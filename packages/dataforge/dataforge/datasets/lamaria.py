@@ -43,8 +43,9 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
 
@@ -83,6 +84,7 @@ from dataforge.logging_toolkit import (
     resolve_ffmpeg,
     time_column,
 )
+from dataforge.video_encoding import encode_concurrently
 from dataforge.vrs import VrsFile
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, MeasuredUp, WorldUpAxis, measured_world_up
 
@@ -302,9 +304,9 @@ class CameraStream:
     camera: Fisheye62Parameters
     """The camera's calibration, extrinsics holding ``rig_T_cam``."""
     frames: Iterator[bytes | memoryview]
-    """Raw planes in presentation order, one per frame, turned upright. A frame is
-    handed over as one buffer of its own rather than accumulated anywhere: a
-    2.4-minute sequence is 10 GB of planes."""
+    """Raw planes in presentation order, one per frame, native (sideways): the encoder
+    turns them upright, as ``camera`` already is. A frame is handed over as one buffer
+    of its own rather than accumulated anywhere: a 2.4-minute sequence is 10 GB of planes."""
     times_ns: Int64[ndarray, "n_frames"]
     """Capture times on Aria's device clock, one per frame, in the same order."""
 
@@ -627,12 +629,9 @@ def open_streams(vrs_path: Path) -> SequenceStreams:
             CameraStream(
                 stream_id=stream_id,
                 camera=camera,
-                # Turned upright, the same quarter turn the calibration above took:
-                # Aria records sideways, and a viewer should not have to. The turn
-                # costs one copy per frame (2 s on the shortest sequence, 15 s on
-                # the longest), and ``ascontiguousarray`` is what makes ``.data`` a
-                # buffer ffmpeg's stdin can take as it stands.
-                frames=(np.ascontiguousarray(np.rot90(image, -1)).data for _, image in aria.iter_frames(vrs, stream_id)),
+                # Native, as the VRS decoder hands them: the encoder turns them upright
+                # (``write_recording``), which costs no Python-side copy per frame.
+                frames=(image.data for _, image in aria.iter_frames(vrs, stream_id)),
                 times_ns=aria.frame_timestamps_ns(vrs, stream_id),
             )
         )
@@ -928,13 +927,15 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             0 if source.control_points_path is None else len(lamaria_source.read_control_points(source.control_points_path).points)
         )
 
-        clips: list[Path] = []
-        for index, stream in enumerate(streams.cameras):
-            clip: Path = work_dir / f"cam_{index:02d}.mp4"
+        # Every camera at once: each encode waits on its own VRS reader, so encoding them in turn leaves NVENC idle.
+        clips: list[Path] = [work_dir / f"cam_{index:02d}.mp4" for index in range(len(streams.cameras))]
+        encodes: list[Callable[[], int]] = []
+        for stream, clip in zip(streams.cameras, clips, strict=True):
             spec: CameraSpec = CAMERA_SPECS[stream.stream_id]
-            layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.width, height=stream.camera.intrinsics.height)
-            encode_frames_to_mp4(stream.frames, clip, source=layout, fps=spec.fps)
-            clips.append(clip)
+            # Native frames are sideways; match the calibration's clockwise quarter turn.
+            layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.height, height=stream.camera.intrinsics.width)
+            encodes.append(partial(encode_frames_to_mp4, stream.frames, clip, source=layout, fps=spec.fps, rotate_cw_quarter_turns=1))
+        encode_concurrently(encodes)
 
         clocks: list[Int64[ndarray, "n_samples"]] = [stream.times_ns for stream in streams.cameras if stream.times_ns.size]
         clocks += [imu.gyro.times_ns for imu in streams.imus if imu.gyro.times_ns.size]

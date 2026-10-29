@@ -13,16 +13,18 @@ pins both the chain and the quaternion order. That cross-check reads the
 **unrotated** rig, because the published file is unrotated; the upright rig
 converters log is checked against it here too.
 
-``lamaria.open_streams`` is exercised here as well: it is the only place where
-the rotated pixels and the rotated calibration meet a real frame.
+``lamaria.open_streams`` and ``write_recording`` are exercised here as well: they are the
+only place where the encoder's quarter turn and the rotated calibration meet a real frame.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from itertools import islice
 from pathlib import Path
 from unittest.mock import Mock
 
+import av
 import numpy as np
 import pytest
 from conftest import PublishedCamera, assert_readers_match_projectaria, raw_asset, read_calibration_json  # pyrefly: ignore[missing-import]
@@ -257,12 +259,12 @@ def test_imu_left_runs_at_its_own_rate(vrs: VrsFile) -> None:
 
 @pytest.mark.integration
 @requires_vrs
-def test_open_streams_hands_the_encoder_upright_contiguous_frames(vrs: VrsFile) -> None:
-    """The converter's frame stream turns the pixels the way it turned the calibration.
+def test_open_streams_hands_the_encoder_native_contiguous_frames(vrs: VrsFile) -> None:
+    """The frames reach ffmpeg as the VRS decoder made them; the calibration is already upright.
 
-    ``encode_frames_to_mp4`` writes the buffer it is given straight into ffmpeg's
-    stdin, so a rotated frame has to arrive contiguous and at the rotated
-    camera's own size, or the video comes out sheared.
+    ``encode_frames_to_mp4`` writes the buffer it is given straight into ffmpeg's stdin, so a
+    frame has to arrive contiguous and at its native size, or the video comes out sheared.
+    The quarter turn is ffmpeg's (see ``test_the_encoded_slam_left_video_is_upright``).
     """
     streams: lamaria.SequenceStreams = lamaria.open_streams(VRS_PATH)
     left: lamaria.CameraStream = streams.cameras[0]
@@ -271,11 +273,42 @@ def test_open_streams_hands_the_encoder_upright_contiguous_frames(vrs: VrsFile) 
     plane: bytes | memoryview = next(left.frames)
     assert isinstance(plane, memoryview)
     assert plane.c_contiguous, "ffmpeg reads the buffer as it stands"
-    assert plane.nbytes == 480 * 640
+    assert plane.nbytes == 640 * 480
 
     native: aria.AriaImage = next(aria.iter_frames(vrs, aria.SLAM_LEFT_STREAM_ID))[1]
-    upright: UInt8[ndarray, "h w"] = np.frombuffer(plane, dtype=np.uint8).reshape(640, 480)
-    np.testing.assert_array_equal(upright, np.rot90(native, -1))
+    np.testing.assert_array_equal(np.frombuffer(plane, dtype=np.uint8).reshape(480, 640), native)
+
+
+@pytest.mark.integration
+@requires_vrs
+def test_the_encoded_slam_left_video_is_upright(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path, vrs: VrsFile) -> None:
+    """What a viewer gets: cam_00's first decoded frame is the native one turned a quarter clockwise.
+
+    Where the turn happens (Python or ffmpeg) is not the point; the encoded pixels are. The first frames of each
+    camera are enough, so the streams are cut short.
+    """
+    kept: int = 30
+    real_open_streams = lamaria.open_streams
+
+    def first_frames(vrs_path: Path) -> lamaria.SequenceStreams:
+        streams: lamaria.SequenceStreams = real_open_streams(vrs_path)
+        return replace(
+            streams, cameras=tuple(replace(camera, frames=islice(camera.frames, kept), times_ns=camera.times_ns[:kept]) for camera in streams.cameras)
+        )
+
+    monkeypatch.setattr(lamaria, "open_streams", first_frames)
+    dataset: lamaria.LamariaDataset = lamaria.LamariaDataset(lamaria.LamariaConfig(root=SEQUENCE_DIR.parents[1], sequences=("R_01_easy",)))
+    identity, source = dataset.discover()[0]
+    dataset.write_recording(identity, source, work_dir=tmp_path, target=tmp_path / "base.rrd")
+
+    with av.open(str(tmp_path / "cam_00.mp4")) as container:
+        decoded: UInt8[ndarray, "h w"] = next(container.decode(video=0)).to_ndarray(format="gray")
+    native: aria.AriaImage = next(aria.iter_frames(vrs, aria.SLAM_LEFT_STREAM_ID))[1]
+    assert decoded.shape == (640, 480), "upright: the 640x480 SLAM frame stands 480 wide"
+    error_upright: float = float(np.abs(decoded.astype(np.int16) - np.rot90(native, -1)).mean())
+    error_wrong_way: float = float(np.abs(decoded.astype(np.int16) - np.rot90(native, 1)).mean())
+    assert error_upright < 1.0, f"mean abs error {error_upright:.2f} against the clockwise turn"
+    assert error_wrong_way > 3 * error_upright, "the counter-clockwise turn must not fit as well"
 
 
 @pytest.mark.integration

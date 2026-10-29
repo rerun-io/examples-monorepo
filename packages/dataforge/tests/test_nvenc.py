@@ -11,11 +11,22 @@ import pytest
 from dataforge import video_encoding as video
 
 
+@pytest.fixture(name="cuda_filter_available", autouse=True)
+def fixture_cuda_filter_available(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("integration") is None:
+        monkeypatch.setattr(video, "has_scale_cuda", lambda binary: True)
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "bad", "1.5"])
-def test_invalid_slot_counts(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("entry", ["parser", "reservation"])
+def test_invalid_slot_counts(value: str, entry: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", value)
-    with pytest.raises(ValueError, match="DATAFORGE_NVENC_SLOTS"), video.nvenc_slot():
-        pytest.fail("invalid slot count accepted")
+    with pytest.raises(ValueError, match="DATAFORGE_NVENC_SLOTS"):
+        if entry == "parser":
+            video.nvenc_slot_count()
+        else:
+            with video.nvenc_slot():
+                pytest.fail("invalid slot count accepted")
 
 
 def test_slots_bound_concurrent_holders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,8 +57,8 @@ def test_session_retry_only(error: str, monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr(video.time, "sleep", waits.append)
     calls = []
 
-    def run(fd: int) -> subprocess.CompletedProcess[str]:
-        assert fd >= 0
+    def run(fds: tuple[int, ...]) -> subprocess.CompletedProcess[str]:
+        assert len(fds) == 1 and fds[0] >= 0
         calls.append(True)
         return subprocess.CompletedProcess([], 1, "", error)
 
@@ -57,9 +68,9 @@ def test_session_retry_only(error: str, monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert waits == ([] if error in ("bad input", "No capable devices found") else [2, 4, 8, 16, 32])
 
 
-@pytest.mark.parametrize(("decode", "crop"), [("cpu", None), ("cuda", None), ("cuda", (32, 32, 0, 0))])
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
 def test_gray_transcode_command(
-    decode: Literal["cpu", "cuda"], crop: tuple[int, int, int, int] | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    decode: Literal["cpu", "cuda"], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
     monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
@@ -76,13 +87,13 @@ def test_gray_transcode_command(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(video.subprocess, "run", run)
-    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode=decode, crop=crop)
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode=decode)
     expected = ["/fake/ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-    if decode == "cuda" and crop is None:
+    if decode == "cuda":
         expected += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     expected += ["-r", "60", "-i", "in.mp4", "-map", "0:v:0", "-an"]
-    if decode == "cpu" or crop is not None:
-        expected += ["-vf", ("crop=32:32:0:0," if crop else "") + "format=gray,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"]
+    if decode == "cpu":
+        expected += ["-vf", "format=gray,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"]
     else:  # NVENC's AV1 takes 4:2:0 only: a 4:4:4 source (MAMMA's HEVC) is converted on the GPU
         expected += ["-vf", "scale_cuda=format=nv12"]
     expected += [
@@ -212,6 +223,9 @@ def test_cuda_gray_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: 
     import av
     import numpy as np
 
+    if not video.has_scale_cuda(nvenc_ffmpeg):
+        pytest.skip("ffmpeg lacks scale_cuda; the NVDEC path is unavailable")
+
     monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
     source = tmp_path / "source.mp4"
     subprocess.run(
@@ -312,10 +326,10 @@ import sys
 from pathlib import Path
 from dataforge import video_encoding as video
 video.NVENC_SLOT_DIR = Path(sys.argv[1])
-with video.nvenc_slot() as fd:
+with video.nvenc_slot() as fds:
     subprocess.Popen(
         [sys.executable, "-c", "import os, sys; os.read(int(sys.argv[1]), 1); print('done', flush=True)", sys.argv[2]],
-        pass_fds=(fd, int(sys.argv[2])),
+        pass_fds=(*fds, int(sys.argv[2])),
     )
     os._exit(0)
 """
@@ -355,6 +369,9 @@ def test_cuda_color_rescale_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monk
     import av
     import numpy as np
 
+    if not video.has_scale_cuda(nvenc_ffmpeg):
+        pytest.skip("ffmpeg lacks scale_cuda; the NVDEC path is unavailable")
+
     monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
     source = tmp_path / "source.mp4"
     subprocess.run(
@@ -377,3 +394,99 @@ def test_cuda_color_rescale_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monk
     assert decoded[0].shape == decoded[1].shape == (12, 1080, 1920, 3)
     mse = np.mean((decoded[0] - decoded[1]) ** 2)
     assert 10 * np.log10(255**2 / mse) >= 30.0
+
+
+def test_missing_cuda_filters_choose_cpu_without_fallback_noise(
+    ffmpeg_commands: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Builds without CUDA scaling skip NVDEC entirely, including for grayscale streams."""
+    monkeypatch.setattr(video, "has_scale_cuda", lambda binary: False)
+    for gray in (False, True):
+        video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=gray, size=(1920, 1080), decode="cuda")
+    assert len(ffmpeg_commands) == 2
+    for command in ffmpeg_commands:
+        assert "-hwaccel" not in command
+        assert "scale=1920:1080" in command[command.index("-vf") + 1]
+    assert "NVDEC path failed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("slots,expected_inputs", [("4", 1), ("3", 2), ("1", 4)])
+def test_mosaic_shares_decode_within_available_slots(
+    slots: str, expected_inputs: int, ffmpeg_commands: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", slots)
+    video.transcode_crops(
+        Path("mosaic.mp4"), [Path(f"cam{i}.mp4") for i in range(4)],
+        crops=[(192, 160, i * 192, 0) for i in range(4)], fps=30, frames=4, gop=60, cq=36,
+    )
+    assert len(ffmpeg_commands) == expected_inputs
+    assert sum(command.count("-i") for command in ffmpeg_commands) == expected_inputs
+    assert sum(command.count("av1_nvenc") for command in ffmpeg_commands) == 4
+    assert all(command.count("av1_nvenc") <= int(slots) for command in ffmpeg_commands)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("slots", ["3", "4"])
+def test_mosaic_packets_match_separate_crops(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: pytest.MonkeyPatch, slots: str) -> None:
+    import av
+
+    monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", slots)
+    source: Path = tmp_path / "mosaic.mp4"
+    subprocess.run([
+        str(nvenc_ffmpeg), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=768x160:rate=30",
+        "-frames:v", "12", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+    ], check=True)
+    crops: list[tuple[int, int, int, int]] = [(192, 160, i * 192, 0) for i in range(4)]
+    outputs: list[Path] = [tmp_path / f"shared{i}.mp4" for i in range(4)]
+    video.transcode_crops(source, outputs, crops=crops, fps=30, frames=12, gop=60, cq=36)
+    for index, output in enumerate(outputs):
+        reference: Path = tmp_path / f"reference{index}.mp4"
+        monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "1")
+        video.transcode_crops(source, [reference], crops=[crops[index]], fps=30, frames=12, gop=60, cq=36)
+        with av.open(str(output)) as shared, av.open(str(reference)) as separate:
+            assert [bytes(packet) for packet in shared.demux(video=0) if packet.size] == [bytes(packet) for packet in separate.demux(video=0) if packet.size]
+
+
+def test_shared_decode_reserves_every_encoder_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "2")
+    monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
+    monkeypatch.setattr(video, "NVENC_SLOT_DIR", tmp_path)
+    monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
+    monkeypatch.setattr(video, "mp4_frame_count", lambda path: 4)
+    entered: Event = Event()
+    waiting: Event = Event()
+
+    def outsider() -> None:
+        waiting.set()
+        with video.nvenc_slot():
+            entered.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            pool.submit(outsider)
+            assert waiting.wait(2.0)
+            assert not entered.wait(0.2)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        monkeypatch.setattr(video.subprocess, "run", run)
+        video.transcode_crops(Path("mosaic.mp4"), [Path("a.mp4"), Path("b.mp4")], crops=[(192, 160, 0, 0), (192, 160, 192, 0)], fps=30, frames=4, gop=60, cq=36)
+        assert entered.wait(2.0)
+
+
+def test_mosaic_retries_refused_sessions(ffmpeg_commands: list[list[str]], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shared decode retries the whole batch after an external encoder takes a session."""
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "2")
+    waits: list[float] = []
+    monkeypatch.setattr(video.time, "sleep", waits.append)
+    attempts: list[tuple[int, ...]] = []
+
+    def run(command: list[str], *, pass_fds: tuple[int, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert len(pass_fds) == 2
+        attempts.append(pass_fds)
+        return subprocess.CompletedProcess(command, int(len(attempts) == 1), "", "OpenEncodeSessionEx failed" if len(attempts) == 1 else "")
+
+    monkeypatch.setattr(video.subprocess, "run", run)
+    video.transcode_crops(Path("mosaic.mp4"), [Path("a.mp4"), Path("b.mp4")], crops=[(192, 160, 0, 0), (192, 160, 192, 0)], fps=30, frames=4, gop=60, cq=36)
+    assert len(attempts) == 2
+    assert waits == [2.0]

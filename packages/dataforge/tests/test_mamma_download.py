@@ -72,3 +72,28 @@ def test_the_fetch_needs_the_credentials(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.delenv("MAMMA_PASSWORD", raising=False)
     with pytest.raises(RuntimeError, match="MAMMA_USERNAME and MAMMA_PASSWORD"):
         fetch_sequence(root, discover_sequences(root, "markerless-dance")[0][0], tmp_path / "fetched")
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_failed_post_cleans_staging_and_keeps_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool) -> None:
+    root = release(tmp_path / "release")
+    sequence = discover_sequences(root, "markerless-dance")[0][0]
+    source = mamma_download.sequence_files(sequence)[0]
+    into = tmp_path / "fetched"
+    target = into / source.relative_to(root)
+    target.parent.mkdir(parents=True)
+    if existing:
+        target.write_bytes(b"previous complete file")
+
+    def post(url: str, data: dict[str, str], target: Path) -> None:
+        target.write_bytes(b"partial transfer")
+        raise OSError("connection lost")
+
+    monkeypatch.setattr(mamma_download, "post_to_file", post)
+    monkeypatch.setenv("MAMMA_USERNAME", "user")
+    monkeypatch.setenv("MAMMA_PASSWORD", "secret")
+    with pytest.raises(OSError, match="connection lost"):
+        fetch_sequence(root, sequence, into)
+    assert list(target.parent.iterdir()) == ([target] if existing else [])
+    if existing:
+        assert target.read_bytes() == b"previous complete file"

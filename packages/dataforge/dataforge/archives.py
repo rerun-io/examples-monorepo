@@ -67,6 +67,10 @@ class MemberReader(AbstractContextManager["MemberReader"], ABC):
     """
 
     @abstractmethod
+    def fork(self, work_dir: Path) -> MemberReader:
+        """Open an independent handle with private extraction scratch for one worker."""
+
+    @abstractmethod
     def read_member(self, member: str) -> bytes:
         """Whole contents of one small member, e.g. ``<SEQ>/mav0/imu0/data.csv``."""
 
@@ -111,7 +115,11 @@ class ZipMemberReader(MemberReader):
     """A plain single-file ``.zip``, read in-process with the stdlib."""
 
     def __init__(self, archive: Path) -> None:
+        self.path: Path = archive
         self.archive: zipfile.ZipFile = zipfile.ZipFile(archive)
+
+    def fork(self, work_dir: Path) -> MemberReader:
+        return ZipMemberReader(self.path)
 
     def read_member(self, member: str) -> bytes:
         return self.archive.read(member)
@@ -141,6 +149,9 @@ class SevenZipMemberReader(MemberReader):
         self.archive: Path = closing_volume
         self.work_dir: Path = work_dir
         self.binary: Path = resolve_seven_zip()
+
+    def fork(self, work_dir: Path) -> MemberReader:
+        return SevenZipMemberReader(self.archive, work_dir)
 
     def _run(self, arguments: Sequence[str]) -> bytes:
         """Run one 7-Zip command and return its stdout; ``-bso0 -bsp0`` keep progress off it."""

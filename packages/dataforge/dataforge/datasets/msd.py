@@ -408,8 +408,8 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         """Refuse to fetch when ``root`` plus this sequence would breach the budget.
 
         The cap covers this sequence's archives **plus** whatever else is already
-        in ``root``. Two things ride on top of it and are not counted: one
-        camera's extracted PNGs (split archives only) and the temp mp4s, both of
+        in ``root``. Two things ride on top of it and are not counted: the active
+        cameras' extracted PNGs (split archives only, bounded by DATAFORGE_NVENC_SLOTS) and the temp mp4s, both of
         which live in ``work/`` for the length of one sequence.
 
         A sequence whose archives *alone* exceed the budget (the Index and G2 long

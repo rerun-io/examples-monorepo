@@ -13,7 +13,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
 FrameMode: TypeAlias = Literal["downscaled", "jpeg", "off"]
@@ -457,8 +457,9 @@ class VioStage:
         Raises:
             SystemExit: If any frameset is still held.
         """
-        if self.pending:
-            raise SystemExit(f"{len(self.pending)} framesets never got the inertial samples that cover them")
+        uncovered: int = len(self.pending) + sum(drop.reason == DropReason.IMU_ENDED for drop in self.lockstep.dropped)
+        if uncovered:
+            raise SystemExit(f"{uncovered} framesets never got the inertial samples that cover them")
 
     def summary(self) -> str:
         """One line on what the stage did, for the end of a replay.
@@ -468,8 +469,11 @@ class VioStage:
         that guarded the call on ``elapsed_ms`` suppressed exactly that line.
         """
         unresolved: str = ""
-        if self.pending:
-            unresolved = f", {len(self.pending)} FRAMESETS NEVER COVERED BY THE IMU at {[held.t_ns for held in self.pending]}"
+        uncovered: list[int] = [held.t_ns for held in self.pending] + [
+            drop.t_ns for drop in self.lockstep.dropped if drop.reason == DropReason.IMU_ENDED
+        ]
+        if uncovered:
+            unresolved = f", {len(uncovered)} FRAMESETS NEVER COVERED BY THE IMU at {uncovered}"
         if not self.elapsed_ms:
             return f"vio: {self.lockstep.imu_samples} IMU samples pushed, nothing tracked{unresolved}"
         return (

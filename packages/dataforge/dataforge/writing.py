@@ -18,6 +18,7 @@ from typing import Any
 
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from rerun import bindings
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from rerun.recording_stream import RecordingStream
@@ -201,6 +202,7 @@ def atomic_recording(
     recording_id: str,
     default_blueprint: rrb.Blueprint | None = None,
     send_properties: bool = True,
+    optimize: bool = False,
 ) -> Iterator[rr.RecordingStream]:
     """Yield a recording saved to a temp file that replaces ``target`` on success.
 
@@ -218,20 +220,26 @@ def atomic_recording(
             ``send_property``/``send_recording_name`` calls still land either way
             (verified on rerun 0.37.0), so a layer's own property group is
             unaffected.
+        optimize: Compact column batches for object-store publication. Only use on layers
+            whose full payload fits in memory; mesh layers keep their lazy-loading boundaries.
     """
     # The recording stream is the inner context on purpose: it flushes and closes
     # before atomic_write reaches its os.replace.
-    with (
-        atomic_write(target) as temp_path,
-        recording_to(
+    with atomic_write(target) as temp_path:
+        with recording_to(
             temp_path,
             application_id=application_id,
             recording_id=recording_id,
             default_blueprint=default_blueprint,
             send_properties=send_properties,
-        ) as recording,
-    ):
-        yield recording
+        ) as recording:
+            yield recording
+        if optimize:
+            # Work on the unpublished artifact; a failed optimization must leave the old target intact.
+            with atomic_write(temp_path) as optimized:
+                rrc.RrdReader(temp_path).stream().collect(optimize=rrc.OptimizationProfile.OBJECT_STORE).write_rrd(
+                    optimized, application_id=application_id, recording_id=recording_id,
+                )
 
 
 def select_segments(entry: DatasetEntry, requested: Sequence[str]) -> list[str]:

@@ -31,10 +31,11 @@ def write_layer(
     """Atomically write poses on base video time, without changing base sensor data.
 
     ``clock_offset_ns`` is the feed's export offset plus camera-to-IMU offset.
-    Empty, incomplete or non-finite runs cannot replace an existing result.
+    Explicit initialization and terminal IMU drops are recorded; unexplained
+    losses, interior gaps and non-finite runs cannot replace an existing result.
     """
-    if len(run.estimate) < 2 or run.lost or len(run.estimate) != run.framesets:
-        raise ValueError(f"refusing incomplete pose layer: {len(run.estimate)} poses / {run.framesets} framesets, {run.lost} pending")
+    if problem := run.unexplained_loss():
+        raise ValueError(problem)
     positions: Float64[ndarray, "n 3"] = run.estimate.position_m
     rotations: Float64[ndarray, "n 4"] = np.roll(run.estimate.quaternion_wxyz, -1, axis=1)
     times: Int64[ndarray, " n"] = shift_clock(run.estimate, -clock_offset_ns).t_ns
@@ -58,5 +59,10 @@ def write_layer(
         )
         rec.log(schema.trail_path(POSE_SOURCE), rr.LineStrips3D.from_fields(radii=0.006), static=True)
         rec.log(f"{root}", rr.AnyValues(source="slam-rs catalog VIO", profile=profile, backend=backend, decoder=decoder, config_sha256=run.config_sha256,
-                                      num_poses=len(positions), wall_s=run.wall_s, median_tracker_ms=run.median_tracker_ms,
+                                      num_poses=len(positions), num_framesets=run.framesets, num_dropped=len(run.dropped),
+                                      wall_s=run.wall_s, median_tracker_ms=run.median_tracker_ms,
                                       export_to_video_time_offset_ns=clock_offset_ns), static=True)
+        if run.dropped:
+            rec.log(f"{root}/dropped", rr.AnyValues(
+                t_ns=[drop.t_ns - clock_offset_ns for drop in run.dropped], reasons=[drop.reason for drop in run.dropped],
+            ), static=True)

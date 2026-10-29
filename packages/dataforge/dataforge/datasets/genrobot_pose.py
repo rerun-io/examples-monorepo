@@ -21,6 +21,7 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.ops.mano.mano_np import MANOLayerNP
 from simplecv.ops.smplx.smplx_coco133 import smplx_joints_to_coco133_xyzc
+from simplecv.sensors.camera.base_camera import pixels_in_image
 
 from dataforge import actions, hands, meshes, paths, schema
 from dataforge.datasets.genrobot_source import (
@@ -345,7 +346,7 @@ def project(world_T_cam: Float64[ndarray, "f 4 4"], calibration: CameraCalibrati
     cam_T_world[posed] = np.linalg.inv(world_T_cam[posed])
     in_cam: Float64[ndarray, "f k 3"] = np.einsum("fij,fkj->fki", cam_T_world[:, :3, :3], points) + cam_T_world[:, None, :3, 3]
     pixels: Float64[ndarray, "n 2"] = calibration.lens.project(in_cam.reshape(-1, 3))
-    inside: Bool[ndarray, "n"] = (pixels[:, 0] >= 0) & (pixels[:, 0] < SOURCE_WIDTH) & (pixels[:, 1] >= 0) & (pixels[:, 1] < SOURCE_HEIGHT)
+    inside: Bool[ndarray, "n"] = pixels_in_image(pixels, SOURCE_WIDTH, SOURCE_HEIGHT)
     return np.where(inside[:, None], pixels, np.nan).reshape(points.shape[0], points.shape[1], 2)
 
 

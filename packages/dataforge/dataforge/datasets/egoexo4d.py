@@ -81,6 +81,8 @@ class Egoexo4dConfig(FrameLimitedConfig):
     """AWS profile holding the Ego-Exo4D licence keys (they expire 14 days after issue)."""
     keep_raw: bool = False
     """Keep a take's videos, VRS and trajectory files after base; the fit, models, metadata and sidecars always stay."""
+    prefetch_budget_gb: float = 32.0
+    """Maximum raw GB to prefetch for the next take; larger takes fetch in the foreground."""
     model_root: Path | None = None
     """Directory holding body_models/smplh/SMPLH_MALE.npz and body_models/smplx/SMPLX_NEUTRAL.npz; defaults to root."""
 
@@ -166,6 +168,10 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
             names = [name for name in names if name in self.config.sequences]
         return [(SequenceIdentity(self.config.command, (name,)), takes[name]) for name in names]
 
+    def capture_timesync_files(self, take: Take) -> list[ManifestPath]:
+        """The capture clock files fetched and counted toward the prefetch budget."""
+        return [path for path in self.release.manifest("captures")[take.capture_uid].paths if path.relative_path.endswith("/timesync.csv")]
+
     def fetch_take(self, take: Take) -> None:
         """Fetch the trajectory files, then concurrently the take's other files and its capture's timesync.csv, unless present.
 
@@ -179,13 +185,17 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
             calib.cam_uid for calib in localized(read_gopro_calibs(self.config.root / take.root_dir / "trajectory/gopro_calibs.csv"))
         ]
         rest: list[ManifestPath] = [path for path in self.take_files(take, gopros) if path not in trajectory]
-        rest += [path for path in self.release.manifest("captures")[take.capture_uid].paths if path.relative_path.endswith("/timesync.csv")]
+        rest += self.capture_timesync_files(take)
         with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as executor:
             list(executor.map(lambda path: self.release.fetch(path, self.config.root), rest))
 
     def prefetch(self, identity: SequenceIdentity, source: Take, *, force: bool) -> None:
         """Fetch the next take's raw files while this one converts; only base reads them."""
         if not writing.should_skip(self.targets(identity)[paths.BASE_LAYER], force=force):
+            files: list[ManifestPath] = self.take_files(source, source.exo_cameras)
+            files += self.capture_timesync_files(source)
+            if any(path.size is None for path in files) or sum(path.size or 0 for path in files) > self.config.prefetch_budget_gb * 1e9:
+                return
             self.fetch_take(source)
 
     def base_inputs(self, take: Take) -> BaseInputs:

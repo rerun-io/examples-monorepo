@@ -38,8 +38,6 @@ ignore_names = [
     # MammaSyn: a cached shard index compares stamps whole; a context manager's __exit__ takes the exception triple.
     "mtime_ns",
     "exc",
-    # pickle.Unpickler calls find_class itself.
-    "find_class",
     "main",
     "rr_config",
     "sequence",
@@ -91,6 +89,11 @@ ignore_names = [
     "return_value",
     # PyAV decoder setting, read by the decoder.
     "thread_type",
+    "pix_fmt",
+    # Pytest invokes this autouse capability fixture.
+    "fixture_cuda_filter_available",
+    # s3fs reads its retry count internally.
+    "retries",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

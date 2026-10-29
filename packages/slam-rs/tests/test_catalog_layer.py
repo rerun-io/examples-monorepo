@@ -4,12 +4,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
 from fixture_types import Rows, RowsReader
 
 from slam_rs.catalog_layer import write_layer
-from slam_rs.tracking import SegmentRun
+from slam_rs.tracking import DroppedFrameset, DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory
 
 
@@ -47,3 +48,49 @@ def test_incomplete_run_does_not_replace_a_previous_result(tmp_path: Path, run: 
     with pytest.raises(ValueError, match="incomplete"):
         write_layer(path, "session", replace(run, lost=1), clock_offset_ns=0, profile="fast", backend="cpu")
     assert path.read_bytes() == previous
+
+
+@pytest.mark.parametrize(("stamp", "reason"), [
+    (1, DropReason.BEFORE_INITIALIZATION),
+    (10_000_000_000, DropReason.IMU_ENDED),
+])
+def test_explained_boundary_drop_is_written(
+    tmp_path: Path, run: SegmentRun, stamp: int,
+    reason: DropReason,
+) -> None:
+    output: Path = tmp_path / "boundary.rrd"
+    dropped: DroppedFrameset = DroppedFrameset(stamp, reason)
+    write_layer(output, "session", replace(run, framesets=3, lost=1, dropped=(dropped,)), clock_offset_ns=0, profile="fast", backend="cpu")
+    drop_batches: list[pa.RecordBatch] = [
+        chunk.to_record_batch() for chunk in rrc.RrdReader(output).stream().filter(content="/world/runs/slam_rs/dropped").to_chunks()
+    ]
+    assert len(drop_batches) == 1
+    assert drop_batches[0].column("t_ns").to_pylist() == [[stamp]]
+    assert drop_batches[0].column("reasons").to_pylist() == [[reason]]
+
+
+def test_explained_interior_gap_still_refuses_the_layer(tmp_path: Path, run: SegmentRun) -> None:
+    dropped: DroppedFrameset = DroppedFrameset(8_500_000_000, DropReason.IMU_ENDED)
+    with pytest.raises(ValueError, match="incomplete"):
+        write_layer(tmp_path / "gap.rrd", "session", replace(run, framesets=3, lost=1, dropped=(dropped,)), clock_offset_ns=0, profile="fast", backend="cpu")
+
+
+def test_drop_reasons_keep_their_serialized_strings() -> None:
+    from dataclasses import dataclass
+
+    from serde import serde
+    from serde.json import from_json, to_json
+
+    @serde
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        reason: DropReason
+        """Persisted cause of a missing pose."""
+
+    for reason, text in (
+        (DropReason.BEFORE_INITIALIZATION, "insufficient stereo support before initialization"),
+        (DropReason.IMU_ENDED, "end of stream before IMU coverage"),
+    ):
+        encoded = to_json(Record(reason))
+        assert encoded == '{"reason":"' + text + '"}'
+        assert from_json(Record, encoded).reason is reason

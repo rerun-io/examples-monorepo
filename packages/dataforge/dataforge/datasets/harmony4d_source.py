@@ -493,13 +493,17 @@ def read_people(files: ZipSequenceFiles, frames: Int64[ndarray, "t"], pose_dir: 
     for row, frame in enumerate(frames.tolist()):
         pose_name: str = f"{pose_dir}/{frame:05d}.npy"
         for name, pose in (person_dict(load_pickle(files.read(pose_name), pose_name), pose_name) if files.exists(pose_name) else {}).items():
-            track: PersonTrack = people.setdefault(name, PersonTrack.empty(name, len(frames)))
+            if name not in people:
+                people[name] = PersonTrack.empty(name, len(frames))
+            track: PersonTrack = people[name]
             if pose is not None:
                 keypoints: Float64[ndarray, "17 4"] = np.asarray(pose, dtype=np.float64).reshape(COCO17, 4)
                 track.coco17[row], track.coco17_confidence[row] = keypoints[:, :3], keypoints[:, 3]
         smpl_name: str = f"{smpl_dir}/{frame:05d}.npy"
         for name, value in (person_dict(load_pickle(files.read(smpl_name), smpl_name), smpl_name) if files.exists(smpl_name) else {}).items():
-            track = people.setdefault(name, PersonTrack.empty(name, len(frames)))
+            if name not in people:
+                people[name] = PersonTrack.empty(name, len(frames))
+            track = people[name]
             if value is not None:
                 fit: SmplFit = smpl_fit(value, f"{smpl_name}: {name}")
                 for key in SMPL_SHAPES:

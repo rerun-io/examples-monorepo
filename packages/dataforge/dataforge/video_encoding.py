@@ -24,12 +24,12 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, TypeVar
 
 import av
 
@@ -86,6 +86,18 @@ def remux_prefix(source: Path, target: Path, count: int) -> None:
             seen += 1
         if seen != count:
             raise ValueError(f"{source}: only {seen} packets, expected {count}")
+
+
+T = TypeVar("T")
+
+
+def encode_concurrently(jobs: Sequence[Callable[[], T]], *, workers: int | None = None) -> list[T]:  # noqa: UP047 - keep Python 3.10/3.11 syntax, as for UP046
+    """Encode independent jobs up to the slot limit; return results in job order."""
+    if not jobs:
+        return []
+    with ThreadPoolExecutor(max_workers=min(len(jobs), workers or nvenc_slot_count())) as pool:
+        futures: list[Future[T]] = [pool.submit(job) for job in jobs]
+        return [future.result() for future in futures]
 
 
 @contextlib.contextmanager
@@ -232,9 +244,8 @@ NVENC_SLOT_DIR: Path = Path("/tmp/dataforge-nvenc")
 """Shared flock files; all dataforge processes on the machine use the same directory."""
 
 
-@contextlib.contextmanager
-def nvenc_slot() -> Iterator[int]:
-    """Yield a locked fd for ffmpeg to inherit; release explicitly after the child exits."""
+def nvenc_slot_count() -> int:
+    """Read the shared encoder capacity, rejecting invalid settings."""
     value: str = os.environ.get("DATAFORGE_NVENC_SLOTS", "6")
     try:
         slots: int = int(value)
@@ -242,7 +253,12 @@ def nvenc_slot() -> Iterator[int]:
         raise ValueError(f"DATAFORGE_NVENC_SLOTS must be a positive int, got {value!r}") from None
     if slots <= 0:
         raise ValueError(f"DATAFORGE_NVENC_SLOTS must be a positive int, got {value!r}")
-    NVENC_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    return slots
+
+
+@contextlib.contextmanager
+def _single_nvenc_slot(slots: int) -> Iterator[int]:
+    """Wait for one locked descriptor for the child to inherit."""
     started: float = time.monotonic()
     warned: bool = False
     while True:
@@ -263,21 +279,37 @@ def nvenc_slot() -> Iterator[int]:
         time.sleep(0.2)
 
 
+@contextlib.contextmanager
+def nvenc_slot(count: int = 1) -> Iterator[tuple[int, ...]]:
+    """Reserve all requested encoder slots before starting the child."""
+    slots: int = nvenc_slot_count()
+    if not 1 <= count <= slots:
+        raise ValueError(f"requested {count} NVENC slots, capacity is {slots}")
+    NVENC_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+        # Serialize acquisition so batches cannot each hold part of a reservation.
+        with (NVENC_SLOT_DIR / "reservation.lock").open("a+b") as reservation:
+            fcntl.flock(reservation, fcntl.LOCK_EX)
+            fds: tuple[int, ...] = tuple(stack.enter_context(_single_nvenc_slot(slots)) for _ in range(count))
+            fcntl.flock(reservation, fcntl.LOCK_UN)
+        yield fds
+
+
 def nvenc_session_failure(stderr: str) -> bool:
     """Driver session-limit messages that need an encode retry, never a decode fallback."""
     return any(message in stderr for message in ("OpenEncodeSessionEx failed", "incompatible client key"))
 
 
-def run_nvenc(run: Callable[[int], subprocess.CompletedProcess[str]]) -> subprocess.CompletedProcess[str]:
+def run_nvenc(run: Callable[[tuple[int, ...]], subprocess.CompletedProcess[str]], *, slots: int = 1) -> subprocess.CompletedProcess[str]:
     """Run an encoder in a shared slot; on a session-limit failure release it, back off 2-32 s and retry."""
     for delay in (2.0, 4.0, 8.0, 16.0, 32.0):
-        with nvenc_slot() as fd:
-            result: subprocess.CompletedProcess[str] = run(fd)
+        with nvenc_slot(slots) as fds:
+            result: subprocess.CompletedProcess[str] = run(fds)
         if result.returncode == 0 or not nvenc_session_failure(result.stderr):
             return result
         time.sleep(delay)
-    with nvenc_slot() as fd:
-        return run(fd)
+    with nvenc_slot(slots) as fds:
+        return run(fds)
 
 
 def _nvenc_args(*, gop: int, cq: int) -> list[str]:
@@ -300,6 +332,15 @@ def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     ]
 
 
+@functools.cache
+def has_scale_cuda(binary: Path) -> bool:
+    """Whether this ffmpeg build can scale hardware frames; cached per binary."""
+    result: subprocess.CompletedProcess[str] = subprocess.run(
+        [str(binary), "-hide_banner", "-filters"], capture_output=True, text=True, check=False
+    )
+    return any("scale_cuda" in line.split() for line in result.stdout.splitlines())
+
+
 def transcode_mp4(
     source: Path,
     output: Path,
@@ -310,7 +351,6 @@ def transcode_mp4(
     frames: int,
     gray: bool,
     size: tuple[int, int] | None = None,
-    crop: tuple[int, int, int, int] | None = None,
     keep: list[range] | None = None,
     decode: Literal["cpu", "cuda"] = "cpu",
 ) -> int:
@@ -321,20 +361,17 @@ def transcode_mp4(
     filter, for a stream whose real samples are padded to a higher frame rate.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
-    which for a gray source carry neutral chroma, converted to 4:2:0. size (width, height) rescales, on the GPU
-    under CUDA decode. Optional crop is (width, height, x, y), applied first, and always
-    uses CPU decode. Other NVDEC failures fall back to CPU; session failures retry the same
+    which for a gray source carry neutral chroma, converted to 4:2:0. size (width, height) rescales on the GPU
+    when scale_cuda is available; builds without it use CPU decode directly.
+    Other NVDEC failures fall back to CPU; session failures retry the same
     command and never trigger that fallback.
     """
     if frames <= 0:
         raise ValueError("frames must be positive")
-    if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
-        raise ValueError("crop requires positive dimensions and nonnegative offsets")
     runs: str = "+".join(f"between(n,{run.start},{run[-1]})*not(mod(n-{run.start},{run.step}))" for run in keep or [])
     select: list[str] = [f"select='{runs}'"] if keep is not None else []
     cpu_filters: list[str] = [
         *select,
-        *([] if crop is None else ["crop=" + ":".join(str(value) for value in crop)]),
         *([] if size is None else [f"scale={size[0]}:{size[1]}"]),
         *(["format=gray"] if gray else []),
         EVEN_DIMENSION_AND_PIXEL_FORMAT,
@@ -354,9 +391,9 @@ def transcode_mp4(
             "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq),
             "-frames:v", str(frames), str(output),
         ]
-        return run_nvenc(lambda fd: subprocess.run(command, pass_fds=(fd,), capture_output=True, text=True, check=False))
+        return run_nvenc(lambda fds: subprocess.run(command, pass_fds=fds, capture_output=True, text=True, check=False))
 
-    cuda: bool = decode == "cuda" and crop is None
+    cuda: bool = decode == "cuda" and has_scale_cuda(binary)
     result: subprocess.CompletedProcess[str] = run(cuda=cuda)
     if cuda and result.returncode and not nvenc_session_failure(result.stderr):
         tail: str = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no stderr"
@@ -368,6 +405,49 @@ def transcode_mp4(
     if written != frames:
         raise ValueError(f"{output} holds {written} samples, expected {frames}")
     return written
+
+
+def transcode_crops(
+    source: Path,
+    outputs: list[Path],
+    *,
+    crops: list[tuple[int, int, int, int]],
+    fps: int,
+    frames: int,
+    gop: int,
+    cq: int,
+) -> None:
+    """Share one CPU decode across cropped gray outputs, batching at the NVENC slot limit.
+
+    Four tiles decode once with four slots, twice with three. Each batch reserves
+    all its encoder slots before ffmpeg starts; concurrent batches cannot deadlock
+    by each holding part of a reservation. Output order and frame counts survive.
+    """
+    if not outputs or len(outputs) != len(crops) or frames <= 0:
+        raise ValueError("positive frame count and one crop per output required")
+    if any(min(crop[:2]) <= 0 or min(crop[2:]) < 0 for crop in crops):
+        raise ValueError("crop requires positive dimensions and nonnegative offsets")
+    slots: int = nvenc_slot_count()
+    binary: Path = resolve_ffmpeg()
+    require_av1_nvenc(binary)
+    for start in range(0, len(outputs), slots):
+        batch: list[Path] = outputs[start:start + slots]
+        filters: list[str] = [f"[0:v]split={len(batch)}" + "".join(f"[tile{i}]" for i in range(len(batch)))]
+        command: list[str] = [str(binary), "-hide_banner", "-loglevel", "error", "-y", "-filter_complex_threads", "1", "-r", str(fps), "-i", str(source)]
+        for index, crop in enumerate(crops[start:start + slots]):
+            filters.append(f"[tile{index}]crop=" + ":".join(str(value) for value in crop) + f",format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}[cam{index}]")
+        command.extend(["-filter_complex", ";".join(filters)])
+        for index, output in enumerate(batch):
+            command.extend(["-map", f"[cam{index}]", "-an", "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq), "-frames:v", str(frames), str(output)])
+        result: subprocess.CompletedProcess[str] = run_nvenc(
+            lambda fds, command=command: subprocess.run(command, pass_fds=fds, capture_output=True, text=True, check=False), slots=len(batch)
+        )
+        if result.returncode:
+            raise RuntimeError(f"ffmpeg exited {result.returncode} while cropping {source}:\n{result.stderr[-4000:]}")
+        for output in batch:
+            written: int = mp4_frame_count(output)
+            if written != frames:
+                raise ValueError(f"{output} holds {written} samples, expected {frames}")
 
 
 def encode_frames_to_mp4(
@@ -448,8 +528,8 @@ def encode_frames_to_mp4(
     complaints: list[bytes] = []
     fed: int = 0
     # One slot, no retry: a pipe consumes its frames once, so a session refused by an outside process fails the sequence.
-    with nvenc_slot() as fd:
-        process: subprocess.Popen[bytes] = subprocess.Popen(command, pass_fds=(fd,), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    with nvenc_slot() as fds:
+        process: subprocess.Popen[bytes] = subprocess.Popen(command, pass_fds=fds, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         assert process.stdin is not None and process.stderr is not None
         drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore
         drain.start()

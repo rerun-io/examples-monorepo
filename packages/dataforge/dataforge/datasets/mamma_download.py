@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 import requests
 
+from dataforge import writing
 from dataforge.datasets.mamma_source import FAMILY_COLLECTIONS, KNOWN_INCOMPLETE, MARKER_FILES, Family, MammaSequence, discover_sequences
 from dataforge.transports import CHUNK_BYTES
 
@@ -84,7 +85,7 @@ def post_to_file(url: str, data: dict[str, str], target: Path) -> None:
 
 def fetch_sequence(root: Path, sequence: MammaSequence, into: Path) -> list[str]:
     """Download ``sequence``'s files from the MPI server under ``into`` (release-relative paths) and compare each with the release
-    copy under ``root``; return the files that differ. Each lands as ``.part`` and is renamed once complete."""
+    copy under ``root``; return the files that differ. Each is staged and published atomically once complete."""
     username: str | None = os.environ.get("MAMMA_USERNAME")
     password: str | None = os.environ.get("MAMMA_PASSWORD")
     if not username or not password:
@@ -93,14 +94,11 @@ def fetch_sequence(root: Path, sequence: MammaSequence, into: Path) -> list[str]
     for path in sequence_files(sequence):
         relative: str = path.relative_to(root).as_posix()
         target: Path = into / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        part: Path = target.with_name(f"{target.name}.part")
-        post_to_file(f"{MPI_URL}&sfile={quote(f'datasets/{relative}', safe='/')}", {"username": username, "password": password}, part)
-        problem: str | None = file_problem(part)
-        if problem is not None:
-            part.unlink()
-            raise RuntimeError(f"MPI fetch of {relative}: {problem.removeprefix(f'{part}: ')}")
-        part.rename(target)
+        with writing.atomic_write(target) as part:
+            post_to_file(f"{MPI_URL}&sfile={quote(f'datasets/{relative}', safe='/')}", {"username": username, "password": password}, part)
+            problem: str | None = file_problem(part)
+            if problem is not None:
+                raise RuntimeError(f"MPI fetch of {relative}: {problem.removeprefix(f'{part}: ')}")
         if not filecmp.cmp(target, path, shallow=False):
             mismatches.append(f"{relative}: {target.stat().st_size} bytes fetched differ from the release copy")
     return mismatches

@@ -18,7 +18,7 @@ from typing import ClassVar
 import rerun as rr
 import rerun.blueprint as rrb
 from serde import serde
-from serde.json import from_json, to_json
+from serde.json import to_json
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
@@ -48,6 +48,7 @@ from dataforge.datasets.genrobot_source import (
     read_episode,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.records import read_json
 from dataforge.writing import TableField, TableFields
 
 MANIFEST_NAME: str = "manifest.json"
@@ -164,7 +165,7 @@ class GenrobotDataset(DataforgeDataset[GenrobotConfig, HubEpisode]):
         path: Path = self.config.root / MANIFEST_NAME
         if not path.is_file():
             raise FileNotFoundError(f"{path}: run dataforge-download genrobot first")
-        manifest: Manifest = from_json(Manifest, path.read_text())
+        manifest: Manifest = read_json(path, Manifest)
         if manifest.revision != self.config.revision:
             raise ValueError(f"{path} lists {manifest.revision}, the config pins {self.config.revision}: run dataforge-download genrobot again")
         return manifest

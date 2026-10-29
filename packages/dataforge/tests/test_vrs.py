@@ -1,7 +1,9 @@
 """Raw VRS image records retain their shipped order, format and device clock."""
 
 import json
+import os
 import struct
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +11,79 @@ import pytest
 from conftest import vrs_file, vrs_record
 
 from dataforge.vrs import CONFIGURATION_RECORD, VrsFile, VrsImageReader
+
+
+@pytest.mark.parametrize("compression", [0, 1, 2])
+def test_variable_layout_jpeg_and_capture_clock(tmp_path: Path, compression: int) -> None:
+    layout: str = json.dumps(
+        {
+            "data_layout": [
+                {"name": "capture_timestamp_ns", "type": "DataPieceValue<int64_t>", "offset": 0},
+                {"name": "metadata", "type": "DataPieceVector<uint8_t>", "index": 0},
+                {"name": "label", "type": "DataPieceString", "index": 1},
+            ]
+        }
+    )
+    path: Path = tmp_path / "variable.vrs"
+    jpeg: bytes = b"\xff\xd8test\xff\xd9"
+    # Packed fixed fields, two uint32 offset/length pairs, then variable bytes.
+    path.write_bytes(
+        vrs_file(
+            {1201: {"RF:Data:2": "data_layout+image/jpg", "DL:Data:2:0": layout}},
+            [
+                vrs_record(
+                    struct.pack("<qIIII", stamp, 0, len(metadata), len(metadata), 3) + metadata + b"abc" + jpeg, type_id=1201, compression=compression
+                )
+                for stamp, metadata in [(100, b""), (200, b"\xff\xd8metadata\xff\xd9")]
+            ],
+        )
+    )
+    reader: VrsImageReader = VrsImageReader(VrsFile(path), "1201-1")
+    assert [(frame.capture_timestamp_ns, frame.image) for frame in reader.images()] == [(100, jpeg), (200, jpeg)]
+    assert reader.capture_timestamps().tolist() == [100, 200]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("sequence", ["2_12", "5_12"])
+def test_lamaria_variable_layout_first_frames(sequence: str) -> None:
+    variable: str = f"DATAFORGE_LAMARIA_SEQUENCE_{sequence}_VRS"
+    path: Path = Path(os.environ.get(variable, f"/tmp/lamaria-sequence-{sequence.replace('_', '-')}-prefix.vrs"))
+    if not path.is_file():
+        pytest.skip(f"LaMAria sequence_{sequence} VRS asset is absent: {path}; set {variable}")
+    pytest.importorskip("turbojpeg", reason="LaMAria frame decoding needs PyTurboJPEG in dataforge-dev")
+    from dataforge.aria import iter_frames
+
+    vrs: VrsFile = VrsFile(path)
+    frames = list(islice(iter_frames(vrs, "1201-1"), 30))
+    assert len(frames) == 30
+    assert all(image.dtype == np.uint8 and image.shape == (480, 640) for _, image in frames)
+    assert all(right[0] > left[0] for left, right in zip(frames, frames[1:], strict=False))
+    assert VrsImageReader(vrs, "1201-1").capture_timestamps()[:30].tolist() == [stamp for stamp, _ in frames]
+
+
+@pytest.mark.parametrize(
+    "payload,error",
+    [
+        (bytes(15), "truncated image payload"),
+        (struct.pack("<qII", 100, 1, 0) + b"\xff\xd8\xff\xd9", "invalid variable DataLayout index"),
+        (struct.pack("<qII", 100, 0, 1000) + b"\xff\xd8\xff\xd9", "truncated image payload"),
+        (struct.pack("<qII", 100, 0, 0) + b"xx\xff\xd9", "invalid JPEG boundaries"),
+        (struct.pack("<qII", 100, 0, 0) + b"\xff\xd8xx", "invalid JPEG boundaries"),
+    ],
+)
+def test_variable_layout_corruption_is_refused(tmp_path: Path, payload: bytes, error: str) -> None:
+    layout: str = json.dumps(
+        {
+            "data_layout": [
+                {"name": "capture_timestamp_ns", "type": "DataPieceValue<int64_t>", "offset": 0},
+                {"name": "metadata", "type": "DataPieceVector<uint8_t>", "index": 0},
+            ]
+        }
+    )
+    path: Path = tmp_path / "broken-variable.vrs"
+    path.write_bytes(vrs_file({1201: {"RF:Data:2": "data_layout+image/jpg", "DL:Data:2:0": layout}}, [vrs_record(payload, type_id=1201)]))
+    with pytest.raises(ValueError, match=error):
+        list(VrsImageReader(VrsFile(path), "1201-1").images())
 
 
 def synthetic_vrs(*, compression: int = 0, image_format: str = "jpg", timestamp_offset: int = 4) -> bytes:

@@ -110,3 +110,24 @@ def test_split_archive_reader_extracts_one_directory_at_a_time(tmp_path: Path) -
     assert frames == [frame_bytes(index) for index in range(12)]
     # The extracted PNGs are gone again; peak scratch is one directory, not the archive.
     assert not list(work.rglob("*.png"))
+
+
+@pytest.mark.skipif(shutil.which("zip") is None, reason="needs Info-ZIP's zip to build a multi-volume fixture")
+@pytest.mark.parametrize("split", [False, True])
+def test_forked_readers_keep_their_handles_and_extractions_independent(tmp_path: Path, split: bool) -> None:
+    tree: Path = tmp_path / "tree"
+    member_tree(tree, num_directories=2, num_frames=12)
+    if split:
+        subprocess.run(["zip", "-q", "-0", "-r", "-s", "64k", str(tmp_path / f"{TOP}.zip"), TOP], cwd=tree, check=True)
+    else:
+        shutil.make_archive(str(tmp_path / TOP), "zip", root_dir=tree)
+    volumes: list[Path] = sorted(tmp_path.glob(f"{TOP}.z*"))
+    with open_member_reader(volumes, tmp_path / "work") as reader:
+        with reader.fork(tmp_path / "first") as first, reader.fork(tmp_path / "second") as second:
+            pending = first.iter_members(frame_members(tree, 0))
+            assert next(pending) == frame_bytes(0)
+            assert list(second.iter_members(frame_members(tree, 1))) == [frame_bytes(i) for i in range(12)]
+            assert list(pending) == [frame_bytes(i) for i in range(1, 12)]
+        assert reader.read_member(f"{TOP}/data0/index.csv").startswith(b"filename")
+    assert not list((tmp_path / "first").rglob("*.png"))
+    assert not list((tmp_path / "second").rglob("*.png"))

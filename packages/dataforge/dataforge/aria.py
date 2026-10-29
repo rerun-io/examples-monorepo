@@ -6,8 +6,8 @@
   rescale included), so every parameter and pose has the SDK's bits.
 * **The streams.** Frames and IMU samples in VRS record order, read by
   ``dataforge.vrs``, on Aria's DEVICE clock in nanoseconds.
-* **The projection.** ``project_to_calibration`` sends world points through the
-  full FISHEYE624 model.
+* **The projection.** ``project_frames`` sends world points through the full FISHEYE624
+  model in production; ``project_to_calibration`` is the float64 reference for tests and docs.
 
 LaMAria's rig convention (imu-right as the body frame) and its ground-truth
 formats live in ``datasets/lamaria_source.py``.
@@ -330,10 +330,10 @@ def project_frames(
     world_T_device: Float64[ndarray, "n 4 4"],
     positions: Float32[ndarray, "n 133 3"],
 ) -> Float32[ndarray, "n 133 2"]:
-    """``project_to_calibration`` for every frame at once, for corpus-scale layers.
+    """Project every frame at once, the production path for corpus-scale layers.
 
-    The same pixels to rounding: the batched transform sums in another order, so the last bits differ from the
-    per-joint loop, which hot3d and aria_gen2_pilot keep for their byte-identical parity baselines.
+    Transforms and lens calculations use float64; stored pixels are rounded to float32. The scalar
+    ``project_to_calibration`` is the float64 reference for tests and docs; its transform sums in a different order.
 
     Args:
         calibration: Full lens model in the logged image orientation; ``rig_T_cam`` is ``device_T_camera``.

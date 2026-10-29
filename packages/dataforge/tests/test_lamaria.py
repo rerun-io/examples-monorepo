@@ -10,6 +10,7 @@ real encoder and the real writers do their jobs.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass, replace
@@ -890,6 +891,36 @@ def test_keep_raw_leaves_the_vrs_and_the_encoded_mp4s(tmp_path: Path, monkeypatc
         convert_one(fake)
         assert fake.vrs_path.is_file()
         assert sorted(path.name for path in fake.root.rglob("*.mp4")) == ["cam_00.mp4", "cam_01.mp4", "cam_02.mp4"]
+
+
+@pytest.mark.integration
+def test_the_three_cameras_are_encoded_at_the_same_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nvenc_ffmpeg: Path) -> None:
+    """No camera hands over its first frame until all three encoders have asked for one.
+
+    One camera after another leaves NVENC waiting on the VRS reader; a convert that encodes them in turn never gets
+    past this barrier and fails on its timeout.
+    """
+    all_started: threading.Barrier = threading.Barrier(len(lamaria_source.CAMERA_STREAM_IDS), timeout=10.0)
+
+    def after_all_started(frames: Iterator[bytes | memoryview]) -> Iterator[bytes | memoryview]:
+        all_started.wait()
+        yield from frames
+
+    def gated_streams(vrs_path: Path) -> lamaria.SequenceStreams:
+        streams: lamaria.SequenceStreams = synthetic_streams(vrs_path)
+        return replace(streams, cameras=tuple(replace(camera, frames=after_all_started(camera.frames)) for camera in streams.cameras))
+
+    with converting(tmp_path, monkeypatch) as fake:
+        monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "3")
+        monkeypatch.setattr(lamaria, "open_streams", gated_streams)
+        _, base = convert_one(fake)
+
+    store: rrc.ChunkStore = read_back(base)
+    assert [column_rows(store, f"{schema.video_path(0, index)}:VideoStream:sample").num_rows for index in range(3)] == [
+        SLAM_FRAMES,
+        SLAM_FRAMES,
+        RGB_FRAMES,
+    ]
 
 
 @pytest.mark.integration

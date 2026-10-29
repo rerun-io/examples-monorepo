@@ -150,6 +150,9 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         with ExitStack() as stack:
             together({layer: stack.enter_context(self.layer_recording(identity, layer, targets[layer])) for layer in rest})
 
+    optimized_layers: ClassVar[tuple[str, ...]] = ()
+    """Small columnar layers compacted before publication; mesh layers must keep their boundaries."""
+
     def layer_recording(
         self, identity: SequenceIdentity, layer: str, target: Path, blueprint: rrb.Blueprint | None = None
     ) -> AbstractContextManager[rr.RecordingStream]:
@@ -164,6 +167,7 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
             recording_id=identity.recording_id,
             default_blueprint=(self.default_blueprint() if blueprint is None else blueprint) if base else None,
             send_properties=base,
+            optimize=layer in self.optimized_layers,
         )
 
     @abstractmethod

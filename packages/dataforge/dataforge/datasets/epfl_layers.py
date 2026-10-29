@@ -158,7 +158,7 @@ def write_pose(
 
 
 def write_hand_pose(
-    recording: rr.RecordingStream, rows: list[PoseRow], times: Int64[ndarray, "n"], frames: Int64[ndarray, "n"], *, specs: tuple[FitSpec, ...]
+    recording: rr.RecordingStream, rows: list[PoseRow], times: Int64[ndarray, "n"], frames: Int64[ndarray, "n"], *, specs: tuple[FitSpec, ...], describe: bool = True
 ) -> None:
     """The hand_pose layer owns joined COCO keypoints and the source frame id."""
     write_pose(recording, rows, times, frames, specs=specs)
@@ -166,6 +166,7 @@ def write_hand_pose(
         recording,
         times_ns=times,
         frame_indices=frames,
+        describe=describe,
         positions=np.stack([row.positions for row in rows]),
         confidence=np.stack([row.confidence for row in rows]),
     )
@@ -192,7 +193,7 @@ def project_keypoints(camera: ExoCamera, points: Float32[ndarray, "n 133 3"]) ->
 
 
 def write_projections(
-    recording: rr.RecordingStream, cameras: dict[str, ExoCamera], rows: list[PoseRow], times: Int64[ndarray, "n"], frames: Int64[ndarray, "n"]
+    recording: rr.RecordingStream, cameras: dict[str, ExoCamera], rows: list[PoseRow], times: Int64[ndarray, "n"], frames: Int64[ndarray, "n"], *, describe: bool = True
 ) -> None:
     """Project every exo camera through its eight-coefficient lens with the shared projections writer."""
     positions = np.stack([row.positions for row in rows])
@@ -203,6 +204,7 @@ def write_projections(
         frame_indices=frames,
         confidence=np.stack([row.confidence for row in rows]),
         camera_model=ExoCamera.camera_model,
+        describe=describe,
     )
 
 

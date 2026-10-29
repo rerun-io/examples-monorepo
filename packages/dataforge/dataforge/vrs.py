@@ -32,6 +32,21 @@ DATA_RECORD: int = 3
 UNCOMPRESSED: int = 0
 CODECS: dict[int, str] = {1: "lz4", 2: "zstd"}
 """VRS CompressionType values; the recorder keeps a compressed record only when it is smaller."""
+PIECE_BYTES: dict[str, int] = {
+    "Bool": 1,
+    "char": 1,
+    "int8_t": 1,
+    "uint8_t": 1,
+    "int16_t": 2,
+    "uint16_t": 2,
+    "int32_t": 4,
+    "uint32_t": 4,
+    "int64_t": 8,
+    "uint64_t": 8,
+    "float": 4,
+    "double": 8,
+}
+"""Packed width of a fixed DataLayout piece's element type, for layouts that do not state their size."""
 
 
 class RecordHeader(NamedTuple):
@@ -64,6 +79,8 @@ class LayoutPiece:
     """Fixed byte offset; variable pieces have no fixed offset."""
     size: int = 1
     """Element count of a ``DataPieceArray``; 1 for a single value."""
+    index: int = -1
+    """Entry in the variable-size offset/length index, when present."""
 
 
 @serde
@@ -352,10 +369,22 @@ class VrsFile:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ImageLayout:
+    """JPEG prefix and capture clock for one record format version."""
+
+    size: int
+    """Fixed fields and variable-size index in bytes."""
+    timestamp_offset: int
+    """Capture clock offset within the fixed fields."""
+    variable_count: int = 0
+    """Number of packed offset/length pairs at the end of the prefix."""
+
+
 class VrsImageReader:
     """One JPEG camera stream of an open ``VrsFile``, its data formats validated.
 
-    The image path accepts only a fixed DataLayout followed by JPEG, in
+    The image path accepts a fixed or variable DataLayout followed by JPEG, in
     uncompressed, lz4 or zstd records.
     """
 
@@ -364,26 +393,67 @@ class VrsImageReader:
         self.stream_id: str = stream_id
         where: str = f"{vrs.path}/{stream_id}"
         description: StreamDescription = vrs.description(stream_id)
-        self._layouts: dict[int, tuple[int, int]] = {}
+        self._layouts: dict[int, ImageLayout] = {}
         for version, record_format in description.record_formats.items():
-            match: re.Match[str] | None = re.fullmatch(r"data_layout/size=(\d+)\+image/jpg", record_format)
+            match: re.Match[str] | None = re.fullmatch(r"data_layout(?:/size=(\d+))?\+image/jpg", record_format)
             if match is None:
                 raise ValueError(f"{where}: unsupported image format {record_format}")
-            size: int = int(match[1])
             layout: DataLayout = read_layout(description.layout_docs[version], where)
+            variable_count: int = 0
+            size: int = 0
+            if match[1] is not None:
+                size = int(match[1])
+            else:
+                # VRS omits size= when variable pieces exist: DataLayout.cpp L282-302.
+                # Fixed fields are packed, then uint32 offset/length pairs (DataLayout.h L230-251).
+                # https://github.com/facebookresearch/vrs/blob/main/vrs/DataLayout.cpp#L282-L302
+                # https://github.com/facebookresearch/vrs/blob/main/vrs/DataLayout.h#L230-L251
+                for piece in layout.data_layout:
+                    if piece.index >= 0:
+                        if (
+                            piece.offset != -1
+                            or piece.index != variable_count
+                            or not (piece.type == "DataPieceString" or re.fullmatch(r"DataPiece(?:Vector|StringMap)<.+>", piece.type))
+                        ):
+                            raise ValueError(f"{where}: unsupported variable DataLayout piece {piece.name}")
+                        variable_count += 1
+                    else:
+                        kind: re.Match[str] | None = re.fullmatch(r"DataPiece(Value|Array)<([^>]+)>", piece.type)
+                        if kind is None or kind[2] not in PIECE_BYTES or piece.offset != size or piece.size < 0 or variable_count:
+                            raise ValueError(f"{where}: unsupported fixed DataLayout piece {piece.name}")
+                        size += PIECE_BYTES[kind[2]] * (piece.size if kind[1] == "Array" else 1)
+                size += 8 * variable_count
             timestamps: list[LayoutPiece] = [piece for piece in layout.data_layout if piece.name == "capture_timestamp_ns"]
-            if len(timestamps) != 1 or timestamps[0].type != "DataPieceValue<int64_t>" or not 0 <= timestamps[0].offset <= size - 8:
+            if (
+                len(timestamps) != 1
+                or timestamps[0].type != "DataPieceValue<int64_t>"
+                or not 0 <= timestamps[0].offset <= size - 8 * variable_count - 8
+            ):
                 raise ValueError(f"{where}: invalid capture_timestamp_ns layout")
-            self._layouts[version] = (size, timestamps[0].offset)
+            self._layouts[version] = ImageLayout(size, timestamps[0].offset, variable_count)
 
     def images(self) -> Iterator[ImageRecord]:
         """Yield complete JPEG blocks with validated boundaries and timestamps."""
         where: str = f"{self.vrs.path}/{self.stream_id}"
         for version, payload in self.vrs.payloads(self.stream_id, DATA_RECORD, dict.fromkeys(self._layouts)):
-            layout_size, timestamp_offset = self._layouts[version]
+            layout: ImageLayout = self._layouts[version]
+            layout_size: int = layout.size
+            if len(payload) < layout_size:
+                raise ValueError(f"{where}: truncated image payload")
+            variable_size: int = 0
+            # Variable data follows the index; its last offset+length gives the block end.
+            # Validate contiguous entries as VRS does in DataLayout.cpp L725-773.
+            # https://github.com/facebookresearch/vrs/blob/main/vrs/DataLayout.cpp#L360-L370
+            # https://github.com/facebookresearch/vrs/blob/main/vrs/DataLayout.cpp#L725-L773
+            for index in range(layout.variable_count):
+                offset, length = struct.unpack_from("<II", payload, layout.size - 8 * (layout.variable_count - index))
+                if offset != variable_size:
+                    raise ValueError(f"{where}: invalid variable DataLayout index")
+                variable_size += length
+            layout_size += variable_size
             if len(payload) < layout_size + 4:
                 raise ValueError(f"{where}: truncated image payload")
-            timestamp: int = struct.unpack_from("<q", payload, timestamp_offset)[0]
+            timestamp: int = struct.unpack_from("<q", payload, layout.timestamp_offset)[0]
             image: bytes = payload[layout_size:]
             if not image.startswith(b"\xff\xd8") or not image.endswith(b"\xff\xd9"):
                 raise ValueError(f"{where}: invalid JPEG boundaries")
@@ -391,10 +461,10 @@ class VrsImageReader:
 
     def capture_timestamps(self) -> Int64[ndarray, "n"]:
         """Every image's capture clock in file order, reading only the DataLayout of uncompressed records."""
-        prefix_sizes: dict[int, int | None] = {version: size for version, (size, _) in self._layouts.items()}
+        prefix_sizes: dict[int, int | None] = {version: layout.size for version, layout in self._layouts.items()}
         return np.fromiter(
             (
-                struct.unpack_from("<q", payload, self._layouts[version][1])[0]
+                struct.unpack_from("<q", payload, self._layouts[version].timestamp_offset)[0]
                 for version, payload in self.vrs.payloads(self.stream_id, DATA_RECORD, prefix_sizes)
             ),
             dtype=np.int64,

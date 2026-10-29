@@ -13,7 +13,8 @@ encodes an image sequence and then logs it has one import to make.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -180,8 +181,11 @@ def log_video_stream(
     shift_ns: int = 0,
     times_ns: Int64[ndarray, "n_samples"] | None = None,
     frame_indices: Int64[ndarray, "n"] | None = None,
+    optimize_gops: bool = False,
 ) -> int:
     """Remux one mp4 as a ``VideoStream``, optionally retimed, and count its samples.
+
+    ``optimize_gops`` packs complete GoPs near 2 MiB using bounded optimizer windows.
 
     Five invariants ride along, in the order they bite:
 
@@ -303,7 +307,15 @@ def log_video_stream(
         timeline_name=schema.TIMELINE,
         transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True, ffmpeg_override=ffmpeg_override),
     )
-    recording.send_chunks(reader.stream().flat_map(tap))  # invariant 2
+    stream = reader.stream().flat_map(tap)
+    if optimize_gops:
+        # Mp4Reader already emits complete GoPs and exact keyframe indexes. Compact
+        # these chunks without deriving a second set of keyframe rows.
+        batcher = ChunkBatcher(profile=replace(rrc.OptimizationProfile.OBJECT_STORE, gop_batching=False))
+        recording.send_chunks(stream.flat_map(batcher))
+        recording.send_chunks(batcher.flush())
+    else:
+        recording.send_chunks(stream)  # invariant 2
     if times_ns is not None and sample_count != times_ns.size:
         raise ValueError(f"{video_path.name} holds {sample_count} samples but {times_ns.size} timestamps were given")
     return sample_count
@@ -729,3 +741,41 @@ def annotation_context() -> rr.AnnotationContext:
             ),
         ]
     )
+
+
+@dataclass(slots=True)
+class ChunkBatcher:
+    """A bounded object-store optimizer used as a native stream's flat-map callback.
+
+    Consume ``stream.flat_map(batcher)`` with a native terminal, then send ``flush()``.
+    Do not iterate a pipeline with Python callbacks from an iterable send_chunks sink:
+    its iterator can block those callbacks from acquiring the GIL in Rerun 0.38.1.
+    """
+
+    static_chunks: Sequence[rrc.Chunk] = ()
+    """Codec context needed for native keyframe derivation; callers log it once."""
+    max_chunks: int = 64
+    """Maximum reader outputs retained in one optimizer window."""
+    profile: rrc.OptimizationProfile = rrc.OptimizationProfile.OBJECT_STORE
+    """Disable GoP rebatching when the reader already supplies complete GoPs and keyframe indexes."""
+    _pending: list[rrc.Chunk] = field(default_factory=list, init=False)
+    """Reader outputs waiting for the next bounded flush."""
+
+    def __post_init__(self) -> None:
+        if self.max_chunks < 1:
+            raise ValueError("max_chunks must be positive")
+
+    def __call__(self, chunk: rrc.Chunk) -> list[rrc.Chunk]:
+        self._pending.append(chunk)
+        return self.flush() if len(self._pending) >= self.max_chunks else []
+
+    def flush(self) -> list[rrc.Chunk]:
+        """Optimize the pending window, including the final partial window."""
+        if not self._pending:
+            return []
+        window, self._pending = self._pending, []
+        optimized = rrc.LazyChunkStream.from_iter([*self.static_chunks, *window]).collect(optimize=self.profile)
+        output = optimized.stream()
+        if self.static_chunks:
+            output = output.drop(is_static=True)
+        return output.to_chunks()

@@ -197,3 +197,30 @@ def test_trajectory_reads_the_mps_sample(tmp_path: Path) -> None:
     poses = trajectory.at(np.array([149202610000, 149203000000, 149203459000 + 6_000_000], dtype=np.int64))
     np.testing.assert_array_equal(poses[0], trajectory.poses[0])
     assert np.isfinite(poses[1]).all() and np.isnan(poses[2]).all()
+
+
+def test_frame_peaks_matches_gray_decode_including_padding(tmp_path: Path) -> None:
+    """All luma levels, narrow padded rows, and frame limits retain gray-decode peaks."""
+    import av
+
+    from dataforge.datasets.egoexo4d_source import frame_peaks
+
+    path = tmp_path / "luma.mkv"
+    with av.open(str(path), "w") as output:
+        stream = output.add_stream("ffv1", rate=30)
+        assert isinstance(stream, av.video.stream.VideoStream)
+        stream.width, stream.height = 18, 2
+        stream.codec_context.pix_fmt = "yuv420p"
+        for level in range(256):
+            image = np.full((3, 18), 128, dtype=np.uint8)
+            image[:2] = level
+            frame = av.VideoFrame.from_ndarray(image, format="yuv420p")
+            for packet in stream.encode(frame):
+                output.mux(packet)
+        for packet in stream.encode():
+            output.mux(packet)
+    with av.open(str(path)) as container:
+        expected = np.array([frame.to_ndarray(format="gray").max() for frame in container.decode(video=0)], dtype=np.int64)
+    np.testing.assert_array_equal(frame_peaks(path, 1000), expected)
+    np.testing.assert_array_equal(frame_peaks(path, 33), expected[:33])
+    assert frame_peaks(path, 0).size == 0
