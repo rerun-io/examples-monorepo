@@ -18,6 +18,7 @@ def paper_numbers(path: Path) -> Path:
         "train_seconds_summary": 600.0, "peak_gpu_used_gb_legacy": 0.5,
     }  # fmt: skip
     data: dict = {
+        "source": {"paper": "arXiv", "hardware_paper": "RTX A5000 24 GB"},
         "hf_nvs_per_scene": {"dtu": {"scan24": {"v1-fixed": hf}, "scan37": {"v1-fixed": {**hf, "psnr": 27.0, "primitives": 120}}}},
         "sfm_points": {"dtu": {"scan24": 100, "scan37": 120}},
         "table1_2d": [],
@@ -84,6 +85,7 @@ def test_scene_rows_carry_our_numbers_and_the_published_scene_beside_them(table:
     assert brush.status == "incomplete" and brush.psnr is None and brush.paper is None
     missing = next(r for r in table.scenes if r.scene == "scan24" and r.method == "brush-7k")
     assert missing.status == "missing"
+    assert table.published_hardware == "RTX A5000 24 GB", "the published numbers' hardware as paper-numbers.json records it"
 
 
 def test_dataset_means_average_the_scenes_beside_the_published_scenes_mean(table: BenchTable) -> None:

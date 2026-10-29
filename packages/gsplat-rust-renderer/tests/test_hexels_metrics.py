@@ -45,7 +45,13 @@ def table(tmp_path: Path) -> BenchTable:
         row("hexels-v1-30k-pub-wgsl", psnr=24.7121, ssim=0.73, lpips_vgg=0.33, fps=900.0, deploy_mb=11.10128, paper=PUBLISHED),
         row("hexels-v1-7k", status="incomplete", reason="no metrics.json", paper=PUBLISHED),
     ]
-    return read_json(BenchTable, write(tmp_path / "TABLE.json", {"format": "hexels-bench-table-2", "scenes": rows, "means": [], "flags": []}))
+    document: dict = {"format": "hexels-bench-table-3", "published_hardware": "RTX A5000 24 GB", "scenes": rows, "means": [], "flags": []}
+    return read_json(BenchTable, write(tmp_path / "TABLE.json", document))
+
+
+def test_a_table_written_before_the_hardware_field_still_reads(tmp_path: Path) -> None:
+    old: BenchTable = read_json(BenchTable, write(tmp_path / "TABLE.json", {"format": "hexels-bench-table-2", "scenes": [row("brush-7k")]}))
+    assert old.published_hardware is None and old.scenes[0].method == "brush-7k"
 
 
 def cells(table: BenchTable, method: str) -> SceneCells:
@@ -55,30 +61,38 @@ def cells(table: BenchTable, method: str) -> SceneCells:
 
 
 def test_brush_row_takes_table_cells_and_the_wgsl_rerender_fps(table: BenchTable, tmp_path: Path) -> None:
-    backends: list[dict] = [{"implementation": "brush", "median_of_repeat_medians_ms": 9.0}, {"implementation": "ours", "median_of_repeat_medians_ms": 2.5}]
+    backends: list[dict] = [
+        {"implementation": "brush", "adapter": "GPU R", "median_of_repeat_medians_ms": 9.0},
+        {"implementation": "ours", "adapter": "GPU R", "median_of_repeat_medians_ms": 2.5},
+    ]
     speed: Path = write(tmp_path / "speed.json", {"complete": True, "splats": 1000, "backends": backends})
-    brush: MetricRow = run_row(table, cells(table, "brush-7k"), "Brush 3DGS 7k", 1000, None, speed)
+    runs: Path = tmp_path / "runs"
+    write(runs / "mipnerf360/garden/brush-7k/train.json", {"method": "brush-7k", "gpu": "GPU T", "host": "h"})
+    write(runs / "mipnerf360/garden/brush-7k-wgsl/fps.json", {"median_fps": 554.6, "adapter": "GPU F", "backend": "Vulkan"})
+    brush: MetricRow = run_row(table, cells(table, "brush-7k"), "Brush 3DGS 7k", 1000, None, speed, runs)
     assert (brush.psnr, brush.ssim, brush.lpips_vgg, brush.source) == (24.25, 0.7, 0.38, "ours, shared-png16")
     assert (brush.fps, brush.train_min, brush.train_vram_gib, brush.deploy_mb, brush.primitives) == (554.6, 0.5, 0.46, 0.236, 1000)
     assert brush.renderer_ms_median == 2.5 and brush.viewer_ms_median is None
+    assert (brush.train_gpu, brush.fps_gpu, brush.renderer_gpu, brush.viewer_gpu) == ("GPU T", "GPU F", "GPU R", None), "each GPU from its own record"
 
 
-def test_unscored_run_shows_empty_cells_not_another_scorers_numbers(table: BenchTable) -> None:
-    unscored: MetricRow = run_row(table, cells(table, "hexels-v1-7k"), "Hexels V1 7k", 31205, None, None)
+def test_unscored_run_shows_empty_cells_not_another_scorers_numbers(table: BenchTable, tmp_path: Path) -> None:
+    unscored: MetricRow = run_row(table, cells(table, "hexels-v1-7k"), "Hexels V1 7k", 31205, None, None, tmp_path / "runs")
     assert unscored.source == "unscored" and unscored.psnr is None and unscored.fps is None and unscored.primitives == 31205
 
 
 def test_probe_statistics_and_the_published_row(table: BenchTable, tmp_path: Path) -> None:
     frames: list[dict] = [{"ms": float(ms), "camera": {}} for ms in range(1, 301)]
     probe: Path = write(tmp_path / "probe.json", {"adapter": "RTX 5090", "frames": frames, "gpu_bytes_scene": 2_000_000, "gpu_bytes_views": 500_000})
-    hexels: MetricRow = run_row(table, cells(table, "hexels-v1-30k-pub-wgsl"), "Hexels V1 30k published", 138_766, probe, None)
+    hexels: MetricRow = run_row(table, cells(table, "hexels-v1-30k-pub-wgsl"), "Hexels V1 30k published", 138_766, probe, None, tmp_path / "runs")
     assert (hexels.psnr, hexels.fps, hexels.train_min) == (24.7121, 900.0, None)
+    assert (hexels.viewer_gpu, hexels.fps_gpu, hexels.train_gpu) == ("RTX 5090", None, None), "no fps.json, no train.json: no claim"
     assert hexels.viewer_ms_median == pytest.approx(150.5)
     assert hexels.viewer_ms_p95 == pytest.approx(float(np.percentile(np.arange(1, 301), 95.0)))
     assert hexels.viewer_gpu_mb == pytest.approx(2.5)
     published: MetricRow = paper_row(cells(table, "hexels-v1-30k-pub-wgsl"), "Paper Hexels V1 30k")
     assert (published.psnr, published.primitives, published.train_min, published.deploy_mb) == (24.71, 138766, 20.775, 11.10128)
-    assert published.source == "published, A5000" and published.train_vram_gib is None
+    assert published.source == "published" and published.train_vram_gib is None
     with pytest.raises(ValueError, match="no published checkpoint"):
         paper_row(cells(table, "brush-7k"), "x")
 

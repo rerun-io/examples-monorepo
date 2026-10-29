@@ -52,7 +52,7 @@ class PaperScene:
     primitives: int
     """Hexels."""
     train_min: float | None
-    """Training minutes on the authors' A5000 (30k steps)."""
+    """Training minutes of the authors' run (30k steps; hardware in `BenchTable.published_hardware`)."""
 
 
 @serde(deny_unknown_fields=True)
@@ -120,7 +120,7 @@ class PaperMean:
     primitives_k: float
     """Hexels, thousands."""
     train_min: float | None
-    """A5000 training minutes (30k steps)."""
+    """Training minutes of the authors' runs (30k steps; hardware in `BenchTable.published_hardware`)."""
 
 
 @serde(deny_unknown_fields=True)
@@ -175,6 +175,8 @@ class BenchTable:
     """Local ISO time."""
     runs_root: str
     """Runs directory read."""
+    published_hardware: str
+    """GPU of the published numbers as paper-numbers.json records it (`source.hardware_paper`)."""
     mean_scenes: dict[str, list[str]]
     """Scenes each dataset mean averages (contracts/scope.md)."""
     scenes: list[SceneRow]
@@ -324,9 +326,10 @@ def build_table(
         for method in methods
     ]
     return BenchTable(
-        format="hexels-bench-table-2",
+        format="hexels-bench-table-3",
         generated=datetime.now().isoformat(timespec="seconds"),
         runs_root=str(runs),
+        published_hardware=paper.source.hardware_paper,
         mean_scenes={dataset: list(averaged[dataset]) for dataset in datasets},
         scenes=rows,
         means=means,

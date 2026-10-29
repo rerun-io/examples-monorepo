@@ -57,7 +57,7 @@ class PublishedCells:
     primitives: int
     """Hexels."""
     train_min: float | None
-    """Training minutes on the authors' A5000 (30k steps)."""
+    """Training minutes of the authors' run (30k steps; hardware in `BenchTable.published_hardware`)."""
 
 
 @serde
@@ -96,6 +96,26 @@ class BenchTable:
 
     scenes: list[SceneCells]
     """Per-scene rows."""
+    published_hardware: str | None = None
+    """GPU of the published numbers as the paper records it; None in tables written before the field."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class TrainRecord:
+    """`train.json` of a run the benchmark trained (read partially)."""
+
+    gpu: str | None
+    """GPU the trainer ran on; null without NVML."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class FpsReport:
+    """`fps.json` of a `gsplat render --fps` run (read partially)."""
+
+    adapter: str
+    """GPU adapter that rendered the test views."""
 
 
 @serde
@@ -129,6 +149,8 @@ class SpeedBackend:
 
     implementation: str
     """`ours` (gsplat-core), `brush` or `native`."""
+    adapter: str
+    """GPU adapter it ran on."""
     median_of_repeat_medians_ms: float
     """Renderer frame time, median of the repeat medians."""
 
@@ -174,6 +196,14 @@ class MetricRow:
     """Compute renderer GPU memory in the viewer (scene + view), MB."""
     renderer_ms_median: float | None = None
     """`gsplat speed --impl ours` on the orbit (renderer only), median of repeat medians, ms."""
+    viewer_gpu: str | None = None
+    """Adapter of the `gsplat probe` report."""
+    renderer_gpu: str | None = None
+    """Adapter of the `gsplat speed` report."""
+    fps_gpu: str | None = None
+    """Adapter of the `fps.json` behind `fps`; None when no fps.json records one."""
+    train_gpu: str | None = None
+    """GPU of the run's `train.json`."""
 
 
 def scene_cells(table: BenchTable, dataset: str, scene: str, method: str) -> SceneCells | None:
@@ -181,8 +211,9 @@ def scene_cells(table: BenchTable, dataset: str, scene: str, method: str) -> Sce
     return next((row for row in table.scenes if (row.dataset, row.scene, row.method) == (dataset, scene, method)), None)
 
 
-def run_row(table: BenchTable, cells: SceneCells, name: str, primitives: int, probe: Path | None, speed: Path | None) -> MetricRow:
-    """Our row for one run: its TABLE.json cells (null until the shared scorer scored it) and viewer timing.
+def run_row(table: BenchTable, cells: SceneCells, name: str, primitives: int, probe: Path | None, speed: Path | None, runs_root: Path) -> MetricRow:
+    """Our row for one run: its TABLE.json cells (null until the shared scorer scored it), viewer timing, and the GPU of
+    each measurement as its own record names it (probe and speed reports, the run's train.json and fps.json).
 
     A run without its own render FPS (Brush renders its test views in the trainer) takes it from `<method>-wgsl`,
     the same model rendered by gsplat-core.
@@ -194,15 +225,21 @@ def run_row(table: BenchTable, cells: SceneCells, name: str, primitives: int, pr
         primitives: Primitive count of the model shown.
         probe: Optional `gsplat probe` report for this model.
         speed: Optional `gsplat speed` report for this model.
+        runs_root: Run layout root holding `<dataset>/<scene>/<method>/{train.json, fps.json}`.
     """
     rerender: SceneCells | None = scene_cells(table, cells.dataset, cells.scene, f"{cells.method}-wgsl")
-    fps: float | None = cells.fps if cells.fps is not None or rerender is None else rerender.fps
+    fps_cells: SceneCells = cells if cells.fps is not None or rerender is None else rerender
+    scene_dir: Path = runs_root / cells.dataset / cells.scene
+    fps_report: Path = scene_dir / fps_cells.method / "fps.json"
+    train_record: Path = scene_dir / cells.method / "train.json"
     viewer_ms: Float64[ndarray, "n"] | None = None
     viewer_gpu_mb: float | None = None
+    viewer_gpu: str | None = None
     if probe is not None:
         report: ProbeReport = read_json(ProbeReport, probe)
         viewer_ms = np.array([frame.ms for frame in report.frames], dtype=np.float64)
         viewer_gpu_mb = (report.gpu_bytes_scene + report.gpu_bytes_views) / 1e6
+        viewer_gpu = report.adapter
     ours: list[SpeedBackend] = [b for b in read_json(SpeedReport, speed).backends if b.implementation == "ours"] if speed is not None else []
     return MetricRow(
         method=name,
@@ -210,7 +247,7 @@ def run_row(table: BenchTable, cells: SceneCells, name: str, primitives: int, pr
         psnr=cells.psnr,
         ssim=cells.ssim,
         lpips_vgg=cells.lpips_vgg,
-        fps=fps,
+        fps=fps_cells.fps,
         train_min=cells.train_min,
         train_vram_gib=cells.vram_gib,
         deploy_mb=cells.deploy_mb,
@@ -219,6 +256,10 @@ def run_row(table: BenchTable, cells: SceneCells, name: str, primitives: int, pr
         viewer_ms_p95=None if viewer_ms is None else float(np.percentile(viewer_ms, 95.0)),
         viewer_gpu_mb=viewer_gpu_mb,
         renderer_ms_median=ours[0].median_of_repeat_medians_ms if ours else None,
+        viewer_gpu=viewer_gpu,
+        renderer_gpu=ours[0].adapter if ours else None,
+        fps_gpu=read_json(FpsReport, fps_report).adapter if fps_cells.fps is not None and fps_report.is_file() else None,
+        train_gpu=read_json(TrainRecord, train_record).gpu if train_record.is_file() else None,
     )
 
 
@@ -228,7 +269,7 @@ def paper_row(cells: SceneCells, name: str) -> MetricRow:
         raise ValueError(f"TABLE.json has no published checkpoint beside {cells.dataset}/{cells.scene}/{cells.method}")
     return MetricRow(
         method=name,
-        source="published, A5000",
+        source="published",
         psnr=cells.paper.psnr,
         ssim=cells.paper.ssim,
         lpips_vgg=cells.paper.lpips_vgg,

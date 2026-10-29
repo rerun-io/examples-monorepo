@@ -77,10 +77,9 @@ class CompareConfig:
     """`gsplat speed --impl ours` report of the Brush PLY on orbit.json, shown in the table."""
     hexels_speed: Path | None = None
     """`gsplat speed --impl ours` report of the hexel PLY on orbit.json, shown in the table."""
-    timing_gpu: str = "RTX 5090"
-    """GPU of the probe and speed reports, named in the table title."""
     test_view_fps: bool = True
-    """Show the run's test-view render FPS; it was measured on the RTX 5090, so drop it for other hosts."""
+    """Show the runs' test-view render FPS. It was measured where the benchmark ran (the table title names that GPU
+    when fps.json records it), so recordings that should carry only this host's timing drop it."""
     runs_root: Path = field(default_factory=lambda: Path(os.environ.get("HEXELS_WORK", str(Path.home() / "hexels-work"))) / "runs")
     """Run layout root (contracts/run-layout.md); default `$HEXELS_WORK/runs`, as the hexels package's `Roots`."""
     contracts_root: Path = field(
@@ -187,15 +186,38 @@ def splat_view(name: str, entity: str) -> rrb.Spatial3DView:
     )
 
 
-def compare_blueprint(layout: Layout, brush_name: str, hexels_name: str, fps: float, timing_gpu: str) -> rrb.Blueprint:
-    """Brush left, Hexels right, metrics below; the orbit plays in a loop."""
+def hardware_note(rows: list[MetricRow], published_hardware: str | None) -> str:
+    """Which GPU each kind of number came from, as the records name it: a kind is claimed only when every row that
+    shows it names its GPU, kinds on the same GPU share one clause, and the published numbers' hardware comes last."""
+    kinds: tuple[tuple[str, str, str], ...] = (
+        ("viewer timing", "viewer_ms_median", "viewer_gpu"),
+        ("renderer timing", "renderer_ms_median", "renderer_gpu"),
+        ("test-view FPS", "fps", "fps_gpu"),
+        ("training", "train_min", "train_gpu"),
+    )
+    kinds_by_gpu: dict[str, list[str]] = {}
+    for kind, value, gpu in kinds:
+        gpus: list[str | None] = [getattr(row, gpu) for row in rows if getattr(row, value) is not None]
+        if gpus and None not in gpus:
+            kinds_by_gpu.setdefault(" / ".join(dict.fromkeys(str(name) for name in gpus)), []).append(kind)
+    clauses: list[str] = []
+    for gpu, names in kinds_by_gpu.items():
+        listed: str = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+        clauses.append(f"{listed} on {gpu}")
+    if published_hardware is not None:
+        clauses.append(f"published on {published_hardware}")
+    return "; ".join(clauses)
+
+
+def compare_blueprint(layout: Layout, brush_name: str, hexels_name: str, fps: float, hardware: str) -> rrb.Blueprint:
+    """Brush left, Hexels right, metrics below (titled with `hardware_note`); the orbit plays in a loop."""
     brush: rrb.Spatial3DView = splat_view(brush_name, BRUSH_ENTITY)
     hexels: rrb.Spatial3DView = splat_view(hexels_name, HEXELS_ENTITY)
     time_panel: rrb.TimePanel = rrb.TimePanel(timeline=ORBIT_TIMELINE, play_state="playing", loop_mode="all", fps=fps, state="collapsed")
     if layout != "compare":
         return rrb.Blueprint(brush if layout == "brush" else hexels, time_panel, collapse_panels=True)
     table: rrb.DataframeView = rrb.DataframeView(
-        name=f"Per-scene metrics: viewer and renderer timing on {timing_gpu}, quality and training on RTX 5090, published on A5000", origin=METRICS_ENTITY,
+        name=f"Per-scene metrics: {hardware}" if hardware else "Per-scene metrics", origin=METRICS_ENTITY,
         query=rrb.archetypes.DataframeQuery(timeline=METRICS_TIMELINE),
     )
     # The table needs about 350 px for its twelve rows at 1080p.
@@ -222,8 +244,10 @@ def main(config: CompareConfig) -> None:
     hexels_cells: SceneCells | None = scene_cells(table, config.dataset, config.scene, config.hexels_method)
     if brush_cells is None or hexels_cells is None:
         raise ValueError(f"TABLE.json has no {config.dataset}/{config.scene} rows for {config.brush_method} and {config.hexels_method}")
-    brush: MetricRow = run_row(table, brush_cells, display_name(config.brush_method), brush_count, config.brush_probe, config.brush_speed)
-    hexel: MetricRow = run_row(table, hexels_cells, display_name(config.hexels_method), len(hexels.centers), config.hexels_probe, config.hexels_speed)
+    brush: MetricRow = run_row(table, brush_cells, display_name(config.brush_method), brush_count, config.brush_probe, config.brush_speed, config.runs_root)
+    hexel: MetricRow = run_row(
+        table, hexels_cells, display_name(config.hexels_method), len(hexels.centers), config.hexels_probe, config.hexels_speed, config.runs_root
+    )
     if not config.test_view_fps:
         brush, hexel = replace(brush, fps=None), replace(hexel, fps=None)
     brush_name: str = view_name(brush, "splats")
@@ -231,7 +255,7 @@ def main(config: CompareConfig) -> None:
     if config.layout == "compare":
         # Rows first: the table sizes its columns to the content of its first frame.
         log_metric_table([brush, hexel, paper_row(hexels_cells, f"Paper Hexels {variant.upper()} 30k")])
-    rr.send_blueprint(compare_blueprint(config.layout, brush_name, hexels_name, config.fps, config.timing_gpu))
+    rr.send_blueprint(compare_blueprint(config.layout, brush_name, hexels_name, config.fps, hardware_note([brush, hexel], table.published_hardware)))
     log_cameras(contract, orbit, specs)
     if config.layout != "hexels":
         log_ply(brush_ply, entity=BRUSH_ENTITY)
