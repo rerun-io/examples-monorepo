@@ -189,10 +189,7 @@ impl ViewState {
                 (raster_kind.binding(), target.resource()),
             ];
             match &target {
-                Target::TextureDepth { depth, .. } => {
-                    bindings.push((8, wgpu::BindingResource::TextureView(depth)));
-                }
-                Target::TextureDepthId { depth, id, .. } => {
+                Target::TextureDepth { depth, id, .. } => {
                     bindings.extend([
                         (8, wgpu::BindingResource::TextureView(depth)),
                         // The 32-bit depth sort ends in its input buffers: global rows in depth order.

@@ -155,7 +155,7 @@ impl RenderView {
             &mut self.core,
             camera,
             &options,
-            gsplat_core::Target::TextureDepthId {
+            gsplat_core::Target::TextureDepth {
                 color: self.target.color.default_view.clone(),
                 depth: self.target.depth.default_view.clone(),
                 id: self.target.id.default_view.clone(),
