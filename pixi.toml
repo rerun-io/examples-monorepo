@@ -2204,6 +2204,26 @@ rerun-sdk = "==0.38.1"
 PACKAGE_DIR = "packages/hexels"
 PYREFLY_TARGET = "hexels_bench tools tests"
 
+[feature.hexels-surface.tasks.hexels-surface-run]
+cmd = "python tools/surface_run.py"
+cwd = "packages/hexels"
+description = "Render depth (gsplat render --surface, or upstream CUDA frames) and fuse TSDF meshes with upstream's settings"
+
+[feature.hexels-surface.tasks.hexels-surface-eval]
+cmd = "python tools/surface_eval.py"
+cwd = "packages/hexels"
+description = "Score fuse_post.ply: DTU Chamfer (2DGS eval_dtu) or T&T F1 (2DGS eval_tnt in the tnt-eval env)"
+
+[feature.hexels-surface.tasks.hexels-surface-table]
+cmd = "python tools/surface_table.py"
+cwd = "packages/hexels"
+description = "Collect scored surface runs and the paper's per-scene numbers into runs/SURFACE_TABLE.json"
+
+[feature.hexels-surface.tasks.hexels-surface-log]
+cmd = "python tools/surface_log.py"
+cwd = "packages/hexels"
+description = "Write the per-scene surface recording: meshes, depth and normal maps, cameras, metrics"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # tnt-eval — the Tanks and Temples evaluator's pinned environment (upstream environment-tnt-eval.yml):
 # Python 3.8 and Open3D 0.10, whose registration API the 2DGS `scripts/eval_tnt` code needs.
