@@ -99,6 +99,15 @@ def exposure_path(cam: int) -> str:
     return f"{schema.cam_path(RIG, cam)}/exposure"
 
 
+RETIMED_ENTITIES: dict[str, tuple[str, ...]] = {
+    **{camera_topic(cam): (schema.video_path(RIG, cam), exposure_path(cam)) for cam in range(NUM_CAMERAS)},
+    EEF_POSE_TOPIC: (schema.rig_path(RIG),),
+    IMU_TOPIC: (schema.gyro_path(RIG, IMU), schema.accel_path(RIG, IMU)),
+    FRAME_VALIDITY_TOPIC: ("/frames",),
+}
+"""Output entities counted from each source topic before lenses fan out its columns."""
+
+
 def binary_to_blob(data: pa.BinaryArray) -> pa.ListArray:
     """``binary`` rows as ``list<uint8>`` (the ``Blob`` layout) over the same bytes, honouring a sliced array's offset."""
     offsets: pa.Array = pa.Array.from_buffers(pa.int32(), len(data) + 1, [None, data.buffers()[1]], offset=data.offset)
@@ -180,7 +189,7 @@ def frames_lens() -> rrc.DeriveLens:
 
 @dataclass
 class Retimer:
-    """Moves every chunk from the MCAP's ``message_log_time`` onto ``video_time`` and ``frame_index``.
+    """Moves each source chunk before lenses from the MCAP's ``message_log_time`` onto ``video_time`` and ``frame_index``.
 
     Chunks keep their row ids. Native-rate sensors (the IMU) get ``video_time`` only, as exoego §14
     asks; every frame-aligned stream also gets the reference camera's frame. Counts each entity's rows
@@ -190,7 +199,9 @@ class Retimer:
     clock: EpisodeClock
     """The episode clock."""
     native_rate: frozenset[str]
-    """Entities that keep their own rate and get no ``frame_index``."""
+    """Source topics that keep their own rate and get no ``frame_index``."""
+    starts: dict[str, int] = field(default_factory=dict)
+    """Each camera's first decodable stamp; leading P-frames are dropped before deriving columns."""
     rows: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     """Rows seen per entity."""
     frames: dict[str, list[Int64[ndarray, "n"]]] = field(default_factory=lambda: defaultdict(list))
@@ -203,14 +214,23 @@ class Retimer:
         if "message_log_time" not in batch.schema.names:
             return [chunk]
         stamps: Int64[ndarray, "n"] = np.asarray(batch.column("message_log_time").cast(pa.int64()))
+        start_ns = self.starts.get(chunk.entity_path)
+        if start_ns is not None and np.any(stamps < start_ns):
+            keep = stamps >= start_ns
+            if not np.any(keep):
+                return []
+            batch = batch.filter(pa.array(keep))
+            stamps = stamps[keep]
         index: int = batch.schema.get_field_index("message_log_time")
         batch = batch.set_column(index, VIDEO_TIME_FIELD, pa.array(self.clock.video_time_ns(stamps), type=pa.duration("ns")))
         batch = batch.remove_column(batch.schema.get_field_index("message_publish_time"))
         frames: Int64[ndarray, "n"] = self.clock.frame_indices(stamps)
         with self.lock:
-            self.rows[chunk.entity_path] += batch.num_rows
-            if chunk.entity_path not in self.native_rate:
-                self.frames[chunk.entity_path].append(frames)
+            entities = RETIMED_ENTITIES.get(chunk.entity_path, (chunk.entity_path,))
+            for entity in entities:
+                self.rows[entity] += batch.num_rows
+                if chunk.entity_path not in self.native_rate:
+                    self.frames[entity].append(frames)
         if chunk.entity_path not in self.native_rate:
             batch = batch.add_column(index + 1, FRAME_INDEX_FIELD, pa.array(frames, type=pa.int64()))
         return rrc.Chunk.from_record_batch(batch)
@@ -256,16 +276,27 @@ def video_start(file: EpisodeFile, cam: int, *, t0_ns: int, end_ns: int) -> Vide
     raise ValueError(f"{file.path}: camera{cam} has no keyframe in {skipped} samples")
 
 
-def base_stream(file: EpisodeFile, episode: Episode, retimer: Retimer, starts: Sequence[VideoStart]) -> rrc.LazyChunkStream:
+def base_stream(
+    file: EpisodeFile, episode: Episode, retimer: Retimer, starts: Sequence[VideoStart],
+    *, codecs: Sequence[rrc.Chunk], batchers: list[writing.ChunkBatcher],
+) -> rrc.LazyChunkStream:
     """Cameras from their first keyframe, rig pose, IMU and frames of one MCAP, shaped by lenses and retimed."""
-    cameras: list[rrc.LazyChunkStream] = [
-        file.stream([camera_topic(cam)], start_time_ns=start.stamp_ns).lenses([video_lens(cam), exposure_lens(cam)]) for cam, start in enumerate(starts)
-    ]
-    stream: rrc.LazyChunkStream = rrc.LazyChunkStream.merge(*cameras, file.stream([EEF_POSE_TOPIC, IMU_TOPIC, FRAME_VALIDITY_TOPIC]))
+    # Decode/decompress each MCAP block once. Split branches share this reader;
+    # six independent camera readers repeatedly decompressed the same source blocks.
+    retimer.starts = {camera_topic(cam): start.stamp_ns for cam, start in enumerate(starts)}
+    stream = file.stream([*(camera_topic(cam) for cam in range(NUM_CAMERAS)), EEF_POSE_TOPIC, IMU_TOPIC, FRAME_VALIDITY_TOPIC]).flat_map(retimer)
+    cameras: list[rrc.LazyChunkStream] = []
+    for cam in range(NUM_CAMERAS):
+        camera, stream = stream.split(content=camera_topic(cam))
+        batcher = writing.ChunkBatcher(static_chunks=(codecs[cam],))
+        batchers.append(batcher)
+        cameras.append(camera.lenses([video_lens(cam), exposure_lens(cam)]).flat_map(batcher))
     stream = stream.lenses(rig_pose_lens(), content=EEF_POSE_TOPIC)
     stream = stream.lenses(imu_lenses(), content=IMU_TOPIC)
     stream = stream.lenses(frames_lens(), content=FRAME_VALIDITY_TOPIC)
-    return stream.flat_map(retimer)
+    batcher = writing.ChunkBatcher()
+    batchers.append(batcher)
+    return rrc.LazyChunkStream.merge(*cameras, stream.flat_map(batcher))
 
 
 def camera_parameters(cam: int, calibration: CameraCalibration) -> PinholeParameters:
@@ -337,7 +368,7 @@ def write_base_layer(
     counts: dict[str, int] = shipped_counts(mcap)
     robot: RobotInfo | None = optional_message(file, ROBOT_INFO_TOPIC, RobotInfo)
     robot_name: str | None = None if robot is None else robot.robot_name
-    retimer: Retimer = Retimer(episode.clock, native_rate=frozenset({schema.gyro_path(RIG, IMU), schema.accel_path(RIG, IMU)}))
+    retimer: Retimer = Retimer(episode.clock, native_rate=frozenset({IMU_TOPIC}))
     end_ns: int = rrc.McapReader(mcap).time_bounds()[1]
     starts: list[VideoStart] = [video_start(file, cam, t0_ns=episode.clock.t0_ns, end_ns=end_ns) for cam in range(NUM_CAMERAS)]
     resolutions: list[str] = []
@@ -373,10 +404,13 @@ def write_base_layer(
         if episode.annotation is not None:
             rr.log(schema.instruction_path(), rr.TextDocument(episode.annotation.bold_mark, media_type=rr.MediaType.MARKDOWN), static=True, recording=recording)
         # The static codecs ride in the optimized stream: GoP rebatching needs each video's codec beside its samples.
-        codecs: rrc.LazyChunkStream = rrc.LazyChunkStream.from_iter(
-            [rrc.Chunk.from_columns(schema.video_path(RIG, cam), indexes=[], columns=rr.VideoStream.columns(codec=[rr.VideoCodec.H264])) for cam in range(NUM_CAMERAS)]
-        )
-        recording.send_chunks(rrc.LazyChunkStream.merge(codecs, base_stream(file, episode, retimer, starts)).collect(optimize=rrc.OptimizationProfile.OBJECT_STORE))
+        codecs = [rrc.Chunk.from_columns(schema.video_path(RIG, cam), indexes=[], columns=rr.VideoStream.columns(codec=[rr.VideoCodec.H264])) for cam in range(NUM_CAMERAS)]
+        recording.send_chunks(codecs)
+        batchers: list[writing.ChunkBatcher] = []
+        stream = base_stream(file, episode, retimer, starts, codecs=codecs, batchers=batchers)
+        recording.send_chunks(stream)
+        for batcher in batchers:
+            recording.send_chunks(batcher.flush())
         census: BaseCensus = BaseCensus(
             camera_frames=tuple(retimer.rows[schema.video_path(RIG, cam)] for cam in range(NUM_CAMERAS)),
             rig_poses=retimer.rows[schema.rig_path(RIG)],

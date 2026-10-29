@@ -206,3 +206,68 @@ def test_a_track_without_hands_or_body_gets_no_pose_or_hand_mesh_layer() -> None
     track: PoseTrack = synthetic_track(3, betas=np.zeros((3, 10)), mano=False)
     assert not track.has_pose and not any(check_mano(track, side).passed for side in (0, 1))
     assert synthetic_track(3, betas=np.zeros((3, 10)), mano=True).has_pose
+
+
+def test_base_stream_retimes_before_deriving_and_keeps_native_imu_clock() -> None:
+    """One source clock rewrite must feed every derived entity without adding an IMU frame clock."""
+    import rerun as rr
+    import rerun.chunk as rrc
+
+    from dataforge import schema
+    from dataforge.datasets.genrobot_layers import Retimer
+    from dataforge.datasets.genrobot_source import IMU_TOPIC
+
+    clock = EpisodeClock(t0_ns=100, frame_times_ns=np.array([110, 120], dtype=np.int64), frame_numbers=np.array([5, 6], dtype=np.int64))
+    retimer = Retimer(clock, native_rate=frozenset({IMU_TOPIC}))
+    chunk = rrc.Chunk.from_columns(
+        IMU_TOPIC,
+        indexes=[rr.TimeColumn("message_log_time", timestamp=np.array([110, 120], dtype="datetime64[ns]")), rr.TimeColumn("message_publish_time", timestamp=np.array([110, 120], dtype="datetime64[ns]"))],
+        columns=rr.Scalars.columns(scalars=[1.0, 2.0]),
+    )
+    result = retimer(chunk)[0]
+    assert retimer.rows[schema.gyro_path(0, 0)] == 2
+    assert result.timeline_names == ["video_time"]
+    assert result.to_record_batch().column("video_time").cast(pa.int64()).to_pylist() == [10, 20]
+
+
+def test_optimizer_windows_keep_tail_rows_and_both_clocks() -> None:
+    import rerun as rr
+    import rerun.chunk as rrc
+
+    from dataforge.writing import ChunkBatcher
+
+    source = rrc.LazyChunkStream.from_iter(
+        rrc.Chunk.from_columns(
+            "/pose", indexes=[rr.TimeColumn("frame_index", sequence=[i]), rr.TimeColumn("video_time", duration=np.array([i * 10], dtype="timedelta64[ns]"))],
+            columns=rr.Scalars.columns(scalars=[float(i)]),
+        ) for i in range(8)
+    )
+    batcher = ChunkBatcher(max_chunks=3)
+    chunks = source.flat_map(batcher).to_chunks()
+    chunks.extend(batcher.flush())
+    assert len(chunks) == 3
+    batches = [c.to_record_batch() for c in chunks]
+    assert [v for b in batches for v in b.column("frame_index").to_pylist()] == list(range(8))
+    assert [v for b in batches for v in b.column("video_time").cast(pa.int64()).to_pylist()] == [i * 10 for i in range(8)]
+    assert [v for b in batches for v in b.column("Scalars:scalars").to_pylist()] == [[float(i)] for i in range(8)]
+
+
+def test_base_clock_discards_only_samples_before_each_camera_first_keyframe() -> None:
+    import rerun as rr
+    import rerun.chunk as rrc
+
+    from dataforge import schema
+    from dataforge.datasets.genrobot_layers import Retimer
+    from dataforge.datasets.genrobot_source import camera_topic
+
+    clock = EpisodeClock(t0_ns=100, frame_times_ns=np.array([110, 120], dtype=np.int64), frame_numbers=np.array([5, 6], dtype=np.int64))
+    retimer = Retimer(clock, native_rate=frozenset(), starts={camera_topic(0): 120})
+    source = rrc.Chunk.from_columns(
+        camera_topic(0), indexes=[rr.TimeColumn("message_log_time", timestamp=np.array([110, 120], dtype="datetime64[ns]")), rr.TimeColumn("message_publish_time", timestamp=np.array([110, 120], dtype="datetime64[ns]"))],
+        columns=rr.Scalars.columns(scalars=[1.0, 2.0]),
+    )
+    result = retimer(source)[0].to_record_batch()
+    assert result.column("video_time").cast(pa.int64()).to_pylist() == [20]
+    assert result.column("frame_index").to_pylist() == [6]
+    assert result.column("Scalars:scalars").to_pylist() == [[2.0]]
+    assert retimer.rows[schema.video_path(0, 0)] == 1
