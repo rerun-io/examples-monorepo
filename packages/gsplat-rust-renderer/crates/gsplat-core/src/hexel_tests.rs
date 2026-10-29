@@ -492,7 +492,7 @@ fn tilted_hexels_map_only_the_tiles_they_reach() {
         variant: HexelVariant::V1,
         params: hexel(
             [0.0, 0.0, 3.0],
-            Quat::from_axis_angle(Vec3::new(1.0, 1.0, 0.0).normalize(), 1.2),
+            Quat::from_axis_angle(Vec3::new(1.0, 1.0, 0.0).normalize_or_zero(), 1.2),
             [1.2, 0.5],
             0.9,
             20.0,
