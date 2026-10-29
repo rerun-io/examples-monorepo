@@ -29,9 +29,9 @@ impl Renderer {
         self.check_bytes(Splats::gpu_bytes(count, sh_degree))
     }
 
-    /// Hexel parameters are one storage buffer of `stride` floats per hexel.
+    /// Hexel parameters and each view's projected hexels are one storage binding each.
     pub fn check_hexel_capacity(&self, count: usize, variant: HexelVariant) -> Result<(), Error> {
-        self.check_bytes(count as u64 * variant.stride() as u64 * 4)
+        self.check_bytes(Hexels::gpu_bytes(count, variant))
     }
 
     fn check_bytes(&self, required: u64) -> Result<(), Error> {

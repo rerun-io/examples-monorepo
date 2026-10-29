@@ -57,11 +57,7 @@ impl Scene {
     pub(crate) fn projected_bytes(&self) -> u64 {
         match self.inputs {
             Inputs::Splats { .. } => 40,
-            Inputs::Hexels {
-                variant: HexelVariant::Image,
-                ..
-            } => 64,
-            Inputs::Hexels { .. } => 84,
+            Inputs::Hexels { variant, .. } => variant.projected_bytes(),
         }
     }
 

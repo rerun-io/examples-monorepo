@@ -37,6 +37,14 @@ impl HexelVariant {
             Self::Image => 15,
         }
     }
+
+    /// Bytes of one projected hexel, matching `Hexel` and `ImageHexel` in the shaders.
+    pub(crate) const fn projected_bytes(self) -> u64 {
+        match self {
+            Self::Image => 64,
+            Self::V1 | Self::V2 | Self::V3 => 84,
+        }
+    }
 }
 
 /// Activated planar hexagons (honeycomb-surfels/hexels), `variant.stride()` floats per hexel.
@@ -53,6 +61,11 @@ impl Hexels {
 
     pub fn is_empty(&self) -> bool {
         self.params.is_empty()
+    }
+
+    /// Largest GPU binding for this many hexels: the parameters or the projected hexels.
+    pub fn gpu_bytes(count: usize, variant: HexelVariant) -> u64 {
+        count as u64 * (variant.stride() as u64 * 4).max(variant.projected_bytes())
     }
 }
 
@@ -163,5 +176,21 @@ impl Splats {
     /// Largest GPU buffer needed for a cloud of this size and SH degree.
     pub fn gpu_bytes(count: usize, degree: u32) -> u64 {
         count as u64 * (12 * (u64::from(degree) + 1).pow(2)).max(40)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HexelVariant, Hexels};
+
+    #[test]
+    fn hexel_preflight_counts_the_projected_binding_when_it_is_larger() {
+        // 1.65 M V1 hexels: 132,000,000 input bytes fit a 128 MiB binding, 84-byte projections do not.
+        assert_eq!(Hexels::gpu_bytes(1_650_000, HexelVariant::V1), 138_600_000);
+        assert!(Hexels::gpu_bytes(1_650_000, HexelVariant::V1) > 128 << 20);
+        // Image hexels: 60 input bytes, 64 projected bytes.
+        assert_eq!(Hexels::gpu_bytes(1, HexelVariant::Image), 64);
+        // V3 inputs (260 bytes) stay the larger buffer.
+        assert_eq!(Hexels::gpu_bytes(2, HexelVariant::V3), 520);
     }
 }
