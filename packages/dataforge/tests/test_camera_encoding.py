@@ -1,6 +1,5 @@
 """Camera scheduling contracts at the video boundary."""
 
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -18,8 +17,8 @@ from dataforge.timing import SequenceTimer
 def test_local_gen2_cameras_start_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     barrier: threading.Barrier = threading.Barrier(3, timeout=2.0)
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "3")
-    monkeypatch.setattr(subprocess, "check_output", lambda *_args, **kwargs: "ext4\n")
-    scene = cast(Scene, Mock(spec=Scene, vrs=SimpleNamespace(path=tmp_path / "video.vrs"), cameras=[SimpleNamespace(stream_id=str(i)) for i in range(3)]))
+    monkeypatch.setattr(gen2.paths, "NAS_ROOT", tmp_path / "nas")
+    scene = cast(Scene, Mock(spec=Scene, vrs=SimpleNamespace(path=tmp_path / "local" / "video.vrs"), cameras=[SimpleNamespace(stream_id=str(i)) for i in range(3)]))
 
     def encode(scene: Scene, camera: Camera, clip: Path) -> int:
         barrier.wait()
@@ -29,11 +28,11 @@ def test_local_gen2_cameras_start_together(tmp_path: Path, monkeypatch: pytest.M
     gen2.encode_cameras(scene, tmp_path, SequenceTimer())
 
 
-@pytest.mark.parametrize("filesystem,slots", [("nfs4", "3"), ("cifs", "3"), ("unknown", "3"), ("ext4", "1")])
-def test_network_sources_and_one_slot_stay_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filesystem: str, slots: str) -> None:
+@pytest.mark.parametrize("folder,slots", [("nas", "3"), ("local", "1")])
+def test_nas_sources_and_one_slot_stay_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str, slots: str) -> None:
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", slots)
-    monkeypatch.setattr(subprocess, "check_output", lambda *_args, **kwargs: filesystem)
-    scene = cast(Scene, Mock(spec=Scene, vrs=SimpleNamespace(path=tmp_path / "video.vrs"), cameras=[SimpleNamespace(stream_id=str(i)) for i in range(3)]))
+    monkeypatch.setattr(gen2.paths, "NAS_ROOT", tmp_path / "nas")
+    scene = cast(Scene, Mock(spec=Scene, vrs=SimpleNamespace(path=tmp_path / folder / "video.vrs"), cameras=[SimpleNamespace(stream_id=str(i)) for i in range(3)]))
     order: list[str] = []
     active: int = 0
     peak: int = 0

@@ -1,6 +1,5 @@
 """Native Gen2 sensors, MPS hand measurements and full-lens derived projections."""
 
-import subprocess
 from functools import partial
 from pathlib import Path
 
@@ -10,7 +9,7 @@ import rerun as rr
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
-from dataforge import aria, hands, schema, writing
+from dataforge import aria, hands, paths, schema, writing
 from dataforge.clocks import nearest_framesets
 from dataforge.datasets.aria_gen2_pilot_source import IMUS, Camera, Scene
 from dataforge.identity import SequenceIdentity
@@ -99,14 +98,8 @@ def encode_camera(scene: Scene, camera: Camera, clip: Path) -> int:
 
 
 def encode_cameras(scene: Scene, work: Path, timer: SequenceTimer) -> None:
-    """Overlap local camera reads; keep network and unknown filesystems serial."""
-    try:
-        filesystem: str = subprocess.check_output(
-            ["findmnt", "-n", "-o", "FSTYPE", "-T", str(scene.vrs.path.resolve())], text=True
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        filesystem = "unknown"
-    workers: int | None = None if filesystem in {"ext4", "xfs", "btrfs", "tmpfs", "zfs", "apfs"} else 1
+    """Encode the cameras at once, except from the NAS, whose disks seek between interleaved camera reads."""
+    workers: int | None = 1 if scene.vrs.path.resolve().is_relative_to(paths.NAS_ROOT) else None
     with timer.stage("transcode"):
         encode_concurrently([partial(encode_camera, scene, camera, work / f"{camera.stream_id}.mp4") for camera in scene.cameras], workers=workers)
 
