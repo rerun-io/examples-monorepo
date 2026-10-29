@@ -1,5 +1,8 @@
 """Native Gen2 sensors, MPS hand measurements and full-lens derived projections."""
 
+import os
+import subprocess
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +13,7 @@ from numpy import ndarray
 
 from dataforge import aria, hands, schema, writing
 from dataforge.clocks import nearest_framesets
-from dataforge.datasets.aria_gen2_pilot_source import IMUS, Scene
+from dataforge.datasets.aria_gen2_pilot_source import IMUS, Camera, Scene
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
     ImuChannel,
@@ -77,6 +80,43 @@ def write_motion(recording: rr.RecordingStream, scene: Scene) -> None:
         )
 
 
+def encode_camera(scene: Scene, camera: Camera, clip: Path) -> int:
+    """Read one camera through its independent VRS payload iterator."""
+    return encode_frames_to_mp4(
+        census_images(
+            VrsHevcReader(scene.vrs, camera.stream_id).images(),
+            camera.times_ns,
+            camera.source_count,
+            preview=scene.stop_ns is not None,
+            where=f"{scene.source}/{camera.stream_id}",
+        ),
+        clip,
+        source=FrameSource("hevc"),
+        fps=camera.fps,
+        gop=AV1_GOP,
+        cq=AV1_CQ,
+        filter_threads=1,
+    )
+
+
+def encode_cameras(scene: Scene, work: Path, timer: SequenceTimer) -> None:
+    """Overlap local camera reads; keep network and unknown filesystems serial."""
+    try:
+        filesystem: str = subprocess.check_output(
+            ["findmnt", "-n", "-o", "FSTYPE", "-T", str(scene.vrs.path.resolve())], text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        filesystem = "unknown"
+    slots: int = int(os.environ.get("DATAFORGE_NVENC_SLOTS", "6"))
+    if slots < 1:
+        raise ValueError("DATAFORGE_NVENC_SLOTS must be positive")
+    workers: int = min(len(scene.cameras), slots) if filesystem in {"ext4", "xfs", "btrfs", "tmpfs", "zfs", "apfs"} else 1
+    with timer.stage("transcode"), ThreadPoolExecutor(max_workers=workers) as pool:
+        futures: list[Future[int]] = [pool.submit(encode_camera, scene, camera, work / f"{camera.stream_id}.mp4") for camera in scene.cameras]
+        for future in futures:
+            future.result()
+
+
 def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceIdentity, timer: SequenceTimer) -> None:
     """Pipe native HEVC to shared AV1 NVENC, then remap MP4 samples to VRS times."""
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True, recording=recording)
@@ -84,25 +124,9 @@ def write_base(recording: rr.RecordingStream, scene: Scene, identity: SequenceId
     log_rig_node(recording, 0, reference=None, num_cameras=len(scene.cameras), name="Aria Gen2 device", kind="ego")
     resolutions: list[str] = []
     with work_dir("aria-gen2-") as work:
-        # Sequential cameras limit seeks against cook_0's read-only NAS source.
+        encode_cameras(scene, work, timer)
         for index, camera in enumerate(scene.cameras):
             clip: Path = work / f"{camera.stream_id}.mp4"
-            with timer.stage("transcode"):
-                encode_frames_to_mp4(
-                    census_images(
-                        VrsHevcReader(scene.vrs, camera.stream_id).images(),
-                        camera.times_ns,
-                        camera.source_count,
-                        preview=scene.stop_ns is not None,
-                        where=f"{scene.source}/{camera.stream_id}",
-                    ),
-                    clip,
-                    source=FrameSource("hevc"),
-                    fps=camera.fps,
-                    gop=AV1_GOP,
-                    cq=AV1_CQ,
-                    filter_threads=1,
-                )
             log_camera_node(
                 recording,
                 0,
