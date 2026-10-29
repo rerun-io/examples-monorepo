@@ -1,4 +1,4 @@
-"""Aria Gen2 Pilot v1.0: verify-only source and three native-clock layers."""
+"""Aria Gen2 Pilot v1.0: the release fetched from Meta's CDN (or verified in place) and three native-clock layers."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -8,11 +8,12 @@ from typing import ClassVar
 import rerun as rr
 import rerun.blueprint as rrb
 from serde import serde
+from serde.json import to_json
 
-from dataforge import blueprints, paths, schema, writing
+from dataforge import blueprints, meta_cdn, paths, schema, transports, writing
 from dataforge.datasets.aria_gen2_pilot_layers import write_base, write_hands, write_projections
 from dataforge.datasets.aria_gen2_pilot_source import CAMERAS, SEQUENCES, Scene, read_scene
-from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
+from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig, RemoteSequence
 from dataforge.identity import SequenceIdentity
 from dataforge.records import read_json
 from dataforge.transports import FileIntegrity, matches_file
@@ -32,19 +33,56 @@ class SourceFile:
 @serde
 @dataclass(frozen=True, slots=True)
 class SequenceFiles:
-    """Only files needed by this port; other download types remain upstream."""
+    """Only the download types this port reads (``FETCHED``); depth, scene, HOI and the rest stay upstream."""
 
     main_vrs: SourceFile
-    """Canonical video.vrs (the CDN filename is a duplicate)."""
+    """Lands as ``video.vrs`` (the official layout's name)."""
+    mps_slam_trajectories: SourceFile
+    """Zip holding ``closed_loop_trajectory.csv``."""
+    mps_hand_tracking: SourceFile
+    """Zip holding ``hand_tracking_results.csv``."""
 
 
 @serde
 @dataclass(frozen=True, slots=True)
 class Manifest:
-    """Release download inventory; expired URLs are never used."""
+    """Release inventory ``download`` writes beside the sequences: sizes and SHA-1s, never a URL."""
 
     sequences: dict[str, SequenceFiles]
     """Integrity metadata keyed by sequence name."""
+
+
+MANIFEST_FILE: str = "AriaGen2PilotDataset_manifest.json"
+"""The inventory's name in the raw root."""
+FETCHED: dict[str, str] = {
+    "main_vrs": "video.vrs",
+    "mps_slam_trajectories": "mps/slam/closed_loop_trajectory.csv",
+    "mps_hand_tracking": "mps/hand_tracking/hand_tracking_results.csv",
+}
+"""Each fetched download type and the sequence-relative file the converter reads from it (for a zip: the one member
+extracted, into the official layout's folder)."""
+CDN: meta_cdn.CdnSource = meta_cdn.CdnSource(
+    "Aria Gen2 Pilot", "download a fresh URL file from https://www.projectaria.com/datasets/gen2pilot/ (links expire after about a month)"
+)
+"""Names the dataset in every CDN message."""
+
+
+def read_url_file(path: Path | None) -> meta_cdn.UrlFile:
+    """The ``--url-file`` a user downloaded from projectaria.com, refusing another dataset's."""
+    urls: meta_cdn.UrlFile = meta_cdn.read_url_file(meta_cdn.url_file_at(path, "--url-file", CDN), CDN)
+    if urls.sequence_config.dataset_name != "AriaGen2PilotDataset":
+        raise ValueError(f"the URL file is {urls.sequence_config.dataset_name}'s; aria_gen2_pilot needs AriaGen2PilotDataset_download_urls*.json")
+    return urls
+
+
+def manifest_of(urls: meta_cdn.UrlFile) -> Manifest:
+    """The URL file's fetched types without their URLs."""
+    return Manifest(
+        sequences={
+            name: SequenceFiles(**{kind: SourceFile(files[kind].file_size_bytes, files[kind].sha1sum) for kind in FETCHED})
+            for name, files in sorted(urls.sequences.items())
+        }
+    )
 
 
 RIG_FORWARD: tuple[float, float, float] = (0.34, -0.27, 0.9)
@@ -57,16 +95,19 @@ FOLLOW_EYE: rrb.EyeControls3D = blueprints.headset_eye_controls(RIG_FORWARD, RIG
 
 @dataclass
 class AriaGen2PilotConfig(FrameLimitedConfig):
-    """Read-only source selection; output follows DATAFORGE_OUTPUT_ROOT."""
+    """Source selection; ``download`` writes only beneath ``root``, convert output follows DATAFORGE_OUTPUT_ROOT."""
 
     command: ClassVar[str] = "aria_gen2_pilot"
     """CLI and catalog dataset name."""
     _target: type = field(default_factory=lambda: AriaGen2PilotDataset)
     """Dataset constructor."""
     root: Path = field(default_factory=lambda: paths.raw_root() / "aria_gen2_pilot")
-    """Release root: the download manifest and one directory per sequence (the source may live on the NAS)."""
+    """Release root: ``MANIFEST_FILE`` and one directory per sequence (the source may live on the NAS)."""
     sequences: tuple[str, ...] | None = None
-    """Subset of the 12 release names; None discovers all complete local sources."""
+    """Subset of the 12 release names; None downloads every one and discovers all complete local sources."""
+    url_file: Path | None = None
+    """``AriaGen2PilotDataset_download_urls*.json`` from projectaria.com: ``download`` fetches with it; discovery and
+    convert never need it."""
 
 
 class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
@@ -75,8 +116,23 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
     layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.PROJECTIONS_LAYER)
 
     def manifest(self) -> Manifest:
-        """The release inventory beside the sequences."""
-        return read_json(self.config.root / "AriaGen2PilotDataset_download_urls.json", Manifest)
+        """The release inventory ``download`` wrote beside the sequences."""
+        path: Path = self.config.root / MANIFEST_FILE
+        if not path.is_file():
+            raise FileNotFoundError(f"no {MANIFEST_FILE} in {self.config.root}; run `dataforge-download aria_gen2_pilot --url-file <URL file>` first")
+        return read_json(path, Manifest)
+
+    def remote_sequences(self) -> list[RemoteSequence]:
+        """Each release sequence with the bytes ``download`` fetches for it and the files it leaves."""
+        manifest: Manifest = manifest_of(read_url_file(self.config.url_file)) if self.config.url_file is not None else self.manifest()
+        return [
+            RemoteSequence(
+                key=name,
+                size_bytes=sum(getattr(files, kind).file_size_bytes for kind in FETCHED),
+                files=tuple(f"{name}/{relative}" for relative in FETCHED.values()),
+            )
+            for name, files in manifest.sequences.items()
+        ]
 
     def discover(self, manifest: Manifest | None = None) -> list[tuple[SequenceIdentity, Path]]:
         """Find all complete release sequences without traversing _simplecv."""
@@ -88,11 +144,7 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
         found: list[tuple[SequenceIdentity, Path]] = []
         for name in selected:
             source: Path = self.config.root / name
-            required: list[Path] = [
-                source / "video.vrs",
-                source / "mps/slam/closed_loop_trajectory.csv",
-                source / "mps/hand_tracking/hand_tracking_results.csv",
-            ]
+            required: list[Path] = [source / relative for relative in FETCHED.values()]
             missing: list[Path] = [path for path in required if not path.is_file()]
             if missing:
                 if self.config.sequences is not None:
@@ -107,7 +159,13 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
         return found
 
     def download(self) -> None:
-        """Verify local VRS size and SHA-1; never fetch, extract or modify raw data."""
+        """With ``url_file``: write the manifest, then fetch what convert reads; rerunning resumes and skips what is there.
+
+        Without it: verify each local ``video.vrs`` against the manifest's size and SHA-1, changing nothing.
+        """
+        if self.config.url_file is not None:
+            self.fetch(read_url_file(self.config.url_file))
+            return
         manifest: Manifest = self.manifest()
         found: list[tuple[SequenceIdentity, Path]] = self.discover(manifest)
         for _, source in found:
@@ -116,6 +174,25 @@ class AriaGen2PilotDataset(DataforgeDataset[AriaGen2PilotConfig, Path]):
             if not matches_file(source / "video.vrs", FileIntegrity(listed.file_size_bytes, "sha1", listed.sha1sum)):
                 raise ValueError(f"{source}/video.vrs: SHA-1 differs from release manifest")
         print(f"aria_gen2_pilot v1.0: verified {len(found)} local sequences")
+
+    def fetch(self, urls: meta_cdn.UrlFile) -> None:
+        """The selected sequences' main VRS and the one needed member of each MPS zip, SHA-1-checked as they land."""
+        selected: list[str] = sorted(urls.sequences) if self.config.sequences is None else sorted(set(self.config.sequences))
+        unknown: list[str] = [name for name in selected if name not in urls.sequences]
+        if unknown:
+            raise ValueError(f"aria_gen2_pilot: unknown sequence(s) {unknown} in the URL file; see `dataforge-download aria_gen2_pilot --list-remote`")
+        with writing.atomic_write(self.config.root / MANIFEST_FILE) as temp_path:
+            temp_path.write_text(to_json(manifest_of(urls)))
+        report: transports.FetchReport = transports.FetchReport()
+        for name in selected:
+            folder: Path = self.config.root / name
+            files: dict[str, meta_cdn.CdnFile] = urls.sequences[name]
+            meta_cdn.fetch_file(files["main_vrs"], folder / FETCHED["main_vrs"], report, CDN)
+            for kind in ("mps_slam_trajectories", "mps_hand_tracking"):
+                member: Path = Path(FETCHED[kind])
+                meta_cdn.fetch_zip(files[kind], [member.name], [member.name], folder / member.parent, report, CDN)
+            print(f"  {name}: done")
+        print(f"aria_gen2_pilot: {len(selected)} sequence(s); {report.summary()} → {self.config.root}")
 
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         """Write atomic local layers and never follow raw symlinks for output."""

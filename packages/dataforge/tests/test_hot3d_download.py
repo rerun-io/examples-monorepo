@@ -13,11 +13,11 @@ import tyro
 from conftest import zip_bytes
 from serde import from_dict
 
-from dataforge import transports
+from dataforge import meta_cdn, transports
 from dataforge.apis import download as download_api
-from dataforge.datasets import hot3d_download
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
-from dataforge.datasets.hot3d_download import CdnFile, fetch_verified, read_url_file
+from dataforge.datasets.hot3d_download import SOURCE, read_url_file
+from dataforge.meta_cdn import CdnFile
 
 FUTURE: str = "oe=7FFFFFFF"
 """An ``oe`` expiry in 2038."""
@@ -144,7 +144,7 @@ def test_partial_file_resumes(cdn: tuple[dict[str, bytes], Path, Path, list[str]
     vrs: CdnFile = urls.sequences["P0001_bbbb"]["main_vrs"]
     dest = tmp_path / "recording.vrs"
     dest.with_name("recording.vrs.part").write_bytes(bodies[vrs.download_url][:7])
-    fetch_verified(vrs, dest)
+    meta_cdn.fetch_verified(vrs, dest, SOURCE)
     assert dest.read_bytes() == b"P0001_bbbb" * 10
     assert not dest.with_name("recording.vrs.part").exists()
 
@@ -153,12 +153,12 @@ def test_size_and_sha1_mismatch(cdn: tuple[dict[str, bytes], Path, Path, list[st
     bodies, _, _, _ = cdn
     short = from_dict(CdnFile, entry(bodies, "short.vrs", b"abc", size=4))
     with pytest.raises(ValueError, match="holds 3 bytes"):
-        fetch_verified(short, tmp_path / "short.vrs")
+        meta_cdn.fetch_verified(short, tmp_path / "short.vrs", SOURCE)
     assert (tmp_path / "short.vrs.part").exists() and not (tmp_path / "short.vrs").exists()
     corrupt = CdnFile(filename="bad.vrs", sha1sum="0" * 40, file_size_bytes=3, download_url=next(iter(bodies)))
     bodies[corrupt.download_url] = b"xyz"
     with pytest.raises(ValueError, match="sha1 differs"):
-        fetch_verified(corrupt, tmp_path / "bad.vrs")
+        meta_cdn.fetch_verified(corrupt, tmp_path / "bad.vrs", SOURCE)
     assert not (tmp_path / "bad.vrs.part").exists() and not (tmp_path / "bad.vrs").exists()
 
 
@@ -166,7 +166,7 @@ def test_expired_and_missing_url_files(cdn: tuple[dict[str, bytes], Path, Path, 
     bodies, _, _, fetched = cdn
     old = from_dict(CdnFile, entry(bodies, "old.vrs", b"abc", oe="oe=5F5E1000"))
     with pytest.raises(ValueError, match="expired on 2020-09-13"):
-        fetch_verified(old, tmp_path / "old.vrs")
+        meta_cdn.fetch_verified(old, tmp_path / "old.vrs", SOURCE)
     assert not fetched
     with pytest.raises(FileNotFoundError, match="projectaria.com"):
         Hot3dAriaConfig(root=tmp_path / "raw").setup().download()
@@ -266,12 +266,12 @@ def test_real_cdn_fetch_of_a_tiny_file(tmp_path: Path) -> None:
         pytest.skip("HOT3D URL file absent: set HOT3D_URL_FILE to a Hot3DAria_download_urls*.json from projectaria.com")
     urls = read_url_file(Path(path))
     tiny: CdnFile = min((files[kind] for files in urls.sequences.values() for kind in files), key=lambda item: item.file_size_bytes)
-    stamp = hot3d_download.expiry(tiny.download_url)
+    stamp = meta_cdn.expiry(tiny.download_url)
     if stamp is not None and stamp <= datetime.now(UTC):
         pytest.skip(f"HOT3D URL file absent: {path} expired")
     try:
         requests.head("https://scontent.xx.fbcdn.net", timeout=10)
     except requests.RequestException:
         pytest.skip("offline: the HOT3D CDN is unreachable")
-    fetch_verified(tiny, tmp_path / tiny.filename)
+    meta_cdn.fetch_verified(tiny, tmp_path / tiny.filename, SOURCE)
     assert (tmp_path / tiny.filename).stat().st_size == tiny.file_size_bytes
