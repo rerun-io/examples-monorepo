@@ -303,9 +303,9 @@ class CameraStream:
     camera: Fisheye62Parameters
     """The camera's calibration, extrinsics holding ``rig_T_cam``."""
     frames: Iterator[bytes | memoryview]
-    """Raw planes in presentation order, one per frame, turned upright. A frame is
-    handed over as one buffer of its own rather than accumulated anywhere: a
-    2.4-minute sequence is 10 GB of planes."""
+    """Raw planes in presentation order, one per frame, native (sideways): the encoder
+    turns them upright, as ``camera`` already is. A frame is handed over as one buffer
+    of its own rather than accumulated anywhere: a 2.4-minute sequence is 10 GB of planes."""
     times_ns: Int64[ndarray, "n_frames"]
     """Capture times on Aria's device clock, one per frame, in the same order."""
 
@@ -628,12 +628,9 @@ def open_streams(vrs_path: Path) -> SequenceStreams:
             CameraStream(
                 stream_id=stream_id,
                 camera=camera,
-                # Turned upright, the same quarter turn the calibration above took:
-                # Aria records sideways, and a viewer should not have to. The turn
-                # costs one copy per frame (2 s on the shortest sequence, 15 s on
-                # the longest), and ``ascontiguousarray`` is what makes ``.data`` a
-                # buffer ffmpeg's stdin can take as it stands.
-                frames=(np.ascontiguousarray(np.rot90(image, -1)).data for _, image in aria.iter_frames(vrs, stream_id)),
+                # Native, as the VRS decoder hands them: the encoder turns them upright
+                # (``write_recording``), which costs no Python-side copy per frame.
+                frames=(image.data for _, image in aria.iter_frames(vrs, stream_id)),
                 times_ns=aria.frame_timestamps_ns(vrs, stream_id),
             )
         )
@@ -935,8 +932,10 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             encodes: list[Future[int]] = []
             for stream, clip in zip(streams.cameras, clips, strict=True):
                 spec: CameraSpec = CAMERA_SPECS[stream.stream_id]
-                layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.width, height=stream.camera.intrinsics.height)
-                encodes.append(pool.submit(encode_frames_to_mp4, stream.frames, clip, source=layout, fps=spec.fps))
+                # The frames arrive native and sideways; ffmpeg gives them the same quarter turn the
+                # calibration took, so the native size is the upright one transposed.
+                layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.height, height=stream.camera.intrinsics.width)
+                encodes.append(pool.submit(encode_frames_to_mp4, stream.frames, clip, source=layout, fps=spec.fps, rotate_cw_quarter_turns=1))
             for encode in encodes:
                 encode.result()
 
