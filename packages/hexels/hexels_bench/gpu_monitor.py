@@ -31,21 +31,24 @@ class PeakVramSampler:
     interval_s: float = 0.005
     """Sampling period in seconds."""
     changes: list[tuple[float, int]] = field(default_factory=list)
-    """(Unix seconds, bytes summed over GPUs) each time the sampled value changed."""
+    """(Unix seconds, bytes summed over GPUs) each time the sampled value changed; only samples in which NVML
+    reported a usage for the pid count."""
     samples: int = 0
     """Number of samples taken."""
     available: bool = True
     """False when NVML could not start (no NVIDIA driver): nothing was sampled."""
+    error: str | None = None
+    """The NVML error that stopped sampling during the run; the peak is then unknown."""
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
 
     def _sample_once(self, handles: list) -> None:
-        used: int = 0
+        used: int | None = None
         for handle in handles:
             for process in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
                 if process.pid == self.pid and process.usedGpuMemory is not None:
-                    used += int(process.usedGpuMemory)
-        if not self.changes or self.changes[-1][1] != used:
+                    used = (used or 0) + int(process.usedGpuMemory)
+        if used is not None and (not self.changes or self.changes[-1][1] != used):
             self.changes.append((time.time(), used))
         self.samples += 1
 
@@ -61,6 +64,8 @@ class PeakVramSampler:
                 self._sample_once(handles)
                 time.sleep(self.interval_s)
             self._sample_once(handles)
+        except pynvml.NVMLError as error:
+            self.error = f"{type(error).__name__}: {error}"
         finally:
             pynvml.nvmlShutdown()
 
@@ -75,10 +80,15 @@ class PeakVramSampler:
             self._thread.join()
 
     def peak_gib(self, until_unix_s: float | None = None) -> float | None:
-        """Largest sample taken at or before `until_unix_s` (all samples for None), GiB; None when NVML was unavailable."""
-        if not self.available:
+        """Largest sample taken at or before `until_unix_s` (all samples for None), GiB.
+
+        None when the peak is unknown: NVML was unavailable or raised during the run, or it reported no usage
+        for the pid by then.
+        """
+        if not self.available or self.error is not None:
             return None
-        return max((used for when, used in self.changes if until_unix_s is None or when <= until_unix_s), default=0) / 2**30
+        used: list[int] = [used for when, used in self.changes if until_unix_s is None or when <= until_unix_s]
+        return max(used) / 2**30 if used else None
 
 
 @dataclass(frozen=True, slots=True)

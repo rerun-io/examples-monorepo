@@ -120,7 +120,5 @@ def main(config: Config) -> None:
                     stream.write(json.dumps({"stem": stem, "method": method, "host": socket.gethostname(), "error": str(error)}) + "\n")
                 print(f"FAILED {stem} {method}: {error}", flush=True)
                 continue
-            print(
-                f"{stem} {method}: loop {record.loop_seconds:.1f} s, total {record.total_seconds:.1f} s, peak {record.peak_vram_gib:.2f} GiB",
-                flush=True,
-            )
+            peak: str = "unknown" if record.peak_vram_gib is None else f"{record.peak_vram_gib:.2f} GiB"
+            print(f"{stem} {method}: loop {record.loop_seconds:.1f} s, total {record.total_seconds:.1f} s, peak {peak}", flush=True)
