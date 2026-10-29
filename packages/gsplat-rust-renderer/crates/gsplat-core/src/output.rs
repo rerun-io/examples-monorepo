@@ -18,6 +18,15 @@ pub enum Target {
         color: wgpu::TextureView,
         depth: wgpu::TextureView,
     },
+
+    /// Float color as `Float`, two f32 depths per pixel (expected and median camera Z), and four
+    /// f32 per pixel for the world normal facing the camera (w = 0). Expected depth and normal are
+    /// alpha-weighted sums divided by alpha. Splats use centre depths and leave the normal zero.
+    Surface {
+        color: wgpu::Buffer,
+        depth: wgpu::Buffer,
+        normal: wgpu::Buffer,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -26,12 +35,13 @@ pub(crate) enum RasterKind {
     Packed,
     Texture,
     TextureDepth,
+    Surface,
 }
 
 impl RasterKind {
     pub fn binding(self) -> u32 {
         match self {
-            Self::Float => 4,
+            Self::Float | Self::Surface => 4,
             Self::Packed => 5,
             Self::Texture | Self::TextureDepth => 6,
         }
@@ -57,33 +67,48 @@ impl Target {
             }
             Ok(())
         };
-        let (buffer, kind, bytes_per_pixel) = match self {
-            Self::Float(buffer) => (buffer, RasterKind::Float, 16),
-            Self::Packed(buffer) => (buffer, RasterKind::Packed, 4),
+        let pixels = u64::from(size.x) * u64::from(size.y);
+        let buffer = |buffer: &wgpu::Buffer, bytes_per_pixel: u64| {
+            let bytes = pixels
+                .checked_mul(bytes_per_pixel)
+                .ok_or(crate::Error::Input("target size overflow"))?;
+            if buffer.size() < bytes || !buffer.usage().contains(wgpu::BufferUsages::STORAGE) {
+                return Err(crate::Error::Input(
+                    "target buffer is too small or lacks STORAGE usage",
+                ));
+            }
+            Ok(())
+        };
+        match self {
+            Self::Float(color) => buffer(color, 16).map(|()| RasterKind::Float),
+            Self::Packed(color) => buffer(color, 4).map(|()| RasterKind::Packed),
             Self::Texture(color) => {
                 texture(color, wgpu::TextureFormat::Rgba8Unorm)?;
-                return Ok(RasterKind::Texture);
+                Ok(RasterKind::Texture)
             }
             Self::TextureDepth { color, depth } => {
                 texture(color, wgpu::TextureFormat::Rgba8Unorm)?;
                 texture(depth, wgpu::TextureFormat::R32Float)?;
-                return Ok(RasterKind::TextureDepth);
+                Ok(RasterKind::TextureDepth)
             }
-        };
-        let bytes = (u64::from(size.x) * u64::from(size.y))
-            .checked_mul(bytes_per_pixel)
-            .ok_or(crate::Error::Input("target size overflow"))?;
-        if buffer.size() < bytes || !buffer.usage().contains(wgpu::BufferUsages::STORAGE) {
-            return Err(crate::Error::Input(
-                "target buffer is too small or lacks STORAGE usage",
-            ));
+            Self::Surface {
+                color,
+                depth,
+                normal,
+            } => {
+                buffer(color, 16)?;
+                buffer(depth, 8)?;
+                buffer(normal, 16)?;
+                Ok(RasterKind::Surface)
+            }
         }
-        Ok(kind)
     }
 
     pub(crate) fn resource(&self) -> wgpu::BindingResource<'_> {
         match self {
-            Self::Float(buffer) | Self::Packed(buffer) => buffer.as_entire_binding(),
+            Self::Float(buffer) | Self::Packed(buffer) | Self::Surface { color: buffer, .. } => {
+                buffer.as_entire_binding()
+            }
             Self::Texture(color) | Self::TextureDepth { color, .. } => {
                 wgpu::BindingResource::TextureView(color)
             }

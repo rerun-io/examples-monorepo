@@ -71,12 +71,13 @@ impl Scratch {
         &self,
         device: &wgpu::Device,
         kernels: &Kernels,
+        scene: &Scene,
         uniform: &wgpu::Buffer,
     ) -> MappingGroups {
         MappingGroups {
             tiles: bind(
                 device,
-                &kernels.map_tiles.layout,
+                &kernels.stages(scene).map_tiles.layout,
                 &[
                     (0, uniform.as_entire_binding()),
                     (1, self.counts.as_entire_binding()),
@@ -189,7 +190,11 @@ impl ViewState {
         let gathered = storage(device, "sorted tile counts", u64::from(n) * 4);
         let visible = CountSlot::Visible;
         let scratch = Scratch {
-            projected: storage(device, "projected splats", u64::from(n.max(1)) * 40),
+            projected: storage(
+                device,
+                "projected primitives",
+                u64::from(n.max(1)) * scene.projected_bytes(),
+            ),
             depth_sort: RadixSort::new(
                 device,
                 kernels,
@@ -215,39 +220,31 @@ impl ViewState {
             bits: 1,
             counts,
         };
+        let stages = kernels.stages(scene);
         let frames = std::array::from_fn(|_| {
             let uniform = uniform(device, &[0; size_of::<Uniforms>() / 4]);
-            let projection = ProjectionGroups {
-                forward: bind(
-                    device,
-                    &kernels.project_forward.layout,
-                    &[
-                        (0, uniform.as_entire_binding()),
-                        (1, scene.transforms.as_entire_binding()),
-                        (2, scene.opacity.as_entire_binding()),
-                        (3, scene.min_scale.as_entire_binding()),
-                        (4, ids.as_entire_binding()),
+            let projection = |kernel: &crate::gpu::Kernel, visible: bool| {
+                let mut bindings = scene.bindings(visible);
+                bindings.extend([
+                    (0, uniform.as_entire_binding()),
+                    (4, ids.as_entire_binding()),
+                    (6, scratch.counts.as_entire_binding()),
+                ]);
+                if visible {
+                    bindings.push((8, scratch.projected.as_entire_binding()));
+                } else {
+                    bindings.extend([
                         (5, depths.as_entire_binding()),
-                        (6, scratch.counts.as_entire_binding()),
                         (7, hits.as_entire_binding()),
-                    ],
-                ),
-                visible: bind(
-                    device,
-                    &kernels.project_visible.layout,
-                    &[
-                        (0, uniform.as_entire_binding()),
-                        (1, scene.transforms.as_entire_binding()),
-                        (2, scene.opacity.as_entire_binding()),
-                        (3, scene.min_scale.as_entire_binding()),
-                        (4, ids.as_entire_binding()),
-                        (6, scratch.counts.as_entire_binding()),
-                        (8, scratch.projected.as_entire_binding()),
-                        (9, scene.sh.as_entire_binding()),
-                    ],
-                ),
+                    ]);
+                }
+                bind(device, &kernel.layout, &bindings)
             };
-            let mapping = scratch.mapping(device, kernels, &uniform);
+            let projection = ProjectionGroups {
+                forward: projection(&stages.forward, false),
+                visible: projection(&stages.visible, true),
+            };
+            let mapping = scratch.mapping(device, kernels, scene, &uniform);
             FrameSlot {
                 uniform,
                 projection,
@@ -326,7 +323,7 @@ impl ViewState {
             return Ok(());
         }
         for frame in &mut self.frames {
-            frame.mapping = scratch.mapping(&self.device, kernels, &frame.uniform);
+            frame.mapping = scratch.mapping(&self.device, kernels, &self.scene, &frame.uniform);
             frame.raster = None;
         }
         Ok(())

@@ -2,6 +2,7 @@
 pub mod camera;
 pub mod camera_files;
 pub mod engines;
+pub mod hexel_ply;
 mod metrics;
 mod provenance;
 mod renderer;
@@ -13,7 +14,9 @@ pub use metrics::{
     mean, pair_directories,
 };
 pub use provenance::Provenance;
-pub use renderer::{Output, PlyScene, StandaloneRenderer, parity_image, raw_splats};
+pub use renderer::{
+    Output, PlyScene, Primitives, StandaloneRenderer, Surface, parity_image, raw_splats,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[error("unsupported: {0}")]

@@ -3,7 +3,8 @@ use super::{INTERSECTIONS, PendingFrame, VISIBLE, ViewState};
 use crate::gpu::{self, bind};
 use crate::kernels::{Kernels, TILE_WIDTH, WG};
 use crate::primitives::dispatch::dispatch_direct;
-use crate::{Camera, Error, RenderMode, RenderOptions, Scene, Target};
+use crate::scene::Inputs;
+use crate::{Camera, CameraModel, Error, RenderMode, RenderOptions, Scene, Target};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -48,7 +49,8 @@ pub(super) struct Uniforms {
     options: RenderFlags,
     coefficients: [f32; 8],
     lens: LensInfo,
-    padding: [u32; 4],
+    /// Camera-to-world rotation (xyzw) for world-space hexel normals.
+    camera_rotation: [f32; 4],
 }
 
 #[repr(C)]
@@ -83,17 +85,32 @@ impl Uniforms {
                 tiles_x: tiles.x,
                 tiles_y: tiles.y,
             },
-            scene: SceneInfo {
-                splats: scene.n,
-                sh_degree: scene.degree,
-                coefficients: (scene.degree + 1).pow(2),
-                padding: 0,
+            scene: match scene.inputs {
+                Inputs::Splats { degree, .. } => SceneInfo {
+                    splats: scene.n,
+                    sh_degree: degree,
+                    coefficients: (degree + 1).pow(2),
+                    padding: 0,
+                },
+                // Hexel shaders read the variant (1-3) and the per-hexel stride here.
+                Inputs::Hexels { variant, .. } => SceneInfo {
+                    splats: scene.n,
+                    sh_degree: variant as u32 + 1,
+                    coefficients: variant.stride() as u32,
+                    padding: 0,
+                },
             },
             background: options.background.extend(0.0).to_array(),
             options: RenderFlags {
                 log_scale_offset: options.splat_scale.ln(),
                 mip: u32::from(options.render_mode == RenderMode::Mip),
-                has_min_scale: u32::from(scene.has_min_scale),
+                has_min_scale: u32::from(matches!(
+                    scene.inputs,
+                    Inputs::Splats {
+                        has_min_scale: true,
+                        ..
+                    }
+                )),
                 padding: 0,
             },
             coefficients,
@@ -105,7 +122,7 @@ impl Uniforms {
                 radial_limit,
                 padding3: [0.0; 2],
             },
-            padding: [0; 4],
+            camera_rotation: camera.rotation.to_array(),
         }
     }
 }
@@ -139,6 +156,11 @@ impl ViewState {
         target: Target,
     ) -> Result<(), Error> {
         let raster_kind = target.layout(camera.size)?;
+        if self.scene.hexels() && camera.model != CameraModel::Pinhole {
+            return Err(Error::Input("hexel scenes render with a pinhole camera"));
+        }
+        let stages = kernels.stages(&self.scene);
+        let raster = stages.raster(raster_kind)?;
         let tiles = self.prepare(queue, kernels, camera.size)?;
         let scratch = &self.scratch;
         let index = self
@@ -155,7 +177,6 @@ impl ViewState {
         let scene = &self.scene;
         let uniforms = Uniforms::new(camera, options, scene, tiles);
         queue.write_buffer(&frame.uniform, 0, bytemuck::bytes_of(&uniforms));
-        let raster = kernels.raster(raster_kind);
         frame.raster.take_if(|(cached, _)| cached != &target);
         let (_, raster_group) = frame.raster.get_or_insert_with(|| {
             let (_, ids) = scratch.intersections.sort.output(scratch.bits);
@@ -167,8 +188,17 @@ impl ViewState {
                 (7, scratch.counts.as_entire_binding()),
                 (raster_kind.binding(), target.resource()),
             ];
-            if let Target::TextureDepth { depth, .. } = &target {
-                bindings.push((8, wgpu::BindingResource::TextureView(depth)));
+            match &target {
+                Target::TextureDepth { depth, .. } => {
+                    bindings.push((8, wgpu::BindingResource::TextureView(depth)));
+                }
+                Target::Surface { depth, normal, .. } => {
+                    bindings.extend([
+                        (9, depth.as_entire_binding()),
+                        (10, normal.as_entire_binding()),
+                    ]);
+                }
+                _ => {}
             }
             let group = bind(&self.device, &raster.layout, &bindings);
             (target, group)
@@ -185,7 +215,7 @@ impl ViewState {
         encoder.clear_buffer(&scratch.counts, 0, None);
         dispatch_direct(
             encoder,
-            &kernels.project_forward,
+            &stages.forward,
             &frame.projection.forward,
             scene.n.div_ceil(WG),
             timestamps(Some(0), 1),
@@ -203,14 +233,14 @@ impl ViewState {
         self.dispatches.dispatch_indirect(
             encoder,
             VISIBLE,
-            &kernels.project_visible,
+            &stages.visible,
             &frame.projection.visible,
             timestamps(None, 5),
         );
         self.dispatches.dispatch_indirect(
             encoder,
             VISIBLE,
-            &kernels.map_tiles,
+            &stages.map_tiles,
             &frame.mapping.tiles,
             timestamps(None, 6),
         );

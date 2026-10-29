@@ -1,6 +1,6 @@
 //! Encode one GPU-driven forward path against shared scenes and independent views.
 use crate::kernels::Kernels;
-use crate::{Camera, Error, RenderOptions, Scene, Splats, Target, ViewState};
+use crate::{Camera, Error, HexelVariant, Hexels, RenderOptions, Scene, Splats, Target, ViewState};
 use std::sync::Arc;
 
 /// Device-lifetime pipelines. Scene uploads and per-view scratch have independent lifetimes.
@@ -26,7 +26,15 @@ impl Renderer {
 
     /// Reject oversized wire dimensions before converting the CPU data.
     pub fn check_capacity(&self, count: usize, sh_degree: u32) -> Result<(), Error> {
-        let required = Splats::gpu_bytes(count, sh_degree);
+        self.check_bytes(Splats::gpu_bytes(count, sh_degree))
+    }
+
+    /// Hexel parameters are one storage buffer of `stride` floats per hexel.
+    pub fn check_hexel_capacity(&self, count: usize, variant: HexelVariant) -> Result<(), Error> {
+        self.check_bytes(count as u64 * variant.stride() as u64 * 4)
+    }
+
+    fn check_bytes(&self, required: u64) -> Result<(), Error> {
         if required > self.limit {
             return Err(Error::Capacity {
                 required,
@@ -38,6 +46,15 @@ impl Renderer {
 
     pub fn upload(&self, splats: &Splats) -> Result<Arc<Scene>, Error> {
         Ok(Arc::new(Scene::upload(&self.device, splats, self.limit)?))
+    }
+
+    /// Hexel scenes share views, targets and feedback with splats; they need a pinhole camera.
+    pub fn upload_hexels(&self, hexels: &Hexels) -> Result<Arc<Scene>, Error> {
+        Ok(Arc::new(Scene::upload_hexels(
+            &self.device,
+            hexels,
+            self.limit,
+        )?))
     }
 
     pub fn create_view(

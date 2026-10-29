@@ -163,6 +163,8 @@ mod tests {
                 sh_coeffs: None,
                 raw_opacities: None,
             },
+            hexels: None,
+            image_size: None,
             mode: gsplat_core::RenderMode::Default,
             center: glam::Vec3::ZERO,
             extent: 1.0,

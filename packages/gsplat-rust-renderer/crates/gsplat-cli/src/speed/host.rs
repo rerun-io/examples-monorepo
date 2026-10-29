@@ -273,7 +273,7 @@ mod tests {
         }
         assert_eq!(admission_complete(10, 10, deadline), Some(false));
         assert_eq!(
-            admission_complete(0, 10, Instant::now() + Duration::from_secs(60)),
+            admission_complete(0, 10, Instant::now() + Duration::from_mins(1)),
             None
         );
     }

@@ -11,6 +11,14 @@ pub(crate) fn resolve(name: &'static str) -> String {
             "common.wgsl" => include_str!("../shader/common.wgsl"),
             "counts.wgsl" => include_str!("../shader/counts.wgsl"),
             "dispatch.wgsl" => include_str!("../shader/dispatch.wgsl"),
+            "hexel_common.wgsl" => include_str!("../shader/hexel_common.wgsl"),
+            "image_hexel.wgsl" => include_str!("../shader/image_hexel.wgsl"),
+            "image_map.wgsl" => include_str!("../shader/image_map.wgsl"),
+            "image_project.wgsl" => include_str!("../shader/image_project.wgsl"),
+            "image_raster.wgsl" => include_str!("../shader/image_raster.wgsl"),
+            "hexel_map.wgsl" => include_str!("../shader/hexel_map.wgsl"),
+            "hexel_project.wgsl" => include_str!("../shader/hexel_project.wgsl"),
+            "hexel_raster.wgsl" => include_str!("../shader/hexel_raster.wgsl"),
             "lens.wgsl" => include_str!("../shader/lens.wgsl"),
             "map.wgsl" => include_str!("../shader/map.wgsl"),
             "project.wgsl" => include_str!("../shader/project.wgsl"),
@@ -20,6 +28,7 @@ pub(crate) fn resolve(name: &'static str) -> String {
             "sort.wgsl" => include_str!("../shader/sort.wgsl"),
             "raster_common.wgsl" => include_str!("../shader/raster_common.wgsl"),
             "raster_outputs.wgsl" => include_str!("../shader/raster_outputs.wgsl"),
+            "rect_map.wgsl" => include_str!("../shader/rect_map.wgsl"),
             _ => panic!("unknown embedded shader import: {name}"),
         };
         for line in source.lines() {

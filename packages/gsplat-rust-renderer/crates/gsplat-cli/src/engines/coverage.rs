@@ -28,6 +28,8 @@ fn synthetic_scene(degree: u32) -> PlyScene {
             ),
             raw_opacities: Some((0..n).map(|i| i as f32 * 0.1).collect()),
         },
+        hexels: None,
+        image_size: None,
         mode: gsplat_core::RenderMode::Default,
         center: Vec3::new(0.0, 0.0, 2.0),
         extent: 1.0,
@@ -63,7 +65,7 @@ async fn compare(
     }
     let mut ours = Engine::Ours(Box::new(
         crate::StandaloneRenderer::new(
-            &raw,
+            crate::Primitives::Splats(&raw),
             gsplat_core::RenderOptions {
                 render_mode: scene.mode,
                 ..Default::default()

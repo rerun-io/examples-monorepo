@@ -14,6 +14,48 @@ pub struct Splats {
     pub min_scale: Option<Vec<f32>>,
 }
 
+/// Hexel appearance: spatial RGB (V1), plus a linear view term (V2) or SH degrees 1-3 (V3).
+/// `Image` hexels are 2D Image-GS-style fits in pixel space, blended top-10 and normalized.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HexelVariant {
+    #[default]
+    V1,
+    V2,
+    V3,
+    Image,
+}
+
+impl HexelVariant {
+    /// f32 values per hexel. 3D: centre, wxyz rotation, two scales, opacity, sharpness,
+    /// base colour and its u/v gradients (20), then 9 (V2) or 45 (V3) view coefficients.
+    /// Image: centre and scales in pixels, angle, sharpness, colour and its x/y gradients (15).
+    pub const fn stride(self) -> usize {
+        match self {
+            Self::V1 => 20,
+            Self::V2 => 29,
+            Self::V3 => 65,
+            Self::Image => 15,
+        }
+    }
+}
+
+/// Activated planar hexagons (honeycomb-surfels/hexels), `variant.stride()` floats per hexel.
+#[derive(Clone, Debug, Default)]
+pub struct Hexels {
+    pub variant: HexelVariant,
+    pub params: Vec<f32>,
+}
+
+impl Hexels {
+    pub fn len(&self) -> usize {
+        self.params.len() / self.variant.stride()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+}
+
 /// Camera pose is camera-to-world. Principal point is normalized by image size.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
