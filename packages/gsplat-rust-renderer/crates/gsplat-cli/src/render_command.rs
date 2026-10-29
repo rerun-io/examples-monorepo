@@ -92,17 +92,21 @@ fn image_frame(ply: &Path, size: glam::UVec2) -> CameraFrame {
     }
 }
 
-/// One view of the surface recording; depth images are in camera z units (`meter = 1`).
+/// One view of the surface recording; `image` is the view's float RGBA render, and depth images
+/// are in camera z units (`meter = 1`).
 fn log_surface(
     recording: &rerun::RecordingStream,
     renderer: &StandaloneRenderer,
+    image: &image::DynamicImage,
     index: usize,
     frame: &CameraFrame,
     name: &str,
 ) -> Result<()> {
     let camera = &frame.camera;
     let resolution = [camera.width, camera.height];
-    let rgba = renderer.read_rgba()?;
+    let rgba = image
+        .as_rgba32f()
+        .context("surface views read a float RGBA render")?;
     let surface = renderer.read_surface()?;
     recording.set_time_sequence("view", i64::try_from(index)?);
     let pose = camera.pose();
@@ -122,17 +126,7 @@ fn log_surface(
         ])
         .with_resolution([camera.width as f32, camera.height as f32]),
     )?;
-    let rgb: Vec<u8> = rgba
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|p| {
-            p[..3]
-                .iter()
-                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
-        })
-        .collect();
-    let alpha: Vec<f32> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+    let alpha: Vec<f32> = rgba.pixels().map(|p| p[3]).collect();
     let depth = |i: usize| -> Vec<f32> { surface.depth.iter().map(|d| d[i]).collect() };
     let normal: Vec<f32> = surface
         .normal
@@ -153,7 +147,10 @@ fn log_surface(
         )
         .with_meter(1.0)
     };
-    recording.log(entity("rgb"), &rerun::Image::from_rgb24(rgb, resolution))?;
+    recording.log(
+        entity("rgb"),
+        &rerun::Image::from_rgb24(image.to_rgb8().into_raw(), resolution),
+    )?;
     recording.log(entity("median_depth"), &depth_image(&depth(1)))?;
     recording.log(entity("expected_depth"), &depth_image(&depth(0)))?;
     recording.log(
@@ -278,12 +275,10 @@ fn frame_output(root: &Path, frame: &CameraFrame) -> Result<PathBuf> {
     Ok(root.join(&frame.file_path).with_extension("png"))
 }
 
-fn save(renderer: &StandaloneRenderer, size: glam::UVec2, path: &Path, png16: bool) -> Result<()> {
-    let pixels = renderer.read_rgba()?;
+fn save(image: &image::DynamicImage, path: &Path, png16: bool) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let image = gsplat_cli::parity_image(pixels, size.x, size.y)?;
     if png16 {
         image.to_rgb16().save(path)?;
     } else {
@@ -361,9 +356,10 @@ pub(crate) async fn run(args: Args) -> Result<()> {
             Output::Float
         };
         renderer.render(&frame.camera, output)?;
-        save(&renderer, size, path, args.png16)?;
+        let image = gsplat_cli::parity_image(renderer.read_rgba()?, size.x, size.y)?;
+        save(&image, path, args.png16)?;
         if let Some(recording) = &recording {
-            log_surface(recording, &renderer, *index, frame, &surface_name)?;
+            log_surface(recording, &renderer, &image, *index, frame, &surface_name)?;
         }
         if (done + 1) % 25 == 0 || done + 1 == selected.len() {
             eprintln!("Rendered {}/{} test frames", done + 1, selected.len());
