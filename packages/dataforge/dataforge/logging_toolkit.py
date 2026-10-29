@@ -13,7 +13,7 @@ encodes an image sequence and then logs it has one import to make.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -29,7 +29,7 @@ from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.rerun_log_utils import log_pinhole
 from simplecv.rig import CameraKind, PeerSensorKind
 
-from dataforge import schema
+from dataforge import schema, writing
 from dataforge.video_encoding import (
     RAW_PIXEL_FORMATS as RAW_PIXEL_FORMATS,
 )
@@ -180,8 +180,11 @@ def log_video_stream(
     shift_ns: int = 0,
     times_ns: Int64[ndarray, "n_samples"] | None = None,
     frame_indices: Int64[ndarray, "n"] | None = None,
+    optimize_gops: bool = False,
 ) -> int:
     """Remux one mp4 as a ``VideoStream``, optionally retimed, and count its samples.
+
+    ``optimize_gops`` packs complete GoPs near 2 MiB using bounded optimizer windows.
 
     Five invariants ride along, in the order they bite:
 
@@ -303,7 +306,15 @@ def log_video_stream(
         timeline_name=schema.TIMELINE,
         transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True, ffmpeg_override=ffmpeg_override),
     )
-    recording.send_chunks(reader.stream().flat_map(tap))  # invariant 2
+    stream = reader.stream().flat_map(tap)
+    if optimize_gops:
+        # Mp4Reader already emits complete GoPs and exact keyframe indexes. Compact
+        # these chunks without deriving a second set of keyframe rows.
+        batcher = writing.ChunkBatcher(profile=replace(rrc.OptimizationProfile.OBJECT_STORE, gop_batching=False))
+        recording.send_chunks(stream.flat_map(batcher))
+        recording.send_chunks(batcher.flush())
+    else:
+        recording.send_chunks(stream)  # invariant 2
     if times_ns is not None and sample_count != times_ns.size:
         raise ValueError(f"{video_path.name} holds {sample_count} samples but {times_ns.size} timestamps were given")
     return sample_count

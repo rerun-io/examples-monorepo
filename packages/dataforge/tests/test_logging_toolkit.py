@@ -459,3 +459,19 @@ def test_video_has_source_frame_index_and_duration(tmp_path: Path, clip: Path) -
         if schema.TIMELINE in chunk.timeline_names:
             assert chunk.to_record_batch().schema.field(schema.FRAME_INDEX).type == pa.int64()
             assert chunk.to_record_batch().schema.field(schema.TIMELINE).type == pa.duration("ns")
+
+
+@pytest.mark.integration
+def test_video_compacts_complete_gops_without_changing_samples_or_keyframes(tmp_path: Path, clip: Path) -> None:
+    source = list(rr.experimental.Mp4Reader(clip, mode="stream", entity_path=ENTITY, timeline_name=schema.TIMELINE).stream())
+    target = tmp_path / "compact-gops.rrd"
+    with rr.RecordingStream("test", recording_id="compact", send_properties=False) as recording:
+        recording.save(target)
+        log_video_stream(recording, clip, ENTITY, optimize_gops=True)
+    actual = list(rrc.RrdReader(target).stream())
+    samples = [c for c in actual if VIDEO_SAMPLE_COMPONENT in c.to_record_batch().schema.names]
+    assert len(samples) == 1
+    for component in (VIDEO_SAMPLE_COMPONENT, VIDEO_KEYFRAME_COMPONENT):
+        expected = [(t, v) for c in source if component in c.to_record_batch().schema.names for t, v in zip(c.to_record_batch().column(schema.TIMELINE).cast(pa.int64()).to_pylist(), c.to_record_batch().column(component).to_pylist(), strict=True)]
+        observed = [(t, v) for c in actual if component in c.to_record_batch().schema.names for t, v in zip(c.to_record_batch().column(schema.TIMELINE).cast(pa.int64()).to_pylist(), c.to_record_batch().column(component).to_pylist(), strict=True)]
+        assert observed == expected

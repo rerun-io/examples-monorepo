@@ -82,6 +82,8 @@ class Assembly101Dataset(DataforgeDataset[Assembly101Config, Assembly101Source])
 
     layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.ACTIONS_LAYER)
 
+    optimized_layers = (paths.HAND_POSE_LAYER,)
+
     def __init__(self, config: Assembly101Config) -> None:
         super().__init__(config)
         self.actions: dict[str, Actions] | None = None

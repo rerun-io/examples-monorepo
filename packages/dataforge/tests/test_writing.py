@@ -192,3 +192,15 @@ def test_save_table_blueprint_shows_the_declared_fields_and_hides_every_other_co
         assert column(layout, "rerun_segment_id") == (None, None), "system columns keep the viewer default"
     assert logged[("/table/layouts/cards", "field_order")] == [SEGMENT_LINK_COLUMN, action.column]
     assert logged[("/table/layouts/table", "column_order")] == [SEGMENT_LINK_COLUMN, action.column, coverage.column]
+
+
+def test_optimized_recording_compacts_columns_and_preserves_rows(tmp_path: Path) -> None:
+    target = tmp_path / "compact.rrd"
+    with atomic_recording(target, recording_id="compact", send_properties=False, optimize=True) as recording:
+        for frame in range(40):
+            recording.send_columns("/pose", indexes=[rr.TimeColumn("frame", sequence=[frame])], columns=rr.Scalars.columns(scalars=[float(frame)]))
+    chunks = [c for c in rrc.RrdReader(target).stream() if not c.is_static]
+    assert len(chunks) == 1
+    batch = chunks[0].to_record_batch()
+    assert batch.column("frame").to_pylist() == list(range(40))
+    assert batch.column("Scalars:scalars").to_pylist() == [[float(i)] for i in range(40)]

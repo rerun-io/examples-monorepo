@@ -12,12 +12,13 @@ import os
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from rerun import bindings
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from rerun.recording_stream import RecordingStream
@@ -201,6 +202,7 @@ def atomic_recording(
     recording_id: str,
     default_blueprint: rrb.Blueprint | None = None,
     send_properties: bool = True,
+    optimize: bool = False,
 ) -> Iterator[rr.RecordingStream]:
     """Yield a recording saved to a temp file that replaces ``target`` on success.
 
@@ -218,20 +220,26 @@ def atomic_recording(
             ``send_property``/``send_recording_name`` calls still land either way
             (verified on rerun 0.37.0), so a layer's own property group is
             unaffected.
+        optimize: Compact column batches for object-store publication. Only use on layers
+            whose full payload fits in memory; mesh layers keep their lazy-loading boundaries.
     """
     # The recording stream is the inner context on purpose: it flushes and closes
     # before atomic_write reaches its os.replace.
-    with (
-        atomic_write(target) as temp_path,
-        recording_to(
+    with atomic_write(target) as temp_path:
+        with recording_to(
             temp_path,
             application_id=application_id,
             recording_id=recording_id,
             default_blueprint=default_blueprint,
             send_properties=send_properties,
-        ) as recording,
-    ):
-        yield recording
+        ) as recording:
+            yield recording
+        if optimize:
+            # Work on the unpublished artifact; a failed optimization must leave the old target intact.
+            with atomic_write(temp_path) as optimized:
+                rrc.RrdReader(temp_path).stream().collect(optimize=rrc.OptimizationProfile.OBJECT_STORE).write_rrd(
+                    optimized, application_id=application_id, recording_id=recording_id,
+                )
 
 
 def select_segments(entry: DatasetEntry, requested: Sequence[str]) -> list[str]:
@@ -305,3 +313,41 @@ def send_capture_properties(
         rr.AnyValues(schema=schema.DATAFORGE_SCHEMA_VERSION, num_frames=num_frames, num_cameras=num_cameras, **present),
     )
     recording.send_property("convert", rr.AnyValues(version=CONVERT_SCHEMA_VERSION))
+
+
+@dataclass(slots=True)
+class ChunkBatcher:
+    """A bounded object-store optimizer used as a native stream's flat-map callback.
+
+    Consume ``stream.flat_map(batcher)`` with a native terminal, then send ``flush()``.
+    Do not iterate a pipeline with Python callbacks from an iterable send_chunks sink:
+    its iterator can block those callbacks from acquiring the GIL in Rerun 0.38.1.
+    """
+
+    static_chunks: Sequence[rrc.Chunk] = ()
+    """Codec context needed for native keyframe derivation; callers log it once."""
+    max_chunks: int = 64
+    """Maximum reader outputs retained in one optimizer window."""
+    profile: rrc.OptimizationProfile = rrc.OptimizationProfile.OBJECT_STORE
+    """Disable GoP rebatching when the reader already supplies complete GoPs and keyframe indexes."""
+    _pending: list[rrc.Chunk] = field(default_factory=list, init=False)
+    """Reader outputs waiting for the next bounded flush."""
+
+    def __post_init__(self) -> None:
+        if self.max_chunks < 1:
+            raise ValueError("max_chunks must be positive")
+
+    def __call__(self, chunk: rrc.Chunk) -> list[rrc.Chunk]:
+        self._pending.append(chunk)
+        return self.flush() if len(self._pending) >= self.max_chunks else []
+
+    def flush(self) -> list[rrc.Chunk]:
+        """Optimize the pending window, including the final partial window."""
+        if not self._pending:
+            return []
+        window, self._pending = self._pending, []
+        optimized = rrc.LazyChunkStream.from_iter([*self.static_chunks, *window]).collect(optimize=self.profile)
+        output = optimized.stream()
+        if self.static_chunks:
+            output = output.drop(is_static=True)
+        return output.to_chunks()

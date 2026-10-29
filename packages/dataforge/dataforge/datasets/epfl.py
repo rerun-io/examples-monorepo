@@ -99,6 +99,8 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
         paths.ACTIONS_LAYER,
     )
 
+    optimized_layers = (paths.HAND_POSE_LAYER, paths.BODY_POSE_LAYER)
+
     def remote_sequences(self) -> list[RemoteSequence]:
         """One entry per session the pinned mirror ships complete; one Hub listing call, nothing downloaded."""
         sessions = complete_sessions(hf_list_files(SOURCE_REPO, SOURCE_REVISION))
