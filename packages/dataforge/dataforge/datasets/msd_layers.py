@@ -423,7 +423,7 @@ def write_base_layer(
                 distortion_valid_radius=camera.calibration.distortion_valid_radius,
                 image_rotation_cw_deg=(DEGREES_PER_QUARTER_TURN * camera.quarter_turns_cw if camera.quarter_turns_cw else None),
             )
-            log_video_stream(recording, camera.clip, schema.video_path(RIG, index), times_ns=camera.times_ns, optimize_gops=True)
+            log_video_stream(recording, camera.clip, schema.video_path(RIG, index), times_ns=camera.times_ns)
         log_imu(recording, RIG, IMU, gyro=streams.gyro, accel=streams.accel, name="imu0")
         if streams.magnetometer is not None:
             log_magnetometer(recording, RIG, MAG, field=streams.magnetometer, name="mag0")

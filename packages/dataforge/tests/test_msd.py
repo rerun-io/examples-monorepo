@@ -629,3 +629,75 @@ def test_cameras_read_independent_archives_at_the_same_time(
     identity, source = dataset.discover()[0]
     assert dataset.convert(identity, source, force=False).is_file()
     assert len({id(reader.archive) for reader in readers}) == MSD_DEVICES[device].num_cameras
+
+
+@pytest.mark.parametrize("occupied, expected", [(2, True), (8, False)])
+def test_prefetch_respects_raw_budget_and_pending_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, occupied: int, expected: bool
+) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "output"))
+    root: Path = tmp_path / "raw"
+    root.mkdir()
+    (root / "current.zip").write_bytes(b"x" * occupied)
+    dataset: MsdDataset = MsdDataset(MsdConfig(root=root, raw_budget_gb=10e-9))
+    identity: SequenceIdentity = SequenceIdentity("msd-index", ("collection", "next"))
+    source: MsdSource = MsdSource("collection", "next", ("next.zip",), 4)
+    current: MsdSource = MsdSource("collection", "current", ("current.zip",), occupied)
+    fetched: list[str] = []
+    monkeypatch.setattr("dataforge.datasets.msd.transports.hf_fetch", lambda *_args, **kwargs: fetched.extend(kwargs["allow_patterns"]))
+    dataset.prefetch_next(identity, source, current_source=current, force=False)
+    assert bool(fetched) is expected
+    fetched.clear()
+    target: Path = dataset.targets(identity)[paths.BASE_LAYER]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"base")
+    dataset.prefetch_next(identity, source, current_source=current, force=False)
+    assert fetched == []
+
+
+def test_prefetch_reserves_current_archives_before_they_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "output"))
+    dataset: MsdDataset = MsdDataset(MsdConfig(root=tmp_path / "raw", raw_budget_gb=10e-9))
+    identity: SequenceIdentity = SequenceIdentity("msd-index", ("collection", "next"))
+    source: MsdSource = MsdSource("collection", "next", ("next.zip",), 4)
+    current: MsdSource = MsdSource("collection", "current", ("current.zip",), 8)
+    fetched: list[str] = []
+    monkeypatch.setattr("dataforge.datasets.msd.transports.hf_fetch", lambda *_args, **kwargs: fetched.extend(kwargs["allow_patterns"]))
+    dataset.prefetch_next(identity, source, current_source=current, force=False)
+    assert fetched == []
+
+
+def test_convert_reuses_prefetched_archives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextlib import nullcontext
+
+    from dataforge.datasets import msd
+
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "output"))
+    root: Path = tmp_path / "raw"
+    dataset: MsdDataset = MsdDataset(MsdConfig(root=root))
+    identity: SequenceIdentity = SequenceIdentity("msd-index", ("collection", "next"))
+    source: MsdSource = MsdSource("collection", "next", ("next.zip",), 4)
+    fetched: list[str] = []
+
+    def fetch(*_args: str, **kwargs: str | Path | list[str]) -> Path:
+        fetched.append("next.zip")
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "next.zip").write_bytes(b"data")
+        return root
+
+    def read(*_args: str, **kwargs: str) -> None:
+        raise RuntimeError("synthetic reader reached")
+
+    monkeypatch.setattr(msd.transports, "hf_fetch", fetch)
+    monkeypatch.setattr(msd, "require_av1_nvenc", lambda _: None)
+    monkeypatch.setattr(msd, "resolve_ffmpeg", lambda: Path("ffmpeg"))
+    monkeypatch.setattr(MsdDataset, "calibration", lambda self: ())
+    monkeypatch.setattr(MsdDataset, "warn_on_follow_frame", lambda *_args: None)
+    monkeypatch.setattr(msd, "open_member_reader", lambda *_args: nullcontext(None))
+    monkeypatch.setattr(msd, "read_sequence", read)
+    dataset.prefetch_next(identity, source, current_source=MsdSource("collection", "current", (), 0), force=False)
+    with pytest.raises(RuntimeError, match="synthetic reader reached"):
+        dataset.convert(identity, source, force=False)
+    assert fetched == ["next.zip"]
+    assert (root / "next.zip").read_bytes() == b"data"
+    assert "fetch" in dataset.timer.stage_s

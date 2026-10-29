@@ -1420,6 +1420,71 @@ def test_a_sequence_with_control_points_but_no_pgt_still_gets_a_gt_layer(
     assert gt["world_up"] == "+z", "the world is still the published one; only the measurement is missing"
 
 
+def test_prefetch_fetches_only_pending_base_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "output"))
+    root: Path = downloaded_root(tmp_path, manifest=manifest_fixture(), complete=("R_01_easy",))
+    dataset: LamariaDataset = LamariaDataset(LamariaConfig(root=root, sequences=("R_01_easy",)))
+    identity, source = dataset.discover()[0]
+    fetched: list[Path] = []
+
+    def fetch(url: str, *, dest: Path) -> Path:
+        fetched.append(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"vrs")
+        return dest
+
+    monkeypatch.setattr("dataforge.datasets.lamaria.transports.http_fetch", fetch)
+    dataset.prefetch(identity, source, force=False)
+    assert fetched == [source.vrs_path]
+    dataset.prefetch(identity, source, force=False)
+    assert fetched == [source.vrs_path]
+    source.vrs_path.unlink()
+    target: Path = dataset.targets(identity)[paths.BASE_LAYER]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"base")
+    dataset.prefetch(identity, source, force=False)
+    assert fetched == [source.vrs_path]
+
+
+@pytest.mark.parametrize("keep_raw", [False, True])
+def test_convert_reuses_prefetch_and_only_prunes_its_own_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_raw: bool,
+) -> None:
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "output"))
+    root: Path = downloaded_root(tmp_path, manifest=manifest_fixture(), complete=("R_01_easy", "R_11_5cp"))
+    dataset: LamariaDataset = LamariaDataset(LamariaConfig(root=root, sequences=("R_01_easy", "R_11_5cp"), keep_raw=keep_raw))
+    discovered: list[tuple[SequenceIdentity, LamariaSource]] = dataset.discover()
+    identity, original = discovered[0]
+    source: LamariaSource = replace(original, pseudo_gt_path=None, control_points_path=None)
+    next_identity, next_source = discovered[1]
+    fetched: list[Path] = []
+
+    def fetch(url: str, *, dest: Path) -> Path:
+        fetched.append(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"vrs")
+        return dest
+
+    def write(
+        self: LamariaDataset, identity: SequenceIdentity, source: LamariaSource, *, work_dir: Path, target: Path,
+    ) -> lamaria.RecordingSummary:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"base")
+        return lamaria.RecordingSummary()
+
+    monkeypatch.setattr(lamaria.transports, "http_fetch", fetch)
+    monkeypatch.setattr(lamaria, "require_av1_nvenc", lambda _: None)
+    monkeypatch.setattr(lamaria, "resolve_ffmpeg", lambda: Path("ffmpeg"))
+    monkeypatch.setattr(LamariaDataset, "write_recording", write)
+    dataset.prefetch(identity, source, force=False)
+    dataset.prefetch(next_identity, next_source, force=False)
+    dataset.convert(identity, source, force=False)
+    assert fetched == [source.vrs_path, next_source.vrs_path]
+    assert source.vrs_path.is_file() is keep_raw
+    assert next_source.vrs_path.is_file()
+    assert "fetch" in dataset.timer.stage_s
+
+
 @pytest.mark.integration
 def test_card_fields_name_properties_the_layers_write(converted_easy: ConvertedSequence) -> None:
     """``table_fields()`` names columns by string, so a renamed property would strand a card field silently."""

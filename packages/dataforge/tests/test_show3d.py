@@ -517,6 +517,8 @@ def test_test_split_converts_only_base_and_captions(tmp_path: Path, tiny_scene: 
             stream = output.add_stream(
                 "libaom-av1", rate=60, width=256, height=160, pix_fmt="yuv420p", options={"cpu-used": "8", "lag-in-frames": "0"}
             )
+            # PyAV 17's stubs type add_stream(<codec name>) as any stream kind; both 17 and 18 narrow on this.
+            assert isinstance(stream, av.video.stream.VideoStream)
             count = 0
             for frame in original.decode(video=0):
                 frame.pts = count

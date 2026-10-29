@@ -67,9 +67,17 @@ def file_stamps(targets: dict[str, Path]) -> dict[str, tuple[int, int]]:
     return stamps
 
 
+def prefetch_one(
+    dataset: DataforgeDataset, identity: SequenceIdentity, source: object, *, current_source: object, force: bool, timer: SequenceTimer,
+) -> None:
+    """Measure background fetch on its own clock, including failures."""
+    with timer.stage("prefetch"):
+        dataset.prefetch_next(identity, source, current_source=current_source, force=force)
+
+
 def convert_one(
     dataset: DataforgeDataset, identity: SequenceIdentity, source: object, *, force: bool, version: str,
-    prefetched: Future[None] | None = None,
+    prefetched: Future[None] | None = None, prefetch_timer: SequenceTimer | None = None,
 ) -> ConvertRecord:
     """Convert one sequence and return its timing record, including an individual failure."""
     dataset.timer = SequenceTimer()
@@ -79,11 +87,12 @@ def convert_one(
     failure: str | None = None
     try:
         if prefetched is not None:
-            if not prefetched.done():
-                with timer.stage("fetch"):
+            try:
+                with timer.stage("prefetch_wait"):
                     prefetched.result()
-            else:
-                prefetched.result()
+            finally:
+                if prefetch_timer is not None:
+                    timer.add("prefetch", prefetch_timer.stage_s["prefetch"])
         target: Path = dataset.convert(identity, source, force=force)
         elapsed: float = timer.total_s
         if not target.is_file():
@@ -126,14 +135,19 @@ def main(config: Config) -> None:
     root: Path = paths.output_root()
     with ThreadPoolExecutor(max_workers=1) as executor:
         prefetched: Future[None] | None = None
+        prefetch_timer: SequenceTimer | None = None
         for index, (identity, source) in enumerate(selected):
+            upcoming_timer: SequenceTimer = SequenceTimer()
             upcoming: Future[None] | None = (
-                executor.submit(dataset.prefetch, *selected[index + 1], force=config.force) if index + 1 < len(selected) else None
+                executor.submit(
+                    prefetch_one, dataset, *selected[index + 1], current_source=source, force=config.force, timer=upcoming_timer,
+                ) if index + 1 < len(selected) else None
             )
             record: ConvertRecord = convert_one(
-                dataset, identity, source, force=config.force, version=source_version, prefetched=prefetched,
+                dataset, identity, source, force=config.force, version=source_version, prefetched=prefetched, prefetch_timer=prefetch_timer,
             )
             prefetched = upcoming
+            prefetch_timer = upcoming_timer
             append_record(root / "timing/convert.jsonl", record)
             if record.error is not None:
                 print(f"FAILED {identity.sequence_key}: {record.error}")

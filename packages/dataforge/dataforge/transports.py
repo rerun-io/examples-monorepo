@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, NamedTuple
 
+import httpx
 import requests
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFile
@@ -128,16 +129,30 @@ def require_commit_sha(revision: str) -> str:
 def hf_fetch_files(
     repo_id: str, paths: Sequence[str], *, local_dir: Path, revision: str, workers: int = 16, repo_type: HfRepoType = "dataset"
 ) -> Path:
-    """Fetch pinned paths concurrently; cancel pending work on the first failure."""
+    """Fetch pinned paths concurrently; cancel pending work on the first lasting failure.
+
+    A connection-level failure (``httpx.TransportError``: a stalled TLS handshake, a reset, a read timeout) is
+    retried with the shared backoff; an HTTP error status is not. One handshake timeout used to fail a whole
+    SHOW3D sequence on the DGX Spark.
+    """
     require_commit_sha(revision)
     if workers < 1:
         raise ValueError("workers must be positive")
     if not paths:
         return local_dir
+
+    def fetch(path: str) -> None:
+        for attempt in attempts_of(path, ATTEMPTS):
+            try:
+                hf_hub_download(repo_id, path, repo_type=repo_type, local_dir=str(local_dir), revision=revision)
+                return
+            except httpx.TransportError as error:
+                if attempt == ATTEMPTS:
+                    raise
+                print(f"  warning: attempt {attempt}/{ATTEMPTS} at {path}: {type(error).__name__}: {error}", file=sys.stderr)
+
     with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
-        futures: list[Future[str]] = [
-            executor.submit(hf_hub_download, repo_id, path, repo_type=repo_type, local_dir=str(local_dir), revision=revision) for path in paths
-        ]
+        futures: list[Future[None]] = [executor.submit(fetch, path) for path in paths]
         try:
             for future in as_completed(futures):
                 future.result()

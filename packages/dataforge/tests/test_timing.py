@@ -147,6 +147,10 @@ def test_one_scene_prefetch_overlaps_and_failure_is_recorded(tmp_path: Path, mon
         convert.main(convert.Config(dataset=RobocapConfig(), force=True))
     records = load_records(tmp_path / "timing/convert.jsonl", ConvertRecord)
     assert [r.error for r in records] == [None, "OSError: prefetch failed", None]
+    assert "prefetch" not in records[0].stage_s
+    for record in records[1:]:
+        assert record.stage_s["prefetch"] > 0.0
+        assert record.stage_s["prefetch_wait"] >= 0.0
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -187,7 +191,7 @@ def test_conversion_waits_for_prefetch_completion(tmp_path: Path, monkeypatch: p
         record = result.result(timeout=3)
     assert called.is_set() is not failed
     assert record.error == ("OSError: fetch failed" if failed else None)
-    assert "fetch" in record.stage_s
+    assert "prefetch_wait" in record.stage_s
 
 
 @pytest.mark.parametrize("failed", [False, True])

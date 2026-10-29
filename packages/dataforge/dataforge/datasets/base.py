@@ -192,6 +192,10 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         Must not touch self.timer, recordings, or print per-sequence progress.
         """
 
+    def prefetch_next(self, identity: SequenceIdentity, source: SourceT, *, current_source: SourceT, force: bool) -> None:
+        """Prefetch with the current source available for shared scratch budgets."""
+        self.prefetch(identity, source, force=force)
+
     @abstractmethod
     def convert(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> Path:
         """Write the base (and derived) layer rrds of one sequence; return the base path."""
