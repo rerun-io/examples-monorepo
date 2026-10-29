@@ -1,0 +1,77 @@
+"""One-session catalog GPU keypoints; local calibration owns the output."""
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from dataforge.timing import SequenceTimer
+from rerun.server import Server
+
+from selfcap_curate.apis import open_session
+from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, open_segment, read_time_sync
+from selfcap_curate.keypoints import Camera, read_anchors, read_cameras, triangulate_episode, write_keypoints
+from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models
+from selfcap_curate.records import EpisodeKey, TimeSync
+
+
+@dataclass
+class Config:
+    calib_dir: Path  # Read-only selfcap-calibrate files whose camera values own the output.
+    output_dir: Path  # New complete per-episode calibration files; local, existing targets refused.
+    rate: float  # Explicit common aligned sampling frequency in Hz.
+    segment_ids: tuple[str, ...] = ()  # Explicit segment ids or unprefixed episode keys of one session.
+    key_file: Path | None = None  # Optional newline-separated ids, combined with segment_ids.
+    catalog_url: str = CATALOG_URL  # Read-only catalog containing patched bases, videos, clocks and anchors.
+
+
+@dataclass(frozen=True, slots=True)
+class KeypointEpisode:
+    key: EpisodeKey
+    """Canonical episode and output names."""
+    segment: Segment
+    """Base segment and its discovered physical layout."""
+    sync: TimeSync
+    """Validated alignment record."""
+    cameras: dict[str, Camera]
+    """Calibrated phones with usable offsets."""
+
+
+def main(config: Config) -> None:
+    """Infer then triangulate, copying calib chunks unchanged; never register or swap."""
+    _, keys, dataset = open_session(
+        config.segment_ids,
+        config.key_file,
+        config.catalog_url,
+        output=config.output_dir,
+        protected=(config.calib_dir,),
+        source=config.calib_dir,
+        new_directory=False,
+        rate=config.rate,
+    )
+    processable: list[KeypointEpisode] = []
+    files = [config.calib_dir / key.rrd_name for key in keys]
+    with Server(host="127.0.0.1", port=0, datasets={DATASET_NAME: files}) as server:
+        calibration = server.client().get_dataset(DATASET_NAME)
+        for key in keys:
+            segment = open_segment(dataset, key.segment)
+            try:
+                cameras = read_cameras(calibration, segment.id, segment.layout.phones)
+            except ValueError as error:
+                print("KEYPOINTS_SKIP", key, str(error), flush=True)
+                continue
+            sync = read_time_sync(dataset, segment.id)
+            cameras = {p: c for p, c in cameras.items() if (sync.offsets_ms or {}).get("exo/" + p) is not None}
+            if len(cameras) < 2:
+                print("KEYPOINTS_SKIP", key, "fewer than two calibrated and synced phones", flush=True)
+            else:
+                processable.append(KeypointEpisode(key, segment, sync, cameras))
+    if not processable:
+        return
+    detector, pose = keypoint_models()
+    timer = SequenceTimer()
+    for episode in processable:
+        key = episode.key
+        with timer.stage(key.key):
+            detections = detect_keypoints(episode.segment, detector, pose, rate=config.rate, sync=episode.sync)
+            result = triangulate_episode(detections, episode.cameras, read_anchors(episode.segment, detections.times, episode.sync))
+            write_keypoints(config.calib_dir / key.rrd_name, config.output_dir / key.rrd_name, result)
+        print("KEYPOINTS_TIME", key, len(result.times), int((result.n_views >= 2).sum()), timer.stage_s[key.key], flush=True)

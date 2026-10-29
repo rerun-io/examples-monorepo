@@ -1584,6 +1584,10 @@ cmd = "python tools/apps/pool_oak_rotation.py"
 cwd = "packages/selfcap-curate"
 description = "Rebuild robust per-device OAK RGB/IMU rotations from session fits"
 
+[feature.selfcap-curate.tasks.selfcap-keypoints]
+cmd = "python tools/apps/keypoints.py"
+cwd = "packages/selfcap-curate"
+description = "Add catalog GPU RTMW keypoints to explicit session calibration files"
 
 [feature.selfcap-curate.tasks.selfcap-calibrate]
 cmd = "python tools/apps/calibrate.py"

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from rerun.chunk import RrdReader
 from rrd_fixtures import private_server
-from rrd_references import OakReference, reference_tables
+from rrd_references import KeypointReference, OakReference, reference_tables
 from scipy.spatial.transform import Rotation
 from serde import SerdeError, from_dict, serde
 from serde.json import from_json
@@ -19,6 +19,7 @@ from selfcap_curate.calib_layer import CalibSession, write_calib_layer
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment
 from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
 from selfcap_curate.factory import cy_shift_px, intrinsic_matrix, read_quest_block
+from selfcap_curate.keypoints import Keypoints2D, ViewDetections
 from selfcap_curate.patch_base import patch
 from selfcap_curate.quest_fit import read_session_episode
 from selfcap_curate.records import (
@@ -255,8 +256,35 @@ def oak_median_reference(syncs, served):
     return reference.oak_median_px
 
 
+def load_keypoint_reference(path: Path) -> KeypointReference:
+    """Read exact detector streams; rounded timelines are for display only."""
+    tables = reference_tables(path)
+    metadata = tables["/reference"]
+    phones = metadata["phones"][0].as_py()
+    cameras = metadata["cameras"][0].as_py()
+    times = np.asarray(tables["/reference/grid"]["time_s"].to_pylist(), dtype=np.float64).reshape(-1)
+    views, pts, video_times = {}, {}, {}
+    for phone, camera in zip(phones, cameras, strict=True):
+        parent = f"{camera}/pinhole/pred/rtmw_persons"
+        points, boxes = tables[f"{parent}/coco133_uv"], tables[f"{parent}/boxes"]
+        corners = np.asarray(boxes["xyxy"].to_pylist(), dtype=np.float64).reshape(len(times), -1, 4)
+        persons = corners.shape[1]
+        views[phone] = ViewDetections(
+            corners,
+            np.asarray(boxes["confidence"].to_pylist(), dtype=np.float64),
+            np.asarray(points["Points2D:positions"].to_pylist(), dtype=np.float64).reshape(len(times), persons, 133, 2),
+            np.asarray(points["confidence"].to_pylist(), dtype=np.float64).reshape(len(times), persons, 133),
+        )
+        pts[phone] = np.asarray(points["pts_s"].to_pylist(), dtype=np.float64).reshape(-1)
+        video_times[phone] = np.asarray(points["time_s"].to_pylist(), dtype=np.float64).reshape(-1)
+    return KeypointReference(
+        Keypoints2D(times, views, float(metadata["rate"][0].as_py()[0])), pts, video_times, int(metadata["schema_version"][0].as_py()[0])
+    )
 
 
+def load_keypoints2d(path: Path) -> Keypoints2D:
+    """Load the frozen multi-person detector fixture used by triangulation."""
+    return load_keypoint_reference(path).detections
 
 
 def frozen_state(record: dict, quest) -> CalibSession:
