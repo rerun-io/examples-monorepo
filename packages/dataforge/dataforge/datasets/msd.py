@@ -404,6 +404,47 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
             sidecar=paths.sidecar_path(output_root, identity, GT_SIDECAR_NAME),
         )
 
+    def prefetch(self, identity: SequenceIdentity, source: MsdSource, *, force: bool) -> None:
+        """Fetch pending base archives only when scratch space permits."""
+        self.prefetch_next(identity, source, current_source=None, force=force)
+
+    def prefetch_next(
+        self, identity: SequenceIdentity, source: MsdSource, *, current_source: MsdSource | None, force: bool,
+    ) -> None:
+        """Reserve both sequences' archives, including bytes not yet on disk."""
+        locations: SequencePaths = self.sequence_paths(identity, source)
+        if writing.should_skip(locations.target, force=force) or source.archive_bytes <= 0:
+            return
+        own: set[Path] = set(locations.archives)
+        current: set[Path] = set() if current_source is None else {self.config.root / name for name in current_source.archive_paths}
+        occupied: int = 0
+        current_bytes: int = 0
+        for directory, subdirectories, names in os.walk(self.config.root):
+            here: Path = Path(directory)
+            if here in (self.config.root / ".cache", self.config.root / "work"):
+                subdirectories.clear()
+                continue
+            for name in names:
+                path: Path = here / name
+                try:
+                    size: int = path.stat().st_size
+                except FileNotFoundError:  # The current conversion owns deletion.
+                    continue
+                if path in current:
+                    current_bytes += size
+                elif path not in own:
+                    occupied += size
+        reserved: int = max(current_bytes, 0 if current_source is None else current_source.archive_bytes)
+        if occupied + reserved + source.archive_bytes > int(self.config.raw_budget_gb * 1e9):
+            return
+        self.fetch_archives(source, locations.archives)
+
+    def fetch_archives(self, source: MsdSource, archives: Sequence[Path]) -> None:
+        """Reuse complete archives; the Hub still resumes incomplete volumes."""
+        if all(path.is_file() for path in archives) and sum(path.stat().st_size for path in archives) == source.archive_bytes:
+            return
+        transports.hf_fetch(REPO_ID, allow_patterns=list(source.archive_paths), local_dir=self.config.root, revision=self.config.revision)
+
     def enforce_raw_budget(self, source: MsdSource, archives: Sequence[Path]) -> None:
         """Refuse to fetch when ``root`` plus this sequence would breach the budget.
 
@@ -525,7 +566,8 @@ class MsdDataset(DataforgeDataset[MsdConfig, MsdSource]):
         on_disk: int = sum(1 for archive in locations.archives if archive.is_file())
         if on_disk:
             print(f"  {on_disk}/{len(locations.archives)} archive volume(s) already in {self.config.root}; the fetch only verifies them")
-        transports.hf_fetch(REPO_ID, allow_patterns=list(source.archive_paths), local_dir=self.config.root, revision=self.config.revision)
+        with self.timer.stage("fetch"):
+            self.fetch_archives(source, locations.archives)
 
         locations.work_dir.mkdir(parents=True, exist_ok=True)
         try:

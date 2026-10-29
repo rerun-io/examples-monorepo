@@ -128,7 +128,7 @@ def main(config: Config) -> None:
         prefetched: Future[None] | None = None
         for index, (identity, source) in enumerate(selected):
             upcoming: Future[None] | None = (
-                executor.submit(dataset.prefetch, *selected[index + 1], force=config.force) if index + 1 < len(selected) else None
+                executor.submit(dataset.prefetch_next, *selected[index + 1], current_source=source, force=config.force) if index + 1 < len(selected) else None
             )
             record: ConvertRecord = convert_one(
                 dataset, identity, source, force=config.force, version=source_version, prefetched=prefetched,
