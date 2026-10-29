@@ -9,8 +9,9 @@ pub const RENDERER: &str = "brush-render render_splats (wgpu), black background,
 
 /// Render every view at its training resolution and write `<dir>/<image stem>.png`.
 pub async fn write(splats: &Splats, views: &[SceneView], dir: &Path) -> anyhow::Result<()> {
+    let names = output_names(views.iter().map(|view| view.image.path()))?;
     std::fs::create_dir_all(dir)?;
-    for view in views {
+    for (view, name) in views.iter().zip(names) {
         // Loading applies Brush's resolution cap, so renders match what training saw.
         let target = view.image.load().await?;
         let (width, height) = (target.width(), target.height());
@@ -24,14 +25,29 @@ pub async fn write(splats: &Splats, views: &[SceneView], dir: &Path) -> anyhow::
         ))
         .await;
         let pixels = render.into_data_async().await?.try_into_vec::<f32>()?;
-        let name = view
-            .image
-            .path()
-            .file_stem()
-            .context("eval image has no file name")?;
-        rgb16(width, height, pixels)?.save(dir.join(format!("{}.png", name.to_string_lossy())))?;
+        rgb16(width, height, pixels)?.save(dir.join(name))?;
     }
     Ok(())
+}
+
+/// One `<image stem>.png` per view; two views with the same stem would overwrite each other.
+fn output_names<'a>(paths: impl IntoIterator<Item = &'a Path>) -> anyhow::Result<Vec<String>> {
+    let mut seen = std::collections::HashMap::new();
+    paths
+        .into_iter()
+        .map(|path| {
+            let stem = path.file_stem().context("eval image has no file name")?;
+            let name = format!("{}.png", stem.to_string_lossy());
+            if let Some(first) = seen.insert(name.clone(), path) {
+                anyhow::bail!(
+                    "eval images {} and {} would both write {name}",
+                    first.display(),
+                    path.display()
+                );
+            }
+            Ok(name)
+        })
+        .collect()
 }
 
 /// Drop alpha (the render is already composited on black), clamp to [0,1] and round to 16 bits.
@@ -65,5 +81,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(image.into_raw(), vec![32768, 0, 65535, 1, 0, 65535]);
+    }
+
+    #[test]
+    fn eval_views_sharing_a_file_stem_are_rejected_before_rendering() {
+        use std::path::Path;
+        let names =
+            super::output_names([Path::new("left/0001.jpg"), Path::new("left/0002.jpg")]).unwrap();
+        assert_eq!(names, ["0001.png", "0002.png"]);
+        let error = super::output_names([Path::new("left/0001.jpg"), Path::new("right/0001.jpg")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("left/0001.jpg") && error.contains("right/0001.jpg"),
+            "{error}"
+        );
     }
 }
