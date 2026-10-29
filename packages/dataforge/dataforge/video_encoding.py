@@ -300,6 +300,21 @@ def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     ]
 
 
+CUDA_FILTERS: dict[Path, bool] = {}
+CUDA_FILTER_LOCK = threading.Lock()
+
+
+def has_scale_cuda(binary: Path) -> bool:
+    """Whether this ffmpeg build can scale hardware frames; probe once across camera threads."""
+    with CUDA_FILTER_LOCK:
+        if binary not in CUDA_FILTERS:
+            result: subprocess.CompletedProcess[str] = subprocess.run(
+                [str(binary), "-hide_banner", "-filters"], capture_output=True, text=True, check=True
+            )
+            CUDA_FILTERS[binary] = any("scale_cuda" in line.split() for line in result.stdout.splitlines())
+        return CUDA_FILTERS[binary]
+
+
 def transcode_mp4(
     source: Path,
     output: Path,
@@ -321,8 +336,8 @@ def transcode_mp4(
     filter, for a stream whose real samples are padded to a higher frame rate.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
-    which for a gray source carry neutral chroma, converted to 4:2:0. size (width, height) rescales, on the GPU
-    under CUDA decode. Optional crop is (width, height, x, y), applied first, and always
+    which for a gray source carry neutral chroma, converted to 4:2:0. size (width, height) rescales on the GPU
+    when scale_cuda is available; builds without it use CPU decode directly. Optional crop is (width, height, x, y), applied first, and always
     uses CPU decode. Other NVDEC failures fall back to CPU; session failures retry the same
     command and never trigger that fallback.
     """
@@ -356,7 +371,7 @@ def transcode_mp4(
         ]
         return run_nvenc(lambda fd: subprocess.run(command, pass_fds=(fd,), capture_output=True, text=True, check=False))
 
-    cuda: bool = decode == "cuda" and crop is None
+    cuda: bool = decode == "cuda" and crop is None and has_scale_cuda(binary)
     result: subprocess.CompletedProcess[str] = run(cuda=cuda)
     if cuda and result.returncode and not nvenc_session_failure(result.stderr):
         tail: str = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no stderr"

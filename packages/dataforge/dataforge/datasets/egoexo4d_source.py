@@ -7,6 +7,7 @@ public docs (docs.ego-exo4d-data.org) and projectaria-tools' MPS readers.
 """
 
 import csv
+import functools
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import NamedTuple
 import av
 import numpy as np
 import pyarrow as pa
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde import coerce, serde
@@ -124,12 +125,37 @@ class Take:
         return f"{self.root_dir}/{relative_path}"
 
 
+@functools.cache
+def gray_luma_table() -> UInt8[ndarray, "256"]:
+    """Exact libswscale limited-range YUV420P to gray mapping, without a full-frame conversion."""
+    image: UInt8[ndarray, "3 256"] = np.full((3, 256), 128, dtype=np.uint8)
+    image[:2] = np.arange(256, dtype=np.uint8)
+    return av.VideoFrame.from_ndarray(image, format="yuv420p").to_ndarray(format="gray")[0].copy()
+
+
 def frame_peaks(path: Path, frames: int) -> Int64[ndarray, "n"]:
-    """Brightest luma of each of a video's first ``frames`` frames."""
+    """Brightest gray luma of each of a video's first ``frames`` frames.
+
+    The eye streams are 8-bit YUV420P: gray conversion is monotone in Y, so reduce
+    the strided Y planes first and convert the resulting peaks in one vector operation.
+    Other pixel formats retain PyAV's full conversion.
+    """
+    peaks: list[int] = []
+    native: list[int] = []
     with av.open(str(path)) as container:
         stream: av.video.stream.VideoStream = container.streams.video[0]
         stream.thread_type = "AUTO"
-        return np.array([frame.to_ndarray(format="gray").max() for frame in islice(container.decode(stream), frames)], dtype=np.int64)
+        for frame in islice(container.decode(stream), frames):
+            if frame.format.name == "yuv420p":
+                plane: av.video.plane.VideoPlane = frame.planes[0]
+                luma: UInt8[ndarray, "h w"] = np.frombuffer(plane, dtype=np.uint8).reshape(frame.height, plane.line_size)[:, : frame.width]
+                native.append(len(peaks))
+                peaks.append(int(luma.max()))
+            else:
+                peaks.append(int(frame.to_ndarray(format="gray").max()))
+    result: Int64[ndarray, "n"] = np.asarray(peaks, dtype=np.int64)
+    result[native] = gray_luma_table()[result[native]]
+    return result
 
 
 def sample_frames(peaks: Int64[ndarray, "n"], step: int, where: str) -> list[range]:

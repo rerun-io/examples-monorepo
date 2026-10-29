@@ -91,6 +91,9 @@ ignore_names = [
     "return_value",
     # PyAV decoder setting, read by the decoder.
     "thread_type",
+    "pix_fmt",
+    # Pytest invokes this autouse capability fixture.
+    "fixture_cuda_filter_available",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

@@ -11,6 +11,12 @@ import pytest
 from dataforge import video_encoding as video
 
 
+@pytest.fixture(name="cuda_filter_available", autouse=True)
+def fixture_cuda_filter_available(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("integration") is None:
+        monkeypatch.setattr(video, "has_scale_cuda", lambda binary: True)
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "bad", "1.5"])
 def test_invalid_slot_counts(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", value)
@@ -212,6 +218,9 @@ def test_cuda_gray_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monkeypatch: 
     import av
     import numpy as np
 
+    if not video.has_scale_cuda(nvenc_ffmpeg):
+        pytest.skip("ffmpeg lacks scale_cuda; the NVDEC path is unavailable")
+
     monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
     source = tmp_path / "source.mp4"
     subprocess.run(
@@ -355,6 +364,9 @@ def test_cuda_color_rescale_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monk
     import av
     import numpy as np
 
+    if not video.has_scale_cuda(nvenc_ffmpeg):
+        pytest.skip("ffmpeg lacks scale_cuda; the NVDEC path is unavailable")
+
     monkeypatch.setenv("DATAFORGE_FFMPEG", str(nvenc_ffmpeg))
     source = tmp_path / "source.mp4"
     subprocess.run(
@@ -377,3 +389,17 @@ def test_cuda_color_rescale_matches_cpu(tmp_path: Path, nvenc_ffmpeg: Path, monk
     assert decoded[0].shape == decoded[1].shape == (12, 1080, 1920, 3)
     mse = np.mean((decoded[0] - decoded[1]) ** 2)
     assert 10 * np.log10(255**2 / mse) >= 30.0
+
+
+def test_missing_cuda_filters_choose_cpu_without_fallback_noise(
+    ffmpeg_commands: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Builds without CUDA scaling skip NVDEC entirely, including for grayscale streams."""
+    monkeypatch.setattr(video, "has_scale_cuda", lambda binary: False)
+    for gray in (False, True):
+        video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=30, frames=4, gray=gray, size=(1920, 1080), decode="cuda")
+    assert len(ffmpeg_commands) == 2
+    for command in ffmpeg_commands:
+        assert "-hwaccel" not in command
+        assert "scale=1920:1080" in command[command.index("-vf") + 1]
+    assert "NVDEC path failed" not in capsys.readouterr().out
