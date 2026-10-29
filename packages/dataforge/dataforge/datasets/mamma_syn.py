@@ -355,9 +355,10 @@ def instance_mask_pngs(source: bytes, size: tuple[int, int], turns: int) -> dict
     """A palette PNG per person present in a sample's instance mask (pixel value = person index + 1), keyed by person index;
     the mask turned ``turns`` quarters clockwise first, as its video."""
     ids = np.rot90(decode_gray(source), k=-turns)  # decoded once for every person; no jaxtyping on thread-pool locals (see palette_png)
+    # Count uint8 IDs directly: bincount first widens every pixel to int64.
     return {
         int(value) - 1: palette_png(np.where(ids == value, np.uint8(255), np.uint8(0)), size, hands.PERSON_COLOURS[(int(value) - 1) % len(hands.PERSON_COLOURS)])
-        for value in np.unique(ids)
+        for value in np.flatnonzero(cv2.calcHist([ids], [0], None, [256], [0, 256]).reshape(-1)).astype(np.uint8)
         if value
     }
 
