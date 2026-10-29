@@ -14,9 +14,12 @@ from dataforge import schema
 from dataforge.datasets.selfcap import SelfcapConfig, build_episode_plan, episode_is_readable
 from dataforge.identity import SequenceIdentity
 from dataforge.schema import CAPTURE_TIMELINE
+from frozen_v2 import GOLDEN_REFS, load_oak_detections
 from rerun.chunk import RrdReader
 
-from selfcap_curate.catalog_io import DATASET_NAME
+from selfcap_curate.apis import calibrate as calibration_api
+from selfcap_curate.apis.calibrate import Config, main
+from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_phone_detections
 from selfcap_curate.records import read_frozen_sync, read_sync
 
 pytestmark = pytest.mark.golden
@@ -88,6 +91,24 @@ def test_align_reproduces_session_from_raw(tmp_path: Path, monkeypatch: pytest.M
         print("RAW_ALIGN_TIME", "session", "align", time.monotonic() - start, flush=True)
         assert completed.returncode == 0, completed.stdout[-6000:]
 
+        # The catalog layer is the phone stage boundary; OAK remains a test-only reference.
+        monkeypatch.setattr(calibration_api, "pose_models", lambda: (None, None))
+        monkeypatch.setattr(
+            calibration_api,
+            "detect_oak_hands_gpu",
+            lambda _dataset, sync, *_args: load_oak_detections(GOLDEN_REFS / "oak-sapiens2" / sync.episode_key.rrd_name),
+        )
+        monkeypatch.setattr(calibration_api, "detect_episode", lambda *_args, **_kwargs: pytest.fail("phone detections must be reused"))
+        with private_server({DATASET_NAME: [output / f"selfcap__{key}.rrd" for key in keys]}) as aligned_server:
+            dataset = aligned_server.client().get_dataset(DATASET_NAME)
+            dataset.register([p.resolve().as_uri() for p in sorted((output / "sapiens2").glob("*.rrd"))], layer_name="sapiens2").wait()
+            for key in keys:
+                saved = read_phone_detections(open_segment(dataset, f"selfcap__{key}"))
+                assert tuple(saved) == tuple(references[key].exo_fit)
+                assert all(len(value.times_s) > 0 for value in saved.values())
+            calibrated = main(Config(tmp_path / "calibrated", key_file=key_file, catalog_url=aligned_server.url()))
+        assert calibrated.session == "2025-12-30__65d00748"
+        assert calibrated.oak.ok and all(camera.ok for camera in calibrated.exo.phones.values())
     failures = []
     for key, reference in references.items():
         record = read_sync(output / f"selfcap__{key}.json")

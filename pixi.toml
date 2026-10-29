@@ -1579,10 +1579,28 @@ dataforge = { path = "packages/dataforge", editable = true }
 PACKAGE_DIR = "packages/selfcap-curate"
 PYREFLY_TARGET = "selfcap_curate"
 
+[feature.selfcap-curate.tasks.selfcap-pool-oak-rotation]
+cmd = "python tools/apps/pool_oak_rotation.py"
+cwd = "packages/selfcap-curate"
+description = "Rebuild robust per-device OAK RGB/IMU rotations from session fits"
 
 
+[feature.selfcap-curate.tasks.selfcap-calibrate]
+cmd = "python tools/apps/calibrate.py"
+cwd = "packages/selfcap-curate"
+description = "Solve one explicit session and write calibration-only layers and session JSON"
 
+[feature.selfcap-curate.tasks.selfcap-focal-profile]
+cmd = "python tools/apps/focal_profile.py"
+cwd = "packages/selfcap-curate"
+# The frozen profiles were made single-threaded; MKL/OpenCV thread counts change the curves.
+env = { OMP_NUM_THREADS = "1" }
+description = "Produce fixed-focal session cost profiles from catalog Quest tracks"
 
+[feature.selfcap-curate.tasks.selfcap-pool]
+cmd = "python tools/apps/pool.py"
+cwd = "packages/selfcap-curate"
+description = "Rebuild pooled device intrinsics from typed focal-profile results"
 
 [feature.selfcap-curate.tasks.selfcap-sync-curves]
 cmd = "python tools/apps/sync_curves.py"
