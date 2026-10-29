@@ -65,8 +65,7 @@ fn sharpness(id: u32) -> f32 {
     add_intersections(hit);
     let write = atomicAdd(&counts[0], 1u) & 0x7fffffffu;
     global_from_compact[write] = id;
-    let bits = bitcast<u32>(m.tw.z);
-    depths[write] = bits ^ 0x80000000u;
+    depths[write] = depth_key(m.tw.z);
 }
 
 // Upstream renderer.py adds the view term per primitive before rasterization:

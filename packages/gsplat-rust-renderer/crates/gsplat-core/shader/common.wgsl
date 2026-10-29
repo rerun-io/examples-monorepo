@@ -41,6 +41,12 @@ fn finite3(v: vec3f) -> bool {
     return finite(v.x) && finite(v.y) && finite(v.z);
 }
 
+// Float-flip preserves positive-depth order and orders negative depths numerically.
+fn depth_key(depth: f32) -> u32 {
+    let bits = bitcast<u32>(depth);
+    return bits ^ select(0x80000000u, 0xffffffffu, (bits >> 31u) != 0u);
+}
+
 fn sigma(p: vec2f, center: vec2f, conic: vec3f) -> f32 {
     let d = p - center;
     return 0.5 * (conic.x * d.x * d.x + conic.z * d.y * d.y) + conic.y * d.x * d.y;
