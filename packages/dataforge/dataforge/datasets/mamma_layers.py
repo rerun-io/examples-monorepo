@@ -1,4 +1,4 @@
-"""MAMMA layer writers: base (cameras and AV1 video), body_pose, body_mesh, projections, masks, markers, contacts and visibility.
+"""MAMMA layer writers: base (cameras and AV1 video), body_pose, body_mesh, projections, masks, markers, visibility.
 
 Every stream logs on ``video_time`` = frame / fps from the sequence's own rate, beside the release ``frame_index``.
 """

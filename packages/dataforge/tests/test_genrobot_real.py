@@ -15,7 +15,7 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.chunk as rrc
-from conftest import column_rows, raw_asset, read_back, recording_properties
+from conftest import column_rows, raw_asset, read_back, recording_properties, static_values
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 
@@ -109,15 +109,16 @@ def test_base_layer_holds_every_shipped_camera_frame_as_h264_video(barber_base: 
     counts: dict[str, int] = shipped_counts(sample(BARBER))
     for cam in range(NUM_CAMERAS):
         samples: pa.Table = column_rows(store, f"{schema.video_path(0, cam)}:VideoStream:sample")
-        skipped: int = static_row(store, schema.cam_path(0, cam))[f"{schema.cam_path(0, cam)}:skipped_leading_samples"][0]
+        skipped = static_values(store, schema.cam_path(0, cam))["skipped_leading_samples"]
+        assert isinstance(skipped, int)
         assert samples.num_rows == census.camera_frames[cam]
         assert samples.num_rows + skipped == counts[f"/robot0/sensor/camera{cam}/compressed"], "every shipped sample is written or counted as skipped"
         first: bytes = bytes(samples.column(1).to_pylist()[0][0])
         assert is_keyframe(first), "the video starts at a keyframe"
         sps: int = first.find(b"\x00\x00\x01\x67")
         assert sps >= 0 and first[sps + 5] & 0x10 == 0, "constraint_set3_flag is cleared"
-        codec: list = static_row(store, schema.video_path(0, cam))[f"{schema.video_path(0, cam)}:VideoStream:codec"]
-        assert codec == [rr.VideoCodec.H264.value]
+        codec = static_values(store, schema.video_path(0, cam))["codec"]
+        assert codec == rr.VideoCodec.H264.value
 
 
 def test_base_layer_rig_pose_rows_carry_translation_and_rotation_together(barber_base: tuple[Path, BaseCensus, Episode]) -> None:
@@ -135,8 +136,8 @@ def test_base_layer_imu_is_in_m_s2_under_the_solved_mounting(barber_base: tuple[
     accel: Float64[ndarray, "n 3"] = np.asarray(column_rows(store, f"{schema.accel_path(0, 0)}:Scalars:scalars").column(1).to_pylist(), dtype=np.float64).reshape(-1, 3)
     assert accel.shape[0] == census.imu_samples > 1000
     assert 9.3 < np.linalg.norm(accel, axis=1).mean() < 10.3
-    node: dict[str, list] = static_row(store, schema.imu_path(0, 0))
-    np.testing.assert_allclose(np.asarray(node[f"{schema.imu_path(0, 0)}:Transform3D:mat3x3"][0]).reshape(3, 3, order="F"), RIG_FROM_CALIB)
+    node = static_values(store, schema.imu_path(0, 0))
+    np.testing.assert_allclose(np.asarray(node["mat3x3"]).reshape(3, 3, order="F"), RIG_FROM_CALIB)
 
 
 def test_base_layer_frames_and_properties(barber_base: tuple[Path, BaseCensus, Episode]) -> None:
@@ -155,14 +156,9 @@ def test_base_layer_frames_and_properties(barber_base: tuple[Path, BaseCensus, E
     assert episode_properties["domain_0"] == "business" and episode_properties["domain_3"] == "daily_work"
     assert episode_properties["firmware"] == "2.2.9" and episode_properties["device"] == "DAS Ego V7"
     assert episode_properties["is_success"] is True
-    instruction: list = static_row(store, schema.instruction_path())[f"{schema.instruction_path()}:TextDocument:text"]
+    instruction = static_values(store, schema.instruction_path())["text"]
     assert episode.annotation is not None
-    assert instruction == [episode.annotation.bold_mark]
-
-
-def static_row(store: rrc.ChunkStore, entity_path: str) -> dict[str, list]:
-    """The static components of one entity."""
-    return store.reader(index=None, contents=entity_path).to_arrow_table().to_pylist()[0]
+    assert instruction == episode.annotation.bold_mark
 
 
 @pytest.fixture(scope="module")

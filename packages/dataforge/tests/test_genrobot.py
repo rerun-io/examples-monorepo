@@ -269,3 +269,32 @@ def test_base_clock_discards_only_samples_before_each_camera_first_keyframe() ->
     assert result.column("frame_index").to_pylist() == [6]
     assert result.column("Scalars:scalars").to_pylist() == [[2.0]]
     assert retimer.rows[camera_topic(0)] == 1
+
+
+def test_manifest_load_names_invalid_sources_and_keeps_revision_guard(tmp_path: Path) -> None:
+    from dataforge.datasets.genrobot import MANIFEST_NAME, GenrobotConfig, GenrobotDataset, Manifest
+    from dataforge.datasets.genrobot_source import REVISION
+
+    dataset = GenrobotDataset(GenrobotConfig(root=tmp_path))
+    path = tmp_path / MANIFEST_NAME
+    with pytest.raises(FileNotFoundError, match="run dataforge-download genrobot first"):
+        dataset.manifest()
+    path.write_text('{"revision": "' + REVISION + '", "episodes": []}')
+    assert dataset.manifest() == Manifest(revision=REVISION, episodes=[])
+    for malformed in ('{', '{"revision": "' + REVISION + '", "episodes": [], "extra": true}'):
+        path.write_text(malformed)
+        with pytest.raises(ValueError, match=str(path)):
+            dataset.manifest()
+    path.write_text('{"revision": "different", "episodes": []}')
+    with pytest.raises(ValueError, match="run dataforge-download genrobot again"):
+        dataset.manifest()
+
+
+def test_projection_image_bounds_match_existing_policy() -> None:
+    from simplecv.sensors.camera.base_camera import pixels_in_image
+
+    from dataforge.datasets.genrobot_source import SOURCE_HEIGHT, SOURCE_WIDTH
+
+    pixels = np.array([[0.0, 0.0], [SOURCE_WIDTH - 1.0, SOURCE_HEIGHT - 1.0], [SOURCE_WIDTH, 0.0], [0.0, SOURCE_HEIGHT],
+                       [-1.0, 0.0], [np.nan, 0.0], [0.0, np.inf], [-np.inf, 0.0]], dtype=np.float64)
+    np.testing.assert_array_equal(pixels_in_image(pixels, SOURCE_WIDTH, SOURCE_HEIGHT), [True, True, False, False, False, False, False, False])

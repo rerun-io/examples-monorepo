@@ -38,8 +38,6 @@ ignore_names = [
     # MammaSyn: a cached shard index compares stamps whole; a context manager's __exit__ takes the exception triple.
     "mtime_ns",
     "exc",
-    # pickle.Unpickler calls find_class itself.
-    "find_class",
     "main",
     "rr_config",
     "sequence",
