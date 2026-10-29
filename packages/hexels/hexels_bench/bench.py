@@ -191,7 +191,9 @@ def to_attic(roots: Roots, item: Item, partials: tuple[Path, ...]) -> None:
 
 def score_step(item: Item, fps: float | None) -> Step:
     fps_args: tuple[str, ...] = () if fps is None else ("--fps", repr(fps))
-    return Step(name="score", env="hexels", args=("hexels-score", "--dataset", item.dataset, "--scene", item.scene, "--method", item.method, *fps_args))
+    return Step(
+        name="score", env="hexels", args=("hexels-score", "--dataset", item.dataset, "--scene", item.scene, "--method", item.method, *fps_args)
+    )
 
 
 def brush_train_step(roots: Roots, item: Item) -> Step:
@@ -244,7 +246,17 @@ def execute(roots: Roots, item: Item, run: Runner) -> None:
         run(score_step(item, None), log)
     elif spec.trains:
         to_attic(roots, item, (run_dir,))
-        args: tuple[str, ...] = ("hexels-train", "--dataset", item.dataset, "--scene", item.scene, "--variant", spec.variant, "--steps", str(spec.steps))
+        args: tuple[str, ...] = (
+            "hexels-train",
+            "--dataset",
+            item.dataset,
+            "--scene",
+            item.scene,
+            "--variant",
+            spec.variant,
+            "--steps",
+            str(spec.steps),
+        )
         run(Step(name="hexels-train", env="hexels", args=args), log)
     else:
         to_attic(roots, item, (run_dir / "upstream-eval", run_dir / "upstream-eval-job"))

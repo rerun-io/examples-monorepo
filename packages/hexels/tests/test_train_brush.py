@@ -1,4 +1,5 @@
 """The protocol runner writes the run-layout directory around one Brush training."""
+
 import json
 import sys
 from collections.abc import Callable
@@ -46,13 +47,42 @@ def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_
     run: Path = tmp_path / "runs/dtu/scan1/brush-test"
     arguments: list[str] = (tmp_path / "bin/arguments").read_text().splitlines()
     assert arguments == [
-        str((tmp_path / "prepared/dtu/scan1").resolve()), "--total-train-iters", "70", "--max-splats", "3", "--eval-every", "70",
-        "--export-every", "70", "--export-path", str(run.resolve()), "--export-name", "model.ply",
-        "--test-renders", str((run / "renders/test").resolve()), "--summary", str((run / "brush-summary.json").resolve()), "--seed", "7",
+        str((tmp_path / "prepared/dtu/scan1").resolve()),
+        "--total-train-iters",
+        "70",
+        "--max-splats",
+        "3",
+        "--eval-every",
+        "70",
+        "--export-every",
+        "70",
+        "--export-path",
+        str(run.resolve()),
+        "--export-name",
+        "model.ply",
+        "--test-renders",
+        str((run / "renders/test").resolve()),
+        "--summary",
+        str((run / "brush-summary.json").resolve()),
+        "--seed",
+        "7",
     ]
     report: dict = json.loads((run / "train.json").read_text())
-    assert set(report) == {"method", "dataset", "scene", "steps", "loop_seconds", "total_seconds", "peak_vram_gib", "primitives", "sfm_points",
-                           "gpu", "host", "source_sha", "command"}
+    assert set(report) == {
+        "method",
+        "dataset",
+        "scene",
+        "steps",
+        "loop_seconds",
+        "total_seconds",
+        "peak_vram_gib",
+        "primitives",
+        "sfm_points",
+        "gpu",
+        "host",
+        "source_sha",
+        "command",
+    }
     assert (report["method"], report["dataset"], report["scene"], report["steps"]) == ("brush-test", "dtu", "scan1", 70)
     assert (report["loop_seconds"], report["primitives"], report["sfm_points"]) == (1.5, 2, 3)
     assert report["total_seconds"] > 0.0
@@ -113,11 +143,14 @@ def test_tiny_brush_training_through_the_protocol_path(tmp_path: Path, protocol_
     binary: Path = GSPLAT_RELEASE / "gsplat-train"
     if not binary.is_file():
         pytest.skip(f"needs {binary} (pixi run -e gsplat-rust-renderer gsplat-build)")
-    source, _ = protocol_scene(tmp_path / "data/dtu/scan1", tmp_path / CONTRACT.format(scene="scan1"), ["0000", "0008"],
-                               image_size=(64, 48), contract_size=(32, 24))
+    source, _ = protocol_scene(
+        tmp_path / "data/dtu/scan1", tmp_path / CONTRACT.format(scene="scan1"), ["0000", "0008"], image_size=(64, 48), contract_size=(32, 24)
+    )
     rng: np.random.Generator = np.random.default_rng(1)
-    points: list[str] = [f"{i} {x:.4f} {y:.4f} {z:.4f} {r} {g} {b} 0.1 1 0"
-                         for i, ((x, y, z), (r, g, b)) in enumerate(zip(rng.uniform(-0.5, 0.5, (64, 3)).tolist(), rng.integers(0, 256, (64, 3)).tolist(), strict=True))]
+    points: list[str] = [
+        f"{i} {x:.4f} {y:.4f} {z:.4f} {r} {g} {b} 0.1 1 0"
+        for i, ((x, y, z), (r, g, b)) in enumerate(zip(rng.uniform(-0.5, 0.5, (64, 3)).tolist(), rng.integers(0, 256, (64, 3)).tolist(), strict=True))
+    ]
     (source / "sparse/0/points3D.txt").write_text("\n".join(points) + "\n")
     main(config(tmp_path, binary, steps=30), [])
     run: Path = tmp_path / "runs/dtu/scan1/brush-test"

@@ -20,7 +20,23 @@ DATA_SUBDIR: dict[Dataset, str] = {"mipnerf360": "mipnerf360", "dtu": "dtu", "tn
 PUBLISHED_APPEARANCE: dict[HexelVariant, str] = {"v1": "v1-spatial-rgb", "v2": "v2-linear-view", "v3": "v3-sh3"}
 PROTOCOL_SCENES: dict[Dataset, tuple[str, ...]] = {
     "mipnerf360": ("bicycle", "flowers", "garden", "stump", "treehill", "room", "counter", "kitchen", "bonsai"),
-    "dtu": ("scan24", "scan37", "scan40", "scan55", "scan63", "scan65", "scan69", "scan83", "scan97", "scan105", "scan106", "scan110", "scan114", "scan118", "scan122"),
+    "dtu": (
+        "scan24",
+        "scan37",
+        "scan40",
+        "scan55",
+        "scan63",
+        "scan65",
+        "scan69",
+        "scan83",
+        "scan97",
+        "scan105",
+        "scan106",
+        "scan110",
+        "scan114",
+        "scan118",
+        "scan122",
+    ),
     "tnt": ("Barn", "Caterpillar", "Courthouse", "Ignatius", "Meetingroom", "Truck", "Train", "Francis", "Horse", "Lighthouse"),
 }
 """The 34 NVS scenes of upstream configs/nvs.json, in upstream order."""

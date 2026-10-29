@@ -61,9 +61,7 @@ def test_fit_command_runs_upstreams_paper_recipes(tmp_path: Path) -> None:
 def test_score_run_writes_metrics_beside_renders(tmp_path: Path) -> None:
     roots = Roots(data=tmp_path / "data", runs=tmp_path / "runs")
     run_dir: Path = roots.run_dir("dtu", "scanX", "hexels-v1-7k")
-    camera = ContractCamera(
-        name="0000", width=8, height=6, fov_x=0.5, fov_y=0.4, world_view_transform=np.eye(4), camera_center=np.zeros(3)
-    )
+    camera = ContractCamera(name="0000", width=8, height=6, fov_x=0.5, fov_y=0.4, world_view_transform=np.eye(4), camera_center=np.zeros(3))
     write_cameras_file(
         run_dir / "cameras.json",
         CamerasFile(format="hexels-cameras-1", dataset="dtu", scene="scanX", split="test", background=[0.0, 0.0, 0.0], cameras=[camera]),

@@ -121,14 +121,18 @@ def blueprint(
         return rrb.Spatial2DView(origin="/world/camera", contents=[entity], name=name)
 
     rows: list[rrb.Horizontal] = [
-        rrb.Horizontal(image_view("/world/camera/gt", "GT"), *[image_view(f"/world/camera/{m}/rgb", f"{SURFACE_METHODS[m].label} RGB") for m in map_methods]),
+        rrb.Horizontal(
+            image_view("/world/camera/gt", "GT"), *[image_view(f"/world/camera/{m}/rgb", f"{SURFACE_METHODS[m].label} RGB") for m in map_methods]
+        ),
         rrb.Horizontal(*[image_view(f"/world/camera/{m}/depth", f"{SURFACE_METHODS[m].label} depth") for m in map_methods]),
         rrb.Horizontal(*[image_view(f"/world/camera/{m}/normal", f"{SURFACE_METHODS[m].label} normal") for m in map_methods]),
         rrb.Horizontal(*[image_view(f"/world/camera/{m}/normal_from_depth", f"{SURFACE_METHODS[m].label} normal from depth") for m in map_methods]),
     ]
     eye_controls = rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, position=eye, look_target=center, eye_up=up)
     meshes: list[rrb.Spatial3DView] = [
-        rrb.Spatial3DView(origin="/world", contents=[f"/world/mesh/{m}", "/world/camera"], name=f"{SURFACE_METHODS[m].label} mesh", eye_controls=eye_controls)
+        rrb.Spatial3DView(
+            origin="/world", contents=[f"/world/mesh/{m}", "/world/camera"], name=f"{SURFACE_METHODS[m].label} mesh", eye_controls=eye_controls
+        )
         for m in mesh_methods
     ]
     if mesh_methods and reference:

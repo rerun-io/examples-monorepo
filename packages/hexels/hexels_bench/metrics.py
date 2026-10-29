@@ -222,4 +222,3 @@ def ply_vertex_count(path: Path) -> int:
             if line == "end_header":
                 break
     raise ValueError(f"{path}: no vertex element")
-

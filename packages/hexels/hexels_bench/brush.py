@@ -9,7 +9,6 @@ cameras; this module turns it into a NeRF-style directory that Brush reads with 
 
 import os
 import shutil
-import struct
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,11 +19,20 @@ import PIL
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from PIL import Image
-from plyfile import PlyData
 from serde import serde
 from serde.json import to_json
 
-from hexels_bench.cameras import CameraContract, ContractCamera, ContractSettings, find_image, load_target, ordered_targets_sha256, target_sha256
+from hexels_bench.cameras import (
+    CameraContract,
+    ContractCamera,
+    ContractSettings,
+    SfmPoints,
+    find_image,
+    load_target,
+    ordered_targets_sha256,
+    read_sfm_points,
+    target_sha256,
+)
 from hexels_bench.layout import read_json
 
 
@@ -85,18 +93,6 @@ class PreparedScene:
     """Pillow version that decoded and resized the images."""
 
 
-@dataclass(frozen=True, slots=True)
-class SfmPoints:
-    """The COLMAP point cloud upstream initializes from."""
-
-    xyz: Float32[ndarray, "n 3"]
-    """Point positions."""
-    rgb: UInt8[ndarray, "n 3"]
-    """Point colors."""
-    source: str
-    """File name the points came from."""
-
-
 def target_size(width: int, height: int, resolution: int) -> tuple[int, int]:
     """2DGS ``loadCam`` target size for an explicit resolution divisor (Python rounding, half to even)."""
     if resolution not in (1, 2, 4, 8):
@@ -109,36 +105,6 @@ def opengl_world_from_camera(world_view_transform: Float64[ndarray, "4 4"]) -> F
     world_from_camera: Float64[ndarray, "4 4"] = np.linalg.inv(world_view_transform.T)
     world_from_camera[:3, 1:3] *= -1.0
     return world_from_camera
-
-
-def read_sfm_points(sparse: Path) -> SfmPoints:
-    """Read the SfM cloud with 2DGS precedence: points3D.ply, then points3D.bin, then points3D.txt."""
-    if (sparse / "points3D.ply").is_file():
-        vertex = PlyData.read(str(sparse / "points3D.ply"))["vertex"]
-        xyz: Float32[ndarray, "n 3"] = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1).astype(np.float32)
-        rgb: UInt8[ndarray, "n 3"] = np.stack([vertex["red"], vertex["green"], vertex["blue"]], axis=1).astype(np.uint8)
-        return SfmPoints(xyz=xyz, rgb=rgb, source="points3D.ply")
-    positions: list[tuple[float, float, float]] = []
-    colors: list[tuple[int, int, int]] = []
-    if (sparse / "points3D.bin").is_file():
-        data: bytes = (sparse / "points3D.bin").read_bytes()
-        offset: int = 8
-        for _ in range(struct.unpack_from("<Q", data)[0]):
-            record: tuple = struct.unpack_from("<Q3d3BdQ", data, offset)
-            positions.append(record[1:4])
-            colors.append(record[4:7])
-            offset += struct.calcsize("<Q3d3BdQ") + 8 * record[8]
-        source: str = "points3D.bin"
-    elif (sparse / "points3D.txt").is_file():
-        for line in (sparse / "points3D.txt").read_text().splitlines():
-            if line.strip() and not line.startswith("#"):
-                fields: list[str] = line.split()
-                positions.append((float(fields[1]), float(fields[2]), float(fields[3])))
-                colors.append((int(fields[4]), int(fields[5]), int(fields[6])))
-        source = "points3D.txt"
-    else:
-        raise FileNotFoundError(f"No SfM points (points3D.ply/.bin/.txt) in {sparse}")
-    return SfmPoints(xyz=np.array(positions, dtype=np.float32).reshape(-1, 3), rgb=np.array(colors, dtype=np.uint8).reshape(-1, 3), source=source)
 
 
 def init_ply(points: SfmPoints) -> bytes:
@@ -198,7 +164,9 @@ def prepare_scene(source: Path, contract_path: Path, output: Path) -> PreparedSc
                 )
                 for camera in cameras
             ]
-            (staging / f"transforms_{split}.json").write_text(to_json(BrushTransforms(camera_angle_x=frames[0].camera_angle_x, ply_file_path="init.ply", frames=frames)))
+            (staging / f"transforms_{split}.json").write_text(
+                to_json(BrushTransforms(camera_angle_x=frames[0].camera_angle_x, ply_file_path="init.ply", frames=frames))
+            )
         (staging / "init.ply").write_bytes(init_ply(points))
         record: PreparedScene = PreparedScene(
             source=source.resolve(),

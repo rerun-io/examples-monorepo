@@ -80,4 +80,3 @@ def rrd_frames(rrd: Path, surface_name: str, cameras: list[ContractCamera]) -> I
             expected_depth=parts["expected_depth"],
             alpha=parts["alpha"],
         )
-

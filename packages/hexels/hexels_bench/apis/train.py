@@ -21,8 +21,7 @@ from serde.json import to_json
 from hexels_bench.apis.export import export_run
 from hexels_bench.apis.export_published import stage_ground_truth
 from hexels_bench.apis.score import score_run
-from hexels_bench.brush import read_sfm_points
-from hexels_bench.cameras import CameraContract, cameras_file, write_cameras_file
+from hexels_bench.cameras import CameraContract, cameras_file, read_sfm_points, write_cameras_file
 from hexels_bench.checkpoint import find_checkpoint
 from hexels_bench.gpu_monitor import Measured, gpu_name, run_measured
 from hexels_bench.hexel_ply import HexelPly, HexelVariant

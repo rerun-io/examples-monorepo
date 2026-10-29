@@ -1,4 +1,5 @@
-"""Held-out cameras and ground-truth targets of a scene, from upstream's camera contract.
+"""The protocol inputs of a scene: held-out cameras and ground-truth targets from upstream's camera contract, and
+the SfM points both trainers initialize from (and cap their primitive count at).
 
 Upstream publishes one camera contract per NVS scene (HF `jhu-ccvl/Hexels`,
 `cameras/nvs/<dataset>/<scene>/contract.json`): the 2DGS camera geometry of every training and test
@@ -9,6 +10,7 @@ targets bit-exactly (checked against the contract digest) as 16-bit PNGs for the
 
 import hashlib
 import json
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +18,7 @@ import numpy as np
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from PIL import Image
+from plyfile import PlyData
 from serde import serde
 from serde.json import to_json
 
@@ -140,6 +143,48 @@ def target_sha256(rgb: UInt8[ndarray, "h w 3"]) -> str:
     digest.update(json.dumps(list(target.shape), separators=(",", ":")).encode())
     digest.update(target.tobytes())
     return digest.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class SfmPoints:
+    """The COLMAP point cloud upstream initializes from."""
+
+    xyz: Float32[ndarray, "n 3"]
+    """Point positions."""
+    rgb: UInt8[ndarray, "n 3"]
+    """Point colors."""
+    source: str
+    """File name the points came from."""
+
+
+def read_sfm_points(sparse: Path) -> SfmPoints:
+    """Read the SfM cloud with 2DGS precedence: points3D.ply, then points3D.bin, then points3D.txt."""
+    if (sparse / "points3D.ply").is_file():
+        vertex = PlyData.read(str(sparse / "points3D.ply"))["vertex"]
+        xyz: Float32[ndarray, "n 3"] = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1).astype(np.float32)
+        rgb: UInt8[ndarray, "n 3"] = np.stack([vertex["red"], vertex["green"], vertex["blue"]], axis=1).astype(np.uint8)
+        return SfmPoints(xyz=xyz, rgb=rgb, source="points3D.ply")
+    positions: list[tuple[float, float, float]] = []
+    colors: list[tuple[int, int, int]] = []
+    if (sparse / "points3D.bin").is_file():
+        data: bytes = (sparse / "points3D.bin").read_bytes()
+        offset: int = 8
+        for _ in range(struct.unpack_from("<Q", data)[0]):
+            record: tuple = struct.unpack_from("<Q3d3BdQ", data, offset)
+            positions.append(record[1:4])
+            colors.append(record[4:7])
+            offset += struct.calcsize("<Q3d3BdQ") + 8 * record[8]
+        source: str = "points3D.bin"
+    elif (sparse / "points3D.txt").is_file():
+        for line in (sparse / "points3D.txt").read_text().splitlines():
+            if line.strip() and not line.startswith("#"):
+                fields: list[str] = line.split()
+                positions.append((float(fields[1]), float(fields[2]), float(fields[3])))
+                colors.append((int(fields[4]), int(fields[5]), int(fields[6])))
+        source = "points3D.txt"
+    else:
+        raise FileNotFoundError(f"No SfM points (points3D.ply/.bin/.txt) in {sparse}")
+    return SfmPoints(xyz=np.array(positions, dtype=np.float32).reshape(-1, 3), rgb=np.array(colors, dtype=np.uint8).reshape(-1, 3), source=source)
 
 
 def load_target(image_path: Path, width: int, height: int) -> UInt8[ndarray, "h w 3"]:

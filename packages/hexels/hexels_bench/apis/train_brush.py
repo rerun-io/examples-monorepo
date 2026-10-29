@@ -106,10 +106,25 @@ def run_scene(config: Config, scene: str, forwarded: list[str]) -> None:
     summary_path: Path = run / "brush-summary.json"
     steps: str = str(config.steps)
     command: list[str] = [
-        str(config.binary.resolve()), str(prepared_dir.resolve()),
-        "--total-train-iters", steps, "--max-splats", str(prepared.sfm_points), "--eval-every", steps, "--export-every", steps,
-        "--export-path", str(run.resolve()), "--export-name", "model.ply",
-        "--test-renders", str((run / "renders/test").resolve()), "--summary", str(summary_path.resolve()), *forwarded,
+        str(config.binary.resolve()),
+        str(prepared_dir.resolve()),
+        "--total-train-iters",
+        steps,
+        "--max-splats",
+        str(prepared.sfm_points),
+        "--eval-every",
+        steps,
+        "--export-every",
+        steps,
+        "--export-path",
+        str(run.resolve()),
+        "--export-name",
+        "model.ply",
+        "--test-renders",
+        str((run / "renders/test").resolve()),
+        "--summary",
+        str(summary_path.resolve()),
+        *forwarded,
     ]
     if config.gpu_lock is not None:
         print(f"Waiting for {config.gpu_lock}")
@@ -124,11 +139,21 @@ def run_scene(config: Config, scene: str, forwarded: list[str]) -> None:
         raise RuntimeError(f"{run}: {renders} test renders for {prepared.test_views} held-out views")
     write_cameras_file(run / "cameras.json", cameras_file(read_json(CameraContract, contract), config.dataset, scene, [0.0, 0.0, 0.0]))
     report: TrainRecord = TrainRecord(
-        method=config.method, dataset=config.dataset, scene=scene, steps=summary.steps,
-        loop_seconds=summary.loop_seconds, total_seconds=measured.seconds,
+        method=config.method,
+        dataset=config.dataset,
+        scene=scene,
+        steps=summary.steps,
+        loop_seconds=summary.loop_seconds,
+        total_seconds=measured.seconds,
         peak_vram_gib=measured.vram.peak_gib(until_unix_s=summary.training_end_unix_seconds),
-        primitives=summary.splats, sfm_points=prepared.sfm_points, gpu=gpu_name(), host=socket.gethostname(),
-        source_sha=source_sha(), command=shlex.join(command),
+        primitives=summary.splats,
+        sfm_points=prepared.sfm_points,
+        gpu=gpu_name(),
+        host=socket.gethostname(),
+        source_sha=source_sha(),
+        command=shlex.join(command),
     )
     (run / "train.json").write_text(to_json(report) + "\n")
-    print(f"{run}: loop {summary.loop_seconds:.1f} s, total {measured.seconds:.1f} s, {summary.splats} splats, Brush eval PSNR {summary.brush_eval_psnr}")
+    print(
+        f"{run}: loop {summary.loop_seconds:.1f} s, total {measured.seconds:.1f} s, {summary.splats} splats, Brush eval PSNR {summary.brush_eval_psnr}"
+    )
