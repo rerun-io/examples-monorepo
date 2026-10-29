@@ -101,3 +101,18 @@ def test_jpeg_decode_lookahead_is_bounded() -> None:
     next(decoded)
     assert len(consumed) <= 4
     decoded.close()
+
+
+def test_jpeg_half_size_decode_matches_turbojpeg_scaling() -> None:
+    """A 1/2 scaling factor decodes through libjpeg's DCT scaling: the frame source states the scaled size and the planes
+    are TurboJPEG's own scaled planes (4K GoPro frames are stored at 1920x1080 without a full-size decode)."""
+    codec = turbojpeg.TurboJPEG()
+    height, width = 27, 34  # odd scaled height: ceil(27 / 2) = 14 luma rows, 7 chroma rows at 4:2:0
+    pixels = np.random.default_rng(0).integers(0, 255, (height, width, 3), dtype=np.uint8)
+    encoded = codec.encode(pixels, jpeg_subsample=turbojpeg.TJSAMP_420)
+    assert isinstance(encoded, bytes)
+    source = jpeg_frame_source(encoded, scaling_factor=(1, 2))
+    assert source == FrameSource("yuv420p", 17, 14, full_range=True)
+    planes = codec.decode_to_yuv_planes(encoded, scaling_factor=(1, 2), strides=(32, 32, 32))
+    expected = b"".join(plane[:h, :w].tobytes() for plane, (h, w) in zip(planes, [(14, 17), (7, 9), (7, 9)], strict=True))
+    assert list(decode_jpeg_frames([encoded], source=source, scaling_factor=(1, 2))) == [expected]

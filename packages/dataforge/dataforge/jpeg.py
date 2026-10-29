@@ -23,11 +23,16 @@ def _jpeg_decoder() -> TurboJPEG:
     return TurboJPEG()
 
 
-def jpeg_frame_source(image: bytes) -> FrameSource:
-    """Describe the JPEG's native chroma layout, refusing unsupported colour spaces."""
+def jpeg_frame_source(image: bytes, *, scaling_factor: tuple[int, int] = (1, 1)) -> FrameSource:
+    """Describe the JPEG's native chroma layout at its decoded size, refusing unsupported colour spaces.
+
+    ``scaling_factor`` (numerator, denominator) is libjpeg's DCT scaling, one of ``TurboJPEG.scaling_factors``: a
+    decoded side is ``ceil(side * numerator / denominator)``, as TurboJPEG's ``TJSCALED`` computes it.
+    """
     header = _jpeg_decoder().decode_header(image)
-    width: int = header[0]
-    height: int = header[1]
+    numerator, denominator = scaling_factor
+    width: int = -(-header[0] * numerator // denominator)
+    height: int = -(-header[1] * numerator // denominator)
     sampling: int = header[2]
     colorspace: int = header[3]
     kinds: dict[int, FrameKind] = {TJSAMP_GRAY: "gray8", TJSAMP_420: "yuv420p", TJSAMP_422: "yuv422p", TJSAMP_444: "yuv444p"}
@@ -36,12 +41,15 @@ def jpeg_frame_source(image: bytes) -> FrameSource:
     return FrameSource(kinds[sampling], width, height, full_range=sampling != TJSAMP_GRAY)
 
 
-def decode_jpeg_frames(images: Iterable[bytes], *, source: FrameSource, workers: int = 8) -> Generator[bytes, None, None]:
+def decode_jpeg_frames(
+    images: Iterable[bytes], *, source: FrameSource, workers: int = 8, scaling_factor: tuple[int, int] = (1, 1)
+) -> Generator[bytes, None, None]:
     """Decode JPEGs to packed native planes with bounded, ordered look-ahead.
 
     At most twice the worker count is queued. Crop TurboJPEG's MCU padding and
     row strides before serializing each plane, including odd-sized images.
     Eight workers per camera means at most 24 decoders across parallel_clips.
+    ``scaling_factor`` is the DCT scaling ``source`` was described with (``jpeg_frame_source``).
     """
     if workers < 1:
         raise ValueError("JPEG decode workers must be positive")
@@ -58,10 +66,10 @@ def decode_jpeg_frames(images: Iterable[bytes], *, source: FrameSource, workers:
         sizes.extend([((height + dy - 1) // dy, (width + dx - 1) // dx)] * 2)
 
     def decode(image: bytes) -> bytes:
-        if jpeg_frame_source(image) != source:
+        if jpeg_frame_source(image, scaling_factor=scaling_factor) != source:
             raise ValueError("JPEG layout changed within stream")
         # Loop locals stay unannotated: beartype would rebuild a jaxtyping checker per frame in the dev env.
-        planes = decoder.decode_to_yuv_planes(image)
+        planes = decoder.decode_to_yuv_planes(image, scaling_factor=None if scaling_factor == (1, 1) else scaling_factor)
         return b"".join(plane[:h, :w].tobytes() for plane, (h, w) in zip(planes, sizes, strict=True))
 
     pending: deque[Future[bytes]] = deque()
