@@ -29,7 +29,7 @@ METRIC_ROWS: tuple[tuple[str, str], ...] = (
     ("viewer_ms_p95", "viewer ms p95"),
     ("viewer_gpu_mb", "viewer GPU MB"),
     ("renderer_ms_median", "renderer ms p50"),
-    ("fps", "render FPS, test views"),
+    ("fps", "test-view FPS"),
     ("train_min", "train min"),
     ("train_vram_gib", "train GiB"),
     ("deploy_mb", "model MB"),

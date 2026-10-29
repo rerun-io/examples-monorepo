@@ -147,8 +147,8 @@ def compare_blueprint(layout: Layout, brush_name: str, hexels_name: str, fps: fl
         name=f"Per-scene metrics: viewer and renderer timing on {timing_gpu}, quality and training on RTX 5090, published on A5000", origin=METRICS_ENTITY,
         query=rrb.archetypes.DataframeQuery(timeline=METRICS_TIMELINE),
     )
-    # The table needs about 330 px for its eleven rows at 1080p.
-    return rrb.Blueprint(rrb.Vertical(rrb.Horizontal(brush, hexels), table, row_shares=[2, 1]), time_panel, collapse_panels=True)
+    # The table needs about 350 px for its twelve rows at 1080p.
+    return rrb.Blueprint(rrb.Vertical(rrb.Horizontal(brush, hexels), table, row_shares=[1.85, 1]), time_panel, collapse_panels=True)
 
 
 def main(config: CompareConfig) -> None:
@@ -174,7 +174,7 @@ def main(config: CompareConfig) -> None:
     hexels_name: str = view_name(hexel, "hexels")
     if config.layout == "compare":
         # Rows first: the table sizes its columns to the content of its first frame.
-        log_metric_table([brush, hexel, paper_row(config.paper_numbers, config.dataset, config.scene, f"{variant}-fixed", f"Hexels {variant.upper()} 30k published")])
+        log_metric_table([brush, hexel, paper_row(config.paper_numbers, config.dataset, config.scene, f"{variant}-fixed", f"Paper Hexels {variant.upper()} 30k")])
     rr.send_blueprint(compare_blueprint(config.layout, brush_name, hexels_name, config.fps, config.timing_gpu))
     log_cameras(contract, orbit, specs)
     if config.layout != "hexels":
