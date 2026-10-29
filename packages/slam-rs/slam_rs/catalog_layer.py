@@ -34,14 +34,8 @@ def write_layer(
     Explicit initialization and terminal IMU drops are recorded; unexplained
     losses, interior gaps and non-finite runs cannot replace an existing result.
     """
-    if (len(run.estimate) < 2 or run.lost != len(run.dropped)
-            or len(run.estimate) + len(run.dropped) != run.framesets
-            or len({drop.t_ns for drop in run.dropped}) != len(run.dropped)
-            or any(not (
-                drop.reason == "insufficient stereo support before initialization" and drop.t_ns < run.estimate.t_ns[0]
-                or drop.reason == "end of stream before IMU coverage" and drop.t_ns > run.estimate.t_ns[-1]
-            ) for drop in run.dropped)):
-        raise ValueError(f"refusing incomplete pose layer: {len(run.estimate)} poses / {run.framesets} framesets, {run.lost} missing, {len(run.dropped)} explained drops")
+    if problem := run.unexplained_loss():
+        raise ValueError(problem)
     positions: Float64[ndarray, "n 3"] = run.estimate.position_m
     rotations: Float64[ndarray, "n 4"] = np.roll(run.estimate.quaternion_wxyz, -1, axis=1)
     times: Int64[ndarray, " n"] = shift_clock(run.estimate, -clock_offset_ns).t_ns
