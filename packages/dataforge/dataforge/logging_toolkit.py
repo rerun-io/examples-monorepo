@@ -350,6 +350,15 @@ def _log_sensor_node(
     rr.log(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
 
 
+def layout_frustum_m(centres_xy: Float64[ndarray, "c 2"]) -> float:
+    """Frustum length for a layout of static cameras: 5 % of the layout's radius, at least 0.1 m.
+
+    The viewer fits its eye to the layout (a kitchen, a soccer pitch), so a frustum keeps one on-screen size only if it
+    grows with the layout.
+    """
+    return max(0.1, 0.05 * float(np.linalg.norm(centres_xy - centres_xy.mean(axis=0), axis=1).max()))
+
+
 def log_camera_node(
     recording: rr.RecordingStream,
     rig: int,

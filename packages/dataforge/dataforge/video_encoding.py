@@ -82,7 +82,8 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
     """Encode with the requested workers; yield clips in submission order while later jobs run.
 
     Each clip is deleted when the caller requests the next one, so at most one finished clip waits on disk
-    for logging. Cleanup waits for encoders and removes every leftover, including on failure.
+    for logging; a job may write no clip (nothing to encode). Cleanup waits for encoders and removes every
+    leftover, including on failure.
     Transcode measures first submit to final encode completion, excluding logging.
     """
     finished: list[float] = []
@@ -102,7 +103,7 @@ def parallel_clips(jobs: list[tuple[Path, Callable[[], None]]], timer: SequenceT
                 for (clip, _), future in zip(jobs, futures, strict=True):
                     future.result()
                     yield clip
-                    clip.unlink()
+                    clip.unlink(missing_ok=True)
 
             yield ready()
     finally:
@@ -299,11 +300,14 @@ def transcode_mp4(
     gray: bool,
     size: tuple[int, int] | None = None,
     crop: tuple[int, int, int, int] | None = None,
+    keep: list[range] | None = None,
     decode: Literal["cpu", "cuda"] = "cpu",
 ) -> int:
     """Decode a file and encode AV1 directly in ffmpeg, checking sample count.
 
     frames is the exact expected output count; source timing is applied by the caller.
+    keep, runs of evenly spaced source frames, keeps only those frames, before any other
+    filter, for a stream whose real samples are padded to a higher frame rate.
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
     which for a gray source carry neutral chroma, converted to 4:2:0. size (width, height) rescales, on the GPU
@@ -315,7 +319,10 @@ def transcode_mp4(
         raise ValueError("frames must be positive")
     if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
         raise ValueError("crop requires positive dimensions and nonnegative offsets")
+    runs: str = "+".join(f"between(n,{run.start},{run[-1]})*not(mod(n-{run.start},{run.step}))" for run in keep or [])
+    select: list[str] = [f"select='{runs}'"] if keep is not None else []
     cpu_filters: list[str] = [
+        *select,
         *([] if crop is None else ["crop=" + ":".join(str(value) for value in crop)]),
         *([] if size is None else [f"scale={size[0]}:{size[1]}"]),
         *(["format=gray"] if gray else []),
@@ -323,7 +330,7 @@ def transcode_mp4(
     ]
     # NVENC's AV1 takes 4:2:0 only, as the CPU path's last filter ensures: a 4:4:4 source (MAMMA's HEVC) fails without this.
     # nv12 is what NVDEC hands over for 8-bit 4:2:0, so for such a source scale_cuda passes the frames through untouched.
-    cuda_filters: list[str] = [f"scale_cuda={'' if size is None else f'{size[0]}:{size[1]}:'}format=nv12"]
+    cuda_filters: list[str] = [*select, f"scale_cuda={'' if size is None else f'{size[0]}:{size[1]}:'}format=nv12"]
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     def run(*, cuda: bool) -> subprocess.CompletedProcess[str]:
@@ -465,3 +472,10 @@ def mp4_frame_count(path: Path) -> int:
         if stream.frames:
             return stream.frames
         return sum(1 for packet in container.demux(stream) if packet.pts is not None)
+
+
+def video_size(path: Path) -> tuple[int, int]:
+    """Width and height of an mp4's first video stream."""
+    with av.open(str(path)) as container:
+        stream: av.video.stream.VideoStream = container.streams.video[0]
+        return stream.codec_context.width, stream.codec_context.height

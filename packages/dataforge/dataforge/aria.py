@@ -36,8 +36,8 @@ from dataforge.vrs import ImuRecords, VrsFile, VrsImageReader
 
 # ── streams ───────────────────────────────────────────────────────────────
 
-AriaStreamId: TypeAlias = Literal["1201-1", "1201-2", "214-1", "1202-1", "1202-2"]
-"""The five Aria Gen1 streams a converter reads (Gen2 reuses the ids); the rest (magnetometer,
+AriaStreamId: TypeAlias = Literal["1201-1", "1201-2", "214-1", "211-1", "1202-1", "1202-2"]
+"""The Aria Gen1 streams a converter reads (Gen2 reuses the ids); the rest (magnetometer,
 barometer, GPS, WiFi, Bluetooth) are left in the file."""
 
 SLAM_LEFT_STREAM_ID: AriaStreamId = "1201-1"
@@ -46,6 +46,8 @@ SLAM_RIGHT_STREAM_ID: AriaStreamId = "1201-2"
 """camera-slam-right: 640x480 gray at 20 fps."""
 RGB_STREAM_ID: AriaStreamId = "214-1"
 """camera-rgb: 1408x1408 RGB at 10 fps, stored JPEG-compressed in the VRS."""
+ET_STREAM_ID: AriaStreamId = "211-1"
+"""camera-et: both eye-tracking cameras side by side in one 640x240 gray frame, at 10 fps."""
 IMU_RIGHT_STREAM_ID: AriaStreamId = "1202-1"
 """imu-right at 1 kHz (LaMAria's body frame)."""
 IMU_LEFT_STREAM_ID: AriaStreamId = "1202-2"
@@ -321,6 +323,34 @@ def project_to_calibration(
         pixels[index, joints[in_front]] = fisheye624.project(calibration, points[in_front])
     pixels[~np.isfinite(pixels).all(axis=-1)] = np.nan
     return pixels
+
+
+def project_frames(
+    calibration: Fisheye624Parameters,
+    world_T_device: Float64[ndarray, "n 4 4"],
+    positions: Float32[ndarray, "n 133 3"],
+) -> Float32[ndarray, "n 133 2"]:
+    """``project_to_calibration`` for every frame at once, for corpus-scale layers.
+
+    The same pixels to rounding: the batched transform sums in another order, so the last bits differ from the
+    per-joint loop, which hot3d and aria_gen2_pilot keep for their byte-identical parity baselines.
+
+    Args:
+        calibration: Full lens model in the logged image orientation; ``rig_T_cam`` is ``device_T_camera``.
+        world_T_device: Float64[ndarray, "n 4 4"] poses, NaN when missing.
+        positions: Float32[ndarray, "n 133 3"] world metres, NaN when missing.
+
+    Returns:
+        Float32[ndarray, "n 133 2"] pixels, NaN for missing, rear and out-of-view joints.
+    """
+    cam_T_world: Float64[ndarray, "n 4 4"] = np.linalg.inv(world_T_device @ calibration.rig_T_cam.matrix())
+    local: Float64[ndarray, "p 3"] = (
+        np.einsum("nij,nkj->nki", cam_T_world[:, :3, :3], positions.astype(np.float64)) + cam_T_world[:, None, :3, 3]
+    ).reshape(-1, 3)
+    pixels: Float64[ndarray, "p 2"] = np.full((len(local), 2), np.nan)
+    usable: Bool[ndarray, "p"] = np.isfinite(local).all(axis=1) & (local[:, 2] > 0.0)
+    pixels[usable] = fisheye624.project(calibration, local[usable])
+    return pixels.reshape(*positions.shape[:2], 2).astype(np.float32)
 
 
 # ── streams ───────────────────────────────────────────────────────────────
