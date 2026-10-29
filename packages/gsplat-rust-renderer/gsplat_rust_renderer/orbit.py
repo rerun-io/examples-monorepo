@@ -35,7 +35,7 @@ class CameraSpec:
 
 @dataclass(frozen=True, slots=True)
 class Orbit:
-    """A closed circular camera path around the point the capture cameras look at."""
+    """A closed camera path on the circle around the point the capture cameras look at."""
 
     center: Float64[ndarray, "3"]
     """Least-squares closest point to every camera's optical axis."""
@@ -46,7 +46,8 @@ class Orbit:
     elevation: float
     """Median camera height above the centre along `up`."""
     world_from_cameras: Float64[ndarray, "n 4 4"]
-    """OpenCV camera-to-world poses, evenly spaced in azimuth, looking at the centre; pose 0 faces camera 0."""
+    """OpenCV camera-to-world poses looking at the centre: one even turn with pose 0 at camera 0, or, when the
+    cameras leave a gap wider than 90 degrees (DTU), a cosine-eased sweep over their arc and back."""
 
 
 def look_at(position: Float64[ndarray, "3"], target: Float64[ndarray, "3"], up: Float64[ndarray, "3"]) -> Float64[ndarray, "4 4"]:
@@ -81,7 +82,14 @@ def orbit_from_cameras(world_from_cameras: Float64[ndarray, "n 4 4"], frames: in
     second: Float64[ndarray, "3"] = np.cross(up, first)
     radius: float = float(np.median(np.linalg.norm(horizontal, axis=1)))
     elevation: float = float(np.median(heights))
-    angles: Float64[ndarray, "m"] = np.arange(frames) * (2.0 * np.pi / frames)
+    azimuths: Float64[ndarray, "n"] = np.sort(np.arctan2(horizontal @ second, horizontal @ first) % (2.0 * np.pi))
+    gaps: Float64[ndarray, "n"] = np.diff(azimuths, append=azimuths[0] + 2.0 * np.pi)
+    widest: int = int(np.argmax(gaps))
+    turns: Float64[ndarray, "m"] = np.arange(frames) * (2.0 * np.pi / frames)
+    # Nothing was captured behind a front-only scene, so the path stays over the cameras.
+    angles: Float64[ndarray, "m"] = (
+        azimuths[(widest + 1) % len(azimuths)] + 0.5 * (2.0 * np.pi - gaps[widest]) * (1.0 - np.cos(turns)) if gaps[widest] > 0.5 * np.pi else turns
+    )
     poses: Float64[ndarray, "m 4 4"] = np.stack(
         [look_at(center + radius * (np.cos(a) * first + np.sin(a) * second) + elevation * up, center, up) for a in angles]
     )
