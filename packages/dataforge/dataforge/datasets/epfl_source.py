@@ -175,7 +175,7 @@ FITS: tuple[FitSpec, ...] = (
         slice(0, 17),
         schema.body_path("smpl"),
         schema.body_path("mesh"),
-        (160, 190, 200, 110),
+        hands.BODY_ALBEDO,
     ),
 )
 """The three independent fits in each matched pair of source rows."""

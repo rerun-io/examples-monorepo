@@ -254,7 +254,12 @@ class ManoSimpleLayerNP:
 
 
 class MANOLayerNP:
-    """NumPy implementation mirroring MANOLayerTorch's interface (meters output)."""
+    """NumPy implementation mirroring MANOLayerTorch's interface (meters output).
+
+    ``fix_left_shapedirs`` applies the known MANO left-hand shape fix: MANO_LEFT.pkl ships its first
+    shape direction with x not mirrored, so fits made with the fix (negated x) pose wrong without it.
+    It does nothing for the right hand.
+    """
 
     def __init__(
         self,
@@ -262,6 +267,7 @@ class MANOLayerNP:
         betas: Float32[np.ndarray, "10"],
         mano_root_dir: Path | None = None,
         use_pca: bool = True,
+        fix_left_shapedirs: bool = False,
     ) -> None:
         if mano_root_dir is None:
             repo_root: Path = Path(__file__).resolve().parents[2]
@@ -303,6 +309,10 @@ class MANOLayerNP:
             ncomps=45,
             use_pca=use_pca,
         )
+        if fix_left_shapedirs and side == "left":
+            fixed: Float32[ndarray, "n_verts=778 3 10"] = self._mano_layer.th_shapedirs.copy()  # the loaded model may be shared
+            fixed[:, 0, :] *= -1.0
+            self._mano_layer.th_shapedirs = fixed
 
         # Store faces
         self.f: Int64[ndarray, "num_faces=1538 3"] = self._mano_layer.th_faces

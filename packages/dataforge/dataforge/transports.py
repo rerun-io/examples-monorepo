@@ -130,7 +130,9 @@ def hf_fetch_files(repo_id: str, paths: Sequence[str], *, local_dir: Path, revis
     if not paths:
         return local_dir
     with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
-        futures: list[Future[str]] = [executor.submit(hf_hub_download, repo_id, path, repo_type="dataset", local_dir=str(local_dir), revision=revision) for path in paths]
+        futures: list[Future[str]] = [
+            executor.submit(hf_hub_download, repo_id, path, repo_type="dataset", local_dir=str(local_dir), revision=revision) for path in paths
+        ]
         try:
             for future in as_completed(futures):
                 future.result()
@@ -247,6 +249,12 @@ class HfFileInfo:
 def hf_file_info(entry: RepoFile) -> HfFileInfo:
     """Adapt one ``RepoFile`` of a Hub listing."""
     return HfFileInfo(entry.path, entry.size, entry.lfs.sha256 if entry.lfs is not None else None, entry.blob_id)
+
+
+def hf_list_files(repo_id: str, revision: str, path_in_repo: str | None = None) -> list[HfFileInfo]:
+    """Every dataset file under ``path_in_repo`` at a pinned revision, in one recursive listing call."""
+    entries = HfApi().list_repo_tree(repo_id, repo_type="dataset", revision=revision, path_in_repo=path_in_repo, recursive=True)
+    return [hf_file_info(entry) for entry in entries if isinstance(entry, RepoFile)]
 
 
 def hf_lfs_files(repo_id: str, names: Sequence[str], *, revision: str) -> list[HfFileInfo]:

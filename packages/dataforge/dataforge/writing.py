@@ -57,6 +57,12 @@ class TableFields:
     """Table columns after the recording link."""
 
 
+def episode_table_fields(*names: str) -> TableFields:
+    """Cards and table both show ``property:episode:<name>`` for each of ``names``, then the frame count."""
+    fields: tuple[TableField, ...] = (*(TableField(f"property:episode:{name}", name) for name in names), TableField("property:capture:num_frames", "frames"))
+    return TableFields(cards=fields, table=fields)
+
+
 def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
     """Every view in the blueprint's container tree, in layout order."""
     views: list[rrb.View] = []

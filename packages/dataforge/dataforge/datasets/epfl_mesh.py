@@ -15,6 +15,7 @@ from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 
 from dataforge import hands, meshes
 from dataforge.datasets.epfl_source import Fit, FitSpec, PoseRow
+from dataforge.smpl import smpl_faces
 
 
 def corrected_translation(fits: list[Fit], root: Float32[ndarray, "3"]) -> Float32[ndarray, "n 3"]:
@@ -57,13 +58,10 @@ class MeshWriter:
 
     def faces(self, name: Literal["body", "left", "right"]) -> UInt32[ndarray, "f 3"]:
         """Triangle list of one fit's model; shape-independent, so it is loaded once from a zero-shape model."""
+        if name == "body":
+            return smpl_faces(self.model_root)
         if name not in self.topology:
-            zeros: Float32[ndarray, "10"] = np.zeros(10, dtype=np.float32)
-            if name == "body":
-                faces = SmplxLayerTorch(betas=zeros, model_type="smpl", gender="neutral", model_root_dir=self.model_root).faces
-            else:
-                faces = MANOLayerNP(side=name, betas=zeros, use_pca=False).f
-            self.topology[name] = np.asarray(faces, dtype=np.uint32)
+            self.topology[name] = np.asarray(MANOLayerNP(side=name, betas=np.zeros(10, dtype=np.float32), use_pca=False).f, dtype=np.uint32)
         return self.topology[name]
 
     def start(self, recording: rr.RecordingStream, specs: tuple[FitSpec, ...]) -> None:

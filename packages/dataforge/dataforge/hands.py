@@ -58,6 +58,8 @@ assert (LEFT_HAND_INDEX, RIGHT_HAND_INDEX) == (0, 1)
 
 HAND_ALBEDO: dict[Side, tuple[int, int, int, int]] = {"left": (90, 160, 240, 110), "right": (240, 170, 130, 110)}
 """Shared per-side mesh RGBA."""
+BODY_ALBEDO: tuple[int, int, int, int] = (160, 190, 200, 110)
+"""Shared body mesh RGBA."""
 
 
 def coco133_from_coco_hands(joints_lr: Float32[ndarray, "2 21 d"]) -> Float32[ndarray, "133 d"]:
