@@ -234,6 +234,10 @@ def test_partial_outputs_move_to_the_attic_before_a_rerun(tmp_path: Path) -> Non
         ("hexels-train", str(roots.runs)),
         ("hexels-render-published", str(roots.runs)),
     ]
+    assert [args[args.index(flag) + 1] for (_, args), flag in zip(runner.steps, ("--method", "--methods"), strict=True)] == [
+        "hexels-v1-7k",
+        "hexels-v1-30k-pub-cuda",
+    ], "tools take the method itself, never a variant and step count"
     attic: list[str] = sorted(path.name for path in (roots.runs / "_attic").iterdir())
     assert len(attic) == 2
     assert attic[0].startswith("dtu-scan24-hexels-v1-30k-pub-cuda-") and attic[1].startswith("dtu-scan24-hexels-v1-7k-")

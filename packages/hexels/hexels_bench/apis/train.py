@@ -26,7 +26,7 @@ from hexels_bench.checkpoint import find_checkpoint
 from hexels_bench.gpu_monitor import Measured, gpu_name, run_measured
 from hexels_bench.hexel_ply import HexelPly, HexelVariant
 from hexels_bench.layout import UPSTREAM_DATASET, Dataset, Roots, read_json
-from hexels_bench.methods import primitive_bytes
+from hexels_bench.methods import METHODS, Method, MethodSpec
 from hexels_bench.metrics import TrainRecord
 from hexels_bench.upstream import UPSTREAM_HEXELS_REV, UpstreamRenderer, load_renderer, measure_fps, write_test_renders
 
@@ -67,10 +67,8 @@ class Config:
     """Run-layout dataset name."""
     scene: str
     """Upstream scene name."""
-    variant: HexelVariant = "v1"
-    """Appearance variant."""
-    steps: int = 7000
-    """Optimisation steps."""
+    method: Method = "hexels-v1-7k"
+    """A Hexels method we train (hexels-v1-7k, hexels-v3-7k); its row in `METHODS` gives the variant and step count."""
     roots: Roots = field(default_factory=Roots)
     """Data and run roots."""
 
@@ -86,15 +84,18 @@ def prepare_command(scene_dir: Path, model_dir: Path, dataset: Dataset, variant:
     return apply_schedule([str(part) for part in prepared["command"]], steps), Path(prepared["cwd"])
 
 
-def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, steps: int) -> Path:
-    method: str = f"hexels-{variant}-{steps // 1000}k" if steps % 1000 == 0 else f"hexels-{variant}-{steps}"
+def train(roots: Roots, dataset: Dataset, scene: str, method: Method) -> Path:
+    spec: MethodSpec = METHODS[method]
+    variant: HexelVariant | None = spec.variant
+    if variant is None or not spec.trains:
+        raise ValueError(f"{method} is not a Hexels method we train")
     run_dir: Path = roots.run_dir(dataset, scene, method)
     model_dir: Path = run_dir / "upstream"
     if model_dir.exists():
         raise FileExistsError(f"{model_dir} exists; upstream needs a fresh output directory")
     scene_dir: Path = roots.scene_dir(dataset, scene)
     run_dir.mkdir(parents=True, exist_ok=True)
-    command, cwd = prepare_command(scene_dir, model_dir, dataset, variant, steps)
+    command, cwd = prepare_command(scene_dir, model_dir, dataset, variant, spec.steps)
     measured: Measured = run_measured(command, cwd, run_dir / "log.txt")
     summary: dict = json.loads((model_dir / "summary.json").read_text())
 
@@ -107,13 +108,13 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
     fps: float = measure_fps(renderer)
     del renderer
     torch.cuda.empty_cache()
-    score_run(roots, dataset, scene, method, primitive_bytes(variant), fps, torch.device("cuda"))
+    score_run(roots, dataset, scene, method, fps, torch.device("cuda"))
 
     record = TrainRecord(
         method=method,
         dataset=dataset,
         scene=scene,
-        steps=steps,
+        steps=spec.steps,
         loop_seconds=float(summary["train_seconds"]),
         total_seconds=measured.seconds,
         peak_vram_gib=measured.vram.peak_gib(),
@@ -129,5 +130,5 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
 
 
 def main(config: Config) -> None:
-    run_dir: Path = train(config.roots, config.dataset, config.scene, config.variant, config.steps)
+    run_dir: Path = train(config.roots, config.dataset, config.scene, config.method)
     print(f"wrote {run_dir}")

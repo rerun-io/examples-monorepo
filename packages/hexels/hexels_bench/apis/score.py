@@ -33,13 +33,12 @@ def score_run(
     roots: Roots,
     dataset: Dataset,
     scene: str,
-    method: str,
-    bytes_per_primitive: int,
+    method: Method,
     fps: float | None,
     device: torch.device,
     with_lpips: bool = True,
 ) -> MetricsFile:
-    """Score `runs/<dataset>/<scene>/<method>/`; deploy MB = model.ply vertices x `bytes_per_primitive` / 1e6."""
+    """Score `runs/<dataset>/<scene>/<method>/`; deploy MB = model.ply vertices x the method's FP32 bytes per primitive / 1e6."""
     run_dir: Path = roots.run_dir(dataset, scene, method)
     cameras: CamerasFile = read_json(CamerasFile, run_dir / "cameras.json")
     rows: list[ViewMetrics] = score_views(
@@ -48,7 +47,7 @@ def score_run(
     if fps is None and (run_dir / "metrics.json").is_file():
         fps = read_json(MetricsFile, run_dir / "metrics.json").fps
     ply: Path = run_dir / "model.ply"
-    deploy_mb: float | None = ply_vertex_count(ply) * bytes_per_primitive / 1e6 if ply.is_file() else None
+    deploy_mb: float | None = ply_vertex_count(ply) * primitive_bytes(METHODS[method].variant) / 1e6 if ply.is_file() else None
     ply_mb: float | None = ply.stat().st_size / 1e6 if ply.is_file() else None
     metrics: MetricsFile = summarize(
         rows, method=method, dataset=dataset, scene=scene, scorer="shared-png16", fps=fps, deploy_mb=deploy_mb, ply_mb=ply_mb
@@ -58,8 +57,7 @@ def score_run(
 
 
 def main(config: Config) -> None:
-    size: int = primitive_bytes(METHODS[config.method].variant)
-    metrics: MetricsFile = score_run(config.roots, config.dataset, config.scene, config.method, size, config.fps, torch.device(config.device))
+    metrics: MetricsFile = score_run(config.roots, config.dataset, config.scene, config.method, config.fps, torch.device(config.device))
     lpips_text: str = "n/a" if metrics.lpips_vgg is None else f"{metrics.lpips_vgg:.4f}"
     print(
         f"{config.dataset}/{config.scene}/{config.method}: {metrics.views} views, PSNR {metrics.psnr:.4f} dB, SSIM {metrics.ssim:.4f}, LPIPS {lpips_text}"

@@ -3,6 +3,7 @@
 import json
 import shutil
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TypeAlias
 
@@ -25,15 +26,15 @@ renders = pathlib.Path(value("--test-renders"))
 renders.mkdir(parents=True)
 for name in ("0000", "0008"):
     (renders / f"{name}.png").write_bytes(b"png")
-pathlib.Path(value("--summary")).write_text(json.dumps({"steps": 70, "loop_seconds": 1.5, "wall_seconds": 2.0, "training_end_unix_seconds": 0.0,
+pathlib.Path(value("--summary")).write_text(json.dumps({"steps": 30, "loop_seconds": 1.5, "wall_seconds": 2.0, "training_end_unix_seconds": 0.0,
     "splats": 2, "brush_eval_psnr": 20.0, "brush_eval_ssim": 0.5, "renderer": "fake"}))
 print("trained")
 """
 
 
-def config(root: Path, binary: Path, steps: int = 70, scenes: tuple[str, ...] = ("scan1",)) -> Config:
+def config(root: Path, binary: Path, scenes: tuple[str, ...] = ("scan1",)) -> Config:
     roots = Roots(data=root / "data", runs=root / "runs", brush_prepared=root / "prepared")
-    return Config(dataset="dtu", scenes=scenes, steps=steps, method="brush-test", roots=roots, binary=binary, gpu_lock=root / "gpu.lock")
+    return Config(dataset="dtu", scenes=scenes, method="brush-smoke", roots=roots, binary=binary, gpu_lock=root / "gpu.lock")
 
 
 def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_scene: SceneFactory) -> None:
@@ -43,18 +44,18 @@ def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_
     binary.write_text(FAKE_TRAINER)
     binary.chmod(0o755)
     main(config(tmp_path, binary), ["--", "--seed", "7"])
-    run: Path = tmp_path / "runs/dtu/scan1/brush-test"
+    run: Path = tmp_path / "runs/dtu/scan1/brush-smoke"
     arguments: list[str] = (tmp_path / "bin/arguments").read_text().splitlines()
     assert arguments == [
         str((tmp_path / "prepared/dtu/scan1").resolve()),
         "--total-train-iters",
-        "70",
+        "30",
         "--max-splats",
         "3",
         "--eval-every",
-        "70",
+        "30",
         "--export-every",
-        "70",
+        "30",
         "--export-path",
         str(run.resolve()),
         "--export-name",
@@ -82,7 +83,7 @@ def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_
         "source_sha",
         "command",
     }
-    assert (report["method"], report["dataset"], report["scene"], report["steps"]) == ("brush-test", "dtu", "scan1", 70)
+    assert (report["method"], report["dataset"], report["scene"], report["steps"]) == ("brush-smoke", "dtu", "scan1", 30)
     assert (report["loop_seconds"], report["primitives"], report["sfm_points"]) == (1.5, 2, 3)
     assert report["total_seconds"] > 0.0
     assert report["command"].endswith("--seed 7")
@@ -106,8 +107,8 @@ def test_failed_training_leaves_no_report(tmp_path: Path, protocol_scene: SceneF
     with pytest.raises(RuntimeError, match="1 of 1 scenes failed: scan1"):
         main(config(tmp_path, binary), [])
     assert "FAILED dtu/scan1: gsplat-train exited with 3" in capsys.readouterr().out
-    assert not (tmp_path / "runs/dtu/scan1/brush-test/train.json").exists()
-    assert "broken" in (tmp_path / "runs/dtu/scan1/brush-test/log.txt").read_text()
+    assert not (tmp_path / "runs/dtu/scan1/brush-smoke/train.json").exists()
+    assert "broken" in (tmp_path / "runs/dtu/scan1/brush-smoke/log.txt").read_text()
 
 
 def test_a_failing_scene_does_not_stop_the_batch(tmp_path: Path, protocol_scene: SceneFactory) -> None:
@@ -118,7 +119,13 @@ def test_a_failing_scene_does_not_stop_the_batch(tmp_path: Path, protocol_scene:
     binary.chmod(0o755)
     with pytest.raises(RuntimeError, match="1 of 2 scenes failed: scan1"):
         main(config(tmp_path, binary, scenes=("scan1", "scan2")), [])
-    assert (tmp_path / "runs/dtu/scan2/brush-test/train.json").is_file()
+    assert (tmp_path / "runs/dtu/scan2/brush-smoke/train.json").is_file()
+
+
+def test_only_brush_training_methods_are_accepted(tmp_path: Path) -> None:
+    for method in ("hexels-v1-7k", "brush-7k-wgsl"):
+        with pytest.raises(ValueError, match=f"{method} is not a Brush method we train"):
+            main(replace(config(tmp_path, tmp_path / "gsplat-train"), method=method), [])
 
 
 @pytest.mark.integration
@@ -137,8 +144,8 @@ def test_tiny_brush_training_through_the_protocol_path(tmp_path: Path, protocol_
         for i, ((x, y, z), (r, g, b)) in enumerate(zip(rng.uniform(-0.5, 0.5, (64, 3)).tolist(), rng.integers(0, 256, (64, 3)).tolist(), strict=True))
     ]
     (source / "sparse/0/points3D.txt").write_text("\n".join(points) + "\n")
-    main(config(tmp_path, binary, steps=30), [])
-    run: Path = tmp_path / "runs/dtu/scan1/brush-test"
+    main(config(tmp_path, binary), [])
+    run: Path = tmp_path / "runs/dtu/scan1/brush-smoke"
     report: dict = json.loads((run / "train.json").read_text())
     header: bytes = (run / "model.ply").read_bytes().split(b"end_header")[0]
     assert f"element vertex {report['primitives']}\n".encode() in header

@@ -63,7 +63,7 @@ def test_render_published_scan24_v3_reproduces_published_metrics(tmp_path: Path)
     """Upstream CUDA renders of the published checkpoint score within 0.05 dB of the HF numbers, and the
     shared 16-bit PNG scorer agrees with upstream's direct-float evaluator to < 0.01 dB."""
     roots = Roots(data=needs_data("pretrained-nvs", "dtu").data, runs=tmp_path)
-    shared: MetricsFile = render_published(roots, *SCAN24_V3, upstream_evaluator=True)
+    shared: MetricsFile = render_published(roots, "dtu", "scan24", "hexels-v3-30k-pub-cuda", upstream_evaluator=True)
     run_dir: Path = roots.run_dir("dtu", "scan24", "hexels-v3-30k-pub-cuda")
     published: MetricsFile = read_json(MetricsFile, run_dir / "published_metrics.json")
     upstream: MetricsFile = read_json(MetricsFile, run_dir / "upstream_float_metrics.json")

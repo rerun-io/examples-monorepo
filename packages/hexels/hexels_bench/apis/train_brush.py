@@ -18,6 +18,7 @@ from hexels_bench.brush import PreparedScene, prepare_scene
 from hexels_bench.cameras import CameraContract, cameras_file, write_cameras_file
 from hexels_bench.gpu_monitor import Measured, gpu_lock, gpu_name, run_measured
 from hexels_bench.layout import GSPLAT_RELEASE, PROTOCOL_SCENES, Dataset, Roots, read_json
+from hexels_bench.methods import METHODS, Method, MethodSpec
 from hexels_bench.metrics import TrainRecord
 
 
@@ -29,10 +30,8 @@ class Config:
     """Run-layout dataset name."""
     scenes: tuple[str, ...] = ()
     """Upstream scene names (garden, scan24, Truck); empty runs every protocol scene of the dataset."""
-    steps: int = 7000
-    """Training steps."""
-    method: str = "brush-7k"
-    """Run-layout method directory."""
+    method: Method = "brush-7k"
+    """A Brush method we train; its row in `METHODS` gives the step count."""
     roots: Roots = field(default_factory=Roots)
     """Data (scenes, camera contracts), runs and Brush-prepared roots."""
     binary: Path = GSPLAT_RELEASE / "gsplat-train"
@@ -75,8 +74,9 @@ def source_sha() -> str:
 
 def main(config: Config, extra_flags: list[str]) -> None:
     """Run every selected scene; a failing scene is reported at the end and does not stop the others."""
-    if config.steps <= 0:
-        raise ValueError("steps must be positive")
+    spec: MethodSpec = METHODS[config.method]
+    if spec.variant is not None or not spec.trains:
+        raise ValueError(f"{config.method} is not a Brush method we train")
     forwarded: list[str] = extra_flags[1:] if extra_flags[:1] == ["--"] else extra_flags
     scenes: tuple[str, ...] = config.scenes or PROTOCOL_SCENES[config.dataset]
     failures: list[str] = []
@@ -102,7 +102,7 @@ def run_scene(config: Config, scene: str, forwarded: list[str]) -> None:
     prepared: PreparedScene = prepare_scene(roots.scene_dir(config.dataset, scene), contract, prepared_dir)
     run.mkdir(parents=True, exist_ok=True)
     summary_path: Path = run / "brush-summary.json"
-    steps: str = str(config.steps)
+    steps: str = str(METHODS[config.method].steps)
     command: list[str] = [
         str(config.binary.resolve()), str(prepared_dir.resolve()),
         "--total-train-iters", steps, "--max-splats", str(prepared.sfm_points), "--eval-every", steps, "--export-every", steps,

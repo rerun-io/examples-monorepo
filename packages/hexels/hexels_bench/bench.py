@@ -23,7 +23,7 @@ from serde.json import from_json, to_json
 from hexels_bench.cameras import CamerasFile
 from hexels_bench.gpu_monitor import gpu_lock
 from hexels_bench.layout import GSPLAT_RELEASE, PROTOCOL_SCENES, WORKSPACE, Dataset, Roots, read_json
-from hexels_bench.methods import METHODS, Method, MethodSpec
+from hexels_bench.methods import BENCHMARK_METHODS, METHODS, Method, MethodSpec
 from hexels_bench.metrics import MetricsFile, TrainRecord
 
 Env: TypeAlias = Literal["gsplat-rust-renderer", "hexels"]
@@ -101,7 +101,7 @@ class QueueSummary:
     """Items that failed (see FAILURES.jsonl)."""
 
 
-def build_queue(datasets: tuple[Dataset, ...], scenes: tuple[str, ...] = (), methods: tuple[Method, ...] = tuple(METHODS)) -> list[Item]:
+def build_queue(datasets: tuple[Dataset, ...], scenes: tuple[str, ...] = (), methods: tuple[Method, ...] = BENCHMARK_METHODS) -> list[Item]:
     """Items dataset by dataset, scenes in upstream order, every method of a scene before the next scene.
 
     Args:
@@ -191,7 +191,7 @@ def brush_train_step(roots: Roots, item: Item) -> Step:
     """The Brush protocol runner for one scene, without --gpu-lock (the conductor already holds it)."""
     args: tuple[str, ...] = (
         "python", str(WORKSPACE / "packages" / "hexels" / "tools" / "train_brush.py"), "--dataset", item.dataset, "--scenes", item.scene, "--method", item.method,
-        "--steps", str(METHODS[item.method].steps), *roots_args(roots),
+        *roots_args(roots),
     )  # fmt: skip
     return Step(name="brush-train", env="hexels", args=args)
 
@@ -236,21 +236,11 @@ def execute(roots: Roots, item: Item, run: Runner) -> None:
         run(score_step(roots, item, None), log)
     elif spec.trains:
         to_attic(roots, item, (run_dir,))
-        args: tuple[str, ...] = (
-            "hexels-train",
-            "--dataset",
-            item.dataset,
-            "--scene",
-            item.scene,
-            "--variant",
-            spec.variant,
-            "--steps",
-            str(spec.steps),
-        )
+        args: tuple[str, ...] = ("hexels-train", "--dataset", item.dataset, "--scene", item.scene, "--method", item.method)
         run(Step(name="hexels-train", env="hexels", args=(*args, *roots_args(roots))), log)
     else:
         to_attic(roots, item, (run_dir / "upstream-eval", run_dir / "upstream-eval-job"))
-        args = ("hexels-render-published", "--dataset", item.dataset, "--scenes", item.scene, "--variants", spec.variant)
+        args = ("hexels-render-published", "--dataset", item.dataset, "--scenes", item.scene, "--methods", item.method)
         run(Step(name="hexels-render-published", env="hexels", args=(*args, *roots_args(roots))), log)
     reason: str | None = incomplete_reason(run_dir, item.method)
     if reason is not None:

@@ -69,7 +69,7 @@ def test_score_run_writes_metrics_beside_renders(tmp_path: Path) -> None:
     rgb: np.ndarray = np.random.default_rng(0).integers(0, 65536, size=(6, 8, 3), dtype=np.uint16)
     write_png16(roots.gt_dir("dtu", "scanX") / "0000.png", rgb)
     write_png16(run_dir / "renders" / "test" / "0000.png", rgb // 2)
-    metrics: MetricsFile = score_run(roots, "dtu", "scanX", "hexels-v1-7k", 80, 123.0, torch.device("cpu"), with_lpips=False)
+    metrics: MetricsFile = score_run(roots, "dtu", "scanX", "hexels-v1-7k", 123.0, torch.device("cpu"), with_lpips=False)
     assert metrics.views == 1 and metrics.fps == 123.0 and metrics.deploy_mb is None
     assert read_json(MetricsFile, run_dir / "metrics.json") == metrics
     assert pytest.approx(metrics.psnr, abs=1e-9) == metrics.per_view[0].psnr

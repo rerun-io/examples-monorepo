@@ -5,7 +5,7 @@ from pathlib import Path
 
 from hexels_bench.bench import Item, QueueSummary, build_queue, pixi_runner, run_queue
 from hexels_bench.layout import Dataset, Roots
-from hexels_bench.methods import METHODS, Method
+from hexels_bench.methods import BENCHMARK_METHODS, Method
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +16,7 @@ class Config:
     """Datasets in queue order."""
     scenes: tuple[str, ...] = ()
     """Scene filter (upstream names, e.g. garden scan24 Truck); empty runs every protocol scene."""
-    methods: tuple[Method, ...] = tuple(METHODS)
+    methods: tuple[Method, ...] = BENCHMARK_METHODS
     """Methods per scene, in this order."""
     tail_methods: tuple[Method, ...] = ()
     """Methods queued afterwards for every protocol scene of the datasets (e.g. brush-7k to score finished Brush runs)."""

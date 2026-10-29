@@ -10,13 +10,12 @@ from pathlib import Path
 
 import torch
 
-from hexels_bench.apis.export_published import published_method, stage_published
+from hexels_bench.apis.export_published import published_variant, stage_published
 from hexels_bench.apis.score import score_run
 from hexels_bench.cameras import CamerasFile
 from hexels_bench.checkpoint import find_checkpoint
-from hexels_bench.hexel_ply import HexelVariant
 from hexels_bench.layout import Dataset, Roots, read_json
-from hexels_bench.methods import primitive_bytes
+from hexels_bench.methods import Method
 from hexels_bench.metrics import MetricsFile, ViewMetrics, summarize, write_metrics_file
 from hexels_bench.upstream import UpstreamRenderer, load_renderer, measure_fps, run_upstream_evaluator, write_test_renders
 
@@ -29,15 +28,15 @@ class Config:
     """Run-layout dataset name."""
     scenes: list[str]
     """Upstream scene names."""
-    variants: list[HexelVariant] = field(default_factory=lambda: ["v1", "v2", "v3"])
-    """Published variants."""
+    methods: list[Method] = field(default_factory=lambda: ["hexels-v1-30k-pub-cuda", "hexels-v2-30k-pub-cuda", "hexels-v3-30k-pub-cuda"])
+    """Published CUDA methods."""
     upstream_evaluator: bool = True
     """Also run upstream `scripts.evaluate_nvs_campaign evaluate` (direct-float metrics, fly-around video)."""
     roots: Roots = field(default_factory=Roots)
     """Data and run roots."""
 
 
-def upstream_float_metrics(result: dict, method: str, dataset: Dataset, scene: str, shared: MetricsFile) -> MetricsFile:
+def upstream_float_metrics(result: dict, method: Method, dataset: Dataset, scene: str, shared: MetricsFile) -> MetricsFile:
     """Upstream's evaluator result in our metrics.json schema (scorer upstream-float)."""
     rows: list[ViewMetrics] = [
         ViewMetrics(name=row["image_name"], psnr=row["psnr_db"], ssim=row["ssim"], lpips_vgg=row["lpips_vgg"]) for row in result["per_view"]
@@ -54,17 +53,16 @@ def upstream_float_metrics(result: dict, method: str, dataset: Dataset, scene: s
     )
 
 
-def render_published(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, upstream_evaluator: bool) -> MetricsFile:
-    run_dir: Path = stage_published(roots, dataset, scene, variant)
-    model_dir: Path = roots.published_model(dataset, scene, variant)
+def render_published(roots: Roots, dataset: Dataset, scene: str, method: Method, upstream_evaluator: bool) -> MetricsFile:
+    run_dir: Path = stage_published(roots, dataset, scene, method)
+    model_dir: Path = roots.published_model(dataset, scene, published_variant(method))
     cameras: CamerasFile = read_json(CamerasFile, run_dir / "cameras.json")
     renderer: UpstreamRenderer = load_renderer(model_dir, find_checkpoint(model_dir), roots.scene_dir(dataset, scene))
     write_test_renders(renderer, [camera.name for camera in cameras.cameras], run_dir / "renders" / "test")
     fps: float = measure_fps(renderer)
     del renderer
     torch.cuda.empty_cache()
-    method: str = published_method(variant)
-    shared: MetricsFile = score_run(roots, dataset, scene, method, primitive_bytes(variant), fps, torch.device("cuda"))
+    shared: MetricsFile = score_run(roots, dataset, scene, method, fps, torch.device("cuda"))
     if upstream_evaluator:
         result: dict = run_upstream_evaluator(roots, model_dir, run_dir / "upstream-eval" / "metrics.json", run_dir / "log.txt")
         upstream: MetricsFile = upstream_float_metrics(result, method, dataset, scene, shared)
@@ -79,5 +77,5 @@ def render_published(roots: Roots, dataset: Dataset, scene: str, variant: HexelV
 
 def main(config: Config) -> None:
     for scene in config.scenes:
-        for variant in config.variants:
-            render_published(config.roots, config.dataset, scene, variant, config.upstream_evaluator)
+        for method in config.methods:
+            render_published(config.roots, config.dataset, scene, method, config.upstream_evaluator)

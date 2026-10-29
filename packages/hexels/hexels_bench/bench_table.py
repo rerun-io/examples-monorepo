@@ -21,7 +21,7 @@ from serde.json import to_json
 
 from hexels_bench.bench import incomplete_reason
 from hexels_bench.layout import PROTOCOL_SCENES, REPRESENTATIVE_SCENES, UPSTREAM_DATASET, Dataset, read_json
-from hexels_bench.methods import METHODS, Method
+from hexels_bench.methods import BENCHMARK_METHODS, METHODS, Method
 from hexels_bench.metrics import MetricsFile, TrainRecord, ply_vertex_count
 from hexels_bench.paper import PaperNumbers, PublishedNvs
 
@@ -300,7 +300,7 @@ def build_table(
     datasets: tuple[Dataset, ...] = ("dtu", "mipnerf360", "tnt"),
     scenes: dict[Dataset, tuple[str, ...]] | None = None,
     mean_scenes: dict[Dataset, tuple[str, ...]] | None = None,
-    methods: tuple[Method, ...] = tuple(METHODS),
+    methods: tuple[Method, ...] = BENCHMARK_METHODS,
 ) -> BenchTable:
     """Read every run directory into scene rows, dataset means and flags.
 
