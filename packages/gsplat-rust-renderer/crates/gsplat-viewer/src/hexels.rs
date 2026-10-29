@@ -252,5 +252,12 @@ mod tests {
                 );
             }
         }
+        // `gaussians3d.compute_visualizer` writes overrides under this identifier.
+        assert_eq!(
+            crate::visualizer::render_mode_descriptor()
+                .component
+                .as_str(),
+            "ComputeGaussianSplats3D:render_mode"
+        );
     }
 }
