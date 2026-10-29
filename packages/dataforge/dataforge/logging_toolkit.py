@@ -121,6 +121,12 @@ def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
     return rr.TimeColumn(schema.TIMELINE, duration=times_ns.view("timedelta64[ns]"))
 
 
+def capture_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
+    """Build the as-cut duration index from Int64[ndarray, 'n_samples'] nanoseconds."""
+    assert times_ns.dtype == np.int64, f"capture_time is an int64 nanosecond clock, got {times_ns.dtype}"
+    return rr.TimeColumn(schema.CAPTURE_TIMELINE, duration=times_ns.view("timedelta64[ns]"))
+
+
 def frame_index_column(indices: Int64[ndarray, "n"]) -> rr.TimeColumn:
     """Sequence timeline holding the upstream frame indices (Int64[ndarray, 'n'])."""
     return rr.TimeColumn(schema.FRAME_INDEX, sequence=indices)
@@ -132,6 +138,14 @@ FRAME_INDEX_FIELD: pa.Field = (
     .schema.field(schema.FRAME_INDEX)
 )
 """Rerun-derived sequence field shared by video sample and keyframe chunks."""
+
+
+CAPTURE_TIME_FIELD: pa.Field = (
+    rrc.Chunk.from_columns("/", indexes=[capture_column(np.array([0], dtype=np.int64))], columns=rr.Scalars.columns(scalars=[0.0]))
+    .to_record_batch()
+    .schema.field(schema.CAPTURE_TIMELINE)
+)
+"""Rerun-derived duration field shared by capture-time video chunks."""
 
 
 def log_rig_node(
@@ -179,6 +193,7 @@ def log_video_stream(
     entity_path: str,
     *,
     shift_ns: int = 0,
+    capture_time: bool = False,
     times_ns: Int64[ndarray, "n_samples"] | None = None,
     frame_indices: Int64[ndarray, "n"] | None = None,
 ) -> int:
@@ -218,6 +233,7 @@ def log_video_stream(
         recording: Destination recording stream.
         video_path: mp4 to remux, with GPU transcoding when B-frames require it.
         entity_path: ``.../pinhole/video`` entity to log under.
+        capture_time: Duplicate the final video_time index as the immutable as-cut clock.
         shift_ns: Nanoseconds added to every indexed chunk's ``video_time``.
         times_ns: Exact ``video_time`` per sample, in presentation order; must
             hold one value per sample in the file.
@@ -306,7 +322,15 @@ def log_video_stream(
         timeline_name=schema.TIMELINE,
         transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True, ffmpeg_override=ffmpeg_override),
     )
-    stream = reader.stream().flat_map(tap)
+    def with_capture_time(chunk: rrc.Chunk) -> list[rrc.Chunk]:
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        if schema.TIMELINE not in batch.schema.names:
+            return [chunk]
+        return rrc.Chunk.from_record_batch(batch.add_column(batch.schema.get_field_index(schema.TIMELINE) + 1, CAPTURE_TIME_FIELD, batch.column(schema.TIMELINE)))
+
+    stream: rrc.LazyChunkStream = reader.stream().flat_map(tap)
+    if capture_time:
+        stream = stream.flat_map(with_capture_time)
     # Mp4Reader already emits complete GoPs and exact keyframe indexes. Compact
     # these chunks without deriving a second set of keyframe rows.
     batcher = ChunkBatcher(profile=replace(rrc.OptimizationProfile.OBJECT_STORE, gop_batching=False))
@@ -327,13 +351,13 @@ class ImuChannel:
     """Scaled samples (rad/s for gyro, m/s^2 for accel)."""
 
 
-def _log_scalar_channel(recording: rr.RecordingStream, entity_path: str, channel: ImuChannel) -> None:
+def _log_scalar_channel(recording: rr.RecordingStream, entity_path: str, channel: ImuChannel, *, capture_time: bool = False) -> None:
     """Send one sensor channel's samples columnar on ``video_time``; an empty channel logs nothing."""
     if channel.times_ns.size == 0:
         return
     rr.send_columns(
         entity_path,
-        indexes=[time_column(channel.times_ns)],
+        indexes=[time_column(channel.times_ns), *([capture_column(channel.times_ns)] if capture_time else [])],
         columns=rr.Scalars.columns(scalars=channel.values_xyz),
         recording=recording,
     )
@@ -540,6 +564,7 @@ def log_pose_track(
     times_ns: Int64[ndarray, "n_poses"],
     translations_xyz: Float32[ndarray, "n_poses 3"] | Float64[ndarray, "n_poses 3"],
     quaternions_xyzw: Float32[ndarray, "n_poses 4"] | Float64[ndarray, "n_poses 4"],
+    capture_time: bool = False,
     frame_indices: Int64[ndarray, "n"] | None = None,
 ) -> None:
     """Send a temporal pose track columnar: one ``Transform3D`` per sample on ``video_time``.
@@ -560,13 +585,18 @@ def log_pose_track(
         translations_xyz: Positions in metres, in whichever float width the
             source holds them; Rerun's transform components are float32 either way.
         quaternions_xyzw: Orientations, scalar last, same widths.
+        capture_time: Also log the unmodified capture clock.
         frame_indices: Optional Int64[ndarray, "n"] source sequence index per pose.
     """
     if frame_indices is not None and len(frame_indices) != len(times_ns):
         raise ValueError("pose frame_indices and times_ns must have the same length")
     rr.send_columns(
         entity_path,
-        indexes=[time_column(times_ns), *([] if frame_indices is None else [frame_index_column(frame_indices)])],
+        indexes=[
+            time_column(times_ns),
+            *([capture_column(times_ns)] if capture_time else []),
+            *([] if frame_indices is None else [frame_index_column(frame_indices)]),
+        ],
         columns=rr.Transform3D.columns(translation=translations_xyz, quaternion=quaternions_xyzw),
         recording=recording,
     )
@@ -643,6 +673,7 @@ def log_imu(
     gyro: ImuChannel,
     accel: ImuChannel,
     name: str,
+    capture_time: bool = False,
     rig_T_imu: rr.Transform3D | None = None,
 ) -> None:
     """Log one IMU node: both channels columnar, plus the static node metadata.
@@ -661,10 +692,11 @@ def log_imu(
         gyro: Angular-velocity samples in rad/s; an empty channel is skipped.
         accel: Linear-acceleration samples in m/s^2; an empty channel is skipped.
         name: Human label for the device (e.g. ``"dev0"``, ``"oak-imu"``).
+        capture_time: Also log the unmodified capture clock on both channels.
         rig_T_imu: This IMU's pose in the rig frame; ``None`` logs the identity.
     """
-    _log_scalar_channel(recording, schema.gyro_path(rig, imu), gyro)
-    _log_scalar_channel(recording, schema.accel_path(rig, imu), accel)
+    _log_scalar_channel(recording, schema.gyro_path(rig, imu), gyro, capture_time=capture_time)
+    _log_scalar_channel(recording, schema.accel_path(rig, imu), accel, capture_time=capture_time)
     _log_sensor_node(recording, schema.imu_path(rig, imu), name=name, kind="imu", rig_T_sensor=rig_T_imu)
 
 

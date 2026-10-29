@@ -12,8 +12,14 @@ surveyed control points (``/world/gt/control_points`` with per-camera
 
 from __future__ import annotations
 
-TIMELINE: str = "video_time"
-"""The single timestamp timeline every dataforge stream logs on."""
+from typing import Final
+
+TIMELINE: Final = "video_time"
+"""The aligned duration timeline every dataforge stream logs on."""
+
+CAPTURE_TIMELINE: Final = "capture_time"
+"""As-cut duration clock preserved when video_time is aligned by curation."""
+
 
 FRAME_INDEX: str = "frame_index"
 """Sequence timeline holding the upstream frame index; datasets whose source has one stamp it beside video_time."""
@@ -141,14 +147,14 @@ def hand_profile_path() -> str:
     return "/world/gt/hands/profile"
 
 
-def coco133_xyz_path() -> str:
-    """§10: COCO-133 keypoints in world metres."""
-    return "/world/gt/coco133_xyz"
+def coco133_xyz_path(*, pred: str | None = None) -> str:
+    """§10: COCO-133 keypoints in world metres; a model's under ``/world/pred/<pred>`` (§3, like ``person_path``)."""
+    return f"{'/world/gt' if pred is None else f'/world/pred/{pred}'}/coco133_xyz"
 
 
-def coco133_uv_path(rig: int, cam: int) -> str:
-    """§10: shipped COCO-133 keypoints in camera pixels."""
-    return f"{pinhole_path(rig, cam)}/coco133_uv"
+def coco133_uv_path(rig: int, cam: int, *, pred: str | None = None) -> str:
+    """§10: shipped COCO-133 keypoints in camera pixels; a model's under ``pinhole/pred/<pred>``."""
+    return f"{pinhole_path(rig, cam)}{'' if pred is None else f'/pred/{pred}'}/coco133_uv"
 
 
 def coco133_uv_projected_path(rig: int, cam: int) -> str:

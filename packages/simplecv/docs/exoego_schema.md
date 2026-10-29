@@ -267,6 +267,7 @@ When ingesting a recording:
 5. Use `video_time` everywhere; a frame-indexed source additionally stamps
    `frame_index` (sequence) on frame-aligned rows (§14). Dataforge exposes it
    as `schema.FRAME_INDEX`. Native-rate sensors keep their own sample times (§8).
+   SelfCap also stamps `capture_time`, the as-cut duration clock; curation shifts only `video_time`.
 6. Every non-camera peer sensor (`/world/rig_*/imu_*`, `/world/rig_*/mag_*`) has a
    static `Transform3D` (`rig_T_imu` / `rig_T_mag`) and a static `kind`
    (`"imu"` / `"mag"`). This is a **writer-side** rule for now — dataforge's

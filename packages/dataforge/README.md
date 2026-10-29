@@ -405,6 +405,38 @@ registers exactly as before. Duplicates are skipped, which keeps a re-register
 idempotent; after regenerating a layer use `--replace`, because a skipped
 duplicate leaves the server serving the old file and says nothing.
 
+
+For a bounded replacement without `REPLACE`, supply one layer and explicit
+files named `<recording_id>.rrd`:
+
+```bash
+pixi run -e dataforge --frozen dataforge-swap-layer --catalog-url <url> --catalog-name selfcap --layer calib --files /stage/<recording_id>.rrd
+```
+
+Before any mutation, every file must contain exactly one recording whose ID
+matches its file stem. Layer names must match `[a-zA-Z0-9][a-zA-Z0-9_-]*`;
+spaces and path separators are rejected. Registration results must contain
+exactly the batch's expected IDs, or the swap raises an error.
+
+`--batch-size` defaults to 500. Each batch waits for a dataset listing under
+10 seconds and, with `--local-catalog` (the default), a zero TCP listen backlog
+on the catalog's port on this host. Run it on the catalog's host; from another
+host pass `--no-local-catalog`. `--gate-timeout-s` defaults to 600
+seconds per batch and raises `TimeoutError` if the gate stays busy; the wait
+prints progress every 30 seconds. Each batch prints its layer and exact segment
+IDs before unregistering, so an interrupted swap leaves a recovery record. With
+`--nfs-mount /mnt/nas/datasets`, it also requires average NFS READ execute
+time below 100 ms over 20 seconds. The swap drops only the named segment IDs
+and layer, then registers with `SKIP`. It reads no segment table and does not
+republish blueprints. Files must already be published at their final paths.
+If registration fails after a drop, that batch can be rerun.
+
+SelfCap base recordings include raw Quest hands in the COCO-133 hand slots,
+with other joints absent (NaN). `capture_time` equals `video_time` at ingest
+for videos, IMU, head pose, and hands. Time alignment, latency correction,
+calibration, and inferred keypoints belong in the separate `selfcap-curate`
+package; it preserves `capture_time` as the as-cut clock.
+
 ### The layer rule
 
 Every dataset follows it; `lamaria` is the reference implementation. **base** is a

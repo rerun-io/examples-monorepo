@@ -3009,6 +3009,12 @@ cwd = "packages/dataforge"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Register every layer's rrds into a local Rerun catalog"
 
+[feature.dataforge.tasks.dataforge-swap-layer]
+cmd = "python tools/apps/swap_layer.py"
+cwd = "packages/dataforge"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Swap one catalog layer in idle-gated batches with exact segment IDs and SKIP"
+
 [feature.dataforge.tasks.dataforge-robocap-calibration]
 cmd = "python tools/robocap_calibration.py"
 cwd = "packages/dataforge"

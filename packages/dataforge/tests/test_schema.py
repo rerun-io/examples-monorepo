@@ -99,3 +99,10 @@ def test_a_person_carries_its_body_contact_and_markers_while_each_camera_carries
     assert schema.person_visibility_path(2, 0, 3) == "/world/rig_02/cam_00/pinhole/visibility/person_03"
     with pytest.raises(ValueError, match="non-negative"):
         schema.person_contact_path(0, -1)
+
+
+def test_coco133_prediction_paths_preserve_shipped_defaults() -> None:
+    assert schema.coco133_xyz_path() == "/world/gt/coco133_xyz"
+    assert schema.coco133_xyz_path(pred="rtmw_triangulated") == "/world/pred/rtmw_triangulated/coco133_xyz"
+    assert schema.coco133_uv_path(2, 0) == "/world/rig_02/cam_00/pinhole/coco133_uv"
+    assert schema.coco133_uv_path(2, 0, pred="sapiens2") == "/world/rig_02/cam_00/pinhole/pred/sapiens2/coco133_uv"
