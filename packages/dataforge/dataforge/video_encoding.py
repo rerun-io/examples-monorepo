@@ -332,19 +332,13 @@ def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     ]
 
 
-CUDA_FILTERS: dict[Path, bool] = {}
-CUDA_FILTER_LOCK = threading.Lock()
-
-
+@functools.cache
 def has_scale_cuda(binary: Path) -> bool:
-    """Whether this ffmpeg build can scale hardware frames; probe once across camera threads."""
-    with CUDA_FILTER_LOCK:
-        if binary not in CUDA_FILTERS:
-            result: subprocess.CompletedProcess[str] = subprocess.run(
-                [str(binary), "-hide_banner", "-filters"], capture_output=True, text=True, check=True
-            )
-            CUDA_FILTERS[binary] = any("scale_cuda" in line.split() for line in result.stdout.splitlines())
-        return CUDA_FILTERS[binary]
+    """Whether this ffmpeg build can scale hardware frames; cached per binary."""
+    result: subprocess.CompletedProcess[str] = subprocess.run(
+        [str(binary), "-hide_banner", "-filters"], capture_output=True, text=True, check=False
+    )
+    return any("scale_cuda" in line.split() for line in result.stdout.splitlines())
 
 
 def transcode_mp4(
