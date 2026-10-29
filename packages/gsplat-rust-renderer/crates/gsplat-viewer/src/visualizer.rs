@@ -263,11 +263,9 @@ pub(crate) fn draw_instances(
     let masks = query
         .highlights
         .entity_outline_mask(data.entity_path.hash());
-    let uniform = crate::renderer::draw_uniform(
-        solid_background(ctx),
-        re_renderer::PickingLayerObjectId(data.entity_path.hash64()),
-        masks,
-    );
+    let object = re_renderer::PickingLayerObjectId(data.entity_path.hash64());
+    let uniform =
+        crate::renderer::DrawUniform::new(solid_background(ctx), object, masks, primitives.len());
     for (index, world_from_local) in instances.iter().enumerate() {
         let world_from_local = world_from_local.as_affine3a();
         if !world_from_local.inverse().is_finite() {
