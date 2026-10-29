@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 from plyfile import PlyData, PlyElement
 
-from gsplat_rust_renderer.nvs_protocol import opengl_world_from_camera, prepare_scene, target_size
+from hexels_bench.brush import opengl_world_from_camera, prepare_scene, target_size
 
 SceneFactory: TypeAlias = Callable[..., tuple[Path, Path]]
 

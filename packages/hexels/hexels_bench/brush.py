@@ -1,15 +1,12 @@
-"""Hexels NVS protocol inputs for Brush: upstream cameras, split, target images and SfM initialization.
+"""Brush inputs of the Hexels NVS protocol: the upstream cameras, split, target images and SfM initialization.
 
 Upstream Hexels loads every scene through the 2DGS COLMAP reader (hbb1/2d-gaussian-splatting@335ad612):
 cameras sorted by image name, every eighth held out from index 0, field of view from COLMAP fx/fy with the
 principal point at the image centre, images resized with PIL to ``round(size / resolution)`` and alpha kept
-out of the RGB target. The published camera contract (HF ``jhu-ccvl/Hexels``,
-``cameras/nvs/<dataset>/<scene>/contract.json``) records the resulting cameras; this module turns it into a
-NeRF-style directory that Brush reads with exactly those cameras and images.
+out of the RGB target. The published camera contract (`hexels_bench.cameras`) records the resulting
+cameras; this module turns it into a NeRF-style directory that Brush reads with exactly those cameras and images.
 """
 
-import hashlib
-import json
 import os
 import shutil
 import struct
@@ -17,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import mkdtemp
-from typing import Literal, TypeAlias
 
 import numpy as np
 import PIL
@@ -25,95 +21,11 @@ from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from PIL import Image
 from plyfile import PlyData
-from serde import SerdeError, serde
-from serde.json import from_json, to_json
+from serde import serde
+from serde.json import to_json
 
-Dataset: TypeAlias = Literal["mipnerf360", "dtu", "tnt"]
-UPSTREAM_DATASETS: dict[Dataset, str] = {"mipnerf360": "mipnerf360", "dtu": "dtu", "tnt": "tanks_and_temples"}
-"""Dataset names in the upstream camera contract tree."""
-DATA_DIRS: dict[Dataset, str] = {"mipnerf360": "mipnerf360", "dtu": "dtu", "tnt": "tnt_nvs"}
-"""Scene roots below the dataset directory (upstream configs/nvs.json dataset_roots)."""
-PROTOCOL_SCENES: dict[Dataset, tuple[str, ...]] = {
-    "mipnerf360": ("bicycle", "flowers", "garden", "stump", "treehill", "room", "counter", "kitchen", "bonsai"),
-    "dtu": ("scan24", "scan37", "scan40", "scan55", "scan63", "scan65", "scan69", "scan83", "scan97", "scan105", "scan106", "scan110", "scan114", "scan118", "scan122"),
-    "tnt": ("Barn", "Caterpillar", "Courthouse", "Ignatius", "Meetingroom", "Truck", "Train", "Francis", "Horse", "Lighthouse"),
-}
-"""The 34 NVS scenes of upstream configs/nvs.json."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ContractSettings:
-    """Upstream loader options recorded in the camera contract."""
-
-    images: str
-    """Image folder below the scene directory."""
-    resolution: int
-    """2DGS resolution divisor."""
-    llffhold: int
-    """Every llffhold-th name-sorted camera is held out."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ContractCamera:
-    """One camera exactly as the upstream loader built it."""
-
-    name: str
-    """Image name without extension."""
-    width: int
-    """Target width in pixels."""
-    height: int
-    """Target height in pixels."""
-    fov_x: float
-    """Horizontal field of view in radians; the principal point is the image centre."""
-    fov_y: float
-    """Vertical field of view in radians."""
-    world_view_transform: Float64[ndarray, "4 4"]
-    """Transposed OpenCV world-to-camera matrix (2DGS row-vector convention)."""
-    camera_center: Float64[ndarray, "3"]
-    """Camera position in world coordinates."""
-
-    def world_from_camera(self) -> Float64[ndarray, "4 4"]:
-        """OpenCV (right/down/forward) camera-to-world pose."""
-        return np.linalg.inv(self.world_view_transform.T)
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ContractSplit:
-    """Summary of one split's inputs."""
-
-    count: int
-    """Number of cameras."""
-    ordered_target_tensors_sha256: str
-    """Hash of the ordered (name, float32 CHW target hash) pairs."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ContractGeometry:
-    """Ordered camera records per split."""
-
-    training: list[ContractCamera]
-    """Training cameras in loader order."""
-    test: list[ContractCamera]
-    """Held-out cameras in loader order."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class CameraContract:
-    """The published per-scene camera contract (third-party document, read partially)."""
-
-    settings: ContractSettings
-    """Loader options that produced the cameras."""
-    training: ContractSplit
-    """Training split summary."""
-    test: ContractSplit
-    """Held-out split summary."""
-    geometry: ContractGeometry
-    """Camera records."""
+from hexels_bench.cameras import CameraContract, ContractCamera, ContractSettings, find_image, load_target, ordered_targets_sha256, target_sha256
+from hexels_bench.layout import read_json
 
 
 @serde
@@ -185,47 +97,11 @@ class SfmPoints:
     """File name the points came from."""
 
 
-def read_json[Record](cls: type[Record], path: Path) -> Record:
-    """Decode a JSON record (camera contract, run record, report); malformed input names the file."""
-    try:
-        return from_json(cls, path.read_text())
-    except (SerdeError, ValueError) as error:
-        raise ValueError(f"{path}: {error}") from error
-
-
 def target_size(width: int, height: int, resolution: int) -> tuple[int, int]:
     """2DGS ``loadCam`` target size for an explicit resolution divisor (Python rounding, half to even)."""
     if resolution not in (1, 2, 4, 8):
         raise ValueError(f"2DGS resolution must be 1, 2, 4 or 8, got {resolution}")
     return round(width / resolution), round(height / resolution)
-
-
-def load_target(path: Path, resolution: int) -> UInt8[ndarray, "h w 3"]:
-    """Decode and resize like 2DGS ``loadCam``: RGBA is resized band by band and alpha is dropped, not composited."""
-    with Image.open(path) as image:
-        bands: tuple[Image.Image, ...] = image.split()
-        size: tuple[int, int] = target_size(image.width, image.height, resolution)
-        if len(bands) == 3:
-            return np.asarray(image.resize(size))
-        if len(bands) != 4:
-            raise ValueError(f"{path}: expected an RGB or RGBA image, got mode {image.mode}")
-        return np.stack([np.asarray(band.resize(size)) for band in bands[:3]], axis=-1)
-
-
-def target_sha256(rgb: UInt8[ndarray, "h w 3"]) -> str:
-    """Hash of upstream's float32 CHW target tensor (hexels/benchmark_metrics.py ``_tensor_sha256``)."""
-    target: Float32[ndarray, "3 h w"] = np.ascontiguousarray((rgb.astype(np.float32) / np.float32(255.0)).transpose(2, 0, 1))
-    digest = hashlib.sha256()
-    digest.update(target.dtype.str.encode())
-    digest.update(json.dumps(target.shape, separators=(",", ":")).encode())
-    digest.update(target.tobytes())
-    return digest.hexdigest()
-
-
-def ordered_targets_sha256(pairs: list[tuple[str, str]]) -> str:
-    """Hash of the ordered (name, target hash) list (hexels/benchmark_metrics.py ``_json_sha256``)."""
-    payload: bytes = json.dumps([list(pair) for pair in pairs], sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
-    return hashlib.sha256(payload).hexdigest()
 
 
 def opengl_world_from_camera(world_view_transform: Float64[ndarray, "4 4"]) -> Float64[ndarray, "4 4"]:
@@ -273,14 +149,6 @@ def init_ply(points: SfmPoints) -> bytes:
     return (header + "".join(f"property float {name}\n" for name in names) + "end_header\n").encode() + values.tobytes()
 
 
-def find_image(folder: Path, name: str) -> Path:
-    """The single file in ``folder`` whose stem is the camera name."""
-    matches: list[Path] = [path for path in folder.glob(f"{name}.*") if path.stem == name]
-    if len(matches) != 1:
-        raise FileNotFoundError(f"Expected one image named {name} in {folder}, found {len(matches)}")
-    return matches[0]
-
-
 def prepare_scene(source: Path, contract_path: Path, output: Path) -> PreparedScene:
     """Write ``transforms_{train,test}.json``, ``{train,test}/<name>.png`` and ``init.ply`` for one scene.
 
@@ -301,9 +169,12 @@ def prepare_scene(source: Path, contract_path: Path, output: Path) -> PreparedSc
     folder: Path = source / settings.images
 
     def write_target(camera: ContractCamera, images: Path) -> str:
-        rgb: UInt8[ndarray, "h w 3"] = load_target(find_image(folder, camera.name), settings.resolution)
-        if rgb.shape != (camera.height, camera.width, 3):
-            raise ValueError(f"{folder / camera.name}: target is {rgb.shape[1]}x{rgb.shape[0]}, contract says {camera.width}x{camera.height}")
+        path: Path = find_image(folder, camera.name)
+        with Image.open(path) as image:
+            size: tuple[int, int] = target_size(image.width, image.height, settings.resolution)
+        if size != (camera.width, camera.height):
+            raise ValueError(f"{path}: target is {size[0]}x{size[1]}, contract says {camera.width}x{camera.height}")
+        rgb: UInt8[ndarray, "h w 3"] = load_target(path, camera.width, camera.height)
         Image.fromarray(rgb, "RGB").save(images / f"{camera.name}.png", compress_level=1)
         return target_sha256(rgb)
 
@@ -317,7 +188,7 @@ def prepare_scene(source: Path, contract_path: Path, output: Path) -> PreparedSc
             with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 1)) as pool:
                 hashes: list[str] = list(pool.map(write_target, cameras, [staging / split] * len(cameras)))
             expected: str = (contract.training if split == "train" else contract.test).ordered_target_tensors_sha256
-            matches[split] = ordered_targets_sha256([(camera.name, digest) for camera, digest in zip(cameras, hashes, strict=True)]) == expected
+            matches[split] = ordered_targets_sha256([[camera.name, digest] for camera, digest in zip(cameras, hashes, strict=True)]) == expected
             frames: list[BrushFrame] = [
                 BrushFrame(
                     file_path=f"{split}/{camera.name}.png",

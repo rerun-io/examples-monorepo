@@ -3,8 +3,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from gsplat_rust_renderer.bench_table import BenchTable, MeanRow, PaperNumbers, build_table, write_table_json, write_table_rrd
-from gsplat_rust_renderer.nvs_protocol import read_json
+from hexels_bench.bench_table import BenchTable, MeanRow, build_table, write_table_json, write_table_rrd
+from hexels_bench.layout import read_json
+from hexels_bench.paper import PAPER_NUMBERS, PaperNumbers
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,8 +14,6 @@ class Config:
 
     runs: Path = Path.home() / "hexels-work" / "runs"
     """Runs root (<dataset>/<scene>/<method>/)."""
-    paper_numbers: Path = Path.home() / "hexels-work" / "specs" / "paper-numbers.json"
-    """Paper and HF catalog numbers (`hf_nvs_per_scene`, `sfm_points`)."""
 
 
 def fmt(value: float | None, digits: int) -> str:
@@ -22,7 +21,7 @@ def fmt(value: float | None, digits: int) -> str:
 
 
 def main(config: Config) -> None:
-    table: BenchTable = build_table(config.runs, read_json(PaperNumbers, config.paper_numbers))
+    table: BenchTable = build_table(config.runs, read_json(PaperNumbers, PAPER_NUMBERS))
     write_table_json(table, config.runs / "TABLE.json")
     write_table_rrd(table, config.runs / "table.rrd")
     print(

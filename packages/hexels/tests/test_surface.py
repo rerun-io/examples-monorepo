@@ -117,7 +117,7 @@ def test_tsdf_settings_follow_the_two_upstream_groups() -> None:
 def frontal_camera(name: str, width: int = 64, height: int = 48) -> ContractCamera:
     return ContractCamera(
         name=name, width=width, height=height, fov_x=1.0, fov_y=2 * math.atan(math.tan(0.5) * height / width),
-        world_view_transform=np.eye(4).tolist(), camera_center=[0.0, 0.0, 0.0],
+        world_view_transform=np.eye(4), camera_center=np.zeros(3),
     )  # fmt: skip
 
 
@@ -212,13 +212,14 @@ def test_rrd_frames_read_the_cli_layout_in_view_order(tmp_path: Path) -> None:
 @pytest.mark.parametrize(("dataset", "scene"), [("dtu", "scan24"), ("tnt", "Barn"), ("mipnerf360", "garden")])
 def test_scene_cameras_equal_upstream_camera_contracts(dataset, scene) -> None:
     """All registered views of a real scene equal the HF camera contract's training + test records."""
-    from hexels_bench.cameras import load_contract
+    from hexels_bench.cameras import CameraContract
+    from hexels_bench.layout import read_json
 
     roots = Roots()
     contract_path: Path = roots.contract(dataset, scene)
     if not contract_path.is_file() or not roots.scene_dir(dataset, scene).is_dir():
         pytest.skip(f"needs {contract_path} and {roots.scene_dir(dataset, scene)}")
-    contract = load_contract(contract_path)
+    contract = read_json(CameraContract, contract_path)
     reference: list[ContractCamera] = sorted(contract.geometry.training + contract.geometry.test, key=lambda camera: camera.name)
     cameras: list[ContractCamera] = scene_cameras(roots.scene_dir(dataset, scene), contract.settings.images, contract.settings.resolution)
     assert [(c.name, c.width, c.height, c.fov_x, c.fov_y) for c in cameras] == [(c.name, c.width, c.height, c.fov_x, c.fov_y) for c in reference]
@@ -236,12 +237,14 @@ def test_post_process_keeps_everything_when_asked_for_more_clusters_than_exist()
     assert len(post_process_mesh(big + small, clusters_to_keep=50).triangles) == total
 
 
-def test_every_all_view_surface_method_is_a_cli_choice() -> None:
+def test_every_surface_method_has_one_table_row() -> None:
     from typing import get_args
 
-    from hexels_bench.apis.surface_run import PUBLISHED_SURFACE, SurfaceMethod, surface_model_dir
+    from hexels_bench.apis.surface_run import SURFACE_METHODS, SurfaceMethod, surface_model_dir
 
     roots = Roots(data=Path("/d"), runs=Path("/r"))
-    assert set(PUBLISHED_SURFACE) <= set(get_args(SurfaceMethod))
+    assert list(SURFACE_METHODS) == list(get_args(SurfaceMethod))
+    assert all(SURFACE_METHODS[spec.ply_from].depth_source == "wgsl" for spec in SURFACE_METHODS.values())
+    assert surface_model_dir(roots, "dtu", "scan24", "hexels-v3-surf-30k-pub-cuda") == roots.published_surface_model("dtu", "scan24")
     assert surface_model_dir(roots, "dtu", "scan24", "hexels-v3-surf-30k") == Path("/r/dtu/scan24/hexels-v3-surf-30k/upstream")
     assert surface_model_dir(roots, "dtu", "scan24", "brush-7k") is None

@@ -1,7 +1,5 @@
 """The protocol runner writes the run-layout directory around one Brush training."""
 import json
-import os
-import subprocess
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -10,10 +8,11 @@ from typing import TypeAlias
 import numpy as np
 import pytest
 
-from gsplat_rust_renderer.apis.train_protocol import Config, main, peak_training_vram_mib, process_memory_sample
+from hexels_bench.apis.train_brush import Config, main, peak_training_vram_mib, process_memory_sample
+from hexels_bench.layout import GSPLAT_RELEASE, Roots
 
 SceneFactory: TypeAlias = Callable[..., tuple[Path, Path]]
-PACKAGE: Path = Path(__file__).resolve().parents[1]
+CONTRACT: str = "data/hexels-pretrained/cameras/nvs/dtu/{scene}/contract.json"
 
 FAKE_TRAINER: str = """#!/usr/bin/env python3
 import json, pathlib, sys
@@ -32,12 +31,12 @@ print("trained")
 
 
 def config(root: Path, binary: Path, steps: int = 70, scenes: tuple[str, ...] = ("scan1",)) -> Config:
-    return Config(dataset="dtu", scenes=scenes, steps=steps, method="brush-test", data_root=root / "data", contracts_root=root / "contracts",
-                  prepared_root=root / "prepared", runs_root=root / "runs", binary=binary, gpu_lock=root / "gpu.lock")
+    roots = Roots(data=root / "data", runs=root / "runs", brush_prepared=root / "prepared")
+    return Config(dataset="dtu", scenes=scenes, steps=steps, method="brush-test", roots=roots, binary=binary, gpu_lock=root / "gpu.lock")
 
 
 def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_scene: SceneFactory) -> None:
-    protocol_scene(tmp_path / "data/dtu/scan1", tmp_path / "contracts/dtu/scan1/contract.json", ["0000", "0008"])
+    protocol_scene(tmp_path / "data/dtu/scan1", tmp_path / CONTRACT.format(scene="scan1"), ["0000", "0008"])
     binary: Path = tmp_path / "bin/gsplat-train"
     binary.parent.mkdir()
     binary.write_text(FAKE_TRAINER)
@@ -69,7 +68,7 @@ def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_
 
 
 def test_failed_training_leaves_no_report(tmp_path: Path, protocol_scene: SceneFactory, capsys: pytest.CaptureFixture[str]) -> None:
-    protocol_scene(tmp_path / "data/dtu/scan1", tmp_path / "contracts/dtu/scan1/contract.json", ["0000", "0008"])
+    protocol_scene(tmp_path / "data/dtu/scan1", tmp_path / CONTRACT.format(scene="scan1"), ["0000", "0008"])
     binary: Path = tmp_path / "gsplat-train"
     binary.write_text("#!/bin/sh\necho broken >&2\nexit 3\n")
     binary.chmod(0o755)
@@ -81,7 +80,7 @@ def test_failed_training_leaves_no_report(tmp_path: Path, protocol_scene: SceneF
 
 
 def test_a_failing_scene_does_not_stop_the_batch(tmp_path: Path, protocol_scene: SceneFactory) -> None:
-    protocol_scene(tmp_path / "data/dtu/scan2", tmp_path / "contracts/dtu/scan2/contract.json", ["0000", "0008"])
+    protocol_scene(tmp_path / "data/dtu/scan2", tmp_path / CONTRACT.format(scene="scan2"), ["0000", "0008"])
     binary: Path = tmp_path / "bin/gsplat-train"
     binary.parent.mkdir()
     binary.write_text(FAKE_TRAINER)
@@ -108,17 +107,18 @@ def test_peak_vram_ignores_samples_after_training() -> None:
 
 @pytest.mark.integration
 def test_tiny_brush_training_through_the_protocol_path(tmp_path: Path, protocol_scene: SceneFactory) -> None:
-    """Real gsplat-train (debug build) on a synthetic 10-view scene: PLY, 16-bit renders, report."""
+    """Real gsplat-train (release build) on a synthetic 10-view scene: PLY, 16-bit renders, report."""
     cv2 = pytest.importorskip("cv2")
-    subprocess.run(["cargo", "build", "--locked", "--package", "gsplat-train"], cwd=PACKAGE, check=True)
-    source, _ = protocol_scene(tmp_path / "data/dtu/scan1", tmp_path / "contracts/dtu/scan1/contract.json", ["0000", "0008"],
+    binary: Path = GSPLAT_RELEASE / "gsplat-train"
+    if not binary.is_file():
+        pytest.skip(f"needs {binary} (pixi run -e gsplat-rust-renderer gsplat-build)")
+    source, _ = protocol_scene(tmp_path / "data/dtu/scan1", tmp_path / CONTRACT.format(scene="scan1"), ["0000", "0008"],
                                image_size=(64, 48), contract_size=(32, 24))
     rng: np.random.Generator = np.random.default_rng(1)
     points: list[str] = [f"{i} {x:.4f} {y:.4f} {z:.4f} {r} {g} {b} 0.1 1 0"
                          for i, ((x, y, z), (r, g, b)) in enumerate(zip(rng.uniform(-0.5, 0.5, (64, 3)).tolist(), rng.integers(0, 256, (64, 3)).tolist(), strict=True))]
     (source / "sparse/0/points3D.txt").write_text("\n".join(points) + "\n")
-    environment: dict[str, str] = dict(os.environ)
-    main(config(tmp_path, Path(environment.get("CARGO_TARGET_DIR", str(PACKAGE / "target"))) / "debug/gsplat-train", steps=30), [])
+    main(config(tmp_path, binary, steps=30), [])
     run: Path = tmp_path / "runs/dtu/scan1/brush-test"
     report: dict = json.loads((run / "train.json").read_text())
     header: bytes = (run / "model.ply").read_bytes().split(b"end_header")[0]

@@ -10,7 +10,6 @@ before any learning-rate decay.
 
 import json
 import socket
-import struct
 import subprocess
 import sys
 import time
@@ -18,55 +17,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
-from serde import serde
 from serde.json import to_json
 
 from hexels_bench.apis.export import export_run
 from hexels_bench.apis.export_published import stage_ground_truth
 from hexels_bench.apis.score import score_run
-from hexels_bench.cameras import CameraContract, cameras_file, load_contract, write_cameras_file
+from hexels_bench.brush import read_sfm_points
+from hexels_bench.cameras import CameraContract, cameras_file, write_cameras_file
 from hexels_bench.checkpoint import find_checkpoint
 from hexels_bench.gpu_monitor import PeakVramSampler, gpu_name
 from hexels_bench.hexel_ply import HexelPly, HexelVariant
-from hexels_bench.layout import UPSTREAM_DATASET, Dataset, Roots
-from hexels_bench.metrics import ply_vertex_count
+from hexels_bench.layout import UPSTREAM_DATASET, Dataset, Roots, read_json
+from hexels_bench.methods import primitive_bytes
+from hexels_bench.metrics import TrainRecord
 from hexels_bench.upstream import UPSTREAM_HEXELS_REV, UpstreamRenderer, load_renderer, measure_fps, write_test_renders
 
 UPSTREAM_STEPS: int = 30000
 UPSTREAM_MILESTONES: tuple[int, ...] = (15001, 20001, 25001)
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class TrainRecord:
-    """`train.json` of a run directory (contract run-layout.md)."""
-
-    method: str
-    """e.g. hexels-v1-7k."""
-    dataset: str
-    """Run-layout dataset name."""
-    scene: str
-    """Scene name."""
-    steps: int
-    """Optimisation steps."""
-    loop_seconds: float
-    """Wall time of the optimisation loop (upstream summary.json train_seconds)."""
-    total_seconds: float
-    """Wall time of the whole training process, dataset load and checkpoint writes included."""
-    peak_vram_gib: float
-    """Peak GPU memory of the trainer process (NVML, 5 ms samples), GiB."""
-    primitives: int
-    """Hexels in the exported model."""
-    sfm_points: int | None
-    """Points in the scene's COLMAP SfM model (the primitive cap); null for 2D fits."""
-    gpu: str
-    """GPU name."""
-    host: str
-    """Host name."""
-    source_sha: str
-    """Upstream hexels commit."""
-    command: str
-    """Training command line."""
 
 
 def scaled_schedule(steps: int) -> tuple[list[int], int]:
@@ -92,19 +59,6 @@ def apply_schedule(command: list[str], steps: int) -> list[str]:
     else:
         result += ["--lr_means3d_max_steps", str(means_max_steps)]
     return result
-
-
-def sfm_point_count(scene_dir: Path) -> int:
-    """Points in `sparse/0` (binary, text or the 2DGS-converted points3D.ply)."""
-    sparse: Path = scene_dir / "sparse" / "0"
-    if (sparse / "points3D.bin").is_file():
-        with (sparse / "points3D.bin").open("rb") as file:
-            return int(struct.unpack("<Q", file.read(8))[0])
-    if (sparse / "points3D.txt").is_file():
-        return sum(1 for line in (sparse / "points3D.txt").read_text().splitlines() if line.strip() and not line.startswith("#"))
-    if (sparse / "points3D.ply").is_file():
-        return ply_vertex_count(sparse / "points3D.ply")
-    raise FileNotFoundError(f"{sparse}: no points3D")
 
 
 @dataclass
@@ -156,7 +110,7 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
     summary: dict = json.loads((model_dir / "summary.json").read_text())
 
     ply: HexelPly = export_run(model_dir, run_dir / "model.ply")
-    contract: CameraContract = load_contract(roots.contract(dataset, scene))
+    contract: CameraContract = read_json(CameraContract, roots.contract(dataset, scene))
     stage_ground_truth(roots, dataset, scene, contract)
     write_cameras_file(run_dir / "cameras.json", cameras_file(contract, dataset, scene, [0.0, 0.0, 0.0]))
     renderer: UpstreamRenderer = load_renderer(model_dir, find_checkpoint(model_dir), scene_dir)
@@ -164,7 +118,7 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
     fps: float = measure_fps(renderer)
     del renderer
     torch.cuda.empty_cache()
-    score_run(roots, dataset, scene, method, fps, torch.device("cuda"))
+    score_run(roots, dataset, scene, method, primitive_bytes(variant), fps, torch.device("cuda"))
 
     record = TrainRecord(
         method=method,
@@ -175,7 +129,7 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
         total_seconds=total_seconds,
         peak_vram_gib=sampler.peak_gib,
         primitives=ply.cloud.count,
-        sfm_points=sfm_point_count(scene_dir),
+        sfm_points=len(read_sfm_points(scene_dir / "sparse" / "0").xyz),
         gpu=gpu_name(),
         host=socket.gethostname(),
         source_sha=UPSTREAM_HEXELS_REV,

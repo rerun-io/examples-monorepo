@@ -12,8 +12,12 @@ pytest.importorskip("gsplat.cuda_hexels3d", reason="hexel-kernel CUDA build (hex
 from hexels_bench.apis.render_published import render_published  # noqa: E402
 from hexels_bench.checkpoint import find_checkpoint, load_checkpoint, load_run_config  # noqa: E402
 from hexels_bench.hexel_ply import HexelVariant  # noqa: E402
-from hexels_bench.layout import Dataset, Roots  # noqa: E402
-from hexels_bench.metrics import MetricsFile, load_metrics_file  # noqa: E402
+from hexels_bench.layout import (  # noqa: E402
+    Dataset,
+    Roots,
+    read_json,  # noqa: E402
+)
+from hexels_bench.metrics import MetricsFile  # noqa: E402
 
 pytestmark = pytest.mark.integration
 SCAN24_V3: tuple[Dataset, str, HexelVariant] = ("dtu", "scan24", "v3")
@@ -61,7 +65,7 @@ def test_render_published_scan24_v3_reproduces_published_metrics(tmp_path: Path)
     roots = Roots(data=needs_data("pretrained-nvs", "dtu").data, runs=tmp_path)
     shared: MetricsFile = render_published(roots, *SCAN24_V3, upstream_evaluator=True)
     run_dir: Path = roots.run_dir("dtu", "scan24", "hexels-v3-30k-pub-cuda")
-    published: MetricsFile = load_metrics_file(run_dir / "published_metrics.json")
-    upstream: MetricsFile = load_metrics_file(run_dir / "upstream_float_metrics.json")
+    published: MetricsFile = read_json(MetricsFile, run_dir / "published_metrics.json")
+    upstream: MetricsFile = read_json(MetricsFile, run_dir / "upstream_float_metrics.json")
     assert abs(upstream.psnr - published.psnr) < 0.05
     assert abs(shared.psnr - upstream.psnr) < 0.01

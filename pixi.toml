@@ -2060,24 +2060,6 @@ depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { tas
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
 
-[feature.gsplat-rust-renderer.tasks.gsplat-train-protocol]
-args = [{ arg = "dataset", default = "dtu" }]
-cmd = "python tools/train_protocol.py --dataset {{ dataset }}"
-depends-on = ["gsplat-build"]
-cwd = "packages/gsplat-rust-renderer"
-description = "Train Brush on the Hexels NVS protocol for every scene of one dataset"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-bench]
-cmd = "python tools/bench.py"
-depends-on = ["gsplat-build"]
-cwd = "packages/gsplat-rust-renderer"
-description = "Brush vs Hexels benchmark queue (needs the hexels env installed for the upstream methods)"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-bench-table]
-cmd = "python tools/bench_table.py"
-cwd = "packages/gsplat-rust-renderer"
-description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
-
 [feature.gsplat-rust-renderer.tasks.gsplat-log-hexels-compare]
 cmd = "python tools/log_hexels_compare.py"
 cwd = "packages/gsplat-rust-renderer"
@@ -2167,6 +2149,25 @@ description = "Decode 2D fits with upstream CUDA and with the WGSL renderer, sco
 cmd = "python tools/figure2d.py"
 cwd = "packages/hexels"
 description = "Write the 2D Figure 2 rows and the six-image summary as Rerun recordings"
+
+# The benchmark: Brush on the Hexels protocol (gsplat-train from the gsplat-rust-renderer build), the
+# 34-scene queue (each step in its own env) and the table (runs/TABLE.json, runs/table.rrd).
+[feature.hexels.tasks.hexels-train-brush]
+cmd = "python tools/train_brush.py"
+depends-on = [{ task = "gsplat-build", environment = "gsplat-rust-renderer" }]
+cwd = "packages/hexels"
+description = "Train Brush on the Hexels NVS protocol for every scene of one dataset (--dataset; extra Brush flags follow --)"
+
+[feature.hexels.tasks.hexels-bench]
+cmd = "python tools/bench.py"
+depends-on = [{ task = "gsplat-build", environment = "gsplat-rust-renderer" }]
+cwd = "packages/hexels"
+description = "Brush vs Hexels benchmark queue: every incomplete (dataset, scene, method) run under the GPU lock"
+
+[feature.hexels.tasks.hexels-bench-table]
+cmd = "python tools/bench_table.py"
+cwd = "packages/hexels"
+description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
 
 # Surfaces: TSDF meshes from rendered depth (Open3D, upstream Hexels settings), the paper's evaluators run
 # unchanged from the patched 2DGS tree in this env (eval_tnt in `tnt-eval`), and the surface recordings.

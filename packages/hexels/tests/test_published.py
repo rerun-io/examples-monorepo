@@ -7,10 +7,10 @@ import numpy as np
 import pytest
 
 from hexels_bench.apis.export_published import stage_published
-from hexels_bench.cameras import load_cameras_file
+from hexels_bench.cameras import CamerasFile
 from hexels_bench.hexel_ply import HexelPly, HexelVariant, read_hexel_ply
-from hexels_bench.layout import Dataset, Roots
-from hexels_bench.metrics import MetricsFile, load_metrics_file
+from hexels_bench.layout import Dataset, Roots, read_json
+from hexels_bench.metrics import MetricsFile
 
 pytestmark = pytest.mark.integration
 
@@ -28,10 +28,10 @@ def test_stage_published_writes_ply_cameras_and_exact_gt(tmp_path: Path, dataset
     assert ply.cloud.variant == variant
     assert ply.cloud.count == metadata["primitive_count"]
     assert np.isfinite(ply.cloud.to_rows()).all()
-    cameras = load_cameras_file(run_dir / "cameras.json")
+    cameras = read_json(CamerasFile, run_dir / "cameras.json")
     assert len(cameras.cameras) == metadata["expected_metrics"]["view_count"]
     assert sorted(path.stem for path in roots.gt_dir(dataset, scene).glob("*.png")) == sorted(camera.name for camera in cameras.cameras)
-    published: MetricsFile = load_metrics_file(run_dir / "published_metrics.json")
+    published: MetricsFile = read_json(MetricsFile, run_dir / "published_metrics.json")
     assert published.scorer == "upstream-float"
     assert [view.name for view in published.per_view] == [camera.name for camera in cameras.cameras]
     assert published.psnr == pytest.approx(metadata["expected_metrics"]["mean_psnr_db"], abs=1e-9)

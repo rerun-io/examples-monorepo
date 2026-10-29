@@ -12,11 +12,12 @@ import torch
 
 from hexels_bench.apis.export_published import published_method, stage_published
 from hexels_bench.apis.score import score_run
-from hexels_bench.cameras import CamerasFile, load_cameras_file
+from hexels_bench.cameras import CamerasFile
 from hexels_bench.checkpoint import find_checkpoint
 from hexels_bench.hexel_ply import HexelVariant
-from hexels_bench.layout import Dataset, Roots
-from hexels_bench.metrics import MetricsFile, ViewMetrics, load_metrics_file, summarize, write_metrics_file
+from hexels_bench.layout import Dataset, Roots, read_json
+from hexels_bench.methods import primitive_bytes
+from hexels_bench.metrics import MetricsFile, ViewMetrics, summarize, write_metrics_file
 from hexels_bench.upstream import UpstreamRenderer, load_renderer, measure_fps, run_upstream_evaluator, write_test_renders
 
 
@@ -56,14 +57,14 @@ def upstream_float_metrics(result: dict, method: str, dataset: Dataset, scene: s
 def render_published(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, upstream_evaluator: bool) -> MetricsFile:
     run_dir: Path = stage_published(roots, dataset, scene, variant)
     model_dir: Path = roots.published_model(dataset, scene, variant)
-    cameras: CamerasFile = load_cameras_file(run_dir / "cameras.json")
+    cameras: CamerasFile = read_json(CamerasFile, run_dir / "cameras.json")
     renderer: UpstreamRenderer = load_renderer(model_dir, find_checkpoint(model_dir), roots.scene_dir(dataset, scene))
     write_test_renders(renderer, [camera.name for camera in cameras.cameras], run_dir / "renders" / "test")
     fps: float = measure_fps(renderer)
     del renderer
     torch.cuda.empty_cache()
     method: str = published_method(variant)
-    shared: MetricsFile = score_run(roots, dataset, scene, method, fps, torch.device("cuda"))
+    shared: MetricsFile = score_run(roots, dataset, scene, method, primitive_bytes(variant), fps, torch.device("cuda"))
     if upstream_evaluator:
         result: dict = run_upstream_evaluator(roots, model_dir, run_dir / "upstream-eval" / "metrics.json", run_dir / "log.txt")
         upstream: MetricsFile = upstream_float_metrics(result, method, dataset, scene, shared)
@@ -71,7 +72,7 @@ def render_published(roots: Roots, dataset: Dataset, scene: str, variant: HexelV
         print(
             f"{dataset}/{scene}/{method}: shared-png16 {shared.psnr:.4f} dB vs upstream-float {upstream.psnr:.4f} dB (delta {shared.psnr - upstream.psnr:+.4f})"
         )
-    published: MetricsFile = load_metrics_file(run_dir / "published_metrics.json")
+    published: MetricsFile = read_json(MetricsFile, run_dir / "published_metrics.json")
     print(f"{dataset}/{scene}/{method}: published {published.psnr:.4f} dB, ours {shared.psnr:.4f} dB, FPS {fps:.1f}")
     return shared
 

@@ -3,7 +3,7 @@ and a Rerun metrics recording `table.rrd` (entity layout of specs/viewer.md sect
 
 Per-scene rows carry only what that run measured (Brush training has no FPS of its own: `brush-7k-wgsl`
 re-renders the same PLY and carries it). Hexels rows sit beside the published 30k checkpoint of the same
-variant on the same scene (HF catalog, paper-numbers.json `hf_nvs_per_scene`). Dataset means average the
+variant on the same scene (HF catalog, `hexels_bench.paper` `hf_nvs_per_scene`). Dataset means average the
 representative scenes of contracts/scope.md and sit beside the mean of the published per-scene values over
 those same scenes, never beside the paper's 34-scene dataset means.
 """
@@ -19,46 +19,17 @@ import rerun.blueprint as rrb
 from serde import serde
 from serde.json import to_json
 
-from gsplat_rust_renderer.bench import METHODS, REPRESENTATIVE_SCENES, RunMetrics, TrainRecord, incomplete_reason
-from gsplat_rust_renderer.nvs_protocol import PROTOCOL_SCENES, UPSTREAM_DATASETS, Dataset, read_json
+from hexels_bench.bench import incomplete_reason
+from hexels_bench.layout import PROTOCOL_SCENES, REPRESENTATIVE_SCENES, UPSTREAM_DATASET, Dataset, read_json
+from hexels_bench.methods import METHODS, Method
+from hexels_bench.metrics import MetricsFile, TrainRecord, ply_vertex_count
+from hexels_bench.paper import PaperNumbers, PublishedNvs
 
 PAPER_DATASET_ORDER: tuple[Dataset, ...] = ("tnt", "mipnerf360", "dtu")
 """The paper's column order (Table 2/3): T&T, Mip-NeRF 360, DTU."""
 PUBLISHED_TOLERANCE_DB: float = 0.05
 """Published 30k checkpoints re-rendered by us must match the paper's per-scene PSNR this closely."""
 Status: TypeAlias = Literal["complete", "incomplete", "missing"]
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class PaperSceneModel:
-    """One published checkpoint in the HF catalog (paper-numbers.json `hf_nvs_per_scene`)."""
-
-    views: int
-    """Held-out views."""
-    psnr: float
-    """PSNR, dB (upstream direct-float evaluator)."""
-    ssim: float
-    """SSIM."""
-    lpips_vgg: float
-    """LPIPS-VGG."""
-    primitives: int
-    """Hexels in the checkpoint."""
-    learned_model_bytes: int
-    """FP32 learned parameter bytes."""
-    train_seconds_summary: float | None
-    """Training seconds from the checkpoint's summary.json (A5000), absent for grown models."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class PaperNumbers:
-    """The parts of specs/paper-numbers.json the table reads (other keys are ignored)."""
-
-    hf_nvs_per_scene: dict[str, dict[str, dict[str, PaperSceneModel]]]
-    """Published checkpoints per upstream dataset, scene and `<variant>-<population>`."""
-    sfm_points: dict[str, dict[str, int]]
-    """SfM point count (the primitive cap) per upstream dataset and scene."""
 
 
 @serde(deny_unknown_fields=True)
@@ -93,7 +64,7 @@ class SceneRow:
     """Run-layout dataset."""
     scene: str
     """Scene name."""
-    method: str
+    method: Method
     """Run method."""
     status: Status
     """complete = scored on every held-out view; incomplete = started; missing = no run directory."""
@@ -159,7 +130,7 @@ class MeanRow:
 
     dataset: Dataset
     """Run-layout dataset."""
-    method: str
+    method: Method
     """Run method."""
     scenes: int
     """Complete scenes averaged."""
@@ -214,31 +185,14 @@ class BenchTable:
     """Numbers outside the expected band (published checkpoints vs paper, view counts)."""
 
 
-def variant(method: str) -> str | None:
-    """Hexels appearance variant of a method (v1, v2, v3), None for Brush."""
-    return method.split("-")[1] if method.startswith("hexels-") else None
-
-
-def ply_vertex_count(path: Path) -> int:
-    """Vertex count from a PLY header (splat and hexel PLY alike)."""
-    with path.open("rb") as stream:
-        for raw in stream:
-            line: str = raw.decode("ascii", errors="replace").strip()
-            if line.startswith("element vertex "):
-                return int(line.split()[2])
-            if line == "end_header":
-                break
-    raise ValueError(f"{path}: no vertex element")
-
-
 def mean(values: list[float | None]) -> float | None:
     present: list[float] = [value for value in values if value is not None]
     return sum(present) / len(present) if present else None
 
 
-def published_scene(paper: PaperNumbers, dataset: Dataset, scene: str, method: str) -> PaperScene | None:
-    found: str | None = variant(method)
-    model: PaperSceneModel | None = paper.hf_nvs_per_scene.get(UPSTREAM_DATASETS[dataset], {}).get(scene, {}).get(f"{found}-fixed") if found else None
+def published_scene(paper: PaperNumbers, dataset: Dataset, scene: str, method: Method) -> PaperScene | None:
+    found: str | None = METHODS[method].variant
+    model: PublishedNvs | None = paper.hf_nvs_per_scene.get(UPSTREAM_DATASET[dataset], {}).get(scene, {}).get(f"{found}-fixed") if found else None
     if model is None:
         return None
     seconds: float | None = model.train_seconds_summary
@@ -254,12 +208,12 @@ def published_scene(paper: PaperNumbers, dataset: Dataset, scene: str, method: s
     )
 
 
-def scene_row(runs: Path, dataset: Dataset, scene: str, method: str, paper: PaperNumbers) -> SceneRow:
+def scene_row(runs: Path, dataset: Dataset, scene: str, method: Method, paper: PaperNumbers) -> SceneRow:
     run_dir: Path = runs / dataset / scene / method
     published: PaperScene | None = published_scene(paper, dataset, scene, method)
     reason: str | None = incomplete_reason(run_dir, method) if run_dir.is_dir() else "no run directory"
     status: Status = "complete" if reason is None else ("incomplete" if run_dir.is_dir() else "missing")
-    metrics: RunMetrics | None = read_json(RunMetrics, run_dir / "metrics.json") if status == "complete" else None
+    metrics: MetricsFile | None = read_json(MetricsFile, run_dir / "metrics.json") if status == "complete" else None
     train: TrainRecord | None = read_json(TrainRecord, run_dir / "train.json") if metrics is not None and (run_dir / "train.json").is_file() else None
     primitives: int | None = None
     if metrics is not None:
@@ -281,13 +235,13 @@ def scene_row(runs: Path, dataset: Dataset, scene: str, method: str, paper: Pape
         deploy_mb=None if metrics is None else metrics.deploy_mb,
         ply_mb=None if metrics is None else metrics.ply_mb,
         primitives=primitives,
-        sfm_points=paper.sfm_points.get(UPSTREAM_DATASETS[dataset], {}).get(scene),
+        sfm_points=paper.sfm_points.get(UPSTREAM_DATASET[dataset], {}).get(scene),
         paper=published,
         delta_psnr=None if metrics is None or published is None else metrics.psnr - published.psnr,
     )
 
 
-def mean_row(dataset: Dataset, method: str, rows: list[SceneRow], paper: PaperNumbers) -> MeanRow:
+def mean_row(dataset: Dataset, method: Method, rows: list[SceneRow]) -> MeanRow:
     """Mean of `rows` (one method, the representative scenes of one dataset) over its complete scenes."""
     done: list[SceneRow] = [row for row in rows if row.status == "complete"]
     published: list[PaperScene] = [row.paper for row in rows if row.paper is not None]
@@ -331,7 +285,7 @@ def flags_for(rows: list[SceneRow]) -> list[str]:
     for row in rows:
         if row.status != "complete" or row.paper is None:
             continue
-        if "-30k-pub-" in row.method and row.delta_psnr is not None and abs(row.delta_psnr) > PUBLISHED_TOLERANCE_DB:
+        if METHODS[row.method].published and row.delta_psnr is not None and abs(row.delta_psnr) > PUBLISHED_TOLERANCE_DB:
             flags.append(
                 f"{row.dataset}/{row.scene}/{row.method}: PSNR {row.psnr:.3f} vs published {row.paper.psnr:.3f} ({row.delta_psnr:+.3f} dB, band {PUBLISHED_TOLERANCE_DB} dB)"
             )
@@ -346,13 +300,13 @@ def build_table(
     datasets: tuple[Dataset, ...] = ("dtu", "mipnerf360", "tnt"),
     scenes: dict[Dataset, tuple[str, ...]] | None = None,
     mean_scenes: dict[Dataset, tuple[str, ...]] | None = None,
-    methods: tuple[str, ...] = METHODS,
+    methods: tuple[Method, ...] = tuple(METHODS),
 ) -> BenchTable:
     """Read every run directory into scene rows, dataset means and flags.
 
     Args:
         runs: The runs root (<dataset>/<scene>/<method>/).
-        paper: Parsed specs/paper-numbers.json.
+        paper: Published numbers (`hexels_bench.paper`).
         datasets: Datasets of the scene rows, in this order.
         scenes: Scenes per dataset for the rows; defaults to every protocol scene.
         mean_scenes: Scenes per dataset the means average; defaults to the representative scenes.
@@ -364,7 +318,7 @@ def build_table(
         scene_row(runs, dataset, scene, method, paper) for dataset in datasets for scene in row_scenes[dataset] for method in methods
     ]
     means: list[MeanRow] = [
-        mean_row(dataset, method, [scene_row(runs, dataset, scene, method, paper) for scene in averaged[dataset]], paper)
+        mean_row(dataset, method, [scene_row(runs, dataset, scene, method, paper) for scene in averaged[dataset]])
         for dataset in PAPER_DATASET_ORDER
         if dataset in datasets
         for method in methods
@@ -434,7 +388,7 @@ def mean_columns(means: list[MeanRow]) -> dict[str, Column]:
 
 
 TABLE_LABEL: str = "(metric and unit)"
-"""Label column; it sorts first because the dataframe orders columns by name (same convention as hexels_metrics)."""
+"""Label column; it sorts first because the dataframe orders columns by name."""
 TABLE_ROWS: tuple[tuple[str, str], ...] = (
     ("psnr", "PSNR dB"),
     ("ssim", "SSIM"),

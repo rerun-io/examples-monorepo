@@ -20,7 +20,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeAlias
 
 import numpy as np
 from jaxtyping import UInt8
@@ -28,14 +27,13 @@ from numpy import ndarray
 from PIL import Image
 from serde.json import to_json
 
-from hexels_bench.apis.train import TrainRecord
 from hexels_bench.gpu_monitor import PeakVramSampler
 from hexels_bench.layout import Roots
+from hexels_bench.metrics import TrainRecord
 from hexels_bench.png16 import write_png16
+from hexels_bench.results2d import FIT_OF_RUN, FitMethod
 from hexels_bench.upstream import UPSTREAM_HEXELS_REV
 
-FitMethod: TypeAlias = Literal["hexels-2d", "hexels-2d-flat", "imagegs-2d"]
-VARIANT: dict[FitMethod, str] = {"hexels-2d": "rich", "hexels-2d-flat": "flat", "imagegs-2d": "imagegs"}
 PRIMITIVES: int = 10000
 
 
@@ -69,7 +67,7 @@ def stage_image_gt(roots: Roots, stem: str) -> Path:
 def fit_command(roots: Roots, stem: str, method: FitMethod, output: Path, steps: int | None) -> list[str]:
     command: list[str] = [
         sys.executable, "-m", "scripts.fit_image", "--image", str(image_path(roots, stem)),
-        "--output", str(output), "--variant", VARIANT[method],
+        "--output", str(output), "--variant", FIT_OF_RUN[method].recipe,
     ]  # fmt: skip
     return command if steps is None else [*command, "--steps", str(steps)]
 

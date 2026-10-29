@@ -5,36 +5,26 @@ import os
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from gsplat_rust_renderer.bench import (
-    BenchPaths,
-    Item,
-    Step,
-    StepFailed,
-    build_queue,
-    incomplete_reason,
-    load_failures,
-    run_queue,
-)
+from hexels_bench.bench import Item, Step, StepFailed, build_queue, incomplete_reason, load_failures, run_queue
+from hexels_bench.layout import GSPLAT_RELEASE, Roots
+from hexels_bench.methods import Method
 
 NAMES: tuple[str, ...] = ("0000", "0008")
 
 
-def bench_paths(tmp_path: Path) -> BenchPaths:
-    return BenchPaths(
-        repo=tmp_path / "repo",
-        runs=tmp_path / "runs",
-        data=tmp_path / "data",
-        brush_prepared=tmp_path / "prepared",
-        gpu_lock=tmp_path / "gpu.lock",
-    )
+def bench_roots(tmp_path: Path) -> Roots:
+    return Roots(data=tmp_path / "data", runs=tmp_path / "runs", brush_prepared=tmp_path / "prepared")
 
 
 def write_cameras(run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
-    cameras: list[dict] = [{"name": name, "width": 4, "height": 3} for name in NAMES]
-    (run_dir / "cameras.json").write_text(json.dumps({"format": "hexels-cameras-1", "cameras": cameras}))
+    camera: dict = {"width": 4, "height": 3, "fov_x": 0.5, "fov_y": 0.4, "world_view_transform": np.eye(4).tolist(), "camera_center": [0.0, 0.0, 0.0]}
+    cameras: list[dict] = [{**camera, "name": name} for name in NAMES]
+    header: dict = {"format": "hexels-cameras-1", "dataset": "dtu", "scene": "scan24", "split": "test", "background": [0.0, 0.0, 0.0]}
+    (run_dir / "cameras.json").write_text(json.dumps({**header, "cameras": cameras}))
 
 
 def write_scored(run_dir: Path, method: str, fps: float | None = None, lpips: float | None = 0.2) -> None:
@@ -73,8 +63,7 @@ def complete_run(run_dir: Path, method: str) -> None:
 class FakeRunner:
     """Records steps and produces the outputs the real tools would write."""
 
-    def __init__(self, paths: BenchPaths, fail_methods: tuple[str, ...] = ()) -> None:
-        self.paths: BenchPaths = paths
+    def __init__(self, fail_methods: tuple[str, ...] = ()) -> None:
         self.fail_methods: tuple[str, ...] = fail_methods
         self.steps: list[tuple[str, tuple[str, ...]]] = []
 
@@ -135,7 +124,7 @@ def test_queue_runs_datasets_in_order_then_scenes_in_protocol_order_then_methods
         ("brush-7k", lambda run: os.utime(run / "model.ply", (time.time() + 60, time.time() + 60)), "older than model.ply"),
     ],
 )
-def test_incomplete_reason_names_what_is_missing(tmp_path: Path, method: str, breaks, reason: str) -> None:
+def test_incomplete_reason_names_what_is_missing(tmp_path: Path, method: Method, breaks, reason: str) -> None:
     run_dir: Path = tmp_path / method
     complete_run(run_dir, method)
     assert incomplete_reason(run_dir, method) is None
@@ -145,7 +134,7 @@ def test_incomplete_reason_names_what_is_missing(tmp_path: Path, method: str, br
 
 
 def test_the_tail_scores_brush_on_every_other_scene_after_the_selected_ones() -> None:
-    from gsplat_rust_renderer.apis.bench import Config, queue_for
+    from hexels_bench.apis.bench import Config, queue_for
 
     queue: list[Item] = queue_for(
         Config(datasets=("dtu",), scenes=("scan24", "scan114"), methods=("brush-7k", "hexels-v1-7k"), tail_methods=("brush-7k",))
@@ -161,26 +150,27 @@ def test_the_tail_scores_brush_on_every_other_scene_after_the_selected_ones() ->
 
 
 def test_complete_items_are_skipped_and_the_rest_run_through_pixi_envs(tmp_path: Path) -> None:
-    paths: BenchPaths = bench_paths(tmp_path)
-    scene: Path = paths.runs / "dtu" / "scan24"
+    roots: Roots = bench_roots(tmp_path)
+    lock: Path = tmp_path / "gpu.lock"
+    scene: Path = roots.runs / "dtu" / "scan24"
     complete_run(scene / "hexels-v1-7k", "hexels-v1-7k")
     write_cameras(scene / "hexels-v2-30k-pub-cuda")
     (scene / "hexels-v2-30k-pub-cuda" / "model.ply").write_bytes(b"ply")
-    runner = FakeRunner(paths)
+    runner = FakeRunner()
     queue: list[Item] = build_queue(("dtu",), scenes=("scan24",), methods=("brush-7k", "brush-7k-wgsl", "hexels-v1-7k", "hexels-v2-30k-pub-wgsl"))
 
-    summary = run_queue(queue, paths, runner)
+    summary = run_queue(queue, roots, lock, runner)
 
     assert [item.method for item in summary.skipped] == ["hexels-v1-7k"]
     assert [item.method for item in summary.done] == ["brush-7k", "brush-7k-wgsl", "hexels-v2-30k-pub-wgsl"]
     assert summary.failed == []
     envs_and_heads: list[tuple[str, str]] = [(env, args[0]) for env, args in runner.steps]
     assert envs_and_heads == [
-        ("gsplat-rust-renderer", "python"),  # Brush protocol runner
+        ("hexels", "python"),  # Brush protocol runner
         ("hexels", "hexels-score"),
-        ("gsplat-rust-renderer", str(paths.gsplat_binary)),
+        ("gsplat-rust-renderer", str(GSPLAT_RELEASE / "gsplat")),
         ("hexels", "hexels-score"),
-        ("gsplat-rust-renderer", str(paths.gsplat_binary)),
+        ("gsplat-rust-renderer", str(GSPLAT_RELEASE / "gsplat")),
         ("hexels", "hexels-score"),
     ]
     brush_train: tuple[str, ...] = runner.steps[0][1]
@@ -192,47 +182,50 @@ def test_complete_items_are_skipped_and_the_rest_run_through_pixi_envs(tmp_path:
     assert staged.is_symlink() and staged.resolve() == (scene / "hexels-v2-30k-pub-cuda" / "model.ply").resolve()
     assert (scene / "brush-7k-wgsl" / "model.ply").resolve() == (scene / "brush-7k" / "model.ply").resolve()
 
-    rerun = run_queue(queue, paths, FakeRunner(paths))
+    rerun = run_queue(queue, roots, lock, FakeRunner())
     assert rerun.done == [] and len(rerun.skipped) == 4
 
 
 def test_a_failure_is_logged_and_the_queue_continues(tmp_path: Path) -> None:
-    paths: BenchPaths = bench_paths(tmp_path)
+    roots: Roots = bench_roots(tmp_path)
+    lock: Path = tmp_path / "gpu.lock"
     queue: list[Item] = build_queue(("dtu",), scenes=("scan24", "scan37"), methods=("hexels-v3-7k",))
-    summary = run_queue(queue, paths, FakeRunner(paths, fail_methods=("hexels-v3-7k",)))
+    summary = run_queue(queue, roots, lock, FakeRunner(fail_methods=("hexels-v3-7k",)))
     assert [item.scene for item in summary.failed] == ["scan24", "scan37"]
-    failures = load_failures(paths.runs / "FAILURES.jsonl")
+    failures = load_failures(roots.runs / "FAILURES.jsonl")
     assert [(f.scene, f.method) for f in failures] == [("scan24", "hexels-v3-7k"), ("scan37", "hexels-v3-7k")]
     assert "exited with 1" in failures[0].error
 
-    retry = run_queue(queue[:1], paths, FakeRunner(paths))
+    retry = run_queue(queue[:1], roots, lock, FakeRunner())
     assert [item.scene for item in retry.done] == ["scan24"]
 
 
 def test_a_wgsl_rerender_waits_for_its_source_run(tmp_path: Path) -> None:
-    paths: BenchPaths = bench_paths(tmp_path)
-    summary = run_queue(build_queue(("dtu",), scenes=("scan24",), methods=("brush-7k-wgsl",)), paths, FakeRunner(paths))
+    roots: Roots = bench_roots(tmp_path)
+    lock: Path = tmp_path / "gpu.lock"
+    summary = run_queue(build_queue(("dtu",), scenes=("scan24",), methods=("brush-7k-wgsl",)), roots, lock, FakeRunner())
     assert len(summary.failed) == 1
-    assert "brush-7k" in load_failures(paths.runs / "FAILURES.jsonl")[0].error
+    assert "brush-7k" in load_failures(roots.runs / "FAILURES.jsonl")[0].error
 
 
 def test_partial_outputs_move_to_the_attic_before_a_rerun(tmp_path: Path) -> None:
-    paths: BenchPaths = bench_paths(tmp_path)
-    train_run: Path = paths.runs / "dtu" / "scan24" / "hexels-v1-7k"
+    roots: Roots = bench_roots(tmp_path)
+    lock: Path = tmp_path / "gpu.lock"
+    train_run: Path = roots.runs / "dtu" / "scan24" / "hexels-v1-7k"
     (train_run / "upstream").mkdir(parents=True)
     (train_run / "log.txt").write_text("crashed\n")
-    cuda_run: Path = paths.runs / "dtu" / "scan24" / "hexels-v1-30k-pub-cuda"
+    cuda_run: Path = roots.runs / "dtu" / "scan24" / "hexels-v1-30k-pub-cuda"
     write_cameras(cuda_run)
     (cuda_run / "model.ply").write_bytes(b"ply")
     (cuda_run / "upstream-eval").mkdir()
     (cuda_run / "upstream-eval-job").mkdir()
 
-    summary = run_queue(build_queue(("dtu",), scenes=("scan24",), methods=("hexels-v1-7k", "hexels-v1-30k-pub-cuda")), paths, FakeRunner(paths))
+    summary = run_queue(build_queue(("dtu",), scenes=("scan24",), methods=("hexels-v1-7k", "hexels-v1-30k-pub-cuda")), roots, lock, FakeRunner())
 
     assert len(summary.done) == 2
-    attic: list[str] = sorted(path.name for path in (paths.runs / "_attic").iterdir())
+    attic: list[str] = sorted(path.name for path in (roots.runs / "_attic").iterdir())
     assert len(attic) == 2
     assert attic[0].startswith("dtu-scan24-hexels-v1-30k-pub-cuda-") and attic[1].startswith("dtu-scan24-hexels-v1-7k-")
-    assert (paths.runs / "_attic" / attic[1] / "log.txt").read_text() == "crashed\n"
+    assert (roots.runs / "_attic" / attic[1] / "log.txt").read_text() == "crashed\n"
     assert (cuda_run / "model.ply").is_file(), "staged published files stay"
     assert not (cuda_run / "upstream-eval-job").exists()

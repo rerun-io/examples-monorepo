@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from PIL import Image
-from serde import SerdeError, serde
-from serde.json import from_json, to_json
+from serde import serde
+from serde.json import to_json
 
 from hexels_bench.png16 import write_png16
 
@@ -37,10 +37,14 @@ class ContractCamera:
     """Horizontal field of view in radians."""
     fov_y: float
     """Vertical field of view in radians."""
-    world_view_transform: list[list[float]]
-    """4x4, row-vector convention: [x y z 1] @ M is the OpenCV camera point."""
-    camera_center: list[float]
+    world_view_transform: Float64[ndarray, "4 4"]
+    """Row-vector convention: [x y z 1] @ M is the OpenCV camera point (M = world-to-camera transposed)."""
+    camera_center: Float64[ndarray, "3"]
     """Camera center in world space."""
+
+    def world_from_camera(self) -> Float64[ndarray, "4 4"]:
+        """OpenCV (right/down/forward) camera-to-world pose."""
+        return np.linalg.inv(self.world_view_transform.T)
 
 
 @serde
@@ -85,18 +89,12 @@ class CameraContract:
 
     settings: ContractSettings
     """Scene loading settings."""
+    training: ContractSplit
+    """Training split digests."""
     test: ContractSplit
     """Test split digests."""
     geometry: ContractGeometry
     """Camera geometry."""
-
-
-def load_contract(path: Path) -> CameraContract:
-    """Load an upstream camera contract.json."""
-    try:
-        return from_json(CameraContract, path.read_text())
-    except (SerdeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path}: {error}") from error
 
 
 @serde(deny_unknown_fields=True)
@@ -128,24 +126,19 @@ def write_cameras_file(path: Path, cameras: CamerasFile) -> None:
     path.write_text(to_json(cameras) + "\n")
 
 
-def load_cameras_file(path: Path) -> CamerasFile:
-    try:
-        return from_json(CamerasFile, path.read_text())
-    except (SerdeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path}: {error}") from error
-
-
-def _json_sha256(value: list[list[str]]) -> str:
-    text: str = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+def ordered_targets_sha256(digests: list[list[str]]) -> str:
+    """Upstream's digest of the ordered [[name, target digest], ...] list (hexels/benchmark_metrics.py `_json_sha256`)."""
+    text: str = json.dumps(digests, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _tensor_sha256(target: Float32[ndarray, "3 h w"]) -> str:
-    """Upstream's tensor digest: dtype string, shape JSON, then the raw bytes."""
+def target_sha256(rgb: UInt8[ndarray, "h w 3"]) -> str:
+    """Upstream's digest of a float32 CHW target tensor (`_tensor_sha256`): dtype string, shape JSON, then the raw bytes."""
+    target: Float32[ndarray, "3 h w"] = np.ascontiguousarray((rgb.astype(np.float32) / np.float32(255.0)).transpose(2, 0, 1))
     digest = hashlib.sha256()
     digest.update(target.dtype.str.encode())
     digest.update(json.dumps(list(target.shape), separators=(",", ":")).encode())
-    digest.update(np.ascontiguousarray(target).tobytes())
+    digest.update(target.tobytes())
     return digest.hexdigest()
 
 
@@ -178,11 +171,10 @@ def write_targets(contract: CameraContract, scene_dir: Path, out_dir: Path) -> l
     written: list[Path] = []
     for camera in contract.geometry.test:
         rgb: UInt8[ndarray, "h w 3"] = load_target(find_image(images_dir, camera.name), camera.width, camera.height)
-        chw: Float32[ndarray, "3 h w"] = np.ascontiguousarray((rgb.astype(np.float32) / np.float32(255.0)).clip(0, 1).transpose(2, 0, 1))
-        digests.append([camera.name, _tensor_sha256(chw)])
+        digests.append([camera.name, target_sha256(rgb)])
         path: Path = out_dir / f"{camera.name}.png"
         write_png16(path, rgb.astype(np.uint16) * np.uint16(257))
         written.append(path)
-    if _json_sha256(digests) != contract.test.ordered_target_tensors_sha256:
+    if ordered_targets_sha256(digests) != contract.test.ordered_target_tensors_sha256:
         raise ValueError(f"{scene_dir}: test targets do not match the camera contract digest")
     return written

@@ -1,7 +1,7 @@
 """Collect every scored surface run into `runs/SURFACE_TABLE.json`, with the paper's per-scene number beside it.
 
 Rows come from `runs/<dataset>/<scene>/<method>/surface*/surface_metrics.json` (+ fusion.json, depth_parity.json);
-paper values from `specs/paper-numbers.json` (`hf_surface_main_per_scene`, the published surface
+paper values from `hexels_bench.paper` (`hf_surface_main_per_scene`, the published surface
 checkpoints' own evaluation).
 """
 
@@ -12,15 +12,14 @@ from pathlib import Path
 from serde import serde
 from serde.json import to_json
 
-from hexels_bench.layout import UPSTREAM_DATASET, Roots
+from hexels_bench.layout import UPSTREAM_DATASET, Roots, read_json
+from hexels_bench.paper import PAPER_NUMBERS, PaperNumbers, PublishedSurface
 
 
 @dataclass
 class Config:
     """Write runs/SURFACE_TABLE.json from the scored surface runs."""
 
-    paper_numbers: Path = Path.home() / "hexels-work" / "specs" / "paper-numbers.json"
-    """Paper numbers (key hf_surface_main_per_scene)."""
     roots: Roots = field(default_factory=Roots)
     """Data and run roots."""
 
@@ -62,13 +61,13 @@ class SurfaceRow:
     """CUDA method: mean |median depth CUDA - WGSL| (scene units)."""
 
 
-def rows(roots: Roots, paper: dict) -> list[SurfaceRow]:
+def rows(roots: Roots, paper: dict[str, dict[str, PublishedSurface]]) -> list[SurfaceRow]:
     found: list[SurfaceRow] = []
     for metrics_path in sorted(roots.runs.glob("*/*/*/surface*/surface_metrics.json")):
         metrics: dict = json.loads(metrics_path.read_text())
         fusion: dict = json.loads((metrics_path.parent / "fusion.json").read_text())
         parity_path: Path = metrics_path.parent / "depth_parity.json"
-        reference: dict = paper.get(UPSTREAM_DATASET[metrics["dataset"]], {}).get(metrics["scene"], {})
+        reference: PublishedSurface | None = paper.get(UPSTREAM_DATASET[metrics["dataset"]], {}).get(metrics["scene"])
         found.append(
             SurfaceRow(
                 dataset=metrics["dataset"],
@@ -83,8 +82,8 @@ def rows(roots: Roots, paper: dict) -> list[SurfaceRow]:
                 f1=metrics["f1"],
                 precision=metrics["precision"],
                 recall=metrics["recall"],
-                paper_cd_mm=reference.get("cd_mm"),
-                paper_f1=reference.get("f1_pct"),
+                paper_cd_mm=None if reference is None else reference.cd_mm,
+                paper_f1=None if reference is None else reference.f1_pct,
                 depth_vs_cuda_mean_abs=json.loads(parity_path.read_text())["median_abs_mean"] if parity_path.is_file() else None,
             )
         )
@@ -92,8 +91,7 @@ def rows(roots: Roots, paper: dict) -> list[SurfaceRow]:
 
 
 def main(config: Config) -> None:
-    paper: dict = json.loads(config.paper_numbers.read_text())["hf_surface_main_per_scene"]
-    table: list[SurfaceRow] = rows(config.roots, paper)
+    table: list[SurfaceRow] = rows(config.roots, read_json(PaperNumbers, PAPER_NUMBERS).hf_surface_main_per_scene)
     out: Path = config.roots.runs / "SURFACE_TABLE.json"
     out.write_text(to_json(table) + "\n")
     for row in table:

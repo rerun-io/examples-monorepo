@@ -4,11 +4,8 @@ A 2D run directory `runs/imagegs/<stem>/<method>/` scores one decoder (upstream 
 on one fit under one or more conditions: the paper's packed file (`decoded_hxm`), the uniform
 16-bit file (`uint16`) and the raw FP32 fields (`raw_fp32`). The primary condition's 16-bit render is
 `renders/test/<stem>.png`; the others are `renders/<condition>/<stem>.png`.
-
-Torch-free on purpose: the Rerun figure tool reads these files in an environment without torch.
 """
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +16,10 @@ from jaxtyping import Float32, Float64, UInt16
 from numpy import ndarray
 from serde import serde
 from serde.json import from_json, to_json
+
+from hexels_bench.layout import read_json
+from hexels_bench.metrics import TrainRecord
+from hexels_bench.paper import PaperNumbers, PublishedImage, Table1Row
 
 Condition: TypeAlias = Literal["decoded_hxm", "uint16", "raw_fp32"]
 Decoder: TypeAlias = Literal["cuda", "wgsl"]
@@ -45,8 +46,43 @@ TABLE_METHODS: tuple[tuple[str, Condition | None], ...] = (
     ("hexels-2d-flat-wgsl", None),
 )
 """Table rows: (method, condition); None is the method's primary condition (the stored file)."""
-PAPER_ROW: dict[str, str] = {"imagegs-2d": "Image-GS", "hexels-2d-flat": "Hexels (constant)", "hexels-2d": "Hexels"}
-"""Paper Table 1 row of each method family (the leading part of the method name)."""
+FitKind: TypeAlias = Literal["pub-rich", "pub-flat", "rich", "flat", "imagegs"]
+FitMethod: TypeAlias = Literal["hexels-2d", "hexels-2d-flat", "imagegs-2d"]
+PAPER_ROW: dict[FitMethod, str] = {"imagegs-2d": "Image-GS", "hexels-2d-flat": "Hexels (constant)", "hexels-2d": "Hexels"}
+"""Paper Table 1 row of each recipe."""
+
+
+@dataclass(frozen=True, slots=True)
+class FitSpec:
+    """One 2D fit: a recipe, ours or the published one, and the run directories its decodes go to."""
+
+    family: FitMethod
+    """Our fit of the same recipe: its run directory, and the recipe's Table 1 row."""
+    published: bool
+    """The HF jhu-ccvl/Hexels fit of the paper's recipe, not ours."""
+    cuda_method: str
+    """Run directory of the upstream CUDA decode (for our fits also the fit itself)."""
+    wgsl_method: str | None
+    """Run directory of the WGSL decode; None for Image-GS (no WGSL decoder, specs/twod.md D5)."""
+    recipe: str
+    """Upstream `scripts.fit_image --variant`."""
+    appearance: str | None
+    """HF appearance name of the Hexels recipe (spatial-rgb, flat-rgb); None for Image-GS."""
+    packed_profile: str | None
+    """Profile of the paper's packed Hexels file (mixed14, balanced); None for Image-GS (uint16 .hxi)."""
+    floats_per_primitive: int
+    """Stored FP32 floats per primitive."""
+
+
+FITS: dict[FitKind, FitSpec] = {
+    "pub-rich": FitSpec("hexels-2d", True, "hexels-2d-pub-cuda", "hexels-2d-pub-wgsl", "rich", "spatial-rgb", "mixed14", 15),
+    "pub-flat": FitSpec("hexels-2d-flat", True, "hexels-2d-flat-pub-cuda", "hexels-2d-flat-pub-wgsl", "flat", "flat-rgb", "balanced", 8),
+    "rich": FitSpec("hexels-2d", False, "hexels-2d", "hexels-2d-wgsl", "rich", "spatial-rgb", "mixed14", 15),
+    "flat": FitSpec("hexels-2d-flat", False, "hexels-2d-flat", "hexels-2d-flat-wgsl", "flat", "flat-rgb", "balanced", 8),
+    "imagegs": FitSpec("imagegs-2d", False, "imagegs-2d", None, "imagegs", None, None, 8),
+}
+FIT_OF_RUN: dict[str, FitSpec] = {method: spec for spec in FITS.values() for method in (spec.cuda_method, spec.wgsl_method) if method is not None}
+"""2D run directory -> the fit it decodes."""
 
 
 @serde(deny_unknown_fields=True)
@@ -131,6 +167,15 @@ def load_image_run(path: Path) -> ImageRun:
     return from_json(ImageRun, path.read_text())
 
 
+def published_scores(item: PublishedImage, condition: Condition) -> tuple[float | None, float | None, float | None]:
+    """HF catalog PSNR, SSIM and LPIPS-Alex of the published file matching `condition` (packed .hxm, uniform 16-bit)."""
+    if condition == "decoded_hxm":
+        return item.psnr_hxm, item.ssim_hxm, item.lpips_alex_hxm
+    if condition == "uint16":
+        return item.psnr_uint16, None, None
+    return None, None, None
+
+
 def psnr_between(first: UInt16[ndarray, "h w 3"], second: UInt16[ndarray, "h w 3"]) -> float:
     """PSNR of two 16-bit renders in [0, 1] units; IDENTICAL_PSNR when they are bit-identical."""
     difference: Float64[ndarray, "h w 3"] = (first.astype(np.float64) - second.astype(np.float64)) / 65535.0
@@ -207,15 +252,7 @@ def mean_or_none(values: list[float | None]) -> float | None:
     return None if not values or any(value is None for value in values) else float(np.mean([value for value in values if value is not None]))
 
 
-PUBLISHED_FIELDS: dict[Condition, tuple[str | None, str | None, str | None]] = {
-    "decoded_hxm": ("psnr_hxm", "ssim_hxm", "lpips_alex_hxm"),
-    "uint16": ("psnr_uint16", None, None),
-    "raw_fp32": (None, None, None),
-}
-"""HF per-image catalog keys (paper-numbers.json `hf_images_2d_per_image`) for PSNR, SSIM, LPIPS per condition."""
-
-
-def table_rows(image_root: Path, stems: list[str], paper: dict) -> list[TableRow]:
+def table_rows(image_root: Path, stems: list[str], paper: PaperNumbers) -> list[TableRow]:
     """Per-image rows and an all-image mean for every TABLE_METHODS entry found under `image_root` (runs/imagegs).
 
     Hexels rows carry the HF catalog numbers of the published fit of the same image (scope.md: compare
@@ -230,20 +267,19 @@ def table_rows(image_root: Path, stems: list[str], paper: dict) -> list[TableRow
         if not runs:
             continue
         condition: Condition = runs[0].primary if wanted is None else wanted
-        family: str = method.removesuffix("-wgsl").removesuffix("-pub-cuda").replace("-pub", "")
-        appearance: str | None = {"hexels-2d": "spatial-rgb", "hexels-2d-flat": "flat-rgb"}.get(family)
-        trains: dict[str, dict] = {}
+        fit: FitSpec = FIT_OF_RUN[method]
+        trains: dict[str, TrainRecord] = {}
         for run in runs:
-            train: Path = image_root / run.image / family / "train.json"
-            if "-pub" not in method and train.is_file():  # published fits have no training run of ours
-                trains[run.image] = json.loads(train.read_text())
-        table1: dict | None = next((row for row in paper["table1_2d"] if row["method"] == PAPER_ROW.get(family)), None)
+            train: Path = image_root / run.image / fit.family / "train.json"
+            if not fit.published and train.is_file():  # published fits have no training run of ours
+                trains[run.image] = read_json(TrainRecord, train)
+        table1: Table1Row | None = next((row for row in paper.table1_2d if row.method == PAPER_ROW[fit.family]), None)
         for group in [*(run.image for run in runs), "all"]:
             members: list[ImageRun] = [run for run in runs if group in ("all", run.image)]
             scores: list[ConditionScores] = [run.scores(condition) for run in members]
-            published: list[dict] = [] if appearance is None else [paper["hf_images_2d_per_image"][run.image][appearance] for run in members]
-            keys: tuple[str | None, str | None, str | None] = PUBLISHED_FIELDS[condition]
-            member_trains: list[dict] = [trains[run.image] for run in members if run.image in trains]
+            catalog: list[PublishedImage] = [paper.hf_images_2d_per_image[run.image][fit.appearance] for run in members if fit.appearance is not None]
+            published: list[tuple[float | None, float | None, float | None]] = [published_scores(item, condition) for item in catalog]
+            member_trains: list[TrainRecord] = [trains[run.image] for run in members if run.image in trains]
             complete: bool = len(member_trains) == len(members)
             whole: bool = group == "all" and table1 is not None
             rows.append(
@@ -256,16 +292,16 @@ def table_rows(image_root: Path, stems: list[str], paper: dict) -> list[TableRow
                     ssim=float(np.mean([s.ssim for s in scores])),
                     lpips_alex=float(np.mean([s.lpips_alex for s in scores])),
                     fps=mean_or_none([s.fps for s in scores]),
-                    train_seconds=float(np.mean([t["loop_seconds"] for t in member_trains])) if complete else None,
-                    peak_vram_gib=float(np.mean([t["peak_vram_gib"] for t in member_trains])) if complete else None,
-                    train_gpu=str(member_trains[0]["gpu"]) if complete else None,
-                    published_psnr=mean_or_none([item[keys[0]] for item in published]) if keys[0] else None,
-                    published_ssim=mean_or_none([item[keys[1]] for item in published]) if keys[1] else None,
-                    published_lpips_alex=mean_or_none([item[keys[2]] for item in published]) if keys[2] else None,
-                    published_fps_a5000=mean_or_none([item["median_fps_uint16_a5000"] for item in published]),
-                    table1_psnr=float(table1["psnr"]) if whole and table1 is not None else None,
-                    table1_ssim=float(table1["ssim"]) if whole and table1 is not None else None,
-                    table1_lpips_alex=float(table1["lpips_alex"]) if whole and table1 is not None else None,
+                    train_seconds=float(np.mean([t.loop_seconds for t in member_trains])) if complete else None,
+                    peak_vram_gib=mean_or_none([t.peak_vram_gib for t in member_trains]) if complete else None,
+                    train_gpu=member_trains[0].gpu if complete else None,
+                    published_psnr=mean_or_none([item[0] for item in published]),
+                    published_ssim=mean_or_none([item[1] for item in published]),
+                    published_lpips_alex=mean_or_none([item[2] for item in published]),
+                    published_fps_a5000=mean_or_none([item.median_fps_uint16_a5000 for item in catalog]),
+                    table1_psnr=table1.psnr if whole and table1 is not None else None,
+                    table1_ssim=table1.ssim if whole and table1 is not None else None,
+                    table1_lpips_alex=table1.lpips_alex if whole and table1 is not None else None,
                 )
             )
     return rows

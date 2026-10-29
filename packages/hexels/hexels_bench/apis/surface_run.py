@@ -23,9 +23,9 @@ from serde import serde
 from serde.json import to_json
 
 from hexels_bench.apis.export import export_run
-from hexels_bench.cameras import CamerasFile, ContractCamera, find_image, load_contract, write_cameras_file
+from hexels_bench.cameras import CameraContract, CamerasFile, ContractCamera, find_image, write_cameras_file
 from hexels_bench.checkpoint import UpstreamRunConfig, find_checkpoint, load_run_config
-from hexels_bench.layout import Dataset, Roots
+from hexels_bench.layout import GSPLAT_RELEASE, Dataset, Roots, read_json
 from hexels_bench.surface import (
     DepthMode,
     FusionResult,
@@ -51,9 +51,37 @@ SurfaceMethod: TypeAlias = Literal[
     "hexels-v1-30k-pub-wgsl",
     "hexels-v3-30k-pub-wgsl",
 ]
-PUBLISHED_SURFACE: tuple[SurfaceMethod, ...] = ("hexels-v3-surf-30k-pub-wgsl", "hexels-v3-surf-30k-pub-cuda")
-"""The paper's surface checkpoints (all views): one PLY, depth from WGSL or from upstream CUDA."""
-GSPLAT: Path = Path(__file__).resolve().parents[3] / "gsplat-rust-renderer" / "target" / "release" / "gsplat"
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceSpec:
+    """Where a surface method's model and depth come from."""
+
+    model: Literal["published", "ours", "nvs"]
+    """published: the paper's surface checkpoint, all views; ours: our run of the paper's surface recipe
+    (`scripts.train_scene --all-views --surface`), all views; nvs: an NVS run's model.ply over its training views."""
+    ply_from: SurfaceMethod
+    """Run directory whose model.ply is rendered; for the CUDA method also the WGSL recording its depth is compared with."""
+    depth_source: Literal["wgsl", "upstream-cuda"]
+    """`gsplat render --surface`, or upstream's CUDA renderer in process."""
+    depth_mode: DepthMode
+    """Fused depth: median for Hexels (the paper's); Brush splats only have the alpha-weighted expected depth (spec R7)."""
+    alpha_threshold: float
+    """Depth is zeroed where alpha <= this: 0 for Hexels as upstream, 0.5 for Brush (spec R7)."""
+    label: str
+    """Short name in the surface recording."""
+
+
+SURFACE_METHODS: dict[SurfaceMethod, SurfaceSpec] = {
+    "hexels-v3-surf-30k-pub-wgsl": SurfaceSpec("published", "hexels-v3-surf-30k-pub-wgsl", "wgsl", "median", 0.0, "v3-surf-wgsl"),
+    "hexels-v3-surf-30k-pub-cuda": SurfaceSpec("published", "hexels-v3-surf-30k-pub-wgsl", "upstream-cuda", "median", 0.0, "v3-surf-cuda"),
+    "hexels-v3-surf-30k": SurfaceSpec("ours", "hexels-v3-surf-30k", "wgsl", "median", 0.0, "v3-surf-30k"),
+    "brush-7k": SurfaceSpec("nvs", "brush-7k", "wgsl", "expected", 0.5, "brush-7k"),
+    "hexels-v1-7k": SurfaceSpec("nvs", "hexels-v1-7k", "wgsl", "median", 0.0, "v1-7k"),
+    "hexels-v3-7k": SurfaceSpec("nvs", "hexels-v3-7k", "wgsl", "median", 0.0, "v3-7k"),
+    "hexels-v1-30k-pub-wgsl": SurfaceSpec("nvs", "hexels-v1-30k-pub-wgsl", "wgsl", "median", 0.0, "v1-wgsl"),
+    "hexels-v3-30k-pub-wgsl": SurfaceSpec("nvs", "hexels-v3-30k-pub-wgsl", "wgsl", "median", 0.0, "v3-wgsl"),
+}
 
 
 @dataclass
@@ -68,7 +96,7 @@ class Config:
     """Methods to fuse; NVS methods (7k runs, published NVS checkpoints) need their run's model.ply and fuse their training views."""
     depth_mode: DepthMode | None = None
     """Override the method's depth (Hexels: median, the paper's; Brush: expected); writes to surface-<mode>/."""
-    gsplat: Path = GSPLAT
+    gsplat: Path = GSPLAT_RELEASE / "gsplat"
     """Release `gsplat` binary (pixi run -e gsplat-rust-renderer gsplat-build, or cargo build -p gsplat-cli --release)."""
     gpu_lock: Path | None = Path.home() / "hexels-work" / "gpu.lock"
     """flock held around each WGSL render; None to skip."""
@@ -197,36 +225,30 @@ class SurfacePlan:
     depth_mode: DepthMode
     """Which depth to fuse."""
     alpha_threshold: float
-    """Zero depth where alpha <= this (0 for Hexels as upstream; 0.5 for Brush, spec R7)."""
-
-
-def default_depth_mode(method: SurfaceMethod) -> DepthMode:
-    """Hexels fuse median depth (the paper's); Brush splats have only the alpha-weighted expected depth (spec R7)."""
-    return "expected" if method.startswith("brush") else "median"
+    """Zero depth where alpha <= this."""
 
 
 def surface_out_dir(roots: Roots, dataset: Dataset, scene: str, method: SurfaceMethod, depth_mode: DepthMode | None) -> Path:
     """`<run>/surface/` for the method's own depth mode, `<run>/surface-<mode>/` for an override."""
-    if depth_mode is None or depth_mode == default_depth_mode(method):
+    if depth_mode is None or depth_mode == SURFACE_METHODS[method].depth_mode:
         return roots.surface_dir(dataset, scene, method)
     return roots.run_dir(dataset, scene, method) / f"surface-{depth_mode}"
 
 
 def surface_model_dir(roots: Roots, dataset: Dataset, scene: str, method: SurfaceMethod) -> Path | None:
-    """Upstream run directory (config.json, checkpoints/) of an all-view surface method; None for NVS methods.
-    `hexels-v3-surf-30k` is our own run of the paper's surface recipe (`scripts.train_scene --all-views --surface`)."""
-    if method in PUBLISHED_SURFACE:
+    """Upstream run directory (config.json, checkpoints/) of an all-view surface method; None for NVS methods."""
+    model: Literal["published", "ours", "nvs"] = SURFACE_METHODS[method].model
+    if model == "published":
         return roots.published_surface_model(dataset, scene)
-    if method == "hexels-v3-surf-30k":
-        return roots.run_dir(dataset, scene, method) / "upstream"
-    return None
+    return roots.run_dir(dataset, scene, method) / "upstream" if model == "ours" else None
 
 
 def plan_surface(roots: Roots, dataset: Dataset, scene: str, method: SurfaceMethod, depth_mode: DepthMode | None) -> SurfacePlan:
     """All-view surface runs (published or ours) fuse every registered view loaded with the run's own settings;
     NVS runs fuse their training views (the contract's `geometry.training`)."""
-    brush: bool = method.startswith("brush")
-    mode: DepthMode = depth_mode if depth_mode is not None else default_depth_mode(method)
+    spec: SurfaceSpec = SURFACE_METHODS[method]
+    mode: DepthMode = depth_mode if depth_mode is not None else spec.depth_mode
+    ply: Path = roots.run_dir(dataset, scene, spec.ply_from) / "model.ply"
     out_dir: Path = surface_out_dir(roots, dataset, scene, method, depth_mode)
     model_dir: Path | None = surface_model_dir(roots, dataset, scene, method)
     if model_dir is not None:
@@ -236,27 +258,26 @@ def plan_surface(roots: Roots, dataset: Dataset, scene: str, method: SurfaceMeth
         source: Path = Path(config.source_path)
         scene_dir: Path = source if source.is_absolute() else roots.data / source.relative_to("data")
         images: str = config.images if config.images is not None else "images"
-        ply_method: SurfaceMethod = "hexels-v3-surf-30k-pub-wgsl" if method in PUBLISHED_SURFACE else method
         return SurfacePlan(
             out_dir=out_dir,
-            ply=roots.run_dir(dataset, scene, ply_method) / "model.ply",
+            ply=ply,
             cameras=scene_cameras(scene_dir, images, config.resolution),
             split="all",
             scene_dir=scene_dir,
             images_dir=scene_dir / images,
             depth_mode=mode,
-            alpha_threshold=0.0,
+            alpha_threshold=spec.alpha_threshold,
         )
-    contract = load_contract(roots.contract(dataset, scene))
+    contract: CameraContract = read_json(CameraContract, roots.contract(dataset, scene))
     return SurfacePlan(
         out_dir=out_dir,
-        ply=roots.run_dir(dataset, scene, method) / "model.ply",
+        ply=ply,
         cameras=contract.geometry.training,
         split="train",
         scene_dir=roots.scene_dir(dataset, scene),
         images_dir=roots.scene_dir(dataset, scene) / contract.settings.images,
         depth_mode=mode,
-        alpha_threshold=0.5 if brush else 0.0,
+        alpha_threshold=spec.alpha_threshold,
     )
 
 
@@ -299,6 +320,7 @@ def compare_frames(frames: Iterator[SurfaceFrame], references: Iterator[SurfaceF
 
 
 def run_one(config: Config, dataset: Dataset, scene: str, method: SurfaceMethod) -> FusionReport | None:
+    spec: SurfaceSpec = SURFACE_METHODS[method]
     plan: SurfacePlan = plan_surface(config.roots, dataset, scene, method, config.depth_mode)
     if (plan.out_dir / "fusion.json").is_file() and not config.force:
         print(f"skip {dataset}/{scene}/{method}: {plan.out_dir / 'fusion.json'} exists")
@@ -315,19 +337,17 @@ def run_one(config: Config, dataset: Dataset, scene: str, method: SurfaceMethod)
         CamerasFile(format="hexels-cameras-1", dataset=dataset, scene=scene, split=plan.split, background=background, cameras=plan.cameras),
     )
     parity_rows: list[DepthParity] = []
-    if method == "hexels-v3-surf-30k-pub-cuda":
+    if spec.depth_source == "upstream-cuda":
         assert model_dir is not None
         frames: Iterator[SurfaceFrame] = surface_frames(model_dir, find_checkpoint(model_dir), plan.scene_dir)
-        wgsl_rrd: Path = config.roots.surface_dir(dataset, scene, "hexels-v3-surf-30k-pub-wgsl") / "surface.rrd"
+        wgsl_rrd: Path = config.roots.surface_dir(dataset, scene, spec.ply_from) / "surface.rrd"
         if wgsl_rrd.is_file():
-            frames = compare_frames(frames, rrd_frames(wgsl_rrd, "hexels-v3-surf-30k-pub-wgsl", plan.cameras), parity_rows)
-        source: str = "upstream-cuda"
+            frames = compare_frames(frames, rrd_frames(wgsl_rrd, spec.ply_from, plan.cameras), parity_rows)
     else:
         rrd: Path = plan.out_dir / "surface.rrd"
         if config.rerender or not rrd.is_file():
             rrd = render_surface(config, plan, method, log)
         frames = rrd_frames(rrd, method, plan.cameras)
-        source = "wgsl"
     settings: TsdfSettings = tsdf_settings(dataset, scene)
     result: FusionResult = fuse_tsdf(fusion_views(frames, plan), settings)
     o3d.io.write_triangle_mesh(str(plan.out_dir / "fuse.ply"), result.mesh)
@@ -338,7 +358,7 @@ def run_one(config: Config, dataset: Dataset, scene: str, method: SurfaceMethod)
         dataset=dataset,
         scene=scene,
         method=method,
-        depth_source=source,
+        depth_source=spec.depth_source,
         depth_mode=plan.depth_mode,
         alpha_threshold=plan.alpha_threshold,
         split=plan.split,

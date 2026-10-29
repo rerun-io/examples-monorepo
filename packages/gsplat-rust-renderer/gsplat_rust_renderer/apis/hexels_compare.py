@@ -1,8 +1,8 @@
 """Brush 3DGS | Hexels side by side: both views track one logged orbit camera on the `frame` timeline.
 
 Brush enters as native `GaussianSplats3D`, Hexels as `Hexels3D` (stock Rerun shows its Points3D fallback).
-Below the views, a DataframeView lists our per-scene numbers beside the published ones. The `brush` and
-`hexels` layouts keep one view, the shape `gsplat probe` measures.
+Below the views, a DataframeView lists our per-scene numbers (from the benchmark's `TABLE.json`) beside the
+published ones. The `brush` and `hexels` layouts keep one view, the shape `gsplat probe` measures.
 """
 
 import re
@@ -15,6 +15,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float64
 from numpy import ndarray
+from serde import serde
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from gsplat_rust_renderer.gaussians3d import log_ply
@@ -22,17 +23,21 @@ from gsplat_rust_renderer.hexels3d import Hexels3D, log_hexels, read_hexel_ply
 from gsplat_rust_renderer.hexels_metrics import (
     METRICS_ENTITY,
     METRICS_TIMELINE,
-    PAPER_DATASET,
+    BenchTable,
     MetricRow,
-    RunDataset,
+    SceneCells,
     log_metric_table,
     paper_row,
+    read_json,
     run_row,
+    scene_cells,
 )
-from gsplat_rust_renderer.nvs_protocol import CameraContract, ContractCamera, read_json
 from gsplat_rust_renderer.orbit import CameraSpec, Orbit, orbit_from_cameras, orbit_specs, write_orbit_json
 
+Dataset: TypeAlias = Literal["mipnerf360", "dtu", "tnt"]
 Layout: TypeAlias = Literal["compare", "brush", "hexels"]
+UPSTREAM_DATASET: dict[Dataset, str] = {"mipnerf360": "mipnerf360", "dtu": "dtu", "tnt": "tanks_and_temples"}
+"""Run-layout dataset name -> dataset directory of the published camera contracts."""
 BRUSH_ENTITY: str = "/world/brush"
 HEXELS_ENTITY: str = "/world/hexels"
 ORBIT_ENTITY: str = "/world/orbit_cam"
@@ -45,7 +50,7 @@ class CompareConfig:
 
     rr_config: RerunTyroConfig
     """Viewer wiring; `--rr-config.save <scene>-compare.rrd` writes the recording."""
-    dataset: RunDataset = "mipnerf360"
+    dataset: Dataset = "mipnerf360"
     """Run-layout dataset name."""
     scene: str = "garden"
     """Upstream scene name."""
@@ -79,8 +84,51 @@ class CompareConfig:
     """Run layout root (contracts/run-layout.md)."""
     contracts_root: Path = field(default_factory=lambda: Path.home() / "gsplat-modern-data/hexels-pretrained/cameras/nvs")
     """Published camera contracts: `<paper dataset>/<scene>/contract.json`."""
-    paper_numbers: Path = field(default_factory=lambda: Path.home() / "hexels-work/specs/paper-numbers.json")
-    """Published per-scene numbers (`hf_nvs_per_scene`)."""
+    table: Path | None = None
+    """Benchmark table with our and the published per-scene numbers (`hexels-bench-table`); default `<runs_root>/TABLE.json`."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class ContractCamera:
+    """One camera of the published camera contract (read partially; 2DGS conventions)."""
+
+    name: str
+    """Image stem."""
+    width: int
+    """Image width in pixels."""
+    height: int
+    """Image height in pixels."""
+    fov_x: float
+    """Horizontal field of view in radians; the principal point is the image centre."""
+    fov_y: float
+    """Vertical field of view in radians."""
+    world_view_transform: Float64[ndarray, "4 4"]
+    """Transposed OpenCV world-to-camera matrix (row-vector convention)."""
+
+    def world_from_camera(self) -> Float64[ndarray, "4 4"]:
+        """OpenCV (right/down/forward) camera-to-world pose."""
+        return np.linalg.inv(self.world_view_transform.T)
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class ContractGeometry:
+    """Camera records per split."""
+
+    training: list[ContractCamera]
+    """Training cameras."""
+    test: list[ContractCamera]
+    """Held-out cameras."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class CameraContract:
+    """HF jhu-ccvl/Hexels `cameras/nvs/<dataset>/<scene>/contract.json` (third-party document, read partially)."""
+
+    geometry: ContractGeometry
+    """Camera records."""
 
 
 def display_name(method: str) -> str:
@@ -154,7 +202,7 @@ def compare_blueprint(layout: Layout, brush_name: str, hexels_name: str, fps: fl
 def main(config: CompareConfig) -> None:
     """Log both models, the orbit (also written to `<run>/orbit.json`), the table and the blueprint."""
     scene_dir: Path = config.runs_root / config.dataset / config.scene
-    contract: CameraContract = read_json(CameraContract, config.contracts_root / PAPER_DATASET[config.dataset] / config.scene / "contract.json")
+    contract: CameraContract = read_json(CameraContract, config.contracts_root / UPSTREAM_DATASET[config.dataset] / config.scene / "contract.json")
     cameras: list[ContractCamera] = contract.geometry.training + contract.geometry.test
     orbit: Orbit = orbit_from_cameras(np.stack([camera.world_from_camera() for camera in cameras]), config.frames)
     fov_y: float = float(np.median([camera.fov_y for camera in contract.geometry.test]))
@@ -166,15 +214,20 @@ def main(config: CompareConfig) -> None:
     brush_count: int = vertex_count(brush_ply)
     hexels: Hexels3D = read_hexel_ply(hexels_ply)
     variant: str = hexels.variant
-    brush: MetricRow = run_row(scene_dir / config.brush_method, display_name(config.brush_method), "brush", brush_count, config.brush_probe, config.brush_speed)
-    hexel: MetricRow = run_row(scene_dir / config.hexels_method, display_name(config.hexels_method), variant, len(hexels.centers), config.hexels_probe, config.hexels_speed)
+    table: BenchTable = read_json(BenchTable, config.table if config.table is not None else config.runs_root / "TABLE.json")
+    brush_cells: SceneCells | None = scene_cells(table, config.dataset, config.scene, config.brush_method)
+    hexels_cells: SceneCells | None = scene_cells(table, config.dataset, config.scene, config.hexels_method)
+    if brush_cells is None or hexels_cells is None:
+        raise ValueError(f"TABLE.json has no {config.dataset}/{config.scene} rows for {config.brush_method} and {config.hexels_method}")
+    brush: MetricRow = run_row(table, brush_cells, display_name(config.brush_method), brush_count, config.brush_probe, config.brush_speed)
+    hexel: MetricRow = run_row(table, hexels_cells, display_name(config.hexels_method), len(hexels.centers), config.hexels_probe, config.hexels_speed)
     if not config.test_view_fps:
         brush, hexel = replace(brush, fps=None), replace(hexel, fps=None)
     brush_name: str = view_name(brush, "splats")
     hexels_name: str = view_name(hexel, "hexels")
     if config.layout == "compare":
         # Rows first: the table sizes its columns to the content of its first frame.
-        log_metric_table([brush, hexel, paper_row(config.paper_numbers, config.dataset, config.scene, f"{variant}-fixed", f"Paper Hexels {variant.upper()} 30k")])
+        log_metric_table([brush, hexel, paper_row(hexels_cells, f"Paper Hexels {variant.upper()} 30k")])
     rr.send_blueprint(compare_blueprint(config.layout, brush_name, hexels_name, config.fps, config.timing_gpu))
     log_cameras(contract, orbit, specs)
     if config.layout != "hexels":

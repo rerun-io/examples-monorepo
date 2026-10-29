@@ -5,10 +5,10 @@ import numpy as np
 import pytest
 import torch
 
+from hexels_bench.layout import read_json
 from hexels_bench.metrics import (
     MetricsFile,
     ViewMetrics,
-    load_metrics_file,
     psnr_from_sse,
     score_views,
     ssim,
@@ -64,4 +64,4 @@ def test_score_and_metrics_file_round_trip(tmp_path: Path) -> None:
     assert metrics.psnr == pytest.approx((rows[0].psnr + rows[1].psnr) / 2)
     write_metrics_file(tmp_path / "metrics.json", metrics)
     assert '"fps":null' in (tmp_path / "metrics.json").read_text().replace(" ", "")
-    assert load_metrics_file(tmp_path / "metrics.json") == metrics
+    assert read_json(MetricsFile, tmp_path / "metrics.json") == metrics
