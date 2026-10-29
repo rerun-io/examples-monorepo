@@ -2060,6 +2060,24 @@ depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { tas
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
 
+[feature.gsplat-rust-renderer.tasks.gsplat-train-protocol]
+args = [{ arg = "dataset", default = "dtu" }]
+cmd = "python tools/train_protocol.py --dataset {{ dataset }}"
+depends-on = ["gsplat-build"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Brush on the Hexels NVS protocol for every scene of one dataset"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-bench]
+cmd = "python tools/bench.py"
+depends-on = ["gsplat-build"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Brush vs Hexels benchmark queue (needs the hexels env installed for the upstream methods)"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-bench-table]
+cmd = "python tools/bench_table.py"
+cwd = "packages/gsplat-rust-renderer"
+description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
+
 [feature.gsplat-rust-renderer.tasks.gsplat-log-hexels-compare]
 cmd = "python tools/log_hexels_compare.py"
 cwd = "packages/gsplat-rust-renderer"
