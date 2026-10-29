@@ -25,7 +25,7 @@ pub use output::Target;
 pub use renderer::Renderer;
 pub use scene::Scene;
 pub use timing::{QUERY_COUNT, STAGE_NAMES, stage_ms};
-pub use types::{Camera, FrameStats, RenderMode, RenderOptions, Splats};
+pub use types::{Camera, FrameStats, HexelVariant, Hexels, RenderMode, RenderOptions, Splats};
 pub use view::ViewState;
 
 /// Input, capability, or readback failure at the renderer boundary.
@@ -69,6 +69,8 @@ pub enum Error {
     TooManySplats(#[from] std::num::TryFromIntError),
 }
 
+#[cfg(test)]
+mod hexel_tests;
 #[cfg(test)]
 mod primitive_tests;
 

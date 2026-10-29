@@ -16,7 +16,7 @@ struct Uniforms {
     options: RenderFlags,
     coefficients: array<vec4f, 2>,
     lens: LensInfo,
-    padding: vec4u,
+    camera_rotation: vec4f,
 }
 
 struct Splat {

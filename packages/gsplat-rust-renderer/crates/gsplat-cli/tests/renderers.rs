@@ -15,6 +15,8 @@ fn one_splat(log_scale: f32) -> PlyScene {
             sh_coeffs: Some(vec![0.1, 0.2, 0.3]),
             raw_opacities: Some(vec![0.0]),
         },
+        hexels: None,
+        image_size: None,
         mode: gsplat_core::RenderMode::Default,
         center: Vec3::ZERO,
         extent: 1.0,

@@ -5956,6 +5956,7 @@ dependencies = [
  "re_types_core 0.38.1",
  "re_viewer",
  "re_viewer_context",
+ "rerun 0.38.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",

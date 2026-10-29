@@ -20,13 +20,13 @@ fn pixel(tile: vec2u, lid: u32) -> vec2u {
     return tile * TILE_WIDTH + vec2u(compact_bits(lid), compact_bits(lid >> 1u));
 }
 
-struct Raster { rgba: vec4f, depth: f32, pix: vec2u, inside: bool, }
+struct Raster { rgba: vec4f, depth: f32, median: f32, pix: vec2u, inside: bool, }
 fn raster(tile: vec2u, lid: u32) -> Raster {
     if lid == 0u {
         skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
     }
     if workgroupUniformLoad(&skip) != 0u {
-        return Raster(vec4f(0.0), 0.0, vec2u(0u), false);
+        return Raster(vec4f(0.0), 0.0, 0.0, vec2u(0u), false);
     }
     let pix = pixel(tile, lid);
     let inside = all(pix < vec2u(frame.image.width, frame.image.height));
@@ -41,6 +41,7 @@ fn raster(tile: vec2u, lid: u32) -> Raster {
     var transmittance = 1.0;
     var color = vec3f(0.0);
     var expected_depth = 0.0;
+    var median_depth = 0.0;
     var done = !inside;
     if done {
         atomicAdd(&num_done, 1u);
@@ -66,6 +67,8 @@ fn raster(tile: vec2u, lid: u32) -> Raster {
                 } else {
                     color += max(vec3f(p.color_r, p.color_g, p.color_b), vec3f(0.0)) * (alpha * transmittance);
                     expected_depth += p.depth * alpha * transmittance;
+                    // 2DGS median depth: the last contribution while transmittance exceeds one half.
+                    median_depth = select(median_depth, p.depth, transmittance > 0.5);
                     transmittance = next;
                 }
             }
@@ -75,5 +78,5 @@ fn raster(tile: vec2u, lid: u32) -> Raster {
         }
     }
     return Raster(vec4f(color + transmittance * frame.background.xyz, 1.0 - transmittance),
-        expected_depth / max(1.0 - transmittance, 1e-8), pix, inside);
+        expected_depth / max(1.0 - transmittance, 1e-8), median_depth, pix, inside);
 }

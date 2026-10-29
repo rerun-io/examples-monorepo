@@ -256,7 +256,13 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
         }
     }
     let mut backends = Vec::new();
-    let mut oracle = Engine::Brush(Box::new(Brush::new(&scene, &a.settings).await));
+    // Brush checks splat renders; hexel scenes have no reference renderer here.
+    let mut oracle = match scene.hexels {
+        None => Some(Engine::Brush(Box::new(
+            Brush::new(&scene, &a.settings).await,
+        ))),
+        Some(_) => None,
+    };
     for Lane {
         kind: implementation,
         mut engine,
@@ -298,7 +304,10 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             lane1_unavailable_reason: (engine.adapter().backend == "Metal").then_some(
                 "Per-stage GPU timestamps are unreliable on Metal; frame timings remain available.",
             ),
-            camera_checks: check_cameras(&mut engine, &mut oracle, &cameras).await?,
+            camera_checks: match &mut oracle {
+                Some(oracle) => check_cameras(&mut engine, oracle, &cameras).await?,
+                None => Vec::new(),
+            },
             repeats,
         });
     }

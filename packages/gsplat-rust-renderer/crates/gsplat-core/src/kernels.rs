@@ -15,7 +15,7 @@ pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
 
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
-pub(crate) fn sources() -> [String; 7] {
+pub(crate) fn sources() -> [String; 13] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -24,6 +24,12 @@ pub(crate) fn sources() -> [String; 7] {
         "sort.wgsl",
         "dispatch.wgsl",
         "raster_outputs.wgsl",
+        "hexel_project.wgsl",
+        "hexel_map.wgsl",
+        "hexel_raster.wgsl",
+        "image_project.wgsl",
+        "image_map.wgsl",
+        "image_raster.wgsl",
     ]
     .map(crate::shader::resolve)
 }
@@ -81,12 +87,20 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (9, R),
         ],
         "gather" => &[(1, R), (2, R), (3, R), (4, W)],
-        "map_tiles" => &[(0, U), (1, R), (5, R), (6, R), (7, W), (8, W)],
+        "map_tiles" | "hexel_map_tiles" | "image_map_tiles" => {
+            &[(0, U), (1, R), (5, R), (6, R), (7, W), (8, W)]
+        }
         "tile_offsets" => &[(0, U), (1, R), (7, W), (9, W)],
-        "raster_float" => &[(0, U), (1, R), (2, R), (3, R), (4, W), (7, R)],
-        "raster_packed" => &[(0, U), (1, R), (2, R), (3, R), (5, W), (7, R)],
-        "raster_texture" => &[(0, U), (1, R), (2, R), (3, R), (6, COLOR), (7, R)],
-        "raster_texture_depth" => &[
+        "raster_float" | "hexel_raster_float" | "image_raster_float" => {
+            &[(0, U), (1, R), (2, R), (3, R), (4, W), (7, R)]
+        }
+        "raster_packed" | "hexel_raster_packed" | "image_raster_packed" => {
+            &[(0, U), (1, R), (2, R), (3, R), (5, W), (7, R)]
+        }
+        "raster_texture" | "hexel_raster_texture" => {
+            &[(0, U), (1, R), (2, R), (3, R), (6, COLOR), (7, R)]
+        }
+        "raster_texture_depth" | "hexel_raster_texture_depth" => &[
             (0, U),
             (1, R),
             (2, R),
@@ -94,6 +108,18 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (6, COLOR),
             (7, R),
             (8, DEPTH),
+        ],
+        "hexel_forward" | "image_forward" => &[(0, U), (1, R), (4, W), (5, W), (6, W), (7, W)],
+        "hexel_visible" | "image_visible" => &[(0, U), (1, R), (4, W), (6, W), (8, W)],
+        "raster_surface" | "hexel_raster_surface" => &[
+            (0, U),
+            (1, R),
+            (2, R),
+            (3, R),
+            (4, W),
+            (7, R),
+            (9, W),
+            (10, W),
         ],
         "scan" => &[(0, R), (1, R), (2, W), (3, W), (4, U)],
         "add_offsets" => &[(0, R), (1, R), (2, W), (4, U)],
@@ -106,16 +132,31 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
     }
 }
 
-pub(crate) struct Kernels {
-    pub project_forward: Kernel,
-    pub project_visible: Kernel,
-    pub gather: Kernel,
+/// Kernels that depend on the primitive; the sort, scan and tile-range kernels are shared.
+pub(crate) struct Stages {
+    pub forward: Kernel,
+    pub visible: Kernel,
     pub map_tiles: Kernel,
+    /// Float, packed, texture, texture-depth and surface rasterizers; `None` where unsupported.
+    rasters: [Option<Kernel>; 5],
+}
+
+impl Stages {
+    pub fn raster(&self, kind: crate::output::RasterKind) -> Result<&Kernel, crate::Error> {
+        self.rasters[kind as usize]
+            .as_ref()
+            .ok_or(crate::Error::Input(
+                "this primitive has no such render target",
+            ))
+    }
+}
+
+pub(crate) struct Kernels {
+    pub splats: Stages,
+    pub hexels: Stages,
+    pub images: Stages,
+    pub gather: Kernel,
     pub tile_offsets: Kernel,
-    pub float: Kernel,
-    pub packed: Kernel,
-    pub texture: Kernel,
-    pub texture_depth: Kernel,
     pub scan: Kernel,
     pub add_offsets: Kernel,
     pub count_keys: Kernel,
@@ -128,19 +169,62 @@ pub(crate) struct Kernels {
 
 impl Kernels {
     pub fn new(device: &wgpu::Device) -> Self {
-        let [projection, mapping, raster, scan, sort, prepare, outputs] =
-            sources().map(|s| module(device, &s));
+        let [
+            projection,
+            mapping,
+            raster,
+            scan,
+            sort,
+            prepare,
+            outputs,
+            hexel_projection,
+            hexel_mapping,
+            hexel_raster,
+            image_projection,
+            image_mapping,
+            image_raster,
+        ] = sources().map(|s| module(device, &s));
         let kernel = |module, entry| pipeline(device, module, entry, bindings(entry));
         Self {
-            project_forward: kernel(&projection, "project_forward"),
-            project_visible: kernel(&projection, "project_visible"),
+            splats: Stages {
+                forward: kernel(&projection, "project_forward"),
+                visible: kernel(&projection, "project_visible"),
+                map_tiles: kernel(&mapping, "map_tiles"),
+                rasters: [
+                    Some(kernel(&outputs, "raster_float")),
+                    Some(kernel(&outputs, "raster_packed")),
+                    Some(kernel(&raster, "raster_texture")),
+                    Some(kernel(&raster, "raster_texture_depth")),
+                    Some(kernel(&outputs, "raster_surface")),
+                ],
+            },
+            hexels: Stages {
+                forward: kernel(&hexel_projection, "hexel_forward"),
+                visible: kernel(&hexel_projection, "hexel_visible"),
+                map_tiles: kernel(&hexel_mapping, "hexel_map_tiles"),
+                rasters: [
+                    "hexel_raster_float",
+                    "hexel_raster_packed",
+                    "hexel_raster_texture",
+                    "hexel_raster_texture_depth",
+                    "hexel_raster_surface",
+                ]
+                .map(|entry| Some(kernel(&hexel_raster, entry))),
+            },
+            images: Stages {
+                forward: kernel(&image_projection, "image_forward"),
+                visible: kernel(&image_projection, "image_visible"),
+                map_tiles: kernel(&image_mapping, "image_map_tiles"),
+                rasters: [
+                    Some(kernel(&image_raster, "image_raster_float")),
+                    Some(kernel(&image_raster, "image_raster_packed")),
+                    None,
+                    None,
+                    None,
+                ],
+            },
             gather: kernel(&mapping, "gather"),
-            map_tiles: kernel(&mapping, "map_tiles"),
             tile_offsets: kernel(&mapping, "tile_offsets"),
-            float: kernel(&outputs, "raster_float"),
-            packed: kernel(&outputs, "raster_packed"),
-            texture: kernel(&raster, "raster_texture"),
-            texture_depth: kernel(&raster, "raster_texture_depth"),
             scan: kernel(&scan, "scan"),
             add_offsets: kernel(&scan, "add_offsets"),
             count_keys: kernel(&sort, "count_keys"),
@@ -152,13 +236,15 @@ impl Kernels {
         }
     }
 
-    pub fn raster(&self, kind: crate::output::RasterKind) -> &Kernel {
-        use crate::output::RasterKind;
-        match kind {
-            RasterKind::Float => &self.float,
-            RasterKind::Packed => &self.packed,
-            RasterKind::Texture => &self.texture,
-            RasterKind::TextureDepth => &self.texture_depth,
+    pub fn stages(&self, scene: &crate::Scene) -> &Stages {
+        use crate::scene::Inputs;
+        match scene.inputs {
+            Inputs::Splats { .. } => &self.splats,
+            Inputs::Hexels {
+                variant: crate::HexelVariant::Image,
+                ..
+            } => &self.images,
+            Inputs::Hexels { .. } => &self.hexels,
         }
     }
 }
@@ -203,6 +289,12 @@ mod tests {
                 }
                 if ty.name.as_deref() == Some("Splat") {
                     assert_eq!(layout[handle].size, 40);
+                }
+                if ty.name.as_deref() == Some("Hexel") {
+                    assert_eq!(layout[handle].size, 80);
+                }
+                if ty.name.as_deref() == Some("ImageHexel") {
+                    assert_eq!(layout[handle].size, 64);
                 }
             }
             let workgroup_bytes: u32 = module

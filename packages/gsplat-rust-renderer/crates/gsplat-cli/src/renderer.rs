@@ -4,11 +4,15 @@ use anyhow::Context as _;
 use anyhow::Result;
 use brush_serde::import::SplatData;
 use glam::{UVec2, Vec3};
-use gsplat_core::{RenderMode, RenderOptions, Splats, Target};
+use gsplat_core::{Hexels, RenderMode, RenderOptions, Splats, Target};
 use std::path::Path;
 
+/// A splat or hexel PLY. For hexels, `data` holds only the centres used for framing.
 pub struct PlyScene {
     pub data: SplatData,
+    pub hexels: Option<Hexels>,
+    /// Image size of a 2D hexel fit.
+    pub image_size: Option<UVec2>,
     pub mode: RenderMode,
     pub center: Vec3,
     pub extent: f32,
@@ -16,14 +20,45 @@ pub struct PlyScene {
 
 impl PlyScene {
     pub async fn load(path: &Path) -> Result<Self> {
-        let loaded =
-            brush_serde::import::load_splat_from_ply(tokio::fs::File::open(path).await?, None)
-                .await?;
-        if loaded.data.num_splats() == 0 {
+        let bytes = tokio::fs::read(path).await?;
+        let mut image_size = None;
+        let (data, hexels, mode) = if crate::hexel_ply::is_hexel_ply(&bytes) {
+            let parsed = crate::hexel_ply::parse(&bytes)?;
+            let hexels = parsed.hexels;
+            image_size = parsed.image_size;
+            // 2D centres sit on the z = 0 plane.
+            let planar = hexels.variant == gsplat_core::HexelVariant::Image;
+            let means = hexels
+                .params
+                .chunks_exact(hexels.variant.stride())
+                .flat_map(|h| [h[0], h[1], if planar { 0.0 } else { h[2] }])
+                .collect();
+            let data = SplatData {
+                means,
+                rotations: None,
+                log_scales: None,
+                sh_coeffs: None,
+                raw_opacities: None,
+            };
+            (data, Some(hexels), RenderMode::Default)
+        } else {
+            let loaded =
+                brush_serde::import::load_splat_from_ply(std::io::Cursor::new(bytes), None).await?;
+            let mode = if matches!(
+                loaded.meta.render_mode,
+                Some(brush_render::gaussian_splats::SplatRenderMode::Mip)
+            ) {
+                RenderMode::Mip
+            } else {
+                RenderMode::Default
+            };
+            (loaded.data, None, mode)
+        };
+        if data.num_splats() == 0 {
             anyhow::bail!("empty splat cloud");
         }
         let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for p in loaded.data.means.as_chunks::<3>().0 {
+        for p in data.means.as_chunks::<3>().0 {
             let p = Vec3::from_array(*p);
             if !p.is_finite() {
                 anyhow::bail!("nonfinite splat center");
@@ -32,15 +67,10 @@ impl PlyScene {
             max = max.max(p);
         }
         Ok(Self {
-            data: loaded.data,
-            mode: if matches!(
-                loaded.meta.render_mode,
-                Some(brush_render::gaussian_splats::SplatRenderMode::Mip)
-            ) {
-                RenderMode::Mip
-            } else {
-                RenderMode::Default
-            },
+            data,
+            hexels,
+            image_size,
+            mode,
             center: (min + max) * 0.5,
             extent: (max - min).length() * 0.5,
         })
@@ -99,6 +129,21 @@ pub fn raw_splats(data: &SplatData) -> Result<Splats> {
 pub enum Output {
     Float,
     Packed,
+    /// Float colour plus depth and normal buffers (hexel scenes).
+    Surface,
+}
+
+/// The primitives a standalone renderer uploads.
+#[derive(Clone, Copy)]
+pub enum Primitives<'a> {
+    Splats(&'a Splats),
+    Hexels(&'a Hexels),
+}
+
+/// Per-pixel surface outputs: expected and median depth, then the world normal (w = 0).
+pub struct Surface {
+    pub depth: Vec<[f32; 2]>,
+    pub normal: Vec<[f32; 4]>,
 }
 
 pub struct StandaloneRenderer {
@@ -110,6 +155,7 @@ pub struct StandaloneRenderer {
     options: RenderOptions,
     float: wgpu::Buffer,
     packed: wgpu::Buffer,
+    surface: Option<(wgpu::Buffer, wgpu::Buffer)>,
     size: UVec2,
     last_output: Option<Output>,
 }
@@ -157,7 +203,7 @@ impl StandaloneRenderer {
         )?))
     }
     pub async fn new(
-        splats: &Splats,
+        primitives: Primitives<'_>,
         options: RenderOptions,
         size: UVec2,
         initial_capacity: u32,
@@ -179,7 +225,10 @@ impl StandaloneRenderer {
             })
             .await?;
         let core = gsplat_core::Renderer::new(&device)?;
-        let scene = core.upload(splats)?;
+        let scene = match primitives {
+            Primitives::Splats(splats) => core.upload(splats)?,
+            Primitives::Hexels(hexels) => core.upload_hexels(hexels)?,
+        };
         let view = core.create_view(&scene, initial_capacity)?;
         let bytes = u64::from(size.x) * u64::from(size.y) * 16;
         if bytes == 0 || bytes > device.limits().max_storage_buffer_binding_size {
@@ -206,6 +255,7 @@ impl StandaloneRenderer {
             options,
             float,
             packed,
+            surface: None,
             size,
             last_output: None,
         })
@@ -219,18 +269,40 @@ impl StandaloneRenderer {
         if UVec2::new(camera.width, camera.height) != self.size {
             anyhow::bail!("renderer resolution changed");
         }
+        if matches!(output, Output::Surface) && self.surface.is_none() {
+            let pixels = self.float.size() / 16;
+            let buffer = |label, bytes| {
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                })
+            };
+            self.surface = Some((
+                buffer("depth target", pixels * 8),
+                buffer("normal target", pixels * 16),
+            ));
+        }
         loop {
             let mut encoder = self.device.create_command_encoder(&Default::default());
+            let target = match (output, &self.surface) {
+                (Output::Float, _) => Target::Float(self.float.clone()),
+                (Output::Packed, _) => Target::Packed(self.packed.clone()),
+                (Output::Surface, Some((depth, normal))) => Target::Surface {
+                    color: self.float.clone(),
+                    depth: depth.clone(),
+                    normal: normal.clone(),
+                },
+                (Output::Surface, None) => unreachable!("surface buffers are allocated above"),
+            };
             self.core.render(
                 &self.queue,
                 &mut encoder,
                 &mut self.view,
                 &camera.core_camera(),
                 &self.options,
-                match output {
-                    Output::Float => Target::Float(self.float.clone()),
-                    Output::Packed => Target::Packed(self.packed.clone()),
-                },
+                target,
             )?;
             self.queue.submit([encoder.finish()]);
             self.finish()?;
@@ -248,20 +320,80 @@ impl StandaloneRenderer {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         Ok(())
     }
+    /// Throughput mode: submit a float frame without waiting for it, keeping up to three frames in
+    /// flight as the viewer does. Fails if a completed frame overflowed its intersection capacity,
+    /// so warm up with [`Self::render`] first. [`Self::finish_submitted`] waits for the rest.
+    pub fn submit_float(&mut self, camera: &CameraSpec) -> Result<()> {
+        camera.validate()?;
+        if UVec2::new(camera.width, camera.height) != self.size {
+            anyhow::bail!("renderer resolution changed");
+        }
+        loop {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            match self.core.render(
+                &self.queue,
+                &mut encoder,
+                &mut self.view,
+                &camera.core_camera(),
+                &self.options,
+                Target::Float(self.float.clone()),
+            ) {
+                Ok(()) => {
+                    self.queue.submit([encoder.finish()]);
+                    self.last_output = Some(Output::Float);
+                    return self.check_submitted();
+                }
+                Err(gsplat_core::Error::Busy(_)) => {
+                    self.finish()?;
+                    self.check_submitted()?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    /// Wait for every submitted frame and check its feedback.
+    pub fn finish_submitted(&mut self) -> Result<()> {
+        self.finish()?;
+        while self.view.has_pending_frames() {
+            self.check_submitted()?;
+        }
+        Ok(())
+    }
+    fn check_submitted(&mut self) -> Result<()> {
+        if let Some(stats) = self.view.poll_feedback()? {
+            anyhow::ensure!(
+                !stats.needs_rerender,
+                "a submitted frame overflowed its intersection capacity; warm up with render() first"
+            );
+        }
+        Ok(())
+    }
     /// Read the target written by the last successful render.
     pub fn read_rgba(&self) -> Result<Vec<f32>> {
         let output = self.last_output.context("render before readback")?;
-        let target = if matches!(output, Output::Float) {
-            &self.float
-        } else {
-            &self.packed
-        };
+        let packed = matches!(output, Output::Packed);
+        let target = if packed { &self.packed } else { &self.float };
         let encoder = self.device.create_command_encoder(&Default::default());
         let data = self.read_buffer(encoder, target)?;
-        Ok(if matches!(output, Output::Float) {
-            bytemuck::cast_slice(&data).to_vec()
-        } else {
+        Ok(if packed {
             data.iter().map(|x| f32::from(*x) / 255.0).collect()
+        } else {
+            bytemuck::cast_slice(&data).to_vec()
+        })
+    }
+    /// Read the depth and normal targets of the last `Output::Surface` render.
+    pub fn read_surface(&self) -> Result<Surface> {
+        let (Some(Output::Surface), Some((depth, normal))) = (self.last_output, &self.surface)
+        else {
+            anyhow::bail!("render a surface output before reading it");
+        };
+        let read = |buffer| {
+            let encoder = self.device.create_command_encoder(&Default::default());
+            self.read_buffer(encoder, buffer)
+        };
+        Ok(Surface {
+            depth: bytemuck::cast_slice(&read(depth)?).to_vec(),
+            normal: bytemuck::cast_slice(&read(normal)?).to_vec(),
         })
     }
     fn read_buffer(
