@@ -1,7 +1,7 @@
 [project]
 name = "hexels-bench"
 version = "0.1.0"
-description = "Hexels beside Brush: upstream checkpoint export to hexel PLY, protocol training, published-checkpoint renders and the shared NVS scorer"
+description = "Hexels beside Brush: upstream checkpoint export to hexel PLY, protocol training (Hexels and Brush), published-checkpoint renders, the shared NVS scorer, the benchmark queue and its tables"
 authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
 # Static metadata only. Upstream Hexels, its CUDA kernels and Image-GS come from the
