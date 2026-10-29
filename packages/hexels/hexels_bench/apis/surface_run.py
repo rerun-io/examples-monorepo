@@ -1,5 +1,5 @@
 """Meshes from rendered depth, per scene and method: write the surface cameras, render the surface
-recording with `gsplat render --surface` (or stream upstream CUDA frames), and fuse with upstream's
+recording with `gsplat render --surface` (or render upstream CUDA frames in process), and fuse with upstream's
 Open3D TSDF settings (`hexels_bench.surface`).
 
 Writes `runs/<dataset>/<scene>/<method>/surface/{cameras.json, surface.rrd, renders/, fuse.ply,
@@ -24,7 +24,7 @@ from serde.json import to_json
 
 from hexels_bench.apis.export import export_run
 from hexels_bench.cameras import CamerasFile, ContractCamera, find_image, load_contract, write_cameras_file
-from hexels_bench.checkpoint import UpstreamRunConfig, load_run_config
+from hexels_bench.checkpoint import UpstreamRunConfig, find_checkpoint, load_run_config
 from hexels_bench.layout import Dataset, Roots
 from hexels_bench.surface import (
     DepthMode,
@@ -38,7 +38,8 @@ from hexels_bench.surface import (
     surface_depth,
     tsdf_settings,
 )
-from hexels_bench.surface_frames import SurfaceFrame, rrd_frames, upstream_frames
+from hexels_bench.surface_frames import SurfaceFrame, rrd_frames
+from hexels_bench.upstream import surface_frames
 
 SurfaceMethod: TypeAlias = Literal[
     "hexels-v3-surf-30k-pub-wgsl",
@@ -52,8 +53,7 @@ SurfaceMethod: TypeAlias = Literal[
 ]
 PUBLISHED_SURFACE: tuple[SurfaceMethod, ...] = ("hexels-v3-surf-30k-pub-wgsl", "hexels-v3-surf-30k-pub-cuda")
 """The paper's surface checkpoints (all views): one PLY, depth from WGSL or from upstream CUDA."""
-PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
-GSPLAT: Path = PACKAGE_DIR.parent / "gsplat-rust-renderer" / "target" / "release" / "gsplat"
+GSPLAT: Path = Path(__file__).resolve().parents[3] / "gsplat-rust-renderer" / "target" / "release" / "gsplat"
 
 
 @dataclass
@@ -190,6 +190,8 @@ class SurfacePlan:
     """Views to render and fuse, in order."""
     split: Literal["all", "train"]
     """Which views those are."""
+    scene_dir: Path
+    """Scene directory (upstream source_path)."""
     images_dir: Path
     """Scene images (alpha masks)."""
     depth_mode: DepthMode
@@ -240,6 +242,7 @@ def plan_surface(roots: Roots, dataset: Dataset, scene: str, method: SurfaceMeth
             ply=roots.run_dir(dataset, scene, ply_method) / "model.ply",
             cameras=scene_cameras(scene_dir, images, config.resolution),
             split="all",
+            scene_dir=scene_dir,
             images_dir=scene_dir / images,
             depth_mode=mode,
             alpha_threshold=0.0,
@@ -250,6 +253,7 @@ def plan_surface(roots: Roots, dataset: Dataset, scene: str, method: SurfaceMeth
         ply=roots.run_dir(dataset, scene, method) / "model.ply",
         cameras=contract.geometry.training,
         split="train",
+        scene_dir=roots.scene_dir(dataset, scene),
         images_dir=roots.scene_dir(dataset, scene) / contract.settings.images,
         depth_mode=mode,
         alpha_threshold=0.5 if brush else 0.0,
@@ -312,20 +316,8 @@ def run_one(config: Config, dataset: Dataset, scene: str, method: SurfaceMethod)
     )
     parity_rows: list[DepthParity] = []
     if method == "hexels-v3-surf-30k-pub-cuda":
-        command: list[str] = [
-            "pixi",
-            "run",
-            "-e",
-            "hexels",
-            "--frozen",
-            "python",
-            "tools/upstream_surface.py",
-            "--dataset",
-            dataset,
-            "--scene",
-            scene,
-        ]
-        frames: Iterator[SurfaceFrame] = upstream_frames(command, PACKAGE_DIR, log)
+        assert model_dir is not None
+        frames: Iterator[SurfaceFrame] = surface_frames(model_dir, find_checkpoint(model_dir), plan.scene_dir)
         wgsl_rrd: Path = config.roots.surface_dir(dataset, scene, "hexels-v3-surf-30k-pub-wgsl") / "surface.rrd"
         if wgsl_rrd.is_file():
             frames = compare_frames(frames, rrd_frames(wgsl_rrd, "hexels-v3-surf-30k-pub-wgsl", plan.cameras), parity_rows)

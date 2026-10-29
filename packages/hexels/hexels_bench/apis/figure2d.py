@@ -6,8 +6,7 @@
 - `runs/imagegs/summary.rrd` + `runs/imagegs/TABLE2D.json`: every method and condition per image and
   over all images, beside the HF catalog numbers of the same images and the paper's Table 1.
 
-Torch-free (reads metrics.json and 16-bit PNG renders). Needs `rerun-sdk`: run it with an env that has
-it (gsplat-rust-renderer-dev) and `PYTHONPATH=packages/hexels` until the hexels env carries rerun-sdk.
+Torch-free (reads metrics.json and 16-bit PNG renders).
 """
 
 import json

@@ -1,4 +1,3 @@
-import io
 import math
 import struct
 from pathlib import Path
@@ -7,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-pytest.importorskip("open3d", reason="surface fusion needs an importable open3d (hexels-surface env)", exc_type=ImportError)
+pytest.importorskip("open3d", reason="surface fusion needs an importable open3d (hexels env)", exc_type=ImportError)
 
 from hexels_bench.apis.surface_run import DepthParity, frame_parity, surface_out_dir, total_parity  # noqa: E402
 from hexels_bench.cameras import ContractCamera  # noqa: E402
@@ -24,7 +23,7 @@ from hexels_bench.surface import (  # noqa: E402
     surface_depth,
     tsdf_settings,
 )
-from hexels_bench.surface_frames import SurfaceFrame, read_frames, write_frame  # noqa: E402
+from hexels_bench.surface_frames import SurfaceFrame  # noqa: E402
 
 
 def rotation_from_quaternion(q: np.ndarray) -> np.ndarray:
@@ -166,26 +165,6 @@ def frame(name: str, seed: int) -> SurfaceFrame:
         expected_depth=rng.random((3, 4), dtype=np.float32),
         alpha=rng.random((3, 4), dtype=np.float32),
     )
-
-
-def test_frames_survive_the_upstream_pipe() -> None:
-    stream = io.BytesIO()
-    sent: list[SurfaceFrame] = [frame("0000", 0), frame("0001", 1)]
-    for item in sent:
-        write_frame(stream, item)
-    stream.seek(0)
-    received: list[SurfaceFrame] = list(read_frames(stream))
-    assert [item.name for item in received] == ["0000", "0001"]
-    for a, b in zip(sent, received, strict=True):
-        for field in ("rgb", "median_depth", "expected_depth", "alpha"):
-            np.testing.assert_array_equal(getattr(a, field), getattr(b, field))
-
-
-def test_a_truncated_pipe_is_an_error() -> None:
-    stream = io.BytesIO()
-    write_frame(stream, frame("0000", 0))
-    with pytest.raises(EOFError):
-        list(read_frames(io.BytesIO(stream.getvalue()[:-5])))
 
 
 def test_parity_totals_weight_views_by_their_pixels() -> None:

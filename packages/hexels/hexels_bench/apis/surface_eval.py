@@ -20,10 +20,9 @@ from hexels_bench.apis.surface_run import SurfaceMethod, surface_out_dir
 from hexels_bench.layout import Dataset, Roots
 from hexels_bench.surface import DepthMode
 
-WORKSPACE: Path = Path(__file__).resolve().parents[4]
-TWO_DGS: Path = WORKSPACE / ".pixi" / "envs" / "hexels" / "share" / "hexels-src" / "2d-gaussian-splatting"
-"""Patched 2DGS tree (hexels-src output) in the workspace's `hexels` env."""
-TNT_PYTHON: Path = WORKSPACE / ".pixi" / "envs" / "tnt-eval" / "bin" / "python"
+TWO_DGS: Path = Path(sys.prefix) / "share" / "hexels-src" / "2d-gaussian-splatting"
+"""Patched 2DGS tree (hexels-src output) in this env."""
+TNT_PYTHON: Path = Path(__file__).resolve().parents[4] / ".pixi" / "envs" / "tnt-eval" / "bin" / "python"
 
 
 @dataclass
