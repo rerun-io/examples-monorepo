@@ -253,3 +253,13 @@ def test_partial_outputs_move_to_the_attic_before_a_rerun(tmp_path: Path) -> Non
     assert (roots.runs / "_attic" / attic[1] / "log.txt").read_text() == "crashed\n"
     assert (cuda_run / "model.ply").is_file(), "staged published files stay"
     assert not (cuda_run / "upstream-eval-job").exists()
+
+
+def test_roots_default_to_the_environment_then_the_home_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HEXELS_WORK", str(tmp_path / "work"))
+    monkeypatch.setenv("GSPLAT_MODERN_DATA", str(tmp_path / "data"))
+    roots = Roots()
+    assert (roots.data, roots.runs, roots.brush_prepared) == (tmp_path / "data", tmp_path / "work/runs", tmp_path / "work/brush-prepared")
+    monkeypatch.delenv("HEXELS_WORK")
+    monkeypatch.delenv("GSPLAT_MODERN_DATA")
+    assert (Roots().data, Roots().runs) == (Path.home() / "gsplat-modern-data", Path.home() / "hexels-work" / "runs")

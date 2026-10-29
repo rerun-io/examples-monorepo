@@ -22,8 +22,8 @@ class Config:
     """Methods queued afterwards for every protocol scene of the datasets (e.g. brush-7k to score finished Brush runs)."""
     roots: Roots = field(default_factory=Roots)
     """Data, run and Brush-prepared roots."""
-    gpu_lock: Path = Path.home() / "hexels-work" / "gpu.lock"
-    """flock file shared by every GPU-heavy job on the host."""
+    gpu_lock: Path | None = None
+    """flock file shared by every GPU-heavy job on the host; None takes `gpu.lock` beside the runs root."""
 
 
 def queue_for(config: Config) -> list[Item]:
@@ -34,8 +34,9 @@ def queue_for(config: Config) -> list[Item]:
 
 def main(config: Config) -> None:
     queue: list[Item] = queue_for(config)
-    print(f"{len(queue)} items; runs {config.roots.runs}; lock {config.gpu_lock}", flush=True)
-    summary: QueueSummary = run_queue(queue, config.roots, config.gpu_lock, pixi_runner)
+    lock: Path = config.gpu_lock if config.gpu_lock is not None else config.roots.runs.parent / "gpu.lock"
+    print(f"{len(queue)} items; runs {config.roots.runs}; lock {lock}", flush=True)
+    summary: QueueSummary = run_queue(queue, config.roots, lock, pixi_runner)
     print(f"done {len(summary.done)}, skipped {len(summary.skipped)}, failed {len(summary.failed)}")
     for item in summary.failed:
         print(f"FAILED {item.dataset}/{item.scene}/{item.method} (see {config.roots.runs / 'FAILURES.jsonl'})")

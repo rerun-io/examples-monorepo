@@ -5,6 +5,7 @@ Below the views, a DataframeView lists our per-scene numbers (from the benchmark
 published ones. The `brush` and `hexels` layouts keep one view, the shape `gsplat probe` measures.
 """
 
+import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -80,10 +81,12 @@ class CompareConfig:
     """GPU of the probe and speed reports, named in the table title."""
     test_view_fps: bool = True
     """Show the run's test-view render FPS; it was measured on the RTX 5090, so drop it for other hosts."""
-    runs_root: Path = field(default_factory=lambda: Path.home() / "hexels-work/runs")
-    """Run layout root (contracts/run-layout.md)."""
-    contracts_root: Path = field(default_factory=lambda: Path.home() / "gsplat-modern-data/hexels-pretrained/cameras/nvs")
-    """Published camera contracts: `<paper dataset>/<scene>/contract.json`."""
+    runs_root: Path = field(default_factory=lambda: Path(os.environ.get("HEXELS_WORK", str(Path.home() / "hexels-work"))) / "runs")
+    """Run layout root (contracts/run-layout.md); default `$HEXELS_WORK/runs`, as the hexels package's `Roots`."""
+    contracts_root: Path = field(
+        default_factory=lambda: Path(os.environ.get("GSPLAT_MODERN_DATA", str(Path.home() / "gsplat-modern-data"))) / "hexels-pretrained/cameras/nvs"
+    )
+    """Published camera contracts: `<paper dataset>/<scene>/contract.json`; default under `$GSPLAT_MODERN_DATA`."""
     table: Path | None = None
     """Benchmark table with our and the published per-scene numbers (`hexels-bench-table`); default `<runs_root>/TABLE.json`."""
 

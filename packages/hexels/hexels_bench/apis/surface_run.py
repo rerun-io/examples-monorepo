@@ -98,8 +98,8 @@ class Config:
     """Override the method's depth (Hexels: median, the paper's; Brush: expected); writes to surface-<mode>/."""
     gsplat: Path = GSPLAT_RELEASE / "gsplat"
     """Release `gsplat` binary (pixi run -e gsplat-rust-renderer gsplat-build, or cargo build -p gsplat-cli --release)."""
-    gpu_lock: Path | None = Path.home() / "hexels-work" / "gpu.lock"
-    """flock held around each WGSL render; None to skip."""
+    gpu_lock: Path | None = None
+    """flock held around each WGSL render; None takes `gpu.lock` beside the runs root (the benchmark queue's lock)."""
     force: bool = False
     """Redo scenes that already have a fusion.json."""
     rerender: bool = False
@@ -227,7 +227,7 @@ def render_surface(config: Config, plan: SurfacePlan, method: str, log: Path) ->
     with log.open("a") as stream:
         stream.write(" ".join(command) + "\n")
         stream.flush()
-        with gpu_lock(config.gpu_lock):
+        with gpu_lock(config.gpu_lock if config.gpu_lock is not None else config.roots.runs.parent / "gpu.lock"):
             subprocess.run(command, check=True, stdout=stream, stderr=subprocess.STDOUT)
     return rrd
 
