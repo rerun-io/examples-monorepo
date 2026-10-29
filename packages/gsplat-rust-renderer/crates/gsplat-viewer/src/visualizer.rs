@@ -69,18 +69,25 @@ impl VisualizerSystem for GaussianSplatVisualizer {
     }
 }
 
+/// One entity instruction in one view: what each of its rows and instances draws with.
+pub(crate) struct EntityDraw<'a> {
+    pub(crate) ctx: &'a ViewContext<'a>,
+    pub(crate) query: &'a ViewQuery<'a>,
+    pub(crate) data: &'a DataResult,
+    pub(crate) instruction: &'a VisualizerInstruction,
+    instances: &'a [glam::DAffine3],
+    renderer: &'a GaussianRenderer,
+    pub(crate) output: &'a VisualizerExecutionOutput,
+    report: &'a dyn Fn(ViewerReportSeverity, String),
+    camera: &'a Camera,
+    /// The view's solid background, queried once per view.
+    background: Option<glam::Vec3>,
+}
+
 /// Query and queue one entity instruction; returns whether the view needs another frame.
 pub(crate) type DrawEntity = fn(
-    &ViewContext<'_>,
-    &ViewQuery<'_>,
-    &DataResult,
-    &VisualizerInstruction,
-    &[glam::DAffine3],
-    &GaussianRenderer,
-    &VisualizerExecutionOutput,
-    &dyn Fn(ViewerReportSeverity, String),
+    &EntityDraw<'_>,
     &mut Vec<re_renderer::QueueableDrawData>,
-    &Camera,
 ) -> Result<bool, ViewSystemExecutionError>;
 
 /// Shared splat and hexel execution: one eye per view, explicit instructions, instance transforms.
@@ -100,6 +107,7 @@ pub(crate) fn execute_compute(
         return Ok(output);
     };
     let transforms = systems.get::<TransformTreeContext>(&output)?;
+    let background = solid_background(ctx);
     let mut draw = Vec::new();
     for (data, instruction) in query.iter_visualizer_instruction_for(identifier) {
         let report = |severity, message: String| {
@@ -119,18 +127,19 @@ pub(crate) fn execute_compute(
             }
             None => continue,
         };
-        match draw_entity(
+        let entity = EntityDraw {
             ctx,
             query,
             data,
             instruction,
             instances,
             renderer,
-            &output,
-            &report,
-            &mut draw,
-            &camera,
-        ) {
+            output: &output,
+            report: &report,
+            camera: &camera,
+            background,
+        };
+        match draw_entity(&entity, &mut draw) {
             Ok(true) => ctx.egui_ctx().request_repaint(),
             Ok(false) => {}
             Err(error) => report(ViewerReportSeverity::Error, format!("{error:#}")),
@@ -140,18 +149,19 @@ pub(crate) fn execute_compute(
 }
 
 fn draw_splat_entity(
-    ctx: &ViewContext<'_>,
-    query: &ViewQuery<'_>,
-    data: &DataResult,
-    instruction: &VisualizerInstruction,
-    instances: &[glam::DAffine3],
-    renderer: &GaussianRenderer,
-    output: &VisualizerExecutionOutput,
-    report: &dyn Fn(ViewerReportSeverity, String),
+    entity: &EntityDraw<'_>,
     draw: &mut Vec<re_renderer::QueueableDrawData>,
-    camera: &Camera,
 ) -> Result<bool, ViewSystemExecutionError> {
     re_tracing::profile_function!();
+    let &EntityDraw {
+        ctx,
+        query,
+        data,
+        instruction,
+        output,
+        report,
+        ..
+    } = entity;
     let components =
         GaussianSplats3D::all_component_identifiers().chain([render_mode_descriptor().component]);
     let query_results =
@@ -225,15 +235,8 @@ fn draw_splat_entity(
                 .unwrap_or(*fallback_degree.0),
         };
         retry |= draw_instances(
-            ctx,
-            query,
-            data,
-            instruction,
-            instances,
-            renderer,
-            report,
+            entity,
             draw,
-            camera,
             row,
             signature,
             Primitives::Splats(&native),
@@ -245,27 +248,31 @@ fn draw_splat_entity(
 
 /// Queue one compute batch per instance; capacity or capability failures draw the stock fallback.
 pub(crate) fn draw_instances(
-    ctx: &ViewContext<'_>,
-    query: &ViewQuery<'_>,
-    data: &DataResult,
-    instruction: &VisualizerInstruction,
-    instances: &[glam::DAffine3],
-    renderer: &GaussianRenderer,
-    report: &dyn Fn(ViewerReportSeverity, String),
+    entity: &EntityDraw<'_>,
     draw: &mut Vec<re_renderer::QueueableDrawData>,
-    camera: &Camera,
     row: (re_log_types::TimeInt, re_sdk_types::RowId),
     signature: re_log_types::hash::Hash64,
     primitives: Primitives<'_>,
     render_mode: RenderMode,
 ) -> Result<bool, ViewSystemExecutionError> {
+    let &EntityDraw {
+        ctx,
+        query,
+        data,
+        instruction,
+        instances,
+        renderer,
+        report,
+        camera,
+        background,
+        ..
+    } = entity;
     let mut retry = false;
     let masks = query
         .highlights
         .entity_outline_mask(data.entity_path.hash());
     let object = re_renderer::PickingLayerObjectId(data.entity_path.hash64());
-    let uniform =
-        crate::renderer::DrawUniform::new(solid_background(ctx), object, masks, primitives.len());
+    let uniform = crate::renderer::DrawUniform::new(background, object, masks, primitives.len());
     for (index, world_from_local) in instances.iter().enumerate() {
         let world_from_local = world_from_local.as_affine3a();
         if !world_from_local.inverse().is_finite() {

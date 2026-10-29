@@ -1,19 +1,18 @@
 //! `Hexels3D` (hexel PLY contract, f32 fields) through the shared compute path.
 //! Stock viewers draw the `Points3D` fallback logged on the same entity instead.
 use crate::cache::{GpuCache, Primitives};
-use crate::renderer::GaussianRenderer;
-use crate::visualizer::{attribute_generation, draw_instances, execute_compute};
+use crate::visualizer::{EntityDraw, attribute_generation, draw_instances, execute_compute};
+use gsplat_core::RenderMode;
 use gsplat_core::native::{NativeHexels, at_or_last};
-use gsplat_core::{Camera, RenderMode};
 use re_sdk_types::{Component as _, ComponentDescriptor, components};
 use re_view::{DataResultQuery as _, VisualizerInstructionQueryResults};
 use re_viewer::external::{
     re_log_types, re_query, re_renderer, re_sdk_types, re_view, re_viewer_context,
 };
 use re_viewer_context::{
-    AppOptions, DataResult, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
-    ViewSystemExecutionError, ViewSystemIdentifier, ViewerReportSeverity,
-    VisualizerExecutionOutput, VisualizerInstruction, VisualizerQueryInfo, VisualizerSystem,
+    AppOptions, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
+    ViewSystemExecutionError, ViewSystemIdentifier, VisualizerExecutionOutput, VisualizerQueryInfo,
+    VisualizerSystem,
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
@@ -76,18 +75,18 @@ impl VisualizerSystem for HexelVisualizer {
 }
 
 fn draw_hexel_entity(
-    ctx: &ViewContext<'_>,
-    query: &ViewQuery<'_>,
-    data: &DataResult,
-    instruction: &VisualizerInstruction,
-    instances: &[glam::DAffine3],
-    renderer: &GaussianRenderer,
-    output: &VisualizerExecutionOutput,
-    report: &dyn Fn(ViewerReportSeverity, String),
+    entity: &EntityDraw<'_>,
     draw: &mut Vec<re_renderer::QueueableDrawData>,
-    camera: &Camera,
 ) -> Result<bool, ViewSystemExecutionError> {
     re_tracing::profile_function!();
+    let &EntityDraw {
+        ctx,
+        query,
+        data,
+        instruction,
+        output,
+        ..
+    } = entity;
     let identifiers = descriptors().map(|d| d.component);
     let query_results = data.query_components_with_history(
         ctx,
@@ -145,15 +144,8 @@ fn draw_hexel_entity(
             sh: sh.unwrap_or(&[]),
         };
         retry |= draw_instances(
-            ctx,
-            query,
-            data,
-            instruction,
-            instances,
-            renderer,
-            report,
+            entity,
             draw,
-            camera,
             row,
             re_log_types::hash::Hash64::from_u64(hasher.finish()),
             Primitives::Hexels(&hexels),
