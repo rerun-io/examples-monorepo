@@ -249,3 +249,24 @@ def test_every_surface_method_has_one_table_row() -> None:
     assert surface_model_dir(roots, "dtu", "scan24", "hexels-v3-surf-30k-pub-cuda") == roots.published_surface_model("dtu", "scan24")
     assert surface_model_dir(roots, "dtu", "scan24", "hexels-v3-surf-30k") == Path("/r/dtu/scan24/hexels-v3-surf-30k/upstream")
     assert surface_model_dir(roots, "dtu", "scan24", "brush-7k") is None
+
+
+def test_tnt_evaluator_runs_through_pixi_from_the_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The T&T evaluator needs the tnt-eval env: `pixi run --frozen` installs it from the lock or says why it cannot."""
+    from hexels_bench.apis import surface_eval
+    from hexels_bench.layout import WORKSPACE
+
+    calls: list[tuple[list[str], Path | None]] = []
+
+    def fake_run(command: list[str], **kwargs) -> None:
+        calls.append((command, kwargs.get("cwd")))
+        (tmp_path / "tnt_eval" / "Barn.prf_tau_plotstr.txt").write_text("0.5 0.4 0.45 0.01\n")
+
+    monkeypatch.setattr(surface_eval.subprocess, "run", fake_run)
+    (tmp_path / "tnt_eval").mkdir()
+    config = surface_eval.Config(dataset="tnt", scenes=["Barn"], roots=Roots(data=tmp_path / "data", runs=tmp_path / "runs"))
+    metrics = surface_eval.evaluate_tnt(config, "Barn", "m", tmp_path / "fuse_post.ply", tmp_path / "tnt_eval", tmp_path / "log.txt")
+    command, cwd = calls[0]
+    assert command[:6] == ["pixi", "run", "-e", "tnt-eval", "--frozen", "python"] and command[6].endswith("scripts/eval_tnt/run.py")
+    assert cwd == WORKSPACE
+    assert (metrics.precision, metrics.recall, metrics.f1, metrics.tau) == (50.0, 40.0, 45.0, 0.01)
