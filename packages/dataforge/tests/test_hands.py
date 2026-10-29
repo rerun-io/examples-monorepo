@@ -49,3 +49,24 @@ def test_coco_hands_fill_their_coco133_slots_and_nothing_else() -> None:
     np.testing.assert_array_equal(dense[91:112], joints[0])
     np.testing.assert_array_equal(dense[112:133], joints[1])
     assert np.isnan(dense[:91]).all()
+
+
+def test_keypoint_columns_are_bounded_and_preserve_every_row(tmp_path: Path) -> None:
+    """Long sequences keep columns near the object-store target on both clocks."""
+    count = 2400
+    times = np.arange(count, dtype=np.int64) * 33_333_333
+    frames = np.arange(count, dtype=np.int64) + 7
+    positions = np.arange(count * 133 * 3, dtype=np.float32).reshape(count, 133, 3)
+    target = tmp_path / "bounded.rrd"
+    with writing.atomic_recording(target, recording_id="bounded", send_properties=False) as recording:
+        hands.log_keypoints3d(recording, times_ns=times, frame_indices=frames, positions=positions, confidence=None)
+        hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=frames, positions=positions[..., :2], confidence=None)
+    for path, dimension in ((schema.coco133_xyz_path(), 3), ("/pixels", 2)):
+        batches = [c.to_record_batch() for c in read_chunks(target) if not c.is_static and str(c.entity_path) == path]
+        assert len(batches) > 1
+        assert all(b.nbytes < 2 * 1024 * 1024 for b in batches)
+        batches.sort(key=lambda b: b.column("frame_index")[0].as_py())
+        assert [f for b in batches for f in b.column("frame_index").to_pylist()] == frames.tolist()
+        assert [t for b in batches for t in b.column("video_time").cast("int64").to_pylist()] == times.tolist()
+        actual = np.concatenate([np.asarray(b.column(next(n for n in b.schema.names if n.endswith(":positions"))).to_pylist()) for b in batches])
+        np.testing.assert_array_equal(actual, positions[..., :dimension])

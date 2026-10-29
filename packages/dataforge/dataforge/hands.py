@@ -131,21 +131,24 @@ def log_keypoints3d(
         confidence: Float32[ndarray, "t 133"] or None; preserve shipped values.
         path: Entity; each person of a multi-person sequence has its own (``schema.person_coco133_xyz_path``).
     """
-    positions, scores = confidence_rule(positions, confidence)
-    flat_conf: Float32[ndarray, "n"] = scores.reshape(-1)
-    colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(flat_conf[None, :, None])[0]
+    # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
+    rows_per_batch = (2 * 1024 * 1024 - 4096) // (133 * (3 * 4 + 4 + 4) + 64)
     rr.log(
         path,
         Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=0.004),
         static=True,
         recording=recording,
     )
-    rr.send_columns(
-        path,
-        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
-        columns=Points3DWithConfidence.columns(positions=positions.reshape(-1, 3), confidences=flat_conf, colors=colors).partition([133] * len(positions)),
-        recording=recording,
-    )
+    for start in range(0, len(positions), rows_per_batch):
+        stop = start + rows_per_batch
+        masked, scores = confidence_rule(positions[start:stop], None if confidence is None else confidence[start:stop])
+        colors = confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0]
+        rr.send_columns(
+            path,
+            indexes=[time_column(times_ns[start:stop]), frame_index_column(frame_indices[start:stop])],
+            columns=Points3DWithConfidence.columns(positions=masked.reshape(-1, 3), confidences=scores.reshape(-1), colors=colors).partition([133] * len(masked)),
+            recording=recording,
+        )
 
 
 def log_keypoints2d(
@@ -158,19 +161,23 @@ def log_keypoints2d(
     confidence: Float32[ndarray, "t 133"] | None,
 ) -> None:
     """Write Float32[t,133,2] pixels and confidence to ``path`` (shipped or projected 2D)."""
-    positions, scores = confidence_rule(positions, confidence)
+    # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
+    rows_per_batch = (2 * 1024 * 1024 - 4096) // (133 * (2 * 4 + 4 + 0) + 64)
     rr.log(
         path,
         Points2DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS, show_labels=False, radii=3.0),
         static=True,
         recording=recording,
     )
-    rr.send_columns(
-        path,
-        indexes=[time_column(times_ns), frame_index_column(frame_indices)],
-        columns=Points2DWithConfidence.columns(positions=positions.reshape(-1, 2), confidences=scores.reshape(-1)).partition([133] * len(positions)),
-        recording=recording,
-    )
+    for start in range(0, len(positions), rows_per_batch):
+        stop = start + rows_per_batch
+        masked, scores = confidence_rule(positions[start:stop], None if confidence is None else confidence[start:stop])
+        rr.send_columns(
+            path,
+            indexes=[time_column(times_ns[start:stop]), frame_index_column(frame_indices[start:stop])],
+            columns=Points2DWithConfidence.columns(positions=masked.reshape(-1, 2), confidences=scores.reshape(-1)).partition([133] * len(masked)),
+            recording=recording,
+        )
 
 
 def log_projections(
