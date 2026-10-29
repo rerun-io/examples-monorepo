@@ -14,7 +14,9 @@ pair). See ``packages/dataforge/README.md#the-layer-rule``.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -262,8 +264,7 @@ def read_sequence(
 
     The csvs come first so a sequence that is missing a stream fails before
     the expensive half, and the mp4s all exist before any of them is remuxed
-    — a split archive's reader extracts one camera at a time, so a converter
-    cannot hold a reader open across the two.
+    — each camera uses an independent archive handle and extraction directory.
 
     Every camera is encoded **upright**, and this is the only place that
     decision is made: the quarter turn that brings a camera's image-up closest
@@ -322,8 +323,10 @@ def read_sequence(
     # Deliberately not bounded by gt: duration_ns describes the *sensor* layer.
     duration_ns: int = max(int(times_ns[-1]) for times_ns in sensor_times_ns) - start_time_ns
 
-    encoded: list[EncodedCamera] = []
-    for index, (calibration, rows, times_ns) in enumerate(zip(cameras, camera_rows, camera_times_ns, strict=True)):
+    def encode(index: int) -> EncodedCamera:
+        calibration: CalibratedCamera = cameras[index]
+        rows: list[CameraRow] = camera_rows[index]
+        times_ns: Int64[ndarray, "n_samples"] = camera_times_ns[index]
         clip: Path = work_dir / f"cam{index}.mp4"
         # Every camera is encoded upright, by the one rule: the quarter turn that
         # brings this camera's image-up closest to the headset's up. The turn goes
@@ -332,21 +335,26 @@ def read_sequence(
         # The Index's and the Odyssey+'s cameras answer 0 and are untouched; all
         # four of the G2's are mounted rolled, and this is what stands them up.
         quarter_turns_cw: int = upright_quarter_turns(calibration, profile.follow.up)
-        encode_frames_to_mp4(
-            reader.iter_members([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
-            clip,
-            source=FrameSource("png"),
-            fps=nominal_fps(times_ns),
-            rotate_cw_quarter_turns=quarter_turns_cw,
-        )
-        encoded.append(
-            EncodedCamera(
-                calibration=rotate_camera_cw(calibration, quarter_turns_cw),
-                quarter_turns_cw=quarter_turns_cw,
-                times_ns=times_ns - start_time_ns,
-                clip=clip,
+        with reader.fork(work_dir / f"reader-cam{index}") as camera_reader:
+            encode_frames_to_mp4(
+                camera_reader.iter_members([f"{mav0}/cam{index}/data/{row.filename}" for row in rows]),
+                clip,
+                source=FrameSource("png"),
+                fps=nominal_fps(times_ns),
+                rotate_cw_quarter_turns=quarter_turns_cw,
             )
+        return EncodedCamera(
+            calibration=rotate_camera_cw(calibration, quarter_turns_cw),
+            quarter_turns_cw=quarter_turns_cw,
+            times_ns=times_ns - start_time_ns,
+            clip=clip,
         )
+
+    slots: int = int(os.environ.get("DATAFORGE_NVENC_SLOTS", "6"))
+    if slots < 1:
+        raise ValueError("DATAFORGE_NVENC_SLOTS must be positive")
+    with ThreadPoolExecutor(max_workers=min(len(cameras), slots)) as pool:
+        encoded: list[EncodedCamera] = list(pool.map(encode, range(len(cameras))))
 
     inertial_times_ns: Int64[ndarray, "n_samples"] = inertial.times_ns - start_time_ns
     return SequenceStreams(

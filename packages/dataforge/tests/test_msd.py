@@ -601,3 +601,31 @@ def test_the_two_3d_views_are_complementary_views_of_one_path() -> None:
     assert ((packed >> 24) & 0xFF, (packed >> 16) & 0xFF, (packed >> 8) & 0xFF) == blueprints.DIM_TRAJECTORY_COLOR
     trail_override: object = follow.visualizer_overrides[schema.trail_path("gt")]
     assert isinstance(trail_override, rrb.VisibleTimeRanges), "the trail is still the cursor-relative window"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("device", ["index", "g2"])
+def test_cameras_read_independent_archives_at_the_same_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, device: MsdDeviceChoice, nvenc_ffmpeg: Path
+) -> None:
+    import threading
+
+    from dataforge.archives import ZipMemberReader
+
+    hub: FakeHub = build_hub(tmp_path, monkeypatch, device=device)
+    barrier = threading.Barrier(min(3, MSD_DEVICES[device].num_cameras), timeout=3.0)
+    original = ZipMemberReader.iter_members
+    readers: list[ZipMemberReader] = []
+
+    def gated(reader: ZipMemberReader, members):
+        readers.append(reader)
+        if len(readers) <= barrier.parties:
+            barrier.wait()
+        yield from original(reader, members)
+
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "3")
+    monkeypatch.setattr(ZipMemberReader, "iter_members", gated)
+    dataset = MsdDataset(hub.config)
+    identity, source = dataset.discover()[0]
+    assert dataset.convert(identity, source, force=False).is_file()
+    assert len({id(reader.archive) for reader in readers}) == MSD_DEVICES[device].num_cameras
