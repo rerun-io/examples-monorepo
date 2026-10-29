@@ -68,9 +68,9 @@ def test_session_retry_only(error: str, monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert waits == ([] if error in ("bad input", "No capable devices found") else [2, 4, 8, 16, 32])
 
 
-@pytest.mark.parametrize(("decode", "crop"), [("cpu", None), ("cuda", None), ("cuda", (32, 32, 0, 0))])
+@pytest.mark.parametrize("decode", ["cpu", "cuda"])
 def test_gray_transcode_command(
-    decode: Literal["cpu", "cuda"], crop: tuple[int, int, int, int] | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    decode: Literal["cpu", "cuda"], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DATAFORGE_FFMPEG", "/fake/ffmpeg")
     monkeypatch.setattr(video, "require_av1_nvenc", lambda binary: None)
@@ -87,13 +87,13 @@ def test_gray_transcode_command(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(video.subprocess, "run", run)
-    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode=decode, crop=crop)
+    video.transcode_mp4(Path("in.mp4"), Path("out.mp4"), gop=60, cq=36, fps=60, frames=4, gray=True, decode=decode)
     expected = ["/fake/ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-    if decode == "cuda" and crop is None:
+    if decode == "cuda":
         expected += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     expected += ["-r", "60", "-i", "in.mp4", "-map", "0:v:0", "-an"]
-    if decode == "cpu" or crop is not None:
-        expected += ["-vf", ("crop=32:32:0:0," if crop else "") + "format=gray,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"]
+    if decode == "cpu":
+        expected += ["-vf", "format=gray,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"]
     else:  # NVENC's AV1 takes 4:2:0 only: a 4:4:4 source (MAMMA's HEVC) is converted on the GPU
         expected += ["-vf", "scale_cuda=format=nv12"]
     expected += [
@@ -442,7 +442,8 @@ def test_mosaic_packets_match_separate_crops(tmp_path: Path, nvenc_ffmpeg: Path,
     video.transcode_crops(source, outputs, crops=crops, fps=30, frames=12, gop=60, cq=36)
     for index, output in enumerate(outputs):
         reference: Path = tmp_path / f"reference{index}.mp4"
-        video.transcode_mp4(source, reference, crop=crops[index], fps=30, frames=12, gop=60, cq=36, gray=True)
+        monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "1")
+        video.transcode_crops(source, [reference], crops=[crops[index]], fps=30, frames=12, gop=60, cq=36)
         with av.open(str(output)) as shared, av.open(str(reference)) as separate:
             assert [bytes(packet) for packet in shared.demux(video=0) if packet.size] == [bytes(packet) for packet in separate.demux(video=0) if packet.size]
 

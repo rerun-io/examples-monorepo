@@ -357,7 +357,6 @@ def transcode_mp4(
     frames: int,
     gray: bool,
     size: tuple[int, int] | None = None,
-    crop: tuple[int, int, int, int] | None = None,
     keep: list[range] | None = None,
     decode: Literal["cpu", "cuda"] = "cpu",
 ) -> int:
@@ -369,19 +368,16 @@ def transcode_mp4(
     The input -r assigns nominal timestamps without dropping or duplicating frames.
     gray drops chroma on the CPU path; the CUDA path encodes the decoded planes as they are,
     which for a gray source carry neutral chroma, converted to 4:2:0. size (width, height) rescales on the GPU
-    when scale_cuda is available; builds without it use CPU decode directly. Optional crop is (width, height, x, y), applied first, and always
-    uses CPU decode. Other NVDEC failures fall back to CPU; session failures retry the same
+    when scale_cuda is available; builds without it use CPU decode directly.
+    Other NVDEC failures fall back to CPU; session failures retry the same
     command and never trigger that fallback.
     """
     if frames <= 0:
         raise ValueError("frames must be positive")
-    if crop is not None and (min(crop[:2]) <= 0 or min(crop[2:]) < 0):
-        raise ValueError("crop requires positive dimensions and nonnegative offsets")
     runs: str = "+".join(f"between(n,{run.start},{run[-1]})*not(mod(n-{run.start},{run.step}))" for run in keep or [])
     select: list[str] = [f"select='{runs}'"] if keep is not None else []
     cpu_filters: list[str] = [
         *select,
-        *([] if crop is None else ["crop=" + ":".join(str(value) for value in crop)]),
         *([] if size is None else [f"scale={size[0]}:{size[1]}"]),
         *(["format=gray"] if gray else []),
         EVEN_DIMENSION_AND_PIXEL_FORMAT,
@@ -403,7 +399,7 @@ def transcode_mp4(
         ]
         return run_nvenc(lambda fds: subprocess.run(command, pass_fds=fds, capture_output=True, text=True, check=False))
 
-    cuda: bool = decode == "cuda" and crop is None and has_scale_cuda(binary)
+    cuda: bool = decode == "cuda" and has_scale_cuda(binary)
     result: subprocess.CompletedProcess[str] = run(cuda=cuda)
     if cuda and result.returncode and not nvenc_session_failure(result.stderr):
         tail: str = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "no stderr"
