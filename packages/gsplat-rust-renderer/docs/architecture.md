@@ -103,7 +103,8 @@ Reports record runtime source SHA, Cargo.lock SHA-256, and crate version;
 exported binaries can set `GSPLAT_SOURCE_SHA` explicitly.
 
 Speed measures render plus GPU completion with pixels left on the GPU. Admission
-checks load and available GPU utilization, then warmup and repeated timed loops
+checks load and available GPU utilization for up to `--quiet-wait-minutes` (90 by
+default; a busy shared host records `loaded_host`), then warmup and repeated timed loops
 produce the median of repeat medians and p95. Separate stage timestamps diagnose
 costs. Every repeat lasts at least ten seconds and covers complete orbits, so
 frame counts can differ but each camera has equal weight. Equal counts would
