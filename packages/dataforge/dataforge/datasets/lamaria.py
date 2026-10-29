@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
@@ -928,13 +929,16 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             0 if source.control_points_path is None else len(lamaria_source.read_control_points(source.control_points_path).points)
         )
 
-        clips: list[Path] = []
-        for index, stream in enumerate(streams.cameras):
-            clip: Path = work_dir / f"cam_{index:02d}.mp4"
-            spec: CameraSpec = CAMERA_SPECS[stream.stream_id]
-            layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.width, height=stream.camera.intrinsics.height)
-            encode_frames_to_mp4(stream.frames, clip, source=layout, fps=spec.fps)
-            clips.append(clip)
+        # Every camera at once: each encode waits on its own VRS reader, so encoding them in turn leaves NVENC idle.
+        clips: list[Path] = [work_dir / f"cam_{index:02d}.mp4" for index in range(len(streams.cameras))]
+        with ThreadPoolExecutor(max_workers=len(streams.cameras)) as pool:
+            encodes: list[Future[int]] = []
+            for stream, clip in zip(streams.cameras, clips, strict=True):
+                spec: CameraSpec = CAMERA_SPECS[stream.stream_id]
+                layout: FrameSource = FrameSource(spec.frame_kind, width=stream.camera.intrinsics.width, height=stream.camera.intrinsics.height)
+                encodes.append(pool.submit(encode_frames_to_mp4, stream.frames, clip, source=layout, fps=spec.fps))
+            for encode in encodes:
+                encode.result()
 
         clocks: list[Int64[ndarray, "n_samples"]] = [stream.times_ns for stream in streams.cameras if stream.times_ns.size]
         clocks += [imu.gyro.times_ns for imu in streams.imus if imu.gyro.times_ns.size]
