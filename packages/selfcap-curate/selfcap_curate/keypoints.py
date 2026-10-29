@@ -18,7 +18,6 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
-from scipy.signal import savgol_filter
 from simplecv.catalog_rig_layout import catalog_components
 from simplecv.rrd_query_utils import first_valid_value
 
@@ -31,8 +30,15 @@ INLIER_PX: float = 8.0
 
 DISPLAY_CONFIDENCE: float = 0.7
 """Joints scoring below this are not written (mv-api's display threshold); triangulation itself gates views at 0.3."""
-SMOOTH_SPAN_S: float = 0.28
-"""Savitzky-Golay span of the 3D tracks: ~4x less frame-to-frame jitter on cc808233 ep001 at 25 Hz, points move ~3 mm."""
+ONE_EURO_MIN_CUTOFF_HZ: float = 1.0
+"""One Euro cutoff at rest; with ONE_EURO_BETA, forward + backward cut cc808233 ep001 jitter 6x (median 11.8 -> 1.9 mm)."""
+ONE_EURO_BETA: float = 2.0
+"""Cutoff increase per m/s of joint speed, so fast moves are followed closely (12 mm median pull in the fastest 10%)."""
+SMOOTH_MIN_RATE_HZ: float = 10.0
+"""Plans sampled slower than this stay raw: a 1 Hz cutoff needs samples well above it."""
+HEADSET_COVERED: Int64[ndarray, "k"] = np.r_[0:3, 23:91]
+"""Body nose/eyes and the 68 face landmarks: every wearer has a Quest on, and RTMW and Sapiens2 both place these on its
+front plate with high confidence (cc808233 ep001 head crops), so they are written as missing."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,19 +227,34 @@ def triangulate_episode(
     return Keypoints3D(detections.times, xyz, counts, confidence, selected, cameras, detections.rate)
 
 
-def smooth_keypoints(result: Keypoints3D, span_s: float = SMOOTH_SPAN_S) -> Keypoints3D:
-    """Savitzky-Golay (order 2) over each joint's finite runs; gaps are never bridged and plans too slow for the span stay raw."""
-    window: int = round(span_s * result.rate) | 1
-    if window < 5:
+def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float) -> Float32[ndarray, "n j 3"]:
+    """Causal One Euro filter (Casiez et al. 2012) per joint on the 3D vector; every gap restarts it."""
+
+    def alpha(cutoff: Float64[ndarray, "k"] | float) -> Float64[ndarray, "k"] | float:
+        return 1.0 / (1.0 + rate / (2.0 * np.pi * cutoff))
+
+    out: Float32[ndarray, "n j 3"] = np.full_like(xyz, np.nan)
+    state: Float64[ndarray, "j 3"] = np.zeros(xyz.shape[1:])
+    velocity: Float64[ndarray, "j 3"] = np.zeros(xyz.shape[1:])
+    alive: Bool[ndarray, "j"] = np.zeros(xyz.shape[1], bool)
+    for t, sample in enumerate(xyz.astype(np.float64)):
+        valid: Bool[ndarray, "j"] = np.isfinite(sample).all(1)
+        start = valid & ~alive
+        state[start], velocity[start] = sample[start], 0.0
+        step = valid & alive
+        velocity[step] += alpha(1.0) * ((sample[step] - state[step]) * rate - velocity[step])
+        state[step] += alpha(ONE_EURO_MIN_CUTOFF_HZ + ONE_EURO_BETA * np.linalg.norm(velocity[step], axis=1))[:, None] * (sample[step] - state[step])
+        out[t, valid] = state[valid]
+        alive = valid
+    return out
+
+
+def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
+    """One Euro run forward and backward in time and averaged, so its lags cancel; gaps stay gaps, slow plans stay raw."""
+    if result.rate < SMOOTH_MIN_RATE_HZ:
         return result
-    xyz: Float32[ndarray, "n 133 3"] = result.xyz.copy()
-    finite: Bool[ndarray, "n 133"] = np.isfinite(xyz).all(-1)
-    for joint in range(xyz.shape[1]):
-        edges = np.flatnonzero(np.diff(np.r_[0, finite[:, joint].astype(np.int8), 0]))
-        for start, stop in zip(edges[::2], edges[1::2], strict=True):
-            if stop - start >= window:
-                xyz[start:stop, joint] = savgol_filter(xyz[start:stop, joint], window, 2, axis=0)
-    return replace(result, xyz=xyz)
+    smooth = (one_euro(result.xyz, result.rate) + one_euro(result.xyz[::-1], result.rate)[::-1]) / 2.0
+    return replace(result, xyz=smooth.astype(np.float32))
 
 
 def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
@@ -249,7 +270,8 @@ def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
     if len(stores) != 1:
         raise ValueError("calibration input must contain one recording")
     stamps: Int64[ndarray, "n"] = np.rint(result.times * 1e9).astype(np.int64)
-    shown: Float32[ndarray, "n 133 3"] = np.where((result.confidence >= DISPLAY_CONFIDENCE)[..., None], result.xyz, np.float32(np.nan))
+    visible: Bool[ndarray, "133"] = ~np.isin(np.arange(133), HEADSET_COVERED)
+    shown: Float32[ndarray, "n 133 3"] = np.where(((result.confidence >= DISPLAY_CONFIDENCE) & visible)[..., None], result.xyz, np.float32(np.nan))
 
     def projected(camera: Camera) -> Float32[ndarray, "n 133 2"]:
         uvd: Float64[ndarray, "m 3"] = project(camera, shown.reshape(-1, 3).astype(np.float64))
@@ -277,7 +299,8 @@ def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
                 kp3d_reprojection_threshold_px=INLIER_PX,
                 kp3d_calibration_sha256=hashlib.sha256(calib.read_bytes()).hexdigest(),
                 kp3d_display_confidence=DISPLAY_CONFIDENCE,
-                kp3d_smoothing=f"Savitzky-Golay order 2 over {SMOOTH_SPAN_S} s, finite runs only",
+                kp3d_missing_under_headset="body 0-2 and face 23-90: both models place them on the Quest front plate",
+                kp3d_smoothing=f"One Euro forward + backward, min cutoff {ONE_EURO_MIN_CUTOFF_HZ} Hz, beta {ONE_EURO_BETA}, restarts at gaps",
             ),
         )
         for parent in parents:
@@ -302,7 +325,7 @@ def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
                     f"{result.cameras[phone].entity}/pinhole/pred/rtmw/coco133_uv",
                     times_ns=stamps,
                     frame_indices=None,
-                    positions=np.where((scores >= DISPLAY_CONFIDENCE)[..., None], selected.xy, np.float32(np.nan)),
+                    positions=np.where(((scores >= DISPLAY_CONFIDENCE) & visible)[..., None], selected.xy, np.float32(np.nan)),
                     confidence=scores,
                 )
             log_projections(

@@ -6,6 +6,7 @@ from rerun.chunk import RrdReader
 
 from selfcap_curate.keypoints import (
     DISPLAY_CONFIDENCE,
+    HEADSET_COVERED,
     Camera,
     Keypoints2D,
     Keypoints3D,
@@ -101,14 +102,13 @@ def three_d(times, xyz, confidence, selected, cams, rate) -> Keypoints3D:
     return Keypoints3D(times, xyz.astype(np.float32), np.full(xyz.shape[:2], 4, np.uint8), confidence.astype(np.float32), selected, cams, rate)
 
 
-def test_smoothing_cuts_jitter_keeps_gaps_and_leaves_slow_plans_raw() -> None:
+def test_smoothing_cuts_jitter_without_lag_keeps_gaps_and_leaves_slow_plans_raw() -> None:
     rng = np.random.default_rng(0)
     times = np.arange(100) / 25.0
     truth = np.stack([np.sin(times), np.cos(times), 3.0 + 0.1 * times], axis=1)
     xyz = np.repeat((truth + rng.normal(0.0, 0.01, truth.shape))[:, None], 133, axis=1)
     xyz[40:43, 5] = np.nan  # a gap is never bridged
-    xyz[:, 6] = np.nan
-    xyz[10:14, 6] = truth[10:14]  # a run shorter than the window stays raw
+    xyz[:, 6] = np.repeat(np.linspace(0.0, 2.0, 100)[:, None], 3, axis=1)  # a steady 0.5 m/s ramp
     raw = three_d(times, xyz, np.ones((100, 133)), {}, {}, 25.0)
     smooth = smooth_keypoints(raw)
 
@@ -118,7 +118,8 @@ def test_smoothing_cuts_jitter_keeps_gaps_and_leaves_slow_plans_raw() -> None:
     assert jitter(smooth.xyz[:, 0]) < 0.4 * jitter(raw.xyz[:, 0])
     assert np.nanmedian(np.linalg.norm(smooth.xyz[:, 0] - truth, axis=1)) < np.nanmedian(np.linalg.norm(raw.xyz[:, 0] - truth, axis=1))
     np.testing.assert_array_equal(np.isfinite(smooth.xyz), np.isfinite(raw.xyz))
-    np.testing.assert_array_equal(smooth.xyz[10:14, 6], raw.xyz[10:14, 6])
+    # Forward and backward lags cancel: away from the ends a steady motion comes back where it was.
+    np.testing.assert_allclose(smooth.xyz[20:80, 6], raw.xyz[20:80, 6], atol=1e-3)
     slow = three_d(times, xyz, np.ones((100, 133)), {}, {}, 2.0)
     np.testing.assert_array_equal(smooth_keypoints(slow).xyz, slow.xyz)
 
@@ -132,6 +133,7 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
     xyz = np.tile(np.linspace([-0.3, -0.3, 3.5], [0.3, 0.3, 4.5], 133), (2, 1, 1))
     confidence = np.full((2, 133), 0.9)
     confidence[:, 5] = DISPLAY_CONFIDENCE - 0.05
+    assert {0, 1, 2, 23, 90} <= set(HEADSET_COVERED.tolist()) and not {3, 4, 5, 7, 91} & set(HEADSET_COVERED.tolist())
     uv = np.tile(project(camera, xyz[0])[:, :2], (2, 1, 1)).astype(np.float32)
     scores = np.full((2, 133), 0.9)
     scores[:, 7] = 0.5
@@ -143,10 +145,12 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
         batch = next(c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and str(c.entity_path) == entity)
         return np.asarray(batch.column(f"{kind}:positions").to_pylist()[0], dtype=float)
 
+    # Low confidence (3D joint 5, 2D joint 7) and the face the headset covers are written as missing everywhere.
+    hidden3d, hidden2d = np.r_[5, HEADSET_COVERED], np.r_[7, HEADSET_COVERED]
     points = row("/world/pred/rtmw_triangulated/coco133_xyz", "Points3D")
-    assert np.isnan(points[5]).all() and np.isfinite(np.delete(points, 5, axis=0)).all()
+    assert np.isnan(points[hidden3d]).all() and np.isfinite(np.delete(points, hidden3d, axis=0)).all()
     overlay = row("/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv", "Points2D")
-    assert np.isnan(overlay[7]).all() and np.isfinite(np.delete(overlay, 7, axis=0)).all()
+    assert np.isnan(overlay[hidden2d]).all() and np.isfinite(np.delete(overlay, hidden2d, axis=0)).all()
     projected = row("/world/rig_00/cam_00/pinhole/coco133_uv_projected", "Points2D")
-    assert np.isnan(projected[5]).all()
-    np.testing.assert_allclose(np.delete(projected, 5, axis=0), np.delete(uv[0], 5, axis=0), atol=1e-3)
+    assert np.isnan(projected[hidden3d]).all()
+    np.testing.assert_allclose(np.delete(projected, hidden3d, axis=0), np.delete(uv[0], hidden3d, axis=0), atol=1e-3)
