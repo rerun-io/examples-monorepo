@@ -73,6 +73,7 @@ pub enum GpuError {
 /// Construct the default wgpu client after a fallible adapter probe.
 ///
 /// Select a device with `CUBECL_WGPU_DEFAULT_DEVICE` before the first call.
+/// Client creation panics are retried once before caching the final result.
 /// Initialization and its result are cached for the process, including failures.
 /// Panic messages remain visible.
 ///
@@ -84,12 +85,26 @@ pub fn gpu_client() -> Result<cubecl::prelude::ComputeClient<GpuRuntime>, GpuErr
         std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            guarded(GpuError::ClientPanicked, || {
+            initialize_client(|| {
                 probe_availability()?;
                 Ok(wgpu_client())
             })
         })
         .clone()
+}
+
+// Device creation can fail transiently (Vulkan ERROR_INITIALIZATION_FAILED).
+// Keep the unwind boundary inside the retry, and cache only the final result.
+#[cfg(any(feature = "wgpu", test))]
+fn initialize_client<T>(mut create: impl FnMut() -> Result<T, GpuError>) -> Result<T, GpuError> {
+    let first = guarded(GpuError::ClientPanicked, &mut create);
+    if matches!(first, Err(GpuError::ClientPanicked)) {
+        eprintln!("wgpu device/client creation panicked; retrying once after 200 ms (the runtime reason is logged above)");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        guarded(GpuError::ClientPanicked, create)
+    } else {
+        first
+    }
 }
 
 /// Portable compute backend name.
@@ -241,7 +256,15 @@ pub fn probe_storage<R: cubecl::prelude::Runtime>(
 #[cfg(feature = "wgpu")]
 fn wgpu_client() -> cubecl::prelude::ComputeClient<cubecl_wgpu::WgpuRuntime> {
     use cubecl::prelude::Runtime;
-    cubecl_wgpu::WgpuRuntime::client(&cubecl_wgpu::WgpuDevice::default())
+    // Create the device on this thread before registering a CubeCL service.
+    // Each retry then creates a fresh device without depending on the global
+    // runner's partially completed lazy initialization.
+    let setup = cubecl_wgpu::init_setup::<cubecl_wgpu::AutoGraphicsApi>(
+        &cubecl_wgpu::WgpuDevice::default(),
+        cubecl_wgpu::RuntimeOptions::default(),
+    );
+    let device = cubecl_wgpu::init_device(setup, cubecl_wgpu::RuntimeOptions::default());
+    cubecl_wgpu::WgpuRuntime::client(&device)
 }
 
 #[cube(launch)]
@@ -311,6 +334,38 @@ static PROBE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn client_startup_retries_a_panic_once() {
+        let mut attempts = 0;
+        let result = initialize_client(|| {
+            attempts += 1;
+            if attempts == 1 {
+                panic!("Failed to create Vulkan device: ERROR_INITIALIZATION_FAILED");
+            }
+            Ok(7)
+        });
+        assert_eq!(result, Ok(7));
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn client_startup_stops_after_two_failures_and_does_not_retry_no_adapter() {
+        let mut attempts = 0;
+        let result: Result<(), GpuError> = initialize_client(|| {
+            attempts += 1;
+            panic!("device creation failed");
+        });
+        assert_eq!(result, Err(GpuError::ClientPanicked));
+        assert_eq!(attempts, 2);
+        attempts = 0;
+        let absent = GpuError::NoAdapter { backend: "Vulkan" };
+        let result: Result<(), GpuError> = initialize_client(|| {
+            attempts += 1;
+            Err(absent)
+        });
+        assert_eq!(result, Err(absent));
+        assert_eq!(attempts, 1);
+    }
     #[cfg(feature = "wgpu")]
     #[test]
     fn client_initialization_probes_once_per_process() {
