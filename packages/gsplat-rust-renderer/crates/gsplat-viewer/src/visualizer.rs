@@ -325,6 +325,8 @@ pub(crate) fn draw_instances(
                             native,
                             world_from_local,
                             signature,
+                            masks,
+                            object,
                         )?
                     }
                     Primitives::Hexels(hexels) => {
@@ -333,7 +335,14 @@ pub(crate) fn draw_instances(
                             format!("{error}; drawing hexel centres as points"),
                         );
                         re_log::warn_once!("Hexel compute fallback: {error:#}");
-                        crate::hexels::points_fallback(ctx, query, data, hexels, world_from_local)?
+                        crate::hexels::points_fallback(
+                            ctx,
+                            query,
+                            hexels,
+                            world_from_local,
+                            masks,
+                            object,
+                        )?
                     }
                 });
             }
