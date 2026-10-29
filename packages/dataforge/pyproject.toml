@@ -94,6 +94,8 @@ ignore_names = [
     "pix_fmt",
     # Pytest invokes this autouse capability fixture.
     "fixture_cuda_filter_available",
+    # s3fs reads its retry count internally.
+    "retries",
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

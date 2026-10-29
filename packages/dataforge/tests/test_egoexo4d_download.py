@@ -1,11 +1,13 @@
 """Ego-Exo4D release access against an in-memory S3: manifests, per-take file selection, size-checked fetch."""
 
+import asyncio
 import json
 import threading
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from fsspec.asyn import get_loop
 from test_egoexo4d_source import GOPRO_HEADER, GOPRO_ROWS
 
 from dataforge.datasets.egoexo4d import Egoexo4dConfig, Egoexo4dDataset
@@ -34,26 +36,47 @@ TAKE: dict[str, object] = {
 }
 
 
+class FakeBody:
+    """An async S3 body whose reads can be replaced with a stalled stream."""
+
+    def __init__(self, payload: bytes) -> None:
+        self.payload: bytes = payload
+        self.offset: int = 0
+        self.closed: bool = False
+
+    async def read(self, amount: int) -> bytes:
+        chunk: bytes = self.payload[self.offset : self.offset + amount]
+        self.offset += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeS3:
-    """The three s3fs calls Release makes, over a dict of object bytes; ``denied`` raises like an unauthorized profile."""
+    """The s3fs session, size and GetObject calls, over in-memory bytes; ``denied`` raises like an unauthorized profile."""
 
     def __init__(self, objects: dict[str, bytes], *, denied: bool = False) -> None:
         self.objects: dict[str, bytes] = objects
         self.denied: bool = denied
+        self.loop = get_loop()
+        self.s3 = self
 
-    def read_text(self, path: str) -> str:
-        if self.denied:
-            raise PermissionError("Access Denied")
-        return self.objects[path].decode()
+    async def set_session(self) -> None:
+        pass
+
+    async def get_object(self, *, Bucket: str, Key: str, Range: str) -> dict[str, FakeBody]:
+        start, end = (int(value) for value in Range.removeprefix("bytes=").split("-"))
+        return {"Body": FakeBody(self.objects[f"s3://{Bucket}/{Key}"][start : end + 1])}
+
+    async def _size(self, path: str) -> int:
+        return self.size(path)
 
     def size(self, path: str) -> int:
+        if self.denied:
+            raise PermissionError("Access Denied")
         return len(self.objects[path])
 
-    def cat_file(self, path: str, start: int, end: int) -> bytes:
-        return self.objects[path][start:end]
-
-    def get_file(self, path: str, dest: str) -> None:
-        Path(dest).write_bytes(self.objects[path])
 
 
 def entry(uid: str, paths: list[tuple[str, int]]) -> dict[str, object]:
@@ -108,6 +131,8 @@ def test_fetch_take_fetches_what_base_reads(tmp_path: Path) -> None:
     assert [path.relative_path for path in dataset.take_files(take, ["cam01"])] == take_files
     listed = [path.relative_path for path in dataset.take_files(take, take.exo_cameras)]  # --list-remote: every exo video
     assert listed == [*take_files[:5], "takes/cmu_bike02_4/frame_aligned_videos/cam02.mp4", *take_files[5:]]
+    for part in manifests:
+        dataset.release.manifest(cast(Any, part))
     fetched: list[str] = []
     dataset.release.fetch = lambda path, root: fetched.append(path.relative_path) or True  # type: ignore[method-assign]
     dataset.fetch_take(take)
@@ -144,22 +169,26 @@ def test_large_fetch_reads_ranges_concurrently_and_verifies_each(tmp_path: Path,
     payload = b"0123456789abcdef"
     source = release({"s3://bucket/a": payload}, {"takes": [entry("u", [("a", len(payload))])]})
     source.stream_slots = threading.BoundedSemaphore(16)
-    barrier = threading.Barrier(4)
+    barrier = asyncio.Barrier(4)
     reads: list[tuple[int, int]] = []
-
-    def read(path: str, *, start: int, end: int) -> bytes:
-        reads.append((start, end))
-        barrier.wait(timeout=2)
-        return payload[start:end]
-
-    monkeypatch.setattr(source.fs, "cat_file", read)
     (file,) = source.manifest("takes")["u"].paths
+
+    async def read(**kwargs: str) -> dict[str, FakeBody]:
+        start, end = (int(value) for value in kwargs["Range"].removeprefix("bytes=").split("-"))
+        reads.append((start, end + 1))
+        await asyncio.wait_for(barrier.wait(), timeout=2.0)
+        return {"Body": FakeBody(payload[start : end + 1])}
+
+    monkeypatch.setattr(source.fs.s3, "get_object", read)
     assert source.fetch(file, tmp_path)
     assert (tmp_path / "a").read_bytes() == payload
     assert sorted(reads) == [(0, 4), (4, 8), (8, 12), (12, 16)]
     assert not source.fetch(file, tmp_path)
     (tmp_path / "a").unlink()
-    monkeypatch.setattr(source.fs, "cat_file", lambda path, *, start, end: b"x")
+    async def short(**kwargs: str) -> dict[str, FakeBody]:
+        return {"Body": FakeBody(b"x")}
+
+    monkeypatch.setattr(source.fs.s3, "get_object", short)
     with pytest.raises(ValueError, match="range"):
         source.fetch(file, tmp_path)
     assert not (tmp_path / "a").exists()
@@ -185,3 +214,84 @@ def test_prefetch_leaves_oversized_take_for_foreground(tmp_path: Path, monkeypat
     files[0] = ManifestPath("s3://bucket/video", "video", 5)
     dataset.prefetch(identity, take, force=True)
     assert fetched == [take.take_name]
+
+
+def test_stalled_stream_is_cancelled_closed_and_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After one chunk, a body that never sends again cannot hold a fetch indefinitely."""
+    from dataforge.datasets import egoexo4d_download as download
+
+    monkeypatch.setattr(download, "NO_PROGRESS_S", 0.03, raising=False)
+    monkeypatch.setattr(download, "RETRY_DELAY_S", 0.0, raising=False)
+    source = release({"s3://bucket/a": b"0123456789"}, {"takes": [entry("u", [("a", 10)])]})
+    (file,) = source.manifest("takes")["u"].paths
+    stalled = FakeBody(b"012")
+    cancelled = threading.Event()
+    original_read = stalled.read
+
+    async def read(amount: int) -> bytes:
+        if stalled.offset:
+            try:
+                try:
+                    await asyncio.wait_for(asyncio.Event().wait(), timeout=1.0)
+                except TimeoutError as error:
+                    raise RuntimeError("no-progress watchdog did not cancel the stopped read") from error
+            finally:
+                cancelled.set()
+        return await original_read(amount)
+
+    monkeypatch.setattr(stalled, "read", read)
+    calls: list[str] = []
+
+    async def get_object(**kwargs: str) -> dict[str, FakeBody]:
+        calls.append(kwargs["Range"])
+        return {"Body": stalled if len(calls) == 1 else FakeBody(b"0123456789")}
+
+    monkeypatch.setattr(source.fs.s3, "get_object", get_object)
+    assert source.fetch(file, tmp_path)
+    assert cancelled.is_set() and stalled.closed
+    assert calls == ["bytes=0-9", "bytes=0-9"]
+    assert (tmp_path / "a").read_bytes() == b"0123456789"
+    assert "attempt 1/3" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stall_at", ["headers", "body", "trickle"])
+def test_stall_attempts_are_bounded_and_never_publish(
+    stall_at: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dead GET, a silent body, and a continuously trickling body all terminate."""
+    from dataforge.datasets import egoexo4d_download as download
+
+    source = release({"s3://bucket/a": b"0123456789"}, {"takes": [entry("u", [("a", 10)])]})
+    (file,) = source.manifest("takes")["u"].paths
+    monkeypatch.setattr(download, "NO_PROGRESS_S", 0.03)
+    monkeypatch.setattr(download, "RANGE_DEADLINE_S", 0.06)
+    monkeypatch.setattr(download, "RETRY_DELAY_S", 0.0)
+    bodies: list[FakeBody] = []
+    calls: list[str] = []
+
+    async def read(amount: int) -> bytes:
+        if stall_at == "trickle":
+            await asyncio.sleep(0.02)
+            return b"x"
+        await asyncio.Event().wait()
+        return b""
+
+    async def get_object(**kwargs: str) -> dict[str, FakeBody]:
+        calls.append(kwargs["Range"])
+        if stall_at == "headers":
+            await asyncio.Event().wait()
+        body = FakeBody(b"")
+        monkeypatch.setattr(body, "read", read)
+        bodies.append(body)
+        return {"Body": body}
+
+    monkeypatch.setattr(source.fs.s3, "get_object", get_object)
+    with pytest.raises(TimeoutError):
+        source.fetch(file, tmp_path)
+    assert calls == ["bytes=0-9"] * 3
+    assert all(body.closed for body in bodies)
+    assert not (tmp_path / "a").exists()
+    assert not any(path.is_file() for path in (tmp_path / ".dataforge-staging").rglob("*"))
+    assert "attempt 3/3" in capsys.readouterr().out
