@@ -173,6 +173,8 @@ def test_complete_items_are_skipped_and_the_rest_run_through_pixi_envs(tmp_path:
         ("gsplat-rust-renderer", str(GSPLAT_RELEASE / "gsplat")),
         ("hexels", "hexels-score"),
     ]
+    hexels_steps: list[tuple[str, ...]] = [args for env, args in runner.steps if env == "hexels"]
+    assert all(args[args.index("--roots.runs") + 1] == str(roots.runs) for args in hexels_steps), "every hexels tool writes the queue's runs root"
     brush_train: tuple[str, ...] = runner.steps[0][1]
     assert "--gpu-lock" not in brush_train, "the conductor holds the lock; a child flock would deadlock"
     assert brush_train[brush_train.index("--scenes") + 1] == "scan24"
@@ -220,9 +222,14 @@ def test_partial_outputs_move_to_the_attic_before_a_rerun(tmp_path: Path) -> Non
     (cuda_run / "upstream-eval").mkdir()
     (cuda_run / "upstream-eval-job").mkdir()
 
-    summary = run_queue(build_queue(("dtu",), scenes=("scan24",), methods=("hexels-v1-7k", "hexels-v1-30k-pub-cuda")), roots, lock, FakeRunner())
+    runner = FakeRunner()
+    summary = run_queue(build_queue(("dtu",), scenes=("scan24",), methods=("hexels-v1-7k", "hexels-v1-30k-pub-cuda")), roots, lock, runner)
 
     assert len(summary.done) == 2
+    assert [(args[0], args[args.index("--roots.runs") + 1]) for _, args in runner.steps] == [
+        ("hexels-train", str(roots.runs)),
+        ("hexels-render-published", str(roots.runs)),
+    ]
     attic: list[str] = sorted(path.name for path in (roots.runs / "_attic").iterdir())
     assert len(attic) == 2
     assert attic[0].startswith("dtu-scan24-hexels-v1-30k-pub-cuda-") and attic[1].startswith("dtu-scan24-hexels-v1-7k-")

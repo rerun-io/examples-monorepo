@@ -189,19 +189,22 @@ def to_attic(roots: Roots, item: Item, partials: tuple[Path, ...]) -> None:
         print(f"moved partial {path} -> {target}")
 
 
-def score_step(item: Item, fps: float | None) -> Step:
+def roots_args(roots: Roots) -> tuple[str, ...]:
+    """The roots every hexels tool takes, so each step reads and writes the queue's runs root, not the default one."""
+    return ("--roots.data", str(roots.data), "--roots.runs", str(roots.runs))
+
+
+def score_step(roots: Roots, item: Item, fps: float | None) -> Step:
     fps_args: tuple[str, ...] = () if fps is None else ("--fps", repr(fps))
-    return Step(
-        name="score", env="hexels", args=("hexels-score", "--dataset", item.dataset, "--scene", item.scene, "--method", item.method, *fps_args)
-    )
+    args: tuple[str, ...] = ("hexels-score", "--dataset", item.dataset, "--scene", item.scene, "--method", item.method, *fps_args, *roots_args(roots))
+    return Step(name="score", env="hexels", args=args)
 
 
 def brush_train_step(roots: Roots, item: Item) -> Step:
     """The Brush protocol runner for one scene, without --gpu-lock (the conductor already holds it)."""
     args: tuple[str, ...] = (
         "python", str(WORKSPACE / "packages" / "hexels" / "tools" / "train_brush.py"), "--dataset", item.dataset, "--scenes", item.scene, "--method", item.method,
-        "--steps", str(METHODS[item.method].steps), "--roots.data", str(roots.data), "--roots.runs", str(roots.runs),
-        "--roots.brush-prepared", str(roots.brush_prepared),
+        "--steps", str(METHODS[item.method].steps), *roots_args(roots), "--roots.brush-prepared", str(roots.brush_prepared),
     )  # fmt: skip
     return Step(name="brush-train", env="hexels", args=args)
 
@@ -239,11 +242,11 @@ def execute(roots: Roots, item: Item, run: Runner) -> None:
     if spec.renders_from is not None:
         stage_wgsl(roots, item, spec.renders_from)
         run(wgsl_render_step(run_dir), log)
-        run(score_step(item, read_json(FpsReport, run_dir / "fps.json").median_fps), log)
+        run(score_step(roots, item, read_json(FpsReport, run_dir / "fps.json").median_fps), log)
     elif spec.variant is None:
         if not (run_dir / "train.json").is_file():
             run(brush_train_step(roots, item), log)
-        run(score_step(item, None), log)
+        run(score_step(roots, item, None), log)
     elif spec.trains:
         to_attic(roots, item, (run_dir,))
         args: tuple[str, ...] = (
@@ -257,11 +260,11 @@ def execute(roots: Roots, item: Item, run: Runner) -> None:
             "--steps",
             str(spec.steps),
         )
-        run(Step(name="hexels-train", env="hexels", args=args), log)
+        run(Step(name="hexels-train", env="hexels", args=(*args, *roots_args(roots))), log)
     else:
         to_attic(roots, item, (run_dir / "upstream-eval", run_dir / "upstream-eval-job"))
         args = ("hexels-render-published", "--dataset", item.dataset, "--scenes", item.scene, "--variants", spec.variant)
-        run(Step(name="hexels-render-published", env="hexels", args=args), log)
+        run(Step(name="hexels-render-published", env="hexels", args=(*args, *roots_args(roots))), log)
     reason: str | None = incomplete_reason(run_dir, item.method)
     if reason is not None:
         raise RuntimeError(f"steps finished but the run is incomplete: {reason}")
