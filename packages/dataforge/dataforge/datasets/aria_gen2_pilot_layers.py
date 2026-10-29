@@ -208,7 +208,7 @@ def write_projections(recording: rr.RecordingStream, scene: Scene) -> None:
     hands.log_projections(
         recording,
         (
-            ((0, index), aria.project_to_calibration(camera.calibration, batch.device_poses, batch.positions).astype(np.float32))
+            ((0, index), aria.project_frames(camera.calibration, batch.device_poses, batch.positions))
             for index, camera in enumerate(scene.cameras if len(batch.times_ns) else [])
         ),
         times_ns=batch.times_ns,

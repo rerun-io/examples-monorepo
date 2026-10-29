@@ -332,8 +332,8 @@ def project_frames(
 ) -> Float32[ndarray, "n 133 2"]:
     """``project_to_calibration`` for every frame at once, for corpus-scale layers.
 
-    The same pixels to rounding: the batched transform sums in another order, so the last bits differ from the
-    per-joint loop, which hot3d and aria_gen2_pilot keep for their byte-identical parity baselines.
+    Transforms and lens calculations use float64; stored pixels are rounded to float32. The scalar
+    ``project_to_calibration`` remains the float64 reference because the transform sums in a different order.
 
     Args:
         calibration: Full lens model in the logged image orientation; ``rig_T_cam`` is ``device_T_camera``.

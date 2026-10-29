@@ -206,7 +206,7 @@ def write_projections(recording: rr.RecordingStream, scene: Scene, batch: HandBa
     hands.log_projections(
         recording,
         (
-            ((0, cam), aria.project_to_calibration(camera.calibration, world_T_device, batch.positions).astype(np.float32))
+            ((0, cam), aria.project_frames(camera.calibration, world_T_device, batch.positions))
             for cam, camera in enumerate(scene.cameras)
         ),
         times_ns=scene.times_ns,

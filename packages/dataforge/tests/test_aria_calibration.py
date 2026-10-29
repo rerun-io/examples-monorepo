@@ -77,20 +77,22 @@ def test_read_device_calibration_needs_the_file_tag(tmp_path: Path) -> None:
         aria.read_device_calibration(VrsFile(bare))
 
 
+@pytest.mark.parametrize("batched", [False, True])
 @pytest.mark.parametrize("valid_radius,width", [(10.0, 640), (None, 330)])
-def test_projection_rejects_valid_radius_and_image_bounds(valid_radius: float | None, width: int) -> None:
+def test_projection_rejects_valid_radius_and_image_bounds(valid_radius: float | None, width: int, batched: bool) -> None:
     camera = Fisheye624Parameters(
         "test", width, 480, np.array([300.0, 320.0, 240.0, *([0.0] * 12)]), SE3.from_quaternion(np.array([1.0, 0.0, 0.0, 0.0]), np.zeros(3)), 1.5, valid_radius
     )
     positions = np.full((1, 133, 3), np.nan, dtype=np.float32)
     positions[0, 91] = [0.5, 0.0, 1.0]
-    projected = aria.project_to_calibration(camera, np.eye(4)[None], positions)
+    projected = (aria.project_frames if batched else aria.project_to_calibration)(camera, np.eye(4)[None], positions)
     assert np.isnan(projected).all()
     _, confidence = hands.confidence_rule(projected.astype(np.float32), np.ones((1, 133), dtype=np.float32))
     assert (confidence == 0.0).all()
 
 
-def test_projection_goes_through_the_device_pose_and_skips_missing_poses_and_points_behind() -> None:
+@pytest.mark.parametrize("batched", [False, True])
+def test_projection_goes_through_the_device_pose_and_skips_missing_poses_and_points_behind(batched: bool) -> None:
     # The camera sits 1 m along the device's x axis; the device is 2 m along the world's z axis.
     camera = Fisheye624Parameters(
         "test", 640, 480, np.array([300.0, 320.0, 240.0, *([0.0] * 12)]), SE3.from_quaternion(np.array([1.0, 0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])), 1.5, None
@@ -100,7 +102,7 @@ def test_projection_goes_through_the_device_pose_and_skips_missing_poses_and_poi
     positions = np.full((3, 133, 3), np.nan, dtype=np.float32)
     positions[:, 0] = [1.0, 0.0, 3.0]  # 1 m in front of the camera, on its optical axis
     positions[:, 1] = [1.0, 0.0, 1.0]  # 1 m behind it
-    projected = aria.project_to_calibration(camera, world_T_device, positions)
+    projected = (aria.project_frames if batched else aria.project_to_calibration)(camera, world_T_device, positions)
     np.testing.assert_allclose(projected[:2, 0], [[320.0, 240.0]] * 2, atol=1e-9)
     assert np.isnan(projected[:2, 1:]).all()
     assert np.isnan(projected[2]).all()
