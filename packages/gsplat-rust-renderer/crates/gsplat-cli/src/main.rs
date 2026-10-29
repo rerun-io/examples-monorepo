@@ -186,6 +186,18 @@ mod tests {
         }
     }
     #[test]
+    fn speed_quiet_host_wait_defaults_to_ninety_minutes_and_accepts_zero() {
+        let wait = |extra: &[&str]| {
+            let cli = [&["gsplat", "speed", "--ply", "x", "--out", "y"][..], extra].concat();
+            let Action::Speed(args) = Args::try_parse_from(cli).unwrap().command else {
+                panic!("speed command")
+            };
+            args.quiet_wait_minutes
+        };
+        assert_eq!(wait(&[]), 90);
+        assert_eq!(wait(&["--quiet-wait-minutes", "0"]), 0);
+    }
+    #[test]
     fn cli_rejects_unknown_oracle_and_invalid_resolution() {
         assert!(
             Args::try_parse_from([

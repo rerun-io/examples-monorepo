@@ -2123,6 +2123,24 @@ depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { tas
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
 
+[feature.gsplat-rust-renderer.tasks.gsplat-train-protocol]
+args = [{ arg = "dataset", default = "dtu" }]
+cmd = "python tools/train_protocol.py --dataset {{ dataset }}"
+depends-on = ["gsplat-build"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Brush on the Hexels NVS protocol for every scene of one dataset"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-bench]
+cmd = "python tools/bench.py"
+depends-on = ["gsplat-build"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Brush vs Hexels benchmark queue (needs the hexels env installed for the upstream methods)"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-bench-table]
+cmd = "python tools/bench_table.py"
+cwd = "packages/gsplat-rust-renderer"
+description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
+
 [feature.gsplat-rust-renderer.tasks.gsplat-log-hexels-compare]
 cmd = "python tools/log_hexels_compare.py"
 cwd = "packages/gsplat-rust-renderer"
@@ -2173,6 +2191,11 @@ cmd = "python tools/export.py"
 cwd = "packages/hexels"
 description = "Export an upstream Hexels run (config.json + checkpoints/) to a hexel PLY"
 
+[feature.hexels.tasks.hexels-export-image]
+cmd = "python tools/export_image.py"
+cwd = "packages/hexels"
+description = "Export an upstream 2D Hexel fit (raw FP32 .pt) to a 2D hexel PLY"
+
 [feature.hexels.tasks.hexels-export-published]
 cmd = "python tools/export_published.py"
 cwd = "packages/hexels"
@@ -2192,6 +2215,21 @@ description = "Train one scene with upstream Hexels under our protocol (7k, fixe
 cmd = "python tools/score.py"
 cwd = "packages/hexels"
 description = "Shared scorer: PSNR/SSIM/LPIPS-VGG of a run's 16-bit renders against the scene's GT"
+
+[feature.hexels.tasks.hexels-fit-2d]
+cmd = "python tools/fit_image.py --method hexels-2d"
+cwd = "packages/hexels"
+description = "Fit Image-GS benchmark images with upstream 2D Hexels (20K->10K, 5,100 steps), time, VRAM, score"
+
+[feature.hexels.tasks.hexels-decode-2d]
+cmd = "python tools/decode2d.py"
+cwd = "packages/hexels"
+description = "Decode 2D fits with upstream CUDA and with the WGSL renderer, score both, time the decodes"
+
+[feature.hexels.tasks.hexels-figure-2d]
+cmd = "python tools/figure2d.py"
+cwd = "packages/hexels"
+description = "Write the 2D Figure 3 rows and the six-image summary as Rerun recordings"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # hexels-surface — TSDF meshes from `gsplat render --surface` depth (Open3D, upstream Hexels
@@ -2228,6 +2266,26 @@ rerun-sdk = "==0.38.1"
 [feature.hexels-surface.activation.env]
 PACKAGE_DIR = "packages/hexels"
 PYREFLY_TARGET = "hexels_bench tools tests"
+
+[feature.hexels-surface.tasks.hexels-surface-run]
+cmd = "python tools/surface_run.py"
+cwd = "packages/hexels"
+description = "Render depth (gsplat render --surface, or upstream CUDA frames) and fuse TSDF meshes with upstream's settings"
+
+[feature.hexels-surface.tasks.hexels-surface-eval]
+cmd = "python tools/surface_eval.py"
+cwd = "packages/hexels"
+description = "Score fuse_post.ply: DTU Chamfer (2DGS eval_dtu) or T&T F1 (2DGS eval_tnt in the tnt-eval env)"
+
+[feature.hexels-surface.tasks.hexels-surface-table]
+cmd = "python tools/surface_table.py"
+cwd = "packages/hexels"
+description = "Collect scored surface runs and the paper's per-scene numbers into runs/SURFACE_TABLE.json"
+
+[feature.hexels-surface.tasks.hexels-surface-log]
+cmd = "python tools/surface_log.py"
+cwd = "packages/hexels"
+description = "Write the per-scene surface recording: meshes, depth and normal maps, cameras, metrics"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # tnt-eval — the Tanks and Temples evaluator's pinned environment (upstream environment-tnt-eval.yml):

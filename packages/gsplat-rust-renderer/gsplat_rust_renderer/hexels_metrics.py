@@ -28,7 +28,8 @@ METRIC_ROWS: tuple[tuple[str, str], ...] = (
     ("viewer_ms_median", "viewer ms p50"),
     ("viewer_ms_p95", "viewer ms p95"),
     ("viewer_gpu_mb", "viewer GPU MB"),
-    ("fps", "render FPS"),
+    ("renderer_ms_median", "renderer ms p50"),
+    ("fps", "test-view FPS"),
     ("train_min", "train min"),
     ("train_vram_gib", "train GiB"),
     ("deploy_mb", "model MB"),
@@ -149,6 +150,26 @@ class ProbeReport:
     """Compute per-view scratch and targets, bytes."""
 
 
+@serde
+@dataclass(frozen=True, slots=True)
+class SpeedBackend:
+    """One renderer in a `gsplat speed --out` report (read partially)."""
+
+    implementation: str
+    """`ours` (gsplat-core), `brush` or `native`."""
+    median_of_repeat_medians_ms: float
+    """Renderer frame time, median of the repeat medians."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class SpeedReport:
+    """`gsplat speed --out` report (read partially)."""
+
+    backends: list[SpeedBackend]
+    """Measured renderers."""
+
+
 @dataclass(frozen=True, slots=True)
 class MetricRow:
     """One table row; `None` cells stay empty."""
@@ -179,6 +200,8 @@ class MetricRow:
     """`gsplat probe` full viewer frame on the orbit, 95th percentile ms."""
     viewer_gpu_mb: float | None = None
     """Compute renderer GPU memory in the viewer (scene + view), MB."""
+    renderer_ms_median: float | None = None
+    """`gsplat speed --impl ours` on the orbit (renderer only), median of repeat medians, ms."""
 
 
 def read_record[Record](cls: type[Record], path: Path) -> Record | None:
@@ -199,8 +222,10 @@ def probe_cells(path: Path | None) -> dict[str, float]:
     }
 
 
-def run_row(run_dir: Path, method: str, primitive: str, primitives: int, probe: Path | None = None) -> MetricRow:
+def run_row(run_dir: Path, method: str, primitive: str, primitives: int, probe: Path | None = None, speed: Path | None = None) -> MetricRow:
     """Our row for one run directory. PSNR source order: shared scorer, WGSL parity, Brush's own eval.
+
+    A run without its own render FPS takes it from `<run>-wgsl`, the same model rendered by gsplat-core.
 
     Args:
         run_dir: `runs/<dataset>/<scene>/<method>`.
@@ -208,6 +233,7 @@ def run_row(run_dir: Path, method: str, primitive: str, primitives: int, probe: 
         primitive: key of PRIMITIVE_BYTES (`brush`, `v1`, `v2`, `v3`).
         primitives: primitive count of the model shown.
         probe: optional `gsplat probe` report for this model.
+        speed: optional `gsplat speed` report for this model.
     """
     metrics: RunMetrics | None = read_record(RunMetrics, run_dir / "metrics.json")
     parity: ParityReport | None = read_record(ParityReport, run_dir / "parity.json")
@@ -224,6 +250,11 @@ def run_row(run_dir: Path, method: str, primitive: str, primitives: int, probe: 
         psnr, source = parity.summary.mean_psnr_wgsl_gt, "ours, WGSL vs GT"
     elif brush is not None:
         psnr, ssim, source = brush.brush_eval_psnr, brush.brush_eval_ssim, "ours, Brush eval 8-bit"
+    if fps is None:
+        rerender: RunMetrics | None = read_record(RunMetrics, run_dir.with_name(f"{run_dir.name}-wgsl") / "metrics.json")
+        fps = rerender.fps if rerender is not None else None
+    report: SpeedReport | None = read_record(SpeedReport, speed) if speed is not None else None
+    ours: list[SpeedBackend] = [backend for backend in report.backends if backend.implementation == "ours"] if report is not None else []
     return MetricRow(
         method=method,
         source=source,
@@ -235,6 +266,7 @@ def run_row(run_dir: Path, method: str, primitive: str, primitives: int, probe: 
         train_vram_gib=train.peak_vram_gib if train is not None else None,
         deploy_mb=primitives * PRIMITIVE_BYTES[primitive] / 1e6,
         primitives=primitives,
+        renderer_ms_median=ours[0].median_of_repeat_medians_ms if ours else None,
         **probe_cells(probe),
     )
 

@@ -5997,6 +5997,8 @@ dependencies = [
  "re_chunk 0.38.1",
  "re_log_encoding 0.38.1",
  "rerun 0.38.1",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

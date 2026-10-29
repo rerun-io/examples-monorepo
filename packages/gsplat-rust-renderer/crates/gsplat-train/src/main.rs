@@ -2,6 +2,7 @@
 mod dashboard;
 mod logging;
 mod recorder;
+mod test_renders;
 
 use anyhow::{Context as _, ensure};
 use brush_process::{
@@ -40,6 +41,28 @@ struct Cli {
     /// Explicit override for a custom viewer; stock Rerun is the default.
     #[arg(long)]
     compute_visualizer: bool,
+    /// After the last step, render the eval views with Brush (black background) as 16-bit RGB PNGs here.
+    #[arg(long)]
+    test_renders: Option<PathBuf>,
+    /// Write steps, loop and wall seconds, the final splat count and Brush's eval scores as JSON.
+    #[arg(long)]
+    summary: Option<PathBuf>,
+}
+
+#[derive(serde::Serialize)]
+struct Summary {
+    steps: u32,
+    /// Brush's summed step time: data wait, optimisation and refinement; no evaluation or export.
+    loop_seconds: f64,
+    /// From the end of loading to the end of the stream, including evaluation and export.
+    wall_seconds: f64,
+    /// Wall clock at the end of the stream, before the test renders, so memory samples can be split.
+    training_end_unix_seconds: f64,
+    splats: u32,
+    /// Brush's own eval at the last step, after an 8-bit roundtrip of the render.
+    brush_eval_psnr: Option<f32>,
+    brush_eval_ssim: Option<f32>,
+    renderer: &'static str,
 }
 
 fn observation_interval(value: &str) -> Result<u32, String> {
@@ -87,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let device = brush_process::burn_init_setup().await;
     let mut recorder = recorder::Recorder::new(&cli, &device)?;
+    let (test_renders_dir, summary_path) = (cli.test_renders.clone(), cli.summary.clone());
     let config_error = Arc::new(OnceLock::new());
     let callback_error = config_error.clone();
     let mut process =
@@ -101,6 +125,8 @@ async fn main() -> anyhow::Result<()> {
     let mut final_step = 0;
     let mut training_start = None;
     let mut brush_elapsed = Duration::ZERO;
+    let mut eval_views = None;
+    let mut last_eval = None;
     let training_result: anyhow::Result<()> = async {
         while let Some(event) = process.stream.next().await {
             let event = event?;
@@ -111,6 +137,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 ProcessMessage::TrainMessage(TrainMessage::TrainConfig { config }) => {
                     final_step = config.train_config.total_iters();
+                }
+                ProcessMessage::TrainMessage(TrainMessage::Dataset { dataset }) => {
+                    eval_views = dataset.eval.as_ref().map(|scene| scene.views.clone());
                 }
                 ProcessMessage::TrainMessage(TrainMessage::TrainStep {
                     iter,
@@ -131,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
                     avg_ssim,
                 }) => {
                     println!("Eval iter {iter}: PSNR {avg_psnr}, SSIM {avg_ssim}");
+                    last_eval = Some((*avg_psnr, *avg_ssim));
                 }
                 ProcessMessage::Warning { error } => eprintln!("Brush warning: {error:#}"),
                 ProcessMessage::StartLoading {
@@ -156,10 +186,32 @@ async fn main() -> anyhow::Result<()> {
         .context("training never started")?
         .elapsed()
         .as_secs_f64();
+    let training_end = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     println!(
         "Training summary: steps={final_step} wall_seconds={wall:.9} brush_seconds={:.9} logging={enabled}",
         brush_elapsed.as_secs_f64()
     );
+    let splats = process
+        .splat_view
+        .latest()
+        .context("training produced no splats")?;
+    if let Some(dir) = &test_renders_dir {
+        let views = eval_views.context("--test-renders needs eval views (transforms_test.json)")?;
+        test_renders::write(&splats, &views, dir).await?;
+    }
+    if let Some(path) = summary_path {
+        let summary = Summary {
+            steps: final_step,
+            loop_seconds: brush_elapsed.as_secs_f64(),
+            wall_seconds: wall,
+            training_end_unix_seconds: training_end.as_secs_f64(),
+            splats: splats.num_splats(),
+            brush_eval_psnr: last_eval.map(|(psnr, _)| psnr),
+            brush_eval_ssim: last_eval.map(|(_, ssim)| ssim),
+            renderer: test_renders::RENDERER,
+        };
+        std::fs::write(path, serde_json::to_vec_pretty(&summary)?)?;
+    }
     Ok(())
 }
 

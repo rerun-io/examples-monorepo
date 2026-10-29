@@ -44,6 +44,18 @@ def test_published_wgsl_run_reports_parity_psnr_and_probe_statistics(tmp_path: P
     assert row.viewer_gpu_mb == pytest.approx(2.5)
 
 
+def test_render_fps_falls_back_to_the_wgsl_rerender_and_speed_gives_renderer_time(tmp_path: Path) -> None:
+    run: Path = tmp_path / "brush-7k"
+    write(run / "metrics.json", {"psnr": 24.2, "ssim": 0.69, "lpips_vgg": 0.38, "scorer": "shared-png16", "fps": None, "views": 24})
+    write(tmp_path / "brush-7k-wgsl" / "metrics.json", {"psnr": 24.2, "ssim": 0.69, "lpips_vgg": 0.38, "scorer": "shared-png16", "fps": 554.6})
+    backends: list[dict] = [{"implementation": "brush", "median_of_repeat_medians_ms": 9.0, "adapter": {"name": "M4"}},
+                            {"implementation": "ours", "median_of_repeat_medians_ms": 2.5, "adapter": {"name": "M4"}}]
+    speed: Path = write(tmp_path / "speed.json", {"complete": True, "splats": 1000, "backends": backends})
+    row: MetricRow = run_row(run, "Brush 3DGS 7k", "brush", 1000, speed=speed)
+    assert (row.psnr, row.fps, row.renderer_ms_median) == (24.2, 554.6, 2.5)
+    assert run_row(tmp_path / "brush-7k-wgsl", "Brush WGSL", "brush", 1000).renderer_ms_median is None
+
+
 def test_paper_row_reads_the_published_checkpoint(tmp_path: Path) -> None:
     scene: dict = {"psnr": 24.71, "ssim": 0.728, "lpips_vgg": 0.337, "primitives": 138766, "learned_model_bytes": 11101280,
                    "train_seconds_summary": 1246.5, "peak_gpu_used_gb_legacy": 0.687, "views": 24}

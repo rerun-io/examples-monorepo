@@ -6,7 +6,7 @@ Below the views, a DataframeView lists our per-scene numbers beside the publishe
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -23,6 +23,7 @@ from gsplat_rust_renderer.hexels_metrics import (
     METRICS_ENTITY,
     METRICS_TIMELINE,
     PAPER_DATASET,
+    MetricRow,
     RunDataset,
     log_metric_table,
     paper_row,
@@ -63,9 +64,17 @@ class CompareConfig:
     fps: float = 30.0
     """Timeline playback rate; 60 advances one pose per headless probe frame."""
     brush_probe: Path | None = None
-    """`gsplat probe` report of the `brush` layout, shown in the table."""
+    """`gsplat probe` report of the `brush` layout, shown in the table and its view title."""
     hexels_probe: Path | None = None
-    """`gsplat probe` report of the `hexels` layout, shown in the table."""
+    """`gsplat probe` report of the `hexels` layout, shown in the table and its view title."""
+    brush_speed: Path | None = None
+    """`gsplat speed --impl ours` report of the Brush PLY on orbit.json, shown in the table."""
+    hexels_speed: Path | None = None
+    """`gsplat speed --impl ours` report of the hexel PLY on orbit.json, shown in the table."""
+    timing_gpu: str = "RTX 5090"
+    """GPU of the probe and speed reports, named in the table title."""
+    test_view_fps: bool = True
+    """Show the run's test-view render FPS; it was measured on the RTX 5090, so drop it for other hosts."""
     runs_root: Path = field(default_factory=lambda: Path.home() / "hexels-work/runs")
     """Run layout root (contracts/run-layout.md)."""
     contracts_root: Path = field(default_factory=lambda: Path.home() / "gsplat-modern-data/hexels-pretrained/cameras/nvs")
@@ -82,6 +91,12 @@ def display_name(method: str) -> str:
     kind, variant, steps, published = match.groups()
     name: str = "Brush 3DGS" if kind == "brush" else f"Hexels {variant.upper() if variant else ''}".strip()
     return f"{name} {steps}{' published' if published else ''}"
+
+
+def view_name(row: MetricRow, primitive: str) -> str:
+    """`<model> · <count> <primitive>`, plus the viewer FPS of the model's probe when there is one."""
+    name: str = f"{row.method} · {row.primitives:,} {primitive}"
+    return name if row.viewer_ms_median is None else f"{name} · {1000.0 / row.viewer_ms_median:.0f} FPS viewer"
 
 
 def vertex_count(path: Path) -> int:
@@ -121,7 +136,7 @@ def splat_view(name: str, entity: str) -> rrb.Spatial3DView:
     )
 
 
-def compare_blueprint(layout: Layout, brush_name: str, hexels_name: str, fps: float) -> rrb.Blueprint:
+def compare_blueprint(layout: Layout, brush_name: str, hexels_name: str, fps: float, timing_gpu: str) -> rrb.Blueprint:
     """Brush left, Hexels right, metrics below; the orbit plays in a loop."""
     brush: rrb.Spatial3DView = splat_view(brush_name, BRUSH_ENTITY)
     hexels: rrb.Spatial3DView = splat_view(hexels_name, HEXELS_ENTITY)
@@ -129,11 +144,11 @@ def compare_blueprint(layout: Layout, brush_name: str, hexels_name: str, fps: fl
     if layout != "compare":
         return rrb.Blueprint(brush if layout == "brush" else hexels, time_panel, collapse_panels=True)
     table: rrb.DataframeView = rrb.DataframeView(
-        name="Per-scene metrics: ours on RTX 5090, published on A5000", origin=METRICS_ENTITY,
+        name=f"Per-scene metrics: viewer and renderer timing on {timing_gpu}, quality and training on RTX 5090, published on A5000", origin=METRICS_ENTITY,
         query=rrb.archetypes.DataframeQuery(timeline=METRICS_TIMELINE),
     )
-    # The table needs about 330 px for its eleven rows at 1080p.
-    return rrb.Blueprint(rrb.Vertical(rrb.Horizontal(brush, hexels), table, row_shares=[2, 1]), time_panel, collapse_panels=True)
+    # The table needs about 350 px for its twelve rows at 1080p.
+    return rrb.Blueprint(rrb.Vertical(rrb.Horizontal(brush, hexels), table, row_shares=[1.85, 1]), time_panel, collapse_panels=True)
 
 
 def main(config: CompareConfig) -> None:
@@ -151,16 +166,16 @@ def main(config: CompareConfig) -> None:
     brush_count: int = vertex_count(brush_ply)
     hexels: Hexels3D = read_hexel_ply(hexels_ply)
     variant: str = hexels.variant
-    brush_name: str = f"{display_name(config.brush_method)} · {brush_count:,} splats"
-    hexels_name: str = f"{display_name(config.hexels_method)} · {len(hexels.centers):,} hexels"
+    brush: MetricRow = run_row(scene_dir / config.brush_method, display_name(config.brush_method), "brush", brush_count, config.brush_probe, config.brush_speed)
+    hexel: MetricRow = run_row(scene_dir / config.hexels_method, display_name(config.hexels_method), variant, len(hexels.centers), config.hexels_probe, config.hexels_speed)
+    if not config.test_view_fps:
+        brush, hexel = replace(brush, fps=None), replace(hexel, fps=None)
+    brush_name: str = view_name(brush, "splats")
+    hexels_name: str = view_name(hexel, "hexels")
     if config.layout == "compare":
         # Rows first: the table sizes its columns to the content of its first frame.
-        log_metric_table([
-            run_row(scene_dir / config.brush_method, display_name(config.brush_method), "brush", brush_count, config.brush_probe),
-            run_row(scene_dir / config.hexels_method, display_name(config.hexels_method), variant, len(hexels.centers), config.hexels_probe),
-            paper_row(config.paper_numbers, config.dataset, config.scene, f"{variant}-fixed", f"Hexels {variant.upper()} 30k published"),
-        ])
-    rr.send_blueprint(compare_blueprint(config.layout, brush_name, hexels_name, config.fps))
+        log_metric_table([brush, hexel, paper_row(config.paper_numbers, config.dataset, config.scene, f"{variant}-fixed", f"Paper Hexels {variant.upper()} 30k")])
+    rr.send_blueprint(compare_blueprint(config.layout, brush_name, hexels_name, config.fps, config.timing_gpu))
     log_cameras(contract, orbit, specs)
     if config.layout != "hexels":
         log_ply(brush_ply, entity=BRUSH_ENTITY)

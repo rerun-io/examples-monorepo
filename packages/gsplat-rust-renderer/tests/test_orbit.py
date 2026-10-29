@@ -12,12 +12,14 @@ CENTER: Float64[np.ndarray, "3"] = np.array([0.4, 1.5, 1.1])
 UP: Float64[np.ndarray, "3"] = np.array([0.0, -0.8, -0.6])
 
 
-def ring(count: int, radius: float, height: float) -> Float64[np.ndarray, "n 4 4"]:
-    """Capture cameras on a tilted ring, all looking at CENTER."""
-    first: Float64[np.ndarray, "3"] = np.array([1.0, 0.0, 0.0])
-    second: Float64[np.ndarray, "3"] = np.cross(UP, first)
-    angles: Float64[np.ndarray, "n"] = np.linspace(0.3, 0.3 + 2.0 * np.pi, count, endpoint=False)
-    return np.stack([look_at(CENTER + radius * (np.cos(a) * first + np.sin(a) * second) + height * UP, CENTER, UP) for a in angles])
+FIRST: Float64[np.ndarray, "3"] = np.array([1.0, 0.0, 0.0])
+SECOND: Float64[np.ndarray, "3"] = np.cross(UP, FIRST)
+
+
+def ring(count: int, radius: float, height: float, span: float = 2.0 * np.pi) -> Float64[np.ndarray, "n 4 4"]:
+    """Capture cameras on a tilted ring (or an arc of it), all looking at CENTER."""
+    angles: Float64[np.ndarray, "n"] = np.linspace(0.3, 0.3 + span, count, endpoint=span < 2.0 * np.pi)
+    return np.stack([look_at(CENTER + radius * (np.cos(a) * FIRST + np.sin(a) * SECOND) + height * UP, CENTER, UP) for a in angles])
 
 
 def test_orbit_recovers_centre_up_radius_and_elevation() -> None:
@@ -56,3 +58,18 @@ def test_orbit_json_is_a_camera_spec_array(tmp_path: Path) -> None:
     assert records[0]["model"] == "Pinhole" and (records[0]["cx"], records[0]["cy"]) == (960.0, 540.0)
     np.testing.assert_allclose(records[0]["fy"], 540.0 / np.tan(np.pi / 6.0))
     np.testing.assert_allclose(records[2]["world_from_camera"], orbit.world_from_cameras[2])
+
+
+def test_cameras_on_an_arc_give_a_back_and_forth_sweep_over_that_arc() -> None:
+    """A capture that covers only the front (DTU) has nothing behind it, so the path stays over the cameras."""
+    orbit: Orbit = orbit_from_cameras(ring(20, 2.0, 1.0, span=np.deg2rad(100.0)), frames=300)
+    np.testing.assert_allclose(orbit.up, UP, atol=1e-9)  # the camera y axes do not cancel on an arc; the x axes stay level
+    np.testing.assert_allclose(orbit.center, CENTER, atol=1e-9)
+    poses: Float64[np.ndarray, "n 4 4"] = orbit.world_from_cameras
+    offsets: Float64[np.ndarray, "n 3"] = poses[:, :3, 3] - CENTER
+    azimuths: Float64[np.ndarray, "n"] = np.rad2deg(np.arctan2(offsets @ SECOND, offsets @ FIRST) - 0.3)
+    assert azimuths.min() > -1e-6 and azimuths.max() < 100.0 + 1e-6
+    np.testing.assert_allclose([azimuths[0], azimuths[150]], [0.0, 100.0], atol=1e-6)
+    steps: Float64[np.ndarray, "n"] = np.linalg.norm(np.diff(offsets, axis=0, append=offsets[:1]), axis=1)
+    assert steps.min() > 1e-6, "every pose moves, also across the loop seam"
+    np.testing.assert_allclose(poses[:, :3, 2], -offsets / np.linalg.norm(offsets, axis=1, keepdims=True), atol=1e-12)

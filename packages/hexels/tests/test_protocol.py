@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from hexels_bench.apis.fit_image import fit_command
 from hexels_bench.apis.score import score_run
 from hexels_bench.apis.train import apply_schedule, scaled_schedule, sfm_point_count
 from hexels_bench.cameras import CamerasFile, ContractCamera, write_cameras_file
@@ -57,6 +58,16 @@ def test_sfm_point_count_reads_colmap_binary_and_text(tmp_path: Path) -> None:
 def test_upstream_revision_matches_recipe() -> None:
     revisions: list[str] = re.findall(r"rev: ([0-9a-f]{40})", RECIPE.read_text())
     assert revisions[0] == UPSTREAM_HEXELS_REV
+
+
+def test_fit_command_runs_upstreams_paper_recipes(tmp_path: Path) -> None:
+    """All three 2D methods go through upstream `scripts.fit_image` with its paper defaults (specs/twod.md D6)."""
+    roots = Roots(data=tmp_path / "data", runs=tmp_path / "runs")
+    command: list[str] = fit_command(roots, "anime-1_2k", "imagegs-2d", tmp_path / "out", None)
+    assert command[1:3] == ["-m", "scripts.fit_image"]
+    assert command[-2:] == ["--variant", "imagegs"]
+    assert command[command.index("--image") + 1] == str(tmp_path / "data" / "imagegs" / "images" / "anime-1_2k.png")
+    assert fit_command(roots, "anime-1_2k", "hexels-2d-flat", tmp_path / "out", 500)[-4:] == ["--variant", "flat", "--steps", "500"]
 
 
 def test_score_run_writes_metrics_beside_renders(tmp_path: Path) -> None:

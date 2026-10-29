@@ -36,6 +36,9 @@ pub struct SpeedArgs {
     min_seconds: f64,
     #[arg(long, default_value_t = 3)]
     repeats: usize,
+    /// Minutes to wait for a quiet host; after that every repeat runs and records `loaded_host`.
+    #[arg(long, default_value_t = 90)]
+    pub(crate) quiet_wait_minutes: u64,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -241,7 +244,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
         });
     }
     // Rotate backend order for each repeat; each timed run admits ten quiet samples.
-    let admission_deadline = Instant::now() + Duration::from_mins(90);
+    let admission_deadline = Instant::now() + Duration::from_mins(a.quiet_wait_minutes);
     for index in 0..a.repeats {
         for order in 0..engines.len() {
             let backend = (index + order) % engines.len();

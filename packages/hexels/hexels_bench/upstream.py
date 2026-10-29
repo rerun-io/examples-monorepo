@@ -7,7 +7,7 @@ the rest of hexels_bench (export, scorer, layout) runs anywhere torch runs.
 import json
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -18,6 +18,7 @@ from jaxtyping import Float32
 
 from hexels_bench.layout import Roots
 from hexels_bench.png16 import from_unit_float, write_png16
+from hexels_bench.surface_frames import SurfaceFrame
 
 UPSTREAM_HEXELS_REV: str = "698d1afb0944d3e766074c3beb70362f16c7550d"
 """hexels commit packaged by packages/hexels-src/recipe.yaml (a unit test keeps them equal)."""
@@ -57,6 +58,25 @@ def load_renderer(model_dir: Path, checkpoint: Path, scene_dir: Path) -> Upstrea
         return renderer.render(camera, model, background)["image"]
 
     return UpstreamRenderer(render=render, cameras=list(scene.test_cameras))
+
+
+@torch.no_grad()
+def surface_frames(model_dir: Path, checkpoint: Path, scene_dir: Path) -> Iterator[SurfaceFrame]:
+    """Every training view rendered by upstream CUDA with its surface outputs, as upstream's mesh
+    extraction renders them (`scripts/extract_hexels_dtu_mesh.py` L.73-80 and L.103-128): all registered
+    views for all-view checkpoints, color `clamp(0, 1) * 255` truncated, expected depth
+    `surf_depth / max(surf_alpha, 1e-6)`. Masking and the alpha cut happen in our fusion code."""
+    model, scene, renderer, background = _load(model_dir, checkpoint, scene_dir, "--split", "train", "--skip_test")
+    for camera in scene.train_cameras:
+        package: dict[str, torch.Tensor] = renderer.render(camera, model, background, return_surface=True, return_median_depth=True)
+        alpha: torch.Tensor = package["surf_alpha"]
+        yield SurfaceFrame(
+            name=str(camera.image_name),
+            rgb=package["image"].clamp(0, 1).mul(255).byte().permute(1, 2, 0).contiguous().cpu().numpy(),
+            median_depth=package["surf_median_depth"].squeeze(0).float().contiguous().cpu().numpy(),
+            expected_depth=(package["surf_depth"] / alpha.clamp_min(1e-6)).squeeze(0).float().contiguous().cpu().numpy(),
+            alpha=alpha.squeeze(0).float().contiguous().cpu().numpy(),
+        )
 
 
 @torch.no_grad()
