@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from jaxtyping import Float32
 from numpy import ndarray
+from serde import serde
 
 from hexels_bench.hexel_ply import write_float_ply
 
@@ -27,6 +28,91 @@ PROPERTIES_2D: tuple[str, ...] = (
 )  # fmt: skip
 COLOR_GRAD_SCALE: float = 0.1
 FLAT_SOFTNESS: float = 10.0
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class StoredFitHeader:
+    """Header of a stored 2D fit as upstream `scripts.decode_image.load_representation` returns it (read partially)."""
+
+    method: str
+    """hexel or imagegs."""
+    width: int
+    """Image width in pixels."""
+    height: int
+    """Image height in pixels."""
+    layout: str | None = None
+    """dense15 or flat8 for Hexel fits; Image-GS `.hxi` files have none."""
+    step: int | None = None
+    """Training step; only the raw `.pt` files record it."""
+    scale_mode: str = "log"
+    """Scale parameterization of a raw `.pt` fit; stored files are log-scale."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class FitJob:
+    """`job` of an upstream `scripts.fit_image` metrics.json (read partially)."""
+
+    max_steps: int
+    """Steps of the recipe."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class FitCheckpoint:
+    """One stored file of an upstream fit (read partially)."""
+
+    step: int
+    """Step it was stored at."""
+    bits: int
+    """Bits per stored value (16 or 32)."""
+    psnr_db: float
+    """Upstream's PSNR of the decoded file."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class FitMetrics:
+    """`metrics.json` that upstream `scripts.fit_image` writes beside a fit (read partially)."""
+
+    job: FitJob
+    """The fit's job."""
+    training_seconds: float
+    """Wall time of the optimisation loop."""
+    gpu: str
+    """GPU name."""
+    checkpoints: list[FitCheckpoint]
+    """Stored files, in the order upstream wrote them."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class ExpectedFitMetrics:
+    """`expected_metrics` of a published fit's representation (read partially)."""
+
+    psnr_db: float
+    """PSNR of the decoded file."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class FitRepresentation:
+    """One stored file of a published fit (read partially)."""
+
+    format: str
+    """Packing profile, e.g. mixed14 or uniform-uint16."""
+    expected_metrics: ExpectedFitMetrics
+    """Upstream's scores of that file."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class PublishedFitMetadata:
+    """`metadata.json` of a published 2D fit (HF jhu-ccvl/Hexels `images_2d/`, read partially)."""
+
+    representations: list[FitRepresentation]
+    """Stored files of the fit."""
 
 
 @dataclass(frozen=True, slots=True)

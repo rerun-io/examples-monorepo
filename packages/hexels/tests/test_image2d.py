@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -100,3 +101,20 @@ def test_stage_published_image_writes_ply_and_lossless_gt(tmp_path: Path) -> Non
     gt: np.ndarray = read_png16(tmp_path / "imagegs" / "anime-1_2k" / "gt" / "test" / "anime-1_2k.png")
     assert gt.shape == (2048, 2048, 3)
     assert np.all(gt % 257 == 0)
+
+
+def test_upstream_fit_records_read_the_fields_the_tools_use(tmp_path: Path) -> None:
+    """`scripts.fit_image` metrics.json and a published fit's metadata.json, as upstream writes them (extra fields kept out)."""
+    from hexels_bench.image2d import FitMetrics, PublishedFitMetadata
+    from hexels_bench.layout import read_json
+
+    checkpoints: list[dict] = [{"step": 10000, "bits": bits, "psnr_db": 30.0 + bits / 100, "file": "x", "bytes": 1} for bits in (32, 16)]
+    fit: dict = {"complete": True, "job": {"max_steps": 10000, "image": "a.png"}, "training_seconds": 521.9, "gpu": "GPU", "checkpoints": checkpoints}
+    (tmp_path / "metrics.json").write_text(json.dumps(fit))
+    metrics: FitMetrics = read_json(FitMetrics, tmp_path / "metrics.json")
+    assert (metrics.job.max_steps, metrics.training_seconds, metrics.gpu) == (10000, 521.9, "GPU")
+    assert {checkpoint.bits: checkpoint.psnr_db for checkpoint in metrics.checkpoints} == {32: 30.32, 16: 30.16}
+    representations: list[dict] = [{"format": "mixed14", "path": "p", "expected_metrics": {"psnr_db": 35.8, "ssim": 0.9}}]
+    (tmp_path / "metadata.json").write_text(json.dumps({"id": "x", "representations": representations}))
+    metadata: PublishedFitMetadata = read_json(PublishedFitMetadata, tmp_path / "metadata.json")
+    assert [(item.format, item.expected_metrics.psnr_db) for item in metadata.representations] == [("mixed14", 35.8)]

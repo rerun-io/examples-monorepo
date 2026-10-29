@@ -31,9 +31,28 @@ Env: TypeAlias = Literal["gsplat-rust-renderer", "hexels"]
 
 @serde
 @dataclass(frozen=True, slots=True)
+class FpsTrial:
+    """One timed trial of `gsplat render --fps`."""
+
+    seconds: float
+    """Wall time of the trial."""
+    frames: int
+    """Frames rendered in it."""
+    fps: float
+    """frames / seconds."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
 class FpsReport:
     """`fps.json` written by `gsplat render --fps` (read partially; the CLI owns the schema)."""
 
+    adapter: str
+    """GPU adapter that rendered."""
+    backend: str
+    """wgpu backend (Vulkan, Metal, ...)."""
+    trials: list[FpsTrial]
+    """Timed trials."""
     median_fps: float
     """Median of the trial frame rates."""
 

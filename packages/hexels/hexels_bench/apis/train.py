@@ -8,7 +8,6 @@ policy as upstream's short smoke recipe (`scripts/prepare_nvs_smoke.py`); otherw
 before any learning-rate decay.
 """
 
-import json
 import socket
 import subprocess
 import sys
@@ -16,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
-from serde.json import to_json
+from serde.json import from_json, to_json
 
 from hexels_bench.apis.export import export_run
 from hexels_bench.apis.score import score_run
@@ -27,7 +26,15 @@ from hexels_bench.hexel_ply import HexelPly, HexelVariant
 from hexels_bench.layout import UPSTREAM_DATASET, Dataset, Roots, read_json
 from hexels_bench.methods import METHODS, Method, MethodSpec
 from hexels_bench.metrics import TrainRecord
-from hexels_bench.upstream import UPSTREAM_HEXELS_REV, UpstreamRenderer, load_renderer, measure_fps, write_test_renders
+from hexels_bench.upstream import (
+    UPSTREAM_HEXELS_REV,
+    TrainScenePlan,
+    TrainSummary,
+    UpstreamRenderer,
+    load_renderer,
+    measure_fps,
+    write_test_renders,
+)
 
 UPSTREAM_STEPS: int = 30000
 UPSTREAM_MILESTONES: tuple[int, ...] = (15001, 20001, 25001)
@@ -79,8 +86,8 @@ def prepare_command(scene_dir: Path, model_dir: Path, dataset: Dataset, variant:
          "--dataset", UPSTREAM_DATASET[dataset], "--variant", variant, "--iterations", str(steps), "--prepare"],
         check=True, capture_output=True, text=True,
     ).stdout  # fmt: skip
-    prepared: dict = json.loads(output)
-    return apply_schedule([str(part) for part in prepared["command"]], steps), Path(prepared["cwd"])
+    plan: TrainScenePlan = from_json(TrainScenePlan, output)
+    return apply_schedule(plan.command, steps), Path(plan.cwd)
 
 
 def train(roots: Roots, dataset: Dataset, scene: str, method: Method) -> Path:
@@ -96,7 +103,7 @@ def train(roots: Roots, dataset: Dataset, scene: str, method: Method) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     command, cwd = prepare_command(scene_dir, model_dir, dataset, variant, spec.steps)
     measured: Measured = run_measured(command, cwd, run_dir / "log.txt")
-    summary: dict = json.loads((model_dir / "summary.json").read_text())
+    summary: TrainSummary = read_json(TrainSummary, model_dir / "summary.json")
 
     ply: HexelPly = export_run(model_dir, run_dir / "model.ply")
     contract: CameraContract = read_json(CameraContract, roots.contract(dataset, scene))
@@ -113,7 +120,7 @@ def train(roots: Roots, dataset: Dataset, scene: str, method: Method) -> Path:
         dataset=dataset,
         scene=scene,
         steps=spec.steps,
-        loop_seconds=float(summary["train_seconds"]),
+        loop_seconds=summary.train_seconds,
         total_seconds=measured.seconds,
         peak_vram_gib=measured.vram.peak_gib(),
         primitives=ply.cloud.count,

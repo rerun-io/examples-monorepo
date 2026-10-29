@@ -17,7 +17,7 @@ from hexels_bench.checkpoint import find_checkpoint
 from hexels_bench.layout import Dataset, Roots, read_json
 from hexels_bench.methods import Method
 from hexels_bench.metrics import MetricsFile, ViewMetrics, summarize, write_metrics_file
-from hexels_bench.upstream import UpstreamRenderer, load_renderer, measure_fps, run_upstream_evaluator, write_test_renders
+from hexels_bench.upstream import PublishedEvaluation, UpstreamRenderer, load_renderer, measure_fps, run_upstream_evaluator, write_test_renders
 
 
 @dataclass
@@ -36,18 +36,16 @@ class Config:
     """Data and run roots."""
 
 
-def upstream_float_metrics(result: dict, method: Method, dataset: Dataset, scene: str, shared: MetricsFile) -> MetricsFile:
+def upstream_float_metrics(result: PublishedEvaluation, method: Method, dataset: Dataset, scene: str, shared: MetricsFile) -> MetricsFile:
     """Upstream's evaluator result in our metrics.json schema (scorer upstream-float)."""
-    rows: list[ViewMetrics] = [
-        ViewMetrics(name=row["image_name"], psnr=row["psnr_db"], ssim=row["ssim"], lpips_vgg=row["lpips_vgg"]) for row in result["per_view"]
-    ]
+    rows: list[ViewMetrics] = [ViewMetrics(name=row.image_name, psnr=row.psnr_db, ssim=row.ssim, lpips_vgg=row.lpips_vgg) for row in result.per_view]
     return summarize(
         rows,
         method=method,
         dataset=dataset,
         scene=scene,
         scorer="upstream-float",
-        fps=float(result["benchmark"]["median_fps"]),
+        fps=None if result.benchmark is None else result.benchmark.median_fps,
         deploy_mb=shared.deploy_mb,
         ply_mb=shared.ply_mb,
     )
@@ -64,7 +62,7 @@ def render_published(roots: Roots, dataset: Dataset, scene: str, method: Method,
     torch.cuda.empty_cache()
     shared: MetricsFile = score_run(roots, dataset, scene, method, fps, torch.device("cuda"))
     if upstream_evaluator:
-        result: dict = run_upstream_evaluator(roots, model_dir, run_dir / "upstream-eval" / "metrics.json", run_dir / "log.txt")
+        result: PublishedEvaluation = run_upstream_evaluator(roots, model_dir, run_dir / "upstream-eval" / "metrics.json", run_dir / "log.txt")
         upstream: MetricsFile = upstream_float_metrics(result, method, dataset, scene, shared)
         write_metrics_file(run_dir / "upstream_float_metrics.json", upstream)
         print(

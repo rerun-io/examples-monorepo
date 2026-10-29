@@ -8,9 +8,6 @@ evaluation.json). `render-published` adds the upstream CUDA renders and our meas
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from serde import serde
-from serde.json import from_json
-
 from hexels_bench.apis.export import export_run
 from hexels_bench.cameras import CameraContract, CamerasFile, cameras_file, write_cameras_file, write_targets
 from hexels_bench.checkpoint import UpstreamRunConfig, load_run_config
@@ -18,30 +15,7 @@ from hexels_bench.hexel_ply import HexelPly, HexelVariant
 from hexels_bench.layout import Dataset, Roots, read_json
 from hexels_bench.methods import METHODS, Method, MethodSpec, primitive_bytes
 from hexels_bench.metrics import MetricsFile, ViewMetrics, ply_vertex_count, summarize, write_metrics_file
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class PublishedView:
-    """One per-view row of upstream's evaluation.json (read partially)."""
-
-    image_name: str
-    """Image stem."""
-    psnr_db: float
-    """Direct-float PSNR."""
-    ssim: float
-    """2DGS SSIM."""
-    lpips_vgg: float
-    """LPIPS-VGG."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class PublishedEvaluation:
-    """Upstream's evaluation.json beside each published checkpoint: the authors' direct-float scores."""
-
-    per_view: list[PublishedView]
-    """Per-view scores in render order."""
+from hexels_bench.upstream import PublishedEvaluation
 
 
 @dataclass
@@ -96,7 +70,7 @@ def published_metrics(model_dir: Path, run_dir: Path, dataset: Dataset, scene: s
     """The authors' published direct-float scores (HF evaluation.json) in metrics.json form.
     Not re-measured: our own measurements go to metrics.json (shared-png16) and the upstream evaluator
     run by `render-published`."""
-    evaluation: PublishedEvaluation = from_json(PublishedEvaluation, (model_dir / "evaluation.json").read_text())
+    evaluation: PublishedEvaluation = read_json(PublishedEvaluation, model_dir / "evaluation.json")
     rows: list[ViewMetrics] = [
         ViewMetrics(name=view.image_name, psnr=view.psnr_db, ssim=view.ssim, lpips_vgg=view.lpips_vgg) for view in evaluation.per_view
     ]
