@@ -14,6 +14,33 @@ var<workgroup> range_lo: u32;
 var<workgroup> range_hi: u32;
 var<workgroup> num_done: atomic<u32>;
 
+// Composite candidate t front to back; nothing once the pixel is done or past the batch, and alpha below the
+// cutoff is a miss.
+fn blend(start: u32, t: u32, remaining: u32, pix: vec2u, surface: bool, transmittance: ptr<function, f32>,
+    color: ptr<function, vec3f>, done: ptr<function, bool>, out: ptr<function, Raster>) {
+    if *done || t >= remaining {
+        return;
+    }
+    let s = sample(batch[t], pix, surface);
+    if !(s.alpha >= ALPHA_CUTOFF) {
+        return;
+    }
+    let next = *transmittance * (1.0 - s.alpha);
+    if next <= 1e-4 {
+        *done = true;
+        return;
+    }
+    let w = s.alpha * *transmittance;
+    *color += s.color * w;
+    (*out).depth += s.depth * w;
+    // 2DGS median depth and its primitive: the last contribution while transmittance exceeds one half.
+    let median = *transmittance > 0.5;
+    (*out).median = select((*out).median, s.depth, median);
+    (*out).isect = select((*out).isect, start + t, median);
+    (*out).normal += s.normal * w;
+    *transmittance = next;
+}
+
 fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
     var out: Raster;
     out.isect = NO_ID;
@@ -49,25 +76,13 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
         }
         workgroupBarrier();
         let was_done = done;
-        for (var t = 0u; !done && t < remaining; t++) {
-            let s = sample(batch[t], out.pix, surface);
-            if !(s.alpha >= ALPHA_CUTOFF) {
-                continue;
-            }
-            let next = transmittance * (1.0 - s.alpha);
-            if next <= 1e-4 {
-                done = true;
-                continue;
-            }
-            let w = s.alpha * transmittance;
-            color += s.color * w;
-            out.depth += s.depth * w;
-            // 2DGS median depth and its primitive: the last contribution while transmittance exceeds one half.
-            let median = transmittance > 0.5;
-            out.median = select(out.median, s.depth, median);
-            out.isect = select(out.isect, start + t, median);
-            out.normal += s.normal * w;
-            transmittance = next;
+        // Four candidates per iteration: on Apple GPUs the loop overhead (naga's loop bound, the exit tests) is a
+        // large share of a cheap candidate. The order and every early exit are those of one per iteration.
+        for (var t = 0u; !done && t < remaining; t += 4u) {
+            blend(start, t, remaining, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 1u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 2u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 3u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
         }
         if !was_done && done {
             atomicAdd(&num_done, 1u);

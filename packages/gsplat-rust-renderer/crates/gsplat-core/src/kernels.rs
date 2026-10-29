@@ -290,7 +290,7 @@ mod tests {
                     assert_eq!(layout[handle].size, 40);
                 }
                 if ty.name.as_deref() == Some("Hexel") {
-                    assert_eq!(layout[handle].size, 80);
+                    assert_eq!(layout[handle].size, 84);
                 }
                 if ty.name.as_deref() == Some("ImageHexel") {
                     assert_eq!(layout[handle].size, 64);

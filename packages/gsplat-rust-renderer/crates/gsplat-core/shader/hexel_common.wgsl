@@ -10,11 +10,13 @@ const FILTER_SIZE = 0.707106;
 const FLT_EPSILON = 1.1920929e-7;
 
 // Rows of the plane-to-pixel map: (u, v, 1) . tu = x w, (u, v, 1) . tv = y w, (u, v, 1) . tw = w.
-// `color` holds the base colour (with the view term folded in), then the u and v gradients.
+// `reach` is the apothem beyond which alpha < 1/255 (`hexel_reach`). `color` holds the base colour
+// (with the view term folded in), then the u and v gradients.
 struct Hexel {
     t: array<f32, 9>,
     opacity: f32,
     sharpness: f32,
+    reach: f32,
     color: array<f32, 9>,
 }
 
@@ -22,10 +24,15 @@ struct Plane { tu: vec3f, tv: vec3f, tw: vec3f, }
 
 // The hexel is the `Primitive` of the shared tile mapper and rasterizer.
 alias Primitive = Hexel;
-const BATCH = 128u; // 128 hexels of 80 bytes fill the core's 10 KiB workgroup budget.
+const BATCH = 120u; // 120 hexels of 84 bytes fill the core's 10 KiB workgroup budget.
 
 fn primitive_tiles(h: Hexel) -> vec4u {
     return hexel_tiles(plane(h), h.opacity, h.sharpness);
+}
+
+// The map margin is half the forward pass's, so a row never emits more tiles than it reserved.
+fn primitive_row(h: Hexel, rect: vec4u, row: u32) -> vec2u {
+    return row_span(outline(plane(h), h.reach), rect, row, 0.5);
 }
 
 fn plane(h: Hexel) -> Plane {
@@ -109,4 +116,63 @@ fn hexel_tiles(m: Plane, opacity: f32, sharpness: f32) -> vec4u {
         return vec4u(0u);
     }
     return rect;
+}
+
+// Apothem beyond which alpha < 1/255: alpha >= 1/255 needs sharpness * sdf <= log(255 o - 1). The 0.01 in
+// that exponent and 1e-4 of the apothem absorb exp and rounding differences between backends.
+fn hexel_reach(opacity: f32, sharpness: f32) -> f32 {
+    return (1.0 + (log((255.0 * (1.0 + 8.0 * FLT_EPSILON)) * opacity - 1.0) + 0.01) / sharpness) * 1.0001;
+}
+
+// The hexagon of apothem 1.01 reach in pixels. When it lies in front of the near plane its image is
+// a convex hexagon (`front`); otherwise tile rows keep their whole rectangle.
+struct Outline { v0: vec2f, v1: vec2f, v2: vec2f, v3: vec2f, v4: vec2f, v5: vec2f, front: bool, }
+
+fn outline(m: Plane, reach: f32) -> Outline {
+    let a = 1.01 * reach;
+    let r = HEX_RADIUS * a;
+    let c = array<vec3f, 6>(vec3f(r, 0.0, 1.0), vec3f(0.5 * r, a, 1.0), vec3f(-0.5 * r, a, 1.0), vec3f(-r, 0.0, 1.0),
+        vec3f(-0.5 * r, -a, 1.0), vec3f(0.5 * r, -a, 1.0));
+    let w0 = vec3f(dot(c[0], m.tw), dot(c[1], m.tw), dot(c[2], m.tw));
+    let w1 = vec3f(dot(c[3], m.tw), dot(c[4], m.tw), dot(c[5], m.tw));
+    return Outline(vec2f(dot(c[0], m.tu), dot(c[0], m.tv)) / w0.x, vec2f(dot(c[1], m.tu), dot(c[1], m.tv)) / w0.y,
+        vec2f(dot(c[2], m.tu), dot(c[2], m.tv)) / w0.z, vec2f(dot(c[3], m.tu), dot(c[3], m.tv)) / w1.x,
+        vec2f(dot(c[4], m.tu), dot(c[4], m.tv)) / w1.y, vec2f(dot(c[5], m.tu), dot(c[5], m.tv)) / w1.z,
+        a > 0.0 && all(w0 >= vec3f(HEX_NEAR)) && all(w1 >= vec3f(HEX_NEAR)));
+}
+
+// Widen `span` (x min, x max) by the part of edge a-b between pixel rows ya and yb.
+fn clip_edge(a: vec2f, b: vec2f, ya: f32, yb: f32, span: vec2f) -> vec2f {
+    if max(a.y, b.y) < ya || min(a.y, b.y) > yb {
+        return span;
+    }
+    var t = vec2f(0.0, 1.0);
+    if a.y != b.y {
+        t = clamp((vec2f(ya, yb) - a.y) / (b.y - a.y), vec2f(0.0), vec2f(1.0));
+    }
+    let x = a.x + t * (b.x - a.x);
+    return vec2f(min(span.x, min(x.x, x.y)), max(span.y, max(x.x, x.y)));
+}
+
+// Tile columns [x, y) of tile row `row` within `rect` that the outline, widened by `margin` pixels,
+// touches. The pixel centres of a tile row lie at y = 16 row .. 16 row + 15.
+fn row_span(o: Outline, rect: vec4u, row: u32, margin: f32) -> vec2u {
+    if !o.front {
+        return rect.xz;
+    }
+    let ya = f32(row * TILE_WIDTH) - margin;
+    let yb = f32(row * TILE_WIDTH + TILE_WIDTH - 1u) + margin;
+    var span = vec2f(3.4028235e38, -3.4028235e38);
+    span = clip_edge(o.v0, o.v1, ya, yb, span);
+    span = clip_edge(o.v1, o.v2, ya, yb, span);
+    span = clip_edge(o.v2, o.v3, ya, yb, span);
+    span = clip_edge(o.v3, o.v4, ya, yb, span);
+    span = clip_edge(o.v4, o.v5, ya, yb, span);
+    span = clip_edge(o.v5, o.v0, ya, yb, span);
+    if span.x > span.y {
+        return vec2u(rect.x);
+    }
+    let lo = clamp(floor((span.x - margin) / f32(TILE_WIDTH)), f32(rect.x), f32(rect.z));
+    let hi = clamp(floor((span.y + margin) / f32(TILE_WIDTH)) + 1.0, lo, f32(rect.z));
+    return vec2u(u32(lo), u32(hi));
 }

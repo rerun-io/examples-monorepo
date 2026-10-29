@@ -51,7 +51,13 @@ fn sharpness(id: u32) -> f32 {
         return;
     }
     let rect = hexel_tiles(m, opacity, sharpness(id));
-    let hit = (rect.z - rect.x) * (rect.w - rect.y);
+    // Only the tiles of each row that the outline touches; most of a tilted hexel's rectangle misses.
+    let o = outline(m, hexel_reach(opacity, sharpness(id)));
+    var hit = 0u;
+    for (var row = rect.y; row < rect.w; row++) {
+        let span = row_span(o, rect, row, 1.0);
+        hit += span.y - span.x;
+    }
     if hit == 0u {
         return;
     }
@@ -106,6 +112,7 @@ fn view_color(base: u32) -> vec3f {
     let m = hexel_plane(id);
     let c = view_color(base);
     projected[compact] = Hexel(array<f32, 9>(m.tu.x, m.tu.y, m.tu.z, m.tv.x, m.tv.y, m.tv.z, m.tw.x, m.tw.y, m.tw.z),
-        params[base + 9u], sharpness(id), array<f32, 9>(c.x, c.y, c.z, params[base + 14u], params[base + 15u],
+        params[base + 9u], sharpness(id), hexel_reach(params[base + 9u], sharpness(id)),
+        array<f32, 9>(c.x, c.y, c.z, params[base + 14u], params[base + 15u],
         params[base + 16u], params[base + 17u], params[base + 18u], params[base + 19u]));
 }

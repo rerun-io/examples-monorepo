@@ -34,3 +34,8 @@ fn image_tiles(x: f32, y: f32, su: f32, sv: f32, sharpness: f32) -> vec4u {
 fn primitive_tiles(h: ImageHexel) -> vec4u {
     return image_tiles(h.x, h.y, h.su, h.sv, h.sharpness);
 }
+
+// 2D fits blend every hexel of the rectangle (no alpha cutoff), so each row keeps the whole rectangle.
+fn primitive_row(h: ImageHexel, rect: vec4u, row: u32) -> vec2u {
+    return rect.xz;
+}
