@@ -468,7 +468,10 @@ impl Renderer for GaussianRenderer {
             DrawPhase::Transparent => (self.composite_pipeline, 0..3),
             DrawPhase::PickingLayer => (self.picking_pipeline, 0..6),
             DrawPhase::OutlineMask => (self.outline_pipeline, 0..6),
-            _ => return Ok(()),
+            _ => {
+                re_log::debug_panic!("unexpected draw phase {phase:?}");
+                return Ok(());
+            }
         };
         pass.set_pipeline(render_pipelines.get(pipeline)?);
         for instruction in draw_instructions {
