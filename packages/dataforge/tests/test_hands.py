@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from conftest import read_chunks
+from simplecv.rerun_custom_types import confidence_scores_to_rgb
 
 from dataforge import hands, schema, writing
 
@@ -63,7 +64,7 @@ def test_keypoint_columns_are_bounded_and_preserve_every_row(tmp_path: Path) -> 
         hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=frames, positions=positions[..., :2], confidence=None)
     for path, dimension in ((schema.coco133_xyz_path(), 3), ("/pixels", 2)):
         batches = [c.to_record_batch() for c in read_chunks(target) if not c.is_static and str(c.entity_path) == path]
-        assert sorted(b.num_rows for b in batches) == ([96, 768, 768, 768] if dimension == 3 else [1140, 1260])
+        assert sorted(b.num_rows for b in batches) == ([96, 768, 768, 768] if dimension == 3 else [492, 954, 954])
         assert all(b.nbytes < 2 * 1024 * 1024 for b in batches)
         batches.sort(key=lambda b: b.column("frame_index")[0].as_py())
         assert [f for b in batches for f in b.column("frame_index").to_pylist()] == frames.tolist()
@@ -90,3 +91,17 @@ def test_keypoint_descriptors_are_written_once_per_entity_and_recording(tmp_path
         for path in (schema.coco133_xyz_path(), "/pixels"):
             descriptors = [c for c in read_chunks(target) if c.is_static and str(c.entity_path) == path]
             assert len(descriptors) == 1
+
+
+def test_2d_rows_are_coloured_by_confidence_like_3d(tmp_path: Path) -> None:
+    """2D keypoints carry the same red -> yellow -> green confidence colours as 3D; no frame_index when None."""
+    times = np.array([0, 40_000_000], dtype=np.int64)
+    confidence = np.tile(np.linspace(0.0, 1.0, 133, dtype=np.float32), (2, 1))
+    target = tmp_path / "coloured.rrd"
+    with writing.atomic_recording(target, recording_id="coloured", send_properties=False) as recording:
+        hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=None, positions=np.zeros((2, 133, 2), np.float32), confidence=confidence)
+    batch = next(c.to_record_batch() for c in read_chunks(target) if not c.is_static and str(c.entity_path) == "/pixels")
+    assert "frame_index" not in batch.schema.names
+    colours = np.asarray(batch.column("Points2D:colors").to_pylist()[0], dtype=np.uint32)
+    expected = confidence_scores_to_rgb(confidence[:1, :, None])[0]
+    np.testing.assert_array_equal(colours, [int.from_bytes(bytes([*rgb, 255]), "big") for rgb in expected.astype(np.uint8).tolist()])

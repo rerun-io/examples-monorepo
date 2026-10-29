@@ -1,21 +1,24 @@
 """COCO-133 wearer selection, confidence-weighted triangulation and layer writing."""
 
 import hashlib
+import re
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import cv2
 import numpy as np
 import rerun as rr
-from dataforge.logging_toolkit import time_column
+from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
 from dataforge.schema import coco133_xyz_path
 from dataforge.writing import atomic_write
-from jaxtyping import Bool, Float32, Float64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
+from scipy.signal import savgol_filter
 from simplecv.catalog_rig_layout import catalog_components
 from simplecv.rrd_query_utils import first_valid_value
 
@@ -25,6 +28,11 @@ from selfcap_curate.quest_fit import load_quest_hands
 from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, TimeSync
 
 INLIER_PX: float = 8.0
+
+DISPLAY_CONFIDENCE: float = 0.7
+"""Joints scoring below this are not written (mv-api's display threshold); triangulation itself gates views at 0.3."""
+SMOOTH_SPAN_S: float = 0.28
+"""Savitzky-Golay span of the 3D tracks: ~4x less frame-to-frame jitter on cc808233 ep001 at 25 Hz, points move ~3 mm."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +47,7 @@ class Camera:
 class Triangulated:
     xyz: Float32[ndarray, "j 3"]  # World metres; NaN for missing/degenerate joints.
     n_views: UInt8[ndarray, "j"]  # Positive-depth inlier count, zero when unusable.
+    confidence: Float32[ndarray, "j"]  # Mean RTMW score of the inlier views, zero when unusable.
 
 
 def project(camera: Camera, xyz: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 3"]:
@@ -74,9 +83,9 @@ def select_wearer(camera: Camera, anchors: Float64[ndarray, "3 3"], boxes: Float
 def triangulate(cameras: list[Camera], uv: Float64[ndarray, "v j 2"], scores: Float64[ndarray, "v j"], threshold: float = INLIER_PX) -> Triangulated:
     """All view pairs, >=0.5° ray separation, weighted DLT and two gated refits."""
     views, joints = scores.shape
-    xyz, counts = np.full((joints, 3), np.nan, np.float32), np.zeros(joints, np.uint8)
+    xyz, counts, confidence = np.full((joints, 3), np.nan, np.float32), np.zeros(joints, np.uint8), np.zeros(joints, np.float32)
     if views < 2:
-        return Triangulated(xyz, counts)
+        return Triangulated(xyz, counts, confidence)
     projections = np.stack([np.linalg.inv(c.world_T_cam)[:3] for c in cameras])
     norm = np.stack(
         [
@@ -89,7 +98,7 @@ def triangulate(cameras: list[Camera], uv: Float64[ndarray, "v j 2"], scores: Fl
     valid = (scores >= 0.3) & np.isfinite(scores) & np.isfinite(uv).all(2) & np.isfinite(norm).all(2)
     norm, clean = np.where(np.isfinite(norm), norm, 0.0), np.where(valid, scores, 0.0)
     if not np.any(valid.sum(0) >= 2):
-        return Triangulated(xyz, counts)
+        return Triangulated(xyz, counts, confidence)
 
     def fit(mask: Bool[ndarray, "v j"]) -> Float64[ndarray, "j 3"]:
         rows = np.stack(
@@ -136,7 +145,8 @@ def triangulate(cameras: list[Camera], uv: Float64[ndarray, "v j 2"], scores: Fl
     count = inliers.sum(0)
     good = (count >= 2) & np.isfinite(points).all(1)
     xyz[good], counts[good] = points[good], count[good]
-    return Triangulated(xyz, counts)
+    confidence[good] = (np.where(inliers, clean, 0.0).sum(0) / np.maximum(count, 1))[good]
+    return Triangulated(xyz, counts, confidence)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +189,7 @@ class Keypoints3D:
     times: Float64[ndarray, "n"]  # Aligned sample grid in seconds, with empty rows preserved.
     xyz: Float32[ndarray, "n 133 3"]  # Quest-world metres; missing joints are NaN.
     n_views: UInt8[ndarray, "n 133"]  # Per-joint inlier counts.
+    confidence: Float32[ndarray, "n 133"]  # Mean inlier RTMW score; zero for missing joints.
     selected: dict[str, SelectedView]  # Wearer overlays indexed by phone.
     cameras: dict[str, Camera]  # Usable catalog calibration and overlay entity identities.
     rate: float  # Sample rate for provenance.
@@ -195,6 +206,7 @@ def triangulate_episode(
         raise ValueError("anchors must match the sample grid")
     xyz = np.full((frames, 133, 3), np.nan, np.float32)
     counts = np.zeros((frames, 133), np.uint8)
+    confidence = np.zeros((frames, 133), np.float32)
     selected = {p: SelectedView(np.full((frames, 133, 2), np.nan, np.float32), np.zeros((frames, 133))) for p in phones}
     for i in range(frames):
         uv, scores = np.full((len(phones), 133, 2), np.nan), np.zeros((len(phones), 133))
@@ -205,42 +217,52 @@ def triangulate_episode(
                 uv[view], scores[view] = observed.xy[i, person], observed.scores[i, person]
                 selected[phone].xy[i], selected[phone].scores[i] = uv[view], scores[view]
         result = triangulate(camera_list, uv, scores, threshold)
-        xyz[i], counts[i] = result.xyz, result.n_views
-    return Keypoints3D(detections.times, xyz, counts, selected, cameras, detections.rate)
+        xyz[i], counts[i], confidence[i] = result.xyz, result.n_views, result.confidence
+    return Keypoints3D(detections.times, xyz, counts, confidence, selected, cameras, detections.rate)
+
+
+def smooth_keypoints(result: Keypoints3D, span_s: float = SMOOTH_SPAN_S) -> Keypoints3D:
+    """Savitzky-Golay (order 2) over each joint's finite runs; gaps are never bridged and plans too slow for the span stay raw."""
+    window: int = round(span_s * result.rate) | 1
+    if window < 5:
+        return result
+    xyz: Float32[ndarray, "n 133 3"] = result.xyz.copy()
+    finite: Bool[ndarray, "n 133"] = np.isfinite(xyz).all(-1)
+    for joint in range(xyz.shape[1]):
+        edges = np.flatnonzero(np.diff(np.r_[0, finite[:, joint].astype(np.int8), 0]))
+        for start, stop in zip(edges[::2], edges[1::2], strict=True):
+            if stop - start >= window:
+                xyz[start:stop, joint] = savgol_filter(xyz[start:stop, joint], window, 2, axis=0)
+    return replace(result, xyz=xyz)
 
 
 def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
-    """One output file and calib property group; input calibration chunks stay intact."""
+    """One output file and calib property group; input calibration chunks stay intact.
+
+    Keypoint rows go through dataforge's shared writer: 133 joints per row, NaN for missing joints, and a confidence
+    per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. Joints under
+    DISPLAY_CONFIDENCE are written as missing, and the shown 3D joints are projected into every calibrated phone
+    through its lens model.
+    """
     reader = RrdReader(calib)
     stores = reader.recordings()
     if len(stores) != 1:
         raise ValueError("calibration input must contain one recording")
+    stamps: Int64[ndarray, "n"] = np.rint(result.times * 1e9).astype(np.int64)
+    shown: Float32[ndarray, "n 133 3"] = np.where((result.confidence >= DISPLAY_CONFIDENCE)[..., None], result.xyz, np.float32(np.nan))
 
-    def points(
-        parent: str,
-        archetype: type[rr.Points3D] | type[rr.Points2D],
-        entity: str,
-        positions: Float32[ndarray, "n 133 d"],
-        confidence: Float64[ndarray, "n 133"] | None = None,
-    ) -> Iterator[Chunk]:
-        yield Chunk.from_columns(parent, indexes=[], columns=rr.AnnotationContext.columns(context=[COCO133_CLASS]))
-        for start in range(0, len(result.times), 256):
-            block = positions[start : start + 256]
-            good = np.isfinite(block).all(2)
-            if confidence is not None:
-                good &= confidence[start : start + 256] >= 0.3
-            ids = np.broadcast_to(np.arange(133, dtype=np.uint16), good.shape)[good]
-            columns = archetype.columns(
-                positions=block[good],
-                class_ids=np.zeros(len(ids), np.uint16),
-                keypoint_ids=ids,
-                radii=np.full(len(ids), 0.009 if block.shape[-1] == 3 else 3.0, np.float32),
-            ).partition(good.sum(1))
-            yield Chunk.from_columns(
-                entity,
-                indexes=[time_column(np.rint(result.times[start : start + 256] * 1e9).astype(np.int64))],
-                columns=columns,
-            )
+    def projected(camera: Camera) -> Float32[ndarray, "n 133 2"]:
+        uvd: Float64[ndarray, "m 3"] = project(camera, shown.reshape(-1, 3).astype(np.float64))
+        uv: Float64[ndarray, "m 2"] = np.where((uvd[:, 2:] > 1e-5), uvd[:, :2], np.nan)
+        return uv.reshape(len(shown), 133, 2).astype(np.float32)
+
+    def rig_cam(entity: str) -> tuple[int, int]:
+        match = re.fullmatch(r"/world/rig_(\d+)/cam_(\d+)", entity)
+        if match is None:
+            raise ValueError(f"camera entity {entity} is not a rig camera")
+        return int(match[1]), int(match[2])
+
+    parents: list[str] = ["/world/pred", *(f"{result.cameras[phone].entity}/pinhole/pred/rtmw" for phone in result.selected)]
 
     def additions() -> Iterator[Chunk]:
         yield Chunk.from_property(
@@ -254,20 +276,45 @@ def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
                 kp3d_possible_joints=int(result.n_views.size),
                 kp3d_reprojection_threshold_px=INLIER_PX,
                 kp3d_calibration_sha256=hashlib.sha256(calib.read_bytes()).hexdigest(),
+                kp3d_display_confidence=DISPLAY_CONFIDENCE,
+                kp3d_smoothing=f"Savitzky-Golay order 2 over {SMOOTH_SPAN_S} s, finite runs only",
             ),
         )
-        yield from points("/world/pred", rr.Points3D, coco133_xyz_path(pred="rtmw_triangulated"), result.xyz)
-        for phone, selected in result.selected.items():
-            yield from points(
-                f"{result.cameras[phone].entity}/pinhole/pred/rtmw",
-                rr.Points2D,
-                f"{result.cameras[phone].entity}/pinhole/pred/rtmw/coco133_uv",
-                selected.xy,
-                selected.scores,
-            )
+        for parent in parents:
+            yield Chunk.from_columns(parent, indexes=[], columns=rr.AnnotationContext.columns(context=[COCO133_CLASS]))
 
-    with atomic_write(output) as temporary:
-        LazyChunkStream.merge(reader.stream(), LazyChunkStream.from_iter(additions())).write_rrd(
+    with TemporaryDirectory(prefix="selfcap-kp3d-") as work, atomic_write(output) as temporary:
+        rows: Path = Path(work) / "keypoints.rrd"
+        with rr.RecordingStream(stores[0].application_id, recording_id=stores[0].recording_id, send_properties=False) as recording:
+            recording.save(rows)
+            log_keypoints3d(
+                recording,
+                times_ns=stamps,
+                frame_indices=None,
+                positions=shown,
+                confidence=result.confidence,
+                path=coco133_xyz_path(pred="rtmw_triangulated"),
+            )
+            for phone, selected in result.selected.items():
+                scores: Float32[ndarray, "n 133"] = selected.scores.astype(np.float32)
+                log_keypoints2d(
+                    recording,
+                    f"{result.cameras[phone].entity}/pinhole/pred/rtmw/coco133_uv",
+                    times_ns=stamps,
+                    frame_indices=None,
+                    positions=np.where((scores >= DISPLAY_CONFIDENCE)[..., None], selected.xy, np.float32(np.nan)),
+                    confidence=scores,
+                )
+            log_projections(
+                recording,
+                ((rig_cam(camera.entity), projected(camera)) for camera in result.cameras.values()),
+                times_ns=stamps,
+                frame_indices=None,
+                confidence=result.confidence,
+                camera_model="pinhole with radial k1, k2 (selfcap-curate exo calibration)",
+            )
+            recording.flush()
+        LazyChunkStream.merge(reader.stream(), LazyChunkStream.from_iter(additions()), RrdReader(rows).stream()).write_rrd(
             temporary, application_id=stores[0].application_id, recording_id=stores[0].recording_id
         )
 

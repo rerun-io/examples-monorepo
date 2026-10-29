@@ -314,18 +314,20 @@ ENTITY = "/world/pred/rtmw_triangulated/coco133_xyz"
 
 
 def dense(path: Path, entity: str, dimension: int):
+    """Rows as (133, d) arrays: sparse served rows carry keypoint_ids, dense dataforge rows hold all 133 joints in order."""
     rows = {}
     for chunk in RrdReader(path).stream().filter(content=entity):
         batch = chunk.to_record_batch()
         if chunk.is_static or "video_time" not in batch.schema.names:
             continue
         kind = "Points3D" if dimension == 3 else "Points2D"
-        for stamp, positions, ids in zip(
-            batch.column("video_time").cast("int64").to_pylist(),
-            batch.column(f"{kind}:positions").to_pylist(),
-            batch.column(f"{kind}:keypoint_ids").to_pylist(),
-            strict=True,
-        ):
+        positions_column = batch.column(f"{kind}:positions").to_pylist()
+        ids_column = (
+            batch.column(f"{kind}:keypoint_ids").to_pylist()
+            if f"{kind}:keypoint_ids" in batch.schema.names
+            else [None if row is None else list(range(133)) for row in positions_column]
+        )
+        for stamp, positions, ids in zip(batch.column("video_time").cast("int64").to_pylist(), positions_column, ids_column, strict=True):
             array = np.full((133, dimension), np.nan)
             if ids:
                 array[np.asarray(ids).reshape(-1)] = np.asarray(positions).reshape(-1, dimension)

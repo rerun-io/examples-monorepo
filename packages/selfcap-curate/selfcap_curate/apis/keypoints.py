@@ -8,7 +8,7 @@ from rerun.server import Server
 
 from selfcap_curate.apis import open_session
 from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, open_segment, read_time_sync
-from selfcap_curate.keypoints import Camera, read_anchors, read_cameras, triangulate_episode, write_keypoints
+from selfcap_curate.keypoints import Camera, read_anchors, read_cameras, smooth_keypoints, triangulate_episode, write_keypoints
 from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models
 from selfcap_curate.records import EpisodeKey, TimeSync
 
@@ -73,7 +73,7 @@ def main(config: Config) -> None:
         with timer.stage(f"{key}/detect"):
             detections = detect_keypoints(episode.segment, detector, pose, rate=config.rate, sync=episode.sync)
         with timer.stage(f"{key}/triangulate"):
-            result = triangulate_episode(detections, episode.cameras, read_anchors(episode.segment, detections.times, episode.sync))
+            result = smooth_keypoints(triangulate_episode(detections, episode.cameras, read_anchors(episode.segment, detections.times, episode.sync)))
         with timer.stage(f"{key}/write"):
             write_keypoints(config.calib_dir / key.rrd_name, config.output_dir / key.rrd_name, result)
         print(

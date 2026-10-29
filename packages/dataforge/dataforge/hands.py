@@ -126,7 +126,7 @@ def log_keypoints3d(
     recording: rr.RecordingStream,
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     positions: Float32[ndarray, "t 133 3"],
     confidence: Float32[ndarray, "t 133"] | None,
     path: str = schema.coco133_xyz_path(),
@@ -137,7 +137,7 @@ def log_keypoints3d(
     Args:
         recording: Destination stream.
         times_ns: Int64[ndarray, "t"] video times in nanoseconds.
-        frame_indices: Int64[ndarray, "t"] source indices.
+        frame_indices: Int64[ndarray, "t"] source indices, or None when the source has only the video_time clock.
         positions: Float32[ndarray, "t 133 3"], metres; missing slots contain NaN.
         confidence: Float32[ndarray, "t 133"] or None; preserve shipped values.
         path: Entity; each person of a multi-person sequence has its own (``schema.person_coco133_xyz_path``).
@@ -152,12 +152,12 @@ def log_keypoints2d(
     path: str,
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     positions: Float32[ndarray, "t 133 2"],
     confidence: Float32[ndarray, "t 133"] | None,
     describe: bool = True,
 ) -> None:
-    """Write Float32[t,133,2] pixels and confidence to ``path`` (shipped or projected 2D)."""
+    """Write Float32[t,133,2] pixels and confidence to ``path`` (shipped or projected 2D); None frame indices omit that timeline."""
     if describe:
         log_keypoint_descriptors(recording, path, dimension=2)
     _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2)
@@ -168,14 +168,14 @@ def _send_keypoint_rows(
     path: str,
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     positions: Float32[ndarray, "t 133 d"],
     confidence: Float32[ndarray, "t 133"] | None,
     dimension: Literal[2, 3],
 ) -> None:
     """Bound temporal columns before allocation using the publication byte target."""
-    # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
-    row_bytes = 133 * (dimension * 4 + 4 + (4 if dimension == 3 else 0)) + 64
+    # Budget positions, confidence, packed colours (2D and 3D), offsets, row IDs and both clocks.
+    row_bytes = 133 * (dimension * 4 + 4 + 4) + 64
     rows_per_batch = (cast(int, rrc.OptimizationProfile.OBJECT_STORE.max_bytes) - 4096) // row_bytes
     for start in range(0, len(positions), rows_per_batch):
         stop = start + rows_per_batch
@@ -184,11 +184,14 @@ def _send_keypoint_rows(
             Points3DWithConfidence.columns(
                 positions=masked.reshape(-1, 3), confidences=scores.reshape(-1), colors=confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0]
             )
-            if dimension == 3 else Points2DWithConfidence.columns(positions=masked.reshape(-1, 2), confidences=scores.reshape(-1))
+            if dimension == 3
+            else Points2DWithConfidence.columns(
+                positions=masked.reshape(-1, 2), confidences=scores.reshape(-1), colors=confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0]
+            )
         )
         rr.send_columns(
             path,
-            indexes=[time_column(times_ns[start:stop]), frame_index_column(frame_indices[start:stop])],
+            indexes=[time_column(times_ns[start:stop]), *([] if frame_indices is None else [frame_index_column(frame_indices[start:stop])])],
             columns=columns.partition([133] * len(masked)),
             recording=recording,
         )
@@ -199,7 +202,7 @@ def log_projections(
     pixels_by_camera: Iterable[tuple[tuple[int, int], Float32[ndarray, "t 133 2"]]],
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     confidence: Float32[ndarray, "t 133"],
     camera_model: str,
     calibration_source: str | None = None,

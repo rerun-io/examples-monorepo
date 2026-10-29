@@ -177,7 +177,13 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
                     {
                         "camera_id": "CAM_C",
                         "positional_layout": "left",
-                        "lens_intrinsics": {"focal_length_x": 572.2, "focal_length_y": 572.1, "principal_point_x": 648.4, "principal_point_y": 356.7, "available": True},
+                        "lens_intrinsics": {
+                            "focal_length_x": 572.2,
+                            "focal_length_y": 572.1,
+                            "principal_point_x": 648.4,
+                            "principal_point_y": 356.7,
+                            "available": True,
+                        },
                         "distortion": {"coefficients": coefficients, "available": True},
                         "capture_resolution": {"width": 1280, "height": 720},
                         "sensor_info": {"pixel_array_size": {"width": 1280, "height": 720}},
@@ -185,7 +191,13 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
                     {
                         "camera_id": "avcapturedevice:5",
                         "positional_layout": "center",
-                        "lens_intrinsics": {"focal_length_x": 700.0, "focal_length_y": 700.0, "principal_point_x": 960.0, "principal_point_y": 540.0, "available": True},
+                        "lens_intrinsics": {
+                            "focal_length_x": 700.0,
+                            "focal_length_y": 700.0,
+                            "principal_point_x": 960.0,
+                            "principal_point_y": 540.0,
+                            "available": True,
+                        },
                         "distortion": {"available": False},
                         "capture_resolution": {"width": 1920, "height": 1080},
                         "sensor_info": {"pixel_array_size": {"width": 1920, "height": 1080}},
@@ -193,7 +205,13 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
                     {
                         "camera_id": "broken",
                         "positional_layout": "right",
-                        "lens_intrinsics": {"focal_length_x": None, "focal_length_y": None, "principal_point_x": None, "principal_point_y": None, "available": False},
+                        "lens_intrinsics": {
+                            "focal_length_x": None,
+                            "focal_length_y": None,
+                            "principal_point_x": None,
+                            "principal_point_y": None,
+                            "available": False,
+                        },
                         "capture_resolution": {"width": 0, "height": 0},
                         "sensor_info": {"pixel_array_size": {"width": 0, "height": 0}},
                         "distortion": {},
@@ -220,13 +238,24 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
     blueprint: rrb.Blueprint = SelfcapConfig().setup().default_blueprint()
     views: dict[str, rrb.View] = {str(view.name): view for view in blueprint_views(blueprint)}
     exo: list[str] = [f"exo rig_{rig:02d}" for rig in range(4)]
-    assert sorted(views) == sorted(["World (Quest frame, calibrated)", "OAK rgb", "Quest left", "Quest right", *exo])
+    assert sorted(views) == sorted(["World (Quest frame, calibrated)", "OAK rgb", "OAK left", "OAK right", "Quest left", "Quest right", *exo])
     assert str(views["World (Quest frame, calibrated)"].origin) == "/world"
-    cameras: dict[str, tuple[int, int]] = {**{name: (rig, 0) for rig, name in enumerate(exo)}, "OAK rgb": (4, 0), "Quest left": (5, 0), "Quest right": (5, 1)}
+    cameras: dict[str, tuple[int, int]] = {
+        **{name: (rig, 0) for rig, name in enumerate(exo)},
+        "OAK rgb": (4, 0),
+        "OAK left": (4, 1),
+        "OAK right": (4, 2),
+        "Quest left": (5, 0),
+        "Quest right": (5, 1),
+    }
     for name, (rig, cam) in cameras.items():
         assert str(views[name].origin) == schema.pinhole_path(rig, cam)
         contents: list[str] = cast(list[str], views[name].contents)  # the view keeps the list it was built with
         assert "/world/gt/**" in contents  # the Quest hands, drawn into every camera
+        # Sapiens2 feeds alignment only: present in the tree, hidden by default.
+        assert views[name].visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/pred/sapiens2"] == rrb.EntityBehavior(visible=False)
+        # The ego cameras have no explicit projections, so the viewer draws the triangulated 3D through their pose chain.
+        assert ("/world/pred/**" in contents) == name.startswith(("OAK", "Quest"))
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:
@@ -238,7 +267,13 @@ def calibration_document(layouts: tuple[str, ...]) -> str:
                 {
                     "camera_id": layout,
                     "positional_layout": layout,
-                    "lens_intrinsics": {"focal_length_x": 700.0, "focal_length_y": 700.0, "principal_point_x": 640.0, "principal_point_y": 360.0, "available": True},
+                    "lens_intrinsics": {
+                        "focal_length_x": 700.0,
+                        "focal_length_y": 700.0,
+                        "principal_point_x": 640.0,
+                        "principal_point_y": 360.0,
+                        "available": True,
+                    },
                     "capture_resolution": {"width": 1280, "height": 720},
                     "sensor_info": {"pixel_array_size": {"width": 1280, "height": 720}},
                     "distortion": {},
@@ -336,8 +371,13 @@ def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, 
     )
     for side, stamp in (("left", 17181303), ("right", 27181303)):
         (episode / "quest" / f"{side}_hand_poses.csv").write_text(
-            "ts_ns," + ",".join(f"joint_{j}_{axis}" for j in range(26) for axis in ("px", "py", "pz")) + "\n"
-            + str(stamp) + "," + ",".join(str(j / 100) for j in range(78)) + "\n"
+            "ts_ns,"
+            + ",".join(f"joint_{j}_{axis}" for j in range(26) for axis in ("px", "py", "pz"))
+            + "\n"
+            + str(stamp)
+            + ","
+            + ",".join(str(j / 100) for j in range(78))
+            + "\n"
         )
     monkeypatch.setattr(paths, "output_root", lambda: tmp_path / "output")
     identity: SequenceIdentity = SequenceIdentity(dataset="selfcap", parts=("2025-12-20", SESSION_A[:8], "ep001"))
@@ -393,7 +433,9 @@ def test_convert_keeps_each_video_container_start(tmp_path: Path, monkeypatch: p
         stream = container.streams.video[0]
         time_base = stream.time_base
         assert time_base is not None
-        presented_ns: list[int] = sorted(round(packet.pts * time_base * 1_000_000_000) for packet in container.demux(stream) if packet.pts is not None)
+        presented_ns: list[int] = sorted(
+            round(packet.pts * time_base * 1_000_000_000) for packet in container.demux(stream) if packet.pts is not None
+        )
     reader: rrc.RrdReader = rrc.RrdReader(convert_fixture_episode(tmp_path, monkeypatch, overrides={"ego/left.mp4": late}))
     sample_ns: dict[str, list[int]] = {}
     first_indices: dict[str, int] = {}
@@ -439,31 +481,36 @@ def test_raw_calibration_chunks_keep_verbatim_device_documents(tmp_path: Path) -
     from dataforge.datasets.selfcap import raw_calibration_chunks
 
     documents = {}
-    for rig, folder in enumerate(('exo/phone-a', 'exo/phone-b', 'ego', 'quest')):
-        path = tmp_path / folder / 'calibration.json'
+    for rig, folder in enumerate(("exo/phone-a", "exo/phone-b", "ego", "quest")):
+        path = tmp_path / folder / "calibration.json"
         path.parent.mkdir(parents=True)
         content = (' {"vendor": "' + folder + '", "opaque": [1, 2]}\r\n').encode()
         path.write_bytes(content)
-        documents[f'/world/rig_{rig:02d}'] = content.decode()
-    chunks = raw_calibration_chunks(tmp_path, ['phone-a', 'phone-b'])
+        documents[f"/world/rig_{rig:02d}"] = content.decode()
+    chunks = raw_calibration_chunks(tmp_path, ["phone-a", "phone-b"])
     assert len(chunks) == 4
     for chunk in chunks:
         assert chunk.is_static
-        assert chunk.to_record_batch().column('raw_calibration_json').to_pylist() == [[documents[str(chunk.entity_path)]]]
+        assert chunk.to_record_batch().column("raw_calibration_json").to_pylist() == [[documents[str(chunk.entity_path)]]]
 
 
 def test_convert_logs_factory_documents_on_every_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from rerun.chunk import RrdReader
 
     reader = RrdReader(convert_fixture_episode(tmp_path, monkeypatch))
-    values = {str(c.entity_path): c.to_record_batch().column('raw_calibration_json')[0].as_py()[0] for c in reader.stream() if 'raw_calibration_json' in c.to_record_batch().schema.names}
-    assert set(values) == {f'/world/rig_{i:02d}' for i in range(6)}
-    assert all(document == calibration_document(('center', 'left', 'right')) for document in values.values())
+    values = {
+        str(c.entity_path): c.to_record_batch().column("raw_calibration_json")[0].as_py()[0]
+        for c in reader.stream()
+        if "raw_calibration_json" in c.to_record_batch().schema.names
+    }
+    assert set(values) == {f"/world/rig_{i:02d}" for i in range(6)}
+    assert all(document == calibration_document(("center", "left", "right")) for document in values.values())
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_hand_csv_refuses_nonadjacent_duplicate_timestamps(tmp_path: Path, side: str) -> None:
     from dataforge.datasets.selfcap import read_quest_hands
+
     source = tmp_path / f"{side}_hand_poses.csv"
     header = "ts_ns," + ",".join(f"j{i}" for i in range(78)) + "\n"
     source.write_text(header + "".join(f"{stamp}," + ",".join(["1"] * 78) + "\n" for stamp in (17, 27, 17)))
