@@ -17,8 +17,8 @@ platforms = [
     { name = "linux-aarch64-cuda13", platform = "linux-aarch64", cuda = "13.0", glibc = "2.35" },
 ]
 version = "0.1.0"
-# Named workspace platforms need pixi >= 0.71; the fleet runs 0.73.
-requires-pixi = ">=0.73"
+# Named workspace platforms need pixi >= 0.71; the workspace and CI use 0.83.
+requires-pixi = ">=0.83"
 preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────

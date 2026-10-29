@@ -309,7 +309,7 @@ To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
 per commit, including PR branches — `curl` the index first to confirm your platform; PR commits
 are usually linux-x86_64 only) and match `rerun-sdk == <ver>` to the wheel filename. Re-lock on
-linux-64 (pixi >= 0.73, as set by `requires-pixi`) and move back to a public release once the fix ships.
+linux-64 (pixi >= 0.83, as set by `requires-pixi`) and move back to a public release once the fix ships.
 
 ## Gotchas
 
