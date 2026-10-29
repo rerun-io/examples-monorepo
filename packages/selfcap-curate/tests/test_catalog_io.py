@@ -14,7 +14,9 @@ from simplecv.catalog_rig_layout import CatalogComponent, parse_rig_layout
 
 import selfcap_curate.quest_fit as quest
 from selfcap_curate import catalog_io
-from selfcap_curate.catalog_io import Segment, rig_layout, select_layout
+from selfcap_curate.catalog_io import Segment, open_segment, rig_layout, select_layout
+from selfcap_curate.keypoints import read_cameras
+from selfcap_curate.keypoints_gpu import plan_episode
 from selfcap_curate.records import CatalogHands, SelfcapLayout
 
 
@@ -52,6 +54,8 @@ def test_mixed_sessions_only_discover_segment_cameras(tmp_path, private_server, 
             assert sum(camera.rig_kind == "exo" for camera in layout.cameras) == phones
             assert select_layout(layout, tuple(f"phone-{i}" for i in range(phones))).oak_rig == phones
 
+            assert len(read_cameras(dataset, f"session-{phones}")) == phones
+            assert len(plan_episode(open_segment(dataset, f"session-{phones}"), 3.0, sync=sync).videos) == phones
 
 
 @pytest.mark.integration
