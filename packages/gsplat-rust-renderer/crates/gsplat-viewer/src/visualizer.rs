@@ -21,12 +21,16 @@ use re_viewer_context::{
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
-/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction.
+/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction ("default" or "mip").
 /// The data recording still contains only native `GaussianSplats3D` descriptors.
 pub(crate) fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
+    let archetype = crate::selection::COMPUTE.into();
     re_sdk_types::ComponentDescriptor {
-        archetype: None,
-        component: "ComputeGaussianSplats3D:render_mode".into(),
+        archetype: Some(archetype),
+        component: re_sdk_types::ComponentIdentifier::from_archetype_field(
+            archetype,
+            "render_mode",
+        ),
         component_type: Some(re_sdk_types::components::Text::name()),
     }
 }

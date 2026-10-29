@@ -301,6 +301,10 @@ fn register_splat_system(
     registrator: &mut re_viewer_context::ViewSystemRegistrator<'_>,
 ) -> Result<(), re_viewer_context::ViewClassRegistryError> {
     crate::bounds::register(registrator);
+    // A new view default or override of the render mode starts at the mode used without one.
+    registrator.register_fallback_provider(visualizer::render_mode_descriptor().component, |_| {
+        re_sdk_types::components::Text::from("default")
+    });
     registrator.register_context_system::<crate::selection::AutomaticComputeSelection>()?;
     registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()?;
     registrator.register_visualizer::<crate::hexels::HexelVisualizer>()
