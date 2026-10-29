@@ -6,6 +6,7 @@ Runtime and TensorRT share one static-shape graph and thresholding/NMS runs on
 GPU with torchvision.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -49,6 +50,9 @@ class YoloxDetectorConfig:
     nms_thr: float = 0.45
     """Non-maximum suppression IoU threshold."""
 
+    onnx_transform: Callable[[Path], Path] | None = None
+    """Optional graph transform applied after detector NMS removal, before runtime creation."""
+
     def setup(self) -> "YoloxDetector":
         """Fetch artifacts, build/load the runtime, and return a ready detector."""
         return YoloxDetector(self)
@@ -65,6 +69,8 @@ class YoloxDetector(PersonDetector):
         """
         self.config: YoloxDetectorConfig = config
         onnx_path: Path = strip_detector_nms(fetch_openmmlab_onnx(YOLOX_ONNX_ZIP_URLS[config.variant]))
+        if config.onnx_transform is not None:
+            onnx_path = config.onnx_transform(onnx_path)
         self.runtime: TensorRuntime = create_runtime_from_onnx(onnx_path, config.backend)
         input_shape: tuple[int, ...] = self.runtime.spec.inputs[0].shape
         self.input_size: tuple[int, int] = (int(input_shape[1]), int(input_shape[2]))

@@ -1,0 +1,153 @@
+# SelfCap alignment and calibration
+
+Catalog-based alignment and calibration for explicit episodes of one SelfCap session.
+Inputs are read only. Outputs are Sapiens2 detection layers, JSON records and RRD copies; registration
+and layer swaps remain separate operator actions.
+
+| Stage | Module | Output |
+|---|---|---|
+| Read one named segment | `catalog_io` | Rig layout, encoded video, gyro and Quest tracks |
+| Rotation/repeat signals and correlations | `links`, `episode_links` | Coarse links, gyro-refined lags and repeat clocks |
+| GPU phone hands | `hands_gpu`, `detection_io` | Property-free `sapiens2` layer RRDs |
+| Shared camera/time fit | `quest_fit`, `session_fit`, `sync_policy` | Strict `TimeSync` JSON |
+| Copy and retime base | `patch_base` | New aligned RRD with provenance |
+| Inspect both clocks | `apis.sync_curves` | Rerun curves and residuals |
+
+## Commands and guards
+
+```bash
+pixi run -e selfcap-curate --frozen selfcap-align \
+  --base-dir /local/base --output-dir /local/aligned \
+  --catalog-url rerun+http://127.0.0.1:51235 \
+  --segment-ids selfcap__2025-12-30__65d00748__ep001 selfcap__2025-12-30__65d00748__ep002
+```
+
+`--key-file` accepts one explicit segment id or unprefixed episode key per line.
+Selection must belong to one session; no catalog enumeration is performed.
+Alignment reads presented-time bases containing Quest hands, factory metadata,
+the session UUID and ego `first_frame_idx`. Older incomplete bases need conversion.
+Models use Sapiens2 0.4B and YOLOX through posekit/trtkit TensorRT, batch eight.
+The CLIs use per-machine model caches; callers can set cache environment variables for isolation. Existing targets, NAS output
+and output beneath the input base directory are refused.
+
+The legacy served-base migration remains supported:
+
+```bash
+pixi run -e selfcap-curate --frozen selfcap-patch-base \
+  --keys 2025-11-24__027d8215__ep002 --sync-dir /local/sync --sync-name '{key}.json' \
+  --served-dir /local/served --raw-root /readonly/cut --output-dir /local/migrated
+```
+
+Only this migration reads raw MP4/hand/factory metadata. It restores video
+container starts, adds missing Quest hands and records provenance. Fresh-base
+patching reads no raw files. A patched base cannot be patched again.
+`--mode migrate-keep-clock` (default) restores the served clocks; `--mode migrate-realign` rebuilds alignment from the supplied record. Align uses the explicit `fresh` patch mode.
+`--quest-video-delta-ms` changes only Quest video alignment. Neither CLI registers
+or swaps layers; use `dataforge-swap-layer --layer` separately.
+
+For evidence, run `selfcap-sync-curves --segment-id <id>` in the same environment.
+Its shared `--rr-config.save <path>` and `--rr-config.headless` options support
+saved recordings without a display. The tool reads each clock separately.
+
+## Clocks
+
+`capture_time` preserves presented video PTS, including the container start,
+and raw CSV timestamps for IMU, Quest pose and hands. `video_time` aligns them
+to OAK left. Offsets are milliseconds to **add** to capture time. RGB uses
+`a_ms + b_ms_per_s * (t_start_session_s + capture_seconds)`; the session origin
+is the ingested OAK left frame counter divided by 24. Phone alignment uses
+`tau - 48 ms + quest_pose`. Missing measurements remain null with flags.
+
+Frozen scratch links used container PTS. Catalog bases that dropped the start
+therefore need per-stream corrections only in reference comparisons; production
+measurements always use the catalog clock consistently. The pilot frozen coarse
+links predate a scratch revision: recorded drift is 2.05 ms (left→pose) and
+3.39 ms (left→gyro). Golden comparisons retain the final scratch references.
+
+## Validation and provenance
+
+Run `pixi run -e selfcap-curate-dev --frozen gate` for lint, typecheck, deadcode,
+unit and integration tests. Run `tests-golden` separately with GPU access.
+Units cover synthetic timing, DLT, fill/flag rules and patch invariants.
+Integration checks explicit catalog links and migration against fresh conversion.
+Goldens cover three CPU-fit sessions, GPU hand parity, and raw conversion through
+the actual alignment CLI. Tests keep their reference tolerances and use temporary
+bases and test-scoped servers; they never register on the shared catalog.
+
+The read-only source is
+`/home/pablo/exoego-data/dataforge-selfcap-aligned/v2/code/`.
+Frozen comparison fixtures live in `tests/fixtures/`; other reference adapters
+are test-only in `tests/frozen_v2.py`. Program records use strict pyserde JSON;
+arrays remain typed streams rather than JSON payloads.
+
+## Session calibration
+
+| Stage | Module | Output |
+|---|---|---|
+| Exo fixed-focal fit and profiles | `exo_calibration` | Cameras, episode overrides, BA cost curves |
+| OAK hands and mount | `hands_gpu`, `oak_mount` | Typed hands and Quest-rig RGB transform |
+| Factory/Quest borrowing | `factory`, `catalog_io`, `device_tables` | Stereo transforms and pinholes |
+| Write calibration | `calib_layer`, `apis.calibrate` | Session JSON and calibration-only RRDs |
+
+```bash
+pixi run -e selfcap-curate --frozen selfcap-calibrate --output-dir /local/calib --key-file /local/keys.txt
+pixi run -e selfcap-curate --frozen selfcap-focal-profile --key-file /local/keys.txt --output /local/profile.json
+pixi run -e selfcap-curate --frozen selfcap-pool --profiles /local/f_profile/*.json --output /local/device_intrinsics.json
+```
+
+Calibration reads the catalog's `sapiens2` layer, with GPU fallback for missing phone data. OAK hands are computed from catalog video. Tracks and factory values come from explicit segments. Outputs stay local; NAS writes, existing targets, registration and swaps are refused. `device_intrinsics.json` is rebuilt by the profile/pool commands. Rebuild `oak_device_rgb_R_imu.json` with `selfcap-pool-oak-rotation --free-paths /local/oak_free/*.json --gyro-dir /local/gyro --output /local/rotations.json`.
+`borrowed_camera50.json` is curated by hand from verified device, healthy-segment and lever-arm facts.
+Goldens cover three exo/OAK sessions, focal profiles and both pooled tables, GPU hands, served layer values including camera-50 borrowing, and raw alignment through calibration with cached detections.
+
+## Keypoints
+
+```bash
+pixi run -e selfcap-curate --frozen selfcap-keypoints --calib-dir /local/calib --output-dir /local/complete \
+  --catalog-url rerun+http://127.0.0.1:51235 --key-file /local/keys.txt --rate 2.0
+```
+
+Register base before calib in every batch: the catalog resolves duplicated static values by the newest write.
+If frame planning, missing hands or decoding fails after model load, rerun with the unwritten keys only.
+Order: `selfcap-calibrate` → `selfcap-keypoints` → one `dataforge-swap-layer --layer calib`.
+Cameras come from local `--calib-dir` files; the catalog supplies patched videos, clocks and Quest anchors.
+Explicit ids or a key file select one session. Preflight reports unprocessable episodes with `KEYPOINTS_SKIP`; good episodes run.
+Existing targets, NAS outputs and outputs within the input directory are refused; no external registration or swap occurs.
+Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz (40). YOLOX-m HumanArt and RTMW-x use TensorRT batches of eight,
+keeping three people per frame on a half-open `video_time` grid anchored at cut zero; nearest-frame ties go left.
+Quest anchors use capture_time: left-eye head + quest_pose (100 ms gap), wrists −48 ms + quest_pose (40 ms gap).
+Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation uses joint confidence
+≥0.3, radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
+AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
+Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
+`pinhole/pred/rtmw/coco133_uv` and `kp3d_*` fields in the same `calib` group; no external quality metrics are stored.
+Goldens: all eleven episodes retain exact masks, 3D median ≤1 mm and overlays ≤0.01 px, including flagged Quest-relative clocks. Fresh GPU 2D median ≤1 px;
+the end-to-end CLI after fresh calibration uses 3D median ≤10 mm and reports pose drift and validity changes.
+
+Calibration and focal profiling read alignment records from each selected catalog base. Phone detections come from the selected segment’s `sapiens2` layer; local sync JSON cannot override the base clocks. Focal profiling refuses missing detection data.
+
+`selfcap-align` and `selfcap-calibrate` require a new, absent output directory. They build the session in a sibling staging directory and publish it with one rename after all outputs succeed. A failed run leaves no output directory; the same command can be retried.
+
+Sync outputs use `selfcap__<key>.json` throughout; the migration command accepts an explicit `--sync-name` template for legacy input directories.
+
+## Sapiens2 detection layer
+
+Align writes `sapiens2/selfcap__<key>.rrd` beside the aligned bases. Each layer has
+application `dataforge`, the segment’s recording ID, and **no properties**.
+Phone identities come from the segment layout. All 133 points are stored at
+`<cam>/pinhole/pred/sapiens2/coco133_uv`, with keypoint IDs and `confidence`;
+the parent `pred/sapiens2` holds the COCO-133 annotation context. Missing values
+and low scores are retained. Float32 xy and source float16 scores round-trip exactly.
+`capture_time` is presented frame PTS in integer nanoseconds. `video_time` adds
+`round(phone_offset_ms * 1e6)`, as in base patching. No container start is rebased.
+
+Operator order: align → `dataforge-swap-layer --layer base` →
+`dataforge-swap-layer --layer sapiens2` → calibrate → keypoints →
+`dataforge-swap-layer --layer calib`. The existing swap command supports adding
+an absent layer; each command uses explicit files and its normal idle gate.
+Nothing in align, calibrate or the converter registers or swaps catalog data.
+
+Phone goldens read the served `sapiens2` layer through private catalogs. Frozen OAK and
+multi-person RTMW detector streams live under the local reference root’s
+`golden-refs/oak-sapiens2/` and `golden-refs/rtmw-kp2d/` directories as viewer-readable RRDs.
+Their typed components retain exact float64 seconds beside the integer-ns `video_time`
+timeline. The tests read these fixtures directly; they do not import external research code.

@@ -1,0 +1,77 @@
+{
+ "key": "2025-12-08__cc808233__ep001",
+ "duration_s": 64.922,
+ "window_s": [
+  7.46,
+  57.46
+ ],
+ "oak_native_frames": 1559,
+ "t_start_session_s": 37.292,
+ "oak_left_rot_samples": 1198,
+ "oak_rgb_rot_samples": 1199,
+ "quest_video_rot_samples": 1249,
+ "oak_left_pattern": {
+  "ppm_vs_24": -60,
+  "phi": 0.2,
+  "agreement": 0.9846,
+  "pairs_used": 1039,
+  "moving_frac": 1.0,
+  "repeat_frac_pred": 0.04,
+  "native_frames_pred": 1199
+ },
+ "oak_rgb_pattern": {
+  "ppm_vs_24": -60,
+  "phi": 0.2,
+  "agreement": 0.9936,
+  "pairs_used": 1097,
+  "moving_frac": 1.0,
+  "repeat_frac_pred": 0.04,
+  "native_frames_pred": 1199
+ },
+ "lag_left_to_pose": {
+  "lag_s": 0.185,
+  "peak": 0.711,
+  "second_peak": 0.554,
+  "overlap_s": 49.9
+ },
+ "lag_rgb_to_left": {
+  "lag_s": -0.06295,
+  "peak": 0.972,
+  "second_peak": 0.744,
+  "overlap_s": 49.1
+ },
+ "lag_quest_video_to_pose": {
+  "lag_s": -0.02535,
+  "peak": 0.726,
+  "second_peak": 0.554,
+  "overlap_s": 49.9
+ },
+ "lag_left_to_gyro": {
+  "lag_s": 2.07479,
+  "peak": 0.969,
+  "second_peak": 0.719,
+  "overlap_s": 49.9
+ },
+ "lag_gyro_to_pose": {
+  "lag_s": -1.88378,
+  "peak": 0.723,
+  "second_peak": 0.535,
+  "overlap_s": 56.9
+ },
+ "elapsed_s": 56.4,
+ "video_start_s": {
+  "oak_left": 0.040001,
+  "oak_rgb": 0.040001,
+  "quest_video": 0.04
+ },
+ "video_start_source": "Measured once with ffprobe -select_streams v:0 -show_entries stream=start_time -of csv=p=0 on /mnt/nas/datasets/exoego-self-collected/main/cut/2025-12-08/cc808233-aa00-47cc-9ed5-f01d9a842036/episodes/episode-001/{ego/left.mp4,ego/rgb.mp4,quest/right.mp4}. Scratch uses MP4 PTS; compare each stream with its first catalog capture_time sample, allowing either rebased or container-start-preserving catalogs.",
+ "search_half_width_s": {
+  "left_to_pose": 3.0,
+  "rgb_to_left": 0.4,
+  "quest_video_to_pose": 1.0,
+  "left_to_quest_video": 3.0,
+  "left_to_gyro": 4.0,
+  "gyro_to_pose": 4.0
+ },
+ "search_half_width_source": "Frozen records predate the search_half_width_s field; preserved here from v2/code/links_cpu.py WINDOWS defaults, confirmed by the SelfCap v2 follow-up. WIDE is not used for these three records."
+}

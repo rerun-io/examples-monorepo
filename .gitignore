@@ -181,3 +181,5 @@ repomix-output.xml
 artifacts/*
 
 packages/agent-traces/data/
+
+packages/selfcap-curate/data/
