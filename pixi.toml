@@ -2060,6 +2060,125 @@ depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { tas
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# hexels — upstream Hexels (CUDA 13 build in packages/hexels-src) + our protocol tools
+# ═══════════════════════════════════════════════════════════════════════════
+# hexel-kernel installs as the Python module `gsplat`: never compose this feature with nerfstudio gsplat.
+# Image-GS runs through upstream's fit_image harness in this env (hexel-kernel carries its 2D kernels).
+[feature.hexels]
+platforms = ["linux-64"]
+
+[feature.hexels.dependencies]
+python = "3.12.*"
+# hexels-src runs need open3d (upstream mesh extraction, 2DGS eval_dtu); conda-forge 0.20.0 fails to import
+# (libOpen3D.so.0.20: undefined filament symbol), so hold the monorepo's 0.19 like every other feature.
+open3d = ">=0.19.0,<0.20"
+hexels-src = { path = "packages/hexels-src" }
+hexel-kernel = { path = "packages/hexels-src" }
+fused-ssim = { path = "packages/hexels-src" }
+simple-knn = { path = "packages/hexels-src" }
+image-gs = { path = "packages/hexels-src" }
+tyro = ">=0.9.1,<0.10"
+pyserde = ">=0.31.2,<0.32"
+tomli-w = ">=1.2,<2"
+orjson = ">=3.11,<4"
+jaxtyping = "*"
+numpy = "*"
+pillow = "*"
+nvidia-ml-py = "*"
+
+[feature.hexels.pypi-dependencies]
+hexels-bench = { path = "packages/hexels", editable = true }
+# Rerun recordings of the 2D Figure 3 rows (tools/figure2d.py); same pin as `common`.
+rerun-sdk = "==0.38.1"
+# NVIDIA FLIP, imported by upstream's 2D image metrics; PyPI only.
+flip-evaluator = "==1.7"
+
+[feature.hexels.activation.env]
+PACKAGE_DIR = "packages/hexels"
+PYREFLY_TARGET = "hexels_bench tools tests"
+
+# Run directories follow ~/hexels-work/contracts/run-layout.md; roots default to ~/gsplat-modern-data
+# and ~/hexels-work/runs (--roots.data / --roots.runs).
+[feature.hexels.tasks.hexels-export]
+cmd = "python tools/export.py"
+cwd = "packages/hexels"
+description = "Export an upstream Hexels run (config.json + checkpoints/) to a hexel PLY"
+
+[feature.hexels.tasks.hexels-export-published]
+cmd = "python tools/export_published.py"
+cwd = "packages/hexels"
+description = "Stage published 30k checkpoints: model.ply, cameras.json, exact GT, published metrics (no GPU)"
+
+[feature.hexels.tasks.hexels-render-published]
+cmd = "python tools/render_published.py"
+cwd = "packages/hexels"
+description = "Render published checkpoints with upstream CUDA (16-bit), paper FPS, shared scorer + upstream evaluator"
+
+[feature.hexels.tasks.hexels-train]
+cmd = "python tools/train.py"
+cwd = "packages/hexels"
+description = "Train one scene with upstream Hexels under our protocol (7k, fixed SfM population) and score it"
+
+[feature.hexels.tasks.hexels-score]
+cmd = "python tools/score.py"
+cwd = "packages/hexels"
+description = "Shared scorer: PSNR/SSIM/LPIPS-VGG of a run's 16-bit renders against the scene's GT"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# hexels-surface — TSDF meshes from `gsplat render --surface` depth (Open3D, upstream Hexels
+# settings), the DTU Chamfer evaluator and the surface recordings. No upstream CUDA build: Hexels and
+# Brush depth come from the WGSL renderer; upstream CUDA frames stream in from the `hexels` env. The
+# evaluators run unchanged from the patched 2DGS tree in the `hexels` env (eval_tnt in `tnt-eval`).
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.hexels-surface]
+platforms = ["linux-64"]
+
+[feature.hexels-surface.dependencies]
+python = "3.12.*"
+open3d = ">=0.19.0,<0.20"
+tyro = ">=0.9.1,<0.10"
+pyserde = ">=0.31.2,<0.32"
+tomli-w = ">=1.2,<2"
+orjson = ">=3.11,<4"
+jaxtyping = "*"
+numpy = "*"
+pillow = "*"
+nvidia-ml-py = "*"
+py-opencv = "*"
+# 2DGS `scripts/eval_dtu` (run unchanged from the hexels env's share/hexels-src; its culling needs CUDA torch)
+scikit-image = "*"
+scikit-learn = "*"
+scipy = "*"
+trimesh = "*"
+tqdm = "*"
+
+[feature.hexels-surface.pypi-dependencies]
+hexels-bench = { path = "packages/hexels", editable = true }
+rerun-sdk = "==0.38.1"
+
+[feature.hexels-surface.activation.env]
+PACKAGE_DIR = "packages/hexels"
+PYREFLY_TARGET = "hexels_bench tools tests"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# tnt-eval — the Tanks and Temples evaluator's pinned environment (upstream environment-tnt-eval.yml):
+# Python 3.8 and Open3D 0.10, whose registration API the 2DGS `scripts/eval_tnt` code needs.
+# Only an interpreter for that script; never compose it with other features.
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.tnt-eval]
+platforms = ["linux-64"]
+
+[feature.tnt-eval.dependencies]
+python = "3.8.*"
+
+[feature.tnt-eval.pypi-dependencies]
+numpy = "==1.23.5"
+scipy = "==1.10.1"
+open3d = "==0.10.0.0"
+matplotlib = "==3.7.5"
+trimesh = "==4.5.3"
+
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 platforms = ["linux-64"]
@@ -3725,6 +3844,11 @@ gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
     "dev",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
+hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
+hexels-surface = { features = ["cuda", "hexels-surface"], solve-group = "hexels-surface", no-default-feature = true }
+hexels-surface-dev = { features = ["cuda", "hexels-surface", "dev"], solve-group = "hexels-surface", no-default-feature = true }
+tnt-eval = { features = ["tnt-eval"], no-default-feature = true }
 dataforge = { features = [
     "common",
     "dataforge",
