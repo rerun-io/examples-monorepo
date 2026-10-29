@@ -45,9 +45,14 @@ native `GaussianSplats3D` adds RGBA8/f16 quantization, which is reported separat
 
 ## Viewer
 
-The custom visualizer reads native components and respects explicit visualizer
-instructions. Automatic selection changes only the active custom viewer's
-blueprint. Recordings without overrides remain portable to stock Rerun.
+The custom visualizers read native `GaussianSplats3D` components and the custom
+`Hexels3D` archetype (f32 fields; rotations are converted from Rerun xyzw to the
+core's wxyz) and respect explicit visualizer instructions. Both share execution,
+the cache, bounds and composition. Automatic selection changes only the active
+custom viewer's blueprint: stock splat quads become compute splats, and the
+`Points3D` fallback that hexel entities carry is dropped. Recordings without
+overrides remain portable to stock Rerun, which draws native splats and the
+hexel fallback points.
 
 A store-owned cache shares uploads across views and tracks each instance's target
 with dirty, pending, complete, or capacity-failed state. Optional-attribute changes invalidate the
@@ -55,12 +60,20 @@ upload even when centers retain their row ID. Blueprint values need a content
 hash because their source row IDs are cleared by Rerun. Camera and mode changes
 reuse the scene. Unused entries are evicted when frames advance.
 
+Splats and hexels are trained with display-space blending over a solid
+background, while Rerun blends in linear light. Over a solid view background
+the composite emits `linear(rgb + (1 - a) bg) - (1 - a') linear(bg)`, with `a'`
+the largest transparency that keeps the sRGB target non-negative, so the view
+reproduces the standalone render exactly over that colour; content behind the
+splats is blended approximately. Gradient backgrounds keep the plain
+premultiplied conversion.
+
 `collect_drawables` records compute through the shared
 `before_view_builder_encoder`; instances and views add no separate queue submission.
 The Transparent composite writes `frag_depth` and uses the renderer's 4x MSAA
 state. Each instance/view still owns two full-viewport targets (color and depth);
 an upstream integration should pool them. A capacity failure uses stock quads
-and keeps that fallback until the scene changes. Both paths provide transformed
+(hexels: their fallback points) and keeps that fallback until the scene changes. Both paths provide transformed
 bounds for automatic framing.
 
 Splats in separate entities are not jointly sorted. Picking, hover, and outlines

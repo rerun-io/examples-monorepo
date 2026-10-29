@@ -22,6 +22,9 @@ struct Report<'a> {
     warmup_seconds: f64,
     minimum_camera_delta: f32,
     msaa_samples: u32,
+    /// Compute-renderer GPU bytes at the last frame: shared scene uploads, per-view scratch and targets.
+    gpu_bytes_scene: u64,
+    gpu_bytes_views: u64,
     frames: &'a [Frame],
 }
 
@@ -76,6 +79,7 @@ impl FrameProbe {
         output: &egui::FullOutput,
         camera: gsplat_core::Camera,
         msaa_samples: u32,
+        gpu_bytes: [u64; 2],
     ) -> anyhow::Result<bool> {
         if let Some(first) = self.frames.first() {
             anyhow::ensure!(
@@ -168,6 +172,8 @@ impl FrameProbe {
             warmup_seconds: self.warmup_ms / 1000.0,
             minimum_camera_delta,
             msaa_samples,
+            gpu_bytes_scene: gpu_bytes[0],
+            gpu_bytes_views: gpu_bytes[1],
             frames: &self.frames,
         };
         std::fs::write(&self.path, serde_json::to_vec_pretty(&report)?)?;
@@ -205,6 +211,7 @@ pub struct Args {
 struct ProbeView {
     camera: gsplat_core::Camera,
     msaa_samples: u32,
+    gpu_bytes: [u64; 2],
 }
 static CAMERAS: Mutex<Vec<ProbeView>> = Mutex::new(Vec::new());
 #[derive(Default)]
@@ -230,6 +237,7 @@ impl ViewContextSystem for ProbeEye {
                     false,
                 )
                 .count,
+                gpu_bytes: gsplat_viewer::compute_gpu_bytes(ctx),
             });
         }
     }
@@ -318,6 +326,7 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
             harness.output(),
             view.camera,
             view.msaa_samples,
+            view.gpu_bytes,
         )? {
             harness
                 .render()
