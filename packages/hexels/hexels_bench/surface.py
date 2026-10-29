@@ -139,8 +139,8 @@ def scene_cameras(scene_dir: Path, images: str, resolution: int) -> list[Contrac
                 height=round(height / resolution),
                 fov_x=2 * math.atan(colmap_width / (2 * focal_x)),
                 fov_y=2 * math.atan(colmap_height / (2 * focal_y)),
-                world_view_transform=world_view.astype(np.float64).tolist(),
-                camera_center=center.astype(np.float64).tolist(),
+                world_view_transform=world_view.astype(np.float64),
+                camera_center=center.astype(np.float64),
             )
         )
     return sorted(records, key=lambda camera: camera.name)

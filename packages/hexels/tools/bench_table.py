@@ -2,7 +2,7 @@
 
 import tyro
 
-from gsplat_rust_renderer.apis.bench_table import Config, main
+from hexels_bench.apis.bench_table import Config, main
 
 if __name__ == "__main__":
     main(tyro.cli(Config))

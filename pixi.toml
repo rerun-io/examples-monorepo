@@ -2123,24 +2123,6 @@ depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { tas
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
 
-[feature.gsplat-rust-renderer.tasks.gsplat-train-protocol]
-args = [{ arg = "dataset", default = "dtu" }]
-cmd = "python tools/train_protocol.py --dataset {{ dataset }}"
-depends-on = ["gsplat-build"]
-cwd = "packages/gsplat-rust-renderer"
-description = "Train Brush on the Hexels NVS protocol for every scene of one dataset"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-bench]
-cmd = "python tools/bench.py"
-depends-on = ["gsplat-build"]
-cwd = "packages/gsplat-rust-renderer"
-description = "Brush vs Hexels benchmark queue (needs the hexels env installed for the upstream methods)"
-
-[feature.gsplat-rust-renderer.tasks.gsplat-bench-table]
-cmd = "python tools/bench_table.py"
-cwd = "packages/gsplat-rust-renderer"
-description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
-
 [feature.gsplat-rust-renderer.tasks.gsplat-log-hexels-compare]
 cmd = "python tools/log_hexels_compare.py"
 cwd = "packages/gsplat-rust-renderer"
@@ -2175,7 +2157,7 @@ nvidia-ml-py = "*"
 
 [feature.hexels.pypi-dependencies]
 hexels-bench = { path = "packages/hexels", editable = true }
-# Rerun recordings of the 2D Figure 3 rows (tools/figure2d.py); same pin as `common`.
+# Rerun recordings (2D Figure 2 rows, surface recordings); same pin as `common`.
 rerun-sdk = "==0.38.1"
 # NVIDIA FLIP, imported by upstream's 2D image metrics; PyPI only.
 flip-evaluator = "==1.7"
@@ -2229,60 +2211,45 @@ description = "Decode 2D fits with upstream CUDA and with the WGSL renderer, sco
 [feature.hexels.tasks.hexels-figure-2d]
 cmd = "python tools/figure2d.py"
 cwd = "packages/hexels"
-description = "Write the 2D Figure 3 rows and the six-image summary as Rerun recordings"
+description = "Write the 2D Figure 2 rows and the six-image summary as Rerun recordings"
 
-# ═══════════════════════════════════════════════════════════════════════════
-# hexels-surface — TSDF meshes from `gsplat render --surface` depth (Open3D, upstream Hexels
-# settings), the DTU Chamfer evaluator and the surface recordings. No upstream CUDA build: Hexels and
-# Brush depth come from the WGSL renderer; upstream CUDA frames stream in from the `hexels` env. The
-# evaluators run unchanged from the patched 2DGS tree in the `hexels` env (eval_tnt in `tnt-eval`).
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.hexels-surface]
-platforms = ["linux-64"]
+# The benchmark: Brush on the Hexels protocol (gsplat-train from the gsplat-rust-renderer build), the
+# 34-scene queue (each step in its own env) and the table (runs/TABLE.json, runs/table.rrd).
+[feature.hexels.tasks.hexels-train-brush]
+cmd = "python tools/train_brush.py"
+depends-on = [{ task = "gsplat-build", environment = "gsplat-rust-renderer" }]
+cwd = "packages/hexels"
+description = "Train Brush on the Hexels NVS protocol for every scene of one dataset (--dataset; extra Brush flags follow --)"
 
-[feature.hexels-surface.dependencies]
-python = "3.12.*"
-open3d = ">=0.19.0,<0.20"
-tyro = ">=0.9.1,<0.10"
-pyserde = ">=0.31.2,<0.32"
-tomli-w = ">=1.2,<2"
-orjson = ">=3.11,<4"
-jaxtyping = "*"
-numpy = "*"
-pillow = "*"
-nvidia-ml-py = "*"
-py-opencv = "*"
-# 2DGS `scripts/eval_dtu` (run unchanged from the hexels env's share/hexels-src; its culling needs CUDA torch)
-scikit-image = "*"
-scikit-learn = "*"
-scipy = "*"
-trimesh = "*"
-tqdm = "*"
+[feature.hexels.tasks.hexels-bench]
+cmd = "python tools/bench.py"
+depends-on = [{ task = "gsplat-build", environment = "gsplat-rust-renderer" }]
+cwd = "packages/hexels"
+description = "Brush vs Hexels benchmark queue: every incomplete (dataset, scene, method) run under the GPU lock"
 
-[feature.hexels-surface.pypi-dependencies]
-hexels-bench = { path = "packages/hexels", editable = true }
-rerun-sdk = "==0.38.1"
+[feature.hexels.tasks.hexels-bench-table]
+cmd = "python tools/bench_table.py"
+cwd = "packages/hexels"
+description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
 
-[feature.hexels-surface.activation.env]
-PACKAGE_DIR = "packages/hexels"
-PYREFLY_TARGET = "hexels_bench tools tests"
-
-[feature.hexels-surface.tasks.hexels-surface-run]
+# Surfaces: TSDF meshes from rendered depth (Open3D, upstream Hexels settings), the paper's evaluators run
+# unchanged from the patched 2DGS tree in this env (eval_tnt in `tnt-eval`), and the surface recordings.
+[feature.hexels.tasks.hexels-surface-run]
 cmd = "python tools/surface_run.py"
 cwd = "packages/hexels"
-description = "Render depth (gsplat render --surface, or upstream CUDA frames) and fuse TSDF meshes with upstream's settings"
+description = "Render depth (gsplat render --surface, or upstream CUDA in process) and fuse TSDF meshes with upstream's settings"
 
-[feature.hexels-surface.tasks.hexels-surface-eval]
+[feature.hexels.tasks.hexels-surface-eval]
 cmd = "python tools/surface_eval.py"
 cwd = "packages/hexels"
 description = "Score fuse_post.ply: DTU Chamfer (2DGS eval_dtu) or T&T F1 (2DGS eval_tnt in the tnt-eval env)"
 
-[feature.hexels-surface.tasks.hexels-surface-table]
+[feature.hexels.tasks.hexels-surface-table]
 cmd = "python tools/surface_table.py"
 cwd = "packages/hexels"
 description = "Collect scored surface runs and the paper's per-scene numbers into runs/SURFACE_TABLE.json"
 
-[feature.hexels-surface.tasks.hexels-surface-log]
+[feature.hexels.tasks.hexels-surface-log]
 cmd = "python tools/surface_log.py"
 cwd = "packages/hexels"
 description = "Write the per-scene surface recording: meshes, depth and normal maps, cameras, metrics"
@@ -3980,8 +3947,6 @@ gsplat-rust-renderer-dev = { features = [
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
 hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
-hexels-surface = { features = ["cuda", "hexels-surface"], solve-group = "hexels-surface", no-default-feature = true }
-hexels-surface-dev = { features = ["cuda", "hexels-surface", "dev"], solve-group = "hexels-surface", no-default-feature = true }
 tnt-eval = { features = ["tnt-eval"], no-default-feature = true }
 dataforge = { features = [
     "common",

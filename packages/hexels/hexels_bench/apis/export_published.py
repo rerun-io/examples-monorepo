@@ -12,11 +12,12 @@ from serde import serde
 from serde.json import from_json
 
 from hexels_bench.apis.export import export_run
-from hexels_bench.cameras import CameraContract, CamerasFile, cameras_file, load_contract, write_cameras_file, write_targets
+from hexels_bench.cameras import CameraContract, CamerasFile, cameras_file, write_cameras_file, write_targets
 from hexels_bench.checkpoint import UpstreamRunConfig, load_run_config
 from hexels_bench.hexel_ply import HexelPly, HexelVariant
-from hexels_bench.layout import Dataset, Roots
-from hexels_bench.metrics import MetricsFile, ViewMetrics, bytes_per_primitive, ply_vertex_count, summarize, write_metrics_file
+from hexels_bench.layout import Dataset, Roots, read_json
+from hexels_bench.methods import primitive_bytes
+from hexels_bench.metrics import MetricsFile, ViewMetrics, ply_vertex_count, summarize, write_metrics_file
 
 
 @serde
@@ -71,7 +72,7 @@ def stage_ground_truth(roots: Roots, dataset: Dataset, scene: str, contract: Cam
 
 def stage_published(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant) -> Path:
     """Write model.ply and cameras.json of one published checkpoint; returns the run directory."""
-    contract: CameraContract = load_contract(roots.contract(dataset, scene))
+    contract: CameraContract = read_json(CameraContract, roots.contract(dataset, scene))
     stage_ground_truth(roots, dataset, scene, contract)
     model_dir: Path = roots.published_model(dataset, scene, variant)
     run_config: UpstreamRunConfig = load_run_config(model_dir / "config.json")
@@ -96,8 +97,7 @@ def published_metrics(model_dir: Path, run_dir: Path, dataset: Dataset, scene: s
     ]
     method: str = published_method(variant)
     ply: Path = run_dir / "model.ply"
-    size: int | None = bytes_per_primitive(method)
-    deploy_mb: float | None = None if size is None else ply_vertex_count(ply) * size / 1e6
+    deploy_mb: float = ply_vertex_count(ply) * primitive_bytes(variant) / 1e6
     return summarize(
         rows, method=method, dataset=dataset, scene=scene, scorer="upstream-float", fps=None, deploy_mb=deploy_mb, ply_mb=ply.stat().st_size / 1e6
     )

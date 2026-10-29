@@ -19,7 +19,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 
-from hexels_bench.apis.surface_run import SurfaceMethod, SurfacePlan, plan_surface
+from hexels_bench.apis.surface_run import SURFACE_METHODS, SurfaceMethod, SurfacePlan, plan_surface
 from hexels_bench.cameras import ContractCamera, find_image, load_target
 from hexels_bench.layout import Dataset, Roots
 from hexels_bench.surface import camera_from_world, normals_from_depth, surface_depth
@@ -109,13 +109,9 @@ def log_dtu_reference(roots: Roots, scene: str, points: int) -> None:
     rr.log("world/reference", rr.Points3D(local, colors=[150, 150, 150], radii=rr.Radius.ui_points(1.0)), static=True)
 
 
-def short(method: str) -> str:
-    return method.replace("hexels-", "").replace("-30k-pub", "")
-
-
 def blueprint(
-    map_methods: list[str],
-    mesh_methods: list[str],
+    map_methods: list[SurfaceMethod],
+    mesh_methods: list[SurfaceMethod],
     up: Float64[ndarray, "3"],
     center: Float64[ndarray, "3"],
     eye: Float64[ndarray, "3"],
@@ -125,14 +121,18 @@ def blueprint(
         return rrb.Spatial2DView(origin="/world/camera", contents=[entity], name=name)
 
     rows: list[rrb.Horizontal] = [
-        rrb.Horizontal(image_view("/world/camera/gt", "GT"), *[image_view(f"/world/camera/{m}/rgb", f"{short(m)} RGB") for m in map_methods]),
-        rrb.Horizontal(*[image_view(f"/world/camera/{m}/depth", f"{short(m)} depth") for m in map_methods]),
-        rrb.Horizontal(*[image_view(f"/world/camera/{m}/normal", f"{short(m)} normal") for m in map_methods]),
-        rrb.Horizontal(*[image_view(f"/world/camera/{m}/normal_from_depth", f"{short(m)} normal from depth") for m in map_methods]),
+        rrb.Horizontal(
+            image_view("/world/camera/gt", "GT"), *[image_view(f"/world/camera/{m}/rgb", f"{SURFACE_METHODS[m].label} RGB") for m in map_methods]
+        ),
+        rrb.Horizontal(*[image_view(f"/world/camera/{m}/depth", f"{SURFACE_METHODS[m].label} depth") for m in map_methods]),
+        rrb.Horizontal(*[image_view(f"/world/camera/{m}/normal", f"{SURFACE_METHODS[m].label} normal") for m in map_methods]),
+        rrb.Horizontal(*[image_view(f"/world/camera/{m}/normal_from_depth", f"{SURFACE_METHODS[m].label} normal from depth") for m in map_methods]),
     ]
     eye_controls = rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, position=eye, look_target=center, eye_up=up)
     meshes: list[rrb.Spatial3DView] = [
-        rrb.Spatial3DView(origin="/world", contents=[f"/world/mesh/{m}", "/world/camera"], name=f"{short(m)} mesh", eye_controls=eye_controls)
+        rrb.Spatial3DView(
+            origin="/world", contents=[f"/world/mesh/{m}", "/world/camera"], name=f"{SURFACE_METHODS[m].label} mesh", eye_controls=eye_controls
+        )
         for m in mesh_methods
     ]
     if mesh_methods and reference:
@@ -143,9 +143,9 @@ def blueprint(
 
 def main(config: Config) -> None:
     roots: Roots = config.roots
-    plans: dict[str, SurfacePlan] = {method: plan_surface(roots, config.dataset, config.scene, method, None) for method in config.methods}
-    map_methods: list[str] = [m for m in config.methods if (plans[m].out_dir / "surface.rrd").is_file()]
-    mesh_methods: list[str] = [m for m in config.methods if (plans[m].out_dir / "fuse_post.ply").is_file()]
+    plans: dict[SurfaceMethod, SurfacePlan] = {method: plan_surface(roots, config.dataset, config.scene, method, None) for method in config.methods}
+    map_methods: list[SurfaceMethod] = [m for m in config.methods if (plans[m].out_dir / "surface.rrd").is_file()]
+    mesh_methods: list[SurfaceMethod] = [m for m in config.methods if (plans[m].out_dir / "fuse_post.ply").is_file()]
     first: SurfacePlan = plans[config.methods[0]]
     shared: list[str] = [c.name for c in first.cameras if all(c.name in {d.name for d in plans[m].cameras} for m in map_methods)]
     chosen: list[str] = [shared[round(i * (len(shared) - 1) / max(config.views - 1, 1))] for i in range(min(config.views, len(shared)))]

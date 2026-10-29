@@ -26,7 +26,9 @@ SPLATS_VISUALIZER: str = "ComputeGaussianSplats3D"
 def compute_visualizer(render_mode: Literal["default", "mip"] = "default") -> rrb.Visualizer:
     """Explicit custom-viewer choice; stock viewers cannot execute this visualizer."""
     warnings.warn("ComputeGaussianSplats3D requires the custom viewer; stock Rerun will show no splats for this explicit override.", stacklevel=2)
-    descriptor: rr.ComponentDescriptor = rr.ComponentDescriptor("ComputeGaussianSplats3D:render_mode", component_type="rerun.components.Text")
+    descriptor: rr.ComponentDescriptor = rr.ComponentDescriptor(
+        f"{SPLATS_VISUALIZER}:render_mode", archetype=SPLATS_VISUALIZER, component_type="rerun.components.Text"
+    )
     return rrb.Visualizer(SPLATS_VISUALIZER, overrides=[rr.components.TextBatch([render_mode]).described(descriptor)])
 
 

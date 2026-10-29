@@ -3,10 +3,12 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from gsplat_rust_renderer.bench_table import BenchTable, PaperNumbers, build_table, mean_columns, scene_columns, write_table_rrd
-from gsplat_rust_renderer.nvs_protocol import read_json
+from hexels_bench.bench_table import BenchTable, build_table, mean_columns, scene_columns, write_table_rrd
+from hexels_bench.layout import read_json
+from hexels_bench.paper import PaperNumbers
 
 
 def paper_numbers(path: Path) -> Path:
@@ -18,17 +20,25 @@ def paper_numbers(path: Path) -> Path:
     data: dict = {
         "hf_nvs_per_scene": {"dtu": {"scan24": {"v1-fixed": hf}, "scan37": {"v1-fixed": {**hf, "psnr": 27.0, "primitives": 120}}}},
         "sfm_points": {"dtu": {"scan24": 100, "scan37": 120}},
-        "table3_matched_primitives_sfm_count": {"dtu": {}},
+        "table1_2d": [],
+        "hf_images_2d_per_image": {},
+        "hf_surface_main_per_scene": {},
     }
     path.write_text(json.dumps(data))
     return path
+
+
+def write_cameras(run_dir: Path, scene: str, names: list[str]) -> None:
+    camera: dict = {"width": 4, "height": 3, "fov_x": 0.5, "fov_y": 0.4, "world_view_transform": np.eye(4).tolist(), "camera_center": [0.0, 0.0, 0.0]}
+    cameras: dict = {"format": "hexels-cameras-1", "dataset": "dtu", "scene": scene, "split": "test", "background": [0.0, 0.0, 0.0]}
+    (run_dir / "cameras.json").write_text(json.dumps({**cameras, "cameras": [{**camera, "name": name} for name in names]}))
 
 
 def write_run(runs: Path, scene: str, method: str, psnr: float, fps: float | None, train: tuple[float, float, float] | None, vertices: int) -> None:
     run_dir: Path = runs / "dtu" / scene / method
     (run_dir / "renders" / "test").mkdir(parents=True)
     names: list[str] = ["0000", "0008"]
-    (run_dir / "cameras.json").write_text(json.dumps({"cameras": [{"name": name} for name in names]}))
+    write_cameras(run_dir, scene, names)
     for name in names:
         (run_dir / "renders" / "test" / f"{name}.png").write_bytes(b"png")
     per_view: list[dict] = [{"name": name, "psnr": psnr, "ssim": 0.85, "lpips_vgg": 0.25} for name in names]

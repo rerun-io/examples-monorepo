@@ -11,6 +11,7 @@ import torch
 from hexels_bench.apis.fit_image import stage_image_gt
 from hexels_bench.image2d import HexelImage, load_image_fit, write_hexel_image_ply
 from hexels_bench.layout import Roots
+from hexels_bench.results2d import FITS, FitSpec
 
 Appearance: TypeAlias = Literal["spatial-rgb", "flat-rgb"]
 
@@ -27,16 +28,10 @@ class Config:
     """Data and run roots."""
 
 
-def published_fit(roots: Roots, stem: str, appearance: Appearance) -> Path:
-    return (
-        roots.data / "hexels-pretrained" / "images_2d" / stem / f"hexels_{appearance}_pruned-20000-to-10000_seed123_step005100" / "hexels_raw-fp32.pt"
-    )
-
-
 def stage_published_image(roots: Roots, stem: str, appearance: Appearance) -> Path:
-    fit: Path = published_fit(roots, stem, appearance)
-    method: str = "hexels-2d-pub-cuda" if appearance == "spatial-rgb" else "hexels-2d-flat-pub-cuda"
-    out: Path = roots.runs / "imagegs" / stem / method / "model.ply"
+    fit: Path = roots.published_image_fit(stem, appearance) / "hexels_raw-fp32.pt"
+    spec: FitSpec = next(spec for spec in FITS.values() if spec.published and spec.appearance == appearance)
+    out: Path = roots.runs / "imagegs" / stem / spec.cuda_method / "model.ply"
     image: HexelImage = load_image_fit(fit)
     step: int = int(torch.load(fit, map_location="cpu", weights_only=True)["step"])
     write_hexel_image_ply(out, image, str(fit), step)

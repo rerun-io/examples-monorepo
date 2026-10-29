@@ -1,4 +1,5 @@
 """Brush receives the upstream Hexels cameras, split, images and SfM initialization."""
+
 import json
 import struct
 from collections.abc import Callable
@@ -10,9 +11,10 @@ import pytest
 from PIL import Image
 from plyfile import PlyData, PlyElement
 
-from gsplat_rust_renderer.nvs_protocol import opengl_world_from_camera, prepare_scene, target_size
+from hexels_bench.brush import opengl_world_from_camera, prepare_scene, target_size
 
 SceneFactory: TypeAlias = Callable[..., tuple[Path, Path]]
+
 
 def test_prepare_writes_contract_split_at_upstream_resolution(tmp_path: Path, protocol_scene: SceneFactory) -> None:
     source, contract = protocol_scene(tmp_path / "dtu/scan1", tmp_path / "contract.json", ["0000", "0008"])
@@ -44,8 +46,12 @@ def test_target_size_uses_python_rounding_like_2dgs() -> None:
 def test_world_from_camera_matches_upstream_camera_center() -> None:
     """scan24 test view 0000 from the published contract: its center is upstream's own record."""
     world_view: np.ndarray = np.array(
-        [[0.9702627062797546, -0.014742869883775711, -0.2416049987077713, 0.0], [0.007479910738766193, 0.9994929432868958, -0.0309509988874197, 0.0],
-         [0.2419387847185135, 0.028223415836691856, 0.9698809385299683, 0.0], [-0.2518884837627411, -0.044171787798404694, 2.083570957183838, 1.0]]
+        [
+            [0.9702627062797546, -0.014742869883775711, -0.2416049987077713, 0.0],
+            [0.007479910738766193, 0.9994929432868958, -0.0309509988874197, 0.0],
+            [0.2419387847185135, 0.028223415836691856, 0.9698809385299683, 0.0],
+            [-0.2518884837627411, -0.044171787798404694, 2.083570957183838, 1.0],
+        ]
     )
     world_from_camera: np.ndarray = opengl_world_from_camera(world_view)
     np.testing.assert_allclose(world_from_camera[:3, 3], [0.7471479177474976, 0.11052209138870239, -1.9586275815963745], atol=1e-6)
@@ -88,7 +94,10 @@ def test_binary_points_follow_colmap_layout_and_ply_wins(tmp_path: Path, protoco
     np.testing.assert_allclose(vertex["y"], [2.0, -2.0])
     np.testing.assert_allclose(vertex["green"], [8 / 255, 8 / 255], rtol=1e-6)
     # 2DGS reads sparse/0/points3D.ply first when it exists (its storePly writes uint8 colors on first load).
-    cloud = np.array([(4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 255, 0, 0)], dtype=[(n, "f4") for n in ("x", "y", "z", "nx", "ny", "nz")] + [(n, "u1") for n in ("red", "green", "blue")])
+    cloud = np.array(
+        [(4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 255, 0, 0)],
+        dtype=[(n, "f4") for n in ("x", "y", "z", "nx", "ny", "nz")] + [(n, "u1") for n in ("red", "green", "blue")],
+    )
     PlyData([PlyElement.describe(cloud, "vertex")]).write(str(sparse / "points3D.ply"))
     assert prepare_scene(source, contract, tmp_path / "from-ply").sfm_points == 1
     vertex = PlyData.read(tmp_path / "from-ply/init.ply")["vertex"]

@@ -21,12 +21,16 @@ use re_viewer_context::{
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
-/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction.
+/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction ("default" or "mip").
 /// The data recording still contains only native `GaussianSplats3D` descriptors.
 pub(crate) fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
+    let archetype = crate::selection::COMPUTE.into();
     re_sdk_types::ComponentDescriptor {
-        archetype: None,
-        component: "ComputeGaussianSplats3D:render_mode".into(),
+        archetype: Some(archetype),
+        component: re_sdk_types::ComponentIdentifier::from_archetype_field(
+            archetype,
+            "render_mode",
+        ),
         component_type: Some(re_sdk_types::components::Text::name()),
     }
 }
@@ -256,7 +260,14 @@ pub(crate) fn draw_instances(
     render_mode: RenderMode,
 ) -> Result<bool, ViewSystemExecutionError> {
     let mut retry = false;
-    let background = solid_background(ctx);
+    let masks = query
+        .highlights
+        .entity_outline_mask(data.entity_path.hash());
+    let uniform = crate::renderer::draw_uniform(
+        solid_background(ctx),
+        re_renderer::PickingLayerObjectId(data.entity_path.hash64()),
+        masks,
+    );
     for (index, world_from_local) in instances.iter().enumerate() {
         let world_from_local = world_from_local.as_affine3a();
         if !world_from_local.inverse().is_finite() {
@@ -290,7 +301,7 @@ pub(crate) fn draw_instances(
                     signature,
                     camera,
                     options,
-                    background,
+                    uniform,
                 )
             });
         match prepared {
@@ -324,7 +335,7 @@ pub(crate) fn draw_instances(
                             format!("{error}; drawing hexel centres as points"),
                         );
                         re_log::warn_once!("Hexel compute fallback: {error:#}");
-                        crate::hexels::points_fallback(ctx, query, hexels, world_from_local)?
+                        crate::hexels::points_fallback(ctx, query, data, hexels, world_from_local)?
                     }
                 });
             }

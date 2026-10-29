@@ -1,4 +1,5 @@
-"""Held-out cameras and ground-truth targets of a scene, from upstream's camera contract.
+"""The protocol inputs of a scene: held-out cameras and ground-truth targets from upstream's camera contract, and
+the SfM points both trainers initialize from (and cap their primitive count at).
 
 Upstream publishes one camera contract per NVS scene (HF `jhu-ccvl/Hexels`,
 `cameras/nvs/<dataset>/<scene>/contract.json`): the 2DGS camera geometry of every training and test
@@ -9,15 +10,17 @@ targets bit-exactly (checked against the contract digest) as 16-bit PNGs for the
 
 import hashlib
 import json
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from PIL import Image
-from serde import SerdeError, serde
-from serde.json import from_json, to_json
+from plyfile import PlyData
+from serde import serde
+from serde.json import to_json
 
 from hexels_bench.png16 import write_png16
 
@@ -37,10 +40,14 @@ class ContractCamera:
     """Horizontal field of view in radians."""
     fov_y: float
     """Vertical field of view in radians."""
-    world_view_transform: list[list[float]]
-    """4x4, row-vector convention: [x y z 1] @ M is the OpenCV camera point."""
-    camera_center: list[float]
+    world_view_transform: Float64[ndarray, "4 4"]
+    """Row-vector convention: [x y z 1] @ M is the OpenCV camera point (M = world-to-camera transposed)."""
+    camera_center: Float64[ndarray, "3"]
     """Camera center in world space."""
+
+    def world_from_camera(self) -> Float64[ndarray, "4 4"]:
+        """OpenCV (right/down/forward) camera-to-world pose."""
+        return np.linalg.inv(self.world_view_transform.T)
 
 
 @serde
@@ -85,18 +92,12 @@ class CameraContract:
 
     settings: ContractSettings
     """Scene loading settings."""
+    training: ContractSplit
+    """Training split digests."""
     test: ContractSplit
     """Test split digests."""
     geometry: ContractGeometry
     """Camera geometry."""
-
-
-def load_contract(path: Path) -> CameraContract:
-    """Load an upstream camera contract.json."""
-    try:
-        return from_json(CameraContract, path.read_text())
-    except (SerdeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path}: {error}") from error
 
 
 @serde(deny_unknown_fields=True)
@@ -128,25 +129,62 @@ def write_cameras_file(path: Path, cameras: CamerasFile) -> None:
     path.write_text(to_json(cameras) + "\n")
 
 
-def load_cameras_file(path: Path) -> CamerasFile:
-    try:
-        return from_json(CamerasFile, path.read_text())
-    except (SerdeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path}: {error}") from error
-
-
-def _json_sha256(value: list[list[str]]) -> str:
-    text: str = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+def ordered_targets_sha256(digests: list[list[str]]) -> str:
+    """Upstream's digest of the ordered [[name, target digest], ...] list (hexels/benchmark_metrics.py `_json_sha256`)."""
+    text: str = json.dumps(digests, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _tensor_sha256(target: Float32[ndarray, "3 h w"]) -> str:
-    """Upstream's tensor digest: dtype string, shape JSON, then the raw bytes."""
+def target_sha256(rgb: UInt8[ndarray, "h w 3"]) -> str:
+    """Upstream's digest of a float32 CHW target tensor (`_tensor_sha256`): dtype string, shape JSON, then the raw bytes."""
+    target: Float32[ndarray, "3 h w"] = np.ascontiguousarray((rgb.astype(np.float32) / np.float32(255.0)).transpose(2, 0, 1))
     digest = hashlib.sha256()
     digest.update(target.dtype.str.encode())
     digest.update(json.dumps(list(target.shape), separators=(",", ":")).encode())
-    digest.update(np.ascontiguousarray(target).tobytes())
+    digest.update(target.tobytes())
     return digest.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class SfmPoints:
+    """The COLMAP point cloud upstream initializes from."""
+
+    xyz: Float32[ndarray, "n 3"]
+    """Point positions."""
+    rgb: UInt8[ndarray, "n 3"]
+    """Point colors."""
+    source: str
+    """File name the points came from."""
+
+
+def read_sfm_points(sparse: Path) -> SfmPoints:
+    """Read the SfM cloud with 2DGS precedence: points3D.ply, then points3D.bin, then points3D.txt."""
+    if (sparse / "points3D.ply").is_file():
+        vertex = PlyData.read(str(sparse / "points3D.ply"))["vertex"]
+        xyz: Float32[ndarray, "n 3"] = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1).astype(np.float32)
+        rgb: UInt8[ndarray, "n 3"] = np.stack([vertex["red"], vertex["green"], vertex["blue"]], axis=1).astype(np.uint8)
+        return SfmPoints(xyz=xyz, rgb=rgb, source="points3D.ply")
+    positions: list[tuple[float, float, float]] = []
+    colors: list[tuple[int, int, int]] = []
+    if (sparse / "points3D.bin").is_file():
+        data: bytes = (sparse / "points3D.bin").read_bytes()
+        offset: int = 8
+        for _ in range(struct.unpack_from("<Q", data)[0]):
+            record: tuple = struct.unpack_from("<Q3d3BdQ", data, offset)
+            positions.append(record[1:4])
+            colors.append(record[4:7])
+            offset += struct.calcsize("<Q3d3BdQ") + 8 * record[8]
+        source: str = "points3D.bin"
+    elif (sparse / "points3D.txt").is_file():
+        for line in (sparse / "points3D.txt").read_text().splitlines():
+            if line.strip() and not line.startswith("#"):
+                fields: list[str] = line.split()
+                positions.append((float(fields[1]), float(fields[2]), float(fields[3])))
+                colors.append((int(fields[4]), int(fields[5]), int(fields[6])))
+        source = "points3D.txt"
+    else:
+        raise FileNotFoundError(f"No SfM points (points3D.ply/.bin/.txt) in {sparse}")
+    return SfmPoints(xyz=np.array(positions, dtype=np.float32).reshape(-1, 3), rgb=np.array(colors, dtype=np.uint8).reshape(-1, 3), source=source)
 
 
 def load_target(image_path: Path, width: int, height: int) -> UInt8[ndarray, "h w 3"]:
@@ -178,11 +216,10 @@ def write_targets(contract: CameraContract, scene_dir: Path, out_dir: Path) -> l
     written: list[Path] = []
     for camera in contract.geometry.test:
         rgb: UInt8[ndarray, "h w 3"] = load_target(find_image(images_dir, camera.name), camera.width, camera.height)
-        chw: Float32[ndarray, "3 h w"] = np.ascontiguousarray((rgb.astype(np.float32) / np.float32(255.0)).clip(0, 1).transpose(2, 0, 1))
-        digests.append([camera.name, _tensor_sha256(chw)])
+        digests.append([camera.name, target_sha256(rgb)])
         path: Path = out_dir / f"{camera.name}.png"
         write_png16(path, rgb.astype(np.uint16) * np.uint16(257))
         written.append(path)
-    if _json_sha256(digests) != contract.test.ordered_target_tensors_sha256:
+    if ordered_targets_sha256(digests) != contract.test.ordered_target_tensors_sha256:
         raise ValueError(f"{scene_dir}: test targets do not match the camera contract digest")
     return written

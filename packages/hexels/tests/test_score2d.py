@@ -10,9 +10,9 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("scripts.decode_image", reason="needs upstream hexels (hexels env)")
 
-from hexels_bench.apis.decode2d import GSPLAT, Config, decode_fit, published_files  # noqa: E402
+from hexels_bench.apis.decode2d import Config, decode_fit, published_files  # noqa: E402
 from hexels_bench.layout import Roots  # noqa: E402
-from hexels_bench.results2d import ImageRun  # noqa: E402
+from hexels_bench.results2d import FITS, ImageRun  # noqa: E402
 from hexels_bench.score2d import ImageScorer, ImageScores, load_target, time_decoder  # noqa: E402
 
 STEM: str = "anime-1_2k"
@@ -63,10 +63,10 @@ def test_scorer_equals_upstream_evaluate_image() -> None:
 def test_wgsl_decode_matches_cuda_and_the_catalog(tmp_path: Path) -> None:
     """specs/twod.md 3 gates on one published fit: CUDA vs catalog < 1e-3 dB, WGSL vs CUDA >= 50 dB, |dPSNR| < 0.01 dB."""
     published_or_skip()
-    if not GSPLAT.is_file():
-        pytest.skip(f"needs the release gsplat binary {GSPLAT} (cargo build --release -p gsplat-cli)")
     config = Config(stems=[STEM], roots=Roots(runs=tmp_path))
-    files = published_files(config.roots, STEM, "pub-rich")
+    if not config.gsplat.is_file():
+        pytest.skip(f"needs the release gsplat binary {config.gsplat} (pixi run -e gsplat-rust-renderer gsplat-build)")
+    files = published_files(config.roots, STEM, FITS["pub-rich"])
     assert files is not None
     runs: list[ImageRun] = decode_fit(config, ImageScorer(torch.device("cuda")), STEM, files)
     cuda, wgsl = runs

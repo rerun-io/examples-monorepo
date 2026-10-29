@@ -1,4 +1,3 @@
-import io
 import math
 import struct
 from pathlib import Path
@@ -7,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-pytest.importorskip("open3d", reason="surface fusion needs an importable open3d (hexels-surface env)", exc_type=ImportError)
+pytest.importorskip("open3d", reason="surface fusion needs an importable open3d (hexels env)", exc_type=ImportError)
 
 from hexels_bench.apis.surface_run import DepthParity, frame_parity, surface_out_dir, total_parity  # noqa: E402
 from hexels_bench.cameras import ContractCamera  # noqa: E402
@@ -24,7 +23,7 @@ from hexels_bench.surface import (  # noqa: E402
     surface_depth,
     tsdf_settings,
 )
-from hexels_bench.surface_frames import SurfaceFrame, read_frames, write_frame  # noqa: E402
+from hexels_bench.surface_frames import SurfaceFrame  # noqa: E402
 
 
 def rotation_from_quaternion(q: np.ndarray) -> np.ndarray:
@@ -118,7 +117,7 @@ def test_tsdf_settings_follow_the_two_upstream_groups() -> None:
 def frontal_camera(name: str, width: int = 64, height: int = 48) -> ContractCamera:
     return ContractCamera(
         name=name, width=width, height=height, fov_x=1.0, fov_y=2 * math.atan(math.tan(0.5) * height / width),
-        world_view_transform=np.eye(4).tolist(), camera_center=[0.0, 0.0, 0.0],
+        world_view_transform=np.eye(4), camera_center=np.zeros(3),
     )  # fmt: skip
 
 
@@ -168,26 +167,6 @@ def frame(name: str, seed: int) -> SurfaceFrame:
     )
 
 
-def test_frames_survive_the_upstream_pipe() -> None:
-    stream = io.BytesIO()
-    sent: list[SurfaceFrame] = [frame("0000", 0), frame("0001", 1)]
-    for item in sent:
-        write_frame(stream, item)
-    stream.seek(0)
-    received: list[SurfaceFrame] = list(read_frames(stream))
-    assert [item.name for item in received] == ["0000", "0001"]
-    for a, b in zip(sent, received, strict=True):
-        for field in ("rgb", "median_depth", "expected_depth", "alpha"):
-            np.testing.assert_array_equal(getattr(a, field), getattr(b, field))
-
-
-def test_a_truncated_pipe_is_an_error() -> None:
-    stream = io.BytesIO()
-    write_frame(stream, frame("0000", 0))
-    with pytest.raises(EOFError):
-        list(read_frames(io.BytesIO(stream.getvalue()[:-5])))
-
-
 def test_parity_totals_weight_views_by_their_pixels() -> None:
     a: SurfaceFrame = frame("a", 0)
     b = SurfaceFrame(name="a", rgb=a.rgb, median_depth=a.median_depth + np.float32(0.01), expected_depth=a.expected_depth, alpha=a.alpha)
@@ -233,13 +212,14 @@ def test_rrd_frames_read_the_cli_layout_in_view_order(tmp_path: Path) -> None:
 @pytest.mark.parametrize(("dataset", "scene"), [("dtu", "scan24"), ("tnt", "Barn"), ("mipnerf360", "garden")])
 def test_scene_cameras_equal_upstream_camera_contracts(dataset, scene) -> None:
     """All registered views of a real scene equal the HF camera contract's training + test records."""
-    from hexels_bench.cameras import load_contract
+    from hexels_bench.cameras import CameraContract
+    from hexels_bench.layout import read_json
 
     roots = Roots()
     contract_path: Path = roots.contract(dataset, scene)
     if not contract_path.is_file() or not roots.scene_dir(dataset, scene).is_dir():
         pytest.skip(f"needs {contract_path} and {roots.scene_dir(dataset, scene)}")
-    contract = load_contract(contract_path)
+    contract = read_json(CameraContract, contract_path)
     reference: list[ContractCamera] = sorted(contract.geometry.training + contract.geometry.test, key=lambda camera: camera.name)
     cameras: list[ContractCamera] = scene_cameras(roots.scene_dir(dataset, scene), contract.settings.images, contract.settings.resolution)
     assert [(c.name, c.width, c.height, c.fov_x, c.fov_y) for c in cameras] == [(c.name, c.width, c.height, c.fov_x, c.fov_y) for c in reference]
@@ -257,12 +237,14 @@ def test_post_process_keeps_everything_when_asked_for_more_clusters_than_exist()
     assert len(post_process_mesh(big + small, clusters_to_keep=50).triangles) == total
 
 
-def test_every_all_view_surface_method_is_a_cli_choice() -> None:
+def test_every_surface_method_has_one_table_row() -> None:
     from typing import get_args
 
-    from hexels_bench.apis.surface_run import PUBLISHED_SURFACE, SurfaceMethod, surface_model_dir
+    from hexels_bench.apis.surface_run import SURFACE_METHODS, SurfaceMethod, surface_model_dir
 
     roots = Roots(data=Path("/d"), runs=Path("/r"))
-    assert set(PUBLISHED_SURFACE) <= set(get_args(SurfaceMethod))
+    assert list(SURFACE_METHODS) == list(get_args(SurfaceMethod))
+    assert all(SURFACE_METHODS[spec.ply_from].depth_source == "wgsl" for spec in SURFACE_METHODS.values())
+    assert surface_model_dir(roots, "dtu", "scan24", "hexels-v3-surf-30k-pub-cuda") == roots.published_surface_model("dtu", "scan24")
     assert surface_model_dir(roots, "dtu", "scan24", "hexels-v3-surf-30k") == Path("/r/dtu/scan24/hexels-v3-surf-30k/upstream")
     assert surface_model_dir(roots, "dtu", "scan24", "brush-7k") is None

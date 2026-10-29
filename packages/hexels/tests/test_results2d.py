@@ -1,8 +1,11 @@
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
+from serde import from_dict
 
+from hexels_bench.paper import PaperNumbers
 from hexels_bench.results2d import (
     IDENTICAL_PSNR,
     Condition,
@@ -79,13 +82,19 @@ def test_worst_window_finds_the_hot_patch() -> None:
 
 def test_table_rows_give_per_image_rows_and_a_mean_with_published_and_table1_numbers(tmp_path: Path) -> None:
     published: dict = {"psnr_hxm": 0.0, "ssim_hxm": 0.9, "lpips_alex_hxm": 0.1, "psnr_uint16": 0.0, "median_fps_uint16_a5000": 200.0}
-    paper: dict = {
-        "table1_2d": [{"method": "Hexels", "psnr": 35.82, "ssim": 0.9359, "lpips_alex": 0.0924}],
-        "hf_images_2d_per_image": {
-            "anime-1_2k": {"spatial-rgb": published | {"psnr_hxm": 41.0, "psnr_uint16": 41.1}},
-            "art-1_2k": {"spatial-rgb": published | {"psnr_hxm": 21.0, "psnr_uint16": 21.1}},
+    paper: PaperNumbers = from_dict(
+        PaperNumbers,
+        {
+            "hf_nvs_per_scene": {},
+            "sfm_points": {},
+            "table1_2d": [{"method": "Hexels", "psnr": 35.82, "ssim": 0.9359, "lpips_alex": 0.0924}],
+            "hf_images_2d_per_image": {
+                "anime-1_2k": {"spatial-rgb": published | {"psnr_hxm": 41.0, "psnr_uint16": 41.1}},
+                "art-1_2k": {"spatial-rgb": published | {"psnr_hxm": 21.0, "psnr_uint16": 21.1}},
+            },
+            "hf_surface_main_per_scene": {},
         },
-    }
+    )
     for stem, psnr, seconds in (("anime-1_2k", 40.0, 500.0), ("art-1_2k", 20.0, 700.0)):
         image = ImageRun(
             method="hexels-2d", image=stem, category=image_category(stem), decoder="cuda", gpu="RTX 3060", host="h",
@@ -93,7 +102,9 @@ def test_table_rows_give_per_image_rows_and_a_mean_with_published_and_table1_num
             conditions=[scores("decoded_hxm", psnr), scores("raw_fp32", psnr + 0.1)],
         )  # fmt: skip
         write_image_run(tmp_path / stem / "hexels-2d" / "metrics.json", image)
-        (tmp_path / stem / "hexels-2d" / "train.json").write_text(f'{{"loop_seconds": {seconds}, "peak_vram_gib": 2.0, "gpu": "RTX 3060"}}')
+        train: dict = {"method": "hexels-2d", "dataset": "imagegs", "scene": stem, "steps": 5100, "loop_seconds": seconds, "total_seconds": seconds + 9.0,
+                       "peak_vram_gib": 2.0, "primitives": 10000, "sfm_points": None, "gpu": "RTX 3060", "host": "h", "source_sha": "x", "command": "fit"}  # fmt: skip
+        (tmp_path / stem / "hexels-2d" / "train.json").write_text(json.dumps(train))
     rows: list[TableRow] = table_rows(tmp_path, ["anime-1_2k", "art-1_2k"], paper)
     by_key: dict[tuple[str, str], TableRow] = {(row.condition, row.group): row for row in rows}
     assert {row.method for row in rows} == {"hexels-2d"}

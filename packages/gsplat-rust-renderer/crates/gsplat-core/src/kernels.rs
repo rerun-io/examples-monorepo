@@ -15,7 +15,7 @@ pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
 
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
-pub(crate) fn sources() -> [String; 13] {
+pub(crate) fn sources() -> [String; 12] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -23,7 +23,6 @@ pub(crate) fn sources() -> [String; 13] {
         "scan.wgsl",
         "sort.wgsl",
         "dispatch.wgsl",
-        "raster_outputs.wgsl",
         "hexel_project.wgsl",
         "hexel_map.wgsl",
         "hexel_raster.wgsl",
@@ -64,6 +63,12 @@ const DEPTH: wgpu::BindingType = wgpu::BindingType::StorageTexture {
     view_dimension: wgpu::TextureViewDimension::D2,
 };
 
+const ID: wgpu::BindingType = wgpu::BindingType::StorageTexture {
+    access: wgpu::StorageTextureAccess::WriteOnly,
+    format: wgpu::TextureFormat::R32Uint,
+    view_dimension: wgpu::TextureViewDimension::D2,
+};
+
 pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
     match entry {
         "project_forward" => &[
@@ -87,20 +92,12 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (9, R),
         ],
         "gather" => &[(1, R), (2, R), (3, R), (4, W)],
-        "map_tiles" | "hexel_map_tiles" | "image_map_tiles" => {
-            &[(0, U), (1, R), (5, R), (6, R), (7, W), (8, W)]
-        }
+        "map_tiles" => &[(0, U), (1, R), (5, R), (6, R), (7, W), (8, W)],
         "tile_offsets" => &[(0, U), (1, R), (7, W), (9, W)],
-        "raster_float" | "hexel_raster_float" | "image_raster_float" => {
-            &[(0, U), (1, R), (2, R), (3, R), (4, W), (7, R)]
-        }
-        "raster_packed" | "hexel_raster_packed" | "image_raster_packed" => {
-            &[(0, U), (1, R), (2, R), (3, R), (5, W), (7, R)]
-        }
-        "raster_texture" | "hexel_raster_texture" => {
-            &[(0, U), (1, R), (2, R), (3, R), (6, COLOR), (7, R)]
-        }
-        "raster_texture_depth" | "hexel_raster_texture_depth" => &[
+        "raster_float" => &[(0, U), (1, R), (2, R), (3, R), (4, W), (7, R)],
+        "raster_packed" => &[(0, U), (1, R), (2, R), (3, R), (5, W), (7, R)],
+        "raster_texture" => &[(0, U), (1, R), (2, R), (3, R), (6, COLOR), (7, R)],
+        "raster_texture_depth" => &[
             (0, U),
             (1, R),
             (2, R),
@@ -109,9 +106,20 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (7, R),
             (8, DEPTH),
         ],
+        "raster_texture_depth_id" => &[
+            (0, U),
+            (1, R),
+            (2, R),
+            (3, R),
+            (6, COLOR),
+            (7, R),
+            (8, DEPTH),
+            (11, R),
+            (12, ID),
+        ],
         "hexel_forward" | "image_forward" => &[(0, U), (1, R), (4, W), (5, W), (6, W), (7, W)],
         "hexel_visible" | "image_visible" => &[(0, U), (1, R), (4, W), (6, W), (8, W)],
-        "raster_surface" | "hexel_raster_surface" => &[
+        "raster_surface" => &[
             (0, U),
             (1, R),
             (2, R),
@@ -137,8 +145,8 @@ pub(crate) struct Stages {
     pub forward: Kernel,
     pub visible: Kernel,
     pub map_tiles: Kernel,
-    /// Float, packed, texture, texture-depth and surface rasterizers; `None` where unsupported.
-    rasters: [Option<Kernel>; 5],
+    /// Rasterizers in `RasterKind` order; `None` where unsupported.
+    rasters: [Option<Kernel>; 6],
 }
 
 impl Stages {
@@ -167,6 +175,16 @@ pub(crate) struct Kernels {
     pub prepare: Kernel,
 }
 
+/// Raster entry points in `RasterKind` order; every primitive module declares all of them.
+const RASTERS: [&str; 6] = [
+    "raster_float",
+    "raster_packed",
+    "raster_texture",
+    "raster_texture_depth",
+    "raster_surface",
+    "raster_texture_depth_id",
+];
+
 impl Kernels {
     pub fn new(device: &wgpu::Device) -> Self {
         let [
@@ -176,7 +194,6 @@ impl Kernels {
             scan,
             sort,
             prepare,
-            outputs,
             hexel_projection,
             hexel_mapping,
             hexel_raster,
@@ -184,45 +201,27 @@ impl Kernels {
             image_mapping,
             image_raster,
         ] = sources().map(|s| module(device, &s));
-        let kernel = |module, entry| pipeline(device, module, entry, bindings(entry));
+        let kernel = |module: &wgpu::ShaderModule, entry: &str| {
+            pipeline(device, module, entry, bindings(entry))
+        };
+        // 2D fits keep only the float and packed targets.
+        let stages = |project,
+                      [forward, visible]: [&str; 2],
+                      map,
+                      raster: &wgpu::ShaderModule,
+                      targets: usize| Stages {
+            forward: kernel(project, forward),
+            visible: kernel(project, visible),
+            map_tiles: kernel(map, "map_tiles"),
+            rasters: std::array::from_fn(|i| (i < targets).then(|| kernel(raster, RASTERS[i]))),
+        };
+        let splat = ["project_forward", "project_visible"];
+        let params = ["hexel_forward", "hexel_visible"];
+        let image = ["image_forward", "image_visible"];
         Self {
-            splats: Stages {
-                forward: kernel(&projection, "project_forward"),
-                visible: kernel(&projection, "project_visible"),
-                map_tiles: kernel(&mapping, "map_tiles"),
-                rasters: [
-                    Some(kernel(&outputs, "raster_float")),
-                    Some(kernel(&outputs, "raster_packed")),
-                    Some(kernel(&raster, "raster_texture")),
-                    Some(kernel(&raster, "raster_texture_depth")),
-                    Some(kernel(&outputs, "raster_surface")),
-                ],
-            },
-            hexels: Stages {
-                forward: kernel(&hexel_projection, "hexel_forward"),
-                visible: kernel(&hexel_projection, "hexel_visible"),
-                map_tiles: kernel(&hexel_mapping, "hexel_map_tiles"),
-                rasters: [
-                    "hexel_raster_float",
-                    "hexel_raster_packed",
-                    "hexel_raster_texture",
-                    "hexel_raster_texture_depth",
-                    "hexel_raster_surface",
-                ]
-                .map(|entry| Some(kernel(&hexel_raster, entry))),
-            },
-            images: Stages {
-                forward: kernel(&image_projection, "image_forward"),
-                visible: kernel(&image_projection, "image_visible"),
-                map_tiles: kernel(&image_mapping, "image_map_tiles"),
-                rasters: [
-                    Some(kernel(&image_raster, "image_raster_float")),
-                    Some(kernel(&image_raster, "image_raster_packed")),
-                    None,
-                    None,
-                    None,
-                ],
-            },
+            splats: stages(&projection, splat, &mapping, &raster, 6),
+            hexels: stages(&hexel_projection, params, &hexel_mapping, &hexel_raster, 6),
+            images: stages(&image_projection, image, &image_mapping, &image_raster, 2),
             gather: kernel(&mapping, "gather"),
             tile_offsets: kernel(&mapping, "tile_offsets"),
             scan: kernel(&scan, "scan"),

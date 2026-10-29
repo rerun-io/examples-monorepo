@@ -1,21 +1,17 @@
-"""Per-scene comparison rows (ours and published) read from the run layout, logged as Rerun data."""
+"""Per-scene comparison rows for the side-by-side recording: our numbers and the published ones from the benchmark
+table (`runs/TABLE.json`, written by the hexels package), viewer timing from `gsplat probe` / `gsplat speed`."""
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
 
 import numpy as np
 import rerun as rr
 from jaxtyping import Float64
 from numpy import ndarray
-from serde import serde
+from serde import SerdeError, serde
+from serde.json import from_json
 
-from gsplat_rust_renderer.nvs_protocol import read_json
-
-RunDataset: TypeAlias = Literal["mipnerf360", "dtu", "tnt"]
-PAPER_DATASET: dict[RunDataset, str] = {"mipnerf360": "mipnerf360", "dtu": "dtu", "tnt": "tanks_and_temples"}
-# FP32 learned state per primitive (contract run-layout.md, Deploy MB).
-PRIMITIVE_BYTES: dict[str, int] = {"brush": 236, "v1": 80, "v2": 116, "v3": 260}
 METRICS_ENTITY: str = "/metrics/table"
 METRICS_TIMELINE: str = "row"
 # Table rows in display order. The label column sorts first: the dataframe orders columns by name.
@@ -37,93 +33,69 @@ METRIC_ROWS: tuple[tuple[str, str], ...] = (
 )
 
 
+def read_json[Record](cls: type[Record], path: Path) -> Record:
+    """Decode a JSON record; malformed input names the file."""
+    try:
+        return from_json(cls, path.read_text())
+    except (SerdeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{path}: {error}") from error
+
+
 @serde
 @dataclass(frozen=True, slots=True)
-class RunMetrics:
-    """`metrics.json` / `published_metrics.json` of one run (read partially)."""
+class PublishedCells:
+    """`paper` of a TABLE.json scene row: the published 30k checkpoint of the same variant (read partially)."""
 
+    psnr: float
+    """PSNR, dB."""
+    ssim: float
+    """SSIM."""
+    lpips_vgg: float
+    """LPIPS-VGG."""
+    deploy_mb: float
+    """Learned FP32 bytes / 1e6."""
+    primitives: int
+    """Hexels."""
+    train_min: float | None
+    """Training minutes on the authors' A5000 (30k steps)."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class SceneCells:
+    """One (dataset, scene, method) row of TABLE.json (read partially); unscored cells are null."""
+
+    dataset: str
+    """Run-layout dataset."""
+    scene: str
+    """Scene name."""
+    method: str
+    """Run method."""
     psnr: float | None
-    """Mean PSNR over the test views, dB."""
+    """Mean PSNR, dB (shared scorer)."""
     ssim: float | None
     """Mean SSIM."""
     lpips_vgg: float | None
     """Mean LPIPS-VGG."""
-    scorer: str
-    """`shared-png16` or `upstream-float`."""
-    fps: float | None = None
-    """Render FPS under the run-layout protocol, when measured."""
+    fps: float | None
+    """Paper-protocol render FPS over the test views."""
+    train_min: float | None
+    """Optimisation loop minutes."""
+    vram_gib: float | None
+    """Peak training VRAM, GiB."""
+    deploy_mb: float | None
+    """Primitives x FP32 bytes / 1e6."""
+    paper: PublishedCells | None
+    """Published checkpoint of the same variant (Hexels rows)."""
 
 
 @serde
 @dataclass(frozen=True, slots=True)
-class TrainRecord:
-    """`train.json` of a run we trained (read partially)."""
+class BenchTable:
+    """`runs/TABLE.json` (read partially): one row per protocol scene and method, complete or not."""
 
-    loop_seconds: float
-    """Optimisation loop wall time."""
-    peak_vram_gib: float | None
-    """Peak training process GPU memory."""
-    primitives: int
-    """Final primitive count."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class BrushSummary:
-    """`brush-summary.json` (Brush's own 8-bit eval at the last step, read partially)."""
-
-    brush_eval_psnr: float
-    """Brush in-process eval PSNR."""
-    brush_eval_ssim: float
-    """Brush in-process eval SSIM."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ParitySummary:
-    """WGSL render of a published model against GT."""
-
-    mean_psnr_wgsl_gt: float
-    """Mean PSNR of our WGSL renders against GT, dB."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ParityReport:
-    """`parity.json` of a `-pub-wgsl` run (read partially)."""
-
-    summary: ParitySummary
-    """Means over the test views."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class PaperScene:
-    """One published checkpoint in `paper-numbers.json` `hf_nvs_per_scene` (authors' A5000 numbers)."""
-
-    psnr: float
-    """Mean test PSNR, dB."""
-    ssim: float
-    """Mean test SSIM."""
-    lpips_vgg: float
-    """Mean test LPIPS-VGG."""
-    primitives: int
-    """Primitive count."""
-    learned_model_bytes: int
-    """FP32 learned state in bytes."""
-    train_seconds_summary: float | None
-    """Training time, seconds."""
-    peak_gpu_used_gb_legacy: float | None
-    """Peak GPU memory during training."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class PaperNumbers:
-    """`specs/paper-numbers.json` (read partially)."""
-
-    hf_nvs_per_scene: dict[str, dict[str, dict[str, PaperScene]]]
-    """dataset -> scene -> `v{1,2,3}-{fixed,grown}` -> published numbers."""
+    scenes: list[SceneCells]
+    """Per-scene rows."""
 
 
 @serde
@@ -204,89 +176,65 @@ class MetricRow:
     """`gsplat speed --impl ours` on the orbit (renderer only), median of repeat medians, ms."""
 
 
-def read_record[Record](cls: type[Record], path: Path) -> Record | None:
-    """Decode an optional JSON record; a missing file is `None`, a malformed one names the file."""
-    return read_json(cls, path) if path.is_file() else None
+def scene_cells(table: BenchTable, dataset: str, scene: str, method: str) -> SceneCells | None:
+    """The TABLE.json row of one run, None when the table has no such method."""
+    return next((row for row in table.scenes if (row.dataset, row.scene, row.method) == (dataset, scene, method)), None)
 
 
-def probe_cells(path: Path | None) -> dict[str, float]:
-    """Median/p95 frame time and compute GPU memory from a `gsplat probe` report."""
-    report: ProbeReport | None = read_record(ProbeReport, path) if path is not None else None
-    if report is None:
-        return {}
-    frame_ms: Float64[ndarray, "n"] = np.array([frame.ms for frame in report.frames], dtype=np.float64)
-    return {
-        "viewer_ms_median": float(np.median(frame_ms)),
-        "viewer_ms_p95": float(np.percentile(frame_ms, 95.0)),
-        "viewer_gpu_mb": (report.gpu_bytes_scene + report.gpu_bytes_views) / 1e6,
-    }
+def run_row(table: BenchTable, cells: SceneCells, name: str, primitives: int, probe: Path | None, speed: Path | None) -> MetricRow:
+    """Our row for one run: its TABLE.json cells (null until the shared scorer scored it) and viewer timing.
 
-
-def run_row(run_dir: Path, method: str, primitive: str, primitives: int, probe: Path | None = None, speed: Path | None = None) -> MetricRow:
-    """Our row for one run directory. PSNR source order: shared scorer, WGSL parity, Brush's own eval.
-
-    A run without its own render FPS takes it from `<run>-wgsl`, the same model rendered by gsplat-core.
+    A run without its own render FPS (Brush renders its test views in the trainer) takes it from `<method>-wgsl`,
+    the same model rendered by gsplat-core.
 
     Args:
-        run_dir: `runs/<dataset>/<scene>/<method>`.
-        method: display name.
-        primitive: key of PRIMITIVE_BYTES (`brush`, `v1`, `v2`, `v3`).
-        primitives: primitive count of the model shown.
-        probe: optional `gsplat probe` report for this model.
-        speed: optional `gsplat speed` report for this model.
+        table: The benchmark table.
+        cells: The run's row of `table`.
+        name: Display name of the model.
+        primitives: Primitive count of the model shown.
+        probe: Optional `gsplat probe` report for this model.
+        speed: Optional `gsplat speed` report for this model.
     """
-    metrics: RunMetrics | None = read_record(RunMetrics, run_dir / "metrics.json")
-    parity: ParityReport | None = read_record(ParityReport, run_dir / "parity.json")
-    brush: BrushSummary | None = read_record(BrushSummary, run_dir / "brush-summary.json")
-    train: TrainRecord | None = read_record(TrainRecord, run_dir / "train.json")
-    psnr: float | None = None
-    ssim: float | None = None
-    lpips_vgg: float | None = None
-    fps: float | None = None
-    source: str = "unscored"
-    if metrics is not None:
-        psnr, ssim, lpips_vgg, fps, source = metrics.psnr, metrics.ssim, metrics.lpips_vgg, metrics.fps, f"ours, {metrics.scorer}"
-    elif parity is not None:
-        psnr, source = parity.summary.mean_psnr_wgsl_gt, "ours, WGSL vs GT"
-    elif brush is not None:
-        psnr, ssim, source = brush.brush_eval_psnr, brush.brush_eval_ssim, "ours, Brush eval 8-bit"
-    if fps is None:
-        rerender: RunMetrics | None = read_record(RunMetrics, run_dir.with_name(f"{run_dir.name}-wgsl") / "metrics.json")
-        fps = rerender.fps if rerender is not None else None
-    report: SpeedReport | None = read_record(SpeedReport, speed) if speed is not None else None
-    ours: list[SpeedBackend] = [backend for backend in report.backends if backend.implementation == "ours"] if report is not None else []
+    rerender: SceneCells | None = scene_cells(table, cells.dataset, cells.scene, f"{cells.method}-wgsl")
+    fps: float | None = cells.fps if cells.fps is not None or rerender is None else rerender.fps
+    viewer_ms: Float64[ndarray, "n"] | None = None
+    viewer_gpu_mb: float | None = None
+    if probe is not None:
+        report: ProbeReport = read_json(ProbeReport, probe)
+        viewer_ms = np.array([frame.ms for frame in report.frames], dtype=np.float64)
+        viewer_gpu_mb = (report.gpu_bytes_scene + report.gpu_bytes_views) / 1e6
+    ours: list[SpeedBackend] = [b for b in read_json(SpeedReport, speed).backends if b.implementation == "ours"] if speed is not None else []
     return MetricRow(
-        method=method,
-        source=source,
-        psnr=psnr,
-        ssim=ssim,
-        lpips_vgg=lpips_vgg,
+        method=name,
+        source="ours, shared-png16" if cells.psnr is not None else "unscored",
+        psnr=cells.psnr,
+        ssim=cells.ssim,
+        lpips_vgg=cells.lpips_vgg,
         fps=fps,
-        train_min=train.loop_seconds / 60.0 if train is not None else None,
-        train_vram_gib=train.peak_vram_gib if train is not None else None,
-        deploy_mb=primitives * PRIMITIVE_BYTES[primitive] / 1e6,
+        train_min=cells.train_min,
+        train_vram_gib=cells.vram_gib,
+        deploy_mb=cells.deploy_mb,
         primitives=primitives,
+        viewer_ms_median=None if viewer_ms is None else float(np.median(viewer_ms)),
+        viewer_ms_p95=None if viewer_ms is None else float(np.percentile(viewer_ms, 95.0)),
+        viewer_gpu_mb=viewer_gpu_mb,
         renderer_ms_median=ours[0].median_of_repeat_medians_ms if ours else None,
-        **probe_cells(probe),
     )
 
 
-def paper_row(paper_numbers: Path, dataset: RunDataset, scene: str, variant: str, method: str) -> MetricRow:
-    """The authors' published per-scene numbers for one checkpoint (`v1-fixed`, ...)."""
-    numbers: PaperNumbers | None = read_record(PaperNumbers, paper_numbers)
-    if numbers is None:
-        raise ValueError(f"Missing {paper_numbers}")
-    published: PaperScene = numbers.hf_nvs_per_scene[PAPER_DATASET[dataset]][scene][variant]
+def paper_row(cells: SceneCells, name: str) -> MetricRow:
+    """The authors' published per-scene numbers for the checkpoint beside a Hexels row."""
+    if cells.paper is None:
+        raise ValueError(f"TABLE.json has no published checkpoint beside {cells.dataset}/{cells.scene}/{cells.method}")
     return MetricRow(
-        method=method,
+        method=name,
         source="published, A5000",
-        psnr=published.psnr,
-        ssim=published.ssim,
-        lpips_vgg=published.lpips_vgg,
-        train_min=published.train_seconds_summary / 60.0 if published.train_seconds_summary is not None else None,
-        train_vram_gib=published.peak_gpu_used_gb_legacy,
-        deploy_mb=published.learned_model_bytes / 1e6,
-        primitives=published.primitives,
+        psnr=cells.paper.psnr,
+        ssim=cells.paper.ssim,
+        lpips_vgg=cells.paper.lpips_vgg,
+        train_min=cells.paper.train_min,
+        deploy_mb=cells.paper.deploy_mb,
+        primitives=cells.paper.primitives,
     )
 
 

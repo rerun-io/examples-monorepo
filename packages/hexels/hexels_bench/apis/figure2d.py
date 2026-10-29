@@ -6,11 +6,9 @@
 - `runs/imagegs/summary.rrd` + `runs/imagegs/TABLE2D.json`: every method and condition per image and
   over all images, beside the HF catalog numbers of the same images and the paper's Table 1.
 
-Torch-free (reads metrics.json and 16-bit PNG renders). Needs `rerun-sdk`: run it with an env that has
-it (gsplat-rust-renderer-dev) and `PYTHONPATH=packages/hexels` until the hexels env carries rerun-sdk.
+Reads metrics.json and the 16-bit PNG renders; decodes nothing.
 """
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,7 +20,8 @@ from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
 from serde.json import to_json
 
-from hexels_bench.layout import Roots
+from hexels_bench.layout import Roots, read_json
+from hexels_bench.paper import PAPER_NUMBERS, PaperNumbers
 from hexels_bench.png16 import read_png16
 from hexels_bench.results2d import (
     ERROR_RANGE,
@@ -37,7 +36,6 @@ from hexels_bench.results2d import (
 )
 
 CROP: int = 256
-PAPER_NUMBERS: Path = Path.home() / "hexels-work" / "specs" / "paper-numbers.json"
 
 
 @dataclass
@@ -148,8 +146,7 @@ BAR_SERIES: tuple[tuple[str, Condition, tuple[int, int, int]], ...] = (
 
 def write_summary(roots: Roots, stems: list[str]) -> Path:
     """TABLE2D.json and summary.rrd: one table row per method, condition and image (and their mean)."""
-    paper: dict = json.loads(PAPER_NUMBERS.read_text())
-    rows: list[TableRow] = table_rows(roots.runs / "imagegs", stems, paper)
+    rows: list[TableRow] = table_rows(roots.runs / "imagegs", stems, read_json(PaperNumbers, PAPER_NUMBERS))
     (roots.runs / "imagegs" / "TABLE2D.json").write_text(to_json(rows) + "\n")
     out: Path = roots.runs / "imagegs" / "summary.rrd"
     recording = rr.RecordingStream("hexels-2d-summary", recording_id="summary")

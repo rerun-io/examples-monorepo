@@ -206,10 +206,8 @@ site-package-path = [
     ".pixi/envs/gauss-surf-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages",
     ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages/rerun_sdk",
-    # hexels-surface-dev first: it is the env of the surface modules (open3d 0.19, rerun-sdk).
-    ".pixi/envs/hexels-surface-dev/lib/python3.12/site-packages",
-    ".pixi/envs/hexels-surface-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/hexels-dev/lib/python3.12/site-packages",
+    ".pixi/envs/hexels-dev/lib/python3.12/site-packages/rerun_sdk",
     # Upstream hexels/scripts are put on sys.path by a .pth file (packages/hexels-src).
     ".pixi/envs/hexels-dev/share/hexels-src",
 ]

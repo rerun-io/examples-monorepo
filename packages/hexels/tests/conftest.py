@@ -1,4 +1,5 @@
 """Shared synthetic inputs."""
+
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -27,7 +28,11 @@ def write_protocol_scene(
 
     def camera(name: str, index: int) -> dict:
         return {
-            "name": name, "width": contract_size[0], "height": contract_size[1], "fov_x": 0.9, "fov_y": 0.7,
+            "name": name,
+            "width": contract_size[0],
+            "height": contract_size[1],
+            "fov_x": 0.9,
+            "fov_y": 0.7,
             "world_view_transform": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.1 * index, 0.0, 3.0, 1.0]],
             "camera_center": [-0.1 * index, 0.0, -3.0],
         }
@@ -36,10 +41,15 @@ def write_protocol_scene(
         "training": [camera(name, i) for i, name in enumerate(NAMES) if name not in test_names],
         "test": [camera(name, i) for i, name in enumerate(NAMES) if name in test_names],
     }
-    split = {key: {"count": len(rows), "ordered_names_sha256": "n", "ordered_geometry_sha256": "g", "ordered_target_tensors_sha256": "t"} for key, rows in geometry.items()}
+    split = {
+        key: {"count": len(rows), "ordered_names_sha256": "n", "ordered_geometry_sha256": "g", "ordered_target_tensors_sha256": "t"}
+        for key, rows in geometry.items()
+    }
     contract: dict = {
         "settings": {"source_path": "data/dtu/scan1", "images": "images", "resolution": 2, "eval": True, "llffhold": 8, "data_device": "cpu"},
-        "training": split["training"], "test": split["test"] | {"ordered_names": test_names}, "geometry": geometry,
+        "training": split["training"],
+        "test": split["test"] | {"ordered_names": test_names},
+        "geometry": geometry,
     }
     contract_path.parent.mkdir(parents=True, exist_ok=True)
     contract_path.write_text(json.dumps(contract))

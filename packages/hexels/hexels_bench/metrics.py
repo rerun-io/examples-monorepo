@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from jaxtyping import Float, Float32, Float64
 from numpy import ndarray
 from serde import serde
-from serde.json import from_json, to_json
+from serde.json import to_json
 
 from hexels_bench.png16 import read_png16, to_unit_float
 
@@ -71,6 +71,39 @@ class MetricsFile:
     """Which scorer produced the numbers."""
     per_view: list[ViewMetrics]
     """Per-view scores, in render order."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class TrainRecord:
+    """`train.json` of a run we trained (contract run-layout.md; Brush, Hexels and the 2D fits)."""
+
+    method: str
+    """Run method, e.g. hexels-v1-7k."""
+    dataset: str
+    """Run-layout dataset name (imagegs for 2D fits)."""
+    scene: str
+    """Scene name or image stem."""
+    steps: int
+    """Optimisation steps."""
+    loop_seconds: float
+    """Wall time of the optimisation loop (Brush: summed step time; upstream: summary.json train_seconds)."""
+    total_seconds: float
+    """Wall time of the whole training process, loading and writes included."""
+    peak_vram_gib: float | None
+    """Peak GPU memory of the trainer process up to the end of training (`gpu_monitor`), GiB; null without NVML."""
+    primitives: int
+    """Primitives in the exported model."""
+    sfm_points: int | None
+    """Points in the scene's SfM model (the primitive cap); null for 2D fits."""
+    gpu: str | None
+    """GPU name; null without NVML."""
+    host: str
+    """Host name."""
+    source_sha: str
+    """Commit of the trainer's source (upstream hexels, or this repository for Brush)."""
+    command: str
+    """Training command line."""
 
 
 def psnr_from_sse(sse: float, elements: int) -> float:
@@ -179,10 +212,6 @@ def write_metrics_file(path: Path, metrics: MetricsFile) -> None:
     path.write_text(to_json(metrics) + "\n")
 
 
-def load_metrics_file(path: Path) -> MetricsFile:
-    return from_json(MetricsFile, path.read_text())
-
-
 def ply_vertex_count(path: Path) -> int:
     """Vertex count from any PLY header (3DGS and hexel PLY alike)."""
     with path.open("rb") as file:
@@ -193,14 +222,3 @@ def ply_vertex_count(path: Path) -> int:
             if line == "end_header":
                 break
     raise ValueError(f"{path}: no vertex element")
-
-
-BYTES_PER_PRIMITIVE: dict[str, int] = {"hexels-v1": 80, "hexels-v2": 116, "hexels-v3": 260, "brush": 236}
-"""FP32 learned bytes per primitive (run-layout.md): Hexels V1/V2/V3 and 3DGS with SH3 (59 floats)."""
-
-
-def bytes_per_primitive(method: str) -> int | None:
-    for prefix, size in BYTES_PER_PRIMITIVE.items():
-        if method.startswith(prefix):
-            return size
-    return None

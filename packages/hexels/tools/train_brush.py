@@ -1,6 +1,6 @@
 import tyro
 
-from gsplat_rust_renderer.apis.train_protocol import Config, main
+from hexels_bench.apis.train_brush import Config, main
 
 if __name__ == "__main__":
     config, extra_flags = tyro.cli(Config, return_unknown_args=True)

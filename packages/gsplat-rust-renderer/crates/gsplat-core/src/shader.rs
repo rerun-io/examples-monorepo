@@ -11,6 +11,7 @@ pub(crate) fn resolve(name: &'static str) -> String {
             "common.wgsl" => include_str!("../shader/common.wgsl"),
             "counts.wgsl" => include_str!("../shader/counts.wgsl"),
             "dispatch.wgsl" => include_str!("../shader/dispatch.wgsl"),
+            "hexagon.wgsl" => include_str!("../shader/hexagon.wgsl"),
             "hexel_common.wgsl" => include_str!("../shader/hexel_common.wgsl"),
             "image_hexel.wgsl" => include_str!("../shader/image_hexel.wgsl"),
             "image_map.wgsl" => include_str!("../shader/image_map.wgsl"),

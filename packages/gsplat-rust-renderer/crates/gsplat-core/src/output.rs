@@ -19,6 +19,14 @@ pub enum Target {
         depth: wgpu::TextureView,
     },
 
+    /// `TextureDepth` plus, per pixel, the global row of the median contributor (the last primitive
+    /// composited while transmittance exceeds one half; `u32::MAX` when none), r32uint, for picking.
+    TextureDepthId {
+        color: wgpu::TextureView,
+        depth: wgpu::TextureView,
+        id: wgpu::TextureView,
+    },
+
     /// Float color as `Float`, two f32 depths per pixel (expected and median camera Z), and four
     /// f32 per pixel for the world normal facing the camera (w = 0). Expected depth and normal are
     /// alpha-weighted sums divided by alpha. Splats use centre depths and leave the normal zero.
@@ -36,6 +44,7 @@ pub(crate) enum RasterKind {
     Texture,
     TextureDepth,
     Surface,
+    TextureDepthId,
 }
 
 impl RasterKind {
@@ -43,7 +52,7 @@ impl RasterKind {
         match self {
             Self::Float | Self::Surface => 4,
             Self::Packed => 5,
-            Self::Texture | Self::TextureDepth => 6,
+            Self::Texture | Self::TextureDepth | Self::TextureDepthId => 6,
         }
     }
 }
@@ -91,6 +100,12 @@ impl Target {
                 texture(depth, wgpu::TextureFormat::R32Float)?;
                 Ok(RasterKind::TextureDepth)
             }
+            Self::TextureDepthId { color, depth, id } => {
+                texture(color, wgpu::TextureFormat::Rgba8Unorm)?;
+                texture(depth, wgpu::TextureFormat::R32Float)?;
+                texture(id, wgpu::TextureFormat::R32Uint)?;
+                Ok(RasterKind::TextureDepthId)
+            }
             Self::Surface {
                 color,
                 depth,
@@ -109,9 +124,9 @@ impl Target {
             Self::Float(buffer) | Self::Packed(buffer) | Self::Surface { color: buffer, .. } => {
                 buffer.as_entire_binding()
             }
-            Self::Texture(color) | Self::TextureDepth { color, .. } => {
-                wgpu::BindingResource::TextureView(color)
-            }
+            Self::Texture(color)
+            | Self::TextureDepth { color, .. }
+            | Self::TextureDepthId { color, .. } => wgpu::BindingResource::TextureView(color),
         }
     }
 }

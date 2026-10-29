@@ -15,12 +15,9 @@ are `apis/decode2d.py`. Ground truth: `runs/imagegs/<stem>/gt/test/<stem>.png` (
 import json
 import shutil
 import socket
-import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeAlias
 
 import numpy as np
 from jaxtyping import UInt8
@@ -28,14 +25,13 @@ from numpy import ndarray
 from PIL import Image
 from serde.json import to_json
 
-from hexels_bench.apis.train import TrainRecord
-from hexels_bench.gpu_monitor import PeakVramSampler
+from hexels_bench.gpu_monitor import Measured, run_measured
 from hexels_bench.layout import Roots
+from hexels_bench.metrics import TrainRecord
 from hexels_bench.png16 import write_png16
+from hexels_bench.results2d import FIT_OF_RUN, FitMethod
 from hexels_bench.upstream import UPSTREAM_HEXELS_REV
 
-FitMethod: TypeAlias = Literal["hexels-2d", "hexels-2d-flat", "imagegs-2d"]
-VARIANT: dict[FitMethod, str] = {"hexels-2d": "rich", "hexels-2d-flat": "flat", "imagegs-2d": "imagegs"}
 PRIMITIVES: int = 10000
 
 
@@ -69,23 +65,9 @@ def stage_image_gt(roots: Roots, stem: str) -> Path:
 def fit_command(roots: Roots, stem: str, method: FitMethod, output: Path, steps: int | None) -> list[str]:
     command: list[str] = [
         sys.executable, "-m", "scripts.fit_image", "--image", str(image_path(roots, stem)),
-        "--output", str(output), "--variant", VARIANT[method],
+        "--output", str(output), "--variant", FIT_OF_RUN[method].recipe,
     ]  # fmt: skip
     return command if steps is None else [*command, "--steps", str(steps)]
-
-
-def run_measured(command: list[str], cwd: Path, log: Path) -> tuple[float, float]:
-    """Run `command` as a direct child; returns (wall seconds, peak VRAM GiB)."""
-    started: float = time.perf_counter()
-    with log.open("a") as stream:
-        stream.write(" ".join(command) + "\n")
-        stream.flush()
-        process = subprocess.Popen(command, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT)
-        with PeakVramSampler(pid=process.pid) as sampler:
-            return_code: int = process.wait()
-    if return_code != 0:
-        raise RuntimeError(f"{command[1:4]} exited with {return_code}; see {log}")
-    return time.perf_counter() - started, sampler.peak_gib
 
 
 def fit(roots: Roots, method: FitMethod, stem: str, steps: int | None) -> TrainRecord:
@@ -96,7 +78,9 @@ def fit(roots: Roots, method: FitMethod, stem: str, steps: int | None) -> TrainR
     run_dir.mkdir(parents=True, exist_ok=True)
     stage_image_gt(roots, stem)
     command: list[str] = fit_command(roots, stem, method, output, steps)
-    total_seconds, peak_gib = run_measured(command, run_dir, run_dir / "log.txt")
+    measured: Measured = run_measured(command, run_dir, run_dir / "log.txt")
+    if measured.returncode != 0:
+        raise RuntimeError(f"{command[1:4]} exited with {measured.returncode}; see {run_dir / 'log.txt'}")
     upstream: dict = json.loads((output / "metrics.json").read_text())
     record = TrainRecord(
         method=method,
@@ -104,8 +88,8 @@ def fit(roots: Roots, method: FitMethod, stem: str, steps: int | None) -> TrainR
         scene=stem,
         steps=int(upstream["job"]["max_steps"]),
         loop_seconds=float(upstream["training_seconds"]),
-        total_seconds=total_seconds,
-        peak_vram_gib=peak_gib,
+        total_seconds=measured.seconds,
+        peak_vram_gib=measured.vram.peak_gib(),
         primitives=PRIMITIVES,
         sfm_points=None,
         gpu=str(upstream["gpu"]),
