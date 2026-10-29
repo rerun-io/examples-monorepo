@@ -16,23 +16,21 @@ fn hexel_normal(h: Hexel) -> vec3f {
     return facing + q.w * t + cross(q.xyz, t);
 }
 
+// Values, not a mutable Sample: the struct with early returns cost NVIDIA ~15 % of the hexel raster stage.
 fn sample(h: Hexel, pix: vec2u, surface: bool) -> Sample {
-    var out: Sample;
     let m = plane(h);
     let p = cross(f32(pix.x) * m.tw - m.tu, f32(pix.y) * m.tw - m.tv);
     if p.z == 0.0 {
-        return out;
+        return Sample(0.0, vec3f(0.0), 0.0, vec3f(0.0));
     }
     let s = p.xy / p.z;
-    out.depth = s.x * m.tw.x + s.y * m.tw.y + m.tw.z;
-    if out.depth < HEX_NEAR {
-        return out;
-    }
-    out.alpha = min(h.opacity / (1.0 + exp(hexagon_sdf(s) * h.sharpness)), 0.99);
-    out.color = vec3f(h.color[0], h.color[1], h.color[2]) + s.x * vec3f(h.color[3], h.color[4], h.color[5]) +
+    let depth = s.x * m.tw.x + s.y * m.tw.y + m.tw.z;
+    let alpha = min(h.opacity / (1.0 + exp(hexagon_sdf(s) * h.sharpness)), 0.99);
+    let color = vec3f(h.color[0], h.color[1], h.color[2]) + s.x * vec3f(h.color[3], h.color[4], h.color[5]) +
         s.y * vec3f(h.color[6], h.color[7], h.color[8]);
+    var normal = vec3f(0.0);
     if surface {
-        out.normal = hexel_normal(h);
+        normal = hexel_normal(h);
     }
-    return out;
+    return Sample(select(alpha, 0.0, depth < HEX_NEAR), color, depth, normal);
 }
