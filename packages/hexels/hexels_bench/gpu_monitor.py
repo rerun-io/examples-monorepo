@@ -1,27 +1,37 @@
-"""Peak GPU memory of a process, sampled with NVML on a background thread (run-layout.md protocol)."""
+"""Peak GPU memory of a trainer: the one sampler for every trainer we run (run-layout.md protocol).
 
+`run_measured` starts the trainer as a direct child and samples it with NVML on a background thread every
+5 ms: the sum over GPUs of the `usedGpuMemory` NVML reports for the trainer's pid (its own allocations: the
+CUDA context and torch's caching allocator, or Brush's wgpu/Vulkan buffers; never other processes). Each
+change of that value is kept with its wall-clock time, so a runner can cut the peak at the end of training:
+Brush trains, evaluates, exports and then renders the test views in one process (cut at its
+`training_end_unix_seconds`); the upstream Hexels trainer runs with --skip_postprocess and the 2D fits render
+nothing afterwards, so their whole process counts.
+"""
+
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pynvml
 
 
 @dataclass(slots=True)
 class PeakVramSampler:
-    """Sample the GPU memory NVML reports for `pid` every `interval_s` and keep the maximum.
-
-    Use as a context manager around the process's lifetime; `peak_bytes` holds the maximum seen.
-    """
+    """Sample the GPU memory NVML reports for `pid` every `interval_s`; a context manager around the process's lifetime."""
 
     pid: int
     """Process to watch (the trainer itself, not a launcher)."""
     interval_s: float = 0.005
     """Sampling period in seconds."""
-    peak_bytes: int = 0
-    """Largest used GPU memory seen for `pid`, summed over devices."""
+    changes: list[tuple[float, int]] = field(default_factory=list)
+    """(Unix seconds, bytes summed over GPUs) each time the sampled value changed."""
     samples: int = 0
     """Number of samples taken."""
+    available: bool = True
+    """False when NVML could not start (no NVIDIA driver): nothing was sampled."""
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
 
@@ -31,11 +41,16 @@ class PeakVramSampler:
             for process in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
                 if process.pid == self.pid and process.usedGpuMemory is not None:
                     used += int(process.usedGpuMemory)
-        self.peak_bytes = max(self.peak_bytes, used)
+        if not self.changes or self.changes[-1][1] != used:
+            self.changes.append((time.time(), used))
         self.samples += 1
 
     def _run(self) -> None:
-        pynvml.nvmlInit()
+        try:
+            pynvml.nvmlInit()
+        except pynvml.NVMLError:
+            self.available = False
+            return
         try:
             handles: list = [pynvml.nvmlDeviceGetHandleByIndex(index) for index in range(pynvml.nvmlDeviceGetCount())]
             while not self._stop.is_set():
@@ -55,13 +70,43 @@ class PeakVramSampler:
         if self._thread is not None:
             self._thread.join()
 
-    @property
-    def peak_gib(self) -> float:
-        return self.peak_bytes / 2**30
+    def peak_gib(self, until_unix_s: float | None = None) -> float | None:
+        """Largest sample taken at or before `until_unix_s` (all samples for None), GiB; None when NVML was unavailable."""
+        if not self.available:
+            return None
+        return max((used for when, used in self.changes if until_unix_s is None or when <= until_unix_s), default=0) / 2**30
 
 
-def gpu_name() -> str:
-    pynvml.nvmlInit()
+@dataclass(frozen=True, slots=True)
+class Measured:
+    """A trainer run as a direct child."""
+
+    returncode: int
+    """Exit status."""
+    seconds: float
+    """Wall time from start to exit."""
+    vram: PeakVramSampler
+    """Its GPU memory samples."""
+
+
+def run_measured(command: list[str], cwd: Path | None, log: Path) -> Measured:
+    """Run `command` as a direct child under `PeakVramSampler`; the command line, then its stdout and stderr, are appended to `log`."""
+    started: float = time.perf_counter()
+    with log.open("a") as stream:
+        stream.write(" ".join(command) + "\n")
+        stream.flush()
+        process = subprocess.Popen(command, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT)
+        with PeakVramSampler(pid=process.pid) as sampler:
+            returncode: int = process.wait()
+    return Measured(returncode=returncode, seconds=time.perf_counter() - started, vram=sampler)
+
+
+def gpu_name() -> str | None:
+    """Name of GPU 0, None without NVML."""
+    try:
+        pynvml.nvmlInit()
+    except pynvml.NVMLError:
+        return None
     try:
         name: str | bytes = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
         return name.decode() if isinstance(name, bytes) else name

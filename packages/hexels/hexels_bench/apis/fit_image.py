@@ -15,9 +15,7 @@ are `apis/decode2d.py`. Ground truth: `runs/imagegs/<stem>/gt/test/<stem>.png` (
 import json
 import shutil
 import socket
-import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,7 +25,7 @@ from numpy import ndarray
 from PIL import Image
 from serde.json import to_json
 
-from hexels_bench.gpu_monitor import PeakVramSampler
+from hexels_bench.gpu_monitor import Measured, run_measured
 from hexels_bench.layout import Roots
 from hexels_bench.metrics import TrainRecord
 from hexels_bench.png16 import write_png16
@@ -72,20 +70,6 @@ def fit_command(roots: Roots, stem: str, method: FitMethod, output: Path, steps:
     return command if steps is None else [*command, "--steps", str(steps)]
 
 
-def run_measured(command: list[str], cwd: Path, log: Path) -> tuple[float, float]:
-    """Run `command` as a direct child; returns (wall seconds, peak VRAM GiB)."""
-    started: float = time.perf_counter()
-    with log.open("a") as stream:
-        stream.write(" ".join(command) + "\n")
-        stream.flush()
-        process = subprocess.Popen(command, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT)
-        with PeakVramSampler(pid=process.pid) as sampler:
-            return_code: int = process.wait()
-    if return_code != 0:
-        raise RuntimeError(f"{command[1:4]} exited with {return_code}; see {log}")
-    return time.perf_counter() - started, sampler.peak_gib
-
-
 def fit(roots: Roots, method: FitMethod, stem: str, steps: int | None) -> TrainRecord:
     run_dir: Path = roots.runs / "imagegs" / stem / method
     output: Path = run_dir / "upstream"
@@ -94,7 +78,9 @@ def fit(roots: Roots, method: FitMethod, stem: str, steps: int | None) -> TrainR
     run_dir.mkdir(parents=True, exist_ok=True)
     stage_image_gt(roots, stem)
     command: list[str] = fit_command(roots, stem, method, output, steps)
-    total_seconds, peak_gib = run_measured(command, run_dir, run_dir / "log.txt")
+    measured: Measured = run_measured(command, run_dir, run_dir / "log.txt")
+    if measured.returncode != 0:
+        raise RuntimeError(f"{command[1:4]} exited with {measured.returncode}; see {run_dir / 'log.txt'}")
     upstream: dict = json.loads((output / "metrics.json").read_text())
     record = TrainRecord(
         method=method,
@@ -102,8 +88,8 @@ def fit(roots: Roots, method: FitMethod, stem: str, steps: int | None) -> TrainR
         scene=stem,
         steps=int(upstream["job"]["max_steps"]),
         loop_seconds=float(upstream["training_seconds"]),
-        total_seconds=total_seconds,
-        peak_vram_gib=peak_gib,
+        total_seconds=measured.seconds,
+        peak_vram_gib=measured.vram.peak_gib(),
         primitives=PRIMITIVES,
         sfm_points=None,
         gpu=str(upstream["gpu"]),

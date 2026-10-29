@@ -6,14 +6,10 @@ other Brush settings keep their defaults. `gsplat-train` comes from the gsplat-r
 """
 
 import shlex
-import shutil
 import socket
 import subprocess
-import threading
-import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 from serde import serde
@@ -22,6 +18,7 @@ from serde.json import to_json
 from hexels_bench.bench import gpu_lock
 from hexels_bench.brush import PreparedScene, prepare_scene
 from hexels_bench.cameras import CameraContract, cameras_file, write_cameras_file
+from hexels_bench.gpu_monitor import Measured, gpu_name, run_measured
 from hexels_bench.layout import GSPLAT_RELEASE, PROTOCOL_SCENES, Dataset, Roots, read_json
 from hexels_bench.metrics import TrainRecord
 
@@ -58,7 +55,7 @@ class TrainerSummary:
     wall_seconds: float
     """End of loading to end of training, evaluation and export included."""
     training_end_unix_seconds: float
-    """Wall clock when training, Brush's eval and export finished, before the test renders."""
+    """Wall clock when training, Brush's eval and export finished, before the test renders (the VRAM peak's cutoff)."""
     splats: int
     """Final splat count."""
     brush_eval_psnr: float | None
@@ -67,55 +64,6 @@ class TrainerSummary:
     """Brush's own last-step eval SSIM."""
     renderer: str
     """Renderer that produced the test renders."""
-
-
-def process_memory_sample(line: str, pid: int) -> tuple[float, float] | None:
-    """(Unix seconds, used MiB) of ``pid`` from one ``nvidia-smi --query-compute-apps=timestamp,pid,used_memory`` CSV line."""
-    fields: list[str] = [field.strip() for field in line.split(",")]
-    if len(fields) != 3 or fields[1] != str(pid):
-        return None
-    try:
-        return datetime.strptime(fields[0], "%Y/%m/%d %H:%M:%S.%f").timestamp(), float(fields[2])
-    except ValueError:
-        return None
-
-
-def wait_with_vram_samples(process: subprocess.Popen[bytes]) -> list[tuple[float, float]]:
-    """Wait for ``process`` while nvidia-smi samples its GPU memory about every 5 ms; empty without nvidia-smi."""
-    samples: list[tuple[float, float]] = []
-    if shutil.which("nvidia-smi") is None:
-        process.wait()
-        return samples
-    query: list[str] = ["nvidia-smi", "--query-compute-apps=timestamp,pid,used_memory", "--format=csv,noheader,nounits", "-lms", "5"]
-    sampler: subprocess.Popen[str] = subprocess.Popen(query, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-
-    def read() -> None:
-        assert sampler.stdout is not None
-        for line in sampler.stdout:
-            sample: tuple[float, float] | None = process_memory_sample(line, process.pid)
-            if sample is not None:
-                samples.append(sample)
-
-    reader: threading.Thread = threading.Thread(target=read, daemon=True)
-    reader.start()
-    process.wait()
-    sampler.terminate()
-    sampler.wait()
-    reader.join()
-    return samples
-
-
-def peak_training_vram_mib(samples: list[tuple[float, float]], training_end: float) -> float | None:
-    """Largest sample taken before training ended; the test renders afterwards are evaluation, not training."""
-    return max((used for when, used in samples if when <= training_end), default=None)
-
-
-def gpu_name() -> str | None:
-    """First GPU's name, or None without nvidia-smi."""
-    if shutil.which("nvidia-smi") is None:
-        return None
-    output: str = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True, check=True).stdout
-    return output.splitlines()[0].strip()
 
 
 def source_sha() -> str:
@@ -165,26 +113,22 @@ def run_scene(config: Config, scene: str, forwarded: list[str]) -> None:
     ]
     if config.gpu_lock is not None:
         print(f"Waiting for {config.gpu_lock}")
-    with (run / "log.txt").open("wb") as log, gpu_lock(config.gpu_lock) if config.gpu_lock is not None else nullcontext():
+    with gpu_lock(config.gpu_lock) if config.gpu_lock is not None else nullcontext():
         print(f"Training {config.dataset}/{scene} -> {run}")
-        start: float = time.perf_counter()
-        trainer: subprocess.Popen[bytes] = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
-        samples: list[tuple[float, float]] = wait_with_vram_samples(trainer)
-        total_seconds: float = time.perf_counter() - start
-    if trainer.returncode != 0:
-        raise RuntimeError(f"gsplat-train exited with {trainer.returncode}; see {run / 'log.txt'}")
+        measured: Measured = run_measured(command, None, run / "log.txt")
+    if measured.returncode != 0:
+        raise RuntimeError(f"gsplat-train exited with {measured.returncode}; see {run / 'log.txt'}")
     summary: TrainerSummary = read_json(TrainerSummary, summary_path)
     renders: int = len(list((run / "renders/test").glob("*.png")))
     if renders != prepared.test_views:
         raise RuntimeError(f"{run}: {renders} test renders for {prepared.test_views} held-out views")
-    peak_mib: float | None = peak_training_vram_mib(samples, summary.training_end_unix_seconds)
     write_cameras_file(run / "cameras.json", cameras_file(read_json(CameraContract, contract), config.dataset, scene, [0.0, 0.0, 0.0]))
     report: TrainRecord = TrainRecord(
         method=config.method, dataset=config.dataset, scene=scene, steps=summary.steps,
-        loop_seconds=summary.loop_seconds, total_seconds=total_seconds,
-        peak_vram_gib=None if peak_mib is None else peak_mib / 1024.0,
+        loop_seconds=summary.loop_seconds, total_seconds=measured.seconds,
+        peak_vram_gib=measured.vram.peak_gib(until_unix_s=summary.training_end_unix_seconds),
         primitives=summary.splats, sfm_points=prepared.sfm_points, gpu=gpu_name(), host=socket.gethostname(),
         source_sha=source_sha(), command=shlex.join(command),
     )
     (run / "train.json").write_text(to_json(report) + "\n")
-    print(f"{run}: loop {summary.loop_seconds:.1f} s, total {total_seconds:.1f} s, {summary.splats} splats, Brush eval PSNR {summary.brush_eval_psnr}")
+    print(f"{run}: loop {summary.loop_seconds:.1f} s, total {measured.seconds:.1f} s, {summary.splats} splats, Brush eval PSNR {summary.brush_eval_psnr}")

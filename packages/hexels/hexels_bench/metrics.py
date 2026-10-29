@@ -91,13 +91,13 @@ class TrainRecord:
     total_seconds: float
     """Wall time of the whole training process, loading and writes included."""
     peak_vram_gib: float | None
-    """Peak GPU memory of the trainer process, GiB."""
+    """Peak GPU memory of the trainer process up to the end of training (`gpu_monitor`), GiB; null without NVML."""
     primitives: int
     """Primitives in the exported model."""
     sfm_points: int | None
     """Points in the scene's SfM model (the primitive cap); null for 2D fits."""
     gpu: str | None
-    """GPU name."""
+    """GPU name; null without NVML."""
     host: str
     """Host name."""
     source_sha: str

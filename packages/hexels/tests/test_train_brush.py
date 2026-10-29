@@ -1,14 +1,15 @@
 """The protocol runner writes the run-layout directory around one Brush training."""
 import json
+import sys
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import TypeAlias
 
 import numpy as np
 import pytest
 
-from hexels_bench.apis.train_brush import Config, main, peak_training_vram_mib, process_memory_sample
+from hexels_bench.apis.train_brush import Config, main
+from hexels_bench.gpu_monitor import Measured, PeakVramSampler, run_measured
 from hexels_bench.layout import GSPLAT_RELEASE, Roots
 
 SceneFactory: TypeAlias = Callable[..., tuple[Path, Path]]
@@ -56,7 +57,7 @@ def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_
     assert (report["loop_seconds"], report["primitives"], report["sfm_points"]) == (1.5, 2, 3)
     assert report["total_seconds"] > 0.0
     assert report["command"].endswith("--seed 7")
-    assert (run / "log.txt").read_text().strip() == "trained"
+    assert (run / "log.txt").read_text().splitlines()[1:] == ["trained"], "the command line, then the trainer's output"
     cameras: dict = json.loads((run / "cameras.json").read_text())
     assert (cameras["format"], cameras["split"], cameras["background"]) == ("hexels-cameras-1", "test", [0.0, 0.0, 0.0])
     assert [camera["name"] for camera in cameras["cameras"]] == ["0000", "0008"]
@@ -90,19 +91,19 @@ def test_a_failing_scene_does_not_stop_the_batch(tmp_path: Path, protocol_scene:
     assert (tmp_path / "runs/dtu/scan2/brush-test/train.json").is_file()
 
 
-def test_nvidia_smi_samples_select_the_trainer_process() -> None:
-    when: float = datetime(2026, 10, 28, 22, 6, 42, 553000).timestamp()
-    assert process_memory_sample("2026/10/28 22:06:42.553, 4242, 2048\n", 4242) == (when, 2048.0)
-    assert process_memory_sample("2026/10/28 22:06:42.553, 4243, 2048\n", 4242) is None
-    assert process_memory_sample("2026/10/28 22:06:42.553, 4242, [N/A]\n", 4242) is None
-    assert process_memory_sample("No running processes found\n", 4242) is None
-
-
 def test_peak_vram_ignores_samples_after_training() -> None:
-    """Test renders run after training and must not count as training memory (upstream --skip_postprocess)."""
-    samples: list[tuple[float, float]] = [(10.0, 100.0), (11.0, 400.0), (12.0, 300.0), (12.5, 2400.0)]
-    assert peak_training_vram_mib(samples, training_end=12.0) == 400.0
-    assert peak_training_vram_mib(samples[3:], training_end=12.0) is None
+    """Brush renders the test views after training in the same process; they must not count as training memory."""
+    sampler = PeakVramSampler(pid=0, changes=[(10.0, 100 * 2**20), (11.0, 400 * 2**20), (12.0, 300 * 2**20), (12.5, 2400 * 2**20)])
+    assert sampler.peak_gib(until_unix_s=12.0) == 400 / 1024 and sampler.peak_gib() == 2400 / 1024
+    assert sampler.peak_gib(until_unix_s=9.0) == 0.0
+    assert PeakVramSampler(pid=0, available=False).peak_gib() is None, "without NVML the peak is unmeasured, not zero"
+
+
+def test_run_measured_logs_the_command_then_the_output(tmp_path: Path) -> None:
+    measured: Measured = run_measured([sys.executable, "-c", "print('hello')"], None, tmp_path / "log.txt")
+    lines: list[str] = (tmp_path / "log.txt").read_text().splitlines()
+    assert measured.returncode == 0 and measured.seconds > 0.0 and lines == [f"{sys.executable} -c print('hello')", "hello"]
+    assert measured.vram.peak_gib() in (0.0, None), "a CPU-only child holds no GPU memory"
 
 
 @pytest.mark.integration
@@ -125,6 +126,7 @@ def test_tiny_brush_training_through_the_protocol_path(tmp_path: Path, protocol_
     assert f"element vertex {report['primitives']}\n".encode() in header
     assert 0 < report["primitives"] <= report["sfm_points"] == 64
     assert 0.0 < report["loop_seconds"] < report["total_seconds"]
+    assert report["peak_vram_gib"] > 0.0, "NVML sees the trainer's wgpu memory"
     for name in ("0000", "0008"):
         render = cv2.imread(str(run / f"renders/test/{name}.png"), cv2.IMREAD_UNCHANGED)
         assert (render.dtype, render.shape) == (np.uint16, (24, 32, 3))

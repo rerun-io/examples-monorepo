@@ -12,7 +12,6 @@ import json
 import socket
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,7 +24,7 @@ from hexels_bench.apis.score import score_run
 from hexels_bench.brush import read_sfm_points
 from hexels_bench.cameras import CameraContract, cameras_file, write_cameras_file
 from hexels_bench.checkpoint import find_checkpoint
-from hexels_bench.gpu_monitor import PeakVramSampler, gpu_name
+from hexels_bench.gpu_monitor import Measured, gpu_name, run_measured
 from hexels_bench.hexel_ply import HexelPly, HexelVariant
 from hexels_bench.layout import UPSTREAM_DATASET, Dataset, Roots, read_json
 from hexels_bench.methods import primitive_bytes
@@ -97,16 +96,9 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
     scene_dir: Path = roots.scene_dir(dataset, scene)
     run_dir.mkdir(parents=True, exist_ok=True)
     command, cwd = prepare_command(scene_dir, model_dir, dataset, variant, steps)
-    started: float = time.perf_counter()
-    with (run_dir / "log.txt").open("w") as log:
-        log.write(" ".join(command) + "\n")
-        log.flush()
-        process = subprocess.Popen(command, cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
-        with PeakVramSampler(pid=process.pid) as sampler:
-            return_code: int = process.wait()
-    total_seconds: float = time.perf_counter() - started
-    if return_code != 0:
-        raise RuntimeError(f"upstream training exited with {return_code}; see {run_dir / 'log.txt'}")
+    measured: Measured = run_measured(command, cwd, run_dir / "log.txt")
+    if measured.returncode != 0:
+        raise RuntimeError(f"upstream training exited with {measured.returncode}; see {run_dir / 'log.txt'}")
     summary: dict = json.loads((model_dir / "summary.json").read_text())
 
     ply: HexelPly = export_run(model_dir, run_dir / "model.ply")
@@ -126,8 +118,8 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
         scene=scene,
         steps=steps,
         loop_seconds=float(summary["train_seconds"]),
-        total_seconds=total_seconds,
-        peak_vram_gib=sampler.peak_gib,
+        total_seconds=measured.seconds,
+        peak_vram_gib=measured.vram.peak_gib(),
         primitives=ply.cloud.count,
         sfm_points=len(read_sfm_points(scene_dir / "sparse" / "0").xyz),
         gpu=gpu_name(),
