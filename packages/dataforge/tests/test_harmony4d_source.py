@@ -26,7 +26,7 @@ from harmony4d_synthetic import (
 from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge.datasets.harmony4d_layers import aria_camera, ego_rig, encode_job, exo_camera, exo_scale, person_index
-from dataforge.datasets.harmony4d_source import Sequence, ZipSequenceFiles, load_pickle, read_aria_calibration, read_sequence
+from dataforge.datasets.harmony4d_source import PersonTrack, Sequence, ZipSequenceFiles, load_pickle, read_aria_calibration, read_sequence
 from dataforge.video_encoding import halvings
 
 
@@ -93,6 +93,20 @@ def test_people_cover_every_frame_with_nan_where_unlabelled(sequence: Sequence) 
     np.testing.assert_allclose(aria01.betas, 0.1)
     assert aria01.fit_loss.tolist() == [0.5] * len(FRAMES)
     assert [person_index(person) for person in sequence.people] == [0, 1]
+
+
+def test_reader_allocates_each_person_track_once(files: ZipSequenceFiles, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whole-sequence vertex buffers must not be allocated again for each label."""
+    allocated: list[str] = []
+    original = PersonTrack.empty
+
+    def empty(name: str, frames: int) -> PersonTrack:
+        allocated.append(name)
+        return original(name, frames)
+
+    monkeypatch.setattr(PersonTrack, "empty", empty)
+    sequence = read_sequence(files)
+    assert allocated == [person.name for person in sequence.people]
 
 
 @pytest.mark.parametrize("flat", [False, True])
