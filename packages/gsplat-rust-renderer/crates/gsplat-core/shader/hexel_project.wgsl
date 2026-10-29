@@ -3,7 +3,7 @@
 
 // Hexel counterparts of project_forward and project_visible. Parameters per hexel:
 // centre, wxyz rotation, scales u/v, opacity, sharpness, colour, u and v colour gradients,
-// then the view term (scene.coefficients is the stride, scene.sh_degree the variant).
+// then the view term (scene.coefficients is the stride, scene.variant the variant).
 @group(0) @binding(1) var<storage, read> params: array<f32>;
 @group(0) @binding(4) var<storage, read_write> global_from_compact: array<u32>;
 @group(0) @binding(5) var<storage, read_write> depths: array<u32>;
@@ -73,13 +73,13 @@ fn sharpness(id: u32) -> f32 {
 // V2 c += A d, V3 c += sum_k Y_k(d) c_k (degrees 1-3), with d from the camera to the centre.
 fn view_color(base: u32) -> vec3f {
     var color = param3(base + 11u);
-    if frame.scene.sh_degree == 1u {
+    if frame.scene.variant == HEXEL_V1 {
         return color;
     }
     let delta = param3(base) - frame.camera_position_in_obj.xyz;
     let d = delta * inverseSqrt(dot(delta, delta) + 1e-8);
     let k = base + 20u;
-    if frame.scene.sh_degree == 2u {
+    if frame.scene.variant == HEXEL_V2 {
         return color + vec3f(dot(param3(k), d), dot(param3(k + 3u), d), dot(param3(k + 6u), d));
     }
     let x = d.x;

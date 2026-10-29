@@ -16,13 +16,14 @@ pub struct Splats {
 
 /// Hexel appearance: spatial RGB (V1), plus a linear view term (V2) or SH degrees 1-3 (V3).
 /// `Image` hexels are 2D Image-GS-style fits in pixel space, blended top-10 and normalized.
+/// The discriminants are the `SceneInfo.variant` codes the shaders test (`HEXEL_V1`, `HEXEL_V2`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HexelVariant {
     #[default]
-    V1,
-    V2,
-    V3,
-    Image,
+    V1 = 1,
+    V2 = 2,
+    V3 = 3,
+    Image = 4,
 }
 
 impl HexelVariant {

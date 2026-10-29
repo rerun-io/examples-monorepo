@@ -8,6 +8,9 @@ const HEX_NEAR = 0.2;
 const LOG_254 = 5.537334267;
 const FILTER_SIZE = 0.707106;
 const FLT_EPSILON = 1.1920929e-7;
+// `SceneInfo.variant` codes, the `HexelVariant` discriminants.
+const HEXEL_V1 = 1u;
+const HEXEL_V2 = 2u;
 
 // Rows of the plane-to-pixel map: (u, v, 1) . tu = x w, (u, v, 1) . tv = y w, (u, v, 1) . tw = w.
 // `reach` is the apothem beyond which alpha < 1/255 (`hexel_reach`). `color` holds the base colour
