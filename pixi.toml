@@ -1619,6 +1619,8 @@ description = "Write migrated local copies of named served SelfCap bases (no cat
 [feature.selfcap-curate.tasks.selfcap-align]
 cmd = "python tools/apps/align.py"
 cwd = "packages/selfcap-curate"
+# links tracks frame pairs on a thread pool; multi-threaded MKL inside each pair oversubscribes the CPU (5x slower).
+env = { OMP_NUM_THREADS = "1" }
 description = "Align explicit fresh-base episodes of one session into local copies (no catalog writes)"
 
 # ═══════════════════════════════════════════════════════════════════════════

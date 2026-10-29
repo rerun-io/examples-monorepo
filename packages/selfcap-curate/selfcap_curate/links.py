@@ -4,16 +4,21 @@ Lag L means source(t) matches target(t + L). Video clocks are refined against
 high-rate gyro samples, never against another video's frame-grid peaks.
 """
 
-import io
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import cache
 
-import av
 import cv2
 import numpy as np
-from jaxtyping import Float64, UInt8
+import torch
+import torch.nn.functional as F
+from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
+from numpy.lib.stride_tricks import sliding_window_view
 from simplecv.catalog_video import CatalogVideo
 from simplecv.catalog_video_codec import wrap_mp4
+from torch import Tensor
 
 from selfcap_curate.records import Lag, RepeatPattern
 
@@ -52,11 +57,14 @@ def correlate(source: SpeedSeries, target: SpeedSeries, *, half_width_s: float =
     grid: Float64[ndarray, "n"] = np.arange(start, stop, 1.0 / fs)
     sampled: Float64[ndarray, "n"] = np.interp(grid, source.times, source.speed)
     normalized: Float64[ndarray, "n"] = (sampled - sampled.mean()) / (sampled.std() + 1e-9)
-    scores: list[float] = []
-    for lag in lags:
-        shifted: Float64[ndarray, "n"] = np.interp(grid + lag, target.times, target.speed)
-        scores.append(float(((shifted - shifted.mean()) / (shifted.std() + 1e-9) * normalized).mean()))
-    cc: Float64[ndarray, "l"] = np.asarray(scores, dtype=np.float64)
+    # grid[i] + lags[j] = grid[0] + lags[0] + (i + j) / fs: one interpolation, every shift a window of it.
+    values: Float64[ndarray, "m"] = np.interp(grid[0] + lags[0] + np.arange(len(grid) + len(lags) - 1) / fs, target.times, target.speed)
+    n: int = len(grid)
+    sums: Float64[ndarray, "m1"] = np.concatenate([[0.0], np.cumsum(values)])
+    squares: Float64[ndarray, "m1"] = np.concatenate([[0.0], np.cumsum(values * values)])
+    mean: Float64[ndarray, "l"] = (sums[n:] - sums[:-n]) / n
+    std: Float64[ndarray, "l"] = np.sqrt(np.maximum((squares[n:] - squares[:-n]) / n - mean * mean, 0.0))
+    cc: Float64[ndarray, "l"] = (np.correlate(values, normalized, mode="valid") - mean * normalized.sum()) / ((std + 1e-9) * n)
     j: int = int(np.argmax(cc))
     fraction: float = 0.0
     if 0 < j < len(cc) - 1:
@@ -68,65 +76,81 @@ def correlate(source: SpeedSeries, target: SpeedSeries, *, half_width_s: float =
     return Lag(None if clipped else round(best, 5), round(float(cc[j]), 3), round(second, 3), round(stop - start, 1), clipped)
 
 
+def frame_rotation(previous: UInt8[ndarray, "h w"], image: UInt8[ndarray, "h w"], inverse: Float64[ndarray, "3 3"]) -> float | None:
+    """Rotation angle between two frames: tracked corners, then a twice-trimmed best rotation."""
+    corners = cv2.goodFeaturesToTrack(previous, 120, 0.01, 8)
+    if corners is None or len(corners) < 12:
+        return None
+    tracked, status, _ = cv2.calcOpticalFlowPyrLK(previous, image, corners, corners.copy())
+    keep = status[:, 0] == 1
+    a, b = corners[keep, 0], tracked[keep, 0]
+    if len(a) < 12:
+        return None
+    source: Float64[ndarray, "k 3"] = (inverse @ np.c_[a, np.ones(len(a))].T).T
+    target: Float64[ndarray, "k 3"] = (inverse @ np.c_[b, np.ones(len(b))].T).T
+    source /= np.linalg.norm(source, axis=1, keepdims=True)
+    target /= np.linalg.norm(target, axis=1, keepdims=True)
+    rotation: Float64[ndarray, "3 3"] = np.eye(3)
+    for _ in range(2):
+        u, _, vt = np.linalg.svd(target.T @ source)
+        rotation = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
+        residual = np.linalg.norm(target - source @ rotation.T, axis=1)
+        keep = residual <= np.quantile(residual, 0.66)
+        source, target = source[keep], target[keep]
+    return float(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0)))
+
+
+@cache
+def tracking_pool() -> ThreadPoolExecutor:
+    """Frame pairs are independent; OpenCV releases the GIL. BLAS must run single-threaded (OMP_NUM_THREADS=1)."""
+    return ThreadPoolExecutor(max(4, (os.cpu_count() or 8) - 4))
+
+
+def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> UInt8[Tensor, "n h w"]:
+    """CUDA-decode samples first..last from the keyframe at or before first; BT.601 luma, area-resized by scale."""
+    from torchcodec.decoders import VideoDecoder
+
+    key: int = max(i for i in range(first + 1) if video.keyframes[i])
+    decoder = VideoDecoder(wrap_mp4(video.samples[key : last + 1], video.keyframes[key : last + 1], 30, codec=video.codec), device="cuda", seek_mode="exact")
+    luma: Float32[Tensor, "1 3 1 1"] = torch.tensor([0.299, 0.587, 0.114], device="cuda").view(1, 3, 1, 1)
+    batches: list[Tensor] = []
+    for begin in range(first - key, last - key + 1, 128):
+        rgb: UInt8[Tensor, "b 3 h w"] = decoder.get_frames_in_range(begin, min(begin + 128, last - key + 1)).data
+        size: tuple[int, int] = (int(round(rgb.shape[2] * scale)), int(round(rgb.shape[3] * scale)))
+        gray = F.interpolate((rgb.float() * luma).sum(1, keepdim=True), size=size, mode="area")
+        batches.append(gray.round_().clamp_(0, 255).to(torch.uint8)[:, 0])
+    return torch.cat(batches)
+
+
 def rotation_speed(
     video: CatalogVideo, focal_px: float, width_px: int, start_s: float, stop_s: float, *, changes: list[tuple[float, float]] | None = None
 ) -> SpeedSeries:
-    """Measure rotation between distinct frames in a capture-time window."""
+    """Measure rotation between distinct frames in a capture-time window.
+
+    Decode, gray and frame differences run on the GPU; corner tracking runs per distinct frame pair on a thread pool.
+    """
+    import torch
+
     cv2.setNumThreads(1)
+    t: Float64[ndarray, "f"] = video.t_ns * 1e-9
+    inside: Int64[ndarray, "w"] = np.flatnonzero((t >= start_s) & (t <= stop_s))
+    if not len(inside):
+        return SpeedSeries(np.empty(0), np.empty(0))
+    first, last = int(inside[0]), int(inside[-1])
     scale: float = 512.0 / width_px
-    times: list[float] = []
-    speeds: list[float] = []
-    previous: UInt8[ndarray, "h w"] | None = None
-    last: UInt8[ndarray, "h w"] | None = None
-    previous_time: float = 0.0
-    inverse: Float64[ndarray, "3 3"] | None = None
-    data: bytes = wrap_mp4(video.samples, video.keyframes, 30, codec=video.codec)
-    with av.open(io.BytesIO(data), mode="r") as container:
-        stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
-        stream.codec_context.thread_count = 2
-        for index, frame in enumerate(container.decode(stream)):
-            time_s: float = float(video.t_ns[index]) * 1e-9
-            if time_s < start_s:
-                continue
-            if time_s > stop_s:
-                break
-            image: UInt8[ndarray, "h w"] = frame.to_ndarray(format="gray", width=512, height=int(round(frame.height * scale)))
-            if inverse is None:
-                matrix: Float64[ndarray, "3 3"] = np.array(
-                    [[focal_px * scale, 0.0, 256.0], [0.0, focal_px * scale, image.shape[0] / 2.0], [0.0, 0.0, 1.0]]
-                )
-                inverse = np.linalg.inv(matrix)
-            if last is not None:
-                difference: float = float(np.abs(image.astype(np.int16) - last.astype(np.int16)).mean())
-                if changes is not None:
-                    changes.append((time_s, difference))
-                if difference < 0.3:
-                    last = image
-                    continue
-            last = image
-            if previous is not None:
-                corners = cv2.goodFeaturesToTrack(previous, 120, 0.01, 8)
-                if corners is not None and len(corners) >= 12:
-                    tracked, status, _ = cv2.calcOpticalFlowPyrLK(previous, image, corners, corners.copy())
-                    keep = status[:, 0] == 1
-                    a, b = corners[keep, 0], tracked[keep, 0]
-                    if len(a) >= 12:
-                        source: Float64[ndarray, "k 3"] = (inverse @ np.c_[a, np.ones(len(a))].T).T
-                        target: Float64[ndarray, "k 3"] = (inverse @ np.c_[b, np.ones(len(b))].T).T
-                        source /= np.linalg.norm(source, axis=1, keepdims=True)
-                        target /= np.linalg.norm(target, axis=1, keepdims=True)
-                        rotation: Float64[ndarray, "3 3"] = np.eye(3)
-                        for _ in range(2):
-                            u, _, vt = np.linalg.svd(target.T @ source)
-                            rotation = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
-                            residual = np.linalg.norm(target - source @ rotation.T, axis=1)
-                            keep = residual <= np.quantile(residual, 0.66)
-                            source, target = source[keep], target[keep]
-                        times.append(0.5 * (time_s + previous_time))
-                        speeds.append(float(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0)) / max(time_s - previous_time, 1e-3)))
-            previous, previous_time = image, time_s
-    return SpeedSeries(np.asarray(times, dtype=np.float64), np.asarray(speeds, dtype=np.float64))
+    gray: UInt8[Tensor, "n h w"] = gray_frames(video, first, last, scale)
+    height: int = gray.shape[1]
+    differences: Float64[ndarray, "m"] = (gray[1:].to(torch.int16) - gray[:-1].to(torch.int16)).abs().float().mean((1, 2)).double().cpu().numpy()
+    frames: UInt8[ndarray, "n h w"] = gray.cpu().numpy()
+    times: Float64[ndarray, "n"] = t[first : last + 1]
+    if changes is not None:
+        changes.extend(zip(times[1:].tolist(), differences.tolist(), strict=True))
+    kept: list[int] = [0, *(int(i) + 1 for i in np.flatnonzero(differences >= 0.3))]
+    inverse: Float64[ndarray, "3 3"] = np.linalg.inv(np.array([[focal_px * scale, 0.0, 256.0], [0.0, focal_px * scale, height / 2.0], [0.0, 0.0, 1.0]]))
+    pairs: list[tuple[int, int]] = list(zip(kept[:-1], kept[1:], strict=True))
+    angles = list(tracking_pool().map(lambda pair: frame_rotation(frames[pair[0]], frames[pair[1]], inverse), pairs))
+    samples = [(0.5 * (times[j] + times[i]), angle / max(times[j] - times[i], 1e-3)) for (i, j), angle in zip(pairs, angles, strict=True) if angle is not None]
+    return SpeedSeries(np.asarray([s[0] for s in samples], dtype=np.float64), np.asarray([s[1] for s in samples], dtype=np.float64))
 
 
 def fit_pattern(times: Float64[ndarray, "n"], differences: Float64[ndarray, "n"]) -> RepeatPattern | None:
@@ -134,22 +158,21 @@ def fit_pattern(times: Float64[ndarray, "n"], differences: Float64[ndarray, "n"]
     if len(times) < 201:
         return None
     pad = np.pad(np.nan_to_num(differences, nan=0.0), 8, mode="edge")
-    local = np.array([np.percentile(pad[i : i + 17], 80) for i in range(len(differences))])
+    local = np.percentile(sliding_window_view(pad, 17)[: len(differences)], 80, axis=1)
     moving = local > 1.0
     repeats = (differences < 0.2 * local) & moving
     use = repeats | ((differences > 0.5 * local) & moving)
     if not use.any():
         return None
-    best: tuple[float, int, float] = (-1.0, 0, 0.0)
-    for ppm in range(-1500, 1501, 10):
-        base = times * 24.0 * (1.0 + ppm * 1e-6)
-        for phase in np.arange(0.0, 1.0, 0.02):
-            native = np.floor(base + phase)
-            predicted = np.r_[False, np.diff(native) == 0.0]
-            agreement = float((predicted == repeats)[use].mean())
-            if agreement > best[0]:
-                best = agreement, ppm, float(phase)
-    agreement, ppm, phase = best
+    ppms: Int64[ndarray, "r"] = np.arange(-1500, 1501, 10)
+    phases: Float64[ndarray, "p"] = np.arange(0.0, 1.0, 0.02)
+    scores: Float64[ndarray, "r p"] = np.empty((len(ppms), len(phases)))
+    for row, ppm in enumerate(ppms):
+        native = np.floor(times[None, :] * 24.0 * (1.0 + int(ppm) * 1e-6) + phases[:, None])
+        predicted = np.concatenate([np.zeros((len(phases), 1), dtype=bool), np.diff(native, axis=1) == 0.0], axis=1)
+        scores[row] = (predicted[:, use] == repeats[use]).mean(axis=1)
+    row, column = divmod(int(np.argmax(scores)), len(phases))  # first best in (ppm, phase) order, as the scan kept it
+    agreement, ppm, phase = float(scores[row, column]), int(ppms[row]), float(phases[column])
     native = np.floor(times * 24.0 * (1.0 + ppm * 1e-6) + phase)
     return RepeatPattern(
         ppm,
