@@ -19,7 +19,6 @@ import torch
 from serde.json import to_json
 
 from hexels_bench.apis.export import export_run
-from hexels_bench.apis.export_published import stage_ground_truth
 from hexels_bench.apis.score import score_run
 from hexels_bench.cameras import CameraContract, cameras_file, read_sfm_points, write_cameras_file
 from hexels_bench.checkpoint import find_checkpoint
@@ -101,7 +100,6 @@ def train(roots: Roots, dataset: Dataset, scene: str, method: Method) -> Path:
 
     ply: HexelPly = export_run(model_dir, run_dir / "model.ply")
     contract: CameraContract = read_json(CameraContract, roots.contract(dataset, scene))
-    stage_ground_truth(roots, dataset, scene, contract)
     write_cameras_file(run_dir / "cameras.json", cameras_file(contract, dataset, scene, [0.0, 0.0, 0.0]))
     renderer: UpstreamRenderer = load_renderer(model_dir, find_checkpoint(model_dir), scene_dir)
     write_test_renders(renderer, [camera.name for camera in contract.geometry.test], run_dir / "renders" / "test")

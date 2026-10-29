@@ -1,4 +1,5 @@
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -8,10 +9,10 @@ import torch
 from hexels_bench.apis.fit_image import fit_command
 from hexels_bench.apis.score import score_run
 from hexels_bench.apis.train import apply_schedule, scaled_schedule
-from hexels_bench.cameras import CamerasFile, ContractCamera, write_cameras_file
+from hexels_bench.cameras import CameraContract, CamerasFile, ContractCamera, cameras_file, load_target, write_cameras_file
 from hexels_bench.layout import Roots, read_json
 from hexels_bench.metrics import MetricsFile
-from hexels_bench.png16 import write_png16
+from hexels_bench.png16 import read_png16, write_png16
 from hexels_bench.upstream import UPSTREAM_HEXELS_REV
 
 RECIPE: Path = Path(__file__).resolve().parents[2] / "hexels-src" / "recipe.yaml"
@@ -73,3 +74,20 @@ def test_score_run_writes_metrics_beside_renders(tmp_path: Path) -> None:
     assert metrics.views == 1 and metrics.fps == 123.0 and metrics.deploy_mb is None
     assert read_json(MetricsFile, run_dir / "metrics.json") == metrics
     assert pytest.approx(metrics.psnr, abs=1e-9) == metrics.per_view[0].psnr
+
+
+def test_score_run_stages_the_ground_truth_of_a_fresh_runs_root(tmp_path: Path, protocol_scene: Callable[..., tuple[Path, Path]]) -> None:
+    """A Brush run on a scene nothing else has touched: no gt/test/ yet, so scoring writes it from the contract first."""
+    roots = Roots(data=tmp_path / "data", runs=tmp_path / "runs")
+    source, contract_path = protocol_scene(roots.scene_dir("dtu", "scan24"), roots.contract("dtu", "scan24"), ["0000", "0008"])
+    contract: CameraContract = read_json(CameraContract, contract_path)
+    run_dir: Path = roots.run_dir("dtu", "scan24", "brush-7k")
+    write_cameras_file(run_dir / "cameras.json", cameras_file(contract, "dtu", "scan24", [0.0, 0.0, 0.0]))
+    rng: np.random.Generator = np.random.default_rng(3)
+    for camera in contract.geometry.test:
+        write_png16(run_dir / "renders" / "test" / f"{camera.name}.png", rng.integers(0, 65536, size=(6, 8, 3), dtype=np.uint16))
+    assert not roots.gt_dir("dtu", "scan24").exists()
+    metrics: MetricsFile = score_run(roots, "dtu", "scan24", "brush-7k", None, torch.device("cpu"), with_lpips=False)
+    assert [view.name for view in metrics.per_view] == ["0000", "0008"]
+    expected: np.ndarray = load_target(source / "images" / "0008.png", 8, 6).astype(np.uint16) * 257
+    np.testing.assert_array_equal(read_png16(roots.gt_dir("dtu", "scan24") / "0008.png"), expected)

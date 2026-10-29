@@ -16,6 +16,8 @@ def write_png16(path: Path, rgb: UInt16[ndarray, "h w 3"]) -> None:
 
 def read_png16(path: Path) -> UInt16[ndarray, "h w 3"]:
     """Read a 16-bit RGB PNG; an 8-bit PNG is widened exactly (k -> 257 k)."""
+    if not path.is_file():
+        raise FileNotFoundError(f"{path}: no such file")
     image: ndarray | None = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if image is None or image.ndim != 3 or image.shape[2] not in (3, 4):
         raise ValueError(f"{path}: not an RGB(A) PNG")

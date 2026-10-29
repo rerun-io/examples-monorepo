@@ -45,8 +45,11 @@ def write_protocol_scene(
         "training": [camera(name, i) for i, name in enumerate(NAMES) if name not in test_names],
         "test": [camera(name, i) for i, name in enumerate(NAMES) if name in test_names],
     }
+
     def digest(rows: list[dict]) -> str:
-        targets: list[list[str]] = [[row["name"], target_sha256(load_target(source / "images" / f"{row['name']}.png", *contract_size))] for row in rows]
+        targets: list[list[str]] = [
+            [row["name"], target_sha256(load_target(source / "images" / f"{row['name']}.png", *contract_size))] for row in rows
+        ]
         return ordered_targets_sha256(targets)
 
     split = {

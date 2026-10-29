@@ -25,6 +25,11 @@ def test_png16_round_trip_is_exact(tmp_path: Path) -> None:
     np.testing.assert_array_equal(read_png16(tmp_path / "a.png"), rgb)
 
 
+def test_a_missing_png_is_reported_as_missing(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="0000.png"):
+        read_png16(tmp_path / "0000.png")
+
+
 def test_unit_float_quantization_clamps_once() -> None:
     values: np.ndarray = np.array([[[-0.5, 0.5, 1.5]]], dtype=np.float32)
     np.testing.assert_array_equal(from_unit_float(values), np.array([[[0, 32768, 65535]]], dtype=np.uint16))
