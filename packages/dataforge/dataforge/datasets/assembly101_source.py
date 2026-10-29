@@ -10,7 +10,7 @@ import numpy as np
 import orjson
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
-from serde import coerce, field, from_dict, serde
+from serde import from_dict, serde
 
 from dataforge.hands import coco133_from_hands
 from dataforge.records import read_json
@@ -43,48 +43,16 @@ def pose_path(root: Path, member: str, sequence: str) -> Path:
     return root / "assembly101_camera_and_hand_poses" / member / f"{sequence}.json"
 
 
-@serde(type_check=coerce)
-@dataclass(frozen=True, slots=True)
-class HandPair:
-    """One shipped frame; missing hands remain missing."""
-
-    left: Float32[ndarray, "21 d"] | None = field(rename="0", default=None)
-    """Left Assembly-21 joints."""
-    right: Float32[ndarray, "21 d"] | None = field(rename="1", default=None)
-    """Right Assembly-21 joints."""
-
-    def array(self, dimensions: int) -> Float32[ndarray, "2 21 d"]:
-        result: Float32[ndarray, "2 21 d"] = np.full((2, 21, dimensions), np.nan, dtype=np.float32)
-        for index, value in enumerate((self.left, self.right)):
-            if value is not None:
-                if value.shape != (21, dimensions):
-                    raise ValueError(f"expected 21 x {dimensions} hand coordinates, got {value.shape}")
-                result[index] = value
-        return result
-
-
-@serde(type_check=coerce)
-@dataclass(frozen=True, slots=True)
-class HandConfidence:
-    """Per-hand confidence, applied to every present joint."""
-
-    left: float = field(rename="0")
-    """Left hand confidence."""
-    right: float = field(rename="1")
-    """Right hand confidence."""
-
-    def __post_init__(self) -> None:
-        if not 0.0 <= self.left <= 1.0 or not 0.0 <= self.right <= 1.0:
-            raise ValueError("hand confidence must lie in [0, 1]")
-
-
 HandRows: TypeAlias = tuple[Int64[ndarray, "n"], Float32[ndarray, "n 133 d"], Float32[ndarray, "n 133"]]
 
 
 def read_confidence(path: Path) -> dict[int, Float32[ndarray, "2"]]:
     """Decode a confidence stream once, retaining real frame keys."""
     rows: dict[str, dict[str, float]] = orjson.loads(path.read_bytes())
-    values: Float64[ndarray, "n 2"] = np.asarray([[row["0"], row["1"]] for row in rows.values()], dtype=np.float64).reshape(-1, 2)
+    try:
+        values: Float64[ndarray, "n 2"] = np.asarray([[row["0"], row["1"]] for row in rows.values()], dtype=np.float64).reshape(-1, 2)
+    except KeyError as error:
+        raise ValueError(f"{path}: missing hand confidence key {error}") from error
     if not ((values >= 0.0) & (values <= 1.0)).all():
         raise ValueError(f"{path}: hand confidence must lie in [0, 1]")
     columns: Float32[ndarray, "n 2"] = values.astype(np.float32)
