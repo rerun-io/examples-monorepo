@@ -1,5 +1,5 @@
 //! Hexel PLY reader: binary little-endian f32 rows of activated parameters,
-//! announced by `comment hexels_format 1` (hexels-work contract `hexel-ply.md`).
+//! announced by `comment hexels_format 1` (contract: `packages/hexels/docs/hexel-ply.md`).
 use anyhow::{Context as _, Result, bail, ensure};
 use gsplat_core::{HexelVariant, Hexels};
 
