@@ -1,0 +1,761 @@
+{
+  "date": "2026-10-26",
+  "sessions": {
+    "2025-12-09__021d2e8b": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200001285487438,
+        1.823906824183208e-09,
+        -6.7209342119456394e-09
+      ]
+    },
+    "2025-12-09__080fab15": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999724554836,
+        4.213797366592331e-11,
+        6.912370675848933e-11
+      ]
+    },
+    "2025-12-09__429f94b5": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.0320000040402932,
+        2.1404404984548542e-10,
+        7.488851622161619e-10
+      ]
+    },
+    "2025-12-09__53c63aae": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000007281191664,
+        -5.5569538519317785e-09,
+        -8.232526563234366e-09
+      ]
+    },
+    "2025-12-09__584829be": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000011698197384,
+        5.441189981220118e-10,
+        -1.6573168115652237e-09
+      ]
+    },
+    "2025-12-09__6be10880": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000844930294,
+        8.19776598340316e-09,
+        2.2613404065952025e-09
+      ]
+    },
+    "2025-12-09__7d8a1e28": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000505940161,
+        -9.292212745787287e-10,
+        4.3055284754123235e-09
+      ]
+    },
+    "2025-12-09__8087af33": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000004584167796,
+        1.02721256951821e-08,
+        -7.308503496838981e-09
+      ]
+    },
+    "2025-12-09__bc5fb85d": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000788254721,
+        1.9311901001961562e-09,
+        -1.988511869055465e-09
+      ]
+    },
+    "2025-12-09__c28bd671": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199998759018721,
+        3.1294363593559194e-09,
+        7.546815436465515e-09
+      ]
+    },
+    "2025-12-09__e17b4ce5": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.031999996971608866,
+        -4.623219765353959e-09,
+        -3.776026033519564e-09
+      ]
+    },
+    "2025-12-09__fe9095a0": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000004475744824,
+        -5.29301510260316e-09,
+        8.901888531864799e-10
+      ]
+    },
+    "2025-12-10__072200e6": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000011968222976,
+        -1.814120149240539e-09,
+        -1.6210098124913586e-09
+      ]
+    },
+    "2025-12-10__0b9506ff": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999680172275,
+        7.058316320307512e-09,
+        -4.4125668396954865e-09
+      ]
+    },
+    "2025-12-10__0bd08506": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999863153455,
+        -1.5542544196112118e-09,
+        3.6616911447406864e-09
+      ]
+    },
+    "2025-12-10__171e8cc1": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199998536236641,
+        4.4073450791715096e-10,
+        -1.570727395372451e-09
+      ]
+    },
+    "2025-12-10__1a69b42a": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000251455697,
+        -3.41318517026179e-09,
+        -4.2935031363544596e-09
+      ]
+    },
+    "2025-12-10__30c6509a": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199998779453591,
+        2.816105813818748e-09,
+        -4.3274264172055155e-09
+      ]
+    },
+    "2025-12-10__369e3eb7": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.032000005197514746,
+        -2.6470895302110886e-09,
+        5.337224134871477e-10
+      ]
+    },
+    "2025-12-10__3887d8cf": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000557001685,
+        1.467727729284607e-09,
+        -7.018920458734534e-09
+      ]
+    },
+    "2025-12-10__3eaf8c2f": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999885418063,
+        1.4927524320806906e-09,
+        2.694438561157142e-10
+      ]
+    },
+    "2025-12-10__510740fd": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.031999997317620446,
+        -1.256212809122581e-09,
+        -2.858228403956886e-09
+      ]
+    },
+    "2025-12-10__6183daa5": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000002098435704,
+        -7.835334030897867e-10,
+        -4.3217707607068334e-09
+      ]
+    },
+    "2025-12-10__647ffc58": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000036320351,
+        -2.6498394849888696e-09,
+        4.473413861560971e-10
+      ]
+    },
+    "2025-12-10__657c913a": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000207339999,
+        -8.760842155897119e-10,
+        -4.098940423191699e-09
+      ]
+    },
+    "2025-12-10__65c145f8": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000800390209,
+        -6.427930382413294e-09,
+        -1.643713359866794e-10
+      ]
+    },
+    "2025-12-10__7136ab5e": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.032000005440246004,
+        -7.574226874168533e-09,
+        -6.887367953734014e-09
+      ]
+    },
+    "2025-12-10__717e2e0f": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000023536087,
+        1.978162876559164e-10,
+        4.927551783273643e-09
+      ]
+    },
+    "2025-12-10__769384dd": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999848006656,
+        3.316618715776265e-09,
+        -1.2162726381603761e-09
+      ]
+    },
+    "2025-12-10__787ccabd": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000706871083,
+        6.316560278302186e-09,
+        4.349077334375728e-09
+      ]
+    },
+    "2025-12-10__7c8f73e1": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000017423771,
+        -7.85153306953612e-09,
+        -4.756428223506859e-09
+      ]
+    },
+    "2025-12-10__7fa0e87f": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999505077719,
+        4.767485503598401e-10,
+        6.205876798559551e-09
+      ]
+    },
+    "2025-12-10__819a09a4": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000392325844,
+        5.448062580931667e-09,
+        3.7238986339005464e-09
+      ]
+    },
+    "2025-12-10__944c394a": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.032000004472955236,
+        8.13223770962379e-09,
+        1.9518086868952622e-09
+      ]
+    },
+    "2025-12-10__9d4c79da": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000003144007326,
+        1.018737563404648e-08,
+        -6.762481047362101e-09
+      ]
+    },
+    "2025-12-10__a2f4ac86": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.031999993361959085,
+        -2.3276199197230785e-10,
+        8.988394570308422e-09
+      ]
+    },
+    "2025-12-10__a45185aa": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.031999997862876134,
+        1.6318294389361387e-09,
+        3.4385037039896815e-09
+      ]
+    },
+    "2025-12-10__a8cccf2d": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999779952433,
+        -1.2781011665685682e-10,
+        2.931676540418593e-09
+      ]
+    },
+    "2025-12-10__ac374c37": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000140350141,
+        -1.3807697572115751e-09,
+        7.607064700376753e-10
+      ]
+    },
+    "2025-12-10__b5e42523": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000872687683,
+        -1.69175492364948e-09,
+        -6.474080133100912e-09
+      ]
+    },
+    "2025-12-10__b79e4ee2": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000002066784744,
+        -2.361518963017728e-09,
+        -5.829057556083761e-09
+      ]
+    },
+    "2025-12-10__baaf351c": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000358080222,
+        -2.5286772432908666e-09,
+        3.685665231345503e-09
+      ]
+    },
+    "2025-12-10__bf382d1a": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999952197496,
+        2.5631867288378185e-09,
+        8.939954387887639e-09
+      ]
+    },
+    "2025-12-10__c7614839": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999755178756,
+        3.8947633729247144e-09,
+        -3.8589078876771765e-09
+      ]
+    },
+    "2025-12-10__ceb0a9ac": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.0319999977299735,
+        -1.287670891789161e-09,
+        -3.476322688045208e-09
+      ]
+    },
+    "2025-12-10__ced2fef0": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000310425909,
+        3.0220386575130487e-09,
+        -1.0267585531797963e-09
+      ]
+    },
+    "2025-12-10__decd9cb1": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999453844986,
+        1.0552783265282972e-09,
+        5.106991343706291e-09
+      ]
+    },
+    "2025-12-10__ea32455b": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000185314473,
+        5.465171103863353e-09,
+        -3.8468761232035575e-09
+      ]
+    },
+    "2025-12-10__ef6b7189": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000078872033,
+        -5.452621566065519e-09,
+        2.7811867808757995e-09
+      ]
+    },
+    "2025-12-11__0ec1e39a": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000688818012,
+        8.399074977183396e-10,
+        1.873425498066794e-09
+      ]
+    },
+    "2025-12-11__14b733c3": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000005428828394,
+        1.8949189283662404e-09,
+        -9.414801854790156e-10
+      ]
+    },
+    "2025-12-11__1e6dc6d4": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000000199669976,
+        7.129255272936286e-09,
+        3.01393923707316e-10
+      ]
+    },
+    "2025-12-11__2137efa7": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000007224652315,
+        -3.87701708584598e-09,
+        -3.3125086007501636e-11
+      ]
+    },
+    "2025-12-11__21aa7041": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999836735937,
+        4.919945791048708e-09,
+        -8.398257006492216e-09
+      ]
+    },
+    "2025-12-11__263b78be": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000543319752,
+        -8.529970254439467e-10,
+        -9.631116654196248e-09
+      ]
+    },
+    "2025-12-11__26c30cbe": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000002110201854,
+        -2.2331806490832884e-09,
+        -2.9720574890035323e-09
+      ]
+    },
+    "2025-12-11__2854d80d": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000418292527,
+        4.18998610633714e-09,
+        3.236101414616499e-09
+      ]
+    },
+    "2025-12-11__2b4fb9d3": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000001581602176,
+        -6.0176828676344885e-09,
+        2.825441741682866e-09
+      ]
+    },
+    "2025-12-11__3c7830c4": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000681053813,
+        5.174418265391223e-09,
+        -5.009769474262349e-09
+      ]
+    },
+    "2025-12-11__3f1fb3f2": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000000917790865,
+        -2.631404535241577e-09,
+        -5.64994720453349e-09
+      ]
+    },
+    "2025-12-11__407d7959": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000007096785396,
+        2.2499412194454393e-09,
+        -2.835844059578818e-11
+      ]
+    },
+    "2025-12-11__451075d2": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999878260085,
+        1.2921508897589806e-09,
+        3.590776842532506e-10
+      ]
+    },
+    "2025-12-11__491ba1a0": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999897253397,
+        3.2449192968048157e-09,
+        6.046571923712385e-09
+      ]
+    },
+    "2025-12-11__4c329e55": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000085159073,
+        -8.273345297044044e-09,
+        -3.5454814917290634e-09
+      ]
+    },
+    "2025-12-11__558f7640": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000476080378,
+        5.414243485837855e-09,
+        -8.223001446427958e-10
+      ]
+    },
+    "2025-12-11__6d3740b8": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.032000005782036184,
+        1.5256089273829598e-10,
+        -9.066328660045642e-10
+      ]
+    },
+    "2025-12-11__71a74388": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.031999997192390814,
+        -7.431335406413164e-09,
+        3.435052881028966e-09
+      ]
+    },
+    "2025-12-11__83fef76f": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000000194906494,
+        -2.2467889389254925e-09,
+        -6.687697576279739e-09
+      ]
+    },
+    "2025-12-11__916fef02": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03200000186335169,
+        -3.511645269710373e-09,
+        -9.601458517138894e-12
+      ]
+    },
+    "2025-12-11__942a6014": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000478587113,
+        3.991917667950373e-09,
+        -1.111237407647181e-09
+      ]
+    },
+    "2025-12-11__bc653f13": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999003879697,
+        -6.807874427389171e-09,
+        1.0929451232932763e-09
+      ]
+    },
+    "2025-12-11__c435a68c": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03199999953860023,
+        3.5036620861517154e-09,
+        -7.258825610034769e-09
+      ]
+    },
+    "2025-12-11__cab3343e": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999876867734,
+        -1.5897446553614358e-10,
+        2.1288963369947567e-09
+      ]
+    },
+    "2025-12-11__effa73ed": {
+      "device_id": "Quest - Diamond-3928C999",
+      "healthy_segment": "selfcap__2025-12-08__cc808233__ep001",
+      "rig_T_device_m": [
+        0.03199999944541145,
+        -2.5097164294690666e-09,
+        4.079335994000566e-09
+      ]
+    },
+    "2025-12-12__06ac94d6": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000884969895,
+        -2.6607841589754155e-09,
+        -1.9383790406113377e-10
+      ]
+    },
+    "2025-12-12__169222ab": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000129626721,
+        -3.2579298789997546e-09,
+        3.5171015128065974e-09
+      ]
+    },
+    "2025-12-12__3a7c3b5c": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000007015644184,
+        -3.3885236006003794e-09,
+        -1.7609593644385413e-09
+      ]
+    },
+    "2025-12-12__6deb4d3f": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000710517984,
+        1.2006723029006627e-09,
+        4.654121948943768e-10
+      ]
+    },
+    "2025-12-12__9c74b2ff": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200001310490374,
+        -1.461768459748436e-09,
+        -2.3326272718948715e-09
+      ]
+    },
+    "2025-12-12__be784290": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000241513633,
+        -3.184707756190286e-09,
+        3.410992016616987e-09
+      ]
+    },
+    "2025-12-12__c59849ae": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000671158936,
+        -2.5537233439010265e-09,
+        1.3003824267387998e-09
+      ]
+    },
+    "2025-12-12__cbc47f36": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000685445002,
+        1.8075040700282763e-09,
+        -1.614503850055904e-09
+      ]
+    },
+    "2025-12-12__e2147f93": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.032000006936715716,
+        1.2057286453981408e-09,
+        -3.3493167544973446e-09
+      ]
+    },
+    "2025-12-12__fa3b22db": {
+      "device_id": "Quest - Mountain-63ADA0FC",
+      "healthy_segment": "selfcap__2025-12-08__2a1104aa__ep001",
+      "rig_T_device_m": [
+        0.03200000233529213,
+        1.1520667458214673e-09,
+        -5.624002055726329e-09
+      ]
+    }
+  }
+}

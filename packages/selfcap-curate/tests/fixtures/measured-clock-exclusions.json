@@ -1,0 +1,11 @@
+{
+  "session": "2025-12-30__65d00748",
+  "source_comment": "A1: final pre-fix OAK solver, restricted to episodes with measured clocks; OMP_NUM_THREADS=1. ep002's as-cut zero fallbacks are not observations.",
+  "excluded_flags": {
+    "2025-12-30__65d00748__ep002": [
+      "quest_unsynced_kept_as_cut",
+      "oak_imu_unsynced"
+    ]
+  },
+  "oak_median_px": 15.490574910877095
+}

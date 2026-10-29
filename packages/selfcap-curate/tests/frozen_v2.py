@@ -10,15 +10,23 @@ import numpy as np
 import pytest
 from rerun.chunk import RrdReader
 from rrd_fixtures import private_server
+from rrd_references import OakReference, reference_tables
+from scipy.spatial.transform import Rotation
 from serde import SerdeError, from_dict, serde
 from serde.json import from_json
 
-from selfcap_curate.catalog_io import DATASET_NAME
+from selfcap_curate.calib_layer import CalibSession, write_calib_layer
+from selfcap_curate.catalog_io import DATASET_NAME, open_segment
+from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
+from selfcap_curate.factory import cy_shift_px, intrinsic_matrix, read_quest_block
 from selfcap_curate.patch_base import patch
+from selfcap_curate.quest_fit import read_session_episode
 from selfcap_curate.records import (
     CatalogHands,
     Lag,
     Links,
+    OakDetections,
+    OakFit,
     RepeatPattern,
     SelfcapLayout,
     SessionEpisode,
@@ -201,6 +209,21 @@ def private_catalog(syncs, directory: Path, *, layers: bool = True):
         yield server
 
 
+def assert_quest_block(block, expected) -> None:
+    """Compare the served Quest capture crop and factory matrices without rounding."""
+    assert bool(block.pinholes) == expected["ok"]
+    assert block.mode == expected["mode"]
+    assert set(block.pinholes) == set(expected["pinholes"])
+    for slot, pinhole in block.pinholes.items():
+        old = expected["pinholes"][slot]
+        assert pinhole.camera_id == old["camera_id"]
+        assert (pinhole.capture_resolution.width, pinhole.capture_resolution.height) == (old["width"], old["height"])
+        assert cy_shift_px(pinhole) == old["cy_shift_px"]
+        np.testing.assert_allclose(
+            intrinsic_matrix(pinhole), [[old["fx"], 0.0, old["cx"]], [0.0, old["fy"], old["cy"]], [0.0, 0.0, 1.0]], rtol=0.0, atol=0.0
+        )
+    for slot, transform in block.rig_T_cam.items():
+        np.testing.assert_allclose(transform, expected["rig_T_cam"][slot], rtol=0.0, atol=1e-14)
 
 
 @serde(deny_unknown_fields=True)
@@ -236,6 +259,27 @@ def oak_median_reference(syncs, served):
 
 
 
+def frozen_state(record: dict, quest) -> CalibSession:
+    phones = {}
+    for phone, source in record["exo"]["phones"].items():
+        matrix = np.asarray(source["world_T_cam"])
+        rotation = Rotation.from_matrix(matrix[:3, :3].T).as_rotvec()
+        camera = Camera(np.r_[rotation, -matrix[:3, :3].T @ matrix[:3, 3], source["f"], source["cx"], source["cy"], 0.0, 0.0])
+        episodes = {
+            key: EpisodeCalibration(
+                ep["n"], ep["median_px"], ep["ok"], ep["scope"], None if ep.get("world_T_cam") is None else np.asarray(ep["world_T_cam"])
+            )
+            for key, ep in source["episodes"].items()
+        }
+        phones[phone] = PhoneCalibration(True, camera, source["median_px"], source["p90_px"], source["n"], episodes)
+    exo = SessionCalibration(record["session"], phones, record["exo"].get("bundle", {}).get("body_median_px"))
+    return CalibSession(
+        record["session"],
+        exo,
+        from_dict(OakFit, record["oak"]),
+        quest,
+        {name: np.asarray(record["oak_factory"][name]) for name in ("rgb_T_left", "rgb_T_right")},
+    )
 
 
 ENTITY = "/world/pred/rtmw_triangulated/coco133_xyz"
@@ -265,6 +309,18 @@ def chunk_bytes(path):
     return {c.to_record_batch().schema.metadata[b"rerun:id"]: c.to_record_batch().serialize().to_pybytes() for c in RrdReader(path).stream()}
 
 
+def calib_files(server, syncs, directory):
+    """Write typed reference calibration without registering its chunks."""
+    dataset = server.client().get_dataset(DATASET_NAME)
+    record = ROOT / "calib/sessions" / f"{syncs[0].key.rsplit('__', 1)[0]}.json"
+    if not record.is_file():
+        pytest.skip(f"golden session record absent: {record}")
+    segments = {sync.key: open_segment(dataset, sync.episode_key.segment) for sync in syncs}
+    state = frozen_state(json.loads(record.read_text()), read_quest_block(segments[syncs[0].key]))
+    outputs = [directory / f"selfcap__{sync.key}.rrd" for sync in syncs]
+    for sync, output in zip(syncs, outputs, strict=True):
+        write_calib_layer(output, state, read_session_episode(segments[sync.key], sync))
+    return outputs
 
 
 def session_episode(sync, hands=None, gyro_times=None, gyro=None, *, detections=None, quest=None, layout=None, oak=None):
@@ -285,5 +341,31 @@ def session_episode(sync, hands=None, gyro_times=None, gyro=None, *, detections=
     )
 
 
+def load_oak_reference(path: Path) -> OakReference:
+    """Read full-frame OAK hands and exact frame-planning metadata."""
+    tables = reference_tables(path)
+    metadata = tables["/reference"]
+    entity = f"{metadata['camera'][0].as_py()[0]}/pinhole/pred/sapiens2/coco133_uv"
+    rows = tables.get(entity)
+    if rows is None:
+        indices, times, aligned = np.empty(0, dtype=np.int64), np.empty(0), np.empty(0)
+        xy, scores = np.empty((0, 133, 2)), np.empty((0, 133))
+    else:
+        indices = np.asarray(rows["idx"].to_pylist(), dtype=np.int64).reshape(-1)
+        times = np.asarray(rows["time_s"].to_pylist(), dtype=np.float64).reshape(-1)
+        aligned = np.asarray(rows["video_time_s"].to_pylist(), dtype=np.float64).reshape(-1)
+        xy = np.asarray(rows["Points2D:positions"].to_pylist(), dtype=np.float64).reshape(-1, 133, 2)
+        scores = np.asarray(rows["confidence"].to_pylist(), dtype=np.float64).reshape(-1, 133)
+    return OakReference(
+        indices,
+        float(metadata["fps"][0].as_py()[0]),
+        times,
+        OakDetections(aligned, xy, scores),
+        int(metadata["width"][0].as_py()[0]),
+        int(metadata["height"][0].as_py()[0]),
+    )
 
 
+def load_oak_detections(path: Path) -> OakDetections:
+    """Load a read-only OAK RRD reference; never a production input."""
+    return load_oak_reference(path).detections
