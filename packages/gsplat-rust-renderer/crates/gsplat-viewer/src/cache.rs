@@ -257,7 +257,7 @@ impl GpuCache {
         generation: Hash64,
         camera: &Camera,
         options: RenderOptions,
-        background: Option<glam::Vec3>,
+        uniform: [u32; 64],
     ) -> Result<(GaussianDrawData, bool), gsplat_core::Error> {
         re_tracing::profile_function!();
         let core = renderer.core()?;
@@ -302,7 +302,9 @@ impl GpuCache {
         Ok((
             GaussianDrawData {
                 view: entry.render.clone(),
-                background: renderer.background(ctx, background),
+                uniform: renderer.draw_bind_group(ctx, uniform),
+                // Entity-wide mask or highlighted rows (see `draw_uniform`).
+                outlined: uniform[6] != 0 || uniform[7] != 0,
                 camera: *camera,
                 options,
                 center: bounds.center().into(),

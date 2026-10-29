@@ -1,16 +1,18 @@
-//! Compute draw data and transparent depth-tested composition for `re_renderer`.
+//! Compute draw data: transparent depth-tested composition, picking ids and outline masks for `re_renderer`.
 use gsplat_core::{Camera, Error, RenderOptions};
 use parking_lot::Mutex;
 use re_renderer::external::smallvec::smallvec;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 use re_renderer::{BindGroupDesc, BindGroupEntry, GpuBindGroup, GpuTexture};
-use re_viewer::external::{parking_lot, re_log, re_renderer};
+use re_viewer::external::{parking_lot, re_log, re_renderer, re_viewer_context};
 use std::sync::{Arc, OnceLock};
 
 pub(crate) struct GaussianRenderer {
     composite_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
-    background_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
+    draw_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
     composite_pipeline: re_renderer::GpuRenderPipelineHandle,
+    picking_pipeline: re_renderer::GpuRenderPipelineHandle,
+    outline_pipeline: re_renderer::GpuRenderPipelineHandle,
     pub(crate) core: Option<gsplat_core::Renderer>,
 }
 
@@ -18,6 +20,7 @@ struct TargetImage {
     size: glam::UVec2,
     color: GpuTexture,
     depth: GpuTexture,
+    id: GpuTexture,
     composite: GpuBindGroup,
 }
 // Only Pending can carry an in-flight eye; Dirty retains the previous image on overflow.
@@ -58,7 +61,7 @@ pub(crate) struct RenderView {
 impl RenderView {
     pub(crate) fn gpu_byte_size(&self) -> u64 {
         self.core.gpu_byte_size()
-            + u64::from(self.target.size.x) * u64::from(self.target.size.y) * 8
+            + u64::from(self.target.size.x) * u64::from(self.target.size.y) * 12
     }
 
     pub(crate) fn replace_scene(
@@ -152,9 +155,10 @@ impl RenderView {
             &mut self.core,
             camera,
             &options,
-            gsplat_core::Target::TextureDepth {
+            gsplat_core::Target::TextureDepthId {
                 color: self.target.color.default_view.clone(),
                 depth: self.target.depth.default_view.clone(),
+                id: self.target.id.default_view.clone(),
             },
         )?;
         self.image = Image::Pending {
@@ -168,8 +172,10 @@ impl RenderView {
 #[derive(Clone)]
 pub(crate) struct GaussianDrawData {
     pub(crate) view: Arc<Mutex<RenderView>>,
-    /// Composite uniform: the view's solid background, or none for gradients.
-    pub(crate) background: GpuBindGroup,
+    /// `draw_uniform`: background, picking object and outline masks of this entity.
+    pub(crate) uniform: GpuBindGroup,
+    /// Whether the entity or any of its instances is outlined.
+    pub(crate) outlined: bool,
     pub(crate) camera: Camera,
     pub(crate) options: RenderOptions,
     pub(crate) center: glam::Vec3A,
@@ -198,8 +204,13 @@ impl DrawData for GaussianDrawData {
         {
             re_log::error_once!("Failed to encode Gaussian splats: {error:#}");
         }
+        use re_renderer::DrawPhase;
+        let mut phases = DrawPhase::Transparent | DrawPhase::PickingLayer;
+        if self.outlined {
+            phases.insert(DrawPhase::OutlineMask);
+        }
         collector.add_drawable(
-            re_renderer::DrawPhase::Transparent,
+            phases,
             DrawDataDrawable::from_world_position(view_info, self.center, 0),
         );
     }
@@ -232,26 +243,21 @@ impl GaussianRenderer {
         })
     }
 
-    /// Per-frame composite uniform; `background` is the view's solid colour in display space.
-    pub(crate) fn background(
+    /// Per-frame draw uniform (see `draw_uniform`).
+    pub(crate) fn draw_bind_group(
         &self,
         ctx: &re_renderer::RenderContext,
-        background: Option<glam::Vec3>,
+        uniform: [u32; 64],
     ) -> GpuBindGroup {
-        // Uniform buffers are 256 bytes; only the first vec4 is read.
-        let mut uniform = [0.0_f32; 64];
-        if let Some(color) = background {
-            uniform[..4].copy_from_slice(&color.extend(1.0).to_array());
-        }
         ctx.gpu_resources.bind_groups.alloc(
             &ctx.device,
             &ctx.gpu_resources,
             &BindGroupDesc {
-                label: "gsplat composite background".into(),
-                layout: self.background_bind_group_layout,
+                label: "gsplat draw".into(),
+                layout: self.draw_bind_group_layout,
                 entries: smallvec![re_renderer::create_and_fill_uniform_buffer(
                     ctx,
-                    "gsplat composite background".into(),
+                    "gsplat draw".into(),
                     uniform,
                 )],
             },
@@ -261,9 +267,10 @@ impl GaussianRenderer {
     fn target(&self, ctx: &re_renderer::RenderContext, size: glam::UVec2) -> TargetImage {
         // TextureDesc is not exported in 0.38.1; reuse the public 2D descriptor.
         let template = ctx.texture_manager_2d.white_texture_unorm();
-        let [view, depth] = [
+        let [view, depth, id] = [
             ("gsplat composite", wgpu::TextureFormat::Rgba8Unorm),
             ("gsplat expected depth", wgpu::TextureFormat::R32Float),
+            ("gsplat median contributor id", wgpu::TextureFormat::R32Uint),
         ]
         .map(|(label, format)| {
             let mut desc = template.creation_desc.clone();
@@ -286,7 +293,8 @@ impl GaussianRenderer {
                 layout: self.composite_bind_group_layout,
                 entries: smallvec![
                     BindGroupEntry::DefaultTextureView(view.handle),
-                    BindGroupEntry::DefaultTextureView(depth.handle)
+                    BindGroupEntry::DefaultTextureView(depth.handle),
+                    BindGroupEntry::DefaultTextureView(id.handle)
                 ],
             },
         );
@@ -294,6 +302,7 @@ impl GaussianRenderer {
             size,
             color: view,
             depth,
+            id,
             composite: group,
         }
     }
@@ -306,43 +315,54 @@ impl Renderer for GaussianRenderer {
         re_tracing::profile_function!();
         register_embedded_shaders();
 
-        let composite_shader_module = ctx.gpu_resources.shader_modules.get_or_create(
-            ctx,
-            &re_renderer::ShaderModuleDesc {
-                label: "gaussian_composite".into(),
-                source: "shader/gaussian_composite.wgsl".into(),
-                extra_workaround_replacements: Vec::new(),
-            },
-        );
+        let module = |label: &str, source: &str| {
+            ctx.gpu_resources.shader_modules.get_or_create(
+                ctx,
+                &re_renderer::ShaderModuleDesc {
+                    label: label.into(),
+                    source: source.into(),
+                    extra_workaround_replacements: Vec::new(),
+                },
+            )
+        };
+        let composite_shader_module =
+            module("gaussian_composite", "shader/gaussian_composite.wgsl");
+        let picking_shader_module = module("gaussian_picking", "shader/gaussian_picking.wgsl");
         let composite_bind_group_layout = ctx.gpu_resources.bind_group_layouts.get_or_create(
             &ctx.device,
             &re_renderer::BindGroupLayoutDesc {
                 label: "GaussianRenderer::composite_bind_group_layout".into(),
-                entries: (0..2)
-                    .map(|binding| wgpu::BindGroupLayoutEntry {
-                        binding,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    })
-                    .collect(),
+                entries: [
+                    wgpu::TextureSampleType::Float { filterable: false },
+                    wgpu::TextureSampleType::Float { filterable: false },
+                    wgpu::TextureSampleType::Uint,
+                ]
+                .into_iter()
+                .zip(0..)
+                .map(|(sample_type, binding)| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                })
+                .collect(),
             },
         );
-        let background_bind_group_layout = ctx.gpu_resources.bind_group_layouts.get_or_create(
+        let draw_bind_group_layout = ctx.gpu_resources.bind_group_layouts.get_or_create(
             &ctx.device,
             &re_renderer::BindGroupLayoutDesc {
-                label: "GaussianRenderer::background_bind_group_layout".into(),
+                label: "GaussianRenderer::draw_bind_group_layout".into(),
                 entries: vec![wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: std::num::NonZeroU64::new(16),
+                        min_binding_size: std::num::NonZeroU64::new(256),
                     },
                     count: None,
                 }],
@@ -355,7 +375,7 @@ impl Renderer for GaussianRenderer {
                 entries: vec![
                     ctx.global_bindings.layout,
                     composite_bind_group_layout,
-                    background_bind_group_layout,
+                    draw_bind_group_layout,
                 ],
             },
         );
@@ -386,15 +406,50 @@ impl Renderer for GaussianRenderer {
                 false,
             ),
         };
-        let composite_pipeline = ctx
-            .gpu_resources
-            .render_pipelines
-            .get_or_create(ctx, &composite_pipeline_desc);
+        let pipelines = &ctx.gpu_resources.render_pipelines;
+        let composite_pipeline = pipelines.get_or_create(ctx, &composite_pipeline_desc);
+        // Picking ids and outline masks: a full-view quad that reads the id texture.
+        let id_pipeline = |label: &str,
+                           entrypoint: &str,
+                           format: wgpu::TextureFormat,
+                           depth_stencil,
+                           multisample| {
+            pipelines.get_or_create(
+                ctx,
+                &re_renderer::RenderPipelineDesc {
+                    label: label.into(),
+                    vertex_entrypoint: "vs_main".into(),
+                    vertex_handle: picking_shader_module,
+                    fragment_entrypoint: entrypoint.into(),
+                    fragment_handle: picking_shader_module,
+                    render_targets: smallvec![Some(format.into())],
+                    depth_stencil,
+                    multisample,
+                    ..composite_pipeline_desc.clone()
+                },
+            )
+        };
+        let picking_pipeline = id_pipeline(
+            "GaussianRenderer::picking",
+            "fs_picking",
+            re_renderer::PickingLayerProcessor::PICKING_LAYER_FORMAT,
+            re_renderer::PickingLayerProcessor::PICKING_LAYER_DEPTH_STATE,
+            re_renderer::PickingLayerProcessor::PICKING_LAYER_MSAA_STATE,
+        );
+        let outline_pipeline = id_pipeline(
+            "GaussianRenderer::outline_mask",
+            "fs_outline",
+            re_renderer::OutlineMaskProcessor::MASK_FORMAT,
+            re_renderer::OutlineMaskProcessor::MASK_DEPTH_STATE,
+            re_renderer::OutlineMaskProcessor::mask_default_msaa_state(ctx.device_caps().tier),
+        );
 
         Self {
             composite_bind_group_layout,
-            background_bind_group_layout,
+            draw_bind_group_layout,
             composite_pipeline,
+            picking_pipeline,
+            outline_pipeline,
             core: gsplat_core::Renderer::new(&ctx.device).ok(),
         }
     }
@@ -406,21 +461,65 @@ impl Renderer for GaussianRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         draw_instructions: &[DrawInstruction<'_, GaussianDrawData>],
     ) -> Result<(), DrawError> {
-        re_log::debug_assert_eq!(phase, re_renderer::DrawPhase::Transparent);
-        let composite_pipeline = render_pipelines.get(self.composite_pipeline)?;
-        pass.set_pipeline(composite_pipeline);
+        use re_renderer::DrawPhase;
+        // The composite draws a screen triangle; ids and masks draw a full-view quad.
+        let (pipeline, vertices) = match phase {
+            DrawPhase::Transparent => (self.composite_pipeline, 0..3),
+            DrawPhase::PickingLayer => (self.picking_pipeline, 0..6),
+            DrawPhase::OutlineMask => (self.outline_pipeline, 0..6),
+            _ => return Ok(()),
+        };
+        pass.set_pipeline(render_pipelines.get(pipeline)?);
         for instruction in draw_instructions {
             let entry = instruction.draw_data.view.lock();
             let Some(image) = entry.completed() else {
                 continue;
             };
             pass.set_bind_group(1, &image, &[]);
-            pass.set_bind_group(2, &instruction.draw_data.background, &[]);
-            pass.draw(0..3, 0..1);
+            pass.set_bind_group(2, &instruction.draw_data.uniform, &[]);
+            pass.draw(vertices.clone(), 0..1);
         }
 
         Ok(())
     }
+}
+
+/// Most highlighted rows one draw can outline individually; more fall back to the entity-wide mask.
+const MAX_HIGHLIGHTS: usize = 28;
+
+/// The 256-byte draw uniform of `shader/gaussian_picking.wgsl` (its prefix is the composite's
+/// `Background`): the solid background in display space (w = 1; zero for gradients), the picking
+/// object id (low, high word), the entity-wide outline mask, the number of highlighted rows, then
+/// (row, mask) pairs sorted by row. A mask word holds channel A in bits 0-7, B in bits 8-15 and
+/// bit 16 when set; a row mask has already fallen back to the entity-wide one per channel.
+pub(crate) fn draw_uniform(
+    background: Option<glam::Vec3>,
+    object: re_renderer::PickingLayerObjectId,
+    masks: &re_viewer_context::ViewOutlineMasks,
+) -> [u32; 64] {
+    let word = |mask: re_renderer::OutlineMaskPreference| {
+        mask.0
+            .map_or(0, |[a, b]| u32::from(a) | (u32::from(b) << 8) | (1 << 16))
+    };
+    let mut uniform = [0_u32; 64];
+    if let Some(color) = background {
+        uniform[..4].copy_from_slice(&color.extend(1.0).to_array().map(f32::to_bits));
+    }
+    uniform[4..6].copy_from_slice(&[(object.0 & 0xffff_ffff) as u32, (object.0 >> 32) as u32]);
+    uniform[6] = word(masks.overall);
+    let mut rows: Vec<u32> = masks
+        .instances
+        .keys()
+        .filter_map(|instance| u32::try_from(instance.get()).ok())
+        .filter(|&row| row != u32::MAX)
+        .collect();
+    rows.sort_unstable();
+    rows.truncate(MAX_HIGHLIGHTS);
+    uniform[7] = rows.len() as u32;
+    for (slot, row) in uniform[8..].as_chunks_mut::<2>().0.iter_mut().zip(rows) {
+        slot.copy_from_slice(&[row, word(masks.index_outline_mask(u64::from(row).into()))]);
+    }
+    uniform
 }
 
 fn register_embedded_shaders() {
@@ -433,5 +532,61 @@ fn register_embedded_shaders() {
                 include_str!("../shader/gaussian_composite.wgsl").into(),
             )
             .expect("register composite");
+        re_renderer::get_filesystem()
+            .create_file(
+                "shader/gaussian_picking.wgsl",
+                include_str!("../shader/gaussian_picking.wgsl").into(),
+            )
+            .expect("register picking");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::re_renderer::{OutlineMaskPreference, PickingLayerObjectId};
+    use re_viewer::external::{re_log_types::Instance, re_viewer_context::ViewOutlineMasks};
+
+    #[test]
+    fn draw_uniform_packs_background_picking_object_and_outline_masks() {
+        let mut masks = ViewOutlineMasks {
+            overall: OutlineMaskPreference::some(1, 0),
+            ..Default::default()
+        };
+        for (instance, a, b) in [(7, 0, 2), (3, 4, 5), (u64::from(u32::MAX), 9, 9)] {
+            masks
+                .instances
+                .insert(Instance::from(instance), OutlineMaskPreference::some(a, b));
+        }
+        let object = PickingLayerObjectId(0x1122_3344_5566_7788);
+        let uniform = super::draw_uniform(Some(glam::Vec3::new(0.25, 0.5, 1.0)), object, &masks);
+        let bits = |v: [f32; 4]| v.map(f32::to_bits);
+        assert_eq!(uniform[..4], bits([0.25, 0.5, 1.0, 1.0]));
+        assert_eq!(uniform[4..6], [0x5566_7788, 0x1122_3344]);
+        // Mask words: bit 16 = set, channel A in bits 0-7, channel B in bits 8-15.
+        assert_eq!(uniform[6], 0x1_00_01);
+        // Rows sorted by id; a zero channel falls back to the entity-wide mask; u32::MAX is no row.
+        assert_eq!(uniform[7], 2);
+        assert_eq!(uniform[8..12], [3, 0x1_05_04, 7, 0x1_02_01]);
+        assert!(uniform[12..].iter().all(|&word| word == 0));
+
+        let plain = super::draw_uniform(None, object, &ViewOutlineMasks::default());
+        assert_eq!(plain[..4], [0; 4]);
+        assert_eq!(plain[6..8], [0, 0]);
+    }
+
+    #[test]
+    fn draw_uniform_keeps_the_lowest_rows_that_fit() {
+        let mut masks = ViewOutlineMasks::default();
+        for instance in (0..40).rev() {
+            masks
+                .instances
+                .insert(Instance::from(instance), OutlineMaskPreference::some(0, 1));
+        }
+        let uniform = super::draw_uniform(None, PickingLayerObjectId(1), &masks);
+        assert_eq!(uniform[6], 0);
+        assert_eq!(uniform[7], 28);
+        let rows: Vec<u32> = uniform[8..].chunks(2).map(|pair| pair[0]).collect();
+        assert_eq!(rows, (0..28).collect::<Vec<u32>>());
+        assert!(uniform[8..].chunks(2).all(|pair| pair[1] == 0x1_01_00));
+    }
 }

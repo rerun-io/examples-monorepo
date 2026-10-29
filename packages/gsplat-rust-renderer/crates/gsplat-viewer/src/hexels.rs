@@ -162,10 +162,12 @@ fn draw_hexel_entity(
 }
 
 /// The `Points3D` fallback, drawn by the compute visualizer when the core cannot hold the scene:
-/// centres in their base colour clamped to [0, 1], 1.5 UI points (as `hexels3d.py` logs it).
+/// centres in their base colour clamped to [0, 1], 1.5 UI points (as `hexels3d.py` logs it),
+/// pickable and outlined per hexel row like the stock point cloud.
 pub(crate) fn points_fallback(
     ctx: &ViewContext<'_>,
     query: &ViewQuery<'_>,
+    data: &DataResult,
     hexels: &NativeHexels<'_>,
     world_from_local: glam::Affine3A,
 ) -> Result<re_renderer::QueueableDrawData, ViewSystemExecutionError> {
@@ -196,10 +198,30 @@ pub(crate) fn points_fallback(
     {
         ctx.egui_ctx().request_repaint();
     }
+    let picking_ids: Vec<_> = (0..count as u64)
+        .map(re_renderer::PickingLayerInstanceId)
+        .collect();
+    let masks = query
+        .highlights
+        .entity_outline_mask(data.entity_path.hash());
     let mut builder = re_renderer::PointCloudBuilder::new(ctx.render_ctx());
-    builder
+    let mut batch = builder
         .batch("Hexel compute fallback")
         .world_from_obj(world_from_local)
-        .add_points(&points, &colors, &[]);
+        .outline_mask_ids(masks.overall)
+        .picking_object_id(re_renderer::PickingLayerObjectId(data.entity_path.hash64()))
+        .add_points(&points, &colors, &picking_ids);
+    #[expect(clippy::iter_over_hash_type)] // Ranges of one row each never overlap.
+    for (instance, mask) in &masks.instances {
+        if let Ok(row) = u32::try_from(instance.get())
+            && (row as usize) < count
+        {
+            batch = batch.push_additional_outline_mask_ids_for_range(
+                re_renderer::Span::from_start_len(row, 1),
+                *mask,
+            );
+        }
+    }
+    drop(batch);
     Ok(builder.into_draw_data()?.into())
 }
