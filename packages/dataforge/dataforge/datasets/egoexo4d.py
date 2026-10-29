@@ -81,6 +81,8 @@ class Egoexo4dConfig(FrameLimitedConfig):
     """AWS profile holding the Ego-Exo4D licence keys (they expire 14 days after issue)."""
     keep_raw: bool = False
     """Keep a take's videos, VRS and trajectory files after base; the fit, models, metadata and sidecars always stay."""
+    raw_budget_gb: float = 32.0
+    """Maximum extra raw GB for the one prefetched take; larger takes fetch in the foreground."""
     model_root: Path | None = None
     """Directory holding body_models/smplh/SMPLH_MALE.npz and body_models/smplx/SMPLX_NEUTRAL.npz; defaults to root."""
 
@@ -186,6 +188,10 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
     def prefetch(self, identity: SequenceIdentity, source: Take, *, force: bool) -> None:
         """Fetch the next take's raw files while this one converts; only base reads them."""
         if not writing.should_skip(self.targets(identity)[paths.BASE_LAYER], force=force):
+            files: list[ManifestPath] = self.take_files(source, source.exo_cameras)
+            files += [path for path in self.release.manifest("captures")[source.capture_uid].paths if path.relative_path.endswith("/timesync.csv")]
+            if any(path.size is None for path in files) or sum(path.size or 0 for path in files) > self.config.raw_budget_gb * 1e9:
+                return
             self.fetch_take(source)
 
     def base_inputs(self, take: Take) -> BaseInputs:

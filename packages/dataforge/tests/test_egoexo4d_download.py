@@ -49,6 +49,9 @@ class FakeS3:
     def size(self, path: str) -> int:
         return len(self.objects[path])
 
+    def cat_file(self, path: str, start: int, end: int) -> bytes:
+        return self.objects[path][start:end]
+
     def get_file(self, path: str, dest: str) -> None:
         Path(dest).write_bytes(self.objects[path])
 
@@ -68,6 +71,7 @@ def release(objects: dict[str, bytes], manifests: dict[str, list[dict[str, objec
     result.fs = cast(Any, FakeS3(objects, denied=denied))
     result.manifests = {}
     result.lock = threading.Lock()
+    result.stream_slots = threading.BoundedSemaphore(16)
     return result
 
 
@@ -130,3 +134,54 @@ def test_denied_access_names_the_profile_and_the_sign_up() -> None:
     source = release({}, {"takes": []}, denied=True)
     with pytest.raises(PermissionError, match="'egoexo4d'.*ego4ddataset"):
         source.manifest("takes")
+
+
+def test_large_fetch_reads_ranges_concurrently_and_verifies_each(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A large object uses overlapping bounded reads and never publishes a short range."""
+    from dataforge.datasets import egoexo4d_download as download
+
+    monkeypatch.setattr(download, "RANGE_BYTES", 4, raising=False)
+    payload = b"0123456789abcdef"
+    source = release({"s3://bucket/a": payload}, {"takes": [entry("u", [("a", len(payload))])]})
+    source.stream_slots = threading.BoundedSemaphore(16)
+    barrier = threading.Barrier(4)
+    reads: list[tuple[int, int]] = []
+
+    def read(path: str, *, start: int, end: int) -> bytes:
+        reads.append((start, end))
+        barrier.wait(timeout=2)
+        return payload[start:end]
+
+    monkeypatch.setattr(source.fs, "cat_file", read)
+    (file,) = source.manifest("takes")["u"].paths
+    assert source.fetch(file, tmp_path)
+    assert (tmp_path / "a").read_bytes() == payload
+    assert sorted(reads) == [(0, 4), (4, 8), (8, 12), (12, 16)]
+    assert not source.fetch(file, tmp_path)
+    (tmp_path / "a").unlink()
+    monkeypatch.setattr(source.fs, "cat_file", lambda path, *, start, end: b"x")
+    with pytest.raises(ValueError, match="range"):
+        source.fetch(file, tmp_path)
+    assert not (tmp_path / "a").exists()
+
+
+def test_prefetch_leaves_oversized_take_for_foreground(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Speculation has a raw-byte ceiling; an oversized take can still convert in the foreground."""
+    from dataforge.datasets.egoexo4d_download import ManifestPath
+    from dataforge.identity import SequenceIdentity
+
+    (tmp_path / "takes.json").write_text(json.dumps([TAKE]))
+    take = read_takes(tmp_path / "takes.json")["cmu_bike02_4"]
+    dataset = Egoexo4dDataset(Egoexo4dConfig(root=tmp_path))
+    dataset.config.raw_budget_gb = 0.00000001
+    dataset.release = release({}, {"captures": [entry("capture-uid", [])]})
+    files = [ManifestPath("s3://bucket/video", "video", 20)]
+    monkeypatch.setattr(dataset, "take_files", lambda take, gopros: files)
+    fetched: list[str] = []
+    monkeypatch.setattr(dataset, "fetch_take", lambda take: fetched.append(take.take_name))
+    identity = SequenceIdentity("egoexo4d", (take.take_name,))
+    dataset.prefetch(identity, take, force=True)
+    assert fetched == []
+    files[0] = ManifestPath("s3://bucket/video", "video", 5)
+    dataset.prefetch(identity, take, force=True)
+    assert fetched == [take.take_name]

@@ -8,6 +8,7 @@ else, verified by size, into the layout the CLI writes (``<root>/<relative_path>
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -18,6 +19,9 @@ from dataforge import transports
 from dataforge.datasets.egoexo4d_body import HM_FILE, HM_REPO, HM_REVISION
 from dataforge.records import decode
 from dataforge.transports import FileIntegrity, HfFileInfo
+
+RANGE_BYTES: int = 32 * 1024 * 1024
+"""Maximum buffered bytes per S3 stream (at most sixteen streams across takes)."""
 
 RELEASE: str = "s3://ego4d-consortium-sharing/egoexo-public/v2"
 """The public Ego-Exo4D release the official ``egoexo`` CLI downloads (``--release v2``)."""
@@ -72,7 +76,8 @@ class Release:
         import s3fs  # simplecv declares it; only the release needs it
 
         self.profile: str = profile
-        self.fs = s3fs.S3FileSystem(profile=profile)
+        self.fs = s3fs.S3FileSystem(profile=profile, config_kwargs={"max_pool_connections": 16})
+        self.stream_slots = threading.BoundedSemaphore(16)
         self.manifests: dict[str, dict[str, ManifestEntry]] = {}
         self.lock = threading.Lock()  # threading.Lock is a factory, not a type beartype can check
 
@@ -106,7 +111,26 @@ class Release:
         staged: Path = root / transports.STAGING_DIR / f"{file.relative_path}.{time.time_ns()}"
         staged.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self.fs.get_file(file.source_path, str(staged))
+            if size > RANGE_BYTES:
+                with staged.open("wb") as output:
+                    output.truncate(size)
+
+                def fetch_range(start: int) -> None:
+                    end: int = min(start + RANGE_BYTES, size)
+                    with self.stream_slots:
+                        data = self.fs.cat_file(file.source_path, start=start, end=end)
+                        assert isinstance(data, bytes)  # s3fs stubs also allow text; a binary range is always bytes
+                        if len(data) != end - start:
+                            raise ValueError(f"{file.source_path}: range {start}:{end} returned {len(data)} bytes")
+                        with staged.open("r+b") as output:
+                            output.seek(start)
+                            output.write(data)
+
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    list(executor.map(fetch_range, range(0, size, RANGE_BYTES)))
+            else:
+                with self.stream_slots:
+                    self.fs.get_file(file.source_path, str(staged))
             transports.publish_verified(staged, dest, integrity)
         finally:
             staged.unlink(missing_ok=True)
