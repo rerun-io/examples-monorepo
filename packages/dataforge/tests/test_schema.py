@@ -88,12 +88,14 @@ def test_ground_truth_body_hand_and_quality_paths_sit_under_world_gt_or_their_ri
         schema.quality_flag_path(0, -1, "occluded")
 
 
-def test_a_person_carries_its_body_while_each_camera_carries_what_it_sees_of_them() -> None:
+def test_a_person_carries_its_body_contact_and_markers_while_each_camera_carries_what_it_sees_of_them() -> None:
     """The people tree of the spec's People section: per-person ground truth under ``/world/gt/people``, per-camera views
     (masks, projections, vertex visibility) under that camera's pinhole, keyed by the same ``person_NN``."""
     assert schema.person_path(3) == "/world/gt/people/person_03"
     assert schema.person_body_path(3, "smplx") == "/world/gt/people/person_03/body/smplx"
+    assert schema.person_floor_contact_path(3) == "/world/gt/people/person_03/contact/floor"
+    assert schema.person_contact_path(3, 1) == "/world/gt/people/person_03/contact/person_01"
     assert schema.person_mask_path(2, 0, 3) == "/world/rig_02/cam_00/pinhole/masks/person_03"
     assert schema.person_visibility_path(2, 0, 3) == "/world/rig_02/cam_00/pinhole/visibility/person_03"
     with pytest.raises(ValueError, match="non-negative"):
-        schema.person_mask_path(0, 0, -1)
+        schema.person_contact_path(0, -1)

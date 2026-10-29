@@ -51,6 +51,8 @@ MASKS_LAYER: str = "masks"
 """Shipped per-person segmentation masks, one image per camera and frame."""
 MARKERS_LAYER: str = "markers"
 """Shipped motion-capture marker positions."""
+CONTACTS_LAYER: str = "contacts"
+"""Shipped per-vertex contact of each person: with the floor and with the other person."""
 VISIBILITY_LAYER: str = "visibility"
 """Shipped per-vertex visibility of each person in each camera."""
 

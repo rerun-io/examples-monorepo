@@ -30,6 +30,7 @@ from dataforge.datasets.mamma_layers import (
     write_projections,
 )
 from dataforge.datasets.mamma_source import Family, MammaCamera, MammaSequence, SequenceLabels, discover_sequences, read_camera
+from dataforge.datasets.mamma_syn_source import SynFamily
 from dataforge.identity import SequenceIdentity
 
 PANES: int = 8
@@ -94,14 +95,16 @@ class MammaConfig(FrameLimitedConfig):
     command: ClassVar[str] = "mamma"
     """Registry key and CLI subcommand; ``--family`` picks the catalog dataset."""
     _target: type = field(default_factory=lambda: MammaDataset)
-    family: Family = "eval"
-    """Catalog family to work on; also the catalog dataset (``mamma-<family>``)."""
+    family: Family | SynFamily = "eval"
+    """Catalog family to work on; also the catalog dataset (``mamma-<family>``). ``syn`` and ``syn-bedlam`` are MammaSyn."""
     root: Path = field(default_factory=lambda: paths.raw_root() / "mamma")
     """Release root, read only."""
     model_root: Path = field(default_factory=lambda: paths.raw_root() / "mamma-body-models")
     """Where the SMPL-X model files go (``dataforge-download mamma`` fetches them)."""
     sequences: tuple[str, ...] | None = None
     """Sequence keys (``singles/230929_WhiteRabbit_CatchBall_50048_1``, ``indoors/crossing_arms``); None selects all."""
+    index_root: Path = field(default_factory=lambda: paths.raw_root() / "mamma-syn-index")
+    """MammaSyn: where each sequence directory's shard index is cached (local disk; rebuilt when a shard changes)."""
     fetch_into: Path | None = None
     """Download: also fetch the ``sequences`` from the MPI server into this directory and compare every file with the release
     copy, as a proof that the download path works (needs MAMMA_USERNAME and MAMMA_PASSWORD). Never the whole release."""
@@ -110,6 +113,16 @@ class MammaConfig(FrameLimitedConfig):
     def name(self) -> str:
         """Catalog dataset and identity ``dataset`` part: one per family."""
         return f"{self.command}-{self.family}"
+
+    def setup(self) -> DataforgeDataset:
+        """The MPI families' dataset, or MammaSyn's for ``syn`` and ``syn-bedlam``."""
+        from dataforge.datasets.mamma_syn import MammaBedlamDataset, MammaSynDataset  # imports this module
+
+        if self.family == "syn":
+            return MammaSynDataset(self)
+        if self.family == "syn-bedlam":
+            return MammaBedlamDataset(self)
+        return MammaDataset(self)
 
 
 SourceT = TypeVar("SourceT")
@@ -130,7 +143,11 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
 
     @property
     def family(self) -> Family:
-        return self.config.family
+        """The MPI family (``MammaConfig.setup`` gives the MammaSyn families their own dataset)."""
+        family: Family | SynFamily = self.config.family
+        if family == "syn" or family == "syn-bedlam":
+            raise ValueError(f"{family} is a MammaSyn family: MammaConfig.setup builds MammaSynDataset for it")
+        return family
 
     layers = (
         paths.BASE_LAYER,
