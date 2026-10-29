@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -177,8 +177,8 @@ def to_attic(roots: Roots, item: Item, partials: tuple[Path, ...]) -> None:
 
 
 def roots_args(roots: Roots) -> tuple[str, ...]:
-    """The roots every hexels tool takes, so each step reads and writes the queue's runs root, not the default one."""
-    return ("--roots.data", str(roots.data), "--roots.runs", str(roots.runs))
+    """Every root as a `--roots.<name>` flag (every hexels tool takes `Roots`), so each step uses the queue's roots, not the defaults."""
+    return tuple(arg for root in fields(Roots) for arg in (f"--roots.{root.name.replace('_', '-')}", str(getattr(roots, root.name))))
 
 
 def score_step(roots: Roots, item: Item, fps: float | None) -> Step:
@@ -191,7 +191,7 @@ def brush_train_step(roots: Roots, item: Item) -> Step:
     """The Brush protocol runner for one scene, without --gpu-lock (the conductor already holds it)."""
     args: tuple[str, ...] = (
         "python", str(WORKSPACE / "packages" / "hexels" / "tools" / "train_brush.py"), "--dataset", item.dataset, "--scenes", item.scene, "--method", item.method,
-        "--steps", str(METHODS[item.method].steps), *roots_args(roots), "--roots.brush-prepared", str(roots.brush_prepared),
+        "--steps", str(METHODS[item.method].steps), *roots_args(roots),
     )  # fmt: skip
     return Step(name="brush-train", env="hexels", args=args)
 

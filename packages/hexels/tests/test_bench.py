@@ -174,7 +174,11 @@ def test_complete_items_are_skipped_and_the_rest_run_through_pixi_envs(tmp_path:
         ("hexels", "hexels-score"),
     ]
     hexels_steps: list[tuple[str, ...]] = [args for env, args in runner.steps if env == "hexels"]
-    assert all(args[args.index("--roots.runs") + 1] == str(roots.runs) for args in hexels_steps), "every hexels tool writes the queue's runs root"
+    assert all(
+        args[args.index(flag) + 1] == str(root)
+        for args in hexels_steps
+        for flag, root in (("--roots.data", roots.data), ("--roots.runs", roots.runs), ("--roots.brush-prepared", roots.brush_prepared))
+    ), "every hexels tool uses the queue's roots"
     brush_train: tuple[str, ...] = runner.steps[0][1]
     assert "--gpu-lock" not in brush_train, "the conductor holds the lock; a child flock would deadlock"
     assert brush_train[brush_train.index("--scenes") + 1] == "scan24"
