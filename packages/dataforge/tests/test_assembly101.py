@@ -10,16 +10,27 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 from conftest import assert_raw_root_guarded, read_chunks
+from serde import from_dict
 from simplecv.camera_parameters import BrownConradyDistortion, Fisheye62Parameters, KannalaBrandtDistortion, PinholeParameters
 from simplecv.rerun_custom_types import PinholeWithDistortion
 
 from dataforge import schema
 from dataforge.actions import Segment, active_labels
+from dataforge.datasets import assembly101_source
 from dataforge.datasets.assembly101 import Assembly101Config, Assembly101Dataset, Assembly101Source
 from dataforge.datasets.assembly101_actions import Actions, read_actions
 from dataforge.datasets.assembly101_calibration import Lens, camera_parameters, resolve_calibration
 from dataforge.datasets.assembly101_layers import CameraVideo, camera_sources, read_poses, write_actions
-from dataforge.datasets.assembly101_source import EXO_SERIALS, pose_path, read_confidence, read_hand_rows, read_pixels, read_transforms
+from dataforge.datasets.assembly101_source import (
+    EXO_SERIALS,
+    HandConfidence,
+    HandPair,
+    pose_path,
+    read_confidence,
+    read_hand_rows,
+    read_pixels,
+    read_transforms,
+)
 from dataforge.hands import confidence_rule
 
 
@@ -39,6 +50,15 @@ def test_hand_rows_use_numeric_keys_and_shipped_confidence(tmp_path: Path) -> No
     _, normalized = confidence_rule(positions, scores)
     assert normalized[0, 91] == 0.0
     assert np.isnan(positions[:, 0]).all()
+
+
+def test_hand_stream_does_not_construct_per_frame_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stream batches decode directly into numeric columns, including absent hands."""
+    def reject_record(*_args, **_kwargs) -> None:
+        raise AssertionError("per-frame pyserde decoding in hand stream")
+
+    monkeypatch.setattr(assembly101_source, "from_dict", reject_record)
+    test_hand_rows_use_numeric_keys_and_shipped_confidence(tmp_path)
 
 
 def test_calibration_parameters_preserve_coefficients_and_scale() -> None:
@@ -311,7 +331,8 @@ def test_camera_pinhole_components_match_legacy_values(model: Literal["OpenCV", 
 def test_confidence_record_preserves_shipped_values(tmp_path: Path) -> None:
     path = tmp_path / "confidence.json"
     path.write_text('{"2": {"0": 0.25, "1": 0.0}}')
-    np.testing.assert_array_equal(read_confidence(path)[2], np.array([0.25, 0.0], dtype=np.float32))
+    record: HandConfidence = from_dict(HandConfidence, {"0": 0.25, "1": 0.0})
+    np.testing.assert_array_equal(read_confidence(path)[2], np.array([record.left, record.right], dtype=np.float32))
 
 
 def test_output_beneath_the_raw_root_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -324,3 +345,19 @@ def test_default_roots_follow_the_raw_root_and_annotations_follow_root(monkeypat
     assert Assembly101Config().annotations == Path("/raw/assembly101/official/annotations")
     assert Assembly101Config(root=Path("/elsewhere")).annotations == Path("/elsewhere/official/annotations")
     assert Assembly101Config(annotations_root=Path("/labels/annotations")).annotations == Path("/labels/annotations")
+
+
+def test_hand_record_schema_keeps_missing_hands() -> None:
+    """The record schema remains available outside the columnar stream path."""
+    pair: HandPair = from_dict(HandPair, {"0": [[1, 2, 3]] * 21})
+    joints = pair.array(3)
+    np.testing.assert_array_equal(joints[0], np.tile([1.0, 2.0, 3.0], (21, 1)))
+    assert np.isnan(joints[1]).all()
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan")])
+def test_hand_confidence_stream_rejects_invalid_scores(tmp_path: Path, value: float) -> None:
+    path: Path = tmp_path / "confidence.json"
+    path.write_text(json.dumps({"2": {"0": value, "1": 0.0}}))
+    with pytest.raises(ValueError):
+        read_confidence(path)

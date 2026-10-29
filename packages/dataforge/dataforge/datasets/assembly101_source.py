@@ -1,13 +1,13 @@
 """Assembly101 JSON boundaries and columnar hand streams."""
 
 import csv
-import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias, TypeVar
 
 import numpy as np
+import orjson
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from serde import coerce, field, from_dict, serde
@@ -83,8 +83,12 @@ HandRows: TypeAlias = tuple[Int64[ndarray, "n"], Float32[ndarray, "n 133 d"], Fl
 
 def read_confidence(path: Path) -> dict[int, Float32[ndarray, "2"]]:
     """Decode a confidence stream once, retaining real frame keys."""
-    rows: dict[str, HandConfidence] = read_json(path, dict[str, HandConfidence])
-    return {int(key): np.array([row.left, row.right], dtype=np.float32) for key, row in rows.items()}
+    rows: dict[str, dict[str, float]] = orjson.loads(path.read_bytes())
+    values: Float64[ndarray, "n 2"] = np.asarray([[row["0"], row["1"]] for row in rows.values()], dtype=np.float64).reshape(-1, 2)
+    if not ((values >= 0.0) & (values <= 1.0)).all():
+        raise ValueError(f"{path}: hand confidence must lie in [0, 1]")
+    columns: Float32[ndarray, "n 2"] = values.astype(np.float32)
+    return {int(key): columns[index] for index, key in enumerate(rows)}
 
 
 def frame_batches(rows: Mapping[str, object], frame_limit: int | None) -> Iterator[list[str]]:
@@ -100,7 +104,15 @@ def coco_rows(
     keys: list[str], pairs: list[dict[str, list[list[float | int]]]], confidence: dict[int, Float32[ndarray, "2"]], dimensions: int, scale: float
 ) -> HandRows:
     """Decode a batch into raw COCO rows; shared writers apply the confidence rule."""
-    joints: Float32[ndarray, "n 2 21 d"] = np.stack([from_dict(HandPair, raw).array(dimensions) for raw in pairs]) * np.float32(scale)
+    joints: Float32[ndarray, "n 2 21 d"] = np.full((len(pairs), 2, 21, dimensions), np.nan, dtype=np.float32)
+    for hand, key in enumerate(("0", "1")):
+        present: list[int] = [index for index, pair in enumerate(pairs) if pair.get(key) is not None]
+        if present:
+            values: Float32[ndarray, "p j d"] = np.asarray([pairs[index][key] for index in present], dtype=np.float32)
+            if values.shape != (len(present), 21, dimensions):
+                raise ValueError(f"expected 21 x {dimensions} hand coordinates, got {values.shape[1:]}")
+            joints[present, hand] = values
+    joints *= np.float32(scale)
     confidence_batch: Float32[ndarray, "n 2"] = np.stack([confidence[int(key)] for key in keys])
     positions, scores = coco133_from_hands(joints, confidence_batch)
     return np.array(keys, dtype=np.int64), positions, scores
@@ -115,8 +127,7 @@ def read_hand_rows(
     frame_limit: int | None,
 ) -> Iterator[HandRows]:
     """Read 3D once; sort numeric keys and release consumed source frames in batches."""
-    with path.open() as handle:
-        rows: dict[str, dict[str, list[list[float | int]]]] = json.load(handle)
+    rows: dict[str, dict[str, list[list[float | int]]]] = orjson.loads(path.read_bytes())
     for keys in frame_batches(rows, frame_limit):
         yield coco_rows(keys, [rows.pop(key) for key in keys], confidence, dimensions, scale)
 
@@ -125,8 +136,7 @@ def read_pixels(
     path: Path, confidence: dict[int, Float32[ndarray, "2"]], camera_scales: dict[str, float], frame_limit: int | None
 ) -> Iterator[tuple[str, HandRows]]:
     """Read the large 2D member once; keep only one 256-frame camera batch in addition to it."""
-    with path.open() as handle:
-        rows: dict[str, dict[str, dict[str, list[list[float | int]]]]] = json.load(handle)
+    rows: dict[str, dict[str, dict[str, list[list[float | int]]]]] = orjson.loads(path.read_bytes())
     for keys in frame_batches(rows, frame_limit):
         for camera, scale in camera_scales.items():
             yield camera, coco_rows(keys, [rows[key].pop(camera) for key in keys], confidence, 2, scale)
