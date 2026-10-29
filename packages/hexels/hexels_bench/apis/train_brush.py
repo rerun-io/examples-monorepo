@@ -106,26 +106,11 @@ def run_scene(config: Config, scene: str, forwarded: list[str]) -> None:
     summary_path: Path = run / "brush-summary.json"
     steps: str = str(config.steps)
     command: list[str] = [
-        str(config.binary.resolve()),
-        str(prepared_dir.resolve()),
-        "--total-train-iters",
-        steps,
-        "--max-splats",
-        str(prepared.sfm_points),
-        "--eval-every",
-        steps,
-        "--export-every",
-        steps,
-        "--export-path",
-        str(run.resolve()),
-        "--export-name",
-        "model.ply",
-        "--test-renders",
-        str((run / "renders/test").resolve()),
-        "--summary",
-        str(summary_path.resolve()),
-        *forwarded,
-    ]
+        str(config.binary.resolve()), str(prepared_dir.resolve()),
+        "--total-train-iters", steps, "--max-splats", str(prepared.sfm_points), "--eval-every", steps, "--export-every", steps,
+        "--export-path", str(run.resolve()), "--export-name", "model.ply",
+        "--test-renders", str((run / "renders/test").resolve()), "--summary", str(summary_path.resolve()), *forwarded,
+    ]  # fmt: skip
     if config.gpu_lock is not None:
         print(f"Waiting for {config.gpu_lock}")
     with gpu_lock(config.gpu_lock) if config.gpu_lock is not None else nullcontext():
