@@ -47,14 +47,27 @@ pub(crate) struct Args {
     /// (`0.5 n + 0.5`, zero where alpha is zero) under `world/camera/<surface-name>/`.
     #[arg(long)]
     surface: Option<PathBuf>,
-    #[arg(long, default_value = "wgsl", requires = "surface")]
-    surface_name: String,
+    /// Entity name under `world/camera/` in the surface recording; defaults to the PLY file stem.
+    #[arg(long, requires = "surface")]
+    surface_name: Option<String>,
     /// After the renders, time the rendered views with upstream Hexels' protocol for the input and
     /// write the report here: 3D scenes keep up to 3 frames in flight, 2D fits wait on every render.
     #[arg(long)]
     fps: Option<PathBuf>,
     #[command(flatten)]
     settings: RenderSettings,
+}
+
+impl Args {
+    fn surface_name(&self) -> String {
+        self.surface_name.clone().unwrap_or_else(|| {
+            self.ply
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
 }
 
 fn parse_background(text: &str) -> Result<glam::Vec3, String> {
@@ -337,9 +350,10 @@ pub(crate) async fn run(args: Args) -> Result<()> {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                 std::fs::create_dir_all(parent)?;
             }
-            Ok(rerun::RecordingStreamBuilder::new("hexels-surface").save(path)?)
+            Ok(rerun::RecordingStreamBuilder::new("gsplat-render").save(path)?)
         })
         .transpose()?;
+    let surface_name = args.surface_name();
     for (done, (index, frame, path)) in selected.iter().enumerate() {
         let output = if recording.is_some() {
             Output::Surface
@@ -349,7 +363,7 @@ pub(crate) async fn run(args: Args) -> Result<()> {
         renderer.render(&frame.camera, output)?;
         save(&renderer, size, path, args.png16)?;
         if let Some(recording) = &recording {
-            log_surface(recording, &renderer, *index, frame, &args.surface_name)?;
+            log_surface(recording, &renderer, *index, frame, &surface_name)?;
         }
         if (done + 1) % 25 == 0 || done + 1 == selected.len() {
             eprintln!("Rendered {}/{} test frames", done + 1, selected.len());
@@ -447,6 +461,34 @@ mod tests {
         assert_eq!(median_fps(&trials[..3]).unwrap(), 300.0);
         assert!(median_fps(&[]).is_err());
         assert!(median_fps(&[trial(f64::INFINITY)]).is_err());
+    }
+    #[test]
+    fn surface_entities_default_to_the_ply_stem() {
+        let parse = |extra: &[&str]| {
+            let base = [
+                "gsplat render",
+                "--ply",
+                "runs/garden/model.ply",
+                "--output",
+                "a.png",
+            ];
+            Args::try_parse_from(base.iter().chain(extra)).unwrap()
+        };
+        assert_eq!(parse(&["--surface", "s.rrd"]).surface_name(), "model");
+        let named = parse(&["--surface", "s.rrd", "--surface-name", "wgsl"]);
+        assert_eq!(named.surface_name(), "wgsl");
+        assert!(
+            Args::try_parse_from([
+                "gsplat render",
+                "--ply",
+                "m.ply",
+                "--output",
+                "a.png",
+                "--surface-name",
+                "x"
+            ])
+            .is_err()
+        );
     }
     #[test]
     fn output_paths_preserve_subdirectories_and_reject_parent_escape() {
