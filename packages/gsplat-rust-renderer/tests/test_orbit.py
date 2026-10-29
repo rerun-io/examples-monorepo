@@ -62,12 +62,14 @@ def test_orbit_json_is_a_camera_spec_array(tmp_path: Path) -> None:
 
 def test_cameras_on_an_arc_give_a_back_and_forth_sweep_over_that_arc() -> None:
     """A capture that covers only the front (DTU) has nothing behind it, so the path stays over the cameras."""
-    orbit: Orbit = orbit_from_cameras(ring(20, 2.0, 0.5, span=np.deg2rad(100.0)), frames=300)
+    orbit: Orbit = orbit_from_cameras(ring(20, 2.0, 1.0, span=np.deg2rad(100.0)), frames=300)
+    np.testing.assert_allclose(orbit.up, UP, atol=1e-9)  # the camera y axes do not cancel on an arc; the x axes stay level
+    np.testing.assert_allclose(orbit.center, CENTER, atol=1e-9)
     poses: Float64[np.ndarray, "n 4 4"] = orbit.world_from_cameras
     offsets: Float64[np.ndarray, "n 3"] = poses[:, :3, 3] - CENTER
     azimuths: Float64[np.ndarray, "n"] = np.rad2deg(np.arctan2(offsets @ SECOND, offsets @ FIRST) - 0.3)
     assert azimuths.min() > -1e-6 and azimuths.max() < 100.0 + 1e-6
-    np.testing.assert_allclose([azimuths[0], azimuths[150]], [0.0, 100.0], atol=1.0)  # fitted up tilts slightly on an arc
+    np.testing.assert_allclose([azimuths[0], azimuths[150]], [0.0, 100.0], atol=1e-6)
     steps: Float64[np.ndarray, "n"] = np.linalg.norm(np.diff(offsets, axis=0, append=offsets[:1]), axis=1)
     assert steps.min() > 1e-6, "every pose moves, also across the loop seam"
     np.testing.assert_allclose(poses[:, :3, 2], -offsets / np.linalg.norm(offsets, axis=1, keepdims=True), atol=1e-12)

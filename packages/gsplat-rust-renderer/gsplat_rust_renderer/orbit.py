@@ -73,17 +73,23 @@ def orbit_from_cameras(world_from_cameras: Float64[ndarray, "n 4 4"], frames: in
     axes: Float64[ndarray, "n 3"] = world_from_cameras[:, :3, 2]
     projectors: Float64[ndarray, "n 3 3"] = np.eye(3) - axes[:, :, None] * axes[:, None, :]
     center: Float64[ndarray, "3"] = np.linalg.solve(projectors.sum(axis=0), np.einsum("nij,nj->i", projectors, origins))
-    up: Float64[ndarray, "3"] = -world_from_cameras[:, :3, 1].mean(axis=0)
-    up /= np.linalg.norm(up)
     offsets: Float64[ndarray, "n 3"] = origins - center
-    heights: Float64[ndarray, "n"] = offsets @ up
-    horizontal: Float64[ndarray, "n 3"] = offsets - heights[:, None] * up
-    first: Float64[ndarray, "3"] = horizontal[0] / np.linalg.norm(horizontal[0])
-    second: Float64[ndarray, "3"] = np.cross(up, first)
+    mean_up: Float64[ndarray, "3"] = -world_from_cameras[:, :3, 1].mean(axis=0)
+    rights: Float64[ndarray, "n 3"] = world_from_cameras[:, :3, 0]
+    level: Float64[ndarray, "3"] = np.linalg.eigh(rights.T @ rights)[1][:, 0]
+    # Around a ring the inward lean of the camera y axes cancels; on an arc it does not, so there the up axis is
+    # the direction the (level) camera x axes avoid.
+    for up in (mean_up / np.linalg.norm(mean_up), np.sign(level @ mean_up) * level):
+        heights: Float64[ndarray, "n"] = offsets @ up
+        horizontal: Float64[ndarray, "n 3"] = offsets - heights[:, None] * up
+        first: Float64[ndarray, "3"] = horizontal[0] / np.linalg.norm(horizontal[0])
+        second: Float64[ndarray, "3"] = np.cross(up, first)
+        azimuths: Float64[ndarray, "n"] = np.sort(np.arctan2(horizontal @ second, horizontal @ first) % (2.0 * np.pi))
+        gaps: Float64[ndarray, "n"] = np.diff(azimuths, append=azimuths[0] + 2.0 * np.pi)
+        if gaps.max() <= 0.5 * np.pi:
+            break
     radius: float = float(np.median(np.linalg.norm(horizontal, axis=1)))
     elevation: float = float(np.median(heights))
-    azimuths: Float64[ndarray, "n"] = np.sort(np.arctan2(horizontal @ second, horizontal @ first) % (2.0 * np.pi))
-    gaps: Float64[ndarray, "n"] = np.diff(azimuths, append=azimuths[0] + 2.0 * np.pi)
     widest: int = int(np.argmax(gaps))
     turns: Float64[ndarray, "m"] = np.arange(frames) * (2.0 * np.pi / frames)
     # Nothing was captured behind a front-only scene, so the path stays over the cameras.
