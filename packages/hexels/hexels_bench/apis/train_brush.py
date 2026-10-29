@@ -93,13 +93,13 @@ def main(config: Config, extra_flags: list[str]) -> None:
 def run_scene(config: Config, scene: str, forwarded: list[str]) -> None:
     """Prepare one scene, train with Brush defaults capped at the SfM count, and write its run directory."""
     roots: Roots = config.roots
-    contract: Path = roots.contract(config.dataset, scene)
-    prepared_dir: Path = roots.brush_prepared / config.dataset / scene
-    prepared: PreparedScene = prepare_scene(roots.scene_dir(config.dataset, scene), contract, prepared_dir)
     run: Path = roots.run_dir(config.dataset, scene, config.method)
     if (run / "train.json").is_file():
         print(f"Complete, skipped: {run}")
         return
+    contract: Path = roots.contract(config.dataset, scene)
+    prepared_dir: Path = roots.brush_prepared / config.dataset / scene
+    prepared: PreparedScene = prepare_scene(roots.scene_dir(config.dataset, scene), contract, prepared_dir)
     run.mkdir(parents=True, exist_ok=True)
     summary_path: Path = run / "brush-summary.json"
     steps: str = str(config.steps)

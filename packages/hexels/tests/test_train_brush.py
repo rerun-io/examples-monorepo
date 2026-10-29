@@ -1,6 +1,7 @@
 """The protocol runner writes the run-layout directory around one Brush training."""
 
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
@@ -90,10 +91,11 @@ def test_run_directory_follows_the_run_layout_contract(tmp_path: Path, protocol_
     assert (cameras["format"], cameras["split"], cameras["background"]) == ("hexels-cameras-1", "test", [0.0, 0.0, 0.0])
     assert [camera["name"] for camera in cameras["cameras"]] == ["0000", "0008"]
     assert cameras["cameras"][1]["world_view_transform"][3] == [0.8, 0.0, 3.0, 1.0]
-    # A finished run is left alone.
+    # A finished run is left alone, before its scene is prepared again.
     (tmp_path / "bin/arguments").unlink()
+    shutil.rmtree(tmp_path / "prepared")
     main(config(tmp_path, binary), [])
-    assert not (tmp_path / "bin/arguments").exists()
+    assert not (tmp_path / "bin/arguments").exists() and not (tmp_path / "prepared").exists()
 
 
 def test_failed_training_leaves_no_report(tmp_path: Path, protocol_scene: SceneFactory, capsys: pytest.CaptureFixture[str]) -> None:
