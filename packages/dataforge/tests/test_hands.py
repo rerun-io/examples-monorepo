@@ -63,7 +63,7 @@ def test_keypoint_columns_are_bounded_and_preserve_every_row(tmp_path: Path) -> 
         hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=frames, positions=positions[..., :2], confidence=None)
     for path, dimension in ((schema.coco133_xyz_path(), 3), ("/pixels", 2)):
         batches = [c.to_record_batch() for c in read_chunks(target) if not c.is_static and str(c.entity_path) == path]
-        assert len(batches) > 1
+        assert sorted(b.num_rows for b in batches) == ([96, 768, 768, 768] if dimension == 3 else [1140, 1260])
         assert all(b.nbytes < 2 * 1024 * 1024 for b in batches)
         batches.sort(key=lambda b: b.column("frame_index")[0].as_py())
         assert [f for b in batches for f in b.column("frame_index").to_pylist()] == frames.tolist()

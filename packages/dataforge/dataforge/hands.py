@@ -14,11 +14,12 @@ Class 0 uses the root COCO-133 AnnotationContext. Derived projections use a sepa
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133_batch
@@ -141,20 +142,9 @@ def log_keypoints3d(
         confidence: Float32[ndarray, "t 133"] or None; preserve shipped values.
         path: Entity; each person of a multi-person sequence has its own (``schema.person_coco133_xyz_path``).
     """
-    # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
-    rows_per_batch = (2 * 1024 * 1024 - 4096) // (133 * (3 * 4 + 4 + 4) + 64)
     if describe:
         log_keypoint_descriptors(recording, path, dimension=3)
-    for start in range(0, len(positions), rows_per_batch):
-        stop = start + rows_per_batch
-        masked, scores = confidence_rule(positions[start:stop], None if confidence is None else confidence[start:stop])
-        colors = confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0]
-        rr.send_columns(
-            path,
-            indexes=[time_column(times_ns[start:stop]), frame_index_column(frame_indices[start:stop])],
-            columns=Points3DWithConfidence.columns(positions=masked.reshape(-1, 3), confidences=scores.reshape(-1), colors=colors).partition([133] * len(masked)),
-            recording=recording,
-        )
+    _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=3)
 
 
 def log_keypoints2d(
@@ -168,17 +158,38 @@ def log_keypoints2d(
     describe: bool = True,
 ) -> None:
     """Write Float32[t,133,2] pixels and confidence to ``path`` (shipped or projected 2D)."""
-    # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
-    rows_per_batch = (2 * 1024 * 1024 - 4096) // (133 * (2 * 4 + 4 + 0) + 64)
     if describe:
         log_keypoint_descriptors(recording, path, dimension=2)
+    _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2)
+
+
+def _send_keypoint_rows(
+    recording: rr.RecordingStream,
+    path: str,
+    *,
+    times_ns: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"],
+    positions: Float32[ndarray, "t 133 d"],
+    confidence: Float32[ndarray, "t 133"] | None,
+    dimension: Literal[2, 3],
+) -> None:
+    """Bound temporal columns before allocation using the publication byte target."""
+    # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
+    row_bytes = 133 * (dimension * 4 + 4 + (4 if dimension == 3 else 0)) + 64
+    rows_per_batch = (cast(int, rrc.OptimizationProfile.OBJECT_STORE.max_bytes) - 4096) // row_bytes
     for start in range(0, len(positions), rows_per_batch):
         stop = start + rows_per_batch
         masked, scores = confidence_rule(positions[start:stop], None if confidence is None else confidence[start:stop])
+        columns = (
+            Points3DWithConfidence.columns(
+                positions=masked.reshape(-1, 3), confidences=scores.reshape(-1), colors=confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0]
+            )
+            if dimension == 3 else Points2DWithConfidence.columns(positions=masked.reshape(-1, 2), confidences=scores.reshape(-1))
+        )
         rr.send_columns(
             path,
             indexes=[time_column(times_ns[start:stop]), frame_index_column(frame_indices[start:stop])],
-            columns=Points2DWithConfidence.columns(positions=masked.reshape(-1, 2), confidences=scores.reshape(-1)).partition([133] * len(masked)),
+            columns=columns.partition([133] * len(masked)),
             recording=recording,
         )
 
