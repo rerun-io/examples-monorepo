@@ -1,10 +1,10 @@
 #import <./common.wgsl>
+#import <./hexagon.wgsl>
 
 // Hexel forward model hand-ported from honeycomb-surfels/hexel-kernel 3af3220,
 // gsplat/cuda_hexels3d/csrc/hexels3d_forward.cu (preprocess_hexels3d, render_hexels3d).
 // Pixel centres are integer coordinates, as upstream; the principal point moves by -0.5.
 const HEX_NEAR = 0.2;
-const HEX_RADIUS = 1.15470053838;
 const LOG_254 = 5.537334267;
 const FILTER_SIZE = 0.707106;
 const FLT_EPSILON = 1.1920929e-7;
@@ -19,6 +19,14 @@ struct Hexel {
 }
 
 struct Plane { tu: vec3f, tv: vec3f, tw: vec3f, }
+
+// The hexel is the `Primitive` of the shared tile mapper and rasterizer.
+alias Primitive = Hexel;
+const BATCH = 128u; // 128 hexels of 80 bytes fill the core's 10 KiB workgroup budget.
+
+fn primitive_tiles(h: Hexel) -> vec4u {
+    return hexel_tiles(plane(h), h.opacity, h.sharpness);
+}
 
 fn plane(h: Hexel) -> Plane {
     return Plane(vec3f(h.t[0], h.t[1], h.t[2]), vec3f(h.t[3], h.t[4], h.t[5]), vec3f(h.t[6], h.t[7], h.t[8]));
@@ -101,10 +109,4 @@ fn hexel_tiles(m: Plane, opacity: f32, sharpness: f32) -> vec4u {
         return vec4u(0u);
     }
     return rect;
-}
-
-// Regular hexagon with flat top and bottom edges, as the max of three half-plane distances.
-fn hexagon_sdf(s: vec2f) -> f32 {
-    let a = 0.5 * 1.7320508;
-    return max(abs(s.y), max(abs(a * s.x + 0.5 * s.y), abs(a * s.x - 0.5 * s.y))) - 1.0;
 }
