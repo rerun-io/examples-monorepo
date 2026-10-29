@@ -1,7 +1,8 @@
 //! Store-owned uploads and per-view lifetimes; viewer identities stop at this boundary.
 use crate::renderer::{GaussianDrawData, GaussianRenderer, Prepared, RenderView};
 use ahash::HashMap;
-use gsplat_core::{Camera, RenderOptions, native::NativeSplats};
+use gsplat_core::native::{NativeHexels, NativeSplats};
+use gsplat_core::{Camera, RenderOptions};
 use parking_lot::Mutex;
 use re_viewer::external::re_log_types::hash::Hash64;
 use re_viewer::external::{
@@ -15,6 +16,56 @@ struct CachedView {
     last_frame: u64,
     generation: Hash64,
     render: Arc<Mutex<RenderView>>,
+}
+
+/// One entity row of either primitive; both share scenes, views, targets and composition.
+#[derive(Clone, Copy)]
+pub(crate) enum Primitives<'a> {
+    Splats(&'a NativeSplats<'a>),
+    Hexels(&'a NativeHexels<'a>),
+}
+
+impl Primitives<'_> {
+    /// Reject oversized uploads before converting the CPU arrays.
+    fn check_capacity(self, core: &gsplat_core::Renderer) -> Result<(), gsplat_core::Error> {
+        match self {
+            Self::Splats(cloud) => core.check_capacity(
+                cloud.centers.len(),
+                cloud.coefficient_count().isqrt() as u32 - 1,
+            ),
+            Self::Hexels(hexels) => {
+                core.check_hexel_capacity(hexels.centers.len(), hexels.variant())
+            }
+        }
+    }
+
+    fn upload(
+        self,
+        core: &gsplat_core::Renderer,
+    ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
+        re_tracing::profile_scope!("upload");
+        let (scene, count, kind) = match self {
+            Self::Splats(cloud) => (
+                core.upload(&cloud.to_core())?,
+                cloud.centers.len(),
+                "Gaussian splats",
+            ),
+            Self::Hexels(hexels) => (
+                core.upload_hexels(&hexels.to_core())?,
+                hexels.centers.len(),
+                "hexels",
+            ),
+        };
+        re_log::debug!("Uploaded {} {kind}", re_format::format_uint(count));
+        Ok(scene)
+    }
+
+    fn bounds(self) -> re_renderer::RobustBounds {
+        match self {
+            Self::Splats(cloud) => crate::bounds::from_splats(cloud),
+            Self::Hexels(hexels) => crate::bounds::from_hexels(hexels),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -136,9 +187,34 @@ impl re_byte_size::MemUsageTreeCapture for GpuCache {
     }
 }
 
+/// GPU bytes of shared scene uploads and of per-view scratch and targets, for the frame probe.
+pub fn compute_gpu_bytes(ctx: &re_viewer_context::ViewContext<'_>) -> [u64; 2] {
+    ctx.viewer_ctx
+        .store_context
+        .memoizer::<GpuCache, _>(|cache| {
+            [
+                cache.scenes.values().map(|e| e.scene.gpu_byte_size()).sum(),
+                cache
+                    .views
+                    .values()
+                    .map(|e| e.render.lock().gpu_byte_size())
+                    .sum(),
+            ]
+        })
+}
+
 impl GpuCache {
     pub(crate) fn view_bounds(&self, id: re_viewer_context::ViewId) -> Option<macaw::BoundingBox> {
         self.bounds.get(&id).map(|(bounds, _)| *bounds)
+    }
+
+    /// Fallback paths without a cached upload still contribute to default framing.
+    pub(crate) fn record_view_bounds(
+        &mut self,
+        view_id: re_viewer_context::ViewId,
+        bounds: macaw::BoundingBox,
+    ) -> bool {
+        record_bounds(&mut self.bounds, self.frame, view_id, bounds)
     }
 
     pub(crate) fn fallback(
@@ -177,31 +253,22 @@ impl GpuCache {
         ctx: &re_renderer::RenderContext,
         renderer: &GaussianRenderer,
         key: BatchKey,
-        cloud: &NativeSplats<'_>,
+        primitives: Primitives<'_>,
         generation: Hash64,
         camera: &Camera,
         options: RenderOptions,
+        background: Option<glam::Vec3>,
     ) -> Result<(GaussianDrawData, bool), gsplat_core::Error> {
         re_tracing::profile_function!();
         let core = renderer.core()?;
-        core.check_capacity(
-            cloud.centers.len(),
-            cloud.coefficient_count().isqrt() as u32 - 1,
-        )?;
+        primitives.check_capacity(core)?;
         let frame = self.frame;
         let shared = match self.scenes.entry(generation) {
             Entry::Vacant(entry) => {
-                let scene = {
-                    re_tracing::profile_scope!("upload");
-                    core.upload(&cloud.to_core())?
-                };
-                re_log::debug!(
-                    "Uploaded {} Gaussian splats",
-                    re_format::format_uint(cloud.centers.len())
-                );
+                let scene = primitives.upload(core)?;
                 entry.insert(CachedScene {
                     last_frame: frame,
-                    bounds: crate::bounds::from_splats(cloud),
+                    bounds: primitives.bounds(),
                     scene,
                 })
             }
@@ -235,6 +302,7 @@ impl GpuCache {
         Ok((
             GaussianDrawData {
                 view: entry.render.clone(),
+                background: renderer.background(ctx, background),
                 camera: *camera,
                 options,
                 center: bounds.center().into(),

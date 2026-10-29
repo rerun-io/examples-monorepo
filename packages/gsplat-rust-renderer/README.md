@@ -26,6 +26,17 @@ The custom viewer selects compute rendering automatically. Stock Rerun selects
 its native renderer for the same recording. An explicit compute visualizer
 selection requires the custom viewer.
 
+Hexel PLYs (planar hexagons, [hexel PLY contract](crates/gsplat-cli/README.md))
+enter Rerun as the custom `Hexels3D` archetype (`gsplat_rust_renderer.hexels3d`):
+f32 centres, xyzw rotations, two scales, opacity, sharpness, a colour field and
+the V2/V3 view term, plus a `Points3D` fallback on the same entity. The custom
+viewer draws the hexels with the core's hexel primitive; stock Rerun draws the
+fallback points. `tools/log_hexels_compare.py` logs a Brush 3DGS PLY and a hexel
+PLY side by side: both views track one orbit camera on the `frame` timeline
+(the orbit is fitted to the scene's cameras and also written as `orbit.json`),
+with a per-scene metrics table below. `--layout brush|hexels` writes the
+one-view recording that `gsplat probe` measures.
+
 ![Pretrained Lego in the custom viewer](docs/media/pretrained-lego.png)
 
 ## Train

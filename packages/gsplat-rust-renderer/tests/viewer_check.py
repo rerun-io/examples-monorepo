@@ -21,6 +21,8 @@ from rerun.experimental import ViewerClient
 from serde.json import to_json
 
 from gsplat_rust_renderer.gaussians3d import compute_visualizer, log_ply
+from gsplat_rust_renderer.hexels3d import HEXELS_ENTITY, Hexels3D, log_hexels, write_hexel_ply
+from gsplat_rust_renderer.orbit import CameraSpec, look_at, write_orbit_json
 from gsplat_rust_renderer.scene_io import NerfFrame, NerfTransforms
 
 
@@ -29,7 +31,7 @@ class Config:
     binaries: Path
     ply: Path
     out: Path
-    mode: Literal["relog", "pair", "views", "portable", "pair-white", "depth"] = "relog"
+    mode: Literal["relog", "pair", "views", "portable", "pair-white", "depth", "hexels", "hexels-tracked", "hexels-portable"] = "relog"
 
 
 def capture(viewer: ViewerClient, view: rrb.Spatial3DView, path: Path, allow_blank: bool = False, ready: Callable[[UInt8[np.ndarray, "h w 3"]], bool] | None = None) -> UInt8[np.ndarray, "h w 3"]:
@@ -250,9 +252,137 @@ def check_pair(config: Config, image: UInt8[np.ndarray, "h w 3"], position: Floa
     error: Float64[np.ndarray, "h w 3"] = (image.astype(np.float64) - reference.astype(np.float64)) / 255.0
     psnr: float = -10.0 * math.log10(float(np.mean(error**2)))
     print(f"viewer/standalone: {w}x{h}, {psnr:.6f} dB", flush=True)
-    # Linear-light viewer blending differs from the standalone display-space background.
-    floor = 40.0 if config.mode == "pair-white" else 39.0
+    # The composite reproduces display-space blending over the solid view background; what remains is
+    # the native GaussianSplats3D RGBA8/f16 quantization (old linear-light blending: 39.7 / 40.3 dB).
+    floor = 45.0
     assert psnr >= floor, f"Viewer/standalone PSNR below {floor} dB: {psnr}"
+
+
+def synthetic_hexels() -> Hexels3D:
+    """A 5x5 grid of V3 hexels facing +z: distinct base colours, colour gradients and small SH terms."""
+    axis: Float32[np.ndarray, "5"] = np.linspace(-1.0, 1.0, 5, dtype=np.float32)
+    gx, gy = np.meshgrid(axis, axis)
+    count: int = 25
+    rng: np.random.Generator = np.random.default_rng(7)
+    color_field: Float32[np.ndarray, "n 9"] = np.concatenate(
+        [rng.uniform(0.15, 0.95, (count, 3)), rng.uniform(-0.25, 0.25, (count, 6))], axis=1).astype(np.float32)
+    return Hexels3D(
+        centers=np.stack([gx.ravel(), gy.ravel(), np.zeros(count, dtype=np.float32)], axis=1),
+        quaternions_xyzw=np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (count, 1)),
+        scales=np.full((count, 2), 0.22, dtype=np.float32),
+        opacities=np.ones(count, dtype=np.float32),
+        sharpness=np.full(count, 20.0, dtype=np.float32),
+        color_field=color_field,
+        sh_coefficients=rng.uniform(-0.1, 0.1, (count, 45)).astype(np.float32),
+    )
+
+
+def render_reference(config: Config, ply: Path, spec: CameraSpec, name: str) -> UInt8[np.ndarray, "h w 3"]:
+    """`gsplat render` of one CameraSpec, cropped like a 1 px/point Rerun 0.38.1 view capture."""
+    camera_path: Path = config.out / f"{name}.json"
+    write_orbit_json(camera_path, [spec])
+    reference_path: Path = config.out / f"{name}.png"
+    subprocess.run([str(config.binaries / "gsplat"), "render", "--ply", str(ply), "--camera", str(camera_path), "--background", "0,0,0", "--output", str(reference_path)],
+                   check=True, timeout=120)
+    return np.asarray(Image.open(reference_path).convert("RGB"), dtype=np.uint8)[2:-3, 2:-3]
+
+
+def pose_psnr(config: Config, ply: Path, image: UInt8[np.ndarray, "h w 3"], pose: Float64[np.ndarray, "4 4"], fov_y: float, name: str) -> float:
+    """PSNR of a black-background view capture against `gsplat render` of the same pose and vertical field of view.
+
+    Over a solid view background the composite reproduces display-space blending, so the whole frame is compared.
+    """
+    h, w = image.shape[0] + 5, image.shape[1] + 5
+    focal: float = 0.5 * h / math.tan(fov_y / 2.0)
+    reference: UInt8[np.ndarray, "h w 3"] = render_reference(config, ply, CameraSpec(pose, w, h, focal, focal, 0.5 * w, 0.5 * h), f"{name}-reference")
+    error: Float64[np.ndarray, "h w 3"] = (image.astype(np.float64) - reference.astype(np.float64)) / 255.0
+    score: float = -10.0 * math.log10(max(float(np.mean(error**2)), 1e-12))
+    print(f"{name}: viewer/standalone {w}x{h}, {score:.6f} dB", flush=True)
+    return score
+
+
+HEXEL_EYE: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] = ((1.2, -2.5, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+# The default 3D view field of view, as Rerun 0.38.1 computes it in f32.
+DEFAULT_FOV_Y: float = float(np.float32(55.0) * np.float32(math.tau) / np.float32(360.0))
+
+
+def check_hexels(config: Config, ply: Path) -> None:
+    """Hexels3D with an explicit eye: the compute hexels draw (parity with gsplat render), not the Points3D fallback."""
+    position, target, up = (np.array(v, dtype=np.float64) for v in HEXEL_EYE)
+    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+        rr.init("hexels-viewer-check", strict=True)
+        rr.connect_grpc(viewer.url)
+        log_hexels(synthetic_hexels())
+        view = splat_view((0, 0, 0), rrb.EyeControls3D(position=position, look_target=target, eye_up=up), contents=[HEXELS_ENTITY])
+        rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
+        image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "hexels.png")
+        score: float = pose_psnr(config, ply, image, look_at(position, target, up), DEFAULT_FOV_Y, "hexels")
+        assert score >= 50.0, f"Viewer hexels differ from gsplat render: {score} dB"
+        rr.disconnect()
+
+
+def check_hexels_tracked(config: Config, ply: Path) -> None:
+    """A view tracking a logged pinhole renders the compute hexels from that pose and field of view (spec V4/V5)."""
+    fov_y: float = 0.8
+    poses: list[Float64[np.ndarray, "4 4"]] = [look_at(np.array([np.cos(a) * 2.5, np.sin(a) * 2.5, 2.0]), np.zeros(3), np.array([0.0, 0.0, 1.0])) for a in (-1.2, -0.4)]
+    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+        rr.init("hexels-tracked-check", strict=True)
+        rr.connect_grpc(viewer.url)
+        log_hexels(synthetic_hexels())
+        focal: float = 540.0 / math.tan(fov_y / 2.0)
+        rr.log("/world/orbit_cam", rr.Pinhole(focal_length=[focal, focal], width=1920, height=1080, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.05, color=[0, 0, 0, 0], line_width=0.0), static=True)
+        for frame, pose in enumerate(poses):
+            rr.set_time("frame", sequence=frame)
+            rr.log("/world/orbit_cam", rr.Transform3D(translation=pose[:3, 3], mat3x3=pose[:3, :3]))
+        view = splat_view((0, 0, 0), rrb.EyeControls3D(tracking_entity="/world/orbit_cam"), contents=[HEXELS_ENTITY, "/world/orbit_cam"])
+        rr.send_blueprint(rrb.Blueprint(view, rrb.TimePanel(timeline="frame", play_state="paused"), collapse_panels=True))
+        recording = rr.get_global_data_recording()
+        assert recording is not None
+        recording.flush(timeout_sec=30.0)
+        images: list[UInt8[np.ndarray, "h w 3"]] = []
+        for frame, pose in enumerate(poses):
+            deadline: float = time.monotonic() + 30.0
+            while True:
+                try:
+                    viewer.set_time("frame", sequence=frame)
+                    break
+                except ConnectionError:
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.2)
+            image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"tracked-{frame}.png")
+            score: float = pose_psnr(config, ply, image, pose, fov_y, f"tracked-{frame}")
+            assert score >= 50.0, f"Tracked view differs from the pinhole pose and field of view: {score} dB"
+            images.append(image)
+        assert float(np.mean(np.any(images[0] != images[1], axis=2))) > 0.05, "The tracked view did not move with the logged camera"
+        rr.disconnect()
+
+
+def check_hexels_portable(config: Config, ply: Path) -> None:
+    """One recording: the custom viewer draws compute hexels, stock Rerun the Points3D fallback (centre points)."""
+    position, target, up = (np.array(v, dtype=np.float64) for v in HEXEL_EYE)
+    view = splat_view((0, 0, 0), rrb.EyeControls3D(position=position, look_target=target, eye_up=up), contents=[HEXELS_ENTITY])
+    recording_path: Path = config.out / "hexels-portable.rrd"
+    rr.init("hexels-portable", strict=True)
+    rr.save(recording_path)
+    rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
+    log_hexels(synthetic_hexels())
+    recording = rr.get_global_data_recording()
+    assert recording is not None
+    recording.flush(timeout_sec=30.0)
+    rr.disconnect()
+    for name, executable in (("compute", str(config.binaries / "gsplat-rust-renderer")), ("stock", None)):
+        with spawn_viewer(executable) as viewer:
+            viewer.open_url(str(recording_path.resolve()))
+            image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"hexels-portable-{name}.png")
+        score: float = pose_psnr(config, ply, image, look_at(position, target, up), DEFAULT_FOV_Y, f"portable-{name}")
+        lit: int = int(np.sum(np.max(image, axis=2) > 20))
+        print(f"HEXELS_PORTABLE {name} lit_pixels={lit} psnr={score:.3f}", flush=True)
+        if name == "compute":
+            assert score >= 50.0, "The custom viewer did not draw compute hexels"
+        else:
+            # 25 screen-space points of 1.5 UI points each.
+            assert lit > 25 * 4 and score < 30.0, "Stock Rerun should draw the Points3D fallback centres, not hexagons"
 
 
 def main(config: Config) -> None:
@@ -260,6 +390,11 @@ def main(config: Config) -> None:
     config.out.mkdir(parents=True, exist_ok=True)
     if check := {"depth": check_depth_and_framing, "portable": check_portable_recording}.get(config.mode):
         check(config)
+        return
+    if hexel_check := {"hexels": check_hexels, "hexels-tracked": check_hexels_tracked, "hexels-portable": check_hexels_portable}.get(config.mode):
+        ply: Path = config.out / "synthetic-hexels.ply"
+        write_hexel_ply(ply, synthetic_hexels())
+        hexel_check(config, ply)
         return
     position: Float64[np.ndarray, "3"] = np.array([2.0, -2.0, 1.2])
     target: Float64[np.ndarray, "3"] = np.array([0.0, 0.0, 0.25])

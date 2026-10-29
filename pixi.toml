@@ -2060,6 +2060,11 @@ depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { tas
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego splats and dataset cameras to the running viewer"
 
+[feature.gsplat-rust-renderer.tasks.gsplat-log-hexels-compare]
+cmd = "python tools/log_hexels_compare.py"
+cwd = "packages/gsplat-rust-renderer"
+description = "Log a Brush PLY and a hexel PLY side by side on one orbit camera with the per-scene metrics table"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # hexels — upstream Hexels (CUDA 13 build in packages/hexels-src) + our protocol tools
 # ═══════════════════════════════════════════════════════════════════════════

@@ -9,6 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 pub(crate) struct GaussianRenderer {
     composite_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
+    background_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
     composite_pipeline: re_renderer::GpuRenderPipelineHandle,
     pub(crate) core: Option<gsplat_core::Renderer>,
 }
@@ -167,6 +168,8 @@ impl RenderView {
 #[derive(Clone)]
 pub(crate) struct GaussianDrawData {
     pub(crate) view: Arc<Mutex<RenderView>>,
+    /// Composite uniform: the view's solid background, or none for gradients.
+    pub(crate) background: GpuBindGroup,
     pub(crate) camera: Camera,
     pub(crate) options: RenderOptions,
     pub(crate) center: glam::Vec3A,
@@ -227,6 +230,32 @@ impl GaussianRenderer {
             image: Image::Dirty,
             last_good: None,
         })
+    }
+
+    /// Per-frame composite uniform; `background` is the view's solid colour in display space.
+    pub(crate) fn background(
+        &self,
+        ctx: &re_renderer::RenderContext,
+        background: Option<glam::Vec3>,
+    ) -> GpuBindGroup {
+        // Uniform buffers are 256 bytes; only the first vec4 is read.
+        let mut uniform = [0.0_f32; 64];
+        if let Some(color) = background {
+            uniform[..4].copy_from_slice(&color.extend(1.0).to_array());
+        }
+        ctx.gpu_resources.bind_groups.alloc(
+            &ctx.device,
+            &ctx.gpu_resources,
+            &BindGroupDesc {
+                label: "gsplat composite background".into(),
+                layout: self.background_bind_group_layout,
+                entries: smallvec![re_renderer::create_and_fill_uniform_buffer(
+                    ctx,
+                    "gsplat composite background".into(),
+                    uniform,
+                )],
+            },
+        )
     }
 
     fn target(&self, ctx: &re_renderer::RenderContext, size: glam::UVec2) -> TargetImage {
@@ -303,11 +332,31 @@ impl Renderer for GaussianRenderer {
                     .collect(),
             },
         );
+        let background_bind_group_layout = ctx.gpu_resources.bind_group_layouts.get_or_create(
+            &ctx.device,
+            &re_renderer::BindGroupLayoutDesc {
+                label: "GaussianRenderer::background_bind_group_layout".into(),
+                entries: vec![wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: std::num::NonZeroU64::new(16),
+                    },
+                    count: None,
+                }],
+            },
+        );
         let composite_pipeline_layout = ctx.gpu_resources.pipeline_layouts.get_or_create(
             ctx,
             &re_renderer::PipelineLayoutDesc {
                 label: "GaussianRenderer::composite".into(),
-                entries: vec![ctx.global_bindings.layout, composite_bind_group_layout],
+                entries: vec![
+                    ctx.global_bindings.layout,
+                    composite_bind_group_layout,
+                    background_bind_group_layout,
+                ],
             },
         );
 
@@ -344,6 +393,7 @@ impl Renderer for GaussianRenderer {
 
         Self {
             composite_bind_group_layout,
+            background_bind_group_layout,
             composite_pipeline,
             core: gsplat_core::Renderer::new(&ctx.device).ok(),
         }
@@ -365,6 +415,7 @@ impl Renderer for GaussianRenderer {
                 continue;
             };
             pass.set_bind_group(1, &image, &[]);
+            pass.set_bind_group(2, &instruction.draw_data.background, &[]);
             pass.draw(0..3, 0..1);
         }
 

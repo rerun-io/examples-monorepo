@@ -301,8 +301,9 @@ fn register_splat_system(
     registrator: &mut re_viewer_context::ViewSystemRegistrator<'_>,
 ) -> Result<(), re_viewer_context::ViewClassRegistryError> {
     crate::bounds::register(registrator);
-    registrator.register_context_system::<crate::selection::AutomaticSplatSelection>()?;
-    registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()
+    registrator.register_context_system::<crate::selection::AutomaticComputeSelection>()?;
+    registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()?;
+    registrator.register_visualizer::<crate::hexels::HexelVisualizer>()
 }
 
 #[cfg(test)]
@@ -372,6 +373,11 @@ mod selection_tests {
             .collect();
         splats.sort();
         assert_eq!(splats, ["ComputeGaussianSplats3D", "GaussianSplats3D"]);
+        assert!(
+            visualizers
+                .iter_with_identifiers()
+                .any(|(id, _)| id.as_str() == crate::selection::COMPUTE_HEXELS)
+        );
         assert!(
             visualizers.iter_with_identifiers().count() > 10,
             "Other spatial visualizers remain registered"
