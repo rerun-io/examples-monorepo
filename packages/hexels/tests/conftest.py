@@ -8,13 +8,17 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from hexels_bench.cameras import load_target, ordered_targets_sha256, target_sha256
+
 NAMES: list[str] = [f"{index:04d}" for index in range(10)]
 
 
 def write_protocol_scene(
     source: Path, contract_path: Path, test_names: list[str], *, image_size: tuple[int, int] = (17, 13), contract_size: tuple[int, int] = (8, 6)
 ) -> tuple[Path, Path]:
-    """A 2DGS-style scene (RGBA images, COLMAP text points) and its upstream camera contract at resolution 2."""
+    """A 2DGS-style scene (RGBA images, COLMAP text points) and its upstream camera contract at resolution 2, with the
+    target digests of the images at `contract_size` (the module's digest functions; `test_cameras` checks them
+    against an independent copy of upstream's)."""
     (source / "images").mkdir(parents=True)
     (source / "sparse/0").mkdir(parents=True)
     rng: np.random.Generator = np.random.default_rng(0)
@@ -41,8 +45,12 @@ def write_protocol_scene(
         "training": [camera(name, i) for i, name in enumerate(NAMES) if name not in test_names],
         "test": [camera(name, i) for i, name in enumerate(NAMES) if name in test_names],
     }
+    def digest(rows: list[dict]) -> str:
+        targets: list[list[str]] = [[row["name"], target_sha256(load_target(source / "images" / f"{row['name']}.png", *contract_size))] for row in rows]
+        return ordered_targets_sha256(targets)
+
     split = {
-        key: {"count": len(rows), "ordered_names_sha256": "n", "ordered_geometry_sha256": "g", "ordered_target_tensors_sha256": "t"}
+        key: {"count": len(rows), "ordered_names_sha256": "n", "ordered_geometry_sha256": "g", "ordered_target_tensors_sha256": digest(rows)}
         for key, rows in geometry.items()
     }
     contract: dict = {

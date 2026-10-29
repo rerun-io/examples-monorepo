@@ -109,3 +109,22 @@ def test_completed_preparation_is_reused(tmp_path: Path, protocol_scene: SceneFa
     first = prepare_scene(source, contract, tmp_path / "prepared")
     (source / "images/0000.png").unlink()
     assert prepare_scene(source, contract, tmp_path / "prepared") == first
+
+
+def test_targets_that_miss_the_contract_digest_are_refused(tmp_path: Path, protocol_scene: SceneFactory) -> None:
+    source, contract = protocol_scene(tmp_path / "dtu/scan1", tmp_path / "contract.json", ["0000", "0008"])
+    document: dict = json.loads(contract.read_text())
+    document["test"]["ordered_target_tensors_sha256"] = "0" * 64
+    contract.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="test target images do not match"):
+        prepare_scene(source, contract, tmp_path / "prepared")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["contract.json", "dtu"], "no prepared scene and no staging directory"
+
+
+def test_a_record_with_mismatched_targets_is_not_reused(tmp_path: Path, protocol_scene: SceneFactory) -> None:
+    source, contract = protocol_scene(tmp_path / "dtu/scan1", tmp_path / "contract.json", ["0000", "0008"])
+    prepare_scene(source, contract, tmp_path / "prepared")
+    record: dict = json.loads((tmp_path / "prepared/prepare.json").read_text())
+    (tmp_path / "prepared/prepare.json").write_text(json.dumps(record | {"train_targets_match": False}))
+    with pytest.raises(ValueError, match="differ from the contract"):
+        prepare_scene(source, contract, tmp_path / "prepared")
