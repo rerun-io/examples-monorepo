@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
+import s3fs
 from aiohttp import ClientError as AioClientError
 from botocore.exceptions import ClientError, HTTPClientError, IncompleteReadError
 from botocore.exceptions import ConnectionError as S3ConnectionError
@@ -96,8 +97,6 @@ class Release:
     """Read access to the Ego-Exo4D release through one AWS profile (the licence keys); safe to share across threads."""
 
     def __init__(self, profile: str) -> None:
-        import s3fs  # simplecv declares it; only the release needs it
-
         self.profile: str = profile
         self.fs = s3fs.S3FileSystem(
             profile=profile,

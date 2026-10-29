@@ -202,7 +202,7 @@ def test_prefetch_leaves_oversized_take_for_foreground(tmp_path: Path, monkeypat
     (tmp_path / "takes.json").write_text(json.dumps([TAKE]))
     take = read_takes(tmp_path / "takes.json")["cmu_bike02_4"]
     dataset = Egoexo4dDataset(Egoexo4dConfig(root=tmp_path))
-    dataset.config.raw_budget_gb = 0.00000001
+    dataset.config.prefetch_budget_gb = 0.00000001
     dataset.release = release({}, {"captures": [entry("capture-uid", [])]})
     files = [ManifestPath("s3://bucket/video", "video", 20)]
     monkeypatch.setattr(dataset, "take_files", lambda take, gopros: files)
