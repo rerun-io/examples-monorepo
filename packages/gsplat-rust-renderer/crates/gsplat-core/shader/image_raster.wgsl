@@ -17,9 +17,10 @@ fn weight(h: ImageHexel, d: vec2f) -> f32 {
     return 1.0 / (1.0 + exp(hexagon_sdf(vec2f(u, v)) * h.sharpness));
 }
 
-// Depth, median and normal stay zero: a 2D fit has no surface.
+// Depth, median and normal stay zero and there is no median contributor: a 2D fit has no surface.
 fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
     var out: Raster;
+    out.isect = NO_ID;
     if lid == 0u {
         skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
         let index = (tile.x + tile.y * frame.image.tiles_x) * 2u;
