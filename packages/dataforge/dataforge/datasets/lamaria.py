@@ -709,6 +709,16 @@ def build_table_blueprint() -> rrb.Blueprint:
 class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
     """Converts LaMAria sequences into exoego:v2 base-layer recordings."""
 
+    def __init__(self, config: LamariaConfig) -> None:
+        super().__init__(config)
+        self.fetched_vrs: set[Path] = set()
+
+    def fetch_vrs(self, source: LamariaSource) -> None:
+        """Verify or resume once; only a completed fetch is reusable without HTTP."""
+        if source.vrs_path not in self.fetched_vrs or not source.vrs_path.is_file():
+            transports.http_fetch(source.vrs_url, dest=source.vrs_path)
+            self.fetched_vrs.add(source.vrs_path)
+
     def archive_url(self, *parts: str) -> str:
         """Absolute URL of one archive path, e.g. ``raw_data/training/R_01_easy.vrs``."""
         return "/".join([self.config.base_url.rstrip("/"), *parts])
@@ -837,6 +847,12 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
             print(f"  {record.sequence:<16} {record.split:<8} {record.vrs_display_bytes / 1e9:5.1f} GB  {ground_truth or 'no ground truth'}")
         print(f"  small files → {self.config.root}/<split>/<seq>/, manifest → {manifest_path}")
 
+    def prefetch(self, identity: SequenceIdentity, source: LamariaSource, *, force: bool) -> None:
+        """Fetch only the next pending base's VRS; its conversion owns cleanup."""
+        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
+        if not writing.should_skip(target, force=force):
+            self.fetch_vrs(source)
+
     def convert(self, identity: SequenceIdentity, source: LamariaSource, *, force: bool) -> Path:
         """Write whichever of the two layers is missing, base first.
 
@@ -865,7 +881,8 @@ class LamariaDataset(DataforgeDataset[LamariaConfig, LamariaSource]):
                 print(f"  {source.vrs_path.stat().st_size / 1e9:.2f} GB already in {source.vrs_path.parent}; the fetch resumes or verifies it")
             else:
                 print(f"  fetching {source.vrs_display_bytes / 1e9:.1f} GB from {source.vrs_url}")
-            transports.http_fetch(source.vrs_url, dest=source.vrs_path)
+            with self.timer.stage("fetch"):
+                self.fetch_vrs(source)
             work_dir: Path = source.vrs_path.parent / f"{source.sequence}-mp4"
             work_dir.mkdir(parents=True, exist_ok=True)
             try:
