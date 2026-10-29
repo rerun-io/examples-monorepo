@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from time import perf_counter
 from typing import Literal, TypeAlias, TypeVar
@@ -554,6 +555,17 @@ def encode_frames_to_mp4(
     if written != fed:
         raise ValueError(f"{output} holds {written} samples but {fed} frames were fed; the pipe lost data")
     return fed
+
+
+def read_video_start_ns(video_path: Path) -> int:
+    """Presentation time of an mp4's first frame, including its edit-list start."""
+    with av.open(str(video_path)) as container:
+        if not container.streams.video:
+            return 0
+        stream = container.streams.video[0]
+        if stream.start_time is None or stream.time_base is None:
+            return 0
+        return round(stream.start_time * Fraction(stream.time_base.numerator, stream.time_base.denominator) * 1_000_000_000)
 
 
 def mp4_frame_count(path: Path) -> int:

@@ -271,6 +271,8 @@ def write_segment_layer(
 ) -> list[str]:
     """Write one ``<segment>.rrd`` per segment under ``output_dir`` and register them as ``layer``.
 
+    Use ``dataforge-swap-layer`` for gated replacement on the shared server.
+
     Each file is written atomically with the segment's own recording id, so it
     joins that segment; an existing copy of the layer is replaced. A layer never
     restates recording properties: a second ``/__properties`` chunk collides with

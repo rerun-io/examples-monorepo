@@ -39,6 +39,8 @@ class Config:
     replace: bool = False
     """Re-register a layer the catalog already holds for a segment, instead of skipping it.
 
+    Use ``dataforge-swap-layer`` for gated replacement on the shared server.
+
     Registration is normally ``SKIP``, so re-running it over a corpus is cheap
     and idempotent. But a regenerated layer — ``rm gt/*.rrd`` and a convert, per
     README#the-layer-rule — is a *new file at a registered path*, and ``SKIP``

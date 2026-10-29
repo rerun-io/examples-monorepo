@@ -21,19 +21,26 @@ so ``video_time`` is a duration timeline anchored at the episode start.
 
 The nine videos are *not* the raw device streams: the cutting pipeline
 re-encoded all of them to AV1 on one shared, near-CFR grid. Within an episode
-every stream carries the same frame count and the same ``start_pts`` (0, or a
-constant 16-20 ms), and the container duration matches the ego csv span to
-~40 ms; the ego mp4s additionally carry ~50% zero-cost duplicate packets (3
-bytes = ``show_existing_frame``) because the 24 fps OAK was resampled onto the
-iPhone grid. Consequences:
+every stream carries the same frame count, and the container duration matches
+the ego csv span to ~40 ms; the ego mp4s additionally carry ~50% zero-cost
+duplicate packets (3 bytes = ``show_existing_frame``) because the 24 fps OAK
+was resampled onto the iPhone grid. Each mp4 presents its first frame at its
+own container start: 0 in about half of the 4,168 cut episodes, otherwise about
+one frame of that stream (16, 20, 33, 40 or 41 ms; measured 2026-10-26).
+Consequences:
 
-* Raw PTS **is** the episode clock, for exo *and* ego *and* quest. Every video
-  therefore passes through ``Mp4Reader`` unmodified — no retime shift.
+* The presented PTS **is** the episode clock, for exo *and* ego *and* quest.
+  ``Mp4Reader`` rebases every file to start at 0, so each video is shifted back
+  by its container start (``read_video_start_ns``); nothing else is retimed.
 * The ego frame csvs cannot index the ego mp4 samples (e.g. 322 csv rows vs 671
   video samples). They stay the authoritative *native-rate* clock and are
   surfaced as ``num_native_frames`` / ``native_duration_ns`` on each ego camera.
-  TODO(dataforge): a lens that drops the duplicate packets and retimes the ego
+  TODO(selfcap-curate): a lens that drops the duplicate packets and retimes the ego
   streams onto their native csv timestamps.
+
+Both ``video_time`` and ``capture_time`` hold the as-cut clock at ingest.
+The separate selfcap-curate package later shifts ``video_time`` while preserving
+``capture_time``. No latency correction or alignment is applied here.
 
 Permissions. Large parts of the corpus are mode 000 (a NAS sync artifact; a
 corpus-wide chmod is pending). Discovery gates every required file behind
@@ -52,27 +59,44 @@ no transform at all, waiting for a calibration/SLAM layer to localize them.
 
 from __future__ import annotations
 
-import csv
-import json
 import os
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
-from beartype.roar import BeartypeException
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
+from rerun.chunk import Chunk
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
+from dataforge.datasets.selfcap_raw import CameraCalibration as CameraCalibration
+from dataforge.datasets.selfcap_raw import HeadPoses as HeadPoses
+from dataforge.datasets.selfcap_raw import QuestHands as QuestHands
+from dataforge.datasets.selfcap_raw import read_calibration as read_calibration
+from dataforge.datasets.selfcap_raw import read_head_poses as read_head_poses
+from dataforge.datasets.selfcap_raw import read_imu_csv as read_imu_csv
+from dataforge.datasets.selfcap_raw import read_quest_hands as read_quest_hands
+from dataforge.datasets.selfcap_raw import read_session_task as read_session_task
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import ImuChannel, log_imu, log_pose_track, log_rig_node, log_video_stream
+from dataforge.logging_toolkit import (
+    ImuChannel,
+    annotation_context,
+    capture_column,
+    log_imu,
+    log_pose_track,
+    log_rig_node,
+    log_video_stream,
+    time_column,
+)
+from dataforge.records import read_csv_columns
+from dataforge.video_encoding import read_video_start_ns
 
 DATE_DIR_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 """Capture-day directories under the subset; the loose ``manifest.json`` siblings do not match."""
@@ -90,8 +114,6 @@ Keying on ``positional_layout`` rather than ``camera_id`` because the OAK's
 QUEST_STREAM_LAYOUTS: tuple[tuple[str, str], ...] = (("left", "left"), ("right", "right"))
 """Quest stream name → ``positional_layout``, in cam_00..cam_01 order."""
 
-BROWN_CONRADY_COEFFICIENTS: int = 14
-"""OpenCV's ``[k1 k2 p1 p2 k3 k4 k5 k6 s1 s2 s3 s4 tau_x tau_y]`` — exactly simplecv's ``BrownConradyDistortion``."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres; the Quest world is metric, so this reads as 10 cm."""
 IMU_DEVICE: int = 0
@@ -114,32 +136,26 @@ QUEST_CORE_FILES: tuple[str, ...] = ("quest/left.mp4", "quest/right.mp4", "quest
 """Files an episode must expose readably for its Quest rig to be convertible."""
 
 
-@dataclass(frozen=True, slots=True)
-class CameraCalibration:
-    """One camera's intrinsics as the raw calibration states them."""
+def log_quest_hands(recording: rr.RecordingStream, hands: QuestHands, *, shift_ns: int = 0) -> None:
+    """Log raw COCO-133 hands, shifting only video_time by ``shift_ns``.
 
-    width: int
-    """Image width in pixels, from ``capture_resolution`` (the encoded video's width)."""
-    height: int
-    """Image height in pixels, from ``capture_resolution``."""
-    focal_length_xy: Float64[ndarray, "2"]
-    """``(fx, fy)`` in pixels."""
-    principal_point_xy: Float64[ndarray, "2"]
-    """``(cx, cy)`` in pixels."""
-    distortion_coefficients: Float64[ndarray, "14"] | None
-    """Brown-Conrady coefficients, or None when the raw calibration declares none."""
-
-
-@dataclass(frozen=True, slots=True)
-class HeadPoses:
-    """The Quest's left-eye track in its own Y-up world frame."""
-
-    times_ns: Int64[ndarray, "n_samples"]
-    """Sample times on the episode-relative ``video_time`` clock, in nanoseconds."""
-    translations_xyz: Float32[ndarray, "n_samples 3"]
-    """Left-eye positions in metres."""
-    quaternions_xyzw: Float32[ndarray, "n_samples 4"]
-    """Left-eye orientations as xyzw quaternions (Rerun's component layout)."""
+    The static annotation context and point metadata are shared by ingestion and
+    the one-off base migration. capture_time always keeps the raw CSV stamps.
+    """
+    rr.log("/world/gt", annotation_context(), static=True, recording=recording)
+    rr.log(
+        schema.coco133_xyz_path(),
+        rr.Points3D.from_fields(class_ids=0, keypoint_ids=list(range(133)), radii=0.006),
+        static=True,
+        recording=recording,
+    )
+    if hands.times_ns.size:
+        rr.send_columns(
+            schema.coco133_xyz_path(),
+            indexes=[time_column(hands.times_ns + shift_ns), capture_column(hands.times_ns)],
+            columns=rr.Points3D.columns(positions=hands.positions_xyz.reshape(-1, 3)).partition([133] * len(hands.times_ns)),
+            recording=recording,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +195,8 @@ class CameraPlan:
     """Rows in the ego stream's native-rate csv; None for cameras without one."""
     native_duration_ns: int | None = None
     """Last native-rate timestamp; None for cameras without a csv."""
+    first_frame_idx: int | None = None
+    """First session-global 24 fps counter; preserves the RGB drift origin."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +237,12 @@ class EpisodePlan:
     """Blueprint panes — exactly the cameras in ``rigs``, in rig-then-camera order."""
 
 
+def raw_calibration_chunks(episode_dir: Path, devices: list[str]) -> list[Chunk]:
+    """Preserve opaque vendor JSON verbatim on each device rig as static raw-source facts."""
+    folders: list[Path] = [episode_dir / "exo" / device for device in devices] + [episode_dir / "ego", episode_dir / "quest"]
+    return [Chunk.from_columns(schema.rig_path(rig), indexes=[], columns=rr.AnyValues.columns(raw_calibration_json=[(folder / "calibration.json").read_bytes().decode("utf-8")])) for rig, folder in enumerate(folders)]
+
+
 @dataclass
 class SelfcapConfig(DataforgeDatasetConfig):
     """Self-collected exo/ego/Quest captures, cut into per-task episodes."""
@@ -232,152 +256,6 @@ class SelfcapConfig(DataforgeDatasetConfig):
     """Corpus root holding the ``cut`` / ``good`` / ``sample`` subsets."""
     subset: str = "cut"
     """Subset directory to convert; only ``cut`` holds per-episode captures."""
-
-
-def read_csv_columns(csv_path: Path) -> dict[str, Float64[ndarray, "n_rows"]]:
-    """Read a fully numeric csv into one float64 column per header name.
-
-    Column *order* differs between corpus revisions, so every caller indexes by
-    name. ``ts_ns`` survives the float64 round trip exactly: episode-relative
-    times stay below 1e12 ns, far inside float64's 2^53 integer range.
-
-    Args:
-        csv_path: A csv whose first row is a header and whose body is numeric.
-
-    Returns:
-        Header name → column values; empty arrays when the file holds only a header.
-    """
-    with csv_path.open(newline="") as handle:
-        reader: Iterator[list[str]] = csv.reader(handle)
-        header: list[str] = next(reader)
-        rows: list[list[str]] = list(reader)
-    if not rows:
-        return {name: np.zeros(0, dtype=np.float64) for name in header}
-    values: Float64[ndarray, "n_rows n_columns"] = np.array(rows, dtype=np.float64)
-    return {name: values[:, index] for index, name in enumerate(header)}
-
-
-def read_frame_times_ns(csv_path: Path) -> Int64[ndarray, "n_frames"]:
-    """Native-rate capture times of one ego video stream, in row (frame) order.
-
-    Args:
-        csv_path: An ``ego/{rgb,left,right}.csv`` with ``ts_ns,frame_idx`` columns.
-
-    Returns:
-        The ``ts_ns`` column as nanoseconds on the episode-relative clock. The
-        companion ``frame_idx`` is a *session*-global counter, not an index into
-        the episode's mp4, so it is deliberately dropped.
-    """
-    columns: dict[str, Float64[ndarray, "n_rows"]] = read_csv_columns(csv_path)
-    return np.rint(columns["ts_ns"]).astype(np.int64)
-
-
-def read_imu_csv(csv_path: Path) -> tuple[ImuChannel, ImuChannel]:
-    """Read the OAK IMU csv, keeping only the gyroscope and accelerometer channels.
-
-    Both channels share the csv's single ``ts_ns`` column: the OAK reports one
-    fused row per sample instant, unlike RoboCap's two independent tables.
-
-    Args:
-        csv_path: An ``ego/imu.csv``; also holds ``mag_*`` and ``rot_*`` columns.
-
-    Returns:
-        The gyro (rad/s) and accel (m/s^2) channels at their native ~100 Hz rate.
-        TODO(dataforge): the magnetometer and the ``rot_ijk`` device attitude are
-        dropped; they want a magnetometer entity and a proper rotation component.
-    """
-    columns: dict[str, Float64[ndarray, "n_rows"]] = read_csv_columns(csv_path)
-    times_ns: Int64[ndarray, "n_samples"] = np.rint(columns["ts_ns"]).astype(np.int64)
-    gyro_xyz: Float64[ndarray, "n_samples 3"] = np.stack([columns["gyro_x"], columns["gyro_y"], columns["gyro_z"]], axis=-1)
-    accel_xyz: Float64[ndarray, "n_samples 3"] = np.stack([columns["accel_x"], columns["accel_y"], columns["accel_z"]], axis=-1)
-    return ImuChannel(times_ns=times_ns, values_xyz=gyro_xyz), ImuChannel(times_ns=times_ns, values_xyz=accel_xyz)
-
-
-def read_head_poses(csv_path: Path) -> HeadPoses:
-    """Read the Quest head-pose csv, keeping the left-eye track.
-
-    Args:
-        csv_path: A ``quest/head_pose.csv`` holding both eye poses per row.
-
-    Returns:
-        The left-eye poses, which stand in for the Quest rig pose.
-        TODO(dataforge): the right eye's offset relative to the left is
-        recoverable from ``quest/calibration.json`` (``device_to_left`` /
-        ``device_to_right`` / ``left_to_right`` extrinsics); once validated it
-        becomes the static ``rig_T_cam`` of both Quest cameras.
-    """
-    columns: dict[str, Float64[ndarray, "n_rows"]] = read_csv_columns(csv_path)
-    times_ns: Int64[ndarray, "n_samples"] = np.rint(columns["ts_ns"]).astype(np.int64)
-    translations_xyz: Float32[ndarray, "n_samples 3"] = np.stack(
-        [columns["left_pos_x"], columns["left_pos_y"], columns["left_pos_z"]], axis=-1
-    ).astype(np.float32)
-    quaternions_xyzw: Float32[ndarray, "n_samples 4"] = np.stack(
-        [columns["left_quat_x"], columns["left_quat_y"], columns["left_quat_z"], columns["left_quat_w"]], axis=-1
-    ).astype(np.float32)
-    return HeadPoses(times_ns=times_ns, translations_xyz=translations_xyz, quaternions_xyzw=quaternions_xyzw)
-
-
-def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
-    """Read a device ``calibration.json`` into intrinsics keyed by ``positional_layout``.
-
-    Extrinsics are deliberately not read: exo files ship an empty list, and the
-    ego/Quest ones are in unvalidated units (the OAK baseline reads as 7.5,
-    i.e. centimetres). TODO(dataforge): validate and log them as ``rig_T_cam``.
-
-    Args:
-        calibration_path: A ``calibration.json`` from ``ego/``, ``exo/<Device>/``, or ``quest/``.
-
-    Returns:
-        ``positional_layout`` → intrinsics for every camera the file describes.
-    """
-    document: dict = json.loads(calibration_path.read_text())
-    cameras: dict[str, CameraCalibration] = {}
-    for entry in document.get("intrinsics", []):
-        lens: dict = entry.get("lens_intrinsics") or {}
-        resolution: dict = entry.get("capture_resolution") or {}
-        if lens.get("focal_length_x") is None or resolution.get("width") is None:
-            continue
-        raw_coefficients: list[float] | None = (entry.get("distortion") or {}).get("coefficients")
-        distortion: Float64[ndarray, "14"] | None = (
-            np.asarray(raw_coefficients, dtype=np.float64) if raw_coefficients is not None and len(raw_coefficients) == BROWN_CONRADY_COEFFICIENTS else None
-        )
-        cameras[str(entry.get("positional_layout"))] = CameraCalibration(
-            width=int(resolution["width"]),
-            height=int(resolution["height"]),
-            focal_length_xy=np.asarray([lens["focal_length_x"], lens["focal_length_y"]], dtype=np.float64),
-            principal_point_xy=np.asarray([lens["principal_point_x"], lens["principal_point_y"]], dtype=np.float64),
-            distortion_coefficients=distortion,
-        )
-    return cameras
-
-
-def read_session_task(metadata_path: Path) -> dict[str, str]:
-    """Task and collector of a session, or ``{}`` when its metadata is unreadable.
-
-    Every ``cut`` session's ``metadata.json`` is mode 000 as of 2026-08-20, so
-    this returns ``{}`` corpus-wide until the pending chmod lands.
-
-    Args:
-        metadata_path: Session-level ``metadata.json``.
-
-    Returns:
-        The ``task`` and ``collector`` keys that were present and non-empty.
-    """
-    if not os.access(metadata_path, os.R_OK):
-        return {}
-    try:
-        document: dict = json.loads(metadata_path.read_text())
-    except BeartypeException:
-        raise
-    except (OSError, json.JSONDecodeError) as error:
-        print(f"  warning: unreadable session metadata {metadata_path}: {error}")
-        return {}
-    values: dict[str, str] = {}
-    for key, source in (("task", "task"), ("collector", "collector_name")):
-        value: object = document.get(source)
-        if isinstance(value, str) and value:
-            values[key] = value
-    return values
 
 
 def exo_devices(episode_dir: Path) -> list[str]:
@@ -466,7 +344,9 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
             continue
         # The mp4 is resampled onto the shared episode grid, so the csv's native-rate
         # clock is surfaced as metadata rather than used to retime the samples.
-        frame_times_ns: Int64[ndarray, "n_frames"] = read_frame_times_ns(ego_dir / f"{stream}.csv")
+        columns: pa.Table = read_csv_columns(ego_dir / f"{stream}.csv", dict.fromkeys(("ts_ns", "frame_idx"), pa.float64()))
+        frame_times_ns: Int64[ndarray, "n_frames"] = np.rint(columns.column("ts_ns").to_numpy()).astype(np.int64)
+        frame_indices: Float64[ndarray, "n_frames"] = columns.column("frame_idx").to_numpy()
         ego_cameras.append(
             CameraPlan(
                 rig=ego_rig,
@@ -477,6 +357,7 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 kind="rgb" if stream == "rgb" else "grayscale",
                 native_frames=frame_times_ns.size,
                 native_duration_ns=int(frame_times_ns[-1]) if frame_times_ns.size else 0,
+                first_frame_idx=int(frame_indices[0]) if frame_indices.size else None,
             )
         )
         panes.append(CameraPane(name=f"ego {stream}", rig=ego_rig, cam=cam, kind="ego"))
@@ -623,7 +504,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
 
     # ── conversion ────────────────────────────────────────────────────────
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
-        """Write one episode's base-layer rrd (nine cameras, ego IMU, Quest pose)."""
+        """Write one episode's base-layer rrd (nine cameras, ego IMU, Quest pose and hands)."""
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
         if writing.should_skip(target, force=force):
             print(f"skip {identity.sequence_key} → {target}")
@@ -642,6 +523,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             # moving-rig pose: the Quest world is right-handed Y-up.
             rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True, recording=recording)
 
+            rr.send_chunks(raw_calibration_chunks(plan.episode_dir, [rig.name for rig in plan.rigs if rig.kind == "exo"]), recording=recording)
             num_frames: int = 0
             for rig_plan in plan.rigs:
                 log_rig_node(
@@ -656,6 +538,8 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                     num_frames = max(num_frames, self._log_camera(recording, camera))
             self._log_ego_imu(recording, plan)
             self._log_quest_pose(recording, plan)
+            hands: QuestHands = read_quest_hands(plan.episode_dir / "quest")
+            log_quest_hands(recording, hands)
 
             # AnyValues drops None-valued kwargs, so an unreadable metadata.json simply
             # leaves task/collector off the property instead of writing empty strings.
@@ -665,6 +549,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 identity,
                 num_cameras=len(plan.panes),
                 num_frames=num_frames,
+                session=plan.episode_dir.parents[1].name,
                 task=session.get("task"),
                 collector=session.get("collector"),
             )
@@ -689,10 +574,12 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         rr.log(
             schema.cam_path(camera.rig, camera.cam),
             rr.AnyValues(
+                drop_untyped_nones=True,
                 name=camera.name,
                 kind=camera.kind,
                 num_native_frames=camera.native_frames,
                 native_duration_ns=camera.native_duration_ns,
+                **({"first_frame_idx": camera.first_frame_idx} if camera.first_frame_idx is not None else {}),
             ),
             static=True,
             recording=recording,
@@ -731,14 +618,16 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             static=True,
             recording=recording,
         )
-        # Raw PTS is already the shared episode clock (see the module docstring), so no shift.
-        return log_video_stream(recording, camera.video_path, schema.video_path(camera.rig, camera.cam))
+        # The presented PTS is the shared episode clock (see the module docstring).
+        return log_video_stream(
+            recording, camera.video_path, schema.video_path(camera.rig, camera.cam), shift_ns=read_video_start_ns(camera.video_path), capture_time=True
+        )
 
     def _log_ego_imu(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
         """Log the OAK's single IMU on the ego rig, when its csv holds samples."""
         channels: tuple[ImuChannel, ImuChannel] = read_imu_csv(plan.episode_dir / "ego" / "imu.csv")
         if channels[0].times_ns.size:
-            log_imu(recording, plan.ego_rig, IMU_DEVICE, gyro=channels[0], accel=channels[1], name="oak-imu")
+            log_imu(recording, plan.ego_rig, IMU_DEVICE, gyro=channels[0], accel=channels[1], name="oak-imu", capture_time=True)
 
     def _log_quest_pose(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
         """Log the Quest's left-eye track as the temporal ``world_T_rig`` on its rig node."""
@@ -753,4 +642,5 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             times_ns=poses.times_ns,
             translations_xyz=poses.translations_xyz,
             quaternions_xyzw=poses.quaternions_xyzw,
+            capture_time=True,
         )

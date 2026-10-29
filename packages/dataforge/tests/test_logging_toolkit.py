@@ -30,6 +30,7 @@ from dataforge.logging_toolkit import (
     VIDEO_SAMPLE_COMPONENT,
     ImuChannel,
     VideoChunkKind,
+    capture_column,
     classify_video_chunk,
     log_camera_source,
     log_imu,
@@ -462,16 +463,29 @@ def test_video_has_source_frame_index_and_duration(tmp_path: Path, clip: Path) -
 
 
 @pytest.mark.integration
-def test_video_compacts_complete_gops_without_changing_samples_or_keyframes(tmp_path: Path, clip: Path) -> None:
+@pytest.mark.parametrize("capture_time", [False, True])
+def test_video_compacts_complete_gops_without_changing_samples_or_keyframes(tmp_path: Path, clip: Path, capture_time: bool) -> None:
     source = list(rr.experimental.Mp4Reader(clip, mode="stream", entity_path=ENTITY, timeline_name=schema.TIMELINE).stream())
     target = tmp_path / "compact-gops.rrd"
     with rr.RecordingStream("test", recording_id="compact", send_properties=False) as recording:
         recording.save(target)
-        log_video_stream(recording, clip, ENTITY, optimize_gops=True)
+        log_video_stream(recording, clip, ENTITY, optimize_gops=True, capture_time=capture_time)
     actual = list(rrc.RrdReader(target).stream())
     samples = [c for c in actual if VIDEO_SAMPLE_COMPONENT in c.to_record_batch().schema.names]
     assert len(samples) == 1
+    if capture_time:
+        for chunk in actual:
+            batch = chunk.to_record_batch()
+            if schema.TIMELINE in batch.schema.names:
+                assert batch.column(schema.CAPTURE_TIMELINE).equals(batch.column(schema.TIMELINE))
     for component in (VIDEO_SAMPLE_COMPONENT, VIDEO_KEYFRAME_COMPONENT):
         expected = [(t, v) for c in source if component in c.to_record_batch().schema.names for t, v in zip(c.to_record_batch().column(schema.TIMELINE).cast(pa.int64()).to_pylist(), c.to_record_batch().column(component).to_pylist(), strict=True)]
         observed = [(t, v) for c in actual if component in c.to_record_batch().schema.names for t, v in zip(c.to_record_batch().column(schema.TIMELINE).cast(pa.int64()).to_pylist(), c.to_record_batch().column(component).to_pylist(), strict=True)]
         assert observed == expected
+
+
+def test_capture_column_preserves_duration_nanoseconds() -> None:
+    stamps: Int64[ndarray, "n"] = np.array([0, 17181303], dtype=np.int64)
+    column: rr.TimeColumn = capture_column(stamps)
+    assert column.timeline == schema.CAPTURE_TIMELINE
+    assert column.as_arrow_array().equals(pa.array([0, 17181303], type=pa.duration("ns")))
