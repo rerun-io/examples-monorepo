@@ -398,6 +398,38 @@ def test_hf_file_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         transports.hf_fetch_files("repo", ["a", "b"], local_dir=tmp_path, revision="a" * 40)
 
 
+def test_hf_retries_a_transient_connection_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    calls: list[str] = []
+
+    def download(_repo: str, path: str, **_kwargs: object) -> None:
+        calls.append(path)
+        if len(calls) == 1:
+            raise httpx.ConnectTimeout("_ssl.c:993: The handshake operation timed out")
+
+    monkeypatch.setattr(transports, "hf_hub_download", download)
+    monkeypatch.setattr(transports, "RETRY_BACKOFF_S", (0.0,))
+    assert transports.hf_fetch_files("repo", ["a"], local_dir=tmp_path, revision="a" * 40) == tmp_path
+    assert calls == ["a", "a"], "one handshake timeout is retried, not fatal"
+
+
+def test_hf_gives_up_after_the_last_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    calls: list[str] = []
+
+    def download(_repo: str, path: str, **_kwargs: object) -> None:
+        calls.append(path)
+        raise httpx.ConnectError("unreachable")
+
+    monkeypatch.setattr(transports, "hf_hub_download", download)
+    monkeypatch.setattr(transports, "RETRY_BACKOFF_S", (0.0,))
+    with pytest.raises(httpx.ConnectError):
+        transports.hf_fetch_files("repo", ["a"], local_dir=tmp_path, revision="a" * 40)
+    assert len(calls) == transports.ATTEMPTS
+
+
 def test_dataset_pins() -> None:
     from dataforge.datasets.msd import REVISION as MSD_REVISION
     from dataforge.datasets.msd import MsdConfig
