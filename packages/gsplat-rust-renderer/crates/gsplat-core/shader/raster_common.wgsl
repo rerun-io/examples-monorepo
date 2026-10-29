@@ -16,6 +16,7 @@ var<workgroup> num_done: atomic<u32>;
 
 fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
     var out: Raster;
+    out.isect = NO_ID;
     if lid == 0u {
         skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
     }
@@ -61,8 +62,10 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
             let w = s.alpha * transmittance;
             color += s.color * w;
             out.depth += s.depth * w;
-            // 2DGS median depth: the last contribution while transmittance exceeds one half.
-            out.median = select(out.median, s.depth, transmittance > 0.5);
+            // 2DGS median depth and its primitive: the last contribution while transmittance exceeds one half.
+            let median = transmittance > 0.5;
+            out.median = select(out.median, s.depth, median);
+            out.isect = select(out.isect, start + t, median);
             out.normal += s.normal * w;
             transmittance = next;
         }

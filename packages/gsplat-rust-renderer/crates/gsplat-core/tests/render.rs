@@ -2,7 +2,7 @@
 #![cfg(feature = "testing")]
 use glam::{Quat, Vec3};
 use gsplat_core::test_utils as common;
-use gsplat_core::{RenderMode, RenderOptions, Renderer, Splats, Target};
+use gsplat_core::{HexelVariant, Hexels, RenderMode, RenderOptions, Renderer, Splats, Target};
 
 #[test]
 #[ignore = "integration: GPU"]
@@ -63,7 +63,7 @@ fn analytic_render(
     };
     let float = common::upload(device, &vec![[0.0f32; 4]; 33 * 33]);
     let packed = common::upload(device, &vec![0u32; 33 * 33]);
-    let texture = texture(device, wgpu::TextureFormat::Rgba8Unorm);
+    let texture = texture(device, wgpu::TextureFormat::Rgba8Unorm, 33);
     let texture_view = texture.create_view(&Default::default());
     let texture_copy = common::upload(device, &vec![0u8; 256 * 33]);
     for target in [
@@ -216,8 +216,8 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
         .unwrap();
     let mut view = renderer.create_view(&scene, 64).unwrap();
     let camera = common::pinhole_camera(33);
-    let color = texture(device, wgpu::TextureFormat::Rgba8Unorm);
-    let depth = texture(device, wgpu::TextureFormat::R32Float);
+    let color = texture(device, wgpu::TextureFormat::Rgba8Unorm, 33);
+    let depth = texture(device, wgpu::TextureFormat::R32Float, 33);
     let output = common::upload(device, &vec![0.0f32; 64 * 33]);
     let color_output = common::upload(device, &vec![0u8; 256 * 33]);
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -251,12 +251,109 @@ fn optional_depth_is_alpha_weighted_and_normal_color_is_preserved() {
     }
 }
 
-fn texture(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::Texture {
+/// Logged rows (global ids) 0..5: one behind the camera, then the left pixel's strong back layer, the
+/// right pixel's back layer, the left pixel's weak front layer and the right pixel's opaque front layer.
+/// The depth sort reorders them, so a compact or intersection index would not match these ids.
+const PICK_ROWS: [([f32; 3], f32); 5] = [
+    ([0.0, 0.0, -3.0], 0.95),
+    ([-0.2647 * 4.0, 0.0, 4.0], 0.95),
+    ([0.2818 * 3.0, 0.0, 3.0], 0.95),
+    ([-0.2647 * 2.0, 0.0, 2.0], 0.4),
+    ([0.2818 * 2.5, 0.0, 2.5], 0.95),
+];
+
+/// The id target stores the global row of the median contributor (the last one composited while
+/// transmittance exceeds one half) and leaves the colour and depth of `TextureDepth` unchanged.
+#[test]
+#[ignore = "integration: GPU"]
+fn median_contributor_ids_are_global_rows_for_splats_and_hexels() {
+    let (device, queue) = &common::gpu();
+    let renderer = Renderer::new(device).unwrap();
+    let splats = Splats {
+        transforms: PICK_ROWS
+            .iter()
+            .map(|&([x, y, z], _)| {
+                let log_scale = (0.0512 * z.abs()).ln();
+                [x, y, z, 1.0, 0.0, 0.0, 0.0, log_scale, log_scale, log_scale]
+            })
+            .collect(),
+        raw_opacities: PICK_ROWS
+            .iter()
+            .map(|&(_, o)| (o / (1.0 - o)).ln())
+            .collect(),
+        sh_coefficients: vec![[0.0; 3]; PICK_ROWS.len()],
+        sh_degree: 0,
+        min_scale: None,
+    };
+    let hexels = Hexels {
+        variant: HexelVariant::V1,
+        params: PICK_ROWS
+            .iter()
+            .flat_map(|&(centre, opacity)| {
+                let scale = 0.12 * centre[2].abs();
+                let mut row = centre.to_vec();
+                row.extend([1.0, 0.0, 0.0, 0.0, scale, scale, opacity, 200.0]);
+                row.extend([0.5; 3].into_iter().chain([0.0; 6]));
+                row
+            })
+            .collect(),
+    };
+    let camera = common::pinhole_camera(64);
+    let options = RenderOptions::default();
+    for scene in [
+        renderer.upload(&splats).unwrap(),
+        renderer.upload_hexels(&hexels).unwrap(),
+    ] {
+        let mut view = renderer.create_view(&scene, 256).unwrap();
+        let mut pixels = Vec::new();
+        for with_id in [false, true] {
+            let color = texture(device, wgpu::TextureFormat::Rgba8Unorm, 64);
+            let depth = texture(device, wgpu::TextureFormat::R32Float, 64);
+            let id = texture(device, wgpu::TextureFormat::R32Uint, 64);
+            let view_of = |t: &wgpu::Texture| t.create_view(&Default::default());
+            let target = if with_id {
+                Target::TextureDepthId {
+                    color: view_of(&color),
+                    depth: view_of(&depth),
+                    id: view_of(&id),
+                }
+            } else {
+                Target::TextureDepth {
+                    color: view_of(&color),
+                    depth: view_of(&depth),
+                }
+            };
+            let mut encoder = device.create_command_encoder(&Default::default());
+            renderer
+                .render(queue, &mut encoder, &mut view, &camera, &options, target)
+                .unwrap();
+            let read_back = [&color, &depth, &id].map(|t| {
+                let buffer = common::upload(device, &vec![0u8; 256 * 64]);
+                copy_texture(&mut encoder, t, &buffer);
+                buffer
+            });
+            queue.submit([encoder.finish()]);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            assert!(!view.poll_feedback().unwrap().unwrap().needs_rerender);
+            pixels.push(read_back.map(|b| common::read::<u32>(device, queue, &b, 64 * 64)));
+        }
+        let [plain, picked] = [&pixels[0], &pixels[1]];
+        assert_eq!(plain[0], picked[0], "colour changed with the id target");
+        assert_eq!(plain[1], picked[1], "depth changed with the id target");
+        let at = |x: usize, y: usize| picked[2][y * 64 + x];
+        assert_eq!(at(16, 32), 1, "weak front over strong back: the back row");
+        assert_eq!(at(48, 32), 4, "opaque front: the front row");
+        assert_eq!(at(32, 2), u32::MAX, "empty pixel");
+        assert_eq!(at(2, 62), u32::MAX, "empty corner");
+    }
+}
+
+fn texture(device: &wgpu::Device, format: wgpu::TextureFormat, size: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {
-            width: 33,
-            height: 33,
+            width: size,
+            height: size,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -277,11 +374,11 @@ fn copy_texture(
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: destination,
-            // Both formats use four-byte texels; 33-pixel rows require padding.
+            // Every format here uses four-byte texels; rows of at most 64 pixels pad to 256 bytes.
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(256),
-                rows_per_image: Some(33),
+                rows_per_image: Some(texture.height()),
             },
         },
         texture.size(),

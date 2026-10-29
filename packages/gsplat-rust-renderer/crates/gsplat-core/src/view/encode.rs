@@ -192,6 +192,14 @@ impl ViewState {
                 Target::TextureDepth { depth, .. } => {
                     bindings.push((8, wgpu::BindingResource::TextureView(depth)));
                 }
+                Target::TextureDepthId { depth, id, .. } => {
+                    bindings.extend([
+                        (8, wgpu::BindingResource::TextureView(depth)),
+                        // The 32-bit depth sort ends in its input buffers: global rows in depth order.
+                        (11, scratch.depth_sort.output(32).1.as_entire_binding()),
+                        (12, wgpu::BindingResource::TextureView(id)),
+                    ]);
+                }
                 Target::Surface { depth, normal, .. } => {
                     bindings.extend([
                         (9, depth.as_entire_binding()),
