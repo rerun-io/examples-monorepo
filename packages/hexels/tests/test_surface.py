@@ -8,7 +8,7 @@ from PIL import Image
 
 pytest.importorskip("open3d", reason="surface fusion needs an importable open3d (hexels env)", exc_type=ImportError)
 
-from hexels_bench.apis.surface_run import DepthParity, frame_parity, surface_out_dir, total_parity  # noqa: E402
+from hexels_bench.apis.surface_run import frame_parity, surface_out_dir, total_parity  # noqa: E402
 from hexels_bench.cameras import ContractCamera  # noqa: E402
 from hexels_bench.layout import Roots  # noqa: E402
 from hexels_bench.surface import (  # noqa: E402
@@ -24,6 +24,7 @@ from hexels_bench.surface import (  # noqa: E402
     tsdf_settings,
 )
 from hexels_bench.surface_frames import SurfaceFrame  # noqa: E402
+from hexels_bench.surface_records import DepthParity  # noqa: E402
 
 
 def rotation_from_quaternion(q: np.ndarray) -> np.ndarray:

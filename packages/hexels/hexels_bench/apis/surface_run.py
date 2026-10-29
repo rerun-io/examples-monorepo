@@ -18,7 +18,6 @@ import numpy as np
 import open3d as o3d
 from jaxtyping import Bool, Float32
 from numpy import ndarray
-from serde import serde
 from serde.json import to_json
 
 from hexels_bench.apis.export import export_run
@@ -39,6 +38,7 @@ from hexels_bench.surface import (
     tsdf_settings,
 )
 from hexels_bench.surface_frames import SurfaceFrame, rrd_frames
+from hexels_bench.surface_records import DepthParity, FusionReport
 from hexels_bench.upstream import surface_frames
 
 SurfaceMethod: TypeAlias = Literal[
@@ -108,72 +108,8 @@ class Config:
     """Data and run roots."""
 
 
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class FusionReport:
-    """`fusion.json`: what was fused and how (upstream's extraction.json fields that apply)."""
-
-    dataset: str
-    """Run-layout dataset name."""
-    scene: str
-    """Upstream scene name."""
-    method: str
-    """Run-layout method."""
-    depth_source: str
-    """wgsl (gsplat render --surface) or upstream-cuda."""
-    depth_mode: str
-    """median or expected."""
-    alpha_threshold: float
-    """Depth is zeroed where alpha <= this."""
-    split: str
-    """all (every registered view) or train (the NVS training views)."""
-    masked: bool
-    """True when the images' alpha masks zeroed depth (DTU)."""
-    voxel_size: float
-    """TSDF voxel."""
-    sdf_trunc: float
-    """TSDF truncation."""
-    depth_trunc: float
-    """Maximum fused depth."""
-    views: int
-    """Integrated views."""
-    valid_depth_fraction: float
-    """Fraction of fused pixels with 0 < depth < depth_trunc."""
-    raw_triangles: int
-    """Triangles of fuse.ply."""
-    vertices: int
-    """Vertices of fuse_post.ply."""
-    triangles: int
-    """Triangles of fuse_post.ply."""
-    fusion_seconds: float
-    """Integration + marching cubes + post-processing wall time (includes reading or rendering frames)."""
-
-
 PARITY_TOLERANCE: float = 1e-3
 """Median-depth difference (scene units) above which a pixel counts as different in depth_parity.json."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class DepthParity:
-    """`depth_parity.json`: upstream CUDA vs WGSL surface frames of the same checkpoint (all views, or one view)."""
-
-    views: int
-    """Compared views."""
-    pixels: int
-    """All pixels of those views."""
-    both_hit: int
-    """Pixels where both median depths are positive."""
-    median_abs_mean: float
-    """Mean |median depth CUDA - WGSL| over `both_hit` pixels (scene units)."""
-    median_abs_max: float
-    """Largest such difference."""
-    median_over_tolerance: int
-    """`both_hit` pixels whose difference exceeds PARITY_TOLERANCE."""
-    hit_mismatch: int
-    """Pixels where exactly one renderer has a median depth."""
-    alpha_abs_mean: float
-    """Mean |alpha CUDA - WGSL| over all pixels."""
 
 
 def frame_parity(frame: SurfaceFrame, reference: SurfaceFrame) -> DepthParity:

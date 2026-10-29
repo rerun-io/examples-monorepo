@@ -7,7 +7,6 @@ Depth uses one Turbo range per scene (2nd/98th percentile of the first method's 
 world space, `round(255 (0.5 n + 0.5))`, black where nothing was hit.
 """
 
-import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,9 +20,10 @@ from numpy import ndarray
 
 from hexels_bench.apis.surface_run import SURFACE_METHODS, SurfaceMethod, SurfacePlan, plan_surface
 from hexels_bench.cameras import ContractCamera, find_image, load_target
-from hexels_bench.layout import Dataset, Roots
+from hexels_bench.layout import Dataset, Roots, read_json
 from hexels_bench.surface import camera_from_world, normals_from_depth, surface_depth
 from hexels_bench.surface_frames import rrd_views
+from hexels_bench.surface_records import FusionReport, SurfaceMetrics
 
 MAP_PARTS: tuple[str, ...] = ("rgb", "median_depth", "expected_depth", "alpha", "normal")
 
@@ -175,11 +175,18 @@ def main(config: Config) -> None:
     for method in config.methods:
         metrics_path: Path = plans[method].out_dir / "surface_metrics.json"
         fusion_path: Path = plans[method].out_dir / "fusion.json"
-        values: dict = {k: v for k, v in json.loads(metrics_path.read_text()).items() if isinstance(v, float)} if metrics_path.is_file() else {}
+        values: dict[str, float] = {}
+        if metrics_path.is_file():
+            metrics: SurfaceMetrics = read_json(SurfaceMetrics, metrics_path)
+            scores: dict[str, float | None] = {
+                "cd_mm": metrics.cd_mm, "acc_mm": metrics.acc_mm, "comp_mm": metrics.comp_mm,
+                "precision": metrics.precision, "recall": metrics.recall, "f1": metrics.f1, "tau": metrics.tau,
+            }  # fmt: skip
+            values = {name: score for name, score in scores.items() if score is not None}
         if fusion_path.is_file():
-            values["triangles"] = float(json.loads(fusion_path.read_text())["triangles"])
+            values["triangles"] = float(read_json(FusionReport, fusion_path).triangles)
         if values:
-            rr.log(f"metrics/surface/{method}", rr.AnyValues(**values), static=True)
+            rr.log(f"metrics/surface/{method}", rr.AnyValues(drop_untyped_nones=True, **values), static=True)
 
     camera_index: dict[str, int] = {c.name: i for i, c in enumerate(first.cameras)}
     for name in chosen:

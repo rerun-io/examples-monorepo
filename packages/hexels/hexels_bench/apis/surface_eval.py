@@ -19,6 +19,7 @@ from serde.json import from_json, to_json
 from hexels_bench.apis.surface_run import SurfaceMethod, surface_out_dir
 from hexels_bench.layout import Dataset, Roots
 from hexels_bench.surface import DepthMode
+from hexels_bench.surface_records import SurfaceMetrics
 
 TWO_DGS: Path = Path(sys.prefix) / "share" / "hexels-src" / "2d-gaussian-splatting"
 """Patched 2DGS tree (hexels-src output) in this env."""
@@ -60,35 +61,6 @@ class DtuResults:
     """Completeness: mean STL-to-data distance below max_dist."""
     overall: float
     """Chamfer distance (mean_d2s + mean_s2d) / 2."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class SurfaceMetrics:
-    """`surface_metrics.json`; unscored fields are null."""
-
-    dataset: str
-    """Run-layout dataset name."""
-    scene: str
-    """Upstream scene name."""
-    method: str
-    """Run-layout method."""
-    evaluator: str
-    """2dgs-eval_dtu or 2dgs-eval_tnt."""
-    cd_mm: float | None
-    """DTU Chamfer distance (mm)."""
-    acc_mm: float | None
-    """DTU accuracy (mean d2s, mm)."""
-    comp_mm: float | None
-    """DTU completeness (mean s2d, mm)."""
-    precision: float | None
-    """T&T precision at tau, percent."""
-    recall: float | None
-    """T&T recall at tau, percent."""
-    f1: float | None
-    """T&T F1 at tau, percent."""
-    tau: float | None
-    """T&T distance threshold (scene units of the GT)."""
 
 
 def evaluate_dtu(config: Config, scene: str, method: str, mesh: Path, out_dir: Path, log: Path) -> SurfaceMetrics:
