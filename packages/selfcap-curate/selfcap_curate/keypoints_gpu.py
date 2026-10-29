@@ -1,10 +1,10 @@
 """Catalog-only YOLOX + RTMW-x COCO-133 producer for CPU triangulation."""
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import numpy as np
 import onnx
@@ -18,12 +18,12 @@ from posekit.predictions import BoxDetections, Keypoints2d
 from simplecv.catalog_video import CatalogVideo
 from simplecv.catalog_video_codec import wrap_mp4
 from torch import Tensor
+from torchcodec import FrameBatch
 from torchcodec.decoders import VideoDecoder
 from trtkit.backends import TensorRtBackendConfig
 
 from selfcap_curate.catalog_io import Segment, read_phone_videos
 from selfcap_curate.keypoints import Keypoints2D, ViewDetections
-from selfcap_curate.keypoints_av1 import filter_video
 from selfcap_curate.records import TimeSync
 
 
@@ -56,6 +56,37 @@ def plan_frames(aligned: dict[str, CatalogVideo], rate: float) -> FramePlan:
     return FramePlan(times, {p: nearest_indices(v.t_ns.astype(np.float64) * 1e-9, times) for p, v in aligned.items()}, aligned)
 
 
+def decode_wanted(decoder: VideoDecoder, indices: Int64[ndarray, "n"], batch: int, chunk: int = 64) -> Iterator[FrameBatch]:
+    """Decode in order up to the last wanted frame and yield the wanted frames, repeats included, ``batch`` at a time.
+
+    One pass costs no more than picking: AV1 references keep about 85% of a phone's frames needed even for a
+    2 Hz plan, and a plan at the native rate wants every frame.
+    """
+    if np.any(np.diff(indices) < 0):
+        raise ValueError("wanted frames must be sorted")
+    if len(indices) and (indices[0] < 0 or indices[-1] >= len(decoder)):
+        raise ValueError("wanted frames must lie inside the video")
+    stop: int = int(indices[-1]) + 1 if len(indices) else 0
+    held: FrameBatch | None = None
+    for start in range(0, stop, chunk):
+        frames: FrameBatch = decoder.get_frames_in_range(start, min(start + chunk, stop))
+        picked: FrameBatch = frames[torch.from_numpy(indices[(indices >= start) & (indices < start + chunk)] - start)]
+        held = (
+            picked
+            if held is None
+            else FrameBatch(
+                torch.cat([held.data, picked.data]),
+                torch.cat([held.pts_seconds, picked.pts_seconds]),
+                torch.cat([held.duration_seconds, picked.duration_seconds]),
+            )
+        )
+        while len(held) >= batch:
+            yield held[:batch]
+            held = held[batch:]
+    if held is not None and len(held):
+        yield held
+
+
 def plan_episode(segment: Segment, rate: float, sync: TimeSync) -> FramePlan:
     """Read named segment streams and prepare original-frame selections."""
     videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time")
@@ -76,45 +107,40 @@ def detect_keypoints(
     """Infer three people in CUDA batches of eight, widening float16 confidence on the aligned grid."""
     plan: FramePlan = plan_episode(segment, rate, sync)
     views: dict[str, ViewDetections] = {}
-    with TemporaryDirectory(prefix="selfcap-kp2d-") as work:
-        for phone, video in plan.videos.items():
-            fps: int = round(1e9 / float(np.median(np.diff(video.t_ns))))
-            indices: Int64[ndarray, "n"] = plan.indices[phone]
-            source, filtered = Path(work) / "source.mp4", Path(work) / "filtered.mp4"
-            source.write_bytes(wrap_mp4(video.samples, video.keyframes, fps, video.codec))
-            wanted: Float64[ndarray, "n"] = indices.astype(np.float64) / fps
-            path: Path = source
-            if video.codec == "av1":
-                indices = filter_video(source, filtered, wanted)
-                path = filtered
-            decoder = VideoDecoder(str(path), device="cuda", dimension_order="NHWC", seek_mode="exact")
-            xy: Float32[ndarray, "n 3 133 2"] = np.full((len(plan.times), 3, 133, 2), np.nan, np.float32)
-            scores: Float16[ndarray, "n 3 133"] = np.zeros((len(plan.times), 3, 133), np.float16)
-            boxes: Float32[ndarray, "n 3 4"] = np.full((len(plan.times), 3, 4), np.nan, np.float32)
-            confidence: Float32[ndarray, "n 3"] = np.zeros((len(plan.times), 3), np.float32)
-            for start in range(0, len(plan.times), 8):
-                frames = decoder.get_frames_at(indices[start : start + 8].tolist())
-                if not np.allclose(frames.pts_seconds.cpu().numpy(), wanted[start : start + 8], rtol=0.0, atol=1e-9):
-                    raise ValueError("decoder changed selected source timestamps")
-                detected: BoxDetections = detector(frames.data)
-                fi: Int64[ndarray, "d"] = detected.frame_indices.cpu().numpy()
-                sc: Float32[ndarray, "d"] = detected.scores.cpu().numpy()
-                rows: list[int] = []
-                for frame in range(len(frames.data)):
-                    candidates: Int64[ndarray, "d"] = np.flatnonzero(fi == frame)
-                    rows.extend(candidates[np.argsort(-sc[candidates], kind="stable")[:3]].tolist())
-                if not len(rows):
-                    continue
+    for phone, video in plan.videos.items():
+        fps: int = round(1e9 / float(np.median(np.diff(video.t_ns))))
+        indices: Int64[ndarray, "n"] = plan.indices[phone]
+        wanted: Float64[ndarray, "n"] = indices.astype(np.float64) / fps
+        decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, fps, video.codec), device="cuda", dimension_order="NHWC", seek_mode="exact")
+        xy: Float32[ndarray, "n 3 133 2"] = np.full((len(plan.times), 3, 133, 2), np.nan, np.float32)
+        scores: Float16[ndarray, "n 3 133"] = np.zeros((len(plan.times), 3, 133), np.float16)
+        boxes: Float32[ndarray, "n 3 4"] = np.full((len(plan.times), 3, 4), np.nan, np.float32)
+        confidence: Float32[ndarray, "n 3"] = np.zeros((len(plan.times), 3), np.float32)
+        start: int = 0
+        for frames in decode_wanted(decoder, indices, batch=8):
+            if not np.allclose(frames.pts_seconds.cpu().numpy(), wanted[start : start + len(frames)], rtol=0.0, atol=1e-9):
+                raise ValueError("decoder changed selected source timestamps")
+            detected: BoxDetections = detector(frames.data)
+            fi: Int64[ndarray, "d"] = detected.frame_indices.cpu().numpy()
+            sc: Float32[ndarray, "d"] = detected.scores.cpu().numpy()
+            rows: list[int] = []
+            for frame in range(len(frames)):
+                candidates: Int64[ndarray, "d"] = np.flatnonzero(fi == frame)
+                rows.extend(candidates[np.argsort(-sc[candidates], kind="stable")[:3]].tolist())
+            if len(rows):
                 selected: BoxDetections = BoxDetections(detected.xyxy[rows], detected.scores[rows], detected.frame_indices[rows])
                 keypoints: Keypoints2d = pose(frames.data, selected)
                 kfi: Int64[ndarray, "d"] = keypoints.frame_indices.cpu().numpy()
                 if not np.array_equal(kfi, fi[rows]):
                     raise ValueError("pose changed detection instance order")
-                slots = np.concatenate([np.arange(count) for count in np.bincount(kfi, minlength=len(frames.data))])
+                slots = np.concatenate([np.arange(count) for count in np.bincount(kfi, minlength=len(frames))])
                 xy[start + kfi, slots], scores[start + kfi, slots] = keypoints.xy.cpu().numpy(), keypoints.scores.cpu().numpy()
                 boxes[start + kfi, slots], confidence[start + kfi, slots] = selected.xyxy.cpu().numpy(), selected.scores.cpu().numpy()
-            del decoder
-            views[phone] = ViewDetections(boxes.astype(np.float64), confidence.astype(np.float64), xy.astype(np.float64), scores.astype(np.float64))
+            start += len(frames)
+        if start != len(plan.times):
+            raise ValueError(f"{phone}: decoded {start} of {len(plan.times)} planned frames")
+        del decoder
+        views[phone] = ViewDetections(boxes.astype(np.float64), confidence.astype(np.float64), xy.astype(np.float64), scores.astype(np.float64))
     return Keypoints2D(plan.times, views, rate)
 
 
@@ -151,8 +177,9 @@ def dynamic_yolox(source: Path) -> Path:
     return dest
 
 
+@cache
 def keypoint_models() -> tuple[YoloxDetector, RtmPose2d]:
-    """Use installed posekit/trtkit cache settings, YOLOX .3 and RTMW-x."""
+    """Use installed posekit/trtkit cache settings, YOLOX .3 and RTMW-x; built once per process."""
     backend = TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8)
     detector = YoloxDetectorConfig(backend=backend, score_thr=0.3, onnx_transform=dynamic_yolox).setup()
     pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=backend).setup()

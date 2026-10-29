@@ -1,4 +1,4 @@
-"""GPU producer parity, exact AV1 frame checks and downstream 5a accuracy."""
+"""GPU producer parity, planned source frames and downstream 5a accuracy."""
 
 import os
 from pathlib import Path
@@ -7,12 +7,9 @@ import numpy as np
 import pytest
 import torch
 from frozen_v2 import ENTITY, GOLDEN_REFS, ROOT, SERVED, calib_files, dense, load_keypoint_reference
-from simplecv.catalog_video_codec import wrap_mp4
-from torchcodec.decoders import VideoDecoder
 
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_time_sync
 from selfcap_curate.keypoints import read_anchors, read_cameras, triangulate_episode
-from selfcap_curate.keypoints_av1 import filter_video
 from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models, plan_episode
 from selfcap_curate.records import read_frozen_sync
 
@@ -55,19 +52,6 @@ def test_gpu_keypoints_match_frozen_and_served_triangulation(tmp_path: Path, pri
                 original,
                 np.rint((frozen.pts_s[phone] + sync.offsets_ms["exo/" + phone] / 1000.0 - video.t_ns[0] * 1e-9) * fps).astype(np.int64),
             )
-            source, target = tmp_path / "source.mp4", tmp_path / "filtered.mp4"
-            source.write_bytes(wrap_mp4(video.samples, video.keyframes, fps, video.codec))
-            indices = filter_video(source, target, original.astype(np.float64) / fps)
-            full = VideoDecoder(str(source), device="cuda", dimension_order="NHWC", seek_mode="exact")
-            skip = VideoDecoder(str(target), device="cuda", dimension_order="NHWC", seek_mode="exact")
-            assert len(skip) < len(full)
-            for start in range(0, len(original), 8):
-                full_frames = full.get_frames_at(original[start : start + 8].tolist())
-                skip_frames = skip.get_frames_at(indices[start : start + 8].tolist())
-                assert torch.equal(full_frames.data, skip_frames.data)
-                assert torch.equal(full_frames.pts_seconds, skip_frames.pts_seconds)
-            print("AV1_GPU_EXACT", phone, len(original), len(full), len(skip), flush=True)
-            del full, skip, full_frames, skip_frames
         actual = detect_keypoints(handle, *models, rate=expected.rate, sync=sync)
         np.testing.assert_array_equal(actual.times, expected.times)
         assert actual.views.keys() == expected.views.keys()

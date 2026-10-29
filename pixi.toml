@@ -1623,6 +1623,13 @@ cwd = "packages/selfcap-curate"
 env = { OMP_NUM_THREADS = "1" }
 description = "Align explicit fresh-base episodes of one session into local copies (no catalog writes)"
 
+[feature.selfcap-curate.tasks.selfcap-post]
+cmd = "python tools/apps/post.py"
+cwd = "packages/selfcap-curate"
+# Same pool as selfcap-align: one BLAS thread per tracked frame pair.
+env = { OMP_NUM_THREADS = "1" }
+description = "Align, calibrate and keypoint one session in one process into local copies (no catalog writes)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # exo-calib — exo-camera calibration from human keypoints (Kineo-style
 # correspondences + staged kornia-rs bundle adjustment). Catalog-native: its

@@ -7,6 +7,7 @@ import numpy as np
 from dataforge.datasets.selfcap_raw import FactoryCalibration, FactoryExtrinsic, Intrinsic
 from jaxtyping import Float64
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from serde import serde
 
 from selfcap_curate.catalog_io import MissingSegmentError, Segment, open_segment, read_factories
@@ -64,8 +65,8 @@ def oak_stereo(calibration: FactoryCalibration) -> dict[str, Float64[ndarray, "4
     return {"rgb_T_left": rgb_T_left, "rgb_T_right": rgb_T_left @ transform(right.R, right.T * 0.01)}
 
 
-def read_quest_block(segment: Segment, calibration: FactoryCalibration | None = None) -> QuestBlock:
-    """Resolve camera-50 borrowing automatically from strict segment-key provenance."""
+def read_quest_block(segment: Segment, calibration: FactoryCalibration | None = None, *, donors: DatasetEntry | None = None) -> QuestBlock:
+    """Resolve camera-50 borrowing automatically from strict segment-key provenance; donors default to the segment's dataset."""
     calibration = calibration if calibration is not None else read_factories(segment)["quest"]
     block = quest_block(calibration)
     if block.mode != "faulty-unresolved":
@@ -75,7 +76,7 @@ def read_quest_block(segment: Segment, calibration: FactoryCalibration | None = 
     if borrowed is None:
         return block
     try:
-        donor: Segment = open_segment(segment.dataset, borrowed.healthy_segment)
+        donor: Segment = open_segment(donors if donors is not None else segment.dataset, borrowed.healthy_segment)
     except MissingSegmentError as error:
         raise ValueError(f"session {session} borrows camera 50 from {borrowed.healthy_segment}; register that segment") from error
     healthy = read_factories(donor)

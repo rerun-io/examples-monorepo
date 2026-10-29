@@ -1,9 +1,9 @@
 """One-session calibration CLI; typed input adapters are kept at this boundary."""
 
 from dataclasses import dataclass, replace
-from functools import cache
 from pathlib import Path
 
+from rerun.catalog import CatalogClient
 from serde.json import to_json
 
 from selfcap_curate import catalog_io
@@ -26,14 +26,15 @@ class Config:
     key_file: Path | None = None
     """Optional newline-separated segment ids or unprefixed keys."""
     catalog_url: str = catalog_io.CATALOG_URL
-    """Read-only endpoint containing aligned bases and any healthy borrow source."""
+    """Read-only endpoint containing aligned bases and, unless donor_catalog_url is set, any healthy borrow source."""
+    donor_catalog_url: str | None = None
+    """Read-only endpoint holding the healthy camera-50 borrow sources when they are not on catalog_url."""
 
 
 def main(config: Config) -> CalibSession:
     """Solve one session and write files only; never register or swap a layer."""
     session, keys, dataset = open_session(config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=())
     with session_output(config.output_dir) as output:
-        models = cache(pose_models)
         episodes = []
         segments = []
         for key in keys:
@@ -43,8 +44,8 @@ def main(config: Config) -> CalibSession:
             episode = read_session_episode(segment, sync)
             phones = catalog_io.read_phone_detections(segment)
             if set(episode.layout.phones) - phones.keys():
-                phones = {**detect_episode(segment, episode.quest, *models()), **phones}
-            oak = detect_oak_hands_gpu(dataset, sync, episode.quest, episode.layout, models()[1])
+                phones = {**detect_episode(segment, episode.quest, *pose_models()), **phones}
+            oak = detect_oak_hands_gpu(dataset, sync, episode.quest, episode.layout, pose_models()[1])
             episodes.append(replace(episode, detections=phones, oak=oak))
         first_segment = segments[0]
         factories = catalog_io.read_factories(first_segment)
@@ -53,7 +54,11 @@ def main(config: Config) -> CalibSession:
             session,
             calibrate(session, episodes, read_table().focals),
             solve_oak(session, episodes, oak_centre(ego), ego.device_id, fixed_rotation(gyro, ego.device_id, rotations)),
-            read_quest_block(first_segment, factories["quest"]),
+            read_quest_block(
+                first_segment,
+                factories["quest"],
+                donors=None if config.donor_catalog_url is None else CatalogClient(config.donor_catalog_url).get_dataset(catalog_io.DATASET_NAME),
+            ),
             oak_stereo(ego),
         )
         for motion in episodes:

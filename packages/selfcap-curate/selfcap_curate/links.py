@@ -111,7 +111,9 @@ def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> UIn
     from torchcodec.decoders import VideoDecoder
 
     key: int = max(i for i in range(first + 1) if video.keyframes[i])
-    decoder = VideoDecoder(wrap_mp4(video.samples[key : last + 1], video.keyframes[key : last + 1], 30, codec=video.codec), device="cuda", seek_mode="exact")
+    decoder = VideoDecoder(
+        wrap_mp4(video.samples[key : last + 1], video.keyframes[key : last + 1], 30, codec=video.codec), device="cuda", seek_mode="exact"
+    )
     luma: Float32[Tensor, "1 3 1 1"] = torch.tensor([0.299, 0.587, 0.114], device="cuda").view(1, 3, 1, 1)
     batches: list[Tensor] = []
     for begin in range(first - key, last - key + 1, 128):
@@ -147,10 +149,16 @@ def rotation_speed(
     if changes is not None:
         changes.extend(zip(times[1:].tolist(), differences.tolist(), strict=True))
     kept: list[int] = [0, *(int(i) + 1 for i in np.flatnonzero(differences >= 0.3))]
-    inverse: Float64[ndarray, "3 3"] = np.linalg.inv(np.array([[focal_px * scale, 0.0, 256.0], [0.0, focal_px * scale, height / 2.0], [0.0, 0.0, 1.0]]))
+    inverse: Float64[ndarray, "3 3"] = np.linalg.inv(
+        np.array([[focal_px * scale, 0.0, 256.0], [0.0, focal_px * scale, height / 2.0], [0.0, 0.0, 1.0]])
+    )
     pairs: list[tuple[int, int]] = list(zip(kept[:-1], kept[1:], strict=True))
     angles = list(tracking_pool().map(lambda pair: frame_rotation(frames[pair[0]], frames[pair[1]], inverse), pairs))
-    samples = [(0.5 * (times[j] + times[i]), angle / max(times[j] - times[i], 1e-3)) for (i, j), angle in zip(pairs, angles, strict=True) if angle is not None]
+    samples = [
+        (0.5 * (times[j] + times[i]), angle / max(times[j] - times[i], 1e-3))
+        for (i, j), angle in zip(pairs, angles, strict=True)
+        if angle is not None
+    ]
     return SpeedSeries(np.asarray([s[0] for s in samples], dtype=np.float64), np.asarray([s[1] for s in samples], dtype=np.float64))
 
 

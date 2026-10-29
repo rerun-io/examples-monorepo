@@ -1,6 +1,7 @@
 """Catalog-only GPU phone and OAK hands with served frame-selection rules."""
 
 from collections.abc import Callable
+from functools import cache
 
 import numpy as np
 import torch
@@ -85,8 +86,9 @@ def detect_frames(
     return PhoneDetections(times_s, xy.astype(np.float64), scores.astype(np.float64))
 
 
+@cache
 def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, BoxDetections], Keypoints2d]]:
-    """Build v2's YOLOX 0.3 and Sapiens2 0.4B TensorRT batch-eight models."""
+    """Build v2's YOLOX 0.3 and Sapiens2 0.4B TensorRT batch-eight models once per process."""
     from posekit.models.sapiens import SapiensPoseConfig
     from posekit.models.yolox import YoloxDetectorConfig
     from trtkit.backends import TensorRtBackendConfig

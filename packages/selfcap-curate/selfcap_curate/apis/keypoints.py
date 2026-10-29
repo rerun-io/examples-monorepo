@@ -70,8 +70,17 @@ def main(config: Config) -> None:
     timer = SequenceTimer()
     for episode in processable:
         key = episode.key
-        with timer.stage(key.key):
+        with timer.stage(f"{key}/detect"):
             detections = detect_keypoints(episode.segment, detector, pose, rate=config.rate, sync=episode.sync)
+        with timer.stage(f"{key}/triangulate"):
             result = triangulate_episode(detections, episode.cameras, read_anchors(episode.segment, detections.times, episode.sync))
+        with timer.stage(f"{key}/write"):
             write_keypoints(config.calib_dir / key.rrd_name, config.output_dir / key.rrd_name, result)
-        print("KEYPOINTS_TIME", key, len(result.times), int((result.n_views >= 2).sum()), timer.stage_s[key.key], flush=True)
+        print(
+            "KEYPOINTS_TIME",
+            key,
+            len(result.times),
+            int((result.n_views >= 2).sum()),
+            {k: v for k, v in timer.stage_s.items() if k.startswith(f"{key}/")},
+            flush=True,
+        )
