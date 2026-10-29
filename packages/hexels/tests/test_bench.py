@@ -13,6 +13,7 @@ from hexels_bench.layout import GSPLAT_RELEASE, Roots
 from hexels_bench.methods import Method
 
 NAMES: tuple[str, ...] = ("0000", "0008")
+MODEL_PLY: bytes = b"ply\nformat binary_little_endian 1.0\nelement vertex 0\nproperty float x\nend_header\n"
 
 
 def bench_roots(tmp_path: Path) -> Roots:
@@ -52,7 +53,7 @@ def write_train(run_dir: Path, method: str) -> None:
 def complete_run(run_dir: Path, method: str) -> None:
     """Every file a finished run of `method` has (the model is written before it is scored)."""
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "model.ply").write_bytes(b"ply")
+    (run_dir / "model.ply").write_bytes(MODEL_PLY)
     write_scored(run_dir, method, fps=500.0 if "wgsl" in method or "cuda" in method else None)
     if method in ("brush-7k", "hexels-v1-7k", "hexels-v3-7k"):
         write_train(run_dir, method)
@@ -78,7 +79,7 @@ class FakeRunner:
         if step.name == "brush-train":
             write_cameras(log.parent)
             write_train(log.parent, method)
-            (log.parent / "model.ply").write_bytes(b"ply")
+            (log.parent / "model.ply").write_bytes(MODEL_PLY)
         elif step.name == "wgsl-render":
             (log.parent / "fps.json").write_text(json.dumps(fps_report(321.5)))
         elif step.name in ("hexels-train", "hexels-render-published"):
@@ -111,6 +112,11 @@ def test_queue_runs_datasets_in_order_then_scenes_in_protocol_order_then_methods
         build_queue(("mipnerf360",), scenes=("Garden",))
 
 
+def replace_with_link(path: Path, target: Path) -> None:
+    path.unlink()
+    path.symlink_to(target)
+
+
 @pytest.mark.parametrize(
     ("method", "breaks", "reason"),
     [
@@ -122,6 +128,9 @@ def test_queue_runs_datasets_in_order_then_scenes_in_protocol_order_then_methods
         ("hexels-v1-7k", lambda run: write_scored(run, "hexels-v1-7k", fps=1.0, lpips=None), "LPIPS"),
         ("hexels-v1-7k", lambda run: write_scored(run, "brush-7k", fps=1.0), "method brush-7k"),
         ("brush-7k", lambda run: os.utime(run / "model.ply", (time.time() + 60, time.time() + 60)), "older than model.ply"),
+        ("hexels-v1-7k", lambda run: (run / "model.ply").unlink(), "no model.ply"),
+        ("brush-7k", lambda run: (run / "model.ply").write_bytes(b"ply\nend_header\n"), "unreadable model.ply"),
+        ("hexels-v1-30k-pub-wgsl", lambda run: replace_with_link(run / "model.ply", run / "missing.ply"), "no model.ply"),
     ],
 )
 def test_incomplete_reason_names_what_is_missing(tmp_path: Path, method: Method, breaks, reason: str) -> None:
@@ -155,7 +164,7 @@ def test_complete_items_are_skipped_and_the_rest_run_through_pixi_envs(tmp_path:
     scene: Path = roots.runs / "dtu" / "scan24"
     complete_run(scene / "hexels-v1-7k", "hexels-v1-7k")
     write_cameras(scene / "hexels-v2-30k-pub-cuda")
-    (scene / "hexels-v2-30k-pub-cuda" / "model.ply").write_bytes(b"ply")
+    (scene / "hexels-v2-30k-pub-cuda" / "model.ply").write_bytes(MODEL_PLY)
     runner = FakeRunner()
     queue: list[Item] = build_queue(("dtu",), scenes=("scan24",), methods=("brush-7k", "brush-7k-wgsl", "hexels-v1-7k", "hexels-v2-30k-pub-wgsl"))
 
@@ -222,7 +231,7 @@ def test_partial_outputs_move_to_the_attic_before_a_rerun(tmp_path: Path) -> Non
     (train_run / "log.txt").write_text("crashed\n")
     cuda_run: Path = roots.runs / "dtu" / "scan24" / "hexels-v1-30k-pub-cuda"
     write_cameras(cuda_run)
-    (cuda_run / "model.ply").write_bytes(b"ply")
+    (cuda_run / "model.ply").write_bytes(MODEL_PLY)
     (cuda_run / "upstream-eval").mkdir()
     (cuda_run / "upstream-eval-job").mkdir()
 

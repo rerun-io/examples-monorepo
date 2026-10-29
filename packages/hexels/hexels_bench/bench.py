@@ -24,7 +24,7 @@ from hexels_bench.cameras import CamerasFile
 from hexels_bench.gpu_monitor import gpu_lock
 from hexels_bench.layout import GSPLAT_RELEASE, PROTOCOL_SCENES, WORKSPACE, Dataset, Roots, read_json
 from hexels_bench.methods import BENCHMARK_METHODS, METHODS, Method, MethodSpec
-from hexels_bench.metrics import MetricsFile, TrainRecord
+from hexels_bench.metrics import MetricsFile, TrainRecord, ply_vertex_count
 
 Env: TypeAlias = Literal["gsplat-rust-renderer", "hexels"]
 
@@ -123,12 +123,19 @@ def build_queue(datasets: tuple[Dataset, ...], scenes: tuple[str, ...] = (), met
 
 
 def incomplete_reason(run_dir: Path, method: Method) -> str | None:
-    """None when the run directory is a finished, scored run of `method`; otherwise what is missing."""
+    """None when the run directory is a finished, scored run of `method` with a readable model.ply; otherwise what is missing."""
     spec: MethodSpec = METHODS[method]
     if not (run_dir / "metrics.json").is_file():
         return "no metrics.json"
     if not (run_dir / "cameras.json").is_file():
         return "no cameras.json"
+    model: Path = run_dir / "model.ply"
+    if not model.is_file():
+        return "no model.ply (missing, or a link to a missing file)"
+    try:
+        ply_vertex_count(model)
+    except ValueError as error:
+        return f"unreadable model.ply: {error}"
     try:
         metrics: MetricsFile = read_json(MetricsFile, run_dir / "metrics.json")
         names: list[str] = [camera.name for camera in read_json(CamerasFile, run_dir / "cameras.json").cameras]
@@ -145,7 +152,7 @@ def incomplete_reason(run_dir: Path, method: Method) -> str | None:
         return f"{len(renders)} renders for {len(names)} cameras"
     if [view.name for view in metrics.per_view] != names or metrics.views != len(names):
         return f"metrics.json scores {metrics.views} views, cameras.json has {len(names)}"
-    if (run_dir / "model.ply").exists() and (run_dir / "model.ply").stat().st_mtime > (run_dir / "metrics.json").stat().st_mtime:
+    if model.stat().st_mtime > (run_dir / "metrics.json").stat().st_mtime:
         return "metrics.json is older than model.ply (retrained or re-exported since scoring)"
     if metrics.lpips_vgg is None:
         return "no LPIPS"
