@@ -1,0 +1,105 @@
+{
+ "key": "2025-11-24__027d8215__ep002",
+ "duration_s": 121.329,
+ "window_s": [
+  10.66,
+  110.66
+ ],
+ "oak_native_frames": 2912,
+ "t_start_session_s": 148.958,
+ "oak_left_rot_samples": 2411,
+ "oak_rgb_rot_samples": 2411,
+ "quest_video_rot_samples": 2959,
+ "oak_left_pattern": {
+  "ppm_vs_24": 0,
+  "phi": 0.16,
+  "agreement": 0.9929,
+  "pairs_used": 2670,
+  "moving_frac": 1.0,
+  "repeat_frac_pred": 0.191,
+  "native_frames_pred": 2399
+ },
+ "oak_rgb_pattern": {
+  "ppm_vs_24": 310,
+  "phi": 0.26,
+  "agreement": 0.9926,
+  "pairs_used": 2703,
+  "moving_frac": 1.0,
+  "repeat_frac_pred": 0.19,
+  "native_frames_pred": 2400
+ },
+ "lag_left_to_pose": {
+  "lag_s": -0.14944,
+  "peak": 0.865,
+  "second_peak": 0.771,
+  "overlap_s": 99.9
+ },
+ "lag_rgb_to_left": {
+  "lag_s": 0.07521,
+  "peak": 0.63,
+  "second_peak": 0.542,
+  "overlap_s": 99.1
+ },
+ "lag_quest_video_to_pose": {
+  "lag_s": -0.00634,
+  "peak": 0.911,
+  "second_peak": 0.82,
+  "overlap_s": 99.9
+ },
+ "lag_left_to_gyro": {
+  "lag_s": 2.28117,
+  "peak": 0.939,
+  "second_peak": 0.825,
+  "overlap_s": 99.9
+ },
+ "lag_gyro_to_pose": {
+  "lag_s": -2.43,
+  "peak": 0.921,
+  "second_peak": 0.809,
+  "overlap_s": 113.3
+ },
+ "elapsed_s": 102.8,
+ "video_start_s": {
+  "oak_left": 0.0,
+  "oak_rgb": 0.0,
+  "quest_video": 0.0
+ },
+ "video_start_source": "Measured once with ffprobe -select_streams v:0 -show_entries stream=start_time -of csv=p=0 on /mnt/nas/datasets/exoego-self-collected/main/cut/2025-11-24/027d8215-7ef4-418e-bc3b-fb98f3a3ae06/episodes/episode-002/{ego/left.mp4,ego/rgb.mp4,quest/right.mp4}. Scratch uses MP4 PTS; compare each stream with its first catalog capture_time sample, allowing either rebased or container-start-preserving catalogs.",
+ "search_half_width_s": {
+  "left_to_pose": 3.0,
+  "rgb_to_left": 0.4,
+  "quest_video_to_pose": 1.0,
+  "left_to_quest_video": 3.0,
+  "left_to_gyro": 4.0,
+  "gyro_to_pose": 4.0
+ },
+ "search_half_width_source": "Frozen records predate the search_half_width_s field; preserved here from v2/code/links_cpu.py WINDOWS defaults, confirmed by the SelfCap v2 follow-up. WIDE is not used for these three records.",
+ "scratch_final": {
+  "lag_left_to_pose": {
+   "served_ms": -149.44,
+   "scratch_final_ms": -151.49,
+   "drift_ms": 2.05
+  },
+  "lag_rgb_to_left": {
+   "served_ms": 75.21,
+   "scratch_final_ms": 73.98,
+   "drift_ms": 1.23
+  },
+  "lag_quest_video_to_pose": {
+   "served_ms": -6.34,
+   "scratch_final_ms": -5.26,
+   "drift_ms": 1.08
+  },
+  "lag_left_to_gyro": {
+   "served_ms": 2281.17,
+   "scratch_final_ms": 2277.78,
+   "drift_ms": 3.39
+  },
+  "lag_gyro_to_pose": {
+   "served_ms": -2430.0,
+   "scratch_final_ms": -2430.0,
+   "drift_ms": 0.0
+  }
+ },
+ "scratch_final_source": "Pilot records predate a scratch code revision: left-to-pose drift is 2.05 ms and coarse left-to-gyro drift is 3.39 ms; final scratch rerun on the same [10.66, 110.66] s window with frozen widths, recorded by /tmp/selfcap-pilot-diagnostic.py in slice-a-report.md."
+}

@@ -1,0 +1,50 @@
+[project]
+name = "selfcap-curate"
+version = "0.1.0"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+dependencies = ["posekit", "trtkit", "simplecv", "dataforge", "sapiens2-pose", "torchcodec", "tyro>=0.9.1"]
+
+[tool.uv.sources]
+posekit = { path = "../posekit", editable = true }
+trtkit = { path = "../trtkit", editable = true }
+simplecv = { path = "../simplecv", editable = true }
+dataforge = { path = "../dataforge", editable = true }
+sapiens2-pose = { path = "../sapiens2-pose", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["selfcap_curate"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e selfcap-curate-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e selfcap-curate-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    "E501",   # Line too long
+    "F722",   # jaxtyping forward annotation false positive
+    "F821",   # jaxtyping forward annotation false positive
+    "UP037",  # Remove quotes false positive with jaxtyping
+    "UP040",  # PEP 695 `type` does not parse on our Python 3.10/3.11 envs, and beartype errors name only the alias, not the shape
+    "UP046",  # PEP 695 type parameters do not parse on Python 3.10/3.11 either
+]
+
+[tool.vulture]
+paths = ["selfcap_curate", "tests"]
+# pyserde reads record fields; PyAV consumes thread configuration in C.
+# Serialized legacy/stream metadata and public shared-camera diagnostics.
+# Temporary PR3 exports: calibration/keypoint consumers land in PR4/PR5.
+ignore_names = ["ENTITY", "GOLDEN_REFS", "GyroFit", "OakFit", "R_head_from_imu", "chunk_bytes", "dense", "detect_oak_hands_gpu", "hands_kept_frac", "max_episode_dev_deg", "median_px", "oak_device_id", "oak_median_reference", "ok", "questrig_T_rgb", "read_factories", "rotation_source", "session_episode", "version", "video_time", "dim_param", "episode_key", "clipped_at_s", "a_ms", "agreement", "aligned_clock", "b_ms_per_s", "basin_halfwidth_ms", "clipped", "closure_ms", "cmin_px", "confidence", "date", "edge", "ego_exo_abs_uncertainty_ms", "episode", "exo_fit", "flags", "formula", "hand_latency_ms", "how", "key", "lag_gyro_to_pose", "lag_left_to_gyro", "lag_left_to_pose", "lag_left_to_quest_video", "lag_quest_video_to_pose", "lag_rgb_to_left", "lag_s", "left_to_gyro", "links", "method", "moving_frac", "native_frames_pred", "oak_left_pattern", "oak_rgb_model", "oak_rgb_pattern", "offsets_ms", "overlap_s", "pairs_used", "peak", "peak_left_to_gyro", "peak_left_to_pose", "peak_quest_video_to_pose", "peak_rgb_to_left", "phi", "points", "ppm_vs_24", "pytestmark", "quest_video_to_gyro", "repeat_frac_pred", "rgb_episode_minus_model_ms", "rgb_to_gyro", "second_peak", "session", "t_start_session_s", "tau_ms", "tau_phone_to_pose_ms", "thread_count", "thread_type"]
+exclude = ["*/__pycache__/*"]
+min_confidence = 60

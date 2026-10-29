@@ -1558,6 +1558,47 @@ description = "Train a first 5k-step Brush splat from the kitchen train 0100 rig
 [feature.pysfm.target.linux-64.dependencies]
 brush = "==0.3.0"
 
+[feature.selfcap-curate]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.selfcap-curate.dependencies]
+python = "3.12.*"
+torchcodec = "*"
+# dataforge.datasets imports its HTTP transport at module load.
+requests = "*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.selfcap-curate.pypi-dependencies]
+sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
+selfcap-curate = { path = "packages/selfcap-curate", editable = true }
+posekit = { path = "packages/posekit", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.selfcap-curate.activation.env]
+PACKAGE_DIR = "packages/selfcap-curate"
+PYREFLY_TARGET = "selfcap_curate"
+
+
+
+
+
+
+[feature.selfcap-curate.tasks.selfcap-sync-curves]
+cmd = "python tools/apps/sync_curves.py"
+cwd = "packages/selfcap-curate"
+description = "Compare five catalog rotation-speed curves on capture and aligned clocks"
+
+[feature.selfcap-curate.tasks.selfcap-patch-base]
+cmd = "python tools/apps/patch_base.py"
+cwd = "packages/selfcap-curate"
+description = "Write migrated local copies of named served SelfCap bases (no catalog operations)"
+
+[feature.selfcap-curate.tasks.selfcap-align]
+cmd = "python tools/apps/align.py"
+cwd = "packages/selfcap-curate"
+description = "Align explicit fresh-base episodes of one session into local copies (no catalog writes)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # exo-calib — exo-camera calibration from human keypoints (Kineo-style
 # correspondences + staged kornia-rs bundle adjustment). Catalog-native: its
@@ -3405,6 +3446,8 @@ simplecv-catalog-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv-catalog", no-default-feature = true }
+selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate"], solve-group = "selfcap-curate", no-default-feature = true }
+selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
 exo-calib = { features = [
     "catalog-common",
     "rerun-prerelease",

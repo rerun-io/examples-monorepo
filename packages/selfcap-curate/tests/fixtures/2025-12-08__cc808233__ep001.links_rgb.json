@@ -1,0 +1,9 @@
+{
+ "key": "2025-12-08__cc808233__ep001",
+ "left_to_gyro_s": 2.0748,
+ "left_peak": 0.969,
+ "rgb_to_gyro_s": 2.00696,
+ "rgb_peak": 0.97,
+ "rgb_to_left_s": -0.06784,
+ "edge": false
+}

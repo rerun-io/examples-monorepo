@@ -1,0 +1,121 @@
+{
+ "key": "2025-12-30__65d00748__ep001",
+ "session": "65d00748-fb27-4811-aca7-416a2bdbefda",
+ "date": "2025-12-30",
+ "episode": "ep001",
+ "method": "selfcap-sync v2 (2026-10-13)",
+ "aligned_clock": "OAK left video PTS as cut (video_time); capture_time keeps every stream's PTS as cut",
+ "offsets_ms": {
+  "oak_left": 0.0,
+  "oak_right": 0.0,
+  "oak_imu": -1488.9,
+  "quest_pose": -446.7,
+  "quest_video": -488.0,
+  "oak_rgb_at_start": -3.4,
+  "exo/Comet-B1C77204": -456.7,
+  "exo/Hammer-06873283": -704.6,
+  "exo/Titanium-57BB9E1A": -863.8
+ },
+ "flags": [
+  "quest_pose_low_confidence",
+  "oak_imu_via_pose",
+  "oak_rgb_without_gyro",
+  "exo_Comet-B1C77204_weak"
+ ],
+ "oak_rgb_model": {
+  "a_ms": -3.4,
+  "b_ms_per_s": 0.0,
+  "t_start_session_s": 22.542,
+  "how": "session_model",
+  "formula": "offset_ms(t) = a_ms + b_ms_per_s * (t_start_session_s + t), t = rgb PTS in s"
+ },
+ "exo_fit": {
+  "Comet-B1C77204": {
+   "tau_phone_to_pose_ms": 38.0,
+   "how": "own_weak_fit",
+   "tau_ms": 9.5,
+   "cmin_px": 15.19,
+   "basin_halfwidth_ms": 46.0,
+   "points": 720,
+   "edge": false
+  },
+  "Hammer-06873283": {
+   "tau_phone_to_pose_ms": -209.9,
+   "how": "measured",
+   "tau_ms": -209.9,
+   "cmin_px": 11.21,
+   "basin_halfwidth_ms": 23.0,
+   "points": 720,
+   "edge": false
+  },
+  "Titanium-57BB9E1A": {
+   "tau_phone_to_pose_ms": -369.1,
+   "how": "measured",
+   "tau_ms": -369.1,
+   "cmin_px": 10.74,
+   "basin_halfwidth_ms": 33.0,
+   "points": 673,
+   "edge": false
+  }
+ },
+ "confidence": {
+  "closure_ms": 3.1,
+  "peak_left_to_pose": 0.397,
+  "peak_left_to_gyro": 0.433,
+  "peak_quest_video_to_pose": 0.888,
+  "peak_rgb_to_left": 0.726,
+  "rgb_episode_minus_model_ms": 0.0,
+  "hand_latency_ms": 48.0,
+  "ego_exo_abs_uncertainty_ms": 12.0
+ },
+ "links": {
+  "oak_left_pattern": {
+   "ppm_vs_24": -10,
+   "phi": 0.68,
+   "agreement": 0.9996,
+   "pairs_used": 2477,
+   "moving_frac": 0.997,
+   "repeat_frac_pred": 0.52,
+   "native_frames_pred": 1200
+  },
+  "oak_rgb_pattern": {
+   "ppm_vs_24": -10,
+   "phi": 0.68,
+   "agreement": 0.9988,
+   "pairs_used": 2492,
+   "moving_frac": 1.0,
+   "repeat_frac_pred": 0.52,
+   "native_frames_pred": 1200
+  },
+  "lag_left_to_pose": {
+   "lag_s": 0.44671,
+   "peak": 0.397,
+   "second_peak": 0.37,
+   "overlap_s": 49.9
+  },
+  "lag_rgb_to_left": {
+   "lag_s": -0.0034,
+   "peak": 0.726,
+   "second_peak": 0.709,
+   "overlap_s": 49.1
+  },
+  "lag_quest_video_to_pose": {
+   "lag_s": -0.04128,
+   "peak": 0.888,
+   "second_peak": 0.855,
+   "overlap_s": 50.0
+  },
+  "lag_left_to_gyro": {
+   "lag_s": 1.49207,
+   "peak": 0.433,
+   "second_peak": 0.407,
+   "overlap_s": 49.9
+  },
+  "lag_gyro_to_pose": {
+   "lag_s": -1.04221,
+   "peak": 0.907,
+   "second_peak": 0.867,
+   "overlap_s": 107.1
+  }
+ }
+}
