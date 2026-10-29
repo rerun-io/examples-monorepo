@@ -96,8 +96,6 @@ def train(roots: Roots, dataset: Dataset, scene: str, variant: HexelVariant, ste
     run_dir.mkdir(parents=True, exist_ok=True)
     command, cwd = prepare_command(scene_dir, model_dir, dataset, variant, steps)
     measured: Measured = run_measured(command, cwd, run_dir / "log.txt")
-    if measured.returncode != 0:
-        raise RuntimeError(f"upstream training exited with {measured.returncode}; see {run_dir / 'log.txt'}")
     summary: dict = json.loads((model_dir / "summary.json").read_text())
 
     ply: HexelPly = export_run(model_dir, run_dir / "model.ply")

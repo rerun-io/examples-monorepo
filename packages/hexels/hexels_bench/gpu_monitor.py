@@ -6,12 +6,16 @@ CUDA context and torch's caching allocator, or Brush's wgpu/Vulkan buffers; neve
 change of that value is kept with its wall-clock time, so a runner can cut the peak at the end of training:
 Brush trains, evaluates, exports and then renders the test views in one process (cut at its
 `training_end_unix_seconds`); the upstream Hexels trainer runs with --skip_postprocess and the 2D fits render
-nothing afterwards, so their whole process counts.
+nothing afterwards, so their whole process counts. `gpu_lock` is the one flock every GPU job on a host
+holds, so timings and peaks do not share the GPU.
 """
 
+import fcntl
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,10 +83,8 @@ class PeakVramSampler:
 
 @dataclass(frozen=True, slots=True)
 class Measured:
-    """A trainer run as a direct child."""
+    """A trainer run as a direct child that exited with status 0."""
 
-    returncode: int
-    """Exit status."""
     seconds: float
     """Wall time from start to exit."""
     vram: PeakVramSampler
@@ -90,7 +92,11 @@ class Measured:
 
 
 def run_measured(command: list[str], cwd: Path | None, log: Path) -> Measured:
-    """Run `command` as a direct child under `PeakVramSampler`; the command line, then its stdout and stderr, are appended to `log`."""
+    """Run `command` as a direct child under `PeakVramSampler`; the command line, then its stdout and stderr, are appended to `log`.
+
+    Raises:
+        RuntimeError: The command exited with a nonzero status.
+    """
     started: float = time.perf_counter()
     with log.open("a") as stream:
         stream.write(" ".join(command) + "\n")
@@ -98,7 +104,24 @@ def run_measured(command: list[str], cwd: Path | None, log: Path) -> Measured:
         process = subprocess.Popen(command, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT)
         with PeakVramSampler(pid=process.pid) as sampler:
             returncode: int = process.wait()
-    return Measured(returncode=returncode, seconds=time.perf_counter() - started, vram=sampler)
+    if returncode != 0:
+        raise RuntimeError(f"{Path(command[0]).name} exited with {returncode}; see {log}")
+    return Measured(seconds=time.perf_counter() - started, vram=sampler)
+
+
+@contextmanager
+def gpu_lock(path: Path | None) -> Iterator[None]:
+    """Hold an exclusive `flock(path)` for the block, so GPU jobs sharing the file do not overlap; no lock for None."""
+    if path is None:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def gpu_name() -> str | None:

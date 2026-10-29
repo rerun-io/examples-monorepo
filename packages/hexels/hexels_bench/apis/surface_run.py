@@ -7,7 +7,6 @@ fuse_post.ply, fusion.json, log.txt}`; the CUDA method also writes `depth_parity
 recording of the same checkpoint. Scenes with a fusion.json are skipped unless `--force`.
 """
 
-import fcntl
 import subprocess
 import time
 from collections.abc import Iterator
@@ -25,6 +24,7 @@ from serde.json import to_json
 from hexels_bench.apis.export import export_run
 from hexels_bench.cameras import CameraContract, CamerasFile, ContractCamera, find_image, write_cameras_file
 from hexels_bench.checkpoint import UpstreamRunConfig, find_checkpoint, load_run_config
+from hexels_bench.gpu_monitor import gpu_lock
 from hexels_bench.layout import GSPLAT_RELEASE, Dataset, Roots, read_json
 from hexels_bench.surface import (
     DepthMode,
@@ -291,12 +291,8 @@ def render_surface(config: Config, plan: SurfacePlan, method: str, log: Path) ->
     with log.open("a") as stream:
         stream.write(" ".join(command) + "\n")
         stream.flush()
-        if config.gpu_lock is None:
+        with gpu_lock(config.gpu_lock):
             subprocess.run(command, check=True, stdout=stream, stderr=subprocess.STDOUT)
-        else:
-            with config.gpu_lock.open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                subprocess.run(command, check=True, stdout=stream, stderr=subprocess.STDOUT)
     return rrd
 
 

@@ -12,8 +12,6 @@ Image-GS fits have no WGSL decoder (specs/twod.md D5). Results: `metrics.json` (
 in `runs/imagegs/<stem>/<method>/`. Run it in the hexels env under the GPU lock (it times decodes).
 """
 
-import contextlib
-import fcntl
 import json
 import socket
 import subprocess
@@ -26,6 +24,7 @@ from jaxtyping import Float32, UInt16
 from numpy import ndarray
 from serde import SerdeError
 
+from hexels_bench.gpu_monitor import gpu_lock
 from hexels_bench.image2d import HexelImage, hexel_image_from_fields, write_hexel_image_ply
 from hexels_bench.layout import GSPLAT_RELEASE, Roots
 from hexels_bench.png16 import from_unit_float, read_png16, write_png16
@@ -271,10 +270,7 @@ def main(config: Config) -> None:
             outputs: list[str] = [method for method in (spec.cuda_method, spec.wgsl_method) if method is not None]
             if not config.force and all(is_done(config.roots.runs / "imagegs" / stem / method / "metrics.json") for method in outputs):
                 continue
-            with contextlib.ExitStack() as stack:
-                if config.gpu_lock is not None:
-                    lock = stack.enter_context(config.gpu_lock.open("a"))
-                    fcntl.flock(lock, fcntl.LOCK_EX)  # released when the file closes
+            with gpu_lock(config.gpu_lock):
                 runs: list[ImageRun] = decode_fit(config, scorer, stem, files)
             for run in runs:
                 scores: ConditionScores = run.scores()

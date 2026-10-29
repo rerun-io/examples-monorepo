@@ -79,8 +79,6 @@ def fit(roots: Roots, method: FitMethod, stem: str, steps: int | None) -> TrainR
     stage_image_gt(roots, stem)
     command: list[str] = fit_command(roots, stem, method, output, steps)
     measured: Measured = run_measured(command, run_dir, run_dir / "log.txt")
-    if measured.returncode != 0:
-        raise RuntimeError(f"{command[1:4]} exited with {measured.returncode}; see {run_dir / 'log.txt'}")
     upstream: dict = json.loads((output / "metrics.json").read_text())
     record = TrainRecord(
         method=method,

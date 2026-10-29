@@ -8,17 +8,15 @@ other Brush settings keep their defaults. `gsplat-train` comes from the gsplat-r
 import shlex
 import socket
 import subprocess
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from serde import serde
 from serde.json import to_json
 
-from hexels_bench.bench import gpu_lock
 from hexels_bench.brush import PreparedScene, prepare_scene
 from hexels_bench.cameras import CameraContract, cameras_file, write_cameras_file
-from hexels_bench.gpu_monitor import Measured, gpu_name, run_measured
+from hexels_bench.gpu_monitor import Measured, gpu_lock, gpu_name, run_measured
 from hexels_bench.layout import GSPLAT_RELEASE, PROTOCOL_SCENES, Dataset, Roots, read_json
 from hexels_bench.metrics import TrainRecord
 
@@ -113,11 +111,9 @@ def run_scene(config: Config, scene: str, forwarded: list[str]) -> None:
     ]  # fmt: skip
     if config.gpu_lock is not None:
         print(f"Waiting for {config.gpu_lock}")
-    with gpu_lock(config.gpu_lock) if config.gpu_lock is not None else nullcontext():
+    with gpu_lock(config.gpu_lock):
         print(f"Training {config.dataset}/{scene} -> {run}")
         measured: Measured = run_measured(command, None, run / "log.txt")
-    if measured.returncode != 0:
-        raise RuntimeError(f"gsplat-train exited with {measured.returncode}; see {run / 'log.txt'}")
     summary: TrainerSummary = read_json(TrainerSummary, summary_path)
     renders: int = len(list((run / "renders/test").glob("*.png")))
     if renders != prepared.test_views:

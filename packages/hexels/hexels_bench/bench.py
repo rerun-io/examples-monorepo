@@ -7,13 +7,11 @@ complete when its `metrics.json` scores every held-out view (and the method's ot
 complete items are skipped, so a stopped queue resumes where it left off.
 """
 
-import fcntl
 import shlex
 import shutil
 import subprocess
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +21,7 @@ from serde import serde
 from serde.json import from_json, to_json
 
 from hexels_bench.cameras import CamerasFile
+from hexels_bench.gpu_monitor import gpu_lock
 from hexels_bench.layout import GSPLAT_RELEASE, PROTOCOL_SCENES, WORKSPACE, Dataset, Roots, read_json
 from hexels_bench.methods import METHODS, Method, MethodSpec
 from hexels_bench.metrics import MetricsFile, TrainRecord
@@ -161,18 +160,6 @@ def load_failures(path: Path) -> list[FailureRecord]:
     if not path.is_file():
         return []
     return [from_json(FailureRecord, line) for line in path.read_text().splitlines() if line.strip()]
-
-
-@contextmanager
-def gpu_lock(path: Path) -> Iterator[None]:
-    """Hold `flock(path)` (exclusive) for the duration of the block."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def to_attic(roots: Roots, item: Item, partials: tuple[Path, ...]) -> None:
