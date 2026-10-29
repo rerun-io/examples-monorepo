@@ -321,8 +321,9 @@ impl StandaloneRenderer {
         Ok(())
     }
     /// Throughput mode: submit a float frame without waiting for it, keeping up to three frames in
-    /// flight as the viewer does. Fails if a completed frame overflowed its intersection capacity,
-    /// so warm up with [`Self::render`] first. [`Self::finish_submitted`] waits for the rest.
+    /// flight as the viewer does; when all three are pending it drains the device first. Fails if a
+    /// completed frame overflowed its intersection capacity, so warm up with [`Self::render`] first.
+    /// [`Self::finish_submitted`] waits for the rest.
     pub fn submit_float(&mut self, camera: &CameraSpec) -> Result<()> {
         camera.validate()?;
         if UVec2::new(camera.width, camera.height) != self.size {

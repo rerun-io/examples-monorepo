@@ -49,8 +49,8 @@ pub(crate) struct Args {
     surface: Option<PathBuf>,
     #[arg(long, default_value = "wgsl", requires = "surface")]
     surface_name: String,
-    /// After the renders, time the rendered views with upstream Hexels' protocol for the input
-    /// (`NVS_FPS` for 3D scenes, `IMAGE_FPS` for 2D fits) and write the report here.
+    /// After the renders, time the rendered views with upstream Hexels' protocol for the input and
+    /// write the report here: 3D scenes keep up to 3 frames in flight, 2D fits wait on every render.
     #[arg(long)]
     fps: Option<PathBuf>,
     #[command(flatten)]
@@ -160,13 +160,13 @@ struct FpsProtocol {
     warmup_passes: usize,
     timed_passes: usize,
     trials: usize,
-    /// Wait for every render (upstream 2D decode timing) instead of one GPU wait per trial.
+    /// Wait for every render (upstream 2D decode timing) instead of keeping up to 3 frames in flight.
     wait_each: bool,
 }
 
 /// Upstream Hexels `scripts/evaluate_nvs_campaign.py` `benchmark` settings.
 const NVS_FPS: FpsProtocol = FpsProtocol {
-    name: "hexels-paper: 2 warm-up passes, 4 trials x 10 passes, median FPS; up to 3 frames in flight, one GPU wait per trial; no readback",
+    name: "hexels-paper: 2 warm-up passes, 4 trials x 10 passes, median FPS; up to 3 frames in flight, the GPU drained whenever all 3 are pending and at the end of each trial; no readback",
     warmup_passes: 2,
     timed_passes: 10,
     trials: 4,
@@ -214,7 +214,8 @@ fn median_fps(trials: &[FpsTrial]) -> Result<f64> {
 }
 
 /// Warm up (synchronized renders size the intersection buffers), then time whole passes over
-/// `frames`, submitted back to back with one GPU wait per trial unless the protocol waits on each.
+/// `frames`. Unless the protocol waits on each render, frames are submitted back to back with up
+/// to 3 in flight: the GPU is drained whenever all 3 are pending, and once at the end of each trial.
 fn measure_fps(
     renderer: &mut StandaloneRenderer,
     frames: &[&CameraFrame],
