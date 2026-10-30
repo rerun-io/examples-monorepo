@@ -251,11 +251,16 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
     for name, (rig, cam) in cameras.items():
         assert str(views[name].origin) == schema.pinhole_path(rig, cam)
         contents: list[str] = cast(list[str], views[name].contents)  # the view keeps the list it was built with
-        assert "/world/gt/**" in contents  # the Quest hands, drawn into every camera
         # Sapiens2 feeds alignment only: present in the tree, hidden by default.
         assert views[name].visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/pred/sapiens2"] == rrb.EntityBehavior(visible=False)
-        # The ego cameras have no explicit projections, so the viewer draws the triangulated 3D through their pose chain.
-        assert ("/world/pred/**" in contents) == name.startswith(("OAK", "Quest"))
+        if name.startswith("OAK"):
+            # The OAK lenses are strongly distorted and the viewer's Pinhole is not: their overlays are 2D projections
+            # beneath the pinhole, so no 3D entity is drawn through the pose chain.
+            assert contents == [f"{schema.pinhole_path(rig, cam)}/**"]
+        else:
+            assert "/world/gt/**" in contents  # the Quest hands; phones are rectified and Quest cameras undistorted
+            # The Quest cameras have no explicit projections, so the viewer draws the triangulated 3D through their pose chain.
+            assert ("/world/pred/**" in contents) == name.startswith("Quest")
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:

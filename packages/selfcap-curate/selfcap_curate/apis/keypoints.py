@@ -8,7 +8,17 @@ from rerun.server import Server
 
 from selfcap_curate.apis import open_session
 from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, open_segment, read_time_sync
-from selfcap_curate.keypoints import Camera, read_anchors, read_cameras, smooth_keypoints, triangulate_episode, write_keypoints
+from selfcap_curate.keypoints import (
+    Camera,
+    EgoCamera,
+    ego_quest_hands,
+    read_anchors,
+    read_cameras,
+    read_ego_cameras,
+    smooth_keypoints,
+    triangulate_episode,
+    write_keypoints,
+)
 from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models
 from selfcap_curate.records import EpisodeKey, TimeSync
 
@@ -33,6 +43,8 @@ class KeypointEpisode:
     """Validated alignment record."""
     cameras: dict[str, Camera]
     """Calibrated phones with usable offsets."""
+    ego: tuple[EgoCamera, ...]
+    """OAK cameras with a calibrated mount; overlays are projected through their full lens model."""
 
 
 def main(config: Config) -> None:
@@ -63,7 +75,7 @@ def main(config: Config) -> None:
             if len(cameras) < 2:
                 print("KEYPOINTS_SKIP", key, "fewer than two calibrated and synced phones", flush=True)
             else:
-                processable.append(KeypointEpisode(key, segment, sync, cameras))
+                processable.append(KeypointEpisode(key, segment, sync, cameras, tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig))))
     if not processable:
         return
     detector, pose = keypoint_models()
@@ -75,7 +87,13 @@ def main(config: Config) -> None:
         with timer.stage(f"{key}/triangulate"):
             result = smooth_keypoints(triangulate_episode(detections, episode.cameras, read_anchors(episode.segment, detections.times, episode.sync)))
         with timer.stage(f"{key}/write"):
-            write_keypoints(config.calib_dir / key.rrd_name, config.output_dir / key.rrd_name, result)
+            write_keypoints(
+                config.calib_dir / key.rrd_name,
+                config.output_dir / key.rrd_name,
+                result,
+                ego=episode.ego,
+                quest_hands=ego_quest_hands(episode.segment, episode.sync) if episode.ego else None,
+            )
         print(
             "KEYPOINTS_TIME",
             key,

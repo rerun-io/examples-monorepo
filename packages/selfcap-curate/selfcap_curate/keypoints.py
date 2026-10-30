@@ -13,20 +13,22 @@ import numpy as np
 import rerun as rr
 import torch
 from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
-from dataforge.schema import coco133_xyz_path
+from dataforge.logging_toolkit import time_column
+from dataforge.schema import coco133_uv_projected_path, coco133_xyz_path, pinhole_path
 from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from simplecv.catalog_rig_layout import catalog_components
+from simplecv.data.skeleton.coco_133 import COCO_133_LINKS
 from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
 
 from selfcap_curate.catalog_io import Segment, read_catalog_hands, scalar
 from selfcap_curate.detection_io import COCO133_CLASS
 from selfcap_curate.quest_fit import load_quest_hands
-from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, TimeSync
+from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, TimeSync, oak_quest_offset_ms
 
 INLIER_PX: float = 8.0
 
@@ -67,6 +69,115 @@ def project(camera: Camera, xyz: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n
         radius = np.sum(xy * xy, axis=1)
         uv = (xy * (1.0 + camera.radial[0] * radius + camera.radial[1] * radius**2)[:, None]) @ camera.K[:2, :2].T + camera.K[:2, 2]
     return np.c_[uv, q[:, 2]]
+
+
+@dataclass(frozen=True, slots=True)
+class EgoCamera:
+    rig: int  # OAK rig index.
+    cam: int  # 0 rgb, 1 left, 2 right.
+    K: Float64[ndarray, "3 3"]  # Encoded-image pinhole matrix.
+    distortion: Float64[ndarray, "c"]  # OpenCV order (k1, k2, p1, p2, k3, k4, k5, k6, s1-s4, tx, ty); the viewer's Pinhole ignores it.
+    size: tuple[int, int]  # Image width, height.
+    rig_T_cam: Float64[ndarray, "4 4"]  # Factory stereo extrinsic; identity for the rgb rig frame.
+    times_s: Float64[ndarray, "p"]  # video_time of the calibrated rig poses (Quest head samples shifted by the OAK offset).
+    world_T_rig: Float64[ndarray, "p 4 4"]  # Head pose x OAK mount, RDF rig to Quest world.
+
+
+EGO_POSE_MAX_GAP_S: float = 0.1
+"""Rig poses further apart than this are not interpolated across (the overlay is left missing)."""
+
+
+def project_ego(camera: EgoCamera, times_s: Float64[ndarray, "n"], xyz: Float32[ndarray, "n j 3"]) -> Float32[ndarray, "n j 2"]:
+    """World points at each time through the rig pose (lerp + slerp) and the full OAK lens model; missing when unprojectable.
+
+    Points behind the camera or outside the calibrated field (beyond the image corners' rays, where the rational model can fold
+    back into the image) stay NaN, as do times outside the pose track or across a pose gap.
+    """
+    from scipy.spatial.transform import Rotation, Slerp
+
+    right = np.clip(np.searchsorted(camera.times_s, times_s), 1, len(camera.times_s) - 1)
+    left = right - 1
+    gap = camera.times_s[right] - camera.times_s[left]
+    usable = (times_s >= camera.times_s[0]) & (times_s <= camera.times_s[-1]) & (gap <= EGO_POSE_MAX_GAP_S)
+    clipped = np.clip(times_s, camera.times_s[0], camera.times_s[-1])
+    alpha = ((clipped - camera.times_s[left]) / np.maximum(gap, 1e-12))[:, None]
+    translation = (1.0 - alpha) * camera.world_T_rig[left, :3, 3] + alpha * camera.world_T_rig[right, :3, 3]
+    rotation = Slerp(camera.times_s, Rotation.from_matrix(camera.world_T_rig[:, :3, :3]))(clipped).as_matrix()
+    world_T_cam_r = rotation @ camera.rig_T_cam[:3, :3]
+    world_T_cam_t = translation + np.einsum("nij,j->ni", rotation, camera.rig_T_cam[:3, 3])
+    local = np.einsum("njk,nkl->njl", xyz.astype(np.float64) - world_T_cam_t[:, None, :], world_T_cam_r)  # R^T (x - t), row vectors
+    width, height = camera.size
+    corners = np.array([[0.0, 0.0], [width - 1.0, 0.0], [0.0, height - 1.0], [width - 1.0, height - 1.0]]).reshape(-1, 1, 2)
+    max_radius = 1.05 * float(np.linalg.norm(cv2.undistortPoints(corners, camera.K, camera.distortion).reshape(-1, 2), axis=1).max())
+    with np.errstate(divide="ignore", invalid="ignore"):
+        normalized = local[..., :2] / local[..., 2:3]
+    good = usable[:, None] & (local[..., 2] > 1e-3) & np.isfinite(normalized).all(-1) & (np.linalg.norm(normalized, axis=-1) <= max_radius)
+    uv = np.full((*xyz.shape[:2], 2), np.nan, dtype=np.float32)
+    if good.any():
+        pixels, _ = cv2.projectPoints(local[good].reshape(-1, 1, 3), np.zeros(3), np.zeros(3), camera.K, camera.distortion)
+        uv[good] = pixels.reshape(-1, 2)
+    return uv
+
+
+def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str, oak_rig: int) -> list[EgoCamera]:
+    """The OAK cameras whose pose the calibration layer gives: one query for the rig pose track and stereo, one for the lenses."""
+    rig = f"/world/rig_{oak_rig:02d}"
+    cams = {cam: f"{rig}/cam_{cam:02d}" for cam in (0, 1, 2)}
+    poses = (
+        calibration.filter_segments(segment)
+        .filter_contents([rig, *cams.values()])
+        .reader(index="video_time")
+        .select("video_time", f"{rig}:Transform3D:mat3x3", f"{rig}:Transform3D:translation")
+        .to_arrow_table()
+    )
+    poses = poses.filter(poses[f"{rig}:Transform3D:mat3x3"].is_valid())
+    if not len(poses):
+        return []  # no calibrated OAK mount for this episode
+    times_s: Float64[ndarray, "p"] = poses["video_time"].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64) * 1e-9
+    world_T_rig: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(poses), 1, 1))
+    world_T_rig[:, :3, :3] = np.asarray(poses[f"{rig}:Transform3D:mat3x3"].to_pylist(), dtype=np.float64).reshape(-1, 3, 3).transpose(0, 2, 1)
+    world_T_rig[:, :3, 3] = np.asarray(poses[f"{rig}:Transform3D:translation"].to_pylist(), dtype=np.float64).reshape(-1, 3)
+    static = calibration.filter_segments(segment).filter_contents(list(cams.values())).reader(index=None).to_arrow_table()
+    lenses = base.filter_segments(segment).filter_contents([f"{path}/pinhole" for path in cams.values()]).reader(index=None).to_arrow_table()
+
+    def numeric(table, name: str) -> Float64[ndarray, "k"] | None:  # noqa: ANN001
+        return np.asarray(first_valid_value(table[name]), dtype=np.float64).reshape(-1) if name in table.column_names and table[name].null_count < len(table) else None
+
+    result: list[EgoCamera] = []
+    for cam, path in cams.items():
+        matrix, size = numeric(lenses, f"{path}/pinhole:Pinhole:image_from_camera"), numeric(lenses, f"{path}/pinhole:Pinhole:resolution")
+        distortion = numeric(lenses, f"{path}/pinhole:simplecv.components.DistortionCoefficients")
+        if matrix is None or size is None:
+            continue
+        rig_T_cam = np.eye(4)
+        if cam != 0:
+            rotation, translation = numeric(static, f"{path}:Transform3D:mat3x3"), numeric(static, f"{path}:Transform3D:translation")
+            if rotation is None or translation is None:
+                continue
+            rig_T_cam[:3, :3], rig_T_cam[:3, 3] = rotation.reshape(3, 3).T, translation
+        result.append(
+            EgoCamera(oak_rig, cam, matrix.reshape(3, 3).T, distortion if distortion is not None else np.zeros(5), (int(size[0]), int(size[1])), rig_T_cam, times_s, world_T_rig)
+        )
+    return result
+
+
+QUEST_HANDS_UV: str = "quest_coco133_uv_projected"
+"""Quest hand joints projected into an OAK camera, beneath its pinhole (the viewer cannot apply the OAK lens model)."""
+QUEST_HANDS_CLASS: rr.ClassDescription = rr.ClassDescription(
+    info=rr.AnnotationInfo(id=0, label="Quest hands (projected)", color=(0, 0, 255)), keypoint_connections=COCO_133_LINKS
+)
+"""Blue like the base's /world/gt Quest hands; the points carry no colours of their own, so joints and bones take it."""
+
+
+def ego_quest_hands(segment: Segment, sync: TimeSync) -> tuple[Float64[ndarray, "q"], Float32[ndarray, "q 133 3"]] | None:
+    """Quest hand joints on video_time as the OAK sees them: capture time + OAK offset - hand latency (solve_oak's mapping)."""
+    qp = oak_quest_offset_ms(sync)
+    if qp is None:
+        return None
+    source = read_catalog_hands(segment)
+    positions = source.positions.astype(np.float32)
+    positions[(positions == 0.0).all(-1)] = np.nan
+    return source.times_s + (qp - HAND_LATENCY_MS) / 1000.0, positions
 
 
 def select_wearers(
@@ -307,13 +418,20 @@ def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
     return replace(result, xyz=smooth.astype(np.float32))
 
 
-def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
+def write_keypoints(
+    calib: Path,
+    output: Path,
+    result: Keypoints3D,
+    ego: tuple[EgoCamera, ...] = (),
+    quest_hands: tuple[Float64[ndarray, "q"], Float32[ndarray, "q 133 3"]] | None = None,
+) -> None:
     """One output file and calib property group; input calibration chunks stay intact.
 
     Keypoint rows go through dataforge's shared writer: 133 joints per row, NaN for missing joints, and a confidence
     per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. Joints under
     DISPLAY_CONFIDENCE are written as missing, and the shown 3D joints are projected into every calibrated phone
-    through its lens model.
+    through its lens model. ``ego`` OAK cameras get the same projections plus the Quest hands (``quest_hands``),
+    through the full OAK lens model: the viewer's Pinhole has no distortion, which put overlays up to 220 px off.
     """
     reader = RrdReader(calib)
     stores = reader.recordings()
@@ -334,7 +452,13 @@ def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
             raise ValueError(f"camera entity {entity} is not a rig camera")
         return int(match[1]), int(match[2])
 
-    parents: list[str] = ["/world/pred", *(f"{result.cameras[phone].entity}/pinhole/pred/rtmw" for phone in result.selected)]
+    parents: list[str] = [
+        "/world/pred",
+        *(f"{result.cameras[phone].entity}/pinhole/pred/rtmw" for phone in result.selected),
+        *(coco133_uv_projected_path(*rig_cam(camera.entity)) for camera in result.cameras.values()),
+        *(coco133_uv_projected_path(camera.rig, camera.cam) for camera in ego),
+    ]
+    quest_paths: list[str] = [f"{pinhole_path(camera.rig, camera.cam)}/{QUEST_HANDS_UV}" for camera in ego] if quest_hands is not None else []
 
     def additions() -> Iterator[Chunk]:
         yield Chunk.from_property(
@@ -355,6 +479,8 @@ def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
         )
         for parent in parents:
             yield Chunk.from_columns(parent, indexes=[], columns=rr.AnnotationContext.columns(context=[COCO133_CLASS]))
+        for path in quest_paths:
+            yield Chunk.from_columns(path, indexes=[], columns=rr.AnnotationContext.columns(context=[QUEST_HANDS_CLASS]))
 
     with TemporaryDirectory(prefix="selfcap-kp3d-") as work, atomic_write(output) as temporary:
         rows: Path = Path(work) / "keypoints.rrd"
@@ -380,12 +506,28 @@ def write_keypoints(calib: Path, output: Path, result: Keypoints3D) -> None:
                 )
             log_projections(
                 recording,
-                ((rig_cam(camera.entity), projected(camera)) for camera in result.cameras.values()),
+                (
+                    *((rig_cam(camera.entity), projected(camera)) for camera in result.cameras.values()),
+                    *(((camera.rig, camera.cam), project_ego(camera, result.times, shown)) for camera in ego),
+                ),
                 times_ns=stamps,
                 frame_indices=None,
                 confidence=result.confidence,
-                camera_model="pinhole with radial k1, k2 (selfcap-curate exo calibration)",
+                camera_model="phones: pinhole with radial k1, k2 (selfcap-curate exo calibration)"
+                + ("; OAK: OpenCV Brown-Conrady, 14 coefficients (factory)" if ego else ""),
             )
+            if quest_hands is not None:
+                hand_times, hand_xyz = quest_hands
+                hand_stamps: Int64[ndarray, "q"] = np.rint(hand_times * 1e9).astype(np.int64)
+                for camera, path in zip(ego, quest_paths, strict=True):
+                    pixels: Float32[ndarray, "q 133 2"] = project_ego(camera, hand_times, hand_xyz)
+                    rr.log(path, rr.Points2D.from_fields(class_ids=0, keypoint_ids=np.arange(133, dtype=np.uint16), radii=3.0, show_labels=False), static=True, recording=recording)
+                    rr.send_columns(
+                        path,
+                        indexes=[time_column(hand_stamps)],
+                        columns=rr.Points2D.columns(positions=pixels.reshape(-1, 2)).partition([133] * len(pixels)),
+                        recording=recording,
+                    )
             recording.flush()
         LazyChunkStream.merge(reader.stream(), LazyChunkStream.from_iter(additions()), RrdReader(rows).stream()).write_rrd(
             temporary, application_id=stores[0].application_id, recording_id=stores[0].recording_id

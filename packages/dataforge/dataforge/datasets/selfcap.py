@@ -437,25 +437,29 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         """Corpus-wide calibration review layout for the modal four-iPhone rig.
 
         The calibrated Quest world in 3D beside the OAK rgb, the OAK left/right mono pair and both
-        Quest cameras, the iPhones beneath; every camera pane also draws ``/world/gt`` (the Quest hands),
-        so the calib layer's poses can be judged on the video. On the base layer alone
+        Quest cameras, the iPhones beneath; the iPhone and Quest panes also draw ``/world/gt`` (the Quest
+        hands), so the calib layer's poses can be judged on the video. On the base layer alone
         the panes show the videos and the uncalibrated iPhones sit at the origin.
         Exo device names vary per session, so the dataset default labels them by rig;
         the per-recording blueprint embedded at convert keeps the real names.
 
-        Sapiens2 detections only feed alignment, so they stay in each pane's tree but hidden. The ego panes
-        also draw ``/world/pred`` (the triangulated keypoints) through their pose chain; the iPhones carry
-        explicit lens-model projections instead.
+        Sapiens2 detections only feed alignment, so they stay in each pane's tree but hidden. The Quest panes
+        also draw ``/world/pred`` (the triangulated keypoints) through their pose chain (no lens distortion);
+        the iPhones carry explicit lens-model projections. The OAK lenses are strongly distorted (up to
+        220 px against a plain pinhole) and the viewer's Pinhole has no distortion, so the OAK panes draw
+        only what is logged beneath their pinhole: the calib layer's lens-model projections of the keypoints
+        and of the Quest hands.
         """
         ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
 
         def camera(name: str, rig: int, cam: int, *, ego: bool = False) -> rrb.Spatial2DView:
             pinhole: str = schema.pinhole_path(rig, cam)
+            world: list[str] = [] if rig == ego_rig else ["/world/gt/**", *(["/world/pred/**"] if ego else [])]
             return blueprints.camera_view(
                 name,
                 rig,
                 cam,
-                contents=[f"{pinhole}/**", "/world/gt/**", *(["/world/pred/**"] if ego else [])],
+                contents=[f"{pinhole}/**", *world],
                 overrides={f"{pinhole}/pred/sapiens2": rrb.EntityBehavior(visible=False)},
             )
 
