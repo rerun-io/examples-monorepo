@@ -224,15 +224,22 @@ def raw_rtmw(segment: str, videos=None) -> dict:
 
 def publish(segment: str, layers: dict) -> None:
     dataset=CatalogClient(CATALOG).get_dataset(name=DATASET)
+    manifest=root(segment)/'publish-receipts.json'
+    receipts=json.loads(manifest.read_text()) if manifest.exists() else {}
     for layer,path in layers.items():
         if not path.exists():continue
-        digest=hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-        remote=f'{REMOTE}/{layer}/{segment}-{digest}.rrd'
+        with path.open('rb') as stream:
+            digest=hashlib.file_digest(stream,'sha256').hexdigest()
+        remote=f'{REMOTE}/{layer}/{segment}-{digest[:16]}.rrd'
+        previous=receipts.get(layer,{})
+        if layer=='base' and previous.get('sha256')==digest and previous.get('uri')==f'file://{remote}':
+            table=dataset.filter_segments(segment).segment_table().select('rerun_layer_names','rerun_storage_urls').to_arrow_table()
+            if len(table)==1:
+                registered=dict(zip(table['rerun_layer_names'][0].as_py(),table['rerun_storage_urls'][0].as_py(),strict=True))
+                if registered.get(layer)==previous['uri']:continue
         subprocess.run(['ssh','spark',f'mkdir -p {REMOTE}/{layer}'],check=True,timeout=60)
         subprocess.run(['scp','-q',str(path),f'spark:{remote}'],check=True,timeout=180)
         dataset.register([f'file://{remote}'],layer_name=layer,on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
-        manifest=root(segment)/'publish-receipts.json'
-        receipts=json.loads(manifest.read_text()) if manifest.exists() else {}
-        receipts[layer]={'uri':f'file://{remote}','sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'registered_at':time.time()}
+        receipts[layer]={'uri':f'file://{remote}','sha256':digest,'registered_at':time.time()}
         temporary=manifest.with_suffix('.tmp')
         temporary.write_text(json.dumps(receipts,indent=2));temporary.replace(manifest)
