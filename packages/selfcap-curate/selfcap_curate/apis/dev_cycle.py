@@ -1,4 +1,4 @@
-"""Run a local post cycle and publish it into a separate named candidate dataset."""
+"""Run a local post cycle and publish its generated layers to a dev dataset."""
 
 import re
 import shlex
@@ -36,9 +36,9 @@ class Config:
     tag: str
     """Unique run directory name, supplied by the operator."""
     dataset: str = "selfcap-post-dev-exofit"
-    """Destination candidate dataset; production and current dev names are refused."""
+    """Destination dev dataset; production names are refused."""
     reference_dataset: str = "selfcap-post-dev"
-    """Read-only source of existing layers, including independent RTMW and EgoHand."""
+    """Source of existing layers; independent EgoHand and SOMA layers are never refreshed."""
     catalog_url: str = "rerun+http://dgx-spark:51235"
     """Catalog that owns the source and candidate datasets."""
     catalog_host: str = "spark"
@@ -64,13 +64,14 @@ class Config:
 
 
 def main(config: Config) -> None:
-    """Publish only to the explicitly selected candidate; source datasets are read-only."""
+    """Publish generated layers only; preserve independent layers in the main dev dataset."""
     EpisodeKey.parse(config.segment)
     for name in (config.dataset, config.tag):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
             raise ValueError("dataset and tag must be simple path components")
-    if config.dataset in {"selfcap-post-dev", "selfcap-post-ep1", "dataforge-selfcap", config.reference_dataset}:
-        raise ValueError("dev-cycle destination must be a separate candidate dataset")
+    refresh_main: bool = config.dataset == "selfcap-post-dev"
+    if config.dataset in {"selfcap-post-ep1", "dataforge-selfcap"} or (config.dataset == config.reference_dataset and not refresh_main):
+        raise ValueError("dev-cycle destination must be main dev or a separate candidate dataset")
     work = config.work_root / config.tag
     work.mkdir(parents=True, exist_ok=False)
     remote = config.remote_root / config.dataset
@@ -88,10 +89,11 @@ def main(config: Config) -> None:
     subprocess.run(["ssh", config.catalog_host,
                     f"mkdir -p {shlex.quote(str(run.parent))} && mkdir {shlex.quote(str(run))}"], check=True)
     candidate = client.create_dataset(config.dataset, exist_ok=True)
-    # Freeze the source file references in this separate dataset before computation.
-    for layer in ("base", "sapiens2", "calib", "egohand"):
-        if layer in source_layers:
-            candidate.register([source_layers[layer]], layer_name=layer, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    # Seed new candidates, but never re-register independent layers in main dev.
+    if not refresh_main:
+        for layer in ("base", "sapiens2", "calib", "egohand"):
+            if layer in source_layers:
+                candidate.register([source_layers[layer]], layer_name=layer, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     if config.landmarks is not None:
         label_path = work / "exo_landmarks" / f"{config.segment}.rrd"
         write_landmarks(label_path, config.segment, from_json(Landmarks, config.landmarks.read_text()))
@@ -99,7 +101,7 @@ def main(config: Config) -> None:
         subprocess.run(["scp", "-q", str(label_path), f"{config.catalog_host}:{run}/exo_landmarks/{config.segment}.rrd"], check=True)
         candidate.register([f"file://{run}/exo_landmarks/{config.segment}.rrd"], layer_name="exo_landmarks",
                            on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
-    elif "exo_landmarks" in source_layers:
+    elif "exo_landmarks" in source_layers and not refresh_main:
         candidate.register([source_layers["exo_landmarks"]], layer_name="exo_landmarks", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     base = work / "base"
     base.mkdir()
@@ -112,6 +114,8 @@ def main(config: Config) -> None:
               "calib": work / "out/keypoints" / f"{config.segment}.rrd",
               "egohand_calib": work / "out/calib/egohand" / f"{config.segment}.rrd",
               "exo_landmarks": work / "out/align/exo_landmarks" / f"{config.segment}.rrd"}
+    if refresh_main:
+        del layers["sapiens2"]  # Keep the existing alignment detections; keypoints_sapiens2 is a separate run.
     for layer, path in layers.items():
         if not path.exists():
             continue

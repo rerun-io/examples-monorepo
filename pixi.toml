@@ -1665,7 +1665,7 @@ description = "Fit optical landmarks from a named catalog dataset and report hel
 cmd = "python tools/apps/dev_cycle.py"
 cwd = "packages/selfcap-curate"
 env = { OMP_NUM_THREADS = "1", PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True" }
-description = "Run post and publish to an explicitly named candidate dataset"
+description = "Run post and publish generated layers to an explicitly named dev dataset"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # exo-calib — exo-camera calibration from human keypoints (Kineo-style

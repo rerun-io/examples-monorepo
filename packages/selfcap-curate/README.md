@@ -192,9 +192,11 @@ pixi run --frozen -e selfcap-curate selfcap-dev-cycle \
   --exo-refine --focal-source fit --oak-egohand-assets /tmp/egohand
 ```
 
-This is an explicit publishing tool. It refuses the production datasets and
-`selfcap-post-dev`, uses a new run directory, retains the source EgoHand file,
-and registers the default blueprint. The scratch `/tmp/selfcap-5090/dev_cycle.py`
+This is an explicit publishing tool. It refuses production datasets, uses a
+new run directory, and registers the default blueprint. With `--dataset selfcap-post-dev`,
+it replaces only base, calib, egohand_calib and exo_landmarks; it preserves
+SOMA, EgoHand and existing Sapiens2 layers. Separate candidates also copy the
+source EgoHand file and alignment detections. The scratch `/tmp/selfcap-5090/dev_cycle.py`
 remains independent and unchanged. Run files and reports live beneath
 `<remote-root>/<dataset>/runs/<tag>/`.
 
@@ -229,4 +231,5 @@ values enter the solver.
 The d31bf1da candidate reproduces the offline medians (pixels): headset
 38.53 → 4.56, phones 101.95 → 0.31, Sapiens hands 8.37 → 8.98, independent
 RTMW hands 9.59 → 10.50, body transfer 24.67 → 16.55. The hand regressions
-fail the no-regression gate. It remains a candidate for visual comparison.
+fail the no-regression gate. The main dev promotion is explicit and retains
+that gate result; it does not imply that the hand metrics improved.
