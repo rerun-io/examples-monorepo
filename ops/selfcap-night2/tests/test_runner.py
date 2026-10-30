@@ -152,3 +152,35 @@ def test_launch_and_external_commands_use_configured_worktree(queue, monkeypatch
     monkeypatch.setattr(runner.subprocess, "Popen", popen)
     runner.external(["echo", "{segment}"], {"segment": "test"}, "soma", 5)
     assert process_cwds == [checkout]
+
+
+@pytest.mark.parametrize("state,owner,info", [("s1", "old-owner", "{}"), ("failed", None, '{"failed_stage":"s2"}')])
+def test_controller_recovery_does_not_replace_a_new_claim(queue, monkeypatch, state, owner, info):
+    original_connect = runner.connect
+    with original_connect() as db:
+        db.execute("update jobs set state=?,owner=?,updated=0,info=?", (state, owner, info))
+        db.execute("insert into workers values('old-owner',0,0)")
+    reclaimed = []
+
+    def connect_with_reclaim():
+        db = original_connect()
+
+        def before_statement(statement):
+            if statement.lower().startswith("update jobs set state=") and not reclaimed:
+                reclaimed.append(True)
+                with original_connect() as other:
+                    other.execute("update jobs set state='s2',owner='new-owner',updated=200")
+
+        db.set_trace_callback(before_statement)
+        return db
+
+    monkeypatch.setattr(runner, "connect", connect_with_reclaim)
+
+    def stop(_):
+        raise StopIteration
+
+    monkeypatch.setattr(runner.time, "sleep", stop)
+    with pytest.raises(StopIteration):
+        runner.controller()
+    with original_connect() as db:
+        assert tuple(db.execute("select state,owner,updated from jobs").fetchone()) == ("s2", "new-owner", 200.0)

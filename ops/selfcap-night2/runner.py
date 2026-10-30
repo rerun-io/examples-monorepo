@@ -179,9 +179,9 @@ def work(role,index):
     name=f'{role}-{index}'
     with connect() as c:
         c.execute('insert into workers values(?,?,0) on conflict(name) do update set heartbeat=excluded.heartbeat',(name,time.time()))
-        for stale in c.execute('select segment,state from jobs where owner=?',(name,)).fetchall():
+        for stale in c.execute('select segment,state,updated from jobs where owner=?',(name,)).fetchall():
             state={'s1':'queued','s2':'labelled','labelling':'s1_done'}.get(stale['state'],stale['state'])
-            c.execute('update jobs set state=?,owner=null,updated=? where segment=?',(state,time.time(),stale['segment']))
+            c.execute('update jobs set state=?,owner=null,updated=? where segment=? and state=? and owner=? and updated=?',(state,time.time(),stale['segment'],stale['state'],name,stale['updated']))
         if c.execute('select failures from workers where name=?',(name,)).fetchone()[0]>=3:return
     stop=threading.Event();threading.Thread(target=heartbeat,args=(name,stop),daemon=True).start()
     while True:
@@ -313,14 +313,14 @@ def controller():
             for owner in stale:
                 for job in c.execute('select * from jobs where owner=?',(owner,)).fetchall():
                     state={'s1':'queued','s2':'labelled','labelling':'s1_done'}.get(job['state'],job['state'])
-                    c.execute('update jobs set state=?,owner=null,updated=? where segment=?',(state,time.time(),job['segment']))
+                    c.execute('update jobs set state=?,owner=null,updated=? where segment=? and state=? and owner=? and updated=?',(state,time.time(),job['segment'],job['state'],owner,job['updated']))
             # Retry an interrupted session twice, retaining its error history and worker failure guard.
             for job in c.execute("select * from jobs where ordinal<? and state='failed' and updated<?",(config()['limit'],time.time()-10)).fetchall():
                 info=json.loads(job['info']); retries=info.get('retries',0)
                 if retries>=2:continue
                 stage=info.get('failed_stage','s1'); info['retries']=retries+1
                 state={'s1':'queued','s2':'labelled','soma':'soma','labelling':'s1_done'}[stage]
-                c.execute('update jobs set state=?,owner=null,updated=?,info=? where segment=?',(state,time.time(),json.dumps(info),job['segment']))
+                c.execute('update jobs set state=?,owner=null,updated=?,info=? where segment=? and state=? and owner is ? and updated=?',(state,time.time(),json.dumps(info),job['segment'],job['state'],job['owner'],job['updated']))
         cfg=config()
         if cfg.get('batch_started_at'):
             snapshot=report_snapshot()
