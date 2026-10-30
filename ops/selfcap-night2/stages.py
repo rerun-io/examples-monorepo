@@ -130,20 +130,20 @@ def s2(segment: str, decision: dict | None=None) -> dict:
         original=keypoints.detect_keypoints
         original_models=keypoints.keypoint_models
         original_selection=keypoint_geometry.select_wearers
-        keypoints.keypoint_models=lambda *args,**kwargs: (None,None)
-        record=open_segment(dataset,segment)
-        sync=read_time_sync(dataset,segment)
-        expected_phones=tuple(phone for phone in record.layout.phones if (sync.offsets_ms or {}).get('exo/'+phone) is not None)
-        cached=cache2d.load(work/'s1/rtmw-cache',expected_phones=expected_phones,expected_rate=rate)
-        keypoints.detect_keypoints=lambda *args,**kwargs:cached
-        selected_source=work/'s1/rtmw-cache/source.json'
-        if selected_source.exists() and json.loads(selected_source.read_text()).get('cache')=='original_s1_selected':
-            import numpy as np
-            # Restored immutable S1 points already contain the selected wearer.
-            # Preserve those exact observations; there are no other candidates to select.
-            keypoint_geometry.select_wearers=lambda camera,anchors,boxes,scores:np.zeros(len(boxes),dtype=np.int64)
-            metrics['rtmw_input_source']=json.loads(selected_source.read_text())
         try:
+            keypoints.keypoint_models=lambda *args,**kwargs: (None,None)
+            record=open_segment(dataset,segment)
+            sync=read_time_sync(dataset,segment)
+            expected_phones=tuple(phone for phone in record.layout.phones if (sync.offsets_ms or {}).get('exo/'+phone) is not None)
+            cached=cache2d.load(work/'s1/rtmw-cache',expected_phones=expected_phones,expected_rate=rate)
+            keypoints.detect_keypoints=lambda *args,**kwargs:cached
+            selected_source=work/'s1/rtmw-cache/source.json'
+            if selected_source.exists() and json.loads(selected_source.read_text()).get('cache')=='original_s1_selected':
+                import numpy as np
+                # Restored immutable S1 points already contain the selected wearer.
+                # Preserve those exact observations; there are no other candidates to select.
+                keypoint_geometry.select_wearers=lambda camera,anchors,boxes,scores:np.zeros(len(boxes),dtype=np.int64)
+                metrics['rtmw_input_source']=json.loads(selected_source.read_text())
             keypoints.main(keypoints.Config(calib_dir=final,output_dir=out/'keypoints',rate=rate,segment_ids=(segment,),catalog_url=server.url()))
         finally:
             keypoints.detect_keypoints=original
