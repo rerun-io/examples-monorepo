@@ -1,5 +1,6 @@
 """Exo camera models, fixed-intrinsics session fits and focal cost profiles."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -126,6 +127,7 @@ class BundleResult:
     cameras: dict[str, Camera]  # Camera-to-Quest-world model parameters.
     cost: float  # Robust least-squares objective.
     body_median_px: float | None = None  # Unweighted body residual median for layer provenance.
+    converged: bool = True  # Whether the optimizer terminated before its evaluation limit.
 
 
 def triangulate(cameras: dict[str, Camera], views: dict[str, BodyObservation]) -> Float64[ndarray, "13 3"]:
@@ -145,8 +147,9 @@ def triangulate(cameras: dict[str, Camera], views: dict[str, BodyObservation]) -
     return points
 
 
-def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, Camera], *, max_nfev: int = 80) -> BundleResult:
-    """Optimize poses/body points, optionally focal lengths; centre fixed, no distortion."""
+def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, Camera], *, max_nfev: int = 80,
+           anchors: Callable[[dict[str, Camera]], Float64[ndarray, "a"]] | None = None) -> BundleResult:
+    """Optimize poses/body points with fixed intrinsics and optional optical anchors."""
     phones: list[str] = sorted(cameras)
     pi: dict[str, int] = {p: i for i, p in enumerate(phones)}
     world = {p: stacked[p].world for p in phones}
@@ -165,10 +168,11 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
     nc, nh = len(phones), sum(len(world[p]) for p in phones)
     logf = np.array([np.log(cameras[p].parameters[6]) for p in phones])
     initial = np.concatenate([np.r_[cameras[p].parameters[:6], logf[pi[p]]] for p in phones] + [np.asarray(points).ravel()])
+    anchor_count = 0 if anchors is None else len(anchors(cameras))
 
     def unpack(values: Float64[ndarray, "n"]) -> dict[str, Camera]:
         c = values[: 7 * nc].reshape(nc, 7)
-        return {p: Camera(np.r_[c[i, :6], np.exp(logf[i]), 960.0, 540.0, 0.0, 0.0]) for i, p in enumerate(phones)}
+        return {p: Camera(np.r_[c[i, :6], cameras[p].parameters[6:]]) for i, p in enumerate(phones)}
 
     def residual(values: Float64[ndarray, "n"]) -> Float64[ndarray, "m"]:
         cams = unpack(values)
@@ -185,9 +189,11 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
             r = (uv[:, :2] - obs[mask, 2:4]) * obs[mask, 4:5]
             r[uv[:, 2] <= 0.0] = 1e3
             errors.append(r.ravel())
+        if anchors is not None:
+            errors.append(anchors(cams))
         return np.concatenate(errors)
 
-    sparsity = lil_matrix((2 * nh + 2 * len(obs), len(initial)), dtype=np.int8)
+    sparsity = lil_matrix((2 * nh + 2 * len(obs) + anchor_count, len(initial)), dtype=np.int8)
     row = 0
     for p in phones:
         n = len(world[p])
@@ -198,11 +204,13 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
             sparsity[row : row + 2, 7 * i : 7 * i + 7] = 1
             sparsity[row : row + 2, 7 * nc + 3 * point : 7 * nc + 3 * point + 3] = 1
             row += 2
+    if anchor_count:
+        sparsity[2 * nh + 2 * len(obs):, :7 * nc] = 1
     for i in range(nc):
         sparsity[:, 7 * i + 6] = 0
     result = least_squares(residual, initial, jac_sparsity=sparsity, loss="cauchy", f_scale=6.0, x_scale="jac", max_nfev=max_nfev, method="trf")
-    body_error = np.linalg.norm(residual(result.x)[2 * nh :].reshape(-1, 2), axis=1) / np.maximum(obs[:, 4], 1e-6)
-    return BundleResult(unpack(result.x), float(result.cost), float(np.median(body_error)) if len(body_error) else None)
+    body_error = np.linalg.norm(residual(result.x)[2 * nh : 2 * nh + 2 * len(obs)].reshape(-1, 2), axis=1) / np.maximum(obs[:, 4], 1e-6)
+    return BundleResult(unpack(result.x), float(result.cost), float(np.median(body_error)) if len(body_error) else None, bool(result.success))
 
 
 BODY: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16)

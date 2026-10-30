@@ -5,13 +5,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+from jaxtyping import Float64
+from numpy import ndarray
 from scipy.spatial.transform import Rotation, Slerp
 from serde import serde
 from serde.json import from_json
 
 from selfcap_curate import catalog_io
-from selfcap_curate.device_tables import read_table
-from selfcap_curate.exo_calibration import BODY, BodyObservation, Camera, triangulate
+from selfcap_curate.exo_calibration import BODY, BodyObservation, Camera, bundle, triangulate
 from selfcap_curate.exo_landmarks import Landmarks, read_landmarks
 from selfcap_curate.exo_refine import FocalSource, Refinement, RefinementProblem, predict_labels, select_labels, solve
 from selfcap_curate.factory import QuestBlock, read_quest_block
@@ -195,25 +196,64 @@ def residuals(inputs: Inputs, model: Refinement, fold: int) -> dict[str, list[fl
     return output
 
 
+def polish(inputs: Inputs, problem: RefinementProblem, model: Refinement, fold: int | None) -> Refinement:
+    """Polish poses/body points from the optical solution, retaining its fixed lens anchors.
+
+    Training body observations use the same time-block split as hand fitting.
+    The optical offset stays a nuisance parameter; it is never a wearable pose.
+    """
+    cameras = {str(i): camera for i, camera in enumerate(model.cameras)}
+    hands = {str(i): hand for i, hand in enumerate(problem.hands)}
+    body = []
+    # Match the usual sparse calibration frame count, with explicit timestamp matching.
+    target_times = inputs.detections[0].times_s + inputs.phone_offsets_s[0]
+    for time in target_times:
+        if fold is not None and (int(time // 10) % 2 != fold or not .2 < time % 10 < 9.8):
+            continue
+        views = {}
+        for i, detection in enumerate(inputs.body):
+            if not len(detection.times_s):
+                continue
+            nearest = int(np.argmin(abs(detection.times_s - time)))
+            if abs(detection.times_s[nearest] - time) > .025:
+                continue
+            scores = detection.scores[nearest, list(BODY)].copy()
+            scores[:3] = 0.0
+            views[str(i)] = BodyObservation(detection.xy[nearest, list(BODY)], scores)
+        if len(views) >= 2:
+            body.append(views)
+    targets = np.array([[label.u, label.v] for label in problem.landmarks.labels])
+    keys = [(label.view, label.target_id) for label in problem.landmarks.labels]
+    repeats = np.array([max(1, round(20 / keys.count(key))) for key in keys])
+    weights = 2.0 * np.sqrt([label.confidence for label in problem.landmarks.labels])[:, None]
+
+    def anchors(candidate: dict[str, Camera]) -> Float64[ndarray, "a"]:
+        ordered = tuple(candidate[str(i)] for i in range(len(model.cameras)))
+        errors = (predict_labels(problem, ordered, model.head_translation_m) - targets) * weights
+        return np.repeat(errors, repeats, axis=0).ravel()
+
+    result = bundle(hands, body, cameras, max_nfev=80, anchors=anchors)
+    polished = tuple(result.cameras[str(i)] for i in range(len(model.cameras)))
+    assert all(before.parameters[6:].tobytes() == after.parameters[6:].tobytes()
+               for before, after in zip(model.cameras, polished, strict=True)), "Body polish must preserve every intrinsic"
+    return replace(model, cameras=polished, method=model.method + "; fixed-intrinsic hands/body BA with optical anchors",
+                   converged=model.converged and result.converged)
+
+
 def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[float, ...] | None = None,
-             focal_record: str | None = None, static_phones: bool = False, landmark_target_count: int | None = None) -> tuple[Refinement, Gate]:
+             focal_record: str | None = None, static_phones: bool = False, landmark_target_count: int | None = None,
+             body_polish: bool = False) -> tuple[Refinement, Gate]:
     """Fit both holdout folds, report transfer, then fit the deployable all-data model."""
     baseline = Refinement(inputs.problem.cameras, np.zeros(3), inputs.problem.landmarks.digest, "table")
     fit_problem = inputs.problem
-    if focal_source == "table":
-        focals = read_table().focals
-        seeds = []
-        for phone, camera in zip(inputs.phones, inputs.problem.cameras, strict=True):
-            parameters = camera.parameters.copy()
-            parameters[6] = focals[phone]
-            seeds.append(Camera(parameters))
-        fit_problem = replace(fit_problem, cameras=tuple(seeds))
     pools: dict[str, dict[str, list[float]]] = {"baseline": {}, "candidate": {}}
     models = []
     for fold in (0, 1):
         problem = replace(select_labels(fit_problem, fold, static_phones=static_phones), hands=heldout_hands(inputs, fold, train=True))
         model = replace(solve(problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count),
                         label_layer_hash=inputs.problem.landmarks.digest)
+        if body_polish:
+            model = polish(inputs, problem, model, fold)
         models.append(model)
         for name, fit in (("baseline", baseline), ("candidate", model)):
             for metric, values in residuals(inputs, fit, fold).items():
@@ -231,6 +271,8 @@ def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[f
         if before is None or after is None or after > before:
             passes = False
     final = solve(fit_problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count)
+    if body_polish:
+        final = polish(inputs, fit_problem, final, None)
     gate = Gate(scores["baseline"], scores["candidate"], tuple(models), passes and final.converged and all(model.converged for model in models))
     if static_phones:
         gate = replace(gate, policy=gate.policy + "; static phone anchors shared in both training folds; phone score is in-sample consistency, not independent validation")

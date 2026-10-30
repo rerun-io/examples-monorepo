@@ -9,11 +9,11 @@ from selfcap_curate.exo_refine import RefinementProblem, solve
 from selfcap_curate.quest_fit import Correspondences
 
 
-def test_joint_solver_recovers_pose_focal_and_head_offset() -> None:
+def test_joint_solver_recovers_pose_focal_with_fixed_quest_origin() -> None:
     rng = np.random.default_rng(42)
     cameras = tuple(Camera(np.array([0.0, angle, 0.0, x, 0.0, 3.0, focal, 960.0, 540.0, 0.0, 0.0]))
                     for angle, x, focal in ((0.2, -0.8, 800.0), (-0.3, 0.9, 950.0)))
-    offset = np.array([-0.03, -0.05, 0.02])
+    offset = np.zeros(3)
     world = rng.uniform(-0.6, 0.6, (80, 3))
     hands = tuple(Correspondences(world, camera.project(world)[:, :2], np.ones(80)) for camera in cameras)
     labels, centres, rotations = [], [], []

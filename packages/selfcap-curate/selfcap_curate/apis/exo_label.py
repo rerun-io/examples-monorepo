@@ -9,7 +9,7 @@ from serde.json import from_json, to_json
 
 from selfcap_curate import catalog_io
 from selfcap_curate.calib_layer import CalibSession
-from selfcap_curate.exo_label import GateThresholds, label_session, run_session
+from selfcap_curate.exo_label import GateThresholds, LabelFocalSource, label_session, run_session
 
 
 @dataclass
@@ -28,6 +28,8 @@ class Config:
     """Hard wall-clock deadline including all child Sol calls."""
     thresholds: GateThresholds = field(default_factory=GateThresholds)
     """Explicit optical and independent hand acceptance thresholds."""
+    focal_source: LabelFocalSource = "device-vp"
+    """Fixed device VP focal, or the initial calibration for unknown devices; never fit focal."""
     worker: bool = False
     """Internal isolated process entry point."""
 
@@ -37,10 +39,10 @@ def main(config: Config) -> None:
     if config.worker:
         segment = catalog_io.open_segment(CatalogClient(config.catalog_url).get_dataset(name=config.dataset), config.segment)
         state = from_json(CalibSession, config.calib_record.read_text())
-        result = run_session(segment, state, config.output_dir, thresholds=config.thresholds)
+        result = run_session(segment, state, config.output_dir, thresholds=config.thresholds, focal_source=config.focal_source)
     else:
         result = label_session(config.segment, config.calib_record, config.output_dir, dataset=config.dataset,
-                               catalog_url=config.catalog_url, timeout_s=config.timeout_s, thresholds=config.thresholds)
+                               catalog_url=config.catalog_url, timeout_s=config.timeout_s, thresholds=config.thresholds, focal_source=config.focal_source)
     print(to_json(result), flush=True)
 
 

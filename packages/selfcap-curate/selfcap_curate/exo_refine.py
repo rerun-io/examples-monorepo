@@ -1,9 +1,4 @@
-"""Deterministic joint exo pose, focal and Quest optical-origin refinement.
-
-The head translation is an estimated optical lever arm, not a correction to the
-raw tracking poses. Hands anchor the world frame. Labels constrain optical
-centres. The two-fold gate must be inspected before accepting a candidate.
-"""
+"""Deterministic exo-only refinement; Quest poses, hands and optical origins are fixed truth."""
 
 from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias
@@ -19,8 +14,8 @@ from selfcap_curate.exo_landmarks import Landmarks
 from selfcap_curate.quest_fit import Correspondences
 
 FocalSource: TypeAlias = Literal["table", "fit", "fixed"]
-VERSION: str = "selfcap-exo-refine-v1"
-METHOD: str = "joint hands + optical landmarks + head translation; Huber then Cauchy (6 px)"
+VERSION: str = "selfcap-exo-refine-v2"
+METHOD: str = "exo poses from Quest hands + fixed optical landmarks; Huber then Cauchy (6 px)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +38,7 @@ class Refinement:
     cameras: tuple[Camera, ...]
     """Refined camera models in exo rig order."""
     head_translation_m: Float64[ndarray, "3"]
-    """Shared head-frame translation added to both factory optical centres."""
+    """Legacy compatibility field, always zero for exo-only fits. Never changes wearables."""
     label_layer_hash: str
     """SHA256 of the complete typed landmark record."""
     focal_source: FocalSource
@@ -106,7 +101,7 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
         initial[:, 6] = fixed_focals
     width: int = 7 if free else 6
     nc: int = count * width
-    parameters: Float64[ndarray, "p"] = np.concatenate([np.r_[p[:6], np.log(p[6])] if free else p[:6] for p in initial] + [np.array([0.0, -0.07, 0.0])])
+    parameters: Float64[ndarray, "p"] = np.concatenate([np.r_[p[:6], np.log(p[6])] if free else p[:6] for p in initial])
     targets: Float64[ndarray, "n 2"] = np.array([[label.u, label.v] for label in problem.landmarks.labels])
     repetitions = np.ones(len(problem.landmarks.labels), dtype=int)
     if landmark_target_count is not None:
@@ -125,15 +120,14 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
     def residual(values: Float64[ndarray, "p"]) -> Float64[ndarray, "r"]:
         cameras: tuple[Camera, ...] = unpack(values)
         errors: list[Float64[ndarray, "r"]] = [(camera.project(data.world)[:, :2] - data.image).ravel() for camera, data in zip(cameras, problem.hands, strict=True)]
-        errors.append(np.repeat((predict_labels(problem, cameras, values[nc:]) - targets) * weights, repetitions, axis=0).ravel())
+        errors.append(np.repeat((predict_labels(problem, cameras, np.zeros(3)) - targets) * weights, repetitions, axis=0).ravel())
         return np.concatenate(errors)
 
     lower: Float64[ndarray, "p"] = np.full_like(parameters, -np.inf)
     upper: Float64[ndarray, "p"] = -lower
-    lower[-3:], upper[-3:] = -0.25, 0.25
     if free:
         lower[6:nc:7], upper[6:nc:7] = np.log(400.0), np.log(1200.0)
     warm: OptimizeResult = least_squares(residual, parameters, bounds=(lower, upper), loss="huber", f_scale=6.0, x_scale="jac", max_nfev=150)
     solution: OptimizeResult = least_squares(residual, warm.x, bounds=(lower, upper), loss="cauchy", f_scale=6.0, x_scale="jac", max_nfev=150)
-    return Refinement(unpack(solution.x), solution.x[nc:], problem.landmarks.digest, focal_source, focal_record,
+    return Refinement(unpack(solution.x), np.zeros(3), problem.landmarks.digest, focal_source, focal_record,
                       converged=bool(warm.success and solution.success))

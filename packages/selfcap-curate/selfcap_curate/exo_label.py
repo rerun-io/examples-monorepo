@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
@@ -20,6 +21,7 @@ from serde.json import from_json, to_json
 
 from selfcap_curate import catalog_io
 from selfcap_curate.calib_layer import CalibSession
+from selfcap_curate.device_vp import read_vp_table
 from selfcap_curate.exo_landmarks import Landmark, Landmarks
 from selfcap_curate.exo_refine_catalog import Gate, evaluate, load_inputs
 
@@ -73,6 +75,7 @@ class GateThresholds:
 
 
 DEFAULT_THRESHOLDS = GateThresholds()
+LabelFocalSource: TypeAlias = Literal["device-vp", "table"]
 
 
 @serde(deny_unknown_fields=True)
@@ -92,6 +95,14 @@ class LabelResult:
     """Explicit acceptance thresholds applied to this result."""
     gate: Gate | None = None
     """Held-out results when scoring completed."""
+    solver_version: str | None = None
+    """Exo-only solver contract; older offset-enabled results cannot be resumed."""
+    focal_source: str | None = None
+    """Table means the initial calibration intrinsics stayed fixed; null for older results."""
+    focals: dict[str, float] = field(default_factory=dict)
+    """Fixed focal pixels per device."""
+    focal_sources: dict[str, str] = field(default_factory=dict)
+    """device-vp or initial-calibration per camera; neither is fitted."""
 
 
 def accepts(gate: Gate, thresholds: GateThresholds = DEFAULT_THRESHOLDS) -> bool:
@@ -301,17 +312,29 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
     return record
 
 
-def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, *, thresholds: GateThresholds = DEFAULT_THRESHOLDS) -> LabelResult:
+def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, *, thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp") -> LabelResult:
     """Build, label and gate one session; runner must bound this call or use the CLI."""
     start = time.monotonic()
     output.mkdir(parents=True, exist_ok=True)
+    table = read_vp_table()
+    fixed_focals = {}
+    focal_sources = {}
+    for phone in segment.layout.phones:
+        camera = state.exo.phones[phone].camera
+        if camera is None:
+            raise ValueError(f'Missing initial camera for {phone}')
+        measured = table.devices.get(phone) if focal_source == 'device-vp' else None
+        fixed_focals[phone] = measured.focal_px if measured is not None else float(camera.parameters[6])
+        focal_sources[phone] = 'device-vp' if measured is not None else 'initial-calibration'
     result_path = output / 'result.json'
     if result_path.exists():
         previous = from_json(LabelResult, result_path.read_text())
         if previous.segment != segment.id:
             raise ValueError('Output directory belongs to another segment')
-        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds:
+        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-only-fixed-focal-v1':
             return previous
+    for name in ('calib.json', 'refinement.json'):
+        (output / name).unlink(missing_ok=True)
     packet_path = output / 'packet.json'
     packet = from_json(Packet, packet_path.read_text()) if packet_path.exists() else make_packet(segment, state, output)
     record_path = output / 'landmarks.json'
@@ -326,13 +349,20 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
                 raise ValueError(f"Missing initial camera for {phone}")
             cameras.append(camera)
         inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record)
-        model, gate = evaluate(inputs, focal_source='fit', static_phones=True, landmark_target_count=20)
+        truth_bytes = tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values())
+        model, gate = evaluate(inputs, focal_source="fixed", fixed_focals=tuple(fixed_focals[phone] for phone in packet.phones),
+                               static_phones=True, landmark_target_count=20, body_polish=True)
+        assert truth_bytes == tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values()), "Exo fitting must preserve Quest hands"
         accepted = accepts(gate, thresholds) and model.converged
         gate = replace(gate, passes=accepted, policy=gate.policy + "; configurable optical/body/Sapiens/RTMW acceptance thresholds in result.json")
+        assert not np.any(model.head_translation_m), 'Exo-only refinement must not move the Quest world'
         if accepted:
             (output / 'refinement.json').write_text(to_json(model))
-            (output / 'calib.json').write_text(to_json(replace(state, exo_refinements={**state.exo_refinements, segment.id: model})))
-        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate)
+            updated = replace(state, exo_refinements={**state.exo_refinements, segment.id: model})
+            assert updated.oak is state.oak and updated.quest is state.quest and updated.stereo is state.stereo, 'Only exo cameras may change'
+            (output / 'calib.json').write_text(to_json(updated))
+        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, 'exo-only-fixed-focal-v1', focal_source,
+                             fixed_focals, focal_sources)
     temporary = result_path.with_suffix('.tmp')
     temporary.write_text(to_json(result))
     temporary.replace(result_path)
@@ -365,10 +395,10 @@ def bounded_command(args: list[str], output: Path, segment: str, timeout_s: floa
 
 def label_session(segment: str, calib_record: Path, output: Path, *, dataset: str = "selfcap-post-dev",
                   catalog_url: str = "rerun+http://dgx-spark:51235", timeout_s: float = 360.0,
-                  thresholds: GateThresholds = DEFAULT_THRESHOLDS) -> LabelResult:
+                  thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp") -> LabelResult:
     """Runner API: isolate one session, resume its files, and enforce a hard deadline."""
     args = ["--segment", segment, "--calib-record", str(calib_record.resolve()), "--output-dir", str(output.resolve()),
-            "--dataset", dataset, "--catalog-url", catalog_url]
+            "--dataset", dataset, "--catalog-url", catalog_url, "--focal-source", focal_source]
     args.extend(["--thresholds.optical-min-drop-px", str(thresholds.optical_min_drop_px),
                  "--thresholds.optical-min-drop-fraction", str(thresholds.optical_min_drop_fraction),
                  "--thresholds.sapiens-max-regression-px", str(thresholds.sapiens_max_regression_px),
