@@ -46,6 +46,8 @@ class Config:
     """OAK alignment observations; Sapiens retains the legacy 32-frame path for comparison."""
     oak_egohand_assets: Path = Path("data/egohand")
     """Local EgoHand asset root containing weights/, engines/ and dinov3-bf16.onnx."""
+    retain_models: bool = False
+    """Keep inference engines between episodes in a long-lived batch worker."""
     exo_refine: bool = False
     """Opt into joint optical calibration when exo_landmarks is present."""
     exo_focal_source: FocalSource = "fit"
@@ -83,7 +85,7 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
                 rotation = None
             elif rotation is None:
                 raise ValueError("EgoHand gyro-fixed fitting requires an eligible gyro rotation; use oak_free_rotation explicitly to fit without it")
-            release_cuda_memory(models=True)
+            release_cuda_memory(models=not config.retain_models)
         for index, (episode, segment) in enumerate(zip(episodes, segments, strict=True)):
             if config.oak_observations is not None:
                 oak = read_oak_observations(config.oak_observations / f"{segment.id}.parquet", segment.id)
@@ -95,7 +97,7 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
                 if sampling_rotation is None:
                     raise ValueError("EgoHand visibility sampling requires the gyro rotation")
                 oak = detect_oak_egohand(episode, video, oak_centre(ego), sampling_rotation, config.oak_egohand_assets,
-                                        camera=next((camera for camera in current if camera.cam == 0), None))
+                                        camera=next((camera for camera in current if camera.cam == 0), None), retain_models=config.retain_models)
             else:
                 oak = detect_oak_hands_gpu(dataset, episode.sync, episode.quest, episode.layout, pose_models()[1],
                                           video=None if segment.videos is None else segment.videos[video_path(episode.layout.oak_rig, 0)])
