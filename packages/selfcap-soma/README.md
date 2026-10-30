@@ -1,6 +1,6 @@
 # SelfCap SOMA fitting prototype
 
-Current published configuration: [upper body and hands](docs/upper-body.md).
+Current published run: [upper body with refined exo cameras](docs/refined-exo.md).
 The original prototype description below documents the earlier baseline.
 
 Fit one fixed-calibration SelfCap recording to NVIDIA SOMA-X body and hands.
