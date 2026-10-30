@@ -110,6 +110,7 @@ search-path = [
     "packages/sapiens2-pose/src",
     "packages/sapiens-coco133-pose/src",
     "packages/posekit/src",
+    "packages/egohand/src",
     "packages/lamp",
     "packages/trtkit/src",
     "packages/egoexo-forge/src",
@@ -126,6 +127,8 @@ search-path = [
 # any import regardless of which package file is open.
 # Requires all *-dev envs installed (pixi install -a)
 site-package-path = [
+    ".pixi/envs/egohand-dev/lib/python3.12/site-packages",
+    ".pixi/envs/egohand-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/agent-traces-dev/lib/python3.12/site-packages",
     ".pixi/envs/agent-traces-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/kornia-staging-dev/lib/python3.12/site-packages",

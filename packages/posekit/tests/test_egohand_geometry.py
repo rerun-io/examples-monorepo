@@ -1,0 +1,55 @@
+"""Camera and anatomical contracts, independent of model weights."""
+
+import cv2
+import numpy as np
+import pytest
+
+pytest.importorskip("egohand_inference", reason="requires the egohand Pixi environment")
+
+from posekit.models.egohand_geometry import (
+    OAKCamera,
+    coco_hand_indices,
+    detector_hand_side,
+    soma_to_hand21,
+    soma_to_openxr25,
+)
+
+
+def test_oak_projection_retains_all_fourteen_coefficients() -> None:
+    intrinsics = np.array([[600.0, 0.0, 640.0], [0.0, 601.0, 360.0], [0.0, 0.0, 1.0]])
+    distortion = np.array([0.03, -0.01, 0.002, -0.003, 0.004, 0.005, -0.002, 0.001, 0.001, -0.002, 0.003, -0.001, 0.02, -0.03])
+    points = np.array([[0.3, -0.2, 1.0], [-0.7, 0.4, 1.5], [0.0, 0.0, 2.0]])
+    camera = OAKCamera(intrinsics, distortion, 1280, 720)
+    expected, _ = cv2.projectPoints(points, np.zeros(3), np.zeros(3), intrinsics, distortion)
+    np.testing.assert_allclose(camera.project(points), expected[:, 0], atol=1e-8)
+    rays = camera.unproject(expected[:, 0])
+    np.testing.assert_allclose(rays[:, :2] / rays[:, 2:], points[:, :2] / points[:, 2:], atol=1e-7)
+
+
+def test_perspective_crop_round_trip_preserves_source_ray() -> None:
+    camera = OAKCamera(np.array([[600.0, 0.0, 640.0], [0.0, 600.0, 360.0], [0.0, 0.0, 1.0]]), np.zeros(14), 1280, 720)
+    crop = camera.crop(np.zeros((720, 1280, 3), dtype=np.uint8), np.array([1000.0, 300.0, 180.0]), 256)
+    pixels = np.array([[127.5, 127.5], [20.0, 30.0], [230.0, 220.0]])
+    crop_rays = np.c_[pixels, np.ones(3)] @ np.linalg.inv(crop.intrinsics).T
+    source_rays = crop_rays @ crop.source_R_crop.T
+    restored = camera.unproject(camera.project(source_rays)) @ crop.source_R_crop
+    np.testing.assert_allclose(restored[:, :2] / restored[:, 2:], crop_rays[:, :2], atol=1e-7)
+    np.testing.assert_allclose(camera.project(source_rays[:1]), [[1000.0, 300.0]], atol=1e-7)
+
+
+def test_hand_labels_are_anatomical_and_unknown_labels_fail() -> None:
+    assert detector_hand_side(1) == "left"
+    assert detector_hand_side(2) == "right"
+    with pytest.raises(ValueError, match="hand label"):
+        detector_hand_side(0)
+
+
+def test_soma_mapping_skips_extra_metacarpals_for_coco_and_quest21() -> None:
+    # Unique coordinates make the independently specified anatomical order visible.
+    points = np.repeat(np.arange(25, dtype=np.float32)[:, None], 3, axis=1)
+    expected = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
+    np.testing.assert_array_equal(soma_to_hand21(points)[:, 0], expected)
+    assert coco_hand_indices("left") == tuple(range(91, 112))
+    assert coco_hand_indices("right") == tuple(range(112, 133))
+    # OpenXR without palm retains wrist and all metacarpals: index 1..25.
+    np.testing.assert_array_equal(soma_to_openxr25(points), points)
