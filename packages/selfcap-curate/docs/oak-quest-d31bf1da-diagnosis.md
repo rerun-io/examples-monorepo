@@ -3,6 +3,9 @@
 Date: 2026-10-29. Code inspected: `74e69c8ea1112ca8929d878235f654ae064ce7f6`.
 Scope: `selfcap__2025-12-03__d31bf1da__ep001` only.
 
+The subsequent [intrinsics test](oak-quest-d31bf1da-intrinsics.md) adds weighted
+focal/principal-point fits and independent mono-left inference.
+
 ## Decision
 
 Keep the production calibration and timing unchanged. A large clock error is
