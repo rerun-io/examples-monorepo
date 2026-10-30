@@ -70,7 +70,7 @@ def test_failed_readback_clears_old_verification_and_prevents_cleanup(tmp_path: 
     artifact = directory / "fit.rrd"
     artifact.write_text("retain")
     state = Checkpoint("signature", "published", Timings(), layer_sha256="expected", readback_verified=True)
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="wrong remote.rrd"))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **_kwargs: subprocess.CompletedProcess(args, 0, stdout="wrong remote.rrd"))
     with pytest.raises(ValueError, match="digest mismatch"):
         verify_publication(config, SEGMENT, state, np.array([0.0, 1.0]))
     assert not state.readback_verified

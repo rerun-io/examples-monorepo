@@ -11,6 +11,7 @@ def test_reader_preserves_all_26_joint_orientations(tmp_path):
     data = read_quest_joint_poses(source)
     assert data.positions.shape == (1, 26, 3)
     np.testing.assert_array_equal(data.times_ns, [42])
+    assert data.orientations is not None
     np.testing.assert_allclose(data.orientations[0, 25], [0, 0, 0.6, 0.8])
 
 

@@ -274,7 +274,7 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
         assert world.visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/skeleton"] == rrb.EntityBehavior(visible=False)
         assert world.visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/camera_centers"] == rrb.EntityBehavior(visible=False)
     assert "/world/pred/soma_x/mesh" not in world.visualizer_overrides
-    dev_views = blueprint_views(SelfcapConfig().setup().default_blueprint(show_soma_mesh=True))
+    dev_views = blueprint_views(SelfcapDataset(SelfcapConfig()).default_blueprint(show_soma_mesh=True))
     dev_world = next(view for view in dev_views if str(view.name) == "World (Quest frame, calibrated)")
     assert dev_world.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
     for view in dev_views:
