@@ -1583,6 +1583,52 @@ description = "Train a first 5k-step Brush splat from the kitchen train 0100 rig
 [feature.pysfm.target.linux-64.dependencies]
 brush = "==0.3.0"
 
+[feature.selfcap-soma]
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
+
+[feature.selfcap-soma.dependencies]
+python = "3.12.*"
+py-opencv = "*"
+pytorch-gpu = ">=2.12,<2.13"
+cuda-version = "13.0.*"
+numpy = "*"
+scipy = "*"
+pyserde = ">=0.31.2,<0.32"
+tomli-w = ">=1.2,<2"
+orjson = ">=3.11,<4"
+jaxtyping = "*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.selfcap-soma.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+py-soma-x = "==0.3.0"
+rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
+selfcap-soma = { path = "packages/selfcap-soma", editable = true }
+
+[feature.selfcap-soma.activation.env]
+PACKAGE_DIR = "packages/selfcap-soma"
+PYREFLY_TARGET = "selfcap_soma"
+
+[feature.selfcap-soma.tasks.soma-fit]
+cmd = "python tools/fit.py"
+cwd = "packages/selfcap-soma"
+
+[feature.selfcap-soma.tasks.soma-evaluate]
+cmd = "python tools/evaluate.py"
+cwd = "packages/selfcap-soma"
+
+[feature.selfcap-soma.tasks.soma-overlay]
+cmd = "python tools/overlay.py"
+cwd = "packages/selfcap-soma"
+
+[feature.selfcap-soma.tasks.soma-repair-hands]
+cmd = "python tools/repair_hands.py"
+cwd = "packages/selfcap-soma"
+
+[feature.selfcap-soma.tasks.soma-shoulders]
+cmd = "python tools/shoulders.py"
+cwd = "packages/selfcap-soma"
+
 [feature.selfcap-curate]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -3520,6 +3566,8 @@ simplecv-catalog-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv-catalog", no-default-feature = true }
+selfcap-soma = { features = ["selfcap-soma"], solve-group = "selfcap-soma", no-default-feature = true }
+selfcap-soma-dev = { features = ["selfcap-soma", "dev"], solve-group = "selfcap-soma", no-default-feature = true }
 selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "posekit-egohand"], solve-group = "selfcap-curate", no-default-feature = true }
 selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "posekit-egohand", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
 exo-calib = { features = [
