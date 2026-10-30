@@ -4,6 +4,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import rerun as rr
 import trimesh
 from jaxtyping import Bool, Float32, Float64
@@ -78,6 +80,22 @@ def log_joint_overlay(
     )
 
 
+def mesh_vertex_rows(column: pa.Array | pa.ChunkedArray) -> Float32[ndarray, "n v 3"]:
+    """View uniform mesh rows in Arrow numeric buffers, retaining slice offsets."""
+    array = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+    if array.null_count:
+        raise ValueError("mesh vertex rows must not be null")
+    lengths = pc.list_value_length(array).to_numpy(zero_copy_only=False)
+    if len(lengths) and np.any(lengths != lengths[0]):
+        raise ValueError("mesh vertex rows must have uniform vertex counts")
+    vectors = pc.list_flatten(array)
+    if vectors.null_count:
+        raise ValueError("mesh vertices must not be null")
+    values = pc.list_flatten(vectors).to_numpy(zero_copy_only=False).astype(np.float32, copy=False)
+    count = int(lengths[0]) if len(lengths) else 0
+    return values.reshape(len(array), count, 3)
+
+
 def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader, times: Float64[ndarray, "n"]) -> None:
     """Retain the fixed rest-pose waist selection, with newly computed normals."""
     selection = source.stream().filter(content="/parameters/upper_body_vertices").to_chunks()
@@ -102,7 +120,7 @@ def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader, times: Fl
     recording.log("/world/pred/soma_x/mesh", rr.Mesh3D.from_fields(triangle_indices=faces, albedo_factor=[0.25, 0.65, 0.8, 0.5]), static=True)
     for batch in batches:
         stamps = batch.column("video_time").cast("int64").to_numpy().astype(np.float64) / 1e9
-        vertices = np.asarray(batch.column("Mesh3D:vertex_positions").to_pylist(), dtype=np.float32)[:, ids]
+        vertices = mesh_vertex_rows(batch.column("Mesh3D:vertex_positions"))[:, ids]
         normals = np.stack([trimesh.Trimesh(v, faces, process=False).vertex_normals for v in vertices]).astype(np.float32)
         recording.send_columns(
             "/world/pred/soma_x/mesh",
