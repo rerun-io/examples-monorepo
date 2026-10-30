@@ -211,10 +211,16 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
             points = np.stack([position + rotation @ state.quest.rig_T_cam.get(str(s), np.eye(4))[:3, 3] for s in (0, 1)])
             uv = camera.project(points)
             center = uv[:, :2].mean(0)
-            crop, bounds = grid_crop(image, float(center[0]), float(center[1]), 260, f'view={view} time={stamp:.9f} quest0/quest1')
+            towards_observer = rotation.T @ (camera.world_T_cam[:3, 3] - position)
+            lateral = float(towards_observer[0] / np.linalg.norm(towards_observer))
+            # The factory baseline points from left camera 0 to right camera 1.
+            baseline = state.quest.rig_T_cam.get("1", np.eye(4))[:3, 3]
+            near_right = lateral * (1.0 if baseline[0] >= 0.0 else -1.0) > 0.0
+            targets = ['quest1' if near_right else 'quest0'] if abs(lateral) > .6 else ['quest0', 'quest1']
+            crop, bounds = grid_crop(image, float(center[0]), float(center[1]), 260, f'view={view} time={stamp:.9f} {"/".join(targets)}')
             path = output / f'view{view}-head{number}.png'
             cv2.imwrite(str(path), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
-            panels.append(Panel(view, stamp, ['quest0', 'quest1'], bounds, str(path), str(source_path)))
+            panels.append(Panel(view, stamp, targets, bounds, str(path), str(source_path)))
             if number == 0:
                 for target, other in enumerate(cameras):
                     if target == view or other is None:
@@ -238,7 +244,7 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
 PROMPT = """Label optical camera apertures in these image crops. Return only the schema JSON.
 Use ORIGINAL image pixel coordinates from the tick labels, not crop pixels. Grid lines are 20 original pixels apart; image enlarged 2x. Title gives view, exact video_time and allowed target IDs. Faint crosses are uncertain predictions, NOT labels.
 Phones: mark the centre of the physical back-camera lens facing this observer, not the screen, tripod, body centre or reflection. Device IDs identify targets generically; scene placement varies. Skip partly hidden lenses, screens and backs without a clear visible aperture. Omit rather than guess when you cannot confidently identify the correct phone.
-Headset: quest0 is the wearer's LEFT front RGB aperture, quest1 the wearer's RIGHT (when frontal, wearer left is image right). Quest 3S has two triangular three-aperture clusters on its white visor: RGB is the large dark outer aperture in each cluster; do not label the small neighboring tracking/IR/depth apertures or the centre of the triangle. Quest 3 has three vertical front pills: RGB cameras are on the two outer pills, not the central depth sensor. Skip occluded, side/back-facing, blurred, or ambiguous apertures. Never infer invisible points by symmetry. Confidence >=0.6 means clear visible lens, <=0.5 is uncertain and should be omitted. One mark per visible target. No tools, no prose.
+Headset: quest0 is the wearer's LEFT front RGB aperture, quest1 the wearer's RIGHT (when frontal, wearer left is image right). Quest 3S has two triangular three-aperture clusters on its white visor: RGB is the large dark outer aperture in each cluster; do not label the small neighboring tracking/IR/depth apertures or the centre of the triangle. Quest 3 has three vertical front pills: RGB cameras are on the two outer pills, not the central depth sensor. Skip occluded, side/back-facing, blurred, or ambiguous apertures. Never infer invisible points by symmetry. Confidence >=0.6 means clear visible lens, <=0.5 is uncertain and should be omitted. Only IDs listed in each panel are permitted. For an oblique view, the listed near-side lens ID was determined from calibrated head orientation: use that ID rather than guessing from image-left/image-right. One mark per visible target. No tools, no prose.
 """
 
 
@@ -302,7 +308,9 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
     result_path = output / 'result.json'
     if result_path.exists():
         previous = from_json(LabelResult, result_path.read_text())
-        if previous.decision in ('accepted', 'rejected'):
+        if previous.segment != segment.id:
+            raise ValueError('Output directory belongs to another segment')
+        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds:
             return previous
     packet_path = output / 'packet.json'
     packet = from_json(Packet, packet_path.read_text()) if packet_path.exists() else make_packet(segment, state, output)
@@ -311,8 +319,13 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
     if len(record.labels) < 12 or len({label.view for label in record.labels}) < len(packet.phones):
         result = LabelResult(segment.id, 'rejected', 'insufficient visible landmark coverage', len(record.labels), time.monotonic() - start, thresholds)
     else:
-        cameras = tuple(state.exo.phones[phone].camera for phone in packet.phones)
-        inputs = load_inputs(segment, cameras=cameras, quest=state.quest, landmarks=record)
+        cameras = []
+        for phone in packet.phones:
+            camera = state.exo.phones[phone].camera
+            if camera is None:
+                raise ValueError(f"Missing initial camera for {phone}")
+            cameras.append(camera)
+        inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record)
         model, gate = evaluate(inputs, focal_source='fit', static_phones=True, landmark_target_count=20)
         accepted = accepts(gate, thresholds) and model.converged
         gate = replace(gate, passes=accepted, policy=gate.policy + "; configurable optical/body/Sapiens/RTMW acceptance thresholds in result.json")
