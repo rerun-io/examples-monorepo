@@ -1331,7 +1331,7 @@ warp-lang = "==1.11.1"
 # These four existing Transformers wrappers have decorated .to() stubs that
 # pyrefly misbinds as unbound methods in this isolated dependency solve.
 [feature.posekit-egohand.activation.env]
-PYREFLY_EXTRA_ARGS = "--baseline egohand-pyrefly-baseline.json"
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
 
 [feature.posekit-egohand.tasks.egohand-selfcap]
 cmd = "python tools/demos/egohand_selfcap.py"
@@ -3502,8 +3502,8 @@ simplecv-catalog-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv-catalog", no-default-feature = true }
-selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate"], solve-group = "selfcap-curate", no-default-feature = true }
-selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
+selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "posekit-egohand"], solve-group = "selfcap-curate", no-default-feature = true }
+selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "posekit-egohand", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
 exo-calib = { features = [
     "catalog-common",
     "rerun-prerelease",

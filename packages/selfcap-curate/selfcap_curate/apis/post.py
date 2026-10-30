@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from dataforge.timing import SequenceTimer
 from rerun.server import Server
@@ -31,6 +32,10 @@ class Config:
     """Optional directory of dense EgoHand observation Parquets, passed to OAK calibration."""
     oak_free_rotation: bool = False
     """Fit the supplied EgoHand observations with free rotation instead of the production gyro rotation."""
+    oak_method: Literal["egohand", "sapiens"] = "egohand"
+    """Use 64 seeded EgoHand frames by default, or the legacy Sapiens OAK path."""
+    oak_egohand_assets: Path = Path("data/egohand")
+    """Local EgoHand weights and cached engine root, passed to calibration."""
 
 
 def main(config: Config) -> None:
@@ -51,7 +56,7 @@ def main(config: Config) -> None:
             ),
             session_videos=session_videos,
         )
-    release_cuda_memory(models=False)  # align's decode and links buffers; calibrate still needs Sapiens2
+    release_cuda_memory(models=config.oak_method == "egohand")
     with Server(host="127.0.0.1", port=0, datasets={DATASET_NAME: sorted(aligned.glob("*.rrd"))}) as server:
         detections: list[str] = [path.resolve().as_uri() for path in sorted((aligned / "sapiens2").glob("*.rrd"))]
         server.client().get_dataset(DATASET_NAME).register(detections, layer_name="sapiens2").wait()
@@ -65,6 +70,8 @@ def main(config: Config) -> None:
                     donor_catalog_url=config.catalog_url,
                     oak_observations=config.oak_observations,
                     oak_free_rotation=config.oak_free_rotation,
+                    oak_method=config.oak_method,
+                    oak_egohand_assets=config.oak_egohand_assets,
                 ),
                 session_videos=session_videos,
             )

@@ -10,8 +10,25 @@ from dataforge.catalog_swap import swap_layer
 from rerun.chunk import RrdReader
 
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_phone_detections, read_time_sync
-from selfcap_curate.detection_io import read_oak_observations, write_detections_layer
-from selfcap_curate.records import PhoneDetections, SelfcapLayout
+from selfcap_curate.detection_io import read_oak_observations, write_detections_layer, write_oak_egohand_layer
+from selfcap_curate.records import OakDetections, PhoneDetections, SelfcapLayout
+
+
+def test_egohand_layer_retains_sparse_video_times_and_confidence(tmp_path):
+    path = tmp_path / "egohand.rrd"
+    xy = np.full((2, 133, 2), np.nan)
+    xy[:, 91:112] = 10.0
+    confidence = np.zeros((2, 133))
+    confidence[:, 91:112] = 0.8
+    write_oak_egohand_layer(path, "episode", 4, OakDetections(np.array([1.0, 4.0]), xy, confidence))
+    reader = RrdReader(path)
+    assert reader.recordings()[0].recording_id == "episode"
+    chunks = list(reader.stream())
+    assert all("/__properties" not in str(chunk.entity_path) for chunk in chunks)
+    data = next(chunk.to_record_batch() for chunk in chunks if not chunk.is_static)
+    assert data.column("video_time").cast("int64").to_pylist() == [1_000_000_000, 4_000_000_000]
+    assert data.column("confidence").to_pylist() == confidence.tolist()
+    assert any("egohand_calib/coco133_uv" in str(chunk.entity_path) for chunk in chunks)
 
 
 def test_oak_observations_preserve_pixels_and_reject_another_segment(tmp_path):

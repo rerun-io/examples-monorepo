@@ -460,7 +460,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 rig,
                 cam,
                 contents=[f"{pinhole}/**", *world],
-                overrides={f"{pinhole}/pred/sapiens2": rrb.EntityBehavior(visible=False)},
+                overrides={f"{pinhole}/pred/{source}": rrb.EntityBehavior(visible=False) for source in ("sapiens2", "egohand_calib")},
             )
 
         ego = rrb.Vertical(
