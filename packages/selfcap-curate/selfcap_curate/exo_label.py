@@ -1,5 +1,6 @@
 """Bounded optical-landmark packets, Sol annotation, and fail-closed exo gating."""
 
+import hashlib
 import json
 import os
 import signal
@@ -113,6 +114,12 @@ class LabelResult:
     """Fixed focal pixels per device."""
     focal_sources: dict[str, str] = field(default_factory=dict)
     """device-vp or initial-calibration per camera; neither is fitted."""
+    rtmw_source: str | None = None
+    """Explicit original S1 recording path, or null for the live catalog."""
+    rtmw_sha256: str | None = None
+    """Hash pinning the observation bytes used to fit and score."""
+    cached_labels_sha256: str | None = None
+    """Hash pinning the input labels in inference-free redecision mode."""
 
 
 def accepts(gate: Gate, thresholds: GateThresholds = DEFAULT_THRESHOLDS) -> bool:
@@ -391,16 +398,28 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
     return record
 
 
-def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, *, thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp", objective: ObjectiveShares = DEFAULT_OBJECTIVE) -> LabelResult:
+def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, *, thresholds: GateThresholds = DEFAULT_THRESHOLDS,
+                focal_source: LabelFocalSource = "device-vp", objective: ObjectiveShares = DEFAULT_OBJECTIVE,
+                cached_labels: Path | None = None, rtmw_rrd: Path | None = None) -> LabelResult:
     """Build, label and gate one session; runner must bound this call or use the CLI."""
     start = time.monotonic()
+    if cached_labels is not None and rtmw_rrd is None:
+        raise ValueError('cached_labels requires an original S1 rtmw_rrd')
+    rtmw_hash = None
+    label_hash = None
+    if rtmw_rrd is not None:
+        with rtmw_rrd.open('rb') as source:
+            rtmw_hash = hashlib.file_digest(source, 'sha256').hexdigest()
+    if cached_labels is not None:
+        label_hash = hashlib.sha256(cached_labels.read_bytes()).hexdigest()
     output.mkdir(parents=True, exist_ok=True)
     active = calibrated_rigs(state, segment.layout.phones)
     if len(active) < 2:
         for name in ('calib.json', 'refinement.json'):
             (output / name).unlink(missing_ok=True)
         result = LabelResult(segment.id, 'skipped', f'Fewer than two initial exo cameras ({len(active)} calibrated)', 0,
-                             time.monotonic() - start, thresholds, objective=objective, solver_version='exo-visible-folds-physical-targets-v4')
+                             time.monotonic() - start, thresholds, objective=objective, solver_version='exo-visible-folds-physical-targets-v4',
+                             rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None, rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash)
         (output / 'result.json').write_text(to_json(result))
         return result
     table = read_vp_table()
@@ -419,16 +438,23 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         previous = from_json(LabelResult, result_path.read_text())
         if previous.segment != segment.id:
             raise ValueError('Output directory belongs to another segment')
-        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-visible-folds-physical-targets-v4' and previous.objective == objective:
+        if (previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source
+                and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-visible-folds-physical-targets-v4'
+                and previous.objective == objective and previous.rtmw_sha256 == rtmw_hash and previous.cached_labels_sha256 == label_hash):
             return previous
     for name in ('calib.json', 'refinement.json'):
         (output / name).unlink(missing_ok=True)
     packet_path = output / 'packet.json'
-    packet = from_json(Packet, packet_path.read_text()) if packet_path.exists() else make_packet(segment, state, output)
-    packet = replace(packet, panels=[panel for panel in packet.panels if panel.view in active
-                                    and all(not target.startswith('phone') or int(target[5:]) in active for target in panel.targets)])
-    record_path = output / 'landmarks.json'
-    record = from_json(Landmarks, record_path.read_text()) if record_path.exists() else annotate(packet, output)
+    if cached_labels is not None:
+        packet = Packet(segment.id, segment.layout.phones, [])
+        record = from_json(Landmarks, cached_labels.read_text())
+        (output / 'landmarks.json').write_text(to_json(record))
+    else:
+        packet = from_json(Packet, packet_path.read_text()) if packet_path.exists() else make_packet(segment, state, output)
+        packet = replace(packet, panels=[panel for panel in packet.panels if panel.view in active
+                                        and all(not target.startswith('phone') or int(target[5:]) in active for target in panel.targets)])
+        record_path = output / 'landmarks.json'
+        record = from_json(Landmarks, record_path.read_text()) if record_path.exists() else annotate(packet, output)
     record = replace(record, labels=[label for label in record.labels if label.view in active
                                     and (not label.target_id.startswith('phone') or int(label.target_id[5:]) in active)])
     if len(record.labels) < 12 or len({label.view for label in record.labels}) < len(active):
@@ -441,7 +467,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
             if camera is None:
                 raise ValueError(f"Missing initial camera for {phone}")
             cameras.append(camera)
-        inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record, camera_rigs=active)
+        inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record, camera_rigs=active, rtmw_rrd=rtmw_rrd)
         record = inputs.problem.landmarks
         truth_bytes = tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values())
         model, gate = evaluate(inputs, focal_source="fixed", fixed_focals=tuple(fixed_focals[packet.phones[rig]] for rig in active),
@@ -461,6 +487,8 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, 'exo-visible-folds-physical-targets-v4', focal_source,
                              fixed_focals, focal_sources)
     temporary = result_path.with_suffix('.tmp')
+    result = replace(result, rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None,
+                     rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash)
     temporary.write_text(to_json(result))
     temporary.replace(result_path)
     return result
@@ -492,10 +520,17 @@ def bounded_command(args: list[str], output: Path, segment: str, timeout_s: floa
 
 def label_session(segment: str, calib_record: Path, output: Path, *, dataset: str = "selfcap-post-dev",
                   catalog_url: str = "rerun+http://dgx-spark:51235", timeout_s: float = 360.0,
-                  thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp", objective: ObjectiveShares = DEFAULT_OBJECTIVE) -> LabelResult:
+                  thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp", objective: ObjectiveShares = DEFAULT_OBJECTIVE,
+                  cached_labels: Path | None = None, rtmw_rrd: Path | None = None) -> LabelResult:
     """Runner API: isolate one session, resume its files, and enforce a hard deadline."""
     args = ["--segment", segment, "--calib-record", str(calib_record.resolve()), "--output-dir", str(output.resolve()),
             "--dataset", dataset, "--catalog-url", catalog_url, "--focal-source", focal_source]
+    if cached_labels is not None:
+        if rtmw_rrd is None:
+            raise ValueError('cached_labels requires an original S1 rtmw_rrd')
+        args.extend(['--cached-labels', str(cached_labels.resolve())])
+    if rtmw_rrd is not None:
+        args.extend(['--rtmw-rrd', str(rtmw_rrd.resolve())])
     args.extend(["--thresholds.optical-min-drop-px", str(thresholds.optical_min_drop_px),
                  "--thresholds.optical-min-drop-fraction", str(thresholds.optical_min_drop_fraction),
                  "--thresholds.sapiens-max-regression-px", str(thresholds.sapiens_max_regression_px),
