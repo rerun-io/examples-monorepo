@@ -131,3 +131,37 @@ def read_image_tracks(path: Path) -> list[ImageTrack]:
         order = np.argsort(stamps)
         tracks.append(ImageTrack(name, stamps[order], points[order]))
     return tracks
+
+
+def read_egohand_rgb(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]) -> list[ImageTrack]:
+    """Read registered RGB hand image evidence once, preserving absent detections."""
+    view = dataset.filter_segments(segment)
+    paths = [
+        column.split(":", 1)[0]
+        for column in view.schema().column_names()
+        if column.startswith("/world/rig_04/cam_00/pinhole/") and "/egohand/" in column and column.endswith(":Points2D:positions")
+    ]
+    if not paths:
+        return []
+    table = (
+        view.filter_contents(paths)
+        .reader(index="video_time")
+        .filter(col("video_time").cast(pa.int64()) >= lit(int((times[0] - 0.05) * 1e9)))
+        .filter(col("video_time").cast(pa.int64()) <= lit(int((times[-1] + 0.05) * 1e9)))
+        .to_arrow_table()
+    )
+    mapping = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
+    result = []
+    for path in paths:
+        column = path + ":Points2D:positions"
+        rows = table.filter(table[column].is_valid())
+        stamps = seconds(rows["video_time"])
+        points = np.full((len(stamps), 21, 2), np.nan)
+        for index, row in enumerate(rows[column].to_pylist()):
+            if len(row) == 25:
+                points[index] = np.asarray(row, dtype=np.float64)[mapping]
+            elif len(row) == 21:
+                points[index] = np.asarray(row, dtype=np.float64)
+        order = np.argsort(stamps)
+        result.append(ImageTrack(path, stamps[order], points[order]))
+    return result

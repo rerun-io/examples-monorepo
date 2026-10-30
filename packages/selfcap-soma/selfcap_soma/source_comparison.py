@@ -23,6 +23,7 @@ from selfcap_soma.evaluation_io import nearest_indices, read_views
 from selfcap_soma.fitting import Calibration, FitOptions, FitResult, fit
 from selfcap_soma.hand_diagnostics import Plausibility, measure
 from selfcap_soma.hand_pose import read_orientations
+from selfcap_soma.landmarks import FOOT_VERTICES
 from selfcap_soma.output import Report, Residual, residual, save
 from selfcap_soma.shoulders import subset
 
@@ -136,6 +137,17 @@ def load_fit(directory: Path, calibration: Calibration, data: Observations) -> F
     if calibration.head_attachment is None:
         raise ValueError("baseline lacks a head attachment")
     report = from_json(Report, (directory / "report.json").read_text())
+    translations = np.asarray(roots.to_pylist(), dtype=np.float32).reshape(-1, 3)
+    foot_batches = []
+    with torch.no_grad():
+        for start in range(0, len(poses), 32):
+            posed = model.pose(
+                torch.tensor(poses[start : start + 32], device="cuda"),
+                transl=torch.tensor(translations[start : start + 32], device="cuda"),
+                apply_correctives=False,
+            )
+            foot_batches.append(posed.vertices[:, torch.as_tensor(FOOT_VERTICES, device="cuda")].mean(2).cpu().numpy())
+    feet = np.concatenate(foot_batches)
     return FitResult(
         poses,
         np.asarray(roots.to_pylist(), dtype=np.float32).reshape(-1, 3),
@@ -156,6 +168,7 @@ def load_fit(directory: Path, calibration: Calibration, data: Observations) -> F
         calibration.bone_scales,
         True,
         True,
+        feet,
     )
 
 

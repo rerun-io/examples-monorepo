@@ -108,3 +108,53 @@ def test_sparse_ear_vertices_match_full_mesh_and_ear_calibration_freezes():
     frozen = fit(data, assets, 4, 1, fixed=calibration)
     np.testing.assert_allclose(frozen.head_attachment, result.head_attachment)
     np.testing.assert_array_equal(frozen.head_offset, result.head_offset)
+
+
+def test_foot_surface_targets_drive_ankle_rotation():
+    from selfcap_soma.fitting import FitOptions
+    from selfcap_soma.landmarks import FOOT_VERTICES, foot_vertices
+
+    assets = Path("/tmp/soma-fit/assets")
+    if not assets.exists() or not torch.cuda.is_available():
+        pytest.skip("requires SOMA assets and CUDA")
+    model = SOMALayer(
+        data_root=assets,
+        device="cuda",
+        identity_model_type="soma",
+        mode="torch",
+        lod="low",
+        enable_procedural_transforms=False,
+        correctives_model_path=None,
+    )
+    with torch.no_grad():
+        model.prepare_identity(torch.zeros(1, 128, device="cuda"))
+        names = tuple(model.public_joint_names[1:])
+        poses = torch.zeros(3, 77, 3, device="cuda")
+        rest = model.pose(poses, apply_correctives=False)
+        poses[:, names.index("LeftFoot"), 0] = 0.25
+        poses[:, names.index("RightFoot"), 0] = -0.2
+        target = model.pose(poses, apply_correctives=False)
+        feet = target.vertices[:, torch.as_tensor(FOOT_VERTICES, device="cuda")].mean(2).cpu().numpy()
+        skin = model.batched_skinning
+        sparse = foot_vertices(
+            skin.bind_shapes,
+            model.skinning_weights,
+            skin.inverse_bind_transform,
+            target.transforms[:, torch.argsort(model.public_transform_joint_indices)],
+        )
+        np.testing.assert_allclose(sparse.cpu().numpy(), feet, atol=2e-6)
+        original = rest.vertices[:, torch.as_tensor(FOOT_VERTICES, device="cuda")].mean(2).cpu().numpy()
+        points = np.full((3, 133, 3), np.nan)
+        for key, name in coco_joint_names().items():
+            points[:, key] = target.joints[:, names.index(name)].cpu().numpy()
+        points[:, 17:23] = feet
+    data = Observations(
+        np.array([0.0, 0.05, 0.1]), points, np.ones((3, 133)), np.full_like(points, np.nan), np.full((3, 3), np.nan), np.full((3, 3, 3), np.nan), 0.0
+    )
+    calibration = Calibration(
+        np.zeros((1, 128), np.float32), 1.0, np.zeros(3, np.float32), np.ones((1, 60), np.float32), np.eye(3, dtype=np.float32), "ears"
+    )
+    result = fit(data, assets, 80, 1, FitOptions(head_mode="ears", use_feet=True, foot_contact_weight=0.0), fixed=calibration)
+    assert result.foot_landmarks is not None
+    assert np.median(np.linalg.norm(result.foot_landmarks - feet, axis=-1)) < np.median(np.linalg.norm(original - feet, axis=-1)) * 0.6
+    assert np.linalg.norm(result.poses[:, [names.index("LeftFoot"), names.index("RightFoot")]]) > 0.05

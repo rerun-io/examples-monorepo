@@ -60,6 +60,8 @@ def mapped(result: FitResult, data: Observations) -> Float64[ndarray, "n 133 3"]
     for key, name in coco_joint_names().items():
         points[:, key] = result.joints[:, result.names.index(name)]
     points[:, 3:5] = result.ear_landmarks
+    if result.foot_landmarks is not None:
+        points[:, 17:23] = result.foot_landmarks
     return points
 
 

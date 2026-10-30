@@ -67,6 +67,8 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     for coco, name in coco_joint_names().items():
         mapped[:, coco] = result.joints[:, result.names.index(name)]
     mapped[:, 3:5] = result.ear_landmarks
+    if result.foot_landmarks is not None:
+        mapped[:, 17:23] = result.foot_landmarks
     frame = int(np.searchsorted(data.times, target_s, side="right") - 1)
     frame = max(0, min(frame, len(data.times) - 1))
     report = Report(
@@ -109,7 +111,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
                 else "Headset attachment is estimated from this segment; ear landmarks are hand-selected low-LOD surface vertices."
             ),
             "Shared native identity, global scale and optional body bone ratios; no hand PCA or learned pose prior.",
-            "No foot surface terms, contact model, image evidence or uncertainty estimate.",
+            "Foot surface landmarks and gated contact are available; no image fitting or uncertainty estimate.",
             "Quest bone orientations constrained." if result.hand_orientations else "No hand bone orientation supervision.",
             "Low-LOD mesh; procedural twists enabled, pose correctives unavailable."
             if result.display_twists
@@ -146,6 +148,12 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     recording.send_columns(
         "/world/fit/ears", indexes=index, columns=rr.Points3D.columns(positions=result.ear_landmarks.reshape(-1, 3)).partition([2] * len(data.times))
     )
+    if result.foot_landmarks is not None:
+        recording.send_columns(
+            "/world/fit/feet",
+            indexes=index,
+            columns=rr.Points3D.columns(positions=result.foot_landmarks.reshape(-1, 3)).partition([6] * len(data.times)),
+        )
     recording.send_columns(
         "/world/inputs/exo", indexes=index, columns=rr.Points3D.columns(positions=data.exo.reshape(-1, 3)).partition([133] * len(data.times))
     )
