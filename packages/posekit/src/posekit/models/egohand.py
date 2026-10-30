@@ -34,7 +34,7 @@ class HandDetections:
     boxes: BoxDetections
     """Source-image boxes and batch indices."""
     sides: tuple[HandSide, ...]
-    """Assigned side, or raw class name when detector identity assignment is disabled."""
+    """Anatomical side assigned from the ordered ego sequence."""
 
 
 def resolve_hand_identities(detections: HandDetections, frame_count: int) -> HandDetections:
@@ -92,10 +92,6 @@ class EgoHandDetectorConfig:
     """Path to hand_detector.onnx."""
     threshold: float = 0.5
     """Minimum detector confidence, unrelated to landmark visibility."""
-
-    assign_identity: bool = True
-    """Use upstream geometry/IoU assignment on an ordered, upright ego sequence."""
-
     backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
     """ONNX Runtime reference or cached TensorRT engine, with a dynamic batch."""
 
@@ -157,7 +153,7 @@ class EgoHandDetector:
         raw: HandDetections = HandDetections(
             BoxDetections(torch.stack(boxes), torch.stack(scores), torch.tensor(indices, device=frames_rgb.device, dtype=torch.int64)), tuple(sides)
         )
-        return resolve_hand_identities(raw, len(frames_rgb)) if self.config.assign_identity else raw
+        return resolve_hand_identities(raw, len(frames_rgb))
 
 
 @serde
