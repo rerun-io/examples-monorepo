@@ -473,6 +473,30 @@ never overwritten), makes them the defaults, then unregisters every older bluepr
 entry of the dataset, hand-registered ones included, and deletes the older files in
 `blueprints/`. The dataset id and its segments stay, so links keep working.
 
+For an existing SelfCap dataset, refresh only its blueprints on the catalog host:
+
+```bash
+pixi run -e dataforge --frozen python packages/dataforge/tools/apps/selfcap_blueprints.py \
+  --catalog-name selfcap-post-ep1-v2 \
+  --output-root /home/pablo/dataforge-dev/selfcap-post-ep1-v2
+```
+
+The command requires an existing dataset and never registers recording layers.
+Use `selfcap-post-ep1-v2-refined` for both arguments once the runner creates that
+subset. The output directory must be readable by the catalog server on the same
+host. Cards pair the display skeleton and SOMA mesh with the `rig_00` exo video;
+the four card fields summarize capture/session, phone count, refinement, and SOMA
+quality. The table adds OAK pose/rotation, frame count, and the full session UUID.
+Gate decisions and quality reasons remain available in their report JSON columns.
+
+SelfCap's default segment layout still assumes four phones: OAK at `rig_04`,
+Quest at `rig_05`. Three-phone captures currently put them at `rig_03` and
+`rig_04`. A fixed-slot migration must reserve four exo slots, always map OAK and
+Quest to their fixed slots, and apply that mapping to base ingestion, transforms,
+IMU, projections, and every derived layer reader/writer. Existing recordings
+would need a consistent remap across all layers before registration. A blueprint
+change alone cannot repair those paths. The table's `rig_00` works in both layouts.
+
 The native viewer saves its own copy of each table layout on disk
 (`~/.local/share/rerun/blueprints/tables/` on Linux,
 `~/Library/Application Support/rerun/blueprints/tables/` on macOS) and can keep

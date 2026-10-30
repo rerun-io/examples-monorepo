@@ -571,3 +571,36 @@ def test_calibration_keeps_unknown_vendor_fields_and_rejects_short_distortion(tm
     result = read_calibration(source)["center"]
     assert result.width == 1280
     assert result.distortion_coefficients is None
+
+
+def test_table_blueprint_shows_scene_and_one_exo_video_for_both_rig_layouts() -> None:
+    views: list[rrb.View] = blueprint_views(SelfcapConfig().setup().table_blueprint())
+    assert len(views) == 2
+    scene, camera = views
+    assert isinstance(scene, rrb.Spatial3DView)
+    assert str(scene.origin) == "/world"
+    assert isinstance(camera, rrb.Spatial2DView)
+    assert str(camera.origin) == schema.pinhole_path(0, 0)
+    scene_contents: list[str] = cast(list[str], scene.contents)
+    camera_contents: list[str] = cast(list[str], camera.contents)
+    for phone_count in (3, 4):
+        slots = [(rig, 0) for rig in range(phone_count)] + [(phone_count, cam) for cam in range(3)] + [(phone_count + 1, cam) for cam in range(2)]
+        for rig, cam in slots:
+            assert f"- {schema.video_path(rig, cam)}/**" in scene_contents
+    assert "/world/skeleton/**" in camera_contents
+    assert "/world/pred/soma_x/mesh/**" in camera_contents
+    assert "/world/pred/soma_x/mesh/**" in scene_contents
+    assert "/world/gt/**" not in scene_contents
+
+
+def test_table_fields_keep_the_capture_and_quality_summary_compact() -> None:
+    fields = SelfcapConfig().setup().table_fields()
+    assert [(field.column, field.name) for field in fields.cards] == [
+        ("property:calib:session", "Capture / session"),
+        ("property:calib:exo_cameras", "Phones"),
+        ("property:calib:calib_exo_refined", "Refined"),
+        ("property:soma_quality:status", "SOMA quality"),
+    ]
+    assert len(fields.table) == 8
+    assert {field.column for field in fields.cards} <= {field.column for field in fields.table}
+    assert {field.name for field in fields.table} >= {"OAK posed", "OAK rotation", "Frames", "Session UUID"}
