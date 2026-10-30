@@ -174,8 +174,16 @@ def load_fit(directory: Path, calibration: Calibration, data: Observations, with
     )
 
 
-def evaluate(name: str, data: Observations, result: FitResult, upper_body_only: bool = False) -> Metrics:
-    dataset = CatalogClient(CATALOG).get_dataset(DATASET)
+def evaluate(
+    name: str,
+    data: Observations,
+    result: FitResult,
+    upper_body_only: bool = False,
+    catalog_url: str = CATALOG,
+    dataset_name: str = DATASET,
+    segment: str = SEGMENT,
+) -> Metrics:
+    dataset = CatalogClient(catalog_url).get_dataset(dataset_name)
     points = mapped(result, data)
     if upper_body_only:
         points[:, 13:91] = np.nan
@@ -183,14 +191,14 @@ def evaluate(name: str, data: Observations, result: FitResult, upper_body_only: 
     # Both detectors see exactly the same predicted frames; missing detections stay absent.
     camera = None
     for detector in ("rtmw", "sapiens2"):
-        phones, camera = read_views(dataset, SEGMENT, data.times, detector)
+        phones, camera = read_views(dataset, segment, data.times, detector)
         for phone in phones:
             prediction = project(phone.camera, points.reshape(-1, 3)).reshape(-1, 133, 3)
             error = np.linalg.norm(prediction[..., :2] - phone.pixels, axis=-1)
             error[(phone.scores < 0.7) | (prediction[..., 2] <= 0)] = np.nan
             cross.append(CrossView(detector, phone.name, pixel_error(error)))
     assert camera is not None
-    view = dataset.filter_segments(SEGMENT)
+    view = dataset.filter_segments(segment)
     columns = view.schema().column_names()
     paths = [
         name.split(":", 1)[0]

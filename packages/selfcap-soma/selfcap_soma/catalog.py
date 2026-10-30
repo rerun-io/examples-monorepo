@@ -144,6 +144,8 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     )
     hand_table = raw.filter(raw[hands_column].is_valid())
     head_table = raw.filter(raw[quaternion].is_valid())
+    if len(hand_table) < 2 or len(head_table) < 2:
+        raise ValueError(f"{dataset}/{segment}: need at least two Quest hand and head samples")
     ht = seconds(head_table["capture_time"])
     hp = np.asarray(head_table[translation].to_pylist(), dtype=np.float64).reshape(-1, 3)
     hq = np.asarray(head_table[quaternion].to_pylist(), dtype=np.float64).reshape(-1, 4)

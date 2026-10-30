@@ -26,7 +26,15 @@ class Config:
     """Per-phone image evidence used to classify observed versus inferred joints."""
     source: Path = Path("/tmp/soma-fit/full-segment/fit.rrd")
     """Fitted geometry recording; no input videos are copied."""
-    reference: Path = Path("/tmp/selfcap-dev/c4/out/keypoints/selfcap__2025-12-03__d31bf1da__ep001.rrd")
+    catalog_url: str = "rerun+http://dgx-spark:51235"
+    """Catalog to read, without changing any source layer."""
+    dataset: str = "selfcap-post-dev"
+    """Dataset containing this segment's inputs and calibrated cameras."""
+    segment: str = "selfcap__2025-12-03__d31bf1da__ep001"
+    """Recording/segment ID used by the SelfCap converter."""
+    application_id: str = "dataforge"
+    """Application ID written by the SelfCap converter."""
+    reference: Path | None = None
     """Original layer defining the application and recording IDs."""
     output: Path = Path("/tmp/soma-fit/layer/selfcap__2025-12-03__d31bf1da__ep001.rrd")
     """Local layer file; registration is a separate explicit action."""
@@ -103,10 +111,13 @@ def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader) -> None:
 
 def main(config: Config) -> None:
     source = RrdReader(config.source)
-    identity = RrdReader(config.reference).recordings()[0]
-    segment = "selfcap__2025-12-03__d31bf1da__ep001"
-    if identity.recording_id != segment:
-        raise ValueError("reference recording must be the requested SelfCap segment")
+    segment = config.segment
+    application_id = config.application_id
+    if config.reference is not None:
+        identity = RrdReader(config.reference).recordings()[0]
+        if identity.recording_id != segment:
+            raise ValueError("reference recording must be the requested SelfCap segment")
+        application_id = identity.application_id
     rows = []
     for chunk in source.stream().filter(content="/world/fit/joints").to_chunks():
         table = chunk.to_record_batch()
@@ -176,7 +187,7 @@ def main(config: Config) -> None:
         points = np.concatenate([row[1] for row in landmark_rows])[landmark_order]
     if config.upper_body_only:
         points[:, 13:91] = np.nan
-    dataset = CatalogClient("rerun+http://dgx-spark:51235").get_dataset("selfcap-post-dev")
+    dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     phones, rgb = read_views(dataset, segment, times, config.exo_source)
     rgb_evidence = np.full((len(times), 133, 2), np.nan)
     for track in read_egohand_rgb(dataset, segment, times):
@@ -205,7 +216,7 @@ def main(config: Config) -> None:
             )
         )
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    recording = rr.RecordingStream(identity.application_id, recording_id=identity.recording_id)
+    recording = rr.RecordingStream(application_id, recording_id=segment)
     recording.save(config.output)
     if config.upper_body_only:
         static = source.stream().filter(content="/parameters/visible_joints").to_chunks()
