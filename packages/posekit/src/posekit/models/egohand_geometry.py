@@ -1,12 +1,11 @@
-"""Calibrated EgoHand crops and explicit anatomical hand correspondences."""
+"""Calibrated OAK camera and explicit anatomical hand correspondences."""
 
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 import numpy as np
 from egohand_inference.camera.camera_models import CameraModel, load_camera_calibration
-from egohand_inference.camera.perspective_crop import perspective_crop
-from jaxtyping import Float32, Float64, UInt8
+from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 HandSide: TypeAlias = Literal["left", "right"]
@@ -32,29 +31,6 @@ def coco_hand_indices(side: HandSide) -> tuple[int, ...]:
 def soma_to_hand21(joints: Float32[ndarray, "25 3"]) -> Float32[ndarray, "21 3"]:
     """Select MediaPipe/COCO and catalog Quest-21 joints from SOMA-25."""
     return joints[np.asarray(SOMA_HAND21)]
-
-
-def soma_to_openxr25(joints: Float32[ndarray, "25 3"]) -> Float32[ndarray, "25 3"]:
-    """Return OpenXR wrist through little tip (indices 1..25, no palm).
-
-    SOMA has no OpenXR palm joint. Do not synthesize one or call this a full
-    OpenXR-26 prediction. The retained joints have identical anatomical order.
-    """
-    return joints.copy()
-
-
-@dataclass(frozen=True, slots=True)
-class PerspectiveHandCrop:
-    """Virtual pinhole crop with its rotation back to the source camera."""
-
-    rgb: Float32[ndarray, "h w 3"]
-    """RGB crop in [0, 1]."""
-    intrinsics: Float64[ndarray, "3 3"]
-    """Virtual camera intrinsics in crop pixels."""
-    bbox: Float64[ndarray, "3"]
-    """Virtual crop center and side in pixels."""
-    source_R_crop: Float64[ndarray, "3 3"]
-    """Rotation taking crop-camera vectors to source-camera vectors."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +70,3 @@ class OAKCamera:
     def unproject(self, pixels: Float64[ndarray, "n 2"]) -> Float64[ndarray, "n 3"]:
         """Recover unit camera-space rays, rejecting non-invertible pixels."""
         return self.model.unproject(pixels)
-
-    def crop(self, rgb: UInt8[ndarray, "h w 3"], bbox: Float64[ndarray, "3"], side: int) -> PerspectiveHandCrop:
-        """Create a perspective RGB crop from a source-pixel center/side box."""
-        result: tuple[ndarray, ndarray, ndarray, ndarray] = perspective_crop(np.ascontiguousarray(rgb[:, :, ::-1]), bbox, self.model, side)
-        return PerspectiveHandCrop(*result)
