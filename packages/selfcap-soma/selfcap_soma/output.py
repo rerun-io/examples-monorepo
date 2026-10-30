@@ -127,7 +127,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     (output / "report.json").write_text(to_json(report))
     recording = rr.RecordingStream("selfcap-soma-prototype")
     recording.save(output / "fit.rrd")
-    quality = assess_quality(mapped.astype(np.float64), data.exo, data.hands)
+    quality = assess_quality(mapped.astype(np.float64), data.exo, data.hands, result.scale, data.confidence)
     (output / "quality.json").write_text(to_json(quality))
     log_quality(recording, quality)
     recording.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)

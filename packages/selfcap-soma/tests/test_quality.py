@@ -11,7 +11,8 @@ from selfcap_soma.quality import SomaQuality, assess_quality, log_quality
 
 
 def test_quality_pass_and_explicit_thresholds() -> None:
-    points = np.zeros((2, 133, 3), dtype=np.float64)
+    points = np.zeros((3, 133, 3), dtype=np.float64)
+    points[:, 4, 0] = 0.15
     quality = assess_quality(points, points, points)
     assert quality.status == "pass"
     assert quality.body_median_mm == 0.0
@@ -22,9 +23,10 @@ def test_quality_pass_and_explicit_thresholds() -> None:
 
 
 def test_quality_flags_bad_ears_and_missing_hands() -> None:
-    points = np.zeros((2, 133, 3), dtype=np.float64)
+    points = np.zeros((3, 133, 3), dtype=np.float64)
+    points[:, 4, 0] = 0.15
     source = points.copy()
-    source[:, 3:5, 0] = 0.031
+    source[:, 3:5, 0] += 0.031
     hands = np.full_like(points, np.nan)
     quality = assess_quality(points, source, hands)
     assert quality.status == "flag"
@@ -33,7 +35,8 @@ def test_quality_flags_bad_ears_and_missing_hands() -> None:
 
 
 def test_quality_uses_upper_body_and_jointly_finite_points() -> None:
-    points = np.zeros((2, 133, 3), dtype=np.float64)
+    points = np.zeros((3, 133, 3), dtype=np.float64)
+    points[:, 4, 0] = 0.15
     source = points.copy()
     source[:, 13:23] = 100.0
     source[0, 5] = np.nan
@@ -46,7 +49,8 @@ def test_quality_uses_upper_body_and_jointly_finite_points() -> None:
 
 
 def test_quality_property_roundtrip(tmp_path: Path) -> None:
-    points = np.zeros((2, 133, 3), dtype=np.float64)
+    points = np.zeros((3, 133, 3), dtype=np.float64)
+    points[:, 4, 0] = 0.15
     quality = assess_quality(points, points, points)
     path = tmp_path / "quality.rrd"
     recording = rr.RecordingStream("quality-test")
@@ -60,3 +64,12 @@ def test_quality_property_roundtrip(tmp_path: Path) -> None:
     payload = batch.column("record_json")[0].as_py()[0]
     assert from_json(SomaQuality, payload) == quality
     assert batch.column("status")[0].as_py() == ["pass"]
+
+
+def test_quality_reports_active_scale_bound_and_ear_fallback() -> None:
+    points = np.zeros((3, 133, 3), dtype=np.float64)
+    quality = assess_quality(points, points, points, scale=1.25)
+    assert quality.scale_bound_active
+    assert quality.head_torso_rotation_fallback
+    assert quality.ear_span_rejected_frames == 3
+    assert quality.status == "flag"

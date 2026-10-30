@@ -10,6 +10,8 @@ from numpy import ndarray
 from serde import serde
 from serde.json import to_json
 
+from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, plausible_ears
+
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
@@ -25,10 +27,22 @@ class SomaQuality:
     ears_threshold_mm: float = 30.0
     hands_threshold_mm: float = 15.0
     definition: str = "v1: finite-point training residuals; body COCO 5-12, shoulders 5-6, ears 3-4 vs exo; hands 91-132 vs Quest"
+    ear_span_surviving_frames: int = 0
+    ear_span_rejected_frames: int = 0
+    head_torso_rotation_fallback: bool = False
+    scale_bound_active: bool = False
+    scale_min: float = SCALE_MIN
+    scale_max: float = SCALE_MAX
+    ear_span_min_mm: float = 110.0
+    ear_span_max_mm: float = 200.0
 
 
 def assess_quality(
-    fitted: Float64[ndarray, "n 133 3"], exo: Float64[ndarray, "n 133 3"], quest: Float64[ndarray, "n 133 3"]
+    fitted: Float64[ndarray, "n 133 3"],
+    exo: Float64[ndarray, "n 133 3"],
+    quest: Float64[ndarray, "n 133 3"],
+    scale: float | None = None,
+    confidence: Float64[ndarray, "n 133"] | None = None,
 ) -> SomaQuality:
     """Flag missing metrics or medians above fixed screening thresholds."""
     medians: list[float | None] = []
@@ -47,7 +61,21 @@ def assess_quality(
             reasons.append(f"{name}_missing")
         elif median > threshold:
             reasons.append(f"{name}_above_threshold")
-    return SomaQuality(medians[0], medians[1], medians[2], medians[3], "flag" if reasons else "pass", tuple(reasons))
+    pairs = plausible_ears(exo)
+    if confidence is not None:
+        pairs &= (confidence[:, 3:5] > 0.0).any(1)
+    surviving = int(pairs.sum())
+    fallback = surviving < 3
+    bound = scale is not None and (scale <= SCALE_MIN + 1e-6 or scale >= SCALE_MAX - 1e-6)
+    if fallback:
+        reasons.append("insufficient_plausible_ears")
+    if bound:
+        reasons.append("scale_bound_active")
+    return SomaQuality(
+        medians[0], medians[1], medians[2], medians[3], "flag" if reasons else "pass", tuple(reasons),
+        ear_span_surviving_frames=surviving, ear_span_rejected_frames=len(exo) - surviving,
+        head_torso_rotation_fallback=fallback, scale_bound_active=bound,
+    )
 
 
 def log_quality(recording: rr.RecordingStream, quality: SomaQuality) -> None:
@@ -60,6 +88,14 @@ def log_quality(recording: rr.RecordingStream, quality: SomaQuality) -> None:
         "shoulders_threshold_mm": quality.shoulders_threshold_mm,
         "ears_threshold_mm": quality.ears_threshold_mm,
         "hands_threshold_mm": quality.hands_threshold_mm,
+        "ear_span_surviving_frames": quality.ear_span_surviving_frames,
+        "ear_span_rejected_frames": quality.ear_span_rejected_frames,
+        "head_torso_rotation_fallback": quality.head_torso_rotation_fallback,
+        "scale_bound_active": quality.scale_bound_active,
+        "scale_min": quality.scale_min,
+        "scale_max": quality.scale_max,
+        "ear_span_min_mm": quality.ear_span_min_mm,
+        "ear_span_max_mm": quality.ear_span_max_mm,
     }
     for name in ("body", "shoulders", "ears", "hands"):
         value = getattr(quality, f"{name}_median_mm")
