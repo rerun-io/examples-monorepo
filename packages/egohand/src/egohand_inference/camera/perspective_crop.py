@@ -37,6 +37,15 @@ def perspective_crop(
         side_length]`` in crop pixels, and the rotation from crop-camera to
         source-camera coordinates, in that order.
     """
+    K_virtual, bbox_virtual, crop_to_source_rotation = perspective_crop_geometry(bbox, camera, crop_side_pixels)
+    remap_pixels = create_perspective_remap(camera, crop_to_source_rotation, K_virtual[0, 0], crop_side_pixels)
+    crop_bgr = cv2.remap(image_bgr, remap_pixels, None, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    return crop_rgb, K_virtual, bbox_virtual, crop_to_source_rotation
+
+
+def perspective_crop_geometry(bbox, camera, crop_side_pixels):
+    """Compute the virtual camera without reading or resampling an image."""
     bbox_center_x, bbox_center_y, bbox_side = np.asarray(bbox, dtype=np.float64)
 
     # The curved perimeter, including each corner, determines the full angular
@@ -92,21 +101,6 @@ def perspective_crop(
     max_normalized_extent = np.max(np.abs(normalized_perimeter_coords))
     focal_length = (crop_side_pixels / 2.0) / max_normalized_extent
 
-    # Each crop pixel is a ray. Rotated into source camera coordinates and projected, it
-    # gives the source pixel that crop pixel samples.
-    remap_pixels = create_perspective_remap(
-        camera, crop_to_source_rotation, focal_length, crop_side_pixels
-    )
-    crop_bgr = cv2.remap(
-        image_bgr,
-        remap_pixels,
-        None,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    )
-    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-    crop_rgb = crop_rgb.astype(np.float32) / 255.0
     K_virtual = np.array(
         [
             [focal_length, 0, crop_center],
@@ -119,4 +113,4 @@ def perspective_crop(
         [crop_center, crop_center, crop_side_pixels],
         dtype=np.float64,
     )
-    return crop_rgb, K_virtual, bbox_virtual, crop_to_source_rotation
+    return K_virtual, bbox_virtual, crop_to_source_rotation

@@ -19,7 +19,7 @@ compatibility; this package does not expose a training command.
 
 Changes from source: remove unused global chumpy shims; remove file exporters
 and full-body wrapper methods; rename internal imports; support OpenCV 4 and 5
-iterative point undistortion; add opt-in synchronized SOMA timing. The model
+iterative point undistortion; add CUDA-event SOMA timing, GPU perspective sampling and prepared-crop input. The model
 math and checkpoint configuration remain unchanged. The posekit adapter owns
 new typed code; the vendored dependency remains an explicit source boundary.
 
@@ -79,3 +79,41 @@ The optional dev lane carries a four-entry pyrefly baseline for existing
 Transformers `.to()` decorator-stub errors in unchanged posekit models. The
 EgoHand adapter itself has no baseline entries. AnyIO <4.15 respects the shared
 typing_extensions hold; no dependency constraints in other features were changed.
+
+## Batched accelerated inference
+
+The segment runner uses cached TensorRT engines for the released RT-DETR
+ONNX detector and the DINOv3 backbone. DINO is exported with bf16 autocast;
+RT-DETR keeps its fp32 graph and permits TF32 tactics. Both have dynamic batch
+profiles. Pillow resizes each detector batch in parallel without changing its
+pixels. Detection runs in groups of eight frames, followed by upstream
+identity assignment over the ordered sequence. Reconstruction runs sixteen
+frames (up to 32 hand crops) per call. `--batch-frames` controls this grouping.
+
+The public configuration also retains the eager reference path. Select GPU
+crops with `EgoHandConfig(gpu_crops=True, batch_size=32)` and supply
+`backbone_onnx=Path(...)` to use TensorRT. If that artifact is absent, setup
+exports it from the supplied checkpoint. Use a separate artifact path for
+each checkpoint. `backbone_backend` controls the engine profile and cache.
+`EgoHandDetectorConfig.backend` selects ONNX Runtime or TensorRT independently.
+
+GPU crops retain the full 14-coefficient OAK lens model, including its physical
+projection domain. CPU work computes the small box-perimeter inversion; Warp
+projects the raster on CUDA, then Torch fuses uint8 sampling, mirroring and
+normalization. Sampling follows the environment's OpenCV 5 float-coordinate
+interpolation. The CPU crop path remains available for reference comparisons.
+Run through Pixi so Triton can locate the environment's CUDA assembler. The
+dev environment keeps the same sampling math eager so all local type checks
+remain active; production fuses the sampling and normalization kernels.
+
+SOMA still reconstructs **all mesh vertices**, joints, local rotations,
+identity coefficients, global scale, per-finger scales and camera translation.
+Batching reduces its call overhead. CUDA events measure SOMA without a
+synchronization around each call. Reported SOMA time is nested in forward and
+post-forward time; do not add it again. The remaining CPU output conversion
+preserves the upstream camera and mirroring conventions.
+
+Warm throughput excludes checkpoint loading, ONNX export, engine build and
+first-call Torch/Warp compilation. Keep those startup costs separate. Whole
+segment throughput includes RGB decoding, detection and complete mesh-producing
+prediction, but excludes Rerun serialization and catalog transfer.

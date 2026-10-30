@@ -230,6 +230,7 @@ class EgoHandPredictor:
         output_paths_per_hand=None,
         frame_times: dict[str, float] | None = None,
         defer_smoothing: bool = False,
+        prepared_crops: list | None = None,
         source_cameras_per_image: dict[str, CameraModel] | None = None,
     ) -> dict[str, dict[str, dict]]:
         """Prepare hand crops from image lists and produce SOMA predictions.
@@ -386,7 +387,10 @@ class EgoHandPredictor:
 
         perf_reporter = getattr(self, "perf_reporter", None)
         prepared_inputs_by_image = {}
-        if crop_jobs:
+        if prepared_crops is not None:
+            for data in prepared_crops:
+                prepared_inputs_by_image.setdefault(data["image_id"], {})[data["real_hand_side"]] = data
+        elif crop_jobs:
             crop_workers = min(8, (os.cpu_count() or 1))
             preprocessing_start = time.perf_counter()
             with ThreadPoolExecutor(max_workers=crop_workers) as pool:

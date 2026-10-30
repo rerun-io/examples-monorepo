@@ -24,6 +24,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
+from trtkit import TensorRtBackendConfig
 
 from posekit.apis.egohand_comparison import ErrorSummary, quest_pixels, summarize
 from posekit.models.egohand import (
@@ -58,6 +59,8 @@ class Config:
     """Infer every Nth decoded frame; 1 uses all frames."""
     compare_sapiens: bool = True
     """Compare Sapiens2 0.4B on every selected frame; needs its cached weights."""
+    batch_frames: int = 16
+    """Frames per inference call; full meshes and parameters are always retained."""
     rr_config: RerunTyroConfig = field(default_factory=lambda: RerunTyroConfig(application_id="egohand-selfcap", recording_id=SEGMENT, headless=True))
     """Shared viewer/save settings; pass --rr-config.save for the recording."""
 
@@ -152,7 +155,7 @@ def run_sapiens(frames: UInt8[Tensor, "n h w 3"]) -> tuple[Float32[ndarray, "n 2
 
 def main(config: Config) -> None:
     """Resolve hand identity, reconstruct and score one matched frame window."""
-    if not 0.0 <= config.start_s <= config.end_s <= 6.2 or config.stride < 1:
+    if not 0.0 <= config.start_s <= config.end_s <= 6.2 or config.stride < 1 or config.batch_frames < 1:
         raise ValueError("This experiment is restricted to 0..6.2 seconds with positive stride")
     config.output.mkdir(parents=True, exist_ok=True)
     table: pa.Table = load_window(config.output / "window.parquet")
@@ -188,17 +191,45 @@ def main(config: Config) -> None:
     if config.compare_sapiens:
         sapiens, sapiens_ms = run_sapiens(frames)
     weights: Path = config.output / "weights"
-    detector: EgoHandDetector = EgoHandDetectorConfig(weights / "detector/hand_detector.onnx").setup()
+    detector: EgoHandDetector = EgoHandDetectorConfig(
+        weights / "detector/hand_detector.onnx",
+        backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=config.output / "engines"),
+    ).setup()
+    detector(frames[:8])
     torch.cuda.synchronize()
     started: float = time.perf_counter()
     detections: HandDetections = detector(frames)
     torch.cuda.synchronize()
     detector_ms: float = (time.perf_counter() - started) * 1000.0 / len(frames)
-    predictor: EgoHandPredictor = EgoHandConfig(weights / "egohand/egohand_s060000.ckpt", weights / "soma").setup()
-    torch.cuda.reset_peak_memory_stats()
+    predictor: EgoHandPredictor = EgoHandConfig(
+        weights / "egohand/egohand_s060000.ckpt",
+        weights / "soma",
+        batch_size=32,
+        gpu_crops=True,
+        backbone_onnx=config.output / "dinov3-bf16.onnx",
+        backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=config.output / "engines"),
+    ).setup()
     ego: Float32[ndarray, "n 2 21 2"] = np.full_like(quest, np.nan)
     sharpness: Float64[ndarray, "n 2"] = np.full((len(frames), 2), np.nan)
     predictor_ms: list[float] = []
+    results_by_frame: list[tuple[HandReconstruction, list[int]]] = []
+    for start in range(0, len(frames), config.batch_frames):
+        stop: int = min(start + config.batch_frames, len(frames))
+        selected = torch.where((detections.boxes.frame_indices >= start) & (detections.boxes.frame_indices < stop))[0].tolist()
+        batch_detections = HandDetections(
+            BoxDetections(detections.boxes.xyxy[selected], detections.boxes.scores[selected], detections.boxes.frame_indices[selected] - start),
+            tuple(detections.sides[i] for i in selected),
+        )
+        if start == 0:
+            predictor(frames[start:stop], batch_detections, camera)
+            predictor.stage_ms.clear()
+            torch.cuda.reset_peak_memory_stats()
+        started = time.perf_counter()
+        batch_result = predictor(frames[start:stop], batch_detections, camera)
+        torch.cuda.synchronize()
+        predictor_ms.extend([(time.perf_counter() - started) * 1000.0 / (stop - start)] * (stop - start))
+        for index in range(stop - start):
+            results_by_frame.append((batch_result, torch.where(batch_result.keypoints.frame_indices == index)[0].tolist()))
     hand_count: int = 0
     rr.send_blueprint(
         rrb.Blueprint(
@@ -241,17 +272,15 @@ def main(config: Config) -> None:
             ),
             tuple(detections.sides[i] for i in selected),
         )
-        started = time.perf_counter()
-        result: HandReconstruction = predictor(frames[index : index + 1], local, camera)
-        torch.cuda.synchronize()
-        predictor_ms.append((time.perf_counter() - started) * 1000.0)
+        result, hand_indices = results_by_frame[index]
         rr.set_time("video_time", duration=float(frame_times[index]))
         rr.log("/image/rgb", rr.Image(frames[index].cpu().numpy()).compress(jpeg_quality=90))
         rr.log("/image/egohand", rr.Clear(recursive=True))
         rr.log("/camera_space/egohand", rr.Clear(recursive=True))
         rr.log("/image/egohand", annotations)
         rr.log("/camera_space/egohand", annotations)
-        for hand, side in enumerate(result.sides):
+        for hand in hand_indices:
+            side = result.sides[hand]
             side_index: int = 0 if side == "left" else 1
             color: tuple[int, int, int] = (65, 210, 255) if side == "left" else (255, 165, 65)
             ego[index, side_index] = result.keypoints.xy[hand, list(SOMA_HAND21)].cpu().numpy()
@@ -294,8 +323,8 @@ def main(config: Config) -> None:
             if crop.size:
                 gray = cv2.cvtColor(cv2.resize(crop, (96, 96)), cv2.COLOR_RGB2GRAY)
                 sharpness[index, side_index] = cv2.Laplacian(gray, cv2.CV_64F).var()
-        hand_count += len(result.sides)
-        print(f"{frame_times[index]:.3f}s: {len(result.sides)} hands; inference {predictor_ms[-1]:.1f} ms", flush=True)
+        hand_count += len(hand_indices)
+        print(f"{frame_times[index]:.3f}s: {len(hand_indices)} hands; inference {predictor_ms[index]:.1f} ms", flush=True)
     per_joint: dict[str, ErrorSummary] = {}
     for side, name in enumerate(("left", "right")):
         for joint, joint_name in enumerate(HAND_21.keypoint_names):

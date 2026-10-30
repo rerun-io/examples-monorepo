@@ -852,3 +852,33 @@ def create_perspective_remap(
         pixels = source_pixels.astype(np.float32)
     pixels[~np.isfinite(pixels)] = -1.0
     return pixels
+
+
+def create_perspective_remap_gpu(camera, crop_to_source_rotation, focal_length, side, pixels):
+    """Fill a contiguous CUDA float32 (side*side, 2) torch tensor with source pixels.
+
+    Uses the identical float64 projection and physical-lens validity checks as
+    the reference CPU crop. Lens coefficients stay cached on the device.
+    """
+    if not isinstance(camera, _PerspectiveCamera):
+        raise ValueError("GPU perspective crops require a rational or pinhole camera")
+    device = str(pixels.device)
+    if not hasattr(camera, "_gpu_projection_parameters"):
+        camera._gpu_projection_parameters = {}
+    if device not in camera._gpu_projection_parameters:
+        K, d = camera.K, camera.distortion_coefficients
+        camera._gpu_projection_parameters[device] = (
+            wp.vec4d(K[0, 0], K[1, 1], K[0, 2], K[1, 2]),
+            wp.array(d, dtype=wp.float64, device=device),
+            wp.vec4d(*np.r_[np.sin(d[-2:]), np.cos(d[-2:])]),
+            wp.float64(camera._max_radius_squared),
+        )
+    wp.launch(
+        _perspective_remap,
+        dim=side * side,
+        inputs=[side, wp.float64(focal_length), wp.mat33d(crop_to_source_rotation), *camera._gpu_projection_parameters[device]],
+        outputs=[wp.from_torch(pixels, dtype=wp.float32)],
+        device=device,
+        stream=wp.stream_from_torch(),
+        record_tape=False,
+    )

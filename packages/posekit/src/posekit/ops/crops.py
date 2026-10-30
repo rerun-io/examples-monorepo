@@ -15,7 +15,7 @@ from functools import lru_cache
 from typing import Literal
 
 import torch
-from jaxtyping import Float, Int, UInt8
+from jaxtyping import Bool, Float, Float32, Int, Int64, UInt8
 from torch import Tensor
 
 from posekit.predictions import validate_frames_rgb
@@ -130,7 +130,9 @@ def crop_frames(
     return CropBatch(crops.to(dtype=dtype).contiguous(), frame_indices, bboxes, centers, scales, spec)
 
 
-def _crop_grid(centers: Float[Tensor, "n 2"], scales: Float[Tensor, "n 2"], spec: CropSpec, height: int, width: int) -> Float[Tensor, "n crop_h crop_w 2"]:
+def _crop_grid(
+    centers: Float[Tensor, "n 2"], scales: Float[Tensor, "n 2"], spec: CropSpec, height: int, width: int
+) -> Float[Tensor, "n crop_h crop_w 2"]:
     """Normalized ``grid_sample`` coordinates (``align_corners=True``) of every crop pixel in its source frame."""
     out_w: int = int(spec.input_size[0])
     out_h: int = int(spec.input_size[1])
@@ -142,6 +144,34 @@ def _crop_grid(centers: Float[Tensor, "n 2"], scales: Float[Tensor, "n 2"], spec
         src_x = xx[None] * scales[:, 0, None, None] / float(out_w - 1) + centers[:, 0, None, None] - 0.5 * scales[:, 0, None, None]
         src_y = yy[None] * scales[:, 1, None, None] / float(out_h - 1) + centers[:, 1, None, None] - 0.5 * scales[:, 1, None, None]
     return torch.stack([src_x / float(width - 1) * 2.0 - 1.0, src_y / float(height - 1) * 2.0 - 1.0], dim=-1).contiguous()
+
+
+def remap_frames(
+    frames_rgb: UInt8[Tensor, "b h w 3"], frame_indices: Int[Tensor, "n"], source_pixels: Float32[Tensor, "n crop_h crop_w 2"]
+) -> Float32[Tensor, "n 3 crop_h crop_w"]:
+    """Sample source-pixel maps using OpenCV 5 INTER_LINEAR uint8 semantics.
+
+    Reads four uint8 pixels per output with a constant black border. OpenCV
+    uses floating point coordinates and rounds the uint8 result; preserving
+    that rounding matters when replacing a trained model's CPU preprocessing.
+    A horizontally reversed map produces a mirrored crop.
+    """
+    height: int = int(frames_rgb.shape[1])
+    width: int = int(frames_rgb.shape[2])
+    low: Float32[Tensor, "n crop_h crop_w 2"] = source_pixels.floor()
+    fraction: Float32[Tensor, "n crop_h crop_w 2"] = source_pixels - low
+    frame: Int[Tensor, "n 1 1"] = frame_indices[:, None, None]
+    output: Float32[Tensor, "n crop_h crop_w 3"] = torch.zeros((*source_pixels.shape[:3], 3), device=frames_rgb.device, dtype=torch.float32)
+    for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        x: Int64[Tensor, "n crop_h crop_w"] = low[..., 0].long() + dx
+        y: Int64[Tensor, "n crop_h crop_w"] = low[..., 1].long() + dy
+        valid: Bool[Tensor, "n crop_h crop_w"] = (x >= 0) & (x < width) & (y >= 0) & (y < height)
+        weight: Float32[Tensor, "n crop_h crop_w"] = (fraction[..., 0] if dx else 1.0 - fraction[..., 0]) * (
+            fraction[..., 1] if dy else 1.0 - fraction[..., 1]
+        )
+        values: Float32[Tensor, "n crop_h crop_w 3"] = frames_rgb[frame, y.clamp(0, height - 1), x.clamp(0, width - 1)].float()
+        output += values * (weight * valid)[..., None]
+    return (output + 0.5).floor().permute(0, 3, 1, 2)
 
 
 def _sample_uint8_bilinear(

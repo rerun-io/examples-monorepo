@@ -8,8 +8,6 @@ excluded from checkpoints via NonPersistentModuleWrapper.
 """
 
 import os
-import time
-
 import torch
 import torch.nn as nn
 
@@ -53,7 +51,7 @@ class SomaHandWrapper(nn.Module):
         if data_root is None:
             data_root = _resolve_hand_data_root()
 
-        self.profile_ms = None
+        self.profile_events = None
         self.identity_model_type = identity_model_type
         self._hands = {}
         for hand_type in ("left", "right"):
@@ -123,9 +121,10 @@ class SomaHandWrapper(nn.Module):
             dict with 'vertices' (B, Vh, 3) and 'joints' (B, 25, 3) in meters
         """
         hand = self._hands[hand_type]
-        if self.profile_ms is not None:
-            torch.cuda.synchronize()
-            started = time.perf_counter()
+        if self.profile_events is not None:
+            started = torch.cuda.Event(enable_timing=True)
+            finished = torch.cuda.Event(enable_timing=True)
+            started.record()
         result = hand(
             poses.float(),
             identity_coeffs.float(),
@@ -134,7 +133,7 @@ class SomaHandWrapper(nn.Module):
             global_scale=global_scale,
             scale_params=scale_params,
         )
-        if self.profile_ms is not None:
-            torch.cuda.synchronize()
-            self.profile_ms.append((time.perf_counter() - started) * 1000.0)
+        if self.profile_events is not None:
+            finished.record()
+            self.profile_events.append((started, finished))
         return result
