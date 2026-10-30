@@ -20,7 +20,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Bool, Float32, Float64, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8, UInt16
 from numpy import ndarray
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133_batch
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
@@ -208,12 +208,15 @@ def _send_keypoint_rows(
 
 def log_projections(
     recording: rr.RecordingStream,
-    pixels_by_camera: Iterable[tuple[tuple[int, int], Float32[ndarray, "t 133 2"]]],
+    pixels_by_camera: Iterable[tuple[tuple[int, int], Float32[ndarray, "t j 2"]]],
     *,
     times_ns: Int64[ndarray, "t"],
     frame_indices: Int64[ndarray, "t"] | None,
-    confidence: Float32[ndarray, "t 133"],
+    confidence: Float32[ndarray, "t 133"] | None,
     camera_model: str,
+    entity_name: str = "coco133_uv_projected",
+    class_ids: UInt16[ndarray, "j"] | None = None,
+    keypoint_ids: UInt16[ndarray, "j"] | None = None,
     calibration_source: str | None = None,
     describe: bool = True,
     color_range: tuple[float, float] = (0.0, 1.0),
@@ -223,14 +226,39 @@ def log_projections(
     Each dataset projects through its own lens model; this writes the result the same way for all.
     The property records ``derived_from``, ``camera_model`` and, when given, ``calibration_source``.
     ``color_range`` rescales display colours only; stored confidence stays raw.
+    ``entity_name`` selects a sibling overlay; with no confidence, plain points inherit their annotation colours.
     ``pixels_by_camera`` is consumed one camera at a time, so a generator that projects each camera
     as it is asked for keeps a single camera's pixels in memory.
     """
-    recording.send_property(paths.PROJECTIONS_LAYER, rr.AnyValues(drop_untyped_nones=True, derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source))
+    if entity_name == "coco133_uv_projected":
+        recording.send_property(
+            paths.PROJECTIONS_LAYER,
+            rr.AnyValues(drop_untyped_nones=True, derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source),
+        )
     for (rig, cam), pixels in pixels_by_camera:
+        path: str = f"{schema.pinhole_path(rig, cam)}/{entity_name}"
+        if confidence is None:
+            rr.log(
+                path,
+                rr.Points2D.from_fields(
+                    class_ids=0 if class_ids is None else class_ids,
+                    keypoint_ids=np.arange(pixels.shape[1], dtype=np.uint16) if keypoint_ids is None else keypoint_ids,
+                    radii=3.0,
+                    show_labels=False,
+                ),
+                static=True,
+                recording=recording,
+            )
+            rr.send_columns(
+                path,
+                indexes=[time_column(times_ns), *([] if frame_indices is None else [frame_index_column(frame_indices)])],
+                columns=rr.Points2D.columns(positions=pixels.reshape(-1, 2)).partition([pixels.shape[1]] * len(pixels)),
+                recording=recording,
+            )
+            continue
         log_keypoints2d(
             recording,
-            schema.coco133_uv_projected_path(rig, cam),
+            path,
             times_ns=times_ns,
             frame_indices=frame_indices,
             positions=pixels,
