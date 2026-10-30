@@ -18,7 +18,6 @@ from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
 from simplecv.catalog_video import CatalogVideo
 from simplecv.catalog_video_codec import wrap_mp4
-from simplecv.temporal import nearest_indices as sample_nearest_indices
 from torch import Tensor
 from torchcodec import FrameBatch
 from torchcodec.decoders import VideoDecoder
@@ -65,7 +64,9 @@ def nearest_indices(pts: Float64[ndarray, "f"], want: Float64[ndarray, "n"]) -> 
     """Nearest source sample; ties go left, including irregular presentation PTS."""
     if not len(pts) or not np.isfinite(want).all() or not np.all(np.diff(pts) > 0.0):
         raise ValueError("presentation times must be nonempty and strictly increasing")
-    return sample_nearest_indices(pts, want)
+    right: Int64[ndarray, "n"] = np.clip(np.searchsorted(pts, want), 0, len(pts) - 1)
+    left: Int64[ndarray, "n"] = np.maximum(right - 1, 0)
+    return np.where(abs(pts[left] - want) <= abs(pts[right] - want), left, right)
 
 
 @dataclass(frozen=True, slots=True)
