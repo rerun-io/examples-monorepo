@@ -17,7 +17,7 @@ import traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from batch_reporting import report, stage_paused, stage_result
-from infrastructure import is_infrastructure_error
+from infrastructure import is_gpu_fault, is_infrastructure_error
 from repeated_errors import repeated_stage_error, is_soma_input_limitation
 
 class InfrastructureError(RuntimeError):
@@ -232,6 +232,16 @@ def work(role,index):
                 if config().get('cleanup_after_success',True):cleanup_finished(seg,info)
         except Exception as error:
             detail=traceback.format_exc();elapsed=time.perf_counter()-started
+            if stage == 'soma' and is_gpu_fault(detail) and info.get('gpu_fault_retries', 0) >= 1:
+                info['gpu_fault_trace'] = detail
+                info.pop('failed_stage', None)
+                info.pop('retries', None)
+                with owned_claim(job, stage, name) as c:
+                    if c is None:continue
+                    c.execute("update jobs set state='soma_gpu_fault',owner=null,error=null,updated=?,info=? where segment=?", (time.time(), json.dumps(info), seg))
+                    c.execute('insert into events values(?,?,?,?,?,?)', (time.time(), seg, stage, elapsed, 'gpu_fault_parked', name))
+                notify(f'Repeated isolated SOMA GPU fault; parked {seg}: {str(error)[-1800:]}')
+                continue
             if isinstance(error, InfrastructureError) or is_infrastructure_error(detail):
                 info['infrastructure_stage']=stage
                 info['infrastructure_reason']=str(error)

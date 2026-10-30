@@ -42,3 +42,13 @@ It restores inputs only for accepted/rejected flips, then runs those through S2 
 SOMA with normal publication/readback/cleanup checks. Only after that barrier does
 the remaining batch100 SOMA refresh begin. A replay error leaves that barrier closed
 and notifies the operator. Original remote RRDs remain untouched.
+
+### Fatal CUDA context recovery
+
+Illegal-address errors and poisoned-MPS symptoms are infrastructure errors. They
+pause the affected stage without marking the session as bad data. After resetting
+MPS, retry affected sessions with fresh processes. A session already marked with
+`gpu_fault_retries >= 1` that faults again in SOMA is parked as `soma_gpu_fault`;
+it does not trip the shared stage failure latch. Use `CUDA_LAUNCH_BLOCKING=1` and a
+non-MPS CUDA context for the first retry so an asynchronous fault cannot poison
+other clients and the traceback identifies the failing operation.
