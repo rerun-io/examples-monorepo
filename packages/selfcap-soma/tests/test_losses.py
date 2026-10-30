@@ -18,3 +18,14 @@ def test_outlier_growth_is_linear_and_empty_source_is_zero():
     point = torch.tensor([[[0.04, 0.0, 0.0]]])
     torch.testing.assert_close(robust_points(point, target, torch.ones(1, 1), 0.01), torch.tensor(6.0))
     torch.testing.assert_close(robust_points(point, target, torch.zeros(1, 1), 0.01), torch.tensor(0.0))
+
+
+def test_body_lengths_include_widths_and_midpoint_torso():
+    from selfcap_soma.losses import body_lengths
+
+    body = torch.zeros(1, 12, 3)
+    body[0, 0] = torch.tensor([1.0, 3.0, 0.0])
+    body[0, 1] = torch.tensor([-1.0, 3.0, 0.0])
+    body[0, 6] = torch.tensor([0.5, 0.0, 0.0])
+    body[0, 7] = torch.tensor([-0.5, 0.0, 0.0])
+    torch.testing.assert_close(body_lengths(body)[0, :3], torch.tensor([2.0, 1.0, 3.0]))

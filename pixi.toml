@@ -1595,6 +1595,10 @@ cwd = "packages/selfcap-soma"
 cmd = "python tools/overlay.py"
 cwd = "packages/selfcap-soma"
 
+[feature.selfcap-soma.tasks.soma-shoulders]
+cmd = "python tools/shoulders.py"
+cwd = "packages/selfcap-soma"
+
 [feature.selfcap-curate]
 platforms = ["linux-64", "linux-aarch64"]
 

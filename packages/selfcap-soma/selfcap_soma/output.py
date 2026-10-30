@@ -39,7 +39,12 @@ class Report:
     exo_body: Residual
     exo_hands: Residual
     quest_hands: Residual
-    quest_left_eye: Residual
+    tracked_pose_to_anatomical_eye: Residual
+    attachment_position: Residual
+    ears: Residual
+    head_anchor: str
+    head_attachment_rotation: list[list[float]]
+    head_offset_m: list[float]
     head_rotation_median_deg: float
     head_rotation_p90_deg: float
     target_fit_vs_quest: Residual
@@ -55,12 +60,13 @@ def residual(a: Float64[ndarray, "... 3"], b: Float64[ndarray, "... 3"]) -> Resi
     return Residual(float(np.median(valid)) if valid.size else None, float(np.percentile(valid, 90)) if valid.size else None, int(valid.size))
 
 
-def save(output: Path, data: Observations, result: FitResult, target_s: float) -> Report:
+def save(output: Path, data: Observations, result: FitResult, target_s: float, mesh_stride: int = 1) -> Report:
     """Persist a local comparison recording and a strict JSON report."""
     output.mkdir(parents=True, exist_ok=True)
     mapped = np.full_like(data.exo, np.nan)
     for coco, name in coco_joint_names().items():
         mapped[:, coco] = result.joints[:, result.names.index(name)]
+    mapped[:, 3:5] = result.ear_landmarks
     frame = int(np.searchsorted(data.times, target_s, side="right") - 1)
     frame = max(0, min(frame, len(data.times) - 1))
     report = Report(
@@ -76,6 +82,17 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float) -
         residual(mapped[:, 91:], data.exo[:, 91:]),
         residual(mapped[:, 91:], data.hands[:, 91:]),
         residual(result.joints[:, result.names.index("LeftEye")].astype(np.float64), data.head_positions),
+        residual(
+            result.joints[:, result.names.index("Head" if result.head_anchor == "head" else "LeftEye")].astype(np.float64),
+            data.head_positions
+            + np.einsum(
+                "nij,j->ni", data.head_rotations @ result.head_attachment if result.head_anchor == "head" else data.head_rotations, result.head_offset
+            ),
+        ),
+        residual(result.ear_landmarks.astype(np.float64), data.exo[:, 3:5]),
+        result.head_anchor,
+        result.head_attachment.astype(float).tolist(),
+        result.head_offset.astype(float).tolist(),
         float(np.median(result.head_angle_deg)),
         float(np.percentile(result.head_angle_deg, 90)),
         residual(mapped[frame, 91:], data.hands[frame, 91:]),
@@ -83,8 +100,8 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float) -
         residual(mapped[frame, 91:], data.exo[frame, 91:]),
         (
             "Training residuals, not independent accuracy measurements.",
-            "Quest eye attachment inferred from neutral anatomy; no measured headset-to-skull calibration.",
-            "First 16 shared shape coefficients and global scale; no hand PCA or learned pose prior.",
+            "Headset attachment is estimated from this segment; ear landmarks are hand-selected low-LOD surface vertices.",
+            "Shared native identity, global scale and optional body bone ratios; no hand PCA or learned pose prior.",
             "No foot surface terms, contact model, image evidence, twist supervision or uncertainty estimate.",
             "Low-LOD mesh with procedural twists and pose correctives disabled.",
             "Temporal prior is timestamp-scaled velocity change in translation and axis-angle parameters.",
@@ -115,6 +132,10 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float) -
     recording.send_columns(
         "/world/fit/joints", indexes=index, columns=rr.Points3D.columns(positions=result.joints.reshape(-1, 3)).partition([77] * len(data.times))
     )
+    recording.log("/world/fit/ears", rr.Points3D.from_fields(colors=[0, 255, 255], radii=0.008), static=True)
+    recording.send_columns(
+        "/world/fit/ears", indexes=index, columns=rr.Points3D.columns(positions=result.ear_landmarks.reshape(-1, 3)).partition([2] * len(data.times))
+    )
     recording.send_columns(
         "/world/inputs/exo", indexes=index, columns=rr.Points3D.columns(positions=data.exo.reshape(-1, 3)).partition([133] * len(data.times))
     )
@@ -141,13 +162,20 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float) -
         recording.log("/parameters/poses", rr.Tensor(pose))
     recording.send_columns("/parameters/root", indexes=index, columns=rr.Points3D.columns(positions=result.translations))
     recording.log("/parameters/identity", rr.Tensor(result.identity), static=True)
+    recording.log("/parameters/head_attachment", rr.Tensor(result.head_attachment), static=True)
+    recording.log("/parameters/head_anchor", rr.TextDocument(result.head_anchor), static=True)
+    recording.log("/parameters/head_offset", rr.Tensor(result.head_offset), static=True)
+    recording.log("/parameters/bone_scales", rr.Tensor(result.bone_scales), static=True)
+    recording.log("/parameters/joint_names", rr.TextDocument("\n".join(result.names)), static=True)
     recording.log("/parameters/scale", rr.Scalars(result.scale), static=True)
-    normals = np.stack([trimesh.Trimesh(v, result.faces, process=False).vertex_normals for v in result.vertices])
+    mesh_rows = np.unique(np.r_[np.arange(0, len(data.times), mesh_stride), len(data.times) - 1])
+    mesh_vertices = result.vertices[mesh_rows]
+    normals = np.stack([trimesh.Trimesh(v, result.faces, process=False).vertex_normals for v in mesh_vertices]).astype(np.float32)
     recording.send_columns(
         "/world/fit/mesh",
-        indexes=index,
-        columns=rr.Mesh3D.columns(vertex_positions=result.vertices.reshape(-1, 3), vertex_normals=normals.reshape(-1, 3)).partition(
-            [result.vertices.shape[1]] * len(data.times)
+        indexes=[rr.TimeColumn("video_time", duration=data.times[mesh_rows])],
+        columns=rr.Mesh3D.columns(vertex_positions=mesh_vertices.reshape(-1, 3), vertex_normals=normals.reshape(-1, 3)).partition(
+            [result.vertices.shape[1]] * len(mesh_rows)
         ),
     )
     recording.send_blueprint(

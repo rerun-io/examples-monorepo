@@ -1,6 +1,7 @@
 """Single-segment held-out fitting experiment; no catalog writes."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -18,7 +19,7 @@ from selfcap_soma.camera_geometry import project, project_ego, triangulate_frame
 from selfcap_soma.catalog import Observations, read_window
 from selfcap_soma.evaluation import apply_body_offsets, heldout_blocks, learn_body_offsets
 from selfcap_soma.evaluation_io import nearest_indices, read_image_tracks, read_views
-from selfcap_soma.fitting import FitResult, fit
+from selfcap_soma.fitting import FitOptions, FitResult, fit
 from selfcap_soma.observations import coco_joint_names
 from selfcap_soma.output import save
 
@@ -58,6 +59,7 @@ def mapped(result: FitResult, data: Observations) -> Float64[ndarray, "n 133 3"]
     points = np.full_like(data.exo, np.nan)
     for key, name in coco_joint_names().items():
         points[:, key] = result.joints[:, result.names.index(name)]
+    points[:, 3:5] = result.ear_landmarks
     return points
 
 
@@ -86,6 +88,10 @@ class Config:
     """Optional corrected image evidence; source is never changed."""
     iterations: int = 400
     """Fixed optimization budget, not tuned on evaluation labels."""
+    calibrated: bool = False
+    """Fit shape only on well-observed frames before 25 s, then freeze."""
+    options: FitOptions = field(default_factory=FitOptions)
+    """Explicit candidate settings; defaults keep the original baseline."""
 
 
 def main(config: Config) -> None:
@@ -94,10 +100,39 @@ def main(config: Config) -> None:
     url, dataset_name = "rerun+http://dgx-spark:51235", "selfcap-post-dev"
     data: Observations = read_window(url, dataset_name, segment, 0.3, 50.0, 1)
     views, oak = read_views(CatalogClient(url).get_dataset(dataset_name), segment, data.times)
+    calibration_cache: dict[bytes, FitResult] = {}
+    calibration_times: list[float] = []
+
+    def solve(observed: Observations) -> FitResult:
+        calibrated = None
+        if config.calibrated:
+            valid = (
+                (observed.times < 25.0)
+                & np.isfinite(observed.exo[:, [5, 6, 11, 12]]).all((1, 2))
+                & (observed.confidence[:, [5, 6, 11, 12]].min(1) >= 0.7)
+            )
+            selected = np.flatnonzero(valid)[::8]
+            key = sha256(observed.exo[selected].tobytes() + observed.hands[selected].tobytes() + observed.confidence[selected].tobytes()).digest()
+            if key not in calibration_cache:
+                training = replace(
+                    observed,
+                    times=observed.times[selected],
+                    exo=observed.exo[selected],
+                    hands=observed.hands[selected],
+                    confidence=observed.confidence[selected],
+                    head_positions=observed.head_positions[selected],
+                    head_rotations=observed.head_rotations[selected],
+                )
+                calibrated = fit(training, config.assets, 600, 300, config.options)
+                calibration_cache[key] = calibrated
+                calibration_times.append(calibrated.seconds)
+            calibrated = calibration_cache[key]
+        return fit(observed, config.assets, config.iterations, 80, config.options, fixed=calibrated)
+
     heldout: Bool[ndarray, "n"] = heldout_blocks(data.times)
     withheld: Float64[ndarray, "n 133 3"] = data.hands.copy()
     withheld[heldout] = np.nan
-    heldout_fit: FitResult = fit(replace(data, hands=withheld), config.assets, config.iterations, 80)
+    heldout_fit: FitResult = solve(replace(data, hands=withheld))
     points: Float64[ndarray, "n 133 3"] = mapped(heldout_fit, data)
     rows = [score("Quest hands: alternating 2 s held-out blocks", points[heldout, 91:], data.exo[heldout, 91:], data.hands[heldout, 91:], "mm")]
     target_index = np.searchsorted(data.times, 4.144403454, side="right") - 1
@@ -111,9 +146,25 @@ def main(config: Config) -> None:
     # The body evaluation target is absent from ALL fitting and initialization
     # on [25,50]. Hand slots use independent Quest measurements there.
     train: Bool[ndarray, "n"] = data.times < 25.0
+    if config.options.use_ears:
+        ear_input = data.exo.copy()
+        ear_input[~train, 3:5] = np.nan
+        ear_data = replace(data, exo=ear_input)
+        ear_fit = solve(ear_data)
+        eye_pin = fit(ear_data, config.assets, config.iterations, 80)
+        rows.append(
+            score(
+                "Ears [25,50]: withheld ears vs original eye pin",
+                ear_fit.ear_landmarks[~train],
+                eye_pin.ear_landmarks[~train],
+                data.exo[~train, 3:5],
+                "mm",
+            )
+        )
+        runtimes.extend((ear_fit.seconds, eye_pin.seconds))
     body_input: Float64[ndarray, "n 133 3"] = data.exo.copy()
     body_input[~train, 5:17] = np.nan
-    body_fit = fit(replace(data, exo=body_input), config.assets, config.iterations, 80)
+    body_fit = solve(replace(data, exo=body_input))
     body_points = mapped(body_fit, data)
     rotations = Rotation.from_rotvec(body_fit.poses[:, 0].astype(np.float64)).as_matrix()
     offsets = learn_body_offsets(body_points[:, 5:17], data.exo[:, 5:17], rotations, train)
@@ -131,7 +182,7 @@ def main(config: Config) -> None:
     for column, key in enumerate(scored_body):
         leave_joint_out = data.exo.copy()
         leave_joint_out[~train, key] = np.nan
-        joint_fit = fit(replace(data, exo=leave_joint_out), config.assets, config.iterations, 80)
+        joint_fit = solve(replace(data, exo=leave_joint_out))
         predicted_joint = mapped(joint_fit, data)[:, key : key + 1]
         joint_rotations = Rotation.from_rotvec(joint_fit.poses[:, 0].astype(np.float64)).as_matrix()
         offset = learn_body_offsets(predicted_joint, data.exo[:, key : key + 1], joint_rotations, train)
@@ -147,16 +198,14 @@ def main(config: Config) -> None:
         triangulated, _, confidence = triangulate_frames(
             [v.camera for v in others], np.stack([v.pixels for v in others], axis=1), np.stack([v.scores for v in others], axis=1)
         )
-        camera_fit = fit(
-            replace(data, exo=triangulated.astype(np.float64), confidence=confidence.astype(np.float64)), config.assets, config.iterations, 80
-        )
+        camera_fit = solve(replace(data, exo=triangulated.astype(np.float64), confidence=confidence.astype(np.float64)))
         candidate = mapped(camera_fit, data)
         projected = project(view.camera, candidate.reshape(-1, 3)).reshape(-1, 133, 3)
         raw_projected = project(view.camera, triangulated.reshape(-1, 3).astype(np.float64)).reshape(-1, 133, 3)
         targets = np.where((view.scores >= 0.7)[..., None], view.pixels, np.nan)
         candidate_uv = np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan)
         raw_uv = np.where(raw_projected[:, :, 2:] > 0.001, raw_projected[:, :, :2], np.nan)
-        for label, keys in (("body", slice(5, 17)), ("hands", slice(91, 133))):
+        for label, keys in (("body", slice(5, 17)), ("hands", slice(91, 133)), ("ears", slice(3, 5))):
             rows.append(score(f"{view.name} leave-camera-out {label}", candidate_uv[:, keys], raw_uv[:, keys], targets[:, keys], "px"))
         runtimes.append(camera_fit.seconds)
 
@@ -193,14 +242,14 @@ def main(config: Config) -> None:
         "[0,2), [4,6), ... withheld from Quest hand fitting",
         25.0,
         rows,
-        runtimes,
+        runtimes + calibration_times,
         perf_counter() - start,
         offsets.tolist(),
         [
             "Fixed calibration and previously selected wearer associations are shared; calibration was not held out.",
             "Phone scores use leave-camera-out triangulation, not the stored all-camera triangulation.",
             "The body comparison scores absent fitting targets on [25,50]; offsets were learned only before 25 s.",
-            "Offsets calibrate observation landmarks, not mesh surface shape. No ears or foot-surface points are invented.",
+            "Body offsets calibrate observation landmarks. Ear mode uses documented mesh vertices; no foot-surface constraints.",
             "OAK evidence is only the available corrected 2–6 s artifact; only finite common points are scored.",
             "EgoHand/Sapiens side is selected by Quest projection with a 20 px ambiguity margin, independently of either scored method.",
             "No OAK detector confidence was retained in that artifact, so those rows use finite points only.",

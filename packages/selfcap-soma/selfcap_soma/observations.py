@@ -1,6 +1,7 @@
 """Clock and anatomical correspondence rules for the prototype."""
 
-from jaxtyping import Float64
+import numpy as np
+from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 
@@ -37,3 +38,12 @@ def coco_joint_names() -> dict[int, str]:
             for joint, suffix in enumerate(suffixes):
                 names[base + 1 + finger * 4 + joint] = f"{side}Hand{digit}{suffix}"
     return names
+
+
+def overlay_points(points: Float32[ndarray, "n j 3"], names: tuple[str, ...]) -> Float32[ndarray, "n 133 3"]:
+    """Projectable COCO body/hand joints only; internal and face joints stay absent."""
+    result: Float32[ndarray, "n 133 3"] = np.full((len(points), 133, 3), np.nan, dtype=np.float32)
+    for key, name in coco_joint_names().items():
+        if name in names:
+            result[:, key] = points[:, names.index(name)]
+    return result

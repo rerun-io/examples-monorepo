@@ -1,12 +1,12 @@
 """Single-segment prototype entry point."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from serde.json import to_json
+from serde.json import from_json, to_json
 
 from selfcap_soma.catalog import read_window
-from selfcap_soma.fitting import fit
+from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.output import save
 
 
@@ -34,11 +34,20 @@ class Config:
     """Local RRD and report directory; never registered."""
     target: float = 4.144
     """Video time used for diagnostics."""
+    mesh_stride: int = 1
+    """Log every nth fitted mesh; joints retain every frame."""
+    calibration: Path | None = None
+    """Optional frozen body identity, bone ratios and head attachment JSON."""
+    options: FitOptions = field(default_factory=FitOptions)
+    """Shape and attachment settings; defaults reproduce the initial prototype."""
 
 
 def main(config: Config) -> None:
     if not 0 < config.shape_iterations < config.iterations:
         raise ValueError("shape iterations must be between zero and total iterations")
+    if config.mesh_stride < 1:
+        raise ValueError("mesh stride must be positive")
     data = read_window(config.catalog, config.dataset, config.segment, config.start, config.end, config.stride)
-    result = fit(data, config.assets, config.iterations, config.shape_iterations)
-    print(to_json(save(config.output, data, result, config.target)))
+    calibrated = None if config.calibration is None else from_json(Calibration, config.calibration.read_text())
+    result = fit(data, config.assets, config.iterations, config.shape_iterations, config.options, fixed=calibrated)
+    print(to_json(save(config.output, data, result, config.target, config.mesh_stride)))

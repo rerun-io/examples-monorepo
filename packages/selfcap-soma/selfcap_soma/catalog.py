@@ -68,6 +68,21 @@ def interpolate_hands(
     return result
 
 
+def interpolate_head(
+    times: Float64[ndarray, "p"],
+    positions: Float64[ndarray, "p 3"],
+    quaternions: Float64[ndarray, "p 4"],
+    samples: Float64[ndarray, "n"],
+) -> tuple[Float64[ndarray, "n 3"], Float64[ndarray, "n 3 3"]]:
+    """Interpolate head poses; missing endpoints or gaps have no position target."""
+    right = np.clip(np.searchsorted(times, samples), 1, len(times) - 1)
+    valid = (samples >= times[0]) & (samples <= times[-1]) & ((times[right] - times[right - 1]) <= 0.06)
+    result = np.column_stack([np.interp(samples, times, positions[:, axis]) for axis in range(3)])
+    result[~valid] = np.nan
+    rotations = Slerp(times, Rotation.from_quat(quaternions))(np.clip(samples, times[0], times[-1])).as_matrix()
+    return result, rotations
+
+
 def read_window(url: str, dataset: str, segment: str, start: float, end: float, stride: int) -> Observations:
     """Use one materialization per entity group, with window pushdown."""
     view = CatalogClient(url).get_dataset(dataset).filter_segments(segment)
@@ -115,9 +130,6 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     hq = np.asarray(head_table[quaternion].to_pylist(), dtype=np.float64).reshape(-1, 4)
     keep = np.r_[True, np.diff(ht) > 0.0]
     ht, hp, hq = ht[keep], hp[keep], hq[keep]
-    if head_sample[0] < ht[0] or head_sample[-1] > ht[-1] or np.max(np.diff(ht)) > 0.06:
-        raise ValueError("missing or gapped Quest head coverage")
     hands = interpolate_hands(seconds(hand_table["capture_time"]), np.asarray(hand_table[hands_column].to_pylist(), dtype=np.float64), hand_sample)
-    positions = np.column_stack([np.interp(head_sample, ht, hp[:, axis]) for axis in range(3)])
-    rotations = Slerp(ht, Rotation.from_quat(hq))(head_sample).as_matrix()
+    positions, rotations = interpolate_head(ht, hp, hq, head_sample)
     return Observations(times, exo, scores, hands, positions, rotations, offset)
