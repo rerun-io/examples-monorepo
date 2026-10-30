@@ -30,6 +30,15 @@ class QuestBlock:
     mode: Literal["healthy", "faulty-left-borrowed-cam50", "faulty-unresolved", "unknown-layout"]  # Explicit headset layout/fallback status.
 
 
+def optical_targets(quest: QuestBlock) -> dict[str, Float64[ndarray, "4 4"]]:
+    """Map physical left/right RGB targets to resolved transforms, not video slot numbers."""
+    if quest.mode == "healthy":
+        return {"quest0": np.eye(4), "quest1": quest.rig_T_cam["1"]}
+    if quest.mode == "faulty-left-borrowed-cam50":
+        return {"quest0": quest.rig_T_cam["1"]}
+    return {}
+
+
 def quest_block(
     calibration: FactoryCalibration, *, camera50: FactoryExtrinsic | None = None, rig_T_device: Float64[ndarray, "4 4"] | None = None
 ) -> QuestBlock:

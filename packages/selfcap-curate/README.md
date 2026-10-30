@@ -251,6 +251,9 @@ arguments. Its isolated worker has a 360-second deadline, including its Sol
 children. Existing output directories are supported. Completed decisions resume;
 failed or timed-out attempts reuse their completed packet and label files.
 Use a new directory when source calibration or annotations change.
+Phones without an initial pose are omitted, preserving the other phones' rig
+IDs. Fewer than two calibrated phones returns `skipped`. A transient Codex
+service failure is retried once; stderr from both attempts is retained.
 
 The tool samples four facing headset frames per view, and one frame for static
 phones. Every other phone whose predicted centre falls inside the image receives a
@@ -264,9 +267,17 @@ must fall inside the corresponding crop;
 timestamps are canonicalized within one microsecond. A local dark-component snap
 moves headset labels at most five source pixels.
 
+Physical headset target IDs follow the factory calibration: `quest0` is the
+left RGB lens, even when borrowed camera 50 is stored in video slot 1. An
+unresolved right lens is omitted. Three-phone recordings derive OAK/Quest rig
+indices from their layout.
+
 Both fit folds share the static phone anchors. Their phone residual is therefore
 an **in-sample consistency check**, not independent validation. Headset frames
-and 10-second hand blocks are held out; body transfer uses independent RTMW
+are held out. Usable hand frames alternate per camera, with a minimum of two
+usable frames; dense hand scores follow the nearest sparse frame's fold. Body
+frames are split with per-camera visibility checks, and exact duplicate frame
+sets are removed. Insufficient coverage fails closed. Body transfer uses independent RTMW
 observations. The robust objective uses fixed relative block shares for headset anchors,
 phone anchors, hands, and body (1:0.25:1.5:0.5), each divided equally among
 active views and normalized by its observation count. Confidence weights are

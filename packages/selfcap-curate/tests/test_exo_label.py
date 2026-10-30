@@ -103,3 +103,44 @@ def test_phone_filter_keeps_large_but_supported_initial_pose_error():
     panel = Panel(1,1.,['phone0'],(0,0,540,540),'crop','source',(250.,250.),.7)
     mark = Landmark(1,1.,'phone0',470.,250.,.9)
     assert filter_phone_labels([mark],[panel]) == [mark]
+
+
+def test_codex_capacity_retries_once_and_keeps_stderr(monkeypatch, tmp_path):
+    import subprocess
+
+    from selfcap_curate.exo_label import run_codex
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            kwargs['stderr'].write('ERROR: Selected model is at capacity.\n')
+            raise subprocess.CalledProcessError(1, args)
+        kwargs['stdout'].write('success\n')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    run_codex(['codex'], 'prompt', {}, tmp_path/'out.json', tmp_path/'call.log', 10.0)
+    assert len(calls) == 2
+    assert 'at capacity' in (tmp_path/'call.log').read_text()
+    assert 'success' in (tmp_path/'call.retry.log').read_text()
+
+
+def test_codex_permanent_failure_does_not_retry(monkeypatch, tmp_path):
+    import subprocess
+
+    import pytest
+
+    from selfcap_curate.exo_label import run_codex
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        kwargs['stderr'].write('Invalid schema')
+        raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    with pytest.raises(RuntimeError, match='Invalid schema'):
+        run_codex(['codex'], 'prompt', {}, tmp_path/'out.json', tmp_path/'call.log', 10.0)
+    assert len(calls) == 1

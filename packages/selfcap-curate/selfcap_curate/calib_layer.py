@@ -77,8 +77,10 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             if camera is None or camera.camera is None:
                 continue
             episode = camera.episodes.get(sync.episode)
-            refined = refinement.cameras[rig] if refinement is not None else camera.camera
-            matrix = (refined.world_T_cam if refinement is not None else
+            refined = refinement.camera_for_rig(rig) if refinement is not None else None
+            applied = refined is not None
+            refined = refined if refined is not None else camera.camera
+            matrix = (refined.world_T_cam if applied else
                       episode.world_T_cam if episode is not None and episode.world_T_cam is not None else camera.camera.world_T_cam)
             status = "flagged" if episode is not None and not episode.ok else "ok"
             count += 1
@@ -87,7 +89,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             tf(
                 entity,
                 matrix,
-                calib_source=refinement.method if refinement is not None else METHOD,
+                calib_source=refinement.method if refinement is not None and applied else METHOD,
                 calib_scope=episode.scope if episode else "session",
                 calib_status=status,
                 calib_phone=phone,
