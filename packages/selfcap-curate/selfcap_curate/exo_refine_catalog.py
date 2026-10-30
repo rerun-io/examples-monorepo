@@ -5,8 +5,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
+from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation, Slerp
 from serde import serde
 from serde.json import from_json
@@ -87,9 +89,35 @@ class Gate:
     """Deterministic holdout and independent transfer definitions."""
 
 
+def read_rtmw_recording(path: Path, segment: str, rigs: tuple[int, ...]) -> tuple[PhoneDetections, ...]:
+    """Read original S1 observations without querying a replaced catalog layer."""
+    reader = RrdReader(path)
+    store = next((entry for entry in reader.recordings() if entry.recording_id == segment), None)
+    if store is None:
+        raise ValueError(f'{path}: recording does not match {segment}')
+    entities = {f'/world/rig_{rig:02d}/cam_00/pinhole/pred/rtmw/coco133_uv': rig for rig in rigs}
+    batches: dict[int, list[pa.RecordBatch]] = {rig: [] for rig in rigs}
+    for chunk in reader.stream(store=store):
+        entity = str(chunk.entity_path)
+        if not chunk.is_static and entity in entities:
+            batch = chunk.to_record_batch()
+            if 'Points2D:positions' in batch.schema.names:
+                batches[entities[entity]].append(batch)
+    result = []
+    for rig in rigs:
+        if not batches[rig]:
+            raise ValueError(f'{path}: missing original RTMW observations for rig_{rig:02d}')
+        table = pa.Table.from_batches(batches[rig])
+        times = catalog_io.seconds(table['video_time'])
+        order = np.argsort(times)
+        result.append(PhoneDetections(times[order], catalog_io.floats(table['Points2D:positions'], -1, 133, 2)[order],
+                                      catalog_io.floats(table['simplecv.KeypointConfidence2D:confidences'], -1, 133)[order]))
+    return tuple(result)
+
+
 def load_inputs(segment: catalog_io.Segment, *, cameras: tuple[Camera, ...] | None = None,
                 quest: QuestBlock | None = None, landmarks: Landmarks | None = None,
-                camera_rigs: tuple[int, ...] | None = None) -> Inputs:
+                camera_rigs: tuple[int, ...] | None = None, rtmw_rrd: Path | None = None) -> Inputs:
     """Load inputs from one catalog segment, never from the raw capture files."""
     record = landmarks if landmarks is not None else read_landmarks(segment.dataset, segment.id)
     if record is None:
@@ -143,6 +171,10 @@ def load_inputs(segment: catalog_io.Segment, *, cameras: tuple[Camera, ...] | No
         if label.target_id.startswith("quest"):
             positions[i] += rotations[i] @ targets[label.target_id][:3, 3]
     hands = tuple(pairs(detection, tracks, tau) for detection, tau in zip(detections, phone_to_pose, strict=True))
+    if rtmw_rrd is not None:
+        body = read_rtmw_recording(rtmw_rrd, segment.id, rigs)
+        return Inputs(RefinementProblem(cameras, hands, record, positions, rotations), phones, detections, tracks, sync,
+                      body, tuple(phone_offsets), tuple(phone_to_pose), quest_offset / 1000.0)
     entities = [f"/world/rig_{rig:02d}/cam_00/pinhole/pred/rtmw/coco133_uv" for rig in rigs]
     table = segment.dataset.filter_segments(segment.id).filter_contents(entities).reader(index="video_time").to_arrow_table()
     body = []

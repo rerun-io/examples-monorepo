@@ -251,6 +251,13 @@ arguments. Its isolated worker has a 360-second deadline, including its Sol
 children. Existing output directories are supported. Completed decisions resume;
 failed or timed-out attempts reuse their completed packet and label files.
 Use a new directory when source calibration or annotations change.
+For a cached redecision, pass `--cached-labels /old/landmarks.json --rtmw-rrd
+/local/original-s1-rtmw.rrd` and a new output directory. This mode never builds
+crops or invokes Sol, and rejects a missing RTMW argument. The RRD must belong
+to the requested segment and contain all active views. Its SHA256 and the
+cached-label SHA256 are recorded in `result.json` and checked on resume.
+For an approved fresh relabel after S2, omit `--cached-labels` but still pass
+`--rtmw-rrd` so the gate does not read S2's smoothed observations.
 Phones without an initial pose are omitted, preserving the other phones' rig
 IDs. Fewer than two calibrated phones returns `skipped`. A transient Codex
 service failure is retried once; stderr from both attempts is retained.

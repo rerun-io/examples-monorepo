@@ -33,8 +33,16 @@ class Config:
     """Fixed device VP focal, or the initial calibration for unknown devices; never fit focal."""
     objective: ObjectiveShares = field(default_factory=ObjectiveShares)
     """Observation-count invariant headset, phone, hand and body loss shares."""
+    cached_labels: Path | None = None
+    """Use these existing landmarks only; never build crops or invoke Sol."""
+    rtmw_rrd: Path | None = None
+    """Explicit original S1 RTMW recording; required for cached redecisions."""
     worker: bool = False
     """Internal isolated process entry point."""
+
+    def __post_init__(self) -> None:
+        if self.cached_labels is not None and self.rtmw_rrd is None:
+            raise ValueError('cached_labels requires an original S1 rtmw_rrd')
 
 
 def main(config: Config) -> None:
@@ -42,10 +50,12 @@ def main(config: Config) -> None:
     if config.worker:
         segment = catalog_io.open_segment(CatalogClient(config.catalog_url).get_dataset(name=config.dataset), config.segment)
         state = from_json(CalibSession, config.calib_record.read_text())
-        result = run_session(segment, state, config.output_dir, thresholds=config.thresholds, focal_source=config.focal_source, objective=config.objective)
+        result = run_session(segment, state, config.output_dir, thresholds=config.thresholds, focal_source=config.focal_source,
+                             objective=config.objective, cached_labels=config.cached_labels, rtmw_rrd=config.rtmw_rrd)
     else:
         result = label_session(config.segment, config.calib_record, config.output_dir, dataset=config.dataset,
-                               catalog_url=config.catalog_url, timeout_s=config.timeout_s, thresholds=config.thresholds, focal_source=config.focal_source, objective=config.objective)
+                               catalog_url=config.catalog_url, timeout_s=config.timeout_s, thresholds=config.thresholds, focal_source=config.focal_source,
+                               objective=config.objective, cached_labels=config.cached_labels, rtmw_rrd=config.rtmw_rrd)
     print(to_json(result), flush=True)
 
 
