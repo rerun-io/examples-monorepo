@@ -155,3 +155,67 @@ multi-person RTMW detector streams live under the local reference root’s
 `golden-refs/oak-sapiens2/` and `golden-refs/rtmw-kp2d/` directories as viewer-readable RRDs.
 Their typed components retain exact float64 seconds beside the integer-ns `video_time`
 timeline. The tests read these fixtures directly; they do not import external research code.
+
+## Candidate optical calibration
+
+`selfcap-post --exo-refine` fits exo pose, square-pixel focal and one shared
+head-frame optical translation before keypoints. The default remains off.
+`--exo-reference-dataset` selects a read-only source for labels and independent
+RTMW checks. An episode without an `exo_landmarks` layer keeps the normal fit.
+The translation changes Quest camera lever arms, not the raw head track or OAK
+mount. The calibration file then owns triangulation, display skeleton and all
+camera-centre projections.
+
+`exo_landmarks` stores labelled `Points2D` at
+`/world/rig_XX/cam_00/pinhole/exo_landmarks` on `video_time`. Its recording
+property holds a strict `Landmarks` record (view, seconds, target, pixels,
+confidence, labeller, method and date). `quest0` and `quest1` are factory optical
+centres; `phoneN` is exo rig N. The committed d31bf1da labels retain all 232
+marks. Their original agent model was not recorded; provenance states that gap.
+
+```bash
+pixi run --frozen -e selfcap-curate selfcap-dev-cycle \
+  --segment selfcap__2025-12-03__d31bf1da__ep001 \
+  --tag exofit-example --dataset selfcap-post-dev-exofit \
+  --landmarks selfcap_curate/landmarks/selfcap__2025-12-03__d31bf1da__ep001.json \
+  --exo-refine --focal-source fit --oak-egohand-assets /tmp/egohand
+```
+
+This is an explicit publishing tool. It refuses the production datasets and
+`selfcap-post-dev`, uses a new run directory, retains the source EgoHand file,
+and registers the default blueprint. The scratch `/tmp/selfcap-5090/dev_cycle.py`
+remains independent and unchanged. Run files and reports live beneath
+`<remote-root>/<dataset>/runs/<tag>/`.
+
+The focal source is `table`, `fit`, or `fixed`. A `fixed` source requires
+`--focal-file` with this strict JSON schema (use full phone IDs):
+
+```json
+{"focals":{"Dragon-413A7CC1":850.0,"Tiger-FE57138F":850.0,"Titanium-B00700F9":900.0,"Wolf-387E89E1":900.0},"method":"independent measurement"}
+```
+
+The values above illustrate the file format; they are not measured intrinsics.
+The solver records the input hash, source, version, fitted cameras and optical
+translation under `/__properties/calib`. Camera poses remain at
+`/world/rig_XX/cam_00`; pinholes remain at their existing child paths.
+
+For a read-only fit or an exact source-calibration comparison:
+
+```bash
+pixi run --frozen -e selfcap-curate selfcap-exo-refine \
+  --dataset selfcap-post-dev --landmark-dataset selfcap-post-dev-exofit \
+  --segment selfcap__2025-12-03__d31bf1da__ep001 --output-dir /tmp/exofit-check
+```
+
+This writes `refinement.json` and `gate.json`. `--calib-record` also writes a
+calibration layer through the existing writer. The report pools two held-out
+folds: alternate label frames and alternate 10-second hand blocks with a 200 ms
+guard. RTMW hand checks use every third held-out frame; body transfer uses every
+sixth frame and triangulates from the other cameras. The published model fits
+all labels and Sapiens pairs after these checks. No random draws or wall-clock
+values enter the solver.
+
+The d31bf1da candidate reproduces the offline medians (pixels): headset
+38.53 → 4.56, phones 101.95 → 0.31, Sapiens hands 8.37 → 8.98, independent
+RTMW hands 9.59 → 10.50, body transfer 24.67 → 16.55. The hand regressions
+fail the no-regression gate. It remains a candidate for visual comparison.

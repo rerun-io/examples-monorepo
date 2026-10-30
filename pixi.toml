@@ -1655,6 +1655,18 @@ cwd = "packages/selfcap-curate"
 env = { OMP_NUM_THREADS = "1", PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True" }
 description = "Align, calibrate and keypoint one session in one process into local copies (no catalog writes)"
 
+[feature.selfcap-curate.tasks.selfcap-exo-refine]
+cmd = "python tools/apps/exo_refine.py"
+cwd = "packages/selfcap-curate"
+env = { OMP_NUM_THREADS = "1" }
+description = "Fit optical landmarks from a named catalog dataset and report held-out transfer"
+
+[feature.selfcap-curate.tasks.selfcap-dev-cycle]
+cmd = "python tools/apps/dev_cycle.py"
+cwd = "packages/selfcap-curate"
+env = { OMP_NUM_THREADS = "1", PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True" }
+description = "Run post and publish to an explicitly named candidate dataset"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # exo-calib — exo-camera calibration from human keypoints (Kineo-style
 # correspondences + staged kornia-rs bundle adjustment). Catalog-native: its
