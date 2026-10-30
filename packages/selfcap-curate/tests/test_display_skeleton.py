@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from selfcap_curate.display_style import DISPLAY_LINKS, skeleton_style
+from selfcap_curate.display_style import DISPLAY_LINKS
 from selfcap_curate.keypoints import display_skeleton
 
 
@@ -32,17 +32,6 @@ def test_display_links_use_hand_roots_and_exclude_hidden_joints() -> None:
     assert (91, 92) in links and (112, 113) in links
     assert {(5, 6), (5, 11), (6, 12), (11, 12)} <= links
     assert not {0, 1, 2, 9, 10, *range(13, 91)} & {joint for link in links for joint in link}
-
-
-def test_confidence_colour_scale_and_weaker_endpoint_links() -> None:
-    confidence = np.ones((1, 133), dtype=np.float32)
-    confidence[0, 7] = 0.7
-    confidence[0, 91] = 0.85
-    style = skeleton_style(confidence)
-    assert style.colors[0, 7].tolist() == [255, 0, 0, 255]
-    np.testing.assert_allclose(style.colors[0, 91], [255, 255, 0, 255], atol=1)
-    assert style.colors[0, 112].tolist() == [0, 255, 0, 255]
-    assert style.edge_colors[0, DISPLAY_LINKS.index((7, 91))].tolist() == [255, 0, 0, 255]
 
 
 def test_quest_hand_observation_uses_raw_camera_detection() -> None:

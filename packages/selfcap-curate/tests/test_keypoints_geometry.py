@@ -194,11 +194,14 @@ def test_display_writer_preserves_coco_ids_with_confidence_colours(tmp_path) -> 
     rows = {str(c.entity_path): c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and any(name.endswith(":positions") for name in c.to_record_batch().schema.names)}
     for path, kind in (("/world/skeleton", "Points3D"), ("/world/rig_00/cam_00/pinhole/skeleton", "Points2D")):
         batch = rows[path]
-        assert not any(name.endswith(":confidences") for name in batch.schema.names)
+        assert any(name.endswith(":confidences") for name in batch.schema.names)
+        assert any(name.endswith(":average_confidence") for name in batch.schema.names)
+        assert "display_confidence" not in batch.schema.names
         points = np.asarray(batch.column(f"{kind}:positions").to_pylist()[0])
         assert len(points) == 133
         assert np.isnan(points[np.r_[0:3, 9:11, 13:91]]).all()
         assert np.isfinite(points[np.r_[3:9, 11:13, 91:133]]).all()
+    assert not any("LineStrips" in name for c in RrdReader(output).stream() for name in c.to_record_batch().schema.names)
     np.testing.assert_allclose(
         np.asarray(rows["/world/rig_00/cam_00/pinhole/skeleton"].column("Points2D:positions").to_pylist()[0])[5],
         project(camera, xyz[0])[:, :2][5],

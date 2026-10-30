@@ -129,7 +129,7 @@ Body joints use a temporally consistent camera-pair path, a five-frame median, a
 The default `/world/skeleton` and `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
 and both 21-joint hands. Knees, ankles and feet remain in the hidden full COCO-133 layers.
 Every view uses the same confidence colours: red at 0.7, yellow at 0.85, green at 1.0, clamped outside that range.
-Low-confidence and bridged points remain visible. Edges use the smaller endpoint confidence, with fixed widths.
+Low-confidence and bridged points remain visible. Blue annotation links use the shared typed keypoint archetypes and their class/keypoint IDs; custom confidence components carry per-joint and average confidence.
 Quest hands have no per-joint confidence, so tracked Quest joints use 1.0. The support masks remain available for inspection.
 AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
