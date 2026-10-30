@@ -260,12 +260,12 @@ def work(role,index):
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'waiting_fix',name))
                 print('SOMA_WAITING_FIX',seg,flush=True)
                 continue
-            if stage in ('soma','s2') and (isinstance(error,InputLimitation) or repeated_stage_error(info,stage,str(error))):
+            if stage in ('s1','soma','s2') and (isinstance(error,InputLimitation) or repeated_stage_error(info,stage,str(error))):
                 info.pop('failed_stage',None);info.pop('retries',None)
                 info['waiting_reason']=str(error)
                 with owned_claim(job,stage,name) as c:
                     if c is None:continue
-                    c.execute("update jobs set state=?,owner=null,error=null,updated=?,info=? where segment=?",('soma_input_limited' if stage=='soma' else 's2_waiting_fix',time.time(),json.dumps(info),seg))
+                    c.execute("update jobs set state=?,owner=null,error=null,updated=?,info=? where segment=?",({'soma':'soma_input_limited','s2':'s2_waiting_fix','s1':'s1_waiting_fix'}[stage],time.time(),json.dumps(info),seg))
                     c.execute("update events set status='input_limited' where segment=? and stage=? and status='failed'",(seg,stage))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'input_limited',name))
                 notify(f'{stage} input limitation or repeated error, parked: {seg}: {error}')

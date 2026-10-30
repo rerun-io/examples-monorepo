@@ -343,3 +343,21 @@ def test_calibrate_missing_layer_falls_back_to_gpu(calibration_call, monkeypatch
     monkeypatch.setattr(api, "detect_episode", detect)
     api.main(config)
     assert calls == list(config.segment_ids)
+
+
+def test_egohand_missing_clock_finishes_without_sampling(calibration_call, monkeypatch) -> None:
+    api, config, _ = calibration_call
+    config = replace(config, oak_method="egohand")
+    previous = api.catalog_io.read_time_sync
+    monkeypatch.setattr(api.catalog_io, "read_time_sync", lambda *args: replace(previous(*args), flags=["quest_unsynced_kept_as_cut"]))
+    monkeypatch.setattr(api, "fixed_rotation", lambda *_args: None)
+    monkeypatch.setattr(api, "detect_oak_egohand", lambda *args, **kwargs: pytest.fail("must not sample without a clock"))
+    monkeypatch.setattr(api, "solve_oak", lambda *args, **kwargs: pytest.fail("must not fit without a clock"))
+    state = api.main(config)
+    assert not state.oak.ok
+    assert "missing Quest/OAK clock" in state.oak.rotation_source
+    assert (config.output_dir / "egohand" / f"{config.segment_ids[0]}.rrd").is_file()
+    path = config.output_dir / f"{config.segment_ids[0]}.rrd"
+    prop = next(c.to_record_batch() for c in RrdReader(path).stream() if str(c.entity_path) == "/__properties/calib")
+    assert prop.column("oak_posed")[0].as_py() == [False]
+    assert prop.column("oak_unposed_reason")[0].as_py() == ["missing Quest/OAK clock"]

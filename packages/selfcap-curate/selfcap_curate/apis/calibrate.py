@@ -24,6 +24,7 @@ from selfcap_curate.keypoints import read_ego_cameras
 from selfcap_curate.oak_egohand import detect_oak_egohand
 from selfcap_curate.oak_mount import fixed_rotation, gyro_mount, solve_oak
 from selfcap_curate.quest_fit import read_session_episode
+from selfcap_curate.records import OakFit, oak_quest_offset_ms
 
 
 @dataclass
@@ -80,13 +81,19 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
         ego, gyro, rotations = factories["ego"], gyro_mount(session, episodes), read_rotations()
         rotation = fixed_rotation(gyro, ego.device_id, rotations)
         use_egohand = config.oak_observations is not None or config.oak_method == "egohand"
-        if use_egohand:
+        has_oak_clock = any(oak_quest_offset_ms(episode.sync) is not None for episode in episodes)
+        if use_egohand and has_oak_clock:
             if config.oak_free_rotation:
                 rotation = None
             elif rotation is None:
                 raise ValueError("EgoHand gyro-fixed fitting requires an eligible gyro rotation; use oak_free_rotation explicitly to fit without it")
             release_cuda_memory(models=not config.retain_models)
         for index, (episode, segment) in enumerate(zip(episodes, segments, strict=True)):
+            if oak_quest_offset_ms(episode.sync) is None:
+                print("OAK_UNPOSED", segment.id, "missing Quest/OAK clock", flush=True)
+                if use_egohand:
+                    write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, episode.oak)
+                continue
             if config.oak_observations is not None:
                 oak = read_oak_observations(config.oak_observations / f"{segment.id}.parquet", segment.id)
             elif config.oak_method == "egohand":
@@ -104,11 +111,16 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
             episodes[index] = replace(episode, oak=oak)
             if use_egohand:
                 write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, oak)
+        oak_fit = (
+            solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=use_egohand,
+                      gate_image_speed=config.oak_observations is not None)
+            if has_oak_clock else OakFit(session, False, ego.device_id, rotation_source="unposed: missing Quest/OAK clock",
+                                         observation_source="egohand" if use_egohand else "sapiens")
+        )
         state = CalibSession(
             session,
             calibrate(session, episodes, read_table().focals),
-            solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=use_egohand,
-                      gate_image_speed=config.oak_observations is not None),
+            oak_fit,
             read_quest_block(
                 first_segment,
                 factories["quest"],

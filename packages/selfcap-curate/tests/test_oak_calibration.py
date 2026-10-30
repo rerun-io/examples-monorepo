@@ -184,3 +184,13 @@ def test_weighted_hand_mount_rejects_base_joints_and_trims_bad_finger(fix_rotati
     assert result.ok and result.median_px < 0.01
     assert result.observation_source == "egohand"
     np.testing.assert_allclose(result.questrig_T_rgb, expected, atol=1e-4)
+
+
+def test_missing_quest_oak_clock_leaves_mount_unposed(fixture_sync) -> None:
+    sync = replace(fixture_sync(), flags=["quest_unsynced_kept_as_cut"])
+    hands = CatalogHands(np.array([0.0, 1.0]), np.zeros((2, 133, 3)), np.array([0.0, 1.0]),
+                         np.zeros((2, 3)), np.tile([0.0, 0.0, 0.0, 1.0], (2, 1)))
+    episode = session_episode(sync, hands, np.array([0.0, 1.0]), np.zeros((2, 3)))
+    fit = solve_oak("missing-clock", [episode], factory().intrinsics[0], "device", weighted=True)
+    assert not fit.ok
+    assert fit.questrig_T_rgb is None
