@@ -83,3 +83,22 @@ def test_deployed_label_drift_is_rejected_even_when_fold_scores_pass():
     gate = Gate(before,after,(),True,heldout_labels={'quest/view_1':Score(4,4.,5.)},deployed_labels={'quest/view_1':Score(4,25.,28.)})
     assert not accepts(gate)
     assert accepts(replace(gate,deployed_labels={'quest/view_1':Score(4,3.,5.)}))
+
+
+def test_phone_filter_rejects_back_facing_and_distant_identity_substitutions():
+    from selfcap_curate.exo_label import Panel, filter_phone_labels
+
+    panels = [Panel(0,1.,['phone1'],(0,0,540,540),'crop','source',(250.,250.),.8),
+              Panel(0,1.,['phone2'],(0,0,540,540),'crop2','source',(250.,250.),.1)]
+    close = Landmark(0,1.,'phone1',260.,240.,.9)
+    far = Landmark(0,1.,'phone1',500.,500.,.9)
+    hidden = Landmark(0,1.,'phone2',260.,240.,.9)
+    assert filter_phone_labels([close,far,hidden],panels) == [close]
+
+
+def test_phone_filter_keeps_large_but_supported_initial_pose_error():
+    from selfcap_curate.exo_label import Panel, filter_phone_labels
+
+    panel = Panel(1,1.,['phone0'],(0,0,540,540),'crop','source',(250.,250.),.7)
+    mark = Landmark(1,1.,'phone0',470.,250.,.9)
+    assert filter_phone_labels([mark],[panel]) == [mark]

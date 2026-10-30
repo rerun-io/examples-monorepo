@@ -253,9 +253,14 @@ failed or timed-out attempts reuse their completed packet and label files.
 Use a new directory when source calibration or annotations change.
 
 The tool samples four facing headset frames per view, and one frame for static
-phones. Phone lenses seen at grazing angles are omitted. Crops carry a source
+phones. Every other phone whose predicted centre falls inside the image receives a
+540-pixel crop, including grazing-angle candidates. Crops carry a source
 pixel grid; Sol runs read-only with medium reasoning and the fast tier on the
-default personal account. Coordinates must fall inside the corresponding crop;
+default personal account. Headsets and phones use separate calls; missing
+front-facing phone targets get one automatic retry with the other identified
+phones as context. Phone assignments must agree with a front-facing optical
+axis and lie within 240 source pixels of the initial prediction. Coordinates
+must fall inside the corresponding crop;
 timestamps are canonicalized within one microsecond. A local dark-component snap
 moves headset labels at most five source pixels.
 

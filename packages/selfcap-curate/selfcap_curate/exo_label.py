@@ -42,6 +42,10 @@ class Panel:
     """Annotated PNG path."""
     source: str
     """Unannotated source PNG for local centroid refinement."""
+    predicted: tuple[float, float] | None = None
+    """Initial projected phone centre, in source pixels."""
+    frontality: float | None = None
+    """Cosine between target optical axis and its direction to the observing camera."""
 
 
 @serde(deny_unknown_fields=True)
@@ -175,6 +179,19 @@ def filter_labels(labels: list[Landmark], allowed: dict[tuple[int, float, str], 
     return list(result.values())
 
 
+def filter_phone_labels(labels: list[Landmark], panels: list[Panel]) -> list[Landmark]:
+    """Reject back-facing identities and marks outside the initial phone search radius."""
+    result = []
+    for label in labels:
+        panel = next((p for p in panels if label.target_id in p.targets and abs(p.video_time - label.video_time) < 1e-6), None)
+        if panel is None or (panel.frontality is not None and panel.frontality < .3):
+            continue
+        if panel.predicted is not None and np.linalg.norm(np.array([label.u, label.v]) - panel.predicted) > 240.0:
+            continue
+        result.append(label)
+    return result
+
+
 def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) -> Packet:
     """Decode a few facing frames per view from the base and initial camera solution."""
     from dataforge.schema import video_path
@@ -220,7 +237,8 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
             if len(block):
                 picked.append(int(candidates[block[np.argmax(facing[block])]]))
         if not picked:
-            continue
+            # Static phone crops are still needed when no facing headset sample exists.
+            picked = [int(candidates[len(candidates) // 2])]
         indices = np.array(sorted(set(picked)), dtype=np.int64)
         fps = 1.0 / float(np.median(np.diff(times)))
         images = decode_frames(video, indices, fps).cpu().numpy()
@@ -247,17 +265,16 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
                 for target, other in enumerate(cameras):
                     if target == view or other is None:
                         continue
-                    toward_observer = camera.world_T_cam[:3, 3] - other.world_T_cam[:3, 3]
-                    frontality = float(other.world_T_cam[:3, 2] @ toward_observer / np.linalg.norm(toward_observer))
-                    if frontality < .3:
-                        continue
                     pixel = camera.project(other.world_T_cam[:3, 3][None])[0]
                     if pixel[2] <= 0 or not (0 <= pixel[0] < image.shape[1] and 0 <= pixel[1] < image.shape[0]):
                         continue
                     crop, bounds = grid_crop(image, float(pixel[0]), float(pixel[1]), 540, f'view={view} time={stamp:.9f} phone{target} {phones[target]}')
                     path = output / f'view{view}-phone{target}-{number}.png'
                     cv2.imwrite(str(path), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
-                    panels.append(Panel(view, stamp, [f'phone{target}'], bounds, str(path), str(source_path)))
+                    direction = camera.world_T_cam[:3, 3] - other.world_T_cam[:3, 3]
+                    facing = float(other.world_T_cam[:3, 2] @ direction / np.linalg.norm(direction))
+                    panels.append(Panel(view, stamp, [f'phone{target}'], bounds, str(path), str(source_path),
+                                        (float(pixel[0]), float(pixel[1])), facing))
     packet = Packet(segment.id, phones, panels)
     (output / 'packet.json').write_text(to_json(packet))
     return packet
@@ -271,7 +288,7 @@ Headset: quest0 is the wearer's LEFT front RGB aperture, quest1 the wearer's RIG
 
 
 def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmarks:
-    """Run one read-only Sol call per view, caching validated per-view JSON."""
+    """Run separate read-only headset/phone calls per view; cache each typed result."""
     from concurrent.futures import ThreadPoolExecutor
 
     schema = {'type': 'object', 'properties': {'labels': {'type': 'array', 'items': {'type': 'object', 'properties': {
@@ -282,23 +299,44 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
     schema_path = output / 'schema.json'
     schema_path.write_text(json.dumps(schema))
 
-    def label_view(view: int) -> list[Landmark]:
-        path = output / f'sol-view{view}.json'
-        panels = [panel for panel in packet.panels if panel.view == view]
+    def label_panels(view: int, panels: list[Panel], kind: str, context: str = "") -> list[Landmark]:
+        if not panels:
+            return []
+        path = output / f'sol-view{view}-{kind}.json'
         if not path.exists():
             args = ['codex', 'exec', '--ignore-user-config', '--strict-config', '--ephemeral', '--skip-git-repo-check',
                     '-C', str(output), '-s', 'read-only', '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="medium"',
                     '-c', 'service_tier="fast"', '--output-schema', str(schema_path), '-o', str(path)]
             for panel in panels:
                 args.extend(['-i', panel.path])
-            prompt = PROMPT + '\nTargets and crop bounds:\n' + to_json(Packet(packet.segment, packet.phones, panels))
+            focus = ("These are PHONE-only crops. Inspect each crop for the actual back-camera lens, including small landscape phones. "
+                     "The title supplies its identity; you do not need to recognize the device ID from appearance. "
+                     "White stickers or a central clamp on the phone are not lenses. A plainly visible lens should be labelled; "
+                     "do not omit it just because the hardware model is unknown. The prediction may be displaced by 150 pixels. "
+                     "Keep overlapping crops consistent: never assign the same visible phone to two different target IDs. "
+                     "Skip a target if its own lens is hidden or it cannot be distinguished from another phone. "
+                     if kind.startswith('phone') else "These are HEADSET-only crops. ")
+            prompt = focus + context + ' Each phone panel includes predicted position and frontality cosine. A cosine below 0.3 means a grazing/back-facing camera whose lens is normally not visible; do not substitute another nearby phone. ' + PROMPT + '\nTargets and crop bounds:\n' + to_json(Packet(packet.segment, packet.phones, panels))
             env = os.environ.copy()
             env.pop('CODEX_HOME', None)
-            with (output / f'sol-view{view}.log').open('w') as log:
+            with (output / f'sol-view{view}-{kind}.log').open('w') as log:
                 subprocess.run(args, env=env, input=prompt, text=True, stdout=log, stderr=log, timeout=timeout_s, check=True)
         labels = from_json(SolLabels, path.read_text()).labels
         allowed = {(p.view, p.video_time, target): p.bounds for p in panels for target in p.targets}
         return filter_labels(labels, allowed)
+
+    def label_view(view: int) -> list[Landmark]:
+        panels = [panel for panel in packet.panels if panel.view == view]
+        heads = [panel for panel in panels if panel.targets[0].startswith('quest')]
+        phones = [panel for panel in panels if panel.targets[0].startswith('phone')]
+        head_labels = label_panels(view, heads, 'heads')
+        phone_labels = filter_phone_labels(label_panels(view, phones, 'phones'), phones)
+        present = {label.target_id for label in phone_labels}
+        missing = [p for p in phones if p.targets[0] not in present and (p.frontality is None or p.frontality >= .3)]
+        if missing:
+            context = "Already identified phone lenses (do not assign these same phones to a missing ID): " + to_json(SolLabels(phone_labels))
+            phone_labels.extend(filter_phone_labels(label_panels(view, missing, 'phone-retry', context), missing))
+        return head_labels + phone_labels
 
     views = sorted({p.view for p in packet.panels})
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -318,7 +356,7 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
                 if distance <= 5.0:
                     label = replace(label, u=float(x - 13 + center[0]), v=float(y - 13 + center[1]))
         refined.append(label)
-    record = Landmarks(refined, 'gpt-6.1-sol medium fast', 'source-pixel grid; visible apertures only; confidence >=0.6; <=5px dark centroid snap', datetime.now(UTC).date().isoformat())
+    record = Landmarks(refined, 'gpt-6.1-sol medium fast', 'automatic per-view headset and phone passes; all projected phone crops; source-pixel grid; confidence >=0.6; <=5px dark centroid snap; geometry-filtered phones with automatic missing-target retry', datetime.now(UTC).date().isoformat())
     (output / 'landmarks.json').write_text(to_json(record))
     return record
 
@@ -342,7 +380,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         previous = from_json(LabelResult, result_path.read_text())
         if previous.segment != segment.id:
             raise ValueError('Output directory belongs to another segment')
-        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-normalized-blocks-v1' and previous.objective == objective:
+        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-normalized-autophones-v3' and previous.objective == objective:
             return previous
     for name in ('calib.json', 'refinement.json'):
         (output / name).unlink(missing_ok=True)
@@ -364,6 +402,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         model, gate = evaluate(inputs, focal_source="fixed", fixed_focals=tuple(fixed_focals[phone] for phone in packet.phones),
                                static_phones=True, body_polish=True, objective=objective)
         assert truth_bytes == tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values()), "Exo fitting must preserve Quest hands"
+        (output / 'candidate.json').write_text(to_json(model))
         accepted = accepts(gate, thresholds) and model.converged
         gate = replace(gate, passes=accepted, policy=gate.policy + "; configurable optical/body/Sapiens/RTMW acceptance thresholds in result.json")
         assert not np.any(model.head_translation_m), 'Exo-only refinement must not move the Quest world'
@@ -372,7 +411,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
             updated = replace(state, exo_refinements={**state.exo_refinements, segment.id: model})
             assert updated.oak is state.oak and updated.quest is state.quest and updated.stereo is state.stereo, 'Only exo cameras may change'
             (output / 'calib.json').write_text(to_json(updated))
-        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, 'exo-normalized-blocks-v1', focal_source,
+        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, 'exo-normalized-autophones-v3', focal_source,
                              fixed_focals, focal_sources)
     temporary = result_path.with_suffix('.tmp')
     temporary.write_text(to_json(result))
