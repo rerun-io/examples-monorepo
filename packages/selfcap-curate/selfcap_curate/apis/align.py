@@ -1,12 +1,14 @@
 """Align explicit episodes of one session; catalog inputs, local outputs only."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dataforge.schema import CAPTURE_TIMELINE, video_path
 from dataforge.timing import SequenceTimer
+from simplecv.catalog_video import read_catalog_videos
 
 from selfcap_curate.apis import open_session, session_output
-from selfcap_curate.catalog_io import CATALOG_URL, open_segment, read_catalog_hands, read_episode, read_session_clock
+from selfcap_curate.catalog_io import CATALOG_URL, SessionVideos, open_segment, read_catalog_hands, read_episode, read_session_clock
 from selfcap_curate.detection_io import write_detections_layer
 from selfcap_curate.episode_links import measure_links
 from selfcap_curate.hands_gpu import detect_episode, pose_models
@@ -33,7 +35,7 @@ class Config:
     """Catalog containing these fresh bases; never registered or swapped here."""
 
 
-def main(config: Config) -> None:
+def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
     """Measure, detect, fit and patch one selected session without raw reads."""
     _, keys, dataset = open_session(
         config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=(config.base_dir,), source=config.base_dir
@@ -48,6 +50,14 @@ def main(config: Config) -> None:
             segment: str = key.segment
             with timer.stage(f"{key}/catalog"):
                 handle = open_segment(dataset, segment)
+                if session_videos is not None:
+                    entities: list[str] = [video_path(rig, 0) for rig in range(len(handle.layout.phones))] + list(handle.layout.video_entities)
+                    handle = replace(
+                        handle,
+                        videos=dict(zip(entities, read_catalog_videos(dataset, segment, entities, CAPTURE_TIMELINE), strict=True)),
+                        hands=read_catalog_hands(handle),
+                    )
+                    session_videos[segment] = handle
                 layouts.append(handle.layout)
                 inputs = read_episode(handle)
                 clock = read_session_clock(handle)

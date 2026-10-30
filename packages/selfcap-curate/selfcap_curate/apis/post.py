@@ -7,7 +7,7 @@ from dataforge.timing import SequenceTimer
 from rerun.server import Server
 
 from selfcap_curate.apis import align, calibrate, keypoints
-from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME
+from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, SessionVideos, native_phone_rate
 from selfcap_curate.hands_gpu import release_cuda_memory
 
 
@@ -19,8 +19,8 @@ class Config:
     """As-cut base RRD directory with presented timestamps, read only."""
     output_dir: Path
     """New directory: align/ holds the aligned bases, sapiens2/ and sync records; keypoints/ holds the calib layers."""
-    rate: float
-    """Keypoints sampling frequency in Hz on the aligned clock."""
+    rate: float | None = None
+    """Keypoints frequency in Hz; omitted uses the first episode's median native phone rate."""
     segment_ids: tuple[str, ...] = ()
     """Explicit selfcap__date__sid8__epNNN ids of one session."""
     key_file: Path | None = None
@@ -38,12 +38,14 @@ def main(config: Config) -> None:
     if config.output_dir.exists() or config.output_dir.is_symlink():
         raise FileExistsError(config.output_dir)
     aligned: Path = config.output_dir / "align"
+    session_videos: SessionVideos = {}
     timer = SequenceTimer()
     with timer.stage("align"):
         align.main(
             align.Config(
                 base_dir=config.base_dir, output_dir=aligned, segment_ids=config.segment_ids, key_file=config.key_file, catalog_url=config.catalog_url
-            )
+            ),
+            session_videos=session_videos,
         )
     release_cuda_memory(models=False)  # align's decode and links buffers; calibrate still needs Sapiens2
     with Server(host="127.0.0.1", port=0, datasets={DATASET_NAME: sorted(aligned.glob("*.rrd"))}) as server:
@@ -57,7 +59,8 @@ def main(config: Config) -> None:
                     key_file=config.key_file,
                     catalog_url=server.url(),
                     donor_catalog_url=config.catalog_url,
-                )
+                ),
+                session_videos=session_videos,
             )
         release_cuda_memory(models=True)  # keypoints never uses Sapiens2: free its engines so sessions can share the GPU
         with timer.stage("keypoints"):
@@ -65,10 +68,11 @@ def main(config: Config) -> None:
                 keypoints.Config(
                     calib_dir=config.output_dir / "calib",
                     output_dir=config.output_dir / "keypoints",
-                    rate=config.rate,
+                    rate=config.rate if config.rate is not None else native_phone_rate(next(iter(session_videos.values()))),
                     segment_ids=config.segment_ids,
                     key_file=config.key_file,
                     catalog_url=server.url(),
-                )
+                ),
+                session_videos=session_videos,
             )
     print("POST_TIME", timer.stage_s, flush=True)

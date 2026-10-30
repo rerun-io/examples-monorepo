@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from itertools import combinations
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import overload
 
 import cv2
 import numpy as np
@@ -123,8 +124,11 @@ def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str
     """The OAK cameras whose pose the calibration layer gives: one query for the rig pose track and stereo, one for the lenses."""
     rig = f"/world/rig_{oak_rig:02d}"
     cams = {cam: f"{rig}/cam_{cam:02d}" for cam in (0, 1, 2)}
+    view = calibration.filter_segments(segment)
+    if not any(item.entity_path == rig and item.field == "mat3x3" and not item.is_static for item in catalog_components(view.schema())):
+        return []
     poses = (
-        calibration.filter_segments(segment)
+        view
         .filter_contents([rig, *cams.values()])
         .reader(index="video_time")
         .select("video_time", f"{rig}:Transform3D:mat3x3", f"{rig}:Transform3D:translation")
@@ -390,6 +394,12 @@ def triangulate_episode(
 
 def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float) -> Float32[ndarray, "n j 3"]:
     """Causal One Euro filter (Casiez et al. 2012) per joint on the 3D vector; every gap restarts it."""
+
+    @overload
+    def alpha(cutoff: float) -> float: ...
+
+    @overload
+    def alpha(cutoff: Float64[ndarray, "k"]) -> Float64[ndarray, "k"]: ...
 
     def alpha(cutoff: Float64[ndarray, "k"] | float) -> Float64[ndarray, "k"] | float:
         return 1.0 / (1.0 + rate / (2.0 * np.pi * cutoff))

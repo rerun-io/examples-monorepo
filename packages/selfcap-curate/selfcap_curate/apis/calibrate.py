@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dataforge.schema import video_path
 from rerun.catalog import CatalogClient
 from serde.json import to_json
 
@@ -31,7 +32,7 @@ class Config:
     """Read-only endpoint holding the healthy camera-50 borrow sources when they are not on catalog_url."""
 
 
-def main(config: Config) -> CalibSession:
+def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = None) -> CalibSession:
     """Solve one session and write files only; never register or swap a layer."""
     session, keys, dataset = open_session(config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=())
     with session_output(config.output_dir) as output:
@@ -39,13 +40,22 @@ def main(config: Config) -> CalibSession:
         segments = []
         for key in keys:
             segment = catalog_io.open_segment(dataset, key.segment)
+            if session_videos is not None:
+                segment = replace(segment, videos=session_videos[key.segment].videos, hands=session_videos[key.segment].hands)
             segments.append(segment)
             sync = catalog_io.read_time_sync(dataset, key.segment)
             episode = read_session_episode(segment, sync)
             phones = catalog_io.read_phone_detections(segment)
             if set(episode.layout.phones) - phones.keys():
                 phones = {**detect_episode(segment, episode.quest, *pose_models()), **phones}
-            oak = detect_oak_hands_gpu(dataset, sync, episode.quest, episode.layout, pose_models()[1])
+            oak = detect_oak_hands_gpu(
+                dataset,
+                sync,
+                episode.quest,
+                episode.layout,
+                pose_models()[1],
+                video=None if segment.videos is None else segment.videos[video_path(episode.layout.oak_rig, 0)],
+            )
             episodes.append(replace(episode, detections=phones, oak=oak))
         first_segment = segments[0]
         factories = catalog_io.read_factories(first_segment)

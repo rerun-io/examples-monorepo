@@ -122,7 +122,7 @@ def decode_wanted(decoder: VideoDecoder, indices: Int64[ndarray, "n"], batch: in
 
 def plan_episode(segment: Segment, rate: float, sync: TimeSync) -> FramePlan:
     """Read named segment streams and prepare original-frame selections."""
-    videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time")
+    videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time", sync=sync)
     offsets: dict[str, float | None] = sync.offsets_ms or {}
     videos = {p: v for p, v in videos.items() if offsets.get("exo/" + p) is not None}
     return plan_frames(videos, rate)

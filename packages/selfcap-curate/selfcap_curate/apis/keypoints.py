@@ -1,13 +1,13 @@
 """One-session catalog GPU keypoints; local calibration owns the output."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from dataforge.timing import SequenceTimer
 from rerun.server import Server
 
 from selfcap_curate.apis import open_session
-from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, open_segment, read_time_sync
+from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, SessionVideos, open_segment, read_time_sync
 from selfcap_curate.keypoints import (
     Camera,
     EgoCamera,
@@ -47,7 +47,7 @@ class KeypointEpisode:
     """OAK cameras with a calibrated mount; overlays are projected through their full lens model."""
 
 
-def main(config: Config) -> None:
+def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
     """Infer then triangulate, copying calib chunks unchanged; never register or swap."""
     _, keys, dataset = open_session(
         config.segment_ids,
@@ -65,6 +65,8 @@ def main(config: Config) -> None:
         calibration = server.client().get_dataset(DATASET_NAME)
         for key in keys:
             segment = open_segment(dataset, key.segment)
+            if session_videos is not None:
+                segment = replace(segment, videos=session_videos[key.segment].videos, hands=session_videos[key.segment].hands)
             try:
                 cameras = read_cameras(calibration, segment.id, segment.layout.phones)
             except ValueError as error:

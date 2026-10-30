@@ -189,11 +189,18 @@ def full_frame_boxes(frames: UInt8[Tensor, "n h w 3"]) -> BoxDetections:
 
 
 def detect_oak_hands_gpu(
-    dataset: DatasetEntry, sync: TimeSync, quest: dict[Side, HandTrack], layout: SelfcapLayout, pose: Callable[[Tensor, BoxDetections], Keypoints2d]
+    dataset: DatasetEntry,
+    sync: TimeSync,
+    quest: dict[Side, HandTrack],
+    layout: SelfcapLayout,
+    pose: Callable[[Tensor, BoxDetections], Keypoints2d],
+    *,
+    video: CatalogVideo | None = None,
 ) -> OakDetections:
     """Read only one catalog base, decode picked RGB frames on CUDA, Sapiens2 batch four."""
     segment: str = sync.episode_key.segment
-    video = read_catalog_videos(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE)[0]
+    if video is None:
+        video = read_catalog_videos(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE)[0]
     fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
     indices = pick_oak_frames(quest, len(video.samples), fps, sync)
     detected = detect_frames(decode_frames(video, indices, fps), video.t_ns[indices].astype(np.float64) * 1e-9, full_frame_boxes, pose)

@@ -178,7 +178,7 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
         api.catalog_io, "read_time_sync", lambda _dataset, segment: replace(motion.sync, key=segment.removeprefix("selfcap__"), episode=segment[-5:])
     )
     monkeypatch.setattr(
-        api.catalog_io, "open_segment", lambda _dataset, segment: SimpleNamespace(id=segment, layout=SelfcapLayout(3, 4, ("A", "B", "C")))
+        api.catalog_io, "open_segment", lambda _dataset, segment: SimpleNamespace(id=segment, layout=SelfcapLayout(3, 4, ("A", "B", "C")), videos=None)
     )
     monkeypatch.setattr(api, "read_session_episode", lambda _dataset, sync: replace(motion, sync=sync))
     monkeypatch.setattr(
@@ -191,7 +191,7 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
         lambda *_args, **_kwargs: {p: PhoneDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))) for p in motion.layout.phones},
     )
     monkeypatch.setattr(api, "pose_models", lambda: (None, None))
-    monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *_args: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
+    monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *_args, **_kwargs: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
     monkeypatch.setattr(api, "calibrate", lambda *_args: state.exo)
     monkeypatch.setattr(api, "gyro_mount", lambda *_args: GyroFit("test", False))
     monkeypatch.setattr(api, "solve_oak", lambda *_args: state.oak)
