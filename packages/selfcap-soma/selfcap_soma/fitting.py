@@ -16,7 +16,7 @@ from torch import Tensor
 
 from selfcap_soma.catalog import Observations
 from selfcap_soma.feet import foot_pose_penalty, symmetry_penalty
-from selfcap_soma.hand_pose import HandOrientations, orientation_targets
+from selfcap_soma.hand_pose import HandOrientations, HandOrientationSource, frame, hand_limit_penalty, orientation_targets
 from selfcap_soma.landmarks import EAR_VERTICES, FOOT_VERTICES, ear_vertices, foot_vertices, rotation_delta
 from selfcap_soma.losses import attached_eye, body_acceleration_penalty, body_lengths, robust_points, rotation_temporal_penalty
 from selfcap_soma.observations import coco_joint_names
@@ -69,6 +69,8 @@ class FitResult:
     """Vertex selection for the upper-body display surface."""
     visible_joints: Int64[ndarray, "j"] | None = None
     """Public joint indices shown in upper-body displays, including hips."""
+    hand_orientation_source: HandOrientationSource | None = None
+    """Per-hand measured orientation availability; none denotes position-derived fallback."""
 
 
 @serde(deny_unknown_fields=True)
@@ -239,7 +241,7 @@ def fit(
     aligned = None
     if orientations is not None:
         aligned = orientation_targets(orientations, data.times, names, neutral_joints, neutral_transforms[0, :, :3, :3].cpu().numpy())
-        if initial is not None:
+        if initial is not None or "none" in orientations.sources:
             # Initialize rotations from measured world frames, rather than the
             # position-only solution's arbitrary roll local minimum.
             with torch.no_grad():
@@ -368,6 +370,45 @@ def fit(
     body_chain = [
         names.index(name) for name in ("Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "LeftShoulder", "RightShoulder", "LeftArm", "RightArm")
     ]
+    fallback_ids = []
+    fallback_bases = []
+    fallback_limits = []
+    fallback_signs = []
+    if orientations is not None:
+        for side_index, side in enumerate(("Left", "Right")):
+            if orientations.sources[side_index] != "none":
+                continue
+            wrist = names.index(side + "Hand")
+            normal = np.cross(
+                neutral_joints[names.index(side + "HandIndex2")] - neutral_joints[wrist],
+                neutral_joints[names.index(side + "HandPinky2")] - neutral_joints[wrist],
+            ).astype(np.float64)
+            for index, name in enumerate(names):
+                if name == side + "Hand":
+                    direction = neutral_joints[wrist] - neutral_joints[names.index(side + "ForeArm")]
+                    limit = [1.2, 1.2, 0.6, 0.8]
+                elif name.startswith(side + "Hand") and name[-1:].isdigit():
+                    child = name[:-1] + str(int(name[-1]) + 1)
+                    if child not in names:
+                        child = name[:-1] + "End"
+                    direction = neutral_joints[names.index(child)] - neutral_joints[index]
+                    limit = [1.4, 1.4, 0.8, 0.3] if "Thumb" in name else [0.35, 2.0, 0.6 if name.endswith("1") or name.endswith("2") else 0.3, 0.25]
+                else:
+                    continue
+                basis = frame(direction.astype(np.float64), normal).astype(np.float32)
+                flex = initial_poses[:, index] @ basis[:, 1]
+                fallback_ids.append(index)
+                fallback_bases.append(basis)
+                fallback_limits.append(limit)
+                fallback_signs.append(-1.0 if np.median(flex) < 0 else 1.0)
+    fallback_basis_tensor = torch.as_tensor(np.asarray(fallback_bases), dtype=torch.float32, device="cuda")
+    fallback_limit_tensor = torch.as_tensor(fallback_limits, dtype=torch.float32, device="cuda")
+    fallback_sign_tensor = torch.as_tensor(fallback_signs, dtype=torch.float32, device="cuda")
+    rotation_weights = None
+    if aligned is not None and orientations is not None:
+        rotation_weights = torch.tensor(
+            [0.1 if orientations.sources[int(names[i].startswith("Right"))] == "none" else 1.0 for i in aligned[0]], device="cuda"
+        )
     start: float = perf_counter()
     for iteration in range(iterations):
         if fixed is not None and iteration >= iterations // 2:
@@ -458,9 +499,12 @@ def fit(
                 foot_pose_penalty(poses[:, foot_indices], foot_axes) + foot_pose_penalty(poses[:, toe_indices], foot_axes, toe_joints=True)
             )
         if orientation_data is not None:
+            assert rotation_weights is not None
             ids, target, valid = orientation_data
             orientation_error = (posed.transforms[:, ids, :3, :3] - target).square().mean((-1, -2))
-            loss = loss + options.orientation_weight * (orientation_error * valid).sum() / valid.sum().clamp_min(1) / 0.03
+            loss = loss + options.orientation_weight * (orientation_error * valid * rotation_weights).sum() / valid.sum().clamp_min(1) / 0.03
+        if fallback_ids:
+            loss = loss + hand_limit_penalty(poses[:, fallback_ids], fallback_basis_tensor, fallback_limit_tensor, fallback_sign_tensor)
         loss = loss + options.offset_prior * (head_offset / (0.1 if use_ears else 0.05)).square().mean()
         loss = loss + 0.02 * rotation_raw.square().mean()
         if fixed is None and warmup <= iteration < shape_end:
@@ -571,8 +615,9 @@ def fit(
         head_offset.detach().cpu().numpy(),
         bone_scales.cpu().numpy(),
         options.display_twists,
-        orientations is not None,
+        orientations is not None and "quest" in orientations.sources,
         np.concatenate(meshes)[:, np.asarray(FOOT_VERTICES)].mean(axis=2) if options.use_feet else None,
         selection.vertices,
         visible,
+        HandOrientationSource(*orientations.sources) if orientations is not None else None,
     )

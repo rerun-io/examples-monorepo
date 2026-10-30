@@ -14,6 +14,7 @@ from serde.json import to_json
 
 from selfcap_soma.catalog import Observations
 from selfcap_soma.fitting import FitResult
+from selfcap_soma.hand_pose import HandOrientationSource
 from selfcap_soma.observations import coco_joint_names, video_time_column
 
 
@@ -51,6 +52,8 @@ class Report:
     target_exo_vs_quest: Residual
     target_fit_vs_exo: Residual
     limitations: tuple[str, ...]
+    hand_orientation_source: HandOrientationSource | None = None
+    """Per-hand measured orientation source; none uses the position-derived fallback."""
 
 
 def residual(a: Float64[ndarray, "... 3"], b: Float64[ndarray, "... 3"]) -> Residual:
@@ -118,6 +121,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
             else "Low-LOD mesh with procedural twists and pose correctives disabled.",
             "Temporal prior is timestamp-scaled velocity change in translation and axis-angle parameters.",
         ),
+        result.hand_orientation_source,
     )
     (output / "report.json").write_text(to_json(report))
     recording = rr.RecordingStream("selfcap-soma-prototype")
@@ -188,6 +192,8 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         recording.log("/parameters/upper_body_vertices", rr.Tensor(result.upper_body_vertices), static=True)
     if result.visible_joints is not None:
         recording.log("/parameters/visible_joints", rr.Tensor(result.visible_joints), static=True)
+    if result.hand_orientation_source is not None:
+        recording.log("/parameters/hand_orientation_source", rr.TextDocument(to_json(result.hand_orientation_source)), static=True)
     recording.log("/parameters/identity", rr.Tensor(result.identity), static=True)
     recording.log("/parameters/head_attachment", rr.Tensor(result.head_attachment), static=True)
     recording.log("/parameters/head_anchor", rr.TextDocument(result.head_anchor), static=True)

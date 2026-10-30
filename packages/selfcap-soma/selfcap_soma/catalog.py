@@ -8,7 +8,7 @@ import pyarrow as pa
 from datafusion import col, lit
 from jaxtyping import Float64, Int64
 from numpy import ndarray
-from rerun.catalog import CatalogClient
+from rerun.catalog import CatalogClient, DatasetEntry
 from scipy.spatial.transform import Rotation, Slerp
 from serde import serde
 from serde.json import from_json
@@ -16,6 +16,35 @@ from serde.json import from_json
 from selfcap_soma.observations import quest_sample_times
 
 ExoSource: TypeAlias = Literal["rtmw", "sapiens2"]
+
+
+@dataclass(frozen=True, slots=True)
+class RigPaths:
+    exo: tuple[str, ...]
+    """Calibrated exocentric rig paths."""
+    oak: str
+    """Egocentric OAK rig path."""
+    quest: str
+    """Quest tracked-head rig path."""
+
+
+def rig_paths_from_kinds(kinds: dict[str, str]) -> RigPaths:
+    """Resolve roles from converter metadata, never from a fixed phone count."""
+    exo = tuple(sorted(path for path, kind in kinds.items() if kind == "exo"))
+    oak = [path for path, kind in kinds.items() if kind == "ego"]
+    quest = [path for path, kind in kinds.items() if kind == "quest"]
+    if not exo or len(oak) != 1 or len(quest) != 1:
+        raise ValueError(f"expected exo rigs and exactly one OAK/Quest rig, got {kinds}")
+    return RigPaths(exo, oak[0], quest[0])
+
+
+def read_rigs(dataset: DatasetEntry, segment: str) -> RigPaths:
+    """Read static rig-kind metadata in one query."""
+    view = dataset.filter_segments(segment)
+    columns = [name for name in view.schema().column_names() if name.startswith("/world/rig_") and name.endswith(":kind") and name.count("/") == 2]
+    table = view.filter_contents([name.split(":")[0] for name in columns]).reader(index=None).select(*columns).to_arrow_table()
+    kinds = {name.split(":")[0]: str(table[name].drop_null()[0].as_py()[0]) for name in columns if len(table[name].drop_null())}
+    return rig_paths_from_kinds(kinds)
 
 
 def exo_columns(columns: list[str], source: ExoSource) -> tuple[str, str]:
@@ -107,7 +136,9 @@ def interpolate_head(
 
 def read_window(url: str, dataset: str, segment: str, start: float, end: float, stride: int, source: ExoSource = "rtmw") -> Observations:
     """Use one materialization per entity group, with window pushdown."""
-    view = CatalogClient(url).get_dataset(dataset).filter_segments(segment)
+    entry = CatalogClient(url).get_dataset(dataset)
+    view = entry.filter_segments(segment)
+    rigs = read_rigs(entry, segment)
     sync_table = view.filter_contents(["/__properties/time_sync"]).reader(index=None).to_arrow_table()
     sync_column = next(name for name in sync_table.column_names if name.endswith(":time_sync:record_json"))
     sync_text = sync_table[sync_column].drop_null()[0].as_py()[0]
@@ -137,7 +168,7 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     scores = np.asarray(table[confidence].to_pylist(), dtype=np.float64).reshape(-1, 133)
     head_sample, hand_sample = quest_sample_times(times, offset)
 
-    hand_path, head_path = "/world/gt/coco133_xyz", "/world/rig_05"
+    hand_path, head_path = "/world/gt/coco133_xyz", rigs.quest
     hands_column = f"{hand_path}:Points3D:positions"
     translation = f"{head_path}:Transform3D:translation"
     quaternion = f"{head_path}:Transform3D:quaternion"

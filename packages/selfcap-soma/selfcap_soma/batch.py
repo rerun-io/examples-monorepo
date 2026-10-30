@@ -22,7 +22,7 @@ from serde.json import from_json, to_json
 
 from selfcap_soma.catalog import ExoSource, read_window
 from selfcap_soma.fitting import Calibration, FitOptions, fit
-from selfcap_soma.hand_pose import read_orientations
+from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
 from selfcap_soma.output import save
 from selfcap_soma.overlay import Config as OverlayConfig
 from selfcap_soma.overlay import main as export
@@ -30,7 +30,7 @@ from selfcap_soma.shape_frames import select_shape_frames
 from selfcap_soma.shoulders import subset
 from selfcap_soma.temporal import group_jitter
 
-VERSION = "soma-batch-v5-exact-time-full-mesh"
+VERSION = "soma-batch-v6-position-hand-fallback"
 SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 
 
@@ -112,6 +112,8 @@ class Checkpoint:
     """Integrity check for a completed local layer."""
     layer_bytes: int = 0
     """Completed local layer size."""
+    hand_orientation_source: HandOrientationSource | None = None
+    """Measured Quest orientation availability for each hand."""
     mesh_sample_sha256: str = ""
     """First/last mesh samples retained as a readback integrity check."""
     readback_verified: bool = False
@@ -237,6 +239,9 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         began = perf_counter()
         calibration = from_json(Calibration, (directory / "calibration.json").read_text())
         orientations = read_orientations(raw, data.times, data.offset_ms)
+        state.hand_orientation_source = HandOrientationSource(*orientations.sources)
+        (directory / "hand-orientation-source.json").write_text(to_json(state.hand_orientation_source))
+        print("hand_orientation_source", to_json(state.hand_orientation_source), flush=True)
         result = fit(
             data,
             config.assets,

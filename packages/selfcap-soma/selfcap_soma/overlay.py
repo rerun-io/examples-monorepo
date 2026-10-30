@@ -201,7 +201,7 @@ def main(config: Config) -> None:
         valid = abs(track.times[indices] - times) <= 0.05
         base = 91 if track.name.endswith("/left") else 112
         rgb_evidence[valid, base : base + 21] = track.points[indices[valid]]
-    paths = [f"/world/rig_04/cam_{cam:02d}" for cam in (1, 2)]
+    paths = [f"/world/rig_{rgb.rig:02d}/cam_{cam:02d}" for cam in (1, 2)]
     table = dataset.filter_segments(segment).filter_contents([*paths, *(f"{path}/pinhole" for path in paths)]).reader(index=None).to_arrow_table()
     egos = [rgb]
     for cam, path in enumerate(paths, start=1):
@@ -277,7 +277,7 @@ def main(config: Config) -> None:
         if ego.cam != 0:
             evidence[~np.isfinite(rgb_evidence).all(-1)] = np.nan
         seen = observed_points(pixels.astype(np.float64), evidence, np.isfinite(evidence).all(-1).astype(np.float64))
-        projections.append((f"/world/rig_04/cam_{ego.cam:02d}/pinhole", pixels, seen))
+        projections.append((f"/world/rig_{ego.rig:02d}/cam_{ego.cam:02d}/pinhole", pixels, seen))
     for pinhole, pixels, seen in projections:
         path = f"{pinhole}/pred/soma_x/joints_uv"
         log_joint_overlay(recording, path, times, pixels, seen)

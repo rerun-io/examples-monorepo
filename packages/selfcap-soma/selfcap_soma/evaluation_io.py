@@ -12,7 +12,7 @@ from rerun.catalog import DatasetEntry
 from rerun.chunk import RrdReader
 
 from selfcap_soma.camera_geometry import Camera, EgoCamera
-from selfcap_soma.catalog import ExoSource, seconds
+from selfcap_soma.catalog import ExoSource, read_rigs, seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,8 +35,9 @@ def nearest_indices(source: Float64[ndarray, "m"], target: Float64[ndarray, "n"]
 
 def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"], source: ExoSource = "rtmw") -> tuple[list[PhoneView], EgoCamera]:
     view = dataset.filter_segments(segment)
-    cameras = [f"/world/rig_{i:02d}/cam_00" for i in range(4)]
-    oak = "/world/rig_04"
+    rigs = read_rigs(dataset, segment)
+    cameras = [f"{rig}/cam_00" for rig in rigs.exo]
+    oak = rigs.oak
     oak_camera = f"{oak}/cam_00"
     static = view.filter_contents([*cameras, *(f"{c}/pinhole" for c in cameras), f"{oak_camera}/pinhole"]).reader(index=None).to_arrow_table()
     columns = view.schema().column_names()
@@ -91,7 +92,7 @@ def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]
     transforms[:, :3, 3] = np.asarray(poses[f"{oak}:Transform3D:translation"].to_pylist(), dtype=np.float64).reshape(-1, 3)
     size = first(static, f"{oak_camera}/pinhole:Pinhole:resolution")
     ego = EgoCamera(
-        4,
+        int(oak.rsplit("_", 1)[1]),
         0,
         first(static, f"{oak_camera}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T,
         first(static, f"{oak_camera}/pinhole:simplecv.components.DistortionCoefficients"),
@@ -136,10 +137,11 @@ def read_image_tracks(path: Path) -> list[ImageTrack]:
 def read_egohand_rgb(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]) -> list[ImageTrack]:
     """Read registered RGB hand image evidence once, preserving absent detections."""
     view = dataset.filter_segments(segment)
+    oak = read_rigs(dataset, segment).oak
     paths = [
         column.split(":", 1)[0]
         for column in view.schema().column_names()
-        if column.startswith("/world/rig_04/cam_00/pinhole/") and "/egohand/" in column and column.endswith(":Points2D:positions")
+        if column.startswith(f"{oak}/cam_00/pinhole/") and "/egohand/" in column and column.endswith(":Points2D:positions")
     ]
     if not paths:
         return []

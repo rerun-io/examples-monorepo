@@ -203,7 +203,7 @@ def evaluate(
     paths = [
         name.split(":", 1)[0]
         for name in columns
-        if name.startswith("/world/rig_04/cam_00/pinhole/") and "/egohand/" in name and name.endswith(":Points2D:positions")
+        if name.startswith(f"/world/rig_{camera.rig:02d}/cam_00/pinhole/") and "/egohand/" in name and name.endswith(":Points2D:positions")
     ]
     if len(paths) != 2:
         raise ValueError(f"expected two EgoHand RGB tracks, got {paths}")
