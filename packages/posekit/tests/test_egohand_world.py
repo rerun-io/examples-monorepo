@@ -1,7 +1,10 @@
 """World placement and display-mesh logic are independent of model weights."""
 
 import numpy as np
+import pytest
 from scipy.spatial.transform import Rotation
+
+pytest.importorskip("egohand_inference", reason="requires the egohand Pixi environment")
 
 from posekit.apis.egohand_comparison import EgoCamera
 from posekit.apis.egohand_world import camera_world_poses, make_mesh_lod, mesh_normals

@@ -1,8 +1,8 @@
-"""Projection and robust triangulation reused from selfcap-curate/keypoints.py.
+"""Projection and robust triangulation copied from selfcap-curate/keypoints.py.
 
-Copied without behavioral changes from local commit d2be70660. This small
-inference subset avoids installing the detector stack in the fitting env.
-The parity test compares source AST and numeric projection against upstream.
+Synced from integration commit 013ae4a5. Keeping this inference-only subset
+avoids installing selfcap-curate's detector stack in the SOMA fitting env.
+The AST parity test guards every copied geometry definition.
 """
 
 from dataclasses import dataclass
@@ -11,11 +11,12 @@ from itertools import combinations
 import cv2
 import numpy as np
 import torch
-from jaxtyping import Float32, Float64, UInt8
+from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
 INLIER_PX: float = 8.0
+MIN_DETECTION_SCORE: float = 0.3
 EGO_POSE_MAX_GAP_S: float = 0.1
 
 
@@ -25,6 +26,16 @@ class Camera:
     world_T_cam: Float64[ndarray, "4 4"]  # RDF camera to Quest world, metres.
     radial: tuple[float, float]  # OpenCV k1,k2; refined iOS pinholes are rectified (zero).
     entity: str  # Camera node for the per-view overlay.
+    size: tuple[int, int] = (1920, 1080)  # Calibrated image width and height.
+
+
+@dataclass(frozen=True, slots=True)
+class TriangulationBatch:
+    xyz: Float32[ndarray, "n j 3"]
+    n_views: UInt8[ndarray, "n j"]
+    confidence: Float32[ndarray, "n j"]
+    inliers: Bool[ndarray, "n v j"]
+    max_reprojection_px: Float32[ndarray, "n j"]
 
 
 def project(camera: Camera, xyz: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 3"]:
@@ -50,31 +61,46 @@ class EgoCamera:
     world_T_rig: Float64[ndarray, "p 4 4"]  # Head pose x OAK mount, RDF rig to Quest world.
 
 
+def camera_transforms(
+    times_s: Float64[ndarray, "n"], stamps: Float64[ndarray, "p"],
+    world_T_rig: Float64[ndarray, "p 4 4"], rig_T_cam: Float64[ndarray, "4 4"],
+) -> Float64[ndarray, "n 4 4"]:
+    """Interpolate rig translation/rotation, then apply the camera lever arm; gaps over 100 ms stay missing."""
+    output: Float64[ndarray, "n 4 4"] = np.full((len(times_s), 4, 4), np.nan)
+    if len(stamps) < 2:
+        return output
+    from scipy.spatial.transform import Rotation, Slerp
+
+    right = np.clip(np.searchsorted(stamps, times_s), 1, len(stamps) - 1)
+    left = right - 1
+    gap = stamps[right] - stamps[left]
+    usable = (times_s >= stamps[0]) & (times_s <= stamps[-1]) & (gap <= EGO_POSE_MAX_GAP_S)
+    clipped = np.clip(times_s, stamps[0], stamps[-1])
+    alpha = ((clipped - stamps[left]) / np.maximum(gap, 1e-12))[:, None]
+    translation = (1.0 - alpha) * world_T_rig[left, :3, 3] + alpha * world_T_rig[right, :3, 3]
+    rotation = Slerp(stamps, Rotation.from_matrix(world_T_rig[:, :3, :3]))(clipped).as_matrix()
+    world_T_cam_r = rotation @ rig_T_cam[:3, :3]
+    world_T_cam_t = translation + np.einsum("nij,j->ni", rotation, rig_T_cam[:3, 3])
+    output[:] = np.eye(4)
+    output[:, :3, :3], output[:, :3, 3] = world_T_cam_r, world_T_cam_t
+    output[~usable] = np.nan
+    return output
+
+
 def project_ego(camera: EgoCamera, times_s: Float64[ndarray, "n"], xyz: Float32[ndarray, "n j 3"]) -> Float32[ndarray, "n j 2"]:
     """World points at each time through the rig pose (lerp + slerp) and the full OAK lens model; missing when unprojectable.
 
     Points behind the camera or outside the calibrated field (beyond the image corners' rays, where the rational model can fold
     back into the image) stay NaN, as do times outside the pose track or across a pose gap.
     """
-    from scipy.spatial.transform import Rotation, Slerp
-
-    right = np.clip(np.searchsorted(camera.times_s, times_s), 1, len(camera.times_s) - 1)
-    left = right - 1
-    gap = camera.times_s[right] - camera.times_s[left]
-    usable = (times_s >= camera.times_s[0]) & (times_s <= camera.times_s[-1]) & (gap <= EGO_POSE_MAX_GAP_S)
-    clipped = np.clip(times_s, camera.times_s[0], camera.times_s[-1])
-    alpha = ((clipped - camera.times_s[left]) / np.maximum(gap, 1e-12))[:, None]
-    translation = (1.0 - alpha) * camera.world_T_rig[left, :3, 3] + alpha * camera.world_T_rig[right, :3, 3]
-    rotation = Slerp(camera.times_s, Rotation.from_matrix(camera.world_T_rig[:, :3, :3]))(clipped).as_matrix()
-    world_T_cam_r = rotation @ camera.rig_T_cam[:3, :3]
-    world_T_cam_t = translation + np.einsum("nij,j->ni", rotation, camera.rig_T_cam[:3, 3])
-    local = np.einsum("njk,nkl->njl", xyz.astype(np.float64) - world_T_cam_t[:, None, :], world_T_cam_r)  # R^T (x - t), row vectors
+    transforms: Float64[ndarray, "n 4 4"] = camera_transforms(times_s, camera.times_s, camera.world_T_rig, camera.rig_T_cam)
+    local = np.einsum("njk,nkl->njl", xyz.astype(np.float64) - transforms[:, None, :3, 3], transforms[:, :3, :3])
     width, height = camera.size
     corners = np.array([[0.0, 0.0], [width - 1.0, 0.0], [0.0, height - 1.0], [width - 1.0, height - 1.0]]).reshape(-1, 1, 2)
     max_radius = 1.05 * float(np.linalg.norm(cv2.undistortPoints(corners, camera.K, camera.distortion).reshape(-1, 2), axis=1).max())
     with np.errstate(divide="ignore", invalid="ignore"):
         normalized = local[..., :2] / local[..., 2:3]
-    good = usable[:, None] & (local[..., 2] > 1e-3) & np.isfinite(normalized).all(-1) & (np.linalg.norm(normalized, axis=-1) <= max_radius)
+    good = (local[..., 2] > 1e-3) & np.isfinite(normalized).all(-1) & (np.linalg.norm(normalized, axis=-1) <= max_radius)
     uv = np.full((*xyz.shape[:2], 2), np.nan, dtype=np.float32)
     if good.any():
         pixels, _ = cv2.projectPoints(local[good].reshape(-1, 1, 3), np.zeros(3), np.zeros(3), camera.K, camera.distortion)
@@ -84,7 +110,7 @@ def project_ego(camera: EgoCamera, times_s: Float64[ndarray, "n"], xyz: Float32[
 
 def triangulate_frames(
     cameras: list[Camera], uv: Float64[ndarray, "n v j 2"], scores: Float64[ndarray, "n v j"], threshold: float = INLIER_PX, chunk: int = 2048
-) -> tuple[Float32[ndarray, "n j 3"], UInt8[ndarray, "n j"], Float32[ndarray, "n j"]]:
+) -> TriangulationBatch:
     """All view pairs, >=0.5° ray separation, weighted DLT and two gated refits, for every frame and joint at once.
 
     float64 on the GPU when there is one: each DLT is the smallest eigenvector of its 4x4 normal matrix, which agrees
@@ -96,8 +122,10 @@ def triangulate_frames(
         np.zeros((frames, joints), np.uint8),
         np.zeros((frames, joints), np.float32),
     )
+    masks: Bool[ndarray, "n v j"] = np.zeros((frames, views, joints), dtype=bool)
+    max_errors: Float32[ndarray, "n j"] = np.full((frames, joints), np.nan, dtype=np.float32)
     if views < 2 or not frames:
-        return xyz, counts, confidence
+        return TriangulationBatch(xyz, counts, confidence, masks, max_errors)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def tensor(array: ndarray) -> Tensor:
@@ -110,7 +138,7 @@ def triangulate_frames(
     radial = tensor(np.array([c.radial for c in cameras]))
     cos_min = float(np.cos(np.deg2rad(0.5)))
 
-    def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> tuple[ndarray, ndarray, ndarray]:
+    def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> tuple[ndarray, ndarray, ndarray, ndarray, ndarray]:
         norm_np = np.stack(
             [
                 cv2.undistortPoints(
@@ -121,7 +149,7 @@ def triangulate_frames(
             axis=1,
         )
         observed, score, norm = tensor(observed_np), tensor(scores_np), tensor(norm_np)
-        valid = (score >= 0.3) & torch.isfinite(score) & torch.isfinite(observed).all(-1) & torch.isfinite(norm).all(-1)
+        valid = (score >= MIN_DETECTION_SCORE) & torch.isfinite(score) & torch.isfinite(observed).all(-1) & torch.isfinite(norm).all(-1)
         norm = torch.where(torch.isfinite(norm), norm, 0.0)
         clean = torch.where(valid, score, 0.0)
         root = torch.sqrt(clean)
@@ -179,9 +207,11 @@ def triangulate_frames(
             torch.where(good[..., None], points, torch.nan).float().cpu().numpy(),
             torch.where(good, count, 0).to(torch.uint8).cpu().numpy(),
             torch.where(good, torch.where(inliers, clean, 0.0).sum(1) / count.clamp(min=1), 0.0).float().cpu().numpy(),
+            (inliers & good[:, None, :]).cpu().numpy(),
+            torch.where(good, torch.where(inliers, residual(points), 0.0).amax(1), torch.nan).float().cpu().numpy(),
         )
 
     for begin in range(0, frames, chunk):
         stop = min(begin + chunk, frames)
-        xyz[begin:stop], counts[begin:stop], confidence[begin:stop] = solve(uv[begin:stop], scores[begin:stop])
-    return xyz, counts, confidence
+        xyz[begin:stop], counts[begin:stop], confidence[begin:stop], masks[begin:stop], max_errors[begin:stop] = solve(uv[begin:stop], scores[begin:stop])
+    return TriangulationBatch(xyz, counts, confidence, masks, max_errors)

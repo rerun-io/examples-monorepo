@@ -197,9 +197,10 @@ def main(config: Config) -> None:
     # reach shape, pose, initialization, or temporal regularization targets.
     for index, view in enumerate(views):
         others = [other for i, other in enumerate(views) if i != index]
-        triangulated, _, confidence = triangulate_frames(
+        triangulation = triangulate_frames(
             [v.camera for v in others], np.stack([v.pixels for v in others], axis=1), np.stack([v.scores for v in others], axis=1)
         )
+        triangulated, confidence = triangulation.xyz, triangulation.confidence
         camera_fit = solve(replace(data, exo=triangulated.astype(np.float64), confidence=confidence.astype(np.float64)))
         candidate = mapped(camera_fit, data)
         projected = project(view.camera, candidate.reshape(-1, 3)).reshape(-1, 133, 3)

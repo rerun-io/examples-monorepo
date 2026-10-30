@@ -38,6 +38,8 @@ def read_quest_centers(calibration: DatasetEntry, base: DatasetEntry, segment: s
     path: str = f"/world/rig_{rig:02d}"
     view = base.filter_segments(segment)
     videos: set[str] = {item.entity_path for item in catalog_components(view.schema()) if item.archetype == "VideoStream"}
+    if not any(f"{path}/cam_{cam:02d}/pinhole/video" in videos for cam in (0, 1)):
+        return []
     poses: pa.Table = (
         view.filter_contents(path)
         .reader(index="video_time")

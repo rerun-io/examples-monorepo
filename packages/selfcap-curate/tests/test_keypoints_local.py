@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import rerun as rr
 from frozen_v2 import fixture_sync, session_episode
+from rrd_fixtures import VIDEO_FIXTURES
 
 import selfcap_curate.keypoints as keypoints
 from selfcap_curate.apis import keypoints as api
@@ -44,7 +45,7 @@ def test_cli_uses_local_poses_instead_of_equal_provenance_catalog(tmp_path, monk
     local.mkdir()
     key = "2025-12-30__65d00748__ep001"
     base = tmp_path / "base.rrd"
-    synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False)
+    synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False, video=VIDEO_FIXTURES / "av1_48f_192x160.mp4")
     sync = calibration(tmp_path / "catalog.rrd", depth=4.0)
     calibration(local / f"selfcap__{key}.rrd", depth=9.0)
 
@@ -117,7 +118,7 @@ def test_cli_skips_unprocessable_episodes_before_models_and_runs_others(
     base_files = []
     for key in keys:
         base = tmp_path / f"{key}.base.rrd"
-        synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False)
+        synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False, video=VIDEO_FIXTURES / "av1_48f_192x160.mp4")
         base_files.append(base)
     servers = []
     real_server = rr.server.Server

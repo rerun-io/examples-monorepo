@@ -11,7 +11,8 @@ from numpy import ndarray
 from selfcap_curate.keypoints import INLIER_PX, Camera, Triangulated, project, select_wearers, triangulate_frames
 
 
-# The per-frame implementation as of 9d7032286, kept verbatim as the reference.
+# Independent per-frame SVD reference from 9d7032286. Acceptance follows the
+# current policy (>=0.3); the old >=0.7 display threshold discarded valid support.
 def reference_select_wearer(camera: Camera, anchors: Float64[ndarray, "3 3"], boxes: Float64[ndarray, "p 4"], scores: Float64[ndarray, "p"]) -> int:
     """Nearest head/wrist rectangle distance, head weight two, reject cost >=0.5."""
     projected = project(camera, anchors)
@@ -48,7 +49,7 @@ def reference_triangulate(
             for c, p in zip(cameras, uv, strict=True)
         ]
     )
-    valid = (scores >= 0.7) & np.isfinite(scores) & np.isfinite(uv).all(2) & np.isfinite(norm).all(2)
+    valid = (scores >= 0.3) & np.isfinite(scores) & np.isfinite(uv).all(2) & np.isfinite(norm).all(2)
     norm, clean = np.where(np.isfinite(norm), norm, 0.0), np.where(valid, scores, 0.0)
     if not np.any(valid.sum(0) >= 2):
         return Triangulated(xyz, counts, confidence)
