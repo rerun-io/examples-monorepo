@@ -79,17 +79,20 @@ def s1(segment: str) -> dict:
     return metrics
 
 
-def ego_geometry_signature(path: Path) -> str:
-    """Exact camera geometry on rig_04/05, independent of chunk partitioning."""
-    rows=[]
+def ego_geometry_signature(path: Path, rigs: tuple[str, str]) -> str:
+    """Exact geometry on the resolved wearable rigs, independent of chunk partitioning."""
+    rows=[];seen=set()
     for chunk in RrdReader(path).stream():
         entity=str(chunk.entity_path)
-        if not entity.startswith(('/world/rig_04','/world/rig_05')):continue
+        matching=[rig for rig in rigs if entity==rig or entity.startswith(rig+'/')]
+        if not matching:continue
         batch=chunk.to_record_batch()
         stamps=[None]*len(batch) if chunk.is_static else batch['video_time'].cast('int64').to_pylist()
         for name in batch.schema.names:
             if name.startswith(('Transform3D:','Pinhole:')):
+                seen.update(matching)
                 rows.extend((entity,name,t,value) for t,value in zip(stamps,batch[name].to_pylist()))
+    if set(rigs)-seen:raise ValueError(f'{path}: missing wearable geometry {set(rigs)-seen}')
     return hashlib.sha256(json.dumps(sorted(rows,key=lambda x:(x[0],x[1],-1 if x[2] is None else x[2])),sort_keys=True).encode()).hexdigest()
 
 
@@ -101,6 +104,8 @@ def s2(segment: str, decision: dict | None=None) -> dict:
     refined=bool(decision.get('refined',False))
     with private(segment) as server:
         dataset=server.client().get_dataset(DATASET_NAME)
+        record=open_segment(dataset,segment)
+        rigs=(f'/world/rig_{record.layout.oak_rig:02d}',f'/world/rig_{record.layout.quest_rig:02d}')
         if refined:
             state_path=next((work/'s1/calib').glob('*.json'))
             state=from_json(CalibSession,Path(decision['calib_path']).read_text())
@@ -109,8 +114,8 @@ def s2(segment: str, decision: dict | None=None) -> dict:
         else:shutil.copy2(source,final/f'{segment}.rrd')
         current=final/f'{segment}.rrd'
         fallback=None
-        if refined and ego_geometry_signature(current)!=ego_geometry_signature(source):
-            fallback='Refinement changed rig_04/05 transform or pinhole; retained S1 geometry'
+        if refined and ego_geometry_signature(current,rigs)!=ego_geometry_signature(source,rigs):
+            fallback=f'Refinement changed {rigs} transform or pinhole; retained S1 geometry'
             print('EXO_REFINEMENT_REJECTED',segment,fallback,flush=True)
             refined=False
             shutil.copy2(source,current)
