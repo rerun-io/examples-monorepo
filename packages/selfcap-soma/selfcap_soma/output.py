@@ -16,6 +16,7 @@ from selfcap_soma.catalog import Observations
 from selfcap_soma.fitting import FitResult
 from selfcap_soma.hand_pose import HandOrientationSource
 from selfcap_soma.observations import coco_joint_names, video_time_column
+from selfcap_soma.quality import assess_quality, log_quality
 
 
 @serde(deny_unknown_fields=True)
@@ -126,6 +127,9 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     (output / "report.json").write_text(to_json(report))
     recording = rr.RecordingStream("selfcap-soma-prototype")
     recording.save(output / "fit.rrd")
+    quality = assess_quality(mapped.astype(np.float64), data.exo, data.hands)
+    (output / "quality.json").write_text(to_json(quality))
+    log_quality(recording, quality)
     recording.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
     edges = [(int(parent) - 1, child - 1) for child, parent in enumerate(result.parents) if child > 0 and parent > 0]
     recording.log(
