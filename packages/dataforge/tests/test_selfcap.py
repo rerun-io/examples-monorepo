@@ -258,6 +258,9 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
         assert hidden[f"{pinhole}/quest_coco133_uv_projected"] == rrb.EntityBehavior(visible=False)
         assert hidden["/world/gt"] == rrb.EntityBehavior(visible=False)
         assert hidden["/world/pred"] == rrb.EntityBehavior(visible=False)
+        assert hidden["/world/gt/sapiens2"] == rrb.EntityBehavior(visible=False)
+        if rig < 4:
+            assert hidden[f"{pinhole}/sapiens2"] == rrb.EntityBehavior(visible=False)
         assert f"{pinhole}/camera_centers" not in hidden
         assert f"{pinhole}/**" in contents
         assert "/world/gt/**" in contents and "/world/pred/**" in contents
