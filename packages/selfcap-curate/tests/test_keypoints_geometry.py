@@ -8,6 +8,7 @@ from selfcap_curate.keypoints import (
     DISPLAY_CONFIDENCE,
     HEADSET_COVERED,
     Camera,
+    EgoCamera,
     Keypoints2D,
     Keypoints3D,
     SelectedView,
@@ -132,14 +133,17 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
     camera = cameras()[0]
     xyz = np.tile(np.linspace([-0.3, -0.3, 3.5], [0.3, 0.3, 4.5], 133), (2, 1, 1))
     confidence = np.full((2, 133), 0.9)
+    confidence[:, [3, 4, 6]] = [0.7, 0.85, 1.0]
     confidence[:, 5] = DISPLAY_CONFIDENCE - 0.05
     assert {0, 1, 2, 23, 90} <= set(HEADSET_COVERED.tolist()) and not {3, 4, 5, 7, 91} & set(HEADSET_COVERED.tolist())
     uv = np.tile(project(camera, xyz[0])[:, :2], (2, 1, 1)).astype(np.float32)
     scores = np.full((2, 133), 0.9)
+    scores[:, [3, 4, 6]] = [0.7, 0.85, 1.0]
     scores[:, 7] = 0.5
     result = three_d(np.array([0.0, 0.04]), xyz, confidence, {"phone": SelectedView(uv, scores)}, {"phone": camera}, 25.0)
     output = tmp_path / "complete.rrd"
-    write_keypoints(base, output, result)
+    ego = EgoCamera(4, 0, camera.K, np.zeros(14), (1920, 1080), np.eye(4), result.times, np.stack([camera.world_T_cam] * 2))
+    write_keypoints(base, output, result, ego=(ego,), quest_hands=(result.times, result.xyz))
 
     def row(entity, kind):
         batch = next(c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and str(c.entity_path) == entity)
@@ -154,3 +158,17 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
     projected = row("/world/rig_00/cam_00/pinhole/coco133_uv_projected", "Points2D")
     assert np.isnan(projected[hidden3d]).all()
     np.testing.assert_allclose(np.delete(projected, hidden3d, axis=0), np.delete(uv[0], hidden3d, axis=0), atol=1e-3)
+
+    for entity, kind in (
+        ("/world/pred/rtmw_triangulated/coco133_xyz", "Points3D"),
+        ("/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv", "Points2D"),
+        ("/world/rig_00/cam_00/pinhole/coco133_uv_projected", "Points2D"),
+        ("/world/rig_04/cam_00/pinhole/coco133_uv_projected", "Points2D"),
+    ):
+        batch = next(c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and str(c.entity_path) == entity)
+        packed = np.asarray(batch.column(f"{kind}:colors").to_pylist()[0], dtype=np.uint32)[[3, 4, 6]]
+        rgb = np.array([list(int(value).to_bytes(4, "big")[:3]) for value in packed])
+        np.testing.assert_allclose(rgb, [[255, 0, 0], [255, 255, 0], [0, 255, 0]], atol=1)
+        np.testing.assert_array_equal(np.asarray(batch.column(next(name for name in batch.schema.names if name.endswith(":confidences"))).to_pylist()[0])[[3, 4, 6]], np.array([0.7, 0.85, 1.0], dtype=np.float32))
+    quest = next(c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and str(c.entity_path) == "/world/rig_04/cam_00/pinhole/quest_coco133_uv_projected")
+    assert "Points2D:colors" not in quest.schema.names  # Its blue annotation colour stays in control.

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from conftest import read_chunks
 from simplecv.rerun_custom_types import confidence_scores_to_rgb
 
@@ -105,3 +106,26 @@ def test_2d_rows_are_coloured_by_confidence_like_3d(tmp_path: Path) -> None:
     colours = np.asarray(batch.column("Points2D:colors").to_pylist()[0], dtype=np.uint32)
     expected = confidence_scores_to_rgb(confidence[:1, :, None])[0]
     np.testing.assert_array_equal(colours, [int.from_bytes(bytes([*rgb, 255]), "big") for rgb in expected.astype(np.uint8).tolist()])
+
+
+@pytest.mark.parametrize("color_range", [(0.0, 1.0), (0.7, 1.0)])
+def test_keypoint_colour_range_preserves_scores_across_all_writers(tmp_path: Path, color_range: tuple[float, float]) -> None:
+    """Only colours stretch: endpoints are red/green, midpoint yellow, raw scores survive."""
+    low, high = color_range
+    confidence = np.full((1, 133), high, dtype=np.float32)
+    confidence[0, :5] = [low - 0.1, low, (low + high) / 2.0, high, high + 0.1]
+    positions = np.ones((1, 133, 3), dtype=np.float32)
+    times = np.array([0], dtype=np.int64)
+    target = tmp_path / "range.rrd"
+    with writing.atomic_recording(target, recording_id="range", send_properties=False) as recording:
+        hands.log_keypoints3d(recording, times_ns=times, frame_indices=None, positions=positions, confidence=confidence, color_range=color_range)
+        hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=None, positions=positions[..., :2], confidence=confidence, color_range=color_range)
+        hands.log_projections(recording, [((0, 0), positions[..., :2])], times_ns=times, frame_indices=None, confidence=confidence, camera_model="pinhole", color_range=color_range)
+    batches = [chunk.to_record_batch() for chunk in read_chunks(target) if not chunk.is_static]
+    assert len(batches) == 3
+    for batch in batches:
+        kind = "Points3D" if "Points3D:positions" in batch.schema.names else "Points2D"
+        np.testing.assert_array_equal(batch.column(next(name for name in batch.schema.names if name.endswith(":confidences"))).to_pylist(), confidence)
+        packed = batch.column(f"{kind}:colors").to_pylist()[0][:5]
+        rgb = np.array([list(value.to_bytes(4, "big")[:3]) for value in packed])
+        np.testing.assert_allclose(rgb, [[255, 0, 0], [255, 0, 0], [255, 255, 0], [0, 255, 0], [0, 255, 0]], atol=1)

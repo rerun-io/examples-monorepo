@@ -440,7 +440,7 @@ def write_keypoints(
     Keypoint rows go through dataforge's shared writer: 133 joints per row, NaN for missing joints, and a confidence
     per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. Joints under
     DISPLAY_CONFIDENCE are written as missing, and the shown 3D joints are projected into every calibrated phone
-    through its lens model. ``ego`` OAK cameras get the same projections plus the Quest hands (``quest_hands``),
+    through its lens model. Colours stretch from red at DISPLAY_CONFIDENCE to green at 1.0; scores stay raw. ``ego`` OAK cameras get the same projections plus the Quest hands (``quest_hands``),
     through the full OAK lens model: the viewer's Pinhole has no distortion, which put overlays up to 220 px off.
     """
     reader = RrdReader(calib)
@@ -503,6 +503,7 @@ def write_keypoints(
                 positions=shown,
                 confidence=result.confidence,
                 path=coco133_xyz_path(pred="rtmw_triangulated"),
+                color_range=(DISPLAY_CONFIDENCE, 1.0),
             )
             for phone, selected in result.selected.items():
                 scores: Float32[ndarray, "n 133"] = selected.scores.astype(np.float32)
@@ -513,6 +514,7 @@ def write_keypoints(
                     frame_indices=None,
                     positions=np.where(((scores >= DISPLAY_CONFIDENCE) & visible)[..., None], selected.xy, np.float32(np.nan)),
                     confidence=scores,
+                    color_range=(DISPLAY_CONFIDENCE, 1.0),
                 )
             log_projections(
                 recording,
@@ -523,6 +525,7 @@ def write_keypoints(
                 times_ns=stamps,
                 frame_indices=None,
                 confidence=result.confidence,
+                color_range=(DISPLAY_CONFIDENCE, 1.0),
                 camera_model="phones: pinhole with radial k1, k2 (selfcap-curate exo calibration)"
                 + ("; OAK: OpenCV Brown-Conrady, 14 coefficients (factory)" if ego else ""),
             )
