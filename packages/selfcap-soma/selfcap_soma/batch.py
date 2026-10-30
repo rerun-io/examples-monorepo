@@ -21,10 +21,11 @@ from selfcap_soma.hand_pose import read_orientations
 from selfcap_soma.output import save
 from selfcap_soma.overlay import Config as OverlayConfig
 from selfcap_soma.overlay import main as export
+from selfcap_soma.shape_frames import select_shape_frames
 from selfcap_soma.shoulders import subset
 from selfcap_soma.temporal import group_jitter
 
-VERSION = "soma-batch-v2-body-acceleration"
+VERSION = "soma-batch-v3-supported-shape-frames"
 SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 
 
@@ -165,6 +166,8 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     )
     for array in (data.times, data.exo, data.confidence, data.hands, data.head_rotations):
         digest.update(array.tobytes())
+    if data.support is not None:
+        digest.update(data.support.tobytes())
     # Camera/calibration changes invalidate overlays even if 3D inputs stay unchanged.
     calib = [name for name in metadata.column_names if name.startswith("property:calib:")]
     digest.update(metadata.select(calib).combine_chunks().to_batches()[0].serialize().to_pybytes())
@@ -193,13 +196,11 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     )
     if state.phase == "new":
         began = perf_counter()
-        good = np.isfinite(data.exo[:, [3, 4, 5, 6, 11, 12]]).all((1, 2))
-        good &= (data.confidence[:, [3, 4, 5, 6, 11, 12]] >= 0.7).all(1)
-        indices = np.flatnonzero(good & (data.times < 25.0))[::8]
-        if len(indices) < 10:
-            raise ValueError(f"{segment}: fewer than 10 well-observed shape frames in first 25 seconds")
+        selection = select_shape_frames(data.times, data.exo, data.confidence, data.support)
+        (directory / "shape-frames.json").write_text(to_json(selection))
+        print(f"shape frames: {len(selection.indices)}, whole-segment fallback: {selection.used_fallback}", flush=True)
         mask = np.zeros(len(data.times), dtype=bool)
-        mask[indices] = True
+        mask[selection.indices] = True
         shape = fit(subset(data, mask), config.assets, 600, config.shape_iterations, options)
         calibration = Calibration(shape.identity, shape.scale, shape.head_offset, shape.bone_scales, shape.head_attachment, shape.head_anchor)
         (directory / "calibration.json").write_text(to_json(calibration))

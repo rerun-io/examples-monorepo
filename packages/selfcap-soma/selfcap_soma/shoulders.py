@@ -24,6 +24,7 @@ def subset(data: Observations, mask: Bool[ndarray, "n"]) -> Observations:
         hands=data.hands[mask],
         head_positions=data.head_positions[mask],
         head_rotations=data.head_rotations[mask],
+        support=data.support[mask] if data.support is not None else None,
     )
 
 

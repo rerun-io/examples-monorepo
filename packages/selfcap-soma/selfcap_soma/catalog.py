@@ -6,7 +6,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import pyarrow as pa
 from datafusion import col, lit
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from scipy.spatial.transform import Rotation, Slerp
@@ -60,6 +60,8 @@ class Observations:
     """World rotations of the tracked Quest headset frame; anatomical origin unresolved."""
     offset_ms: float
     """Fixed catalog Quest offset."""
+    support: Int64[ndarray, "n 133"] | None = None
+    """Geometric inlier-view counts, when supplied by the triangulation layer."""
 
 
 def seconds(values: pa.ChunkedArray) -> Float64[ndarray, "n"]:
@@ -112,14 +114,19 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     sync = from_json(SyncRecord, sync_text)
     offset = sync.offsets_ms["quest_pose"]
 
-    position, confidence = exo_columns(view.schema().column_names(), source)
+    columns = view.schema().column_names()
+    position, confidence = exo_columns(columns, source)
     exo_path = position.split(":", 1)[0]
+    support_column = exo_path + ":support_view_count"
+    selected = ["video_time", position, confidence]
+    if support_column in columns:
+        selected.append(support_column)
     table = (
         view.filter_contents([exo_path])
         .reader(index="video_time")
         .filter(col("video_time").cast(pa.int64()) >= lit(int(start * 1e9)))
         .filter(col("video_time").cast(pa.int64()) <= lit(int(end * 1e9)))
-        .select("video_time", position, confidence)
+        .select(*selected)
         .to_arrow_table()
     )
     table = table.filter(table[position].is_valid()).take(np.arange(0, len(table), stride))
@@ -153,4 +160,5 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     ht, hp, hq = ht[keep], hp[keep], hq[keep]
     hands = interpolate_hands(seconds(hand_table["capture_time"]), np.asarray(hand_table[hands_column].to_pylist(), dtype=np.float64), hand_sample)
     positions, rotations = interpolate_head(ht, hp, hq, head_sample)
-    return Observations(times, exo, scores, hands, positions, rotations, offset)
+    support = np.asarray(table[support_column].to_pylist(), dtype=np.int64) if support_column in table.column_names else None
+    return Observations(times, exo, scores, hands, positions, rotations, offset, support)
