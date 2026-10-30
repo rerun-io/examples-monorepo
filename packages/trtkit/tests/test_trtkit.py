@@ -473,3 +473,18 @@ def test_fp16_conv_trunk_rejects_outputs_inside_the_trunk() -> None:
     )
     with pytest.raises(ValueError, match="fp16 trunk"):
         fp16_conv_trunk(onnx.helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)]))
+
+
+def test_onnx_content_hash_reads_each_file_version_once(tmp_path: Path) -> None:
+    """Workers reload models every session; the multi-GB ONNX is hashed once per (path, size, mtime), not per load."""
+    from trtkit import trt_builder
+
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"proto")
+    model.with_suffix(".onnx.data").write_bytes(b"weights")
+    first = trt_builder.onnx_content_hash(model)
+    reads = trt_builder._hash_files.cache_info().misses
+    assert trt_builder.onnx_content_hash(model) == first
+    assert trt_builder._hash_files.cache_info().misses == reads, "an unchanged file is not read again"
+    model.with_suffix(".onnx.data").write_bytes(b"other weights")
+    assert trt_builder.onnx_content_hash(model) != first, "a rewritten weight file is hashed again"
