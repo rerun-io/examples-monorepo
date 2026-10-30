@@ -98,3 +98,29 @@ def test_s2_latch_still_allows_s1_on_combined_worker(queue, monkeypatch):
     monkeypatch.setattr(storage, 'gpu_available', lambda *args: True)
     job, stage = runner.claim('gpu', 'gpu-0')
     assert (job['segment'], stage) == ('next', 's1')
+
+
+def test_launch_and_external_commands_use_configured_worktree(queue, monkeypatch):
+    from types import SimpleNamespace
+    checkout = queue / 'pinned-checkout'
+    checkout.mkdir()
+    runner.CONFIG.write_text(json.dumps({**runner.config(), 'pipeline_worktree': str(checkout),
+        'pipeline_python': str(checkout / '.pixi/envs/selfcap-curate/bin/python'), 'pipeline_pythonpath': str(checkout / 'packages')}))
+    commands = []
+    monkeypatch.setattr(runner.subprocess, 'run', lambda args, **kwargs: commands.append(args) or SimpleNamespace(returncode=1, stdout='not-found'))
+    runner.launch('s2', 1)
+    launch = commands[-1]
+    assert f'--property=WorkingDirectory={checkout}' in launch
+    assert f'--setenv=TRITON_PTXAS_BLACKWELL_PATH={checkout}/.pixi/envs/selfcap-curate/bin/ptxas' in launch
+    assert str(checkout / 'ops/selfcap-night2/runner.py') in launch
+    monkeypatch.setattr(runner, 'ROOT', queue)
+    initial = queue / 'runs/test/s1/calib'
+    initial.mkdir(parents=True)
+    (initial / 'calib.json').write_text('{}')
+    process_cwds = []
+    def popen(args, **kwargs):
+        process_cwds.append(kwargs['cwd'])
+        return SimpleNamespace(returncode=0, poll=lambda: 0)
+    monkeypatch.setattr(runner.subprocess, 'Popen', popen)
+    runner.external(['echo', '{segment}'], {'segment': 'test'}, 'soma', 5)
+    assert process_cwds == [checkout]

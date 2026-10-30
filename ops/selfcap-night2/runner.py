@@ -28,7 +28,6 @@ class InputLimitation(RuntimeError):
 
 
 ROOT=Path('/tmp/selfcap-night2');DB=ROOT/'state.sqlite';CONFIG=ROOT/'config.json'
-CWD=Path('/home/pablo/.paseo/worktrees/26sr02x6/selfcap-display-skeleton')
 PARENT='773be1d3-a483-4a1c-9fcf-6c76b243dcec'
 TZ=ZoneInfo('America/Chicago')
 
@@ -149,7 +148,7 @@ def external(command,job,stage,timeout):
     args=[part.format(**fields) for part in command]
     with (out/'command.log').open('a') as log:
         log_start=log.tell()
-        proc=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,cwd=CWD)
+        proc=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,cwd=Path(config()['pipeline_worktree']))
         try:
             deadline=time.monotonic()+timeout
             while proc.poll() is None:
@@ -368,7 +367,7 @@ def launch(role,count):
             subprocess.run(['systemctl','--user','start',name],check=True)
             continue
         cfg=config()
-        args=['systemd-run','--user',f'--unit={name}','--collect',f"--property=WorkingDirectory={cfg['pipeline_worktree']}",'--property=Restart=on-failure','--property=RestartSec=10','--setenv=CUDA_MPS_PIPE_DIRECTORY=/tmp/selfcap-mps/pipe','--setenv=OMP_NUM_THREADS=1','--setenv=PYTHONUNBUFFERED=1','--setenv=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True',f"--setenv=PYTHONPATH={cfg['pipeline_pythonpath']}",f'--setenv=TRITON_PTXAS_BLACKWELL_PATH={CWD}/.pixi/envs/selfcap-curate/bin/ptxas']
+        args=['systemd-run','--user',f'--unit={name}','--collect',f"--property=WorkingDirectory={cfg['pipeline_worktree']}",'--property=Restart=on-failure','--property=RestartSec=10','--setenv=CUDA_MPS_PIPE_DIRECTORY=/tmp/selfcap-mps/pipe','--setenv=OMP_NUM_THREADS=1','--setenv=PYTHONUNBUFFERED=1','--setenv=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True',f"--setenv=PYTHONPATH={cfg['pipeline_pythonpath']}",f"--setenv=TRITON_PTXAS_BLACKWELL_PATH={Path(cfg['pipeline_worktree'])/'.pixi/envs/selfcap-curate/bin/ptxas'}"]
         if role=='s2':args.append('--setenv=CUDA_VISIBLE_DEVICES=')
         args += [cfg['pipeline_python'],str(Path(cfg['pipeline_worktree'])/'ops/selfcap-night2/runner.py'), 'controller' if role=='controller' else 'worker']
         if role!='controller':args +=[role,str(i)]
