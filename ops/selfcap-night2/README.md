@@ -26,3 +26,19 @@ Otherwise it samples 64 seeded frames with tracked Quest hands (without a pose-b
 visibility gate), then uses the existing free-rotation PnP/refinement fit. The
 calibration records `oak_rotation_source` (`gyro` or `free`) and
 `oak_rotation_reason`. A missing Quest/OAK clock still yields an unposed OAK.
+
+### Gate-v3 release and post-main replay
+
+`release_controller.py` is pinned beside the stage scripts and packages. New labels
+use Sapiens regression <= 5 px and RTMW <= 1.5 px; exactly two CV folds are required,
+at most one may fail to converge, and the full fit must converge. Geometry, body,
+and drift gates remain unchanged.
+
+After the main 590 are terminal and their cleanup is verified, the controller stops
+all stage pools and runs `gate_redecision.py`. It reads cached landmarks and original
+S1 RTMW recordings identified by SHA256; it never starts Sol or model inference.
+The immutable snapshot, results and flip list live in `/tmp/selfcap-night2/gate-v3`.
+It restores inputs only for accepted/rejected flips, then runs those through S2 and
+SOMA with normal publication/readback/cleanup checks. Only after that barrier does
+the remaining batch100 SOMA refresh begin. A replay error leaves that barrier closed
+and notifies the operator. Original remote RRDs remain untouched.
