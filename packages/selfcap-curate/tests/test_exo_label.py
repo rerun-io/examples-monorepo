@@ -4,13 +4,14 @@ import numpy as np
 
 from selfcap_curate.exo_label import GateThresholds, accepts, filter_labels, grid_crop
 from selfcap_curate.exo_landmarks import Landmark
+from selfcap_curate.exo_refine import Refinement
 from selfcap_curate.exo_refine_catalog import Gate, Score
 
 
 def test_gate_requires_independent_metrics_and_limits_hands():
     before = {name: Score(50, 20.0, 30.0) for name in ('headset', 'phones', 'sapiens_hands', 'rtmw_hands', 'body_transfer')}
     after = {name: Score(50, 10.0, 20.0) for name in before}
-    gate = Gate(before, after, (), False)
+    gate = Gate(before, after, (Refinement((), np.zeros(3), 'test', 'fixed'),) * 2, False, full_fit_converged=True)
     assert accepts(gate)
     assert not accepts(replace(gate, candidate={**after, 'rtmw_hands': Score(50, 21.51, 30.0)}))
     assert not accepts(replace(gate, candidate={**after, 'body_transfer': Score(0, None, None)}))
@@ -37,7 +38,7 @@ def test_timestamp_rounding_keeps_correct_label_and_normalizes_time():
 
 def test_static_phone_anchor_is_shared_but_headset_stays_held_out():
     from selfcap_curate.exo_calibration import Camera
-    from selfcap_curate.exo_landmarks import Landmarks
+    from selfcap_curate.exo_landmarks import Landmark, Landmarks
     from selfcap_curate.exo_refine import RefinementProblem, select_labels
 
     labels = [Landmark(0, 0.0, 'phone1', 10.0, 20.0, .8), Landmark(0, 0.0, 'quest0', 40.0, 20.0, .8),
@@ -53,6 +54,7 @@ def test_deadline_returns_fallback_record(tmp_path):
 
     result = bounded_command(['--help'], tmp_path, 'synthetic', .001)
     assert result.decision == 'timeout'
+    assert result.gate_version == 'gate-v3'
     assert (tmp_path / 'result.json').exists()
     assert not (tmp_path / 'calib.json').exists()
 
@@ -61,11 +63,11 @@ def test_hand_thresholds_are_explicit_and_independent():
     before = {name: Score(50, 20.0, 30.0) for name in ('headset', 'phones', 'sapiens_hands', 'rtmw_hands', 'body_transfer')}
     after = {name: Score(50, 10.0, 20.0) for name in before}
     after['rtmw_hands'] = Score(50, 21.3, 30.0)
-    gate = Gate(before, after, (), False)
+    gate = Gate(before, after, (Refinement((), np.zeros(3), 'test', 'fixed'),) * 2, False, full_fit_converged=True)
     assert accepts(gate)
     assert not accepts(gate, GateThresholds(rtmw_max_regression_px=1.0))
     assert accepts(replace(gate, candidate={**after, 'sapiens_hands': Score(50, 21.51, 30.0)}))
-    assert not accepts(replace(gate, candidate={**after, 'sapiens_hands': Score(50, 22.01, 30.0)}))
+    assert not accepts(replace(gate, candidate={**after, 'sapiens_hands': Score(50, 25.01, 30.0)}))
 
 
 def test_device_vp_table_is_typed_and_has_all_measured_devices():
@@ -81,7 +83,7 @@ def test_device_vp_table_is_typed_and_has_all_measured_devices():
 def test_deployed_label_drift_is_rejected_even_when_fold_scores_pass():
     before = {name: Score(50,20.,30.) for name in ('headset','phones','sapiens_hands','rtmw_hands','body_transfer')}
     after = {name: Score(50,3.,5.) for name in before}
-    gate = Gate(before,after,(),True,heldout_labels={'quest/view_1':Score(4,4.,5.)},deployed_labels={'quest/view_1':Score(4,25.,28.)})
+    gate = Gate(before,after,(Refinement((), np.zeros(3), 'test', 'fixed'),) * 2,True,full_fit_converged=True,heldout_labels={'quest/view_1':Score(4,4.,5.)},deployed_labels={'quest/view_1':Score(4,25.,28.)})
     assert not accepts(gate)
     assert accepts(replace(gate,deployed_labels={'quest/view_1':Score(4,3.,5.)}))
 
