@@ -126,11 +126,12 @@ The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, a
 Each mask lists cameras in the static `support_camera_paths` order. A measured point needs at least two supporting cameras; temporal estimates carry `temporal_bridged` and retain the actual support count.
 Body joints use a centred median-5 jump detector and interpolation, followed by a centred Gaussian (sigma 2 frames). The result blends toward jump-cleaned measurements between 0.3 and 0.5 m/s, preserving fast motion without restoring raw jumps. This replaces displacement-biased camera-pair tracking. All operations are time symmetric; no causal delay is added. Missing runs up to 0.5 seconds are bridged; longer source gaps stay missing. Other triangulated joints retain beta 2.0; Quest hand tracking is unchanged.
 
-The default `/world/skeleton` and `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
+The default `/world/skeleton` and OAK `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
 and both 21-joint hands. Knees, ankles and feet remain in the hidden full COCO-133 layers.
 Every view uses the same confidence colours: red at 0.7, yellow at 0.85, green at 1.0, clamped outside that range.
 Low-confidence and bridged points remain visible. Blue annotation links use the shared typed keypoint archetypes and their class/keypoint IDs; custom confidence components carry per-joint and average confidence.
 Quest hands have no per-joint confidence, so tracked Quest joints use 1.0. The support masks remain available for inspection.
+Exo and Quest views project the world skeleton and SOMA mesh through their pinholes in Rerun; 3D joints use UI-point radii. OAK alone keeps explicit display projections through all 14 factory lens coefficients.
 AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
 `pinhole/pred/rtmw/coco133_uv` and `kp3d_*` fields in the same `calib` group; no external quality metrics are stored.

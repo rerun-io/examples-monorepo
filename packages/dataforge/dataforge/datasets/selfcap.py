@@ -436,7 +436,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
     def default_blueprint(self, *, show_soma_mesh: bool = False) -> rrb.Blueprint:
         """One display skeleton per view; source overlays stay in the tree for comparison.
 
-        OAK and exo use explicit lens projections. Quest views project the world skeleton.
+        OAK uses explicit lens projections. Exo and Quest use native Pinhole projection.
         The dev dataset can opt into the SOMA mesh as 3D context without showing its joints.
         """
         ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
@@ -460,12 +460,15 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
 
         def camera(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
             pinhole: str = schema.pinhole_path(rig, cam)
+            overrides = hidden.copy()
+            if rig != ego_rig:
+                overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
             return blueprints.camera_view(
                 name,
                 rig,
                 cam,
-                contents=[f"{pinhole}/**", "/world/gt/**", "/world/pred/**", *(["/world/skeleton"] if rig == quest_rig else [])],
-                overrides=hidden.copy(),
+                contents=[f"{pinhole}/**", "/world/gt/**", "/world/pred/**", *(["/world/skeleton/**"] if rig != ego_rig else [])],
+                overrides=overrides,
             )
 
         ego = rrb.Vertical(
@@ -482,7 +485,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 world_overrides[f"{schema.pinhole_path(rig, cam)}/camera_centers"] = rrb.EntityBehavior(visible=False)
         if show_soma_mesh:
             world_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
-        scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world", overrides=world_overrides)
+        scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world", overrides={**world_overrides})
         return rrb.Blueprint(
             rrb.Vertical(rrb.Horizontal(scene, ego, column_shares=[3.0, 1.2]), rrb.Horizontal(*exo), row_shares=[3.0, 2.0]),
             collapse_panels=True,

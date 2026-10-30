@@ -192,7 +192,8 @@ def test_display_writer_preserves_coco_ids_with_confidence_colours(tmp_path) -> 
     output = tmp_path / "display.rrd"
     write_keypoints(base, output, result)
     rows = {str(c.entity_path): c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and any(name.endswith(":positions") for name in c.to_record_batch().schema.names)}
-    for path, kind in (("/world/skeleton", "Points3D"), ("/world/rig_00/cam_00/pinhole/skeleton", "Points2D")):
+    assert "/world/rig_00/cam_00/pinhole/skeleton" not in rows
+    for path, kind in (("/world/skeleton", "Points3D"),):
         batch = rows[path]
         assert any(name.endswith(":confidences") for name in batch.schema.names)
         assert any(name.endswith(":average_confidence") for name in batch.schema.names)
@@ -202,8 +203,6 @@ def test_display_writer_preserves_coco_ids_with_confidence_colours(tmp_path) -> 
         assert np.isnan(points[np.r_[0:3, 9:11, 13:91]]).all()
         assert np.isfinite(points[np.r_[3:9, 11:13, 91:133]]).all()
     assert not any("LineStrips" in name for c in RrdReader(output).stream() for name in c.to_record_batch().schema.names)
-    np.testing.assert_allclose(
-        np.asarray(rows["/world/rig_00/cam_00/pinhole/skeleton"].column("Points2D:positions").to_pylist()[0])[5],
-        project(camera, xyz[0])[:, :2][5],
-        atol=1e-4,
-    )
+    static = [c.to_record_batch() for c in RrdReader(output).stream() if c.is_static and str(c.entity_path) == "/world/skeleton"]
+    radii = [batch["Points3D:radii"].to_pylist() for batch in static if "Points3D:radii" in batch.schema.names]
+    assert radii[-1] == [[-3.0]]  # UI points, independent of camera distance.

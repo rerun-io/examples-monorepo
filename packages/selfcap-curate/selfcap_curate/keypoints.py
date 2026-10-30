@@ -635,9 +635,6 @@ def write_keypoints(
             if model == "rtmw":
                 display: DisplaySkeleton = display_skeleton(result.times, result.xyz, result.confidence, quest_hands)
                 log_display_skeleton(recording, "/world/skeleton", display.positions, display.confidence, stamps)
-                for camera in result.cameras.values():
-                    pixels: Float32[ndarray, "n 133 2"] = projected(camera, display.positions)
-                    log_display_skeleton(recording, f"{camera.entity}/pinhole/skeleton", pixels, display.confidence, stamps)
                 for camera in ego:
                     log_display_skeleton(recording, f"{pinhole_path(camera.rig, camera.cam)}/skeleton",
                                          project_ego(camera, result.times, display.positions), display.confidence, stamps)

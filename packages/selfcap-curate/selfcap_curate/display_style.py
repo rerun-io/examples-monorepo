@@ -5,7 +5,8 @@ import rerun as rr
 from dataforge.hands import log_keypoints2d, log_keypoints3d
 from jaxtyping import Float32, Int64
 from numpy import ndarray
-from simplecv.data.skeleton.coco_133 import COCO_133_LINKS
+from simplecv.data.skeleton.coco_133 import COCO_133_IDS, COCO_133_LINKS
+from simplecv.rerun_custom_types import Points3DWithConfidence
 
 DISPLAY_JOINTS: Int64[ndarray, "k"] = np.r_[3:9, 11:13, 91:133]
 """Ears, shoulders, elbows, hips and hands; lower-body data stays in the source layers."""
@@ -33,8 +34,10 @@ def log_display_skeleton(
         static=True,
     )
     if positions.shape[-1] == 3:
+        recording.log(path, Points3DWithConfidence.from_fields(class_ids=0, keypoint_ids=COCO_133_IDS,
+                      show_labels=False, radii=rr.Radius.ui_points(3.0)), static=True)
         log_keypoints3d(recording, path=path, times_ns=stamps, frame_indices=None,
-                        positions=positions, confidence=confidence, color_range=(0.7, 1.0))
+                        positions=positions, confidence=confidence, color_range=(0.7, 1.0), describe=False)
     else:
         log_keypoints2d(recording, path=path, times_ns=stamps, frame_indices=None,
                         positions=positions, confidence=confidence, color_range=(0.7, 1.0))

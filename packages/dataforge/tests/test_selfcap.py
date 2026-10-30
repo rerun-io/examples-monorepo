@@ -264,7 +264,9 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
         assert f"{pinhole}/exo_landmarks" not in hidden
         assert f"{pinhole}/**" in contents
         assert "/world/gt/**" in contents and "/world/pred/**" in contents
-        assert ("/world/skeleton" in contents) == name.startswith("Quest")
+        assert ("/world/skeleton/**" in contents) == (rig != 4)
+        if rig != 4:
+            assert hidden["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=False)
     world = views["World (Quest frame, calibrated)"]
     assert world.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
     assert world.visualizer_overrides["/world/gt"] == rrb.EntityBehavior(visible=False)
@@ -275,6 +277,9 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
     dev_views = blueprint_views(SelfcapConfig().setup().default_blueprint(show_soma_mesh=True))
     dev_world = next(view for view in dev_views if str(view.name) == "World (Quest frame, calibrated)")
     assert dev_world.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
+    for view in dev_views:
+        if str(view.name).startswith(("exo", "Quest")):
+            assert view.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:
