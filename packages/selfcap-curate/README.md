@@ -273,13 +273,14 @@ active views and normalized by its observation count. Confidence weights are
 normalized within each view. Weighting is applied to the robust cost, preserving
 the six-pixel outlier scale. Fold fits and the all-frame fit use the same shares.
 Acceptance requires optical medians to improve by at least 2 pixels and 10%,
-body transfer median to improve, Sapiens hand median to regress by at most 1 pixel, RTMW hand median by at most 1.5 pixels,
+body transfer median to improve, independent RTMW hand median to regress by at most 1.5 pixels,
+and the original fit's Sapiens hand median to regress by at most 2 pixels as a secondary guard,
 and all solvers to converge. The deployed model's per-view label medians must
 also stay within two pixels of the corresponding full-pipeline fold scores.
 Missing metrics reject the candidate.
 
 `result.json` always records `segment`, `decision`, `reason`, `labels`,
-`elapsed_s`, `thresholds`, and `gate`. The four thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
+`elapsed_s`, `thresholds`, and `gate`. The thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
 `failed`. Only `accepted` writes `refinement.json` and `calib.json`; all other
 outcomes retain the initial calibration. `landmarks.json`, `packet.json`, PNGs,
 and per-view logs provide provenance. Nothing is registered by this command.

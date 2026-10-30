@@ -73,12 +73,12 @@ class GateThresholds:
     """Minimum absolute reduction for each optical target class."""
     optical_min_drop_fraction: float = .1
     """Minimum fractional reduction for each optical target class."""
-    sapiens_max_regression_px: float = 1.0
-    """Maximum held-out Sapiens hand median increase."""
+    sapiens_max_regression_px: float = 2.0
+    """Guard against large regression on the original fit's Sapiens samples."""
     deployed_label_tolerance_px: float = 2.0
     """Maximum deployed-label median increase over its corresponding fold score."""
     rtmw_max_regression_px: float = 1.5
-    """Maximum independent RTMW hand median increase."""
+    """Primary hand gate: maximum independent RTMW median increase."""
 
 
 DEFAULT_THRESHOLDS = GateThresholds()

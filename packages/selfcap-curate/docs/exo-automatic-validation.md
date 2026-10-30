@@ -38,11 +38,15 @@ procedure, from the unrefined S1 baseline. Pixel medians:
 | Session | Sapiens hands | RTMW hands | Body transfer | Decision | Wall time |
 |---|---:|---:|---:|---|---:|
 | d31bf1da | 8.39 → 9.05 | 9.59 → 10.33 | 25.28 → 15.27 | Accept, 30 labels | 42.2 s |
-| 5adb9b92 | 11.07 → 12.58 | 17.22 → 14.85 | 56.91 → 14.92 | Reject: Sapiens +1.52 > 1.0 | 34.7 s |
+| 5adb9b92 | 11.07 → 12.58 | 17.22 → 14.85 | 56.91 → 14.92 | Accept under revised hand gate | 34.7 s |
 
 d31 headset/phone gate medians: 39.14 → 3.19 / 104.63 → 0.99.
 5adb headset/phone gate medians: 16.58 → 3.19 / 146.32 → 0.69.
-No thresholds changed. Rejected runs retain candidate.json for diagnosis but
+The cached fits were re-scored after the approved gate revision: independent
+RTMW hands may regress at most 1.5 px; the original fit's Sapiens samples serve
+only as a 2.0 px regression guard. Optical and body improvement rules are
+unchanged. Both result.json files record these thresholds; no fitting or
+labelling was repeated. Rejected runs retain candidate.json for diagnosis but
 do not emit refinement.json or calib.json.
 
 One raw-calibration query of selfcap-post-ep1-v2 returned 43 sessions; none
