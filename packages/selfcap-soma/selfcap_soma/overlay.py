@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 import rerun as rr
 import trimesh
 from jaxtyping import Bool, Float32, Float64
@@ -85,13 +84,13 @@ def mesh_vertex_rows(column: pa.Array | pa.ChunkedArray) -> Float32[ndarray, "n 
     array = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
     if array.null_count:
         raise ValueError("mesh vertex rows must not be null")
-    lengths = pc.list_value_length(array).to_numpy(zero_copy_only=False)
+    lengths = array.value_lengths().to_numpy(zero_copy_only=False)
     if len(lengths) and np.any(lengths != lengths[0]):
         raise ValueError("mesh vertex rows must have uniform vertex counts")
-    vectors = pc.list_flatten(array)
+    vectors = array.flatten()
     if vectors.null_count:
         raise ValueError("mesh vertices must not be null")
-    values = pc.list_flatten(vectors).to_numpy(zero_copy_only=False).astype(np.float32, copy=False)
+    values = vectors.flatten().to_numpy(zero_copy_only=False).astype(np.float32, copy=False)
     count = int(lengths[0]) if len(lengths) else 0
     return values.reshape(len(array), count, 3)
 
