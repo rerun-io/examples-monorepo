@@ -55,6 +55,15 @@ Quality rank and start point 0.5. The refined entry shares all layer file refere
 and applies a saved `refined = true` table filter; its underlying registrations are
 not a physical refined subset. The original recording blueprint is reused.
 
+## Later REPLACE investigation
+
+The apparent server stall was subsequently traced to CPU-bound, quadratic schema
+recomputation under the global catalog write lock, not a deadlock or FD leak.
+Both 0.38.1 and 0.41.0 show the same scaling. See
+[the investigation](replace-investigation.md), the public three-file
+[reproduction](repro_replace_scaling.py), and the unfiled
+[issue draft](replace-issue-draft.md). Both isolated test servers were stopped.
+
 ## Evidence collected before the pause
 
 The 0.38.1 CatalogClient could list, read schemas, query a reader, and register a
@@ -71,7 +80,7 @@ and no separate tables or assets. A two-dataset test restore (5,534 segment/laye
 took 21.7 s; a warm recovery took 9.5 s. Linear extrapolation of the first result is
 about 32 s for all 8,192 references, excluding cold I/O and per-entry overhead.
 
-**Do not swap the shared server yet.** A repeated full REPLACE registration on the
+**Initial observation, clarified by the later investigation:** A repeated full REPLACE registration on the
 test server while its viewer was open stalled, and even catalog listing timed out
 at 20 s. Closing the viewer did not recover it; only the isolated test unit was
 restarted. The restore tool now skips identical layer URIs and blueprint references;
