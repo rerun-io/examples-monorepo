@@ -184,3 +184,24 @@ def test_controller_recovery_does_not_replace_a_new_claim(queue, monkeypatch, st
         runner.controller()
     with original_connect() as db:
         assert tuple(db.execute("select state,owner,updated from jobs").fetchone()) == ("s2", "new-owner", 200.0)
+
+
+@pytest.mark.parametrize('retry,expected', [(False, '0'), (True, '1')])
+def test_soma_blocks_cuda_only_for_first_fault_retry(queue, monkeypatch, retry, expected):
+    from types import SimpleNamespace
+
+    cfg = runner.config()
+    runner.write_config({**cfg, 'pipeline_worktree': str(queue)})
+    monkeypatch.setattr(runner, 'ROOT', queue)
+    initial = queue / 'runs/test/s1/calib'
+    initial.mkdir(parents=True)
+    (initial / 'calib.json').write_text('{}')
+    observed = []
+
+    def popen(args, **kwargs):
+        observed.append(kwargs['env']['CUDA_LAUNCH_BLOCKING'])
+        return SimpleNamespace(returncode=0, poll=lambda: 0)
+
+    monkeypatch.setattr(runner.subprocess, 'Popen', popen)
+    runner.external(['echo', '{segment}'], {'segment': 'test', 'info': json.dumps({'gpu_fault_retry_pending': retry})}, 'soma', 5)
+    assert observed == [expected]

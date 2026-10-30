@@ -13,6 +13,7 @@ from pathlib import Path
 
 import runner
 from gate_redecision import flips_finished
+from soma_timing import timing_window
 
 ROOT = Path("/tmp/selfcap-night2")
 
@@ -131,7 +132,14 @@ def snapshot():
         if cfg.get("run590_phase") == "main"
         else remaining_soma * means["soma"] / 6 / 60
     )
+    with runner.connect() as db:
+        soma_events = [
+            (r["ts"], r["seconds"], r["segment"]) for r in db.execute("select e.ts,e.seconds,e.segment from events e join jobs j on j.segment=e.segment where e.stage='soma' and e.status='ok' and not coalesce(json_extract(j.info,'$.soma_cuda_launch_blocking'),0)")
+        ]
+    timing = timing_window(soma_events, cfg.get("soma_normal_timing_start", 0.0), cfg.get("soma_normal_timing_jobs", 20))
+    atomic_json(ROOT / "soma-normal-timing.json", timing)
     return {
+        "soma_normal_timing": timing,
         "phase": cfg.get("run590_phase", "main"),
         "main_terminal": sum(terminal(r) for r in main),
         "main_total": 590,

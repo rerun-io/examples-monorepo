@@ -52,3 +52,10 @@ MPS, retry affected sessions with fresh processes. A session already marked with
 it does not trip the shared stage failure latch. Use `CUDA_LAUNCH_BLOCKING=1` and a
 non-MPS CUDA context for the first retry so an asynchronous fault cannot poison
 other clients and the traceback identifies the failing operation.
+
+Normal SOMA jobs stay outside MPS with asynchronous CUDA execution. Only a job
+marked `gpu_fault_retry_pending` uses `CUDA_LAUNCH_BLOCKING=1`; the retry consumes
+that marker and a further fault is parked. `soma_normal_timing_start` defines a
+20-completion timing window that excludes jobs already running at the change and
+blocking retries. The controller includes it as `soma_normal_timing` in milestone
+reports and writes `/tmp/selfcap-night2/soma-normal-timing.json`.

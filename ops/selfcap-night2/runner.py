@@ -148,7 +148,10 @@ def external(command,job,stage,timeout):
     args=[part.format(**fields) for part in command]
     with (out/'command.log').open('a') as log:
         log_start=log.tell()
-        proc=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,cwd=Path(config()['pipeline_worktree']))
+        environment = os.environ.copy()
+        if stage == 'soma':
+            environment['CUDA_LAUNCH_BLOCKING'] = '1' if json.loads(job.get('info', '{}')).get('gpu_fault_retry_pending') else '0'
+        proc=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,cwd=Path(config()['pipeline_worktree']),env=environment)
         try:
             deadline=time.monotonic()+timeout
             while proc.poll() is None:
@@ -212,6 +215,10 @@ def work(role,index):
                 if labels.exists():info['decision']['landmarks_path']=str(labels)
                 target='calib_input_limited' if decision['decision']=='skipped' else ('labelled' if decision['decision'] in ('accepted','rejected') else 'label_timeout')
             else:
+                retry_blocking = bool(info.pop('gpu_fault_retry_pending', False))
+                info['soma_cuda_launch_blocking'] = retry_blocking
+                if retry_blocking:
+                    info['gpu_fault_retries'] = info.get('gpu_fault_retries', 0) + 1
                 from storage import verify_publication
                 info['s2_readback']=verify_publication(seg,manifest=ROOT/'runs'/seg/'publish-receipts.json',include_soma=False)
                 external(config()['soma_command'],job,'soma',1200)
@@ -243,6 +250,8 @@ def work(role,index):
                 notify(f'Repeated isolated SOMA GPU fault; parked {seg}: {str(error)[-1800:]}')
                 continue
             if isinstance(error, InfrastructureError) or is_infrastructure_error(detail):
+                if stage == 'soma' and is_gpu_fault(detail):
+                    info['gpu_fault_retry_pending'] = True
                 info['infrastructure_stage']=stage
                 info['infrastructure_reason']=str(error)
                 with owned_claim(job,stage,name) as c:
