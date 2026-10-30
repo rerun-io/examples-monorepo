@@ -13,6 +13,7 @@ from scipy.sparse import lil_matrix
 from scipy.spatial.transform import Rotation
 from serde import serde
 
+from selfcap_curate.calibration_objective import ObjectiveShares, block_weights, robust_loss
 from selfcap_curate.device_tables import GRID, FocalProfile
 from selfcap_curate.quest_fit import Correspondences, pairs
 from selfcap_curate.records import SessionEpisode, finite
@@ -148,7 +149,8 @@ def triangulate(cameras: dict[str, Camera], views: dict[str, BodyObservation]) -
 
 
 def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, Camera], *, max_nfev: int = 80,
-           anchors: Callable[[dict[str, Camera]], Float64[ndarray, "a"]] | None = None) -> BundleResult:
+           anchors: Callable[[dict[str, Camera]], Float64[ndarray, "a"]] | None = None,
+           objective: ObjectiveShares | None = None, anchor_weights: Float64[ndarray, "a"] | None = None) -> BundleResult:
     """Optimize poses/body points with fixed intrinsics and optional optical anchors."""
     phones: list[str] = sorted(cameras)
     pi: dict[str, int] = {p: i for i, p in enumerate(phones)}
@@ -169,6 +171,18 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
     logf = np.array([np.log(cameras[p].parameters[6]) for p in phones])
     initial = np.concatenate([np.r_[cameras[p].parameters[:6], logf[pi[p]]] for p in phones] + [np.asarray(points).ravel()])
     anchor_count = 0 if anchors is None else len(anchors(cameras))
+    loss_weights = None
+    if objective is not None:
+        hand_views = np.concatenate([np.full(len(stacked[p].world), i, dtype=np.int64) for i, p in enumerate(phones)])
+        hand_confidence = np.ones(len(hand_views))
+        hand_weights = block_weights(hand_views, hand_confidence, objective.hands)
+        body_order = np.concatenate([np.flatnonzero(obs[:, 1] == i) for i in range(nc)])
+        body_weights = block_weights(obs[:, 1].astype(np.int64), obs[:, 4] ** 2, objective.body)[body_order]
+        if anchor_weights is None and anchor_count:
+            raise ValueError('Normalized anchors require explicit weights')
+        loss_weights = np.r_[np.repeat(hand_weights, 2) / 2.0, np.repeat(body_weights, 2) / 2.0,
+                             np.zeros(0) if anchor_weights is None else anchor_weights]
+
 
     def unpack(values: Float64[ndarray, "n"]) -> dict[str, Camera]:
         c = values[: 7 * nc].reshape(nc, 7)
@@ -186,7 +200,9 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
         for i, p in enumerate(phones):
             mask = obs[:, 1] == i
             uv = cams[p].project(xyz[obs[mask, 0].astype(int)])
-            r = (uv[:, :2] - obs[mask, 2:4]) * obs[mask, 4:5]
+            r = uv[:, :2] - obs[mask, 2:4]
+            if objective is None:
+                r *= obs[mask, 4:5]
             r[uv[:, 2] <= 0.0] = 1e3
             errors.append(r.ravel())
         if anchors is not None:
@@ -208,8 +224,13 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
         sparsity[2 * nh + 2 * len(obs):, :7 * nc] = 1
     for i in range(nc):
         sparsity[:, 7 * i + 6] = 0
-    result = least_squares(residual, initial, jac_sparsity=sparsity, loss="cauchy", f_scale=6.0, x_scale="jac", max_nfev=max_nfev, method="trf")
-    body_error = np.linalg.norm(residual(result.x)[2 * nh : 2 * nh + 2 * len(obs)].reshape(-1, 2), axis=1) / np.maximum(obs[:, 4], 1e-6)
+    result = least_squares(residual, initial, jac_sparsity=sparsity, loss="cauchy" if loss_weights is None else robust_loss(loss_weights), f_scale=6.0, x_scale="jac", max_nfev=max_nfev, method="trf",
+                           ftol=1e-6 if objective is not None else 1e-8,
+                           xtol=1e-6 if objective is not None else 1e-8,
+                           gtol=1e-6 if objective is not None else 1e-8)
+    body_error = np.linalg.norm(residual(result.x)[2 * nh : 2 * nh + 2 * len(obs)].reshape(-1, 2), axis=1)
+    if objective is None:
+        body_error /= np.maximum(obs[:, 4], 1e-6)
     return BundleResult(unpack(result.x), float(result.cost), float(np.median(body_error)) if len(body_error) else None, bool(result.success))
 
 

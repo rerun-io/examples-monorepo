@@ -1,7 +1,7 @@
 """Catalog inputs and held-out transfer checks for the exo candidate solver."""
 
 import hashlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +12,7 @@ from serde import serde
 from serde.json import from_json
 
 from selfcap_curate import catalog_io
+from selfcap_curate.calibration_objective import ObjectiveShares, block_weights
 from selfcap_curate.exo_calibration import BODY, BodyObservation, Camera, bundle, triangulate
 from selfcap_curate.exo_landmarks import Landmarks, read_landmarks
 from selfcap_curate.exo_refine import FocalSource, Refinement, RefinementProblem, predict_labels, select_labels, solve
@@ -78,6 +79,10 @@ class Gate:
     """Models retained for exact replay of the held-out predictions."""
     passes: bool
     """Every scored metric has no median regression; all five metrics must exist."""
+    heldout_labels: dict[str, Score] = field(default_factory=dict)
+    """Per-view label scores pooled from the full held-out procedures."""
+    deployed_labels: dict[str, Score] = field(default_factory=dict)
+    """Final all-frame model label residuals, including each view."""
     policy: str = "alternating label frames; alternating 10s blocks with 200ms guard; RTMW hands stride 3; body stride 6, leave-one-view-out"
     """Deterministic holdout and independent transfer definitions."""
 
@@ -196,11 +201,11 @@ def residuals(inputs: Inputs, model: Refinement, fold: int) -> dict[str, list[fl
     return output
 
 
-def polish(inputs: Inputs, problem: RefinementProblem, model: Refinement, fold: int | None) -> Refinement:
+def polish(inputs: Inputs, problem: RefinementProblem, model: Refinement, fold: int | None, objective: ObjectiveShares | None = None) -> Refinement:
     """Polish poses/body points from the optical solution, retaining its fixed lens anchors.
 
     Training body observations use the same time-block split as hand fitting.
-    The optical offset stays a nuisance parameter; it is never a wearable pose.
+    Quest points and wearable transforms remain unchanged.
     """
     cameras = {str(i): camera for i, camera in enumerate(model.cameras)}
     hands = {str(i): hand for i, hand in enumerate(problem.hands)}
@@ -227,12 +232,22 @@ def polish(inputs: Inputs, problem: RefinementProblem, model: Refinement, fold: 
     repeats = np.array([max(1, round(20 / keys.count(key))) for key in keys])
     weights = 2.0 * np.sqrt([label.confidence for label in problem.landmarks.labels])[:, None]
 
+    anchor_weights = None
+    if objective is not None:
+        repeats[:] = 1
+        weights[:] = 1.0
+        views = np.array([label.view for label in problem.landmarks.labels], dtype=np.int64)
+        confidence = np.array([label.confidence for label in problem.landmarks.labels])
+        head = np.array([label.target_id.startswith('quest') for label in problem.landmarks.labels])
+        anchor_weights = np.repeat(block_weights(views, confidence * head, objective.headset)
+                                   + block_weights(views, confidence * ~head, objective.phones), 2) / 2.0
+
     def anchors(candidate: dict[str, Camera]) -> Float64[ndarray, "a"]:
         ordered = tuple(candidate[str(i)] for i in range(len(model.cameras)))
         errors = (predict_labels(problem, ordered, model.head_translation_m) - targets) * weights
         return np.repeat(errors, repeats, axis=0).ravel()
 
-    result = bundle(hands, body, cameras, max_nfev=80, anchors=anchors)
+    result = bundle(hands, body, cameras, max_nfev=400 if objective is not None else 120, anchors=anchors, objective=objective, anchor_weights=anchor_weights)
     polished = tuple(result.cameras[str(i)] for i in range(len(model.cameras)))
     assert all(before.parameters[6:].tobytes() == after.parameters[6:].tobytes()
                for before, after in zip(model.cameras, polished, strict=True)), "Body polish must preserve every intrinsic"
@@ -242,19 +257,27 @@ def polish(inputs: Inputs, problem: RefinementProblem, model: Refinement, fold: 
 
 def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[float, ...] | None = None,
              focal_record: str | None = None, static_phones: bool = False, landmark_target_count: int | None = None,
-             body_polish: bool = False) -> tuple[Refinement, Gate]:
+             body_polish: bool = False, objective: ObjectiveShares | None = None) -> tuple[Refinement, Gate]:
     """Fit both holdout folds, report transfer, then fit the deployable all-data model."""
     baseline = Refinement(inputs.problem.cameras, np.zeros(3), inputs.problem.landmarks.digest, "table")
     fit_problem = inputs.problem
     pools: dict[str, dict[str, list[float]]] = {"baseline": {}, "candidate": {}}
     models = []
+    label_pools = {}
     for fold in (0, 1):
         problem = replace(select_labels(fit_problem, fold, static_phones=static_phones), hands=heldout_hands(inputs, fold, train=True))
-        model = replace(solve(problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count),
+        model = replace(solve(problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count, objective=objective),
                         label_layer_hash=inputs.problem.landmarks.digest)
         if body_polish:
-            model = polish(inputs, problem, model, fold)
+            model = polish(inputs, problem, model, fold, objective)
         models.append(model)
+        test_labels = select_labels(fit_problem, 1 - fold)
+        predicted = predict_labels(test_labels, model.cameras, model.head_translation_m)
+        distances = np.linalg.norm(predicted - np.array([[label.u, label.v] for label in test_labels.landmarks.labels]), axis=1)
+        for label, distance in zip(test_labels.landmarks.labels, distances, strict=True):
+            kind = 'quest' if label.target_id.startswith('quest') else 'phone'
+            for key in (f'{kind}/all', f'{kind}/view_{label.view}'):
+                label_pools.setdefault(key, []).append(float(distance))
         for name, fit in (("baseline", baseline), ("candidate", model)):
             for metric, values in residuals(inputs, fit, fold).items():
                 pools[name].setdefault(metric, []).extend(values)
@@ -270,10 +293,23 @@ def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[f
         before, after = scores["baseline"][metric].median, candidate.median
         if before is None or after is None or after > before:
             passes = False
-    final = solve(fit_problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count)
+    final = solve(fit_problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count, objective=objective)
     if body_polish:
-        final = polish(inputs, fit_problem, final, None)
+        final = polish(inputs, fit_problem, final, None, objective)
     gate = Gate(scores["baseline"], scores["candidate"], tuple(models), passes and final.converged and all(model.converged for model in models))
+    predicted = predict_labels(fit_problem, final.cameras, final.head_translation_m)
+    distances = np.linalg.norm(predicted - np.array([[label.u, label.v] for label in fit_problem.landmarks.labels]), axis=1)
+    deployed = {}
+    for kind in ('quest', 'phone'):
+        for view in (-1, *range(len(final.cameras))):
+            values = np.array([distance for label, distance in zip(fit_problem.landmarks.labels, distances, strict=True)
+                               if label.target_id.startswith(kind) and (view == -1 or label.view == view)])
+            deployed[f'{kind}/all' if view == -1 else f'{kind}/view_{view}'] = Score(len(values), float(np.median(values)) if len(values) else None,
+                                                                               float(np.percentile(values, 90)) if len(values) else None)
+    heldout = {key: Score(len(values), float(np.median(values)), float(np.percentile(values, 90))) for key, values in label_pools.items()}
+    gate = replace(gate, deployed_labels=deployed, heldout_labels=heldout)
+    if objective is not None:
+        gate = replace(gate, policy=gate.policy + "; fixed total headset/phone/hand/body shares; raw-pixel robust loss; final-model label sanity checked")
     if static_phones:
         gate = replace(gate, policy=gate.policy + "; static phone anchors shared in both training folds; phone score is in-sample consistency, not independent validation")
     return final, gate

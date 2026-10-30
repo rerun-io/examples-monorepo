@@ -252,23 +252,34 @@ failed or timed-out attempts reuse their completed packet and label files.
 Use a new directory when source calibration or annotations change.
 
 The tool samples four facing headset frames per view, and one frame for static
-phones. Phone lenses seen at grazing angles are omitted. Crops carry a source
+phones. Every other phone whose predicted centre falls inside the image receives a
+540-pixel crop, including grazing-angle candidates. Crops carry a source
 pixel grid; Sol runs read-only with medium reasoning and the fast tier on the
-default personal account. Coordinates must fall inside the corresponding crop;
+default personal account. Headsets and phones use separate calls; missing
+front-facing phone targets get one automatic retry with the other identified
+phones as context. Phone assignments must agree with a front-facing optical
+axis and lie within 240 source pixels of the initial prediction. Coordinates
+must fall inside the corresponding crop;
 timestamps are canonicalized within one microsecond. A local dark-component snap
 moves headset labels at most five source pixels.
 
 Both fit folds share the static phone anchors. Their phone residual is therefore
 an **in-sample consistency check**, not independent validation. Headset frames
 and 10-second hand blocks are held out; body transfer uses independent RTMW
-observations. Sparse optical targets retain the total loss weight of 20 samples
-per view/target, preserving the original dense-label estimator's balance.
+observations. The robust objective uses fixed relative block shares for headset anchors,
+phone anchors, hands, and body (1:0.25:1.5:0.5), each divided equally among
+active views and normalized by its observation count. Confidence weights are
+normalized within each view. Weighting is applied to the robust cost, preserving
+the six-pixel outlier scale. Fold fits and the all-frame fit use the same shares.
 Acceptance requires optical medians to improve by at least 2 pixels and 10%,
-body transfer median to improve, Sapiens hand median to regress by at most 1 pixel, RTMW hand median by at most 1.5 pixels,
-and all solvers to converge. Missing metrics reject the candidate.
+body transfer median to improve, independent RTMW hand median to regress by at most 1.5 pixels,
+and the original fit's Sapiens hand median to regress by at most 2 pixels as a secondary guard,
+and all solvers to converge. The deployed model's per-view label medians must
+also stay within two pixels of the corresponding full-pipeline fold scores.
+Missing metrics reject the candidate.
 
 `result.json` always records `segment`, `decision`, `reason`, `labels`,
-`elapsed_s`, `thresholds`, and `gate`. The four thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
+`elapsed_s`, `thresholds`, and `gate`. The thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
 `failed`. Only `accepted` writes `refinement.json` and `calib.json`; all other
 outcomes retain the initial calibration. `landmarks.json`, `packet.json`, PNGs,
 and per-view logs provide provenance. Nothing is registered by this command.

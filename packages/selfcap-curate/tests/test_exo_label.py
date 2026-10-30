@@ -64,7 +64,8 @@ def test_hand_thresholds_are_explicit_and_independent():
     gate = Gate(before, after, (), False)
     assert accepts(gate)
     assert not accepts(gate, GateThresholds(rtmw_max_regression_px=1.0))
-    assert not accepts(replace(gate, candidate={**after, 'sapiens_hands': Score(50, 21.1, 30.0)}))
+    assert accepts(replace(gate, candidate={**after, 'sapiens_hands': Score(50, 21.51, 30.0)}))
+    assert not accepts(replace(gate, candidate={**after, 'sapiens_hands': Score(50, 22.01, 30.0)}))
 
 
 def test_device_vp_table_is_typed_and_has_all_measured_devices():
@@ -75,3 +76,30 @@ def test_device_vp_table_is_typed_and_has_all_measured_devices():
     assert table.devices['Dragon-413A7CC1'].focal_px == 888.7573979270643
     assert table.devices['Titanium-57BB9E1A'].focal_px == 894.9294280422055
     assert all(device.low_px <= device.focal_px <= device.high_px for device in table.devices.values())
+
+
+def test_deployed_label_drift_is_rejected_even_when_fold_scores_pass():
+    before = {name: Score(50,20.,30.) for name in ('headset','phones','sapiens_hands','rtmw_hands','body_transfer')}
+    after = {name: Score(50,3.,5.) for name in before}
+    gate = Gate(before,after,(),True,heldout_labels={'quest/view_1':Score(4,4.,5.)},deployed_labels={'quest/view_1':Score(4,25.,28.)})
+    assert not accepts(gate)
+    assert accepts(replace(gate,deployed_labels={'quest/view_1':Score(4,3.,5.)}))
+
+
+def test_phone_filter_rejects_back_facing_and_distant_identity_substitutions():
+    from selfcap_curate.exo_label import Panel, filter_phone_labels
+
+    panels = [Panel(0,1.,['phone1'],(0,0,540,540),'crop','source',(250.,250.),.8),
+              Panel(0,1.,['phone2'],(0,0,540,540),'crop2','source',(250.,250.),.1)]
+    close = Landmark(0,1.,'phone1',260.,240.,.9)
+    far = Landmark(0,1.,'phone1',500.,500.,.9)
+    hidden = Landmark(0,1.,'phone2',260.,240.,.9)
+    assert filter_phone_labels([close,far,hidden],panels) == [close]
+
+
+def test_phone_filter_keeps_large_but_supported_initial_pose_error():
+    from selfcap_curate.exo_label import Panel, filter_phone_labels
+
+    panel = Panel(1,1.,['phone0'],(0,0,540,540),'crop','source',(250.,250.),.7)
+    mark = Landmark(1,1.,'phone0',470.,250.,.9)
+    assert filter_phone_labels([mark],[panel]) == [mark]
