@@ -105,7 +105,7 @@ def claim(role,name):
             c.execute("update jobs set state='label_timeout',owner=null,updated=? where ordinal<? and state in ('s1_done','labelling') and (ordinal>0 or ?) and (s1_ready<? or (owner is null and ? >= ?))",(now,cfg['limit'],bool(cfg['label_command']),now-1200,now,cfg['label_cutoff']))
         job=None;stage=role
         if role=='gpu':
-            job=None if cfg.get('s2_paused',False) or cfg.get('s2_separate',False) else c.execute("select * from jobs where ordinal<? and state in ('labelled','label_timeout') order by ordinal limit 1",(cfg['limit'],)).fetchone();stage='s2'
+            job=None if cfg.get('s2_paused',False) or cfg.get('s2_separate',False) or stage_paused(c,'s2') else c.execute("select * from jobs where ordinal<? and state in ('labelled','label_timeout') order by ordinal limit 1",(cfg['limit'],)).fetchone();stage='s2'
             pending=c.execute("select count(*) from jobs where ordinal<? and state not in ('queued','done','failed','calib_input_limited')",(cfg['limit'],)).fetchone()[0]
             if job is None and now<cfg['s1_cutoff'] and pending<cfg['max_inflight'] and not stage_paused(c,'s1'):
                 from storage import storage_available, gpu_available

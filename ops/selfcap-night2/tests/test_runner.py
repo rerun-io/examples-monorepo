@@ -75,3 +75,26 @@ def test_atomic_config_writer_readers_see_only_complete_documents(queue):
         stop.set()
         thread.join()
     assert not errors
+
+
+@pytest.mark.parametrize('role', ['gpu', 's2'])
+def test_s2_latch_blocks_both_worker_roles(queue, role):
+    with runner.connect() as db:
+        runner.stage_result(db, 's2', False)
+        runner.stage_result(db, 's2', False)
+        runner.stage_result(db, 's2', False)
+    assert runner.claim(role, role + '-0') is None
+
+
+def test_s2_latch_still_allows_s1_on_combined_worker(queue, monkeypatch):
+    import storage
+    cfg = runner.config()
+    runner.CONFIG.write_text(json.dumps({**cfg, 's1_cutoff': 1e20}))
+    with runner.connect() as db:
+        for _ in range(3):
+            runner.stage_result(db, 's2', False)
+        db.execute("insert into jobs values('next',1,'queued',null,0,0,'{}',null)")
+    monkeypatch.setattr(storage, 'storage_available', lambda *args: True)
+    monkeypatch.setattr(storage, 'gpu_available', lambda *args: True)
+    job, stage = runner.claim('gpu', 'gpu-0')
+    assert (job['segment'], stage) == ('next', 's1')
