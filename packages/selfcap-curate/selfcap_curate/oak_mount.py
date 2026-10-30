@@ -61,7 +61,7 @@ def gyro_mount(session: str, episodes: list[SessionEpisode]) -> GyroFit:
 
 def solve_oak(
     session: str, episodes: list[SessionEpisode], intrinsic: Intrinsic, device: str, fixed_rotation: Float64[ndarray, "3 3"] | None = None,
-    *, weighted: bool = False,
+    *, weighted: bool = False, gate_image_speed: bool = True,
 ) -> OakFit:
     """Fit mapped fingers; optionally use dense EgoHand scores, a 300 px/s gate and one full-lens trimming pass."""
     observations = []
@@ -76,7 +76,7 @@ def solve_oak(
         if weighted and len(vt) < 2:
             continue
         image_speed: Float64[ndarray, "n 133"] = (
-            np.linalg.norm(np.gradient(detections.xy, vt, axis=0), axis=-1) if weighted else np.zeros_like(detections.scores)
+            np.linalg.norm(np.gradient(detections.xy, vt, axis=0), axis=-1) if weighted and gate_image_speed else np.zeros_like(detections.scores)
         )
         tq = vt - qp / 1000.0
         i = np.clip(np.searchsorted(ht, tq), 1, len(ht) - 1)

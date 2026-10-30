@@ -4,7 +4,7 @@ from posekit import skeletons
 from posekit.zoo import PRESETS, ZOO, preset
 
 KNOWN_SKELETONS: dict[str, skeletons.KeypointSkeleton] = {
-    skeleton.name: skeleton for skeleton in (skeletons.COCO_17, skeletons.COCO_133, skeletons.HAND_21)
+    skeleton.name: skeleton for skeleton in (skeletons.COCO_17, skeletons.COCO_133, skeletons.HAND_21, skeletons.SOMA_HAND)
 }
 
 

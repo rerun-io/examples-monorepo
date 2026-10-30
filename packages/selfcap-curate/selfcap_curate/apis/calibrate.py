@@ -2,19 +2,23 @@
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 from dataforge.schema import video_path
 from rerun.catalog import CatalogClient
 from serde.json import to_json
+from simplecv.catalog_video import read_catalog_videos
 
 from selfcap_curate import catalog_io
 from selfcap_curate.apis import open_session, session_output
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
-from selfcap_curate.detection_io import read_oak_observations
+from selfcap_curate.detection_io import read_oak_observations, write_oak_egohand_layer
 from selfcap_curate.device_tables import read_rotations, read_table
 from selfcap_curate.exo_calibration import calibrate
 from selfcap_curate.factory import oak_centre, oak_stereo, read_quest_block
-from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models
+from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models, release_cuda_memory
+from selfcap_curate.keypoints import read_ego_cameras
+from selfcap_curate.oak_egohand import detect_oak_egohand
 from selfcap_curate.oak_mount import fixed_rotation, gyro_mount, solve_oak
 from selfcap_curate.quest_fit import read_session_episode
 
@@ -35,6 +39,10 @@ class Config:
     """Optional directory of <segment>.parquet EgoHand pixels and box scores; enables weighted dense hand fitting."""
     oak_free_rotation: bool = False
     """Fit rotation freely for supplied EgoHand observations; otherwise preserve the production gyro rotation."""
+    oak_method: Literal["egohand", "sapiens"] = "egohand"
+    """OAK alignment observations; Sapiens retains the legacy 32-frame path for comparison."""
+    oak_egohand_assets: Path = Path("data/egohand")
+    """Local EgoHand asset root containing weights/, engines/ and dinov3-bf16.onnx."""
 
 
 def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = None) -> CalibSession:
@@ -53,31 +61,41 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
             phones = catalog_io.read_phone_detections(segment)
             if set(episode.layout.phones) - phones.keys():
                 phones = {**detect_episode(segment, episode.quest, *pose_models()), **phones}
-            if config.oak_observations is not None:
-                oak = read_oak_observations(config.oak_observations / f"{key.segment}.parquet", key.segment)
-            else:
-                oak = detect_oak_hands_gpu(
-                    dataset,
-                    sync,
-                    episode.quest,
-                    episode.layout,
-                    pose_models()[1],
-                    video=None if segment.videos is None else segment.videos[video_path(episode.layout.oak_rig, 0)],
-                )
-            episodes.append(replace(episode, detections=phones, oak=oak))
+            episodes.append(replace(episode, detections=phones))
         first_segment = segments[0]
         factories = catalog_io.read_factories(first_segment)
         ego, gyro, rotations = factories["ego"], gyro_mount(session, episodes), read_rotations()
         rotation = fixed_rotation(gyro, ego.device_id, rotations)
-        if config.oak_observations is not None:
+        use_egohand = config.oak_observations is not None or config.oak_method == "egohand"
+        if use_egohand:
             if config.oak_free_rotation:
                 rotation = None
             elif rotation is None:
                 raise ValueError("EgoHand gyro-fixed fitting requires an eligible gyro rotation; use oak_free_rotation explicitly to fit without it")
+            release_cuda_memory(models=True)
+        for index, (episode, segment) in enumerate(zip(episodes, segments, strict=True)):
+            if config.oak_observations is not None:
+                oak = read_oak_observations(config.oak_observations / f"{segment.id}.parquet", segment.id)
+            elif config.oak_method == "egohand":
+                video = (segment.videos[video_path(episode.layout.oak_rig, 0)] if segment.videos is not None else
+                         read_catalog_videos(dataset, segment.id, [video_path(episode.layout.oak_rig, 0)], "capture_time")[0])
+                current = read_ego_cameras(dataset, dataset, segment.id, episode.layout.oak_rig)
+                sampling_rotation = fixed_rotation(gyro, ego.device_id, rotations)
+                if sampling_rotation is None:
+                    raise ValueError("EgoHand visibility sampling requires the gyro rotation")
+                oak = detect_oak_egohand(episode, video, oak_centre(ego), sampling_rotation, config.oak_egohand_assets,
+                                        camera=next((camera for camera in current if camera.cam == 0), None))
+            else:
+                oak = detect_oak_hands_gpu(dataset, episode.sync, episode.quest, episode.layout, pose_models()[1],
+                                          video=None if segment.videos is None else segment.videos[video_path(episode.layout.oak_rig, 0)])
+            episodes[index] = replace(episode, oak=oak)
+            if use_egohand:
+                write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, oak)
         state = CalibSession(
             session,
             calibrate(session, episodes, read_table().focals),
-            solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=config.oak_observations is not None),
+            solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=use_egohand,
+                      gate_image_speed=config.oak_observations is not None),
             read_quest_block(
                 first_segment,
                 factories["quest"],

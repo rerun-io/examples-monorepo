@@ -51,6 +51,32 @@ def read_oak_observations(path: Path, segment: str) -> OakDetections:
     return OakDetections(times, xy, scores)
 
 
+def write_oak_egohand_layer(path: Path, segment: str, oak_rig: int, detections: OakDetections) -> None:
+    """Persist newly inferred calibration samples as an independent, property-free layer."""
+    entity: str = coco133_uv_path(oak_rig, 0, pred="egohand_calib")
+    count: int = len(detections.video_time)
+    context = rr.ClassDescription(info=rr.AnnotationInfo(id=0, label="EgoHand calibration", color=(255, 145, 35)),
+                                  keypoint_annotations=COCO133_CLASS.keypoint_annotations, keypoint_connections=COCO_133_LINKS)
+
+    def chunks() -> Iterator[Chunk]:
+        yield Chunk.from_columns(entity.rsplit("/", 1)[0], indexes=[], columns=rr.AnnotationContext.columns(context=[context]))
+        if count:
+            yield Chunk.from_columns(
+                entity, indexes=[time_column(np.rint(detections.video_time * 1e9).astype(np.int64))],
+                columns=[
+                    *rr.Points2D.columns(positions=detections.xy.astype(np.float32).reshape(-1, 2),
+                                        keypoint_ids=np.tile(np.arange(133, dtype=np.uint16), count),
+                                        class_ids=np.zeros(count * 133, dtype=np.uint16)).partition([133] * count),
+                    *rr.AnyValues.columns(confidence=detections.scores.tolist()),
+                ],
+            )
+
+    with atomic_write(path) as target:
+        LazyChunkStream.from_iter(chunks()).collect(optimize=OptimizationProfile.OBJECT_STORE).write_rrd(
+            target, application_id=APPLICATION_ID, recording_id=segment,
+        )
+
+
 def write_detections_layer(path: Path, sync: TimeSync, layout: SelfcapLayout, detections: dict[str, PhoneDetections]) -> None:
     """Keep every joint, including missing/low-confidence cells, on presented PTS.
 

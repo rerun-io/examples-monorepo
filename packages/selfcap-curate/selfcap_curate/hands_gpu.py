@@ -2,6 +2,7 @@
 
 import gc
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 
 import numpy as np
@@ -115,15 +116,19 @@ def release_cuda_memory(*, models: bool) -> None:
 
 
 def decode_frames(video: CatalogVideo, indices: Int64[ndarray, "n"], fps: float) -> UInt8[Tensor, "n h w 3"]:
-    """CUDA-decode catalog packets without changing the authoritative sample stamps."""
+    """CUDA-decode selected catalog packets on an owned decoder thread."""
     from torchcodec.decoders import VideoDecoder
 
     if not len(indices):
         return torch.empty((0, 0, 0, 3), dtype=torch.uint8)
-    data: bytes = wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec)
-    decoder = VideoDecoder(data, device="cuda", seek_mode="approximate")
-    frames = decoder.get_frames_at(indices.tolist())
-    return rearrange(frames.data, "n c h w -> n h w c").contiguous()
+    def decode() -> UInt8[Tensor, "n h w 3"]:
+        data: bytes = wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec)
+        decoder = VideoDecoder(data, device="cuda", seek_mode="approximate")
+        frames = decoder.get_frames_at(indices.tolist())
+        return rearrange(frames.data, "n c h w -> n h w c").contiguous()
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="oak-decode") as pool:
+        return pool.submit(decode).result()
 
 
 def detect_episode(
