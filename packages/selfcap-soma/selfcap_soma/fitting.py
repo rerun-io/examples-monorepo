@@ -576,6 +576,8 @@ def fit(
         selection = mesh_selection(rest_pose.vertices[0].cpu().numpy(), model.faces.cpu().numpy(), waist_height)
         rim = np.flatnonzero(np.any(selection.rest_offsets != 0.0, axis=1))
         rest_offsets = torch.as_tensor(selection.rest_offsets[rim], device="cuda")
+        rim_skinning_weights = model.public_skinning_weights()[rim]
+        inverse_bind_transforms = torch.linalg.inv(model.public_bind_transforms_world())
         meshes: list[Float32[ndarray, "b v 3"]] = []
         joints: list[Float32[ndarray, "b 77 3"]] = []
         for begin in range(0, len(data.times), 16):
@@ -584,8 +586,8 @@ def fit(
             # gives its exact skinning motion in both 78- and 110-joint modes.
             blended = torch.einsum(
                 "vj,njkl->nvkl",
-                model.public_skinning_weights()[rim],
-                output.transforms @ torch.linalg.inv(model.public_bind_transforms_world()),
+                rim_skinning_weights,
+                output.transforms @ inverse_bind_transforms,
             )
             display_vertices = output.vertices.clone()
             display_vertices[:, rim] += torch.einsum("nvij,vj->nvi", blended[..., :3, :3], rest_offsets)
@@ -603,13 +605,14 @@ def fit(
     public_names = tuple(model.public_joint_names)
     public_parents = model.public_joint_parent_ids.cpu().numpy().astype(np.int64)
     visible = np.flatnonzero(visible_joint_mask(public_names, public_parents)[1:]).astype(np.int64)
+    vertices: Float32[ndarray, "n v 3"] = np.concatenate(meshes)
     return FitResult(
         poses.detach().cpu().numpy(),
         translations.detach().cpu().numpy(),
         torch.nn.functional.pad(identity.detach(), (0, 128 - active_components)).cpu().numpy(),
         float(log_scale.exp().item()),
         np.concatenate(joints),
-        np.concatenate(meshes),
+        vertices,
         model.faces.cpu().numpy(),
         names,
         model.public_joint_parent_ids.cpu().numpy().astype(np.int64),
@@ -617,13 +620,13 @@ def fit(
         torch.cuda.max_memory_allocated(),
         angles,
         head_attachment.detach().cpu().numpy(),
-        np.concatenate(meshes)[:, EAR_VERTICES].reshape(-1, 2, 3, 3).mean(axis=2),
+        vertices[:, EAR_VERTICES].reshape(-1, 2, 3, 3).mean(axis=2),
         head_mode if head_mode != "quest" else ("head" if use_ears else "eye"),
         head_offset.detach().cpu().numpy(),
         bone_scales.cpu().numpy(),
         options.display_twists,
         orientations is not None and "quest" in orientations.sources,
-        np.concatenate(meshes)[:, np.asarray(FOOT_VERTICES)].mean(axis=2) if options.use_feet else None,
+        vertices[:, np.asarray(FOOT_VERTICES)].mean(axis=2) if options.use_feet else None,
         selection.vertices,
         visible,
         HandOrientationSource(*orientations.sources) if orientations is not None else None,
