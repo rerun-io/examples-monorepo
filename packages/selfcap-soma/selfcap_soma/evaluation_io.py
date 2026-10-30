@@ -147,8 +147,6 @@ def read_views(
         stamps,
         transforms,
     )
-    if len(ego.distortion) != 14:
-        raise ValueError("expected the full 14-coefficient OAK lens")
     return phones, ego
 
 

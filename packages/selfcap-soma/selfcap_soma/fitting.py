@@ -240,8 +240,6 @@ def fit(
     initial_anchors: Float64[ndarray, "n a 3"] = data.exo[:, anchors].copy()
     for joint in range(len(anchors)):
         valid = np.isfinite(initial_anchors[:, joint]).all(-1)
-        if valid.sum() < 2:
-            raise ValueError("prototype initialization needs two observations per torso anchor")
         for axis in range(3):
             initial_anchors[:, joint, axis] = np.interp(data.times, data.times[valid], initial_anchors[valid, joint, axis])
     for i, target in enumerate(initial_anchors):
