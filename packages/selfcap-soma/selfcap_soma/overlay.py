@@ -13,7 +13,7 @@ from rerun.chunk import RrdReader
 
 from selfcap_soma.camera_geometry import project, project_ego
 from selfcap_soma.catalog import ExoSource
-from selfcap_soma.evaluation_io import first, nearest_indices, read_egohand_rgb, read_views
+from selfcap_soma.evaluation_io import first, missing_camera_calibration, nearest_indices, read_egohand_rgb, read_views
 from selfcap_soma.observations import overlay_points, require_full_rate_mesh, video_time_column
 from selfcap_soma.overlay_style import observed_links, observed_points, residual_tolerance
 
@@ -194,31 +194,37 @@ def main(config: Config) -> None:
     dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     phones, rgb = read_views(dataset, segment, times, config.exo_source)
     rgb_evidence = np.full((len(times), 133, 2), np.nan)
-    for track in read_egohand_rgb(dataset, segment, times):
-        if not len(track.times):
-            continue
-        indices = nearest_indices(track.times, times)
-        valid = abs(track.times[indices] - times) <= 0.05
-        base = 91 if track.name.endswith("/left") else 112
-        rgb_evidence[valid, base : base + 21] = track.points[indices[valid]]
-    paths = [f"/world/rig_{rgb.rig:02d}/cam_{cam:02d}" for cam in (1, 2)]
-    table = dataset.filter_segments(segment).filter_contents([*paths, *(f"{path}/pinhole" for path in paths)]).reader(index=None).to_arrow_table()
-    egos = [rgb]
-    for cam, path in enumerate(paths, start=1):
-        transform = np.eye(4)
-        transform[:3, :3] = first(table, f"{path}:Transform3D:mat3x3").reshape(3, 3).T
-        transform[:3, 3] = first(table, f"{path}:Transform3D:translation")
-        size = first(table, f"{path}/pinhole:Pinhole:resolution")
-        egos.append(
-            replace(
-                rgb,
-                cam=cam,
-                K=first(table, f"{path}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T,
-                distortion=first(table, f"{path}/pinhole:simplecv.components.DistortionCoefficients"),
-                size=(int(size[0]), int(size[1])),
-                rig_T_cam=transform,
+    egos = []
+    if rgb is not None:
+        for track in read_egohand_rgb(dataset, segment, times):
+            if not len(track.times):
+                continue
+            indices = nearest_indices(track.times, times)
+            valid = abs(track.times[indices] - times) <= 0.05
+            base = 91 if track.name.endswith("/left") else 112
+            rgb_evidence[valid, base : base + 21] = track.points[indices[valid]]
+        paths = [f"/world/rig_{rgb.rig:02d}/cam_{cam:02d}" for cam in (1, 2)]
+        table = dataset.filter_segments(segment).filter_contents([*paths, *(f"{path}/pinhole" for path in paths)]).reader(index=None).to_arrow_table()
+        egos.append(rgb)
+        for cam, path in enumerate(paths, start=1):
+            missing = missing_camera_calibration(table, path, distorted=True)
+            if missing:
+                print(f"SKIP_CAMERA {segment} {path}: missing calibration {missing}", flush=True)
+                continue
+            transform = np.eye(4)
+            transform[:3, :3] = first(table, f"{path}:Transform3D:mat3x3").reshape(3, 3).T
+            transform[:3, 3] = first(table, f"{path}:Transform3D:translation")
+            size = first(table, f"{path}/pinhole:Pinhole:resolution")
+            egos.append(
+                replace(
+                    rgb,
+                    cam=cam,
+                    K=first(table, f"{path}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T,
+                    distortion=first(table, f"{path}/pinhole:simplecv.components.DistortionCoefficients"),
+                    size=(int(size[0]), int(size[1])),
+                    rig_T_cam=transform,
+                )
             )
-        )
     config.output.parent.mkdir(parents=True, exist_ok=True)
     recording = rr.RecordingStream(application_id, recording_id=segment)
     recording.save(config.output)
@@ -265,7 +271,9 @@ def main(config: Config) -> None:
         for view in phones:
             projected = project(view.camera, points.reshape(-1, 3).astype(np.float64)).reshape(len(times), 133, 3)
             pixels = np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan).astype(np.float32)
-            tolerance = residual_tolerance(points.astype(np.float64), reference, projected[:, :, 2], float(max(view.camera.K[0, 0], view.camera.K[1, 1])))
+            tolerance = residual_tolerance(
+                points.astype(np.float64), reference, projected[:, :, 2], float(max(view.camera.K[0, 0], view.camera.K[1, 1]))
+            )
             seen = observed_points(pixels.astype(np.float64), view.pixels, view.scores, tolerance)
             projections.append((f"{view.camera.entity}/pinhole", pixels, seen))
     for ego in egos:

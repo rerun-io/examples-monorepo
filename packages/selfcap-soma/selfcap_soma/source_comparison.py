@@ -197,41 +197,42 @@ def evaluate(
             error = np.linalg.norm(prediction[..., :2] - phone.pixels, axis=-1)
             error[(phone.scores < 0.7) | (prediction[..., 2] <= 0)] = np.nan
             cross.append(CrossView(detector, phone.name, pixel_error(error)))
-    assert camera is not None
-    view = dataset.filter_segments(segment)
-    columns = view.schema().column_names()
-    paths = [
-        name.split(":", 1)[0]
-        for name in columns
-        if name.startswith(f"/world/rig_{camera.rig:02d}/cam_00/pinhole/") and "/egohand/" in name and name.endswith(":Points2D:positions")
-    ]
-    if len(paths) != 2:
-        raise ValueError(f"expected two EgoHand RGB tracks, got {paths}")
-    table = (
-        view.filter_contents(paths)
-        .reader(index="video_time")
-        .filter(col("video_time").cast(pa.int64()) >= lit(int(data.times[0] * 1e9)))
-        .filter(col("video_time").cast(pa.int64()) <= lit(int(data.times[-1] * 1e9)))
-        .to_arrow_table()
-    )
-    order25 = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
-    fingers = [2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20]
     errors = []
-    for path in paths:
-        side = 0 if path.endswith("/left") else 1
-        key = f"{path}:Points2D:positions"
-        rows = table.filter(table[key].is_valid())
-        stamps = seconds(rows["video_time"])
-        target = np.full((len(stamps), 21, 2), np.nan)
-        for i, row in enumerate(rows[key].to_pylist()):
-            if len(row) == 25:
-                target[i] = np.asarray(row)[order25]
-        hand = points[:, 91 + side * 21 : 112 + side * 21]
-        world = np.empty((len(stamps), 21, 3), dtype=np.float32)
-        for joint in range(21):
-            for axis in range(3):
-                world[:, joint, axis] = np.interp(stamps, data.times, hand[:, joint, axis])
-        errors.extend(np.linalg.norm(project_ego(camera, stamps, world)[:, fingers] - target[:, fingers], axis=-1).ravel())
+    if camera is not None:
+        view = dataset.filter_segments(segment)
+        columns = view.schema().column_names()
+        paths = [
+            name.split(":", 1)[0]
+            for name in columns
+            if name.startswith(f"/world/rig_{camera.rig:02d}/cam_00/pinhole/") and "/egohand/" in name and name.endswith(":Points2D:positions")
+        ]
+        if len(paths) != 2:
+            paths = []
+        if paths:
+            table = (
+                view.filter_contents(paths)
+                .reader(index="video_time")
+                .filter(col("video_time").cast(pa.int64()) >= lit(int(data.times[0] * 1e9)))
+                .filter(col("video_time").cast(pa.int64()) <= lit(int(data.times[-1] * 1e9)))
+                .to_arrow_table()
+            )
+            order25 = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
+            fingers = [2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20]
+            for path in paths:
+                side = 0 if path.endswith("/left") else 1
+                key = f"{path}:Points2D:positions"
+                rows = table.filter(table[key].is_valid())
+                stamps = seconds(rows["video_time"])
+                target = np.full((len(stamps), 21, 2), np.nan)
+                for i, row in enumerate(rows[key].to_pylist()):
+                    if len(row) == 25:
+                        target[i] = np.asarray(row)[order25]
+                hand = points[:, 91 + side * 21 : 112 + side * 21]
+                world = np.empty((len(stamps), 21, 3), dtype=np.float32)
+                for joint in range(21):
+                    for axis in range(3):
+                        world[:, joint, axis] = np.interp(stamps, data.times, hand[:, joint, axis])
+                errors.extend(np.linalg.norm(project_ego(camera, stamps, world)[:, fingers] - target[:, fingers], axis=-1).ravel())
     calibration = Calibration(result.identity, result.scale, result.head_offset, result.bone_scales, result.head_attachment, result.head_anchor)
     model = model_for(calibration)
     with torch.no_grad():

@@ -24,7 +24,27 @@ class PhoneView:
 
 
 def first(table: pa.Table, name: str) -> Float64[ndarray, "k"]:
+    if name not in table.column_names or not len(table[name].drop_null()):
+        raise ValueError(f"missing calibration value: {name}")
     return np.asarray(table[name].drop_null()[0].as_py(), dtype=np.float64).reshape(-1)
+
+
+def missing_camera_calibration(table: pa.Table, camera: str, extrinsics: bool = True, distorted: bool = False) -> list[str]:
+    """List absent, empty or nonfinite calibration fields before reading a camera."""
+    required = {f"{camera}/pinhole:Pinhole:image_from_camera": 9}
+    if extrinsics:
+        required.update({f"{camera}:Transform3D:translation": 3, f"{camera}:Transform3D:mat3x3": 9})
+    if distorted:
+        required.update({f"{camera}/pinhole:Pinhole:resolution": 2, f"{camera}/pinhole:simplecv.components.DistortionCoefficients": 14})
+    missing = []
+    for name, size in required.items():
+        if name not in table.column_names or not len(table[name].drop_null()):
+            missing.append(name)
+            continue
+        values = first(table, name)
+        if values.size != size or not np.isfinite(values).all():
+            missing.append(name)
+    return missing
 
 
 def nearest_indices(source: Float64[ndarray, "m"], target: Float64[ndarray, "n"]) -> Int64[ndarray, "n"]:
@@ -33,7 +53,9 @@ def nearest_indices(source: Float64[ndarray, "m"], target: Float64[ndarray, "n"]
     return np.where(abs(source[left] - target) <= abs(source[right] - target), left, right)
 
 
-def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"], source: ExoSource = "rtmw") -> tuple[list[PhoneView], EgoCamera]:
+def read_views(
+    dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"], source: ExoSource = "rtmw"
+) -> tuple[list[PhoneView], EgoCamera | None]:
     view = dataset.filter_segments(segment)
     rigs = read_rigs(dataset, segment)
     cameras = [f"{rig}/cam_00" for rig in rigs.exo]
@@ -42,7 +64,12 @@ def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]
     static = view.filter_contents([*cameras, *(f"{c}/pinhole" for c in cameras), f"{oak_camera}/pinhole"]).reader(index=None).to_arrow_table()
     columns = view.schema().column_names()
     paths = []
+    calibrated = []
     for camera in cameras:
+        missing = missing_camera_calibration(static, camera)
+        if missing:
+            print(f"SKIP_CAMERA {segment} {camera}: missing calibration {missing}", flush=True)
+            continue
         candidates = [
             name.split(":", 1)[0]
             for name in columns
@@ -51,18 +78,27 @@ def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]
             and f"/{source}/" in name
             and name.split(":", 1)[0] + ":simplecv.KeypointConfidence2D:confidences" in columns
         ]
+        if not candidates:
+            print(f"SKIP_CAMERA {segment} {camera}: no {source} 2D track", flush=True)
+            continue
         if len(candidates) != 1:
-            raise ValueError(f"expected one confident {source} 2D track for {camera}: {candidates}")
+            raise ValueError(f"ambiguous {source} 2D tracks for {camera}: {candidates}")
+        calibrated.append(camera)
         paths.append(candidates[0])
     samples = (
-        view.filter_contents(paths)
-        .reader(index="video_time")
-        .filter(col("video_time").cast(pa.int64()) >= lit(int((times[0] - 0.05) * 1e9)))
-        .filter(col("video_time").cast(pa.int64()) <= lit(int((times[-1] + 0.05) * 1e9)))
-        .to_arrow_table()
+        None
+        if not paths
+        else (
+            view.filter_contents(paths)
+            .reader(index="video_time")
+            .filter(col("video_time").cast(pa.int64()) >= lit(int((times[0] - 0.05) * 1e9)))
+            .filter(col("video_time").cast(pa.int64()) <= lit(int((times[-1] + 0.05) * 1e9)))
+            .to_arrow_table()
+        )
     )
     phones: list[PhoneView] = []
-    for camera, path in zip(cameras, paths, strict=True):
+    for camera, path in zip(calibrated, paths, strict=True):
+        assert samples is not None
         matrix = first(static, f"{camera}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T
         pose = np.eye(4)
         pose[:3, :3] = first(static, f"{camera}:Transform3D:mat3x3").reshape(3, 3).T
@@ -70,6 +106,9 @@ def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]
         position = f"{path}:Points2D:positions"
         rows = samples.filter(samples[position].is_valid())
         stamps = seconds(rows["video_time"])
+        if not len(stamps):
+            print(f"SKIP_CAMERA {segment} {camera}: no detections in requested window", flush=True)
+            continue
         indices = nearest_indices(stamps, times)
         pixels = np.asarray(rows[position].to_pylist(), dtype=np.float64)[indices]
         scores = np.asarray(rows[f"{path}:simplecv.KeypointConfidence2D:confidences"].to_pylist(), dtype=np.float64)[indices]
@@ -77,6 +116,10 @@ def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]
         pixels[~valid] = np.nan
         scores[~valid] = 0.0
         phones.append(PhoneView(Camera(matrix, pose, (0.0, 0.0), camera), camera.split("/")[2], pixels, scores))
+    missing = missing_camera_calibration(static, oak_camera, extrinsics=False, distorted=True)
+    if missing:
+        print(f"SKIP_CAMERA {segment} {oak_camera}: missing calibration {missing}", flush=True)
+        return phones, None
     poses = (
         view.filter_contents([oak])
         .reader(index="video_time")
@@ -87,6 +130,9 @@ def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]
     )
     poses = poses.filter(poses[f"{oak}:Transform3D:mat3x3"].is_valid())
     stamps = seconds(poses["video_time"])
+    if not len(stamps):
+        print(f"SKIP_CAMERA {segment} {oak}: no calibrated pose samples", flush=True)
+        return phones, None
     transforms = np.tile(np.eye(4), (len(stamps), 1, 1))
     transforms[:, :3, :3] = np.asarray(poses[f"{oak}:Transform3D:mat3x3"].to_pylist(), dtype=np.float64).reshape(-1, 3, 3).transpose(0, 2, 1)
     transforms[:, :3, 3] = np.asarray(poses[f"{oak}:Transform3D:translation"].to_pylist(), dtype=np.float64).reshape(-1, 3)

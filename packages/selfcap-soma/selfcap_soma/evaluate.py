@@ -214,9 +214,14 @@ def main(config: Config) -> None:
     # The OAK detections were never fitting inputs. Match side by independent
     # Quest projection; reject ambiguous center assignments rather than
     # choosing the assignment that improves the fitted score.
-    fit_uv = project_ego(oak, data.times, points.astype(np.float32))
-    raw_uv = project_ego(oak, data.times, data.exo.astype(np.float32))
-    quest_uv = project_ego(oak, data.times, data.hands.astype(np.float32))
+    if oak is None:
+        fit_uv = np.full((*points.shape[:2], 2), np.nan)
+        raw_uv = fit_uv.copy()
+        quest_uv = fit_uv.copy()
+    else:
+        fit_uv = project_ego(oak, data.times, points.astype(np.float32))
+        raw_uv = project_ego(oak, data.times, data.exo.astype(np.float32))
+        quest_uv = project_ego(oak, data.times, data.hands.astype(np.float32))
     hand_order = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
     for track in read_image_tracks(config.egohand):
         idx = nearest_indices(data.times, track.times)
