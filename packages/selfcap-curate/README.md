@@ -262,11 +262,16 @@ moves headset labels at most five source pixels.
 Both fit folds share the static phone anchors. Their phone residual is therefore
 an **in-sample consistency check**, not independent validation. Headset frames
 and 10-second hand blocks are held out; body transfer uses independent RTMW
-observations. Sparse optical targets retain the total loss weight of 20 samples
-per view/target, preserving the original dense-label estimator's balance.
+observations. The robust objective uses fixed relative block shares for headset anchors,
+phone anchors, hands, and body (1:0.25:1.5:0.5), each divided equally among
+active views and normalized by its observation count. Confidence weights are
+normalized within each view. Weighting is applied to the robust cost, preserving
+the six-pixel outlier scale. Fold fits and the all-frame fit use the same shares.
 Acceptance requires optical medians to improve by at least 2 pixels and 10%,
 body transfer median to improve, Sapiens hand median to regress by at most 1 pixel, RTMW hand median by at most 1.5 pixels,
-and all solvers to converge. Missing metrics reject the candidate.
+and all solvers to converge. The deployed model's per-view label medians must
+also stay within two pixels of the corresponding full-pipeline fold scores.
+Missing metrics reject the candidate.
 
 `result.json` always records `segment`, `decision`, `reason`, `labels`,
 `elapsed_s`, `thresholds`, and `gate`. The four thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or

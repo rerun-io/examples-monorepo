@@ -75,3 +75,11 @@ def test_device_vp_table_is_typed_and_has_all_measured_devices():
     assert table.devices['Dragon-413A7CC1'].focal_px == 888.7573979270643
     assert table.devices['Titanium-57BB9E1A'].focal_px == 894.9294280422055
     assert all(device.low_px <= device.focal_px <= device.high_px for device in table.devices.values())
+
+
+def test_deployed_label_drift_is_rejected_even_when_fold_scores_pass():
+    before = {name: Score(50,20.,30.) for name in ('headset','phones','sapiens_hands','rtmw_hands','body_transfer')}
+    after = {name: Score(50,3.,5.) for name in before}
+    gate = Gate(before,after,(),True,heldout_labels={'quest/view_1':Score(4,4.,5.)},deployed_labels={'quest/view_1':Score(4,25.,28.)})
+    assert not accepts(gate)
+    assert accepts(replace(gate,deployed_labels={'quest/view_1':Score(4,3.,5.)}))

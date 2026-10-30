@@ -21,6 +21,7 @@ from serde.json import from_json, to_json
 
 from selfcap_curate import catalog_io
 from selfcap_curate.calib_layer import CalibSession
+from selfcap_curate.calibration_objective import ObjectiveShares
 from selfcap_curate.device_vp import read_vp_table
 from selfcap_curate.exo_landmarks import Landmark, Landmarks
 from selfcap_curate.exo_refine_catalog import Gate, evaluate, load_inputs
@@ -70,11 +71,14 @@ class GateThresholds:
     """Minimum fractional reduction for each optical target class."""
     sapiens_max_regression_px: float = 1.0
     """Maximum held-out Sapiens hand median increase."""
+    deployed_label_tolerance_px: float = 2.0
+    """Maximum deployed-label median increase over its corresponding fold score."""
     rtmw_max_regression_px: float = 1.5
     """Maximum independent RTMW hand median increase."""
 
 
 DEFAULT_THRESHOLDS = GateThresholds()
+DEFAULT_OBJECTIVE = ObjectiveShares()
 LabelFocalSource: TypeAlias = Literal["device-vp", "table"]
 
 
@@ -95,6 +99,8 @@ class LabelResult:
     """Explicit acceptance thresholds applied to this result."""
     gate: Gate | None = None
     """Held-out results when scoring completed."""
+    objective: ObjectiveShares | None = None
+    """Count-invariant loss shares used in both folds and the deployed fit."""
     solver_version: str | None = None
     """Exo-only solver contract; older offset-enabled results cannot be resumed."""
     focal_source: str | None = None
@@ -120,6 +126,11 @@ def accepts(gate: Gate, thresholds: GateThresholds = DEFAULT_THRESHOLDS) -> bool
             if after.median >= before.median:
                 return False
         elif after.median > before.median + (thresholds.sapiens_max_regression_px if metric == 'sapiens_hands' else thresholds.rtmw_max_regression_px):
+            return False
+    for key, deployed in gate.deployed_labels.items():
+        heldout = gate.heldout_labels.get(key)
+        if (deployed.median is not None and heldout is not None and heldout.median is not None
+                and deployed.median > heldout.median + thresholds.deployed_label_tolerance_px):
             return False
     return True
 
@@ -312,7 +323,7 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
     return record
 
 
-def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, *, thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp") -> LabelResult:
+def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, *, thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp", objective: ObjectiveShares = DEFAULT_OBJECTIVE) -> LabelResult:
     """Build, label and gate one session; runner must bound this call or use the CLI."""
     start = time.monotonic()
     output.mkdir(parents=True, exist_ok=True)
@@ -331,7 +342,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         previous = from_json(LabelResult, result_path.read_text())
         if previous.segment != segment.id:
             raise ValueError('Output directory belongs to another segment')
-        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-only-fixed-focal-v1':
+        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-normalized-blocks-v1' and previous.objective == objective:
             return previous
     for name in ('calib.json', 'refinement.json'):
         (output / name).unlink(missing_ok=True)
@@ -351,7 +362,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record)
         truth_bytes = tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values())
         model, gate = evaluate(inputs, focal_source="fixed", fixed_focals=tuple(fixed_focals[phone] for phone in packet.phones),
-                               static_phones=True, landmark_target_count=20, body_polish=True)
+                               static_phones=True, body_polish=True, objective=objective)
         assert truth_bytes == tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values()), "Exo fitting must preserve Quest hands"
         accepted = accepts(gate, thresholds) and model.converged
         gate = replace(gate, passes=accepted, policy=gate.policy + "; configurable optical/body/Sapiens/RTMW acceptance thresholds in result.json")
@@ -361,7 +372,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
             updated = replace(state, exo_refinements={**state.exo_refinements, segment.id: model})
             assert updated.oak is state.oak and updated.quest is state.quest and updated.stereo is state.stereo, 'Only exo cameras may change'
             (output / 'calib.json').write_text(to_json(updated))
-        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, 'exo-only-fixed-focal-v1', focal_source,
+        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, 'exo-normalized-blocks-v1', focal_source,
                              fixed_focals, focal_sources)
     temporary = result_path.with_suffix('.tmp')
     temporary.write_text(to_json(result))
@@ -395,12 +406,15 @@ def bounded_command(args: list[str], output: Path, segment: str, timeout_s: floa
 
 def label_session(segment: str, calib_record: Path, output: Path, *, dataset: str = "selfcap-post-dev",
                   catalog_url: str = "rerun+http://dgx-spark:51235", timeout_s: float = 360.0,
-                  thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp") -> LabelResult:
+                  thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp", objective: ObjectiveShares = DEFAULT_OBJECTIVE) -> LabelResult:
     """Runner API: isolate one session, resume its files, and enforce a hard deadline."""
     args = ["--segment", segment, "--calib-record", str(calib_record.resolve()), "--output-dir", str(output.resolve()),
             "--dataset", dataset, "--catalog-url", catalog_url, "--focal-source", focal_source]
     args.extend(["--thresholds.optical-min-drop-px", str(thresholds.optical_min_drop_px),
                  "--thresholds.optical-min-drop-fraction", str(thresholds.optical_min_drop_fraction),
                  "--thresholds.sapiens-max-regression-px", str(thresholds.sapiens_max_regression_px),
-                 "--thresholds.rtmw-max-regression-px", str(thresholds.rtmw_max_regression_px)])
+                 "--thresholds.rtmw-max-regression-px", str(thresholds.rtmw_max_regression_px),
+                 "--thresholds.deployed-label-tolerance-px", str(thresholds.deployed_label_tolerance_px),
+                 "--objective.headset", str(objective.headset), "--objective.phones", str(objective.phones),
+                 "--objective.hands", str(objective.hands), "--objective.body", str(objective.body)])
     return bounded_command(args, output, segment, timeout_s, thresholds)

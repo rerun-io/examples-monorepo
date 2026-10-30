@@ -9,6 +9,7 @@ from serde.json import from_json, to_json
 
 from selfcap_curate import catalog_io
 from selfcap_curate.calib_layer import CalibSession
+from selfcap_curate.calibration_objective import ObjectiveShares
 from selfcap_curate.exo_label import GateThresholds, LabelFocalSource, label_session, run_session
 
 
@@ -30,6 +31,8 @@ class Config:
     """Explicit optical and independent hand acceptance thresholds."""
     focal_source: LabelFocalSource = "device-vp"
     """Fixed device VP focal, or the initial calibration for unknown devices; never fit focal."""
+    objective: ObjectiveShares = field(default_factory=ObjectiveShares)
+    """Observation-count invariant headset, phone, hand and body loss shares."""
     worker: bool = False
     """Internal isolated process entry point."""
 
@@ -39,10 +42,10 @@ def main(config: Config) -> None:
     if config.worker:
         segment = catalog_io.open_segment(CatalogClient(config.catalog_url).get_dataset(name=config.dataset), config.segment)
         state = from_json(CalibSession, config.calib_record.read_text())
-        result = run_session(segment, state, config.output_dir, thresholds=config.thresholds, focal_source=config.focal_source)
+        result = run_session(segment, state, config.output_dir, thresholds=config.thresholds, focal_source=config.focal_source, objective=config.objective)
     else:
         result = label_session(config.segment, config.calib_record, config.output_dir, dataset=config.dataset,
-                               catalog_url=config.catalog_url, timeout_s=config.timeout_s, thresholds=config.thresholds, focal_source=config.focal_source)
+                               catalog_url=config.catalog_url, timeout_s=config.timeout_s, thresholds=config.thresholds, focal_source=config.focal_source, objective=config.objective)
     print(to_json(result), flush=True)
 
 

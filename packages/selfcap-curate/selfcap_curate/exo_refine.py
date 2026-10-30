@@ -9,6 +9,7 @@ from numpy import ndarray
 from scipy.optimize import OptimizeResult, least_squares
 from serde import serde
 
+from selfcap_curate.calibration_objective import ObjectiveShares, block_weights, robust_loss
 from selfcap_curate.exo_calibration import Camera
 from selfcap_curate.exo_landmarks import Landmarks
 from selfcap_curate.quest_fit import Correspondences
@@ -49,6 +50,8 @@ class Refinement:
     """Exact estimator family."""
     version: str = VERSION
     """Solver and split-policy version."""
+    objective: ObjectiveShares | None = None
+    """Explicit count-invariant objective shares; null for legacy summed residuals."""
     converged: bool = True
     """Both robust optimization stages terminated before their step limit."""
 
@@ -76,7 +79,7 @@ def select_labels(problem: RefinementProblem, fold: int, *, static_phones: bool 
 
 
 def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixed_focals: tuple[float, ...] | None = None,
-          focal_record: str | None = None, landmark_target_count: int | None = None) -> Refinement:
+          focal_record: str | None = None, landmark_target_count: int | None = None, objective: ObjectiveShares | None = None) -> Refinement:
     """Fit poses/focals/offset with the offline estimator's exact loss and bounds.
 
     Inputs are Float64 camera/point arrays in metres and source pixels. This
@@ -108,6 +111,20 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
         keys = [(label.view, label.target_id) for label in problem.landmarks.labels]
         repetitions = np.array([max(1, round(landmark_target_count / keys.count(key))) for key in keys])
     weights: Float64[ndarray, "n 1"] = np.sqrt([label.confidence for label in problem.landmarks.labels])[:, None] * 2.0
+    loss_weights = None
+    if objective is not None:
+        repetitions[:] = 1
+        weights[:] = 1.0
+        hand_views = np.concatenate([np.full(len(data.world), i, dtype=np.int64) for i, data in enumerate(problem.hands)])
+        hand_confidence = np.ones(len(hand_views))
+        hand_weights = block_weights(hand_views, hand_confidence, objective.hands)
+        label_views = np.array([label.view for label in problem.landmarks.labels], dtype=np.int64)
+        confidence = np.array([label.confidence for label in problem.landmarks.labels])
+        head = np.array([label.target_id.startswith('quest') for label in problem.landmarks.labels])
+        label_weights = block_weights(label_views, confidence * head, objective.headset)
+        label_weights += block_weights(label_views, confidence * ~head, objective.phones)
+        loss_weights = np.repeat(np.r_[hand_weights, label_weights], 2) / 2.0
+
 
     def unpack(values: Float64[ndarray, "p"]) -> tuple[Camera, ...]:
         matrix: Float64[ndarray, "c 11"] = initial.copy()
@@ -127,7 +144,7 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
     upper: Float64[ndarray, "p"] = -lower
     if free:
         lower[6:nc:7], upper[6:nc:7] = np.log(400.0), np.log(1200.0)
-    warm: OptimizeResult = least_squares(residual, parameters, bounds=(lower, upper), loss="huber", f_scale=6.0, x_scale="jac", max_nfev=150)
-    solution: OptimizeResult = least_squares(residual, warm.x, bounds=(lower, upper), loss="cauchy", f_scale=6.0, x_scale="jac", max_nfev=150)
+    warm: OptimizeResult = least_squares(residual, parameters, bounds=(lower, upper), loss="huber" if loss_weights is None else robust_loss(loss_weights, "huber"), f_scale=6.0, x_scale="jac", max_nfev=150)
+    solution: OptimizeResult = least_squares(residual, warm.x, bounds=(lower, upper), loss="cauchy" if loss_weights is None else robust_loss(loss_weights), f_scale=6.0, x_scale="jac", max_nfev=150)
     return Refinement(unpack(solution.x), np.zeros(3), problem.landmarks.digest, focal_source, focal_record,
-                      converged=bool(warm.success and solution.success))
+                      objective=objective, converged=bool(warm.success and solution.success))
