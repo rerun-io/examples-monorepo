@@ -53,7 +53,8 @@ def test_smoothing_labels_temporal_estimates_without_inventing_support() -> None
 
 
 @pytest.mark.parametrize("model", ["rtmw", "sapiens2"])
-def test_support_columns_are_stored_beside_each_3d_joint(tmp_path, model) -> None:
+@pytest.mark.parametrize("view_count", [2, 3, 4])
+def test_support_columns_are_stored_beside_each_3d_joint(tmp_path, model, view_count) -> None:
     import rerun as rr
     from rerun.chunk import RrdReader
 
@@ -63,13 +64,24 @@ def test_support_columns_are_stored_beside_each_3d_joint(tmp_path, model) -> Non
     with rr.RecordingStream("test", recording_id="support", send_properties=False) as recording:
         recording.save(base)
         recording.send_property("calib", rr.AnyValues(method="test"))
-    cams = cameras()[:2]
+    cams = cameras()[:view_count]
     result = Keypoints3D(np.array([0.0]), np.full((1, 133, 3), [0.0, 0.0, 4.0], np.float32),
-                         np.full((1, 133), 2, np.uint8), np.ones((1, 133), np.float32), {},
-                         {"a": cams[0], "b": cams[1]}, 25.0, np.ones((1, 2, 133), bool), np.full((1, 133), 0.25, np.float32))
+                         np.full((1, 133), view_count, np.uint8), np.ones((1, 133), np.float32), {},
+                         {str(i): camera for i, camera in enumerate(cams)}, 25.0, np.ones((1, view_count, 133), bool), np.full((1, 133), 0.25, np.float32))
     output = tmp_path / "support.rrd"
     write_keypoints(base, output, result, model=model)
     batch = next(c.to_record_batch() for c in RrdReader(output).stream() if "support_view_count" in c.to_record_batch().schema.names)
-    assert batch.column("support_view_count").to_pylist() == [[2] * 133]
+    assert batch.column("support_view_count").to_pylist() == [[view_count] * 133]
     assert batch.column("support_max_reprojection_px").to_pylist() == [[0.25] * 133]
-    assert batch.column("support_inlier_mask").to_pylist() == [[[True, True]] * 133]
+    assert batch.column("support_inlier_mask").to_pylist() == [[[True] * view_count + [False] * (4 - view_count)] * 133]
+
+
+def test_support_writer_rejects_more_than_four_cameras(tmp_path) -> None:
+    from selfcap_curate.keypoints import write_keypoints
+
+    cams = cameras()
+    result = Keypoints3D(np.array([0.0]), np.zeros((1, 133, 3), np.float32),
+                        np.zeros((1, 133), np.uint8), np.zeros((1, 133), np.float32), {},
+                        {str(i): cams[i % 4] for i in range(5)}, 25.0)
+    with pytest.raises(ValueError, match="at most four"):
+        write_keypoints(tmp_path / "unused.rrd", tmp_path / "output.rrd", result)

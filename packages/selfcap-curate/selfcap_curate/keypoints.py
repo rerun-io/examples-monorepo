@@ -568,6 +568,10 @@ def write_keypoints(
     through the full OAK lens model: the viewer's Pinhole has no distortion, which put overlays up to 220 px off.
     Camera-centre chunks retain their native exo frame clocks when merged into the layer.
     """
+    if len(result.cameras) > 4:
+        raise ValueError("support masks support at most four exo cameras; refusing to truncate")
+    if result.inliers is not None and result.inliers.shape[1] != len(result.cameras):
+        raise ValueError("support mask camera count does not match support_camera_paths")
     reader = RrdReader(calib)
     stores = reader.recordings()
     if len(stores) != 1:
@@ -650,7 +654,10 @@ def write_keypoints(
             if result.inliers is not None and result.max_reprojection_px is not None:
                 recording.log(xyz_path, rr.AnyValues(support_camera_paths=[camera.entity for camera in result.cameras.values()],
                               confidence_semantics="Mean inlier detector score; multiplied by 0.9 for two-view support, and by 0.75 at temporally bridged frames; not visibility probability"), static=True)
-                mask: Bool[ndarray, "n 133 v"] = result.inliers.transpose(0, 2, 1)
+                # Catalog schema is shared across three- and four-phone sessions. The
+                # leading slots follow support_camera_paths; absent trailing slots are false.
+                mask: Bool[ndarray, "n 133 4"] = np.zeros((len(stamps), 133, 4), dtype=bool)
+                mask[:, :, :len(result.cameras)] = result.inliers.transpose(0, 2, 1)
                 rr.send_columns(xyz_path, indexes=[time_column(stamps)], columns=rr.AnyValues.columns(
                     support_view_count=result.n_views.reshape(-1),
                     temporal_bridged=(np.zeros(result.xyz.shape[:2], dtype=bool) if result.bridged is None else result.bridged).reshape(-1),
