@@ -169,13 +169,13 @@ timeline. The tests read these fixtures directly; they do not import external re
 
 ## Candidate optical calibration
 
-`selfcap-post --exo-refine` fits exo pose, square-pixel focal and one shared
-head-frame optical translation before keypoints. The default remains off.
+`selfcap-post --exo-refine` is the legacy optical diagnostic path. The batch
+runner uses `selfcap-exo-label` with fixed device VP focals and no head offset.
 `--exo-reference-dataset` selects a read-only source for labels and independent
 RTMW checks. An episode without an `exo_landmarks` layer keeps the normal fit.
-The translation changes Quest camera lever arms, not the raw head track or OAK
-mount. The calibration file then owns triangulation, display skeleton and all
-camera-centre projections.
+Only exo camera poses may change. Quest camera extrinsics, SLAM poses, hands,
+and the OAK mount are preserved. The calibration file then owns triangulation,
+display skeleton and camera-centre projections.
 
 `exo_landmarks` stores labelled `Points2D` at
 `/world/rig_XX/cam_00/pinhole/exo_landmarks` on `video_time`. Its recording
@@ -273,3 +273,16 @@ and all solvers to converge. Missing metrics reject the candidate.
 `failed`. Only `accepted` writes `refinement.json` and `calib.json`; all other
 outcomes retain the initial calibration. `landmarks.json`, `packet.json`, PNGs,
 and per-view logs provide provenance. Nothing is registered by this command.
+
+The default `--focal-source device-vp` fixes each known device to its measured
+image-only focal from `selfcap_curate/device_vp.json`. Unknown devices retain
+the initial calibration focal. `--focal-source table` retains every initial
+focal. Neither option fits focal, principal point, or distortion. Results record
+`focals` and `focal_sources` per camera.
+
+The estimator changes only exo camera poses. Quest SLAM, Quest cameras, OAK
+mount/poses, and Quest hands are immutable truth. The old `head_translation_m`
+compatibility field is always zero. An anchored hands/body bundle adjustment
+polishes the optical solution before the final held-out gate; it retains the Sol
+landmark terms and exact fixed intrinsics. Offset-enabled cached results are
+invalidated by the new solver contract.

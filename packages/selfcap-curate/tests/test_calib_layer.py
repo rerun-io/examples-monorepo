@@ -65,28 +65,37 @@ def test_calibrate_cli_rejects_mixed_sessions_before_catalog_access(tmp_path: Pa
     assert not config.output_dir.exists()
 
 
-def test_refinement_writes_provenance_and_both_optical_lever_arms(tmp_path: Path) -> None:
-    sync = replace(fixture_sync(), exo_fit={"phone": ExoFit(None, "test")})
-    raw = CatalogHands(np.empty(0), np.empty((0, 133, 3)), np.array([0.0, 1.0]), np.zeros((2, 3)),
+def test_exo_refinement_preserves_quest_and_oak_transform_bytes(tmp_path: Path) -> None:
+    phones = ('A', 'B', 'C', 'D')
+    sync = replace(fixture_sync(), offsets_ms={"quest_pose": 0.0}, exo_fit={p: ExoFit(None, "test") for p in phones})
+    raw = CatalogHands(np.empty(0), np.empty((0, 133, 3)), np.array([0.0, 1.0]), np.array([[0.,0.,0.],[1.,2.,3.]]),
                        np.tile([0.0, 0.0, 0.0, 1.0], (2, 1)))
-    motion = replace(session_episode(sync, raw, np.empty(0), np.empty((0, 3))), layout=SelfcapLayout(1, 2, ("phone",)))
+    motion = replace(session_episode(sync, raw, np.empty(0), np.empty((0, 3))), layout=SelfcapLayout(4, 5, phones))
     camera = Camera(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 900.0, 960.0, 540.0, 0.0, 0.0]))
     right = np.eye(4)
     right[0, 3] = 0.06
-    refinement = Refinement((camera,), np.array([0.01, -0.03, 0.02]), "label-hash", "fit")
-    state = CalibSession("synthetic", SessionCalibration("synthetic", {"phone": PhoneCalibration(True, camera)}),
-                         OakFit(), QuestBlock({}, {"1": right}, "healthy"), {},
-                         exo_refinements={sync.episode_key.segment: refinement})
-    output = tmp_path / "refined.rrd"
-    write_calib_layer(output, state, motion)
-    chunks = list(RrdReader(output).stream())
-    provenance = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/__properties/calib")
-    assert provenance.column("exo_label_layer_hash")[0].as_py() == ["label-hash"]
-    assert provenance.column("exo_focal_source")[0].as_py() == ["fit"]
-    for slot, expected in ((0, [0.01, -0.03, 0.02]), (1, [0.07, -0.03, 0.02])):
-        transform = next(c.to_record_batch() for c in chunks if str(c.entity_path) == f"/world/rig_02/cam_{slot:02d}"
-                         and "Transform3D:translation" in c.to_record_batch().schema.names)
-        np.testing.assert_allclose(transform.column("Transform3D:translation")[0].as_py()[0], expected)
+    refinement = Refinement((camera,) * 4, np.array([0.01, -0.03, 0.02]), "label-hash", "fixed")
+    state = CalibSession("synthetic", SessionCalibration("synthetic", {p: PhoneCalibration(True, camera) for p in phones}),
+                         OakFit("synthetic", True, "oak", 4.0, np.eye(4), 1.0), QuestBlock({}, {"1": right}, "healthy"),
+                         {"rgb_T_left": np.eye(4), "rgb_T_right": right})
+    paths = [tmp_path / "before.rrd", tmp_path / "after.rrd"]
+    write_calib_layer(paths[0], state, motion)
+    write_calib_layer(paths[1], replace(state, exo_refinements={sync.episode_key.segment: refinement}), motion)
+
+    def transform_bytes(path: Path) -> list[tuple[str, bytes]]:
+        result = []
+        for chunk in RrdReader(path).stream():
+            entity = str(chunk.entity_path)
+            if not entity.startswith(("/world/rig_04", "/world/rig_05")):
+                continue
+            batch = chunk.to_record_batch()
+            columns = [name for name in batch.schema.names if name.startswith(("Transform3D:", "Pinhole:")) or name == "video_time"]
+            if any(name.startswith(("Transform3D:", "Pinhole:")) for name in columns):
+                result.append((entity, batch.select(columns).serialize().to_pybytes()))
+        return sorted(result)
+
+    assert transform_bytes(paths[0])
+    assert transform_bytes(paths[0]) == transform_bytes(paths[1])
 
 
 def test_calibrate_cli_refuses_existing_output_before_solving(tmp_path: Path) -> None:

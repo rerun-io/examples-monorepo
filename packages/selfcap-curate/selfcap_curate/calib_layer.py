@@ -113,13 +113,10 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 rr.AnyValues(calib_source=METHOD, calib_oak_source=session.oak.observation_source, calib_oak_median_px=session.oak.median_px),
                 static=True,
             )
+        # The fitted head offset is an exo-only nuisance parameter, never a wearable transform.
         quest_transforms = session.quest.rig_T_cam.copy()
-        if refinement is not None:
-            quest_transforms.setdefault("0", np.eye(4))
         for slot, matrix in quest_transforms.items():
             matrix = matrix.copy()
-            if refinement is not None:
-                matrix[:3, 3] += refinement.head_translation_m
             tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")
         for slot, camera in session.quest.pinholes.items():
             if cy_shift_px(camera):

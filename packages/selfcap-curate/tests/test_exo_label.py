@@ -65,3 +65,13 @@ def test_hand_thresholds_are_explicit_and_independent():
     assert accepts(gate)
     assert not accepts(gate, GateThresholds(rtmw_max_regression_px=1.0))
     assert not accepts(replace(gate, candidate={**after, 'sapiens_hands': Score(50, 21.1, 30.0)}))
+
+
+def test_device_vp_table_is_typed_and_has_all_measured_devices():
+    from selfcap_curate.device_vp import read_vp_table
+
+    table = read_vp_table()
+    assert len(table.devices) == 8
+    assert table.devices['Dragon-413A7CC1'].focal_px == 888.7573979270643
+    assert table.devices['Titanium-57BB9E1A'].focal_px == 894.9294280422055
+    assert all(device.low_px <= device.focal_px <= device.high_px for device in table.devices.values())
