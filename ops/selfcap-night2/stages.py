@@ -126,7 +126,10 @@ def s2(segment: str, decision: dict | None=None) -> dict:
         original_models=keypoints.keypoint_models
         original_selection=keypoint_geometry.select_wearers
         keypoints.keypoint_models=lambda *args,**kwargs: (None,None)
-        cached=cache2d.load(work/'s1/rtmw-cache')
+        record=open_segment(dataset,segment)
+        sync=read_time_sync(dataset,segment)
+        expected_phones=tuple(phone for phone in record.layout.phones if (sync.offsets_ms or {}).get('exo/'+phone) is not None)
+        cached=cache2d.load(work/'s1/rtmw-cache',expected_phones=expected_phones,expected_rate=rate)
         keypoints.detect_keypoints=lambda *args,**kwargs:cached
         selected_source=work/'s1/rtmw-cache/source.json'
         if selected_source.exists() and json.loads(selected_source.read_text()).get('cache')=='original_s1_selected':
@@ -187,8 +190,10 @@ def raw_rtmw(segment: str, videos=None) -> dict:
         if len(cameras)<2:
             return skipped(f'only {len(cameras)} calibrated exo cameras; at least two required')
         cache=work/'rtmw-cache'
-        if list(cache.glob('*.parquet')): detections=cache2d.load(cache)
-        else:
+        expected_phones=tuple(phone for phone in record.layout.phones if (sync.offsets_ms or {}).get('exo/'+phone) is not None)
+        try:
+            detections=cache2d.load(cache,expected_phones=expected_phones,expected_rate=rate)
+        except (ValueError, OSError):
             try:
                 detections=detect_keypoints(record,*keypoint_models(),rate=rate,sync=sync)
             except ValueError as error:
