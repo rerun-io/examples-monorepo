@@ -62,7 +62,7 @@ def read_quest_centers(calibration: DatasetEntry, base: DatasetEntry, segment: s
         if f"{camera}/pinhole/video" not in videos:
             continue
         matrix: Float64[ndarray, "4 4"] = np.eye(4)
-        if cam == 1:
+        if cam == 1 or f"{camera}:Transform3D:translation" in extrinsics.column_names:
             translation: str = f"{camera}:Transform3D:translation"
             rotation: str = f"{camera}:Transform3D:mat3x3"
             if translation not in extrinsics.column_names or rotation not in extrinsics.column_names:
@@ -112,7 +112,7 @@ def camera_center_chunks(
         yield Chunk.from_columns(
             entity,
             indexes=[],
-            columns=[*Points2D.columns(labels=labels, colors=colors).partition([len(labels)]), *Points2D.columns(radii=4.0, show_labels=True)],
+            columns=[*Points2D.columns(labels=labels, colors=colors).partition([len(labels)]), *Points2D.columns(radii=4.0, show_labels=[True])],
         )
         pixels: Float32[ndarray, "n k 2"] = project_centers(camera, centers)
         yield Chunk.from_columns(

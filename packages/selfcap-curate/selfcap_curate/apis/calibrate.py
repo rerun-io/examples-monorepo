@@ -15,6 +15,9 @@ from selfcap_curate.calib_layer import CalibSession, write_calib_layer
 from selfcap_curate.detection_io import read_oak_observations, write_oak_egohand_layer
 from selfcap_curate.device_tables import read_rotations, read_table
 from selfcap_curate.exo_calibration import calibrate
+from selfcap_curate.exo_landmarks import read_landmarks
+from selfcap_curate.exo_refine import FocalSource
+from selfcap_curate.exo_refine_catalog import evaluate, load_inputs, read_focals
 from selfcap_curate.factory import oak_centre, oak_stereo, read_quest_block
 from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models, release_cuda_memory
 from selfcap_curate.keypoints import read_ego_cameras
@@ -43,6 +46,14 @@ class Config:
     """OAK alignment observations; Sapiens retains the legacy 32-frame path for comparison."""
     oak_egohand_assets: Path = Path("data/egohand")
     """Local EgoHand asset root containing weights/, engines/ and dinov3-bf16.onnx."""
+    exo_refine: bool = False
+    """Opt into joint optical calibration when exo_landmarks is present."""
+    exo_focal_source: FocalSource = "fit"
+    """Use table focal, jointly fitted focal, or a fixed focal record."""
+    exo_focal_file: Path | None = None
+    """Typed JSON FocalRecord required by the fixed source."""
+    exo_reference_dataset: str | None = None
+    """Optional dataset on donor_catalog_url carrying independent RTMW gate observations."""
 
 
 def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = None) -> CalibSession:
@@ -103,6 +114,29 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
             ),
             oak_stereo(ego),
         )
+        if config.exo_refine:
+            refinements = {}
+            for segment in segments:
+                labels = read_landmarks(dataset, segment.id)
+                if labels is None:
+                    continue
+                seeds = []
+                for phone in segment.layout.phones:
+                    camera = state.exo.phones[phone].camera
+                    if camera is None:
+                        raise ValueError("exo refinement needs initialized cameras for every labelled view")
+                    seeds.append(camera)
+                inputs = load_inputs(segment, cameras=tuple(seeds), quest=state.quest, landmarks=labels)
+                if config.exo_reference_dataset is not None:
+                    reference = CatalogClient(config.donor_catalog_url or config.catalog_url).get_dataset(name=config.exo_reference_dataset)
+                    reference_inputs = load_inputs(catalog_io.open_segment(reference, segment.id), landmarks=labels)
+                    inputs = replace(inputs, body=reference_inputs.body)
+                fixed, digest = read_focals(config.exo_focal_file, inputs.phones)
+                result, gate = evaluate(inputs, focal_source=config.exo_focal_source, fixed_focals=fixed, focal_record=digest)
+                refinements[segment.id] = result
+                (output / f"{segment.id}.exo-gate.json").write_text(to_json(gate))
+                print("EXO_GATE", segment.id, "pass" if gate.passes else "candidate: fails no-regression gate", flush=True)
+            state = replace(state, exo_refinements=refinements)
         for motion in episodes:
             write_calib_layer(output / motion.sync.episode_key.rrd_name, state, motion)
         (output / f"{session}.json").write_text(to_json(state))
