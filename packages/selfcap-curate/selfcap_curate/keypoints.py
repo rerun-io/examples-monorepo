@@ -537,10 +537,17 @@ def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
 
     xyz = stable_body(result, xyz)
     final: TriangulationBatch = support_for_points(result, xyz)
-    confidence = final.confidence * np.where(final.n_views == 2, 0.9, 1.0).astype(np.float32)
-    filled, confidence, bridged = bridge_short_gaps(final.xyz, confidence, result.rate)
-    support = support_for_points(result, filled)
-    return replace(result, xyz=filled, n_views=support.n_views, confidence=confidence, inliers=support.inliers, max_reprojection_px=support.max_reprojection_px, bridged=bridged)
+    # Temporal estimates retain their coordinates even without two views at that
+    # instant; support components still describe only the actual 8 px inliers.
+    _, source_confidence, gaps = bridge_short_gaps(result.xyz, result.confidence, result.rate)
+    finite = np.isfinite(xyz).all(-1)
+    inferred = finite & (final.n_views < 2)
+    confidence = np.where(inferred, source_confidence * 0.75, final.confidence).astype(np.float32)
+    confidence *= np.where(final.n_views == 2, 0.9, 1.0).astype(np.float32)
+    confidence[~finite] = 0.0
+    bridged = gaps | inferred
+    return replace(result, xyz=xyz, n_views=final.n_views, confidence=confidence, inliers=final.inliers, max_reprojection_px=final.max_reprojection_px, bridged=bridged)
+
 
 
 def write_keypoints(
@@ -613,7 +620,7 @@ def write_keypoints(
                 kp3d_min_detection_score=MIN_DETECTION_SCORE,
                 kp3d_support_camera_paths=[camera.entity for camera in result.cameras.values()],
                 kp3d_missing_under_headset="body 0-2 and face 23-90: both models place them on the Quest front plate",
-                kp3d_smoothing=f"Body: continuous view-pair path, median 5, bidirectional One Euro {ONE_EURO_MIN_CUTOFF_HZ} Hz beta 0.3, 8 px support, 30 mm acceleration outliers replaced across gaps up to 0.5 s; other joints: bidirectional One Euro beta {ONE_EURO_BETA}; restart at gaps",
+                kp3d_smoothing=f"Body: centred median-5 jump replacement and Gaussian sigma 2 frames; above 0.5 m/s follow jump-cleaned positions; gaps up to 0.5 s bridged; other joints: bidirectional One Euro beta {ONE_EURO_BETA}; restart at gaps",
             ),
         )
         for parent in parents:

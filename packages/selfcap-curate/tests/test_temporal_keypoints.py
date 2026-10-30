@@ -1,30 +1,16 @@
-"""Body camera-pair selection rejects alternating high-score false matches."""
+"""Centred body filtering preserves phase, gaps, and the separate hand treatment."""
 
 import numpy as np
-from test_keypoints_geometry import cameras
-
-from selfcap_curate.keypoints import Keypoints3D, SelectedView, project, triangulate_frames
-from selfcap_curate.temporal_keypoints import stable_body
 
 
-def test_body_path_stays_on_consistent_views_and_leaves_hands_unchanged() -> None:
-    cams = cameras()
-    frames = 61
-    true = np.tile([0.1, -0.2, 4.0], (frames, 133, 1)).astype(np.float32)
-    false = true.copy()
-    false[:, :, 0] += (0.25 * (-1.0) ** np.arange(frames))[:, None]
-    uv = np.stack([
-        np.stack([project(camera, points.astype(np.float64))[:, :2] for points in (true if view < 2 else false)])
-        for view, camera in enumerate(cams)
-    ], axis=1)
-    scores = np.broadcast_to(np.array([0.85, 0.85, 0.99, 0.99])[None, :, None], uv.shape[:3]).copy()
-    raw = triangulate_frames(cams, uv, scores)
-    selected = {str(i): SelectedView(uv[:, i].astype(np.float32), scores[:, i]) for i in range(4)}
-    result = Keypoints3D(np.arange(frames) / 24.0, raw.xyz, raw.n_views, raw.confidence, selected,
-                        dict(zip(selected, cams, strict=True)), 24.0, raw.inliers, raw.max_reprojection_px)
-    stable = stable_body(result, raw.xyz)
-    np.testing.assert_allclose(stable[:, 6], true[:, 6], atol=0.01)
-    np.testing.assert_array_equal(stable[:, 91:], raw.xyz[:, 91:])
+def test_body_filter_leaves_hand_treatment_unchanged() -> None:
+    from selfcap_curate.keypoints import Keypoints3D
+    from selfcap_curate.temporal_keypoints import stable_body
+
+    xyz = np.zeros((61, 133, 3), dtype=np.float32)
+    xyz[:, 91:] = np.arange(61, dtype=np.float32)[:, None, None]
+    result = Keypoints3D(np.arange(61) / 24.0, xyz, np.ones((61,133),np.uint8), np.ones((61,133),np.float32), {}, {}, 24.0)
+    np.testing.assert_array_equal(stable_body(result, xyz)[:, 91:], xyz[:, 91:])
 
 
 def test_short_gaps_are_bridged_with_reduced_confidence_but_long_gaps_stay_missing() -> None:
@@ -41,3 +27,20 @@ def test_short_gaps_are_bridged_with_reduced_confidence_but_long_gaps_stay_missi
     assert (scores[2:5] < 0.9).all()
     assert np.isnan(filled[10:24]).all()
     assert not bridged[10:24].any()
+
+
+def test_body_filter_is_time_symmetric_and_preserves_fast_motion_phase() -> None:
+    from selfcap_curate.temporal_keypoints import responsive_body
+
+    t = np.arange(121, dtype=np.float32) / 24.0
+    signal = np.zeros((121, 1, 3), dtype=np.float32)
+    signal[:, 0, 0] = 0.4 * np.sin(2 * np.pi * t)
+    signal[30, 0, 1] = 0.2  # isolated tracking jump, including during fast motion
+    filtered = responsive_body(signal, 24.0)
+    reverse = responsive_body(signal[::-1].copy(), 24.0)[::-1]
+    np.testing.assert_allclose(filtered, reverse, atol=1e-6)
+    assert abs(filtered[30, 0, 1]) < 0.02
+    # The central periodic peaks must not shift by a frame.
+    reference = signal[24:96, 0, 0]
+    correlations = [np.dot(reference, filtered[24 + lag:96 + lag, 0, 0]) for lag in range(-3, 4)]
+    assert int(np.argmax(correlations)) - 3 == 0
