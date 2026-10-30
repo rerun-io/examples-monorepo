@@ -29,3 +29,22 @@ def test_body_lengths_include_widths_and_midpoint_torso():
     body[0, 6] = torch.tensor([0.5, 0.0, 0.0])
     body[0, 7] = torch.tensor([-0.5, 0.0, 0.0])
     torch.testing.assert_close(body_lengths(body)[0, :3], torch.tensor([2.0, 1.0, 3.0]))
+
+
+def test_rotation_temporal_term_penalizes_jitter_but_allows_steady_turns():
+    from selfcap_soma.losses import rotation_temporal_penalty
+
+    def rotations(angles):
+        a = torch.tensor(angles)
+        z = torch.zeros_like(a)
+        o = torch.ones_like(a)
+        return torch.stack((torch.cos(a), -torch.sin(a), z, torch.sin(a), torch.cos(a), z, z, z, o), dim=-1).reshape(-1, 1, 3, 3).requires_grad_()
+
+    dt = torch.full((4,), 0.04)
+    steady = rotations([0.0, 0.01, 0.02, 0.03, 0.04])
+    jitter = rotations([0.0, 0.02, 0.0, 0.02, 0.0])
+    cost = rotation_temporal_penalty(jitter, dt)
+    assert cost > rotation_temporal_penalty(steady, dt) * 100
+    cost.backward()
+    assert torch.isfinite(jitter.grad).all()
+    assert rotation_temporal_penalty(rotations([0.0] * 5), dt) == 0

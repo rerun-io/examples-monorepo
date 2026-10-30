@@ -61,6 +61,25 @@ def test_shared_shape_freeze_keeps_repeated_pose_gradients_finite():
     np.testing.assert_array_equal(frozen.head_offset, result.head_offset)
     assert frozen.scale == pytest.approx(result.scale, abs=1e-6)
 
+    from dataclasses import replace
+
+    from selfcap_soma.fitting import FitOptions
+    from selfcap_soma.upper_body import lower_body_mask
+
+    leg_ids = np.flatnonzero(lower_body_mask(tuple(model.public_joint_names), model.public_joint_parent_ids.cpu().numpy().astype(np.int64))[1:])
+    bent = result.poses.copy()
+    bent[:, leg_ids] = 0.4
+    upper = fit(
+        data,
+        assets,
+        iterations=4,
+        shape_iterations=1,
+        options=FitOptions(freeze_legs=True, leg_support_weight=0.0, hip_landmark_weight=0.15),
+        fixed=calibration,
+        initial=replace(result, poses=bent),
+    )
+    np.testing.assert_array_equal(upper.poses[:, leg_ids], 0.0)
+
 
 def test_sparse_ear_vertices_match_full_mesh_and_ear_calibration_freezes():
     from selfcap_soma.fitting import FitOptions
@@ -154,7 +173,7 @@ def test_foot_surface_targets_drive_ankle_rotation():
     calibration = Calibration(
         np.zeros((1, 128), np.float32), 1.0, np.zeros(3, np.float32), np.ones((1, 60), np.float32), np.eye(3, dtype=np.float32), "ears"
     )
-    result = fit(data, assets, 80, 1, FitOptions(head_mode="ears", use_feet=True, foot_contact_weight=0.0), fixed=calibration)
+    result = fit(data, assets, 80, 1, FitOptions(head_mode="ears", use_feet=True), fixed=calibration)
     assert result.foot_landmarks is not None
     assert np.median(np.linalg.norm(result.foot_landmarks - feet, axis=-1)) < np.median(np.linalg.norm(original - feet, axis=-1)) * 0.6
     assert np.linalg.norm(result.poses[:, [names.index("LeftFoot"), names.index("RightFoot")]]) > 0.05

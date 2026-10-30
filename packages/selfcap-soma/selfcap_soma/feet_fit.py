@@ -118,7 +118,6 @@ def main(config: Config) -> None:
         head_mode="ears-rotation",
         head_rotation_weight=0.3,
         use_feet=True,
-        floor_height_m=contact.floor_height_m,
         shape_components=128,
         identity_prior=0.05,
         scale_prior=2.0,

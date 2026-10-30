@@ -125,7 +125,7 @@ def model_for(calibration: Calibration) -> SOMALayer:
     return model
 
 
-def load_fit(directory: Path, calibration: Calibration, data: Observations) -> FitResult:
+def load_fit(directory: Path, calibration: Calibration, data: Observations, with_foot_landmarks: bool = True) -> FitResult:
     times, raw = stream(directory / "fit.rrd", "/parameters/poses", "Tensor:data")
     if not np.allclose(times, data.times, atol=1e-8):
         raise ValueError("baseline and observation timestamps differ")
@@ -138,16 +138,18 @@ def load_fit(directory: Path, calibration: Calibration, data: Observations) -> F
         raise ValueError("baseline lacks a head attachment")
     report = from_json(Report, (directory / "report.json").read_text())
     translations = np.asarray(roots.to_pylist(), dtype=np.float32).reshape(-1, 3)
-    foot_batches = []
-    with torch.no_grad():
-        for start in range(0, len(poses), 32):
-            posed = model.pose(
-                torch.tensor(poses[start : start + 32], device="cuda"),
-                transl=torch.tensor(translations[start : start + 32], device="cuda"),
-                apply_correctives=False,
-            )
-            foot_batches.append(posed.vertices[:, torch.as_tensor(FOOT_VERTICES, device="cuda")].mean(2).cpu().numpy())
-    feet = np.concatenate(foot_batches)
+    feet = None
+    if with_foot_landmarks:
+        foot_batches = []
+        with torch.no_grad():
+            for start in range(0, len(poses), 32):
+                posed = model.pose(
+                    torch.tensor(poses[start : start + 32], device="cuda"),
+                    transl=torch.tensor(translations[start : start + 32], device="cuda"),
+                    apply_correctives=False,
+                )
+                foot_batches.append(posed.vertices[:, torch.as_tensor(FOOT_VERTICES, device="cuda")].mean(2).cpu().numpy())
+        feet = np.concatenate(foot_batches)
     return FitResult(
         poses,
         np.asarray(roots.to_pylist(), dtype=np.float32).reshape(-1, 3),
@@ -172,9 +174,11 @@ def load_fit(directory: Path, calibration: Calibration, data: Observations) -> F
     )
 
 
-def evaluate(name: str, data: Observations, result: FitResult) -> Metrics:
+def evaluate(name: str, data: Observations, result: FitResult, upper_body_only: bool = False) -> Metrics:
     dataset = CatalogClient(CATALOG).get_dataset(DATASET)
     points = mapped(result, data)
+    if upper_body_only:
+        points[:, 13:91] = np.nan
     cross = []
     # Both detectors see exactly the same predicted frames; missing detections stay absent.
     camera = None
@@ -237,7 +241,7 @@ def evaluate(name: str, data: Observations, result: FitResult) -> Metrics:
     plausibility = measure(model, result, data.times)
     return Metrics(
         name,
-        residual(points[:, 5:17], data.exo[:, 5:17]),
+        residual(points[:, 5:13] if upper_body_only else points[:, 5:17], data.exo[:, 5:13] if upper_body_only else data.exo[:, 5:17]),
         residual(points[:, 5:7], data.exo[:, 5:7]),
         residual(points[:, 3:5], data.exo[:, 3:5]),
         residual(points[:, 91:], data.hands[:, 91:]),

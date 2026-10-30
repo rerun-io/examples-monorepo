@@ -27,3 +27,11 @@ def robust_points(
     cost = torch.where(distance <= 2.0, 0.5 * distance.square(), 2.0 * (distance - 1.0))
     effective = torch.where(valid, weights, 0.0)
     return (cost * effective).sum() / effective.sum().clamp_min(1.0)
+
+
+def rotation_temporal_penalty(rotations: Float[Tensor, "n k 3 3"], dt: Float[Tensor, "interval"]) -> Float[Tensor, ""]:
+    """Penalize rapid changes in world rotation velocity, retaining smooth turns."""
+    velocity = (rotations[1:] - rotations[:-1]) / dt[:, None, None, None].clamp_min(1e-6)
+    change = (velocity[1:] - velocity[:-1]) / 0.5
+    valid = (dt[1:] > 0) & (dt[1:] <= 0.1) & (dt[:-1] > 0) & (dt[:-1] <= 0.1)
+    return (change.square().mean(dim=(1, 2, 3)) * valid).sum() / valid.sum().clamp_min(1)

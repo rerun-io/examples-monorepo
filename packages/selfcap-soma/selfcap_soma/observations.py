@@ -40,10 +40,10 @@ def coco_joint_names() -> dict[int, str]:
     return names
 
 
-def overlay_points(points: Float32[ndarray, "n j 3"], names: tuple[str, ...]) -> Float32[ndarray, "n 133 3"]:
+def overlay_points(points: Float32[ndarray, "n j 3"], names: tuple[str, ...], upper_body_only: bool = True) -> Float32[ndarray, "n 133 3"]:
     """Projectable COCO body/hand joints only; internal and face joints stay absent."""
     result: Float32[ndarray, "n 133 3"] = np.full((len(points), 133, 3), np.nan, dtype=np.float32)
     for key, name in coco_joint_names().items():
-        if name in names:
+        if name in names and (not upper_body_only or not 13 <= key <= 22):
             result[:, key] = points[:, names.index(name)]
     return result

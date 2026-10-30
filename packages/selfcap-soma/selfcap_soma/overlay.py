@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
+import trimesh
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from rerun.catalog import CatalogClient
@@ -19,6 +20,8 @@ from selfcap_soma.overlay_style import observed_links, observed_points
 
 @dataclass(frozen=True, slots=True)
 class Config:
+    upper_body_only: bool = True
+    """Crop the mesh and display only head/ears, arms/hands and hips."""
     exo_source: ExoSource = "sapiens2"
     """Per-phone image evidence used to classify observed versus inferred joints."""
     source: Path = Path("/tmp/soma-fit/full-segment/fit.rrd")
@@ -33,12 +36,11 @@ def log_joint_overlay(
     recording: rr.RecordingStream, path: str, times: Float64[ndarray, "n"], pixels: Float32[ndarray, "n 133 2"], seen: Bool[ndarray, "n 133"]
 ) -> None:
     """Keep points and individually styled links on the existing joint entity."""
-    body_edges = [(5, 6), (5, 7), (7, 9), (6, 8), (8, 10), (5, 11), (6, 12), (11, 12), (11, 13), (13, 15), (12, 14), (14, 16)]
+    body_edges = [(3, 4), (5, 6), (5, 7), (7, 9), (6, 8), (8, 10), (5, 11), (6, 12), (11, 12)]
     hand_edges = [(base, base + 1 + finger * 4) for base in (91, 112) for finger in range(5)] + [
         (base + 1 + finger * 4 + joint, base + 2 + finger * 4 + joint) for base in (91, 112) for finger in range(5) for joint in range(3)
     ]
-    foot_edges = [(15, 19), (19, 17), (17, 18), (18, 19), (16, 22), (22, 20), (20, 21), (21, 22)]
-    edges = np.asarray(body_edges + hand_edges + foot_edges, dtype=np.int64)
+    edges = np.asarray(body_edges + hand_edges, dtype=np.int64)
     recording.log(
         path,
         rr.AnnotationContext(rr.ClassDescription(info=rr.AnnotationInfo(id=0))),
@@ -66,6 +68,39 @@ def log_joint_overlay(
     )
 
 
+def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader) -> None:
+    """Retain only selected upper-body vertices, with newly computed normals."""
+    selection = source.stream().filter(content="/parameters/upper_body_vertices").to_chunks()
+    if not selection:
+        raise ValueError("fit is missing its skinning-based upper-body vertex selection")
+    ids = np.asarray(selection[0].to_record_batch().column("Tensor:data")[0].as_py()[0]["buffer"], dtype=np.int64)
+    faces = None
+    batches = []
+    for chunk in source.stream().filter(content="/world/fit/mesh").to_chunks():
+        batch = chunk.to_record_batch()
+        if "Mesh3D:triangle_indices" in batch.schema.names:
+            faces = np.asarray(batch.column("Mesh3D:triangle_indices")[0].as_py(), dtype=np.int32)
+        if "video_time" in batch.schema.names and "Mesh3D:vertex_positions" in batch.schema.names:
+            batches.append(batch)
+    if faces is None or not batches:
+        raise ValueError("fit mesh has no faces or vertex frames")
+    remap = np.full(int(faces.max()) + 1, -1, dtype=np.int64)
+    remap[ids] = np.arange(len(ids))
+    faces = remap[faces[(remap[faces] >= 0).all(1)]].astype(np.int32)
+    recording.log("/world/pred/soma_x/mesh", rr.Mesh3D.from_fields(triangle_indices=faces, albedo_factor=[0.25, 0.65, 0.8, 0.5]), static=True)
+    for batch in batches:
+        stamps = batch.column("video_time").cast("int64").to_numpy().astype(np.float64) / 1e9
+        vertices = np.asarray(batch.column("Mesh3D:vertex_positions").to_pylist(), dtype=np.float32)[:, ids]
+        normals = np.stack([trimesh.Trimesh(v, faces, process=False).vertex_normals for v in vertices]).astype(np.float32)
+        recording.send_columns(
+            "/world/pred/soma_x/mesh",
+            indexes=[rr.TimeColumn("video_time", duration=stamps)],
+            columns=rr.Mesh3D.columns(vertex_positions=vertices.reshape(-1, 3), vertex_normals=normals.reshape(-1, 3)).partition(
+                [len(ids)] * len(stamps)
+            ),
+        )
+
+
 def main(config: Config) -> None:
     source = RrdReader(config.source)
     identity = RrdReader(config.reference).recordings()[0]
@@ -87,7 +122,8 @@ def main(config: Config) -> None:
     if not name_chunks:
         raise ValueError("fit recording lacks joint names; rerun soma-fit before exporting overlays")
     names = tuple(name_chunks[0].to_record_batch().column("TextDocument:text")[0].as_py()[0].splitlines())
-    points = overlay_points(points, names)
+    world_joints = points.copy()
+    points = overlay_points(points, names, config.upper_body_only)
     ear_rows = []
     for chunk in source.stream().filter(content="/world/fit/ears").to_chunks():
         table = chunk.to_record_batch()
@@ -123,6 +159,8 @@ def main(config: Config) -> None:
         quest = np.concatenate([row[1] for row in quest_rows])[np.argsort(np.concatenate([row[0] for row in quest_rows]))]
         if len(quest) != len(times):
             raise ValueError("Quest and joint streams differ in length")
+    if config.upper_body_only:
+        points[:, 13:91] = np.nan
     dataset = CatalogClient("rerun+http://dgx-spark:51235").get_dataset("selfcap-post-dev")
     phones, rgb = read_views(dataset, segment, times, config.exo_source)
     rgb_evidence = np.full((len(times), 133, 2), np.nan)
@@ -154,12 +192,27 @@ def main(config: Config) -> None:
     config.output.parent.mkdir(parents=True, exist_ok=True)
     recording = rr.RecordingStream(identity.application_id, recording_id=identity.recording_id)
     recording.save(config.output)
-    for old, new in (
-        ("/world/fit/joints", "/world/pred/soma_x/joints"),
-        ("/world/fit/mesh", "/world/pred/soma_x/mesh"),
-        ("/world/fit/ears", "/world/pred/soma_x/ears"),
-    ):
-        recording.send_chunks(source.stream().filter(content=old).map(lambda chunk, new=new: chunk.with_entity_path(new)))
+    if config.upper_body_only:
+        static = source.stream().filter(content="/parameters/visible_joints").to_chunks()
+        if not static:
+            raise ValueError("upper-body output requires a fit with a skinning-based display selection")
+        visible_ids = np.asarray(static[0].to_record_batch().column("Tensor:data")[0].as_py()[0]["buffer"], dtype=np.int64)
+        hidden = np.ones(world_joints.shape[1], dtype=bool)
+        hidden[visible_ids] = False
+        world_joints[:, hidden] = np.nan
+        for chunk in source.stream().filter(content="/world/fit/joints").to_chunks():
+            if "video_time" not in chunk.to_record_batch().schema.names:
+                recording.send_chunks(chunk.with_entity_path("/world/pred/soma_x/joints"))
+        recording.send_columns(
+            "/world/pred/soma_x/joints",
+            indexes=[rr.TimeColumn("video_time", duration=times)],
+            columns=rr.Points3D.columns(positions=world_joints.reshape(-1, 3)).partition([world_joints.shape[1]] * len(times)),
+        )
+        log_cropped_mesh(recording, source)
+    else:
+        for old, new in (("/world/fit/joints", "/world/pred/soma_x/joints"), ("/world/fit/mesh", "/world/pred/soma_x/mesh")):
+            recording.send_chunks(source.stream().filter(content=old).map(lambda chunk, new=new: chunk.with_entity_path(new)))
+    recording.send_chunks(source.stream().filter(content="/world/fit/ears").map(lambda chunk: chunk.with_entity_path("/world/pred/soma_x/ears")))
     projections = []
     for view in phones:
         projected = project(view.camera, points.reshape(-1, 3).astype(np.float64)).reshape(len(times), 133, 3)

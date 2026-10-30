@@ -60,3 +60,13 @@ def test_head_attachment_offset_rotates_with_head_not_world():
     rotations = np.array([[[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]], dtype=np.float32)
     point = attached_eye(torch.from_numpy(heads), torch.from_numpy(rotations), torch.tensor([0.1, 0.0, 0.0]))
     np.testing.assert_allclose(point, [[1.0, 2.1, 3.0]])
+
+
+def test_upper_body_overlay_keeps_hips_but_omits_knees_and_ankles():
+    from selfcap_soma.observations import overlay_points
+
+    names = ("LeftLeg", "LeftShin", "LeftFoot", "RightLeg", "RightShin", "RightFoot", "LeftHand")
+    points = np.ones((1, len(names), 3), dtype=np.float32)
+    result = overlay_points(points, names)
+    assert np.isfinite(result[:, [11, 12, 91]]).all()
+    assert np.isnan(result[:, 13:91]).all()

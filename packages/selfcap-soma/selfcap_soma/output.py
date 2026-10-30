@@ -60,7 +60,7 @@ def residual(a: Float64[ndarray, "... 3"], b: Float64[ndarray, "... 3"]) -> Resi
     return Residual(float(np.median(valid)) if valid.size else None, float(np.percentile(valid, 90)) if valid.size else None, int(valid.size))
 
 
-def save(output: Path, data: Observations, result: FitResult, target_s: float, mesh_stride: int = 1) -> Report:
+def save(output: Path, data: Observations, result: FitResult, target_s: float, mesh_stride: int = 1, upper_body_only: bool = False) -> Report:
     """Persist a local comparison recording and a strict JSON report."""
     output.mkdir(parents=True, exist_ok=True)
     mapped = np.full_like(data.exo, np.nan)
@@ -80,7 +80,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         data.offset_ms,
         target_s,
         float(data.times[frame]),
-        residual(mapped[:, 5:17], data.exo[:, 5:17]),
+        residual(mapped[:, 5:13] if upper_body_only else mapped[:, 5:17], data.exo[:, 5:13] if upper_body_only else data.exo[:, 5:17]),
         residual(mapped[:, 91:], data.exo[:, 91:]),
         residual(mapped[:, 91:], data.hands[:, 91:]),
         residual(
@@ -111,7 +111,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
                 else "Headset attachment is estimated from this segment; ear landmarks are hand-selected low-LOD surface vertices."
             ),
             "Shared native identity, global scale and optional body bone ratios; no hand PCA or learned pose prior.",
-            "Foot surface landmarks and gated contact are available; no image fitting or uncertainty estimate.",
+            "No floor-contact term, image fitting or uncertainty estimate.",
             "Quest bone orientations constrained." if result.hand_orientations else "No hand bone orientation supervision.",
             "Low-LOD mesh; procedural twists enabled, pose correctives unavailable."
             if result.display_twists
@@ -179,6 +179,10 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         recording.set_time("video_time", duration=float(stamp))
         recording.log("/parameters/poses", rr.Tensor(pose))
     recording.send_columns("/parameters/root", indexes=index, columns=rr.Points3D.columns(positions=result.translations))
+    if result.upper_body_vertices is not None:
+        recording.log("/parameters/upper_body_vertices", rr.Tensor(result.upper_body_vertices), static=True)
+    if result.visible_joints is not None:
+        recording.log("/parameters/visible_joints", rr.Tensor(result.visible_joints), static=True)
     recording.log("/parameters/identity", rr.Tensor(result.identity), static=True)
     recording.log("/parameters/head_attachment", rr.Tensor(result.head_attachment), static=True)
     recording.log("/parameters/head_anchor", rr.TextDocument(result.head_anchor), static=True)

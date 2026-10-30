@@ -1,8 +1,8 @@
 # Feet, limb symmetry and observed/inferred overlays
 
-Status: code and first current-layer run complete. **Not published.** Wait for
-explicit confirmation that the stricter `keypoints_sapiens2` layer is registered,
-then refit and replace only `selfcap-post-dev/soma`.
+Status: superseded by [the upper-body fit](upper-body.md). The foot experiment
+was not published; floor contact is removed and lower-body observations have
+zero weight in the current run.
 
 The configuration remains Sapiens2 exo observations, ear position landmarks,
 and soft Quest head rotation (weight 0.3, no head translation). Quest hand

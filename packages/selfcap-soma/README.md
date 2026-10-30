@@ -1,5 +1,8 @@
 # SelfCap SOMA fitting prototype
 
+Current published configuration: [upper body and hands](docs/upper-body.md).
+The original prototype description below documents the earlier baseline.
+
 Fit one fixed-calibration SelfCap recording to NVIDIA SOMA-X body and hands.
 This is an observation fitter, not an image model. It does not use EgoHand,
 change calibration or clocks, or register catalog layers.
