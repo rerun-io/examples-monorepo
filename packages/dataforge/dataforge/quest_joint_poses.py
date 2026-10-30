@@ -8,10 +8,8 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 from jaxtyping import Float32, Int64
 from numpy import ndarray
-from serde import serde
 
 
-@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class QuestJointPoses:
     times_ns: Int64[ndarray, "n"]

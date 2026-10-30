@@ -11,7 +11,7 @@ from uuid import uuid4
 import numpy as np
 import onnx
 import torch
-from dataforge.temporal import nearest_indices as sample_nearest_indices
+from dataforge.clocks import nearest_framesets
 from jaxtyping import Bool, Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from onnx import numpy_helper
@@ -66,7 +66,7 @@ def nearest_indices(pts: Float64[ndarray, "f"], want: Float64[ndarray, "n"]) -> 
     """Nearest source sample; ties go left, including irregular presentation PTS."""
     if not len(pts) or not np.isfinite(want).all() or not np.all(np.diff(pts) > 0.0):
         raise ValueError("presentation times must be nonempty and strictly increasing")
-    return sample_nearest_indices(pts, want)
+    return nearest_framesets(pts, want)
 
 
 @dataclass(frozen=True, slots=True)
