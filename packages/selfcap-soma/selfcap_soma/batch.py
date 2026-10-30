@@ -25,7 +25,7 @@ from selfcap_soma.shape_frames import select_shape_frames
 from selfcap_soma.shoulders import subset
 from selfcap_soma.temporal import group_jitter
 
-VERSION = "soma-batch-v3-supported-shape-frames"
+VERSION = "soma-batch-v5-exact-time-full-mesh"
 SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 
 
@@ -234,7 +234,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         state.timings.fit_s = perf_counter() - began
         state.timings.peak_gpu_mib = max(state.timings.peak_gpu_mib, result.peak_bytes / 2**20)
         began = perf_counter()
-        save(directory, data, result, 39.862079571, 3, upper_body_only=True)
+        save(directory, data, result, 39.862079571, 1, upper_body_only=True)
         (directory / "jitter.json").write_text(to_json(group_jitter(result.joints, data.times, result.names)))
         state.timings.write_s = perf_counter() - began
         state.phase = "fit"

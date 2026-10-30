@@ -14,7 +14,7 @@ from serde.json import to_json
 
 from selfcap_soma.catalog import Observations
 from selfcap_soma.fitting import FitResult
-from selfcap_soma.observations import coco_joint_names
+from selfcap_soma.observations import coco_joint_names, video_time_column
 
 
 @serde(deny_unknown_fields=True)
@@ -140,7 +140,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         rr.TextDocument("SOMA fit (cyan); triangulated points (orange); Quest hands (magenta).\n" + "\n".join(report.limitations)),
         static=True,
     )
-    index = [rr.TimeColumn("video_time", duration=data.times)]
+    index = [video_time_column(data.times)]
     recording.send_columns(
         "/world/fit/joints", indexes=index, columns=rr.Points3D.columns(positions=result.joints.reshape(-1, 3)).partition([77] * len(data.times))
     )
@@ -181,7 +181,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         recording.log(path, rr.Points3D.from_fields(keypoint_ids=np.arange(42), class_ids=0, colors=color, radii=0.003), static=True)
         recording.send_columns(path, indexes=index, columns=rr.Points3D.columns(positions=points.reshape(-1, 3)).partition([42] * len(data.times)))
     for stamp, pose in zip(data.times, result.poses, strict=True):
-        recording.set_time("video_time", duration=float(stamp))
+        recording.set_time("video_time", duration=np.timedelta64(int(np.rint(stamp * 1e9)), "ns"))
         recording.log("/parameters/poses", rr.Tensor(pose))
     recording.send_columns("/parameters/root", indexes=index, columns=rr.Points3D.columns(positions=result.translations))
     if result.upper_body_vertices is not None:
@@ -200,7 +200,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     normals = np.stack([trimesh.Trimesh(v, result.faces, process=False).vertex_normals for v in mesh_vertices]).astype(np.float32)
     recording.send_columns(
         "/world/fit/mesh",
-        indexes=[rr.TimeColumn("video_time", duration=data.times[mesh_rows])],
+        indexes=[video_time_column(data.times[mesh_rows])],
         columns=rr.Mesh3D.columns(vertex_positions=mesh_vertices.reshape(-1, 3), vertex_normals=normals.reshape(-1, 3)).partition(
             [result.vertices.shape[1]] * len(mesh_rows)
         ),

@@ -122,7 +122,7 @@ def main(config: Config) -> None:
     result = fit(
         data, ASSETS, config.iterations, 1, replace(options, orientation_weight=30.0), fixed=calibration, initial=initial, orientations=orientations
     )
-    save(config.output, data, result, 39.862079571, 3, upper_body_only=True)
+    save(config.output, data, result, 39.862079571, 1, upper_body_only=True)
     if result.upper_body_vertices is None:
         raise ValueError("missing upper-body display selection")
     retained = np.isin(result.faces, result.upper_body_vertices).all(1).sum()

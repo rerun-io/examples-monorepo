@@ -1,7 +1,8 @@
 """Clock and anatomical correspondence rules for the prototype."""
 
 import numpy as np
-from jaxtyping import Float32, Float64
+import rerun as rr
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 
 
@@ -47,3 +48,14 @@ def overlay_points(points: Float32[ndarray, "n j 3"], names: tuple[str, ...], up
         if name in names and (not upper_body_only or not 13 <= key <= 22):
             result[:, key] = points[:, names.index(name)]
     return result
+
+
+def require_full_rate_mesh(mesh_times: Int64[ndarray, "m"], joint_times: Int64[ndarray, "n"]) -> None:
+    """Reject decimated or shifted meshes before creating a publishable layer."""
+    if not np.array_equal(np.sort(mesh_times), np.sort(joint_times)):
+        raise ValueError("mesh timestamps must exactly equal all fitted joint timestamps; regenerate with mesh_stride=1")
+
+
+def video_time_column(times: Float64[ndarray, "n"]) -> rr.TimeColumn:
+    """Round back to source nanoseconds; avoid Rerun's float-seconds truncation."""
+    return rr.TimeColumn("video_time", duration=np.rint(times * 1e9).astype("timedelta64[ns]"))

@@ -14,7 +14,7 @@ from rerun.chunk import RrdReader
 from selfcap_soma.camera_geometry import project, project_ego
 from selfcap_soma.catalog import ExoSource
 from selfcap_soma.evaluation_io import first, nearest_indices, read_egohand_rgb, read_views
-from selfcap_soma.observations import overlay_points
+from selfcap_soma.observations import overlay_points, require_full_rate_mesh, video_time_column
 from selfcap_soma.overlay_style import observed_links, observed_points, residual_tolerance
 
 
@@ -57,7 +57,7 @@ def log_joint_overlay(
     recording.log(path, rr.Points2D.from_fields(keypoint_ids=np.arange(133), class_ids=0), static=True)
     recording.send_columns(
         path,
-        indexes=[rr.TimeColumn("video_time", duration=times)],
+        indexes=[video_time_column(times)],
         columns=rr.Points2D.columns(
             positions=pixels.reshape(-1, 2),
             colors=np.where(seen[..., None], np.array([0, 255, 255, 255]), np.array([140, 140, 140, 110])).astype(np.uint8).reshape(-1, 4),
@@ -67,7 +67,7 @@ def log_joint_overlay(
     supported = observed_links(seen, edges)
     recording.send_columns(
         path,
-        indexes=[rr.TimeColumn("video_time", duration=times)],
+        indexes=[video_time_column(times)],
         columns=rr.LineStrips2D.columns(
             strips=pixels[:, edges].reshape(-1, 2, 2),
             colors=np.where(supported[..., None], np.array([0, 255, 255, 255]), np.array([130, 130, 130, 90])).astype(np.uint8).reshape(-1, 4),
@@ -76,7 +76,7 @@ def log_joint_overlay(
     )
 
 
-def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader) -> None:
+def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader, times: Float64[ndarray, "n"]) -> None:
     """Retain the fixed rest-pose waist selection, with newly computed normals."""
     selection = source.stream().filter(content="/parameters/upper_body_vertices").to_chunks()
     if not selection:
@@ -92,6 +92,8 @@ def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader) -> None:
             batches.append(batch)
     if faces is None or not batches:
         raise ValueError("fit mesh has no faces or vertex frames")
+    mesh_times = np.concatenate([batch.column("video_time").cast("int64").to_numpy() for batch in batches])
+    require_full_rate_mesh(mesh_times, np.rint(times * 1e9).astype(np.int64))
     remap = np.full(int(faces.max()) + 1, -1, dtype=np.int64)
     remap[ids] = np.arange(len(ids))
     faces = remap[faces[(remap[faces] >= 0).all(1)]].astype(np.int32)
@@ -102,7 +104,7 @@ def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader) -> None:
         normals = np.stack([trimesh.Trimesh(v, faces, process=False).vertex_normals for v in vertices]).astype(np.float32)
         recording.send_columns(
             "/world/pred/soma_x/mesh",
-            indexes=[rr.TimeColumn("video_time", duration=stamps)],
+            indexes=[video_time_column(stamps)],
             columns=rr.Mesh3D.columns(vertex_positions=vertices.reshape(-1, 3), vertex_normals=normals.reshape(-1, 3)).partition(
                 [len(ids)] * len(stamps)
             ),
@@ -231,10 +233,10 @@ def main(config: Config) -> None:
                 recording.send_chunks(chunk.with_entity_path("/world/pred/soma_x/joints"))
         recording.send_columns(
             "/world/pred/soma_x/joints",
-            indexes=[rr.TimeColumn("video_time", duration=times)],
+            indexes=[video_time_column(times)],
             columns=rr.Points3D.columns(positions=world_joints.reshape(-1, 3)).partition([world_joints.shape[1]] * len(times)),
         )
-        log_cropped_mesh(recording, source)
+        log_cropped_mesh(recording, source, times)
     else:
         for old, new in (("/world/fit/joints", "/world/pred/soma_x/joints"), ("/world/fit/mesh", "/world/pred/soma_x/mesh")):
             recording.send_chunks(source.stream().filter(content=old).map(lambda chunk, new=new: chunk.with_entity_path(new)))

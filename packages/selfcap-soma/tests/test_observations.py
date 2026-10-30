@@ -70,3 +70,24 @@ def test_upper_body_overlay_keeps_hips_but_omits_knees_and_ankles():
     result = overlay_points(points, names)
     assert np.isfinite(result[:, [11, 12, 91]]).all()
     assert np.isnan(result[:, 13:91]).all()
+
+
+def test_full_rate_mesh_requires_exact_joint_timestamps() -> None:
+    from selfcap_soma.observations import require_full_rate_mesh
+
+    stamps = np.array([0, 41_666_667, 83_333_334], dtype=np.int64)
+    require_full_rate_mesh(stamps, stamps.copy())
+    import pytest
+
+    with pytest.raises(ValueError, match='mesh timestamps'):
+        require_full_rate_mesh(stamps[::2], stamps)
+    with pytest.raises(ValueError, match='mesh timestamps'):
+        require_full_rate_mesh(stamps + 1, stamps)
+
+
+def test_video_time_column_preserves_source_nanoseconds() -> None:
+    from selfcap_soma.observations import video_time_column
+
+    stamps = np.array([208324653, 2041581601, 4083163202, 182117411775], dtype=np.int64)
+    column = video_time_column(stamps.astype(np.float64) / 1e9)
+    np.testing.assert_array_equal(column.times.cast('int64').to_numpy(), stamps)

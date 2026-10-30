@@ -1,5 +1,7 @@
 # Overnight SOMA batch runner
 
+Current mesh output: [full-rate mesh and exact timestamps](full-rate-mesh.md).
+
 Current body temporal defaults and validation: [body smoothing](body-smoothing.md).
 The performance table below describes the original v1 run.
 
