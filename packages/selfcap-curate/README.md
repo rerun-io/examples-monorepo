@@ -292,13 +292,18 @@ normalized within each view. Weighting is applied to the robust cost, preserving
 the six-pixel outlier scale. Fold fits and the all-frame fit use the same shares.
 Acceptance requires optical medians to improve by at least 2 pixels and 10%,
 body transfer median to improve, independent RTMW hand median to regress by at most 1.5 pixels,
-and the original fit's Sapiens hand median to regress by at most 2 pixels as a secondary guard,
-and all solvers to converge. The deployed model's per-view label medians must
+and the original fit's Sapiens hand median to regress by at most 5 pixels as a gross-failure guard.
+The deployed full fit must converge. At most one of the two CV folds may be
+unconverged, and only when every other check passes. The deployed model's per-view label medians must
 also stay within two pixels of the corresponding full-pipeline fold scores.
 Missing metrics reject the candidate.
 
 `result.json` always records `segment`, `decision`, `reason`, `labels`,
-`elapsed_s`, `thresholds`, and `gate`. The thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
+`elapsed_s`, `thresholds`, and `gate`. New decisions record `gate_version: "gate-v3"`,
+`thresholds.max_nonconverged_cv_folds: 1`, and
+`thresholds.require_full_fit_convergence: true`. Full-fit convergence cannot be
+disabled. Legacy cached decisions are re-evaluated when the gate version changes.
+The thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
 `failed`. Only `accepted` writes `refinement.json` and `calib.json`; all other
 outcomes retain the initial calibration. `landmarks.json`, `packet.json`, PNGs,
 and per-view logs provide provenance. Nothing is registered by this command.
