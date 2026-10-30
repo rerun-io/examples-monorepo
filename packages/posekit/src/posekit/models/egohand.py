@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
 from egohand_inference.perf import PerfStage
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
@@ -30,7 +31,52 @@ class HandDetections:
     boxes: BoxDetections
     """Source-image boxes and batch indices."""
     sides: tuple[HandSide, ...]
-    """Wearer's anatomical side for every box."""
+    """Assigned side, or raw class name when detector identity assignment is disabled."""
+
+
+def resolve_hand_identities(detections: HandDetections, frame_count: int) -> HandDetections:
+    """Assign an upright ego sequence before deciding which crops to mirror.
+
+    This reuses upstream's candidate deduplication and IoU identity assignment.
+    Two-hand bootstrap uses image geometry; later frames use track continuity,
+    including crossings. Detector class IDs are only a lone-bootstrap fallback.
+    The original selected boxes and scores are retained: no padding or smoothing.
+    """
+    boxes: Float32[ndarray, "n 4"] = detections.boxes.xyxy_numpy()
+    frames: list[int] = detections.boxes.frame_indices.tolist()
+    scores: list[float] = detections.boxes.scores.tolist()
+    records: list[dict[str, list[list[float]]]] = [{"L": [], "R": []} for _ in range(frame_count)]
+    for box, frame, score, side in zip(boxes, frames, scores, detections.sides, strict=True):
+        records[frame]["L" if side == "left" else "R"].append(
+            [
+                float((box[0] + box[2]) / 2),
+                float((box[1] + box[3]) / 2),
+                float(box[2] - box[0]),
+                float(box[3] - box[1]),
+                score,
+                1.0 if side == "left" else 2.0,
+            ]
+        )
+    tracks, _ = select_new(records)
+    selected: list[int] = []
+    sides: list[HandSide] = []
+    for frame in range(frame_count):
+        candidates: list[int] = [i for i, value in enumerate(frames) if value == frame]
+        for side, key in (("left", "L"), ("right", "R")):
+            if not tracks[key][1][frame]:
+                continue
+            center: Float32[ndarray, "2"] = tracks[key][0][frame, :2]
+            row: int = min(candidates, key=lambda i: float(np.linalg.norm((boxes[i, :2] + boxes[i, 2:]) / 2 - center)))
+            selected.append(row)
+            sides.append(side)
+    return HandDetections(
+        BoxDetections(
+            detections.boxes.xyxy[selected],
+            detections.boxes.scores[selected],
+            detections.boxes.frame_indices[selected],
+        ),
+        tuple(sides),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,20 +88,23 @@ class EgoHandDetectorConfig:
     threshold: float = 0.5
     """Minimum detector confidence, unrelated to landmark visibility."""
 
+    assign_identity: bool = True
+    """Use upstream geometry/IoU assignment on an ordered, upright ego sequence."""
+
     def setup(self) -> "EgoHandDetector":
         """Create the CUDA detector."""
         return EgoHandDetector(self)
 
 
 class EgoHandDetector:
-    """Best left and right hand detections per image, using CUDA I/O binding."""
+    """CUDA detector with upstream sequence-level anatomical identity assignment."""
 
     def __init__(self, config: EgoHandDetectorConfig) -> None:
         self.config: EgoHandDetectorConfig = config
         self.runtime: OnnxCudaRuntime = OnnxCudaRuntime(config.weights, max_batch_size=1)
 
     def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"]) -> HandDetections:
-        """Detect hands from canonical RGB batches, retaining class identity."""
+        """Detect an ordered RGB sequence; resolve identity before hand mirroring."""
         validate_frames_rgb(frames_rgb)
         boxes: list[Tensor] = []
         scores: list[Tensor] = []
@@ -77,16 +126,19 @@ class EgoHandDetector:
                 candidates: Int64[Tensor, "n"] = torch.where(valid)[0]
                 if not len(candidates):
                     continue
-                best: Int64[Tensor, ""] = candidates[outputs["scores"][0, candidates].argmax()]
-                boxes.append(outputs["boxes"][0, best].clone().float())
-                scores.append(outputs["scores"][0, best].clone().float())
-                indices.append(frame_index)
-                sides.append(detector_hand_side(label))
+                # Keep candidates across class IDs for upstream's identity assignment.
+                # Top-1 per class can discard a hand when both are misclassified alike.
+                for candidate in candidates:
+                    boxes.append(outputs["boxes"][0, candidate].clone().float())
+                    scores.append(outputs["scores"][0, candidate].clone().float())
+                    indices.append(frame_index)
+                    sides.append(detector_hand_side(label))
         if not boxes:
             return HandDetections(BoxDetections.empty(frames_rgb.device), ())
-        return HandDetections(
+        raw: HandDetections = HandDetections(
             BoxDetections(torch.stack(boxes), torch.stack(scores), torch.tensor(indices, device=frames_rgb.device, dtype=torch.int64)), tuple(sides)
         )
+        return resolve_hand_identities(raw, len(frames_rgb)) if self.config.assign_identity else raw
 
 
 @serde

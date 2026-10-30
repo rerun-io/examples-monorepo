@@ -47,6 +47,8 @@ def test_released_models_return_aligned_hands() -> None:
         pytest.skip(f"missing one-segment calibration fixture: {window}")
     camera = camera_from_window(pq.read_table(window))
     detections = EgoHandDetectorConfig(required[1]).setup()(frames)
+    assert detections.sides == ("left", "right")
+    assert float(detections.boxes.xyxy[0, 0]) < float(detections.boxes.xyxy[1, 0])
     model = EgoHandConfig(required[0], weights / "soma").setup()
     result = model(frames, detections, camera)
     assert len(result.sides) > 0

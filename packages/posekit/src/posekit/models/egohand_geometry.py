@@ -15,7 +15,7 @@ SOMA_HAND21: tuple[int, ...] = (0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 1
 
 
 def detector_hand_side(label: int) -> HandSide:
-    """Decode the NVIDIA detector's wearer-relative label."""
+    """Decode the raw NVIDIA class name; identity assignment is a separate stage."""
     if label == 1:
         return "left"
     if label == 2:

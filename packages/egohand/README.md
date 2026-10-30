@@ -48,16 +48,32 @@ are used. No other environment's dependency constraints change.
 - Detector SHA256:
   `85d36428cc1ecf8832ca2d48f7aa04df0659cf94dde358352fb3cf651a319810`
 
-`--compare-sapiens` adds one full-frame Sapiens2 0.4B reference at the video
-sample nearest 4.144 s (4.128168524 s in this segment), then clears it on the
-next video frame. EgoHand runs every frame in the window. All 2D coordinates
-refer to distorted source pixels; the separate 3D view uses OAK camera metres.
-The detector's class names are retained even when its handedness is wrong.
-The report includes an opposite-side Quest pairing strictly as a diagnostic;
-it does not relabel the predictions or establish independent ground truth.
-SOMA time is nested within forward/post-forward time and must not be added to
-those stages. Process GPU memory can be sampled with nvidia-smi; torch peaks
-exclude ORT, Warp and driver allocations.
+`--compare-sapiens` runs full-frame Sapiens2 0.4B on every selected frame.
+The report includes per-joint median/p90 errors against Quest, with capture-time
+clock conversion, 48 ms hand latency, interpolated OAK pose and all 14 lens terms.
+Both models use identical finite joint slots. Six of Sapiens2's 21 hand slots are
+unmapped in the production adapter; these are reported as missing, never filled.
+Low/high crop-sharpness thirds provide a blur proxy, not manual blur labels.
+
+Raw RT-DETR class names are not anatomical identities. The initial port treated
+them as identities and consequently mirrored the wrong crops. The adapter now
+uses upstream candidate deduplication and geometry/IoU assignment before any
+crop mirroring. It retains all confident candidates and preserves the selected
+raw boxes: no new smoothing, gap filling, or padding changes are introduced.
+Two-hand bootstrap assumes an upright, unmirrored egocentric view; subsequent
+identity uses continuity. A lone bootstrap detection still relies on its class
+label. `assign_identity=False` exposes raw candidates for diagnostics.
+
+The correction is supported by an untouched upstream detector comparison:
+preprocessing is bit-identical, raw boxes/classes agree, and swapping RGB/BGR
+or reflecting the input does not repair identity. The supplied upstream
+assignment resolves the reversed candidates; regression tests check reversed
+labels, already-correct labels, and both hands under one class. The numeric
+class-name table remains unchanged. Sides are resolved before selecting the
+left-canonical/right-mirrored SOMA reconstruction path.
+
+All 2D coordinates are distorted source pixels. The 3D view uses OAK camera
+metres. SOMA timing is nested within forward/post-forward and is not additive.
 
 The optional dev lane carries a four-entry pyrefly baseline for existing
 Transformers `.to()` decorator-stub errors in unchanged posekit models. The
