@@ -4,10 +4,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from dataforge.timing import SequenceTimer
+from rerun.chunk import Chunk
 from rerun.server import Server
+from simplecv.catalog_video import CatalogVideo
 
 from selfcap_curate.apis import open_session
-from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, SessionVideos, open_segment, read_time_sync
+from selfcap_curate.camera_centers import CenterTrack, camera_center_chunks, read_quest_centers
+from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, SessionVideos, open_segment, read_phone_videos, read_time_sync
 from selfcap_curate.keypoints import (
     Camera,
     EgoCamera,
@@ -45,6 +48,8 @@ class KeypointEpisode:
     """Calibrated phones with usable offsets."""
     ego: tuple[EgoCamera, ...]
     """OAK cameras with a calibrated mount; overlays are projected through their full lens model."""
+    center_chunks: tuple[Chunk, ...]
+    """Camera-centre overlays sampled at each exo video frame time."""
 
 
 def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
@@ -77,7 +82,11 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
             if len(cameras) < 2:
                 print("KEYPOINTS_SKIP", key, "fewer than two calibrated and synced phones", flush=True)
             else:
-                processable.append(KeypointEpisode(key, segment, sync, cameras, tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig))))
+                ego: tuple[EgoCamera, ...] = tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig))
+                quest: list[CenterTrack] = read_quest_centers(calibration, dataset, segment.id, segment.layout.quest_rig)
+                videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time", sync=sync)
+                centers: tuple[Chunk, ...] = tuple(camera_center_chunks(cameras, ego, quest, {phone: video.t_ns for phone, video in videos.items()}))
+                processable.append(KeypointEpisode(key, segment, sync, cameras, ego, centers))
     if not processable:
         return
     detector, pose = keypoint_models()
@@ -95,6 +104,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
                 result,
                 ego=episode.ego,
                 quest_hands=ego_quest_hands(episode.segment, episode.sync),
+                camera_center_chunks=episode.center_chunks,
             )
         print(
             "KEYPOINTS_TIME",

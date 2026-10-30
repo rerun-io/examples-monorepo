@@ -476,6 +476,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         for rig, cams in cameras:
             for cam in cams:
                 world_overrides[f"{schema.pinhole_path(rig, cam)}/skeleton"] = rrb.EntityBehavior(visible=False)
+                world_overrides[f"{schema.pinhole_path(rig, cam)}/camera_centers"] = rrb.EntityBehavior(visible=False)
         if show_soma_mesh:
             world_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
         scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world", overrides=world_overrides)
