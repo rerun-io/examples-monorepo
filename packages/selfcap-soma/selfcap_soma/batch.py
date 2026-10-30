@@ -11,7 +11,12 @@ from time import perf_counter
 from typing import Literal
 
 import numpy as np
+import pyarrow as pa
+from datafusion import col, lit
+from jaxtyping import Float64, Int64
+from numpy import ndarray
 from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
+from rerun.chunk import RrdReader
 from serde import serde
 from serde.json import from_json, to_json
 
@@ -63,6 +68,8 @@ class Config:
     """Shape-update iterations within the 600-step sparse calibration pass."""
     publish: bool = True
     """Ship and register soma; disable for local validation runs."""
+    cleanup_after_publish: bool = False
+    """After verified catalog readback, delete only this segment's known heavy local RRDs."""
     force: bool = False
     """Ignore matching local checkpoints and refit."""
 
@@ -103,6 +110,12 @@ class Checkpoint:
     """Integrity check for a completed local layer."""
     layer_bytes: int = 0
     """Completed local layer size."""
+    mesh_sample_sha256: str = ""
+    """First/last mesh samples retained as a readback integrity check."""
+    readback_verified: bool = False
+    """Catalog URI, remote digest, mesh times and endpoint geometry were checked."""
+    cleaned: bool = False
+    """Heavy local artifacts may be absent; resume must verify the published layer."""
 
 
 def selected_segments(values: list[str], path: Path | None) -> list[str]:
@@ -180,6 +193,14 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         state = Checkpoint(signature, "new", Timings())
     state.timings.catalog_s = perf_counter() - started
     layer = directory / f"{segment}.rrd"
+    if state.phase == "published" and state.cleaned:
+        verify_publication(config, segment, state, data.times)
+        if config.cleanup_after_publish and config.publish:
+            cleanup_published(config, directory, segment, state)
+        state.timings.total_s = perf_counter() - started
+        write_checkpoint(state_path, state)
+        print(segment, to_json(state), flush=True)
+        return
     if state.phase in ("export", "published") and (not layer.is_file() or hashlib.sha256(layer.read_bytes()).hexdigest() != state.layer_sha256):
         raise ValueError(f"{segment}: completed layer is missing/corrupt; rerun with --force")
     options = FitOptions(
@@ -261,6 +282,11 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     if config.publish:
         state.timings.ship_s, state.timings.register_s = publish_layer(config, layer)
         state.phase = "published"
+        if config.cleanup_after_publish:
+            endpoints = np.rint(data.times[[0, -1]] * 1e9).astype(np.int64)
+            state.mesh_sample_sha256 = local_mesh_digest(layer, endpoints)
+            verify_publication(config, segment, state, data.times)
+            cleanup_published(config, directory, segment, state)
     state.timings.total_s = perf_counter() - started
     write_checkpoint(state_path, state)
     print(segment, to_json(state), flush=True)
@@ -280,6 +306,85 @@ def publish_layer(config: Config, layer: Path) -> tuple[float, float]:
     client = CatalogClient(config.catalog_url)
     client.get_dataset(config.dataset).register([remote.as_uri()], layer_name="soma", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     return ship_s, perf_counter() - began
+
+
+def local_mesh_digest(path: Path, endpoints: Int64[ndarray, "2"]) -> str:
+    """Hash the two endpoint mesh samples before local cleanup."""
+    rows = []
+    component = "Mesh3D:vertex_positions"
+    for chunk in RrdReader(path).stream().filter(content="/world/pred/soma_x/mesh").to_chunks():
+        batch = chunk.to_record_batch()
+        if "video_time" not in batch.schema.names or component not in batch.schema.names:
+            continue
+        stamps = batch.column("video_time").cast("int64").to_numpy()
+        for index in np.flatnonzero(np.isin(stamps, endpoints)):
+            rows.append((int(stamps[index]), np.asarray(batch.column(component)[int(index)].as_py(), dtype=np.float32)))
+    if len(rows) != 2:
+        raise ValueError("local layer must contain both endpoint mesh samples before cleanup")
+    digest = hashlib.sha256()
+    for stamp, points in sorted(rows, key=lambda row: row[0]):
+        digest.update(np.asarray([stamp], dtype="<i8").tobytes())
+        digest.update(points.astype("<f4").tobytes())
+    return digest.hexdigest()
+
+
+def verify_publication(config: Config, segment: str, state: Checkpoint, times: Float64[ndarray, "n"]) -> None:
+    """Verify registration, remote file integrity and actual catalog mesh readback."""
+    state.readback_verified = False
+    remote = config.spark_dir / f"{segment}.rrd"
+    result = subprocess.run(["ssh", config.spark_host, f"sha256sum -- {shlex.quote(str(remote))}"], check=True, capture_output=True, text=True)
+    if not result.stdout.split() or result.stdout.split()[0] != state.layer_sha256:
+        raise ValueError(f"{segment}: published remote layer digest mismatch; cleanup refused")
+    client = CatalogClient(config.catalog_url)
+    dataset = client.get_dataset(config.dataset)
+    view = dataset.filter_segments(segment)
+    metadata = view.segment_table().select("rerun_layer_names", "rerun_storage_urls").to_arrow_table()
+    if len(metadata) != 1:
+        raise ValueError(f"{segment}: missing catalog registration; cleanup refused")
+    registered = dict(zip(metadata["rerun_layer_names"][0].as_py(), metadata["rerun_storage_urls"][0].as_py(), strict=True))
+    if registered.get("soma") != remote.as_uri():
+        raise ValueError(f"{segment}: catalog soma URI mismatch; cleanup refused")
+    component = "/world/pred/soma_x/mesh:Mesh3D:vertex_positions"
+    reader = view.filter_contents(["/world/pred/soma_x/mesh"]).reader(index="video_time")
+    stamps = reader.filter(col(component).is_not_null()).select("video_time").to_arrow_table()["video_time"].cast(pa.int64()).to_numpy()
+    expected = np.rint(times * 1e9).astype(np.int64)
+    if not np.array_equal(np.sort(stamps), expected):
+        raise ValueError(f"{segment}: catalog mesh timestamps mismatch; cleanup refused")
+    samples = (
+        reader.filter((col("video_time").cast(pa.int64()) == lit(int(expected[0]))) | (col("video_time").cast(pa.int64()) == lit(int(expected[-1]))))
+        .select("video_time", component)
+        .to_arrow_table()
+        .sort_by("video_time")
+    )
+    digest = hashlib.sha256()
+    if len(samples) != 2:
+        raise ValueError(f"{segment}: catalog endpoint mesh samples missing; cleanup refused")
+    for index in range(2):
+        stamp = int(samples["video_time"][index].cast(pa.int64()).as_py())
+        points = np.asarray(samples[component][index].as_py(), dtype=np.float32)
+        if not np.isfinite(points).all():
+            raise ValueError(f"{segment}: catalog mesh has nonfinite vertices; cleanup refused")
+        digest.update(np.asarray([stamp], dtype="<i8").tobytes())
+        digest.update(points.astype("<f4").tobytes())
+    if not state.mesh_sample_sha256 or digest.hexdigest() != state.mesh_sample_sha256:
+        raise ValueError(f"{segment}: catalog mesh sample digest mismatch; cleanup refused")
+    state.readback_verified = True
+
+
+def cleanup_published(config: Config, directory: Path, segment: str, state: Checkpoint) -> None:
+    """Delete only known local RRDs after successful publication and readback."""
+    if not config.cleanup_after_publish or not config.publish or state.phase != "published" or not state.readback_verified:
+        raise ValueError("cleanup requires opt-in and a verified successful publication")
+    if directory.resolve().parent != (config.output / config.dataset).resolve() or directory.name != segment:
+        raise ValueError("cleanup directory is outside the segment output directory")
+    paths = [directory / name for name in ("fit.rrd", f"{segment}.rrd", f"{segment}.pending.rrd")]
+    if any(path.is_symlink() for path in paths):
+        raise ValueError("cleanup refuses symlink artifacts")
+    # Persist first: a crash between unlinks resumes through catalog verification.
+    state.cleaned = True
+    write_checkpoint(directory / "checkpoint.json", state)
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 def main(config: Config) -> None:

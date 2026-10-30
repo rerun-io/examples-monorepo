@@ -129,3 +129,30 @@ and live shipping/REPLACE (using the identical Sapiens2 layer already published)
 were exercised. Pixel evidence was inspected for the fresh Sapiens2 publish and
 local RTMW preview at 39.862 s; both show upper-body overlays, with grey links
 where that source's evidence does not pass the visibility rule. No full gate.
+
+## Opt-in local cleanup
+
+Add `--cleanup-after-publish` to release heavy SOMA files for a completed
+segment. The flag is off by default. It deletes only `fit.rrd`,
+`<segment>.rrd`, and `<segment>.pending.rrd` directly in that segment's output
+directory. JSON reports, calibration, checkpoint, logs, screenshots and any
+unrecognized files remain. It does not remove source/corpus files or recurse
+into other output directories, and it refuses symlink artifacts.
+
+Cleanup runs only after successful ship, REPLACE registration and readback:
+the remote file SHA-256, registered soma URI, complete mesh timestamp array,
+and first/last mesh vertex hashes must agree. Failure leaves the local files
+intact and exits nonzero. The checkpoint records verification and cleanup
+intent before unlinking, so an interrupted cleanup can finish safely on resume.
+
+A cleaned published checkpoint resumes by checking the remote file and catalog
+again; it does not require or regenerate deleted local RRDs. Missing/replaced
+remote output fails explicitly; use `--force` to refit if recovery is needed.
+`--no-publish` never cleans local artifacts. Changing the cleanup flag does not
+invalidate an existing fit. Cleanup does not change the fitting algorithm.
+
+Validation: temporary-file tests cover the allowlist, preserved reports/logs,
+failed/unverified publication, read-only calls and symlinks. Live read-only
+verification of d31 succeeded, then a synthetic cleaned checkpoint with no
+local RRD resumed successfully in 4.94 s. No d31 evidence was deleted and no
+corpus job was launched for these checks.
