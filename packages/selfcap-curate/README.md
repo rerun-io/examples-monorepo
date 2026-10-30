@@ -126,9 +126,11 @@ The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, a
 Each mask lists cameras in the static `support_camera_paths` order. A usable point needs at least two supporting cameras.
 One Euro smoothing is accepted only while that support remains within 8 px; otherwise the raw triangulation is retained.
 
-The default `/world/skeleton` and `<cam>/pinhole/skeleton` combine triangulated body/feet with Quest hands.
+The default `/world/skeleton` and `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
+and both 21-joint hands. Knees, ankles and feet remain in the hidden full COCO-133 layers.
 In each exo view, camera-supported joints are magenta/white; inferred joints and every link touching one are smaller, dim grey.
-Quest hand replacements must also agree with that camera's detection within 8 px to be shown as observed.
+Quest hand replacements are observed when that camera's raw detection scores ≥0.7 and agrees within 15 px;
+they do not require support for the independently triangulated hand.
 In OAK views, Quest-tracked hands are bright and the body is inferred. The world view retains the side colours.
 AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera

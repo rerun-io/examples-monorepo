@@ -218,7 +218,7 @@ def ego_quest_hands(segment: Segment, sync: TimeSync) -> tuple[Float64[ndarray, 
 @dataclass(frozen=True, slots=True)
 class DisplaySkeleton:
     positions: Float32[ndarray, "n 133 3"]
-    """Exo body and feet, plus Quest hands with triangulated fallback."""
+    """Exo ears and upper body, plus Quest hands with triangulated fallback."""
     quest_tracked: Bool[ndarray, "n 133"]
     """Hand joints supplied by valid Quest tracking at this timestamp."""
 
@@ -229,7 +229,7 @@ def display_skeleton(
     confidence: Float32[ndarray, "n 133"],
     quest_hands: tuple[Float64[ndarray, "q"], Float32[ndarray, "q 133 3"]] | None,
 ) -> DisplaySkeleton:
-    """Exo body/ears/feet plus clock-corrected Quest hands; confident exo hands fill tracking gaps."""
+    """Exo ears/upper body plus clock-corrected Quest hands; confident exo hands fill tracking gaps."""
     selected: Bool[ndarray, "133"] = np.isin(np.arange(133), DISPLAY_JOINTS)
     output: Float32[ndarray, "n 133 3"] = np.where(((confidence >= DISPLAY_CONFIDENCE) & selected)[..., None], xyz, np.float32(np.nan))
     tracked: Bool[ndarray, "n 133"] = np.zeros(xyz.shape[:2], dtype=bool)
@@ -425,6 +425,18 @@ class SelectedView:
     scores: Float64[ndarray, "n 133"]  # Unmodified joint confidence.
 
 
+def exo_display_observed(
+    pixels: Float32[ndarray, "n 133 2"],
+    selected: SelectedView,
+    inliers: Bool[ndarray, "n 133"],
+    quest_tracked: Bool[ndarray, "n 133"],
+) -> Bool[ndarray, "n 133"]:
+    """Quest joints use independent raw-camera evidence within 15 px; exo joints retain the 8 px inlier rule."""
+    error: Float32[ndarray, "n 133"] = np.linalg.norm(pixels - selected.xy, axis=-1)
+    quest_observed: Bool[ndarray, "n 133"] = (selected.scores >= DISPLAY_CONFIDENCE) & (error <= 15.0)
+    return np.where(quest_tracked, quest_observed, inliers & (error <= INLIER_PX))
+
+
 @dataclass(frozen=True, slots=True)
 class Keypoints3D:
     times: Float64[ndarray, "n"]  # Aligned sample grid in seconds, with empty rows preserved.
@@ -609,9 +621,8 @@ def write_keypoints(
                 for view, (phone, camera) in enumerate(result.cameras.items()):
                     pixels: Float32[ndarray, "n 133 2"] = projected(camera, display.positions)
                     supported: Bool[ndarray, "n 133"] = np.zeros(result.xyz.shape[:2], dtype=bool) if result.inliers is None else result.inliers[:, view].copy()
-                    # Quest hands replace triangulated hands, so they also need agreement with this camera.
                     if phone in result.selected:
-                        supported &= np.linalg.norm(pixels - result.selected[phone].xy, axis=-1) <= INLIER_PX
+                        supported = exo_display_observed(pixels, result.selected[phone], supported, display.quest_tracked)
                     log_display_skeleton(recording, f"{camera.entity}/pinhole/skeleton", pixels, supported, stamps)
                 for camera in ego:
                     log_display_skeleton(recording, f"{pinhole_path(camera.rig, camera.cam)}/skeleton",

@@ -197,8 +197,8 @@ def test_display_writer_preserves_coco_ids_without_confidence_colours(tmp_path) 
         assert not any(name.endswith(":confidences") for name in batch.schema.names)
         points = np.asarray(batch.column(f"{kind}:positions").to_pylist()[0])
         assert len(points) == 133
-        assert np.isnan(points[np.r_[0:3, 9:11, 23:91]]).all()
-        assert np.isfinite(points[np.r_[3:9, 11:23, 91:133]]).all()
+        assert np.isnan(points[np.r_[0:3, 9:11, 13:91]]).all()
+        assert np.isfinite(points[np.r_[3:9, 11:13, 91:133]]).all()
     np.testing.assert_allclose(
         np.asarray(rows["/world/rig_00/cam_00/pinhole/skeleton"].column("Points2D:positions").to_pylist()[0])[5],
         project(camera, xyz[0])[:, :2][5],

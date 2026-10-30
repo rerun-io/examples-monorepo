@@ -9,8 +9,9 @@ from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from simplecv.data.skeleton.coco_133 import COCO_133_LINKS
 
-DISPLAY_JOINTS: Int64[ndarray, "k"] = np.r_[3:9, 11:23, 91:133]
-DISPLAY_LEFT_JOINTS: frozenset[int] = frozenset({*range(91, 112), 3, 5, 7, 11, 13, 15, 17, 18, 19})
+DISPLAY_JOINTS: Int64[ndarray, "k"] = np.r_[3:9, 11:13, 91:133]
+"""Ears, shoulders, elbows, hips and hands; lower-body data stays in the source layers."""
+DISPLAY_LEFT_JOINTS: frozenset[int] = frozenset({*range(91, 112), 3, 5, 7, 11})
 DISPLAY_LINKS: list[tuple[int, int]] = [
     ({9: 91, 10: 112}.get(a, a), {9: 91, 10: 112}.get(b, b))
     for a, b in COCO_133_LINKS

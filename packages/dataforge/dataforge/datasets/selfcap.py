@@ -454,8 +454,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             for cam in cams:
                 pinhole: str = schema.pinhole_path(rig, cam)
                 # Keep the Sapiens2 raw/projected pair beside the RTMW branches in the view tree.
-                if rig < ego_rig:
-                    hidden[f"{pinhole}/sapiens2"] = rrb.EntityBehavior(visible=False)
+                hidden[f"{pinhole}/sapiens2"] = rrb.EntityBehavior(visible=False)
                 for suffix in ("pred", "coco133_uv_projected", "quest_coco133_uv_projected"):
                     hidden[f"{pinhole}/{suffix}"] = rrb.EntityBehavior(visible=False)
 
