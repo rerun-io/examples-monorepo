@@ -11,6 +11,7 @@ from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, Sessio
 from selfcap_curate.keypoints import (
     Camera,
     EgoCamera,
+    PoseModel,
     ego_quest_hands,
     read_anchors,
     read_cameras,
@@ -26,11 +27,13 @@ from selfcap_curate.records import EpisodeKey, TimeSync
 @dataclass
 class Config:
     calib_dir: Path  # Read-only selfcap-calibrate files whose camera values own the output.
-    output_dir: Path  # New complete per-episode calibration files; local, existing targets refused.
+    output_dir: Path  # Per-episode outputs; Sapiens2 contains only its new keypoint layer. Existing targets refused.
     rate: float  # Explicit common aligned sampling frequency in Hz.
     segment_ids: tuple[str, ...] = ()  # Explicit segment ids or unprefixed episode keys of one session.
     key_file: Path | None = None  # Optional newline-separated ids, combined with segment_ids.
     catalog_url: str = CATALOG_URL  # Read-only catalog containing patched bases, videos, clocks and anchors.
+    model: PoseModel = "rtmw"
+    """2D estimator; Sapiens2 writes an isolated layer without calibration chunks."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +51,7 @@ class KeypointEpisode:
 
 
 def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
-    """Infer then triangulate, copying calib chunks unchanged; never register or swap."""
+    """Infer then triangulate; Sapiens2 emits a separate layer. Never register or swap."""
     _, keys, dataset = open_session(
         config.segment_ids,
         config.key_file,
@@ -80,7 +83,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
                 processable.append(KeypointEpisode(key, segment, sync, cameras, tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig))))
     if not processable:
         return
-    detector, pose = keypoint_models()
+    detector, pose = keypoint_models() if config.model == "rtmw" else keypoint_models(config.model)
     timer = SequenceTimer()
     for episode in processable:
         key = episode.key
@@ -95,6 +98,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
                 result,
                 ego=episode.ego,
                 quest_hands=ego_quest_hands(episode.segment, episode.sync),
+                model=config.model,
             )
         print(
             "KEYPOINTS_TIME",
