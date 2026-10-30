@@ -196,7 +196,7 @@ def residuals(inputs: Inputs, model: Refinement, fold: int) -> dict[str, list[fl
 
 
 def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[float, ...] | None = None,
-             focal_record: str | None = None) -> tuple[Refinement, Gate]:
+             focal_record: str | None = None, static_phones: bool = False, landmark_target_count: int | None = None) -> tuple[Refinement, Gate]:
     """Fit both holdout folds, report transfer, then fit the deployable all-data model."""
     baseline = Refinement(inputs.problem.cameras, np.zeros(3), inputs.problem.landmarks.digest, "table")
     fit_problem = inputs.problem
@@ -211,8 +211,8 @@ def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[f
     pools: dict[str, dict[str, list[float]]] = {"baseline": {}, "candidate": {}}
     models = []
     for fold in (0, 1):
-        problem = replace(select_labels(fit_problem, fold), hands=heldout_hands(inputs, fold, train=True))
-        model = replace(solve(problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record),
+        problem = replace(select_labels(fit_problem, fold, static_phones=static_phones), hands=heldout_hands(inputs, fold, train=True))
+        model = replace(solve(problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count),
                         label_layer_hash=inputs.problem.landmarks.digest)
         models.append(model)
         for name, fit in (("baseline", baseline), ("candidate", model)):
@@ -230,8 +230,11 @@ def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[f
         before, after = scores["baseline"][metric].median, candidate.median
         if before is None or after is None or after > before:
             passes = False
-    final = solve(fit_problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record)
-    return final, Gate(scores["baseline"], scores["candidate"], tuple(models), passes and final.converged and all(model.converged for model in models))
+    final = solve(fit_problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count)
+    gate = Gate(scores["baseline"], scores["candidate"], tuple(models), passes and final.converged and all(model.converged for model in models))
+    if static_phones:
+        gate = replace(gate, policy=gate.policy + "; static phone anchors shared in both training folds; phone score is in-sample consistency, not independent validation")
+    return final, gate
 
 
 def read_focals(path: Path | None, phones: tuple[str, ...]) -> tuple[tuple[float, ...] | None, str | None]:
