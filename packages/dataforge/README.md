@@ -481,13 +481,52 @@ pixi run -e dataforge --frozen python packages/dataforge/tools/apps/selfcap_blue
   --output-root /home/pablo/dataforge-dev/selfcap-post-ep1-v2
 ```
 
-The command requires an existing dataset and never registers recording layers.
+The command requires an existing dataset. By default it changes only blueprints.
+Add `--refresh-quality` to recompute and REPLACE only the `summary` property layer;
+source layers are never registered or replaced. Fresh stamped summary files are
+retained so another catalog can safely register the same files.
 Use `selfcap-post-ep1-v2-refined` for both arguments once the runner creates that
 subset. The output directory must be readable by the catalog server on the same
 host. Cards pair the display skeleton and SOMA mesh with the `rig_00` exo video;
-the four card fields summarize capture/session, phone count, refinement, and SOMA
-quality. The table adds OAK pose/rotation, frame count, and the full session UUID.
+the card fields show Quality rank, capture/session, phone count, refinement, and SOMA
+quality. Quality rank is the second table column, after the preview link. The table adds OAK pose/rotation, frame count, and the full session UUID.
 Gate decisions and quality reasons remain available in their report JSON columns.
+
+Quality rank 1 is best. Each refresh sorts all current segments by: refined true
+first; SOMA status `pass` first; ascending mean of body and shoulder median residuals
+in mm; segment ID to break ties. Both residuals must be finite and nonnegative;
+otherwise their mean is treated as infinity. These ordinal ranks describe one
+catalog snapshot and must be refreshed after refinement decisions change.
+Rerun 0.38.1 supports one UI sort key, but cannot save it in a table blueprint.
+In table view, open Quality rank's `…` menu and choose Ascending; switching to cards
+retains that order in the viewer. An older locally cached blueprint can hide the new
+column; test with isolated viewer state rather than deleting all user layouts.
+
+For a read-only catalog inventory (all visible datasets, layers, assets, blueprint
+URIs/default roles, and tables), run on the catalog host:
+
+```bash
+pixi run -e dataforge --frozen python packages/dataforge/tools/apps/catalog_snapshot.py \
+  --catalog-url rerun+http://127.0.0.1:51235 --target /path/to/snapshot.json
+pixi run -e dataforge --frozen python packages/dataforge/tools/apps/catalog_restore.py \
+  --snapshot-path /path/to/snapshot.json --catalog-url rerun+http://127.0.0.1:51241 \
+  --names selfcap-post-ep1-v2 dataforge-egoexo4d
+```
+
+Omit `--names` to restore every entry. Restoration uses the original files, replaces
+matching destination layers, and preserves names and segment IDs. New dataset IDs
+are assigned, so existing URLs containing the original dataset ID need new links.
+The restore command rejects the literal source URL as destination. During a live
+run this inventory is a sequence of metadata reads, not an atomic snapshot; take a
+fresh inventory after writers finish before a server swap.
+
+The separate 0.41 test runtime stays outside this workspace's dependency pins.
+Rerun 0.39 adds the Python table-blueprint API; 0.40 adds saved sort and filters;
+0.41 adds preview start-point control (default midpoint). Its SelfCap test blueprint
+uses ascending Quality rank, start point 0.5, and a separate filtered catalog entry
+sharing all layer files with a saved `refined = true` table filter. It is a filtered
+view, not a physical subset of the underlying registrations.
+
 
 SelfCap's default segment layout still assumes four phones: OAK at `rig_04`,
 Quest at `rig_05`. Three-phone captures currently put them at `rig_03` and

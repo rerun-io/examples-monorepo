@@ -521,8 +521,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             writing.TableField("property:soma_quality:status", "SOMA quality"),
         )
         return writing.TableFields(
-            cards=summary,
+            cards=(writing.TableField("property:summary:quality_rank", "Quality rank"), *summary),
             table=(
+                writing.TableField("property:summary:quality_rank", "Quality rank"),
                 *summary,
                 writing.TableField("property:calib:oak_posed", "OAK posed"),
                 writing.TableField("property:calib:oak_rotation_source", "OAK rotation"),

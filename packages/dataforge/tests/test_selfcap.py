@@ -596,11 +596,12 @@ def test_table_blueprint_shows_scene_and_one_exo_video_for_both_rig_layouts() ->
 def test_table_fields_keep_the_capture_and_quality_summary_compact() -> None:
     fields = SelfcapConfig().setup().table_fields()
     assert [(field.column, field.name) for field in fields.cards] == [
+        ("property:summary:quality_rank", "Quality rank"),
         ("property:calib:session", "Capture / session"),
         ("property:calib:exo_cameras", "Phones"),
         ("property:calib:calib_exo_refined", "Refined"),
         ("property:soma_quality:status", "SOMA quality"),
     ]
-    assert len(fields.table) == 8
+    assert len(fields.table) == 9
     assert {field.column for field in fields.cards} <= {field.column for field in fields.table}
     assert {field.name for field in fields.table} >= {"OAK posed", "OAK rotation", "Frames", "Session UUID"}
