@@ -10,7 +10,16 @@ from simplecv.catalog_video import CatalogVideo
 
 from selfcap_curate.apis import open_session
 from selfcap_curate.camera_centers import CenterTrack, camera_center_chunks, read_quest_centers
-from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, Segment, SessionVideos, open_segment, read_phone_videos, read_time_sync
+from selfcap_curate.catalog_io import (
+    CATALOG_URL,
+    DATASET_NAME,
+    Segment,
+    SessionVideos,
+    open_segment,
+    read_catalog_hands,
+    read_phone_videos,
+    read_time_sync,
+)
 from selfcap_curate.keypoints import (
     Camera,
     EgoCamera,
@@ -98,6 +107,8 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
         key = episode.key
         with timer.stage(f"{key}/detect"):
             detections = detect_keypoints(episode.segment, detector, pose, rate=config.rate, sync=episode.sync)
+        if episode.segment.hands is None and (episode.sync.offsets_ms or {}).get("quest_pose") is not None:
+            episode = replace(episode, segment=replace(episode.segment, hands=read_catalog_hands(episode.segment)))
         with timer.stage(f"{key}/triangulate"):
             result = smooth_keypoints(triangulate_episode(detections, episode.cameras, read_anchors(episode.segment, detections.times, episode.sync)))
         with timer.stage(f"{key}/write"):

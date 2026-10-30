@@ -18,6 +18,10 @@ from selfcap_curate.keypoints import Keypoints2D, project, read_cameras, triangu
 from selfcap_curate.records import CatalogHands, ExoFit, OakFit, SelfcapLayout
 
 
+def empty_raw_hands():
+    return CatalogHands(np.empty(0), np.empty((0, 133, 3)), np.array([0.0, 1.0]), np.zeros((2, 3)), np.tile([0.0, 0.0, 0.0, 1.0], (2, 1)))
+
+
 def calibration(path, *, episode="ep001", depth=4.0, missing=()):
     sync = fixture_sync(
         key=f"2025-12-30__65d00748__{episode}",
@@ -57,6 +61,7 @@ def test_cli_uses_local_poses_instead_of_equal_provenance_catalog(tmp_path, monk
         assert all(camera.world_T_cam[2, 3] == -9.0 for camera in cameras.values())
         raise Checked
 
+    monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands(), raising=False)
     monkeypatch.setattr(api, "read_time_sync", lambda *_args: sync)
     monkeypatch.setattr(api, "keypoint_models", lambda: (None, None))
     monkeypatch.setattr(api, "detect_keypoints", lambda *_args, **_kwargs: Keypoints2D(np.array([0.0]), {}, 3.0))
@@ -136,15 +141,33 @@ def test_cli_skips_unprocessable_episodes_before_models_and_runs_others(
         loaded.append(output)
         return None, None
 
+    raw = empty_raw_hands()
+    raw_reads = []
+
+    def read_raw(segment):
+        raw_reads.append(segment.id)
+        return raw
+
+    def cached_anchors(segment, *_args, **_kwargs):
+        assert segment.hands is raw
+        return np.zeros((1, 3, 3))
+
+    def cached_quest_hands(segment, *_args):
+        assert segment.hands is raw
+        return None
+
+    monkeypatch.setattr(api, "read_catalog_hands", read_raw, raising=False)
+    monkeypatch.setattr(api, "ego_quest_hands", cached_quest_hands)
     monkeypatch.setattr(api, "read_time_sync", lambda dataset, segment: syncs[segment])
     monkeypatch.setattr(api, "keypoint_models", models)
     monkeypatch.setattr(api, "detect_keypoints", lambda *_args, **_kwargs: Keypoints2D(np.array([0.0]), {}, 3.0))
-    monkeypatch.setattr(api, "read_anchors", lambda *_args, **_kwargs: np.zeros((1, 3, 3)))
+    monkeypatch.setattr(api, "read_anchors", cached_anchors)
     with private_server({DATASET_NAME: base_files}) as server:
         api.main(api.Config(local, tmp_path / "out", rate=3.0, segment_ids=keys, catalog_url=server.url()))
     assert len(servers) == 1
     assert len(servers[0]) == len(keys)
     assert len(loaded) == (0 if all_skipped else 1)
+    assert raw_reads == ([] if all_skipped else [f"selfcap__{keys[0]}"])
     assert not (tmp_path / "out" / f"selfcap__{keys[1]}.rrd").exists()
     assert (tmp_path / "out" / f"selfcap__{keys[0]}.rrd").exists() == (not all_skipped)
     output = "\n".join(loaded) + capsys.readouterr().out
