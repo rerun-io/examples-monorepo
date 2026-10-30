@@ -1,8 +1,10 @@
 # Deferred SelfCap 0.41 catalog test
 
-This is an isolated experiment. It does not change the monorepo's Rerun pins.
-Do not run it until Pablo resumes the work after the overnight writer finishes.
-The test service has been stopped; the shared `:51235` service was never restarted.
+This isolates the 0.41 runtime from the monorepo's Rerun pins. The shared Spark
+catalog was upgraded to 0.41.0 on 2026-10-30 after the writer finished and Pablo
+authorized the swap. Its stable runtime is `~/dataforge-dev/rerun-041`, and the
+persistent `rerun-dev-catalog.service` restores a saved snapshot on start.
+The separate `rerun-catalog.service` on port 9876 was not changed.
 
 Before the pause instruction arrived, the earlier authorized steps published 690
 summary ranks and the visible rank column to `selfcap-post-ep1-v2` on `:51235`.
@@ -50,7 +52,10 @@ change, so links containing old dataset IDs must be updated. The inventory uses
 successive metadata reads, not an atomic snapshot; take it after the writer finishes.
 Keep original snapshots rather than overwriting them.
 
-`blueprints.py` requires 0.41.0 and refuses port 51235. It adds saved ascending
+`blueprints.py` requires 0.41.0 and refuses port 51235 unless `--allow-shared` is supplied.
+It preserves the membership of an existing refined dataset by default. Pass
+`--populate-refined` only for the isolated experiment that intentionally shares all
+source registrations and uses a saved filter. It adds saved ascending
 Quality rank and start point 0.5. The refined entry shares all layer file references
 and applies a saved `refined = true` table filter; its underlying registrations are
 not a physical refined subset. The original recording blueprint is reused.

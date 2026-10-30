@@ -1,4 +1,4 @@
-"""SelfCap 0.41 saved-sort/filter experiment; never target the shared 51235 server."""
+"""SelfCap 0.41 saved-sort/filter layouts; shared-server use requires explicit opt-in."""
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -15,12 +15,16 @@ from serde import from_dict, serde
 
 @dataclass
 class Config:
-    """Publish layouts on an existing isolated 0.41 test catalog."""
+    """Publish layouts on a 0.41 catalog; preserve existing subset membership by default."""
 
     output_root: Path
     """Server-visible directory for new stamped blueprint files."""
+    allow_shared: bool = False
+    """Explicitly allow the shared port after its authorized upgrade."""
+    populate_refined: bool = False
+    """Create a filtered-view dataset sharing all files; otherwise preserve existing membership."""
     catalog_url: str = "rerun+http://127.0.0.1:51241"
-    """Test server; port 51235 is explicitly refused."""
+    """Catalog URL; port 51235 requires allow_shared."""
     catalog_name: str = "selfcap-post-ep1-v2"
     """Existing SelfCap dataset populated by the snapshot restore tool."""
     refined_name: str = "selfcap-post-ep1-v2-refined"
@@ -89,15 +93,15 @@ def table_blueprint(columns: list[str], *, filtered: bool) -> rrb.table.TableBlu
 
 def main(config: Config) -> None:
     """Share layer references with a filtered view and register fresh table blueprints."""
-    if rr.__version__ != "0.41.0" or urlparse(config.catalog_url).port == 51235:
-        raise ValueError("Use Rerun 0.41.0 and an isolated test port; 51235 is forbidden")
+    if rr.__version__ != "0.41.0" or (urlparse(config.catalog_url).port == 51235 and not config.allow_shared):
+        raise ValueError("Use Rerun 0.41.0; shared port 51235 requires --allow-shared")
     client: CatalogClient = CatalogClient(config.catalog_url)
     source: DatasetEntry = client.get_dataset(config.catalog_name)
     stamp: str = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
     config.output_root.mkdir(parents=True, exist_ok=True)
     for filtered in (False, True):
-        target: DatasetEntry = client.create_dataset(config.refined_name, exist_ok=True) if filtered else source
-        if filtered:
+        target: DatasetEntry = (client.create_dataset(config.refined_name, exist_ok=True) if config.populate_refined else client.get_dataset(config.refined_name)) if filtered else source
+        if filtered and config.populate_refined:
             existing: set[LayerRef] = {
                 from_dict(LayerRef, row) for row in target.manifest().select("rerun_segment_id", "rerun_layer_name", "rerun_storage_url").to_arrow_table().to_pylist()
             }

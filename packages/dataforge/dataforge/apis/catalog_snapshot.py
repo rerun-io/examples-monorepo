@@ -103,15 +103,16 @@ def snapshot_catalog(catalog_url: str, target: Path) -> None:
     print(f"Saved {len(entries)} entries to {target}")
 
 
-def restore_catalog(snapshot_path: Path, catalog_url: str, names: tuple[str, ...] = ()) -> None:
+def restore_catalog(snapshot_path: Path, catalog_url: str, names: tuple[str, ...] = (), *, allow_source_url: bool = False) -> None:
     """Restore selected or all entries on another server, retaining existing files.
 
     Re-running replaces changed segment/layers on the destination only, skipping
     identical URI registrations. Dataset
-    entry IDs change, but names and segment IDs are preserved. Source must differ.
+    entry IDs change, but names and segment IDs are preserved. Source must differ
+    unless allow_source_url explicitly permits recovery of a restarted server.
     """
     snapshot: CatalogSnapshot = records.decode(CatalogSnapshot, snapshot_path.read_text(), source=str(snapshot_path))
-    if catalog_url.rstrip("/") == snapshot.source_url.rstrip("/"):
+    if not allow_source_url and catalog_url.rstrip("/") == snapshot.source_url.rstrip("/"):
         raise ValueError("Restore target must differ from the snapshot source")
     missing: set[str] = set(names) - {entry.name for entry in snapshot.entries}
     if missing:
