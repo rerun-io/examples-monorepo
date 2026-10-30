@@ -117,3 +117,29 @@ Warm throughput excludes checkpoint loading, ONNX export, engine build and
 first-call Torch/Warp compilation. Keep those startup costs separate. Whole
 segment throughput includes RGB decoding, detection and complete mesh-producing
 prediction, but excludes Rerun serialization and catalog transfer.
+
+## Calibrated world layer
+
+`posekit.apis.egohand_layer.generate_layer` accepts the three OAK camera
+records returned by selfcap-curate's `read_ego_cameras`, converted to
+`posekit.apis.egohand_comparison.EgoCamera`. It reads only the requested segment
+of `selfcap-post-dev`; publication is a separate, explicit operation.
+
+The writer places meshes and 25-joint skeletons under
+`/world/pred/egohand/{left,right}` and image joints beneath each OAK pinhole's
+`pred/egohand` path. Camera-to-world placement uses the calibrated rig track
+with translation interpolation and rotation SLERP. Poses outside the track or
+across gaps over 100 ms are absent. Mono projections retain all 14 lens terms.
+
+Display meshes use fixed connected clusters of at most four source vertices,
+reducing each hand to 1,000 vertices and 1,974 triangles. The same mapping is
+used on every frame; joints are not reduced. Vertices and recomputed normals
+remain float32. Static topology and skeleton annotations are model metadata;
+Parquet inference streams become Rerun components through typed lenses and
+are optimized for object storage. Missing observations emit empty geometry.
+
+`egohand_world_metrics.compare_world_layer` compares the same 21 anatomical
+joints to latency-corrected Quest hands and the existing SOMA-77 hand joints.
+It reports world-space distance, wrist distance, signed camera-depth residual
+and wrist-relative articulation error. Snapshot metrics interpolate to the
+requested cursor time; the viewer holds each stream's preceding sample.
