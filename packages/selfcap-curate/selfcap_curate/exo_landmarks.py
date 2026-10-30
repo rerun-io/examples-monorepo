@@ -75,7 +75,7 @@ def write_landmarks(path: Path, segment: str, record: Landmarks) -> None:
             columns=[
                 *rr.Points2D.columns(positions=[[label.u, label.v] for label in ordered], labels=[label.target_id for label in ordered],
                                      radii=[2.5] * len(ordered), colors=[[255, 220, 60]] * len(ordered), show_labels=[True] * len(ordered)).partition(counts),
-                *rr.AnyValues.columns(confidence=[label.confidence for label in ordered]).partition(counts),
+                *rr.AnyValues.columns(confidence=np.asarray([label.confidence for label in ordered], dtype=np.float64)).partition(counts),
             ],
         ))
     path.parent.mkdir(parents=True, exist_ok=True)

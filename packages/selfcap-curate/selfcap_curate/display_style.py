@@ -70,7 +70,7 @@ def log_display_skeleton(
                 colors=style.colors.reshape(-1, 4),
                 radii=np.full(positions.shape[0] * 133, 3.0 if dimension == 2 else 0.006, dtype=np.float32),
             ).partition([133] * len(stamps)),
-            *rr.AnyValues.columns(confidence=confidence.reshape(-1)).partition([133] * len(stamps)),
+            *rr.AnyValues.columns(display_confidence=confidence.reshape(-1)).partition([133] * len(stamps)),
         ],
         recording=recording,
     )
