@@ -142,6 +142,9 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 oak_posed=posed,
                 oak_unposed_reason=None if posed else ("missing Quest/OAK clock" if qp is None else "OAK mount not fitted"),
                 oak_median_px=session.oak.median_px,
+                oak_rotation_source=("gyro" if session.oak.rotation_source.startswith("gyro") else
+                                     "unposed" if session.oak.rotation_source.startswith("unposed") else "free"),
+                oak_rotation_reason=session.oak.rotation_reason,
                 quest_mode=session.quest.mode,
                 record_json=json.dumps(to_dict(Provenance(session.session, METHOD, sync.episode))),
                 exo_refinement_json=to_json(refinement) if refinement is not None else None,

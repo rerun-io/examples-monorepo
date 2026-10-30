@@ -17,3 +17,12 @@ pixi run --as-is -e selfcap-curate-dev python -m pytest -q ops/selfcap-night2/te
 
 These tests use temporary caches and databases, synthetic recordings, and fake
 transport boundaries. They do not start production workers or publish layers.
+
+### OAK rotation fallback (run-v8)
+
+S1 uses the gyro-fixed EgoHand mount only when the gyro fit is valid, the episode
+spread is at most 1.5 degrees, and the device has an RGB/IMU rotation entry.
+Otherwise it samples 64 seeded frames with tracked Quest hands (without a pose-based
+visibility gate), then uses the existing free-rotation PnP/refinement fit. The
+calibration records `oak_rotation_source` (`gyro` or `free`) and
+`oak_rotation_reason`. A missing Quest/OAK clock still yields an unposed OAK.

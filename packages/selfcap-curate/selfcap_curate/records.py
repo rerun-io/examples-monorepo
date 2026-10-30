@@ -453,3 +453,4 @@ class OakFit:
     hands_kept_frac: float | None = None  # Fraction of complete frame/side groups retained.
     rotation_source: str = "hands"  # Free hand rotation or gyro mount rotation @ device rgb_R_imu.
     observation_source: Literal["sapiens", "egohand"] = "sapiens"  # Image observations used by the mount fit.
+    rotation_reason: str | None = None

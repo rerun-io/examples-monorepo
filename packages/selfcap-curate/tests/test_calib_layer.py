@@ -247,7 +247,9 @@ def test_calibrate_egohand_uses_default_path_and_writes_named_layer(calibration_
                         OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
     monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *args, **kwargs: pytest.fail("legacy OAK model must not run"))
     monkeypatch.setattr(api, "write_oak_egohand_layer", lambda path, *args: calls.append(path.parent.name))
-    api.main(config)
+    result = api.main(config)
+    assert result.oak.rotation_source == "gyro"
+    assert result.oak.rotation_reason is None
     assert calls == ["egohand", "egohand"]
     assert api.Config(config.output_dir).oak_method == "egohand"
 
@@ -361,3 +363,35 @@ def test_egohand_missing_clock_finishes_without_sampling(calibration_call, monke
     prop = next(c.to_record_batch() for c in RrdReader(path).stream() if str(c.entity_path) == "/__properties/calib")
     assert prop.column("oak_posed")[0].as_py() == [False]
     assert prop.column("oak_unposed_reason")[0].as_py() == ["missing Quest/OAK clock"]
+
+
+@pytest.mark.parametrize("reason", ["gyro fit not ok", "episode spread exceeds 1.5 degrees", "device missing from rgb_R_imu table"])
+def test_egohand_ineligible_gyro_uses_free_fit_and_records_reason(calibration_call, monkeypatch, reason):
+    api, config, _ = calibration_call
+    config = replace(config, oak_method="egohand")
+    gyro = GyroFit("test", reason != "gyro fit not ok", max_episode_dev_deg=2.0 if "spread" in reason else 1.0,
+                   R_head_from_imu=np.eye(3))
+    monkeypatch.setattr(api, "gyro_mount", lambda *_args: gyro)
+    monkeypatch.setattr(api, "read_rotations", lambda: SimpleNamespace(devices={}))
+    monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
+    monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
+    monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
+    old_solve = api.solve_oak
+
+    def detect(*args, **kwargs):
+        assert args[3] is None
+        return OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133)))
+
+    def solve(*args, **kwargs):
+        assert args[4] is None
+        return old_solve(*args, **kwargs)
+
+    monkeypatch.setattr(api, "detect_oak_egohand", detect)
+    monkeypatch.setattr(api, "solve_oak", solve)
+    state = api.main(config)
+    assert state.oak.rotation_source == "free"
+    assert state.oak.rotation_reason == reason
+    path = config.output_dir / f"{config.segment_ids[0]}.rrd"
+    prop = next(c.to_record_batch() for c in RrdReader(path).stream() if str(c.entity_path) == "/__properties/calib")
+    assert prop.column("oak_rotation_source")[0].as_py() == ["free"]
+    assert prop.column("oak_rotation_reason")[0].as_py() == [reason]

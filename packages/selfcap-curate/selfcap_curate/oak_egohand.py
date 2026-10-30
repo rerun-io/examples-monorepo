@@ -38,7 +38,7 @@ class OakFrameSelection:
 
 
 def select_egohand_frames(
-    times: Float64[ndarray, "f"], pixels: Float32[ndarray, "f 133 2"], tracked: Bool[ndarray, "f 2"],
+    times: Float64[ndarray, "f"], pixels: Float32[ndarray, "f 133 2"] | None, tracked: Bool[ndarray, "f 2"],
     size: tuple[int, int], *, count: int = 64, seed: int = 20261030,
 ) -> OakFrameSelection:
     """Uniform sampling without replacement after visibility and 300 px/s Quest-speed gates."""
@@ -48,15 +48,17 @@ def select_egohand_frames(
         return OakFrameSelection(np.empty(0, np.int64), np.empty((0, 2), bool), 0)
     if not np.all(np.diff(times) > 0.0):
         raise ValueError("video times must increase")
-    speed: Float32[ndarray, "f 133"] = np.linalg.norm(np.gradient(pixels, times, axis=0), axis=-1)
     eligible: Bool[ndarray, "f 2"] = tracked.copy()
-    width, height = size
-    for side, base in enumerate(HAND_BASE.values()):
-        indices: Int64[ndarray, "j"] = np.asarray(MAPPED) + base
-        points: Float32[ndarray, "f j 2"] = pixels[:, indices]
-        inside: Bool[ndarray, "f"] = np.isfinite(points).all((1, 2)) & (points[:, :, 0] >= 0.0).all(1) & (points[:, :, 0] < width).all(1)
-        inside &= (points[:, :, 1] >= 0.0).all(1) & (points[:, :, 1] < height).all(1)
-        eligible[:, side] &= inside & (speed[:, indices] <= 300.0).all(1)
+    # A free mount has no projection yet; sample tracked hands and let image detection find them.
+    if pixels is not None:
+        speed: Float32[ndarray, "f 133"] = np.linalg.norm(np.gradient(pixels, times, axis=0), axis=-1)
+        width, height = size
+        for side, base in enumerate(HAND_BASE.values()):
+            indices: Int64[ndarray, "j"] = np.asarray(MAPPED) + base
+            points: Float32[ndarray, "f j 2"] = pixels[:, indices]
+            inside: Bool[ndarray, "f"] = np.isfinite(points).all((1, 2)) & (points[:, :, 0] >= 0.0).all(1) & (points[:, :, 0] < width).all(1)
+            inside &= (points[:, :, 1] >= 0.0).all(1) & (points[:, :, 1] < height).all(1)
+            eligible[:, side] &= inside & (speed[:, indices] <= 300.0).all(1)
     candidates: Int64[ndarray, "k"] = np.flatnonzero(eligible.any(1))
     chosen: Int64[ndarray, "n"] = np.sort(np.random.default_rng(seed).choice(candidates, min(count, len(candidates)), replace=False))
     return OakFrameSelection(chosen, eligible[chosen], len(candidates))
@@ -106,7 +108,7 @@ def egohand_models(assets: Path) -> tuple[EgoHandDetector, EgoHandPredictor]:
 
 @torch.inference_mode()
 def detect_oak_egohand(
-    episode: SessionEpisode, video: CatalogVideo, intrinsic: Intrinsic, rotation: Float64[ndarray, "3 3"],
+    episode: SessionEpisode, video: CatalogVideo, intrinsic: Intrinsic, rotation: Float64[ndarray, "3 3"] | None,
     assets: Path, *, camera: EgoCamera | None = None, retain_models: bool = False,
 ) -> OakDetections:
     """Run only 64 seeded samples; release this episode's GPU models before returning."""
@@ -115,7 +117,7 @@ def detect_oak_egohand(
         raise ValueError("EgoHand sampling requires the Quest/OAK clock")
     times: Float64[ndarray, "f"] = episode.sync.oak_rgb_model.video_time_s(video.t_ns.astype(np.float64) * 1e-9)
     head: CatalogHands = episode.hands
-    if camera is None:
+    if camera is None and rotation is not None:
         poses: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(head.head_times_s), 1, 1))
         poses[:, :3, :3] = Rotation.from_quat(head.head_quaternions).as_matrix() @ rotation
         poses[:, :3, 3] = head.head_positions
@@ -128,7 +130,11 @@ def detect_oak_egohand(
         indices, alpha, valid = hand_neighbors(hand, times - qp / 1000.0 + HAND_LATENCY_MS / 1000.0)
         xyz[:, base : base + 21] = (1.0 - alpha[:, None, None]) * hand.joints[indices - 1] + alpha[:, None, None] * hand.joints[indices]
         tracked[:, side_index] = valid
-    selection: OakFrameSelection = select_egohand_frames(times, project_ego(camera, times, xyz), tracked, camera.size)
+    size: tuple[int, int] = camera.size if camera is not None else (intrinsic.capture_resolution.width, intrinsic.capture_resolution.height)
+    pixels: Float32[ndarray, "f 133 2"] | None = project_ego(camera, times, xyz) if camera is not None and rotation is not None else None
+    selection: OakFrameSelection = select_egohand_frames(times, pixels, tracked, size)
+    lens: OAKCamera = (OAKCamera(camera.K, camera.distortion, *size) if camera is not None else
+                       OAKCamera(intrinsic_matrix(intrinsic), np.asarray(intrinsic.distortion.coefficients, dtype=np.float64), *size))
     print(f"EGOHAND_SAMPLE {episode.sync.key}: {len(selection.indices)}/{selection.eligible_count} eligible frames", flush=True)
     if not len(selection.indices):
         return OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133)))
@@ -139,7 +145,7 @@ def detect_oak_egohand(
     try:
         detector, predictor = egohand_models(assets)
         result: OakDetections = infer_egohand_frames(frames, times[selection.indices], selection.hands,
-                                     OAKCamera(camera.K, camera.distortion, *camera.size), detector, predictor)
+                                     lens, detector, predictor)
         torch.cuda.synchronize()
         print(f"EGOHAND_CALIB_SECONDS {time.perf_counter() - started:.3f}", flush=True)
         return result
