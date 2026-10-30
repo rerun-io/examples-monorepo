@@ -113,6 +113,11 @@ ZOO: dict[str, ZooModel] = {
             "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-l_16xb16-600e_body7-640x640-b37118ce_20231211.zip",
             (640, 640), "coco_17", "planned", "One full-frame pass, boxes+keypoints jointly; needs GPU NMS port (Phase 4).",
         ),
+        ZooModel(
+            "egohand-v1", "pose3d", "top-down", "local",
+            "nvidia/EgoHand-v1", (256, 256), "soma_hand_25", "implemented",
+            "EgoHandConfig in posekit.models.egohand; calibrated camera and anatomical hand boxes required. Uses the egohand Pixi environment.",
+        ),
         # 3D (Phase 4).
         ZooModel(
             "rtmw3d-l-coco133", "pose3d", "top-down", "local",
