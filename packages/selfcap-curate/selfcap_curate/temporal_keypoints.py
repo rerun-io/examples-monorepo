@@ -87,3 +87,24 @@ def stable_body(result: Keypoints3D, baseline: Float32[ndarray, "n 133 3"]) -> F
     output[:, :BODY.start] = baseline[:, :BODY.start]
     output[:, BODY.stop:] = baseline[:, BODY.stop:]
     return output.astype(np.float32)
+
+
+def bridge_short_gaps(
+    positions: Float32[ndarray, "n j 3"],
+    confidence: Float32[ndarray, "n j"],
+    rate: float,
+) -> tuple[Float32[ndarray, "n j 3"], Float32[ndarray, "n j"], Bool[ndarray, "n j"]]:
+    """Interpolate bounded gaps up to 0.5 seconds; inferred samples carry 75% endpoint confidence."""
+    output: Float32[ndarray, "n j 3"] = positions.copy()
+    scores: Float32[ndarray, "n j"] = confidence.copy()
+    bridged: Bool[ndarray, "n j"] = np.zeros(positions.shape[:2], dtype=bool)
+    for joint in range(positions.shape[1]):
+        valid: Int64[ndarray, "v"] = np.flatnonzero(np.isfinite(positions[:, joint]).all(-1))
+        for left, right in zip(valid[:-1], valid[1:], strict=True):
+            if right - left <= 1 or (right - left - 1) / rate > 0.5:
+                continue
+            fraction: Float32[ndarray, "g"] = np.arange(1, right - left, dtype=np.float32) / (right - left)
+            output[left + 1:right, joint] = positions[left, joint] + fraction[:, None] * (positions[right, joint] - positions[left, joint])
+            scores[left + 1:right, joint] = 0.75 * min(confidence[left, joint], confidence[right, joint])
+            bridged[left + 1:right, joint] = True
+    return output, scores, bridged

@@ -20,7 +20,8 @@ def test_display_selection_and_hand_fallback() -> None:
     np.testing.assert_allclose(actual[0, 91:112], 4.0)
     np.testing.assert_allclose(actual[1, 91:112], 1.0)  # no bridging the 80 ms gap
     np.testing.assert_allclose(actual[:, 112:120], 1.0)  # absent right Quest hand
-    assert np.isnan(actual[:, 120]).all()  # low-confidence fallback is missing
+    np.testing.assert_allclose(actual[:, 120], 1.0)  # Low confidence is red, not hidden.
+    assert fusion.confidence[0, 91] == 1.0  # Quest has no per-joint score.
     assert np.isnan(actual[:, np.r_[0:3, 9:11, 13:91]]).all()
     np.testing.assert_allclose(actual[:, np.r_[3:9, 11:13]], 1.0)
 
@@ -33,17 +34,15 @@ def test_display_links_use_hand_roots_and_exclude_hidden_joints() -> None:
     assert not {0, 1, 2, 9, 10, *range(13, 91)} & {joint for link in links for joint in link}
 
 
-def test_an_inferred_endpoint_dims_the_whole_link() -> None:
-    observed = np.ones((1, 133), dtype=bool)
-    observed[0, 7] = False
-    style = skeleton_style(observed)
-    assert style.colors[0, 7].tolist() == [125, 135, 145, 190]
-    assert style.colors[0, 91].tolist() == [255, 64, 255, 255]
-    assert style.colors[0, 112].tolist() == [255, 255, 255, 255]
-    for edge, (a, b) in enumerate(DISPLAY_LINKS):
-        assert style.observed_edges[0, edge] == (a != 7 and b != 7)
-        if a == 7 or b == 7:
-            assert style.edge_colors[0, edge].tolist() == [105, 115, 125, 150]
+def test_confidence_colour_scale_and_weaker_endpoint_links() -> None:
+    confidence = np.ones((1, 133), dtype=np.float32)
+    confidence[0, 7] = 0.7
+    confidence[0, 91] = 0.85
+    style = skeleton_style(confidence)
+    assert style.colors[0, 7].tolist() == [255, 0, 0, 255]
+    np.testing.assert_allclose(style.colors[0, 91], [255, 255, 0, 255], atol=1)
+    assert style.colors[0, 112].tolist() == [0, 255, 0, 255]
+    assert style.edge_colors[0, DISPLAY_LINKS.index((7, 91))].tolist() == [255, 0, 0, 255]
 
 
 def test_quest_hand_observation_uses_raw_camera_detection() -> None:

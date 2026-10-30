@@ -1,17 +1,16 @@
-"""One display skeleton, with camera-supported and inferred joints distinguished."""
+"""One upper-body display skeleton coloured by support-adjusted confidence."""
 
 from dataclasses import dataclass
 
 import numpy as np
 import rerun as rr
 from dataforge.logging_toolkit import time_column
-from jaxtyping import Bool, Float32, Int64, UInt8
+from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from simplecv.data.skeleton.coco_133 import COCO_133_LINKS
 
 DISPLAY_JOINTS: Int64[ndarray, "k"] = np.r_[3:9, 11:13, 91:133]
 """Ears, shoulders, elbows, hips and hands; lower-body data stays in the source layers."""
-DISPLAY_LEFT_JOINTS: frozenset[int] = frozenset({*range(91, 112), 3, 5, 7, 11})
 DISPLAY_LINKS: list[tuple[int, int]] = [
     ({9: 91, 10: 112}.get(a, a), {9: 91, 10: 112}.get(b, b))
     for a, b in COCO_133_LINKS
@@ -22,37 +21,29 @@ DISPLAY_LINKS: list[tuple[int, int]] = [
 @dataclass(frozen=True, slots=True)
 class SkeletonStyle:
     colors: UInt8[ndarray, "n 133 4"]
-    """Magenta/white for observed joints; translucent grey for inferred joints."""
     edge_colors: UInt8[ndarray, "n e 4"]
-    """An edge is grey whenever either endpoint is inferred."""
-    observed_edges: Bool[ndarray, "n e"]
-    """Both endpoints have camera support."""
 
 
-def skeleton_style(observed: Bool[ndarray, "n 133"]) -> SkeletonStyle:
-    """Colour every joint and edge according to its view-specific support."""
-    side_colors: UInt8[ndarray, "133 4"] = np.array(
-        [(255, 64, 255, 255) if joint in DISPLAY_LEFT_JOINTS else (255, 255, 255, 255) for joint in range(133)],
-        dtype=np.uint8,
-    )
-    edges: Int64[ndarray, "e 2"] = np.asarray(DISPLAY_LINKS, dtype=np.int64)
-    edge_observed: Bool[ndarray, "n e"] = observed[:, edges].all(axis=-1)
-    return SkeletonStyle(
-        np.where(observed[..., None], side_colors, np.array([125, 135, 145, 190], np.uint8)),
-        np.where(edge_observed[..., None], side_colors[edges[:, 0]], np.array([105, 115, 125, 150], np.uint8)),
-        edge_observed,
-    )
+def skeleton_style(confidence: Float32[ndarray, "n 133"]) -> SkeletonStyle:
+    """Red at 0.7, yellow at 0.85, green at 1.0; a link uses its weaker endpoint."""
+    def colors(scores: Float32[ndarray, "n j"]) -> UInt8[ndarray, "n j 4"]:
+        scaled = np.clip((scores - 0.7) / 0.3, 0.0, 1.0)
+        return np.stack([np.minimum(2.0 - 2.0 * scaled, 1.0) * 255,
+                         np.minimum(2.0 * scaled, 1.0) * 255,
+                         np.zeros_like(scaled), np.full_like(scaled, 255)], axis=-1).astype(np.uint8)
+    edges = np.asarray(DISPLAY_LINKS, dtype=np.int64)
+    return SkeletonStyle(colors(confidence), colors(confidence[:, edges].min(axis=-1)))
 
 
 def log_display_skeleton(
     recording: rr.RecordingStream,
     path: str,
     positions: Float32[ndarray, "n 133 2"] | Float32[ndarray, "n 133 3"],
-    observed: Bool[ndarray, "n 133"],
+    confidence: Float32[ndarray, "n 133"],
     stamps: Int64[ndarray, "n"],
 ) -> None:
-    """Write explicit edges so mixed observed/inferred links can have distinct colours and widths."""
-    style: SkeletonStyle = skeleton_style(observed)
+    """Use the same confidence colours and fixed widths in every view."""
+    style: SkeletonStyle = skeleton_style(confidence)
     edges: Int64[ndarray, "e 2"] = np.asarray(DISPLAY_LINKS, dtype=np.int64)
     dimension: int = positions.shape[-1]
     point_type = rr.Points2D if dimension == 2 else rr.Points3D
@@ -66,7 +57,7 @@ def log_display_skeleton(
         rr.AnyValues(
             coco133_joint_ids=list(range(133)),
             skeleton_links=DISPLAY_LINKS,
-            observed_semantics="Camera is an inlier for this point; OAK hands use Quest tracking, OAK body is inferred",
+            confidence_semantics="Support-adjusted exo score; Quest hands assigned 1.0 because tracking supplies no per-joint confidence",
         ),
         static=True,
     )
@@ -77,9 +68,9 @@ def log_display_skeleton(
             *point_type.columns(
                 positions=positions.reshape(-1, dimension),
                 colors=style.colors.reshape(-1, 4),
-                radii=np.where(observed, 3.0 if dimension == 2 else 0.006, 1.5 if dimension == 2 else 0.003).reshape(-1),
+                radii=np.full(positions.shape[0] * 133, 3.0 if dimension == 2 else 0.006, dtype=np.float32),
             ).partition([133] * len(stamps)),
-            *rr.AnyValues.columns(observed=observed.reshape(-1)).partition([133] * len(stamps)),
+            *rr.AnyValues.columns(confidence=confidence.reshape(-1)).partition([133] * len(stamps)),
         ],
         recording=recording,
     )
@@ -89,7 +80,7 @@ def log_display_skeleton(
         columns=line_type.columns(
             strips=positions[:, edges].reshape(-1, 2, dimension),
             colors=style.edge_colors.reshape(-1, 4),
-            radii=np.where(style.observed_edges, -1.2, -0.7).reshape(-1),
+            radii=np.full(len(stamps) * len(edges), -1.2, dtype=np.float32),
         ).partition([len(edges)] * len(stamps)),
         recording=recording,
     )

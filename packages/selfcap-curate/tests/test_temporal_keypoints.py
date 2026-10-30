@@ -25,3 +25,19 @@ def test_body_path_stays_on_consistent_views_and_leaves_hands_unchanged() -> Non
     stable = stable_body(result, raw.xyz)
     np.testing.assert_allclose(stable[:, 6], true[:, 6], atol=0.01)
     np.testing.assert_array_equal(stable[:, 91:], raw.xyz[:, 91:])
+
+
+def test_short_gaps_are_bridged_with_reduced_confidence_but_long_gaps_stay_missing() -> None:
+    from selfcap_curate.temporal_keypoints import bridge_short_gaps
+
+    positions = np.zeros((30, 1, 3), dtype=np.float32)
+    positions[:, 0, 0] = np.arange(30)
+    confidence = np.full((30, 1), 0.9, dtype=np.float32)
+    positions[2:5] = np.nan
+    positions[10:24] = np.nan
+    filled, scores, bridged = bridge_short_gaps(positions, confidence, 24.0)
+    np.testing.assert_allclose(filled[2:5, 0, 0], [2, 3, 4])
+    assert bridged[2:5].all()
+    assert (scores[2:5] < 0.9).all()
+    assert np.isnan(filled[10:24]).all()
+    assert not bridged[10:24].any()

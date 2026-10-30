@@ -125,7 +125,7 @@ def test_smoothing_cuts_jitter_without_lag_keeps_gaps_and_leaves_slow_plans_raw(
     np.testing.assert_array_equal(smooth_keypoints(slow).xyz, slow.xyz)
 
 
-def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_path) -> None:
+def test_writer_keeps_low_confidence_3d_and_projects_into_each_phone(tmp_path) -> None:
     base = tmp_path / "calib.rrd"
     with rr.RecordingStream("test", recording_id="selfcap__synthetic", send_properties=False) as recording:
         recording.save(base)
@@ -149,8 +149,8 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
         batch = next(c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and str(c.entity_path) == entity)
         return np.asarray(batch.column(f"{kind}:positions").to_pylist()[0], dtype=float)
 
-    # Low confidence (3D joint 5, 2D joint 7) and the face the headset covers are written as missing everywhere.
-    hidden3d, hidden2d = np.r_[5, HEADSET_COVERED], np.r_[7, HEADSET_COVERED]
+    # Low-confidence 3D is shown in red; raw 2D visibility remains unchanged.
+    hidden3d, hidden2d = HEADSET_COVERED, np.r_[7, HEADSET_COVERED]
     points = row("/world/pred/rtmw_triangulated/coco133_xyz", "Points3D")
     assert np.isnan(points[hidden3d]).all() and np.isfinite(np.delete(points, hidden3d, axis=0)).all()
     overlay = row("/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv", "Points2D")
@@ -181,7 +181,7 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
     assert "Points2D:colors" not in quest.schema.names  # Its blue annotation colour stays in control.
 
 
-def test_display_writer_preserves_coco_ids_without_confidence_colours(tmp_path) -> None:
+def test_display_writer_preserves_coco_ids_with_confidence_colours(tmp_path) -> None:
     base = tmp_path / "calib.rrd"
     with rr.RecordingStream("test", recording_id="display", send_properties=False) as recording:
         recording.save(base)

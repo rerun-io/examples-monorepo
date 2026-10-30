@@ -38,7 +38,9 @@ PoseModel: TypeAlias = Literal["rtmw", "sapiens2"]
 INLIER_PX: float = 8.0
 
 DISPLAY_CONFIDENCE: float = 0.7
-"""Minimum per-camera detection score for triangulation and display; not a visibility probability."""
+"""Lower bound of the display colour scale; never a visibility threshold."""
+MIN_DETECTION_SCORE: float = 0.3
+"""Permissive detection acceptance; triangulation still requires two 8 px inliers."""
 ONE_EURO_MIN_CUTOFF_HZ: float = 1.0
 """One Euro cutoff at rest; with ONE_EURO_BETA, forward + backward cut cc808233 ep001 jitter 6x (median 11.8 -> 1.9 mm)."""
 ONE_EURO_BETA: float = 2.0
@@ -219,6 +221,8 @@ def ego_quest_hands(segment: Segment, sync: TimeSync) -> tuple[Float64[ndarray, 
 class DisplaySkeleton:
     positions: Float32[ndarray, "n 133 3"]
     """Exo ears and upper body, plus Quest hands with triangulated fallback."""
+    confidence: Float32[ndarray, "n 133"]
+    """Geometric-support adjusted scores; Quest tracking is assigned 1.0 because no joint score exists."""
     quest_tracked: Bool[ndarray, "n 133"]
     """Hand joints supplied by valid Quest tracking at this timestamp."""
 
@@ -231,7 +235,7 @@ def display_skeleton(
 ) -> DisplaySkeleton:
     """Exo ears/upper body plus clock-corrected Quest hands; confident exo hands fill tracking gaps."""
     selected: Bool[ndarray, "133"] = np.isin(np.arange(133), DISPLAY_JOINTS)
-    output: Float32[ndarray, "n 133 3"] = np.where(((confidence >= DISPLAY_CONFIDENCE) & selected)[..., None], xyz, np.float32(np.nan))
+    output: Float32[ndarray, "n 133 3"] = np.where(selected[None, :, None], xyz, np.float32(np.nan))
     tracked: Bool[ndarray, "n 133"] = np.zeros(xyz.shape[:2], dtype=bool)
     if quest_hands is not None:
         stamps: Float64[ndarray, "q"] = quest_hands[0]
@@ -243,7 +247,7 @@ def display_skeleton(
                 available: Bool[ndarray, "n"] = np.isfinite(points).all(axis=1)
                 output[available, joint] = points[available]
                 tracked[available, joint] = True
-    return DisplaySkeleton(output, tracked)
+    return DisplaySkeleton(output, np.where(tracked, 1.0, confidence).astype(np.float32), tracked)
 
 
 def select_wearers(
@@ -316,7 +320,7 @@ def triangulate_frames(
             axis=1,
         )
         observed, score, norm = tensor(observed_np), tensor(scores_np), tensor(norm_np)
-        valid = (score >= DISPLAY_CONFIDENCE) & torch.isfinite(score) & torch.isfinite(observed).all(-1) & torch.isfinite(norm).all(-1)
+        valid = (score >= MIN_DETECTION_SCORE) & torch.isfinite(score) & torch.isfinite(observed).all(-1) & torch.isfinite(norm).all(-1)
         norm = torch.where(torch.isfinite(norm), norm, 0.0)
         clean = torch.where(valid, score, 0.0)
         root = torch.sqrt(clean)
@@ -448,6 +452,7 @@ class Keypoints3D:
     rate: float  # Sample rate for provenance.
     inliers: Bool[ndarray, "n v 133"] | None = None  # Camera axis follows cameras insertion order.
     max_reprojection_px: Float32[ndarray, "n 133"] | None = None  # Maximum error over supporting cameras, NaN when missing.
+    bridged: Bool[ndarray, "n 133"] | None = None  # Temporal estimate replacing a missing or rejected measurement.
 
 
 def triangulate_episode(
@@ -508,7 +513,7 @@ def support_for_points(result: Keypoints3D, xyz: Float32[ndarray, "n 133 3"]) ->
     detections: Float32[ndarray, "n v 133 2"] = np.stack([result.selected[phone].xy for phone in result.cameras], axis=1)
     errors: Float64[ndarray, "n v 133"] = np.linalg.norm(projections[..., :2] - detections, axis=-1)
     scores: Float64[ndarray, "n v 133"] = np.stack([result.selected[phone].scores for phone in result.cameras], axis=1)
-    inliers: Bool[ndarray, "n v 133"] = (scores >= DISPLAY_CONFIDENCE) & np.isfinite(errors) & (errors <= INLIER_PX) & (projections[..., 2] > 1e-5)
+    inliers: Bool[ndarray, "n v 133"] = (scores >= MIN_DETECTION_SCORE) & np.isfinite(errors) & (errors <= INLIER_PX) & (projections[..., 2] > 1e-5)
     counts: UInt8[ndarray, "n 133"] = inliers.sum(1).astype(np.uint8)
     good: Bool[ndarray, "n 133"] = counts >= 2
     inliers &= good[:, None]
@@ -520,7 +525,7 @@ def support_for_points(result: Keypoints3D, xyz: Float32[ndarray, "n 133 3"]) ->
 
 
 def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
-    """Smooth only when two high-confidence cameras still support the new point within 8 px."""
+    """Smooth measured points within their geometric support, then bridge short gaps with reduced confidence."""
     if result.rate < SMOOTH_MIN_RATE_HZ:
         return result
     smooth: Float32[ndarray, "n 133 3"] = ((one_euro(result.xyz, result.rate) + one_euro(result.xyz[::-1], result.rate)[::-1]) / 2.0).astype(np.float32)
@@ -528,11 +533,14 @@ def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
         return replace(result, xyz=smooth)  # Synthetic callers without camera evidence.
     measured: TriangulationBatch = support_for_points(result, smooth)
     xyz: Float32[ndarray, "n 133 3"] = np.where((measured.n_views >= 2)[..., None], smooth, result.xyz)
-    from selfcap_curate.temporal_keypoints import stable_body
+    from selfcap_curate.temporal_keypoints import bridge_short_gaps, stable_body
 
     xyz = stable_body(result, xyz)
     final: TriangulationBatch = support_for_points(result, xyz)
-    return replace(result, xyz=final.xyz, n_views=final.n_views, confidence=final.confidence, inliers=final.inliers, max_reprojection_px=final.max_reprojection_px)
+    confidence = final.confidence * np.where(final.n_views == 2, 0.9, 1.0).astype(np.float32)
+    filled, confidence, bridged = bridge_short_gaps(final.xyz, confidence, result.rate)
+    support = support_for_points(result, filled)
+    return replace(result, xyz=filled, n_views=support.n_views, confidence=confidence, inliers=support.inliers, max_reprojection_px=support.max_reprojection_px, bridged=bridged)
 
 
 def write_keypoints(
@@ -548,8 +556,7 @@ def write_keypoints(
     """Write RTMW with calibration, or an isolated Sapiens2 layer. The input file stays intact.
 
     Keypoint rows go through dataforge's shared writer: 133 joints per row, NaN for missing joints, and a confidence
-    per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. Joints under
-    DISPLAY_CONFIDENCE are written as missing, and the shown 3D joints are projected into every calibrated phone
+    per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. All finite joints remain visible, and the shown 3D joints are projected into every calibrated phone
     through its lens model. Colours stretch from red at DISPLAY_CONFIDENCE to green at 1.0; scores stay raw. ``ego`` OAK cameras get the same projections plus the Quest hands (``quest_hands``),
     through the full OAK lens model: the viewer's Pinhole has no distortion, which put overlays up to 220 px off.
     Camera-centre chunks retain their native exo frame clocks when merged into the layer.
@@ -560,7 +567,7 @@ def write_keypoints(
         raise ValueError("calibration input must contain one recording")
     stamps: Int64[ndarray, "n"] = np.rint(result.times * 1e9).astype(np.int64)
     visible: Bool[ndarray, "133"] = ~np.isin(np.arange(133), HEADSET_COVERED)
-    shown: Float32[ndarray, "n 133 3"] = np.where(((result.confidence >= DISPLAY_CONFIDENCE) & visible)[..., None], result.xyz, np.float32(np.nan))
+    shown: Float32[ndarray, "n 133 3"] = np.where(visible[None, :, None], result.xyz, np.float32(np.nan))
 
     def projected(camera: Camera, points: Float32[ndarray, "n j 3"] = shown) -> Float32[ndarray, "n j 2"]:
         uvd: Float64[ndarray, "m 3"] = project(camera, points.reshape(-1, 3).astype(np.float64))
@@ -598,15 +605,15 @@ def write_keypoints(
                 kp3d_model="YOLOX-m-humanart + " + ("Sapiens2 0.4B COCO-133" if model == "sapiens2" else "RTMW-x COCO-133"),
                 kp3d_rate_hz=result.rate,
                 kp3d_samples=len(result.times),
-                kp3d_valid_joints=int((result.n_views >= 2).sum()),
+                kp3d_valid_joints=int(np.isfinite(result.xyz).all(-1).sum()),
                 kp3d_possible_joints=int(result.n_views.size),
                 kp3d_reprojection_threshold_px=INLIER_PX,
                 kp3d_calibration_sha256=hashlib.sha256(calib.read_bytes()).hexdigest(),
                 kp3d_display_confidence=DISPLAY_CONFIDENCE,
-                kp3d_min_detection_score=DISPLAY_CONFIDENCE,
+                kp3d_min_detection_score=MIN_DETECTION_SCORE,
                 kp3d_support_camera_paths=[camera.entity for camera in result.cameras.values()],
                 kp3d_missing_under_headset="body 0-2 and face 23-90: both models place them on the Quest front plate",
-                kp3d_smoothing=f"Body: continuous view-pair path, median 5, bidirectional One Euro {ONE_EURO_MIN_CUTOFF_HZ} Hz beta 0.3, 8 px support, 30 mm acceleration gate at 24 Hz; other joints: bidirectional One Euro beta {ONE_EURO_BETA}; restart at gaps",
+                kp3d_smoothing=f"Body: continuous view-pair path, median 5, bidirectional One Euro {ONE_EURO_MIN_CUTOFF_HZ} Hz beta 0.3, 8 px support, 30 mm acceleration outliers replaced across gaps up to 0.5 s; other joints: bidirectional One Euro beta {ONE_EURO_BETA}; restart at gaps",
             ),
         )
         for parent in parents:
@@ -620,16 +627,13 @@ def write_keypoints(
             recording.save(rows)
             if model == "rtmw":
                 display: DisplaySkeleton = display_skeleton(result.times, result.xyz, result.confidence, quest_hands)
-                log_display_skeleton(recording, "/world/skeleton", display.positions, np.isfinite(display.positions).all(-1), stamps)
-                for view, (phone, camera) in enumerate(result.cameras.items()):
+                log_display_skeleton(recording, "/world/skeleton", display.positions, display.confidence, stamps)
+                for camera in result.cameras.values():
                     pixels: Float32[ndarray, "n 133 2"] = projected(camera, display.positions)
-                    supported: Bool[ndarray, "n 133"] = np.zeros(result.xyz.shape[:2], dtype=bool) if result.inliers is None else result.inliers[:, view].copy()
-                    if phone in result.selected:
-                        supported = exo_display_observed(pixels, result.selected[phone], supported, display.quest_tracked)
-                    log_display_skeleton(recording, f"{camera.entity}/pinhole/skeleton", pixels, supported, stamps)
+                    log_display_skeleton(recording, f"{camera.entity}/pinhole/skeleton", pixels, display.confidence, stamps)
                 for camera in ego:
                     log_display_skeleton(recording, f"{pinhole_path(camera.rig, camera.cam)}/skeleton",
-                                         project_ego(camera, result.times, display.positions), display.quest_tracked, stamps)
+                                         project_ego(camera, result.times, display.positions), display.confidence, stamps)
             log_keypoints3d(
                 recording,
                 times_ns=stamps,
@@ -641,10 +645,11 @@ def write_keypoints(
             )
             if result.inliers is not None and result.max_reprojection_px is not None:
                 recording.log(xyz_path, rr.AnyValues(support_camera_paths=[camera.entity for camera in result.cameras.values()],
-                              confidence_semantics="Mean accepted 2D detector score; not visibility or geometric certainty"), static=True)
+                              confidence_semantics="Mean inlier detector score; multiplied by 0.9 for two-view support, and by 0.75 at temporally bridged frames; not visibility probability"), static=True)
                 mask: Bool[ndarray, "n 133 v"] = result.inliers.transpose(0, 2, 1)
                 rr.send_columns(xyz_path, indexes=[time_column(stamps)], columns=rr.AnyValues.columns(
                     support_view_count=result.n_views.reshape(-1),
+                    temporal_bridged=(np.zeros(result.xyz.shape[:2], dtype=bool) if result.bridged is None else result.bridged).reshape(-1),
                     support_max_reprojection_px=result.max_reprojection_px.reshape(-1),
                     support_inlier_mask=pa.FixedSizeListArray.from_arrays(pa.array(mask.reshape(-1)), mask.shape[-1]),
                 ).partition([133] * len(stamps)), recording=recording)

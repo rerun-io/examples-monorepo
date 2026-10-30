@@ -120,23 +120,22 @@ Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz 
 keeping three people per frame on a half-open `video_time` grid anchored at cut zero; nearest-frame ties go left.
 Quest anchors use capture_time: left-eye head + quest_pose (100 ms gap), wrists −48 ms + quest_pose (40 ms gap).
 Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation accepts joint detector scores
-≥0.7, with radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
-The reported confidence is the mean accepted detector score, not visibility or geometric certainty.
+≥0.3, with radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
+Confidence is the mean inlier score, multiplied by 0.9 for two-view support. It is not a visibility probability.
 The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, and `support_inlier_mask` per joint.
-Each mask lists cameras in the static `support_camera_paths` order. A usable point needs at least two supporting cameras.
-Body joints use a temporally consistent camera-pair path, a five-frame median, and bidirectional One Euro smoothing (1 Hz, beta 0.3). Smoothing stays within the 8 px geometric support gate. Unsupported temporal jumps above 30 mm second difference at 24 Hz are omitted. Other triangulated joints retain beta 2.0; Quest hand tracking is unchanged.
+Each mask lists cameras in the static `support_camera_paths` order. A measured point needs at least two supporting cameras; temporal estimates carry `temporal_bridged` and retain the actual support count.
+Body joints use a temporally consistent camera-pair path, a five-frame median, and bidirectional One Euro smoothing (1 Hz, beta 0.3). Smoothing stays within the 8 px geometric support gate. Temporal jumps above 30 mm second difference at 24 Hz and missing runs up to 0.5 seconds are interpolated between supported neighbours, with 75% of the smaller endpoint confidence. Longer gaps stay missing. Other triangulated joints retain beta 2.0; Quest hand tracking is unchanged.
 
 The default `/world/skeleton` and `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
 and both 21-joint hands. Knees, ankles and feet remain in the hidden full COCO-133 layers.
-In each exo view, camera-supported joints are magenta/white; inferred joints and every link touching one are smaller, dim grey.
-Quest hand replacements are observed when that camera's raw detection scores ≥0.7 and agrees within 15 px;
-they do not require support for the independently triangulated hand.
-In OAK views, Quest-tracked hands are bright and the body is inferred. The world view retains the side colours.
+Every view uses the same confidence colours: red at 0.7, yellow at 0.85, green at 1.0, clamped outside that range.
+Low-confidence and bridged points remain visible. Edges use the smaller endpoint confidence, with fixed widths.
+Quest hands have no per-joint confidence, so tracked Quest joints use 1.0. The support masks remain available for inspection.
 AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
 `pinhole/pred/rtmw/coco133_uv` and `kp3d_*` fields in the same `calib` group; no external quality metrics are stored.
 Frozen reference comparisons live in `tests/test_keypoints_*golden.py`. Those references use the earlier
-acceptance policy; the stricter per-view score gate intentionally changes which 3D joints are present.
+acceptance and smoothing policy; temporal estimates now preserve short missing runs.
 
 Calibration and focal profiling read alignment records from each selected catalog base. Phone detections come from the selected segment’s `sapiens2` layer; local sync JSON cannot override the base clocks. Focal profiling refuses missing detection data.
 
