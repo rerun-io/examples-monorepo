@@ -124,7 +124,7 @@ Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5.
 The reported confidence is the mean accepted detector score, not visibility or geometric certainty.
 The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, and `support_inlier_mask` per joint.
 Each mask lists cameras in the static `support_camera_paths` order. A usable point needs at least two supporting cameras.
-One Euro smoothing is accepted only while that support remains within 8 px; otherwise the raw triangulation is retained.
+Body joints use a temporally consistent camera-pair path, a five-frame median, and bidirectional One Euro smoothing (1 Hz, beta 0.3). Smoothing stays within the 8 px geometric support gate. Unsupported temporal jumps above 30 mm second difference at 24 Hz are omitted. Other triangulated joints retain beta 2.0; Quest hand tracking is unchanged.
 
 The default `/world/skeleton` and `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
 and both 21-joint hands. Knees, ankles and feet remain in the hidden full COCO-133 layers.

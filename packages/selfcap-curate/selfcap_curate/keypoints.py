@@ -472,7 +472,7 @@ def triangulate_episode(
     return Keypoints3D(detections.times, batch.xyz, batch.n_views, batch.confidence, selected, cameras, detections.rate, batch.inliers, batch.max_reprojection_px)
 
 
-def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float) -> Float32[ndarray, "n j 3"]:
+def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float, *, beta: float = ONE_EURO_BETA) -> Float32[ndarray, "n j 3"]:
     """Causal One Euro filter (Casiez et al. 2012) per joint on the 3D vector; every gap restarts it."""
 
     @overload
@@ -494,7 +494,7 @@ def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float) -> Float32[ndarray, "n
         state[start], velocity[start] = sample[start], 0.0
         step = valid & alive
         velocity[step] += alpha(1.0) * ((sample[step] - state[step]) * rate - velocity[step])
-        state[step] += alpha(ONE_EURO_MIN_CUTOFF_HZ + ONE_EURO_BETA * np.linalg.norm(velocity[step], axis=1))[:, None] * (sample[step] - state[step])
+        state[step] += alpha(ONE_EURO_MIN_CUTOFF_HZ + beta * np.linalg.norm(velocity[step], axis=1))[:, None] * (sample[step] - state[step])
         out[t, valid] = state[valid]
         alive = valid
     return out
@@ -528,6 +528,9 @@ def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
         return replace(result, xyz=smooth)  # Synthetic callers without camera evidence.
     measured: TriangulationBatch = support_for_points(result, smooth)
     xyz: Float32[ndarray, "n 133 3"] = np.where((measured.n_views >= 2)[..., None], smooth, result.xyz)
+    from selfcap_curate.temporal_keypoints import stable_body
+
+    xyz = stable_body(result, xyz)
     final: TriangulationBatch = support_for_points(result, xyz)
     return replace(result, xyz=final.xyz, n_views=final.n_views, confidence=final.confidence, inliers=final.inliers, max_reprojection_px=final.max_reprojection_px)
 
@@ -603,7 +606,7 @@ def write_keypoints(
                 kp3d_min_detection_score=DISPLAY_CONFIDENCE,
                 kp3d_support_camera_paths=[camera.entity for camera in result.cameras.values()],
                 kp3d_missing_under_headset="body 0-2 and face 23-90: both models place them on the Quest front plate",
-                kp3d_smoothing=f"One Euro forward + backward, min cutoff {ONE_EURO_MIN_CUTOFF_HZ} Hz, beta {ONE_EURO_BETA}, restarts at gaps",
+                kp3d_smoothing=f"Body: continuous view-pair path, median 5, bidirectional One Euro {ONE_EURO_MIN_CUTOFF_HZ} Hz beta 0.3, 8 px support, 30 mm acceleration gate at 24 Hz; other joints: bidirectional One Euro beta {ONE_EURO_BETA}; restart at gaps",
             ),
         )
         for parent in parents:

@@ -40,11 +40,12 @@ def test_smoothing_does_not_move_points_outside_their_geometric_support() -> Non
         np.zeros((8, 133), np.float32),
     )
     smooth = smooth_keypoints(result)
-    assert np.all(smooth.n_views == 2)
-    assert np.max(smooth.max_reprojection_px) <= 8.0
+    assert np.all((smooth.n_views == 0) | (smooth.n_views == 2))
+    assert np.all(smooth.n_views[:, 91:] == 2)  # Hands retain their previous treatment.
+    assert np.nanmax(smooth.max_reprojection_px) <= 8.0
     for i, camera in enumerate(cams):
         projected = np.stack([project(camera, frame.astype(np.float64))[:, :2] for frame in smooth.xyz])
-        assert np.max(np.linalg.norm(projected - selected[str(i)].xy, axis=-1)) <= 8.0
+        assert np.nanmax(np.linalg.norm(projected - selected[str(i)].xy, axis=-1)) <= 8.0
 
 
 def test_support_columns_are_stored_beside_each_3d_joint(tmp_path) -> None:
