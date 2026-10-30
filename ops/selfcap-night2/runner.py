@@ -86,7 +86,21 @@ def claim(role,name):
             job=c.execute("select * from jobs where ordinal<? and state='soma' and owner is null order by ordinal limit 1",(cfg['limit'],)).fetchone()
         if job is None:return None
         c.execute('update jobs set state=?,owner=?,updated=? where segment=?',(stage,name,now,job['segment']))
-        return dict(job),stage
+        return {**dict(job), 'updated': now},stage
+
+
+@contextlib.contextmanager
+def owned_claim(job, stage, name):
+    """Serialize result writes only while this exact claim still owns the job.
+
+    The claim timestamp distinguishes restarts reusing the same worker name.
+    This fences database writes, not external artifact publication.
+    """
+    with connect() as c:
+        c.execute('begin immediate')
+        current=c.execute('select 1 from jobs where segment=? and state=? and owner=? and updated=?',
+                          (job['segment'],stage,name,job['updated'])).fetchone()
+        yield c if current else None
 
 
 def heartbeat(name,stop):
@@ -172,11 +186,9 @@ def work(role,index):
                 info['final_readback']=verify_publication(seg,manifest=ROOT/'runs'/seg/'publish-receipts.json')
                 target='done'
             elapsed=time.perf_counter()-started;info[stage+'_wall_s']=elapsed
-            with connect() as c:
-                c.execute('begin immediate')
-                current=c.execute('select state,owner from jobs where segment=?',(seg,)).fetchone()
-                if current['state']==stage and current['owner']==name:
-                    c.execute('update jobs set state=?,owner=null,updated=?,s1_ready=coalesce(s1_ready,?),info=?,error=null where segment=?',(target,time.time(),time.time() if stage=='s1' else None,json.dumps(info),seg))
+            with owned_claim(job,stage,name) as c:
+                if c is None:continue
+                c.execute('update jobs set state=?,owner=null,updated=?,s1_ready=coalesce(s1_ready,?),info=?,error=null where segment=?',(target,time.time(),time.time() if stage=='s1' else None,json.dumps(info),seg))
                 label_ok=role!='label' or info.get('decision',{}).get('decision') in ('accepted','rejected','skipped')
                 newly_paused=stage_result(c,stage,label_ok,info.get('decision',{}).get('reason') if not label_ok else None)
                 c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'ok' if label_ok else 'failed',name));c.execute('update workers set failures=0 where name=?',(name,))
@@ -190,7 +202,8 @@ def work(role,index):
             if isinstance(error, InfrastructureError) or is_infrastructure_error(detail):
                 info['infrastructure_stage']=stage
                 info['infrastructure_reason']=str(error)
-                with connect() as c:
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
                     c.execute("update jobs set state='infrastructure_waiting',owner=null,error=null,updated=?,info=? where segment=?",(time.time(),json.dumps(info),seg))
                     c.execute("insert into stage_health(stage,failures,paused,reason) values(?,0,1,?) on conflict(stage) do update set failures=0,paused=1,reason=excluded.reason",(stage,str(error)))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'infrastructure_pause',name))
@@ -198,7 +211,8 @@ def work(role,index):
                 continue
             if role=='gpu' and ('OutOfMemoryError' in detail or 'CUDA out of memory' in detail):
                 info['oom_requeued_at']=time.time()
-                with connect() as c:
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
                     c.execute("update jobs set state='queued',owner=null,error=null,updated=?,info=? where segment=?",(time.time(),json.dumps(info),seg))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'resource_retry',name))
                 notify(f'S1 OOM resource retry, not data failure: {seg}; waiting for16GiB free before another claim')
@@ -207,7 +221,8 @@ def work(role,index):
             if stage=='soma' and any(reason in str(error) for reason in ('CSV has no orientations', 'need at least two Quest hand and head samples')):
                 info.pop('failed_stage',None);info.pop('retries',None)
                 info['waiting_reason']='SOMA Quest orientation or head-path reader requires pending fix'
-                with connect() as c:
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
                     c.execute("update jobs set state='soma_waiting_fix',owner=null,error=null,updated=?,info=? where segment=?",(time.time(),json.dumps(info),seg))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'waiting_fix',name))
                 print('SOMA_WAITING_FIX',seg,flush=True)
@@ -215,13 +230,15 @@ def work(role,index):
             if stage in ('soma','s2') and (isinstance(error,InputLimitation) or repeated_stage_error(info,stage,str(error))):
                 info.pop('failed_stage',None);info.pop('retries',None)
                 info['waiting_reason']=str(error)
-                with connect() as c:
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
                     c.execute("update jobs set state=?,owner=null,error=null,updated=?,info=? where segment=?",('soma_input_limited' if stage=='soma' else 's2_waiting_fix',time.time(),json.dumps(info),seg))
                     c.execute("update events set status='input_limited' where segment=? and stage=? and status='failed'",(seg,stage))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'input_limited',name))
                 notify(f'{stage} input limitation or repeated error, parked: {seg}: {error}')
                 continue
-            with connect() as c:
+            with owned_claim(job,stage,name) as c:
+                if c is None:continue
                 c.execute("update jobs set state='failed',owner=null,updated=?,info=?,error=? where segment=?",(time.time(),json.dumps({**info,'failed_stage':stage}),detail,seg))
                 newly_paused=stage_result(c,stage,False,str(error))
                 c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'failed',name));c.execute('update workers set failures=failures+1 where name=?',(name,));failures=c.execute('select failures from workers where name=?',(name,)).fetchone()[0]
