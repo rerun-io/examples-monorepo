@@ -8,10 +8,9 @@ from egohand_inference.camera.camera_models import CameraModel, load_camera_cali
 from egohand_inference.camera.perspective_crop import perspective_crop
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
+from simplecv.data.skeleton.soma_hand import SOMA_HAND25_TO_COCO21 as SOMA_HAND21
 
 HandSide: TypeAlias = Literal["left", "right"]
-SOMA_HAND21: tuple[int, ...] = (0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24)
-"""Wrist, then thumb/index/middle/ring/little: omit non-thumb metacarpals."""
 
 
 def detector_hand_side(label: int) -> HandSide:

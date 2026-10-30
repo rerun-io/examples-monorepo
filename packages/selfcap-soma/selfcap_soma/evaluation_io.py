@@ -10,6 +10,7 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.chunk import RrdReader
+from simplecv.data.skeleton.soma_hand import SOMA_HAND25_TO_COCO21
 
 from selfcap_soma.camera_geometry import Camera, EgoCamera
 from selfcap_soma.catalog import ExoSource, read_rigs, seconds
@@ -198,7 +199,6 @@ def read_egohand_rgb(dataset: DatasetEntry, segment: str, times: Float64[ndarray
         .filter(col("video_time").cast(pa.int64()) <= lit(int((times[-1] + 0.05) * 1e9)))
         .to_arrow_table()
     )
-    mapping = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
     result = []
     for path in paths:
         column = path + ":Points2D:positions"
@@ -207,7 +207,7 @@ def read_egohand_rgb(dataset: DatasetEntry, segment: str, times: Float64[ndarray
         points = np.full((len(stamps), 21, 2), np.nan)
         for index, row in enumerate(rows[column].to_pylist()):
             if len(row) == 25:
-                points[index] = np.asarray(row, dtype=np.float64)[mapping]
+                points[index] = np.asarray(row, dtype=np.float64)[list(SOMA_HAND25_TO_COCO21)]
             elif len(row) == 21:
                 points[index] = np.asarray(row, dtype=np.float64)
         order = np.argsort(stamps)

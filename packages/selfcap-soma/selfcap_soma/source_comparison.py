@@ -14,6 +14,7 @@ from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from serde import serde
 from serde.json import from_json, to_json
+from simplecv.data.skeleton.soma_hand import SOMA_HAND25_TO_COCO21
 from soma.body import SOMALayer
 
 from selfcap_soma.camera_geometry import project, project_ego
@@ -216,7 +217,6 @@ def evaluate(
                 .filter(col("video_time").cast(pa.int64()) <= lit(int(data.times[-1] * 1e9)))
                 .to_arrow_table()
             )
-            order25 = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
             fingers = [2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20]
             for path in paths:
                 side = 0 if path.endswith("/left") else 1
@@ -226,7 +226,7 @@ def evaluate(
                 target = np.full((len(stamps), 21, 2), np.nan)
                 for i, row in enumerate(rows[key].to_pylist()):
                     if len(row) == 25:
-                        target[i] = np.asarray(row)[order25]
+                        target[i] = np.asarray(row)[list(SOMA_HAND25_TO_COCO21)]
                 hand = points[:, 91 + side * 21 : 112 + side * 21]
                 world = np.empty((len(stamps), 21, 3), dtype=np.float32)
                 for joint in range(21):

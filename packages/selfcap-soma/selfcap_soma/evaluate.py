@@ -14,6 +14,7 @@ from rerun.catalog import CatalogClient
 from scipy.spatial.transform import Rotation
 from serde import serde
 from serde.json import to_json
+from simplecv.data.skeleton.soma_hand import SOMA_HAND25_TO_COCO21
 
 from selfcap_soma.camera_geometry import project, project_ego, triangulate_frames
 from selfcap_soma.catalog import Observations, read_window
@@ -223,10 +224,9 @@ def main(config: Config) -> None:
         fit_uv = project_ego(oak, data.times, points.astype(np.float32))
         raw_uv = project_ego(oak, data.times, data.exo.astype(np.float32))
         quest_uv = project_ego(oak, data.times, data.hands.astype(np.float32))
-    hand_order = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
     for track in read_image_tracks(config.egohand):
         idx = nearest_indices(data.times, track.times)
-        targets = track.points[:, hand_order] if track.points.shape[1] == 25 else track.points
+        targets = track.points[:, list(SOMA_HAND25_TO_COCO21)] if track.points.shape[1] == 25 else track.points
         predictions = np.full_like(targets, np.nan)
         comparisons = np.full_like(targets, np.nan)
         for row, i in enumerate(idx):
