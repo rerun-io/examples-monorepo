@@ -243,6 +243,9 @@ def main(config: Config) -> None:
         for old, new in (("/world/fit/joints", "/world/pred/soma_x/joints"), ("/world/fit/mesh", "/world/pred/soma_x/mesh")):
             recording.send_chunks(source.stream().filter(content=old).map(lambda chunk, new=new: chunk.with_entity_path(new)))
     recording.send_chunks(source.stream().filter(content="/world/fit/ears").map(lambda chunk: chunk.with_entity_path("/world/pred/soma_x/ears")))
+    if config.native_exo:
+        for path in ("/world/pred/soma_x/joints", "/world/pred/soma_x/ears"):
+            recording.log(path, rr.Points3D.from_fields(radii=rr.Radius.ui_points(2.5)), static=True)
     exo_rows = []
     for chunk in source.stream().filter(content="/world/inputs/exo").to_chunks():
         table = chunk.to_record_batch()

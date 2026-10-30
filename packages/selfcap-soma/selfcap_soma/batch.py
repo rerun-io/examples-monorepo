@@ -184,7 +184,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     if data.support is not None:
         digest.update(data.support.tobytes())
     if config.native_exo:
-        digest.update(b":native-exo-v1")
+        digest.update(b":native-exo-v2-ui-radii")
     # Camera/calibration changes invalidate overlays even if 3D inputs stay unchanged.
     calib = [name for name in metadata.column_names if name.startswith("property:calib:")]
     digest.update(metadata.select(calib).combine_chunks().to_batches()[0].serialize().to_pybytes())
