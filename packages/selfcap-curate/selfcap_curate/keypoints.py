@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from itertools import combinations
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import overload
+from typing import Literal, TypeAlias, overload
 
 import cv2
 import numpy as np
@@ -30,6 +30,8 @@ from selfcap_curate.catalog_io import Segment, read_catalog_hands, scalar
 from selfcap_curate.detection_io import COCO133_CLASS
 from selfcap_curate.quest_fit import load_quest_hands
 from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, TimeSync, oak_quest_offset_ms
+
+PoseModel: TypeAlias = Literal["rtmw", "sapiens2"]
 
 INLIER_PX: float = 8.0
 
@@ -493,8 +495,10 @@ def write_keypoints(
     ego: tuple[EgoCamera, ...] = (),
     quest_hands: tuple[Float64[ndarray, "q"], Float32[ndarray, "q 133 3"]] | None = None,
     camera_center_chunks: tuple[Chunk, ...] = (),
+    *,
+    model: PoseModel = "rtmw",
 ) -> None:
-    """One output file and calib property group; input calibration chunks stay intact.
+    """Write RTMW with calibration, or an isolated Sapiens2 layer. The input file stays intact.
 
     Keypoint rows go through dataforge's shared writer: 133 joints per row, NaN for missing joints, and a confidence
     per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. Joints under
@@ -511,10 +515,6 @@ def write_keypoints(
     visible: Bool[ndarray, "133"] = ~np.isin(np.arange(133), HEADSET_COVERED)
     shown: Float32[ndarray, "n 133 3"] = np.where(((result.confidence >= DISPLAY_CONFIDENCE) & visible)[..., None], result.xyz, np.float32(np.nan))
 
-    display: Float32[ndarray, "n 133 3"] = display_skeleton(result.times, result.xyz, result.confidence, quest_hands)
-
-    display_points: Float32[ndarray, "n 135 3"] = np.concatenate((display, display[:, [6, 12]]), axis=1)
-
     def projected(camera: Camera, points: Float32[ndarray, "n j 3"] = shown) -> Float32[ndarray, "n j 2"]:
         uvd: Float64[ndarray, "m 3"] = project(camera, points.reshape(-1, 3).astype(np.float64))
         uv: Float64[ndarray, "m 2"] = np.where((uvd[:, 2:] > 1e-5), uvd[:, :2], np.nan)
@@ -526,20 +526,29 @@ def write_keypoints(
             raise ValueError(f"camera entity {entity} is not a rig camera")
         return int(match[1]), int(match[2])
 
+    xyz_path: str = "/world/gt/sapiens2/coco133_xyz" if model == "sapiens2" else coco133_xyz_path(pred="rtmw_triangulated")
+    uv_suffix: str = "sapiens2/coco133_uv" if model == "sapiens2" else "pred/rtmw/coco133_uv"
+    projection_name: str = "sapiens2/coco133_uv_projected" if model == "sapiens2" else "coco133_uv_projected"
     parents: list[str] = [
         "/world/pred",
         *(f"{result.cameras[phone].entity}/pinhole/pred/rtmw" for phone in result.selected),
         *(coco133_uv_projected_path(*rig_cam(camera.entity)) for camera in result.cameras.values()),
         *(coco133_uv_projected_path(camera.rig, camera.cam) for camera in ego),
     ]
+    if model == "sapiens2":
+        parents = [
+            xyz_path,
+            *(f"{camera.entity}/pinhole/sapiens2" for camera in result.cameras.values()),
+            *(f"{pinhole_path(camera.rig, camera.cam)}/sapiens2" for camera in ego),
+        ]
     quest_paths: list[str] = [f"{pinhole_path(camera.rig, camera.cam)}/{QUEST_HANDS_UV}" for camera in ego] if quest_hands is not None else []
 
     def additions() -> Iterator[Chunk]:
         yield Chunk.from_property(
-            "calib",
+            "keypoints_sapiens2" if model == "sapiens2" else "calib",
             rr.AnyValues(
                 kp3d_method="confidence-weighted DLT; exhaustive pair RANSAC",
-                kp3d_model="YOLOX-m-humanart + RTMW-x COCO-133",
+                kp3d_model="YOLOX-m-humanart + " + ("Sapiens2 0.4B COCO-133" if model == "sapiens2" else "RTMW-x COCO-133"),
                 kp3d_rate_hz=result.rate,
                 kp3d_samples=len(result.times),
                 kp3d_valid_joints=int((result.n_views >= 2).sum()),
@@ -553,57 +562,60 @@ def write_keypoints(
         )
         for parent in parents:
             yield Chunk.from_columns(parent, indexes=[], columns=rr.AnnotationContext.columns(context=[COCO133_CLASS]))
-        for path in quest_paths:
+        for path in quest_paths if model == "rtmw" else []:
             yield Chunk.from_columns(path, indexes=[], columns=rr.AnnotationContext.columns(context=[QUEST_HANDS_CLASS]))
 
     with TemporaryDirectory(prefix="selfcap-kp3d-") as work, atomic_write(output) as temporary:
         rows: Path = Path(work) / "keypoints.rrd"
         with rr.RecordingStream(stores[0].application_id, recording_id=stores[0].recording_id, send_properties=False) as recording:
             recording.save(rows)
-            rr.log("/world/skeleton", rr.AnnotationContext(DISPLAY_CLASSES), static=True, recording=recording)
-            rr.log(
-                "/world/skeleton",
-                rr.Points3D.from_fields(class_ids=DISPLAY_CLASS_IDS, keypoint_ids=DISPLAY_KEYPOINT_IDS, radii=0.006, show_labels=False),
-                static=True,
-                recording=recording,
-            )
-            rr.send_columns(
-                "/world/skeleton",
-                indexes=[time_column(stamps)],
-                columns=rr.Points3D.columns(positions=display_points.reshape(-1, 3)).partition([135] * len(display_points)),
-                recording=recording,
-            )
-            display_projections: tuple[tuple[tuple[int, int], Float32[ndarray, "n 135 2"]], ...] = (
-                *((rig_cam(camera.entity), projected(camera, display_points)) for camera in result.cameras.values()),
-                *(((camera.rig, camera.cam), project_ego(camera, result.times, display_points)) for camera in ego),
-            )
-            for (rig, cam), _ in display_projections:
-                rr.log(f"{pinhole_path(rig, cam)}/skeleton", rr.AnnotationContext(DISPLAY_CLASSES), static=True, recording=recording)
-            log_projections(
-                recording,
-                display_projections,
-                times_ns=stamps,
-                frame_indices=None,
-                confidence=None,
-                camera_model="SelfCap calibrated lenses",
-                entity_name="skeleton",
-                class_ids=DISPLAY_CLASS_IDS,
-                keypoint_ids=DISPLAY_KEYPOINT_IDS,
-            )
+            if model == "rtmw":
+                display: Float32[ndarray, "n 133 3"] = display_skeleton(result.times, result.xyz, result.confidence, quest_hands)
+                display_points: Float32[ndarray, "n 135 3"] = np.concatenate((display, display[:, [6, 12]]), axis=1)
+                rr.log("/world/skeleton", rr.AnnotationContext(DISPLAY_CLASSES), static=True, recording=recording)
+                rr.log(
+                    "/world/skeleton",
+                    rr.Points3D.from_fields(class_ids=DISPLAY_CLASS_IDS, keypoint_ids=DISPLAY_KEYPOINT_IDS, radii=0.006, show_labels=False),
+                    static=True,
+                    recording=recording,
+                )
+                rr.send_columns(
+                    "/world/skeleton",
+                    indexes=[time_column(stamps)],
+                    columns=rr.Points3D.columns(positions=display_points.reshape(-1, 3)).partition([135] * len(display_points)),
+                    recording=recording,
+                )
+                display_projections: tuple[tuple[tuple[int, int], Float32[ndarray, "n 135 2"]], ...] = (
+                    *((rig_cam(camera.entity), projected(camera, display_points)) for camera in result.cameras.values()),
+                    *(((camera.rig, camera.cam), project_ego(camera, result.times, display_points)) for camera in ego),
+                )
+                for (rig, cam), _ in display_projections:
+                    rr.log(f"{pinhole_path(rig, cam)}/skeleton", rr.AnnotationContext(DISPLAY_CLASSES), static=True, recording=recording)
+                log_projections(
+                    recording,
+                    display_projections,
+                    times_ns=stamps,
+                    frame_indices=None,
+                    confidence=None,
+                    camera_model="SelfCap calibrated lenses",
+                    entity_name="skeleton",
+                    class_ids=DISPLAY_CLASS_IDS,
+                    keypoint_ids=DISPLAY_KEYPOINT_IDS,
+                )
             log_keypoints3d(
                 recording,
                 times_ns=stamps,
                 frame_indices=None,
                 positions=shown,
                 confidence=result.confidence,
-                path=coco133_xyz_path(pred="rtmw_triangulated"),
+                path=xyz_path,
                 color_range=(DISPLAY_CONFIDENCE, 1.0),
             )
             for phone, selected in result.selected.items():
                 scores: Float32[ndarray, "n 133"] = selected.scores.astype(np.float32)
                 log_keypoints2d(
                     recording,
-                    f"{result.cameras[phone].entity}/pinhole/pred/rtmw/coco133_uv",
+                    f"{result.cameras[phone].entity}/pinhole/{uv_suffix}",
                     times_ns=stamps,
                     frame_indices=None,
                     positions=np.where(((scores >= DISPLAY_CONFIDENCE) & visible)[..., None], selected.xy, np.float32(np.nan)),
@@ -620,10 +632,11 @@ def write_keypoints(
                 frame_indices=None,
                 confidence=result.confidence,
                 color_range=(DISPLAY_CONFIDENCE, 1.0),
+                entity_name=projection_name,
                 camera_model="phones: pinhole with radial k1, k2 (selfcap-curate exo calibration)"
                 + ("; OAK: OpenCV Brown-Conrady, 14 coefficients (factory)" if ego else ""),
             )
-            if quest_hands is not None:
+            if quest_hands is not None and model == "rtmw":
                 hand_times, hand_xyz = quest_hands
                 hand_stamps: Int64[ndarray, "q"] = np.rint(hand_times * 1e9).astype(np.int64)
                 for camera, path in zip(ego, quest_paths, strict=True):
@@ -641,7 +654,10 @@ def write_keypoints(
                         recording=recording,
                     )
             recording.flush()
-        LazyChunkStream.merge(reader.stream(), LazyChunkStream.from_iter(additions()), RrdReader(rows).stream(), LazyChunkStream.from_iter(camera_center_chunks)).write_rrd(
+        LazyChunkStream.merge(
+            *([reader.stream(), LazyChunkStream.from_iter(camera_center_chunks)] if model == "rtmw" else []),
+            LazyChunkStream.from_iter(additions()), RrdReader(rows).stream()
+        ).write_rrd(
             temporary, application_id=stores[0].application_id, recording_id=stores[0].recording_id
         )
 

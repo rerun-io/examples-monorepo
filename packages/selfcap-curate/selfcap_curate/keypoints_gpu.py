@@ -1,4 +1,4 @@
-"""Catalog-only YOLOX + RTMW-x COCO-133 producer for CPU triangulation."""
+"""Catalog-only YOLOX + RTMW-x or Sapiens2 COCO-133 producer for triangulation."""
 
 import os
 from collections.abc import Callable, Iterator
@@ -13,7 +13,7 @@ import torch
 from jaxtyping import Bool, Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from onnx import numpy_helper
-from posekit.models.rtmpose import RtmPose2d, RtmPoseConfig
+from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
 from simplecv.catalog_video import CatalogVideo
@@ -25,7 +25,7 @@ from trtkit.backends import TensorRtBackendConfig
 from trtkit.onnx_precision import fp16_conv_trunk
 
 from selfcap_curate.catalog_io import Segment, read_phone_videos
-from selfcap_curate.keypoints import Keypoints2D, ViewDetections
+from selfcap_curate.keypoints import Keypoints2D, PoseModel, ViewDetections
 from selfcap_curate.records import TimeSync
 
 TRACK_MIN_RATE_HZ: float = 10.0
@@ -340,11 +340,15 @@ def fp16_trunk(source: Path) -> Path:
 
 
 @cache
-def keypoint_models() -> tuple[YoloxDetector, RtmPose2d]:
-    """Use installed posekit/trtkit cache settings, YOLOX .3 and RTMW-x with fp16 conv trunks; built once per process."""
+def keypoint_models(model: PoseModel = "rtmw") -> tuple[YoloxDetector, Callable[[Tensor, BoxDetections], Keypoints2d]]:
+    """Cache YOLOX .3 with an fp16 trunk and the selected TensorRT pose model."""
     detector = YoloxDetectorConfig(
         backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8), score_thr=0.3, onnx_transform=lambda path: fp16_trunk(dynamic_yolox(path))
     ).setup()
+    if model == "sapiens2":
+        from posekit.models.sapiens import SapiensPoseConfig
+
+        return detector, SapiensPoseConfig(model_size="0.4B", backend=TensorRtBackendConfig(max_batch_size=4, opt_batch_size=4)).setup()
     # Tracking sends up to phones x TRACK_CHUNKS crops per call; the 1-8-32 profile takes them in one engine call.
     pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=8), onnx_transform=fp16_trunk).setup()
     return detector, pose
