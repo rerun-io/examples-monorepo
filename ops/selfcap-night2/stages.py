@@ -107,7 +107,6 @@ def s2(segment: str, decision: dict | None=None) -> dict:
         record=open_segment(dataset,segment)
         rigs=(f'/world/rig_{record.layout.oak_rig:02d}',f'/world/rig_{record.layout.quest_rig:02d}')
         if refined:
-            state_path=next((work/'s1/calib').glob('*.json'))
             state=from_json(CalibSession,Path(decision['calib_path']).read_text())
             record=open_segment(dataset,segment)
             write_calib_layer(final/f'{segment}.rrd',state,read_session_episode(record,read_time_sync(dataset,segment)))

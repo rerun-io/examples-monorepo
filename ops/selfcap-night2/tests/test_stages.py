@@ -31,7 +31,8 @@ def test_geometry_guard_rejects_missing_wearable(tmp_path):
         stages.ego_geometry_signature(path, ('/world/rig_04', '/world/rig_06'))
 
 
-def test_s2_restores_models_after_cache_load_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize('refined', [False, True])
+def test_s2_restores_models_after_cache_load_failure(tmp_path, monkeypatch, refined):
     import json
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -48,7 +49,12 @@ def test_s2_restores_models_after_cache_load_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(stages, 'private', server)
     monkeypatch.setattr(stages, 'open_segment', lambda *args: SimpleNamespace(layout=SimpleNamespace(phones=('one', 'two'), oak_rig=3, quest_rig=4)))
     monkeypatch.setattr(stages, 'read_time_sync', lambda *args: SimpleNamespace(offsets_ms={'exo/one': 0, 'exo/two': 0}))
+    decision_path = tmp_path / 'accepted-calibration.json'
+    decision_path.write_text('{}')
+    monkeypatch.setattr(stages, 'from_json', lambda *args: None)
+    monkeypatch.setattr(stages, 'read_session_episode', lambda *args: None)
+    monkeypatch.setattr(stages, 'write_calib_layer', lambda path, *args: path.write_bytes((work / 'calib/test.rrd').read_bytes()))
     original = (stages.keypoints.keypoint_models, stages.keypoints.detect_keypoints, stages.keypoint_geometry.select_wearers)
     with pytest.raises(ValueError, match='cache'):
-        stages.s2('test')
+        stages.s2('test', {'refined': refined, 'calib_path': str(decision_path)})
     assert (stages.keypoints.keypoint_models, stages.keypoints.detect_keypoints, stages.keypoint_geometry.select_wearers) == original
