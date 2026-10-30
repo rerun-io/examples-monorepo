@@ -15,7 +15,7 @@ from selfcap_curate.exo_landmarks import Landmarks
 from selfcap_curate.quest_fit import Correspondences
 
 FocalSource: TypeAlias = Literal["table", "fit", "fixed"]
-VERSION: str = "selfcap-exo-refine-v2"
+VERSION: str = "selfcap-exo-refine-v3"
 METHOD: str = "exo poses from Quest hands + fixed optical landmarks; Huber then Cauchy (6 px)"
 
 
@@ -54,6 +54,13 @@ class Refinement:
     """Explicit count-invariant objective shares; null for legacy summed residuals."""
     converged: bool = True
     """Both robust optimization stages terminated before their step limit."""
+    camera_rigs: tuple[int, ...] = ()
+    """Original exo rig indices; empty means the legacy contiguous ordering."""
+
+    def camera_for_rig(self, rig: int) -> Camera | None:
+        """Find a refined camera without shifting identities when a camera is absent."""
+        rigs = self.camera_rigs or tuple(range(len(self.cameras)))
+        return self.cameras[rigs.index(rig)] if rig in rigs else None
 
 
 def predict_labels(problem: RefinementProblem, cameras: tuple[Camera, ...], offset: Float64[ndarray, "3"]) -> Float64[ndarray, "n 2"]:

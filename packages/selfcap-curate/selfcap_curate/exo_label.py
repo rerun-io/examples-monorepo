@@ -192,11 +192,37 @@ def filter_phone_labels(labels: list[Landmark], panels: list[Panel]) -> list[Lan
     return result
 
 
+def calibrated_rigs(state: CalibSession, phones: tuple[str, ...]) -> tuple[int, ...]:
+    """Keep physical rig indices for cameras that have an initial pose."""
+    return tuple(i for i, phone in enumerate(phones) if phone in state.exo.phones and state.exo.phones[phone].camera is not None)
+
+
+def run_codex(args: list[str], prompt: str, env: dict[str, str], path: Path, log_path: Path, timeout_s: float) -> None:
+    """Retain stderr and retry a transient model/service failure once."""
+    for attempt in range(2):
+        attempt_log = log_path if attempt == 0 else log_path.with_suffix('.retry.log')
+        try:
+            with attempt_log.open('w') as log:
+                subprocess.run(args, env=env, input=prompt, text=True, stdout=log, stderr=log, timeout=timeout_s, check=True)
+            return
+        except subprocess.CalledProcessError as error:
+            detail = attempt_log.read_text()[-6000:]
+            transient = any(token in detail.lower() for token in ('at capacity', 'rate limit', 'http 429', 'http 503',
+                                                                 '429 too many', 'temporarily unavailable', 'service unavailable',
+                                                                 'connection reset', 'stream disconnected'))
+            if attempt == 0 and transient:
+                path.unlink(missing_ok=True)
+                continue
+            path.unlink(missing_ok=True)
+            raise RuntimeError(f'Codex failed; stderr retained in {attempt_log}:\n{detail}') from error
+
+
 def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) -> Packet:
     """Decode a few facing frames per view from the base and initial camera solution."""
     from dataforge.schema import video_path
     from simplecv.catalog_video import read_catalog_videos
 
+    from selfcap_curate.factory import optical_targets
     from selfcap_curate.hands_gpu import decode_frames
 
     output.mkdir(parents=True, exist_ok=True)
@@ -207,15 +233,18 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
     head_times = source.head_times_s + sync.offsets_ms['quest_pose'] / 1000.0
     interp = Slerp(head_times, Rotation.from_quat(source.head_quaternions))
     phones = segment.layout.phones
-    cameras = tuple(state.exo.phones[p].camera for p in phones)
-    if any(camera is None for camera in cameras):
-        raise ValueError('All exo cameras need an initial pose')
+    cameras = tuple(state.exo.phones[p].camera if p in state.exo.phones else None for p in phones)
     entities = [video_path(i, 0) for i in range(len(phones))]
     videos = (tuple(segment.videos[e] for e in entities) if segment.videos is not None else
               read_catalog_videos(segment.dataset, segment.id, entities, 'capture_time'))
+    optical = optical_targets(state.quest)
+    if not optical:
+        raise ValueError('No resolved physical Quest RGB targets')
+    optical_rotation = next(iter(optical.values()))[:3, :3]
     panels = []
     for view, (camera, video, phone) in enumerate(zip(cameras, videos, phones, strict=True)):
-        assert camera is not None
+        if camera is None:
+            continue
         offset = sync.offsets_ms.get(f'exo/{phone}')
         if offset is None:
             raise ValueError(f'Missing clock for {phone}')
@@ -228,7 +257,7 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
         rotations = interp(t).as_matrix()
         towards = camera.world_T_cam[:3, 3] - positions
         towards /= np.linalg.norm(towards, axis=1)[:, None]
-        facing = np.einsum('ni,ni->n', rotations[:, :, 2], towards)
+        facing = np.einsum('ni,ni->n', rotations @ optical_rotation[:, 2], towards)
         projected = camera.project(positions)
         valid = (projected[:, 2] > 0) & (projected[:, 0] > 40) & (projected[:, 0] < 1880) & (projected[:, 1] > 40) & (projected[:, 1] < 1040)
         picked = []
@@ -248,7 +277,7 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
             cv2.imwrite(str(source_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
             rotation = interp([stamp]).as_matrix()[0]
             position = np.array([np.interp(stamp, head_times, source.head_positions[:, j]) for j in range(3)])
-            points = np.stack([position + rotation @ state.quest.rig_T_cam.get(str(s), np.eye(4))[:3, 3] for s in (0, 1)])
+            points = np.stack([position + rotation @ matrix[:3, 3] for matrix in optical.values()])
             uv = camera.project(points)
             center = uv[:, :2].mean(0)
             towards_observer = rotation.T @ (camera.world_T_cam[:3, 3] - position)
@@ -257,10 +286,12 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
             baseline = state.quest.rig_T_cam.get("1", np.eye(4))[:3, 3]
             near_right = lateral * (1.0 if baseline[0] >= 0.0 else -1.0) > 0.0
             targets = ['quest1' if near_right else 'quest0'] if abs(lateral) > .6 else ['quest0', 'quest1']
+            targets = [target for target in targets if target in optical] if state.quest.mode == "healthy" else list(optical)
             crop, bounds = grid_crop(image, float(center[0]), float(center[1]), 260, f'view={view} time={stamp:.9f} {"/".join(targets)}')
             path = output / f'view{view}-head{number}.png'
             cv2.imwrite(str(path), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
-            panels.append(Panel(view, stamp, targets, bounds, str(path), str(source_path)))
+            if targets:
+                panels.append(Panel(view, stamp, targets, bounds, str(path), str(source_path)))
             if number == 0:
                 for target, other in enumerate(cameras):
                     if target == view or other is None:
@@ -319,8 +350,7 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
             prompt = focus + context + ' Each phone panel includes predicted position and frontality cosine. A cosine below 0.3 means a grazing/back-facing camera whose lens is normally not visible; do not substitute another nearby phone. ' + PROMPT + '\nTargets and crop bounds:\n' + to_json(Packet(packet.segment, packet.phones, panels))
             env = os.environ.copy()
             env.pop('CODEX_HOME', None)
-            with (output / f'sol-view{view}-{kind}.log').open('w') as log:
-                subprocess.run(args, env=env, input=prompt, text=True, stdout=log, stderr=log, timeout=timeout_s, check=True)
+            run_codex(args, prompt, env, path, output / f'sol-view{view}-{kind}.log', timeout_s)
         labels = from_json(SolLabels, path.read_text()).labels
         allowed = {(p.view, p.video_time, target): p.bounds for p in panels for target in p.targets}
         return filter_labels(labels, allowed)
@@ -365,10 +395,19 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
     """Build, label and gate one session; runner must bound this call or use the CLI."""
     start = time.monotonic()
     output.mkdir(parents=True, exist_ok=True)
+    active = calibrated_rigs(state, segment.layout.phones)
+    if len(active) < 2:
+        for name in ('calib.json', 'refinement.json'):
+            (output / name).unlink(missing_ok=True)
+        result = LabelResult(segment.id, 'skipped', f'Fewer than two initial exo cameras ({len(active)} calibrated)', 0,
+                             time.monotonic() - start, thresholds, objective=objective, solver_version='exo-visible-folds-physical-targets-v4')
+        (output / 'result.json').write_text(to_json(result))
+        return result
     table = read_vp_table()
     fixed_focals = {}
     focal_sources = {}
-    for phone in segment.layout.phones:
+    for rig in active:
+        phone = segment.layout.phones[rig]
         camera = state.exo.phones[phone].camera
         if camera is None:
             raise ValueError(f'Missing initial camera for {phone}')
@@ -380,27 +419,35 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         previous = from_json(LabelResult, result_path.read_text())
         if previous.segment != segment.id:
             raise ValueError('Output directory belongs to another segment')
-        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-normalized-autophones-v3' and previous.objective == objective:
+        if previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-visible-folds-physical-targets-v4' and previous.objective == objective:
             return previous
     for name in ('calib.json', 'refinement.json'):
         (output / name).unlink(missing_ok=True)
     packet_path = output / 'packet.json'
     packet = from_json(Packet, packet_path.read_text()) if packet_path.exists() else make_packet(segment, state, output)
+    packet = replace(packet, panels=[panel for panel in packet.panels if panel.view in active
+                                    and all(not target.startswith('phone') or int(target[5:]) in active for target in panel.targets)])
     record_path = output / 'landmarks.json'
     record = from_json(Landmarks, record_path.read_text()) if record_path.exists() else annotate(packet, output)
-    if len(record.labels) < 12 or len({label.view for label in record.labels}) < len(packet.phones):
+    record = replace(record, labels=[label for label in record.labels if label.view in active
+                                    and (not label.target_id.startswith('phone') or int(label.target_id[5:]) in active)])
+    if len(record.labels) < 12 or len({label.view for label in record.labels}) < len(active):
         result = LabelResult(segment.id, 'rejected', 'insufficient visible landmark coverage', len(record.labels), time.monotonic() - start, thresholds)
     else:
         cameras = []
-        for phone in packet.phones:
+        for rig in active:
+            phone = packet.phones[rig]
             camera = state.exo.phones[phone].camera
             if camera is None:
                 raise ValueError(f"Missing initial camera for {phone}")
             cameras.append(camera)
-        inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record)
+        inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record, camera_rigs=active)
+        record = inputs.problem.landmarks
         truth_bytes = tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values())
-        model, gate = evaluate(inputs, focal_source="fixed", fixed_focals=tuple(fixed_focals[phone] for phone in packet.phones),
+        model, gate = evaluate(inputs, focal_source="fixed", fixed_focals=tuple(fixed_focals[packet.phones[rig]] for rig in active),
                                static_phones=True, body_polish=True, objective=objective)
+        model = replace(model, camera_rigs=active)
+        gate = replace(gate, folds=tuple(replace(fit, camera_rigs=active) for fit in gate.folds))
         assert truth_bytes == tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values()), "Exo fitting must preserve Quest hands"
         (output / 'candidate.json').write_text(to_json(model))
         accepted = accepts(gate, thresholds) and model.converged
@@ -411,7 +458,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
             updated = replace(state, exo_refinements={**state.exo_refinements, segment.id: model})
             assert updated.oak is state.oak and updated.quest is state.quest and updated.stereo is state.stereo, 'Only exo cameras may change'
             (output / 'calib.json').write_text(to_json(updated))
-        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, 'exo-normalized-autophones-v3', focal_source,
+        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, 'exo-visible-folds-physical-targets-v4', focal_source,
                              fixed_focals, focal_sources)
     temporary = result_path.with_suffix('.tmp')
     temporary.write_text(to_json(result))
