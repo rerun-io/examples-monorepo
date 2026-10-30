@@ -68,6 +68,8 @@ class Config:
     """Shape-update iterations within the 600-step sparse calibration pass."""
     publish: bool = True
     """Ship and register soma; disable for local validation runs."""
+    native_exo: bool = False
+    """Use native exo/Quest views and bake OAK only; requires a native-projection blueprint."""
     cleanup_after_publish: bool = False
     """After verified catalog readback, delete only this segment's known heavy local RRDs."""
     force: bool = False
@@ -181,6 +183,8 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         digest.update(array.tobytes())
     if data.support is not None:
         digest.update(data.support.tobytes())
+    if config.native_exo:
+        digest.update(b":native-exo-v1")
     # Camera/calibration changes invalidate overlays even if 3D inputs stay unchanged.
     calib = [name for name in metadata.column_names if name.startswith("property:calib:")]
     digest.update(metadata.select(calib).combine_chunks().to_batches()[0].serialize().to_pybytes())
@@ -271,6 +275,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
                 dataset=config.dataset,
                 segment=segment,
                 exo_source=config.exo_source,
+                native_exo=config.native_exo,
             )
         )
         temporary.replace(layer)

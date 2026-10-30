@@ -22,6 +22,8 @@ from selfcap_soma.overlay_style import observed_links, observed_points, residual
 class Config:
     upper_body_only: bool = True
     """Crop the mesh and display only head/ears, arms/hands and hips."""
+    native_exo: bool = False
+    """Use native exo/Quest projection: omit baked exo overlays; Quest has none; OAK stays baked."""
     exo_source: ExoSource = "sapiens2"
     """Per-phone image evidence used to classify observed versus inferred joints."""
     source: Path = Path("/tmp/soma-fit/full-segment/fit.rrd")
@@ -256,12 +258,13 @@ def main(config: Config) -> None:
             raise ValueError("source landmarks and fitted landmarks must share exact timestamps")
         reference = np.concatenate([row[1] for row in exo_rows])[exo_order]
     projections = []
-    for view in phones:
-        projected = project(view.camera, points.reshape(-1, 3).astype(np.float64)).reshape(len(times), 133, 3)
-        pixels = np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan).astype(np.float32)
-        tolerance = residual_tolerance(points.astype(np.float64), reference, projected[:, :, 2], float(max(view.camera.K[0, 0], view.camera.K[1, 1])))
-        seen = observed_points(pixels.astype(np.float64), view.pixels, view.scores, tolerance)
-        projections.append((f"{view.camera.entity}/pinhole", pixels, seen))
+    if not config.native_exo:
+        for view in phones:
+            projected = project(view.camera, points.reshape(-1, 3).astype(np.float64)).reshape(len(times), 133, 3)
+            pixels = np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan).astype(np.float32)
+            tolerance = residual_tolerance(points.astype(np.float64), reference, projected[:, :, 2], float(max(view.camera.K[0, 0], view.camera.K[1, 1])))
+            seen = observed_points(pixels.astype(np.float64), view.pixels, view.scores, tolerance)
+            projections.append((f"{view.camera.entity}/pinhole", pixels, seen))
     for ego in egos:
         pixels = project_ego(ego, times, points)
         evidence = rgb_evidence if ego.cam == 0 else project_ego(ego, times, quest).astype(np.float64)
