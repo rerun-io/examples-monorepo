@@ -151,6 +151,19 @@ class Calibration:
     """Legacy eye or ear-calibrated head position anchor."""
 
 
+def pose_gradient_mask(
+    names: tuple[str, ...], leg_indices: Int64[ndarray, "k"], hands_only: bool, freeze_legs: bool, device: torch.device
+) -> Float32[Tensor, "1 j 1"]:
+    """Select pose gradients for the hand-only and frozen-leg fitting policies."""
+    if hands_only:
+        mask = torch.tensor([float("Hand" in name or name in ("LeftForeArm", "RightForeArm")) for name in names], device=device)[None, :, None]
+    else:
+        mask = torch.ones((1, len(names), 1), device=device)
+    if freeze_legs:
+        mask[:, leg_indices] = 0.0
+    return mask
+
+
 def fit(
     data: Observations,
     assets: Path,
@@ -363,13 +376,7 @@ def fit(
         orientation_rotations = torch.as_tensor(aligned.rotations, device="cuda")
         orientation_valid = torch.as_tensor(aligned.valid, device="cuda")
         print("Quest-to-SOMA alignment mean spread deg:", float(np.median(aligned.spread_deg)), flush=True)
-    pose_mask = torch.tensor([float("Hand" in name or name in ("LeftForeArm", "RightForeArm")) for name in names], device="cuda")[None, :, None]
-    if options.freeze_legs:
-        pose_mask[:, leg_indices] = 0.0
-    if not options.hands_only:
-        pose_mask = torch.ones_like(pose_mask)
-        if options.freeze_legs:
-            pose_mask[:, leg_indices] = 0.0
+    pose_mask = pose_gradient_mask(names, leg_indices, options.hands_only, options.freeze_legs, poses.device)
     body_chain = [
         names.index(name) for name in ("Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "LeftShoulder", "RightShoulder", "LeftArm", "RightArm")
     ]
