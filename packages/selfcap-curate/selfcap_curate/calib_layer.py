@@ -140,6 +140,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 exo_flagged=flagged,
                 exo_bundle_body_median_px=session.exo.body_median_px,
                 oak_posed=posed,
+                oak_unposed_reason=None if posed else ("missing Quest/OAK clock" if qp is None else "OAK mount not fitted"),
                 oak_median_px=session.oak.median_px,
                 quest_mode=session.quest.mode,
                 record_json=json.dumps(to_dict(Provenance(session.session, METHOD, sync.episode))),
