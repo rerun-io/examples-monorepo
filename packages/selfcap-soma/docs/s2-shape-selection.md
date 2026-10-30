@@ -37,3 +37,28 @@ bone ratios are also fitted. Physical dimensions match the new source better:
 The checked old local calibration had scale 1.059, not 1.10–1.12. No scale was
 forced to satisfy a nominal value. Evidence: `/tmp/soma-fit/check-shape-full.log`
 and `/tmp/soma-fit/s2-shape-dimensions.log`.
+
+## Partial-body observations and runner status
+
+The `5cb1e14c` failure was an overly strict all-six-anchor requirement. Among
+1,682 frames, two-view support counts were ears 1,177/1,285, shoulders
+1,678/1,561, and hips 0/1,339. All three exo cameras had raw left-hip detections
+above 0.3 in 997/1,236/1,545 frames, but the geometric triangulation rejected
+that hip throughout. This is not a missing-camera or whole-body absence case.
+The exact physical cause of the rejected hip is not inferred from detector
+confidence alone.
+
+Shape selection now permits two shoulders, at least one hip and at least one
+ear. Initialization uses the actually observed torso anchors (minimum three),
+without filling or adding a target for the rejected hip. Missing bone-length
+targets remain excluded from the loss as before.
+
+A genuinely insufficient selection raises `InsufficientBodyObservation`. The
+batch CLI prints `SOMA_INPUT_LIMITATION insufficient_body_observation` with the
+segment and exits with status **20**, distinct from ordinary failures (1).
+Runners should record exit 20 as an input limitation. No layer is published
+for that case. The checkpoint version is v7 to invalidate the old strict gate.
+
+The complete `5cb1e14c` RTMW batch validation succeeded locally in 42.37 s,
+without publication. Nine targeted tests and static checks passed, including
+missing-hip selection and exit-status classification.

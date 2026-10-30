@@ -34,3 +34,23 @@ def test_fallback_keeps_low_confidence_bridged_evidence_when_direct_support_is_s
     result = select_shape_frames(times, xyz, confidence, support)
     assert result.used_fallback
     np.testing.assert_array_equal(result.indices, np.arange(12))
+
+
+def test_one_missing_hip_does_not_discard_observed_upper_body() -> None:
+    times = np.arange(120, dtype=np.float64)
+    xyz = np.zeros((120, 133, 3), dtype=np.float64)
+    confidence = np.full((120, 133), .6)
+    support = np.full((120, 133), 2, dtype=np.int64)
+    xyz[:, 11] = np.nan
+    confidence[:, 11] = 0.
+    support[:, 11] = 0
+    assert len(select_shape_frames(times, xyz, confidence, support).indices) >= 3
+
+
+def test_absent_torso_has_distinct_input_limitation() -> None:
+    import pytest
+
+    from selfcap_soma.shape_frames import InsufficientBodyObservation
+
+    with pytest.raises(InsufficientBodyObservation):
+        select_shape_frames(np.arange(10, dtype=np.float64), np.full((10,133,3),np.nan), np.zeros((10,133)), None)

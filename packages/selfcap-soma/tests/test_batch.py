@@ -31,3 +31,18 @@ def test_protected_dataset_fails_before_any_catalog_or_transport(tmp_path: Path)
     with pytest.raises(ValueError, match='protected dataset'):
         run_segment(config, 'selfcap__2025-12-03__d31bf1da__ep001')
     assert not list(tmp_path.iterdir())
+
+
+def test_missing_body_exits_with_documented_input_limitation(monkeypatch, capsys):
+    from selfcap_soma import batch
+    from selfcap_soma.shape_frames import InsufficientBodyObservation
+
+    def unavailable(config, segment):
+        raise InsufficientBodyObservation('no usable torso frames')
+
+    monkeypatch.setattr(batch, 'run_segment', unavailable)
+    config = batch.Config(dataset='test', spark_dir=Path('/remote'), segment=['selfcap__2025-12-04__5cb1e14c__ep001'])
+    with pytest.raises(SystemExit) as raised:
+        batch.main(config)
+    assert raised.value.code == 20
+    assert 'SOMA_INPUT_LIMITATION insufficient_body_observation' in capsys.readouterr().err

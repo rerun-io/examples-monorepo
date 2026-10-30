@@ -20,6 +20,7 @@ from selfcap_soma.hand_pose import HandOrientations, HandOrientationSource, fram
 from selfcap_soma.landmarks import EAR_VERTICES, FOOT_VERTICES, ear_vertices, foot_vertices, rotation_delta
 from selfcap_soma.losses import attached_eye, body_acceleration_penalty, body_lengths, robust_points, rotation_temporal_penalty
 from selfcap_soma.observations import coco_joint_names
+from selfcap_soma.shape_frames import InsufficientBodyObservation
 from selfcap_soma.upper_body import lower_body_mask, mesh_selection, visible_joint_mask
 
 
@@ -216,13 +217,15 @@ def fit(
 
     # Per-frame Kabsch initialization from shoulders and hips avoids a
     # convention-dependent global yaw guess.
-    anchors: list[int] = [5, 6, 11, 12]
-    source: Float32[ndarray, "4 3"] = neutral_joints[[names.index(mapping[k]) for k in anchors]]
+    anchors: list[int] = [key for key in (5, 6, 11, 12) if np.isfinite(data.exo[:, key]).all(1).sum() >= 2]
+    if len(anchors) < 3:
+        raise InsufficientBodyObservation("initialization needs at least three observed torso anchors")
+    source: Float32[ndarray, "a 3"] = neutral_joints[[names.index(mapping[k]) for k in anchors]]
     source_center: Float32[ndarray, "3"] = source.mean(axis=0)
     initial_poses: Float32[ndarray, "n 77 3"] = np.zeros((len(data.times), 77, 3), dtype=np.float32)
     initial_translation: Float32[ndarray, "n 3"] = np.zeros((len(data.times), 3), dtype=np.float32)
-    initial_anchors: Float64[ndarray, "n 4 3"] = data.exo[:, anchors].copy()
-    for joint in range(4):
+    initial_anchors: Float64[ndarray, "n a 3"] = data.exo[:, anchors].copy()
+    for joint in range(len(anchors)):
         valid = np.isfinite(initial_anchors[:, joint]).all(-1)
         if valid.sum() < 2:
             raise ValueError("prototype initialization needs two observations per torso anchor")

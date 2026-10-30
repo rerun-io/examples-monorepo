@@ -5,6 +5,7 @@ import hashlib
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
@@ -26,11 +27,11 @@ from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
 from selfcap_soma.output import save
 from selfcap_soma.overlay import Config as OverlayConfig
 from selfcap_soma.overlay import main as export
-from selfcap_soma.shape_frames import select_shape_frames
+from selfcap_soma.shape_frames import InsufficientBodyObservation, select_shape_frames
 from selfcap_soma.shoulders import subset
 from selfcap_soma.temporal import group_jitter
 
-VERSION = "soma-batch-v6-position-hand-fallback"
+VERSION = "soma-batch-v7-partial-body-anchors"
 SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 
 
@@ -402,5 +403,8 @@ def main(config: Config) -> None:
     for segment in selected_segments(config.segment, config.segments_file):
         try:
             run_segment(config, segment)
+        except InsufficientBodyObservation as error:
+            print(f"SOMA_INPUT_LIMITATION insufficient_body_observation {config.dataset}/{segment}: {error}", file=sys.stderr)
+            raise SystemExit(20) from None
         except (ValueError, FileNotFoundError, KeyError, StopIteration, IndexError, subprocess.CalledProcessError, BlockingIOError) as error:
             raise RuntimeError(f"SOMA batch failed for {config.dataset}/{segment}: {error}") from error
