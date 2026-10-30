@@ -82,13 +82,25 @@ def frame(direction: Float64[ndarray, "... 3"], normal: Float64[ndarray, "... 3"
     return np.stack((x, np.cross(z, x), z), axis=-1)
 
 
+@dataclass(frozen=True, slots=True)
+class OrientationTargets:
+    joint_indices: Int64[ndarray, "j"]
+    """SOMA joint indices constrained by the observed hand frames."""
+    rotations: Float32[ndarray, "n j 3 3"]
+    """Aligned world-space rotations, identity where invalid."""
+    valid: Bool[ndarray, "n j"]
+    """Availability of each aligned rotation."""
+    spread_deg: Float64[ndarray, "j"]
+    """Mean angular spread of each measured alignment."""
+
+
 def orientation_targets(
     observed: HandOrientations,
     times: Float64[ndarray, "n"],
     names: tuple[str, ...],
     neutral: Float32[ndarray, "77 3"],
     neutral_rotations: Float32[ndarray, "78 3 3"],
-) -> tuple[Int64[ndarray, "j"], Float32[ndarray, "n j 3 3"], Bool[ndarray, "n j"], Float64[ndarray, "j"]]:
+) -> OrientationTargets:
     """Align measured Quest rotations, or derive bone frames from position-only hands."""
     indices = []
     targets = []
@@ -129,7 +141,7 @@ def orientation_targets(
             indices.append(index)
             targets.append(np.where(valid[:, None, None], target, np.eye(3)))
             masks.append(valid)
-    return np.asarray(indices, dtype=np.int64), np.stack(targets, axis=1).astype(np.float32), np.stack(masks, axis=1), np.asarray(spread)
+    return OrientationTargets(np.asarray(indices, dtype=np.int64), np.stack(targets, axis=1).astype(np.float32), np.stack(masks, axis=1), np.asarray(spread))
 
 
 def hand_limit_penalty(

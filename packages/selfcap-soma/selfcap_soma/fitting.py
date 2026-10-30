@@ -7,7 +7,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-from jaxtyping import Float32, Float64, Int32, Int64
+from jaxtyping import Bool, Float32, Float64, Int32, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde import serde
@@ -255,14 +255,14 @@ def fit(
                     .numpy()
                 )
             desired = start_frames.copy()
-            for column, index in enumerate(aligned[0]):
-                desired[aligned[2][:, column], index + 1] = aligned[1][aligned[2][:, column], column]
+            for column, index in enumerate(aligned.joint_indices):
+                desired[aligned.valid[:, column], index + 1] = aligned.rotations[aligned.valid[:, column], column]
             rest_frames = neutral_transforms[0, :, :3, :3].cpu().numpy()
             parents = model.public_joint_parent_ids.cpu().numpy()
-            for column, index in enumerate(aligned[0]):
+            for column, index in enumerate(aligned.joint_indices):
                 parent = parents[index + 1]
                 local = rest_frames[parent] @ desired[:, parent].transpose(0, 2, 1) @ desired[:, index + 1] @ rest_frames[index + 1].T
-                valid = aligned[2][:, column]
+                valid = aligned.valid[:, column]
                 initial_poses[valid, index] = Rotation.from_matrix(local[valid]).as_rotvec()
     poses: Float32[Tensor, "n 77 3"] = torch.nn.Parameter(torch.as_tensor(initial_poses, device="cuda"))
     translations: Float32[Tensor, "n 3"] = torch.nn.Parameter(
@@ -355,14 +355,14 @@ def fit(
     soma_body = [names.index(mapping[key]) for key in range(5, 17)]
     body_columns: list[int] = [i for i, key in enumerate(coco) if key < 17]
     hand_columns: list[int] = [i for i, key in enumerate(coco) if key >= 91]
-    orientation_data = None
+    orientation_indices: Int64[Tensor, "j"] | None = None
+    orientation_rotations: Float32[Tensor, "n j 3 3"] | None = None
+    orientation_valid: Bool[Tensor, "n j"] | None = None
     if aligned is not None:
-        orientation_data = (
-            torch.as_tensor(aligned[0] + 1, device="cuda"),
-            torch.as_tensor(aligned[1], device="cuda"),
-            torch.as_tensor(aligned[2], device="cuda"),
-        )
-        print("Quest-to-SOMA alignment mean spread deg:", float(np.median(aligned[3])), flush=True)
+        orientation_indices = torch.as_tensor(aligned.joint_indices + 1, device="cuda")
+        orientation_rotations = torch.as_tensor(aligned.rotations, device="cuda")
+        orientation_valid = torch.as_tensor(aligned.valid, device="cuda")
+        print("Quest-to-SOMA alignment mean spread deg:", float(np.median(aligned.spread_deg)), flush=True)
     pose_mask = torch.tensor([float("Hand" in name or name in ("LeftForeArm", "RightForeArm")) for name in names], device="cuda")[None, :, None]
     if options.freeze_legs:
         pose_mask[:, leg_indices] = 0.0
@@ -410,7 +410,7 @@ def fit(
     rotation_weights = None
     if aligned is not None and orientations is not None:
         rotation_weights = torch.tensor(
-            [0.1 if orientations.sources[int(names[i].startswith("Right"))] == "none" else 1.0 for i in aligned[0]], device="cuda"
+            [0.1 if orientations.sources[int(names[i].startswith("Right"))] == "none" else 1.0 for i in aligned.joint_indices], device="cuda"
         )
     start: float = perf_counter()
     for iteration in range(iterations):
@@ -501,11 +501,10 @@ def fit(
             loss = loss + options.foot_prior_weight * (
                 foot_pose_penalty(poses[:, foot_indices], foot_axes) + foot_pose_penalty(poses[:, toe_indices], foot_axes, toe_joints=True)
             )
-        if orientation_data is not None:
-            assert rotation_weights is not None
-            ids, target, valid = orientation_data
-            orientation_error = (posed.transforms[:, ids, :3, :3] - target).square().mean((-1, -2))
-            loss = loss + options.orientation_weight * (orientation_error * valid * rotation_weights).sum() / valid.sum().clamp_min(1) / 0.03
+        if orientation_valid is not None:
+            assert rotation_weights is not None and orientation_indices is not None and orientation_rotations is not None
+            orientation_error = (posed.transforms[:, orientation_indices, :3, :3] - orientation_rotations).square().mean((-1, -2))
+            loss = loss + options.orientation_weight * (orientation_error * orientation_valid * rotation_weights).sum() / orientation_valid.sum().clamp_min(1) / 0.03
         if fallback_ids:
             loss = loss + hand_limit_penalty(poses[:, fallback_ids], fallback_basis_tensor, fallback_limit_tensor, fallback_sign_tensor)
         loss = loss + options.offset_prior * (head_offset / (0.1 if use_ears else 0.05)).square().mean()
