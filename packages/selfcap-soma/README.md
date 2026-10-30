@@ -504,3 +504,17 @@ Validation: five targeted reader/frame/skin tests passed; the existing dataforge
 Reproduce with `pixi run --frozen -e selfcap-soma soma-repair-hands`, then export with `soma-overlay --source /tmp/soma-fit/hand-repair-final/fit.rrd --output <layer.rrd>`. Registration remains a separate authorized action.
 
 OAK pixel evidence uses `oak-snapshot.png`, an isolated native Rerun rendering of the catalog-decoded RGB frame at 39.835666282 s and the latest registered SOMA projection at 39.831673680 s (cursor 39.862079571 s). The current catalog blueprint did not display the 2D SOMA layer even though its samples were queryable. Explicit-frame and draw-order experiments did not resolve this and were removed; catalog 2D visibility remains an open viewer issue. The isolated image shows residual finger/wrist misalignment, consistent with the 13.4 px score.
+
+## Sapiens2 source and ears-only head modes
+
+`--exo-source sapiens2` selects the schema-discovered Sapiens2 triangulation;
+`rtmw` remains the default. Missing Sapiens hand slots have zero influence.
+`--options.head-mode ears` (the CLI default) removes Quest head position and rotation losses;
+`ears-rotation` adds only its rotation. Both disable attachment translation.
+The legacy `quest` mode remains available.
+
+The full-segment [Sapiens2 comparison](docs/sapiens2-comparison.md) documents
+A/B settings, cross-detector pixel checks and the published result. A's head
+pitch was implausible; B was published with a soft orientation constraint.
+Quest hand positions and orientations remain the hand targets. The camera
+pose origin is never an anatomical head-position target in either new mode.

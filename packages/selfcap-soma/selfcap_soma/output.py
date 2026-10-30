@@ -45,8 +45,8 @@ class Report:
     head_anchor: str
     head_attachment_rotation: list[list[float]]
     head_offset_m: list[float]
-    head_rotation_median_deg: float
-    head_rotation_p90_deg: float
+    head_rotation_median_deg: float | None
+    head_rotation_p90_deg: float | None
     target_fit_vs_quest: Residual
     target_exo_vs_quest: Residual
     target_fit_vs_exo: Residual
@@ -81,10 +81,13 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         residual(mapped[:, 5:17], data.exo[:, 5:17]),
         residual(mapped[:, 91:], data.exo[:, 91:]),
         residual(mapped[:, 91:], data.hands[:, 91:]),
-        residual(result.joints[:, result.names.index("LeftEye")].astype(np.float64), data.head_positions),
+        residual(
+            result.joints[:, result.names.index("LeftEye")].astype(np.float64),
+            data.head_positions if result.head_anchor not in ("ears", "ears-rotation") else np.full_like(data.head_positions, np.nan),
+        ),
         residual(
             result.joints[:, result.names.index("Head" if result.head_anchor == "head" else "LeftEye")].astype(np.float64),
-            data.head_positions
+            (data.head_positions if result.head_anchor not in ("ears", "ears-rotation") else np.full_like(data.head_positions, np.nan))
             + np.einsum(
                 "nij,j->ni", data.head_rotations @ result.head_attachment if result.head_anchor == "head" else data.head_rotations, result.head_offset
             ),
@@ -93,14 +96,18 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         result.head_anchor,
         result.head_attachment.astype(float).tolist(),
         result.head_offset.astype(float).tolist(),
-        float(np.median(result.head_angle_deg)),
-        float(np.percentile(result.head_angle_deg, 90)),
+        float(np.median(result.head_angle_deg)) if np.isfinite(result.head_angle_deg).all() else None,
+        float(np.percentile(result.head_angle_deg, 90)) if np.isfinite(result.head_angle_deg).all() else None,
         residual(mapped[frame, 91:], data.hands[frame, 91:]),
         residual(data.exo[frame, 91:], data.hands[frame, 91:]),
         residual(mapped[frame, 91:], data.exo[frame, 91:]),
         (
             "Training residuals, not independent accuracy measurements.",
-            "Headset attachment is estimated from this segment; ear landmarks are hand-selected low-LOD surface vertices.",
+            (
+                "Head position is constrained only by triangulated ears; no headset translation term."
+                if result.head_anchor in ("ears", "ears-rotation")
+                else "Headset attachment is estimated from this segment; ear landmarks are hand-selected low-LOD surface vertices."
+            ),
             "Shared native identity, global scale and optional body bone ratios; no hand PCA or learned pose prior.",
             "No foot surface terms, contact model, image evidence or uncertainty estimate.",
             "Quest bone orientations constrained." if result.hand_orientations else "No hand bone orientation supervision.",

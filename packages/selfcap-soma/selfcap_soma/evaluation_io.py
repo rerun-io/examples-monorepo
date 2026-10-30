@@ -12,7 +12,7 @@ from rerun.catalog import DatasetEntry
 from rerun.chunk import RrdReader
 
 from selfcap_soma.camera_geometry import Camera, EgoCamera
-from selfcap_soma.catalog import seconds
+from selfcap_soma.catalog import ExoSource, seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,13 +33,26 @@ def nearest_indices(source: Float64[ndarray, "m"], target: Float64[ndarray, "n"]
     return np.where(abs(source[left] - target) <= abs(source[right] - target), left, right)
 
 
-def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]) -> tuple[list[PhoneView], EgoCamera]:
+def read_views(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"], source: ExoSource = "rtmw") -> tuple[list[PhoneView], EgoCamera]:
     view = dataset.filter_segments(segment)
     cameras = [f"/world/rig_{i:02d}/cam_00" for i in range(4)]
     oak = "/world/rig_04"
     oak_camera = f"{oak}/cam_00"
     static = view.filter_contents([*cameras, *(f"{c}/pinhole" for c in cameras), f"{oak_camera}/pinhole"]).reader(index=None).to_arrow_table()
-    paths = [f"{c}/pinhole/pred/rtmw/coco133_uv" for c in cameras]
+    columns = view.schema().column_names()
+    paths = []
+    for camera in cameras:
+        candidates = [
+            name.split(":", 1)[0]
+            for name in columns
+            if name.startswith(camera + "/pinhole/")
+            and name.endswith("/coco133_uv:Points2D:positions")
+            and f"/{source}/" in name
+            and name.split(":", 1)[0] + ":simplecv.KeypointConfidence2D:confidences" in columns
+        ]
+        if len(candidates) != 1:
+            raise ValueError(f"expected one confident {source} 2D track for {camera}: {candidates}")
+        paths.append(candidates[0])
     samples = (
         view.filter_contents(paths)
         .reader(index="video_time")

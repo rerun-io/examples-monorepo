@@ -5,7 +5,7 @@ from pathlib import Path
 
 from serde.json import from_json, to_json
 
-from selfcap_soma.catalog import read_window
+from selfcap_soma.catalog import ExoSource, read_window
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.output import save
 
@@ -18,6 +18,8 @@ class Config:
     """Source dataset."""
     segment: str = "selfcap__2025-12-03__d31bf1da__ep001"
     """Only segment to query."""
+    exo_source: ExoSource = "rtmw"
+    """Triangulated exo detector source, resolved from the catalog schema."""
     start: float = 2.0
     """First video second."""
     end: float = 6.0
@@ -38,8 +40,8 @@ class Config:
     """Log every nth fitted mesh; joints retain every frame."""
     calibration: Path | None = None
     """Optional frozen body identity, bone ratios and head attachment JSON."""
-    options: FitOptions = field(default_factory=FitOptions)
-    """Shape and attachment settings; defaults reproduce the initial prototype."""
+    options: FitOptions = field(default_factory=lambda: FitOptions(head_mode="ears"))
+    """Shape and attachment settings; the CLI defaults to ears-only head fitting."""
 
 
 def main(config: Config) -> None:
@@ -47,7 +49,7 @@ def main(config: Config) -> None:
         raise ValueError("shape iterations must be between zero and total iterations")
     if config.mesh_stride < 1:
         raise ValueError("mesh stride must be positive")
-    data = read_window(config.catalog, config.dataset, config.segment, config.start, config.end, config.stride)
+    data = read_window(config.catalog, config.dataset, config.segment, config.start, config.end, config.stride, config.exo_source)
     calibrated = None if config.calibration is None else from_json(Calibration, config.calibration.read_text())
     result = fit(data, config.assets, config.iterations, config.shape_iterations, config.options, fixed=calibrated)
     print(to_json(save(config.output, data, result, config.target, config.mesh_stride)))

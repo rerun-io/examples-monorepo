@@ -1,6 +1,7 @@
 """Read one bounded SelfCap window without catalog writes."""
 
 from dataclasses import dataclass
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -13,6 +14,25 @@ from serde import serde
 from serde.json import from_json
 
 from selfcap_soma.observations import quest_sample_times
+
+ExoSource: TypeAlias = Literal["rtmw", "sapiens2"]
+
+
+def exo_columns(columns: list[str], source: ExoSource) -> tuple[str, str]:
+    """Discover a unique triangulated source carrying per-joint confidences."""
+    matches = []
+    for column in columns:
+        if not column.endswith("/coco133_xyz:Points3D:positions"):
+            continue
+        entity = column.split(":", 1)[0]
+        if (source == "rtmw" and "/rtmw_triangulated/" not in entity) or (source == "sapiens2" and "/sapiens2/" not in entity):
+            continue
+        confidence = entity + ":simplecv.KeypointConfidence3D:confidences"
+        if confidence in columns:
+            matches.append((column, confidence))
+    if len(matches) != 1:
+        raise ValueError(f"expected a unique {source} triangulation with confidence, found {matches}")
+    return matches[0]
 
 
 @serde
@@ -35,9 +55,9 @@ class Observations:
     hands: Float64[ndarray, "n 133 3"]
     """Latency-corrected, validity-gated Quest world points."""
     head_positions: Float64[ndarray, "n 3"]
-    """World left-eye positions."""
+    """Tracked Quest headset positions; not anatomical eye measurements."""
     head_rotations: Float64[ndarray, "n 3 3"]
-    """World rotations of the Quest left-eye frame."""
+    """World rotations of the tracked Quest headset frame; anatomical origin unresolved."""
     offset_ms: float
     """Fixed catalog Quest offset."""
 
@@ -83,7 +103,7 @@ def interpolate_head(
     return result, rotations
 
 
-def read_window(url: str, dataset: str, segment: str, start: float, end: float, stride: int) -> Observations:
+def read_window(url: str, dataset: str, segment: str, start: float, end: float, stride: int, source: ExoSource = "rtmw") -> Observations:
     """Use one materialization per entity group, with window pushdown."""
     view = CatalogClient(url).get_dataset(dataset).filter_segments(segment)
     sync_table = view.filter_contents(["/__properties/time_sync"]).reader(index=None).to_arrow_table()
@@ -92,9 +112,8 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     sync = from_json(SyncRecord, sync_text)
     offset = sync.offsets_ms["quest_pose"]
 
-    exo_path = "/world/pred/rtmw_triangulated/coco133_xyz"
-    position = f"{exo_path}:Points3D:positions"
-    confidence = f"{exo_path}:simplecv.KeypointConfidence3D:confidences"
+    position, confidence = exo_columns(view.schema().column_names(), source)
+    exo_path = position.split(":", 1)[0]
     table = (
         view.filter_contents([exo_path])
         .reader(index="video_time")
