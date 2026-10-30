@@ -233,3 +233,43 @@ The d31bf1da candidate reproduces the offline medians (pixels): headset
 RTMW hands 9.59 → 10.50, body transfer 24.67 → 16.55. The hand regressions
 fail the no-regression gate. The main dev promotion is explicit and retains
 that gate result; it does not imply that the hand metrics improved.
+
+### Bounded optical labeling
+
+`selfcap-exo-label` reads an initial calibration and the segment's base,
+Sapiens2 and independent RTMW observations. It writes local files only:
+
+```bash
+pixi run --frozen -e selfcap-curate selfcap-exo-label \
+  --segment selfcap__2025-12-03__d31bf1da__ep001 \
+  --calib-record /path/to/initial-session.json --output-dir /path/to/labels \
+  --dataset selfcap-post-ep1-v2 --catalog-url rerun+http://dgx-spark:51235
+```
+
+The runner can call `selfcap_curate.exo_label.label_session` with the same
+arguments. Its isolated worker has a 360-second deadline, including its Sol
+children. Existing output directories are supported. Completed decisions resume;
+failed or timed-out attempts reuse their completed packet and label files.
+Use a new directory when source calibration or annotations change.
+
+The tool samples four facing headset frames per view, and one frame for static
+phones. Phone lenses seen at grazing angles are omitted. Crops carry a source
+pixel grid; Sol runs read-only with medium reasoning and the fast tier on the
+default personal account. Coordinates must fall inside the corresponding crop;
+timestamps are canonicalized within one microsecond. A local dark-component snap
+moves headset labels at most five source pixels.
+
+Both fit folds share the static phone anchors. Their phone residual is therefore
+an **in-sample consistency check**, not independent validation. Headset frames
+and 10-second hand blocks are held out; body transfer uses independent RTMW
+observations. Sparse optical targets retain the total loss weight of 20 samples
+per view/target, preserving the original dense-label estimator's balance.
+Acceptance requires optical medians to improve by at least 2 pixels and 10%,
+body transfer median to improve, Sapiens hand median to regress by at most 1 pixel, RTMW hand median by at most 1.5 pixels,
+and all solvers to converge. Missing metrics reject the candidate.
+
+`result.json` always records `segment`, `decision`, `reason`, `labels`,
+`elapsed_s`, `thresholds`, and `gate`. The four thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
+`failed`. Only `accepted` writes `refinement.json` and `calib.json`; all other
+outcomes retain the initial calibration. `landmarks.json`, `packet.json`, PNGs,
+and per-view logs provide provenance. Nothing is registered by this command.
