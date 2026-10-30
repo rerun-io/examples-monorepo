@@ -15,7 +15,7 @@ from selfcap_soma.camera_geometry import project, project_ego
 from selfcap_soma.catalog import ExoSource
 from selfcap_soma.evaluation_io import first, nearest_indices, read_egohand_rgb, read_views
 from selfcap_soma.observations import overlay_points
-from selfcap_soma.overlay_style import observed_links, observed_points
+from selfcap_soma.overlay_style import observed_links, observed_points, residual_tolerance
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,10 +69,10 @@ def log_joint_overlay(
 
 
 def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader) -> None:
-    """Retain only selected upper-body vertices, with newly computed normals."""
+    """Retain the fixed rest-pose waist selection, with newly computed normals."""
     selection = source.stream().filter(content="/parameters/upper_body_vertices").to_chunks()
     if not selection:
-        raise ValueError("fit is missing its skinning-based upper-body vertex selection")
+        raise ValueError("fit is missing its rest-pose upper-body vertex selection")
     ids = np.asarray(selection[0].to_record_batch().column("Tensor:data")[0].as_py()[0]["buffer"], dtype=np.int64)
     faces = None
     batches = []
@@ -159,6 +159,21 @@ def main(config: Config) -> None:
         quest = np.concatenate([row[1] for row in quest_rows])[np.argsort(np.concatenate([row[0] for row in quest_rows]))]
         if len(quest) != len(times):
             raise ValueError("Quest and joint streams differ in length")
+    # New fits persist the exact COCO-equivalent points consumed by their losses.
+    # Older fits use the equivalent joint mapping plus separately saved surface ears.
+    landmark_rows = []
+    for chunk in source.stream().filter(content="/world/fit/coco_landmarks").to_chunks():
+        table = chunk.to_record_batch()
+        if "video_time" in table.schema.names and "Points3D:positions" in table.schema.names:
+            landmark_rows.append(
+                (table.column("video_time").cast("int64").to_numpy(), np.asarray(table.column("Points3D:positions").to_pylist(), dtype=np.float32))
+            )
+    if landmark_rows:
+        landmark_times = np.concatenate([row[0] for row in landmark_rows])
+        landmark_order = np.argsort(landmark_times)
+        if not np.array_equal(landmark_times[landmark_order], np.rint(times * 1e9).astype(np.int64)):
+            raise ValueError("COCO landmarks and joints must share exact timestamps")
+        points = np.concatenate([row[1] for row in landmark_rows])[landmark_order]
     if config.upper_body_only:
         points[:, 13:91] = np.nan
     dataset = CatalogClient("rerun+http://dgx-spark:51235").get_dataset("selfcap-post-dev")
@@ -195,7 +210,7 @@ def main(config: Config) -> None:
     if config.upper_body_only:
         static = source.stream().filter(content="/parameters/visible_joints").to_chunks()
         if not static:
-            raise ValueError("upper-body output requires a fit with a skinning-based display selection")
+            raise ValueError("upper-body output requires a fit with a rest-pose display selection")
         visible_ids = np.asarray(static[0].to_record_batch().column("Tensor:data")[0].as_py()[0]["buffer"], dtype=np.int64)
         hidden = np.ones(world_joints.shape[1], dtype=bool)
         hidden[visible_ids] = False
@@ -213,11 +228,26 @@ def main(config: Config) -> None:
         for old, new in (("/world/fit/joints", "/world/pred/soma_x/joints"), ("/world/fit/mesh", "/world/pred/soma_x/mesh")):
             recording.send_chunks(source.stream().filter(content=old).map(lambda chunk, new=new: chunk.with_entity_path(new)))
     recording.send_chunks(source.stream().filter(content="/world/fit/ears").map(lambda chunk: chunk.with_entity_path("/world/pred/soma_x/ears")))
+    exo_rows = []
+    for chunk in source.stream().filter(content="/world/inputs/exo").to_chunks():
+        table = chunk.to_record_batch()
+        if "video_time" in table.schema.names and "Points3D:positions" in table.schema.names:
+            exo_rows.append(
+                (table.column("video_time").cast("int64").to_numpy(), np.asarray(table.column("Points3D:positions").to_pylist(), dtype=np.float64))
+            )
+    reference = np.full(points.shape, np.nan, dtype=np.float64)
+    if exo_rows:
+        exo_times = np.concatenate([row[0] for row in exo_rows])
+        exo_order = np.argsort(exo_times)
+        if not np.array_equal(exo_times[exo_order], np.rint(times * 1e9).astype(np.int64)):
+            raise ValueError("source landmarks and fitted landmarks must share exact timestamps")
+        reference = np.concatenate([row[1] for row in exo_rows])[exo_order]
     projections = []
     for view in phones:
         projected = project(view.camera, points.reshape(-1, 3).astype(np.float64)).reshape(len(times), 133, 3)
         pixels = np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan).astype(np.float32)
-        seen = observed_points(pixels.astype(np.float64), view.pixels, view.scores)
+        tolerance = residual_tolerance(points.astype(np.float64), reference, projected[:, :, 2], float(max(view.camera.K[0, 0], view.camera.K[1, 1])))
+        seen = observed_points(pixels.astype(np.float64), view.pixels, view.scores, tolerance)
         projections.append((f"{view.camera.entity}/pinhole", pixels, seen))
     for ego in egos:
         pixels = project_ego(ego, times, points)

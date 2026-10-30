@@ -148,6 +148,11 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     recording.send_columns(
         "/world/fit/ears", indexes=index, columns=rr.Points3D.columns(positions=result.ear_landmarks.reshape(-1, 3)).partition([2] * len(data.times))
     )
+    recording.send_columns(
+        "/world/fit/coco_landmarks",
+        indexes=index,
+        columns=rr.Points3D.columns(positions=mapped.astype(np.float32).reshape(-1, 3)).partition([133] * len(data.times)),
+    )
     if result.foot_landmarks is not None:
         recording.send_columns(
             "/world/fit/feet",

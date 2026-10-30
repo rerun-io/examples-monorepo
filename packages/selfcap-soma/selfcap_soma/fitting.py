@@ -507,11 +507,25 @@ def fit(
             model.prepare_identity(
                 torch.nn.functional.pad(identity, (0, 128 - active_components)), scale_params=bone_scales, global_scale=log_scale.exp()
             )
+        rest_pose = model.pose(torch.zeros_like(poses[:1]), apply_correctives=False)
+        waist_height = float(rest_pose.joints[0, [names.index("LeftLeg"), names.index("RightLeg")], 1].mean().item()) - 0.025
+        selection = mesh_selection(rest_pose.vertices[0].cpu().numpy(), model.faces.cpu().numpy(), waist_height)
+        rim = np.flatnonzero(np.any(selection.rest_offsets != 0.0, axis=1))
+        rest_offsets = torch.as_tensor(selection.rest_offsets[rim], device="cuda")
         meshes: list[Float32[ndarray, "b v 3"]] = []
         joints: list[Float32[ndarray, "b 77 3"]] = []
         for begin in range(0, len(data.times), 16):
             output: SOMAPoseOutput = model.pose(poses[begin : begin + 16], transl=translations[begin : begin + 16], apply_correctives=False)
-            meshes.append(output.vertices.cpu().numpy())
+            # The waist has no procedural twist weights; the public hierarchy
+            # gives its exact skinning motion in both 78- and 110-joint modes.
+            blended = torch.einsum(
+                "vj,njkl->nvkl",
+                model.public_skinning_weights()[rim],
+                output.transforms @ torch.linalg.inv(model.public_bind_transforms_world()),
+            )
+            display_vertices = output.vertices.clone()
+            display_vertices[:, rim] += torch.einsum("nvij,vj->nvi", blended[..., :3, :3], rest_offsets)
+            meshes.append(display_vertices.cpu().numpy())
             joints.append(output.joints.cpu().numpy())
         final: SOMAPoseOutput = model.pose(poses, transl=translations, fk_only=True, apply_correctives=False)
         angles: Float64[ndarray, "n"] = np.degrees(
@@ -524,9 +538,6 @@ def fit(
     torch.cuda.synchronize()
     public_names = tuple(model.public_joint_names)
     public_parents = model.public_joint_parent_ids.cpu().numpy().astype(np.int64)
-    selection = mesh_selection(
-        model.public_skinning_weights().cpu().numpy().astype(np.float64), public_names, public_parents, model.faces.cpu().numpy()
-    )
     visible = np.flatnonzero(visible_joint_mask(public_names, public_parents)[1:]).astype(np.int64)
     return FitResult(
         poses.detach().cpu().numpy(),

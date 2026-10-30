@@ -74,7 +74,7 @@ def test_shared_shape_freeze_keeps_repeated_pose_gradients_finite():
         assets,
         iterations=4,
         shape_iterations=1,
-        options=FitOptions(freeze_legs=True, leg_support_weight=0.0, hip_landmark_weight=0.15),
+        options=FitOptions(freeze_legs=True, leg_support_weight=0.0, hip_landmark_weight=0.15, display_twists=True),
         fixed=calibration,
         initial=replace(result, poses=bent),
     )
@@ -173,7 +173,7 @@ def test_foot_surface_targets_drive_ankle_rotation():
     calibration = Calibration(
         np.zeros((1, 128), np.float32), 1.0, np.zeros(3, np.float32), np.ones((1, 60), np.float32), np.eye(3, dtype=np.float32), "ears"
     )
-    result = fit(data, assets, 80, 1, FitOptions(head_mode="ears", use_feet=True), fixed=calibration)
+    result = fit(data, assets, 80, 1, FitOptions(head_mode="ears", use_feet=True, foot_weight=1.0), fixed=calibration)
     assert result.foot_landmarks is not None
     assert np.median(np.linalg.norm(result.foot_landmarks - feet, axis=-1)) < np.median(np.linalg.norm(original - feet, axis=-1)) * 0.6
     assert np.linalg.norm(result.poses[:, [names.index("LeftFoot"), names.index("RightFoot")]]) > 0.05
