@@ -8,3 +8,12 @@ Config writers must publish a complete JSON document with a unique sibling
 temporary file followed by `Path.replace`; in Python, use `runner.write_config`.
 The runner retries partial legacy reads and then uses its last complete snapshot.
 Atomic replacement prevents partial reads; it does not merge concurrent edits.
+
+Run the isolated operational regression suite from the repository root:
+
+```bash
+pixi run --as-is -e selfcap-curate-dev python -m pytest -q ops/selfcap-night2/tests
+```
+
+These tests use temporary caches and databases, synthetic recordings, and fake
+transport boundaries. They do not start production workers or publish layers.
