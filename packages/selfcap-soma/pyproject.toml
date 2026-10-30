@@ -2,7 +2,7 @@
 name = "selfcap-soma"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["numpy", "scipy", "torch", "py-soma-x==0.3.0", "rerun-sdk", "pyserde", "orjson", "tomli-w", "jaxtyping", "tyro"]
+dependencies = ["numpy", "scipy", "torch", "py-soma-x==0.3.0", "rerun-sdk", "pyserde", "orjson", "tomli-w", "jaxtyping", "tyro", "opencv-python"]
 
 [build-system]
 requires = ["hatchling"]

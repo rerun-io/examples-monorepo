@@ -1563,6 +1563,7 @@ platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.selfcap-soma.dependencies]
 python = "3.12.*"
+py-opencv = "*"
 pytorch-gpu = ">=2.12,<2.13"
 cuda-version = "13.0.*"
 numpy = "*"
@@ -1584,6 +1585,14 @@ PYREFLY_TARGET = "selfcap_soma"
 
 [feature.selfcap-soma.tasks.soma-fit]
 cmd = "python tools/fit.py"
+cwd = "packages/selfcap-soma"
+
+[feature.selfcap-soma.tasks.soma-evaluate]
+cmd = "python tools/evaluate.py"
+cwd = "packages/selfcap-soma"
+
+[feature.selfcap-soma.tasks.soma-overlay]
+cmd = "python tools/overlay.py"
 cwd = "packages/selfcap-soma"
 
 [feature.selfcap-curate]
