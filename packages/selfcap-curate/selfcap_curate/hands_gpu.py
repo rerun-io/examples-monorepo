@@ -1,5 +1,6 @@
 """Catalog-only GPU phone and OAK hands with served frame-selection rules."""
 
+import gc
 from collections.abc import Callable
 from functools import cache
 
@@ -95,6 +96,18 @@ def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, 
 
     backend: TensorRtBackendConfig = TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8)
     return YoloxDetectorConfig(score_thr=0.3, backend=backend).setup(), SapiensPoseConfig(model_size="0.4B", backend=backend).setup()
+
+
+def release_cuda_memory(*, models: bool) -> None:
+    """Hand cached CUDA blocks back to the driver, after dropping the cached Sapiens2/YOLOX engines when ``models``.
+
+    PyTorch keeps every block a process has used, so without this each selfcap-post process holds its align peak
+    (~17 GB on cc808233) through keypoints and only one fits on the GPU.
+    """
+    if models:
+        pose_models.cache_clear()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def decode_frames(video: CatalogVideo, indices: Int64[ndarray, "n"], fps: float) -> UInt8[Tensor, "n h w 3"]:

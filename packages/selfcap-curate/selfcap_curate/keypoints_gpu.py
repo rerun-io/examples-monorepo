@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import onnx
 import torch
-from jaxtyping import Float16, Float32, Float64, Int64
+from jaxtyping import Bool, Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from onnx import numpy_helper
 from posekit.models.rtmpose import RtmPose2d, RtmPoseConfig
@@ -25,6 +25,33 @@ from trtkit.backends import TensorRtBackendConfig
 from selfcap_curate.catalog_io import Segment, read_phone_videos
 from selfcap_curate.keypoints import Keypoints2D, ViewDetections
 from selfcap_curate.records import TimeSync
+
+TRACK_MIN_RATE_HZ: float = 10.0
+"""Plans at or above this rate take each frame's person boxes from the previous frame's pose (detection-by-tracking, as in
+handtrack and mv-api): on cc808233 ep001 YOLOX ran on 263 of 6,476 phone frames, 3D within 7 mm of detect-every-frame."""
+TRACK_MIN_KEYPOINTS: int = 8
+"""A track survives while its pose has at least this many keypoints above 0.3."""
+
+
+def pose_boxes(
+    xy: Float32[Tensor, "n 133 2"], scores: Float32[Tensor, "n 133"], width: int, height: int
+) -> tuple[Float32[Tensor, "n 4"], Float32[Tensor, "n"], Bool[Tensor, "n"]]:
+    """rtmlib pose_to_bbox on confident keypoints, x1.25 about the centre and clipped; alive with TRACK_MIN_KEYPOINTS of them."""
+    confident: Bool[Tensor, "n 133"] = scores > 0.3
+    lo = torch.where(confident[..., None], xy, torch.inf).amin(1)
+    hi = torch.where(confident[..., None], xy, -torch.inf).amax(1)
+    centre, half = (lo + hi) / 2, (hi - lo) / 2 * 1.25
+    upper = torch.tensor([width - 1, height - 1, width - 1, height - 1], dtype=xy.dtype, device=xy.device)
+    boxes = torch.minimum(torch.cat([centre - half, centre + half], 1).clamp(min=0), upper)
+    box_scores = torch.where(confident, scores, 0.0).sum(1) / confident.sum(1).clamp(min=1)
+    return boxes, box_scores, confident.sum(1) >= TRACK_MIN_KEYPOINTS
+
+
+def top_slots(frame_indices: Int64[Tensor, "d"], scores: Float32[Tensor, "d"]) -> Int64[Tensor, "d"]:
+    """Rank of each detection within its frame by descending score, earlier detections first on ties."""
+    order = torch.arange(len(scores), device=scores.device)
+    ahead = (scores[None, :] > scores[:, None]) | ((scores[None, :] == scores[:, None]) & (order[None, :] < order[:, None]))
+    return ((frame_indices[:, None] == frame_indices[None, :]) & ahead).sum(1)
 
 
 def nearest_indices(pts: Float64[ndarray, "f"], want: Float64[ndarray, "n"]) -> Int64[ndarray, "n"]:
@@ -104,8 +131,10 @@ def detect_keypoints(
     *,
     sync: TimeSync,
 ) -> Keypoints2D:
-    """Infer three people in CUDA batches of eight, widening float16 confidence on the aligned grid."""
+    """Infer three people per phone on the aligned grid; dense plans track, sparse plans detect every sample in batches of eight."""
     plan: FramePlan = plan_episode(segment, rate, sync)
+    if rate >= TRACK_MIN_RATE_HZ:
+        return Keypoints2D(plan.times, detect_tracked(plan, detector, pose, refresh=round(rate)), rate)
     views: dict[str, ViewDetections] = {}
     for phone, video in plan.videos.items():
         fps: int = round(1e9 / float(np.median(np.diff(video.t_ns))))
@@ -142,6 +171,65 @@ def detect_keypoints(
         del decoder
         views[phone] = ViewDetections(boxes.astype(np.float64), confidence.astype(np.float64), xy.astype(np.float64), scores.astype(np.float64))
     return Keypoints2D(plan.times, views, rate)
+
+
+def detect_tracked(
+    plan: FramePlan, detector: Callable[[Tensor], BoxDetections], pose: Callable[[Tensor, BoxDetections], Keypoints2d], *, refresh: int
+) -> dict[str, ViewDetections]:
+    """Detection-by-tracking, all phones per frame: boxes come from the previous pose and YOLOX runs only for phones whose
+    track was lost or every ``refresh`` frames. Track state and results stay on the GPU until one copy per phone at the end."""
+    phones: list[str] = list(plan.videos)
+    count, n, device = len(phones), len(plan.times), torch.device("cuda")
+    streams = {}
+    for phone, video in plan.videos.items():
+        fps: int = round(1e9 / float(np.median(np.diff(video.t_ns))))
+        decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, fps, video.codec), device="cuda", dimension_order="NHWC", seek_mode="exact")
+        streams[phone] = (decode_wanted(decoder, plan.indices[phone], batch=16), plan.indices[phone].astype(np.float64) / fps)
+    xy = torch.full((count, n, 3, 133, 2), float("nan"), device=device)
+    scores = torch.zeros((count, n, 3, 133), device=device)
+    boxes = torch.full((count, n, 3, 4), float("nan"), device=device)
+    box_scores = torch.zeros((count, n, 3), device=device)
+    slot_boxes, slot_scores = torch.zeros((count, 3, 4), device=device), torch.zeros((count, 3), device=device)
+    alive = torch.zeros((count, 3), dtype=torch.bool, device=device)
+    lost = torch.zeros(count, dtype=torch.bool, device=device)
+    last_detect: Int64[ndarray, "p"] = np.full(count, -(2**40))
+    tick: int = 0
+    while tick < n:
+        chunks = [next(streams[phone][0]) for phone in phones]
+        for phone, chunk in zip(phones, chunks, strict=True):
+            if not np.allclose(chunk.pts_seconds.cpu().numpy(), streams[phone][1][tick : tick + len(chunk)], rtol=0.0, atol=1e-9):
+                raise ValueError(f"{phone}: decoder changed selected source timestamps")
+        if len({tuple(chunk.data.shape[1:]) for chunk in chunks}) != 1:
+            raise ValueError(f"phones differ in frame size: {[tuple(chunk.data.shape[1:]) for chunk in chunks]}")
+        for k in range(len(chunks[0])):
+            frames: UInt8[Tensor, "p h w 3"] = torch.stack([chunk.data[k] for chunk in chunks])
+            height, width = int(frames.shape[1]), int(frames.shape[2])
+            need: Int64[ndarray, "m"] = np.flatnonzero((~alive.any(1) | lost).cpu().numpy() | (tick - last_detect >= refresh))
+            if len(need):
+                need_t = torch.as_tensor(need, device=device)
+                found: BoxDetections = detector(frames[need_t])
+                rank = top_slots(found.frame_indices, found.scores)
+                keep = rank < 3
+                owner, slot = need_t[found.frame_indices[keep]], rank[keep]
+                alive[need_t], lost[need_t] = False, False
+                slot_boxes[owner, slot], slot_scores[owner, slot], alive[owner, slot] = found.xyxy[keep], found.scores[keep], True
+                last_detect[need] = tick
+            live = alive.nonzero()
+            if len(live):
+                owner, slot = live[:, 0], live[:, 1]
+                keypoints: Keypoints2d = pose(frames, BoxDetections(slot_boxes[owner, slot], slot_scores[owner, slot], owner))
+                xy[owner, tick, slot], scores[owner, tick, slot] = keypoints.xy.float(), keypoints.scores.float()
+                boxes[owner, tick, slot], box_scores[owner, tick, slot] = slot_boxes[owner, slot], slot_scores[owner, slot]
+                next_boxes, next_scores, ok = pose_boxes(keypoints.xy.float(), keypoints.scores.float(), width, height)
+                slot_boxes[owner, slot], slot_scores[owner, slot], alive[owner, slot] = next_boxes, next_scores, ok
+                lost = torch.zeros(count, dtype=torch.int64, device=device).index_add_(0, owner, (~ok).long()) > 0
+            tick += 1
+    return {
+        phone: ViewDetections(
+            boxes[i].double().cpu().numpy(), box_scores[i].double().cpu().numpy(), xy[i].double().cpu().numpy(), scores[i].double().cpu().numpy()
+        )
+        for i, phone in enumerate(phones)
+    }
 
 
 def dynamic_yolox(source: Path) -> Path:

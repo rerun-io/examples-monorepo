@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 import cv2
 import numpy as np
 import rerun as rr
+import torch
 from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
 from dataforge.schema import coco133_xyz_path
 from dataforge.writing import atomic_write
@@ -20,6 +21,7 @@ from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from simplecv.catalog_rig_layout import catalog_components
 from simplecv.rrd_query_utils import first_valid_value
+from torch import Tensor
 
 from selfcap_curate.catalog_io import Segment, read_catalog_hands, scalar
 from selfcap_curate.detection_io import COCO133_CLASS
@@ -67,92 +69,144 @@ def project(camera: Camera, xyz: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n
     return np.c_[uv, q[:, 2]]
 
 
+def select_wearers(
+    camera: Camera, anchors: Float64[ndarray, "n 3 3"], boxes: Float64[ndarray, "n p 4"], scores: Float64[ndarray, "n p"]
+) -> Int64[ndarray, "n"]:
+    """Per frame: nearest head/wrist rectangle distance, head weight two, reject cost >=0.5; -1 when no box qualifies."""
+    frames, people = boxes.shape[:2]
+    if not people:
+        return np.full(frames, -1, np.int64)
+    projected = project(camera, anchors.reshape(-1, 3)).reshape(frames, 3, 3)
+    good: Bool[ndarray, "n 3"] = np.isfinite(projected[..., :2]).all(-1) & (projected[..., 2] > 0.0)
+    uv = projected[..., :2]
+    weights = np.where(good, np.array([2.0, 1.0, 1.0]), 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        size = boxes[..., 2:] - boxes[..., :2]
+        usable = (scores >= 0.3) & np.isfinite(boxes).all(-1) & ~np.any(size <= 0.0, axis=-1)
+        diagonal = np.maximum(np.linalg.norm(size, axis=-1), 1.0)[..., None]
+        outside = np.maximum(np.maximum(boxes[:, :, None, :2] - uv[:, None], uv[:, None] - boxes[:, :, None, 2:]), 0.0)
+        centre = np.linalg.norm(uv[:, None] - (boxes[:, :, None, :2] + boxes[:, :, None, 2:]) / 2.0, axis=-1) / diagonal
+        term = np.linalg.norm(outside, axis=-1) / diagonal + 0.05 * centre
+        cost = np.where(good[:, None], term * weights[:, None], 0.0).sum(-1) / weights.sum(-1)[:, None] - 0.01 * scores
+    cost = np.where(usable & good.any(-1)[:, None], cost, np.inf)
+    best = np.argmin(cost, axis=1)
+    return np.where(np.take_along_axis(cost, best[:, None], 1)[:, 0] < 0.5, best, -1)
+
+
 def select_wearer(camera: Camera, anchors: Float64[ndarray, "3 3"], boxes: Float64[ndarray, "p 4"], scores: Float64[ndarray, "p"]) -> int:
-    """Nearest head/wrist rectangle distance, head weight two, reject cost >=0.5."""
-    projected = project(camera, anchors)
-    good = np.isfinite(projected[:, :2]).all(1) & (projected[:, 2] > 0.0)
-    if not good.any() or not len(boxes):
-        return -1
-    uv, weights = projected[good, :2], np.array([2.0, 1.0, 1.0])[good]
-    costs = np.full(len(boxes), np.inf)
-    for i, (box, score) in enumerate(zip(boxes, scores, strict=True)):
-        if score < 0.3 or not np.isfinite(box).all() or np.any(box[2:] - box[:2] <= 0.0):
-            continue
-        diagonal = max(float(np.linalg.norm(box[2:] - box[:2])), 1.0)
-        outside = np.maximum(np.maximum(box[:2] - uv, uv - box[2:]), 0.0)
-        centre = np.linalg.norm(uv - (box[:2] + box[2:]) / 2.0, axis=1) / diagonal
-        costs[i] = np.average(np.linalg.norm(outside, axis=1) / diagonal + 0.05 * centre, weights=weights) - 0.01 * float(score)
-    best = int(np.argmin(costs))
-    return best if costs[best] < 0.5 else -1
+    """One frame of select_wearers."""
+    return int(select_wearers(camera, anchors[None], boxes[None], scores[None])[0])
+
+
+def triangulate_frames(
+    cameras: list[Camera], uv: Float64[ndarray, "n v j 2"], scores: Float64[ndarray, "n v j"], threshold: float = INLIER_PX, chunk: int = 2048
+) -> tuple[Float32[ndarray, "n j 3"], UInt8[ndarray, "n j"], Float32[ndarray, "n j"]]:
+    """All view pairs, >=0.5° ray separation, weighted DLT and two gated refits, for every frame and joint at once.
+
+    float64 on the GPU when there is one: each DLT is the smallest eigenvector of its 4x4 normal matrix, which agrees
+    with the per-frame SVD it replaced to ~1e-13 m (cc808233 ep001: 7 s -> ~0.2 s per episode).
+    """
+    frames, views, joints = scores.shape
+    xyz, counts, confidence = (
+        np.full((frames, joints, 3), np.nan, np.float32),
+        np.zeros((frames, joints), np.uint8),
+        np.zeros((frames, joints), np.float32),
+    )
+    if views < 2 or not frames:
+        return xyz, counts, confidence
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def tensor(array: ndarray) -> Tensor:
+        return torch.as_tensor(np.ascontiguousarray(array), dtype=torch.float64, device=device)
+
+    inverse = tensor(np.stack([np.linalg.inv(c.world_T_cam) for c in cameras]))
+    rotation = tensor(np.stack([c.world_T_cam[:3, :3] for c in cameras]))
+    lens = tensor(np.stack([c.K[:2, :2] for c in cameras]))
+    centre = tensor(np.stack([c.K[:2, 2] for c in cameras]))
+    radial = tensor(np.array([c.radial for c in cameras]))
+    cos_min = float(np.cos(np.deg2rad(0.5)))
+
+    def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> tuple[ndarray, ndarray, ndarray]:
+        norm_np = np.stack(
+            [
+                cv2.undistortPoints(
+                    np.nan_to_num(observed_np[:, v], nan=0.0, posinf=0.0, neginf=0.0).reshape(-1, 1, 2), c.K, np.array([*c.radial, 0.0, 0.0, 0.0])
+                ).reshape(len(observed_np), joints, 2)
+                for v, c in enumerate(cameras)
+            ],
+            axis=1,
+        )
+        observed, score, norm = tensor(observed_np), tensor(scores_np), tensor(norm_np)
+        valid = (score >= 0.3) & torch.isfinite(score) & torch.isfinite(observed).all(-1) & torch.isfinite(norm).all(-1)
+        norm = torch.where(torch.isfinite(norm), norm, 0.0)
+        clean = torch.where(valid, score, 0.0)
+        root = torch.sqrt(clean)
+        rows = torch.stack(
+            [
+                norm[..., 0, None] * inverse[None, :, None, 2] - inverse[None, :, None, 0],
+                norm[..., 1, None] * inverse[None, :, None, 2] - inverse[None, :, None, 1],
+            ],
+            dim=3,
+        )  # f v j 2 4
+
+        def fit(mask: Tensor) -> Tensor:
+            weighted = rows * torch.where(mask, root, 0.0)[..., None, None]
+            gram = torch.einsum("fvjri,fvjrk->fjik", weighted, weighted).reshape(-1, 4, 4)
+            vectors = torch.cat([torch.linalg.eigh(part)[1][..., 0] for part in gram.split(32768)])
+            vectors = vectors.reshape(len(observed_np), joints, 4)
+            return vectors[..., :3] / vectors[..., 3:4]
+
+        def residual(points: Tensor) -> Tensor:
+            q = torch.einsum("vik,fjk->fvji", inverse[:, :3, :3], points) + inverse[None, :, None, :3, 3]
+            xy = q[..., :2] / q[..., 2:3]
+            r2 = (xy * xy).sum(-1)
+            distortion = 1.0 + radial[None, :, None, 0] * r2 + radial[None, :, None, 1] * r2 * r2
+            pixels = torch.einsum("vik,fvjk->fvji", lens, xy * distortion[..., None]) + centre[None, :, None, :]
+            error = torch.linalg.norm(pixels - observed, dim=-1)
+            return torch.where((q[..., 2] > 1e-5) & torch.isfinite(error), error, torch.inf)
+
+        rays = torch.einsum("vik,fvjk->fvji", rotation, torch.cat([norm, torch.ones_like(norm[..., :1])], -1))
+        rays = rays / torch.linalg.norm(rays, dim=-1, keepdim=True).clamp(min=1e-12)
+        best_mask = torch.zeros_like(valid)
+        best_count = torch.zeros(valid.shape[0], joints, dtype=torch.int64, device=device)
+        best_weight = torch.zeros(valid.shape[0], joints, dtype=torch.float64, device=device)
+        best_error = torch.full((valid.shape[0], joints), torch.inf, dtype=torch.float64, device=device)
+        for a, b in combinations(range(views), 2):
+            pair = valid[:, a] & valid[:, b] & ((rays[:, a] * rays[:, b]).sum(-1) < cos_min)
+            seed = torch.zeros_like(valid)
+            seed[:, a], seed[:, b] = pair, pair
+            res = residual(fit(seed))
+            inliers = valid & (res <= threshold) & pair[:, None, :]
+            count, weight = inliers.sum(1), (inliers * clean).sum(1)
+            mean = torch.where(inliers, res, 0.0).sum(1) / count.clamp(min=1)
+            better = (count > best_count) | (
+                (count == best_count) & ((weight > best_weight + 1e-6) | (((weight - best_weight).abs() <= 1e-6) & (mean < best_error)))
+            )
+            best_mask = torch.where(better[:, None, :], inliers, best_mask)
+            best_count, best_weight, best_error = (
+                torch.where(better, new, old) for new, old in ((count, best_count), (weight, best_weight), (mean, best_error))
+            )
+        inliers = best_mask & valid & (residual(fit(best_mask)) <= threshold)
+        points = fit(inliers)
+        inliers &= residual(points) <= threshold
+        count = inliers.sum(1)
+        good = (count >= 2) & torch.isfinite(points).all(-1)
+        return (
+            torch.where(good[..., None], points, torch.nan).float().cpu().numpy(),
+            torch.where(good, count, 0).to(torch.uint8).cpu().numpy(),
+            torch.where(good, torch.where(inliers, clean, 0.0).sum(1) / count.clamp(min=1), 0.0).float().cpu().numpy(),
+        )
+
+    for begin in range(0, frames, chunk):
+        stop = min(begin + chunk, frames)
+        xyz[begin:stop], counts[begin:stop], confidence[begin:stop] = solve(uv[begin:stop], scores[begin:stop])
+    return xyz, counts, confidence
 
 
 def triangulate(cameras: list[Camera], uv: Float64[ndarray, "v j 2"], scores: Float64[ndarray, "v j"], threshold: float = INLIER_PX) -> Triangulated:
-    """All view pairs, >=0.5° ray separation, weighted DLT and two gated refits."""
-    views, joints = scores.shape
-    xyz, counts, confidence = np.full((joints, 3), np.nan, np.float32), np.zeros(joints, np.uint8), np.zeros(joints, np.float32)
-    if views < 2:
-        return Triangulated(xyz, counts, confidence)
-    projections = np.stack([np.linalg.inv(c.world_T_cam)[:3] for c in cameras])
-    norm = np.stack(
-        [
-            cv2.undistortPoints(
-                np.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0).reshape(-1, 1, 2), c.K, np.array([*c.radial, 0.0, 0.0, 0.0])
-            ).reshape(joints, 2)
-            for c, p in zip(cameras, uv, strict=True)
-        ]
-    )
-    valid = (scores >= 0.3) & np.isfinite(scores) & np.isfinite(uv).all(2) & np.isfinite(norm).all(2)
-    norm, clean = np.where(np.isfinite(norm), norm, 0.0), np.where(valid, scores, 0.0)
-    if not np.any(valid.sum(0) >= 2):
-        return Triangulated(xyz, counts, confidence)
-
-    def fit(mask: Bool[ndarray, "v j"]) -> Float64[ndarray, "j 3"]:
-        rows = np.stack(
-            [
-                norm[..., 0, None] * projections[:, None, 2] - projections[:, None, 0],
-                norm[..., 1, None] * projections[:, None, 2] - projections[:, None, 1],
-            ],
-            axis=2,
-        )
-        rows *= np.sqrt(np.maximum(clean * mask, 0.0))[:, :, None, None]
-        _, _, vh = np.linalg.svd(rows.transpose(1, 0, 2, 3).reshape(joints, -1, 4), full_matrices=False)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            return vh[:, -1, :3] / vh[:, -1, 3:4]
-
-    def residual(points: Float64[ndarray, "j 3"]) -> Float64[ndarray, "v j"]:
-        projected = [project(c, points) for c in cameras]
-        return np.stack(
-            [
-                np.where((p[:, 2] > 1e-5) & np.isfinite(r := np.linalg.norm(p[:, :2] - observed, axis=1)), r, np.inf)
-                for p, observed in zip(projected, uv, strict=True)
-            ]
-        )
-
-    best_mask, best_count, best_weight, best_error = np.zeros((views, joints), bool), np.zeros(joints, int), np.zeros(joints), np.full(joints, np.inf)
-    rays = np.concatenate([norm, np.ones((views, joints, 1))], axis=2)
-    rays = np.stack([r @ c.world_T_cam[:3, :3].T for c, r in zip(cameras, rays, strict=True)])
-    rays /= np.maximum(np.linalg.norm(rays, axis=2, keepdims=True), 1e-12)
-    for a, b in combinations(range(views), 2):
-        seed = np.zeros((views, joints), bool)
-        seed[a] = seed[b] = valid[a] & valid[b] & (np.sum(rays[a] * rays[b], axis=1) < np.cos(np.deg2rad(0.5)))
-        res = residual(fit(seed))
-        inliers = valid & (res <= threshold) & seed[a][None, :]
-        count, weight = inliers.sum(0), (inliers * clean).sum(0)
-        mean = np.sum(np.where(inliers, res, 0.0), axis=0) / np.maximum(count, 1)
-        better = (count > best_count) | (
-            (count == best_count) & ((weight > best_weight + 1e-6) | ((np.abs(weight - best_weight) <= 1e-6) & (mean < best_error)))
-        )
-        best_mask[:, better] = inliers[:, better]
-        best_count[better], best_weight[better], best_error[better] = count[better], weight[better], mean[better]
-    inliers = best_mask & valid & (residual(fit(best_mask)) <= threshold)
-    points = fit(inliers)
-    res = residual(points)
-    inliers &= res <= threshold
-    count = inliers.sum(0)
-    good = (count >= 2) & np.isfinite(points).all(1)
-    xyz[good], counts[good] = points[good], count[good]
-    confidence[good] = (np.where(inliers, clean, 0.0).sum(0) / np.maximum(count, 1))[good]
-    return Triangulated(xyz, counts, confidence)
+    """One frame of triangulate_frames."""
+    xyz, counts, confidence = triangulate_frames(cameras, uv[None], scores[None], threshold)
+    return Triangulated(xyz[0], counts[0], confidence[0])
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,20 +264,16 @@ def triangulate_episode(
     camera_list = list(cameras.values())
     if len(anchors) != frames:
         raise ValueError("anchors must match the sample grid")
-    xyz = np.full((frames, 133, 3), np.nan, np.float32)
-    counts = np.zeros((frames, 133), np.uint8)
-    confidence = np.zeros((frames, 133), np.float32)
-    selected = {p: SelectedView(np.full((frames, 133, 2), np.nan, np.float32), np.zeros((frames, 133))) for p in phones}
-    for i in range(frames):
-        uv, scores = np.full((len(phones), 133, 2), np.nan), np.zeros((len(phones), 133))
-        for view, phone in enumerate(phones):
-            observed = detections.views[phone]
-            person = select_wearer(cameras[phone], anchors[i], observed.boxes[i], observed.box_scores[i])
-            if person >= 0:
-                uv[view], scores[view] = observed.xy[i, person], observed.scores[i, person]
-                selected[phone].xy[i], selected[phone].scores[i] = uv[view], scores[view]
-        result = triangulate(camera_list, uv, scores, threshold)
-        xyz[i], counts[i], confidence[i] = result.xyz, result.n_views, result.confidence
+    uv = np.full((frames, len(phones), 133, 2), np.nan)
+    scores = np.zeros((frames, len(phones), 133))
+    selected: dict[str, SelectedView] = {}
+    for view, phone in enumerate(phones):
+        observed = detections.views[phone]
+        person = select_wearers(cameras[phone], anchors, observed.boxes, observed.box_scores)
+        rows = np.flatnonzero(person >= 0)
+        uv[rows, view], scores[rows, view] = observed.xy[rows, person[rows]], observed.scores[rows, person[rows]]
+        selected[phone] = SelectedView(uv[:, view].astype(np.float32), scores[:, view].copy())
+    xyz, counts, confidence = triangulate_frames(camera_list, uv, scores, threshold)
     return Keypoints3D(detections.times, xyz, counts, confidence, selected, cameras, detections.rate)
 
 

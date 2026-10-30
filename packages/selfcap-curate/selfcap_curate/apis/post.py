@@ -8,6 +8,7 @@ from rerun.server import Server
 
 from selfcap_curate.apis import align, calibrate, keypoints
 from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME
+from selfcap_curate.hands_gpu import release_cuda_memory
 
 
 @dataclass
@@ -44,6 +45,7 @@ def main(config: Config) -> None:
                 base_dir=config.base_dir, output_dir=aligned, segment_ids=config.segment_ids, key_file=config.key_file, catalog_url=config.catalog_url
             )
         )
+    release_cuda_memory(models=False)  # align's decode and links buffers; calibrate still needs Sapiens2
     with Server(host="127.0.0.1", port=0, datasets={DATASET_NAME: sorted(aligned.glob("*.rrd"))}) as server:
         detections: list[str] = [path.resolve().as_uri() for path in sorted((aligned / "sapiens2").glob("*.rrd"))]
         server.client().get_dataset(DATASET_NAME).register(detections, layer_name="sapiens2").wait()
@@ -57,6 +59,7 @@ def main(config: Config) -> None:
                     donor_catalog_url=config.catalog_url,
                 )
             )
+        release_cuda_memory(models=True)  # keypoints never uses Sapiens2: free its engines so sessions can share the GPU
         with timer.stage("keypoints"):
             keypoints.main(
                 keypoints.Config(

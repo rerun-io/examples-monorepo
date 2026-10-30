@@ -1626,8 +1626,8 @@ description = "Align explicit fresh-base episodes of one session into local copi
 [feature.selfcap-curate.tasks.selfcap-post]
 cmd = "python tools/apps/post.py"
 cwd = "packages/selfcap-curate"
-# Same pool as selfcap-align: one BLAS thread per tracked frame pair.
-env = { OMP_NUM_THREADS = "1" }
+# Same pool as selfcap-align: one BLAS thread per tracked frame pair; expandable segments let several sessions share the GPU.
+env = { OMP_NUM_THREADS = "1", PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True" }
 description = "Align, calibrate and keypoint one session in one process into local copies (no catalog writes)"
 
 # ═══════════════════════════════════════════════════════════════════════════
