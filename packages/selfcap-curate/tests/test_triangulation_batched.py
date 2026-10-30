@@ -123,8 +123,9 @@ def cameras(views: int, rng: np.random.Generator) -> list[Camera]:
     return result
 
 
+@pytest.mark.parametrize("chunk", [7, 2048])
 @pytest.mark.parametrize("seed", range(6))
-def test_batched_triangulation_matches_the_per_frame_reference(seed: int) -> None:
+def test_batched_triangulation_matches_the_per_frame_reference(seed: int, chunk: int) -> None:
     rng = np.random.default_rng(seed)
     views, frames, joints = int(rng.integers(2, 6)), 40, 133
     cams = cameras(views, rng)
@@ -136,7 +137,7 @@ def test_batched_triangulation_matches_the_per_frame_reference(seed: int) -> Non
     scores = rng.uniform(0.0, 1.0, uv.shape[:3])
     uv[rng.random(uv.shape[:3]) < 0.03] = np.nan
     scores[rng.random(scores.shape) < 0.02] = np.nan
-    batch = triangulate_frames(cams, uv, scores)
+    batch = triangulate_frames(cams, uv, scores, chunk=chunk)
     xyz, counts, confidence = batch.xyz, batch.n_views, batch.confidence
     for f in range(frames):
         expected = reference_triangulate(cams, uv[f], scores[f])
