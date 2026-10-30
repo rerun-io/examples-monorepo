@@ -14,6 +14,7 @@ from serde import serde
 from soma.body import SOMALayer, SOMAPoseOutput
 from torch import Tensor
 
+from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, bounded_scale, plausible_ears
 from selfcap_soma.catalog import Observations
 from selfcap_soma.feet import foot_pose_penalty, symmetry_penalty
 from selfcap_soma.hand_pose import HandOrientations, HandOrientationSource, frame, hand_limit_penalty, orientation_targets
@@ -204,7 +205,7 @@ def fit(
         model.prepare_identity(
             neutral_identity,
             scale_params=None if seed is None else torch.as_tensor(seed.bone_scales, device="cuda"),
-            global_scale=1.0 if seed is None else seed.scale,
+            global_scale=1.0 if seed is None else bounded_scale(seed.scale),
         )
         neutral: SOMAPoseOutput = model.pose(torch.zeros(1, 77, 3, device="cuda"), fk_only=True, apply_correctives=False)
     neutral_joints: Float32[ndarray, "77 3"] = neutral.joints[0].detach().cpu().numpy()
@@ -283,7 +284,7 @@ def fit(
         raise ValueError("shape components must be in [1,128]")
     identity = torch.nn.Parameter(neutral_identity[:, :active_components].clone(), requires_grad=fixed is None)
     log_scale = torch.nn.Parameter(
-        torch.tensor(0.0 if seed is None else np.log(seed.scale), device="cuda", dtype=torch.float32), requires_grad=fixed is None
+        torch.tensor(0.0 if seed is None else np.log(bounded_scale(seed.scale)), device="cuda", dtype=torch.float32), requires_grad=fixed is None
     )
     offset_raw = torch.nn.Parameter(torch.zeros(3, device="cuda"), requires_grad=options.learn_head_offset and fixed is None and head_mode == "quest")
     if model.num_scale_params != 60:
@@ -340,6 +341,10 @@ def fit(
     dt: Float32[Tensor, "interval"] = torch.as_tensor(np.diff(data.times), dtype=torch.float32, device="cuda")
     ears_target = torch.as_tensor(data.exo[:, 3:5], dtype=torch.float32, device="cuda")
     ears_confidence = torch.as_tensor(data.confidence[:, 3:5], dtype=torch.float32, device="cuda")
+    ear_pairs = plausible_ears(data.exo) & (data.confidence[:, 3:5] > 0.0).any(1)
+    if ear_pairs.sum() < 3:
+        ear_pairs[:] = False
+    ears_confidence = ears_confidence * torch.as_tensor(ear_pairs[:, None], device="cuda")
     feet_target = torch.as_tensor(data.exo[:, 17:23], dtype=torch.float32, device="cuda")
     feet_confidence = torch.as_tensor(data.confidence[:, 17:23], dtype=torch.float32, device="cuda")
     foot_indices = [names.index(side + "Foot") for side in ("Left", "Right")]
@@ -540,6 +545,8 @@ def fit(
             poses.grad.mul_(pose_mask)
         torch.nn.utils.clip_grad_norm_(parameters, 100.0)
         optimizer.step()
+        with torch.no_grad():
+            log_scale.clamp_(np.log(SCALE_MIN), np.log(SCALE_MAX))
         if iteration % 50 == 0 or iteration == iterations - 1:
             print(
                 f"iteration={iteration} loss={loss.item():.3f} exo={body_loss.item():.3f} hands={hand_loss.item():.3f} head={head_loss.item():.3f}",

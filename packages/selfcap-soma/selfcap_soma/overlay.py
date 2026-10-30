@@ -11,12 +11,14 @@ from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
+from serde.json import from_json, to_json
 
 from selfcap_soma.camera_geometry import project, project_ego
 from selfcap_soma.catalog import ExoSource
 from selfcap_soma.evaluation_io import first, missing_camera_calibration, nearest_indices, read_egohand_rgb, read_views
 from selfcap_soma.observations import overlay_points, require_full_rate_mesh, video_time_column
 from selfcap_soma.overlay_style import observed_links, observed_points, residual_tolerance
+from selfcap_soma.quality import SomaQuality, assess_quality, log_quality
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +285,11 @@ def main(config: Config) -> None:
         if not np.array_equal(exo_times[exo_order], np.rint(times * 1e9).astype(np.int64)):
             raise ValueError("source landmarks and fitted landmarks must share exact timestamps")
         reference = np.concatenate([row[1] for row in exo_rows])[exo_order]
+    quality = assess_quality(points.astype(np.float64), reference, quest.astype(np.float64))
+    for chunk in source.stream().filter(content="/__properties/soma_quality").to_chunks():
+        quality = from_json(SomaQuality, chunk.to_record_batch().column("record_json")[0].as_py()[0])
+    log_quality(recording, quality)
+    config.output.with_suffix(".quality.json").write_text(to_json(quality))
     projections = []
     if not config.native_exo:
         for view in phones:
