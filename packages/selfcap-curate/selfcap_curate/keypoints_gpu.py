@@ -6,6 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import onnx
@@ -320,7 +321,12 @@ def dynamic_yolox(source: Path) -> Path:
     del model.graph.value_info[:]
     model = onnx.shape_inference.infer_shapes(model)
     onnx.checker.check_model(model)
-    onnx.save(model, str(dest))
+    partial = dest.with_name(f".{dest.name}.{uuid4().hex}.tmp")
+    try:
+        onnx.save(model, str(partial))
+        partial.replace(dest)
+    finally:
+        partial.unlink(missing_ok=True)
     return dest
 
 

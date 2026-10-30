@@ -1,6 +1,8 @@
 """Session CLI rejects unsafe selections/outputs before catalog or GPU work."""
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import numpy as np
 import onnx
@@ -35,7 +37,8 @@ def test_keypoints_cli_rejects_invalid_session_and_existing_targets(tmp_path: Pa
         main(Config(calib, Path("/mnt/nas/forbidden-keypoints"), rate=3.0, segment_ids=(key,)))
 
 
-def test_dynamic_export_preserves_posekit_source_in_default_cache(tmp_path, monkeypatch):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_dynamic_export_preserves_posekit_source_in_default_cache(tmp_path, monkeypatch, workers):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("POSEKIT_ONNX_CACHE", raising=False)
     shared = tmp_path / "posekit"
@@ -56,7 +59,26 @@ def test_dynamic_export_preserves_posekit_source_in_default_cache(tmp_path, monk
     source = shared / "model.onnx"
     onnx.save(model, source)
     before = source.read_bytes()
-    result = dynamic_yolox(source)
+    destination = tmp_path / ".cache/selfcap-curate/onnx/model_dynamic_batch_v1.onnx"
+    save = onnx.save
+    barrier = Barrier(workers)
+    saved_paths = []
+
+    def save_before_publication(model, path):
+        saved_paths.append(Path(path))
+        assert Path(path) != destination
+        assert not destination.exists()
+        save(model, path)
+        barrier.wait(timeout=10)
+
+    monkeypatch.setattr(onnx, "save", save_before_publication)
+    with ThreadPoolExecutor(workers) as pool:
+        results = list(pool.map(dynamic_yolox, [source] * workers))
+    result = results[0]
+    assert all(path == destination for path in results)
+    assert len(set(saved_paths)) == workers
+    assert all(not path.exists() for path in saved_paths)
+    onnx.checker.check_model(onnx.load(result))
     assert result.parent == tmp_path / ".cache/selfcap-curate/onnx"
     assert source.read_bytes() == before
     assert list(shared.iterdir()) == [source]
