@@ -14,6 +14,7 @@ from soma.body import SOMALayer, SOMAPoseOutput
 from torch import Tensor
 
 from selfcap_soma.catalog import Observations
+from selfcap_soma.hand_pose import HandOrientations, orientation_targets
 from selfcap_soma.landmarks import EAR_VERTICES, ear_vertices, rotation_delta
 from selfcap_soma.losses import attached_eye, body_lengths, robust_points
 from selfcap_soma.observations import coco_joint_names
@@ -55,11 +56,21 @@ class FitResult:
     """Tracked-camera to head-anchor translation, metres. Skull frame for ear mode; Quest frame for legacy eye mode."""
     bone_scales: Float32[ndarray, "1 60"]
     """Native SOMA local bone-length ratios, shared over all frames."""
+    display_twists: bool = False
+    """Whether the output surface uses procedural twist distribution."""
+    hand_orientations: bool = False
+    """Whether raw Quest bone rotations constrained this fit."""
 
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class FitOptions:
+    orientation_weight: float = 0.0
+    """Raw Quest world bone-orientation weight, after constant frame alignment."""
+    hands_only: bool = False
+    """Refine hands and forearms with body/root fixed."""
+    display_twists: bool = False
+    """Enable procedural twist distribution for final display geometry."""
     use_ears: bool = False
     """Fit COCO ears as surface landmarks and attach the headset to the skull."""
     learn_head_rotation: bool = False
@@ -111,9 +122,13 @@ def fit(
     shape_iterations: int = 60,
     options: FitOptions | None = None,
     fixed: FitResult | Calibration | None = None,
+    initial: FitResult | None = None,
+    orientations: HandOrientations | None = None,
 ) -> FitResult:
     """Fit all frames together; freeze identity after the first stage."""
     options = options or FitOptions()
+    if options.hands_only and initial is None:
+        raise ValueError("hand-only refinement requires an existing body fit")
     use_ears = options.use_ears or (fixed is not None and fixed.head_anchor == "head")
     active_components = options.shape_components if fixed is None else 128
     torch.cuda.reset_peak_memory_stats()
@@ -176,8 +191,36 @@ def fit(
         rotation: Rotation = Rotation.align_vectors(target - target.mean(axis=0), source - source_center)[0]
         initial_poses[i, 0] = rotation.as_rotvec()
         initial_translation[i] = target.mean(axis=0) - rotation.apply(source_center)
+    if initial is not None:
+        initial_poses = initial.poses.copy()
+        initial_translation = initial.translations.copy()
+    aligned = None
+    if orientations is not None:
+        aligned = orientation_targets(orientations, data.times, names, neutral_joints, neutral_transforms[0, :, :3, :3].cpu().numpy())
+        if initial is not None:
+            # Initialize rotations from measured world frames, rather than the
+            # position-only solution's arbitrary roll local minimum.
+            with torch.no_grad():
+                start_frames = (
+                    model.pose(torch.as_tensor(initial_poses, device="cuda"), fk_only=True, apply_correctives=False)
+                    .transforms[:, :, :3, :3]
+                    .cpu()
+                    .numpy()
+                )
+            desired = start_frames.copy()
+            for column, index in enumerate(aligned[0]):
+                desired[aligned[2][:, column], index + 1] = aligned[1][aligned[2][:, column], column]
+            rest_frames = neutral_transforms[0, :, :3, :3].cpu().numpy()
+            parents = model.public_joint_parent_ids.cpu().numpy()
+            for column, index in enumerate(aligned[0]):
+                parent = parents[index + 1]
+                local = rest_frames[parent] @ desired[:, parent].transpose(0, 2, 1) @ desired[:, index + 1] @ rest_frames[index + 1].T
+                valid = aligned[2][:, column]
+                initial_poses[valid, index] = Rotation.from_matrix(local[valid]).as_rotvec()
     poses: Float32[Tensor, "n 77 3"] = torch.nn.Parameter(torch.as_tensor(initial_poses, device="cuda"))
-    translations: Float32[Tensor, "n 3"] = torch.nn.Parameter(torch.as_tensor(initial_translation, device="cuda"))
+    translations: Float32[Tensor, "n 3"] = torch.nn.Parameter(
+        torch.as_tensor(initial_translation, device="cuda"), requires_grad=not options.hands_only
+    )
     if not 1 <= options.shape_components <= 128:
         raise ValueError("shape components must be in [1,128]")
     identity = torch.nn.Parameter(neutral_identity[:, :active_components].clone(), requires_grad=fixed is None)
@@ -227,6 +270,15 @@ def fit(
     soma_body = [names.index(mapping[key]) for key in range(5, 17)]
     body_columns: list[int] = [i for i, key in enumerate(coco) if key < 17]
     hand_columns: list[int] = [i for i, key in enumerate(coco) if key >= 91]
+    orientation_data = None
+    if aligned is not None:
+        orientation_data = (
+            torch.as_tensor(aligned[0] + 1, device="cuda"),
+            torch.as_tensor(aligned[1], device="cuda"),
+            torch.as_tensor(aligned[2], device="cuda"),
+        )
+        print("Quest-to-SOMA alignment mean spread deg:", float(np.median(aligned[3])), flush=True)
+    pose_mask = torch.tensor([float("Hand" in name or name in ("LeftForeArm", "RightForeArm")) for name in names], device="cuda")[None, :, None]
     start: float = perf_counter()
     for iteration in range(iterations):
         optimizer.zero_grad(set_to_none=True)
@@ -284,6 +336,10 @@ def fit(
             + 0.005 * smooth
             + 0.03 * prior
         )
+        if orientation_data is not None:
+            ids, target, valid = orientation_data
+            orientation_error = (posed.transforms[:, ids, :3, :3] - target).square().mean((-1, -2))
+            loss = loss + options.orientation_weight * (orientation_error * valid).sum() / valid.sum().clamp_min(1) / 0.03
         loss = loss + options.offset_prior * (head_offset / (0.1 if use_ears else 0.05)).square().mean()
         loss = loss + 0.02 * rotation_raw.square().mean()
         if fixed is None and warmup <= iteration < shape_end:
@@ -299,6 +355,9 @@ def fit(
         if not torch.isfinite(loss):
             raise ValueError(f"nonfinite fit at iteration {iteration}")
         loss.backward()
+        if options.hands_only:
+            assert poses.grad is not None
+            poses.grad.mul_(pose_mask)
         torch.nn.utils.clip_grad_norm_(parameters, 100.0)
         optimizer.step()
         if iteration % 50 == 0 or iteration == iterations - 1:
@@ -315,6 +374,19 @@ def fit(
         head_offset = (0.2 if use_ears else 0.1) * torch.tanh(offset_raw) if options.learn_head_offset and fixed is None else fixed_offset
         head_attachment = base_attachment @ rotation_delta(rotation_raw)
         target_rotation = head_frames @ head_attachment
+        if options.display_twists:
+            model = SOMALayer(
+                data_root=assets,
+                device="cuda",
+                identity_model_type="soma",
+                mode="torch",
+                lod="low",
+                enable_procedural_transforms=True,
+                correctives_model_path=None,
+            )
+            model.prepare_identity(
+                torch.nn.functional.pad(identity, (0, 128 - active_components)), scale_params=bone_scales, global_scale=log_scale.exp()
+            )
         meshes: list[Float32[ndarray, "b v 3"]] = []
         joints: list[Float32[ndarray, "b 77 3"]] = []
         for begin in range(0, len(data.times), 16):
@@ -346,4 +418,6 @@ def fit(
         "head" if use_ears else "eye",
         head_offset.detach().cpu().numpy(),
         bone_scales.cpu().numpy(),
+        options.display_twists,
+        orientations is not None,
     )

@@ -1575,6 +1575,7 @@ jaxtyping = "*"
 tyro = ">=0.9.1,<0.10"
 
 [feature.selfcap-soma.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
 py-soma-x = "==0.3.0"
 rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
 selfcap-soma = { path = "packages/selfcap-soma", editable = true }
@@ -1593,6 +1594,10 @@ cwd = "packages/selfcap-soma"
 
 [feature.selfcap-soma.tasks.soma-overlay]
 cmd = "python tools/overlay.py"
+cwd = "packages/selfcap-soma"
+
+[feature.selfcap-soma.tasks.soma-repair-hands]
+cmd = "python tools/repair_hands.py"
 cwd = "packages/selfcap-soma"
 
 [feature.selfcap-soma.tasks.soma-shoulders]

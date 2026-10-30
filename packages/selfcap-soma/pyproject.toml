@@ -2,7 +2,7 @@
 name = "selfcap-soma"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["numpy", "scipy", "torch", "py-soma-x==0.3.0", "rerun-sdk", "pyserde", "orjson", "tomli-w", "jaxtyping", "tyro", "opencv-python"]
+dependencies = ["numpy", "scipy", "torch", "py-soma-x==0.3.0", "rerun-sdk", "pyserde", "orjson", "tomli-w", "jaxtyping", "tyro", "opencv-python", "dataforge"]
 
 [build-system]
 requires = ["hatchling"]
@@ -23,3 +23,6 @@ addopts = "-m 'not integration and not golden'"
 paths = ["selfcap_soma", "tests"]
 min_confidence = 80
 ignore_names = ["pytestmark"]
+
+[tool.uv.sources]
+dataforge = { path = "../dataforge", editable = true }

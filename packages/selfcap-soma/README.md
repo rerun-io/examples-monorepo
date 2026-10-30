@@ -460,3 +460,47 @@ pixi run --frozen -e selfcap-soma soma-evaluate --output /tmp/soma-fit/ears-held
   --options.scale-prior 2.0 --options.learn-head-offset --options.learn-head-rotation \
   --options.use-ears --options.learn-bone-scales --options.bone-length-weight 2.0
 ```
+
+## Hand mesh repair with raw Quest orientations
+
+Confirmed cause: fitting only joint positions admitted severely twisted bone rotations. The 26-joint raw CSVs for this exact episode contain 183 columns (`ts_ns` + 26 × XYZ/XYZW), but ingest previously retained only the 21 position landmarks. The new typed `dataforge.quest_joint_poses` reader preserves all 26 positions and optional XYZW rotations; the existing ingestion API still exports its original positions, and no source dataset was re-ingested.
+
+Raw source: `/mnt/nas/datasets/exoego-self-collected/main/cut/2025-12-03/d31bf1da-c23c-4e4b-b88b-eb5c5ad20e3f/episodes/episode-001/quest/{left,right}_hand_poses.csv`. Reading this source directly is an explicit exception for orientations absent from the catalog. Timing retains the 225.7 ms Quest offset and 48 ms hand latency.
+
+Fix: estimate one fixed Quest-to-SOMA rotation per hand bone from bone direction and palm normal over the first 25 s (median alignment spread 1.01°). Initialize hand rotations from those frames, then fit a world-rotation term at weight 30 and matrix-error scale 0.03, while retaining the original Quest position weight 3 at 10 mm. Body/root, head and shoulder pose remain frozen during hand/forearm refinement. Enable SOMA procedural twists for final low-LOD skinning; public joint-centre parity is tested. Pose-corrective weights are absent from the available assets, so correctives remain off. Increasing mesh resolution alone cannot determine the missing bone rotations.
+
+Twist display alone barely helped: flipped-face p90 was 11.04% without procedural twists and 11.01% with them. Rotational constraints were necessary. Wrist-location hypothesis was not confirmed: Quest minus triangulated wrist along the forearm direction was +15.76 mm left / +5.49 mm right (positive toward the hand), not 20 mm down the forearm. No wrist offset was introduced.
+
+### Whole-segment before / after
+
+| Measure | Before | After |
+|---|---:|---:|
+| Body median/p90 mm | 22.03 / 42.84 | 22.02 / 45.57 |
+| Shoulders median/p90 mm | 29.38 / 55.03 | 28.93 / 54.23 |
+| Ears median/p90 mm | 10.34 / 21.98 | 10.01 / 21.24 |
+| Quest hands median/p90 mm | 4.73 / 11.43 | 8.29 / 16.06 |
+| OAK RGB 15-finger median/p90 px | 11.47 / 26.89 | 13.40 / 29.36 |
+| Wrist twist p90 degrees | 28.42 | 25.34 |
+| Wrist twist max degrees | 107.23 | 75.74 |
+| Finger roll p90 degrees | 158.75 | 78.14 |
+| Outside broad finger bounds % | 85.02 | 18.42 |
+| Flipped-face p90 % | 11.08 | 0.47 |
+| Collapsed-face p90 % | 1.51 | 0.60 |
+
+Position/image scores are fitting disagreements, not independent accuracy. Before is the previously registered Quest-trusting fit; after uses current catalog observations. The 15 OAK indices are 2,3,4,6,7,8,10,11,12,14,15,16,18,19,20, all finite samples without calibration trimming.
+
+Roll uses swing–twist decomposition, not Euler angles. Broad diagnostic bounds are roll >45°, side swing >35°, or flex-swing magnitude >120°. These are screening proxies, not validated clinical anatomical limits. The remaining 18.4% flags and 78° finger-roll p90 are explicitly unresolved. A flipped face has a normal opposite the rest normal transported by blended bone rotations; collapsed means area below 20% of rest. These proxies do not certify absence of self-intersection.
+
+Baseline worst frames by combined angle/collapse score: 50.622890713 and 24.415649348 s. The evaluation set also includes 39.862079571 and 4.144403454 s. Per-frame results are in `selected-metrics.json`; full diagnostic scalars are in `diagnosis-swing-twist.json`.
+
+Visual review: at both worst frames and 39.862 s, the before mesh has a pinched wrist and folded/rolled palm. The repaired wrists are continuous and the palms/fingers have recognizable hand shapes. Some creases and curl remain. Each close-up contains only the cropped hand/forearm meshes, before on the left and after on the right; the open cut at the upper forearm is the deliberate crop boundary.
+
+Artifacts in `/tmp/soma-fit/hand-repair-final/`: `hands-50.623.png`, `hands-24.416.png`, `hands-39.862.png`, `oak-snapshot.png`, `fit.rrd`, `summary.json`, `selected-metrics.json`, `diagnosis-swing-twist.json`, and the registered segment RRD.
+
+Only the `soma` layer for this segment in `selfcap-post-dev` was replaced. Coverage remains 0.208324653–182.117411775 s: 4,367 joint/overlay frames, 1,457 meshes with normals. Layer size 176,458,543 bytes (168.28 MiB). Final fit/mesh evaluation took 41.67 s, 9.54 ms/frame, with 562.77 MiB peak allocated GPU memory; catalog reads, orientation calibration and diagnostics are excluded. The GPU was shared.
+
+Validation: five targeted reader/frame/skin tests passed; the existing dataforge clock/mapping compatibility test passed; targeted typechecking and Ruff passed. No full gate. The lockfile only adds the existing editable dataforge package to the SOMA environments; other solves are unchanged.
+
+Reproduce with `pixi run --frozen -e selfcap-soma soma-repair-hands`, then export with `soma-overlay --source /tmp/soma-fit/hand-repair-final/fit.rrd --output <layer.rrd>`. Registration remains a separate authorized action.
+
+OAK pixel evidence uses `oak-snapshot.png`, an isolated native Rerun rendering of the catalog-decoded RGB frame at 39.835666282 s and the latest registered SOMA projection at 39.831673680 s (cursor 39.862079571 s). The current catalog blueprint did not display the 2D SOMA layer even though its samples were queryable. Explicit-frame and draw-order experiments did not resolve this and were removed; catalog 2D visibility remains an open viewer issue. The isolated image shows residual finger/wrist misalignment, consistent with the 13.4 px score.

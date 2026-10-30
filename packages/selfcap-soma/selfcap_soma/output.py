@@ -102,8 +102,11 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
             "Training residuals, not independent accuracy measurements.",
             "Headset attachment is estimated from this segment; ear landmarks are hand-selected low-LOD surface vertices.",
             "Shared native identity, global scale and optional body bone ratios; no hand PCA or learned pose prior.",
-            "No foot surface terms, contact model, image evidence, twist supervision or uncertainty estimate.",
-            "Low-LOD mesh with procedural twists and pose correctives disabled.",
+            "No foot surface terms, contact model, image evidence or uncertainty estimate.",
+            "Quest bone orientations constrained." if result.hand_orientations else "No hand bone orientation supervision.",
+            "Low-LOD mesh; procedural twists enabled, pose correctives unavailable."
+            if result.display_twists
+            else "Low-LOD mesh with procedural twists and pose correctives disabled.",
             "Temporal prior is timestamp-scaled velocity change in translation and axis-angle parameters.",
         ),
     )
