@@ -8,7 +8,7 @@ import pytest
 from onnx import helper, numpy_helper
 
 from selfcap_curate.apis.keypoints import Config, main
-from selfcap_curate.keypoints_gpu import dynamic_yolox
+from selfcap_curate.keypoints_gpu import dynamic_yolox, fp16_trunk
 
 
 def test_keypoints_cli_rejects_invalid_session_and_existing_targets(tmp_path: Path):
@@ -60,6 +60,31 @@ def test_dynamic_export_preserves_posekit_source_in_default_cache(tmp_path, monk
     assert result.parent == tmp_path / ".cache/selfcap-curate/onnx"
     assert source.read_bytes() == before
     assert list(shared.iterdir()) == [source]
+
+
+def test_fp16_trunk_is_cached_beside_the_other_rewrites_and_leaves_the_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("POSEKIT_ONNX_CACHE", str(tmp_path / "cache"))
+    weight = numpy_helper.from_array(np.ones((1, 1, 1, 1), dtype=np.float32), name="w")
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Conv", ["input", "w"], ["c"]), helper.make_node("Sigmoid", ["c"], ["output"])],
+            "conv-then-tail",
+            [helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1, 1, 2, 2])],
+            [helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1, 1, 2, 2])],
+            [weight],
+        ),
+        opset_imports=[helper.make_opsetid("", 13)],
+    )
+    source = tmp_path / "rtmw.onnx"
+    onnx.save(model, source)
+    before = source.read_bytes()
+    result = fp16_trunk(source)
+    assert result == tmp_path / "cache/rtmw_fp16trunk_v1.onnx"
+    assert source.read_bytes() == before
+    assert [t.data_type for t in onnx.load(result).graph.initializer] == [onnx.TensorProto.FLOAT16]
+    written = result.stat().st_mtime_ns
+    assert fp16_trunk(source) == result and result.stat().st_mtime_ns == written
+    assert sorted(path.name for path in result.parent.iterdir()) == [result.name]
 
 
 def test_rate_is_required(tmp_path):

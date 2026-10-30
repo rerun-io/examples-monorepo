@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -21,6 +22,7 @@ from torch import Tensor
 from torchcodec import FrameBatch
 from torchcodec.decoders import VideoDecoder
 from trtkit.backends import TensorRtBackendConfig
+from trtkit.onnx_precision import fp16_conv_trunk
 
 from selfcap_curate.catalog_io import Segment, read_phone_videos
 from selfcap_curate.keypoints import Keypoints2D, ViewDetections
@@ -33,6 +35,8 @@ TRACK_MIN_KEYPOINTS: int = 8
 """A track survives while its pose has at least this many keypoints above 0.3."""
 TRACK_CHUNKS: int = 8
 """Independent time chunks tracked in lockstep per phone, so one RTMW call carries ~phones x chunks crops, not ~phones."""
+TRACK_DECODE_BATCH: int = 4
+"""Frames per decode call; a stream holds the batch in use plus one decoding ahead, 8 frames as one batch of 8 held before."""
 
 
 def pose_boxes(
@@ -184,19 +188,56 @@ def detect_tracked(
     each chunk starts with a detection. Track state and results stay on the GPU until one copy per phone at the end.
     """
     phones: list[str] = list(plan.videos)
-    n, device = len(plan.times), torch.device("cuda")
+    n: int = len(plan.times)
     bounds: Int64[ndarray, "k"] = np.unique(np.linspace(0, n, TRACK_CHUNKS + 1).round().astype(np.int64))
-    owner_phone, first_tick, length, sources, wanted = [], [], [], [], []
+    # One decode thread per phone owns that phone's chunk decoders (a CUDA decoder must stay on the thread that made it) and
+    # decodes each stream one batch ahead, so both NVDEC engines work while this thread runs YOLOX and RTMW.
+    threads = [ThreadPoolExecutor(1, thread_name_prefix=f"decode-{i}") for i in range(len(phones))]
+    owner_phone, first_tick, length, wanted, opened = [], [], [], [], []
     for p_index, (phone, video) in enumerate(plan.videos.items()):
         fps: int = round(1e9 / float(np.median(np.diff(video.t_ns))))
-        data = wrap_mp4(video.samples, video.keyframes, fps, video.codec)
-        for begin, stop in zip(bounds[:-1], bounds[1:], strict=True):
-            decoder = VideoDecoder(data, device="cuda", dimension_order="NHWC", seek_mode="exact")
+        chunks = [plan.indices[phone][begin:stop] for begin, stop in zip(bounds[:-1], bounds[1:], strict=True)]
+        opened.append(threads[p_index].submit(open_chunk_sources, video, fps, chunks))
+        for begin, chunk in zip(bounds[:-1], chunks, strict=True):
             owner_phone.append(p_index)
             first_tick.append(int(begin))
-            length.append(int(stop - begin))
-            sources.append(decode_wanted(decoder, plan.indices[phone][begin:stop], batch=8, chunk=8))  # ~100 MB of frames per stream
-            wanted.append(plan.indices[phone][begin:stop].astype(np.float64) / fps)
+            length.append(len(chunk))
+            wanted.append(chunk.astype(np.float64) / fps)
+    per_phone: list[list[Iterator[FrameBatch]]] = [future.result() for future in opened]
+    sources: list[Iterator[FrameBatch]] = [source for phone_sources in per_phone for source in phone_sources]
+    try:
+        return track_streams(plan, detector, pose, refresh, threads, sources, owner_phone, first_tick, length, wanted)
+    finally:
+        sources.clear()
+        for thread, phone_sources in zip(threads, per_phone, strict=True):
+            thread.submit(phone_sources.clear).result()  # decoders die on the thread that made them
+            thread.shutdown(wait=True, cancel_futures=True)
+
+
+def open_chunk_sources(video: CatalogVideo, fps: int, chunks: list[Int64[ndarray, "c"]]) -> list[Iterator[FrameBatch]]:
+    """One CUDA decoder per time chunk, created on the calling (decode) thread."""
+    data = wrap_mp4(video.samples, video.keyframes, fps, video.codec)
+    return [
+        decode_wanted(VideoDecoder(data, device="cuda", dimension_order="NHWC", seek_mode="exact"), chunk, batch=TRACK_DECODE_BATCH, chunk=TRACK_DECODE_BATCH)
+        for chunk in chunks
+    ]
+
+
+def track_streams(
+    plan: FramePlan,
+    detector: Callable[[Tensor], BoxDetections],
+    pose: Callable[[Tensor, BoxDetections], Keypoints2d],
+    refresh: int,
+    threads: list[ThreadPoolExecutor],
+    sources: list[Iterator[FrameBatch]],
+    owner_phone: list[int],
+    first_tick: list[int],
+    length: list[int],
+    wanted: list[Float64[ndarray, "c"]],
+) -> dict[str, ViewDetections]:
+    """The lockstep tracking loop of detect_tracked over prefetched decode streams."""
+    phones: list[str] = list(plan.videos)
+    n, device = len(plan.times), torch.device("cuda")
     streams, phone_of = len(sources), torch.as_tensor(owner_phone, device=device)
     start_of = torch.as_tensor(first_tick, device=device)
     xy = torch.full((len(phones), n, 3, 133, 2), float("nan"), device=device)
@@ -208,14 +249,17 @@ def detect_tracked(
     lost = torch.zeros(streams, dtype=torch.bool, device=device)
     last_detect: Int64[ndarray, "s"] = np.full(streams, -(2**40))
     held: list[FrameBatch | None] = [None] * streams
+    ahead: list[Future[FrameBatch]] = [threads[owner_phone[stream]].submit(next, sources[stream]) for stream in range(streams)]
     for step in range(max(length)):
         active: Int64[ndarray, "a"] = np.flatnonzero(step < np.asarray(length))
         for stream in active:
-            if step % 8 == 0:
-                held[stream] = next(sources[stream])
+            if step % TRACK_DECODE_BATCH == 0:
+                held[stream] = ahead[stream].result()
+                if step + TRACK_DECODE_BATCH < length[stream]:
+                    ahead[stream] = threads[owner_phone[stream]].submit(next, sources[stream])
                 if not np.allclose(held[stream].pts_seconds.cpu().numpy(), wanted[stream][step : step + len(held[stream])], rtol=0.0, atol=1e-9):
                     raise ValueError(f"{phones[owner_phone[stream]]}: decoder changed selected source timestamps")
-        frames: UInt8[Tensor, "a h w 3"] = torch.stack([held[stream].data[step % 8] for stream in active])
+        frames: UInt8[Tensor, "a h w 3"] = torch.stack([held[stream].data[step % TRACK_DECODE_BATCH] for stream in active])
         height, width = int(frames.shape[1]), int(frames.shape[2])
         act = torch.as_tensor(active, device=device)
         need: Int64[ndarray, "m"] = np.flatnonzero((~alive[act].any(1) | lost[act]).cpu().numpy() | (step - last_detect[active] >= refresh))
@@ -280,12 +324,27 @@ def dynamic_yolox(source: Path) -> Path:
     return dest
 
 
+def fp16_trunk(source: Path) -> Path:
+    """trtkit's fp16 conv trunk of an fp32 graph, cached beside dynamic_yolox's rewrite (written whole, then renamed).
+
+    On cc808233 ep001 it cut detect from 9.7 to 7.4 s; 3D moved 1.5 mm median (p90 5.5 mm) and jitter stayed 1.68 mm.
+    """
+    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", "~/.cache/selfcap-curate/onnx")).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    dest: Path = directory / (source.stem + "_fp16trunk_v1.onnx")
+    if not dest.exists():
+        partial = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+        onnx.save(fp16_conv_trunk(onnx.load(source)), str(partial))
+        partial.replace(dest)
+    return dest
+
+
 @cache
 def keypoint_models() -> tuple[YoloxDetector, RtmPose2d]:
-    """Use installed posekit/trtkit cache settings, YOLOX .3 and RTMW-x; built once per process."""
+    """Use installed posekit/trtkit cache settings, YOLOX .3 and RTMW-x with fp16 conv trunks; built once per process."""
     detector = YoloxDetectorConfig(
-        backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8), score_thr=0.3, onnx_transform=dynamic_yolox
+        backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8), score_thr=0.3, onnx_transform=lambda path: fp16_trunk(dynamic_yolox(path))
     ).setup()
     # Tracking sends up to phones x TRACK_CHUNKS crops per call; the 1-8-32 profile takes them in one engine call.
-    pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=8)).setup()
+    pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=8), onnx_transform=fp16_trunk).setup()
     return detector, pose
