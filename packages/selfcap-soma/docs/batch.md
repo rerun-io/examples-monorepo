@@ -1,5 +1,8 @@
 # Overnight SOMA batch runner
 
+Current body temporal defaults and validation: [body smoothing](body-smoothing.md).
+The performance table below describes the original v1 run.
+
 Run from the `selfcap-curate/soma-fit` worktree on the 5090 host. The prod
 `selfcap-soma` environment is already installed. No Sapiens inference is run.
 

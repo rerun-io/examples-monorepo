@@ -48,3 +48,19 @@ def test_rotation_temporal_term_penalizes_jitter_but_allows_steady_turns():
     cost.backward()
     assert torch.isfinite(jitter.grad).all()
     assert rotation_temporal_penalty(rotations([0.0] * 5), dt) == 0
+
+
+def test_body_acceleration_uses_timestamps_and_does_not_bridge_gaps():
+    from selfcap_soma.losses import body_acceleration_penalty
+
+    times = torch.tensor([0.0, 0.04, 0.09, 0.13])
+    points = times[:, None, None].expand(-1, 2, 3).clone().requires_grad_()
+    assert body_acceleration_penalty(points, times[1:] - times[:-1]) < 1e-10
+    jitter = points.detach().clone()
+    jitter[1, 0, 0] += 0.02
+    jitter.requires_grad_()
+    cost = body_acceleration_penalty(jitter, times[1:] - times[:-1])
+    assert cost > 1.0
+    cost.backward()
+    assert torch.isfinite(jitter.grad).all()
+    assert body_acceleration_penalty(jitter, torch.full((3,), 0.2)) == 0

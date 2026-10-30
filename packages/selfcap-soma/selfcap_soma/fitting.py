@@ -18,7 +18,7 @@ from selfcap_soma.catalog import Observations
 from selfcap_soma.feet import foot_pose_penalty, symmetry_penalty
 from selfcap_soma.hand_pose import HandOrientations, orientation_targets
 from selfcap_soma.landmarks import EAR_VERTICES, FOOT_VERTICES, ear_vertices, foot_vertices, rotation_delta
-from selfcap_soma.losses import attached_eye, body_lengths, robust_points, rotation_temporal_penalty
+from selfcap_soma.losses import attached_eye, body_acceleration_penalty, body_lengths, robust_points, rotation_temporal_penalty
 from selfcap_soma.observations import coco_joint_names
 from selfcap_soma.upper_body import lower_body_mask, mesh_selection, visible_joint_mask
 
@@ -88,6 +88,10 @@ class FitOptions:
     """Keep hip-to-knee and descendant local rotations at the rest pose."""
     torso_temporal_weight: float = 0.0
     """World-space pelvis/chest angular-velocity-change penalty."""
+    body_acceleration_weight: float = 0.0
+    """World position acceleration on root, spine, neck and shoulder joints only."""
+    final_learning_rate: float = 0.025
+    """Final pose-pass Adam rate, reached by decay during the second half."""
     limb_symmetry_weight: float = 0.0
     """Shared-shape penalty on left/right arm, forearm, thigh and shin lengths."""
     head_mode: Literal["quest", "ears", "ears-rotation"] = "quest"
@@ -361,8 +365,15 @@ def fit(
         pose_mask = torch.ones_like(pose_mask)
         if options.freeze_legs:
             pose_mask[:, leg_indices] = 0.0
+    body_chain = [
+        names.index(name) for name in ("Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "LeftShoulder", "RightShoulder", "LeftArm", "RightArm")
+    ]
     start: float = perf_counter()
     for iteration in range(iterations):
+        if fixed is not None and iteration >= iterations // 2:
+            fraction = (iteration - iterations // 2) / max(1, iterations - 1 - iterations // 2)
+            for group in optimizer.param_groups:
+                group["lr"] = 0.025 * (options.final_learning_rate / 0.025) ** fraction
         optimizer.zero_grad(set_to_none=True)
         if fixed is None and warmup <= iteration < shape_end:
             bone_scales = 1.0 + 0.3 * torch.tanh(bone_raw) * bone_mask
@@ -428,6 +439,8 @@ def fit(
             + 0.005 * smooth
             + 0.03 * prior
         )
+        if options.body_acceleration_weight > 0.0:
+            loss = loss + options.body_acceleration_weight * body_acceleration_penalty(posed.joints[:, body_chain], dt)
         if options.torso_temporal_weight > 0.0:
             loss = loss + options.torso_temporal_weight * rotation_temporal_penalty(
                 posed.transforms[:, [names.index("Hips") + 1, names.index("Chest") + 1], :3, :3], dt

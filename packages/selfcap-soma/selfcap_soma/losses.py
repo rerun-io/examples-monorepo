@@ -35,3 +35,15 @@ def rotation_temporal_penalty(rotations: Float[Tensor, "n k 3 3"], dt: Float[Ten
     change = (velocity[1:] - velocity[:-1]) / 0.5
     valid = (dt[1:] > 0) & (dt[1:] <= 0.1) & (dt[:-1] > 0) & (dt[:-1] <= 0.1)
     return (change.square().mean(dim=(1, 2, 3)) * valid).sum() / valid.sum().clamp_min(1)
+
+
+def body_acceleration_penalty(points: Float[Tensor, "n j 3"], dt: Float[Tensor, "interval"]) -> Float[Tensor, ""]:
+    """Body-only world acceleration, normalized to a 4 mm second difference at 24 Hz.
+
+    Actual intervals handle irregular sampling. Gaps above 100 ms do not couple.
+    """
+    velocity = (points[1:] - points[:-1]) / dt[:, None, None].clamp_min(1e-6)
+    acceleration = 2.0 * (velocity[1:] - velocity[:-1]) / (dt[1:] + dt[:-1])[:, None, None].clamp_min(1e-6)
+    valid = (dt[1:] > 0) & (dt[1:] <= 0.1) & (dt[:-1] > 0) & (dt[:-1] <= 0.1)
+    normalized = acceleration / (24.0**2 * 0.004)
+    return (normalized.square().sum(-1).mean(-1) * valid).sum() / valid.sum().clamp_min(1)

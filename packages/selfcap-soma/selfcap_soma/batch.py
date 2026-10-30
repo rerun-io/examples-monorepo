@@ -22,8 +22,9 @@ from selfcap_soma.output import save
 from selfcap_soma.overlay import Config as OverlayConfig
 from selfcap_soma.overlay import main as export
 from selfcap_soma.shoulders import subset
+from selfcap_soma.temporal import group_jitter
 
-VERSION = "soma-batch-v1-fresh-shape"
+VERSION = "soma-batch-v2-body-acceleration"
 SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 
 
@@ -51,6 +52,12 @@ class Config:
     """Downloaded SOMA model files."""
     iterations: int = 600
     """Full-rate pose iterations after freezing shape."""
+    body_acceleration_weight: float = 1.0
+    """Body-chain acceleration weight; excludes elbows, wrists and fingers."""
+    torso_temporal_weight: float = 1.0
+    """Root/chest rotation-velocity-change weight."""
+    final_learning_rate: float = 0.001
+    """Adam learning rate at the end of the pose pass."""
     shape_iterations: int = 300
     """Shape-update iterations within the 600-step sparse calibration pass."""
     publish: bool = True
@@ -153,7 +160,9 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     data = read_window(config.catalog_url, config.dataset, segment, 0.0, float(end + 0.1), 1, config.exo_source)
     raw = resolve_quest_directory(config.raw_root, segment)
     digest = hashlib.sha256()
-    digest.update(f"{VERSION}:{config.exo_source}:{config.iterations}:{config.shape_iterations}".encode())
+    digest.update(
+        f"{VERSION}:{config.exo_source}:{config.iterations}:{config.shape_iterations}:{config.body_acceleration_weight}:{config.torso_temporal_weight}:{config.final_learning_rate}".encode()
+    )
     for array in (data.times, data.exo, data.confidence, data.hands, data.head_rotations):
         digest.update(array.tobytes())
     # Camera/calibration changes invalidate overlays even if 3D inputs stay unchanged.
@@ -213,7 +222,9 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
                 freeze_legs=True,
                 leg_support_weight=0.0,
                 hip_landmark_weight=0.15,
-                torso_temporal_weight=0.1,
+                torso_temporal_weight=config.torso_temporal_weight,
+                body_acceleration_weight=config.body_acceleration_weight,
+                final_learning_rate=config.final_learning_rate,
                 orientation_weight=30.0,
             ),
             fixed=calibration,
@@ -223,6 +234,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         state.timings.peak_gpu_mib = max(state.timings.peak_gpu_mib, result.peak_bytes / 2**20)
         began = perf_counter()
         save(directory, data, result, 39.862079571, 3, upper_body_only=True)
+        (directory / "jitter.json").write_text(to_json(group_jitter(result.joints, data.times, result.names)))
         state.timings.write_s = perf_counter() - began
         state.phase = "fit"
         write_checkpoint(state_path, state)

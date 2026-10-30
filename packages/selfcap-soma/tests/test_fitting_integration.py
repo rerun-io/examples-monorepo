@@ -74,7 +74,7 @@ def test_shared_shape_freeze_keeps_repeated_pose_gradients_finite():
         assets,
         iterations=4,
         shape_iterations=1,
-        options=FitOptions(freeze_legs=True, leg_support_weight=0.0, hip_landmark_weight=0.15, display_twists=True),
+        options=FitOptions(freeze_legs=True, leg_support_weight=0.0, hip_landmark_weight=0.15, display_twists=True, body_acceleration_weight=1.0, final_learning_rate=0.001),
         fixed=calibration,
         initial=replace(result, poses=bent),
     )
