@@ -5,6 +5,7 @@ high-rate gyro samples, never against another video's frame-grid peaks.
 """
 
 import os
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cache
@@ -106,12 +107,12 @@ def tracking_pool() -> ThreadPoolExecutor:
     return ThreadPoolExecutor(max(4, (os.cpu_count() or 8) - 4))
 
 
-GRAY_BATCH: int = 32
-"""Frames per float-RGB luma batch (~0.8 GB per 1080p video), small enough for several sessions to share one GPU."""
+GRAY_BATCH: int = 16
+"""Frames per float-RGB luma batch (~0.4 GB per 1080p video); links decodes three videos at once in every session sharing the GPU."""
 
 
-def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> UInt8[Tensor, "n h w"]:
-    """CUDA-decode samples first..last from the keyframe at or before first; BT.601 luma, resized by scale."""
+def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> Iterator[UInt8[Tensor, "b h w"]]:
+    """CUDA-decode samples first..last from the keyframe at or before first; BT.601 luma, resized by scale, one batch at a time."""
     from torchcodec.decoders import VideoDecoder
 
     key: int = max(i for i in range(first + 1) if video.keyframes[i])
@@ -119,14 +120,12 @@ def gray_frames(video: CatalogVideo, first: int, last: int, scale: float) -> UIn
         wrap_mp4(video.samples[key : last + 1], video.keyframes[key : last + 1], 30, codec=video.codec), device="cuda", seek_mode="exact"
     )
     luma: Float32[Tensor, "1 3 1 1"] = torch.tensor([0.299, 0.587, 0.114], device="cuda").view(1, 3, 1, 1)
-    batches: list[Tensor] = []
     for begin in range(first - key, last - key + 1, GRAY_BATCH):
         rgb: UInt8[Tensor, "b 3 h w"] = decoder.get_frames_in_range(begin, min(begin + GRAY_BATCH, last - key + 1)).data
         size: tuple[int, int] = (int(round(rgb.shape[2] * scale)), int(round(rgb.shape[3] * scale)))
         # Antialiased bilinear is the closest GPU match to swscale's default; the tracker reacts to the filter by a few ms.
         gray = F.interpolate((rgb.float() * luma).sum(1, keepdim=True), size=size, mode="bilinear", align_corners=False, antialias=True)
-        batches.append(gray.round_().clamp_(0, 255).to(torch.uint8)[:, 0])
-    return torch.cat(batches)
+        yield gray.round_().clamp_(0, 255).to(torch.uint8)[:, 0]
 
 
 def rotation_speed(
@@ -145,10 +144,18 @@ def rotation_speed(
         return SpeedSeries(np.empty(0), np.empty(0))
     first, last = int(inside[0]), int(inside[-1])
     scale: float = 512.0 / width_px
-    gray: UInt8[Tensor, "n h w"] = gray_frames(video, first, last, scale)
-    height: int = gray.shape[1]
-    differences: Float64[ndarray, "m"] = (gray[1:].to(torch.int16) - gray[:-1].to(torch.int16)).abs().float().mean((1, 2)).double().cpu().numpy()
-    frames: UInt8[ndarray, "n h w"] = gray.cpu().numpy()
+    # Differences and the CPU copy go batch by batch (carrying the previous frame), so the window never sits whole on the GPU.
+    batches: list[UInt8[ndarray, "b h w"]] = []
+    steps: list[Tensor] = []
+    previous: UInt8[Tensor, "p h w"] | None = None
+    for gray in gray_frames(video, first, last, scale):
+        stack: UInt8[Tensor, "s h w"] = gray if previous is None else torch.cat([previous, gray])
+        steps.append((stack[1:].to(torch.int16) - stack[:-1].to(torch.int16)).abs().float().mean((1, 2)))
+        previous = gray[-1:]
+        batches.append(gray.cpu().numpy())
+    differences: Float64[ndarray, "m"] = torch.cat(steps).double().cpu().numpy()
+    frames: UInt8[ndarray, "n h w"] = np.concatenate(batches)
+    height: int = frames.shape[1]
     times: Float64[ndarray, "n"] = t[first : last + 1]
     if changes is not None:
         changes.extend(zip(times[1:].tolist(), differences.tolist(), strict=True))

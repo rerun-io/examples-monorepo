@@ -26,7 +26,7 @@ pixi run -e selfcap-curate --frozen selfcap-align \
 Selection must belong to one session; no catalog enumeration is performed.
 Alignment reads presented-time bases containing Quest hands, factory metadata,
 the session UUID and ego `first_frame_idx`. Older incomplete bases need conversion.
-Models use Sapiens2 0.4B and YOLOX through posekit/trtkit TensorRT, batch eight.
+Models use Sapiens2 0.4B (batch four) and YOLOX (batch eight) through posekit/trtkit TensorRT.
 The CLIs use per-machine model caches; callers can set cache environment variables for isolation. Existing targets, NAS output
 and output beneath the input base directory are refused.
 
