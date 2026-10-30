@@ -27,6 +27,10 @@ class Config:
     """Optional text file, one segment id or unprefixed key per line."""
     catalog_url: str = CATALOG_URL
     """Catalog with the as-cut bases and any camera-50 donor; never registered or swapped here."""
+    oak_observations: Path | None = None
+    """Optional directory of dense EgoHand observation Parquets, passed to OAK calibration."""
+    oak_free_rotation: bool = False
+    """Fit the supplied EgoHand observations with free rotation instead of the production gyro rotation."""
 
 
 def main(config: Config) -> None:
@@ -59,6 +63,8 @@ def main(config: Config) -> None:
                     key_file=config.key_file,
                     catalog_url=server.url(),
                     donor_catalog_url=config.catalog_url,
+                    oak_observations=config.oak_observations,
+                    oak_free_rotation=config.oak_free_rotation,
                 ),
                 session_videos=session_videos,
             )

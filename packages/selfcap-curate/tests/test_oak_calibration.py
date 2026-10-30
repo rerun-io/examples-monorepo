@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+import cv2
 import numpy as np
 import pytest
 from dataforge.datasets.selfcap_raw import Distortion, FactoryCalibration, FactoryExtrinsic
@@ -149,3 +150,37 @@ def test_hand_pnp_recovers_mount_with_fixed_gyro_rotation(flag, latency_ms, monk
 def test_wrong_camera_borrow_is_unresolved() -> None:
     wrong = FactoryExtrinsic("device_to_left", np.eye(3), np.zeros(3), "51")
     assert quest_block(factory(), camera50=wrong, rig_T_device=np.eye(4)).mode == "faulty-unresolved"
+
+
+@pytest.mark.parametrize("fix_rotation", [False, True])
+def test_weighted_hand_mount_rejects_base_joints_and_trims_bad_finger(fix_rotation, fixture_sync) -> None:
+    times = np.arange(0.0, 6.0, 0.01)
+    geometry = np.random.default_rng(42).normal(scale=0.03, size=(21, 3)) + [0.0, 0.0, 0.65]
+    positions = np.full((len(times), 133, 3), np.nan)
+    for base, shift in ((91, -0.12), (112, 0.12)):
+        positions[:, base : base + 21] = geometry + np.stack(
+            [shift + 0.03 * np.sin(times), 0.03 * np.cos(times), 0.05 * np.sin(0.7 * times)], axis=1
+        )[:, None]
+    raw = CatalogHands(times, positions, times, np.zeros((len(times), 3)), np.tile([0.0, 0.0, 0.0, 1.0], (len(times), 1)))
+    sync = replace(fixture_sync(), offsets_ms={"quest_pose": 0.0, "oak_imu": 0.0}, flags=[])
+    motion = session_episode(sync, raw, times, np.zeros((len(times), 3)), quest=load_quest_hands(raw))
+    intrinsic = replace(
+        factory(False).intrinsics[0],
+        distortion=Distortion((1.3, 0.3, 0.001, -0.0005, 0.1, 1.2, 0.4, 0.2, 0.0, 0.0, 0.0, 0.0, 0.003, -0.004)),
+    )
+    expected = transform(Rotation.from_euler("xyz", [0.1, -0.03, 0.02]).as_matrix(), np.array([0.03, 0.04, -0.02]))
+    indices = np.arange(20, len(times) - 20, 5)
+    xyz = positions[indices].reshape(-1, 3)
+    camera = (xyz - expected[:3, 3]) @ expected[:3, :3]
+    xy = cv2.projectPoints(camera, np.zeros(3), np.zeros(3), intrinsic_matrix(intrinsic), np.array(intrinsic.distortion.coefficients))[0]
+    xy = xy.reshape(len(indices), 133, 2)
+    xy[:, [91, 92, 96, 100, 104, 108, 112, 113, 117, 121, 125, 129]] = 1000.0
+    xy[:, 93] += [80.0, 0.0]  # A persistently wrong finger survives the speed gate but must be trimmed.
+    scores = np.where(np.isfinite(xy).all(-1), 0.9, 0.0)
+    result = solve_oak(
+        "synthetic", [replace(motion, oak=OakDetections(times[indices] - 0.048, xy, scores))], intrinsic, "oak",
+        expected[:3, :3] if fix_rotation else None, weighted=True,
+    )
+    assert result.ok and result.median_px < 0.01
+    assert result.observation_source == "egohand"
+    np.testing.assert_allclose(result.questrig_T_rgb, expected, atol=1e-4)

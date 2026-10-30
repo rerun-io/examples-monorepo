@@ -5,6 +5,8 @@ Scope: `selfcap__2025-12-03__d31bf1da__ep001` only.
 
 The subsequent [intrinsics test](oak-quest-d31bf1da-intrinsics.md) adds weighted
 focal/principal-point fits and independent mono-left inference.
+The latest [visible-finger fit](oak-quest-d31bf1da-dense-hands.md) implements a
+gyro-fixed dense-observation option under the revised acceptance criteria.
 
 ## Decision
 

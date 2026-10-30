@@ -3,13 +3,34 @@
 from dataclasses import replace
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from dataforge.catalog_swap import swap_layer
 from rerun.chunk import RrdReader
 
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_phone_detections, read_time_sync
-from selfcap_curate.detection_io import write_detections_layer
+from selfcap_curate.detection_io import read_oak_observations, write_detections_layer
 from selfcap_curate.records import PhoneDetections, SelfcapLayout
+
+
+def test_oak_observations_preserve_pixels_and_reject_another_segment(tmp_path):
+    path = tmp_path / "hands.parquet"
+    xy = np.full((3, 133, 2), np.nan)
+    xy[:, 91:133] = 200.0
+    scores = np.zeros((3, 133))
+    scores[:, 91:133] = 0.9
+    pq.write_table(pa.table({
+        "segment_id": ["segment-a"] * 3,
+        "video_time": pa.array([100_000_000, 150_000_000, 200_000_000], type=pa.int64()),
+        "xy": xy.tolist(), "scores": scores.tolist(),
+    }), path)
+    result = read_oak_observations(path, "segment-a")
+    np.testing.assert_allclose(result.video_time, [0.1, 0.15, 0.2])
+    np.testing.assert_equal(result.xy, xy)
+    np.testing.assert_equal(result.scores, scores)
+    with pytest.raises(ValueError, match="segment-a"):
+        read_oak_observations(path, "segment-b")
 
 
 def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixture_sync):

@@ -194,7 +194,7 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
     monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *_args, **_kwargs: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
     monkeypatch.setattr(api, "calibrate", lambda *_args: state.exo)
     monkeypatch.setattr(api, "gyro_mount", lambda *_args: GyroFit("test", False))
-    monkeypatch.setattr(api, "solve_oak", lambda *_args: state.oak)
+    monkeypatch.setattr(api, "solve_oak", lambda *_args, **_kwargs: state.oak)
     monkeypatch.setattr(api, "oak_stereo", lambda *_args: state.stereo)
     monkeypatch.setattr(api, "oak_centre", lambda *_args: None)
     config = api.Config(tmp_path / "output", (f"selfcap__{motion.sync.key}",))
