@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -32,7 +33,40 @@ PARENT='773be1d3-a483-4a1c-9fcf-6c76b243dcec'
 TZ=ZoneInfo('America/Chicago')
 
 
-def config():return json.loads(CONFIG.read_text())
+_last_config = {}
+
+
+def config():
+    """Keep workers alive across transient legacy config truncation."""
+    for attempt in range(3):
+        try:
+            value=json.loads(CONFIG.read_text())
+            if not isinstance(value,dict):raise ValueError('config must be a JSON object')
+            _last_config[CONFIG]=value
+            return value.copy()
+        except (OSError,json.JSONDecodeError,ValueError):
+            if attempt<2:time.sleep(0.02)
+    if CONFIG in _last_config:
+        print('CONFIG_READ_RETRY using last complete configuration',flush=True)
+        return _last_config[CONFIG].copy()
+    raise ValueError(f'{CONFIG}: no complete configuration available')
+
+
+def write_config(value):
+    """Publish a complete document. Operator writers must use this protocol too."""
+    with tempfile.NamedTemporaryFile(mode='w',dir=CONFIG.parent,prefix=f'.{CONFIG.name}-',delete=False) as stream:
+        temporary=Path(stream.name)
+        try:
+            stream.write(json.dumps(value,indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(CONFIG)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 def connect():
     c=sqlite3.connect(DB,timeout=30);c.row_factory=sqlite3.Row;c.execute('pragma journal_mode=WAL');return c
@@ -52,7 +86,7 @@ def initialize():
     ROOT.mkdir(exist_ok=True)
     if not CONFIG.exists():
         today=dt.datetime.now(TZ).date()
-        CONFIG.write_text(json.dumps({'limit':1,'label_command':None,'soma_command':None,'label_workers':2,'soma_workers':2,'max_inflight':40,'label_cutoff':dt.datetime.combine(today,dt.time(7),TZ).timestamp(),'s1_cutoff':dt.datetime.combine(today,dt.time(7,30),TZ).timestamp()},indent=2))
+        write_config({'limit':1,'label_command':None,'soma_command':None,'label_workers':2,'soma_workers':2,'max_inflight':40,'label_cutoff':dt.datetime.combine(today,dt.time(7),TZ).timestamp(),'s1_cutoff':dt.datetime.combine(today,dt.time(7,30),TZ).timestamp()})
     priorities=[line.split('\\t')[0].split()[0] for line in Path('/tmp/selfcap-5090/validation-10.tsv').read_text().splitlines() if line.strip()]
     queue=list(dict.fromkeys(priorities+Path('/tmp/selfcap-night/queue.txt').read_text().split()))
     with connect() as c:
@@ -302,7 +336,7 @@ def controller():
             if done==cfg['limit'] and not cfg.get('redecision_pending',False) and not any(json.loads(r['info']).get('cleanup_pending') for r in connect().execute("select info from jobs where ordinal<?",(cfg['limit'],))):
                 for role,count in [('gpu',2),('label',3),('s2',3),('soma',6)]:
                     for index in range(count):subprocess.run(['systemctl','--user','stop',f'selfcap-night2-{role}-{index}'],check=False)
-                finished=config();finished['full_go']=False;finished['corpus_paused']=True;CONFIG.write_text(json.dumps(finished,indent=2))
+                finished=config();finished['full_go']=False;finished['corpus_paused']=True;write_config(finished)
                 return
         if cfg.get('full_go'):
             with connect() as c:
@@ -321,7 +355,7 @@ def controller():
                 if not stage_paused(c,'soma'):
                     launch('soma',cfg.get('drain_soma_workers',6))
                     current=config();current['active_soma_workers']=cfg.get('drain_soma_workers',6)
-                    CONFIG.write_text(json.dumps(current,indent=2))
+                    write_config(current)
         time.sleep(10)
 
 

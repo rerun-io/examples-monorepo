@@ -46,3 +46,32 @@ def test_stale_failure_does_not_park_new_owner_or_count_failure(queue, monkeypat
         assert tuple(db.execute('select state,owner,updated from jobs').fetchone()) == ('s2', 'new-owner', 2.0)
         assert db.execute('select count(*) from events').fetchone()[0] == 0
         assert db.execute('select failures from workers').fetchone()[0] == 0
+
+
+def test_config_keeps_last_complete_read_during_partial_legacy_write(queue):
+    previous = runner.config()
+    runner.CONFIG.write_text('{')
+    assert runner.config() == previous
+    runner.CONFIG.write_text(json.dumps({**previous, 'limit': 3}))
+    assert runner.config()['limit'] == 3
+
+
+def test_atomic_config_writer_readers_see_only_complete_documents(queue):
+    import threading
+    errors = []
+    stop = threading.Event()
+    def read():
+        while not stop.is_set():
+            try:
+                assert json.loads(runner.CONFIG.read_text())['limit'] in (2, 3)
+            except Exception as error:
+                errors.append(error)
+    thread = threading.Thread(target=read)
+    thread.start()
+    try:
+        for value in range(40):
+            runner.write_config({'limit': 2 + value % 2, 'payload': 'x' * 10000})
+    finally:
+        stop.set()
+        thread.join()
+    assert not errors
