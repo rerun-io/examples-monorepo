@@ -119,13 +119,22 @@ Existing targets, NAS outputs and outputs within the input directory are refused
 Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz (40). YOLOX-m HumanArt and RTMW-x use TensorRT batches of eight,
 keeping three people per frame on a half-open `video_time` grid anchored at cut zero; nearest-frame ties go left.
 Quest anchors use capture_time: left-eye head + quest_pose (100 ms gap), wrists −48 ms + quest_pose (40 ms gap).
-Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation uses joint confidence
-≥0.3, radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
+Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation accepts joint detector scores
+≥0.7, with radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
+The reported confidence is the mean accepted detector score, not visibility or geometric certainty.
+The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, and `support_inlier_mask` per joint.
+Each mask lists cameras in the static `support_camera_paths` order. A usable point needs at least two supporting cameras.
+One Euro smoothing is accepted only while that support remains within 8 px; otherwise the raw triangulation is retained.
+
+The default `/world/skeleton` and `<cam>/pinhole/skeleton` combine triangulated body/feet with Quest hands.
+In each exo view, camera-supported joints are magenta/white; inferred joints and every link touching one are smaller, dim grey.
+Quest hand replacements must also agree with that camera's detection within 8 px to be shown as observed.
+In OAK views, Quest-tracked hands are bright and the body is inferred. The world view retains the side colours.
 AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
 `pinhole/pred/rtmw/coco133_uv` and `kp3d_*` fields in the same `calib` group; no external quality metrics are stored.
-Goldens: all eleven episodes retain exact masks, 3D median ≤1 mm and overlays ≤0.01 px, including flagged Quest-relative clocks. Fresh GPU 2D median ≤1 px;
-the end-to-end CLI after fresh calibration uses 3D median ≤10 mm and reports pose drift and validity changes.
+Frozen reference comparisons live in `tests/test_keypoints_*golden.py`. Those references use the earlier
+acceptance policy; the stricter per-view score gate intentionally changes which 3D joints are present.
 
 Calibration and focal profiling read alignment records from each selected catalog base. Phone detections come from the selected segment’s `sapiens2` layer; local sync JSON cannot override the base clocks. Focal profiling refuses missing detection data.
 

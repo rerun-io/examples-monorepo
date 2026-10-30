@@ -40,13 +40,13 @@ def test_weighted_ransac_keeps_consensus_and_missing_joints() -> None:
     uv[3, 0] += [140.0, -90.0]
     scores = np.ones((4, 3))
     scores[1:, 2] = 0.1
-    scores[0, 0], scores[1, 0] = 0.6, 0.8
+    scores[0, 0], scores[1, 0] = 0.7, 0.8
     result = triangulate(cams, uv, scores)
     np.testing.assert_allclose(result.xyz[:2], truth[:2], atol=1e-4)
     assert result.n_views.tolist() == [3, 4, 0]
     assert np.isnan(result.xyz[2]).all()
     # Mean RTMW score of the agreeing views; the outlier view 3 of joint 0 does not count.
-    np.testing.assert_allclose(result.confidence, [0.8, 1.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(result.confidence, [5.0 / 6.0, 1.0, 0.0], atol=1e-6)
 
 
 def test_wearer_and_degenerate_rays() -> None:
@@ -87,7 +87,7 @@ def test_appending_all_missing_frames_preserves_calibration_and_empty_rows(tmp_p
     write_keypoints(base, output, result)
     assert base.read_bytes() == original
     rows = [c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and not str(c.entity_path).endswith("/skeleton")]
-    assert len(rows) == 3  # 3D, the phone's RTMW overlay and the phone's projection
+    assert len(rows) == 4  # 3D, geometric support, raw 2D and projection
     assert all(batch.num_rows == 2 for batch in rows)
     assert all("frame_index" not in batch.schema.names for batch in rows)
     points = next(batch for batch in rows if "Points3D:positions" in batch.schema.names)
@@ -191,13 +191,12 @@ def test_display_writer_preserves_coco_ids_without_confidence_colours(tmp_path) 
     result = three_d(np.array([0.0, 0.02]), xyz, np.ones((2, 133)), {}, {"phone": camera}, 25.0)
     output = tmp_path / "display.rrd"
     write_keypoints(base, output, result)
-    rows = {str(c.entity_path): c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static}
+    rows = {str(c.entity_path): c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and any(name.endswith(":positions") for name in c.to_record_batch().schema.names)}
     for path, kind in (("/world/skeleton", "Points3D"), ("/world/rig_00/cam_00/pinhole/skeleton", "Points2D")):
         batch = rows[path]
-        assert not any(name.endswith((":confidences", ":colors")) for name in batch.schema.names)
+        assert not any(name.endswith(":confidences") for name in batch.schema.names)
         points = np.asarray(batch.column(f"{kind}:positions").to_pylist()[0])
-        assert len(points) == 135
-        np.testing.assert_array_equal(points[133:], points[[6, 12]])
+        assert len(points) == 133
         assert np.isnan(points[np.r_[0:3, 9:11, 23:91]]).all()
         assert np.isfinite(points[np.r_[3:9, 11:23, 91:133]]).all()
     np.testing.assert_allclose(
