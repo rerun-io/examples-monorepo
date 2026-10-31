@@ -21,10 +21,12 @@ from dataforge.datasets.selfcap import (
     write_device_asset,
     write_coco133_layer,
     CameraCalibration,
+    CameraPane,
     EpisodePlan,
     HeadPoses,
     SelfcapConfig,
     SelfcapDataset,
+    build_blueprint,
     build_episode_plan,
     exo_devices,
     read_calibration,
@@ -246,6 +248,15 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
     assert left.distortion_coefficients is not None
     np.testing.assert_allclose(left.distortion_coefficients, np.asarray(coefficients))
     assert cameras["center"].distortion_coefficients is None
+
+
+def test_selfcap_layouts_open_on_the_aligned_clock() -> None:
+    # video_time equals capture_time at ingest and is the aligned clock after selfcap-align, so it is the right
+    # timeline at every stage; left unset, the viewer picked capture_time and showed the as-cut streams.
+    panes = (CameraPane("Dragon", 0, 0, "exo"), CameraPane("oak rgb", 4, 0, "ego"), CameraPane("quest left", 5, 0, "quest"))
+    for blueprint in (build_blueprint(panes, ego_rig=4), SelfcapDataset(SelfcapConfig()).default_blueprint()):
+        assert blueprint.time_panel is not None
+        assert str(blueprint.time_panel.timeline) == schema.TIMELINE
 
 
 def test_default_blueprint_is_the_calibration_review_layout() -> None:

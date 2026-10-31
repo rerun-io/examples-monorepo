@@ -566,6 +566,8 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprin
             ),
             row_shares=[4.0, 1.4, 1.0],
         ),
+        # An explicit TimePanel is not collapsed by collapse_panels, so it states its own state.
+        rrb.TimePanel(timeline=schema.TIMELINE, state="collapsed"),
         collapse_panels=True,
     )
 
@@ -613,6 +615,8 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world", overrides=world_overrides)
         return rrb.Blueprint(
             rrb.Vertical(rrb.Horizontal(scene, ego, column_shares=[3.0, 1.2]), rrb.Horizontal(*exo), row_shares=[3.0, 2.0]),
+            # video_time is the as-cut clock at ingest and the aligned clock after selfcap-align.
+            rrb.TimePanel(timeline=schema.TIMELINE, state="collapsed"),
             collapse_panels=True,
         )
 
