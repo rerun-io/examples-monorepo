@@ -442,6 +442,47 @@ class Keypoints3D:
     bridged: Bool[ndarray, "n 133"] | None = None  # Temporal estimate replacing a missing or rejected measurement.
 
 
+BONES: tuple[tuple[int, int], ...] = (
+    (5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (13, 15), (12, 14), (14, 16),  # arms and legs
+    (5, 6), (11, 12), (5, 11), (6, 12), (3, 4), (3, 5), (4, 6),  # torso and ears
+)
+"""COCO body bones whose 3D length is fixed for one person."""
+BONE_RATIO: float = 1.4
+"""A bone longer than 1.4x (or shorter than 1/1.4x) its session median marks a wrong joint."""
+MIN_BONE_FRAMES: int = 50
+"""Frames a bone needs before its median length is trusted."""
+
+
+def drop_bone_outliers(xyz: Float32[ndarray, "n 133 3"], confidence: Float32[ndarray, "n 133"], rounds: int = 3) -> Float32[ndarray, "n 133 3"]:
+    """Drop body joints that stretch or shrink their bones far from the session's median lengths.
+
+    Two views can agree within the pixel gate on a wrong point (left/right swaps, near-parallel rays); a person's bones
+    do not change length. Per frame and round, the joint touching the most bad bones goes (the less confident on a tie).
+    """
+    out = xyz.copy()
+    lengths = np.stack([np.linalg.norm(out[:, a] - out[:, b], axis=-1) for a, b in BONES], axis=1)
+    finite = np.isfinite(lengths)
+    median = np.array([np.median(lengths[finite[:, k], k]) if finite[:, k].sum() >= MIN_BONE_FRAMES else np.nan for k in range(len(BONES))])
+    for _ in range(rounds):
+        lengths = np.stack([np.linalg.norm(out[:, a] - out[:, b], axis=-1) for a, b in BONES], axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ratio = lengths / median
+        bad = np.isfinite(ratio) & ((ratio > BONE_RATIO) | (ratio < 1.0 / BONE_RATIO))
+        if not bad.any():
+            break
+        score, checked = np.zeros(out.shape[:2]), np.zeros(out.shape[:2])
+        for k, (a, b) in enumerate(BONES):
+            score[:, [a, b]] += bad[:, k, None]
+            checked[:, [a, b]] += np.isfinite(ratio[:, k, None])
+        # The share of a joint's checked bones that are bad first (an elbow with one good bone is not the culprit), then
+        # the count, then the lower detector confidence.
+        share = np.divide(score, checked, out=np.zeros_like(score), where=checked > 0)
+        key = np.where(score > 0, share * 100.0 + score * 10.0 - np.nan_to_num(confidence, nan=0.0), -np.inf)
+        frames = np.flatnonzero(np.isfinite(key.max(axis=1)))
+        out[frames, key[frames].argmax(axis=1)] = np.nan
+    return out
+
+
 def triangulate_episode(
     detections: Keypoints2D, cameras: dict[str, Camera], anchors: Float64[ndarray, "n 3 3"], threshold: float = INLIER_PX
 ) -> Keypoints3D:
@@ -466,6 +507,8 @@ def triangulate_episode(
     reprojection = None if batch.max_reprojection_px is None else batch.max_reprojection_px.copy()
     with np.errstate(invalid="ignore"):
         far = np.linalg.norm(xyz - anchors[:, None, 0, :], axis=-1) > MAX_HEAD_DISTANCE_M
+    xyz[far], n_views[far], confidence[far] = np.nan, 0, 0.0
+    far |= np.isfinite(xyz).all(-1) & ~np.isfinite(drop_bone_outliers(xyz, confidence)).all(-1)  # wrong-length bones
     xyz[far], n_views[far], confidence[far] = np.nan, 0, 0.0
     if inliers is not None:
         inliers[np.broadcast_to(far[:, None, :], inliers.shape)] = False
