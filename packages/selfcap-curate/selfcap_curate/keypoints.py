@@ -17,7 +17,7 @@ from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
 from dataforge.logging_toolkit import time_column
 from dataforge.schema import coco133_uv_projected_path, coco133_xyz_path, pinhole_path
 from dataforge.writing import atomic_write
-from jaxtyping import Bool, Float32, Float64, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
@@ -182,6 +182,48 @@ def ego_quest_hands(segment: Segment, sync: TimeSync) -> tuple[Float64[ndarray, 
     positions = source.positions.astype(np.float32)
     positions[(positions == 0.0).all(-1)] = np.nan
     return source.times_s + (qp - HAND_LATENCY_MS) / 1000.0, positions
+
+
+DISPLAY_JOINTS: Int64[ndarray, "k"] = np.r_[3:9, 11:23, 91:133]
+"""COCO slots retained in the fused display, with hand roots replacing body wrists."""
+DISPLAY_LINKS: list[tuple[int, int]] = [
+    ({9: 91, 10: 112}.get(a, a), {9: 91, 10: 112}.get(b, b))
+    for a, b in COCO_133_LINKS
+    if {9: 91, 10: 112}.get(a, a) in DISPLAY_JOINTS and {9: 91, 10: 112}.get(b, b) in DISPLAY_JOINTS
+]
+DISPLAY_LEFT_JOINTS: frozenset[int] = frozenset({*range(91, 112), 3, 5, 7, 11, 13, 15, 17, 18, 19})
+DISPLAY_CLASSES: list[rr.ClassDescription] = [
+    rr.ClassDescription(
+        info=rr.AnnotationInfo(id=side, label=label, color=color),
+        keypoint_connections=[(a, b) for a, b in DISPLAY_LINKS if (a in DISPLAY_LEFT_JOINTS or b in DISPLAY_LEFT_JOINTS) == (side == 0)],
+    )
+    for side, label, color in ((0, "Left (display)", (255, 64, 255)), (1, "Right (display)", (255, 255, 255)))
+]
+# Rerun colours bones by class, and connects only within a class. Duplicate the
+# right shoulder/hip in the left class to retain the two cross-body links.
+DISPLAY_KEYPOINT_IDS: UInt16[ndarray, "135"] = np.r_[np.arange(133), 6, 12].astype(np.uint16)
+DISPLAY_CLASS_IDS: UInt16[ndarray, "135"] = np.array([0 if joint in DISPLAY_LEFT_JOINTS else 1 for joint in range(133)] + [0, 0], dtype=np.uint16)
+
+
+def display_skeleton(
+    times: Float64[ndarray, "n"],
+    xyz: Float32[ndarray, "n 133 3"],
+    confidence: Float32[ndarray, "n 133"],
+    quest_hands: tuple[Float64[ndarray, "q"], Float32[ndarray, "q 133 3"]] | None,
+) -> Float32[ndarray, "n 133 3"]:
+    """Exo body/ears/feet plus clock-corrected Quest hands; confident exo hands fill tracking gaps."""
+    selected: Bool[ndarray, "133"] = np.isin(np.arange(133), DISPLAY_JOINTS)
+    output: Float32[ndarray, "n 133 3"] = np.where(((confidence >= DISPLAY_CONFIDENCE) & selected)[..., None], xyz, np.float32(np.nan))
+    if quest_hands is not None:
+        stamps: Float64[ndarray, "q"] = quest_hands[0]
+        hands: Float32[ndarray, "q 133 3"] = quest_hands[1]
+        for start in (91, 112):
+            valid: Bool[ndarray, "q"] = np.isfinite(hands[:, start : start + 21]).all(axis=(1, 2))
+            for joint in range(start, start + 21):
+                points: Float32[ndarray, "n 3"] = interpolate(times, stamps, hands[:, joint].astype(np.float64), valid, 0.04).astype(np.float32)
+                available: Bool[ndarray, "n"] = np.isfinite(points).all(axis=1)
+                output[available, joint] = points[available]
+    return output
 
 
 def select_wearers(
@@ -451,10 +493,14 @@ def write_keypoints(
     visible: Bool[ndarray, "133"] = ~np.isin(np.arange(133), HEADSET_COVERED)
     shown: Float32[ndarray, "n 133 3"] = np.where(((result.confidence >= DISPLAY_CONFIDENCE) & visible)[..., None], result.xyz, np.float32(np.nan))
 
-    def projected(camera: Camera) -> Float32[ndarray, "n 133 2"]:
-        uvd: Float64[ndarray, "m 3"] = project(camera, shown.reshape(-1, 3).astype(np.float64))
+    display: Float32[ndarray, "n 133 3"] = display_skeleton(result.times, result.xyz, result.confidence, quest_hands)
+
+    display_points: Float32[ndarray, "n 135 3"] = np.concatenate((display, display[:, [6, 12]]), axis=1)
+
+    def projected(camera: Camera, points: Float32[ndarray, "n j 3"] = shown) -> Float32[ndarray, "n j 2"]:
+        uvd: Float64[ndarray, "m 3"] = project(camera, points.reshape(-1, 3).astype(np.float64))
         uv: Float64[ndarray, "m 2"] = np.where((uvd[:, 2:] > 1e-5), uvd[:, :2], np.nan)
-        return uv.reshape(len(shown), 133, 2).astype(np.float32)
+        return uv.reshape(len(points), points.shape[1], 2).astype(np.float32)
 
     def rig_cam(entity: str) -> tuple[int, int]:
         match = re.fullmatch(r"/world/rig_(\d+)/cam_(\d+)", entity)
@@ -496,6 +542,36 @@ def write_keypoints(
         rows: Path = Path(work) / "keypoints.rrd"
         with rr.RecordingStream(stores[0].application_id, recording_id=stores[0].recording_id, send_properties=False) as recording:
             recording.save(rows)
+            rr.log("/world/skeleton", rr.AnnotationContext(DISPLAY_CLASSES), static=True, recording=recording)
+            rr.log(
+                "/world/skeleton",
+                rr.Points3D.from_fields(class_ids=DISPLAY_CLASS_IDS, keypoint_ids=DISPLAY_KEYPOINT_IDS, radii=0.006, show_labels=False),
+                static=True,
+                recording=recording,
+            )
+            rr.send_columns(
+                "/world/skeleton",
+                indexes=[time_column(stamps)],
+                columns=rr.Points3D.columns(positions=display_points.reshape(-1, 3)).partition([135] * len(display_points)),
+                recording=recording,
+            )
+            display_projections: tuple[tuple[tuple[int, int], Float32[ndarray, "n 135 2"]], ...] = (
+                *((rig_cam(camera.entity), projected(camera, display_points)) for camera in result.cameras.values()),
+                *(((camera.rig, camera.cam), project_ego(camera, result.times, display_points)) for camera in ego),
+            )
+            for (rig, cam), _ in display_projections:
+                rr.log(f"{pinhole_path(rig, cam)}/skeleton", rr.AnnotationContext(DISPLAY_CLASSES), static=True, recording=recording)
+            log_projections(
+                recording,
+                display_projections,
+                times_ns=stamps,
+                frame_indices=None,
+                confidence=None,
+                camera_model="SelfCap calibrated lenses",
+                entity_name="skeleton",
+                class_ids=DISPLAY_CLASS_IDS,
+                keypoint_ids=DISPLAY_KEYPOINT_IDS,
+            )
             log_keypoints3d(
                 recording,
                 times_ns=stamps,
@@ -534,7 +610,12 @@ def write_keypoints(
                 hand_stamps: Int64[ndarray, "q"] = np.rint(hand_times * 1e9).astype(np.int64)
                 for camera, path in zip(ego, quest_paths, strict=True):
                     pixels: Float32[ndarray, "q 133 2"] = project_ego(camera, hand_times, hand_xyz)
-                    rr.log(path, rr.Points2D.from_fields(class_ids=0, keypoint_ids=np.arange(133, dtype=np.uint16), radii=3.0, show_labels=False), static=True, recording=recording)
+                    rr.log(
+                        path,
+                        rr.Points2D.from_fields(class_ids=0, keypoint_ids=np.arange(133, dtype=np.uint16), radii=3.0, show_labels=False),
+                        static=True,
+                        recording=recording,
+                    )
                     rr.send_columns(
                         path,
                         indexes=[time_column(hand_stamps)],

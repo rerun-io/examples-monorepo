@@ -3,13 +3,51 @@
 from dataclasses import replace
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from dataforge.catalog_swap import swap_layer
 from rerun.chunk import RrdReader
 
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_phone_detections, read_time_sync
-from selfcap_curate.detection_io import write_detections_layer
-from selfcap_curate.records import PhoneDetections, SelfcapLayout
+from selfcap_curate.detection_io import read_oak_observations, write_detections_layer, write_oak_egohand_layer
+from selfcap_curate.records import OakDetections, PhoneDetections, SelfcapLayout
+
+
+def test_egohand_layer_retains_sparse_video_times_and_confidence(tmp_path):
+    path = tmp_path / "egohand.rrd"
+    xy = np.full((2, 133, 2), np.nan)
+    xy[:, 91:112] = 10.0
+    confidence = np.zeros((2, 133))
+    confidence[:, 91:112] = 0.8
+    write_oak_egohand_layer(path, "episode", 4, OakDetections(np.array([1.0, 4.0]), xy, confidence))
+    reader = RrdReader(path)
+    assert reader.recordings()[0].recording_id == "episode"
+    chunks = list(reader.stream())
+    assert all("/__properties" not in str(chunk.entity_path) for chunk in chunks)
+    data = next(chunk.to_record_batch() for chunk in chunks if not chunk.is_static)
+    assert data.column("video_time").cast("int64").to_pylist() == [1_000_000_000, 4_000_000_000]
+    assert data.column("confidence").to_pylist() == confidence.tolist()
+    assert any("egohand_calib/coco133_uv" in str(chunk.entity_path) for chunk in chunks)
+
+
+def test_oak_observations_preserve_pixels_and_reject_another_segment(tmp_path):
+    path = tmp_path / "hands.parquet"
+    xy = np.full((3, 133, 2), np.nan)
+    xy[:, 91:133] = 200.0
+    scores = np.zeros((3, 133))
+    scores[:, 91:133] = 0.9
+    pq.write_table(pa.table({
+        "segment_id": ["segment-a"] * 3,
+        "video_time": pa.array([100_000_000, 150_000_000, 200_000_000], type=pa.int64()),
+        "xy": xy.tolist(), "scores": scores.tolist(),
+    }), path)
+    result = read_oak_observations(path, "segment-a")
+    np.testing.assert_allclose(result.video_time, [0.1, 0.15, 0.2])
+    np.testing.assert_equal(result.xy, xy)
+    np.testing.assert_equal(result.scores, scores)
+    with pytest.raises(ValueError, match="segment-a"):
+        read_oak_observations(path, "segment-b")
 
 
 def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixture_sync):

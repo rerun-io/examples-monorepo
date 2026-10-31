@@ -94,7 +94,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
                 config.output_dir / key.rrd_name,
                 result,
                 ego=episode.ego,
-                quest_hands=ego_quest_hands(episode.segment, episode.sync) if episode.ego else None,
+                quest_hands=ego_quest_hands(episode.segment, episode.sync),
             )
         print(
             "KEYPOINTS_TIME",

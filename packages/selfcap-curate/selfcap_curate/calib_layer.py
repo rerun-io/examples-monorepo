@@ -103,7 +103,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             )
             recording.log(
                 schema.rig_path(oak_rig),
-                rr.AnyValues(calib_source=METHOD, calib_oak_source="sapiens", calib_oak_median_px=session.oak.median_px),
+                rr.AnyValues(calib_source=METHOD, calib_oak_source=session.oak.observation_source, calib_oak_median_px=session.oak.median_px),
                 static=True,
             )
         for slot, matrix in session.quest.rig_T_cam.items():

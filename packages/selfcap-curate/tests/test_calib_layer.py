@@ -194,11 +194,28 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
     monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *_args, **_kwargs: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
     monkeypatch.setattr(api, "calibrate", lambda *_args: state.exo)
     monkeypatch.setattr(api, "gyro_mount", lambda *_args: GyroFit("test", False))
-    monkeypatch.setattr(api, "solve_oak", lambda *_args: state.oak)
+    monkeypatch.setattr(api, "solve_oak", lambda *_args, **_kwargs: state.oak)
     monkeypatch.setattr(api, "oak_stereo", lambda *_args: state.stereo)
     monkeypatch.setattr(api, "oak_centre", lambda *_args: None)
-    config = api.Config(tmp_path / "output", (f"selfcap__{motion.sync.key}",))
+    config = api.Config(tmp_path / "output", (f"selfcap__{motion.sync.key}",), oak_method="sapiens")
     return api, config, motion.sync.key.rsplit("__", 1)[0]
+
+
+def test_calibrate_egohand_uses_default_path_and_writes_named_layer(calibration_call, monkeypatch):
+    api, config, _ = calibration_call
+    config = replace(config, oak_method="egohand")
+    calls = []
+    monkeypatch.setattr(api, "fixed_rotation", lambda *_args: np.eye(3))
+    monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
+    monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
+    monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
+    monkeypatch.setattr(api, "detect_oak_egohand", lambda *args, **kwargs: calls.append("egohand") or
+                        OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
+    monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *args, **kwargs: pytest.fail("legacy OAK model must not run"))
+    monkeypatch.setattr(api, "write_oak_egohand_layer", lambda path, *args: calls.append(path.parent.name))
+    api.main(config)
+    assert calls == ["egohand", "egohand"]
+    assert api.Config(config.output_dir).oak_method == "egohand"
 
 
 @pytest.mark.parametrize("failure", ["fit", "later_layer", "json"])

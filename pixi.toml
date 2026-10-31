@@ -1313,6 +1313,31 @@ sam2 = { path = "packages/sam2-streaming", editable = true }
 onnx = "*"
 onnxscript = "*"
 
+# EgoHand keeps its inference dependencies outside the base posekit lane.
+[feature.posekit-egohand]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.posekit-egohand.dependencies]
+hydra-core = "*"
+pillow = "<13"
+python-dateutil = "<3"
+anyio = "<4.15"
+
+[feature.posekit-egohand.pypi-dependencies]
+egohand-inference = { path = "packages/egohand", editable = true }
+py-soma-x = "==0.3.0"
+warp-lang = "==1.11.1"
+
+# These four existing Transformers wrappers have decorated .to() stubs that
+# pyrefly misbinds as unbound methods in this isolated dependency solve.
+[feature.posekit-egohand.activation.env]
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
+
+[feature.posekit-egohand.tasks.egohand-selfcap]
+cmd = "python tools/demos/egohand_selfcap.py"
+cwd = "packages/posekit"
+description = "Compare EgoHand on the fixed SelfCap OAK window"
+
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 
@@ -3477,8 +3502,8 @@ simplecv-catalog-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv-catalog", no-default-feature = true }
-selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate"], solve-group = "selfcap-curate", no-default-feature = true }
-selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
+selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "posekit-egohand"], solve-group = "selfcap-curate", no-default-feature = true }
+selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "posekit-egohand", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
 exo-calib = { features = [
     "catalog-common",
     "rerun-prerelease",
@@ -3658,6 +3683,8 @@ posekit = { features = [
     "cuda",
     "posekit",
 ], solve-group = "posekit", no-default-feature = true }
+egohand = { features = ["common", "cuda", "posekit", "posekit-egohand"], solve-group = "egohand", no-default-feature = true }
+egohand-dev = { features = ["common", "cuda", "posekit", "posekit-egohand", "dev"], solve-group = "egohand", no-default-feature = true }
 posekit-dev = { features = [
     "common",
     "cuda",

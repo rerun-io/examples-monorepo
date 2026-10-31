@@ -251,16 +251,25 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
     for name, (rig, cam) in cameras.items():
         assert str(views[name].origin) == schema.pinhole_path(rig, cam)
         contents: list[str] = cast(list[str], views[name].contents)  # the view keeps the list it was built with
-        # Sapiens2 feeds alignment only: present in the tree, hidden by default.
-        assert views[name].visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/pred/sapiens2"] == rrb.EntityBehavior(visible=False)
-        if name.startswith("OAK"):
-            # The OAK lenses are strongly distorted and the viewer's Pinhole is not: their overlays are 2D projections
-            # beneath the pinhole, so no 3D entity is drawn through the pose chain.
-            assert contents == [f"{schema.pinhole_path(rig, cam)}/**"]
-        else:
-            assert "/world/gt/**" in contents  # the Quest hands; phones are rectified and Quest cameras undistorted
-            # The Quest cameras have no explicit projections, so the viewer draws the triangulated 3D through their pose chain.
-            assert ("/world/pred/**" in contents) == name.startswith("Quest")
+        pinhole = schema.pinhole_path(rig, cam)
+        hidden = views[name].visualizer_overrides
+        assert hidden[f"{pinhole}/pred"] == rrb.EntityBehavior(visible=False)
+        assert hidden[f"{pinhole}/coco133_uv_projected"] == rrb.EntityBehavior(visible=False)
+        assert hidden[f"{pinhole}/quest_coco133_uv_projected"] == rrb.EntityBehavior(visible=False)
+        assert hidden["/world/gt"] == rrb.EntityBehavior(visible=False)
+        assert hidden["/world/pred"] == rrb.EntityBehavior(visible=False)
+        assert f"{pinhole}/**" in contents
+        assert "/world/gt/**" in contents and "/world/pred/**" in contents
+        assert ("/world/skeleton" in contents) == name.startswith("Quest")
+    world = views["World (Quest frame, calibrated)"]
+    assert world.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
+    assert world.visualizer_overrides["/world/gt"] == rrb.EntityBehavior(visible=False)
+    for rig, cam in cameras.values():
+        assert world.visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/skeleton"] == rrb.EntityBehavior(visible=False)
+    assert "/world/pred/soma_x/mesh" not in world.visualizer_overrides
+    dev_views = blueprint_views(SelfcapConfig().setup().default_blueprint(show_soma_mesh=True))
+    dev_world = next(view for view in dev_views if str(view.name) == "World (Quest frame, calibrated)")
+    assert dev_world.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:

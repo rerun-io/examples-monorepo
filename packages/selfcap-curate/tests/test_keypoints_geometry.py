@@ -86,7 +86,7 @@ def test_appending_all_missing_frames_preserves_calibration_and_empty_rows(tmp_p
     output = tmp_path / "complete.rrd"
     write_keypoints(base, output, result)
     assert base.read_bytes() == original
-    rows = [c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static]
+    rows = [c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and not str(c.entity_path).endswith("/skeleton")]
     assert len(rows) == 3  # 3D, the phone's RTMW overlay and the phone's projection
     assert all(batch.num_rows == 2 for batch in rows)
     assert all("frame_index" not in batch.schema.names for batch in rows)
@@ -169,6 +169,39 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
         packed = np.asarray(batch.column(f"{kind}:colors").to_pylist()[0], dtype=np.uint32)[[3, 4, 6]]
         rgb = np.array([list(int(value).to_bytes(4, "big")[:3]) for value in packed])
         np.testing.assert_allclose(rgb, [[255, 0, 0], [255, 255, 0], [0, 255, 0]], atol=1)
-        np.testing.assert_array_equal(np.asarray(batch.column(next(name for name in batch.schema.names if name.endswith(":confidences"))).to_pylist()[0])[[3, 4, 6]], np.array([0.7, 0.85, 1.0], dtype=np.float32))
-    quest = next(c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and str(c.entity_path) == "/world/rig_04/cam_00/pinhole/quest_coco133_uv_projected")
+        np.testing.assert_array_equal(
+            np.asarray(batch.column(next(name for name in batch.schema.names if name.endswith(":confidences"))).to_pylist()[0])[[3, 4, 6]],
+            np.array([0.7, 0.85, 1.0], dtype=np.float32),
+        )
+    quest = next(
+        c.to_record_batch()
+        for c in RrdReader(output).stream()
+        if not c.is_static and str(c.entity_path) == "/world/rig_04/cam_00/pinhole/quest_coco133_uv_projected"
+    )
     assert "Points2D:colors" not in quest.schema.names  # Its blue annotation colour stays in control.
+
+
+def test_display_writer_preserves_coco_ids_without_confidence_colours(tmp_path) -> None:
+    base = tmp_path / "calib.rrd"
+    with rr.RecordingStream("test", recording_id="display", send_properties=False) as recording:
+        recording.save(base)
+        recording.send_property("calib", rr.AnyValues(method="unchanged"))
+    camera = cameras()[0]
+    xyz = np.tile([0.1, 0.2, 4.0], (2, 133, 1))
+    result = three_d(np.array([0.0, 0.02]), xyz, np.ones((2, 133)), {}, {"phone": camera}, 25.0)
+    output = tmp_path / "display.rrd"
+    write_keypoints(base, output, result)
+    rows = {str(c.entity_path): c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static}
+    for path, kind in (("/world/skeleton", "Points3D"), ("/world/rig_00/cam_00/pinhole/skeleton", "Points2D")):
+        batch = rows[path]
+        assert not any(name.endswith((":confidences", ":colors")) for name in batch.schema.names)
+        points = np.asarray(batch.column(f"{kind}:positions").to_pylist()[0])
+        assert len(points) == 135
+        np.testing.assert_array_equal(points[133:], points[[6, 12]])
+        assert np.isnan(points[np.r_[0:3, 9:11, 23:91]]).all()
+        assert np.isfinite(points[np.r_[3:9, 11:23, 91:133]]).all()
+    np.testing.assert_allclose(
+        np.asarray(rows["/world/rig_00/cam_00/pinhole/skeleton"].column("Points2D:positions").to_pylist()[0])[5],
+        project(camera, xyz[0])[:, :2][5],
+        atol=1e-4,
+    )
