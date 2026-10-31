@@ -17,10 +17,11 @@ right the moment a pose or ground-truth layer stacks onto the same segment.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun.encodings import EntityPathLike
 
 from dataforge import schema
 
@@ -55,7 +56,7 @@ of trail in view at once without the ground filling it."""
 
 
 def camera_view(
-    name: str, rig: int, cam: int, *, contents: list[str] | None = None, overrides: dict[str, rrb.EntityBehavior] | None = None
+    name: str, rig: int, cam: int, *, contents: list[str] | None = None, overrides: Mapping[EntityPathLike, rrb.EntityBehavior] | None = None
 ) -> rrb.Spatial2DView:
     """One camera's 2D pane.
 

@@ -9,6 +9,8 @@ import pytest
 import rerun as rr
 from rerun.chunk import RrdReader
 
+pytest.importorskip("egohand_inference", reason="requires the egohand Pixi environment")
+
 from posekit.apis.egohand_world import MeshLod, write_world_layer
 
 pytestmark = pytest.mark.integration

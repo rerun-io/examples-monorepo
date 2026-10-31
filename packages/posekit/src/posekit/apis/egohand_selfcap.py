@@ -36,7 +36,7 @@ from posekit.models.egohand import (
     HandDetections,
     HandReconstruction,
 )
-from posekit.models.egohand_geometry import SOMA_HAND21, OAKCamera, coco_hand_indices
+from posekit.models.egohand_geometry import SOMA_HAND21, HandSide, OAKCamera, coco_hand_indices
 from posekit.predictions import BoxDetections, Keypoints2d
 from posekit.skeletons import HAND_21
 
@@ -143,7 +143,8 @@ def run_sapiens(frames: UInt8[Tensor, "n h w 3"]) -> tuple[Float32[ndarray, "n 2
             torch.arange(len(batch), dtype=torch.int64, device=batch.device),
         )
         points: Keypoints2d = model(batch, boxes)
-        for side, name in enumerate(("left", "right")):
+        sides: tuple[HandSide, HandSide] = ("left", "right")
+        for side, name in enumerate(sides):
             output[start : start + len(batch), side] = points.xy[:, list(coco_hand_indices(name))].cpu().numpy()
     torch.cuda.synchronize()
     elapsed: float = (time.perf_counter() - started) * 1000.0 / len(frames)
@@ -313,7 +314,8 @@ def main(config: Config) -> None:
                     scale_parameters=result.scale_parameters[hand].cpu().numpy() if result.scale_parameters is not None else [],
                 ),
             )
-        for side, name in enumerate(("left", "right")):
+        sides: tuple[HandSide, HandSide] = ("left", "right")
+        for side, name in enumerate(sides):
             for source, positions, color in (("quest", quest, (255, 75, 180)), ("sapiens", sapiens, (100, 255, 100))):
                 rr.log(f"/image/{source}/{name}", rr.Points2D(positions[index, side], colors=color, radii=2.0, show_labels=False))
         for box, name in zip(local.boxes.xyxy_numpy(), local.sides, strict=True):

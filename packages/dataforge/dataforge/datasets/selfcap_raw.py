@@ -12,12 +12,12 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.csv as pacsv
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from serde import serde
 
 from dataforge.logging_toolkit import ImuChannel
+from dataforge.quest_joint_poses import read_quest_joint_poses
 from dataforge.records import read_csv_columns, read_json
 
 BROWN_CONRADY_COEFFICIENTS: int = 14
@@ -162,20 +162,9 @@ def read_quest_hands(quest_dir: Path) -> QuestHands:
         if not os.access(source, os.R_OK):
             print(f"  warning: unreadable Quest hands {source}")
             continue
-        try:
-            table: pa.Table = pacsv.read_csv(source, convert_options=pacsv.ConvertOptions(column_types={"ts_ns": pa.int64()}))
-            header: list[str] = table.column_names
-            width: int = (len(header) - 1) // 26
-            if not header or header[0] != "ts_ns" or width not in (3, 7) or len(header) != 1 + 26 * width:
-                raise ValueError("expected ts_ns followed by 26 xyz or xyz+xyzw joints")
-            times: Int64[ndarray, "n"] = table.column(0).to_numpy().astype(np.int64)
-            joints: Float32[ndarray, "n 26 channels"] = np.column_stack([column.to_numpy() for column in table.columns[1:]]).astype(np.float32).reshape(-1, 26, width)
-        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, OSError, ValueError, TypeError) as error:
-            raise ValueError(f"{source}: invalid hand CSV: {error}") from error
-        if len(np.unique(times)) != len(times):
-            raise ValueError(f"{source}: duplicate hand timestamp")
-        points: Float32[ndarray, "n 21 3"] = joints[:, mapping, :3]
-        points[np.abs(joints[:, :, :3]).sum(axis=(1, 2)) == 0] = np.nan
+        raw = read_quest_joint_poses(source)
+        times = raw.times_ns
+        points = raw.positions[:, mapping]
         tracks.append((base, times, points))
     times_ns: Int64[ndarray, "n_samples"] = np.unique(np.concatenate([track[1] for track in tracks])) if tracks else np.empty(0, dtype=np.int64)
     positions: Float32[ndarray, "n_samples 133 3"] = np.full((len(times_ns), 133, 3), np.nan, dtype=np.float32)

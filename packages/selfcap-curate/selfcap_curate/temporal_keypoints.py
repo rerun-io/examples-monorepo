@@ -1,7 +1,7 @@
 """Centred body filtering and bounded temporal interpolation."""
 
 import numpy as np
-from jaxtyping import Bool, Float32, Int64
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from scipy.ndimage import gaussian_filter1d, median_filter
 
@@ -70,7 +70,7 @@ def bridge_short_gaps(
         for left, right in zip(valid[:-1], valid[1:], strict=True):
             if right - left <= 1 or (right - left - 1) / rate > 0.5:
                 continue
-            fraction: Float32[ndarray, "g"] = np.arange(1, right - left, dtype=np.float32) / (right - left)
+            fraction: Float64[ndarray, "g"] = np.arange(1, right - left, dtype=np.float32) / (right - left)
             output[left + 1:right, joint] = positions[left, joint] + fraction[:, None] * (positions[right, joint] - positions[left, joint])
             scores[left + 1:right, joint] = 0.75 * min(confidence[left, joint], confidence[right, joint])
             bridged[left + 1:right, joint] = True

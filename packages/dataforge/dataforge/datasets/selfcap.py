@@ -72,6 +72,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from rerun.chunk import Chunk
+from rerun.encodings import EntityPathLike
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
 from dataforge import blueprints, paths, schema, transports, writing
@@ -440,7 +441,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         The dev dataset can opt into the SOMA mesh as 3D context without showing its joints.
         """
         ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
-        hidden: dict[str, rrb.EntityBehavior] = {
+        hidden: dict[EntityPathLike, rrb.EntityBehavior] = {
             "/world/gt": rrb.EntityBehavior(visible=False),
             "/world/gt/sapiens2": rrb.EntityBehavior(visible=False),
             "/world/pred": rrb.EntityBehavior(visible=False),
@@ -477,7 +478,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             rrb.Horizontal(camera("Quest left", quest_rig, 0), camera("Quest right", quest_rig, 1)),
         )
         exo: list[rrb.Spatial2DView] = [camera(f"exo rig_{rig:02d}", rig, 0) for rig in range(DEFAULT_EXO_CAMERAS)]
-        world_overrides: dict[str, rrb.EntityBehavior] = hidden.copy()
+        world_overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
         # Camera-plane overlays would repeat the body around the world skeleton.
         for rig, cams in cameras:
             for cam in cams:
