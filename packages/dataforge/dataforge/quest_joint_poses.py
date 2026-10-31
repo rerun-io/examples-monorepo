@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.csv as pacsv
 from jaxtyping import Float32, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 
+from dataforge.records import read_csv_columns
 from dataforge.schema import CAPTURE_TIMELINE
 
 QUEST_HAND_SIDES: tuple[str, str] = ("left", "right")
@@ -36,13 +36,19 @@ class QuestJointPoses:
 
 
 def read_quest_joint_poses(source: Path) -> QuestJointPoses:
-    """Preserve the 3- or 7-wide source layout; zero tracking rows become missing."""
+    """Preserve the 3- or 7-wide source layout; zero tracking rows become missing.
+
+    The header fixes the layout before a row is parsed: ``ts_ns`` (int64), then 26 joints of ``<joint>_<axis>``
+    float64 columns, 3 wide (position) or 7 wide (position + xyzw orientation).
+    """
     try:
-        table = pacsv.read_csv(source, convert_options=pacsv.ConvertOptions(column_types={"ts_ns": pa.int64()}))
-        width = (len(table.column_names) - 1) // 26
-        if table.column_names[0] != "ts_ns" or width not in (3, 7) or len(table.column_names) != 1 + 26 * width:
+        with source.open() as csv:
+            header = csv.readline().rstrip("\r\n").split(",")
+        width = (len(header) - 1) // 26
+        if header[0] != "ts_ns" or width not in (3, 7) or len(header) != 1 + 26 * width or len(set(header)) != len(header):
             raise ValueError("expected ts_ns followed by 26 xyz or xyz+xyzw joints")
-        times = table.column(0).to_numpy().astype(np.int64)
+        table = read_csv_columns(source, {"ts_ns": pa.int64(), **dict.fromkeys(header[1:], pa.float64())})
+        times = table.column(0).to_numpy()
         joints = np.column_stack([column.to_numpy() for column in table.columns[1:]]).astype(np.float32).reshape(-1, 26, width)
     except (pa.ArrowInvalid, pa.ArrowNotImplementedError, OSError, ValueError, TypeError) as error:
         raise ValueError(f"{source}: invalid Quest joint CSV: {error}") from error
@@ -50,7 +56,7 @@ def read_quest_joint_poses(source: Path) -> QuestJointPoses:
         raise ValueError(f"{source}: duplicate hand timestamp")
     missing = np.abs(joints[:, :, :3]).sum(axis=(1, 2)) == 0
     joints[missing] = np.nan
-    names = tuple(name.rsplit("_", 1)[0] for name in table.column_names[1::width])
+    names = tuple(name.rsplit("_", 1)[0] for name in header[1::width])
     return QuestJointPoses(times, joints[:, :, :3], joints[:, :, 3:7] if width == 7 else None, names)
 
 

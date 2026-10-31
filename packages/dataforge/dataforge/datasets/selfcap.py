@@ -523,7 +523,10 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
 
 
 def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprint:
-    """Default layout: the 3D scene plus a camera grid over the ego IMU plots.
+    """The base layer's own layout: the 3D scene plus a camera grid over the ego IMU plots.
+
+    It shows what one base rrd holds by itself (unposed phones, raw Quest hands). The catalog never reads it; the
+    dataset's layout over every layer is ``SelfcapDataset.default_blueprint``, which ``dataforge-register`` publishes.
 
     Args:
         panes: Camera labels and indices, in rig-then-camera order.
