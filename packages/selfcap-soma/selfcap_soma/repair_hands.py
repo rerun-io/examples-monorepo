@@ -13,6 +13,8 @@ from selfcap_soma.catalog import read_window
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_diagnostics import Plausibility, measure
 from selfcap_soma.hand_pose import read_orientations
+from dataforge.quest_joint_poses import read_segment_hand_poses
+from rerun.catalog import CatalogClient
 from selfcap_soma.output import save
 
 
@@ -59,8 +61,8 @@ def main() -> None:
     procedural = model(True)
     twist_only = measure(procedural, baseline, data.times)
     print("TWIST ONLY", to_json(twist_only), flush=True)
-    raw = Path("/mnt/nas/datasets/exoego-self-collected/main/cut/2025-12-03/d31bf1da-c23c-4e4b-b88b-eb5c5ad20e3f/episodes/episode-001/quest")
-    orientations = read_orientations(raw, data.times, data.offset_ms)
+    dataset = CatalogClient("rerun+http://dgx-spark:51235").get_dataset(name="selfcap-post-dev")
+    orientations = read_orientations(read_segment_hand_poses(dataset.filter_segments("selfcap__2025-12-03__d31bf1da__ep001")), data.times, data.offset_ms)
     result = fit(
         data,
         assets,

@@ -12,7 +12,8 @@ from serde import from_dict
 
 import selfcap_curate.oak_mount as module
 from selfcap_curate.device_tables import pool_rotations
-from selfcap_curate.factory import cy_shift_px, intrinsic_matrix, oak_stereo, quest_block, transform
+from dataforge.datasets.selfcap_raw import crop_shift_px
+from selfcap_curate.factory import intrinsic_matrix, oak_stereo, quest_block, transform
 from selfcap_curate.oak_mount import gyro_mount, solve_oak
 from selfcap_curate.quest_fit import load_quest_hands
 from selfcap_curate.records import CatalogHands, GyroFit, OakDetections, OakFit
@@ -51,7 +52,7 @@ def test_factory_converts_oak_centimetres_and_december_quest_crop() -> None:
     quest = quest_block(factory())
     assert quest.mode == "faulty-unresolved"
     assert intrinsic_matrix(quest.pinholes["1"])[1, 2] == 482.0
-    assert cy_shift_px(quest.pinholes["1"]) == 160.0
+    assert crop_shift_px(quest.pinholes["1"]) == 160.0
 
 
 def test_broken_left_requires_explicit_borrow_and_measured_lever_arm() -> None:

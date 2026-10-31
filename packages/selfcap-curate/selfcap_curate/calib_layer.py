@@ -7,17 +7,15 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 from dataforge import schema
-from dataforge.logging_toolkit import time_column
 from dataforge.writing import atomic_recording
 from jaxtyping import Float64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from serde import serde, to_dict
 from serde.json import to_json
 
 from selfcap_curate.exo_calibration import SessionCalibration
 from selfcap_curate.exo_refine import Refinement
-from selfcap_curate.factory import QuestBlock, cy_shift_px, intrinsic_matrix
+from selfcap_curate.factory import QuestBlock
 from selfcap_curate.records import OakFit, SessionEpisode, oak_quest_offset_ms
 
 METHOD: str = "selfcap-calib v1 (2026-10-16)"
@@ -48,7 +46,7 @@ class Provenance:
 def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode) -> None:
     """Write RDF transforms/pinholes and one calib property group atomically."""
     layout = motion.layout
-    sync, head, oak_rig, quest_rig = motion.sync, motion.hands, layout.oak_rig, layout.quest_rig
+    sync, oak_rig, quest_rig = motion.sync, layout.oak_rig, layout.quest_rig
     refinement = session.exo_refinements.get(sync.episode_key.segment)
     if layout.phones != tuple(sorted(sync.exo_fit)):
         raise ValueError(f"{sync.key}: base phone layout differs from sync exo_fit")
@@ -68,6 +66,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                     camera_xyz=rr.ViewCoordinates.RDF,
                     image_plane_distance=0.3,
                 ),
+                rr.AnyValues(lens_source="fitted"),  # replaces the base layer's "assumed" lens
                 static=True,
             )
 
@@ -95,37 +94,23 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             )
             p = (refined if refined is not None else camera.camera).parameters
             pinhole(schema.pinhole_path(rig, 0), np.array([[p[6], 0.0, p[7]], [0.0, p[6], p[8]], [0.0, 0.0, 1.0]]), 1920, 1080)
-        for cam, name in ((1, "rgb_T_left"), (2, "rgb_T_right")):
-            if name in session.stereo:
-                tf(schema.cam_path(oak_rig, cam), session.stereo[name], calib_source="OAK factory calibration (cm -> m)")
+        # The OAK stereo and healthy-Quest camera offsets are factory facts written by the base layer.
         qp = oak_quest_offset_ms(sync)
         mount = session.oak.questrig_T_rgb if session.oak.ok else None
         posed = qp is not None and mount is not None
         if posed:
-            rotation = Rotation.from_quat(head.head_quaternions).as_matrix()
-            recording.send_columns(
-                schema.rig_path(oak_rig),
-                indexes=[time_column(np.rint(head.head_times_s * 1e9 + qp * 1e6).astype(np.int64))],
-                columns=rr.Transform3D.columns(translation=head.head_positions + rotation @ mount[:3, 3], mat3x3=rotation @ mount[:3, :3]),
-            )
+            # Same static components as the base layer's nominal prior, so this fit replaces it. The aligned base puts the
+            # Quest track on the OAK's clock, so the static mount needs no time shift.
             recording.log(
                 schema.rig_path(oak_rig),
-                rr.AnyValues(calib_source=METHOD, calib_oak_source=session.oak.observation_source, calib_oak_median_px=session.oak.median_px),
+                rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=f"tf#{schema.rig_path(quest_rig)}"),
+                rr.AnyValues(oak_mount_source="fitted", calib_source=METHOD, calib_oak_source=session.oak.observation_source,
+                             calib_oak_median_px=session.oak.median_px),
                 static=True,
             )
-        # The fitted head offset is an exo-only nuisance parameter, never a wearable transform.
-        quest_transforms = session.quest.rig_T_cam.copy()
-        for slot, matrix in quest_transforms.items():
-            matrix = matrix.copy()
-            tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")
-        for slot, camera in session.quest.pinholes.items():
-            if cy_shift_px(camera):
-                pinhole(
-                    schema.pinhole_path(quest_rig, int(slot)),
-                    intrinsic_matrix(camera),
-                    camera.capture_resolution.width,
-                    camera.capture_resolution.height,
-                )
+        if session.quest.mode != "healthy":  # a borrowed camera-50 transform is an estimate, so it lives here
+            for slot, matrix in session.quest.rig_T_cam.items():
+                tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")
         recording.send_property(
             "calib",
             rr.AnyValues(

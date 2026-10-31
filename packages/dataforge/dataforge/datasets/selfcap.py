@@ -52,9 +52,11 @@ absent from the capture property until the chmod lands.
 Rig topology. Exo devices sorted by name take ``rig_00..``, then the OAK ego rig,
 then the Quest — nine cameras and ``rig_00..rig_05`` in the usual 4-iPhone case.
 Only the Quest rig has a known pose (its left-eye track in the Quest's Y-up
-world frame), so the base layer owns the root ``ViewCoordinates``. Exo extrinsics
-are empty in the raw calibration: those rigs are world-anchored-unknown and carry
-no transform at all, waiting for a calibration/SLAM layer to localize them.
+world frame), so the base layer owns the root ``ViewCoordinates``. The base holds
+only measured facts: the OAK and Quest factory stereo extrinsics become static
+``rig_T_cam`` transforms, while the iPhones measured neither pose (empty
+extrinsics) nor lens (``available: false``, a 700 px fallback). Their rigs carry no
+transform and their cameras no Pinhole until a calibration layer estimates both.
 """
 
 from __future__ import annotations
@@ -71,19 +73,23 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
-from rerun.chunk import Chunk
+from rerun.chunk import Chunk, ChunkStore, RrdReader
 from rerun.encodings import EntityPathLike
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.selfcap_raw import CameraCalibration as CameraCalibration
+from dataforge.datasets.selfcap_raw import FactoryCalibration, assumed_phone_lens, nominal_oak_mount, oak_stereo, quest_left_T_right, quest_mesh_frame
 from dataforge.datasets.selfcap_raw import HeadPoses as HeadPoses
 from dataforge.datasets.selfcap_raw import QuestHands as QuestHands
 from dataforge.datasets.selfcap_raw import read_calibration as read_calibration
 from dataforge.datasets.selfcap_raw import read_head_poses as read_head_poses
 from dataforge.datasets.selfcap_raw import read_imu_csv as read_imu_csv
+from dataforge.datasets.selfcap_raw import QUEST_HAND_SIDES, coco133_hands, read_quest_joint_hands
 from dataforge.datasets.selfcap_raw import read_quest_hands as read_quest_hands
+from dataforge.quest_joint_poses import QuestJointPoses, joint_poses_from_table, quest_hand_path
+from dataforge.quest_joint_poses import read_segment_hand_poses as read_segment_hand_poses
 from dataforge.datasets.selfcap_raw import read_session_task as read_session_task
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
@@ -96,7 +102,7 @@ from dataforge.logging_toolkit import (
     log_video_stream,
     time_column,
 )
-from dataforge.records import read_csv_columns
+from dataforge.records import read_csv_columns, read_json
 from dataforge.video_encoding import read_video_start_ns
 
 DATE_DIR_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -115,8 +121,12 @@ Keying on ``positional_layout`` rather than ``camera_id`` because the OAK's
 QUEST_STREAM_LAYOUTS: tuple[tuple[str, str], ...] = (("left", "left"), ("right", "right"))
 """Quest stream name → ``positional_layout``, in cam_00..cam_01 order."""
 
-IMAGE_PLANE_DISTANCE: float = 0.1
-"""Frustum length in metres; the Quest world is metric, so this reads as 10 cm."""
+IMAGE_PLANE_DISTANCE: float = 0.04
+"""Frustum length in metres. The five head cameras sit 3-7 cm apart, so longer frustums overlap into one blob."""
+PHONE_IMAGE_PLANE_DISTANCE: float = 0.3
+"""The phones stand metres apart; the calibration layer draws them at the same length."""
+DEVICE_MESHES: Path = Path(__file__).parent / "selfcap_devices"
+"""Display meshes of the head-worn devices, in their reference camera frames (see its NOTICE.md)."""
 IMU_DEVICE: int = 0
 """The OAK ships one IMU, so the ego rig has a single ``imu_00``."""
 DEFAULT_EXO_CAMERAS: int = 4
@@ -135,6 +145,99 @@ EGO_CORE_FILES: tuple[str, ...] = (
 """Files an episode must expose readably for its ego rig to be convertible."""
 QUEST_CORE_FILES: tuple[str, ...] = ("quest/left.mp4", "quest/right.mp4", "quest/head_pose.csv", "quest/calibration.json")
 """Files an episode must expose readably for its Quest rig to be convertible."""
+
+
+def log_quest_hand_poses(recording: rr.RecordingStream, hands: dict[str, QuestJointPoses], *, shift_ns: int = 0) -> None:
+    """Log each hand as recorded: ``InstancePoses3D`` with all 26 joints' world positions and xyzw orientations.
+
+    One row per CSV sample; an untracked sample (an all-zero CSV row) is an empty batch, so the CSV round-trips.
+    ``TransformAxes3D`` draws a small frame at every joint (the viewer instances it per pose). Position-only CSVs
+    log translations alone. ``video_time`` is shifted by ``shift_ns``; ``capture_time`` keeps the raw stamps.
+    """
+    for side, hand in hands.items():
+        entity = quest_hand_path(side)
+        rr.log(
+            entity,
+            rr.TransformAxes3D(axis_length=0.01),
+            rr.AnyValues(joint_names=list(hand.joint_names), frame="Quest world, metres; quaternions xyzw"),
+            static=True,
+            recording=recording,
+        )
+        if not hand.times_ns.size:
+            continue
+        tracked = np.isfinite(hand.positions).all(axis=(1, 2))
+        lengths = np.where(tracked, 26, 0)
+        columns = rr.InstancePoses3D.columns(
+            translations=hand.positions[tracked].reshape(-1, 3),
+            quaternions=None if hand.orientations is None else hand.orientations[tracked].reshape(-1, 4),
+        ).partition(lengths)
+        rr.send_columns(
+            entity,
+            indexes=[time_column(hand.times_ns + shift_ns), capture_column(hand.times_ns)],
+            columns=columns,
+            recording=recording,
+        )
+
+
+def read_hand_poses(base_rrd: Path) -> tuple[dict[str, QuestJointPoses], int]:
+    """The joint poses a base layer holds (on ``capture_time``), and its hands' ``video_time`` shift."""
+    entities = {quest_hand_path(side) for side in QUEST_HAND_SIDES}
+    store = ChunkStore.from_chunks([chunk for chunk in RrdReader(base_rrd).stream() if str(chunk.entity_path) in entities])
+    hands: dict[str, QuestJointPoses] = {}
+    shifts: set[int] = set()
+    for side in QUEST_HAND_SIDES:
+        entity = quest_hand_path(side)
+        table = store.reader(index=schema.CAPTURE_TIMELINE, contents=entity).to_arrow_table()
+        if not table.num_rows:
+            continue
+        names = store.reader(index=None, contents=entity).to_arrow_table()[f"{entity}:joint_names"].to_pylist()[0] or []
+        names = names[0] if names and isinstance(names[0], list) else names  # one row of an AnyValues string list
+        hands[side] = joint_poses_from_table(table, entity, schema.CAPTURE_TIMELINE, tuple(names))
+        stamps = table.select([schema.CAPTURE_TIMELINE, schema.TIMELINE]).drop_null()
+        shifts |= set((stamps[schema.TIMELINE].cast(pa.int64()).to_numpy() - stamps[schema.CAPTURE_TIMELINE].cast(pa.int64()).to_numpy()).tolist())
+    if len(shifts) > 1:
+        raise ValueError(f"{base_rrd}: Quest hands carry {len(shifts)} different video_time shifts")
+    return hands, shifts.pop() if shifts else 0
+
+
+def write_gt_layer(base_rrd: Path, target: Path, recording_id: str) -> None:
+    """Derive the ``gt`` layer from a base layer: the COCO-133 view of its Quest hands (``/world/gt/coco133_xyz``).
+
+    The base holds the hands as recorded; this layer is the dataset-agnostic keypoint view the shared exo/ego tools
+    read. It is always computed from a base (fresh or aligned), so it never needs its own retime.
+    """
+    write_coco133_layer(*read_hand_poses(base_rrd), target, recording_id)
+
+
+def write_coco133_layer(hands: dict[str, QuestJointPoses], shift_ns: int, target: Path, recording_id: str) -> None:
+    """``write_gt_layer`` from hand poses already read (``read_hand_poses``)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with writing.recording_to(target, recording_id=recording_id, send_properties=False) as recording:
+        log_quest_hands(recording, coco133_hands(hands), shift_ns=shift_ns)
+
+
+DEVICE_MESH_FILES: dict[str, str] = {"oak": "oak_d_pro_w", "quest": "quest3s"}
+"""Device kind → mesh file in ``DEVICE_MESHES``."""
+
+
+def device_asset_id(device: str, rig: int) -> str:
+    """``devices__<mesh>__rig_NN``: one asset per device and rig index (a 3-phone session puts the OAK at rig_03)."""
+    return f"devices__{DEVICE_MESH_FILES[device]}__rig_{rig:02d}"
+
+
+def write_device_asset(target: Path, device: str, rig: int) -> None:
+    """A catalog asset: the device's mesh, static, at ``/world/rig_NN/device`` in its reference camera frame."""
+    mesh = np.load(DEVICE_MESHES / f"{DEVICE_MESH_FILES[device]}.npz")
+    with writing.atomic_recording(target, recording_id=device_asset_id(device, rig), send_properties=False) as recording:
+        rr.log(
+            f"{schema.rig_path(rig)}/device",
+            rr.Mesh3D(
+                vertex_positions=mesh["positions"], triangle_indices=mesh["triangles"],
+                vertex_normals=mesh["normals"].astype(np.float32), vertex_colors=mesh["colors"],
+            ),
+            static=True,
+            recording=recording,
+        )
 
 
 def log_quest_hands(recording: rr.RecordingStream, hands: QuestHands, *, shift_ns: int = 0) -> None:
@@ -198,6 +301,12 @@ class CameraPlan:
     """Last native-rate timestamp; None for cameras without a csv."""
     first_frame_idx: int | None = None
     """First session-global 24 fps counter; preserves the RGB drift origin."""
+    rig_T_cam: Float64[ndarray, "4 4"] | None = None
+    """Factory transform from the rig's reference camera (cam_00); None for the reference itself and the iPhones."""
+    lens_source: str = "factory"
+    """``lens_source`` AnyValue on the pinhole: ``factory`` (measured) or ``assumed`` (iPhones, until calibration)."""
+    image_plane_distance: float = IMAGE_PLANE_DISTANCE
+    """Frustum length in metres."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,13 +442,22 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
         if calibration is None:
             print(f"  warning: no usable intrinsics in {device_dir / 'calibration.json'}, skipping {device}")
         else:
-            exo_cameras.append(CameraPlan(rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", calibration=calibration, name=device, kind="rgb"))
+            measured: bool = calibration.available
+            exo_cameras.append(
+                CameraPlan(
+                    rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", name=device, kind="rgb",
+                    calibration=calibration if measured else assumed_phone_lens(calibration.width, calibration.height),
+                    lens_source="factory" if measured else "assumed", image_plane_distance=PHONE_IMAGE_PLANE_DISTANCE,
+                )
+            )
             panes.append(CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo"))
         # reference=schema.CAM0_REFERENCE: a single-camera rig's frame is its camera's frame by construction.
         rigs.append(RigPlan(rig=rig, reference=schema.CAM0_REFERENCE, name=device, kind="exo", cameras=tuple(exo_cameras)))
 
     ego_dir: Path = episode_dir / "ego"
     ego_calibration: dict[str, CameraCalibration] = read_calibration(ego_dir / "calibration.json")
+    stereo: dict[str, Float64[ndarray, "4 4"]] = oak_stereo(read_json(ego_dir / "calibration.json", FactoryCalibration))
+    ego_rig_T_cam: dict[str, Float64[ndarray, "4 4"] | None] = {"left": stereo.get("rgb_T_left"), "right": stereo.get("rgb_T_right")}
     ego_cameras: list[CameraPlan] = []
     for cam, (stream, layout) in enumerate(EGO_STREAM_LAYOUTS):
         calibration = ego_calibration.get(layout)
@@ -362,15 +480,16 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 native_frames=frame_times_ns.size,
                 native_duration_ns=int(frame_times_ns[-1]) if frame_times_ns.size else 0,
                 first_frame_idx=int(frame_indices[0]) if frame_indices.size else None,
+                rig_T_cam=ego_rig_T_cam.get(stream),
             )
         )
-        panes.append(CameraPane(name=f"ego {stream}", rig=ego_rig, cam=cam, kind="ego"))
-    # reference=schema.CAM0_REFERENCE: the OAK's rgb camera stands in for the rig frame while the
-    # stereo extrinsics stay unlogged (see read_calibration's TODO on their units).
+        panes.append(CameraPane(name=f"OAK {stream}", rig=ego_rig, cam=cam, kind="ego"))
+    # reference=schema.CAM0_REFERENCE: the OAK's rgb camera is the rig frame; left/right carry rgb_T_left/right.
     rigs.append(RigPlan(rig=ego_rig, reference=schema.CAM0_REFERENCE, name="oak", kind="ego", cameras=tuple(ego_cameras)))
 
     quest_dir: Path = episode_dir / "quest"
     quest_calibration: dict[str, CameraCalibration] = read_calibration(quest_dir / "calibration.json")
+    left_T_right: Float64[ndarray, "4 4"] | None = quest_left_T_right(read_json(quest_dir / "calibration.json", FactoryCalibration))
     quest_cameras: list[CameraPlan] = []
     for cam, (stream, layout) in enumerate(QUEST_STREAM_LAYOUTS):
         calibration = quest_calibration.get(layout)
@@ -385,9 +504,10 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 calibration=calibration,
                 name=stream,
                 kind="grayscale",
+                rig_T_cam=left_T_right if stream == "right" else None,
             )
         )
-        panes.append(CameraPane(name=f"quest {stream}", rig=quest_rig, cam=cam, kind="quest"))
+        panes.append(CameraPane(name=f"Quest {stream}", rig=quest_rig, cam=cam, kind="quest"))
     # reference=schema.CAM0_REFERENCE: the head_pose track logged on the rig node *is* the left-eye pose.
     rigs.append(RigPlan(rig=quest_rig, reference=schema.CAM0_REFERENCE, name="quest", kind="quest", cameras=tuple(quest_cameras)))
 
@@ -405,22 +525,30 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprin
         The blueprint embedded in every SelfCap base-layer rrd.
     """
 
-    def views(kind: str) -> list[rrb.Spatial2DView]:
-        return [blueprints.camera_view(pane.name, pane.rig, pane.cam) for pane in panes if pane.kind == kind]
+    def views(kind: str, *, project: bool = True) -> list[rrb.Spatial2DView]:
+        # A pane is rooted at its pinhole; listing the 3D hand joints too makes the viewer project them into the image
+        # through the transform tree. Exact for the Quest; the OAK lenses are wide and Rerun has no distortion model,
+        # so on the OAK panes the joints land 25-80 px off, worst at the image edge.
+        extra: list[str] = ["/world/gt/**"] if project else []
+        return [
+            blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=[f"{schema.pinhole_path(pane.rig, pane.cam)}/**", *extra])
+            for pane in panes
+            if pane.kind == kind
+        ]
 
-    # The layout is grouped by device kind (blueprints cannot select on the rigs'
-    # `kind` AnyValues, so the grouping travels through the pane list instead) and
-    # mirrors simplecv's exoego ergonomics: a dominant 3D scene with the ego views
-    # (OAK + Quest) in a two-column grid beside it, the exo cameras as a bottom
-    # row, and the IMU strip beneath. Layout only — the logged schema is untouched.
+    # The phones have an assumed lens but no pose until calibration, so this base-only layout keeps them out of 3D.
+    unposed: list[str] = [f"- {schema.rig_path(pane.rig)}/**" for pane in panes if pane.kind == "exo"]
+    oak, quest = views("ego"), views("quest")
+    # A dominant 3D scene with the head cameras stacked beside it: the OAK RGB on top, the two OAK mono cameras
+    # under it, then the two Quest cameras; the exo cameras run along the bottom over the IMU strip.
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Scene", origin="/", line_grid=True),
-                rrb.Grid(*views("ego"), *views("quest"), grid_columns=2, name="Ego"),
-                column_shares=[3.0, 1.0],
+                rrb.Spatial3DView(name="Scene", origin="/", contents=["/**", *unposed], line_grid=True),
+                rrb.Vertical(oak[0], rrb.Horizontal(*oak[1:]), rrb.Horizontal(*quest), name="Head cameras", row_shares=[1.3, 1.0, 1.0]),
+                column_shares=[2.2, 1.0],
             ),
-            rrb.Horizontal(*views("exo"), name="Exo"),
+            rrb.Horizontal(*views("exo", project=False), name="Exo"),
             rrb.Horizontal(
                 blueprints.sensor_plot("Gyroscope", schema.imu_path(ego_rig, IMU_DEVICE), schema.gyro_path(ego_rig, IMU_DEVICE)),
                 blueprints.sensor_plot("Accelerometer", schema.imu_path(ego_rig, IMU_DEVICE), schema.accel_path(ego_rig, IMU_DEVICE)),
@@ -563,7 +691,8 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         """Write one episode's base-layer rrd (nine cameras, ego IMU, Quest pose and hands)."""
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
-        if writing.should_skip(target, force=force):
+        gt_target: Path = paths.rrd_path(paths.output_root(), layer=paths.GT_LAYER, identity=identity)
+        if writing.should_skip(target, force=force) and gt_target.is_file():
             print(f"skip {identity.sequence_key} → {target}")
             return target
 
@@ -571,8 +700,17 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         # plan's, so they can only ever describe cameras that really get logged.
         plan: EpisodePlan = build_episode_plan(source)
 
-        with writing.atomic_recording(
-            target,
+        # Both layers are staged and published together; gt reads the *staged* base, as a rebuild reads the published one.
+        with writing.atomic_write(gt_target) as staged_gt, writing.atomic_write(target) as staged_base:
+            self._write_base(identity, plan, staged_base)
+            write_gt_layer(staged_base, staged_gt, identity.recording_id)
+        print(f"done {identity.sequence_key} → {target} + {gt_target.parent.name} ({len(plan.panes)} cameras)")
+        return target
+
+    def _write_base(self, identity: SequenceIdentity, plan: EpisodePlan, staged: Path) -> None:
+        """The base layer: every raw stream of the episode, as recorded (see the module docstring)."""
+        with writing.recording_to(
+            staged,
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(plan.panes, ego_rig=plan.ego_rig),
         ) as recording:
@@ -595,8 +733,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                     num_frames = max(num_frames, self._log_camera(recording, camera))
             self._log_ego_imu(recording, plan)
             self._log_quest_pose(recording, plan)
-            hands: QuestHands = read_quest_hands(plan.episode_dir / "quest")
-            log_quest_hands(recording, hands)
+            self._log_oak_mount_prior(recording, plan)
+            self._log_quest_mesh_frame(recording, plan)
+            log_quest_hand_poses(recording, read_quest_joint_hands(plan.episode_dir / "quest"))
 
             # AnyValues drops None-valued kwargs, so an unreadable metadata.json simply
             # leaves task/collector off the property instead of writing empty strings.
@@ -611,15 +750,13 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 collector=session.get("collector"),
             )
 
-        print(f"done {identity.sequence_key} → {target} ({len(plan.panes)} cameras, {num_frames} frames)")
-        return target
 
     def _log_camera(self, recording: rr.RecordingStream, camera: CameraPlan) -> int:
-        """Log one planned camera: node metadata, static pinhole, and its video stream.
+        """Log one planned camera: node metadata, its factory ``rig_T_cam``, a static pinhole, and its video stream.
 
-        No ``rig_T_cam`` transform is written: the raw exo calibration ships empty
-        extrinsics, and the ego/Quest ones are in unvalidated units. Brown-Conrady
-        coefficients ride along when the calibration declares them.
+        Every camera gets a pinhole tagged with ``lens_source``. An iPhone's is assumed (see ``assumed_phone_lens``);
+        the calibration layer writes the same components tagged ``fitted``, so the newer static write replaces it.
+        Brown-Conrady coefficients ride along when the calibration declares them.
 
         Args:
             recording: Destination recording stream.
@@ -641,6 +778,13 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             static=True,
             recording=recording,
         )
+        if camera.rig_T_cam is not None:
+            rr.log(
+                schema.cam_path(camera.rig, camera.cam),
+                rr.Transform3D(translation=camera.rig_T_cam[:3, 3], mat3x3=camera.rig_T_cam[:3, :3]),
+                static=True,
+                recording=recording,
+            )
         calibration: CameraCalibration = camera.calibration
         focal_length_xy: Float64[ndarray, "2"] = calibration.focal_length_xy
         principal_point_xy: Float64[ndarray, "2"] = calibration.principal_point_xy
@@ -657,9 +801,6 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             if calibration.distortion_coefficients is None
             else CameraDistortion(model="brown_conrady", coefficients=calibration.distortion_coefficients.astype(np.float32))
         )
-        # TODO(dataforge): the Quest intrinsics describe the 1280x1280 sensor array while
-        # capture_resolution (and the mp4) is 1280x960, so cy lands ~160 px below the image
-        # centre. Confirm the crop origin against the device before shifting the principal point.
         rr.log(
             schema.pinhole_path(camera.rig, camera.cam),
             PinholeWithDistortion(
@@ -668,10 +809,11 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                     width=calibration.width,
                     height=calibration.height,
                     camera_xyz=rr.ViewCoordinates.RDF,
-                    image_plane_distance=IMAGE_PLANE_DISTANCE,
+                    image_plane_distance=camera.image_plane_distance,
                 ),
                 distortion=distortion,
             ),
+            rr.AnyValues(lens_source=camera.lens_source),
             static=True,
             recording=recording,
         )
@@ -689,6 +831,44 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         channels: tuple[ImuChannel, ImuChannel] = read_imu_csv(plan.episode_dir / "ego" / "imu.csv")
         if channels[0].times_ns.size:
             log_imu(recording, plan.ego_rig, IMU_DEVICE, gyro=channels[0], accel=channels[1], name="oak-imu", capture_time=True)
+
+    def _log_quest_mesh_frame(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
+        """Turn the Quest model's frame on a camera-50 headset, whose eye-track frame sits about 175 deg off.
+
+        The mesh itself is a catalog asset (``write_device_asset``), shared by every segment; this static transform
+        on ``/world/rig_NN/device`` is the one per-episode fact it needs. Healthy headsets need none.
+        """
+        frame = quest_mesh_frame(
+            read_json(plan.episode_dir / "ego" / "calibration.json", FactoryCalibration),
+            read_json(plan.episode_dir / "quest" / "calibration.json", FactoryCalibration),
+        )
+        if frame is not None and not np.allclose(frame, np.eye(4)):
+            rr.log(
+                f"{schema.rig_path(plan.quest_rig)}/device",
+                rr.Transform3D(translation=frame[:3, 3], mat3x3=frame[:3, :3]),
+                static=True,
+                recording=recording,
+            )
+
+    def _log_oak_mount_prior(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
+        """Hang the OAK rig on the Quest's left-eye frame with a nominal mount; calibration overwrites it with the fit.
+
+        Both layers write the same static components (translation, mat3x3, parent_frame, oak_mount_source), so the
+        newer write replaces the prior instead of composing with it.
+        """
+        mount = nominal_oak_mount(
+            read_json(plan.episode_dir / "ego" / "calibration.json", FactoryCalibration),
+            read_json(plan.episode_dir / "quest" / "calibration.json", FactoryCalibration),
+        )
+        if mount is None:
+            return
+        rr.log(
+            schema.rig_path(plan.ego_rig),
+            rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=f"tf#{schema.rig_path(plan.quest_rig)}"),
+            rr.AnyValues(oak_mount_source="nominal"),
+            static=True,
+            recording=recording,
+        )
 
     def _log_quest_pose(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
         """Log the Quest's left-eye track as the temporal ``world_T_rig`` on its rig node."""

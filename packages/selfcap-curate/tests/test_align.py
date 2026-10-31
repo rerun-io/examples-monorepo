@@ -82,6 +82,7 @@ def test_failed_session_is_unpublished_and_retryable(tmp_path: Path, monkeypatch
     monkeypatch.setattr(align, "fit_session", fit)
     monkeypatch.setattr(align, "write_detections_layer", detections)
     monkeypatch.setattr(align, "patch", patch)
+    monkeypatch.setattr(align, "read_hand_poses", lambda _path: ({}, 0))  # the fake patch writes no real rrd
     output = tmp_path / "out"
     config = Config(base, output, tuple(f"selfcap__{key}" for key in records))
     with pytest.raises(ValueError, match="injected failure"):

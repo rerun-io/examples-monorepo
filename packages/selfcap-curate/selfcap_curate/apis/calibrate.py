@@ -100,7 +100,7 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
             elif config.oak_method == "egohand":
                 video = (segment.videos[video_path(episode.layout.oak_rig, 0)] if segment.videos is not None else
                          read_catalog_videos(dataset, segment.id, [video_path(episode.layout.oak_rig, 0)], "capture_time")[0])
-                current = read_ego_cameras(dataset, dataset, segment.id, episode.layout.oak_rig)
+                current = read_ego_cameras(dataset, dataset, segment.id, episode.layout.oak_rig, episode.layout.quest_rig)
                 oak = detect_oak_egohand(episode, video, oak_centre(ego), rotation, config.oak_egohand_assets,
                                         camera=next((camera for camera in current if camera.cam == 0), None), retain_models=config.retain_models)
             else:

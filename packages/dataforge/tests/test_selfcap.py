@@ -13,7 +13,13 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 from dataforge import schema
+from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.datasets.selfcap import (
+    DEVICE_MESHES,
+    log_quest_hand_poses,
+    read_hand_poses,
+    write_device_asset,
+    write_gt_layer,
     CameraCalibration,
     EpisodePlan,
     HeadPoses,
@@ -26,7 +32,9 @@ from dataforge.datasets.selfcap import (
     read_imu_csv,
     read_session_task,
 )
+from dataforge.datasets.selfcap_raw import OAK_MOUNT_OTHER, OAK_MOUNTS, assumed_phone_lens, quest_mesh_frame, FactoryCalibration, nominal_oak_mount, oak_stereo, quest_left_T_right
 from dataforge.identity import SequenceIdentity
+from dataforge.records import read_json
 from dataforge.logging_toolkit import ImuChannel
 from dataforge.writing import blueprint_views
 
@@ -412,36 +420,36 @@ def test_convert_preserves_capture_time_on_every_temporal_chunk(tmp_path: Path, 
     import pyarrow as pa
     import rerun.chunk as rrc
 
-    reader: rrc.RrdReader = rrc.RrdReader(convert_fixture_episode(tmp_path, monkeypatch))
+    base: Path = convert_fixture_episode(tmp_path, monkeypatch)
     seen: set[str] = set()
-    hand_rows: int = 0
+    pose_rows: dict[str, list[int]] = {}
     sample_rows: int = 0
-    annotated: bool = False
-    for chunk in reader.stream(store=reader.recordings()[0]):
-        if chunk.is_static:
-            if str(chunk.entity_path) == "/world/gt":
-                annotated = "AnnotationContext:context" in chunk.to_record_batch().schema.names
-            continue
-        batch: pa.RecordBatch = chunk.to_record_batch()
-        assert "capture_time" in chunk.timeline_names, str(chunk.entity_path)
-        assert batch.column("capture_time").equals(batch.column(schema.TIMELINE))
-        field: pa.Field = batch.schema.field("capture_time")
-        assert field.type == pa.duration("ns")
-        assert field.metadata is not None
-        assert field.metadata[b"rerun:kind"] == b"index"
-        assert field.metadata[b"rerun:index_name"] == b"capture_time"
-        assert field.metadata[b"rerun:is_sorted"] == b"true"
-        seen.add(str(chunk.entity_path))
-        if "VideoStream:sample" in batch.schema.names:
-            sample_rows += batch.num_rows
-        if str(chunk.entity_path) == schema.coco133_xyz_path():
-            hand_rows += batch.num_rows
-            assert batch.column("capture_time").cast(pa.int64()).to_pylist() == [17181303, 27181303]
-            points = np.asarray(batch.column("Points3D:positions").to_pylist(), dtype=np.float32)
-            assert np.isnan(points[0, 112:]).all()
-            assert np.isnan(points[1, 91:112]).all()
-    assert annotated
-    assert hand_rows == 2
+    for layer in (base, base.parent.parent / "gt" / base.name):
+        reader: rrc.RrdReader = rrc.RrdReader(layer)
+        for chunk in reader.stream(store=reader.recordings()[0]):
+            if chunk.is_static:
+                continue
+            batch: pa.RecordBatch = chunk.to_record_batch()
+            assert "capture_time" in chunk.timeline_names, str(chunk.entity_path)
+            assert batch.column("capture_time").equals(batch.column(schema.TIMELINE))
+            field: pa.Field = batch.schema.field("capture_time")
+            assert field.type == pa.duration("ns")
+            assert field.metadata is not None
+            assert field.metadata[b"rerun:kind"] == b"index"
+            assert field.metadata[b"rerun:index_name"] == b"capture_time"
+            assert field.metadata[b"rerun:is_sorted"] == b"true"
+            seen.add(str(chunk.entity_path))
+            if "VideoStream:sample" in batch.schema.names:
+                sample_rows += batch.num_rows
+            if "InstancePoses3D:translations" in batch.schema.names:
+                pose_rows[str(chunk.entity_path)] = [len(row) for row in batch.column("InstancePoses3D:translations").to_pylist()]
+            if str(chunk.entity_path) == schema.coco133_xyz_path():
+                assert layer.parent.name == "gt"
+                assert batch.column("capture_time").cast(pa.int64()).to_pylist() == [17181303, 27181303]
+                points = np.asarray(batch.column("Points3D:positions").to_pylist(), dtype=np.float32)
+                assert np.isnan(points[0, 112:]).all()
+                assert np.isnan(points[1, 91:112]).all()
+    assert pose_rows == {quest_hand_path("left"): [26], quest_hand_path("right"): [26]}  # every joint, palm and metacarpals too
     assert sample_rows == 9 * 48  # video stored once, despite its two clocks
     assert {schema.gyro_path(4, 0), schema.accel_path(4, 0), schema.rig_path(5), schema.coco133_xyz_path()} <= seen
 
@@ -605,3 +613,180 @@ def test_table_fields_keep_the_capture_and_quality_summary_compact() -> None:
     assert len(fields.table) == 9
     assert {field.column for field in fields.cards} <= {field.column for field in fields.table}
     assert {field.name for field in fields.table} >= {"OAK posed", "OAK rotation", "Frames", "Session UUID"}
+
+
+def factory_extrinsic(kind: str, rotation: list[list[float]], translation: list[float]) -> dict:
+    return {"type": kind, "from": "a", "to": "b", "R": rotation, "T": translation}
+
+
+def test_iphone_fallback_lens_is_not_measured(tmp_path: Path) -> None:
+    # An iPhone writes a 700 px fallback with available=false; the base must not turn it into a Pinhole.
+    document = json.loads(calibration_document(("center",)))
+    document["intrinsics"][0]["lens_intrinsics"]["available"] = False
+    (tmp_path / "calibration.json").write_text(json.dumps(document))
+    assert not read_calibration(tmp_path / "calibration.json")["center"].available
+
+
+def test_oak_stereo_is_rgb_relative_in_metres(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("center", "left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("left_to_right", identity, [7.5, 0.0, 0.0]),
+                              factory_extrinsic("left_to_rgb", identity, [3.75, 0.0, 0.0])]
+    (tmp_path / "calibration.json").write_text(json.dumps(document))
+    stereo = oak_stereo(read_json(tmp_path / "calibration.json", FactoryCalibration))
+    np.testing.assert_allclose(stereo["rgb_T_left"][:3, 3], [-0.0375, 0.0, 0.0])
+    np.testing.assert_allclose(stereo["rgb_T_right"][:3, 3], [0.0375, 0.0, 0.0])
+
+
+def test_quest_left_T_right_needs_a_healthy_headset(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("device_to_left", identity, [-0.032, 0.0, 0.0]),
+                              factory_extrinsic("device_to_right", identity, [0.032, 0.0, 0.0])]
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    np.testing.assert_allclose(quest_left_T_right(read_json(path, FactoryCalibration))[:3, 3], [0.064, 0.0, 0.0])
+    document["intrinsics"][1]["lens_intrinsics"]["available"] = False  # faulty right camera: fixed later, not here
+    path.write_text(json.dumps(document))
+    assert quest_left_T_right(read_json(path, FactoryCalibration)) is None
+
+
+def test_nominal_oak_mount_follows_the_oak_and_the_headset_layout(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("device_to_left", identity, [-0.032, 0.0, 0.0]),
+                              factory_extrinsic("device_to_right", identity, [0.032, 0.0, 0.0])]
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    healthy = read_json(path, FactoryCalibration)
+    document["intrinsics"][1]["camera_id"] = "50"
+    document["intrinsics"][1]["lens_intrinsics"]["available"] = False  # broken left camera: camera 50 borrowed
+    path.write_text(json.dumps(document))
+    borrowed = read_json(path, FactoryCalibration)
+    known = FactoryCalibration(device_id=next(iter(OAK_MOUNTS)), intrinsics=())
+    unseen = FactoryCalibration(device_id="OAK - never fitted", intrinsics=())
+
+    assert nominal_oak_mount(known, healthy) is OAK_MOUNTS[known.device_id][0]
+    assert nominal_oak_mount(known, borrowed) is OAK_MOUNTS[known.device_id][1]
+    assert nominal_oak_mount(unseen, healthy) is OAK_MOUNT_OTHER[0]
+    assert nominal_oak_mount(unseen, borrowed) is OAK_MOUNT_OTHER[1]
+
+
+def test_quest_principal_point_is_in_video_pixels(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    for entry in document["intrinsics"]:
+        entry["capture_resolution"] = {"width": 1280, "height": 960}
+        entry["sensor_info"] = {"pixel_array_size": {"width": 1280, "height": 1280}}
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    raw_cy = document["intrinsics"][0]["lens_intrinsics"]["principal_point_y"]
+
+    assert read_calibration(path)["left"].principal_point_xy[1] == raw_cy - 160.0  # centred 1280x960 crop of a 1280x1280 sensor
+
+
+def test_assumed_phone_lens_is_a_centred_undistorted_pinhole() -> None:
+    lens = assumed_phone_lens(1920, 1080)
+
+    assert lens.focal_length_xy.tolist() == [960.0, 960.0]  # 90 deg horizontal field of view
+    assert lens.principal_point_xy.tolist() == [960.0, 540.0]
+    assert lens.distortion_coefficients is None and not lens.available
+
+
+def test_quest_mesh_turns_with_a_camera_50_eye_frame(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("device_to_left", identity, [-0.032, 0.0, 0.0]),
+                              factory_extrinsic("device_to_right", identity, [0.032, 0.0, 0.0])]
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    healthy = read_json(path, FactoryCalibration)
+    document["intrinsics"][1]["camera_id"] = "50"
+    document["intrinsics"][1]["lens_intrinsics"]["available"] = False
+    path.write_text(json.dumps(document))
+    borrowed = read_json(path, FactoryCalibration)
+    oak = FactoryCalibration(device_id="OAK - never fitted", intrinsics=())
+
+    turned = quest_mesh_frame(oak, borrowed)
+    angle = np.degrees(np.arccos((np.trace(turned[:3, :3]) - 1) / 2))
+
+    assert np.array_equal(quest_mesh_frame(oak, healthy), np.eye(4))
+    assert 170 < angle < 180  # the camera-50 eye frame sits about 175 deg from the healthy one
+
+
+def test_device_meshes_are_well_formed() -> None:
+    for name in ("oak_d_pro_w", "quest3s"):
+        mesh = np.load(DEVICE_MESHES / f"{name}.npz")
+        positions, triangles = mesh["positions"], mesh["triangles"]
+        assert positions.shape[1] == 3 and triangles.shape[1] == 3
+        assert triangles.max() < len(positions)
+        assert len(mesh["normals"]) == len(mesh["colors"]) == len(positions)
+        assert np.ptp(positions, axis=0).max() < 0.4  # metres: a headset, not millimetres
+
+
+def hand_csv(path: Path, width: int, rows: list[tuple[int, float]]) -> None:
+    """A Quest hand CSV in the device's layout; a row with value 0 is the all-zero "not tracked" row."""
+    axes = ("x", "y", "z", "qx", "qy", "qz", "qw")[:width]
+    names = ("palm", "wrist", *(f"joint{j}" for j in range(24)))
+    header = "ts_ns," + ",".join(f"{name}_{axis}" for name in names for axis in axes)
+    lines = [f"{stamp}," + ",".join(f"{value * (k + 1) / 7:.6f}" for k in range(26 * width)) for stamp, value in rows]
+    path.write_text(header + "\n" + "\n".join(lines) + "\n")
+
+
+@pytest.mark.parametrize("width", [7, 3])
+def test_quest_hand_poses_round_trip_through_the_base(tmp_path: Path, width: int) -> None:
+    from dataforge import writing
+    from dataforge.quest_joint_poses import read_quest_joint_poses
+
+    hand_csv(tmp_path / "left.csv", width, [(1_000_000, 0.123456), (21_000_000, 0.0), (41_000_000, -0.654321)])
+    raw = read_quest_joint_poses(tmp_path / "left.csv")
+    with writing.recording_to(tmp_path / "base.rrd", recording_id="r") as recording:
+        log_quest_hand_poses(recording, {"left": raw}, shift_ns=7_000_000)
+
+    hands, shift = read_hand_poses(tmp_path / "base.rrd")
+    back = hands["left"]
+
+    assert shift == 7_000_000
+    assert np.array_equal(back.times_ns, raw.times_ns)
+    assert np.array_equal(back.positions, raw.positions, equal_nan=True)  # untracked row stays untracked
+    assert np.isnan(back.positions[1]).all() and np.isfinite(back.positions[[0, 2]]).all()
+    assert back.joint_names == raw.joint_names and back.joint_names[:2] == ("palm", "wrist")
+    if width == 7:
+        assert np.array_equal(back.orientations, raw.orientations, equal_nan=True)
+    else:
+        assert back.orientations is None
+
+
+def test_gt_layer_is_the_coco133_view_of_the_base_hands(tmp_path: Path) -> None:
+    import pyarrow as pa
+    import rerun.chunk as rrc
+
+    from dataforge import writing
+    from dataforge.datasets.selfcap_raw import coco133_hands
+    from dataforge.quest_joint_poses import read_quest_joint_poses
+
+    hands = {}
+    for side, stamp in (("left", 1_000_000), ("right", 2_000_000)):
+        hand_csv(tmp_path / f"{side}.csv", 7, [(stamp, 0.25)])
+        hands[side] = read_quest_joint_poses(tmp_path / f"{side}.csv")
+    with writing.recording_to(tmp_path / "base.rrd", recording_id="r") as recording:
+        log_quest_hand_poses(recording, hands, shift_ns=3_000_000)
+    write_gt_layer(tmp_path / "base.rrd", tmp_path / "gt.rrd", "r")
+
+    table = rrc.ChunkStore.from_chunks(list(rrc.RrdReader(tmp_path / "gt.rrd").stream())).reader(index=schema.CAPTURE_TIMELINE, contents=schema.coco133_xyz_path()).to_arrow_table()
+    table = table.filter(pa.compute.is_valid(table[f"{schema.coco133_xyz_path()}:Points3D:positions"]))
+    points = np.asarray(table[f"{schema.coco133_xyz_path()}:Points3D:positions"].to_pylist(), dtype=np.float32)
+
+    expected = coco133_hands(hands)
+    assert table[schema.CAPTURE_TIMELINE].cast(pa.int64()).to_pylist() == expected.times_ns.tolist()
+    assert (table[schema.TIMELINE].cast(pa.int64()).to_numpy() - expected.times_ns).tolist() == [3_000_000, 3_000_000]
+    assert np.array_equal(points, expected.positions_xyz, equal_nan=True)
+
+
+def test_device_asset_is_a_static_mesh_on_the_rig(tmp_path: Path) -> None:
+    import rerun.chunk as rrc
+
+    write_device_asset(tmp_path / "oak.rrd", "oak", 3)
+    chunks = list(rrc.RrdReader(tmp_path / "oak.rrd").stream())
+
+    assert {str(c.entity_path) for c in chunks if "Mesh3D:vertex_positions" in c.to_record_batch().schema.names} == {"/world/rig_03/device"}
+    assert all(c.is_static for c in chunks if str(c.entity_path) == "/world/rig_03/device")

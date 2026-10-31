@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
-from dataforge.datasets.selfcap_raw import FactoryCalibration, FactoryExtrinsic, Intrinsic
+from dataforge.datasets.selfcap_raw import FactoryCalibration, FactoryExtrinsic, Intrinsic, crop_shift_px, oak_stereo, quest_left_T_right
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -53,25 +53,13 @@ def quest_block(
         for c in calibration.intrinsics
         if c.positional_layout == name and c.lens_intrinsics.available
     }
-    ext = {e.type: e for e in calibration.extrinsics}
-    if "device_to_left" in ext and "device_to_right" in ext and len(pinholes) == 2:
-        left, right = ext["device_to_left"], ext["device_to_right"]
-        return QuestBlock(pinholes, {"1": np.linalg.inv(transform(left.R.T, left.T)) @ transform(right.R.T, right.T)}, "healthy")
+    if (left_T_right := quest_left_T_right(calibration)) is not None:
+        return QuestBlock(pinholes, {"1": left_T_right}, "healthy")
     if "1" in pinholes and pinholes["1"].camera_id == "50":
         if camera50 is None or rig_T_device is None or camera50.to != "50" or camera50.type != "device_to_left":
             return QuestBlock(pinholes, {}, "faulty-unresolved")
         return QuestBlock(pinholes, {"1": rig_T_device @ transform(camera50.R.T, camera50.T)}, "faulty-left-borrowed-cam50")
     return QuestBlock(pinholes, {}, "unknown-layout")
-
-
-def oak_stereo(calibration: FactoryCalibration) -> dict[str, Float64[ndarray, "4 4"]]:
-    """Return RGB-relative stereo transforms, converting OAK centimetres to metres."""
-    ext = {e.type: e for e in calibration.extrinsics}
-    if not {"left_to_right", "left_to_rgb"} <= ext.keys():
-        return {}
-    right, rgb = ext["left_to_right"], ext["left_to_rgb"]
-    rgb_T_left = np.linalg.inv(transform(rgb.R, rgb.T * 0.01))
-    return {"rgb_T_left": rgb_T_left, "rgb_T_right": rgb_T_left @ transform(right.R, right.T * 0.01)}
 
 
 def read_quest_block(segment: Segment, calibration: FactoryCalibration | None = None, *, donors: DatasetEntry | None = None) -> QuestBlock:
@@ -98,20 +86,14 @@ def read_quest_block(segment: Segment, calibration: FactoryCalibration | None = 
     return quest_block(calibration, camera50=extrinsic, rig_T_device=transform(np.eye(3), borrowed.rig_T_device_m))
 
 
-def cy_shift_px(intrinsic: Intrinsic) -> float:
-    """Correct a same-width centred vertical crop in curation, leaving ingest raw."""
-    sensor, capture = intrinsic.sensor_info.pixel_array_size, intrinsic.capture_resolution
-    return (sensor.height - capture.height) / 2.0 if sensor.width == capture.width and sensor.height > capture.height else 0.0
-
-
 def intrinsic_matrix(intrinsic: Intrinsic) -> Float64[ndarray, "3 3"]:
-    """Build the factory pinhole with curation's centred-crop correction."""
+    """The factory pinhole in video pixels (the base layer's Pinhole, as a matrix)."""
     lens = intrinsic.lens_intrinsics
     assert lens.principal_point_y is not None
     return np.array(
         [
             [lens.focal_length_x, 0.0, lens.principal_point_x],
-            [0.0, lens.focal_length_y, float(lens.principal_point_y) - cy_shift_px(intrinsic)],
+            [0.0, lens.focal_length_y, float(lens.principal_point_y) - crop_shift_px(intrinsic)],
             [0.0, 0.0, 1.0],
         ],
         dtype=np.float64,

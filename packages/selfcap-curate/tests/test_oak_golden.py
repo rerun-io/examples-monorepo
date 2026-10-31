@@ -15,7 +15,8 @@ from selfcap_curate.apis.pool import RotationConfig as Config
 from selfcap_curate.apis.pool import rotation_main as main
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_factories
 from selfcap_curate.device_tables import read_camera50_table, read_rotations
-from selfcap_curate.factory import cy_shift_px, intrinsic_matrix, oak_centre, oak_stereo, read_quest_block
+from dataforge.datasets.selfcap_raw import crop_shift_px
+from selfcap_curate.factory import intrinsic_matrix, oak_centre, oak_stereo, read_quest_block
 from selfcap_curate.oak_mount import fixed_rotation, gyro_mount, solve_oak
 from selfcap_curate.quest_fit import read_session_episode
 from selfcap_curate.records import GyroFit, gyro_head_offsets, oak_quest_offset_ms, read_frozen_sync
@@ -153,7 +154,7 @@ def test_faulty_left_quest_resolves_from_a_healthy_catalog_segment(tmp_path: Pat
     for slot, pinhole in actual.pinholes.items():
         frozen = expected["pinholes"][slot]
         assert pinhole.camera_id == frozen["camera_id"]
-        assert cy_shift_px(pinhole) == frozen["cy_shift_px"]
+        assert crop_shift_px(pinhole) == frozen["cy_shift_px"]
         assert (pinhole.capture_resolution.width, pinhole.capture_resolution.height) == (frozen["width"], frozen["height"])
         np.testing.assert_allclose(
             intrinsic_matrix(pinhole), [[frozen["fx"], 0.0, frozen["cx"]], [0.0, frozen["fy"], frozen["cy"]], [0.0, 0.0, 1.0]], rtol=0.0, atol=1e-13

@@ -25,6 +25,7 @@ from selfcap_soma.anthropometry import plausible_ears, usable_ears
 from selfcap_soma.catalog import ExoSource, read_window, subset
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
+from dataforge.quest_joint_poses import read_segment_hand_poses
 from selfcap_soma.output import save
 from selfcap_soma.overlay import Config as OverlayConfig
 from selfcap_soma.overlay import main as export
@@ -53,7 +54,6 @@ class Config:
     """SSH host or configured alias for the catalog's file host."""
     output: Path = Path("/tmp/soma-batch")
     """Persistent local checkpoints, one directory per dataset/segment."""
-    raw_root: Path = Path("/mnt/nas/datasets/exoego-self-collected/main/cut")
     """Raw SelfCap cut tree, needed only for missing catalog hand rotations."""
     assets: Path = Path("/tmp/soma-fit/assets")
     """Downloaded SOMA model files."""
@@ -133,22 +133,6 @@ def selected_segments(values: list[str], path: Path | None) -> list[str]:
     return result
 
 
-def resolve_quest_directory(root: Path, segment: str) -> Path:
-    """Resolve the unique raw session; rotations are not carried by the catalog."""
-    match = SEGMENT.fullmatch(segment)
-    if match is None:
-        raise ValueError(f"invalid segment: {segment}")
-    date, prefix, episode = match.groups()
-    matches = list((root / date).glob(f"{prefix}*/episodes/episode-{episode}/quest"))
-    if len(matches) != 1:
-        raise FileNotFoundError(f"{segment}: expected one raw Quest directory under {root}, found {len(matches)}")
-    for side in ("left", "right"):
-        path = matches[0] / f"{side}_hand_poses.csv"
-        if not path.is_file():
-            raise FileNotFoundError(f"{segment}: missing orientation input {path}")
-    return matches[0]
-
-
 def write_checkpoint(path: Path, state: Checkpoint) -> None:
     """Atomically advance a checkpoint after its artifact is complete."""
     temporary = path.with_suffix(".tmp")
@@ -177,7 +161,9 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         raise ValueError(f"{segment}: segment is absent or ambiguous in {config.dataset}")
     end = metadata["video_time:end"][0].as_py().total_seconds()
     data = read_window(config.catalog_url, config.dataset, segment, 0.0, float(end + 0.1), 1, config.exo_source)
-    raw = resolve_quest_directory(config.raw_root, segment)
+    hands = read_segment_hand_poses(dataset.filter_segments(segment))
+    if set(hands) != {"left", "right"}:
+        raise ValueError(f"{segment}: the base layer has no Quest joint poses for {sorted({'left', 'right'} - set(hands))}; re-ingest it")
     digest = hashlib.sha256()
     digest.update(
         f"{VERSION}:{config.exo_source}:{config.iterations}:{config.shape_iterations}:{config.body_acceleration_weight}:{config.torso_temporal_weight}:{config.final_learning_rate}".encode()
@@ -191,8 +177,10 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     # Camera/calibration changes invalidate overlays even if 3D inputs stay unchanged.
     calib = [name for name in metadata.column_names if name.startswith("property:calib:")]
     digest.update(metadata.select(calib).combine_chunks().to_batches()[0].serialize().to_pybytes())
-    for side in ("left", "right"):
-        digest.update((raw / f"{side}_hand_poses.csv").read_bytes())
+    for hand in hands.values():
+        for array in (hand.times_ns, hand.positions, hand.orientations):
+            if array is not None:
+                digest.update(array.tobytes())
     signature = digest.hexdigest()
     state_path = directory / "checkpoint.json"
     state = from_json(Checkpoint, state_path.read_text()) if state_path.exists() else Checkpoint(signature, "new", Timings())
@@ -244,7 +232,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     if state.phase == "shape":
         began = perf_counter()
         calibration = from_json(Calibration, (directory / "calibration.json").read_text())
-        orientations = read_orientations(raw, data.times, data.offset_ms)
+        orientations = read_orientations(hands, data.times, data.offset_ms)
         state.hand_orientation_source = HandOrientationSource(*orientations.sources)
         (directory / "hand-orientation-source.json").write_text(to_json(state.hand_orientation_source))
         print("hand_orientation_source", to_json(state.hand_orientation_source), flush=True)

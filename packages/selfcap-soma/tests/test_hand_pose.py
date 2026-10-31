@@ -51,6 +51,8 @@ def test_finger_flexion_is_not_misreported_as_roll_at_euler_singularity():
 
 
 def test_xyz_only_hand_reader_records_missing_orientation_per_hand(tmp_path):
+    from dataforge.quest_joint_poses import read_quest_joint_poses
+
     from selfcap_soma.hand_pose import read_orientations
 
     for name, width in [("left", 3), ("right", 7)]:
@@ -60,7 +62,8 @@ def test_xyz_only_hand_reader_records_missing_orientation_per_hand(tmp_path):
             joint = [1.0, 2.0, 3.0] + ([0.0, 0.0, 0.0, 1.0] if width == 7 else [])
             rows.append(",".join(map(str, [frame_index * 10_000_000] + joint * 26)))
         (tmp_path / f"{name}_hand_poses.csv").write_text(",".join(header) + "\n" + "\n".join(rows))
-    observed = read_orientations(tmp_path, np.array([0.02, 0.03, 0.04]), 0.0)
+    hands = {name: read_quest_joint_poses(tmp_path / f"{name}_hand_poses.csv") for name in ("left", "right")}
+    observed = read_orientations(hands, np.array([0.02, 0.03, 0.04]), 0.0)
     assert observed.sources == ("none", "quest")
     assert np.isfinite(observed.positions).all()
 
@@ -110,3 +113,11 @@ def test_orientation_targets_name_static_neutral_alignment() -> None:
     np.testing.assert_array_equal(result.spread_deg, np.zeros(40))
     assert names[result.joint_indices[0]] == "LeftHand"
     assert names[result.joint_indices[-1]] == "RightHandPinky4"
+
+
+def test_a_hand_absent_from_the_base_is_marked_none():
+    from selfcap_soma.hand_pose import read_orientations
+
+    observed = read_orientations({}, np.array([0.02, 0.03]), 0.0)
+    assert observed.sources == ("none", "none")
+    assert not observed.valid.any()
