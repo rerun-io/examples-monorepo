@@ -40,13 +40,13 @@ def test_weighted_ransac_keeps_consensus_and_missing_joints() -> None:
     uv[3, 0] += [140.0, -90.0]
     scores = np.ones((4, 3))
     scores[1:, 2] = 0.1
-    scores[0, 0], scores[1, 0] = 0.6, 0.8
+    scores[0, 0], scores[1, 0] = 0.7, 0.8
     result = triangulate(cams, uv, scores)
     np.testing.assert_allclose(result.xyz[:2], truth[:2], atol=1e-4)
     assert result.n_views.tolist() == [3, 4, 0]
     assert np.isnan(result.xyz[2]).all()
     # Mean RTMW score of the agreeing views; the outlier view 3 of joint 0 does not count.
-    np.testing.assert_allclose(result.confidence, [0.8, 1.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(result.confidence, [5.0 / 6.0, 1.0, 0.0], atol=1e-6)
 
 
 def test_wearer_and_degenerate_rays() -> None:
@@ -87,7 +87,7 @@ def test_appending_all_missing_frames_preserves_calibration_and_empty_rows(tmp_p
     write_keypoints(base, output, result)
     assert base.read_bytes() == original
     rows = [c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and not str(c.entity_path).endswith("/skeleton")]
-    assert len(rows) == 3  # 3D, the phone's RTMW overlay and the phone's projection
+    assert len(rows) == 4  # 3D, geometric support, raw 2D and projection
     assert all(batch.num_rows == 2 for batch in rows)
     assert all("frame_index" not in batch.schema.names for batch in rows)
     points = next(batch for batch in rows if "Points3D:positions" in batch.schema.names)
@@ -125,7 +125,7 @@ def test_smoothing_cuts_jitter_without_lag_keeps_gaps_and_leaves_slow_plans_raw(
     np.testing.assert_array_equal(smooth_keypoints(slow).xyz, slow.xyz)
 
 
-def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_path) -> None:
+def test_writer_keeps_low_confidence_3d_and_projects_into_each_phone(tmp_path) -> None:
     base = tmp_path / "calib.rrd"
     with rr.RecordingStream("test", recording_id="selfcap__synthetic", send_properties=False) as recording:
         recording.save(base)
@@ -149,8 +149,8 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
         batch = next(c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and str(c.entity_path) == entity)
         return np.asarray(batch.column(f"{kind}:positions").to_pylist()[0], dtype=float)
 
-    # Low confidence (3D joint 5, 2D joint 7) and the face the headset covers are written as missing everywhere.
-    hidden3d, hidden2d = np.r_[5, HEADSET_COVERED], np.r_[7, HEADSET_COVERED]
+    # Low-confidence 3D is shown in red; raw 2D visibility remains unchanged.
+    hidden3d, hidden2d = HEADSET_COVERED, np.r_[7, HEADSET_COVERED]
     points = row("/world/pred/rtmw_triangulated/coco133_xyz", "Points3D")
     assert np.isnan(points[hidden3d]).all() and np.isfinite(np.delete(points, hidden3d, axis=0)).all()
     overlay = row("/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv", "Points2D")
@@ -181,7 +181,7 @@ def test_writer_hides_low_confidence_joints_and_projects_into_each_phone(tmp_pat
     assert "Points2D:colors" not in quest.schema.names  # Its blue annotation colour stays in control.
 
 
-def test_display_writer_preserves_coco_ids_without_confidence_colours(tmp_path) -> None:
+def test_display_writer_preserves_coco_ids_with_confidence_colours(tmp_path) -> None:
     base = tmp_path / "calib.rrd"
     with rr.RecordingStream("test", recording_id="display", send_properties=False) as recording:
         recording.save(base)
@@ -191,17 +191,18 @@ def test_display_writer_preserves_coco_ids_without_confidence_colours(tmp_path) 
     result = three_d(np.array([0.0, 0.02]), xyz, np.ones((2, 133)), {}, {"phone": camera}, 25.0)
     output = tmp_path / "display.rrd"
     write_keypoints(base, output, result)
-    rows = {str(c.entity_path): c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static}
-    for path, kind in (("/world/skeleton", "Points3D"), ("/world/rig_00/cam_00/pinhole/skeleton", "Points2D")):
+    rows = {str(c.entity_path): c.to_record_batch() for c in RrdReader(output).stream() if not c.is_static and any(name.endswith(":positions") for name in c.to_record_batch().schema.names)}
+    assert "/world/rig_00/cam_00/pinhole/skeleton" not in rows
+    for path, kind in (("/world/skeleton", "Points3D"),):
         batch = rows[path]
-        assert not any(name.endswith((":confidences", ":colors")) for name in batch.schema.names)
+        assert any(name.endswith(":confidences") for name in batch.schema.names)
+        assert any(name.endswith(":average_confidence") for name in batch.schema.names)
+        assert "display_confidence" not in batch.schema.names
         points = np.asarray(batch.column(f"{kind}:positions").to_pylist()[0])
-        assert len(points) == 135
-        np.testing.assert_array_equal(points[133:], points[[6, 12]])
-        assert np.isnan(points[np.r_[0:3, 9:11, 23:91]]).all()
-        assert np.isfinite(points[np.r_[3:9, 11:23, 91:133]]).all()
-    np.testing.assert_allclose(
-        np.asarray(rows["/world/rig_00/cam_00/pinhole/skeleton"].column("Points2D:positions").to_pylist()[0])[5],
-        project(camera, xyz[0])[:, :2][5],
-        atol=1e-4,
-    )
+        assert len(points) == 133
+        assert np.isnan(points[np.r_[0:3, 9:11, 13:91]]).all()
+        assert np.isfinite(points[np.r_[3:9, 11:13, 91:133]]).all()
+    assert not any("LineStrips" in name for c in RrdReader(output).stream() for name in c.to_record_batch().schema.names)
+    static = [c.to_record_batch() for c in RrdReader(output).stream() if c.is_static and str(c.entity_path) == "/world/skeleton"]
+    radii = [batch["Points3D:radii"].to_pylist() for batch in static if "Points3D:radii" in batch.schema.names]
+    assert radii[-1] == [[-3.0]]  # UI points, independent of camera distance.

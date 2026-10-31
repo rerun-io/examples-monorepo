@@ -48,7 +48,7 @@ def reference_triangulate(
             for c, p in zip(cameras, uv, strict=True)
         ]
     )
-    valid = (scores >= 0.3) & np.isfinite(scores) & np.isfinite(uv).all(2) & np.isfinite(norm).all(2)
+    valid = (scores >= 0.7) & np.isfinite(scores) & np.isfinite(uv).all(2) & np.isfinite(norm).all(2)
     norm, clean = np.where(np.isfinite(norm), norm, 0.0), np.where(valid, scores, 0.0)
     if not np.any(valid.sum(0) >= 2):
         return Triangulated(xyz, counts, confidence)
@@ -135,7 +135,8 @@ def test_batched_triangulation_matches_the_per_frame_reference(seed: int) -> Non
     scores = rng.uniform(0.0, 1.0, uv.shape[:3])
     uv[rng.random(uv.shape[:3]) < 0.03] = np.nan
     scores[rng.random(scores.shape) < 0.02] = np.nan
-    xyz, counts, confidence = triangulate_frames(cams, uv, scores)
+    batch = triangulate_frames(cams, uv, scores)
+    xyz, counts, confidence = batch.xyz, batch.n_views, batch.confidence
     for f in range(frames):
         expected = reference_triangulate(cams, uv[f], scores[f])
         np.testing.assert_array_equal(counts[f], expected.n_views)

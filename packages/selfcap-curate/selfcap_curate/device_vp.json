@@ -1,0 +1,129 @@
+{
+  "width": 1920,
+  "height": 1080,
+  "cx": 960.0,
+  "cy": 540.0,
+  "k1": 0.0,
+  "k2": 0.0,
+  "devices": {
+    "Dragon-413A7CC1": {
+      "focal_px": 888.7573979270643,
+      "low_px": 883.5469368025716,
+      "high_px": 892.3913257915044,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-03__d31bf1da__ep001",
+          "focal_px": 888.7573979270643,
+          "orthogonality_deg": null
+        }
+      ],
+      "method": "LSD >65px; persistent physical edges across 5 frames; 3 Manhattan directions; 300 physical-line/frame bootstrap draws, 90% interval; centre fixed; k=0 after plumb-line check."
+    },
+    "Tiger-FE57138F": {
+      "focal_px": 890.6397739953013,
+      "low_px": 879.4837370500055,
+      "high_px": 902.5187473817073,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-03__d31bf1da__ep001",
+          "focal_px": 890.6397739953013,
+          "orthogonality_deg": null
+        }
+      ],
+      "method": "LSD >65px; persistent physical edges across 5 frames; 3 Manhattan directions; 300 physical-line/frame bootstrap draws, 90% interval; centre fixed; k=0 after plumb-line check."
+    },
+    "Titanium-B00700F9": {
+      "focal_px": 906.190394332705,
+      "low_px": 900.9569441153735,
+      "high_px": 917.2989973771984,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-03__d31bf1da__ep001",
+          "focal_px": 906.190394332705,
+          "orthogonality_deg": null
+        }
+      ],
+      "method": "LSD >65px; persistent physical edges across 5 frames; 3 Manhattan directions; 300 physical-line/frame bootstrap draws, 90% interval; centre fixed; k=0 after plumb-line check."
+    },
+    "Wolf-387E89E1": {
+      "focal_px": 897.6092071409714,
+      "low_px": 890.7020568470873,
+      "high_px": 902.5159863784471,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-03__d31bf1da__ep001",
+          "focal_px": 897.6092071409714,
+          "orthogonality_deg": null
+        }
+      ],
+      "method": "LSD >65px; persistent physical edges across 5 frames; 3 Manhattan directions; 300 physical-line/frame bootstrap draws, 90% interval; centre fixed; k=0 after plumb-line check."
+    },
+    "Comet-B1C77204": {
+      "focal_px": 924.478925004904,
+      "low_px": 893.4418135444134,
+      "high_px": 937.3473389013614,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-08__7976738f__ep001",
+          "focal_px": 924.478925004904,
+          "orthogonality_deg": 0.5699546759093982
+        }
+      ],
+      "method": "LSD >65px; 5 frames/session; physical edges persist >=3 frames; candidate Manhattan triples, maximum orthogonality error <2 degrees; median of accepted sessions. Interval is the within/across-session estimate envelope, not a confidence interval; frame degeneracies >20% from session estimate excluded. Centre fixed; k=0."
+    },
+    "Comet-B828F32C": {
+      "focal_px": 915.5375316997008,
+      "low_px": 912.1412005035246,
+      "high_px": 918.3930210149659,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-08__7976738f__ep001",
+          "focal_px": 915.5375316997008,
+          "orthogonality_deg": 0.6441968472022005
+        }
+      ],
+      "method": "LSD >65px; 5 frames/session; physical edges persist >=3 frames; candidate Manhattan triples, maximum orthogonality error <2 degrees; median of accepted sessions. Interval is the within/across-session estimate envelope, not a confidence interval; frame degeneracies >20% from session estimate excluded. Centre fixed; k=0."
+    },
+    "Hammer-06873283": {
+      "focal_px": 898.0747959719213,
+      "low_px": 890.0949930572264,
+      "high_px": 906.8001821246103,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-08__7976738f__ep001",
+          "focal_px": 890.3798919695896,
+          "orthogonality_deg": 0.8717108640408396
+        },
+        {
+          "segment": "selfcap__2025-12-20__67954249__ep001",
+          "focal_px": 905.769699974253,
+          "orthogonality_deg": 1.7798100648788915
+        }
+      ],
+      "method": "LSD >65px; 5 frames/session; physical edges persist >=3 frames; candidate Manhattan triples, maximum orthogonality error <2 degrees; median of accepted sessions. Interval is the within/across-session estimate envelope, not a confidence interval; frame degeneracies >20% from session estimate excluded. Centre fixed; k=0."
+    },
+    "Titanium-57BB9E1A": {
+      "focal_px": 894.9294280422055,
+      "low_px": 849.2958154254663,
+      "high_px": 934.6290714747456,
+      "samples": [
+        {
+          "segment": "selfcap__2025-12-08__7976738f__ep001",
+          "focal_px": 894.9294280422055,
+          "orthogonality_deg": 0.8209184288738461
+        },
+        {
+          "segment": "selfcap__2025-12-12__cf63ede6__ep001",
+          "focal_px": 859.7123607593885,
+          "orthogonality_deg": 0.4604233285127606
+        },
+        {
+          "segment": "selfcap__2025-12-20__67954249__ep001",
+          "focal_px": 925.7167961136582,
+          "orthogonality_deg": 0.8205090720730278
+        }
+      ],
+      "method": "LSD >65px; 5 frames/session; physical edges persist >=3 frames; candidate Manhattan triples, maximum orthogonality error <2 degrees; median of accepted sessions. Interval is the within/across-session estimate envelope, not a confidence interval; frame degeneracies >20% from session estimate excluded. Centre fixed; k=0."
+    }
+  }
+}

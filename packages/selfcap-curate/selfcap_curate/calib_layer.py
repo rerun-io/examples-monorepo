@@ -1,7 +1,7 @@
 """One calibration-only layer per episode; no hands, predictions, or catalog writes."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -13,8 +13,10 @@ from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde import serde, to_dict
+from serde.json import to_json
 
 from selfcap_curate.exo_calibration import SessionCalibration
+from selfcap_curate.exo_refine import Refinement
 from selfcap_curate.factory import QuestBlock, cy_shift_px, intrinsic_matrix
 from selfcap_curate.records import OakFit, SessionEpisode, oak_quest_offset_ms
 
@@ -31,6 +33,8 @@ class CalibSession:
     quest: QuestBlock  # Factory pinholes and resolved camera-50 borrowing.
     stereo: dict[str, Float64[ndarray, "4 4"]]  # Factory rgb_T_left and rgb_T_right in metres.
     version: str = "selfcap-curate-calib-v1"  # Implementation provenance, distinct from the legacy method label.
+    exo_refinements: dict[str, Refinement] = field(default_factory=dict)
+    """Opt-in episode-specific optical calibration and its complete provenance."""
 
 
 @serde(deny_unknown_fields=True)
@@ -45,6 +49,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
     """Write RDF transforms/pinholes and one calib property group atomically."""
     layout = motion.layout
     sync, head, oak_rig, quest_rig = motion.sync, motion.hands, layout.oak_rig, layout.quest_rig
+    refinement = session.exo_refinements.get(sync.episode_key.segment)
     if layout.phones != tuple(sorted(sync.exo_fit)):
         raise ValueError(f"{sync.key}: base phone layout differs from sync exo_fit")
     with atomic_recording(path, recording_id=sync.episode_key.segment, send_properties=False) as recording:
@@ -72,7 +77,11 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             if camera is None or camera.camera is None:
                 continue
             episode = camera.episodes.get(sync.episode)
-            matrix = episode.world_T_cam if episode is not None and episode.world_T_cam is not None else camera.camera.world_T_cam
+            refined = refinement.camera_for_rig(rig) if refinement is not None else None
+            applied = refined is not None
+            refined = refined if refined is not None else camera.camera
+            matrix = (refined.world_T_cam if applied else
+                      episode.world_T_cam if episode is not None and episode.world_T_cam is not None else camera.camera.world_T_cam)
             status = "flagged" if episode is not None and not episode.ok else "ok"
             count += 1
             flagged += status == "flagged"
@@ -80,13 +89,13 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             tf(
                 entity,
                 matrix,
-                calib_source=METHOD,
+                calib_source=refinement.method if refinement is not None and applied else METHOD,
                 calib_scope=episode.scope if episode else "session",
                 calib_status=status,
                 calib_phone=phone,
                 calib_hand_median_px=(episode.median_px if episode is not None else camera.median_px),
             )
-            p = camera.camera.parameters
+            p = refined.parameters
             pinhole(schema.pinhole_path(rig, 0), np.array([[p[6], 0.0, p[7]], [0.0, p[6], p[8]], [0.0, 0.0, 1.0]]), 1920, 1080)
         for cam, name in ((1, "rgb_T_left"), (2, "rgb_T_right")):
             if name in session.stereo:
@@ -106,7 +115,10 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 rr.AnyValues(calib_source=METHOD, calib_oak_source=session.oak.observation_source, calib_oak_median_px=session.oak.median_px),
                 static=True,
             )
-        for slot, matrix in session.quest.rig_T_cam.items():
+        # The fitted head offset is an exo-only nuisance parameter, never a wearable transform.
+        quest_transforms = session.quest.rig_T_cam.copy()
+        for slot, matrix in quest_transforms.items():
+            matrix = matrix.copy()
             tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")
         for slot, camera in session.quest.pinholes.items():
             if cy_shift_px(camera):
@@ -119,6 +131,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
         recording.send_property(
             "calib",
             rr.AnyValues(
+                drop_untyped_nones=True,
                 method=METHOD,
                 version=session.version,
                 world=WORLD,
@@ -130,5 +143,9 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 oak_median_px=session.oak.median_px,
                 quest_mode=session.quest.mode,
                 record_json=json.dumps(to_dict(Provenance(session.session, METHOD, sync.episode))),
+                exo_refinement_json=to_json(refinement) if refinement is not None else None,
+                exo_label_layer_hash=refinement.label_layer_hash if refinement is not None else None,
+                exo_focal_source=refinement.focal_source if refinement is not None else None,
+                exo_refinement_version=refinement.version if refinement is not None else None,
             ),
         )

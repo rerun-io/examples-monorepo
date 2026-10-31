@@ -4,6 +4,7 @@ import gc
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -94,10 +95,19 @@ def infer_egohand_frames(
     return OakDetections(times, xy, scores)
 
 
+@cache
+def egohand_models(assets: Path) -> tuple[EgoHandDetector, EgoHandPredictor]:
+    """Retain engines for an explicitly long-lived batch worker."""
+    detector = EgoHandDetectorConfig(assets / "weights/detector/hand_detector.onnx", backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=assets / "engines")).setup()
+    predictor = EgoHandConfig(assets / "weights/egohand/egohand_s060000.ckpt", assets / "weights/soma", batch_size=16, gpu_crops=True,
+                             backbone_onnx=assets / "dinov3-bf16.onnx", backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=assets / "engines")).setup()
+    return detector, predictor
+
+
 @torch.inference_mode()
 def detect_oak_egohand(
     episode: SessionEpisode, video: CatalogVideo, intrinsic: Intrinsic, rotation: Float64[ndarray, "3 3"],
-    assets: Path, *, camera: EgoCamera | None = None,
+    assets: Path, *, camera: EgoCamera | None = None, retain_models: bool = False,
 ) -> OakDetections:
     """Run only 64 seeded samples; release this episode's GPU models before returning."""
     qp: float | None = oak_quest_offset_ms(episode.sync)
@@ -127,9 +137,7 @@ def detect_oak_egohand(
     detector: EgoHandDetector | None = None
     predictor: EgoHandPredictor | None = None
     try:
-        detector = EgoHandDetectorConfig(assets / "weights/detector/hand_detector.onnx", backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=assets / "engines")).setup()
-        predictor = EgoHandConfig(assets / "weights/egohand/egohand_s060000.ckpt", assets / "weights/soma", batch_size=16, gpu_crops=True,
-                                 backbone_onnx=assets / "dinov3-bf16.onnx", backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=assets / "engines")).setup()
+        detector, predictor = egohand_models(assets)
         result: OakDetections = infer_egohand_frames(frames, times[selection.indices], selection.hands,
                                      OAKCamera(camera.K, camera.distortion, *camera.size), detector, predictor)
         torch.cuda.synchronize()
@@ -137,6 +145,8 @@ def detect_oak_egohand(
         return result
     finally:
         del frames, detector, predictor
+        if not retain_models:
+            egohand_models.cache_clear()
         gc.collect()
         torch.cuda.empty_cache()
         print(f"EGOHAND_RELEASED_MIB {torch.cuda.memory_allocated() / 2**20:.1f}", flush=True)

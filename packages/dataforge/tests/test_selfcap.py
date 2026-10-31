@@ -258,18 +258,28 @@ def test_default_blueprint_is_the_calibration_review_layout() -> None:
         assert hidden[f"{pinhole}/quest_coco133_uv_projected"] == rrb.EntityBehavior(visible=False)
         assert hidden["/world/gt"] == rrb.EntityBehavior(visible=False)
         assert hidden["/world/pred"] == rrb.EntityBehavior(visible=False)
+        assert hidden["/world/gt/sapiens2"] == rrb.EntityBehavior(visible=False)
+        assert hidden[f"{pinhole}/sapiens2"] == rrb.EntityBehavior(visible=False)
+        assert f"{pinhole}/camera_centers" not in hidden
+        assert f"{pinhole}/exo_landmarks" not in hidden
         assert f"{pinhole}/**" in contents
         assert "/world/gt/**" in contents and "/world/pred/**" in contents
-        assert ("/world/skeleton" in contents) == name.startswith("Quest")
+        assert ("/world/skeleton/**" in contents) == (rig != 4)
+        if rig != 4:
+            assert hidden["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=False)
     world = views["World (Quest frame, calibrated)"]
     assert world.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
     assert world.visualizer_overrides["/world/gt"] == rrb.EntityBehavior(visible=False)
     for rig, cam in cameras.values():
         assert world.visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/skeleton"] == rrb.EntityBehavior(visible=False)
+        assert world.visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/camera_centers"] == rrb.EntityBehavior(visible=False)
     assert "/world/pred/soma_x/mesh" not in world.visualizer_overrides
     dev_views = blueprint_views(SelfcapConfig().setup().default_blueprint(show_soma_mesh=True))
     dev_world = next(view for view in dev_views if str(view.name) == "World (Quest frame, calibrated)")
     assert dev_world.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
+    for view in dev_views:
+        if str(view.name).startswith(("exo", "Quest")):
+            assert view.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:

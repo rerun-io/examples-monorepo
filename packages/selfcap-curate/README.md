@@ -119,13 +119,24 @@ Existing targets, NAS outputs and outputs within the input directory are refused
 Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz (40). YOLOX-m HumanArt and RTMW-x use TensorRT batches of eight,
 keeping three people per frame on a half-open `video_time` grid anchored at cut zero; nearest-frame ties go left.
 Quest anchors use capture_time: left-eye head + quest_pose (100 ms gap), wrists −48 ms + quest_pose (40 ms gap).
-Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation uses joint confidence
-≥0.3, radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
+Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation accepts joint detector scores
+≥0.3, with radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
+Confidence is the mean inlier score, multiplied by 0.9 for two-view support. It is not a visibility probability.
+The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, and `support_inlier_mask` per joint.
+Each mask lists cameras in the static `support_camera_paths` order. A measured point needs at least two supporting cameras; temporal estimates carry `temporal_bridged` and retain the actual support count.
+Body joints use a centred median-5 jump detector and interpolation, followed by a centred Gaussian (sigma 2 frames). The result blends toward jump-cleaned measurements between 0.3 and 0.5 m/s, preserving fast motion without restoring raw jumps. This replaces displacement-biased camera-pair tracking. All operations are time symmetric; no causal delay is added. Missing runs up to 0.5 seconds are bridged; longer source gaps stay missing. Other triangulated joints retain beta 2.0; Quest hand tracking is unchanged.
+
+The default `/world/skeleton` and OAK `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
+and both 21-joint hands. Knees, ankles and feet remain in the hidden full COCO-133 layers.
+Every view uses the same confidence colours: red at 0.7, yellow at 0.85, green at 1.0, clamped outside that range.
+Low-confidence and bridged points remain visible. Blue annotation links use the shared typed keypoint archetypes and their class/keypoint IDs; custom confidence components carry per-joint and average confidence.
+Quest hands have no per-joint confidence, so tracked Quest joints use 1.0. The support masks remain available for inspection.
+Exo and Quest views project the world skeleton and SOMA mesh through their pinholes in Rerun; 3D joints use UI-point radii. OAK alone keeps explicit display projections through all 14 factory lens coefficients.
 AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
 `pinhole/pred/rtmw/coco133_uv` and `kp3d_*` fields in the same `calib` group; no external quality metrics are stored.
-Goldens: all eleven episodes retain exact masks, 3D median ≤1 mm and overlays ≤0.01 px, including flagged Quest-relative clocks. Fresh GPU 2D median ≤1 px;
-the end-to-end CLI after fresh calibration uses 3D median ≤10 mm and reports pose drift and validity changes.
+Frozen reference comparisons live in `tests/test_keypoints_*golden.py`. Those references use the earlier
+acceptance and smoothing policy; temporal estimates now preserve short missing runs.
 
 Calibration and focal profiling read alignment records from each selected catalog base. Phone detections come from the selected segment’s `sapiens2` layer; local sync JSON cannot override the base clocks. Focal profiling refuses missing detection data.
 
@@ -155,3 +166,152 @@ multi-person RTMW detector streams live under the local reference root’s
 `golden-refs/oak-sapiens2/` and `golden-refs/rtmw-kp2d/` directories as viewer-readable RRDs.
 Their typed components retain exact float64 seconds beside the integer-ns `video_time`
 timeline. The tests read these fixtures directly; they do not import external research code.
+
+## Candidate optical calibration
+
+`selfcap-post --exo-refine` is the legacy optical diagnostic path. The batch
+runner uses `selfcap-exo-label` with fixed device VP focals and no head offset.
+`--exo-reference-dataset` selects a read-only source for labels and independent
+RTMW checks. An episode without an `exo_landmarks` layer keeps the normal fit.
+Only exo camera poses may change. Quest camera extrinsics, SLAM poses, hands,
+and the OAK mount are preserved. The calibration file then owns triangulation,
+display skeleton and camera-centre projections.
+
+`exo_landmarks` stores labelled `Points2D` at
+`/world/rig_XX/cam_00/pinhole/exo_landmarks` on `video_time`. Its recording
+property holds a strict `Landmarks` record (view, seconds, target, pixels,
+confidence, labeller, method and date). `quest0` and `quest1` are factory optical
+centres; `phoneN` is exo rig N. The committed d31bf1da labels retain all 232
+marks. Their original agent model was not recorded; provenance states that gap.
+
+```bash
+pixi run --frozen -e selfcap-curate selfcap-dev-cycle \
+  --segment selfcap__2025-12-03__d31bf1da__ep001 \
+  --tag exofit-example --dataset selfcap-post-dev-exofit \
+  --landmarks selfcap_curate/landmarks/selfcap__2025-12-03__d31bf1da__ep001.json \
+  --exo-refine --focal-source fit --oak-egohand-assets /tmp/egohand
+```
+
+This is an explicit publishing tool. It refuses production datasets, uses a
+new run directory, and registers the default blueprint. With `--dataset selfcap-post-dev`,
+it replaces only base, calib, egohand_calib and exo_landmarks; it preserves
+SOMA, EgoHand and existing Sapiens2 layers. Separate candidates also copy the
+source EgoHand file and alignment detections. The scratch `/tmp/selfcap-5090/dev_cycle.py`
+remains independent and unchanged. Run files and reports live beneath
+`<remote-root>/<dataset>/runs/<tag>/`.
+
+The focal source is `table`, `fit`, or `fixed`. A `fixed` source requires
+`--focal-file` with this strict JSON schema (use full phone IDs):
+
+```json
+{"focals":{"Dragon-413A7CC1":850.0,"Tiger-FE57138F":850.0,"Titanium-B00700F9":900.0,"Wolf-387E89E1":900.0},"method":"independent measurement"}
+```
+
+The values above illustrate the file format; they are not measured intrinsics.
+The solver records the input hash, source, version, fitted cameras and optical
+translation under `/__properties/calib`. Camera poses remain at
+`/world/rig_XX/cam_00`; pinholes remain at their existing child paths.
+
+For a read-only fit or an exact source-calibration comparison:
+
+```bash
+pixi run --frozen -e selfcap-curate selfcap-exo-refine \
+  --dataset selfcap-post-dev --landmark-dataset selfcap-post-dev-exofit \
+  --segment selfcap__2025-12-03__d31bf1da__ep001 --output-dir /tmp/exofit-check
+```
+
+This writes `refinement.json` and `gate.json`. `--calib-record` also writes a
+calibration layer through the existing writer. The report pools two held-out
+folds: alternate label frames and alternate 10-second hand blocks with a 200 ms
+guard. RTMW hand checks use every third held-out frame; body transfer uses every
+sixth frame and triangulates from the other cameras. The published model fits
+all labels and Sapiens pairs after these checks. No random draws or wall-clock
+values enter the solver.
+
+The d31bf1da candidate reproduces the offline medians (pixels): headset
+38.53 → 4.56, phones 101.95 → 0.31, Sapiens hands 8.37 → 8.98, independent
+RTMW hands 9.59 → 10.50, body transfer 24.67 → 16.55. The hand regressions
+fail the no-regression gate. The main dev promotion is explicit and retains
+that gate result; it does not imply that the hand metrics improved.
+
+### Bounded optical labeling
+
+`selfcap-exo-label` reads an initial calibration and the segment's base,
+Sapiens2 and independent RTMW observations. It writes local files only:
+
+```bash
+pixi run --frozen -e selfcap-curate selfcap-exo-label \
+  --segment selfcap__2025-12-03__d31bf1da__ep001 \
+  --calib-record /path/to/initial-session.json --output-dir /path/to/labels \
+  --dataset selfcap-post-ep1-v2 --catalog-url rerun+http://dgx-spark:51235
+```
+
+The runner can call `selfcap_curate.exo_label.label_session` with the same
+arguments. Its isolated worker has a 360-second deadline, including its Sol
+children. Existing output directories are supported. Completed decisions resume;
+failed or timed-out attempts reuse their completed packet and label files.
+Use a new directory when source calibration or annotations change.
+For a cached redecision, pass `--cached-labels /old/landmarks.json --rtmw-rrd
+/local/original-s1-rtmw.rrd` and a new output directory. This mode never builds
+crops or invokes Sol, and rejects a missing RTMW argument. The RRD must belong
+to the requested segment and contain all active views. Its SHA256 and the
+cached-label SHA256 are recorded in `result.json` and checked on resume.
+For an approved fresh relabel after S2, omit `--cached-labels` but still pass
+`--rtmw-rrd` so the gate does not read S2's smoothed observations.
+Phones without an initial pose are omitted, preserving the other phones' rig
+IDs. Fewer than two calibrated phones returns `skipped`. A transient Codex
+service failure is retried once; stderr from both attempts is retained.
+
+The tool samples four facing headset frames per view, and one frame for static
+phones. Every other phone whose predicted centre falls inside the image receives a
+540-pixel crop, including grazing-angle candidates. Crops carry a source
+pixel grid; Sol runs read-only with medium reasoning and the fast tier on the
+default personal account. Headsets and phones use separate calls; missing
+front-facing phone targets get one automatic retry with the other identified
+phones as context. Phone assignments must agree with a front-facing optical
+axis and lie within 240 source pixels of the initial prediction. Coordinates
+must fall inside the corresponding crop;
+timestamps are canonicalized within one microsecond. A local dark-component snap
+moves headset labels at most five source pixels.
+
+Physical headset target IDs follow the factory calibration: `quest0` is the
+left RGB lens, even when borrowed camera 50 is stored in video slot 1. An
+unresolved right lens is omitted. Three-phone recordings derive OAK/Quest rig
+indices from their layout.
+
+Both fit folds share the static phone anchors. Their phone residual is therefore
+an **in-sample consistency check**, not independent validation. Headset frames
+are held out. Usable hand frames alternate per camera, with a minimum of two
+usable frames; dense hand scores follow the nearest sparse frame's fold. Body
+frames are split with per-camera visibility checks, and exact duplicate frame
+sets are removed. Insufficient coverage fails closed. Body transfer uses independent RTMW
+observations. The robust objective uses fixed relative block shares for headset anchors,
+phone anchors, hands, and body (1:0.25:1.5:0.5), each divided equally among
+active views and normalized by its observation count. Confidence weights are
+normalized within each view. Weighting is applied to the robust cost, preserving
+the six-pixel outlier scale. Fold fits and the all-frame fit use the same shares.
+Acceptance requires optical medians to improve by at least 2 pixels and 10%,
+body transfer median to improve, independent RTMW hand median to regress by at most 1.5 pixels,
+and the original fit's Sapiens hand median to regress by at most 2 pixels as a secondary guard,
+and all solvers to converge. The deployed model's per-view label medians must
+also stay within two pixels of the corresponding full-pipeline fold scores.
+Missing metrics reject the candidate.
+
+`result.json` always records `segment`, `decision`, `reason`, `labels`,
+`elapsed_s`, `thresholds`, and `gate`. The thresholds are configurable under `--thresholds.*` and saved in every result. Decisions are `accepted`, `rejected`, `timeout`, or
+`failed`. Only `accepted` writes `refinement.json` and `calib.json`; all other
+outcomes retain the initial calibration. `landmarks.json`, `packet.json`, PNGs,
+and per-view logs provide provenance. Nothing is registered by this command.
+
+The default `--focal-source device-vp` fixes each known device to its measured
+image-only focal from `selfcap_curate/device_vp.json`. Unknown devices retain
+the initial calibration focal. `--focal-source table` retains every initial
+focal. Neither option fits focal, principal point, or distortion. Results record
+`focals` and `focal_sources` per camera.
+
+The estimator changes only exo camera poses. Quest SLAM, Quest cameras, OAK
+mount/poses, and Quest hands are immutable truth. The old `head_translation_m`
+compatibility field is always zero. An anchored hands/body bundle adjustment
+polishes the optical solution before the final held-out gate; it retains the Sol
+landmark terms and exact fixed intrinsics. Offset-enabled cached results are
+invalidated by the new solver contract.

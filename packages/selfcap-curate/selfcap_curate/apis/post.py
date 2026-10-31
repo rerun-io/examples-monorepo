@@ -5,10 +5,13 @@ from pathlib import Path
 from typing import Literal
 
 from dataforge.timing import SequenceTimer
+from rerun.catalog import CatalogClient
 from rerun.server import Server
 
 from selfcap_curate.apis import align, calibrate, keypoints
 from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, SessionVideos, native_phone_rate
+from selfcap_curate.exo_landmarks import read_landmarks, write_landmarks
+from selfcap_curate.exo_refine import FocalSource
 from selfcap_curate.hands_gpu import release_cuda_memory
 
 
@@ -36,6 +39,14 @@ class Config:
     """Use 64 seeded EgoHand frames by default, or the legacy Sapiens OAK path."""
     oak_egohand_assets: Path = Path("data/egohand")
     """Local EgoHand weights and cached engine root, passed to calibration."""
+    exo_refine: bool = False
+    """Refine cameras from an exo_landmarks layer before triangulation."""
+    exo_focal_source: FocalSource = "fit"
+    """Table, joint-fit, or explicitly fixed phone focals."""
+    exo_focal_file: Path | None = None
+    """Fixed-focal JSON record, when requested."""
+    exo_reference_dataset: str = DATASET_NAME
+    """Read-only source of landmark labels and independent gate observations."""
 
 
 def main(config: Config) -> None:
@@ -60,6 +71,14 @@ def main(config: Config) -> None:
     with Server(host="127.0.0.1", port=0, datasets={DATASET_NAME: sorted(aligned.glob("*.rrd"))}) as server:
         detections: list[str] = [path.resolve().as_uri() for path in sorted((aligned / "sapiens2").glob("*.rrd"))]
         server.client().get_dataset(DATASET_NAME).register(detections, layer_name="sapiens2").wait()
+        if config.exo_refine:
+            reference = CatalogClient(config.catalog_url).get_dataset(name=config.exo_reference_dataset)
+            for segment_id in session_videos:
+                labels = read_landmarks(reference, segment_id)
+                if labels is not None:
+                    path = aligned / "exo_landmarks" / f"{segment_id}.rrd"
+                    write_landmarks(path, segment_id, labels)
+                    server.client().get_dataset(DATASET_NAME).register([path.resolve().as_uri()], layer_name="exo_landmarks").wait()
         with timer.stage("calibrate"):
             calibrate.main(
                 calibrate.Config(
@@ -72,6 +91,10 @@ def main(config: Config) -> None:
                     oak_free_rotation=config.oak_free_rotation,
                     oak_method=config.oak_method,
                     oak_egohand_assets=config.oak_egohand_assets,
+                    exo_refine=config.exo_refine,
+                    exo_focal_source=config.exo_focal_source,
+                    exo_focal_file=config.exo_focal_file,
+                    exo_reference_dataset=config.exo_reference_dataset if config.exo_refine else None,
                 ),
                 session_videos=session_videos,
             )

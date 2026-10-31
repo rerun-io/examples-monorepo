@@ -2,7 +2,8 @@
 
 import numpy as np
 
-from selfcap_curate.keypoints import DISPLAY_CLASS_IDS, DISPLAY_CLASSES, DISPLAY_KEYPOINT_IDS, DISPLAY_LINKS, display_skeleton
+from selfcap_curate.display_style import DISPLAY_LINKS
+from selfcap_curate.keypoints import display_skeleton
 
 
 def test_display_selection_and_hand_fallback() -> None:
@@ -13,25 +14,43 @@ def test_display_selection_and_hand_fallback() -> None:
     quest = np.full((3, 133, 3), np.nan, dtype=np.float32)
     quest[:2, 91:112] = 3.0
     quest[1, 91:112] = 5.0
-    actual = display_skeleton(times, xyz, confidence, (np.array([0.0, 0.02, 0.1]), quest))
+    fusion = display_skeleton(times, xyz, confidence, (np.array([0.0, 0.02, 0.1]), quest))
+    actual = fusion.positions
+    assert fusion.quest_tracked[0, 91] and not fusion.quest_tracked[1, 91]
     np.testing.assert_allclose(actual[0, 91:112], 4.0)
     np.testing.assert_allclose(actual[1, 91:112], 1.0)  # no bridging the 80 ms gap
     np.testing.assert_allclose(actual[:, 112:120], 1.0)  # absent right Quest hand
-    assert np.isnan(actual[:, 120]).all()  # low-confidence fallback is missing
-    assert np.isnan(actual[:, np.r_[0:3, 9:11, 23:91]]).all()
-    np.testing.assert_allclose(actual[:, np.r_[3:9, 11:23]], 1.0)
+    np.testing.assert_allclose(actual[:, 120], 1.0)  # Low confidence is red, not hidden.
+    assert fusion.confidence[0, 91] == 1.0  # Quest has no per-joint score.
+    assert np.isnan(actual[:, np.r_[0:3, 9:11, 13:91]]).all()
+    np.testing.assert_allclose(actual[:, np.r_[3:9, 11:13]], 1.0)
 
 
 def test_display_links_use_hand_roots_and_exclude_hidden_joints() -> None:
     links = {tuple(link) for link in DISPLAY_LINKS}
     assert (7, 91) in links and (8, 112) in links
     assert (91, 92) in links and (112, 113) in links
-    assert not {0, 1, 2, 9, 10, *range(23, 91)} & {joint for link in links for joint in link}
+    assert {(5, 6), (5, 11), (6, 12), (11, 12)} <= links
+    assert not {0, 1, 2, 9, 10, *range(13, 91)} & {joint for link in links for joint in link}
 
 
-def test_every_bone_has_two_points_in_its_side_colour_class() -> None:
-    assert DISPLAY_CLASS_IDS[91] == 0 and DISPLAY_CLASS_IDS[112] == 1
-    for side, description in enumerate(DISPLAY_CLASSES):
-        ids = set(DISPLAY_KEYPOINT_IDS[side == DISPLAY_CLASS_IDS].tolist())
-        assert all(int(pair.keypoint0) in ids and int(pair.keypoint1) in ids for pair in description.keypoint_connections)
-    assert DISPLAY_CLASSES[0].info.color != DISPLAY_CLASSES[1].info.color
+def test_quest_hand_observation_uses_raw_camera_detection() -> None:
+    from selfcap_curate.keypoints import SelectedView, exo_display_observed
+
+    pixels = np.zeros((1, 133, 2), dtype=np.float32)
+    detected = pixels.copy()
+    detected[0, 91, 0] = 14.0
+    detected[0, 92, 0] = 16.0
+    scores = np.ones((1, 133), dtype=np.float64)
+    scores[0, 93] = 0.69
+    inliers = np.zeros((1, 133), dtype=bool)
+    inliers[0, 5] = True
+    tracked = np.zeros((1, 133), dtype=bool)
+    tracked[:, 91:112] = True
+    observed = exo_display_observed(pixels, SelectedView(detected, scores), inliers, tracked)
+    assert observed[0, 91]  # raw detection supports Quest despite absent triangulation support
+    assert not observed[0, 92]  # beyond 15 px
+    assert not observed[0, 93]  # low raw confidence
+    assert observed[0, 94]
+    assert observed[0, 5]  # body still uses geometric support
+    assert not observed[0, 6]
