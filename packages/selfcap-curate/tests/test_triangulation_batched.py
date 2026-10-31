@@ -8,7 +8,17 @@ import pytest
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
-from selfcap_curate.keypoints import INLIER_PX, MIN_RAY_SEPARATION_DEG, Camera, Triangulated, project, select_wearers, triangulate_frames
+from selfcap_curate.keypoints import (
+    INLIER_PX,
+    MIN_RAY_SEPARATION_DEG,
+    ROBUST_OUTER_GATE,
+    ROBUST_ROUNDS,
+    Camera,
+    Triangulated,
+    project,
+    select_wearers,
+    triangulate_frames,
+)
 
 
 # Independent per-frame SVD reference from 9d7032286. Acceptance follows the
@@ -35,7 +45,8 @@ def reference_select_wearer(camera: Camera, anchors: Float64[ndarray, "3 3"], bo
 def reference_triangulate(
     cameras: list[Camera], uv: Float64[ndarray, "v j 2"], scores: Float64[ndarray, "v j"], threshold: float = INLIER_PX
 ) -> Triangulated:
-    """All view pairs whose lines meet at >= MIN_RAY_SEPARATION_DEG (facing phones too), weighted DLT and two gated refits."""
+    """Best pair (lines >= MIN_RAY_SEPARATION_DEG apart, facing phones too) as the seed, two gated refits, robust
+    reweighting over every view, then >= 2 views within the gate whose lines meet at >= MIN_RAY_SEPARATION_DEG."""
     views, joints = scores.shape
     xyz, counts, confidence = np.full((joints, 3), np.nan, np.float32), np.zeros(joints, np.uint8), np.zeros(joints, np.float32)
     if views < 2:
@@ -62,7 +73,7 @@ def reference_triangulate(
             ],
             axis=2,
         )
-        rows *= np.sqrt(np.maximum(clean * mask, 0.0))[:, :, None, None]
+        rows *= np.sqrt(np.maximum(clean * mask, 0.0))[:, :, None, None]  # mask may also be real weights
         _, _, vh = np.linalg.svd(rows.transpose(1, 0, 2, 3).reshape(joints, -1, 4), full_matrices=False)
         with np.errstate(invalid="ignore", divide="ignore"):
             return vh[:, -1, :3] / vh[:, -1, 3:4]
@@ -94,10 +105,24 @@ def reference_triangulate(
         best_count[better], best_weight[better], best_error[better] = count[better], weight[better], mean[better]
     inliers = best_mask & valid & (residual(fit(best_mask)) <= threshold)
     points = fit(inliers)
+    seeded = (inliers.sum(0) >= 2) & np.isfinite(points).all(1)
+    for _ in range(ROBUST_ROUNDS):
+        res = residual(points)
+        with np.errstate(over="ignore", invalid="ignore"):
+            weights = np.where(valid & (res <= ROBUST_OUTER_GATE * threshold), 1.0 / (1.0 + (res / threshold) ** 2), 0.0)
+        refined = fit(weights)
+        keep = seeded & np.isfinite(refined).all(1)
+        points[keep] = refined[keep]
     res = residual(points)
-    inliers &= res <= threshold
+    inliers = valid & (res <= threshold)
     count = inliers.sum(0)
-    good = (count >= 2) & np.isfinite(points).all(1)
+    centres = np.stack([c.world_T_cam[:3, 3] for c in cameras])
+    to_point = points[None] - centres[:, None]
+    to_point /= np.maximum(np.linalg.norm(to_point, axis=2, keepdims=True), 1e-12)
+    lines = np.abs(np.einsum("ajk,bjk->abj", to_point, to_point))
+    pairs = inliers[:, None] & inliers[None] & ~np.eye(views, dtype=bool)[..., None]
+    widest = np.where(pairs, lines, 1.0).min(axis=(0, 1))
+    good = seeded & (count >= 2) & (widest < np.cos(np.deg2rad(MIN_RAY_SEPARATION_DEG))) & np.isfinite(points).all(1)
     xyz[good], counts[good] = points[good], count[good]
     confidence[good] = (np.where(inliers, clean, 0.0).sum(0) / np.maximum(count, 1))[good]
     return Triangulated(xyz, counts, confidence)

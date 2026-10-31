@@ -41,6 +41,11 @@ MIN_RAY_SEPARATION_DEG: float = 5.0
 """Smallest angle between the lines of two supporting rays: phones at almost one viewpoint, or facing each other across the
 wearer (f28dc7af rig_01/rig_03, rays 179.5 degrees apart), leave depth free along the line. Near-parallel pairs pass the pixel
 gate with depth errors of metres; at 5 degrees and 2 m a 5 px error moves depth ~0.13 m."""
+ROBUST_ROUNDS: int = 6
+"""Reweighting rounds over every view after the consensus seed."""
+ROBUST_OUTER_GATE: float = 3.0
+"""Views farther than this many inlier gates (24 px) from the point get no weight: a wrong person or a wild guess does not
+pull it. f28dc7af: RTMW-x ears 154/20 -> 17/17 mm from SAM3DFast, steady on the head (4/5 mm); shoulders 14/39 -> 11/10 mm."""
 MAX_HEAD_DISTANCE_M: float = 2.2
 """A triangulated joint farther than this from the wearer's head (Quest track) is not the wearer's: written missing."""
 
@@ -276,7 +281,9 @@ def select_wearer(camera: Camera, anchors: Float64[ndarray, "3 3"], boxes: Float
 def triangulate_frames(
     cameras: list[Camera], uv: Float64[ndarray, "n v j 2"], scores: Float64[ndarray, "n v j"], threshold: float = INLIER_PX, chunk: int = 2048
 ) -> TriangulationBatch:
-    """All view pairs, >=MIN_RAY_SEPARATION_DEG ray separation, weighted DLT and two gated refits, for every frame and joint at once.
+    """Best view pair as the seed (lines >= MIN_RAY_SEPARATION_DEG apart), two gated refits, then robust reweighting over
+    every view; kept where >= 2 views end within ``threshold`` and their lines meet at >= MIN_RAY_SEPARATION_DEG.
+    For every frame and joint at once.
 
     float64 on the GPU when there is one: each DLT is the smallest eigenvector of its 4x4 normal matrix, which agrees
     with the per-frame SVD it replaced to ~1e-13 m (cc808233 ep001: 7 s -> ~0.2 s per episode).
@@ -301,6 +308,7 @@ def triangulate_frames(
     lens = tensor(np.stack([c.K[:2, :2] for c in cameras]))
     centre = tensor(np.stack([c.K[:2, 2] for c in cameras]))
     radial = tensor(np.array([c.radial for c in cameras]))
+    world_centre = tensor(np.stack([c.world_T_cam[:3, 3] for c in cameras]))
     cos_min = float(np.cos(np.deg2rad(MIN_RAY_SEPARATION_DEG)))
 
     def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> TriangulationBatch:
@@ -317,7 +325,6 @@ def triangulate_frames(
         valid = (score >= MIN_DETECTION_SCORE) & torch.isfinite(score) & torch.isfinite(observed).all(-1) & torch.isfinite(norm).all(-1)
         norm = torch.where(torch.isfinite(norm), norm, 0.0)
         clean = torch.where(valid, score, 0.0)
-        root = torch.sqrt(clean)
         rows = torch.stack(
             [
                 norm[..., 0, None] * inverse[None, :, None, 2] - inverse[None, :, None, 0],
@@ -326,12 +333,15 @@ def triangulate_frames(
             dim=3,
         )  # f v j 2 4
 
-        def fit(mask: Tensor) -> Tensor:
-            weighted = rows * torch.where(mask, root, 0.0)[..., None, None]
+        def fit_weighted(weights: Tensor) -> Tensor:
+            weighted = rows * torch.sqrt(weights)[..., None, None]
             gram = torch.einsum("fvjri,fvjrk->fjik", weighted, weighted).reshape(-1, 4, 4)
             vectors = torch.cat([torch.linalg.eigh(part)[1][..., 0] for part in gram.split(32768)])
             vectors = vectors.reshape(len(observed_np), joints, 4)
             return vectors[..., :3] / vectors[..., 3:4]
+
+        def fit(mask: Tensor) -> Tensor:
+            return fit_weighted(torch.where(mask, clean, 0.0))
 
         def residual(points: Tensor) -> Tensor:
             q = torch.einsum("vik,fjk->fvji", inverse[:, :3, :3], points) + inverse[None, :, None, :3, 3]
@@ -365,10 +375,24 @@ def triangulate_frames(
             )
         inliers = best_mask & valid & (residual(fit(best_mask)) <= threshold)
         points = fit(inliers)
+        seeded = (inliers.sum(1) >= 2) & torch.isfinite(points).all(-1)
+        # From the consensus seed, every phone with the point counts: score x Cauchy(threshold) weights, phones beyond
+        # ROBUST_OUTER_GATE x threshold left out. Phones that guess a hidden joint a little differently (f28dc7af: RTMW-x
+        # puts the ears ~15 px lower from the front than from the side) then meet in between instead of one pair winning.
+        for _ in range(ROBUST_ROUNDS):
+            error = residual(points)
+            weights = torch.where(valid & (error <= ROBUST_OUTER_GATE * threshold), clean / (1.0 + (error / threshold) ** 2), 0.0)
+            refined = fit_weighted(weights)
+            points = torch.where((seeded & torch.isfinite(refined).all(-1))[..., None], refined, points)
         errors: Tensor = residual(points)
-        inliers &= errors <= threshold
+        inliers = valid & (errors <= threshold)
         count = inliers.sum(1)
-        good = (count >= 2) & torch.isfinite(points).all(-1)
+        to_point = points[:, None] - world_centre[None, :, None]
+        to_point = to_point / torch.linalg.norm(to_point, dim=-1, keepdim=True).clamp(min=1e-12)
+        lines = torch.einsum("fajk,fbjk->fabj", to_point, to_point).abs()
+        pairs = inliers[:, :, None] & inliers[:, None] & ~torch.eye(views, dtype=torch.bool, device=device)[None, :, :, None]
+        widest = torch.where(pairs, lines, 1.0).amin(dim=(1, 2))
+        good = seeded & (count >= 2) & (widest < cos_min) & torch.isfinite(points).all(-1)
         return TriangulationBatch(
             torch.where(good[..., None], points, torch.nan).float().cpu().numpy(),
             torch.where(good, count, 0).to(torch.uint8).cpu().numpy(),

@@ -49,6 +49,19 @@ def test_weighted_ransac_keeps_consensus_and_missing_joints() -> None:
     np.testing.assert_allclose(result.confidence, [5.0 / 6.0, 1.0, 0.0], atol=1e-6)
 
 
+def test_views_that_disagree_a_little_all_count() -> None:
+    """A hidden joint each phone guesses slightly differently (two phones 6 px one way, two the other, as RTMW-x's ears on
+    f28dc7af): the point comes from all four phones, between the guesses, not from whichever pair agrees exactly."""
+    cams = cameras()
+    truth = np.array([[0.2, -0.3, 4.0]])
+    uv = np.stack([project(c, truth)[:, :2] for c in cams])
+    uv[:2, 0, 0] += 6.0
+    uv[2:, 0, 0] -= 6.0
+    result = triangulate(cams, uv, np.ones((4, 1)))
+    assert result.n_views[0] == 4
+    assert np.linalg.norm(result.xyz[0] - truth[0]) < 0.005
+
+
 def test_wearer_and_degenerate_rays() -> None:
     cams = cameras()
     anchors = np.array([[0.2, -0.3, 4.0], [0.1, 0.0, 4.0], [0.4, 0.0, 4.0]])
