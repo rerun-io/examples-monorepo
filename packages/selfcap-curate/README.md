@@ -120,7 +120,9 @@ Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz 
 keeping three people per frame on a half-open `video_time` grid anchored at cut zero; nearest-frame ties go left.
 Quest anchors use capture_time: left-eye head + quest_pose (100 ms gap), wrists −48 ms + quest_pose (40 ms gap).
 Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation accepts joint detector scores
-≥0.3, with radial undistortion, weighted DLT, pair RANSAC, 0.5° ray separation, 8 px inliers and two refits.
+≥0.3, with radial undistortion and weighted DLT. The best phone pair whose lines meet at ≥5° (phones facing each other
+count by their lines, not their directions) seeds two refits with 8 px inliers; six rounds then reweight every phone by
+score × Cauchy (8 px), with no weight beyond 24 px. A point is kept where ≥2 phones end within 8 px and their lines meet at ≥5°.
 Confidence is the mean inlier score, multiplied by 0.9 for two-view support. It is not a visibility probability.
 The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, and `support_inlier_mask` per joint.
 Each mask lists cameras in the static `support_camera_paths` order. A measured point needs at least two supporting cameras; temporal estimates carry `temporal_bridged` and retain the actual support count.
