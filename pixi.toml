@@ -63,9 +63,9 @@ torchvision = "*"
 
 [feature.common.pypi-dependencies]
 # pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 gradio = "==6.13.0"                                        # pin-bump: hold
-gradio-rerun = "==0.38.1"                                  # pin-bump: hold
+gradio-rerun = "==0.41.0"                                  # pin-bump: hold
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -102,7 +102,7 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.38.1", extras = [
+rerun-sdk = { version = "==0.41.0", extras = [
     "catalog",
     "dataloader",
 ] }
@@ -1016,7 +1016,7 @@ scipy = "*"
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1602,7 +1602,7 @@ tyro = ">=0.9.1,<0.10"
 [feature.selfcap-soma.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
 py-soma-x = "==0.3.0"
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] }
 selfcap-soma = { path = "packages/selfcap-soma", editable = true }
 
 [feature.selfcap-soma.activation.env]
@@ -2140,7 +2140,7 @@ xorg-libxrandr = "*"
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.38.1"
+rerun-sdk = "==0.38.1"  # matches the custom viewer's =0.38.1 re_viewer crates; moves with their Rust port
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation]
@@ -2337,7 +2337,8 @@ description = "Launch DPVO Gradio web UI"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-evals.dependencies]
-python = "3.10.*"
+python = "3.11.*"  # rerun-sdk 0.41 ships cp311 abi3 wheels only
+pillow = "<13"  # gradio 6.13 (held) needs pillow<13; py3.11 would otherwise pick 13
 pyyaml = "*"
 pyarrow = ">=20.0.0,<21"
 tqdm = "*"
@@ -2404,7 +2405,7 @@ dataforge = { path = "packages/dataforge", editable = true }
 # rerun-prerelease asks for rerun-sdk[dataloader], whose PyPI torchvision does not
 # load against the CPU lane's conda pytorch-cpu ("operator torchvision::nms does not
 # exist"); nothing here uses the dataloader, so the catalog extra alone is kept.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] }
 
 [feature.slam-rs.tasks.slam-rs-demo]
 cmd = "python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy"
@@ -2742,7 +2743,7 @@ hf-transfer = "*"
 simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
 # that misses this line leaves the Mac a release behind with no gate to say so.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 
 # ── Package consumer lane ─────────────────────────────────────────────────
 # Installs the two pixi-build outputs of packages/slam-rs (recipe.yaml) the way
@@ -3212,7 +3213,7 @@ tyro = ">=0.9.1,<0.10"
 [feature.agent-traces.pypi-dependencies]
 agent-traces = { path = "packages/agent-traces", editable = true }
 # pin-bump: hold — this torch-free lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.agent-traces.pypi-options]
 index-url = "https://pypi.org/simple"

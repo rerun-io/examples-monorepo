@@ -82,10 +82,10 @@ def blueprint_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
 def save_table_blueprint(
     blueprint: rrb.Blueprint, target: Path, *, timeline: str, fields: TableFields, columns: Sequence[str]
 ) -> None:
-    """Write a Rerun 0.38 segment-table blueprint: the views plus the ``/table`` entities.
+    """Write a Rerun 0.41 segment-table blueprint: the views plus the ``/table`` entities.
 
-    0.38 redesigned table blueprints (the 0.37 files are ignored): the card and table layouts
-    each name the preview column, and ``TableColumnPreview`` lists the views a preview renders.
+    The card and table layouts each name the preview column; ``TableColumnPreview`` marks it as
+    a preview column and lists the views a preview renders.
     Every view is embedded as in a plain ``.rbl``; the extra entities are logged on the
     blueprint timeline through the low-level archetypes, as the SDK's ``table_blueprints``
     example does until a Python API exists. The recording link column comes first in the
@@ -110,7 +110,6 @@ def save_table_blueprint(
         link: str = rr.escape_entity_path_part(SEGMENT_LINK_COLUMN)
         view_paths: list[str] = [view.blueprint_path() for view in blueprint_views(blueprint)]
         for prefix, shown in (("/table/layouts/table/columns", fields.table), ("/table/layouts/cards/fields", fields.cards)):
-            stream.log(f"{prefix}/{link}", rrb.experimental.TableColumn(cell_kind=rrb.components.TableCellKind.Preview))
             stream.log(f"{prefix}/{link}", rrb.experimental.TableColumnPreview(views=view_paths))
             if not shown:
                 continue  # no declared fields: the viewer shows every property column
