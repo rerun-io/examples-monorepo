@@ -9,6 +9,7 @@ pyserde = "*"
 tomli-w = "*"
 orjson = "*"
 tyro = "*"
+scipy = ">=1.18.1,<2"
 
 [pypi-dependencies]
 rerun-sdk = { version = "==0.41.0", extras = ["catalog"] }
