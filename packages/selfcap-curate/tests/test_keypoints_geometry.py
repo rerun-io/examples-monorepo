@@ -59,6 +59,22 @@ def test_wearer_and_degenerate_rays() -> None:
     assert triangulate([cams[0], cams[0]], uv, np.ones((2, 1))).n_views[0] == 0
 
 
+def test_two_phones_facing_each_other_cannot_fix_depth_alone() -> None:
+    """Rays from phones on opposite sides lie on one line (here 1.4 degrees apart as lines, 178.6 as rays): the point can
+    slide along it and both still agree, so that pair alone gives no point. A third phone at 90 degrees fixes it."""
+    lens = np.array([[900.0, 0.0, 960.0], [0.0, 900.0, 540.0], [0.0, 0.0, 1.0]])
+    poses = [np.eye(4), np.eye(4), np.eye(4)]
+    poses[1][:3, :3], poses[1][:3, 3] = np.diag([-1.0, 1.0, -1.0]), [0.0, 0.0, 8.0]  # at z = 8, looking back down -z
+    poses[2][:3, :3], poses[2][:3, 3] = np.c_[[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]], [4.0, 0.0, 4.0]  # looking down -x
+    cams = [Camera(lens, pose, (0.0, 0.0), f"/world/rig_{i:02d}/cam_00") for i, pose in enumerate(poses)]
+    truth = np.array([[0.05, 0.0, 4.0]])
+    uv = np.stack([project(c, truth)[:, :2] for c in cams])
+    assert triangulate(cams[:2], uv[:2], np.ones((2, 1))).n_views[0] == 0
+    result = triangulate(cams, uv, np.ones((3, 1)))
+    assert result.n_views[0] == 3
+    np.testing.assert_allclose(result.xyz[0], truth[0], atol=1e-4)
+
+
 def test_nonfinite_observations_and_behind_camera_are_missing() -> None:
     cams = cameras()
     truth = np.array([[0.1, 0.2, 4.0], [0.2, 0.1, 3.0], [0.3, 0.1, 4.0]])

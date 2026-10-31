@@ -8,7 +8,7 @@ import pytest
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
-from selfcap_curate.keypoints import INLIER_PX, Camera, Triangulated, project, select_wearers, triangulate_frames
+from selfcap_curate.keypoints import INLIER_PX, MIN_RAY_SEPARATION_DEG, Camera, Triangulated, project, select_wearers, triangulate_frames
 
 
 # Independent per-frame SVD reference from 9d7032286. Acceptance follows the
@@ -35,7 +35,7 @@ def reference_select_wearer(camera: Camera, anchors: Float64[ndarray, "3 3"], bo
 def reference_triangulate(
     cameras: list[Camera], uv: Float64[ndarray, "v j 2"], scores: Float64[ndarray, "v j"], threshold: float = INLIER_PX
 ) -> Triangulated:
-    """All view pairs, >=0.5° ray separation, weighted DLT and two gated refits."""
+    """All view pairs whose lines meet at >= MIN_RAY_SEPARATION_DEG (facing phones too), weighted DLT and two gated refits."""
     views, joints = scores.shape
     xyz, counts, confidence = np.full((joints, 3), np.nan, np.float32), np.zeros(joints, np.uint8), np.zeros(joints, np.float32)
     if views < 2:
@@ -82,7 +82,7 @@ def reference_triangulate(
     rays /= np.maximum(np.linalg.norm(rays, axis=2, keepdims=True), 1e-12)
     for a, b in combinations(range(views), 2):
         seed = np.zeros((views, joints), bool)
-        seed[a] = seed[b] = valid[a] & valid[b] & (np.sum(rays[a] * rays[b], axis=1) < np.cos(np.deg2rad(0.5)))
+        seed[a] = seed[b] = valid[a] & valid[b] & (np.abs(np.sum(rays[a] * rays[b], axis=1)) < np.cos(np.deg2rad(MIN_RAY_SEPARATION_DEG)))
         res = residual(fit(seed))
         inliers = valid & (res <= threshold) & seed[a][None, :]
         count, weight = inliers.sum(0), (inliers * clean).sum(0)

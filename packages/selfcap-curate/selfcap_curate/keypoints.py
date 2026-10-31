@@ -38,7 +38,8 @@ PoseModel: TypeAlias = Literal["rtmw", "sapiens2"]
 
 INLIER_PX: float = 8.0
 MIN_RAY_SEPARATION_DEG: float = 5.0
-"""Smallest angle between two supporting rays. Near-parallel pairs (two phones at almost one viewpoint) pass the pixel
+"""Smallest angle between the lines of two supporting rays: phones at almost one viewpoint, or facing each other across the
+wearer (f28dc7af rig_01/rig_03, rays 179.5 degrees apart), leave depth free along the line. Near-parallel pairs pass the pixel
 gate with depth errors of metres; at 5 degrees and 2 m a 5 px error moves depth ~0.13 m."""
 MAX_HEAD_DISTANCE_M: float = 2.2
 """A triangulated joint farther than this from the wearer's head (Quest track) is not the wearer's: written missing."""
@@ -348,7 +349,7 @@ def triangulate_frames(
         best_weight = torch.zeros(valid.shape[0], joints, dtype=torch.float64, device=device)
         best_error = torch.full((valid.shape[0], joints), torch.inf, dtype=torch.float64, device=device)
         for a, b in combinations(range(views), 2):
-            pair = valid[:, a] & valid[:, b] & ((rays[:, a] * rays[:, b]).sum(-1) < cos_min)
+            pair = valid[:, a] & valid[:, b] & ((rays[:, a] * rays[:, b]).sum(-1).abs() < cos_min)  # the lines' angle: facing phones too
             seed = torch.zeros_like(valid)
             seed[:, a], seed[:, b] = pair, pair
             res = residual(fit(seed))

@@ -199,7 +199,8 @@ BODY_GATE_PX: float = 25.0
 """A view joins a body point only within this many pixels: wider than the 8 px keypoints gate, because the poses it
 corrects disagree by 9-14 px on joints far from the head (7ffcbc7e legs, 4b1b6cdc elbow)."""
 MIN_BODY_RAY_DEG: float = 5.0
-"""Body points whose agreeing rays all meet at a shallower angle carry no depth and are left out, as in keypoints."""
+"""Body points whose agreeing rays all lie within this angle of one line (side by side or facing each other) carry no depth
+and are left out, as in keypoints."""
 MAX_BODY_PAIRS: int = 1200
 """Body pairs per phone and round, evenly spaced: about as many as the gated hand pairs, so neither dominates."""
 BODY_ROUNDS: int = 3
@@ -263,7 +264,7 @@ def triangulate_bodies(cameras: Mapping[str, Camera], bodies: Mapping[str, BodyT
     rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
     cosines = np.einsum("anjk,bnjk->abnj", rays, rays)
     pair = mask[:, None] & mask[None] & ~np.eye(len(phones), dtype=bool)[..., None, None]
-    widest = np.where(pair, cosines, 1.0).min(axis=(0, 1))
+    widest = np.where(pair, np.abs(cosines), 1.0).min(axis=(0, 1))  # the lines' angle: facing phones carry no depth either
     points[~(widest < np.cos(np.radians(MIN_BODY_RAY_DEG)))] = np.nan
     return points
 

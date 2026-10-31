@@ -184,7 +184,7 @@ def triangulate_frames(
         best_weight = torch.zeros(valid.shape[0], joints, dtype=torch.float64, device=device)
         best_error = torch.full((valid.shape[0], joints), torch.inf, dtype=torch.float64, device=device)
         for a, b in combinations(range(views), 2):
-            pair = valid[:, a] & valid[:, b] & ((rays[:, a] * rays[:, b]).sum(-1) < cos_min)
+            pair = valid[:, a] & valid[:, b] & ((rays[:, a] * rays[:, b]).sum(-1).abs() < cos_min)  # the lines' angle: facing phones too
             seed = torch.zeros_like(valid)
             seed[:, a], seed[:, b] = pair, pair
             res = residual(fit(seed))

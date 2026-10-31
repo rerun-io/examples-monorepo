@@ -174,6 +174,22 @@ def test_body_joints_are_triangulated_from_the_views_that_agree() -> None:
     assert np.isnan(points[:, 11]).all()
 
 
+def test_body_joints_seen_only_by_two_phones_facing_each_other_are_missing() -> None:
+    """Joints near the line between two facing phones: their rays are under 5 degrees apart as lines, so depth is free;
+    a third phone from the side fixes them."""
+    from selfcap_curate.head_anchor import BodyTrack, triangulate_bodies
+
+    rng = np.random.default_rng(11)
+    truth = np.array([0.0, 1.0, 0.0]) + rng.uniform([-0.05, -0.05, -0.3], [0.05, 0.05, 0.3], (20, 12, 3))
+    cameras = {p: look_at(np.array(centre), np.array([0.0, 1.0, 0.0])) for p, centre in
+               (("front", [0.0, 1.0, 3.0]), ("back", [0.0, 1.0, -3.0]), ("side", [3.0, 1.0, 0.0]))}
+    bodies = {p: BodyTrack(np.arange(20) / 4.0, c.project(truth.reshape(-1, 3))[:, :2].reshape(20, 12, 2), np.full((20, 12), 0.9))
+              for p, c in cameras.items()}
+    facing = {p: cameras[p] for p in ("front", "back")}
+    assert np.isnan(triangulate_bodies(facing, bodies)).all()
+    np.testing.assert_allclose(triangulate_bodies(cameras, bodies), truth, atol=1e-6)
+
+
 def test_the_body_seen_from_several_phones_corrects_poses_a_wrong_face_template_leaves_off() -> None:
     """Face pairs alone pose each phone separately: a template 1-2 cm off turns each phone a little, and the legs, far
     below the head, disagree between phones. The body seen by every phone pulls them back into agreement."""
