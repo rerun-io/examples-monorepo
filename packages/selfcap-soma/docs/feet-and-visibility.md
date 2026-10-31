@@ -120,9 +120,7 @@ Its machine-readable results are `current/foot-report.json` under the same root.
 
 ## Reproduce
 
-```bash
-OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 pixi run -e selfcap-soma --frozen python packages/selfcap-soma/tools/feet_fit.py --output /tmp/soma-fit/feet-fix/strict
-```
+The experiment script was archived; recover it from git history (removed in the selfcap-soma simplify commit).
 
 Use the installed environment's Python directly when running from a package
 working directory. Do not register the candidate before the source-ready

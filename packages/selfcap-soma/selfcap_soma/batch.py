@@ -21,15 +21,14 @@ from rerun.chunk import RrdReader
 from serde import serde
 from serde.json import from_json, to_json
 
-from selfcap_soma.anthropometry import plausible_ears
-from selfcap_soma.catalog import ExoSource, read_window
+from selfcap_soma.anthropometry import plausible_ears, usable_ears
+from selfcap_soma.catalog import ExoSource, read_window, subset
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
 from selfcap_soma.output import save
 from selfcap_soma.overlay import Config as OverlayConfig
 from selfcap_soma.overlay import main as export
 from selfcap_soma.shape_frames import InsufficientBodyObservation, select_shape_frames
-from selfcap_soma.shoulders import subset
 from selfcap_soma.temporal import group_jitter
 
 VERSION = "soma-batch-v8-anthropometric-guards"
@@ -228,7 +227,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         ear_pairs = plausible_ears(data.exo)
         confidence = data.confidence.copy()
         confidence[~ear_pairs, 3:5] = 0.0
-        surviving = int((ear_pairs & (confidence[:, 3:5] > 0.0).any(1)).sum())
+        surviving = int(usable_ears(data.exo, data.confidence).sum())
         selection = select_shape_frames(data.times, data.exo, confidence, data.support, allow_torso_only=surviving < 3)
         print(f"ear span guard: {surviving}/{len(ear_pairs)} surviving frames; torso/rotation fallback={surviving < 3}", flush=True)
         (directory / "shape-frames.json").write_text(to_json(selection))

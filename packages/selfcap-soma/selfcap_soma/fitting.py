@@ -14,7 +14,7 @@ from serde import serde
 from soma.body import SOMALayer, SOMAPoseOutput
 from torch import Tensor
 
-from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, bounded_scale, plausible_ears
+from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, bounded_scale, usable_ears
 from selfcap_soma.catalog import Observations
 from selfcap_soma.feet import foot_pose_penalty, symmetry_penalty
 from selfcap_soma.hand_pose import HandOrientations, HandOrientationSource, frame, hand_limit_penalty, orientation_targets
@@ -234,22 +234,25 @@ def fit(
     anchors: list[int] = [key for key in (5, 6, 11, 12) if np.isfinite(data.exo[:, key]).all(1).sum() >= 2]
     if len(anchors) < 3:
         raise InsufficientBodyObservation("initialization needs at least three observed torso anchors")
-    source: Float32[ndarray, "a 3"] = neutral_joints[[names.index(mapping[k]) for k in anchors]]
-    source_center: Float32[ndarray, "3"] = source.mean(axis=0)
-    initial_poses: Float32[ndarray, "n 77 3"] = np.zeros((len(data.times), 77, 3), dtype=np.float32)
-    initial_translation: Float32[ndarray, "n 3"] = np.zeros((len(data.times), 3), dtype=np.float32)
-    initial_anchors: Float64[ndarray, "n a 3"] = data.exo[:, anchors].copy()
-    for joint in range(len(anchors)):
-        valid = np.isfinite(initial_anchors[:, joint]).all(-1)
-        for axis in range(3):
-            initial_anchors[:, joint, axis] = np.interp(data.times, data.times[valid], initial_anchors[valid, joint, axis])
-    for i, target in enumerate(initial_anchors):
-        rotation: Rotation = Rotation.align_vectors(target - target.mean(axis=0), source - source_center)[0]
-        initial_poses[i, 0] = rotation.as_rotvec()
-        initial_translation[i] = target.mean(axis=0) - rotation.apply(source_center)
+    initial_poses: Float32[ndarray, "n 77 3"]
+    initial_translation: Float32[ndarray, "n 3"]
     if initial is not None:
         initial_poses = initial.poses.copy()
         initial_translation = initial.translations.copy()
+    else:
+        source: Float32[ndarray, "a 3"] = neutral_joints[[names.index(mapping[k]) for k in anchors]]
+        source_center: Float32[ndarray, "3"] = source.mean(axis=0)
+        initial_poses = np.zeros((len(data.times), 77, 3), dtype=np.float32)
+        initial_translation = np.zeros((len(data.times), 3), dtype=np.float32)
+        initial_anchors: Float64[ndarray, "n a 3"] = data.exo[:, anchors].copy()
+        for joint in range(len(anchors)):
+            valid = np.isfinite(initial_anchors[:, joint]).all(-1)
+            for axis in range(3):
+                initial_anchors[:, joint, axis] = np.interp(data.times, data.times[valid], initial_anchors[valid, joint, axis])
+        for i, target in enumerate(initial_anchors):
+            rotation: Rotation = Rotation.align_vectors(target - target.mean(axis=0), source - source_center)[0]
+            initial_poses[i, 0] = rotation.as_rotvec()
+            initial_translation[i] = target.mean(axis=0) - rotation.apply(source_center)
     leg_indices = np.flatnonzero(lower_body_mask(tuple(model.public_joint_names), model.public_joint_parent_ids.cpu().numpy().astype(np.int64))[1:])
     if options.freeze_legs:
         initial_poses[:, leg_indices] = 0.0
@@ -341,7 +344,7 @@ def fit(
     dt: Float32[Tensor, "interval"] = torch.as_tensor(np.diff(data.times), dtype=torch.float32, device="cuda")
     ears_target = torch.as_tensor(data.exo[:, 3:5], dtype=torch.float32, device="cuda")
     ears_confidence = torch.as_tensor(data.confidence[:, 3:5], dtype=torch.float32, device="cuda")
-    ear_pairs = plausible_ears(data.exo) & (data.confidence[:, 3:5] > 0.0).any(1)
+    ear_pairs = usable_ears(data.exo, data.confidence)
     if ear_pairs.sum() < 3:
         ear_pairs[:] = False
     ears_confidence = ears_confidence * torch.as_tensor(ear_pairs[:, None], device="cuda")

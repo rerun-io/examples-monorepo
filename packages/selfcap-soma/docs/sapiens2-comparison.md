@@ -81,9 +81,7 @@ Left ear differs by 64 mm, right ear by 15 mm; shoulder/hip definitions differ b
 - Catalog screenshots at 39.862079571 s: `world-catalog-soma.png`, `exo02-catalog-soma.png` under the same artifact root; `head-final-preview.png` shows the A/B head close-ups. The original shared-blueprint captures are retained as `world-39.862.png` and `exo02-39.862.png`.
 - Targeted source/head tests: 2 passed on host CUDA. Source/loss/projection tests: 6 passed. Changed-file Ruff and Pyrefly passed (unrelated missing-env path warnings). No full gate.
 
-```bash
-OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 pixi run -e selfcap-soma --frozen python packages/selfcap-soma/tools/source_comparison.py
-```
+The experiment script was archived; recover it from git history (removed in the selfcap-soma simplify commit).
 
 ## Foot defect raised during review
 

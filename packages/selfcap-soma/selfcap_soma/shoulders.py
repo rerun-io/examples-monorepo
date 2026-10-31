@@ -4,28 +4,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
-from jaxtyping import Bool
-from numpy import ndarray
 from serde import serde
 from serde.json import to_json
 
-from selfcap_soma.catalog import Observations, read_window
-from selfcap_soma.evaluate import mapped
+from selfcap_soma.catalog import Observations, read_window, subset
 from selfcap_soma.fitting import Calibration, FitOptions, FitResult, fit
-from selfcap_soma.output import save
-
-
-def subset(data: Observations, mask: Bool[ndarray, "n"]) -> Observations:
-    return replace(
-        data,
-        times=data.times[mask],
-        exo=data.exo[mask],
-        confidence=data.confidence[mask],
-        hands=data.hands[mask],
-        head_positions=data.head_positions[mask],
-        head_rotations=data.head_rotations[mask],
-        support=data.support[mask] if data.support is not None else None,
-    )
+from selfcap_soma.output import mapped, save
 
 
 @serde(deny_unknown_fields=True)
@@ -148,38 +132,34 @@ def main() -> None:
     indices = np.flatnonzero(valid)[::4]
     train = np.zeros(len(data.times), dtype=bool)
     train[indices] = True
-    for name, options in (
-        (
-            "ears-offset-rotation",
-            FitOptions(
-                shape_components=128,
-                identity_prior=0.05,
-                scale_prior=2.0,
-                learn_head_offset=True,
-                learn_head_rotation=True,
-                use_ears=True,
-                learn_bone_scales=True,
-                bone_length_weight=2.0,
-            ),
-        ),
-    ):
-        calibrated = fit(subset(data, train), Path("/tmp/soma-fit/assets"), 600, 300, options)
-        state = Calibration(
-            calibrated.identity, calibrated.scale, calibrated.head_offset, calibrated.bone_scales, calibrated.head_attachment, calibrated.head_anchor
+    name = "ears-offset-rotation"
+    options = FitOptions(
+        shape_components=128,
+        identity_prior=0.05,
+        scale_prior=2.0,
+        learn_head_offset=True,
+        learn_head_rotation=True,
+        use_ears=True,
+        learn_bone_scales=True,
+        bone_length_weight=2.0,
+    )
+    calibrated = fit(subset(data, train), Path("/tmp/soma-fit/assets"), 600, 300, options)
+    state = Calibration(
+        calibrated.identity, calibrated.scale, calibrated.head_offset, calibrated.bone_scales, calibrated.head_attachment, calibrated.head_anchor
+    )
+    (output / f"{name}-calibration.json").write_text(to_json(state))
+    (output / f"{name}-options.json").write_text(to_json(options))
+    result = fit(data, Path("/tmp/soma-fit/assets"), 400, 80, options, fixed=calibrated)
+    reports.append(describe(name, data, result))
+    reports.append(
+        describe(
+            name + "-after25s",
+            subset(data, data.times >= 25.0),
+            replace(result, joints=result.joints[data.times >= 25.0], ear_landmarks=result.ear_landmarks[data.times >= 25.0]),
         )
-        (output / f"{name}-calibration.json").write_text(to_json(state))
-        (output / f"{name}-options.json").write_text(to_json(options))
-        result = fit(data, Path("/tmp/soma-fit/assets"), 400, 80, options, fixed=calibrated)
-        reports.append(describe(name, data, result))
-        reports.append(
-            describe(
-                name + "-after25s",
-                subset(data, data.times >= 25.0),
-                replace(result, joints=result.joints[data.times >= 25.0], ear_landmarks=result.ear_landmarks[data.times >= 25.0]),
-            )
-        )
-        save(output / name, data, result, 4.144, 3)
-        print(to_json(reports[-2]), flush=True)
+    )
+    save(output / name, data, result, 4.144, 3)
+    print(to_json(reports[-2]), flush=True)
     report = Report(reports, int(train.sum()), 25.0)
     (output / "diagnosis.json").write_text(to_json(report))
     print(to_json(report), flush=True)

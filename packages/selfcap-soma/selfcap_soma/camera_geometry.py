@@ -200,7 +200,8 @@ def triangulate_frames(
             )
         inliers = best_mask & valid & (residual(fit(best_mask)) <= threshold)
         points = fit(inliers)
-        inliers &= residual(points) <= threshold
+        errors: Tensor = residual(points)
+        inliers &= errors <= threshold
         count = inliers.sum(1)
         good = (count >= 2) & torch.isfinite(points).all(-1)
         return TriangulationBatch(
@@ -208,7 +209,7 @@ def triangulate_frames(
             torch.where(good, count, 0).to(torch.uint8).cpu().numpy(),
             torch.where(good, torch.where(inliers, clean, 0.0).sum(1) / count.clamp(min=1), 0.0).float().cpu().numpy(),
             (inliers & good[:, None, :]).cpu().numpy(),
-            torch.where(good, torch.where(inliers, residual(points), 0.0).amax(1), torch.nan).float().cpu().numpy(),
+            torch.where(good, torch.where(inliers, errors, 0.0).amax(1), torch.nan).float().cpu().numpy(),
         )
 
     for begin in range(0, frames, chunk):
