@@ -31,6 +31,8 @@ class Config:
     """Optional text file, one segment id or unprefixed key per line."""
     catalog_url: str = CATALOG_URL
     """Catalog with the as-cut bases and any camera-50 donor; never registered or swapped here."""
+    dataset: str = DATASET_NAME
+    """Dataset on ``catalog_url`` that holds the as-cut bases (with their ``gt`` layer)."""
     oak_observations: Path | None = None
     """Optional directory of dense EgoHand observation Parquets, passed to OAK calibration."""
     oak_free_rotation: bool = False
@@ -63,7 +65,8 @@ def main(config: Config) -> None:
     with timer.stage("align"):
         align.main(
             align.Config(
-                base_dir=config.base_dir, output_dir=aligned, segment_ids=config.segment_ids, key_file=config.key_file, catalog_url=config.catalog_url
+                base_dir=config.base_dir, output_dir=aligned, segment_ids=config.segment_ids, key_file=config.key_file,
+                catalog_url=config.catalog_url, dataset=config.dataset,
             ),
             session_videos=session_videos,
         )

@@ -11,7 +11,9 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 from dataforge import schema
-from dataforge.datasets.selfcap import log_quest_hands, read_quest_hands
+from dataforge.quest_joint_poses import quest_hand_path
+from dataforge.datasets.selfcap import log_quest_hand_poses, log_quest_hands, read_quest_hands
+from dataforge.datasets.selfcap_raw import read_quest_joint_hands
 from dataforge.logging_toolkit import capture_column
 from dataforge.schema import CAPTURE_TIMELINE
 from dataforge.writing import recording_to
@@ -107,15 +109,19 @@ def test_patch_refuses_outputs_in_the_raw_tree(tmp_path: Path) -> None:
     assert not (raw / "output.rrd").exists()
 
 
+@pytest.mark.parametrize("hand_form", ["coco133", "joint_poses"])
 @pytest.mark.parametrize("missing_video", [False, True])
-def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp_path: Path, missing_video: bool) -> None:
+def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp_path: Path, missing_video: bool, hand_form: str) -> None:
     """Fresh PR 2 input has presented capture_time and raw hands, but no time_sync."""
 
     served, raw, sync, starts = synthetic_served(tmp_path)
     fresh = tmp_path / "fresh.rrd"
     hands_path = tmp_path / "raw-hands.rrd"
     with recording_to(hands_path, recording_id=f"selfcap__{sync.key}", send_properties=False) as recording:
-        log_quest_hands(recording, read_quest_hands(raw / "quest"))
+        if hand_form == "coco133":  # a base written before the joint poses were ingested
+            log_quest_hands(recording, read_quest_hands(raw / "quest"))
+        else:
+            log_quest_hand_poses(recording, read_quest_joint_hands(raw / "quest"))
         for entity in (schema.gyro_path(4, 0), schema.rig_path(5)):
             recording.send_columns(
                 entity,
@@ -165,10 +171,9 @@ def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp
         capture = batch.column(CAPTURE_TIMELINE).cast(pa.int64()).to_pylist()
         video = batch.column("video_time").cast(pa.int64()).to_pylist()
         firsts.setdefault(entity, (capture[0], video[0]))
-        if entity == schema.coco133_xyz_path():
+        if entity in (schema.coco133_xyz_path(), quest_hand_path("left"), quest_hand_path("right")):
             hand_rows += len(capture)
-            assert capture == [17, 27]
-            assert video == [32_000_017, 32_000_027]
+            assert [v - c for c, v in zip(capture, video, strict=True)] == [32_000_000] * len(capture)  # pose offset less hand latency
     assert hand_rows == 2
     assert firsts[schema.video_path(4, 0)] == (40_039_062, 46_043_066)
     assert firsts[schema.video_path(5, 1)] == (40_039_062, 140_039_062)

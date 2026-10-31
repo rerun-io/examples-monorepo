@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 from dataforge.clocks import nearest_framesets as nearest_indices
+from dataforge.oak_mount import read_oak_track
 from datafusion import col, lit
 from jaxtyping import Float64
 from numpy import ndarray
@@ -115,22 +116,11 @@ def read_views(
     if missing:
         print(f"SKIP_CAMERA {segment} {oak_camera}: missing calibration {missing}", flush=True)
         return phones, None
-    poses = (
-        view.filter_contents([oak])
-        .reader(index="video_time")
-        .filter(col("video_time").cast(pa.int64()) >= lit(int((times[0] - 0.1) * 1e9)))
-        .filter(col("video_time").cast(pa.int64()) <= lit(int((times[-1] + 0.1) * 1e9)))
-        .select("video_time", f"{oak}:Transform3D:mat3x3", f"{oak}:Transform3D:translation")
-        .to_arrow_table()
-    )
-    poses = poses.filter(poses[f"{oak}:Transform3D:mat3x3"].is_valid())
-    stamps = seconds(poses["video_time"])
-    if not len(stamps):
-        print(f"SKIP_CAMERA {segment} {oak}: no calibrated pose samples", flush=True)
+    track = read_oak_track(view, oak, rigs.quest, start_ns=int((times[0] - 0.1) * 1e9), end_ns=int((times[-1] + 0.1) * 1e9))
+    if track is None:
+        print(f"SKIP_CAMERA {segment} {oak}: no fitted OAK mount", flush=True)
         return phones, None
-    transforms = np.tile(np.eye(4), (len(stamps), 1, 1))
-    transforms[:, :3, :3] = np.asarray(poses[f"{oak}:Transform3D:mat3x3"].to_pylist(), dtype=np.float64).reshape(-1, 3, 3).transpose(0, 2, 1)
-    transforms[:, :3, 3] = np.asarray(poses[f"{oak}:Transform3D:translation"].to_pylist(), dtype=np.float64).reshape(-1, 3)
+    stamps, transforms = track
     size = first(static, f"{oak_camera}/pinhole:Pinhole:resolution")
     ego = EgoCamera(
         int(oak.rsplit("_", 1)[1]),

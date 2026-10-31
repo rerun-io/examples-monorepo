@@ -18,7 +18,8 @@ from serde.json import from_json
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment
 from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
-from selfcap_curate.factory import cy_shift_px, intrinsic_matrix, read_quest_block
+from dataforge.datasets.selfcap_raw import crop_shift_px
+from selfcap_curate.factory import intrinsic_matrix, read_quest_block
 from selfcap_curate.keypoints import Keypoints2D, ViewDetections
 from selfcap_curate.patch_base import patch
 from selfcap_curate.quest_fit import read_session_episode
@@ -219,7 +220,7 @@ def assert_quest_block(block, expected) -> None:
         old = expected["pinholes"][slot]
         assert pinhole.camera_id == old["camera_id"]
         assert (pinhole.capture_resolution.width, pinhole.capture_resolution.height) == (old["width"], old["height"])
-        assert cy_shift_px(pinhole) == old["cy_shift_px"]
+        assert crop_shift_px(pinhole) == old["cy_shift_px"]
         np.testing.assert_allclose(
             intrinsic_matrix(pinhole), [[old["fx"], 0.0, old["cx"]], [0.0, old["fy"], old["cy"]], [0.0, 0.0, 1.0]], rtol=0.0, atol=0.0
         )

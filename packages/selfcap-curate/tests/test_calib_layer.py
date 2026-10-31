@@ -21,7 +21,7 @@ from selfcap_curate.factory import QuestBlock
 from selfcap_curate.records import CatalogHands, ExoFit, GyroFit, OakDetections, OakFit, PhoneDetections, SelfcapLayout, write_sync
 
 
-def test_writer_uses_episode_override_and_aligned_oak_pose_without_hands(tmp_path: Path) -> None:
+def test_writer_uses_episode_override_and_fitted_oak_mount_without_hands(tmp_path: Path) -> None:
     sync = fixture_sync()
     sync = replace(sync, offsets_ms={"quest_pose": 1000.0}, exo_fit={"phone": ExoFit(None, "test")})
     raw = CatalogHands(
@@ -51,8 +51,12 @@ def test_writer_uses_episode_override_and_aligned_oak_pose_without_hands(tmp_pat
         if str(c.entity_path) == "/world/rig_00/cam_00" and "Transform3D:translation" in c.to_record_batch().schema.names
     )
     np.testing.assert_allclose(transform.column("Transform3D:translation")[0].as_py()[0], [0.2, 0.0, 0.0])
-    pose = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/world/rig_01" and not c.is_static)
-    assert pose.column("video_time").cast("int64").to_pylist() == [1_000_000_000, 2_000_000_000]
+    # The fitted OAK mount is one static transform hanging the OAK rig on the Quest's frame (no per-frame track).
+    mount = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/world/rig_01" and "Transform3D:parent_frame" in c.to_record_batch().schema.names)
+    assert mount.num_rows == 1
+    assert mount.column("Transform3D:parent_frame")[0].as_py()[0].startswith("tf#/world/rig_")
+    assert mount.column("oak_mount_source")[0].as_py() == ["fitted"]
+    assert not any(str(c.entity_path) == "/world/rig_01" and not c.is_static for c in chunks)
     prop = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/__properties/calib")
     assert prop.column("exo_flagged")[0].as_py() == [1]
 
@@ -117,15 +121,16 @@ def test_failed_links_keep_oak_and_quest_on_their_physical_rigs(tmp_path: Path) 
         "failed",
         SessionCalibration("failed", {}),
         OakFit(),
-        QuestBlock({}, {"0": np.eye(4)}, "healthy"),
+        QuestBlock({}, {"0": np.eye(4)}, "faulty-left-borrowed-cam50"),  # a borrowed transform is the calib layer's to write
         {"rgb_T_left": np.eye(4), "rgb_T_right": np.eye(4)},
     )
     output = tmp_path / "failed.rrd"
     write_calib_layer(output, state, replace(session_episode(sync, raw, np.empty(0), np.empty((0, 3))), layout=SelfcapLayout(3, 4, ("A", "B", "C"))))
     entities = {str(chunk.entity_path) for chunk in RrdReader(output).stream()}
-    assert "/world/rig_03/cam_01" in entities
-    assert "/world/rig_03/cam_02" in entities
     assert "/world/rig_04/cam_00" in entities
+    # OAK stereo is a factory fact: the base layer writes it, the calib layer must not compete with it.
+    assert "/world/rig_03/cam_01" not in entities
+    assert "/world/rig_03/cam_02" not in entities
     assert "/world/rig_00/cam_01" not in entities
 
 
@@ -146,15 +151,15 @@ def layer_case():
 
 
 @pytest.mark.parametrize("flag", [None, "quest_unsynced_kept_as_cut", "quest_pose_unsynced"])
-def test_unsynced_quest_has_no_oak_track(tmp_path: Path, layer_case, flag) -> None:
+def test_unsynced_quest_writes_no_fitted_oak_mount(tmp_path: Path, layer_case, flag) -> None:
     state, motion = layer_case
     motion = replace(motion, sync=replace(motion.sync, flags=[] if flag is None else [flag]))
     path = tmp_path / "layer.rrd"
     write_calib_layer(path, state, replace(motion, layout=SelfcapLayout(3, 4, ("A", "B", "C"))))
     chunks = list(RrdReader(path).stream())
-    track = [c for c in chunks if str(c.entity_path) == "/world/rig_03" and not c.is_static]
+    mount = [c for c in chunks if str(c.entity_path) == "/world/rig_03" and "Transform3D:parent_frame" in c.to_record_batch().schema.names]
     prop = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/__properties/calib")
-    assert bool(track) == (flag is None)
+    assert bool(mount) == (flag is None)  # an unsynced Quest leaves the base layer's nominal mount in place
     assert prop.column("oak_posed")[0].as_py() == [flag is None]
 
 

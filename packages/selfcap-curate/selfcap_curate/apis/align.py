@@ -3,12 +3,13 @@
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dataforge.datasets.selfcap import read_hand_poses, write_coco133_layer
 from dataforge.schema import CAPTURE_TIMELINE, video_path
 from dataforge.timing import SequenceTimer
 from simplecv.catalog_video import read_catalog_videos
 
 from selfcap_curate.apis import open_session, session_output
-from selfcap_curate.catalog_io import CATALOG_URL, SessionVideos, open_segment, read_catalog_hands, read_episode, read_session_clock
+from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, SessionVideos, open_segment, read_catalog_hands, read_episode, read_session_clock
 from selfcap_curate.detection_io import write_detections_layer
 from selfcap_curate.episode_links import measure_links
 from selfcap_curate.hands_gpu import detect_episode, pose_models
@@ -33,12 +34,15 @@ class Config:
     """Optional text file, one segment id or unprefixed key per line."""
     catalog_url: str = CATALOG_URL
     """Catalog containing these fresh bases; never registered or swapped here."""
+    dataset: str = DATASET_NAME
+    """Dataset on ``catalog_url`` that holds the bases (with their ``gt`` layer)."""
 
 
 def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
     """Measure, detect, fit and patch one selected session without raw reads."""
     _, keys, dataset = open_session(
-        config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=(config.base_dir,), source=config.base_dir
+        config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=(config.base_dir,), source=config.base_dir,
+        dataset=config.dataset,
     )
     timer = SequenceTimer()
     with session_output(config.output_dir) as output:
@@ -75,6 +79,9 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
             record = records[key.key]
             with timer.stage(f"{key}/write_patch"):
                 patch(config.base_dir / key.rrd_name, None, record, output_path=output / key.rrd_name, mode="fresh")
+                hands, shift_ns = read_hand_poses(output / key.rrd_name) if (output / key.rrd_name).is_file() else ({}, 0)
+                if hands:  # the gt layer is re-derived from the aligned base, so it is on the aligned clock by construction
+                    write_coco133_layer(hands, shift_ns, output / "gt" / key.rrd_name, record.episode_key.segment)
                 write_sync(output / key.sync_name, record)
                 write_detections_layer(output / "sapiens2" / key.rrd_name, record, layout, episode.detections)
     print("ALIGN_TIME", timer.stage_s, flush=True)

@@ -160,6 +160,12 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
         Only the base layer embeds a blueprint (``blueprint``, else the dataset's default) and Rerun's own
         ``RecordingInfo``; a derived layer stacks onto it under the same recording id.
+
+        TODO(dataforge): decide whether to keep embedding. A catalog registers only the first recording of an rrd
+        (Rerun 0.41 ``DatasetEntry.register``), so it never sees this blueprint; ``apis/register.py`` publishes the
+        layouts it does use. The embedded copy serves only a base opened as a local file, and some datasets embed a
+        per-sequence layout that differs from the registered one (SelfCap: base-only vs. all layers; MAMMA: one
+        sequence's rig). The alternative: stop embedding and save an ``.rbl`` beside local files.
         """
         base: bool = layer == paths.BASE_LAYER
         return writing.atomic_recording(

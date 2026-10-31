@@ -6,7 +6,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-from dataforge.quest_joint_poses import read_quest_joint_poses
+from dataforge.quest_joint_poses import QuestJointPoses
 from jaxtyping import Bool, Float, Float32, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation, Slerp
@@ -37,15 +37,21 @@ class HandOrientations:
     """Per-hand raw orientation availability; derived frames are never called measured."""
 
 
-def read_orientations(directory: Path, times: Float64[ndarray, "n"], offset_ms: float) -> HandOrientations:
-    """Read optional raw rotations and positions; xyz-only hands use position-derived frames."""
+def read_orientations(hands: dict[str, QuestJointPoses], times: Float64[ndarray, "n"], offset_ms: float) -> HandOrientations:
+    """Sample the Quest joint poses (raw stamps, e.g. ``read_segment_hand_poses``) on the fit clock.
+
+    Rotations are optional per hand; a position-only or absent hand is marked ``none`` and uses position-derived frames.
+    """
     samples = quest_sample_times(times, offset_ms)[1]
     positions = np.full((len(times), 2, 26, 3), np.nan)
     rotations = np.tile(np.eye(3), (len(times), 2, 26, 1, 1))
     valid = np.zeros((len(times), 2, 26), dtype=bool)
     sources: list[Literal["quest", "none"]] = []
     for side, name in enumerate(("left", "right")):
-        raw = read_quest_joint_poses(directory / f"{name}_hand_poses.csv")
+        raw = hands.get(name)
+        if raw is None:
+            sources.append("none")
+            continue
         sources.append("none" if raw.orientations is None else "quest")
         stamps = raw.times_ns.astype(np.float64) / 1e9
         right = np.clip(np.searchsorted(stamps, samples), 1, len(stamps) - 1)

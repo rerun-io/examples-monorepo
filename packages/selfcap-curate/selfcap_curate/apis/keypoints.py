@@ -94,7 +94,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
             if len(cameras) < 2:
                 print("KEYPOINTS_SKIP", key, "fewer than two calibrated and synced phones", flush=True)
             else:
-                ego: tuple[EgoCamera, ...] = tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig))
+                ego: tuple[EgoCamera, ...] = tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig, segment.layout.quest_rig))
                 quest: list[CenterTrack] = read_quest_centers(calibration, dataset, segment.id, segment.layout.quest_rig)
                 videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time", sync=sync)
                 centers: tuple[Chunk, ...] = tuple(camera_center_chunks(cameras, ego, quest, {phone: video.t_ns for phone, video in videos.items()}))

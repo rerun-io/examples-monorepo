@@ -18,6 +18,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dataforge import paths, schema
+from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.datasets.selfcap import exo_devices, log_quest_hands, raw_calibration_chunks, read_quest_hands
 from dataforge.schema import CAPTURE_TIMELINE
 from dataforge.video_encoding import read_video_start_ns
@@ -199,13 +200,16 @@ def patch(
         schema.gyro_path(oak_rig, 0): sync_record.offsets_ms.get("oak_imu"),
         schema.accel_path(oak_rig, 0): sync_record.offsets_ms.get("oak_imu"),
         schema.rig_path(oak_rig + 1): pose_ms,
-        schema.coco133_xyz_path(): pose_ms - HAND_LATENCY_MS,
+        schema.coco133_xyz_path(): pose_ms - HAND_LATENCY_MS,  # bases written before the joint poses were ingested
+        quest_hand_path("left"): pose_ms - HAND_LATENCY_MS,
+        quest_hand_path("right"): pose_ms - HAND_LATENCY_MS,
     }
+    hand_entities: set[str] = {schema.coco133_xyz_path(), quest_hand_path("left"), quest_hand_path("right")}
     if unmapped := {entity for entity in present if entity.endswith("/pinhole/video")} - videos.keys():
         raise ValueError(f"{served_base}: video {sorted(unmapped)[0]} has no raw-file mapping")
     if aligning and (unknown := present - videos.keys() - csv_offsets.keys()):
         raise ValueError(f"{served_base}: unknown temporal entity {sorted(unknown)}")
-    has_hands: bool = schema.coco133_xyz_path() in present
+    has_hands: bool = bool(hand_entities & present)
     if not has_hands and raw_episode_dir is None:
         raise ValueError("fresh base requires ingested Quest hands")
     plan: dict[str, Retime] = {}
@@ -222,7 +226,7 @@ def patch(
             quest_delta_ns if name.startswith("quest_") else 0,
         )
     for entity, offset_ms in csv_offsets.items():
-        if entity in present and (aligning or entity == schema.coco133_xyz_path()):
+        if entity in present and (aligning or entity in hand_entities):
             plan[entity] = Retime(0, CAPTURE_TIMELINE, round((offset_ms or 0.0) * 1e6))
 
     def migrate(chunk: Chunk) -> Iterable[Chunk]:

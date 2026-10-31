@@ -17,7 +17,7 @@ from numpy import ndarray
 from serde import serde
 
 from dataforge.logging_toolkit import ImuChannel
-from dataforge.quest_joint_poses import QuestJointPoses, read_quest_joint_poses
+from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, read_quest_joint_poses
 from dataforge.records import read_csv_columns, read_json
 
 BROWN_CONRADY_COEFFICIENTS: int = 14
@@ -116,6 +116,8 @@ class CameraCalibration:
     """``(cx, cy)`` in pixels."""
     distortion_coefficients: Float64[ndarray, "14"] | None
     """Brown-Conrady coefficients, or None when the raw calibration declares none."""
+    available: bool
+    """Whether the lens values were measured. The iPhones write ``False`` with a 700 px fallback focal."""
 
 
 
@@ -147,29 +149,39 @@ class QuestHands:
 
 
 
-def read_quest_hands(quest_dir: Path) -> QuestHands:
-    """Read 26-joint CSVs (xyz or xyz+xyzw per joint) on their raw clock.
+COCO133_HAND_BASE: dict[str, int] = {"left": 91, "right": 112}
+"""First COCO-133 keypoint id of each hand (21 joints each)."""
+COCO133_FROM_OPENXR: list[int] = [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 17, 18, 19, 20, 22, 23, 24, 25]
+"""The 21 of 26 OpenXR joints COCO-133 keeps, in COCO order: wrist, then each finger without its metacarpal (palm dropped)."""
 
-    The upstream CSV layout is timestamp followed by 26 joint records in Quest
-    order. An all-zero row is the CSV's "hand not tracked" and becomes NaN; no jump,
-    freeze, or view-cone filtering is applied at ingest (that is curation).
-    Missing files are warned about and leave that hand absent.
-    """
-    tracks: list[tuple[int, Int64[ndarray, "n"], Float32[ndarray, "n 21 3"]]] = []
-    mapping: list[int] = [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 17, 18, 19, 20, 22, 23, 24, 25]
-    for side, base in (("left", 91), ("right", 112)):
+
+def read_quest_joint_hands(quest_dir: Path) -> dict[str, QuestJointPoses]:
+    """Both hands' 26-joint CSVs as recorded; an unreadable file is warned about and leaves that hand out."""
+    hands: dict[str, QuestJointPoses] = {}
+    for side in QUEST_HAND_SIDES:
         source: Path = quest_dir / f"{side}_hand_poses.csv"
         if not os.access(source, os.R_OK):
             print(f"  warning: unreadable Quest hands {source}")
             continue
-        raw: QuestJointPoses = read_quest_joint_poses(source)
-        tracks.append((base, raw.times_ns, raw.positions[:, mapping]))
-    times_ns: Int64[ndarray, "n_samples"] = np.unique(np.concatenate([track[1] for track in tracks])) if tracks else np.empty(0, dtype=np.int64)
+        hands[side] = read_quest_joint_poses(source)
+    return hands
+
+
+def coco133_hands(hands: dict[str, QuestJointPoses]) -> QuestHands:
+    """The COCO-133 view of the Quest hands: 21 joints per hand on the union of both hands' stamps, NaN elsewhere."""
+    times_ns: Int64[ndarray, "n_samples"] = (
+        np.unique(np.concatenate([hand.times_ns for hand in hands.values()])) if hands else np.empty(0, dtype=np.int64)
+    )
     positions: Float32[ndarray, "n_samples 133 3"] = np.full((len(times_ns), 133, 3), np.nan, dtype=np.float32)
-    for base, stamps, points in tracks:
-        positions[np.searchsorted(times_ns, stamps), base : base + 21] = points
+    for side, hand in hands.items():
+        base = COCO133_HAND_BASE[side]
+        positions[np.searchsorted(times_ns, hand.times_ns), base : base + 21] = hand.positions[:, COCO133_FROM_OPENXR]
     return QuestHands(times_ns=times_ns, positions_xyz=positions)
 
+
+def read_quest_hands(quest_dir: Path) -> QuestHands:
+    """The COCO-133 view straight from the CSVs, for bases written before the joint poses were ingested."""
+    return coco133_hands(read_quest_joint_hands(quest_dir))
 
 
 def read_imu_csv(csv_path: Path) -> tuple[ImuChannel, ImuChannel]:
@@ -217,12 +229,19 @@ def read_head_poses(csv_path: Path) -> HeadPoses:
 
 
 
-def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
-    """Read a device ``calibration.json`` into intrinsics keyed by ``positional_layout``.
+def crop_shift_px(intrinsic: Intrinsic) -> float:
+    """Rows cut from the top when a camera records a centred, same-width crop of its sensor.
 
-    Extrinsics are deliberately not applied here: exo files ship an empty list, and the
-    ego/Quest ones are in unvalidated units (the OAK baseline reads as 7.5,
-    i.e. centimetres). TODO(dataforge): validate and log them as ``rig_T_cam``.
+    The Quest sensors are 1280x1280 and the videos 1280x960, so the factory ``cy`` is 160 px too low for the video.
+    """
+    sensor, capture = intrinsic.sensor_info.pixel_array_size, intrinsic.capture_resolution
+    return (sensor.height - capture.height) / 2.0 if sensor.width == capture.width and sensor.height > capture.height else 0.0
+
+
+def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
+    """Read a device ``calibration.json`` into intrinsics keyed by ``positional_layout``, with ``cy`` in video pixels.
+
+    Extrinsics are read separately (``oak_stereo``, ``quest_left_T_right``); exo files ship none.
 
     Args:
         calibration_path: A ``calibration.json`` from ``ego/``, ``exo/<Device>/``, or ``quest/``.
@@ -245,10 +264,89 @@ def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
             width=resolution.width,
             height=resolution.height,
             focal_length_xy=np.asarray([lens.focal_length_x, lens.focal_length_y], dtype=np.float64),
-            principal_point_xy=np.asarray([lens.principal_point_x, lens.principal_point_y], dtype=np.float64),
+            principal_point_xy=np.asarray([lens.principal_point_x, lens.principal_point_y - crop_shift_px(entry)], dtype=np.float64),
             distortion_coefficients=distortion,
+            available=lens.available,
         )
     return cameras
+
+
+def assumed_phone_lens(width: int, height: int) -> CameraCalibration:
+    """An iPhone's lens until calibration fits one: a centred pinhole with no distortion and a 90 deg horizontal field of view
+    (focal = width / 2). The phones record no lens values, so this is an assumption, tagged as one."""
+    return CameraCalibration(
+        width=width, height=height, focal_length_xy=np.array([width / 2, width / 2]), principal_point_xy=np.array([width / 2, height / 2]),
+        distortion_coefficients=None, available=False,
+    )
+
+
+def factory_transform(rotation: Float64[ndarray, "3 3"], translation: Float64[ndarray, "3"]) -> Float64[ndarray, "4 4"]:
+    """Rigid homogeneous transform from a factory rotation and translation."""
+    matrix: Float64[ndarray, "4 4"] = np.eye(4)
+    matrix[:3, :3], matrix[:3, 3] = rotation, translation
+    return matrix
+
+
+def oak_stereo(calibration: FactoryCalibration) -> dict[str, Float64[ndarray, "4 4"]]:
+    """RGB-relative OAK stereo transforms (``rgb_T_left``, ``rgb_T_right``); the factory file is in centimetres."""
+    ext = {e.type: e for e in calibration.extrinsics}
+    if not {"left_to_right", "left_to_rgb"} <= ext.keys():
+        return {}
+    right, rgb = ext["left_to_right"], ext["left_to_rgb"]
+    rgb_T_left = np.linalg.inv(factory_transform(rgb.R, rgb.T * 0.01))
+    return {"rgb_T_left": rgb_T_left, "rgb_T_right": rgb_T_left @ factory_transform(right.R, right.T * 0.01)}
+
+
+# Prior for the OAK mount on the headset: the RGB camera (RDF) in the Quest left-eye frame, as (healthy, camera-50) pairs.
+# The mount belongs to the OAK's bracket, so the prior is keyed by OAK device id. Medians of the fitted mounts in
+# selfcap-post-ep1-v2 (2026-10-30, 678 sessions); spread about each prior is p50 0.4-1.0 cm / 0.5-1.5 deg. The camera-50
+# column is for headsets whose broken left camera borrows camera 50: their eye track's frame sits about 175 deg about x.
+OAK_MOUNT_OTHER: tuple[Float64[ndarray, "4 4"], Float64[ndarray, "4 4"]] = (
+    np.array([[0.9996, -0.0131, -0.0230, 0.0509], [0.0212, 0.9161, 0.4004, 0.0408], [0.0158, -0.4008, 0.9160, -0.0513], [0, 0, 0, 1.0]]),
+    np.array([[0.9996, -0.0036, -0.0271, 0.0510], [-0.0168, -0.8630, -0.5048, -0.0479], [-0.0216, 0.5051, -0.8628, -0.0223], [0, 0, 0, 1.0]]),
+)
+"""380 healthy / 59 camera-50 sessions on OAKs C1F3CFD2 and F1FBBCD6, and the fallback for an OAK no fit has seen."""
+OAK_MOUNTS: dict[str, tuple[Float64[ndarray, "4 4"], Float64[ndarray, "4 4"]]] = {
+    "OAK - 14442C10D1FCD7D200": (  # 214 healthy / 25 camera-50 sessions; sits about 4 cm from the others, tilted 7 deg more
+        np.array([[0.9989, -0.0328, 0.0346, 0.0306], [0.0108, 0.8627, 0.5056, 0.0671], [-0.0464, -0.5047, 0.8621, -0.0144], [0, 0, 0, 1.0]]),
+        np.array([[0.9995, -0.0069, 0.0324, 0.0333], [0.0123, -0.8297, -0.5581, -0.0728], [0.0307, 0.5581, -0.8292, -0.0414], [0, 0, 0, 1.0]]),
+    ),
+}
+
+
+def nominal_oak_mount(oak: FactoryCalibration, quest: FactoryCalibration) -> Float64[ndarray, "4 4"] | None:
+    """Prior Quest-left-eye → OAK-RGB mount for this OAK and headset layout, or None for a layout no fit has seen."""
+    healthy, camera_50 = OAK_MOUNTS.get(oak.device_id, OAK_MOUNT_OTHER)
+    if quest_left_T_right(quest) is not None:
+        return healthy
+    if any(c.camera_id == "50" for c in quest.intrinsics):
+        return camera_50
+    return None
+
+
+def quest_mesh_frame(oak: FactoryCalibration, quest: FactoryCalibration) -> Float64[ndarray, "4 4"] | None:
+    """Where the Quest mesh (built in a healthy left-eye frame) sits in this headset's eye-track frame.
+
+    Identity for a healthy headset. A camera-50 headset's eye frame is turned about 175 deg; both OAK priors describe the
+    same physical mount, so ``camera50_T_healthy = camera_50 @ inv(healthy)``. None for a layout no fit has seen.
+    """
+    healthy, camera_50 = OAK_MOUNTS.get(oak.device_id, OAK_MOUNT_OTHER)
+    if quest_left_T_right(quest) is not None:
+        return np.eye(4)
+    if any(c.camera_id == "50" for c in quest.intrinsics):
+        return camera_50 @ np.linalg.inv(healthy)
+    return None
+
+
+def quest_left_T_right(calibration: FactoryCalibration) -> Float64[ndarray, "4 4"] | None:
+    """The right camera in the left camera's frame, when the headset is healthy: both cameras measured and both
+    ``device_to_*`` extrinsics present. Faulty headsets return None; their fix borrows from another session."""
+    ext = {e.type: e for e in calibration.extrinsics}
+    measured = {c.positional_layout for c in calibration.intrinsics if c.lens_intrinsics.available}
+    if not ({"device_to_left", "device_to_right"} <= ext.keys() and {"left", "right"} <= measured):
+        return None
+    left, right = ext["device_to_left"], ext["device_to_right"]
+    return np.linalg.inv(factory_transform(left.R.T, left.T)) @ factory_transform(right.R.T, right.T)
 
 
 

@@ -16,6 +16,7 @@ import rerun as rr
 import torch
 from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
 from dataforge.logging_toolkit import time_column
+from dataforge.oak_mount import read_oak_track
 from dataforge.schema import coco133_uv_projected_path, coco133_xyz_path, pinhole_path, rig_path
 from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
@@ -153,27 +154,14 @@ def project_ego(camera: EgoCamera, times_s: Float64[ndarray, "n"], xyz: Float32[
     return uv
 
 
-def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str, oak_rig: int) -> list[EgoCamera]:
-    """The OAK cameras whose pose the calibration layer gives: one query for the rig pose track and stereo, one for the lenses."""
+def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str, oak_rig: int, quest_rig: int) -> list[EgoCamera]:
+    """The OAK cameras of a fitted OAK mount: world poses are the Quest track times the mount, plus stereo and lenses."""
     rig = rig_path(oak_rig)
     cams = {cam: f"{rig}/cam_{cam:02d}" for cam in (0, 1, 2)}
-    view = calibration.filter_segments(segment)
-    if not any(item.entity_path == rig and item.field == "mat3x3" and not item.is_static for item in catalog_components(view.schema())):
-        return []
-    poses = (
-        view
-        .filter_contents([rig, *cams.values()])
-        .reader(index="video_time")
-        .select("video_time", f"{rig}:Transform3D:mat3x3", f"{rig}:Transform3D:translation")
-        .to_arrow_table()
-    )
-    poses = poses.filter(poses[f"{rig}:Transform3D:mat3x3"].is_valid())
-    if not len(poses):
-        return []  # no calibrated OAK mount for this episode
-    times_s: Float64[ndarray, "p"] = poses["video_time"].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64) * 1e-9
-    world_T_rig: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(poses), 1, 1))
-    world_T_rig[:, :3, :3] = np.asarray(poses[f"{rig}:Transform3D:mat3x3"].to_pylist(), dtype=np.float64).reshape(-1, 3, 3).transpose(0, 2, 1)
-    world_T_rig[:, :3, 3] = np.asarray(poses[f"{rig}:Transform3D:translation"].to_pylist(), dtype=np.float64).reshape(-1, 3)
+    track = read_oak_track(calibration.filter_segments(segment), rig, rig_path(quest_rig))
+    if track is None:
+        return []  # no fitted OAK mount for this episode
+    times_s, world_T_rig = track
     static = calibration.filter_segments(segment).filter_contents(list(cams.values())).reader(index=None).to_arrow_table()
     lenses = base.filter_segments(segment).filter_contents([f"{path}/pinhole" for path in cams.values()]).reader(index=None).to_arrow_table()
 
