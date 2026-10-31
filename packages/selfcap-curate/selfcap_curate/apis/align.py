@@ -9,7 +9,7 @@ from dataforge.timing import SequenceTimer
 from simplecv.catalog_video import read_catalog_videos
 
 from selfcap_curate.apis import open_session, session_output
-from selfcap_curate.catalog_io import CATALOG_URL, SessionVideos, open_segment, read_catalog_hands, read_episode, read_session_clock
+from selfcap_curate.catalog_io import CATALOG_URL, DATASET_NAME, SessionVideos, open_segment, read_catalog_hands, read_episode, read_session_clock
 from selfcap_curate.detection_io import write_detections_layer
 from selfcap_curate.episode_links import measure_links
 from selfcap_curate.hands_gpu import detect_episode, pose_models
@@ -34,12 +34,15 @@ class Config:
     """Optional text file, one segment id or unprefixed key per line."""
     catalog_url: str = CATALOG_URL
     """Catalog containing these fresh bases; never registered or swapped here."""
+    dataset: str = DATASET_NAME
+    """Dataset on ``catalog_url`` that holds the bases (with their ``gt`` layer)."""
 
 
 def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
     """Measure, detect, fit and patch one selected session without raw reads."""
     _, keys, dataset = open_session(
-        config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=(config.base_dir,), source=config.base_dir
+        config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=(config.base_dir,), source=config.base_dir,
+        dataset=config.dataset,
     )
     timer = SequenceTimer()
     with session_output(config.output_dir) as output:

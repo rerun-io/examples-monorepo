@@ -21,6 +21,29 @@ def test_align_refuses_empty_invalid_or_mixed_session(segments: tuple[str, ...],
     assert not (tmp_path / "out").exists()
 
 
+def test_align_reads_the_named_catalog_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[tuple[str, str]] = []
+
+    class Client:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def get_dataset(self, name: str) -> None:
+            opened.append((self.url, name))
+            raise LookupError("stop after the catalog lookup")
+
+    monkeypatch.setattr(api_inputs, "CatalogClient", Client)
+    (tmp_path / "base").mkdir()
+    (tmp_path / "base" / "selfcap__2025-12-03__d31bf1da__ep001.rrd").write_bytes(b"")
+    config = Config(
+        base_dir=tmp_path / "base", output_dir=tmp_path / "out", segment_ids=("selfcap__2025-12-03__d31bf1da__ep001",),
+        catalog_url="rerun+http://dgx-spark:51235", dataset="selfcap-walkthrough-d31",
+    )
+    with pytest.raises(LookupError):
+        main(config)
+    assert opened == [("rerun+http://dgx-spark:51235", "selfcap-walkthrough-d31")]
+
+
 def test_align_key_file_cannot_write_into_source_tree(tmp_path: Path) -> None:
     keys = tmp_path / "keys.txt"
     keys.write_text("selfcap__2025-12-30__65d00748__ep001\n")

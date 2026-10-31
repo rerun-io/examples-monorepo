@@ -37,6 +37,7 @@ def open_session(
     source: Path | None = None,
     new_directory: bool = True,
     rate: float | None = None,
+    dataset: str = DATASET_NAME,
 ) -> tuple[str, tuple[EpisodeKey, ...], DatasetEntry]:
     """Shared selection/output preflight, retaining session and per-episode publication guards."""
     keys = episode_keys(ids, key_file)
@@ -52,4 +53,4 @@ def open_session(
                 raise FileExistsError(output / key.rrd_name)
     if new_directory and (output.exists() or output.is_symlink()):
         raise FileExistsError(output)
-    return session, keys, CatalogClient(catalog_url).get_dataset(DATASET_NAME)
+    return session, keys, CatalogClient(catalog_url).get_dataset(dataset)
