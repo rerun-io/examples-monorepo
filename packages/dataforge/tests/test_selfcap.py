@@ -12,7 +12,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 
-from dataforge import schema
+from dataforge import schema, transports
 from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.datasets.selfcap import (
     DEVICE_MESHES,
@@ -114,12 +114,20 @@ def test_discover_pairs_each_identity_with_its_episode_directory(corpus: Path) -
     assert pair[1] == corpus / "cut" / "2025-12-20" / SESSION_A / "episodes" / "episode-009"
 
 
-def test_download_verifies_the_local_corpus(corpus: Path, tmp_path: Path) -> None:
+def test_download_fetches_the_pinned_cut_tree_then_verifies_it(corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fetches: list[tuple[str, list[str], Path, str]] = []
+    monkeypatch.setattr(transports, "hf_fetch", lambda repo, *, allow_patterns, local_dir, revision: fetches.append((repo, list(allow_patterns), local_dir, revision)))
     SelfcapConfig(root=corpus).setup().download()
+    assert fetches == [("pablovela5620/selfcap-hard26-raw", ["cut/**"], corpus, "84a01e79ae35aee923e6dd5dedc91cd695196445")]
     empty_root: Path = tmp_path / "empty"
     empty_root.mkdir()
     with pytest.raises(FileNotFoundError, match="missing"):
         SelfcapConfig(root=empty_root).setup().download()
+
+
+def test_config_refuses_a_floating_revision() -> None:
+    with pytest.raises(ValueError, match="full commit sha"):
+        SelfcapConfig(revision="main")
 
 
 def test_exo_devices_requires_video_and_calibration_in_one_directory(tmp_path: Path) -> None:

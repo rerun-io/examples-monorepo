@@ -73,7 +73,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
-from rerun.chunk import Chunk, ChunkStore, RrdReader
+from rerun.chunk import Chunk, RrdReader
 from rerun.encodings import EntityPathLike
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
@@ -104,6 +104,11 @@ from dataforge.logging_toolkit import (
 )
 from dataforge.records import read_csv_columns, read_json
 from dataforge.video_encoding import read_video_start_ns
+
+REPO_ID: str = "pablovela5620/selfcap-hard26-raw"
+"""Private Hub mirror of the raw tree; for now the 26-episode hard set, byte-identical to the NAS ``cut`` copies."""
+REVISION: str = "84a01e79ae35aee923e6dd5dedc91cd695196445"
+"""Pinned ``REPO_ID`` commit."""
 
 DATE_DIR_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 """Capture-day directories under the subset; the loose ``manifest.json`` siblings do not match."""
@@ -181,8 +186,8 @@ def log_quest_hand_poses(recording: rr.RecordingStream, hands: dict[str, QuestJo
 
 def read_hand_poses(base_rrd: Path) -> tuple[dict[str, QuestJointPoses], int]:
     """The joint poses a base layer holds (on ``capture_time``), and its hands' ``video_time`` shift."""
-    entities = {quest_hand_path(side) for side in QUEST_HAND_SIDES}
-    store = ChunkStore.from_chunks([chunk for chunk in RrdReader(base_rrd).stream() if str(chunk.entity_path) in entities])
+    # The footer index loads only the hand chunks; streaming the file would read every video sample too.
+    store = RrdReader(base_rrd).store().stream().filter(content=[quest_hand_path(side) for side in QUEST_HAND_SIDES]).collect()
     hands: dict[str, QuestJointPoses] = {}
     shifts: set[int] = set()
     for side in QUEST_HAND_SIDES:
@@ -369,10 +374,17 @@ class SelfcapConfig(DataforgeDatasetConfig):
 
     _target: type = field(default_factory=lambda: SelfcapDataset)
     """Dataset class instantiated by ``setup()``."""
-    root: Path = Path("/mnt/nas/datasets/exoego-self-collected/main")
-    """Corpus root holding the ``cut`` / ``good`` / ``sample`` subsets."""
+    root: Path = field(default_factory=lambda: paths.raw_root() / "selfcap")
+    """Corpus root holding the ``cut`` subset; ``download`` fills it from the Hub."""
     subset: str = "cut"
     """Subset directory to convert; only ``cut`` holds per-episode captures."""
+    repo_id: str = REPO_ID
+    """Private Hub dataset mirroring the raw ``cut/<date>/<session>/...`` tree."""
+    revision: str = REVISION
+    """Pinned Hub commit; a deliberate override must be a full lowercase commit SHA."""
+
+    def __post_init__(self) -> None:
+        transports.require_commit_sha(self.revision)
 
 
 def exo_devices(episode_dir: Path) -> list[str]:
@@ -658,7 +670,8 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         return pairs
 
     def download(self) -> None:
-        """Verify the local corpus; SelfCap has no upstream fetch."""
+        """Fetch the raw ``cut`` tree from the pinned Hub mirror into ``root``, then verify it."""
+        transports.hf_fetch(self.config.repo_id, allow_patterns=[f"{self.config.subset}/**"], local_dir=self.config.root, revision=self.config.revision)
         missing: list[str] = transports.local_verify(self.config.root, required=[f"{self.config.subset}/*/*/episodes"])
         if missing:
             raise FileNotFoundError(f"SelfCap corpus at {self.config.root} is missing: {', '.join(missing)}")

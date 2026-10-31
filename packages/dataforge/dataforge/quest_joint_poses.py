@@ -63,16 +63,23 @@ def joint_poses_from_table(table: pa.Table, entity: str, index: str, joint_names
     translations, quaternions = f"{entity}:InstancePoses3D:translations", f"{entity}:InstancePoses3D:quaternions"
     rows = table.filter(pc.is_valid(table[translations])).sort_by(index)
     times = rows[index].combine_chunks().cast(pa.int64()).to_numpy()
-    positions = np.full((len(times), 26, 3), np.nan, dtype=np.float32)
     has_orientation = quaternions in rows.column_names and rows[quaternions].null_count < len(rows)
-    orientations = np.full((len(times), 26, 4), np.nan, dtype=np.float32) if has_orientation else None
-    for i, (xyz, quat) in enumerate(zip(rows[translations].to_pylist(),
-                                        rows[quaternions].to_pylist() if has_orientation else [None] * len(times), strict=True)):
-        if xyz:
-            positions[i] = np.asarray(xyz, dtype=np.float32).reshape(26, 3)
-            if orientations is not None and quat:
-                orientations[i] = np.asarray(quat, dtype=np.float32).reshape(26, 4)
+    positions = joint_rows(rows[translations], 3)
+    orientations = joint_rows(rows[quaternions], 4) if has_orientation else None
+    if orientations is not None:
+        orientations[np.isnan(positions).all(axis=(1, 2))] = np.nan  # an untracked sample has no orientation either
     return QuestJointPoses(times, positions, orientations, joint_names)
+
+
+def joint_rows(column: pa.ChunkedArray, width: int) -> Float32[ndarray, "n 26 width"]:
+    """One ``InstancePoses3D`` column as ``[n, 26, width]``; an empty or null batch (untracked) becomes a NaN row."""
+    batches = column.combine_chunks()
+    tracked = pc.fill_null(pc.list_value_length(batches), 0).to_numpy(zero_copy_only=False)
+    if not np.isin(tracked, (0, 26)).all():
+        raise ValueError(f"expected 26 joints or none per sample, found {sorted(set(tracked.tolist()) - {0, 26})}")
+    joints = np.full((len(tracked), 26, width), np.nan, dtype=np.float32)
+    joints[tracked == 26] = pc.list_flatten(pc.list_flatten(batches)).to_numpy(zero_copy_only=False).astype(np.float32).reshape(-1, 26, width)
+    return joints
 
 
 def read_segment_hand_poses(segment: DatasetEntry) -> dict[str, QuestJointPoses]:
