@@ -15,7 +15,7 @@ from serde import serde
 from serde.json import from_json
 
 from selfcap_curate import catalog_io
-from selfcap_curate.calibration_objective import ObjectiveShares, block_weights
+from selfcap_curate.calibration_objective import ObjectiveShares, label_weights
 from selfcap_curate.exo_calibration import BODY, BodyObservation, Camera, bundle, triangulate
 from selfcap_curate.exo_landmarks import Landmarks, read_landmarks
 from selfcap_curate.exo_refine import FocalSource, Refinement, RefinementProblem, predict_labels, select_labels, solve
@@ -330,11 +330,7 @@ def polish(inputs: Inputs, problem: RefinementProblem, model: Refinement, fold: 
     if objective is not None:
         repeats[:] = 1
         weights[:] = 1.0
-        views = np.array([label.view for label in problem.landmarks.labels], dtype=np.int64)
-        confidence = np.array([label.confidence for label in problem.landmarks.labels])
-        head = np.array([label.target_id.startswith('quest') for label in problem.landmarks.labels])
-        anchor_weights = np.repeat(block_weights(views, confidence * head, objective.headset)
-                                   + block_weights(views, confidence * ~head, objective.phones), 2) / 2.0
+        anchor_weights = np.repeat(label_weights(problem.landmarks.labels, objective), 2) / 2.0
 
     def anchors(candidate: dict[str, Camera]) -> Float64[ndarray, "a"]:
         ordered = tuple(candidate[str(i)] for i in range(len(model.cameras)))

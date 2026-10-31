@@ -9,7 +9,7 @@ from numpy import ndarray
 from scipy.optimize import OptimizeResult, least_squares
 from serde import serde
 
-from selfcap_curate.calibration_objective import ObjectiveShares, block_weights, robust_loss
+from selfcap_curate.calibration_objective import ObjectiveShares, block_weights, label_weights, robust_loss
 from selfcap_curate.exo_calibration import Camera
 from selfcap_curate.exo_landmarks import Landmarks
 from selfcap_curate.quest_fit import Correspondences
@@ -120,12 +120,7 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
         hand_views = np.concatenate([np.full(len(data.world), i, dtype=np.int64) for i, data in enumerate(problem.hands)])
         hand_confidence = np.ones(len(hand_views))
         hand_weights = block_weights(hand_views, hand_confidence, objective.hands)
-        label_views = np.array([label.view for label in problem.landmarks.labels], dtype=np.int64)
-        confidence = np.array([label.confidence for label in problem.landmarks.labels])
-        head = np.array([label.target_id.startswith('quest') for label in problem.landmarks.labels])
-        label_weights = block_weights(label_views, confidence * head, objective.headset)
-        label_weights += block_weights(label_views, confidence * ~head, objective.phones)
-        loss_weights = np.repeat(np.r_[hand_weights, label_weights], 2) / 2.0
+        loss_weights = np.repeat(np.r_[hand_weights, label_weights(problem.landmarks.labels, objective)], 2) / 2.0
 
 
     def unpack(values: Float64[ndarray, "p"]) -> tuple[Camera, ...]:

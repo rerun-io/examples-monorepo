@@ -1,12 +1,14 @@
 """Observation-count invariant robust objective blocks for exo calibration."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from serde import serde
+
+from selfcap_curate.exo_landmarks import Landmark
 
 
 @serde(deny_unknown_fields=True)
@@ -35,6 +37,15 @@ def block_weights(views: Int64[ndarray, "n"], confidence: Float64[ndarray, "n"],
         chosen = views == view
         output[chosen] = share / len(active) * confidence[chosen] / confidence[chosen].sum()
     return output
+
+
+
+def label_weights(labels: Sequence[Landmark], objective: ObjectiveShares) -> Float64[ndarray, "n"]:
+    """Headset and phone anchor blocks, each split equally between the observing views."""
+    views: Int64[ndarray, "n"] = np.array([label.view for label in labels], dtype=np.int64)
+    confidence: Float64[ndarray, "n"] = np.array([label.confidence for label in labels])
+    head = np.array([label.target_id.startswith('quest') for label in labels])
+    return block_weights(views, confidence * head, objective.headset) + block_weights(views, confidence * ~head, objective.phones)
 
 
 def robust_loss(weights: Float64[ndarray, "n"], kind: str = 'cauchy') -> Callable[[Float64[ndarray, "n"]], Float64[ndarray, "3 n"]]:

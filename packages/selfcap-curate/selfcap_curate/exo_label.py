@@ -243,8 +243,6 @@ def run_codex(args: list[str], prompt: str, env: dict[str, str], path: Path, log
 
 def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) -> Packet:
     """Decode a few facing frames per view from the base and initial camera solution."""
-    from dataforge.schema import video_path
-    from simplecv.catalog_video import read_catalog_videos
 
     from selfcap_curate.factory import optical_targets
     from selfcap_curate.hands_gpu import decode_frames
@@ -258,9 +256,7 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
     interp = Slerp(head_times, Rotation.from_quat(source.head_quaternions))
     phones = segment.layout.phones
     cameras = tuple(state.exo.phones[p].camera if p in state.exo.phones else None for p in phones)
-    entities = [video_path(i, 0) for i in range(len(phones))]
-    videos = (tuple(segment.videos[e] for e in entities) if segment.videos is not None else
-              read_catalog_videos(segment.dataset, segment.id, entities, 'capture_time'))
+    videos = tuple(catalog_io.read_phone_videos(segment).values())
     optical = optical_targets(state.quest)
     if not optical:
         raise ValueError('No resolved physical Quest RGB targets')
