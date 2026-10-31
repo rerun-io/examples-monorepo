@@ -506,6 +506,62 @@ def test_convert_keeps_each_video_container_start(tmp_path: Path, monkeypatch: p
     assert first_indices == {schema.cam_path(4, cam): 10 for cam in range(3)}
 
 
+def phone_clip_with_tap(target: Path) -> None:
+    """The AV1 fixture plus a 48 kHz mono Opus track: two seconds of silence with a 1 kHz tap from 1.0 to 1.2 s."""
+    import shutil
+    import subprocess
+
+    ffmpeg: str | None = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg absent")
+    tap: str = "aevalsrc='0.5*sin(2*PI*1000*t)*between(t,1,1.2)':s=48000:d=2"
+    subprocess.run(
+        [ffmpeg, "-nostdin", "-v", "error", "-i", str(FIXTURES / "av1_48f_192x160.mp4"), "-f", "lavfi", "-i", tap,
+         "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "libopus", str(target)],
+        check=True,
+    )
+
+
+def test_convert_logs_each_phone_sound_as_flac_and_loudness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The phone's sound is raw data, so the base keeps it: the track as FLAC (the 0.41 viewer cannot decode Opus) and
+    # its band loudness, both on the phone's own clock. Phones whose mp4 has no audio get neither.
+    import io
+
+    import av
+    import pyarrow as pa
+    import rerun.chunk as rrc
+
+    clip: Path = tmp_path / "phone_with_sound.mp4"
+    phone_clip_with_tap(clip)
+    tiger: str = EXO_DEVICES[1]
+    base: Path = convert_fixture_episode(tmp_path, monkeypatch, overrides={f"exo/{tiger}/{tiger}.mp4": clip})
+    reader: rrc.RrdReader = rrc.RrdReader(base)
+    batches: dict[str, list[pa.RecordBatch]] = {}
+    for chunk in reader.stream(store=reader.recordings()[0]):
+        batches.setdefault(str(chunk.entity_path), []).append(chunk.to_record_batch())
+
+    assert {entity for entity in batches if "/audio_" in entity} == {schema.audio_path(1, 0), schema.loudness_path(1, 0)}
+    (track,) = [batch for batch in batches[schema.audio_path(1, 0)] if "AssetAudio:blob" in batch.schema.names]
+    assert track.num_rows == 1
+    assert track.column("capture_time").equals(track.column(schema.TIMELINE))
+    assert track.column("AssetAudio:media_type").to_pylist() == [["audio/flac"]]
+    with av.open(io.BytesIO(bytes(track.column("AssetAudio:blob").to_pylist()[0][0]))) as flac:
+        stream = flac.streams.audio[0]
+        assert (stream.codec_context.name, stream.rate) == ("flac", 48_000)
+        assert sum(frame.samples for frame in flac.decode(stream)) == pytest.approx(96_000, abs=1_000)
+
+    loudness: pa.RecordBatch = pa.concat_batches([batch for batch in batches[schema.loudness_path(1, 0)] if "Scalars:scalars" in batch.schema.names])
+    assert loudness.column("capture_time").equals(loudness.column(schema.TIMELINE))
+    seconds: Float64[ndarray, "n"] = loudness.column("capture_time").cast(pa.int64()).to_numpy() / 1e9
+    level: Float64[ndarray, "n"] = np.array([row[0] for row in loudness.column("Scalars:scalars").to_pylist()])
+    assert np.diff(seconds) == pytest.approx(0.005)  # one level every 5 ms
+    assert level.min() >= 0.0  # dB over the phone's own floor
+    assert 1.0 <= seconds[np.argmax(level)] <= 1.2 and level.max() > 20.0
+    assert level[seconds < 0.9].max() < 3.0
+    styles = [batch for batch in batches[schema.loudness_path(1, 0)] if "SeriesLines:names" in batch.schema.names]
+    assert styles[0].column("SeriesLines:names").to_pylist() == [["Tiger"]]
+
+
 @pytest.mark.parametrize("contents", ["", "ts_ns,bad\n1,2\n", "ts_ns," + ",".join(f"j{i}" for i in range(78)) + "\n1,2\n"])
 def test_hand_reader_names_malformed_source(tmp_path: Path, contents: str) -> None:
     from dataforge.datasets.selfcap import read_quest_hands

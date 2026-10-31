@@ -205,9 +205,16 @@ def patch(
         quest_hand_path("right"): pose_ms - HAND_LATENCY_MS,
     }
     hand_entities: set[str] = {schema.coco133_xyz_path(), quest_hand_path("left"), quest_hand_path("right")}
+    # Each phone's sound is on the phone's own clock, like its video, so it takes the same offset.
+    sounds: dict[str, str] = {
+        entity: f"exo/{device}"
+        for rig, device in enumerate(devices)
+        for entity in (schema.audio_path(rig, 0), schema.loudness_path(rig, 0))
+        if entity in present
+    }
     if unmapped := {entity for entity in present if entity.endswith("/pinhole/video")} - videos.keys():
         raise ValueError(f"{served_base}: video {sorted(unmapped)[0]} has no raw-file mapping")
-    if aligning and (unknown := present - videos.keys() - csv_offsets.keys()):
+    if aligning and (unknown := present - videos.keys() - csv_offsets.keys() - sounds.keys()):
         raise ValueError(f"{served_base}: unknown temporal entity {sorted(unknown)}")
     has_hands: bool = bool(hand_entities & present)
     if not has_hands and raw_episode_dir is None:
@@ -225,6 +232,8 @@ def patch(
             offset,
             quest_delta_ns if name.startswith("quest_") else 0,
         )
+    for entity, stream in sounds.items():
+        plan[entity] = Retime(0, CAPTURE_TIMELINE if aligning else schema.TIMELINE, round((sync_record.offsets_ms.get(stream) or 0.0) * 1e6) if aligning else 0)
     for entity, offset_ms in csv_offsets.items():
         if entity in present and (aligning or entity in hand_entities):
             plan[entity] = Retime(0, CAPTURE_TIMELINE, round((offset_ms or 0.0) * 1e6))

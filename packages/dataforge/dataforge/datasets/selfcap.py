@@ -96,6 +96,7 @@ from dataforge.logging_toolkit import (
     ImuChannel,
     annotation_context,
     capture_column,
+    log_audio_track,
     log_imu,
     log_pose_track,
     log_rig_node,
@@ -749,6 +750,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 )
                 for camera in rig_plan.cameras:
                     num_frames = max(num_frames, self._log_camera(recording, camera))
+                if rig_plan.kind == "exo" and rig_plan.cameras:
+                    # The phone's own microphone, on the phone's clock; align moves it with the phone's video.
+                    log_audio_track(recording, rig_plan.cameras[0].video_path, rig_plan.rig, 0, label=rig_plan.name.split("-")[0])
             self._log_ego_imu(recording, plan)
             self._log_quest_pose(recording, plan)
             self._log_oak_mount_prior(recording, plan)

@@ -31,6 +31,7 @@ from simplecv.rerun_log_utils import log_pinhole
 from simplecv.rig import CameraKind, PeerSensorKind
 
 from dataforge import schema
+from dataforge.audio import AudioTrack, read_audio_track
 from dataforge.video_encoding import (
     RAW_PIXEL_FORMATS as RAW_PIXEL_FORMATS,
 )
@@ -380,6 +381,42 @@ def _log_sensor_node(
     """
     rr.log(node, IDENTITY_TRANSFORM if rig_T_sensor is None else rig_T_sensor, static=True, recording=recording)
     rr.log(node, rr.AnyValues(drop_untyped_nones=True, name=name, kind=kind, **extra), static=True, recording=recording)
+
+
+def log_audio_track(recording: rr.RecordingStream, video_path: Path, rig: int, audio: int, *, label: str) -> bool:
+    """Log an mp4's sound on ``audio_path``: the FLAC track at its first sample, and its loudness curve beneath.
+
+    Both land on ``video_time`` and ``capture_time``, from the file's own clock, like the video beside them.
+
+    Args:
+        recording: Destination recording stream.
+        video_path: The mp4 whose first audio stream is logged.
+        rig: Rig index owning the microphone.
+        audio: Microphone index within the rig.
+        label: Series name of the loudness curve (the device's short name).
+
+    Returns:
+        False when the file has no audio stream, in which case nothing is logged.
+    """
+    track: AudioTrack | None = read_audio_track(video_path)
+    if track is None:
+        return False
+    start: Int64[ndarray, "1"] = np.array([track.start_ns], dtype=np.int64)
+    rr.send_columns(
+        schema.audio_path(rig, audio),
+        indexes=[time_column(start), capture_column(start)],
+        columns=rr.AssetAudio.columns(blob=[track.flac], media_type=["audio/flac"]),
+        recording=recording,
+    )
+    rr.log(schema.loudness_path(rig, audio), rr.SeriesLines(names=[label], widths=[1.5]), static=True, recording=recording)
+    times: Int64[ndarray, "n"] = track.loudness_times_ns()
+    rr.send_columns(
+        schema.loudness_path(rig, audio),
+        indexes=[time_column(times), capture_column(times)],
+        columns=rr.Scalars.columns(scalars=track.loudness_db),
+        recording=recording,
+    )
+    return True
 
 
 def layout_frustum_m(centres_xy: Float64[ndarray, "c 2"]) -> float:

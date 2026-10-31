@@ -200,6 +200,45 @@ def test_legacy_patch_keeps_each_factory_document_verbatim(tmp_path: Path) -> No
     assert found == documents
 
 
+def test_phone_sound_moves_with_its_phone_when_aligning(tmp_path: Path) -> None:
+    """Ingest logs each phone's track and loudness on its own clock; align shifts both by that phone's offset."""
+
+    served, raw, sync, _ = synthetic_served(tmp_path)
+    sound_path = tmp_path / "sound.rrd"
+    with recording_to(sound_path, recording_id=f"selfcap__{sync.key}", send_properties=False) as recording:
+        log_quest_hand_poses(recording, read_quest_joint_hands(raw / "quest"))
+        stamps = {schema.audio_path(0, 0): np.array([11_000_000], dtype=np.int64), schema.loudness_path(0, 0): np.array([13_500_000, 18_500_000], dtype=np.int64)}
+        for entity, times in stamps.items():
+            recording.send_columns(
+                entity,
+                indexes=[capture_column(times), rr.TimeColumn("video_time", duration=times.view("timedelta64[ns]"))],
+                columns=rr.Scalars.columns(scalars=np.ones(times.size)),
+            )
+
+    def fresh_only(chunk):
+        return [] if str(chunk.entity_path) in ("/world/untouched", "/__properties/time_sync") else [chunk]
+
+    fresh = tmp_path / "fresh.rrd"
+    LazyChunkStream.merge(RrdReader(served).stream().flat_map(fresh_only), RrdReader(sound_path).stream()).write_rrd(
+        fresh, application_id="dataforge", recording_id=f"selfcap__{sync.key}"
+    )
+    assert sync.offsets_ms is not None
+    fitted = replace(sync, offsets_ms={**sync.offsets_ms, "quest_pose": 80.0, "exo/Dragon-413A7CC1": -30.0}, version="selfcap-curate-cpu-v1")
+    record_path = tmp_path / "new-fit.json"
+    write_sync(record_path, fitted)
+    target = patch(fresh, None, read_sync(record_path), output_path=tmp_path / "aligned.rrd", mode="fresh")
+    clocks: dict[str, list[tuple[int, int]]] = {}
+    for chunk in RrdReader(target).stream():
+        if not chunk.is_static and str(chunk.entity_path) in stamps:
+            batch = chunk.to_record_batch()
+            pairs = zip(batch.column(CAPTURE_TIMELINE).cast(pa.int64()).to_pylist(), batch.column("video_time").cast(pa.int64()).to_pylist(), strict=True)
+            clocks.setdefault(str(chunk.entity_path), []).extend(pairs)
+    assert clocks == {
+        schema.audio_path(0, 0): [(11_000_000, -19_000_000)],
+        schema.loudness_path(0, 0): [(13_500_000, -16_500_000), (18_500_000, -11_500_000)],
+    }
+
+
 def test_unknown_temporal_entity_refused_when_aligning(tmp_path: Path) -> None:
 
     served, raw, sync, _ = synthetic_served(tmp_path)

@@ -77,6 +77,16 @@ def video_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/video"
 
 
+def audio_path(rig: int, audio: int) -> str:
+    """``/world/rig_NN/audio_MM`` — a microphone's track (AssetAudio) at its first sample on ``video_time``."""
+    return f"{rig_path(rig)}/audio_{_index(audio, 'audio')}"
+
+
+def loudness_path(rig: int, audio: int) -> str:
+    """``.../audio_MM/loudness`` — band level in dB over the track's own floor, Scalars on ``video_time``."""
+    return f"{audio_path(rig, audio)}/loudness"
+
+
 def imu_path(rig: int, imu: int) -> str:
     """``/world/rig_NN/imu_MM`` — carries the static ``rig_T_imu`` transform."""
     return f"{rig_path(rig)}/imu_{_index(imu, 'imu')}"
