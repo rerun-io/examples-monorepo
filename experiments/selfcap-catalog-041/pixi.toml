@@ -1,0 +1,14 @@
+[workspace]
+name = "selfcap-catalog-041-test"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+python = "3.12.*"
+pyserde = "*"
+tomli-w = "*"
+orjson = "*"
+tyro = "*"
+
+[pypi-dependencies]
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] }

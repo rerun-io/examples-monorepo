@@ -493,12 +493,44 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         )
 
     def table_blueprint(self) -> rrb.Blueprint:
-        """Cheap preview card: the ego rgb stream only, nothing else decoded.
+        """Preview the display skeleton and SOMA mesh beside one native exo projection.
 
-        Every visible table row renders through this at once, so the card must
-        decode exactly one video (see the base-class contract).
+        Rig 00 exists in both three- and four-phone sessions. The scene excludes
+        all possible video slots, so each card decodes only that exo stream.
         """
-        return rrb.Blueprint(blueprints.camera_view("ego rgb", DEFAULT_EXO_CAMERAS, 0), collapse_panels=True)
+        body: list[str] = ["/world/skeleton/**", "/world/pred/soma_x/mesh/**"]
+        slots: list[tuple[int, int]] = [(rig, cam) for rig in range(DEFAULT_EXO_CAMERAS + 2) for cam in range(3)]
+        scene: rrb.Spatial3DView = rrb.Spatial3DView(
+            name="Skeleton + SOMA", origin="/world", contents=[*body, *blueprints.video_exclusions(slots)],
+        )
+        pane: rrb.Spatial2DView = blueprints.camera_view(
+            "Exo rig_00", 0, 0, contents=[schema.video_path(0, 0) + "/**", *body],
+        )
+        return blueprints.exoego_table_blueprint(scene, pane)
+
+    def table_fields(self) -> writing.TableFields:
+        """Capture identity and quality at a glance; detailed reports remain selectable.
+
+        The calibration session combines capture date and session prefix. Gate decisions
+        and SOMA reasons are currently nested in report JSON, not standalone columns.
+        """
+        summary: tuple[writing.TableField, ...] = (
+            writing.TableField("property:calib:session", "Capture / session"),
+            writing.TableField("property:calib:exo_cameras", "Phones"),
+            writing.TableField("property:calib:calib_exo_refined", "Refined"),
+            writing.TableField("property:soma_quality:status", "SOMA quality"),
+        )
+        return writing.TableFields(
+            cards=(writing.TableField("property:summary:quality_rank", "Quality rank"), *summary),
+            table=(
+                writing.TableField("property:summary:quality_rank", "Quality rank"),
+                *summary,
+                writing.TableField("property:calib:oak_posed", "OAK posed"),
+                writing.TableField("property:calib:oak_rotation_source", "OAK rotation"),
+                writing.TableField("property:capture:num_frames", "Frames"),
+                writing.TableField("property:capture:session", "Session UUID"),
+            ),
+        )
 
     # ── raw-tree discovery ────────────────────────────────────────────────
     def subset_root(self) -> Path:
