@@ -1,5 +1,6 @@
 """Align explicit episodes of one session; catalog inputs, local outputs only."""
 
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from selfcap_curate.patch_base import patch
 from selfcap_curate.quest_fit import load_quest_hands
 from selfcap_curate.records import SelfcapLayout, write_sync
 from selfcap_curate.session_fit import EpisodeLinks, FitEpisode
-from selfcap_curate.sync_policy import fit_session
+from selfcap_curate.sync_policy import apply_clock_overrides, fit_session
 
 
 @dataclass
@@ -36,6 +37,9 @@ class Config:
     """Catalog containing these fresh bases; never registered or swapped here."""
     dataset: str = DATASET_NAME
     """Dataset on ``catalog_url`` that holds the bases (with their ``gt`` layer)."""
+    clock_overrides: Path | None = None
+    """JSON {segment_id: {phone: offset_ms}}: clocks the head-anchored calibration found for phones align could not
+    measure or measured wrong; applied to the sync record before patching."""
 
 
 def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
@@ -45,6 +49,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
         dataset=config.dataset,
     )
     timer = SequenceTimer()
+    overrides: dict[str, dict[str, float]] = {} if config.clock_overrides is None else json.loads(config.clock_overrides.read_text())
     with session_output(config.output_dir) as output:
         with timer.stage("session/models"):
             detector, pose = pose_models()
@@ -77,6 +82,9 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
             records = fit_session(episodes)
         for key, episode, layout in zip(keys, episodes, layouts, strict=True):
             record = records[key.key]
+            if key.segment in overrides:
+                record = apply_clock_overrides(record, overrides[key.segment])
+                print("CLOCK_OVERRIDE", key.segment, overrides[key.segment], flush=True)
             with timer.stage(f"{key}/write_patch"):
                 patch(config.base_dir / key.rrd_name, None, record, output_path=output / key.rrd_name, mode="fresh")
                 hands, shift_ns = read_hand_poses(output / key.rrd_name) if (output / key.rrd_name).is_file() else ({}, 0)

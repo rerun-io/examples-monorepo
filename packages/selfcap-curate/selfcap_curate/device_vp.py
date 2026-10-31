@@ -62,3 +62,11 @@ class VPTable:
 def read_vp_table() -> VPTable:
     """Read the typed image-only measurement record."""
     return read_json(Path(__file__).with_name('device_vp.json'), VPTable)
+
+
+def vp_focals(phones: list[str]) -> dict[str, float]:
+    """Each phone's vanishing-point focal; phones without a measurement get the median of the measured devices."""
+    table = read_vp_table()
+    measured = {name: device.focal_px for name, device in table.devices.items()}
+    default = float(np.median(list(measured.values())))
+    return {phone: measured.get(phone, default) for phone in phones}

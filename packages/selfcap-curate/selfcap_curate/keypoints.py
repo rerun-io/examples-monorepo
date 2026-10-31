@@ -37,6 +37,11 @@ from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, TimeSync, oak_que
 PoseModel: TypeAlias = Literal["rtmw", "sapiens2"]
 
 INLIER_PX: float = 8.0
+MIN_RAY_SEPARATION_DEG: float = 5.0
+"""Smallest angle between two supporting rays. Near-parallel pairs (two phones at almost one viewpoint) pass the pixel
+gate with depth errors of metres; at 5 degrees and 2 m a 5 px error moves depth ~0.13 m."""
+MAX_HEAD_DISTANCE_M: float = 2.2
+"""A triangulated joint farther than this from the wearer's head (Quest track) is not the wearer's: written missing."""
 
 DISPLAY_CONFIDENCE: float = 0.7
 """Lower bound of the display colour scale; per-camera 2D detections below it are hidden."""
@@ -158,7 +163,7 @@ def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str
     """The OAK cameras of a fitted OAK mount: world poses are the Quest track times the mount, plus stereo and lenses."""
     rig = rig_path(oak_rig)
     cams = {cam: f"{rig}/cam_{cam:02d}" for cam in (0, 1, 2)}
-    track = read_oak_track(calibration.filter_segments(segment), rig, rig_path(quest_rig))
+    track = read_oak_track(calibration.filter_segments(segment), rig, rig_path(quest_rig), poses=base.filter_segments(segment))
     if track is None:
         return []  # no fitted OAK mount for this episode
     times_s, world_T_rig = track
@@ -270,7 +275,7 @@ def select_wearer(camera: Camera, anchors: Float64[ndarray, "3 3"], boxes: Float
 def triangulate_frames(
     cameras: list[Camera], uv: Float64[ndarray, "n v j 2"], scores: Float64[ndarray, "n v j"], threshold: float = INLIER_PX, chunk: int = 2048
 ) -> TriangulationBatch:
-    """All view pairs, >=0.5° ray separation, weighted DLT and two gated refits, for every frame and joint at once.
+    """All view pairs, >=MIN_RAY_SEPARATION_DEG ray separation, weighted DLT and two gated refits, for every frame and joint at once.
 
     float64 on the GPU when there is one: each DLT is the smallest eigenvector of its 4x4 normal matrix, which agrees
     with the per-frame SVD it replaced to ~1e-13 m (cc808233 ep001: 7 s -> ~0.2 s per episode).
@@ -295,7 +300,7 @@ def triangulate_frames(
     lens = tensor(np.stack([c.K[:2, :2] for c in cameras]))
     centre = tensor(np.stack([c.K[:2, 2] for c in cameras]))
     radial = tensor(np.array([c.radial for c in cameras]))
-    cos_min = float(np.cos(np.deg2rad(0.5)))
+    cos_min = float(np.cos(np.deg2rad(MIN_RAY_SEPARATION_DEG)))
 
     def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> TriangulationBatch:
         norm_np = np.stack(
@@ -456,7 +461,17 @@ def triangulate_episode(
         uv[rows, view], scores[rows, view] = observed.xy[rows, person[rows]], observed.scores[rows, person[rows]]
         selected[phone] = SelectedView(uv[:, view].astype(np.float32), scores[:, view].copy())
     batch: TriangulationBatch = triangulate_frames(camera_list, uv, scores, threshold)
-    return Keypoints3D(detections.times, batch.xyz, batch.n_views, batch.confidence, selected, cameras, detections.rate, batch.inliers, batch.max_reprojection_px)
+    xyz, n_views, confidence = batch.xyz.copy(), batch.n_views.copy(), batch.confidence.copy()
+    inliers = None if batch.inliers is None else batch.inliers.copy()
+    reprojection = None if batch.max_reprojection_px is None else batch.max_reprojection_px.copy()
+    with np.errstate(invalid="ignore"):
+        far = np.linalg.norm(xyz - anchors[:, None, 0, :], axis=-1) > MAX_HEAD_DISTANCE_M
+    xyz[far], n_views[far], confidence[far] = np.nan, 0, 0.0
+    if inliers is not None:
+        inliers[np.broadcast_to(far[:, None, :], inliers.shape)] = False
+    if reprojection is not None:
+        reprojection[far] = np.nan
+    return Keypoints3D(detections.times, xyz, n_views, confidence, selected, cameras, detections.rate, inliers, reprojection)
 
 
 def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float) -> Float32[ndarray, "n j 3"]:

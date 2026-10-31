@@ -213,11 +213,20 @@ def balanced_folds(visible: Bool[ndarray, "n v"]) -> Int64[ndarray, "n"]:
     raise ValueError("Cannot balance cross-validation coverage")
 
 
+def _usable_hands(inputs: Inputs, view: int) -> Bool[ndarray, "n"]:
+    detection = inputs.detections[view]
+    return np.array([len(pairs(PhoneDetections(detection.times_s[i:i+1], detection.xy[i:i+1], detection.scores[i:i+1]),
+                               inputs.tracks, inputs.phone_to_pose_s[view]).world) > 0 for i in range(len(detection.times_s))], dtype=bool)
+
+
+def usable_hand_frames(inputs: Inputs, view: int) -> int:
+    """Frames of one camera whose hand detections pair with the Quest hands."""
+    return int(_usable_hands(inputs, view).sum())
+
+
 def hand_frame_folds(inputs: Inputs, view: int) -> Int64[ndarray, "n"]:
     """Assign each usable hand frame to a fold, independently for each camera."""
-    detection = inputs.detections[view]
-    usable = np.array([len(pairs(PhoneDetections(detection.times_s[i:i+1], detection.xy[i:i+1], detection.scores[i:i+1]),
-                                inputs.tracks, inputs.phone_to_pose_s[view]).world) > 0 for i in range(len(detection.times_s))], dtype=bool)
+    usable = _usable_hands(inputs, view)
     folds = np.full(len(usable), -1, dtype=np.int64)
     folds[usable] = balanced_folds(np.ones((int(usable.sum()), 1), dtype=bool))
     return folds

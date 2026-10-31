@@ -1,7 +1,7 @@
 """v2 clock-selection, RGB drift and phone-fill rules, without file or catalog IO."""
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -375,3 +375,20 @@ def fit_session(episodes: list[FitEpisode]) -> dict[str, TimeSync]:
     quests = {episode.episode: episode.quest for episode in episodes}
     fits: dict[str, PhoneFit] = {phone: fit_phone(frames, quests, grid) for phone, frames in detections.items()}
     return sync_records(episodes, fits, fill_phone_offsets(episodes, fits))
+
+
+def apply_clock_overrides(record: TimeSync, overrides: dict[str, float]) -> TimeSync:
+    """Replace phone offsets (ms) with clocks the wearer's head track found; flag each as ``exo_<phone>_head_sync``."""
+    if not overrides or record.offsets_ms is None:
+        return record
+    offsets = dict(record.offsets_ms)
+    exo = dict(record.exo_fit)
+    flags = [flag for flag in record.flags if not any(flag.startswith(f"exo_{phone}_") for phone in overrides)]
+    pose = offsets.get("quest_pose")
+    for phone, offset in overrides.items():
+        offsets[f"exo/{phone}"] = offset
+        tau = None if pose is None else round(offset + HAND_LATENCY_MS - pose, 1)
+        old = exo.get(phone)
+        exo[phone] = ExoFit(tau, "head_track", *(() if old is None else (old.tau_ms, old.cmin_px, old.basin_halfwidth_ms, old.points, old.edge)))
+        flags.append(f"exo_{phone}_head_sync")
+    return replace(record, offsets_ms=offsets, exo_fit=exo, flags=flags)

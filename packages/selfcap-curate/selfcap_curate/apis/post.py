@@ -49,6 +49,10 @@ class Config:
     """Fixed-focal JSON record, when requested."""
     exo_reference_dataset: str = DATASET_NAME
     """Read-only source of landmark labels and independent gate observations."""
+    exo_method: Literal["hands", "head"] = "hands"
+    """Hands-only phone poses, or v3 head-anchored poses for every phone that sees the wearer's head."""
+    clock_overrides: Path | None = None
+    """JSON {segment_id: {phone: offset_ms}} of head-track clocks, passed to align."""
 
 
 def main(config: Config) -> None:
@@ -66,7 +70,7 @@ def main(config: Config) -> None:
         align.main(
             align.Config(
                 base_dir=config.base_dir, output_dir=aligned, segment_ids=config.segment_ids, key_file=config.key_file,
-                catalog_url=config.catalog_url, dataset=config.dataset,
+                catalog_url=config.catalog_url, dataset=config.dataset, clock_overrides=config.clock_overrides,
             ),
             session_videos=session_videos,
         )
@@ -98,6 +102,7 @@ def main(config: Config) -> None:
                     exo_focal_source=config.exo_focal_source,
                     exo_focal_file=config.exo_focal_file,
                     exo_reference_dataset=config.exo_reference_dataset if config.exo_refine else None,
+                    exo_method=config.exo_method,
                 ),
                 session_videos=session_videos,
             )

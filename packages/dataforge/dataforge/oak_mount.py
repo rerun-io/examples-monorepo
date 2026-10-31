@@ -60,13 +60,16 @@ def read_fitted_mount(view: DatasetEntry, oak: str) -> Float64[ndarray, "4 4"] |
 
 
 def read_oak_track(
-    view: DatasetEntry, oak: str, quest: str, *, start_ns: int | None = None, end_ns: int | None = None
+    view: DatasetEntry, oak: str, quest: str, *, start_ns: int | None = None, end_ns: int | None = None, poses: DatasetEntry | None = None
 ) -> tuple[Float64[ndarray, "n"], Float64[ndarray, "n 4 4"]] | None:
-    """OAK world poses on ``video_time`` (seconds, 4x4), or None when the segment has no fitted mount."""
+    """OAK world poses on ``video_time`` (seconds, 4x4), or None when the segment has no fitted mount.
+
+    The mount comes from ``view``; the Quest track from ``poses`` when the mount lives in a calibration-only layer.
+    """
     mount = read_fitted_mount(view, oak)
     if mount is None:
         return None
-    frame = view.filter_contents([quest]).reader(index="video_time")
+    frame = (view if poses is None else poses).filter_contents([quest]).reader(index="video_time")
     if start_ns is not None:
         frame = frame.filter(col("video_time").cast(pa.int64()) >= lit(start_ns))
     if end_ns is not None:
