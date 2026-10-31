@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
 from egohand_inference.perf import PerfStage
-from jaxtyping import Bool, Float32, Int64, UInt8
+from jaxtyping import Bool, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from serde import from_dict, serde
@@ -34,7 +34,7 @@ class HandDetections:
     boxes: BoxDetections
     """Source-image boxes and batch indices."""
     sides: tuple[HandSide, ...]
-    """Assigned side, or raw class name when detector identity assignment is disabled."""
+    """Anatomical side assigned from the ordered ego sequence."""
 
 
 def resolve_hand_identities(detections: HandDetections, frame_count: int) -> HandDetections:
@@ -92,10 +92,6 @@ class EgoHandDetectorConfig:
     """Path to hand_detector.onnx."""
     threshold: float = 0.5
     """Minimum detector confidence, unrelated to landmark visibility."""
-
-    assign_identity: bool = True
-    """Use upstream geometry/IoU assignment on an ordered, upright ego sequence."""
-
     backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
     """ONNX Runtime reference or cached TensorRT engine, with a dynamic batch."""
 
@@ -116,7 +112,7 @@ class EgoHandDetector:
         validate_frames_rgb(frames_rgb)
         boxes: list[Tensor] = []
         scores: list[Tensor] = []
-        indices: list[int] = []
+        indices: list[Tensor] = []
         sides: list[HandSide] = []
         height: int = int(frames_rgb.shape[1])
         width: int = int(frames_rgb.shape[2])
@@ -139,25 +135,24 @@ class EgoHandDetector:
                     .contiguous(),
                 },
             )
-            for frame_index in range(stop - start):
-                for label in (1, 2):
-                    valid: Bool[Tensor, "q"] = (outputs["labels"][frame_index] == label) & (outputs["scores"][frame_index] > self.config.threshold)
-                    candidates: Int64[Tensor, "n"] = torch.where(valid)[0]
-                    if not len(candidates):
-                        continue
-                    # Keep candidates across class IDs for upstream's identity assignment.
-                    # Top-1 per class can discard a hand when both are misclassified alike.
-                    for candidate in candidates:
-                        boxes.append(outputs["boxes"][frame_index, candidate].clone().float())
-                        scores.append(outputs["scores"][frame_index, candidate].clone().float())
-                        indices.append(start + frame_index)
-                        sides.append(detector_hand_side(label))
-        if not boxes:
+            # Keep candidates across class IDs for upstream's identity assignment.
+            # Top-1 per class can discard a hand when both are misclassified alike.
+            labels: Int[Tensor, "b q"] = outputs["labels"]
+            keep: Bool[Tensor, "b 2 q"] = torch.stack([labels == 1, labels == 2], dim=1) & (outputs["scores"] > self.config.threshold)[:, None]
+            # Row-major order: frame, then label 1 before 2, then query.
+            hits: tuple[Tensor, ...] = torch.where(keep)
+            frame: Int64[Tensor, "n"] = hits[0]
+            query: Int64[Tensor, "n"] = hits[2]
+            boxes.append(outputs["boxes"][frame, query].float())
+            scores.append(outputs["scores"][frame, query].float())
+            indices.append(frame + start)
+            sides.extend(detector_hand_side(label + 1) for label in hits[1].tolist())
+        if not sides:
             return HandDetections(BoxDetections.empty(frames_rgb.device), ())
         raw: HandDetections = HandDetections(
-            BoxDetections(torch.stack(boxes), torch.stack(scores), torch.tensor(indices, device=frames_rgb.device, dtype=torch.int64)), tuple(sides)
+            BoxDetections(torch.cat(boxes), torch.cat(scores), torch.cat(indices).to(device=frames_rgb.device, dtype=torch.int64)), tuple(sides)
         )
-        return resolve_hand_identities(raw, len(frames_rgb)) if self.config.assign_identity else raw
+        return resolve_hand_identities(raw, len(frames_rgb))
 
 
 @serde
@@ -179,8 +174,6 @@ class _UpstreamHand:
     """Optional MHR scale coefficients."""
     pred_vertices: Float32[ndarray, "v 3"]
     """Wrist-relative mesh in source camera axes, metres."""
-    pred_projection_valid: Bool[ndarray, "25"]
-    """Geometric projection validity, not visibility."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,8 +208,6 @@ class EgoHandConfig:
     """Directory containing SOMAHand.npz."""
     batch_size: int = 2
     """Maximum simultaneous hand crops."""
-    device: str = "cuda"
-    """Inference device."""
     padding: float = 0.2
     """Added fraction of the square detector crop side."""
     gpu_crops: bool = False
@@ -240,14 +231,14 @@ class EgoHandPredictor:
         self.config: EgoHandConfig = config
         self.stage_ms: dict[str, list[float]] = {}
         self.predictor: UpstreamPredictor = UpstreamPredictor.from_checkpoint(
-            config.weights, config.soma_assets, config.batch_size, device=config.device, dtype=torch.bfloat16, use_perspective_cropping=True
+            config.weights, config.soma_assets, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True
         )
         self.predictor.perf_reporter = self
         if config.backbone_onnx is not None:
             if not config.backbone_onnx.is_file():
                 export_onnx(
                     self.predictor.model.backbone,
-                    (torch.zeros((2, 3, 256, 256), device=config.device),),
+                    (torch.zeros((2, 3, 256, 256), device="cuda"),),
                     config.backbone_onnx,
                     input_names=["images"],
                     output_names=["features"],

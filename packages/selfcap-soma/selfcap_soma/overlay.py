@@ -37,10 +37,6 @@ class Config:
     """Dataset containing this segment's inputs and calibrated cameras."""
     segment: str = "selfcap__2025-12-03__d31bf1da__ep001"
     """Recording/segment ID used by the SelfCap converter."""
-    application_id: str = "dataforge"
-    """Application ID written by the SelfCap converter."""
-    reference: Path | None = None
-    """Original layer defining the application and recording IDs."""
     output: Path = Path("/tmp/soma-fit/layer/selfcap__2025-12-03__d31bf1da__ep001.rrd")
     """Local layer file; registration is a separate explicit action."""
 
@@ -135,12 +131,6 @@ def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader, times: Fl
 def main(config: Config) -> None:
     source = RrdReader(config.source)
     segment = config.segment
-    application_id = config.application_id
-    if config.reference is not None:
-        identity = RrdReader(config.reference).recordings()[0]
-        if identity.recording_id != segment:
-            raise ValueError("reference recording must be the requested SelfCap segment")
-        application_id = identity.application_id
     rows = []
     for chunk in source.stream().filter(content="/world/fit/joints").to_chunks():
         table = chunk.to_record_batch()
@@ -245,7 +235,7 @@ def main(config: Config) -> None:
                 )
             )
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    recording = rr.RecordingStream(application_id, recording_id=segment)
+    recording = rr.RecordingStream("dataforge", recording_id=segment)
     recording.save(config.output)
     if config.upper_body_only:
         static = source.stream().filter(content="/parameters/visible_joints").to_chunks()

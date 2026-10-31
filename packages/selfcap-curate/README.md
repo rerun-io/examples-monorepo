@@ -116,7 +116,7 @@ For `selfcap-post`, omit `--rate` to use the first episode's median native phone
 Cameras come from local `--calib-dir` files; the catalog supplies patched videos, clocks and Quest anchors.
 Explicit ids or a key file select one session. Preflight reports unprocessable episodes with `KEYPOINTS_SKIP`; good episodes run.
 Existing targets, NAS outputs and outputs within the input directory are refused; no external registration or swap occurs.
-Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz (40). YOLOX-m HumanArt and RTMW-x use TensorRT batches of eight,
+Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz (40). YOLOX-m HumanArt uses TensorRT batches of eight and RTMW-x batches of up to 32 (optimised for eight),
 keeping three people per frame on a half-open `video_time` grid anchored at cut zero; nearest-frame ties go left.
 Quest anchors use capture_time: left-eye head + quest_pose (100 ms gap), wrists −48 ms + quest_pose (40 ms gap).
 Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation accepts joint detector scores
@@ -132,7 +132,6 @@ Every view uses the same confidence colours: red at 0.7, yellow at 0.85, green a
 Low-confidence and bridged points remain visible. Blue annotation links use the shared typed keypoint archetypes and their class/keypoint IDs; custom confidence components carry per-joint and average confidence.
 Quest hands have no per-joint confidence, so tracked Quest joints use 1.0. The support masks remain available for inspection.
 Exo and Quest views project the world skeleton and SOMA mesh through their pinholes in Rerun; 3D joints use UI-point radii. OAK alone keeps explicit display projections through all 14 factory lens coefficients.
-AV1 reference/control/sample packets are retained; selected decoded frames are checked bit-for-bit in goldens.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
 `pinhole/pred/rtmw/coco133_uv` and `kp3d_*` fields in the same `calib` group; no external quality metrics are stored.
 Frozen reference comparisons live in `tests/test_keypoints_*golden.py`. Those references use the earlier
@@ -196,8 +195,7 @@ This is an explicit publishing tool. It refuses production datasets, uses a
 new run directory, and registers the default blueprint. With `--dataset selfcap-post-dev`,
 it replaces only base, calib, egohand_calib and exo_landmarks; it preserves
 SOMA, EgoHand and existing Sapiens2 layers. Separate candidates also copy the
-source EgoHand file and alignment detections. The scratch `/tmp/selfcap-5090/dev_cycle.py`
-remains independent and unchanged. Run files and reports live beneath
+source EgoHand file and alignment detections. Run files and reports live beneath
 `<remote-root>/<dataset>/runs/<tag>/`.
 
 The focal source is `table`, `fit`, or `fixed`. A `fixed` source requires

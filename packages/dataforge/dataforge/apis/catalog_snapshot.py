@@ -83,15 +83,20 @@ def blueprint_refs(entry: DatasetEntry | TableEntry) -> list[BlueprintRef]:
     ]
 
 
+def layer_refs(dataset: DatasetEntry, source: str) -> list[LayerRef]:
+    """Decode a dataset manifest into its registered segment/layer files."""
+    return [
+        records.decode_values(LayerRef, row, source=source)
+        for row in dataset.manifest().select("rerun_segment_id", "rerun_layer_name", "rerun_storage_url").to_arrow_table().to_pylist()
+    ]
+
+
 def snapshot_catalog(catalog_url: str, target: Path) -> None:
     """Save every visible entry and its layers, assets, blueprints, or table URL."""
     client: CatalogClient = CatalogClient(catalog_url)
     entries: list[EntrySnapshot] = []
     for dataset in client.datasets():
-        layers: list[LayerRef] = [
-            records.decode_values(LayerRef, row, source=f"{dataset.name} manifest")
-            for row in dataset.manifest().select("rerun_segment_id", "rerun_layer_name", "rerun_storage_url").to_arrow_table().to_pylist()
-        ]
+        layers: list[LayerRef] = layer_refs(dataset, f"{dataset.name} manifest")
         asset_dataset: DatasetEntry | None = dataset.asset_dataset()
         assets: list[str] = [] if asset_dataset is None else asset_dataset.manifest().select("rerun_storage_url").to_arrow_table().column(0).to_pylist()
         entries.append(EntrySnapshot(dataset.name, str(dataset.id), layers, blueprint_refs(dataset), assets, None))
@@ -127,14 +132,10 @@ def restore_catalog(snapshot_path: Path, catalog_url: str, names: tuple[str, ...
             target = client.register_table(entry.name, entry.table_url)
         else:
             target = client.create_dataset(entry.name, exist_ok=True)
-            existing: list[LayerRef] = [
-                records.decode_values(LayerRef, row, source=f"{entry.name} destination manifest")
-                for row in target.manifest().select("rerun_segment_id", "rerun_layer_name", "rerun_storage_url").to_arrow_table().to_pylist()
-            ]
-            registered: set[tuple[str, str, str]] = {(layer.rerun_segment_id, layer.rerun_layer_name, layer.rerun_storage_url) for layer in existing}
+            registered: set[LayerRef] = set(layer_refs(target, f"{entry.name} destination manifest"))
             by_layer: defaultdict[str, list[str]] = defaultdict(list)
             for layer in entry.layers:
-                if (layer.rerun_segment_id, layer.rerun_layer_name, layer.rerun_storage_url) not in registered:
+                if layer not in registered:
                     by_layer[layer.rerun_layer_name].append(layer.rerun_storage_url)
             for layer_name, uris in by_layer.items():
                 target.register(uris, layer_name=layer_name, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()

@@ -16,7 +16,7 @@ import rerun as rr
 import torch
 from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
 from dataforge.logging_toolkit import time_column
-from dataforge.schema import coco133_uv_projected_path, coco133_xyz_path, pinhole_path
+from dataforge.schema import coco133_uv_projected_path, coco133_xyz_path, pinhole_path, rig_path
 from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
@@ -38,7 +38,7 @@ PoseModel: TypeAlias = Literal["rtmw", "sapiens2"]
 INLIER_PX: float = 8.0
 
 DISPLAY_CONFIDENCE: float = 0.7
-"""Lower bound of the display colour scale; never a visibility threshold."""
+"""Lower bound of the display colour scale; per-camera 2D detections below it are hidden."""
 MIN_DETECTION_SCORE: float = 0.3
 """Permissive detection acceptance; triangulation still requires two 8 px inliers."""
 ONE_EURO_MIN_CUTOFF_HZ: float = 1.0
@@ -155,7 +155,7 @@ def project_ego(camera: EgoCamera, times_s: Float64[ndarray, "n"], xyz: Float32[
 
 def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str, oak_rig: int) -> list[EgoCamera]:
     """The OAK cameras whose pose the calibration layer gives: one query for the rig pose track and stereo, one for the lenses."""
-    rig = f"/world/rig_{oak_rig:02d}"
+    rig = rig_path(oak_rig)
     cams = {cam: f"{rig}/cam_{cam:02d}" for cam in (0, 1, 2)}
     view = calibration.filter_segments(segment)
     if not any(item.entity_path == rig and item.field == "mat3x3" and not item.is_static for item in catalog_components(view.schema())):
@@ -371,7 +371,8 @@ def triangulate_frames(
             )
         inliers = best_mask & valid & (residual(fit(best_mask)) <= threshold)
         points = fit(inliers)
-        inliers &= residual(points) <= threshold
+        errors: Tensor = residual(points)
+        inliers &= errors <= threshold
         count = inliers.sum(1)
         good = (count >= 2) & torch.isfinite(points).all(-1)
         return TriangulationBatch(
@@ -379,7 +380,7 @@ def triangulate_frames(
             torch.where(good, count, 0).to(torch.uint8).cpu().numpy(),
             torch.where(good, torch.where(inliers, clean, 0.0).sum(1) / count.clamp(min=1), 0.0).float().cpu().numpy(),
             (inliers & good[:, None, :]).cpu().numpy(),
-            torch.where(good, torch.where(inliers, residual(points), 0.0).amax(1), torch.nan).float().cpu().numpy(),
+            torch.where(good, torch.where(inliers, errors, 0.0).amax(1), torch.nan).float().cpu().numpy(),
         )
 
     for begin in range(0, frames, chunk):
@@ -434,18 +435,6 @@ class SelectedView:
     scores: Float64[ndarray, "n 133"]  # Unmodified joint confidence.
 
 
-def exo_display_observed(
-    pixels: Float32[ndarray, "n 133 2"],
-    selected: SelectedView,
-    inliers: Bool[ndarray, "n 133"],
-    quest_tracked: Bool[ndarray, "n 133"],
-) -> Bool[ndarray, "n 133"]:
-    """Quest joints use independent raw-camera evidence within 15 px; exo joints retain the 8 px inlier rule."""
-    error: Float32[ndarray, "n 133"] = np.linalg.norm(pixels - selected.xy, axis=-1)
-    quest_observed: Bool[ndarray, "n 133"] = (selected.scores >= DISPLAY_CONFIDENCE) & (error <= 15.0)
-    return np.where(quest_tracked, quest_observed, inliers & (error <= INLIER_PX))
-
-
 @dataclass(frozen=True, slots=True)
 class Keypoints3D:
     times: Float64[ndarray, "n"]  # Aligned sample grid in seconds, with empty rows preserved.
@@ -482,7 +471,7 @@ def triangulate_episode(
     return Keypoints3D(detections.times, batch.xyz, batch.n_views, batch.confidence, selected, cameras, detections.rate, batch.inliers, batch.max_reprojection_px)
 
 
-def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float, *, beta: float = ONE_EURO_BETA) -> Float32[ndarray, "n j 3"]:
+def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float) -> Float32[ndarray, "n j 3"]:
     """Causal One Euro filter (Casiez et al. 2012) per joint on the 3D vector; every gap restarts it."""
 
     @overload
@@ -504,7 +493,7 @@ def one_euro(xyz: Float32[ndarray, "n j 3"], rate: float, *, beta: float = ONE_E
         state[start], velocity[start] = sample[start], 0.0
         step = valid & alive
         velocity[step] += alpha(1.0) * ((sample[step] - state[step]) * rate - velocity[step])
-        state[step] += alpha(ONE_EURO_MIN_CUTOFF_HZ + beta * np.linalg.norm(velocity[step], axis=1))[:, None] * (sample[step] - state[step])
+        state[step] += alpha(ONE_EURO_MIN_CUTOFF_HZ + ONE_EURO_BETA * np.linalg.norm(velocity[step], axis=1))[:, None] * (sample[step] - state[step])
         out[t, valid] = state[valid]
         alive = valid
     return out
@@ -568,7 +557,7 @@ def write_keypoints(
     """Write RTMW with calibration, or an isolated Sapiens2 layer. The input file stays intact.
 
     Keypoint rows go through dataforge's shared writer: 133 joints per row, NaN for missing joints, and a confidence
-    per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. All finite joints remain visible, and the shown 3D joints are projected into every calibrated phone
+    per joint (the mean inlier RTMW score in 3D, the raw RTMW score in 2D), on video_time only. Finite 3D joints remain visible (2D detections below DISPLAY_CONFIDENCE are hidden), and the shown 3D joints are projected into every calibrated phone
     through its lens model. Colours stretch from red at DISPLAY_CONFIDENCE to green at 1.0; scores stay raw. ``ego`` OAK cameras get the same projections plus the Quest hands (``quest_hands``),
     through the full OAK lens model: the viewer's Pinhole has no distortion, which put overlays up to 220 px off.
     Camera-centre chunks retain their native exo frame clocks when merged into the layer.

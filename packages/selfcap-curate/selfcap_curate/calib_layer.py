@@ -78,9 +78,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 continue
             episode = camera.episodes.get(sync.episode)
             refined = refinement.camera_for_rig(rig) if refinement is not None else None
-            applied = refined is not None
-            refined = refined if refined is not None else camera.camera
-            matrix = (refined.world_T_cam if applied else
+            matrix = (refined.world_T_cam if refined is not None else
                       episode.world_T_cam if episode is not None and episode.world_T_cam is not None else camera.camera.world_T_cam)
             status = "flagged" if episode is not None and not episode.ok else "ok"
             count += 1
@@ -89,13 +87,13 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             tf(
                 entity,
                 matrix,
-                calib_source=refinement.method if refinement is not None and applied else METHOD,
+                calib_source=refinement.method if refinement is not None and refined is not None else METHOD,
                 calib_scope=episode.scope if episode else "session",
                 calib_status=status,
                 calib_phone=phone,
                 calib_hand_median_px=(episode.median_px if episode is not None else camera.median_px),
             )
-            p = refined.parameters
+            p = (refined if refined is not None else camera.camera).parameters
             pinhole(schema.pinhole_path(rig, 0), np.array([[p[6], 0.0, p[7]], [0.0, p[6], p[8]], [0.0, 0.0, 1.0]]), 1920, 1080)
         for cam, name in ((1, "rgb_T_left"), (2, "rgb_T_right")):
             if name in session.stereo:

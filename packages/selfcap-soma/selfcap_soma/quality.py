@@ -10,7 +10,7 @@ from numpy import ndarray
 from serde import serde
 from serde.json import to_json
 
-from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, plausible_ears
+from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, plausible_ears, usable_ears
 
 
 @serde(deny_unknown_fields=True)
@@ -61,9 +61,7 @@ def assess_quality(
             reasons.append(f"{name}_missing")
         elif median > threshold:
             reasons.append(f"{name}_above_threshold")
-    pairs = plausible_ears(exo)
-    if confidence is not None:
-        pairs &= (confidence[:, 3:5] > 0.0).any(1)
+    pairs = plausible_ears(exo) if confidence is None else usable_ears(exo, confidence)
     surviving = int(pairs.sum())
     fallback = surviving < 3
     bound = scale is not None and (scale <= SCALE_MIN + 1e-6 or scale >= SCALE_MAX - 1e-6)

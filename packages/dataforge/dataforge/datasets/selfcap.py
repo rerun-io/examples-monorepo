@@ -441,36 +441,23 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         The dev dataset can opt into the SOMA mesh as 3D context without showing its joints.
         """
         ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
-        hidden: dict[EntityPathLike, rrb.EntityBehavior] = {
-            "/world/gt": rrb.EntityBehavior(visible=False),
-            "/world/gt/sapiens2": rrb.EntityBehavior(visible=False),
-            "/world/pred": rrb.EntityBehavior(visible=False),
-        }
-        cameras: list[tuple[int, tuple[int, ...]]] = [
-            *((rig, (0,)) for rig in range(DEFAULT_EXO_CAMERAS)),
-            (ego_rig, (0, 1, 2)),
-            (quest_rig, (0, 1)),
-        ]
-        for rig, cams in cameras:
-            for cam in cams:
-                pinhole: str = schema.pinhole_path(rig, cam)
-                # Keep the Sapiens2 raw/projected pair beside the RTMW branches in the view tree.
-                hidden[f"{pinhole}/sapiens2"] = rrb.EntityBehavior(visible=False)
-                for suffix in ("pred", "coco133_uv_projected", "quest_coco133_uv_projected"):
-                    hidden[f"{pinhole}/{suffix}"] = rrb.EntityBehavior(visible=False)
+        hide: rrb.EntityBehavior = rrb.EntityBehavior(visible=False)
+        cameras: list[tuple[int, tuple[int, ...]]] = [*((rig, (0,)) for rig in range(DEFAULT_EXO_CAMERAS)), (ego_rig, (0, 1, 2)), (quest_rig, (0, 1))]
+        pinholes: list[str] = [schema.pinhole_path(rig, cam) for rig, cams in cameras for cam in cams]
+        # Keep the Sapiens2 raw/projected pair beside the RTMW branches in the view tree.
+        overlays: tuple[str, ...] = ("sapiens2", "pred", "coco133_uv_projected", "quest_coco133_uv_projected")
+        hidden: dict[EntityPathLike, rrb.EntityBehavior] = dict.fromkeys(
+            ["/world/gt", "/world/gt/sapiens2", "/world/pred", *(f"{pinhole}/{suffix}" for pinhole in pinholes for suffix in overlays)], hide
+        )
 
         def camera(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
             pinhole: str = schema.pinhole_path(rig, cam)
-            overrides = hidden.copy()
+            contents: list[str] = [f"{pinhole}/**", "/world/gt/**", "/world/pred/**"]
+            overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
             if rig != ego_rig:
+                contents.append("/world/skeleton/**")
                 overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
-            return blueprints.camera_view(
-                name,
-                rig,
-                cam,
-                contents=[f"{pinhole}/**", "/world/gt/**", "/world/pred/**", *(["/world/skeleton/**"] if rig != ego_rig else [])],
-                overrides=overrides,
-            )
+            return blueprints.camera_view(name, rig, cam, contents=contents, overrides=overrides)
 
         ego = rrb.Vertical(
             camera("OAK rgb", ego_rig, 0),
@@ -478,15 +465,13 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             rrb.Horizontal(camera("Quest left", quest_rig, 0), camera("Quest right", quest_rig, 1)),
         )
         exo: list[rrb.Spatial2DView] = [camera(f"exo rig_{rig:02d}", rig, 0) for rig in range(DEFAULT_EXO_CAMERAS)]
-        world_overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
         # Camera-plane overlays would repeat the body around the world skeleton.
-        for rig, cams in cameras:
-            for cam in cams:
-                world_overrides[f"{schema.pinhole_path(rig, cam)}/skeleton"] = rrb.EntityBehavior(visible=False)
-                world_overrides[f"{schema.pinhole_path(rig, cam)}/camera_centers"] = rrb.EntityBehavior(visible=False)
+        world_overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden | dict.fromkeys(
+            (f"{pinhole}/{suffix}" for pinhole in pinholes for suffix in ("skeleton", "camera_centers")), hide
+        )
         if show_soma_mesh:
             world_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
-        scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world", overrides={**world_overrides})
+        scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world", overrides=world_overrides)
         return rrb.Blueprint(
             rrb.Vertical(rrb.Horizontal(scene, ego, column_shares=[3.0, 1.2]), rrb.Horizontal(*exo), row_shares=[3.0, 2.0]),
             collapse_panels=True,
@@ -514,17 +499,17 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         The calibration session combines capture date and session prefix. Gate decisions
         and SOMA reasons are currently nested in report JSON, not standalone columns.
         """
-        summary: tuple[writing.TableField, ...] = (
+        cards: tuple[writing.TableField, ...] = (
+            writing.TableField("property:summary:quality_rank", "Quality rank"),
             writing.TableField("property:calib:session", "Capture / session"),
             writing.TableField("property:calib:exo_cameras", "Phones"),
             writing.TableField("property:calib:calib_exo_refined", "Refined"),
             writing.TableField("property:soma_quality:status", "SOMA quality"),
         )
         return writing.TableFields(
-            cards=(writing.TableField("property:summary:quality_rank", "Quality rank"), *summary),
+            cards=cards,
             table=(
-                writing.TableField("property:summary:quality_rank", "Quality rank"),
-                *summary,
+                *cards,
                 writing.TableField("property:calib:oak_posed", "OAK posed"),
                 writing.TableField("property:calib:oak_rotation_source", "OAK rotation"),
                 writing.TableField("property:capture:num_frames", "Frames"),

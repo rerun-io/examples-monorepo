@@ -17,7 +17,7 @@ from numpy import ndarray
 from serde import serde
 
 from dataforge.logging_toolkit import ImuChannel
-from dataforge.quest_joint_poses import read_quest_joint_poses
+from dataforge.quest_joint_poses import QuestJointPoses, read_quest_joint_poses
 from dataforge.records import read_csv_columns, read_json
 
 BROWN_CONRADY_COEFFICIENTS: int = 14
@@ -162,10 +162,8 @@ def read_quest_hands(quest_dir: Path) -> QuestHands:
         if not os.access(source, os.R_OK):
             print(f"  warning: unreadable Quest hands {source}")
             continue
-        raw = read_quest_joint_poses(source)
-        times = raw.times_ns
-        points = raw.positions[:, mapping]
-        tracks.append((base, times, points))
+        raw: QuestJointPoses = read_quest_joint_poses(source)
+        tracks.append((base, raw.times_ns, raw.positions[:, mapping]))
     times_ns: Int64[ndarray, "n_samples"] = np.unique(np.concatenate([track[1] for track in tracks])) if tracks else np.empty(0, dtype=np.int64)
     positions: Float32[ndarray, "n_samples 133 3"] = np.full((len(times_ns), 133, 3), np.nan, dtype=np.float32)
     for base, stamps, points in tracks:

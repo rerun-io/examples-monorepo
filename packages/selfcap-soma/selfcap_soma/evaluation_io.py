@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-from dataforge.temporal import nearest_indices as nearest_indices
+from dataforge.clocks import nearest_framesets as nearest_indices
 from datafusion import col, lit
 from jaxtyping import Float64
 from numpy import ndarray

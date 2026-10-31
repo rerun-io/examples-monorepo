@@ -20,8 +20,7 @@ from selfcap_soma.catalog import Observations, read_window
 from selfcap_soma.evaluation import apply_body_offsets, heldout_blocks, learn_body_offsets
 from selfcap_soma.evaluation_io import nearest_indices, read_image_tracks, read_views
 from selfcap_soma.fitting import FitOptions, FitResult, fit
-from selfcap_soma.observations import coco_joint_names
-from selfcap_soma.output import save
+from selfcap_soma.output import mapped, save
 
 
 @serde(deny_unknown_fields=True)
@@ -53,16 +52,6 @@ def score(
         float(np.median(b)) if b.size else None,
         float(np.percentile(b, 90)) if b.size else None,
     )
-
-
-def mapped(result: FitResult, data: Observations) -> Float64[ndarray, "n 133 3"]:
-    points = np.full_like(data.exo, np.nan)
-    for key, name in coco_joint_names().items():
-        points[:, key] = result.joints[:, result.names.index(name)]
-    points[:, 3:5] = result.ear_landmarks
-    if result.foot_landmarks is not None:
-        points[:, 17:23] = result.foot_landmarks
-    return points
 
 
 @serde(deny_unknown_fields=True)

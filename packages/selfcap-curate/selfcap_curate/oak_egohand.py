@@ -26,6 +26,9 @@ from selfcap_curate.keypoints import EgoCamera, project_ego
 from selfcap_curate.quest_fit import hand_neighbors
 from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, MAPPED, CatalogHands, HandTrack, OakDetections, SessionEpisode, oak_quest_offset_ms
 
+EGOHAND_FRAME_COUNT: int = 64
+"""Frames sampled per episode for EgoHand calibration."""
+
 
 @dataclass(frozen=True, slots=True)
 class OakFrameSelection:
@@ -39,11 +42,9 @@ class OakFrameSelection:
 
 def select_egohand_frames(
     times: Float64[ndarray, "f"], pixels: Float32[ndarray, "f 133 2"] | None, tracked: Bool[ndarray, "f 2"],
-    size: tuple[int, int], *, count: int = 64, seed: int = 20261030,
+    size: tuple[int, int], *, seed: int = 20261030,
 ) -> OakFrameSelection:
     """Uniform sampling without replacement after visibility and 300 px/s Quest-speed gates."""
-    if count < 1:
-        raise ValueError("frame count must be positive")
     if len(times) < 2:
         return OakFrameSelection(np.empty(0, np.int64), np.empty((0, 2), bool), 0)
     if not np.all(np.diff(times) > 0.0):
@@ -60,7 +61,7 @@ def select_egohand_frames(
             inside &= (points[:, :, 1] >= 0.0).all(1) & (points[:, :, 1] < height).all(1)
             eligible[:, side] &= inside & (speed[:, indices] <= 300.0).all(1)
     candidates: Int64[ndarray, "k"] = np.flatnonzero(eligible.any(1))
-    chosen: Int64[ndarray, "n"] = np.sort(np.random.default_rng(seed).choice(candidates, min(count, len(candidates)), replace=False))
+    chosen: Int64[ndarray, "n"] = np.sort(np.random.default_rng(seed).choice(candidates, min(EGOHAND_FRAME_COUNT, len(candidates)), replace=False))
     return OakFrameSelection(chosen, eligible[chosen], len(candidates))
 
 

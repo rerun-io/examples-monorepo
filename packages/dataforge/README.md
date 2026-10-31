@@ -520,21 +520,12 @@ The restore command rejects the literal source URL as destination. During a live
 run this inventory is a sequence of metadata reads, not an atomic snapshot; take a
 fresh inventory after writers finish before a server swap.
 
-The separate 0.41 test runtime stays outside this workspace's dependency pins.
-Rerun 0.39 adds the Python table-blueprint API; 0.40 adds saved sort and filters;
-0.41 adds preview start-point control (default midpoint). Its SelfCap test blueprint
-uses ascending Quality rank, start point 0.5, and a separate filtered catalog entry
-sharing all layer files with a saved `refined = true` table filter. It is a filtered
-view, not a physical subset of the underlying registrations.
+The Rerun 0.41 table blueprint (saved sort, filters and preview start point) lives
+outside this workspace's pins; see `experiments/selfcap-catalog-041/README.md`.
 
-
-SelfCap's default segment layout still assumes four phones: OAK at `rig_04`,
-Quest at `rig_05`. Three-phone captures currently put them at `rig_03` and
-`rig_04`. A fixed-slot migration must reserve four exo slots, always map OAK and
-Quest to their fixed slots, and apply that mapping to base ingestion, transforms,
-IMU, projections, and every derived layer reader/writer. Existing recordings
-would need a consistent remap across all layers before registration. A blueprint
-change alone cannot repair those paths. The table's `rig_00` works in both layouts.
+SelfCap's default segment layout assumes four phones: OAK at `rig_04`, Quest at
+`rig_05`. Three-phone captures put them at `rig_03` and `rig_04`, and a blueprint
+change alone cannot remap those paths. The table's `rig_00` works in both layouts.
 
 The native viewer saves its own copy of each table layout on disk
 (`~/.local/share/rerun/blueprints/tables/` on Linux,

@@ -32,25 +32,3 @@ def test_display_links_use_hand_roots_and_exclude_hidden_joints() -> None:
     assert (91, 92) in links and (112, 113) in links
     assert {(5, 6), (5, 11), (6, 12), (11, 12)} <= links
     assert not {0, 1, 2, 9, 10, *range(13, 91)} & {joint for link in links for joint in link}
-
-
-def test_quest_hand_observation_uses_raw_camera_detection() -> None:
-    from selfcap_curate.keypoints import SelectedView, exo_display_observed
-
-    pixels = np.zeros((1, 133, 2), dtype=np.float32)
-    detected = pixels.copy()
-    detected[0, 91, 0] = 14.0
-    detected[0, 92, 0] = 16.0
-    scores = np.ones((1, 133), dtype=np.float64)
-    scores[0, 93] = 0.69
-    inliers = np.zeros((1, 133), dtype=bool)
-    inliers[0, 5] = True
-    tracked = np.zeros((1, 133), dtype=bool)
-    tracked[:, 91:112] = True
-    observed = exo_display_observed(pixels, SelectedView(detected, scores), inliers, tracked)
-    assert observed[0, 91]  # raw detection supports Quest despite absent triangulation support
-    assert not observed[0, 92]  # beyond 15 px
-    assert not observed[0, 93]  # low raw confidence
-    assert observed[0, 94]
-    assert observed[0, 5]  # body still uses geometric support
-    assert not observed[0, 6]

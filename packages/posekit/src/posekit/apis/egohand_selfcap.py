@@ -263,16 +263,9 @@ def main(config: Config) -> None:
         ),
         static=True,
     )
+    detected_xyxy: Float32[ndarray, "n 4"] = detections.boxes.xyxy_numpy()
     for index in range(len(frames)):
         selected: list[int] = torch.where(detections.boxes.frame_indices == index)[0].tolist()
-        local: HandDetections = HandDetections(
-            BoxDetections(
-                detections.boxes.xyxy[selected],
-                detections.boxes.scores[selected],
-                torch.zeros(len(selected), device=frames.device, dtype=torch.int64),
-            ),
-            tuple(detections.sides[i] for i in selected),
-        )
         result, hand_indices = results_by_frame[index]
         rr.set_time("video_time", duration=float(frame_times[index]))
         rr.log("/image/rgb", rr.Image(frames[index].cpu().numpy()).compress(jpeg_quality=90))
@@ -318,9 +311,9 @@ def main(config: Config) -> None:
         for side, name in enumerate(sides):
             for source, positions, color in (("quest", quest, (255, 75, 180)), ("sapiens", sapiens, (100, 255, 100))):
                 rr.log(f"/image/{source}/{name}", rr.Points2D(positions[index, side], colors=color, radii=2.0, show_labels=False))
-        for box, name in zip(local.boxes.xyxy_numpy(), local.sides, strict=True):
-            side_index = 0 if name == "left" else 1
-            x0, y0, x1, y1 = np.rint(box).astype(int)
+        for row in selected:
+            side_index = 0 if detections.sides[row] == "left" else 1
+            x0, y0, x1, y1 = np.rint(detected_xyxy[row]).astype(int)
             crop = frames[index, max(0, y0) : min(camera.height, y1), max(0, x0) : min(camera.width, x1)].cpu().numpy()
             if crop.size:
                 gray = cv2.cvtColor(cv2.resize(crop, (96, 96)), cv2.COLOR_RGB2GRAY)

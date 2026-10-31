@@ -64,15 +64,21 @@ def residual(a: Float64[ndarray, "... 3"], b: Float64[ndarray, "... 3"]) -> Resi
     return Residual(float(np.median(valid)) if valid.size else None, float(np.percentile(valid, 90)) if valid.size else None, int(valid.size))
 
 
+def mapped(result: FitResult, data: Observations) -> Float64[ndarray, "n 133 3"]:
+    """SOMA joints, ear and foot landmarks at their COCO-133 slots; other slots are NaN."""
+    points = np.full_like(data.exo, np.nan)
+    for key, name in coco_joint_names().items():
+        points[:, key] = result.joints[:, result.names.index(name)]
+    points[:, 3:5] = result.ear_landmarks
+    if result.foot_landmarks is not None:
+        points[:, 17:23] = result.foot_landmarks
+    return points
+
+
 def save(output: Path, data: Observations, result: FitResult, target_s: float, mesh_stride: int = 1, upper_body_only: bool = False) -> Report:
     """Persist a local comparison recording and a strict JSON report."""
     output.mkdir(parents=True, exist_ok=True)
-    mapped = np.full_like(data.exo, np.nan)
-    for coco, name in coco_joint_names().items():
-        mapped[:, coco] = result.joints[:, result.names.index(name)]
-    mapped[:, 3:5] = result.ear_landmarks
-    if result.foot_landmarks is not None:
-        mapped[:, 17:23] = result.foot_landmarks
+    fit_points: Float64[ndarray, "n 133 3"] = mapped(result, data)
     frame = int(np.searchsorted(data.times, target_s, side="right") - 1)
     frame = max(0, min(frame, len(data.times) - 1))
     report = Report(
@@ -84,9 +90,9 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         data.offset_ms,
         target_s,
         float(data.times[frame]),
-        residual(mapped[:, 5:13] if upper_body_only else mapped[:, 5:17], data.exo[:, 5:13] if upper_body_only else data.exo[:, 5:17]),
-        residual(mapped[:, 91:], data.exo[:, 91:]),
-        residual(mapped[:, 91:], data.hands[:, 91:]),
+        residual(fit_points[:, 5:13] if upper_body_only else fit_points[:, 5:17], data.exo[:, 5:13] if upper_body_only else data.exo[:, 5:17]),
+        residual(fit_points[:, 91:], data.exo[:, 91:]),
+        residual(fit_points[:, 91:], data.hands[:, 91:]),
         residual(
             result.joints[:, result.names.index("LeftEye")].astype(np.float64),
             data.head_positions if result.head_anchor not in ("ears", "ears-rotation") else np.full_like(data.head_positions, np.nan),
@@ -104,9 +110,9 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         result.head_offset.astype(float).tolist(),
         float(np.median(result.head_angle_deg)) if np.isfinite(result.head_angle_deg).all() else None,
         float(np.percentile(result.head_angle_deg, 90)) if np.isfinite(result.head_angle_deg).all() else None,
-        residual(mapped[frame, 91:], data.hands[frame, 91:]),
+        residual(fit_points[frame, 91:], data.hands[frame, 91:]),
         residual(data.exo[frame, 91:], data.hands[frame, 91:]),
-        residual(mapped[frame, 91:], data.exo[frame, 91:]),
+        residual(fit_points[frame, 91:], data.exo[frame, 91:]),
         (
             "Training residuals, not independent accuracy measurements.",
             (
@@ -127,7 +133,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     (output / "report.json").write_text(to_json(report))
     recording = rr.RecordingStream("selfcap-soma-prototype")
     recording.save(output / "fit.rrd")
-    quality = assess_quality(mapped.astype(np.float64), data.exo, data.hands, result.scale, data.confidence)
+    quality = assess_quality(fit_points.astype(np.float64), data.exo, data.hands, result.scale, data.confidence)
     (output / "quality.json").write_text(to_json(quality))
     log_quality(recording, quality)
     recording.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
@@ -159,7 +165,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
     recording.send_columns(
         "/world/fit/coco_landmarks",
         indexes=index,
-        columns=rr.Points3D.columns(positions=mapped.astype(np.float32).reshape(-1, 3)).partition([133] * len(data.times)),
+        columns=rr.Points3D.columns(positions=fit_points.astype(np.float32).reshape(-1, 3)).partition([133] * len(data.times)),
     )
     if result.foot_landmarks is not None:
         recording.send_columns(
@@ -174,7 +180,7 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         "/world/inputs/quest", indexes=index, columns=rr.Points3D.columns(positions=data.hands.reshape(-1, 3)).partition([133] * len(data.times))
     )
     for name, points, color in (
-        ("fit", mapped[:, 91:], [60, 220, 170]),
+        ("fit", fit_points[:, 91:], [60, 220, 170]),
         ("exo", data.exo[:, 91:], [255, 150, 35]),
         ("quest", data.hands[:, 91:], [220, 75, 230]),
     ):

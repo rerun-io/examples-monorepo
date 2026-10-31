@@ -1,12 +1,12 @@
 """Read one bounded SelfCap window without catalog writes."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
 from datafusion import col, lit
-from jaxtyping import Float64, Int64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from scipy.spatial.transform import Rotation, Slerp
@@ -91,6 +91,20 @@ class Observations:
     """Fixed catalog Quest offset."""
     support: Int64[ndarray, "n 133"] | None = None
     """Geometric inlier-view counts, when supplied by the triangulation layer."""
+
+
+def subset(data: Observations, mask: Bool[ndarray, "n"]) -> Observations:
+    """Keep the masked frames of every per-frame observation stream."""
+    return replace(
+        data,
+        times=data.times[mask],
+        exo=data.exo[mask],
+        confidence=data.confidence[mask],
+        hands=data.hands[mask],
+        head_positions=data.head_positions[mask],
+        head_rotations=data.head_rotations[mask],
+        support=data.support[mask] if data.support is not None else None,
+    )
 
 
 def seconds(values: pa.ChunkedArray) -> Float64[ndarray, "n"]:

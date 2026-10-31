@@ -7,6 +7,7 @@ from typing import Literal
 import numpy as np
 import pyarrow as pa
 from dataforge.logging_toolkit import time_column
+from dataforge.schema import rig_path
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun import Points2D
@@ -35,7 +36,7 @@ class CenterTrack:
 
 def read_quest_centers(calibration: DatasetEntry, base: DatasetEntry, segment: str, rig: int) -> list[CenterTrack]:
     """Use the base's left-eye head track and the calib layer's resolved Quest extrinsics."""
-    path: str = f"/world/rig_{rig:02d}"
+    path: str = rig_path(rig)
     view = base.filter_segments(segment)
     videos: set[str] = {item.entity_path for item in catalog_components(view.schema()) if item.archetype == "VideoStream"}
     if not any(f"{path}/cam_{cam:02d}/pinhole/video" in videos for cam in (0, 1)):

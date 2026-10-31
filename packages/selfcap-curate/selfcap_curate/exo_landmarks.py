@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 from dataforge.logging_toolkit import time_column
+from dataforge.schema import pinhole_path
 from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, OptimizationProfile
 from serde import serde
@@ -31,6 +32,11 @@ class Landmark:
     """Vertical source pixel coordinate."""
     confidence: float
     """Label confidence in (0, 1]."""
+
+    @property
+    def phone(self) -> int | None:
+        """Target phone rig index, or None for a Quest optical target."""
+        return int(self.target_id[5:]) if self.target_id.startswith("phone") else None
 
     def __post_init__(self) -> None:
         if self.view < 0 or not all(math.isfinite(x) for x in (self.video_time, self.u, self.v, self.confidence)):
@@ -70,7 +76,7 @@ def write_landmarks(path: Path, segment: str, record: Landmarks) -> None:
         ordered = [label for stamp in stamps for label in labels if label.video_time == stamp]
         counts = [sum(label.video_time == stamp for label in labels) for stamp in stamps]
         chunks.append(Chunk.from_columns(
-            f"/world/rig_{view:02d}/cam_00/pinhole/exo_landmarks",
+            f"{pinhole_path(view, 0)}/exo_landmarks",
             indexes=[time_column(np.rint(np.asarray(stamps) * 1e9).astype(np.int64))],
             columns=[
                 *rr.Points2D.columns(positions=[[label.u, label.v] for label in ordered], labels=[label.target_id for label in ordered],
