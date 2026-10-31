@@ -333,3 +333,20 @@ def find_clock(face: FaceTrack, track: HeadTrack, offsets: Float64[ndarray, "5 3
         return coarse
     fine, _ = clock_scan(face, track, offsets, seed, np.arange(coarse - 0.4, coarse + 0.4001, 0.04))
     return coarse if fine is None else fine
+
+
+UPSIDE_DOWN_COS: float = 0.5
+"""A phone whose image "down" axis is within 60 degrees of world up is upside down."""
+
+
+def world_up(track: HeadTrack) -> Float64[ndarray, "3"]:
+    """World up, opposite the head camera's mean "down" axis: a worn headset is upright on average (its pitch tilts this
+    estimate by tens of degrees at most, far inside the upside-down test below)."""
+    down = track.rotations[:, :, 1].mean(axis=0)
+    return -down / np.linalg.norm(down)
+
+
+def upright(camera: Camera, up: Float64[ndarray, "3"]) -> bool:
+    """A mounted phone is never upside down. Five face points seen from a few metres also fit a mirrored pose with the
+    image turned over; this rejects it."""
+    return float(camera.world_T_cam[:3, 1] @ up) < UPSIDE_DOWN_COS

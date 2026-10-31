@@ -109,3 +109,17 @@ def test_a_hands_only_pose_the_head_fit_cannot_check_is_flagged_for_the_episode(
     assert not flagged.ok and flagged.camera is camera
     assert not flagged.episodes["ep001"].ok and flagged.episodes["ep001"].scope == "flagged"
     assert unverified(PhoneCalibration(True, camera), "ep002").episodes["ep002"].scope == "flagged"
+
+
+def test_an_upside_down_phone_pose_is_not_upright_in_the_head_tracks_world() -> None:
+    """Five face points seen from afar also fit a mirrored, upside-down pose; a mounted phone is never upside down."""
+    from selfcap_curate.head_anchor import upright, world_up
+
+    level = look_at(np.zeros(3), np.array([0.0, -0.5, 1.0])).world_T_cam[:3, :3]  # the wearer looks ahead and down
+    track = HeadTrack(np.arange(20) / 20.0, np.repeat(level[None], 20, axis=0), np.tile([0.0, 1.6, 0.0], (20, 1)))
+    up = world_up(track)
+    assert up[1] > 0.8
+    phone = look_at(np.array([2.0, 2.0, 1.0]), np.array([0.0, 1.4, 0.0]))
+    flipped = Camera(np.r_[(Rotation.from_rotvec(phone.parameters[:3]).inv() * Rotation.from_euler("z", 180, degrees=True)).inv().as_rotvec(),
+                           phone.parameters[3:]])
+    assert upright(phone, up) and not upright(flipped, up)

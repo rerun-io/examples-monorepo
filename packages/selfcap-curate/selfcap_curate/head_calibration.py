@@ -34,6 +34,8 @@ from selfcap_curate.head_anchor import (
     residual_summary,
     select_person,
     solve_from_head,
+    upright,
+    world_up,
 )
 from selfcap_curate.keypoints import Keypoints2D
 from selfcap_curate.quest_fit import Correspondences, pairs
@@ -179,13 +181,14 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, dense:
     face_px = {p: residual_summary(c, face_correspondences(faces[p], track, offsets))[1] for p, c in fitted.items()}
     # A phone whose face does not fit the template (back views, or a head stream that disagrees with the hands) keeps a
     # pose from its own dense hands instead: with the offsets fixed, each phone's fit is independent.
+    up = world_up(track)
     for phone, camera in list(fitted.items()):
-        if face_px[phone] is not None and face_px[phone] <= ACCEPT_FACE_PX:
+        if face_px[phone] is not None and face_px[phone] <= ACCEPT_FACE_PX and upright(camera, up):
             continue
         own = gated.get(phone)
         if own is not None and len(own.world) >= 60 and phone not in shifts:
             refit = solve_camera(own, float(camera.parameters[6]), seed=camera)
-            if refit is not None:
+            if refit is not None and upright(refit, up):
                 fitted[phone] = refit
                 faces_bad.add(phone)
                 continue

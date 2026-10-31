@@ -148,6 +148,17 @@ def interpolate_head(
     return result, rotations
 
 
+def rdf_head(quaternions: Float64[ndarray, "p 4"]) -> Float64[ndarray, "p 4"]:
+    """Head orientations (xyzw) in RDF. Some captures (2025-12-11/12) store them with y up and z back; a worn headset is
+    never upside down, so a camera "down" axis pointing up the Y-up world on median marks them. Turning by 180 degrees
+    about x is q * (1, 0, 0, 0) = (w, z, -y, -x)."""
+    down_y = Rotation.from_quat(quaternions).as_matrix()[:, 1, 1]
+    if np.median(down_y) <= 0.0:
+        return quaternions
+    x, y, z, w = quaternions.T
+    return np.stack([w, z, -y, -x], axis=1)
+
+
 def read_window(url: str, dataset: str, segment: str, start: float, end: float, stride: int, source: ExoSource = "rtmw") -> Observations:
     """Use one materialization per entity group, with window pushdown."""
     entry = CatalogClient(url).get_dataset(dataset)
@@ -202,7 +213,7 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     hp = np.asarray(head_table[translation].to_pylist(), dtype=np.float64).reshape(-1, 3)
     hq = np.asarray(head_table[quaternion].to_pylist(), dtype=np.float64).reshape(-1, 4)
     keep = np.r_[True, np.diff(ht) > 0.0]
-    ht, hp, hq = ht[keep], hp[keep], hq[keep]
+    ht, hp, hq = ht[keep], hp[keep], rdf_head(hq[keep])
     hands = interpolate_hands(seconds(hand_table["capture_time"]), np.asarray(hand_table[hands_column].to_pylist(), dtype=np.float64), hand_sample)
     positions, rotations = interpolate_head(ht, hp, hq, head_sample)
     support = np.asarray(table[support_column].to_pylist(), dtype=np.int64) if support_column in table.column_names else None
