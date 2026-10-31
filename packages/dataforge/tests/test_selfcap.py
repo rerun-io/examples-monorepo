@@ -19,7 +19,7 @@ from dataforge.datasets.selfcap import (
     log_quest_hand_poses,
     read_hand_poses,
     write_device_asset,
-    write_gt_layer,
+    write_coco133_layer,
     CameraCalibration,
     EpisodePlan,
     HeadPoses,
@@ -764,7 +764,7 @@ def test_quest_hand_poses_round_trip_through_the_base(tmp_path: Path, width: int
         assert back.orientations is None
 
 
-def test_gt_layer_is_the_coco133_view_of_the_base_hands(tmp_path: Path) -> None:
+def test_gt_layer_from_a_base_is_the_coco133_view_of_its_hands(tmp_path: Path) -> None:
     import pyarrow as pa
     import rerun.chunk as rrc
 
@@ -778,7 +778,7 @@ def test_gt_layer_is_the_coco133_view_of_the_base_hands(tmp_path: Path) -> None:
         hands[side] = read_quest_joint_poses(tmp_path / f"{side}.csv")
     with writing.recording_to(tmp_path / "base.rrd", recording_id="r") as recording:
         log_quest_hand_poses(recording, hands, shift_ns=3_000_000)
-    write_gt_layer(tmp_path / "base.rrd", tmp_path / "gt.rrd", "r")
+    write_coco133_layer(*read_hand_poses(tmp_path / "base.rrd"), tmp_path / "gt.rrd", "r")
 
     table = rrc.ChunkStore.from_chunks(list(rrc.RrdReader(tmp_path / "gt.rrd").stream())).reader(index=schema.CAPTURE_TIMELINE, contents=schema.coco133_xyz_path()).to_arrow_table()
     table = table.filter(pa.compute.is_valid(table[f"{schema.coco133_xyz_path()}:Points3D:positions"]))

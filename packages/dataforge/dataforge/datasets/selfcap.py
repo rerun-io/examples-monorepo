@@ -205,17 +205,13 @@ def read_hand_poses(base_rrd: Path) -> tuple[dict[str, QuestJointPoses], int]:
     return hands, shifts.pop() if shifts else 0
 
 
-def write_gt_layer(base_rrd: Path, target: Path, recording_id: str) -> None:
-    """Derive the ``gt`` layer from a base layer: the COCO-133 view of its Quest hands (``/world/gt/coco133_xyz``).
+def write_coco133_layer(hands: dict[str, QuestJointPoses], shift_ns: int, target: Path, recording_id: str) -> None:
+    """The ``gt`` layer: the COCO-133 view (``/world/gt/coco133_xyz``) of the Quest hands a base holds.
 
     The base holds the hands as recorded; this layer is the dataset-agnostic keypoint view the shared exo/ego tools
-    read. It is always computed from a base (fresh or aligned), so it never needs its own retime.
+    read. Ingest passes the hands it just logged; a retimed base (align) passes ``read_hand_poses`` of itself, so
+    the layer never needs its own retime.
     """
-    write_coco133_layer(*read_hand_poses(base_rrd), target, recording_id)
-
-
-def write_coco133_layer(hands: dict[str, QuestJointPoses], shift_ns: int, target: Path, recording_id: str) -> None:
-    """``write_gt_layer`` from hand poses already read (``read_hand_poses``)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     with writing.recording_to(target, recording_id=recording_id, send_properties=False) as recording:
         log_quest_hands(recording, coco133_hands(hands), shift_ns=shift_ns)
@@ -712,15 +708,17 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         # Plan first, log second: the blueprint panes and num_cameras below are the
         # plan's, so they can only ever describe cameras that really get logged.
         plan: EpisodePlan = build_episode_plan(source)
+        hands: dict[str, QuestJointPoses] = read_quest_joint_hands(plan.episode_dir / "quest")
 
-        # Both layers are staged and published together; gt reads the *staged* base, as a rebuild reads the published one.
+        # Both layers are staged and published together, from the same hands: the base logs them unshifted, and
+        # read_hand_poses of that base gives them back exactly (test_quest_hand_poses_round_trip_through_the_base).
         with writing.atomic_write(gt_target) as staged_gt, writing.atomic_write(target) as staged_base:
-            self._write_base(identity, plan, staged_base)
-            write_gt_layer(staged_base, staged_gt, identity.recording_id)
+            self._write_base(identity, plan, hands, staged_base)
+            write_coco133_layer(hands, 0, staged_gt, identity.recording_id)
         print(f"done {identity.sequence_key} → {target} + {gt_target.parent.name} ({len(plan.panes)} cameras)")
         return target
 
-    def _write_base(self, identity: SequenceIdentity, plan: EpisodePlan, staged: Path) -> None:
+    def _write_base(self, identity: SequenceIdentity, plan: EpisodePlan, hands: dict[str, QuestJointPoses], staged: Path) -> None:
         """The base layer: every raw stream of the episode, as recorded (see the module docstring)."""
         with writing.recording_to(
             staged,
@@ -748,7 +746,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             self._log_quest_pose(recording, plan)
             self._log_oak_mount_prior(recording, plan)
             self._log_quest_mesh_frame(recording, plan)
-            log_quest_hand_poses(recording, read_quest_joint_hands(plan.episode_dir / "quest"))
+            log_quest_hand_poses(recording, hands)
 
             # AnyValues drops None-valued kwargs, so an unreadable metadata.json simply
             # leaves task/collector off the property instead of writing empty strings.
