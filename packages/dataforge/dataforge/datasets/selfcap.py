@@ -64,6 +64,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -73,6 +74,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, RrdReader
 from rerun.encodings import EntityPathLike
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
@@ -636,6 +638,32 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             "Exo rig_00", 0, 0, contents=[schema.video_path(0, 0) + "/**", *body],
         )
         return blueprints.exoego_table_blueprint(scene, pane)
+
+    def register_assets(self, entry: DatasetEntry, output_root: Path) -> None:
+        """Attach the OAK and Quest models to each segment at the rigs it holds them on (``device_asset_id``).
+
+        A rig's role is its ``kind`` (``ego`` = OAK, ``quest``), read for every registered segment in one query; the
+        rig index depends on the phone count. Each run writes fresh stamped files and replaces any asset of the same id.
+        """
+        devices: dict[str, str] = {"ego": "oak", "quest": "quest"}
+        rigs: range = range(DEFAULT_EXO_CAMERAS + 2)
+        table: pa.Table = entry.filter_contents([schema.rig_path(rig) for rig in rigs]).reader(index=None).to_arrow_table()
+        segments: dict[tuple[str, int], list[str]] = {}
+        for row in table.to_pylist():
+            for rig in rigs:
+                kind: list[str] | None = row.get(f"{schema.rig_path(rig)}:kind")
+                if kind and kind[0] in devices:
+                    segments.setdefault((devices[kind[0]], rig), []).append(row["rerun_segment_id"])
+        registered: set[str] = set(entry.assets())
+        stamp: str = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        for (device, rig), ids in sorted(segments.items()):
+            asset_id: str = device_asset_id(device, rig)
+            target: Path = paths.asset_path(output_root, asset_id, stamp=stamp).resolve()
+            write_device_asset(target, device, rig)
+            if asset_id in registered:
+                entry.unregister_asset(asset_id)
+            entry.register_asset(target.as_uri(), mode="opt_in", segments=sorted(ids))
+        print(f"registered {len(segments)} device assets: {', '.join(device_asset_id(*key) for key in sorted(segments))}")
 
     def table_fields(self) -> writing.TableFields:
         """Capture identity and quality at a glance; detailed reports remain selectable.

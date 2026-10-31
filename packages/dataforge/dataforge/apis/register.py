@@ -75,6 +75,7 @@ def main(config: Config) -> None:
         with timer.stage(layer):
             entry.register([path.resolve().as_uri() for path in rrd_paths], layer_name=layer, on_duplicate=on_duplicate).wait()
 
+    dataset.register_assets(entry, output_root)
     started: float = perf_counter()
     republish_blueprints(entry, dataset, catalog_name, output_root)
     blueprint_s: float = perf_counter() - started

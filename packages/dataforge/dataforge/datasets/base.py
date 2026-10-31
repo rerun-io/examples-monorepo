@@ -23,6 +23,7 @@ from typing import ClassVar, Generic, TypeVar
 
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun.catalog import DatasetEntry
 from serde import serde
 
 from dataforge import paths, writing
@@ -226,6 +227,17 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         everything else is excluded rather than hidden. Mandatory for the same
         reason: without it, table cards fall back to viewer heuristics that
         decode every stream of every visible row.
+        """
+
+    def register_assets(self, entry: DatasetEntry, output_root: Path) -> None:
+        """Register the dataset's shared static models as catalog assets, after its layers are registered.
+
+        ``dataforge-register`` calls this on every run, so assets follow the current code and the registered
+        segments. Most datasets have none.
+
+        Args:
+            entry: The catalog dataset, with every layer registered.
+            output_root: Where the asset files are written; the server must be able to read them.
         """
 
     def table_fields(self) -> TableFields:

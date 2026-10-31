@@ -115,6 +115,11 @@ def blueprint_path(root: Path, name: str, *, stamp: str, segment_table: bool = F
     return root / "blueprints" / f"{name}{'-table' if segment_table else ''}-{stamp}.rbl"
 
 
+def asset_path(root: Path, asset_id: str, *, stamp: str) -> Path:
+    """Catalog asset location: ``<root>/assets/<asset_id>-<stamp>.rrd``; a registered file is never rewritten in place."""
+    return root / "assets" / f"{asset_id}-{stamp}.rrd"
+
+
 SIDECAR_DIR: str = "sidecars"
 """Directory holding the small per-sequence inputs a derived layer rebuilds from.
 

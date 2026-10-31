@@ -865,3 +865,35 @@ def test_device_asset_is_a_static_mesh_on_the_rig(tmp_path: Path) -> None:
 
     assert {str(c.entity_path) for c in chunks if "Mesh3D:vertex_positions" in c.to_record_batch().schema.names} == {"/world/rig_03/device"}
     assert all(c.is_static for c in chunks if str(c.entity_path) == "/world/rig_03/device")
+
+
+def rig_layout_base(target: Path, recording_id: str, phones: int) -> None:
+    """A base holding only the rig nodes: ``phones`` exo rigs, then the OAK (ego) and the Quest."""
+    from dataforge.logging_toolkit import log_rig_node
+    from dataforge.writing import recording_to
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with recording_to(target, recording_id=recording_id) as recording:
+        for rig, (name, kind) in enumerate([*((device, "exo") for device in EXO_DEVICES[:phones]), ("oak", "ego"), ("quest", "quest")]):
+            log_rig_node(recording, rig, reference=schema.CAM0_REFERENCE, num_cameras=1, name=name, kind=kind)
+
+
+@pytest.mark.integration
+def test_register_attaches_the_device_meshes_at_each_segments_own_rigs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The OAK and Quest models are catalog assets, one per device position: a three-phone session puts the OAK at
+    # rig_03, a four-phone session at rig_04. dataforge-register attaches each segment the meshes for its own rigs.
+    import rerun as rr
+
+    from dataforge.apis import register
+
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "output"))
+    four, three = "selfcap__2025-12-20__25aeb66a__ep001", "selfcap__2025-12-21__1dbe8c49__ep002"
+    rig_layout_base(tmp_path / "output/base" / f"{four}.rrd", four, phones=4)
+    rig_layout_base(tmp_path / "output/base" / f"{three}.rrd", three, phones=3)
+    with rr.server.Server(port=0) as server:
+        for _ in range(2):  # a second run replaces the assets instead of adding more
+            register.main(register.Config(dataset=SelfcapConfig(), catalog_url=server.url(), catalog_name="selfcap-test", replace=True))
+        entry = server.client().get_dataset("selfcap-test")
+        assert sorted(entry.assets_for_segment(four)) == ["devices__oak_d_pro_w__rig_04", "devices__quest3s__rig_05"]
+        assert sorted(entry.assets_for_segment(three)) == ["devices__oak_d_pro_w__rig_03", "devices__quest3s__rig_04"]
+        assert len(entry.assets()) == 4
