@@ -33,3 +33,31 @@ def test_a_flung_wrist_is_dropped_and_the_rest_of_the_frame_kept() -> None:
 def test_a_clean_session_is_left_alone() -> None:
     xyz, confidence = skeleton(seed=4)
     assert np.array_equal(np.isnan(drop_bone_outliers(xyz, confidence)), np.isnan(xyz))
+
+
+def test_a_bridged_joint_that_breaks_its_bones_is_not_written(monkeypatch) -> None:
+    """Gap bridging and jump replacement run after the triangulation's bone check; a bridged knee 60 cm off (a044c36b:
+    thighs up to 1.5 m in 9.5% of frames, 80% of them bridged) must still be dropped."""
+    from test_keypoints_geometry import cameras
+
+    import selfcap_curate.temporal_keypoints as temporal
+    from selfcap_curate.keypoints import Keypoints3D, SelectedView, project, smooth_keypoints
+
+    xyz, confidence = skeleton(frames=120)
+    xyz[:, :, 2] += 4.0  # in front of the test cameras
+    cams = cameras()[:2]
+    selected = {str(i): SelectedView(np.stack([project(c, np.nan_to_num(f.astype(np.float64)))[:, :2] for f in xyz]).astype(np.float32), np.ones((120, 133)))
+                for i, c in enumerate(cams)}
+    result = Keypoints3D(np.arange(120) / 25.0, xyz, np.full((120, 133), 2, np.uint8), confidence, selected, {str(i): c for i, c in enumerate(cams)},
+                         25.0, np.ones((120, 2, 133), bool), np.zeros((120, 133), np.float32))
+    real = temporal.stable_body
+
+    def bridged_wrong(result, points):  # noqa: ANN001, ANN202
+        out = real(result, points).copy()
+        out[60, 13] += (0.0, -0.6, 0.0)  # a bridged left knee: the thigh 2.5x its length
+        return out
+
+    monkeypatch.setattr(temporal, "stable_body", bridged_wrong)
+    out = smooth_keypoints(result)
+    assert np.isnan(out.xyz[60, 13]).all() and out.confidence[60, 13] == 0.0
+    assert np.isfinite(out.xyz[60, [11, 15]]).all() and np.isfinite(out.xyz[59, 13]).all()

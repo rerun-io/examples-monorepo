@@ -191,6 +191,114 @@ def joint_bundle(
     return unpack(result.x)
 
 
+BODY: tuple[int, ...] = tuple(range(5, 17))
+"""COCO shoulders, elbows, wrists, hips, knees and ankles: the joints that tie the phones to each other."""
+MIN_BODY_SCORE: float = 0.5
+"""Body detections below this score do not join a body point."""
+BODY_GATE_PX: float = 25.0
+"""A view joins a body point only within this many pixels: wider than the 8 px keypoints gate, because the poses it
+corrects disagree by 9-14 px on joints far from the head (7ffcbc7e legs, 4b1b6cdc elbow)."""
+MIN_BODY_RAY_DEG: float = 5.0
+"""Body points whose agreeing rays all meet at a shallower angle carry no depth and are left out, as in keypoints."""
+MAX_BODY_PAIRS: int = 1200
+"""Body pairs per phone and round, evenly spaced: about as many as the gated hand pairs, so neither dominates."""
+BODY_ROUNDS: int = 3
+"""Triangulate-then-refit rounds."""
+
+
+@dataclass(frozen=True, slots=True)
+class BodyTrack:
+    """One exo view's selected wearer: BODY keypoints on the dense aligned grid shared by every view."""
+
+    times_s: Float64[ndarray, "n"]
+    """Aligned seconds of each detection frame."""
+    xy: Float64[ndarray, "n j 2"]
+    """BODY keypoints in pixels; NaN when absent."""
+    scores: Float64[ndarray, "n j"]
+    """Detector scores; zero when absent."""
+
+
+def triangulate_bodies(cameras: Mapping[str, Camera], bodies: Mapping[str, BodyTrack], gate_px: float = BODY_GATE_PX) -> Float64[ndarray, "n j 3"]:
+    """Each frame's body joints from the views that see them: DLT, drop views beyond ``gate_px``, refit.
+
+    NaN where fewer than two views agree, or where the agreeing rays meet at less than MIN_BODY_RAY_DEG.
+    """
+    phones = [p for p in cameras if p in bodies]
+    if not phones:
+        return np.zeros((0, len(BODY), 3))
+    times = bodies[phones[0]].times_s
+    if any(not np.array_equal(bodies[p].times_s, times) for p in phones):
+        raise ValueError("body tracks must share one time grid")
+    xy = np.stack([bodies[p].xy for p in phones])  # v n j 2
+    use = np.stack([bodies[p].scores >= MIN_BODY_SCORE for p in phones]) & np.isfinite(xy).all(-1)
+    xy = np.nan_to_num(xy)
+    matrices = np.stack([_projection(cameras[p]) for p in phones])  # v 3 4
+    rows = np.stack([xy[..., :1] * matrices[:, None, None, 2] - matrices[:, None, None, 0],
+                     xy[..., 1:] * matrices[:, None, None, 2] - matrices[:, None, None, 1]], axis=-2)  # v n j 2 4
+    centres = np.stack([cameras[p].world_T_cam[:3, 3] for p in phones])
+
+    def solve(mask: Bool[ndarray, "v n j"]) -> Float64[ndarray, "n j 3"]:
+        weighted = rows * mask[..., None, None]
+        gram = np.einsum("vnjri,vnjrk->njik", weighted, weighted)
+        vectors = np.linalg.eigh(gram)[1][..., 0]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            points = vectors[..., :3] / vectors[..., 3:]
+        points[mask.sum(0) < 2] = np.nan
+        return points
+
+    def errors(points: Float64[ndarray, "n j 3"]) -> Float64[ndarray, "v n j"]:
+        flat = np.nan_to_num(points).reshape(-1, 3)
+        out = []
+        for v, p in enumerate(phones):
+            uvd = cameras[p].project(flat)
+            error = np.linalg.norm(uvd[:, :2] - xy[v].reshape(-1, 2), axis=1)
+            out.append(np.where(uvd[:, 2] > 0.0, error, np.inf).reshape(points.shape[:2]))
+        return np.where(np.isfinite(points).all(-1)[None], np.stack(out), np.inf)
+
+    mask = use
+    for _ in range(2):
+        mask = use & (errors(solve(mask)) <= gate_px)
+    points = solve(mask)
+    rays = points[None] - centres[:, None, None]
+    rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
+    cosines = np.einsum("anjk,bnjk->abnj", rays, rays)
+    pair = mask[:, None] & mask[None] & ~np.eye(len(phones), dtype=bool)[..., None, None]
+    widest = np.where(pair, cosines, 1.0).min(axis=(0, 1))
+    points[~(widest < np.cos(np.radians(MIN_BODY_RAY_DEG)))] = np.nan
+    return points
+
+
+def body_correspondences(camera: Camera, body: BodyTrack, points: Float64[ndarray, "n j 3"]) -> Correspondences:
+    """A phone's body detections paired with the triangulated body, within BODY_GATE_PX, thinned to MAX_BODY_PAIRS."""
+    keep = (body.scores >= MIN_BODY_SCORE) & np.isfinite(body.xy).all(-1) & np.isfinite(points).all(-1)
+    data = Correspondences(points[keep], body.xy[keep], body.scores[keep])
+    if not len(data.world):
+        return data
+    near = camera.residuals(data) <= BODY_GATE_PX
+    return _thin(Correspondences(data.world[near], data.image[near], data.weights[near]), MAX_BODY_PAIRS)
+
+
+def body_bundle(cameras: Mapping[str, Camera], faces: Mapping[str, FaceTrack], hands: Mapping[str, Correspondences],
+                bodies: Mapping[str, BodyTrack], track: HeadTrack, offsets: Float64[ndarray, "5 3"], rounds: int = BODY_ROUNDS) -> dict[str, Camera]:
+    """Refit every pose to its face and hand pairs plus the wearer's body as the other phones see it.
+
+    Face and hands anchor each phone to the head track on their own, so phones pose well near the head and hands but
+    can disagree far below them. Each round triangulates the body from the current poses and refits all poses to
+    face, hand and body pairs (offsets fixed). Phones without a body track keep only their own pairs.
+    """
+    fitted = dict(cameras)
+    empty = Correspondences(np.zeros((0, 3)), np.zeros((0, 2)), np.zeros(0))
+    for _ in range(rounds):
+        points = triangulate_bodies(fitted, bodies)
+        pairs = {}
+        for p, camera in fitted.items():
+            own = hands.get(p, empty)
+            extra = body_correspondences(camera, bodies[p], points) if p in bodies and len(points) else empty
+            pairs[p] = Correspondences(np.r_[own.world, extra.world], np.r_[own.image, extra.image], np.r_[own.weights, extra.weights])
+        fitted, _ = joint_bundle(fitted, faces, pairs, track, offsets, fit_offsets=False)
+    return fitted
+
+
 DEFAULT_OFFSETS: Float64[ndarray, "5 3"] = np.array([
     [0.0311, -0.0064, -0.0646],
     [0.0042, -0.0295, -0.0906],

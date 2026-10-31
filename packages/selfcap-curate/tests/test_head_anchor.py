@@ -123,3 +123,79 @@ def test_an_upside_down_phone_pose_is_not_upright_in_the_head_tracks_world() -> 
     flipped = Camera(np.r_[(Rotation.from_rotvec(phone.parameters[:3]).inv() * Rotation.from_euler("z", 180, degrees=True)).inv().as_rotvec(),
                            phone.parameters[3:]])
     assert upright(phone, up) and not upright(flipped, up)
+
+
+# The wearer's body below the head (world offsets from the head position): shoulders, elbows, wrists, hips, knees, ankles.
+BODY_OFFSETS = np.array([[0.18, -0.25, 0.0], [-0.18, -0.25, 0.0], [0.25, -0.5, 0.05], [-0.25, -0.5, 0.05], [0.25, -0.75, 0.15], [-0.25, -0.75, 0.15],
+                         [0.1, -0.75, 0.0], [-0.1, -0.75, 0.0], [0.1, -1.15, 0.02], [-0.1, -1.15, 0.02], [0.1, -1.55, 0.0], [-0.1, -1.55, 0.0]])
+
+
+def observe_body(camera: Camera, track: HeadTrack, noise: float, seed: int = 7):
+    """The body seen at 4 Hz on the face grid, with pixel noise."""
+    from selfcap_curate.head_anchor import BodyTrack
+
+    rng = np.random.default_rng(seed)
+    rows = slice(None, None, 5)
+    world = track.positions[rows, None] + BODY_OFFSETS[None]
+    n = len(world)
+    uv = camera.project(world.reshape(-1, 3))[:, :2].reshape(n, len(BODY_OFFSETS), 2) + rng.normal(0.0, noise, (n, len(BODY_OFFSETS), 2))
+    return BodyTrack(track.times_s[rows], uv, np.full((n, len(BODY_OFFSETS)), 0.9))
+
+
+def leg_disagreement(cameras: dict[str, Camera], bodies) -> float:
+    """Median largest reprojection error of the legs (knees, ankles) triangulated from every view."""
+    from selfcap_curate.head_anchor import triangulate_bodies
+
+    points = triangulate_bodies(cameras, bodies, gate_px=1e6)
+    errors = [np.linalg.norm(cameras[p].project(points[:, 8:].reshape(-1, 3))[:, :2] - bodies[p].xy[:, 8:].reshape(-1, 2), axis=1) for p in cameras]
+    return float(np.nanmedian(np.max(errors, axis=0)))
+
+
+SCENE = {"a": (np.array([2.5, 2.2, 1.8]), np.array([0.0, 1.0, 0.0])), "b": (np.array([-2.0, 2.0, 2.5]), np.array([0.0, 1.0, 0.0])),
+         "c": (np.array([0.5, 1.9, -3.0]), np.array([0.0, 1.0, 0.0]))}
+
+
+def test_body_joints_are_triangulated_from_the_views_that_agree() -> None:
+    from selfcap_curate.head_anchor import BodyTrack, triangulate_bodies
+
+    track = walk()
+    cameras = {p: look_at(*scene) for p, scene in SCENE.items()}
+    bodies = {p: observe_body(c, track, noise=0.0, seed=i) for i, (p, c) in enumerate(cameras.items())}
+    bad = bodies["c"].xy.copy()
+    bad[:, 0] += 80.0  # one view puts the left shoulder 80 px off: the other two still agree
+    alone = bodies["b"].scores.copy()
+    alone[:, 11] = 0.0  # right ankle seen by b only after a and c lose it
+    bodies = {"a": BodyTrack(bodies["a"].times_s, bodies["a"].xy, np.where(np.arange(12) == 11, 0.0, bodies["a"].scores)),
+              "b": BodyTrack(bodies["b"].times_s, bodies["b"].xy, np.where(np.arange(12) == 11, 0.9, alone)),
+              "c": BodyTrack(bodies["c"].times_s, bad, np.where(np.arange(12) == 11, 0.0, bodies["c"].scores))}
+    points = triangulate_bodies(cameras, bodies)
+    truth = track.positions[::5, None] + BODY_OFFSETS[None]
+    assert np.nanmax(np.linalg.norm(points[:, :11] - truth[:, :11], axis=-1)) < 1e-3
+    assert np.isnan(points[:, 11]).all()
+
+
+def test_the_body_seen_from_several_phones_corrects_poses_a_wrong_face_template_leaves_off() -> None:
+    """Face pairs alone pose each phone separately: a template 1-2 cm off turns each phone a little, and the legs, far
+    below the head, disagree between phones. The body seen by every phone pulls them back into agreement."""
+    from selfcap_curate.head_anchor import body_bundle
+
+    track = walk()
+    truth = {p: look_at(*scene) for p, scene in SCENE.items()}
+    faces = {p: observe(c, track, noise=1.5, outliers=0.05, seed=i) for i, (p, c) in enumerate(truth.items())}
+    bodies = {p: observe_body(c, track, noise=1.5, seed=10 + i) for i, (p, c) in enumerate(truth.items())}
+    wrong = OFFSETS + np.random.default_rng(4).normal(0.0, 0.015, OFFSETS.shape)
+    start = {p: solve_from_head(face_correspondences(faces[p], track, wrong), focal=1400.0) for p in truth}
+    assert all(c is not None for c in start.values())
+    face_only, _ = joint_bundle({p: c for p, c in start.items() if c is not None}, faces, {}, track, wrong, fit_offsets=False)
+    refined = body_bundle(face_only, faces, {}, bodies, track, wrong)
+    before, after = leg_disagreement(face_only, bodies), leg_disagreement(refined, bodies)
+    assert before > 6.0 and after < before / 2
+    # Agreement alone does not fix the phones' common orientation; the face (and in captures the Quest hands) still do,
+    # so the refined poses must keep fitting the face.
+    from selfcap_curate.head_anchor import residual_summary
+
+    for p in truth:
+        face_before = residual_summary(face_only[p], face_correspondences(faces[p], track, wrong))[1]
+        face_after = residual_summary(refined[p], face_correspondences(faces[p], track, wrong))[1]
+        assert face_before is not None and face_after is not None and face_after < face_before + 2.0
+

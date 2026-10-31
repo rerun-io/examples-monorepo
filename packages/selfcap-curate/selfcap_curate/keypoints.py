@@ -575,7 +575,9 @@ def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
     xyz: Float32[ndarray, "n 133 3"] = np.where((measured.n_views >= 2)[..., None], smooth, result.xyz)
     from selfcap_curate.temporal_keypoints import bridge_short_gaps, stable_body
 
-    xyz = stable_body(result, xyz)
+    # Jump replacement and gap bridging come after the triangulation's bone check: check the bones again, so a bridge
+    # to a wrong edge point is not written (a044c36b: thighs up to 1.5 m, 80% of them bridged).
+    xyz = drop_bone_outliers(stable_body(result, xyz), result.confidence)
     final: TriangulationBatch = support_for_points(result, xyz)
     # Temporal estimates retain their coordinates even without two views at that
     # instant; support components still describe only the actual 8 px inliers.
