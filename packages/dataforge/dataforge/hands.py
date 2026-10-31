@@ -20,7 +20,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Bool, Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133_batch
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
@@ -126,25 +126,27 @@ def log_keypoints3d(
     recording: rr.RecordingStream,
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     positions: Float32[ndarray, "t 133 3"],
     confidence: Float32[ndarray, "t 133"] | None,
     path: str = schema.coco133_xyz_path(),
     describe: bool = True,
+    color_range: tuple[float, float] = (0.0, 1.0),
 ) -> None:
     """Write dense COCO rows with confidence colours to ``path``; None means no shipped confidence.
 
     Args:
         recording: Destination stream.
         times_ns: Int64[ndarray, "t"] video times in nanoseconds.
-        frame_indices: Int64[ndarray, "t"] source indices.
+        frame_indices: Int64[ndarray, "t"] source indices, or None when the source has only the video_time clock.
         positions: Float32[ndarray, "t 133 3"], metres; missing slots contain NaN.
         confidence: Float32[ndarray, "t 133"] or None; preserve shipped values.
+        color_range: Raw score bounds mapped to red and green; only colours are rescaled.
         path: Entity; each person of a multi-person sequence has its own (``schema.person_coco133_xyz_path``).
     """
     if describe:
         log_keypoint_descriptors(recording, path, dimension=3)
-    _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=3)
+    _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=3, color_range=color_range)
 
 
 def log_keypoints2d(
@@ -152,15 +154,16 @@ def log_keypoints2d(
     path: str,
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     positions: Float32[ndarray, "t 133 2"],
     confidence: Float32[ndarray, "t 133"] | None,
     describe: bool = True,
+    color_range: tuple[float, float] = (0.0, 1.0),
 ) -> None:
-    """Write Float32[t,133,2] pixels and confidence to ``path`` (shipped or projected 2D)."""
+    """Write Float32[t,133,2] pixels and raw confidence; color_range controls only the red-to-green display scale."""
     if describe:
         log_keypoint_descriptors(recording, path, dimension=2)
-    _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2)
+    _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2, color_range=color_range)
 
 
 def _send_keypoint_rows(
@@ -168,27 +171,36 @@ def _send_keypoint_rows(
     path: str,
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     positions: Float32[ndarray, "t 133 d"],
     confidence: Float32[ndarray, "t 133"] | None,
     dimension: Literal[2, 3],
+    color_range: tuple[float, float] = (0.0, 1.0),
 ) -> None:
     """Bound temporal columns before allocation using the publication byte target."""
-    # Budget positions, confidence, packed colours, offsets, row IDs and both clocks.
-    row_bytes = 133 * (dimension * 4 + 4 + (4 if dimension == 3 else 0)) + 64
+    low: float = color_range[0]
+    high: float = color_range[1]
+    if not np.isfinite(color_range).all() or low >= high:
+        raise ValueError("color_range must contain finite, increasing bounds")
+    # Budget positions, confidence, packed colours (2D and 3D), offsets, row IDs and both clocks.
+    row_bytes = 133 * (dimension * 4 + 4 + 4) + 64
     rows_per_batch = (cast(int, rrc.OptimizationProfile.OBJECT_STORE.max_bytes) - 4096) // row_bytes
     for start in range(0, len(positions), rows_per_batch):
         stop = start + rows_per_batch
         masked, scores = confidence_rule(positions[start:stop], None if confidence is None else confidence[start:stop])
+        colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(((scores - low) / (high - low)).reshape(1, -1, 1))[0]
         columns = (
             Points3DWithConfidence.columns(
-                positions=masked.reshape(-1, 3), confidences=scores.reshape(-1), colors=confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0]
+                positions=masked.reshape(-1, 3), confidences=scores.reshape(-1), colors=colors
             )
-            if dimension == 3 else Points2DWithConfidence.columns(positions=masked.reshape(-1, 2), confidences=scores.reshape(-1))
+            if dimension == 3
+            else Points2DWithConfidence.columns(
+                positions=masked.reshape(-1, 2), confidences=scores.reshape(-1), colors=colors
+            )
         )
         rr.send_columns(
             path,
-            indexes=[time_column(times_ns[start:stop]), frame_index_column(frame_indices[start:stop])],
+            indexes=[time_column(times_ns[start:stop]), *([] if frame_indices is None else [frame_index_column(frame_indices[start:stop])])],
             columns=columns.partition([133] * len(masked)),
             recording=recording,
         )
@@ -199,16 +211,18 @@ def log_projections(
     pixels_by_camera: Iterable[tuple[tuple[int, int], Float32[ndarray, "t 133 2"]]],
     *,
     times_ns: Int64[ndarray, "t"],
-    frame_indices: Int64[ndarray, "t"],
+    frame_indices: Int64[ndarray, "t"] | None,
     confidence: Float32[ndarray, "t 133"],
     camera_model: str,
     calibration_source: str | None = None,
     describe: bool = True,
+    color_range: tuple[float, float] = (0.0, 1.0),
 ) -> None:
     """Write the ``projections`` property, then each ``(rig, cam)``'s lens-projected COCO-133 pixels.
 
     Each dataset projects through its own lens model; this writes the result the same way for all.
     The property records ``derived_from``, ``camera_model`` and, when given, ``calibration_source``.
+    ``color_range`` rescales display colours only; stored confidence stays raw.
     ``pixels_by_camera`` is consumed one camera at a time, so a generator that projects each camera
     as it is asked for keeps a single camera's pixels in memory.
     """
@@ -222,6 +236,7 @@ def log_projections(
             positions=pixels,
             confidence=confidence,
             describe=describe,
+            color_range=color_range,
         )
 
 

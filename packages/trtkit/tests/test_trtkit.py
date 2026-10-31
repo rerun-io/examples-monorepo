@@ -382,3 +382,109 @@ def test_dynamic_runtime_runs_two_shapes_from_one_engine(tmp_path: Path) -> None
         torch.testing.assert_close(outputs["y"].float(), expected, rtol=2e-2, atol=2e-2)
     with pytest.raises(ValueError, match="outside the engine profile"):
         runtime({"images": torch.randn(5, 3, 28, 28, device="cuda"), "bias": bias})
+
+
+def _trunk_and_tail_model():
+    """Conv -> SiLU -> Resize -> Conv trunk, then a ScaleNorm tail (x / ||x||) that reads a weight the trunk also reads."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    rng = np.random.default_rng(0)
+    weights = {
+        "w1": rng.normal(0, 0.3, (4, 2, 3, 3)),
+        "w2": rng.normal(0, 0.3, (4, 4, 1, 1)),
+        "shared": np.full((4,), 0.5),  # conv bias in the trunk and a scale in the tail
+        "scales": np.array([1.0, 1.0, 2.0, 2.0]),
+        "axes": np.array([1], dtype=np.int64),
+    }
+    nodes = [
+        helper.make_node("Conv", ["x", "w1", "shared"], ["c1"], pads=[1, 1, 1, 1]),
+        helper.make_node("Sigmoid", ["c1"], ["s1"]),
+        helper.make_node("Mul", ["c1", "s1"], ["a1"]),
+        helper.make_node("Resize", ["a1", "", "scales"], ["r1"], mode="nearest"),
+        helper.make_node("Conv", ["r1", "w2"], ["c2"]),
+        helper.make_node("Mul", ["c2", "c2"], ["sq"]),
+        helper.make_node("ReduceSum", ["sq", "axes"], ["ss"], keepdims=1),
+        helper.make_node("Sqrt", ["ss"], ["norm"]),
+        helper.make_node("Div", ["c2", "norm"], ["unit"]),
+        helper.make_node("Unsqueeze", ["shared", "axes"], ["shared_col"]),
+        helper.make_node("Unsqueeze", ["shared_col", "axes"], ["shared_hw"]),
+        helper.make_node("Mul", ["unit", "shared_hw"], ["y"]),
+    ]
+    initializers = [numpy_helper.from_array(v if v.dtype == np.int64 else v.astype(np.float32), name=k) for k, v in weights.items()]
+    graph = helper.make_graph(
+        nodes,
+        "trunk_and_tail",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 2, 5, 5])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4, 10, 10])],
+        initializers,
+    )
+    return onnx.helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+
+
+def test_fp16_conv_trunk_halves_the_trunk_and_keeps_the_tail_and_io_fp32() -> None:
+    """Nodes at or before a Conv run in fp16; the norm tail, graph I/O and Resize scales stay fp32; numerics hold."""
+    import numpy as np
+    import onnx
+    from onnx import TensorProto
+    from onnx.reference import ReferenceEvaluator
+
+    from trtkit.onnx_precision import fp16_conv_trunk
+
+    source = _trunk_and_tail_model()
+    converted = fp16_conv_trunk(source)
+
+    types = {v.name: v.type.tensor_type.elem_type for v in [*converted.graph.value_info, *converted.graph.input, *converted.graph.output]}
+    types.update({t.name: t.data_type for t in converted.graph.initializer})
+    producers = {out: node for node in converted.graph.node for out in node.output}
+    conv_inputs = [name for node in converted.graph.node if node.op_type == "Conv" for name in node.input]
+    assert all(types[name] == TensorProto.FLOAT16 for name in conv_inputs), "trunk convs read fp16 activations and weights"
+    assert types["a1"] == TensorProto.FLOAT16 and types["r1"] == TensorProto.FLOAT16, "SiLU and Resize between convs run in fp16"
+    assert types["scales"] == TensorProto.FLOAT, "Resize scales stay float32"
+    assert types["ss"] == TensorProto.FLOAT and types["norm"] == TensorProto.FLOAT, "the norm tail stays fp32"
+    assert types["x"] == TensorProto.FLOAT and types["y"] == TensorProto.FLOAT, "graph I/O stays fp32"
+    assert types["shared"] == TensorProto.FLOAT, "a weight the tail reads keeps its fp32 copy"
+    assert producers[next(n for n in conv_inputs if n.startswith("x"))].op_type == "Cast"
+    assert source.graph.node[0].input[0] == "x", "the caller's model is not mutated"
+    onnx.checker.check_model(converted)
+
+    x = np.random.default_rng(1).normal(0, 1, (1, 2, 5, 5)).astype(np.float32)
+    (expected,) = ReferenceEvaluator(source).run(None, {"x": x})
+    (actual,) = ReferenceEvaluator(converted).run(None, {"x": x})
+    assert actual.dtype == np.float32
+    np.testing.assert_allclose(actual, expected, atol=2e-3)
+
+
+def test_fp16_conv_trunk_rejects_outputs_inside_the_trunk() -> None:
+    """A graph that ends in a Conv has no fp32 tail to hand outputs back; say so instead of guessing."""
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    from trtkit.onnx_precision import fp16_conv_trunk
+
+    weight = numpy_helper.from_array(__import__("numpy").ones((1, 1, 1, 1), dtype="float32"), name="w")
+    graph = helper.make_graph(
+        [helper.make_node("Conv", ["x", "w"], ["y"])],
+        "conv_only",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 1, 2, 2])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 1, 2, 2])],
+        [weight],
+    )
+    with pytest.raises(ValueError, match="fp16 trunk"):
+        fp16_conv_trunk(onnx.helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)]))
+
+
+def test_onnx_content_hash_reads_each_file_version_once(tmp_path: Path) -> None:
+    """Workers reload models every session; the multi-GB ONNX is hashed once per (path, size, mtime), not per load."""
+    from trtkit import trt_builder
+
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"proto")
+    model.with_suffix(".onnx.data").write_bytes(b"weights")
+    first = trt_builder.onnx_content_hash(model)
+    reads = trt_builder._hash_files.cache_info().misses
+    assert trt_builder.onnx_content_hash(model) == first
+    assert trt_builder._hash_files.cache_info().misses == reads, "an unchanged file is not read again"
+    model.with_suffix(".onnx.data").write_bytes(b"other weights")
+    assert trt_builder.onnx_content_hash(model) != first, "a rewritten weight file is hashed again"

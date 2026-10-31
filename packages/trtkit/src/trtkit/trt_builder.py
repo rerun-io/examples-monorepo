@@ -16,6 +16,7 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -291,11 +292,20 @@ def onnx_content_hash(onnx_path: Path) -> str:
     Returns:
         Hex digest string over the proto and any external data.
     """
-    digest = hashlib.sha256()
+    versions: list[tuple[str, int, int]] = []
     for path in (onnx_path.expanduser(), onnx_path.expanduser().with_suffix(".onnx.data")):
-        if not path.exists():
-            continue
-        with path.open("rb") as stream:
+        if path.exists():
+            stat = path.stat()
+            versions.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+    return _hash_files(tuple(versions))
+
+
+@lru_cache(maxsize=64)
+def _hash_files(versions: tuple[tuple[str, int, int], ...]) -> str:
+    """SHA-256 over the files in order; keyed by (path, size, mtime) so a process reading the same ONNX again skips the read."""
+    digest = hashlib.sha256()
+    for path, _, _ in versions:
+        with open(path, "rb") as stream:
             for chunk in iter(lambda: stream.read(1 << 20), b""):
                 digest.update(chunk)
     return digest.hexdigest()

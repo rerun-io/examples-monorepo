@@ -4,9 +4,9 @@ Uses the same shared rig discovery as exo-calib. This module exposes no
 registration, segment enumeration, or catalog mutation operation.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -47,6 +47,14 @@ class Segment:
     """Explicit catalog segment id."""
     layout: SelfcapLayout
     """Device assignment discovered once for this segment."""
+    videos: dict[str, CatalogVideo] | None = None
+    """Optional capture-clock packets owned by this post invocation."""
+    hands: CatalogHands | None = None
+    """Optional raw Quest hands and head poses shared across post stages."""
+
+
+SessionVideos: TypeAlias = dict[str, Segment]
+"""Capture-clock segments retained only for the lifetime of one post call."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +164,11 @@ def read_episode(
         resolution: Float64[ndarray, "2"] = np.asarray(first_valid_value(calibration[f"{pinhole}:Pinhole:resolution"]), dtype=np.float64).reshape(2)
         focals.append(float(matrix[0, 0]))
         widths.append(int(resolution[0]))
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, layout.video_entities, timeline)
+    videos: tuple[CatalogVideo, ...] = (
+        tuple(segment.videos[path] for path in layout.video_entities)
+        if segment.videos is not None and timeline == CAPTURE_TIMELINE
+        else read_catalog_videos(dataset, segment_id, layout.video_entities, timeline)
+    )
     return EpisodeInputs(
         layout, SpeedSeries(tg, np.linalg.norm(gyro_values, axis=1)), pose_speed(tp, quaternions), videos, tuple(focals), tuple(widths)
     )
@@ -168,6 +180,8 @@ def read_catalog_hands(segment: Segment) -> CatalogHands:
     Calibration layers may repeat hands on video_time. Selecting capture_time
     keeps the migrated base as the source of raw samples and avoids that copy.
     """
+    if segment.hands is not None:
+        return segment.hands
     dataset, segment_id, layout = segment.dataset, segment.id, segment.layout
     view = dataset.filter_segments(segment_id)
     head: str = rig_path(layout.quest_rig)
@@ -198,11 +212,34 @@ def read_phone_videos(
     segment: Segment,
     *,
     timeline: Literal["capture_time", "video_time"] = CAPTURE_TIMELINE,
+    sync: TimeSync | None = None,
 ) -> dict[str, CatalogVideo]:
-    """Discover named iPhones in one segment on the requested sample clock."""
+    """Read named phones, or reuse capture packets with the supplied aligned clock.
+
+    Cached packets come from an as-cut base. Only their phone timestamps change
+    after alignment; the packet, keyframe and codec objects stay shared.
+    """
     dataset, segment_id, layout = segment.dataset, segment.id, segment.layout
+    if segment.videos is not None:
+        phones: dict[str, CatalogVideo] = {phone: segment.videos[video_path(rig, 0)] for rig, phone in enumerate(layout.phones)}
+        if timeline == "video_time":
+            record: TimeSync = sync if sync is not None else read_time_sync(dataset, segment_id)
+            if record.episode_key.segment != segment_id or record.offsets_ms is None:
+                raise ValueError(f"{segment_id}: expected its successful alignment record")
+            # Match patch_base.rewrite exactly: integer nanoseconds added to capture_time.
+            phones = {
+                phone: replace(video, times=(video.t_ns + round((record.offsets_ms.get(f"exo/{phone}") or 0.0) * 1e6)).view(video.times.dtype))
+                for phone, video in phones.items()
+            }
+        return phones
     videos = read_catalog_videos(dataset, segment_id, [video_path(rig, 0) for rig in range(len(layout.phones))], timeline)
     return dict(zip(layout.phones, videos, strict=True))
+
+
+def native_phone_rate(segment: Segment) -> float:
+    """Median native phone rate, rounded as in the session runner."""
+    videos: dict[str, CatalogVideo] = read_phone_videos(segment)
+    return round(float(np.median([1e9 / float(np.median(np.diff(video.t_ns))) for video in videos.values()])), 3)
 
 
 def read_factories(segment: Segment) -> dict[str, FactoryCalibration]:

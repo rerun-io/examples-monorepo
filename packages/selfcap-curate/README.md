@@ -26,7 +26,7 @@ pixi run -e selfcap-curate --frozen selfcap-align \
 Selection must belong to one session; no catalog enumeration is performed.
 Alignment reads presented-time bases containing Quest hands, factory metadata,
 the session UUID and ego `first_frame_idx`. Older incomplete bases need conversion.
-Models use Sapiens2 0.4B and YOLOX through posekit/trtkit TensorRT, batch eight.
+Models use Sapiens2 0.4B (batch four) and YOLOX (batch eight) through posekit/trtkit TensorRT.
 The CLIs use per-machine model caches; callers can set cache environment variables for isolation. Existing targets, NAS output
 and output beneath the input base directory are refused.
 
@@ -109,6 +109,10 @@ pixi run -e selfcap-curate --frozen selfcap-keypoints --calib-dir /local/calib -
 Register base before calib in every batch: the catalog resolves duplicated static values by the newest write.
 If frame planning, missing hands or decoding fails after model load, rerun with the unwritten keys only.
 Order: `selfcap-calibrate` → `selfcap-keypoints` → one `dataforge-swap-layer --layer calib`.
+
+`selfcap-post` runs align, calibrate, and keypoints in one process. It reads each episode's required video packets and raw Quest hands/head poses once and keeps them in memory for the later stages. Aligned phone timestamps use the same integer offsets as the base writer. Standalone stage commands still read from the catalog.
+
+For `selfcap-post`, omit `--rate` to use the first episode's median native phone rate (rounded to 0.001 Hz), or pass `--rate` to select a frequency. This avoids a separate video read to measure the rate. The standalone `selfcap-keypoints` command still requires `--rate`.
 Cameras come from local `--calib-dir` files; the catalog supplies patched videos, clocks and Quest anchors.
 Explicit ids or a key file select one session. Preflight reports unprocessable episodes with `KEYPOINTS_SKIP`; good episodes run.
 Existing targets, NAS outputs and outputs within the input directory are refused; no external registration or swap occurs.

@@ -3,7 +3,9 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from conftest import read_chunks
+from simplecv.rerun_custom_types import confidence_scores_to_rgb
 
 from dataforge import hands, schema, writing
 
@@ -63,7 +65,7 @@ def test_keypoint_columns_are_bounded_and_preserve_every_row(tmp_path: Path) -> 
         hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=frames, positions=positions[..., :2], confidence=None)
     for path, dimension in ((schema.coco133_xyz_path(), 3), ("/pixels", 2)):
         batches = [c.to_record_batch() for c in read_chunks(target) if not c.is_static and str(c.entity_path) == path]
-        assert sorted(b.num_rows for b in batches) == ([96, 768, 768, 768] if dimension == 3 else [1140, 1260])
+        assert sorted(b.num_rows for b in batches) == ([96, 768, 768, 768] if dimension == 3 else [492, 954, 954])
         assert all(b.nbytes < 2 * 1024 * 1024 for b in batches)
         batches.sort(key=lambda b: b.column("frame_index")[0].as_py())
         assert [f for b in batches for f in b.column("frame_index").to_pylist()] == frames.tolist()
@@ -90,3 +92,40 @@ def test_keypoint_descriptors_are_written_once_per_entity_and_recording(tmp_path
         for path in (schema.coco133_xyz_path(), "/pixels"):
             descriptors = [c for c in read_chunks(target) if c.is_static and str(c.entity_path) == path]
             assert len(descriptors) == 1
+
+
+def test_2d_rows_are_coloured_by_confidence_like_3d(tmp_path: Path) -> None:
+    """2D keypoints carry the same red -> yellow -> green confidence colours as 3D; no frame_index when None."""
+    times = np.array([0, 40_000_000], dtype=np.int64)
+    confidence = np.tile(np.linspace(0.0, 1.0, 133, dtype=np.float32), (2, 1))
+    target = tmp_path / "coloured.rrd"
+    with writing.atomic_recording(target, recording_id="coloured", send_properties=False) as recording:
+        hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=None, positions=np.zeros((2, 133, 2), np.float32), confidence=confidence)
+    batch = next(c.to_record_batch() for c in read_chunks(target) if not c.is_static and str(c.entity_path) == "/pixels")
+    assert "frame_index" not in batch.schema.names
+    colours = np.asarray(batch.column("Points2D:colors").to_pylist()[0], dtype=np.uint32)
+    expected = confidence_scores_to_rgb(confidence[:1, :, None])[0]
+    np.testing.assert_array_equal(colours, [int.from_bytes(bytes([*rgb, 255]), "big") for rgb in expected.astype(np.uint8).tolist()])
+
+
+@pytest.mark.parametrize("color_range", [(0.0, 1.0), (0.7, 1.0)])
+def test_keypoint_colour_range_preserves_scores_across_all_writers(tmp_path: Path, color_range: tuple[float, float]) -> None:
+    """Only colours stretch: endpoints are red/green, midpoint yellow, raw scores survive."""
+    low, high = color_range
+    confidence = np.full((1, 133), high, dtype=np.float32)
+    confidence[0, :5] = [low - 0.1, low, (low + high) / 2.0, high, high + 0.1]
+    positions = np.ones((1, 133, 3), dtype=np.float32)
+    times = np.array([0], dtype=np.int64)
+    target = tmp_path / "range.rrd"
+    with writing.atomic_recording(target, recording_id="range", send_properties=False) as recording:
+        hands.log_keypoints3d(recording, times_ns=times, frame_indices=None, positions=positions, confidence=confidence, color_range=color_range)
+        hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=None, positions=positions[..., :2], confidence=confidence, color_range=color_range)
+        hands.log_projections(recording, [((0, 0), positions[..., :2])], times_ns=times, frame_indices=None, confidence=confidence, camera_model="pinhole", color_range=color_range)
+    batches = [chunk.to_record_batch() for chunk in read_chunks(target) if not chunk.is_static]
+    assert len(batches) == 3
+    for batch in batches:
+        kind = "Points3D" if "Points3D:positions" in batch.schema.names else "Points2D"
+        np.testing.assert_array_equal(batch.column(next(name for name in batch.schema.names if name.endswith(":confidences"))).to_pylist(), confidence)
+        packed = batch.column(f"{kind}:colors").to_pylist()[0][:5]
+        rgb = np.array([list(value.to_bytes(4, "big")[:3]) for value in packed])
+        np.testing.assert_allclose(rgb, [[255, 0, 0], [255, 0, 0], [255, 255, 0], [0, 255, 0], [0, 255, 0]], atol=1)

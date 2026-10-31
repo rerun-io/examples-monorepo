@@ -1,7 +1,8 @@
 """GPU-resident top-down crop generation and crop->image coordinate mapping.
 
-Crops are produced with an analytic sampling grid plus ``grid_sample`` so CUDA
-video frames flow straight into any backend without cv2/host round-trips. Two
+Crops are produced with an analytic sampling grid and ``grid_sample``'s bilinear
+rule, read straight from the uint8 frames, so CUDA video frames flow into any
+backend without cv2/host round-trips or full-frame float copies. Two
 affine conventions are supported, matching the source networks exactly:
 
 - ``"udp"``: Unbiased Data Processing alignment (Sapiens, mmpose UDP codecs).
@@ -14,7 +15,6 @@ from functools import lru_cache
 from typing import Literal
 
 import torch
-import torch.nn.functional as F
 from jaxtyping import Float, Int, UInt8
 from torch import Tensor
 
@@ -118,26 +118,9 @@ def crop_frames(
         empty_2: Float[Tensor, "0 2"] = torch.empty((0, 2), dtype=torch.float32, device=frames_rgb.device)
         return CropBatch(torch.empty((0, 3, out_h, out_w), dtype=dtype, device=frames_rgb.device), frame_indices, bboxes, empty_2, empty_2, spec)
     centers, scales = bbox_xyxy_to_center_scale(bboxes, aspect_wh=float(out_w) / float(out_h), padding=spec.padding)
-    yy, xx = _crop_meshgrid(out_h, out_w, centers.device, centers.dtype)
-    if spec.align == "cv2":
-        src_x = (xx[None] - float(out_w) * 0.5) * scales[:, 0, None, None] / float(out_w) + centers[:, 0, None, None]
-        src_y = (yy[None] - float(out_h) * 0.5) * scales[:, 1, None, None] / float(out_h) + centers[:, 1, None, None]
-    else:
-        src_x = xx[None] * scales[:, 0, None, None] / float(out_w - 1) + centers[:, 0, None, None] - 0.5 * scales[:, 0, None, None]
-        src_y = yy[None] * scales[:, 1, None, None] / float(out_h - 1) + centers[:, 1, None, None] - 0.5 * scales[:, 1, None, None]
-    grid: Float[Tensor, "n crop_h crop_w 2"] = torch.stack(
-        [
-            src_x / float(int(frames_rgb.shape[2]) - 1) * 2.0 - 1.0,
-            src_y / float(int(frames_rgb.shape[1]) - 1) * 2.0 - 1.0,
-        ],
-        dim=-1,
-    ).contiguous()
-    # Gather per-detection frames channels-first, converting to float once; the
-    # BGR flip runs on the tiny sampled crops (grid_sample is per-channel, so
-    # flipping after sampling is numerically identical to flipping the frames).
-    gathered: Float[Tensor, "n 3 h w"] = frames_rgb.permute(0, 3, 1, 2)[frame_indices].float()
-    with torch.backends.cudnn.flags(enabled=False):
-        crops: Float[Tensor, "n 3 crop_h crop_w"] = F.grid_sample(gathered, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+    grid: Float[Tensor, "n crop_h crop_w 2"] = _crop_grid(centers, scales, spec, int(frames_rgb.shape[1]), int(frames_rgb.shape[2]))
+    crops: Float[Tensor, "n 3 crop_h crop_w"] = _sample_uint8_bilinear(frames_rgb, frame_indices, grid)
+    # The BGR flip runs on the small crops (sampling is per-channel, so flipping after sampling equals flipping the frames).
     if spec.bgr:
         crops = crops.flip(1)
     if spec.mean_rgb is not None:
@@ -145,6 +128,48 @@ def crop_frames(
     if spec.std_rgb is not None:
         crops = crops / _channel_vector(spec.std_rgb, crops.device)
     return CropBatch(crops.to(dtype=dtype).contiguous(), frame_indices, bboxes, centers, scales, spec)
+
+
+def _crop_grid(centers: Float[Tensor, "n 2"], scales: Float[Tensor, "n 2"], spec: CropSpec, height: int, width: int) -> Float[Tensor, "n crop_h crop_w 2"]:
+    """Normalized ``grid_sample`` coordinates (``align_corners=True``) of every crop pixel in its source frame."""
+    out_w: int = int(spec.input_size[0])
+    out_h: int = int(spec.input_size[1])
+    yy, xx = _crop_meshgrid(out_h, out_w, centers.device, centers.dtype)
+    if spec.align == "cv2":
+        src_x = (xx[None] - float(out_w) * 0.5) * scales[:, 0, None, None] / float(out_w) + centers[:, 0, None, None]
+        src_y = (yy[None] - float(out_h) * 0.5) * scales[:, 1, None, None] / float(out_h) + centers[:, 1, None, None]
+    else:
+        src_x = xx[None] * scales[:, 0, None, None] / float(out_w - 1) + centers[:, 0, None, None] - 0.5 * scales[:, 0, None, None]
+        src_y = yy[None] * scales[:, 1, None, None] / float(out_h - 1) + centers[:, 1, None, None] - 0.5 * scales[:, 1, None, None]
+    return torch.stack([src_x / float(width - 1) * 2.0 - 1.0, src_y / float(height - 1) * 2.0 - 1.0], dim=-1).contiguous()
+
+
+def _sample_uint8_bilinear(
+    frames_rgb: UInt8[Tensor, "b h w 3"], frame_indices: Int[Tensor, "n"], grid: Float[Tensor, "n crop_h crop_w 2"]
+) -> Float[Tensor, "n 3 crop_h crop_w"]:
+    """``F.grid_sample(bilinear, zeros, align_corners=True)`` of each detection's frame, reading only four uint8 pixels per crop pixel.
+
+    Gathering every detection's frame as float first costs 25 MB per 1080p detection (0.8 GB for a 32-crop RTMW call)
+    to produce 0.6 MB of crops. Corner order and weights follow PyTorch's kernel (nw, ne, sw, se).
+    """
+    height, width = int(frames_rgb.shape[1]), int(frames_rgb.shape[2])
+    ix: Float[Tensor, "n crop_h crop_w"] = ((grid[..., 0] + 1) / 2) * (width - 1)
+    iy: Float[Tensor, "n crop_h crop_w"] = ((grid[..., 1] + 1) / 2) * (height - 1)
+    ix_nw, iy_nw = ix.floor(), iy.floor()
+    ix_se, iy_se = ix_nw + 1, iy_nw + 1
+    corners = (
+        (ix_nw, iy_nw, (ix_se - ix) * (iy_se - iy)),
+        (ix_se, iy_nw, (ix - ix_nw) * (iy_se - iy)),
+        (ix_nw, iy_se, (ix_se - ix) * (iy - iy_nw)),
+        (ix_se, iy_se, (ix - ix_nw) * (iy - iy_nw)),
+    )
+    frame: Int[Tensor, "n 1 1"] = frame_indices[:, None, None]
+    out: Float[Tensor, "n crop_h crop_w 3"] = torch.zeros((*grid.shape[:3], 3), dtype=torch.float32, device=frames_rgb.device)
+    for x, y, weight in corners:
+        inside = (x >= 0) & (x <= width - 1) & (y >= 0) & (y <= height - 1)
+        values = frames_rgb[frame, y.long().clamp(0, height - 1), x.long().clamp(0, width - 1)].float()
+        out += values * torch.where(inside, weight, 0.0)[..., None]
+    return out.permute(0, 3, 1, 2)
 
 
 def crop_coords_to_image(

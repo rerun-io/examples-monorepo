@@ -1,6 +1,7 @@
 """Coarse links followed by gyro-referenced video clock refinement."""
 
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -32,10 +33,17 @@ def measure_links(
     v2's narrow RGB and Quest-to-pose seeds; device-to-device searches use ±8 s.
     """
     changes: list[list[tuple[float, float]]] = [[], [], []]
-    series: list[SpeedSeries] = [
-        rotation_speed(video, focal, width, *window_s, changes=change)
-        for video, focal, width, change in zip(inputs.videos, inputs.focal_px, inputs.width_px, changes, strict=True)
-    ]
+    # One video decodes on the GPU while another's frame pairs are tracked on the CPU.
+    with ThreadPoolExecutor(len(inputs.videos)) as videos:
+        series: list[SpeedSeries] = list(
+            videos.map(
+                lambda video, focal, width, change: rotation_speed(video, focal, width, *window_s, changes=change),
+                inputs.videos,
+                inputs.focal_px,
+                inputs.width_px,
+                changes,
+            )
+        )
     left, rgb, quest = series
     lp: Lag = correlate(left, inputs.pose, half_width_s=search_half_width_s["left_to_pose"])
     rl: Lag = correlate(rgb, left, half_width_s=search_half_width_s["rgb_to_left"])

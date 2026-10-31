@@ -1,6 +1,8 @@
 """Catalog-only GPU phone and OAK hands with served frame-selection rules."""
 
+import gc
 from collections.abc import Callable
+from functools import cache
 
 import numpy as np
 import torch
@@ -85,14 +87,31 @@ def detect_frames(
     return PhoneDetections(times_s, xy.astype(np.float64), scores.astype(np.float64))
 
 
+@cache
 def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, BoxDetections], Keypoints2d]]:
-    """Build v2's YOLOX 0.3 and Sapiens2 0.4B TensorRT batch-eight models."""
+    """Build v2's YOLOX 0.3 (batch eight) and Sapiens2 0.4B (batch four) TensorRT models once per process.
+
+    Sapiens2 runs on ~24 frames per phone plus the OAK picks, so batch four costs little time and halves its TensorRT
+    activation memory (4.43 -> 2.21 GB), which lets three selfcap-post workers share the 5090.
+    """
     from posekit.models.sapiens import SapiensPoseConfig
     from posekit.models.yolox import YoloxDetectorConfig
     from trtkit.backends import TensorRtBackendConfig
 
-    backend: TensorRtBackendConfig = TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8)
-    return YoloxDetectorConfig(score_thr=0.3, backend=backend).setup(), SapiensPoseConfig(model_size="0.4B", backend=backend).setup()
+    detector = YoloxDetectorConfig(score_thr=0.3, backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8)).setup()
+    return detector, SapiensPoseConfig(model_size="0.4B", backend=TensorRtBackendConfig(max_batch_size=4, opt_batch_size=4)).setup()
+
+
+def release_cuda_memory(*, models: bool) -> None:
+    """Hand cached CUDA blocks back to the driver, after dropping the cached Sapiens2/YOLOX engines when ``models``.
+
+    PyTorch keeps every block a process has used, so without this each selfcap-post process holds its align peak
+    (~17 GB on cc808233) through keypoints and only one fits on the GPU.
+    """
+    if models:
+        pose_models.cache_clear()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def decode_frames(video: CatalogVideo, indices: Int64[ndarray, "n"], fps: float) -> UInt8[Tensor, "n h w 3"]:
@@ -170,11 +189,18 @@ def full_frame_boxes(frames: UInt8[Tensor, "n h w 3"]) -> BoxDetections:
 
 
 def detect_oak_hands_gpu(
-    dataset: DatasetEntry, sync: TimeSync, quest: dict[Side, HandTrack], layout: SelfcapLayout, pose: Callable[[Tensor, BoxDetections], Keypoints2d]
+    dataset: DatasetEntry,
+    sync: TimeSync,
+    quest: dict[Side, HandTrack],
+    layout: SelfcapLayout,
+    pose: Callable[[Tensor, BoxDetections], Keypoints2d],
+    *,
+    video: CatalogVideo | None = None,
 ) -> OakDetections:
-    """Read only one catalog base, decode picked RGB frames on CUDA, batch eight."""
+    """Read only one catalog base, decode picked RGB frames on CUDA, Sapiens2 batch four."""
     segment: str = sync.episode_key.segment
-    video = read_catalog_videos(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE)[0]
+    if video is None:
+        video = read_catalog_videos(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE)[0]
     fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
     indices = pick_oak_frames(quest, len(video.samples), fps, sync)
     detected = detect_frames(decode_frames(video, indices, fps), video.t_ns[indices].astype(np.float64) * 1e-9, full_frame_boxes, pose)

@@ -34,9 +34,9 @@ class ScratchFinalLink:
     served_ms: float
     """Frozen lag served by the corpus, before any catalog clock correction."""
     scratch_final_ms: float
-    """Final scratch rerun on the same measurement window and widths."""
+    """Final re-measurement (a scratch rerun or a later code revision) on the same measurement window and widths."""
     drift_ms: float
-    """Recorded absolute drift between the served and final scratch lags."""
+    """Recorded absolute drift between the served and re-measured lags."""
 
 
 @serde
@@ -53,9 +53,20 @@ class WindowReference:
     search_half_width_source: str
     """Provenance of the frozen widths."""
     scratch_final: dict[str, ScratchFinalLink] = field(default_factory=dict)
-    """Final scratch references where frozen served values no longer reproduce."""
+    """Re-measured references, keyed by comparison name, where frozen served values no longer reproduce."""
     scratch_final_source: str | None = None
-    """Diagnostic provenance for the recorded scratch revision drift."""
+    """Diagnostic provenance for the recorded drift."""
+
+
+def baseline_s(window: WindowReference, key: str, name: str, served_s: float) -> float:
+    """The served lag, or its recorded re-measurement once the served fixture and drift still check out."""
+    if name not in window.scratch_final:
+        return served_s
+    baseline: ScratchFinalLink = window.scratch_final[name]
+    assert served_s * 1000.0 == pytest.approx(baseline.served_ms, abs=1e-6), f"{name}: served fixture changed"
+    assert abs(baseline.served_ms - baseline.scratch_final_ms) == pytest.approx(baseline.drift_ms, abs=0.1), f"{name}: recorded drift changed"
+    print("DRIFT", key, name, baseline.served_ms, baseline.scratch_final_ms, baseline.drift_ms, flush=True)
+    return baseline.scratch_final_ms / 1000.0
 
 
 @pytest.mark.parametrize("key", KEYS)
@@ -100,19 +111,11 @@ def test_catalog_links_match_frozen_measurements(key: str, tmp_path: Path, priva
         frozen: Lag = getattr(reference.links, name)
         if frozen.lag_s is None:
             continue
-        baseline_s: float = frozen.lag_s
-        if name in window.scratch_final:
-            baseline: ScratchFinalLink = window.scratch_final[name]
-            assert frozen.lag_s * 1000.0 == pytest.approx(baseline.served_ms, abs=1e-6), f"{name}: served fixture changed"
-            assert abs(baseline.served_ms - baseline.scratch_final_ms) == pytest.approx(baseline.drift_ms, abs=0.1), (
-                f"{name}: scratch revision drift changed"
-            )
-            baseline_s = baseline.scratch_final_ms / 1000.0
-            print("DRIFT", key, name, baseline.served_ms, baseline.scratch_final_ms, baseline.drift_ms, flush=True)
+        reference_s: float = baseline_s(window, key, name, frozen.lag_s)
         correction_s: float = corrections.get(name, 0.0)
-        expected_s: float = baseline_s + correction_s
+        expected_s: float = reference_s + correction_s
         delta_s: float | None = None if measured.lag_s is None else abs(measured.lag_s - expected_s)
-        print("COMPARISON", key, name, frozen.lag_s, baseline_s, correction_s, expected_s, measured.lag_s, delta_s, flush=True)
+        print("COMPARISON", key, name, frozen.lag_s, reference_s, correction_s, expected_s, measured.lag_s, delta_s, flush=True)
         if measured.lag_s != pytest.approx(expected_s, abs=0.002):
             mismatches.append(f"{name}: {measured.lag_s} vs {expected_s}, residual={delta_s} s")
     fine = from_json(GyroReference, (FIXTURES / f"{key}.links_rgb.json").read_text())
@@ -123,9 +126,11 @@ def test_catalog_links_match_frozen_measurements(key: str, tmp_path: Path, priva
             ("fine_left_to_gyro", result.left_to_gyro, fine.left_to_gyro_s, video_corrections["oak_left"]),
             ("fine_rgb_to_gyro", result.rgb_to_gyro, fine.rgb_to_gyro_s, video_corrections["oak_rgb"]),
         ):
-            expected_s = frozen_s + correction_s
+            assert frozen_s is not None
+            reference_s = baseline_s(window, key, name, frozen_s)
+            expected_s = reference_s + correction_s
             delta_s = None if measured.lag_s is None else abs(measured.lag_s - expected_s)
-            print("COMPARISON", key, name, frozen_s, frozen_s, correction_s, expected_s, measured.lag_s, delta_s, flush=True)
+            print("COMPARISON", key, name, frozen_s, reference_s, correction_s, expected_s, measured.lag_s, delta_s, flush=True)
             if measured.lag_s != pytest.approx(expected_s, abs=0.002):
                 mismatches.append(f"{name}: {measured.lag_s} vs {expected_s}, residual={delta_s} s")
     print(key, "frozen Quest offset_ms", reference.offsets_ms["quest_video"])

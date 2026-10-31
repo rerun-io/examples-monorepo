@@ -240,7 +240,14 @@ class EpisodePlan:
 def raw_calibration_chunks(episode_dir: Path, devices: list[str]) -> list[Chunk]:
     """Preserve opaque vendor JSON verbatim on each device rig as static raw-source facts."""
     folders: list[Path] = [episode_dir / "exo" / device for device in devices] + [episode_dir / "ego", episode_dir / "quest"]
-    return [Chunk.from_columns(schema.rig_path(rig), indexes=[], columns=rr.AnyValues.columns(raw_calibration_json=[(folder / "calibration.json").read_bytes().decode("utf-8")])) for rig, folder in enumerate(folders)]
+    return [
+        Chunk.from_columns(
+            schema.rig_path(rig),
+            indexes=[],
+            columns=rr.AnyValues.columns(raw_calibration_json=[(folder / "calibration.json").read_bytes().decode("utf-8")]),
+        )
+        for rig, folder in enumerate(folders)
+    ]
 
 
 @dataclass
@@ -277,9 +284,7 @@ def exo_devices(episode_dir: Path) -> list[str]:
     return sorted(
         device_dir.name
         for device_dir in exo_dir.iterdir()
-        if device_dir.is_dir()
-        and os.access(device_dir / f"{device_dir.name}.mp4", os.R_OK)
-        and os.access(device_dir / "calibration.json", os.R_OK)
+        if device_dir.is_dir() and os.access(device_dir / f"{device_dir.name}.mp4", os.R_OK) and os.access(device_dir / "calibration.json", os.R_OK)
     )
 
 
@@ -327,9 +332,7 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
         if calibration is None:
             print(f"  warning: no usable intrinsics in {device_dir / 'calibration.json'}, skipping {device}")
         else:
-            exo_cameras.append(
-                CameraPlan(rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", calibration=calibration, name=device, kind="rgb")
-            )
+            exo_cameras.append(CameraPlan(rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", calibration=calibration, name=device, kind="rgb"))
             panes.append(CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo"))
         # reference=schema.CAM0_REFERENCE: a single-camera rig's frame is its camera's frame by construction.
         rigs.append(RigPlan(rig=rig, reference=schema.CAM0_REFERENCE, name=device, kind="exo", cameras=tuple(exo_cameras)))
@@ -400,6 +403,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprin
     Returns:
         The blueprint embedded in every SelfCap base-layer rrd.
     """
+
     def views(kind: str) -> list[rrb.Spatial2DView]:
         return [blueprints.camera_view(pane.name, pane.rig, pane.cam) for pane in panes if pane.kind == kind]
 
@@ -432,23 +436,42 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
     def default_blueprint(self) -> rrb.Blueprint:
         """Corpus-wide calibration review layout for the modal four-iPhone rig.
 
-        The calibrated Quest world in 3D beside the OAK rgb and both Quest cameras, the
-        iPhones beneath; every camera pane also draws ``/world/gt`` (the Quest hands),
-        so the calib layer's poses can be judged on the video. On the base layer alone
+        The calibrated Quest world in 3D beside the OAK rgb, the OAK left/right mono pair and both
+        Quest cameras, the iPhones beneath; the iPhone and Quest panes also draw ``/world/gt`` (the Quest
+        hands), so the calib layer's poses can be judged on the video. On the base layer alone
         the panes show the videos and the uncalibrated iPhones sit at the origin.
         Exo device names vary per session, so the dataset default labels them by rig;
         the per-recording blueprint embedded at convert keeps the real names.
+
+        Sapiens2 detections only feed alignment, so they stay in each pane's tree but hidden. The Quest panes
+        also draw ``/world/pred`` (the triangulated keypoints) through their pose chain (no lens distortion);
+        the iPhones carry explicit lens-model projections. The OAK lenses are strongly distorted (up to
+        220 px against a plain pinhole) and the viewer's Pinhole has no distortion, so the OAK panes draw
+        only what is logged beneath their pinhole: the calib layer's lens-model projections of the keypoints
+        and of the Quest hands.
         """
         ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
 
-        def camera(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
-            return blueprints.camera_view(name, rig, cam, contents=[f"{schema.pinhole_path(rig, cam)}/**", "/world/gt/**"])
+        def camera(name: str, rig: int, cam: int, *, ego: bool = False) -> rrb.Spatial2DView:
+            pinhole: str = schema.pinhole_path(rig, cam)
+            world: list[str] = [] if rig == ego_rig else ["/world/gt/**", *(["/world/pred/**"] if ego else [])]
+            return blueprints.camera_view(
+                name,
+                rig,
+                cam,
+                contents=[f"{pinhole}/**", *world],
+                overrides={f"{pinhole}/pred/sapiens2": rrb.EntityBehavior(visible=False)},
+            )
 
-        ego: list[rrb.Spatial2DView] = [camera("OAK rgb", ego_rig, 0), camera("Quest left", quest_rig, 0), camera("Quest right", quest_rig, 1)]
+        ego = rrb.Vertical(
+            camera("OAK rgb", ego_rig, 0, ego=True),
+            rrb.Horizontal(camera("OAK left", ego_rig, 1, ego=True), camera("OAK right", ego_rig, 2, ego=True)),
+            rrb.Horizontal(camera("Quest left", quest_rig, 0, ego=True), camera("Quest right", quest_rig, 1, ego=True)),
+        )
         exo: list[rrb.Spatial2DView] = [camera(f"exo rig_{rig:02d}", rig, 0) for rig in range(DEFAULT_EXO_CAMERAS)]
         scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world")
         return rrb.Blueprint(
-            rrb.Vertical(rrb.Horizontal(scene, rrb.Vertical(*ego), column_shares=[3.0, 1.0]), rrb.Horizontal(*exo), row_shares=[3.0, 2.0]),
+            rrb.Vertical(rrb.Horizontal(scene, ego, column_shares=[3.0, 1.2]), rrb.Horizontal(*exo), row_shares=[3.0, 2.0]),
             collapse_panels=True,
         )
 
@@ -620,7 +643,11 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         )
         # The presented PTS is the shared episode clock (see the module docstring).
         return log_video_stream(
-            recording, camera.video_path, schema.video_path(camera.rig, camera.cam), shift_ns=read_video_start_ns(camera.video_path), capture_time=True
+            recording,
+            camera.video_path,
+            schema.video_path(camera.rig, camera.cam),
+            shift_ns=read_video_start_ns(camera.video_path),
+            capture_time=True,
         )
 
     def _log_ego_imu(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
