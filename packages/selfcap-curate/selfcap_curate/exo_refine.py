@@ -67,8 +67,8 @@ def predict_labels(problem: RefinementProblem, cameras: tuple[Camera, ...], offs
     """Project labelled centres with the shared optical lever arm."""
     world: Float64[ndarray, "n 3"] = problem.quest_world + np.einsum("nij,j->ni", problem.head_rotations, offset)
     for i, label in enumerate(problem.landmarks.labels):
-        if label.target_id.startswith("phone"):
-            world[i] = cameras[int(label.target_id[5:])].world_T_cam[:3, 3]
+        if label.phone is not None:
+            world[i] = cameras[label.phone].world_T_cam[:3, 3]
     result: Float64[ndarray, "n 2"] = np.empty((len(world), 2))
     for view, camera in enumerate(cameras):
         select: Bool[ndarray, "n"] = np.array([label.view == view for label in problem.landmarks.labels])
@@ -80,13 +80,13 @@ def select_labels(problem: RefinementProblem, fold: int, *, static_phones: bool 
     """Alternate sampled frame indices per view, retaining all targets in a frame."""
     frames: dict[int, list[float]] = {view: sorted({label.video_time for label in problem.landmarks.labels if label.view == view})
               for view in range(len(problem.cameras))}
-    select: Bool[ndarray, "n"] = np.array([(frames[label.view].index(label.video_time) % 2 == fold or (static_phones and label.target_id.startswith("phone"))) for label in problem.landmarks.labels])
+    select: Bool[ndarray, "n"] = np.array([(frames[label.view].index(label.video_time) % 2 == fold or (static_phones and label.phone is not None)) for label in problem.landmarks.labels])
     return replace(problem, landmarks=replace(problem.landmarks, labels=[label for label, keep in zip(problem.landmarks.labels, select, strict=True) if keep]),
                    quest_world=problem.quest_world[select], head_rotations=problem.head_rotations[select])
 
 
 def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixed_focals: tuple[float, ...] | None = None,
-          focal_record: str | None = None, landmark_target_count: int | None = None, objective: ObjectiveShares | None = None) -> Refinement:
+          focal_record: str | None = None, objective: ObjectiveShares | None = None) -> Refinement:
     """Fit poses/focals/offset with the offline estimator's exact loss and bounds.
 
     Inputs are Float64 camera/point arrays in metres and source pixels. This
@@ -99,7 +99,7 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
     if problem.quest_world.shape != (len(problem.landmarks.labels), 3) or problem.head_rotations.shape != (len(problem.landmarks.labels), 3, 3):
         raise ValueError("one Quest point and head rotation is required per label")
     for label in problem.landmarks.labels:
-        if label.view >= count or (label.target_id.startswith("phone") and int(label.target_id[5:]) >= count):
+        if label.view >= count or (label.phone is not None and label.phone >= count):
             raise ValueError("label references a camera outside this rig")
     free: bool = focal_source == "fit"
     if focal_source == "fixed" and (fixed_focals is None or len(fixed_focals) != count):
@@ -113,14 +113,9 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
     nc: int = count * width
     parameters: Float64[ndarray, "p"] = np.concatenate([np.r_[p[:6], np.log(p[6])] if free else p[:6] for p in initial])
     targets: Float64[ndarray, "n 2"] = np.array([[label.u, label.v] for label in problem.landmarks.labels])
-    repetitions = np.ones(len(problem.landmarks.labels), dtype=int)
-    if landmark_target_count is not None:
-        keys = [(label.view, label.target_id) for label in problem.landmarks.labels]
-        repetitions = np.array([max(1, round(landmark_target_count / keys.count(key))) for key in keys])
     weights: Float64[ndarray, "n 1"] = np.sqrt([label.confidence for label in problem.landmarks.labels])[:, None] * 2.0
     loss_weights = None
     if objective is not None:
-        repetitions[:] = 1
         weights[:] = 1.0
         hand_views = np.concatenate([np.full(len(data.world), i, dtype=np.int64) for i, data in enumerate(problem.hands)])
         hand_confidence = np.ones(len(hand_views))
@@ -144,7 +139,7 @@ def solve(problem: RefinementProblem, *, focal_source: FocalSource = "fit", fixe
     def residual(values: Float64[ndarray, "p"]) -> Float64[ndarray, "r"]:
         cameras: tuple[Camera, ...] = unpack(values)
         errors: list[Float64[ndarray, "r"]] = [(camera.project(data.world)[:, :2] - data.image).ravel() for camera, data in zip(cameras, problem.hands, strict=True)]
-        errors.append(np.repeat((predict_labels(problem, cameras, np.zeros(3)) - targets) * weights, repetitions, axis=0).ravel())
+        errors.append(((predict_labels(problem, cameras, np.zeros(3)) - targets) * weights).ravel())
         return np.concatenate(errors)
 
     lower: Float64[ndarray, "p"] = np.full_like(parameters, -np.inf)

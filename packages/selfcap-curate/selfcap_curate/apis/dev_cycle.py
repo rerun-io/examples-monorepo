@@ -63,6 +63,12 @@ class Config:
     """EgoHand weights and TensorRT engine cache."""
 
 
+def ship(host: str, local: Path, remote: Path) -> None:
+    """Copy one file to the catalog host, creating its remote directory first."""
+    subprocess.run(["ssh", host, f"mkdir -p {shlex.quote(str(remote.parent))}"], check=True)
+    subprocess.run(["scp", "-q", str(local), f"{host}:{remote}"], check=True)
+
+
 def main(config: Config) -> None:
     """Publish generated layers only; preserve independent layers in the main dev dataset."""
     EpisodeKey.parse(config.segment)
@@ -97,8 +103,7 @@ def main(config: Config) -> None:
     if config.landmarks is not None:
         label_path = work / "exo_landmarks" / f"{config.segment}.rrd"
         write_landmarks(label_path, config.segment, from_json(Landmarks, config.landmarks.read_text()))
-        subprocess.run(["ssh", config.catalog_host, f"mkdir -p {shlex.quote(str(run / 'exo_landmarks'))}"], check=True)
-        subprocess.run(["scp", "-q", str(label_path), f"{config.catalog_host}:{run}/exo_landmarks/{config.segment}.rrd"], check=True)
+        ship(config.catalog_host, label_path, run / "exo_landmarks" / f"{config.segment}.rrd")
         candidate.register([f"file://{run}/exo_landmarks/{config.segment}.rrd"], layer_name="exo_landmarks",
                            on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     elif "exo_landmarks" in source_layers and not refresh_main:
@@ -120,8 +125,7 @@ def main(config: Config) -> None:
         if not path.exists():
             continue
         remote_path = run / layer / path.name
-        subprocess.run(["ssh", config.catalog_host, f"mkdir -p {shlex.quote(str(remote_path.parent))}"], check=True)
-        subprocess.run(["scp", "-q", str(path), f"{config.catalog_host}:{remote_path}"], check=True)
+        ship(config.catalog_host, path, remote_path)
         candidate.register([remote_path.as_uri()], layer_name=layer, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     layout = work / f"{config.dataset}.rbl"
     SelfcapDataset(SelfcapConfig()).default_blueprint(show_soma_mesh=True).save(config.dataset, str(layout))

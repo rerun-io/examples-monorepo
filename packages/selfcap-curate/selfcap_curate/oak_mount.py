@@ -194,3 +194,18 @@ def fixed_rotation(gyro: GyroFit, device: str, rotations: RotationTable) -> Floa
         and gyro.R_head_from_imu is not None
         else None
     )
+
+
+def fixed_rotation_reason(gyro: GyroFit, device: str, rotations: RotationTable) -> str | None:
+    """Why ``fixed_rotation`` returned None, or None when the gyro mount is eligible."""
+    if not gyro.ok:
+        return "gyro fit not ok"
+    if gyro.max_episode_dev_deg is None:
+        return "gyro episode spread unavailable"
+    if gyro.max_episode_dev_deg > 1.5:
+        return "episode spread exceeds 1.5 degrees"
+    if device not in rotations.devices:
+        return "device missing from rgb_R_imu table"
+    if gyro.R_head_from_imu is None:
+        return "gyro rotation unavailable"
+    return None

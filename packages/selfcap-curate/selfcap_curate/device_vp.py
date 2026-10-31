@@ -59,6 +59,6 @@ class VPTable:
     """Measurements keyed by complete device identifier."""
 
 
-def read_vp_table(path: Path | None = None) -> VPTable:
+def read_vp_table() -> VPTable:
     """Read the typed image-only measurement record."""
-    return read_json(path if path is not None else Path(__file__).with_name('device_vp.json'), VPTable)
+    return read_json(Path(__file__).with_name('device_vp.json'), VPTable)

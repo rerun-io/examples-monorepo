@@ -22,7 +22,7 @@ from selfcap_curate.factory import oak_centre, oak_stereo, read_quest_block
 from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models, release_cuda_memory
 from selfcap_curate.keypoints import read_ego_cameras
 from selfcap_curate.oak_egohand import detect_oak_egohand
-from selfcap_curate.oak_mount import fixed_rotation, gyro_mount, solve_oak
+from selfcap_curate.oak_mount import fixed_rotation, fixed_rotation_reason, gyro_mount, solve_oak
 from selfcap_curate.quest_fit import read_session_episode
 from selfcap_curate.records import OakFit, oak_quest_offset_ms
 
@@ -82,21 +82,10 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
         rotation = fixed_rotation(gyro, ego.device_id, rotations)
         use_egohand = config.oak_observations is not None or config.oak_method == "egohand"
         has_oak_clock = any(oak_quest_offset_ms(episode.sync) is not None for episode in episodes)
-        rotation_reason: str | None = None
+        rotation_reason: str | None = None if rotation is not None else fixed_rotation_reason(gyro, ego.device_id, rotations)
         if config.oak_free_rotation:
             rotation = None
             rotation_reason = "explicit free rotation"
-        elif rotation is None:
-            if not gyro.ok:
-                rotation_reason = "gyro fit not ok"
-            elif gyro.max_episode_dev_deg is None:
-                rotation_reason = "gyro episode spread unavailable"
-            elif gyro.max_episode_dev_deg > 1.5:
-                rotation_reason = "episode spread exceeds 1.5 degrees"
-            elif ego.device_id not in rotations.devices:
-                rotation_reason = "device missing from rgb_R_imu table"
-            else:
-                rotation_reason = "gyro rotation unavailable"
         if use_egohand and has_oak_clock:
             print("OAK_ROTATION", "free" if rotation is None else "gyro", rotation_reason or "eligible gyro mount", flush=True)
             release_cuda_memory(models=not config.retain_models)

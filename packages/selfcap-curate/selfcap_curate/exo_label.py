@@ -95,6 +95,7 @@ class GateThresholds:
 DEFAULT_THRESHOLDS = GateThresholds()
 DEFAULT_OBJECTIVE = ObjectiveShares()
 GATE_VERSION = 'gate-v3'
+SOLVER_VERSION: str = 'exo-visible-folds-physical-targets-v4'
 LabelFocalSource: TypeAlias = Literal["device-vp", "table"]
 
 
@@ -434,7 +435,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         for name in ('calib.json', 'refinement.json'):
             (output / name).unlink(missing_ok=True)
         result = LabelResult(segment.id, 'skipped', f'Fewer than two initial exo cameras ({len(active)} calibrated)', 0,
-                             time.monotonic() - start, thresholds, objective=objective, solver_version='exo-visible-folds-physical-targets-v4',
+                             time.monotonic() - start, thresholds, objective=objective, solver_version=SOLVER_VERSION,
                              rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None, rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash,
                              gate_version=GATE_VERSION)
         (output / 'result.json').write_text(to_json(result))
@@ -442,11 +443,13 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
     table = read_vp_table()
     fixed_focals = {}
     focal_sources = {}
+    initial = {}
     for rig in active:
         phone = segment.layout.phones[rig]
         camera = state.exo.phones[phone].camera
         if camera is None:
             raise ValueError(f'Missing initial camera for {phone}')
+        initial[rig] = camera
         measured = table.devices.get(phone) if focal_source == 'device-vp' else None
         fixed_focals[phone] = measured.focal_px if measured is not None else float(camera.parameters[6])
         focal_sources[phone] = 'device-vp' if measured is not None else 'initial-calibration'
@@ -456,7 +459,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         if previous.segment != segment.id:
             raise ValueError('Output directory belongs to another segment')
         if (previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source
-                and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-visible-folds-physical-targets-v4'
+                and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == SOLVER_VERSION
                 and previous.objective == objective and previous.rtmw_sha256 == rtmw_hash and previous.cached_labels_sha256 == label_hash
                 and previous.gate_version == GATE_VERSION):
             return previous
@@ -468,24 +471,21 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         record = from_json(Landmarks, cached_labels.read_text())
         (output / 'landmarks.json').write_text(to_json(record))
     else:
-        packet = from_json(Packet, packet_path.read_text()) if packet_path.exists() else make_packet(segment, state, output)
+        if packet_path.exists():
+            packet = from_json(Packet, packet_path.read_text())
+        else:
+            segment = replace(segment, hands=catalog_io.read_catalog_hands(segment))  # make_packet and load_inputs share one query
+            packet = make_packet(segment, state, output)
         packet = replace(packet, panels=[panel for panel in packet.panels if panel.view in active
                                         and all(not target.startswith('phone') or int(target[5:]) in active for target in panel.targets)])
         record_path = output / 'landmarks.json'
         record = from_json(Landmarks, record_path.read_text()) if record_path.exists() else annotate(packet, output)
     record = replace(record, labels=[label for label in record.labels if label.view in active
-                                    and (not label.target_id.startswith('phone') or int(label.target_id[5:]) in active)])
+                                    and (label.phone is None or label.phone in active)])
     if len(record.labels) < 12 or len({label.view for label in record.labels}) < len(active):
         result = LabelResult(segment.id, 'rejected', 'insufficient visible landmark coverage', len(record.labels), time.monotonic() - start, thresholds)
     else:
-        cameras = []
-        for rig in active:
-            phone = packet.phones[rig]
-            camera = state.exo.phones[phone].camera
-            if camera is None:
-                raise ValueError(f"Missing initial camera for {phone}")
-            cameras.append(camera)
-        inputs = load_inputs(segment, cameras=tuple(cameras), quest=state.quest, landmarks=record, camera_rigs=active, rtmw_rrd=rtmw_rrd)
+        inputs = load_inputs(segment, cameras=tuple(initial[rig] for rig in active), quest=state.quest, landmarks=record, camera_rigs=active, rtmw_rrd=rtmw_rrd)
         record = inputs.problem.landmarks
         truth_bytes = tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values())
         model, gate = evaluate(inputs, focal_source="fixed", fixed_focals=tuple(fixed_focals[packet.phones[rig]] for rig in active),
@@ -502,7 +502,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
             updated = replace(state, exo_refinements={**state.exo_refinements, segment.id: model})
             assert updated.oak is state.oak and updated.quest is state.quest and updated.stereo is state.stereo, 'Only exo cameras may change'
             (output / 'calib.json').write_text(to_json(updated))
-        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, 'exo-visible-folds-physical-targets-v4', focal_source,
+        result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, SOLVER_VERSION, focal_source,
                              fixed_focals, focal_sources)
     temporary = result_path.with_suffix('.tmp')
     result = replace(result, rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None,

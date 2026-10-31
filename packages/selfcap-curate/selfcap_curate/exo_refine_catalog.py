@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+from dataforge.schema import coco133_uv_path
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from rerun.chunk import RrdReader
@@ -97,7 +98,7 @@ def read_rtmw_recording(path: Path, segment: str, rigs: tuple[int, ...]) -> tupl
     store = next((entry for entry in reader.recordings() if entry.recording_id == segment), None)
     if store is None:
         raise ValueError(f'{path}: recording does not match {segment}')
-    entities = {f'/world/rig_{rig:02d}/cam_00/pinhole/pred/rtmw/coco133_uv': rig for rig in rigs}
+    entities = {coco133_uv_path(rig, 0, pred='rtmw'): rig for rig in rigs}
     batches: dict[int, list[pa.RecordBatch]] = {rig: [] for rig in rigs}
     for chunk in reader.stream(store=store):
         entity = str(chunk.entity_path)
@@ -128,7 +129,7 @@ def load_inputs(segment: catalog_io.Segment, *, cameras: tuple[Camera, ...] | No
     local = {rig: index for index, rig in enumerate(rigs)}
     selected = []
     for label in record.labels:
-        target = int(label.target_id[5:]) if label.target_id.startswith('phone') else None
+        target = label.phone
         if label.view in local and (target is None or target in local):
             selected.append(replace(label, view=local[label.view], target_id=f'phone{local[target]}' if target is not None else label.target_id))
     record = replace(record, labels=selected)
@@ -177,7 +178,7 @@ def load_inputs(segment: catalog_io.Segment, *, cameras: tuple[Camera, ...] | No
         body = read_rtmw_recording(rtmw_rrd, segment.id, rigs)
         return Inputs(RefinementProblem(cameras, hands, record, positions, rotations), phones, detections, tracks, sync,
                       body, tuple(phone_offsets), tuple(phone_to_pose), quest_offset / 1000.0)
-    entities = [f"/world/rig_{rig:02d}/cam_00/pinhole/pred/rtmw/coco133_uv" for rig in rigs]
+    entities = [coco133_uv_path(rig, 0, pred="rtmw") for rig in rigs]
     table = segment.dataset.filter_segments(segment.id).filter_contents(entities).reader(index="video_time").to_arrow_table()
     body = []
     for entity in entities:
@@ -349,7 +350,7 @@ def polish(inputs: Inputs, problem: RefinementProblem, model: Refinement, fold: 
 
 
 def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[float, ...] | None = None,
-             focal_record: str | None = None, static_phones: bool = False, landmark_target_count: int | None = None,
+             focal_record: str | None = None, static_phones: bool = False,
              body_polish: bool = False, objective: ObjectiveShares | None = None) -> tuple[Refinement, Gate]:
     """Fit both holdout folds, report transfer, then fit the deployable all-data model."""
     baseline = Refinement(inputs.problem.cameras, np.zeros(3), inputs.problem.landmarks.digest, "table")
@@ -359,7 +360,7 @@ def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[f
     label_pools = {}
     for fold in (0, 1):
         problem = replace(select_labels(fit_problem, fold, static_phones=static_phones), hands=heldout_hands(inputs, fold, train=True))
-        model = replace(solve(problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count, objective=objective),
+        model = replace(solve(problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, objective=objective),
                         label_layer_hash=inputs.problem.landmarks.digest)
         if body_polish:
             model = polish(inputs, problem, model, fold, objective)
@@ -386,7 +387,7 @@ def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[f
         before, after = scores["baseline"][metric].median, candidate.median
         if before is None or after is None or after > before:
             passes = False
-    final = solve(fit_problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, landmark_target_count=landmark_target_count, objective=objective)
+    final = solve(fit_problem, focal_source=focal_source, fixed_focals=fixed_focals, focal_record=focal_record, objective=objective)
     if body_polish:
         final = polish(inputs, fit_problem, final, None, objective)
     gate = Gate(scores["baseline"], scores["candidate"], tuple(models), passes and final.converged and all(model.converged for model in models),

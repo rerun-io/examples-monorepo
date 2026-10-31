@@ -135,7 +135,6 @@ def rotation_speed(
 
     Decode, gray and frame differences run on the GPU; corner tracking runs per distinct frame pair on a thread pool.
     """
-    import torch
 
     cv2.setNumThreads(1)
     t: Float64[ndarray, "f"] = video.t_ns * 1e-9

@@ -10,10 +10,12 @@ from simplecv.rerun_custom_types import Points3DWithConfidence
 
 DISPLAY_JOINTS: Int64[ndarray, "k"] = np.r_[3:9, 11:13, 91:133]
 """Ears, shoulders, elbows, hips and hands; lower-body data stays in the source layers."""
+WRIST_TO_HAND_ROOT: dict[int, int] = {9: 91, 10: 112}
+"""Body wrists drawn at the hand roots, so arm links meet the hand skeletons."""
 DISPLAY_LINKS: list[tuple[int, int]] = [
-    ({9: 91, 10: 112}.get(a, a), {9: 91, 10: 112}.get(b, b))
+    (WRIST_TO_HAND_ROOT.get(a, a), WRIST_TO_HAND_ROOT.get(b, b))
     for a, b in COCO_133_LINKS
-    if {9: 91, 10: 112}.get(a, a) in DISPLAY_JOINTS and {9: 91, 10: 112}.get(b, b) in DISPLAY_JOINTS
+    if WRIST_TO_HAND_ROOT.get(a, a) in DISPLAY_JOINTS and WRIST_TO_HAND_ROOT.get(b, b) in DISPLAY_JOINTS
 ]
 
 
