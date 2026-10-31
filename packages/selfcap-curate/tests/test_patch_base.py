@@ -207,7 +207,10 @@ def test_phone_sound_moves_with_its_phone_when_aligning(tmp_path: Path) -> None:
     sound_path = tmp_path / "sound.rrd"
     with recording_to(sound_path, recording_id=f"selfcap__{sync.key}", send_properties=False) as recording:
         log_quest_hand_poses(recording, read_quest_joint_hands(raw / "quest"))
-        stamps = {schema.audio_path(0, 0): np.array([11_000_000], dtype=np.int64), schema.loudness_path(0, 0): np.array([13_500_000, 18_500_000], dtype=np.int64)}
+        stamps = {
+            schema.audio_path(0, 0): np.array([11_000_000], dtype=np.int64),
+            schema.loudness_path(0, 0): np.array([13_500_000, 18_500_000], dtype=np.int64),
+        }
         for entity, times in stamps.items():
             recording.send_columns(
                 entity,
@@ -231,7 +234,8 @@ def test_phone_sound_moves_with_its_phone_when_aligning(tmp_path: Path) -> None:
     for chunk in RrdReader(target).stream():
         if not chunk.is_static and str(chunk.entity_path) in stamps:
             batch = chunk.to_record_batch()
-            pairs = zip(batch.column(CAPTURE_TIMELINE).cast(pa.int64()).to_pylist(), batch.column("video_time").cast(pa.int64()).to_pylist(), strict=True)
+            capture, video = (batch.column(name).cast(pa.int64()).to_pylist() for name in (CAPTURE_TIMELINE, "video_time"))
+            pairs = zip(capture, video, strict=True)
             clocks.setdefault(str(chunk.entity_path), []).extend(pairs)
     assert clocks == {
         schema.audio_path(0, 0): [(11_000_000, -19_000_000)],

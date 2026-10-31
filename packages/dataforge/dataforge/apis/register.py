@@ -112,12 +112,13 @@ def republish_blueprints(entry: DatasetEntry, dataset: DataforgeDataset, catalog
         retiring = {row["rerun_segment_id"]: Path(unquote(urlparse(row["rerun_storage_urls"][0]).path)) for row in listed}
     stamp: str = datetime.now().strftime("%Y%m%d-%H%M%S-%f")  # microseconds: back-to-back runs never share a file name
     blueprint_path: Path = paths.blueprint_path(output_root, catalog_name, stamp=stamp).resolve()
+    segment_layout, table_layout = dataset.catalog_blueprints(entry)
     with writing.atomic_write(blueprint_path) as temp_path:
-        dataset.default_blueprint().save(catalog_name, str(temp_path))
+        segment_layout.save(catalog_name, str(temp_path))
     entry.register_blueprint(blueprint_path.as_uri(), set_default=True)
     table_path: Path = paths.blueprint_path(output_root, catalog_name, segment_table=True, stamp=stamp).resolve()
     columns: list[str] = entry.segment_table().schema().names
-    writing.save_table_blueprint(dataset.table_blueprint(), table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
+    writing.save_table_blueprint(table_layout, table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
     entry.register_blueprint(table_path.as_uri(), set_default=True, segment_table=True)
     if blueprint_entries is not None and retiring:
         blueprint_entries.unregister(segments_to_drop=list(retiring), layers_to_drop=[]).wait()

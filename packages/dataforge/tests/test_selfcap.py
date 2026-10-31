@@ -39,6 +39,7 @@ from dataforge.identity import SequenceIdentity
 from dataforge.records import read_json
 from dataforge.logging_toolkit import ImuChannel
 from dataforge.writing import blueprint_views
+from rerun.catalog import DatasetEntry
 
 SESSION_A: str = "25aeb66a-cf5a-44a3-845f-62606cefabe7"
 """Session uuid whose first eight characters become the identity's middle part."""
@@ -259,54 +260,65 @@ def test_selfcap_layouts_open_on_the_aligned_clock() -> None:
         assert str(blueprint.time_panel.timeline) == schema.TIMELINE
 
 
-def test_default_blueprint_is_the_calibration_review_layout() -> None:
-    # The guard: :51235's default comes from this method on every dataforge-register run, and a
-    # catalog restore once fell back to an uncalibrated grid that hid the calib layer's overlays.
-    blueprint: rrb.Blueprint = SelfcapConfig().setup().default_blueprint()
+HEAD_CAMERAS: dict[str, tuple[int, int]] = {"OAK rgb": (4, 0), "OAK left": (4, 1), "OAK right": (4, 2), "Quest left": (5, 0), "Quest right": (5, 1)}
+"""The default layout's head panes and their (rig, camera) in a four-phone session."""
+PHONES: dict[str, int] = {"Phone 1": 0, "Phone 2": 1, "Phone 3": 2, "Phone 4": 3}
+"""The default layout's phone panes and their rigs: index labels, as device names vary per session."""
+
+
+def test_default_blueprint_shows_the_raw_capture_before_calibration() -> None:
+    # One layout for every stage. Before calibrate the phones have no pose: a phone left in 3D would sit at the
+    # world origin, and the Quest hands drawn through its pinhole would land in the wrong place.
+    blueprint: rrb.Blueprint = SelfcapDataset(SelfcapConfig()).default_blueprint(posed_phones=False)
     views: dict[str, rrb.View] = {str(view.name): view for view in blueprint_views(blueprint)}
-    exo: list[str] = [f"exo rig_{rig:02d}" for rig in range(4)]
-    assert sorted(views) == sorted(["World (Quest frame, calibrated)", "OAK rgb", "OAK left", "OAK right", "Quest left", "Quest right", *exo])
-    assert str(views["World (Quest frame, calibrated)"].origin) == "/world"
-    cameras: dict[str, tuple[int, int]] = {
-        **{name: (rig, 0) for rig, name in enumerate(exo)},
-        "OAK rgb": (4, 0),
-        "OAK left": (4, 1),
-        "OAK right": (4, 2),
-        "Quest left": (5, 0),
-        "Quest right": (5, 1),
-    }
-    for name, (rig, cam) in cameras.items():
-        assert str(views[name].origin) == schema.pinhole_path(rig, cam)
-        contents: list[str] = cast(list[str], views[name].contents)  # the view keeps the list it was built with
-        pinhole = schema.pinhole_path(rig, cam)
-        hidden = views[name].visualizer_overrides
-        assert hidden[f"{pinhole}/pred"] == rrb.EntityBehavior(visible=False)
-        assert hidden[f"{pinhole}/coco133_uv_projected"] == rrb.EntityBehavior(visible=False)
-        assert hidden[f"{pinhole}/quest_coco133_uv_projected"] == rrb.EntityBehavior(visible=False)
-        assert hidden["/world/gt"] == rrb.EntityBehavior(visible=False)
-        assert hidden["/world/pred"] == rrb.EntityBehavior(visible=False)
-        assert hidden["/world/gt/sapiens2"] == rrb.EntityBehavior(visible=False)
-        assert hidden[f"{pinhole}/sapiens2"] == rrb.EntityBehavior(visible=False)
-        assert f"{pinhole}/camera_centers" not in hidden
-        assert f"{pinhole}/exo_landmarks" not in hidden
-        assert f"{pinhole}/**" in contents
-        assert "/world/gt/**" in contents and "/world/pred/**" in contents
-        assert ("/world/skeleton/**" in contents) == (rig != 4)
-        if rig != 4:
-            assert hidden["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=False)
-    world = views["World (Quest frame, calibrated)"]
-    assert world.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
-    assert world.visualizer_overrides["/world/gt"] == rrb.EntityBehavior(visible=False)
-    for rig, cam in cameras.values():
-        assert world.visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/skeleton"] == rrb.EntityBehavior(visible=False)
-        assert world.visualizer_overrides[f"{schema.pinhole_path(rig, cam)}/camera_centers"] == rrb.EntityBehavior(visible=False)
-    assert "/world/pred/soma_x/mesh" not in world.visualizer_overrides
-    dev_views = blueprint_views(SelfcapDataset(SelfcapConfig()).default_blueprint(show_soma_mesh=True))
-    dev_world = next(view for view in dev_views if str(view.name) == "World (Quest frame, calibrated)")
-    assert dev_world.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
-    for view in dev_views:
-        if str(view.name).startswith(("exo", "Quest")):
-            assert view.visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
+    sounds: list[str] = [f"{name} · sound" for name in PHONES]
+    loudness: str = "Loudness per phone (dB over its own floor)"
+    assert sorted(views) == sorted(["Scene", *HEAD_CAMERAS, *PHONES, *sounds, loudness, "Gyroscope", "Accelerometer"])
+
+    scene = views["Scene"]
+    assert str(scene.origin) == "/world"
+    scene_contents: list[str] = cast(list[str], scene.contents)
+    assert "/world/**" in scene_contents
+    for rig in PHONES.values():
+        assert f"- /world/rig_{rig:02d}/**" in scene_contents
+    for rig, cam in HEAD_CAMERAS.values():  # the head cameras' image planes would hide the hands
+        assert f"- /world/rig_{rig:02d}/cam_{cam:02d}/pinhole/**" in scene_contents
+    assert "/world/gt" not in scene.visualizer_overrides  # the Quest hands and their joint axes show
+    assert scene.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
+
+    for name, (rig, cam) in HEAD_CAMERAS.items():
+        pinhole: str = f"/world/rig_{rig:02d}/cam_{cam:02d}/pinhole"
+        assert str(views[name].origin) == pinhole
+        assert f"{pinhole}/**" in cast(list[str], views[name].contents)
+        assert "/world/gt/**" in cast(list[str], views[name].contents)
+        assert "/world/gt" not in views[name].visualizer_overrides
+        assert views[name].visualizer_overrides[f"{pinhole}/sapiens2"] == rrb.EntityBehavior(visible=False)
+    for name, rig in PHONES.items():
+        assert cast(list[str], views[name].contents) == [f"/world/rig_{rig:02d}/cam_00/pinhole/**"]
+        sound = views[f"{name} · sound"]
+        assert isinstance(sound, rrb.AudioView)
+        assert str(sound.origin) == f"/world/rig_{rig:02d}/audio_00"
+        assert str(sound.properties["AudioPlayback"]) == str(rrb.AudioPlayback(volume=0.0))  # muted until asked
+    assert cast(list[str], views[loudness].contents) == [f"/world/rig_{rig:02d}/audio_00/loudness" for rig in range(4)]
+    assert str(views["Gyroscope"].origin) == "/world/rig_04/imu_00"
+    assert cast(str, views["Accelerometer"].contents) == "/world/rig_04/imu_00/accel"
+
+
+def test_default_blueprint_draws_the_hands_and_body_through_posed_phones() -> None:
+    # After calibrate the phones have poses: their cameras show in 3D and every overlay projects through them.
+    for show_soma_mesh in (False, True):
+        views = {str(view.name): view for view in blueprint_views(SelfcapDataset(SelfcapConfig()).default_blueprint(show_soma_mesh=show_soma_mesh))}
+        assert "- /world/rig_00/**" not in cast(list[str], views["Scene"].contents)
+        for name, rig in PHONES.items():
+            pinhole: str = f"/world/rig_{rig:02d}/cam_00/pinhole"
+            contents: list[str] = cast(list[str], views[name].contents)
+            assert contents == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**"]
+            hidden = views[name].visualizer_overrides
+            for overlay in ("pred", "sapiens2", "coco133_uv_projected", "quest_coco133_uv_projected"):
+                assert hidden[f"{pinhole}/{overlay}"] == rrb.EntityBehavior(visible=False)
+            assert hidden["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=show_soma_mesh)
+        assert ("/world/pred/soma_x/mesh" in views["Scene"].visualizer_overrides) == show_soma_mesh
+        assert views["Scene"].visualizer_overrides["/world/rig_00/cam_00/pinhole/skeleton"] == rrb.EntityBehavior(visible=False)
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:
@@ -515,11 +527,9 @@ def phone_clip_with_tap(target: Path) -> None:
     if ffmpeg is None:
         pytest.skip("ffmpeg absent")
     tap: str = "aevalsrc='0.5*sin(2*PI*1000*t)*between(t,1,1.2)':s=48000:d=2"
-    subprocess.run(
-        [ffmpeg, "-nostdin", "-v", "error", "-i", str(FIXTURES / "av1_48f_192x160.mp4"), "-f", "lavfi", "-i", tap,
-         "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "libopus", str(target)],
-        check=True,
-    )
+    inputs: list[str] = ["-i", str(FIXTURES / "av1_48f_192x160.mp4"), "-f", "lavfi", "-i", tap]
+    streams: list[str] = ["-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "libopus"]
+    subprocess.run([ffmpeg, "-nostdin", "-v", "error", *inputs, *streams, str(target)], check=True)
 
 
 def test_convert_logs_each_phone_sound_as_flac_and_loudness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -656,24 +666,45 @@ def test_calibration_keeps_unknown_vendor_fields_and_rejects_short_distortion(tm
     assert result.distortion_coefficients is None
 
 
-def test_table_blueprint_shows_scene_and_one_exo_video_for_both_rig_layouts() -> None:
-    views: list[rrb.View] = blueprint_views(SelfcapConfig().setup().table_blueprint())
-    assert len(views) == 2
-    scene, camera = views
-    assert isinstance(scene, rrb.Spatial3DView)
-    assert str(scene.origin) == "/world"
-    assert isinstance(camera, rrb.Spatial2DView)
-    assert str(camera.origin) == schema.pinhole_path(0, 0)
-    scene_contents: list[str] = cast(list[str], scene.contents)
-    camera_contents: list[str] = cast(list[str], camera.contents)
-    for phone_count in (3, 4):
-        slots = [(rig, 0) for rig in range(phone_count)] + [(phone_count, cam) for cam in range(3)] + [(phone_count + 1, cam) for cam in range(2)]
-        for rig, cam in slots:
-            assert f"- {schema.video_path(rig, cam)}/**" in scene_contents
-    assert "/world/skeleton/**" in camera_contents
-    assert "/world/pred/soma_x/mesh/**" in camera_contents
-    assert "/world/pred/soma_x/mesh/**" in scene_contents
-    assert "/world/gt/**" not in scene_contents
+def test_register_publishes_the_posed_layouts_once_the_catalog_holds_phone_poses() -> None:
+    # Calibrate writes each phone's pose on its cam_00; until a layer carries one, the layouts keep the phones unposed.
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    def catalog(*columns: tuple[str, str]) -> DatasetEntry:
+        entry = MagicMock(spec=DatasetEntry)
+        entry.schema.return_value.component_columns.return_value = [SimpleNamespace(entity_path=e, component=c) for e, c in columns]
+        return entry
+
+    def layouts(entry: DatasetEntry) -> tuple[list[str], str]:
+        segment, table = SelfcapDataset(SelfcapConfig()).catalog_blueprints(entry)
+        scene = next(view for view in blueprint_views(segment) if str(view.name) == "Scene")
+        return cast(list[str], scene.contents), str(blueprint_views(table)[1].origin)
+
+    raw = catalog(("/world/rig_04", "Transform3D:translation"), ("/world/rig_00/cam_00/pinhole", "Pinhole:image_from_camera"))
+    calibrated = catalog(("/world/rig_04", "Transform3D:translation"), ("/world/rig_00/cam_00", "Transform3D:translation"))
+    assert "- /world/rig_00/**" in layouts(raw)[0] and layouts(raw)[1] == "/world/rig_04/cam_00/pinhole"
+    assert "- /world/rig_00/**" not in layouts(calibrated)[0] and layouts(calibrated)[1] == "/world/rig_00/cam_00/pinhole"
+
+
+def test_table_card_decodes_one_video_and_follows_the_phone_poses() -> None:
+    # A card decodes exactly one stream. Before calibrate it is the OAK with the Quest hands; after, phone 1 with
+    # the body drawn through its pose.
+    for posed_phones, pane in ((False, (4, 0)), (True, (0, 0))):
+        views: list[rrb.View] = blueprint_views(SelfcapDataset(SelfcapConfig()).table_blueprint(posed_phones=posed_phones))
+        assert len(views) == 2
+        scene, camera = views
+        assert isinstance(scene, rrb.Spatial3DView) and isinstance(camera, rrb.Spatial2DView)
+        assert str(scene.origin) == "/world"
+        assert str(camera.origin) == f"/world/rig_{pane[0]:02d}/cam_{pane[1]:02d}/pinhole"
+        scene_contents: list[str] = cast(list[str], scene.contents)
+        for phone_count in (3, 4):
+            slots = [(rig, 0) for rig in range(phone_count)] + [(phone_count, cam) for cam in range(3)] + [(phone_count + 1, cam) for cam in range(2)]
+            for rig, cam in slots:
+                assert f"- /world/rig_{rig:02d}/cam_{cam:02d}/pinhole/video/**" in scene_contents
+        assert "/world/gt/**" in cast(list[str], camera.contents)
+        assert ("- /world/rig_00/**" in scene_contents) == (not posed_phones)
+        assert ("/world/skeleton/**" in cast(list[str], camera.contents)) == posed_phones
 
 
 def test_table_fields_keep_the_capture_and_quality_summary_compact() -> None:

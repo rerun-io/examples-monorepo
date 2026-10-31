@@ -233,7 +233,8 @@ def patch(
             quest_delta_ns if name.startswith("quest_") else 0,
         )
     for entity, stream in sounds.items():
-        plan[entity] = Retime(0, CAPTURE_TIMELINE if aligning else schema.TIMELINE, round((sync_record.offsets_ms.get(stream) or 0.0) * 1e6) if aligning else 0)
+        sound_offset_ns: int = round((sync_record.offsets_ms.get(stream) or 0.0) * 1e6) if aligning else 0
+        plan[entity] = Retime(0, CAPTURE_TIMELINE if aligning else schema.TIMELINE, sound_offset_ns)
     for entity, offset_ms in csv_offsets.items():
         if entity in present and (aligning or entity in hand_entities):
             plan[entity] = Retime(0, CAPTURE_TIMELINE, round((offset_ms or 0.0) * 1e6))

@@ -229,6 +229,13 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         decode every stream of every visible row.
         """
 
+    def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
+        """The segment and segment-table layouts ``dataforge-register`` publishes for ``entry``, its layers registered.
+
+        A dataset whose layout depends on what the catalog holds reads ``entry``; by default the layouts are fixed.
+        """
+        return self.default_blueprint(), self.table_blueprint()
+
     def register_assets(self, entry: DatasetEntry, output_root: Path) -> None:
         """Register the dataset's shared static models as catalog assets, after its layers are registered.
 

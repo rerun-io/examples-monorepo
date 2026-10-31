@@ -11,6 +11,7 @@ import io
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
@@ -78,7 +79,7 @@ def read_audio_track(video_path: Path) -> AudioTrack | None:
         buffer = io.BytesIO()
         levels: list[Float32[ndarray, "k"]] = []
         with av.open(buffer, "w", format="flac") as output:
-            flac = output.add_stream("flac", rate=stream.rate, layout=layout)
+            flac: av.audio.stream.AudioStream = cast(av.audio.stream.AudioStream, output.add_stream("flac", rate=stream.rate, layout=layout))
             for frame in [*container.decode(stream), None]:  # None flushes the resamplers
                 for converted in to_flac.resample(frame):
                     output.mux(flac.encode(converted))

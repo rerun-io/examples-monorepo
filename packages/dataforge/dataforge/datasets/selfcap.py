@@ -525,49 +525,104 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
     return EpisodePlan(episode_dir=episode_dir, rigs=tuple(rigs), ego_rig=ego_rig, quest_rig=quest_rig, panes=tuple(panes))
 
 
-def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprint:
-    """The base layer's own layout: the 3D scene plus a camera grid over the ego IMU plots.
+HIDDEN_PINHOLE_OVERLAYS: tuple[str, ...] = ("sapiens2", "pred", "coco133_uv_projected", "quest_coco133_uv_projected")
+"""Per-camera overlays kept in the view tree for comparison but hidden: the display skeleton stands for them."""
+LOUDNESS_WINDOW_S: float = 2.0
+"""Half-width of the loudness plot around the time cursor: a tap and its echo on the other phones fit in it."""
 
-    It shows what one base rrd holds by itself (unposed phones, raw Quest hands). The catalog never reads it; the
-    dataset's layout over every layer is ``SelfcapDataset.default_blueprint``, which ``dataforge-register`` publishes.
+
+def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones: bool = False, show_soma_mesh: bool = False) -> rrb.Blueprint:
+    """The SelfCap layout at every stage: 3D scene and head cameras over the phones, their sound, and the OAK IMU.
+
+    A view lists every overlay a later layer may add (Quest hands, skeleton, SOMA), so the one layout serves a
+    freshly ingested capture and a processed one. Only the phone poses change what can be drawn: an unposed phone
+    would sit at the world origin in 3D and project the hands through the wrong pose, so until calibration the scene
+    leaves the phones out and their panes show only the video.
 
     Args:
         panes: Camera labels and indices, in rig-then-camera order.
         ego_rig: Rig index of the OAK, whose ``imu_00`` feeds the time-series views.
+        posed_phones: The phones carry a calibrated pose.
+        show_soma_mesh: Show the SOMA mesh as 3D context (the dev dataset).
 
     Returns:
-        The blueprint embedded in every SelfCap base-layer rrd.
+        The blueprint embedded in every base rrd (phones unposed) and, with index labels, the catalog default.
     """
+    hide: rrb.EntityBehavior = rrb.EntityBehavior(visible=False)
+    phones: list[CameraPane] = [pane for pane in panes if pane.kind == "exo"]
+    pinholes: list[str] = [schema.pinhole_path(pane.rig, pane.cam) for pane in panes]
+    hidden: dict[EntityPathLike, rrb.EntityBehavior] = dict.fromkeys(
+        ["/world/gt/sapiens2", "/world/pred", *(f"{pinhole}/{overlay}" for pinhole in pinholes for overlay in HIDDEN_PINHOLE_OVERLAYS)], hide
+    )
 
-    def views(kind: str, *, project: bool = True) -> list[rrb.Spatial2DView]:
-        # A pane is rooted at its pinhole; listing the 3D hand joints too makes the viewer project them into the image
-        # through the transform tree. Exact for the Quest; the OAK lenses are wide and Rerun has no distortion model,
-        # so on the OAK panes the joints land 25-80 px off, worst at the image edge.
-        extra: list[str] = ["/world/gt/**"] if project else []
-        return [
-            blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=[f"{schema.pinhole_path(pane.rig, pane.cam)}/**", *extra])
-            for pane in panes
-            if pane.kind == kind
-        ]
+    def camera(pane: CameraPane) -> rrb.Spatial2DView:
+        # A pane rooted at its pinhole projects the 3D overlays it lists through the transform tree. Exact for the
+        # Quest and the phones; the OAK lenses are wide and Rerun has no distortion model, so there the joints land
+        # 25-80 px off, worst at the image edge.
+        pinhole: str = schema.pinhole_path(pane.rig, pane.cam)
+        if pane.kind == "exo" and not posed_phones:
+            return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=[f"{pinhole}/**"])
+        contents: list[str] = [f"{pinhole}/**", "/world/gt/**", "/world/pred/**"]
+        overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
+        if pane.rig != ego_rig:
+            contents.append("/world/skeleton/**")
+            overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
+        return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=contents, overrides=overrides)
 
-    # The phones have an assumed lens but no pose until calibration, so this base-only layout keeps them out of 3D.
-    unposed: list[str] = [f"- {schema.rig_path(pane.rig)}/**" for pane in panes if pane.kind == "exo"]
-    oak, quest = views("ego"), views("quest")
-    # A dominant 3D scene with the head cameras stacked beside it: the OAK RGB on top, the two OAK mono cameras
-    # under it, then the two Quest cameras; the exo cameras run along the bottom over the IMU strip.
+    # The scene drops every video (a 3D view decodes the videos it holds) and the head cameras' image planes, which
+    # would cover the hands; camera-plane overlays would repeat the body around the world skeleton.
+    excluded: list[str] = [
+        *blueprints.video_exclusions((pane.rig, pane.cam) for pane in panes),
+        *(f"- {schema.pinhole_path(pane.rig, pane.cam)}/**" for pane in panes if pane.kind != "exo"),
+        *([] if posed_phones else [f"- {schema.rig_path(pane.rig)}/**" for pane in phones]),
+    ]
+    scene_overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden | dict.fromkeys(
+        (f"{pinhole}/{overlay}" for pinhole in pinholes for overlay in ("skeleton", "camera_centers")), hide
+    )
+    if show_soma_mesh:
+        scene_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
+    scene = rrb.Spatial3DView(name="Scene", origin="/world", contents=["/world/**", *excluded], overrides=scene_overrides)
+
+    oak: list[rrb.Spatial2DView] = [camera(pane) for pane in panes if pane.kind == "ego"]
+    quest: list[rrb.Spatial2DView] = [camera(pane) for pane in panes if pane.kind == "quest"]
+    # Sound starts muted: before alignment the phones play the same tap up to seconds apart.
+    strip = rrb.Horizontal(
+        *(
+            rrb.Vertical(
+                camera(pane),
+                rrb.AudioView(origin=schema.audio_path(pane.rig, 0), name=f"{pane.name} · sound", playback=rrb.AudioPlayback(volume=0.0)),
+                row_shares=[4.0, 1.0],
+            )
+            for pane in phones
+        ),
+        name="Phones",
+    )
+    window = rrb.VisibleTimeRange(
+        schema.TIMELINE,
+        start=rrb.TimeRangeBoundary.cursor_relative(seconds=-LOUDNESS_WINDOW_S),
+        end=rrb.TimeRangeBoundary.cursor_relative(seconds=LOUDNESS_WINDOW_S),
+    )
+    loudness = rrb.TimeSeriesView(
+        name="Loudness per phone (dB over its own floor)",
+        contents=[schema.loudness_path(pane.rig, 0) for pane in phones],
+        axis_y=rrb.ScalarAxis(range=(0.0, 45.0)),
+        time_ranges=[window],
+        plot_legend=rrb.PlotLegend(visible=True),
+    )
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Scene", origin="/", contents=["/**", *unposed], line_grid=True),
+                scene,
                 rrb.Vertical(oak[0], rrb.Horizontal(*oak[1:]), rrb.Horizontal(*quest), name="Head cameras", row_shares=[1.3, 1.0, 1.0]),
                 column_shares=[2.2, 1.0],
             ),
-            rrb.Horizontal(*views("exo", project=False), name="Exo"),
+            strip,
+            loudness,
             rrb.Horizontal(
                 blueprints.sensor_plot("Gyroscope", schema.imu_path(ego_rig, IMU_DEVICE), schema.gyro_path(ego_rig, IMU_DEVICE)),
                 blueprints.sensor_plot("Accelerometer", schema.imu_path(ego_rig, IMU_DEVICE), schema.accel_path(ego_rig, IMU_DEVICE)),
             ),
-            row_shares=[4.0, 1.4, 1.0],
+            row_shares=[3.0, 2.0, 0.8, 0.8],
         ),
         # An explicit TimePanel is not collapsed by collapse_panels, so it states its own state.
         rrb.TimePanel(timeline=schema.TIMELINE, state="collapsed"),
@@ -578,66 +633,47 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprin
 class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
     """Converts SelfCap episodes into exoego:v2 base-layer recordings."""
 
-    def default_blueprint(self, *, show_soma_mesh: bool = False) -> rrb.Blueprint:
-        """One display skeleton per view; source overlays stay in the tree for comparison.
+    def default_blueprint(self, *, show_soma_mesh: bool = False, posed_phones: bool = True) -> rrb.Blueprint:
+        """``build_blueprint`` for the modal four-phone rig, with index labels: device names vary per session.
 
-        OAK uses explicit lens projections. Exo and Quest use native Pinhole projection.
-        The dev dataset can opt into the SOMA mesh as 3D context without showing its joints.
+        Register publishes it with ``posed_phones`` read from the catalog (``catalog_blueprints``); the default suits
+        the callers that run after calibration. The dev dataset opts into the SOMA mesh as 3D context.
         """
+        phones: list[CameraPane] = [CameraPane(f"Phone {rig + 1}", rig, 0, "exo") for rig in range(DEFAULT_EXO_CAMERAS)]
         ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
-        hide: rrb.EntityBehavior = rrb.EntityBehavior(visible=False)
-        cameras: list[tuple[int, tuple[int, ...]]] = [*((rig, (0,)) for rig in range(DEFAULT_EXO_CAMERAS)), (ego_rig, (0, 1, 2)), (quest_rig, (0, 1))]
-        pinholes: list[str] = [schema.pinhole_path(rig, cam) for rig, cams in cameras for cam in cams]
-        # Keep the Sapiens2 raw/projected pair beside the RTMW branches in the view tree.
-        overlays: tuple[str, ...] = ("sapiens2", "pred", "coco133_uv_projected", "quest_coco133_uv_projected")
-        hidden: dict[EntityPathLike, rrb.EntityBehavior] = dict.fromkeys(
-            ["/world/gt", "/world/gt/sapiens2", "/world/pred", *(f"{pinhole}/{suffix}" for pinhole in pinholes for suffix in overlays)], hide
-        )
+        head: list[CameraPane] = [CameraPane(f"OAK {stream}", ego_rig, cam, "ego") for cam, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
+        head += [CameraPane(f"Quest {stream}", quest_rig, cam, "quest") for cam, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
+        return build_blueprint((*phones, *head), ego_rig, posed_phones=posed_phones, show_soma_mesh=show_soma_mesh)
 
-        def camera(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
-            pinhole: str = schema.pinhole_path(rig, cam)
-            contents: list[str] = [f"{pinhole}/**", "/world/gt/**", "/world/pred/**"]
-            overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
-            if rig != ego_rig:
-                contents.append("/world/skeleton/**")
-                overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
-            return blueprints.camera_view(name, rig, cam, contents=contents, overrides=overrides)
+    def table_blueprint(self, *, posed_phones: bool = True) -> rrb.Blueprint:
+        """The scene beside one camera: the OAK with the Quest hands, or once the phones are posed, phone 1 with the body.
 
-        ego = rrb.Vertical(
-            camera("OAK rgb", ego_rig, 0),
-            rrb.Horizontal(camera("OAK left", ego_rig, 1), camera("OAK right", ego_rig, 2)),
-            rrb.Horizontal(camera("Quest left", quest_rig, 0), camera("Quest right", quest_rig, 1)),
-        )
-        exo: list[rrb.Spatial2DView] = [camera(f"exo rig_{rig:02d}", rig, 0) for rig in range(DEFAULT_EXO_CAMERAS)]
-        # Camera-plane overlays would repeat the body around the world skeleton.
-        world_overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden | dict.fromkeys(
-            (f"{pinhole}/{suffix}" for pinhole in pinholes for suffix in ("skeleton", "camera_centers")), hide
-        )
-        if show_soma_mesh:
-            world_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
-        scene = rrb.Spatial3DView(name="World (Quest frame, calibrated)", origin="/world", overrides=world_overrides)
-        return rrb.Blueprint(
-            rrb.Vertical(rrb.Horizontal(scene, ego, column_shares=[3.0, 1.2]), rrb.Horizontal(*exo), row_shares=[3.0, 2.0]),
-            # video_time is the as-cut clock at ingest and the aligned clock after selfcap-align.
-            rrb.TimePanel(timeline=schema.TIMELINE, state="collapsed"),
-            collapse_panels=True,
-        )
-
-    def table_blueprint(self) -> rrb.Blueprint:
-        """Preview the display skeleton and SOMA mesh beside one native exo projection.
-
-        Rig 00 exists in both three- and four-phone sessions. The scene excludes
-        all possible video slots, so each card decodes only that exo stream.
+        Rig 00 exists in both three- and four-phone sessions. The scene excludes all possible video slots, so each
+        card decodes only its pane's stream.
         """
-        body: list[str] = ["/world/skeleton/**", "/world/pred/soma_x/mesh/**"]
         slots: list[tuple[int, int]] = [(rig, cam) for rig in range(DEFAULT_EXO_CAMERAS + 2) for cam in range(3)]
+        unposed: list[str] = [] if posed_phones else [f"- {schema.rig_path(rig)}/**" for rig in range(DEFAULT_EXO_CAMERAS)]
         scene: rrb.Spatial3DView = rrb.Spatial3DView(
-            name="Skeleton + SOMA", origin="/world", contents=[*body, *blueprints.video_exclusions(slots)],
+            name="Scene",
+            origin="/world",
+            contents=["/world/**", "- /world/pred/**", "/world/pred/soma_x/mesh/**", *blueprints.video_exclusions(slots), *unposed],
         )
-        pane: rrb.Spatial2DView = blueprints.camera_view(
-            "Exo rig_00", 0, 0, contents=[schema.video_path(0, 0) + "/**", *body],
-        )
+        if posed_phones:
+            body: list[str] = ["/world/gt/**", "/world/skeleton/**", "/world/pred/soma_x/mesh/**"]
+            pane: rrb.Spatial2DView = blueprints.camera_view("Phone 1", 0, 0, contents=[schema.video_path(0, 0) + "/**", *body])
+        else:
+            ego_rig: int = DEFAULT_EXO_CAMERAS
+            pane = blueprints.camera_view("OAK rgb + Quest hands", ego_rig, 0, contents=[schema.video_path(ego_rig, 0) + "/**", "/world/gt/**"])
         return blueprints.exoego_table_blueprint(scene, pane)
+
+    def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
+        """Both layouts, with the phones posed once any registered layer gives a phone camera a pose (calibrate's ``cam_00``)."""
+        phone_cameras: set[str] = {schema.cam_path(rig, 0) for rig in range(DEFAULT_EXO_CAMERAS)}
+        posed_phones: bool = any(
+            str(column.entity_path) in phone_cameras and str(column.component).startswith("Transform3D:")
+            for column in entry.schema().component_columns()
+        )
+        return self.default_blueprint(posed_phones=posed_phones), self.table_blueprint(posed_phones=posed_phones)
 
     def register_assets(self, entry: DatasetEntry, output_root: Path) -> None:
         """Attach the OAK and Quest models to each segment at the rigs it holds them on (``device_asset_id``).
