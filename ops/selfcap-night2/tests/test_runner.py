@@ -1,0 +1,207 @@
+import json
+
+import pytest
+import runner
+
+
+@pytest.fixture
+def queue(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "DB", tmp_path / "state.sqlite")
+    monkeypatch.setattr(runner, "CONFIG", tmp_path / "config.json")
+    runner.CONFIG.write_text(
+        json.dumps(
+            {
+                "limit": 2,
+                "label_command": ["label"],
+                "soma_command": ["soma"],
+                "max_inflight": 40,
+                "s1_cutoff": 0,
+                "label_cutoff": 0,
+                "fallback_enabled": False,
+            }
+        )
+    )
+    with runner.connect() as db:
+        db.executescript(
+            "create table jobs(segment text primary key,ordinal integer,state text,owner text,updated real,s1_ready real,info text,error text); create table workers(name text primary key, heartbeat real, failures integer); create table events(ts real,segment text,stage text,seconds real,status text,worker text);"
+        )
+        db.execute("insert into jobs values('test',0,'labelled',null,0,0,'{}',null)")
+    return tmp_path
+
+
+def test_stale_attempt_cannot_update_same_owner_new_claim(queue):
+    with runner.connect() as db:
+        db.execute("update jobs set state='s2',owner='s2-0',updated=2")
+    old_job = {"segment": "test", "updated": 1}
+    with runner.owned_claim(old_job, "s2", "s2-0") as db:
+        assert db is None
+    current_job = {"segment": "test", "updated": 2}
+    with runner.owned_claim(current_job, "s2", "s2-0") as db:
+        assert db is not None
+
+
+@pytest.mark.parametrize("error", [runner.InfrastructureError("broken"), RuntimeError("bad")])
+def test_stale_failure_does_not_park_new_owner_or_count_failure(queue, monkeypatch, error):
+    claimed = ({"segment": "test", "ordinal": 0, "info": "{}", "s1_ready": 0, "updated": 1}, "labelling")
+    calls = iter([claimed])
+    monkeypatch.setattr(runner, "claim", lambda *args: next(calls))
+    monkeypatch.setattr(runner.threading.Thread, "start", lambda self: None)
+
+    def fail(*args):
+        with runner.connect() as db:
+            db.execute("update jobs set state='s2',owner='new-owner',updated=2")
+        raise error
+
+    monkeypatch.setattr(runner, "external", fail)
+    with pytest.raises(StopIteration):
+        runner.work("label", 0)
+    with runner.connect() as db:
+        assert tuple(db.execute("select state,owner,updated from jobs").fetchone()) == ("s2", "new-owner", 2.0)
+        assert db.execute("select count(*) from events").fetchone()[0] == 0
+        assert db.execute("select failures from workers").fetchone()[0] == 0
+
+
+def test_config_keeps_last_complete_read_during_partial_legacy_write(queue):
+    previous = runner.config()
+    runner.CONFIG.write_text("{")
+    assert runner.config() == previous
+    runner.CONFIG.write_text(json.dumps({**previous, "limit": 3}))
+    assert runner.config()["limit"] == 3
+
+
+def test_atomic_config_writer_readers_see_only_complete_documents(queue):
+    import threading
+
+    errors = []
+    stop = threading.Event()
+
+    def read():
+        while not stop.is_set():
+            try:
+                assert json.loads(runner.CONFIG.read_text())["limit"] in (2, 3)
+            except Exception as error:
+                errors.append(error)
+
+    thread = threading.Thread(target=read)
+    thread.start()
+    try:
+        for value in range(40):
+            runner.write_config({"limit": 2 + value % 2, "payload": "x" * 10000})
+    finally:
+        stop.set()
+        thread.join()
+    assert not errors
+
+
+@pytest.mark.parametrize("role", ["gpu", "s2"])
+def test_s2_latch_blocks_both_worker_roles(queue, role):
+    with runner.connect() as db:
+        runner.stage_result(db, "s2", False)
+        runner.stage_result(db, "s2", False)
+        runner.stage_result(db, "s2", False)
+    assert runner.claim(role, role + "-0") is None
+
+
+def test_s2_latch_still_allows_s1_on_combined_worker(queue, monkeypatch):
+    import storage
+
+    cfg = runner.config()
+    runner.CONFIG.write_text(json.dumps({**cfg, "s1_cutoff": 1e20}))
+    with runner.connect() as db:
+        for _ in range(3):
+            runner.stage_result(db, "s2", False)
+        db.execute("insert into jobs values('next',1,'queued',null,0,0,'{}',null)")
+    monkeypatch.setattr(storage, "storage_available", lambda *args: True)
+    monkeypatch.setattr(storage, "gpu_available", lambda *args: True)
+    job, stage = runner.claim("gpu", "gpu-0")
+    assert (job["segment"], stage) == ("next", "s1")
+
+
+def test_launch_and_external_commands_use_configured_worktree(queue, monkeypatch):
+    from types import SimpleNamespace
+
+    checkout = queue / "pinned-checkout"
+    checkout.mkdir()
+    runner.CONFIG.write_text(
+        json.dumps(
+            {
+                **runner.config(),
+                "pipeline_worktree": str(checkout),
+                "pipeline_python": str(checkout / ".pixi/envs/selfcap-curate/bin/python"),
+                "pipeline_pythonpath": str(checkout / "packages"),
+            }
+        )
+    )
+    commands = []
+    monkeypatch.setattr(runner.subprocess, "run", lambda args, **kwargs: commands.append(args) or SimpleNamespace(returncode=1, stdout="not-found"))
+    runner.launch("s2", 1)
+    launch = commands[-1]
+    assert f"--property=WorkingDirectory={checkout}" in launch
+    assert f"--setenv=TRITON_PTXAS_BLACKWELL_PATH={checkout}/.pixi/envs/selfcap-curate/bin/ptxas" in launch
+    assert str(checkout / "ops/selfcap-night2/runner.py") in launch
+    monkeypatch.setattr(runner, "ROOT", queue)
+    initial = queue / "runs/test/s1/calib"
+    initial.mkdir(parents=True)
+    (initial / "calib.json").write_text("{}")
+    process_cwds = []
+
+    def popen(args, **kwargs):
+        process_cwds.append(kwargs["cwd"])
+        return SimpleNamespace(returncode=0, poll=lambda: 0)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+    runner.external(["echo", "{segment}"], {"segment": "test"}, "soma", 5)
+    assert process_cwds == [checkout]
+
+
+@pytest.mark.parametrize("state,owner,info", [("s1", "old-owner", "{}"), ("failed", None, '{"failed_stage":"s2"}')])
+def test_controller_recovery_does_not_replace_a_new_claim(queue, monkeypatch, state, owner, info):
+    original_connect = runner.connect
+    with original_connect() as db:
+        db.execute("update jobs set state=?,owner=?,updated=0,info=?", (state, owner, info))
+        db.execute("insert into workers values('old-owner',0,0)")
+    reclaimed = []
+
+    def connect_with_reclaim():
+        db = original_connect()
+
+        def before_statement(statement):
+            if statement.lower().startswith("update jobs set state=") and not reclaimed:
+                reclaimed.append(True)
+                with original_connect() as other:
+                    other.execute("update jobs set state='s2',owner='new-owner',updated=200")
+
+        db.set_trace_callback(before_statement)
+        return db
+
+    monkeypatch.setattr(runner, "connect", connect_with_reclaim)
+
+    def stop(_):
+        raise StopIteration
+
+    monkeypatch.setattr(runner.time, "sleep", stop)
+    with pytest.raises(StopIteration):
+        runner.controller()
+    with original_connect() as db:
+        assert tuple(db.execute("select state,owner,updated from jobs").fetchone()) == ("s2", "new-owner", 200.0)
+
+
+@pytest.mark.parametrize('retry,expected', [(False, '0'), (True, '1')])
+def test_soma_blocks_cuda_only_for_first_fault_retry(queue, monkeypatch, retry, expected):
+    from types import SimpleNamespace
+
+    cfg = runner.config()
+    runner.write_config({**cfg, 'pipeline_worktree': str(queue)})
+    monkeypatch.setattr(runner, 'ROOT', queue)
+    initial = queue / 'runs/test/s1/calib'
+    initial.mkdir(parents=True)
+    (initial / 'calib.json').write_text('{}')
+    observed = []
+
+    def popen(args, **kwargs):
+        observed.append(kwargs['env']['CUDA_LAUNCH_BLOCKING'])
+        return SimpleNamespace(returncode=0, poll=lambda: 0)
+
+    monkeypatch.setattr(runner.subprocess, 'Popen', popen)
+    runner.external(['echo', '{segment}'], {'segment': 'test', 'info': json.dumps({'gpu_fault_retry_pending': retry})}, 'soma', 5)
+    assert observed == [expected]

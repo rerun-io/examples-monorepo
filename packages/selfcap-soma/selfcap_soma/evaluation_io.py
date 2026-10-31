@@ -5,8 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+from dataforge.temporal import nearest_indices as nearest_indices
 from datafusion import col, lit
-from jaxtyping import Float64, Int64
+from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.chunk import RrdReader
@@ -45,12 +46,6 @@ def missing_camera_calibration(table: pa.Table, camera: str, extrinsics: bool = 
         if values.size != size or not np.isfinite(values).all():
             missing.append(name)
     return missing
-
-
-def nearest_indices(source: Float64[ndarray, "m"], target: Float64[ndarray, "n"]) -> Int64[ndarray, "n"]:
-    right = np.clip(np.searchsorted(source, target), 0, len(source) - 1)
-    left = np.maximum(right - 1, 0)
-    return np.where(abs(source[left] - target) <= abs(source[right] - target), left, right)
 
 
 def read_views(
@@ -147,8 +142,6 @@ def read_views(
         stamps,
         transforms,
     )
-    if len(ego.distortion) != 14:
-        raise ValueError("expected the full 14-coefficient OAK lens")
     return phones, ego
 
 

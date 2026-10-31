@@ -80,3 +80,33 @@ def test_hand_limit_prior_penalizes_roll_and_excessive_wrist_twist():
     assert loss > hand_limit_penalty(neutral, bases, limits, torch.ones(2)) + 1.0
     loss.backward()
     assert torch.isfinite(bent.grad).all()
+
+
+def test_orientation_targets_name_static_neutral_alignment() -> None:
+    from selfcap_soma.hand_pose import HandOrientations, OrientationTargets, orientation_targets
+
+    names = []
+    positions = np.zeros((3, 2, 26, 3))
+    neutral = []
+    for side, label in enumerate(("Left", "Right")):
+        names.append(label + "Hand")
+        neutral.append([float(side), 0.0, 0.0])
+        positions[:, side, 1] = neutral[-1]
+        for finger, (digit, base) in enumerate(zip(("Thumb", "Index", "Middle", "Ring", "Pinky"), (2, 6, 11, 16, 21), strict=True)):
+            count = 3 if digit == "Thumb" else 4
+            for joint in range(count + 1):
+                names.append(label + "Hand" + digit + (str(joint + 1) if joint < count else "End"))
+                point = [side + 0.03 * (finger + 1), 0.03 * (joint + 1), 0.0]
+                neutral.append(point)
+                positions[:, side, base + joint] = point
+    names.extend(f"unused_{i}" for i in range(77 - len(names)))
+    neutral.extend([[0.0, 0.0, 0.0]] * (77 - len(neutral)))
+    observed = HandOrientations(positions, np.tile(np.eye(3), (3, 2, 26, 1, 1)), np.ones((3, 2, 26), dtype=bool), ("none", "none"))
+    result = orientation_targets(observed, np.arange(3, dtype=np.float64), tuple(names), np.asarray(neutral, dtype=np.float32), np.tile(np.eye(3, dtype=np.float32), (78, 1, 1)))
+    assert isinstance(result, OrientationTargets)
+    assert result.rotations.shape == (3, 40, 3, 3)
+    np.testing.assert_allclose(result.rotations, np.broadcast_to(np.eye(3), result.rotations.shape), atol=1e-6)
+    assert result.valid.all()
+    np.testing.assert_array_equal(result.spread_deg, np.zeros(40))
+    assert names[result.joint_indices[0]] == "LeftHand"
+    assert names[result.joint_indices[-1]] == "RightHandPinky4"

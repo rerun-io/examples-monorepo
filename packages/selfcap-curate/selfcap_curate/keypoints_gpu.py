@@ -6,10 +6,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import onnx
 import torch
+from dataforge.temporal import nearest_indices as sample_nearest_indices
 from jaxtyping import Bool, Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from onnx import numpy_helper
@@ -64,9 +66,7 @@ def nearest_indices(pts: Float64[ndarray, "f"], want: Float64[ndarray, "n"]) -> 
     """Nearest source sample; ties go left, including irregular presentation PTS."""
     if not len(pts) or not np.isfinite(want).all() or not np.all(np.diff(pts) > 0.0):
         raise ValueError("presentation times must be nonempty and strictly increasing")
-    right: Int64[ndarray, "n"] = np.clip(np.searchsorted(pts, want), 0, len(pts) - 1)
-    left: Int64[ndarray, "n"] = np.maximum(right - 1, 0)
-    return np.where(abs(pts[left] - want) <= abs(pts[right] - want), left, right)
+    return sample_nearest_indices(pts, want)
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +320,12 @@ def dynamic_yolox(source: Path) -> Path:
     del model.graph.value_info[:]
     model = onnx.shape_inference.infer_shapes(model)
     onnx.checker.check_model(model)
-    onnx.save(model, str(dest))
+    partial = dest.with_name(f".{dest.name}.{uuid4().hex}.tmp")
+    try:
+        onnx.save(model, str(partial))
+        partial.replace(dest)
+    finally:
+        partial.unlink(missing_ok=True)
     return dest
 
 

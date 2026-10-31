@@ -79,17 +79,20 @@ def s1(segment: str) -> dict:
     return metrics
 
 
-def ego_geometry_signature(path: Path) -> str:
-    """Exact camera geometry on rig_04/05, independent of chunk partitioning."""
-    rows=[]
+def ego_geometry_signature(path: Path, rigs: tuple[str, str]) -> str:
+    """Exact geometry on the resolved wearable rigs, independent of chunk partitioning."""
+    rows=[];seen=set()
     for chunk in RrdReader(path).stream():
         entity=str(chunk.entity_path)
-        if not entity.startswith(('/world/rig_04','/world/rig_05')):continue
+        matching=[rig for rig in rigs if entity==rig or entity.startswith(rig+'/')]
+        if not matching:continue
         batch=chunk.to_record_batch()
         stamps=[None]*len(batch) if chunk.is_static else batch['video_time'].cast('int64').to_pylist()
         for name in batch.schema.names:
             if name.startswith(('Transform3D:','Pinhole:')):
+                seen.update(matching)
                 rows.extend((entity,name,t,value) for t,value in zip(stamps,batch[name].to_pylist()))
+    if set(rigs)-seen:raise ValueError(f'{path}: missing wearable geometry {set(rigs)-seen}')
     return hashlib.sha256(json.dumps(sorted(rows,key=lambda x:(x[0],x[1],-1 if x[2] is None else x[2])),sort_keys=True).encode()).hexdigest()
 
 
@@ -101,16 +104,17 @@ def s2(segment: str, decision: dict | None=None) -> dict:
     refined=bool(decision.get('refined',False))
     with private(segment) as server:
         dataset=server.client().get_dataset(DATASET_NAME)
+        record=open_segment(dataset,segment)
+        rigs=(f'/world/rig_{record.layout.oak_rig:02d}',f'/world/rig_{record.layout.quest_rig:02d}')
         if refined:
-            state_path=next((work/'s1/calib').glob('*.json'))
             state=from_json(CalibSession,Path(decision['calib_path']).read_text())
             record=open_segment(dataset,segment)
             write_calib_layer(final/f'{segment}.rrd',state,read_session_episode(record,read_time_sync(dataset,segment)))
         else:shutil.copy2(source,final/f'{segment}.rrd')
         current=final/f'{segment}.rrd'
         fallback=None
-        if refined and ego_geometry_signature(current)!=ego_geometry_signature(source):
-            fallback='Refinement changed rig_04/05 transform or pinhole; retained S1 geometry'
+        if refined and ego_geometry_signature(current,rigs)!=ego_geometry_signature(source,rigs):
+            fallback=f'Refinement changed {rigs} transform or pinhole; retained S1 geometry'
             print('EXO_REFINEMENT_REJECTED',segment,fallback,flush=True)
             refined=False
             shutil.copy2(source,current)
@@ -125,17 +129,20 @@ def s2(segment: str, decision: dict | None=None) -> dict:
         original=keypoints.detect_keypoints
         original_models=keypoints.keypoint_models
         original_selection=keypoint_geometry.select_wearers
-        keypoints.keypoint_models=lambda *args,**kwargs: (None,None)
-        cached=cache2d.load(work/'s1/rtmw-cache')
-        keypoints.detect_keypoints=lambda *args,**kwargs:cached
-        selected_source=work/'s1/rtmw-cache/source.json'
-        if selected_source.exists() and json.loads(selected_source.read_text()).get('cache')=='original_s1_selected':
-            import numpy as np
-            # Restored immutable S1 points already contain the selected wearer.
-            # Preserve those exact observations; there are no other candidates to select.
-            keypoint_geometry.select_wearers=lambda camera,anchors,boxes,scores:np.zeros(len(boxes),dtype=np.int64)
-            metrics['rtmw_input_source']=json.loads(selected_source.read_text())
         try:
+            keypoints.keypoint_models=lambda *args,**kwargs: (None,None)
+            record=open_segment(dataset,segment)
+            sync=read_time_sync(dataset,segment)
+            expected_phones=tuple(phone for phone in record.layout.phones if (sync.offsets_ms or {}).get('exo/'+phone) is not None)
+            cached=cache2d.load(work/'s1/rtmw-cache',expected_phones=expected_phones,expected_rate=rate)
+            keypoints.detect_keypoints=lambda *args,**kwargs:cached
+            selected_source=work/'s1/rtmw-cache/source.json'
+            if selected_source.exists() and json.loads(selected_source.read_text()).get('cache')=='original_s1_selected':
+                import numpy as np
+                # Restored immutable S1 points already contain the selected wearer.
+                # Preserve those exact observations; there are no other candidates to select.
+                keypoint_geometry.select_wearers=lambda camera,anchors,boxes,scores:np.zeros(len(boxes),dtype=np.int64)
+                metrics['rtmw_input_source']=json.loads(selected_source.read_text())
             keypoints.main(keypoints.Config(calib_dir=final,output_dir=out/'keypoints',rate=rate,segment_ids=(segment,),catalog_url=server.url()))
         finally:
             keypoints.detect_keypoints=original
@@ -187,8 +194,10 @@ def raw_rtmw(segment: str, videos=None) -> dict:
         if len(cameras)<2:
             return skipped(f'only {len(cameras)} calibrated exo cameras; at least two required')
         cache=work/'rtmw-cache'
-        if list(cache.glob('*.parquet')): detections=cache2d.load(cache)
-        else:
+        expected_phones=tuple(phone for phone in record.layout.phones if (sync.offsets_ms or {}).get('exo/'+phone) is not None)
+        try:
+            detections=cache2d.load(cache,expected_phones=expected_phones,expected_rate=rate)
+        except (ValueError, OSError):
             try:
                 detections=detect_keypoints(record,*keypoint_models(),rate=rate,sync=sync)
             except ValueError as error:
@@ -215,15 +224,22 @@ def raw_rtmw(segment: str, videos=None) -> dict:
 
 def publish(segment: str, layers: dict) -> None:
     dataset=CatalogClient(CATALOG).get_dataset(name=DATASET)
+    manifest=root(segment)/'publish-receipts.json'
+    receipts=json.loads(manifest.read_text()) if manifest.exists() else {}
     for layer,path in layers.items():
         if not path.exists():continue
-        digest=hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-        remote=f'{REMOTE}/{layer}/{segment}-{digest}.rrd'
+        with path.open('rb') as stream:
+            digest=hashlib.file_digest(stream,'sha256').hexdigest()
+        remote=f'{REMOTE}/{layer}/{segment}-{digest[:16]}.rrd'
+        previous=receipts.get(layer,{})
+        if layer=='base' and previous.get('sha256')==digest and previous.get('uri')==f'file://{remote}':
+            table=dataset.filter_segments(segment).segment_table().select('rerun_layer_names','rerun_storage_urls').to_arrow_table()
+            if len(table)==1:
+                registered=dict(zip(table['rerun_layer_names'][0].as_py(),table['rerun_storage_urls'][0].as_py(),strict=True))
+                if registered.get(layer)==previous['uri']:continue
         subprocess.run(['ssh','spark',f'mkdir -p {REMOTE}/{layer}'],check=True,timeout=60)
         subprocess.run(['scp','-q',str(path),f'spark:{remote}'],check=True,timeout=180)
         dataset.register([f'file://{remote}'],layer_name=layer,on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
-        manifest=root(segment)/'publish-receipts.json'
-        receipts=json.loads(manifest.read_text()) if manifest.exists() else {}
-        receipts[layer]={'uri':f'file://{remote}','sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'registered_at':time.time()}
+        receipts[layer]={'uri':f'file://{remote}','sha256':digest,'registered_at':time.time()}
         temporary=manifest.with_suffix('.tmp')
         temporary.write_text(json.dumps(receipts,indent=2));temporary.replace(manifest)

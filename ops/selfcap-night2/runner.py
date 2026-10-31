@@ -11,12 +11,13 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from batch_reporting import report, stage_paused, stage_result
-from infrastructure import is_infrastructure_error
+from infrastructure import is_gpu_fault, is_infrastructure_error
 from repeated_errors import repeated_stage_error, is_soma_input_limitation
 
 class InfrastructureError(RuntimeError):
@@ -27,12 +28,44 @@ class InputLimitation(RuntimeError):
 
 
 ROOT=Path('/tmp/selfcap-night2');DB=ROOT/'state.sqlite';CONFIG=ROOT/'config.json'
-CWD=Path('/home/pablo/.paseo/worktrees/26sr02x6/selfcap-display-skeleton')
 PARENT='773be1d3-a483-4a1c-9fcf-6c76b243dcec'
 TZ=ZoneInfo('America/Chicago')
 
 
-def config():return json.loads(CONFIG.read_text())
+_last_config = {}
+
+
+def config():
+    """Keep workers alive across transient legacy config truncation."""
+    for attempt in range(3):
+        try:
+            value=json.loads(CONFIG.read_text())
+            if not isinstance(value,dict):raise ValueError('config must be a JSON object')
+            _last_config[CONFIG]=value
+            return value.copy()
+        except (OSError,json.JSONDecodeError,ValueError):
+            if attempt<2:time.sleep(0.02)
+    if CONFIG in _last_config:
+        print('CONFIG_READ_RETRY using last complete configuration',flush=True)
+        return _last_config[CONFIG].copy()
+    raise ValueError(f'{CONFIG}: no complete configuration available')
+
+
+def write_config(value):
+    """Publish a complete document. Operator writers must use this protocol too."""
+    with tempfile.NamedTemporaryFile(mode='w',dir=CONFIG.parent,prefix=f'.{CONFIG.name}-',delete=False) as stream:
+        temporary=Path(stream.name)
+        try:
+            stream.write(json.dumps(value,indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(CONFIG)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 def connect():
     c=sqlite3.connect(DB,timeout=30);c.row_factory=sqlite3.Row;c.execute('pragma journal_mode=WAL');return c
@@ -52,7 +85,7 @@ def initialize():
     ROOT.mkdir(exist_ok=True)
     if not CONFIG.exists():
         today=dt.datetime.now(TZ).date()
-        CONFIG.write_text(json.dumps({'limit':1,'label_command':None,'soma_command':None,'label_workers':2,'soma_workers':2,'max_inflight':40,'label_cutoff':dt.datetime.combine(today,dt.time(7),TZ).timestamp(),'s1_cutoff':dt.datetime.combine(today,dt.time(7,30),TZ).timestamp()},indent=2))
+        write_config({'limit':1,'label_command':None,'soma_command':None,'label_workers':2,'soma_workers':2,'max_inflight':40,'label_cutoff':dt.datetime.combine(today,dt.time(7),TZ).timestamp(),'s1_cutoff':dt.datetime.combine(today,dt.time(7,30),TZ).timestamp()})
     priorities=[line.split('\\t')[0].split()[0] for line in Path('/tmp/selfcap-5090/validation-10.tsv').read_text().splitlines() if line.strip()]
     queue=list(dict.fromkeys(priorities+Path('/tmp/selfcap-night/queue.txt').read_text().split()))
     with connect() as c:
@@ -71,7 +104,7 @@ def claim(role,name):
             c.execute("update jobs set state='label_timeout',owner=null,updated=? where ordinal<? and state in ('s1_done','labelling') and (ordinal>0 or ?) and (s1_ready<? or (owner is null and ? >= ?))",(now,cfg['limit'],bool(cfg['label_command']),now-1200,now,cfg['label_cutoff']))
         job=None;stage=role
         if role=='gpu':
-            job=None if cfg.get('s2_paused',False) or cfg.get('s2_separate',False) else c.execute("select * from jobs where ordinal<? and state in ('labelled','label_timeout') order by ordinal limit 1",(cfg['limit'],)).fetchone();stage='s2'
+            job=None if cfg.get('s2_paused',False) or cfg.get('s2_separate',False) or stage_paused(c,'s2') else c.execute("select * from jobs where ordinal<? and state in ('labelled','label_timeout') order by ordinal limit 1",(cfg['limit'],)).fetchone();stage='s2'
             pending=c.execute("select count(*) from jobs where ordinal<? and state not in ('queued','done','failed','calib_input_limited')",(cfg['limit'],)).fetchone()[0]
             if job is None and now<cfg['s1_cutoff'] and pending<cfg['max_inflight'] and not stage_paused(c,'s1'):
                 from storage import storage_available, gpu_available
@@ -86,7 +119,21 @@ def claim(role,name):
             job=c.execute("select * from jobs where ordinal<? and state='soma' and owner is null order by ordinal limit 1",(cfg['limit'],)).fetchone()
         if job is None:return None
         c.execute('update jobs set state=?,owner=?,updated=? where segment=?',(stage,name,now,job['segment']))
-        return dict(job),stage
+        return {**dict(job), 'updated': now},stage
+
+
+@contextlib.contextmanager
+def owned_claim(job, stage, name):
+    """Serialize result writes only while this exact claim still owns the job.
+
+    The claim timestamp distinguishes restarts reusing the same worker name.
+    This fences database writes, not external artifact publication.
+    """
+    with connect() as c:
+        c.execute('begin immediate')
+        current=c.execute('select 1 from jobs where segment=? and state=? and owner=? and updated=?',
+                          (job['segment'],stage,name,job['updated'])).fetchone()
+        yield c if current else None
 
 
 def heartbeat(name,stop):
@@ -101,7 +148,10 @@ def external(command,job,stage,timeout):
     args=[part.format(**fields) for part in command]
     with (out/'command.log').open('a') as log:
         log_start=log.tell()
-        proc=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,cwd=CWD)
+        environment = os.environ.copy()
+        if stage == 'soma':
+            environment['CUDA_LAUNCH_BLOCKING'] = '1' if json.loads(job.get('info', '{}')).get('gpu_fault_retry_pending') else '0'
+        proc=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,cwd=Path(config()['pipeline_worktree']),env=environment)
         try:
             deadline=time.monotonic()+timeout
             while proc.poll() is None:
@@ -132,9 +182,9 @@ def work(role,index):
     name=f'{role}-{index}'
     with connect() as c:
         c.execute('insert into workers values(?,?,0) on conflict(name) do update set heartbeat=excluded.heartbeat',(name,time.time()))
-        for stale in c.execute('select segment,state from jobs where owner=?',(name,)).fetchall():
+        for stale in c.execute('select segment,state,updated from jobs where owner=?',(name,)).fetchall():
             state={'s1':'queued','s2':'labelled','labelling':'s1_done'}.get(stale['state'],stale['state'])
-            c.execute('update jobs set state=?,owner=null,updated=? where segment=?',(state,time.time(),stale['segment']))
+            c.execute('update jobs set state=?,owner=null,updated=? where segment=? and state=? and owner=? and updated=?',(state,time.time(),stale['segment'],stale['state'],name,stale['updated']))
         if c.execute('select failures from workers where name=?',(name,)).fetchone()[0]>=3:return
     stop=threading.Event();threading.Thread(target=heartbeat,args=(name,stop),daemon=True).start()
     while True:
@@ -165,6 +215,10 @@ def work(role,index):
                 if labels.exists():info['decision']['landmarks_path']=str(labels)
                 target='calib_input_limited' if decision['decision']=='skipped' else ('labelled' if decision['decision'] in ('accepted','rejected') else 'label_timeout')
             else:
+                retry_blocking = bool(info.pop('gpu_fault_retry_pending', False))
+                info['soma_cuda_launch_blocking'] = retry_blocking
+                if retry_blocking:
+                    info['gpu_fault_retries'] = info.get('gpu_fault_retries', 0) + 1
                 from storage import verify_publication
                 info['s2_readback']=verify_publication(seg,manifest=ROOT/'runs'/seg/'publish-receipts.json',include_soma=False)
                 external(config()['soma_command'],job,'soma',1200)
@@ -172,11 +226,9 @@ def work(role,index):
                 info['final_readback']=verify_publication(seg,manifest=ROOT/'runs'/seg/'publish-receipts.json')
                 target='done'
             elapsed=time.perf_counter()-started;info[stage+'_wall_s']=elapsed
-            with connect() as c:
-                c.execute('begin immediate')
-                current=c.execute('select state,owner from jobs where segment=?',(seg,)).fetchone()
-                if current['state']==stage and current['owner']==name:
-                    c.execute('update jobs set state=?,owner=null,updated=?,s1_ready=coalesce(s1_ready,?),info=?,error=null where segment=?',(target,time.time(),time.time() if stage=='s1' else None,json.dumps(info),seg))
+            with owned_claim(job,stage,name) as c:
+                if c is None:continue
+                c.execute('update jobs set state=?,owner=null,updated=?,s1_ready=coalesce(s1_ready,?),info=?,error=null where segment=?',(target,time.time(),time.time() if stage=='s1' else None,json.dumps(info),seg))
                 label_ok=role!='label' or info.get('decision',{}).get('decision') in ('accepted','rejected','skipped')
                 newly_paused=stage_result(c,stage,label_ok,info.get('decision',{}).get('reason') if not label_ok else None)
                 c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'ok' if label_ok else 'failed',name));c.execute('update workers set failures=0 where name=?',(name,))
@@ -187,10 +239,23 @@ def work(role,index):
                 if config().get('cleanup_after_success',True):cleanup_finished(seg,info)
         except Exception as error:
             detail=traceback.format_exc();elapsed=time.perf_counter()-started
+            if stage == 'soma' and is_gpu_fault(detail) and info.get('gpu_fault_retries', 0) >= 1:
+                info['gpu_fault_trace'] = detail
+                info.pop('failed_stage', None)
+                info.pop('retries', None)
+                with owned_claim(job, stage, name) as c:
+                    if c is None:continue
+                    c.execute("update jobs set state='soma_gpu_fault',owner=null,error=null,updated=?,info=? where segment=?", (time.time(), json.dumps(info), seg))
+                    c.execute('insert into events values(?,?,?,?,?,?)', (time.time(), seg, stage, elapsed, 'gpu_fault_parked', name))
+                notify(f'Repeated isolated SOMA GPU fault; parked {seg}: {str(error)[-1800:]}')
+                continue
             if isinstance(error, InfrastructureError) or is_infrastructure_error(detail):
+                if stage == 'soma' and is_gpu_fault(detail):
+                    info['gpu_fault_retry_pending'] = True
                 info['infrastructure_stage']=stage
                 info['infrastructure_reason']=str(error)
-                with connect() as c:
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
                     c.execute("update jobs set state='infrastructure_waiting',owner=null,error=null,updated=?,info=? where segment=?",(time.time(),json.dumps(info),seg))
                     c.execute("insert into stage_health(stage,failures,paused,reason) values(?,0,1,?) on conflict(stage) do update set failures=0,paused=1,reason=excluded.reason",(stage,str(error)))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'infrastructure_pause',name))
@@ -198,7 +263,8 @@ def work(role,index):
                 continue
             if role=='gpu' and ('OutOfMemoryError' in detail or 'CUDA out of memory' in detail):
                 info['oom_requeued_at']=time.time()
-                with connect() as c:
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
                     c.execute("update jobs set state='queued',owner=null,error=null,updated=?,info=? where segment=?",(time.time(),json.dumps(info),seg))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'resource_retry',name))
                 notify(f'S1 OOM resource retry, not data failure: {seg}; waiting for16GiB free before another claim')
@@ -207,21 +273,24 @@ def work(role,index):
             if stage=='soma' and any(reason in str(error) for reason in ('CSV has no orientations', 'need at least two Quest hand and head samples')):
                 info.pop('failed_stage',None);info.pop('retries',None)
                 info['waiting_reason']='SOMA Quest orientation or head-path reader requires pending fix'
-                with connect() as c:
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
                     c.execute("update jobs set state='soma_waiting_fix',owner=null,error=null,updated=?,info=? where segment=?",(time.time(),json.dumps(info),seg))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'waiting_fix',name))
                 print('SOMA_WAITING_FIX',seg,flush=True)
                 continue
-            if stage in ('soma','s2') and (isinstance(error,InputLimitation) or repeated_stage_error(info,stage,str(error))):
+            if stage in ('s1','soma','s2') and (isinstance(error,InputLimitation) or repeated_stage_error(info,stage,str(error))):
                 info.pop('failed_stage',None);info.pop('retries',None)
                 info['waiting_reason']=str(error)
-                with connect() as c:
-                    c.execute("update jobs set state=?,owner=null,error=null,updated=?,info=? where segment=?",('soma_input_limited' if stage=='soma' else 's2_waiting_fix',time.time(),json.dumps(info),seg))
+                with owned_claim(job,stage,name) as c:
+                    if c is None:continue
+                    c.execute("update jobs set state=?,owner=null,error=null,updated=?,info=? where segment=?",({'soma':'soma_input_limited','s2':'s2_waiting_fix','s1':'s1_waiting_fix'}[stage],time.time(),json.dumps(info),seg))
                     c.execute("update events set status='input_limited' where segment=? and stage=? and status='failed'",(seg,stage))
                     c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'input_limited',name))
                 notify(f'{stage} input limitation or repeated error, parked: {seg}: {error}')
                 continue
-            with connect() as c:
+            with owned_claim(job,stage,name) as c:
+                if c is None:continue
                 c.execute("update jobs set state='failed',owner=null,updated=?,info=?,error=? where segment=?",(time.time(),json.dumps({**info,'failed_stage':stage}),detail,seg))
                 newly_paused=stage_result(c,stage,False,str(error))
                 c.execute('insert into events values(?,?,?,?,?,?)',(time.time(),seg,stage,elapsed,'failed',name));c.execute('update workers set failures=failures+1 where name=?',(name,));failures=c.execute('select failures from workers where name=?',(name,)).fetchone()[0]
@@ -263,14 +332,14 @@ def controller():
             for owner in stale:
                 for job in c.execute('select * from jobs where owner=?',(owner,)).fetchall():
                     state={'s1':'queued','s2':'labelled','labelling':'s1_done'}.get(job['state'],job['state'])
-                    c.execute('update jobs set state=?,owner=null,updated=? where segment=?',(state,time.time(),job['segment']))
+                    c.execute('update jobs set state=?,owner=null,updated=? where segment=? and state=? and owner=? and updated=?',(state,time.time(),job['segment'],job['state'],owner,job['updated']))
             # Retry an interrupted session twice, retaining its error history and worker failure guard.
             for job in c.execute("select * from jobs where ordinal<? and state='failed' and updated<?",(config()['limit'],time.time()-10)).fetchall():
                 info=json.loads(job['info']); retries=info.get('retries',0)
                 if retries>=2:continue
                 stage=info.get('failed_stage','s1'); info['retries']=retries+1
                 state={'s1':'queued','s2':'labelled','soma':'soma','labelling':'s1_done'}[stage]
-                c.execute('update jobs set state=?,owner=null,updated=?,info=? where segment=?',(state,time.time(),json.dumps(info),job['segment']))
+                c.execute('update jobs set state=?,owner=null,updated=?,info=? where segment=? and state=? and owner is ? and updated=?',(state,time.time(),json.dumps(info),job['segment'],job['state'],job['owner'],job['updated']))
         cfg=config()
         if cfg.get('batch_started_at'):
             snapshot=report_snapshot()
@@ -285,7 +354,7 @@ def controller():
             if done==cfg['limit'] and not cfg.get('redecision_pending',False) and not any(json.loads(r['info']).get('cleanup_pending') for r in connect().execute("select info from jobs where ordinal<?",(cfg['limit'],))):
                 for role,count in [('gpu',2),('label',3),('s2',3),('soma',6)]:
                     for index in range(count):subprocess.run(['systemctl','--user','stop',f'selfcap-night2-{role}-{index}'],check=False)
-                finished=config();finished['full_go']=False;finished['corpus_paused']=True;CONFIG.write_text(json.dumps(finished,indent=2))
+                finished=config();finished['full_go']=False;finished['corpus_paused']=True;write_config(finished)
                 return
         if cfg.get('full_go'):
             with connect() as c:
@@ -304,7 +373,7 @@ def controller():
                 if not stage_paused(c,'soma'):
                     launch('soma',cfg.get('drain_soma_workers',6))
                     current=config();current['active_soma_workers']=cfg.get('drain_soma_workers',6)
-                    CONFIG.write_text(json.dumps(current,indent=2))
+                    write_config(current)
         time.sleep(10)
 
 
@@ -317,7 +386,7 @@ def launch(role,count):
             subprocess.run(['systemctl','--user','start',name],check=True)
             continue
         cfg=config()
-        args=['systemd-run','--user',f'--unit={name}','--collect',f"--property=WorkingDirectory={cfg['pipeline_worktree']}",'--property=Restart=on-failure','--property=RestartSec=10','--setenv=CUDA_MPS_PIPE_DIRECTORY=/tmp/selfcap-mps/pipe','--setenv=OMP_NUM_THREADS=1','--setenv=PYTHONUNBUFFERED=1','--setenv=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True',f"--setenv=PYTHONPATH={cfg['pipeline_pythonpath']}",f'--setenv=TRITON_PTXAS_BLACKWELL_PATH={CWD}/.pixi/envs/selfcap-curate/bin/ptxas']
+        args=['systemd-run','--user',f'--unit={name}','--collect',f"--property=WorkingDirectory={cfg['pipeline_worktree']}",'--property=Restart=on-failure','--property=RestartSec=10','--setenv=CUDA_MPS_PIPE_DIRECTORY=/tmp/selfcap-mps/pipe','--setenv=OMP_NUM_THREADS=1','--setenv=PYTHONUNBUFFERED=1','--setenv=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True',f"--setenv=PYTHONPATH={cfg['pipeline_pythonpath']}",f"--setenv=TRITON_PTXAS_BLACKWELL_PATH={Path(cfg['pipeline_worktree'])/'.pixi/envs/selfcap-curate/bin/ptxas'}"]
         if role=='s2':args.append('--setenv=CUDA_VISIBLE_DEVICES=')
         args += [cfg['pipeline_python'],str(Path(cfg['pipeline_worktree'])/'ops/selfcap-night2/runner.py'), 'controller' if role=='controller' else 'worker']
         if role!='controller':args +=[role,str(i)]

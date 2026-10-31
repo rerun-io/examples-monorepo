@@ -74,16 +74,27 @@ class GateThresholds:
     """Minimum absolute reduction for each optical target class."""
     optical_min_drop_fraction: float = .1
     """Minimum fractional reduction for each optical target class."""
-    sapiens_max_regression_px: float = 2.0
+    sapiens_max_regression_px: float = 5.0
     """Guard against large regression on the original fit's Sapiens samples."""
     deployed_label_tolerance_px: float = 2.0
     """Maximum deployed-label median increase over its corresponding fold score."""
     rtmw_max_regression_px: float = 1.5
     """Primary hand gate: maximum independent RTMW median increase."""
+    max_nonconverged_cv_folds: int = 1
+    """Allow at most one failed CV fold, subject to every other gate check."""
+    require_full_fit_convergence: bool = True
+    """Mandatory deployed-model convergence; this safety condition cannot be disabled."""
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.max_nonconverged_cv_folds <= 1:
+            raise ValueError('gate-v3 permits at most one non-converged CV fold')
+        if not self.require_full_fit_convergence:
+            raise ValueError('gate-v3 requires deployed full-fit convergence')
 
 
 DEFAULT_THRESHOLDS = GateThresholds()
 DEFAULT_OBJECTIVE = ObjectiveShares()
+GATE_VERSION = 'gate-v3'
 LabelFocalSource: TypeAlias = Literal["device-vp", "table"]
 
 
@@ -120,15 +131,20 @@ class LabelResult:
     """Hash pinning the observation bytes used to fit and score."""
     cached_labels_sha256: str | None = None
     """Hash pinning the input labels in inference-free redecision mode."""
+    gate_version: str | None = None
+    """Acceptance-policy version; null identifies a legacy decision needing re-scoring."""
 
 
 def accepts(gate: Gate, thresholds: GateThresholds = DEFAULT_THRESHOLDS) -> bool:
     """Require clear optical improvement, body improvement, and the configured hand regression limits."""
-    if any(not model.converged for model in gate.folds):
+    if gate.full_fit_converged is not True or len(gate.folds) != 2:
+        return False
+    if sum(not model.converged for model in gate.folds) > thresholds.max_nonconverged_cv_folds:
         return False
     for metric in ('headset', 'phones', 'sapiens_hands', 'rtmw_hands', 'body_transfer'):
         before, after = gate.baseline.get(metric), gate.candidate.get(metric)
-        if before is None or after is None or before.n == 0 or after.n == 0 or before.median is None or after.median is None:
+        if (before is None or after is None or before.n <= 0 or after.n <= 0 or before.median is None or after.median is None
+                or not np.isfinite([before.median, after.median]).all()):
             return False
         if metric in ('headset', 'phones'):
             if after.median > before.median - max(thresholds.optical_min_drop_px, thresholds.optical_min_drop_fraction * before.median):
@@ -419,7 +435,8 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
             (output / name).unlink(missing_ok=True)
         result = LabelResult(segment.id, 'skipped', f'Fewer than two initial exo cameras ({len(active)} calibrated)', 0,
                              time.monotonic() - start, thresholds, objective=objective, solver_version='exo-visible-folds-physical-targets-v4',
-                             rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None, rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash)
+                             rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None, rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash,
+                             gate_version=GATE_VERSION)
         (output / 'result.json').write_text(to_json(result))
         return result
     table = read_vp_table()
@@ -440,7 +457,8 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
             raise ValueError('Output directory belongs to another segment')
         if (previous.decision in ('accepted', 'rejected') and previous.thresholds == thresholds and previous.focal_source == focal_source
                 and previous.focals == fixed_focals and previous.focal_sources == focal_sources and previous.solver_version == 'exo-visible-folds-physical-targets-v4'
-                and previous.objective == objective and previous.rtmw_sha256 == rtmw_hash and previous.cached_labels_sha256 == label_hash):
+                and previous.objective == objective and previous.rtmw_sha256 == rtmw_hash and previous.cached_labels_sha256 == label_hash
+                and previous.gate_version == GATE_VERSION):
             return previous
     for name in ('calib.json', 'refinement.json'):
         (output / name).unlink(missing_ok=True)
@@ -477,7 +495,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         assert truth_bytes == tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values()), "Exo fitting must preserve Quest hands"
         (output / 'candidate.json').write_text(to_json(model))
         accepted = accepts(gate, thresholds) and model.converged
-        gate = replace(gate, passes=accepted, policy=gate.policy + "; configurable optical/body/Sapiens/RTMW acceptance thresholds in result.json")
+        gate = replace(gate, passes=accepted, policy=gate.policy + "; gate-v3: mandatory full-fit convergence; at most one failed CV fold; thresholds in result.json")
         assert not np.any(model.head_translation_m), 'Exo-only refinement must not move the Quest world'
         if accepted:
             (output / 'refinement.json').write_text(to_json(model))
@@ -488,7 +506,7 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
                              fixed_focals, focal_sources)
     temporary = result_path.with_suffix('.tmp')
     result = replace(result, rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None,
-                     rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash)
+                     rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash, gate_version=GATE_VERSION)
     temporary.write_text(to_json(result))
     temporary.replace(result_path)
     return result
@@ -513,7 +531,8 @@ def bounded_command(args: list[str], output: Path, segment: str, timeout_s: floa
     path = output / 'result.json'
     if code == 0 and path.exists():
         return from_json(LabelResult, path.read_text())
-    result = LabelResult(segment, 'timeout' if code == -1 else 'failed', 'initial calibration retained; see worker.log', 0, time.monotonic() - start, thresholds)
+    result = LabelResult(segment, 'timeout' if code == -1 else 'failed', 'initial calibration retained; see worker.log', 0,
+                         time.monotonic() - start, thresholds, gate_version=GATE_VERSION)
     path.write_text(to_json(result))
     return result
 
@@ -535,6 +554,7 @@ def label_session(segment: str, calib_record: Path, output: Path, *, dataset: st
                  "--thresholds.optical-min-drop-fraction", str(thresholds.optical_min_drop_fraction),
                  "--thresholds.sapiens-max-regression-px", str(thresholds.sapiens_max_regression_px),
                  "--thresholds.rtmw-max-regression-px", str(thresholds.rtmw_max_regression_px),
+                 "--thresholds.max-nonconverged-cv-folds", str(thresholds.max_nonconverged_cv_folds),
                  "--thresholds.deployed-label-tolerance-px", str(thresholds.deployed_label_tolerance_px),
                  "--objective.headset", str(objective.headset), "--objective.phones", str(objective.phones),
                  "--objective.hands", str(objective.hands), "--objective.body", str(objective.body)])

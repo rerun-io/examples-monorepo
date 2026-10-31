@@ -7,13 +7,14 @@ from typing import Literal
 
 import numpy as np
 import torch
-from jaxtyping import Float32, Float64, Int32, Int64
+from jaxtyping import Bool, Float32, Float64, Int32, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from serde import serde
 from soma.body import SOMALayer, SOMAPoseOutput
 from torch import Tensor
 
+from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, bounded_scale, plausible_ears
 from selfcap_soma.catalog import Observations
 from selfcap_soma.feet import foot_pose_penalty, symmetry_penalty
 from selfcap_soma.hand_pose import HandOrientations, HandOrientationSource, frame, hand_limit_penalty, orientation_targets
@@ -151,6 +152,19 @@ class Calibration:
     """Legacy eye or ear-calibrated head position anchor."""
 
 
+def pose_gradient_mask(
+    names: tuple[str, ...], leg_indices: Int64[ndarray, "k"], hands_only: bool, freeze_legs: bool, device: torch.device
+) -> Float32[Tensor, "1 j 1"]:
+    """Select pose gradients for the hand-only and frozen-leg fitting policies."""
+    if hands_only:
+        mask = torch.tensor([float("Hand" in name or name in ("LeftForeArm", "RightForeArm")) for name in names], device=device)[None, :, None]
+    else:
+        mask = torch.ones((1, len(names), 1), device=device)
+    if freeze_legs:
+        mask[:, leg_indices] = 0.0
+    return mask
+
+
 def fit(
     data: Observations,
     assets: Path,
@@ -191,7 +205,7 @@ def fit(
         model.prepare_identity(
             neutral_identity,
             scale_params=None if seed is None else torch.as_tensor(seed.bone_scales, device="cuda"),
-            global_scale=1.0 if seed is None else seed.scale,
+            global_scale=1.0 if seed is None else bounded_scale(seed.scale),
         )
         neutral: SOMAPoseOutput = model.pose(torch.zeros(1, 77, 3, device="cuda"), fk_only=True, apply_correctives=False)
     neutral_joints: Float32[ndarray, "77 3"] = neutral.joints[0].detach().cpu().numpy()
@@ -227,8 +241,6 @@ def fit(
     initial_anchors: Float64[ndarray, "n a 3"] = data.exo[:, anchors].copy()
     for joint in range(len(anchors)):
         valid = np.isfinite(initial_anchors[:, joint]).all(-1)
-        if valid.sum() < 2:
-            raise ValueError("prototype initialization needs two observations per torso anchor")
         for axis in range(3):
             initial_anchors[:, joint, axis] = np.interp(data.times, data.times[valid], initial_anchors[valid, joint, axis])
     for i, target in enumerate(initial_anchors):
@@ -255,14 +267,14 @@ def fit(
                     .numpy()
                 )
             desired = start_frames.copy()
-            for column, index in enumerate(aligned[0]):
-                desired[aligned[2][:, column], index + 1] = aligned[1][aligned[2][:, column], column]
+            for column, index in enumerate(aligned.joint_indices):
+                desired[aligned.valid[:, column], index + 1] = aligned.rotations[aligned.valid[:, column], column]
             rest_frames = neutral_transforms[0, :, :3, :3].cpu().numpy()
             parents = model.public_joint_parent_ids.cpu().numpy()
-            for column, index in enumerate(aligned[0]):
+            for column, index in enumerate(aligned.joint_indices):
                 parent = parents[index + 1]
                 local = rest_frames[parent] @ desired[:, parent].transpose(0, 2, 1) @ desired[:, index + 1] @ rest_frames[index + 1].T
-                valid = aligned[2][:, column]
+                valid = aligned.valid[:, column]
                 initial_poses[valid, index] = Rotation.from_matrix(local[valid]).as_rotvec()
     poses: Float32[Tensor, "n 77 3"] = torch.nn.Parameter(torch.as_tensor(initial_poses, device="cuda"))
     translations: Float32[Tensor, "n 3"] = torch.nn.Parameter(
@@ -272,7 +284,7 @@ def fit(
         raise ValueError("shape components must be in [1,128]")
     identity = torch.nn.Parameter(neutral_identity[:, :active_components].clone(), requires_grad=fixed is None)
     log_scale = torch.nn.Parameter(
-        torch.tensor(0.0 if seed is None else np.log(seed.scale), device="cuda", dtype=torch.float32), requires_grad=fixed is None
+        torch.tensor(0.0 if seed is None else np.log(bounded_scale(seed.scale)), device="cuda", dtype=torch.float32), requires_grad=fixed is None
     )
     offset_raw = torch.nn.Parameter(torch.zeros(3, device="cuda"), requires_grad=options.learn_head_offset and fixed is None and head_mode == "quest")
     if model.num_scale_params != 60:
@@ -329,6 +341,10 @@ def fit(
     dt: Float32[Tensor, "interval"] = torch.as_tensor(np.diff(data.times), dtype=torch.float32, device="cuda")
     ears_target = torch.as_tensor(data.exo[:, 3:5], dtype=torch.float32, device="cuda")
     ears_confidence = torch.as_tensor(data.confidence[:, 3:5], dtype=torch.float32, device="cuda")
+    ear_pairs = plausible_ears(data.exo) & (data.confidence[:, 3:5] > 0.0).any(1)
+    if ear_pairs.sum() < 3:
+        ear_pairs[:] = False
+    ears_confidence = ears_confidence * torch.as_tensor(ear_pairs[:, None], device="cuda")
     feet_target = torch.as_tensor(data.exo[:, 17:23], dtype=torch.float32, device="cuda")
     feet_confidence = torch.as_tensor(data.confidence[:, 17:23], dtype=torch.float32, device="cuda")
     foot_indices = [names.index(side + "Foot") for side in ("Left", "Right")]
@@ -355,21 +371,15 @@ def fit(
     soma_body = [names.index(mapping[key]) for key in range(5, 17)]
     body_columns: list[int] = [i for i, key in enumerate(coco) if key < 17]
     hand_columns: list[int] = [i for i, key in enumerate(coco) if key >= 91]
-    orientation_data = None
+    orientation_indices: Int64[Tensor, "j"] | None = None
+    orientation_rotations: Float32[Tensor, "n j 3 3"] | None = None
+    orientation_valid: Bool[Tensor, "n j"] | None = None
     if aligned is not None:
-        orientation_data = (
-            torch.as_tensor(aligned[0] + 1, device="cuda"),
-            torch.as_tensor(aligned[1], device="cuda"),
-            torch.as_tensor(aligned[2], device="cuda"),
-        )
-        print("Quest-to-SOMA alignment mean spread deg:", float(np.median(aligned[3])), flush=True)
-    pose_mask = torch.tensor([float("Hand" in name or name in ("LeftForeArm", "RightForeArm")) for name in names], device="cuda")[None, :, None]
-    if options.freeze_legs:
-        pose_mask[:, leg_indices] = 0.0
-    if not options.hands_only:
-        pose_mask = torch.ones_like(pose_mask)
-        if options.freeze_legs:
-            pose_mask[:, leg_indices] = 0.0
+        orientation_indices = torch.as_tensor(aligned.joint_indices + 1, device="cuda")
+        orientation_rotations = torch.as_tensor(aligned.rotations, device="cuda")
+        orientation_valid = torch.as_tensor(aligned.valid, device="cuda")
+        print("Quest-to-SOMA alignment mean spread deg:", float(np.median(aligned.spread_deg)), flush=True)
+    pose_mask = pose_gradient_mask(names, leg_indices, options.hands_only, options.freeze_legs, poses.device)
     body_chain = [
         names.index(name) for name in ("Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "LeftShoulder", "RightShoulder", "LeftArm", "RightArm")
     ]
@@ -410,7 +420,7 @@ def fit(
     rotation_weights = None
     if aligned is not None and orientations is not None:
         rotation_weights = torch.tensor(
-            [0.1 if orientations.sources[int(names[i].startswith("Right"))] == "none" else 1.0 for i in aligned[0]], device="cuda"
+            [0.1 if orientations.sources[int(names[i].startswith("Right"))] == "none" else 1.0 for i in aligned.joint_indices], device="cuda"
         )
     start: float = perf_counter()
     for iteration in range(iterations):
@@ -501,11 +511,10 @@ def fit(
             loss = loss + options.foot_prior_weight * (
                 foot_pose_penalty(poses[:, foot_indices], foot_axes) + foot_pose_penalty(poses[:, toe_indices], foot_axes, toe_joints=True)
             )
-        if orientation_data is not None:
-            assert rotation_weights is not None
-            ids, target, valid = orientation_data
-            orientation_error = (posed.transforms[:, ids, :3, :3] - target).square().mean((-1, -2))
-            loss = loss + options.orientation_weight * (orientation_error * valid * rotation_weights).sum() / valid.sum().clamp_min(1) / 0.03
+        if orientation_valid is not None:
+            assert rotation_weights is not None and orientation_indices is not None and orientation_rotations is not None
+            orientation_error = (posed.transforms[:, orientation_indices, :3, :3] - orientation_rotations).square().mean((-1, -2))
+            loss = loss + options.orientation_weight * (orientation_error * orientation_valid * rotation_weights).sum() / orientation_valid.sum().clamp_min(1) / 0.03
         if fallback_ids:
             loss = loss + hand_limit_penalty(poses[:, fallback_ids], fallback_basis_tensor, fallback_limit_tensor, fallback_sign_tensor)
         loss = loss + options.offset_prior * (head_offset / (0.1 if use_ears else 0.05)).square().mean()
@@ -536,6 +545,8 @@ def fit(
             poses.grad.mul_(pose_mask)
         torch.nn.utils.clip_grad_norm_(parameters, 100.0)
         optimizer.step()
+        with torch.no_grad():
+            log_scale.clamp_(np.log(SCALE_MIN), np.log(SCALE_MAX))
         if iteration % 50 == 0 or iteration == iterations - 1:
             print(
                 f"iteration={iteration} loss={loss.item():.3f} exo={body_loss.item():.3f} hands={hand_loss.item():.3f} head={head_loss.item():.3f}",
@@ -572,6 +583,8 @@ def fit(
         selection = mesh_selection(rest_pose.vertices[0].cpu().numpy(), model.faces.cpu().numpy(), waist_height)
         rim = np.flatnonzero(np.any(selection.rest_offsets != 0.0, axis=1))
         rest_offsets = torch.as_tensor(selection.rest_offsets[rim], device="cuda")
+        rim_skinning_weights = model.public_skinning_weights()[rim]
+        inverse_bind_transforms = torch.linalg.inv(model.public_bind_transforms_world())
         meshes: list[Float32[ndarray, "b v 3"]] = []
         joints: list[Float32[ndarray, "b 77 3"]] = []
         for begin in range(0, len(data.times), 16):
@@ -580,8 +593,8 @@ def fit(
             # gives its exact skinning motion in both 78- and 110-joint modes.
             blended = torch.einsum(
                 "vj,njkl->nvkl",
-                model.public_skinning_weights()[rim],
-                output.transforms @ torch.linalg.inv(model.public_bind_transforms_world()),
+                rim_skinning_weights,
+                output.transforms @ inverse_bind_transforms,
             )
             display_vertices = output.vertices.clone()
             display_vertices[:, rim] += torch.einsum("nvij,vj->nvi", blended[..., :3, :3], rest_offsets)
@@ -599,13 +612,14 @@ def fit(
     public_names = tuple(model.public_joint_names)
     public_parents = model.public_joint_parent_ids.cpu().numpy().astype(np.int64)
     visible = np.flatnonzero(visible_joint_mask(public_names, public_parents)[1:]).astype(np.int64)
+    vertices: Float32[ndarray, "n v 3"] = np.concatenate(meshes)
     return FitResult(
         poses.detach().cpu().numpy(),
         translations.detach().cpu().numpy(),
         torch.nn.functional.pad(identity.detach(), (0, 128 - active_components)).cpu().numpy(),
         float(log_scale.exp().item()),
         np.concatenate(joints),
-        np.concatenate(meshes),
+        vertices,
         model.faces.cpu().numpy(),
         names,
         model.public_joint_parent_ids.cpu().numpy().astype(np.int64),
@@ -613,13 +627,13 @@ def fit(
         torch.cuda.max_memory_allocated(),
         angles,
         head_attachment.detach().cpu().numpy(),
-        np.concatenate(meshes)[:, EAR_VERTICES].reshape(-1, 2, 3, 3).mean(axis=2),
+        vertices[:, EAR_VERTICES].reshape(-1, 2, 3, 3).mean(axis=2),
         head_mode if head_mode != "quest" else ("head" if use_ears else "eye"),
         head_offset.detach().cpu().numpy(),
         bone_scales.cpu().numpy(),
         options.display_twists,
         orientations is not None and "quest" in orientations.sources,
-        np.concatenate(meshes)[:, np.asarray(FOOT_VERTICES)].mean(axis=2) if options.use_feet else None,
+        vertices[:, np.asarray(FOOT_VERTICES)].mean(axis=2) if options.use_feet else None,
         selection.vertices,
         visible,
         HandOrientationSource(*orientations.sources) if orientations is not None else None,

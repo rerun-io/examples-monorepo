@@ -26,6 +26,7 @@ def select_shape_frames(
     xyz: Float64[ndarray, "n 133 3"],
     confidence: Float64[ndarray, "n 133"],
     support: Int64[ndarray, "n 133"] | None,
+    allow_torso_only: bool = False,
 ) -> ShapeFrames:
     """Prefer early geometrically supported anchors, then the best whole-segment evidence.
 
@@ -39,6 +40,9 @@ def select_shape_frames(
     # upper body without requiring an occluded contralateral hip.
     finite = available[:, :2].any(1) & available[:, 2:4].all(1) & available[:, 4:].any(1)
     direct = supported[:, :2].any(1) & supported[:, 2:4].all(1) & supported[:, 4:].any(1)
+    if allow_torso_only:
+        finite = available[:, 2:4].all(1) & available[:, 4:].any(1)
+        direct = supported[:, 2:4].all(1) & supported[:, 4:].any(1)
     early = np.flatnonzero(direct & (times < 25.0))[::8]
     if len(early) >= 64:
         return ShapeFrames(early[:96].astype(np.int64), False)

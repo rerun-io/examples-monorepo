@@ -3,3 +3,59 @@
 Operational code for the authorized ep001 batch. State, configuration, reports and large files live under `/tmp/selfcap-night2`; no runtime data belongs here. Run from a detached, pinned worktree with package imports from that same worktree. The SOMA executable has its own explicit pinned worktree and isolated state root. Change revisions only between jobs.
 
 `runner.py status` reads the durable SQLite state. Worker units run `runner.py worker ROLE INDEX`; `runner.py controller` owns retries and milestones. Deployment verifies all stage imports and a real S2 registration before opening S2 claims.
+
+Config writers must publish a complete JSON document with a unique sibling
+temporary file followed by `Path.replace`; in Python, use `runner.write_config`.
+The runner retries partial legacy reads and then uses its last complete snapshot.
+Atomic replacement prevents partial reads; it does not merge concurrent edits.
+
+Run the isolated operational regression suite from the repository root:
+
+```bash
+pixi run --as-is -e selfcap-curate-dev python -m pytest -q ops/selfcap-night2/tests
+```
+
+These tests use temporary caches and databases, synthetic recordings, and fake
+transport boundaries. They do not start production workers or publish layers.
+
+### OAK rotation fallback (run-v8)
+
+S1 uses the gyro-fixed EgoHand mount only when the gyro fit is valid, the episode
+spread is at most 1.5 degrees, and the device has an RGB/IMU rotation entry.
+Otherwise it samples 64 seeded frames with tracked Quest hands (without a pose-based
+visibility gate), then uses the existing free-rotation PnP/refinement fit. The
+calibration records `oak_rotation_source` (`gyro` or `free`) and
+`oak_rotation_reason`. A missing Quest/OAK clock still yields an unposed OAK.
+
+### Gate-v3 release and post-main replay
+
+`release_controller.py` is pinned beside the stage scripts and packages. New labels
+use Sapiens regression <= 5 px and RTMW <= 1.5 px; exactly two CV folds are required,
+at most one may fail to converge, and the full fit must converge. Geometry, body,
+and drift gates remain unchanged.
+
+After the main 590 are terminal and their cleanup is verified, the controller stops
+all stage pools and runs `gate_redecision.py`. It reads cached landmarks and original
+S1 RTMW recordings identified by SHA256; it never starts Sol or model inference.
+The immutable snapshot, results and flip list live in `/tmp/selfcap-night2/gate-v3`.
+It restores inputs only for accepted/rejected flips, then runs those through S2 and
+SOMA with normal publication/readback/cleanup checks. Only after that barrier does
+the remaining batch100 SOMA refresh begin. A replay error leaves that barrier closed
+and notifies the operator. Original remote RRDs remain untouched.
+
+### Fatal CUDA context recovery
+
+Illegal-address errors and poisoned-MPS symptoms are infrastructure errors. They
+pause the affected stage without marking the session as bad data. After resetting
+MPS, retry affected sessions with fresh processes. A session already marked with
+`gpu_fault_retries >= 1` that faults again in SOMA is parked as `soma_gpu_fault`;
+it does not trip the shared stage failure latch. Use `CUDA_LAUNCH_BLOCKING=1` and a
+non-MPS CUDA context for the first retry so an asynchronous fault cannot poison
+other clients and the traceback identifies the failing operation.
+
+Normal SOMA jobs stay outside MPS with asynchronous CUDA execution. Only a job
+marked `gpu_fault_retry_pending` uses `CUDA_LAUNCH_BLOCKING=1`; the retry consumes
+that marker and a further fault is parked. `soma_normal_timing_start` defines a
+20-completion timing window that excludes jobs already running at the change and
+blocking retries. The controller includes it as `soma_normal_timing` in milestone
+reports and writes `/tmp/selfcap-night2/soma-normal-timing.json`.

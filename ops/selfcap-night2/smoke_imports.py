@@ -17,3 +17,11 @@ assert callable(keypoints.detect_keypoints) and callable(keypoints.keypoint_mode
 assert 'rtmw_rrd' in exo_label.Config.__dataclass_fields__
 assert 'cached_labels' in exo_label.Config.__dataclass_fields__
 print('S1, S2 and label stage imports match pinned package sources:', root)
+
+from selfcap_curate.exo_label import DEFAULT_THRESHOLDS, GATE_VERSION
+assert GATE_VERSION == "gate-v3"
+assert DEFAULT_THRESHOLDS.sapiens_max_regression_px == 5.0
+assert DEFAULT_THRESHOLDS.rtmw_max_regression_px == 1.5
+assert DEFAULT_THRESHOLDS.max_nonconverged_cv_folds == 1
+assert DEFAULT_THRESHOLDS.require_full_fit_convergence
+print("Gate-v3 thresholds and mandatory full-fit convergence verified")

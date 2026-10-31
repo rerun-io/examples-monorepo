@@ -9,6 +9,7 @@ from soma.body import SOMALayer
 
 from selfcap_soma.catalog import Observations
 from selfcap_soma.fitting import Calibration, fit
+from selfcap_soma.landmarks import EAR_VERTICES
 from selfcap_soma.observations import coco_joint_names
 
 pytestmark = pytest.mark.integration
@@ -52,6 +53,7 @@ def test_shared_shape_freeze_keeps_repeated_pose_gradients_finite():
     assert np.isfinite(result.poses).all()
     assert np.isfinite(result.joints).all()
     assert result.vertices.shape == (3, 4505, 3)
+    np.testing.assert_array_equal(result.ear_landmarks, result.vertices[:, EAR_VERTICES].reshape(-1, 2, 3, 3).mean(axis=2))
     identity = result.identity.copy()
     identity[0, 126] = 0.1
     calibration = Calibration(identity, result.scale, result.head_offset, result.bone_scales)
@@ -175,5 +177,6 @@ def test_foot_surface_targets_drive_ankle_rotation():
     )
     result = fit(data, assets, 80, 1, FitOptions(head_mode="ears", use_feet=True, foot_weight=1.0), fixed=calibration)
     assert result.foot_landmarks is not None
+    np.testing.assert_array_equal(result.foot_landmarks, result.vertices[:, np.asarray(FOOT_VERTICES)].mean(axis=2))
     assert np.median(np.linalg.norm(result.foot_landmarks - feet, axis=-1)) < np.median(np.linalg.norm(original - feet, axis=-1)) * 0.6
     assert np.linalg.norm(result.poses[:, [names.index("LeftFoot"), names.index("RightFoot")]]) > 0.05

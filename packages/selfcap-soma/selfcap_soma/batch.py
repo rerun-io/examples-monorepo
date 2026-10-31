@@ -21,6 +21,7 @@ from rerun.chunk import RrdReader
 from serde import serde
 from serde.json import from_json, to_json
 
+from selfcap_soma.anthropometry import plausible_ears
 from selfcap_soma.catalog import ExoSource, read_window
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
@@ -31,7 +32,7 @@ from selfcap_soma.shape_frames import InsufficientBodyObservation, select_shape_
 from selfcap_soma.shoulders import subset
 from selfcap_soma.temporal import group_jitter
 
-VERSION = "soma-batch-v7-partial-body-anchors"
+VERSION = "soma-batch-v8-anthropometric-guards"
 SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 
 
@@ -224,7 +225,12 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     )
     if state.phase == "new":
         began = perf_counter()
-        selection = select_shape_frames(data.times, data.exo, data.confidence, data.support)
+        ear_pairs = plausible_ears(data.exo)
+        confidence = data.confidence.copy()
+        confidence[~ear_pairs, 3:5] = 0.0
+        surviving = int((ear_pairs & (confidence[:, 3:5] > 0.0).any(1)).sum())
+        selection = select_shape_frames(data.times, data.exo, confidence, data.support, allow_torso_only=surviving < 3)
+        print(f"ear span guard: {surviving}/{len(ear_pairs)} surviving frames; torso/rotation fallback={surviving < 3}", flush=True)
         (directory / "shape-frames.json").write_text(to_json(selection))
         print(f"shape frames: {len(selection.indices)}, whole-segment fallback: {selection.used_fallback}", flush=True)
         mask = np.zeros(len(data.times), dtype=bool)

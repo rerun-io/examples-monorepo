@@ -4,18 +4,21 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import trimesh
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
+from serde.json import from_json, to_json
 
 from selfcap_soma.camera_geometry import project, project_ego
 from selfcap_soma.catalog import ExoSource
 from selfcap_soma.evaluation_io import first, missing_camera_calibration, nearest_indices, read_egohand_rgb, read_views
 from selfcap_soma.observations import overlay_points, require_full_rate_mesh, video_time_column
 from selfcap_soma.overlay_style import observed_links, observed_points, residual_tolerance
+from selfcap_soma.quality import SomaQuality, assess_quality, log_quality
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +81,22 @@ def log_joint_overlay(
     )
 
 
+def mesh_vertex_rows(column: pa.Array | pa.ChunkedArray) -> Float32[ndarray, "n v 3"]:
+    """View uniform mesh rows in Arrow numeric buffers, retaining slice offsets."""
+    array = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+    if array.null_count:
+        raise ValueError("mesh vertex rows must not be null")
+    lengths = array.value_lengths().to_numpy(zero_copy_only=False)
+    if len(lengths) and np.any(lengths != lengths[0]):
+        raise ValueError("mesh vertex rows must have uniform vertex counts")
+    vectors = array.flatten()
+    if vectors.null_count:
+        raise ValueError("mesh vertices must not be null")
+    values = vectors.flatten().to_numpy(zero_copy_only=False).astype(np.float32, copy=False)
+    count = int(lengths[0]) if len(lengths) else 0
+    return values.reshape(len(array), count, 3)
+
+
 def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader, times: Float64[ndarray, "n"]) -> None:
     """Retain the fixed rest-pose waist selection, with newly computed normals."""
     selection = source.stream().filter(content="/parameters/upper_body_vertices").to_chunks()
@@ -102,7 +121,7 @@ def log_cropped_mesh(recording: rr.RecordingStream, source: RrdReader, times: Fl
     recording.log("/world/pred/soma_x/mesh", rr.Mesh3D.from_fields(triangle_indices=faces, albedo_factor=[0.25, 0.65, 0.8, 0.5]), static=True)
     for batch in batches:
         stamps = batch.column("video_time").cast("int64").to_numpy().astype(np.float64) / 1e9
-        vertices = np.asarray(batch.column("Mesh3D:vertex_positions").to_pylist(), dtype=np.float32)[:, ids]
+        vertices = mesh_vertex_rows(batch.column("Mesh3D:vertex_positions"))[:, ids]
         normals = np.stack([trimesh.Trimesh(v, faces, process=False).vertex_normals for v in vertices]).astype(np.float32)
         recording.send_columns(
             "/world/pred/soma_x/mesh",
@@ -266,6 +285,11 @@ def main(config: Config) -> None:
         if not np.array_equal(exo_times[exo_order], np.rint(times * 1e9).astype(np.int64)):
             raise ValueError("source landmarks and fitted landmarks must share exact timestamps")
         reference = np.concatenate([row[1] for row in exo_rows])[exo_order]
+    quality = assess_quality(points.astype(np.float64), reference, quest.astype(np.float64))
+    for chunk in source.stream().filter(content="/__properties/soma_quality").to_chunks():
+        quality = from_json(SomaQuality, chunk.to_record_batch().column("record_json")[0].as_py()[0])
+    log_quality(recording, quality)
+    config.output.with_suffix(".quality.json").write_text(to_json(quality))
     projections = []
     if not config.native_exo:
         for view in phones:

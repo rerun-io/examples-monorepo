@@ -87,6 +87,8 @@ class Gate:
     """Final all-frame model label residuals, including each view."""
     policy: str = "alternating label frames; alternating 10s blocks with 200ms guard; RTMW hands stride 3; body stride 6, leave-one-view-out"
     """Deterministic holdout and independent transfer definitions."""
+    full_fit_converged: bool | None = None
+    """Convergence of the deployed all-frame model; null is unknown and cannot pass."""
 
 
 def read_rtmw_recording(path: Path, segment: str, rigs: tuple[int, ...]) -> tuple[PhoneDetections, ...]:
@@ -388,7 +390,8 @@ def evaluate(inputs: Inputs, *, focal_source: FocalSource, fixed_focals: tuple[f
     if body_polish:
         final = polish(inputs, fit_problem, final, None, objective)
     gate = Gate(scores["baseline"], scores["candidate"], tuple(models), passes and final.converged and all(model.converged for model in models),
-                policy="alternating usable hand frames per camera; dense hand holdout follows nearest sparse frame; visibility-balanced body frames; held-out headset frames")
+                policy="alternating usable hand frames per camera; dense hand holdout follows nearest sparse frame; visibility-balanced body frames; held-out headset frames",
+                full_fit_converged=final.converged)
     predicted = predict_labels(fit_problem, final.cameras, final.head_translation_m)
     distances = np.linalg.norm(predicted - np.array([[label.u, label.v] for label in fit_problem.landmarks.labels]), axis=1)
     deployed = {}

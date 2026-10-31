@@ -60,3 +60,16 @@ def test_inference_detects_each_frame_independently_and_preserves_box_score():
     assert np.all(result.scores[:, 112:] == 0.0)
     np.testing.assert_array_equal(result.xy[0, 91:96], np.arange(10).reshape(5, 2))
     np.testing.assert_array_equal(result.xy[0, 96], [12.0, 13.0])
+
+
+def test_free_rotation_sampling_uses_tracked_frames_without_a_pose():
+    times = np.arange(200, dtype=np.float64) / 20.0
+    tracked = np.tile([True, False], (200, 1))
+    tracked[50:100] = False
+    result = select_egohand_frames(times, None, tracked, (200, 100))
+    repeat = select_egohand_frames(times, None, tracked, (200, 100))
+    assert len(result.indices) == 64
+    assert result.eligible_count == 150
+    assert not np.isin(result.indices, np.arange(50, 100)).any()
+    assert result.hands[:, 0].all() and not result.hands[:, 1].any()
+    np.testing.assert_array_equal(result.indices, repeat.indices)

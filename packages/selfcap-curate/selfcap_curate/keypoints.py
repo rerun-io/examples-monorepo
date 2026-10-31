@@ -309,7 +309,7 @@ def triangulate_frames(
     radial = tensor(np.array([c.radial for c in cameras]))
     cos_min = float(np.cos(np.deg2rad(0.5)))
 
-    def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> tuple[ndarray, ndarray, ndarray, ndarray, ndarray]:
+    def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> TriangulationBatch:
         norm_np = np.stack(
             [
                 cv2.undistortPoints(
@@ -374,7 +374,7 @@ def triangulate_frames(
         inliers &= residual(points) <= threshold
         count = inliers.sum(1)
         good = (count >= 2) & torch.isfinite(points).all(-1)
-        return (
+        return TriangulationBatch(
             torch.where(good[..., None], points, torch.nan).float().cpu().numpy(),
             torch.where(good, count, 0).to(torch.uint8).cpu().numpy(),
             torch.where(good, torch.where(inliers, clean, 0.0).sum(1) / count.clamp(min=1), 0.0).float().cpu().numpy(),
@@ -384,7 +384,12 @@ def triangulate_frames(
 
     for begin in range(0, frames, chunk):
         stop = min(begin + chunk, frames)
-        xyz[begin:stop], counts[begin:stop], confidence[begin:stop], masks[begin:stop], max_errors[begin:stop] = solve(uv[begin:stop], scores[begin:stop])
+        result = solve(uv[begin:stop], scores[begin:stop])
+        xyz[begin:stop] = result.xyz
+        counts[begin:stop] = result.n_views
+        confidence[begin:stop] = result.confidence
+        masks[begin:stop] = result.inliers
+        max_errors[begin:stop] = result.max_reprojection_px
     return TriangulationBatch(xyz, counts, confidence, masks, max_errors)
 
 
