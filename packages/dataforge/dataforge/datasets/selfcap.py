@@ -75,7 +75,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from rerun.chunk import Chunk, RrdReader
+from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from rerun.encodings import EntityPathLike
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
@@ -95,6 +95,7 @@ from dataforge.quest_joint_poses import QuestJointPoses, joint_poses_from_table,
 from dataforge.quest_joint_poses import read_segment_hand_poses as read_segment_hand_poses
 from dataforge.datasets.selfcap_raw import read_session_task as read_session_task
 from dataforge.identity import SequenceIdentity
+from dataforge.objects import strip_texture_transform, with_root_transform
 from dataforge.logging_toolkit import (
     ImuChannel,
     annotation_context,
@@ -263,6 +264,37 @@ def write_device_asset(target: Path, device: str, rig: int) -> None:
     mesh = mesh.map(lambda chunk: chunk.with_entity_path(f"{node}/device"))
     with writing.atomic_write(target) as staged:
         mesh.write_rrd(staged, application_id=writing.APPLICATION_ID, recording_id=device_asset_id(device, rig))
+
+
+QUEST_MODEL_LEFT_RGB: tuple[float, float, float] = (-0.0318, -0.0138, -0.0805)
+"""The Quest 3S model's left RGB lens (its wearer-left upper front aperture) in the GLB's frame, metres.
+
+From the model package's dimensions.json: columns at x = +-31.8 mm (a 63.6 mm baseline, as d31's factory 63.55 mm),
+upper apertures at 13.8 mm below the lens midpoint, lens glass on the front panel. glTF axes: x wearer-right, y up,
+z toward the wearer (the front panel faces -z).
+"""
+
+
+def quest_model_camera_T_glb() -> Float64[ndarray, "4 4"]:
+    """The GLB frame in the Quest's left RGB camera frame (RDF): a half turn about x, then the lens to the origin."""
+    turn: Float64[ndarray, "3 3"] = np.diag([1.0, -1.0, -1.0])  # glTF up/back -> camera down/forward
+    camera_T_glb: Float64[ndarray, "4 4"] = np.eye(4)
+    camera_T_glb[:3, :3] = turn
+    camera_T_glb[:3, 3] = -turn @ np.asarray(QUEST_MODEL_LEFT_RGB)
+    return camera_T_glb
+
+
+def build_quest_model(glb: Path, target: Path) -> None:
+    """Write ``quest3s.rrd``: the model package's GLB as a static ``Asset3D`` at ``/device``, in the left RGB camera frame.
+
+    The GLB keeps its meshes, PBR materials and textures. Two structural edits make it a device asset: the scene is
+    placed in the camera frame (``quest_model_camera_T_glb``), and the texture-transform extension Rerun refuses is
+    dropped (it only scales the strap's weave texture).
+    """
+    blob: bytes = with_root_transform(strip_texture_transform(glb.read_bytes()), quest_model_camera_T_glb())
+    chunk: Chunk = Chunk.from_columns("/device", indexes=[], columns=rr.Asset3D.columns(blob=[blob], media_type=["model/gltf-binary"]))
+    with writing.atomic_write(target) as staged:
+        LazyChunkStream.from_iter([chunk]).write_rrd(staged, application_id=writing.APPLICATION_ID, recording_id="devices__quest3s")
 
 
 def segment_rig_kinds(entry: DatasetEntry, rigs: range, *extra: str) -> list[tuple[dict[str, object], dict[int, str]]]:

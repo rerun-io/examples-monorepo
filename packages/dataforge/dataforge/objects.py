@@ -123,3 +123,24 @@ def strip_texture_transform(glb: bytes) -> bytes:
     payload += b" " * (-len(payload) % 4)
     tail: bytes = glb[20 + length :]
     return struct.pack("<4sII", b"glTF", 2, 20 + len(payload) + len(tail)) + struct.pack("<I4s", len(payload), b"JSON") + payload + tail
+
+
+def with_root_transform(glb: bytes, matrix: Float64[ndarray, "4 4"]) -> bytes:
+    """Place a whole GLB scene by ``matrix``: a new root node carries it and adopts the old scene roots.
+
+    Like ``strip_texture_transform``, the JSON chunk is edited structurally and every binary chunk is kept, so the
+    asset's meshes, materials and textures are unchanged; only where the scene sits moves.
+    """
+    if len(glb) < 20 or struct.unpack_from("<4sII", glb) != (b"glTF", 2, len(glb)):
+        raise ValueError("invalid GLB v2 header")
+    length, kind = struct.unpack_from("<I4s", glb, 12)
+    if kind != b"JSON" or 20 + length > len(glb):
+        raise ValueError("invalid GLB JSON chunk")
+    document: dict = json.loads(glb[20 : 20 + length])
+    scene: dict = document["scenes"][document.get("scene", 0)]
+    document["nodes"].append({"name": "placement", "matrix": np.asarray(matrix, dtype=np.float64).T.ravel().tolist(), "children": scene["nodes"]})
+    scene["nodes"] = [len(document["nodes"]) - 1]  # glTF matrices are column-major, hence the transpose
+    payload: bytes = json.dumps(document, separators=(",", ":")).encode()
+    payload += b" " * (-len(payload) % 4)
+    tail: bytes = glb[20 + length :]
+    return struct.pack("<4sII", b"glTF", 2, 20 + len(payload) + len(tail)) + struct.pack("<I4s", len(payload), b"JSON") + payload + tail

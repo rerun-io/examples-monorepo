@@ -908,13 +908,61 @@ def test_quest_mesh_turns_with_a_camera_50_eye_frame(tmp_path: Path) -> None:
 def test_device_meshes_are_well_formed() -> None:
     import rerun.chunk as rrc
 
-    for name in DEVICE_MESH_FILES.values():
+    for name in (DEVICE_MESH_FILES["oak"], DEVICE_MESH_FILES["phone"]):
         (mesh,) = [c.to_record_batch() for c in rrc.RrdReader(DEVICE_MESHES / f"{name}.rrd").stream() if str(c.entity_path) == "/device"]
         column = {field: np.asarray(mesh.column(f"Mesh3D:{field}")[0].as_py()) for field in ("vertex_positions", "triangle_indices", "vertex_normals", "vertex_colors")}
         positions, triangles = column["vertex_positions"].reshape(-1, 3), column["triangle_indices"].reshape(-1, 3)
         assert triangles.max() < len(positions)
         assert len(column["vertex_normals"]) == len(column["vertex_colors"]) == len(positions)
         assert np.ptp(positions, axis=0).max() < 0.4  # metres: a headset or a phone, not millimetres
+
+
+def glb_document(glb: bytes) -> dict:
+    """The JSON chunk of a GLB."""
+    import json
+    import struct
+
+    (length,) = struct.unpack_from("<I", glb, 12)
+    return json.loads(glb[20 : 20 + length])
+
+
+def glb_node_positions(document: dict) -> dict[str, np.ndarray]:
+    """Each named node's origin in the GLB's scene frame, composing matrix or TRS down from the scene roots."""
+    from scipy.spatial.transform import Rotation
+
+    def local(node: dict) -> np.ndarray:
+        if "matrix" in node:
+            return np.asarray(node["matrix"], dtype=np.float64).reshape(4, 4).T  # glTF stores column-major
+        m = np.eye(4)
+        m[:3, :3] = Rotation.from_quat(node.get("rotation", [0, 0, 0, 1])).as_matrix() * np.asarray(node.get("scale", [1, 1, 1]))
+        m[:3, 3] = node.get("translation", [0, 0, 0])
+        return m
+
+    out: dict[str, np.ndarray] = {}
+    pending = [(index, np.eye(4)) for index in document["scenes"][document.get("scene", 0)]["nodes"]]
+    while pending:
+        index, parent = pending.pop()
+        node = document["nodes"][index]
+        world = parent @ local(node)
+        out[node.get("name", str(index))] = world[:3, 3]
+        pending.extend((child, world) for child in node.get("children", []))
+    return out
+
+
+def test_quest_model_is_a_glb_in_the_left_rgb_camera_frame() -> None:
+    import rerun.chunk as rrc
+
+    (asset,) = [c.to_record_batch() for c in rrc.RrdReader(DEVICE_MESHES / f"{DEVICE_MESH_FILES['quest']}.rrd").stream() if str(c.entity_path) == "/device"]
+    glb = np.asarray(asset.column("Asset3D:blob")[0].as_py()[0], dtype=np.uint8).tobytes()
+    document = glb_document(glb)
+    lenses = glb_node_positions(document)
+
+    assert asset.column("Asset3D:media_type")[0].as_py() == ["model/gltf-binary"]
+    assert "KHR_texture_transform" not in document.get("extensionsRequired", [])  # Rerun refuses such files
+    assert np.allclose(lenses["L_upper_lens_coating"], 0.0, atol=1e-3)  # the left RGB lens is the origin
+    assert np.allclose(lenses["R_upper_lens_coating"], [0.0636, 0.0, 0.0], atol=1e-3)  # right lens along +x (RDF)
+    assert lenses["L_lower_lens_coating"][1] > 0.01  # the lower aperture sits below: +y is down
+    assert lenses["Eye_Left_Convex_Fresnel_Lens"][2] < -0.03  # the eye lenses sit ~5 cm behind the front glass: +z looks out
 
 
 def hand_csv(path: Path, width: int, rows: list[tuple[int, float]]) -> None:
