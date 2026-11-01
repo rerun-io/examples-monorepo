@@ -42,6 +42,8 @@ class Config:
     """Optional newline-separated segment ids or unprefixed keys."""
     catalog_url: str = catalog_io.CATALOG_URL
     """Read-only endpoint containing aligned bases and, unless donor_catalog_url is set, any healthy borrow source."""
+    dataset: str = catalog_io.DATASET_NAME
+    """Dataset on ``catalog_url`` that holds the aligned bases (with their ``sapiens2`` layer)."""
     donor_catalog_url: str | None = None
     """Read-only endpoint holding the healthy camera-50 borrow sources when they are not on catalog_url."""
     oak_observations: Path | None = None
@@ -70,7 +72,9 @@ class Config:
 
 def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = None) -> CalibSession:
     """Solve one session and write files only; never register or swap a layer."""
-    session, keys, dataset = open_session(config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=())
+    session, keys, dataset = open_session(
+        config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=(), dataset=config.dataset
+    )
     with session_output(config.output_dir) as output:
         episodes = []
         segments = []
