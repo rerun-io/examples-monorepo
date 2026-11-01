@@ -8,7 +8,7 @@ from selfcap_curate.keypoints import Camera, Keypoints3D, SelectedView, write_ke
 from selfcap_curate.keypoints_gpu import keypoint_models
 
 
-def test_sapiens_selects_batch_four_and_same_detector(monkeypatch):
+def test_sapiens_selects_fast_dynamic_default_and_same_detector(monkeypatch):
     from posekit.models.sapiens import SapiensPose2d, SapiensPoseConfig
     from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig
 
@@ -31,7 +31,9 @@ def test_sapiens_selects_batch_four_and_same_detector(monkeypatch):
     assert configs[0].score_thr == 0.3
     assert configs[0].backend.max_batch_size == 8
     assert configs[1].model_size == "0.4B"
-    assert configs[1].backend.max_batch_size == configs[1].backend.opt_batch_size == 4
+    assert configs[1].variant == "nvfp4-768"
+    assert configs[1].backend.max_batch_size == 8
+    assert configs[1].backend.opt_batch_size == 4
     keypoint_models.cache_clear()
 
 

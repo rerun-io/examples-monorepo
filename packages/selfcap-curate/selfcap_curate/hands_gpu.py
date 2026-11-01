@@ -100,7 +100,7 @@ def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, 
     from trtkit.backends import TensorRtBackendConfig
 
     detector = YoloxDetectorConfig(score_thr=0.3, backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8)).setup()
-    return detector, SapiensPoseConfig(model_size="0.4B", backend=TensorRtBackendConfig(max_batch_size=4, opt_batch_size=4)).setup()
+    return detector, SapiensPoseConfig().setup()
 
 
 def release_cuda_memory(*, models: bool) -> None:

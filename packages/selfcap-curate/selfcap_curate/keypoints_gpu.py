@@ -353,7 +353,7 @@ def keypoint_models(model: PoseModel = "rtmw") -> tuple[YoloxDetector, Callable[
     if model == "sapiens2":
         from posekit.models.sapiens import SapiensPoseConfig
 
-        return detector, SapiensPoseConfig(model_size="0.4B", backend=TensorRtBackendConfig(max_batch_size=4, opt_batch_size=4)).setup()
+        return detector, SapiensPoseConfig().setup()
     # Tracking sends up to phones x TRACK_CHUNKS crops per call; the 1-8-32 profile takes them in one engine call.
     pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=8), onnx_transform=fp16_trunk).setup()
     return detector, pose
