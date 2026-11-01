@@ -167,6 +167,15 @@ def coco133_uv_path(rig: int, cam: int, *, pred: str | None = None) -> str:
     return f"{pinhole_path(rig, cam)}{'' if pred is None else f'/pred/{pred}'}/coco133_uv"
 
 
+SHOWN_MIN_CONFIDENCE: float = 0.7
+"""Score a model's keypoint needs to be drawn: the layout shows only ``coco133_uv_shown_path``, the full set stays hidden."""
+
+
+def coco133_uv_shown_path(rig: int, cam: int, *, pred: str) -> str:
+    """A model's COCO-133 keypoints at or above ``SHOWN_MIN_CONFIDENCE``, next to the full set at ``coco133_uv_path``."""
+    return f"{coco133_uv_path(rig, cam, pred=pred)}_min{round(SHOWN_MIN_CONFIDENCE * 100)}"
+
+
 def coco133_uv_projected_path(rig: int, cam: int) -> str:
     """Derived COCO-133 keypoints projected through the full camera lens model."""
     return f"{pinhole_path(rig, cam)}/coco133_uv_projected"

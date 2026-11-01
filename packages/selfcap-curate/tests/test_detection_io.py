@@ -67,8 +67,9 @@ def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixtu
     assert {str(c.entity_path) for c in chunks} == {
         "/world/rig_00/cam_00/pinhole/pred/sapiens2",
         "/world/rig_00/cam_00/pinhole/pred/sapiens2/coco133_uv",
+        "/world/rig_00/cam_00/pinhole/pred/sapiens2/coco133_uv_min70",
     }
-    batch = next(c.to_record_batch() for c in chunks if not c.is_static)
+    batch = next(c.to_record_batch() for c in chunks if not c.is_static and str(c.entity_path).endswith("coco133_uv"))
     assert batch.column("capture_time").cast("int64").to_pylist() == [40_000_001, 80_000_003]
     assert batch.column("video_time").cast("int64").to_pylist() == [40_000_003, 80_000_005]
     np.testing.assert_array_equal(np.asarray(batch.column("Points2D:positions").to_pylist()), xy)
@@ -81,6 +82,30 @@ def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixtu
     assert batch.column("Points2D:keypoint_ids")[0].as_py() == list(range(133))
     # Points the viewer can see: 3 px dots without labels, as dataforge.hands draws COCO-133 keypoints.
     style = next(c.to_record_batch() for c in chunks if c.is_static and str(c.entity_path).endswith("coco133_uv"))
+    assert style.column("Points2D:radii").to_pylist() == [[3.0]]
+    assert style.column("Points2D:show_labels").to_pylist() == [[False]]
+
+
+
+def test_layer_shows_only_points_at_or_above_0_7(tmp_path, fixture_sync):
+    # The full set stays at coco133_uv; the layout draws coco133_uv_min70, which drops the points under 0.7.
+    sync = replace(fixture_sync(), offsets_ms={"exo/A": 0.0})
+    xy = np.arange(532, dtype=np.float32).reshape(2, 133, 2).astype(np.float64)
+    scores = np.full((2, 133), 0.9)
+    scores[0, :3] = [0.69, 0.7, 0.0]
+    scores[1, 5] = 0.2
+    path = tmp_path / sync.episode_key.rrd_name
+    write_detections_layer(path, sync, SelfcapLayout(1, 2, ("A",)), {"A": PhoneDetections(np.array([0.04, 0.08]), xy, scores)})
+    chunks = list(RrdReader(path).stream())
+    shown = next(c.to_record_batch() for c in chunks if not c.is_static and str(c.entity_path).endswith("coco133_uv_min70"))
+    ids = [row.as_py() for row in shown.column("Points2D:keypoint_ids")]
+    assert ids == [[1, *range(3, 133)], [*range(5), *range(6, 133)]]  # each kept point keeps its id, so links still join
+    positions = [np.asarray(row.as_py()) for row in shown.column("Points2D:positions")]
+    np.testing.assert_array_equal(positions[0], xy[0, ids[0]])
+    np.testing.assert_array_equal(positions[1], xy[1, ids[1]])
+    confidences = [row.as_py() for row in shown.column("simplecv.KeypointConfidence2D:confidences")]
+    np.testing.assert_allclose(confidences[0], scores[0, ids[0]], rtol=1e-6)
+    style = next(c.to_record_batch() for c in chunks if c.is_static and str(c.entity_path).endswith("coco133_uv_min70"))
     assert style.column("Points2D:radii").to_pylist() == [[3.0]]
     assert style.column("Points2D:show_labels").to_pylist() == [[False]]
 

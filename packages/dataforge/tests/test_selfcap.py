@@ -295,6 +295,10 @@ def test_default_blueprint_shows_the_raw_capture_before_calibration() -> None:
         assert views[name].visualizer_overrides[f"{pinhole}/sapiens2"] == rrb.EntityBehavior(visible=False)
     for name, rig in PHONES.items():
         assert cast(list[str], views[name].contents) == [f"/world/rig_{rig:02d}/cam_00/pinhole/**"]
+        # Sapiens2 shows only its points at or above 0.7; the full set stays in the data, hidden.
+        overrides = views[name].visualizer_overrides
+        assert overrides[f"/world/rig_{rig:02d}/cam_00/pinhole/pred/sapiens2/coco133_uv"] == rrb.EntityBehavior(visible=False)
+        assert f"/world/rig_{rig:02d}/cam_00/pinhole/pred/sapiens2/coco133_uv_min70" not in overrides
         sound = views[f"{name} · sound"]
         assert isinstance(sound, rrb.AudioView)
         assert str(sound.origin) == f"/world/rig_{rig:02d}/audio_00"

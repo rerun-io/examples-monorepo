@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import rerun as rr
 from dataforge.logging_toolkit import capture_column, time_column
-from dataforge.schema import coco133_uv_path
+from dataforge.schema import SHOWN_MIN_CONFIDENCE, coco133_uv_path, coco133_uv_shown_path
 from dataforge.writing import APPLICATION_ID, atomic_write
 from jaxtyping import Float32, Float64
 from numpy import ndarray
@@ -96,19 +96,25 @@ def write_detections_layer(path: Path, sync: TimeSync, layout: SelfcapLayout, de
             yield Chunk.from_columns(entity.rsplit("/", 1)[0], indexes=[], columns=rr.AnnotationContext.columns(context=[COCO133_CLASS]))
             offset_ns = round(((sync.offsets_ms or {}).get(f"exo/{phone}") or 0.0) * 1e6)
             stamps = np.rint(hand.times_s * 1e9).astype(np.int64)
-            count = len(stamps)
-            # 3 px dots without labels, as dataforge.hands draws COCO-133 keypoints; the default dots vanish under the links.
-            yield Chunk.from_columns(entity, indexes=[], columns=rr.Points2D.columns(radii=[3.0], show_labels=[False]))
-            # The raw score rides as Points2DWithConfidence; each point wears the shared red-to-green score colour.
-            scores: Float32[ndarray, "n"] = hand.scores.astype(np.float32).reshape(-1)
-            columns = Points2DWithConfidence.columns(
-                positions=hand.xy.astype(np.float32).reshape(-1, 2),
-                confidences=scores,
-                keypoint_ids=np.tile(np.arange(133, dtype=np.uint16), count),
-                class_ids=np.zeros(count * 133, dtype=np.int32),
-                colors=confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0],
-            ).partition([133] * count)
-            yield Chunk.from_columns(entity, indexes=[capture_column(stamps), time_column(stamps + offset_ns)], columns=columns)
+            scores: Float32[ndarray, "f 133"] = hand.scores.astype(np.float32)
+            xy: Float32[ndarray, "f 133 2"] = hand.xy.astype(np.float32)
+            # The full set, then the copy the layout draws: only points at or above SHOWN_MIN_CONFIDENCE, each with its id.
+            for path, keep in (
+                (entity, np.ones(scores.shape, dtype=bool)),
+                (coco133_uv_shown_path(rig, 0, pred="sapiens2"), scores >= SHOWN_MIN_CONFIDENCE),
+            ):
+                # 3 px dots without labels, as dataforge.hands draws COCO-133 keypoints; the default dots vanish under the links.
+                yield Chunk.from_columns(path, indexes=[], columns=rr.Points2D.columns(radii=[3.0], show_labels=[False]))
+                # The raw score rides as Points2DWithConfidence; each point wears the shared red-to-green score colour.
+                kept: Float32[ndarray, "n"] = scores[keep]
+                columns = Points2DWithConfidence.columns(
+                    positions=xy[keep],
+                    confidences=kept,
+                    keypoint_ids=np.broadcast_to(np.arange(133, dtype=np.uint16), scores.shape)[keep],
+                    class_ids=np.zeros(kept.size, dtype=np.int32),
+                    colors=confidence_scores_to_rgb(kept.reshape(1, -1, 1))[0],
+                ).partition(keep.sum(axis=1).tolist())
+                yield Chunk.from_columns(path, indexes=[capture_column(stamps), time_column(stamps + offset_ns)], columns=columns)
 
     with atomic_write(path) as target:
         LazyChunkStream.from_iter(chunks()).collect(optimize=OptimizationProfile.OBJECT_STORE).write_rrd(

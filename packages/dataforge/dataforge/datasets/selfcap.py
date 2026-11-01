@@ -561,7 +561,9 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
         # 25-80 px off, worst at the image edge.
         pinhole: str = schema.pinhole_path(pane.rig, pane.cam)
         if pane.kind == "exo" and not posed_phones:
-            return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=[f"{pinhole}/**"])
+            # Sapiens2 draws only its points at or above schema.SHOWN_MIN_CONFIDENCE; the full set stays, hidden.
+            full_sapiens2: dict[EntityPathLike, rrb.EntityBehavior] = {schema.coco133_uv_path(pane.rig, pane.cam, pred="sapiens2"): hide}
+            return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=[f"{pinhole}/**"], overrides=full_sapiens2)
         contents: list[str] = [f"{pinhole}/**", "/world/gt/**", "/world/pred/**"]
         overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
         if pane.rig != ego_rig:
