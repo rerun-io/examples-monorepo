@@ -51,12 +51,18 @@ def test_writer_uses_episode_override_and_fitted_oak_mount_without_hands(tmp_pat
         if str(c.entity_path) == "/world/rig_00/cam_00" and "Transform3D:translation" in c.to_record_batch().schema.names
     )
     np.testing.assert_allclose(transform.column("Transform3D:translation")[0].as_py()[0], [0.2, 0.0, 0.0])
-    # The fitted OAK mount is one static transform hanging the OAK rig on the Quest's frame (no per-frame track).
-    mount = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/world/rig_01" and "Transform3D:parent_frame" in c.to_record_batch().schema.names)
-    assert mount.num_rows == 1
-    assert mount.column("Transform3D:parent_frame")[0].as_py()[0].startswith("tf#/world/rig_")
-    assert mount.column("oak_mount_source")[0].as_py() == ["fitted"]
-    assert not any(str(c.entity_path) == "/world/rig_01" and not c.is_static for c in chunks)
+    # The fitted OAK mount hangs the OAK rig on the Quest's frame: static for queries, and once more at the first Quest
+    # pose, after the base's prior (1 ms earlier), because the viewer resolves a timed transform before a static one.
+    mounts = [c for c in chunks if str(c.entity_path) == "/world/rig_01" and "Transform3D:parent_frame" in c.to_record_batch().schema.names]
+    assert sorted(c.is_static for c in mounts) == [False, True]
+    for chunk in mounts:
+        mount = chunk.to_record_batch()
+        assert mount.num_rows == 1
+        assert mount.column("Transform3D:parent_frame")[0].as_py()[0] == "tf#/world/rig_02"
+        assert mount.column("oak_mount_source")[0].as_py() == ["fitted"]
+    timed = next(c.to_record_batch() for c in mounts if not c.is_static)
+    assert [t.value for t in timed.column("video_time")] == [1_000_000_000], "first Quest pose (0 s) + quest_pose 1000 ms"
+    assert [t.value for t in timed.column("capture_time")] == [0]
     prop = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/__properties/calib")
     assert prop.column("exo_flagged")[0].as_py() == [1]
 

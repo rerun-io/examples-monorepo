@@ -658,8 +658,8 @@ def test_a_three_phone_episode_keeps_the_oak_at_rig_04_and_the_quest_at_rig_05(t
     assert factories == set(kinds), "each device's factory document sits on its own rig"
 
 
-def test_the_oak_mount_prior_is_temporal_so_a_static_fitted_mount_always_hides_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A static prior would compete with calibration's static fit by write order, so a later base rewrite would win.
+def test_the_oak_mount_prior_sits_just_before_the_first_quest_pose_so_the_fit_always_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Calibration writes its fit at the first Quest pose; a later timed value wins in the viewer whatever was written last.
     from rerun.chunk import RrdReader
 
     monkeypatch.setattr("dataforge.datasets.selfcap.nominal_oak_mount", lambda oak, quest: np.eye(4))  # the fixture headset has no stereo pair
@@ -669,7 +669,7 @@ def test_the_oak_mount_prior_is_temporal_so_a_static_fitted_mount_always_hides_i
     ]
     assert len(mounts) == 1 and not mounts[0].is_static
     batch = mounts[0].to_record_batch()
-    assert [t.value for t in batch.column("video_time")] == [17181303], "from the first Quest pose"
+    assert [t.value for t in batch.column("video_time")] == [17181303 - 1_000_000], "1 ms before the first Quest pose, where calibration's fit goes"
     assert batch.column("oak_mount_source").to_pylist() == [["nominal"]]
 
 

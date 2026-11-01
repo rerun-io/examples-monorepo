@@ -1,6 +1,6 @@
-"""The OAK rig hangs on the Quest's left-eye frame by one static mount: a nominal prior in the base layer, replaced by
-the fitted mount in the calibration layer (same components, so the newer write wins). This module turns that into
-OAK world poses for code that needs them per frame."""
+"""The OAK rig hangs on the Quest's left-eye frame by one mount: a nominal prior in the base layer, replaced by the
+fitted mount in the calibration layer (see ``PRIOR_LEAD_NS``). This module turns that into OAK world poses for code
+that needs them per frame."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ from scipy.spatial.transform import Rotation
 
 MOUNT_SOURCE = "oak_mount_source"
 """AnyValues field on the OAK rig: ``nominal`` (base prior) or ``fitted`` (calibration)."""
+PRIOR_LEAD_NS = 1_000_000
+"""The base logs the nominal prior this long before the first Quest pose; calibration logs its fit at that pose. The
+viewer resolves the latest timed transform (ahead of a static one), so the fit wins whichever layer was written last."""
 
 
 def _first(table: pa.Table, name: str):  # noqa: ANN202

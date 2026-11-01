@@ -8,6 +8,7 @@ import numpy as np
 import rerun as rr
 from dataforge import schema
 from dataforge.datasets.selfcap import PHONE_IMAGE_PLANE_DISTANCE
+from dataforge.logging_toolkit import capture_column, time_column
 from dataforge.writing import atomic_recording
 from jaxtyping import Float64
 from numpy import ndarray
@@ -100,15 +101,25 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
         mount = session.oak.questrig_T_rgb if session.oak.ok else None
         posed = qp is not None and mount is not None
         if posed:
-            # Same static components as the base layer's nominal prior, so this fit replaces it. The aligned base puts the
-            # Quest track on the OAK's clock, so the static mount needs no time shift.
+            # Static for queries (``read_fitted_mount``), and again at the first Quest pose, where it follows the base's
+            # nominal prior (PRIOR_LEAD_NS earlier): the viewer resolves a timed transform ahead of a static one.
+            parent = f"tf#{schema.rig_path(quest_rig)}"
+            values = {"oak_mount_source": "fitted", "calib_source": METHOD, "calib_oak_source": session.oak.observation_source,
+                      "calib_oak_median_px": session.oak.median_px}
             recording.log(
-                schema.rig_path(oak_rig),
-                rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=f"tf#{schema.rig_path(quest_rig)}"),
-                rr.AnyValues(oak_mount_source="fitted", calib_source=METHOD, calib_oak_source=session.oak.observation_source,
-                             calib_oak_median_px=session.oak.median_px),
-                static=True,
+                schema.rig_path(oak_rig), rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=parent),
+                rr.AnyValues(**values), static=True,
             )
+            if len(motion.hands.head_times_s):
+                first_pose_ns = np.array([round(float(motion.hands.head_times_s[0]) * 1e9)])
+                recording.send_columns(
+                    schema.rig_path(oak_rig),
+                    indexes=[time_column(first_pose_ns + round(qp * 1e6)), capture_column(first_pose_ns)],
+                    columns=[
+                        *rr.Transform3D.columns(translation=[mount[:3, 3]], mat3x3=[mount[:3, :3]], parent_frame=[parent]),
+                        *rr.AnyValues.columns(**{name: [value] for name, value in values.items()}),
+                    ],
+                )
         if session.quest.mode != "healthy":  # a borrowed camera-50 transform is an estimate, so it lives here
             for slot, matrix in session.quest.rig_T_cam.items():
                 tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")

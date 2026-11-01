@@ -82,6 +82,7 @@ from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.datasets.selfcap_raw import CameraCalibration as CameraCalibration
+from dataforge.oak_mount import PRIOR_LEAD_NS
 from dataforge.datasets.selfcap_raw import FactoryCalibration, assumed_phone_lens, nominal_oak_mount, oak_stereo, quest_left_T_right, quest_mesh_frame
 from dataforge.datasets.selfcap_raw import HeadPoses as HeadPoses
 from dataforge.datasets.selfcap_raw import QuestHands as QuestHands
@@ -989,10 +990,10 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             )
 
     def _log_oak_mount_prior(self, recording: rr.RecordingStream, plan: EpisodePlan, first_pose_ns: int) -> None:
-        """Hang the OAK rig on the Quest's left-eye frame with a nominal mount, from the first Quest pose on.
+        """Hang the OAK rig on the Quest's left-eye frame with a nominal mount, just before the first Quest pose.
 
-        The prior is temporal and calibration's fitted mount is static on the same components, so the fit hides the
-        prior whichever layer was written last; a static prior would lose or win by write order.
+        Calibration logs its fitted mount at the first Quest pose (``PRIOR_LEAD_NS`` later), so the fit replaces the
+        prior from the first drawable frame on, whichever layer was written last.
         """
         mount = nominal_oak_mount(
             read_json(plan.episode_dir / "ego" / "calibration.json", FactoryCalibration),
@@ -1002,7 +1003,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             return
         rr.send_columns(
             schema.rig_path(plan.ego_rig),
-            indexes=[time_column(np.array([first_pose_ns])), capture_column(np.array([first_pose_ns]))],
+            indexes=[time_column(np.array([first_pose_ns - PRIOR_LEAD_NS])), capture_column(np.array([first_pose_ns - PRIOR_LEAD_NS]))],
             columns=[
                 *rr.Transform3D.columns(translation=[mount[:3, 3]], mat3x3=[mount[:3, :3]], parent_frame=[f"tf#{schema.rig_path(plan.quest_rig)}"]),
                 *rr.AnyValues.columns(oak_mount_source=["nominal"]),
