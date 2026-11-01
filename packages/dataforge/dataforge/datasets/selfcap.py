@@ -572,11 +572,12 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
             overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
         return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=contents, overrides=overrides)
 
-    # The scene drops every video (a 3D view decodes the videos it holds) and the head cameras' image planes, which
-    # would cover the hands; camera-plane overlays would repeat the body around the world skeleton.
+    # The head cameras show as bare frustums: their image planes would cover the hands. A posed phone shows its video
+    # in its frustum; an unposed one would sit at the world origin. Camera-plane overlays would repeat the body
+    # around the world skeleton (hidden below).
+    heads: list[str] = [schema.pinhole_path(pane.rig, pane.cam) for pane in panes if pane.kind != "exo"]
     excluded: list[str] = [
-        *blueprints.video_exclusions((pane.rig, pane.cam) for pane in panes),
-        *(f"- {schema.pinhole_path(pane.rig, pane.cam)}/**" for pane in panes if pane.kind != "exo"),
+        *(rule for pinhole in heads for rule in (f"+ {pinhole}", f"- {pinhole}/**")),
         *([] if posed_phones else [f"- {schema.rig_path(pane.rig)}/**" for pane in phones]),
     ]
     scene_overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden | dict.fromkeys(

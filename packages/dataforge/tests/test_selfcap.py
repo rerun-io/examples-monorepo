@@ -282,7 +282,8 @@ def test_default_blueprint_shows_the_raw_capture_before_calibration() -> None:
     assert "/world/**" in scene_contents
     for rig in PHONES.values():
         assert f"- /world/rig_{rig:02d}/**" in scene_contents
-    for rig, cam in HEAD_CAMERAS.values():  # the head cameras' image planes would hide the hands
+    for rig, cam in HEAD_CAMERAS.values():  # head frustums show; their image planes would hide the hands
+        assert f"+ /world/rig_{rig:02d}/cam_{cam:02d}/pinhole" in scene_contents
         assert f"- /world/rig_{rig:02d}/cam_{cam:02d}/pinhole/**" in scene_contents
     assert "/world/gt" not in scene.visualizer_overrides  # the Quest hands and their joint axes show
     assert scene.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
@@ -313,9 +314,13 @@ def test_default_blueprint_draws_the_hands_and_body_through_posed_phones() -> No
     # After calibrate the phones have poses: their cameras show in 3D and every overlay projects through them.
     for show_soma_mesh in (False, True):
         views = {str(view.name): view for view in blueprint_views(SelfcapDataset(SelfcapConfig()).default_blueprint(show_soma_mesh=show_soma_mesh))}
-        assert "- /world/rig_00/**" not in cast(list[str], views["Scene"].contents)
+        scene_contents: list[str] = cast(list[str], views["Scene"].contents)
+        assert "- /world/rig_00/**" not in scene_contents
+        for rig, cam in HEAD_CAMERAS.values():
+            assert f"+ /world/rig_{rig:02d}/cam_{cam:02d}/pinhole" in scene_contents
         for name, rig in PHONES.items():
             pinhole: str = f"/world/rig_{rig:02d}/cam_00/pinhole"
+            assert not [rule for rule in scene_contents if rule.startswith(f"- {pinhole}")], "each posed phone shows its video in 3D"
             contents: list[str] = cast(list[str], views[name].contents)
             assert contents == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**"]
             hidden = views[name].visualizer_overrides
