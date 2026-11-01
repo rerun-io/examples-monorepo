@@ -400,3 +400,16 @@ def test_egohand_ineligible_gyro_uses_free_fit_and_records_reason(calibration_ca
     prop = next(c.to_record_batch() for c in RrdReader(path).stream() if str(c.entity_path) == "/__properties/calib")
     assert prop.column("oak_rotation_source")[0].as_py() == ["free"]
     assert prop.column("oak_rotation_reason")[0].as_py() == [reason]
+
+
+def test_layer_draws_phone_frustums_at_the_base_layers_length(tmp_path, layer_case) -> None:
+    # The fitted lens replaces the base layer's Pinhole; the frustum keeps the length ingest gave the phones.
+    from dataforge.datasets.selfcap import PHONE_IMAGE_PLANE_DISTANCE
+
+    state, motion = layer_case
+    path = tmp_path / "frustum.rrd"
+    write_calib_layer(path, state, motion)
+    distances = [b.column("Pinhole:image_plane_distance")[0].as_py() for c in RrdReader(path).stream()
+                 if str(c.entity_path).endswith("/cam_00/pinhole") and "Pinhole:image_plane_distance" in (b := c.to_record_batch()).schema.names]
+    assert distances
+    assert all(d == [pytest.approx(PHONE_IMAGE_PLANE_DISTANCE)] for d in distances)

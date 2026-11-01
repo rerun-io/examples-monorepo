@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 from dataforge import schema
+from dataforge.datasets.selfcap import PHONE_IMAGE_PLANE_DISTANCE
 from dataforge.writing import atomic_recording
 from jaxtyping import Float64
 from numpy import ndarray
@@ -64,7 +65,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                     width=width,
                     height=height,
                     camera_xyz=rr.ViewCoordinates.RDF,
-                    image_plane_distance=0.3,
+                    image_plane_distance=PHONE_IMAGE_PLANE_DISTANCE,
                 ),
                 rr.AnyValues(lens_source="fitted"),  # replaces the base layer's "assumed" lens
                 static=True,

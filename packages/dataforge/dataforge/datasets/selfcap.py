@@ -131,7 +131,7 @@ QUEST_STREAM_LAYOUTS: tuple[tuple[str, str], ...] = (("left", "left"), ("right",
 
 IMAGE_PLANE_DISTANCE: float = 0.04
 """Frustum length in metres. The five head cameras sit 3-7 cm apart, so longer frustums overlap into one blob."""
-PHONE_IMAGE_PLANE_DISTANCE: float = 0.3
+PHONE_IMAGE_PLANE_DISTANCE: float = 0.15
 """The phones stand metres apart; the calibration layer draws them at the same length."""
 DEVICE_MESHES: Path = Path(__file__).parent / "selfcap_devices"
 """Display meshes of the head-worn devices, in their reference camera frames (see its NOTICE.md)."""
