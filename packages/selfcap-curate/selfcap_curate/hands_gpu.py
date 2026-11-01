@@ -20,12 +20,16 @@ from torch import Tensor
 from selfcap_curate.catalog_io import Segment, read_phone_videos
 from selfcap_curate.records import HAND_LATENCY_MS, HandTrack, OakDetections, PhoneDetections, SelfcapLayout, Side, TimeSync, oak_quest_offset_ms
 
+FRAMES_PER_PHONE: int = 48
+"""Detections align keeps per phone: enough for the clock fit and, the phones being fixed, for their poses."""
 
-def pick_frames(quest: dict[Side, HandTrack], num_frames: int, fps: float) -> Int64[ndarray, "n"]:
-    """Select two 250-frame GOPs, twelve peaks each, spacing ≥4 and margin 2 s.
 
-    The zero-based n/fps grid deliberately matches scratch plan(), including
-    NumPy tie ordering. The margin guards cut boundaries; spacing avoids repeats.
+def pick_frames(quest: dict[Side, HandTrack], num_frames: int, fps: float, count: int = FRAMES_PER_PHONE) -> Int64[ndarray, "n"]:
+    """Spread ``count`` frames over the session, one per equal part, each the part's fastest-moving hands.
+
+    The phones never move, so the wearer seen all over the room pins their poses better than many frames from one
+    stretch; the clock fit needs the hands moving. Parts start 2 s inside each cut; a part where the hands never move
+    gives no frame. The zero-based n/fps grid is the Quest hands' clock before alignment.
     """
     if num_frames < 1 or fps <= 0.0:
         raise ValueError("frame count and fps must be positive")
@@ -34,21 +38,9 @@ def pick_frames(quest: dict[Side, HandTrack], num_frames: int, fps: float) -> In
     for hand in quest.values():
         if len(hand.times_s) > 1:
             motion = np.maximum(motion, np.interp(times, hand.times_s, np.where(hand.valid, hand.speed, 0.0), left=0.0, right=0.0))
-    motion[(times < 2.0) | (times > times[-1] - 2.0)] = 0.0
-    scores: list[tuple[float, int]] = [(float(np.sort(motion[k : k + 250])[-12:].sum()), k) for k in range(0, num_frames, 250)]
-    picks: list[int] = []
-    for _, start in sorted(scores, reverse=True)[:2]:
-        indices: Int64[ndarray, "g"] = np.arange(start, min(start + 250, num_frames))
-        chosen: list[int] = []
-        for index in indices[np.argsort(-motion[indices])]:
-            if motion[index] <= 0.0:
-                break
-            if all(abs(index - other) >= 4 for other in chosen):
-                chosen.append(int(index))
-            if len(chosen) == 12:
-                break
-        picks.extend(chosen)
-    return np.asarray(sorted(picks), dtype=np.int64)
+    inside: Int64[ndarray, "m"] = np.flatnonzero((times >= 2.0) & (times <= times[-1] - 2.0))
+    parts: list[Int64[ndarray, "k"]] = [part for part in np.array_split(inside, count) if len(part) and motion[part].max() > 0.0]
+    return np.asarray([int(part[np.argmax(motion[part])]) for part in parts], dtype=np.int64)
 
 
 @torch.inference_mode()
@@ -92,7 +84,7 @@ def detect_frames(
 def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, BoxDetections], Keypoints2d]]:
     """Build v2's YOLOX 0.3 (batch eight) and Sapiens2 0.4B (batch four) TensorRT models once per process.
 
-    Sapiens2 runs on ~24 frames per phone plus the OAK picks, so batch four costs little time and halves its TensorRT
+    Sapiens2 runs on FRAMES_PER_PHONE frames per phone plus the OAK picks, so batch four costs little time and halves its TensorRT
     activation memory (4.43 -> 2.21 GB), which lets three selfcap-post workers share the 5090.
     """
     from posekit.models.sapiens import SapiensPoseConfig

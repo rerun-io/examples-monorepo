@@ -215,3 +215,35 @@ def test_the_body_seen_from_several_phones_corrects_poses_a_wrong_face_template_
         face_after = residual_summary(refined[p], face_correspondences(faces[p], track, wrong))[1]
         assert face_before is not None and face_after is not None and face_after < face_before + 2.0
 
+
+
+def test_fixed_phones_are_posed_from_a_few_frames_spread_over_the_session(fixture_sync) -> None:
+    # Fixed phones need no dense pass: align's few detections per phone, spread over the session and read on each
+    # phone's own clock, pin every pose.
+    from selfcap_curate.exo_calibration import PhoneCalibration, SessionCalibration
+    from selfcap_curate.head_anchor import DEFAULT_OFFSETS, FACE
+    from selfcap_curate.head_calibration import calibrate_with_head
+    from selfcap_curate.records import CatalogHands, PhoneDetections, SelfcapLayout, SessionEpisode
+
+    walked = walk()  # turned into an upright RDF head (camera y down), as worn
+    level = look_at(np.zeros(3), np.array([0.0, 0.0, 1.0])).world_T_cam[:3, :3]
+    track = HeadTrack(walked.times_s, walked.rotations @ level, walked.positions)
+    truth = {"A": look_at(np.array([2.0, 1.5, 2.0]), np.array([0.0, 1.4, 0.0])), "B": look_at(np.array([-2.0, 1.2, 1.5]), np.array([0.0, 1.5, 0.0]))}
+    clock_ms = {"A": 100.0, "B": 60.0}
+    detections: dict[str, PhoneDetections] = {}
+    rows = np.linspace(40, len(track.times_s) - 40, 48).round().astype(int)  # align detects the same frames on every phone
+    for phone, camera in truth.items():
+        world = np.einsum("nij,kj->nki", track.rotations[rows], DEFAULT_OFFSETS) + track.positions[rows, None]
+        xy, scores = np.full((48, 133, 2), np.nan), np.zeros((48, 133))
+        xy[:, list(FACE)] = camera.project(world.reshape(-1, 3))[:, :2].reshape(48, 5, 2)
+        scores[:, list(FACE)] = 0.9
+        detections[phone] = PhoneDetections(track.times_s[rows] - clock_ms[phone] / 1000.0, xy, scores)
+    episode = SessionEpisode(
+        fixture_sync(offsets_ms={f"exo/{phone}": ms for phone, ms in clock_ms.items()}),
+        CatalogHands(np.empty(0), np.empty((0, 133, 3)), np.empty(0), np.empty((0, 3)), np.empty((0, 4))),
+        np.empty(0), np.empty((0, 3)), {}, SelfcapLayout(2, 3, ("A", "B")), detections,
+    )
+    head = calibrate_with_head(SessionCalibration("s", {p: PhoneCalibration(False) for p in truth}), episode, track, {p: 1400.0 for p in truth}, clock_ms)
+    for phone, camera in truth.items():
+        centre, angle = errors(head.exo.phones[phone].camera, camera)
+        assert centre < 0.03 and angle < 1.0, (phone, centre, angle)

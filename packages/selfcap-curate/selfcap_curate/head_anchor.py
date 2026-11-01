@@ -314,8 +314,6 @@ Measured on selfcap__2025-12-03__d31bf1da__ep001 from its four label-refined pho
 headset wearer are guesses the detector makes around the visor, so offsets fitted freely per session absorb camera
 error; this fixed template is what pins the cameras. Another ego device or detector needs its own template.
 """
-WEARER_GATE_PX: float = 150.0
-"""A person is the wearer only if its face lies this close to the projected head."""
 ACCEPT_FACE_PX: float = 25.0
 """A head-anchored phone needs its median face residual under this to replace or create a pose."""
 CLOCK_SUSPECT_S: float = 0.3
@@ -347,34 +345,6 @@ class PhoneReport:
     """Face residual at zero shift divided by the best one; ~1 for a right clock."""
     clock_correction_ms: float | None = None
     """New phone offset (ms) when the head track found the clock missing or wrong."""
-
-
-def select_person(boxes: Float64[ndarray, "n p 4"], box_scores: Float64[ndarray, "n p"], xy: Float64[ndarray, "n p 133 2"],
-                  scores: Float64[ndarray, "n p 133"], expected: Float64[ndarray, "n 2"] | None) -> ndarray:
-    """Per frame, the candidate that is the wearer; -1 when none qualifies.
-
-    Without a camera, the most confident person whose face is seen; with one, the person whose face centroid lies
-    nearest the projected head, within WEARER_GATE_PX.
-    """
-    face_ok = scores[..., list(FACE)] >= MIN_FACE_SCORE
-    seen = face_ok.sum(-1) >= 2
-    with np.errstate(invalid="ignore"):
-        centroid = np.nansum(np.where(face_ok[..., None], xy[..., list(FACE), :], 0.0), axis=2) / np.maximum(face_ok.sum(-1), 1)[..., None]
-    if expected is None:
-        ranked = np.where(seen, np.nan_to_num(box_scores, nan=-1.0), -np.inf)
-        best = np.argmax(ranked, axis=1)
-        return np.where(np.isfinite(np.take_along_axis(ranked, best[:, None], 1)[:, 0]), best, -1)
-    distance = np.where(seen, np.linalg.norm(centroid - expected[:, None], axis=-1), np.inf)
-    distance[~np.isfinite(expected).all(-1)] = np.inf
-    best = np.argmin(distance, axis=1)
-    return np.where(np.take_along_axis(distance, best[:, None], 1)[:, 0] < WEARER_GATE_PX, best, -1)
-
-
-def chosen(values: ndarray, choice: ndarray, fill: float) -> ndarray:
-    """Rows of ``values`` [n, p, ...] at ``choice`` [n]; ``fill`` where choice is -1."""
-    picked = np.take_along_axis(values, np.maximum(choice, 0).reshape(-1, *([1] * (values.ndim - 1))), axis=1)[:, 0]
-    picked[choice < 0] = fill
-    return picked
 
 
 def residual_summary(camera: Camera, data: Correspondences) -> tuple[int, float | None]:

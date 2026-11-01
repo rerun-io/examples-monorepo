@@ -1,7 +1,7 @@
 """Session exo calibration v3: the hands fit, extended and refined with the wearer's head track.
 
 Every phone that sees the wearer's head gets a pose, including phones that never see the hands. Hands-only poses
-seed the face offsets; the joint fit then refines every phone on dense face and hand pairs. A phone whose head fit
+seed the face offsets; the joint fit then refines every phone on align's face and hand detections. A phone whose head fit
 does not reach ACCEPT_FACE_PX keeps its hands-only pose (or stays unposed).
 """
 
@@ -26,23 +26,19 @@ from selfcap_curate.head_anchor import (
     HeadTrack,
     PhoneReport,
     body_bundle,
-    chosen,
     clock_scan,
-    estimate_offsets,
     face_correspondences,
     face_world,
     find_clock,
     gate_hands,
     joint_bundle,
     residual_summary,
-    select_person,
     solve_from_head,
     upright,
     world_up,
 )
-from selfcap_curate.keypoints import Keypoints2D
 from selfcap_curate.quest_fit import Correspondences, pairs
-from selfcap_curate.records import CatalogHands, PhoneDetections, SessionEpisode
+from selfcap_curate.records import CatalogHands, SessionEpisode
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +49,6 @@ class HeadCalibration:
     offsets: Float64[ndarray, "5 3"]
     offsets_source: str
     phones: dict[str, PhoneReport]
-    measured_offsets: Float64[ndarray, "5 3"] | None = None
-    """Offsets triangulated from the hands-only phones, before the joint fit."""
     clock_corrections_ms: dict[str, float] = field(default_factory=dict)
     """Phone offsets (ms) the head track finds where the phone's clock was missing or decisively wrong."""
 
@@ -86,32 +80,28 @@ def unverified(phone: PhoneCalibration, episode: str) -> PhoneCalibration:
     return replace(phone, ok=False, episodes={**phone.episodes, episode: replace(current, ok=False, scope="flagged")})
 
 
-def _views(dense: Keypoints2D, track: HeadTrack, cameras: dict[str, Camera], offsets: Float64[ndarray, "5 3"] | None,
-           episode: SessionEpisode) -> tuple[dict[str, FaceTrack], dict[str, Correspondences], dict[str, BodyTrack]]:
-    """Each phone's wearer: face track, dense hand pairs and body track; posed phones pick the person at the projected head."""
+def _views(episode: SessionEpisode) -> tuple[dict[str, FaceTrack], dict[str, Correspondences], dict[str, BodyTrack]]:
+    """Each phone's wearer from align's detections: face and body tracks on the aligned clock, and hand pairs.
+
+    Align keeps one person per frame and a few dozen frames per phone, spread over the session; the phones being
+    fixed, that is enough to pose them. A phone without a clock has no aligned frames and is left out.
+    """
     faces: dict[str, FaceTrack] = {}
     hands: dict[str, Correspondences] = {}
     bodies: dict[str, BodyTrack] = {}
     offsets_ms = episode.sync.offsets_ms or {}
-    centre = np.nanmean(offsets, axis=0) if offsets is not None and np.isfinite(offsets).any() else np.zeros(3)
-    rotations, positions, valid = track.at(dense.times)
-    head_point = np.einsum("nij,j->ni", rotations, centre) + positions
-    head_point[~valid] = np.nan
-    for phone, view in dense.views.items():
-        expected = None
-        if phone in cameras:
-            projected = cameras[phone].project(np.nan_to_num(head_point))
-            expected = np.where((projected[:, 2:3] > 0.0) & valid[:, None], projected[:, :2], np.nan)
-        choice = select_person(view.boxes, view.box_scores, view.xy, view.scores, expected)
-        xy = chosen(view.xy, choice, np.nan)
-        scores = chosen(view.scores, choice, 0.0)
-        faces[phone] = FaceTrack(dense.times, xy[:, list(FACE)], scores[:, list(FACE)])
-        bodies[phone] = BodyTrack(dense.times, xy[:, list(BODY)], scores[:, list(BODY)])
+    clocked = {p: d for p, d in episode.detections.items() if offsets_ms.get("exo/" + p) is not None}
+    aligned = {p: d.times_s + offsets_ms["exo/" + p] / 1000.0 for p, d in clocked.items()}
+    # Align detects the same frame numbers on every phone. The body needs several phones at one instant, so it uses
+    # each frame's mean aligned time (the phone clocks differ by tens of milliseconds); face and hands keep their own.
+    shared = np.mean(list(aligned.values()), axis=0) if len({len(t) for t in aligned.values()}) == 1 else None
+    for phone, detections in clocked.items():
+        faces[phone] = FaceTrack(aligned[phone], detections.xy[:, list(FACE)], detections.scores[:, list(FACE)])
+        if shared is not None:
+            bodies[phone] = BodyTrack(shared, detections.xy[:, list(BODY)], detections.scores[:, list(BODY)])
         fit = episode.sync.exo_fit.get(phone)
-        offset = offsets_ms.get("exo/" + phone)
-        if fit is not None and fit.tau_phone_to_pose_ms is not None and offset is not None:
-            capture = dense.times - offset / 1000.0
-            hands[phone] = pairs(PhoneDetections(capture, xy, scores), episode.quest, fit.tau_phone_to_pose_ms / 1000.0)
+        if fit is not None and fit.tau_phone_to_pose_ms is not None:
+            hands[phone] = pairs(detections, episode.quest, fit.tau_phone_to_pose_ms / 1000.0)
     return faces, hands, bodies
 
 
@@ -120,15 +110,14 @@ BODY_SLACK_PX: float = 2.0
 
 
 def _refine_with_body(fitted: dict[str, Camera], faces: dict[str, FaceTrack], gated: dict[str, Correspondences], faces_bad: set[str],
-                      shifts: dict[str, float], dense: Keypoints2D, track: HeadTrack, offsets: Float64[ndarray, "5 3"],
-                      episode: SessionEpisode, up: Float64[ndarray, "3"]) -> tuple[dict[str, Camera], set[str]]:
+                      shifts: dict[str, float], bodies: dict[str, BodyTrack], track: HeadTrack, offsets: Float64[ndarray, "5 3"],
+                      up: Float64[ndarray, "3"]) -> tuple[dict[str, Camera], set[str]]:
     """Pull the accepted poses into agreement on the wearer's body (body_bundle); keep each refined pose that still fits
     its own face and hands within BODY_SLACK_PX and stays upright. Phones on a corrected clock sit out: their detections
     are on the old clock."""
     phones = [p for p in fitted if p not in shifts]
-    if len(phones) < 2:
+    if len(phones) < 2 or any(p not in bodies for p in phones):
         return fitted, set()
-    _, _, bodies = _views(dense, track, {p: fitted[p] for p in phones}, offsets, episode)
     refined = body_bundle({p: fitted[p] for p in phones}, {p: faces[p] for p in phones if p not in faces_bad},
                           {p: gated[p] for p in phones if p in gated}, {p: bodies[p] for p in phones}, track, offsets)
     kept, moved = dict(fitted), set()
@@ -147,45 +136,41 @@ def _shifted(face: FaceTrack, shift: float) -> FaceTrack:
     return face if shift == 0.0 else FaceTrack(face.times_s + shift, face.xy, face.scores)
 
 
-def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, dense: Keypoints2D, track: HeadTrack,
+def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, track: HeadTrack,
                         focals: dict[str, float], clock_ms: dict[str, float], provisional: frozenset[str] = frozenset()) -> HeadCalibration:
     """Extend and refine one episode's hands-only calibration with the head track (single-episode sessions).
 
-    ``clock_ms`` holds each phone's offset as used for ``dense``; ``provisional`` phones had no clock and were
-    detected on a guessed one. Their clock is found from the face track alone; every other phone's clock is checked
-    the same way, and a decisive shift is corrected. Corrected phones lose their hand pairs (paired on the old clock).
+    The observations are align's detections (``episode.detections``) on ``episode.sync``'s clocks; ``clock_ms`` holds
+    each phone's offset as used there, and ``provisional`` phones had no clock and carry a guessed one. Their clock is
+    found from the face track alone; every other phone's clock is checked the same way, and a decisive shift is
+    corrected. Corrected phones lose their hand pairs (paired on the old clock).
     """
     hand_cameras = {p: c.camera for p, c in exo.phones.items() if c.ok and c.camera is not None and p not in provisional}
     default_focal = float(np.median(list(focals.values()))) if focals else 900.0
-    faces, hands, _ = _views(dense, track, hand_cameras, None, episode)
-    measured = estimate_offsets(hand_cameras, faces, track)  # diagnostic only: hands-only poses are biased at the head
+    observed_faces, observed_hands, bodies = _views(episode)
+    faces = dict(observed_faces)
     offsets = DEFAULT_OFFSETS.copy()
     source = "template (d31 label-refined cameras), fixed"
-    # A hands-only pose that projects the head where no face is found picked nobody: pick the wearer without it and
-    # solve that phone from the head like an unposed one.
-    blind = {p for p in hand_cameras if len(face_correspondences(faces[p], track, offsets).world) < MIN_FACE_PAIRS}
-    if blind:
-        unguided, _, _ = _views(dense, track, {}, None, episode)
-        faces.update({p: unguided[p] for p in blind})
+    # A hands-only pose whose projected head finds no face is solved from the head like an unposed phone.
+    blind = {p for p in hand_cameras if p not in faces or len(face_correspondences(faces[p], track, offsets).world) < MIN_FACE_PAIRS}
     shifts: dict[str, float] = {}
-    for phone in sorted(provisional & set(dense.views)):
+    for phone in sorted(provisional & set(faces)):
         found = find_clock(faces[phone], track, offsets, focals.get(phone, default_focal))
         if found is not None:
             shifts[phone] = found
     cameras: dict[str, Camera] = {p: c for p, c in hand_cameras.items() if p not in blind}
-    for phone in dense.views:
+    for phone in faces:
         if phone in cameras or (phone in provisional and phone not in shifts):
             continue
         camera = solve_from_head(face_correspondences(_shifted(faces[phone], shifts.get(phone, 0.0)), track, offsets), focals.get(phone, default_focal))
         if camera is not None:
             cameras[phone] = camera
     if not cameras:
-        return HeadCalibration(exo, offsets, source, {}, measured, {})
+        return HeadCalibration(exo, offsets, source, {}, {})
 
     def fit(cameras: dict[str, Camera]) -> tuple[dict[str, Camera], dict[str, FaceTrack], dict[str, Correspondences]]:
-        views, hand_pairs, _ = _views(dense, track, cameras, offsets, episode)
-        views = {p: _shifted(v, shifts.get(p, 0.0)) for p, v in views.items()}
-        hand_pairs = {p: h for p, h in hand_pairs.items() if p not in shifts}
+        views = {p: _shifted(v, shifts.get(p, 0.0)) for p, v in observed_faces.items()}
+        hand_pairs = {p: h for p, h in observed_hands.items() if p not in shifts}
         gated = {p: gate_hands(cameras[p], hand_pairs[p]) for p in cameras if p in hand_pairs}
         fitted, _ = joint_bundle(cameras, {p: views[p] for p in cameras}, gated, track, offsets, fit_offsets=False)
         gated = {p: gate_hands(fitted[p], hand_pairs[p]) for p in fitted if p in hand_pairs}
@@ -228,14 +213,14 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, dense:
         del fitted[phone]
     # Face and hands pose each phone on its own, well near the head and hands; the body the phones share pulls them into
     # agreement far below (legs, elbows), within what their own face and hands allow.
-    fitted, body_moved = _refine_with_body(fitted, faces, gated, faces_bad, shifts, dense, track, offsets, episode, up)
+    fitted, body_moved = _refine_with_body(fitted, faces, gated, faces_bad, shifts, bodies, track, offsets, up)
     # A clock correction stands only if the corrected phone fits its face and the session's other phones fit theirs:
     # otherwise the scan measured a template that does not hold here. Phones with no clock at all keep theirs.
     others = [v for p, v in face_px.items() if p not in shifts and v is not None]
     template_holds = not others or float(np.median(others)) <= 20.0
     corrections = {p: round(clock_ms[p] + 1000.0 * shift, 1) for p, shift in shifts.items()
                    if p in clock_ms and (p in provisional or (template_holds and face_px.get(p) is not None and face_px[p] <= 15.0))}
-    for phone in sorted(set(dense.views) | set(exo.phones)):
+    for phone in sorted(set(episode.detections) | set(exo.phones)):
         before = hand_cameras.get(phone)
         camera = fitted.get(phone)
         best_shift, gain = scans.get(phone, (shifts.get(phone), None))
@@ -265,7 +250,7 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, dense:
         method = "dense hands (face rejected)" if phone in faces_bad else ("hands+head" if before is not None else "head")
         method += " + body" if phone in body_moved else ""
         reports[phone] = PhoneReport(method, face_n, face_med, hand_n, hand_px, shift, before_px, best_shift, gain, corrections.get(phone))
-    return HeadCalibration(SessionCalibration(exo.session, phones, exo.body_median_px), offsets, source, reports, measured, corrections)
+    return HeadCalibration(SessionCalibration(exo.session, phones, exo.body_median_px), offsets, source, reports, corrections)
 
 
 def face_points(track: HeadTrack, offsets: Float64[ndarray, "5 3"], times: Float64[ndarray, "n"]) -> Float64[ndarray, "n 5 3"]:

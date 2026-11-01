@@ -25,7 +25,6 @@ from selfcap_curate.factory import oak_centre, oak_stereo, read_quest_block
 from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models, release_cuda_memory
 from selfcap_curate.head_calibration import calibrate_with_head, head_track
 from selfcap_curate.keypoints import read_ego_cameras
-from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models
 from selfcap_curate.oak_egohand import detect_oak_egohand
 from selfcap_curate.oak_mount import fixed_rotation, fixed_rotation_reason, gyro_mount, solve_oak
 from selfcap_curate.quest_fit import read_session_episode
@@ -66,8 +65,6 @@ class Config:
     """Optional dataset on donor_catalog_url carrying independent RTMW gate observations."""
     exo_method: Literal["hands", "head"] = "hands"
     """Hands-only phone poses, or v3: extend and refine them with the wearer's head track (single-episode sessions)."""
-    head_rate: float = 4.0
-    """Dense detection rate (Hz) for the head-anchored fit."""
 
 
 def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = None) -> CalibSession:
@@ -147,35 +144,31 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
         if config.exo_method == "head":
             if len(episodes) != 1:
                 raise ValueError("head-anchored calibration handles one episode per session")
-            release_cuda_memory(models=True)
             episode, segment = episodes[0], segments[0]
             quest_pose_ms = (episode.sync.offsets_ms or {}).get("quest_pose")
             if quest_pose_ms is None:
                 print("HEAD_SKIP", segment.id, "no Quest clock", flush=True)
             else:
-                # A phone align could not clock is detected on a guessed one; the head track then finds the real one.
+                # The head fit reads align's detections (the episode's sapiens2 layer); a phone align could not clock
+                # gets a guessed one, and the head track then finds the real one.
                 offsets_ms = dict(episode.sync.offsets_ms or {})
                 known = [v for k, v in offsets_ms.items() if k.startswith("exo/") and v is not None]
                 guess = float(np.median(known)) if known else quest_pose_ms
                 provisional = frozenset(p for p in episode.layout.phones if offsets_ms.get("exo/" + p) is None)
                 offsets_ms.update({"exo/" + p: guess for p in provisional})
                 detection_sync = replace(episode.sync, offsets_ms=offsets_ms)
-                dense = detect_keypoints(segment, *keypoint_models(), rate=config.head_rate, sync=detection_sync)
                 track = head_track(segment.hands or catalog_io.read_catalog_hands(segment), quest_pose_ms)
-                head = calibrate_with_head(state.exo, replace(episode, sync=detection_sync), dense, track, focals,
+                head = calibrate_with_head(state.exo, replace(episode, sync=detection_sync), track, focals,
                                            {p: offsets_ms["exo/" + p] for p in episode.layout.phones}, provisional)
                 hands_only = {p: c.camera.parameters.tolist() for p, c in state.exo.phones.items() if c.camera is not None}
                 state = replace(state, exo=head.exo)
                 (output / f"{session}.head.json").write_text(json.dumps({
                     "offsets_m": head.offsets.tolist(), "offsets_source": head.offsets_source, "head_convention": track.convention,
-                    "measured_offsets_m": None if head.measured_offsets is None else head.measured_offsets.tolist(),
                     "hands_only_cameras": hands_only, "head_cameras": {p: c.camera.parameters.tolist() for p, c in head.exo.phones.items() if c.camera is not None},
                     "clock_corrections_ms": head.clock_corrections_ms, "provisional": sorted(provisional),
                     "phones": {p: asdict(r) for p, r in head.phones.items()}}, indent=1))
                 if head.clock_corrections_ms:
                     print("HEAD_CLOCK", segment.id, head.clock_corrections_ms, flush=True)
-                np.savez_compressed(output / f"{segment.id}.dense.npz", times=dense.times, **{
-                    f"{field}__{p}": getattr(v, field) for p, v in dense.views.items() for field in ("boxes", "box_scores", "xy", "scores")})
                 print("HEAD_CALIBRATION", segment.id, {p: (r.method, r.face_median_px) for p, r in head.phones.items()}, flush=True)
         if config.exo_refine:
             refinements = {}
