@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from sapiens2_pose.api.fast_calibration import calibration_path, load_calibration
+from sapiens2_pose.api.fast_calibration import FAST_POSE_INPUT_HW, calibration_path, load_calibration
 from sapiens2_pose.api.fast_pose import DeferredHead
 
 FAST_POSE_EXPORT_VERSION: int = 1
@@ -18,12 +18,11 @@ FAST_POSE_EXPORT_VERSION: int = 1
 
 def make_fast_pose_exportable(model: nn.Module) -> nn.Module:
     """Select the mapped joints and replace the head with its exact deferred form."""
-    from sapiens2_pose.api.metadata import get_sapiens_metainfo
+    from sapiens2_pose.api.metadata import coco133_goliath_pairs
     from sapiens2_pose.api.tensorrt_pose import make_sapiens_pose_onnx_exportable
 
     model = make_sapiens_pose_onnx_exportable(model)
-    mapping: dict[int, int] = get_sapiens_metainfo()["coco_wholebody_to_goliath_mapping"]
-    indices: list[int] = [int(goliath) for coco, goliath in sorted(mapping.items()) if 0 <= int(coco) < 133]
+    indices: list[int] = list(coco133_goliath_pairs()[1])
     head: Any = model.decode_head
     original: nn.Conv2d = head.conv_pose
     sliced: nn.Conv2d = nn.Conv2d(original.in_channels, len(indices), 1).to(original.weight.device, original.weight.dtype)
@@ -48,7 +47,7 @@ def ensure_fast_pose_onnx(cache_dir: Path, max_batch_size: int = 8) -> Path:
         return path
     model: nn.Module = make_fast_pose_exportable(copy.deepcopy(get_pose_model("0.4B", "cuda")))
     base: Path = path.with_name(path.stem + "_bf16.onnx")
-    inputs: torch.Tensor = torch.zeros((3, 3, 768, 576), dtype=torch.float32, device="cuda")
+    inputs: torch.Tensor = torch.zeros((3, 3, *FAST_POSE_INPUT_HW), dtype=torch.float32, device="cuda")
     export_onnx(
         model, (inputs,), base, input_names=["inputs"], output_names=["heatmaps"], compute_dtype=torch.bfloat16, dynamic_batch_max=max_batch_size
     )

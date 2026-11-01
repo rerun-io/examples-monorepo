@@ -8,6 +8,7 @@ microphones heard lines up once their clocks agree.
 from __future__ import annotations
 
 import io
+import itertools
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -80,7 +81,7 @@ def read_audio_track(video_path: Path) -> AudioTrack | None:
         levels: list[Float32[ndarray, "k"]] = []
         with av.open(buffer, "w", format="flac") as output:
             flac: av.audio.stream.AudioStream = cast(av.audio.stream.AudioStream, output.add_stream("flac", rate=stream.rate, layout=layout))
-            for frame in [*container.decode(stream), None]:  # None flushes the resamplers
+            for frame in itertools.chain(container.decode(stream), (None,)):  # None flushes the resamplers
                 for converted in to_flac.resample(frame):
                     output.mux(flac.encode(converted))
                 levels.extend(converted.to_ndarray().reshape(-1) for converted in to_level.resample(frame))

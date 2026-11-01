@@ -87,7 +87,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
                 print("CLOCK_OVERRIDE", key.segment, overrides[key.segment], flush=True)
             with timer.stage(f"{key}/write_patch"):
                 patch(config.base_dir / key.rrd_name, None, record, output_path=output / key.rrd_name, mode="fresh")
-                hands, shift_ns = read_hand_poses(output / key.rrd_name) if (output / key.rrd_name).is_file() else ({}, 0)
+                hands, shift_ns = read_hand_poses(output / key.rrd_name)
                 if hands:  # the gt layer is re-derived from the aligned base, so it is on the aligned clock by construction
                     write_coco133_layer(hands, shift_ns, output / "gt" / key.rrd_name, record.episode_key.segment)
                 write_sync(output / key.sync_name, record)

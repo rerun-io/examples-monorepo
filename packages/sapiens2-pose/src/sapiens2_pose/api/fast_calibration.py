@@ -8,6 +8,11 @@ from pathlib import Path
 from serde import SerdeError, serde
 from serde.json import from_json
 
+FAST_POSE_INPUT_HW: tuple[int, int] = (768, 576)
+"""Crop height and width the fast export runs at and its calibration was measured on."""
+FAST_POSE_HEATMAP_HW: tuple[int, int] = (192, 144)
+"""Heatmap height and width of the fast export: the input at stride 4."""
+
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
@@ -24,8 +29,8 @@ class FastPoseCalibration:
     """Absolute Q/K/V maxima after normalization and RoPE."""
 
     def __post_init__(self) -> None:
-        if self.input_hw != (768, 576) or self.n_crops < 1:
-            raise ValueError("Fast pose calibration requires 768x576 person crops.")
+        if self.input_hw != FAST_POSE_INPUT_HW or self.n_crops < 1:
+            raise ValueError(f"Fast pose calibration requires {FAST_POSE_INPUT_HW[0]}x{FAST_POSE_INPUT_HW[1]} person crops.")
         if len(self.attention_amax) != 72 or not self.input_amax:
             raise ValueError("Fast pose calibration must include all 24 attention blocks and module inputs.")
         if any(not math.isfinite(value) or value <= 0.0 for value in (*self.input_amax.values(), *self.attention_amax.values())):

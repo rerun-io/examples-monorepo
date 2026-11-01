@@ -10,7 +10,7 @@ import torch
 from serde.json import to_json
 from torch import nn
 
-from sapiens2_pose.api.fast_calibration import FastPoseCalibration
+from sapiens2_pose.api.fast_calibration import FAST_POSE_INPUT_HW, FastPoseCalibration
 from sapiens2_pose.api.fast_export import make_fast_pose_exportable
 
 
@@ -67,7 +67,7 @@ def main(config: Config) -> None:
             image = cv2.imread(str(path))
             if image is None:
                 raise ValueError(f"Cannot read crop {path}")
-            image = cv2.cvtColor(cv2.resize(image, (576, 768)), cv2.COLOR_BGR2RGB)
+            image = cv2.cvtColor(cv2.resize(image, FAST_POSE_INPUT_HW[::-1]), cv2.COLOR_BGR2RGB)
             inputs: torch.Tensor = torch.from_numpy(image).to(device="cuda", dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 model((inputs - mean) / std)
@@ -76,6 +76,6 @@ def main(config: Config) -> None:
             handle.remove()
         for attn, original in originals:
             attn.attn_op = original
-    calibration: FastPoseCalibration = FastPoseCalibration((768, 576), len(paths), input_amax, attention_amax)
+    calibration: FastPoseCalibration = FastPoseCalibration(FAST_POSE_INPUT_HW, len(paths), input_amax, attention_amax)
     config.output.parent.mkdir(parents=True, exist_ok=True)
     config.output.write_text(to_json(calibration, indent=2) + "\n")

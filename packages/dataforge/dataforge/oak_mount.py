@@ -10,6 +10,7 @@ from datafusion import col, lit
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
+from scipy.spatial.transform import Rotation
 
 MOUNT_SOURCE = "oak_mount_source"
 """AnyValues field on the OAK rig: ``nominal`` (base prior) or ``fitted`` (calibration)."""
@@ -28,15 +29,7 @@ def _first(table: pa.Table, name: str):  # noqa: ANN202
 
 def quaternion_matrices(xyzw: Float64[ndarray, "n 4"]) -> Float64[ndarray, "n 3 3"]:
     """Rotation matrices from xyzw quaternions (normalised first)."""
-    x, y, z, w = (xyzw / np.linalg.norm(xyzw, axis=1, keepdims=True)).T
-    return np.stack(
-        [
-            np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)], -1),
-            np.stack([2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)], -1),
-            np.stack([2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], -1),
-        ],
-        axis=1,
-    )
+    return Rotation.from_quat(xyzw).as_matrix()
 
 
 def compose_track(quest_t: Float64[ndarray, "n 3"], quest_xyzw: Float64[ndarray, "n 4"], mount: Float64[ndarray, "4 4"]) -> Float64[ndarray, "n 4 4"]:

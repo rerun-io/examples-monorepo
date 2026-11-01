@@ -86,6 +86,16 @@ def get_sapiens_metainfo() -> dict[str, Any]:
     return _sapiens_metainfo_cache
 
 
+def coco133_goliath_pairs() -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """The mapped COCO-133 joints and the Goliath-308 heatmap each reads, in COCO order.
+
+    The fast export keeps exactly these heatmaps, in this order, so its output channel ``i`` is COCO joint ``coco[i]``.
+    """
+    mapping: dict[Any, Any] = get_sapiens_metainfo()["coco_wholebody_to_goliath_mapping"]
+    pairs: list[tuple[int, int]] = sorted((int(coco), int(goliath)) for coco, goliath in mapping.items() if 0 <= int(coco) < 133)
+    return tuple(coco for coco, _ in pairs), tuple(goliath for _, goliath in pairs)
+
+
 def _build_sapiens_schema() -> PoseSchema:
     """Build the native Sapiens/Goliath 308-keypoint schema."""
     meta: dict[str, Any] = get_sapiens_metainfo()

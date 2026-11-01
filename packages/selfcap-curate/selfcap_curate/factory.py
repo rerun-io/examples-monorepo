@@ -5,6 +5,7 @@ from typing import Literal
 
 import numpy as np
 from dataforge.datasets.selfcap_raw import FactoryCalibration, FactoryExtrinsic, Intrinsic, crop_shift_px, oak_stereo, quest_left_T_right
+from dataforge.datasets.selfcap_raw import factory_transform as transform  # one owner for the factory transform
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -13,13 +14,6 @@ from serde import serde
 from selfcap_curate.catalog_io import MissingSegmentError, Segment, open_segment, read_factories
 from selfcap_curate.device_tables import read_camera50_table
 from selfcap_curate.records import EpisodeKey
-
-
-def transform(rotation: Float64[ndarray, "3 3"], translation: Float64[ndarray, "3"]) -> Float64[ndarray, "4 4"]:
-    """Construct a rigid homogeneous transform from typed factory/solver arrays."""
-    matrix: Float64[ndarray, "4 4"] = np.eye(4)
-    matrix[:3, :3], matrix[:3, 3] = rotation, translation
-    return matrix
 
 
 @serde(deny_unknown_fields=True)

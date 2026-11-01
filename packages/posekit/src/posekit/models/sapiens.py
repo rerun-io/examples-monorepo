@@ -79,6 +79,8 @@ class SapiensPose2d(TopDownPose2d):
         Args:
             config: Model size, backend, and crop padding.
         """
+        from sapiens2_pose.api.fast_calibration import FAST_POSE_HEATMAP_HW, FAST_POSE_INPUT_HW
+        from sapiens2_pose.api.metadata import coco133_goliath_pairs
         from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
 
         self.config: SapiensPoseConfig = config
@@ -86,15 +88,12 @@ class SapiensPose2d(TopDownPose2d):
         spec: Any = MODEL_SPECS[config.model_size]
         self._input_size: tuple[int, int] = (int(spec.input_size[0]), int(spec.input_size[1]))
         self._heatmap_size: tuple[int, int] = (int(spec.heatmap_size[0]), int(spec.heatmap_size[1]))
-        if config.variant == "nvfp4-768":
-            self._input_size = (576, 768)
-            self._heatmap_size = (144, 192)
+        channels: int = int(spec.num_keypoints)
+        if config.variant == "nvfp4-768":  # the fast export keeps only the mapped heatmaps, in COCO order
+            self._input_size, self._heatmap_size = FAST_POSE_INPUT_HW[::-1], FAST_POSE_HEATMAP_HW[::-1]
+            channels = len(coco133_goliath_pairs()[0])
         input_spec = TensorSpec(name="inputs", shape=(3, self._input_size[1], self._input_size[0]), dtype=torch.float32)
-        heatmap_spec = TensorSpec(
-            name="heatmaps",
-            shape=(65 if config.variant == "nvfp4-768" else int(spec.num_keypoints), self._heatmap_size[1], self._heatmap_size[0]),
-            dtype=torch.float32,
-        )
+        heatmap_spec = TensorSpec(name="heatmaps", shape=(channels, self._heatmap_size[1], self._heatmap_size[0]), dtype=torch.float32)
         if isinstance(config.backend, TorchBackendConfig):
             from sapiens2_pose.api.runtime import get_pose_model
 
@@ -218,10 +217,7 @@ def _coco133_projection_indices(device: torch.device) -> tuple[Tensor, Tensor]:
     Returns:
         COCO-133 indices and the Goliath-308 indices they map from.
     """
-    from sapiens2_pose.api.metadata import get_sapiens_metainfo
+    from sapiens2_pose.api.metadata import coco133_goliath_pairs
 
-    mapping: dict[int, int] = {int(k): int(v) for k, v in get_sapiens_metainfo()["coco_wholebody_to_goliath_mapping"].items()}
-    pairs: list[tuple[int, int]] = sorted((coco, goliath) for coco, goliath in mapping.items() if 0 <= coco < 133)
-    coco_indices: Tensor = torch.tensor([pair[0] for pair in pairs], dtype=torch.long, device=device)
-    goliath_indices: Tensor = torch.tensor([pair[1] for pair in pairs], dtype=torch.long, device=device)
-    return coco_indices, goliath_indices
+    coco, goliath = coco133_goliath_pairs()
+    return torch.tensor(coco, dtype=torch.long, device=device), torch.tensor(goliath, dtype=torch.long, device=device)
