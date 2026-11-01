@@ -10,10 +10,11 @@ import rerun as rr
 from dataforge.logging_toolkit import capture_column, time_column
 from dataforge.schema import coco133_uv_path
 from dataforge.writing import APPLICATION_ID, atomic_write
-from jaxtyping import Float64
+from jaxtyping import Float32, Float64
 from numpy import ndarray
 from rerun.chunk import Chunk, LazyChunkStream, OptimizationProfile
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
+from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 
 from selfcap_curate.records import OakDetections, PhoneDetections, SelfcapLayout, TimeSync
 
@@ -96,16 +97,16 @@ def write_detections_layer(path: Path, sync: TimeSync, layout: SelfcapLayout, de
             offset_ns = round(((sync.offsets_ms or {}).get(f"exo/{phone}") or 0.0) * 1e6)
             stamps = np.rint(hand.times_s * 1e9).astype(np.int64)
             count = len(stamps)
-            columns = rr.Points2D.columns(
+            # The raw score rides as Points2DWithConfidence; each point wears the shared red-to-green score colour.
+            scores: Float32[ndarray, "n"] = hand.scores.astype(np.float32).reshape(-1)
+            columns = Points2DWithConfidence.columns(
                 positions=hand.xy.astype(np.float32).reshape(-1, 2),
+                confidences=scores,
                 keypoint_ids=np.tile(np.arange(133, dtype=np.uint16), count),
-                class_ids=np.zeros(count * 133, dtype=np.uint16),
+                class_ids=np.zeros(count * 133, dtype=np.int32),
+                colors=confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0],
             ).partition([133] * count)
-            yield Chunk.from_columns(
-                entity,
-                indexes=[capture_column(stamps), time_column(stamps + offset_ns)],
-                columns=[*columns, *rr.AnyValues.columns(confidence=hand.scores.tolist())],
-            )
+            yield Chunk.from_columns(entity, indexes=[capture_column(stamps), time_column(stamps + offset_ns)], columns=columns)
 
     with atomic_write(path) as target:
         LazyChunkStream.from_iter(chunks()).collect(optimize=OptimizationProfile.OBJECT_STORE).write_rrd(

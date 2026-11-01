@@ -336,7 +336,9 @@ def read_phone_detections(segment: Segment) -> dict[str, PhoneDetections]:
         order = np.argsort(stamps)
         xy = np.asarray(rows[f"{entity}:Points2D:positions"].to_pylist(), dtype=np.float64).reshape(-1, 133, 2)
         ids = np.asarray(rows[f"{entity}:Points2D:keypoint_ids"].to_pylist(), dtype=np.int64).reshape(-1, 133)
-        scores = np.asarray(rows[f"{entity}:confidence"].to_pylist(), dtype=np.float64).reshape(-1, 133)
+        # Points2DWithConfidence since the score colours; older layers kept the score as a plain "confidence" value.
+        score_column = next(c for c in (f"{entity}:simplecv.KeypointConfidence2D:confidences", f"{entity}:confidence") if c in rows.column_names)
+        scores = np.asarray(rows[score_column].to_pylist(), dtype=np.float64).reshape(-1, 133)
         if not np.all(ids == np.arange(133)):
             raise ValueError(f"{segment_id}: Sapiens2 requires all 133 ordered keypoints")
         result[phone] = PhoneDetections(stamps[order] / 1e9, xy[order], scores[order])

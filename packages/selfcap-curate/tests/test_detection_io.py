@@ -7,7 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from dataforge.catalog_swap import swap_layer
-from rerun.chunk import RrdReader
+from rerun.chunk import Chunk, LazyChunkStream, RrdReader
+from simplecv.rerun_custom_types import confidence_scores_to_rgb
 
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_phone_detections, read_time_sync
 from selfcap_curate.detection_io import read_oak_observations, write_detections_layer, write_oak_egohand_layer
@@ -71,7 +72,12 @@ def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixtu
     assert batch.column("capture_time").cast("int64").to_pylist() == [40_000_001, 80_000_003]
     assert batch.column("video_time").cast("int64").to_pylist() == [40_000_003, 80_000_005]
     np.testing.assert_array_equal(np.asarray(batch.column("Points2D:positions").to_pylist()), xy)
-    np.testing.assert_array_equal(np.asarray(batch.column("confidence").to_pylist()), scores)
+    # Points2DWithConfidence: the raw score (float16 values are exact in float32) and the shared score colours.
+    np.testing.assert_array_equal(np.asarray(batch.column("simplecv.KeypointConfidence2D:confidences").to_pylist()), scores)
+    colors = np.asarray(batch.column("Points2D:colors").to_pylist(), dtype=np.uint32).reshape(2, 133)
+    expected = confidence_scores_to_rgb(scores.reshape(1, -1, 1))[0].astype(np.uint32)
+    np.testing.assert_array_equal(colors, ((expected[:, 0] << 24) | (expected[:, 1] << 16) | (expected[:, 2] << 8) | 255).reshape(2, 133))
+    assert colors[0, 10] != colors[0, 11]  # the missed joint is coloured as zero confidence
     assert batch.column("Points2D:keypoint_ids")[0].as_py() == list(range(133))
 
 
@@ -93,6 +99,30 @@ def test_catalog_reader_uses_segment_layout_and_preserves_sparse_frames(tmp_path
         np.testing.assert_array_equal(result["Z"].xy, hand.xy)
         np.testing.assert_array_equal(result["Z"].scores, hand.scores)
         assert read_phone_detections(open_segment(dataset, sync.episode_key.segment[:-3] + "003")) == {}
+
+
+@pytest.mark.integration
+def test_catalog_reader_still_reads_layers_written_with_plain_confidence(tmp_path, fixture_sync, synthetic_base, private_server):
+    # Layers written before Points2DWithConfidence keep their score in a plain "confidence" AnyValues column.
+    import rerun as rr
+
+    from dataforge.logging_toolkit import capture_column, time_column
+
+    sync = fixture_sync()
+    layout = SelfcapLayout(3, 4, ("A", "B", "C"))
+    base = synthetic_base(tmp_path / "base.rrd", segment=sync.episode_key.segment, phones=layout.phones)
+    stamps = np.array([40_000_001], dtype=np.int64)
+    scores = np.full(133, 0.5)
+    entity = "/world/rig_00/cam_00/pinhole/pred/sapiens2/coco133_uv"
+    columns = rr.Points2D.columns(positions=np.ones((133, 2), np.float32), keypoint_ids=np.arange(133, dtype=np.uint16)).partition([133])
+    plain = rr.AnyValues.columns(confidence=[scores.tolist()])
+    old = Chunk.from_columns(entity, indexes=[capture_column(stamps), time_column(stamps)], columns=[*columns, *plain])
+    layer = tmp_path / sync.episode_key.rrd_name
+    LazyChunkStream.from_iter([old]).write_rrd(layer, application_id="dataforge", recording_id=sync.episode_key.segment)
+    with private_server({DATASET_NAME: [base]}) as server:
+        dataset = server.client().get_dataset(DATASET_NAME)
+        dataset.register([layer.resolve().as_uri()], layer_name="sapiens2").wait()
+        np.testing.assert_array_equal(read_phone_detections(open_segment(dataset, sync.episode_key.segment))["A"].scores, scores[None])
 
 
 @pytest.mark.integration
