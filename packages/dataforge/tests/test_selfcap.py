@@ -634,6 +634,16 @@ def test_convert_logs_factory_documents_on_every_rig(tmp_path: Path, monkeypatch
     assert all(document == calibration_document(("center", "left", "right")) for document in values.values())
 
 
+def test_convert_draws_the_axes_of_each_quest_lens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The head track starts at the Quest's left lens: its frame, and the right lens's, show in 3D like the hand joints'.
+    from rerun.chunk import RrdReader
+
+    reader = RrdReader(convert_fixture_episode(tmp_path, monkeypatch))
+    axes = {str(c.entity_path) for c in reader.stream() if "TransformAxes3D:axis_length" in c.to_record_batch().schema.names}
+    assert {"/world/rig_05/cam_00", "/world/rig_05/cam_01"} <= axes
+    assert not [path for path in axes if path.startswith(("/world/rig_00", "/world/rig_04"))], "only the Quest lenses"
+
+
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_hand_csv_refuses_nonadjacent_duplicate_timestamps(tmp_path: Path, side: str) -> None:
     from dataforge.datasets.selfcap import read_quest_hands

@@ -133,6 +133,8 @@ IMAGE_PLANE_DISTANCE: float = 0.04
 """Frustum length in metres. The five head cameras sit 3-7 cm apart, so longer frustums overlap into one blob."""
 PHONE_IMAGE_PLANE_DISTANCE: float = 0.15
 """The phones stand metres apart; the calibration layer draws them at the same length."""
+QUEST_AXIS_LENGTH: float = 0.05
+"""Axes on each Quest lens: the head track is the left lens's pose, so its frame is where the Quest world starts."""
 DEVICE_MESHES: Path = Path(__file__).parent / "selfcap_devices"
 """Display meshes of the head-worn devices, in their reference camera frames (see its NOTICE.md)."""
 IMU_DEVICE: int = 0
@@ -318,6 +320,8 @@ class CameraPlan:
     """``lens_source`` AnyValue on the pinhole: ``factory`` (measured) or ``assumed`` (iPhones, until calibration)."""
     image_plane_distance: float = IMAGE_PLANE_DISTANCE
     """Frustum length in metres."""
+    axis_length: float | None = None
+    """Draw the camera's own frame (``TransformAxes3D``) this long, in metres; None draws none."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,6 +527,7 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 name=stream,
                 kind="grayscale",
                 rig_T_cam=left_T_right if stream == "right" else None,
+                axis_length=QUEST_AXIS_LENGTH,
             )
         )
         panes.append(CameraPane(name=f"Quest {stream}", rig=quest_rig, cam=cam, kind="quest"))
@@ -884,6 +889,8 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 static=True,
                 recording=recording,
             )
+        if camera.axis_length is not None:
+            rr.log(schema.cam_path(camera.rig, camera.cam), rr.TransformAxes3D(axis_length=camera.axis_length), static=True, recording=recording)
         calibration: CameraCalibration = camera.calibration
         focal_length_xy: Float64[ndarray, "2"] = calibration.focal_length_xy
         principal_point_xy: Float64[ndarray, "2"] = calibration.principal_point_xy
