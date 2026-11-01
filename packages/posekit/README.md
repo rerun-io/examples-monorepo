@@ -144,7 +144,7 @@ Every implementation is parity-validated against its reference:
 | RT-DETRv2 | `PersonDetector` | torch | HF processor | ≤ 0.31 px |
 | RTMPose / RTMW | `TopDownPose2d` | onnx · trt | rtmlib | 1.3 px mean |
 | ViTPose | `TopDownPose2d` | torch | HF processor | 0.75 px mean |
-| Sapiens2 pose | `TopDownPose2d` | torch · onnx · trt | fp32 torch | < 1 px (bf16 TRT) |
+| Sapiens2 pose | `TopDownPose2d` | trt (default); torch · onnx · trt (`bf16-1024`) | stored bf16 | PCK@0.01 body/hands 0.911/0.971 (NVFP4) |
 | SAM3 | `PromptableSegmenter` | torch | HF processor | mask IoU ≥ 0.997 |
 | SAM2/EfficientTAM | `VideoSegmenter` | torch | — | stable 30-frame track, IoU ≥ 0.97 |
 | CLIP ViT-B/32 | `IdentityEncoder` | torch | PIL pipeline | cosine ≥ 0.985 |
@@ -174,9 +174,17 @@ numpy only at the Rerun/serialization boundary (`xy_numpy()`):
 - **MMDeploy detector zips** bake `TopK(k=5000)`+NMS (batch-1 only, TRT rejects
   K > 3840). `artifacts.strip_detector_nms` cuts the graph before the TopK
   cluster; thresholding + torchvision NMS run on GPU instead.
-- **Sapiens fp16 TRT overflows** (~70 px error). posekit exports fp32 (dynamo
-  exporter required) and builds **bf16** engines; a requested fp16 config is
-  rewritten with a notice.
+- **Sapiens2 defaults to `nvfp4-768`**, a 768×576 TensorRT 0.4B engine with
+  NVFP4 backbone linears, FP8 attention and head, and a dynamic 1/4/8 batch profile.
+  Scores remain raw heatmap maxima. On the RTX 5090 d31 four-rig evaluation
+  (2,880 people), it took 5.643 ms/person end-to-end versus 31.85 ms for the
+  original engine; keep-agreement at 0.7 was 0.9807.
+  Use `SapiensPoseConfig(variant="bf16-1024", backend=...)` for the original
+  1024×768 path, including Torch and ONNX backends or larger checkpoints.
+  Fast export caches include the calibration hash and export version.
+  Regenerate ranges with `packages/sapiens2-pose/tools/apps/calibrate_fast_pose.py`
+  from person crop images, then review its JSON before replacing package data.
+  Sapiens fp16 TensorRT overflows; the original TensorRT path uses bf16.
 - **Export outside dev mode** (`-e posekit`, not `-e posekit-dev`):
   `torch.onnx.export` tracing violates beartype hints in instrumented packages.
 - **Compare pose backends on confident keypoints only** (score > 0.3) —

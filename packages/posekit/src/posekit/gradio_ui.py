@@ -79,7 +79,7 @@ def _build_estimator(network_name: str, backend_name: BackendName) -> TopDownPos
         case "sapiens2-0.4b" | "sapiens2-1b":
             model_size: SapiensModelSize = "0.4B" if network_name == "sapiens2-0.4b" else "1B"
             backend: BackendConfig = BACKEND_CONFIGS[backend_name]()
-            return SapiensPoseConfig(model_size=model_size, backend=backend).setup()
+            return SapiensPoseConfig(model_size=model_size, variant="bf16-1024", backend=backend).setup()
         case "mamma-dense512":
             try:
                 from mamma.landmarks.posekit_role import MammaNetLandmarksConfig
