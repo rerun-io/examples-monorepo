@@ -34,6 +34,19 @@ def test_discovers_episode_rigs(phones: int) -> None:
     assert layout.video_entities[0] == f"/world/rig_{phones:02d}/cam_01/pinhole/video"
 
 
+def test_discovers_fixed_head_rigs_after_three_phones() -> None:
+    # Current ingest: the OAK is always rig_04 and the Quest rig_05; a three-phone session leaves rig_03 empty.
+    components = [
+        CatalogComponent(f"/world/rig_{rig:02d}/cam_{cam:02d}/pinhole/video", "VideoStream", "sample", False)
+        for rig, count in [(0, 1), (1, 1), (2, 1), (4, 3), (5, 2)]
+        for cam in range(count)
+    ]
+    kinds = {"rig_00": "exo", "rig_01": "exo", "rig_02": "exo", "rig_04": "ego", "rig_05": "quest"}
+    layout = select_layout(parse_rig_layout(components, kinds), ("a", "b", "c"))
+    assert (layout.oak_rig, layout.quest_rig, layout.phones) == (4, 5, ("a", "b", "c"))
+    assert layout.video_entities[0] == "/world/rig_04/cam_01/pinhole/video"
+
+
 @pytest.mark.integration
 def test_mixed_sessions_only_discover_segment_cameras(tmp_path, private_server, synthetic_base, fixture_sync) -> None:
 

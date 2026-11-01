@@ -421,13 +421,14 @@ FIXTURES: Path = Path(__file__).parent / "fixtures"
 """48-frame AV1 clips: one starting at 0, one remuxed with a 40 ms container start (an mp4 edit list)."""
 
 
-def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, overrides: dict[str, Path] | None = None) -> Path:
+def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, overrides: dict[str, Path] | None = None, phones: int = 4) -> Path:
     """Convert a synthetic episode whose nine videos are the AV1 fixture, and return its base rrd.
 
     Args:
         tmp_path: Scratch directory for the episode and the output tree.
         monkeypatch: Redirects the dataforge output root into ``tmp_path``.
         overrides: Clip per video path relative to the episode, replacing the default fixture there.
+        phones: Exo phones kept, from the first.
     """
     import shutil
 
@@ -435,6 +436,8 @@ def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, 
 
     episode: Path = tmp_path / "episode-001"
     make_episode(episode)
+    for device in EXO_DEVICES[phones:]:
+        shutil.rmtree(episode / "exo" / device)
     clip: Path = FIXTURES / "av1_48f_192x160.mp4"
     if not clip.is_file():
         pytest.skip(f"AV1 fixture absent: {clip}")
@@ -638,6 +641,33 @@ def test_convert_logs_factory_documents_on_every_rig(tmp_path: Path, monkeypatch
     }
     assert set(values) == {f"/world/rig_{i:02d}" for i in range(6)}
     assert all(document == calibration_document(("center", "left", "right")) for document in values.values())
+
+
+def test_a_three_phone_episode_keeps_the_oak_at_rig_04_and_the_quest_at_rig_05(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # One catalog layout serves every segment, so the head rigs never move with the phone count; rig_03 stays empty.
+    from rerun.chunk import RrdReader
+
+    kinds = {}
+    for chunk in RrdReader(convert_fixture_episode(tmp_path, monkeypatch, phones=3)).stream():
+        batch = chunk.to_record_batch()
+        if "kind" in batch.schema.names and str(chunk.entity_path).count("/") == 2:
+            kinds[str(chunk.entity_path)] = batch.column("kind")[0].as_py()[0]
+    assert kinds == {"/world/rig_00": "exo", "/world/rig_01": "exo", "/world/rig_02": "exo", "/world/rig_04": "ego", "/world/rig_05": "quest"}
+
+
+def test_the_oak_mount_prior_is_temporal_so_a_static_fitted_mount_always_hides_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A static prior would compete with calibration's static fit by write order, so a later base rewrite would win.
+    from rerun.chunk import RrdReader
+
+    monkeypatch.setattr("dataforge.datasets.selfcap.nominal_oak_mount", lambda oak, quest: np.eye(4))  # the fixture headset has no stereo pair
+    mounts = [
+        c for c in RrdReader(convert_fixture_episode(tmp_path, monkeypatch)).stream()
+        if str(c.entity_path) == "/world/rig_04" and "Transform3D:mat3x3" in c.to_record_batch().schema.names
+    ]
+    assert len(mounts) == 1 and not mounts[0].is_static
+    batch = mounts[0].to_record_batch()
+    assert [t.value for t in batch.column("video_time")] == [17181303], "from the first Quest pose"
+    assert batch.column("oak_mount_source").to_pylist() == [["nominal"]]
 
 
 def test_convert_draws_each_camera_frame_and_names_each_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

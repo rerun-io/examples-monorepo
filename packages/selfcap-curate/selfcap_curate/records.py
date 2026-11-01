@@ -314,7 +314,7 @@ class SelfcapLayout:
     """Segment-local device assignment."""
 
     oak_rig: int
-    """OAK rig, equal to the discovered iPhone count."""
+    """OAK rig: rig_04 in current ingest; older bases put it right after the phones."""
     quest_rig: int
     """Quest rig immediately after OAK."""
     phones: tuple[str, ...]

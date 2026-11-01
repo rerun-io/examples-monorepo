@@ -10,6 +10,7 @@ from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
+from dataforge.datasets.selfcap import DEFAULT_EXO_CAMERAS
 from dataforge.datasets.selfcap_raw import FactoryCalibration
 from dataforge.records import decode
 from dataforge.schema import (
@@ -86,14 +87,20 @@ def read_session_clock(segment: Segment) -> SessionClock:
 
 
 def select_layout(layout: CatalogRigLayout, phones: tuple[str, ...]) -> SelfcapLayout:
-    """Select SelfCap devices from segment-local rig metadata."""
+    """Select SelfCap devices from segment-local rig metadata.
+
+    The OAK and Quest rigs are read from their ``kind``: current ingest keeps them at rig_04 and rig_05, older bases
+    put them right after the phones.
+    """
     exo: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "exo"}
     oak: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "ego"}
     quest: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "quest"}
     count: int = len(exo)
-    if count not in (3, 4) or oak != {f"rig_{count:02d}"} or quest != {f"rig_{count + 1:02d}"}:
+    oak_rig: int = int(next(iter(oak)).removeprefix("rig_")) if len(oak) == 1 else -1
+    quest_rig: int = int(next(iter(quest)).removeprefix("rig_")) if len(quest) == 1 else -1
+    if count not in (3, 4) or oak_rig < count or quest_rig != oak_rig + 1 or exo != {f"rig_{i:02d}" for i in range(count)}:
         raise ValueError(f"not a SelfCap rig layout: exo={exo}, oak={oak}, quest={quest}")
-    result: SelfcapLayout = SelfcapLayout(count, count + 1, phones)
+    result: SelfcapLayout = SelfcapLayout(oak_rig, quest_rig, phones)
     available: set[str] = {c.video_entity for c in layout.cameras}
     if not set(result.video_entities) <= available:
         raise ValueError("SelfCap segment is missing a required camera")
@@ -281,7 +288,7 @@ def open_segment(dataset: DatasetEntry, segment_id: str) -> Segment:
     phones = read_phone_names(dataset, segment_id, layout)
     # Phone-only bases remain usable for keypoint preflight; wearable slots are reserved by the ingest convention.
     if layout.cameras and all(camera.rig_kind == "exo" for camera in layout.cameras):
-        return Segment(dataset, segment_id, SelfcapLayout(len(phones), len(phones) + 1, phones))
+        return Segment(dataset, segment_id, SelfcapLayout(DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1, phones))
     return Segment(dataset, segment_id, select_layout(layout, phones))
 
 

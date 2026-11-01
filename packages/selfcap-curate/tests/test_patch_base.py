@@ -122,7 +122,7 @@ def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp
             log_quest_hands(recording, read_quest_hands(raw / "quest"))
         else:
             log_quest_hand_poses(recording, read_quest_joint_hands(raw / "quest"))
-        for entity in (schema.gyro_path(4, 0), schema.rig_path(5)):
+        for entity in (schema.gyro_path(4, 0), schema.rig_path(5), schema.rig_path(4)):  # rig_04: the OAK mount prior
             recording.send_columns(
                 entity,
                 indexes=[
@@ -180,6 +180,7 @@ def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp
     assert firsts[schema.video_path(0, 0)] == (0, -30_000_000)
     assert firsts[schema.gyro_path(4, 0)] == (17, -199_999_983)
     assert firsts[schema.rig_path(5)] == (17, 80_000_017)
+    assert firsts[schema.rig_path(4)] == firsts[schema.rig_path(5)], "the OAK prior hangs on the Quest track and keeps its clock"
 
 
 def test_legacy_patch_keeps_each_factory_document_verbatim(tmp_path: Path) -> None:
@@ -364,3 +365,14 @@ def test_migration_parses_each_hand_csv_once(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(pacsv, "read_csv", counted)
     patch(served, raw, sync, mode="migrate-keep-clock", output_path=tmp_path / "once.rrd")
     assert opened == [raw / "quest/left_hand_poses.csv", raw / "quest/right_hand_poses.csv"]
+
+
+@pytest.mark.parametrize(("present", "expected"), [
+    ({schema.video_path(3, 1)}, 3),  # an older three-phone base: the OAK followed the phones
+    ({schema.video_path(4, 1)}, 4),  # current ingest: the OAK is always rig_04
+])
+def test_the_oak_rig_comes_from_the_base_not_the_phone_count(present: set[str], expected: int) -> None:
+    from selfcap_curate.patch_base import oak_rig_in
+
+    assert oak_rig_in(3, present) == expected
+    assert oak_rig_in(4, {schema.video_path(4, 1)}) == 4

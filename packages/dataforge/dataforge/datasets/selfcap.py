@@ -462,7 +462,11 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
         The rig/camera/pane plan for this episode.
     """
     devices: list[str] = exo_devices(episode_dir)
-    ego_rig: int = len(devices)
+    # The head rigs never move with the phone count (rig_03 stays empty with three phones), so one catalog layout
+    # serves every segment.
+    if len(devices) > DEFAULT_EXO_CAMERAS:
+        raise ValueError(f"{episode_dir}: {len(devices)} phones; the SelfCap layout has {DEFAULT_EXO_CAMERAS} phone rigs")
+    ego_rig: int = DEFAULT_EXO_CAMERAS
     quest_rig: int = ego_rig + 1
     rigs: list[RigPlan] = []
     panes: list[CameraPane] = []
@@ -855,8 +859,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                     # The phone's own microphone, on the phone's clock; align moves it with the phone's video.
                     log_audio_track(recording, rig_plan.cameras[0].video_path, rig_plan.rig, 0, label=rig_plan.name.split("-")[0])
             self._log_ego_imu(recording, plan)
-            self._log_quest_pose(recording, plan)
-            self._log_oak_mount_prior(recording, plan)
+            first_pose_ns = self._log_quest_pose(recording, plan)
+            if first_pose_ns is not None:
+                self._log_oak_mount_prior(recording, plan, first_pose_ns)
             self._log_quest_mesh_frame(recording, plan)
             log_quest_hand_poses(recording, hands)
 
@@ -977,11 +982,11 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 recording=recording,
             )
 
-    def _log_oak_mount_prior(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
-        """Hang the OAK rig on the Quest's left-eye frame with a nominal mount; calibration overwrites it with the fit.
+    def _log_oak_mount_prior(self, recording: rr.RecordingStream, plan: EpisodePlan, first_pose_ns: int) -> None:
+        """Hang the OAK rig on the Quest's left-eye frame with a nominal mount, from the first Quest pose on.
 
-        Both layers write the same static components (translation, mat3x3, parent_frame, oak_mount_source), so the
-        newer write replaces the prior instead of composing with it.
+        The prior is temporal and calibration's fitted mount is static on the same components, so the fit hides the
+        prior whichever layer was written last; a static prior would lose or win by write order.
         """
         mount = nominal_oak_mount(
             read_json(plan.episode_dir / "ego" / "calibration.json", FactoryCalibration),
@@ -989,21 +994,23 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         )
         if mount is None:
             return
-        rr.log(
+        rr.send_columns(
             schema.rig_path(plan.ego_rig),
-            rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=f"tf#{schema.rig_path(plan.quest_rig)}"),
-            rr.AnyValues(oak_mount_source="nominal"),
-            static=True,
+            indexes=[time_column(np.array([first_pose_ns])), capture_column(np.array([first_pose_ns]))],
+            columns=[
+                *rr.Transform3D.columns(translation=[mount[:3, 3]], mat3x3=[mount[:3, :3]], parent_frame=[f"tf#{schema.rig_path(plan.quest_rig)}"]),
+                *rr.AnyValues.columns(oak_mount_source=["nominal"]),
+            ],
             recording=recording,
         )
 
-    def _log_quest_pose(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
-        """Log the Quest's left-eye track as the temporal ``world_T_rig`` on its rig node."""
+    def _log_quest_pose(self, recording: rr.RecordingStream, plan: EpisodePlan) -> int | None:
+        """Log the Quest's left-eye track as the temporal ``world_T_rig`` on its rig node; return its first time, if any."""
         head_pose_path: Path = plan.episode_dir / "quest" / "head_pose.csv"
         poses: HeadPoses = read_head_poses(head_pose_path)
         if not poses.times_ns.size:
             print(f"  warning: no head poses in {head_pose_path}; the quest rig stays unposed")
-            return
+            return None
         log_pose_track(
             recording,
             schema.rig_path(plan.quest_rig),
@@ -1012,3 +1019,4 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             quaternions_xyzw=poses.quaternions_xyzw,
             capture_time=True,
         )
+        return int(poses.times_ns[0])
