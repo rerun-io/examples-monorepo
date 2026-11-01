@@ -79,6 +79,10 @@ def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixtu
     np.testing.assert_array_equal(colors, ((expected[:, 0] << 24) | (expected[:, 1] << 16) | (expected[:, 2] << 8) | 255).reshape(2, 133))
     assert colors[0, 10] != colors[0, 11]  # the missed joint is coloured as zero confidence
     assert batch.column("Points2D:keypoint_ids")[0].as_py() == list(range(133))
+    # Points the viewer can see: 3 px dots without labels, as dataforge.hands draws COCO-133 keypoints.
+    style = next(c.to_record_batch() for c in chunks if c.is_static and str(c.entity_path).endswith("coco133_uv"))
+    assert style.column("Points2D:radii").to_pylist() == [[3.0]]
+    assert style.column("Points2D:show_labels").to_pylist() == [[False]]
 
 
 @pytest.mark.integration

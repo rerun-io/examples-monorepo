@@ -97,6 +97,8 @@ def write_detections_layer(path: Path, sync: TimeSync, layout: SelfcapLayout, de
             offset_ns = round(((sync.offsets_ms or {}).get(f"exo/{phone}") or 0.0) * 1e6)
             stamps = np.rint(hand.times_s * 1e9).astype(np.int64)
             count = len(stamps)
+            # 3 px dots without labels, as dataforge.hands draws COCO-133 keypoints; the default dots vanish under the links.
+            yield Chunk.from_columns(entity, indexes=[], columns=rr.Points2D.columns(radii=[3.0], show_labels=[False]))
             # The raw score rides as Points2DWithConfidence; each point wears the shared red-to-green score colour.
             scores: Float32[ndarray, "n"] = hand.scores.astype(np.float32).reshape(-1)
             columns = Points2DWithConfidence.columns(
