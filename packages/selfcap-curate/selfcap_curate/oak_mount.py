@@ -1,8 +1,10 @@
 """Robust OAK gyro rotation and session RGB mount from hand correspondences."""
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
-from dataforge.datasets.selfcap_raw import Intrinsic
+from dataforge.datasets.selfcap_raw import FactoryCalibration, Intrinsic
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from scipy.ndimage import gaussian_filter1d
@@ -10,13 +12,15 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
 from selfcap_curate.device_tables import RotationTable
-from selfcap_curate.factory import intrinsic_matrix, transform
+from selfcap_curate.factory import intrinsic_matrix, oak_stereo, transform
 from selfcap_curate.quest_fit import hand_neighbors
 from selfcap_curate.records import (
     HAND_BASE,
     HAND_LATENCY_MS,
     MAPPED,
+    OAK_CAMERAS,
     GyroFit,
+    OakDetections,
     OakFit,
     SessionEpisode,
     gyro_head_offsets,
@@ -59,47 +63,61 @@ def gyro_mount(session: str, episodes: list[SessionEpisode]) -> GyroFit:
     return GyroFit(session, True, rotation.as_matrix(), max(float(np.degrees((rotation.inv() * r).magnitude())) for r in rotations))
 
 
+Observation = tuple[Float64[ndarray, "3"], Float64[ndarray, "2"], str, float]
+"""Quest-rig joint, image pixel, ``episode/frame/side`` group and detection score."""
+
+
+def hand_observations(
+    episode_index: int, episode: SessionEpisode, detections: OakDetections, *, require_video: bool = False, max_image_speed: float | None = None,
+) -> list[Observation]:
+    """Mapped Quest joints in the Quest rig frame at each detection instant, paired with their detected pixels."""
+    qp = oak_quest_offset_ms(episode.sync)
+    if qp is None:
+        return []
+    head = episode.hands
+    ht, hp = head.head_times_s, head.head_positions
+    vt = detections.video_time
+    if require_video and len(vt) < 2:
+        return []
+    image_speed: Float64[ndarray, "n 133"] = (
+        np.linalg.norm(np.gradient(detections.xy, vt, axis=0), axis=-1) if max_image_speed is not None else np.zeros_like(detections.scores)
+    )
+    tq = vt - qp / 1000.0
+    i = np.clip(np.searchsorted(ht, tq), 1, len(ht) - 1)
+    a = np.clip((tq - ht[i - 1]) / np.maximum(ht[i] - ht[i - 1], 1e-9), 0.0, 1.0)
+    position = (1.0 - a[:, None]) * hp[i - 1] + a[:, None] * hp[i]
+    rotation = Slerp(ht, Rotation.from_quat(head.head_quaternions))(np.clip(tq, ht[0], ht[-1]))
+    okh = (tq >= ht[0]) & (tq <= ht[-1]) & (ht[i] - ht[i - 1] < 0.06)
+    observations: list[Observation] = []
+    for side, base in HAND_BASE.items():
+        hand = episode.quest[side]
+        j, alpha, valid = hand_neighbors(hand, tq + HAND_LATENCY_MS / 1000.0)
+        valid = okh & valid
+        joints = (1.0 - alpha[:, None, None]) * hand.joints[j - 1] + alpha[:, None, None] * hand.joints[j]
+        for frame in np.flatnonzero(valid):
+            local = rotation[frame].inv().apply(joints[frame] - position[frame])
+            for k in MAPPED:
+                if (
+                    detections.scores[frame, base + k] >= 0.3
+                    and np.isfinite(detections.xy[frame, base + k]).all()
+                    and (max_image_speed is None or image_speed[frame, base + k] <= max_image_speed)
+                ):
+                    observations.append((local[k], detections.xy[frame, base + k], f"{episode_index}/{frame}/{side}/{k}", detections.scores[frame, base + k]))
+    return observations
+
+
 def solve_oak(
     session: str, episodes: list[SessionEpisode], intrinsic: Intrinsic, device: str, fixed_rotation: Float64[ndarray, "3 3"] | None = None,
     *, weighted: bool = False, gate_image_speed: bool = True,
 ) -> OakFit:
     """Fit mapped fingers; optionally use dense EgoHand scores, a 300 px/s gate and one full-lens trimming pass."""
-    observations = []
-    for episode_index, episode in enumerate(episodes):
-        detections = episode.oak
-        qp = oak_quest_offset_ms(episode.sync)
-        if qp is None:
-            continue
-        head = episode.hands
-        ht, hp = head.head_times_s, head.head_positions
-        vt = detections.video_time
-        if weighted and len(vt) < 2:
-            continue
-        image_speed: Float64[ndarray, "n 133"] = (
-            np.linalg.norm(np.gradient(detections.xy, vt, axis=0), axis=-1) if weighted and gate_image_speed else np.zeros_like(detections.scores)
+    observations = [
+        (point, pixel, group.rsplit("/", 1)[0], score)
+        for episode_index, episode in enumerate(episodes)
+        for point, pixel, group, score in hand_observations(
+            episode_index, episode, episode.oak, require_video=weighted, max_image_speed=300.0 if weighted and gate_image_speed else None
         )
-        tq = vt - qp / 1000.0
-        i = np.clip(np.searchsorted(ht, tq), 1, len(ht) - 1)
-        a = np.clip((tq - ht[i - 1]) / np.maximum(ht[i] - ht[i - 1], 1e-9), 0.0, 1.0)
-        position = (1.0 - a[:, None]) * hp[i - 1] + a[:, None] * hp[i]
-        rotation = Slerp(ht, Rotation.from_quat(head.head_quaternions))(np.clip(tq, ht[0], ht[-1]))
-        okh = (tq >= ht[0]) & (tq <= ht[-1]) & (ht[i] - ht[i - 1] < 0.06)
-        hands = episode.quest
-        for side, base in HAND_BASE.items():
-            hand = hands[side]
-            t = tq + HAND_LATENCY_MS / 1000.0
-            j, alpha, valid = hand_neighbors(hand, t)
-            valid = okh & valid
-            joints = (1.0 - alpha[:, None, None]) * hand.joints[j - 1] + alpha[:, None, None] * hand.joints[j]
-            for frame in np.flatnonzero(valid):
-                local = rotation[frame].inv().apply(joints[frame] - position[frame])
-                for k in MAPPED:
-                    if (
-                        detections.scores[frame, base + k] >= 0.3
-                        and np.isfinite(detections.xy[frame, base + k]).all()
-                        and (not weighted or image_speed[frame, base + k] <= 300.0)
-                    ):
-                        observations.append((local[k], detections.xy[frame, base + k], f"{episode_index}/{frame}/{side}", detections.scores[frame, base + k]))
+    ]
     if len(observations) < 100:
         return OakFit(session, False, device)
     world, image, group, confidence = (np.asarray(values) for values in zip(*observations, strict=True))
@@ -209,3 +227,117 @@ def fixed_rotation_reason(gyro: GyroFit, device: str, rotations: RotationTable) 
     if gyro.R_head_from_imu is None:
         return "gyro rotation unavailable"
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class OakLens:
+    """One OAK camera: factory pixels, all distortion terms, and its pose relative to the RGB camera."""
+
+    intrinsic: Float64[ndarray, "3 3"]
+    distortion: Float64[ndarray, "d"]
+    cam_T_rgb: Float64[ndarray, "4 4"]
+    size: tuple[int, int]
+    """Decoded width and height."""
+
+
+def oak_lenses(calibration: FactoryCalibration) -> dict[str, OakLens] | None:
+    """The three OAK cameras from the factory file, or None when its stereo extrinsics are missing."""
+    stereo = oak_stereo(calibration)
+    if not stereo:
+        return None
+    cam_T_rgb = {"rgb": np.eye(4), "left": np.linalg.inv(stereo["rgb_T_left"]), "right": np.linalg.inv(stereo["rgb_T_right"])}
+    layouts = {"rgb": "center", "left": "left", "right": "right"}
+    lenses = {}
+    for camera in OAK_CAMERAS:
+        intrinsic = next(c for c in calibration.intrinsics if c.positional_layout == layouts[camera])
+        lenses[camera] = OakLens(intrinsic_matrix(intrinsic), np.asarray(intrinsic.distortion.coefficients, dtype=np.float64), cam_T_rgb[camera],
+                                 (intrinsic.capture_resolution.width, intrinsic.capture_resolution.height))
+    return lenses
+
+
+def _kabsch(source: Float64[ndarray, "n 3"], target: Float64[ndarray, "n 3"]) -> Float64[ndarray, "4 4"]:
+    """Rigid transform with ``target ≈ R @ source + t``, refitted on the best 80% four times."""
+    keep = np.ones(len(source), dtype=bool)
+    for _ in range(4):
+        cs, ct = source[keep].mean(0), target[keep].mean(0)
+        u, _, vt = np.linalg.svd((source[keep] - cs).T @ (target[keep] - ct))
+        rotation = vt.T @ np.diag([1.0, 1.0, np.sign(np.linalg.det(vt.T @ u.T))]) @ u.T
+        error = np.linalg.norm(source @ rotation.T + ct - rotation @ cs - target, axis=1)
+        keep = error <= np.percentile(error, 80)
+    return transform(rotation, ct - rotation @ cs)
+
+
+def solve_oak_stereo(
+    session: str, episodes: list[SessionEpisode], views: list[dict[str, OakDetections]], lenses: dict[str, OakLens], device: str,
+) -> OakFit:
+    """Mount from EgoHand on all three OAK cameras: stereo-triangulated hands start a joint fit through every lens.
+
+    ``views[e][camera]`` holds episode ``e``'s detections on the same sampled instants in every camera (row ``f`` is one
+    instant), so the left/right rows pair up for triangulation. One RGB camera alone cannot separate a hand's depth
+    from the mount's tilt; the stereo baseline can.
+    """
+    observations = {
+        camera: [obs for index, (episode, view) in enumerate(zip(episodes, views, strict=True)) for obs in hand_observations(index, episode, view[camera])]
+        for camera in OAK_CAMERAS
+    }
+    if sum(map(len, observations.values())) < 100:
+        return OakFit(session, False, device)
+    # Start: triangulate each joint seen by both stereo cameras (in the RGB frame) and align the Quest joints to them.
+    right = {group: pixel for _, pixel, group, _ in observations["right"]}
+    pairs = [(point, pixel, right[group]) for point, pixel, group, _ in observations["left"] if group in right]
+    if len(pairs) < 50:
+        return OakFit(session, False, device)
+    quest, left_px, right_px = (np.asarray(values) for values in zip(*pairs, strict=True))
+    normalised = {
+        name: cv2.undistortPoints(px.reshape(-1, 1, 2), lenses[name].intrinsic, lenses[name].distortion).reshape(-1, 2).T
+        for name, px in (("left", left_px), ("right", right_px))
+    }
+    points = cv2.triangulatePoints(lenses["left"].cam_T_rgb[:3], lenses["right"].cam_T_rgb[:3], normalised["left"], normalised["right"])
+    points = (points[:3] / points[3]).T
+    front = (points[:, 2] > 0.05) & (points[:, 2] < 2.0)
+    if front.sum() < 50:
+        return OakFit(session, False, device)
+    start = _kabsch(quest[front], points[front])  # rgb_T_questrig
+    data = {
+        camera: tuple(np.asarray(values) for values in zip(*rows, strict=True))
+        for camera, rows in observations.items() if rows
+    }
+
+    def offsets(q: Float64[ndarray, "6"], camera: str) -> Float64[ndarray, "n 2"]:
+        """Projected minus detected pixels in one camera for ``q`` = rgb_T_questrig as (rotvec, t); 1e3 behind it."""
+        point, pixel, _, _ = data[camera]
+        cam_T_q = lenses[camera].cam_T_rgb @ transform(Rotation.from_rotvec(q[:3]).as_matrix(), q[3:])
+        lens = lenses[camera]
+        projected = cv2.projectPoints(point, cv2.Rodrigues(cam_T_q[:3, :3])[0], cam_T_q[:3, 3], lens.intrinsic, lens.distortion)[0].reshape(-1, 2)
+        offset = projected - pixel
+        offset[(point @ cam_T_q[:3, :3].T + cam_T_q[:3, 3])[:, 2] <= 0.0] = 1e3
+        return offset
+
+    p = np.r_[Rotation.from_matrix(start[:3, :3]).as_rotvec(), start[:3, 3]]
+    keep = {camera: np.ones(len(values[0]), dtype=bool) for camera, values in data.items()}
+    for iteration in range(2):  # fit, drop single points beyond 30 px, refit once
+        p = least_squares(
+            lambda q, keep=keep: np.concatenate([(offsets(q, c) * np.sqrt(data[c][3])[:, None])[keep[c]].ravel() for c in data]),
+            p, loss="cauchy", f_scale=6.0, x_scale="jac",
+        ).x
+        errors = {camera: np.linalg.norm(offsets(p, camera), axis=1) for camera in data}
+        if iteration == 0:
+            keep = {camera: error <= 30.0 for camera, error in errors.items()}
+            if sum(int(k.sum()) for k in keep.values()) < 100:
+                return OakFit(session, False, device)
+    # A hand group is one camera's view of one hand at one instant.
+    hand_medians = [
+        float(np.median(errors[camera][hands == hand]))
+        for camera in data
+        for hands in [np.array([group.rsplit("/", 1)[0] for group in data[camera][2]])]
+        for hand in np.unique(hands)
+    ]
+    kept = np.concatenate([errors[camera][keep[camera]] for camera in data])
+    return OakFit(
+        session, True, device, float(np.median(kept)),
+        np.linalg.inv(transform(Rotation.from_rotvec(p[:3]).as_matrix(), p[3:])),
+        float(np.mean([value <= 30.0 for value in hand_medians])),
+        "stereo+rgb joint",
+        observation_source="egohand",
+        camera_median_px={camera: float(np.median(errors[camera][keep[camera]])) for camera in data},
+    )

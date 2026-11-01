@@ -21,7 +21,8 @@ def test_egohand_layer_retains_sparse_video_times_and_confidence(tmp_path):
     xy[:, 91:112] = 10.0
     confidence = np.zeros((2, 133))
     confidence[:, 91:112] = 0.8
-    write_oak_egohand_layer(path, "episode", 4, OakDetections(np.array([1.0, 4.0]), xy, confidence))
+    detections = OakDetections(np.array([1.0, 4.0]), xy, confidence)
+    write_oak_egohand_layer(path, "episode", 4, {"rgb": detections, "left": detections, "right": detections})
     reader = RrdReader(path)
     assert reader.recordings()[0].recording_id == "episode"
     chunks = list(reader.stream())
@@ -29,7 +30,7 @@ def test_egohand_layer_retains_sparse_video_times_and_confidence(tmp_path):
     data = next(chunk.to_record_batch() for chunk in chunks if not chunk.is_static)
     assert data.column("video_time").cast("int64").to_pylist() == [1_000_000_000, 4_000_000_000]
     assert data.column("confidence").to_pylist() == confidence.tolist()
-    assert any("egohand_calib/coco133_uv" in str(chunk.entity_path) for chunk in chunks)
+    assert {str(c.entity_path) for c in chunks if not c.is_static} == {f"/world/rig_04/cam_{cam:02d}/pinhole/pred/egohand_calib/coco133_uv" for cam in range(3)}
 
 
 def test_oak_observations_preserve_pixels_and_reject_another_segment(tmp_path):

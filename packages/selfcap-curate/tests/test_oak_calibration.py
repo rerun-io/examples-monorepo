@@ -195,3 +195,40 @@ def test_missing_quest_oak_clock_leaves_mount_unposed(fixture_sync) -> None:
     fit = solve_oak("missing-clock", [episode], factory().intrinsics[0], "device", weighted=True)
     assert not fit.ok
     assert fit.questrig_T_rgb is None
+
+
+def test_three_camera_mount_recovers_a_known_mount_through_distortion(fixture_sync) -> None:
+    # One mount, three OAK cameras: the stereo pair fixes depth, the joint fit uses every camera with its own lens.
+    times = np.arange(0.0, 6.0, 0.01)
+    geometry = np.random.default_rng(7).normal(scale=0.03, size=(21, 3)) + [0.0, -0.25, -0.45]
+    positions = np.full((len(times), 133, 3), np.nan)
+    for base, shift in ((91, -0.12), (112, 0.12)):
+        positions[:, base : base + 21] = geometry + np.stack(
+            [shift + 0.04 * np.sin(times), 0.03 * np.cos(times), 0.05 * np.sin(0.7 * times)], axis=1
+        )[:, None]
+    raw = CatalogHands(times, positions, times, np.zeros((len(times), 3)), np.tile([0.0, 0.0, 0.0, 1.0], (len(times), 1)))
+    sync = replace(fixture_sync(), offsets_ms={"quest_pose": 0.0, "oak_imu": 0.0}, flags=[])
+    motion = session_episode(sync, raw, times, np.zeros((len(times), 3)), quest=load_quest_hands(raw))
+    # The RGB camera looks down and forward from the Quest eye frame (Quest +y up, -z forward; camera RDF).
+    expected = transform(Rotation.from_euler("x", np.pi - 0.5).as_matrix(), np.array([0.03, 0.06, -0.02]))
+    distortion = np.array([1.3, 0.3, 0.001, -0.0005, 0.1, 1.2, 0.4, 0.2, 0.0, 0.0, 0.0, 0.0, 0.003, -0.004])
+    K = np.array([[560.0, 0.0, 640.0], [0.0, 560.0, 360.0], [0.0, 0.0, 1.0]])
+    lenses = {
+        "rgb": module.OakLens(K, distortion, np.eye(4), (1280, 720)),
+        "left": module.OakLens(K * [[1.01], [1.01], [1.0]], distortion * 0.9, transform(Rotation.from_euler("y", 0.01).as_matrix(), np.array([0.0375, 0.0, 0.0])), (1280, 720)),
+        "right": module.OakLens(K * [[0.99], [0.99], [1.0]], distortion * 1.1, transform(np.eye(3), np.array([-0.0375, 0.0, 0.0])), (1280, 720)),
+    }
+    indices = np.arange(20, len(times) - 20, 9)
+    views = {}
+    for name, lens in lenses.items():
+        cam_T_q = lens.cam_T_rgb @ np.linalg.inv(expected)
+        xyz = positions[indices].reshape(-1, 3)
+        xy = cv2.projectPoints(xyz, cv2.Rodrigues(cam_T_q[:3, :3])[0], cam_T_q[:3, 3], lens.intrinsic, lens.distortion)[0].reshape(len(indices), 133, 2)
+        if name == "left":
+            xy[:, 93] += [80.0, 0.0]  # one persistently wrong finger in one camera is trimmed
+        views[name] = OakDetections(times[indices] - 0.048, xy, np.where(np.isfinite(xy).all(-1), 0.9, 0.0))
+    result = module.solve_oak_stereo("synthetic", [motion], [views], lenses, "oak")
+    assert result.ok and result.median_px < 0.05
+    assert result.rotation_source == "stereo+rgb joint" and result.observation_source == "egohand"
+    assert set(result.camera_median_px) == {"rgb", "left", "right"}
+    np.testing.assert_allclose(result.questrig_T_rgb, expected, atol=1e-4)

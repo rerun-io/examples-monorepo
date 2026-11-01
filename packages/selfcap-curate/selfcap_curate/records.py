@@ -326,6 +326,10 @@ class SelfcapLayout:
         return video_path(self.oak_rig, 1), video_path(self.oak_rig, 0), video_path(self.quest_rig, 1)
 
 
+OAK_CAMERAS: tuple[str, ...] = ("rgb", "left", "right")
+"""OAK streams in cam_00..cam_02 order."""
+
+
 @dataclass(frozen=True, slots=True)
 class OakDetections:
     video_time: Float64[ndarray, "n"]
@@ -454,3 +458,4 @@ class OakFit:
     rotation_source: str = "hands"  # Free hand rotation or gyro mount rotation @ device rgb_R_imu.
     observation_source: Literal["sapiens", "egohand"] = "sapiens"  # Image observations used by the mount fit.
     rotation_reason: str | None = None
+    camera_median_px: dict[str, float] | None = None  # Per OAK camera, for the three-camera fit.

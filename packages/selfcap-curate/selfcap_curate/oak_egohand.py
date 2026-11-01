@@ -23,6 +23,7 @@ from trtkit import TensorRtBackendConfig
 from selfcap_curate.factory import intrinsic_matrix
 from selfcap_curate.hands_gpu import decode_frames
 from selfcap_curate.keypoints import EgoCamera, project_ego
+from selfcap_curate.oak_mount import OakLens
 from selfcap_curate.quest_fit import hand_neighbors
 from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, MAPPED, CatalogHands, HandTrack, OakDetections, SessionEpisode, oak_quest_offset_ms
 
@@ -152,6 +153,51 @@ def detect_oak_egohand(
         return result
     finally:
         del frames, detector, predictor
+        if not retain_models:
+            egohand_models.cache_clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"EGOHAND_RELEASED_MIB {torch.cuda.memory_allocated() / 2**20:.1f}", flush=True)
+
+
+@torch.inference_mode()
+def detect_oak_views(
+    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], assets: Path, *, retain_models: bool = False,
+) -> dict[str, OakDetections]:
+    """EgoHand on the same 64 instants in every OAK camera, sampled on OAK left; videos are read on ``video_time``.
+
+    Left and right share a hardware clock; each camera's row ``f`` is its frame nearest left frame ``f``, so the
+    stereo pair triangulates row by row.
+    """
+    qp: float | None = oak_quest_offset_ms(episode.sync)
+    if qp is None:
+        raise ValueError("EgoHand sampling requires the Quest/OAK clock")
+    left_times: Float64[ndarray, "f"] = videos["left"].t_ns.astype(np.float64) * 1e-9
+    tracked: Bool[ndarray, "f 2"] = np.stack(
+        [hand_neighbors(episode.quest[side], left_times - qp / 1000.0 + HAND_LATENCY_MS / 1000.0)[2] for side in HAND_BASE], axis=1
+    )
+    selection: OakFrameSelection = select_egohand_frames(left_times, None, tracked, lenses["left"].size)
+    print(f"EGOHAND_SAMPLE {episode.sync.key}: {len(selection.indices)}/{selection.eligible_count} eligible frames x {len(videos)} cameras", flush=True)
+    if not len(selection.indices):
+        return {camera: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))) for camera in videos}
+    started: float = time.perf_counter()
+    detector: EgoHandDetector | None = None
+    predictor: EgoHandPredictor | None = None
+    try:
+        detector, predictor = egohand_models(assets)
+        result: dict[str, OakDetections] = {}
+        for camera, video in videos.items():
+            times: Float64[ndarray, "f"] = video.t_ns.astype(np.float64) * 1e-9
+            indices: Int64[ndarray, "n"] = np.clip(np.searchsorted(times, left_times[selection.indices]), 0, len(times) - 1)
+            frames: UInt8[Tensor, "n h w 3"] = decode_frames(video, indices, 1e9 / float(np.median(np.diff(video.t_ns))))
+            lens = OAKCamera(lenses[camera].intrinsic, np.pad(lenses[camera].distortion, (0, 14 - len(lenses[camera].distortion))), *lenses[camera].size)
+            result[camera] = infer_egohand_frames(frames, times[indices], selection.hands, lens, detector, predictor)
+            del frames
+        torch.cuda.synchronize()
+        print(f"EGOHAND_CALIB_SECONDS {time.perf_counter() - started:.3f}", flush=True)
+        return result
+    finally:
+        del detector, predictor
         if not retain_models:
             egohand_models.cache_clear()
         gc.collect()

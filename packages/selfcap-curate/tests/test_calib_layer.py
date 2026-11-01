@@ -242,6 +242,7 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
     monkeypatch.setattr(api, "solve_oak", lambda *_args, **_kwargs: state.oak)
     monkeypatch.setattr(api, "oak_stereo", lambda *_args: state.stereo)
     monkeypatch.setattr(api, "oak_centre", lambda *_args: None)
+    monkeypatch.setattr(api, "oak_lenses", lambda *_args: None)  # no stereo extrinsics: the RGB-only fallback, unless a test sets lenses
     config = api.Config(tmp_path / "output", (f"selfcap__{motion.sync.key}",), oak_method="sapiens")
     return api, config, motion.sync.key.rsplit("__", 1)[0]
 
@@ -419,3 +420,26 @@ def test_layer_draws_phone_frustums_at_the_base_layers_length(tmp_path, layer_ca
                  if str(c.entity_path).endswith("/cam_00/pinhole") and "Pinhole:image_plane_distance" in (b := c.to_record_batch()).schema.names]
     assert distances
     assert all(d == [pytest.approx(PHONE_IMAGE_PLANE_DISTANCE)] for d in distances)
+
+
+def test_calibrate_egohand_fits_the_mount_on_all_three_oak_cameras(calibration_call, monkeypatch):
+    api, config, _ = calibration_call
+    config = replace(config, oak_method="egohand")
+    empty = OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133)))
+    lenses = {camera: SimpleNamespace(name=camera) for camera in ("rgb", "left", "right")}
+    calls = {}
+    monkeypatch.setattr(api, "oak_lenses", lambda *_args: lenses)
+    monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
+    monkeypatch.setattr(api, "read_catalog_videos", lambda _dataset, _segment, entities, timeline: calls.setdefault("videos", (entities, timeline)) and [None] * 3)
+    monkeypatch.setattr(api, "detect_oak_views", lambda _episode, videos, *_args, **_kwargs: calls.setdefault("views", sorted(videos)) and dict.fromkeys(videos, empty))
+    monkeypatch.setattr(api, "detect_oak_egohand", lambda *args, **kwargs: pytest.fail("the RGB-only detector must not run"))
+    monkeypatch.setattr(api, "solve_oak", lambda *args, **kwargs: pytest.fail("the RGB-only fit must not run"))
+    monkeypatch.setattr(api, "solve_oak_stereo", lambda session, episodes, views, given, device: calls.setdefault("solve", (len(episodes), sorted(views[0]), given is lenses))
+                        and OakFit(session, True, device, 5.0, np.eye(4), 1.0, "stereo+rgb joint", observation_source="egohand"))
+    monkeypatch.setattr(api, "write_oak_egohand_layer", lambda path, segment, rig, views: calls.setdefault("layer", sorted(views)))
+    state = api.main(config)
+    assert calls["videos"] == ([f"/world/rig_03/cam_{cam:02d}/pinhole/video" for cam in range(3)], "video_time")
+    assert calls["views"] == calls["layer"] == ["left", "rgb", "right"]
+    assert calls["solve"] == (1, ["left", "rgb", "right"], True)
+    assert state.oak.ok and state.oak.rotation_source == "stereo+rgb joint"
+

@@ -25,10 +25,10 @@ from selfcap_curate.factory import oak_centre, oak_stereo, read_quest_block
 from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models, release_cuda_memory
 from selfcap_curate.head_calibration import calibrate_with_head, head_track
 from selfcap_curate.keypoints import read_ego_cameras
-from selfcap_curate.oak_egohand import detect_oak_egohand
-from selfcap_curate.oak_mount import fixed_rotation, fixed_rotation_reason, gyro_mount, solve_oak
+from selfcap_curate.oak_egohand import detect_oak_egohand, detect_oak_views
+from selfcap_curate.oak_mount import fixed_rotation, fixed_rotation_reason, gyro_mount, oak_lenses, solve_oak, solve_oak_stereo
 from selfcap_curate.quest_fit import read_session_episode
-from selfcap_curate.records import OakFit, oak_quest_offset_ms
+from selfcap_curate.records import OAK_CAMERAS, OakDetections, OakFit, oak_quest_offset_ms
 
 
 @dataclass
@@ -96,17 +96,27 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
         if config.oak_free_rotation:
             rotation = None
             rotation_reason = "explicit free rotation"
+        # EgoHand on all three OAK cameras fits the mount jointly; the RGB-only gyro/free path is the fallback for an
+        # OAK whose factory file lacks the stereo extrinsics, and for supplied observations.
+        lenses = oak_lenses(ego) if config.oak_method == "egohand" and config.oak_observations is None else None
         if use_egohand and has_oak_clock:
-            print("OAK_ROTATION", "free" if rotation is None else "gyro", rotation_reason or "eligible gyro mount", flush=True)
+            print("OAK_ROTATION", "stereo+rgb joint" if lenses is not None else "free" if rotation is None else "gyro",
+                  "" if lenses is not None else rotation_reason or "eligible gyro mount", flush=True)
             release_cuda_memory(models=not config.retain_models)
+        views: dict[int, dict[str, OakDetections]] = {}
         for index, (episode, segment) in enumerate(zip(episodes, segments, strict=True)):
             if oak_quest_offset_ms(episode.sync) is None:
                 print("OAK_UNPOSED", segment.id, "missing Quest/OAK clock", flush=True)
                 if use_egohand:
-                    write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, episode.oak)
+                    write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, {"rgb": episode.oak})
                 continue
             if config.oak_observations is not None:
                 oak = read_oak_observations(config.oak_observations / f"{segment.id}.parquet", segment.id)
+            elif lenses is not None:
+                oak_videos = read_catalog_videos(dataset, segment.id, [video_path(episode.layout.oak_rig, cam) for cam in range(len(OAK_CAMERAS))], "video_time")
+                views[index] = detect_oak_views(episode, dict(zip(OAK_CAMERAS, oak_videos, strict=True)), lenses, config.oak_egohand_assets,
+                                                retain_models=config.retain_models)
+                oak = views[index]["rgb"]
             elif config.oak_method == "egohand":
                 video = (segment.videos[video_path(episode.layout.oak_rig, 0)] if segment.videos is not None else
                          read_catalog_videos(dataset, segment.id, [video_path(episode.layout.oak_rig, 0)], "capture_time")[0])
@@ -118,15 +128,18 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
                                           video=None if segment.videos is None else segment.videos[video_path(episode.layout.oak_rig, 0)])
             episodes[index] = replace(episode, oak=oak)
             if use_egohand:
-                write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, oak)
-        oak_fit = (
-            solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=use_egohand,
-                      gate_image_speed=config.oak_observations is not None)
-            if has_oak_clock else OakFit(session, False, ego.device_id, rotation_source="unposed: missing Quest/OAK clock",
-                                         observation_source="egohand" if use_egohand else "sapiens")
-        )
-        if has_oak_clock:
-            oak_fit = replace(oak_fit, rotation_source="free" if rotation is None else "gyro", rotation_reason=rotation_reason)
+                write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, views.get(index, {"rgb": oak}))
+        if not has_oak_clock:
+            oak_fit = OakFit(session, False, ego.device_id, rotation_source="unposed: missing Quest/OAK clock",
+                             observation_source="egohand" if use_egohand else "sapiens")
+        elif lenses is not None:
+            oak_fit = solve_oak_stereo(session, [episodes[i] for i in views], list(views.values()), lenses, ego.device_id)
+        else:
+            oak_fit = replace(
+                solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=use_egohand,
+                          gate_image_speed=config.oak_observations is not None),
+                rotation_source="free" if rotation is None else "gyro", rotation_reason=rotation_reason,
+            )
         # v3 uses the image-only vanishing-point focal of each device (median for unmeasured ones): the pooled
         # hand-profile table is ~25% short, because hands at one depth cannot separate focal from distance.
         focals = vp_focals([phone for episode in episodes for phone in episode.layout.phones]) if config.exo_method == "head" else read_table().focals
