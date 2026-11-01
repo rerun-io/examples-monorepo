@@ -908,8 +908,11 @@ def test_quest_mesh_turns_with_a_camera_50_eye_frame(tmp_path: Path) -> None:
 def test_device_meshes_are_well_formed() -> None:
     import rerun.chunk as rrc
 
-    for name in (DEVICE_MESH_FILES["oak"], DEVICE_MESH_FILES["phone"]):
+    for name in DEVICE_MESH_FILES.values():
         (mesh,) = [c.to_record_batch() for c in rrc.RrdReader(DEVICE_MESHES / f"{name}.rrd").stream() if str(c.entity_path) == "/device"]
+        if "Asset3D:blob" in mesh.schema.names:  # a GLB; its geometry is checked by its own test
+            assert mesh.column("Asset3D:media_type")[0].as_py() == ["model/gltf-binary"]
+            continue
         column = {field: np.asarray(mesh.column(f"Mesh3D:{field}")[0].as_py()) for field in ("vertex_positions", "triangle_indices", "vertex_normals", "vertex_colors")}
         positions, triangles = column["vertex_positions"].reshape(-1, 3), column["triangle_indices"].reshape(-1, 3)
         assert triangles.max() < len(positions)
@@ -957,7 +960,6 @@ def test_quest_model_is_a_glb_in_the_left_rgb_camera_frame() -> None:
     document = glb_document(glb)
     lenses = glb_node_positions(document)
 
-    assert asset.column("Asset3D:media_type")[0].as_py() == ["model/gltf-binary"]
     assert "KHR_texture_transform" not in document.get("extensionsRequired", [])  # Rerun refuses such files
     assert np.allclose(lenses["L_upper_lens_coating"], 0.0, atol=1e-3)  # the left RGB lens is the origin
     assert np.allclose(lenses["R_upper_lens_coating"], [0.0636, 0.0, 0.0], atol=1e-3)  # right lens along +x (RDF)

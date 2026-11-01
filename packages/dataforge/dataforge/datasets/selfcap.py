@@ -259,7 +259,7 @@ def write_device_asset(target: Path, device: str, rig: int) -> None:
     phone pose is the camera's (calibrate's ``cam_00`` transform), and the layout keeps it out of 3D until then.
     """
     node: str = schema.cam_path(rig, 0) if device == "phone" else schema.rig_path(rig)
-    # The shipped model is a static Mesh3D at /device; the asset is that chunk, moved to the device's node.
+    # The shipped model is one static Mesh3D or Asset3D at /device; the asset is that chunk, moved to the device's node.
     mesh = RrdReader(DEVICE_MESHES / f"{DEVICE_MESH_FILES[device]}.rrd").stream().filter(content="/device")
     mesh = mesh.map(lambda chunk: chunk.with_entity_path(f"{node}/device"))
     with writing.atomic_write(target) as staged:
@@ -284,7 +284,7 @@ def quest_model_camera_T_glb() -> Float64[ndarray, "4 4"]:
     return camera_T_glb
 
 
-def build_quest_model(glb: Path, target: Path) -> None:
+def build_quest_model(glb: Path, target: Path = DEVICE_MESHES / f"{DEVICE_MESH_FILES['quest']}.rrd") -> None:
     """Write ``quest3s.rrd``: the model package's GLB as a static ``Asset3D`` at ``/device``, in the left RGB camera frame.
 
     The GLB keeps its meshes, PBR materials and textures. Two structural edits make it a device asset: the scene is
@@ -294,7 +294,7 @@ def build_quest_model(glb: Path, target: Path) -> None:
     blob: bytes = with_root_transform(strip_texture_transform(glb.read_bytes()), quest_model_camera_T_glb())
     chunk: Chunk = Chunk.from_columns("/device", indexes=[], columns=rr.Asset3D.columns(blob=[blob], media_type=["model/gltf-binary"]))
     with writing.atomic_write(target) as staged:
-        LazyChunkStream.from_iter([chunk]).write_rrd(staged, application_id=writing.APPLICATION_ID, recording_id="devices__quest3s")
+        LazyChunkStream.from_iter([chunk]).write_rrd(staged, application_id=writing.APPLICATION_ID, recording_id=f"devices__{DEVICE_MESH_FILES['quest']}")
 
 
 def segment_rig_kinds(entry: DatasetEntry, rigs: range, *extra: str) -> list[tuple[dict[str, object], dict[int, str]]]:
