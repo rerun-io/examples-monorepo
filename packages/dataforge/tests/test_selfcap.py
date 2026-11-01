@@ -286,6 +286,7 @@ def test_default_blueprint_shows_the_raw_capture_before_calibration() -> None:
         assert f"+ /world/rig_{rig:02d}/cam_{cam:02d}/pinhole" in scene_contents
         assert f"- /world/rig_{rig:02d}/cam_{cam:02d}/pinhole/**" in scene_contents
     assert "/world/gt" not in scene.visualizer_overrides  # the Quest hands and their joint axes show
+    assert str(scene.properties["Background"]) == str(rrb.Background(kind=rrb.BackgroundKind.GradientDark))
     assert scene.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
 
     for name, (rig, cam) in HEAD_CAMERAS.items():
@@ -734,6 +735,7 @@ def test_table_card_decodes_one_video_and_follows_the_phone_poses() -> None:
         assert len(views) == 2
         scene, camera = views
         assert isinstance(scene, rrb.Spatial3DView) and isinstance(camera, rrb.Spatial2DView)
+        assert str(scene.properties["Background"]) == str(rrb.Background(kind=rrb.BackgroundKind.GradientDark))
         assert str(scene.origin) == "/world"
         assert str(camera.origin) == f"/world/rig_{pane[0]:02d}/cam_{pane[1]:02d}/pinhole"
         scene_contents: list[str] = cast(list[str], scene.contents)

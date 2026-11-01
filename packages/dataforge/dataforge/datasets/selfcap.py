@@ -133,6 +133,8 @@ IMAGE_PLANE_DISTANCE: float = 0.04
 """Frustum length in metres. The five head cameras sit 3-7 cm apart, so longer frustums overlap into one blob."""
 PHONE_IMAGE_PLANE_DISTANCE: float = 0.15
 """The phones stand metres apart; the calibration layer draws them at the same length."""
+SCENE_BACKGROUND: rrb.BackgroundKind = rrb.BackgroundKind.GradientDark
+"""Background of every selfcap 3D view."""
 QUEST_AXIS_LENGTH: float = 0.05
 """Axes on each Quest lens: the head track is the left lens's pose, so its frame is where the Quest world starts."""
 DEVICE_MESHES: Path = Path(__file__).parent / "selfcap_devices"
@@ -599,7 +601,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
     )
     if show_soma_mesh:
         scene_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
-    scene = rrb.Spatial3DView(name="Scene", origin="/world", contents=["/world/**", *excluded], overrides=scene_overrides)
+    scene = rrb.Spatial3DView(name="Scene", origin="/world", contents=["/world/**", *excluded], overrides=scene_overrides, background=SCENE_BACKGROUND)
 
     oak: list[rrb.Spatial2DView] = [camera(pane) for pane in panes if pane.kind == "ego"]
     quest: list[rrb.Spatial2DView] = [camera(pane) for pane in panes if pane.kind == "quest"]
@@ -675,6 +677,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             name="Scene",
             origin="/world",
             contents=["/world/**", "- /world/pred/**", "/world/pred/soma_x/mesh/**", *blueprints.video_exclusions(slots), *unposed],
+            background=SCENE_BACKGROUND,
         )
         if posed_phones:
             body: list[str] = ["/world/gt/**", "/world/skeleton/**", "/world/pred/soma_x/mesh/**"]
