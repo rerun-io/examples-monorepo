@@ -15,6 +15,7 @@ from numpy import ndarray
 from dataforge import schema, transports
 from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.datasets.selfcap import (
+    DEVICE_MESH_FILES,
     DEVICE_MESHES,
     log_quest_hand_poses,
     read_hand_poses,
@@ -842,13 +843,15 @@ def test_quest_mesh_turns_with_a_camera_50_eye_frame(tmp_path: Path) -> None:
 
 
 def test_device_meshes_are_well_formed() -> None:
-    for name in ("oak_d_pro_w", "quest3s"):
-        mesh = np.load(DEVICE_MESHES / f"{name}.npz")
-        positions, triangles = mesh["positions"], mesh["triangles"]
-        assert positions.shape[1] == 3 and triangles.shape[1] == 3
+    import rerun.chunk as rrc
+
+    for name in DEVICE_MESH_FILES.values():
+        (mesh,) = [c.to_record_batch() for c in rrc.RrdReader(DEVICE_MESHES / f"{name}.rrd").stream() if str(c.entity_path) == "/device"]
+        column = {field: np.asarray(mesh.column(f"Mesh3D:{field}")[0].as_py()) for field in ("vertex_positions", "triangle_indices", "vertex_normals", "vertex_colors")}
+        positions, triangles = column["vertex_positions"].reshape(-1, 3), column["triangle_indices"].reshape(-1, 3)
         assert triangles.max() < len(positions)
-        assert len(mesh["normals"]) == len(mesh["colors"]) == len(positions)
-        assert np.ptp(positions, axis=0).max() < 0.4  # metres: a headset, not millimetres
+        assert len(column["vertex_normals"]) == len(column["vertex_colors"]) == len(positions)
+        assert np.ptp(positions, axis=0).max() < 0.4  # metres: a headset or a phone, not millimetres
 
 
 def hand_csv(path: Path, width: int, rows: list[tuple[int, float]]) -> None:
@@ -919,6 +922,8 @@ def test_device_asset_is_a_static_mesh_on_the_rig(tmp_path: Path) -> None:
         chunks = list(rrc.RrdReader(tmp_path / f"{device}.rrd").stream())
         assert {str(c.entity_path) for c in chunks if "Mesh3D:vertex_positions" in c.to_record_batch().schema.names} == {entity}
         assert all(c.is_static for c in chunks if str(c.entity_path) == entity)
+    # The models ship as .rrd (a static Mesh3D at /device), never npz/npy (AGENTS.md).
+    assert sorted(path.name for path in DEVICE_MESHES.iterdir() if path.suffix != ".md") == sorted(f"{name}.rrd" for name in DEVICE_MESH_FILES.values())
 
 
 def rig_layout_base(target: Path, recording_id: str, phones: int) -> None:

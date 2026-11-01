@@ -75,7 +75,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from rerun.chunk import Chunk, RrdReader
+from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from rerun.encodings import EntityPathLike
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
@@ -237,18 +237,12 @@ def write_device_asset(target: Path, device: str, rig: int) -> None:
     Head-worn devices sit at ``/world/rig_NN/device``. A phone's model sits at ``/world/rig_NN/cam_00/device``: the
     phone pose is the camera's (calibrate's ``cam_00`` transform), and the layout keeps it out of 3D until then.
     """
-    mesh = np.load(DEVICE_MESHES / f"{DEVICE_MESH_FILES[device]}.npz")
     node: str = schema.cam_path(rig, 0) if device == "phone" else schema.rig_path(rig)
-    with writing.atomic_recording(target, recording_id=device_asset_id(device, rig), send_properties=False) as recording:
-        rr.log(
-            f"{node}/device",
-            rr.Mesh3D(
-                vertex_positions=mesh["positions"], triangle_indices=mesh["triangles"],
-                vertex_normals=mesh["normals"].astype(np.float32), vertex_colors=mesh["colors"],
-            ),
-            static=True,
-            recording=recording,
-        )
+    # The shipped model is a static Mesh3D at /device; the asset is that chunk, moved to the device's node.
+    mesh = [chunk.with_entity_path(f"{node}/device") for chunk in RrdReader(DEVICE_MESHES / f"{DEVICE_MESH_FILES[device]}.rrd").stream()
+            if str(chunk.entity_path) == "/device"]
+    with writing.atomic_write(target) as staged:
+        LazyChunkStream.from_iter(mesh).write_rrd(staged, application_id=writing.APPLICATION_ID, recording_id=device_asset_id(device, rig))
 
 
 def log_quest_hands(recording: rr.RecordingStream, hands: QuestHands, *, shift_ns: int = 0) -> None:
