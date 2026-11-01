@@ -670,25 +670,43 @@ def test_calibration_keeps_unknown_vendor_fields_and_rejects_short_distortion(tm
     assert result.distortion_coefficients is None
 
 
-def test_register_publishes_the_posed_layouts_once_the_catalog_holds_phone_poses() -> None:
-    # Calibrate writes each phone's pose on its cam_00; until a layer carries one, the layouts keep the phones unposed.
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
+@pytest.mark.integration
+def test_register_publishes_the_posed_layouts_only_when_every_phone_has_a_pose(tmp_path: Path) -> None:
+    # Calibrate writes each phone's pose on its cam_00. The catalog has one default layout for all its segments, so it
+    # draws the phones in 3D only when every phone of every segment has a pose: an unposed phone would sit at the origin.
+    import rerun as rr
 
-    def catalog(*columns: tuple[str, str]) -> DatasetEntry:
-        entry = MagicMock(spec=DatasetEntry)
-        entry.schema.return_value.component_columns.return_value = [SimpleNamespace(entity_path=e, component=c) for e, c in columns]
-        return entry
+    from dataforge.writing import recording_to
 
-    def layouts(entry: DatasetEntry) -> tuple[list[str], str]:
+    def calib(target: Path, recording_id: str, rigs: range) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with recording_to(target, recording_id=recording_id, send_properties=False) as recording:
+            for rig in rigs:
+                rr.log(schema.cam_path(rig, 0), rr.Transform3D(translation=[0.0, 0.0, 1.0], mat3x3=np.eye(3)), static=True, recording=recording)
+
+    def phones_in_scene(entry: DatasetEntry) -> bool:
         segment, table = SelfcapDataset(SelfcapConfig()).catalog_blueprints(entry)
         scene = next(view for view in blueprint_views(segment) if str(view.name) == "Scene")
-        return cast(list[str], scene.contents), str(blueprint_views(table)[1].origin)
+        posed: bool = "- /world/rig_00/**" not in cast(list[str], scene.contents)
+        assert (str(blueprint_views(table)[1].origin) == "/world/rig_00/cam_00/pinhole") == posed
+        return posed
 
-    raw = catalog(("/world/rig_04", "Transform3D:translation"), ("/world/rig_00/cam_00/pinhole", "Pinhole:image_from_camera"))
-    calibrated = catalog(("/world/rig_04", "Transform3D:translation"), ("/world/rig_00/cam_00", "Transform3D:translation"))
-    assert "- /world/rig_00/**" in layouts(raw)[0] and layouts(raw)[1] == "/world/rig_04/cam_00/pinhole"
-    assert "- /world/rig_00/**" not in layouts(calibrated)[0] and layouts(calibrated)[1] == "/world/rig_00/cam_00/pinhole"
+    four, three = "selfcap__2025-12-20__25aeb66a__ep001", "selfcap__2025-12-21__1dbe8c49__ep002"
+    rig_layout_base(tmp_path / "base" / f"{four}.rrd", four, phones=4)
+    rig_layout_base(tmp_path / "base" / f"{three}.rrd", three, phones=3)
+    calib(tmp_path / "calib" / f"{four}.rrd", four, range(4))
+    calib(tmp_path / "calib" / f"{three}.rrd", three, range(2))  # calibrate posed only two of its three phones
+    with rr.server.Server(port=0) as server:
+        entry = server.client().create_dataset("selfcap-test")
+        entry.register([(tmp_path / "base" / f"{segment}.rrd").as_uri() for segment in (four, three)], layer_name="base")
+        assert not phones_in_scene(entry)  # raw captures
+        entry.register([(tmp_path / "calib" / f"{four}.rrd").as_uri()], layer_name="calib")
+        assert not phones_in_scene(entry)  # one segment calibrated, the other still raw
+        entry.register([(tmp_path / "calib" / f"{three}.rrd").as_uri()], layer_name="calib")
+        assert not phones_in_scene(entry)  # every segment calibrated, but one phone has no pose
+        calib(tmp_path / "calib2" / f"{three}.rrd", three, range(3))
+        entry.register([(tmp_path / "calib2" / f"{three}.rrd").as_uri()], layer_name="calib", on_duplicate="replace")
+        assert phones_in_scene(entry)
 
 
 def test_table_card_decodes_one_video_and_follows_the_phone_poses() -> None:
@@ -893,13 +911,14 @@ def test_gt_layer_from_a_base_is_the_coco133_view_of_its_hands(tmp_path: Path) -
 
 
 def test_device_asset_is_a_static_mesh_on_the_rig(tmp_path: Path) -> None:
+    # Head-worn devices hang on their rig; a phone's model hangs on its camera, the node calibrate gives a pose.
     import rerun.chunk as rrc
 
-    write_device_asset(tmp_path / "oak.rrd", "oak", 3)
-    chunks = list(rrc.RrdReader(tmp_path / "oak.rrd").stream())
-
-    assert {str(c.entity_path) for c in chunks if "Mesh3D:vertex_positions" in c.to_record_batch().schema.names} == {"/world/rig_03/device"}
-    assert all(c.is_static for c in chunks if str(c.entity_path) == "/world/rig_03/device")
+    for device, rig, entity in (("oak", 3, "/world/rig_03/device"), ("phone", 1, "/world/rig_01/cam_00/device")):
+        write_device_asset(tmp_path / f"{device}.rrd", device, rig)
+        chunks = list(rrc.RrdReader(tmp_path / f"{device}.rrd").stream())
+        assert {str(c.entity_path) for c in chunks if "Mesh3D:vertex_positions" in c.to_record_batch().schema.names} == {entity}
+        assert all(c.is_static for c in chunks if str(c.entity_path) == entity)
 
 
 def rig_layout_base(target: Path, recording_id: str, phones: int) -> None:
@@ -915,7 +934,7 @@ def rig_layout_base(target: Path, recording_id: str, phones: int) -> None:
 
 @pytest.mark.integration
 def test_register_attaches_the_device_meshes_at_each_segments_own_rigs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The OAK and Quest models are catalog assets, one per device position: a three-phone session puts the OAK at
+    # The OAK, Quest and phone models are catalog assets, one per device position: a three-phone session puts the OAK at
     # rig_03, a four-phone session at rig_04. dataforge-register attaches each segment the meshes for its own rigs.
     import rerun as rr
 
@@ -929,6 +948,7 @@ def test_register_attaches_the_device_meshes_at_each_segments_own_rigs(tmp_path:
         for _ in range(2):  # a second run replaces the assets instead of adding more
             register.main(register.Config(dataset=SelfcapConfig(), catalog_url=server.url(), catalog_name="selfcap-test", replace=True))
         entry = server.client().get_dataset("selfcap-test")
-        assert sorted(entry.assets_for_segment(four)) == ["devices__oak_d_pro_w__rig_04", "devices__quest3s__rig_05"]
-        assert sorted(entry.assets_for_segment(three)) == ["devices__oak_d_pro_w__rig_03", "devices__quest3s__rig_04"]
-        assert len(entry.assets()) == 4
+        phones = [f"devices__iphone12__rig_{rig:02d}" for rig in range(4)]
+        assert sorted(entry.assets_for_segment(four)) == sorted([*phones, "devices__oak_d_pro_w__rig_04", "devices__quest3s__rig_05"])
+        assert sorted(entry.assets_for_segment(three)) == sorted([*phones[:3], "devices__oak_d_pro_w__rig_03", "devices__quest3s__rig_04"])
+        assert len(entry.assets()) == 8

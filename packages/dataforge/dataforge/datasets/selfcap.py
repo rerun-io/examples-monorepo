@@ -220,8 +220,10 @@ def write_coco133_layer(hands: dict[str, QuestJointPoses], shift_ns: int, target
         log_quest_hands(recording, coco133_hands(hands), shift_ns=shift_ns)
 
 
-DEVICE_MESH_FILES: dict[str, str] = {"oak": "oak_d_pro_w", "quest": "quest3s"}
+DEVICE_MESH_FILES: dict[str, str] = {"oak": "oak_d_pro_w", "quest": "quest3s", "phone": "iphone12"}
 """Device kind → mesh file in ``DEVICE_MESHES``."""
+RIG_DEVICES: dict[str, str] = {"ego": "oak", "quest": "quest", "exo": "phone"}
+"""Rig ``kind`` → the device whose model the catalog attaches there."""
 
 
 def device_asset_id(device: str, rig: int) -> str:
@@ -230,11 +232,16 @@ def device_asset_id(device: str, rig: int) -> str:
 
 
 def write_device_asset(target: Path, device: str, rig: int) -> None:
-    """A catalog asset: the device's mesh, static, at ``/world/rig_NN/device`` in its reference camera frame."""
+    """A catalog asset: the device's mesh, static, in its reference camera frame.
+
+    Head-worn devices sit at ``/world/rig_NN/device``. A phone's model sits at ``/world/rig_NN/cam_00/device``: the
+    phone pose is the camera's (calibrate's ``cam_00`` transform), and the layout keeps it out of 3D until then.
+    """
     mesh = np.load(DEVICE_MESHES / f"{DEVICE_MESH_FILES[device]}.npz")
+    node: str = schema.cam_path(rig, 0) if device == "phone" else schema.rig_path(rig)
     with writing.atomic_recording(target, recording_id=device_asset_id(device, rig), send_properties=False) as recording:
         rr.log(
-            f"{schema.rig_path(rig)}/device",
+            f"{node}/device",
             rr.Mesh3D(
                 vertex_positions=mesh["positions"], triangle_indices=mesh["triangles"],
                 vertex_normals=mesh["normals"].astype(np.float32), vertex_colors=mesh["colors"],
@@ -669,21 +676,29 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         return blueprints.exoego_table_blueprint(scene, pane)
 
     def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
-        """Both layouts, with the phones posed once any registered layer gives a phone camera a pose (calibrate's ``cam_00``)."""
-        phone_cameras: set[str] = {schema.cam_path(rig, 0) for rig in range(DEFAULT_EXO_CAMERAS)}
-        posed_phones: bool = any(
-            str(column.entity_path) in phone_cameras and str(column.component).startswith("Transform3D:")
-            for column in entry.schema().component_columns()
-        )
+        """Both layouts, with the phones posed only when every phone of every segment has a pose (calibrate's ``cam_00``).
+
+        The catalog holds one default layout for all its segments, and an unposed phone drawn in 3D would sit at the
+        world origin, so one uncalibrated phone anywhere keeps the phones out of 3D. One query reads every segment.
+        """
+        rigs: range = range(DEFAULT_EXO_CAMERAS)
+        table: pa.Table = entry.filter_contents([path for rig in rigs for path in (schema.rig_path(rig), schema.cam_path(rig, 0))]).reader(index=None).to_arrow_table()
+        posed: list[bool] = [
+            row.get(f"{schema.cam_path(rig, 0)}:Transform3D:translation") is not None
+            for row in table.to_pylist()
+            for rig in rigs
+            if (row.get(f"{schema.rig_path(rig)}:kind") or [None])[0] == "exo"
+        ]
+        posed_phones: bool = bool(posed) and all(posed)
         return self.default_blueprint(posed_phones=posed_phones), self.table_blueprint(posed_phones=posed_phones)
 
     def register_assets(self, entry: DatasetEntry, output_root: Path) -> None:
-        """Attach the OAK and Quest models to each segment at the rigs it holds them on (``device_asset_id``).
+        """Attach the OAK, Quest and phone models to each segment at the rigs it holds them on (``device_asset_id``).
 
-        A rig's role is its ``kind`` (``ego`` = OAK, ``quest``), read for every registered segment in one query; the
-        rig index depends on the phone count. Each run writes fresh stamped files and replaces any asset of the same id.
+        A rig's role is its ``kind`` (``RIG_DEVICES``), read for every registered segment in one query; the rig index
+        depends on the phone count. Each run writes fresh stamped files and replaces any asset of the same id.
         """
-        devices: dict[str, str] = {"ego": "oak", "quest": "quest"}
+        devices: dict[str, str] = RIG_DEVICES
         rigs: range = range(DEFAULT_EXO_CAMERAS + 2)
         table: pa.Table = entry.filter_contents([schema.rig_path(rig) for rig in rigs]).reader(index=None).to_arrow_table()
         segments: dict[tuple[str, int], list[str]] = {}
