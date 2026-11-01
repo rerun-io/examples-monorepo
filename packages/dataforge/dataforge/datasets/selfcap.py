@@ -375,16 +375,20 @@ class EpisodePlan:
     """Blueprint panes — exactly the cameras in ``rigs``, in rig-then-camera order."""
 
 
-def raw_calibration_chunks(episode_dir: Path, devices: list[str]) -> list[Chunk]:
-    """Preserve opaque vendor JSON verbatim on each device rig as static raw-source facts."""
-    folders: list[Path] = [episode_dir / "exo" / device for device in devices] + [episode_dir / "ego", episode_dir / "quest"]
+def raw_calibration_chunks(episode_dir: Path, devices: list[str], *, oak_rig: int) -> list[Chunk]:
+    """Preserve opaque vendor JSON verbatim on each device rig as static raw-source facts.
+
+    The phones take rig_00 onwards; the OAK sits at ``oak_rig`` and the Quest right after it, so fewer phones leave a gap.
+    """
+    folders: dict[int, Path] = {rig: episode_dir / "exo" / device for rig, device in enumerate(devices)}
+    folders |= {oak_rig: episode_dir / "ego", oak_rig + 1: episode_dir / "quest"}
     return [
         Chunk.from_columns(
             schema.rig_path(rig),
             indexes=[],
             columns=rr.AnyValues.columns(raw_calibration_json=[(folder / "calibration.json").read_bytes().decode("utf-8")]),
         )
-        for rig, folder in enumerate(folders)
+        for rig, folder in folders.items()
     ]
 
 
@@ -842,7 +846,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             # moving-rig pose: the Quest world is right-handed Y-up.
             rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True, recording=recording)
 
-            rr.send_chunks(raw_calibration_chunks(plan.episode_dir, [rig.name for rig in plan.rigs if rig.kind == "exo"]), recording=recording)
+            rr.send_chunks(
+                raw_calibration_chunks(plan.episode_dir, [rig.name for rig in plan.rigs if rig.kind == "exo"], oak_rig=plan.ego_rig), recording=recording
+            )
             num_frames: int = 0
             for rig_plan in plan.rigs:
                 log_rig_node(

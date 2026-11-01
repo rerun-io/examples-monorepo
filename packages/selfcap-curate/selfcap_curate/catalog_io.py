@@ -249,12 +249,17 @@ def native_phone_rate(segment: Segment) -> float:
     return round(float(np.median([1e9 / float(np.median(np.diff(video.t_ns))) for video in videos.values()])), 3)
 
 
+def factory_rigs(layout: SelfcapLayout) -> tuple[int, ...]:
+    """Rigs holding a device's factory document: each phone, the OAK and the Quest (an empty phone slot has none)."""
+    return (*range(len(layout.phones)), layout.oak_rig, layout.quest_rig)
+
+
 def read_factories(segment: Segment) -> dict[str, FactoryCalibration]:
     """Parse only one segment's static raw vendor values; never read calibration files."""
     dataset, segment_id, layout = segment.dataset, segment.id, segment.layout
     view = dataset.filter_segments(segment_id)
-    rigs = tuple(f"rig_{i:02d}" for i in range(layout.quest_rig + 1))
-    kinds = {rig: "ego" if i == layout.oak_rig else "quest" if i == layout.quest_rig else "exo" for i, rig in enumerate(rigs)}
+    rigs = tuple(f"rig_{i:02d}" for i in factory_rigs(layout))
+    kinds = {f"rig_{layout.oak_rig:02d}": "ego", f"rig_{layout.quest_rig:02d}": "quest"}
     paths = {rig: rig_path(int(rig.removeprefix("rig_"))) for rig in rigs}
     table = view.filter_contents(list(paths.values())).reader(index=None).to_arrow_table()
     result: dict[str, FactoryCalibration] = {}
@@ -264,7 +269,7 @@ def read_factories(segment: Segment) -> dict[str, FactoryCalibration]:
             raise ValueError(f"{segment_id}/{rig}: missing raw_calibration_json; migrate or reconvert the base")
         text = str(scalar(table, column))
         factory = decode(FactoryCalibration, text, source=f"{segment_id}/{rig}")
-        if (kind := kinds[rig]) is not None and kind in ("ego", "quest"):
+        if (kind := kinds.get(rig)) is not None:
             result[kind] = factory
     return result
 

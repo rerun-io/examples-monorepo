@@ -14,7 +14,7 @@ from simplecv.catalog_rig_layout import CatalogComponent, parse_rig_layout
 
 import selfcap_curate.quest_fit as quest
 from selfcap_curate import catalog_io
-from selfcap_curate.catalog_io import Segment, open_segment, rig_layout, select_layout
+from selfcap_curate.catalog_io import Segment, factory_rigs, open_segment, rig_layout, select_layout
 from selfcap_curate.keypoints import read_cameras
 from selfcap_curate.keypoints_gpu import plan_episode
 from selfcap_curate.records import CatalogHands, SelfcapLayout
@@ -45,6 +45,7 @@ def test_discovers_fixed_head_rigs_after_three_phones() -> None:
     layout = select_layout(parse_rig_layout(components, kinds), ("a", "b", "c"))
     assert (layout.oak_rig, layout.quest_rig, layout.phones) == (4, 5, ("a", "b", "c"))
     assert layout.video_entities[0] == "/world/rig_04/cam_01/pinhole/video"
+    assert factory_rigs(layout) == (0, 1, 2, 4, 5), "the empty rig_03 has no factory document"
 
 
 @pytest.mark.integration

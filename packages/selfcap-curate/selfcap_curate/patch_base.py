@@ -270,7 +270,9 @@ def patch(
             migrated = LazyChunkStream.merge(
                 migrated,
                 LazyChunkStream.from_iter(
-                    raw_calibration_chunks(raw_episode_dir, [v.removeprefix("exo/") for v in videos.values() if v.startswith("exo/")])
+                    raw_calibration_chunks(
+                        raw_episode_dir, [v.removeprefix("exo/") for v in videos.values() if v.startswith("exo/")], oak_rig=oak_rig
+                    )
                 ),
             )
         if not has_hands:

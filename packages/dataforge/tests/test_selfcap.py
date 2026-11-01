@@ -617,13 +617,13 @@ def test_raw_calibration_chunks_keep_verbatim_device_documents(tmp_path: Path) -
     from dataforge.datasets.selfcap import raw_calibration_chunks
 
     documents = {}
-    for rig, folder in enumerate(("exo/phone-a", "exo/phone-b", "ego", "quest")):
+    for rig, folder in zip((0, 1, 4, 5), ("exo/phone-a", "exo/phone-b", "ego", "quest"), strict=True):
         path = tmp_path / folder / "calibration.json"
         path.parent.mkdir(parents=True)
         content = (' {"vendor": "' + folder + '", "opaque": [1, 2]}\r\n').encode()
         path.write_bytes(content)
         documents[f"/world/rig_{rig:02d}"] = content.decode()
-    chunks = raw_calibration_chunks(tmp_path, ["phone-a", "phone-b"])
+    chunks = raw_calibration_chunks(tmp_path, ["phone-a", "phone-b"], oak_rig=4)
     assert len(chunks) == 4
     for chunk in chunks:
         assert chunk.is_static
@@ -647,12 +647,15 @@ def test_a_three_phone_episode_keeps_the_oak_at_rig_04_and_the_quest_at_rig_05(t
     # One catalog layout serves every segment, so the head rigs never move with the phone count; rig_03 stays empty.
     from rerun.chunk import RrdReader
 
-    kinds = {}
+    kinds, factories = {}, set()
     for chunk in RrdReader(convert_fixture_episode(tmp_path, monkeypatch, phones=3)).stream():
         batch = chunk.to_record_batch()
         if "kind" in batch.schema.names and str(chunk.entity_path).count("/") == 2:
             kinds[str(chunk.entity_path)] = batch.column("kind")[0].as_py()[0]
+        if "raw_calibration_json" in batch.schema.names:
+            factories.add(str(chunk.entity_path))
     assert kinds == {"/world/rig_00": "exo", "/world/rig_01": "exo", "/world/rig_02": "exo", "/world/rig_04": "ego", "/world/rig_05": "quest"}
+    assert factories == set(kinds), "each device's factory document sits on its own rig"
 
 
 def test_the_oak_mount_prior_is_temporal_so_a_static_fitted_mount_always_hides_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
