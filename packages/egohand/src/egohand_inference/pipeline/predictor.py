@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 _VALID_TARGETS = ("egohand.EgoHand",)
 
 
-def load_egohand_model(checkpoint_path: str | Path, soma_hand_data_folder: str | Path):
+def load_egohand_model(checkpoint_path: str | Path, soma_hand_data_folder: str | Path, backbone: torch.nn.Module | None = None):
     """Load a EgoHand model from a checkpoint.
 
     Reads the training-time cfg stored in ``ckpt["hyper_parameters"]["cfg"]``,
@@ -68,12 +68,15 @@ def load_egohand_model(checkpoint_path: str | Path, soma_hand_data_folder: str |
         checkpoint_path: Path to a ``.ckpt`` file produced by this repo's
             training entrypoint.
         soma_hand_data_folder: SOMAHand asset folder to redirect ``cfg.soma_hand.data_root``.
+        backbone: Ready feature extractor (e.g. a TensorRT engine) used instead of
+            building and loading the checkpoint's DINOv3 backbone.
 
     Returns:
         model: EgoHand instance in eval mode on CPU.
         target: The ``_target_`` string from the checkpoint cfg (for logging).
     """
-    ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    # mmap: the training checkpoint also holds optimizer state; only the weights loaded below are read.
+    ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False, mmap=True)
     cfg = OmegaConf.create(ckpt["hyper_parameters"]["cfg"])
     target = str(cfg.get("_target_", ""))
     if not any(target.endswith(t) for t in _VALID_TARGETS):
@@ -86,10 +89,17 @@ def load_egohand_model(checkpoint_path: str | Path, soma_hand_data_folder: str |
 
     from egohand.models.egohand import EgoHand
 
+    state = ckpt["state_dict"]
+    if backbone is not None:
+        cfg.backbone = {"_target_": "torch.nn.Identity"}
+        state = {key: value for key, value in state.items() if not key.startswith("backbone.")}
+
     model = EgoHand(cfg)
+    if backbone is not None:
+        model.backbone = backbone
 
     model.validate_camera_depth_checkpoint(ckpt)
-    model.load_state_dict(ckpt["state_dict"], strict=False)
+    model.load_state_dict(state, strict=False)
     log.info("[EgoHand] Loaded checkpoint: %s", checkpoint_path)
     return model.eval(), target
 

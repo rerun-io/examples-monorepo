@@ -318,10 +318,23 @@ def onnx_content_hash(onnx_path: Path) -> str:
 
 @lru_cache(maxsize=64)
 def _hash_files(versions: tuple[tuple[str, int, int], ...]) -> str:
-    """SHA-256 over the files in order; keyed by (path, size, mtime) so a process reading the same ONNX again skips the read."""
+    """SHA-256 over the files in order, keyed by (path, size, mtime) in memory and on disk.
+
+    The on-disk record lets a new process find its cached engine without rereading a multi-GB ONNX.
+    """
+    key: str = json.dumps(versions)
+    record: Path = DEFAULT_TRT_CACHE_DIR / "onnx-sha256" / f"{hashlib.sha256(key.encode()).hexdigest()[:24]}.json"
+    if record.is_file():
+        saved: dict[str, str] = json.loads(record.read_text())
+        if saved.get("versions") == key:
+            return saved["sha256"]
     digest = hashlib.sha256()
     for path, _, _ in versions:
         with open(path, "rb") as stream:
             for chunk in iter(lambda: stream.read(1 << 20), b""):
                 digest.update(chunk)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    staged: Path = record.with_suffix(f".{os.getpid()}.tmp")
+    staged.write_text(json.dumps({"versions": key, "sha256": digest.hexdigest()}))
+    staged.replace(record)
     return digest.hexdigest()

@@ -227,24 +227,28 @@ class EgoHandPredictor:
 
     def __init__(self, config: EgoHandConfig) -> None:
         from egohand_inference.pipeline.predictor import EgoHandPredictor as UpstreamPredictor
+        from egohand_inference.pipeline.predictor import load_egohand_model
 
         self.config: EgoHandConfig = config
         self.stage_ms: dict[str, list[float]] = {}
-        self.predictor: UpstreamPredictor = UpstreamPredictor.from_checkpoint(
-            config.weights, config.soma_assets, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True
+        # A cached backbone artifact replaces the 3 GB PyTorch DINOv3, which is then never built or loaded.
+        engine: _TensorRtBackbone | None = None
+        if config.backbone_onnx is not None and config.backbone_onnx.is_file():
+            engine = _TensorRtBackbone(create_runtime_from_onnx(config.backbone_onnx, config.backbone_backend))
+        model, _ = load_egohand_model(config.weights, config.soma_assets, backbone=engine)
+        self.predictor: UpstreamPredictor = UpstreamPredictor(
+            model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True, perf_reporter=self
         )
-        self.predictor.perf_reporter = self
-        if config.backbone_onnx is not None:
-            if not config.backbone_onnx.is_file():
-                export_onnx(
-                    self.predictor.model.backbone,
-                    (torch.zeros((2, 3, 256, 256), device="cuda"),),
-                    config.backbone_onnx,
-                    input_names=["images"],
-                    output_names=["features"],
-                    compute_dtype=torch.bfloat16,
-                    dynamic_batch_max=config.backbone_backend.max_batch_size,
-                )
+        if config.backbone_onnx is not None and engine is None:
+            export_onnx(
+                self.predictor.model.backbone,
+                (torch.zeros((2, 3, 256, 256), device="cuda"),),
+                config.backbone_onnx,
+                input_names=["images"],
+                output_names=["features"],
+                compute_dtype=torch.bfloat16,
+                dynamic_batch_max=config.backbone_backend.max_batch_size,
+            )
             self.predictor.model.backbone = _TensorRtBackbone(create_runtime_from_onnx(config.backbone_onnx, config.backbone_backend))
             torch.cuda.empty_cache()
 

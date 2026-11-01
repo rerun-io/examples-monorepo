@@ -156,3 +156,29 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
     assert errors.median() <= 1.0
     assert torch.quantile(errors, 0.99) <= 5.0
     assert torch.linalg.vector_norm(result.keypoints.xy.cpu() - pixels, dim=-1).median() <= 0.5
+
+
+def test_tensorrt_backbone_setup_never_builds_the_eager_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a cached backbone engine, set-up neither builds nor loads the 3 GB PyTorch DINOv3."""
+    from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
+
+    from posekit.runtimes import TensorRtBackendConfig
+
+    def refuse(*_: object, **__: object) -> None:
+        raise AssertionError("built the eager DINOv3 backbone")
+
+    monkeypatch.setattr(DinoVisionTransformer, "__init__", refuse)
+
+    root = Path("/tmp/egohand")
+    weights, soma, onnx = root / "weights/egohand/egohand_s060000.ckpt", root / "weights/soma", root / "dinov3-bf16.onnx"
+    for asset in (weights, soma / "SOMAHand.npz", onnx):
+        if not asset.exists():
+            pytest.skip(f"missing accelerated EgoHand asset: {asset}")
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    model = EgoHandConfig(
+        weights, soma, backbone_onnx=onnx, backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=root / "engines")
+    ).setup()
+    names = [name for name, _ in model.predictor.model.named_parameters()]
+    assert names, "the hand head is still loaded"
+    assert not [name for name in names if name.startswith("backbone.")]

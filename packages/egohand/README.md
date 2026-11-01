@@ -19,7 +19,8 @@ compatibility; this package does not expose a training command.
 
 Changes from source: remove unused global chumpy shims; remove file exporters
 and full-body wrapper methods; rename internal imports; support OpenCV 4 and 5
-iterative point undistortion; add CUDA-event SOMA timing, GPU perspective sampling and prepared-crop input. The model
+iterative point undistortion; add CUDA-event SOMA timing, GPU perspective sampling and prepared-crop input;
+memory-map the checkpoint and accept a ready backbone in `load_egohand_model`. The model
 math and checkpoint configuration remain unchanged. The posekit adapter owns
 new typed code; the vendored dependency remains an explicit source boundary.
 

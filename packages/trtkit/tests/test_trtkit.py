@@ -475,9 +475,11 @@ def test_fp16_conv_trunk_rejects_outputs_inside_the_trunk() -> None:
         fp16_conv_trunk(onnx.helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)]))
 
 
-def test_onnx_content_hash_reads_each_file_version_once(tmp_path: Path) -> None:
+def test_onnx_content_hash_reads_each_file_version_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Workers reload models every session; the multi-GB ONNX is hashed once per (path, size, mtime), not per load."""
     from trtkit import trt_builder
+
+    monkeypatch.setattr(trt_builder, "DEFAULT_TRT_CACHE_DIR", tmp_path / "cache")
 
     model = tmp_path / "model.onnx"
     model.write_bytes(b"proto")
@@ -487,4 +489,24 @@ def test_onnx_content_hash_reads_each_file_version_once(tmp_path: Path) -> None:
     assert trt_builder.onnx_content_hash(model) == first
     assert trt_builder._hash_files.cache_info().misses == reads, "an unchanged file is not read again"
     model.with_suffix(".onnx.data").write_bytes(b"other weights")
+    assert trt_builder.onnx_content_hash(model) != first, "a rewritten weight file is hashed again"
+
+
+def test_onnx_content_hash_survives_a_new_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh process does not reread an unchanged multi-GB ONNX just to find its cached engine."""
+    from trtkit import trt_builder
+
+    monkeypatch.setattr(trt_builder, "DEFAULT_TRT_CACHE_DIR", tmp_path / "cache")
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"proto")
+    weights = model.with_suffix(".onnx.data")
+    weights.write_bytes(b"weights")
+    first = trt_builder.onnx_content_hash(model)
+    trt_builder._hash_files.cache_clear()  # what a new process starts with
+    weights.chmod(0)  # unreadable, same size and mtime
+    try:
+        assert trt_builder.onnx_content_hash(model) == first
+    finally:
+        weights.chmod(0o644)
+    weights.write_bytes(b"other weights")
     assert trt_builder.onnx_content_hash(model) != first, "a rewritten weight file is hashed again"
