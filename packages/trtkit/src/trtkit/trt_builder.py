@@ -290,7 +290,7 @@ def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = 
     Returns:
         Path to a ready-to-load engine matching this machine and config.
     """
-    onnx_sha256: str = onnx_content_hash(onnx_path)
+    onnx_sha256: str = onnx_content_hash(onnx_path, cache_dir=cache_dir)
     engine_path: Path = cached_engine_path(onnx_path, config, cache_dir=cache_dir, onnx_sha256=onnx_sha256)
     if not engine_path.exists():
         print(f"[trtkit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
@@ -298,43 +298,50 @@ def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = 
     return engine_path
 
 
-def onnx_content_hash(onnx_path: Path) -> str:
+def onnx_content_hash(onnx_path: Path, *, cache_dir: Path | None = None) -> str:
     """Hex SHA-256 of an ONNX model, covering its external weight file if present.
 
     Args:
         onnx_path: ONNX model file (dynamo exports of large models keep weights
             in a sibling ``<name>.onnx.data`` file).
+        cache_dir: Engine cache root that keeps the digest record; defaults to ``DEFAULT_TRT_CACHE_DIR``.
 
     Returns:
         Hex digest string over the proto and any external data.
     """
-    versions: list[tuple[str, int, int]] = []
+    versions: list[tuple[str, int, int, int]] = []
     for path in (onnx_path.expanduser(), onnx_path.expanduser().with_suffix(".onnx.data")):
         if path.exists():
             stat = path.stat()
-            versions.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
-    return _hash_files(tuple(versions))
+            versions.append((str(path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return _hash_files(tuple(versions), cache_dir or DEFAULT_TRT_CACHE_DIR)
 
 
 @lru_cache(maxsize=64)
-def _hash_files(versions: tuple[tuple[str, int, int], ...]) -> str:
-    """SHA-256 over the files in order, keyed by (path, size, mtime) in memory and on disk.
+def _hash_files(versions: tuple[tuple[str, int, int, int], ...], cache_dir: Path) -> str:
+    """SHA-256 over the files in order, keyed by (path, inode, size, mtime) in memory and in ``cache_dir``.
 
-    The on-disk record lets a new process find its cached engine without rereading a multi-GB ONNX.
+    The on-disk record lets a new process find its cached engine without rereading a multi-GB ONNX. It is a best-effort
+    cache: an unreadable or stale record means hashing again, and a failed write only costs the next process a reread.
     """
     key: str = json.dumps(versions)
-    record: Path = DEFAULT_TRT_CACHE_DIR / "onnx-sha256" / f"{hashlib.sha256(key.encode()).hexdigest()[:24]}.json"
-    if record.is_file():
-        saved: dict[str, str] = json.loads(record.read_text())
-        if saved.get("versions") == key:
-            return saved["sha256"]
+    record: Path = cache_dir / "onnx-sha256" / f"{hashlib.sha256(key.encode()).hexdigest()[:24]}.json"
+    try:
+        saved = json.loads(record.read_text())
+        if saved["versions"] == key:
+            return str(saved["sha256"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     digest = hashlib.sha256()
-    for path, _, _ in versions:
+    for path, *_ in versions:
         with open(path, "rb") as stream:
             for chunk in iter(lambda: stream.read(1 << 20), b""):
                 digest.update(chunk)
-    record.parent.mkdir(parents=True, exist_ok=True)
-    staged: Path = record.with_suffix(f".{os.getpid()}.tmp")
-    staged.write_text(json.dumps({"versions": key, "sha256": digest.hexdigest()}))
-    staged.replace(record)
+    try:
+        record.parent.mkdir(parents=True, exist_ok=True)
+        staged: Path = record.with_suffix(f".{os.getpid()}.tmp")
+        staged.write_text(json.dumps({"versions": key, "sha256": digest.hexdigest()}))
+        staged.replace(record)
+    except OSError:
+        pass
     return digest.hexdigest()

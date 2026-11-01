@@ -74,7 +74,7 @@ def head_track(source: CatalogHands, quest_pose_ms: float) -> HeadTrack:
 
 
 def unverified(phone: PhoneCalibration, episode: str) -> PhoneCalibration:
-    """A hands-only pose the head fit could not check (no face, no dense hands within the gate): kept on record,
+    """A hands-only pose the head fit could not check (no face, no own hands within the gate): kept on record,
     flagged for the episode so keypoints leaves it out."""
     current = phone.episodes.get(episode) or EpisodeCalibration(phone.n, phone.median_px, False, "flagged")
     return replace(phone, ok=False, episodes={**phone.episodes, episode: replace(current, ok=False, scope="flagged")})
@@ -95,6 +95,8 @@ def _views(episode: SessionEpisode) -> tuple[dict[str, FaceTrack], dict[str, Cor
     # Align detects the same frame numbers on every phone. The body needs several phones at one instant, so it uses
     # each frame's mean aligned time (the phone clocks differ by tens of milliseconds); face and hands keep their own.
     shared = np.mean(list(aligned.values()), axis=0) if len({len(t) for t in aligned.values()}) == 1 else None
+    if shared is None:
+        print("HEAD_BODY_SKIP", episode.sync.key, "phones have different detection frames:", {p: len(t) for p, t in aligned.items()}, flush=True)
     for phone, detections in clocked.items():
         faces[phone] = FaceTrack(aligned[phone], detections.xy[:, list(FACE)], detections.scores[:, list(FACE)])
         if shared is not None:
@@ -148,21 +150,20 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, track:
     hand_cameras = {p: c.camera for p, c in exo.phones.items() if c.ok and c.camera is not None and p not in provisional}
     default_focal = float(np.median(list(focals.values()))) if focals else 900.0
     observed_faces, observed_hands, bodies = _views(episode)
-    faces = dict(observed_faces)
     offsets = DEFAULT_OFFSETS.copy()
     source = "template (d31 label-refined cameras), fixed"
-    # A hands-only pose whose projected head finds no face is solved from the head like an unposed phone.
-    blind = {p for p in hand_cameras if p not in faces or len(face_correspondences(faces[p], track, offsets).world) < MIN_FACE_PAIRS}
+    # A hands-only pose with too few face pairs to check is solved from the head like an unposed phone.
+    blind = {p for p in hand_cameras if p not in observed_faces or len(face_correspondences(observed_faces[p], track, offsets).world) < MIN_FACE_PAIRS}
     shifts: dict[str, float] = {}
-    for phone in sorted(provisional & set(faces)):
-        found = find_clock(faces[phone], track, offsets, focals.get(phone, default_focal))
+    for phone in sorted(provisional & set(observed_faces)):
+        found = find_clock(observed_faces[phone], track, offsets, focals.get(phone, default_focal))
         if found is not None:
             shifts[phone] = found
     cameras: dict[str, Camera] = {p: c for p, c in hand_cameras.items() if p not in blind}
-    for phone in faces:
+    for phone in observed_faces:
         if phone in cameras or (phone in provisional and phone not in shifts):
             continue
-        camera = solve_from_head(face_correspondences(_shifted(faces[phone], shifts.get(phone, 0.0)), track, offsets), focals.get(phone, default_focal))
+        camera = solve_from_head(face_correspondences(_shifted(observed_faces[phone], shifts.get(phone, 0.0)), track, offsets), focals.get(phone, default_focal))
         if camera is not None:
             cameras[phone] = camera
     if not cameras:
@@ -198,7 +199,7 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, track:
     reports: dict[str, PhoneReport] = {}
     face_px = {p: residual_summary(c, face_correspondences(faces[p], track, offsets))[1] for p, c in fitted.items()}
     # A phone whose face does not fit the template (back views, or a head stream that disagrees with the hands) keeps a
-    # pose from its own dense hands instead: with the offsets fixed, each phone's fit is independent.
+    # pose from its own hands instead: with the offsets fixed, each phone's fit is independent.
     up = world_up(track)
     for phone, camera in list(fitted.items()):
         if face_px[phone] is not None and face_px[phone] <= ACCEPT_FACE_PX and upright(camera, up):

@@ -157,7 +157,7 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
                 provisional = frozenset(p for p in episode.layout.phones if offsets_ms.get("exo/" + p) is None)
                 offsets_ms.update({"exo/" + p: guess for p in provisional})
                 detection_sync = replace(episode.sync, offsets_ms=offsets_ms)
-                track = head_track(segment.hands or catalog_io.read_catalog_hands(segment), quest_pose_ms)
+                track = head_track(episode.hands, quest_pose_ms)
                 head = calibrate_with_head(state.exo, replace(episode, sync=detection_sync), track, focals,
                                            {p: offsets_ms["exo/" + p] for p in episode.layout.phones}, provisional)
                 hands_only = {p: c.camera.parameters.tolist() for p, c in state.exo.phones.items() if c.camera is not None}

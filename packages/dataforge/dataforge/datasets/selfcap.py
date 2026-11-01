@@ -75,7 +75,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from rerun.chunk import Chunk, LazyChunkStream, RrdReader
+from rerun.chunk import Chunk, RrdReader
 from rerun.encodings import EntityPathLike
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
@@ -239,10 +239,16 @@ def write_device_asset(target: Path, device: str, rig: int) -> None:
     """
     node: str = schema.cam_path(rig, 0) if device == "phone" else schema.rig_path(rig)
     # The shipped model is a static Mesh3D at /device; the asset is that chunk, moved to the device's node.
-    mesh = [chunk.with_entity_path(f"{node}/device") for chunk in RrdReader(DEVICE_MESHES / f"{DEVICE_MESH_FILES[device]}.rrd").stream()
-            if str(chunk.entity_path) == "/device"]
+    mesh = RrdReader(DEVICE_MESHES / f"{DEVICE_MESH_FILES[device]}.rrd").stream().filter(content="/device")
+    mesh = mesh.map(lambda chunk: chunk.with_entity_path(f"{node}/device"))
     with writing.atomic_write(target) as staged:
-        LazyChunkStream.from_iter(mesh).write_rrd(staged, application_id=writing.APPLICATION_ID, recording_id=device_asset_id(device, rig))
+        mesh.write_rrd(staged, application_id=writing.APPLICATION_ID, recording_id=device_asset_id(device, rig))
+
+
+def segment_rig_kinds(entry: DatasetEntry, rigs: range, *extra: str) -> list[tuple[dict[str, object], dict[int, str]]]:
+    """Each registered segment's catalog row (its rig nodes plus ``extra`` entities) and the ``kind`` of each rig, in one query."""
+    table: pa.Table = entry.filter_contents([*(schema.rig_path(rig) for rig in rigs), *extra]).reader(index=None).to_arrow_table()
+    return [(row, {rig: kind[0] for rig in rigs if (kind := row.get(f"{schema.rig_path(rig)}:kind"))}) for row in table.to_pylist()]
 
 
 def log_quest_hands(recording: rr.RecordingStream, hands: QuestHands, *, shift_ns: int = 0) -> None:
@@ -677,12 +683,11 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         world origin, so one uncalibrated phone anywhere keeps the phones out of 3D. One query reads every segment.
         """
         rigs: range = range(DEFAULT_EXO_CAMERAS)
-        table: pa.Table = entry.filter_contents([path for rig in rigs for path in (schema.rig_path(rig), schema.cam_path(rig, 0))]).reader(index=None).to_arrow_table()
         posed: list[bool] = [
             row.get(f"{schema.cam_path(rig, 0)}:Transform3D:translation") is not None
-            for row in table.to_pylist()
-            for rig in rigs
-            if (row.get(f"{schema.rig_path(rig)}:kind") or [None])[0] == "exo"
+            for row, kinds in segment_rig_kinds(entry, rigs, *(schema.cam_path(rig, 0) for rig in rigs))
+            for rig, kind in kinds.items()
+            if kind == "exo"
         ]
         posed_phones: bool = bool(posed) and all(posed)
         return self.default_blueprint(posed_phones=posed_phones), self.table_blueprint(posed_phones=posed_phones)
@@ -693,15 +698,11 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         A rig's role is its ``kind`` (``RIG_DEVICES``), read for every registered segment in one query; the rig index
         depends on the phone count. Each run writes fresh stamped files and replaces any asset of the same id.
         """
-        devices: dict[str, str] = RIG_DEVICES
-        rigs: range = range(DEFAULT_EXO_CAMERAS + 2)
-        table: pa.Table = entry.filter_contents([schema.rig_path(rig) for rig in rigs]).reader(index=None).to_arrow_table()
         segments: dict[tuple[str, int], list[str]] = {}
-        for row in table.to_pylist():
-            for rig in rigs:
-                kind: list[str] | None = row.get(f"{schema.rig_path(rig)}:kind")
-                if kind and kind[0] in devices:
-                    segments.setdefault((devices[kind[0]], rig), []).append(row["rerun_segment_id"])
+        for row, kinds in segment_rig_kinds(entry, range(DEFAULT_EXO_CAMERAS + 2)):
+            for rig, kind in kinds.items():
+                if kind in RIG_DEVICES:
+                    segments.setdefault((RIG_DEVICES[kind], rig), []).append(str(row["rerun_segment_id"]))
         registered: set[str] = set(entry.assets())
         stamp: str = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         for (device, rig), ids in sorted(segments.items()):
