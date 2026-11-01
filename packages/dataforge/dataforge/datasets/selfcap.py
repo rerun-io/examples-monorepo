@@ -135,8 +135,12 @@ PHONE_IMAGE_PLANE_DISTANCE: float = 0.15
 """The phones stand metres apart; the calibration layer draws them at the same length."""
 SCENE_BACKGROUND: rrb.BackgroundKind = rrb.BackgroundKind.GradientDark
 """Background of every selfcap 3D view."""
-QUEST_AXIS_LENGTH: float = 0.05
-"""Axes on each Quest lens: the head track is the left lens's pose, so its frame is where the Quest world starts."""
+HEAD_AXIS_LENGTH: float = 0.05
+"""Axes on each head camera (OAK, Quest lens); the Quest left lens's frame is where the head track, and so the world, starts."""
+PHONE_AXIS_LENGTH: float = 0.1
+"""Axes on each phone camera, the length of its frustum's near half."""
+RIG_LABEL_COLOR: tuple[int, int, int] = (255, 200, 0)
+"""The small labelled point that names each rig."""
 DEVICE_MESHES: Path = Path(__file__).parent / "selfcap_devices"
 """Display meshes of the head-worn devices, in their reference camera frames (see its NOTICE.md)."""
 IMU_DEVICE: int = 0
@@ -235,6 +239,11 @@ def device_asset_id(device: str, rig: int) -> str:
     return f"devices__{DEVICE_MESH_FILES[device]}__rig_{rig:02d}"
 
 
+def rig_label_path(rig: int) -> str:
+    """``.../rig_NN/cam_00/rig_label`` — the small labelled point that names a rig, at its reference camera."""
+    return f"{schema.cam_path(rig, 0)}/rig_label"
+
+
 def write_device_asset(target: Path, device: str, rig: int) -> None:
     """A catalog asset: the device's mesh, static, in its reference camera frame.
 
@@ -322,8 +331,10 @@ class CameraPlan:
     """``lens_source`` AnyValue on the pinhole: ``factory`` (measured) or ``assumed`` (iPhones, until calibration)."""
     image_plane_distance: float = IMAGE_PLANE_DISTANCE
     """Frustum length in metres."""
-    axis_length: float | None = None
-    """Draw the camera's own frame (``TransformAxes3D``) this long, in metres; None draws none."""
+    axis_length: float = HEAD_AXIS_LENGTH
+    """The camera's own frame (``TransformAxes3D``) is drawn this long, in metres."""
+    rig_label: str | None = None
+    """Name drawn on a small point at this camera (``rig_label_path``); set on each rig's reference camera only."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -472,6 +483,7 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                     rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", name=device, kind="rgb",
                     calibration=calibration if measured else assumed_phone_lens(calibration.width, calibration.height),
                     lens_source="factory" if measured else "assumed", image_plane_distance=PHONE_IMAGE_PLANE_DISTANCE,
+                    axis_length=PHONE_AXIS_LENGTH, rig_label=f"Phone {rig + 1} · {device.split('-')[0]} (rig_{rig:02d})",
                 )
             )
             panes.append(CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo"))
@@ -505,6 +517,7 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 native_duration_ns=int(frame_times_ns[-1]) if frame_times_ns.size else 0,
                 first_frame_idx=int(frame_indices[0]) if frame_indices.size else None,
                 rig_T_cam=ego_rig_T_cam.get(stream),
+                rig_label=f"OAK (rig_{ego_rig:02d})" if cam == 0 else None,
             )
         )
         panes.append(CameraPane(name=f"OAK {stream}", rig=ego_rig, cam=cam, kind="ego"))
@@ -529,7 +542,7 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 name=stream,
                 kind="grayscale",
                 rig_T_cam=left_T_right if stream == "right" else None,
-                axis_length=QUEST_AXIS_LENGTH,
+                rig_label=f"Quest (rig_{quest_rig:02d})" if cam == 0 else None,
             )
         )
         panes.append(CameraPane(name=f"Quest {stream}", rig=quest_rig, cam=cam, kind="quest"))
@@ -565,7 +578,8 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
     hide: rrb.EntityBehavior = rrb.EntityBehavior(visible=False)
     phones: list[CameraPane] = [pane for pane in panes if pane.kind == "exo"]
     pinholes: list[str] = [schema.pinhole_path(pane.rig, pane.cam) for pane in panes]
-    lenses: list[str] = [schema.cam_path(pane.rig, pane.cam) for pane in panes if pane.kind == "quest"]
+    frames: list[tuple[int, str]] = [(pane.rig, schema.cam_path(pane.rig, pane.cam)) for pane in panes]
+    frames += [(rig, rig_label_path(rig)) for rig in dict.fromkeys(pane.rig for pane in panes)]
     hidden: dict[EntityPathLike, rrb.EntityBehavior] = dict.fromkeys(
         ["/world/gt/sapiens2", "/world/pred", *(f"{pinhole}/{overlay}" for pinhole in pinholes for overlay in HIDDEN_PINHOLE_OVERLAYS)], hide
     )
@@ -585,7 +599,8 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
             contents.append("/world/skeleton/**")
             overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
         if pane.kind == "exo":
-            contents.extend(lenses)  # the Quest lenses' axes, where the Quest world starts
+            # The other rigs' camera frames and names (cam nodes only, without their frustum or video) show in the phone.
+            contents.extend(path for rig, path in frames if rig != pane.rig)
         return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=contents, overrides=overrides)
 
     # The head cameras show as bare frustums: their image planes would cover the hands. A posed phone shows its video
@@ -895,8 +910,10 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 static=True,
                 recording=recording,
             )
-        if camera.axis_length is not None:
-            rr.log(schema.cam_path(camera.rig, camera.cam), rr.TransformAxes3D(axis_length=camera.axis_length), static=True, recording=recording)
+        rr.log(schema.cam_path(camera.rig, camera.cam), rr.TransformAxes3D(axis_length=camera.axis_length), static=True, recording=recording)
+        if camera.rig_label is not None:
+            rr.log(rig_label_path(camera.rig), rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(4.0), colors=RIG_LABEL_COLOR,
+                                                       labels=camera.rig_label, show_labels=True), static=True, recording=recording)
         calibration: CameraCalibration = camera.calibration
         focal_length_xy: Float64[ndarray, "2"] = calibration.focal_length_xy
         principal_point_xy: Float64[ndarray, "2"] = calibration.principal_point_xy

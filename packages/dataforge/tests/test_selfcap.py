@@ -323,8 +323,12 @@ def test_default_blueprint_draws_the_hands_and_body_through_posed_phones() -> No
             pinhole: str = f"/world/rig_{rig:02d}/cam_00/pinhole"
             assert not [rule for rule in scene_contents if rule.startswith(f"- {pinhole}")], "each posed phone shows its video in 3D"
             contents: list[str] = cast(list[str], views[name].contents)
-            # The Quest lenses' axes (their cam nodes, without the frustum or video beneath) project into each phone.
-            assert contents == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**", "/world/rig_05/cam_00", "/world/rig_05/cam_01"]
+            assert contents[:4] == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**"]
+            # The other rigs' camera frames and names project into each phone (cam nodes only: no frustum or video).
+            others = [r for r in range(6) if r != rig]
+            assert {f"/world/rig_{r:02d}/cam_00/rig_label" for r in others} <= set(contents)
+            assert {"/world/rig_04/cam_01", "/world/rig_04/cam_02", "/world/rig_05/cam_01"} <= set(contents)
+            assert not [c for c in contents[4:] if c.startswith(f"/world/rig_{rig:02d}/")], "not its own frame"
             hidden = views[name].visualizer_overrides
             for overlay in ("pred", "sapiens2", "coco133_uv_projected", "quest_coco133_uv_projected"):
                 assert hidden[f"{pinhole}/{overlay}"] == rrb.EntityBehavior(visible=False)
@@ -636,14 +640,19 @@ def test_convert_logs_factory_documents_on_every_rig(tmp_path: Path, monkeypatch
     assert all(document == calibration_document(("center", "left", "right")) for document in values.values())
 
 
-def test_convert_draws_the_axes_of_each_quest_lens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The head track starts at the Quest's left lens: its frame, and the right lens's, show in 3D like the hand joints'.
+def test_convert_draws_each_camera_frame_and_names_each_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every camera shows its frame like the hand joints do, and each rig carries one small point that says which rig it is.
     from rerun.chunk import RrdReader
 
-    reader = RrdReader(convert_fixture_episode(tmp_path, monkeypatch))
-    axes = {str(c.entity_path) for c in reader.stream() if "TransformAxes3D:axis_length" in c.to_record_batch().schema.names}
-    assert {"/world/rig_05/cam_00", "/world/rig_05/cam_01"} <= axes
-    assert not [path for path in axes if path.startswith(("/world/rig_00", "/world/rig_04"))], "only the Quest lenses"
+    batches = [(str(c.entity_path), c.to_record_batch()) for c in RrdReader(convert_fixture_episode(tmp_path, monkeypatch)).stream()]
+    axes = {path for path, b in batches if "TransformAxes3D:axis_length" in b.schema.names}
+    cameras = {f"/world/rig_{rig:02d}/cam_00" for rig in range(4)} | {f"/world/rig_04/cam_{cam:02d}" for cam in range(3)} | {"/world/rig_05/cam_00", "/world/rig_05/cam_01"}
+    assert cameras <= axes
+    labels = {path: b.column("Points3D:labels")[0].as_py() for path, b in batches if "Points3D:labels" in b.schema.names and path.endswith("/rig_label")}
+    assert set(labels) == {f"/world/rig_{rig:02d}/cam_00/rig_label" for rig in range(6)}
+    assert labels["/world/rig_00/cam_00/rig_label"][0].startswith("Phone 1 · ") and labels["/world/rig_00/cam_00/rig_label"][0].endswith("(rig_00)")
+    assert labels["/world/rig_04/cam_00/rig_label"] == ["OAK (rig_04)"]
+    assert labels["/world/rig_05/cam_00/rig_label"] == ["Quest (rig_05)"]
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
