@@ -326,7 +326,7 @@ def test_default_blueprint_draws_the_hands_and_body_through_posed_phones() -> No
             assert contents[:4] == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**"]
             # The other rigs' camera frames and names project into each phone (cam nodes only: no frustum or video).
             others = [r for r in range(6) if r != rig]
-            assert {f"/world/rig_{r:02d}/cam_00/rig_label" for r in others} <= set(contents)
+            assert {f"/world/rig_{r:02d}/cam_00/rig_label" for r in others if r < 4} <= set(contents)
             assert {"/world/rig_04/cam_01", "/world/rig_04/cam_02", "/world/rig_05/cam_01"} <= set(contents)
             assert not [c for c in contents[4:] if c.startswith(f"/world/rig_{rig:02d}/")], "not its own frame"
             hidden = views[name].visualizer_overrides
@@ -641,7 +641,7 @@ def test_convert_logs_factory_documents_on_every_rig(tmp_path: Path, monkeypatch
 
 
 def test_convert_draws_each_camera_frame_and_names_each_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Every camera shows its frame like the hand joints do, and each rig carries one small point that says which rig it is.
+    # Every camera shows its frame like the hand joints do, and each phone rig carries one small point that names it.
     from rerun.chunk import RrdReader
 
     batches = [(str(c.entity_path), c.to_record_batch()) for c in RrdReader(convert_fixture_episode(tmp_path, monkeypatch)).stream()]
@@ -649,10 +649,7 @@ def test_convert_draws_each_camera_frame_and_names_each_rig(tmp_path: Path, monk
     cameras = {f"/world/rig_{rig:02d}/cam_00" for rig in range(4)} | {f"/world/rig_04/cam_{cam:02d}" for cam in range(3)} | {"/world/rig_05/cam_00", "/world/rig_05/cam_01"}
     assert cameras <= axes
     labels = {path: b.column("Points3D:labels")[0].as_py() for path, b in batches if "Points3D:labels" in b.schema.names and path.endswith("/rig_label")}
-    assert set(labels) == {f"/world/rig_{rig:02d}/cam_00/rig_label" for rig in range(6)}
-    assert labels["/world/rig_00/cam_00/rig_label"][0].startswith("Phone 1 · ") and labels["/world/rig_00/cam_00/rig_label"][0].endswith("(rig_00)")
-    assert labels["/world/rig_04/cam_00/rig_label"] == ["OAK (rig_04)"]
-    assert labels["/world/rig_05/cam_00/rig_label"] == ["Quest (rig_05)"]
+    assert labels == {f"/world/rig_{rig:02d}/cam_00/rig_label": [f"rig_{rig:02d}"] for rig in range(4)}, "phones only"
 
 
 @pytest.mark.parametrize("side", ["left", "right"])

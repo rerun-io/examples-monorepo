@@ -140,7 +140,7 @@ HEAD_AXIS_LENGTH: float = 0.05
 PHONE_AXIS_LENGTH: float = 0.1
 """Axes on each phone camera, the length of its frustum's near half."""
 RIG_LABEL_COLOR: tuple[int, int, int] = (255, 200, 0)
-"""The small labelled point that names each rig."""
+"""The small labelled point that names each phone rig."""
 DEVICE_MESHES: Path = Path(__file__).parent / "selfcap_devices"
 """Display meshes of the head-worn devices, in their reference camera frames (see its NOTICE.md)."""
 IMU_DEVICE: int = 0
@@ -240,7 +240,7 @@ def device_asset_id(device: str, rig: int) -> str:
 
 
 def rig_label_path(rig: int) -> str:
-    """``.../rig_NN/cam_00/rig_label`` — the small labelled point that names a rig, at its reference camera."""
+    """``.../rig_NN/cam_00/rig_label`` — the small labelled point that names a phone rig, at its camera."""
     return f"{schema.cam_path(rig, 0)}/rig_label"
 
 
@@ -333,8 +333,8 @@ class CameraPlan:
     """Frustum length in metres."""
     axis_length: float = HEAD_AXIS_LENGTH
     """The camera's own frame (``TransformAxes3D``) is drawn this long, in metres."""
-    rig_label: str | None = None
-    """Name drawn on a small point at this camera (``rig_label_path``); set on each rig's reference camera only."""
+    named: bool = False
+    """Draw a small point labelled ``rig_NN`` at this camera (``rig_label_path``); the phones only."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,7 +483,7 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                     rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", name=device, kind="rgb",
                     calibration=calibration if measured else assumed_phone_lens(calibration.width, calibration.height),
                     lens_source="factory" if measured else "assumed", image_plane_distance=PHONE_IMAGE_PLANE_DISTANCE,
-                    axis_length=PHONE_AXIS_LENGTH, rig_label=f"Phone {rig + 1} · {device.split('-')[0]} (rig_{rig:02d})",
+                    axis_length=PHONE_AXIS_LENGTH, named=True,
                 )
             )
             panes.append(CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo"))
@@ -517,7 +517,6 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 native_duration_ns=int(frame_times_ns[-1]) if frame_times_ns.size else 0,
                 first_frame_idx=int(frame_indices[0]) if frame_indices.size else None,
                 rig_T_cam=ego_rig_T_cam.get(stream),
-                rig_label=f"OAK (rig_{ego_rig:02d})" if cam == 0 else None,
             )
         )
         panes.append(CameraPane(name=f"OAK {stream}", rig=ego_rig, cam=cam, kind="ego"))
@@ -542,7 +541,6 @@ def build_episode_plan(episode_dir: Path) -> EpisodePlan:
                 name=stream,
                 kind="grayscale",
                 rig_T_cam=left_T_right if stream == "right" else None,
-                rig_label=f"Quest (rig_{quest_rig:02d})" if cam == 0 else None,
             )
         )
         panes.append(CameraPane(name=f"Quest {stream}", rig=quest_rig, cam=cam, kind="quest"))
@@ -579,7 +577,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
     phones: list[CameraPane] = [pane for pane in panes if pane.kind == "exo"]
     pinholes: list[str] = [schema.pinhole_path(pane.rig, pane.cam) for pane in panes]
     frames: list[tuple[int, str]] = [(pane.rig, schema.cam_path(pane.rig, pane.cam)) for pane in panes]
-    frames += [(rig, rig_label_path(rig)) for rig in dict.fromkeys(pane.rig for pane in panes)]
+    frames += [(pane.rig, rig_label_path(pane.rig)) for pane in panes if pane.kind == "exo"]
     hidden: dict[EntityPathLike, rrb.EntityBehavior] = dict.fromkeys(
         ["/world/gt/sapiens2", "/world/pred", *(f"{pinhole}/{overlay}" for pinhole in pinholes for overlay in HIDDEN_PINHOLE_OVERLAYS)], hide
     )
@@ -911,9 +909,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
                 recording=recording,
             )
         rr.log(schema.cam_path(camera.rig, camera.cam), rr.TransformAxes3D(axis_length=camera.axis_length), static=True, recording=recording)
-        if camera.rig_label is not None:
+        if camera.named:
             rr.log(rig_label_path(camera.rig), rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(4.0), colors=RIG_LABEL_COLOR,
-                                                       labels=camera.rig_label, show_labels=True), static=True, recording=recording)
+                                                       labels=f"rig_{camera.rig:02d}", show_labels=True), static=True, recording=recording)
         calibration: CameraCalibration = camera.calibration
         focal_length_xy: Float64[ndarray, "2"] = calibration.focal_length_xy
         principal_point_xy: Float64[ndarray, "2"] = calibration.principal_point_xy
