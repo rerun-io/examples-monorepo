@@ -98,6 +98,10 @@ def corpus(tmp_path: Path) -> Path:
     return tmp_path
 
 
+# The 3D scene starts about 3.2 m from the world origin, where the wearer stands in most captures, and orbits slowly.
+SCENE_EYE = rrb.EyeControls3D(kind=rrb.Eye3DKind.Orbital, position=[2.0, 2.9, 2.0], look_target=[0.0, 1.6, 0.0], eye_up=[0.0, 1.0, 0.0], spin_speed=0.1)
+
+
 def test_discover_skips_episodes_with_unreadable_files(corpus: Path, capsys: pytest.CaptureFixture[str]) -> None:
     dataset: SelfcapDataset = SelfcapDataset(SelfcapConfig(root=corpus))
     discovered: list[tuple[SequenceIdentity, Path]] = dataset.discover()
@@ -287,6 +291,7 @@ def test_default_blueprint_shows_the_raw_capture_before_calibration() -> None:
         assert f"- /world/rig_{rig:02d}/cam_{cam:02d}/pinhole/**" in scene_contents
     assert "/world/gt" not in scene.visualizer_overrides  # the Quest hands and their joint axes show
     assert str(scene.properties["Background"]) == str(rrb.Background(kind=rrb.BackgroundKind.GradientDark))
+    assert str(scene.properties["EyeControls3D"]) == str(SCENE_EYE), "a close, slow orbit, like the catalog cards"
     assert scene.visualizer_overrides["/world/pred"] == rrb.EntityBehavior(visible=False)
 
     for name, (rig, cam) in HEAD_CAMERAS.items():
@@ -775,6 +780,7 @@ def test_table_card_decodes_one_video_and_follows_the_phone_poses() -> None:
         scene, camera = views
         assert isinstance(scene, rrb.Spatial3DView) and isinstance(camera, rrb.Spatial2DView)
         assert str(scene.properties["Background"]) == str(rrb.Background(kind=rrb.BackgroundKind.GradientDark))
+        assert str(scene.properties["EyeControls3D"]) == str(SCENE_EYE)
         assert str(scene.origin) == "/world"
         assert str(camera.origin) == f"/world/rig_{pane[0]:02d}/cam_{pane[1]:02d}/pinhole"
         scene_contents: list[str] = cast(list[str], scene.contents)

@@ -148,6 +148,12 @@ IMU_DEVICE: int = 0
 """The OAK ships one IMU, so the ego rig has a single ``imu_00``."""
 DEFAULT_EXO_CAMERAS: int = 4
 """Exo device count in 2937 of the 3085 readable ``cut`` episodes; shapes the dataset-wide blueprint."""
+SCENE_EYE: rrb.EyeControls3D = rrb.EyeControls3D(
+    kind=rrb.Eye3DKind.Orbital, position=[2.0, 2.9, 2.0], look_target=[0.0, 1.6, 0.0], eye_up=[0.0, 1.0, 0.0], spin_speed=0.1
+)
+"""Start of every selfcap 3D view, in the default layout and the catalog cards alike: about 3.2 m from the world origin
+(where the wearer stands in most captures), orbiting it slowly. The viewer's own fit takes in the whole room and starts
+too far out. Tracking the headset does not help: on its transform the eye stays put, on its mesh it zooms onto the mesh."""
 
 EGO_CORE_FILES: tuple[str, ...] = (
     "ego/rgb.mp4",
@@ -623,7 +629,8 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
     )
     if show_soma_mesh:
         scene_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
-    scene = rrb.Spatial3DView(name="Scene", origin="/world", contents=["/world/**", *excluded], overrides=scene_overrides, background=SCENE_BACKGROUND)
+    scene = rrb.Spatial3DView(name="Scene", origin="/world", contents=["/world/**", *excluded], overrides=scene_overrides, background=SCENE_BACKGROUND,
+                              eye_controls=SCENE_EYE)
 
     oak: list[rrb.Spatial2DView] = [camera(pane) for pane in panes if pane.kind == "ego"]
     quest: list[rrb.Spatial2DView] = [camera(pane) for pane in panes if pane.kind == "quest"]
@@ -700,6 +707,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             origin="/world",
             contents=["/world/**", "- /world/pred/**", "/world/pred/soma_x/mesh/**", *blueprints.video_exclusions(slots), *unposed],
             background=SCENE_BACKGROUND,
+            eye_controls=SCENE_EYE,
         )
         if posed_phones:
             body: list[str] = ["/world/gt/**", "/world/skeleton/**", "/world/pred/soma_x/mesh/**"]
