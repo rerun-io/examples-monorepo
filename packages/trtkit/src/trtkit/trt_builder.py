@@ -20,6 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
+import numpy as np
 import torch
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
@@ -64,6 +65,8 @@ class TrtBuildConfig:
     """TensorRT builder optimization level (0-5)."""
     hardware_compatibility: HardwareCompatibility = "none"
     """Plan portability: device-specific, or portable across GPUs with the same compute capability."""
+    fp8_attention: bool = False
+    """Quantize native attention normalization output to FP8 with scale 1/448."""
     extra_output_patterns: tuple[str, ...] = ()
     """Mark every intermediate tensor whose name contains one of these substrings as
     an additional engine output. Materializing a tensor bars TensorRT from fusing it
@@ -102,6 +105,8 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     capability: tuple[int, int] = torch.cuda.get_device_capability()
     onnx_hash: str = (onnx_sha256 or onnx_content_hash(onnx_path))[:12]
     precision_key: str = "strong" if config.allow_tf32 else "strong-notf32"
+    if config.fp8_attention:
+        precision_key += "-fp8attn"
     extra_outputs_key: str = (
         f"_x{hashlib.sha256('|'.join(config.extra_output_patterns).encode()).hexdigest()[:8]}"
         if config.extra_output_patterns
@@ -151,6 +156,14 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if not parser.parse_from_file(str(onnx_path.expanduser())):
         errors: str = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         raise RuntimeError(f"ONNX parse failed for {onnx_path}:\n{errors}")
+    if config.fp8_attention:
+        for layer_index in range(int(network.num_layers)):
+            layer: Any = network.get_layer(layer_index)
+            if layer.type == trt.LayerType.ATTENTION_INPUT:
+                layer.__class__ = trt.IAttentionInputLayer
+                layer.attention.normalization_quantize_to_type = trt.DataType.FP8
+                scale: Any = network.add_constant((), trt.Weights(np.array(1.0 / 448.0, dtype=np.float32)))
+                layer.attention.normalization_quantize_scale = scale.get_output(0)
     for pattern in config.extra_output_patterns:
         matched: bool = False
         for layer_index in range(int(network.num_layers)):
@@ -164,6 +177,8 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             raise RuntimeError(f"extra_output_patterns entry {pattern!r} matched no network tensor in {onnx_path}.")
     builder_config: Any = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(config.workspace_gib * (1 << 30)))
+    if config.fp8_attention:
+        builder_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     builder_config.builder_optimization_level = int(config.builder_optimization_level)
     if config.hardware_compatibility == "same_compute_capability":
         builder_config.hardware_compatibility_level = trt.HardwareCompatibilityLevel.SAME_COMPUTE_CAPABILITY
@@ -222,6 +237,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         "opt_batch_size": config.opt_batch_size,
         "strongly_typed": True,
         "allow_tf32": config.allow_tf32,
+        "fp8_attention": config.fp8_attention,
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,
         "hardware_compatibility": config.hardware_compatibility,
