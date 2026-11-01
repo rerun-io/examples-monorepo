@@ -563,6 +563,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
     hide: rrb.EntityBehavior = rrb.EntityBehavior(visible=False)
     phones: list[CameraPane] = [pane for pane in panes if pane.kind == "exo"]
     pinholes: list[str] = [schema.pinhole_path(pane.rig, pane.cam) for pane in panes]
+    lenses: list[str] = [schema.cam_path(pane.rig, pane.cam) for pane in panes if pane.kind == "quest"]
     hidden: dict[EntityPathLike, rrb.EntityBehavior] = dict.fromkeys(
         ["/world/gt/sapiens2", "/world/pred", *(f"{pinhole}/{overlay}" for pinhole in pinholes for overlay in HIDDEN_PINHOLE_OVERLAYS)], hide
     )
@@ -581,6 +582,8 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
         if pane.rig != ego_rig:
             contents.append("/world/skeleton/**")
             overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
+        if pane.kind == "exo":
+            contents.extend(lenses)  # the Quest lenses' axes, where the Quest world starts
         return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=contents, overrides=overrides)
 
     # The head cameras show as bare frustums: their image planes would cover the hands. A posed phone shows its video

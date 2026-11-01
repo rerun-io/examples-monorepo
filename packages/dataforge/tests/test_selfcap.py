@@ -322,7 +322,8 @@ def test_default_blueprint_draws_the_hands_and_body_through_posed_phones() -> No
             pinhole: str = f"/world/rig_{rig:02d}/cam_00/pinhole"
             assert not [rule for rule in scene_contents if rule.startswith(f"- {pinhole}")], "each posed phone shows its video in 3D"
             contents: list[str] = cast(list[str], views[name].contents)
-            assert contents == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**"]
+            # The Quest lenses' axes (their cam nodes, without the frustum or video beneath) project into each phone.
+            assert contents == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**", "/world/rig_05/cam_00", "/world/rig_05/cam_01"]
             hidden = views[name].visualizer_overrides
             for overlay in ("pred", "sapiens2", "coco133_uv_projected", "quest_coco133_uv_projected"):
                 assert hidden[f"{pinhole}/{overlay}"] == rrb.EntityBehavior(visible=False)
