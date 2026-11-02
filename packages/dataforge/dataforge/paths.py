@@ -78,6 +78,9 @@ def raw_root() -> Path:
 NAS_ROOT: Path = Path("/mnt/nas")
 """Shared network storage: raw corpora may live there, conversion output and scratch never do."""
 
+NAS_WORK_ROOT: Path = Path("/mnt/nas/ssd-8tb")
+"""The NAS SSD share: the one place under ``NAS_ROOT`` where output and scratch may go."""
+
 
 def rrd_path(root: Path, *, layer: str, identity: SequenceIdentity) -> Path:
     """Layer-major rrd location: ``<root>/<layer>/<recording_id>.rrd``."""
@@ -101,12 +104,16 @@ def require_outside(destinations: Iterable[Path], *, roots: Iterable[Path]) -> N
     """Refuse a write whose destination resolves beneath a protected root (raw inputs, the NAS).
 
     Both sides are resolved, so a symlinked output or work directory that points
-    into a raw tree is caught. Each dataset passes its own protected roots.
+    into a raw tree is caught. Each dataset passes its own protected roots. A root
+    that contains ``NAS_WORK_ROOT`` does not protect it; a root inside it still does.
     """
+    work: Path = NAS_WORK_ROOT.resolve()
     protected: list[Path] = [root.resolve() for root in roots]
     for destination in destinations:
+        target: Path = destination.resolve()
         for root in protected:
-            if destination.resolve().is_relative_to(root):
+            shields_work: bool = work.is_relative_to(root) and work != root
+            if target.is_relative_to(root) and not (shields_work and target.is_relative_to(work)):
                 raise ValueError(f"refusing to write beneath protected input {root}: {destination}")
 
 
