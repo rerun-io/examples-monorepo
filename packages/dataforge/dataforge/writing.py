@@ -4,6 +4,7 @@ Half-written files poison batch runs and the catalog server, so a target either
 exists complete or not at all ("exists = done"). Never save over an rrd (or an
 ``.rbl``) that a catalog server has registered — truncation poisons the server;
 re-runs write a fresh tmp and atomically replace, and the catalog re-registers.
+A writer that must never replace a file publishes with a hard link instead (``atomic_write(exclusive=True)``).
 """
 
 from __future__ import annotations
@@ -56,6 +57,40 @@ class TableFields:
     """Card body fields, below the title and the preview."""
     table: tuple[TableField, ...] = ()
     """Table columns after the recording link."""
+    hidden: tuple[str, ...] = ()
+    """Columns a layout with fields hides even when the segment table does not list them at publish time."""
+    sort_by: str | None = None
+    """Column that orders the rows, ascending; ignored when the table does not have it. None keeps the data order."""
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedColumns:
+    """``TableFields`` applied to the columns a segment table has at publish time."""
+
+    table_hidden: tuple[str, ...]
+    """Columns the table layout hides."""
+    cards_hidden: tuple[str, ...]
+    """Columns the card layout hides."""
+    sort_by: str | None
+    """Column that orders the rows, when the table has it."""
+
+
+def published_columns(fields: TableFields, columns: Sequence[str]) -> PublishedColumns:
+    """Resolve what each segment-table layout hides and sorts by.
+
+    A layout with fields hides every column it does not declare, the system columns and ``fields.hidden`` too,
+    except the recording link. A layout with no fields hides nothing.
+
+    Args:
+        fields: Columns each layout shows by default.
+        columns: Every column of the segment table at publish time.
+    """
+
+    def hidden(shown: tuple[TableField, ...]) -> tuple[str, ...]:
+        declared: set[str] = {field.column for field in shown}
+        return tuple(column for column in dict.fromkeys((*columns, *fields.hidden)) if shown and column not in declared and column != SEGMENT_LINK_COLUMN)
+
+    return PublishedColumns(hidden(fields.table), hidden(fields.cards), fields.sort_by if fields.sort_by in columns else None)
 
 
 def episode_table_fields(*names: str) -> TableFields:
@@ -96,9 +131,7 @@ def save_table_blueprint(
         target: ``.rbl`` to write; replaced atomically.
         timeline: Timeline the previews play on.
         fields: Columns each layout shows by default; see ``TableFields``.
-        columns: Every column of the segment table; a layout with fields hides the undeclared
-            ones by name (the viewer shows every property column otherwise). ``rerun_*`` system
-            columns keep the viewer default (hidden).
+        columns: Every column of the segment table at publish time; see ``published_columns``.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     with atomic_write(target) as temp_path, RecordingStream._from_native(
@@ -109,17 +142,20 @@ def save_table_blueprint(
         blueprint._log_to_stream(stream)
         link: str = rr.escape_entity_path_part(SEGMENT_LINK_COLUMN)
         view_paths: list[str] = [view.blueprint_path() for view in blueprint_views(blueprint)]
-        for prefix, shown in (("/table/layouts/table/columns", fields.table), ("/table/layouts/cards/fields", fields.cards)):
+        published: PublishedColumns = published_columns(fields, columns)
+        layouts: tuple[tuple[str, tuple[TableField, ...], tuple[str, ...]], ...] = (
+            ("/table/layouts/table/columns", fields.table, published.table_hidden),
+            ("/table/layouts/cards/fields", fields.cards, published.cards_hidden),
+        )
+        for prefix, shown, hidden in layouts:
             stream.log(f"{prefix}/{link}", rrb.experimental.TableColumnPreview(views=view_paths))
-            if not shown:
-                continue  # no declared fields: the viewer shows every property column
             for field in shown:
                 stream.log(f"{prefix}/{rr.escape_entity_path_part(field.column)}", rrb.experimental.TableColumn(visible=True, name=field.name))
-            declared: set[str] = {field.column for field in shown}
-            for column in columns:
-                if column not in declared and column != SEGMENT_LINK_COLUMN and not column.startswith("rerun_"):
-                    stream.log(f"{prefix}/{rr.escape_entity_path_part(column)}", rrb.experimental.TableColumn(visible=False))
+            for column in hidden:
+                stream.log(f"{prefix}/{rr.escape_entity_path_part(column)}", rrb.experimental.TableColumn(visible=False))
         stream.log("/table", rrb.experimental.PreviewsConfig(timeline=timeline))
+        if published.sort_by is not None:
+            stream.log("/table", rrb.experimental.TableBlueprint(sort_by=rrb.table.SortBy(published.sort_by, direction="Ascending")))
         stream.log("/table/layouts/table", rrb.experimental.TableLayout(column_order=[SEGMENT_LINK_COLUMN, *(f.column for f in fields.table)]))
         stream.log(
             "/table/layouts/cards",
@@ -138,15 +174,21 @@ def should_skip(target: Path, *, force: bool) -> bool:
 
 
 @contextmanager
-def atomic_write(target: Path) -> Iterator[Path]:
+def atomic_write(target: Path, *, exclusive: bool = False) -> Iterator[Path]:
     """Yield a temp path beside ``target`` that replaces it only on clean exit.
 
     Args:
         target: Final location; its parent directory is created if missing.
+        exclusive: Never overwrite: ``target`` must not exist, at entry or when the temp file is published.
 
     Yields:
         A temp path in ``target.parent`` for the caller to write into.
+
+    Raises:
+        FileExistsError: If ``exclusive`` and ``target`` exists.
     """
+    if exclusive and (target.exists() or target.is_symlink()):
+        raise FileExistsError(f"refusing to write {target}: it exists")
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temp_name = tempfile.mkstemp(dir=target.parent, suffix=f"{target.suffix}.tmp")
     os.close(descriptor)
@@ -154,10 +196,12 @@ def atomic_write(target: Path) -> Iterator[Path]:
     try:
         yield temp_path
         temp_path.chmod(0o644)  # mkstemp temps are 0600; NFS mounts and the catalog server need world-readable files
-        os.replace(temp_path, target)
-    except BaseException:
+        if exclusive:
+            os.link(temp_path, target)  # unlike os.replace, refuses a target that appeared since entry
+        else:
+            os.replace(temp_path, target)
+    finally:
         temp_path.unlink(missing_ok=True)
-        raise
 
 
 @contextmanager

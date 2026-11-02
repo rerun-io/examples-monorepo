@@ -1,16 +1,21 @@
 """Per-segment fit-residual screening, not independent accuracy measurement."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import rerun as rr
+from dataforge.schema import SOMA_METRICS, SOMA_QUALITY_PROPERTY
 from jaxtyping import Float64
 from numpy import ndarray
+from rerun.chunk import RrdReader
 from serde import serde
-from serde.json import to_json
+from serde.json import from_json, to_json
 
 from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, plausible_ears, usable_ears
+
+QUALITY_PROPERTY: str = f"/__properties/{SOMA_QUALITY_PROPERTY}"
 
 
 @serde(deny_unknown_fields=True)
@@ -95,8 +100,17 @@ def log_quality(recording: rr.RecordingStream, quality: SomaQuality) -> None:
         "ear_span_min_mm": quality.ear_span_min_mm,
         "ear_span_max_mm": quality.ear_span_max_mm,
     }
-    for name in ("body", "shoulders", "ears", "hands"):
+    for name in SOMA_METRICS:
         value = getattr(quality, f"{name}_median_mm")
         if value is not None:
             values[f"{name}_median_mm"] = value
-    recording.log("/__properties/soma_quality", rr.AnyValues(**values), static=True)
+    recording.log(QUALITY_PROPERTY, rr.AnyValues(**values), static=True)
+
+
+def read_quality(path: Path) -> SomaQuality:
+    """Read the quality record back from a fit or layer RRD."""
+    for chunk in RrdReader(path).stream().filter(content=QUALITY_PROPERTY).to_chunks():
+        batch = chunk.to_record_batch()
+        if "record_json" in batch.schema.names:
+            return from_json(SomaQuality, batch.column("record_json")[0].as_py()[0])
+    raise ValueError(f"{path} has no {QUALITY_PROPERTY} property")

@@ -5,12 +5,12 @@ from itertools import combinations
 import cv2
 import numpy as np
 import pytest
+from dataforge.triangulation import CONFIDENCE_LAMBDA, MIN_RAY_SEPARATION_DEG
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
 from selfcap_curate.keypoints import (
     INLIER_PX,
-    MIN_RAY_SEPARATION_DEG,
     ROBUST_OUTER_GATE,
     ROBUST_ROUNDS,
     Camera,
@@ -124,7 +124,13 @@ def reference_triangulate(
     widest = np.where(pairs, lines, 1.0).min(axis=(0, 1))
     good = seeded & (count >= 2) & (widest < np.cos(np.deg2rad(MIN_RAY_SEPARATION_DEG))) & np.isfinite(points).all(1)
     xyz[good], counts[good] = points[good], count[good]
-    confidence[good] = (np.where(inliers, clean, 0.0).sum(0) / np.maximum(count, 1))[good]
+    # Kineo pairwise score, one pair of detecting views at a time.
+    with np.errstate(over="ignore", invalid="ignore"):
+        shrunk = np.where(valid, clean * np.exp(-CONFIDENCE_LAMBDA * res / np.array([c.K[0, 0] for c in cameras])[:, None]), 0.0)
+    pair_scores = [np.where(valid[a] & valid[b], np.sqrt(shrunk[a] * shrunk[b]), np.nan) for a, b in combinations(range(views), 2)]
+    with np.errstate(invalid="ignore"):
+        kineo = np.nan_to_num(np.nanmean(pair_scores, axis=0), nan=0.0) if pair_scores else np.zeros(joints)
+    confidence[good] = kineo[good]
     return Triangulated(xyz, counts, confidence)
 
 

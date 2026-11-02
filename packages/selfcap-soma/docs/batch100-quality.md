@@ -29,8 +29,9 @@ change is included: stricter support gating would remove all ear supervision
 in two bad sessions and cannot be claimed safe for good sessions.
 
 New fit/export outputs include `/__properties/soma_quality`, a static property
-with queryable status, medians and thresholds, plus a JSON record. Fit outputs
-save `quality.json`; layer exports save `<layer-stem>.quality.json`. A flag means
+with queryable status, medians and thresholds, plus a JSON record in its
+`record_json` field. The RRD is the only copy: read it with
+`selfcap_soma.quality.read_quality(path)`, on a fit or a layer. A flag means
 any median exceeds body 40 mm, shoulders 50 mm, ears 30 mm or Quest hands 15 mm,
 or a metric is missing. The body/ears/hands thresholds follow the batch review;
 50 mm is an explicit additional shoulder screening threshold. Equality passes.

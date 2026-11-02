@@ -128,7 +128,7 @@ def main(config: Config) -> None:
         ship(config.catalog_host, path, remote_path)
         candidate.register([remote_path.as_uri()], layer_name=layer, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     layout = work / f"{config.dataset}.rbl"
-    SelfcapDataset(SelfcapConfig()).default_blueprint(show_soma_mesh=True).save(config.dataset, str(layout))
+    SelfcapDataset(SelfcapConfig()).default_blueprint().save(config.dataset, str(layout))
     subprocess.run(["ssh", config.catalog_host, f"mkdir -p {shlex.quote(str(run / 'reports'))}"], check=True)
     subprocess.run(["scp", "-q", str(layout), f"{config.catalog_host}:{run}/default.rbl"], check=True)
     for path in (work / "out/calib").glob("*.json"):

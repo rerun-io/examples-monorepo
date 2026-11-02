@@ -5,6 +5,10 @@ from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
 
+MIN_OBSERVED_SCORE: float = 0.7
+"""Detector score a 2D keypoint needs to count as image evidence; the stored entities keep every score."""
+
+
 def observed_points(
     projected: Float64[ndarray, "n j 2"],
     detected: Float64[ndarray, "n j 2"],
@@ -13,7 +17,7 @@ def observed_points(
 ) -> Bool[ndarray, "n j"]:
     """A nearby confident image measurement supports an observed marker."""
     return (
-        (scores >= 0.7)
+        (scores >= MIN_OBSERVED_SCORE)
         & np.isfinite(projected).all(-1)
         & np.isfinite(detected).all(-1)
         & (np.linalg.norm(projected - detected, axis=-1) <= max_distance_px)

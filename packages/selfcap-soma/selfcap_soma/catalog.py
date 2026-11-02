@@ -64,6 +64,26 @@ def exo_columns(columns: list[str], source: ExoSource) -> tuple[str, str]:
     return matches[0]
 
 
+def exo_view_track(columns: list[str], camera: str, source: ExoSource) -> str | None:
+    """One camera's 2D detections for a source; None when it has none.
+
+    Align writes Sapiens2 detections to ``pinhole/pred/sapiens2`` and the keypoints layer writes the ones it
+    triangulated to ``pinhole/sapiens2``. The keypoints layer's track wins when a dataset holds both.
+    """
+    candidates: list[str] = [
+        name.split(":", 1)[0]
+        for name in columns
+        if name.startswith(camera + "/pinhole/")
+        and name.endswith("/coco133_uv:Points2D:positions")
+        and f"/{source}/" in name
+        and name.split(":", 1)[0] + ":simplecv.KeypointConfidence2D:confidences" in columns
+    ]
+    tracks: list[str] = [name for name in candidates if "/pred/" not in name] or candidates
+    if len(tracks) > 1:
+        raise ValueError(f"ambiguous {source} 2D tracks for {camera}: {tracks}")
+    return tracks[0] if tracks else None
+
+
 @serde
 @dataclass(frozen=True, slots=True)
 class SyncRecord:
@@ -80,7 +100,7 @@ class Observations:
     exo: Float64[ndarray, "n 133 3"]
     """World points; missing points are NaN."""
     confidence: Float64[ndarray, "n 133"]
-    """Mean inlier detector confidence, not inverse variance."""
+    """The source layer's per-joint confidence, not inverse variance: Kineo pairwise reprojection score in current keypoints layers, mean inlier detector score in older ones."""
     hands: Float64[ndarray, "n 133 3"]
     """Latency-corrected, validity-gated Quest world points."""
     head_positions: Float64[ndarray, "n 3"]
@@ -105,6 +125,21 @@ def subset(data: Observations, mask: Bool[ndarray, "n"]) -> Observations:
         head_rotations=data.head_rotations[mask],
         support=data.support[mask] if data.support is not None else None,
     )
+
+
+TORSO_JOINTS: list[int] = [5, 6, 11, 12]
+"""COCO shoulders and hips."""
+SHOULDER_JOINTS: list[int] = [5, 6]
+MIN_SHOULDER_VIEWS: int = 3
+"""Fewest supporting views on each shoulder of a well-observed frame. The hips are only required to be triangulated:
+they reach three views on 3-6.5 % of frames (easy26, d31), so a three-view hip rule selected 0-1 frames per segment."""
+
+
+def well_observed_torso(data: Observations) -> Bool[ndarray, "n"]:
+    """Frames whose four torso joints are all finite and whose shoulders each have at least MIN_SHOULDER_VIEWS views."""
+    if data.support is None:
+        raise ValueError("the torso gate needs support_view_count, which this triangulation layer does not hold")
+    return np.isfinite(data.exo[:, TORSO_JOINTS]).all((1, 2)) & (data.support[:, SHOULDER_JOINTS].min(1) >= MIN_SHOULDER_VIEWS)
 
 
 def seconds(values: pa.ChunkedArray) -> Float64[ndarray, "n"]:

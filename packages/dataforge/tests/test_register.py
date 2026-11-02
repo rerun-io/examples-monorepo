@@ -173,6 +173,23 @@ def test_a_run_retires_the_blueprint_entries_it_replaces(tmp_path: Path, catalog
     assert not any(path.exists() for path in old) and foreign.exists()
 
 
+def test_retiring_deletes_only_this_datasets_rbl_files(tmp_path: Path, catalog: FakeEntry) -> None:
+    """A listed entry goes off the catalog, but its file stays unless it is this dataset's own ``.rbl``: never a layer."""
+    make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
+    blueprint_dir: Path = (tmp_path / "blueprints").resolve()
+    blueprint_dir.mkdir()
+    mine: Path = blueprint_dir / "robocap-20260101-000000-000000.rbl"
+    other_dataset: Path = blueprint_dir / "other-20260101-000000-000000.rbl"
+    layer_file: Path = blueprint_dir / "robocap__a.rrd"
+    for path in (mine, other_dataset, layer_file):
+        path.write_bytes(b"x")
+    catalog.blueprint_rows = {"rec_mine": mine.as_uri(), "rec_other": other_dataset.as_uri(), "rec_layer": layer_file.as_uri()}
+    register.main(Config(dataset=RobocapConfig()))
+    assert sorted(catalog.unregistered) == ["rec_layer", "rec_mine", "rec_other"]
+    assert not mine.exists()
+    assert other_dataset.exists() and layer_file.exists()
+
+
 def test_back_to_back_runs_keep_only_the_latest_blueprints(tmp_path: Path, catalog: FakeEntry) -> None:
     """Two runs inside one second must not share file names, or the second deletes the files it just registered."""
     make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])

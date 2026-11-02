@@ -4,10 +4,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+from jaxtyping import Bool, Float64
+from numpy import ndarray
 from serde import serde
 from serde.json import to_json
 
-from selfcap_soma.catalog import Observations, read_window, subset
+from selfcap_soma.catalog import Observations, read_window, subset, well_observed_torso
 from selfcap_soma.fitting import Calibration, FitOptions, FitResult, fit
 from selfcap_soma.output import mapped, save
 
@@ -43,6 +45,12 @@ class Run:
     seconds: float
 
 
+def median_bone(name: str, observed_m: Float64[ndarray, "k"], fitted_m: Float64[ndarray, "k"]) -> Bone:
+    """Median lengths over the samples finite on both sides."""
+    valid: Bool[ndarray, "k"] = np.isfinite(observed_m) & np.isfinite(fitted_m)
+    return Bone(name, float(np.median(observed_m[valid]) * 1000), float(np.median(fitted_m[valid]) * 1000))
+
+
 def describe(name: str, data: Observations, result: FitResult) -> Run:
     points = mapped(result, data)
     rows = []
@@ -56,8 +64,7 @@ def describe(name: str, data: Observations, result: FitResult) -> Run:
     ):
         obs = np.concatenate([np.linalg.norm(data.exo[:, a] - data.exo[:, b], axis=-1) for a, b in pairs])
         pred = np.concatenate([np.linalg.norm(points[:, a] - points[:, b], axis=-1) for a, b in pairs])
-        valid = np.isfinite(obs) & np.isfinite(pred)
-        rows.append(Bone(label, float(np.median(obs[valid]) * 1000), float(np.median(pred[valid]) * 1000)))
+        rows.append(median_bone(label, obs, pred))
     for label, obs, pred in (
         (
             "shoulder to hip midpoint",
@@ -70,8 +77,7 @@ def describe(name: str, data: Observations, result: FitResult) -> Run:
             np.linalg.norm(data.head_positions - points[:, [5, 6]].mean(1), axis=-1),
         ),
     ):
-        valid = np.isfinite(obs) & np.isfinite(pred)
-        rows.append(Bone(label, float(np.median(obs[valid]) * 1000), float(np.median(pred[valid]) * 1000)))
+        rows.append(median_bone(label, obs, pred))
     lateral = data.exo[:, 5] - data.exo[:, 6]
     lateral[:, 1] = 0.0
     lateral /= np.linalg.norm(lateral, axis=-1, keepdims=True)
@@ -128,7 +134,7 @@ def main() -> None:
     baseline = fit(data, Path("/tmp/soma-fit/assets"), 400, 80)
     reports.append(describe("baseline", data, baseline))
     save(output / "baseline", data, baseline, 4.144, 3)
-    valid = (data.times < 25.0) & np.isfinite(data.exo[:, [5, 6, 11, 12]]).all((1, 2)) & (data.confidence[:, [5, 6, 11, 12]].min(1) >= 0.7)
+    valid = (data.times < 25.0) & well_observed_torso(data)
     indices = np.flatnonzero(valid)[::4]
     train = np.zeros(len(data.times), dtype=bool)
     train[indices] = True

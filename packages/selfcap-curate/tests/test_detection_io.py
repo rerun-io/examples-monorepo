@@ -132,6 +132,25 @@ def test_catalog_reader_uses_segment_layout_and_preserves_sparse_frames(tmp_path
 
 
 @pytest.mark.integration
+def test_align_and_calibrate_read_the_full_set_with_real_scores(tmp_path, fixture_sync, synthetic_base, private_server):
+    # read_phone_detections feeds align and calibrate, which apply their own gates: 0.69 must arrive as 0.69.
+    sync = replace(fixture_sync(), offsets_ms={"exo/Z": 0.0})
+    layout = SelfcapLayout(3, 4, ("Z", "A", "B"))
+    xy = np.arange(532, dtype=np.float64).reshape(2, 133, 2)
+    scores = np.full((2, 133), float(np.float16(0.9)))
+    scores[0, :2] = [float(np.float16(0.69)), float(np.float16(0.71))]
+    base = synthetic_base(tmp_path / "base.rrd", segment=sync.episode_key.segment, phones=layout.phones)
+    layer = tmp_path / sync.episode_key.rrd_name
+    write_detections_layer(layer, sync, layout, {"Z": PhoneDetections(np.array([0.04, 0.08]), xy, scores)})
+    with private_server({DATASET_NAME: [base]}) as server:
+        dataset = server.client().get_dataset(DATASET_NAME)
+        dataset.register([layer.resolve().as_uri()], layer_name="sapiens2").wait()
+        result = read_phone_detections(open_segment(dataset, sync.episode_key.segment))
+    np.testing.assert_array_equal(result["Z"].xy, xy)
+    np.testing.assert_array_equal(result["Z"].scores, scores)
+
+
+@pytest.mark.integration
 def test_catalog_reader_still_reads_layers_written_with_plain_confidence(tmp_path, fixture_sync, synthetic_base, private_server):
     # Layers written before Points2DWithConfidence keep their score in a plain "confidence" AnyValues column.
     import rerun as rr

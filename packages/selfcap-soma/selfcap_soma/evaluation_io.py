@@ -7,14 +7,15 @@ import numpy as np
 import pyarrow as pa
 from dataforge.clocks import nearest_framesets as nearest_indices
 from dataforge.oak_mount import read_oak_track
+from dataforge.triangulation import HEADSET_COVERED, Camera, EgoCamera
 from datafusion import col, lit
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.chunk import RrdReader
 
-from selfcap_soma.camera_geometry import Camera, EgoCamera
-from selfcap_soma.catalog import ExoSource, read_rigs, seconds
+from selfcap_soma.catalog import ExoSource, exo_view_track, read_rigs, seconds
+from selfcap_soma.overlay_style import MIN_OBSERVED_SCORE
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,21 +67,12 @@ def read_views(
         if missing:
             print(f"SKIP_CAMERA {segment} {camera}: missing calibration {missing}", flush=True)
             continue
-        candidates = [
-            name.split(":", 1)[0]
-            for name in columns
-            if name.startswith(camera + "/pinhole/")
-            and name.endswith("/coco133_uv:Points2D:positions")
-            and f"/{source}/" in name
-            and name.split(":", 1)[0] + ":simplecv.KeypointConfidence2D:confidences" in columns
-        ]
-        if not candidates:
+        track = exo_view_track(columns, camera, source)
+        if track is None:
             print(f"SKIP_CAMERA {segment} {camera}: no {source} 2D track", flush=True)
             continue
-        if len(candidates) != 1:
-            raise ValueError(f"ambiguous {source} 2D tracks for {camera}: {candidates}")
         calibrated.append(camera)
-        paths.append(candidates[0])
+        paths.append(track)
     samples = (
         None
         if not paths
@@ -108,7 +100,9 @@ def read_views(
         indices = nearest_indices(stamps, times)
         pixels = np.asarray(rows[position].to_pylist(), dtype=np.float64)[indices]
         scores = np.asarray(rows[f"{path}:simplecv.KeypointConfidence2D:confidences"].to_pylist(), dtype=np.float64)[indices]
-        valid = abs(stamps[indices] - times) < 0.021
+        # The stored entity keeps every detection; a view holds only joints fitting and scoring may use.
+        valid = (abs(stamps[indices] - times) < 0.021)[:, None] & (scores >= MIN_OBSERVED_SCORE)
+        valid[:, HEADSET_COVERED] = False
         pixels[~valid] = np.nan
         scores[~valid] = 0.0
         phones.append(PhoneView(Camera(matrix, pose, (0.0, 0.0), camera), camera.split("/")[2], pixels, scores))

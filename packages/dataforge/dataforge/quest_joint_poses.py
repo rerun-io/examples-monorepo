@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from jaxtyping import Float32, Int64
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
+from rerun.catalog import DatasetSelection
 
 from dataforge.records import read_csv_columns
 from dataforge.schema import CAPTURE_TIMELINE
@@ -88,7 +88,7 @@ def joint_rows(column: pa.ChunkedArray, width: int) -> Float32[ndarray, "n 26 wi
     return joints
 
 
-def read_segment_hand_poses(segment: DatasetEntry) -> dict[str, QuestJointPoses]:
+def read_segment_hand_poses(segment: DatasetSelection) -> dict[str, QuestJointPoses]:
     """A catalog segment's Quest joint poses (one query), on ``capture_time``: the raw Quest stamps."""
     entities = {side: quest_hand_path(side) for side in QUEST_HAND_SIDES}
     table = segment.filter_contents(list(entities.values())).reader(index=CAPTURE_TIMELINE).to_arrow_table()

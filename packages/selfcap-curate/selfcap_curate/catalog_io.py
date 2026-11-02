@@ -243,10 +243,14 @@ def read_phone_videos(
     return dict(zip(layout.phones, videos, strict=True))
 
 
-def native_phone_rate(segment: Segment) -> float:
-    """Median native phone rate, rounded as in the session runner."""
-    videos: dict[str, CatalogVideo] = read_phone_videos(segment)
+def median_rate(videos: dict[str, CatalogVideo]) -> float:
+    """Median frame rate over these videos, rounded as in the session runner."""
     return round(float(np.median([1e9 / float(np.median(np.diff(video.t_ns))) for video in videos.values()])), 3)
+
+
+def native_phone_rate(segment: Segment) -> float:
+    """Median native phone rate of a segment's capture-clock packets."""
+    return median_rate(read_phone_videos(segment))
 
 
 def factory_rigs(layout: SelfcapLayout) -> tuple[int, ...]:

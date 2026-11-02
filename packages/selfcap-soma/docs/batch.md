@@ -17,6 +17,11 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 pixi run -e selfcap-soma --frozen python \
   --exo-source rtmw
 ```
 
+`--spark-dir` chooses the mode. With it, each finished layer is shipped to that
+absolute directory and registered as `soma`. Without it, all output stays under
+`--output`, nothing is shipped or registered, and the caller registers
+`<output>/<dataset>/<segment>/<segment>.rrd`. The pixi task is `soma-batch`.
+
 First review this one example before launching the corpus. For multiple
 segments, pass several values after `--segment`, or `--segments-file /path/ids.txt`
 (one ID per line, optional blank lines and `#` comments). A process handles its
@@ -43,18 +48,31 @@ and residual-scaled per-view evidence overlays are retained.
 
 Default checkpoint root: `/tmp/soma-batch/<dataset>/<segment>/`. Keep it on a
 persistent disk if `/tmp` is cleared overnight; override with `--output`.
-`checkpoint.json` records completed stages and timings. Input/calibration/raw
-orientation/settings changes invalidate the cache. Interrupted stages rerun;
-completed shape/fit/export stages are reused. Completed layers are SHA-256
-checked. A matching completed local rerun took 0.96 s with `--no-publish`.
-With publishing enabled, resume re-ships and re-registers the same layer so it
+`checkpoint.json` records completed stages and timings, and `calibration.json`
+holds the finished shape pass. Input/calibration/raw orientation/settings changes
+invalidate the cache, and a checkpoint in an older format starts over.
+Interrupted stages rerun; completed shape and layer stages are reused. The pose
+fit and the layer are one stage: the layer is written straight from the fit in
+memory, with no `fit.rrd`, so an interruption before the layer is complete refits
+the pose from `calibration.json`. Completed layers are SHA-256 checked. A matching completed local rerun took 0.96 s without `--spark-dir`.
+With `--spark-dir`, resume re-ships and re-registers the same layer so it
 also works after a remote file loss or catalog restart. `--force` refits.
 A local advisory lock rejects duplicate simultaneous work on the same segment.
+Each segment prints one `SOMA_TIME <segment> catalog_s=… shape_s=… fit_s=… layer_s=…
+ship_s=… register_s=… total_s=… peak_gpu_mib=…` line.
+
+Up to four `soma-batch` processes can run at once on different segments: each one
+writes only under its own `<output>/<dataset>/<segment>/`, takes that directory's
+lock, and treats the assets as read-only. `shape-frames.json`, `report.json`,
+`jitter.json` and `hand-orientation-source.json` stay beside the checkpoint as
+run diagnostics. The GPU is the shared resource: a process counts its own peak
+allocation in `peak_gpu_mib`, so check the sum against the card.
 
 Only `soma` is registered, with REPLACE, at
 `file://<spark-dir>/<segment>.rrd`. Upload uses a temporary file and atomic
-rename. `--no-publish` keeps all artifacts local. Protected datasets
-`selfcap-post-ep1` and `dataforge-selfcap` are rejected.
+rename. Without `--spark-dir` all artifacts stay local. Protected datasets
+`selfcap-post-ep1` and `dataforge-selfcap` are rejected in both modes, and a
+relative `--spark-dir` is rejected.
 
 ## Measured performance
 
@@ -133,8 +151,9 @@ where that source's evidence does not pass the visibility rule. No full gate.
 ## Opt-in local cleanup
 
 Add `--cleanup-after-publish` to release heavy SOMA files for a completed
-segment. The flag is off by default. It deletes only `fit.rrd`,
-`<segment>.rrd`, and `<segment>.pending.rrd` directly in that segment's output
+segment. The flag is off by default and requires `--spark-dir`; without it the
+batch exits nonzero before any work. It deletes only `<segment>.rrd`, a killed
+writer's `*.rrd.tmp`, and a `fit.rrd` left by an older run, directly in that segment's output
 directory. JSON reports, calibration, checkpoint, logs, screenshots and any
 unrecognized files remain. It does not remove source/corpus files or recurse
 into other output directories, and it refuses symlink artifacts.
@@ -148,7 +167,8 @@ intent before unlinking, so an interrupted cleanup can finish safely on resume.
 A cleaned published checkpoint resumes by checking the remote file and catalog
 again; it does not require or regenerate deleted local RRDs. Missing/replaced
 remote output fails explicitly; use `--force` to refit if recovery is needed.
-`--no-publish` never cleans local artifacts. Changing the cleanup flag does not
+A local run never cleans local artifacts, and it fails on a cleaned checkpoint:
+pass `--spark-dir` to verify the publication, or `--force` to refit. Changing the cleanup flag does not
 invalidate an existing fit. Cleanup does not change the fitting algorithm.
 
 Validation: temporary-file tests cover the allowlist, preserved reports/logs,
@@ -156,3 +176,36 @@ failed/unverified publication, read-only calls and symlinks. Live read-only
 verification of d31 succeeded, then a synthetic cleaned checkpoint with no
 local RRD resumed successfully in 4.94 s. No d31 evidence was deleted and no
 corpus job was launched for these checks.
+
+## Reduced-LOD layer: `soma-xlo`
+
+`soma-xlo` writes `/world/pred/soma_x/mesh_xlo`, the fitted body at SOMA-X's xlo
+LOD, with no refit. It only writes `<output-dir>/<segment>.rrd`; the caller ships
+and registers it. It refuses an existing file. CPU only.
+
+```bash
+pixi run -e selfcap-soma --frozen soma-xlo \
+  --soma-dir /tmp/soma-batch --dataset selfcap-post-dev \
+  --segment selfcap__2025-12-03__d31bf1da__ep001 selfcap__2025-12-04__5cb1e14c__ep001 \
+  --assets /tmp/soma-fit/assets --output-dir /tmp/soma-xlo
+```
+
+One process handles every segment on its command line and loads the rest meshes once.
+
+Each xlo vertex takes the per-frame position of its nearest low-LOD vertex in the
+neutral rest pose (zero identity, zero pose, no correctives, computed from
+`--assets` at run time). An xlo vertex whose nearest low vertex lies below the
+waist is dropped, with its faces. Normals are recomputed, area-weighted.
+
+The only input is the registered layer file `<soma-dir>/<dataset>/<segment>/<segment>.rrd`:
+its per-frame crop vertices and its static `/__soma/upper_body_vertices` (component
+`vertex_ids`), the low-LOD ids of the crop. That entity lies outside `/world` and has no
+visualizer, so no view shows it. A segment without them fails: this includes
+any segment run with `--cleanup-after-publish`, which deletes the file, and any layer written
+before this entity existed, which needs a refit. Each
+segment prints one line, `soma_xlo ok` or `soma_xlo FAIL`; a failed segment
+exits 1 after the others finish.
+
+On all 26 `selfcap-easy26-r3` segments, the crop in the fit matched the crop recovered from
+stored faces, and the output matched the 26 registered files: identical vertex positions,
+timestamps and faces, normals within 2.4e-6. That check predates this entity. Recovery from stored faces is not in this package.

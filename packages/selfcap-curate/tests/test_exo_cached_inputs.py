@@ -6,7 +6,8 @@ import rerun as rr
 from dataforge.hands import log_keypoints2d
 
 from selfcap_curate.apis.exo_label import Config
-from selfcap_curate.exo_refine_catalog import read_rtmw_recording
+from selfcap_curate.exo_refine_catalog import confident_body, read_rtmw_recording
+from selfcap_curate.keypoints import HEADSET_COVERED
 
 
 def test_cached_cli_requires_original_rtmw_recording(tmp_path):
@@ -55,3 +56,21 @@ def test_original_rtmw_reader_preserves_weak_points_and_physical_rigs(tmp_path):
         read_rtmw_recording(path, 'wrong-episode', (0,))
     with pytest.raises(ValueError, match="rig_01"):
         read_rtmw_recording(path, 'episode', (1,))
+
+
+def test_refinement_applies_its_own_threshold_to_the_uncensored_rtmw_entity(tmp_path):
+    path = tmp_path/'original.rrd'
+    xy = np.ones((1, 133, 2), dtype=np.float32)
+    scores = np.full((1, 133), .9, dtype=np.float32)
+    scores[0, [5, 6]] = [.69, .71]
+    with rr.RecordingStream('test', recording_id='episode', send_properties=False) as recording:
+        recording.save(path)
+        log_keypoints2d(recording, '/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv',
+                        times_ns=np.array([1], dtype=np.int64), frame_indices=None, positions=xy, confidence=scores,
+                        shown=scores >= .7)
+        recording.flush()
+    body = confident_body(read_rtmw_recording(path, 'episode', (0,))[0])
+    assert np.isnan(body.xy[0, 5]).all() and body.scores[0, 5] == 0.0
+    np.testing.assert_array_equal(body.xy[0, 6], [1.0, 1.0])
+    assert body.scores[0, 6] == pytest.approx(.71)
+    assert np.isnan(body.xy[0, HEADSET_COVERED]).all() and (body.scores[0, HEADSET_COVERED] == 0.0).all()

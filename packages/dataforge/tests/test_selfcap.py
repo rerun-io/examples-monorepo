@@ -306,6 +306,8 @@ def test_default_blueprint_shows_the_raw_capture_before_calibration() -> None:
         # Sapiens2 shows only its points at or above 0.7; the full set stays in the data, hidden.
         overrides = views[name].visualizer_overrides
         assert overrides[f"/world/rig_{rig:02d}/cam_00/pinhole/pred/sapiens2/coco133_uv"] == rrb.EntityBehavior(visible=False)
+        assert overrides[f"/world/rig_{rig:02d}/cam_00/pinhole/pred/rtmw/coco133_uv"] == rrb.EntityBehavior(visible=False)
+        assert overrides[f"/world/rig_{rig:02d}/cam_00/pinhole/sapiens2/coco133_uv"] == rrb.EntityBehavior(visible=False)
         assert f"/world/rig_{rig:02d}/cam_00/pinhole/pred/sapiens2/coco133_uv_min70" not in overrides
         sound = views[f"{name} · sound"]
         assert isinstance(sound, rrb.AudioView)
@@ -318,28 +320,38 @@ def test_default_blueprint_shows_the_raw_capture_before_calibration() -> None:
 
 def test_default_blueprint_draws_the_hands_and_body_through_posed_phones() -> None:
     # After calibrate the phones have poses: their cameras show in 3D and every overlay projects through them.
-    for show_soma_mesh in (False, True):
-        views = {str(view.name): view for view in blueprint_views(SelfcapDataset(SelfcapConfig()).default_blueprint(show_soma_mesh=show_soma_mesh))}
-        scene_contents: list[str] = cast(list[str], views["Scene"].contents)
-        assert "- /world/rig_00/**" not in scene_contents
-        for rig, cam in HEAD_CAMERAS.values():
-            assert f"+ /world/rig_{rig:02d}/cam_{cam:02d}/pinhole" in scene_contents
-        for name, rig in PHONES.items():
-            pinhole: str = f"/world/rig_{rig:02d}/cam_00/pinhole"
-            assert not [rule for rule in scene_contents if rule.startswith(f"- {pinhole}")], "each posed phone shows its video in 3D"
-            contents: list[str] = cast(list[str], views[name].contents)
-            assert contents[:4] == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**"]
-            # The other rigs' camera frames and names project into each phone (cam nodes only: no frustum or video).
-            others = [r for r in range(6) if r != rig]
-            assert {f"/world/rig_{r:02d}/cam_00/rig_label" for r in others if r < 4} <= set(contents)
-            assert {"/world/rig_04/cam_01", "/world/rig_04/cam_02", "/world/rig_05/cam_01"} <= set(contents)
-            assert not [c for c in contents[4:] if c.startswith(f"/world/rig_{rig:02d}/")], "not its own frame"
-            hidden = views[name].visualizer_overrides
-            for overlay in ("pred", "sapiens2", "coco133_uv_projected", "quest_coco133_uv_projected"):
-                assert hidden[f"{pinhole}/{overlay}"] == rrb.EntityBehavior(visible=False)
-            assert hidden["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=show_soma_mesh)
-        assert ("/world/pred/soma_x/mesh" in views["Scene"].visualizer_overrides) == show_soma_mesh
-        assert views["Scene"].visualizer_overrides["/world/rig_00/cam_00/pinhole/skeleton"] == rrb.EntityBehavior(visible=False)
+    views = {str(view.name): view for view in blueprint_views(SelfcapDataset(SelfcapConfig()).default_blueprint())}
+    scene_contents: list[str] = cast(list[str], views["Scene"].contents)
+    assert "- /world/rig_00/**" not in scene_contents
+    for rig, cam in HEAD_CAMERAS.values():
+        assert f"+ /world/rig_{rig:02d}/cam_{cam:02d}/pinhole" in scene_contents
+    for name, rig in PHONES.items():
+        pinhole: str = f"/world/rig_{rig:02d}/cam_00/pinhole"
+        assert not [rule for rule in scene_contents if rule.startswith(f"- {pinhole}")], "each posed phone shows its video in 3D"
+        contents: list[str] = cast(list[str], views[name].contents)
+        assert contents[:4] == [f"{pinhole}/**", "/world/gt/**", "/world/pred/**", "/world/skeleton/**"]
+        # The other rigs' camera frames and names project into each phone (cam nodes only: no frustum or video).
+        others = [r for r in range(6) if r != rig]
+        assert {f"/world/rig_{r:02d}/cam_00/rig_label" for r in others if r < 4} <= set(contents)
+        assert {"/world/rig_04/cam_01", "/world/rig_04/cam_02", "/world/rig_05/cam_01"} <= set(contents)
+        assert not [c for c in contents[4:] if c.startswith(f"/world/rig_{rig:02d}/")], "not its own frame"
+        hidden = views[name].visualizer_overrides
+        for overlay in ("pred", "sapiens2", "coco133_uv_projected", "quest_coco133_uv_projected"):
+            assert hidden[f"{pinhole}/{overlay}"] == rrb.EntityBehavior(visible=False)
+        assert hidden["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
+    assert views["Scene"].visualizer_overrides["/world/pred/soma_x/mesh"] == rrb.EntityBehavior(visible=True)
+    assert views["Scene"].visualizer_overrides["/world/rig_00/cam_00/pinhole/skeleton"] == rrb.EntityBehavior(visible=False)
+
+
+def test_each_oak_pane_draws_the_skeleton_written_beneath_its_own_pinhole() -> None:
+    views = {str(view.name): view for view in blueprint_views(SelfcapDataset(SelfcapConfig()).default_blueprint())}
+    for name in ("OAK rgb", "OAK left", "OAK right"):
+        rig, cam = HEAD_CAMERAS[name]
+        skeleton: str = f"/world/rig_{rig:02d}/cam_{cam:02d}/pinhole/skeleton"
+        assert cast(list[str], views[name].contents)[0] == f"/world/rig_{rig:02d}/cam_{cam:02d}/pinhole/**"
+        assert "/world/skeleton/**" not in cast(list[str], views[name].contents), "the OAK lens model is in its own 2D skeleton, not the viewer's pinhole"
+        assert skeleton not in views[name].visualizer_overrides
+        assert views["Scene"].visualizer_overrides[skeleton] == rrb.EntityBehavior(visible=False)
 
 
 def calibration_document(layouts: tuple[str, ...]) -> str:
@@ -793,18 +805,18 @@ def test_table_card_decodes_one_video_and_follows_the_phone_poses() -> None:
         assert ("/world/skeleton/**" in cast(list[str], camera.contents)) == posed_phones
 
 
-def test_table_fields_keep_the_capture_and_quality_summary_compact() -> None:
+def test_table_fields_show_only_the_session_phones_and_soma_quality_sorted_by_session() -> None:
+    # The rank and refined columns no longer exist; the collector's name never shows, even before a layer provides it.
     fields = SelfcapConfig().setup().table_fields()
-    assert [(field.column, field.name) for field in fields.cards] == [
-        ("property:summary:quality_rank", "Quality rank"),
+    expected = [
         ("property:calib:session", "Capture / session"),
         ("property:calib:exo_cameras", "Phones"),
-        ("property:calib:calib_exo_refined", "Refined"),
         ("property:soma_quality:status", "SOMA quality"),
     ]
-    assert len(fields.table) == 9
-    assert {field.column for field in fields.cards} <= {field.column for field in fields.table}
-    assert {field.name for field in fields.table} >= {"OAK posed", "OAK rotation", "Frames", "Session UUID"}
+    assert [(field.column, field.name) for field in fields.cards] == expected
+    assert [(field.column, field.name) for field in fields.table] == expected
+    assert fields.hidden == ("property:capture:collector",)
+    assert fields.sort_by == "property:calib:session"
 
 
 def factory_extrinsic(kind: str, rotation: list[list[float]], translation: list[float]) -> dict:

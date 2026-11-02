@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import rerun as rr
+from dataforge.hands import sparse_keypoint_columns
 from dataforge.logging_toolkit import capture_column, time_column
 from dataforge.schema import SHOWN_MIN_CONFIDENCE, coco133_uv_path, coco133_uv_shown_path
 from dataforge.writing import APPLICATION_ID, atomic_write
@@ -14,12 +15,12 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 from rerun.chunk import Chunk, LazyChunkStream, OptimizationProfile
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
-from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 
+from selfcap_curate.display_style import SKELETON_LINK_RGB
 from selfcap_curate.records import OAK_CAMERAS, OakDetections, PhoneDetections, SelfcapLayout, TimeSync
 
 COCO133_CLASS: rr.ClassDescription = rr.ClassDescription(
-    info=rr.AnnotationInfo(id=0, label="COCO-133"),
+    info=rr.AnnotationInfo(id=0, label="COCO-133", color=SKELETON_LINK_RGB),
     keypoint_annotations=[rr.AnnotationInfo(id=i, label=name) for i, name in COCO_133_ID2NAME.items()],
     keypoint_connections=COCO_133_LINKS,
 )
@@ -107,15 +108,7 @@ def write_detections_layer(path: Path, sync: TimeSync, layout: SelfcapLayout, de
                 # 3 px dots without labels, as dataforge.hands draws COCO-133 keypoints; the default dots vanish under the links.
                 yield Chunk.from_columns(path, indexes=[], columns=rr.Points2D.columns(radii=[3.0], show_labels=[False]))
                 # The raw score rides as Points2DWithConfidence; each point wears the shared red-to-green score colour.
-                kept: Float32[ndarray, "n"] = scores[keep]
-                columns = Points2DWithConfidence.columns(
-                    positions=xy[keep],
-                    confidences=kept,
-                    keypoint_ids=np.broadcast_to(np.arange(133, dtype=np.uint16), scores.shape)[keep],
-                    class_ids=np.zeros(kept.size, dtype=np.int32),
-                    colors=confidence_scores_to_rgb(kept.reshape(1, -1, 1))[0],
-                ).partition(keep.sum(axis=1).tolist())
-                yield Chunk.from_columns(path, indexes=[capture_column(stamps), time_column(stamps + offset_ns)], columns=columns)
+                yield Chunk.from_columns(path, indexes=[capture_column(stamps), time_column(stamps + offset_ns)], columns=sparse_keypoint_columns(xy, scores, keep))
 
     with atomic_write(path) as target:
         LazyChunkStream.from_iter(chunks()).collect(optimize=OptimizationProfile.OBJECT_STORE).write_rrd(

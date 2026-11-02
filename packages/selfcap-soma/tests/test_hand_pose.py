@@ -1,5 +1,9 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
+import rerun as rr
+from dataforge.quest_joint_poses import read_segment_hand_poses
 
 from selfcap_soma.hand_pose import frame
 
@@ -121,3 +125,21 @@ def test_a_hand_absent_from_the_base_is_marked_none():
     observed = read_orientations({}, np.array([0.02, 0.03]), 0.0)
     assert observed.sources == ("none", "none")
     assert not observed.valid.any()
+
+
+def test_segment_hand_poses_read_from_a_filtered_catalog_segment(tmp_path: Path) -> None:
+    """The batch passes ``dataset.filter_segments(segment)``, which dev-env type checks must accept."""
+    segment = "selfcap__2025-12-03__d31bf1da__ep001"
+    source = tmp_path / f"{segment}.rrd"
+    recording = rr.RecordingStream("hint-test", recording_id=segment)
+    recording.save(source)
+    recording.set_time("capture_time", duration=np.timedelta64(5, "ms"))
+    recording.log("/world/gt/quest_hands/left", rr.InstancePoses3D(translations=np.full((26, 3), 0.25, dtype=np.float32)))
+    recording.flush()
+    recording.disconnect()
+    with rr.server.Server(host="127.0.0.1", port=0, datasets={"hint-test": [source]}) as server:
+        dataset = server.client().get_dataset("hint-test")
+        hands = read_segment_hand_poses(dataset.filter_segments(segment))
+    assert set(hands) == {"left"}
+    assert hands["left"].times_ns.tolist() == [5_000_000]
+    assert hands["left"].positions[0, 25].tolist() == [0.25, 0.25, 0.25]

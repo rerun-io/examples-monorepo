@@ -5,19 +5,16 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
-import pyarrow as pa
 from dataforge.logging_toolkit import time_column
+from dataforge.oak_mount import StaticCamera, read_rig_track, read_static_cameras
 from dataforge.schema import rig_path
+from dataforge.triangulation import Camera, EgoCamera, camera_transforms, project
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun import Points2D
 from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk
-from scipy.spatial.transform import Rotation
 from simplecv.catalog_rig_layout import catalog_components
-from simplecv.rrd_query_utils import first_valid_value
-
-from selfcap_curate.keypoints import Camera, EgoCamera, camera_transforms, project
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,45 +32,23 @@ class CenterTrack:
 
 
 def read_quest_centers(calibration: DatasetEntry, base: DatasetEntry, segment: str, rig: int) -> list[CenterTrack]:
-    """Use the base's left-eye head track and the calib layer's resolved Quest extrinsics."""
+    """The base's left-eye head track and each Quest camera's extrinsic, calib over base: the factory right eye of a healthy
+    headset is in the base, a borrowed camera 50 in the calib layer."""
     path: str = rig_path(rig)
     view = base.filter_segments(segment)
     videos: set[str] = {item.entity_path for item in catalog_components(view.schema()) if item.archetype == "VideoStream"}
-    if not any(f"{path}/cam_{cam:02d}/pinhole/video" in videos for cam in (0, 1)):
+    cameras: dict[int, str] = {cam: f"{path}/cam_{cam:02d}" for cam in (0, 1) if f"{path}/cam_{cam:02d}/pinhole/video" in videos}
+    track: tuple[Float64[ndarray, "p"], Float64[ndarray, "p 4 4"]] | None = read_rig_track(view, path) if cameras else None
+    if track is None or len(track[0]) < 2:
         return []
-    poses: pa.Table = (
-        view.filter_contents(path)
-        .reader(index="video_time")
-        .select("video_time", f"{path}:Transform3D:translation", f"{path}:Transform3D:quaternion")
-        .to_arrow_table()
-    )
-    poses = poses.filter(poses[f"{path}:Transform3D:quaternion"].is_valid())
-    if len(poses) < 2:
-        return []
-    stamps: Float64[ndarray, "p"] = poses["video_time"].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64) * 1e-9
-    transforms: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(poses), 1, 1))
-    transforms[:, :3, 3] = np.asarray(poses[f"{path}:Transform3D:translation"].to_pylist(), dtype=np.float64).reshape(-1, 3)
-    transforms[:, :3, :3] = Rotation.from_quat(
-        np.asarray(poses[f"{path}:Transform3D:quaternion"].to_pylist(), dtype=np.float64).reshape(-1, 4)
-    ).as_matrix()
-    extrinsics: pa.Table = (
-        calibration.filter_segments(segment).filter_contents([f"{path}/cam_00", f"{path}/cam_01"]).reader(index=None).to_arrow_table()
-    )
+    static: dict[str, StaticCamera] = read_static_cameras(calibration.filter_segments(segment), view, list(cameras.values()))
     result: list[CenterTrack] = []
-    for cam in (0, 1):
-        camera: str = f"{path}/cam_{cam:02d}"
-        if f"{camera}/pinhole/video" not in videos:
-            continue
-        matrix: Float64[ndarray, "4 4"] = np.eye(4)
-        if cam == 1 or f"{camera}:Transform3D:translation" in extrinsics.column_names:
-            translation: str = f"{camera}:Transform3D:translation"
-            rotation: str = f"{camera}:Transform3D:mat3x3"
-            if translation not in extrinsics.column_names or rotation not in extrinsics.column_names:
-                continue  # Unresolved faulty-left mode must not invent a camera-50 baseline.
-            matrix[:3, 3] = np.asarray(first_valid_value(extrinsics[translation]), dtype=np.float64).reshape(3)
-            matrix[:3, :3] = np.asarray(first_valid_value(extrinsics[rotation]), dtype=np.float64).reshape(3, 3).T
-        label: str = "Quest L" if cam == 0 else "Quest R" if f"{path}/cam_00/pinhole/video" in videos else "Quest 50"
-        result.append(CenterTrack(label, "quest", stamps, transforms, matrix))
+    for cam, camera in cameras.items():
+        matrix: Float64[ndarray, "4 4"] | None = static[camera].rig_T_cam
+        if matrix is None and cam == 1:
+            continue  # Unresolved faulty-left mode must not invent a camera-50 baseline.
+        label: str = "Quest L" if cam == 0 else "Quest R" if 0 in cameras else "Quest 50"
+        result.append(CenterTrack(label, "quest", track[0], track[1], np.eye(4) if matrix is None else matrix))
     return result
 
 

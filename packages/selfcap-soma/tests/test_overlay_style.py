@@ -12,6 +12,11 @@ def test_only_confident_nearby_finite_detections_are_observed() -> None:
     np.testing.assert_array_equal(observed_links(seen, np.array([[0, 1], [0, 0]])), [[False, True]])
 
 
+def test_observed_points_applies_its_own_threshold_to_uncensored_scores() -> None:
+    points = np.zeros((1, 2, 2))
+    np.testing.assert_array_equal(observed_points(points, points, np.array([[0.69, 0.71]])), [[False, True]])
+
+
 def test_residual_tolerance_scales_with_depth_without_accepting_low_confidence() -> None:
     from selfcap_soma.overlay_style import residual_tolerance
 

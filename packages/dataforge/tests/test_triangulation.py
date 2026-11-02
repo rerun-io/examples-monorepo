@@ -1,26 +1,7 @@
-import ast
-from pathlib import Path
-
 import numpy as np
-import pytest
 import torch
 
-pytest.importorskip("cv2", reason="requires OpenCV projection backend")
-from selfcap_soma.camera_geometry import Camera, project, triangulate_frames
-
-
-def test_reused_geometry_matches_source_ast():
-    root = Path(__file__).resolve().parents[3]
-    original = ast.parse((root / "packages/selfcap-curate/selfcap_curate/keypoints.py").read_text())
-    reused = ast.parse((root / "packages/selfcap-soma/selfcap_soma/camera_geometry.py").read_text())
-    names = {"Camera", "EgoCamera", "TriangulationBatch", "camera_transforms", "project", "project_ego", "triangulate_frames"}
-    original_nodes = {
-        n.name: ast.dump(n, include_attributes=False) for n in original.body if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name in names
-    }
-    reused_nodes = {
-        n.name: ast.dump(n, include_attributes=False) for n in reused.body if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name in names
-    }
-    assert reused_nodes == original_nodes
+from dataforge.triangulation import Camera, project, triangulate_frames
 
 
 def test_two_view_triangulation_recovers_point_without_third_view(monkeypatch):

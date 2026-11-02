@@ -18,7 +18,7 @@ The objective remains a simultaneous, offline fit over the whole segment.
 Dataset `selfcap-post-ep1-v2`, RTMW, 4,367 frames, fresh per-segment shape,
 600 pose iterations. Before is the runner's original batch output under
 `/tmp/soma-batch/selfcap-post-ep1-v2/selfcap__2025-12-03__d31bf1da__ep001`.
-After is the exact new batch CLI with defaults and `--no-publish`, under
+After is the batch CLI with defaults and without `--spark-dir` (local mode), under
 `/tmp/soma-fit/body-smooth/batch/selfcap-post-ep1-v2/selfcap__2025-12-03__d31bf1da__ep001`.
 The existing catalog layer was not replaced during this validation.
 

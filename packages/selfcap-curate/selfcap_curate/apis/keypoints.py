@@ -15,6 +15,7 @@ from selfcap_curate.catalog_io import (
     DATASET_NAME,
     Segment,
     SessionVideos,
+    median_rate,
     open_segment,
     read_catalog_hands,
     read_phone_videos,
@@ -39,13 +40,15 @@ from selfcap_curate.records import EpisodeKey, TimeSync
 @dataclass
 class Config:
     calib_dir: Path  # Read-only selfcap-calibrate files whose camera values own the output.
-    output_dir: Path  # Per-episode outputs; Sapiens2 contains only its new keypoint layer. Existing targets refused.
-    rate: float  # Explicit common aligned sampling frequency in Hz.
+    output_dir: Path  # Per-episode keypoints layers (calibration + keypoints). Existing targets refused.
+    rate: float | None = None
+    """Common aligned sampling frequency in Hz; None uses each episode's median native phone rate."""
     segment_ids: tuple[str, ...] = ()  # Explicit segment ids or unprefixed episode keys of one session.
     key_file: Path | None = None  # Optional newline-separated ids, combined with segment_ids.
     catalog_url: str = CATALOG_URL  # Read-only catalog containing patched bases, videos, clocks and anchors.
+    dataset: str = DATASET_NAME  # Dataset on catalog_url holding those bases, as in calibrate.
     model: PoseModel = "rtmw"
-    """2D estimator; Sapiens2 writes an isolated layer without calibration chunks."""
+    """2D estimator: RTMW-x by default; sapiens2 selects Sapiens2 0.4B NVFP4 and writes its keypoints under sapiens2/ instead."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,8 @@ class KeypointEpisode:
     """Base segment and its discovered physical layout."""
     sync: TimeSync
     """Validated alignment record."""
+    rate: float
+    """Aligned sampling frequency in Hz."""
     cameras: dict[str, Camera]
     """Calibrated phones with usable offsets."""
     ego: tuple[EgoCamera, ...]
@@ -65,7 +70,7 @@ class KeypointEpisode:
 
 
 def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
-    """Infer then triangulate; Sapiens2 emits a separate layer. Never register or swap."""
+    """Infer then triangulate into one keypoints layer per episode. Never register or swap."""
     _, keys, dataset = open_session(
         config.segment_ids,
         config.key_file,
@@ -75,6 +80,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
         source=config.calib_dir,
         new_directory=False,
         rate=config.rate,
+        dataset=config.dataset,
     )
     processable: list[KeypointEpisode] = []
     files = [config.calib_dir / key.rrd_name for key in keys]
@@ -98,7 +104,10 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
                 quest: list[CenterTrack] = read_quest_centers(calibration, dataset, segment.id, segment.layout.quest_rig)
                 videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time", sync=sync)
                 centers: tuple[Chunk, ...] = tuple(camera_center_chunks(cameras, ego, quest, {phone: video.t_ns for phone, video in videos.items()}))
-                processable.append(KeypointEpisode(key, segment, sync, cameras, ego, centers))
+                # A phone's video_time is its capture_time plus one constant, so these packets hold the native spacing: no second read.
+                rate: float = config.rate if config.rate is not None else median_rate(videos)
+                print("KEYPOINTS_RATE", key, rate, flush=True)
+                processable.append(KeypointEpisode(key, segment, sync, rate, cameras, ego, centers))
     if not processable:
         return
     detector, pose = keypoint_models() if config.model == "rtmw" else keypoint_models(config.model)
@@ -106,7 +115,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
     for episode in processable:
         key = episode.key
         with timer.stage(f"{key}/detect"):
-            detections = detect_keypoints(episode.segment, detector, pose, rate=config.rate, sync=episode.sync)
+            detections = detect_keypoints(episode.segment, detector, pose, rate=episode.rate, sync=episode.sync)
         if episode.segment.hands is None and (episode.sync.offsets_ms or {}).get("quest_pose") is not None:
             episode = replace(episode, segment=replace(episode.segment, hands=read_catalog_hands(episode.segment)))
         with timer.stage(f"{key}/triangulate"):

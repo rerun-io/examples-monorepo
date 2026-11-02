@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from dataforge.quest_joint_poses import read_segment_hand_poses
+from rerun.catalog import CatalogClient
 from serde import serde
 from serde.json import from_json, to_json
 from soma.body import SOMALayer
@@ -13,8 +15,6 @@ from selfcap_soma.catalog import read_window
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_diagnostics import Plausibility, measure
 from selfcap_soma.hand_pose import read_orientations
-from dataforge.quest_joint_poses import read_segment_hand_poses
-from rerun.catalog import CatalogClient
 from selfcap_soma.output import save
 
 
@@ -79,7 +79,7 @@ def main() -> None:
         direction = data.exo[:, key] - data.exo[:, elbow]
         direction /= np.linalg.norm(direction, axis=-1, keepdims=True)
         wrist.append(float(np.nanmedian(np.sum((data.hands[:, side] - data.exo[:, key]) * direction, axis=-1)) * 1000))
-    (root / "diagnosis.json").write_text(to_json(Diagnosis(before, twist_only, after, wrist, str(raw))))
+    (root / "diagnosis.json").write_text(to_json(Diagnosis(before, twist_only, after, wrist, "selfcap-post-dev/selfcap__2025-12-03__d31bf1da__ep001")))
     save(root, data, result, 4.144, 3)
     # Store only selected-frame geometry for the close-up screenshot producer.
     import rerun as rr

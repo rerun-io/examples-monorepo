@@ -10,7 +10,7 @@ from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.catalog_video import CatalogVideo
 
-from selfcap_curate.catalog_io import Segment, native_phone_rate, read_catalog_hands, read_phone_videos
+from selfcap_curate.catalog_io import Segment, median_rate, native_phone_rate, read_catalog_hands, read_phone_videos
 from selfcap_curate.records import CatalogHands, SelfcapLayout, TimeSync
 
 
@@ -31,6 +31,14 @@ def test_cached_phone_packets_keep_capture_clock_and_retime_without_copies(fixtu
     assert aligned["A"].keyframes is video.keyframes
     assert aligned["A"].codec == video.codec
     assert native_phone_rate(segment) == 30.0
+
+
+def test_median_rate_takes_the_middle_phone_of_the_videos_it_is_given() -> None:
+    def video(spacing_ns: int) -> CatalogVideo:
+        times: Shaped[ndarray, "3"] = np.array([0, spacing_ns, 2 * spacing_ns], dtype="timedelta64[ns]")
+        return CatalogVideo(times, [np.array([1], dtype=np.uint8)] * 3, [True, False, False], "av1")
+
+    assert median_rate({"A": video(41_666_667), "B": video(33_333_333), "C": video(16_666_667)}) == 30.0
 
 
 def test_cached_quest_samples_keep_capture_clock(fixture_sync: Callable[..., TimeSync]) -> None:

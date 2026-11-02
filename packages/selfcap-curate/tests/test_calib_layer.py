@@ -17,6 +17,7 @@ from selfcap_curate.apis.calibrate import Config, main
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
 from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
 from selfcap_curate.exo_refine import Refinement
+from selfcap_curate.exo_refine_catalog import Gate, Score
 from selfcap_curate.factory import QuestBlock
 from selfcap_curate.records import CatalogHands, ExoFit, GyroFit, OakDetections, OakFit, PhoneDetections, SelfcapLayout, write_sync
 
@@ -275,7 +276,7 @@ def test_failed_calibration_is_unpublished_and_retryable(calibration_call, monke
     failed = False
     written = []
 
-    def layer(path, *_args):
+    def layer(path, *_args, **_kwargs):
         nonlocal failed
         assert not config.output_dir.exists()
         assert path.parent.parent == config.output_dir.parent
@@ -337,6 +338,23 @@ def test_layer_binds_each_written_camera_to_its_phone(tmp_path, layer_case) -> N
         batch = named[f"/world/rig_{rig:02d}/cam_00"]
         assert batch.column("calib_phone")[0].as_py() == [phone]
         assert batch.column("calib_status")[0].as_py() == ["ok"]
+
+
+def test_layer_records_the_exo_gate_as_a_property_not_a_sidecar(tmp_path, layer_case) -> None:
+    state, motion = layer_case
+    medians = {"headset": (39.4, 8.5), "phones": (84.6, 2.0), "sapiens_hands": (8.4, 8.7), "rtmw_hands": (9.6, 10.4), "body_transfer": (24.7, 29.0)}
+    gate = Gate({m: Score(100, b, None) for m, (b, _) in medians.items()}, {m: Score(90, a, None) for m, (_, a) in medians.items()}, (), False,
+                full_fit_converged=True)
+    path = tmp_path / "gated.rrd"
+    write_calib_layer(path, state, replace(motion, layout=SelfcapLayout(3, 4, ("A", "B", "C"))), gate=gate)
+    assert not list(tmp_path.glob("*.json"))
+    prop = next(c.to_record_batch() for c in RrdReader(path).stream() if str(c.entity_path) == "/__properties/exo_gate")
+    assert prop.column("passes")[0].as_py() == [False]
+    assert prop.column("full_fit_converged")[0].as_py() == [True]
+    assert prop.column("headset_before_px")[0].as_py() == [39.4]
+    assert prop.column("headset_after_px")[0].as_py() == [8.5]
+    assert prop.column("body_transfer_after_px")[0].as_py() == [29.0]
+    assert prop.column("rtmw_hands_n")[0].as_py() == [90]
 
 
 def test_calibrate_reuses_catalog_phones_without_phone_inference(calibration_call, monkeypatch):

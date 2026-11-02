@@ -17,6 +17,7 @@ from serde.json import to_json
 
 from selfcap_curate.exo_calibration import SessionCalibration
 from selfcap_curate.exo_refine import Refinement
+from selfcap_curate.exo_refine_catalog import Gate
 from selfcap_curate.factory import QuestBlock
 from selfcap_curate.records import OakFit, SessionEpisode, oak_quest_offset_ms
 
@@ -45,8 +46,9 @@ class Provenance:
     episode: str  # Episode id.
 
 
-def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode) -> None:
-    """Write RDF transforms/pinholes and one calib property group atomically."""
+def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode, gate: Gate | None = None) -> None:
+    """Write RDF transforms/pinholes and one calib property group atomically; an exo refinement's held-out gate, when one
+    ran, is a second property group (``exo_gate``), so the decision lives in the layer, not in a sidecar file."""
     layout = motion.layout
     sync, oak_rig, quest_rig = motion.sync, layout.oak_rig, layout.quest_rig
     refinement = session.exo_refinements.get(sync.episode_key.segment)
@@ -148,3 +150,19 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 exo_refinement_version=refinement.version if refinement is not None else None,
             ),
         )
+        if gate is not None:
+            scores: dict[str, float | int | None] = {}
+            for metric, after in gate.candidate.items():
+                scores[f"{metric}_before_px"] = gate.baseline[metric].median
+                scores[f"{metric}_after_px"] = after.median
+                scores[f"{metric}_n"] = after.n
+            recording.send_property(
+                "exo_gate",
+                rr.AnyValues(
+                    drop_untyped_nones=True,
+                    passes=gate.passes,
+                    full_fit_converged=gate.full_fit_converged,
+                    policy=gate.policy,
+                    **scores,
+                ),
+            )

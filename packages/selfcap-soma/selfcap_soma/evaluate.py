@@ -8,6 +8,7 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
+from dataforge.triangulation import Camera, project, project_ego, triangulate_frames
 from jaxtyping import Bool, Float, Float64
 from numpy import ndarray
 from rerun.catalog import CatalogClient
@@ -15,8 +16,7 @@ from scipy.spatial.transform import Rotation
 from serde import serde
 from serde.json import to_json
 
-from selfcap_soma.camera_geometry import project, project_ego, triangulate_frames
-from selfcap_soma.catalog import Observations, read_window
+from selfcap_soma.catalog import Observations, read_window, subset, well_observed_torso
 from selfcap_soma.evaluation import apply_body_offsets, heldout_blocks, learn_body_offsets
 from selfcap_soma.evaluation_io import nearest_indices, read_image_tracks, read_views
 from selfcap_soma.fitting import FitOptions, FitResult, fit
@@ -52,6 +52,12 @@ def score(
         float(np.median(b)) if b.size else None,
         float(np.percentile(b, 90)) if b.size else None,
     )
+
+
+def front_pixels(camera: Camera, points: Float64[ndarray, "n 133 3"]) -> Float64[ndarray, "n 133 2"]:
+    """Project world points into one camera; points behind it are NaN."""
+    projected: Float64[ndarray, "n 133 3"] = project(camera, points.reshape(-1, 3)).reshape(-1, 133, 3)
+    return np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan)
 
 
 @serde(deny_unknown_fields=True)
@@ -97,24 +103,11 @@ def main(config: Config) -> None:
     def solve(observed: Observations) -> FitResult:
         calibrated = None
         if config.calibrated:
-            valid = (
-                (observed.times < 25.0)
-                & np.isfinite(observed.exo[:, [5, 6, 11, 12]]).all((1, 2))
-                & (observed.confidence[:, [5, 6, 11, 12]].min(1) >= 0.7)
-            )
+            valid = (observed.times < 25.0) & well_observed_torso(observed)
             selected = np.flatnonzero(valid)[::8]
             key = sha256(observed.exo[selected].tobytes() + observed.hands[selected].tobytes() + observed.confidence[selected].tobytes()).digest()
             if key not in calibration_cache:
-                training = replace(
-                    observed,
-                    times=observed.times[selected],
-                    exo=observed.exo[selected],
-                    hands=observed.hands[selected],
-                    confidence=observed.confidence[selected],
-                    head_positions=observed.head_positions[selected],
-                    head_rotations=observed.head_rotations[selected],
-                )
-                calibrated = fit(training, config.assets, 600, 300, config.options)
+                calibrated = fit(subset(observed, np.isin(np.arange(len(observed.times)), selected)), config.assets, 600, 300, config.options)
                 calibration_cache[key] = calibrated
                 calibration_times.append(calibrated.seconds)
             calibrated = calibration_cache[key]
@@ -190,13 +183,13 @@ def main(config: Config) -> None:
             [v.camera for v in others], np.stack([v.pixels for v in others], axis=1), np.stack([v.scores for v in others], axis=1)
         )
         triangulated, confidence = triangulation.xyz, triangulation.confidence
-        camera_fit = solve(replace(data, exo=triangulated.astype(np.float64), confidence=confidence.astype(np.float64)))
+        camera_fit = solve(
+            replace(data, exo=triangulated.astype(np.float64), confidence=confidence.astype(np.float64), support=triangulation.n_views.astype(np.int64))
+        )
         candidate = mapped(camera_fit, data)
-        projected = project(view.camera, candidate.reshape(-1, 3)).reshape(-1, 133, 3)
-        raw_projected = project(view.camera, triangulated.reshape(-1, 3).astype(np.float64)).reshape(-1, 133, 3)
-        targets = np.where((view.scores >= 0.7)[..., None], view.pixels, np.nan)
-        candidate_uv = np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan)
-        raw_uv = np.where(raw_projected[:, :, 2:] > 0.001, raw_projected[:, :, :2], np.nan)
+        targets = view.pixels
+        candidate_uv = front_pixels(view.camera, candidate)
+        raw_uv = front_pixels(view.camera, triangulated.astype(np.float64))
         for label, keys in (("body", slice(5, 17)), ("hands", slice(91, 133)), ("ears", slice(3, 5))):
             rows.append(score(f"{view.name} leave-camera-out {label}", candidate_uv[:, keys], raw_uv[:, keys], targets[:, keys], "px"))
         runtimes.append(camera_fit.seconds)

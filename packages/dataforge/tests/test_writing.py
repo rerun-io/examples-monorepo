@@ -35,6 +35,45 @@ def test_atomic_write_leaves_a_previous_target_intact_on_failure(tmp_path: Path)
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_exclusive_write_refuses_an_existing_target_and_keeps_its_content(tmp_path: Path) -> None:
+    target: Path = tmp_path / "segment.rrd"
+    target.write_bytes(b"registered")
+    with pytest.raises(FileExistsError, match="segment.rrd"), atomic_write(target, exclusive=True) as temp_path:
+        temp_path.write_bytes(b"new")
+    assert target.read_bytes() == b"registered"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_concurrent_exclusive_writes_stage_apart_and_the_first_to_finish_wins(tmp_path: Path) -> None:
+    target: Path = tmp_path / "segment.rrd"
+    with pytest.raises(FileExistsError), atomic_write(target, exclusive=True) as slower:
+        slower.write_bytes(b"slower")
+        with atomic_write(target, exclusive=True) as faster:
+            assert faster != slower
+            faster.write_bytes(b"faster")
+    assert target.read_bytes() == b"faster"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_exclusive_write_publishes_a_world_readable_target_and_no_stage(tmp_path: Path) -> None:
+    target: Path = tmp_path / "layer" / "segment.rrd"
+    with atomic_write(target, exclusive=True) as temp_path:
+        assert temp_path.parent == target.parent  # a hard link cannot cross filesystems
+        temp_path.write_bytes(b"layer")
+    assert target.read_bytes() == b"layer"
+    assert target.stat().st_mode & 0o777 == 0o644
+    assert target.stat().st_nlink == 1
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_failed_exclusive_write_leaves_nothing(tmp_path: Path) -> None:
+    target: Path = tmp_path / "segment.rrd"
+    with pytest.raises(RuntimeError, match="boom"), atomic_write(target, exclusive=True) as temp_path:
+        temp_path.write_bytes(b"half")
+        raise RuntimeError("boom")
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_should_skip_existing_unless_forced(tmp_path: Path) -> None:
     target: Path = tmp_path / "base" / "x.rrd"
     assert not should_skip(target, force=False)
@@ -189,9 +228,49 @@ def test_save_table_blueprint_shows_the_declared_fields_and_hides_every_other_co
     for layout in ("cards/fields", "table/columns"):
         assert column(layout, "property:capture:schema") == ([False], None)
         assert column(layout, "video_time:start") == ([False], None)
-        assert column(layout, "rerun_segment_id") == (None, None), "system columns keep the viewer default"
+        assert column(layout, "rerun_segment_id") == ([False], None)
     assert logged[("/table/layouts/cards", "field_order")] == [SEGMENT_LINK_COLUMN, action.column]
     assert logged[("/table/layouts/table", "column_order")] == [SEGMENT_LINK_COLUMN, action.column, coverage.column]
+
+
+def test_published_columns_applies_the_fields_to_the_columns_at_publish_time() -> None:
+    from dataforge.writing import SEGMENT_LINK_COLUMN, PublishedColumns, TableField, TableFields, published_columns
+
+    fields = TableFields(cards=(TableField("a", "A"),), table=(TableField("b", "B"),), hidden=("later", "a"), sort_by="b")
+    assert published_columns(fields, ["a", "b", SEGMENT_LINK_COLUMN, "rerun_segment_id"]) == PublishedColumns(
+        table_hidden=("a", "rerun_segment_id", "later"), cards_hidden=("b", "rerun_segment_id", "later"), sort_by="b"
+    )
+    assert published_columns(fields, ["a"]).sort_by is None, "the table has no such column yet"
+    assert published_columns(TableFields(), ["a"]) == PublishedColumns((), (), None), "a layout with no fields keeps the viewer default"
+
+
+def test_save_table_blueprint_sorts_the_rows_and_hides_columns_the_table_does_not_list_yet(tmp_path: Path) -> None:
+    """``sort_by`` applies to a column the table has; ``hidden`` covers a column a later layer may add."""
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    from dataforge.writing import TableField, TableFields, save_table_blueprint
+
+    session: TableField = TableField("property:calib:session", "Capture / session")
+
+    def saved(name: str, columns: list[str]) -> dict[tuple[str, str], object]:
+        target: Path = tmp_path / name
+        fields = TableFields(cards=(session,), table=(session,), hidden=("property:capture:collector",), sort_by=session.column)
+        save_table_blueprint(rrb.Blueprint(rrb.Spatial3DView(origin="/world")), target, timeline="video_time", fields=fields, columns=columns)
+        reader: rrc.RrdReader = rrc.RrdReader(target)
+        return {
+            (str(chunk.entity_path), name.rsplit(":", 1)[-1]): chunk.to_record_batch().column(name).to_pylist()[0]
+            for chunk in reader.stream(store=reader.blueprints()[0]).to_chunks()
+            for name in chunk.to_record_batch().schema.names
+            if name.startswith(("TableColumn:", "TableBlueprint:"))
+        }
+
+    logged = saved("with.rbl", ["rerun_segment_id", session.column])
+    assert logged[("/table", "sort_by")] == [{"column": session.column, "direction": 1}]
+    collector: str = rr.escape_entity_path_part("property:capture:collector")
+    for layout in ("cards/fields", "table/columns"):
+        assert logged[(f"/table/layouts/{layout}/{collector}", "visible")] == [False]
+    assert ("/table", "sort_by") not in saved("without.rbl", ["rerun_segment_id"]), "a raw capture has no session column yet"
 
 
 def test_optimized_recording_compacts_columns_and_preserves_rows(tmp_path: Path) -> None:

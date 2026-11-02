@@ -1,13 +1,20 @@
 """Quality flags screen fit residuals, including absent observations."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import rerun as rr
 from rerun.chunk import RrdReader
 from serde.json import from_json
 
-from selfcap_soma.quality import SomaQuality, assess_quality, log_quality
+from selfcap_soma import overlay
+from selfcap_soma.catalog import Observations
+from selfcap_soma.fitting import FitResult
+from selfcap_soma.observations import coco_joint_names
+from selfcap_soma.output import save
+from selfcap_soma.quality import SomaQuality, assess_quality, log_quality, read_quality
 
 
 def test_quality_pass_and_explicit_thresholds() -> None:
@@ -73,3 +80,92 @@ def test_quality_reports_active_scale_bound_and_ear_fallback() -> None:
     assert quality.head_torso_rotation_fallback
     assert quality.ear_span_rejected_frames == 3
     assert quality.status == "flag"
+
+
+def test_read_quality_round_trips_the_written_layer_with_missing_metrics(tmp_path: Path) -> None:
+    written = SomaQuality(12.5, 20.0, None, None, "flag", ("ears_missing", "hands_missing"), ear_span_surviving_frames=7, scale_bound_active=True)
+    path = tmp_path / "layer.rrd"
+    recording = rr.RecordingStream("quality-test", recording_id="segment")
+    recording.save(path)
+    log_quality(recording, written)
+    recording.log("/world/other", rr.Points3D([[0.0, 0.0, 0.0]]), static=True)
+    recording.flush()
+    recording.disconnect()
+    read = read_quality(path)
+    assert read == written
+    assert read.ears_median_mm is None
+    assert read.reasons == ("ears_missing", "hands_missing")
+    assert read.ear_span_surviving_frames == 7
+
+
+def test_read_quality_names_the_file_when_the_property_is_absent(tmp_path: Path) -> None:
+    path = tmp_path / "no-quality.rrd"
+    recording = rr.RecordingStream("quality-test", recording_id="segment")
+    recording.save(path)
+    recording.log("/world/other", rr.Points3D([[0.0, 0.0, 0.0]]), static=True)
+    recording.flush()
+    recording.disconnect()
+    with pytest.raises(ValueError, match="no-quality.rrd.*soma_quality"):
+        read_quality(path)
+
+
+def small_fit(frames: int = 2) -> tuple[Observations, FitResult]:
+    """Two fitted frames, 10 mm from the triangulated points, with no Quest hands."""
+    named = list(dict.fromkeys(["LeftEye", "Head", *coco_joint_names().values()]))
+    names = tuple(named + [f"Spare{index}" for index in range(77 - len(named))])
+    times = np.array([0.0, 0.04], dtype=np.float64)[:frames]
+    joints = np.zeros((frames, 77, 3), dtype=np.float32)
+    vertices = np.zeros((frames, 4, 3), dtype=np.float32)
+    data = Observations(
+        times,
+        np.full((frames, 133, 3), 0.01, dtype=np.float64) * np.array([1.0, 0.0, 0.0]),
+        np.ones((frames, 133), dtype=np.float64),
+        np.full((frames, 133, 3), np.nan, dtype=np.float64),
+        np.zeros((frames, 3), dtype=np.float64),
+        np.tile(np.eye(3, dtype=np.float64), (frames, 1, 1)),
+        0.0,
+    )
+    result = FitResult(
+        np.zeros((frames, 77, 3), dtype=np.float32),
+        np.zeros((frames, 3), dtype=np.float32),
+        np.zeros((1, 128), dtype=np.float32),
+        1.0,
+        joints,
+        vertices,
+        np.array([[0, 1, 2], [1, 2, 3]], dtype=np.int32),
+        names,
+        np.zeros(78, dtype=np.int64),
+        0.1,
+        0,
+        np.zeros(frames, dtype=np.float64),
+        np.eye(3, dtype=np.float32),
+        np.zeros((frames, 2, 3), dtype=np.float32),
+        "ears-rotation",
+        np.zeros(3, dtype=np.float32),
+        np.ones((1, 60), dtype=np.float32),
+        upper_body_vertices=np.array([0, 1, 2], dtype=np.int64),
+        visible_joints=np.arange(77, dtype=np.int64),
+    )
+    return data, result
+
+
+def test_fit_save_keeps_quality_in_the_rrd_and_writes_no_json(tmp_path: Path) -> None:
+    data, result = small_fit()
+    save(tmp_path, data, result, 0.0)
+    assert not (tmp_path / "quality.json").exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["fit.rrd", "report.json"]
+    quality = read_quality(tmp_path / "fit.rrd")
+    assert quality.body_median_mm == pytest.approx(10.0)
+    assert quality.hands_median_mm is None
+    assert "hands_missing" in quality.reasons
+
+
+def test_layer_export_copies_quality_from_the_fit_and_writes_no_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data, result = small_fit()
+    save(tmp_path, data, result, 0.0)
+    monkeypatch.setattr(overlay, "CatalogClient", lambda _url: SimpleNamespace(get_dataset=lambda _name: None))
+    monkeypatch.setattr(overlay, "read_views", lambda *_args: ([], None))
+    layer = tmp_path / "layer" / "segment.pending.rrd"
+    overlay.main(overlay.Config(source=tmp_path / "fit.rrd", output=layer, dataset="test", segment="segment"))
+    assert sorted(path.name for path in layer.parent.iterdir()) == ["segment.pending.rrd"]
+    assert read_quality(layer) == read_quality(tmp_path / "fit.rrd")

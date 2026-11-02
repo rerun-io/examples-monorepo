@@ -49,6 +49,35 @@ For evidence, run `selfcap-sync-curves --segment-id <id>` in the same environmen
 Its shared `--rr-config.save <path>` and `--rr-config.headless` options support
 saved recordings without a display. The tool reads each clock separately.
 
+## One dataset end to end
+
+```bash
+pixi run -e selfcap-curate --frozen selfcap-run --raw-root /local/raw --run-root /local/run-1 \
+  --catalog-url rerun+http://127.0.0.1:51235 --dataset selfcap-new --donor-catalog-url rerun+http://donor:51235 \
+  --oak-egohand-assets /local/egohand --soma-assets /local/soma-assets
+```
+
+`selfcap-run` takes `--raw-root` (a directory that holds `selfcap/`) or `--base-dir` (as-cut base RRDs, which skip ingest), and runs each step as a subprocess of its pixi task in its own environment. A new `--run-root` off the NAS and a `--dataset` that does not exist yet are required, so a rerun needs new names. `--segment-ids` are checked as episode keys before any step runs. The catalog must run on this machine and read the run root.
+
+| Step | Task (environment) | At a time | Layers swapped in after it |
+|---|---|---|---|
+| ingest (raw only) | `dataforge-convert` (dataforge) | one | |
+| register | `dataforge-register` (dataforge) | one | base, gt: `rrd/` |
+| align | `selfcap-align` (selfcap-curate) | `--jobs` | base, gt, sapiens2 |
+| calibrate | `selfcap-calibrate` (selfcap-curate) | `--jobs` | egohand |
+| keypoints | `selfcap-keypoints` (selfcap-curate) | one | calib |
+| publish | `dataforge-publish-blueprints` (dataforge) | one | device assets and blueprints, for viewing while SOMA runs |
+| SOMA | `soma-batch` (selfcap-soma) | `--soma-jobs` | soma |
+| soma_xlo | `soma-xlo` (selfcap-soma) | one process, every segment | soma_xlo |
+| preview | `selfcap-preview` (selfcap-curate) | one process, `--preview-workers` segments | preview |
+| blueprints | `dataforge-publish-blueprints` (dataforge) | one | |
+
+A step receives only the segments that passed the step before it. A segment passes when its output file exists; in a one-process step a segment with no file fails even if the others passed. A failed segment is logged with the last meaningful line of its log, and skipped. These stop the run with a nonzero exit: a step that leaves no segment, and a failed register, publish, swap or blueprints step, because the later steps read what these write. The run also exits nonzero at the end if a segment failed. A segment that fails stays in the dataset with the layers it had, and the default blueprints always include the SOMA mesh, and show the preview card table when any segment has a preview layer.
+
+To save disk, the run deletes two kinds of its own files once the catalog shows the new file as the layer, and logs each one in `progress.log`: the as-cut base under `rrd/base` after the base swap (in a `--base-dir` run only the link, never the as-cut file), and `calib/<segment>/<segment>.rrd` after the calib swap. Nothing outside the run root is deleted.
+
+`<run-root>/progress.log` has one `[HH:MM:SS] <dataset>: ...` line per segment and step, `STEP<number>_<STEP>_WALL` lines, and at the end one `SUMMARY <step>: ok N, failed N, wall N s` line per step and a `SOMA_QUALITY` line with pass and flag counts and medians from the `property:soma_quality:*` columns of the catalog segment table. `<run-root>/logs` holds each process's log.
+
 ## Clocks
 
 `capture_time` preserves presented video PTS, including the container start,
@@ -112,28 +141,29 @@ Order: `selfcap-calibrate` → `selfcap-keypoints` → one `dataforge-swap-layer
 
 `selfcap-post` runs align, calibrate, and keypoints in one process. It reads each episode's required video packets and raw Quest hands/head poses once and keeps them in memory for the later stages. Aligned phone timestamps use the same integer offsets as the base writer. Standalone stage commands still read from the catalog.
 
-For `selfcap-post`, omit `--rate` to use the first episode's median native phone rate (rounded to 0.001 Hz), or pass `--rate` to select a frequency. This avoids a separate video read to measure the rate. The standalone `selfcap-keypoints` command still requires `--rate`.
+Both `selfcap-keypoints` and `selfcap-post` take an optional `--rate`. Without it, each episode uses its own median native phone rate (rounded to 0.001 Hz), measured from the packets the command already reads; every episode prints its rate on a `KEYPOINTS_RATE` line.
+`selfcap-post --donor-catalog-url` reads camera-50 donors, landmark labels and gate observations from another catalog, for a `--catalog-url` that does not hold them; without it they come from `--catalog-url`.
 Cameras come from local `--calib-dir` files; the catalog supplies patched videos, clocks and Quest anchors.
 Explicit ids or a key file select one session. Preflight reports unprocessable episodes with `KEYPOINTS_SKIP`; good episodes run.
 Existing targets, NAS outputs and outputs within the input directory are refused; no external registration or swap occurs.
-Specify `--rate`: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz (40). YOLOX-m HumanArt uses TensorRT batches of eight and RTMW-x batches of up to 32 (optimised for eight),
+The native rate tracks every frame, so pass `--rate` for a sparse plan: served rates were 2 Hz (3,979 episodes), 3 Hz (85), and 10 Hz (40). YOLOX-m HumanArt uses TensorRT batches of eight and RTMW-x batches of up to 32 (optimised for eight),
 keeping three people per frame on a half-open `video_time` grid anchored at cut zero; nearest-frame ties go left.
 Quest anchors use capture_time: left-eye head + quest_pose (100 ms gap), wrists −48 ms + quest_pose (40 ms gap).
 Wearer selection uses head weight 2, person confidence ≥0.3 and box cost <0.5. Triangulation accepts joint detector scores
 ≥0.3, with radial undistortion and weighted DLT. The best phone pair whose lines meet at ≥5° (phones facing each other
 count by their lines, not their directions) seeds two refits with 8 px inliers; six rounds then reweight every phone by
 score × Cauchy (8 px), with no weight beyond 24 px. A point is kept where ≥2 phones end within 8 px and their lines meet at ≥5°.
-Confidence is the mean inlier score, multiplied by 0.9 for two-view support. It is not a visibility probability.
+Confidence is Kineo's pairwise reprojection score over the phones that detected the joint, multiplied by 0.9 for two-view support. It is not a visibility probability.
 The 3D entity also stores `support_view_count`, `support_max_reprojection_px`, and `support_inlier_mask` per joint.
 Each mask lists cameras in the static `support_camera_paths` order. A measured point needs at least two supporting cameras; temporal estimates carry `temporal_bridged` and retain the actual support count.
 Body joints use a centred median-5 jump detector and interpolation, followed by a centred Gaussian (sigma 2 frames). The result blends toward jump-cleaned measurements between 0.3 and 0.5 m/s, preserving fast motion without restoring raw jumps. This replaces displacement-biased camera-pair tracking. All operations are time symmetric; no causal delay is added. Missing runs up to 0.5 seconds are bridged; longer source gaps stay missing. Other triangulated joints retain beta 2.0; Quest hand tracking is unchanged.
 
 The default `/world/skeleton` and OAK `<cam>/pinhole/skeleton` retain ears, shoulders, elbows, the shoulder–hip torso quad,
 and both 21-joint hands. Knees, ankles and feet remain in the hidden full COCO-133 layers.
-Every view uses the same confidence colours: red at 0.7, yellow at 0.85, green at 1.0, clamped outside that range.
+Colours follow two scales, clamped outside their range. 3D confidence, wherever it is drawn: red at 0.2, yellow at 0.6, green at 1.0. Per-phone 2D detector scores: red at 0.7, yellow at 0.85, green at 1.0, and scores below 0.7 stay in `coco133_uv` but out of `coco133_uv_min70`, the copy the layout draws; readers apply their own threshold to `coco133_uv`.
 Low-confidence and bridged points remain visible. Blue annotation links use the shared typed keypoint archetypes and their class/keypoint IDs; custom confidence components carry per-joint and average confidence.
 Quest hands have no per-joint confidence, so tracked Quest joints use 1.0. The support masks remain available for inspection.
-Exo and Quest views project the world skeleton and SOMA mesh through their pinholes in Rerun; 3D joints use UI-point radii. OAK alone keeps explicit display projections through all 14 factory lens coefficients.
+Exo and Quest views project the world skeleton and SOMA mesh through their pinholes in Rerun; 3D joints use UI-point radii. Each of the three OAK cameras keeps explicit display projections through its own 14 factory lens coefficients; the stereo extrinsics and lenses come from the base layer, the mount from the calibration layer.
 Each output preserves every calib chunk and adds `/world/pred/rtmw_triangulated/coco133_xyz`, per-camera
 `pinhole/pred/rtmw/coco133_uv` and `kp3d_*` fields in the same `calib` group; no external quality metrics are stored.
 Frozen reference comparisons live in `tests/test_keypoints_*golden.py`. Those references use the earlier
@@ -172,8 +202,8 @@ timeline. The tests read these fixtures directly; they do not import external re
 
 `selfcap-post --exo-refine` is the legacy optical diagnostic path. The batch
 runner uses `selfcap-exo-label` with fixed device VP focals and no head offset.
-`--exo-reference-dataset` selects a read-only source for labels and independent
-RTMW checks. An episode without an `exo_landmarks` layer keeps the normal fit.
+`--exo-reference-dataset` selects a read-only dataset on `--donor-catalog-url` for
+labels and independent RTMW checks. An episode without an `exo_landmarks` layer keeps the normal fit.
 Only exo camera poses may change. Quest camera extrinsics, SLAM poses, hands,
 and the OAK mount are preserved. The calibration file then owns triangulation,
 display skeleton and camera-centre projections.

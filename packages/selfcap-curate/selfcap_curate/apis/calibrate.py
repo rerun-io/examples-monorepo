@@ -183,6 +183,7 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
                 if head.clock_corrections_ms:
                     print("HEAD_CLOCK", segment.id, head.clock_corrections_ms, flush=True)
                 print("HEAD_CALIBRATION", segment.id, {p: (r.method, r.face_median_px) for p, r in head.phones.items()}, flush=True)
+        gates = {}  # segment id -> held-out gate, written into that segment's calib layer
         if config.exo_refine:
             refinements = {}
             for segment in segments:
@@ -215,10 +216,10 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
                 result = replace(result, camera_rigs=rigs)
                 if gate.passes:  # a candidate that regresses any held-out metric stays a report; the input cameras stand
                     refinements[segment.id] = result
-                (output / f"{segment.id}.exo-gate.json").write_text(to_json(gate))
+                gates[segment.id] = gate
                 print("EXO_GATE", segment.id, "pass" if gate.passes else "candidate: fails no-regression gate", flush=True)
             state = replace(state, exo_refinements=refinements)
         for motion in episodes:
-            write_calib_layer(output / motion.sync.episode_key.rrd_name, state, motion)
+            write_calib_layer(output / motion.sync.episode_key.rrd_name, state, motion, gate=gates.get(motion.sync.episode_key.segment))
         (output / f"{session}.json").write_text(to_json(state))
         return state

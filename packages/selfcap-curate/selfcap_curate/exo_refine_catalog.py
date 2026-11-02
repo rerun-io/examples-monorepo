@@ -20,9 +20,12 @@ from selfcap_curate.exo_calibration import BODY, BodyObservation, Camera, bundle
 from selfcap_curate.exo_landmarks import Landmarks, read_landmarks
 from selfcap_curate.exo_refine import FocalSource, Refinement, RefinementProblem, predict_labels, select_labels, solve
 from selfcap_curate.factory import QuestBlock, optical_targets, read_quest_block
-from selfcap_curate.keypoints import read_cameras
+from selfcap_curate.keypoints import HEADSET_COVERED, read_cameras
 from selfcap_curate.quest_fit import Correspondences, load_quest_hands, pairs
 from selfcap_curate.records import HandTrack, PhoneDetections, Side, TimeSync
+
+MIN_BODY_SCORE: float = 0.7
+"""RTMW score a joint needs to enter the refinement's body observations; the stored entity keeps every score."""
 
 
 @serde(deny_unknown_fields=True)
@@ -90,6 +93,13 @@ class Gate:
     """Deterministic holdout and independent transfer definitions."""
     full_fit_converged: bool | None = None
     """Convergence of the deployed all-frame model; null is unknown and cannot pass."""
+
+
+def confident_body(detections: PhoneDetections) -> PhoneDetections:
+    """Mark RTMW joints under MIN_BODY_SCORE or under the headset missing: the stored entity keeps every detection."""
+    keep: Bool[ndarray, "n 133"] = detections.scores >= MIN_BODY_SCORE
+    keep[:, HEADSET_COVERED] = False
+    return PhoneDetections(detections.times_s, np.where(keep[..., None], detections.xy, np.nan), np.where(keep, detections.scores, 0.0))
 
 
 def read_rtmw_recording(path: Path, segment: str, rigs: tuple[int, ...]) -> tuple[PhoneDetections, ...]:
@@ -175,7 +185,7 @@ def load_inputs(segment: catalog_io.Segment, *, cameras: tuple[Camera, ...] | No
             positions[i] += rotations[i] @ targets[label.target_id][:3, 3]
     hands = tuple(pairs(detection, tracks, tau) for detection, tau in zip(detections, phone_to_pose, strict=True))
     if rtmw_rrd is not None:
-        body = read_rtmw_recording(rtmw_rrd, segment.id, rigs)
+        body = tuple(confident_body(view) for view in read_rtmw_recording(rtmw_rrd, segment.id, rigs))
         return Inputs(RefinementProblem(cameras, hands, record, positions, rotations), phones, detections, tracks, sync,
                       body, tuple(phone_offsets), tuple(phone_to_pose), quest_offset / 1000.0)
     entities = [coco133_uv_path(rig, 0, pred="rtmw") for rig in rigs]
@@ -186,8 +196,8 @@ def load_inputs(segment: catalog_io.Segment, *, cameras: tuple[Camera, ...] | No
         if column not in table.column_names:
             break
         rows = table.filter(table[column].is_valid())
-        body.append(PhoneDetections(catalog_io.seconds(rows["video_time"]), catalog_io.floats(rows[column], -1, 133, 2),
-                                    catalog_io.floats(rows[f"{entity}:simplecv.KeypointConfidence2D:confidences"], -1, 133)))
+        body.append(confident_body(PhoneDetections(catalog_io.seconds(rows["video_time"]), catalog_io.floats(rows[column], -1, 133, 2),
+                                                    catalog_io.floats(rows[f"{entity}:simplecv.KeypointConfidence2D:confidences"], -1, 133))))
     return Inputs(RefinementProblem(cameras, hands, record, positions, rotations), phones, detections, tracks, sync,
                   tuple(body) if len(body) == len(phones) else (), tuple(phone_offsets), tuple(phone_to_pose), quest_offset / 1000.0)
 
@@ -313,7 +323,7 @@ def residuals(inputs: Inputs, model: Refinement, fold: int) -> dict[str, list[fl
                 points = triangulate({str(j): c for j, c in enumerate(cameras)}, others)
                 observation = views[str(v)]
                 distance = np.linalg.norm(camera.project(points)[:, :2] - observation.xy, axis=1)
-                valid = np.isfinite(points).all(1) & np.isfinite(observation.xy).all(1) & (observation.scores >= 0.7)
+                valid = np.isfinite(points).all(1) & np.isfinite(observation.xy).all(1) & (observation.scores >= MIN_BODY_SCORE)
                 valid[:3] = False
                 output["body_transfer"].extend(distance[valid].tolist())
     return output

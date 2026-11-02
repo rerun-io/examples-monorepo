@@ -1,4 +1,4 @@
-"""Sapiens model selection and isolated output layer contracts."""
+"""Sapiens model selection and keypoints layer contracts."""
 
 import numpy as np
 import rerun as rr
@@ -37,7 +37,7 @@ def test_sapiens_selects_fast_dynamic_default_and_same_detector(monkeypatch):
     keypoint_models.cache_clear()
 
 
-def test_sapiens_layer_does_not_copy_calibration_or_shared_entities(tmp_path):
+def test_sapiens_layer_is_the_full_keypoints_layer_with_the_display_skeleton(tmp_path):
     base = tmp_path / "calib.rrd"
     with rr.RecordingStream("test", recording_id="selfcap__synthetic", send_properties=False) as recording:
         recording.save(base)
@@ -54,8 +54,16 @@ def test_sapiens_layer_does_not_copy_calibration_or_shared_entities(tmp_path):
     write_keypoints(base, output, result, model="sapiens2")
     assert base.read_bytes() == original
     paths = {str(chunk.entity_path) for chunk in RrdReader(output).stream()}
+    assert {"/world/rig_02/cam_00", "/__properties/calib"} <= paths  # the calibration it was fitted with rides along
+    assert "/world/skeleton" in paths  # Sapiens2 is the main model: it draws the blue display skeleton
     assert "/world/gt/sapiens2/coco133_xyz" in paths
     assert "/world/rig_02/cam_00/pinhole/sapiens2/coco133_uv" in paths
     assert "/world/rig_02/cam_00/pinhole/sapiens2/coco133_uv_projected" in paths
     assert "/__properties/keypoints_sapiens2" in paths
-    assert all("sapiens2" in path for path in paths)
+    assert not any("rtmw" in path for path in paths)
+
+
+def test_rtmw_is_the_default_keypoint_model(tmp_path):
+    from selfcap_curate.apis.keypoints import Config
+
+    assert Config(tmp_path / "calib", tmp_path / "out", rate=24.0).model == "rtmw"

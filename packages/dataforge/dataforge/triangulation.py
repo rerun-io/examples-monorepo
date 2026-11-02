@@ -1,9 +1,5 @@
-"""Projection and robust triangulation copied from selfcap-curate/keypoints.py.
-
-Kept in sync by the source-AST contract test. This inference-only subset
-avoids installing selfcap-curate's detector stack in the SOMA fitting env.
-The AST parity test guards every copied geometry definition.
-"""
+"""Pure camera geometry shared by selfcap-curate and selfcap-soma: projection through pinhole and OAK lens models, and robust
+multi-view triangulation. It holds no catalog or layer I/O."""
 
 from dataclasses import dataclass
 from itertools import combinations
@@ -11,31 +7,73 @@ from itertools import combinations
 import cv2
 import numpy as np
 import torch
-from jaxtyping import Bool, Float32, Float64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
+from scipy.spatial.transform import Rotation, Slerp
 from torch import Tensor
 
 INLIER_PX: float = 8.0
+"""A view supports a point when it reprojects within this many pixels."""
 MIN_DETECTION_SCORE: float = 0.3
+"""Permissive detection acceptance; triangulation still requires two 8 px inliers."""
+HEADSET_COVERED: Int64[ndarray, "k"] = np.r_[0:3, 23:91]
+"""Body nose/eyes and the 68 face landmarks: every wearer has a Quest on, and RTMW and Sapiens2 both place these on its
+front plate with high confidence (cc808233 ep001 head crops), so 3D omits them and readers of 2D rows must not use them."""
 EGO_POSE_MAX_GAP_S: float = 0.1
+"""Rig poses further apart than this are not interpolated across (the overlay is left missing)."""
+MIN_RAY_SEPARATION_DEG: float = 5.0
+"""Smallest angle between the lines of two supporting rays: phones at almost one viewpoint, or facing each other across the
+wearer (f28dc7af rig_01/rig_03, rays 179.5 degrees apart), leave depth free along the line. Near-parallel pairs pass the pixel
+gate with depth errors of metres; at 5 degrees and 2 m a 5 px error moves depth ~0.13 m."""
+CONFIDENCE_LAMBDA: float = 40.0
+"""Kineo's reprojection decay (arXiv 2510.24464 eq. 12): a miss of 1% of the focal length scales a view's score by exp(-0.4)."""
+ROBUST_ROUNDS: int = 6
+"""Reweighting rounds over every view after the consensus seed."""
+ROBUST_OUTER_GATE: float = 3.0
+"""Views farther than this many inlier gates (24 px) from the point get no weight: a wrong person or a wild guess does not
+pull it. f28dc7af: RTMW-x ears 154/20 -> 17/17 mm from SAM3DFast, steady on the head (4/5 mm); shoulders 14/39 -> 11/10 mm."""
 
 
 @dataclass(frozen=True, slots=True)
 class Camera:
-    K: Float64[ndarray, "3 3"]  # Encoded-image pinhole matrix.
-    world_T_cam: Float64[ndarray, "4 4"]  # RDF camera to Quest world, metres.
-    radial: tuple[float, float]  # OpenCV k1,k2; refined iOS pinholes are rectified (zero).
-    entity: str  # Camera node for the per-view overlay.
-    size: tuple[int, int] = (1920, 1080)  # Calibrated image width and height.
+    K: Float64[ndarray, "3 3"]
+    """Encoded-image pinhole matrix."""
+    world_T_cam: Float64[ndarray, "4 4"]
+    """RDF camera to Quest world, metres."""
+    radial: tuple[float, float]
+    """OpenCV k1,k2; refined iOS pinholes are rectified (zero)."""
+    entity: str
+    """Camera node for the per-view overlay."""
+    size: tuple[int, int] = (1920, 1080)
+    """Calibrated image width and height."""
 
 
 @dataclass(frozen=True, slots=True)
 class TriangulationBatch:
     xyz: Float32[ndarray, "n j 3"]
+    """World metres; NaN for missing or degenerate joints."""
     n_views: UInt8[ndarray, "n j"]
+    """Positive-depth inlier count, zero when unusable."""
     confidence: Float32[ndarray, "n j"]
+    """Kineo pairwise reprojection score over the views that saw the joint (0-1)."""
     inliers: Bool[ndarray, "n v j"]
+    """The views supporting each joint, in camera order."""
     max_reprojection_px: Float32[ndarray, "n j"]
+    """Largest error over the supporting views, NaN when missing."""
+
+
+def reprojection_confidence(
+    errors: Float64[ndarray, "n v j"], scores: Float64[ndarray, "n v j"], focal: Float64[ndarray, "v"], seen: Bool[ndarray, "n v j"]
+) -> Float32[ndarray, "n j"]:
+    """Kineo's 3D confidence (arXiv 2510.24464 eq. 11-14): each view's score times exp(-lambda x miss / focal), each pair of
+    views the geometric mean of the two, averaged over the pairs of views that saw the joint; 0 with fewer than two. The
+    paper averages over every camera pair; here a view that did not detect the joint does not lower it."""
+    shrunk = np.where(seen, scores * np.exp(-CONFIDENCE_LAMBDA * np.nan_to_num(errors, nan=1e9, posinf=1e9) / focal[:, None]), 0.0)
+    roots = np.sqrt(shrunk)
+    pair_sum = (roots.sum(1) ** 2 - shrunk.sum(1)) / 2.0  # sum over i<j of sqrt(a_i a_j)
+    count = seen.sum(1)
+    pairs = count * (count - 1) / 2.0
+    return np.where(count >= 2, pair_sum / np.maximum(pairs, 1.0), 0.0).astype(np.float32)
 
 
 def project(camera: Camera, xyz: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 3"]:
@@ -51,14 +89,22 @@ def project(camera: Camera, xyz: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n
 
 @dataclass(frozen=True, slots=True)
 class EgoCamera:
-    rig: int  # OAK rig index.
-    cam: int  # 0 rgb, 1 left, 2 right.
-    K: Float64[ndarray, "3 3"]  # Encoded-image pinhole matrix.
-    distortion: Float64[ndarray, "c"]  # OpenCV order (k1, k2, p1, p2, k3, k4, k5, k6, s1-s4, tx, ty); the viewer's Pinhole ignores it.
-    size: tuple[int, int]  # Image width, height.
-    rig_T_cam: Float64[ndarray, "4 4"]  # Factory stereo extrinsic; identity for the rgb rig frame.
-    times_s: Float64[ndarray, "p"]  # video_time of the calibrated rig poses (Quest head samples shifted by the OAK offset).
-    world_T_rig: Float64[ndarray, "p 4 4"]  # Head pose x OAK mount, RDF rig to Quest world.
+    rig: int
+    """OAK rig index."""
+    cam: int
+    """0 rgb, 1 left, 2 right."""
+    K: Float64[ndarray, "3 3"]
+    """Encoded-image pinhole matrix."""
+    distortion: Float64[ndarray, "c"]
+    """OpenCV order (k1, k2, p1, p2, k3, k4, k5, k6, s1-s4, tx, ty); the viewer's Pinhole ignores it."""
+    size: tuple[int, int]
+    """Image width, height."""
+    rig_T_cam: Float64[ndarray, "4 4"]
+    """Factory stereo extrinsic; identity for the rgb rig frame."""
+    times_s: Float64[ndarray, "p"]
+    """video_time of the calibrated rig poses (Quest head samples shifted by the OAK offset)."""
+    world_T_rig: Float64[ndarray, "p 4 4"]
+    """Head pose x OAK mount, RDF rig to Quest world."""
 
 
 def camera_transforms(
@@ -69,7 +115,6 @@ def camera_transforms(
     output: Float64[ndarray, "n 4 4"] = np.full((len(times_s), 4, 4), np.nan)
     if len(stamps) < 2:
         return output
-    from scipy.spatial.transform import Rotation, Slerp
 
     right = np.clip(np.searchsorted(stamps, times_s), 1, len(stamps) - 1)
     left = right - 1
@@ -111,7 +156,9 @@ def project_ego(camera: EgoCamera, times_s: Float64[ndarray, "n"], xyz: Float32[
 def triangulate_frames(
     cameras: list[Camera], uv: Float64[ndarray, "n v j 2"], scores: Float64[ndarray, "n v j"], threshold: float = INLIER_PX, chunk: int = 2048
 ) -> TriangulationBatch:
-    """All view pairs, >=0.5° ray separation, weighted DLT and two gated refits, for every frame and joint at once.
+    """Best view pair as the seed (lines >= MIN_RAY_SEPARATION_DEG apart), two gated refits, then robust reweighting over
+    every view; kept where >= 2 views end within ``threshold`` and their lines meet at >= MIN_RAY_SEPARATION_DEG.
+    Confidence is reprojection_confidence over every view that detected the joint. For every frame and joint at once.
 
     float64 on the GPU when there is one: each DLT is the smallest eigenvector of its 4x4 normal matrix, which agrees
     with the per-frame SVD it replaced to ~1e-13 m (cc808233 ep001: 7 s -> ~0.2 s per episode).
@@ -136,7 +183,9 @@ def triangulate_frames(
     lens = tensor(np.stack([c.K[:2, :2] for c in cameras]))
     centre = tensor(np.stack([c.K[:2, 2] for c in cameras]))
     radial = tensor(np.array([c.radial for c in cameras]))
-    cos_min = float(np.cos(np.deg2rad(0.5)))
+    world_centre = tensor(np.stack([c.world_T_cam[:3, 3] for c in cameras]))
+    cos_min = float(np.cos(np.deg2rad(MIN_RAY_SEPARATION_DEG)))
+    focal = np.array([c.K[0, 0] for c in cameras])
 
     def solve(observed_np: Float64[ndarray, "c v j 2"], scores_np: Float64[ndarray, "c v j"]) -> TriangulationBatch:
         norm_np = np.stack(
@@ -152,7 +201,6 @@ def triangulate_frames(
         valid = (score >= MIN_DETECTION_SCORE) & torch.isfinite(score) & torch.isfinite(observed).all(-1) & torch.isfinite(norm).all(-1)
         norm = torch.where(torch.isfinite(norm), norm, 0.0)
         clean = torch.where(valid, score, 0.0)
-        root = torch.sqrt(clean)
         rows = torch.stack(
             [
                 norm[..., 0, None] * inverse[None, :, None, 2] - inverse[None, :, None, 0],
@@ -161,12 +209,15 @@ def triangulate_frames(
             dim=3,
         )  # f v j 2 4
 
-        def fit(mask: Tensor) -> Tensor:
-            weighted = rows * torch.where(mask, root, 0.0)[..., None, None]
+        def fit_weighted(weights: Tensor) -> Tensor:
+            weighted = rows * torch.sqrt(weights)[..., None, None]
             gram = torch.einsum("fvjri,fvjrk->fjik", weighted, weighted).reshape(-1, 4, 4)
             vectors = torch.cat([torch.linalg.eigh(part)[1][..., 0] for part in gram.split(32768)])
             vectors = vectors.reshape(len(observed_np), joints, 4)
             return vectors[..., :3] / vectors[..., 3:4]
+
+        def fit(mask: Tensor) -> Tensor:
+            return fit_weighted(torch.where(mask, clean, 0.0))
 
         def residual(points: Tensor) -> Tensor:
             q = torch.einsum("vik,fjk->fvji", inverse[:, :3, :3], points) + inverse[None, :, None, :3, 3]
@@ -200,14 +251,28 @@ def triangulate_frames(
             )
         inliers = best_mask & valid & (residual(fit(best_mask)) <= threshold)
         points = fit(inliers)
+        seeded = (inliers.sum(1) >= 2) & torch.isfinite(points).all(-1)
+        # From the consensus seed, every phone with the point counts: score x Cauchy(threshold) weights, phones beyond
+        # ROBUST_OUTER_GATE x threshold left out. Phones that guess a hidden joint a little differently (f28dc7af: RTMW-x
+        # puts the ears ~15 px lower from the front than from the side) then meet in between instead of one pair winning.
+        for _ in range(ROBUST_ROUNDS):
+            error = residual(points)
+            weights = torch.where(valid & (error <= ROBUST_OUTER_GATE * threshold), clean / (1.0 + (error / threshold) ** 2), 0.0)
+            refined = fit_weighted(weights)
+            points = torch.where((seeded & torch.isfinite(refined).all(-1))[..., None], refined, points)
         errors: Tensor = residual(points)
-        inliers &= errors <= threshold
+        inliers = valid & (errors <= threshold)
         count = inliers.sum(1)
-        good = (count >= 2) & torch.isfinite(points).all(-1)
+        to_point = points[:, None] - world_centre[None, :, None]
+        to_point = to_point / torch.linalg.norm(to_point, dim=-1, keepdim=True).clamp(min=1e-12)
+        lines = torch.einsum("fajk,fbjk->fabj", to_point, to_point).abs()
+        pairs = inliers[:, :, None] & inliers[:, None] & ~torch.eye(views, dtype=torch.bool, device=device)[None, :, :, None]
+        widest = torch.where(pairs, lines, 1.0).amin(dim=(1, 2))
+        good = seeded & (count >= 2) & (widest < cos_min) & torch.isfinite(points).all(-1)
         return TriangulationBatch(
             torch.where(good[..., None], points, torch.nan).float().cpu().numpy(),
             torch.where(good, count, 0).to(torch.uint8).cpu().numpy(),
-            torch.where(good, torch.where(inliers, clean, 0.0).sum(1) / count.clamp(min=1), 0.0).float().cpu().numpy(),
+            np.where(good.cpu().numpy(), reprojection_confidence(errors.cpu().numpy(), clean.cpu().numpy(), focal, valid.cpu().numpy()), 0.0),
             (inliers & good[:, None, :]).cpu().numpy(),
             torch.where(good, torch.where(inliers, errors, 0.0).amax(1), torch.nan).float().cpu().numpy(),
         )

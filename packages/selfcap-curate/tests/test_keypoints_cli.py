@@ -109,6 +109,26 @@ def test_fp16_trunk_is_cached_beside_the_other_rewrites_and_leaves_the_source(tm
     assert sorted(path.name for path in result.parent.iterdir()) == [result.name]
 
 
-def test_rate_is_required(tmp_path):
-    with pytest.raises(TypeError, match="rate"):
-        Config(tmp_path / "calib", tmp_path / "out")
+def test_rate_is_optional_but_an_explicit_rate_is_still_checked(tmp_path):
+    calib = tmp_path / "calib"
+    calib.mkdir()
+    key = "2025-12-30__65d00748__ep001"
+    (calib / f"selfcap__{key}.rrd").touch()
+    assert Config(calib, tmp_path / "out", segment_ids=(key,)).rate is None
+    with pytest.raises(ValueError, match="rate must be finite and positive"):
+        main(Config(calib, tmp_path / "out", rate=0.0, segment_ids=(key,)))
+
+
+def test_keypoints_reads_the_named_dataset_like_calibrate(tmp_path, monkeypatch):
+    from selfcap_curate.apis import keypoints as api
+
+    seen = {}
+
+    def stop(*_args, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop before catalog access")
+
+    monkeypatch.setattr(api, "open_session", stop)
+    with pytest.raises(RuntimeError, match="stop before catalog access"):
+        main(Config(tmp_path / "calib", tmp_path / "out", rate=3.0, dataset="selfcap-hard26-r2"))
+    assert seen["dataset"] == "selfcap-hard26-r2"

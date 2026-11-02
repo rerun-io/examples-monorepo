@@ -1,6 +1,8 @@
 # SelfCap SOMA fitting prototype
 
 Current published run and overnight CLI: [fresh per-segment shape and RTMW batch runner](docs/batch.md).
+`soma-batch` ships and registers each layer when `--spark-dir` is set; without it all output stays local and the caller registers the layer.
+`soma-xlo` writes a reduced-LOD mesh layer from a batch's local output; see [Reduced-LOD layer](docs/batch.md#reduced-lod-layer-soma-xlo).
 The original prototype description below documents the earlier baseline.
 
 Fit one fixed-calibration SelfCap recording to NVIDIA SOMA-X body and hands.
@@ -76,7 +78,8 @@ torso anchors is used only for initialization, not to invent loss targets.
 | `/parameters/{poses,root}` | per-frame fit parameters | video_time |
 | `/parameters/{identity,scale}` | shared fitted parameters | static |
 
-`fit.rrd` includes geometry, parameters, and a two-view blueprint.
+`fit.rrd` includes geometry, parameters, and a two-view blueprint. `soma-fit` and the
+research tools write it; `soma-batch` does not, and `soma-overlay` still reads it.
 `report.json` records finite-point median/p90 residuals, head rotation error,
 optimization-plus-mesh time, and peak PyTorch allocated GPU memory. Timing
 excludes asset construction, catalog reads, serialization and screenshot work.
@@ -123,10 +126,8 @@ The overlay writer reuses the fitted 77-joint geometry, preserves the original
 `dataforge` / segment recording IDs, and writes `/world/pred/soma_x/{mesh,joints}`.
 It projects every joint into the four exo pinholes and all three OAK cameras at
 `{pinhole}/pred/soma_x/joints_uv`, with a cyan skeleton annotation on each entity.
-It does not copy video or change calibration. The projection and triangulation
-subset in `camera_geometry.py` is copied from `selfcap-curate/keypoints.py` with
-an AST parity test; all seven projected streams were also checked numerically
-against direct use of the original helpers (zero difference, identical masks).
+It does not copy video or change calibration. Projection and triangulation come
+from `dataforge.triangulation`, shared with `selfcap-curate/keypoints.py`.
 
 The layer was copied to
 `dgx-spark:/home/pablo/dataforge-dev/selfcap-post-dev/soma/selfcap__2025-12-03__d31bf1da__ep001.rrd`

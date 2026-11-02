@@ -1,10 +1,19 @@
 """Camera-centre overlays use calibrated lenses and discard invisible centres."""
 
+from pathlib import Path
+
 import numpy as np
+import pytest
+import rerun as rr
+from dataforge.triangulation import Camera, camera_transforms
+from jaxtyping import Float64
+from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from selfcap_curate.camera_centers import camera_center_chunks, project_centers
-from selfcap_curate.keypoints import Camera, camera_transforms
+from selfcap_curate.camera_centers import CenterTrack, camera_center_chunks, project_centers, read_quest_centers
+
+SEGMENT: str = "selfcap__2025-12-30__65d00748__ep001"
+QUEST: str = "/world/rig_05"
 
 
 def test_centers_use_lens_and_clip_behind_and_outside_image() -> None:
@@ -45,3 +54,48 @@ def test_center_overlay_uses_each_video_clock_and_omits_its_own_camera() -> None
     assert np.asarray(second.column("video_time")).view(np.int64).tolist() == [12, 24, 36]
     np.testing.assert_allclose(first.column("Points2D:positions").to_pylist(), [[[60.0, 45.0], [40.0, 45.0]], [[60.0, 45.0], [40.0, 45.0]]])
     assert np.isnan(np.asarray(second.column("Points2D:positions").to_pylist())).all()
+
+
+def quest_layers(calib: Path, base: Path, videos: tuple[int, ...], calib_right_m: float | None, base_right_m: float | None) -> None:
+    """A base with the head track, its Quest videos and any factory right eye; a calib layer with any resolved borrowed camera."""
+    with rr.RecordingStream("test", recording_id=SEGMENT, send_properties=False) as recording:
+        recording.save(calib)
+        recording.log("/world/rig_00/cam_00", rr.Transform3D(translation=[1.0, 0.0, 0.0], mat3x3=np.eye(3)), static=True)  # an exo camera: always present
+        if calib_right_m is not None:
+            recording.log(f"{QUEST}/cam_01", rr.Transform3D(translation=[calib_right_m, 0.0, 0.0], mat3x3=np.eye(3)), static=True)
+    with rr.RecordingStream("test", recording_id=SEGMENT, send_properties=False) as recording:
+        recording.save(base)
+        for cam in videos:
+            recording.log(f"{QUEST}/cam_{cam:02d}/pinhole/video", rr.VideoStream.from_fields(codec=rr.VideoCodec.AV1), static=True)
+        if base_right_m is not None:
+            recording.log(f"{QUEST}/cam_01", rr.Transform3D(translation=[base_right_m, 0.0, 0.0], mat3x3=np.eye(3)), static=True)
+        recording.send_columns(
+            QUEST,
+            indexes=[rr.TimeColumn("video_time", duration=np.array([0.0, 0.1]))],
+            columns=rr.Transform3D.columns(translation=np.zeros((2, 3)), quaternion=np.tile([0.0, 0.0, 0.0, 1.0], (2, 1))),
+        )
+
+
+@pytest.mark.parametrize(
+    ("videos", "calib_right_m", "base_right_m", "expected"),
+    [
+        pytest.param((0, 1), None, 0.06, {"Quest L": 0.0, "Quest R": 0.06}, id="healthy-factory-right-eye-from-the-base"),
+        pytest.param((1,), 0.03, None, {"Quest 50": 0.03}, id="borrowed-camera-50-from-the-calib-layer"),
+        pytest.param((1,), None, None, {}, id="unresolved-camera-50-invents-no-baseline"),
+        pytest.param((0, 1), 0.07, 0.06, {"Quest L": 0.0, "Quest R": 0.07}, id="calib-over-base"),
+    ],
+)
+def test_quest_centers_read_each_camera_calib_over_base(
+    tmp_path: Path, private_server, videos: tuple[int, ...], calib_right_m: float | None, base_right_m: float | None, expected: dict[str, float]
+) -> None:
+    calib: Path = tmp_path / "calib.rrd"
+    base: Path = tmp_path / "base.rrd"
+    quest_layers(calib, base, videos, calib_right_m, base_right_m)
+    with private_server({"calib": [calib], "base": [base]}) as server:
+        client = server.client()
+        tracks: list[CenterTrack] = read_quest_centers(client.get_dataset("calib"), client.get_dataset("base"), SEGMENT, 5)
+    assert {track.label: float(track.rig_T_cam[0, 3]) for track in tracks} == pytest.approx(expected)
+    for track in tracks:
+        identity: Float64[ndarray, "2 4 4"] = np.tile(np.eye(4), (2, 1, 1))
+        np.testing.assert_allclose(track.world_T_rig, identity)
+        np.testing.assert_allclose(track.times_s, [0.0, 0.1])

@@ -6,33 +6,35 @@ import re
 import shlex
 import subprocess
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
 import numpy as np
 import pyarrow as pa
+from dataforge.quest_joint_poses import read_segment_hand_poses
+from dataforge.schema import SOMA_LAYER
+from dataforge.writing import atomic_write
 from datafusion import col, lit
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader
-from serde import serde
+from serde import SerdeError, serde
 from serde.json import from_json, to_json
 
 from selfcap_soma.anthropometry import plausible_ears, usable_ears
 from selfcap_soma.catalog import ExoSource, read_window, subset
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
-from dataforge.quest_joint_poses import read_segment_hand_poses
-from selfcap_soma.output import save
+from selfcap_soma.output import write_report
+from selfcap_soma.overlay import SOMA_MESH, layer_fit, mesh_vertex_rows, write_layer
 from selfcap_soma.overlay import Config as OverlayConfig
-from selfcap_soma.overlay import main as export
 from selfcap_soma.shape_frames import InsufficientBodyObservation, select_shape_frames
 from selfcap_soma.temporal import group_jitter
 
-VERSION = "soma-batch-v8-anthropometric-guards"
+VERSION = "soma-batch-v9-direct-layer"
 SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 
 
@@ -40,8 +42,8 @@ SEGMENT = re.compile(r"selfcap__(\d{4}-\d{2}-\d{2})__([a-f0-9]{8})__ep(\d{3})")
 class Config:
     dataset: str
     """Explicit catalog dataset. Only its soma layer is written."""
-    spark_dir: Path
-    """Absolute destination directory on Spark for the soma RRDs."""
+    spark_dir: Path | None = None
+    """Absolute destination directory on Spark: ship there and register soma. Unset: all output stays local and the caller registers the layer."""
     segment: list[str] = field(default_factory=list)
     """One or more SelfCap segment IDs."""
     segments_file: Path | None = None
@@ -67,12 +69,10 @@ class Config:
     """Adam learning rate at the end of the pose pass."""
     shape_iterations: int = 300
     """Shape-update iterations within the 600-step sparse calibration pass."""
-    publish: bool = True
-    """Ship and register soma; disable for local validation runs."""
     native_exo: bool = False
     """Use native exo/Quest views and bake OAK only; requires a native-projection blueprint."""
     cleanup_after_publish: bool = False
-    """After verified catalog readback, delete only this segment's known heavy local RRDs."""
+    """After verified catalog readback, delete only this segment's known heavy local RRDs; requires spark_dir."""
     force: bool = False
     """Ignore matching local checkpoints and refit."""
 
@@ -86,10 +86,8 @@ class Timings:
     """Sparse shape fitting and its model/mesh work."""
     fit_s: float = 0.0
     """Full-rate pose fitting, including mesh evaluation."""
-    write_s: float = 0.0
-    """Fit RRD and report serialization."""
-    mesh_overlay_s: float = 0.0
-    """Final mesh normals, projections and layer writing."""
+    layer_s: float = 0.0
+    """Report serialization, mesh normals, projections and layer writing."""
     ship_s: float = 0.0
     """SSH/SCP file transfer."""
     register_s: float = 0.0
@@ -105,7 +103,7 @@ class Timings:
 class Checkpoint:
     signature: str
     """Digest of algorithm/settings, input streams, calibration and raw rotations."""
-    phase: Literal["new", "shape", "fit", "export", "published"]
+    phase: Literal["new", "shape", "export", "published"]
     """Last completely written stage; incomplete stages are rerun."""
     timings: Timings
     """Per-stage measurements."""
@@ -140,12 +138,41 @@ def write_checkpoint(path: Path, state: Checkpoint) -> None:
     temporary.replace(path)
 
 
+def read_checkpoint(path: Path, signature: str) -> Checkpoint:
+    """The stored state when it matches; a missing, older-format or other-signature checkpoint starts over."""
+    fresh: Checkpoint = Checkpoint(signature, "new", Timings())
+    if not path.exists():
+        return fresh
+    try:
+        state: Checkpoint = from_json(Checkpoint, path.read_text())
+    except SerdeError:
+        return fresh
+    return state if state.signature == signature else fresh
+
+
+def file_sha256(path: Path) -> str:
+    """Digest of a layer file, without reading it into memory."""
+    with path.open("rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
+
+
+def finish(state_path: Path, segment: str, state: Checkpoint, started: float) -> None:
+    """Record and print one segment's outcome, with a greppable line of stage seconds."""
+    state.timings.total_s = perf_counter() - started
+    write_checkpoint(state_path, state)
+    print(segment, to_json(state), flush=True)
+    stages: str = " ".join(f"{stage.name}={getattr(state.timings, stage.name):.1f}" for stage in fields(state.timings))
+    print(f"SOMA_TIME {segment} {stages}", flush=True)
+
+
 def run_segment(config: Config, segment: str) -> None:
     """Fit one segment under an exclusive local lock; raise on missing inputs."""
     if config.dataset in ("selfcap-post-ep1", "dataforge-selfcap"):
         raise ValueError(f"publication to protected dataset {config.dataset!r} is disabled")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", config.dataset) or not config.spark_dir.is_absolute():
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", config.dataset) or (config.spark_dir is not None and not config.spark_dir.is_absolute()):
         raise ValueError("dataset must be a simple name and spark-dir must be absolute")
+    if config.cleanup_after_publish and config.spark_dir is None:
+        raise ValueError("--cleanup-after-publish requires --spark-dir")
     directory = config.output / config.dataset / segment
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".lock").open("w") as lock:
@@ -183,20 +210,19 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
                 digest.update(array.tobytes())
     signature = digest.hexdigest()
     state_path = directory / "checkpoint.json"
-    state = from_json(Checkpoint, state_path.read_text()) if state_path.exists() else Checkpoint(signature, "new", Timings())
-    if config.force or state.signature != signature:
-        state = Checkpoint(signature, "new", Timings())
+    state = Checkpoint(signature, "new", Timings()) if config.force else read_checkpoint(state_path, signature)
     state.timings.catalog_s = perf_counter() - started
     layer = directory / f"{segment}.rrd"
+    remote: Path | None = None if config.spark_dir is None else config.spark_dir / layer.name
     if state.phase == "published" and state.cleaned:
-        verify_publication(config, segment, state, data.times)
-        if config.cleanup_after_publish and config.publish:
+        if remote is None:
+            raise ValueError(f"{segment}: local layer was cleaned after publication; pass --spark-dir to verify it or --force to refit")
+        verify_publication(config, segment, remote, state, data.times)
+        if config.cleanup_after_publish:
             cleanup_published(config, directory, segment, state)
-        state.timings.total_s = perf_counter() - started
-        write_checkpoint(state_path, state)
-        print(segment, to_json(state), flush=True)
+        finish(state_path, segment, state, started)
         return
-    if state.phase in ("export", "published") and (not layer.is_file() or hashlib.sha256(layer.read_bytes()).hexdigest() != state.layer_sha256):
+    if state.phase in ("export", "published") and (not layer.is_file() or file_sha256(layer) != state.layer_sha256):
         raise ValueError(f"{segment}: completed layer is missing/corrupt; rerun with --force")
     options = FitOptions(
         head_mode="ears-rotation",
@@ -258,57 +284,41 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         state.timings.fit_s = perf_counter() - began
         state.timings.peak_gpu_mib = max(state.timings.peak_gpu_mib, result.peak_bytes / 2**20)
         began = perf_counter()
-        save(directory, data, result, 39.862079571, 1, upper_body_only=True)
+        write_report(directory, data, result, 39.862079571, upper_body_only=True)
         (directory / "jitter.json").write_text(to_json(group_jitter(result.joints, data.times, result.names)))
-        state.timings.write_s = perf_counter() - began
-        state.phase = "fit"
-        write_checkpoint(state_path, state)
-    if state.phase == "fit":
-        began = perf_counter()
-        temporary = layer.with_suffix(".pending.rrd")
-        export(
-            OverlayConfig(
-                source=directory / "fit.rrd",
-                output=temporary,
-                catalog_url=config.catalog_url,
-                dataset=config.dataset,
-                segment=segment,
-                exo_source=config.exo_source,
-                native_exo=config.native_exo,
+        for stale in directory.glob("*.rrd.tmp"):  # a killed writer's; this segment's lock is held
+            stale.unlink()
+        with atomic_write(layer) as staged:
+            write_layer(
+                OverlayConfig(output=staged, catalog_url=config.catalog_url, dataset=config.dataset, segment=segment, exo_source=config.exo_source, native_exo=config.native_exo),
+                layer_fit(data, result),
             )
-        )
-        temporary.replace(layer)
-        state.timings.mesh_overlay_s = perf_counter() - began
-        state.layer_sha256 = hashlib.sha256(layer.read_bytes()).hexdigest()
+        state.timings.layer_s = perf_counter() - began
+        state.layer_sha256 = file_sha256(layer)
         state.layer_bytes = layer.stat().st_size
         state.phase = "export"
         write_checkpoint(state_path, state)
-    if config.publish:
-        state.timings.ship_s, state.timings.register_s = publish_layer(config, layer)
+    if remote is not None:
+        state.timings.ship_s, state.timings.register_s = publish_layer(config, layer, remote)
         state.phase = "published"
         if config.cleanup_after_publish:
             endpoints = np.rint(data.times[[0, -1]] * 1e9).astype(np.int64)
             state.mesh_sample_sha256 = local_mesh_digest(layer, endpoints)
-            verify_publication(config, segment, state, data.times)
+            verify_publication(config, segment, remote, state, data.times)
             cleanup_published(config, directory, segment, state)
-    state.timings.total_s = perf_counter() - started
-    write_checkpoint(state_path, state)
-    print(segment, to_json(state), flush=True)
+    finish(state_path, segment, state, started)
 
 
-def publish_layer(config: Config, layer: Path) -> tuple[float, float]:
+def publish_layer(config: Config, layer: Path, remote: Path) -> tuple[float, float]:
     """Atomically ship one RRD and register only the soma layer with REPLACE."""
-    if config.dataset in ("selfcap-post-ep1", "dataforge-selfcap"):
-        raise ValueError(f"publication to protected dataset {config.dataset!r} is disabled")
-    remote = config.spark_dir / layer.name
     began = perf_counter()
-    subprocess.run(["ssh", config.spark_host, f"mkdir -p -- {shlex.quote(str(config.spark_dir))}"], check=True)
+    subprocess.run(["ssh", config.spark_host, f"mkdir -p -- {shlex.quote(str(remote.parent))}"], check=True)
     subprocess.run(["scp", str(layer), f"{config.spark_host}:{shlex.quote(str(remote) + '.upload')}"], check=True)
     subprocess.run(["ssh", config.spark_host, f"mv -- {shlex.quote(str(remote) + '.upload')} {shlex.quote(str(remote))}"], check=True)
     ship_s = perf_counter() - began
     began = perf_counter()
     client = CatalogClient(config.catalog_url)
-    client.get_dataset(config.dataset).register([remote.as_uri()], layer_name="soma", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    client.get_dataset(config.dataset).register([remote.as_uri()], layer_name=SOMA_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     return ship_s, perf_counter() - began
 
 
@@ -316,13 +326,13 @@ def local_mesh_digest(path: Path, endpoints: Int64[ndarray, "2"]) -> str:
     """Hash the two endpoint mesh samples before local cleanup."""
     rows = []
     component = "Mesh3D:vertex_positions"
-    for chunk in RrdReader(path).stream().filter(content="/world/pred/soma_x/mesh").to_chunks():
+    for chunk in RrdReader(path).stream().filter(content=SOMA_MESH).to_chunks():
         batch = chunk.to_record_batch()
         if "video_time" not in batch.schema.names or component not in batch.schema.names:
             continue
         stamps = batch.column("video_time").cast("int64").to_numpy()
         for index in np.flatnonzero(np.isin(stamps, endpoints)):
-            rows.append((int(stamps[index]), np.asarray(batch.column(component)[int(index)].as_py(), dtype=np.float32)))
+            rows.append((int(stamps[index]), mesh_vertex_rows(batch.column(component).slice(int(index), 1))[0]))
     if len(rows) != 2:
         raise ValueError("local layer must contain both endpoint mesh samples before cleanup")
     digest = hashlib.sha256()
@@ -332,10 +342,9 @@ def local_mesh_digest(path: Path, endpoints: Int64[ndarray, "2"]) -> str:
     return digest.hexdigest()
 
 
-def verify_publication(config: Config, segment: str, state: Checkpoint, times: Float64[ndarray, "n"]) -> None:
+def verify_publication(config: Config, segment: str, remote: Path, state: Checkpoint, times: Float64[ndarray, "n"]) -> None:
     """Verify registration, remote file integrity and actual catalog mesh readback."""
     state.readback_verified = False
-    remote = config.spark_dir / f"{segment}.rrd"
     result = subprocess.run(["ssh", config.spark_host, f"sha256sum -- {shlex.quote(str(remote))}"], check=True, capture_output=True, text=True)
     if not result.stdout.split() or result.stdout.split()[0] != state.layer_sha256:
         raise ValueError(f"{segment}: published remote layer digest mismatch; cleanup refused")
@@ -346,10 +355,10 @@ def verify_publication(config: Config, segment: str, state: Checkpoint, times: F
     if len(metadata) != 1:
         raise ValueError(f"{segment}: missing catalog registration; cleanup refused")
     registered = dict(zip(metadata["rerun_layer_names"][0].as_py(), metadata["rerun_storage_urls"][0].as_py(), strict=True))
-    if registered.get("soma") != remote.as_uri():
+    if registered.get(SOMA_LAYER) != remote.as_uri():
         raise ValueError(f"{segment}: catalog soma URI mismatch; cleanup refused")
-    component = "/world/pred/soma_x/mesh:Mesh3D:vertex_positions"
-    reader = view.filter_contents(["/world/pred/soma_x/mesh"]).reader(index="video_time")
+    component = f"{SOMA_MESH}:Mesh3D:vertex_positions"
+    reader = view.filter_contents([SOMA_MESH]).reader(index="video_time")
     stamps = reader.filter(col(component).is_not_null()).select("video_time").to_arrow_table()["video_time"].cast(pa.int64()).to_numpy()
     expected = np.rint(times * 1e9).astype(np.int64)
     if not np.array_equal(np.sort(stamps), expected):
@@ -365,7 +374,7 @@ def verify_publication(config: Config, segment: str, state: Checkpoint, times: F
         raise ValueError(f"{segment}: catalog endpoint mesh samples missing; cleanup refused")
     for index in range(2):
         stamp = int(samples["video_time"][index].cast(pa.int64()).as_py())
-        points = np.asarray(samples[component][index].as_py(), dtype=np.float32)
+        points = mesh_vertex_rows(samples[component].slice(index, 1))[0]
         if not np.isfinite(points).all():
             raise ValueError(f"{segment}: catalog mesh has nonfinite vertices; cleanup refused")
         digest.update(np.asarray([stamp], dtype="<i8").tobytes())
@@ -377,11 +386,12 @@ def verify_publication(config: Config, segment: str, state: Checkpoint, times: F
 
 def cleanup_published(config: Config, directory: Path, segment: str, state: Checkpoint) -> None:
     """Delete only known local RRDs after successful publication and readback."""
-    if not config.cleanup_after_publish or not config.publish or state.phase != "published" or not state.readback_verified:
+    if not config.cleanup_after_publish or state.phase != "published" or not state.readback_verified:
         raise ValueError("cleanup requires opt-in and a verified successful publication")
     if directory.resolve().parent != (config.output / config.dataset).resolve() or directory.name != segment:
         raise ValueError("cleanup directory is outside the segment output directory")
-    paths = [directory / name for name in ("fit.rrd", f"{segment}.rrd", f"{segment}.pending.rrd")]
+    # fit.rrd: left by a run from before layers were written directly. *.rrd.tmp: a killed writer's stage.
+    paths = [directory / "fit.rrd", directory / f"{segment}.rrd", *directory.glob("*.rrd.tmp")]
     if any(path.is_symlink() for path in paths):
         raise ValueError("cleanup refuses symlink artifacts")
     # Persist first: a crash between unlinks resumes through catalog verification.

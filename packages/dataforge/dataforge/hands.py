@@ -159,11 +159,37 @@ def log_keypoints2d(
     confidence: Float32[ndarray, "t 133"] | None,
     describe: bool = True,
     color_range: tuple[float, float] = (0.0, 1.0),
+    shown: Bool[ndarray, "t 133"] | None = None,
 ) -> None:
-    """Write Float32[t,133,2] pixels and raw confidence; color_range controls only the red-to-green display scale."""
+    """Write Float32[t,133,2] pixels and raw confidence; color_range controls only the red-to-green display scale.
+
+    Model detections pass ``shown``: ``path`` keeps every detection and its real score, and ``schema.shown_path(path)``
+    holds only the shown points, for the layout to draw. Sources without a detector score (shipped labels, projections) omit it.
+    """
     if describe:
         log_keypoint_descriptors(recording, path, dimension=2)
-    _send_keypoint_rows(recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2, color_range=color_range)
+        if shown is not None:
+            rr.log(schema.shown_path(path), Points2DWithConfidence.from_fields(show_labels=False, radii=3.0), static=True, recording=recording)
+    _send_keypoint_rows(
+        recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2, color_range=color_range, shown=shown
+    )
+
+
+def sparse_keypoint_columns(
+    positions: Float32[ndarray, "t 133 2"],
+    confidence: Float32[ndarray, "t 133"],
+    keep: Bool[ndarray, "t 133"],
+    color_range: tuple[float, float] = (0.0, 1.0),
+) -> rr.ComponentColumnList:
+    """Columns of each row's kept points, each with its COCO-133 id, raw score and score colour."""
+    kept: Float32[ndarray, "n"] = confidence[keep]
+    return Points2DWithConfidence.columns(
+        positions=positions[keep],
+        confidences=kept,
+        keypoint_ids=np.broadcast_to(np.arange(133, dtype=np.uint16), keep.shape)[keep],
+        class_ids=np.zeros(kept.size, dtype=np.int32),
+        colors=confidence_scores_to_rgb(((kept - color_range[0]) / (color_range[1] - color_range[0])).reshape(1, -1, 1))[0],
+    ).partition(keep.sum(axis=1).tolist())
 
 
 def _send_keypoint_rows(
@@ -176,14 +202,15 @@ def _send_keypoint_rows(
     confidence: Float32[ndarray, "t 133"] | None,
     dimension: Literal[2, 3],
     color_range: tuple[float, float],
+    shown: Bool[ndarray, "t 133"] | None = None,
 ) -> None:
-    """Bound temporal columns before allocation using the publication byte target."""
+    """Bound temporal columns before allocation using the publication byte target; ``shown`` adds the 2D display copy."""
     low: float = color_range[0]
     high: float = color_range[1]
     if not np.isfinite(color_range).all() or low >= high:
         raise ValueError("color_range must contain finite, increasing bounds")
-    # Budget positions, confidence, packed colours (2D and 3D), offsets, row IDs and both clocks.
-    row_bytes = 133 * (dimension * 4 + 4 + 4) + 64
+    # Budget positions, confidence, packed colours (2D and 3D), offsets, row IDs and both clocks; a display copy adds ids and classes per point.
+    row_bytes = 133 * (dimension * 4 + 4 + 4 + (0 if shown is None else 4)) + 64
     rows_per_batch = (cast(int, rrc.OptimizationProfile.OBJECT_STORE.max_bytes) - 4096) // row_bytes
     for start in range(0, len(positions), rows_per_batch):
         stop = start + rows_per_batch
@@ -191,12 +218,11 @@ def _send_keypoint_rows(
         colors: UInt8[ndarray, "n 3"] = confidence_scores_to_rgb(((scores - low) / (high - low)).reshape(1, -1, 1))[0]
         archetype = Points3DWithConfidence if dimension == 3 else Points2DWithConfidence
         columns = archetype.columns(positions=masked.reshape(-1, dimension), confidences=scores.reshape(-1), colors=colors)
-        rr.send_columns(
-            path,
-            indexes=[time_column(times_ns[start:stop]), *([] if frame_indices is None else [frame_index_column(frame_indices[start:stop])])],
-            columns=columns.partition([133] * len(masked)),
-            recording=recording,
-        )
+        indexes = [time_column(times_ns[start:stop]), *([] if frame_indices is None else [frame_index_column(frame_indices[start:stop])])]
+        rr.send_columns(path, indexes=indexes, columns=columns.partition([133] * len(masked)), recording=recording)
+        if shown is not None:
+            keep: Bool[ndarray, "n 133"] = shown[start:stop] & np.isfinite(masked).all(axis=-1)
+            rr.send_columns(schema.shown_path(path), indexes=indexes, columns=sparse_keypoint_columns(masked, scores, keep, color_range), recording=recording)
 
 
 def log_projections(

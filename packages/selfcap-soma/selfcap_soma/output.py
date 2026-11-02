@@ -7,7 +7,7 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import trimesh
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from serde import serde
 from serde.json import to_json
@@ -75,8 +75,23 @@ def mapped(result: FitResult, data: Observations) -> Float64[ndarray, "n 133 3"]
     return points
 
 
-def save(output: Path, data: Observations, result: FitResult, target_s: float, mesh_stride: int = 1, upper_body_only: bool = False) -> Report:
-    """Persist a local comparison recording and a strict JSON report."""
+def joint_edges(parents: Int64[ndarray, "78"]) -> list[tuple[int, int]]:
+    """Rig connections between nonvirtual joints, from the public parent indices."""
+    return [(int(parent) - 1, child - 1) for child, parent in enumerate(parents) if child > 0 and parent > 0]
+
+
+def log_joint_style(recording: rr.RecordingStream, path: str, edges: list[tuple[int, int]], joint_count: int) -> None:
+    """The static rig connections and marker style of a joint entity."""
+    recording.log(
+        path,
+        rr.AnnotationContext(rr.ClassDescription(info=rr.AnnotationInfo(id=0, color=[60, 220, 170]), keypoint_connections=edges)),
+        static=True,
+    )
+    recording.log(path, rr.Points3D.from_fields(keypoint_ids=np.arange(joint_count), class_ids=0, colors=[60, 220, 170], radii=0.006), static=True)
+
+
+def write_report(output: Path, data: Observations, result: FitResult, target_s: float, upper_body_only: bool = False) -> Report:
+    """Write the strict JSON report of one fit."""
     output.mkdir(parents=True, exist_ok=True)
     fit_points: Float64[ndarray, "n 133 3"] = mapped(result, data)
     frame = int(np.searchsorted(data.times, target_s, side="right") - 1)
@@ -131,21 +146,19 @@ def save(output: Path, data: Observations, result: FitResult, target_s: float, m
         result.hand_orientation_source,
     )
     (output / "report.json").write_text(to_json(report))
+    return report
+
+
+def save(output: Path, data: Observations, result: FitResult, target_s: float, mesh_stride: int = 1, upper_body_only: bool = False) -> Report:
+    """Persist a local comparison recording and a strict JSON report; research tools only, soma-batch writes its layer directly."""
+    report: Report = write_report(output, data, result, target_s, upper_body_only)
+    fit_points: Float64[ndarray, "n 133 3"] = mapped(result, data)
     recording = rr.RecordingStream("selfcap-soma-prototype")
     recording.save(output / "fit.rrd")
     quality = assess_quality(fit_points.astype(np.float64), data.exo, data.hands, result.scale, data.confidence)
-    (output / "quality.json").write_text(to_json(quality))
     log_quality(recording, quality)
     recording.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
-    edges = [(int(parent) - 1, child - 1) for child, parent in enumerate(result.parents) if child > 0 and parent > 0]
-    recording.log(
-        "/world/fit/joints",
-        rr.AnnotationContext(rr.ClassDescription(info=rr.AnnotationInfo(id=0, color=[60, 220, 170]), keypoint_connections=edges)),
-        static=True,
-    )
-    recording.log(
-        "/world/fit/joints", rr.Points3D.from_fields(keypoint_ids=np.arange(77), class_ids=0, colors=[60, 220, 170], radii=0.006), static=True
-    )
+    log_joint_style(recording, "/world/fit/joints", joint_edges(result.parents), 77)
     recording.log("/world/inputs/exo", rr.Points3D.from_fields(colors=[255, 150, 35], radii=0.009), static=True)
     recording.log("/world/inputs/quest", rr.Points3D.from_fields(colors=[220, 75, 230], radii=0.008), static=True)
     recording.log("/world/fit/mesh", rr.Mesh3D.from_fields(triangle_indices=result.faces, albedo_factor=[0.25, 0.65, 0.8, 0.35]), static=True)

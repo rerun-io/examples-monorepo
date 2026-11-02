@@ -81,21 +81,26 @@ from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
+from dataforge.datasets.selfcap_raw import (
+    QUEST_HAND_SIDES,
+    FactoryCalibration,
+    assumed_phone_lens,
+    coco133_hands,
+    nominal_oak_mount,
+    oak_stereo,
+    quest_left_T_right,
+    quest_mesh_frame,
+    read_quest_joint_hands,
+)
 from dataforge.datasets.selfcap_raw import CameraCalibration as CameraCalibration
-from dataforge.oak_mount import PRIOR_LEAD_NS
-from dataforge.datasets.selfcap_raw import FactoryCalibration, assumed_phone_lens, nominal_oak_mount, oak_stereo, quest_left_T_right, quest_mesh_frame
 from dataforge.datasets.selfcap_raw import HeadPoses as HeadPoses
 from dataforge.datasets.selfcap_raw import QuestHands as QuestHands
 from dataforge.datasets.selfcap_raw import read_calibration as read_calibration
 from dataforge.datasets.selfcap_raw import read_head_poses as read_head_poses
 from dataforge.datasets.selfcap_raw import read_imu_csv as read_imu_csv
-from dataforge.datasets.selfcap_raw import QUEST_HAND_SIDES, coco133_hands, read_quest_joint_hands
 from dataforge.datasets.selfcap_raw import read_quest_hands as read_quest_hands
-from dataforge.quest_joint_poses import QuestJointPoses, joint_poses_from_table, quest_hand_path
-from dataforge.quest_joint_poses import read_segment_hand_poses as read_segment_hand_poses
 from dataforge.datasets.selfcap_raw import read_session_task as read_session_task
 from dataforge.identity import SequenceIdentity
-from dataforge.objects import strip_texture_transform, with_root_transform
 from dataforge.logging_toolkit import (
     ImuChannel,
     annotation_context,
@@ -107,7 +112,16 @@ from dataforge.logging_toolkit import (
     log_video_stream,
     time_column,
 )
+from dataforge.oak_mount import PRIOR_LEAD_NS
+from dataforge.objects import strip_texture_transform, with_root_transform
+from dataforge.quest_joint_poses import QuestJointPoses, joint_poses_from_table, quest_hand_path
+from dataforge.quest_joint_poses import read_segment_hand_poses as read_segment_hand_poses
 from dataforge.records import read_csv_columns, read_json
+from dataforge.schema import SOMA_LAYER as SOMA_LAYER
+from dataforge.schema import SOMA_MESH as SOMA_MESH
+from dataforge.schema import SOMA_METRICS as SOMA_METRICS
+from dataforge.schema import SOMA_QUALITY_PROPERTY as SOMA_QUALITY_PROPERTY
+from dataforge.schema import SOMA_XLO as SOMA_XLO
 from dataforge.video_encoding import read_video_start_ns
 
 REPO_ID: str = "pablovela5620/selfcap-hard26-raw"
@@ -603,19 +617,19 @@ LOUDNESS_WINDOW_S: float = 2.0
 """Half-width of the loudness plot around the time cursor: a tap and its echo on the other phones fit in it."""
 
 
-def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones: bool = False, show_soma_mesh: bool = False) -> rrb.Blueprint:
+def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones: bool = False) -> rrb.Blueprint:
     """The SelfCap layout at every stage: 3D scene and head cameras over the phones, their sound, and the OAK IMU.
 
     A view lists every overlay a later layer may add (Quest hands, skeleton, SOMA), so the one layout serves a
     freshly ingested capture and a processed one. Only the phone poses change what can be drawn: an unposed phone
     would sit at the world origin in 3D and project the hands through the wrong pose, so until calibration the scene
-    leaves the phones out and their panes show only the video.
+    leaves the phones out and their panes show only the video. The SOMA mesh override is always there: a segment
+    without the ``soma`` layer has nothing for it to act on.
 
     Args:
         panes: Camera labels and indices, in rig-then-camera order.
         ego_rig: Rig index of the OAK, whose ``imu_00`` feeds the time-series views.
         posed_phones: The phones carry a calibrated pose.
-        show_soma_mesh: Show the SOMA mesh as 3D context (the dev dataset).
 
     Returns:
         The blueprint embedded in every base rrd (phones unposed) and, with index labels, the catalog default.
@@ -635,14 +649,16 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
         # 25-80 px off, worst at the image edge.
         pinhole: str = schema.pinhole_path(pane.rig, pane.cam)
         if pane.kind == "exo" and not posed_phones:
-            # Sapiens2 draws only its points at or above schema.SHOWN_MIN_CONFIDENCE; the full set stays, hidden.
-            full_sapiens2: dict[EntityPathLike, rrb.EntityBehavior] = {schema.coco133_uv_path(pane.rig, pane.cam, pred="sapiens2"): hide}
-            return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=[f"{pinhole}/**"], overrides=full_sapiens2)
+            # A model draws only its points at or above schema.SHOWN_MIN_CONFIDENCE (schema.shown_path); the full set stays, hidden.
+            full_sets: dict[EntityPathLike, rrb.EntityBehavior] = dict.fromkeys(
+                (*(schema.coco133_uv_path(pane.rig, pane.cam, pred=pred) for pred in ("sapiens2", "rtmw")), f"{pinhole}/sapiens2/coco133_uv"), hide
+            )
+            return blueprints.camera_view(pane.name, pane.rig, pane.cam, contents=[f"{pinhole}/**"], overrides=full_sets)
         contents: list[str] = [f"{pinhole}/**", "/world/gt/**", "/world/pred/**"]
         overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
         if pane.rig != ego_rig:
             contents.append("/world/skeleton/**")
-            overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=show_soma_mesh)
+            overrides[SOMA_MESH] = rrb.EntityBehavior(visible=True)
         if pane.kind == "exo":
             # The other rigs' camera frames and names (cam nodes only, without their frustum or video) show in the phone.
             contents.extend(path for rig, path in frames if rig != pane.rig)
@@ -659,8 +675,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
     scene_overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden | dict.fromkeys(
         (f"{pinhole}/{overlay}" for pinhole in pinholes for overlay in ("skeleton", "camera_centers")), hide
     )
-    if show_soma_mesh:
-        scene_overrides["/world/pred/soma_x/mesh"] = rrb.EntityBehavior(visible=True)
+    scene_overrides[SOMA_MESH] = rrb.EntityBehavior(visible=True)
     scene = rrb.Spatial3DView(name="Scene", origin="/world", contents=["/world/**", *excluded], overrides=scene_overrides, background=SCENE_BACKGROUND,
                               eye_controls=SCENE_EYE)
 
@@ -711,20 +726,56 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
     )
 
 
+PREVIEW_LAYER: str = "preview"
+"""Layer that holds a segment's card content (``selfcap-preview``); the table is the card table once any segment holds it."""
+PREVIEW_TIMELINE: str = "preview_time"
+"""Timeline of the preview layer: same values as ``video_time``, but only the window exists there."""
+PREVIEW_VIDEO_SIZE: tuple[int, int] = (480, 270)
+"""Width and height of the preview videos, in pixels."""
+PREVIEW_VIDEO_GAP_PX: int = 4
+"""Gap between the exo and ego videos stacked in one 2D view."""
+PREVIEW_CENTER: str = "/preview/center"
+"""Static transform to the window's mean skeleton position: the card's 3D view origin."""
+PREVIEW_BODY: str = "/preview/body"
+"""Parent of the window copies of the body: the card's 3D view shows all of it."""
+PREVIEW_SKELETON: str = f"{PREVIEW_BODY}/skeleton"
+"""Window copy of ``/world/skeleton``."""
+PREVIEW_SOMA_XLO: str = f"{PREVIEW_BODY}/soma_xlo"
+"""Window copy of the low-vertex SOMA mesh."""
+PREVIEW_EXO_CAM: str = "/preview/exo_cam"
+"""The exo phone's static camera pose."""
+PREVIEW_EXO_PINHOLE: str = f"{PREVIEW_EXO_CAM}/pinhole"
+"""The exo phone's pinhole, scaled to the preview video; the videos sit below it."""
+PREVIEW_IMAGE_PLANE_DISTANCE: float = 0.06
+"""Frustum depth of every camera in the card's 3D view, in metres."""
+PREVIEW_EYE: rrb.EyeControls3D = rrb.EyeControls3D(position=[0.0, 0.55, -1.9], look_target=[0.0, 0.2, 0.0], eye_up=[0.0, 1.0, 0.0], spin_speed=0.2)
+"""Card eye: world is RUB (+Y up, -Z forward), so an elevated front view of the body at ``PREVIEW_CENTER``."""
+TABLE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("property:calib:session", "Capture / session"),
+    ("property:calib:exo_cameras", "Phones"),
+    (f"property:{SOMA_QUALITY_PROPERTY}:status", "SOMA quality"),
+)
+"""Segment-table columns every layout shows, as (column, header)."""
+ALWAYS_HIDDEN_COLUMNS: tuple[str, ...] = ("property:capture:collector",)
+"""Hidden even when the segment table does not list them at publish time."""
+TABLE_SORT_COLUMN: str = "property:calib:session"
+"""Column that orders the segment table."""
+
+
 class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
     """Converts SelfCap episodes into exoego:v2 base-layer recordings."""
 
-    def default_blueprint(self, *, show_soma_mesh: bool = False, posed_phones: bool = True) -> rrb.Blueprint:
+    def default_blueprint(self, *, posed_phones: bool = True) -> rrb.Blueprint:
         """``build_blueprint`` for the modal four-phone rig, with index labels: device names vary per session.
 
         Register publishes it with ``posed_phones`` read from the catalog (``catalog_blueprints``); the default suits
-        the callers that run after calibration. The dev dataset opts into the SOMA mesh as 3D context.
+        the callers that run after calibration.
         """
         phones: list[CameraPane] = [CameraPane(f"Phone {rig + 1}", rig, 0, "exo") for rig in range(DEFAULT_EXO_CAMERAS)]
         ego_rig, quest_rig = DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1
         head: list[CameraPane] = [CameraPane(f"OAK {stream}", ego_rig, cam, "ego") for cam, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
         head += [CameraPane(f"Quest {stream}", quest_rig, cam, "quest") for cam, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
-        return build_blueprint((*phones, *head), ego_rig, posed_phones=posed_phones, show_soma_mesh=show_soma_mesh)
+        return build_blueprint((*phones, *head), ego_rig, posed_phones=posed_phones)
 
     def table_blueprint(self, *, posed_phones: bool = True) -> rrb.Blueprint:
         """The scene beside one camera: the OAK with the Quest hands, or once the phones are posed, phone 1 with the body.
@@ -737,23 +788,77 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         scene: rrb.Spatial3DView = rrb.Spatial3DView(
             name="Scene",
             origin="/world",
-            contents=["/world/**", "- /world/pred/**", "/world/pred/soma_x/mesh/**", *blueprints.video_exclusions(slots), *unposed],
+            contents=["/world/**", "- /world/pred/**", f"{SOMA_MESH}/**", *blueprints.video_exclusions(slots), *unposed],
             background=SCENE_BACKGROUND,
             eye_controls=SCENE_EYE,
         )
         if posed_phones:
-            body: list[str] = ["/world/gt/**", "/world/skeleton/**", "/world/pred/soma_x/mesh/**"]
+            body: list[str] = ["/world/gt/**", "/world/skeleton/**", f"{SOMA_MESH}/**"]
             pane: rrb.Spatial2DView = blueprints.camera_view("Phone 1", 0, 0, contents=[schema.video_path(0, 0) + "/**", *body])
         else:
             ego_rig: int = DEFAULT_EXO_CAMERAS
             pane = blueprints.camera_view("OAK rgb + Quest hands", ego_rig, 0, contents=[schema.video_path(ego_rig, 0) + "/**", "/world/gt/**"])
         return blueprints.exoego_table_blueprint(scene, pane)
 
-    def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
-        """Both layouts, with the phones posed only when every phone of every segment has a pose (calibrate's ``cam_00``).
+    def preview_table_blueprint(self, columns: list[str]) -> rrb.table.TableBlueprint:
+        """The card table of a dataset whose segments hold the ``preview`` layer: previews loop on ``preview_time``.
+
+        A card shows a 3D "Body" view and a 2D "Exo + ego" view. The fields are ``table_fields``; see ``writing.published_columns``.
+
+        Args:
+            columns: Every column of the segment table at publish time.
+        """
+        # Origin = /preview/center (the window's mean body position), so a fixed camera fits every session. The rigs come
+        # from /world: pinhole frustums (and device frames), without the pinholes' 2D children (videos, overlays). The
+        # moving Quest pose is on preview_time in the preview layer; the OAK mount hangs off it.
+        slots: list[tuple[int, int]] = [(rig, cam) for rig in range(DEFAULT_EXO_CAMERAS + 2) for cam in range(3)]
+        contents: list[str] = [f"+ {PREVIEW_BODY}/**"]
+        for rig in range(DEFAULT_EXO_CAMERAS + 2):
+            contents.append(f"+ {schema.rig_path(rig)}/**")
+            for cam in range(3):
+                pinhole: str = schema.pinhole_path(rig, cam)
+                contents += [f"- {pinhole}/**", f"+ {pinhole}"]
+        planes: dict[EntityPathLike, rr.Pinhole] = {schema.pinhole_path(rig, cam): rr.Pinhole.from_fields(image_plane_distance=PREVIEW_IMAGE_PLANE_DISTANCE) for rig, cam in slots}
+        body: rrb.Spatial3DView = rrb.Spatial3DView(
+            name="Body", origin=PREVIEW_CENTER, contents=contents, line_grid=False, overrides=planes, background=SCENE_BACKGROUND, eye_controls=PREVIEW_EYE
+        )
+        # The exo video sits under a scaled copy of the exo phone's pinhole, so the 3D skeleton and xlo mesh project onto it
+        # like in the main view; the OAK video and its 2D skeleton are stacked below it in the same image space.
+        width, height = PREVIEW_VIDEO_SIZE
+        videos: rrb.Spatial2DView = rrb.Spatial2DView(
+            name="Exo + ego",
+            origin=PREVIEW_EXO_PINHOLE,
+            contents=[f"+ {PREVIEW_EXO_PINHOLE}/**", f"+ {PREVIEW_SKELETON}/**", f"+ {PREVIEW_SOMA_XLO}/**"],
+            visual_bounds=rrb.VisualBounds2D(x_range=[0, width], y_range=[0, 2 * height + PREVIEW_VIDEO_GAP_PX]),
+        )
+        preview: rrb.table.Column = rrb.table.Column(writing.SEGMENT_LINK_COLUMN, column_type=rrb.table.PreviewCell(body, videos))
+        fields: writing.TableFields = self.table_fields()
+        published: writing.PublishedColumns = writing.published_columns(fields, columns)
+
+        def layout_columns(shown: tuple[writing.TableField, ...], hidden: tuple[str, ...]) -> list[rrb.table.Column]:
+            return [
+                preview,
+                *(rrb.table.Column(field.column, name=field.name) for field in shown),
+                *(rrb.table.Column(column, visible=False) for column in hidden),
+            ]
+
+        return rrb.table.TableBlueprint(
+            table_layout=rrb.table.TableLayout(columns=layout_columns(fields.table, published.table_hidden)),
+            card_layout=rrb.table.CardLayout(
+                title="property:RecordingInfo:name", link=writing.SEGMENT_LINK_COLUMN, fields=layout_columns(fields.cards, published.cards_hidden)
+            ),
+            default_layout="cards",
+            previews_config=rrb.table.PreviewsConfig(timeline=PREVIEW_TIMELINE, start_point=0.0, play_state="Playing"),
+            sort_by=None if published.sort_by is None else rrb.table.SortBy(published.sort_by, direction="Ascending"),
+        )
+
+    def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint | rrb.table.TableBlueprint]:
+        """Both layouts, as the layers on the catalog allow.
 
         The catalog holds one default layout for all its segments, and an unposed phone drawn in 3D would sit at the
-        world origin, so one uncalibrated phone anywhere keeps the phones out of 3D. One query reads every segment.
+        world origin, so the phones are posed only when every phone of every segment has a pose (calibrate's ``cam_00``):
+        one uncalibrated phone anywhere keeps the phones out of 3D. One query reads every segment. The table is the
+        preview card when any segment holds ``preview``, so one failed segment does not turn the cards off for all.
         """
         rigs: range = range(DEFAULT_EXO_CAMERAS)
         posed: list[bool] = [
@@ -763,7 +868,11 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
             if kind == "exo"
         ]
         posed_phones: bool = bool(posed) and all(posed)
-        return self.default_blueprint(posed_phones=posed_phones), self.table_blueprint(posed_phones=posed_phones)
+        segment_layout: rrb.Blueprint = self.default_blueprint(posed_phones=posed_phones)
+        segments: pa.Table = entry.segment_table().to_arrow_table()
+        if any(PREVIEW_LAYER in layer_names for layer_names in segments["rerun_layer_names"].to_pylist()):
+            return segment_layout, self.preview_table_blueprint(segments.schema.names)
+        return segment_layout, self.table_blueprint(posed_phones=posed_phones)
 
     def register_assets(self, entry: DatasetEntry, output_root: Path) -> None:
         """Attach the OAK, Quest and phone models to each segment at the rigs it holds them on (``device_asset_id``).
@@ -788,28 +897,13 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         print(f"registered {len(segments)} device assets: {', '.join(device_asset_id(*key) for key in sorted(segments))}")
 
     def table_fields(self) -> writing.TableFields:
-        """Capture identity and quality at a glance; detailed reports remain selectable.
+        """Session, phone count and SOMA quality at a glance; every other column stays selectable in the viewer's menu.
 
-        The calibration session combines capture date and session prefix. Gate decisions
-        and SOMA reasons are currently nested in report JSON, not standalone columns.
+        The calibration session combines capture date and session prefix, and orders the rows. The collector's name
+        stays hidden even in a catalog that does not hold the column yet.
         """
-        cards: tuple[writing.TableField, ...] = (
-            writing.TableField("property:summary:quality_rank", "Quality rank"),
-            writing.TableField("property:calib:session", "Capture / session"),
-            writing.TableField("property:calib:exo_cameras", "Phones"),
-            writing.TableField("property:calib:calib_exo_refined", "Refined"),
-            writing.TableField("property:soma_quality:status", "SOMA quality"),
-        )
-        return writing.TableFields(
-            cards=cards,
-            table=(
-                *cards,
-                writing.TableField("property:calib:oak_posed", "OAK posed"),
-                writing.TableField("property:calib:oak_rotation_source", "OAK rotation"),
-                writing.TableField("property:capture:num_frames", "Frames"),
-                writing.TableField("property:capture:session", "Session UUID"),
-            ),
-        )
+        fields: tuple[writing.TableField, ...] = tuple(writing.TableField(column, name) for column, name in TABLE_FIELDS)
+        return writing.TableFields(cards=fields, table=fields, hidden=ALWAYS_HIDDEN_COLUMNS, sort_by=TABLE_SORT_COLUMN)
 
     # ── raw-tree discovery ────────────────────────────────────────────────
     def subset_root(self) -> Path:
