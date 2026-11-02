@@ -10,7 +10,6 @@ from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
-from dataforge.datasets.selfcap import DEFAULT_EXO_CAMERAS
 from dataforge.datasets.selfcap_raw import FactoryCalibration
 from dataforge.records import decode
 from dataforge.schema import (
@@ -24,6 +23,7 @@ from dataforge.schema import (
     rig_path,
     video_path,
 )
+from dataforge.selfcap_schema import DEFAULT_EXO_CAMERAS
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry

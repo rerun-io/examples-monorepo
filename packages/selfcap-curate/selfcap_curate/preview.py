@@ -38,7 +38,9 @@ from typing import TypeAlias
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from dataforge.datasets.selfcap import (
+from dataforge.datasets.selfcap import SOMA_MESH, SOMA_XLO
+from dataforge.schema import TIMELINE, cam_path, pinhole_path, video_path
+from dataforge.selfcap_schema import (
     PREVIEW_CENTER,
     PREVIEW_EXO_CAM,
     PREVIEW_EXO_PINHOLE,
@@ -47,10 +49,7 @@ from dataforge.datasets.selfcap import (
     PREVIEW_TIMELINE,
     PREVIEW_VIDEO_GAP_PX,
     PREVIEW_VIDEO_SIZE,
-    SOMA_MESH,
-    SOMA_XLO,
 )
-from dataforge.schema import TIMELINE, cam_path, pinhole_path, video_path
 from dataforge.video_encoding import resolve_ffmpeg
 from dataforge.writing import atomic_write
 from datafusion import col, lit

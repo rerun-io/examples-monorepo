@@ -95,13 +95,15 @@ class SegmentStep:
     name: StepName
     """The step; also names its log files."""
     command: Callable[[list[str]], list[str]]
-    """The command of one process, for the segments it takes: one, or every one with ``one_process``."""
+    """The command of one process, for the segments it takes: one unit's, or every one with ``one_process``."""
     output: SegmentFile
     """The file that proves the segment passed."""
     layers: Mapping[str, SegmentFile] = field(default_factory=dict)
     """The layers the step produces, in swap order: layer name to the segment's file."""
     superseded: Mapping[str, SegmentFile] = field(default_factory=dict)
     """This run's unregistered file a layer replaces, deleted once the catalog shows the new file for that segment."""
+    unit: Callable[[str], str] = str
+    """The unit of work a segment belongs to; each unit is one process, and by default each segment is its own."""
     jobs: int = 1
     """Processes at a time."""
     one_process: bool = False
@@ -240,25 +242,31 @@ def timed_step(run: Run, name: StepName, *, summary: str = "") -> Iterator[StepC
     run.log(f"{step_label(name)}_WALL {count.wall_s} s")
 
 
-def run_each_segment(run: Run, step: SegmentStep, segments: list[str]) -> list[str]:
-    """Run one process per segment and return the segments that passed, in order."""
+def run_each_unit(run: Run, step: SegmentStep, segments: list[str]) -> list[str]:
+    """Run one process per unit of work and return the segments that passed, in order; each segment reports its own result."""
+    units: dict[str, list[str]] = {}
+    for segment in segments:
+        units.setdefault(step.unit(segment), []).append(segment)
 
-    def run_one(segment: str) -> bool:
+    def run_one(unit: str) -> list[str]:
         started: float = perf_counter()
-        log_path: Path = run.logs / f"{step.name}-{segment}.log"
-        code: int = run_command(step.command([segment]), step.env, log_path)
+        log_path: Path = run.logs / f"{step.name}-{unit}.log"
+        code: int = run_command(step.command(units[unit]), step.env, log_path)
         elapsed: int = int(perf_counter() - started)
-        output: Path = step.output(segment)
-        if code == 0 and output.is_file():
-            run.log(f"{step.name} ok   {segment} ({elapsed} s){reported_details(log_path, step.detail_markers)}")
-            return True
-        reason: str = last_meaningful_line(log_path) if code != 0 else f"exit 0 but no {output}"
-        run.log(f"{step.name} FAIL {segment} ({elapsed} s): {reason}")
-        return False
+        passed: list[str] = []
+        for segment in units[unit]:
+            output: Path = step.output(segment)
+            if code == 0 and output.is_file():
+                run.log(f"{step.name} ok   {segment} ({elapsed} s){reported_details(log_path, step.detail_markers)}")
+                passed.append(segment)
+            else:
+                reason: str = last_meaningful_line(log_path) if code != 0 else f"exit 0 but no {output}"
+                run.log(f"{step.name} FAIL {segment} ({elapsed} s): {reason}")
+        return passed
 
     with ThreadPoolExecutor(step.jobs) as pool:
-        passed: list[bool] = list(pool.map(run_one, segments))
-    return [segment for segment, ok in zip(segments, passed, strict=True) if ok]
+        survivors: set[str] = {segment for passed in pool.map(run_one, units) for segment in passed}
+    return [segment for segment in segments if segment in survivors]
 
 
 def run_one_process(run: Run, step: SegmentStep, segments: list[str]) -> list[str]:
@@ -280,7 +288,7 @@ def run_one_process(run: Run, step: SegmentStep, segments: list[str]) -> list[st
 def run_segments(run: Run, step: SegmentStep, segments: list[str]) -> list[str]:
     """Run the step, swap in its layers for the segments that passed, and return those segments."""
     with timed_step(run, step.name, summary=", one process" if step.one_process else f", {step.jobs} at a time") as count:
-        survivors: list[str] = (run_one_process if step.one_process else run_each_segment)(run, step, segments)
+        survivors: list[str] = (run_one_process if step.one_process else run_each_unit)(run, step, segments)
         count.ok = len(survivors)
         count.failed = len(segments) - len(survivors)
     run.require(survivors, step.name)
@@ -441,11 +449,14 @@ def main(config: Config) -> None:
     donor_url: str = config.catalog_url if config.donor_catalog_url is None else config.donor_catalog_url
     publish_blueprints: list[str] = task("dataforge", "dataforge-publish-blueprints", *catalog, "--output-root", str(root / "catalog"), REGISTRY_NAME)
 
+    def session_of(segment: str) -> str:
+        return EpisodeKey.parse(segment).session
+
     def aligned(segment: str) -> Path:
-        return root / "align" / segment / f"{segment}.rrd"
+        return root / "align" / session_of(segment) / f"{segment}.rrd"
 
     def aligned_layer(segment: str, layer: str) -> Path:
-        return paths.rrd_path(root / "align" / segment, layer=layer, identity=identity_of(segment))
+        return paths.rrd_path(root / "align" / session_of(segment), layer=layer, identity=identity_of(segment))
 
     def calibrated(segment: str) -> Path:
         return root / "calib" / segment / f"{segment}.rrd"
@@ -479,6 +490,7 @@ def main(config: Config) -> None:
                 "sapiens2": lambda segment: aligned_layer(segment, "sapiens2"),
             },
             superseded={layer: partial(as_cut_file, root, layer) for layer in (paths.BASE_LAYER, paths.GT_LAYER)},
+            unit=session_of,  # align pools its evidence across the episodes of a session
             jobs=config.jobs,
         ),
         segments,

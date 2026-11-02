@@ -6,16 +6,17 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+from dataforge.oak_mount import StaticCamera, read_static_cameras
 from dataforge.schema import SOMA_MESH
-from dataforge.triangulation import project, project_ego
+from dataforge.triangulation import EgoCamera, project, project_ego
 from jaxtyping import Bool, Float32, Float64, Int32, Int64
 from numpy import ndarray
-from rerun.catalog import CatalogClient
+from rerun.catalog import CatalogClient, DatasetSelection
 from rerun.chunk import RrdReader
 from scipy.sparse import csr_matrix
 
 from selfcap_soma.catalog import ExoSource, Observations
-from selfcap_soma.evaluation_io import first, missing_camera_calibration, nearest_indices, read_egohand_rgb, read_views
+from selfcap_soma.evaluation_io import nearest_indices, read_egohand_rgb, read_views
 from selfcap_soma.fitting import FitResult
 from selfcap_soma.observations import overlay_points, require_full_rate_mesh, video_time_column
 from selfcap_soma.output import joint_edges, log_joint_style, mapped
@@ -340,6 +341,20 @@ def main(config: Config) -> None:
     write_layer(config, read_fit(config.source))
 
 
+def oak_stereo_cameras(view: DatasetSelection, segment: str, rgb: EgoCamera) -> list[EgoCamera]:
+    """The OAK's left and right cameras beside its rgb one; a camera with incomplete calibration is reported and skipped."""
+    paths: list[str] = [f"/world/rig_{rgb.rig:02d}/cam_{cam:02d}" for cam in (1, 2)]
+    cameras: dict[str, StaticCamera] = read_static_cameras(view, view, paths)  # one dataset holds both layers here
+    stereo: list[EgoCamera] = []
+    for cam, path in enumerate(paths, start=1):
+        found: StaticCamera = cameras[path]
+        if found.rig_T_cam is None or found.K is None or found.resolution is None or found.distortion is None:
+            print(f"SKIP_CAMERA {segment} {path}: missing calibration {found}", flush=True)
+            continue
+        stereo.append(replace(rgb, cam=cam, K=found.K, distortion=found.distortion, size=found.resolution, rig_T_cam=found.rig_T_cam))
+    return stereo
+
+
 def write_layer(config: Config, fit: LayerFit) -> None:
     """Write one segment's layer to config.output; the caller registers it."""
     segment: str = config.segment
@@ -361,28 +376,7 @@ def write_layer(config: Config, fit: LayerFit) -> None:
             valid = abs(track.times[indices] - times) <= 0.05
             base = 91 if track.name.endswith("/left") else 112
             rgb_evidence[valid, base : base + 21] = track.points[indices[valid]]
-        paths = [f"/world/rig_{rgb.rig:02d}/cam_{cam:02d}" for cam in (1, 2)]
-        table = dataset.filter_segments(segment).filter_contents([*paths, *(f"{path}/pinhole" for path in paths)]).reader(index=None).to_arrow_table()
-        egos.append(rgb)
-        for cam, path in enumerate(paths, start=1):
-            missing = missing_camera_calibration(table, path, distorted=True)
-            if missing:
-                print(f"SKIP_CAMERA {segment} {path}: missing calibration {missing}", flush=True)
-                continue
-            transform = np.eye(4)
-            transform[:3, :3] = first(table, f"{path}:Transform3D:mat3x3").reshape(3, 3).T
-            transform[:3, 3] = first(table, f"{path}:Transform3D:translation")
-            size = first(table, f"{path}/pinhole:Pinhole:resolution")
-            egos.append(
-                replace(
-                    rgb,
-                    cam=cam,
-                    K=first(table, f"{path}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T,
-                    distortion=first(table, f"{path}/pinhole:simplecv.components.DistortionCoefficients"),
-                    size=(int(size[0]), int(size[1])),
-                    rig_T_cam=transform,
-                )
-            )
+        egos += [rgb, *oak_stereo_cameras(dataset.filter_segments(segment), segment, rgb)]
     config.output.parent.mkdir(parents=True, exist_ok=True)
     recording = rr.RecordingStream("dataforge", recording_id=segment)
     recording.save(config.output)

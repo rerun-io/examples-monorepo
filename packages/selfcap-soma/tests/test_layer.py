@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import rerun as rr
 import trimesh
+from dataforge.oak_mount import StaticCamera
+from dataforge.triangulation import EgoCamera
 from jaxtyping import Float32, Int32
 from numpy import ndarray
 from rerun.catalog import CatalogClient
@@ -141,3 +143,22 @@ def test_missing_crop_in_a_layer_says_to_refit(tmp_path: Path) -> None:
     recording.disconnect()
     with pytest.raises(ValueError, match="upper-body vertex selection"):
         read_layer_crop(RrdReader(path))
+
+
+def test_the_oak_stereo_cameras_come_from_the_static_calibration_and_an_incomplete_one_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    segment: str = "selfcap__2025-12-03__d31bf1da__ep001"
+    with rr.RecordingStream("test", recording_id=segment, send_properties=False) as recording:
+        recording.save(tmp_path / f"{segment}.rrd")
+        recording.log("/world", rr.ViewCoordinates.RDF, static=True)
+    left: StaticCamera = StaticCamera(np.diag([1.0, 1.0, 1.0, 1.0]), np.diag([500.0, 500.0, 1.0]), (1280, 800), np.arange(14.0))
+    right: StaticCamera = StaticCamera(None, np.diag([500.0, 500.0, 1.0]), (1280, 800), np.arange(14.0))
+    monkeypatch.setattr(overlay, "read_static_cameras", lambda _calibration, _base, cameras: dict(zip(cameras, (left, right), strict=True)))
+    rgb: EgoCamera = EgoCamera(4, 0, np.eye(3), np.zeros(14), (1920, 1080), np.eye(4), np.zeros(1), np.eye(4)[None])
+    with Server(host="127.0.0.1", port=0, datasets={"layer": [tmp_path / f"{segment}.rrd"]}) as server:
+        stereo: list[EgoCamera] = overlay.oak_stereo_cameras(server.client().get_dataset("layer").filter_segments(segment), segment, rgb)
+    assert [(camera.rig, camera.cam, camera.size) for camera in stereo] == [(4, 1, (1280, 800))]
+    np.testing.assert_array_equal(stereo[0].K, left.K)
+    np.testing.assert_array_equal(stereo[0].distortion, left.distortion)
+    assert f"SKIP_CAMERA {segment} /world/rig_04/cam_02" in capsys.readouterr().out

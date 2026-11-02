@@ -19,8 +19,9 @@ import pyarrow as pa
 import rerun as rr
 from dataforge import paths, schema
 from dataforge.quest_joint_poses import quest_hand_path
-from dataforge.datasets.selfcap import DEFAULT_EXO_CAMERAS, exo_devices, log_quest_hands, raw_calibration_chunks, read_quest_hands
+from dataforge.datasets.selfcap import exo_devices, log_quest_hands, raw_calibration_chunks, read_quest_hands
 from dataforge.schema import CAPTURE_TIMELINE
+from dataforge.selfcap_schema import DEFAULT_EXO_CAMERAS
 from dataforge.video_encoding import read_video_start_ns
 from dataforge.writing import atomic_write, recording_to
 from jaxtyping import Int64

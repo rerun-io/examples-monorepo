@@ -22,6 +22,9 @@ DATASET: str = "selfcap-new"
 real_run_command: Callable[[list[str], dict[str, str], Path], int] = run.run_command
 SEGMENT_A: str = "selfcap__2025-12-20__25aeb66a__ep001"
 SEGMENT_B: str = "selfcap__2025-12-21__1dbe8c49__ep002"
+SESSION_A: str = "2025-12-20__25aeb66a"
+SESSION_B: str = "2025-12-21__1dbe8c49"
+SEGMENT_A2: str = f"selfcap__{SESSION_A}__ep002"
 ONE_PROCESS_TASKS: dict[str, str] = {"soma-xlo": "--segment", "selfcap-preview": "--segment-ids"}
 """Tasks with one process for every segment, and the flag that lists the segments."""
 
@@ -122,7 +125,9 @@ def fake_register(pipeline: FakePipeline, _: dict[str, str], arguments: list[str
 
 def fake_align(_: FakePipeline, __: dict[str, str], arguments: list[str], segment: str, ___: Path) -> int:
     output: Path = flag_value(arguments, "--output-dir")
-    return touch(output / f"{segment}.rrd", output / "gt" / f"{segment}.rrd", output / "sapiens2" / f"{segment}.rrd")
+    for each in arguments[arguments.index("--segment-ids") + 1 :]:
+        touch(output / f"{each}.rrd", output / "gt" / f"{each}.rrd", output / "sapiens2" / f"{each}.rrd")
+    return 0
 
 
 def fake_calibrate(_: FakePipeline, __: dict[str, str], arguments: list[str], segment: str, ___: Path) -> int:
@@ -290,8 +295,8 @@ def test_a_raw_root_run_gives_every_step_its_exact_command_in_order(config: Conf
     catalog: list[str] = ["--catalog-url", catalog_url, "--catalog-name", DATASET]
     source: list[str] = ["--catalog-url", catalog_url, "--dataset", DATASET]
 
-    def align(segment: str) -> list[str]:
-        return pixi("selfcap-curate", "selfcap-align", "--base-dir", f"{root}/rrd/base", "--output-dir", f"{root}/align/{segment}", *source, "--segment-ids", segment)
+    def align(segment: str, session: str) -> list[str]:
+        return pixi("selfcap-curate", "selfcap-align", "--base-dir", f"{root}/rrd/base", "--output-dir", f"{root}/align/{session}", *source, "--segment-ids", segment)
 
     def calibrate(segment: str) -> list[str]:
         return pixi(
@@ -314,11 +319,11 @@ def test_a_raw_root_run_gives_every_step_its_exact_command_in_order(config: Conf
     assert pipeline.calls == [
         ({"DATAFORGE_RAW_ROOT": raw, "DATAFORGE_OUTPUT_ROOT": f"{root}/rrd"}, pixi("dataforge", "dataforge-convert", "selfcap")),
         ({"DATAFORGE_OUTPUT_ROOT": f"{root}/rrd"}, pixi("dataforge", "dataforge-register", *catalog, "selfcap")),
-        ({}, align(a)),
-        ({}, align(b)),
-        ({}, swap("base", f"{root}/align/{a}/{a}.rrd", f"{root}/align/{b}/{b}.rrd")),
-        ({}, swap("gt", f"{root}/align/{a}/gt/{a}.rrd", f"{root}/align/{b}/gt/{b}.rrd")),
-        ({}, swap("sapiens2", f"{root}/align/{a}/sapiens2/{a}.rrd", f"{root}/align/{b}/sapiens2/{b}.rrd")),
+        ({}, align(a, SESSION_A)),
+        ({}, align(b, SESSION_B)),
+        ({}, swap("base", f"{root}/align/{SESSION_A}/{a}.rrd", f"{root}/align/{SESSION_B}/{b}.rrd")),
+        ({}, swap("gt", f"{root}/align/{SESSION_A}/gt/{a}.rrd", f"{root}/align/{SESSION_B}/gt/{b}.rrd")),
+        ({}, swap("sapiens2", f"{root}/align/{SESSION_A}/sapiens2/{a}.rrd", f"{root}/align/{SESSION_B}/sapiens2/{b}.rrd")),
         ({}, calibrate(a)),
         ({}, calibrate(b)),
         ({}, swap("egohand", f"{root}/calib/{a}/egohand/{a}.rrd", f"{root}/calib/{b}/egohand/{b}.rrd")),
@@ -405,7 +410,7 @@ def test_a_segment_that_fails_calibrate_is_logged_gets_no_further_step_and_is_ab
     for later in ("selfcap-keypoints", "soma-batch", "soma-xlo"):
         assert [SEGMENT_B in " ".join(command) for command in pipeline.commands_of(later)] == [False]
     assert SEGMENT_B not in " ".join(pipeline.commands_of("selfcap-preview")[0])
-    assert pipeline.swapped_files("base") == [f"{root}/align/{SEGMENT_A}/{SEGMENT_A}.rrd", f"{root}/align/{SEGMENT_B}/{SEGMENT_B}.rrd"]
+    assert pipeline.swapped_files("base") == [f"{root}/align/{SESSION_A}/{SEGMENT_A}.rrd", f"{root}/align/{SESSION_B}/{SEGMENT_B}.rrd"]
     assert pipeline.swapped_files("egohand") == [f"{root}/calib/{SEGMENT_A}/egohand/{SEGMENT_A}.rrd"]
     assert pipeline.swapped_files("calib") == [f"{root}/keypoints/{SEGMENT_A}/{SEGMENT_A}.rrd"]
     assert pipeline.swapped_files("soma") == [f"{root}/soma/{DATASET}/{SEGMENT_A}/{SEGMENT_A}.rrd"]
@@ -573,6 +578,31 @@ def test_an_ingest_record_without_its_base_file_fails_the_segment(config: Config
     assert f"ingest FAIL {SEGMENT_B}: exit 0 but no {root}/rrd/base/{SEGMENT_B}.rrd" in progress_messages(root)
 
 
+def test_the_episodes_of_a_session_align_in_one_process_with_their_files_side_by_side(config: Config, pipeline: FakePipeline, tmp_path: Path) -> None:
+    """Align pools evidence across a session's episodes; head calibration stays per episode."""
+    run.main(replace(config, segment_ids=(SEGMENT_A, SEGMENT_A2, SEGMENT_B)))
+    root: Path = tmp_path / "run"
+    aligns: list[list[str]] = pipeline.commands_of("selfcap-align")
+    assert [command[command.index("--output-dir") + 1 :] for command in aligns] == [
+        [f"{root}/align/{SESSION_A}", "--catalog-url", pipeline.catalog_url, "--dataset", DATASET, "--segment-ids", SEGMENT_A, SEGMENT_A2],
+        [f"{root}/align/{SESSION_B}", "--catalog-url", pipeline.catalog_url, "--dataset", DATASET, "--segment-ids", SEGMENT_B],
+    ]
+    assert pipeline.swapped_files("base") == [f"{root}/align/{SESSION_A}/{SEGMENT_A}.rrd", f"{root}/align/{SESSION_A}/{SEGMENT_A2}.rrd", f"{root}/align/{SESSION_B}/{SEGMENT_B}.rrd"]
+    assert [command[command.index("--segment-ids") + 1 :][:1] for command in pipeline.commands_of("selfcap-calibrate")] == [[SEGMENT_A], [SEGMENT_A2], [SEGMENT_B]]
+    assert "SUMMARY align: ok 3, failed 0, wall 0 s" in progress_messages(root)
+
+
+def test_a_failed_session_fails_each_of_its_episodes_and_the_others_go_on(config: Config, pipeline: FakePipeline, tmp_path: Path) -> None:
+    pipeline.failing["selfcap-align"] = {SEGMENT_A: "ValueError: the session has no phone clock"}
+    with pytest.raises(SystemExit, match="2 segment failures"):
+        run.main(replace(config, segment_ids=(SEGMENT_A, SEGMENT_A2, SEGMENT_B)))
+    messages: list[str] = progress_messages(tmp_path / "run")
+    for segment in (SEGMENT_A, SEGMENT_A2):
+        assert f"align FAIL {segment} (0 s): ValueError: the session has no phone clock" in messages
+    assert "SUMMARY align: ok 1, failed 2, wall 0 s" in messages
+    assert [command[command.index("--segment-ids") + 1] for command in pipeline.commands_of("selfcap-calibrate")] == [SEGMENT_B]
+
+
 def test_superseded_files_go_once_the_catalog_shows_the_new_ones(config: Config, pipeline: FakePipeline, tmp_path: Path) -> None:
     pipeline.registered_layers = {"base", "gt", "calib"}
     run.main(config)
@@ -582,7 +612,7 @@ def test_superseded_files_go_once_the_catalog_shows_the_new_ones(config: Config,
         for superseded in (root / "rrd/base" / f"{segment}.rrd", root / "rrd/gt" / f"{segment}.rrd", root / "calib" / segment / f"{segment}.rrd"):
             assert not superseded.exists()
             assert f"removed superseded {superseded}" in messages
-        for kept in (root / "align" / segment / f"{segment}.rrd", root / "keypoints" / segment / f"{segment}.rrd", root / "calib" / segment / "egohand" / f"{segment}.rrd"):
+        for kept in (root / "align" / segment.split("__", 1)[1].rsplit("__", 1)[0] / f"{segment}.rrd", root / "keypoints" / segment / f"{segment}.rrd", root / "calib" / segment / "egohand" / f"{segment}.rrd"):
             assert kept.is_file()
 
 
