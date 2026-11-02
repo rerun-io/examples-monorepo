@@ -7,13 +7,13 @@ explicit alternative to the default gyro-fixed fit.
 
 ## Inputs and sampling
 
-Both SelfCap environments compose `posekit-egohand`. The local asset directory
-is configured with `--oak-egohand-assets PATH` (default `data/egohand` relative
-to the command's working directory). Its layout matches the EgoHand package:
-`weights/detector/hand_detector.onnx`, `weights/egohand/egohand_s060000.ckpt`,
-`weights/soma/`, cached `engines/`, and `dinov3-bf16.onnx`. Setup reads local
-assets; it does not download them. The dev-cycle driver accepts `EGOHAND_ASSETS`
-and passes it to this option.
+Both SelfCap environments compose `posekit-egohand`. The model files download on
+first use into the Hugging Face cache, at the pinned revisions listed in
+`packages/egohand/README.md`. TensorRT engines and the DINOv3 ONNX export go to the
+trtkit cache (`~/.cache/trtkit/trt`). `--oak-egohand-assets PATH` overrides all of
+them with a local directory: `weights/detector/hand_detector.onnx`,
+`weights/egohand/egohand_s060000.safetensors`, `weights/soma/`, `engines/` and
+`dinov3-bf16.onnx`.
 
 Per episode, the sampler projects Quest hands through the current OAK camera
 pose and full 14-coefficient lens at every source RGB timestamp. A hand is

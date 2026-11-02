@@ -54,7 +54,7 @@ saved recordings without a display. The tool reads each clock separately.
 ```bash
 pixi run -e selfcap-curate --frozen selfcap-run --raw-root /local/raw --run-root /local/run-1 \
   --catalog-url rerun+http://127.0.0.1:51235 --dataset selfcap-new --donor-catalog-url rerun+http://donor:51235 \
-  --oak-egohand-assets /local/egohand --soma-assets /local/soma-assets
+  [--oak-egohand-assets /local/egohand] [--soma-assets /local/soma-assets]  # default: pinned Hugging Face downloads
 ```
 
 `selfcap-run` takes `--raw-root` (a directory that holds `selfcap/`) or `--base-dir` (as-cut base RRDs, which skip ingest), and runs each step as a subprocess of its pixi task in its own environment. A new `--run-root` off the NAS and a `--dataset` that does not exist yet are required, so a rerun needs new names. `--segment-ids` are checked as episode keys before any step runs. The catalog must run on this machine and read the run root.

@@ -28,6 +28,7 @@ from trtkit import TensorRtBackendConfig
 
 from posekit.apis.egohand_comparison import ErrorSummary, quest_pixels, summarize
 from posekit.models.egohand import (
+    CACHED_BACKBONE_ONNX,
     SOMA_HAND,
     EgoHandConfig,
     EgoHandDetector,
@@ -191,11 +192,7 @@ def main(config: Config) -> None:
     sapiens_ms: float = 0.0
     if config.compare_sapiens:
         sapiens, sapiens_ms = run_sapiens(frames)
-    weights: Path = config.output / "weights"
-    detector: EgoHandDetector = EgoHandDetectorConfig(
-        weights / "detector/hand_detector.onnx",
-        backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=config.output / "engines"),
-    ).setup()
+    detector: EgoHandDetector = EgoHandDetectorConfig(backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4)).setup()
     detector(frames[:8])
     torch.cuda.synchronize()
     started: float = time.perf_counter()
@@ -203,12 +200,10 @@ def main(config: Config) -> None:
     torch.cuda.synchronize()
     detector_ms: float = (time.perf_counter() - started) * 1000.0 / len(frames)
     predictor: EgoHandPredictor = EgoHandConfig(
-        weights / "egohand/egohand_s060000.ckpt",
-        weights / "soma",
         batch_size=32,
         gpu_crops=True,
-        backbone_onnx=config.output / "dinov3-bf16.onnx",
-        backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=config.output / "engines"),
+        backbone_onnx=CACHED_BACKBONE_ONNX,
+        backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32),
     ).setup()
     ego: Float32[ndarray, "n 2 21 2"] = np.full_like(quest, np.nan)
     sharpness: Float64[ndarray, "n 2"] = np.full((len(frames), 2), np.nan)

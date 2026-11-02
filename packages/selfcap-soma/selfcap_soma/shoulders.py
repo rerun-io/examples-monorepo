@@ -131,7 +131,7 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     data = read_window("rerun+http://dgx-spark:51235", "selfcap-post-dev", "selfcap__2025-12-03__d31bf1da__ep001", 0.3, 50.0, 2)
     reports = []
-    baseline = fit(data, Path("/tmp/soma-fit/assets"), 400, 80)
+    baseline = fit(data, None, 400, 80)
     reports.append(describe("baseline", data, baseline))
     save(output / "baseline", data, baseline, 4.144, 3)
     valid = (data.times < 25.0) & well_observed_torso(data)
@@ -149,13 +149,13 @@ def main() -> None:
         learn_bone_scales=True,
         bone_length_weight=2.0,
     )
-    calibrated = fit(subset(data, train), Path("/tmp/soma-fit/assets"), 600, 300, options)
+    calibrated = fit(subset(data, train), None, 600, 300, options)
     state = Calibration(
         calibrated.identity, calibrated.scale, calibrated.head_offset, calibrated.bone_scales, calibrated.head_attachment, calibrated.head_anchor
     )
     (output / f"{name}-calibration.json").write_text(to_json(state))
     (output / f"{name}-options.json").write_text(to_json(options))
-    result = fit(data, Path("/tmp/soma-fit/assets"), 400, 80, options, fixed=calibrated)
+    result = fit(data, None, 400, 80, options, fixed=calibrated)
     reports.append(describe(name, data, result))
     reports.append(
         describe(

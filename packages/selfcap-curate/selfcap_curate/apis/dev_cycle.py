@@ -59,8 +59,8 @@ class Config:
     """Focal source for the joint fit."""
     focal_file: Path | None = None
     """Typed fixed-focal record when focal_source is fixed."""
-    oak_egohand_assets: Path = Path("data/egohand")
-    """EgoHand weights and TensorRT engine cache."""
+    oak_egohand_assets: Path | None = None
+    """Optional local EgoHand root with weights/, engines/ and dinov3-bf16.onnx; None takes the pinned downloads and the trtkit cache."""
 
 
 def ship(host: str, local: Path, remote: Path) -> None:

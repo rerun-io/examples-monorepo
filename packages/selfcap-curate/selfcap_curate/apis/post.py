@@ -41,8 +41,8 @@ class Config:
     """Fit the supplied EgoHand observations with free rotation instead of the production gyro rotation."""
     oak_method: Literal["egohand", "sapiens"] = "egohand"
     """Use 64 seeded EgoHand frames by default, or the legacy Sapiens OAK path."""
-    oak_egohand_assets: Path = Path("data/egohand")
-    """Local EgoHand weights and cached engine root, passed to calibration."""
+    oak_egohand_assets: Path | None = None
+    """Optional local EgoHand root with weights/, engines/ and dinov3-bf16.onnx; None takes the pinned downloads and the trtkit cache."""
     exo_refine: bool = False
     """Refine cameras from an exo_landmarks layer before triangulation."""
     exo_focal_source: FocalSource = "fit"

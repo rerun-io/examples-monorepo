@@ -52,10 +52,6 @@ class Config:
     """Catalog on this machine; its server must read run_root."""
     dataset: str
     """New dataset on catalog_url; a name that already exists is refused, so other datasets stay safe."""
-    oak_egohand_assets: Path
-    """Local EgoHand asset root, passed to calibrate."""
-    soma_assets: Path
-    """Downloaded SOMA model files, passed to SOMA and soma_xlo."""
     raw_root: Path | None = None
     """Directory that holds selfcap/ raw captures, to ingest; exactly one of raw_root and base_dir."""
     base_dir: Path | None = None
@@ -64,6 +60,10 @@ class Config:
     """Segment ids to run; empty runs every segment."""
     donor_catalog_url: str | None = None
     """Read-only catalog with any camera-50 donor; None uses catalog_url."""
+    oak_egohand_assets: Path | None = None
+    """Optional local EgoHand root, passed to calibrate; None takes the pinned downloads."""
+    soma_assets: Path | None = None
+    """Optional local SOMA model files, passed to SOMA and soma_xlo; None takes the pinned downloads."""
     exo_method: ExoMethod = "head"
     """Phone poses from hands only, or extended with the wearer's head track."""
     jobs: int = 3
@@ -349,6 +349,16 @@ def remove_superseded(run: Run, layer: str, new: SegmentFile, superseded: Segmen
             run.log(f"kept {file}: the catalog does not show {new(segment)} as {layer}")
 
 
+def resolved(path: Path | None) -> Path | None:
+    """The absolute path: every task runs in its own working directory."""
+    return None if path is None else path.resolve()
+
+
+def optional_flag(flag: str, path: Path | None) -> list[str]:
+    """The flag and its path; without one, the task takes its default."""
+    return [] if path is None else [flag, str(path)]
+
+
 def identity_of(segment: str) -> SequenceIdentity:
     """The segment's identity, from a recording id or an unprefixed key; a malformed one raises ValueError."""
     key: EpisodeKey = EpisodeKey.parse(segment)
@@ -421,7 +431,7 @@ def main(config: Config) -> None:
         raise ValueError("jobs, soma_jobs and preview_workers must be at least 1")
     segment_ids: tuple[str, ...] = tuple(dict.fromkeys(identity_of(segment).recording_id for segment in config.segment_ids))
     paths.require_outside([config.run_root], roots=[paths.NAS_ROOT])
-    inputs: list[Path] = [config.oak_egohand_assets, config.soma_assets]
+    inputs: list[Path] = [assets for assets in (config.oak_egohand_assets, config.soma_assets) if assets is not None]
     if config.raw_root is not None:
         inputs.append(config.raw_root / REGISTRY_NAME)
     if config.base_dir is not None:
@@ -435,8 +445,8 @@ def main(config: Config) -> None:
         raise ValueError(f"dataset {config.dataset} already exists on {config.catalog_url}")
     config = replace(
         config,
-        run_root=config.run_root.resolve(), oak_egohand_assets=config.oak_egohand_assets.resolve(), soma_assets=config.soma_assets.resolve(),
-        raw_root=None if config.raw_root is None else config.raw_root.resolve(), base_dir=None if config.base_dir is None else config.base_dir.resolve(),
+        run_root=config.run_root.resolve(), oak_egohand_assets=resolved(config.oak_egohand_assets), soma_assets=resolved(config.soma_assets),
+        raw_root=resolved(config.raw_root), base_dir=resolved(config.base_dir),
         segment_ids=segment_ids,
     )
     config.run_root.mkdir(parents=True)
@@ -501,7 +511,7 @@ def main(config: Config) -> None:
             "calib",
             lambda only: task(
                 "selfcap-curate", "selfcap-calibrate", "--output-dir", str(calibrated(only[0]).parent), "--segment-ids", *only, *source,
-                "--exo-method", config.exo_method, "--oak-egohand-assets", str(config.oak_egohand_assets), "--donor-catalog-url", donor_url,
+                "--exo-method", config.exo_method, *optional_flag("--oak-egohand-assets", config.oak_egohand_assets), "--donor-catalog-url", donor_url,
             ),
             calibrated,
             layers={"egohand": lambda segment: root / "calib" / segment / "egohand" / f"{segment}.rrd"},
@@ -533,7 +543,7 @@ def main(config: Config) -> None:
             "soma",
             lambda only: task(
                 "selfcap-soma", "soma-batch", "--dataset", config.dataset, "--segment", *only, "--catalog-url", config.catalog_url,
-                "--output", str(root / "soma"), "--assets", str(config.soma_assets),
+                "--output", str(root / "soma"), *optional_flag("--assets", config.soma_assets),
             ),
             soma_file,
             layers={"soma": soma_file},
@@ -547,7 +557,7 @@ def main(config: Config) -> None:
         SegmentStep(
             "soma_xlo",
             lambda selected: task(
-                "selfcap-soma", "soma-xlo", "--soma-dir", str(root / "soma"), "--dataset", config.dataset, "--assets", str(config.soma_assets),
+                "selfcap-soma", "soma-xlo", "--soma-dir", str(root / "soma"), "--dataset", config.dataset, *optional_flag("--assets", config.soma_assets),
                 "--output-dir", str(root / "soma_xlo"), "--segment", *selected,
             ),
             soma_xlo_file,

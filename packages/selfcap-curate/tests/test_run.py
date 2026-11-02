@@ -732,6 +732,13 @@ def test_align_calibrate_and_soma_run_their_jobs_at_a_time_and_keypoints_one_at_
     }
 
 
+def test_without_asset_flags_the_tasks_download_their_own_models(config: Config, pipeline: FakePipeline) -> None:
+    run.main(replace(config, oak_egohand_assets=None, soma_assets=None))
+    commands: list[list[str]] = [command for task in ("selfcap-calibrate", "soma-batch", "soma-xlo") for command in pipeline.commands_of(task)]
+    assert commands
+    assert not [command for command in commands if "--oak-egohand-assets" in command or "--assets" in command]
+
+
 def test_relative_paths_reach_the_tasks_as_absolute_ones(config: Config, pipeline: FakePipeline, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every task has its own working directory, so a relative path would land elsewhere."""
     monkeypatch.chdir(tmp_path)

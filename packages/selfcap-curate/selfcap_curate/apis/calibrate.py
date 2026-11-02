@@ -51,8 +51,8 @@ class Config:
     """Fit rotation freely for supplied EgoHand observations; otherwise preserve the production gyro rotation."""
     oak_method: Literal["egohand", "sapiens"] = "egohand"
     """OAK alignment observations; Sapiens retains the legacy 32-frame path for comparison."""
-    oak_egohand_assets: Path = Path("data/egohand")
-    """Local EgoHand asset root containing weights/, engines/ and dinov3-bf16.onnx."""
+    oak_egohand_assets: Path | None = None
+    """Optional local EgoHand root with weights/, engines/ and dinov3-bf16.onnx; None takes the pinned downloads and the trtkit cache."""
     retain_models: bool = False
     """Keep inference engines between episodes in a long-lived batch worker."""
     exo_refine: bool = False

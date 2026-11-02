@@ -57,8 +57,8 @@ class Config:
     output: Path = Path("/tmp/soma-batch")
     """Persistent local checkpoints, one directory per dataset/segment."""
     """Raw SelfCap cut tree, needed only for missing catalog hand rotations."""
-    assets: Path = Path("/tmp/soma-fit/assets")
-    """Downloaded SOMA model files."""
+    assets: Path | None = None
+    """Local SOMA-X directory; None takes the pinned download."""
     iterations: int = 600
     """Full-rate pose iterations after freezing shape."""
     body_acceleration_weight: float = 1.0

@@ -12,13 +12,22 @@ import torch
 from dataforge.datasets.selfcap_raw import Intrinsic
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
-from posekit.models.egohand import EgoHandConfig, EgoHandDetector, EgoHandDetectorConfig, EgoHandPredictor, HandDetections, HandReconstruction
+from posekit.models.egohand import (
+    CACHED_BACKBONE_ONNX,
+    EgoHandConfig,
+    EgoHandDetector,
+    EgoHandDetectorConfig,
+    EgoHandPredictor,
+    HandDetections,
+    HandReconstruction,
+)
 from posekit.models.egohand_geometry import SOMA_HAND21, HandSide, OAKCamera
 from posekit.predictions import BoxDetections
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import CatalogVideo
 from torch import Tensor
 from trtkit import TensorRtBackendConfig
+from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from selfcap_curate.factory import intrinsic_matrix
 from selfcap_curate.hands_gpu import decode_frames
@@ -99,19 +108,26 @@ def infer_egohand_frames(
     return OakDetections(times, xy, scores)
 
 
-@cache
-def egohand_models(assets: Path) -> tuple[EgoHandDetector, EgoHandPredictor]:
-    """Retain engines for an explicitly long-lived batch worker."""
-    detector = EgoHandDetectorConfig(assets / "weights/detector/hand_detector.onnx", backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=assets / "engines")).setup()
-    predictor = EgoHandConfig(assets / "weights/egohand/egohand_s060000.ckpt", assets / "weights/soma", batch_size=16, gpu_crops=True,
-                             backbone_onnx=assets / "dinov3-bf16.onnx", backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=assets / "engines")).setup()
+def egohand_configs(assets: Path | None) -> tuple[EgoHandDetectorConfig, EgoHandConfig]:
+    """The models' files and engines; None takes the pinned downloads and the trtkit cache."""
+    engines: Path = DEFAULT_TRT_CACHE_DIR if assets is None else assets / "engines"
+    detector = EgoHandDetectorConfig(None if assets is None else assets / "weights/detector/hand_detector.onnx", backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=engines))
+    predictor = EgoHandConfig(None if assets is None else assets / "weights/egohand/egohand_s060000.safetensors", None if assets is None else assets / "weights/soma", batch_size=16, gpu_crops=True,
+                              backbone_onnx=CACHED_BACKBONE_ONNX if assets is None else assets / "dinov3-bf16.onnx", backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=engines))
     return detector, predictor
+
+
+@cache
+def egohand_models(assets: Path | None) -> tuple[EgoHandDetector, EgoHandPredictor]:
+    """Retain engines for an explicitly long-lived batch worker."""
+    detector, predictor = egohand_configs(assets)
+    return detector.setup(), predictor.setup()
 
 
 @torch.inference_mode()
 def detect_oak_egohand(
     episode: SessionEpisode, video: CatalogVideo, intrinsic: Intrinsic, rotation: Float64[ndarray, "3 3"] | None,
-    assets: Path, *, camera: EgoCamera | None = None, retain_models: bool = False,
+    assets: Path | None, *, camera: EgoCamera | None = None, retain_models: bool = False,
 ) -> OakDetections:
     """Run only 64 seeded samples; release this episode's GPU models before returning."""
     qp: float | None = oak_quest_offset_ms(episode.sync)
@@ -162,7 +178,7 @@ def detect_oak_egohand(
 
 @torch.inference_mode()
 def detect_oak_views(
-    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], assets: Path, *, retain_models: bool = False,
+    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], assets: Path | None, *, retain_models: bool = False,
 ) -> dict[str, OakDetections]:
     """EgoHand on the same 64 instants in every OAK camera, sampled on OAK left; videos are read on ``video_time``.
 

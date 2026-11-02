@@ -34,8 +34,8 @@ Required inputs: existing dataset/segment; confident RTMW 3D plus four exo raw
 raw 26-joint hand-orientation CSVs; SOMA assets. Missing inputs exit nonzero and
 name the segment. Raw orientations are read directly because the catalog does
 not carry them. `--raw-root` defaults to the original ingest tree
-`/mnt/nas/datasets/exoego-self-collected/main/cut`; `--assets` defaults to
-`/tmp/soma-fit/assets`. No source layer is rewritten.
+`/mnt/nas/datasets/exoego-self-collected/main/cut`; `--assets` overrides the
+pinned `nvidia/SOMA-X` download. No source layer is rewritten.
 
 Each segment gets a fresh shape stage with legs included, using well-observed
 frames from the first 25 s. Identity, scale, symmetric limb ratios and one
@@ -187,14 +187,14 @@ and registers it. It refuses an existing file. CPU only.
 pixi run -e selfcap-soma --frozen soma-xlo \
   --soma-dir /tmp/soma-batch --dataset selfcap-post-dev \
   --segment selfcap__2025-12-03__d31bf1da__ep001 selfcap__2025-12-04__5cb1e14c__ep001 \
-  --assets /tmp/soma-fit/assets --output-dir /tmp/soma-xlo
+  --output-dir /tmp/soma-xlo
 ```
 
 One process handles every segment on its command line and loads the rest meshes once.
 
 Each xlo vertex takes the per-frame position of its nearest low-LOD vertex in the
 neutral rest pose (zero identity, zero pose, no correctives, computed from
-`--assets` at run time). An xlo vertex whose nearest low vertex lies below the
+the SOMA-X files at run time). An xlo vertex whose nearest low vertex lies below the
 waist is dropped, with its faces. Normals are recomputed, area-weighted.
 
 The only input is the registered layer file `<soma-dir>/<dataset>/<segment>/<segment>.rrd`:

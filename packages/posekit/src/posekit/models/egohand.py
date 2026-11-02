@@ -5,6 +5,7 @@ geometry. Optional GPU sampling and TensorRT preserve full SOMA meshes and
 parameters. Remaining CPU output conversion is included in stage timings.
 """
 
+import fcntl
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -14,12 +15,14 @@ import numpy as np
 import torch
 from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
 from egohand_inference.perf import PerfStage
+from huggingface_hub import hf_hub_download, snapshot_download
 from jaxtyping import Bool, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from serde import from_dict, serde
 from torch import Tensor
 from trtkit import TensorRtBackendConfig, export_onnx
+from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from posekit.models.egohand_geometry import HandSide, OAKCamera, detector_hand_side
 from posekit.predictions import BoxDetections, Keypoints3d, validate_frames_rgb
@@ -84,16 +87,37 @@ def resolve_hand_identities(detections: HandDetections, frame_count: int) -> Han
     )
 
 
+EGOHAND_REVISION: str = "24a325fde719fdb985c7fb4606115b0c1912ab7d"
+"""Weights of nvidia/EgoHand-v1 a153616c egohand_s060000.ckpt, without its pickle."""
+CACHED_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-bf16-{EGOHAND_REVISION[:8]}.onnx"
+"""The bf16 DINOv3 exported from those weights, beside the engines built from it."""
+SOMA_HAND_FILES: tuple[str, ...] = (
+    "SOMAHand.npz", "SOMA_neutral.npz", "SOMA_procedural_transforms.json", "SOMA_template_rig.usda",
+    "MHR/mhr_model_lod1.pt", "MHR/base_body_lod1.obj", "MHR/SOMA_wrap_lod1.obj",
+)
+"""What the SOMA hand model reads."""
+
+
 @dataclass(frozen=True, slots=True)
 class EgoHandDetectorConfig:
     """Released ONNX hand detector configuration."""
 
-    weights: Path
-    """Path to hand_detector.onnx."""
+    weights: Path | None = None
+    """Path to hand_detector.onnx; None downloads it."""
     threshold: float = 0.5
     """Minimum detector confidence, unrelated to landmark visibility."""
     backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
     """ONNX Runtime reference or cached TensorRT engine, with a dynamic batch."""
+    hf_detector_repo_id: str = "nvidia/RT-DETR-Hand-Detector-v1"
+    """Hugging Face repo holding hand_detector.onnx."""
+    hf_detector_revision: str = "55572ddc93a5916c3e486811dc6e62bb2b7bdb9d"
+    """Pinned commit of that repo."""
+
+    def weights_path(self) -> Path:
+        """The ONNX file: ``weights``, or the pinned download in the Hugging Face cache."""
+        if self.weights is not None:
+            return self.weights
+        return Path(hf_hub_download(repo_id=self.hf_detector_repo_id, filename="hand_detector.onnx", revision=self.hf_detector_revision))
 
     def setup(self) -> "EgoHandDetector":
         """Create the CUDA detector."""
@@ -105,7 +129,7 @@ class EgoHandDetector:
 
     def __init__(self, config: EgoHandDetectorConfig) -> None:
         self.config: EgoHandDetectorConfig = config
-        self.runtime: TensorRuntime = create_runtime_from_onnx(config.weights, config.backend)
+        self.runtime: TensorRuntime = create_runtime_from_onnx(config.weights_path(), config.backend)
 
     def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"]) -> HandDetections:
         """Detect an ordered RGB sequence; resolve identity before hand mirroring."""
@@ -200,12 +224,12 @@ class HandReconstruction:
 
 @dataclass(frozen=True, slots=True)
 class EgoHandConfig:
-    """Local released assets; construction never downloads weights."""
+    """Released weights and SOMA files, downloaded at pinned revisions unless local paths override them."""
 
-    weights: Path
-    """EgoHand checkpoint path."""
-    soma_assets: Path
-    """Directory containing SOMAHand.npz."""
+    weights: Path | None = None
+    """EgoHand safetensors path; None downloads it."""
+    soma_assets: Path | None = None
+    """Directory containing SOMAHand.npz; None downloads it."""
     batch_size: int = 2
     """Maximum simultaneous hand crops."""
     padding: float = 0.2
@@ -216,10 +240,56 @@ class EgoHandConfig:
     """Optional bf16 DINOv3 artifact; export from these weights when absent."""
     backbone_backend: TensorRtBackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32))
     """Cached TensorRT runtime for backbone_onnx; ignored for the eager path."""
+    hf_egohand_repo_id: str = "pablovela5620/egohand"
+    """Hugging Face repo holding the safetensors."""
+    hf_egohand_revision: str = EGOHAND_REVISION
+    """Pinned commit of that repo."""
+    hf_soma_repo_id: str = "nvidia/SOMA-X"
+    """Hugging Face repo holding the SOMA hand model."""
+    hf_soma_revision: str = "f81a01796f652260ff930d5318d6c6b845a505ed"
+    """Pinned commit of that repo."""
+
+    def weights_path(self) -> Path:
+        """The safetensors file: ``weights``, or the pinned download in the Hugging Face cache."""
+        if self.weights is not None:
+            return self.weights
+        return Path(hf_hub_download(repo_id=self.hf_egohand_repo_id, filename="egohand_s060000.safetensors", revision=self.hf_egohand_revision))
+
+    def soma_path(self) -> Path:
+        """The SOMA directory: ``soma_assets``, or the pinned download in the Hugging Face cache."""
+        if self.soma_assets is not None:
+            return self.soma_assets
+        return Path(snapshot_download(repo_id=self.hf_soma_repo_id, revision=self.hf_soma_revision, allow_patterns=list(SOMA_HAND_FILES)))
 
     def setup(self) -> "EgoHandPredictor":
-        """Load local weights and construct the calibrated predictor."""
+        """Load the weights and construct the calibrated predictor."""
         return EgoHandPredictor(self)
+
+
+def _export_backbone_once(config: EgoHandConfig, weights: Path, soma: Path) -> None:
+    """Export the bf16 DINOv3 if no one has yet; processes that find it missing take turns, so the first one's export serves them all."""
+    from egohand_inference.pipeline.predictor import EgoHandPredictor as UpstreamPredictor
+    from egohand_inference.pipeline.predictor import load_egohand_model
+
+    onnx: Path = config.backbone_onnx
+    if onnx.is_file():
+        return
+    onnx.parent.mkdir(parents=True, exist_ok=True)
+    with onnx.with_suffix(".lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not onnx.is_file():
+            model, _ = load_egohand_model(weights, soma)
+            export_onnx(
+                UpstreamPredictor(model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True).model.backbone,
+                (torch.zeros((2, 3, 256, 256), device="cuda"),),
+                onnx,
+                input_names=["images"],
+                output_names=["features"],
+                compute_dtype=torch.bfloat16,
+                dynamic_batch_max=config.backbone_backend.max_batch_size,
+            )
+            del model
+            torch.cuda.empty_cache()
 
 
 class EgoHandPredictor:
@@ -233,24 +303,15 @@ class EgoHandPredictor:
         self.stage_ms: dict[str, list[float]] = {}
         # A cached backbone artifact replaces the 3 GB PyTorch DINOv3, which is then never built or loaded.
         engine: _TensorRtBackbone | None = None
-        if config.backbone_onnx is not None and config.backbone_onnx.is_file():
+        weights: Path = config.weights_path()
+        soma: Path = config.soma_path()
+        if config.backbone_onnx is not None:
+            _export_backbone_once(config, weights, soma)
             engine = _TensorRtBackbone(create_runtime_from_onnx(config.backbone_onnx, config.backbone_backend))
-        model, _ = load_egohand_model(config.weights, config.soma_assets, backbone=engine)
+        model, _ = load_egohand_model(weights, soma, backbone=engine)
         self.predictor: UpstreamPredictor = UpstreamPredictor(
             model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True, perf_reporter=self
         )
-        if config.backbone_onnx is not None and engine is None:
-            export_onnx(
-                self.predictor.model.backbone,
-                (torch.zeros((2, 3, 256, 256), device="cuda"),),
-                config.backbone_onnx,
-                input_names=["images"],
-                output_names=["features"],
-                compute_dtype=torch.bfloat16,
-                dynamic_batch_max=config.backbone_backend.max_batch_size,
-            )
-            self.predictor.model.backbone = _TensorRtBackbone(create_runtime_from_onnx(config.backbone_onnx, config.backbone_backend))
-            torch.cuda.empty_cache()
 
     def record_latency(self, stage: PerfStage, latency_ms: float) -> None:
         """Collect per-frame stage timings; SOMA uses nested CUDA-event timing."""

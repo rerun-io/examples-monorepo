@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+from safetensors import safe_open
 
 from egohand_inference.camera.camera_models import CameraModel
 from egohand_inference.camera.perspective_crop import perspective_crop
@@ -56,17 +57,16 @@ _VALID_TARGETS = ("egohand.EgoHand",)
 
 
 def load_egohand_model(checkpoint_path: str | Path, soma_hand_data_folder: str | Path, backbone: torch.nn.Module | None = None):
-    """Load a EgoHand model from a checkpoint.
+    """Load a EgoHand model from a weights-only safetensors file.
 
-    Reads the training-time cfg stored in ``ckpt["hyper_parameters"]["cfg"]``,
+    Reads the training-time cfg stored as YAML in the file's ``cfg`` metadata,
     overrides the two inference-only knobs (skip pretrained backbone load,
     redirect SOMAHand asset folder), instantiates the right model class, and
     loads weights. Returns the model in CPU eval mode; the caller moves it to
     the target device.
 
     Args:
-        checkpoint_path: Path to a ``.ckpt`` file produced by this repo's
-            training entrypoint.
+        checkpoint_path: Path to a ``.safetensors`` file converted from a training checkpoint.
         soma_hand_data_folder: SOMAHand asset folder to redirect ``cfg.soma_hand.data_root``.
         backbone: Ready feature extractor (e.g. a TensorRT engine) used instead of
             building and loading the checkpoint's DINOv3 backbone.
@@ -75,9 +75,10 @@ def load_egohand_model(checkpoint_path: str | Path, soma_hand_data_folder: str |
         model: EgoHand instance in eval mode on CPU.
         target: The ``_target_`` string from the checkpoint cfg (for logging).
     """
-    # mmap: the training checkpoint also holds optimizer state; only the weights loaded below are read.
-    ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False, mmap=True)
-    cfg = OmegaConf.create(ckpt["hyper_parameters"]["cfg"])
+    with safe_open(str(checkpoint_path), framework="pt", device="cpu") as weights:
+        cfg = OmegaConf.create(weights.metadata()["cfg"])
+        # A ready backbone leaves the 3 GB DINOv3 weights unread.
+        state = {key: weights.get_tensor(key) for key in weights.keys() if backbone is None or not key.startswith("backbone.")}
     target = str(cfg.get("_target_", ""))
     if not any(target.endswith(t) for t in _VALID_TARGETS):
         raise ValueError(
@@ -89,16 +90,14 @@ def load_egohand_model(checkpoint_path: str | Path, soma_hand_data_folder: str |
 
     from egohand.models.egohand import EgoHand
 
-    state = ckpt["state_dict"]
     if backbone is not None:
         cfg.backbone = {"_target_": "torch.nn.Identity"}
-        state = {key: value for key, value in state.items() if not key.startswith("backbone.")}
 
     model = EgoHand(cfg)
     if backbone is not None:
         model.backbone = backbone
 
-    model.validate_camera_depth_checkpoint(ckpt)
+    model.validate_camera_depth_checkpoint({"hyper_parameters": {"cfg": cfg}})
     model.load_state_dict(state, strict=False)
     log.info("[EgoHand] Loaded checkpoint: %s", checkpoint_path)
     return model.eval(), target

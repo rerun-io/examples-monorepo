@@ -20,22 +20,27 @@ compatibility; this package does not expose a training command.
 Changes from source: remove unused global chumpy shims; remove file exporters
 and full-body wrapper methods; rename internal imports; support OpenCV 4 and 5
 iterative point undistortion; add CUDA-event SOMA timing, GPU perspective sampling and prepared-crop input;
-memory-map the checkpoint and accept a ready backbone in `load_egohand_model`. The model
+load weights-only safetensors and accept a ready backbone in `load_egohand_model`. The model
 math and checkpoint configuration remain unchanged. The posekit adapter owns
 new typed code; the vendored dependency remains an explicit source boundary.
 
-Required local assets under `/tmp/egohand/weights`:
+The model files download on first use into the Hugging Face cache, at pinned revisions:
 
-- `egohand/egohand_s060000.ckpt`, repo `nvidia/EgoHand-v1`, revision
-  `a153616c5192e6a8b09dbd302f682093080c5b83`.
-- `detector/hand_detector.onnx`, repo `nvidia/RT-DETR-Hand-Detector-v1`, revision
+- `egohand_s060000.safetensors`, repo `pablovela5620/egohand`, revision
+  `24a325fde719fdb985c7fb4606115b0c1912ab7d`. It holds the weights of
+  `egohand_s060000.ckpt` from `nvidia/EgoHand-v1`, revision
+  `a153616c5192e6a8b09dbd302f682093080c5b83`, with the training cfg as YAML in
+  its `cfg` metadata, so that loading it runs no pickle.
+- `hand_detector.onnx`, repo `nvidia/RT-DETR-Hand-Detector-v1`, revision
   `55572ddc93a5916c3e486811dc6e62bb2b7bdb9d`.
-- `soma/`: `SOMAHand.npz`, `SOMA_neutral.npz`,
-  `SOMA_procedural_transforms.json`, `SOMA_template_rig.usda`,
-  `MHR/mhr_model_lod1.pt`, `MHR/base_body_lod1.obj`, `MHR/SOMA_wrap_lod1.obj`,
-  repo `nvidia/SOMA-X`, revision `f81a01796f652260ff930d5318d6c6b845a505ed`.
+- `SOMAHand.npz`, `SOMA_neutral.npz`, `SOMA_procedural_transforms.json`,
+  `SOMA_template_rig.usda`, `MHR/mhr_model_lod1.pt`, `MHR/base_body_lod1.obj`,
+  `MHR/SOMA_wrap_lod1.obj`, repo `nvidia/SOMA-X`, revision
+  `f81a01796f652260ff930d5318d6c6b845a505ed`.
 
-Download with `hf download REPO FILE... --revision REV --local-dir DEST`.
+TensorRT engines and the DINOv3 ONNX export go to the trtkit cache
+(`~/.cache/trtkit/trt`, or `TRTKIT_TRT_CACHE`). Local paths in `EgoHandConfig` and
+`EgoHandDetectorConfig` override the downloads.
 NPZ files are read-only upstream model assets; generated predictions use Rerun.
 The inference extras use the workspace PyTorch and ORT versions. Pillow <13
 and python-dateutil <3 are scoped to the runtime feature, avoiding upstream

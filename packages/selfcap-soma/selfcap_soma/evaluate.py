@@ -79,8 +79,8 @@ class EvaluationReport:
 class Config:
     output: Path = Path("/tmp/soma-fit/evaluation")
     """New local experiment directory."""
-    assets: Path = Path("/tmp/soma-fit/assets")
-    """Official model files."""
+    assets: Path | None = None
+    """Local SOMA-X directory; None takes the pinned download."""
     egohand: Path = Path("/tmp/egohand/comparison-corrected.rrd")
     """Optional corrected image evidence; source is never changed."""
     iterations: int = 400

@@ -151,3 +151,7 @@ def test_post_refuses_an_existing_output(tmp_path: Path) -> None:
     (tmp_path / "out").mkdir()
     with pytest.raises(FileExistsError):
         post.main(post.Config(base_dir=tmp_path / "base", output_dir=tmp_path / "out", rate=2.0, segment_ids=SEGMENTS))
+
+
+def test_the_egohand_assets_are_an_optional_override(tmp_path: Path) -> None:
+    assert post.Config(tmp_path / "base", tmp_path / "out").oak_egohand_assets is None

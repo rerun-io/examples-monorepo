@@ -19,6 +19,7 @@ from numpy import ndarray
 from rerun.chunk import Chunk, ChunkStore, LazyChunkStream, OptimizationProfile, RrdReader
 from soma.body import SOMALayer, SOMAPoseOutput
 
+from selfcap_soma.assets import soma_assets
 from selfcap_soma.batch import selected_segments
 from selfcap_soma.overlay import SOMA_MESH, mesh_vertex_rows, read_layer_crop
 
@@ -32,14 +33,14 @@ class Config:
     """Batch output root holding each registered soma layer at <dataset>/<segment>/<segment>.rrd."""
     dataset: str
     """Dataset directory under soma_dir."""
-    assets: Path
-    """Downloaded SOMA model files."""
     output_dir: Path
     """Destination for <segment>.rrd; an existing file is refused. Nothing is shipped or registered."""
     segment: list[str] = field(default_factory=list)
     """One or more SelfCap segment IDs."""
     segments_file: Path | None = None
     """Optional newline-separated IDs; blank/comment lines are ignored."""
+    assets: Path | None = None
+    """Local SOMA-X directory; None takes the pinned download."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +61,12 @@ class XloMapping:
     """Xlo triangles fully inside the kept vertices, remapped to them."""
 
 
-def rest_meshes(assets: Path) -> RestMeshes:
+def rest_meshes(assets: Path | None) -> RestMeshes:
     """Low and xlo rest meshes of the neutral identity, at zero pose, with no correctives."""
     meshes: dict[str, tuple[Float32[ndarray, "v 3"], Int32[ndarray, "f 3"]]] = {}
     for lod in ("low", "xlo"):
         model: SOMALayer = SOMALayer(
-            data_root=assets,
+            data_root=soma_assets(assets),
             device="cpu",
             identity_model_type="soma",
             mode="torch",

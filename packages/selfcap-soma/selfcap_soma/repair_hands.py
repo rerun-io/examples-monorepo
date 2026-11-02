@@ -11,6 +11,7 @@ from serde import serde
 from serde.json import from_json, to_json
 from soma.body import SOMALayer
 
+from selfcap_soma.assets import soma_assets
 from selfcap_soma.catalog import read_window
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_diagnostics import Plausibility, measure
@@ -31,7 +32,7 @@ class Diagnosis:
 def main() -> None:
     root = Path("/tmp/soma-fit/hand-repair-final")
     root.mkdir(exist_ok=True, parents=True)
-    assets = Path("/tmp/soma-fit/assets")
+    assets = soma_assets()
     calibration = from_json(Calibration, Path("/tmp/soma-fit/ears/ears-offset-rotation-calibration.json").read_text())
     data = read_window("rerun+http://dgx-spark:51235", "selfcap-post-dev", "selfcap__2025-12-03__d31bf1da__ep001", 0.0, 183.0, 1)
     baseline = fit(data, assets, 400, 80, fixed=calibration)

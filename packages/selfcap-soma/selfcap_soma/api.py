@@ -30,8 +30,8 @@ class Config:
     """Total Adam iterations."""
     shape_iterations: int = 60
     """Initial shared-shape fitting iterations."""
-    assets: Path = Path("/tmp/soma-fit/assets")
-    """Official SOMA-X asset directory."""
+    assets: Path | None = None
+    """Local SOMA-X directory; None takes the pinned download."""
     output: Path = Path("/tmp/soma-fit/window")
     """Local RRD and report directory; never registered."""
     target: float = 4.144

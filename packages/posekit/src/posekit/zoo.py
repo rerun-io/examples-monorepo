@@ -116,7 +116,7 @@ ZOO: dict[str, ZooModel] = {
         ZooModel(
             "egohand-v1", "pose3d", "top-down", "local",
             "nvidia/EgoHand-v1", (256, 256), "soma_hand_25", "implemented",
-            "EgoHandConfig in posekit.models.egohand; calibrated camera and anatomical hand boxes required. Uses the egohand Pixi environment.",
+            "EgoHandConfig in posekit.models.egohand; downloads pablovela5620/egohand, a safetensors copy of these weights. Calibrated camera and anatomical hand boxes required. Uses the egohand Pixi environment.",
         ),
         # 3D (Phase 4).
         ZooModel(

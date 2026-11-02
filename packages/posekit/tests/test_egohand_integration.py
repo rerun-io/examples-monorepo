@@ -46,7 +46,7 @@ def test_tensorrt_detector_preserves_batched_anatomical_detections() -> None:
 
 def test_released_models_return_aligned_hands() -> None:
     weights = Path("/tmp/egohand/weights")
-    required = [weights / "egohand/egohand_s060000.ckpt", weights / "detector/hand_detector.onnx", weights / "soma/SOMAHand.npz"]
+    required = [weights / "egohand/egohand_s060000.safetensors", weights / "detector/hand_detector.onnx", weights / "soma/SOMAHand.npz"]
     required.extend(
         weights / name
         for name in (
@@ -104,7 +104,7 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
     required = [
         root / name
         for name in (
-            "weights/egohand/egohand_s060000.ckpt",
+            "weights/egohand/egohand_s060000.safetensors",
             "weights/soma/SOMAHand.npz",
             "weights/soma/MHR/mhr_model_lod1.pt",
             "weights/detector/hand_detector.onnx",
@@ -170,7 +170,7 @@ def test_tensorrt_backbone_setup_never_builds_the_eager_backbone(monkeypatch: py
     monkeypatch.setattr(DinoVisionTransformer, "__init__", refuse)
 
     root = Path("/tmp/egohand")
-    weights, soma, onnx = root / "weights/egohand/egohand_s060000.ckpt", root / "weights/soma", root / "dinov3-bf16.onnx"
+    weights, soma, onnx = root / "weights/egohand/egohand_s060000.safetensors", root / "weights/soma", root / "dinov3-bf16.onnx"
     for asset in (weights, soma / "SOMAHand.npz", onnx):
         if not asset.exists():
             pytest.skip(f"missing accelerated EgoHand asset: {asset}")

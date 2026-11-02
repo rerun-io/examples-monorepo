@@ -15,6 +15,7 @@ from soma.body import SOMALayer, SOMAPoseOutput
 from torch import Tensor
 
 from selfcap_soma.anthropometry import SCALE_MAX, SCALE_MIN, bounded_scale, usable_ears
+from selfcap_soma.assets import soma_assets
 from selfcap_soma.catalog import Observations
 from selfcap_soma.feet import foot_pose_penalty, symmetry_penalty
 from selfcap_soma.hand_pose import HandOrientations, HandOrientationSource, frame, hand_limit_penalty, orientation_targets
@@ -167,7 +168,7 @@ def pose_gradient_mask(
 
 def fit(
     data: Observations,
-    assets: Path,
+    assets: Path | None,
     iterations: int = 400,
     shape_iterations: int = 60,
     options: FitOptions | None = None,
@@ -187,7 +188,7 @@ def fit(
     active_components = options.shape_components if fixed is None else 128
     torch.cuda.reset_peak_memory_stats()
     model: SOMALayer = SOMALayer(
-        data_root=assets,
+        data_root=soma_assets(assets),
         device="cuda",
         identity_model_type="soma",
         mode="torch",
@@ -570,7 +571,7 @@ def fit(
         target_rotation = head_frames @ head_attachment
         if options.display_twists:
             model = SOMALayer(
-                data_root=assets,
+                data_root=soma_assets(assets),
                 device="cuda",
                 identity_model_type="soma",
                 mode="torch",

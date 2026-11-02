@@ -15,9 +15,7 @@ Use a host-side terminal in this workspace for Pixi installation.
 
 ```bash
 pixi install --locked -e selfcap-soma
-hf download nvidia/SOMA-X --revision f81a01796f652260ff930d5318d6c6b845a505ed \
-  SOMA_neutral.npz SOMA_template_rig.usda SOMA_procedural_transforms.json LICENSE \
-  --local-dir /tmp/soma-fit/assets
+# SOMA model files download on first use: nvidia/SOMA-X at f81a01796f652260ff930d5318d6c6b845a505ed. --assets overrides them.
 pixi run -e selfcap-soma --frozen soma-fit --shape-iterations 80
 # Full-rate, head-covered part of the segment:
 pixi run -e selfcap-soma --frozen soma-fit --start 0.3 --end 50.0 --stride 1 \
