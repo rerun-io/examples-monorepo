@@ -1,0 +1,203 @@
+# Upstream Hexels (honeycomb-surfels/hexels) for CUDA 13, plus the CUDA extensions it imports
+# at train/render/eval time; Image-GS runs through hexels' fit_image harness on hexel-kernel's 2D kernels.
+#
+# Upstream pins torch 2.5.1 + CUDA 12.1 + sm_86; these outputs build against the workspace's
+# conda-forge torch 2.12 (cuda130) for sm_86, sm_120 and sm_121 (+PTX). Every output has its own
+# script (no `staging:`, see AGENTS.md "Pixi-build packages").
+#
+# Runtime layout of `hexels-src`: upstream resolves helpers relative to its checkout root
+# (ROOT/2d-gaussian-splatting, ROOT/image-gs, ROOT/configs), so the tree is installed whole at
+# $PREFIX/share/hexels-src and put on sys.path by a .pth file, instead of being pip-installed.
+recipe:
+  name: hexels-src
+  version: "0.1.0"
+
+source:
+  - git: https://github.com/honeycomb-surfels/hexels.git
+    rev: 698d1afb0944d3e766074c3beb70362f16c7550d
+    target_directory: hexels
+  # The two submodules, at the commits hexels@698d1af records.
+  - git: https://github.com/honeycomb-surfels/hexel-kernel.git
+    rev: 3af322068baef2505db8388293ea4beb9737240f
+    target_directory: hexel-kernel
+  - git: https://github.com/honeycomb-surfels/hexel-viewer.git
+    rev: ff497d44d3c2ecdb907e0346b0b8e8de0a64f9ec
+    target_directory: hexel-viewer
+  # Camera loading and the SSIM reference come from 2DGS at the revision upstream's
+  # baselines/repositories.json names; its adaptations.patch is applied from the hexels checkout.
+  - git: https://github.com/hbb1/2d-gaussian-splatting.git
+    rev: 335ad612f2e783a4e57b9cbc4d1e167bd599fc98
+    target_directory: 2d-gaussian-splatting
+  # 2DGS's scene/__init__ imports simple_knn._C; commit = 2DGS's submodule record.
+  - git: https://gitlab.inria.fr/bkerbl/simple-knn.git
+    rev: f155ec04131cb579f53443a06879d37115f4612f
+    target_directory: simple-knn
+  - git: https://github.com/rahul-goel/fused-ssim.git
+    rev: 1272e21a282342e89537159e4bad508b19b34157
+    target_directory: fused-ssim
+  - git: https://github.com/NYU-ICL/image-gs.git
+    rev: 03088368d42684fb54225c981cfd94b58cc0393a
+    target_directory: image-gs
+
+outputs:
+  # ── CUDA extensions ─────────────────────────────────────────────────────
+  - package:
+      name: hexel-kernel
+    build:
+      script:
+        file: build_cuda_ext.sh
+        env:
+          EXT_DIR: hexel-kernel
+    requirements:
+      build:
+        - cuda-compiler 13.0.*
+        - cuda-version 13.0.*
+      host:
+        - python 3.12.*
+        - pip
+        - setuptools
+        - wheel
+        - cuda-version 13.0.*
+        - pytorch-gpu 2.12.*
+        - cuda-cudart-dev
+        - cuda-driver-dev
+        - cuda-cccl
+        - cuda-nvrtc-dev
+        - libcublas-dev
+        - libcusparse-dev
+        - libcusolver-dev
+        - libcurand-dev
+      run:
+        - python 3.12.*
+        - pytorch >=2.12,<2.13
+        - cuda-version >=13.0,<14
+        - jaxtyping
+
+  - package:
+      name: fused-ssim
+    build:
+      script:
+        file: build_cuda_ext.sh
+        env:
+          EXT_DIR: fused-ssim
+    requirements:
+      build:
+        - cuda-compiler 13.0.*
+        - cuda-version 13.0.*
+      host:
+        - python 3.12.*
+        - pip
+        - setuptools
+        - wheel
+        - cuda-version 13.0.*
+        - pytorch-gpu 2.12.*
+        - cuda-cudart-dev
+        - cuda-driver-dev
+        - cuda-cccl
+        - cuda-nvrtc-dev
+        - libcublas-dev
+        - libcusparse-dev
+        - libcusolver-dev
+        - libcurand-dev
+      run:
+        - python 3.12.*
+        - pytorch >=2.12,<2.13
+        - cuda-version >=13.0,<14
+        - jaxtyping
+
+  - package:
+      name: simple-knn
+    build:
+      script:
+        file: build_cuda_ext.sh
+        env:
+          EXT_DIR: simple-knn
+    requirements:
+      build:
+        - cuda-compiler 13.0.*
+        - cuda-version 13.0.*
+      host:
+        - python 3.12.*
+        - pip
+        - setuptools
+        - wheel
+        - cuda-version 13.0.*
+        - pytorch-gpu 2.12.*
+        - cuda-cudart-dev
+        - cuda-driver-dev
+        - cuda-cccl
+        - cuda-nvrtc-dev
+        - libcublas-dev
+        - libcusparse-dev
+        - libcusolver-dev
+        - libcurand-dev
+      run:
+        - python 3.12.*
+        - pytorch >=2.12,<2.13
+        - cuda-version >=13.0,<14
+        - jaxtyping
+
+  # ── Source trees ────────────────────────────────────────────────────────
+  # Image-GS checkout: hexels' 2D fitter imports its model from ROOT/image-gs.
+  - package:
+      name: image-gs
+    build:
+      noarch: generic
+      script:
+        - rm -rf "$PREFIX/share/image-gs"
+        - mkdir -p "$PREFIX/share/image-gs"
+        - tar -C image-gs --exclude=.git -cf - . | tar -xf - -C "$PREFIX/share/image-gs"
+
+  - package:
+      name: hexels-src
+    build:
+      script:
+        - export ROOT="$PREFIX/share/hexels-src"
+        - rm -rf "$ROOT"
+        - mkdir -p "$ROOT"
+        - tar -C hexels --exclude=.git --exclude=docs --exclude=hexel_edge --exclude=huggingface --exclude=submodules -cf - . | tar -xf - -C "$ROOT"
+        - echo "11c60040618b7f2add85958fbeb156d9927414cb96493e4fedd24fc0f83ea2c6  hexels/baselines/2d-gaussian-splatting/adaptations.patch" | sha256sum -c -
+        - cd 2d-gaussian-splatting
+        - git apply ../hexels/baselines/2d-gaussian-splatting/adaptations.patch
+        - cd ..
+        - mkdir -p "$ROOT/2d-gaussian-splatting"
+        - tar -C 2d-gaussian-splatting --exclude=.git --exclude=submodules -cf - . | tar -xf - -C "$ROOT/2d-gaussian-splatting"
+        - ln -s ../image-gs "$ROOT/image-gs"
+        - python -m pip install ./hexel-viewer --no-deps --no-build-isolation -vv
+        - echo "import sys, os; sys.path.append(os.path.join(sys.prefix, 'share', 'hexels-src'))" > "$SP_DIR/hexels-src.pth"
+    requirements:
+      build:
+        - git
+      host:
+        - python 3.12.*
+        - pip
+        - setuptools
+        - wheel
+      run:
+        - python 3.12.*
+        - ${{ pin_subpackage('hexel-kernel', exact=True) }}
+        - ${{ pin_subpackage('fused-ssim', exact=True) }}
+        - ${{ pin_subpackage('simple-knn', exact=True) }}
+        - ${{ pin_subpackage('image-gs', exact=True) }}
+        - pytorch >=2.12,<2.13
+        - torchvision
+        - numpy
+        - scipy
+        - pillow
+        - plyfile
+        - typed-argument-parser
+        - tqdm
+        - pyyaml
+        - imageio
+        - imageio-ffmpeg
+        - lpips
+        - psutil
+        - scikit-learn
+        - scikit-image
+        - py-opencv
+        - matplotlib
+        - pytorch-msssim
+        - mediapy
+        - trimesh
+        - nvidia-ml-py
+        - open3d

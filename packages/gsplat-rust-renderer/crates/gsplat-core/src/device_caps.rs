@@ -7,7 +7,7 @@ pub(crate) const REQUIRED_WORKGROUP_STORAGE_BYTES: u32 = 10_256;
 fn required_limits() -> wgpu::Limits {
     wgpu::Limits {
         max_storage_buffers_per_shader_stage: 8,
-        max_storage_textures_per_shader_stage: 2,
+        max_storage_textures_per_shader_stage: 3,
         max_compute_workgroup_size_y: 1,
         max_compute_workgroup_size_z: 1,
         max_compute_workgroups_per_dimension: 65_535,
@@ -63,9 +63,9 @@ mod capability_tests {
     }
 
     #[test]
-    fn depth_raster_requires_two_storage_textures() {
+    fn id_raster_requires_three_storage_textures() {
         let limits = wgpu::Limits {
-            max_storage_textures_per_shader_stage: 1,
+            max_storage_textures_per_shader_stage: 2,
             ..wgpu::Limits::default()
         };
         assert!(super::check_adapter(wgpu::Features::SUBGROUP, &limits).is_err());
@@ -92,7 +92,7 @@ mod capability_tests {
             requested.max_uniform_buffers_per_shader_stage
         );
         assert_eq!(limits.max_storage_buffers_per_shader_stage, 8);
-        assert_eq!(limits.max_storage_textures_per_shader_stage, 2);
+        assert_eq!(limits.max_storage_textures_per_shader_stage, 3);
         super::check_adapter(wgpu::Features::SUBGROUP, &limits).unwrap();
         assert!(limits.check_limits(&available));
         let weak = wgpu::Limits::downlevel_webgl2_defaults();

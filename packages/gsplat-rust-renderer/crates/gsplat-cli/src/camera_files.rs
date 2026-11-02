@@ -50,8 +50,64 @@ pub(crate) fn nerf_frames(path: &Path, resize: Option<(u32, u32)>) -> Result<Vec
         .collect()
 }
 
-/// A JSON file contains NeRF transforms or an array of strict `CameraSpec` records.
-/// A directory is one COLMAP sparse model containing cameras/images .bin or .txt.
+/// Upstream Hexels camera record (2DGS `Camera`), as in its `contract.json` and our `cameras.json`.
+#[derive(serde::Deserialize)]
+struct UpstreamCamera {
+    name: String,
+    width: u32,
+    height: u32,
+    fov_x: f64,
+    fov_y: f64,
+    /// Row-vector convention: `[x y z 1] @ M` is the OpenCV camera point.
+    world_view_transform: [[f64; 4]; 4],
+}
+
+#[derive(serde::Deserialize)]
+struct UpstreamGeometry {
+    test: Vec<UpstreamCamera>,
+}
+
+/// `cameras.json` (`cameras`) or the upstream `contract.json` (`geometry.test`).
+#[derive(serde::Deserialize)]
+struct UpstreamCameras {
+    cameras: Option<Vec<UpstreamCamera>>,
+    geometry: Option<UpstreamGeometry>,
+}
+
+/// Upstream intrinsics: focal from the field of view, principal point at the image centre.
+fn upstream_frames(document: UpstreamCameras) -> Result<Vec<CameraFrame>> {
+    let cameras = document
+        .cameras
+        .or_else(|| document.geometry.map(|g| g.test))
+        .context("camera file has neither cameras nor geometry.test")?;
+    cameras
+        .into_iter()
+        .map(|camera| {
+            let view_from_world = glam::DMat4::from_cols_array_2d(&camera.world_view_transform);
+            let focal = |size: u32, fov: f64| (f64::from(size) / (2.0 * (fov * 0.5).tan())) as f32;
+            Ok(CameraFrame {
+                camera: CameraSpec {
+                    world_from_camera: view_from_world
+                        .inverse()
+                        .transpose()
+                        .as_mat4()
+                        .to_cols_array_2d(),
+                    width: camera.width,
+                    height: camera.height,
+                    fx: focal(camera.width, camera.fov_x),
+                    fy: focal(camera.height, camera.fov_y),
+                    cx: camera.width as f32 / 2.0,
+                    cy: camera.height as f32 / 2.0,
+                    model: CameraModel::Pinhole,
+                },
+                file_path: PathBuf::from(camera.name),
+            })
+        })
+        .collect()
+}
+
+/// A JSON file contains NeRF transforms, upstream Hexels cameras, or an array of strict
+/// `CameraSpec` records. A directory is one COLMAP sparse model with cameras/images .bin or .txt.
 pub async fn load_frames(path: &Path, resize: Option<(u32, u32)>) -> Result<Vec<CameraFrame>> {
     let mut frames = if path.is_dir() {
         colmap_frames(path).await?
@@ -66,6 +122,10 @@ pub async fn load_frames(path: &Path, resize: Option<(u32, u32)>) -> Result<Vec<
                     file_path: PathBuf::from(format!("{i:03}.png")),
                 })
                 .collect()
+        } else if let Ok(document) = serde_json::from_slice::<UpstreamCameras>(&bytes)
+            && (document.cameras.is_some() || document.geometry.is_some())
+        {
+            upstream_frames(document)?
         } else {
             nerf_frames(path, resize)?
         }

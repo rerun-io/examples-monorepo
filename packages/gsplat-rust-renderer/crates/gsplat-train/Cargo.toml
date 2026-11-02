@@ -16,6 +16,8 @@ glam.workspace = true
 image.workspace = true
 tokio.workspace = true
 tokio-stream = "0.1"
+serde.workspace = true
+serde_json.workspace = true
 rerun = { version = "=0.38.1", default-features = false, features = ["sdk", "glam", "image"] }
 
 [dev-dependencies]

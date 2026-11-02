@@ -25,14 +25,14 @@ pub use output::Target;
 pub use renderer::Renderer;
 pub use scene::Scene;
 pub use timing::{QUERY_COUNT, STAGE_NAMES, stage_ms};
-pub use types::{Camera, FrameStats, RenderMode, RenderOptions, Splats};
+pub use types::{Camera, FrameStats, HexelVariant, Hexels, RenderMode, RenderOptions, Splats};
 pub use view::ViewState;
 
 /// Input, capability, or readback failure at the renderer boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "gsplat-core requires SUBGROUP, eight storage buffers, two storage textures, 256 threads and 10 KiB workgroup memory"
+        "gsplat-core requires SUBGROUP, eight storage buffers, three storage textures, 256 threads and 10 KiB workgroup memory"
     )]
     Capabilities,
 
@@ -69,6 +69,8 @@ pub enum Error {
     TooManySplats(#[from] std::num::TryFromIntError),
 }
 
+#[cfg(test)]
+mod hexel_tests;
 #[cfg(test)]
 mod primitive_tests;
 

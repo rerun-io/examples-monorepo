@@ -1,5 +1,6 @@
 //! Native archetype queries, memoized uploads, instance transforms and blueprint properties.
-use crate::cache::{BatchKey, GpuCache};
+use crate::cache::{BatchKey, GpuCache, Primitives};
+use crate::renderer::GaussianRenderer;
 use glam::UVec2;
 use gsplat_core::{Camera, RenderMode, RenderOptions, native::NativeSplats};
 use half::f16;
@@ -8,23 +9,28 @@ use re_view::{
     BlueprintResolvedResultsExt as _, DataResultQuery as _, VisualizerInstructionQueryResults,
 };
 use re_view_spatial::{SpatialViewState, TransformTreeContext};
+use re_viewer::external::re_viewport_blueprint::ViewProperty;
 use re_viewer::external::{
     re_log, re_log_types, re_query, re_renderer, re_sdk_types, re_view, re_view_spatial,
     re_viewer_context,
 };
 use re_viewer_context::{
-    AppOptions, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
+    AppOptions, DataResult, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
     ViewSystemExecutionError, ViewSystemIdentifier, ViewerReportSeverity,
-    VisualizerExecutionOutput, VisualizerQueryInfo, VisualizerSystem,
+    VisualizerExecutionOutput, VisualizerInstruction, VisualizerQueryInfo, VisualizerSystem,
 };
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
-/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction.
+/// Blueprint-only field on a `ComputeGaussianSplats3D` visualizer instruction ("default" or "mip").
 /// The data recording still contains only native `GaussianSplats3D` descriptors.
 pub(crate) fn render_mode_descriptor() -> re_sdk_types::ComponentDescriptor {
+    let archetype = crate::selection::COMPUTE.into();
     re_sdk_types::ComponentDescriptor {
-        archetype: None,
-        component: "ComputeGaussianSplats3D:render_mode".into(),
+        archetype: Some(archetype),
+        component: re_sdk_types::ComponentIdentifier::from_archetype_field(
+            archetype,
+            "render_mode",
+        ),
         component_type: Some(re_sdk_types::components::Text::name()),
     }
 }
@@ -59,70 +65,103 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         query: &ViewQuery<'_>,
         systems: &ViewContextCollection,
     ) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
-        re_tracing::profile_function!();
-        let renderer = ctx
-            .render_ctx()
-            .renderer::<crate::renderer::GaussianRenderer>()?;
-        let output = VisualizerExecutionOutput::default();
-        let Some(camera) = camera_from_view(ctx, query) else {
-            // The spatial view publishes its first eye on the next frame.
-            ctx.egui_ctx().request_repaint();
-            return Ok(output);
-        };
-        let transforms = systems.get::<TransformTreeContext>(&output)?;
-        let mut draw = Vec::new();
-        for (data, instruction) in query.iter_visualizer_instruction_for(Self::identifier()) {
-            let report = |severity, message: String| {
-                output.report_unspecified_source(instruction.id, severity, message);
-            };
-            if !crate::selection::has_explicit_visualizers(ctx.viewer_ctx, data) {
-                continue;
-            }
-            let instances = match transforms.target_from_entity_path(data.entity_path.hash()) {
-                Some(Ok(transform)) => &transform.target_from_instances()[..],
-                Some(Err(error)) => {
-                    report(
-                        ViewerReportSeverity::Error,
-                        format!("Invalid entity transform: {error:#}"),
-                    );
-                    continue;
-                }
-                None => continue,
-            };
-            match draw_entity(
-                ctx,
-                query,
-                data,
-                instruction,
-                instances,
-                renderer,
-                &output,
-                &report,
-                &mut draw,
-                &camera,
-            ) {
-                Ok(true) => ctx.egui_ctx().request_repaint(),
-                Ok(false) => {}
-                Err(error) => report(ViewerReportSeverity::Error, format!("{error:#}")),
-            }
-        }
-        Ok(output.with_draw_data(draw))
+        execute_compute(ctx, query, systems, Self::identifier(), draw_splat_entity)
     }
 }
 
-fn draw_entity(
+/// One entity instruction in one view: what each of its rows and instances draws with.
+pub(crate) struct EntityDraw<'a> {
+    pub(crate) ctx: &'a ViewContext<'a>,
+    pub(crate) query: &'a ViewQuery<'a>,
+    pub(crate) data: &'a DataResult,
+    pub(crate) instruction: &'a VisualizerInstruction,
+    instances: &'a [glam::DAffine3],
+    renderer: &'a GaussianRenderer,
+    pub(crate) output: &'a VisualizerExecutionOutput,
+    report: &'a dyn Fn(ViewerReportSeverity, String),
+    camera: &'a Camera,
+    /// The view's solid background, queried once per view.
+    background: Option<glam::Vec3>,
+}
+
+/// Query and queue one entity instruction; returns whether the view needs another frame.
+pub(crate) type DrawEntity = fn(
+    &EntityDraw<'_>,
+    &mut Vec<re_renderer::QueueableDrawData>,
+) -> Result<bool, ViewSystemExecutionError>;
+
+/// Shared splat and hexel execution: one eye per view, explicit instructions, instance transforms.
+pub(crate) fn execute_compute(
     ctx: &ViewContext<'_>,
     query: &ViewQuery<'_>,
-    data: &re_viewer_context::DataResult,
-    instruction: &re_viewer_context::VisualizerInstruction,
-    instances: &[glam::DAffine3],
-    renderer: &crate::renderer::GaussianRenderer,
-    output: &VisualizerExecutionOutput,
-    report: &impl Fn(ViewerReportSeverity, String),
+    systems: &ViewContextCollection,
+    identifier: ViewSystemIdentifier,
+    draw_entity: DrawEntity,
+) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
+    re_tracing::profile_function!();
+    let renderer = ctx.render_ctx().renderer::<GaussianRenderer>()?;
+    let output = VisualizerExecutionOutput::default();
+    let Some(camera) = camera_from_view(ctx, query) else {
+        // The spatial view publishes its first eye on the next frame.
+        ctx.egui_ctx().request_repaint();
+        return Ok(output);
+    };
+    let transforms = systems.get::<TransformTreeContext>(&output)?;
+    let background = solid_background(ctx);
+    let mut draw = Vec::new();
+    for (data, instruction) in query.iter_visualizer_instruction_for(identifier) {
+        let report = |severity, message: String| {
+            output.report_unspecified_source(instruction.id, severity, message);
+        };
+        if !crate::selection::has_explicit_visualizers(ctx.viewer_ctx, data) {
+            continue;
+        }
+        let instances = match transforms.target_from_entity_path(data.entity_path.hash()) {
+            Some(Ok(transform)) => &transform.target_from_instances()[..],
+            Some(Err(error)) => {
+                report(
+                    ViewerReportSeverity::Error,
+                    format!("Invalid entity transform: {error:#}"),
+                );
+                continue;
+            }
+            None => continue,
+        };
+        let entity = EntityDraw {
+            ctx,
+            query,
+            data,
+            instruction,
+            instances,
+            renderer,
+            output: &output,
+            report: &report,
+            camera: &camera,
+            background,
+        };
+        match draw_entity(&entity, &mut draw) {
+            Ok(true) => ctx.egui_ctx().request_repaint(),
+            Ok(false) => {}
+            Err(error) => report(ViewerReportSeverity::Error, format!("{error:#}")),
+        }
+    }
+    Ok(output.with_draw_data(draw))
+}
+
+fn draw_splat_entity(
+    entity: &EntityDraw<'_>,
     draw: &mut Vec<re_renderer::QueueableDrawData>,
-    camera: &Camera,
 ) -> Result<bool, ViewSystemExecutionError> {
     re_tracing::profile_function!();
+    let &EntityDraw {
+        ctx,
+        query,
+        data,
+        instruction,
+        output,
+        report,
+        ..
+    } = entity;
     let components =
         GaussianSplats3D::all_component_identifiers().chain([render_mode_descriptor().component]);
     let query_results =
@@ -151,7 +190,11 @@ fn draw_entity(
             RenderMode::Default
         }
     };
-    let attribute_generation = attribute_generation(instruction, &query_results);
+    let attribute_generation = attribute_generation(
+        instruction,
+        &query_results,
+        GaussianSplats3D::all_component_identifiers(),
+    );
     let query_ctx = ctx.query_context(data, query.latest_at_query(), instruction.id);
     let color: re_sdk_types::components::Color = re_viewer_context::typed_fallback_for(
         &query_ctx,
@@ -191,84 +234,161 @@ fn draw_entity(
                 .and_then(|d| d.first().copied())
                 .unwrap_or(*fallback_degree.0),
         };
-        for (index, world_from_local) in instances.iter().enumerate() {
-            let world_from_local = world_from_local.as_affine3a();
-            if !world_from_local.inverse().is_finite() {
-                report(
-                    ViewerReportSeverity::Error,
-                    "Non-invertible splat instance transform".into(),
-                );
-                continue;
+        retry |= draw_instances(
+            entity,
+            draw,
+            row,
+            signature,
+            Primitives::Splats(&native),
+            render_mode,
+        )?;
+    }
+    Ok(retry)
+}
+
+/// Queue one compute batch per instance; capacity or capability failures draw the stock fallback.
+pub(crate) fn draw_instances(
+    entity: &EntityDraw<'_>,
+    draw: &mut Vec<re_renderer::QueueableDrawData>,
+    row: (re_log_types::TimeInt, re_sdk_types::RowId),
+    signature: re_log_types::hash::Hash64,
+    primitives: Primitives<'_>,
+    render_mode: RenderMode,
+) -> Result<bool, ViewSystemExecutionError> {
+    let &EntityDraw {
+        ctx,
+        query,
+        data,
+        instruction,
+        instances,
+        renderer,
+        report,
+        camera,
+        background,
+        ..
+    } = entity;
+    let mut retry = false;
+    let masks = query
+        .highlights
+        .entity_outline_mask(data.entity_path.hash());
+    let object = re_renderer::PickingLayerObjectId(data.entity_path.hash64());
+    let uniform = crate::renderer::DrawUniform::new(background, object, masks, primitives.len());
+    for (index, world_from_local) in instances.iter().enumerate() {
+        let world_from_local = world_from_local.as_affine3a();
+        if !world_from_local.inverse().is_finite() {
+            report(
+                ViewerReportSeverity::Error,
+                "Non-invertible instance transform".into(),
+            );
+            continue;
+        }
+        let key = BatchKey {
+            view_id: query.view_id,
+            entity: data.entity_path.clone(),
+            instruction: instruction.id,
+            instance: index,
+            row,
+        };
+        let options = RenderOptions {
+            render_mode,
+            world_from_local,
+            ..Default::default()
+        };
+        let prepared = ctx
+            .viewer_ctx
+            .store_context
+            .memoizer::<GpuCache, _>(|cache| {
+                cache.prepare(
+                    ctx.render_ctx(),
+                    renderer,
+                    key.clone(),
+                    primitives,
+                    signature,
+                    camera,
+                    options,
+                    uniform,
+                )
+            });
+        match prepared {
+            Ok((batch, needs_repaint)) => {
+                draw.push(batch.into());
+                retry |= needs_repaint;
             }
-            let key = BatchKey {
-                view_id: query.view_id,
-                entity: data.entity_path.clone(),
-                instruction: instruction.id,
-                instance: index,
-                row,
-            };
-            let options = RenderOptions {
-                render_mode,
-                world_from_local,
-                ..Default::default()
-            };
-            let prepared = ctx
-                .viewer_ctx
-                .store_context
-                .memoizer::<GpuCache, _>(|cache| {
-                    cache.prepare(
-                        ctx.render_ctx(),
-                        renderer,
-                        key.clone(),
-                        &native,
-                        signature,
-                        camera,
-                        options,
-                    )
+            Err(
+                error @ (gsplat_core::Error::Capacity { .. } | gsplat_core::Error::Capabilities),
+            ) => {
+                // The pixel contracts use these machine-visible markers to distinguish fallback from compute.
+                draw.push(match primitives {
+                    Primitives::Splats(native) => {
+                        report(
+                            ViewerReportSeverity::Warning,
+                            format!("{error}; using the native Gaussian renderer"),
+                        );
+                        re_log::warn_once!("Gaussian compute fallback: {error:#}");
+                        crate::fallback::native_fallback(
+                            ctx,
+                            query,
+                            key,
+                            native,
+                            world_from_local,
+                            signature,
+                            masks,
+                            object,
+                        )?
+                    }
+                    Primitives::Hexels(hexels) => {
+                        report(
+                            ViewerReportSeverity::Warning,
+                            format!("{error}; drawing hexel centres as points"),
+                        );
+                        re_log::warn_once!("Hexel compute fallback: {error:#}");
+                        crate::hexels::points_fallback(
+                            ctx,
+                            query,
+                            hexels,
+                            world_from_local,
+                            masks,
+                            object,
+                        )?
+                    }
                 });
-            match prepared {
-                Ok((batch, needs_repaint)) => {
-                    draw.push(batch.into());
-                    retry |= needs_repaint;
-                }
-                Err(
-                    error
-                    @ (gsplat_core::Error::Capacity { .. } | gsplat_core::Error::Capabilities),
-                ) => {
-                    report(
-                        ViewerReportSeverity::Warning,
-                        format!("{error}; using the native Gaussian renderer"),
-                    );
-                    // The pixel contract uses this machine-visible marker to distinguish native fallback from compute.
-                    re_log::warn_once!("Gaussian compute fallback: {error:#}");
-                    draw.push(crate::fallback::native_fallback(
-                        ctx,
-                        query,
-                        key,
-                        &native,
-                        world_from_local,
-                        signature,
-                    )?);
-                }
-                Err(error) => {
-                    return Err(ViewSystemExecutionError::DrawDataCreationError(
-                        std::sync::Arc::new(error),
-                    ));
-                }
+            }
+            Err(error) => {
+                return Err(ViewSystemExecutionError::DrawDataCreationError(
+                    std::sync::Arc::new(error),
+                ));
             }
         }
     }
     Ok(retry)
 }
 
-fn attribute_generation(
-    instruction: &re_viewer_context::VisualizerInstruction,
+/// The view's solid background colour in display space; gradients and query failures give none.
+fn solid_background(ctx: &ViewContext<'_>) -> Option<glam::Vec3> {
+    use re_sdk_types::blueprint::{archetypes::Background, components::BackgroundKind};
+    let property = ViewProperty::from_archetype::<Background>(ctx);
+    let kind: BackgroundKind = property
+        .component_or_fallback(ctx, Background::descriptor_kind().component)
+        .ok()?;
+    if kind != BackgroundKind::SolidColor {
+        return None;
+    }
+    let color: re_sdk_types::components::Color = property
+        .component_or_fallback(ctx, Background::descriptor_color().component)
+        .ok()?;
+    let [r, g, b, _] = color.to_array();
+    Some(glam::Vec3::new(r.into(), g.into(), b.into()) / 255.0)
+}
+
+pub(crate) fn attribute_generation(
+    instruction: &VisualizerInstruction,
     query_results: &re_view::BlueprintResolvedResults<'_>,
+    components: impl Iterator<Item = re_sdk_types::ComponentIdentifier>,
 ) -> u64 {
     // Rerun's combined hash includes every view default, even camera properties.
-    // Hash only resolved splat components so views with different eyes/modes share uploads.
+    // Hash only resolved primitive components so views with different eyes/modes share uploads.
     let mut attribute_hasher = DefaultHasher::new();
-    for component in GaussianSplats3D::all_component_identifiers() {
+    for component in components {
         std::hash::Hash::hash(&component, &mut attribute_hasher);
         instruction
             .component_mappings

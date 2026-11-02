@@ -1,0 +1,42 @@
+"""Integration: the published HF checkpoints and datasets (gsplat-modern-data, READY markers)."""
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from hexels_bench.apis.export_published import published_variant, stage_published
+from hexels_bench.cameras import CamerasFile
+from hexels_bench.hexel_ply import HexelPly, HexelVariant, read_hexel_ply
+from hexels_bench.layout import Dataset, Roots, read_json
+from hexels_bench.methods import Method
+from hexels_bench.metrics import MetricsFile
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize(
+    ("dataset", "scene", "method", "marker"),
+    [("dtu", "scan24", "hexels-v3-30k-pub-cuda", "dtu"), ("mipnerf360", "garden", "hexels-v1-30k-pub-cuda", "mipnerf360")],
+)
+def test_stage_published_writes_ply_cameras_and_exact_gt(tmp_path: Path, dataset: Dataset, scene: str, method: Method, marker: str) -> None:
+    data: Path = Roots().data
+    for needed in ("pretrained-nvs", marker):
+        if not (data / "READY" / needed).is_file():
+            pytest.skip(f"needs {data}/READY/{needed}")
+    roots = Roots(data=data, runs=tmp_path)
+    run_dir: Path = stage_published(roots, dataset, scene, method)  # raises if the GT digest differs
+    variant: HexelVariant = published_variant(method)
+    metadata: dict = json.loads((roots.published_model(dataset, scene, variant) / "metadata.json").read_text())
+    ply: HexelPly = read_hexel_ply(run_dir / "model.ply")
+    assert ply.cloud.variant == variant
+    assert ply.cloud.count == metadata["primitive_count"]
+    assert np.isfinite(ply.cloud.to_rows()).all()
+    cameras = read_json(CamerasFile, run_dir / "cameras.json")
+    assert len(cameras.cameras) == metadata["expected_metrics"]["view_count"]
+    assert sorted(path.stem for path in roots.gt_dir(dataset, scene).glob("*.png")) == sorted(camera.name for camera in cameras.cameras)
+    published: MetricsFile = read_json(MetricsFile, run_dir / "published_metrics.json")
+    assert published.scorer == "upstream-float"
+    assert [view.name for view in published.per_view] == [camera.name for camera in cameras.cameras]
+    assert published.psnr == pytest.approx(metadata["expected_metrics"]["mean_psnr_db"], abs=1e-9)

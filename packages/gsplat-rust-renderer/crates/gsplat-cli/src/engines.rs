@@ -38,6 +38,9 @@ impl Engine {
         archetype: Option<&Path>,
     ) -> Result<Self> {
         settings.validate()?;
+        if scene.hexels.is_some() && !matches!(kind, Implementation::Ours) {
+            return Err(crate::Unsupported("hexel PLYs in this reference renderer".into()).into());
+        }
         if matches!(kind, Implementation::Native)
             && (settings.mode(scene.mode) != gsplat_core::RenderMode::Default
                 || settings.splat_scale != 1.0
@@ -194,6 +197,19 @@ pub async fn ours(
     archetype: Option<&Path>,
     background: Vec3,
 ) -> Result<crate::StandaloneRenderer> {
+    let options = gsplat_core::RenderOptions {
+        background,
+        ..settings.options(scene.mode)
+    };
+    if let Some(hexels) = &scene.hexels {
+        anyhow::ensure!(
+            archetype.is_none() && settings.min_scale.is_none(),
+            "hexel PLYs have no archetype or scale floor"
+        );
+        let primitives = crate::Primitives::Hexels(hexels);
+        let capacity = settings.initial_capacity;
+        return crate::StandaloneRenderer::new(primitives, options, size, capacity).await;
+    }
     let mut splats = if let Some(path) = archetype {
         archetype_splats(path)?
     } else {
@@ -206,11 +222,8 @@ pub async fn ours(
         splats.min_scale = Some(vec![floor; scene.data.num_splats()]);
     }
     crate::StandaloneRenderer::new(
-        &splats,
-        gsplat_core::RenderOptions {
-            background,
-            ..settings.options(scene.mode)
-        },
+        crate::Primitives::Splats(&splats),
+        options,
         size,
         settings.initial_capacity,
     )

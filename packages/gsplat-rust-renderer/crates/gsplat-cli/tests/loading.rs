@@ -122,3 +122,34 @@ fn raw_upload_preserves_dc_and_coefficient_major_rgb() {
         ]
     );
 }
+
+#[tokio::test]
+async fn upstream_hexel_cameras_centre_the_principal_point_and_invert_the_view() {
+    let temporary = tempfile::tempdir().unwrap();
+    // Camera at (1, 2, 3) looking down world +z: world_view_transform is the transposed w2c.
+    let record = serde_json::json!({
+        "name": "0008", "width": 778, "height": 580, "fov_x": 1.0, "fov_y": 0.8,
+        "world_view_transform": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [-1, -2, -3, 1]],
+        "camera_center": [1, 2, 3],
+    });
+    for document in [
+        serde_json::json!({"format": "hexels-cameras-1", "background": [0, 0, 0], "cameras": [record]}),
+        serde_json::json!({"settings": {}, "geometry": {"training": [], "test": [record]}}),
+    ] {
+        let path = temporary.path().join("cameras.json");
+        std::fs::write(&path, document.to_string()).unwrap();
+        let frames = load_frames(&path, None).await.unwrap();
+        let camera = &frames[0].camera;
+        assert_eq!(frames[0].file_path, std::path::PathBuf::from("0008"));
+        assert_eq!(
+            (camera.width, camera.height, camera.cx, camera.cy),
+            (778, 580, 389.0, 290.0)
+        );
+        assert!((camera.fx - 778.0 / (2.0 * 0.5f32.tan())).abs() < 1e-3);
+        assert!((camera.fy - 580.0 / (2.0 * 0.4f32.tan())).abs() < 1e-3);
+        assert_eq!(
+            camera.pose().w_axis.truncate(),
+            glam::Vec3::new(1.0, 2.0, 3.0)
+        );
+    }
+}

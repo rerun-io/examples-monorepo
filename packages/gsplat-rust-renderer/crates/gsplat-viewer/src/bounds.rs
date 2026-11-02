@@ -65,15 +65,31 @@ fn scene_bounds(ctx: &QueryContext<'_>) -> macaw::BoundingBox {
 pub(crate) fn from_splats(
     cloud: &gsplat_core::native::NativeSplats<'_>,
 ) -> re_renderer::RobustBounds {
+    visible_bounds(cloud.centers, |i| {
+        gsplat_core::native::at_or_last(cloud.colors, i, 0xFFFFFFFF) as u8 >= 5
+    })
+}
+
+/// Hexels: same rule on the activated opacity.
+pub(crate) fn from_hexels(
+    hexels: &gsplat_core::native::NativeHexels<'_>,
+) -> re_renderer::RobustBounds {
+    visible_bounds(hexels.centers, |i| {
+        gsplat_core::native::at_or_last(hexels.opacities, i, 1.0) * 255.0 >= 5.0
+    })
+}
+
+fn visible_bounds(
+    centers: &[[f32; 3]],
+    visible: impl Fn(usize) -> bool,
+) -> re_renderer::RobustBounds {
     re_tracing::profile_scope!("bounds");
-    let centers: Vec<_> = cloud
-        .centers
+    let centers: Vec<_> = centers
         .iter()
         .enumerate()
         .filter_map(|(i, center)| {
             let center = Vec3::from_array(*center);
-            let alpha = gsplat_core::native::at_or_last(cloud.colors, i, 0xFFFFFFFF) as u8;
-            (alpha >= 5 && center.is_finite()).then_some(center)
+            (visible(i) && center.is_finite()).then_some(center)
         })
         .collect();
     re_renderer::RobustBounds::from_points(&centers)

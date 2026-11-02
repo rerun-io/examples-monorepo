@@ -1,35 +1,57 @@
-#import <./common.wgsl>
+#import <./raster_outputs.wgsl>
 
-// Hand port of Brush rasterize 1388f74c. 256 splats per cooperative batch.
+// Front-to-back tile rasterizer (hand port of Brush rasterize 1388f74c) for any primitive. The importing
+// module defines `alias Primitive`, `const BATCH` (BATCH primitives fit the 10 KiB workgroup budget) and
+// `fn sample(p: Primitive, pix: vec2u, surface: bool) -> Sample`; alpha below the cutoff is a miss.
+struct Sample { alpha: f32, color: vec3f, depth: f32, normal: vec3f, }
 @group(0) @binding(1) var<storage, read> compact_from_isect: array<u32>;
 @group(0) @binding(2) var<storage, read> offsets: array<u32>;
-@group(0) @binding(3) var<storage, read> projected: array<Splat>;
+@group(0) @binding(3) var<storage, read> projected: array<Primitive>;
 @group(0) @binding(7) var<storage, read> counts: array<u32>;
-var<workgroup> batch: array<Splat, WG>;
+var<workgroup> batch: array<Primitive, BATCH>;
 var<workgroup> skip: u32;
 var<workgroup> range_lo: u32;
 var<workgroup> range_hi: u32;
 var<workgroup> num_done: atomic<u32>;
-fn compact_bits(v: u32) -> u32 {
-    var x = v & 0x55u;
-    x = (x | (x >> 1u)) & 0x33u;
-    return (x | (x >> 2u)) & 0x0fu;
+
+// Composite candidate t front to back; nothing once the pixel is done or past the batch, and alpha below the
+// cutoff is a miss.
+fn blend(start: u32, t: u32, remaining: u32, pix: vec2u, surface: bool, transmittance: ptr<function, f32>,
+    color: ptr<function, vec3f>, done: ptr<function, bool>, out: ptr<function, Raster>) {
+    if *done || t >= remaining {
+        return;
+    }
+    let s = sample(batch[t], pix, surface);
+    if !(s.alpha >= ALPHA_CUTOFF) {
+        return;
+    }
+    let next = *transmittance * (1.0 - s.alpha);
+    if next <= 1e-4 {
+        *done = true;
+        return;
+    }
+    let w = s.alpha * *transmittance;
+    *color += s.color * w;
+    (*out).depth += s.depth * w;
+    // 2DGS median depth and its primitive: the last contribution while transmittance exceeds one half.
+    let median = *transmittance > 0.5;
+    (*out).median = select((*out).median, s.depth, median);
+    (*out).isect = select((*out).isect, start + t, median);
+    (*out).normal += s.normal * w;
+    *transmittance = next;
 }
 
-fn pixel(tile: vec2u, lid: u32) -> vec2u {
-    return tile * TILE_WIDTH + vec2u(compact_bits(lid), compact_bits(lid >> 1u));
-}
-
-struct Raster { rgba: vec4f, depth: f32, pix: vec2u, inside: bool, }
-fn raster(tile: vec2u, lid: u32) -> Raster {
+fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
+    var out: Raster;
+    out.isect = NO_ID;
     if lid == 0u {
         skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
     }
     if workgroupUniformLoad(&skip) != 0u {
-        return Raster(vec4f(0.0), 0.0, vec2u(0u), false);
+        return out;
     }
-    let pix = pixel(tile, lid);
-    let inside = all(pix < vec2u(frame.image.width, frame.image.height));
+    out.pix = pixel(tile, lid);
+    out.inside = all(out.pix < vec2u(frame.image.width, frame.image.height));
     if lid == 0u {
         let index = (tile.x + tile.y * frame.image.tiles_x) * 2u;
         range_lo = offsets[index];
@@ -40,40 +62,35 @@ fn raster(tile: vec2u, lid: u32) -> Raster {
     let hi = workgroupUniformLoad(&range_hi);
     var transmittance = 1.0;
     var color = vec3f(0.0);
-    var expected_depth = 0.0;
-    var done = !inside;
+    var done = !out.inside;
     if done {
         atomicAdd(&num_done, 1u);
     }
-    for (var start = lo; start < hi; start += WG) {
+    for (var start = lo; start < hi; start += BATCH) {
         if workgroupUniformLoad(&num_done) >= WG {
             break;
         }
-        let remaining = min(WG, hi - start);
+        let remaining = min(BATCH, hi - start);
         if lid < remaining {
             batch[lid] = projected[compact_from_isect[start + lid]];
         }
         workgroupBarrier();
         let was_done = done;
-        for (var t = 0u; !done && t < remaining; t++) {
-            let p = batch[t];
-            let s = sigma(vec2f(pix) + 0.5, vec2f(p.x, p.y), vec3f(p.conic_x, p.conic_y, p.conic_z));
-            let alpha = min(0.999, p.color_a * exp(-s));
-            if s >= 0.0 && alpha >= ALPHA_CUTOFF {
-                let next = transmittance * (1.0 - alpha);
-                if next <= 1e-4 {
-                    done = true;
-                } else {
-                    color += max(vec3f(p.color_r, p.color_g, p.color_b), vec3f(0.0)) * (alpha * transmittance);
-                    expected_depth += p.depth * alpha * transmittance;
-                    transmittance = next;
-                }
-            }
+        // Four candidates per iteration: on Apple GPUs the loop overhead (naga's loop bound, the exit tests) is a
+        // large share of a cheap candidate. The order and every early exit are those of one per iteration.
+        for (var t = 0u; !done && t < remaining; t += 4u) {
+            blend(start, t, remaining, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 1u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 2u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 3u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
         }
         if !was_done && done {
             atomicAdd(&num_done, 1u);
         }
     }
-    return Raster(vec4f(color + transmittance * frame.background.xyz, 1.0 - transmittance),
-        expected_depth / max(1.0 - transmittance, 1e-8), pix, inside);
+    let alpha = 1.0 - transmittance;
+    out.rgba = vec4f(color + transmittance * frame.background.xyz, alpha);
+    out.depth /= max(alpha, 1e-8);
+    out.normal /= max(alpha, 1e-8);
+    return out;
 }

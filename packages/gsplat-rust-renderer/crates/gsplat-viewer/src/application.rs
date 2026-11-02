@@ -301,8 +301,13 @@ fn register_splat_system(
     registrator: &mut re_viewer_context::ViewSystemRegistrator<'_>,
 ) -> Result<(), re_viewer_context::ViewClassRegistryError> {
     crate::bounds::register(registrator);
-    registrator.register_context_system::<crate::selection::AutomaticSplatSelection>()?;
-    registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()
+    // A new view default or override of the render mode starts at the mode used without one.
+    registrator.register_fallback_provider(visualizer::render_mode_descriptor().component, |_| {
+        re_sdk_types::components::Text::from("default")
+    });
+    registrator.register_context_system::<crate::selection::AutomaticComputeSelection>()?;
+    registrator.register_visualizer::<visualizer::GaussianSplatVisualizer>()?;
+    registrator.register_visualizer::<crate::hexels::HexelVisualizer>()
 }
 
 #[cfg(test)]
@@ -372,6 +377,11 @@ mod selection_tests {
             .collect();
         splats.sort();
         assert_eq!(splats, ["ComputeGaussianSplats3D", "GaussianSplats3D"]);
+        assert!(
+            visualizers
+                .iter_with_identifiers()
+                .any(|(id, _)| id.as_str() == crate::selection::COMPUTE_HEXELS)
+        );
         assert!(
             visualizers.iter_with_identifiers().count() > 10,
             "Other spatial visualizers remain registered"

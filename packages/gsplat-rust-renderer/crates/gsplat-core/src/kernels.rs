@@ -15,7 +15,7 @@ pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
 
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
-pub(crate) fn sources() -> [String; 7] {
+pub(crate) fn sources() -> [String; 12] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -23,7 +23,12 @@ pub(crate) fn sources() -> [String; 7] {
         "scan.wgsl",
         "sort.wgsl",
         "dispatch.wgsl",
-        "raster_outputs.wgsl",
+        "hexel_project.wgsl",
+        "hexel_map.wgsl",
+        "hexel_raster.wgsl",
+        "image_project.wgsl",
+        "image_map.wgsl",
+        "image_raster.wgsl",
     ]
     .map(crate::shader::resolve)
 }
@@ -55,6 +60,12 @@ const COLOR: wgpu::BindingType = wgpu::BindingType::StorageTexture {
 const DEPTH: wgpu::BindingType = wgpu::BindingType::StorageTexture {
     access: wgpu::StorageTextureAccess::WriteOnly,
     format: wgpu::TextureFormat::R32Float,
+    view_dimension: wgpu::TextureViewDimension::D2,
+};
+
+const ID: wgpu::BindingType = wgpu::BindingType::StorageTexture {
+    access: wgpu::StorageTextureAccess::WriteOnly,
+    format: wgpu::TextureFormat::R32Uint,
     view_dimension: wgpu::TextureViewDimension::D2,
 };
 
@@ -94,6 +105,20 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (6, COLOR),
             (7, R),
             (8, DEPTH),
+            (11, R),
+            (12, ID),
+        ],
+        "hexel_forward" | "image_forward" => &[(0, U), (1, R), (4, W), (5, W), (6, W), (7, W)],
+        "hexel_visible" | "image_visible" => &[(0, U), (1, R), (4, W), (6, W), (8, W)],
+        "raster_surface" => &[
+            (0, U),
+            (1, R),
+            (2, R),
+            (3, R),
+            (4, W),
+            (7, R),
+            (9, W),
+            (10, W),
         ],
         "scan" => &[(0, R), (1, R), (2, W), (3, W), (4, U)],
         "add_offsets" => &[(0, R), (1, R), (2, W), (4, U)],
@@ -106,16 +131,31 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
     }
 }
 
-pub(crate) struct Kernels {
-    pub project_forward: Kernel,
-    pub project_visible: Kernel,
-    pub gather: Kernel,
+/// Kernels that depend on the primitive; the sort, scan and tile-range kernels are shared.
+pub(crate) struct Stages {
+    pub forward: Kernel,
+    pub visible: Kernel,
     pub map_tiles: Kernel,
+    /// Rasterizers in `RasterKind` order; `None` where unsupported.
+    rasters: [Option<Kernel>; 5],
+}
+
+impl Stages {
+    pub fn raster(&self, kind: crate::output::RasterKind) -> Result<&Kernel, crate::Error> {
+        self.rasters[kind as usize]
+            .as_ref()
+            .ok_or(crate::Error::Input(
+                "this primitive has no such render target",
+            ))
+    }
+}
+
+pub(crate) struct Kernels {
+    pub splats: Stages,
+    pub hexels: Stages,
+    pub images: Stages,
+    pub gather: Kernel,
     pub tile_offsets: Kernel,
-    pub float: Kernel,
-    pub packed: Kernel,
-    pub texture: Kernel,
-    pub texture_depth: Kernel,
     pub scan: Kernel,
     pub add_offsets: Kernel,
     pub count_keys: Kernel,
@@ -126,21 +166,60 @@ pub(crate) struct Kernels {
     pub prepare: Kernel,
 }
 
+/// Raster entry points in `RasterKind` order; every primitive module declares all of them.
+const RASTERS: [&str; 5] = [
+    "raster_float",
+    "raster_packed",
+    "raster_texture",
+    "raster_texture_depth",
+    "raster_surface",
+];
+
 impl Kernels {
     pub fn new(device: &wgpu::Device) -> Self {
-        let [projection, mapping, raster, scan, sort, prepare, outputs] =
-            sources().map(|s| module(device, &s));
-        let kernel = |module, entry| pipeline(device, module, entry, bindings(entry));
+        let [
+            projection,
+            mapping,
+            raster,
+            scan,
+            sort,
+            prepare,
+            hexel_projection,
+            hexel_mapping,
+            hexel_raster,
+            image_projection,
+            image_mapping,
+            image_raster,
+        ] = sources().map(|s| module(device, &s));
+        let kernel = |module: &wgpu::ShaderModule, entry: &str| {
+            pipeline(device, module, entry, bindings(entry))
+        };
+        // 2D fits keep only the float and packed targets.
+        let stages = |project,
+                      [forward, visible]: [&str; 2],
+                      map,
+                      raster: &wgpu::ShaderModule,
+                      targets: usize| Stages {
+            forward: kernel(project, forward),
+            visible: kernel(project, visible),
+            map_tiles: kernel(map, "map_tiles"),
+            rasters: std::array::from_fn(|i| (i < targets).then(|| kernel(raster, RASTERS[i]))),
+        };
+        let splat = ["project_forward", "project_visible"];
+        let params = ["hexel_forward", "hexel_visible"];
+        let image = ["image_forward", "image_visible"];
         Self {
-            project_forward: kernel(&projection, "project_forward"),
-            project_visible: kernel(&projection, "project_visible"),
+            splats: stages(&projection, splat, &mapping, &raster, RASTERS.len()),
+            hexels: stages(
+                &hexel_projection,
+                params,
+                &hexel_mapping,
+                &hexel_raster,
+                RASTERS.len(),
+            ),
+            images: stages(&image_projection, image, &image_mapping, &image_raster, 2),
             gather: kernel(&mapping, "gather"),
-            map_tiles: kernel(&mapping, "map_tiles"),
             tile_offsets: kernel(&mapping, "tile_offsets"),
-            float: kernel(&outputs, "raster_float"),
-            packed: kernel(&outputs, "raster_packed"),
-            texture: kernel(&raster, "raster_texture"),
-            texture_depth: kernel(&raster, "raster_texture_depth"),
             scan: kernel(&scan, "scan"),
             add_offsets: kernel(&scan, "add_offsets"),
             count_keys: kernel(&sort, "count_keys"),
@@ -152,13 +231,15 @@ impl Kernels {
         }
     }
 
-    pub fn raster(&self, kind: crate::output::RasterKind) -> &Kernel {
-        use crate::output::RasterKind;
-        match kind {
-            RasterKind::Float => &self.float,
-            RasterKind::Packed => &self.packed,
-            RasterKind::Texture => &self.texture,
-            RasterKind::TextureDepth => &self.texture_depth,
+    pub fn stages(&self, scene: &crate::Scene) -> &Stages {
+        use crate::scene::Inputs;
+        match scene.inputs {
+            Inputs::Splats { .. } => &self.splats,
+            Inputs::Hexels {
+                variant: crate::HexelVariant::Image,
+                ..
+            } => &self.images,
+            Inputs::Hexels { .. } => &self.hexels,
         }
     }
 }
@@ -203,6 +284,12 @@ mod tests {
                 }
                 if ty.name.as_deref() == Some("Splat") {
                     assert_eq!(layout[handle].size, 40);
+                }
+                if ty.name.as_deref() == Some("Hexel") {
+                    assert_eq!(layout[handle].size, 84);
+                }
+                if ty.name.as_deref() == Some("ImageHexel") {
+                    assert_eq!(layout[handle].size, 64);
                 }
             }
             let workgroup_bytes: u32 = module

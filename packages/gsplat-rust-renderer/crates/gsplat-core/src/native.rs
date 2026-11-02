@@ -1,5 +1,5 @@
-//! The native `GaussianSplats3D` upload boundary, shared by viewer and parity harness.
-use crate::Splats;
+//! The native `GaussianSplats3D` and `Hexels3D` upload boundary, shared by viewer and parity harness.
+use crate::{HexelVariant, Hexels, Splats};
 use glam::Quat;
 use half::f16;
 
@@ -81,5 +81,127 @@ impl NativeSplats<'_> {
             }
         }
         splats
+    }
+}
+
+/// Borrowed `Hexels3D` component arrays (f32, activated). Rotations are Rerun xyzw.
+/// Short optional arrays repeat their last item; `view_linear` selects V2, `sh` V3.
+pub struct NativeHexels<'a> {
+    pub centers: &'a [[f32; 3]],
+    pub quaternions: &'a [[f32; 4]],
+    pub scales: &'a [[f32; 2]],
+    pub opacities: &'a [f32],
+    pub sharpness: &'a [f32],
+    pub color_field: &'a [[f32; 9]],
+    pub view_linear: &'a [[f32; 9]],
+    pub sh: &'a [[f32; 45]],
+}
+
+impl NativeHexels<'_> {
+    pub fn variant(&self) -> HexelVariant {
+        if !self.sh.is_empty() {
+            HexelVariant::V3
+        } else if !self.view_linear.is_empty() {
+            HexelVariant::V2
+        } else {
+            HexelVariant::V1
+        }
+    }
+
+    /// Core rows in the hexel PLY order: centre, wxyz rotation, scales, opacity, sharpness,
+    /// colour field, then the V2/V3 view term. Values pass through unchanged.
+    pub fn to_core(&self) -> Hexels {
+        let variant = self.variant();
+        let mut params = Vec::with_capacity(self.centers.len() * variant.stride());
+        for (i, center) in self.centers.iter().enumerate() {
+            let [x, y, z, w] = at_or_last(self.quaternions, i, [0.0, 0.0, 0.0, 1.0]);
+            params.extend_from_slice(center);
+            params.extend_from_slice(&[w, x, y, z]);
+            params.extend_from_slice(&at_or_last(self.scales, i, [0.01; 2]));
+            params.push(at_or_last(self.opacities, i, 1.0));
+            params.push(at_or_last(self.sharpness, i, 10.0));
+            params.extend_from_slice(&at_or_last(
+                self.color_field,
+                i,
+                [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ));
+            match variant {
+                HexelVariant::V2 => {
+                    params.extend_from_slice(&at_or_last(self.view_linear, i, [0.0; 9]));
+                }
+                HexelVariant::V3 => params.extend_from_slice(&at_or_last(self.sh, i, [0.0; 45])),
+                HexelVariant::V1 | HexelVariant::Image => {}
+            }
+        }
+        Hexels { variant, params }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hexel_rotation_returns_to_core_wxyz_order() {
+        // Rerun xyzw for a 90-degree turn about x; the core rotates t_v = R e_y onto +z.
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let hexels = NativeHexels {
+            centers: &[[1.0, 2.0, 3.0]],
+            quaternions: &[[h, 0.0, 0.0, h]],
+            scales: &[[0.2, 0.4]],
+            opacities: &[0.5],
+            sharpness: &[7.0],
+            color_field: &[[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]],
+            view_linear: &[],
+            sh: &[],
+        }
+        .to_core();
+        assert_eq!(hexels.variant, HexelVariant::V1);
+        assert_eq!(
+            hexels.params,
+            [
+                1.0, 2.0, 3.0, h, h, 0.0, 0.0, 0.2, 0.4, 0.5, 7.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6,
+                0.7, 0.8, 0.9
+            ]
+        );
+        let q = &hexels.params[3..7];
+        let rotation = glam::Quat::from_xyzw(q[1], q[2], q[3], q[0]);
+        assert!((rotation * glam::Vec3::Y).abs_diff_eq(glam::Vec3::Z, 1e-6));
+    }
+
+    #[test]
+    fn hexel_view_terms_select_the_variant_and_short_arrays_repeat() {
+        let sh: Vec<[f32; 45]> = vec![std::array::from_fn(|i| i as f32)];
+        let hexels = NativeHexels {
+            centers: &[[0.0; 3], [1.0; 3]],
+            quaternions: &[],
+            scales: &[[0.3, 0.3]],
+            opacities: &[],
+            sharpness: &[],
+            color_field: &[],
+            view_linear: &[],
+            sh: &sh,
+        }
+        .to_core();
+        assert_eq!(hexels.variant, HexelVariant::V3);
+        assert_eq!(hexels.len(), 2);
+        let second = &hexels.params[65..];
+        assert_eq!(
+            &second[..11],
+            &[1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.3, 0.3, 1.0, 10.0]
+        );
+        assert_eq!(second[20..], sh[0]);
+        let linear = NativeHexels {
+            centers: &[[0.0; 3]],
+            quaternions: &[],
+            scales: &[],
+            opacities: &[],
+            sharpness: &[],
+            color_field: &[],
+            view_linear: &[[2.0; 9]],
+            sh: &[],
+        };
+        assert_eq!(linear.variant(), HexelVariant::V2);
+        assert_eq!(linear.to_core().params.len(), 29);
     }
 }

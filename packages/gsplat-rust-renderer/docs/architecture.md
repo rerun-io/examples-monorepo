@@ -33,7 +33,8 @@ use relative `#import <...>` directives through a small local import resolver.
 
 The forward path projects, sorts visible depths, scans intersection counts,
 projects visible splats, maps and sorts tiles, computes tile offsets, and
-rasterizes. Counts and dispatch plans stay on the GPU. An eight-byte count
+rasterizes. Splats and hexels give one tile rasterizer a per-pixel `sample()`, 2D fits keep a top-K
+blend, and all three share one set of output entry points. Counts and dispatch plans stay on the GPU. An eight-byte count
 readback detects overflow; the output remains intact until capacity grows and
 the view rerenders. Pinhole, KB4, RT8, and thin-prism camera models share this path.
 Render mode is a per-render option: default blur or mip antialiasing.
@@ -45,9 +46,14 @@ native `GaussianSplats3D` adds RGBA8/f16 quantization, which is reported separat
 
 ## Viewer
 
-The custom visualizer reads native components and respects explicit visualizer
-instructions. Automatic selection changes only the active custom viewer's
-blueprint. Recordings without overrides remain portable to stock Rerun.
+The custom visualizers read native `GaussianSplats3D` components and the custom
+`Hexels3D` archetype (f32 fields; rotations are converted from Rerun xyzw to the
+core's wxyz) and respect explicit visualizer instructions. Both share execution,
+the cache, bounds and composition. Automatic selection changes only the active
+custom viewer's blueprint: stock splat quads become compute splats, and the
+`Points3D` fallback that hexel entities carry is dropped. Recordings without
+overrides remain portable to stock Rerun, which draws native splats and the
+hexel fallback points.
 
 A store-owned cache shares uploads across views and tracks each instance's target
 with dirty, pending, complete, or capacity-failed state. Optional-attribute changes invalidate the
@@ -55,16 +61,30 @@ upload even when centers retain their row ID. Blueprint values need a content
 hash because their source row IDs are cleared by Rerun. Camera and mode changes
 reuse the scene. Unused entries are evicted when frames advance.
 
+Splats and hexels are trained with display-space blending over a solid
+background, while Rerun blends in linear light. Over a solid view background
+the composite emits `linear(rgb + (1 - a) bg) - (1 - a') linear(bg)`, with `a'`
+the largest transparency that keeps the sRGB target non-negative, so the view
+reproduces the standalone render exactly over that colour; content behind the
+splats is blended approximately. Gradient backgrounds keep the plain
+premultiplied conversion.
+
 `collect_drawables` records compute through the shared
 `before_view_builder_encoder`; instances and views add no separate queue submission.
 The Transparent composite writes `frag_depth` and uses the renderer's 4x MSAA
-state. Each instance/view still owns two full-viewport targets (color and depth);
-an upstream integration should pool them. A capacity failure uses stock quads
-and keeps that fallback until the scene changes. Both paths provide transformed
+state. Each instance/view still owns three full-viewport targets (color, depth and
+median-contributor id); an upstream integration should pool them. A capacity failure uses stock quads
+(hexels: their fallback points) and keeps that fallback until the scene changes. Both paths provide transformed
 bounds for automatic framing.
 
-Splats in separate entities are not jointly sorted. Picking, hover, and outlines
-are not implemented. The public 0.38.1 view state supplies `last_eye`, which can lag
+Splats in separate entities are not jointly sorted. Picking and outlines read the
+core's id target: per pixel, the global row of the median contributor (the last
+primitive composited while transmittance exceeds one half, the 2DGS median-depth
+rule). The PickingLayer and OutlineMask draws are a full-view quad placed through
+view space (`projection_from_view`, `tan_half_fov`), so it covers the same view
+pixels in the main pass and in the picking pass, whose projection is cropped to
+its rectangle; both write the composite's depth. Hover and selection therefore
+name one hexel or splat row, as stock `GaussianSplats3D` does. The public 0.38.1 view state supplies `last_eye`, which can lag
 one UI frame. Upstream integration needs the current full pose, projection, and
 pixel resolution in `DrawableCollectionViewInfo`; camera position alone cannot
 replace those fields.
@@ -90,7 +110,8 @@ Reports record runtime source SHA, Cargo.lock SHA-256, and crate version;
 exported binaries can set `GSPLAT_SOURCE_SHA` explicitly.
 
 Speed measures render plus GPU completion with pixels left on the GPU. Admission
-checks load and available GPU utilization, then warmup and repeated timed loops
+checks load and available GPU utilization for up to `--quiet-wait-minutes` (90 by
+default; a busy shared host records `loaded_host`), then warmup and repeated timed loops
 produce the median of repeat medians and p95. Separate stage timestamps diagnose
 costs. Every repeat lasts at least ten seconds and covers complete orbits, so
 frame counts can differ but each camera has equal weight. Equal counts would
@@ -110,7 +131,7 @@ Viewer integration lives in `crates/gsplat-viewer/src/{renderer,cache,visualizer
 and `composite.wgsl`. Resource handles must adapt to Rerun's pools and view context.
 
 Local support stays here: core `lens.rs`/`lens.wgsl` for non-pinhole cameras,
-`output.rs`/`raster_outputs.wgsl` for float and packed outputs, `timing.rs`, and the
+the float, packed and surface targets of `output.rs`/`raster_outputs.wgsl`, `timing.rs`, and the
 `shader.rs` import resolver. Texture targets in `output.rs` need pooled handles upstream.
 CLI, training, viewer startup and compatibility selection, the frame probe,
 Python orchestration, and the patched-source package are also local support.

@@ -68,7 +68,8 @@ impl FallbackArrays {
     }
 }
 
-/// The stock texture-backed path remains available when compute storage cannot hold a scene.
+/// The stock texture-backed path remains available when compute storage cannot hold a scene;
+/// it keeps the stock per-splat picking ids and outlines.
 pub(crate) fn native_fallback(
     ctx: &re_viewer_context::ViewContext<'_>,
     query: &re_viewer_context::ViewQuery<'_>,
@@ -76,8 +77,13 @@ pub(crate) fn native_fallback(
     cloud: &NativeSplats<'_>,
     world_from_local: glam::Affine3A,
     generation: re_log_types::hash::Hash64,
+    masks: &re_viewer_context::ViewOutlineMasks,
+    object: re_renderer::PickingLayerObjectId,
 ) -> Result<re_renderer::QueueableDrawData, ViewSystemExecutionError> {
     re_tracing::profile_function!();
+    let picking_ids: Vec<_> = (0..cloud.centers.len() as u64)
+        .map(re_renderer::PickingLayerInstanceId)
+        .collect();
     ctx.viewer_ctx
         .store_context
         .memoizer::<GpuCache, _>(|cache| {
@@ -87,9 +93,11 @@ pub(crate) fn native_fallback(
                 ctx.egui_ctx().request_repaint();
             }
             let mut builder = re_renderer::GaussianSplatBuilder::new(ctx.render_ctx());
-            builder
+            let mut batch = builder
                 .batch("Gaussian compute fallback")
                 .world_from_obj(world_from_local)
+                .outline_mask_ids(masks.overall)
+                .picking_object_id(object)
                 .sort_order(sort)
                 .add_gaussians(
                     &arrays.centers,
@@ -98,8 +106,15 @@ pub(crate) fn native_fallback(
                     &arrays.colors,
                     &arrays.sh,
                     arrays.sh_count,
-                    &[],
+                    &picking_ids,
                 );
+            for (row, mask) in crate::renderer::outline_rows(masks, picking_ids.len()) {
+                batch = batch.push_additional_outline_mask_ids_for_range(
+                    re_renderer::Span::from_start_len(row, 1),
+                    mask,
+                );
+            }
+            drop(batch);
             Ok(builder.into_draw_data()?.into())
         })
 }

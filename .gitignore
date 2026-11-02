@@ -104,6 +104,7 @@ packages/gauss-surf/data/
 packages/dataforge/data/
 packages/handtrack/data/
 packages/handfit/data/
+packages/hexels/data/
 packages/handfit/target/
 packages/handfit/handfit/_core.so
 packages/exo-calib/data/

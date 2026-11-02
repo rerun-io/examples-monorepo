@@ -5,6 +5,11 @@ use re_viewer::external::{re_sdk_types, re_viewer_context};
 pub(crate) const COMPUTE: &str = "ComputeGaussianSplats3D";
 
 pub(crate) const NATIVE: &str = "GaussianSplats3D";
+
+pub(crate) const COMPUTE_HEXELS: &str = "ComputeHexels3D";
+
+/// The stock-viewer fallback that `Hexels3D` entities carry beside the archetype.
+const HEXEL_FALLBACK: &str = "Points3D";
 use re_viewer_context::{
     BlueprintContext as _, IdentifiedViewSystem, MissingChunkReporter, ViewContext,
     ViewContextSystem, ViewContextSystemOncePerFrameResult, ViewQuery, ViewSystemIdentifier,
@@ -28,12 +33,13 @@ pub(crate) fn has_explicit_visualizers(
         .is_some()
 }
 
+/// Prefers the compute visualizers over stock splat quads and the hexel `Points3D` fallback.
 #[derive(Default)]
-pub(crate) struct AutomaticSplatSelection;
+pub(crate) struct AutomaticComputeSelection;
 
-impl IdentifiedViewSystem for AutomaticSplatSelection {
+impl IdentifiedViewSystem for AutomaticComputeSelection {
     fn identifier() -> ViewSystemIdentifier {
-        "AutomaticSplatSelection".into()
+        "AutomaticComputeSelection".into()
     }
 }
 
@@ -58,7 +64,55 @@ fn select_default(
     Some(selected)
 }
 
-impl ViewContextSystem for AutomaticSplatSelection {
+/// Hexel entities carry `Hexels3D` and its `Points3D` fallback; the custom viewer keeps only compute.
+fn select_hexels(
+    explicit: bool,
+    instructions: &[re_viewer_context::VisualizerInstruction],
+) -> Option<Vec<re_viewer_context::VisualizerInstruction>> {
+    if explicit
+        || !instructions
+            .iter()
+            .any(|i| i.visualizer_type.as_str() == COMPUTE_HEXELS)
+    {
+        return None;
+    }
+    Some(
+        instructions
+            .iter()
+            .filter(|i| i.visualizer_type.as_str() != HEXEL_FALLBACK)
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Rewrite automatic instructions of entities whose heuristic choice includes `visualizer`.
+fn apply_selection(
+    ctx: &ViewContext<'_>,
+    query: &ViewQuery<'_>,
+    visualizer: &'static str,
+    select: fn(
+        bool,
+        &[re_viewer_context::VisualizerInstruction],
+    ) -> Option<Vec<re_viewer_context::VisualizerInstruction>>,
+) {
+    let viewer = ctx.viewer_ctx;
+    for (data, _) in query.iter_visualizer_instruction_for(visualizer.into()) {
+        let explicit = has_explicit_visualizers(viewer, data);
+        let Some(instructions) = select(explicit, &data.visualizer_instructions) else {
+            continue;
+        };
+        for instruction in &instructions {
+            instruction.write_instruction_to_blueprint(viewer);
+        }
+        viewer.save_blueprint_archetype(
+            data.override_base_path.clone(),
+            &ActiveVisualizers::new(instructions.iter().map(|i| i.id)),
+        );
+        ctx.egui_ctx().request_repaint();
+    }
+}
+
+impl ViewContextSystem for AutomaticComputeSelection {
     fn execute(
         &mut self,
         ctx: &ViewContext<'_>,
@@ -66,21 +120,8 @@ impl ViewContextSystem for AutomaticSplatSelection {
         query: &ViewQuery<'_>,
         _: &ViewContextSystemOncePerFrameResult,
     ) {
-        let viewer = ctx.viewer_ctx;
-        for (data, _) in query.iter_visualizer_instruction_for(NATIVE.into()) {
-            let explicit = has_explicit_visualizers(viewer, data);
-            let Some(instructions) = select_default(explicit, &data.visualizer_instructions) else {
-                continue;
-            };
-            for instruction in &instructions {
-                instruction.write_instruction_to_blueprint(viewer);
-            }
-            viewer.save_blueprint_archetype(
-                data.override_base_path.clone(),
-                &ActiveVisualizers::new(instructions.iter().map(|i| i.id)),
-            );
-            ctx.egui_ctx().request_repaint();
-        }
+        apply_selection(ctx, query, NATIVE, select_default);
+        apply_selection(ctx, query, COMPUTE_HEXELS, select_hexels);
     }
 }
 
@@ -118,6 +159,28 @@ mod tests {
         assert_eq!(selected[1].id, native.id);
         assert_eq!(selected[1].component_mappings, native.component_mappings);
         assert_eq!(selected[1].visualizer_type.as_str(), COMPUTE);
+    }
+
+    #[test]
+    fn hexel_defaults_drop_only_the_points_fallback() {
+        let points = instruction(HEXEL_FALLBACK);
+        let compute = instruction(COMPUTE_HEXELS);
+        let other = instruction("Arrows3D");
+        let selected =
+            select_hexels(false, &[points.clone(), compute.clone(), other.clone()]).unwrap();
+        let ids: Vec<_> = selected.iter().map(|i| i.id).collect();
+        assert_eq!(ids, [compute.id, other.id]);
+        assert_eq!(selected[0].component_mappings, compute.component_mappings);
+        // Without a fallback, compute still becomes explicit so the visualizer draws it.
+        assert_eq!(
+            select_hexels(false, std::slice::from_ref(&compute))
+                .unwrap()
+                .len(),
+            1
+        );
+        // Explicit choices and plain point clouds stay untouched.
+        assert!(select_hexels(true, &[points.clone(), compute]).is_none());
+        assert!(select_hexels(false, &[points]).is_none());
     }
 
     #[test]

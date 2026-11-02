@@ -183,7 +183,10 @@ mod tests {
         );
         let group = bind(device, &kernel.layout, &[(6, counts.as_entire_binding())]);
         let kernels = crate::kernels::Kernels::new(device);
-        let raster = &kernels.float;
+        let raster = kernels
+            .splats
+            .raster(crate::output::RasterKind::Float)
+            .unwrap();
         let mut words = [0u32; 64];
         words[28..32].fill(1);
         let uniform = crate::gpu::uniform(device, &words);

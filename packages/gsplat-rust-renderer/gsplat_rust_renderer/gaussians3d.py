@@ -26,7 +26,9 @@ SPLATS_VISUALIZER: str = "ComputeGaussianSplats3D"
 def compute_visualizer(render_mode: Literal["default", "mip"] = "default") -> rrb.Visualizer:
     """Explicit custom-viewer choice; stock viewers cannot execute this visualizer."""
     warnings.warn("ComputeGaussianSplats3D requires the custom viewer; stock Rerun will show no splats for this explicit override.", stacklevel=2)
-    descriptor: rr.ComponentDescriptor = rr.ComponentDescriptor("ComputeGaussianSplats3D:render_mode", component_type="rerun.components.Text")
+    descriptor: rr.ComponentDescriptor = rr.ComponentDescriptor(
+        f"{SPLATS_VISUALIZER}:render_mode", archetype=SPLATS_VISUALIZER, component_type="rerun.components.Text"
+    )
     return rrb.Visualizer(SPLATS_VISUALIZER, overrides=[rr.components.TextBatch([render_mode]).described(descriptor)])
 
 
@@ -51,7 +53,7 @@ def splat_overrides(compute: bool, render_mode: Literal["default", "mip"] | None
     return {SPLATS_ENTITY: compute_visualizer(render_mode or "default")} if compute else {}
 
 
-def log_ply(path: Path, *, recording: rr.RecordingStream | None = None) -> Float32[ndarray, "2 3"]:
+def log_ply(path: Path, *, entity: str = SPLATS_ENTITY, recording: rr.RecordingStream | None = None) -> Float32[ndarray, "2 3"]:
     """Import static native splats and return their 2nd/98th percentile camera bounds.
 
     Rerun owns PLY decoding. Its chunk reader preserves the native components while
@@ -68,7 +70,7 @@ def log_ply(path: Path, *, recording: rr.RecordingStream | None = None) -> Float
             source.flush(timeout_sec=30.0)
         finally:
             source.disconnect()
-        store: ChunkStore = RrdReader(rrd).stream().filter(content="/splats.ply").map(lambda chunk: chunk.with_entity_path(SPLATS_ENTITY)).collect()
+        store: ChunkStore = RrdReader(rrd).stream().filter(content="/splats.ply").map(lambda chunk: chunk.with_entity_path(entity)).collect()
         batches: list[pa.RecordBatch] = [chunk.to_record_batch() for chunk in store.stream().to_chunks() if "GaussianSplats3D:centers" in chunk.to_record_batch().schema.names]
         if not batches:
             raise ValueError(f"{path}: no Gaussian splat centers")

@@ -163,6 +163,8 @@ mod tests {
                 sh_coeffs: None,
                 raw_opacities: None,
             },
+            hexels: None,
+            image_size: None,
             mode: gsplat_core::RenderMode::Default,
             center: glam::Vec3::ZERO,
             extent: 1.0,
@@ -182,6 +184,18 @@ mod tests {
                 .transform_point3(glam::Vec3::new(1.0, 2.0, 3.0));
             assert!(target.x.abs() < 1e-5 && target.y.abs() < 1e-5 && target.z > 0.0);
         }
+    }
+    #[test]
+    fn speed_quiet_host_wait_defaults_to_ninety_minutes_and_accepts_zero() {
+        let wait = |extra: &[&str]| {
+            let cli = [&["gsplat", "speed", "--ply", "x", "--out", "y"][..], extra].concat();
+            let Action::Speed(args) = Args::try_parse_from(cli).unwrap().command else {
+                panic!("speed command")
+            };
+            args.quiet_wait_minutes
+        };
+        assert_eq!(wait(&[]), 90);
+        assert_eq!(wait(&["--quiet-wait-minutes", "0"]), 0);
     }
     #[test]
     fn cli_rejects_unknown_oracle_and_invalid_resolution() {

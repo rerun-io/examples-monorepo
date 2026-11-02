@@ -1,22 +1,12 @@
 #import <./raster_common.wgsl>
 
-@group(0) @binding(6) var out_texture: texture_storage_2d<rgba8unorm, write>;
+// Gaussian splat coverage, as Brush rasterize 1388f74c; 256 splats per cooperative batch.
+alias Primitive = Splat;
+const BATCH = WG;
 
-@compute @workgroup_size(WG) fn raster_texture(@builtin(workgroup_id) gid: vec3u,
-    @builtin(local_invocation_index) lid: u32) {
-    let r = raster(gid.xy, lid);
-    if r.inside {
-        textureStore(out_texture, r.pix, r.rgba);
-    }
-}
-
-@group(0) @binding(8) var out_depth: texture_storage_2d<r32float, write>;
-
-@compute @workgroup_size(WG) fn raster_texture_depth(@builtin(workgroup_id) gid: vec3u,
-    @builtin(local_invocation_index) lid: u32) {
-    let r = raster(gid.xy, lid);
-    if r.inside {
-        textureStore(out_texture, r.pix, r.rgba);
-        textureStore(out_depth, r.pix, vec4f(r.depth));
-    }
+fn sample(p: Splat, pix: vec2u, surface: bool) -> Sample {
+    let s = sigma(vec2f(pix) + 0.5, vec2f(p.x, p.y), vec3f(p.conic_x, p.conic_y, p.conic_z));
+    let alpha = min(0.999, p.color_a * exp(-s));
+    return Sample(select(0.0, alpha, s >= 0.0), max(vec3f(p.color_r, p.color_g, p.color_b), vec3f(0.0)), p.depth,
+        vec3f(0.0));
 }
