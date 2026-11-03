@@ -235,11 +235,6 @@ def median_rate(videos: dict[str, CatalogVideo]) -> float:
     return round(float(np.median([1e9 / float(np.median(np.diff(video.t_ns))) for video in videos.values()])), 3)
 
 
-def native_phone_rate(segment: Segment) -> float:
-    """Median native phone rate of a segment's capture-clock packets."""
-    return median_rate(read_phone_videos(segment))
-
-
 def factory_rigs(layout: SelfcapLayout) -> tuple[int, ...]:
     """Rigs holding a device's factory document: each phone, the OAK and the Quest (an empty phone slot has none)."""
     return (*range(len(layout.phones)), layout.oak_rig, layout.quest_rig)
