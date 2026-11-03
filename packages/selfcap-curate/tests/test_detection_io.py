@@ -3,15 +3,13 @@
 from dataclasses import replace
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 from dataforge.catalog_swap import swap_layer
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from simplecv.rerun_custom_types import confidence_scores_to_rgb
 
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_phone_detections, read_time_sync
-from selfcap_curate.detection_io import read_oak_observations, write_detections_layer, write_oak_egohand_layer
+from selfcap_curate.detection_io import write_detections_layer, write_oak_egohand_layer
 from selfcap_curate.records import OakDetections, PhoneDetections, SelfcapLayout
 
 
@@ -31,25 +29,6 @@ def test_egohand_layer_retains_sparse_video_times_and_confidence(tmp_path):
     assert data.column("video_time").cast("int64").to_pylist() == [1_000_000_000, 4_000_000_000]
     assert data.column("confidence").to_pylist() == confidence.tolist()
     assert {str(c.entity_path) for c in chunks if not c.is_static} == {f"/world/rig_04/cam_{cam:02d}/pinhole/pred/egohand_calib/coco133_uv" for cam in range(3)}
-
-
-def test_oak_observations_preserve_pixels_and_reject_another_segment(tmp_path):
-    path = tmp_path / "hands.parquet"
-    xy = np.full((3, 133, 2), np.nan)
-    xy[:, 91:133] = 200.0
-    scores = np.zeros((3, 133))
-    scores[:, 91:133] = 0.9
-    pq.write_table(pa.table({
-        "segment_id": ["segment-a"] * 3,
-        "video_time": pa.array([100_000_000, 150_000_000, 200_000_000], type=pa.int64()),
-        "xy": xy.tolist(), "scores": scores.tolist(),
-    }), path)
-    result = read_oak_observations(path, "segment-a")
-    np.testing.assert_allclose(result.video_time, [0.1, 0.15, 0.2])
-    np.testing.assert_equal(result.xy, xy)
-    np.testing.assert_equal(result.scores, scores)
-    with pytest.raises(ValueError, match="segment-a"):
-        read_oak_observations(path, "segment-b")
 
 
 def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixture_sync):
@@ -85,7 +64,6 @@ def test_layer_preserves_all_joints_clocks_and_has_no_properties(tmp_path, fixtu
     style = next(c.to_record_batch() for c in chunks if c.is_static and str(c.entity_path).endswith("coco133_uv"))
     assert style.column("Points2D:radii").to_pylist() == [[3.0]]
     assert style.column("Points2D:show_labels").to_pylist() == [[False]]
-
 
 
 def test_layer_shows_only_points_at_or_above_0_7(tmp_path, fixture_sync):

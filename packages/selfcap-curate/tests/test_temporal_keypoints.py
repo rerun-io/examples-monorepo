@@ -4,8 +4,7 @@ import numpy as np
 
 
 def test_body_filter_leaves_hand_treatment_unchanged() -> None:
-    from selfcap_curate.keypoints import Keypoints3D
-    from selfcap_curate.temporal_keypoints import stable_body
+    from selfcap_curate.keypoints import Keypoints3D, stable_body
 
     xyz = np.zeros((61, 133, 3), dtype=np.float32)
     xyz[:, 91:] = np.arange(61, dtype=np.float32)[:, None, None]

@@ -1,7 +1,6 @@
-"""Bounded camera and detector reads for the single-segment experiment."""
+"""Bounded camera and detector reads for SOMA layers."""
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
@@ -11,10 +10,8 @@ from dataforge.triangulation import HEADSET_COVERED, Camera, EgoCamera
 from datafusion import col, lit
 from jaxtyping import Float64
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
-from rerun.chunk import RrdReader
 
-from selfcap_soma.catalog import ExoSource, exo_view_track, read_rigs, seconds
+from selfcap_soma.catalog import ExoSource, SegmentCatalog, exo_view_track, floats, seconds
 from selfcap_soma.overlay_style import MIN_OBSERVED_SCORE
 
 
@@ -51,15 +48,14 @@ def missing_camera_calibration(table: pa.Table, camera: str, extrinsics: bool = 
 
 
 def read_views(
-    dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"], source: ExoSource = "rtmw"
+    catalog: SegmentCatalog, segment: str, times: Float64[ndarray, "n"], source: ExoSource = "rtmw"
 ) -> tuple[list[PhoneView], EgoCamera | None]:
-    view = dataset.filter_segments(segment)
-    rigs = read_rigs(dataset, segment)
+    view, rigs = catalog.view, catalog.rigs
     cameras = [f"{rig}/cam_00" for rig in rigs.exo]
     oak = rigs.oak
     oak_camera = f"{oak}/cam_00"
     static = view.filter_contents([*cameras, *(f"{c}/pinhole" for c in cameras), f"{oak_camera}/pinhole"]).reader(index=None).to_arrow_table()
-    columns = view.schema().column_names()
+    columns = catalog.columns
     paths = []
     calibrated = []
     for camera in cameras:
@@ -98,8 +94,8 @@ def read_views(
             print(f"SKIP_CAMERA {segment} {camera}: no detections in requested window", flush=True)
             continue
         indices = nearest_indices(stamps, times)
-        pixels = np.asarray(rows[position].to_pylist(), dtype=np.float64)[indices]
-        scores = np.asarray(rows[f"{path}:simplecv.KeypointConfidence2D:confidences"].to_pylist(), dtype=np.float64)[indices]
+        pixels = floats(rows[position], -1, 133, 2)[indices]
+        scores = floats(rows[f"{path}:simplecv.KeypointConfidence2D:confidences"], -1, 133)[indices]
         # The stored entity keeps every detection; a view holds only joints fitting and scoring may use.
         valid = (abs(stamps[indices] - times) < 0.021)[:, None] & (scores >= MIN_OBSERVED_SCORE)
         valid[:, HEADSET_COVERED] = False
@@ -136,34 +132,12 @@ class ImageTrack:
     points: Float64[ndarray, "n j 2"]
 
 
-def read_image_tracks(path: Path) -> list[ImageTrack]:
-    """Read only 2D inference tracks from the corrected EgoHand recording."""
-    if not path.exists():
-        return []
-    grouped: dict[str, list[pa.RecordBatch]] = {}
-    for chunk in RrdReader(path).stream().to_chunks():
-        name = str(chunk.entity_path)
-        if name.startswith(("/image/egohand/", "/image/sapiens/")):
-            batch = chunk.to_record_batch()
-            if "Points2D:positions" in batch.schema.names and "video_time" in batch.schema.names:
-                grouped.setdefault(name, []).append(batch)
-    tracks: list[ImageTrack] = []
-    for name, batches in grouped.items():
-        table = pa.Table.from_batches(batches)
-        stamps = seconds(table["video_time"])
-        points = np.asarray(table["Points2D:positions"].to_pylist(), dtype=np.float64)
-        order = np.argsort(stamps)
-        tracks.append(ImageTrack(name, stamps[order], points[order]))
-    return tracks
-
-
-def read_egohand_rgb(dataset: DatasetEntry, segment: str, times: Float64[ndarray, "n"]) -> list[ImageTrack]:
+def read_egohand_rgb(catalog: SegmentCatalog, times: Float64[ndarray, "n"]) -> list[ImageTrack]:
     """Read registered RGB hand image evidence once, preserving absent detections."""
-    view = dataset.filter_segments(segment)
-    oak = read_rigs(dataset, segment).oak
+    view, oak = catalog.view, catalog.rigs.oak
     paths = [
         column.split(":", 1)[0]
-        for column in view.schema().column_names()
+        for column in catalog.columns
         if column.startswith(f"{oak}/cam_00/pinhole/") and "/egohand/" in column and column.endswith(":Points2D:positions")
     ]
     if not paths:
@@ -182,11 +156,11 @@ def read_egohand_rgb(dataset: DatasetEntry, segment: str, times: Float64[ndarray
         rows = table.filter(table[column].is_valid())
         stamps = seconds(rows["video_time"])
         points = np.full((len(stamps), 21, 2), np.nan)
-        for index, row in enumerate(rows[column].to_pylist()):
-            if len(row) == 25:
-                points[index] = np.asarray(row, dtype=np.float64)[mapping]
-            elif len(row) == 21:
-                points[index] = np.asarray(row, dtype=np.float64)
+        lengths = rows[column].combine_chunks().value_lengths().to_numpy(zero_copy_only=False)
+        for count in (21, 25):
+            indices = np.flatnonzero(lengths == count)
+            values = floats(rows[column].take(indices), len(indices), count, 2)
+            points[indices] = values[:, mapping] if count == 25 else values
         order = np.argsort(stamps)
         result.append(ImageTrack(path, stamps[order], points[order]))
     return result

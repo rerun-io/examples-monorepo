@@ -1,10 +1,10 @@
-"""SelfCap: 4 iPhones + an OAK ego rig + a Quest → one exoego:v2 base rrd per episode.
+"""SelfCap: iPhones, an OAK ego rig and a Quest produce one base RRD per episode.
 
 Raw layout on disk (already local; ``download`` only verifies it)::
 
     <root>/<subset>/<YYYY-MM-DD>/<session-uuid>/
-        metadata.json                     task / collector / time (usually mode 000)
-        calibration_manifest.json         (usually mode 000)
+        metadata.json                     task / collector / time
+        calibration_manifest.json
         episodes/episode-<NNN>/
             ego/{rgb,left,right}.mp4      OAK, 1280x720
             ego/{rgb,left,right}.csv      ts_ns,frame_idx at the OAK's native rate
@@ -14,40 +14,17 @@ Raw layout on disk (already local; ``download`` only verifies it)::
             quest/{left,right}.mp4 + head_pose.csv + body/hand poses + calibration.json
             episode-<NNN>.rrd             prior art; deliberately ignored
 
-Clocks (verified on disk, 2026-08-20, over four days x one episode each plus
-three episodes of ``2025-12-20/25aeb66a``). Every ``ts_ns`` column — ego frame
-csvs, ``imu.csv``, ``head_pose.csv`` — is **episode-relative** and starts at 0,
-so ``video_time`` is a duration timeline anchored at the episode start.
-
-The nine videos are *not* the raw device streams: the cutting pipeline
-re-encoded all of them to AV1 on one shared, near-CFR grid. Within an episode
-every stream carries the same frame count, and the container duration matches
-the ego csv span to ~40 ms; the ego mp4s additionally carry ~50% zero-cost
-duplicate packets (3 bytes = ``show_existing_frame``) because the 24 fps OAK
-was resampled onto the iPhone grid. Each mp4 presents its first frame at its
-own container start: 0 in about half of the 4,168 cut episodes, otherwise about
-one frame of that stream (16, 20, 33, 40 or 41 ms; measured 2026-10-26).
-Consequences:
-
-* The presented PTS **is** the episode clock, for exo *and* ego *and* quest.
-  ``Mp4Reader`` rebases every file to start at 0, so each video is shifted back
-  by its container start (``read_video_start_ns``); nothing else is retimed.
-* The ego frame csvs cannot index the ego mp4 samples (e.g. 322 csv rows vs 671
-  video samples). They stay the authoritative *native-rate* clock and are
-  surfaced as ``num_native_frames`` / ``native_duration_ns`` on each ego camera.
-  TODO(selfcap-curate): a lens that drops the duplicate packets and retimes the ego
-  streams onto their native csv timestamps.
+Clocks. Raw CSV timestamps are episode-relative. Video presentation PTS,
+including each container's start, is the episode clock for every camera.
+``Mp4Reader`` rebases files to zero; ``read_video_start_ns`` restores the start.
+The cutting pipeline re-encoded streams onto a shared near-CFR grid. OAK MP4s
+include duplicate packets, so their CSV rows cannot index video samples. The
+CSVs describe the native-rate clock and provide ``num_native_frames`` and
+``native_duration_ns`` on each OAK camera.
 
 Both ``video_time`` and ``capture_time`` hold the as-cut clock at ingest.
 The separate selfcap-curate package later shifts ``video_time`` while preserving
 ``capture_time``. No latency correction or alignment is applied here.
-
-Permissions. Large parts of the corpus are mode 000 (a NAS sync artifact; a
-corpus-wide chmod is pending). Discovery gates every required file behind
-``os.access(..., os.R_OK)`` and silently drops episodes that fail; convert warns
-and degrades instead of aborting. Session ``metadata.json`` is currently
-unreadable for **all** 692 ``cut`` sessions, so ``task`` / ``collector`` are
-absent from the capture property until the chmod lands.
 
 Rig topology. Exo devices sorted by name take ``rig_00..``, then the OAK ego rig,
 then the Quest — nine cameras and ``rig_00..rig_05`` in the usual 4-iPhone case.

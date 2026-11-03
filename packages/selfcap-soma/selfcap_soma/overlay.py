@@ -1,4 +1,4 @@
-"""Write a layer aligned with SelfCap's original recording and camera tree, from a fit in memory or a legacy fit.rrd."""
+"""Write a layer aligned with SelfCap's original recording and camera tree, from a fit in memory."""
 
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -9,19 +9,20 @@ import rerun as rr
 from dataforge.oak_mount import StaticCamera, read_static_cameras
 from dataforge.schema import SOMA_MESH
 from dataforge.triangulation import EgoCamera, project, project_ego
+from dataforge.writing import atomic_recording
 from jaxtyping import Bool, Float32, Float64, Int32, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetSelection
 from rerun.chunk import RrdReader
 from scipy.sparse import csr_matrix
 
-from selfcap_soma.catalog import ExoSource, Observations
+from selfcap_soma.catalog import ExoSource, Observations, SegmentCatalog, open_segment
 from selfcap_soma.evaluation_io import nearest_indices, read_egohand_rgb, read_views
 from selfcap_soma.fitting import FitResult
-from selfcap_soma.observations import overlay_points, require_full_rate_mesh, video_time_column
+from selfcap_soma.observations import require_full_rate_mesh, video_time_column
 from selfcap_soma.output import joint_edges, log_joint_style, mapped
 from selfcap_soma.overlay_style import observed_links, observed_points, residual_tolerance
-from selfcap_soma.quality import SomaQuality, assess_quality, log_quality, read_quality
+from selfcap_soma.quality import SomaQuality, assess_quality, log_quality
 
 SOMA_JOINTS: str = "/world/pred/soma_x/joints"
 """Fitted joints in the soma layer."""
@@ -35,26 +36,6 @@ TRIMESH_ZERO_NORM: float = 1e-13
 """trimesh.util.TOL_ZERO: a shorter vector has no direction."""
 TRIMESH_DEGENERATE_ANGLE: float = 1e-8
 """trimesh.constants.tol.merge: a triangle with a smaller corner angle contributes nothing."""
-
-
-@dataclass(frozen=True, slots=True)
-class Config:
-    upper_body_only: bool = True
-    """Crop the mesh and display only head/ears, arms/hands and hips."""
-    native_exo: bool = False
-    """Use native exo/Quest projection: omit baked exo overlays; Quest has none; OAK stays baked."""
-    exo_source: ExoSource = "rtmw"
-    """Per-phone image evidence used to classify observed versus inferred joints."""
-    source: Path = Path("/tmp/soma-fit/full-segment/fit.rrd")
-    """Legacy fit recording read by soma-overlay; soma-batch passes its fit in memory and ignores this."""
-    catalog_url: str = "rerun+http://dgx-spark:51235"
-    """Catalog to read, without changing any source layer."""
-    dataset: str = "selfcap-post-dev"
-    """Dataset containing this segment's inputs and calibrated cameras."""
-    segment: str = "selfcap__2025-12-03__d31bf1da__ep001"
-    """Recording/segment ID used by the SelfCap converter."""
-    output: Path = Path("/tmp/soma-fit/layer/selfcap__2025-12-03__d31bf1da__ep001.rrd")
-    """Local layer file; registration is a separate explicit action."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,116 +153,6 @@ def read_layer_crop(source: RrdReader) -> Int64[ndarray, "v"]:
     return selection[0].to_record_batch().column("vertex_ids").flatten().to_numpy(zero_copy_only=False).astype(np.int64)
 
 
-def read_fit_ids(source: RrdReader, entity: str) -> Int64[ndarray, "v"] | None:
-    """A static id tensor of a legacy fit recording."""
-    selection = source.stream().filter(content=entity).to_chunks()
-    if not selection:
-        return None
-    return np.asarray(selection[0].to_record_batch().column("Tensor:data")[0].as_py()[0]["buffer"], dtype=np.int64)
-
-
-def read_fit_points(source: RrdReader, entity: str) -> tuple[Int64[ndarray, "n"], Float32[ndarray, "n p 3"]] | None:
-    """Time-ordered point rows of one entity of a legacy fit recording."""
-    stamps: list[Int64[ndarray, "m"]] = []
-    rows: list[Float32[ndarray, "m p 3"]] = []
-    for chunk in source.stream().filter(content=entity, is_static=False, components="Points3D:positions").to_chunks():
-        batch: pa.RecordBatch = chunk.to_record_batch()
-        stamps.append(batch.column("video_time").cast("int64").to_numpy())
-        rows.append(mesh_vertex_rows(batch.column("Points3D:positions")))
-    if not rows:
-        return None
-    joined: Int64[ndarray, "n"] = np.concatenate(stamps)
-    order: Int64[ndarray, "n"] = np.argsort(joined)
-    return joined[order], np.concatenate(rows)[order]
-
-
-def read_fit_mesh(source: RrdReader) -> tuple[Int64[ndarray, "m"], Float32[ndarray, "m v 3"], Int32[ndarray, "f 3"]]:
-    """Time-ordered surface frames and triangles of a legacy fit recording."""
-    faces: Int32[ndarray, "f 3"] | None = None
-    stamps: list[Int64[ndarray, "k"]] = []
-    rows: list[Float32[ndarray, "k v 3"]] = []
-    for chunk in source.stream().filter(content="/world/fit/mesh").to_chunks():
-        batch: pa.RecordBatch = chunk.to_record_batch()
-        if "Mesh3D:triangle_indices" in batch.schema.names:
-            faces = np.asarray(batch.column("Mesh3D:triangle_indices")[0].as_py(), dtype=np.int32)
-        if "video_time" in batch.schema.names and "Mesh3D:vertex_positions" in batch.schema.names:
-            stamps.append(batch.column("video_time").cast("int64").to_numpy())
-            rows.append(mesh_vertex_rows(batch.column("Mesh3D:vertex_positions")))
-    if faces is None or not rows:
-        raise ValueError("fit mesh has no faces or vertex frames")
-    joined: Int64[ndarray, "m"] = np.concatenate(stamps)
-    order: Int64[ndarray, "m"] = np.argsort(joined)
-    return joined[order], np.concatenate(rows)[order], faces
-
-
-def read_fit_edges(source: RrdReader) -> list[tuple[int, int]]:
-    """Rig connections stored on a legacy fit recording's joint entity."""
-    for chunk in source.stream().filter(content="/world/fit/joints", is_static=True).to_chunks():
-        batch: pa.RecordBatch = chunk.to_record_batch()
-        if "AnnotationContext:context" in batch.schema.names:
-            connections = batch.column("AnnotationContext:context")[0].as_py()[0][0]["class_description"]["keypoint_connections"]
-            return [(int(edge["keypoint0"]), int(edge["keypoint1"])) for edge in connections]
-    return []
-
-
-def read_fit(path: Path) -> LayerFit:
-    """Read a layer's contents from a legacy fit.rrd, written by soma-fit and the research tools."""
-    source: RrdReader = RrdReader(path)
-    joint_rows = read_fit_points(source, "/world/fit/joints")
-    if joint_rows is None:
-        raise ValueError(f"{path} has no fitted joints")
-    stamps: Int64[ndarray, "n"] = joint_rows[0]
-    joints: Float32[ndarray, "n j 3"] = joint_rows[1]
-
-    def aligned(entity: str) -> Float32[ndarray, "n p 3"] | None:
-        read = read_fit_points(source, entity)
-        if read is not None and not np.array_equal(read[0], stamps):
-            raise ValueError(f"{entity} and the fitted joints must share exact timestamps")
-        return None if read is None else read[1]
-
-    name_chunks = source.stream().filter(content="/parameters/joint_names").to_chunks()
-    if not name_chunks:
-        raise ValueError("fit recording lacks joint names; rerun soma-fit before exporting overlays")
-    names: tuple[str, ...] = tuple(name_chunks[0].to_record_batch().column("TextDocument:text")[0].as_py()[0].splitlines())
-    ears: Float32[ndarray, "n 2 3"] | None = aligned("/world/fit/ears")
-    feet: Float32[ndarray, "n 6 3"] | None = aligned("/world/fit/feet")
-    # New fits persist the exact COCO-equivalent points consumed by their losses.
-    # Older fits use the equivalent joint mapping plus separately saved surface ears and feet.
-    points: Float32[ndarray, "n 133 3"] | None = aligned("/world/fit/coco_landmarks")
-    if points is None:
-        points = overlay_points(joints, names, upper_body_only=False)
-        if ears is not None:
-            points[:, 3:5] = ears
-        if feet is not None:
-            points[:, 17:23] = feet
-    quest: Float32[ndarray, "n 133 3"] | None = aligned("/world/inputs/quest")
-    if quest is None:
-        quest = np.full_like(points, np.nan)
-    exo: Float32[ndarray, "n 133 3"] | None = aligned("/world/inputs/exo")
-    reference: Float64[ndarray, "n 133 3"] = np.full(points.shape, np.nan, dtype=np.float64) if exo is None else exo.astype(np.float64)
-    try:
-        quality: SomaQuality = read_quality(path)
-    except ValueError:  # fits from before the quality record
-        quality = assess_quality(points.astype(np.float64), reference, quest.astype(np.float64))
-    mesh = read_fit_mesh(source)
-    return LayerFit(
-        stamps.astype(np.float64) / 1e9,
-        names,
-        joints,
-        read_fit_edges(source),
-        ears,
-        points,
-        reference,
-        quest,
-        quality,
-        mesh[1],
-        mesh[0],
-        mesh[2],
-        read_fit_ids(source, "/parameters/upper_body_vertices"),
-        read_fit_ids(source, "/parameters/visible_joints"),
-    )
-
-
 def angle_weighted_normals(vertices: Float32[ndarray, "n v 3"], faces: Int32[ndarray, "f 3"]) -> Float32[ndarray, "n v 3"]:
     """Trimesh's vertex normals for every frame at once: unit face normals weighted by corner angle.
 
@@ -336,11 +207,6 @@ def log_mesh(recording: rr.RecordingStream, fit: LayerFit, upper_body_only: bool
         )
 
 
-def main(config: Config) -> None:
-    """Write a layer from a legacy fit recording."""
-    write_layer(config, read_fit(config.source))
-
-
 def oak_stereo_cameras(view: DatasetSelection, segment: str, rgb: EgoCamera) -> list[EgoCamera]:
     """The OAK's left and right cameras beside its rgb one; a camera with incomplete calibration is reported and skipped."""
     paths: list[str] = [f"/world/rig_{rgb.rig:02d}/cam_{cam:02d}" for cam in (1, 2)]
@@ -355,56 +221,48 @@ def oak_stereo_cameras(view: DatasetSelection, segment: str, rgb: EgoCamera) -> 
     return stereo
 
 
-def write_layer(config: Config, fit: LayerFit) -> None:
-    """Write one segment's layer to config.output; the caller registers it."""
-    segment: str = config.segment
+def write_layer(segment: str, dataset: str, catalog_url: str, exo_source: ExoSource, output: Path, fit: LayerFit, *, catalog: SegmentCatalog | None = None) -> None:
+    """Write one upper-body layer atomically; the caller registers it."""
     times: Float64[ndarray, "n"] = fit.times
     points: Float32[ndarray, "n 133 3"] = fit.points.copy()
     quest: Float32[ndarray, "n 133 3"] = fit.quest
     reference: Float64[ndarray, "n 133 3"] = fit.exo
-    if config.upper_body_only:
-        points[:, 13:91] = np.nan
-    dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset)
-    phones, rgb = read_views(dataset, segment, times, config.exo_source)
+    points[:, 13:91] = np.nan
+    if catalog is None:
+        catalog = open_segment(CatalogClient(catalog_url).get_dataset(dataset), segment)
+    phones, rgb = read_views(catalog, segment, times, exo_source)
     rgb_evidence = np.full((len(times), 133, 2), np.nan)
     egos = []
     if rgb is not None:
-        for track in read_egohand_rgb(dataset, segment, times):
+        for track in read_egohand_rgb(catalog, times):
             if not len(track.times):
                 continue
             indices = nearest_indices(track.times, times)
             valid = abs(track.times[indices] - times) <= 0.05
             base = 91 if track.name.endswith("/left") else 112
             rgb_evidence[valid, base : base + 21] = track.points[indices[valid]]
-        egos += [rgb, *oak_stereo_cameras(dataset.filter_segments(segment), segment, rgb)]
-    config.output.parent.mkdir(parents=True, exist_ok=True)
-    recording = rr.RecordingStream("dataforge", recording_id=segment)
-    recording.save(config.output)
-    world_joints: Float32[ndarray, "n j 3"] = fit.joints.copy()
-    if config.upper_body_only:
+        egos += [rgb, *oak_stereo_cameras(catalog.view, segment, rgb)]
+    with atomic_recording(output, recording_id=segment, send_properties=False) as recording:
+        world_joints: Float32[ndarray, "n j 3"] = fit.joints.copy()
         if fit.visible_joints is None:
             raise ValueError("upper-body output requires a fit with a rest-pose display selection")
         hidden: Bool[ndarray, "j"] = np.ones(world_joints.shape[1], dtype=bool)
         hidden[fit.visible_joints] = False
         world_joints[:, hidden] = np.nan
-    log_joint_style(recording, SOMA_JOINTS, fit.edges, world_joints.shape[1])
-    recording.send_columns(
-        SOMA_JOINTS,
-        indexes=[video_time_column(times)],
-        columns=rr.Points3D.columns(positions=world_joints.reshape(-1, 3)).partition([world_joints.shape[1]] * len(times)),
-    )
-    log_mesh(recording, fit, config.upper_body_only)
-    if fit.ears is not None:
-        recording.log(SOMA_EARS, rr.Points3D.from_fields(colors=[0, 255, 255], radii=0.008), static=True)
+        log_joint_style(recording, SOMA_JOINTS, fit.edges, world_joints.shape[1])
         recording.send_columns(
-            SOMA_EARS, indexes=[video_time_column(times)], columns=rr.Points3D.columns(positions=fit.ears.reshape(-1, 3)).partition([2] * len(times))
+            SOMA_JOINTS,
+            indexes=[video_time_column(times)],
+            columns=rr.Points3D.columns(positions=world_joints.reshape(-1, 3)).partition([world_joints.shape[1]] * len(times)),
         )
-    if config.native_exo:
-        for path in (SOMA_JOINTS, SOMA_EARS):
-            recording.log(path, rr.Points3D.from_fields(radii=rr.Radius.ui_points(2.5)), static=True)
-    log_quality(recording, fit.quality)
-    projections = []
-    if not config.native_exo:
+        log_mesh(recording, fit, True)
+        if fit.ears is not None:
+            recording.log(SOMA_EARS, rr.Points3D.from_fields(colors=[0, 255, 255], radii=0.008), static=True)
+            recording.send_columns(
+                SOMA_EARS, indexes=[video_time_column(times)], columns=rr.Points3D.columns(positions=fit.ears.reshape(-1, 3)).partition([2] * len(times))
+            )
+        log_quality(recording, fit.quality)
+        projections = []
         for view in phones:
             projected = project(view.camera, points.reshape(-1, 3).astype(np.float64)).reshape(len(times), 133, 3)
             pixels = np.where(projected[:, :, 2:] > 0.001, projected[:, :, :2], np.nan).astype(np.float32)
@@ -413,20 +271,18 @@ def write_layer(config: Config, fit: LayerFit) -> None:
             )
             seen = observed_points(pixels.astype(np.float64), view.pixels, view.scores, tolerance)
             projections.append((f"{view.camera.entity}/pinhole", pixels, seen))
-    for ego in egos:
-        pixels = project_ego(ego, times, points)
-        evidence = rgb_evidence if ego.cam == 0 else project_ego(ego, times, quest).astype(np.float64)
-        # Mono images have no EgoHand detector: require RGB image support as
-        # well as a nearby valid Quest projection, rather than claiming that
-        # tracking alone establishes visibility through an occluder.
-        if ego.cam != 0:
-            evidence[~np.isfinite(rgb_evidence).all(-1)] = np.nan
-        seen = observed_points(pixels.astype(np.float64), evidence, np.isfinite(evidence).all(-1).astype(np.float64))
-        projections.append((f"/world/rig_{ego.rig:02d}/cam_{ego.cam:02d}/pinhole", pixels, seen))
-    for pinhole, pixels, seen in projections:
-        path = f"{pinhole}/pred/soma_x/joints_uv"
-        log_joint_overlay(recording, path, times, pixels, seen)
-        print(path, "observed:", int(seen.sum()), "finite joints:", int(np.isfinite(pixels).all(-1).sum()))
-    recording.flush()
-    recording.disconnect()
-    print(config.output)
+        for ego in egos:
+            pixels = project_ego(ego, times, points)
+            evidence = rgb_evidence if ego.cam == 0 else project_ego(ego, times, quest).astype(np.float64)
+            # Mono images have no EgoHand detector: require RGB image support as
+            # well as a nearby valid Quest projection, rather than claiming that
+            # tracking alone establishes visibility through an occluder.
+            if ego.cam != 0:
+                evidence[~np.isfinite(rgb_evidence).all(-1)] = np.nan
+            seen = observed_points(pixels.astype(np.float64), evidence, np.isfinite(evidence).all(-1).astype(np.float64))
+            projections.append((f"/world/rig_{ego.rig:02d}/cam_{ego.cam:02d}/pinhole", pixels, seen))
+        for pinhole, pixels, seen in projections:
+            path = f"{pinhole}/pred/soma_x/joints_uv"
+            log_joint_overlay(recording, path, times, pixels, seen)
+            print(path, "observed:", int(seen.sum()), "finite joints:", int(np.isfinite(pixels).all(-1).sum()))
+    print(output)

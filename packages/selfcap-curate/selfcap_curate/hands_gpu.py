@@ -85,7 +85,7 @@ def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, 
     """Build v2's YOLOX 0.3 (batch eight) and Sapiens2 0.4B (batch four) TensorRT models once per process.
 
     Sapiens2 runs on FRAMES_PER_PHONE frames per phone plus the OAK picks, so batch four costs little time and halves its TensorRT
-    activation memory (4.43 -> 2.21 GB), which lets three selfcap-post workers share the 5090.
+    activation memory (4.43 -> 2.21 GB), which lets three calibration workers share the 5090.
     """
     from posekit.models.sapiens import SapiensPoseConfig
     from posekit.models.yolox import YoloxDetectorConfig
@@ -98,7 +98,7 @@ def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, 
 def release_cuda_memory(*, models: bool) -> None:
     """Hand cached CUDA blocks back to the driver, after dropping the cached Sapiens2/YOLOX engines when ``models``.
 
-    PyTorch keeps every block a process has used, so without this each selfcap-post process holds its align peak
+    PyTorch keeps every block a process has used, so without this each calibration process holds its align peak
     (~17 GB on cc808233) through keypoints and only one fits on the GPU.
     """
     if models:

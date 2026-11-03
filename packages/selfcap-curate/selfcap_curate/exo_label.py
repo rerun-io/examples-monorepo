@@ -14,6 +14,7 @@ from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
+from dataforge.writing import atomic_write
 from jaxtyping import UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation, Slerp
@@ -327,7 +328,8 @@ def make_packet(segment: catalog_io.Segment, state: CalibSession, output: Path) 
                     panels.append(Panel(view, stamp, [f'phone{target}'], bounds, str(path), str(source_path),
                                         (float(pixel[0]), float(pixel[1])), facing))
     packet = Packet(segment.id, phones, panels)
-    (output / 'packet.json').write_text(to_json(packet))
+    with atomic_write(output / 'packet.json') as staged:
+        staged.write_text(to_json(packet))
     return packet
 
 
@@ -348,7 +350,8 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
         'required': ['view', 'video_time', 'target_id', 'u', 'v', 'confidence'], 'additionalProperties': False}}},
         'required': ['labels'], 'additionalProperties': False}
     schema_path = output / 'schema.json'
-    schema_path.write_text(json.dumps(schema))
+    with atomic_write(schema_path) as staged:
+        staged.write_text(json.dumps(schema))
 
     def label_panels(view: int, panels: list[Panel], kind: str, context: str = "") -> list[Landmark]:
         if not panels:
@@ -407,7 +410,8 @@ def annotate(packet: Packet, output: Path, timeout_s: float = 180.0) -> Landmark
                     label = replace(label, u=float(x - 13 + center[0]), v=float(y - 13 + center[1]))
         refined.append(label)
     record = Landmarks(refined, 'gpt-6.1-sol medium fast', 'automatic per-view headset and phone passes; all projected phone crops; source-pixel grid; confidence >=0.6; <=5px dark centroid snap; geometry-filtered phones with automatic missing-target retry', datetime.now(UTC).date().isoformat())
-    (output / 'landmarks.json').write_text(to_json(record))
+    with atomic_write(output / 'landmarks.json') as staged:
+        staged.write_text(to_json(record))
     return record
 
 
@@ -434,7 +438,8 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
                              time.monotonic() - start, thresholds, objective=objective, solver_version=SOLVER_VERSION,
                              rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None, rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash,
                              gate_version=GATE_VERSION)
-        (output / 'result.json').write_text(to_json(result))
+        with atomic_write(output / 'result.json') as staged:
+            staged.write_text(to_json(result))
         return result
     table = read_vp_table()
     fixed_focals = {}
@@ -465,7 +470,8 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
     if cached_labels is not None:
         packet = Packet(segment.id, segment.layout.phones, [])
         record = from_json(Landmarks, cached_labels.read_text())
-        (output / 'landmarks.json').write_text(to_json(record))
+        with atomic_write(output / 'landmarks.json') as staged:
+            staged.write_text(to_json(record))
     else:
         if packet_path.exists():
             packet = from_json(Packet, packet_path.read_text())
@@ -489,22 +495,24 @@ def run_session(segment: catalog_io.Segment, state: CalibSession, output: Path, 
         model = replace(model, camera_rigs=active)
         gate = replace(gate, folds=tuple(replace(fit, camera_rigs=active) for fit in gate.folds))
         assert truth_bytes == tuple((track.times_s.tobytes(), track.joints.tobytes()) for track in inputs.tracks.values()), "Exo fitting must preserve Quest hands"
-        (output / 'candidate.json').write_text(to_json(model))
+        with atomic_write(output / 'candidate.json') as staged:
+            staged.write_text(to_json(model))
         accepted = accepts(gate, thresholds) and model.converged
         gate = replace(gate, passes=accepted, policy=gate.policy + "; gate-v3: mandatory full-fit convergence; at most one failed CV fold; thresholds in result.json")
         assert not np.any(model.head_translation_m), 'Exo-only refinement must not move the Quest world'
         if accepted:
-            (output / 'refinement.json').write_text(to_json(model))
+            with atomic_write(output / 'refinement.json') as staged:
+                staged.write_text(to_json(model))
             updated = replace(state, exo_refinements={**state.exo_refinements, segment.id: model})
             assert updated.oak is state.oak and updated.quest is state.quest and updated.stereo is state.stereo, 'Only exo cameras may change'
-            (output / 'calib.json').write_text(to_json(updated))
+            with atomic_write(output / 'calib.json') as staged:
+                staged.write_text(to_json(updated))
         result = LabelResult(segment.id, 'accepted' if accepted else 'rejected', 'held-out optical/body/hand gate', len(record.labels), time.monotonic() - start, thresholds, gate, objective, SOLVER_VERSION, focal_source,
                              fixed_focals, focal_sources)
-    temporary = result_path.with_suffix('.tmp')
     result = replace(result, rtmw_source=str(rtmw_rrd.resolve()) if rtmw_rrd else None,
                      rtmw_sha256=rtmw_hash, cached_labels_sha256=label_hash, gate_version=GATE_VERSION)
-    temporary.write_text(to_json(result))
-    temporary.replace(result_path)
+    with atomic_write(result_path) as staged:
+        staged.write_text(to_json(result))
     return result
 
 
@@ -529,12 +537,13 @@ def bounded_command(args: list[str], output: Path, segment: str, timeout_s: floa
         return from_json(LabelResult, path.read_text())
     result = LabelResult(segment, 'timeout' if code == -1 else 'failed', 'initial calibration retained; see worker.log', 0,
                          time.monotonic() - start, thresholds, gate_version=GATE_VERSION)
-    path.write_text(to_json(result))
+    with atomic_write(path) as staged:
+        staged.write_text(to_json(result))
     return result
 
 
-def label_session(segment: str, calib_record: Path, output: Path, *, dataset: str = "selfcap-post-dev",
-                  catalog_url: str = "rerun+http://dgx-spark:51235", timeout_s: float = 360.0,
+def label_session(segment: str, calib_record: Path, output: Path, *, dataset: str,
+                  catalog_url: str, timeout_s: float = 360.0,
                   thresholds: GateThresholds = DEFAULT_THRESHOLDS, focal_source: LabelFocalSource = "device-vp", objective: ObjectiveShares = DEFAULT_OBJECTIVE,
                   cached_labels: Path | None = None, rtmw_rrd: Path | None = None) -> LabelResult:
     """Runner API: isolate one session, resume its files, and enforce a hard deadline."""

@@ -1,21 +1,22 @@
 """One-session calibration CLI; typed input adapters are kept at this boundary."""
 
-import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 from dataforge.datasets.selfcap_raw import oak_stereo
 from dataforge.schema import video_path
+from dataforge.writing import atomic_write
 from rerun.catalog import CatalogClient
+from serde import serde
 from serde.json import to_json
 from simplecv.catalog_video import read_catalog_videos
 
 from selfcap_curate import catalog_io
 from selfcap_curate.apis import open_session, session_output
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
-from selfcap_curate.detection_io import read_oak_observations, write_oak_egohand_layer
+from selfcap_curate.detection_io import write_oak_egohand_layer
 from selfcap_curate.device_tables import read_rotations, read_table
 from selfcap_curate.device_vp import vp_focals
 from selfcap_curate.exo_calibration import calibrate
@@ -23,13 +24,37 @@ from selfcap_curate.exo_landmarks import read_landmarks
 from selfcap_curate.exo_refine import FocalSource
 from selfcap_curate.exo_refine_catalog import evaluate, load_inputs, read_focals, usable_hand_frames
 from selfcap_curate.factory import oak_centre, read_quest_block
-from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models, release_cuda_memory
+from selfcap_curate.hands_gpu import detect_episode, pose_models, release_cuda_memory
+from selfcap_curate.head_anchor import PhoneReport
 from selfcap_curate.head_calibration import calibrate_with_head, head_track
 from selfcap_curate.keypoints import read_ego_cameras
 from selfcap_curate.oak_egohand import detect_oak_egohand, detect_oak_views
 from selfcap_curate.oak_mount import fixed_rotation, fixed_rotation_reason, gyro_mount, oak_lenses, solve_oak, solve_oak_stereo
 from selfcap_curate.quest_fit import read_session_episode
 from selfcap_curate.records import OAK_CAMERAS, OakDetections, OakFit, oak_quest_offset_ms
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class HeadReport:
+    """Head-anchored calibration provenance written beside the session record."""
+
+    offsets_m: list[list[float]]
+    """Face landmark offsets in the tracked head frame, in metres."""
+    offsets_source: str
+    """Source of the face landmark offsets."""
+    head_convention: str
+    """Coordinate convention of the source head track."""
+    hands_only_cameras: dict[str, list[float]]
+    """Phone camera parameters before head refinement."""
+    head_cameras: dict[str, list[float]]
+    """Phone camera parameters after head refinement."""
+    clock_corrections_ms: dict[str, float]
+    """Phone clock corrections in milliseconds."""
+    provisional: list[str]
+    """Phones whose initial clocks were guesses."""
+    phones: dict[str, PhoneReport]
+    """Per-phone fit and clock diagnostics."""
 
 
 @dataclass
@@ -46,16 +71,8 @@ class Config:
     """Dataset on ``catalog_url`` that holds the aligned bases (with their ``sapiens2`` layer)."""
     donor_catalog_url: str | None = None
     """Read-only endpoint holding the healthy camera-50 borrow sources when they are not on catalog_url."""
-    oak_observations: Path | None = None
-    """Optional directory of <segment>.parquet EgoHand pixels and box scores; enables weighted dense hand fitting."""
-    oak_free_rotation: bool = False
-    """Fit rotation freely for supplied EgoHand observations; otherwise preserve the production gyro rotation."""
-    oak_method: Literal["egohand", "sapiens"] = "egohand"
-    """OAK alignment observations; Sapiens retains the legacy 32-frame path for comparison."""
     oak_egohand_assets: Path | None = None
     """Optional local EgoHand root with weights/, engines/ and dinov3-bf16.onnx; None takes the pinned downloads and the trtkit cache."""
-    retain_models: bool = False
-    """Keep inference engines between episodes in a long-lived batch worker."""
     exo_refine: bool = False
     """Opt into joint optical calibration when exo_landmarks is present."""
     exo_focal_source: FocalSource = "fit"
@@ -64,11 +81,11 @@ class Config:
     """Typed JSON FocalRecord required by the fixed source."""
     exo_reference_dataset: str | None = None
     """Optional dataset on donor_catalog_url carrying independent RTMW gate observations."""
-    exo_method: Literal["hands", "head"] = "hands"
+    exo_method: Literal["hands", "head"] = "head"
     """Hands-only phone poses, or v3: extend and refine them with the wearer's head track (single-episode sessions)."""
 
 
-def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = None) -> CalibSession:
+def main(config: Config) -> CalibSession:
     """Solve one session and write files only; never register or swap a layer."""
     session, keys, dataset = open_session(
         config.segment_ids, config.key_file, config.catalog_url, output=config.output_dir, protected=(), dataset=config.dataset
@@ -78,8 +95,6 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
         segments = []
         for key in keys:
             segment = catalog_io.open_segment(dataset, key.segment)
-            if session_videos is not None:
-                segment = replace(segment, videos=session_videos[key.segment].videos, hands=session_videos[key.segment].hands)
             segments.append(segment)
             sync = catalog_io.read_time_sync(dataset, key.segment)
             episode = read_session_episode(segment, sync)
@@ -91,54 +106,40 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
         factories = catalog_io.read_factories(first_segment)
         ego, gyro, rotations = factories["ego"], gyro_mount(session, episodes), read_rotations()
         rotation = fixed_rotation(gyro, ego.device_id, rotations)
-        use_egohand = config.oak_observations is not None or config.oak_method == "egohand"
         has_oak_clock = any(oak_quest_offset_ms(episode.sync) is not None for episode in episodes)
         rotation_reason: str | None = None if rotation is not None else fixed_rotation_reason(gyro, ego.device_id, rotations)
-        if config.oak_free_rotation:
-            rotation = None
-            rotation_reason = "explicit free rotation"
-        # EgoHand on all three OAK cameras fits the mount jointly; the RGB-only gyro/free path is the fallback for an
-        # OAK whose factory file lacks the stereo extrinsics, and for supplied observations.
-        lenses = oak_lenses(ego) if config.oak_method == "egohand" and config.oak_observations is None else None
-        if use_egohand and has_oak_clock:
+        # Fit all OAK cameras jointly when stereo extrinsics are present; otherwise use RGB with the gyro mount.
+        lenses = oak_lenses(ego)
+        if has_oak_clock:
             print("OAK_ROTATION", "stereo+rgb joint" if lenses is not None else "free" if rotation is None else "gyro",
                   "" if lenses is not None else rotation_reason or "eligible gyro mount", flush=True)
-            release_cuda_memory(models=not config.retain_models)
+            release_cuda_memory(models=True)
         views: dict[int, dict[str, OakDetections]] = {}
         for index, (episode, segment) in enumerate(zip(episodes, segments, strict=True)):
             if oak_quest_offset_ms(episode.sync) is None:
                 print("OAK_UNPOSED", segment.id, "missing Quest/OAK clock", flush=True)
-                if use_egohand:
-                    write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, {"rgb": episode.oak})
+                write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, {"rgb": episode.oak})
                 continue
-            if config.oak_observations is not None:
-                oak = read_oak_observations(config.oak_observations / f"{segment.id}.parquet", segment.id)
-            elif lenses is not None:
+            if lenses is not None:
                 oak_videos = read_catalog_videos(dataset, segment.id, [video_path(episode.layout.oak_rig, cam) for cam in range(len(OAK_CAMERAS))], "video_time")
-                views[index] = detect_oak_views(episode, dict(zip(OAK_CAMERAS, oak_videos, strict=True)), lenses, config.oak_egohand_assets,
-                                                retain_models=config.retain_models)
+                views[index] = detect_oak_views(episode, dict(zip(OAK_CAMERAS, oak_videos, strict=True)), lenses, config.oak_egohand_assets)
                 oak = views[index]["rgb"]
-            elif config.oak_method == "egohand":
+            else:
                 video = (segment.videos[video_path(episode.layout.oak_rig, 0)] if segment.videos is not None else
                          read_catalog_videos(dataset, segment.id, [video_path(episode.layout.oak_rig, 0)], "capture_time")[0])
                 current = read_ego_cameras(dataset, dataset, segment.id, episode.layout.oak_rig, episode.layout.quest_rig)
                 oak = detect_oak_egohand(episode, video, oak_centre(ego), rotation, config.oak_egohand_assets,
-                                        camera=next((camera for camera in current if camera.cam == 0), None), retain_models=config.retain_models)
-            else:
-                oak = detect_oak_hands_gpu(dataset, episode.sync, episode.quest, episode.layout, pose_models()[1],
-                                          video=None if segment.videos is None else segment.videos[video_path(episode.layout.oak_rig, 0)])
+                                        camera=next((camera for camera in current if camera.cam == 0), None))
             episodes[index] = replace(episode, oak=oak)
-            if use_egohand:
-                write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, views.get(index, {"rgb": oak}))
+            write_oak_egohand_layer(output / "egohand" / f"{segment.id}.rrd", segment.id, episode.layout.oak_rig, views.get(index, {"rgb": oak}))
         if not has_oak_clock:
             oak_fit = OakFit(session, False, ego.device_id, rotation_source="unposed: missing Quest/OAK clock",
-                             observation_source="egohand" if use_egohand else "sapiens")
+                             observation_source="egohand")
         elif lenses is not None:
             oak_fit = solve_oak_stereo(session, [episodes[i] for i in views], list(views.values()), lenses, ego.device_id)
         else:
             oak_fit = replace(
-                solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=use_egohand,
-                          gate_image_speed=config.oak_observations is not None),
+                solve_oak(session, episodes, oak_centre(ego), ego.device_id, rotation, weighted=True, gate_image_speed=False),
                 rotation_source="free" if rotation is None else "gyro", rotation_reason=rotation_reason,
             )
         # v3 uses the image-only vanishing-point focal of each device (median for unmeasured ones): the pooled
@@ -176,11 +177,11 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
                                            {p: offsets_ms["exo/" + p] for p in episode.layout.phones}, provisional)
                 hands_only = {p: c.camera.parameters.tolist() for p, c in state.exo.phones.items() if c.camera is not None}
                 state = replace(state, exo=head.exo)
-                (output / f"{session}.head.json").write_text(json.dumps({
-                    "offsets_m": head.offsets.tolist(), "offsets_source": head.offsets_source, "head_convention": track.convention,
-                    "hands_only_cameras": hands_only, "head_cameras": {p: c.camera.parameters.tolist() for p, c in head.exo.phones.items() if c.camera is not None},
-                    "clock_corrections_ms": head.clock_corrections_ms, "provisional": sorted(provisional),
-                    "phones": {p: asdict(r) for p, r in head.phones.items()}}, indent=1))
+                with atomic_write(output / f"{session}.head.json") as staged:
+                    staged.write_text(to_json(HeadReport(
+                        head.offsets.tolist(), head.offsets_source, track.convention, hands_only,
+                        {p: c.camera.parameters.tolist() for p, c in head.exo.phones.items() if c.camera is not None},
+                        head.clock_corrections_ms, sorted(provisional), head.phones)))
                 if head.clock_corrections_ms:
                     print("HEAD_CLOCK", segment.id, head.clock_corrections_ms, flush=True)
                 print("HEAD_CALIBRATION", segment.id, {p: (r.method, r.face_median_px) for p, r in head.phones.items()}, flush=True)
@@ -222,5 +223,6 @@ def main(config: Config, *, session_videos: catalog_io.SessionVideos | None = No
             state = replace(state, exo_refinements=refinements)
         for motion in episodes:
             write_calib_layer(output / motion.sync.episode_key.rrd_name, state, motion, gate=gates.get(motion.sync.episode_key.segment))
-        (output / f"{session}.json").write_text(to_json(state))
+        with atomic_write(output / f"{session}.json") as staged:
+            staged.write_text(to_json(state))
         return state

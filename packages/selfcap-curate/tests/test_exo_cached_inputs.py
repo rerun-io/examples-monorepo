@@ -12,14 +12,14 @@ from selfcap_curate.keypoints import HEADSET_COVERED
 
 def test_cached_cli_requires_original_rtmw_recording(tmp_path):
     with pytest.raises(ValueError, match="rtmw"):
-        Config("episode", tmp_path/'calib.json', tmp_path/'out', cached_labels=tmp_path/'labels.json')
+        Config("episode", tmp_path/'calib.json', tmp_path/'out', dataset="test", cached_labels=tmp_path/'labels.json')
 
 
 def test_cached_cli_defaults_to_gate_v3_and_forwards_fold_rule(monkeypatch, tmp_path):
     import selfcap_curate.exo_label as module
 
     config = Config('episode', tmp_path/'calib.json', tmp_path/'out',
-                    cached_labels=tmp_path/'labels.json', rtmw_rrd=tmp_path/'original.rrd')
+                    dataset="test", cached_labels=tmp_path/'labels.json', rtmw_rrd=tmp_path/'original.rrd')
     assert config.thresholds.sapiens_max_regression_px == 5.0
     assert config.thresholds.max_nonconverged_cv_folds == 1
     assert config.thresholds.require_full_fit_convergence
@@ -31,7 +31,7 @@ def test_cached_cli_defaults_to_gate_v3_and_forwards_fold_rule(monkeypatch, tmp_
 
     monkeypatch.setattr(module, 'bounded_command', capture)
     result = module.label_session(config.segment, config.calib_record, config.output_dir,
-                                  cached_labels=config.cached_labels, rtmw_rrd=config.rtmw_rrd)
+                                  dataset=config.dataset, catalog_url=config.catalog_url, cached_labels=config.cached_labels, rtmw_rrd=config.rtmw_rrd)
     assert result.gate_version == 'gate-v3'
     assert calls[0][calls[0].index('--thresholds.sapiens-max-regression-px') + 1] == '5.0'
     assert calls[0][calls[0].index('--thresholds.max-nonconverged-cv-folds') + 1] == '1'

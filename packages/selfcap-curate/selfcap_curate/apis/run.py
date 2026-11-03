@@ -212,6 +212,16 @@ def last_meaningful_line(log_path: Path) -> str:
     return meaningful[-1][:MAX_REASON_LENGTH] if meaningful else "its log is empty"
 
 
+def missing_output_reason(log_path: Path, step: StepName, segment: str, output: Path) -> str:
+    """Use this segment's explicit skip reason when a successful process wrote no output."""
+    marker: str = f"{step.upper()}_SKIP"
+    for line in reversed(log_path.read_text(errors="replace").splitlines()):
+        fields: list[str] = line.split(maxsplit=2)
+        if len(fields) == 3 and fields[0] == marker and fields[1].removeprefix("selfcap__") == segment.removeprefix("selfcap__"):
+            return line.strip()[:MAX_REASON_LENGTH]
+    return f"exit 0 but no {output}"
+
+
 def reported_details(log_path: Path, markers: tuple[str, ...]) -> str:
     """The details of the log's marker lines, each after its marker and key, as one suffix."""
     if not markers:
@@ -260,7 +270,7 @@ def run_each_unit(run: Run, step: SegmentStep, segments: list[str]) -> list[str]
                 run.log(f"{step.name} ok   {segment} ({elapsed} s){reported_details(log_path, step.detail_markers)}")
                 passed.append(segment)
             else:
-                reason: str = last_meaningful_line(log_path) if code != 0 else f"exit 0 but no {output}"
+                reason: str = last_meaningful_line(log_path) if code != 0 else missing_output_reason(log_path, step.name, segment, output)
                 run.log(f"{step.name} FAIL {segment} ({elapsed} s): {reason}")
         return passed
 
@@ -280,7 +290,7 @@ def run_one_process(run: Run, step: SegmentStep, segments: list[str]) -> list[st
             run.log(f"{step.name} ok   {segment}")
             survivors.append(segment)
         else:
-            reason: str = last_meaningful_line(log_path) if code != 0 else f"exit 0 but no {output}"
+            reason: str = last_meaningful_line(log_path) if code != 0 else missing_output_reason(log_path, step.name, segment, output)
             run.log(f"{step.name} FAIL {segment}: {reason}; see {log_path}")
     return survivors
 

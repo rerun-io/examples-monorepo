@@ -21,9 +21,9 @@ class Config:
     """Initial unrefined CalibSession JSON."""
     output_dir: Path
     """Persistent packet, labels, gate and accepted refinement directory."""
-    dataset: str = 'selfcap-post-dev'
+    dataset: str
     """Read-only dataset carrying base, initial calibration, Sapiens and RTMW."""
-    catalog_url: str = 'rerun+http://dgx-spark:51235'
+    catalog_url: str = catalog_io.CATALOG_URL
     """Read-only catalog URL."""
     timeout_s: float = 360.0
     """Hard wall-clock deadline including all child Sol calls."""

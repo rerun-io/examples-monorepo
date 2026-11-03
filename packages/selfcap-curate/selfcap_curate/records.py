@@ -10,6 +10,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 from dataforge.records import read_json
 from dataforge.schema import video_path
+from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from serde import SerdeError, from_dict, serde
@@ -212,7 +213,8 @@ def read_sync(path: Path) -> TimeSync:
 
 def write_sync(path: Path, record: TimeSync) -> None:
     """Write a machine JSON record (missing measurements are null)."""
-    path.write_text(to_json(record))
+    with atomic_write(path) as staged:
+        staged.write_text(to_json(record))
 
 
 def read_frozen_sync(path: Path, *, text: str | None = None) -> TimeSync:

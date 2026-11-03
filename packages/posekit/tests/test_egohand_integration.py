@@ -4,16 +4,35 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import torch
 
 pytest.importorskip("egohand_inference", reason="requires the egohand Pixi environment")
 
-from posekit.apis.egohand_selfcap import camera_from_window
+from jaxtyping import Float64
+from numpy import ndarray
+from simplecv.rrd_query_utils import first_valid_value
+
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
+from posekit.models.egohand_geometry import OAKCamera
 
 pytestmark = pytest.mark.integration
+
+CAMERA = "/world/rig_04/cam_00/pinhole"
+
+def camera_from_window(table: pa.Table) -> OAKCamera:
+    """Read the catalog calibration; matrix components are column-major."""
+    intrinsics: Float64[ndarray, "3 3"] = (
+        np.asarray(first_valid_value(table[f"{CAMERA}:Pinhole:image_from_camera"]), dtype=np.float64).reshape(3, 3).T
+    )
+    distortion: Float64[ndarray, "14"] = np.asarray(
+        first_valid_value(table[f"{CAMERA}:simplecv.components.DistortionCoefficients"]), dtype=np.float64
+    ).reshape(14)
+    resolution = first_valid_value(table[f"{CAMERA}:Pinhole:resolution"])
+    return OAKCamera(intrinsics, distortion, int(resolution[0]), int(resolution[1]))
+
 
 
 def test_tensorrt_detector_preserves_batched_anatomical_detections() -> None:

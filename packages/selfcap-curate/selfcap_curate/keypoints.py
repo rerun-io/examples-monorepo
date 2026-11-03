@@ -43,6 +43,7 @@ from selfcap_curate.detection_io import COCO133_CLASS
 from selfcap_curate.display_style import CONFIDENCE_3D_COLOR_FLOOR, DISPLAY_JOINTS, log_display_skeleton
 from selfcap_curate.quest_fit import load_quest_hands
 from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, TimeSync, oak_quest_offset_ms
+from selfcap_curate.temporal_keypoints import BODY, bridge_short_gaps, responsive_body
 
 PoseModel: TypeAlias = Literal["rtmw", "sapiens2"]
 QuestHandTrack: TypeAlias = tuple[Float64[ndarray, "q"], Float32[ndarray, "q 133 3"]]
@@ -66,7 +67,6 @@ class Triangulated:
     confidence: Float32[ndarray, "j"]  # Kineo pairwise reprojection score over the views that saw the joint (0-1).
     inliers: Bool[ndarray, "v j"] | None = None
     max_reprojection_px: Float32[ndarray, "j"] | None = None
-
 
 
 def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str, oak_rig: int, quest_rig: int) -> list[EgoCamera]:
@@ -345,6 +345,13 @@ def support_for_points(result: Keypoints3D, xyz: Float32[ndarray, "n 133 3"]) ->
     )
 
 
+def stable_body(result: Keypoints3D, baseline: Float32[ndarray, "n 133 3"]) -> Float32[ndarray, "n 133 3"]:
+    """Filter per-frame triangulated body positions; preserve the caller's hand treatment."""
+    output: Float32[ndarray, "n 133 3"] = baseline.copy()
+    output[:, BODY] = responsive_body(result.xyz[:, BODY], result.rate)
+    return output
+
+
 def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
     """Smooth measured points within their geometric support, then bridge short gaps with reduced confidence."""
     if result.rate < SMOOTH_MIN_RATE_HZ:
@@ -354,8 +361,6 @@ def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
         return replace(result, xyz=smooth)  # Synthetic callers without camera evidence.
     measured: TriangulationBatch = support_for_points(result, smooth)
     xyz: Float32[ndarray, "n 133 3"] = np.where((measured.n_views >= 2)[..., None], smooth, result.xyz)
-    from selfcap_curate.temporal_keypoints import bridge_short_gaps, stable_body
-
     # Jump replacement and gap bridging come after the triangulation's bone check: check the bones again, so a bridge
     # to a wrong edge point is not written (a044c36b: thighs up to 1.5 m, 80% of them bridged).
     xyz = drop_bone_outliers(stable_body(result, xyz), result.confidence)
@@ -515,6 +520,7 @@ def write_keypoints(
                 confidence=result.confidence,
                 color_range=(CONFIDENCE_3D_COLOR_FLOOR, 1.0),
                 entity_name=projection_name,
+                write_property=model == "rtmw",
                 camera_model="phones: pinhole with radial k1, k2 (selfcap-curate exo calibration)"
                 + ("; OAK: OpenCV Brown-Conrady, 14 coefficients (factory)" if ego else ""),
             )

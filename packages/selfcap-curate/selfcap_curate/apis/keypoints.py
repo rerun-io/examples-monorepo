@@ -14,7 +14,6 @@ from selfcap_curate.catalog_io import (
     CATALOG_URL,
     DATASET_NAME,
     Segment,
-    SessionVideos,
     median_rate,
     open_segment,
     read_catalog_hands,
@@ -57,6 +56,8 @@ class KeypointEpisode:
     """Canonical episode and output names."""
     segment: Segment
     """Base segment and its discovered physical layout."""
+    videos: dict[str, CatalogVideo]
+    """Phone packets already read for centres and native-rate measurement."""
     sync: TimeSync
     """Validated alignment record."""
     rate: float
@@ -69,7 +70,7 @@ class KeypointEpisode:
     """Camera-centre overlays sampled at each exo video frame time."""
 
 
-def main(config: Config, *, session_videos: SessionVideos | None = None) -> None:
+def main(config: Config) -> None:
     """Infer then triangulate into one keypoints layer per episode. Never register or swap."""
     _, keys, dataset = open_session(
         config.segment_ids,
@@ -88,8 +89,6 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
         calibration = server.client().get_dataset(DATASET_NAME)
         for key in keys:
             segment = open_segment(dataset, key.segment)
-            if session_videos is not None:
-                segment = replace(segment, videos=session_videos[key.segment].videos, hands=session_videos[key.segment].hands)
             try:
                 cameras = read_cameras(calibration, segment.id, segment.layout.phones)
             except ValueError as error:
@@ -107,7 +106,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
                 # A phone's video_time is its capture_time plus one constant, so these packets hold the native spacing: no second read.
                 rate: float = config.rate if config.rate is not None else median_rate(videos)
                 print("KEYPOINTS_RATE", key, rate, flush=True)
-                processable.append(KeypointEpisode(key, segment, sync, rate, cameras, ego, centers))
+                processable.append(KeypointEpisode(key, segment, videos, sync, rate, cameras, ego, centers))
     if not processable:
         return
     detector, pose = keypoint_models() if config.model == "rtmw" else keypoint_models(config.model)
@@ -115,7 +114,7 @@ def main(config: Config, *, session_videos: SessionVideos | None = None) -> None
     for episode in processable:
         key = episode.key
         with timer.stage(f"{key}/detect"):
-            detections = detect_keypoints(episode.segment, detector, pose, rate=episode.rate, sync=episode.sync)
+            detections = detect_keypoints(episode.segment, detector, pose, rate=episode.rate, sync=episode.sync, videos=episode.videos)
         if episode.segment.hands is None and (episode.sync.offsets_ms or {}).get("quest_pose") is not None:
             episode = replace(episode, segment=replace(episode.segment, hands=read_catalog_hands(episode.segment)))
         with timer.stage(f"{key}/triangulate"):

@@ -9,6 +9,7 @@ import numpy as np
 import rerun as rr
 from dataforge.logging_toolkit import time_column
 from dataforge.schema import pinhole_path
+from dataforge.writing import atomic_write
 from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, OptimizationProfile
 from serde import serde
@@ -85,8 +86,9 @@ def write_landmarks(path: Path, segment: str, record: Landmarks) -> None:
             ],
         ))
     path.parent.mkdir(parents=True, exist_ok=True)
-    LazyChunkStream.from_iter(chunks).collect(optimize=OptimizationProfile.OBJECT_STORE).write_rrd(
-        str(path), application_id="selfcap-exo-landmarks", recording_id=segment)
+    with atomic_write(path, exclusive=True) as staged:
+        LazyChunkStream.from_iter(chunks).collect(optimize=OptimizationProfile.OBJECT_STORE).write_rrd(
+            str(staged), application_id="selfcap-exo-landmarks", recording_id=segment)
 
 
 def read_landmarks(dataset: DatasetEntry, segment: str) -> Landmarks | None:

@@ -12,9 +12,11 @@ import numpy as np
 import onnx
 import torch
 from dataforge.clocks import nearest_framesets
+from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from onnx import numpy_helper
+from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR
 from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
@@ -120,9 +122,9 @@ def decode_wanted(decoder: VideoDecoder, indices: Int64[ndarray, "n"], batch: in
         yield held
 
 
-def plan_episode(segment: Segment, rate: float, sync: TimeSync) -> FramePlan:
+def plan_episode(segment: Segment, rate: float, sync: TimeSync, videos: dict[str, CatalogVideo] | None = None) -> FramePlan:
     """Read named segment streams and prepare original-frame selections."""
-    videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time", sync=sync)
+    videos = read_phone_videos(segment, timeline="video_time", sync=sync) if videos is None else videos
     offsets: dict[str, float | None] = sync.offsets_ms or {}
     videos = {p: v for p, v in videos.items() if offsets.get("exo/" + p) is not None}
     return plan_frames(videos, rate)
@@ -136,9 +138,10 @@ def detect_keypoints(
     rate: float,
     *,
     sync: TimeSync,
+    videos: dict[str, CatalogVideo] | None = None,
 ) -> Keypoints2D:
     """Infer three people per phone on the aligned grid; dense plans track, sparse plans detect every sample in batches of eight."""
-    plan: FramePlan = plan_episode(segment, rate, sync)
+    plan: FramePlan = plan_episode(segment, rate, sync, videos)
     if rate >= TRACK_MIN_RATE_HZ:
         return Keypoints2D(plan.times, detect_tracked(plan, detector, pose, refresh=round(rate)), rate)
     views: dict[str, ViewDetections] = {}
@@ -293,7 +296,7 @@ def track_streams(
 
 def dynamic_yolox(source: Path) -> Path:
     """Make only the five reviewed YOLOX-m batch reshape constants dynamic."""
-    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", "~/.cache/selfcap-curate/onnx")).expanduser()
+    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", str(DEFAULT_ONNX_CACHE_DIR))).expanduser()
     directory.mkdir(parents=True, exist_ok=True)
     dest: Path = directory / (source.stem + "_dynamic_batch_v1.onnx")
     if dest.exists():
@@ -334,13 +337,12 @@ def fp16_trunk(source: Path) -> Path:
 
     On cc808233 ep001 it cut detect from 9.7 to 7.4 s; 3D moved 1.5 mm median (p90 5.5 mm) and jitter stayed 1.68 mm.
     """
-    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", "~/.cache/selfcap-curate/onnx")).expanduser()
+    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", str(DEFAULT_ONNX_CACHE_DIR))).expanduser()
     directory.mkdir(parents=True, exist_ok=True)
     dest: Path = directory / (source.stem + "_fp16trunk_v1.onnx")
     if not dest.exists():
-        partial = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
-        onnx.save(fp16_conv_trunk(onnx.load(source)), str(partial))
-        partial.replace(dest)
+        with atomic_write(dest) as staged:
+            onnx.save(fp16_conv_trunk(onnx.load(source)), str(staged))
     return dest
 
 

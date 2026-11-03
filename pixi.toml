@@ -1333,11 +1333,6 @@ warp-lang = "==1.11.1"
 [feature.posekit-egohand.activation.env]
 PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
 
-[feature.posekit-egohand.tasks.egohand-selfcap]
-cmd = "python tools/demos/egohand_selfcap.py"
-cwd = "packages/posekit"
-description = "Compare EgoHand on the fixed SelfCap OAK window"
-
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 
@@ -1611,26 +1606,6 @@ selfcap-soma = { path = "packages/selfcap-soma", editable = true }
 PACKAGE_DIR = "packages/selfcap-soma"
 PYREFLY_TARGET = "selfcap_soma"
 
-[feature.selfcap-soma.tasks.soma-fit]
-cmd = "python tools/fit.py"
-cwd = "packages/selfcap-soma"
-
-[feature.selfcap-soma.tasks.soma-evaluate]
-cmd = "python tools/evaluate.py"
-cwd = "packages/selfcap-soma"
-
-[feature.selfcap-soma.tasks.soma-overlay]
-cmd = "python tools/overlay.py"
-cwd = "packages/selfcap-soma"
-
-[feature.selfcap-soma.tasks.soma-repair-hands]
-cmd = "python tools/repair_hands.py"
-cwd = "packages/selfcap-soma"
-
-[feature.selfcap-soma.tasks.soma-shoulders]
-cmd = "python tools/shoulders.py"
-cwd = "packages/selfcap-soma"
-
 [feature.selfcap-soma.tasks.soma-batch]
 cmd = "python tools/batch.py"
 cwd = "packages/selfcap-soma"
@@ -1709,13 +1684,6 @@ cwd = "packages/selfcap-curate"
 env = { OMP_NUM_THREADS = "1" }
 description = "Align explicit fresh-base episodes of one session into local copies (no catalog writes)"
 
-[feature.selfcap-curate.tasks.selfcap-post]
-cmd = "python tools/apps/post.py"
-cwd = "packages/selfcap-curate"
-# Same pool as selfcap-align: one BLAS thread per tracked frame pair; expandable segments let several sessions share the GPU.
-env = { OMP_NUM_THREADS = "1", PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True" }
-description = "Align, calibrate and keypoint one session in one process into local copies (no catalog writes)"
-
 [feature.selfcap-curate.tasks.selfcap-exo-label]
 cmd = "python tools/apps/exo_label.py"
 cwd = "packages/selfcap-curate"
@@ -1727,12 +1695,6 @@ cmd = "python tools/apps/exo_refine.py"
 cwd = "packages/selfcap-curate"
 env = { OMP_NUM_THREADS = "1" }
 description = "Fit optical landmarks from a named catalog dataset and report held-out transfer"
-
-[feature.selfcap-curate.tasks.selfcap-dev-cycle]
-cmd = "python tools/apps/dev_cycle.py"
-cwd = "packages/selfcap-curate"
-env = { OMP_NUM_THREADS = "1", PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True" }
-description = "Run post and publish generated layers to an explicitly named dev dataset"
 
 [feature.selfcap-curate.tasks.selfcap-preview]
 cmd = "python tools/apps/preview.py"

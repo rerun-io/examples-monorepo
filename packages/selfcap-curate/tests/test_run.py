@@ -426,12 +426,21 @@ def test_the_reason_skips_the_blank_lines_and_box_borders_after_the_failure(conf
     assert f"calib FAIL {SEGMENT_B} (0 s): RuntimeError: head fit diverged" in progress_messages(tmp_path / "run")
 
 
-def test_a_clean_exit_without_the_output_file_fails_the_segment(config: Config, pipeline: FakePipeline, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(WRITERS, "selfcap-keypoints", fake_nothing)
+@pytest.mark.parametrize("skip_reason", [None, "fewer than two calibrated and synced phones"])
+def test_a_clean_exit_without_the_output_file_fails_the_segment(
+    config: Config, pipeline: FakePipeline, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skip_reason: str | None,
+) -> None:
+    def skip(_: FakePipeline, __: dict[str, str], ___: list[str], segment: str, log_path: Path) -> int:
+        if skip_reason is not None:
+            log_path.write_text(f"KEYPOINTS_SKIP {segment.removeprefix('selfcap__')} {skip_reason}\nKEYPOINTS_TIME other 100\n")
+        return 0
+
+    monkeypatch.setitem(WRITERS, "selfcap-keypoints", skip)
     with pytest.raises(SystemExit, match="no segments left after keypoints"):
         run.main(config)
     root: Path = tmp_path / "run"
-    assert f"keypoints FAIL {SEGMENT_A} (0 s): exit 0 but no {root}/keypoints/{SEGMENT_A}/{SEGMENT_A}.rrd" in progress_messages(root)
+    reason = f"KEYPOINTS_SKIP {SEGMENT_A.removeprefix('selfcap__')} {skip_reason}" if skip_reason else f"exit 0 but no {root}/keypoints/{SEGMENT_A}/{SEGMENT_A}.rrd"
+    assert f"keypoints FAIL {SEGMENT_A} (0 s): {reason}" in progress_messages(root)
 
 
 def test_zero_survivors_stop_the_run_nonzero_with_the_counts(config: Config, pipeline: FakePipeline, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

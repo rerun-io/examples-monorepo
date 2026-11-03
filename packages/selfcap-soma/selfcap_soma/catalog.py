@@ -1,14 +1,15 @@
 """Read one bounded SelfCap window without catalog writes."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
+from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, joint_poses_from_table, quest_hand_path
 from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry
+from rerun.catalog import DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation, Slerp
 from serde import serde
 from serde.json import from_json
@@ -38,13 +39,37 @@ def rig_paths_from_kinds(kinds: dict[str, str]) -> RigPaths:
     return RigPaths(exo, oak[0], quest[0])
 
 
-def read_rigs(dataset: DatasetEntry, segment: str) -> RigPaths:
-    """Read static rig-kind metadata in one query."""
-    view = dataset.filter_segments(segment)
-    columns = [name for name in view.schema().column_names() if name.startswith("/world/rig_") and name.endswith(":kind") and name.count("/") == 2]
+def read_rigs(view: DatasetSelection, columns: list[str]) -> RigPaths:
+    """Read static rig-kind metadata using the segment schema already fetched."""
+    columns = [name for name in columns if name.startswith("/world/rig_") and name.endswith(":kind") and name.count("/") == 2]
     table = view.filter_contents([name.split(":")[0] for name in columns]).reader(index=None).select(*columns).to_arrow_table()
     kinds = {name.split(":")[0]: str(table[name].drop_null()[0].as_py()[0]) for name in columns if len(table[name].drop_null())}
     return rig_paths_from_kinds(kinds)
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentCatalog:
+    view: DatasetSelection
+    """One segment selection reused by every observation and overlay query."""
+    columns: list[str]
+    """Schema column names fetched once for this segment."""
+    rigs: RigPaths
+    """Physical roles from the segment's static rig metadata."""
+
+
+def open_segment(dataset: DatasetEntry, segment: str) -> SegmentCatalog:
+    """Open a segment and discover its schema and rig roles once."""
+    view = dataset.filter_segments(segment)
+    columns = view.schema().column_names()
+    return SegmentCatalog(view, columns, read_rigs(view, columns))
+
+
+def floats(column: pa.ChunkedArray, *shape: int) -> Float64[ndarray, "..."]:
+    """Read nested numeric Arrow buffers, retaining slice offsets and the requested shape."""
+    values = column.combine_chunks()
+    while pa.types.is_list(values.type) or pa.types.is_fixed_size_list(values.type):
+        values = values.flatten()
+    return values.to_numpy(zero_copy_only=False).astype(np.float64).reshape(*shape)
 
 
 def exo_columns(columns: list[str], source: ExoSource) -> tuple[str, str]:
@@ -111,6 +136,8 @@ class Observations:
     """Fixed catalog Quest offset."""
     support: Int64[ndarray, "n 133"] | None = None
     """Geometric inlier-view counts, when supplied by the triangulation layer."""
+    hand_poses: dict[str, QuestJointPoses] = field(default_factory=dict)
+    """Raw joint poses from the same capture_time materialization as hands and head."""
 
 
 def subset(data: Observations, mask: Bool[ndarray, "n"]) -> Observations:
@@ -125,21 +152,6 @@ def subset(data: Observations, mask: Bool[ndarray, "n"]) -> Observations:
         head_rotations=data.head_rotations[mask],
         support=data.support[mask] if data.support is not None else None,
     )
-
-
-TORSO_JOINTS: list[int] = [5, 6, 11, 12]
-"""COCO shoulders and hips."""
-SHOULDER_JOINTS: list[int] = [5, 6]
-MIN_SHOULDER_VIEWS: int = 3
-"""Fewest supporting views on each shoulder of a well-observed frame. The hips are only required to be triangulated:
-they reach three views on 3-6.5 % of frames (easy26, d31), so a three-view hip rule selected 0-1 frames per segment."""
-
-
-def well_observed_torso(data: Observations) -> Bool[ndarray, "n"]:
-    """Frames whose four torso joints are all finite and whose shoulders each have at least MIN_SHOULDER_VIEWS views."""
-    if data.support is None:
-        raise ValueError("the torso gate needs support_view_count, which this triangulation layer does not hold")
-    return np.isfinite(data.exo[:, TORSO_JOINTS]).all((1, 2)) & (data.support[:, SHOULDER_JOINTS].min(1) >= MIN_SHOULDER_VIEWS)
 
 
 def seconds(values: pa.ChunkedArray) -> Float64[ndarray, "n"]:
@@ -194,18 +206,16 @@ def rdf_head(quaternions: Float64[ndarray, "p 4"]) -> Float64[ndarray, "p 4"]:
     return np.stack([w, z, -y, -x], axis=1)
 
 
-def read_window(url: str, dataset: str, segment: str, start: float, end: float, stride: int, source: ExoSource = "rtmw") -> Observations:
-    """Use one materialization per entity group, with window pushdown."""
-    entry = CatalogClient(url).get_dataset(dataset)
-    view = entry.filter_segments(segment)
-    rigs = read_rigs(entry, segment)
+def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, source: ExoSource = "rtmw") -> Observations:
+    """Push down the triangulation window and read all Quest streams in one query."""
+    view, rigs = catalog.view, catalog.rigs
     sync_table = view.filter_contents(["/__properties/time_sync"]).reader(index=None).to_arrow_table()
     sync_column = next(name for name in sync_table.column_names if name.endswith(":time_sync:record_json"))
     sync_text = sync_table[sync_column].drop_null()[0].as_py()[0]
     sync = from_json(SyncRecord, sync_text)
     offset = sync.offsets_ms["quest_pose"]
 
-    columns = view.schema().column_names()
+    columns = catalog.columns
     position, confidence = exo_columns(columns, source)
     exo_path = position.split(":", 1)[0]
     support_column = exo_path + ":support_view_count"
@@ -224,32 +234,32 @@ def read_window(url: str, dataset: str, segment: str, start: float, end: float, 
     times = seconds(table["video_time"])
     if len(times) < 3:
         raise ValueError("window needs at least three triangulated frames")
-    exo = np.asarray(table[position].to_pylist(), dtype=np.float64)
-    scores = np.asarray(table[confidence].to_pylist(), dtype=np.float64).reshape(-1, 133)
+    exo = floats(table[position], -1, 133, 3)
+    scores = floats(table[confidence], -1, 133)
     head_sample, hand_sample = quest_sample_times(times, offset)
 
     hand_path, head_path = "/world/gt/coco133_xyz", rigs.quest
     hands_column = f"{hand_path}:Points3D:positions"
     translation = f"{head_path}:Transform3D:translation"
     quaternion = f"{head_path}:Transform3D:quaternion"
-    raw = (
-        view.filter_contents([hand_path, head_path])
-        .reader(index="capture_time")
-        .filter(col("capture_time").cast(pa.int64()) >= lit(int((head_sample[0] - 0.1) * 1e9)))
-        .filter(col("capture_time").cast(pa.int64()) <= lit(int((hand_sample[-1] + 0.1) * 1e9)))
-        .select("capture_time", hands_column, translation, quaternion)
-        .to_arrow_table()
-    )
+    joint_entities = {side: quest_hand_path(side) for side in QUEST_HAND_SIDES}
+    joint_columns = [name for name in columns if any(name.startswith(entity + ":InstancePoses3D:") for entity in joint_entities.values())]
+    raw = (view.filter_contents([hand_path, head_path, *joint_entities.values()]).reader(index="capture_time")
+           .select("capture_time", hands_column, translation, quaternion, *joint_columns).to_arrow_table())
+    hand_poses = {side: joint_poses_from_table(raw, entity, "capture_time") for side, entity in joint_entities.items()
+                  if entity + ":InstancePoses3D:translations" in raw.column_names}
+    stamps = raw["capture_time"].cast(pa.int64()).to_numpy()
+    raw = raw.take(np.flatnonzero((stamps >= int((head_sample[0] - 0.1) * 1e9)) & (stamps <= int((hand_sample[-1] + 0.1) * 1e9))))
     hand_table = raw.filter(raw[hands_column].is_valid())
     head_table = raw.filter(raw[quaternion].is_valid())
     if len(hand_table) < 2 or len(head_table) < 2:
-        raise ValueError(f"{dataset}/{segment}: need at least two Quest hand and head samples")
+        raise ValueError("need at least two Quest hand and head samples")
     ht = seconds(head_table["capture_time"])
-    hp = np.asarray(head_table[translation].to_pylist(), dtype=np.float64).reshape(-1, 3)
-    hq = np.asarray(head_table[quaternion].to_pylist(), dtype=np.float64).reshape(-1, 4)
+    hp = floats(head_table[translation], -1, 3)
+    hq = floats(head_table[quaternion], -1, 4)
     keep = np.r_[True, np.diff(ht) > 0.0]
     ht, hp, hq = ht[keep], hp[keep], rdf_head(hq[keep])
-    hands = interpolate_hands(seconds(hand_table["capture_time"]), np.asarray(hand_table[hands_column].to_pylist(), dtype=np.float64), hand_sample)
+    hands = interpolate_hands(seconds(hand_table["capture_time"]), floats(hand_table[hands_column], -1, 133, 3), hand_sample)
     positions, rotations = interpolate_head(ht, hp, hq, head_sample)
-    support = np.asarray(table[support_column].to_pylist(), dtype=np.int64) if support_column in table.column_names else None
-    return Observations(times, exo, scores, hands, positions, rotations, offset, support)
+    support = floats(table[support_column], -1, 133).astype(np.int64) if support_column in table.column_names else None
+    return Observations(times, exo, scores, hands, positions, rotations, offset, support, hand_poses)

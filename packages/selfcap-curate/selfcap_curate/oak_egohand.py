@@ -1,4 +1,7 @@
-"""Sample visible slow Quest fingers, then independently detect and reconstruct EgoHand."""
+"""Sample visible slow Quest fingers, then independently detect and reconstruct EgoHand.
+
+Use seeded sampling of 64 frames so calibration samples are reproducible.
+"""
 
 import gc
 import time

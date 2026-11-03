@@ -1,6 +1,6 @@
 import torch
 
-from selfcap_soma.losses import robust_points
+from selfcap_soma.losses import robust_points, symmetry_penalty
 
 
 def test_robust_points_masks_nan_and_has_finite_gradient():
@@ -64,3 +64,12 @@ def test_body_acceleration_uses_timestamps_and_does_not_bridge_gaps():
     cost.backward()
     assert torch.isfinite(jitter.grad).all()
     assert body_acceleration_penalty(jitter, torch.full((3,), 0.2)) == 0
+
+
+def test_symmetry_has_rest_zero_and_finite_gradients() -> None:
+    assert symmetry_penalty(torch.tensor([[0.4, 0.4, 0.3, 0.3, 0.45, 0.45, 0.4, 0.4]])).item() == 0.0
+    unequal = torch.tensor([[0.35, 0.45, 0.3, 0.3, 0.45, 0.45, 0.4, 0.4]], requires_grad=True)
+    penalty = symmetry_penalty(unequal)
+    assert penalty.item() > 1.0
+    penalty.backward()
+    assert torch.isfinite(unequal.grad).all()

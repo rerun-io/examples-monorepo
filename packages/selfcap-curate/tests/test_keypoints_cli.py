@@ -41,6 +41,7 @@ def test_keypoints_cli_rejects_invalid_session_and_existing_targets(tmp_path: Pa
 def test_dynamic_export_preserves_posekit_source_in_default_cache(tmp_path, monkeypatch, workers):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("POSEKIT_ONNX_CACHE", raising=False)
+    monkeypatch.setattr("selfcap_curate.keypoints_gpu.DEFAULT_ONNX_CACHE_DIR", tmp_path / ".cache/posekit/onnx")
     shared = tmp_path / "posekit"
     shared.mkdir()
     nodes, constants = [], []
@@ -59,7 +60,7 @@ def test_dynamic_export_preserves_posekit_source_in_default_cache(tmp_path, monk
     source = shared / "model.onnx"
     onnx.save(model, source)
     before = source.read_bytes()
-    destination = tmp_path / ".cache/selfcap-curate/onnx/model_dynamic_batch_v1.onnx"
+    destination = tmp_path / ".cache/posekit/onnx/model_dynamic_batch_v1.onnx"
     save = onnx.save
     barrier = Barrier(workers)
     saved_paths = []
@@ -79,7 +80,7 @@ def test_dynamic_export_preserves_posekit_source_in_default_cache(tmp_path, monk
     assert len(set(saved_paths)) == workers
     assert all(not path.exists() for path in saved_paths)
     onnx.checker.check_model(onnx.load(result))
-    assert result.parent == tmp_path / ".cache/selfcap-curate/onnx"
+    assert result.parent == tmp_path / ".cache/posekit/onnx"
     assert source.read_bytes() == before
     assert list(shared.iterdir()) == [source]
 

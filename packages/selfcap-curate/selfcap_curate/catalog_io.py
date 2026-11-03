@@ -6,7 +6,7 @@ registration, segment enumeration, or catalog mutation operation.
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal
 
 import numpy as np
 import pyarrow as pa
@@ -49,13 +49,9 @@ class Segment:
     layout: SelfcapLayout
     """Device assignment discovered once for this segment."""
     videos: dict[str, CatalogVideo] | None = None
-    """Optional capture-clock packets owned by this post invocation."""
+    """Optional capture-clock packets cached by the caller."""
     hands: CatalogHands | None = None
-    """Optional raw Quest hands and head poses shared across post stages."""
-
-
-SessionVideos: TypeAlias = dict[str, Segment]
-"""Capture-clock segments retained only for the lifetime of one post call."""
+    """Optional cached raw Quest hands and head poses."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,8 @@
-"""Quest orientation constraints and anatomical hand diagnostics."""
+"""Quest orientation constraints and anatomical hand diagnostics.
+
+When measured rotations are absent, a position-derived roll frame contributes
+at 0.1 times the measured rotation weight.
+"""
 
 from dataclasses import dataclass
 from typing import Literal

@@ -4,6 +4,7 @@ from collections.abc import Callable
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
 from dataforge.schema import video_path
 from jaxtyping import Shaped
 from numpy import ndarray
@@ -14,7 +15,7 @@ from selfcap_curate.catalog_io import Segment, median_rate, native_phone_rate, r
 from selfcap_curate.records import CatalogHands, SelfcapLayout, TimeSync
 
 
-def test_cached_phone_packets_keep_capture_clock_and_retime_without_copies(fixture_sync: Callable[..., TimeSync]) -> None:
+def test_cached_phone_packets_keep_capture_clock_and_retime_without_copies(fixture_sync: Callable[..., TimeSync], monkeypatch: pytest.MonkeyPatch) -> None:
     sync: TimeSync = fixture_sync(offsets_ms={"exo/A": 0.0000015, "exo/B": -0.0000025})
     times: Shaped[ndarray, "3"] = np.array([17, 33_333_350, 66_666_683], dtype="timedelta64[ns]")
     video: CatalogVideo = CatalogVideo(times, [np.array([1, 2], dtype=np.uint8)] * 3, [True, False, False], "av1")
@@ -31,6 +32,16 @@ def test_cached_phone_packets_keep_capture_clock_and_retime_without_copies(fixtu
     assert aligned["A"].keyframes is video.keyframes
     assert aligned["A"].codec == video.codec
     assert native_phone_rate(segment) == 30.0
+    from selfcap_curate import keypoints_gpu
+
+    def reread(*_args, **_kwargs):
+        pytest.fail("inference planning must reuse the aligned packets")
+
+    monkeypatch.setattr(keypoints_gpu, "read_phone_videos", reread)
+    plan = keypoints_gpu.plan_episode(segment, 30.0, sync, videos=aligned)
+    assert plan.videos["A"] is aligned["A"]
+    assert plan.videos["B"] is aligned["B"]
+
 
 
 def test_median_rate_takes_the_middle_phone_of_the_videos_it_is_given() -> None:

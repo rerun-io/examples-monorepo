@@ -234,6 +234,7 @@ def log_projections(
     confidence: Float32[ndarray, "t 133"],
     camera_model: str,
     entity_name: str = "coco133_uv_projected",
+    write_property: bool = True,
     calibration_source: str | None = None,
     describe: bool = True,
     color_range: tuple[float, float] = (0.0, 1.0),
@@ -243,11 +244,11 @@ def log_projections(
     Each dataset projects through its own lens model; this writes the result the same way for all.
     The property records ``derived_from``, ``camera_model`` and, when given, ``calibration_source``.
     ``color_range`` rescales display colours only; stored confidence stays raw.
-    ``entity_name`` selects a sibling overlay; only the default name writes the ``projections`` property.
+    ``entity_name`` selects a sibling overlay; ``write_property`` controls the ``projections`` property.
     ``pixels_by_camera`` is consumed one camera at a time, so a generator that projects each camera
     as it is asked for keeps a single camera's pixels in memory.
     """
-    if entity_name == "coco133_uv_projected":
+    if write_property:
         recording.send_property(
             paths.PROJECTIONS_LAYER,
             rr.AnyValues(drop_untyped_nones=True, derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source),

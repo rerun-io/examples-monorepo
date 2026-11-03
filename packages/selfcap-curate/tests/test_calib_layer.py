@@ -237,34 +237,44 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
         lambda *_args, **_kwargs: {p: PhoneDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))) for p in motion.layout.phones},
     )
     monkeypatch.setattr(api, "pose_models", lambda: (None, None))
-    monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *_args, **_kwargs: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
     monkeypatch.setattr(api, "calibrate", lambda *_args: state.exo)
     monkeypatch.setattr(api, "gyro_mount", lambda *_args: GyroFit("test", False))
     monkeypatch.setattr(api, "solve_oak", lambda *_args, **_kwargs: state.oak)
     monkeypatch.setattr(api, "oak_stereo", lambda *_args: state.stereo)
     monkeypatch.setattr(api, "oak_centre", lambda *_args: None)
     monkeypatch.setattr(api, "oak_lenses", lambda *_args: None)  # no stereo extrinsics: the RGB-only fallback, unless a test sets lenses
-    config = api.Config(tmp_path / "output", (f"selfcap__{motion.sync.key}",), oak_method="sapiens")
+    monkeypatch.setattr(api, "release_cuda_memory", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
+    monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
+    monkeypatch.setattr(api, "detect_oak_egohand", lambda *_args, **_kwargs: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
+    config = api.Config(tmp_path / "output", (f"selfcap__{motion.sync.key}",), exo_method="hands")
     return api, config, motion.sync.key.rsplit("__", 1)[0]
 
 
 def test_calibrate_egohand_uses_default_path_and_writes_named_layer(calibration_call, monkeypatch):
     api, config, _ = calibration_call
-    config = replace(config, oak_method="egohand")
     calls = []
     monkeypatch.setattr(api, "fixed_rotation", lambda *_args: np.eye(3))
-    monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
+    released = []
+    monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: released.append(kwargs))
+    previous_solve = api.solve_oak
+
+    def solve(*args, **kwargs):
+        assert kwargs == {"weighted": True, "gate_image_speed": False}
+        return previous_solve(*args, **kwargs)
+
+    monkeypatch.setattr(api, "solve_oak", solve)
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
     monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
     monkeypatch.setattr(api, "detect_oak_egohand", lambda *args, **kwargs: calls.append("egohand") or
                         OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))))
-    monkeypatch.setattr(api, "detect_oak_hands_gpu", lambda *args, **kwargs: pytest.fail("legacy OAK model must not run"))
     monkeypatch.setattr(api, "write_oak_egohand_layer", lambda path, *args: calls.append(path.parent.name))
     result = api.main(config)
     assert result.oak.rotation_source == "gyro"
     assert result.oak.rotation_reason is None
     assert calls == ["egohand", "egohand"]
-    assert api.Config(config.output_dir).oak_method == "egohand"
+    assert released == [{"models": True}]
+    assert api.Config(config.output_dir).exo_method == "head"
 
 
 @pytest.mark.parametrize("failure", ["fit", "later_layer", "json"])
@@ -379,7 +389,6 @@ def test_calibrate_missing_layer_falls_back_to_gpu(calibration_call, monkeypatch
 
 def test_egohand_missing_clock_finishes_without_sampling(calibration_call, monkeypatch) -> None:
     api, config, _ = calibration_call
-    config = replace(config, oak_method="egohand")
     previous = api.catalog_io.read_time_sync
     monkeypatch.setattr(api.catalog_io, "read_time_sync", lambda *args: replace(previous(*args), flags=["quest_unsynced_kept_as_cut"]))
     monkeypatch.setattr(api, "fixed_rotation", lambda *_args: None)
@@ -398,7 +407,6 @@ def test_egohand_missing_clock_finishes_without_sampling(calibration_call, monke
 @pytest.mark.parametrize("reason", ["gyro fit not ok", "episode spread exceeds 1.5 degrees", "device missing from rgb_R_imu table"])
 def test_egohand_ineligible_gyro_uses_free_fit_and_records_reason(calibration_call, monkeypatch, reason):
     api, config, _ = calibration_call
-    config = replace(config, oak_method="egohand")
     gyro = GyroFit("test", reason != "gyro fit not ok", max_episode_dev_deg=2.0 if "spread" in reason else 1.0,
                    R_head_from_imu=np.eye(3))
     monkeypatch.setattr(api, "gyro_mount", lambda *_args: gyro)
@@ -442,7 +450,6 @@ def test_layer_draws_phone_frustums_at_the_base_layers_length(tmp_path, layer_ca
 
 def test_calibrate_egohand_fits_the_mount_on_all_three_oak_cameras(calibration_call, monkeypatch):
     api, config, _ = calibration_call
-    config = replace(config, oak_method="egohand")
     empty = OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133)))
     lenses = {camera: SimpleNamespace(name=camera) for camera in ("rgb", "left", "right")}
     calls = {}
@@ -460,4 +467,3 @@ def test_calibrate_egohand_fits_the_mount_on_all_three_oak_cameras(calibration_c
     assert calls["views"] == calls["layer"] == ["left", "rgb", "right"]
     assert calls["solve"] == (1, ["left", "rgb", "right"], True)
     assert state.oak.ok and state.oak.rotation_source == "stereo+rgb joint"
-

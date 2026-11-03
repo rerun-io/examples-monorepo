@@ -13,7 +13,7 @@ from selfcap_soma import overlay
 from selfcap_soma.catalog import Observations
 from selfcap_soma.fitting import FitResult
 from selfcap_soma.observations import coco_joint_names
-from selfcap_soma.output import save
+from selfcap_soma.overlay import layer_fit, write_layer
 from selfcap_soma.quality import SomaQuality, assess_quality, log_quality, read_quality
 
 
@@ -149,23 +149,12 @@ def small_fit(frames: int = 2) -> tuple[Observations, FitResult]:
     return data, result
 
 
-def test_fit_save_keeps_quality_in_the_rrd_and_writes_no_json(tmp_path: Path) -> None:
+def test_layer_export_keeps_quality_from_the_fit_and_writes_no_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     data, result = small_fit()
-    save(tmp_path, data, result, 0.0)
-    assert not (tmp_path / "quality.json").exists()
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["fit.rrd", "report.json"]
-    quality = read_quality(tmp_path / "fit.rrd")
-    assert quality.body_median_mm == pytest.approx(10.0)
-    assert quality.hands_median_mm is None
-    assert "hands_missing" in quality.reasons
-
-
-def test_layer_export_copies_quality_from_the_fit_and_writes_no_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    data, result = small_fit()
-    save(tmp_path, data, result, 0.0)
+    monkeypatch.setattr(overlay, "open_segment", lambda *_args: None)
     monkeypatch.setattr(overlay, "CatalogClient", lambda _url: SimpleNamespace(get_dataset=lambda _name: None))
     monkeypatch.setattr(overlay, "read_views", lambda *_args: ([], None))
     layer = tmp_path / "layer" / "segment.pending.rrd"
-    overlay.main(overlay.Config(source=tmp_path / "fit.rrd", output=layer, dataset="test", segment="segment"))
+    write_layer("segment", "test", "test", "rtmw", layer, layer_fit(data, result))
     assert sorted(path.name for path in layer.parent.iterdir()) == ["segment.pending.rrd"]
-    assert read_quality(layer) == read_quality(tmp_path / "fit.rrd")
+    assert read_quality(layer).body_median_mm == pytest.approx(10.0)

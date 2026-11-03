@@ -30,6 +30,7 @@ def select_shape_frames(
 ) -> ShapeFrames:
     """Prefer early geometrically supported anchors, then the best whole-segment evidence.
 
+    Direct evidence needs at least two supporting views per anchor.
     Confidence only ranks accepted finite evidence; it is not a detector threshold.
     Bridged points retain their reduced loss weights and rank below direct support.
     """

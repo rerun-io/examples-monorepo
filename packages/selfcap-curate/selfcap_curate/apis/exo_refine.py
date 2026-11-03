@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dataforge.writing import atomic_write
 from rerun.catalog import CatalogClient
 from serde.json import from_json, to_json
 
@@ -21,11 +22,11 @@ class Config:
     """Explicit segment id with an exo_landmarks layer."""
     output_dir: Path
     """New output directory for the model, gate and optional calibration layer."""
-    dataset: str = "selfcap-post-dev-exofit"
+    dataset: str
     """Read-only source dataset."""
     landmark_dataset: str | None = None
     """Optional separate catalog dataset carrying the same segment's label layer."""
-    catalog_url: str = "rerun+http://dgx-spark:51235"
+    catalog_url: str = catalog_io.CATALOG_URL
     """Catalog endpoint."""
     focal_source: FocalSource = "fit"
     """Table, fitted, or fixed focal source."""
@@ -45,14 +46,17 @@ def main(config: Config) -> None:
     fixed, digest = read_focals(config.focal_file, inputs.phones)
     with session_output(config.output_dir) as output:
         model, gate = evaluate(inputs, focal_source=config.focal_source, fixed_focals=fixed, focal_record=digest)
-        (output / "refinement.json").write_text(to_json(model))
-        (output / "gate.json").write_text(to_json(gate))
+        with atomic_write(output / "refinement.json") as staged:
+            staged.write_text(to_json(model))
+        with atomic_write(output / "gate.json") as staged:
+            staged.write_text(to_json(gate))
         if config.calib_record is not None:
             state = from_json(CalibSession, config.calib_record.read_text())
             state = replace(state, exo_refinements={**state.exo_refinements, segment.id: model})
             motion = read_session_episode(segment, inputs.sync)
             write_calib_layer(output / f"{segment.id}.rrd", state, motion)
-            (output / "calib.json").write_text(to_json(state))
+            with atomic_write(output / "calib.json") as staged:
+                staged.write_text(to_json(state))
         for metric, candidate in gate.candidate.items():
             baseline = gate.baseline[metric]
             print(metric, baseline.median, baseline.p90, "->", candidate.median, candidate.p90, flush=True)

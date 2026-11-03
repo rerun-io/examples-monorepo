@@ -40,7 +40,7 @@ def test_a_bridged_joint_that_breaks_its_bones_is_not_written(monkeypatch) -> No
     thighs up to 1.5 m in 9.5% of frames, 80% of them bridged) must still be dropped."""
     from test_keypoints_geometry import cameras
 
-    import selfcap_curate.temporal_keypoints as temporal
+    import selfcap_curate.keypoints as temporal
     from selfcap_curate.keypoints import Keypoints3D, SelectedView, project, smooth_keypoints
 
     xyz, confidence = skeleton(frames=120)

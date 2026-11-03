@@ -5,8 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-import rerun.blueprint as rrb
-import trimesh
+from dataforge.writing import atomic_write
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from serde import serde
@@ -15,8 +14,7 @@ from serde.json import to_json
 from selfcap_soma.catalog import Observations
 from selfcap_soma.fitting import FitResult
 from selfcap_soma.hand_pose import HandOrientationSource
-from selfcap_soma.observations import coco_joint_names, video_time_column
-from selfcap_soma.quality import assess_quality, log_quality
+from selfcap_soma.observations import coco_joint_names
 
 
 @serde(deny_unknown_fields=True)
@@ -36,8 +34,8 @@ class Report:
     peak_allocated_mib: float
     shared_scale: float
     quest_offset_ms: float
-    requested_time_s: float
-    sampled_time_s: float
+    requested_time_s: float | None
+    sampled_time_s: float | None
     exo_body: Residual
     exo_hands: Residual
     quest_hands: Residual
@@ -49,9 +47,9 @@ class Report:
     head_offset_m: list[float]
     head_rotation_median_deg: float | None
     head_rotation_p90_deg: float | None
-    target_fit_vs_quest: Residual
-    target_exo_vs_quest: Residual
-    target_fit_vs_exo: Residual
+    target_fit_vs_quest: Residual | None
+    target_exo_vs_quest: Residual | None
+    target_fit_vs_exo: Residual | None
     limitations: tuple[str, ...]
     hand_orientation_source: HandOrientationSource | None = None
     """Per-hand measured orientation source; none uses the position-derived fallback."""
@@ -90,12 +88,11 @@ def log_joint_style(recording: rr.RecordingStream, path: str, edges: list[tuple[
     recording.log(path, rr.Points3D.from_fields(keypoint_ids=np.arange(joint_count), class_ids=0, colors=[60, 220, 170], radii=0.006), static=True)
 
 
-def write_report(output: Path, data: Observations, result: FitResult, target_s: float, upper_body_only: bool = False) -> Report:
+def write_report(output: Path, data: Observations, result: FitResult, target_s: float | None = None, upper_body_only: bool = False) -> Report:
     """Write the strict JSON report of one fit."""
     output.mkdir(parents=True, exist_ok=True)
     fit_points: Float64[ndarray, "n 133 3"] = mapped(result, data)
-    frame = int(np.searchsorted(data.times, target_s, side="right") - 1)
-    frame = max(0, min(frame, len(data.times) - 1))
+    frame = None if target_s is None else int(np.clip(np.searchsorted(data.times, target_s, side="right") - 1, 0, len(data.times) - 1))
     report = Report(
         len(data.times),
         result.seconds,
@@ -104,7 +101,7 @@ def write_report(output: Path, data: Observations, result: FitResult, target_s: 
         result.scale,
         data.offset_ms,
         target_s,
-        float(data.times[frame]),
+        None if frame is None else float(data.times[frame]),
         residual(fit_points[:, 5:13] if upper_body_only else fit_points[:, 5:17], data.exo[:, 5:13] if upper_body_only else data.exo[:, 5:17]),
         residual(fit_points[:, 91:], data.exo[:, 91:]),
         residual(fit_points[:, 91:], data.hands[:, 91:]),
@@ -125,9 +122,9 @@ def write_report(output: Path, data: Observations, result: FitResult, target_s: 
         result.head_offset.astype(float).tolist(),
         float(np.median(result.head_angle_deg)) if np.isfinite(result.head_angle_deg).all() else None,
         float(np.percentile(result.head_angle_deg, 90)) if np.isfinite(result.head_angle_deg).all() else None,
-        residual(fit_points[frame, 91:], data.hands[frame, 91:]),
-        residual(data.exo[frame, 91:], data.hands[frame, 91:]),
-        residual(fit_points[frame, 91:], data.exo[frame, 91:]),
+        None if frame is None else residual(fit_points[frame, 91:], data.hands[frame, 91:]),
+        None if frame is None else residual(data.exo[frame, 91:], data.hands[frame, 91:]),
+        None if frame is None else residual(fit_points[frame, 91:], data.exo[frame, 91:]),
         (
             "Training residuals, not independent accuracy measurements.",
             (
@@ -145,109 +142,6 @@ def write_report(output: Path, data: Observations, result: FitResult, target_s: 
         ),
         result.hand_orientation_source,
     )
-    (output / "report.json").write_text(to_json(report))
-    return report
-
-
-def save(output: Path, data: Observations, result: FitResult, target_s: float, mesh_stride: int = 1, upper_body_only: bool = False) -> Report:
-    """Persist a local comparison recording and a strict JSON report; research tools only, soma-batch writes its layer directly."""
-    report: Report = write_report(output, data, result, target_s, upper_body_only)
-    fit_points: Float64[ndarray, "n 133 3"] = mapped(result, data)
-    recording = rr.RecordingStream("selfcap-soma-prototype")
-    recording.save(output / "fit.rrd")
-    quality = assess_quality(fit_points.astype(np.float64), data.exo, data.hands, result.scale, data.confidence)
-    log_quality(recording, quality)
-    recording.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
-    log_joint_style(recording, "/world/fit/joints", joint_edges(result.parents), 77)
-    recording.log("/world/inputs/exo", rr.Points3D.from_fields(colors=[255, 150, 35], radii=0.009), static=True)
-    recording.log("/world/inputs/quest", rr.Points3D.from_fields(colors=[220, 75, 230], radii=0.008), static=True)
-    recording.log("/world/fit/mesh", rr.Mesh3D.from_fields(triangle_indices=result.faces, albedo_factor=[0.25, 0.65, 0.8, 0.35]), static=True)
-    recording.log(
-        "/description",
-        rr.TextDocument("SOMA fit (cyan); triangulated points (orange); Quest hands (magenta).\n" + "\n".join(report.limitations)),
-        static=True,
-    )
-    index = [video_time_column(data.times)]
-    recording.send_columns(
-        "/world/fit/joints", indexes=index, columns=rr.Points3D.columns(positions=result.joints.reshape(-1, 3)).partition([77] * len(data.times))
-    )
-    recording.log("/world/fit/ears", rr.Points3D.from_fields(colors=[0, 255, 255], radii=0.008), static=True)
-    recording.send_columns(
-        "/world/fit/ears", indexes=index, columns=rr.Points3D.columns(positions=result.ear_landmarks.reshape(-1, 3)).partition([2] * len(data.times))
-    )
-    recording.send_columns(
-        "/world/fit/coco_landmarks",
-        indexes=index,
-        columns=rr.Points3D.columns(positions=fit_points.astype(np.float32).reshape(-1, 3)).partition([133] * len(data.times)),
-    )
-    if result.foot_landmarks is not None:
-        recording.send_columns(
-            "/world/fit/feet",
-            indexes=index,
-            columns=rr.Points3D.columns(positions=result.foot_landmarks.reshape(-1, 3)).partition([6] * len(data.times)),
-        )
-    recording.send_columns(
-        "/world/inputs/exo", indexes=index, columns=rr.Points3D.columns(positions=data.exo.reshape(-1, 3)).partition([133] * len(data.times))
-    )
-    recording.send_columns(
-        "/world/inputs/quest", indexes=index, columns=rr.Points3D.columns(positions=data.hands.reshape(-1, 3)).partition([133] * len(data.times))
-    )
-    for name, points, color in (
-        ("fit", fit_points[:, 91:], [60, 220, 170]),
-        ("exo", data.exo[:, 91:], [255, 150, 35]),
-        ("quest", data.hands[:, 91:], [220, 75, 230]),
-    ):
-        # Each digit starts at the wrist, then follows its own four joints.
-        hand_edges = [(base, base + 1 + finger * 4) for base in (0, 21) for finger in range(5)] + [
-            (base + 1 + finger * 4 + joint, base + 2 + finger * 4 + joint) for base in (0, 21) for finger in range(5) for joint in range(3)
-        ]
-        path = f"/world/detail/{name}"
-        recording.log(
-            path, rr.AnnotationContext(rr.ClassDescription(info=rr.AnnotationInfo(id=0, color=color), keypoint_connections=hand_edges)), static=True
-        )
-        recording.log(path, rr.Points3D.from_fields(keypoint_ids=np.arange(42), class_ids=0, colors=color, radii=0.003), static=True)
-        recording.send_columns(path, indexes=index, columns=rr.Points3D.columns(positions=points.reshape(-1, 3)).partition([42] * len(data.times)))
-    for stamp, pose in zip(data.times, result.poses, strict=True):
-        recording.set_time("video_time", duration=np.timedelta64(int(np.rint(stamp * 1e9)), "ns"))
-        recording.log("/parameters/poses", rr.Tensor(pose))
-    recording.send_columns("/parameters/root", indexes=index, columns=rr.Points3D.columns(positions=result.translations))
-    if result.upper_body_vertices is not None:
-        recording.log("/parameters/upper_body_vertices", rr.Tensor(result.upper_body_vertices), static=True)
-    if result.visible_joints is not None:
-        recording.log("/parameters/visible_joints", rr.Tensor(result.visible_joints), static=True)
-    if result.hand_orientation_source is not None:
-        recording.log("/parameters/hand_orientation_source", rr.TextDocument(to_json(result.hand_orientation_source)), static=True)
-    recording.log("/parameters/identity", rr.Tensor(result.identity), static=True)
-    recording.log("/parameters/head_attachment", rr.Tensor(result.head_attachment), static=True)
-    recording.log("/parameters/head_anchor", rr.TextDocument(result.head_anchor), static=True)
-    recording.log("/parameters/head_offset", rr.Tensor(result.head_offset), static=True)
-    recording.log("/parameters/bone_scales", rr.Tensor(result.bone_scales), static=True)
-    recording.log("/parameters/joint_names", rr.TextDocument("\n".join(result.names)), static=True)
-    recording.log("/parameters/scale", rr.Scalars(result.scale), static=True)
-    mesh_rows = np.unique(np.r_[np.arange(0, len(data.times), mesh_stride), len(data.times) - 1])
-    mesh_vertices = result.vertices[mesh_rows]
-    normals = np.stack([trimesh.Trimesh(v, result.faces, process=False).vertex_normals for v in mesh_vertices]).astype(np.float32)
-    recording.send_columns(
-        "/world/fit/mesh",
-        indexes=[video_time_column(data.times[mesh_rows])],
-        columns=rr.Mesh3D.columns(vertex_positions=mesh_vertices.reshape(-1, 3), vertex_normals=normals.reshape(-1, 3)).partition(
-            [result.vertices.shape[1]] * len(mesh_rows)
-        ),
-    )
-    recording.send_blueprint(
-        rrb.Blueprint(
-            rrb.Horizontal(
-                rrb.Spatial3DView(
-                    origin="/world",
-                    name="Body and observations",
-                    contents=["/world/fit/**", "/world/inputs/**"],
-                    eye_controls=rrb.EyeControls3D(position=[1.3, 1.7, 2.2], look_target=[-0.35, 1.15, 0.4], eye_up=[0.0, 1.0, 0.0]),
-                ),
-                rrb.Spatial3DView(origin="/world/detail", name="Hands: cyan fit / orange exo / magenta Quest"),
-            ),
-            collapse_panels=True,
-        )
-    )
-    recording.flush()
-    recording.disconnect()
+    with atomic_write(output / "report.json") as staged:
+        staged.write_text(to_json(report))
     return report

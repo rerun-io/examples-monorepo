@@ -5,8 +5,6 @@ from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from scipy.ndimage import gaussian_filter1d, median_filter
 
-from selfcap_curate.keypoints import Keypoints3D
-
 BODY: slice = slice(3, 17)
 BODY_SIGMA_FRAMES: float = 2.0
 MAX_SECOND_DIFFERENCE_M: float = 0.03
@@ -46,13 +44,6 @@ def responsive_body(xyz: Float32[ndarray, "n j 3"], rate: float) -> Float32[ndar
             speed: Float32[ndarray, "m 1"] = np.linalg.norm(np.gradient(median, axis=0) * rate, axis=-1) if len(source) > 1 else np.zeros(source.shape[:2], np.float32)
             weight: Float32[ndarray, "m 1 1"] = np.clip((speed - 0.3) / 0.2, 0.0, 1.0)[..., None]
             output[begin:end, joint:joint + 1] = (1.0 - weight) * smooth + weight * clean
-    return output
-
-
-def stable_body(result: Keypoints3D, baseline: Float32[ndarray, "n 133 3"]) -> Float32[ndarray, "n 133 3"]:
-    """Filter per-frame triangulated body positions; preserve the caller's hand treatment."""
-    output: Float32[ndarray, "n 133 3"] = baseline.copy()
-    output[:, BODY] = responsive_body(result.xyz[:, BODY], result.rate)
     return output
 
 

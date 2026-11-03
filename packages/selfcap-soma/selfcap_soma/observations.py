@@ -57,5 +57,5 @@ def require_full_rate_mesh(mesh_times: Int64[ndarray, "m"], joint_times: Int64[n
 
 
 def video_time_column(times: Float64[ndarray, "n"]) -> rr.TimeColumn:
-    """Round back to source nanoseconds; avoid Rerun's float-seconds truncation."""
+    """Round to integer nanoseconds and pass timedelta64[ns]; avoid float-seconds truncation."""
     return rr.TimeColumn("video_time", duration=np.rint(times * 1e9).astype("timedelta64[ns]"))

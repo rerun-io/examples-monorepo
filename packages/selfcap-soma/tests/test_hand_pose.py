@@ -43,17 +43,6 @@ def test_procedural_twists_preserve_public_joint_centres():
     np.testing.assert_allclose(values[0], values[1], atol=2e-6)
 
 
-def test_finger_flexion_is_not_misreported_as_roll_at_euler_singularity():
-    from scipy.spatial.transform import Rotation
-
-    from selfcap_soma.hand_diagnostics import swing_twist_angles
-
-    rotations = Rotation.from_rotvec(np.deg2rad([[0.0, 90.0, 0.0], [90.0, 0.0, 0.0], [0.0, 180.0, 0.0]])).as_matrix()
-    angles = swing_twist_angles(rotations)
-    np.testing.assert_allclose(angles[:, 0], [0.0, 90.0, 0.0], atol=1e-8)
-    np.testing.assert_allclose(abs(angles[:, 1]), [90.0, 0.0, 180.0], atol=1e-8)
-
-
 def test_xyz_only_hand_reader_records_missing_orientation_per_hand(tmp_path):
     from dataforge.quest_joint_poses import read_quest_joint_poses
 

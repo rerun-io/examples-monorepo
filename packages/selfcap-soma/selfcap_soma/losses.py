@@ -47,3 +47,8 @@ def body_acceleration_penalty(points: Float[Tensor, "n j 3"], dt: Float[Tensor, 
     valid = (dt[1:] > 0) & (dt[1:] <= 0.1) & (dt[:-1] > 0) & (dt[:-1] <= 0.1)
     normalized = acceleration / (24.0**2 * 0.004)
     return (normalized.square().sum(-1).mean(-1) * valid).sum() / valid.sum().clamp_min(1)
+
+
+def symmetry_penalty(lengths: Float[Tensor, "n 8"]) -> Float[Tensor, ""]:
+    """Match paired upper arm, forearm, thigh and shin lengths in 1 cm units."""
+    return ((lengths[:, 0::2] - lengths[:, 1::2]) / 0.01).square().mean()

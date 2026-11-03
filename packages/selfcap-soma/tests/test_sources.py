@@ -8,7 +8,7 @@ import rerun as rr
 from dataforge.triangulation import HEADSET_COVERED
 from rerun.server import Server
 
-from selfcap_soma import api, batch, catalog, evaluation_io, overlay
+from selfcap_soma import batch, catalog, evaluation_io
 from selfcap_soma.catalog import RigPaths, exo_columns, exo_view_track
 
 
@@ -28,9 +28,7 @@ def test_sapiens_selection_uses_registered_confidence_and_ignores_legacy_predict
 def test_rtmw_is_the_default_exo_source() -> None:
     """A run that names no source reads the layer the keypoints stage writes by default."""
     defaults = {
-        "fit": next(f.default for f in fields(api.Config) if f.name == "exo_source"),
         "batch": next(f.default for f in fields(batch.Config) if f.name == "exo_source"),
-        "overlay": next(f.default for f in fields(overlay.Config) if f.name == "exo_source"),
         "read_window": signature(catalog.read_window).parameters["source"].default,
         "read_views": signature(evaluation_io.read_views).parameters["source"].default,
     }
@@ -80,9 +78,10 @@ def test_read_views_thresholds_the_uncensored_entity_itself(tmp_path: Path, monk
             ],
             recording=recording,
         )
-    monkeypatch.setattr(evaluation_io, "read_rigs", lambda *_args: RigPaths(exo=("/world/rig_00",), oak="/world/rig_04", quest="/world/rig_05"))
     with Server(port=0, datasets={"selfcap": [path]}) as server:
-        phones, ego = evaluation_io.read_views(server.client().get_dataset("selfcap"), "episode", np.array([1.0]))
+        view = server.client().get_dataset("selfcap").filter_segments("episode")
+        context = catalog.SegmentCatalog(view, view.schema().column_names(), RigPaths(("/world/rig_00",), "/world/rig_04", "/world/rig_05"))
+        phones, ego = evaluation_io.read_views(context, "episode", np.array([1.0]))
     assert ego is None
     assert np.isnan(phones[0].pixels[0, 5]).all() and phones[0].scores[0, 5] == 0.0
     np.testing.assert_array_equal(phones[0].pixels[0, 6], [1.0, 1.0])
