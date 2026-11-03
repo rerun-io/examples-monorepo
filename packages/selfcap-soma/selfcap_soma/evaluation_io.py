@@ -151,6 +151,6 @@ def read_egohand_rgb(catalog: SegmentCatalog, times: Float64[ndarray, "n"]) -> l
     stamps = seconds(rows["video_time"])
     points = floats(rows[column], -1, 133, 2)
     scores = floats(rows[path + ":confidence"], -1, 133)
-    points[scores < MIN_OBSERVED_SCORE] = np.nan
+    points[~(scores >= MIN_OBSERVED_SCORE)] = np.nan
     order = np.argsort(stamps)
     return [ImageTrack(f"{path}/{side}", stamps[order], points[order, base:base + 21]) for side, base in OAK_HAND_BASES]

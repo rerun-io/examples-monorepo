@@ -59,7 +59,7 @@ class FitResult:
     head_anchor: Literal["ears", "ears-rotation"]
     """Ear landmarks, with optional tracked-head rotation."""
     head_offset: Float32[ndarray, "3"]
-    """Tracked-camera to head-anchor translation, metres. Skull frame for ear mode; Quest frame for legacy eye mode."""
+    """Tracked-camera to the ear anchor, in metres in the skull frame."""
     bone_scales: Float32[ndarray, "1 60"]
     """Native SOMA local bone-length ratios, shared over all frames."""
     upper_body_vertices: Int64[ndarray, "v"]

@@ -42,7 +42,7 @@ def test_2d_rows_keep_every_detection_and_the_display_copy_only_the_shown_points
     entity = "/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv"
     with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
         hands.log_keypoints2d(recording, entity, times_ns=np.array([0, 1], dtype=np.int64), frame_indices=None, positions=uv, confidence=scores)
-        copy = hands.shown_keypoint_columns(uv, scores, scores >= 0.7)
+        copy = hands.shown_keypoint_columns(uv, scores, (scores >= 0.7) & np.isfinite(uv).all(-1))
         recording.send_columns(schema.shown_path(entity), indexes=[], columns=copy.style)
         recording.send_columns(schema.shown_path(entity), indexes=[time_column(np.array([0, 1], dtype=np.int64))], columns=copy.columns)
     chunks = read_chunks(target)

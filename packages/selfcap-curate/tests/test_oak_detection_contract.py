@@ -23,6 +23,7 @@ def test_oak_layer_round_trips_both_hands_into_soma_image_evidence(tmp_path: Pat
     scores = np.where(np.isfinite(xy).all(-1), 0.9, 0.0)
     xy[1, 91] = [999.0, 888.0]
     scores[1, 91] = 0.1
+    scores[1, 92] = np.nan
     path = tmp_path / "egohand.rrd"
     write_oak_egohand_layer(path, "episode", 4, {"rgb": OakDetections(times, xy, scores)})
     with Server(port=0, datasets={"selfcap": [path]}) as server:
@@ -35,4 +36,4 @@ def test_oak_layer_round_trips_both_hands_into_soma_image_evidence(tmp_path: Pat
     np.testing.assert_array_equal(left.times, times)
     np.testing.assert_array_equal(left.points[0], np.tile([101.0, 202.0], (21, 1)))
     np.testing.assert_array_equal(right.points, np.tile([303.0, 404.0], (2, 21, 1)))
-    assert np.isnan(left.points[1, 0]).all()
+    assert np.isnan(left.points[1, :2]).all()

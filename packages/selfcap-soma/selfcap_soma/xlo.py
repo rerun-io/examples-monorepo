@@ -12,7 +12,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
-from dataforge.selfcap_schema import SOMA_XLO
+from dataforge.selfcap_schema import SOMA_MESH, SOMA_XLO
 from dataforge.writing import atomic_write
 from jaxtyping import Float32, Int32, Int64
 from numpy import ndarray
@@ -21,7 +21,7 @@ from soma.body import SOMALayer, SOMAPoseOutput
 
 from selfcap_soma.assets import soma_assets
 from selfcap_soma.batch import selected_segments
-from selfcap_soma.overlay import SOMA_MESH, mesh_vertex_rows, read_layer_crop
+from selfcap_soma.overlay import mesh_vertex_rows, read_layer_crop
 
 APPLICATION_ID: str = "selfcap-soma-xlo"
 ALBEDO: tuple[float, float, float, float] = (0.25, 0.65, 0.8, 0.5)
