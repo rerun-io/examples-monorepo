@@ -519,9 +519,10 @@ def write_keypoints(
                 mask: Bool[ndarray, "n 133 4"] = np.zeros((len(stamps), 133, 4), dtype=bool)
                 mask[:, :, :len(result.cameras)] = result.inliers.transpose(0, 2, 1)
                 rr.send_columns(xyz_path, indexes=[time_column(stamps)], columns=rr.AnyValues.columns(
-                    support_view_count=result.n_views.reshape(-1),
-                    temporal_bridged=(np.zeros(result.xyz.shape[:2], dtype=bool) if result.bridged is None else result.bridged).reshape(-1),
-                    support_max_reprojection_px=result.max_reprojection_px.reshape(-1),
+                    # Arrow inputs avoid AnyValues wrapping each NumPy scalar in a Python singleton list.
+                    support_view_count=pa.array(result.n_views.reshape(-1)),
+                    temporal_bridged=pa.array((np.zeros(result.xyz.shape[:2], dtype=bool) if result.bridged is None else result.bridged).reshape(-1)),
+                    support_max_reprojection_px=pa.array(result.max_reprojection_px.reshape(-1)),
                     support_inlier_mask=pa.FixedSizeListArray.from_arrays(pa.array(mask.reshape(-1)), mask.shape[-1]),
                 ).partition([133] * len(stamps)), recording=recording)
             for phone, selected in result.selected.items():
