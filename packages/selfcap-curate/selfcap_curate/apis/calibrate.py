@@ -163,9 +163,14 @@ def refine_with_head(state: CalibSession, episode: SessionEpisode, focals: dict[
     provisional = frozenset(p for p in episode.layout.phones if offsets_ms.get("exo/" + p) is None)
     offsets_ms.update({"exo/" + p: guess for p in provisional})
     track = head_track(episode.hands, quest_pose_ms)
+    clocks: dict[str, float] = {}
+    for phone in episode.layout.phones:
+        value = offsets_ms["exo/" + phone]
+        assert value is not None
+        clocks[phone] = value
     head = calibrate_with_head(
         state.exo, replace(episode, sync=replace(episode.sync, offsets_ms=offsets_ms)), track, focals,
-        {p: offsets_ms["exo/" + p] for p in episode.layout.phones}, provisional,
+        clocks, provisional,
     )
     report = HeadReport(
         head.offsets.tolist(), head.offsets_source, track.convention,

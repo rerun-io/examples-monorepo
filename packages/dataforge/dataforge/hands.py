@@ -229,7 +229,7 @@ def shown_keypoint_columns(
 ) -> ShownKeypoints:
     """Build the shown copy of Float32[t,133,2] pixels using the shared confidence colour floor."""
     return ShownKeypoints(
-        sparse_keypoint_columns(positions, scores, keep & np.isfinite(positions).all(-1), (schema.SHOWN_MIN_CONFIDENCE, 1.0)),
+        sparse_keypoint_columns(positions, scores, keep, (schema.SHOWN_MIN_CONFIDENCE, 1.0)),
         rr.Points2D.columns(radii=[3.0], show_labels=[False]),
     )
 
