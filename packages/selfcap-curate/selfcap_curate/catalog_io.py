@@ -23,7 +23,7 @@ from dataforge.schema import (
     rig_path,
     video_path,
 )
-from dataforge.selfcap_schema import oak_rig_of, rdf_head
+from dataforge.selfcap_schema import HeadConvention, oak_rig_of, rdf_head
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -48,10 +48,6 @@ class Segment:
     """Explicit catalog segment id."""
     layout: SelfcapLayout
     """Device assignment discovered once for this segment."""
-    videos: dict[str, CatalogVideo] | None = None
-    """Optional capture-clock packets cached by the caller."""
-    hands: CatalogHands | None = None
-    """Optional cached raw Quest hands and head poses."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +115,8 @@ class EpisodeInputs:
     """Original horizontal focal lengths in video order."""
     width_px: tuple[int, ...]
     """Original image widths in video order."""
+    head_convention: HeadConvention = "RDF"
+    """Original head axes stored in the base recording."""
 
 
 def rig_layout(dataset: DatasetEntry, segment_id: str) -> CatalogRigLayout:
@@ -167,18 +165,16 @@ def read_episode(
         resolution: Float64[ndarray, "2"] = np.asarray(first_valid_value(calibration[f"{pinhole}:Pinhole:resolution"]), dtype=np.float64).reshape(2)
         focals.append(float(matrix[0, 0]))
         widths.append(int(resolution[0]))
-    videos: tuple[CatalogVideo, ...] = (
-        tuple(segment.videos[path] for path in layout.video_entities)
-        if segment.videos is not None and timeline == CAPTURE_TIMELINE
-        else read_catalog_videos(dataset, segment_id, layout.video_entities, timeline)
-    )
+    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, layout.video_entities, timeline)
+    axes = rdf_head(quaternions)
     return EpisodeInputs(
         layout,
         SpeedSeries(tg, np.linalg.norm(gyro_values, axis=1)),
-        pose_speed(tp, rdf_head(quaternions).quaternions),
+        pose_speed(tp, axes.quaternions),
         videos,
         tuple(focals),
         tuple(widths),
+        axes.convention,
     )
 
 
@@ -188,8 +184,6 @@ def read_catalog_hands(segment: Segment) -> CatalogHands:
     Calibration layers may repeat hands on video_time. Selecting capture_time
     keeps the migrated base as the source of raw samples and avoids that copy.
     """
-    if segment.hands is not None:
-        return segment.hands
     dataset, segment_id, layout = segment.dataset, segment.id, segment.layout
     view = dataset.filter_segments(segment_id)
     head: str = rig_path(layout.quest_rig)
@@ -219,31 +213,21 @@ def read_catalog_hands(segment: Segment) -> CatalogHands:
 
 
 def read_phone_videos(
-    segment: Segment,
-    *,
-    timeline: Literal["capture_time", "video_time"] = CAPTURE_TIMELINE,
-    sync: TimeSync | None = None,
+    segment: Segment, *, timeline: Literal["capture_time", "video_time"] = CAPTURE_TIMELINE
 ) -> dict[str, CatalogVideo]:
-    """Read named phones, or reuse capture packets with the supplied aligned clock.
+    """Read phone packets once on the requested catalog clock."""
+    videos = read_catalog_videos(segment.dataset, segment.id, [video_path(rig, 0) for rig in range(len(segment.layout.phones))], timeline)
+    return dict(zip(segment.layout.phones, videos, strict=True))
 
-    Cached packets come from an as-cut base. Only their phone timestamps change
-    after alignment; the packet, keyframe and codec objects stay shared.
-    """
-    dataset, segment_id, layout = segment.dataset, segment.id, segment.layout
-    if segment.videos is not None:
-        phones: dict[str, CatalogVideo] = {phone: segment.videos[video_path(rig, 0)] for rig, phone in enumerate(layout.phones)}
-        if timeline == "video_time":
-            record: TimeSync = sync if sync is not None else read_time_sync(dataset, segment_id)
-            if record.episode_key.segment != segment_id or record.offsets_ms is None:
-                raise ValueError(f"{segment_id}: expected its successful alignment record")
-            # Match patch_base.rewrite exactly: integer nanoseconds added to capture_time.
-            phones = {
-                phone: replace(video, times=(video.t_ns + round((record.offsets_ms.get(f"exo/{phone}") or 0.0) * 1e6)).view(video.times.dtype))
-                for phone, video in phones.items()
-            }
-        return phones
-    videos = read_catalog_videos(dataset, segment_id, [video_path(rig, 0) for rig in range(len(layout.phones))], timeline)
-    return dict(zip(layout.phones, videos, strict=True))
+
+def aligned_phone_videos(videos_capture: dict[str, CatalogVideo], sync: TimeSync) -> dict[str, CatalogVideo]:
+    """Shift capture packet timestamps by the same integer nanoseconds as patch_base; share packet payloads."""
+    if sync.offsets_ms is None:
+        raise ValueError(f"{sync.episode_key.segment}: expected its successful alignment record")
+    return {
+        phone: replace(video, times=(video.t_ns + round((sync.offsets_ms.get(f"exo/{phone}") or 0.0) * 1e6)).view(video.times.dtype))
+        for phone, video in videos_capture.items()
+    }
 
 
 def median_rate(videos: dict[str, CatalogVideo]) -> float:

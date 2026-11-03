@@ -13,7 +13,7 @@ import selfcap_curate.catalog_io as catalog_io
 import selfcap_curate.keypoints as keypoints
 from selfcap_curate.apis import keypoints as api
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
-from selfcap_curate.catalog_io import DATASET_NAME, open_segment
+from selfcap_curate.catalog_io import DATASET_NAME
 from selfcap_curate.exo_calibration import Camera, PhoneCalibration, SessionCalibration
 from selfcap_curate.factory import QuestBlock
 from selfcap_curate.keypoints import Keypoints2D, project, read_cameras, triangulate
@@ -65,7 +65,7 @@ def test_cli_uses_local_poses_instead_of_equal_provenance_catalog(tmp_path, monk
 
     monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands(), raising=False)
     monkeypatch.setattr(api, "read_time_sync", lambda *_args: sync)
-    monkeypatch.setattr(api, "keypoint_models", lambda: (None, None))
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
     monkeypatch.setattr(api, "detect_keypoints", lambda *_args, **_kwargs: Keypoints2D(np.array([0.0]), {}, 3.0))
     monkeypatch.setattr(api, "read_anchors", lambda *_args, **_kwargs: np.zeros((1, 3, 3)))
     monkeypatch.setattr(api, "triangulate_episode", check)
@@ -99,10 +99,11 @@ def test_keypoints_rate_defaults_to_the_native_phone_rate_without_a_second_read(
         reads.append(args[1])
         return real_read(*args)
 
+    monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands())
     monkeypatch.setattr(catalog_io, "read_catalog_videos", counted_read)
     monkeypatch.setattr(api, "read_time_sync", lambda *_args: sync)
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: ())
-    monkeypatch.setattr(api, "keypoint_models", lambda: (None, None))
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
     monkeypatch.setattr(api, "detect_keypoints", detect)
     with private_server({DATASET_NAME: [base]}) as server, pytest.raises(Checked):
         api.main(api.Config(local, tmp_path / "out", segment_ids=(key,), catalog_url=server.url()))
@@ -135,7 +136,7 @@ def test_each_episode_resolves_its_own_rate_unless_the_config_gives_one(tmp_path
     monkeypatch.setattr(api, "read_phone_videos", lambda segment, **_kwargs: phone_videos[segment.id])
     monkeypatch.setattr(api, "read_time_sync", lambda _dataset, segment: syncs[segment])
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: ())
-    monkeypatch.setattr(api, "keypoint_models", lambda: (None, None))
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
     monkeypatch.setattr(api, "detect_keypoints", detect)
     monkeypatch.setattr(api, "read_anchors", lambda *_args, **_kwargs: np.zeros((1, 3, 3)))
     monkeypatch.setattr(api, "ego_quest_hands", lambda *_args: None)
@@ -166,11 +167,10 @@ def test_flagged_quest_pose_keeps_relative_phone_anchors(tmp_path, monkeypatch, 
     times = np.arange(10, dtype=np.float64) * 0.02
     source = CatalogHands(times, np.ones((10, 133, 3)) + times[:, None, None] * 0.1, times, np.ones((10, 3)), np.tile([0.0, 0.0, 0.0, 1.0], (10, 1)))
 
-    monkeypatch.setattr(keypoints, "read_catalog_hands", lambda *_args, **_kwargs: source)
     base = synthetic_base(tmp_path / "base.rrd", segment=sync.episode_key.segment, phones=("A", "B", "C"))
-    with private_server({DATASET_NAME: [base]}) as server:
+    with private_server({DATASET_NAME: [base]}):
         anchors = keypoints.read_anchors(
-            open_segment(server.client().get_dataset(DATASET_NAME), sync.episode_key.segment), np.array([0.06, 0.08]), sync
+            source, np.array([0.06, 0.08]), sync
         )
     assert np.isfinite(anchors).all()
 
@@ -208,7 +208,7 @@ def test_cli_skips_unprocessable_episodes_before_models_and_runs_others(
     monkeypatch.setattr(api, "Server", session_server, raising=False)
     loaded = []
 
-    def models():
+    def models(*_args):
         output = capsys.readouterr().out
         assert f"KEYPOINTS_SKIP {keys[1]}" in output
         loaded.append(output)
@@ -222,11 +222,11 @@ def test_cli_skips_unprocessable_episodes_before_models_and_runs_others(
         return raw
 
     def cached_anchors(segment, *_args, **_kwargs):
-        assert segment.hands is raw
+        assert segment is raw
         return np.zeros((1, 3, 3))
 
     def cached_quest_hands(segment, *_args):
-        assert segment.hands is raw
+        assert segment is raw
         return None
 
     monkeypatch.setattr(api, "read_catalog_hands", read_raw, raising=False)

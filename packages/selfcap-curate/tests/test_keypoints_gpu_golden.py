@@ -8,7 +8,7 @@ import pytest
 import torch
 from frozen_v2 import ENTITY, GOLDEN_REFS, ROOT, SERVED, calib_files, dense, load_keypoint_reference
 
-from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_time_sync
+from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_catalog_hands, read_time_sync
 from selfcap_curate.keypoints import read_anchors, read_cameras, triangulate_episode
 from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models, plan_episode
 from selfcap_curate.records import read_frozen_sync
@@ -64,7 +64,7 @@ def test_gpu_keypoints_match_frozen_and_served_triangulation(tmp_path: Path, pri
             assert np.median(delta) <= 1.0
         with private_server({DATASET_NAME: [calib]}) as camera_server:
             cameras = read_cameras(camera_server.client().get_dataset(DATASET_NAME), segment)
-        result = triangulate_episode(actual, cameras, read_anchors(handle, actual.times, sync=sync))
+        result = triangulate_episode(actual, cameras, read_anchors(read_catalog_hands(handle), actual.times, sync=sync))
     stamps, truth = dense(assets[3], ENTITY, 3)
     np.testing.assert_array_equal(np.rint(result.times * 1e9).astype(np.int64), stamps)
     distance = np.linalg.norm(result.xyz - truth, axis=-1)

@@ -7,7 +7,7 @@ import pytest
 from frozen_v2 import ENTITY, GOLDEN_REFS, ROOT, SERVED, calib_files, chunk_bytes, dense, load_keypoints2d
 from rerun.chunk import RrdReader
 
-from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_time_sync
+from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_catalog_hands, read_time_sync
 from selfcap_curate.keypoints import read_anchors, read_cameras, triangulate_episode, write_keypoints
 from selfcap_curate.records import read_frozen_sync
 
@@ -34,7 +34,7 @@ def test_triangulated_episode_matches_served_masks_and_overlays(session: str, tm
             with private_server({DATASET_NAME: [calib]}) as camera_server:
                 cameras = read_cameras(camera_server.client().get_dataset(DATASET_NAME), segment)
             result = triangulate_episode(
-                detections, cameras, read_anchors(open_segment(dataset, segment), detections.times, sync=read_time_sync(dataset, segment))
+                detections, cameras, read_anchors(read_catalog_hands(open_segment(dataset, segment)), detections.times, sync=read_time_sync(dataset, segment))
             )
             output = tmp_path / "complete" / calib.name
             before, original = calib.read_bytes(), chunk_bytes(calib)

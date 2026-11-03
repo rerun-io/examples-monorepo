@@ -34,7 +34,7 @@ def test_keypoints_cli_rejects_invalid_session_and_existing_targets(tmp_path: Pa
     with pytest.raises(ValueError):
         main(Config(calib, calib / "nested", rate=3.0, segment_ids=(key,)))
     with pytest.raises(ValueError):
-        main(Config(calib, Path("/mnt/nas/forbidden-keypoints"), rate=3.0, segment_ids=(key,)))
+        main(Config(calib, Path("/mnt/nas/datasets/forbidden-keypoints"), rate=3.0, segment_ids=(key,)))
 
 
 @pytest.mark.parametrize("workers", [1, 2])

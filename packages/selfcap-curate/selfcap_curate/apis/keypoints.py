@@ -1,6 +1,6 @@
 """One-session catalog GPU keypoints; local calibration owns the output."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from dataforge.timing import SequenceTimer
@@ -14,6 +14,7 @@ from selfcap_curate.catalog_io import (
     CATALOG_URL,
     DATASET_NAME,
     Segment,
+    aligned_phone_videos,
     median_rate,
     open_segment,
     read_catalog_hands,
@@ -33,7 +34,7 @@ from selfcap_curate.keypoints import (
     write_keypoints,
 )
 from selfcap_curate.keypoints_gpu import detect_keypoints, keypoint_models
-from selfcap_curate.records import EpisodeKey, TimeSync
+from selfcap_curate.records import CatalogHands, EpisodeKey, TimeSync
 
 
 @dataclass
@@ -58,6 +59,8 @@ class KeypointEpisode:
     """Base segment and its discovered physical layout."""
     videos: dict[str, CatalogVideo]
     """Phone packets already read for centres and native-rate measurement."""
+    hands: CatalogHands | None
+    """Normalized capture-clock Quest samples, absent when the Quest clock is missing."""
     sync: TimeSync
     """Validated alignment record."""
     rate: float
@@ -101,31 +104,29 @@ def main(config: Config) -> None:
             else:
                 ego: tuple[EgoCamera, ...] = tuple(read_ego_cameras(calibration, dataset, segment.id, segment.layout.oak_rig, segment.layout.quest_rig))
                 quest: list[CenterTrack] = read_quest_centers(calibration, dataset, segment.id, segment.layout.quest_rig)
-                videos: dict[str, CatalogVideo] = read_phone_videos(segment, timeline="video_time", sync=sync)
+                videos: dict[str, CatalogVideo] = aligned_phone_videos(read_phone_videos(segment), sync)
                 centers: tuple[Chunk, ...] = tuple(camera_center_chunks(cameras, ego, quest, {phone: video.t_ns for phone, video in videos.items()}))
                 # A phone's video_time is its capture_time plus one constant, so these packets hold the native spacing: no second read.
                 rate: float = config.rate if config.rate is not None else median_rate(videos)
                 print("KEYPOINTS_RATE", key, rate, flush=True)
-                processable.append(KeypointEpisode(key, segment, videos, sync, rate, cameras, ego, centers))
+                processable.append(KeypointEpisode(key, segment, videos, read_catalog_hands(segment) if (sync.offsets_ms or {}).get("quest_pose") is not None else None, sync, rate, cameras, ego, centers))
     if not processable:
         return
-    detector, pose = keypoint_models() if config.model == "rtmw" else keypoint_models(config.model)
+    detector, pose = keypoint_models(config.model)
     timer = SequenceTimer()
     for episode in processable:
         key = episode.key
         with timer.stage(f"{key}/detect"):
             detections = detect_keypoints(episode.segment, detector, pose, rate=episode.rate, sync=episode.sync, videos=episode.videos)
-        if episode.segment.hands is None and (episode.sync.offsets_ms or {}).get("quest_pose") is not None:
-            episode = replace(episode, segment=replace(episode.segment, hands=read_catalog_hands(episode.segment)))
         with timer.stage(f"{key}/triangulate"):
-            result = smooth_keypoints(triangulate_episode(detections, episode.cameras, read_anchors(episode.segment, detections.times, episode.sync)))
+            result = smooth_keypoints(triangulate_episode(detections, episode.cameras, read_anchors(episode.hands, detections.times, episode.sync)))
         with timer.stage(f"{key}/write"):
             write_keypoints(
                 config.calib_dir / key.rrd_name,
                 config.output_dir / key.rrd_name,
                 result,
                 ego=episode.ego,
-                quest_hands=ego_quest_hands(episode.segment, episode.sync),
+                quest_hands=ego_quest_hands(episode.hands, episode.sync),
                 camera_center_chunks=episode.center_chunks,
                 model=config.model,
             )

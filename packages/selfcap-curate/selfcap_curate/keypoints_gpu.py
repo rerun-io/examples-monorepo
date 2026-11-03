@@ -28,7 +28,7 @@ from torchcodec.decoders import VideoDecoder
 from trtkit.backends import TensorRtBackendConfig
 from trtkit.onnx_precision import fp16_conv_trunk
 
-from selfcap_curate.catalog_io import Segment, read_phone_videos
+from selfcap_curate.catalog_io import Segment, aligned_phone_videos, read_phone_videos
 from selfcap_curate.keypoints import Keypoints2D, PoseModel, ViewDetections
 from selfcap_curate.records import TimeSync
 
@@ -124,7 +124,7 @@ def decode_wanted(decoder: VideoDecoder, indices: Int64[ndarray, "n"], batch: in
 
 def plan_episode(segment: Segment, rate: float, sync: TimeSync, videos: dict[str, CatalogVideo] | None = None) -> FramePlan:
     """Read named segment streams and prepare original-frame selections."""
-    videos = read_phone_videos(segment, timeline="video_time", sync=sync) if videos is None else videos
+    videos = aligned_phone_videos(read_phone_videos(segment), sync) if videos is None else videos
     offsets: dict[str, float | None] = sync.offsets_ms or {}
     videos = {p: v for p, v in videos.items() if offsets.get("exo/" + p) is not None}
     return plan_frames(videos, rate)

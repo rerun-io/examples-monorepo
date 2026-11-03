@@ -1,8 +1,7 @@
 """COCO-133 wearer selection, confidence-weighted triangulation and layer writing."""
 
 import hashlib
-import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,12 +10,12 @@ from typing import Literal, TypeAlias, overload
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
+from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections, log_projections_property, shown_keypoint_columns
 from dataforge.interpolation import bracket, lerp
 from dataforge.logging_toolkit import time_column
 from dataforge.oak_mount import StaticCamera, read_oak_track, read_static_cameras
-from dataforge.schema import SHOWN_MIN_CONFIDENCE, coco133_uv_projected_path, coco133_xyz_path, pinhole_path, rig_path
-from dataforge.selfcap_schema import rdf_head
+from dataforge.schema import SHOWN_MIN_CONFIDENCE, cam_path, coco133_uv_projected_path, coco133_xyz_path, pinhole_path, rig_path, shown_path
+from dataforge.selfcap_schema import PREDICTIONS, SAPIENS2_XYZ, SKELETON
 from dataforge.triangulation import (
     HEADSET_COVERED,
     INLIER_PX,
@@ -38,13 +37,12 @@ from rerun.catalog import DatasetEntry
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from simplecv.catalog_rig_layout import catalog_components
 from simplecv.data.skeleton.coco_133 import COCO_133_LINKS
-from simplecv.rrd_query_utils import first_valid_value
 
-from selfcap_curate.catalog_io import Segment, read_catalog_hands, scalar
+from selfcap_curate.catalog_io import scalar
 from selfcap_curate.detection_io import COCO133_CLASS
 from selfcap_curate.display_style import CONFIDENCE_3D_COLOR_FLOOR, DISPLAY_JOINTS, log_display_skeleton
 from selfcap_curate.quest_fit import load_quest_hands
-from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, TimeSync, oak_quest_offset_ms
+from selfcap_curate.records import HAND_BASE, HAND_LATENCY_MS, CatalogHands, TimeSync, oak_quest_offset_ms
 from selfcap_curate.temporal_keypoints import BODY, bridge_short_gaps, responsive_body
 
 PoseModel: TypeAlias = Literal["rtmw", "sapiens2"]
@@ -75,7 +73,7 @@ def read_ego_cameras(calibration: DatasetEntry, base: DatasetEntry, segment: str
     """The OAK cameras of a fitted OAK mount: world poses are the Quest track times the mount; stereo and lenses are factory
     facts, which only the base layer writes (write_calib_layer holds the mount alone)."""
     rig = rig_path(oak_rig)
-    cams = {cam: f"{rig}/cam_{cam:02d}" for cam in (0, 1, 2)}
+    cams = {cam: cam_path(oak_rig, cam) for cam in (0, 1, 2)}
     track = read_oak_track(calibration.filter_segments(segment), rig, rig_path(quest_rig), poses=base.filter_segments(segment))
     if track is None:
         return []  # no fitted OAK mount for this episode
@@ -99,12 +97,11 @@ QUEST_HANDS_CLASS: rr.ClassDescription = rr.ClassDescription(
 """Blue like the base's /world/gt Quest hands; the points carry no colours of their own, so joints and bones take it."""
 
 
-def ego_quest_hands(segment: Segment, sync: TimeSync) -> QuestHandTrack | None:
+def ego_quest_hands(source: CatalogHands | None, sync: TimeSync) -> QuestHandTrack | None:
     """Quest hand joints on video_time as the OAK sees them: capture time + OAK offset - hand latency (solve_oak's mapping)."""
     qp = oak_quest_offset_ms(sync)
-    if qp is None:
+    if qp is None or source is None:
         return None
-    source = read_catalog_hands(segment)
     positions = source.positions.astype(np.float32)
     positions[(positions == 0.0).all(-1)] = np.nan
     return source.times_s + (qp - HAND_LATENCY_MS) / 1000.0, positions
@@ -379,6 +376,52 @@ def smooth_keypoints(result: Keypoints3D) -> Keypoints3D:
     return replace(result, xyz=xyz, n_views=final.n_views, confidence=confidence, inliers=final.inliers, max_reprojection_px=final.max_reprojection_px, bridged=bridged)
 
 
+def rtmw_annotation_parents(result: Keypoints3D, ego: tuple[EgoCamera, ...]) -> list[str]:
+    """Contexts for the RTMW world predictions, selected detections and projected copies."""
+    return [
+        PREDICTIONS,
+        *(f"{result.cameras[phone].entity}/pinhole/pred/rtmw" for phone in result.selected),
+        *(f"{camera.entity}/pinhole/coco133_uv_projected" for camera in result.cameras.values()),
+        *(coco133_uv_projected_path(camera.rig, camera.cam) for camera in ego),
+    ]
+
+
+def sapiens2_annotation_parents(result: Keypoints3D, ego: tuple[EgoCamera, ...]) -> list[str]:
+    """Contexts for Sapiens2 world keypoints and every calibrated camera."""
+    return [SAPIENS2_XYZ, *(f"{camera.entity}/pinhole/sapiens2" for camera in result.cameras.values()),
+            *(f"{pinhole_path(camera.rig, camera.cam)}/sapiens2" for camera in ego)]
+
+
+@dataclass(frozen=True, slots=True)
+class KeypointPaths:
+    """Entities and provenance used by one model's keypoint layer writer."""
+
+    property_name: str
+    """Recording property for keypoint provenance."""
+    label: str
+    """Human-readable pose estimator name."""
+    xyz_path: str
+    """Triangulated world keypoints."""
+    uv_suffix: str
+    """Detected pixels relative to each camera pinhole."""
+    projection_name: str
+    """Projected pixels relative to each camera pinhole."""
+    annotation_parents: Callable[[Keypoints3D, tuple[EgoCamera, ...]], list[str]]
+    """Annotation context locations for this model."""
+    write_property: bool
+    """Whether this layer owns the shared projections property."""
+
+
+RTMW_PATHS: KeypointPaths = KeypointPaths(
+    "calib", "RTMW-x COCO-133", coco133_xyz_path(pred="rtmw_triangulated"), "pred/rtmw/coco133_uv",
+    "coco133_uv_projected", rtmw_annotation_parents, True,
+)
+SAPIENS2_PATHS: KeypointPaths = KeypointPaths(
+    "keypoints_sapiens2", "Sapiens2 0.4B COCO-133", SAPIENS2_XYZ, "sapiens2/coco133_uv",
+    "sapiens2/coco133_uv_projected", sapiens2_annotation_parents, False,
+)
+
+
 def write_keypoints(
     calib: Path,
     output: Path,
@@ -416,39 +459,21 @@ def write_keypoints(
         uv: Float64[ndarray, "m 2"] = np.where((uvd[:, 2:] > 1e-5), uvd[:, :2], np.nan)
         return uv.reshape(len(points), points.shape[1], 2).astype(np.float32)
 
-    def rig_cam(entity: str) -> tuple[int, int]:
-        match = re.fullmatch(r"/world/rig_(\d+)/cam_(\d+)", entity)
-        if match is None:
-            raise ValueError(f"camera entity {entity} is not a rig camera")
-        return int(match[1]), int(match[2])
-
-    xyz_path: str = "/world/gt/sapiens2/coco133_xyz" if model == "sapiens2" else coco133_xyz_path(pred="rtmw_triangulated")
-    uv_suffix: str = "sapiens2/coco133_uv" if model == "sapiens2" else "pred/rtmw/coco133_uv"
-    projection_name: str = "sapiens2/coco133_uv_projected" if model == "sapiens2" else "coco133_uv_projected"
-    parents: list[str] = [
-        "/world/pred",
-        *(f"{result.cameras[phone].entity}/pinhole/pred/rtmw" for phone in result.selected),
-        *(coco133_uv_projected_path(*rig_cam(camera.entity)) for camera in result.cameras.values()),
-        *(coco133_uv_projected_path(camera.rig, camera.cam) for camera in ego),
-    ]
-    if model == "sapiens2":
-        parents = [
-            xyz_path,
-            *(f"{camera.entity}/pinhole/sapiens2" for camera in result.cameras.values()),
-            *(f"{pinhole_path(camera.rig, camera.cam)}/sapiens2" for camera in ego),
-        ]
+    paths: KeypointPaths = SAPIENS2_PATHS if model == "sapiens2" else RTMW_PATHS
+    xyz_path: str = paths.xyz_path
+    parents: list[str] = paths.annotation_parents(result, ego)
     quest_paths: list[str] = [f"{pinhole_path(camera.rig, camera.cam)}/{QUEST_HANDS_UV}" for camera in ego] if quest_hands is not None else []
 
     def additions() -> Iterator[Chunk]:
         yield Chunk.from_property(
-            "keypoints_sapiens2" if model == "sapiens2" else "calib",
+            paths.property_name,
             rr.AnyValues(
                 kp3d_method=(
                     f"confidence-weighted DLT: best view-pair seed, {ROBUST_ROUNDS} rounds of robust reweighting over every view "
                     f"(Cauchy at {INLIER_PX:g} px, no weight beyond {ROBUST_OUTER_GATE * INLIER_PX:g} px); "
                     "confidence: Kineo pairwise reprojection score (arXiv 2510.24464)"
                 ),
-                kp3d_model="YOLOX-m-humanart + " + ("Sapiens2 0.4B COCO-133" if model == "sapiens2" else "RTMW-x COCO-133"),
+                kp3d_model="YOLOX-m-humanart + " + paths.label,
                 kp3d_rate_hz=result.rate,
                 kp3d_samples=len(result.times),
                 kp3d_valid_joints=int(np.isfinite(result.xyz).all(-1).sum()),
@@ -473,7 +498,7 @@ def write_keypoints(
         with rr.RecordingStream(stores[0].application_id, recording_id=stores[0].recording_id, send_properties=False) as recording:
             recording.save(rows)
             display: DisplaySkeleton = display_skeleton(result.times, result.xyz, result.confidence, quest_hands)
-            log_display_skeleton(recording, "/world/skeleton", display.positions, display.confidence, stamps)
+            log_display_skeleton(recording, SKELETON, display.positions, display.confidence, stamps)
             for camera in ego:
                 log_display_skeleton(recording, f"{pinhole_path(camera.rig, camera.cam)}/skeleton",
                                      project_ego(camera, result.times, display.positions), display.confidence, stamps)
@@ -503,28 +528,33 @@ def write_keypoints(
                 scores: Float32[ndarray, "n 133"] = selected.scores.astype(np.float32)
                 log_keypoints2d(
                     recording,
-                    f"{result.cameras[phone].entity}/pinhole/{uv_suffix}",
+                    f"{result.cameras[phone].entity}/pinhole/{paths.uv_suffix}",
                     times_ns=stamps,
                     frame_indices=None,
                     positions=selected.xy,
                     confidence=scores,
                     color_range=(SHOWN_MIN_CONFIDENCE, 1.0),
-                    shown=(scores >= SHOWN_MIN_CONFIDENCE) & visible,
+                )
+                copy = shown_keypoint_columns(selected.xy, scores, (scores >= SHOWN_MIN_CONFIDENCE) & visible & np.isfinite(selected.xy).all(-1))
+                path: str = shown_path(f"{result.cameras[phone].entity}/pinhole/{paths.uv_suffix}")
+                rr.send_columns(path, indexes=[], columns=copy.style, recording=recording)
+                rr.send_columns(path, indexes=[time_column(stamps)], columns=copy.columns, recording=recording)
+            if paths.write_property:
+                log_projections_property(
+                    recording,
+                    camera_model="phones: pinhole with radial k1, k2 (selfcap-curate exo calibration)"
+                    + ("; OAK: OpenCV Brown-Conrady, 14 coefficients (factory)" if ego else ""),
                 )
             log_projections(
                 recording,
                 (
-                    *((rig_cam(camera.entity), projected(camera)) for camera in result.cameras.values()),
-                    *(((camera.rig, camera.cam), project_ego(camera, result.times, shown)) for camera in ego),
+                    *((f"{camera.entity}/pinhole/{paths.projection_name}", projected(camera)) for camera in result.cameras.values()),
+                    *((f"{pinhole_path(camera.rig, camera.cam)}/{paths.projection_name}", project_ego(camera, result.times, shown)) for camera in ego),
                 ),
                 times_ns=stamps,
                 frame_indices=None,
                 confidence=result.confidence,
                 color_range=(CONFIDENCE_3D_COLOR_FLOOR, 1.0),
-                entity_name=projection_name,
-                write_property=model == "rtmw",
-                camera_model="phones: pinhole with radial k1, k2 (selfcap-curate exo calibration)"
-                + ("; OAK: OpenCV Brown-Conrady, 14 coefficients (factory)" if ego else ""),
             )
             if quest_hands is not None:
                 hand_times, hand_xyz = quest_hands
@@ -564,19 +594,16 @@ def read_cameras(dataset: DatasetEntry, segment: str, base_phones: tuple[str, ..
     if base_phones is not None and (unexpected := set(names.values()) - set(base_phones)):
         raise ValueError("local calib phones absent from base: " + ", ".join(sorted(unexpected)))
 
-    def numeric(name: str) -> Float64[ndarray, "n"]:
-        return np.asarray(first_valid_value(table[name]), dtype=np.float64).reshape(-1)
-
+    static: dict[str, StaticCamera] = read_static_cameras(view, view, entities)
     result: dict[str, Camera] = {}
     for entity in entities:
         status = f"{entity}:calib_status"
         if status not in table.column_names or scalar(table, status, allow_none=True) != "ok":
             continue
-        phone = names[entity]
-        pose: Float64[ndarray, "4 4"] = np.eye(4)
-        pose[:3, :3], pose[:3, 3] = numeric(f"{entity}:Transform3D:mat3x3").reshape(3, 3).T, numeric(f"{entity}:Transform3D:translation")
-        size: Float64[ndarray, "n"] = numeric(f"{entity}/pinhole:Pinhole:resolution")
-        result[phone] = Camera(numeric(f"{entity}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T, pose, (0.0, 0.0), entity, (int(size[0]), int(size[1])))
+        camera: StaticCamera = static[entity]
+        if camera.K is None or camera.rig_T_cam is None or camera.resolution is None:
+            raise ValueError(f"{segment}/{entity}: incomplete calibrated camera")
+        result[names[entity]] = Camera(camera.K, camera.rig_T_cam, (0.0, 0.0), entity, camera.resolution)
     return result
 
 
@@ -599,15 +626,13 @@ def interpolate(
     return result
 
 
-def read_anchors(segment: Segment, times: Float64[ndarray, "n"], sync: TimeSync) -> Float64[ndarray, "n 3 3"]:
+def read_anchors(source: CatalogHands | None, times: Float64[ndarray, "n"], sync: TimeSync) -> Float64[ndarray, "n 3 3"]:
     """Use the base's time_sync, left-eye head pose and filtered raw hand wrists."""
     # Phone offsets embed this same Quest offset, including flagged as-cut zero.
     qp = (sync.offsets_ms or {}).get("quest_pose")
-    if qp is None:
+    if qp is None or source is None:
         return np.full((len(times), 3, 3), np.nan)
-    source = read_catalog_hands(segment)
-    axes = rdf_head(source.head_quaternions)
-    valid = np.isfinite(source.head_positions).all(1) & (np.linalg.norm(axes.quaternions, axis=1) > 0.5)
+    valid = np.isfinite(source.head_positions).all(1) & (np.linalg.norm(source.head_quaternions, axis=1) > 0.5)
     head = interpolate(times, source.head_times_s + qp / 1000.0, source.head_positions, valid, HEAD_ANCHOR_MAX_GAP_S)
     hands = load_quest_hands(source)
     wrists = [
