@@ -64,10 +64,8 @@ from dataforge.datasets.selfcap_raw import (
     FactoryCalibration,
     assumed_phone_lens,
     coco133_hands,
-    nominal_oak_mount,
     oak_stereo,
     quest_left_T_right,
-    quest_mesh_frame,
     read_quest_joint_hands,
 )
 from dataforge.datasets.selfcap_raw import CameraCalibration as CameraCalibration
@@ -90,7 +88,7 @@ from dataforge.logging_toolkit import (
     log_video_stream,
     time_column,
 )
-from dataforge.oak_mount import PRIOR_LEAD_NS
+from dataforge.oak_mount import PRIOR_LEAD_NS, nominal_oak_mount, quest_mesh_frame
 from dataforge.objects import strip_texture_transform, with_root_transform
 from dataforge.quest_joint_poses import QuestJointPoses, joint_poses_from_table, quest_hand_path
 from dataforge.quest_joint_poses import read_segment_hand_poses as read_segment_hand_poses

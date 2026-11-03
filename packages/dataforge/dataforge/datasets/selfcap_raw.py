@@ -14,93 +14,26 @@ import numpy as np
 import pyarrow as pa
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
-from serde import serde
 
 from dataforge.logging_toolkit import ImuChannel
+from dataforge.oak_mount import OAK_MOUNT_OTHER as OAK_MOUNT_OTHER
+from dataforge.oak_mount import OAK_MOUNTS as OAK_MOUNTS
+from dataforge.oak_mount import Distortion as Distortion
+from dataforge.oak_mount import FactoryCalibration as FactoryCalibration
+from dataforge.oak_mount import FactoryExtrinsic as FactoryExtrinsic
+from dataforge.oak_mount import Intrinsic as Intrinsic
+from dataforge.oak_mount import Lens as Lens
+from dataforge.oak_mount import Sensor as Sensor
+from dataforge.oak_mount import Size as Size
+from dataforge.oak_mount import factory_transform as factory_transform
+from dataforge.oak_mount import nominal_oak_mount as nominal_oak_mount
+from dataforge.oak_mount import quest_left_T_right as quest_left_T_right
+from dataforge.oak_mount import quest_mesh_frame as quest_mesh_frame
 from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, read_quest_joint_poses
 from dataforge.records import read_csv_columns, read_json
 
 BROWN_CONRADY_COEFFICIENTS: int = 14
 """OpenCV's 14-coefficient Brown-Conrady distortion layout."""
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Size:
-    width: int
-    """Array/capture width in pixels."""
-    height: int
-    """Array/capture height in pixels."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Sensor:
-    pixel_array_size: Size
-    """Full sensor array before centre crop."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Lens:
-    focal_length_x: float | None
-    """Horizontal focal in pixels."""
-    focal_length_y: float | None
-    """Vertical focal in pixels."""
-    principal_point_x: float | None
-    """Horizontal principal point in sensor pixels."""
-    principal_point_y: float | None
-    """Vertical principal point in sensor pixels."""
-    available: bool
-    """Whether factory intrinsics are valid."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Distortion:
-    coefficients: tuple[float, ...] | None = None
-    """OAK Brown-Conrady vector; absent for Quest."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Intrinsic:
-    camera_id: str
-    """Physical camera id, including Quest 50/51."""
-    positional_layout: str
-    """Factory slot name."""
-    lens_intrinsics: Lens
-    """Raw factory lens values."""
-    sensor_info: Sensor
-    """Sensor crop metadata."""
-    capture_resolution: Size
-    """Captured image dimensions."""
-    distortion: Distortion
-    """Full OAK distortion; Quest has none."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class FactoryExtrinsic:
-    type: str
-    """Factory direction label; matrices follow scratch's device-specific convention."""
-    R: Float64[ndarray, "3 3"]
-    """Raw factory rotation."""
-    T: Float64[ndarray, "3"]
-    """Translation: OAK centimetres, Quest metres."""
-    to: str = ""
-    """Physical destination camera id."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class FactoryCalibration:
-    device_id: str
-    """Full factory device identity."""
-    intrinsics: tuple[Intrinsic, ...]
-    """Available and unavailable camera slots."""
-    extrinsics: tuple[FactoryExtrinsic, ...] = ()
-    """Factory transforms, never estimated session calibration."""
-
 
 @dataclass(frozen=True, slots=True)
 class CameraCalibration:
@@ -280,13 +213,6 @@ def assumed_phone_lens(width: int, height: int) -> CameraCalibration:
     )
 
 
-def factory_transform(rotation: Float64[ndarray, "3 3"], translation: Float64[ndarray, "3"]) -> Float64[ndarray, "4 4"]:
-    """Rigid homogeneous transform from a factory rotation and translation."""
-    matrix: Float64[ndarray, "4 4"] = np.eye(4)
-    matrix[:3, :3], matrix[:3, 3] = rotation, translation
-    return matrix
-
-
 def oak_stereo(calibration: FactoryCalibration) -> dict[str, Float64[ndarray, "4 4"]]:
     """RGB-relative OAK stereo transforms (``rgb_T_left``, ``rgb_T_right``); the factory file is in centimetres."""
     ext = {e.type: e for e in calibration.extrinsics}
@@ -297,56 +223,7 @@ def oak_stereo(calibration: FactoryCalibration) -> dict[str, Float64[ndarray, "4
     return {"rgb_T_left": rgb_T_left, "rgb_T_right": rgb_T_left @ factory_transform(right.R, right.T * 0.01)}
 
 
-# Prior for the OAK mount on the headset: the RGB camera (RDF) in the Quest left-eye frame, as (healthy, camera-50) pairs.
-# The mount belongs to the OAK's bracket, so the prior is keyed by OAK device id. Medians of the fitted mounts in
-# selfcap-post-ep1-v2 (2026-10-30, 678 sessions); spread about each prior is p50 0.4-1.0 cm / 0.5-1.5 deg. The camera-50
-# column is for headsets whose broken left camera borrows camera 50: their eye track's frame sits about 175 deg about x.
-OAK_MOUNT_OTHER: tuple[Float64[ndarray, "4 4"], Float64[ndarray, "4 4"]] = (
-    np.array([[0.9996, -0.0131, -0.0230, 0.0509], [0.0212, 0.9161, 0.4004, 0.0408], [0.0158, -0.4008, 0.9160, -0.0513], [0, 0, 0, 1.0]]),
-    np.array([[0.9996, -0.0036, -0.0271, 0.0510], [-0.0168, -0.8630, -0.5048, -0.0479], [-0.0216, 0.5051, -0.8628, -0.0223], [0, 0, 0, 1.0]]),
-)
-"""380 healthy / 59 camera-50 sessions on OAKs C1F3CFD2 and F1FBBCD6, and the fallback for an OAK no fit has seen."""
-OAK_MOUNTS: dict[str, tuple[Float64[ndarray, "4 4"], Float64[ndarray, "4 4"]]] = {
-    "OAK - 14442C10D1FCD7D200": (  # 214 healthy / 25 camera-50 sessions; sits about 4 cm from the others, tilted 7 deg more
-        np.array([[0.9989, -0.0328, 0.0346, 0.0306], [0.0108, 0.8627, 0.5056, 0.0671], [-0.0464, -0.5047, 0.8621, -0.0144], [0, 0, 0, 1.0]]),
-        np.array([[0.9995, -0.0069, 0.0324, 0.0333], [0.0123, -0.8297, -0.5581, -0.0728], [0.0307, 0.5581, -0.8292, -0.0414], [0, 0, 0, 1.0]]),
-    ),
-}
 
-
-def nominal_oak_mount(oak: FactoryCalibration, quest: FactoryCalibration) -> Float64[ndarray, "4 4"] | None:
-    """Prior Quest-left-eye → OAK-RGB mount for this OAK and headset layout, or None for a layout no fit has seen."""
-    healthy, camera_50 = OAK_MOUNTS.get(oak.device_id, OAK_MOUNT_OTHER)
-    if quest_left_T_right(quest) is not None:
-        return healthy
-    if any(c.camera_id == "50" for c in quest.intrinsics):
-        return camera_50
-    return None
-
-
-def quest_mesh_frame(oak: FactoryCalibration, quest: FactoryCalibration) -> Float64[ndarray, "4 4"] | None:
-    """Where the Quest mesh (built in a healthy left-eye frame) sits in this headset's eye-track frame.
-
-    Identity for a healthy headset. A camera-50 headset's eye frame is turned about 175 deg; both OAK priors describe the
-    same physical mount, so ``camera50_T_healthy = camera_50 @ inv(healthy)``. None for a layout no fit has seen.
-    """
-    healthy, camera_50 = OAK_MOUNTS.get(oak.device_id, OAK_MOUNT_OTHER)
-    if quest_left_T_right(quest) is not None:
-        return np.eye(4)
-    if any(c.camera_id == "50" for c in quest.intrinsics):
-        return camera_50 @ np.linalg.inv(healthy)
-    return None
-
-
-def quest_left_T_right(calibration: FactoryCalibration) -> Float64[ndarray, "4 4"] | None:
-    """The right camera in the left camera's frame, when the headset is healthy: both cameras measured and both
-    ``device_to_*`` extrinsics present. Faulty headsets return None; their fix borrows from another session."""
-    ext = {e.type: e for e in calibration.extrinsics}
-    measured = {c.positional_layout for c in calibration.intrinsics if c.lens_intrinsics.available}
-    if not ({"device_to_left", "device_to_right"} <= ext.keys() and {"left", "right"} <= measured):
-        return None
-    left, right = ext["device_to_left"], ext["device_to_right"]
-    return np.linalg.inv(factory_transform(left.R.T, left.T)) @ factory_transform(right.R.T, right.T)
 
 
 
