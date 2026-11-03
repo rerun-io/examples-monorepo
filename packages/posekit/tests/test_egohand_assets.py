@@ -7,6 +7,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+pytest.importorskip("egohand_inference", reason="EgoHand adapters require the optional posekit-egohand feature (egohand-dev environment)")
+
 from posekit.models import egohand
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
 
@@ -79,6 +81,7 @@ def test_the_model_loads_from_safetensors_with_its_cfg_in_the_metadata(tmp_path:
     model, target = predictor.load_egohand_model(path, tmp_path / "soma", backbone=engine)
 
     assert target == "egohand.models.egohand.EgoHand"
+    assert isinstance(model, Model)
     assert model.backbone is engine and not model.training
     assert built[0].backbone_weights is None and built[0].soma_hand.data_root == str(tmp_path / "soma")
     assert built[0].backbone == {"_target_": "torch.nn.Identity"}

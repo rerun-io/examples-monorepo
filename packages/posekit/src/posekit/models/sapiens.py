@@ -90,7 +90,8 @@ class SapiensPose2d(TopDownPose2d):
         self._heatmap_size: tuple[int, int] = (int(spec.heatmap_size[0]), int(spec.heatmap_size[1]))
         channels: int = int(spec.num_keypoints)
         if config.variant == "nvfp4-768":  # the fast export keeps only the mapped heatmaps, in COCO order
-            self._input_size, self._heatmap_size = FAST_POSE_INPUT_HW[::-1], FAST_POSE_HEATMAP_HW[::-1]
+            self._input_size = (FAST_POSE_INPUT_HW[1], FAST_POSE_INPUT_HW[0])
+            self._heatmap_size = (FAST_POSE_HEATMAP_HW[1], FAST_POSE_HEATMAP_HW[0])
             channels = len(coco133_goliath_pairs()[0])
         input_spec = TensorSpec(name="inputs", shape=(3, self._input_size[1], self._input_size[0]), dtype=torch.float32)
         heatmap_spec = TensorSpec(name="heatmaps", shape=(channels, self._heatmap_size[1], self._heatmap_size[0]), dtype=torch.float32)

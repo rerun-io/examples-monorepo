@@ -266,12 +266,11 @@ class EgoHandConfig:
         return EgoHandPredictor(self)
 
 
-def _export_backbone_once(config: EgoHandConfig, weights: Path, soma: Path) -> None:
+def _export_backbone_once(config: EgoHandConfig, weights: Path, soma: Path, onnx: Path) -> None:
     """Export the bf16 DINOv3 if no one has yet; processes that find it missing take turns, so the first one's export serves them all."""
     from egohand_inference.pipeline.predictor import EgoHandPredictor as UpstreamPredictor
     from egohand_inference.pipeline.predictor import load_egohand_model
 
-    onnx: Path = config.backbone_onnx
     if onnx.is_file():
         return
     onnx.parent.mkdir(parents=True, exist_ok=True)
@@ -306,7 +305,7 @@ class EgoHandPredictor:
         weights: Path = config.weights_path()
         soma: Path = config.soma_path()
         if config.backbone_onnx is not None:
-            _export_backbone_once(config, weights, soma)
+            _export_backbone_once(config, weights, soma, config.backbone_onnx)
             engine = _TensorRtBackbone(create_runtime_from_onnx(config.backbone_onnx, config.backbone_backend))
         model, _ = load_egohand_model(weights, soma, backbone=engine)
         self.predictor: UpstreamPredictor = UpstreamPredictor(
