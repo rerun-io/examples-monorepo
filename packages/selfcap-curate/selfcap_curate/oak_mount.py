@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 from dataforge.datasets.selfcap_raw import FactoryCalibration, Intrinsic, oak_stereo
-from dataforge.interpolation import bracket, lerp, slerp
+from dataforge.interpolation import interpolate_poses, interpolate_positions
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.ndimage import gaussian_filter1d
@@ -14,7 +14,7 @@ from scipy.spatial.transform import Rotation
 
 from selfcap_curate.device_tables import RotationTable
 from selfcap_curate.factory import intrinsic_matrix, transform
-from selfcap_curate.quest_fit import hand_neighbors
+from selfcap_curate.quest_fit import HAND_MAX_GAP_S
 from selfcap_curate.records import (
     HAND_BASE,
     HAND_LATENCY_MS,
@@ -29,7 +29,7 @@ from selfcap_curate.records import (
 )
 
 OAK_HEAD_MAX_GAP_S: float = 0.06
-"""OAK hand fitting requires head-pose intervals strictly shorter than 60 ms."""
+"""OAK hand fitting requires head-pose intervals no longer than 60 ms."""
 
 
 def gyro_mount(session: str, episodes: list[SessionEpisode]) -> GyroFit:
@@ -92,16 +92,15 @@ def hand_observations(
         np.linalg.norm(np.gradient(detections.xy, vt, axis=0), axis=-1) if max_image_speed is not None else np.zeros_like(detections.scores)
     )
     tq = vt - qp / 1000.0
-    samples = bracket(ht, tq, OAK_HEAD_MAX_GAP_S, inclusive=False, denominator_floor=1e-9, clip=True)
-    position = lerp(hp, samples)
-    rotation = Rotation.from_matrix(slerp(ht, Rotation.from_quat(head.head_quaternions), tq))
-    okh = samples.valid
+    head_pose = interpolate_poses(ht, hp, Rotation.from_quat(head.head_quaternions), tq, OAK_HEAD_MAX_GAP_S)
+    position = head_pose.positions
+    rotation = Rotation.from_matrix(head_pose.rotations)
+    okh = head_pose.valid
     observations: list[Observation] = []
     for side, base in HAND_BASE.items():
         hand = episode.quest[side]
-        j, alpha, valid = hand_neighbors(hand, tq + HAND_LATENCY_MS / 1000.0)
-        valid = okh & valid
-        joints = (1.0 - alpha[:, None, None]) * hand.joints[j - 1] + alpha[:, None, None] * hand.joints[j]
+        joints = interpolate_positions(hand.times_s, hand.joints, tq + HAND_LATENCY_MS / 1000.0, HAND_MAX_GAP_S, hand.valid)
+        valid = okh & np.isfinite(joints).all((1, 2))
         for frame in np.flatnonzero(valid):
             local = rotation[frame].inv().apply(joints[frame] - position[frame])
             for k in MAPPED:

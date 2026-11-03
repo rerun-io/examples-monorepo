@@ -9,7 +9,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-from dataforge.interpolation import bracket, lerp, slerp
+from dataforge.interpolation import bracket, interpolate_poses, interpolate_positions
 from dataforge.quest_joint_poses import QuestJointPoses
 from jaxtyping import Bool, Float, Float32, Float64, Int64
 from numpy import ndarray
@@ -42,7 +42,7 @@ class HandOrientations:
 
 
 HAND_ORIENTATION_MAX_GAP_S: float = 0.04
-"""Hand poses require intervals strictly shorter than 40 ms."""
+"""Hand poses require intervals no longer than 40 ms."""
 
 
 def read_orientations(hands: dict[str, QuestJointPoses], times: Float64[ndarray, "n"], offset_ms: float) -> HandOrientations:
@@ -62,9 +62,9 @@ def read_orientations(hands: dict[str, QuestJointPoses], times: Float64[ndarray,
             continue
         sources.append("none" if raw.orientations is None else "quest")
         stamps = raw.times_ns.astype(np.float64) / 1e9
-        bounds = bracket(stamps, samples, HAND_ORIENTATION_MAX_GAP_S, inclusive=False, denominator_floor=0.0)
+        bounds = bracket(stamps, samples, HAND_ORIENTATION_MAX_GAP_S)
         left, right = bounds.left, bounds.right
-        positions[:, side] = lerp(raw.positions, bounds)
+        positions[:, side] = interpolate_positions(stamps, raw.positions, samples, HAND_ORIENTATION_MAX_GAP_S)
         if raw.orientations is None:
             valid[:, side] = np.isfinite(positions[:, side]).all(-1) & bounds.valid[:, None]
             continue
@@ -73,8 +73,9 @@ def read_orientations(hands: dict[str, QuestJointPoses], times: Float64[ndarray,
             good = np.isfinite(q).all(-1) & (np.linalg.norm(q, axis=-1) > 0.5)
             if good.sum() < 2:
                 continue
-            rotations[:, side, joint] = slerp(stamps[good], Rotation.from_quat(q[good]), samples)
-            valid[:, side, joint] = good[left] & good[right] & bounds.valid
+            pose = interpolate_poses(stamps[good], raw.positions[good, joint], Rotation.from_quat(q[good]), samples, HAND_ORIENTATION_MAX_GAP_S)
+            rotations[:, side, joint] = pose.rotations
+            valid[:, side, joint] = good[left] & (good[right] | (stamps[left] == stamps[right])) & bounds.valid
     return HandOrientations(positions, rotations, valid, (sources[0], sources[1]))
 
 

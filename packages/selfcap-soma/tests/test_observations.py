@@ -40,12 +40,13 @@ def test_overlay_maps_only_body_and_hands_not_head_or_root():
 def test_head_samples_outside_coverage_are_missing_not_extrapolated():
     from selfcap_soma.catalog import interpolate_head
 
-    positions, rotations = interpolate_head(
+    result = interpolate_head(
         np.array([0.0, 0.02]),
         np.array([[1.0, 2.0, 3.0], [3.0, 2.0, 3.0]]),
         np.array([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]),
         np.array([-0.01, 0.01, 0.03]),
     )
+    positions, rotations = result.positions, result.rotations
     assert np.isnan(positions[[0, 2]]).all()
     np.testing.assert_allclose(positions[1], [2.0, 2.0, 3.0])
     np.testing.assert_allclose(rotations[1], np.eye(3))

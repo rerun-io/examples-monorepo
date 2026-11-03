@@ -11,7 +11,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections, log_projections_property, shown_keypoint_columns
-from dataforge.interpolation import bracket, lerp
+from dataforge.interpolation import interpolate_positions
 from dataforge.logging_toolkit import time_column
 from dataforge.oak_mount import StaticCamera, read_oak_track, read_static_cameras
 from dataforge.schema import SHOWN_MIN_CONFIDENCE, cam_path, coco133_uv_projected_path, coco133_xyz_path, pinhole_path, rig_path, shown_path
@@ -617,13 +617,7 @@ def interpolate(
     times: Float64[ndarray, "m"], stamps: Float64[ndarray, "n"], values: Float64[ndarray, "n 3"], valid: Bool[ndarray, "n"], max_gap: float
 ) -> Float64[ndarray, "m 3"]:
     """Linear interpolation only between valid neighbours within the source gap gate."""
-    result = np.full((len(times), 3), np.nan)
-    if len(stamps) < 2:
-        return result
-    samples = bracket(stamps, times, max_gap)
-    good = samples.valid & valid[samples.left] & valid[samples.right]
-    result[good] = lerp(values, samples)[good]
-    return result
+    return interpolate_positions(stamps, values, times, max_gap, valid)
 
 
 def read_anchors(source: CatalogHands | None, times: Float64[ndarray, "n"], sync: TimeSync) -> Float64[ndarray, "n 3 3"]:

@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
-from dataforge.interpolation import bracket, lerp, slerp
+from dataforge.interpolation import interpolate_poses
 from dataforge.selfcap_schema import HeadConvention
 from dataforge.triangulation import Camera as TriangulationCamera
 from dataforge.triangulation import triangulate_frames
@@ -51,13 +51,9 @@ class HeadTrack:
     """Axes the source stored the orientation in; the rotations here are always RDF (x right, y down, z forward)."""
 
     def at(self, times: Float64[ndarray, "m"]) -> tuple[Float64[ndarray, "m 3 3"], Float64[ndarray, "m 3"], Bool[ndarray, "m"]]:
-        """Slerp/lerp between neighbours no more than HEAD_GAP_S apart; invalid rows are identity at the origin."""
-        samples = bracket(self.times_s, times, HEAD_GAP_S, clip=True)
-        valid = samples.valid
-        rotations = slerp(self.times_s, Rotation.from_matrix(self.rotations), times)
-        positions = lerp(self.positions, samples)
-        rotations[~valid], positions[~valid] = np.eye(3), 0.0
-        return rotations, positions, valid
+        """Interpolate neighbours no more than HEAD_GAP_S apart; invalid positions are NaN."""
+        return interpolate_poses(self.times_s, self.positions, Rotation.from_matrix(self.rotations), times, HEAD_GAP_S)
+
 
 
 @dataclass(frozen=True, slots=True)

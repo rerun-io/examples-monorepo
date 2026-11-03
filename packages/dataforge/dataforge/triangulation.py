@@ -12,7 +12,7 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from torch import Tensor
 
-from dataforge.interpolation import bracket, lerp, slerp
+from dataforge.interpolation import interpolate_poses
 
 INLIER_PX: float = 8.0
 """A view supports a point when it reprojects within this many pixels."""
@@ -116,20 +116,7 @@ def camera_transforms(
     rig_T_cam: Float64[ndarray, "4 4"],
 ) -> Float64[ndarray, "n 4 4"]:
     """Interpolate rig translation/rotation, then apply the camera lever arm; gaps over 100 ms stay missing."""
-    output: Float64[ndarray, "n 4 4"] = np.full((len(times_s), 4, 4), np.nan)
-    if len(stamps) < 2:
-        return output
-
-    samples = bracket(stamps, times_s, EGO_POSE_MAX_GAP_S, clip=True)
-    usable = samples.valid
-    translation = lerp(world_T_rig[:, :3, 3], samples)
-    rotation = slerp(stamps, Rotation.from_matrix(world_T_rig[:, :3, :3]), times_s)
-    world_T_cam_r = rotation @ rig_T_cam[:3, :3]
-    world_T_cam_t = translation + np.einsum("nij,j->ni", rotation, rig_T_cam[:3, 3])
-    output[:] = np.eye(4)
-    output[:, :3, :3], output[:, :3, 3] = world_T_cam_r, world_T_cam_t
-    output[~usable] = np.nan
-    return output
+    return interpolate_poses(stamps, world_T_rig[:, :3, 3], Rotation.from_matrix(world_T_rig[:, :3, :3]), times_s, EGO_POSE_MAX_GAP_S).transforms @ rig_T_cam
 
 
 def project_ego(camera: EgoCamera, times_s: Float64[ndarray, "n"], xyz: Float32[ndarray, "n j 3"]) -> Float32[ndarray, "n j 2"]:

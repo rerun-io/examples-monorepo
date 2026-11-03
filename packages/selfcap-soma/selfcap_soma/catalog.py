@@ -5,7 +5,7 @@ from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
-from dataforge.interpolation import bracket, lerp, slerp
+from dataforge.interpolation import PoseSamples, interpolate_poses, interpolate_positions
 from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, joint_poses_from_table, quest_hand_path
 from dataforge.schema import coco133_xyz_path
 from dataforge.selfcap_schema import HeadConvention, SyncRecord, rdf_head
@@ -165,8 +165,6 @@ def interpolate_hands(
 ) -> Float64[ndarray, "n 133 3"]:
     """Interpolate valid bracketing samples; reject jumps, freezes and gaps."""
     result: Float64[ndarray, "n 133 3"] = np.full((len(sample), 133, 3), np.nan)
-    samples = bracket(times, sample, HAND_MAX_GAP_S, denominator_floor=1e-9)
-    lo, hi = samples.left, samples.right
     for base in (91, 112):
         hand = points[:, base : base + 21]
         finite = np.isfinite(hand).all((1, 2)) & (np.abs(hand).sum((1, 2)) > 0.0)
@@ -174,8 +172,7 @@ def interpolate_hands(
         jump = np.r_[False, speed > 4.0]
         frozen = np.r_[False, np.abs(np.diff(hand, axis=0)).sum((1, 2)) == 0.0]
         finite &= ~(jump | np.r_[jump[1:], False] | (frozen & np.r_[False, frozen[:-1]]))
-        valid = finite[lo] & finite[hi] & samples.valid
-        result[valid, base : base + 21] = lerp(hand, samples)[valid]
+        result[:, base : base + 21] = interpolate_positions(times, hand, sample, HAND_MAX_GAP_S, finite)
     return result
 
 
@@ -184,13 +181,9 @@ def interpolate_head(
     positions: Float64[ndarray, "p 3"],
     quaternions: Float64[ndarray, "p 4"],
     samples: Float64[ndarray, "n"],
-) -> tuple[Float64[ndarray, "n 3"], Float64[ndarray, "n 3 3"]]:
+) -> PoseSamples:
     """Interpolate head poses; missing endpoints or gaps have no position target."""
-    samples_bracket = bracket(times, samples, HEAD_MAX_GAP_S, denominator_floor=0.0)
-    result = lerp(positions, samples_bracket)
-    result[~samples_bracket.valid] = np.nan
-    rotations = slerp(times, Rotation.from_quat(quaternions), samples)
-    return result, rotations
+    return interpolate_poses(times, positions, Rotation.from_quat(quaternions), samples, HEAD_MAX_GAP_S)
 
 
 def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, source: ExoSource = "rtmw") -> Observations:
@@ -257,6 +250,7 @@ def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, 
     keep = np.r_[True, np.diff(ht) > 0.0]
     ht, hp, hq = ht[keep], hp[keep], hq[keep]
     hands = interpolate_hands(seconds(hand_table["capture_time"]), floats(hand_table[hands_column], -1, 133, 3), hand_sample)
-    positions, rotations = interpolate_head(ht, hp, hq, head_sample)
+    head = interpolate_head(ht, hp, hq, head_sample)
+    positions, rotations = head.positions, np.where(head.valid[:, None, None], head.rotations, np.nan)
     support = floats(table[support_column], -1, 133).astype(np.int64) if support_column in table.column_names else None
     return Observations(times, exo, scores, hands, positions, rotations, offset, support, hand_poses, axes.convention)

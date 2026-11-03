@@ -7,7 +7,7 @@ semantics. No guessed confidence is assigned to the catalog's raw Quest hands.
 from dataclasses import dataclass
 
 import numpy as np
-from dataforge.interpolation import bracket
+from dataforge.interpolation import bracket, interpolate_positions
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
@@ -15,7 +15,7 @@ from selfcap_curate.catalog_io import Segment, read_catalog_hands, read_gyro
 from selfcap_curate.records import HAND_BASE, MAPPED, CatalogHands, HandTrack, PhoneDetections, SessionEpisode, Side, TimeSync
 
 HAND_MAX_GAP_S: float = 0.04
-"""Quest hand pairs require a strictly shorter interval than 40 ms."""
+"""Quest hand pairs require a no longer than 40 ms."""
 
 
 def load_quest_hands(source: CatalogHands) -> dict[Side, HandTrack]:
@@ -78,9 +78,9 @@ class Correspondences:
 
 
 def hand_neighbors(hand: HandTrack, times: Float64[ndarray, "n"]) -> tuple[Int64[ndarray, "n"], Float64[ndarray, "n"], Bool[ndarray, "n"]]:
-    """Share the 1e-6 denominator and strict 40 ms tracked-neighbor gate only."""
-    samples = bracket(hand.times_s, times, HAND_MAX_GAP_S, inclusive=False, denominator_floor=1e-6, clip=True)
-    valid = samples.valid & hand.valid[samples.left] & hand.valid[samples.right]
+    """Use the shared inclusive 40 ms policy and the source tracking mask."""
+    samples = bracket(hand.times_s, times, HAND_MAX_GAP_S)
+    valid = samples.valid & hand.valid[samples.left] & (hand.valid[samples.right] | (hand.times_s[samples.left] == hand.times_s[samples.right]))
     return samples.right, samples.alpha, valid
 
 
@@ -100,11 +100,12 @@ def pairs(detections: PhoneDetections, quest: dict[Side, HandTrack], tau_s: floa
         if len(q.times_s) < 2:
             continue
         tq = detections.times_s + tau_s
-        i, a, valid = hand_neighbors(q, tq)
-        speed = (1.0 - a) * q.speed[i - 1] + a * q.speed[i]
+        _, _, valid = hand_neighbors(q, tq)
+        speed = interpolate_positions(q.times_s, q.speed, tq, HAND_MAX_GAP_S, q.valid)
+        joints = interpolate_positions(q.times_s, q.joints, tq, HAND_MAX_GAP_S, q.valid)
         motion_weight = np.clip(speed / 0.3, 0.1, 1.0)
         for joint in MAPPED:
-            world = (1.0 - a)[:, None] * q.joints[i - 1, joint] + a[:, None] * q.joints[i, joint]
+            world = joints[:, joint]
             image = detections.xy[:, base + joint]
             keep = valid & (detections.scores[:, base + joint] >= 0.3) & np.isfinite(image).all(1)
             worlds.append(world[keep])

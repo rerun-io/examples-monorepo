@@ -9,7 +9,8 @@ from selfcap_soma.hand_pose import frame, read_orientations
 
 
 @pytest.mark.parametrize("orientations", [False, True], ids=["positions", "rotations"])
-def test_zero_length_hand_gap_is_invalid_without_dividing_by_zero(orientations: bool) -> None:
+@pytest.mark.parametrize("time", [-0.048, 0.0], ids=["at-duplicate", "outside-track"])
+def test_zero_length_hand_gap_uses_left_sample_only_inside_the_track(orientations: bool, time: float) -> None:
     raw = QuestJointPoses(
         np.array([0, 0], dtype=np.int64),
         np.ones((2, 26, 3), dtype=np.float32),
@@ -17,9 +18,13 @@ def test_zero_length_hand_gap_is_invalid_without_dividing_by_zero(orientations: 
         (),
     )
     with np.errstate(divide="raise", invalid="raise"):
-        observed = read_orientations({"left": raw}, np.array([0.0]), 0.0)
-    assert not observed.valid.any()
-    assert np.isfinite(observed.positions[:, 0]).all()
+        observed = read_orientations({"left": raw}, np.array([time]), 0.0)
+    if time < 0.0:
+        assert observed.valid[:, 0].all()
+        np.testing.assert_array_equal(observed.positions[:, 0], np.ones((1, 26, 3)))
+    else:
+        assert not observed.valid.any()
+        assert np.isnan(observed.positions[:, 0]).all()
     assert np.isfinite(observed.rotations).all()
 
 
