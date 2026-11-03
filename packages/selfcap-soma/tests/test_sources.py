@@ -87,3 +87,13 @@ def test_read_views_thresholds_the_uncensored_entity_itself(tmp_path: Path, monk
     np.testing.assert_array_equal(phones[0].pixels[0, 6], [1.0, 1.0])
     assert phones[0].scores[0, 6] == pytest.approx(0.71)
     assert np.isnan(phones[0].pixels[0, HEADSET_COVERED]).all() and (phones[0].scores[0, HEADSET_COVERED] == 0.0).all()
+
+
+def test_unused_phone_null_offset_does_not_block_the_quest_clock() -> None:
+    """Unused phones can lack a clock while the Quest clock remains usable."""
+    from serde.json import from_json
+    from selfcap_soma.catalog import SyncRecord
+
+    sync = from_json(SyncRecord, '{"offsets_ms":{"quest_pose":12.5,"exo/unused":null},"version":2}')
+    assert sync.offsets_ms["quest_pose"] == 12.5
+    assert sync.offsets_ms["exo/unused"] is None

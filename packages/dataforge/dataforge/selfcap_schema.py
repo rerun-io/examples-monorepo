@@ -14,6 +14,7 @@ import numpy as np
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from serde import serde
 
 from dataforge import schema
 
@@ -131,3 +132,19 @@ def oak_rig_of(phones: int, present: Collection[str], *, ego_rigs: Collection[in
     if len(ego_rigs) == 1:
         return next(iter(ego_rigs))
     return phones if schema.video_path(phones, 1) in present else DEFAULT_EXO_CAMERAS
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class SyncRecord:
+    """Partial read contract for aligned clocks; unrelated producer fields may grow."""
+
+    offsets_ms: dict[str, float | None]
+    """Capture-to-video offsets in milliseconds; unused devices may have no clock."""
+
+    def require_offset(self, device: str) -> float:
+        """Require only the clock this consumer uses."""
+        value = self.offsets_ms.get(device)
+        if value is None or not np.isfinite(value):
+            raise ValueError(f"missing finite clock offset for {device}")
+        return value

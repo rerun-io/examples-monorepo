@@ -8,13 +8,12 @@ import pyarrow as pa
 from dataforge.interpolation import bracket, lerp, slerp
 from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, joint_poses_from_table, quest_hand_path
 from dataforge.schema import coco133_xyz_path
-from dataforge.selfcap_schema import HeadConvention, rdf_head
+from dataforge.selfcap_schema import HeadConvention, SyncRecord, rdf_head
 from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation
-from serde import serde
 from serde.json import from_json
 
 from selfcap_soma.observations import quest_sample_times
@@ -112,15 +111,6 @@ def exo_view_track(columns: list[str], camera: str, source: ExoSource) -> str | 
     return tracks[0] if tracks else None
 
 
-@serde
-@dataclass(frozen=True, slots=True)
-class SyncRecord:
-    """Only the source fields used here; the third-party record can grow."""
-
-    offsets_ms: dict[str, float]
-    """Offsets from capture time to video time."""
-
-
 @dataclass(frozen=True, slots=True)
 class Observations:
     times: Float64[ndarray, "n"]
@@ -210,7 +200,7 @@ def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, 
     sync_column = next(name for name in sync_table.column_names if name.endswith(":time_sync:record_json"))
     sync_text = sync_table[sync_column].drop_null()[0].as_py()[0]
     sync = from_json(SyncRecord, sync_text)
-    offset = sync.offsets_ms["quest_pose"]
+    offset = sync.require_offset("quest_pose")
 
     columns = catalog.columns
     position, confidence = exo_columns(columns, source)
