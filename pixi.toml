@@ -1599,7 +1599,7 @@ huggingface_hub = "*"
 [feature.selfcap-soma.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
 py-soma-x = "==0.3.0"
-rerun-sdk = { version = "==0.41.0", extras = ["catalog"] }
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 selfcap-soma = { path = "packages/selfcap-soma", editable = true }
 
 [feature.selfcap-soma.activation.env]
