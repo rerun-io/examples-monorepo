@@ -1,5 +1,15 @@
 # EgoHand inference source
 
+> **TODO: replace this vendored copy with a rattler-build recipe.** Follow the
+> `packages/mast3r` pattern: fetch `NVIDIA/IsaacCapture@479063c` and
+> `DINOv3@5aa7e93`, copy only the inference files SelfCap runs, and keep our
+> changes as patches (pyproject, safetensors loading, OpenCV 5 undistortion,
+> prepared crops, GPU sampling). Use the upstream module names. Export the
+> backbone ONNX once with a tool in the package, host it on
+> `pablovela5620/egohand`, and drop the first-use export. A trace of
+> `selfcap-calibrate` (2026-11-02) ran 102 of 285 functions; the DINOv3 code
+> runs only for that export.
+
 This is a build-only vendored dependency of posekit. The public API is
 `posekit.models.egohand`, and the runtime feature is `posekit-egohand`.
 Use `pixi run -e egohand egohand-selfcap --rr-config.headless --rr-config.save /tmp/egohand/selfcap.rrd`.
