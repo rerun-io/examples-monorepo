@@ -292,3 +292,14 @@ def test_remote_catalog_skips_local_backlog_probe() -> None:
         backlog_probe=lambda _: pytest.fail("remote catalog must not probe ss"),
         listing_probe=lambda _: True,
     )
+
+
+def test_catalog_locality_comes_from_the_url_host() -> None:
+    import socket
+
+    from dataforge.catalog_swap import is_local_catalog
+
+    assert is_local_catalog("rerun+http://127.0.0.1:51301")
+    assert is_local_catalog("rerun+http://localhost:9876")
+    assert is_local_catalog(f"rerun+http://{socket.gethostname()}:51235")
+    assert not is_local_catalog("rerun+http://dgx-spark:51235")

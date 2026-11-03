@@ -49,7 +49,7 @@ class Config:
     run_root: Path
     """New directory for every output and log; an existing one is refused."""
     catalog_url: str
-    """Catalog on this machine; its server must read run_root."""
+    """Catalog URL, local or on another machine; its server must read run_root at the same path."""
     dataset: str
     """New dataset on catalog_url; a name that already exists is refused, so other datasets stay safe."""
     raw_root: Path | None = None

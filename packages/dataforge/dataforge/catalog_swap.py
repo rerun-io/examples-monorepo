@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import socket
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -37,6 +38,12 @@ class LayerEntry(Protocol):
     def register(self, uris: list[str], /, *, layer_name: str, on_duplicate: OnDuplicateSegmentLayer) -> CatalogTask:
         """Register a batch of files."""
         ...
+
+
+def is_local_catalog(catalog_url: str) -> bool:
+    """True when the catalog URL names this machine, so its listening backlog can be probed here."""
+    host: str | None = urlparse(catalog_url.removeprefix("rerun+")).hostname
+    return host in {"localhost", "127.0.0.1", "::1", socket.gethostname()}
 
 
 def listen_backlog_idle(port: int) -> bool:
