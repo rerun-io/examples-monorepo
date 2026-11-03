@@ -47,8 +47,8 @@ class LayerFit:
     """Fitted world joints."""
     edges: list[tuple[int, int]]
     """Rig connections between joints."""
-    ears: Float32[ndarray, "n 2 3"] | None
-    """Fitted ear landmarks; older fits lack them."""
+    ears: Float32[ndarray, "n 2 3"]
+    """Fitted ear landmarks."""
     points: Float32[ndarray, "n 133 3"]
     """COCO-133 equivalent points consumed by the fit's losses."""
     exo: Float64[ndarray, "n 133 3"]
@@ -63,9 +63,9 @@ class LayerFit:
     """Mesh frame times in nanoseconds."""
     faces: Int32[ndarray, "f 3"]
     """Whole low-LOD triangles."""
-    upper_body_vertices: Int64[ndarray, "c"] | None
+    upper_body_vertices: Int64[ndarray, "c"]
     """Rest-pose vertex selection for the upper-body surface."""
-    visible_joints: Int64[ndarray, "k"] | None
+    visible_joints: Int64[ndarray, "k"]
     """Joint indices shown in upper-body displays."""
 
 
@@ -184,8 +184,6 @@ def log_mesh(recording: rr.RecordingStream, fit: LayerFit, upper_body_only: bool
     """Log the surface, with newly computed normals per frame; the upper-body crop is stored for later stages."""
     ids: Int64[ndarray, "c"] = np.arange(fit.vertices.shape[1], dtype=np.int64)
     if upper_body_only:
-        if fit.upper_body_vertices is None:
-            raise ValueError("fit is missing its rest-pose upper-body vertex selection")
         require_full_rate_mesh(fit.mesh_stamps, np.rint(fit.times * 1e9).astype(np.int64))
         ids = fit.upper_body_vertices
         recording.log(SOMA_CROP, rr.AnyValues(vertex_ids=ids), static=True)
@@ -241,8 +239,6 @@ def write_layer(segment: str, dataset: str, catalog_url: str, exo_source: ExoSou
         egos += [rgb, *oak_stereo_cameras(catalog.view, segment, rgb)]
     with atomic_recording(output, recording_id=segment, send_properties=False) as recording:
         world_joints: Float32[ndarray, "n j 3"] = fit.joints.copy()
-        if fit.visible_joints is None:
-            raise ValueError("upper-body output requires a fit with a rest-pose display selection")
         hidden: Bool[ndarray, "j"] = np.ones(world_joints.shape[1], dtype=bool)
         hidden[fit.visible_joints] = False
         world_joints[:, hidden] = np.nan
@@ -253,11 +249,10 @@ def write_layer(segment: str, dataset: str, catalog_url: str, exo_source: ExoSou
             columns=rr.Points3D.columns(positions=world_joints.reshape(-1, 3)).partition([world_joints.shape[1]] * len(times)),
         )
         log_mesh(recording, fit, True)
-        if fit.ears is not None:
-            recording.log(SOMA_EARS, rr.Points3D.from_fields(colors=[0, 255, 255], radii=0.008), static=True)
-            recording.send_columns(
-                SOMA_EARS, indexes=[video_time_column(times)], columns=rr.Points3D.columns(positions=fit.ears.reshape(-1, 3)).partition([2] * len(times))
-            )
+        recording.log(SOMA_EARS, rr.Points3D.from_fields(colors=[0, 255, 255], radii=0.008), static=True)
+        recording.send_columns(
+            SOMA_EARS, indexes=[video_time_column(times)], columns=rr.Points3D.columns(positions=fit.ears.reshape(-1, 3)).partition([2] * len(times))
+        )
         log_quality(recording, fit.quality)
         projections = []
         for view in phones:

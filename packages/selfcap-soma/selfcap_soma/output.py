@@ -63,13 +63,11 @@ def residual(a: Float64[ndarray, "... 3"], b: Float64[ndarray, "... 3"]) -> Resi
 
 
 def mapped(result: FitResult, data: Observations) -> Float64[ndarray, "n 133 3"]:
-    """SOMA joints, ear and foot landmarks at their COCO-133 slots; other slots are NaN."""
+    """SOMA joints and ear landmarks at their COCO-133 slots; other slots are NaN."""
     points = np.full_like(data.exo, np.nan)
     for key, name in coco_joint_names().items():
         points[:, key] = result.joints[:, result.names.index(name)]
     points[:, 3:5] = result.ear_landmarks
-    if result.foot_landmarks is not None:
-        points[:, 17:23] = result.foot_landmarks
     return points
 
 
@@ -105,17 +103,8 @@ def write_report(output: Path, data: Observations, result: FitResult, target_s: 
         residual(fit_points[:, 5:13] if upper_body_only else fit_points[:, 5:17], data.exo[:, 5:13] if upper_body_only else data.exo[:, 5:17]),
         residual(fit_points[:, 91:], data.exo[:, 91:]),
         residual(fit_points[:, 91:], data.hands[:, 91:]),
-        residual(
-            result.joints[:, result.names.index("LeftEye")].astype(np.float64),
-            data.head_positions if result.head_anchor not in ("ears", "ears-rotation") else np.full_like(data.head_positions, np.nan),
-        ),
-        residual(
-            result.joints[:, result.names.index("Head" if result.head_anchor == "head" else "LeftEye")].astype(np.float64),
-            (data.head_positions if result.head_anchor not in ("ears", "ears-rotation") else np.full_like(data.head_positions, np.nan))
-            + np.einsum(
-                "nij,j->ni", data.head_rotations @ result.head_attachment if result.head_anchor == "head" else data.head_rotations, result.head_offset
-            ),
-        ),
+        Residual(None, None, 0),
+        Residual(None, None, 0),
         residual(result.ear_landmarks.astype(np.float64), data.exo[:, 3:5]),
         result.head_anchor,
         result.head_attachment.astype(float).tolist(),
@@ -127,11 +116,7 @@ def write_report(output: Path, data: Observations, result: FitResult, target_s: 
         None if frame is None else residual(fit_points[frame, 91:], data.exo[frame, 91:]),
         (
             "Training residuals, not independent accuracy measurements.",
-            (
-                "Head position is constrained only by triangulated ears; no headset translation term."
-                if result.head_anchor in ("ears", "ears-rotation")
-                else "Headset attachment is estimated from this segment; ear landmarks are hand-selected low-LOD surface vertices."
-            ),
+            "Head position is constrained only by triangulated ears; no headset translation term.",
             "Shared native identity, global scale and optional body bone ratios; no hand PCA or learned pose prior.",
             "No floor-contact term, image fitting or uncertainty estimate.",
             "Quest bone orientations constrained." if result.hand_orientations else "No hand bone orientation supervision.",

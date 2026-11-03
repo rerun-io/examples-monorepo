@@ -56,22 +56,20 @@ class FitResult:
     """Shared tracked-camera to skull rotation."""
     ear_landmarks: Float32[ndarray, "n 2 3"]
     """Skinned tragus-region surface landmarks."""
-    head_anchor: Literal["eye", "head", "ears", "ears-rotation"]
-    """Legacy eye/head attachment, ears-only, or ears with rotation."""
+    head_anchor: Literal["ears", "ears-rotation"]
+    """Ear landmarks, with optional tracked-head rotation."""
     head_offset: Float32[ndarray, "3"]
     """Tracked-camera to head-anchor translation, metres. Skull frame for ear mode; Quest frame for legacy eye mode."""
     bone_scales: Float32[ndarray, "1 60"]
     """Native SOMA local bone-length ratios, shared over all frames."""
+    upper_body_vertices: Int64[ndarray, "v"]
+    """Required rest-pose vertex selection for the upper-body display surface."""
+    visible_joints: Int64[ndarray, "j"]
+    """Required public joint indices shown in upper-body displays."""
     display_twists: bool = False
     """Whether the output surface uses procedural twist distribution."""
     hand_orientations: bool = False
     """Whether raw Quest bone rotations constrained this fit."""
-    foot_landmarks: Float32[ndarray, "n 6 3"] | None = None
-    """Skinned COCO 17–22 surface landmarks, when available."""
-    upper_body_vertices: Int64[ndarray, "v"] | None = None
-    """Vertex selection for the upper-body display surface."""
-    visible_joints: Int64[ndarray, "j"] | None = None
-    """Public joint indices shown in upper-body displays, including hips."""
     hand_orientation_source: HandOrientationSource | None = None
     """Per-hand measured orientation availability; none denotes position-derived fallback."""
 
@@ -127,10 +125,10 @@ class Calibration:
     bone_scales: Float32[ndarray, "1 60"]
     """Shared native bone ratios in SOMA's public control order."""
 
-    head_attachment: Float32[ndarray, "3 3"] | None = None
-    """Camera-to-skull rotation; absent for legacy calibration files."""
-    head_anchor: Literal["eye", "head", "ears", "ears-rotation"] = "eye"
-    """Legacy eye or ear-calibrated head position anchor."""
+    head_attachment: Float32[ndarray, "3 3"]
+    """Camera-to-skull rotation fitted during shape calibration."""
+    head_anchor: Literal["ears", "ears-rotation"]
+    """Ear-calibrated head position anchor."""
 
 
 def pose_gradient_mask(
@@ -200,7 +198,7 @@ def fit(
     camera_basis: Float32[ndarray, "3 3"] = np.column_stack((right, -up, np.cross(right, -up)))
     head_index = names.index("Head")
     attachment: Float32[ndarray, "3 3"] = camera_basis.T @ neutral_transforms[0, head_index + 1, :3, :3].cpu().numpy()
-    if seed is not None and seed.head_attachment is not None:
+    if seed is not None:
         attachment = seed.head_attachment
     if head_mode == "ears":
         attachment = np.eye(3, dtype=np.float32)
@@ -546,10 +544,9 @@ def fit(
         head_mode,
         head_offset.detach().cpu().numpy(),
         bone_scales.cpu().numpy(),
-        options.display_twists,
-        orientations is not None and "quest" in orientations.sources,
-        None,
         selection.vertices,
         visible,
+        options.display_twists,
+        orientations is not None and "quest" in orientations.sources,
         HandOrientationSource(*orientations.sources) if orientations is not None else None,
     )

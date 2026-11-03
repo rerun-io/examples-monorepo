@@ -56,7 +56,7 @@ def test_shared_shape_freeze_keeps_repeated_pose_gradients_finite():
     np.testing.assert_array_equal(result.ear_landmarks, result.vertices[:, EAR_VERTICES].reshape(-1, 2, 3, 3).mean(axis=2))
     identity = result.identity.copy()
     identity[0, 126] = 0.1
-    calibration = Calibration(identity, result.scale, result.head_offset, result.bone_scales)
+    calibration = Calibration(identity, result.scale, result.head_offset, result.bone_scales, result.head_attachment, result.head_anchor)
     frozen = fit(data, assets, iterations=4, shape_iterations=1, fixed=calibration)
     np.testing.assert_array_equal(frozen.identity, identity)
     np.testing.assert_array_equal(frozen.bone_scales, result.bone_scales)
