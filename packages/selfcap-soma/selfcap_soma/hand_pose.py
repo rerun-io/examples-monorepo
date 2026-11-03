@@ -96,6 +96,14 @@ class OrientationTargets:
     """Availability of each aligned rotation."""
     spread_deg: Float64[ndarray, "j"]
     """Mean angular spread of each measured alignment."""
+    sources: tuple[Literal["quest", "positions"], ...]
+    """Actual target source per constrained joint, after alignment fallback."""
+
+    @property
+    def weights(self) -> Float32[ndarray, "j"]:
+        """Measured targets have unit weight; position-derived frames have one tenth."""
+        return np.asarray([1.0 if source == "quest" else 0.1 for source in self.sources], dtype=np.float32)
+
 
 
 def orientation_targets(
@@ -110,6 +118,7 @@ def orientation_targets(
     targets = []
     masks = []
     spread = []
+    sources: list[Literal["quest", "positions"]] = []
     for side, label in enumerate(("Left", "Right")):
         wrist = names.index(label + "Hand")
         normal0 = np.cross(
@@ -135,17 +144,19 @@ def orientation_targets(
             valid = observed.valid[:, side, qindex] & np.isfinite(candidates).all((1, 2)) & position_valid
             calibration = valid & (times < 25.0)
             if observed.sources[side] == "none" or calibration.sum() < 10:
+                sources.append("positions")
                 target = positional_target
                 valid = position_valid & observed.valid[:, side, qindex]
                 spread.append(0.0)
             else:
+                sources.append("quest")
                 mean = Rotation.from_matrix(candidates[calibration]).mean().as_matrix()
                 spread.append(float(np.degrees(Rotation.from_matrix(mean.T @ candidates[calibration]).magnitude()).mean()))
                 target = observed.rotations[:, side, qindex] @ mean
             indices.append(index)
             targets.append(np.where(valid[:, None, None], target, np.eye(3)))
             masks.append(valid)
-    return OrientationTargets(np.asarray(indices, dtype=np.int64), np.stack(targets, axis=1).astype(np.float32), np.stack(masks, axis=1), np.asarray(spread))
+    return OrientationTargets(np.asarray(indices, dtype=np.int64), np.stack(targets, axis=1).astype(np.float32), np.stack(masks, axis=1), np.asarray(spread), tuple(sources))
 
 
 def hand_limit_penalty(

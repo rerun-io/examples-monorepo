@@ -375,9 +375,7 @@ def fit(
     fallback_sign_tensor = torch.as_tensor(fallback_signs, dtype=torch.float32, device="cuda")
     rotation_weights = None
     if aligned is not None and orientations is not None:
-        rotation_weights = torch.tensor(
-            [0.1 if orientations.sources[int(names[i].startswith("Right"))] == "none" else 1.0 for i in aligned.joint_indices], device="cuda"
-        )
+        rotation_weights = torch.as_tensor(aligned.weights, device="cuda")
     start: float = perf_counter()
     for iteration in range(iterations):
         if fixed is not None and iteration >= iterations // 2:

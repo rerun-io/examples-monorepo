@@ -93,11 +93,16 @@ def test_hand_limit_prior_penalizes_roll_and_excessive_wrist_twist():
     assert torch.isfinite(bent.grad).all()
 
 
-def test_orientation_targets_name_static_neutral_alignment() -> None:
+@pytest.mark.parametrize(("samples", "sources", "weight"), [
+    (3, ("none", "none"), 0.1),
+    (3, ("quest", "quest"), 0.1),
+    (12, ("quest", "quest"), 1.0),
+])
+def test_orientation_targets_name_static_neutral_alignment(samples, sources, weight) -> None:
     from selfcap_soma.hand_pose import HandOrientations, OrientationTargets, orientation_targets
 
     names = []
-    positions = np.zeros((3, 2, 26, 3))
+    positions = np.zeros((samples, 2, 26, 3))
     neutral = []
     for side, label in enumerate(("Left", "Right")):
         names.append(label + "Hand")
@@ -112,15 +117,17 @@ def test_orientation_targets_name_static_neutral_alignment() -> None:
                 positions[:, side, base + joint] = point
     names.extend(f"unused_{i}" for i in range(77 - len(names)))
     neutral.extend([[0.0, 0.0, 0.0]] * (77 - len(neutral)))
-    observed = HandOrientations(positions, np.tile(np.eye(3), (3, 2, 26, 1, 1)), np.ones((3, 2, 26), dtype=bool), ("none", "none"))
-    result = orientation_targets(observed, np.arange(3, dtype=np.float64), tuple(names), np.asarray(neutral, dtype=np.float32), np.tile(np.eye(3, dtype=np.float32), (78, 1, 1)))
+    observed = HandOrientations(positions, np.tile(np.eye(3), (samples, 2, 26, 1, 1)), np.ones((samples, 2, 26), dtype=bool), sources)
+    result = orientation_targets(observed, np.arange(samples, dtype=np.float64), tuple(names), np.asarray(neutral, dtype=np.float32), np.tile(np.eye(3, dtype=np.float32), (78, 1, 1)))
     assert isinstance(result, OrientationTargets)
-    assert result.rotations.shape == (3, 40, 3, 3)
+    assert result.rotations.shape == (samples, 40, 3, 3)
     np.testing.assert_allclose(result.rotations, np.broadcast_to(np.eye(3), result.rotations.shape), atol=1e-6)
     assert result.valid.all()
-    np.testing.assert_array_equal(result.spread_deg, np.zeros(40))
+    np.testing.assert_allclose(result.spread_deg, np.zeros(40), atol=1e-12)
     assert names[result.joint_indices[0]] == "LeftHand"
     assert names[result.joint_indices[-1]] == "RightHandPinky4"
+
+    np.testing.assert_allclose(result.weights, np.full(40, weight), atol=1e-7)
 
 
 def test_a_hand_absent_from_the_base_is_marked_none():
