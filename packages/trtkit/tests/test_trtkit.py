@@ -250,7 +250,11 @@ def test_dynamic_dims_share_symbols_and_derive_multiples(tmp_path: Path) -> None
     assert len(shapes) == 1, "autocast wrapper takes *inputs, so torch.export sees one varargs parameter"
     images_dims, grid_dims, token_dims = shapes[0]
     assert str(images_dims[2]) == "14*rows" and str(images_dims[3]) == "14*cols"
+    from torch.export.dynamic_shapes import _DerivedDim
+
+    assert isinstance(images_dims[2], _DerivedDim) and isinstance(images_dims[3], _DerivedDim)
     assert images_dims[2].root is grid_dims[2] and images_dims[3].root is grid_dims[3], "derived dims must share the grid's symbols"
+    assert isinstance(images_dims[0], torch.export.Dim)
     assert images_dims[0].min == 1 and images_dims[0].max == 4
     assert "AUTO" in str(token_dims[1]) and "min=7" in str(token_dims[1]) and "max=73" in str(token_dims[1])
 
@@ -265,6 +269,7 @@ def test_dynamic_dims_with_a_range_of_one_stay_static() -> None:
         {"images": {0: DynamicDim("batch", 1, 1), 1: DynamicDim("views", 2, 6)}, "grid": {0: DynamicDim("batch", 1, 1, multiple=14)}},
     )
     assert 0 not in images_dims and 0 not in grid_dims, "a range of one is static"
+    assert isinstance(images_dims[1], torch.export.Dim)
     assert images_dims[1].min == 2 and images_dims[1].max == 6
 
 
@@ -450,8 +455,11 @@ def test_fp16_conv_trunk_halves_the_trunk_and_keeps_the_tail_and_io_fp32() -> No
     onnx.checker.check_model(converted)
 
     x = np.random.default_rng(1).normal(0, 1, (1, 2, 5, 5)).astype(np.float32)
-    (expected,) = ReferenceEvaluator(source).run(None, {"x": x})
-    (actual,) = ReferenceEvaluator(converted).run(None, {"x": x})
+    expected_outputs = ReferenceEvaluator(source).run(None, {"x": x})
+    actual_outputs = ReferenceEvaluator(converted).run(None, {"x": x})
+    assert isinstance(expected_outputs, list) and isinstance(actual_outputs, list)
+    (expected,), (actual,) = expected_outputs, actual_outputs
+    assert isinstance(expected, np.ndarray) and isinstance(actual, np.ndarray)
     assert actual.dtype == np.float32
     np.testing.assert_allclose(actual, expected, atol=2e-3)
 
