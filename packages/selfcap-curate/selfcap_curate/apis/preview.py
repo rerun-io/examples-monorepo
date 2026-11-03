@@ -49,7 +49,7 @@ def main(config: Config) -> None:
         raise ValueError("workers must be at least 1")
     if config.seconds <= 0.0 or (config.fps is not None and config.fps <= 0.0):
         raise ValueError("seconds and fps must be positive")
-    paths.require_outside([config.output_dir], roots=[paths.NAS_ROOT])
+    paths.require_outside([config.output_dir], roots=[*paths.NAS_RAW_ROOTS])
     entry: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     requested: list[str] = [key.segment for key in episode_keys(config.segment_ids, config.key_file)] if config.segment_ids or config.key_file else []
     segments: list[str] = writing.select_segments(entry, requested)

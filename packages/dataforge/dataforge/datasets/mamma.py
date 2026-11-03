@@ -175,7 +175,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
         if self.config.fetch_into is not None:
             if self.config.sequences is None:
                 raise ValueError("--fetch-into proves the MPI download on chosen sequences: name them with --sequences (the release is ~221 GB)")
-            paths.require_outside([self.config.fetch_into], roots=[paths.NAS_ROOT, self.config.root])
+            paths.require_outside([self.config.fetch_into], roots=[*paths.NAS_RAW_ROOTS, self.config.root])
             for sequence in sequences:
                 key: str = SequenceIdentity(self.config.name, sequence.parts).sequence_key
                 if key in self.config.sequences:
@@ -193,7 +193,7 @@ class MammaDataset(DataforgeDataset[MammaConfig, MammaSequence]):
 
     def convert(self, identity: SequenceIdentity, source: MammaSequence, *, force: bool) -> Path:
         """Base, then the body, projection, mask, marker and visibility layers, all from the release in place."""
-        targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
+        targets, pending = self.pending_layers(identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root])
         # By collection, not by file presence: a missing mask tar or marker file fails its layer instead of skipping it.
         ships: dict[str, bool] = {paths.MASKS_LAYER: source.is_eval, paths.MARKERS_LAYER: source.has_markers, paths.VISIBILITY_LAYER: source.is_eval}
         pending = [layer for layer in pending if ships.get(layer, True)]

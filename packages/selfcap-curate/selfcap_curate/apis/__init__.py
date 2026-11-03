@@ -44,7 +44,7 @@ def open_session(
     session = one_session(keys)
     if rate is not None and (not math.isfinite(rate) or rate <= 0.0):
         raise ValueError("rate must be finite and positive")
-    paths.require_outside([output], roots=[paths.NAS_ROOT, *protected])
+    paths.require_outside([output], roots=[*paths.NAS_RAW_ROOTS, *protected])
     if source is not None:
         for key in keys:
             if not (source / key.rrd_name).is_file():

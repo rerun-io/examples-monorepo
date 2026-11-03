@@ -158,7 +158,7 @@ class EpflDataset(DataforgeDataset[EpflConfig, str]):
     def convert(self, identity: SequenceIdentity, source: str, *, force: bool) -> Path:
         """Open pending pose layers together so both large CSVs are read once."""
         targets, pending = self.pending_layers(
-            identity, force=force, roots=[paths.NAS_ROOT, self.config.root, self.config.video_root or self.config.root]
+            identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root, self.config.video_root or self.config.root]
         )
         if not pending:
             return targets[paths.BASE_LAYER]

@@ -449,7 +449,7 @@ def main(config: Config) -> None:
     if config.jobs < 1 or config.soma_jobs < 1 or config.preview_workers < 1:
         raise ValueError("jobs, soma_jobs and preview_workers must be at least 1")
     segment_ids: tuple[str, ...] = tuple(dict.fromkeys(identity_of(segment).recording_id for segment in config.segment_ids))
-    paths.require_outside([config.run_root], roots=[paths.NAS_ROOT])
+    paths.require_outside([config.run_root], roots=[*paths.NAS_RAW_ROOTS])
     inputs: list[Path] = [assets for assets in (config.oak_egohand_assets, config.soma_assets) if assets is not None]
     if config.raw_root is not None:
         inputs.append(config.raw_root / REGISTRY_NAME)

@@ -157,7 +157,7 @@ class Harmony4dDataset(DataforgeDataset[Harmony4dConfig, Harmony4dSequence]):
 
     def convert(self, identity: SequenceIdentity, source: Harmony4dSequence, *, force: bool) -> Path:
         """Base, body_pose, body_mesh and projections of one sequence, read from its zip in place."""
-        targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
+        targets, pending = self.pending_layers(identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root])
         if not pending:
             return targets[paths.BASE_LAYER]
         split, scene, sequence_name = identity.parts

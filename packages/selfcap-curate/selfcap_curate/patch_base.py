@@ -137,7 +137,7 @@ def patch(
     quest_video_delta_ms: float | None = None,
 ) -> Path:
     """Apply the stated fresh alignment, legacy clock restoration, or legacy realignment."""
-    paths.require_outside([output_path], roots=[paths.NAS_ROOT, *([raw_episode_dir] if raw_episode_dir is not None else [])])
+    paths.require_outside([output_path], roots=[*paths.NAS_RAW_ROOTS, *([raw_episode_dir] if raw_episode_dir is not None else [])])
     if output_path.exists():
         raise FileExistsError(output_path)
     if quest_video_delta_ms is not None and not math.isfinite(quest_video_delta_ms):

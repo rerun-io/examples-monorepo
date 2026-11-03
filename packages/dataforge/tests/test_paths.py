@@ -77,12 +77,11 @@ def test_every_layer_name_is_distinct_and_the_nas_is_a_protected_root() -> None:
         require_outside([paths.NAS_ROOT / "dataforge" / "rrd"], roots=[paths.NAS_ROOT])
 
 
-def test_the_nas_work_share_is_writable_but_raw_trees_inside_it_stay_protected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    nas: Path = tmp_path / "nas"
-    work: Path = nas / "ssd-8tb"
-    monkeypatch.setattr(paths, "NAS_WORK_ROOT", work)
-    require_outside([work / "selfcap" / "runs" / "easy26"], roots=[nas])
+def test_the_nas_work_share_is_writable_but_raw_trees_inside_it_stay_protected() -> None:
+    work: Path = Path("/mnt/nas/ssd-8tb")
+    require_outside([work / "selfcap" / "runs" / "easy26"], roots=paths.NAS_RAW_ROOTS)
+    for raw in paths.NAS_RAW_ROOTS:
+        with pytest.raises(ValueError, match="refusing to write beneath protected input"):
+            require_outside([raw / "rrd"], roots=paths.NAS_RAW_ROOTS)
     with pytest.raises(ValueError, match="refusing to write beneath protected input"):
-        require_outside([nas / "datasets" / "rrd"], roots=[nas])
-    with pytest.raises(ValueError, match="refusing to write beneath protected input"):
-        require_outside([work / "selfcap" / "raw" / "easy26" / "out"], roots=[nas, work / "selfcap" / "raw" / "easy26"])
+        require_outside([work / "selfcap" / "raw" / "out"], roots=[*paths.NAS_RAW_ROOTS, work / "selfcap" / "raw"])

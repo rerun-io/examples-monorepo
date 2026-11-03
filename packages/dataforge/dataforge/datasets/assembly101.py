@@ -167,7 +167,7 @@ class Assembly101Dataset(DataforgeDataset[Assembly101Config, Assembly101Source])
 
     def convert(self, identity: SequenceIdentity, source: Assembly101Source, *, force: bool) -> Path:
         """Publish only available layers, atomically, sharing the recording identity."""
-        targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root, self.config.annotations, paths.NAS_ROOT])
+        targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root, self.config.annotations, *paths.NAS_RAW_ROOTS])
         with self.timer.stage("fetch"):
             if self.actions is None:
                 self.actions = read_actions(self.config.annotations, {found.sequence for _, found in self.discover()})

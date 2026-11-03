@@ -64,7 +64,7 @@ def pool_main(config: PoolConfig) -> None:
     """Pool typed profiles; source schemas are checked before fitting."""
     if config.output.exists():
         raise FileExistsError(config.output)
-    paths.require_outside([config.output], roots=[paths.NAS_ROOT])
+    paths.require_outside([config.output], roots=[*paths.NAS_RAW_ROOTS])
     profiles = [read_json(path, FocalProfile) for path in config.profiles]
     with atomic_write(config.output) as staged:
         staged.write_text(to_json(pool(profiles, config.generated_date)))
@@ -86,7 +86,7 @@ def rotation_main(config: RotationConfig) -> None:
     """Rebuild the device table from typed free-hand and gyro session records."""
     if config.output.exists():
         raise FileExistsError(config.output)
-    paths.require_outside([config.output], roots=[paths.NAS_ROOT, config.gyro_dir])
+    paths.require_outside([config.output], roots=[*paths.NAS_RAW_ROOTS, config.gyro_dir])
     free = [read_json(p, OakFit) for p in config.free_paths]
     gyros = {f.session: read_json(path, GyroFit) for f in free if (path := config.gyro_dir / f"{f.session}.json").exists()}
     with atomic_write(config.output) as staged:

@@ -260,7 +260,7 @@ def test_a_missing_input_directory_stops_before_any_step(config: Config, tmp_pat
 
 
 def test_a_run_root_on_the_nas_is_refused(config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(paths, "NAS_ROOT", tmp_path)
+    monkeypatch.setattr(paths, "NAS_RAW_ROOTS", (tmp_path,))
     with pytest.raises(ValueError, match="refusing to write"):
         run.main(config)
     assert not config.run_root.exists()
