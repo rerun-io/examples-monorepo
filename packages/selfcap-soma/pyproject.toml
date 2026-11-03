@@ -22,7 +22,8 @@ addopts = "-m 'not integration and not golden'"
 [tool.vulture]
 paths = ["selfcap_soma", "tests"]
 min_confidence = 80
-ignore_names = ["pytestmark"]
+# Pytest requests no_catalog by name to guard against catalog access in layer tests.
+ignore_names = ["pytestmark", "no_catalog"]
 
 [tool.uv.sources]
 dataforge = { path = "../dataforge", editable = true }
