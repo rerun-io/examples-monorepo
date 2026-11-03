@@ -2,16 +2,18 @@
 
 from dataclasses import replace
 
+import cv2
 import numpy as np
 import pytest
-from dataforge.datasets.selfcap_raw import Distortion, FactoryCalibration, FactoryExtrinsic
+from dataforge.datasets.selfcap_raw import Distortion, FactoryCalibration, FactoryExtrinsic, crop_shift_px, oak_stereo
 from frozen_v2 import session_episode
+from legacy_oak import legacy_solve_oak
 from scipy.spatial.transform import Rotation
 from serde import from_dict
 
 import selfcap_curate.oak_mount as module
 from selfcap_curate.device_tables import pool_rotations
-from selfcap_curate.factory import cy_shift_px, intrinsic_matrix, oak_stereo, quest_block, transform
+from selfcap_curate.factory import intrinsic_matrix, quest_block, transform
 from selfcap_curate.oak_mount import gyro_mount, solve_oak
 from selfcap_curate.quest_fit import load_quest_hands
 from selfcap_curate.records import CatalogHands, GyroFit, OakDetections, OakFit
@@ -50,7 +52,7 @@ def test_factory_converts_oak_centimetres_and_december_quest_crop() -> None:
     quest = quest_block(factory())
     assert quest.mode == "faulty-unresolved"
     assert intrinsic_matrix(quest.pinholes["1"])[1, 2] == 482.0
-    assert cy_shift_px(quest.pinholes["1"]) == 160.0
+    assert crop_shift_px(quest.pinholes["1"]) == 160.0
 
 
 def test_broken_left_requires_explicit_borrow_and_measured_lever_arm() -> None:
@@ -79,6 +81,7 @@ def test_gyro_mount_recovers_known_axis_rotation(flags, accepted, fixture_sync) 
 
     times = np.arange(0.0, 5.0, 0.005)
     rot = Rotation.from_euler("xyz", np.c_[0.3 * np.sin(times), 0.4 * np.sin(1.4 * times), 0.25 * np.cos(0.8 * times)])
+    rot = rot * Rotation.from_rotvec([np.pi, 0.0, 0.0])  # Worn RDF head in a Y-up world.
     omega = (rot[:-1].inv() * rot[1:]).as_rotvec() / np.diff(times)[:, None]
     midpoint = (times[:-1] + times[1:]) / 2.0
     expected = Rotation.from_euler("xyz", [0.2, -0.1, 0.3])
@@ -138,7 +141,8 @@ def test_hand_pnp_recovers_mount_with_fixed_gyro_rotation(flag, latency_ms, monk
         pixels = rgb @ intrinsic_matrix(intrinsic).T
         xy[:, base : base + 21] = pixels[..., :2] / pixels[..., 2:3]
         scores[:, base : base + 21] = 1.0
-    result = solve_oak("synthetic", [replace(motion, oak=OakDetections(vt, xy, scores))], intrinsic, "oak", expected[:3, :3])
+    expected = np.diag([1.0, -1.0, -1.0, 1.0]) @ expected  # Fixture head is stored RUB; the fitted mount uses RDF.
+    result = legacy_solve_oak("synthetic", [replace(motion, oak=OakDetections(vt, xy, scores))], intrinsic, "oak", expected[:3, :3])
     if flag is not None:
         assert not result.ok
         return
@@ -149,3 +153,96 @@ def test_hand_pnp_recovers_mount_with_fixed_gyro_rotation(flag, latency_ms, monk
 def test_wrong_camera_borrow_is_unresolved() -> None:
     wrong = FactoryExtrinsic("device_to_left", np.eye(3), np.zeros(3), "51")
     assert quest_block(factory(), camera50=wrong, rig_T_device=np.eye(4)).mode == "faulty-unresolved"
+
+
+@pytest.mark.parametrize("fix_rotation", [False, True])
+def test_weighted_hand_mount_rejects_base_joints_and_trims_bad_finger(fix_rotation, fixture_sync) -> None:
+    times = np.arange(0.0, 6.0, 0.01)
+    geometry = np.random.default_rng(42).normal(scale=0.03, size=(21, 3)) + [0.0, 0.0, 0.65]
+    positions = np.full((len(times), 133, 3), np.nan)
+    for base, shift in ((91, -0.12), (112, 0.12)):
+        positions[:, base : base + 21] = (
+            geometry + np.stack([shift + 0.03 * np.sin(times), 0.03 * np.cos(times), 0.05 * np.sin(0.7 * times)], axis=1)[:, None]
+        )
+    raw = CatalogHands(times, positions, times, np.zeros((len(times), 3)), np.tile([0.0, 0.0, 0.0, 1.0], (len(times), 1)))
+    sync = replace(fixture_sync(), offsets_ms={"quest_pose": 0.0, "oak_imu": 0.0}, flags=[])
+    motion = session_episode(sync, raw, times, np.zeros((len(times), 3)), quest=load_quest_hands(raw))
+    intrinsic = replace(
+        factory(False).intrinsics[0],
+        distortion=Distortion((1.3, 0.3, 0.001, -0.0005, 0.1, 1.2, 0.4, 0.2, 0.0, 0.0, 0.0, 0.0, 0.003, -0.004)),
+    )
+    expected = transform(Rotation.from_euler("xyz", [0.1, -0.03, 0.02]).as_matrix(), np.array([0.03, 0.04, -0.02]))
+    indices = np.arange(20, len(times) - 20, 5)
+    xyz = positions[indices].reshape(-1, 3)
+    camera = (xyz - expected[:3, 3]) @ expected[:3, :3]
+    xy = cv2.projectPoints(camera, np.zeros(3), np.zeros(3), intrinsic_matrix(intrinsic), np.array(intrinsic.distortion.coefficients))[0]
+    xy = xy.reshape(len(indices), 133, 2)
+    xy[:, [91, 92, 96, 100, 104, 108, 112, 113, 117, 121, 125, 129]] = 1000.0
+    xy[:, 93] += [80.0, 0.0]  # A persistently wrong finger survives the speed gate but must be trimmed.
+    scores = np.where(np.isfinite(xy).all(-1), 0.9, 0.0)
+    expected = np.diag([1.0, -1.0, -1.0, 1.0]) @ expected  # Fixture head is stored RUB; the fitted mount uses RDF.
+    result = solve_oak(
+        "synthetic",
+        [replace(motion, oak=OakDetections(times[indices] - 0.048, xy, scores))],
+        intrinsic,
+        "oak",
+        expected[:3, :3] if fix_rotation else None,
+    )
+    assert result.ok and result.median_px < 0.01
+    assert result.observation_source == "egohand"
+    np.testing.assert_allclose(result.questrig_T_rgb, expected, atol=1e-4)
+
+
+def test_missing_quest_oak_clock_leaves_mount_unposed(fixture_sync) -> None:
+    sync = replace(fixture_sync(), flags=["quest_unsynced_kept_as_cut"])
+    hands = CatalogHands(np.array([0.0, 1.0]), np.zeros((2, 133, 3)), np.array([0.0, 1.0]),
+                         np.zeros((2, 3)), np.tile([0.0, 0.0, 0.0, 1.0], (2, 1)))
+    episode = session_episode(sync, hands, np.array([0.0, 1.0]), np.zeros((2, 3)))
+    fit = solve_oak("missing-clock", [episode], factory().intrinsics[0], "device")
+    assert not fit.ok
+    assert fit.questrig_T_rgb is None
+
+
+def test_three_camera_mount_recovers_a_known_mount_through_distortion(fixture_sync) -> None:
+    # One mount, three OAK cameras: the stereo pair fixes depth, the joint fit uses every camera with its own lens.
+    times = np.arange(0.0, 6.0, 0.01)
+    geometry = np.random.default_rng(7).normal(scale=0.03, size=(21, 3)) + [0.0, -0.25, -0.45]
+    positions = np.full((len(times), 133, 3), np.nan)
+    for base, shift in ((91, -0.12), (112, 0.12)):
+        positions[:, base : base + 21] = (
+            geometry + np.stack([shift + 0.04 * np.sin(times), 0.03 * np.cos(times), 0.05 * np.sin(0.7 * times)], axis=1)[:, None]
+        )
+    raw = CatalogHands(times, positions, times, np.zeros((len(times), 3)), np.tile([0.0, 0.0, 0.0, 1.0], (len(times), 1)))
+    sync = replace(fixture_sync(), offsets_ms={"quest_pose": 0.0, "oak_imu": 0.0}, flags=[])
+    motion = session_episode(sync, raw, times, np.zeros((len(times), 3)), quest=load_quest_hands(raw))
+    # The RGB camera looks down and forward from the Quest eye frame (Quest +y up, -z forward; camera RDF).
+    expected = transform(Rotation.from_euler("x", np.pi - 0.5).as_matrix(), np.array([0.03, 0.06, -0.02]))
+    distortion = np.array([1.3, 0.3, 0.001, -0.0005, 0.1, 1.2, 0.4, 0.2, 0.0, 0.0, 0.0, 0.0, 0.003, -0.004])
+    K = np.array([[560.0, 0.0, 640.0], [0.0, 560.0, 360.0], [0.0, 0.0, 1.0]])
+    lenses = {
+        "rgb": module.OakLens(K, distortion, np.eye(4), (1280, 720)),
+        "left": module.OakLens(
+            K * [[1.01], [1.01], [1.0]],
+            distortion * 0.9,
+            transform(Rotation.from_euler("y", 0.01).as_matrix(), np.array([0.0375, 0.0, 0.0])),
+            (1280, 720),
+        ),
+        "right": module.OakLens(K * [[0.99], [0.99], [1.0]], distortion * 1.1, transform(np.eye(3), np.array([-0.0375, 0.0, 0.0])), (1280, 720)),
+    }
+    indices = np.arange(20, len(times) - 20, 9)
+    views = {}
+    for name, lens in lenses.items():
+        cam_T_q = lens.cam_T_rgb @ np.linalg.inv(expected)
+        xyz = positions[indices].reshape(-1, 3)
+        xy = cv2.projectPoints(xyz, cv2.Rodrigues(cam_T_q[:3, :3])[0], cam_T_q[:3, 3], lens.intrinsic, lens.distortion)[0].reshape(
+            len(indices), 133, 2
+        )
+        if name == "left":
+            xy[:, 93] += [80.0, 0.0]  # one persistently wrong finger in one camera is trimmed
+        views[name] = OakDetections(times[indices] - 0.048, xy, np.where(np.isfinite(xy).all(-1), 0.9, 0.0))
+    expected = np.diag([1.0, -1.0, -1.0, 1.0]) @ expected  # Fixture head is stored RUB; the fitted mount uses RDF.
+    result = module.solve_oak_stereo("synthetic", [motion], [views], lenses, "oak")
+    assert result.ok and result.median_px < 0.05
+    assert result.rotation_source == "stereo+rgb joint" and result.observation_source == "egohand"
+    assert set(result.camera_median_px) == {"rgb", "left", "right"}
+    np.testing.assert_allclose(result.questrig_T_rgb, expected, atol=1e-4)

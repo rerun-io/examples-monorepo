@@ -36,7 +36,7 @@ class Config:
 
 def main(config: Config) -> None:
     """Patch named episodes into output_dir; never register or replace a base."""
-    paths.require_outside([config.output_dir], roots=[paths.NAS_ROOT, config.raw_root, config.served_dir, config.sync_dir])
+    paths.require_outside([config.output_dir], roots=[*paths.NAS_RAW_ROOTS, config.raw_root, config.served_dir, config.sync_dir])
     keys = episode_keys(config.keys, config.key_file)
     for key in keys:
         sync: TimeSync = read_frozen_sync(config.sync_dir / config.sync_name.format(key=key.key))

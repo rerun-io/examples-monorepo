@@ -32,6 +32,15 @@ paths = ["dataforge", "tests"]
 # Tyro-facing verb entry points and config fields (the CLI shims call them), plus the
 # keyword-only parameters a test fake must accept to match the real catalog API.
 ignore_names = [
+    # Shared SelfCap API used by selfcap-curate and selfcap-soma (outside these scan paths).
+    "SOMA_XLO", "SOMA_METRICS", "SOMA_JOINTS", "SOMA_EARS", "SAPIENS2_XYZ",
+    "SOMA_LAYER",  # Public layer-name contract retained by the SelfCap schema review.
+    "OAK_HAND_BASES", "HEADSET_COVERED", "coco133_uv_shown_path", "oak_egohand_path",
+    "oak_rig_of", "SyncRecord", "require_offset", "read_oak_track", "project_ego",
+    "head_convention",  # Source-axis provenance on the shared normalized RigTrack record.
+    "build_quest_model",  # Tyro entry point in tools/dev/selfcap_quest_model.py.
+    # Snapshot fields are serialized; the snapshot CLI is a thin Tyro shim.
+    "rerun_segment_id", "original_id", "snapshot_catalog",
     "device_id", "to", "pixel_array_size", "sensor_info",  # Vendor calibration schema fields.
     # VRS binary header fields retained to match FileFormat.h positional unpacking.
     "previous_record_size",

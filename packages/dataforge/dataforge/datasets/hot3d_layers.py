@@ -203,16 +203,16 @@ def write_hands(recording: rr.RecordingStream, scene: Scene, profile: HandProfil
 def write_projections(recording: rr.RecordingStream, scene: Scene, batch: HandBatch) -> None:
     """Write derived lens-model pixels on the same census as the 3D joints."""
     world_T_device: Float64[ndarray, "n 4 4"] = pose_array(scene.headset, scene.times_ns)
+    hands.log_projections_property(recording, camera_model="FISHEYE624")
     hands.log_projections(
         recording,
         (
-            ((0, cam), aria.project_frames(camera.calibration, world_T_device, batch.positions))
+            (schema.coco133_uv_projected_path(0, cam), aria.project_frames(camera.calibration, world_T_device, batch.positions))
             for cam, camera in enumerate(scene.cameras)
         ),
         times_ns=scene.times_ns,
         frame_indices=scene.frame_indices,
         confidence=batch.confidence,
-        camera_model="FISHEYE624",
     )
 
 

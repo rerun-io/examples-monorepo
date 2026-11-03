@@ -11,8 +11,10 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 from dataforge import schema
-from dataforge.datasets.selfcap import log_quest_hands, read_quest_hands
+from dataforge.datasets.selfcap import log_quest_hand_poses, log_quest_hands, read_quest_hands
+from dataforge.datasets.selfcap_raw import read_quest_joint_hands
 from dataforge.logging_toolkit import capture_column
+from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.schema import CAPTURE_TIMELINE
 from dataforge.writing import recording_to
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
@@ -107,16 +109,20 @@ def test_patch_refuses_outputs_in_the_raw_tree(tmp_path: Path) -> None:
     assert not (raw / "output.rrd").exists()
 
 
+@pytest.mark.parametrize("hand_form", ["coco133", "joint_poses"])
 @pytest.mark.parametrize("missing_video", [False, True])
-def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp_path: Path, missing_video: bool) -> None:
+def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp_path: Path, missing_video: bool, hand_form: str) -> None:
     """Fresh PR 2 input has presented capture_time and raw hands, but no time_sync."""
 
     served, raw, sync, starts = synthetic_served(tmp_path)
     fresh = tmp_path / "fresh.rrd"
     hands_path = tmp_path / "raw-hands.rrd"
     with recording_to(hands_path, recording_id=f"selfcap__{sync.key}", send_properties=False) as recording:
-        log_quest_hands(recording, read_quest_hands(raw / "quest"))
-        for entity in (schema.gyro_path(4, 0), schema.rig_path(5)):
+        if hand_form == "coco133":  # a base written before the joint poses were ingested
+            log_quest_hands(recording, read_quest_hands(raw / "quest"))
+        else:
+            log_quest_hand_poses(recording, read_quest_joint_hands(raw / "quest"))
+        for entity in (schema.gyro_path(4, 0), schema.rig_path(5), schema.rig_path(4)):  # rig_04: the OAK mount prior
             recording.send_columns(
                 entity,
                 indexes=[
@@ -165,16 +171,16 @@ def test_new_fit_record_aligns_a_fresh_base_without_readding_starts_or_hands(tmp
         capture = batch.column(CAPTURE_TIMELINE).cast(pa.int64()).to_pylist()
         video = batch.column("video_time").cast(pa.int64()).to_pylist()
         firsts.setdefault(entity, (capture[0], video[0]))
-        if entity == schema.coco133_xyz_path():
+        if entity in (schema.coco133_xyz_path(), quest_hand_path("left"), quest_hand_path("right")):
             hand_rows += len(capture)
-            assert capture == [17, 27]
-            assert video == [32_000_017, 32_000_027]
+            assert [v - c for c, v in zip(capture, video, strict=True)] == [32_000_000] * len(capture)  # pose offset less hand latency
     assert hand_rows == 2
     assert firsts[schema.video_path(4, 0)] == (40_039_062, 46_043_066)
     assert firsts[schema.video_path(5, 1)] == (40_039_062, 140_039_062)
     assert firsts[schema.video_path(0, 0)] == (0, -30_000_000)
     assert firsts[schema.gyro_path(4, 0)] == (17, -199_999_983)
     assert firsts[schema.rig_path(5)] == (17, 80_000_017)
+    assert firsts[schema.rig_path(4)] == firsts[schema.rig_path(5)], "the OAK prior hangs on the Quest track and keeps its clock"
 
 
 def test_legacy_patch_keeps_each_factory_document_verbatim(tmp_path: Path) -> None:
@@ -193,6 +199,49 @@ def test_legacy_patch_keeps_each_factory_document_verbatim(tmp_path: Path) -> No
             assert chunk.is_static
             found[str(chunk.entity_path)] = batch.column("raw_calibration_json")[0].as_py()[0]
     assert found == documents
+
+
+def test_phone_sound_moves_with_its_phone_when_aligning(tmp_path: Path) -> None:
+    """Ingest logs each phone's track and loudness on its own clock; align shifts both by that phone's offset."""
+
+    served, raw, sync, _ = synthetic_served(tmp_path)
+    sound_path = tmp_path / "sound.rrd"
+    with recording_to(sound_path, recording_id=f"selfcap__{sync.key}", send_properties=False) as recording:
+        log_quest_hand_poses(recording, read_quest_joint_hands(raw / "quest"))
+        stamps = {
+            schema.audio_path(0, 0): np.array([11_000_000], dtype=np.int64),
+            schema.loudness_path(0, 0): np.array([13_500_000, 18_500_000], dtype=np.int64),
+        }
+        for entity, times in stamps.items():
+            recording.send_columns(
+                entity,
+                indexes=[capture_column(times), rr.TimeColumn("video_time", duration=times.view("timedelta64[ns]"))],
+                columns=rr.Scalars.columns(scalars=np.ones(times.size)),
+            )
+
+    def fresh_only(chunk):
+        return [] if str(chunk.entity_path) in ("/world/untouched", "/__properties/time_sync") else [chunk]
+
+    fresh = tmp_path / "fresh.rrd"
+    LazyChunkStream.merge(RrdReader(served).stream().flat_map(fresh_only), RrdReader(sound_path).stream()).write_rrd(
+        fresh, application_id="dataforge", recording_id=f"selfcap__{sync.key}"
+    )
+    assert sync.offsets_ms is not None
+    fitted = replace(sync, offsets_ms={**sync.offsets_ms, "quest_pose": 80.0, "exo/Dragon-413A7CC1": -30.0}, version="selfcap-curate-cpu-v1")
+    record_path = tmp_path / "new-fit.json"
+    write_sync(record_path, fitted)
+    target = patch(fresh, None, read_sync(record_path), output_path=tmp_path / "aligned.rrd", mode="fresh")
+    clocks: dict[str, list[tuple[int, int]]] = {}
+    for chunk in RrdReader(target).stream():
+        if not chunk.is_static and str(chunk.entity_path) in stamps:
+            batch = chunk.to_record_batch()
+            capture, video = (batch.column(name).cast(pa.int64()).to_pylist() for name in (CAPTURE_TIMELINE, "video_time"))
+            pairs = zip(capture, video, strict=True)
+            clocks.setdefault(str(chunk.entity_path), []).extend(pairs)
+    assert clocks == {
+        schema.audio_path(0, 0): [(11_000_000, -19_000_000)],
+        schema.loudness_path(0, 0): [(13_500_000, -16_500_000), (18_500_000, -11_500_000)],
+    }
 
 
 def test_unknown_temporal_entity_refused_when_aligning(tmp_path: Path) -> None:
@@ -316,3 +365,14 @@ def test_migration_parses_each_hand_csv_once(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(pacsv, "read_csv", counted)
     patch(served, raw, sync, mode="migrate-keep-clock", output_path=tmp_path / "once.rrd")
     assert opened == [raw / "quest/left_hand_poses.csv", raw / "quest/right_hand_poses.csv"]
+
+
+@pytest.mark.parametrize(("present", "expected"), [
+    ({schema.video_path(3, 1)}, 3),  # an older three-phone base: the OAK followed the phones
+    ({schema.video_path(4, 1)}, 4),  # current ingest: the OAK is always rig_04
+])
+def test_the_oak_rig_comes_from_the_base_not_the_phone_count(present: set[str], expected: int) -> None:
+    from dataforge.selfcap_schema import oak_rig_of
+
+    assert oak_rig_of(3, present) == expected
+    assert oak_rig_of(4, {schema.video_path(4, 1)}) == 4

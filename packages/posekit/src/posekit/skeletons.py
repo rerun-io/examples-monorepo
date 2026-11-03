@@ -49,5 +49,17 @@ HAND_21 = KeypointSkeleton(
 )
 """21-keypoint hand layout shared by MediaPipe and MANO joint regressors."""
 
-SKELETONS: dict[str, KeypointSkeleton] = {skeleton.name: skeleton for skeleton in (COCO_17, COCO_133, HAND_21)}
+SOMA_HAND: KeypointSkeleton = KeypointSkeleton(
+    "soma_hand_25",
+    ("wrist", "thumb_metacarpal", "thumb_proximal", "thumb_distal", "thumb_tip")
+    + tuple(
+        f"{finger}_{joint}"
+        for finger in ("index", "middle", "ring", "little")
+        for joint in ("metacarpal", "proximal", "intermediate", "distal", "tip")
+    ),
+    tuple((index - 1 if index not in (1, 5, 10, 15, 20) else 0, index) for index in range(1, 25)),
+)
+
+
+SKELETONS: dict[str, KeypointSkeleton] = {skeleton.name: skeleton for skeleton in (COCO_17, COCO_133, HAND_21, SOMA_HAND)}
 """Registry of built-in skeleton formats keyed by ``KeypointSkeleton.name``."""

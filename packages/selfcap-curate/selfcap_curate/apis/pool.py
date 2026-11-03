@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dataforge import paths
 from dataforge.records import read_json
+from dataforge.writing import atomic_write
 from serde.json import to_json
 
 from selfcap_curate.apis import open_session
@@ -43,7 +44,8 @@ def main(config: Config) -> None:
             raise ValueError(f"{key}: Sapiens2 layer missing phone detections; run selfcap-align and register its sapiens2 layer first")
         episodes.append(replace(episode, detections=detections))
     result = profile_session(session, episodes)
-    config.output.write_text(to_json(result))
+    with atomic_write(config.output) as staged:
+        staged.write_text(to_json(result))
 
 
 @dataclass
@@ -62,9 +64,10 @@ def pool_main(config: PoolConfig) -> None:
     """Pool typed profiles; source schemas are checked before fitting."""
     if config.output.exists():
         raise FileExistsError(config.output)
-    paths.require_outside([config.output], roots=[paths.NAS_ROOT])
+    paths.require_outside([config.output], roots=[*paths.NAS_RAW_ROOTS])
     profiles = [read_json(path, FocalProfile) for path in config.profiles]
-    config.output.write_text(to_json(pool(profiles, config.generated_date)))
+    with atomic_write(config.output) as staged:
+        staged.write_text(to_json(pool(profiles, config.generated_date)))
 
 
 @dataclass
@@ -83,7 +86,8 @@ def rotation_main(config: RotationConfig) -> None:
     """Rebuild the device table from typed free-hand and gyro session records."""
     if config.output.exists():
         raise FileExistsError(config.output)
-    paths.require_outside([config.output], roots=[paths.NAS_ROOT, config.gyro_dir])
+    paths.require_outside([config.output], roots=[*paths.NAS_RAW_ROOTS, config.gyro_dir])
     free = [read_json(p, OakFit) for p in config.free_paths]
     gyros = {f.session: read_json(path, GyroFit) for f in free if (path := config.gyro_dir / f"{f.session}.json").exists()}
-    config.output.write_text(to_json(pool_rotations(free, gyros, config.generated_date)))
+    with atomic_write(config.output) as staged:
+        staged.write_text(to_json(pool_rotations(free, gyros, config.generated_date)))

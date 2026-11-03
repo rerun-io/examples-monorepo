@@ -5,7 +5,7 @@ from pathlib import Path
 
 from rerun.catalog import CatalogClient
 
-from dataforge.catalog_swap import LayerEntry, catalog_idle, swap_layer
+from dataforge.catalog_swap import LayerEntry, catalog_idle, is_local_catalog, swap_layer
 
 
 @dataclass
@@ -24,8 +24,8 @@ class SwapConfig:
     """Maximum segments per gated batch."""
     gate_timeout_s: float = 600.0
     """Maximum seconds each batch waits for an idle catalog."""
-    local_catalog: bool = True
-    """Probe the local listening backlog; disable for a remote catalog."""
+    local_catalog: bool | None = None
+    """Probe the local listening backlog; None decides from the catalog URL's host."""
     nfs_mount: Path | None = None
     """Optional NFS mount whose READ latency is checked over 20 seconds."""
 
@@ -40,5 +40,5 @@ def main(config: SwapConfig) -> None:
     entry: LayerEntry = CatalogClient(config.catalog_url).get_dataset(config.catalog_name)
     swap_layer(
         entry, config.layer, config.files, batch_size=config.batch_size, gate_timeout_s=config.gate_timeout_s,
-        idle_probe=lambda: catalog_idle(config.catalog_url, config.nfs_mount, local=config.local_catalog),
+        idle_probe=lambda: catalog_idle(config.catalog_url, config.nfs_mount, local=is_local_catalog(config.catalog_url) if config.local_catalog is None else config.local_catalog),
     )

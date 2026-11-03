@@ -78,6 +78,9 @@ def raw_root() -> Path:
 NAS_ROOT: Path = Path("/mnt/nas")
 """Shared network storage: raw corpora may live there, conversion output and scratch never do."""
 
+NAS_RAW_ROOTS: tuple[Path, ...] = (Path("/mnt/nas/datasets"), Path("/mnt/nas/personal"))
+"""Raw NAS shares protected from conversion output and scratch writes."""
+
 
 def rrd_path(root: Path, *, layer: str, identity: SequenceIdentity) -> Path:
     """Layer-major rrd location: ``<root>/<layer>/<recording_id>.rrd``."""
@@ -98,21 +101,23 @@ def layer_targets(identity: SequenceIdentity, layers: Sequence[str], *, frame_li
 
 
 def require_outside(destinations: Iterable[Path], *, roots: Iterable[Path]) -> None:
-    """Refuse a write whose destination resolves beneath a protected root (raw inputs, the NAS).
-
-    Both sides are resolved, so a symlinked output or work directory that points
-    into a raw tree is caught. Each dataset passes its own protected roots.
-    """
+    """Refuse writes that resolve beneath a protected root, including symlinks."""
     protected: list[Path] = [root.resolve() for root in roots]
     for destination in destinations:
+        target: Path = destination.resolve()
         for root in protected:
-            if destination.resolve().is_relative_to(root):
+            if target.is_relative_to(root):
                 raise ValueError(f"refusing to write beneath protected input {root}: {destination}")
 
 
 def blueprint_path(root: Path, name: str, *, stamp: str, segment_table: bool = False) -> Path:
     """Blueprint location: ``<root>/blueprints/<name>[-table]-<stamp>.rbl``; every register run stamps new files."""
     return root / "blueprints" / f"{name}{'-table' if segment_table else ''}-{stamp}.rbl"
+
+
+def asset_path(root: Path, asset_id: str, *, stamp: str) -> Path:
+    """Catalog asset location: ``<root>/assets/<asset_id>-<stamp>.rrd``; a registered file is never rewritten in place."""
+    return root / "assets" / f"{asset_id}-{stamp}.rrd"
 
 
 SIDECAR_DIR: str = "sidecars"

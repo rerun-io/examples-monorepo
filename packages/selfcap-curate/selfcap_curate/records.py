@@ -10,6 +10,8 @@ from typing import Literal, TypeAlias
 import numpy as np
 from dataforge.records import read_json
 from dataforge.schema import video_path
+from dataforge.selfcap_schema import HeadConvention
+from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from serde import SerdeError, from_dict, serde
@@ -212,7 +214,8 @@ def read_sync(path: Path) -> TimeSync:
 
 def write_sync(path: Path, record: TimeSync) -> None:
     """Write a machine JSON record (missing measurements are null)."""
-    path.write_text(to_json(record))
+    with atomic_write(path) as staged:
+        staged.write_text(to_json(record))
 
 
 def read_frozen_sync(path: Path, *, text: str | None = None) -> TimeSync:
@@ -292,7 +295,9 @@ class CatalogHands:
     head_positions: Float64[ndarray, "h 3"]
     """Base rig translations: the left-eye origin, not a fabricated cyclopean pose."""
     head_quaternions: Float64[ndarray, "h 4"]
-    """Head-to-world xyzw orientations."""
+    """Head-to-world xyzw orientations, RDF when loaded from the catalog."""
+    head_convention: HeadConvention = "RDF"
+    """Original orientation axes in the stored base."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,7 +319,7 @@ class SelfcapLayout:
     """Segment-local device assignment."""
 
     oak_rig: int
-    """OAK rig, equal to the discovered iPhone count."""
+    """OAK rig: rig_04 in current ingest; older bases put it right after the phones."""
     quest_rig: int
     """Quest rig immediately after OAK."""
     phones: tuple[str, ...]
@@ -324,6 +329,10 @@ class SelfcapLayout:
     def video_entities(self) -> tuple[str, str, str]:
         """OAK left, OAK RGB, Quest right, in that order."""
         return video_path(self.oak_rig, 1), video_path(self.oak_rig, 0), video_path(self.quest_rig, 1)
+
+
+OAK_CAMERAS: tuple[str, ...] = ("rgb", "left", "right")
+"""OAK streams in cam_00..cam_02 order."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,3 +461,8 @@ class OakFit:
     questrig_T_rgb: Float64[ndarray, "4 4"] | None = None  # RGB-camera to Quest-left-rig rigid transform in metres.
     hands_kept_frac: float | None = None  # Fraction of complete frame/side groups retained.
     rotation_source: str = "hands"  # Free hand rotation or gyro mount rotation @ device rgb_R_imu.
+    observation_source: Literal["sapiens", "egohand"] = "sapiens"  # Image observations used by the mount fit.
+    rotation_reason: str | None = None
+    camera_median_px: dict[str, float] | None = None  # Per OAK camera, for the three-camera fit.
+    head_frame: Literal["recorded", "rdf"] = "recorded"
+    """Axes of questrig_T_rgb; legacy records use the base rig axes, new fits use RDF."""

@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import pytest
-import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 
-from dataforge import schema
+from dataforge import schema, transports
 from dataforge.datasets.selfcap import (
+    DEVICE_MESH_FILES,
+    DEVICE_MESHES,
     CameraCalibration,
     EpisodePlan,
     HeadPoses,
@@ -21,14 +21,29 @@ from dataforge.datasets.selfcap import (
     SelfcapDataset,
     build_episode_plan,
     exo_devices,
+    log_quest_hand_poses,
     read_calibration,
+    read_hand_poses,
     read_head_poses,
     read_imu_csv,
     read_session_task,
+    write_coco133_layer,
+    write_device_asset,
+)
+from dataforge.datasets.selfcap_raw import (
+    OAK_MOUNT_OTHER,
+    OAK_MOUNTS,
+    FactoryCalibration,
+    assumed_phone_lens,
+    nominal_oak_mount,
+    oak_stereo,
+    quest_left_T_right,
+    quest_mesh_frame,
 )
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel
-from dataforge.writing import blueprint_views
+from dataforge.quest_joint_poses import quest_hand_path
+from dataforge.records import read_json
 
 SESSION_A: str = "25aeb66a-cf5a-44a3-845f-62606cefabe7"
 """Session uuid whose first eight characters become the identity's middle part."""
@@ -106,12 +121,20 @@ def test_discover_pairs_each_identity_with_its_episode_directory(corpus: Path) -
     assert pair[1] == corpus / "cut" / "2025-12-20" / SESSION_A / "episodes" / "episode-009"
 
 
-def test_download_verifies_the_local_corpus(corpus: Path, tmp_path: Path) -> None:
+def test_download_fetches_the_pinned_cut_tree_then_verifies_it(corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fetches: list[tuple[str, list[str], Path, str]] = []
+    monkeypatch.setattr(transports, "hf_fetch", lambda repo, *, allow_patterns, local_dir, revision: fetches.append((repo, list(allow_patterns), local_dir, revision)))
     SelfcapConfig(root=corpus).setup().download()
+    assert fetches == [("pablovela5620/selfcap-hard26-raw", ["cut/**"], corpus, "84a01e79ae35aee923e6dd5dedc91cd695196445")]
     empty_root: Path = tmp_path / "empty"
     empty_root.mkdir()
     with pytest.raises(FileNotFoundError, match="missing"):
         SelfcapConfig(root=empty_root).setup().download()
+
+
+def test_config_refuses_a_floating_revision() -> None:
+    with pytest.raises(ValueError, match="full commit sha"):
+        SelfcapConfig(revision="main")
 
 
 def test_exo_devices_requires_video_and_calibration_in_one_directory(tmp_path: Path) -> None:
@@ -177,7 +200,13 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
                     {
                         "camera_id": "CAM_C",
                         "positional_layout": "left",
-                        "lens_intrinsics": {"focal_length_x": 572.2, "focal_length_y": 572.1, "principal_point_x": 648.4, "principal_point_y": 356.7, "available": True},
+                        "lens_intrinsics": {
+                            "focal_length_x": 572.2,
+                            "focal_length_y": 572.1,
+                            "principal_point_x": 648.4,
+                            "principal_point_y": 356.7,
+                            "available": True,
+                        },
                         "distortion": {"coefficients": coefficients, "available": True},
                         "capture_resolution": {"width": 1280, "height": 720},
                         "sensor_info": {"pixel_array_size": {"width": 1280, "height": 720}},
@@ -185,7 +214,13 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
                     {
                         "camera_id": "avcapturedevice:5",
                         "positional_layout": "center",
-                        "lens_intrinsics": {"focal_length_x": 700.0, "focal_length_y": 700.0, "principal_point_x": 960.0, "principal_point_y": 540.0, "available": True},
+                        "lens_intrinsics": {
+                            "focal_length_x": 700.0,
+                            "focal_length_y": 700.0,
+                            "principal_point_x": 960.0,
+                            "principal_point_y": 540.0,
+                            "available": True,
+                        },
                         "distortion": {"available": False},
                         "capture_resolution": {"width": 1920, "height": 1080},
                         "sensor_info": {"pixel_array_size": {"width": 1920, "height": 1080}},
@@ -193,7 +228,13 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
                     {
                         "camera_id": "broken",
                         "positional_layout": "right",
-                        "lens_intrinsics": {"focal_length_x": None, "focal_length_y": None, "principal_point_x": None, "principal_point_y": None, "available": False},
+                        "lens_intrinsics": {
+                            "focal_length_x": None,
+                            "focal_length_y": None,
+                            "principal_point_x": None,
+                            "principal_point_y": None,
+                            "available": False,
+                        },
                         "capture_resolution": {"width": 0, "height": 0},
                         "sensor_info": {"pixel_array_size": {"width": 0, "height": 0}},
                         "distortion": {},
@@ -214,21 +255,6 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
     assert cameras["center"].distortion_coefficients is None
 
 
-def test_default_blueprint_is_the_calibration_review_layout() -> None:
-    # The guard: :51235's default comes from this method on every dataforge-register run, and a
-    # catalog restore once fell back to an uncalibrated grid that hid the calib layer's overlays.
-    blueprint: rrb.Blueprint = SelfcapConfig().setup().default_blueprint()
-    views: dict[str, rrb.View] = {str(view.name): view for view in blueprint_views(blueprint)}
-    exo: list[str] = [f"exo rig_{rig:02d}" for rig in range(4)]
-    assert sorted(views) == sorted(["World (Quest frame, calibrated)", "OAK rgb", "Quest left", "Quest right", *exo])
-    assert str(views["World (Quest frame, calibrated)"].origin) == "/world"
-    cameras: dict[str, tuple[int, int]] = {**{name: (rig, 0) for rig, name in enumerate(exo)}, "OAK rgb": (4, 0), "Quest left": (5, 0), "Quest right": (5, 1)}
-    for name, (rig, cam) in cameras.items():
-        assert str(views[name].origin) == schema.pinhole_path(rig, cam)
-        contents: list[str] = cast(list[str], views[name].contents)  # the view keeps the list it was built with
-        assert "/world/gt/**" in contents  # the Quest hands, drawn into every camera
-
-
 def calibration_document(layouts: tuple[str, ...]) -> str:
     """A vendor-shaped calibration document with one usable camera per layout."""
     return json.dumps(
@@ -238,7 +264,13 @@ def calibration_document(layouts: tuple[str, ...]) -> str:
                 {
                     "camera_id": layout,
                     "positional_layout": layout,
-                    "lens_intrinsics": {"focal_length_x": 700.0, "focal_length_y": 700.0, "principal_point_x": 640.0, "principal_point_y": 360.0, "available": True},
+                    "lens_intrinsics": {
+                        "focal_length_x": 700.0,
+                        "focal_length_y": 700.0,
+                        "principal_point_x": 640.0,
+                        "principal_point_y": 360.0,
+                        "available": True,
+                    },
                     "capture_resolution": {"width": 1280, "height": 720},
                     "sensor_info": {"pixel_array_size": {"width": 1280, "height": 720}},
                     "distortion": {},
@@ -307,13 +339,14 @@ FIXTURES: Path = Path(__file__).parent / "fixtures"
 """48-frame AV1 clips: one starting at 0, one remuxed with a 40 ms container start (an mp4 edit list)."""
 
 
-def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, overrides: dict[str, Path] | None = None) -> Path:
+def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, overrides: dict[str, Path] | None = None, phones: int = 4) -> Path:
     """Convert a synthetic episode whose nine videos are the AV1 fixture, and return its base rrd.
 
     Args:
         tmp_path: Scratch directory for the episode and the output tree.
         monkeypatch: Redirects the dataforge output root into ``tmp_path``.
         overrides: Clip per video path relative to the episode, replacing the default fixture there.
+        phones: Exo phones kept, from the first.
     """
     import shutil
 
@@ -321,6 +354,8 @@ def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, 
 
     episode: Path = tmp_path / "episode-001"
     make_episode(episode)
+    for device in EXO_DEVICES[phones:]:
+        shutil.rmtree(episode / "exo" / device)
     clip: Path = FIXTURES / "av1_48f_192x160.mp4"
     if not clip.is_file():
         pytest.skip(f"AV1 fixture absent: {clip}")
@@ -336,8 +371,13 @@ def convert_fixture_episode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, 
     )
     for side, stamp in (("left", 17181303), ("right", 27181303)):
         (episode / "quest" / f"{side}_hand_poses.csv").write_text(
-            "ts_ns," + ",".join(f"joint_{j}_{axis}" for j in range(26) for axis in ("px", "py", "pz")) + "\n"
-            + str(stamp) + "," + ",".join(str(j / 100) for j in range(78)) + "\n"
+            "ts_ns,"
+            + ",".join(f"joint_{j}_{axis}" for j in range(26) for axis in ("px", "py", "pz"))
+            + "\n"
+            + str(stamp)
+            + ","
+            + ",".join(str(j / 100) for j in range(78))
+            + "\n"
         )
     monkeypatch.setattr(paths, "output_root", lambda: tmp_path / "output")
     identity: SequenceIdentity = SequenceIdentity(dataset="selfcap", parts=("2025-12-20", SESSION_A[:8], "ep001"))
@@ -348,36 +388,36 @@ def test_convert_preserves_capture_time_on_every_temporal_chunk(tmp_path: Path, 
     import pyarrow as pa
     import rerun.chunk as rrc
 
-    reader: rrc.RrdReader = rrc.RrdReader(convert_fixture_episode(tmp_path, monkeypatch))
+    base: Path = convert_fixture_episode(tmp_path, monkeypatch)
     seen: set[str] = set()
-    hand_rows: int = 0
+    pose_rows: dict[str, list[int]] = {}
     sample_rows: int = 0
-    annotated: bool = False
-    for chunk in reader.stream(store=reader.recordings()[0]):
-        if chunk.is_static:
-            if str(chunk.entity_path) == "/world/gt":
-                annotated = "AnnotationContext:context" in chunk.to_record_batch().schema.names
-            continue
-        batch: pa.RecordBatch = chunk.to_record_batch()
-        assert "capture_time" in chunk.timeline_names, str(chunk.entity_path)
-        assert batch.column("capture_time").equals(batch.column(schema.TIMELINE))
-        field: pa.Field = batch.schema.field("capture_time")
-        assert field.type == pa.duration("ns")
-        assert field.metadata is not None
-        assert field.metadata[b"rerun:kind"] == b"index"
-        assert field.metadata[b"rerun:index_name"] == b"capture_time"
-        assert field.metadata[b"rerun:is_sorted"] == b"true"
-        seen.add(str(chunk.entity_path))
-        if "VideoStream:sample" in batch.schema.names:
-            sample_rows += batch.num_rows
-        if str(chunk.entity_path) == schema.coco133_xyz_path():
-            hand_rows += batch.num_rows
-            assert batch.column("capture_time").cast(pa.int64()).to_pylist() == [17181303, 27181303]
-            points = np.asarray(batch.column("Points3D:positions").to_pylist(), dtype=np.float32)
-            assert np.isnan(points[0, 112:]).all()
-            assert np.isnan(points[1, 91:112]).all()
-    assert annotated
-    assert hand_rows == 2
+    for layer in (base, base.parent.parent / "gt" / base.name):
+        reader: rrc.RrdReader = rrc.RrdReader(layer)
+        for chunk in reader.stream(store=reader.recordings()[0]):
+            if chunk.is_static:
+                continue
+            batch: pa.RecordBatch = chunk.to_record_batch()
+            assert "capture_time" in chunk.timeline_names, str(chunk.entity_path)
+            assert batch.column("capture_time").equals(batch.column(schema.TIMELINE))
+            field: pa.Field = batch.schema.field("capture_time")
+            assert field.type == pa.duration("ns")
+            assert field.metadata is not None
+            assert field.metadata[b"rerun:kind"] == b"index"
+            assert field.metadata[b"rerun:index_name"] == b"capture_time"
+            assert field.metadata[b"rerun:is_sorted"] == b"true"
+            seen.add(str(chunk.entity_path))
+            if "VideoStream:sample" in batch.schema.names:
+                sample_rows += batch.num_rows
+            if "InstancePoses3D:translations" in batch.schema.names:
+                pose_rows[str(chunk.entity_path)] = [len(row) for row in batch.column("InstancePoses3D:translations").to_pylist()]
+            if str(chunk.entity_path) == schema.coco133_xyz_path():
+                assert layer.parent.name == "gt"
+                assert batch.column("capture_time").cast(pa.int64()).to_pylist() == [17181303, 27181303]
+                points = np.asarray(batch.column("Points3D:positions").to_pylist(), dtype=np.float32)
+                assert np.isnan(points[0, 112:]).all()
+                assert np.isnan(points[1, 91:112]).all()
+    assert pose_rows == {quest_hand_path("left"): [26], quest_hand_path("right"): [26]}  # every joint, palm and metacarpals too
     assert sample_rows == 9 * 48  # video stored once, despite its two clocks
     assert {schema.gyro_path(4, 0), schema.accel_path(4, 0), schema.rig_path(5), schema.coco133_xyz_path()} <= seen
 
@@ -393,7 +433,9 @@ def test_convert_keeps_each_video_container_start(tmp_path: Path, monkeypatch: p
         stream = container.streams.video[0]
         time_base = stream.time_base
         assert time_base is not None
-        presented_ns: list[int] = sorted(round(packet.pts * time_base * 1_000_000_000) for packet in container.demux(stream) if packet.pts is not None)
+        presented_ns: list[int] = sorted(
+            round(packet.pts * time_base * 1_000_000_000) for packet in container.demux(stream) if packet.pts is not None
+        )
     reader: rrc.RrdReader = rrc.RrdReader(convert_fixture_episode(tmp_path, monkeypatch, overrides={"ego/left.mp4": late}))
     sample_ns: dict[str, list[int]] = {}
     first_indices: dict[str, int] = {}
@@ -411,6 +453,60 @@ def test_convert_keeps_each_video_container_start(tmp_path: Path, monkeypatch: p
     assert len(sample_ns) == 8
     assert all(min(times) == 0 for times in sample_ns.values())
     assert first_indices == {schema.cam_path(4, cam): 10 for cam in range(3)}
+
+
+def phone_clip_with_tap(target: Path) -> None:
+    """The AV1 fixture plus a 48 kHz mono Opus track: two seconds of silence with a 1 kHz tap from 1.0 to 1.2 s."""
+    import shutil
+    import subprocess
+
+    ffmpeg: str | None = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg absent")
+    tap: str = "aevalsrc='0.5*sin(2*PI*1000*t)*between(t,1,1.2)':s=48000:d=2"
+    inputs: list[str] = ["-i", str(FIXTURES / "av1_48f_192x160.mp4"), "-f", "lavfi", "-i", tap]
+    streams: list[str] = ["-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "libopus"]
+    subprocess.run([ffmpeg, "-nostdin", "-v", "error", *inputs, *streams, str(target)], check=True)
+
+
+def test_convert_logs_each_phone_sound_as_flac_and_loudness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The phone's sound is raw data, so the base keeps it: the track as FLAC (the 0.41 viewer cannot decode Opus) and
+    # its band loudness, both on the phone's own clock. Phones whose mp4 has no audio get neither.
+    import io
+
+    import av
+    import pyarrow as pa
+    import rerun.chunk as rrc
+
+    clip: Path = tmp_path / "phone_with_sound.mp4"
+    phone_clip_with_tap(clip)
+    tiger: str = EXO_DEVICES[1]
+    base: Path = convert_fixture_episode(tmp_path, monkeypatch, overrides={f"exo/{tiger}/{tiger}.mp4": clip})
+    reader: rrc.RrdReader = rrc.RrdReader(base)
+    batches: dict[str, list[pa.RecordBatch]] = {}
+    for chunk in reader.stream(store=reader.recordings()[0]):
+        batches.setdefault(str(chunk.entity_path), []).append(chunk.to_record_batch())
+
+    assert {entity for entity in batches if "/audio_" in entity} == {schema.audio_path(1, 0), schema.loudness_path(1, 0)}
+    (track,) = [batch for batch in batches[schema.audio_path(1, 0)] if "AssetAudio:blob" in batch.schema.names]
+    assert track.num_rows == 1
+    assert track.column("capture_time").equals(track.column(schema.TIMELINE))
+    assert track.column("AssetAudio:media_type").to_pylist() == [["audio/flac"]]
+    with av.open(io.BytesIO(bytes(track.column("AssetAudio:blob").to_pylist()[0][0])), mode="r") as flac:
+        stream = flac.streams.audio[0]
+        assert (stream.codec_context.name, stream.rate) == ("flac", 48_000)
+        assert sum(frame.samples for frame in flac.decode(stream)) == pytest.approx(96_000, abs=1_000)
+
+    loudness: pa.RecordBatch = pa.concat_batches([batch for batch in batches[schema.loudness_path(1, 0)] if "Scalars:scalars" in batch.schema.names])
+    assert loudness.column("capture_time").equals(loudness.column(schema.TIMELINE))
+    seconds: Float64[ndarray, "n"] = loudness.column("capture_time").cast(pa.int64()).to_numpy() / 1e9
+    level: Float64[ndarray, "n"] = np.array([row[0] for row in loudness.column("Scalars:scalars").to_pylist()])
+    assert np.diff(seconds) == pytest.approx(0.005)  # one level every 5 ms
+    assert level.min() >= 0.0  # dB over the phone's own floor
+    assert 1.0 <= seconds[np.argmax(level)] <= 1.2 and level.max() > 20.0
+    assert level[seconds < 0.9].max() < 3.0
+    styles = [batch for batch in batches[schema.loudness_path(1, 0)] if "SeriesLines:names" in batch.schema.names]
+    assert styles[0].column("SeriesLines:names").to_pylist() == [["Tiger"]]
 
 
 @pytest.mark.parametrize("contents", ["", "ts_ns,bad\n1,2\n", "ts_ns," + ",".join(f"j{i}" for i in range(78)) + "\n1,2\n"])
@@ -439,31 +535,78 @@ def test_raw_calibration_chunks_keep_verbatim_device_documents(tmp_path: Path) -
     from dataforge.datasets.selfcap import raw_calibration_chunks
 
     documents = {}
-    for rig, folder in enumerate(('exo/phone-a', 'exo/phone-b', 'ego', 'quest')):
-        path = tmp_path / folder / 'calibration.json'
+    for rig, folder in zip((0, 1, 4, 5), ("exo/phone-a", "exo/phone-b", "ego", "quest"), strict=True):
+        path = tmp_path / folder / "calibration.json"
         path.parent.mkdir(parents=True)
         content = (' {"vendor": "' + folder + '", "opaque": [1, 2]}\r\n').encode()
         path.write_bytes(content)
-        documents[f'/world/rig_{rig:02d}'] = content.decode()
-    chunks = raw_calibration_chunks(tmp_path, ['phone-a', 'phone-b'])
+        documents[f"/world/rig_{rig:02d}"] = content.decode()
+    chunks = raw_calibration_chunks(tmp_path, ["phone-a", "phone-b"], oak_rig=4)
     assert len(chunks) == 4
     for chunk in chunks:
         assert chunk.is_static
-        assert chunk.to_record_batch().column('raw_calibration_json').to_pylist() == [[documents[str(chunk.entity_path)]]]
+        assert chunk.to_record_batch().column("raw_calibration_json").to_pylist() == [[documents[str(chunk.entity_path)]]]
 
 
 def test_convert_logs_factory_documents_on_every_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from rerun.chunk import RrdReader
 
     reader = RrdReader(convert_fixture_episode(tmp_path, monkeypatch))
-    values = {str(c.entity_path): c.to_record_batch().column('raw_calibration_json')[0].as_py()[0] for c in reader.stream() if 'raw_calibration_json' in c.to_record_batch().schema.names}
-    assert set(values) == {f'/world/rig_{i:02d}' for i in range(6)}
-    assert all(document == calibration_document(('center', 'left', 'right')) for document in values.values())
+    values = {
+        str(c.entity_path): c.to_record_batch().column("raw_calibration_json")[0].as_py()[0]
+        for c in reader.stream()
+        if "raw_calibration_json" in c.to_record_batch().schema.names
+    }
+    assert set(values) == {f"/world/rig_{i:02d}" for i in range(6)}
+    assert all(document == calibration_document(("center", "left", "right")) for document in values.values())
+
+
+def test_a_three_phone_episode_keeps_the_oak_at_rig_04_and_the_quest_at_rig_05(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # One catalog layout serves every segment, so the head rigs never move with the phone count; rig_03 stays empty.
+    from rerun.chunk import RrdReader
+
+    kinds, factories = {}, set()
+    for chunk in RrdReader(convert_fixture_episode(tmp_path, monkeypatch, phones=3)).stream():
+        batch = chunk.to_record_batch()
+        if "kind" in batch.schema.names and str(chunk.entity_path).count("/") == 2:
+            kinds[str(chunk.entity_path)] = batch.column("kind")[0].as_py()[0]
+        if "raw_calibration_json" in batch.schema.names:
+            factories.add(str(chunk.entity_path))
+    assert kinds == {"/world/rig_00": "exo", "/world/rig_01": "exo", "/world/rig_02": "exo", "/world/rig_04": "ego", "/world/rig_05": "quest"}
+    assert factories == set(kinds), "each device's factory document sits on its own rig"
+
+
+def test_the_oak_mount_prior_sits_just_before_the_first_quest_pose_so_the_fit_always_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Calibration writes its fit at the first Quest pose; a later timed value wins in the viewer whatever was written last.
+    from rerun.chunk import RrdReader
+
+    monkeypatch.setattr("dataforge.datasets.selfcap.nominal_oak_mount", lambda oak, quest: np.eye(4))  # the fixture headset has no stereo pair
+    mounts = [
+        c for c in RrdReader(convert_fixture_episode(tmp_path, monkeypatch)).stream()
+        if str(c.entity_path) == "/world/rig_04" and "Transform3D:mat3x3" in c.to_record_batch().schema.names
+    ]
+    assert len(mounts) == 1 and not mounts[0].is_static
+    batch = mounts[0].to_record_batch()
+    assert [t.value for t in batch.column("video_time")] == [17181303 - 1_000_000], "1 ms before the first Quest pose, where calibration's fit goes"
+    assert batch.column("oak_mount_source").to_pylist() == [["nominal"]]
+
+
+def test_convert_draws_each_camera_frame_and_names_each_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every camera shows its frame like the hand joints do, and each phone rig carries one small point that names it.
+    from rerun.chunk import RrdReader
+
+    batches = [(str(c.entity_path), c.to_record_batch()) for c in RrdReader(convert_fixture_episode(tmp_path, monkeypatch)).stream()]
+    axes = {path for path, b in batches if "TransformAxes3D:axis_length" in b.schema.names}
+    cameras = {f"/world/rig_{rig:02d}/cam_00" for rig in range(4)} | {f"/world/rig_04/cam_{cam:02d}" for cam in range(3)} | {"/world/rig_05/cam_00", "/world/rig_05/cam_01"}
+    assert cameras <= axes
+    labels = {path: b.column("Points3D:labels")[0].as_py() for path, b in batches if "Points3D:labels" in b.schema.names and path.endswith("/rig_label")}
+    assert labels == {f"/world/rig_{rig:02d}/cam_00/rig_label": [f"rig_{rig:02d}"] for rig in range(4)}, "phones only"
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_hand_csv_refuses_nonadjacent_duplicate_timestamps(tmp_path: Path, side: str) -> None:
     from dataforge.datasets.selfcap import read_quest_hands
+
     source = tmp_path / f"{side}_hand_poses.csv"
     header = "ts_ns," + ",".join(f"j{i}" for i in range(78)) + "\n"
     source.write_text(header + "".join(f"{stamp}," + ",".join(["1"] * 78) + "\n" for stamp in (17, 27, 17)))
@@ -500,3 +643,273 @@ def test_calibration_keeps_unknown_vendor_fields_and_rejects_short_distortion(tm
     result = read_calibration(source)["center"]
     assert result.width == 1280
     assert result.distortion_coefficients is None
+
+
+def factory_extrinsic(kind: str, rotation: list[list[float]], translation: list[float]) -> dict:
+    return {"type": kind, "from": "a", "to": "b", "R": rotation, "T": translation}
+
+
+def test_iphone_fallback_lens_is_not_measured(tmp_path: Path) -> None:
+    # An iPhone writes a 700 px fallback with available=false; the base must not turn it into a Pinhole.
+    document = json.loads(calibration_document(("center",)))
+    document["intrinsics"][0]["lens_intrinsics"]["available"] = False
+    (tmp_path / "calibration.json").write_text(json.dumps(document))
+    assert not read_calibration(tmp_path / "calibration.json")["center"].available
+
+
+def test_oak_stereo_is_rgb_relative_in_metres(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("center", "left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("left_to_right", identity, [7.5, 0.0, 0.0]),
+                              factory_extrinsic("left_to_rgb", identity, [3.75, 0.0, 0.0])]
+    (tmp_path / "calibration.json").write_text(json.dumps(document))
+    stereo = oak_stereo(read_json(tmp_path / "calibration.json", FactoryCalibration))
+    np.testing.assert_allclose(stereo["rgb_T_left"][:3, 3], [-0.0375, 0.0, 0.0])
+    np.testing.assert_allclose(stereo["rgb_T_right"][:3, 3], [0.0375, 0.0, 0.0])
+
+
+def test_quest_left_T_right_needs_a_healthy_headset(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("device_to_left", identity, [-0.032, 0.0, 0.0]),
+                              factory_extrinsic("device_to_right", identity, [0.032, 0.0, 0.0])]
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    left_T_right = quest_left_T_right(read_json(path, FactoryCalibration))
+    assert left_T_right is not None
+    np.testing.assert_allclose(left_T_right[:3, 3], [0.064, 0.0, 0.0])
+    document["intrinsics"][1]["lens_intrinsics"]["available"] = False  # faulty right camera: fixed later, not here
+    path.write_text(json.dumps(document))
+    assert quest_left_T_right(read_json(path, FactoryCalibration)) is None
+
+
+def test_nominal_oak_mount_follows_the_oak_and_the_headset_layout(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("device_to_left", identity, [-0.032, 0.0, 0.0]),
+                              factory_extrinsic("device_to_right", identity, [0.032, 0.0, 0.0])]
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    healthy = read_json(path, FactoryCalibration)
+    document["intrinsics"][1]["camera_id"] = "50"
+    document["intrinsics"][1]["lens_intrinsics"]["available"] = False  # broken left camera: camera 50 borrowed
+    path.write_text(json.dumps(document))
+    borrowed = read_json(path, FactoryCalibration)
+    known = FactoryCalibration(device_id=next(iter(OAK_MOUNTS)), intrinsics=())
+    unseen = FactoryCalibration(device_id="OAK - never fitted", intrinsics=())
+
+    assert nominal_oak_mount(known, healthy) is OAK_MOUNTS[known.device_id][0]
+    assert nominal_oak_mount(known, borrowed) is OAK_MOUNTS[known.device_id][1]
+    assert nominal_oak_mount(unseen, healthy) is OAK_MOUNT_OTHER[0]
+    assert nominal_oak_mount(unseen, borrowed) is OAK_MOUNT_OTHER[1]
+
+
+def test_quest_principal_point_is_in_video_pixels(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    for entry in document["intrinsics"]:
+        entry["capture_resolution"] = {"width": 1280, "height": 960}
+        entry["sensor_info"] = {"pixel_array_size": {"width": 1280, "height": 1280}}
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    raw_cy = document["intrinsics"][0]["lens_intrinsics"]["principal_point_y"]
+
+    assert read_calibration(path)["left"].principal_point_xy[1] == raw_cy - 160.0  # centred 1280x960 crop of a 1280x1280 sensor
+
+
+def test_assumed_phone_lens_is_a_centred_undistorted_pinhole() -> None:
+    lens = assumed_phone_lens(1920, 1080)
+
+    assert lens.focal_length_xy.tolist() == [960.0, 960.0]  # 90 deg horizontal field of view
+    assert lens.principal_point_xy.tolist() == [960.0, 540.0]
+    assert lens.distortion_coefficients is None and not lens.available
+
+
+def test_quest_mesh_turns_with_a_camera_50_eye_frame(tmp_path: Path) -> None:
+    document = json.loads(calibration_document(("left", "right")))
+    identity = np.eye(3).tolist()
+    document["extrinsics"] = [factory_extrinsic("device_to_left", identity, [-0.032, 0.0, 0.0]),
+                              factory_extrinsic("device_to_right", identity, [0.032, 0.0, 0.0])]
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(document))
+    healthy = read_json(path, FactoryCalibration)
+    document["intrinsics"][1]["camera_id"] = "50"
+    document["intrinsics"][1]["lens_intrinsics"]["available"] = False
+    path.write_text(json.dumps(document))
+    borrowed = read_json(path, FactoryCalibration)
+    oak = FactoryCalibration(device_id="OAK - never fitted", intrinsics=())
+
+    turned = quest_mesh_frame(oak, borrowed)
+    assert turned is not None
+    angle = np.degrees(np.arccos((np.trace(turned[:3, :3]) - 1) / 2))
+
+    healthy_frame = quest_mesh_frame(oak, healthy)
+    assert healthy_frame is not None and np.array_equal(healthy_frame, np.eye(4))
+    assert 170 < angle < 180  # the camera-50 eye frame sits about 175 deg from the healthy one
+
+
+def test_device_meshes_are_well_formed() -> None:
+    import rerun.chunk as rrc
+
+    for name in DEVICE_MESH_FILES.values():
+        (mesh,) = [c.to_record_batch() for c in rrc.RrdReader(DEVICE_MESHES / f"{name}.rrd").stream() if str(c.entity_path) == "/device"]
+        if "Asset3D:blob" in mesh.schema.names:  # a GLB; its geometry is checked by its own test
+            assert mesh.column("Asset3D:media_type")[0].as_py() == ["model/gltf-binary"]
+            continue
+        column = {field: np.asarray(mesh.column(f"Mesh3D:{field}")[0].as_py()) for field in ("vertex_positions", "triangle_indices", "vertex_normals", "vertex_colors")}
+        positions, triangles = column["vertex_positions"].reshape(-1, 3), column["triangle_indices"].reshape(-1, 3)
+        assert triangles.max() < len(positions)
+        assert len(column["vertex_normals"]) == len(column["vertex_colors"]) == len(positions)
+        assert np.ptp(positions, axis=0).max() < 0.4  # metres: a headset or a phone, not millimetres
+
+
+def glb_document(glb: bytes) -> dict:
+    """The JSON chunk of a GLB."""
+    import json
+    import struct
+
+    (length,) = struct.unpack_from("<I", glb, 12)
+    return json.loads(glb[20 : 20 + length])
+
+
+def glb_node_positions(document: dict) -> dict[str, np.ndarray]:
+    """Each named node's origin in the GLB's scene frame, composing matrix or TRS down from the scene roots."""
+    from scipy.spatial.transform import Rotation
+
+    def local(node: dict) -> np.ndarray:
+        if "matrix" in node:
+            return np.asarray(node["matrix"], dtype=np.float64).reshape(4, 4).T  # glTF stores column-major
+        m = np.eye(4)
+        m[:3, :3] = Rotation.from_quat(node.get("rotation", [0, 0, 0, 1])).as_matrix() * np.asarray(node.get("scale", [1, 1, 1]))
+        m[:3, 3] = node.get("translation", [0, 0, 0])
+        return m
+
+    out: dict[str, np.ndarray] = {}
+    pending = [(index, np.eye(4)) for index in document["scenes"][document.get("scene", 0)]["nodes"]]
+    while pending:
+        index, parent = pending.pop()
+        node = document["nodes"][index]
+        world = parent @ local(node)
+        out[node.get("name", str(index))] = world[:3, 3]
+        pending.extend((child, world) for child in node.get("children", []))
+    return out
+
+
+def test_quest_model_is_a_glb_in_the_left_rgb_camera_frame() -> None:
+    import rerun.chunk as rrc
+
+    (asset,) = [c.to_record_batch() for c in rrc.RrdReader(DEVICE_MESHES / f"{DEVICE_MESH_FILES['quest']}.rrd").stream() if str(c.entity_path) == "/device"]
+    glb = np.asarray(asset.column("Asset3D:blob")[0].as_py()[0], dtype=np.uint8).tobytes()
+    document = glb_document(glb)
+    lenses = glb_node_positions(document)
+
+    assert "KHR_texture_transform" not in document.get("extensionsRequired", [])  # Rerun refuses such files
+    assert np.allclose(lenses["L_upper_lens_coating"], 0.0, atol=1e-3)  # the left RGB lens is the origin
+    assert np.allclose(lenses["R_upper_lens_coating"], [0.0636, 0.0, 0.0], atol=1e-3)  # right lens along +x (RDF)
+    assert lenses["L_lower_lens_coating"][1] > 0.01  # the lower aperture sits below: +y is down
+    assert lenses["Eye_Left_Convex_Fresnel_Lens"][2] < -0.03  # the eye lenses sit ~5 cm behind the front glass: +z looks out
+
+
+def hand_csv(path: Path, width: int, rows: list[tuple[int, float]]) -> None:
+    """A Quest hand CSV in the device's layout; a row with value 0 is the all-zero "not tracked" row."""
+    axes = ("x", "y", "z", "qx", "qy", "qz", "qw")[:width]
+    names = ("palm", "wrist", *(f"joint{j}" for j in range(24)))
+    header = "ts_ns," + ",".join(f"{name}_{axis}" for name in names for axis in axes)
+    lines = [f"{stamp}," + ",".join(f"{value * (k + 1) / 7:.6f}" for k in range(26 * width)) for stamp, value in rows]
+    path.write_text(header + "\n" + "\n".join(lines) + "\n")
+
+
+@pytest.mark.parametrize("width", [7, 3])
+def test_quest_hand_poses_round_trip_through_the_base(tmp_path: Path, width: int) -> None:
+    from dataforge import writing
+    from dataforge.quest_joint_poses import read_quest_joint_poses
+
+    hand_csv(tmp_path / "left.csv", width, [(1_000_000, 0.123456), (21_000_000, 0.0), (41_000_000, -0.654321)])
+    raw = read_quest_joint_poses(tmp_path / "left.csv")
+    with writing.recording_to(tmp_path / "base.rrd", recording_id="r") as recording:
+        log_quest_hand_poses(recording, {"left": raw}, shift_ns=7_000_000)
+
+    hands, shift = read_hand_poses(tmp_path / "base.rrd")
+    back = hands["left"]
+
+    assert shift == 7_000_000
+    assert np.array_equal(back.times_ns, raw.times_ns)
+    assert np.array_equal(back.positions, raw.positions, equal_nan=True)  # untracked row stays untracked
+    assert np.isnan(back.positions[1]).all() and np.isfinite(back.positions[[0, 2]]).all()
+    assert back.joint_names == raw.joint_names and back.joint_names[:2] == ("palm", "wrist")
+    if width == 7:
+        assert back.orientations is not None and raw.orientations is not None
+        assert np.array_equal(back.orientations, raw.orientations, equal_nan=True)
+    else:
+        assert back.orientations is None
+
+
+def test_gt_layer_from_a_base_is_the_coco133_view_of_its_hands(tmp_path: Path) -> None:
+    import pyarrow as pa
+    import rerun.chunk as rrc
+
+    from dataforge import writing
+    from dataforge.datasets.selfcap_raw import coco133_hands
+    from dataforge.quest_joint_poses import read_quest_joint_poses
+
+    hands = {}
+    for side, stamp in (("left", 1_000_000), ("right", 2_000_000)):
+        hand_csv(tmp_path / f"{side}.csv", 7, [(stamp, 0.25)])
+        hands[side] = read_quest_joint_poses(tmp_path / f"{side}.csv")
+    with writing.recording_to(tmp_path / "base.rrd", recording_id="r") as recording:
+        log_quest_hand_poses(recording, hands, shift_ns=3_000_000)
+    write_coco133_layer(*read_hand_poses(tmp_path / "base.rrd"), tmp_path / "gt.rrd", "r")
+
+    table = rrc.ChunkStore.from_chunks(list(rrc.RrdReader(tmp_path / "gt.rrd").stream())).reader(index=schema.CAPTURE_TIMELINE, contents=schema.coco133_xyz_path()).to_arrow_table()
+    table = table.filter(table[f"{schema.coco133_xyz_path()}:Points3D:positions"].is_valid())
+    points = np.asarray(table[f"{schema.coco133_xyz_path()}:Points3D:positions"].to_pylist(), dtype=np.float32)
+
+    expected = coco133_hands(hands)
+    assert table[schema.CAPTURE_TIMELINE].cast(pa.int64()).to_pylist() == expected.times_ns.tolist()
+    assert (table[schema.TIMELINE].cast(pa.int64()).to_numpy() - expected.times_ns).tolist() == [3_000_000, 3_000_000]
+    assert np.array_equal(points, expected.positions_xyz, equal_nan=True)
+
+
+def test_device_asset_is_a_static_mesh_on_the_rig(tmp_path: Path) -> None:
+    # Head-worn devices hang on their rig; a phone's model hangs on its camera, the node calibrate gives a pose.
+    import rerun.chunk as rrc
+
+    for device, rig, entity in (("oak", 3, "/world/rig_03/device"), ("phone", 1, "/world/rig_01/cam_00/device")):
+        write_device_asset(tmp_path / f"{device}.rrd", device, rig)
+        chunks = list(rrc.RrdReader(tmp_path / f"{device}.rrd").stream())
+        assert {str(c.entity_path) for c in chunks if "Mesh3D:vertex_positions" in c.to_record_batch().schema.names} == {entity}
+        assert all(c.is_static for c in chunks if str(c.entity_path) == entity)
+    # The models ship as .rrd (a static Mesh3D at /device), never npz/npy (AGENTS.md).
+    assert sorted(path.name for path in DEVICE_MESHES.iterdir() if path.suffix != ".md") == sorted(f"{name}.rrd" for name in DEVICE_MESH_FILES.values())
+
+
+def rig_layout_base(target: Path, recording_id: str, phones: int) -> None:
+    """A base holding only the rig nodes: ``phones`` exo rigs, then the OAK (ego) and the Quest."""
+    from dataforge.logging_toolkit import log_rig_node
+    from dataforge.writing import recording_to
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with recording_to(target, recording_id=recording_id) as recording:
+        for rig, (name, kind) in enumerate([*((device, "exo") for device in EXO_DEVICES[:phones]), ("oak", "ego"), ("quest", "quest")]):
+            log_rig_node(recording, rig, reference=schema.CAM0_REFERENCE, num_cameras=1, name=name, kind=kind)
+
+
+@pytest.mark.integration
+def test_register_attaches_the_device_meshes_at_each_segments_own_rigs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The OAK, Quest and phone models are catalog assets, one per device position: a three-phone session puts the OAK at
+    # rig_03, a four-phone session at rig_04. dataforge-register attaches each segment the meshes for its own rigs.
+    import rerun as rr
+
+    from dataforge.apis import register
+
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "output"))
+    four, three = "selfcap__2025-12-20__25aeb66a__ep001", "selfcap__2025-12-21__1dbe8c49__ep002"
+    rig_layout_base(tmp_path / "output/base" / f"{four}.rrd", four, phones=4)
+    rig_layout_base(tmp_path / "output/base" / f"{three}.rrd", three, phones=3)
+    with rr.server.Server(port=0) as server:
+        for _ in range(2):  # a second run replaces the assets instead of adding more
+            register.main(register.Config(dataset=SelfcapConfig(), catalog_url=server.url(), catalog_name="selfcap-test", replace=True))
+        entry = server.client().get_dataset("selfcap-test")
+        phones = [f"devices__iphone12__rig_{rig:02d}" for rig in range(4)]
+        assert sorted(entry.assets_for_segment(four)) == sorted([*phones, "devices__oak_d_pro_w__rig_04", "devices__quest3s__rig_05"])
+        assert sorted(entry.assets_for_segment(three)) == sorted([*phones[:3], "devices__oak_d_pro_w__rig_03", "devices__quest3s__rig_04"])
+        assert len(entry.assets()) == 8

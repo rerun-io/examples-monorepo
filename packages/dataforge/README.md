@@ -473,6 +473,10 @@ never overwritten), makes them the defaults, then unregisters every older bluepr
 entry of the dataset, hand-registered ones included, and deletes the older files in
 `blueprints/`. The dataset id and its segments stay, so links keep working.
 
+For an existing dataset, use `dataforge-publish-blueprints` to refresh its
+blueprints. Pass the dataset registry key, catalog URL, catalog name, and output
+root explicitly. The catalog server must be able to read that output root.
+
 The native viewer saves its own copy of each table layout on disk
 (`~/.local/share/rerun/blueprints/tables/` on Linux,
 `~/Library/Application Support/rerun/blueprints/tables/` on macOS) and can keep

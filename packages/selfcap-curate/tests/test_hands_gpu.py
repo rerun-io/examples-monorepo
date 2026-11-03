@@ -9,14 +9,18 @@ from selfcap_curate.hands_gpu import detect_frames, pick_frames
 from selfcap_curate.records import HandTrack
 
 
-def test_two_gops_pick_twelve_spaced_motion_peaks() -> None:
+def test_frames_spread_over_the_session_one_motion_peak_per_part() -> None:
+    # The phones never move, so their poses want the wearer seen all over the room: the frames spread over the whole
+    # session, one per equal part, each the part's fastest-moving hands (the clock fit needs moving hands).
     times = np.arange(600, dtype=np.float64) / 25.0
     speed = np.zeros(600)
-    expected = [80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 330, 334, 338, 342, 346, 350, 354, 358, 362, 366, 370, 374]
-    speed[expected] = np.arange(1, 25)
-    speed[:50] = 1000.0  # Margin excludes these even though they move fastest.
+    speed[:50] = 1000.0  # inside the 2 s margin: excluded although fastest
+    speed[[90, 100]] = [1.0, 3.0]  # part [50, 175): 100 is its peak
+    speed[[200, 260]] = [2.0, 1.0]  # part [175, 300): 200
+    speed[[400]] = 0.5  # part [300, 425): 400
+    # part [425, 550) never moves: no frame
     hand = HandTrack(times, np.zeros((600, 21, 3)), np.ones(600, dtype=bool), speed)
-    assert pick_frames({"left": hand, "right": hand}, 600, 25.0).tolist() == expected
+    assert pick_frames({"left": hand, "right": hand}, 600, 25.0, count=4).tolist() == [100, 200, 400]
 
 
 def test_top_person_batches_and_empty_frames_keep_container_shape() -> None:

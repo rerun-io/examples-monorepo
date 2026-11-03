@@ -16,6 +16,7 @@ from time import perf_counter
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+import rerun.blueprint as rrb
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
 from dataforge import paths, schema, writing
@@ -75,6 +76,7 @@ def main(config: Config) -> None:
         with timer.stage(layer):
             entry.register([path.resolve().as_uri() for path in rrd_paths], layer_name=layer, on_duplicate=on_duplicate).wait()
 
+    dataset.register_assets(entry, output_root)
     started: float = perf_counter()
     republish_blueprints(entry, dataset, catalog_name, output_root)
     blueprint_s: float = perf_counter() - started
@@ -111,16 +113,24 @@ def republish_blueprints(entry: DatasetEntry, dataset: DataforgeDataset, catalog
         retiring = {row["rerun_segment_id"]: Path(unquote(urlparse(row["rerun_storage_urls"][0]).path)) for row in listed}
     stamp: str = datetime.now().strftime("%Y%m%d-%H%M%S-%f")  # microseconds: back-to-back runs never share a file name
     blueprint_path: Path = paths.blueprint_path(output_root, catalog_name, stamp=stamp).resolve()
+    segment_layout, table_layout = dataset.catalog_blueprints(entry)
     with writing.atomic_write(blueprint_path) as temp_path:
-        dataset.default_blueprint().save(catalog_name, str(temp_path))
+        segment_layout.save(catalog_name, str(temp_path))
     entry.register_blueprint(blueprint_path.as_uri(), set_default=True)
     table_path: Path = paths.blueprint_path(output_root, catalog_name, segment_table=True, stamp=stamp).resolve()
-    columns: list[str] = entry.segment_table().schema().names
-    writing.save_table_blueprint(dataset.table_blueprint(), table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
+    if isinstance(table_layout, rrb.table.TableBlueprint):  # a dataset's own table, complete with its timeline and columns
+        with writing.atomic_write(table_path) as temp_path:
+            table_layout.save(catalog_name, str(temp_path))
+    else:
+        columns: list[str] = entry.segment_table().schema().names
+        writing.save_table_blueprint(table_layout, table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
     entry.register_blueprint(table_path.as_uri(), set_default=True, segment_table=True)
     if blueprint_entries is not None and retiring:
         blueprint_entries.unregister(segments_to_drop=list(retiring), layers_to_drop=[]).wait()
-        ours: list[Path] = [path for path in retiring.values() if path.parent == blueprint_path.parent]  # both resolved
+        # Only this dataset's own .rbl files in its blueprint directory (both resolved) are deleted: an entry can point anywhere.
+        ours: list[Path] = [
+            path for path in retiring.values() if path.parent == blueprint_path.parent and path.suffix == ".rbl" and path.name.startswith(catalog_name)
+        ]
         for path in ours:
             path.unlink(missing_ok=True)
         print(f"retired {len(retiring)} older blueprint entries of '{catalog_name}' and deleted {len(ours)} of their files")

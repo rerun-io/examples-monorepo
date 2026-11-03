@@ -75,6 +75,18 @@ def test_quest_automatically_resolves_the_healthy_catalog_segment(tmp_path: Path
 
 
 @pytest.mark.integration
+def test_quest_reads_the_donor_from_a_separate_donor_dataset(tmp_path: Path, private_server) -> None:
+    healthy = read_camera50_table().sessions["2025-12-09__021d2e8b"].healthy_segment
+    a, b = tmp_path / "faulty.rrd", tmp_path / "healthy.rrd"
+    write_factory_record(a, FAULTY, faulty=True)
+    write_factory_record(b, healthy, faulty=False)
+    with private_server({DATASET_NAME: [a]}) as session, private_server({DATASET_NAME: [b]}) as donors:
+        result = read_quest_block(open_segment(session.client().get_dataset(DATASET_NAME), FAULTY), donors=donors.client().get_dataset(DATASET_NAME))
+        assert result.mode == "faulty-left-borrowed-cam50"
+        np.testing.assert_allclose(result.rig_T_cam["1"][:3, 3], [0.002, 0.01, -0.07], atol=1e-7)
+
+
+@pytest.mark.integration
 def test_missing_catalog_document_does_not_fall_back_to_raw_files(tmp_path: Path, private_server) -> None:
     path = tmp_path / "missing.rrd"
     write_factory_record(path, FAULTY, faulty=True, document=False)

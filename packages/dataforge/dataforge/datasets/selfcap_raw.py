@@ -12,95 +12,28 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.csv as pacsv
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
-from serde import serde
 
 from dataforge.logging_toolkit import ImuChannel
+from dataforge.oak_mount import OAK_MOUNT_OTHER as OAK_MOUNT_OTHER
+from dataforge.oak_mount import OAK_MOUNTS as OAK_MOUNTS
+from dataforge.oak_mount import Distortion as Distortion
+from dataforge.oak_mount import FactoryCalibration as FactoryCalibration
+from dataforge.oak_mount import FactoryExtrinsic as FactoryExtrinsic
+from dataforge.oak_mount import Intrinsic as Intrinsic
+from dataforge.oak_mount import Lens as Lens
+from dataforge.oak_mount import Sensor as Sensor
+from dataforge.oak_mount import Size as Size
+from dataforge.oak_mount import factory_transform as factory_transform
+from dataforge.oak_mount import nominal_oak_mount as nominal_oak_mount
+from dataforge.oak_mount import quest_left_T_right as quest_left_T_right
+from dataforge.oak_mount import quest_mesh_frame as quest_mesh_frame
+from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, read_quest_joint_poses
 from dataforge.records import read_csv_columns, read_json
 
 BROWN_CONRADY_COEFFICIENTS: int = 14
 """OpenCV's 14-coefficient Brown-Conrady distortion layout."""
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Size:
-    width: int
-    """Array/capture width in pixels."""
-    height: int
-    """Array/capture height in pixels."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Sensor:
-    pixel_array_size: Size
-    """Full sensor array before centre crop."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Lens:
-    focal_length_x: float | None
-    """Horizontal focal in pixels."""
-    focal_length_y: float | None
-    """Vertical focal in pixels."""
-    principal_point_x: float | None
-    """Horizontal principal point in sensor pixels."""
-    principal_point_y: float | None
-    """Vertical principal point in sensor pixels."""
-    available: bool
-    """Whether factory intrinsics are valid."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Distortion:
-    coefficients: tuple[float, ...] | None = None
-    """OAK Brown-Conrady vector; absent for Quest."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class Intrinsic:
-    camera_id: str
-    """Physical camera id, including Quest 50/51."""
-    positional_layout: str
-    """Factory slot name."""
-    lens_intrinsics: Lens
-    """Raw factory lens values."""
-    sensor_info: Sensor
-    """Sensor crop metadata."""
-    capture_resolution: Size
-    """Captured image dimensions."""
-    distortion: Distortion
-    """Full OAK distortion; Quest has none."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class FactoryExtrinsic:
-    type: str
-    """Factory direction label; matrices follow scratch's device-specific convention."""
-    R: Float64[ndarray, "3 3"]
-    """Raw factory rotation."""
-    T: Float64[ndarray, "3"]
-    """Translation: OAK centimetres, Quest metres."""
-    to: str = ""
-    """Physical destination camera id."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class FactoryCalibration:
-    device_id: str
-    """Full factory device identity."""
-    intrinsics: tuple[Intrinsic, ...]
-    """Available and unavailable camera slots."""
-    extrinsics: tuple[FactoryExtrinsic, ...] = ()
-    """Factory transforms, never estimated session calibration."""
-
 
 @dataclass(frozen=True, slots=True)
 class CameraCalibration:
@@ -116,6 +49,8 @@ class CameraCalibration:
     """``(cx, cy)`` in pixels."""
     distortion_coefficients: Float64[ndarray, "14"] | None
     """Brown-Conrady coefficients, or None when the raw calibration declares none."""
+    available: bool
+    """Whether the lens values were measured. The iPhones write ``False`` with a 700 px fallback focal."""
 
 
 
@@ -147,42 +82,39 @@ class QuestHands:
 
 
 
-def read_quest_hands(quest_dir: Path) -> QuestHands:
-    """Read 26-joint CSVs (xyz or xyz+xyzw per joint) on their raw clock.
+COCO133_HAND_BASE: dict[str, int] = {"left": 91, "right": 112}
+"""First COCO-133 keypoint id of each hand (21 joints each)."""
+COCO133_FROM_OPENXR: list[int] = [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 17, 18, 19, 20, 22, 23, 24, 25]
+"""The 21 of 26 OpenXR joints COCO-133 keeps, in COCO order: wrist, then each finger without its metacarpal (palm dropped)."""
 
-    The upstream CSV layout is timestamp followed by 26 joint records in Quest
-    order. An all-zero row is the CSV's "hand not tracked" and becomes NaN; no jump,
-    freeze, or view-cone filtering is applied at ingest (that is curation).
-    Missing files are warned about and leave that hand absent.
-    """
-    tracks: list[tuple[int, Int64[ndarray, "n"], Float32[ndarray, "n 21 3"]]] = []
-    mapping: list[int] = [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 17, 18, 19, 20, 22, 23, 24, 25]
-    for side, base in (("left", 91), ("right", 112)):
+
+def read_quest_joint_hands(quest_dir: Path) -> dict[str, QuestJointPoses]:
+    """Both hands' 26-joint CSVs as recorded; an unreadable file is warned about and leaves that hand out."""
+    hands: dict[str, QuestJointPoses] = {}
+    for side in QUEST_HAND_SIDES:
         source: Path = quest_dir / f"{side}_hand_poses.csv"
         if not os.access(source, os.R_OK):
             print(f"  warning: unreadable Quest hands {source}")
             continue
-        try:
-            table: pa.Table = pacsv.read_csv(source, convert_options=pacsv.ConvertOptions(column_types={"ts_ns": pa.int64()}))
-            header: list[str] = table.column_names
-            width: int = (len(header) - 1) // 26
-            if not header or header[0] != "ts_ns" or width not in (3, 7) or len(header) != 1 + 26 * width:
-                raise ValueError("expected ts_ns followed by 26 xyz or xyz+xyzw joints")
-            times: Int64[ndarray, "n"] = table.column(0).to_numpy().astype(np.int64)
-            joints: Float32[ndarray, "n 26 channels"] = np.column_stack([column.to_numpy() for column in table.columns[1:]]).astype(np.float32).reshape(-1, 26, width)
-        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, OSError, ValueError, TypeError) as error:
-            raise ValueError(f"{source}: invalid hand CSV: {error}") from error
-        if len(np.unique(times)) != len(times):
-            raise ValueError(f"{source}: duplicate hand timestamp")
-        points: Float32[ndarray, "n 21 3"] = joints[:, mapping, :3]
-        points[np.abs(joints[:, :, :3]).sum(axis=(1, 2)) == 0] = np.nan
-        tracks.append((base, times, points))
-    times_ns: Int64[ndarray, "n_samples"] = np.unique(np.concatenate([track[1] for track in tracks])) if tracks else np.empty(0, dtype=np.int64)
+        hands[side] = read_quest_joint_poses(source)
+    return hands
+
+
+def coco133_hands(hands: dict[str, QuestJointPoses]) -> QuestHands:
+    """The COCO-133 view of the Quest hands: 21 joints per hand on the union of both hands' stamps, NaN elsewhere."""
+    times_ns: Int64[ndarray, "n_samples"] = (
+        np.unique(np.concatenate([hand.times_ns for hand in hands.values()])) if hands else np.empty(0, dtype=np.int64)
+    )
     positions: Float32[ndarray, "n_samples 133 3"] = np.full((len(times_ns), 133, 3), np.nan, dtype=np.float32)
-    for base, stamps, points in tracks:
-        positions[np.searchsorted(times_ns, stamps), base : base + 21] = points
+    for side, hand in hands.items():
+        base = COCO133_HAND_BASE[side]
+        positions[np.searchsorted(times_ns, hand.times_ns), base : base + 21] = hand.positions[:, COCO133_FROM_OPENXR]
     return QuestHands(times_ns=times_ns, positions_xyz=positions)
 
+
+def read_quest_hands(quest_dir: Path) -> QuestHands:
+    """The COCO-133 view straight from the CSVs, for bases written before the joint poses were ingested."""
+    return coco133_hands(read_quest_joint_hands(quest_dir))
 
 
 def read_imu_csv(csv_path: Path) -> tuple[ImuChannel, ImuChannel]:
@@ -230,12 +162,19 @@ def read_head_poses(csv_path: Path) -> HeadPoses:
 
 
 
-def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
-    """Read a device ``calibration.json`` into intrinsics keyed by ``positional_layout``.
+def crop_shift_px(intrinsic: Intrinsic) -> float:
+    """Rows cut from the top when a camera records a centred, same-width crop of its sensor.
 
-    Extrinsics are deliberately not applied here: exo files ship an empty list, and the
-    ego/Quest ones are in unvalidated units (the OAK baseline reads as 7.5,
-    i.e. centimetres). TODO(dataforge): validate and log them as ``rig_T_cam``.
+    The Quest sensors are 1280x1280 and the videos 1280x960, so the factory ``cy`` is 160 px too low for the video.
+    """
+    sensor, capture = intrinsic.sensor_info.pixel_array_size, intrinsic.capture_resolution
+    return (sensor.height - capture.height) / 2.0 if sensor.width == capture.width and sensor.height > capture.height else 0.0
+
+
+def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
+    """Read a device ``calibration.json`` into intrinsics keyed by ``positional_layout``, with ``cy`` in video pixels.
+
+    Extrinsics are read separately (``oak_stereo``, ``quest_left_T_right``); exo files ship none.
 
     Args:
         calibration_path: A ``calibration.json`` from ``ego/``, ``exo/<Device>/``, or ``quest/``.
@@ -250,6 +189,8 @@ def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
         resolution = entry.capture_resolution
         if lens.focal_length_x is None:
             continue
+        if lens.principal_point_y is None:
+            raise ValueError(f"{calibration_path}: missing principal_point_y for {entry.positional_layout}")
         raw_coefficients = entry.distortion.coefficients
         distortion: Float64[ndarray, "14"] | None = (
             np.asarray(raw_coefficients, dtype=np.float64) if raw_coefficients is not None and len(raw_coefficients) == BROWN_CONRADY_COEFFICIENTS else None
@@ -258,10 +199,33 @@ def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
             width=resolution.width,
             height=resolution.height,
             focal_length_xy=np.asarray([lens.focal_length_x, lens.focal_length_y], dtype=np.float64),
-            principal_point_xy=np.asarray([lens.principal_point_x, lens.principal_point_y], dtype=np.float64),
+            principal_point_xy=np.asarray([lens.principal_point_x, lens.principal_point_y - crop_shift_px(entry)], dtype=np.float64),
             distortion_coefficients=distortion,
+            available=lens.available,
         )
     return cameras
+
+
+def assumed_phone_lens(width: int, height: int) -> CameraCalibration:
+    """An iPhone's lens until calibration fits one: a centred pinhole with no distortion and a 90 deg horizontal field of view
+    (focal = width / 2). The phones record no lens values, so this is an assumption, tagged as one."""
+    return CameraCalibration(
+        width=width, height=height, focal_length_xy=np.array([width / 2, width / 2]), principal_point_xy=np.array([width / 2, height / 2]),
+        distortion_coefficients=None, available=False,
+    )
+
+
+def oak_stereo(calibration: FactoryCalibration) -> dict[str, Float64[ndarray, "4 4"]]:
+    """RGB-relative OAK stereo transforms (``rgb_T_left``, ``rgb_T_right``); the factory file is in centimetres."""
+    ext = {e.type: e for e in calibration.extrinsics}
+    if not {"left_to_right", "left_to_rgb"} <= ext.keys():
+        return {}
+    right, rgb = ext["left_to_right"], ext["left_to_rgb"]
+    rgb_T_left = np.linalg.inv(factory_transform(rgb.R, rgb.T * 0.01))
+    return {"rgb_T_left": rgb_T_left, "rgb_T_right": rgb_T_left @ factory_transform(right.R, right.T * 0.01)}
+
+
+
 
 
 

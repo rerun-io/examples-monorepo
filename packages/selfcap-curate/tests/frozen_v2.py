@@ -8,6 +8,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from dataforge.datasets.selfcap_raw import crop_shift_px
+from dataforge.selfcap_schema import rdf_head
 from rerun.chunk import RrdReader
 from rrd_fixtures import private_server
 from rrd_references import KeypointReference, OakReference, reference_tables
@@ -18,7 +20,7 @@ from serde.json import from_json
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment
 from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
-from selfcap_curate.factory import cy_shift_px, intrinsic_matrix, read_quest_block
+from selfcap_curate.factory import intrinsic_matrix, read_quest_block
 from selfcap_curate.keypoints import Keypoints2D, ViewDetections
 from selfcap_curate.patch_base import patch
 from selfcap_curate.quest_fit import read_session_episode
@@ -219,7 +221,7 @@ def assert_quest_block(block, expected) -> None:
         old = expected["pinholes"][slot]
         assert pinhole.camera_id == old["camera_id"]
         assert (pinhole.capture_resolution.width, pinhole.capture_resolution.height) == (old["width"], old["height"])
-        assert cy_shift_px(pinhole) == old["cy_shift_px"]
+        assert crop_shift_px(pinhole) == old["cy_shift_px"]
         np.testing.assert_allclose(
             intrinsic_matrix(pinhole), [[old["fx"], 0.0, old["cx"]], [0.0, old["fy"], old["cy"]], [0.0, 0.0, 1.0]], rtol=0.0, atol=0.0
         )
@@ -314,18 +316,20 @@ ENTITY = "/world/pred/rtmw_triangulated/coco133_xyz"
 
 
 def dense(path: Path, entity: str, dimension: int):
+    """Rows as (133, d) arrays: sparse served rows carry keypoint_ids, dense dataforge rows hold all 133 joints in order."""
     rows = {}
     for chunk in RrdReader(path).stream().filter(content=entity):
         batch = chunk.to_record_batch()
         if chunk.is_static or "video_time" not in batch.schema.names:
             continue
         kind = "Points3D" if dimension == 3 else "Points2D"
-        for stamp, positions, ids in zip(
-            batch.column("video_time").cast("int64").to_pylist(),
-            batch.column(f"{kind}:positions").to_pylist(),
-            batch.column(f"{kind}:keypoint_ids").to_pylist(),
-            strict=True,
-        ):
+        positions_column = batch.column(f"{kind}:positions").to_pylist()
+        ids_column = (
+            batch.column(f"{kind}:keypoint_ids").to_pylist()
+            if f"{kind}:keypoint_ids" in batch.schema.names
+            else [None if row is None else list(range(133)) for row in positions_column]
+        )
+        for stamp, positions, ids in zip(batch.column("video_time").cast("int64").to_pylist(), positions_column, ids_column, strict=True):
             array = np.full((133, dimension), np.nan)
             if ids:
                 array[np.asarray(ids).reshape(-1)] = np.asarray(positions).reshape(-1, dimension)
@@ -356,6 +360,8 @@ def session_episode(sync, hands=None, gyro_times=None, gyro=None, *, detections=
 
     empty = np.empty(0)
     hands = hands if hands is not None else CatalogHands(empty, np.empty((0, 133, 3)), empty, np.empty((0, 3)), np.empty((0, 4)))
+    axes = rdf_head(hands.head_quaternions, hands.head_convention)
+    hands = replace(hands, head_quaternions=axes.quaternions, head_convention=axes.convention)
     kwargs = {} if oak is None else {"oak": oak}
     return SessionEpisode(
         sync,

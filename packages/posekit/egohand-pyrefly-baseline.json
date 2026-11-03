@@ -1,0 +1,32 @@
+{
+  "errors": [
+    {
+      "column": 84,
+      "path": "src/posekit/models/clip_identity.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `self` with type `CLIPVisionModelWithProjection` in function `functools._Wrapped.__call__`",
+      "severity": "error"
+    },
+    {
+      "column": 80,
+      "path": "src/posekit/models/rtdetr.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `self` with type `RTDetrV2ForObjectDetection` in function `functools._Wrapped.__call__`",
+      "severity": "error"
+    },
+    {
+      "column": 70,
+      "path": "src/posekit/models/sam3_segmenter.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `self` with type `Sam3Model` in function `functools._Wrapped.__call__`",
+      "severity": "error"
+    },
+    {
+      "column": 78,
+      "path": "src/posekit/models/vitpose.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `self` with type `VitPoseForPoseEstimation` in function `functools._Wrapped.__call__`",
+      "severity": "error"
+    }
+  ]
+}

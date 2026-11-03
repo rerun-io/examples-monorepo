@@ -4,7 +4,7 @@ Uses the same shared rig discovery as exo-calib. This module exposes no
 registration, segment enumeration, or catalog mutation operation.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -23,6 +23,7 @@ from dataforge.schema import (
     rig_path,
     video_path,
 )
+from dataforge.selfcap_schema import HeadConvention, oak_rig_of, rdf_head
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -78,14 +79,20 @@ def read_session_clock(segment: Segment) -> SessionClock:
 
 
 def select_layout(layout: CatalogRigLayout, phones: tuple[str, ...]) -> SelfcapLayout:
-    """Select SelfCap devices from segment-local rig metadata."""
+    """Select SelfCap devices from segment-local rig metadata.
+
+    The OAK and Quest rigs are read from their ``kind``: current ingest keeps them at rig_04 and rig_05, older bases
+    put them right after the phones.
+    """
     exo: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "exo"}
     oak: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "ego"}
     quest: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "quest"}
     count: int = len(exo)
-    if count not in (3, 4) or oak != {f"rig_{count:02d}"} or quest != {f"rig_{count + 1:02d}"}:
+    oak_rig: int = oak_rig_of(count, {c.video_entity for c in layout.cameras}, ego_rigs={int(r.removeprefix("rig_")) for r in oak}) if len(oak) == 1 else -1
+    quest_rig: int = int(next(iter(quest)).removeprefix("rig_")) if len(quest) == 1 else -1
+    if count not in (3, 4) or oak_rig < count or quest_rig != oak_rig + 1 or exo != {f"rig_{i:02d}" for i in range(count)}:
         raise ValueError(f"not a SelfCap rig layout: exo={exo}, oak={oak}, quest={quest}")
-    result: SelfcapLayout = SelfcapLayout(count, count + 1, phones)
+    result: SelfcapLayout = SelfcapLayout(oak_rig, quest_rig, phones)
     available: set[str] = {c.video_entity for c in layout.cameras}
     if not set(result.video_entities) <= available:
         raise ValueError("SelfCap segment is missing a required camera")
@@ -108,6 +115,8 @@ class EpisodeInputs:
     """Original horizontal focal lengths in video order."""
     width_px: tuple[int, ...]
     """Original image widths in video order."""
+    head_convention: HeadConvention = "RDF"
+    """Original head axes stored in the base recording."""
 
 
 def rig_layout(dataset: DatasetEntry, segment_id: str) -> CatalogRigLayout:
@@ -157,8 +166,15 @@ def read_episode(
         focals.append(float(matrix[0, 0]))
         widths.append(int(resolution[0]))
     videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, layout.video_entities, timeline)
+    axes = rdf_head(quaternions)
     return EpisodeInputs(
-        layout, SpeedSeries(tg, np.linalg.norm(gyro_values, axis=1)), pose_speed(tp, quaternions), videos, tuple(focals), tuple(widths)
+        layout,
+        SpeedSeries(tg, np.linalg.norm(gyro_values, axis=1)),
+        pose_speed(tp, axes.quaternions),
+        videos,
+        tuple(focals),
+        tuple(widths),
+        axes.convention,
     )
 
 
@@ -185,32 +201,51 @@ def read_catalog_hands(segment: Segment) -> CatalogHands:
     poses: pa.Table = table.filter(table[rotation_column].is_valid())
     if not len(hands):
         raise ValueError(f"{segment_id}: base Quest hands absent on capture_time; migrate the base first")
+    axes = rdf_head(floats(poses[rotation_column], -1, 4))
     return CatalogHands(
         seconds(hands[CAPTURE_TIMELINE]),
         floats(hands[points_column], -1, 133, 3),
         seconds(poses[CAPTURE_TIMELINE]),
         floats(poses[translation_column], -1, 3),
-        floats(poses[rotation_column], -1, 4),
+        axes.quaternions,
+        axes.convention,
     )
 
 
 def read_phone_videos(
-    segment: Segment,
-    *,
-    timeline: Literal["capture_time", "video_time"] = CAPTURE_TIMELINE,
+    segment: Segment, *, timeline: Literal["capture_time", "video_time"] = CAPTURE_TIMELINE
 ) -> dict[str, CatalogVideo]:
-    """Discover named iPhones in one segment on the requested sample clock."""
-    dataset, segment_id, layout = segment.dataset, segment.id, segment.layout
-    videos = read_catalog_videos(dataset, segment_id, [video_path(rig, 0) for rig in range(len(layout.phones))], timeline)
-    return dict(zip(layout.phones, videos, strict=True))
+    """Read phone packets once on the requested catalog clock."""
+    videos = read_catalog_videos(segment.dataset, segment.id, [video_path(rig, 0) for rig in range(len(segment.layout.phones))], timeline)
+    return dict(zip(segment.layout.phones, videos, strict=True))
+
+
+def aligned_phone_videos(videos_capture: dict[str, CatalogVideo], sync: TimeSync) -> dict[str, CatalogVideo]:
+    """Shift capture packet timestamps by the same integer nanoseconds as patch_base; share packet payloads."""
+    if sync.offsets_ms is None:
+        raise ValueError(f"{sync.episode_key.segment}: expected its successful alignment record")
+    return {
+        phone: replace(video, times=(video.t_ns + round((sync.offsets_ms.get(f"exo/{phone}") or 0.0) * 1e6)).view(video.times.dtype))
+        for phone, video in videos_capture.items()
+    }
+
+
+def median_rate(videos: dict[str, CatalogVideo]) -> float:
+    """Median frame rate over these videos, rounded as in the session runner."""
+    return round(float(np.median([1e9 / float(np.median(np.diff(video.t_ns))) for video in videos.values()])), 3)
+
+
+def factory_rigs(layout: SelfcapLayout) -> tuple[int, ...]:
+    """Rigs holding a device's factory document: each phone, the OAK and the Quest (an empty phone slot has none)."""
+    return (*range(len(layout.phones)), layout.oak_rig, layout.quest_rig)
 
 
 def read_factories(segment: Segment) -> dict[str, FactoryCalibration]:
     """Parse only one segment's static raw vendor values; never read calibration files."""
     dataset, segment_id, layout = segment.dataset, segment.id, segment.layout
     view = dataset.filter_segments(segment_id)
-    rigs = tuple(f"rig_{i:02d}" for i in range(layout.quest_rig + 1))
-    kinds = {rig: "ego" if i == layout.oak_rig else "quest" if i == layout.quest_rig else "exo" for i, rig in enumerate(rigs)}
+    rigs = tuple(f"rig_{i:02d}" for i in factory_rigs(layout))
+    kinds = {f"rig_{layout.oak_rig:02d}": "ego", f"rig_{layout.quest_rig:02d}": "quest"}
     paths = {rig: rig_path(int(rig.removeprefix("rig_"))) for rig in rigs}
     table = view.filter_contents(list(paths.values())).reader(index=None).to_arrow_table()
     result: dict[str, FactoryCalibration] = {}
@@ -220,7 +255,7 @@ def read_factories(segment: Segment) -> dict[str, FactoryCalibration]:
             raise ValueError(f"{segment_id}/{rig}: missing raw_calibration_json; migrate or reconvert the base")
         text = str(scalar(table, column))
         factory = decode(FactoryCalibration, text, source=f"{segment_id}/{rig}")
-        if (kind := kinds[rig]) is not None and kind in ("ego", "quest"):
+        if (kind := kinds.get(rig)) is not None:
             result[kind] = factory
     return result
 
@@ -244,7 +279,8 @@ def open_segment(dataset: DatasetEntry, segment_id: str) -> Segment:
     phones = read_phone_names(dataset, segment_id, layout)
     # Phone-only bases remain usable for keypoint preflight; wearable slots are reserved by the ingest convention.
     if layout.cameras and all(camera.rig_kind == "exo" for camera in layout.cameras):
-        return Segment(dataset, segment_id, SelfcapLayout(len(phones), len(phones) + 1, phones))
+        oak_rig: int = oak_rig_of(len(phones), {c.video_entity for c in layout.cameras})
+        return Segment(dataset, segment_id, SelfcapLayout(oak_rig, oak_rig + 1, phones))
     return Segment(dataset, segment_id, select_layout(layout, phones))
 
 
@@ -297,9 +333,11 @@ def read_phone_detections(segment: Segment) -> dict[str, PhoneDetections]:
             continue
         stamps = np.asarray(rows[CAPTURE_TIMELINE].cast(pa.int64()), dtype=np.int64)
         order = np.argsort(stamps)
-        xy = np.asarray(rows[f"{entity}:Points2D:positions"].to_pylist(), dtype=np.float64).reshape(-1, 133, 2)
-        ids = np.asarray(rows[f"{entity}:Points2D:keypoint_ids"].to_pylist(), dtype=np.int64).reshape(-1, 133)
-        scores = np.asarray(rows[f"{entity}:confidence"].to_pylist(), dtype=np.float64).reshape(-1, 133)
+        xy = floats(rows[f"{entity}:Points2D:positions"], -1, 133, 2)
+        ids = floats(rows[f"{entity}:Points2D:keypoint_ids"], -1, 133).astype(np.int64)
+        # Points2DWithConfidence since the score colours; older layers kept the score as a plain "confidence" value.
+        score_column = next(c for c in (f"{entity}:simplecv.KeypointConfidence2D:confidences", f"{entity}:confidence") if c in rows.column_names)
+        scores = floats(rows[score_column], -1, 133)
         if not np.all(ids == np.arange(133)):
             raise ValueError(f"{segment_id}: Sapiens2 requires all 133 ordered keypoints")
         result[phone] = PhoneDetections(stamps[order] / 1e9, xy[order], scores[order])
@@ -317,3 +355,15 @@ def floats(column: pa.ChunkedArray, *shape: int) -> Float64[ndarray, "..."]:
     while pa.types.is_list(values.type) or pa.types.is_fixed_size_list(values.type):
         values = values.flatten()
     return values.to_numpy(zero_copy_only=False).astype(np.float64).reshape(*shape)
+
+
+def read_calibration_sync(dataset: DatasetEntry, segment_id: str, original: TimeSync) -> TimeSync:
+    """Use the effective clock published with the local pose; old calibration layers keep their catalog clock."""
+    table = dataset.filter_segments(segment_id).filter_contents(["/__properties/calibration_sync"]).reader(index=None).to_arrow_table()
+    column = next((name for name in table.column_names if name.endswith(":calibration_sync:record_json")), None)
+    if column is None or not len(table[column].drop_null()):
+        return original
+    record = read_frozen_sync(Path(segment_id), text=str(scalar(table, column)))
+    if record.episode_key.segment != segment_id:
+        raise ValueError(f"{segment_id}: calibration clock belongs to {record.key}")
+    return record

@@ -163,3 +163,31 @@ def pool_rotations(free: list[OakFit], gyros: dict[str, GyroFit], generated_date
             generated_date,
         )
     return RotationTable(output)
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class VpFocals:
+    """Image-only vanishing-point focals used by the production head fit."""
+
+    generated_date: str
+    """ISO date this packaged table was generated."""
+    focals: dict[str, float]
+    """Square-pixel focal lengths at 1920×1080, keyed by phone device."""
+
+    def __post_init__(self) -> None:
+        date.fromisoformat(self.generated_date)
+        if not self.focals or any(not np.isfinite(f) or f <= 0.0 for f in self.focals.values()):
+            raise ValueError("vanishing-point focals must be finite and positive")
+
+
+def read_vp_focals(path: Path | None = None) -> VpFocals:
+    """Read measured head-fit focals without rounding their stored values."""
+    return read_json(path if path is not None else Path(__file__).with_name("device_vp_focals.json"), VpFocals)
+
+
+def vp_focals(phones: list[str]) -> dict[str, float]:
+    """Keep each measured head-fit focal; unknown devices use the measured median."""
+    focals: dict[str, float] = read_vp_focals().focals
+    default: float = float(np.median(list(focals.values())))
+    return {phone: focals.get(phone, default) for phone in phones}

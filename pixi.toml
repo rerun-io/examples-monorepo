@@ -63,9 +63,9 @@ torchvision = "*"
 
 [feature.common.pypi-dependencies]
 # pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 gradio = "==6.13.0"                                        # pin-bump: hold
-gradio-rerun = "==0.38.1"                                  # pin-bump: hold
+gradio-rerun = "==0.41.0"                                  # pin-bump: hold
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -102,7 +102,7 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.38.1", extras = [
+rerun-sdk = { version = "==0.41.0", extras = [
     "catalog",
     "dataloader",
 ] }
@@ -1016,7 +1016,7 @@ scipy = "*"
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1313,6 +1313,25 @@ sam2 = { path = "packages/sam2-streaming", editable = true }
 onnx = "*"
 onnxscript = "*"
 
+# EgoHand keeps its inference dependencies outside the base posekit lane.
+[feature.posekit-egohand]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.posekit-egohand.dependencies]
+hydra-core = "*"
+pillow = "<13"
+python-dateutil = "<3"
+anyio = "<4.15"
+
+[feature.posekit-egohand.pypi-dependencies]
+egohand-inference = { path = "packages/egohand", editable = true }
+warp-lang = "==1.11.1"
+
+# These four existing Transformers wrappers have decorated .to() stubs that
+# pyrefly misbinds as unbound methods in this isolated dependency solve.
+[feature.posekit-egohand.activation.env]
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
+
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 
@@ -1558,6 +1577,49 @@ description = "Train a first 5k-step Brush splat from the kitchen train 0100 rig
 [feature.pysfm.target.linux-64.dependencies]
 brush = "==0.3.0"
 
+[feature.soma-runtime]
+platforms = ["linux-64", "linux-aarch64", "linux-64-cuda13", "linux-aarch64-cuda13"]
+
+[feature.soma-runtime.pypi-dependencies]
+py-soma-x = "==0.3.0"
+
+[feature.selfcap-soma]
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
+
+[feature.selfcap-soma.dependencies]
+python = "3.12.*"
+py-opencv = "*"
+pytorch-gpu = ">=2.12,<2.13"
+cuda-version = "13.0.*"
+numpy = "*"
+scipy = "*"
+pyserde = ">=0.31.2,<0.32"
+tomli-w = ">=1.2,<2"
+orjson = ">=3.11,<4"
+jaxtyping = "*"
+tyro = ">=0.9.1,<0.10"
+# selfcap_soma.assets downloads SOMA-X from a pinned HF revision.
+huggingface_hub = "*"
+
+[feature.selfcap-soma.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
+selfcap-soma = { path = "packages/selfcap-soma", editable = true }
+
+[feature.selfcap-soma.activation.env]
+PACKAGE_DIR = "packages/selfcap-soma"
+PYREFLY_TARGET = "selfcap_soma"
+
+[feature.selfcap-soma.tasks.soma-batch]
+cmd = "python tools/batch.py"
+cwd = "packages/selfcap-soma"
+# The GPU does the work; two BLAS threads per process keep the CPU free for the steps around it.
+env = { OMP_NUM_THREADS = "2", MKL_NUM_THREADS = "2", PYTHONDONTWRITEBYTECODE = "1" }
+
+[feature.selfcap-soma.tasks.soma-xlo]
+cmd = "python tools/xlo.py"
+cwd = "packages/selfcap-soma"
+
 [feature.selfcap-curate]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -1567,6 +1629,9 @@ torchcodec = "*"
 # dataforge.datasets imports its HTTP transport at module load.
 requests = "*"
 tyro = ">=0.9.1,<0.10"
+# The EgoHand loader reads pinned HF safetensors.
+huggingface_hub = "*"
+safetensors = "*"
 
 [feature.selfcap-curate.pypi-dependencies]
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
@@ -1619,7 +1684,19 @@ description = "Write migrated local copies of named served SelfCap bases (no cat
 [feature.selfcap-curate.tasks.selfcap-align]
 cmd = "python tools/apps/align.py"
 cwd = "packages/selfcap-curate"
+# links tracks frame pairs on a thread pool; multi-threaded MKL inside each pair oversubscribes the CPU (5x slower).
+env = { OMP_NUM_THREADS = "1" }
 description = "Align explicit fresh-base episodes of one session into local copies (no catalog writes)"
+
+[feature.selfcap-curate.tasks.selfcap-preview]
+cmd = "python tools/apps/preview.py"
+cwd = "packages/selfcap-curate"
+description = "Write one preview layer rrd per segment from a catalog (no shipping, no registration)"
+
+[feature.selfcap-curate.tasks.selfcap-run]
+cmd = "python tools/apps/run.py"
+cwd = "packages/selfcap-curate"
+description = "Run one new dataset end to end, ingest to blueprints, swapping layers in as it goes"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # exo-calib — exo-camera calibration from human keypoints (Kineo-style
@@ -2042,7 +2119,7 @@ xorg-libxrandr = "*"
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.38.1"
+rerun-sdk = "==0.38.1"  # matches the custom viewer's =0.38.1 re_viewer crates; moves with their Rust port
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation]
@@ -2395,7 +2472,8 @@ description = "Launch DPVO Gradio web UI"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-evals.dependencies]
-python = "3.10.*"
+python = "3.11.*"  # rerun-sdk 0.41 ships cp311 abi3 wheels only
+pillow = "<13"  # gradio 6.13 (held) needs pillow<13; py3.11 would otherwise pick 13
 pyyaml = "*"
 pyarrow = ">=20.0.0,<21"
 tqdm = "*"
@@ -2462,7 +2540,7 @@ dataforge = { path = "packages/dataforge", editable = true }
 # rerun-prerelease asks for rerun-sdk[dataloader], whose PyPI torchvision does not
 # load against the CPU lane's conda pytorch-cpu ("operator torchvision::nms does not
 # exist"); nothing here uses the dataloader, so the catalog extra alone is kept.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] }
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] }
 
 [feature.slam-rs.tasks.slam-rs-demo]
 cmd = "python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy"
@@ -2800,7 +2878,7 @@ hf-transfer = "*"
 simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
 # that misses this line leaves the Mac a release behind with no gate to say so.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 
 # ── Package consumer lane ─────────────────────────────────────────────────
 # Installs the two pixi-build outputs of packages/slam-rs (recipe.yaml) the way
@@ -3234,6 +3312,12 @@ cwd = "packages/dataforge"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Swap one catalog layer in idle-gated batches with exact segment IDs and SKIP"
 
+[feature.dataforge.tasks.dataforge-publish-blueprints]
+cmd = "python tools/apps/publish_blueprints.py"
+cwd = "packages/dataforge"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Register fresh device assets and default and segment-table blueprints of an existing dataset, retiring older blueprints"
+
 [feature.dataforge.tasks.dataforge-robocap-calibration]
 cmd = "python tools/robocap_calibration.py"
 cwd = "packages/dataforge"
@@ -3270,7 +3354,7 @@ tyro = ">=0.9.1,<0.10"
 [feature.agent-traces.pypi-dependencies]
 agent-traces = { path = "packages/agent-traces", editable = true }
 # pin-bump: hold — this torch-free lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.38.1", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.41.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.agent-traces.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -3624,8 +3708,10 @@ simplecv-catalog-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv-catalog", no-default-feature = true }
-selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate"], solve-group = "selfcap-curate", no-default-feature = true }
-selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
+selfcap-soma = { features = ["soma-runtime", "selfcap-soma"], solve-group = "selfcap-soma", no-default-feature = true }
+selfcap-soma-dev = { features = ["soma-runtime", "selfcap-soma", "dev"], solve-group = "selfcap-soma", no-default-feature = true }
+selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "soma-runtime", "posekit-egohand"], solve-group = "selfcap-curate", no-default-feature = true }
+selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "soma-runtime", "posekit-egohand", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
 exo-calib = { features = [
     "catalog-common",
     "rerun-prerelease",
@@ -3805,6 +3891,8 @@ posekit = { features = [
     "cuda",
     "posekit",
 ], solve-group = "posekit", no-default-feature = true }
+egohand = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand"], solve-group = "egohand", no-default-feature = true }
+egohand-dev = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "dev"], solve-group = "egohand", no-default-feature = true }
 posekit-dev = { features = [
     "common",
     "cuda",

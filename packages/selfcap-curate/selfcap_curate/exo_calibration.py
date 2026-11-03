@@ -146,7 +146,7 @@ def triangulate(cameras: dict[str, Camera], views: dict[str, BodyObservation]) -
 
 
 def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, Camera], *, max_nfev: int = 80) -> BundleResult:
-    """Optimize poses/body points, optionally focal lengths; centre fixed, no distortion."""
+    """Optimize poses and body points with fixed intrinsics."""
     phones: list[str] = sorted(cameras)
     pi: dict[str, int] = {p: i for i, p in enumerate(phones)}
     world = {p: stacked[p].world for p in phones}
@@ -165,10 +165,9 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
     nc, nh = len(phones), sum(len(world[p]) for p in phones)
     logf = np.array([np.log(cameras[p].parameters[6]) for p in phones])
     initial = np.concatenate([np.r_[cameras[p].parameters[:6], logf[pi[p]]] for p in phones] + [np.asarray(points).ravel()])
-
     def unpack(values: Float64[ndarray, "n"]) -> dict[str, Camera]:
         c = values[: 7 * nc].reshape(nc, 7)
-        return {p: Camera(np.r_[c[i, :6], np.exp(logf[i]), 960.0, 540.0, 0.0, 0.0]) for i, p in enumerate(phones)}
+        return {p: Camera(np.r_[c[i, :6], cameras[p].parameters[6:]]) for i, p in enumerate(phones)}
 
     def residual(values: Float64[ndarray, "n"]) -> Float64[ndarray, "m"]:
         cams = unpack(values)
@@ -182,7 +181,8 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
         for i, p in enumerate(phones):
             mask = obs[:, 1] == i
             uv = cams[p].project(xyz[obs[mask, 0].astype(int)])
-            r = (uv[:, :2] - obs[mask, 2:4]) * obs[mask, 4:5]
+            r = uv[:, :2] - obs[mask, 2:4]
+            r *= obs[mask, 4:5]
             r[uv[:, 2] <= 0.0] = 1e3
             errors.append(r.ravel())
         return np.concatenate(errors)
@@ -201,7 +201,8 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
     for i in range(nc):
         sparsity[:, 7 * i + 6] = 0
     result = least_squares(residual, initial, jac_sparsity=sparsity, loss="cauchy", f_scale=6.0, x_scale="jac", max_nfev=max_nfev, method="trf")
-    body_error = np.linalg.norm(residual(result.x)[2 * nh :].reshape(-1, 2), axis=1) / np.maximum(obs[:, 4], 1e-6)
+    body_error = np.linalg.norm(residual(result.x)[2 * nh : 2 * nh + 2 * len(obs)].reshape(-1, 2), axis=1)
+    body_error /= np.maximum(obs[:, 4], 1e-6)
     return BundleResult(unpack(result.x), float(result.cost), float(np.median(body_error)) if len(body_error) else None)
 
 

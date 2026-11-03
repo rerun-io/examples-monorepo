@@ -66,9 +66,15 @@ def test_served_patch_agrees_with_fresh_ingest_then_alignment(key: str, tmp_path
             else:
                 offset = 0.0
             offsets[entity] = 0.0 if offset is None else offset
+        if rig.kind == "exo":  # a phone's audio track shares its video clock
+            offsets[schema.audio_path(rig.cameras[0].rig, 0)] = offsets[schema.video_path(rig.cameras[0].rig, rig.cameras[0].cam)]
     for entity in (schema.gyro_path(plan.ego_rig, 0), schema.accel_path(plan.ego_rig, 0)):
         assert sync.offsets_ms["oak_imu"] is not None
         offsets[entity] = sync.offsets_ms["oak_imu"]
+    offsets[schema.rig_path(plan.ego_rig)] = 0.0  # the OAK is the reference clock
+    for side in ("left", "right"):  # raw Quest hand poses ride the Quest pose clock
+        assert sync.offsets_ms["quest_pose"] is not None
+        offsets[f"/world/gt/quest_hands/{side}"] = sync.offsets_ms["quest_pose"]
     for entity in (schema.rig_path(plan.quest_rig), schema.coco133_xyz_path()):
         assert sync.offsets_ms["quest_pose"] is not None
         offsets[entity] = sync.offsets_ms["quest_pose"] - (48.0 if entity == schema.coco133_xyz_path() else 0.0)
@@ -84,7 +90,8 @@ def test_served_patch_agrees_with_fresh_ingest_then_alignment(key: str, tmp_path
             model = sync.oak_rgb_model
             shift = np.rint((model.a_ms + model.b_ms_per_s * (model.t_start_session_s + (capture - starts[entity]) / 1e9)) * 1e6).astype(np.int64)
         else:
-            shift = round(offsets[entity] * 1e6)
+            owner = max((key for key in offsets if entity == key or entity.startswith(key + "/")), key=len)  # audio_00/loudness → audio_00
+            shift = round(offsets[owner] * 1e6)
         index = batch.schema.get_field_index("video_time")
         batch = batch.set_column(index, batch.schema.field(index), pa.array(capture + shift, type=batch.schema.field(index).type))
         return Chunk.from_record_batch(batch)
@@ -95,8 +102,14 @@ def test_served_patch_agrees_with_fresh_ingest_then_alignment(key: str, tmp_path
     reader.stream(store=store).flat_map(align_fresh).write_rrd(expected, application_id=store.application_id, recording_id=store.recording_id)
     migrated_times = entity_times(patched)
     fresh_times = entity_times(expected)
-    assert migrated_times.keys() == fresh_times.keys()
-    for entity, actual in migrated_times.items():
+    # The served corpus predates three ingest streams; the fresh base carries them, the migrated one does not.
+    newer = {f"/world/gt/quest_hands/{side}" for side in ("left", "right")} | {schema.rig_path(plan.ego_rig)}
+    newer |= {key for key in fresh_times if "/audio_" in key}
+    older = {schema.coco133_xyz_path()}  # served bases still hold it; ingest now writes it to the gt layer
+    assert fresh_times.keys() - migrated_times.keys() <= newer, fresh_times.keys() - migrated_times.keys() - newer
+    assert migrated_times.keys() - fresh_times.keys() <= older, migrated_times.keys() - fresh_times.keys() - older
+    for entity in sorted(migrated_times.keys() & fresh_times.keys()):
+        actual = migrated_times[entity]
         reference = fresh_times[entity]
         assert actual.samples == reference.samples
         assert len(actual.capture_ns) == len(reference.capture_ns)

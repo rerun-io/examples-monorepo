@@ -109,3 +109,24 @@ def test_decode_classic_heatmaps_peak_and_quarter_shift() -> None:
     assert float(scores[0, 0]) == 1.0
     # (5 + 0.25) * 4 in x, 10 * 4 in y (symmetric neighbors -> no y shift).
     assert torch.allclose(xy[0, 0], torch.tensor([21.0, 40.0]))
+
+
+def test_crops_sample_uint8_frames_like_grid_sample_on_float_frames() -> None:
+    """Crops read only their source pixels from the uint8 frames, yet match grid_sample on per-detection float frames."""
+    import torch.nn.functional as F
+
+    generator = torch.Generator().manual_seed(0)
+    frames: UInt8[Tensor, "2 48 64 3"] = torch.randint(0, 256, (2, 48, 64, 3), dtype=torch.uint8, generator=generator)
+    # Inside, straddling the left/top edges, and far past the right/bottom edges (zero padding).
+    boxes: Float[Tensor, "3 4"] = torch.tensor([[10.3, 8.7, 40.1, 39.6], [-12.0, -5.5, 20.0, 30.0], [50.0, 30.0, 90.0, 70.0]])
+    frame_indices = torch.tensor([0, 1, 1])
+    spec = CropSpec(input_size=(24, 32), padding=1.25, align="cv2", bgr=True, mean_rgb=(123.675, 116.28, 103.53), std_rgb=(58.395, 57.12, 57.375))
+    batch: CropBatch = crop_frames(frames, frame_indices=frame_indices, bboxes_xyxy=boxes, spec=spec)
+
+    gathered = frames.permute(0, 3, 1, 2)[frame_indices].float()
+    from posekit.ops.crops import _crop_grid
+
+    reference = F.grid_sample(gathered, _crop_grid(batch.centers, batch.scales, spec, frames.shape[1], frames.shape[2]), mode="bilinear", padding_mode="zeros", align_corners=True)
+    reference = reference.flip(1)
+    reference = (reference - torch.tensor(spec.mean_rgb).view(1, 3, 1, 1)) / torch.tensor(spec.std_rgb).view(1, 3, 1, 1)
+    torch.testing.assert_close(batch.inputs, reference, atol=1e-4, rtol=0.0)

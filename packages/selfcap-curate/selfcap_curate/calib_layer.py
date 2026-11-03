@@ -1,22 +1,24 @@
 """One calibration-only layer per episode; no hands, predictions, or catalog writes."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
 from dataforge import schema
-from dataforge.logging_toolkit import time_column
+from dataforge.datasets.selfcap import PHONE_IMAGE_PLANE_DISTANCE
+from dataforge.logging_toolkit import capture_column, time_column
+from dataforge.selfcap_schema import recorded_head_basis
 from dataforge.writing import atomic_recording
 from jaxtyping import Float64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation
 from serde import serde, to_dict
+from serde.json import to_json
 
 from selfcap_curate.exo_calibration import SessionCalibration
-from selfcap_curate.factory import QuestBlock, cy_shift_px, intrinsic_matrix
-from selfcap_curate.records import OakFit, SessionEpisode, oak_quest_offset_ms
+from selfcap_curate.factory import QuestBlock
+from selfcap_curate.records import OakFit, SessionEpisode, TimeSync, oak_quest_offset_ms
 
 METHOD: str = "selfcap-calib v1 (2026-10-16)"
 WORLD: str = "Quest world: head_pose.csv frame, metres, Y-up; cameras OpenCV RDF"
@@ -31,6 +33,9 @@ class CalibSession:
     quest: QuestBlock  # Factory pinholes and resolved camera-50 borrowing.
     stereo: dict[str, Float64[ndarray, "4 4"]]  # Factory rgb_T_left and rgb_T_right in metres.
     version: str = "selfcap-curate-calib-v1"  # Implementation provenance, distinct from the legacy method label.
+    effective_sync: dict[str, TimeSync] = field(default_factory=dict)
+    """Effective episode clocks accepted with the fitted cameras, keyed by unprefixed episode key."""
+
 
 
 @serde(deny_unknown_fields=True)
@@ -42,9 +47,9 @@ class Provenance:
 
 
 def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode) -> None:
-    """Write RDF transforms/pinholes and one calib property group atomically."""
+    """Write RDF transforms, pinholes and calibration provenance atomically."""
     layout = motion.layout
-    sync, head, oak_rig, quest_rig = motion.sync, motion.hands, layout.oak_rig, layout.quest_rig
+    sync, oak_rig, quest_rig = motion.sync, layout.oak_rig, layout.quest_rig
     if layout.phones != tuple(sorted(sync.exo_fit)):
         raise ValueError(f"{sync.key}: base phone layout differs from sync exo_fit")
     with atomic_recording(path, recording_id=sync.episode_key.segment, send_properties=False) as recording:
@@ -61,8 +66,9 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                     width=width,
                     height=height,
                     camera_xyz=rr.ViewCoordinates.RDF,
-                    image_plane_distance=0.3,
+                    image_plane_distance=PHONE_IMAGE_PLANE_DISTANCE,
                 ),
+                rr.AnyValues(lens_source="fitted"),  # replaces the base layer's "assumed" lens
                 static=True,
             )
 
@@ -88,37 +94,53 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
             )
             p = camera.camera.parameters
             pinhole(schema.pinhole_path(rig, 0), np.array([[p[6], 0.0, p[7]], [0.0, p[6], p[8]], [0.0, 0.0, 1.0]]), 1920, 1080)
-        for cam, name in ((1, "rgb_T_left"), (2, "rgb_T_right")):
-            if name in session.stereo:
-                tf(schema.cam_path(oak_rig, cam), session.stereo[name], calib_source="OAK factory calibration (cm -> m)")
+        # The OAK stereo and healthy-Quest camera offsets are factory facts written by the base layer.
         qp = oak_quest_offset_ms(sync)
         mount = session.oak.questrig_T_rgb if session.oak.ok else None
         posed = qp is not None and mount is not None
         if posed:
-            rotation = Rotation.from_quat(head.head_quaternions).as_matrix()
-            recording.send_columns(
-                schema.rig_path(oak_rig),
-                indexes=[time_column(np.rint(head.head_times_s * 1e9 + qp * 1e6).astype(np.int64))],
-                columns=rr.Transform3D.columns(translation=head.head_positions + rotation @ mount[:3, 3], mat3x3=rotation @ mount[:3, :3]),
-            )
+            if session.oak.head_frame == "rdf":
+                mount = recorded_head_basis(motion.hands.head_convention) @ mount  # The base parent keeps its recorded axes.
+            # Static for queries (``read_fitted_mount``), and again at the first Quest pose, where it follows the base's
+            # nominal prior (PRIOR_LEAD_NS earlier): the viewer resolves a timed transform ahead of a static one.
+            parent = f"tf#{schema.rig_path(quest_rig)}"
+            values = {
+                "oak_mount_source": "fitted",
+                "calib_source": METHOD,
+                "calib_oak_source": session.oak.observation_source,
+                "calib_oak_median_px": session.oak.median_px,
+            }
             recording.log(
                 schema.rig_path(oak_rig),
-                rr.AnyValues(calib_source=METHOD, calib_oak_source="sapiens", calib_oak_median_px=session.oak.median_px),
+                rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=parent),
+                rr.AnyValues(**values),
                 static=True,
             )
-        for slot, matrix in session.quest.rig_T_cam.items():
-            tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")
-        for slot, camera in session.quest.pinholes.items():
-            if cy_shift_px(camera):
-                pinhole(
-                    schema.pinhole_path(quest_rig, int(slot)),
-                    intrinsic_matrix(camera),
-                    camera.capture_resolution.width,
-                    camera.capture_resolution.height,
+            if len(motion.hands.head_times_s):
+                first_pose_ns = np.array([round(float(motion.hands.head_times_s[0]) * 1e9)])
+                recording.send_columns(
+                    schema.rig_path(oak_rig),
+                    indexes=[time_column(first_pose_ns + round(qp * 1e6)), capture_column(first_pose_ns)],
+                    columns=[
+                        *rr.Transform3D.columns(translation=[mount[:3, 3]], mat3x3=[mount[:3, :3]], parent_frame=[parent]),
+                        *rr.AnyValues.columns(
+                            oak_mount_source=["fitted"],
+                            calib_source=[METHOD],
+                            calib_oak_source=[session.oak.observation_source],
+                            calib_oak_median_px=[session.oak.median_px],
+                        ),
+                    ],
                 )
+        if session.quest.mode != "healthy":  # a borrowed camera-50 transform is an estimate, so it lives here
+            for slot, matrix in session.quest.rig_T_cam.items():
+                tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")
+        effective = session.effective_sync.get(sync.key)
+        if effective is not None:
+            recording.send_property("calibration_sync", rr.AnyValues(record_json=to_json(effective)))
         recording.send_property(
             "calib",
             rr.AnyValues(
+                drop_untyped_nones=True,
                 method=METHOD,
                 version=session.version,
                 world=WORLD,
@@ -127,7 +149,16 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                 exo_flagged=flagged,
                 exo_bundle_body_median_px=session.exo.body_median_px,
                 oak_posed=posed,
+                oak_unposed_reason=None if posed else ("missing Quest/OAK clock" if qp is None else "OAK mount not fitted"),
                 oak_median_px=session.oak.median_px,
+                oak_rotation_source=(
+                    "gyro"
+                    if session.oak.rotation_source.startswith("gyro")
+                    else "unposed"
+                    if session.oak.rotation_source.startswith("unposed")
+                    else "free"
+                ),
+                oak_rotation_reason=session.oak.rotation_reason,
                 quest_mode=session.quest.mode,
                 record_json=json.dumps(to_dict(Provenance(session.session, METHOD, sync.episode))),
             ),

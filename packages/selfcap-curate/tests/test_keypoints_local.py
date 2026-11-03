@@ -6,15 +6,22 @@ import numpy as np
 import pytest
 import rerun as rr
 from frozen_v2 import fixture_sync, session_episode
+from rrd_fixtures import VIDEO_FIXTURES
+from simplecv.catalog_video import CatalogVideo
 
+import selfcap_curate.catalog_io as catalog_io
 import selfcap_curate.keypoints as keypoints
 from selfcap_curate.apis import keypoints as api
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
-from selfcap_curate.catalog_io import DATASET_NAME, open_segment
+from selfcap_curate.catalog_io import DATASET_NAME
 from selfcap_curate.exo_calibration import Camera, PhoneCalibration, SessionCalibration
 from selfcap_curate.factory import QuestBlock
 from selfcap_curate.keypoints import Keypoints2D, project, read_cameras, triangulate
 from selfcap_curate.records import CatalogHands, ExoFit, OakFit, SelfcapLayout
+
+
+def empty_raw_hands():
+    return CatalogHands(np.empty(0), np.empty((0, 133, 3)), np.array([0.0, 1.0]), np.zeros((2, 3)), np.tile([0.0, 0.0, 0.0, 1.0], (2, 1)))
 
 
 def calibration(path, *, episode="ep001", depth=4.0, missing=()):
@@ -44,7 +51,7 @@ def test_cli_uses_local_poses_instead_of_equal_provenance_catalog(tmp_path, monk
     local.mkdir()
     key = "2025-12-30__65d00748__ep001"
     base = tmp_path / "base.rrd"
-    synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False)
+    synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False, video=VIDEO_FIXTURES / "av1_48f_192x160.mp4")
     sync = calibration(tmp_path / "catalog.rrd", depth=4.0)
     calibration(local / f"selfcap__{key}.rrd", depth=9.0)
 
@@ -56,8 +63,9 @@ def test_cli_uses_local_poses_instead_of_equal_provenance_catalog(tmp_path, monk
         assert all(camera.world_T_cam[2, 3] == -9.0 for camera in cameras.values())
         raise Checked
 
+    monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands(), raising=False)
     monkeypatch.setattr(api, "read_time_sync", lambda *_args: sync)
-    monkeypatch.setattr(api, "keypoint_models", lambda: (None, None))
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
     monkeypatch.setattr(api, "detect_keypoints", lambda *_args, **_kwargs: Keypoints2D(np.array([0.0]), {}, 3.0))
     monkeypatch.setattr(api, "read_anchors", lambda *_args, **_kwargs: np.zeros((1, 3, 3)))
     monkeypatch.setattr(api, "triangulate_episode", check)
@@ -65,6 +73,78 @@ def test_cli_uses_local_poses_instead_of_equal_provenance_catalog(tmp_path, monk
         server.client().get_dataset(DATASET_NAME).register([(tmp_path / "catalog.rrd").as_uri()], layer_name="calib").wait()
         with pytest.raises(Checked):
             api.main(api.Config(local, tmp_path / "out", rate=3.0, segment_ids=(key,), catalog_url=server.url()))
+
+
+@pytest.mark.integration
+def test_keypoints_rate_defaults_to_the_native_phone_rate_without_a_second_read(tmp_path, monkeypatch, capsys, synthetic_base, private_server):
+    local = tmp_path / "local"
+    local.mkdir()
+    key = "2025-12-30__65d00748__ep001"
+    base = tmp_path / "base.rrd"
+    # The fixture video holds 48 frames 1/24 s apart (ffprobe: r_frame_rate=24/1, packet spacing 0.041667 s).
+    synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False, video=VIDEO_FIXTURES / "av1_48f_192x160.mp4")
+    sync = calibration(local / f"selfcap__{key}.rrd")
+    rates = []
+    reads = []
+    real_read = catalog_io.read_catalog_videos
+
+    class Checked(Exception):
+        pass
+
+    def detect(_segment, _detector, _pose, rate, **_kwargs):
+        rates.append(rate)
+        raise Checked
+
+    def counted_read(*args):
+        reads.append(args[1])
+        return real_read(*args)
+
+    monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands())
+    monkeypatch.setattr(catalog_io, "read_catalog_videos", counted_read)
+    monkeypatch.setattr(api, "read_time_sync", lambda *_args: sync)
+    monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: ())
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
+    monkeypatch.setattr(api, "detect_keypoints", detect)
+    with private_server({DATASET_NAME: [base]}) as server, pytest.raises(Checked):
+        api.main(api.Config(local, tmp_path / "out", segment_ids=(key,), catalog_url=server.url()))
+    assert rates == [24.0]
+    assert reads == [f"selfcap__{key}"]
+    assert f"KEYPOINTS_RATE {key} 24.0\n" in capsys.readouterr().out
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("rate", "expected"), [(None, [30.0, 10.0]), (2.0, [2.0, 2.0])])
+def test_each_episode_resolves_its_own_rate_unless_the_config_gives_one(tmp_path, monkeypatch, capsys, synthetic_base, private_server, rate, expected):
+    local = tmp_path / "local"
+    local.mkdir()
+    keys = tuple(f"2025-12-30__65d00748__ep{i:03d}" for i in (1, 2))
+    spacings_ns = {keys[0]: 33_333_333, keys[1]: 100_000_000}
+    syncs, phone_videos, bases = {}, {}, []
+    for key in keys:
+        segment = f"selfcap__{key}"
+        syncs[segment] = replace(calibration(local / f"{segment}.rrd", episode=key[-5:]), flags=["quest_unsynced_kept_as_cut"])
+        bases.append(synthetic_base(tmp_path / f"{key}.base.rrd", segment=segment, phones=tuple("ABC"), oak=False, quest=False))
+        video = CatalogVideo(np.arange(3, dtype=np.int64).astype("timedelta64[ns]") * spacings_ns[key], [np.array([1], dtype=np.uint8)] * 3, [True, False, False], "av1")
+        phone_videos[segment] = dict.fromkeys("ABC", video)
+    rates = []
+
+    def detect(_segment, _detector, _pose, rate, **_kwargs):
+        rates.append(rate)
+        return Keypoints2D(np.array([0.0]), {}, rate)
+
+    monkeypatch.setattr(api, "read_catalog_hands", lambda _segment: empty_raw_hands())
+    monkeypatch.setattr(api, "read_phone_videos", lambda segment, **_kwargs: phone_videos[segment.id])
+    monkeypatch.setattr(api, "read_time_sync", lambda _dataset, segment: syncs[segment])
+    monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: ())
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
+    monkeypatch.setattr(api, "detect_keypoints", detect)
+    monkeypatch.setattr(api, "read_anchors", lambda *_args, **_kwargs: np.zeros((1, 3, 3)))
+    monkeypatch.setattr(api, "ego_quest_hands", lambda *_args: None)
+    with private_server({DATASET_NAME: bases}) as server:
+        api.main(api.Config(local, tmp_path / "out", rate=rate, segment_ids=keys, catalog_url=server.url()))
+    assert rates == expected
+    output = capsys.readouterr().out
+    assert all(f"KEYPOINTS_RATE {key} {value}\n" in output for key, value in zip(keys, expected, strict=True))
 
 
 @pytest.mark.integration
@@ -87,11 +167,10 @@ def test_flagged_quest_pose_keeps_relative_phone_anchors(tmp_path, monkeypatch, 
     times = np.arange(10, dtype=np.float64) * 0.02
     source = CatalogHands(times, np.ones((10, 133, 3)) + times[:, None, None] * 0.1, times, np.ones((10, 3)), np.tile([0.0, 0.0, 0.0, 1.0], (10, 1)))
 
-    monkeypatch.setattr(keypoints, "read_catalog_hands", lambda *_args, **_kwargs: source)
     base = synthetic_base(tmp_path / "base.rrd", segment=sync.episode_key.segment, phones=("A", "B", "C"))
-    with private_server({DATASET_NAME: [base]}) as server:
+    with private_server({DATASET_NAME: [base]}):
         anchors = keypoints.read_anchors(
-            open_segment(server.client().get_dataset(DATASET_NAME), sync.episode_key.segment), np.array([0.06, 0.08]), sync
+            source, np.array([0.06, 0.08]), sync
         )
     assert np.isfinite(anchors).all()
 
@@ -117,7 +196,7 @@ def test_cli_skips_unprocessable_episodes_before_models_and_runs_others(
     base_files = []
     for key in keys:
         base = tmp_path / f"{key}.base.rrd"
-        synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False)
+        synthetic_base(base, segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False, video=VIDEO_FIXTURES / "av1_48f_192x160.mp4")
         base_files.append(base)
     servers = []
     real_server = rr.server.Server
@@ -129,21 +208,39 @@ def test_cli_skips_unprocessable_episodes_before_models_and_runs_others(
     monkeypatch.setattr(api, "Server", session_server, raising=False)
     loaded = []
 
-    def models():
+    def models(*_args):
         output = capsys.readouterr().out
         assert f"KEYPOINTS_SKIP {keys[1]}" in output
         loaded.append(output)
         return None, None
 
+    raw = empty_raw_hands()
+    raw_reads = []
+
+    def read_raw(segment):
+        raw_reads.append(segment.id)
+        return raw
+
+    def cached_anchors(segment, *_args, **_kwargs):
+        assert segment is raw
+        return np.zeros((1, 3, 3))
+
+    def cached_quest_hands(segment, *_args):
+        assert segment is raw
+        return None
+
+    monkeypatch.setattr(api, "read_catalog_hands", read_raw, raising=False)
+    monkeypatch.setattr(api, "ego_quest_hands", cached_quest_hands)
     monkeypatch.setattr(api, "read_time_sync", lambda dataset, segment: syncs[segment])
     monkeypatch.setattr(api, "keypoint_models", models)
     monkeypatch.setattr(api, "detect_keypoints", lambda *_args, **_kwargs: Keypoints2D(np.array([0.0]), {}, 3.0))
-    monkeypatch.setattr(api, "read_anchors", lambda *_args, **_kwargs: np.zeros((1, 3, 3)))
+    monkeypatch.setattr(api, "read_anchors", cached_anchors)
     with private_server({DATASET_NAME: base_files}) as server:
         api.main(api.Config(local, tmp_path / "out", rate=3.0, segment_ids=keys, catalog_url=server.url()))
     assert len(servers) == 1
     assert len(servers[0]) == len(keys)
     assert len(loaded) == (0 if all_skipped else 1)
+    assert raw_reads == ([] if all_skipped else [f"selfcap__{keys[0]}"])
     assert not (tmp_path / "out" / f"selfcap__{keys[1]}.rrd").exists()
     assert (tmp_path / "out" / f"selfcap__{keys[0]}.rrd").exists() == (not all_skipped)
     output = "\n".join(loaded) + capsys.readouterr().out
@@ -180,3 +277,41 @@ def test_cli_skips_calibration_for_different_base_before_gpu(tmp_path, monkeypat
         api.main(api.Config(local, tmp_path / "out", rate=2.0, segment_ids=(key,), catalog_url=server.url()))
     assert f"KEYPOINTS_SKIP {key} local calib phones absent from base: B" in capsys.readouterr().out
     assert not (tmp_path / "out" / f"selfcap__{key}.rrd").exists()
+
+
+@pytest.mark.integration
+def test_keypoints_uses_the_effective_clock_published_with_its_camera_pose(tmp_path, monkeypatch, synthetic_base, private_server):
+    """A pose refined at a corrected clock must select packets on that same clock."""
+    from rerun.chunk import Chunk, LazyChunkStream, RrdReader
+    from serde.json import to_json
+
+    local = tmp_path / "local"
+    local.mkdir()
+    key = "2025-12-30__65d00748__ep001"
+    source = local / f"selfcap__{key}.rrd"
+    before = calibration(source)
+    effective = replace(before, offsets_ms={**before.offsets_ms, "exo/A": 125.0})
+    staged = tmp_path / "effective.rrd"
+    LazyChunkStream.merge(
+        RrdReader(source).stream(),
+        LazyChunkStream.from_iter([Chunk.from_property("calibration_sync", rr.AnyValues(record_json=to_json(effective)))]),
+    ).write_rrd(staged, application_id="test", recording_id=f"selfcap__{key}")
+    staged.replace(source)
+    base = synthetic_base(tmp_path / "base.rrd", segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False,
+                          video=VIDEO_FIXTURES / "av1_48f_192x160.mp4")
+    monkeypatch.setattr(api, "read_time_sync", lambda *_args: before)
+    monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands())
+    monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: ())
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
+
+    class Checked(Exception):
+        pass
+
+    def detect(_segment, _detector, _pose, *, sync, videos, **_kwargs):
+        assert sync.offsets_ms["exo/A"] == 125.0
+        assert videos["A"].t_ns[0] - videos["B"].t_ns[0] == 125_000_000
+        raise Checked
+
+    monkeypatch.setattr(api, "detect_keypoints", detect)
+    with private_server({DATASET_NAME: [base]}) as server, pytest.raises(Checked):
+        api.main(api.Config(local, tmp_path / "out", segment_ids=(key,), catalog_url=server.url()))

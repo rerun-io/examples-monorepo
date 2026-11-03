@@ -1,6 +1,9 @@
 """Catalog-only GPU phone and OAK hands with served frame-selection rules."""
 
+import gc
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import cache
 
 import numpy as np
 import torch
@@ -17,12 +20,16 @@ from torch import Tensor
 from selfcap_curate.catalog_io import Segment, read_phone_videos
 from selfcap_curate.records import HAND_LATENCY_MS, HandTrack, OakDetections, PhoneDetections, SelfcapLayout, Side, TimeSync, oak_quest_offset_ms
 
+FRAMES_PER_PHONE: int = 48
+"""Detections align keeps per phone: enough for the clock fit and, the phones being fixed, for their poses."""
 
-def pick_frames(quest: dict[Side, HandTrack], num_frames: int, fps: float) -> Int64[ndarray, "n"]:
-    """Select two 250-frame GOPs, twelve peaks each, spacing ≥4 and margin 2 s.
 
-    The zero-based n/fps grid deliberately matches scratch plan(), including
-    NumPy tie ordering. The margin guards cut boundaries; spacing avoids repeats.
+def pick_frames(quest: dict[Side, HandTrack], num_frames: int, fps: float, count: int = FRAMES_PER_PHONE) -> Int64[ndarray, "n"]:
+    """Spread ``count`` frames over the session, one per equal part, each the part's fastest-moving hands.
+
+    The phones never move, so the wearer seen all over the room pins their poses better than many frames from one
+    stretch; the clock fit needs the hands moving. Parts start 2 s inside each cut; a part where the hands never move
+    gives no frame. The zero-based n/fps grid is the Quest hands' clock before alignment.
     """
     if num_frames < 1 or fps <= 0.0:
         raise ValueError("frame count and fps must be positive")
@@ -31,21 +38,9 @@ def pick_frames(quest: dict[Side, HandTrack], num_frames: int, fps: float) -> In
     for hand in quest.values():
         if len(hand.times_s) > 1:
             motion = np.maximum(motion, np.interp(times, hand.times_s, np.where(hand.valid, hand.speed, 0.0), left=0.0, right=0.0))
-    motion[(times < 2.0) | (times > times[-1] - 2.0)] = 0.0
-    scores: list[tuple[float, int]] = [(float(np.sort(motion[k : k + 250])[-12:].sum()), k) for k in range(0, num_frames, 250)]
-    picks: list[int] = []
-    for _, start in sorted(scores, reverse=True)[:2]:
-        indices: Int64[ndarray, "g"] = np.arange(start, min(start + 250, num_frames))
-        chosen: list[int] = []
-        for index in indices[np.argsort(-motion[indices])]:
-            if motion[index] <= 0.0:
-                break
-            if all(abs(index - other) >= 4 for other in chosen):
-                chosen.append(int(index))
-            if len(chosen) == 12:
-                break
-        picks.extend(chosen)
-    return np.asarray(sorted(picks), dtype=np.int64)
+    inside: Int64[ndarray, "m"] = np.flatnonzero((times >= 2.0) & (times <= times[-1] - 2.0))
+    parts: list[Int64[ndarray, "k"]] = [part for part in np.array_split(inside, count) if len(part) and motion[part].max() > 0.0]
+    return np.asarray([int(part[np.argmax(motion[part])]) for part in parts], dtype=np.int64)
 
 
 @torch.inference_mode()
@@ -85,26 +80,47 @@ def detect_frames(
     return PhoneDetections(times_s, xy.astype(np.float64), scores.astype(np.float64))
 
 
+@cache
 def pose_models() -> tuple[Callable[[Tensor], BoxDetections], Callable[[Tensor, BoxDetections], Keypoints2d]]:
-    """Build v2's YOLOX 0.3 and Sapiens2 0.4B TensorRT batch-eight models."""
+    """Build v2's YOLOX 0.3 (batch eight) and Sapiens2 0.4B (batch four) TensorRT models once per process.
+
+    Sapiens2 runs on FRAMES_PER_PHONE frames per phone plus the OAK picks, so batch four costs little time and halves its TensorRT
+    activation memory (4.43 -> 2.21 GB), which lets three calibration workers share the 5090.
+    """
     from posekit.models.sapiens import SapiensPoseConfig
     from posekit.models.yolox import YoloxDetectorConfig
     from trtkit.backends import TensorRtBackendConfig
 
-    backend: TensorRtBackendConfig = TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8)
-    return YoloxDetectorConfig(score_thr=0.3, backend=backend).setup(), SapiensPoseConfig(model_size="0.4B", backend=backend).setup()
+    detector = YoloxDetectorConfig(score_thr=0.3, backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8)).setup()
+    return detector, SapiensPoseConfig().setup()
+
+
+def release_cuda_memory(*, models: bool) -> None:
+    """Hand cached CUDA blocks back to the driver, after dropping the cached Sapiens2/YOLOX engines when ``models``.
+
+    PyTorch keeps every block a process has used, so without this each calibration process holds its align peak
+    (~17 GB on cc808233) through keypoints and only one fits on the GPU.
+    """
+    if models:
+        pose_models.cache_clear()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def decode_frames(video: CatalogVideo, indices: Int64[ndarray, "n"], fps: float) -> UInt8[Tensor, "n h w 3"]:
-    """CUDA-decode catalog packets without changing the authoritative sample stamps."""
+    """CUDA-decode selected catalog packets on an owned decoder thread."""
     from torchcodec.decoders import VideoDecoder
 
     if not len(indices):
         return torch.empty((0, 0, 0, 3), dtype=torch.uint8)
-    data: bytes = wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec)
-    decoder = VideoDecoder(data, device="cuda", seek_mode="approximate")
-    frames = decoder.get_frames_at(indices.tolist())
-    return rearrange(frames.data, "n c h w -> n h w c").contiguous()
+    def decode() -> UInt8[Tensor, "n h w 3"]:
+        data: bytes = wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec)
+        decoder = VideoDecoder(data, device="cuda", seek_mode="approximate")
+        frames = decoder.get_frames_at(indices.tolist())
+        return rearrange(frames.data, "n c h w -> n h w c").contiguous()
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="oak-decode") as pool:
+        return pool.submit(decode).result()
 
 
 def detect_episode(
@@ -170,11 +186,18 @@ def full_frame_boxes(frames: UInt8[Tensor, "n h w 3"]) -> BoxDetections:
 
 
 def detect_oak_hands_gpu(
-    dataset: DatasetEntry, sync: TimeSync, quest: dict[Side, HandTrack], layout: SelfcapLayout, pose: Callable[[Tensor, BoxDetections], Keypoints2d]
+    dataset: DatasetEntry,
+    sync: TimeSync,
+    quest: dict[Side, HandTrack],
+    layout: SelfcapLayout,
+    pose: Callable[[Tensor, BoxDetections], Keypoints2d],
+    *,
+    video: CatalogVideo | None = None,
 ) -> OakDetections:
-    """Read only one catalog base, decode picked RGB frames on CUDA, batch eight."""
+    """Read only one catalog base, decode picked RGB frames on CUDA, Sapiens2 batch four."""
     segment: str = sync.episode_key.segment
-    video = read_catalog_videos(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE)[0]
+    if video is None:
+        video = read_catalog_videos(dataset, segment, [video_path(layout.oak_rig, 0)], CAPTURE_TIMELINE)[0]
     fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
     indices = pick_oak_frames(quest, len(video.samples), fps, sync)
     detected = detect_frames(decode_frames(video, indices, fps), video.t_ns[indices].astype(np.float64) * 1e-9, full_frame_boxes, pose)

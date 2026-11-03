@@ -215,7 +215,7 @@ class Egoexo4dDataset(DataforgeDataset[Egoexo4dConfig, Take]):
 
     def convert(self, identity: SequenceIdentity, source: Take, *, force: bool) -> Path:
         """Base first (fetch, encode, publish with its sidecar, prune the take), then the fit's layers from the sidecar."""
-        targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
+        targets, pending = self.pending_layers(identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root])
         base: Path = targets[paths.BASE_LAYER]
         sidecar: Path = paths.sidecar_path(base.parents[1], identity, SIDECAR)  # a preview's root holds its own sidecar
         if paths.BASE_LAYER in pending or not sidecar.is_file():  # every derived layer is stamped on base's clock

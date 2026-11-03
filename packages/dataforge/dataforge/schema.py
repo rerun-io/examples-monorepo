@@ -77,6 +77,16 @@ def video_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/video"
 
 
+def audio_path(rig: int, audio: int) -> str:
+    """``/world/rig_NN/audio_MM`` — a microphone's track (AssetAudio) at its first sample on ``video_time``."""
+    return f"{rig_path(rig)}/audio_{_index(audio, 'audio')}"
+
+
+def loudness_path(rig: int, audio: int) -> str:
+    """``.../audio_MM/loudness`` — band level in dB over the track's own floor, Scalars on ``video_time``."""
+    return f"{audio_path(rig, audio)}/loudness"
+
+
 def imu_path(rig: int, imu: int) -> str:
     """``/world/rig_NN/imu_MM`` — carries the static ``rig_T_imu`` transform."""
     return f"{rig_path(rig)}/imu_{_index(imu, 'imu')}"
@@ -155,6 +165,20 @@ def coco133_xyz_path(*, pred: str | None = None) -> str:
 def coco133_uv_path(rig: int, cam: int, *, pred: str | None = None) -> str:
     """§10: shipped COCO-133 keypoints in camera pixels; a model's under ``pinhole/pred/<pred>``."""
     return f"{pinhole_path(rig, cam)}{'' if pred is None else f'/pred/{pred}'}/coco133_uv"
+
+
+SHOWN_MIN_CONFIDENCE: float = 0.7
+"""Score a model's keypoint needs to be drawn: the layout shows only ``coco133_uv_shown_path``, the full set stays hidden."""
+
+
+def shown_path(path: str) -> str:
+    """The display copy beside a full 2D keypoint entity: only the points at or above ``SHOWN_MIN_CONFIDENCE``."""
+    return f"{path}_min{round(SHOWN_MIN_CONFIDENCE * 100)}"
+
+
+def coco133_uv_shown_path(rig: int, cam: int, *, pred: str) -> str:
+    """A model's COCO-133 keypoints at or above ``SHOWN_MIN_CONFIDENCE``, next to the full set at ``coco133_uv_path``."""
+    return shown_path(coco133_uv_path(rig, cam, pred=pred))
 
 
 def coco133_uv_projected_path(rig: int, cam: int) -> str:

@@ -11,14 +11,17 @@ reduction results as extra ONNX outputs to force materialization and split
 the fusion — see prompt-da's ``export_promptda_onnx`` for a worked example.
 """
 
+import fcntl
 import hashlib
 import json
 import os
 import time
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
+import numpy as np
 import torch
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
@@ -63,6 +66,8 @@ class TrtBuildConfig:
     """TensorRT builder optimization level (0-5)."""
     hardware_compatibility: HardwareCompatibility = "none"
     """Plan portability: device-specific, or portable across GPUs with the same compute capability."""
+    fp8_attention: bool = False
+    """Quantize native attention normalization output to FP8 with scale 1/448."""
     extra_output_patterns: tuple[str, ...] = ()
     """Mark every intermediate tensor whose name contains one of these substrings as
     an additional engine output. Materializing a tensor bars TensorRT from fusing it
@@ -101,6 +106,8 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     capability: tuple[int, int] = torch.cuda.get_device_capability()
     onnx_hash: str = (onnx_sha256 or onnx_content_hash(onnx_path))[:12]
     precision_key: str = "strong" if config.allow_tf32 else "strong-notf32"
+    if config.fp8_attention:
+        precision_key += "-fp8attn"
     extra_outputs_key: str = (
         f"_x{hashlib.sha256('|'.join(config.extra_output_patterns).encode()).hexdigest()[:8]}"
         if config.extra_output_patterns
@@ -150,6 +157,14 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if not parser.parse_from_file(str(onnx_path.expanduser())):
         errors: str = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         raise RuntimeError(f"ONNX parse failed for {onnx_path}:\n{errors}")
+    if config.fp8_attention:
+        for layer_index in range(int(network.num_layers)):
+            layer: Any = network.get_layer(layer_index)
+            if layer.type == trt.LayerType.ATTENTION_INPUT:
+                layer.__class__ = trt.IAttentionInputLayer
+                layer.attention.normalization_quantize_to_type = trt.DataType.FP8
+                scale: Any = network.add_constant((), trt.Weights(np.array(1.0 / 448.0, dtype=np.float32)))
+                layer.attention.normalization_quantize_scale = scale.get_output(0)
     for pattern in config.extra_output_patterns:
         matched: bool = False
         for layer_index in range(int(network.num_layers)):
@@ -163,6 +178,8 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             raise RuntimeError(f"extra_output_patterns entry {pattern!r} matched no network tensor in {onnx_path}.")
     builder_config: Any = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(config.workspace_gib * (1 << 30)))
+    if config.fp8_attention:
+        builder_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     builder_config.builder_optimization_level = int(config.builder_optimization_level)
     if config.hardware_compatibility == "same_compute_capability":
         builder_config.hardware_compatibility_level = trt.HardwareCompatibilityLevel.SAME_COMPUTE_CAPABILITY
@@ -221,6 +238,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         "opt_batch_size": config.opt_batch_size,
         "strongly_typed": True,
         "allow_tf32": config.allow_tf32,
+        "fp8_attention": config.fp8_attention,
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,
         "hardware_compatibility": config.hardware_compatibility,
@@ -273,29 +291,62 @@ def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = 
     Returns:
         Path to a ready-to-load engine matching this machine and config.
     """
-    onnx_sha256: str = onnx_content_hash(onnx_path)
+    onnx_sha256: str = onnx_content_hash(onnx_path, cache_dir=cache_dir)
     engine_path: Path = cached_engine_path(onnx_path, config, cache_dir=cache_dir, onnx_sha256=onnx_sha256)
     if not engine_path.exists():
-        print(f"[trtkit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
-        build_engine(onnx_path, engine_path, config, onnx_sha256=onnx_sha256)
+        engine_path.parent.mkdir(parents=True, exist_ok=True)
+        with engine_path.with_name(f"{engine_path.name}.lock").open("w") as lock:  # processes that find it missing take turns
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not engine_path.exists():
+                print(f"[trtkit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
+                build_engine(onnx_path, engine_path, config, onnx_sha256=onnx_sha256)
     return engine_path
 
 
-def onnx_content_hash(onnx_path: Path) -> str:
+def onnx_content_hash(onnx_path: Path, *, cache_dir: Path | None = None) -> str:
     """Hex SHA-256 of an ONNX model, covering its external weight file if present.
 
     Args:
         onnx_path: ONNX model file (dynamo exports of large models keep weights
             in a sibling ``<name>.onnx.data`` file).
+        cache_dir: Engine cache root that keeps the digest record; defaults to ``DEFAULT_TRT_CACHE_DIR``.
 
     Returns:
         Hex digest string over the proto and any external data.
     """
-    digest = hashlib.sha256()
+    versions: list[tuple[str, int, int, int]] = []
     for path in (onnx_path.expanduser(), onnx_path.expanduser().with_suffix(".onnx.data")):
-        if not path.exists():
-            continue
-        with path.open("rb") as stream:
+        if path.exists():
+            stat = path.stat()
+            versions.append((str(path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return _hash_files(tuple(versions), cache_dir or DEFAULT_TRT_CACHE_DIR)
+
+
+@lru_cache(maxsize=64)
+def _hash_files(versions: tuple[tuple[str, int, int, int], ...], cache_dir: Path) -> str:
+    """SHA-256 over the files in order, keyed by (path, inode, size, mtime) in memory and in ``cache_dir``.
+
+    The on-disk record lets a new process find its cached engine without rereading a multi-GB ONNX. It is a best-effort
+    cache: an unreadable or stale record means hashing again, and a failed write only costs the next process a reread.
+    """
+    key: str = json.dumps(versions)
+    record: Path = cache_dir / "onnx-sha256" / f"{hashlib.sha256(key.encode()).hexdigest()[:24]}.json"
+    try:
+        saved = json.loads(record.read_text())
+        if saved["versions"] == key:
+            return str(saved["sha256"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    digest = hashlib.sha256()
+    for path, *_ in versions:
+        with open(path, "rb") as stream:
             for chunk in iter(lambda: stream.read(1 << 20), b""):
                 digest.update(chunk)
+    try:
+        record.parent.mkdir(parents=True, exist_ok=True)
+        staged: Path = record.with_suffix(f".{os.getpid()}.tmp")
+        staged.write_text(json.dumps({"versions": key, "sha256": digest.hexdigest()}))
+        staged.replace(record)
+    except OSError:
+        pass
     return digest.hexdigest()

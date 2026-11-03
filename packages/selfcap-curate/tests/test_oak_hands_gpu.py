@@ -1,12 +1,15 @@
 """Full-frame hand producer public seams without CUDA or downloaded models."""
 
 from dataclasses import replace
+from threading import get_ident
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from posekit.predictions import Keypoints2d
 from posekit.skeletons import COCO_133
+from simplecv.catalog_video import CatalogVideo
 
 import selfcap_curate.hands_gpu as module
 from selfcap_curate.hands_gpu import detect_frames, full_frame_boxes, pick_oak_frames
@@ -48,3 +51,23 @@ def test_oak_picker_uses_the_shared_hand_latency(monkeypatch, fixture_sync) -> N
     speed[300] = 1.0
     hand = HandTrack(times, np.zeros((1000, 21, 3)), np.ones(1000, dtype=bool), speed)
     assert module.pick_oak_frames({"left": hand}, 1000, 100.0, sync).tolist() == [300]
+
+
+def test_picked_decode_owns_its_decoder_thread(monkeypatch):
+    caller = get_ident()
+    threads = []
+
+    class Decoder:
+        def __init__(self, *args, **kwargs):
+            threads.append(get_ident())
+
+        def get_frames_at(self, indices):
+            assert get_ident() == threads[0]
+            return SimpleNamespace(data=torch.zeros((len(indices), 3, 5, 7), dtype=torch.uint8))
+
+    monkeypatch.setattr("torchcodec.decoders.VideoDecoder", Decoder)
+    monkeypatch.setattr(module, "wrap_mp4", lambda *args, **kwargs: b"test")
+    video = CatalogVideo(np.array([0, 1, 2], np.int64), [np.array([1], np.uint8)] * 3, [True, False, False], "av1")
+    frames = module.decode_frames(video, np.array([0, 2], np.int64), 24.0)
+    assert threads[0] != caller
+    assert frames.shape == (2, 5, 7, 3)

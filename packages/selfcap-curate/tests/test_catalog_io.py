@@ -14,7 +14,7 @@ from simplecv.catalog_rig_layout import CatalogComponent, parse_rig_layout
 
 import selfcap_curate.quest_fit as quest
 from selfcap_curate import catalog_io
-from selfcap_curate.catalog_io import Segment, open_segment, rig_layout, select_layout
+from selfcap_curate.catalog_io import Segment, factory_rigs, open_segment, rig_layout, select_layout
 from selfcap_curate.keypoints import read_cameras
 from selfcap_curate.keypoints_gpu import plan_episode
 from selfcap_curate.records import CatalogHands, SelfcapLayout
@@ -32,6 +32,20 @@ def test_discovers_episode_rigs(phones: int) -> None:
     assert layout.oak_rig == phones
     assert layout.quest_rig == phones + 1
     assert layout.video_entities[0] == f"/world/rig_{phones:02d}/cam_01/pinhole/video"
+
+
+def test_discovers_fixed_head_rigs_after_three_phones() -> None:
+    # Current ingest: the OAK is always rig_04 and the Quest rig_05; a three-phone session leaves rig_03 empty.
+    components = [
+        CatalogComponent(f"/world/rig_{rig:02d}/cam_{cam:02d}/pinhole/video", "VideoStream", "sample", False)
+        for rig, count in [(0, 1), (1, 1), (2, 1), (4, 3), (5, 2)]
+        for cam in range(count)
+    ]
+    kinds = {"rig_00": "exo", "rig_01": "exo", "rig_02": "exo", "rig_04": "ego", "rig_05": "quest"}
+    layout = select_layout(parse_rig_layout(components, kinds), ("a", "b", "c"))
+    assert (layout.oak_rig, layout.quest_rig, layout.phones) == (4, 5, ("a", "b", "c"))
+    assert layout.video_entities[0] == "/world/rig_04/cam_01/pinhole/video"
+    assert factory_rigs(layout) == (0, 1, 2, 4, 5), "the empty rig_03 has no factory document"
 
 
 @pytest.mark.integration

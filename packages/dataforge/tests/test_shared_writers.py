@@ -8,6 +8,7 @@ import rerun as rr
 from conftest import read_chunks
 
 from dataforge import hands, meshes, objects, schema, writing
+from dataforge.logging_toolkit import time_column
 
 
 @pytest.mark.parametrize("shipped", [None, 0.25, 0.0])
@@ -30,6 +31,32 @@ def test_dense_confidence_rule(tmp_path: Path, shipped: float | None, dimensions
     assert scores[91] == (1.0 if shipped is None else shipped)
     assert np.isnan(positions[0]).all()
     assert scores[0] == 0.0
+
+
+def test_2d_rows_keep_every_detection_and_the_display_copy_only_the_shown_points(tmp_path: Path) -> None:
+    uv = np.arange(532, dtype=np.float32).reshape(2, 133, 2)
+    uv[0, 5] = np.nan
+    scores = np.full((2, 133), 0.9, dtype=np.float32)
+    scores[0, [3, 4, 5]] = [0.69, 0.71, 0.9]
+    target = tmp_path / "hands.rrd"
+    entity = "/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv"
+    with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
+        hands.log_keypoints2d(recording, entity, times_ns=np.array([0, 1], dtype=np.int64), frame_indices=None, positions=uv, confidence=scores)
+        copy = hands.shown_keypoint_columns(uv, scores, (scores >= 0.7) & np.isfinite(uv).all(-1))
+        recording.send_columns(schema.shown_path(entity), indexes=[], columns=copy.style)
+        recording.send_columns(schema.shown_path(entity), indexes=[time_column(np.array([0, 1], dtype=np.int64))], columns=copy.columns)
+    chunks = read_chunks(target)
+    raw = next(c.to_record_batch() for c in chunks if not c.is_static and str(c.entity_path) == entity)
+    np.testing.assert_array_equal(np.array(raw.column("Points2D:positions").to_pylist()[0], dtype=np.float32)[3], uv[0, 3])
+    np.testing.assert_allclose(raw.column("simplecv.KeypointConfidence2D:confidences").to_pylist()[0][3:5], [0.69, 0.71], rtol=1e-6)
+    shown = next(c.to_record_batch() for c in chunks if not c.is_static and str(c.entity_path) == f"{entity}_min70")
+    # A kept point keeps its COCO id; 0.69 and the NaN joint are absent.
+    assert shown.column("Points2D:keypoint_ids").to_pylist() == [[*range(3), 4, *range(6, 133)], list(range(133))]
+    np.testing.assert_array_equal(np.array(shown.column("Points2D:positions").to_pylist()[0], dtype=np.float32)[3], uv[0, 4])
+    np.testing.assert_allclose(shown.column("simplecv.KeypointConfidence2D:confidences").to_pylist()[0][3], 0.71, rtol=1e-6)
+    style = next(c.to_record_batch() for c in chunks if c.is_static and str(c.entity_path) == f"{entity}_min70")
+    assert style.column("Points2D:radii").to_pylist() == [[3.0]]
+    assert style.column("Points2D:show_labels").to_pylist() == [[False]]
 
 
 def test_mesh_batch_writes_empty_rows(tmp_path: Path) -> None:

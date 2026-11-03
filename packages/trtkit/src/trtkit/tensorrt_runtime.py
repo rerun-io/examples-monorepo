@@ -11,7 +11,7 @@ ONNX exports) zero-pad up to their baked batch.
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import Tensor
@@ -32,7 +32,7 @@ class _TrtEngine:
             raise RuntimeError("TensorRT execution requires CUDA.")
         import tensorrt
 
-        self._trt: Any = tensorrt  # the compiled bindings have incomplete stubs
+        self._trt: Any = cast(Any, tensorrt)  # the compiled bindings have incomplete stubs
         engine: Any = self._trt.Runtime(self._trt.Logger(self._trt.Logger.WARNING)).deserialize_cuda_engine(engine_path.expanduser().read_bytes())
         context: Any = None if engine is None else engine.create_execution_context()
         if engine is None or context is None:

@@ -2,6 +2,7 @@
 
 import json
 import struct
+from collections.abc import Callable
 from typing import Literal
 
 import numpy as np
@@ -83,6 +84,21 @@ def log_object_mesh(
     )
 
 
+def _edit_glb_json(glb: bytes, edit: Callable[[dict], None]) -> bytes:
+    """Apply ``edit`` to a GLB's JSON document in place and repack; every binary chunk is kept byte for byte."""
+    if len(glb) < 20 or struct.unpack_from("<4sII", glb) != (b"glTF", 2, len(glb)):
+        raise ValueError("invalid GLB v2 header")
+    length, kind = struct.unpack_from("<I4s", glb, 12)
+    if kind != b"JSON" or 20 + length > len(glb):
+        raise ValueError("invalid GLB JSON chunk")
+    document: dict = json.loads(glb[20 : 20 + length])
+    edit(document)
+    payload: bytes = json.dumps(document, separators=(",", ":")).encode()
+    payload += b" " * (-len(payload) % 4)
+    tail: bytes = glb[20 + length :]
+    return struct.pack("<4sII", b"glTF", 2, 20 + len(payload) + len(tail)) + struct.pack("<I4s", len(payload), b"JSON") + payload + tail
+
+
 def strip_texture_transform(glb: bytes) -> bytes:
     """Remove unsupported texture transforms, preserving all other GLB chunks.
 
@@ -92,34 +108,44 @@ def strip_texture_transform(glb: bytes) -> bytes:
     GLB's open-ended JSON document is edited structurally; binary buffers, node
     scales and unrelated extensions are left intact.
     """
-    if len(glb) < 20 or struct.unpack_from("<4sII", glb) != (b"glTF", 2, len(glb)):
-        raise ValueError("invalid GLB v2 header")
-    length, kind = struct.unpack_from("<I4s", glb, 12)
-    if kind != b"JSON" or 20 + length > len(glb):
-        raise ValueError("invalid GLB JSON chunk")
-    document: dict[str, object] = json.loads(glb[20 : 20 + length])
-    extension: str = "KHR_texture_transform"
-    for key in ("extensionsUsed", "extensionsRequired"):
-        names: object = document.get(key)
-        if isinstance(names, list):
-            document[key] = [name for name in names if name != extension]
-            if not document[key]:
-                del document[key]
-    # Traverse texture infos, including those inside material extensions.
-    materials: object = document.get("materials", [])
-    pending: list[object] = list(materials) if isinstance(materials, list) else []
-    while pending:
-        value: object = pending.pop()
-        if isinstance(value, dict):
-            extensions: object = value.get("extensions")
-            if isinstance(extensions, dict):
-                extensions.pop(extension, None)
-                if not extensions:
-                    del value["extensions"]
-            pending.extend(value.values())
-        elif isinstance(value, list):
-            pending.extend(value)
-    payload: bytes = json.dumps(document, separators=(",", ":")).encode()
-    payload += b" " * (-len(payload) % 4)
-    tail: bytes = glb[20 + length :]
-    return struct.pack("<4sII", b"glTF", 2, 20 + len(payload) + len(tail)) + struct.pack("<I4s", len(payload), b"JSON") + payload + tail
+
+    def edit(document: dict) -> None:
+        extension: str = "KHR_texture_transform"
+        for key in ("extensionsUsed", "extensionsRequired"):
+            names: object = document.get(key)
+            if isinstance(names, list):
+                document[key] = [name for name in names if name != extension]
+                if not document[key]:
+                    del document[key]
+        # Traverse texture infos, including those inside material extensions.
+        materials: object = document.get("materials", [])
+        pending: list[object] = list(materials) if isinstance(materials, list) else []
+        while pending:
+            value: object = pending.pop()
+            if isinstance(value, dict):
+                extensions: object = value.get("extensions")
+                if isinstance(extensions, dict):
+                    extensions.pop(extension, None)
+                    if not extensions:
+                        del value["extensions"]
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+
+    return _edit_glb_json(glb, edit)
+
+
+def with_root_transform(glb: bytes, matrix: Float64[ndarray, "4 4"]) -> bytes:
+    """Place a whole GLB scene by ``matrix``: a new root node carries it and adopts the old scene roots.
+
+    Like ``strip_texture_transform``, the JSON chunk is edited structurally and every binary chunk is kept, so the
+    asset's meshes, materials and textures are unchanged; only where the scene sits moves.
+    """
+
+    def edit(document: dict) -> None:
+        scene: dict = document["scenes"][document.get("scene", 0)]
+        column_major: list[float] = matrix.T.ravel().tolist()  # glTF stores matrices column-major
+        document["nodes"].append({"name": "placement", "matrix": column_major, "children": scene["nodes"]})
+        scene["nodes"] = [len(document["nodes"]) - 1]
+
+    return _edit_glb_json(glb, edit)

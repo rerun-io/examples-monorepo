@@ -15,7 +15,7 @@ Requires the ``sapiens2-pose`` package (model definition + checkpoints);
 imports are lazy so the rest of posekit works without it.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -51,10 +51,19 @@ class SapiensPoseConfig:
 
     model_size: SapiensModelSize = "0.4B"
     """Sapiens2 checkpoint size."""
-    backend: BackendConfig = field(default_factory=TorchBackendConfig)
+    variant: Literal["nvfp4-768", "bf16-1024"] = "nvfp4-768"
+    """Fast quantized 0.4B export, or the original full-resolution network."""
+    backend: BackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4))
     """Backend running the network: native torch module, or its ONNX export on ONNX Runtime/TensorRT."""
     padding: float = 1.25
     """Bbox padding multiplier before cropping."""
+
+    def __post_init__(self) -> None:
+        if self.variant == "nvfp4-768":
+            if not isinstance(self.backend, TensorRtBackendConfig):
+                raise ValueError("nvfp4-768 requires the TensorRT backend.")
+            if self.model_size != "0.4B":
+                raise ValueError("nvfp4-768 calibration supports only Sapiens2 0.4B.")
 
     def setup(self) -> "SapiensPose2d":
         """Load weights (and export/build artifacts if needed), return a ready estimator."""
@@ -70,6 +79,8 @@ class SapiensPose2d(TopDownPose2d):
         Args:
             config: Model size, backend, and crop padding.
         """
+        from sapiens2_pose.api.fast_calibration import FAST_POSE_HEATMAP_HW, FAST_POSE_INPUT_HW
+        from sapiens2_pose.api.metadata import coco133_goliath_pairs
         from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
 
         self.config: SapiensPoseConfig = config
@@ -77,10 +88,13 @@ class SapiensPose2d(TopDownPose2d):
         spec: Any = MODEL_SPECS[config.model_size]
         self._input_size: tuple[int, int] = (int(spec.input_size[0]), int(spec.input_size[1]))
         self._heatmap_size: tuple[int, int] = (int(spec.heatmap_size[0]), int(spec.heatmap_size[1]))
+        channels: int = int(spec.num_keypoints)
+        if config.variant == "nvfp4-768":  # the fast export keeps only the mapped heatmaps, in COCO order
+            self._input_size = (FAST_POSE_INPUT_HW[1], FAST_POSE_INPUT_HW[0])
+            self._heatmap_size = (FAST_POSE_HEATMAP_HW[1], FAST_POSE_HEATMAP_HW[0])
+            channels = len(coco133_goliath_pairs()[0])
         input_spec = TensorSpec(name="inputs", shape=(3, self._input_size[1], self._input_size[0]), dtype=torch.float32)
-        heatmap_spec = TensorSpec(
-            name="heatmaps", shape=(int(spec.num_keypoints), self._heatmap_size[1], self._heatmap_size[0]), dtype=torch.float32
-        )
+        heatmap_spec = TensorSpec(name="heatmaps", shape=(channels, self._heatmap_size[1], self._heatmap_size[0]), dtype=torch.float32)
         if isinstance(config.backend, TorchBackendConfig):
             from sapiens2_pose.api.runtime import get_pose_model
 
@@ -97,7 +111,13 @@ class SapiensPose2d(TopDownPose2d):
             # graph, ORT the fp32 graph — rationale in _ensure_sapiens_onnx.
             static_batch: int = backend.opt_batch_size if isinstance(backend, TensorRtBackendConfig) else backend.max_batch_size
             bf16: bool = isinstance(backend, TensorRtBackendConfig)
-            self.runtime = create_runtime_from_onnx(_ensure_sapiens_onnx(config.model_size, static_batch, bf16=bf16), backend)
+            if config.variant == "nvfp4-768":
+                from sapiens2_pose.api.fast_export import ensure_fast_pose_onnx
+
+                backend = replace(backend, fp8_attention=True)
+                self.runtime = create_runtime_from_onnx(ensure_fast_pose_onnx(DEFAULT_ONNX_CACHE_DIR, backend.max_batch_size), backend)
+            else:
+                self.runtime = create_runtime_from_onnx(_ensure_sapiens_onnx(config.model_size, static_batch, bf16=bf16), backend)
         self.crop_spec: CropSpec = CropSpec(
             input_size=self._input_size, padding=config.padding, align="udp", bgr=False, mean_rgb=IMAGENET_MEAN_255, std_rgb=IMAGENET_STD_255
         )
@@ -125,17 +145,18 @@ class SapiensPose2d(TopDownPose2d):
         if num_instances == 0:
             return Keypoints2d.empty(self.skeleton, frames_rgb.device)
         outputs: dict[str, Tensor] = run_chunked(self.runtime, {self.runtime.spec.inputs[0].name: crop_batch.inputs})
-        heatmaps: Float[Tensor, "n 308 hm_h hm_w"] = outputs[self.runtime.spec.outputs[0].name]
+        heatmaps: Float[Tensor, "n k hm_h hm_w"] = outputs[self.runtime.spec.outputs[0].name]
         coco_indices, goliath_indices = _coco133_projection_indices(heatmaps.device)
         xy_crop, mapped_scores = decode_udp_heatmaps(
-            heatmaps[:, goliath_indices], input_size=self._input_size, heatmap_size=self._heatmap_size, blur_kernel_size=11
+            (heatmaps if self.config.variant == "nvfp4-768" else heatmaps[:, goliath_indices]),
+            input_size=self._input_size,
+            heatmap_size=self._heatmap_size,
+            blur_kernel_size=11,
         )
         xy_image: Float[Tensor, "n mapped 2"] = crop_coords_to_image(
             xy_crop, centers=crop_batch.centers, scales=crop_batch.scales, input_size=self._input_size
         )
-        xy_coco: Float[Tensor, "n 133 2"] = torch.full(
-            (num_instances, num_keypoints, 2), float("nan"), dtype=torch.float32, device=heatmaps.device
-        )
+        xy_coco: Float[Tensor, "n 133 2"] = torch.full((num_instances, num_keypoints, 2), float("nan"), dtype=torch.float32, device=heatmaps.device)
         scores_coco: Float[Tensor, "n 133"] = torch.zeros((num_instances, num_keypoints), dtype=torch.float32, device=heatmaps.device)
         xy_coco[:, coco_indices] = xy_image
         scores_coco[:, coco_indices] = mapped_scores
@@ -167,7 +188,7 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     dtype_key: str = "bf16" if bf16 else "fp32"
     # bf16 exports now carry fp32 ConvTranspose islands, so warm caches must re-export.
     onnx_path: Path = (
-        DEFAULT_ONNX_CACHE_DIR / f"sapiens2_{model_size.lower()}_pose_b{static_batch}_{dtype_key}_v{SAPIENS_ONNX_EXPORT_VERSION}.onnx"
+        DEFAULT_ONNX_CACHE_DIR / f"sapiens2_{model_size.lower()}_bf16-1024_pose_b{static_batch}_{dtype_key}_v{SAPIENS_ONNX_EXPORT_VERSION}.onnx"
     )
     if onnx_path.exists():
         return onnx_path
@@ -197,10 +218,7 @@ def _coco133_projection_indices(device: torch.device) -> tuple[Tensor, Tensor]:
     Returns:
         COCO-133 indices and the Goliath-308 indices they map from.
     """
-    from sapiens2_pose.api.metadata import get_sapiens_metainfo
+    from sapiens2_pose.api.metadata import coco133_goliath_pairs
 
-    mapping: dict[int, int] = {int(k): int(v) for k, v in get_sapiens_metainfo()["coco_wholebody_to_goliath_mapping"].items()}
-    pairs: list[tuple[int, int]] = sorted((coco, goliath) for coco, goliath in mapping.items() if 0 <= coco < 133)
-    coco_indices: Tensor = torch.tensor([pair[0] for pair in pairs], dtype=torch.long, device=device)
-    goliath_indices: Tensor = torch.tensor([pair[1] for pair in pairs], dtype=torch.long, device=device)
-    return coco_indices, goliath_indices
+    coco, goliath = coco133_goliath_pairs()
+    return torch.tensor(coco, dtype=torch.long, device=device), torch.tensor(goliath, dtype=torch.long, device=device)

@@ -73,5 +73,18 @@
   "left_to_gyro": 4.0,
   "gyro_to_pose": 4.0
  },
- "search_half_width_source": "Frozen records predate the search_half_width_s field; preserved here from v2/code/links_cpu.py WINDOWS defaults, confirmed by the SelfCap v2 follow-up. WIDE is not used for these three records."
+ "search_half_width_source": "Frozen records predate the search_half_width_s field; preserved here from v2/code/links_cpu.py WINDOWS defaults, confirmed by the SelfCap v2 follow-up. WIDE is not used for these three records.",
+ "scratch_final": {
+  "lag_left_to_gyro": {
+   "served_ms": 1492.07,
+   "scratch_final_ms": 1494.9,
+   "drift_ms": 2.83
+  },
+  "fine_left_to_gyro": {
+   "served_ms": 1492.03,
+   "scratch_final_ms": 1494.9,
+   "drift_ms": 2.87
+  }
+ },
+ "scratch_final_source": "GPU links (selfcap-curate/fast-post 8a250dd51: NVDEC decode from the window keyframe, antialiased bilinear GPU gray) re-measures left-to-gyro 2.83 ms (coarse) and 2.87 ms (fine) later than v2 on this episode, whose v2 left-to-gyro correlation is weak (peak 0.433, second 0.407); every other link of the three golden episodes stays within 1.08 ms of its reference. Measured 2026-10-29 on dl-server's RTX 5090 by this test, same [36.63, 86.63] s window and frozen widths; the served v2 values stay above."
 }

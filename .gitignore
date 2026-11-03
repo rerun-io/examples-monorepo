@@ -184,3 +184,5 @@ artifacts/*
 packages/agent-traces/data/
 
 packages/selfcap-curate/data/
+
+packages/selfcap-soma/data/

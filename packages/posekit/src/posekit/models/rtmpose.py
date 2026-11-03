@@ -6,7 +6,9 @@ replicates rtmlib exactly (cv2 top-down affine, BGR input, rtmlib's RGB-ordered
 mean/std applied to BGR channels), so results match the reference pipeline.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -47,6 +49,8 @@ class RtmPoseConfig:
     """Accelerated backend running the pose graph."""
     padding: float = 1.25
     """Bbox padding multiplier before cropping."""
+    onnx_transform: Callable[[Path], Path] | None = None
+    """Optional graph transform applied to the fetched artifact before runtime creation."""
 
     def setup(self) -> "RtmPose2d":
         """Fetch artifacts, build/load the runtime, and return a ready estimator."""
@@ -64,7 +68,10 @@ class RtmPose2d(TopDownPose2d):
         """
         self.config: RtmPoseConfig = config
         self.skeleton = RTMPOSE_SKELETONS[config.variant]
-        self.runtime: TensorRuntime = create_runtime_from_onnx(fetch_openmmlab_onnx(RTMPOSE_ONNX_ZIP_URLS[config.variant]), config.backend)
+        onnx_path: Path = fetch_openmmlab_onnx(RTMPOSE_ONNX_ZIP_URLS[config.variant])
+        if config.onnx_transform is not None:
+            onnx_path = config.onnx_transform(onnx_path)
+        self.runtime: TensorRuntime = create_runtime_from_onnx(onnx_path, config.backend)
         input_shape: tuple[int, ...] = self.runtime.spec.inputs[0].shape
         # rtmlib applies the RGB-ordered ImageNet constants to BGR crops; replicated verbatim.
         self.crop_spec: CropSpec = CropSpec(

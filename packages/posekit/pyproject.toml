@@ -13,7 +13,11 @@ version = "0.1.0"
 
 # Workspace siblings named above resolve to their in-repo path (never to a PyPI
 # namesake); the root manifest installs the same paths editable.
+[project.optional-dependencies]
+egohand = ["egohand-inference"]
+
 [tool.uv.sources]
+egohand-inference = { path = "../egohand", editable = true }
 simplecv = { path = "../simplecv", editable = true }
 
 [build-system]

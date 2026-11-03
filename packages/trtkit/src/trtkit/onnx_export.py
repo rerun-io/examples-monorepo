@@ -59,7 +59,7 @@ def _torch_dynamic_shapes(input_names: list[str], dynamic_dims: DynamicDims) -> 
     unknown: set[str] = set(dynamic_dims) - set(input_names)
     if unknown:
         raise ValueError(f"dynamic_dims names inputs that are not exported: {sorted(unknown)}.")
-    symbols: dict[str, object] = {}
+    symbols: dict[str, torch.export.Dim] = {}
     bounds: dict[str, tuple[int, int]] = {}
     per_input: list[dict[int, object]] = []
     for name in input_names:

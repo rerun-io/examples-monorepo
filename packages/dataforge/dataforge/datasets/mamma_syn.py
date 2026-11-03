@@ -511,7 +511,7 @@ def syn_download(config: MammaConfig, family: SynFamily, selected: Callable[[], 
     if config.fetch_into is not None:
         if config.sequences is None:
             raise ValueError("--fetch-into proves the Hub download on chosen sequences: name them with --sequences (MammaSyn is 6.63 TB)")
-        paths.require_outside([config.fetch_into], roots=[paths.NAS_ROOT, config.root])
+        paths.require_outside([config.fetch_into], roots=[*paths.NAS_RAW_ROOTS, config.root])
         for directory, shards in selected():
             mismatches: list[str] = fetch_proof(config.root, directory, shards, config.fetch_into)
             problems += mismatches
@@ -561,7 +561,7 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
     def prefetch(self, identity: SequenceIdentity, source: SynSequence, *, force: bool) -> None:
         """Copy the shards of a sequence whose pixels are still to convert to local disk, and index the copy, while the one before
         it converts. A sequence that needs its labels alone reads them in place (``convert``)."""
-        if needs_pixels(self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]):
+        if needs_pixels(self.pending_layers(identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root])[1]):
             staged: Path = self.stage_root / identity.recording_id
             try:
                 sequence_samples(stage_shards(source.shards, staged), self.config.index_root, identity.sequence_key)
@@ -574,7 +574,7 @@ class MammaSynDataset(DataforgeDataset[MammaConfig, SynSequence]):
 
         A sequence whose pending layers need no pixels reads its label pickles in place, never staging its shards.
         """
-        targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
+        targets, pending = self.pending_layers(identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root])
         if not pending:
             return targets[paths.BASE_LAYER]
         pixels: bool = needs_pixels(pending)
@@ -810,7 +810,7 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         """Read the members of a clip still to convert into memory while the clip before it converts (a clip's samples lie in a
         few runs of its batch's shards: a few reads, instead of three random NAS reads per sample on the convert's path). A clip
         whose pending layers need no pixels reads its label pickles and one PNG header (``sample_members``)."""
-        pending: list[str] = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])[1]
+        pending: list[str] = self.pending_layers(identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root])[1]
         if pending:
             pixels: bool = needs_pixels(pending)
             members: list[ShardMember] = sample_members(self.clip_samples(source), pixels)
@@ -820,7 +820,7 @@ class MammaBedlamDataset(DataforgeDataset[MammaConfig, BedlamClip]):
         """Read the clip once (encoding it when base is pending; its labels alone when no pending layer needs pixels), pose every
         person and move them into the camera frame, write."""
         members: dict[tuple[str, int], bytes] | None = self.prefetched.pop(identity.recording_id, None)
-        targets, pending = self.pending_layers(identity, force=force, roots=[paths.NAS_ROOT, self.config.root])
+        targets, pending = self.pending_layers(identity, force=force, roots=[*paths.NAS_RAW_ROOTS, self.config.root])
         if not pending:
             return targets[paths.BASE_LAYER]
         samples: list[SynSample] = self.clip_samples(source)

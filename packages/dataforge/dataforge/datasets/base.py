@@ -23,6 +23,7 @@ from typing import ClassVar, Generic, TypeVar
 
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun.catalog import DatasetEntry
 from serde import serde
 
 from dataforge import paths, writing
@@ -160,6 +161,12 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
         Only the base layer embeds a blueprint (``blueprint``, else the dataset's default) and Rerun's own
         ``RecordingInfo``; a derived layer stacks onto it under the same recording id.
+
+        TODO(dataforge): decide whether to keep embedding. A catalog registers only the first recording of an rrd
+        (Rerun 0.41 ``DatasetEntry.register``), so it never sees this blueprint; ``apis/register.py`` publishes the
+        layouts it does use. The embedded copy serves only a base opened as a local file, and some datasets embed a
+        per-sequence layout that differs from the registered one (SelfCap: base-only vs. all layers; MAMMA: one
+        sequence's rig). The alternative: stop embedding and save an ``.rbl`` beside local files.
         """
         base: bool = layer == paths.BASE_LAYER
         return writing.atomic_recording(
@@ -220,6 +227,24 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         everything else is excluded rather than hidden. Mandatory for the same
         reason: without it, table cards fall back to viewer heuristics that
         decode every stream of every visible row.
+        """
+
+    def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint | rrb.table.TableBlueprint]:
+        """The segment and segment-table layouts ``dataforge-register`` publishes for ``entry``, its layers registered.
+
+        A dataset whose layout depends on what the catalog holds reads ``entry``; by default the layouts are fixed.
+        """
+        return self.default_blueprint(), self.table_blueprint()
+
+    def register_assets(self, entry: DatasetEntry, output_root: Path) -> None:
+        """Register the dataset's shared static models as catalog assets, after its layers are registered.
+
+        ``dataforge-register`` calls this on every run, so assets follow the current code and the registered
+        segments. Most datasets have none.
+
+        Args:
+            entry: The catalog dataset, with every layer registered.
+            output_root: Where the asset files are written; the server must be able to read them.
         """
 
     def table_fields(self) -> TableFields:
