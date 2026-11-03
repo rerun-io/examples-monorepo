@@ -11,14 +11,9 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 from dataforge import schema, transports
-from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.datasets.selfcap import (
     DEVICE_MESH_FILES,
     DEVICE_MESHES,
-    log_quest_hand_poses,
-    read_hand_poses,
-    write_device_asset,
-    write_coco133_layer,
     CameraCalibration,
     EpisodePlan,
     HeadPoses,
@@ -26,15 +21,29 @@ from dataforge.datasets.selfcap import (
     SelfcapDataset,
     build_episode_plan,
     exo_devices,
+    log_quest_hand_poses,
     read_calibration,
+    read_hand_poses,
     read_head_poses,
     read_imu_csv,
     read_session_task,
+    write_coco133_layer,
+    write_device_asset,
 )
-from dataforge.datasets.selfcap_raw import OAK_MOUNT_OTHER, OAK_MOUNTS, assumed_phone_lens, quest_mesh_frame, FactoryCalibration, nominal_oak_mount, oak_stereo, quest_left_T_right
+from dataforge.datasets.selfcap_raw import (
+    OAK_MOUNT_OTHER,
+    OAK_MOUNTS,
+    FactoryCalibration,
+    assumed_phone_lens,
+    nominal_oak_mount,
+    oak_stereo,
+    quest_left_T_right,
+    quest_mesh_frame,
+)
 from dataforge.identity import SequenceIdentity
-from dataforge.records import read_json
 from dataforge.logging_toolkit import ImuChannel
+from dataforge.quest_joint_poses import quest_hand_path
+from dataforge.records import read_json
 
 SESSION_A: str = "25aeb66a-cf5a-44a3-845f-62606cefabe7"
 """Session uuid whose first eight characters become the identity's middle part."""

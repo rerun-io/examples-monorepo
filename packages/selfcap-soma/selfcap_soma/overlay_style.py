@@ -4,7 +4,6 @@ import numpy as np
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
-
 MIN_OBSERVED_SCORE: float = 0.7
 """Detector score a 2D keypoint needs to count as image evidence; the stored entities keep every score."""
 

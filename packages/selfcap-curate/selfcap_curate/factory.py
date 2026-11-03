@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
-from dataforge.datasets.selfcap_raw import FactoryCalibration, FactoryExtrinsic, Intrinsic, crop_shift_px, oak_stereo, quest_left_T_right
+from dataforge.datasets.selfcap_raw import FactoryCalibration, FactoryExtrinsic, Intrinsic, crop_shift_px, quest_left_T_right
 from dataforge.datasets.selfcap_raw import factory_transform as transform  # one owner for the factory transform
 from jaxtyping import Float64
 from numpy import ndarray

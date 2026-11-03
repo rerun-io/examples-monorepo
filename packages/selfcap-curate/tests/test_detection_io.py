@@ -154,7 +154,6 @@ def test_align_and_calibrate_read_the_full_set_with_real_scores(tmp_path, fixtur
 def test_catalog_reader_still_reads_layers_written_with_plain_confidence(tmp_path, fixture_sync, synthetic_base, private_server):
     # Layers written before Points2DWithConfidence keep their score in a plain "confidence" AnyValues column.
     import rerun as rr
-
     from dataforge.logging_toolkit import capture_column, time_column
 
     sync = fixture_sync()

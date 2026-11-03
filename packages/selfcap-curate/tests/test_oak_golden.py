@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from dataforge.datasets.selfcap_raw import crop_shift_px
 from frozen_v2 import GOLDEN_REFS, RAW, ROOT, SERVED, assert_quest_block, load_oak_detections, oak_median_reference
 from scipy.spatial.transform import Rotation
 from serde.json import from_json
@@ -15,7 +16,6 @@ from selfcap_curate.apis.pool import RotationConfig as Config
 from selfcap_curate.apis.pool import rotation_main as main
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_factories
 from selfcap_curate.device_tables import read_camera50_table, read_rotations
-from dataforge.datasets.selfcap_raw import crop_shift_px
 from selfcap_curate.factory import intrinsic_matrix, oak_centre, oak_stereo, read_quest_block
 from selfcap_curate.oak_mount import fixed_rotation, gyro_mount, solve_oak
 from selfcap_curate.quest_fit import read_session_episode

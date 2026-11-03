@@ -11,10 +11,10 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 from dataforge import schema
-from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.datasets.selfcap import log_quest_hand_poses, log_quest_hands, read_quest_hands
 from dataforge.datasets.selfcap_raw import read_quest_joint_hands
 from dataforge.logging_toolkit import capture_column
+from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.schema import CAPTURE_TIMELINE
 from dataforge.writing import recording_to
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader

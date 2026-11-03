@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from dataforge.datasets.selfcap_raw import crop_shift_px
 from rerun.chunk import RrdReader
 from rrd_fixtures import private_server
 from rrd_references import KeypointReference, OakReference, reference_tables
@@ -18,7 +19,6 @@ from serde.json import from_json
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
 from selfcap_curate.catalog_io import DATASET_NAME, open_segment
 from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
-from dataforge.datasets.selfcap_raw import crop_shift_px
 from selfcap_curate.factory import intrinsic_matrix, read_quest_block
 from selfcap_curate.keypoints import Keypoints2D, ViewDetections
 from selfcap_curate.patch_base import patch
