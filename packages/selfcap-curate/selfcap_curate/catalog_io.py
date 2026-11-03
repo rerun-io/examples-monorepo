@@ -360,3 +360,15 @@ def floats(column: pa.ChunkedArray, *shape: int) -> Float64[ndarray, "..."]:
     while pa.types.is_list(values.type) or pa.types.is_fixed_size_list(values.type):
         values = values.flatten()
     return values.to_numpy(zero_copy_only=False).astype(np.float64).reshape(*shape)
+
+
+def read_calibration_sync(dataset: DatasetEntry, segment_id: str, original: TimeSync) -> TimeSync:
+    """Use the effective clock published with the local pose; old calibration layers keep their catalog clock."""
+    table = dataset.filter_segments(segment_id).filter_contents(["/__properties/calibration_sync"]).reader(index=None).to_arrow_table()
+    column = next((name for name in table.column_names if name.endswith(":calibration_sync:record_json")), None)
+    if column is None or not len(table[column].drop_null()):
+        return original
+    record = read_frozen_sync(Path(segment_id), text=str(scalar(table, column)))
+    if record.episode_key.segment != segment_id:
+        raise ValueError(f"{segment_id}: calibration clock belongs to {record.key}")
+    return record

@@ -17,6 +17,7 @@ from selfcap_curate.catalog_io import (
     aligned_phone_videos,
     median_rate,
     open_segment,
+    read_calibration_sync,
     read_catalog_hands,
     read_phone_videos,
     read_time_sync,
@@ -97,7 +98,7 @@ def main(config: Config) -> None:
             except ValueError as error:
                 print("KEYPOINTS_SKIP", key, str(error), flush=True)
                 continue
-            sync = read_time_sync(dataset, segment.id)
+            sync = read_calibration_sync(calibration, segment.id, read_time_sync(dataset, segment.id))
             cameras = {p: c for p, c in cameras.items() if (sync.offsets_ms or {}).get("exo/" + p) is not None}
             if len(cameras) < 2:
                 print("KEYPOINTS_SKIP", key, "fewer than two calibrated and synced phones", flush=True)

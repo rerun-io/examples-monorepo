@@ -441,3 +441,16 @@ def test_calibrate_egohand_fits_the_mount_on_all_three_oak_cameras(calibration_c
     assert calls["views"] == calls["layer"] == ["left", "rgb", "right"]
     assert calls["solve"] == (1, ["left", "rgb", "right"], True)
     assert state.oak.ok and state.oak.rotation_source == "stereo+rgb joint"
+
+
+def test_calibration_layer_carries_the_clock_accepted_with_its_pose(tmp_path, layer_case) -> None:
+    from serde.json import from_json
+    from selfcap_curate.records import TimeSync
+
+    state, motion = layer_case
+    effective = replace(motion.sync, offsets_ms={**(motion.sync.offsets_ms or {}), "exo/A": 125.0})
+    state = replace(state, effective_sync={motion.sync.key: effective})
+    path = tmp_path / "clocked.rrd"
+    write_calib_layer(path, state, motion)
+    table = next(chunk.to_record_batch() for chunk in RrdReader(path).stream() if str(chunk.entity_path) == "/__properties/calibration_sync")
+    assert from_json(TimeSync, table["record_json"][0].as_py()[0]) == effective

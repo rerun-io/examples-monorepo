@@ -1,7 +1,7 @@
 """One calibration-only layer per episode; no hands, predictions, or catalog writes."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -14,10 +14,11 @@ from dataforge.writing import atomic_recording
 from jaxtyping import Float64
 from numpy import ndarray
 from serde import serde, to_dict
+from serde.json import to_json
 
 from selfcap_curate.exo_calibration import SessionCalibration
 from selfcap_curate.factory import QuestBlock
-from selfcap_curate.records import OakFit, SessionEpisode, oak_quest_offset_ms
+from selfcap_curate.records import OakFit, SessionEpisode, TimeSync, oak_quest_offset_ms
 
 METHOD: str = "selfcap-calib v1 (2026-10-16)"
 WORLD: str = "Quest world: head_pose.csv frame, metres, Y-up; cameras OpenCV RDF"
@@ -32,6 +33,9 @@ class CalibSession:
     quest: QuestBlock  # Factory pinholes and resolved camera-50 borrowing.
     stereo: dict[str, Float64[ndarray, "4 4"]]  # Factory rgb_T_left and rgb_T_right in metres.
     version: str = "selfcap-curate-calib-v1"  # Implementation provenance, distinct from the legacy method label.
+    effective_sync: dict[str, TimeSync] = field(default_factory=dict)
+    """Effective episode clocks accepted with the fitted cameras, keyed by unprefixed episode key."""
+
 
 
 @serde(deny_unknown_fields=True)
@@ -125,6 +129,9 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
         if session.quest.mode != "healthy":  # a borrowed camera-50 transform is an estimate, so it lives here
             for slot, matrix in session.quest.rig_T_cam.items():
                 tf(schema.cam_path(quest_rig, int(slot)), matrix, calib_source=f"quest calibration.json ({session.quest.mode})")
+        effective = session.effective_sync.get(sync.key)
+        if effective is not None:
+            recording.send_property("calibration_sync", rr.AnyValues(record_json=to_json(effective)))
         recording.send_property(
             "calib",
             rr.AnyValues(

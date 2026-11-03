@@ -31,6 +31,7 @@ from selfcap_curate.oak_egohand import detect_oak_egohand, detect_oak_views
 from selfcap_curate.oak_mount import OakLens, fixed_rotation, fixed_rotation_reason, gyro_mount, oak_lenses, solve_oak, solve_oak_stereo
 from selfcap_curate.quest_fit import read_session_episode
 from selfcap_curate.records import OAK_CAMERAS, EpisodeKey, OakDetections, OakFit, SessionEpisode, oak_quest_offset_ms
+from selfcap_curate.sync_policy import apply_clock_overrides
 
 
 @serde(deny_unknown_fields=True)
@@ -183,7 +184,7 @@ def refine_with_head(state: CalibSession, episode: SessionEpisode, focals: dict[
     if head.clock_corrections_ms:
         print("HEAD_CLOCK", segment, head.clock_corrections_ms, flush=True)
     print("HEAD_CALIBRATION", segment, {p: (r.method, r.face_median_px) for p, r in head.phones.items()}, flush=True)
-    return replace(state, exo=head.exo)
+    return replace(state, exo=head.exo, effective_sync={**state.effective_sync, episode.sync.key: apply_clock_overrides(episode.sync, head.clock_corrections_ms)})
 
 
 def main(config: Config) -> CalibSession:

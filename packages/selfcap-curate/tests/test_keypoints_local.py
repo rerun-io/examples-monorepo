@@ -277,3 +277,41 @@ def test_cli_skips_calibration_for_different_base_before_gpu(tmp_path, monkeypat
         api.main(api.Config(local, tmp_path / "out", rate=2.0, segment_ids=(key,), catalog_url=server.url()))
     assert f"KEYPOINTS_SKIP {key} local calib phones absent from base: B" in capsys.readouterr().out
     assert not (tmp_path / "out" / f"selfcap__{key}.rrd").exists()
+
+
+@pytest.mark.integration
+def test_keypoints_uses_the_effective_clock_published_with_its_camera_pose(tmp_path, monkeypatch, synthetic_base, private_server):
+    """A pose refined at a corrected clock must select packets on that same clock."""
+    from rerun.chunk import Chunk, LazyChunkStream, RrdReader
+    from serde.json import to_json
+
+    local = tmp_path / "local"
+    local.mkdir()
+    key = "2025-12-30__65d00748__ep001"
+    source = local / f"selfcap__{key}.rrd"
+    before = calibration(source)
+    effective = replace(before, offsets_ms={**before.offsets_ms, "exo/A": 125.0})
+    staged = tmp_path / "effective.rrd"
+    LazyChunkStream.merge(
+        RrdReader(source).stream(),
+        LazyChunkStream.from_iter([Chunk.from_property("calibration_sync", rr.AnyValues(record_json=to_json(effective)))]),
+    ).write_rrd(staged, application_id="test", recording_id=f"selfcap__{key}")
+    staged.replace(source)
+    base = synthetic_base(tmp_path / "base.rrd", segment=f"selfcap__{key}", phones=tuple("ABC"), oak=False, quest=False,
+                          video=VIDEO_FIXTURES / "av1_48f_192x160.mp4")
+    monkeypatch.setattr(api, "read_time_sync", lambda *_args: before)
+    monkeypatch.setattr(api, "read_catalog_hands", lambda *_args: empty_raw_hands())
+    monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: ())
+    monkeypatch.setattr(api, "keypoint_models", lambda *_args: (None, None))
+
+    class Checked(Exception):
+        pass
+
+    def detect(_segment, _detector, _pose, *, sync, videos, **_kwargs):
+        assert sync.offsets_ms["exo/A"] == 125.0
+        assert videos["A"].t_ns[0] - videos["B"].t_ns[0] == 125_000_000
+        raise Checked
+
+    monkeypatch.setattr(api, "detect_keypoints", detect)
+    with private_server({DATASET_NAME: [base]}) as server, pytest.raises(Checked):
+        api.main(api.Config(local, tmp_path / "out", segment_ids=(key,), catalog_url=server.url()))
