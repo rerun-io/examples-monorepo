@@ -17,14 +17,13 @@ def test_log_projections_writes_property_and_each_camera(tmp_path: Path) -> None
     times = np.array([123], dtype=np.int64)
     frames = np.array([7], dtype=np.int64)
     with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
+        hands.log_projections_property(recording, camera_model="FISHEYE62", calibration_source="factory")
         hands.log_projections(
             recording,
-            [((0, 2), positions), ((1, 0), positions)],
+            [(schema.coco133_uv_projected_path(0, 2), positions), (schema.coco133_uv_projected_path(1, 0), positions)],
             times_ns=times,
             frame_indices=frames,
             confidence=np.full((1, 133), 0.75, dtype=np.float32),
-            camera_model="FISHEYE62",
-            calibration_source="factory",
         )
     chunks = read_chunks(target)
     fields = {
@@ -120,7 +119,7 @@ def test_keypoint_colour_range_preserves_scores_across_all_writers(tmp_path: Pat
     with writing.atomic_recording(target, recording_id="range", send_properties=False) as recording:
         hands.log_keypoints3d(recording, times_ns=times, frame_indices=None, positions=positions, confidence=confidence, color_range=color_range)
         hands.log_keypoints2d(recording, "/pixels", times_ns=times, frame_indices=None, positions=positions[..., :2], confidence=confidence, color_range=color_range)
-        hands.log_projections(recording, [((0, 0), positions[..., :2])], times_ns=times, frame_indices=None, confidence=confidence, camera_model="pinhole", color_range=color_range)
+        hands.log_projections(recording, [(schema.coco133_uv_projected_path(0, 0), positions[..., :2])], times_ns=times, frame_indices=None, confidence=confidence, color_range=color_range)
     batches = [chunk.to_record_batch() for chunk in read_chunks(target) if not chunk.is_static]
     assert len(batches) == 3
     for batch in batches:

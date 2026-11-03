@@ -197,13 +197,14 @@ def write_projections(
 ) -> None:
     """Project every exo camera through its eight-coefficient lens with the shared projections writer."""
     positions = np.stack([row.positions for row in rows])
+    hands.log_projections_property(recording, camera_model=ExoCamera.camera_model)
     hands.log_projections(
         recording,
-        (((rig, 0), project_keypoints(cameras[name], positions)) for rig, name in enumerate(EXO_CAMERAS)),
+        ((schema.coco133_uv_projected_path(rig, 0), project_keypoints(cameras[name], positions)) for rig, name in enumerate(EXO_CAMERAS)),
         times_ns=times,
         frame_indices=frames,
         confidence=np.stack([row.confidence for row in rows]),
-        camera_model=ExoCamera.camera_model,
+
         describe=describe,
     )
 

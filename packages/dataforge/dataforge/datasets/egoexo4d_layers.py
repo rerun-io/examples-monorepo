@@ -307,24 +307,23 @@ def write_projections(recording: rr.RecordingStream, fit: HmFit, frames: FrameSi
     positions: Float32[ndarray, "t 133 3"] = fit_keypoints(fit, rows)
     world_T_device: Float64[ndarray, "t 4 4"] = frames.world_T_device[rows]
 
-    def pixels() -> Iterator[tuple[tuple[int, int], Float32[ndarray, "t 133 2"]]]:
+    def pixels() -> Iterator[tuple[str, Float32[ndarray, "t 133 2"]]]:
         flat: Float64[ndarray, "p 3"] = positions.reshape(-1, 3).astype(np.float64)
         for rig, calib in enumerate(cameras.gopros, start=1):  # each GoPro's KB4 lens at its stored size
             camera: Fisheye62Parameters = calib.camera(*stored_size(calib))
             cam_T_world: Float64[ndarray, "4 4"] = camera.extrinsics.cam_T_world
-            yield (rig, 0), project_fisheye62(flat @ cam_T_world[:3, :3].T + cam_T_world[:3, 3], camera).reshape(-1, 133, 2).astype(np.float32)
+            yield schema.coco133_uv_projected_path(rig, 0), project_fisheye62(flat @ cam_T_world[:3, :3].T + cam_T_world[:3, 3], camera).reshape(-1, 133, 2).astype(np.float32)
         device: aria.DeviceCalibration = aria.DeviceCalibration.from_json(cameras.aria_calib_json, SIDECAR)
         for cam, stream in enumerate(ARIA_STREAMS):
             if stream.calibrated:  # in the stored (rotated) orientation
                 calibration: Fisheye624Parameters = logged_calibration(device.camera(stream.name), *cameras.aria_sizes[stream.name])
-                yield (EGO_RIG, cam), aria.project_frames(calibration, world_T_device, positions)
+                yield schema.coco133_uv_projected_path(EGO_RIG, cam), aria.project_frames(calibration, world_T_device, positions)
 
+    hands.log_projections_property(recording, camera_model=f"{KB4} (GoPros), {FISHEYE624} (Aria)", calibration_source="gopro_calibs.csv; Aria factory calib_json")
     hands.log_projections(
         recording,
         pixels(),
         times_ns=frames.times_ns[rows],
         frame_indices=rows,
         confidence=np.isfinite(positions).all(axis=-1).astype(np.float32),
-        camera_model=f"{KB4} (GoPros), {FISHEYE624} (Aria)",
-        calibration_source="gopro_calibs.csv; Aria factory calib_json",
     )

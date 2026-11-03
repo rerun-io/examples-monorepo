@@ -366,13 +366,13 @@ def write_projections_layer(
     coco: Float64[ndarray, "f 133 3"] = track.coco133.astype(np.float64)
     confidence: Float32[ndarray, "f 133"] = np.isfinite(coco).all(axis=-1).astype(np.float32)
 
-    def pixels_by_camera() -> Iterator[tuple[tuple[int, int], Float32[ndarray, "f 133 2"]]]:
+    def pixels_by_camera() -> Iterator[tuple[str, Float32[ndarray, "f 133 2"]]]:
         for cam, calibration in enumerate(calibrations):
-            yield (0, cam), project(poses[cam], calibration, coco).astype(np.float32)
+            yield schema.coco133_uv_projected_path(0, cam), project(poses[cam], calibration, coco).astype(np.float32)
 
+    hands.log_projections_property(recording, camera_model="ds", calibration_source="camera_info (double sphere) per episode")
     hands.log_projections(
         recording, pixels_by_camera(), times_ns=track.times_ns, frame_indices=track.frame_indices, confidence=confidence,
-        camera_model="ds", calibration_source="camera_info (double sphere) per episode",
     )  # fmt: skip
     count: int = len(BODY_NAMES)
     for cam, calibration in enumerate(calibrations):

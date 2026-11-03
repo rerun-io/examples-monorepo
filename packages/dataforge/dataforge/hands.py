@@ -159,19 +159,12 @@ def log_keypoints2d(
     confidence: Float32[ndarray, "t 133"] | None,
     describe: bool = True,
     color_range: tuple[float, float] = (0.0, 1.0),
-    shown: Bool[ndarray, "t 133"] | None = None,
 ) -> None:
-    """Write Float32[t,133,2] pixels and raw confidence; color_range controls only the red-to-green display scale.
-
-    Model detections pass ``shown``: ``path`` keeps every detection and its real score, and ``schema.shown_path(path)``
-    holds only the shown points, for the layout to draw. Sources without a detector score (shipped labels, projections) omit it.
-    """
+    """Write Float32[t,133,2] pixels and raw confidence; color_range controls only display colours."""
     if describe:
         log_keypoint_descriptors(recording, path, dimension=2)
-        if shown is not None:
-            rr.log(schema.shown_path(path), Points2DWithConfidence.from_fields(show_labels=False, radii=3.0), static=True, recording=recording)
     _send_keypoint_rows(
-        recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2, color_range=color_range, shown=shown
+        recording, path, times_ns=times_ns, frame_indices=frame_indices, positions=positions, confidence=confidence, dimension=2, color_range=color_range
     )
 
 
@@ -202,15 +195,14 @@ def _send_keypoint_rows(
     confidence: Float32[ndarray, "t 133"] | None,
     dimension: Literal[2, 3],
     color_range: tuple[float, float],
-    shown: Bool[ndarray, "t 133"] | None = None,
 ) -> None:
-    """Bound temporal columns before allocation using the publication byte target; ``shown`` adds the 2D display copy."""
+    """Bound temporal columns before allocation using the publication byte target."""
     low: float = color_range[0]
     high: float = color_range[1]
     if not np.isfinite(color_range).all() or low >= high:
         raise ValueError("color_range must contain finite, increasing bounds")
     # Budget positions, confidence, packed colours (2D and 3D), offsets, row IDs and both clocks; a display copy adds ids and classes per point.
-    row_bytes = 133 * (dimension * 4 + 4 + 4 + (0 if shown is None else 4)) + 64
+    row_bytes = 133 * (dimension * 4 + 4 + 4) + 64
     rows_per_batch = (cast(int, rrc.OptimizationProfile.OBJECT_STORE.max_bytes) - 4096) // row_bytes
     for start in range(0, len(positions), rows_per_batch):
         stop = start + rows_per_batch
@@ -220,49 +212,51 @@ def _send_keypoint_rows(
         columns = archetype.columns(positions=masked.reshape(-1, dimension), confidences=scores.reshape(-1), colors=colors)
         indexes = [time_column(times_ns[start:stop]), *([] if frame_indices is None else [frame_index_column(frame_indices[start:stop])])]
         rr.send_columns(path, indexes=indexes, columns=columns.partition([133] * len(masked)), recording=recording)
-        if shown is not None:
-            keep: Bool[ndarray, "n 133"] = shown[start:stop] & np.isfinite(masked).all(axis=-1)
-            rr.send_columns(schema.shown_path(path), indexes=indexes, columns=sparse_keypoint_columns(masked, scores, keep, color_range), recording=recording)
+
+
+@dataclass(frozen=True, slots=True)
+class ShownKeypoints:
+    """Static point style and sparse temporal columns for a 2D display copy."""
+
+    columns: rr.ComponentColumnList
+    """Kept points with COCO ids, raw confidence and score colours."""
+    style: rr.ComponentColumnList
+    """Three-pixel points without labels, on a static clock."""
+
+
+def shown_keypoint_columns(
+    positions: Float32[ndarray, "t 133 2"], scores: Float32[ndarray, "t 133"], keep: Bool[ndarray, "t 133"]
+) -> ShownKeypoints:
+    """Build the shown copy of Float32[t,133,2] pixels using the shared confidence colour floor."""
+    return ShownKeypoints(
+        sparse_keypoint_columns(positions, scores, keep & np.isfinite(positions).all(-1), (schema.SHOWN_MIN_CONFIDENCE, 1.0)),
+        rr.Points2D.columns(radii=[3.0], show_labels=[False]),
+    )
+
+
+def log_projections_property(recording: rr.RecordingStream, *, camera_model: str, calibration_source: str | None = None) -> None:
+    """Record the lens model and source of an episode's derived projections."""
+    recording.send_property(
+        paths.PROJECTIONS_LAYER,
+        rr.AnyValues(drop_untyped_nones=True, derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source),
+    )
 
 
 def log_projections(
     recording: rr.RecordingStream,
-    pixels_by_camera: Iterable[tuple[tuple[int, int], Float32[ndarray, "t 133 2"]]],
+    pixels_by_camera: Iterable[tuple[str, Float32[ndarray, "t 133 2"]]],
     *,
     times_ns: Int64[ndarray, "t"],
     frame_indices: Int64[ndarray, "t"] | None,
     confidence: Float32[ndarray, "t 133"],
-    camera_model: str,
-    entity_name: str = "coco133_uv_projected",
-    write_property: bool = True,
-    calibration_source: str | None = None,
     describe: bool = True,
     color_range: tuple[float, float] = (0.0, 1.0),
 ) -> None:
-    """Write the ``projections`` property, then each ``(rig, cam)``'s lens-projected COCO-133 pixels.
-
-    Each dataset projects through its own lens model; this writes the result the same way for all.
-    The property records ``derived_from``, ``camera_model`` and, when given, ``calibration_source``.
-    ``color_range`` rescales display colours only; stored confidence stays raw.
-    ``entity_name`` selects a sibling overlay; ``write_property`` controls the ``projections`` property.
-    ``pixels_by_camera`` is consumed one camera at a time, so a generator that projects each camera
-    as it is asked for keeps a single camera's pixels in memory.
-    """
-    if write_property:
-        recording.send_property(
-            paths.PROJECTIONS_LAYER,
-            rr.AnyValues(drop_untyped_nones=True, derived_from="coco133_xyz", camera_model=camera_model, calibration_source=calibration_source),
-        )
-    for (rig, cam), pixels in pixels_by_camera:
+    """Write each entity's lens-projected COCO-133 pixels, consuming one camera at a time."""
+    for entity, pixels in pixels_by_camera:
         log_keypoints2d(
-            recording,
-            f"{schema.pinhole_path(rig, cam)}/{entity_name}",
-            times_ns=times_ns,
-            frame_indices=frame_indices,
-            positions=pixels,
-            confidence=confidence,
-            describe=describe,
-            color_range=color_range,
+            recording, entity, times_ns=times_ns, frame_indices=frame_indices, positions=pixels,
+            confidence=confidence, describe=describe, color_range=color_range,
         )
 
 

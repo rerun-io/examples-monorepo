@@ -192,15 +192,14 @@ def write_projections(recording: rr.RecordingStream, scene: Scene) -> None:
     Without hand samples only the property is written.
     """
     batch = scene.hands
+    hands.log_projections_property(recording, camera_model="FISHEYE624", calibration_source="VRS factory")
     hands.log_projections(
         recording,
         (
-            ((0, index), aria.project_frames(camera.calibration, batch.device_poses, batch.positions))
+            (schema.coco133_uv_projected_path(0, index), aria.project_frames(camera.calibration, batch.device_poses, batch.positions))
             for index, camera in enumerate(scene.cameras if len(batch.times_ns) else [])
         ),
         times_ns=batch.times_ns,
         frame_indices=batch.frame_indices,
         confidence=batch.confidence,
-        camera_model="FISHEYE624",
-        calibration_source="VRS factory",
     )

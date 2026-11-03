@@ -215,7 +215,7 @@ def write_meshes(recording: rr.RecordingStream, scene: SequenceData) -> None:
 def write_projections(recording: rr.RecordingStream, scene: SequenceData, keypoints: HandKeypoints) -> None:
     """Write lens-model projections on the hand-pose clock, clearing untracked frames."""
 
-    def pixels_by_camera() -> Iterator[tuple[tuple[int, int], Float32[ndarray, "n 133 2"]]]:
+    def pixels_by_camera() -> Iterator[tuple[str, Float32[ndarray, "n 133 2"]]]:
         """Project one camera at a time, as the writer logs it."""
         for index, camera in enumerate(rig_cameras(scene)):
             world_T_cam: Float64[ndarray, "n 4 4"] = scene.world_T_rig @ scene.rig_T_cam[index]
@@ -224,13 +224,13 @@ def write_projections(recording: rr.RecordingStream, scene: SequenceData, keypoi
                 "nji,nkj->nki", world_T_cam[:, :3, :3], keypoints.positions - world_T_cam[:, None, :3, 3]
             )
             projected: Float64[ndarray, "p 2"] = project_fisheye62(xyz_cam.reshape(-1, 3), camera)
-            yield (0, index), projected.reshape(scene.count, 133, 2).astype(np.float32)
+            yield schema.coco133_uv_projected_path(0, index), projected.reshape(scene.count, 133, 2).astype(np.float32)
 
+    hands.log_projections_property(recording, camera_model=FISHEYE62)
     hands.log_projections(
         recording,
         pixels_by_camera(),
         times_ns=scene.times_ns,
         frame_indices=scene.frame_indices,
         confidence=keypoints.confidence,
-        camera_model=FISHEYE62,
     )

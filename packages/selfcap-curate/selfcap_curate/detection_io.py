@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-from dataforge.hands import sparse_keypoint_columns
+from dataforge.hands import shown_keypoint_columns, sparse_keypoint_columns
 from dataforge.logging_toolkit import capture_column, time_column
 from dataforge.schema import SHOWN_MIN_CONFIDENCE, coco133_uv_path, coco133_uv_shown_path
 from dataforge.writing import APPLICATION_ID, atomic_write
@@ -72,15 +72,14 @@ def write_detections_layer(path: Path, sync: TimeSync, layout: SelfcapLayout, de
             stamps = np.rint(hand.times_s * 1e9).astype(np.int64)
             scores: Float32[ndarray, "f 133"] = hand.scores.astype(np.float32)
             xy: Float32[ndarray, "f 133 2"] = hand.xy.astype(np.float32)
-            # The full set, then the copy the layout draws: only points at or above SHOWN_MIN_CONFIDENCE, each with its id.
-            for path, keep in (
-                (entity, np.ones(scores.shape, dtype=bool)),
-                (coco133_uv_shown_path(rig, 0, pred="sapiens2"), scores >= SHOWN_MIN_CONFIDENCE),
+            copy = shown_keypoint_columns(xy, scores, scores >= SHOWN_MIN_CONFIDENCE)
+            for path, columns in (
+                (entity, sparse_keypoint_columns(xy, scores, np.ones(scores.shape, dtype=bool))),
+                (coco133_uv_shown_path(rig, 0, pred="sapiens2"), copy.columns),
             ):
-                # 3 px dots without labels, as dataforge.hands draws COCO-133 keypoints; the default dots vanish under the links.
-                yield Chunk.from_columns(path, indexes=[], columns=rr.Points2D.columns(radii=[3.0], show_labels=[False]))
-                # The raw score rides as Points2DWithConfidence; each point wears the shared red-to-green score colour.
-                yield Chunk.from_columns(path, indexes=[capture_column(stamps), time_column(stamps + offset_ns)], columns=sparse_keypoint_columns(xy, scores, keep))
+                yield Chunk.from_columns(path, indexes=[], columns=copy.style)
+                yield Chunk.from_columns(path, indexes=[capture_column(stamps), time_column(stamps + offset_ns)], columns=columns)
+
 
     with atomic_write(path) as target:
         LazyChunkStream.from_iter(chunks()).collect(optimize=OptimizationProfile.OBJECT_STORE).write_rrd(

@@ -8,6 +8,7 @@ import rerun as rr
 from conftest import read_chunks
 
 from dataforge import hands, meshes, objects, schema, writing
+from dataforge.logging_toolkit import time_column
 
 
 @pytest.mark.parametrize("shipped", [None, 0.25, 0.0])
@@ -40,7 +41,10 @@ def test_2d_rows_keep_every_detection_and_the_display_copy_only_the_shown_points
     target = tmp_path / "hands.rrd"
     entity = "/world/rig_00/cam_00/pinhole/pred/rtmw/coco133_uv"
     with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
-        hands.log_keypoints2d(recording, entity, times_ns=np.array([0, 1], dtype=np.int64), frame_indices=None, positions=uv, confidence=scores, shown=scores >= 0.7)
+        hands.log_keypoints2d(recording, entity, times_ns=np.array([0, 1], dtype=np.int64), frame_indices=None, positions=uv, confidence=scores)
+        copy = hands.shown_keypoint_columns(uv, scores, scores >= 0.7)
+        recording.send_columns(schema.shown_path(entity), indexes=[], columns=copy.style)
+        recording.send_columns(schema.shown_path(entity), indexes=[time_column(np.array([0, 1], dtype=np.int64))], columns=copy.columns)
     chunks = read_chunks(target)
     raw = next(c.to_record_batch() for c in chunks if not c.is_static and str(c.entity_path) == entity)
     np.testing.assert_array_equal(np.array(raw.column("Points2D:positions").to_pylist()[0], dtype=np.float32)[3], uv[0, 3])
