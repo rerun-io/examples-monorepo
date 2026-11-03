@@ -17,6 +17,7 @@ from serde import SerdeError, serde
 from serde.json import from_json, to_json
 
 from selfcap_soma.anthropometry import plausible_ears, usable_ears
+from selfcap_soma.assets import SOMA_BODY_FILES, SOMA_X_REPO_ID, SOMA_X_REVISION
 from selfcap_soma.catalog import ExoSource, open_segment, read_window, subset
 from selfcap_soma.fitting import Calibration, FitOptions, fit
 from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
@@ -167,7 +168,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     digest.update(
         f"{VERSION}:{config.exo_source}:{config.iterations}:{config.shape_iterations}:{config.body_acceleration_weight}:{config.torso_temporal_weight}:{config.final_learning_rate}".encode()
     )
-    for array in (data.times, data.exo, data.confidence, data.hands, data.head_rotations):
+    for array in (data.times, data.exo, data.confidence, data.hands, data.head_positions, data.head_rotations):
         digest.update(array.tobytes())
     if data.support is not None:
         digest.update(data.support.tobytes())
@@ -178,6 +179,21 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         for array in (hand.times_ns, hand.positions, hand.orientations):
             if array is not None:
                 digest.update(array.tobytes())
+    evidence = sorted(name for name in catalog.columns if name.startswith("/world/rig_") and any(
+        kind in name for kind in (":Transform3D:", ":Pinhole:", ":Points2D:", ":confidence", ":simplecv.KeypointConfidence2D:", ":simplecv.components.DistortionCoefficients")
+    ))
+    if evidence:
+        entities = sorted({name.split(":", 1)[0] for name in evidence})
+        for index in (None, "video_time"):
+            table = catalog.view.filter_contents(entities).reader(index=index).select(*evidence).to_arrow_table()
+            for batch in table.combine_chunks().to_batches():
+                digest.update(batch.serialize().to_pybytes())
+    if config.assets is None:
+        digest.update(f"{SOMA_X_REPO_ID}@{SOMA_X_REVISION}".encode())
+    else:
+        for name in SOMA_BODY_FILES:
+            digest.update(name.encode())
+            digest.update(file_sha256(config.assets / name).encode())
     signature = digest.hexdigest()
     state_path = directory / "checkpoint.json"
     state = Checkpoint(signature, "new", Timings()) if config.force else read_checkpoint(state_path, signature)

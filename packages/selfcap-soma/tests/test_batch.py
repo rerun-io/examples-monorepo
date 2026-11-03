@@ -207,3 +207,19 @@ def _dataset() -> SimpleNamespace:
     view = Mock(spec=DatasetSelection)
     view.segment_table.return_value.to_arrow_table.return_value = table
     return SimpleNamespace(filter_segments=lambda _segment: view)
+
+
+def test_changed_camera_calibration_invalidates_a_completed_checkpoint(tmp_path: Path, transport, monkeypatch) -> None:
+    config = Config(catalog_url="test", dataset="test", output=tmp_path)
+    catalog = batch.open_segment(None, SEGMENT)
+    column = "/world/rig_00/cam_00/pinhole:Pinhole:image_from_camera"
+    catalog = SegmentCatalog(catalog.view, [column], catalog.rigs)
+    monkeypatch.setattr(batch, "open_segment", lambda *_args: catalog)
+    table = pa.table({column: [[[1.0] * 9]]})
+    catalog.view.filter_contents.return_value.reader.return_value.select.return_value.to_arrow_table.side_effect = lambda: table
+    run_segment(config, SEGMENT)
+    checkpoint = tmp_path / "test" / SEGMENT / "checkpoint.json"
+    before = json.loads(checkpoint.read_text())["signature"]
+    table = pa.table({column: [[[2.0] * 9]]})
+    run_segment(config, SEGMENT)
+    assert json.loads(checkpoint.read_text())["signature"] != before
