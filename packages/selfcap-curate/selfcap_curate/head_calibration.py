@@ -8,6 +8,7 @@ does not reach ACCEPT_FACE_PX keeps its hands-only pose (or stays unposed).
 from dataclasses import dataclass, field, replace
 
 import numpy as np
+from dataforge.selfcap_schema import rdf_head
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -53,10 +54,6 @@ class HeadCalibration:
     """Phone offsets (ms) the head track finds where the phone's clock was missing or decisively wrong."""
 
 
-RUB_TO_RDF: Float64[ndarray, "3 3"] = np.diag([1.0, -1.0, -1.0])
-"""Turns an orientation stored with x right, y up, z back (OpenXR camera axes) into RDF."""
-
-
 def head_track(source: CatalogHands, quest_pose_ms: float) -> HeadTrack:
     """The Quest head pose (left-eye origin, head-to-world xyzw) moved onto the aligned clock, in RDF axes.
 
@@ -67,10 +64,8 @@ def head_track(source: CatalogHands, quest_pose_ms: float) -> HeadTrack:
     valid = np.isfinite(source.head_positions).all(1) & (np.linalg.norm(source.head_quaternions, axis=1) > 0.5)
     times = source.head_times_s[valid] + quest_pose_ms / 1000.0
     order = np.flatnonzero(np.r_[True, np.diff(times) > 0.0])
-    rotations = Rotation.from_quat(source.head_quaternions[valid][order]).as_matrix()
-    if np.median(rotations[:, 1, 1]) > 0.0:
-        return HeadTrack(times[order], rotations @ RUB_TO_RDF, source.head_positions[valid][order], convention="RUB")
-    return HeadTrack(times[order], rotations, source.head_positions[valid][order])
+    axes = rdf_head(source.head_quaternions[valid][order], source.head_convention)
+    return HeadTrack(times[order], Rotation.from_quat(axes.quaternions).as_matrix(), source.head_positions[valid][order], convention=axes.convention)
 
 
 def unverified(phone: PhoneCalibration, episode: str) -> PhoneCalibration:

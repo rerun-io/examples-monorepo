@@ -11,10 +11,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
+from dataforge.interpolation import bracket, lerp, slerp
+from dataforge.selfcap_schema import HeadConvention
+from dataforge.triangulation import Camera as TriangulationCamera
+from dataforge.triangulation import triangulate_frames
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from scipy.optimize import least_squares
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 
 from selfcap_curate.exo_calibration import Camera, solve_camera
 from selfcap_curate.quest_fit import Correspondences
@@ -43,20 +47,15 @@ class HeadTrack:
     """Head-to-world rotations."""
     positions: Float64[ndarray, "n 3"]
     """Head origin in world metres."""
-    convention: str = "RDF"
+    convention: HeadConvention = "RDF"
     """Axes the source stored the orientation in; the rotations here are always RDF (x right, y down, z forward)."""
 
     def at(self, times: Float64[ndarray, "m"]) -> tuple[Float64[ndarray, "m 3 3"], Float64[ndarray, "m 3"], Bool[ndarray, "m"]]:
         """Slerp/lerp between neighbours no more than HEAD_GAP_S apart; invalid rows are identity at the origin."""
-        stamps = self.times_s
-        right = np.clip(np.searchsorted(stamps, times), 1, len(stamps) - 1)
-        left = right - 1
-        gap = stamps[right] - stamps[left]
-        valid = (times >= stamps[0]) & (times <= stamps[-1]) & (gap > 0.0) & (gap <= HEAD_GAP_S)
-        clipped = np.clip(times, stamps[0], stamps[-1])
-        rotations = Slerp(stamps, Rotation.from_matrix(self.rotations))(clipped).as_matrix()
-        alpha = ((clipped - stamps[left]) / np.maximum(gap, 1e-12))[:, None]
-        positions = (1.0 - alpha) * self.positions[left] + alpha * self.positions[right]
+        samples = bracket(self.times_s, times, HEAD_GAP_S, clip=True)
+        valid = samples.valid
+        rotations = slerp(self.times_s, Rotation.from_matrix(self.rotations), times)
+        positions = lerp(self.positions, samples)
         rotations[~valid], positions[~valid] = np.eye(3), 0.0
         return rotations, positions, valid
 
@@ -198,9 +197,6 @@ MIN_BODY_SCORE: float = 0.5
 BODY_GATE_PX: float = 25.0
 """A view joins a body point only within this many pixels: wider than the 8 px keypoints gate, because the poses it
 corrects disagree by 9-14 px on joints far from the head (7ffcbc7e legs, 4b1b6cdc elbow)."""
-MIN_BODY_RAY_DEG: float = 5.0
-"""Body points whose agreeing rays all lie within this angle of one line (side by side or facing each other) carry no depth
-and are left out, as in keypoints."""
 MAX_BODY_PAIRS: int = 1200
 """Body pairs per phone and round, evenly spaced: about as many as the gated hand pairs, so neither dominates."""
 BODY_ROUNDS: int = 3
@@ -220,53 +216,23 @@ class BodyTrack:
 
 
 def triangulate_bodies(cameras: Mapping[str, Camera], bodies: Mapping[str, BodyTrack], gate_px: float = BODY_GATE_PX) -> Float64[ndarray, "n j 3"]:
-    """Each frame's body joints from the views that see them: DLT, drop views beyond ``gate_px``, refit.
-
-    NaN where fewer than two views agree, or where the agreeing rays meet at less than MIN_BODY_RAY_DEG.
-    """
-    phones = [p for p in cameras if p in bodies]
+    """Triangulate scored body tracks with the shared robust multi-view solver."""
+    phones: list[str] = [phone for phone in cameras if phone in bodies]
     if not phones:
         return np.zeros((0, len(BODY), 3))
-    times = bodies[phones[0]].times_s
-    if any(not np.array_equal(bodies[p].times_s, times) for p in phones):
+    times: Float64[ndarray, "n"] = bodies[phones[0]].times_s
+    if any(not np.array_equal(bodies[phone].times_s, times) for phone in phones):
         raise ValueError("body tracks must share one time grid")
-    xy = np.stack([bodies[p].xy for p in phones])  # v n j 2
-    use = np.stack([bodies[p].scores >= MIN_BODY_SCORE for p in phones]) & np.isfinite(xy).all(-1)
-    xy = np.nan_to_num(xy)
-    matrices = np.stack([_projection(cameras[p]) for p in phones])  # v 3 4
-    rows = np.stack([xy[..., :1] * matrices[:, None, None, 2] - matrices[:, None, None, 0],
-                     xy[..., 1:] * matrices[:, None, None, 2] - matrices[:, None, None, 1]], axis=-2)  # v n j 2 4
-    centres = np.stack([cameras[p].world_T_cam[:3, 3] for p in phones])
-
-    def solve(mask: Bool[ndarray, "v n j"]) -> Float64[ndarray, "n j 3"]:
-        weighted = rows * mask[..., None, None]
-        gram = np.einsum("vnjri,vnjrk->njik", weighted, weighted)
-        vectors = np.linalg.eigh(gram)[1][..., 0]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            points = vectors[..., :3] / vectors[..., 3:]
-        points[mask.sum(0) < 2] = np.nan
-        return points
-
-    def errors(points: Float64[ndarray, "n j 3"]) -> Float64[ndarray, "v n j"]:
-        flat = np.nan_to_num(points).reshape(-1, 3)
-        out = []
-        for v, p in enumerate(phones):
-            uvd = cameras[p].project(flat)
-            error = np.linalg.norm(uvd[:, :2] - xy[v].reshape(-1, 2), axis=1)
-            out.append(np.where(uvd[:, 2] > 0.0, error, np.inf).reshape(points.shape[:2]))
-        return np.where(np.isfinite(points).all(-1)[None], np.stack(out), np.inf)
-
-    mask = use
-    for _ in range(2):
-        mask = use & (errors(solve(mask)) <= gate_px)
-    points = solve(mask)
-    rays = points[None] - centres[:, None, None]
-    rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
-    cosines = np.einsum("anjk,bnjk->abnj", rays, rays)
-    pair = mask[:, None] & mask[None] & ~np.eye(len(phones), dtype=bool)[..., None, None]
-    widest = np.where(pair, np.abs(cosines), 1.0).min(axis=(0, 1))  # the lines' angle: facing phones carry no depth either
-    points[~(widest < np.cos(np.radians(MIN_BODY_RAY_DEG)))] = np.nan
-    return points
+    adapted: list[TriangulationCamera] = []
+    for phone in phones:
+        camera: Camera = cameras[phone]
+        p: Float64[ndarray, "11"] = camera.parameters
+        matrix: Float64[ndarray, "3 3"] = np.array([[p[6], 0.0, p[7]], [0.0, p[6], p[8]], [0.0, 0.0, 1.0]])
+        adapted.append(TriangulationCamera(matrix, camera.world_T_cam, (float(p[9]), float(p[10])), phone))
+    xy: Float64[ndarray, "n v j 2"] = np.stack([bodies[phone].xy for phone in phones], axis=1)
+    scores: Float64[ndarray, "n v j"] = np.stack([bodies[phone].scores for phone in phones], axis=1)
+    scores = np.where(scores >= MIN_BODY_SCORE, scores, 0.0)
+    return triangulate_frames(adapted, xy, scores, threshold=gate_px).xyz.astype(np.float64)
 
 
 def body_correspondences(camera: Camera, body: BodyTrack, points: Float64[ndarray, "n j 3"]) -> Correspondences:

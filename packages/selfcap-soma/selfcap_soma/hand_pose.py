@@ -9,10 +9,11 @@ from typing import Literal
 
 import numpy as np
 import torch
+from dataforge.interpolation import bracket, lerp, slerp
 from dataforge.quest_joint_poses import QuestJointPoses
 from jaxtyping import Bool, Float, Float32, Float64, Int64
 from numpy import ndarray
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 from serde import serde
 from torch import Tensor
 
@@ -40,6 +41,10 @@ class HandOrientations:
     """Per-hand raw orientation availability; derived frames are never called measured."""
 
 
+HAND_ORIENTATION_MAX_GAP_S: float = 0.04
+"""Hand poses require intervals strictly shorter than 40 ms."""
+
+
 def read_orientations(hands: dict[str, QuestJointPoses], times: Float64[ndarray, "n"], offset_ms: float) -> HandOrientations:
     """Sample the Quest joint poses (raw stamps, e.g. ``read_segment_hand_poses``) on the fit clock.
 
@@ -57,29 +62,19 @@ def read_orientations(hands: dict[str, QuestJointPoses], times: Float64[ndarray,
             continue
         sources.append("none" if raw.orientations is None else "quest")
         stamps = raw.times_ns.astype(np.float64) / 1e9
-        right = np.clip(np.searchsorted(stamps, samples), 1, len(stamps) - 1)
-        left = right - 1
-        fraction = ((samples - stamps[left]) / (stamps[right] - stamps[left]))[:, None, None]
-        positions[:, side] = (1 - fraction) * raw.positions[left] + fraction * raw.positions[right]
+        bounds = bracket(stamps, samples, HAND_ORIENTATION_MAX_GAP_S, inclusive=False, denominator_floor=0.0)
+        left, right = bounds.left, bounds.right
+        positions[:, side] = lerp(raw.positions, bounds)
         if raw.orientations is None:
-            valid[:, side] = (
-                np.isfinite(positions[:, side]).all(-1)
-                & (samples[:, None] >= stamps[0])
-                & (samples[:, None] <= stamps[-1])
-                & ((stamps[right] - stamps[left])[:, None] < 0.04)
-            )
+            valid[:, side] = np.isfinite(positions[:, side]).all(-1) & bounds.valid[:, None]
             continue
         for joint in range(26):
             q = raw.orientations[:, joint].astype(np.float64)
             good = np.isfinite(q).all(-1) & (np.linalg.norm(q, axis=-1) > 0.5)
             if good.sum() < 2:
                 continue
-            rotations[:, side, joint] = Slerp(stamps[good], Rotation.from_quat(q[good]))(
-                np.clip(samples, stamps[good][0], stamps[good][-1])
-            ).as_matrix()
-            valid[:, side, joint] = (
-                good[left] & good[right] & (samples >= stamps[0]) & (samples <= stamps[-1]) & ((stamps[right] - stamps[left]) < 0.04)
-            )
+            rotations[:, side, joint] = slerp(stamps[good], Rotation.from_quat(q[good]), samples)
+            valid[:, side, joint] = good[left] & good[right] & bounds.valid
     return HandOrientations(positions, rotations, valid, (sources[0], sources[1]))
 
 

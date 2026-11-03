@@ -14,6 +14,8 @@ from numpy import ndarray
 from rerun.catalog import DatasetSelection
 from scipy.spatial.transform import Rotation
 
+from dataforge.selfcap_schema import rdf_head
+
 MOUNT_SOURCE = "oak_mount_source"
 """AnyValues field on the OAK rig: ``nominal`` (base prior) or ``fitted`` (calibration)."""
 PRIOR_LEAD_NS = 1_000_000
@@ -62,9 +64,21 @@ def read_fitted_mount(view: DatasetSelection, oak: str) -> Float64[ndarray, "4 4
     return _rigid(rotation, translation)
 
 
+@dataclass(frozen=True, slots=True)
+class RigTrack:
+    """World poses and the basis needed to attach stored camera extrinsics."""
+
+    times_s: Float64[ndarray, "n"]
+    """Pose timestamps on video_time, in seconds."""
+    world_T_rig: Float64[ndarray, "n 4 4"]
+    """Rig poses, with RDF axes when normalization was requested."""
+    recorded_T_rig: Float64[ndarray, "4 4"]
+    """Read-side rig axes expressed in the unchanged recorded parent frame."""
+
+
 def read_rig_track(
-    view: DatasetSelection, rig: str, *, start_ns: int | None = None, end_ns: int | None = None
-) -> tuple[Float64[ndarray, "n"], Float64[ndarray, "n 4 4"]] | None:
+    view: DatasetSelection, rig: str, *, start_ns: int | None = None, end_ns: int | None = None, normalize_head: bool = False
+) -> RigTrack | None:
     """A rig's world poses on ``video_time`` (seconds, 4x4), or None when it has no pose in the window."""
     frame = view.filter_contents([rig]).reader(index="video_time")
     if start_ns is not None:
@@ -78,7 +92,11 @@ def read_rig_track(
     times_s = rows["video_time"].combine_chunks().cast(pa.int64()).to_numpy() * 1e-9
     translations = np.asarray(rows[f"{rig}:Transform3D:translation"].to_pylist(), dtype=np.float64).reshape(-1, 3)
     quaternions = np.asarray(rows[f"{rig}:Transform3D:quaternion"].to_pylist(), dtype=np.float64).reshape(-1, 4)
-    return times_s, compose_track(translations, quaternions, np.eye(4))
+    recorded_T_rig: Float64[ndarray, "4 4"] = np.eye(4)
+    if normalize_head:
+        axes = rdf_head(quaternions)
+        quaternions, recorded_T_rig = axes.quaternions, axes.recorded_T_rdf
+    return RigTrack(times_s, compose_track(translations, quaternions, np.eye(4)), recorded_T_rig)
 
 
 def read_oak_track(
@@ -91,10 +109,10 @@ def read_oak_track(
     mount = read_fitted_mount(view, oak)
     if mount is None:
         return None
-    track = read_rig_track(view if poses is None else poses, quest, start_ns=start_ns, end_ns=end_ns)
+    track = read_rig_track(view if poses is None else poses, quest, start_ns=start_ns, end_ns=end_ns, normalize_head=True)
     if track is None:
         return None
-    return track[0], track[1] @ mount
+    return track.times_s, track.world_T_rig @ np.linalg.inv(track.recorded_T_rig) @ mount
 
 
 @dataclass(frozen=True, slots=True)

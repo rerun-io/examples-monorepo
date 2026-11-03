@@ -9,8 +9,10 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 from torch import Tensor
+
+from dataforge.interpolation import bracket, lerp, slerp
 
 INLIER_PX: float = 8.0
 """A view supports a point when it reprojects within this many pixels."""
@@ -108,22 +110,20 @@ class EgoCamera:
 
 
 def camera_transforms(
-    times_s: Float64[ndarray, "n"], stamps: Float64[ndarray, "p"],
-    world_T_rig: Float64[ndarray, "p 4 4"], rig_T_cam: Float64[ndarray, "4 4"],
+    times_s: Float64[ndarray, "n"],
+    stamps: Float64[ndarray, "p"],
+    world_T_rig: Float64[ndarray, "p 4 4"],
+    rig_T_cam: Float64[ndarray, "4 4"],
 ) -> Float64[ndarray, "n 4 4"]:
     """Interpolate rig translation/rotation, then apply the camera lever arm; gaps over 100 ms stay missing."""
     output: Float64[ndarray, "n 4 4"] = np.full((len(times_s), 4, 4), np.nan)
     if len(stamps) < 2:
         return output
 
-    right = np.clip(np.searchsorted(stamps, times_s), 1, len(stamps) - 1)
-    left = right - 1
-    gap = stamps[right] - stamps[left]
-    usable = (times_s >= stamps[0]) & (times_s <= stamps[-1]) & (gap <= EGO_POSE_MAX_GAP_S)
-    clipped = np.clip(times_s, stamps[0], stamps[-1])
-    alpha = ((clipped - stamps[left]) / np.maximum(gap, 1e-12))[:, None]
-    translation = (1.0 - alpha) * world_T_rig[left, :3, 3] + alpha * world_T_rig[right, :3, 3]
-    rotation = Slerp(stamps, Rotation.from_matrix(world_T_rig[:, :3, :3]))(clipped).as_matrix()
+    samples = bracket(stamps, times_s, EGO_POSE_MAX_GAP_S, clip=True)
+    usable = samples.valid
+    translation = lerp(world_T_rig[:, :3, 3], samples)
+    rotation = slerp(stamps, Rotation.from_matrix(world_T_rig[:, :3, :3]), times_s)
     world_T_cam_r = rotation @ rig_T_cam[:3, :3]
     world_T_cam_t = translation + np.einsum("nij,j->ni", rotation, rig_T_cam[:3, 3])
     output[:] = np.eye(4)

@@ -16,8 +16,6 @@ from selfcap_curate.apis import calibrate as api
 from selfcap_curate.apis.calibrate import Config, main
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
 from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
-from selfcap_curate.exo_refine import Refinement
-from selfcap_curate.exo_refine_catalog import Gate, Score
 from selfcap_curate.factory import QuestBlock
 from selfcap_curate.records import CatalogHands, ExoFit, GyroFit, OakDetections, OakFit, PhoneDetections, SelfcapLayout, write_sync
 
@@ -74,39 +72,6 @@ def test_calibrate_cli_rejects_mixed_sessions_before_catalog_access(tmp_path: Pa
     with pytest.raises(ValueError, match="exactly one session"):
         main(config)
     assert not config.output_dir.exists()
-
-
-def test_exo_refinement_preserves_quest_and_oak_transform_bytes(tmp_path: Path) -> None:
-    phones = ('A', 'B', 'C', 'D')
-    sync = replace(fixture_sync(), offsets_ms={"quest_pose": 0.0}, exo_fit={p: ExoFit(None, "test") for p in phones})
-    raw = CatalogHands(np.empty(0), np.empty((0, 133, 3)), np.array([0.0, 1.0]), np.array([[0.,0.,0.],[1.,2.,3.]]),
-                       np.tile([0.0, 0.0, 0.0, 1.0], (2, 1)))
-    motion = replace(session_episode(sync, raw, np.empty(0), np.empty((0, 3))), layout=SelfcapLayout(4, 5, phones))
-    camera = Camera(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 900.0, 960.0, 540.0, 0.0, 0.0]))
-    right = np.eye(4)
-    right[0, 3] = 0.06
-    refinement = Refinement((camera,) * 4, np.array([0.01, -0.03, 0.02]), "label-hash", "fixed")
-    state = CalibSession("synthetic", SessionCalibration("synthetic", {p: PhoneCalibration(True, camera) for p in phones}),
-                         OakFit("synthetic", True, "oak", 4.0, np.eye(4), 1.0), QuestBlock({}, {"1": right}, "healthy"),
-                         {"rgb_T_left": np.eye(4), "rgb_T_right": right})
-    paths = [tmp_path / "before.rrd", tmp_path / "after.rrd"]
-    write_calib_layer(paths[0], state, motion)
-    write_calib_layer(paths[1], replace(state, exo_refinements={sync.episode_key.segment: refinement}), motion)
-
-    def transform_bytes(path: Path) -> list[tuple[str, bytes]]:
-        result = []
-        for chunk in RrdReader(path).stream():
-            entity = str(chunk.entity_path)
-            if not entity.startswith(("/world/rig_04", "/world/rig_05")):
-                continue
-            batch = chunk.to_record_batch()
-            columns = [name for name in batch.schema.names if name.startswith(("Transform3D:", "Pinhole:")) or name == "video_time"]
-            if any(name.startswith(("Transform3D:", "Pinhole:")) for name in columns):
-                result.append((entity, batch.select(columns).serialize().to_pybytes()))
-        return sorted(result)
-
-    assert transform_bytes(paths[0])
-    assert transform_bytes(paths[0]) == transform_bytes(paths[1])
 
 
 def test_calibrate_cli_refuses_existing_output_before_solving(tmp_path: Path) -> None:
@@ -168,6 +133,29 @@ def test_unsynced_quest_writes_no_fitted_oak_mount(tmp_path: Path, layer_case, f
     prop = next(c.to_record_batch() for c in chunks if str(c.entity_path) == "/__properties/calib")
     assert bool(mount) == (flag is None)  # an unsynced Quest leaves the base layer's nominal mount in place
     assert prop.column("oak_posed")[0].as_py() == [flag is None]
+
+
+@pytest.mark.parametrize("rub", [False, True], ids=["rdf-base", "rub-base"])
+@pytest.mark.parametrize("head_frame", ["recorded", "rdf"], ids=["legacy-fit", "rdf-fit"])
+def test_fitted_mount_is_written_in_the_unchanged_parent_axes(tmp_path, layer_case, rub, head_frame) -> None:
+    state, motion = layer_case
+    # Identity in the world is RUB; a half turn about x is RDF.
+    quaternion = [0.0, 0.0, 0.0, 1.0] if rub else [1.0, 0.0, 0.0, 0.0]
+    hands = replace(motion.hands, head_quaternions=np.tile(quaternion, (2, 1)))
+    mount = np.eye(4)
+    mount[:3, 3] = [0.1, 0.2, 0.3]
+    state = replace(state, oak=replace(state.oak, questrig_T_rgb=mount, head_frame=head_frame))
+    motion = replace(motion, hands=hands, layout=SelfcapLayout(3, 4, ("A", "B", "C")))
+    path = tmp_path / "axes.rrd"
+    write_calib_layer(path, state, motion)
+    expected = np.diag([1.0, -1.0, -1.0, 1.0]) @ mount if rub and head_frame == "rdf" else mount
+    batches = [chunk.to_record_batch() for chunk in RrdReader(path).stream() if str(chunk.entity_path) == "/world/rig_03"]
+    transforms = [batch for batch in batches if "Transform3D:mat3x3" in batch.schema.names]
+    assert len(transforms) == 2  # Static queries and the viewer's timed override use the same axes.
+    for batch in transforms:
+        rotation = np.asarray(batch.column("Transform3D:mat3x3")[0].as_py()[0]).reshape(3, 3).T
+        np.testing.assert_allclose(rotation, expected[:3, :3])
+        np.testing.assert_allclose(batch.column("Transform3D:translation")[0].as_py()[0], expected[:3, 3])
 
 
 @pytest.mark.parametrize("episode_median,session_median,expected", [(None, None, None), (None, 3.0, None), (0.0, 3.0, 0.0), (2.0, 3.0, 2.0)])
@@ -348,23 +336,6 @@ def test_layer_binds_each_written_camera_to_its_phone(tmp_path, layer_case) -> N
         batch = named[f"/world/rig_{rig:02d}/cam_00"]
         assert batch.column("calib_phone")[0].as_py() == [phone]
         assert batch.column("calib_status")[0].as_py() == ["ok"]
-
-
-def test_layer_records_the_exo_gate_as_a_property_not_a_sidecar(tmp_path, layer_case) -> None:
-    state, motion = layer_case
-    medians = {"headset": (39.4, 8.5), "phones": (84.6, 2.0), "sapiens_hands": (8.4, 8.7), "rtmw_hands": (9.6, 10.4), "body_transfer": (24.7, 29.0)}
-    gate = Gate({m: Score(100, b, None) for m, (b, _) in medians.items()}, {m: Score(90, a, None) for m, (_, a) in medians.items()}, (), False,
-                full_fit_converged=True)
-    path = tmp_path / "gated.rrd"
-    write_calib_layer(path, state, replace(motion, layout=SelfcapLayout(3, 4, ("A", "B", "C"))), gate=gate)
-    assert not list(tmp_path.glob("*.json"))
-    prop = next(c.to_record_batch() for c in RrdReader(path).stream() if str(c.entity_path) == "/__properties/exo_gate")
-    assert prop.column("passes")[0].as_py() == [False]
-    assert prop.column("full_fit_converged")[0].as_py() == [True]
-    assert prop.column("headset_before_px")[0].as_py() == [39.4]
-    assert prop.column("headset_after_px")[0].as_py() == [8.5]
-    assert prop.column("body_transfer_after_px")[0].as_py() == [29.0]
-    assert prop.column("rtmw_hands_n")[0].as_py() == [90]
 
 
 def test_calibrate_reuses_catalog_phones_without_phone_inference(calibration_call, monkeypatch):

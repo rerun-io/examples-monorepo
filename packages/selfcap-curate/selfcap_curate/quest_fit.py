@@ -7,11 +7,16 @@ semantics. No guessed confidence is assigned to the catalog's raw Quest hands.
 from dataclasses import dataclass
 
 import numpy as np
+from dataforge.interpolation import bracket
+from dataforge.selfcap_schema import rdf_head
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
 from selfcap_curate.catalog_io import Segment, read_catalog_hands, read_gyro
 from selfcap_curate.records import HAND_BASE, MAPPED, CatalogHands, HandTrack, PhoneDetections, SessionEpisode, Side, TimeSync
+
+HAND_MAX_GAP_S: float = 0.04
+"""Quest hand pairs require a strictly shorter interval than 40 ms."""
 
 
 def load_quest_hands(source: CatalogHands) -> dict[Side, HandTrack]:
@@ -26,6 +31,7 @@ def load_quest_hands(source: CatalogHands) -> dict[Side, HandTrack]:
     """
     if len(source.head_times_s) == 0:
         raise ValueError("Quest hands require the base's capture-time head pose")
+    head_axes = rdf_head(source.head_quaternions)
     result: dict[Side, HandTrack] = {}
     directions: dict[Side, Float64[ndarray, "n 3"]] = {}
     for side, base in HAND_BASE.items():
@@ -39,7 +45,7 @@ def load_quest_hands(source: CatalogHands) -> dict[Side, HandTrack]:
         frozen = np.r_[False, np.abs(np.diff(joints, axis=0)).sum((1, 2)) == 0.0]
         valid &= ~(frozen & np.roll(frozen, -1))
         hi = np.clip(np.searchsorted(source.head_times_s, source.times_s), 0, len(source.head_times_s) - 1)
-        q = source.head_quaternions[hi] * np.array([-1.0, -1.0, -1.0, 1.0])
+        q = head_axes.quaternions[hi] * np.array([-1.0, -1.0, -1.0, 1.0])
         v = wrist - source.head_positions[hi]
         cross = 2.0 * np.cross(q[:, :3], v)
         rotated = v + q[:, 3:4] * cross + np.cross(q[:, :3], cross)
@@ -75,12 +81,9 @@ class Correspondences:
 
 def hand_neighbors(hand: HandTrack, times: Float64[ndarray, "n"]) -> tuple[Int64[ndarray, "n"], Float64[ndarray, "n"], Bool[ndarray, "n"]]:
     """Share the 1e-6 denominator and strict 40 ms tracked-neighbor gate only."""
-    i = np.clip(np.searchsorted(hand.times_s, times), 1, len(hand.times_s) - 1)
-    alpha = np.clip((times - hand.times_s[i - 1]) / np.maximum(hand.times_s[i] - hand.times_s[i - 1], 1e-6), 0.0, 1.0)
-    valid = (
-        (times >= hand.times_s[0]) & (times <= hand.times_s[-1]) & hand.valid[i] & hand.valid[i - 1] & (hand.times_s[i] - hand.times_s[i - 1] < 0.04)
-    )
-    return i, alpha, valid
+    samples = bracket(hand.times_s, times, HAND_MAX_GAP_S, inclusive=False, denominator_floor=1e-6, clip=True)
+    valid = samples.valid & hand.valid[samples.left] & hand.valid[samples.right]
+    return samples.right, samples.alpha, valid
 
 
 def pairs(detections: PhoneDetections, quest: dict[Side, HandTrack], tau_s: float) -> Correspondences:

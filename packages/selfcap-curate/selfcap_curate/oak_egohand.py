@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from dataforge.datasets.selfcap_raw import Intrinsic
+from dataforge.selfcap_schema import rdf_head
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from posekit.models.egohand import (
@@ -129,8 +130,14 @@ def egohand_models(assets: Path | None) -> tuple[EgoHandDetector, EgoHandPredict
 
 @torch.inference_mode()
 def detect_oak_egohand(
-    episode: SessionEpisode, video: CatalogVideo, intrinsic: Intrinsic, rotation: Float64[ndarray, "3 3"] | None,
-    assets: Path | None, *, camera: EgoCamera | None = None, retain_models: bool = False,
+    episode: SessionEpisode,
+    video: CatalogVideo,
+    intrinsic: Intrinsic,
+    rotation: Float64[ndarray, "3 3"] | None,
+    assets: Path | None,
+    *,
+    camera: EgoCamera | None = None,
+    retain_models: bool = False,
 ) -> OakDetections:
     """Run only 64 seeded samples; release this episode's GPU models before returning."""
     qp: float | None = oak_quest_offset_ms(episode.sync)
@@ -140,10 +147,18 @@ def detect_oak_egohand(
     head: CatalogHands = episode.hands
     if camera is None and rotation is not None:
         poses: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(head.head_times_s), 1, 1))
-        poses[:, :3, :3] = Rotation.from_quat(head.head_quaternions).as_matrix() @ rotation
+        poses[:, :3, :3] = Rotation.from_quat(rdf_head(head.head_quaternions).quaternions).as_matrix() @ rotation
         poses[:, :3, 3] = head.head_positions
-        camera = EgoCamera(episode.layout.oak_rig, 0, intrinsic_matrix(intrinsic), np.asarray(intrinsic.distortion.coefficients, dtype=np.float64),
-                           (intrinsic.capture_resolution.width, intrinsic.capture_resolution.height), np.eye(4), head.head_times_s + qp / 1000.0, poses)
+        camera = EgoCamera(
+            episode.layout.oak_rig,
+            0,
+            intrinsic_matrix(intrinsic),
+            np.asarray(intrinsic.distortion.coefficients, dtype=np.float64),
+            (intrinsic.capture_resolution.width, intrinsic.capture_resolution.height),
+            np.eye(4),
+            head.head_times_s + qp / 1000.0,
+            poses,
+        )
     xyz: Float32[ndarray, "f 133 3"] = np.full((len(times), 133, 3), np.nan, np.float32)
     tracked: Bool[ndarray, "f 2"] = np.zeros((len(times), 2), bool)
     for side_index, (side, base) in enumerate(HAND_BASE.items()):
@@ -154,8 +169,11 @@ def detect_oak_egohand(
     size: tuple[int, int] = camera.size if camera is not None else (intrinsic.capture_resolution.width, intrinsic.capture_resolution.height)
     pixels: Float32[ndarray, "f 133 2"] | None = project_ego(camera, times, xyz) if camera is not None and rotation is not None else None
     selection: OakFrameSelection = select_egohand_frames(times, pixels, tracked, size)
-    lens: OAKCamera = (OAKCamera(camera.K, camera.distortion, *size) if camera is not None else
-                       OAKCamera(intrinsic_matrix(intrinsic), np.asarray(intrinsic.distortion.coefficients, dtype=np.float64), *size))
+    lens: OAKCamera = (
+        OAKCamera(camera.K, camera.distortion, *size)
+        if camera is not None
+        else OAKCamera(intrinsic_matrix(intrinsic), np.asarray(intrinsic.distortion.coefficients, dtype=np.float64), *size)
+    )
     print(f"EGOHAND_SAMPLE {episode.sync.key}: {len(selection.indices)}/{selection.eligible_count} eligible frames", flush=True)
     if not len(selection.indices):
         return OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133)))
@@ -165,8 +183,7 @@ def detect_oak_egohand(
     predictor: EgoHandPredictor | None = None
     try:
         detector, predictor = egohand_models(assets)
-        result: OakDetections = infer_egohand_frames(frames, times[selection.indices], selection.hands,
-                                     lens, detector, predictor)
+        result: OakDetections = infer_egohand_frames(frames, times[selection.indices], selection.hands, lens, detector, predictor)
         torch.cuda.synchronize()
         print(f"EGOHAND_CALIB_SECONDS {time.perf_counter() - started:.3f}", flush=True)
         return result

@@ -1,5 +1,6 @@
 """``selfcap-run`` against a fake subprocess runner and an in-process catalog: the exact commands, the order, and who survives."""
 
+import os
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -794,3 +795,23 @@ def test_a_task_outside_any_pixi_activation_keeps_the_whole_environment(tmp_path
     child: dict[str, str] = env_of_child(tmp_path, monkeypatch, {"LD_LIBRARY_PATH": "/opt/mine/lib", "PATH": "/usr/bin:/bin"}, {})
     assert child["LD_LIBRARY_PATH"] == "/opt/mine/lib"
     assert child["PATH"] == "/usr/bin:/bin"
+
+
+def test_task_log_mode_is_readable_even_with_a_restrictive_umask(tmp_path: Path) -> None:
+    log_path: Path = tmp_path / "task.log"
+    previous: int = os.umask(0o777)
+    try:
+        assert real_run_command(["/bin/true"], {}, log_path) == 0
+    finally:
+        os.umask(previous)
+    assert log_path.stat().st_mode & 0o777 == 0o644
+
+
+def test_progress_log_mode_is_readable_even_with_a_restrictive_umask(tmp_path: Path) -> None:
+    state = run.Run(Config(run_root=tmp_path, catalog_url="unused", dataset="test"))
+    previous: int = os.umask(0o777)
+    try:
+        state.log("created")
+    finally:
+        os.umask(previous)
+    assert (tmp_path / "progress.log").stat().st_mode & 0o777 == 0o644

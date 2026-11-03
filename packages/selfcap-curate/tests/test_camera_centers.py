@@ -97,5 +97,6 @@ def test_quest_centers_read_each_camera_calib_over_base(
     assert {track.label: float(track.rig_T_cam[0, 3]) for track in tracks} == pytest.approx(expected)
     for track in tracks:
         identity: Float64[ndarray, "2 4 4"] = np.tile(np.eye(4), (2, 1, 1))
-        np.testing.assert_allclose(track.world_T_rig, identity)
+        identity[:, 0, 3] = expected[track.label]
+        np.testing.assert_allclose(track.world_T_rig @ track.rig_T_cam, identity)
         np.testing.assert_allclose(track.times_s, [0.0, 0.1])

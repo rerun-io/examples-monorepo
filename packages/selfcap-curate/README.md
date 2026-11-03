@@ -77,10 +77,19 @@ to OAK left. Offsets are milliseconds to **add** to capture time. RGB uses
 is the ingested OAK left frame counter divided by 24. Phone alignment uses
 `tau - 48 ms + quest_pose`. Missing measurements remain null with flags.
 
-## Optical refinement
+## TODO
 
-`selfcap-exo-label` records optical landmarks. `selfcap-exo-refine` evaluates
-candidate camera poses with held-out gates. The `exo_refine*`, `exo_landmarks`,
-`calibration_objective`, and `device_vp` modules hold this optional stack.
-`selfcap-calibrate` exposes `--exo-refine`, `--exo-focal-source`,
-`--exo-focal-file`, and `--exo-reference-dataset` for it.
+Exo optical labeling and refinement were removed in this PR. If needed, bring
+them back as a separate step that `selfcap-run` can call.
+
+Each step now runs as a subprocess and reads its inputs from the catalog.
+Measured on easy26 (2026-11-02), keypoints start-up costs 5 s per segment
+(about 2.2 min per serial run); SOMA start-up costs about 3 s per segment
+(about 20 s wall time). A fused mode first needs pure step functions
+(inputs → outputs), thin catalog adapters, and one shared environment:
+curate and SOMA currently pin different `warp-lang` versions. The step CLIs
+and a fused runner must share one code path.
+
+The cheaper first step is to start each segment's keypoints as soon as its
+calibration passes. Today calibration (327 s) and keypoints (433 s) run back
+to back.

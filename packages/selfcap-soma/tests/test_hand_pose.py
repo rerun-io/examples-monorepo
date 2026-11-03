@@ -3,9 +3,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rerun as rr
-from dataforge.quest_joint_poses import read_segment_hand_poses
+from dataforge.quest_joint_poses import QuestJointPoses, read_segment_hand_poses
 
-from selfcap_soma.hand_pose import frame
+from selfcap_soma.hand_pose import frame, read_orientations
+
+
+@pytest.mark.parametrize("orientations", [False, True], ids=["positions", "rotations"])
+def test_zero_length_hand_gap_is_invalid_without_dividing_by_zero(orientations: bool) -> None:
+    raw = QuestJointPoses(
+        np.array([0, 0], dtype=np.int64),
+        np.ones((2, 26, 3), dtype=np.float32),
+        np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (2, 26, 1)) if orientations else None,
+        (),
+    )
+    with np.errstate(divide="raise", invalid="raise"):
+        observed = read_orientations({"left": raw}, np.array([0.0]), 0.0)
+    assert not observed.valid.any()
+    assert np.isfinite(observed.positions[:, 0]).all()
+    assert np.isfinite(observed.rotations).all()
 
 
 def test_bone_frame_is_orthonormal_and_follows_bone():

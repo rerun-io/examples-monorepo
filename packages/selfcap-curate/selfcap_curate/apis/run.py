@@ -135,6 +135,8 @@ class Run:
         """Print one line and append it to progress.log."""
         line: str = f"[{datetime.now():%H:%M:%S}] {self.config.dataset}: {message}"
         with self.lock, (self.config.run_root / "progress.log").open("a") as progress:
+            # The NAS SSD client caches new files as mode 000; chmod repairs its cached attributes.
+            (self.config.run_root / "progress.log").chmod(0o644)
             print(line, flush=True)
             progress.write(line + "\n")
 
@@ -199,8 +201,15 @@ def child_environment(parent: Mapping[str, str]) -> dict[str, str]:
 def run_command(command: list[str], env: dict[str, str], log_path: Path) -> int:
     """Run one task with its output in ``log_path`` and return its exit code."""
     with log_path.open("w") as log:
+        # The NAS SSD client caches new files as mode 000; chmod repairs its cached attributes.
+        log_path.chmod(0o644)
         completed: subprocess.CompletedProcess[bytes] = subprocess.run(
-            command, env={**child_environment(os.environ), **env}, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, check=False,
+            command,
+            env={**child_environment(os.environ), **env},
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
         )
     return completed.returncode
 

@@ -12,9 +12,11 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dataforge.hands import log_keypoints2d, log_keypoints3d, log_projections
+from dataforge.interpolation import bracket, lerp
 from dataforge.logging_toolkit import time_column
 from dataforge.oak_mount import StaticCamera, read_oak_track, read_static_cameras
 from dataforge.schema import SHOWN_MIN_CONFIDENCE, coco133_uv_projected_path, coco133_xyz_path, pinhole_path, rig_path
+from dataforge.selfcap_schema import rdf_head
 from dataforge.triangulation import (
     HEADSET_COVERED,
     INLIER_PX,
@@ -134,7 +136,7 @@ def display_skeleton(
         for start in (91, 112):
             valid: Bool[ndarray, "q"] = np.isfinite(hands[:, start : start + 21]).all(axis=(1, 2))
             for joint in range(start, start + 21):
-                points: Float32[ndarray, "n 3"] = interpolate(times, stamps, hands[:, joint].astype(np.float64), valid, 0.04).astype(np.float32)
+                points: Float32[ndarray, "n 3"] = interpolate(times, stamps, hands[:, joint].astype(np.float64), valid, HAND_MAX_GAP_S).astype(np.float32)
                 available: Bool[ndarray, "n"] = np.isfinite(points).all(axis=1)
                 output[available, joint] = points[available]
                 tracked[available, joint] = True
@@ -578,6 +580,12 @@ def read_cameras(dataset: DatasetEntry, segment: str, base_phones: tuple[str, ..
     return result
 
 
+HEAD_ANCHOR_MAX_GAP_S: float = 0.1
+"""Head anchors accept intervals up to and including 100 ms."""
+HAND_MAX_GAP_S: float = 0.04
+"""Quest hand points and wrist anchors accept intervals up to and including 40 ms."""
+
+
 def interpolate(
     times: Float64[ndarray, "m"], stamps: Float64[ndarray, "n"], values: Float64[ndarray, "n 3"], valid: Bool[ndarray, "n"], max_gap: float
 ) -> Float64[ndarray, "m 3"]:
@@ -585,11 +593,9 @@ def interpolate(
     result = np.full((len(times), 3), np.nan)
     if len(stamps) < 2:
         return result
-    right = np.clip(np.searchsorted(stamps, times), 1, len(stamps) - 1)
-    left, gap = right - 1, stamps[right] - stamps[right - 1]
-    good = (times >= stamps[0]) & (times <= stamps[-1]) & (gap > 0.0) & (gap <= max_gap) & valid[left] & valid[right]
-    alpha = ((times - stamps[left]) / np.maximum(gap, 1e-12))[:, None]
-    result[good] = ((1.0 - alpha) * values[left] + alpha * values[right])[good]
+    samples = bracket(stamps, times, max_gap)
+    good = samples.valid & valid[samples.left] & valid[samples.right]
+    result[good] = lerp(values, samples)[good]
     return result
 
 
@@ -600,11 +606,14 @@ def read_anchors(segment: Segment, times: Float64[ndarray, "n"], sync: TimeSync)
     if qp is None:
         return np.full((len(times), 3, 3), np.nan)
     source = read_catalog_hands(segment)
-    valid = np.isfinite(source.head_positions).all(1) & (np.linalg.norm(source.head_quaternions, axis=1) > 0.5)
-    head = interpolate(times, source.head_times_s + qp / 1000.0, source.head_positions, valid, 0.1)
+    axes = rdf_head(source.head_quaternions)
+    valid = np.isfinite(source.head_positions).all(1) & (np.linalg.norm(axes.quaternions, axis=1) > 0.5)
+    head = interpolate(times, source.head_times_s + qp / 1000.0, source.head_positions, valid, HEAD_ANCHOR_MAX_GAP_S)
     hands = load_quest_hands(source)
     wrists = [
-        interpolate(times, hands[side].times_s - HAND_LATENCY_MS / 1000.0 + qp / 1000.0, hands[side].joints[:, 0], hands[side].valid, 0.04)
+        interpolate(
+            times, hands[side].times_s - HAND_LATENCY_MS / 1000.0 + qp / 1000.0, hands[side].joints[:, 0], hands[side].valid, HAND_MAX_GAP_S
+        )
         for side in HAND_BASE
     ]
     return np.stack([head, *wrists], axis=1)

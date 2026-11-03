@@ -6,6 +6,14 @@ environment lacks.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal, TypeAlias
+
+import numpy as np
+from jaxtyping import Bool, Float64
+from numpy import ndarray
+from scipy.spatial.transform import Rotation
+
 from dataforge import schema
 
 EGO_STREAM_LAYOUTS: tuple[tuple[str, str], ...] = (("rgb", "center"), ("left", "left"), ("right", "right"))
@@ -47,3 +55,43 @@ PREVIEW_IMAGE_PLANE_DISTANCE: float = 0.06
 def rig_label_path(rig: int) -> str:
     """``.../rig_NN/cam_00/rig_label`` — the small labelled point that names a phone rig, at its camera."""
     return f"{schema.cam_path(rig, 0)}/rig_label"
+
+
+HeadConvention: TypeAlias = Literal["RDF", "RUB"]
+
+
+@dataclass(frozen=True, slots=True)
+class HeadAxes:
+    """Read-side orientations in RDF, with the source convention for provenance."""
+
+    quaternions: Float64[ndarray, "n 4"]
+    """Head-to-world xyzw orientations; invalid rows keep their source values."""
+    convention: HeadConvention
+    """Axes stored in the base recording."""
+
+    @property
+    def recorded_T_rdf(self) -> Float64[ndarray, "4 4"]:
+        """RDF head frame to the unchanged base rig frame."""
+        return np.diag([1.0, -1.0, -1.0, 1.0]) if self.convention == "RUB" else np.eye(4)
+
+
+def rdf_head(quaternions: Float64[ndarray, "n 4"], source_convention: HeadConvention = "RDF") -> HeadAxes:
+    """Normalize SelfCap head axes without changing the stored recording.
+
+    Camera-50 captures can store RUB axes. A worn headset's down axis points
+    down in the Y-up world; a positive median world-Y component marks RUB.
+    Right-multiplication by a 180-degree x rotation converts it to RDF.
+
+    Args:
+        quaternions: Float64[n, 4] head-to-world xyzw orientations.
+        source_convention: Keep the recorded axes when an earlier catalog read
+            has already normalized the quaternions.
+
+    Returns:
+        RDF quaternions and the basis needed to attach recorded extrinsics.
+    """
+    valid: Bool[ndarray, "n"] = np.isfinite(quaternions).all(-1) & (np.linalg.norm(quaternions, axis=-1) > 0.5)
+    if not valid.any() or np.median(Rotation.from_quat(quaternions[valid]).as_matrix()[:, 1, 1]) <= 0.0:
+        return HeadAxes(quaternions, source_convention)
+    x, y, z, w = quaternions.T
+    return HeadAxes(np.stack([w, z, -y, -x], axis=1), "RUB")

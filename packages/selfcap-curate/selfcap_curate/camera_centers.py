@@ -6,7 +6,7 @@ from typing import Literal
 
 import numpy as np
 from dataforge.logging_toolkit import time_column
-from dataforge.oak_mount import StaticCamera, read_rig_track, read_static_cameras
+from dataforge.oak_mount import RigTrack, StaticCamera, read_rig_track, read_static_cameras
 from dataforge.schema import rig_path
 from dataforge.triangulation import Camera, EgoCamera, camera_transforms, project
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
@@ -38,8 +38,8 @@ def read_quest_centers(calibration: DatasetEntry, base: DatasetEntry, segment: s
     view = base.filter_segments(segment)
     videos: set[str] = {item.entity_path for item in catalog_components(view.schema()) if item.archetype == "VideoStream"}
     cameras: dict[int, str] = {cam: f"{path}/cam_{cam:02d}" for cam in (0, 1) if f"{path}/cam_{cam:02d}/pinhole/video" in videos}
-    track: tuple[Float64[ndarray, "p"], Float64[ndarray, "p 4 4"]] | None = read_rig_track(view, path) if cameras else None
-    if track is None or len(track[0]) < 2:
+    track: RigTrack | None = read_rig_track(view, path, normalize_head=True) if cameras else None
+    if track is None or len(track.times_s) < 2:
         return []
     static: dict[str, StaticCamera] = read_static_cameras(calibration.filter_segments(segment), view, list(cameras.values()))
     result: list[CenterTrack] = []
@@ -48,7 +48,11 @@ def read_quest_centers(calibration: DatasetEntry, base: DatasetEntry, segment: s
         if matrix is None and cam == 1:
             continue  # Unresolved faulty-left mode must not invent a camera-50 baseline.
         label: str = "Quest L" if cam == 0 else "Quest R" if 0 in cameras else "Quest 50"
-        result.append(CenterTrack(label, "quest", track[0], track[1], np.eye(4) if matrix is None else matrix))
+        result.append(
+            CenterTrack(
+                label, "quest", track.times_s, track.world_T_rig, np.linalg.inv(track.recorded_T_rig) @ (np.eye(4) if matrix is None else matrix)
+            )
+        )
     return result
 
 

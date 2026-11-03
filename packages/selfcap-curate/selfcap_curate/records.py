@@ -10,6 +10,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 from dataforge.records import read_json
 from dataforge.schema import video_path
+from dataforge.selfcap_schema import HeadConvention
 from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float64
 from numpy import ndarray
@@ -294,7 +295,9 @@ class CatalogHands:
     head_positions: Float64[ndarray, "h 3"]
     """Base rig translations: the left-eye origin, not a fabricated cyclopean pose."""
     head_quaternions: Float64[ndarray, "h 4"]
-    """Head-to-world xyzw orientations."""
+    """Head-to-world xyzw orientations, RDF when loaded from the catalog."""
+    head_convention: HeadConvention = "RDF"
+    """Original orientation axes in the stored base."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,3 +464,5 @@ class OakFit:
     observation_source: Literal["sapiens", "egohand"] = "sapiens"  # Image observations used by the mount fit.
     rotation_reason: str | None = None
     camera_median_px: dict[str, float] | None = None  # Per OAK camera, for the three-camera fit.
+    head_frame: Literal["recorded", "rdf"] = "recorded"
+    """Axes of questrig_T_rgb; legacy records use the base rig axes, new fits use RDF."""

@@ -5,12 +5,14 @@ from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
+from dataforge.interpolation import bracket, lerp, slerp
 from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, joint_poses_from_table, quest_hand_path
+from dataforge.selfcap_schema import rdf_head
 from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, DatasetSelection
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 from serde import serde
 from serde.json import from_json
 
@@ -159,15 +161,19 @@ def seconds(values: pa.ChunkedArray) -> Float64[ndarray, "n"]:
     return values.cast(pa.int64()).to_numpy().astype(np.float64) / 1e9
 
 
+HAND_MAX_GAP_S: float = 0.04
+"""Hand positions accept intervals up to and including 40 ms."""
+HEAD_MAX_GAP_S: float = 0.06
+"""Head positions accept intervals up to and including 60 ms."""
+
+
 def interpolate_hands(
     times: Float64[ndarray, "q"], points: Float64[ndarray, "q 133 3"], sample: Float64[ndarray, "n"]
 ) -> Float64[ndarray, "n 133 3"]:
     """Interpolate valid bracketing samples; reject jumps, freezes and gaps."""
     result: Float64[ndarray, "n 133 3"] = np.full((len(sample), 133, 3), np.nan)
-    hi = np.clip(np.searchsorted(times, sample), 1, len(times) - 1)
-    lo = hi - 1
-    dt = times[hi] - times[lo]
-    alpha = (sample - times[lo]) / np.maximum(dt, 1e-9)
+    samples = bracket(times, sample, HAND_MAX_GAP_S, denominator_floor=1e-9)
+    lo, hi = samples.left, samples.right
     for base in (91, 112):
         hand = points[:, base : base + 21]
         finite = np.isfinite(hand).all((1, 2)) & (np.abs(hand).sum((1, 2)) > 0.0)
@@ -175,8 +181,8 @@ def interpolate_hands(
         jump = np.r_[False, speed > 4.0]
         frozen = np.r_[False, np.abs(np.diff(hand, axis=0)).sum((1, 2)) == 0.0]
         finite &= ~(jump | np.r_[jump[1:], False] | (frozen & np.r_[False, frozen[:-1]]))
-        valid = finite[lo] & finite[hi] & (dt <= 0.04) & (alpha >= 0.0) & (alpha <= 1.0)
-        result[valid, base : base + 21] = hand[lo[valid]] * (1.0 - alpha[valid, None, None]) + hand[hi[valid]] * alpha[valid, None, None]
+        valid = finite[lo] & finite[hi] & samples.valid
+        result[valid, base : base + 21] = lerp(hand, samples)[valid]
     return result
 
 
@@ -187,23 +193,11 @@ def interpolate_head(
     samples: Float64[ndarray, "n"],
 ) -> tuple[Float64[ndarray, "n 3"], Float64[ndarray, "n 3 3"]]:
     """Interpolate head poses; missing endpoints or gaps have no position target."""
-    right = np.clip(np.searchsorted(times, samples), 1, len(times) - 1)
-    valid = (samples >= times[0]) & (samples <= times[-1]) & ((times[right] - times[right - 1]) <= 0.06)
-    result = np.column_stack([np.interp(samples, times, positions[:, axis]) for axis in range(3)])
-    result[~valid] = np.nan
-    rotations = Slerp(times, Rotation.from_quat(quaternions))(np.clip(samples, times[0], times[-1])).as_matrix()
+    samples_bracket = bracket(times, samples, HEAD_MAX_GAP_S, denominator_floor=0.0)
+    result = lerp(positions, samples_bracket)
+    result[~samples_bracket.valid] = np.nan
+    rotations = slerp(times, Rotation.from_quat(quaternions), samples)
     return result, rotations
-
-
-def rdf_head(quaternions: Float64[ndarray, "p 4"]) -> Float64[ndarray, "p 4"]:
-    """Head orientations (xyzw) in RDF. Some captures (2025-12-11/12) store them with y up and z back; a worn headset is
-    never upside down, so a camera "down" axis pointing up the Y-up world on median marks them. Turning by 180 degrees
-    about x is q * (1, 0, 0, 0) = (w, z, -y, -x)."""
-    down_y = Rotation.from_quat(quaternions).as_matrix()[:, 1, 1]
-    if np.median(down_y) <= 0.0:
-        return quaternions
-    x, y, z, w = quaternions.T
-    return np.stack([w, z, -y, -x], axis=1)
 
 
 def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, source: ExoSource = "rtmw") -> Observations:
@@ -244,10 +238,17 @@ def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, 
     quaternion = f"{head_path}:Transform3D:quaternion"
     joint_entities = {side: quest_hand_path(side) for side in QUEST_HAND_SIDES}
     joint_columns = [name for name in columns if any(name.startswith(entity + ":InstancePoses3D:") for entity in joint_entities.values())]
-    raw = (view.filter_contents([hand_path, head_path, *joint_entities.values()]).reader(index="capture_time")
-           .select("capture_time", hands_column, translation, quaternion, *joint_columns).to_arrow_table())
-    hand_poses = {side: joint_poses_from_table(raw, entity, "capture_time") for side, entity in joint_entities.items()
-                  if entity + ":InstancePoses3D:translations" in raw.column_names}
+    raw = (
+        view.filter_contents([hand_path, head_path, *joint_entities.values()])
+        .reader(index="capture_time")
+        .select("capture_time", hands_column, translation, quaternion, *joint_columns)
+        .to_arrow_table()
+    )
+    hand_poses = {
+        side: joint_poses_from_table(raw, entity, "capture_time")
+        for side, entity in joint_entities.items()
+        if entity + ":InstancePoses3D:translations" in raw.column_names
+    }
     stamps = raw["capture_time"].cast(pa.int64()).to_numpy()
     raw = raw.take(np.flatnonzero((stamps >= int((head_sample[0] - 0.1) * 1e9)) & (stamps <= int((hand_sample[-1] + 0.1) * 1e9))))
     hand_table = raw.filter(raw[hands_column].is_valid())
@@ -258,7 +259,7 @@ def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, 
     hp = floats(head_table[translation], -1, 3)
     hq = floats(head_table[quaternion], -1, 4)
     keep = np.r_[True, np.diff(ht) > 0.0]
-    ht, hp, hq = ht[keep], hp[keep], rdf_head(hq[keep])
+    ht, hp, hq = ht[keep], hp[keep], rdf_head(hq[keep]).quaternions
     hands = interpolate_hands(seconds(hand_table["capture_time"]), floats(hand_table[hands_column], -1, 133, 3), hand_sample)
     positions, rotations = interpolate_head(ht, hp, hq, head_sample)
     support = floats(table[support_column], -1, 133).astype(np.int64) if support_column in table.column_names else None

@@ -163,3 +163,22 @@ def pool_rotations(free: list[OakFit], gyros: dict[str, GyroFit], generated_date
             generated_date,
         )
     return RotationTable(output)
+
+
+HEAD_FOCALS: dict[str, float] = {
+    "Dragon-413A7CC1": 888.7573979270643,
+    "Tiger-FE57138F": 890.6397739953013,
+    "Titanium-B00700F9": 906.190394332705,
+    "Wolf-387E89E1": 897.6092071409714,
+    "Comet-B1C77204": 924.478925004904,
+    "Comet-B828F32C": 915.5375316997008,
+    "Hammer-06873283": 898.0747959719213,
+    "Titanium-57BB9E1A": 894.9294280422055,
+}
+"""Image-only vanishing-point focals at 1920x1080, retained from device_vp.json for the production head fit."""
+
+
+def vp_focals(phones: list[str]) -> dict[str, float]:
+    """Keep each measured head-fit focal; unknown devices use the measured median."""
+    default: float = float(np.median(list(HEAD_FOCALS.values())))
+    return {phone: HEAD_FOCALS.get(phone, default) for phone in phones}

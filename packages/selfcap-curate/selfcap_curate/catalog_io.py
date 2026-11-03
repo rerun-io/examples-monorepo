@@ -23,7 +23,7 @@ from dataforge.schema import (
     rig_path,
     video_path,
 )
-from dataforge.selfcap_schema import DEFAULT_EXO_CAMERAS
+from dataforge.selfcap_schema import DEFAULT_EXO_CAMERAS, rdf_head
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -173,7 +173,12 @@ def read_episode(
         else read_catalog_videos(dataset, segment_id, layout.video_entities, timeline)
     )
     return EpisodeInputs(
-        layout, SpeedSeries(tg, np.linalg.norm(gyro_values, axis=1)), pose_speed(tp, quaternions), videos, tuple(focals), tuple(widths)
+        layout,
+        SpeedSeries(tg, np.linalg.norm(gyro_values, axis=1)),
+        pose_speed(tp, rdf_head(quaternions).quaternions),
+        videos,
+        tuple(focals),
+        tuple(widths),
     )
 
 
@@ -202,12 +207,14 @@ def read_catalog_hands(segment: Segment) -> CatalogHands:
     poses: pa.Table = table.filter(table[rotation_column].is_valid())
     if not len(hands):
         raise ValueError(f"{segment_id}: base Quest hands absent on capture_time; migrate the base first")
+    axes = rdf_head(floats(poses[rotation_column], -1, 4))
     return CatalogHands(
         seconds(hands[CAPTURE_TIMELINE]),
         floats(hands[points_column], -1, 133, 3),
         seconds(poses[CAPTURE_TIMELINE]),
         floats(poses[translation_column], -1, 3),
-        floats(poses[rotation_column], -1, 4),
+        axes.quaternions,
+        axes.convention,
     )
 
 

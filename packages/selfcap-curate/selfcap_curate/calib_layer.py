@@ -1,7 +1,7 @@
 """One calibration-only layer per episode; no hands, predictions, or catalog writes."""
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -9,15 +9,13 @@ import rerun as rr
 from dataforge import schema
 from dataforge.datasets.selfcap import PHONE_IMAGE_PLANE_DISTANCE
 from dataforge.logging_toolkit import capture_column, time_column
+from dataforge.selfcap_schema import rdf_head
 from dataforge.writing import atomic_recording
 from jaxtyping import Float64
 from numpy import ndarray
 from serde import serde, to_dict
-from serde.json import to_json
 
 from selfcap_curate.exo_calibration import SessionCalibration
-from selfcap_curate.exo_refine import Refinement
-from selfcap_curate.exo_refine_catalog import Gate
 from selfcap_curate.factory import QuestBlock
 from selfcap_curate.records import OakFit, SessionEpisode, oak_quest_offset_ms
 
@@ -34,8 +32,6 @@ class CalibSession:
     quest: QuestBlock  # Factory pinholes and resolved camera-50 borrowing.
     stereo: dict[str, Float64[ndarray, "4 4"]]  # Factory rgb_T_left and rgb_T_right in metres.
     version: str = "selfcap-curate-calib-v1"  # Implementation provenance, distinct from the legacy method label.
-    exo_refinements: dict[str, Refinement] = field(default_factory=dict)
-    """Opt-in episode-specific optical calibration and its complete provenance."""
 
 
 @serde(deny_unknown_fields=True)
@@ -46,12 +42,10 @@ class Provenance:
     episode: str  # Episode id.
 
 
-def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode, gate: Gate | None = None) -> None:
-    """Write RDF transforms/pinholes and one calib property group atomically; an exo refinement's held-out gate, when one
-    ran, is a second property group (``exo_gate``), so the decision lives in the layer, not in a sidecar file."""
+def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode) -> None:
+    """Write RDF transforms, pinholes and calibration provenance atomically."""
     layout = motion.layout
     sync, oak_rig, quest_rig = motion.sync, layout.oak_rig, layout.quest_rig
-    refinement = session.exo_refinements.get(sync.episode_key.segment)
     if layout.phones != tuple(sorted(sync.exo_fit)):
         raise ValueError(f"{sync.key}: base phone layout differs from sync exo_fit")
     with atomic_recording(path, recording_id=sync.episode_key.segment, send_properties=False) as recording:
@@ -80,9 +74,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode,
             if camera is None or camera.camera is None:
                 continue
             episode = camera.episodes.get(sync.episode)
-            refined = refinement.camera_for_rig(rig) if refinement is not None else None
-            matrix = (refined.world_T_cam if refined is not None else
-                      episode.world_T_cam if episode is not None and episode.world_T_cam is not None else camera.camera.world_T_cam)
+            matrix = episode.world_T_cam if episode is not None and episode.world_T_cam is not None else camera.camera.world_T_cam
             status = "flagged" if episode is not None and not episode.ok else "ok"
             count += 1
             flagged += status == "flagged"
@@ -90,27 +82,36 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode,
             tf(
                 entity,
                 matrix,
-                calib_source=refinement.method if refinement is not None and refined is not None else METHOD,
+                calib_source=METHOD,
                 calib_scope=episode.scope if episode else "session",
                 calib_status=status,
                 calib_phone=phone,
                 calib_hand_median_px=(episode.median_px if episode is not None else camera.median_px),
             )
-            p = (refined if refined is not None else camera.camera).parameters
+            p = camera.camera.parameters
             pinhole(schema.pinhole_path(rig, 0), np.array([[p[6], 0.0, p[7]], [0.0, p[6], p[8]], [0.0, 0.0, 1.0]]), 1920, 1080)
         # The OAK stereo and healthy-Quest camera offsets are factory facts written by the base layer.
         qp = oak_quest_offset_ms(sync)
         mount = session.oak.questrig_T_rgb if session.oak.ok else None
         posed = qp is not None and mount is not None
         if posed:
+            if session.oak.head_frame == "rdf":
+                axes = rdf_head(motion.hands.head_quaternions, motion.hands.head_convention)
+                mount = axes.recorded_T_rdf @ mount  # The base parent keeps its recorded axes.
             # Static for queries (``read_fitted_mount``), and again at the first Quest pose, where it follows the base's
             # nominal prior (PRIOR_LEAD_NS earlier): the viewer resolves a timed transform ahead of a static one.
             parent = f"tf#{schema.rig_path(quest_rig)}"
-            values = {"oak_mount_source": "fitted", "calib_source": METHOD, "calib_oak_source": session.oak.observation_source,
-                      "calib_oak_median_px": session.oak.median_px}
+            values = {
+                "oak_mount_source": "fitted",
+                "calib_source": METHOD,
+                "calib_oak_source": session.oak.observation_source,
+                "calib_oak_median_px": session.oak.median_px,
+            }
             recording.log(
-                schema.rig_path(oak_rig), rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=parent),
-                rr.AnyValues(**values), static=True,
+                schema.rig_path(oak_rig),
+                rr.Transform3D(translation=mount[:3, 3], mat3x3=mount[:3, :3], parent_frame=parent),
+                rr.AnyValues(**values),
+                static=True,
             )
             if len(motion.hands.head_times_s):
                 first_pose_ns = np.array([round(float(motion.hands.head_times_s[0]) * 1e9)])
@@ -139,30 +140,15 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode,
                 oak_posed=posed,
                 oak_unposed_reason=None if posed else ("missing Quest/OAK clock" if qp is None else "OAK mount not fitted"),
                 oak_median_px=session.oak.median_px,
-                oak_rotation_source=("gyro" if session.oak.rotation_source.startswith("gyro") else
-                                     "unposed" if session.oak.rotation_source.startswith("unposed") else "free"),
+                oak_rotation_source=(
+                    "gyro"
+                    if session.oak.rotation_source.startswith("gyro")
+                    else "unposed"
+                    if session.oak.rotation_source.startswith("unposed")
+                    else "free"
+                ),
                 oak_rotation_reason=session.oak.rotation_reason,
                 quest_mode=session.quest.mode,
                 record_json=json.dumps(to_dict(Provenance(session.session, METHOD, sync.episode))),
-                exo_refinement_json=to_json(refinement) if refinement is not None else None,
-                exo_label_layer_hash=refinement.label_layer_hash if refinement is not None else None,
-                exo_focal_source=refinement.focal_source if refinement is not None else None,
-                exo_refinement_version=refinement.version if refinement is not None else None,
             ),
         )
-        if gate is not None:
-            scores: dict[str, float | int | None] = {}
-            for metric, after in gate.candidate.items():
-                scores[f"{metric}_before_px"] = gate.baseline[metric].median
-                scores[f"{metric}_after_px"] = after.median
-                scores[f"{metric}_n"] = after.n
-            recording.send_property(
-                "exo_gate",
-                rr.AnyValues(
-                    drop_untyped_nones=True,
-                    passes=gate.passes,
-                    full_fit_converged=gate.full_fit_converged,
-                    policy=gate.policy,
-                    **scores,
-                ),
-            )

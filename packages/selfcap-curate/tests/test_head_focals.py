@@ -1,0 +1,26 @@
+"""Production head calibration keeps the measured focal values after optical cleanup."""
+
+import pytest
+
+from selfcap_curate.device_tables import vp_focals
+
+
+@pytest.mark.parametrize(
+    "phone,focal",
+    [
+        ("Dragon-413A7CC1", 888.7573979270643),
+        ("Tiger-FE57138F", 890.6397739953013),
+        ("Titanium-B00700F9", 906.190394332705),
+        ("Wolf-387E89E1", 897.6092071409714),
+        ("Comet-B1C77204", 924.478925004904),
+        ("Comet-B828F32C", 915.5375316997008),
+        ("Hammer-06873283", 898.0747959719213),
+        ("Titanium-57BB9E1A", 894.9294280422055),
+    ],
+)
+def test_head_fit_keeps_each_measured_focal(phone: str, focal: float) -> None:
+    assert vp_focals([phone]) == {phone: focal}
+
+
+def test_unmeasured_head_fit_focal_keeps_the_measured_median() -> None:
+    assert vp_focals(["unknown"]) == {"unknown": (897.6092071409714 + 898.0747959719213) / 2.0}
