@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
+from dataforge.oak_mount import FactoryCalibration
 from frozen_v2 import fixture_sync, session_episode
 from rerun.catalog import DatasetEntry
 from rerun.chunk import RrdReader
@@ -15,8 +16,11 @@ from selfcap_curate import apis as api_inputs
 from selfcap_curate.apis import calibrate as api
 from selfcap_curate.apis.calibrate import Config, main
 from selfcap_curate.calib_layer import CalibSession, write_calib_layer
+from selfcap_curate.catalog_io import Segment
+from selfcap_curate.device_tables import RotationTable
 from selfcap_curate.exo_calibration import Camera, EpisodeCalibration, PhoneCalibration, SessionCalibration
 from selfcap_curate.factory import QuestBlock
+from selfcap_curate.oak_mount import OakLens
 from selfcap_curate.records import CatalogHands, ExoFit, GyroFit, OakDetections, OakFit, PhoneDetections, SelfcapLayout, write_sync
 
 
@@ -140,8 +144,7 @@ def test_unsynced_quest_writes_no_fitted_oak_mount(tmp_path: Path, layer_case, f
 def test_fitted_mount_is_written_in_the_unchanged_parent_axes(tmp_path, layer_case, rub, head_frame) -> None:
     state, motion = layer_case
     # Identity in the world is RUB; a half turn about x is RDF.
-    quaternion = [0.0, 0.0, 0.0, 1.0] if rub else [1.0, 0.0, 0.0, 0.0]
-    hands = replace(motion.hands, head_quaternions=np.tile(quaternion, (2, 1)))
+    hands = replace(motion.hands, head_quaternions=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)), head_convention="RUB" if rub else "RDF")
     mount = np.eye(4)
     mount[:3, 3] = [0.1, 0.2, 0.3]
     state = replace(state, oak=replace(state.oak, questrig_T_rgb=mount, head_frame=head_frame))
@@ -212,11 +215,11 @@ def calibration_call(tmp_path, layer_case, monkeypatch):
         api.catalog_io, "read_time_sync", lambda _dataset, segment: replace(motion.sync, key=segment.removeprefix("selfcap__"), episode=segment[-5:])
     )
     monkeypatch.setattr(
-        api.catalog_io, "open_segment", lambda _dataset, segment: SimpleNamespace(id=segment, layout=SelfcapLayout(3, 4, ("A", "B", "C")), videos=None)
+        api.catalog_io, "open_segment", lambda _dataset, segment: Segment(_dataset, segment, SelfcapLayout(3, 4, ("A", "B", "C")))
     )
     monkeypatch.setattr(api, "read_session_episode", lambda _dataset, sync: replace(motion, sync=sync))
     monkeypatch.setattr(
-        api.catalog_io, "read_factories", lambda *_args, **_kwargs: {"ego": SimpleNamespace(device_id="oak", centre=None), "quest": None}
+        api.catalog_io, "read_factories", lambda *_args, **_kwargs: {"ego": FactoryCalibration("oak", ()), "quest": None}
     )
     monkeypatch.setattr(api, "read_quest_block", lambda *_args, **_kwargs: state.quest)
     monkeypatch.setattr(
@@ -248,7 +251,7 @@ def test_calibrate_egohand_uses_default_path_and_writes_named_layer(calibration_
     previous_solve = api.solve_oak
 
     def solve(*args, **kwargs):
-        assert kwargs == {"weighted": True, "gate_image_speed": False}
+        assert kwargs == {}
         return previous_solve(*args, **kwargs)
 
     monkeypatch.setattr(api, "solve_oak", solve)
@@ -381,7 +384,7 @@ def test_egohand_ineligible_gyro_uses_free_fit_and_records_reason(calibration_ca
     gyro = GyroFit("test", reason != "gyro fit not ok", max_episode_dev_deg=2.0 if "spread" in reason else 1.0,
                    R_head_from_imu=np.eye(3))
     monkeypatch.setattr(api, "gyro_mount", lambda *_args: gyro)
-    monkeypatch.setattr(api, "read_rotations", lambda: SimpleNamespace(devices={}))
+    monkeypatch.setattr(api, "read_rotations", lambda: RotationTable({}))
     monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
     monkeypatch.setattr(api, "read_ego_cameras", lambda *_args: [])
     monkeypatch.setattr(api, "read_catalog_videos", lambda *_args: [None])
@@ -422,7 +425,7 @@ def test_layer_draws_phone_frustums_at_the_base_layers_length(tmp_path, layer_ca
 def test_calibrate_egohand_fits_the_mount_on_all_three_oak_cameras(calibration_call, monkeypatch):
     api, config, _ = calibration_call
     empty = OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133)))
-    lenses = {camera: SimpleNamespace(name=camera) for camera in ("rgb", "left", "right")}
+    lenses = {camera: OakLens(np.eye(3), np.zeros(14), np.eye(4), (1280, 720)) for camera in ("rgb", "left", "right")}
     calls = {}
     monkeypatch.setattr(api, "oak_lenses", lambda *_args: lenses)
     monkeypatch.setattr(api, "release_cuda_memory", lambda **kwargs: None)
