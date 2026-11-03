@@ -9,7 +9,7 @@ pytest.importorskip("soma", reason="requires specialized SOMA environment")
 from soma.body import SOMALayer
 
 from selfcap_soma.catalog import Observations
-from selfcap_soma.fitting import FitOptions, fit
+from selfcap_soma.fitting import FitOptions, calibrate_shape
 from selfcap_soma.observations import coco_joint_names
 
 
@@ -36,8 +36,8 @@ def test_ears_only_fit_is_independent_of_quest_head_values() -> None:
     data = Observations(np.array([0.0, 0.05, 0.1]), points, np.ones((3, 133)), points.copy(), np.zeros((3, 3)), np.tile(np.eye(3), (3, 1, 1)), 0.0)
     points += np.random.default_rng(42).normal(0.0, 0.01, points.shape)
     options = FitOptions(head_mode="ears")
-    a = fit(data, assets, 2, 1, options)
-    b = fit(replace(data, head_positions=np.full((3, 3), np.nan), head_rotations=np.full((3, 3, 3), np.nan)), assets, 2, 1, options)
+    a = calibrate_shape(data, assets, 2, 1, options)
+    b = calibrate_shape(replace(data, head_positions=np.full((3, 3), np.nan), head_rotations=np.full((3, 3, 3), np.nan)), assets, 2, 1, options)
     # GPU atomic reductions vary even for identical inputs (observed maxima:
     # 1.4e-5 m torso, 2.5e-4 m overall). Keep a submillimetre noise allowance.
     np.testing.assert_allclose(a.joints[:, :20], b.joints[:, :20], atol=5e-5)

@@ -19,7 +19,7 @@ from serde.json import from_json, to_json
 from selfcap_soma.anthropometry import plausible_ears, usable_ears
 from selfcap_soma.assets import SOMA_BODY_FILES, SOMA_X_REPO_ID, SOMA_X_REVISION
 from selfcap_soma.catalog import ExoSource, open_segment, read_window, subset
-from selfcap_soma.fitting import Calibration, FitOptions, fit
+from selfcap_soma.fitting import Calibration, FitOptions, calibrate_shape, fit_pose
 from selfcap_soma.hand_pose import HandOrientationSource, read_orientations
 from selfcap_soma.output import write_report
 from selfcap_soma.overlay import layer_fit, write_layer
@@ -185,7 +185,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     if evidence:
         entities = sorted({name.split(":", 1)[0] for name in evidence})
         for index in (None, "video_time"):
-            table = catalog.view.filter_contents(entities).reader(index=index).select(*evidence).to_arrow_table()
+            table = catalog.view.filter_contents(entities).reader(index=index).select(*([] if index is None else [index]), *evidence).to_arrow_table()
             for batch in table.combine_chunks().to_batches():
                 digest.update(batch.serialize().to_pybytes())
     if config.assets is None:
@@ -226,7 +226,7 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         print(f"shape frames: {len(selection.indices)}, whole-segment fallback: {selection.used_fallback}", flush=True)
         mask = np.zeros(len(data.times), dtype=bool)
         mask[selection.indices] = True
-        shape = fit(subset(data, mask), config.assets, 600, config.shape_iterations, options)
+        shape = calibrate_shape(subset(data, mask), config.assets, 600, config.shape_iterations, options)
         calibration = Calibration(shape.identity, shape.scale, shape.head_offset, shape.bone_scales, shape.head_attachment, shape.head_anchor)
         with atomic_write(directory / "calibration.json") as staged:
             staged.write_text(to_json(calibration))
@@ -242,11 +242,11 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
         with atomic_write(directory / "hand-orientation-source.json") as staged:
             staged.write_text(to_json(state.hand_orientation_source))
         print("hand_orientation_source", to_json(state.hand_orientation_source), flush=True)
-        result = fit(
+        result = fit_pose(
             data,
+            calibration,
             config.assets,
             config.iterations,
-            1,
             replace(
                 options,
                 learn_head_rotation=False,
@@ -258,7 +258,6 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
                 final_learning_rate=config.final_learning_rate,
                 orientation_weight=30.0,
             ),
-            fixed=calibration,
             orientations=orientations,
         )
         state.timings.fit_s = perf_counter() - began

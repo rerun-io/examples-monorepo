@@ -104,7 +104,8 @@ def transport(monkeypatch: pytest.MonkeyPatch) -> list[list[str] | str]:
         joints=None,
         names=(),
     )
-    monkeypatch.setattr(batch, "fit", lambda *_args, **_kwargs: fitted)
+    monkeypatch.setattr(batch, "calibrate_shape", lambda *_args, **_kwargs: fitted)
+    monkeypatch.setattr(batch, "fit_pose", lambda *_args, **_kwargs: fitted)
     monkeypatch.setattr(batch, "read_orientations", lambda *_args: SimpleNamespace(sources=("none", "none")))
     monkeypatch.setattr(batch, "write_report", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(batch, "layer_fit", lambda *_args: None)
@@ -141,7 +142,7 @@ def test_each_segment_prints_one_time_line_with_its_stage_seconds(tmp_path: Path
 def test_old_format_checkpoint_starts_over(tmp_path: Path, transport: list[list[str] | str]) -> None:
     directory = tmp_path / "test" / SEGMENT
     directory.mkdir(parents=True)
-    (directory / "checkpoint.json").write_text(json.dumps({"signature": "old", "phase": "fit", "timings": {"write_s": 1.0, "mesh_overlay_s": 1.0}}))
+    (directory / "checkpoint.json").write_text(json.dumps({"signature": "old", "phase": "calibrate_shape", "timings": {"write_s": 1.0, "mesh_overlay_s": 1.0}}))
     run_segment(Config(catalog_url="test", dataset="test", output=tmp_path), SEGMENT)
     assert json.loads((directory / "checkpoint.json").read_text())["phase"] == "export"
 
@@ -149,7 +150,7 @@ def test_old_format_checkpoint_starts_over(tmp_path: Path, transport: list[list[
 def test_resume_reuses_the_layer_after_export(tmp_path: Path, transport: list[list[str] | str], monkeypatch: pytest.MonkeyPatch) -> None:
     config = Config(catalog_url="test", dataset="test", output=tmp_path)
     run_segment(config, SEGMENT)
-    monkeypatch.setattr(batch, "fit", lambda *_args, **_kwargs: pytest.fail("a finished segment must not refit"))
+    monkeypatch.setattr(batch, "calibrate_shape", lambda *_args, **_kwargs: pytest.fail("a finished segment must not refit"))
     run_segment(config, SEGMENT)
     (tmp_path / "test" / SEGMENT / f"{SEGMENT}.rrd").write_bytes(b"changed")
     with pytest.raises(ValueError, match="missing/corrupt"):
@@ -186,7 +187,8 @@ def test_real_layer_from_memory_feeds_xlo_with_no_fit_recording(tmp_path: Path, 
     data.hand_poses.update({side: QuestJointPoses(np.empty(0, dtype=np.int64), np.empty((0, 26, 3), dtype=np.float32), None) for side in ("left", "right")})
     monkeypatch.setattr(batch, "open_segment", lambda *_args: SegmentCatalog(_dataset().filter_segments(SEGMENT), [], RigPaths(("/world/rig_00",), "/world/rig_04", "/world/rig_05")))
     monkeypatch.setattr(batch, "select_shape_frames", lambda *_args, **_kwargs: ShapeFrames(np.array([0, 1], dtype=np.int64), False))
-    monkeypatch.setattr(batch, "fit", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(batch, "calibrate_shape", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(batch, "fit_pose", lambda *_args, **_kwargs: result)
     monkeypatch.setattr(batch, "read_orientations", lambda *_args: SimpleNamespace(sources=("none", "none")))
     monkeypatch.setattr(batch, "group_jitter", lambda *_args: [])
     monkeypatch.setattr(overlay, "CatalogClient", lambda _url: SimpleNamespace(get_dataset=lambda _name: None))
