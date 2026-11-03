@@ -170,7 +170,17 @@ def read_camera_models(store: LazyStore, rigs: list[int]) -> dict[int, CameraMod
     }
 
 
-def exo_candidates(entry: DatasetEntry, segment: str, options: PreviewOptions) -> tuple[int, list[int]]:
+@dataclass(frozen=True, slots=True)
+class PreviewRigs:
+    """Moving OAK rig and exo candidates in display preference order."""
+
+    oak: int
+    """OAK rig index."""
+    phones: list[int]
+    """Candidate phone rig indices, best first."""
+
+
+def exo_candidates(entry: DatasetEntry, segment: str, options: PreviewOptions) -> PreviewRigs:
     """The OAK rig and the phones the exo may come from, best first; a named rig needs no layout.
 
     Returns:
@@ -180,13 +190,13 @@ def exo_candidates(entry: DatasetEntry, segment: str, options: PreviewOptions) -
         ValueError: If the segment does not have a SelfCap rig layout and a rig is left to choose.
     """
     if options.ego is not None and options.exo is not None:
-        return options.ego, [options.exo]
+        return PreviewRigs(options.ego, [options.exo])
     layout: CatalogRigLayout = rig_layout(entry, segment)
     ego_rig: int = select_layout(layout, ()).oak_rig if options.ego is None else options.ego
     if options.exo is not None:
-        return ego_rig, [options.exo]
+        return PreviewRigs(ego_rig, [options.exo])
     phones: set[int] = {int(camera.rig.removeprefix("rig_")) for camera in layout.cameras if camera.rig_kind == "exo"}
-    return ego_rig, [rig for rig in EXO_PREFERENCE if rig in phones]
+    return PreviewRigs(ego_rig, [rig for rig in EXO_PREFERENCE if rig in phones])
 
 
 def scale_points_2d(batch: pa.RecordBatch, scale: float) -> pa.RecordBatch:
@@ -422,9 +432,9 @@ def build_segment_preview(entry: DatasetEntry, segment: str, target: Path, optio
         raise FileExistsError(f"refusing to write {target}: it exists")
     store: LazyStore = entry.segment_store(segment)
     schema: Schema = store.schema()
-    choice: tuple[int, list[int]] = exo_candidates(entry, segment, options)
-    ego_rig: int = choice[0]
-    phones: list[int] = choice[1]
+    choice: PreviewRigs = exo_candidates(entry, segment, options)
+    ego_rig: int = choice.oak
+    phones: list[int] = choice.phones
     models: dict[int, CameraModel] = read_camera_models(store, list(dict.fromkeys([ego_rig, *phones])))
     exo_rig: int = next((rig for rig in phones if models[rig].is_posed), phones[0])
     exo_model: CameraModel = models[exo_rig]
