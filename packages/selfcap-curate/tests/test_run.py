@@ -452,10 +452,10 @@ def test_no_ingested_segment_stops_before_register(config: Config, pipeline: Fak
     assert pipeline.task_names() == ["dataforge-convert"]
 
 
-def test_no_donor_uses_the_catalog(config: Config, pipeline: FakePipeline, catalog_url: str) -> None:
+def test_no_donor_lets_calibrate_borrow_from_the_run_dataset(config: Config, pipeline: FakePipeline) -> None:
     run.main(replace(config, donor_catalog_url=None))
     for command in pipeline.commands_of("selfcap-calibrate"):
-        assert command[command.index("--donor-catalog-url") + 1] == catalog_url
+        assert "--donor-catalog-url" not in command  # calibrate then reads donors from --dataset, not dataforge-selfcap
 
 
 def test_a_preview_file_proves_the_segment_and_only_its_survivors_are_swapped(config: Config, pipeline: FakePipeline, tmp_path: Path) -> None:

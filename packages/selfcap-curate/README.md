@@ -13,6 +13,50 @@ and layer swaps remain separate operator actions.
 | Copy and retime base | `patch_base` | New aligned RRD with provenance |
 | Inspect both clocks | `apis.sync_curves` | Rerun curves and residuals |
 
+## Run it yourself
+
+The raw captures are private Hugging Face datasets. You need read access and `hf auth login`.
+Run from the repository root on a machine with an NVIDIA GPU.
+
+**1. Start a catalog** that can read your run directory. A local one is enough:
+
+```bash
+pixi run -e selfcap-curate --frozen rerun server --host 127.0.0.1 -p 51300 &
+CATALOG=rerun+http://127.0.0.1:51300
+```
+
+A catalog on another machine also works (for example `rerun+http://dgx-spark:51235`) if it reads
+the run directory at the same path, such as the NAS SSD share `/mnt/nas/ssd-8tb`.
+
+**2a. Smoke run: 3 segments (about 5 minutes).**
+
+```bash
+RAW=/mnt/nas/ssd-8tb/selfcap/raw/easy26-smoke
+pixi exec --spec huggingface_hub hf download pablovela5620/selfcap-easy26-raw --repo-type dataset \
+  --revision 12de5d4fa29aa443298e8f6ac560ad5a72c9815a --local-dir $RAW/selfcap \
+  --include 'cut/2025-11-25/426c5f35-*/**' --include 'cut/2025-12-23/4444205e-*/**' --include 'cut/2025-12-23/d3dc7bbf-*/**'
+pixi run -e selfcap-curate --frozen selfcap-run --raw-root $RAW \
+  --run-root /mnt/nas/ssd-8tb/selfcap/runs/easy26-smoke-$(date +%Y%m%d-%H%M) \
+  --catalog-url $CATALOG --dataset selfcap-easy26-smoke-$(date +%Y%m%d-%H%M)
+```
+
+**2b. Full easy set: 26 segments (5.5 GB download, about 30 minutes).**
+
+```bash
+RAW=/mnt/nas/ssd-8tb/selfcap/raw/easy26
+pixi exec --spec huggingface_hub hf download pablovela5620/selfcap-easy26-raw --repo-type dataset \
+  --revision 12de5d4fa29aa443298e8f6ac560ad5a72c9815a --local-dir $RAW/selfcap
+pixi run -e selfcap-curate --frozen selfcap-run --raw-root $RAW \
+  --run-root /mnt/nas/ssd-8tb/selfcap/runs/easy26-$(date +%Y%m%d-%H%M) \
+  --catalog-url $CATALOG --dataset selfcap-easy26-$(date +%Y%m%d-%H%M)
+```
+
+The run directory and the dataset name must be new. `<run-root>/progress.log` shows each step;
+the last lines give the summary and `PIPELINE_DONE`. Open the result with
+`pixi run -e selfcap-curate --frozen rerun "$CATALOG"`. The model files (EgoHand, the hand
+detector, SOMA-X) download on first use at pinned revisions. The hard set is
+`pablovela5620/selfcap-hard26-raw` and runs the same way.
+
 ## Commands and guards
 
 ```bash
@@ -57,7 +101,7 @@ pixi run -e selfcap-curate --frozen selfcap-run --raw-root /local/raw --run-root
   [--oak-egohand-assets /local/egohand] [--soma-assets /local/soma-assets]  # default: pinned Hugging Face downloads
 ```
 
-`selfcap-run` takes `--raw-root` (a directory that holds `selfcap/`) or `--base-dir` (as-cut base RRDs, which skip ingest), and runs each step as a subprocess of its pixi task in its own environment. A new `--run-root` off the NAS and a `--dataset` that does not exist yet are required, so a rerun needs new names. `--segment-ids` are checked as episode keys before any step runs. The catalog must run on this machine and read the run root.
+`selfcap-run` takes `--raw-root` (a directory that holds `selfcap/`) or `--base-dir` (as-cut base RRDs, which skip ingest), and runs each step as a subprocess of its pixi task in its own environment. A new `--run-root` off the NAS and a `--dataset` that does not exist yet are required, so a rerun needs new names. `--segment-ids` are checked as episode keys before any step runs. The catalog server must read the run root at the same path.
 
 | Step | Task (environment) | At a time | Layers swapped in after it |
 |---|---|---|---|

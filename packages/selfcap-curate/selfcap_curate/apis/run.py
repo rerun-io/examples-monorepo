@@ -59,7 +59,7 @@ class Config:
     segment_ids: tuple[str, ...] = ()
     """Segment ids to run; empty runs every segment."""
     donor_catalog_url: str | None = None
-    """Read-only catalog with any camera-50 donor; None uses catalog_url."""
+    """Read-only catalog whose dataforge-selfcap holds camera-50 donors; None borrows from the run's own dataset."""
     oak_egohand_assets: Path | None = None
     """Optional local EgoHand root, passed to calibrate; None takes the pinned downloads."""
     soma_assets: Path | None = None
@@ -354,9 +354,9 @@ def resolved(path: Path | None) -> Path | None:
     return None if path is None else path.resolve()
 
 
-def optional_flag(flag: str, path: Path | None) -> list[str]:
-    """The flag and its path; without one, the task takes its default."""
-    return [] if path is None else [flag, str(path)]
+def optional_flag(flag: str, value: Path | str | None) -> list[str]:
+    """The flag and its value; without one, the task takes its default."""
+    return [] if value is None else [flag, str(value)]
 
 
 def identity_of(segment: str) -> SequenceIdentity:
@@ -456,7 +456,6 @@ def main(config: Config) -> None:
 
     catalog: list[str] = ["--catalog-url", config.catalog_url, "--catalog-name", config.dataset]
     source: list[str] = ["--catalog-url", config.catalog_url, "--dataset", config.dataset]
-    donor_url: str = config.catalog_url if config.donor_catalog_url is None else config.donor_catalog_url
     publish_blueprints: list[str] = task("dataforge", "dataforge-publish-blueprints", *catalog, "--output-root", str(root / "catalog"), REGISTRY_NAME)
 
     def session_of(segment: str) -> str:
@@ -511,7 +510,7 @@ def main(config: Config) -> None:
             "calib",
             lambda only: task(
                 "selfcap-curate", "selfcap-calibrate", "--output-dir", str(calibrated(only[0]).parent), "--segment-ids", *only, *source,
-                "--exo-method", config.exo_method, *optional_flag("--oak-egohand-assets", config.oak_egohand_assets), "--donor-catalog-url", donor_url,
+                "--exo-method", config.exo_method, *optional_flag("--oak-egohand-assets", config.oak_egohand_assets), *optional_flag("--donor-catalog-url", config.donor_catalog_url),
             ),
             calibrated,
             layers={"egohand": lambda segment: root / "calib" / segment / "egohand" / f"{segment}.rrd"},
