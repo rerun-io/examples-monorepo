@@ -5,14 +5,14 @@ from dataclasses import replace
 import cv2
 import numpy as np
 import pytest
-from dataforge.datasets.selfcap_raw import Distortion, FactoryCalibration, FactoryExtrinsic, crop_shift_px
+from dataforge.datasets.selfcap_raw import Distortion, FactoryCalibration, FactoryExtrinsic, crop_shift_px, oak_stereo
 from frozen_v2 import session_episode
 from scipy.spatial.transform import Rotation
 from serde import from_dict
 
 import selfcap_curate.oak_mount as module
 from selfcap_curate.device_tables import pool_rotations
-from selfcap_curate.factory import intrinsic_matrix, oak_stereo, quest_block, transform
+from selfcap_curate.factory import intrinsic_matrix, quest_block, transform
 from selfcap_curate.oak_mount import gyro_mount, solve_oak
 from selfcap_curate.quest_fit import load_quest_hands
 from selfcap_curate.records import CatalogHands, GyroFit, OakDetections, OakFit

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from dataforge.datasets.selfcap_raw import FactoryCalibration, Intrinsic
+from dataforge.datasets.selfcap_raw import FactoryCalibration, Intrinsic, oak_stereo
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from scipy.ndimage import gaussian_filter1d
@@ -12,7 +12,7 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
 from selfcap_curate.device_tables import RotationTable
-from selfcap_curate.factory import intrinsic_matrix, oak_stereo, transform
+from selfcap_curate.factory import intrinsic_matrix, transform
 from selfcap_curate.quest_fit import hand_neighbors
 from selfcap_curate.records import (
     HAND_BASE,

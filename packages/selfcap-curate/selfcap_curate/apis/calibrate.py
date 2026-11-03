@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+from dataforge.datasets.selfcap_raw import oak_stereo
 from dataforge.schema import video_path
 from rerun.catalog import CatalogClient
 from serde.json import to_json
@@ -21,7 +22,7 @@ from selfcap_curate.exo_calibration import calibrate
 from selfcap_curate.exo_landmarks import read_landmarks
 from selfcap_curate.exo_refine import FocalSource
 from selfcap_curate.exo_refine_catalog import evaluate, load_inputs, read_focals, usable_hand_frames
-from selfcap_curate.factory import oak_centre, oak_stereo, read_quest_block
+from selfcap_curate.factory import oak_centre, read_quest_block
 from selfcap_curate.hands_gpu import detect_episode, detect_oak_hands_gpu, pose_models, release_cuda_memory
 from selfcap_curate.head_calibration import calibrate_with_head, head_track
 from selfcap_curate.keypoints import read_ego_cameras
