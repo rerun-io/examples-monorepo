@@ -8,7 +8,7 @@ from typing import cast
 import numpy as np
 import pytest
 import rerun.blueprint as rrb
-from rerun.catalog import DatasetEntry
+from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from test_selfcap import rig_layout_base
 
 from dataforge import schema
@@ -136,6 +136,7 @@ def test_register_publishes_the_posed_layouts_only_when_every_phone_has_a_pose(t
         segment, table = SelfcapDataset(SelfcapConfig()).catalog_blueprints(entry)
         scene = next(view for view in blueprint_views(segment) if str(view.name) == "Scene")
         posed: bool = "- /world/rig_00/**" not in cast(list[str], scene.contents)
+        assert isinstance(table, rrb.Blueprint)
         assert (str(blueprint_views(table)[1].origin) == "/world/rig_00/cam_00/pinhole") == posed
         return posed
 
@@ -153,7 +154,7 @@ def test_register_publishes_the_posed_layouts_only_when_every_phone_has_a_pose(t
         entry.register([(tmp_path / "calib" / f"{three}.rrd").as_uri()], layer_name="calib")
         assert not phones_in_scene(entry)  # every segment calibrated, but one phone has no pose
         calib(tmp_path / "calib2" / f"{three}.rrd", three, range(3))
-        entry.register([(tmp_path / "calib2" / f"{three}.rrd").as_uri()], layer_name="calib", on_duplicate="replace")
+        entry.register([(tmp_path / "calib2" / f"{three}.rrd").as_uri()], layer_name="calib", on_duplicate=OnDuplicateSegmentLayer.REPLACE)
         assert phones_in_scene(entry)
 
 

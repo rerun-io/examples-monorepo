@@ -236,7 +236,7 @@ def test_work_directory_cannot_overlap_raw_roots(tmp_path: Path, monkeypatch: py
     raw = tmp_path / "raw"
     if raw_kind == "symlink":
         output.mkdir()
-        work.symlink_to("/mnt/nas/epfl-work")
+        work.symlink_to("/mnt/nas/datasets/epfl-work")
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(output))
     config = EpflConfig(root=work if raw_kind == "pose" else raw, video_root=work if raw_kind == "video" else raw)
     with pytest.raises(ValueError, match="refusing to write beneath protected input"):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +28,7 @@ def test_quaternion_matrices_match_identity_and_normalise() -> None:
     np.testing.assert_allclose(quaternion_matrices(np.array([[0.0, 0.0, 0.0, 2.0]]))[0], np.eye(3))
 
 
-def layer(path: Path, entries: dict[str, list[object]]) -> None:
+def layer(path: Path, entries: dict[str, list[rr.AsComponents | Iterable[rr.DescribedComponentBatch]]]) -> None:
     with rr.RecordingStream("test", recording_id=SEGMENT, send_properties=False) as recording:
         recording.save(path)
         for entity, archetypes in entries.items():
@@ -41,13 +42,14 @@ def test_static_cameras_take_each_component_from_calibration_over_base(tmp_path:
     calibration: Path = tmp_path / "calibration.rrd"
     base: Path = tmp_path / "base.rrd"
     layer(calibration, {f"{camera}/pinhole": [rr.Pinhole(focal_length=700.0, principal_point=[640.0, 360.0], width=1280, height=720)]})
+    distortion = DistortionCoefficientsBatch(np.array([-0.1, 0.0, 0.0, 0.0, 0.0], dtype=np.float32))
     layer(
         base,
         {
             camera: [rr.Transform3D(translation=[0.06, 0.0, 0.0], mat3x3=turned)],
             f"{camera}/pinhole": [
                 rr.Pinhole(focal_length=500.0, principal_point=[320.0, 240.0], width=640, height=480),
-                [DistortionCoefficientsBatch(np.array([-0.1, 0.0, 0.0, 0.0, 0.0], dtype=np.float32))],
+                [distortion.described(distortion.component_descriptor())],
             ],
         },
     )

@@ -47,7 +47,10 @@ def layer(tmp_path: Path) -> Callable[[str, str], str]:
         target: Path = tmp_path / name / f"{segment}.rrd"
         target.parent.mkdir(parents=True, exist_ok=True)
         with recording_to(target, recording_id=segment, send_properties=False) as recording:
-            recording.send_property(name, rr.AnyValues(**LAYER_PROPERTIES.get(name, {"present": True})))
+            properties = rr.AnyValues()
+            for key, value in LAYER_PROPERTIES.get(name, {"present": True}).items():
+                properties.with_component_from_data(key, value)
+            recording.send_property(name, properties)
         return target.as_uri()
 
     return write
@@ -89,6 +92,7 @@ def test_the_table_is_the_preview_card_when_any_segment_has_a_preview_layer(serv
         body, videos = cell.views
         assert (str(body.name), str(body.origin)) == ("Body", "/preview/center")
         assert (str(videos.name), str(videos.origin)) == ("Exo + ego", "/preview/exo_cam/pinhole")
+        assert isinstance(body.contents, list) and isinstance(videos.contents, list)
         assert "+ /preview/body/**" in body.contents and "- /world/rig_05/cam_02/pinhole/**" in body.contents and "+ /world/rig_05/cam_02/pinhole" in body.contents
         assert set(videos.contents) == {"+ /preview/exo_cam/pinhole/**", "+ /preview/body/skeleton/**", "+ /preview/body/soma_xlo/**"}
         assert [(column.source, column.name) for column in columns[1:4]] == [
@@ -155,7 +159,9 @@ def test_the_main_registers_both_defaults_and_a_rerun_retires_only_its_own_older
     logged = table_entities(first[1])
     assert logged[("/table", "timeline")] == ["preview_time"]
     assert logged[("/table", "sort_by")] == [{"column": "property:calib:session", "direction": 1}]
-    assert logged[("/table/layouts/cards", "field_order")][:4] == ["recording link", "property:calib:session", "property:calib:exo_cameras", "property:soma_quality:status"]
+    field_order = logged[("/table/layouts/cards", "field_order")]
+    assert isinstance(field_order, list)
+    assert field_order[:4] == ["recording link", "property:calib:session", "property:calib:exo_cameras", "property:soma_quality:status"]
     assert logged[(f"/table/layouts/cards/fields/{rr.escape_entity_path_part('property:capture:collector')}", "visible")] == [False]
     assert logged[(f"/table/layouts/table/columns/{rr.escape_entity_path_part('property:capture:num_frames')}", "visible")] == [False]
 

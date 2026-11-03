@@ -492,7 +492,7 @@ def test_convert_logs_each_phone_sound_as_flac_and_loudness(tmp_path: Path, monk
     assert track.num_rows == 1
     assert track.column("capture_time").equals(track.column(schema.TIMELINE))
     assert track.column("AssetAudio:media_type").to_pylist() == [["audio/flac"]]
-    with av.open(io.BytesIO(bytes(track.column("AssetAudio:blob").to_pylist()[0][0]))) as flac:
+    with av.open(io.BytesIO(bytes(track.column("AssetAudio:blob").to_pylist()[0][0])), mode="r") as flac:
         stream = flac.streams.audio[0]
         assert (stream.codec_context.name, stream.rate) == ("flac", 48_000)
         assert sum(frame.samples for frame in flac.decode(stream)) == pytest.approx(96_000, abs=1_000)
@@ -675,7 +675,9 @@ def test_quest_left_T_right_needs_a_healthy_headset(tmp_path: Path) -> None:
                               factory_extrinsic("device_to_right", identity, [0.032, 0.0, 0.0])]
     path = tmp_path / "calibration.json"
     path.write_text(json.dumps(document))
-    np.testing.assert_allclose(quest_left_T_right(read_json(path, FactoryCalibration))[:3, 3], [0.064, 0.0, 0.0])
+    left_T_right = quest_left_T_right(read_json(path, FactoryCalibration))
+    assert left_T_right is not None
+    np.testing.assert_allclose(left_T_right[:3, 3], [0.064, 0.0, 0.0])
     document["intrinsics"][1]["lens_intrinsics"]["available"] = False  # faulty right camera: fixed later, not here
     path.write_text(json.dumps(document))
     assert quest_left_T_right(read_json(path, FactoryCalibration)) is None
@@ -737,9 +739,11 @@ def test_quest_mesh_turns_with_a_camera_50_eye_frame(tmp_path: Path) -> None:
     oak = FactoryCalibration(device_id="OAK - never fitted", intrinsics=())
 
     turned = quest_mesh_frame(oak, borrowed)
+    assert turned is not None
     angle = np.degrees(np.arccos((np.trace(turned[:3, :3]) - 1) / 2))
 
-    assert np.array_equal(quest_mesh_frame(oak, healthy), np.eye(4))
+    healthy_frame = quest_mesh_frame(oak, healthy)
+    assert healthy_frame is not None and np.array_equal(healthy_frame, np.eye(4))
     assert 170 < angle < 180  # the camera-50 eye frame sits about 175 deg from the healthy one
 
 
@@ -833,6 +837,7 @@ def test_quest_hand_poses_round_trip_through_the_base(tmp_path: Path, width: int
     assert np.isnan(back.positions[1]).all() and np.isfinite(back.positions[[0, 2]]).all()
     assert back.joint_names == raw.joint_names and back.joint_names[:2] == ("palm", "wrist")
     if width == 7:
+        assert back.orientations is not None and raw.orientations is not None
         assert np.array_equal(back.orientations, raw.orientations, equal_nan=True)
     else:
         assert back.orientations is None
@@ -855,7 +860,7 @@ def test_gt_layer_from_a_base_is_the_coco133_view_of_its_hands(tmp_path: Path) -
     write_coco133_layer(*read_hand_poses(tmp_path / "base.rrd"), tmp_path / "gt.rrd", "r")
 
     table = rrc.ChunkStore.from_chunks(list(rrc.RrdReader(tmp_path / "gt.rrd").stream())).reader(index=schema.CAPTURE_TIMELINE, contents=schema.coco133_xyz_path()).to_arrow_table()
-    table = table.filter(pa.compute.is_valid(table[f"{schema.coco133_xyz_path()}:Points3D:positions"]))
+    table = table.filter(table[f"{schema.coco133_xyz_path()}:Points3D:positions"].is_valid())
     points = np.asarray(table[f"{schema.coco133_xyz_path()}:Points3D:positions"].to_pylist(), dtype=np.float32)
 
     expected = coco133_hands(hands)

@@ -189,6 +189,8 @@ def read_calibration(calibration_path: Path) -> dict[str, CameraCalibration]:
         resolution = entry.capture_resolution
         if lens.focal_length_x is None:
             continue
+        if lens.principal_point_y is None:
+            raise ValueError(f"{calibration_path}: missing principal_point_y for {entry.positional_layout}")
         raw_coefficients = entry.distortion.coefficients
         distortion: Float64[ndarray, "14"] | None = (
             np.asarray(raw_coefficients, dtype=np.float64) if raw_coefficients is not None and len(raw_coefficients) == BROWN_CONRADY_COEFFICIENTS else None

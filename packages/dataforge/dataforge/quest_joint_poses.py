@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 from jaxtyping import Float32, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetSelection
@@ -67,7 +66,7 @@ def joint_poses_from_table(table: pa.Table, entity: str, index: str, joint_names
     as the CSV reader turns an all-zero row into NaN.
     """
     translations, quaternions = f"{entity}:InstancePoses3D:translations", f"{entity}:InstancePoses3D:quaternions"
-    rows = table.filter(pc.is_valid(table[translations])).sort_by(index)
+    rows = table.filter(table[translations].is_valid()).sort_by(index)
     times = rows[index].combine_chunks().cast(pa.int64()).to_numpy()
     has_orientation = quaternions in rows.column_names and rows[quaternions].null_count < len(rows)
     positions = joint_rows(rows[translations], 3)
@@ -80,11 +79,14 @@ def joint_poses_from_table(table: pa.Table, entity: str, index: str, joint_names
 def joint_rows(column: pa.ChunkedArray, width: int) -> Float32[ndarray, "n 26 width"]:
     """One ``InstancePoses3D`` column as ``[n, 26, width]``; an empty or null batch (untracked) becomes a NaN row."""
     batches = column.combine_chunks()
-    tracked = pc.fill_null(pc.list_value_length(batches), 0).to_numpy(zero_copy_only=False)
+    assert isinstance(batches, (pa.ListArray, pa.LargeListArray))
+    tracked = batches.value_lengths().fill_null(0).to_numpy(zero_copy_only=False)
     if not np.isin(tracked, (0, 26)).all():
         raise ValueError(f"expected 26 joints or none per sample, found {sorted(set(tracked.tolist()) - {0, 26})}")
     joints = np.full((len(tracked), 26, width), np.nan, dtype=np.float32)
-    joints[tracked == 26] = pc.list_flatten(pc.list_flatten(batches)).to_numpy(zero_copy_only=False).astype(np.float32).reshape(-1, 26, width)
+    values = batches.flatten()
+    assert isinstance(values, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray))
+    joints[tracked == 26] = values.flatten().to_numpy(zero_copy_only=False).astype(np.float32).reshape(-1, 26, width)
     return joints
 
 
