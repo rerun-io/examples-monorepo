@@ -6,6 +6,7 @@ import numpy as np
 import pyarrow as pa
 from dataforge.clocks import nearest_framesets as nearest_indices
 from dataforge.oak_mount import read_oak_track
+from dataforge.selfcap_schema import OAK_HAND_BASES, oak_egohand_path
 from dataforge.triangulation import HEADSET_COVERED, Camera, EgoCamera
 from datafusion import col, lit
 from jaxtyping import Float64
@@ -135,32 +136,21 @@ class ImageTrack:
 def read_egohand_rgb(catalog: SegmentCatalog, times: Float64[ndarray, "n"]) -> list[ImageTrack]:
     """Read registered RGB hand image evidence once, preserving absent detections."""
     view, oak = catalog.view, catalog.rigs.oak
-    paths = [
-        column.split(":", 1)[0]
-        for column in catalog.columns
-        if column.startswith(f"{oak}/cam_00/pinhole/") and "/egohand/" in column and column.endswith(":Points2D:positions")
-    ]
-    if not paths:
+    path = oak_egohand_path(int(oak.rsplit("_", 1)[1]), 0)
+    column = path + ":Points2D:positions"
+    if column not in catalog.columns:
         return []
     table = (
-        view.filter_contents(paths)
+        view.filter_contents([path])
         .reader(index="video_time")
         .filter(col("video_time").cast(pa.int64()) >= lit(int((times[0] - 0.05) * 1e9)))
         .filter(col("video_time").cast(pa.int64()) <= lit(int((times[-1] + 0.05) * 1e9)))
         .to_arrow_table()
     )
-    mapping = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
-    result = []
-    for path in paths:
-        column = path + ":Points2D:positions"
-        rows = table.filter(table[column].is_valid())
-        stamps = seconds(rows["video_time"])
-        points = np.full((len(stamps), 21, 2), np.nan)
-        lengths = rows[column].combine_chunks().value_lengths().to_numpy(zero_copy_only=False)
-        for count in (21, 25):
-            indices = np.flatnonzero(lengths == count)
-            values = floats(rows[column].take(indices), len(indices), count, 2)
-            points[indices] = values[:, mapping] if count == 25 else values
-        order = np.argsort(stamps)
-        result.append(ImageTrack(path, stamps[order], points[order]))
-    return result
+    rows = table.filter(table[column].is_valid())
+    stamps = seconds(rows["video_time"])
+    points = floats(rows[column], -1, 133, 2)
+    scores = floats(rows[path + ":confidence"], -1, 133)
+    points[scores < MIN_OBSERVED_SCORE] = np.nan
+    order = np.argsort(stamps)
+    return [ImageTrack(f"{path}/{side}", stamps[order], points[order, base:base + 21]) for side, base in OAK_HAND_BASES]

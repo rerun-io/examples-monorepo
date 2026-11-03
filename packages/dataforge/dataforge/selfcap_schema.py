@@ -148,3 +148,12 @@ class SyncRecord:
         if value is None or not np.isfinite(value):
             raise ValueError(f"missing finite clock offset for {device}")
         return value
+
+
+OAK_HAND_BASES: tuple[tuple[Literal["left", "right"], int], ...] = (("left", 91), ("right", 112))
+"""EgoHand calibration layers use dense COCO-133: each hand occupies 21 consecutive slots."""
+
+
+def oak_egohand_path(rig: int, cam: int) -> str:
+    """Dense COCO-133 EgoHand calibration pixels, with raw scores on the ``confidence`` component."""
+    return schema.coco133_uv_path(rig, cam, pred="egohand_calib")

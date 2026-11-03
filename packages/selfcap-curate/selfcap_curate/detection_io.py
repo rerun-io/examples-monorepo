@@ -8,6 +8,7 @@ import rerun as rr
 from dataforge.hands import shown_keypoint_columns, sparse_keypoint_columns
 from dataforge.logging_toolkit import capture_column, time_column
 from dataforge.schema import SHOWN_MIN_CONFIDENCE, coco133_uv_path, coco133_uv_shown_path
+from dataforge.selfcap_schema import oak_egohand_path
 from dataforge.writing import APPLICATION_ID, atomic_write
 from jaxtyping import Float32
 from numpy import ndarray
@@ -32,7 +33,7 @@ def write_oak_egohand_layer(path: Path, segment: str, oak_rig: int, views: dict[
 
     def chunks() -> Iterator[Chunk]:
         for camera, detections in views.items():
-            entity: str = coco133_uv_path(oak_rig, OAK_CAMERAS.index(camera), pred="egohand_calib")
+            entity: str = oak_egohand_path(oak_rig, OAK_CAMERAS.index(camera))
             count: int = len(detections.video_time)
             yield Chunk.from_columns(entity.rsplit("/", 1)[0], indexes=[], columns=rr.AnnotationContext.columns(context=[context]))
             if count:
