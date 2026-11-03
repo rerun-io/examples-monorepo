@@ -11,11 +11,11 @@ from rerun.catalog import DatasetEntry
 from rerun.encodings import EntityPathLike
 
 from dataforge import blueprints, schema, writing
-from dataforge.schema import SOMA_MESH, SOMA_QUALITY_PROPERTY
 from dataforge.selfcap_schema import (
     DEFAULT_EXO_CAMERAS,
     EGO_STREAM_LAYOUTS,
     IMU_DEVICE,
+    PREDICTIONS,
     PREVIEW_BODY,
     PREVIEW_CENTER,
     PREVIEW_EXO_PINHOLE,
@@ -27,6 +27,9 @@ from dataforge.selfcap_schema import (
     PREVIEW_VIDEO_GAP_PX,
     PREVIEW_VIDEO_SIZE,
     QUEST_STREAM_LAYOUTS,
+    SKELETON,
+    SOMA_MESH,
+    SOMA_QUALITY_PROPERTY,
     rig_label_path,
 )
 
@@ -119,7 +122,7 @@ def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int, *, posed_phones
         contents: list[str] = [f"{pinhole}/**", "/world/gt/**", "/world/pred/**"]
         overrides: dict[EntityPathLike, rrb.EntityBehavior] = hidden.copy()
         if pane.rig != ego_rig:
-            contents.append("/world/skeleton/**")
+            contents.append(f"{SKELETON}/**")
             overrides[SOMA_MESH] = rrb.EntityBehavior(visible=True)
         if pane.kind == "exo":
             # The other rigs' camera frames and names (cam nodes only, without their frustum or video) show in the phone.
@@ -212,12 +215,12 @@ def table_blueprint(*, posed_phones: bool = True) -> rrb.Blueprint:
     scene: rrb.Spatial3DView = rrb.Spatial3DView(
         name="Scene",
         origin="/world",
-        contents=["/world/**", "- /world/pred/**", f"{SOMA_MESH}/**", *blueprints.video_exclusions(slots), *unposed],
+        contents=["/world/**", f"- {PREDICTIONS}/**", f"{SOMA_MESH}/**", *blueprints.video_exclusions(slots), *unposed],
         background=SCENE_BACKGROUND,
         eye_controls=SCENE_EYE,
     )
     if posed_phones:
-        body: list[str] = ["/world/gt/**", "/world/skeleton/**", f"{SOMA_MESH}/**"]
+        body: list[str] = ["/world/gt/**", f"{SKELETON}/**", f"{SOMA_MESH}/**"]
         pane: rrb.Spatial2DView = blueprints.camera_view("Phone 1", 0, 0, contents=[schema.video_path(0, 0) + "/**", *body])
     else:
         ego_rig: int = DEFAULT_EXO_CAMERAS

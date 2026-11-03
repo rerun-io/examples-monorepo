@@ -21,8 +21,8 @@ from urllib.parse import unquote, urlparse
 
 import pyarrow as pa
 from dataforge import paths
-from dataforge.datasets.selfcap import SOMA_METRICS, SOMA_QUALITY_PROPERTY
 from dataforge.identity import SequenceIdentity
+from dataforge.selfcap_schema import SOMA_METRICS, SOMA_QUALITY_PROPERTY
 from dataforge.timing import ConvertRecord, load_records
 from rerun.catalog import CatalogClient
 

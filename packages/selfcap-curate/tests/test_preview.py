@@ -11,7 +11,8 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.blueprint as rrb
-from dataforge.datasets.selfcap import SOMA_MESH, SOMA_XLO, SelfcapConfig, SelfcapDataset
+from dataforge.datasets.selfcap import SelfcapConfig, SelfcapDataset
+from dataforge.selfcap_schema import SOMA_MESH, SOMA_XLO
 from dataforge.writing import recording_to
 from jaxtyping import Int64, UInt8
 from numpy import ndarray

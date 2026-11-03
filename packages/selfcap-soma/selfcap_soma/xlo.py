@@ -12,7 +12,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
-from dataforge.schema import SOMA_XLO
+from dataforge.selfcap_schema import SOMA_XLO
 from dataforge.writing import atomic_write
 from jaxtyping import Float32, Int32, Int64
 from numpy import ndarray

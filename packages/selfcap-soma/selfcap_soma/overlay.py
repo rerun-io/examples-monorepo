@@ -7,7 +7,8 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 from dataforge.oak_mount import StaticCamera, read_static_cameras
-from dataforge.schema import SOMA_MESH
+from dataforge.schema import cam_path, pinhole_path
+from dataforge.selfcap_schema import SOMA_EARS, SOMA_JOINTS, SOMA_MESH
 from dataforge.triangulation import EgoCamera, project, project_ego
 from dataforge.writing import atomic_recording
 from jaxtyping import Bool, Float32, Float64, Int32, Int64
@@ -24,10 +25,6 @@ from selfcap_soma.output import joint_edges, log_joint_style, mapped
 from selfcap_soma.overlay_style import observed_links, observed_points, residual_tolerance
 from selfcap_soma.quality import SomaQuality, assess_quality, log_quality
 
-SOMA_JOINTS: str = "/world/pred/soma_x/joints"
-"""Fitted joints in the soma layer."""
-SOMA_EARS: str = "/world/pred/soma_x/ears"
-"""Fitted ear landmarks in the soma layer."""
 SOMA_CROP: str = "/__soma/upper_body_vertices"
 """Static low-LOD vertex ids of the stored crop, component ``vertex_ids``: outside /world and without a visualizer, so no view shows it."""
 NORMAL_FRAMES: int = 128
@@ -209,7 +206,7 @@ def log_mesh(recording: rr.RecordingStream, fit: LayerFit, upper_body_only: bool
 
 def oak_stereo_cameras(view: DatasetSelection, segment: str, rgb: EgoCamera) -> list[EgoCamera]:
     """The OAK's left and right cameras beside its rgb one; a camera with incomplete calibration is reported and skipped."""
-    paths: list[str] = [f"/world/rig_{rgb.rig:02d}/cam_{cam:02d}" for cam in (1, 2)]
+    paths: list[str] = [cam_path(rgb.rig, cam) for cam in (1, 2)]
     cameras: dict[str, StaticCamera] = read_static_cameras(view, view, paths)  # one dataset holds both layers here
     stereo: list[EgoCamera] = []
     for cam, path in enumerate(paths, start=1):
@@ -280,7 +277,7 @@ def write_layer(segment: str, dataset: str, catalog_url: str, exo_source: ExoSou
             if ego.cam != 0:
                 evidence[~np.isfinite(rgb_evidence).all(-1)] = np.nan
             seen = observed_points(pixels.astype(np.float64), evidence, np.isfinite(evidence).all(-1).astype(np.float64))
-            projections.append((f"/world/rig_{ego.rig:02d}/cam_{ego.cam:02d}/pinhole", pixels, seen))
+            projections.append((pinhole_path(ego.rig, ego.cam), pixels, seen))
         for pinhole, pixels, seen in projections:
             path = f"{pinhole}/pred/soma_x/joints_uv"
             log_joint_overlay(recording, path, times, pixels, seen)

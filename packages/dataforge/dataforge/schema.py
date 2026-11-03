@@ -30,17 +30,6 @@ EXOEGO_SCHEMA_VERSION: str = "exoego:v2"
 DATAFORGE_SCHEMA_VERSION: str = "dataforge:v1"
 """Value of the ``property:capture:schema`` recording property."""
 
-SOMA_MESH: str = "/world/pred/soma_x/mesh"
-"""Fitted SOMA mesh, from the ``soma`` layer."""
-SOMA_XLO: str = "/world/pred/soma_x/mesh_xlo"
-"""Low-vertex SOMA mesh, from the ``soma_xlo`` layer."""
-SOMA_LAYER: str = "soma"
-"""Layer that carries ``SOMA_MESH``."""
-SOMA_QUALITY_PROPERTY: str = "soma_quality"
-"""Property group of a segment's fit quality: its columns are ``property:soma_quality:<field>``."""
-SOMA_METRICS: tuple[str, ...] = ("body", "shoulders", "ears", "hands")
-"""Body parts with a residual in the quality record: its fields are ``<metric>_median_mm``."""
-
 GT_RUN_SOURCE: str = "gt"
 """Run source of the ground-truth trajectory and trail under ``/world/runs/``.
 

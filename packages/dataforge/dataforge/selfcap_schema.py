@@ -6,6 +6,7 @@ environment lacks.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -15,6 +16,29 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from dataforge import schema
+
+SOMA_MESH: str = "/world/pred/soma_x/mesh"
+"""Fitted SOMA mesh, from the ``soma`` layer."""
+SOMA_XLO: str = "/world/pred/soma_x/mesh_xlo"
+"""Low-vertex SOMA mesh, from the ``soma_xlo`` layer."""
+SOMA_LAYER: str = "soma"
+"""Layer that carries ``SOMA_MESH``."""
+SOMA_QUALITY_PROPERTY: str = "soma_quality"
+"""Property group of a segment's fit quality: its columns are ``property:soma_quality:<field>``."""
+SOMA_METRICS: tuple[str, ...] = ("body", "shoulders", "ears", "hands")
+"""Body parts with a residual in the quality record: its fields are ``<metric>_median_mm``."""
+
+SKELETON: str = "/world/skeleton"
+"""Display skeleton shared by the fitted body and measured Quest hands."""
+SOMA_JOINTS: str = "/world/pred/soma_x/joints"
+"""Fitted SOMA joints in world metres."""
+SOMA_EARS: str = "/world/pred/soma_x/ears"
+"""Fitted SOMA ears in world metres."""
+SAPIENS2_XYZ: str = "/world/gt/sapiens2/coco133_xyz"
+"""Triangulated Sapiens2 keypoints retained at their production entity."""
+PREDICTIONS: str = "/world/pred"
+"""Parent annotation context for predicted world keypoints."""
+
 
 EGO_STREAM_LAYOUTS: tuple[tuple[str, str], ...] = (("rgb", "center"), ("left", "left"), ("right", "right"))
 """OAK stream name → ``positional_layout`` in ``ego/calibration.json``, in cam_00..cam_02 order.
@@ -95,3 +119,10 @@ def rdf_head(quaternions: Float64[ndarray, "n 4"], source_convention: HeadConven
         return HeadAxes(quaternions, source_convention)
     x, y, z, w = quaternions.T
     return HeadAxes(np.stack([w, z, -y, -x], axis=1), "RUB")
+
+
+def oak_rig_of(phones: int, present: Collection[str], *, ego_rigs: Collection[int] = ()) -> int:
+    """Prefer the discovered ego rig, then the legacy OAK left camera, else the reserved slot."""
+    if len(ego_rigs) == 1:
+        return next(iter(ego_rigs))
+    return phones if schema.video_path(phones, 1) in present else DEFAULT_EXO_CAMERAS

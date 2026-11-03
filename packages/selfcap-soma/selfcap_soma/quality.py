@@ -6,7 +6,7 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
-from dataforge.schema import SOMA_METRICS, SOMA_QUALITY_PROPERTY
+from dataforge.selfcap_schema import SOMA_METRICS, SOMA_QUALITY_PROPERTY
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.chunk import RrdReader

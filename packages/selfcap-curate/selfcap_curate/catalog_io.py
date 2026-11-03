@@ -23,7 +23,7 @@ from dataforge.schema import (
     rig_path,
     video_path,
 )
-from dataforge.selfcap_schema import DEFAULT_EXO_CAMERAS, rdf_head
+from dataforge.selfcap_schema import oak_rig_of, rdf_head
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -92,7 +92,7 @@ def select_layout(layout: CatalogRigLayout, phones: tuple[str, ...]) -> SelfcapL
     oak: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "ego"}
     quest: set[str] = {c.rig for c in layout.cameras if c.rig_kind == "quest"}
     count: int = len(exo)
-    oak_rig: int = int(next(iter(oak)).removeprefix("rig_")) if len(oak) == 1 else -1
+    oak_rig: int = oak_rig_of(count, {c.video_entity for c in layout.cameras}, ego_rigs={int(r.removeprefix("rig_")) for r in oak}) if len(oak) == 1 else -1
     quest_rig: int = int(next(iter(quest)).removeprefix("rig_")) if len(quest) == 1 else -1
     if count not in (3, 4) or oak_rig < count or quest_rig != oak_rig + 1 or exo != {f"rig_{i:02d}" for i in range(count)}:
         raise ValueError(f"not a SelfCap rig layout: exo={exo}, oak={oak}, quest={quest}")
@@ -300,7 +300,8 @@ def open_segment(dataset: DatasetEntry, segment_id: str) -> Segment:
     phones = read_phone_names(dataset, segment_id, layout)
     # Phone-only bases remain usable for keypoint preflight; wearable slots are reserved by the ingest convention.
     if layout.cameras and all(camera.rig_kind == "exo" for camera in layout.cameras):
-        return Segment(dataset, segment_id, SelfcapLayout(DEFAULT_EXO_CAMERAS, DEFAULT_EXO_CAMERAS + 1, phones))
+        oak_rig: int = oak_rig_of(len(phones), {c.video_entity for c in layout.cameras})
+        return Segment(dataset, segment_id, SelfcapLayout(oak_rig, oak_rig + 1, phones))
     return Segment(dataset, segment_id, select_layout(layout, phones))
 
 

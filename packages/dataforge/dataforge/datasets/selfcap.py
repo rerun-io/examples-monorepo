@@ -95,11 +95,6 @@ from dataforge.objects import strip_texture_transform, with_root_transform
 from dataforge.quest_joint_poses import QuestJointPoses, joint_poses_from_table, quest_hand_path
 from dataforge.quest_joint_poses import read_segment_hand_poses as read_segment_hand_poses
 from dataforge.records import read_csv_columns, read_json
-from dataforge.schema import SOMA_LAYER as SOMA_LAYER
-from dataforge.schema import SOMA_MESH as SOMA_MESH
-from dataforge.schema import SOMA_METRICS as SOMA_METRICS
-from dataforge.schema import SOMA_QUALITY_PROPERTY as SOMA_QUALITY_PROPERTY
-from dataforge.schema import SOMA_XLO as SOMA_XLO
 from dataforge.selfcap_schema import DEFAULT_EXO_CAMERAS, EGO_STREAM_LAYOUTS, IMU_DEVICE, QUEST_STREAM_LAYOUTS, rig_label_path
 from dataforge.video_encoding import read_video_start_ns
 

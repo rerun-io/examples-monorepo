@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow as pa
 from dataforge.interpolation import bracket, lerp, slerp
 from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, joint_poses_from_table, quest_hand_path
+from dataforge.schema import coco133_xyz_path
 from dataforge.selfcap_schema import rdf_head
 from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64
@@ -232,7 +233,7 @@ def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, 
     scores = floats(table[confidence], -1, 133)
     head_sample, hand_sample = quest_sample_times(times, offset)
 
-    hand_path, head_path = "/world/gt/coco133_xyz", rigs.quest
+    hand_path, head_path = coco133_xyz_path(), rigs.quest
     hands_column = f"{hand_path}:Points3D:positions"
     translation = f"{head_path}:Transform3D:translation"
     quaternion = f"{head_path}:Transform3D:quaternion"

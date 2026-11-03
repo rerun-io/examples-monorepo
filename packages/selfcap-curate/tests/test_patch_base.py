@@ -372,7 +372,7 @@ def test_migration_parses_each_hand_csv_once(tmp_path: Path, monkeypatch) -> Non
     ({schema.video_path(4, 1)}, 4),  # current ingest: the OAK is always rig_04
 ])
 def test_the_oak_rig_comes_from_the_base_not_the_phone_count(present: set[str], expected: int) -> None:
-    from selfcap_curate.patch_base import oak_rig_in
+    from dataforge.selfcap_schema import oak_rig_of
 
-    assert oak_rig_in(3, present) == expected
-    assert oak_rig_in(4, {schema.video_path(4, 1)}) == 4
+    assert oak_rig_of(3, present) == expected
+    assert oak_rig_of(4, {schema.video_path(4, 1)}) == 4

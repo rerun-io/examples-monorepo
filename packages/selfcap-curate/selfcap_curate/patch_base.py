@@ -21,7 +21,7 @@ from dataforge import paths, schema
 from dataforge.datasets.selfcap import exo_devices, log_quest_hands, raw_calibration_chunks, read_quest_hands
 from dataforge.quest_joint_poses import quest_hand_path
 from dataforge.schema import CAPTURE_TIMELINE
-from dataforge.selfcap_schema import DEFAULT_EXO_CAMERAS
+from dataforge.selfcap_schema import oak_rig_of
 from dataforge.video_encoding import read_video_start_ns
 from dataforge.writing import atomic_write, recording_to
 from jaxtyping import Int64
@@ -122,11 +122,6 @@ def rewrite(chunk: Chunk, operation: Retime, source: Path) -> list[Chunk]:
     return Chunk.from_record_batch(batch)
 
 
-def oak_rig_in(phones: int, present: set[str]) -> int:
-    """The OAK's rig in a base: right after the phones in older bases (their OAK-only left camera sits there), else rig_04."""
-    return phones if schema.video_path(phones, 1) in present else DEFAULT_EXO_CAMERAS
-
-
 def patch(
     served_base: Path,
     raw_episode_dir: Path | None,
@@ -169,7 +164,7 @@ def patch(
     devices = exo_devices(raw_episode_dir) if original is not None and raw_episode_dir is not None else sorted(phones)
     if not devices:
         raise ValueError(f"{raw_episode_dir}: no readable exo videos and calibrations")
-    oak_rig: int = oak_rig_in(len(devices), inventory.present)
+    oak_rig: int = oak_rig_of(len(devices), inventory.present)
     videos: dict[str, str] = {schema.video_path(rig, 0): f"exo/{device}" for rig, device in enumerate(devices)}
     videos.update(
         {

@@ -38,7 +38,6 @@ from typing import TypeAlias
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from dataforge.datasets.selfcap import SOMA_MESH, SOMA_XLO
 from dataforge.schema import TIMELINE, cam_path, pinhole_path, video_path
 from dataforge.selfcap_schema import (
     PREVIEW_CENTER,
@@ -49,6 +48,9 @@ from dataforge.selfcap_schema import (
     PREVIEW_TIMELINE,
     PREVIEW_VIDEO_GAP_PX,
     PREVIEW_VIDEO_SIZE,
+    SKELETON,
+    SOMA_MESH,
+    SOMA_XLO,
 )
 from dataforge.video_encoding import resolve_ffmpeg
 from dataforge.writing import atomic_write
@@ -435,7 +437,7 @@ def build_segment_preview(entry: DatasetEntry, segment: str, target: Path, optio
     lo: int = max(int(exo_index.times[0]), middle - half)
     hi: int = min(int(exo_index.times[-1]) + 1, middle + half)
     body: list[Chunk] = []
-    for source, destination in (("/world/skeleton", PREVIEW_SKELETON), (SOMA_XLO, PREVIEW_SOMA_XLO)):
+    for source, destination in ((SKELETON, PREVIEW_SKELETON), (SOMA_XLO, PREVIEW_SOMA_XLO)):
         for chunk in store.stream().filter(content=source).to_chunks():
             body += copy_window(chunk, destination, lo, hi, fps=options.fps)
     if not any(str(chunk.entity_path) == PREVIEW_SOMA_XLO for chunk in body) and SOMA_MESH in schema.entity_paths():
