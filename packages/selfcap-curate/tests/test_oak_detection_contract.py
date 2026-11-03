@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from rerun.server import Server
 
+# ruff: noqa: E402
 soma_catalog = pytest.importorskip("selfcap_soma.catalog", reason="requires selfcap-soma on PYTHONPATH for the cross-package contract")
 evaluation_io = pytest.importorskip("selfcap_soma.evaluation_io", reason="requires selfcap-soma for the cross-package contract")
 

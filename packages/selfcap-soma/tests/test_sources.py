@@ -92,6 +92,7 @@ def test_read_views_thresholds_the_uncensored_entity_itself(tmp_path: Path, monk
 def test_unused_phone_null_offset_does_not_block_the_quest_clock() -> None:
     """Unused phones can lack a clock while the Quest clock remains usable."""
     from serde.json import from_json
+
     from selfcap_soma.catalog import SyncRecord
 
     sync = from_json(SyncRecord, '{"offsets_ms":{"quest_pose":12.5,"exo/unused":null},"version":2}')

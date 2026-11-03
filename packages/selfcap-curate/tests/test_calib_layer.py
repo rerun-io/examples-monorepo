@@ -445,6 +445,7 @@ def test_calibrate_egohand_fits_the_mount_on_all_three_oak_cameras(calibration_c
 
 def test_calibration_layer_carries_the_clock_accepted_with_its_pose(tmp_path, layer_case) -> None:
     from serde.json import from_json
+
     from selfcap_curate.records import TimeSync
 
     state, motion = layer_case
