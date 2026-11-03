@@ -1,6 +1,7 @@
 """Exo cameras from the head track: synthetic scenes with a known camera, head path and face offsets."""
 
 import numpy as np
+from dataforge.selfcap_schema import rdf_head
 from scipy.spatial.transform import Rotation
 
 from selfcap_curate.exo_calibration import Camera
@@ -90,7 +91,8 @@ def test_a_head_track_stored_with_y_up_and_z_back_is_turned_back_to_rdf() -> Non
 
     def track(rotation: np.ndarray) -> HeadTrack:
         quaternions = Rotation.from_matrix(np.repeat(rotation[None], n, axis=0)).as_quat()
-        return head_track(CatalogHands(np.zeros(0), np.zeros((0, 133, 3)), np.arange(n) / 20.0, np.tile([0.0, 1.6, 0.0], (n, 1)), quaternions), 0.0)
+        axes = rdf_head(quaternions)
+        return head_track(CatalogHands(np.zeros(0), np.zeros((0, 133, 3)), np.arange(n) / 20.0, np.tile([0.0, 1.6, 0.0], (n, 1)), axes.quaternions, axes.convention), 0.0)
 
     stored_rub = track(level @ np.diag([1.0, -1.0, -1.0]))
     stored_rdf = track(level)

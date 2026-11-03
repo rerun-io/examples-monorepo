@@ -8,7 +8,6 @@ does not reach ACCEPT_FACE_PX keeps its hands-only pose (or stays unposed).
 from dataclasses import dataclass, field, replace
 
 import numpy as np
-from dataforge.selfcap_schema import rdf_head
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -64,8 +63,7 @@ def head_track(source: CatalogHands, quest_pose_ms: float) -> HeadTrack:
     valid = np.isfinite(source.head_positions).all(1) & (np.linalg.norm(source.head_quaternions, axis=1) > 0.5)
     times = source.head_times_s[valid] + quest_pose_ms / 1000.0
     order = np.flatnonzero(np.r_[True, np.diff(times) > 0.0])
-    axes = rdf_head(source.head_quaternions[valid][order], source.head_convention)
-    return HeadTrack(times[order], Rotation.from_quat(axes.quaternions).as_matrix(), source.head_positions[valid][order], convention=axes.convention)
+    return HeadTrack(times[order], Rotation.from_quat(source.head_quaternions[valid][order]).as_matrix(), source.head_positions[valid][order], convention=source.head_convention)
 
 
 def unverified(phone: PhoneCalibration, episode: str) -> PhoneCalibration:

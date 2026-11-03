@@ -96,7 +96,12 @@ class HeadAxes:
     @property
     def recorded_T_rdf(self) -> Float64[ndarray, "4 4"]:
         """RDF head frame to the unchanged base rig frame."""
-        return np.diag([1.0, -1.0, -1.0, 1.0]) if self.convention == "RUB" else np.eye(4)
+        return recorded_head_basis(self.convention)
+
+
+def recorded_head_basis(convention: HeadConvention) -> Float64[ndarray, "4 4"]:
+    """RDF axes expressed in the unchanged recorded head frame."""
+    return np.diag([1.0, -1.0, -1.0, 1.0]) if convention == "RUB" else np.eye(4)
 
 
 def rdf_head(quaternions: Float64[ndarray, "n 4"], source_convention: HeadConvention = "RDF") -> HeadAxes:

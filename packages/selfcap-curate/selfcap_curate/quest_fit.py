@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import numpy as np
 from dataforge.interpolation import bracket
-from dataforge.selfcap_schema import rdf_head
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
@@ -31,7 +30,6 @@ def load_quest_hands(source: CatalogHands) -> dict[Side, HandTrack]:
     """
     if len(source.head_times_s) == 0:
         raise ValueError("Quest hands require the base's capture-time head pose")
-    head_axes = rdf_head(source.head_quaternions)
     result: dict[Side, HandTrack] = {}
     directions: dict[Side, Float64[ndarray, "n 3"]] = {}
     for side, base in HAND_BASE.items():
@@ -45,7 +43,7 @@ def load_quest_hands(source: CatalogHands) -> dict[Side, HandTrack]:
         frozen = np.r_[False, np.abs(np.diff(joints, axis=0)).sum((1, 2)) == 0.0]
         valid &= ~(frozen & np.roll(frozen, -1))
         hi = np.clip(np.searchsorted(source.head_times_s, source.times_s), 0, len(source.head_times_s) - 1)
-        q = head_axes.quaternions[hi] * np.array([-1.0, -1.0, -1.0, 1.0])
+        q = source.head_quaternions[hi] * np.array([-1.0, -1.0, -1.0, 1.0])
         v = wrist - source.head_positions[hi]
         cross = 2.0 * np.cross(q[:, :3], v)
         rotated = v + q[:, 3:4] * cross + np.cross(q[:, :3], cross)

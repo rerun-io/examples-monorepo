@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from dataforge.datasets.selfcap_raw import crop_shift_px
+from dataforge.selfcap_schema import rdf_head
 from rerun.chunk import RrdReader
 from rrd_fixtures import private_server
 from rrd_references import KeypointReference, OakReference, reference_tables
@@ -359,6 +360,8 @@ def session_episode(sync, hands=None, gyro_times=None, gyro=None, *, detections=
 
     empty = np.empty(0)
     hands = hands if hands is not None else CatalogHands(empty, np.empty((0, 133, 3)), empty, np.empty((0, 3)), np.empty((0, 4)))
+    axes = rdf_head(hands.head_quaternions, hands.head_convention)
+    hands = replace(hands, head_quaternions=axes.quaternions, head_convention=axes.convention)
     kwargs = {} if oak is None else {"oak": oak}
     return SessionEpisode(
         sync,

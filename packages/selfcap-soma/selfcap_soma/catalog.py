@@ -8,7 +8,7 @@ import pyarrow as pa
 from dataforge.interpolation import bracket, lerp, slerp
 from dataforge.quest_joint_poses import QUEST_HAND_SIDES, QuestJointPoses, joint_poses_from_table, quest_hand_path
 from dataforge.schema import coco133_xyz_path
-from dataforge.selfcap_schema import rdf_head
+from dataforge.selfcap_schema import HeadConvention, rdf_head
 from datafusion import col, lit
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
@@ -141,6 +141,8 @@ class Observations:
     """Geometric inlier-view counts, when supplied by the triangulation layer."""
     hand_poses: dict[str, QuestJointPoses] = field(default_factory=dict)
     """Raw joint poses from the same capture_time materialization as hands and head."""
+    head_convention: HeadConvention = "RDF"
+    """Orientation axes stored in the base, before read-side RDF normalization."""
 
 
 def subset(data: Observations, mask: Bool[ndarray, "n"]) -> Observations:
@@ -250,6 +252,9 @@ def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, 
         for side, entity in joint_entities.items()
         if entity + ":InstancePoses3D:translations" in raw.column_names
     }
+    head_rows = raw.filter(raw[quaternion].is_valid())
+    axes = rdf_head(floats(head_rows[quaternion], -1, 4))
+    head_stamps = head_rows["capture_time"].cast(pa.int64()).to_numpy()
     stamps = raw["capture_time"].cast(pa.int64()).to_numpy()
     raw = raw.take(np.flatnonzero((stamps >= int((head_sample[0] - 0.1) * 1e9)) & (stamps <= int((hand_sample[-1] + 0.1) * 1e9))))
     hand_table = raw.filter(raw[hands_column].is_valid())
@@ -258,10 +263,10 @@ def read_window(catalog: SegmentCatalog, start: float, end: float, stride: int, 
         raise ValueError("need at least two Quest hand and head samples")
     ht = seconds(head_table["capture_time"])
     hp = floats(head_table[translation], -1, 3)
-    hq = floats(head_table[quaternion], -1, 4)
+    hq = axes.quaternions[(head_stamps >= int((head_sample[0] - 0.1) * 1e9)) & (head_stamps <= int((hand_sample[-1] + 0.1) * 1e9))]
     keep = np.r_[True, np.diff(ht) > 0.0]
-    ht, hp, hq = ht[keep], hp[keep], rdf_head(hq[keep]).quaternions
+    ht, hp, hq = ht[keep], hp[keep], hq[keep]
     hands = interpolate_hands(seconds(hand_table["capture_time"]), floats(hand_table[hands_column], -1, 133, 3), hand_sample)
     positions, rotations = interpolate_head(ht, hp, hq, head_sample)
     support = floats(table[support_column], -1, 133).astype(np.int64) if support_column in table.column_names else None
-    return Observations(times, exo, scores, hands, positions, rotations, offset, support, hand_poses)
+    return Observations(times, exo, scores, hands, positions, rotations, offset, support, hand_poses, axes.convention)

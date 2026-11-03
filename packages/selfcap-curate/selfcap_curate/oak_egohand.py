@@ -13,7 +13,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from dataforge.datasets.selfcap_raw import Intrinsic
-from dataforge.selfcap_schema import rdf_head
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from posekit.models.egohand import (
@@ -147,7 +146,7 @@ def detect_oak_egohand(
     head: CatalogHands = episode.hands
     if camera is None and rotation is not None:
         poses: Float64[ndarray, "p 4 4"] = np.tile(np.eye(4), (len(head.head_times_s), 1, 1))
-        poses[:, :3, :3] = Rotation.from_quat(rdf_head(head.head_quaternions).quaternions).as_matrix() @ rotation
+        poses[:, :3, :3] = Rotation.from_quat(head.head_quaternions).as_matrix() @ rotation
         poses[:, :3, 3] = head.head_positions
         camera = EgoCamera(
             episode.layout.oak_rig,

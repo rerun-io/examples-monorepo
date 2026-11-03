@@ -9,7 +9,7 @@ import rerun as rr
 from dataforge import schema
 from dataforge.datasets.selfcap import PHONE_IMAGE_PLANE_DISTANCE
 from dataforge.logging_toolkit import capture_column, time_column
-from dataforge.selfcap_schema import rdf_head
+from dataforge.selfcap_schema import recorded_head_basis
 from dataforge.writing import atomic_recording
 from jaxtyping import Float64
 from numpy import ndarray
@@ -96,8 +96,7 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
         posed = qp is not None and mount is not None
         if posed:
             if session.oak.head_frame == "rdf":
-                axes = rdf_head(motion.hands.head_quaternions, motion.hands.head_convention)
-                mount = axes.recorded_T_rdf @ mount  # The base parent keeps its recorded axes.
+                mount = recorded_head_basis(motion.hands.head_convention) @ mount  # The base parent keeps its recorded axes.
             # Static for queries (``read_fitted_mount``), and again at the first Quest pose, where it follows the base's
             # nominal prior (PRIOR_LEAD_NS earlier): the viewer resolves a timed transform ahead of a static one.
             parent = f"tf#{schema.rig_path(quest_rig)}"
