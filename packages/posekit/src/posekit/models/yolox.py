@@ -6,16 +6,22 @@ Runtime and TensorRT share one static-shape graph and thresholding/NMS runs on
 GPU with torchvision.
 """
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
+import numpy as np
+import onnx
 import torch
 from jaxtyping import Float, UInt8
+from onnx import numpy_helper
 from torch import Tensor
+from trtkit.trt_builder import onnx_content_hash
 
-from posekit.artifacts import fetch_openmmlab_onnx, strip_detector_nms
+from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR, fetch_openmmlab_onnx, strip_detector_nms
 from posekit.models.base import PersonDetector
 from posekit.ops.letterbox import letterbox_frames
 from posekit.ops.yolox import decode_yolox_head_outputs
@@ -106,3 +112,43 @@ class YoloxDetector(PersonDetector):
             score_thr=self.config.score_thr,
             nms_thr=self.config.nms_thr,
         )
+
+
+def dynamic_yolox(source: Path) -> Path:
+    """Make only the five reviewed YOLOX-m batch reshape constants dynamic."""
+    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", str(DEFAULT_ONNX_CACHE_DIR))).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    digest: str = onnx_content_hash(source, cache_dir=directory)[:16]
+    dest: Path = directory / f"{source.stem}_{digest}_dynamic_batch_v1.onnx"
+    if dest.exists():
+        return dest
+    model = onnx.load(source)
+    constants = {node.output[0]: next(a.t for a in node.attribute if a.name == "value") for node in model.graph.node if node.op_type == "Constant"}
+    constants.update({value.name: value for value in model.graph.initializer})
+    changed: set[str] = set()
+    for node in model.graph.node:
+        if node.op_type != "Reshape":
+            continue
+        proto = constants[node.input[1]]
+        shape = numpy_helper.to_array(proto).copy()
+        if shape.ndim != 1 or shape[0] not in (0, 1):
+            raise ValueError(f"Unreviewed YOLOX reshape: {node.name}")
+        shape[0] = 0
+        proto.CopyFrom(numpy_helper.from_array(shape.astype(np.int64), name=proto.name))
+        changed.add(node.input[1])
+    if len(changed) != 5:
+        raise ValueError("Expected five YOLOX batch constants")
+    for value in [*model.graph.input, *model.graph.output]:
+        value.type.tensor_type.shape.dim[0].ClearField("dim_value")
+        value.type.tensor_type.shape.dim[0].dim_param = "batch"
+    del model.graph.value_info[:]
+    model = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model)
+    partial = dest.with_name(f".{dest.name}.{uuid4().hex}.tmp")
+    try:
+        onnx.save(model, str(partial))
+        partial.replace(dest)
+    finally:
+        partial.unlink(missing_ok=True)
+    return dest
+

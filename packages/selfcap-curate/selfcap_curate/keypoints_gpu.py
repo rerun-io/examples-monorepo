@@ -6,19 +6,15 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from uuid import uuid4
 
 import numpy as np
-import onnx
 import torch
 from dataforge.clocks import nearest_framesets
-from dataforge.writing import atomic_write
 from jaxtyping import Bool, Float16, Float32, Float64, Int64, UInt8
 from numpy import ndarray
-from onnx import numpy_helper
 from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR
 from posekit.models.rtmpose import RtmPoseConfig
-from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig
+from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig, dynamic_yolox
 from posekit.predictions import BoxDetections, Keypoints2d
 from simplecv.catalog_video import CatalogVideo
 from simplecv.catalog_video_codec import wrap_mp4
@@ -26,7 +22,7 @@ from torch import Tensor
 from torchcodec import FrameBatch
 from torchcodec.decoders import VideoDecoder
 from trtkit.backends import TensorRtBackendConfig
-from trtkit.onnx_precision import fp16_conv_trunk
+from trtkit.onnx_precision import fp16_trunk
 
 from selfcap_curate.catalog_io import Segment, aligned_phone_videos, read_phone_videos
 from selfcap_curate.keypoints import Keypoints2D, PoseModel, ViewDetections
@@ -294,68 +290,17 @@ def track_streams(
     }
 
 
-def dynamic_yolox(source: Path) -> Path:
-    """Make only the five reviewed YOLOX-m batch reshape constants dynamic."""
-    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", str(DEFAULT_ONNX_CACHE_DIR))).expanduser()
-    directory.mkdir(parents=True, exist_ok=True)
-    dest: Path = directory / (source.stem + "_dynamic_batch_v1.onnx")
-    if dest.exists():
-        return dest
-    model = onnx.load(source)
-    constants = {node.output[0]: next(a.t for a in node.attribute if a.name == "value") for node in model.graph.node if node.op_type == "Constant"}
-    constants.update({value.name: value for value in model.graph.initializer})
-    changed: set[str] = set()
-    for node in model.graph.node:
-        if node.op_type != "Reshape":
-            continue
-        proto = constants[node.input[1]]
-        shape = numpy_helper.to_array(proto).copy()
-        if shape.ndim != 1 or shape[0] not in (0, 1):
-            raise ValueError(f"Unreviewed YOLOX reshape: {node.name}")
-        shape[0] = 0
-        proto.CopyFrom(numpy_helper.from_array(shape.astype(np.int64), name=proto.name))
-        changed.add(node.input[1])
-    if len(changed) != 5:
-        raise ValueError("Expected five YOLOX batch constants")
-    for value in [*model.graph.input, *model.graph.output]:
-        value.type.tensor_type.shape.dim[0].ClearField("dim_value")
-        value.type.tensor_type.shape.dim[0].dim_param = "batch"
-    del model.graph.value_info[:]
-    model = onnx.shape_inference.infer_shapes(model)
-    onnx.checker.check_model(model)
-    partial = dest.with_name(f".{dest.name}.{uuid4().hex}.tmp")
-    try:
-        onnx.save(model, str(partial))
-        partial.replace(dest)
-    finally:
-        partial.unlink(missing_ok=True)
-    return dest
-
-
-def fp16_trunk(source: Path) -> Path:
-    """trtkit's fp16 conv trunk of an fp32 graph, cached beside dynamic_yolox's rewrite (written whole, then renamed).
-
-    On cc808233 ep001 it cut detect from 9.7 to 7.4 s; 3D moved 1.5 mm median (p90 5.5 mm) and jitter stayed 1.68 mm.
-    """
-    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", str(DEFAULT_ONNX_CACHE_DIR))).expanduser()
-    directory.mkdir(parents=True, exist_ok=True)
-    dest: Path = directory / (source.stem + "_fp16trunk_v1.onnx")
-    if not dest.exists():
-        with atomic_write(dest) as staged:
-            onnx.save(fp16_conv_trunk(onnx.load(source)), str(staged))
-    return dest
-
-
 @cache
 def keypoint_models(model: PoseModel = "rtmw") -> tuple[YoloxDetector, Callable[[Tensor, BoxDetections], Keypoints2d]]:
     """Cache YOLOX .3 with an fp16 trunk and the selected TensorRT pose model."""
+    directory = Path(os.environ.get("POSEKIT_ONNX_CACHE", str(DEFAULT_ONNX_CACHE_DIR))).expanduser()
     detector = YoloxDetectorConfig(
-        backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8), score_thr=0.3, onnx_transform=lambda path: fp16_trunk(dynamic_yolox(path))
+        backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8), score_thr=0.3, onnx_transform=lambda path: fp16_trunk(dynamic_yolox(path), directory)
     ).setup()
     if model == "sapiens2":
         from posekit.models.sapiens import SapiensPoseConfig
 
         return detector, SapiensPoseConfig().setup()
     # Tracking sends up to phones x TRACK_CHUNKS crops per call; the 1-8-32 profile takes them in one engine call.
-    pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=8), onnx_transform=fp16_trunk).setup()
+    pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=8), onnx_transform=lambda path: fp16_trunk(path, directory)).setup()
     return detector, pose

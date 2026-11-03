@@ -6,10 +6,14 @@ fp32/TF32 until the graph itself says fp16.
 """
 
 from collections import defaultdict
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
+
+from trtkit.trt_builder import onnx_content_hash
 
 FP32_ONLY_INPUTS: dict[str, frozenset[int]] = {"Resize": frozenset({1, 2})}
 """Float inputs ONNX types independently of the data: Resize's roi and scales (scales is tensor(float))."""
@@ -87,3 +91,18 @@ def fp16_conv_trunk(source: onnx.ModelProto) -> onnx.ModelProto:
     model = onnx.shape_inference.infer_shapes(model)
     onnx.checker.check_model(model)
     return model
+
+
+def fp16_trunk(source: Path, cache_dir: Path) -> Path:
+    """Cache the fp16 convolutional rewrite by source content and transform version; preserve the source."""
+    directory = cache_dir.expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    digest: str = onnx_content_hash(source, cache_dir=directory)[:16]
+    dest: Path = directory / f"{source.stem}_{digest}_fp16trunk_v1.onnx"
+    if not dest.exists():
+        with TemporaryDirectory(prefix=".fp16-trunk-", dir=directory) as work:
+            staged: Path = Path(work) / dest.name
+            onnx.save(fp16_conv_trunk(onnx.load(source)), str(staged))
+            staged.replace(dest)
+    return dest
+
