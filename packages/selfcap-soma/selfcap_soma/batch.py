@@ -185,7 +185,12 @@ def _run_locked(config: Config, segment: str, directory: Path) -> None:
     if evidence:
         entities = sorted({name.split(":", 1)[0] for name in evidence})
         for index in (None, "video_time"):
-            table = catalog.view.filter_contents(entities).reader(index=index).select(*([] if index is None else [index]), *evidence).to_arrow_table()
+            reader = catalog.view.filter_contents(entities).reader(index=index)
+            available = set(reader.schema().names)
+            columns = [name for name in evidence if name in available]
+            if not columns:
+                continue  # The catalog union can include evidence absent from this segment/index.
+            table = reader.select(*([] if index is None else [index]), *columns).to_arrow_table()
             for batch in table.combine_chunks().to_batches():
                 digest.update(batch.serialize().to_pybytes())
     if config.assets is None:

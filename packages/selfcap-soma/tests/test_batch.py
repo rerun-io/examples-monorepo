@@ -11,6 +11,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 from dataforge.quest_joint_poses import QuestJointPoses
+from datafusion import SessionContext
 from rerun.catalog import DatasetSelection
 from rerun.chunk import RrdReader
 from test_quality import small_fit
@@ -217,11 +218,34 @@ def test_changed_camera_calibration_invalidates_a_completed_checkpoint(tmp_path:
     column = "/world/rig_00/cam_00/pinhole:Pinhole:image_from_camera"
     catalog = SegmentCatalog(catalog.view, [column], catalog.rigs)
     monkeypatch.setattr(batch, "open_segment", lambda *_args: catalog)
-    table = pa.table({column: [[[1.0] * 9]]})
-    catalog.view.filter_contents.return_value.reader.return_value.select.return_value.to_arrow_table.side_effect = lambda: table
+    table = pa.table({"video_time": pa.array([0], pa.duration("ns")), column: [[[1.0] * 9]]})
+    catalog.view.filter_contents.return_value.reader.side_effect = lambda **_kwargs: SessionContext().from_arrow(table)
     run_segment(config, SEGMENT)
     checkpoint = tmp_path / "test" / SEGMENT / "checkpoint.json"
     before = json.loads(checkpoint.read_text())["signature"]
-    table = pa.table({column: [[[2.0] * 9]]})
+    table = pa.table({"video_time": pa.array([0], pa.duration("ns")), column: [[[2.0] * 9]]})
     run_segment(config, SEGMENT)
     assert json.loads(checkpoint.read_text())["signature"] != before
+
+
+def test_checkpoint_accepts_a_phone_without_camera_centers(tmp_path: Path, transport, monkeypatch) -> None:
+    """A union catalog schema may name evidence absent from this segment or index."""
+    config = Config(catalog_url="test", dataset="test", output=tmp_path)
+    catalog = batch.open_segment(None, SEGMENT)
+    lens = "/world/rig_00/cam_00/pinhole:Pinhole:image_from_camera"
+    missing = "/world/rig_00/cam_00/pinhole/camera_centers:Points2D:positions"
+    centers = "/world/rig_01/cam_00/pinhole/camera_centers:Points2D:positions"
+    catalog = SegmentCatalog(catalog.view, [lens, missing, centers], catalog.rigs)
+    monkeypatch.setattr(batch, "open_segment", lambda *_args: catalog)
+    static = pa.table({lens: [[[1.0] * 9]]})
+    temporal = pa.table({"video_time": pa.array([0], pa.duration("ns")), centers: [[[10.0, 20.0]]]})
+    catalog.view.filter_contents.return_value.reader.side_effect = lambda *, index: SessionContext().from_arrow(static if index is None else temporal)
+
+    run_segment(config, SEGMENT)
+
+    checkpoint = tmp_path / "test" / SEGMENT / "checkpoint.json"
+    before = json.loads(checkpoint.read_text())
+    assert before["phase"] == "export"
+    temporal = pa.table({"video_time": pa.array([0], pa.duration("ns")), centers: [[[30.0, 20.0]]]})
+    run_segment(config, SEGMENT)
+    assert json.loads(checkpoint.read_text())["signature"] != before["signature"]
