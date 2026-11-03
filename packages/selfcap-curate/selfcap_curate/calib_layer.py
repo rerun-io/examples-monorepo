@@ -123,7 +123,12 @@ def write_calib_layer(path: Path, session: CalibSession, motion: SessionEpisode)
                     indexes=[time_column(first_pose_ns + round(qp * 1e6)), capture_column(first_pose_ns)],
                     columns=[
                         *rr.Transform3D.columns(translation=[mount[:3, 3]], mat3x3=[mount[:3, :3]], parent_frame=[parent]),
-                        *rr.AnyValues.columns(**{name: [value] for name, value in values.items()}),
+                        *rr.AnyValues.columns(
+                            oak_mount_source=["fitted"],
+                            calib_source=[METHOD],
+                            calib_oak_source=[session.oak.observation_source],
+                            calib_oak_median_px=[session.oak.median_px],
+                        ),
                     ],
                 )
         if session.quest.mode != "healthy":  # a borrowed camera-50 transform is an estimate, so it lives here

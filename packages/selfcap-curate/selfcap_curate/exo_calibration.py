@@ -126,7 +126,6 @@ class BundleResult:
     cameras: dict[str, Camera]  # Camera-to-Quest-world model parameters.
     cost: float  # Robust least-squares objective.
     body_median_px: float | None = None  # Unweighted body residual median for layer provenance.
-    converged: bool = True  # Whether the optimizer terminated before its evaluation limit.
 
 
 def triangulate(cameras: dict[str, Camera], views: dict[str, BodyObservation]) -> Float64[ndarray, "13 3"]:
@@ -204,7 +203,7 @@ def bundle(stacked: dict[str, Correspondences], body: Body, cameras: dict[str, C
     result = least_squares(residual, initial, jac_sparsity=sparsity, loss="cauchy", f_scale=6.0, x_scale="jac", max_nfev=max_nfev, method="trf")
     body_error = np.linalg.norm(residual(result.x)[2 * nh : 2 * nh + 2 * len(obs)].reshape(-1, 2), axis=1)
     body_error /= np.maximum(obs[:, 4], 1e-6)
-    return BundleResult(unpack(result.x), float(result.cost), float(np.median(body_error)) if len(body_error) else None, bool(result.success))
+    return BundleResult(unpack(result.x), float(result.cost), float(np.median(body_error)) if len(body_error) else None)
 
 
 BODY: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16)

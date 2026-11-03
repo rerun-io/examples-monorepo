@@ -28,7 +28,6 @@ from selfcap_curate.head_anchor import (
     body_bundle,
     clock_scan,
     face_correspondences,
-    face_world,
     find_clock,
     gate_hands,
     joint_bundle,
@@ -83,8 +82,9 @@ def _views(episode: SessionEpisode) -> tuple[dict[str, FaceTrack], dict[str, Cor
     hands: dict[str, Correspondences] = {}
     bodies: dict[str, BodyTrack] = {}
     offsets_ms = episode.sync.offsets_ms or {}
-    clocked = {p: d for p, d in episode.detections.items() if offsets_ms.get("exo/" + p) is not None}
-    aligned = {p: d.times_s + offsets_ms["exo/" + p] / 1000.0 for p, d in clocked.items()}
+    clocks = {p: offset for p in episode.detections if (offset := offsets_ms.get("exo/" + p)) is not None}
+    clocked = {p: episode.detections[p] for p in clocks}
+    aligned = {p: d.times_s + clocks[p] / 1000.0 for p, d in clocked.items()}
     # Align detects the same frame numbers on every phone. The body needs several phones at one instant, so it uses
     # each frame's mean aligned time (the phone clocks differ by tens of milliseconds); face and hands keep their own.
     shared = np.mean(list(aligned.values()), axis=0) if len({len(t) for t in aligned.values()}) == 1 else None
@@ -195,7 +195,8 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, track:
     # pose from its own hands instead: with the offsets fixed, each phone's fit is independent.
     up = world_up(track)
     for phone, camera in list(fitted.items()):
-        if face_px[phone] is not None and face_px[phone] <= ACCEPT_FACE_PX and upright(camera, up):
+        face_error = face_px[phone]
+        if face_error is not None and face_error <= ACCEPT_FACE_PX and upright(camera, up):
             continue
         own = gated.get(phone)
         if own is not None and len(own.world) >= 60 and phone not in shifts:
@@ -213,7 +214,7 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, track:
     others = [v for p, v in face_px.items() if p not in shifts and v is not None]
     template_holds = not others or float(np.median(others)) <= 20.0
     corrections = {p: round(clock_ms[p] + 1000.0 * shift, 1) for p, shift in shifts.items()
-                   if p in clock_ms and (p in provisional or (template_holds and face_px.get(p) is not None and face_px[p] <= 15.0))}
+                   if p in clock_ms and (p in provisional or (template_holds and (error := face_px.get(p)) is not None and error <= 15.0))}
     for phone in sorted(set(episode.detections) | set(exo.phones)):
         before = hand_cameras.get(phone)
         camera = fitted.get(phone)
@@ -245,8 +246,3 @@ def calibrate_with_head(exo: SessionCalibration, episode: SessionEpisode, track:
         method += " + body" if phone in body_moved else ""
         reports[phone] = PhoneReport(method, face_n, face_med, hand_n, hand_px, shift, before_px, best_shift, gain, corrections.get(phone))
     return HeadCalibration(SessionCalibration(exo.session, phones, exo.body_median_px), offsets, source, reports, corrections)
-
-
-def face_points(track: HeadTrack, offsets: Float64[ndarray, "5 3"], times: Float64[ndarray, "n"]) -> Float64[ndarray, "n 5 3"]:
-    """World face points, for display and checks."""
-    return face_world(track, offsets, times)

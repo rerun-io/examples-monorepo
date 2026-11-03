@@ -166,7 +166,9 @@ def joint_bundle(
         for p in phones:
             camera = fitted[p]
             if p in faces:
-                rotations, positions, valid = head[p]
+                sample = head[p]
+                assert sample is not None  # Face tracks have a cached head sample.
+                rotations, positions, valid = sample
                 world = np.einsum("nij,kj->nki", rotations, rows) + positions[:, None]
                 face = faces[p]
                 keep = valid[:, None] & known[None] & (face.scores >= MIN_FACE_SCORE) & np.isfinite(face.xy).all(-1)
@@ -344,11 +346,14 @@ def clock_scan(face: FaceTrack, track: HeadTrack, offsets: Float64[ndarray, "5 3
 
     With no seed, every shift solves from scratch (EPnP RANSAC), which finds a phone's clock without any prior.
     """
+    resolved_focal = focal if seed is None else float(seed.parameters[6])
+    if resolved_focal is None:
+        raise ValueError("clock_scan requires a focal length when no camera seed is supplied")
     best, at_zero = (None, np.inf), None
     for shift in shifts:
         moved = FaceTrack(face.times_s + shift, face.xy, face.scores)
         data = _thin(face_correspondences(moved, track, offsets))
-        camera = solve_from_head(data, focal if seed is None else float(seed.parameters[6]), seed=seed)
+        camera = solve_from_head(data, resolved_focal, seed=seed)
         if camera is None:
             continue
         _, median = residual_summary(camera, data)

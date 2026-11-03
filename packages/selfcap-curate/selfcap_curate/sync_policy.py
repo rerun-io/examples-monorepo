@@ -389,6 +389,6 @@ def apply_clock_overrides(record: TimeSync, overrides: dict[str, float]) -> Time
         offsets[f"exo/{phone}"] = offset
         tau = None if pose is None else round(offset + HAND_LATENCY_MS - pose, 1)
         old = exo.get(phone)
-        exo[phone] = ExoFit(tau, "head_track", *(() if old is None else (old.tau_ms, old.cmin_px, old.basin_halfwidth_ms, old.points, old.edge)))
+        exo[phone] = ExoFit(tau, "head_track") if old is None else replace(old, tau_phone_to_pose_ms=tau, how="head_track")
         flags.append(f"exo_{phone}_head_sync")
     return replace(record, offsets_ms=offsets, exo_fit=exo, flags=flags)
