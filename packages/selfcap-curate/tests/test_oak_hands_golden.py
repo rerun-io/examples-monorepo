@@ -11,6 +11,7 @@ import pytest
 import torch
 from dataforge.schema import CAPTURE_TIMELINE, video_path
 from frozen_v2 import GOLDEN_REFS, RAW, ROOT, SERVED, load_oak_detections, load_oak_reference, oak_median_reference
+from legacy_oak import legacy_solve_oak as solve_oak
 from serde import from_dict
 from simplecv.catalog_video import read_catalog_videos
 
@@ -18,7 +19,7 @@ from selfcap_curate.catalog_io import DATASET_NAME, open_segment, read_factories
 from selfcap_curate.device_tables import read_rotations
 from selfcap_curate.factory import oak_centre
 from selfcap_curate.hands_gpu import detect_oak_hands_gpu, pick_oak_frames, pose_models
-from selfcap_curate.oak_mount import fixed_rotation, gyro_mount, solve_oak
+from selfcap_curate.oak_mount import fixed_rotation, gyro_mount
 from selfcap_curate.quest_fit import load_quest_hands, read_session_episode
 from selfcap_curate.records import OakFit, oak_quest_offset_ms, read_frozen_sync
 

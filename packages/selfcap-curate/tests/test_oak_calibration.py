@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from dataforge.datasets.selfcap_raw import Distortion, FactoryCalibration, FactoryExtrinsic, crop_shift_px, oak_stereo
 from frozen_v2 import session_episode
+from legacy_oak import legacy_solve_oak
 from scipy.spatial.transform import Rotation
 from serde import from_dict
 
@@ -141,7 +142,7 @@ def test_hand_pnp_recovers_mount_with_fixed_gyro_rotation(flag, latency_ms, monk
         xy[:, base : base + 21] = pixels[..., :2] / pixels[..., 2:3]
         scores[:, base : base + 21] = 1.0
     expected = np.diag([1.0, -1.0, -1.0, 1.0]) @ expected  # Fixture head is stored RUB; the fitted mount uses RDF.
-    result = solve_oak("synthetic", [replace(motion, oak=OakDetections(vt, xy, scores))], intrinsic, "oak", expected[:3, :3])
+    result = legacy_solve_oak("synthetic", [replace(motion, oak=OakDetections(vt, xy, scores))], intrinsic, "oak", expected[:3, :3])
     if flag is not None:
         assert not result.ok
         return
@@ -186,7 +187,6 @@ def test_weighted_hand_mount_rejects_base_joints_and_trims_bad_finger(fix_rotati
         intrinsic,
         "oak",
         expected[:3, :3] if fix_rotation else None,
-        weighted=True,
     )
     assert result.ok and result.median_px < 0.01
     assert result.observation_source == "egohand"
@@ -198,7 +198,7 @@ def test_missing_quest_oak_clock_leaves_mount_unposed(fixture_sync) -> None:
     hands = CatalogHands(np.array([0.0, 1.0]), np.zeros((2, 133, 3)), np.array([0.0, 1.0]),
                          np.zeros((2, 3)), np.tile([0.0, 0.0, 0.0, 1.0], (2, 1)))
     episode = session_episode(sync, hands, np.array([0.0, 1.0]), np.zeros((2, 3)))
-    fit = solve_oak("missing-clock", [episode], factory().intrinsics[0], "device", weighted=True)
+    fit = solve_oak("missing-clock", [episode], factory().intrinsics[0], "device")
     assert not fit.ok
     assert fit.questrig_T_rgb is None
 
