@@ -293,11 +293,15 @@ re-registers from disk on start (then `Restart=on-failure` becomes safe).
 
 ## Testing Rerun builds
 
-**Rust follows the primary Python Rerun lane.** The `common` / `rerun-prerelease`
-PyPI `rerun-sdk` pin is the source of truth; the Rust `re_*` crates
-(`packages/gsplat-rust-renderer/Cargo.toml`) must match it exactly, or the viewer
-silently loses protocol/tooling parity. To bump: Python first, then the Rust pins
-(matching that release's egui family), then re-lock Pixi and Cargo.
+**The gsplat custom viewer pins its own Rerun lane.** `[feature.gsplat-rust-renderer.pypi-dependencies]`
+(and `[feature.hexels.pypi-dependencies]`, which logs recordings for that viewer) pin
+**`rerun-sdk == 0.42.0`**; the Rust `rerun`/`re_*` crates in
+`packages/gsplat-rust-renderer/crates/*/Cargo.toml` must match it exactly (`=0.42.0`),
+or the viewer silently loses protocol/tooling parity. To bump: Python first, then the
+Rust pins (matching that release's egui family: 0.42 uses egui/eframe/egui_kittest 0.37
+and glam 0.33 via `re_math`), then re-lock Pixi and Cargo (`cargo update -p <crate>@<old>`
+for the re_* family, not a blanket update). Brush stays on glam 0.30; the viewer converts
+at the gsplat-core boundary.
 
 The primary workspace lane runs **`rerun-sdk == 0.38.1`** with the `catalog`
 extra through `common`. Catalog/stream environments add the `dataloader` extra
