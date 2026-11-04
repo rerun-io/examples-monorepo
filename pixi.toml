@@ -2168,8 +2168,10 @@ depends-on = ["gsplat-build", { task = "gsplat-download", args = ["all", "all"] 
 cwd = "packages/gsplat-rust-renderer"
 description = "Render and evaluate Blender test splits; --checkpoint-only checks bundled predictions"
 
+# Call the env's cargo-fmt/cargo-clippy directly: `cargo <sub>` searches $CARGO_HOME/bin first, where a
+# rustup proxy may run an older toolchain than the pinned rust (Rerun 0.42 requires rustc 1.98).
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
-cmd = "cargo fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
+cmd = "cargo-fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo-clippy clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
 description = "Check our Rust formatting, run Clippy including gsplat probe, and run Rust unit tests"
 
