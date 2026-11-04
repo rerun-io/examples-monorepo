@@ -172,7 +172,11 @@ impl Logger {
             let path = format!("world/dataset/camera/{i}");
             self.rec.log_static(
                 path.as_str(),
-                &rerun::Transform3D::from_translation_rotation(camera.position, camera.rotation),
+                // Brush's glam 0.30 types cross into Rerun's glam 0.33 as arrays.
+                &rerun::Transform3D::from_translation_rotation(
+                    camera.position.to_array(),
+                    rerun::Quaternion::from_xyzw(camera.rotation.to_array()),
+                ),
             )?;
             self.rec.log_static(
                 path.as_str(),

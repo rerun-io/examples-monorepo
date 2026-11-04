@@ -11,7 +11,7 @@ pub fn archetype_splats(path: &Path) -> Result<gsplat_core::Splats> {
         let mut found = None;
         for message in re_log_encoding::rrd::DecoderApp::decode_lazy(reader) {
             let message = message?;
-            let re_log_types::LogMsg::ArrowMsg(store, message) = message else {
+            let rerun::log::LogMsg::ArrowMsg(store, message) = message else {
                 continue;
             };
             if store.kind() != re_log_types::StoreKind::Recording {

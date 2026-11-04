@@ -1,12 +1,13 @@
-//! Rerun 0.38.1 native renderer path: public PLY conversion, per-frame builder,
+//! Rerun 0.42.0 native renderer path: public PLY conversion, per-frame builder,
 //! per-frame CPU back-to-front sort with a cached seed order, and per-frame uploads.
+//! Rerun math is glam 0.33 (`re_math`); camera poses arrive in Brush's glam 0.30.
 use super::{Adapter, Counts, archetype::decode};
 use crate::camera::CameraSpec;
 use crate::camera::opengl_to_opencv;
 use anyhow::{Context as _, Result};
-use glam::Vec2;
-use glam::Vec3;
 use gsplat_core::CameraModel;
+use re_math::Vec2;
+use re_math::Vec3;
 use re_renderer::view_builder::{Projection, TargetConfiguration, ViewBuilder};
 use re_renderer::{
     GaussianShCoefficient, GaussianSplatBuilder, RenderConfig, RenderContext, Rgba, Rgba32Unmul,
@@ -20,11 +21,11 @@ pub struct Native {
     adapter: Adapter,
     centers: Vec<Vec3>,
     scales: Vec<Vec3>,
-    rotations: Vec<glam::Quat>,
+    rotations: Vec<re_math::Quat>,
     colors: Vec<Rgba32Unmul>,
     sh_coefficients: Vec<[GaussianShCoefficient; 15]>,
     sort: SortOrderCache,
-    bounds: macaw::BoundingBox,
+    bounds: re_math::BoundingBox,
     sh_count: usize,
     picking_ids: Vec<re_renderer::PickingLayerInstanceId>,
     screenshot_pending: bool,
@@ -42,7 +43,7 @@ impl Native {
         let rotations = decoded
             .quaternions
             .into_iter()
-            .map(glam::Quat::from_array)
+            .map(re_math::Quat::from_array)
             .collect();
         let colors = decoded
             .colors
@@ -54,7 +55,7 @@ impl Native {
             .into_iter()
             .map(|sh| sh.map(GaussianShCoefficient::from_rgb))
             .collect();
-        let bounds = macaw::BoundingBox::from_points(centers.iter().copied());
+        let bounds = re_math::BoundingBox::from_points(centers.iter().copied());
         let picking_ids = (0..centers.len())
             .map(|i| re_renderer::PickingLayerInstanceId(i as u64))
             .collect();
@@ -104,8 +105,9 @@ impl Native {
         if !matches!(c.model, CameraModel::Pinhole) {
             return Err(crate::Unsupported("native lens model".into()).into());
         }
-        let view = macaw::IsoTransform::from_mat4(&opengl_to_opencv(c.pose()).inverse())
-            .context("native rigid pose")?;
+        let pose = re_math::Mat4::from_cols_array(&opengl_to_opencv(c.pose()).to_cols_array());
+        let view =
+            re_math::IsoTransform::from_mat4(&pose.inverse()).context("native rigid pose")?;
         self.ctx.begin_frame();
         let mut builder = ViewBuilder::new(
             &self.ctx,

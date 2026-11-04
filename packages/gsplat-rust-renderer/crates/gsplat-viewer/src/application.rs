@@ -28,12 +28,12 @@ const DEFAULT_HEADLESS_SIZE: egui::Vec2 = egui::vec2(1600.0, 900.0);
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if cli.print_version {
-        println!("rerun {}", re_viewer::build_info().version);
+        println!("rerun {}", build_info().version);
         return Ok(());
     }
 
     re_log::setup_logging();
-    re_crash_handler::install_crash_handlers(re_viewer::build_info());
+    re_crash_handler::install_crash_handlers(build_info());
 
     let grpc_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, cli.port));
     re_log::info!(
@@ -41,7 +41,7 @@ pub fn run() -> anyhow::Result<()> {
         cli.port
     );
     let (grpc_rx, _grpc_server_handle) = re_grpc_server::spawn_with_recv(
-        grpc_addr,
+        re_grpc_server::ServerListener::bind(grpc_addr)?,
         re_grpc_server::ServerOptions::default(),
         re_grpc_server::shutdown::never(),
     );
@@ -99,6 +99,15 @@ pub fn run() -> anyhow::Result<()> {
     .map_err(|err| anyhow::anyhow!(err))
 }
 
+/// The Rerun release this viewer embeds; 0.42 removed `re_viewer::build_info()`.
+/// `re_build_info` versions in lockstep with `re_viewer`, so `CrateVersion::LOCAL` is Rerun's.
+fn build_info() -> re_build_info::BuildInfo {
+    re_build_info::BuildInfo {
+        version: re_build_info::CrateVersion::LOCAL,
+        ..re_build_info::cargo_build_info!()
+    }
+}
+
 /// Build a stock viewer with compute splat systems registered.
 pub fn create_app(
     cc: &eframe::CreationContext<'_>,
@@ -112,7 +121,7 @@ pub fn create_app(
 
     let mut viewer = re_viewer::App::new(
         main_thread_token,
-        re_viewer::build_info(),
+        build_info(),
         app_env,
         startup_options,
         cc,
@@ -142,7 +151,7 @@ pub fn create_app(
     Ok(viewer)
 }
 
-// Copy of re_viewer::run_headless_app because 0.38.1 cannot accept our WgpuSetup.
+// Copy of re_viewer::run_headless_app because 0.42.0 cannot accept our WgpuSetup.
 fn run_headless(
     window_size: Option<egui::Vec2>,
     app_creator: impl FnOnce(&eframe::CreationContext<'_>) -> anyhow::Result<re_viewer::App>,
@@ -157,6 +166,9 @@ fn run_headless(
         egui_kittest::Harness::<re_viewer::App>::builder()
             .with_size(size)
             .with_step_dt(1.0 / 60.0)
+            .with_accessibility_check(false)
+            // Like upstream: draw tofu for glyphs the harness fonts lack instead of panicking.
+            .allow_missing_glyphs()
             .wgpu_setup(compute_wgpu_setup())
             .build_eframe(move |cc| {
                 let repaint_signal = repaint_signal.clone();
@@ -353,16 +365,18 @@ mod selection_tests {
     #[test]
     fn custom_spatial_view_keeps_both_explicit_choices() {
         let mut registry = ViewClassRegistry::default();
-        let reflection = re_sdk_types::reflection::reflection();
+        let reflection = Arc::new(parking_lot::RwLock::new(
+            re_sdk_types::reflection::reflection().clone(),
+        ));
         let options = Default::default();
         let mut fallbacks = Default::default();
         registry
-            .add_class::<re_view_spatial::SpatialView3D>(reflection, &options, &mut fallbacks)
+            .add_class::<re_view_spatial::SpatialView3D>(&reflection, &options, &mut fallbacks)
             .unwrap();
         registry
             .extend_class(
                 re_view_spatial::SpatialView3D::identifier(),
-                reflection,
+                &reflection,
                 &options,
                 &mut fallbacks,
                 register_splat_system,

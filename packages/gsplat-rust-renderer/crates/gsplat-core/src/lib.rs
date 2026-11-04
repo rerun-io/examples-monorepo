@@ -20,6 +20,8 @@ mod shader;
 mod timing;
 mod types;
 mod view;
+/// The glam version of every public math type here (Brush's), for callers on another glam.
+pub use glam;
 pub use lens::CameraModel;
 pub use output::Target;
 pub use renderer::Renderer;

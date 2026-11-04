@@ -13,11 +13,11 @@ probe = ["dep:gsplat-viewer", "dep:re_viewer", "dep:egui_kittest", "dep:re_grpc_
 [dependencies]
 tempfile = "3"
 gsplat-viewer = { path = "../gsplat-viewer", optional = true }
-re_viewer = { version = "=0.38.1", optional = true }
-egui_kittest = { version = "0.36.2", features = ["wgpu", "eframe"], optional = true }
-re_grpc_server = { version = "=0.38.1", optional = true }
-re_viewer_context = { version = "=0.38.1", optional = true }
-re_log = { version = "=0.38.1", features = ["setup"], optional = true }
+re_viewer = { version = "=0.42.0", optional = true }
+egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"], optional = true }
+re_grpc_server = { version = "=0.42.0", optional = true }
+re_viewer_context = { version = "=0.42.0", optional = true }
+re_log = { version = "=0.42.0", features = ["setup"], optional = true }
 gsplat-core = { path = "../gsplat-core", features = ["serde"] }
 brush-serde.workspace = true
 brush-render.workspace = true
@@ -34,14 +34,15 @@ clap.workspace = true
 anyhow.workspace = true
 burn.workspace = true
 half.workspace = true
-re_renderer = "=0.38.1"
-re_sdk_types = "=0.38.1"
-rerun = { version = "=0.38.1", default-features = false, features = ["sdk", "glam"] }
-re_types_core = "=0.38.1"
-re_log_encoding = { version = "=0.38.1", features = ["decoder"] }
-re_log_types = "=0.38.1"
-re_chunk = "=0.38.1"
-macaw = "0.30"
+re_renderer = "=0.42.0"
+re_sdk_types = "=0.42.0"
+rerun = { version = "=0.42.0", default-features = false, features = ["sdk", "glam"] }
+re_types_core = "=0.42.0"
+re_log_encoding = { version = "=0.42.0", features = ["decoder"] }
+re_log_types = "=0.42.0"
+re_chunk = "=0.42.0"
+# Rerun 0.42 math (glam 0.33) for the native engine; Brush-facing code keeps the workspace glam 0.30.
+re_math = "0.33"
 brush-dataset.workspace = true
 brush-loss.workspace = true
 lpips.workspace = true
