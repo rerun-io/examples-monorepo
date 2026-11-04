@@ -128,7 +128,7 @@ def check_portable_recording(config: Config) -> None:
                 print(f"PORTABLE_PIXELS {label} {name} yellow={yellow:.6f} reports={reports}", flush=True)
                 if unsupported:
                     assert yellow < 0.001, "Stock must not silently reinterpret the explicit compute choice"
-                    # Stock 0.38.1 silently skips unknown instruction types.
+                    # Stock 0.42.0 silently skips unknown instruction types.
                     print("UNSUPPORTED_STOCK_VISUALIZER: ComputeGaussianSplats3D requires the custom viewer", flush=True)
                 else:
                     assert yellow > 0.01, f"{label} {name} did not draw splats"
@@ -236,7 +236,7 @@ def look_at_c2w(
 
 def check_pair(config: Config, image: UInt8[np.ndarray, "h w 3"], position: Float64[np.ndarray, "3"], target: Float64[np.ndarray, "3"], up: Float64[np.ndarray, "3"]) -> None:
     """Compare a captured viewport with the matching standalone camera."""
-    # At 1 px/point, Rerun 0.38.1 crops 2 pixels at top/left and 3 at bottom/right.
+    # At 1 px/point, Rerun 0.42.0 crops 2 pixels at top/left and 3 at bottom/right.
     h, w = image.shape[:2]
     h, w = h + 5, w + 5
     fov_y: float = float(np.float32(55.0) * np.float32(math.tau) / np.float32(360.0))
@@ -278,7 +278,7 @@ def synthetic_hexels() -> Hexels3D:
 
 
 def render_reference(config: Config, ply: Path, spec: CameraSpec, name: str) -> UInt8[np.ndarray, "h w 3"]:
-    """`gsplat render` of one CameraSpec, cropped like a 1 px/point Rerun 0.38.1 view capture."""
+    """`gsplat render` of one CameraSpec, cropped like a 1 px/point Rerun 0.42.0 view capture."""
     camera_path: Path = config.out / f"{name}.json"
     write_orbit_json(camera_path, [spec])
     reference_path: Path = config.out / f"{name}.png"
@@ -302,7 +302,7 @@ def pose_psnr(config: Config, ply: Path, image: UInt8[np.ndarray, "h w 3"], pose
 
 
 HEXEL_EYE: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] = ((1.2, -2.5, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
-# The default 3D view field of view, as Rerun 0.38.1 computes it in f32.
+# The default 3D view field of view, as Rerun 0.42.0 computes it in f32.
 DEFAULT_FOV_Y: float = float(np.float32(55.0) * np.float32(math.tau) / np.float32(360.0))
 
 
