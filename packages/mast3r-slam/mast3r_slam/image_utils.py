@@ -131,7 +131,7 @@ def resize_img(
         unnormalized uint8 image.
     """
     assert size in (224, 512)
-    pil_img: PIL.Image.Image = PIL.Image.fromarray(np.uint8(rgb * 255))
+    pil_img: PIL.Image.Image = PIL.Image.fromarray((rgb * 255).astype(np.uint8))
     if size == 224:
         # Resize short side to 224, then center-crop to square.
         orig_w: int
@@ -170,7 +170,7 @@ def resize_img_with_transform(
         A tuple of (``ResizedImage``, ``CropTransform``).
     """
     assert size in (224, 512)
-    pil_img: PIL.Image.Image = PIL.Image.fromarray(np.uint8(rgb * 255))
+    pil_img: PIL.Image.Image = PIL.Image.fromarray((rgb * 255).astype(np.uint8))
     orig_w: int
     orig_h: int
     orig_w, orig_h = pil_img.size
