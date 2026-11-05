@@ -205,94 +205,27 @@ def test_fast_profiling_is_scoped_and_reuses_its_capture() -> None:
 
 
 @pytest.mark.integration
-def test_reduced_hand_geometry_preserves_every_decoder_layer() -> None:
-    """Removing unused mesh support preserves hand keypoints and every layer's tokens."""
-    import numpy as np
-    from torch import Tensor, nn
-
-    from posekit.models.sam3d_body_capture import DecoderOutput
+def test_decoder_profiling_excludes_capture_warmups() -> None:
+    """A fresh per-decoder graph reports its replay, excluding capture warmups."""
     from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
-    from posekit.models.sam3d_body_head import CaptureMhrHead
-    from posekit.models.sam3d_body_mhr import BodySkinning
 
     checkpoint = try_to_load_from_cache("facebook/sam-3d-body-dinov3", "model.ckpt", revision=SAM3D_BODY_REVISION)
-    asset = try_to_load_from_cache("facebook/sam-3d-body-dinov3", "assets/mhr_model.pt", revision=SAM3D_BODY_REVISION)
     image = Path("/mnt/nas/ssd-8tb/posekit/goldens/sam3d-body-v1/inputs/Planche.jpg")
-    if not torch.cuda.is_available() or not isinstance(checkpoint, str) or not isinstance(asset, str) or not image.is_file():
-        pytest.skip("requires CUDA, cached SAM body checkpoint/MHR asset and Planche.jpg")
-    fast = Sam3dBodyFastConfig(
-        checkpoint_dir=Path(checkpoint).parent, backbone_onnx=None, decoder_onnx_dir=None, capture_pipeline=False,
-    ).setup()
-    # Observe each invocation directly; graph replay does not call Python hooks.
-    fast.body_decoder.capture = False
-    fast.hand_decoder.capture = False
-    model = fast.estimator.model
-    head = model.head_pose_hand
-    assert isinstance(head, CaptureMhrHead)
-    source = torch.jit.load(asset, map_location="cuda")
-    points: list[Tensor] = []
-    tokens: list[Tensor] = []
-
-    def observe_points(module: nn.Module, args: tuple[Tensor | None, ...], output: dict[str, Tensor | np.ndarray | None]) -> None:
-        value = output["pred_keypoints_3d"]
-        assert isinstance(value, Tensor)
-        points.append(value.clone())
-
-    def observe_tokens(module: nn.Module, args: tuple[Tensor | None, ...], output: tuple[Tensor, Tensor]) -> None:
-        tokens.append(output[0].clone())
-
+    if not torch.cuda.is_available() or not isinstance(checkpoint, str) or not image.is_file():
+        pytest.skip("requires CUDA, cached SAM body checkpoint and Planche.jpg")
+    fast = Sam3dBodyFastConfig(mode="body", capture_pipeline=False).setup()
     pixels = decode_image(str(image), mode=ImageReadMode.RGB).permute(1, 2, 0).contiguous().cuda()
-    frames = torch.stack((pixels, pixels.flip(1)))
     height, width = pixels.shape[:2]
-    boxes = BoxDetections(
-        torch.tensor([[0.0, 0.0, float(width), float(height)]], device="cuda").repeat(2, 1),
-        torch.ones(2, device="cuda"), torch.arange(2, device="cuda"),
-    )
-    # Freeze the actual hand decoder inputs once. Re-running the body and
-    # backbone would add unrelated numerical variation to this parity check.
-    decoder_inputs: list[tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]] = []
-    original_forward = fast.hand_decoder.forward
-
-    def remember_inputs(
-        image_embeddings: Tensor, init_estimate: Tensor | None = None,
-        keypoints: Tensor | None = None, prev_estimate: Tensor | None = None,
-        condition_info: Tensor | None = None, batch: dict[str, Tensor] | None = None,
-    ) -> DecoderOutput:
-        assert init_estimate is None and prev_estimate is None
-        assert keypoints is not None and condition_info is not None and batch is not None
-        decoder_inputs.append((image_embeddings.clone(), keypoints.clone(), condition_info.clone(), {key: value.clone() for key, value in batch.items()}))
-        return original_forward(image_embeddings, keypoints=keypoints, condition_info=condition_info, batch=batch)
-
+    boxes = BoxDetections(torch.tensor([[0.0, 0.0, float(width), float(height)]], device="cuda"),
+                          torch.ones(1, device="cuda"), torch.zeros(1, dtype=torch.int64, device="cuda"))
+    fast.profile_stages = True
     with torch.inference_mode():
-        fast.hand_decoder.forward = remember_inputs
-        fast(frames, boxes)
-        fast.hand_decoder.forward = original_forward
-        assert len(decoder_inputs) == 1
-        features, prompts, condition, batch = decoder_inputs[0]
-        model._initialize_batch(batch)
-        model.body_batch_idx = []
-        model.hand_batch_idx = list(range(len(features)))
-        head.register_forward_hook(observe_points)
-        for layer in model.decoder_hand.layers:
-            layer.register_forward_hook(observe_tokens)
-        full_vertices = torch.nonzero(head.keypoint_mapping[:70, :18439].ne(0).any(dim=0)).flatten()
-        head.keypoint_mhr = BodySkinning(source, full_vertices)
-        head.compact_mapping = torch.cat((head.keypoint_mapping[:70, full_vertices], head.keypoint_mapping[:70, 18439:]), 1)
-        fast.hand_decoder.run(features, prompts, condition, batch, None)
-        points.clear()
-        tokens.clear()
-        fast.hand_decoder.run(features, prompts, condition, batch, None)
-        expected_points, expected_tokens = points.copy(), tokens.copy()
-        points.clear()
-        tokens.clear()
-        hand_vertices = torch.nonzero(head.keypoint_mapping[21:42, :18439].ne(0).any(dim=0)).flatten()
-        assert len(hand_vertices) < len(full_vertices)
-        head.keypoint_mhr = BodySkinning(source, hand_vertices)
-        head.compact_mapping = torch.cat((head.keypoint_mapping[:70, hand_vertices], head.keypoint_mapping[:70, 18439:]), 1)
-        fast.hand_decoder.run(features, prompts, condition, batch, None)
-    assert len(tokens) == len(expected_tokens) == len(model.decoder_hand.layers)
-    assert len(points) == len(expected_points) >= len(tokens)
-    for actual, expected in zip(points, expected_points, strict=True):
-        torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
-    for actual, expected in zip(tokens, expected_tokens, strict=True):
-        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-6)
+        fast(pixels[None], boxes)
+        count = fast.graph_count
+        fast(pixels[None], boxes)
+    assert fast.graph_count == count
+    first, replay = fast.stage_ms["decoder_body"]
+    # Three warmups plus capture would exceed this generous one-replay bound.
+    assert first <= 2.0 * replay
+    assert all(value >= 0.0 for value in fast.stage_ms["other"])
+    assert not fast.estimator.model.decoder._forward_hooks

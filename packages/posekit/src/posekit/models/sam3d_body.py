@@ -228,7 +228,7 @@ class _StageClock:
 
         def wrapped(*args: object, **kwargs: object) -> object:
             label: Sam3dBodyStage | None = stage()
-            if label is None:
+            if not self.enabled or label is None:
                 return method(*args, **kwargs)
             start = torch.cuda.Event(enable_timing=True, external=True)
             end = torch.cuda.Event(enable_timing=True, external=True)
@@ -242,6 +242,8 @@ class _StageClock:
 
     def _hook(self, module: torch.nn.Module, stage: Callable[[], str], *, nested: bool) -> list[RemovableHandle]:
         def before(*_: object) -> None:
+            if not self.enabled:
+                return
             if nested:
                 self.in_decoder = True
             start = torch.cuda.Event(enable_timing=True, external=True)
@@ -249,6 +251,8 @@ class _StageClock:
             self.events.append((stage(), start, torch.cuda.Event(enable_timing=True, external=True)))  # type: ignore[arg-type]
 
         def after(*_: object) -> None:
+            if not self.enabled:
+                return
             if nested:
                 self.in_decoder = False
             self.events[-1][2].record()
