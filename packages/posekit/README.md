@@ -104,7 +104,7 @@ pixi run -e posekit --frozen posekit-video-track --video-path video.mp4
 
 Two roles cover hands. `HandDetector` maps frames to `HandDetections` (boxes plus a
 left/right side per box). `TopDownHandPose3d` maps frames, those detections and an
-optional `CalibratedCamera` (`posekit.cameras`, JSON via `load_calibrated_camera`) to
+optional `CalibratedCamera` (`posekit.cameras`, a static `.rrd` via `load_calibrated_camera`) to
 `HandPoses3d`: `Keypoints3d` with a hand skeleton, plus per-hand mesh vertices and
 per-side faces. `HandPoses3d.as_hand21()` gives every model the same HAND_21 view.
 
