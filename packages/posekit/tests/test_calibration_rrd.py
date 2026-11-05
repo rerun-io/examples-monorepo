@@ -8,6 +8,7 @@ from serde.json import to_json
 
 from posekit.models.calibration_rrd import CalibrationRecording, range_tables, read_calibration_rrd, write_calibration_rrd
 from posekit.models.egohand_quantization import load_calibration, write_calibration
+from posekit.models.sam3d_body_quantization import load_body_calibration, write_body_calibration
 
 
 def example_recording() -> CalibrationRecording:
@@ -46,9 +47,10 @@ def test_writer_rejects_columns_of_unequal_length(tmp_path: Path) -> None:
         write_calibration_rrd(tmp_path / "example.rrd", recording)
 
 
-# SHA256 of to_json() of the EgoHand record loaded from the JSON asset it replaced. JSON floats
+# SHA256 of to_json() of each record loaded from the JSON asset it replaced. JSON floats
 # are shortest round-trip reprs, so an equal digest means every value is bit-identical.
 EGOHAND_NVFP4_SHA256: str = "687fcda618207bc8988393dae2702f8bccb86ce9a341443022f969f10a16a633"
+SAM3D_BODY_WIDE_SHA256: str = "49e0fb8328bb56dd9bd275d442de5ce55b3bde7db99d57a8b593e7d4a2787271"
 
 
 def test_egohand_calibration_rrd_matches_the_former_json() -> None:
@@ -65,3 +67,20 @@ def test_egohand_writer_round_trips_and_names_its_model(tmp_path: Path) -> None:
     assert load_calibration(tmp_path / "hands.rrd") == hands
     with pytest.raises(ValueError, match="egohand"):
         read_calibration_rrd(tmp_path / "hands.rrd", "other")
+
+
+def test_body_calibration_rrd_matches_the_former_json() -> None:
+    calibration = load_body_calibration()
+    assert hashlib.sha256(to_json(calibration).encode()).hexdigest() == SAM3D_BODY_WIDE_SHA256
+    assert (len(calibration.split.calibration), len(calibration.split.evaluation), calibration.body_crops) == (308, 213, 288)
+    assert list(calibration.input_amax.items())[-1] == ("encoder.blocks.31.mlp.w3", 516.0)
+    assert list(calibration.attention_amax.items())[-1] == ("encoder.blocks.31.attn.v", 17.0)
+
+
+def test_body_writer_round_trips_and_rejects_the_hand_recording(tmp_path: Path) -> None:
+    body = load_body_calibration()
+    write_body_calibration(tmp_path / "body.rrd", body)
+    assert load_body_calibration(tmp_path / "body.rrd") == body
+    write_calibration(tmp_path / "hands.rrd", load_calibration())
+    with pytest.raises(ValueError, match="sam3d-body"):
+        load_body_calibration(tmp_path / "hands.rrd")

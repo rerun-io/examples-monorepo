@@ -128,8 +128,9 @@ def test_calibrated_body_reuses_graph_after_batch_and_camera_changes() -> None:
     config = Sam3dBodyFastConfig()
     image = Path("/mnt/nas/ssd-8tb/posekit/goldens/sam3d-body-v1/inputs/Planche.jpg")
     assert config.backbone_onnx is not None
-    artifact = body_backbone_path(config.backbone_onnx, load_body_calibration(config.calibration), config.fp8_tail_blocks,
-                                  plan=config.backbone_plan, source_version=config.backbone_source_onnx.name)
+    calibration = load_body_calibration(config.calibration)
+    artifact = body_backbone_path(config.backbone_onnx, calibration, config.fp8_tail_blocks,
+                                  plan=config.precision_plans(calibration)[0], source_version=config.backbone_source_onnx.name)
     if not torch.cuda.is_available() or not artifact.is_file() or not image.is_file():
         pytest.skip("requires CUDA, cached calibrated SAM body backbone and Planche.jpg")
     fast = config.setup()

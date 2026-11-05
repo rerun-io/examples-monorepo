@@ -104,6 +104,9 @@ else:
         {
             "sam3d-body": Sam3dBodyConfig(mode="full"), "sam3d-body-bodyonly": Sam3dBodyConfig(mode="body"),
             "sam3d-body-fast": Sam3dBodyFastConfig(mode="full"), "sam3d-body-fast-bodyonly": Sam3dBodyFastConfig(mode="body"),
+            "sam3d-body-fast-bf16": Sam3dBodyFastConfig(backbone_precision="bf16"),
+            "sam3d-body-fast-torch": Sam3dBodyFastConfig(backbone_onnx=None, compile_torch_backbone=True),
+            "sam3d-body-fast-nvfp4": Sam3dBodyFastConfig(backbone_precision="nvfp4"),
         }, prefix_names=False
     )
 

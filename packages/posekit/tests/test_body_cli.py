@@ -9,6 +9,25 @@ import pytest
 pytest.importorskip("yacs", reason="body app CLI requires the posekit-body environment")
 
 
+@pytest.mark.parametrize("name,precision,compiled", [
+    ("sam3d-body-fast", "hybrid", False),
+    ("sam3d-body-fast-bf16", "bf16", False),
+    ("sam3d-body-fast-torch", "hybrid", True),
+    ("sam3d-body-fast-nvfp4", "nvfp4", False),
+])
+def test_body_cli_selects_measured_backbone_options(name: str, precision: str, compiled: bool) -> None:
+    import tyro
+
+    from posekit.models import BodyPose3dConfig
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    config = tyro.cli(BodyPose3dConfig, args=[name])
+    assert isinstance(config, Sam3dBodyFastConfig)
+    assert config.backbone_precision == precision
+    assert config.compile_torch_backbone is compiled
+    assert (config.backbone_onnx is None) is compiled
+
+
 def test_multiview_task_accepts_fast_body_config() -> None:
     import tyro
     from simplecv.data.exoego.hocap import HocapConfig

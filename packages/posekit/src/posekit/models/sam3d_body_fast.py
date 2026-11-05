@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -12,8 +13,9 @@ from trtkit import TensorRtBackendConfig
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from posekit.cameras import CalibratedCamera, CameraKey, camera_key
+from posekit.models.dinov3_calibration import DINO_BLOCKS
 from posekit.models.sam3d_body import ROOT_INDICES, SAM3D_BODY_REVISION, Sam3dBodyConfig, Sam3dBodyPredictor, Sam3dBodyReconstruction
-from posekit.models.sam3d_body_quantization import BodyBackbonePrecision, BodyPrecisionPlan
+from posekit.models.sam3d_body_quantization import BodyBackbonePrecision, BodyCalibration, BodyPrecisionPlan
 from posekit.predictions import BoxDetections, Keypoints3d, validate_frames_rgb
 
 CACHED_BODY_BACKBONE: Path = DEFAULT_TRT_CACHE_DIR / "sam3d-body-backbone-nvfp4.onnx"
@@ -38,14 +40,14 @@ class Sam3dBodyFastConfig(Sam3dBodyConfig):
     """Compile the Torch backbone while retaining BF16 intermediate rounding; requires backbone_onnx=None."""
     backbone_source_onnx: Path = CACHED_BODY_SOURCE
     """BF16 source backbone, exported from these weights when missing."""
-    backbone_precision: BodyBackbonePrecision = "nvfp4"
-    """Use calibrated mixed NVFP4/FP8 or the unquantized BF16 TensorRT backbone."""
+    backbone_precision: Literal["hybrid", "nvfp4", "bf16"] = "hybrid"
+    """Default: BF16 body and calibrated FP8 hands. NVFP4 and wholly BF16 are explicit alternatives."""
     decoder_onnx_dir: Path | None = CACHED_BODY_DECODERS
     """Learned BF16 decoder layers, exported when missing; None keeps Torch layers for ablations."""
     backbone_backend: TensorRtBackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=16, opt_batch_size=2, use_cuda_graph=True))
     """Backbone runtime profile; decoder layers use this profile with internal graph capture and FP8 normalization disabled."""
     calibration: Path | None = None
-    """SAM-specific 512-pixel ranges; None loads the committed disjoint phone split."""
+    """SAM-specific 512-pixel ranges; None loads the committed wide calibration and disjoint evaluation split."""
     fp8_tail_blocks: int = 8
     """Final backbone blocks that use FP8 linears instead of NVFP4."""
     backbone_plan: BodyPrecisionPlan = field(default_factory=BodyPrecisionPlan)
@@ -63,6 +65,22 @@ class Sam3dBodyFastConfig(Sam3dBodyConfig):
             raise ValueError("Module precision plans require backbone_onnx and backbone_precision='nvfp4'. Use BF16 overrides within the plan for mixed precision.")
         if not self.gpu_preprocessing and (self.hand_backbone_plan.linears or self.hand_backbone_plan.attention):
             raise ValueError("A separate hand backbone plan requires GPU preprocessing.")
+        if not self.gpu_preprocessing and self.backbone_onnx is not None and self.backbone_precision == "hybrid":
+            raise ValueError("The hybrid backbone requires GPU preprocessing for separate body and hand plans.")
+
+    def precision_plans(self, calibration: BodyCalibration) -> tuple[BodyPrecisionPlan, BodyPrecisionPlan]:
+        """Resolve the complete body and hand plans, including explicit module overrides."""
+        body: BodyPrecisionPlan = BodyPrecisionPlan()
+        hands: BodyPrecisionPlan = BodyPrecisionPlan()
+        if self.backbone_precision == "hybrid":
+            body = BodyPrecisionPlan({name: "bf16" for name in calibration.input_amax}, {index: "bf16" for index in range(DINO_BLOCKS)})
+            hands = BodyPrecisionPlan({name: "fp8" for name in calibration.input_amax}, {index: "fp8" for index in range(DINO_BLOCKS)})
+        body = BodyPrecisionPlan(body.linears | self.backbone_plan.linears, body.attention | self.backbone_plan.attention)
+        hands = BodyPrecisionPlan(
+            body.linears | hands.linears | self.hand_backbone_plan.linears,
+            body.attention | hands.attention | self.hand_backbone_plan.attention,
+        )
+        return body, hands
 
     def setup(self) -> "FastSam3dBodyPredictor":
         """Load the model and prepare capture-safe decoders."""
@@ -81,7 +99,7 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
         from posekit.models.sam3d_body_quantization import load_body_calibration
         from sam3d_body.models.heads.mhr_head import MHRHead
 
-        calibration = load_body_calibration(config.calibration) if config.backbone_onnx is not None and config.backbone_precision == "nvfp4" else None
+        calibration = load_body_calibration(config.calibration) if config.backbone_onnx is not None and config.backbone_precision != "bf16" else None
         if calibration is not None and calibration.revision != config.hf_revision:
             raise ValueError("SAM body calibration revision differs from the selected checkpoint revision")
         wp.init()
@@ -105,11 +123,14 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
             from posekit.models.sam3d_body_onnx import TensorRtBodyBackbone, build_body_backbone
 
             torch_backbone: nn.Module = model.backbone
+            plans: tuple[BodyPrecisionPlan, BodyPrecisionPlan] = (
+                config.precision_plans(calibration) if calibration is not None else (BodyPrecisionPlan(), BodyPrecisionPlan())
+            )
+            precision: BodyBackbonePrecision = "bf16" if config.backbone_precision == "bf16" else "nvfp4"
             backend: TensorRtBackendConfig = replace(config.backbone_backend, use_cuda_graph=False) if capture_pipeline else config.backbone_backend
             backbone = TensorRtBodyBackbone(build_body_backbone(
                 torch_backbone, config.backbone_source_onnx, config.backbone_onnx, calibration,
-                backend, config.fp8_tail_blocks, config.backbone_precision,
-                plan=config.backbone_plan,
+                backend, config.fp8_tail_blocks, precision, plan=plans[0],
             ))
             if config.gpu_preprocessing and config.mode == "full":
                 # TensorRT performs a host synchronization after a shape change.
@@ -117,11 +138,7 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
                 # enclosing graph records both dependent passes.
                 hand_backbone = TensorRtBodyBackbone(build_body_backbone(
                     torch_backbone, config.backbone_source_onnx, config.backbone_onnx, calibration,
-                    backend, config.fp8_tail_blocks, config.backbone_precision,
-                    plan=BodyPrecisionPlan(
-                        linears=config.backbone_plan.linears | config.hand_backbone_plan.linears,
-                        attention=config.backbone_plan.attention | config.hand_backbone_plan.attention,
-                    ),
+                    backend, config.fp8_tail_blocks, precision, plan=plans[1],
                 ))
             model.add_module("backbone", backbone)
         elif config.compile_torch_backbone:

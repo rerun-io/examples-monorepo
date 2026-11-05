@@ -138,7 +138,7 @@ class CalibrationSample:
 
 def load_body_calibration(path: Path | None = None) -> BodyCalibration:
     """Load the committed split, or validate an explicit calibration .rrd (layout: ``posekit.models.calibration_rrd``)."""
-    source: Path = path if path is not None else Path(__file__).parents[1] / "assets" / "sam3d_body_nvfp4.rrd"
+    source: Path = path if path is not None else Path(__file__).parents[1] / "assets" / "sam3d_body_wide.rrd"
     recording: CalibrationRecording = read_calibration_rrd(source, BODY_CALIBRATION_MODEL)
     tables: dict[str, dict[str, CalibrationColumn]] = recording.tables
     try:

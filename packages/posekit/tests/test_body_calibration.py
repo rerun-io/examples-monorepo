@@ -46,12 +46,26 @@ def test_committed_calibration_controls_artifact_identity() -> None:
 
 
 def test_fast_config_selects_calibrated_gpu_pipeline_by_default() -> None:
+    from trtkit.onnx_qdq import Fp8Attention, Fp8Linear, KeepPrecision
+
     from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+    from posekit.models.sam3d_body_quantization import body_qdq_plan, load_body_calibration
 
     config = Sam3dBodyFastConfig()
     assert config.gpu_preprocessing
     assert config.backbone_onnx is not None
     assert config.decoder_onnx_dir is not None
+    assert config.backbone_precision == "hybrid"
+    calibration = load_body_calibration(config.calibration)
+    assert len(calibration.split.calibration) == 308
+    assert len(calibration.split.evaluation) == 213
+    body, hands = config.precision_plans(calibration)
+    body_plan = body_qdq_plan(calibration, config.fp8_tail_blocks, body)
+    hand_plan = body_qdq_plan(calibration, config.fp8_tail_blocks, hands)
+    assert all(isinstance(choice, KeepPrecision) for choice in body_plan.modules.values())
+    assert all(isinstance(choice, KeepPrecision) for choice in body_plan.attention)
+    assert all(isinstance(choice, Fp8Linear) for choice in hand_plan.modules.values())
+    assert all(isinstance(choice, Fp8Attention) for choice in hand_plan.attention)
 
 
 def test_body_precision_plan_can_preserve_outliers_without_changing_other_modules() -> None:
