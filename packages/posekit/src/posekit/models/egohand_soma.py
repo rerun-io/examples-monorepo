@@ -5,7 +5,6 @@ The released MHR parameters remain dynamic: all five identity coefficients,
 each hand. Only the neutral pose corrective and topology tables are cached.
 """
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -18,6 +17,7 @@ from torch import Tensor
 
 from egohand.models.soma_hand_wrapper import SomaHandWrapper
 from posekit.models.egohand_mhr import MhrHandRestSkinning
+from posekit.ops.compile import compile_unless_dev
 
 
 class _CudaMHRHand(MHRHandIdentityModel):
@@ -48,8 +48,7 @@ class _CudaMHRHand(MHRHandIdentityModel):
         source_vertices, local_faces = torch.unique(self.hand_faces, sorted=True, return_inverse=True)
         self.hand_faces = local_faces
         character = self._mhr_model.module.character_torch
-        rest_model = MhrHandRestSkinning(character, source_vertices, self.scale_indices[0], self.neutral_correctives)
-        self.rest_model = rest_model if os.environ.get("PIXI_DEV_MODE") == "1" else torch.compile(rest_model, fullgraph=True, dynamic=True)
+        self.rest_model = compile_unless_dev(MhrHandRestSkinning(character, source_vertices, self.scale_indices[0], self.neutral_correctives))
 
     def _get_shaped_verts(self, identity_coeffs: Float32[Tensor, "b 5"]) -> Float32[Tensor, "b v 3"]:
         """Evaluate the released shape, scale and FK for every required source vertex."""

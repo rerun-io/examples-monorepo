@@ -1,6 +1,5 @@
 """Batched CUDA lens inversion, virtual cameras and hand crop sampling."""
 
-import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,12 +11,14 @@ from torch import Tensor
 from egohand_inference.camera.camera_models import _PerspectiveCamera
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand_capture import capture_hand_graph
-from posekit.models.egohand_crops import _compiled_normalize_crops, _normalize_crops
+from posekit.models.egohand_crops import normalize_crops
 from posekit.models.egohand_geometry import lens_model
-from posekit.models.egohand_lens_kernels import _project_joints, _remap, _unproject_pixels
+from posekit.models.egohand_lens_kernels import project_joints, remap, unproject_pixels
+from posekit.ops.compile import compile_unless_dev
 from posekit.predictions import HandDetections, HandSide
 
 
+@compile_unless_dev
 def _sample_perimeter(boxes: Float32[Tensor, "n 4"], edge: Float64[Tensor, "1025"], padding: float) -> Float64[Tensor, "n 4101 2"]:
     center = ((boxes[:, :2] + boxes[:, 2:]) / 2.0).double()
     size = ((boxes[:, 2:] - boxes[:, :2]).amax(-1).double() * (1.0 + padding)).float().double()
@@ -30,6 +31,7 @@ def _sample_perimeter(boxes: Float32[Tensor, "n 4"], edge: Float64[Tensor, "1025
                       torch.stack((high[:, 0, None].expand_as(y), y), -1)), dim=1)
 
 
+@compile_unless_dev
 def _virtual_camera(rays: Float64[Tensor, "n 4101 3"]) -> tuple[Float64[Tensor, "n"], Float64[Tensor, "n 3 3"]]:
     center = rays[:, 0]
     x, y, z = center.unbind(-1)
@@ -40,10 +42,6 @@ def _virtual_camera(rays: Float64[Tensor, "n 4101 3"]) -> tuple[Float64[Tensor, 
     normalized = perimeter[..., :2] / perimeter[..., 2:]
     extent = torch.where(torch.isfinite(normalized), normalized.abs(), 0.0).amax((1, 2))
     return 128.0 / extent, rotation
-
-
-_sample_perimeter_compiled = torch.compile(_sample_perimeter, fullgraph=True, dynamic=True)
-_virtual_camera_compiled = torch.compile(_virtual_camera, fullgraph=True, dynamic=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,22 +105,20 @@ class CudaHandCropper:
     def unproject(self, pixels: Float64[Tensor, "n p 2"]) -> Float64[Tensor, "n p 3"]:
         """Invert the physical lens on the GPU, retaining the reference pixel tolerance."""
         rays = torch.empty((*pixels.shape[:-1], 3), device=pixels.device, dtype=torch.float64)
-        wp.launch(_unproject_pixels, dim=pixels.shape[:2], inputs=[wp.from_torch(pixels.contiguous(), dtype=wp.vec2d), self.intrinsic,
+        wp.launch(unproject_pixels, dim=pixels.shape[:2], inputs=[wp.from_torch(pixels.contiguous(), dtype=wp.vec2d), self.intrinsic,
                   self.coefficients, self.tilt, self.radius_bound, self.radial_count], outputs=[wp.from_torch(rays, dtype=wp.vec3d)],
                   device=str(self.device), stream=self._stream(), record_tape=False)
         return rays
 
     def geometry(self, boxes: Float32[Tensor, "n 4"], padding: float) -> tuple[Float64[Tensor, "n"], Float64[Tensor, "n 3 3"]]:
         """Fit the same 4,100-point perimeter and shortest optical-axis rotation."""
-        sample = _sample_perimeter if os.environ.get("PIXI_DEV_MODE") == "1" else _sample_perimeter_compiled
-        virtual = _virtual_camera if os.environ.get("PIXI_DEV_MODE") == "1" else _virtual_camera_compiled
-        pixels = sample(boxes, self.edge, padding)
-        return virtual(self.unproject(pixels))
+        pixels = _sample_perimeter(boxes, self.edge, padding)
+        return _virtual_camera(self.unproject(pixels))
 
     def maps(self, focal: Float64[Tensor, "n"], rotation: Float64[Tensor, "n 3 3"], mirrored: Tensor) -> Float32[Tensor, "n 256 256 2"]:
         """Project every virtual pixel in one batch, mirroring right-hand crops."""
         maps = torch.empty((len(focal), 256, 256, 2), device=focal.device)
-        wp.launch(_remap, dim=(len(focal), 256, 256), inputs=[wp.from_torch(focal), wp.from_torch(rotation, dtype=wp.mat33d),
+        wp.launch(remap, dim=(len(focal), 256, 256), inputs=[wp.from_torch(focal), wp.from_torch(rotation, dtype=wp.mat33d),
                   wp.from_torch(mirrored, dtype=wp.bool), self.intrinsic, self.coefficients, self.tilt, self.radius_bound, self.radial_count],
                   outputs=[wp.from_torch(maps, dtype=wp.vec2)], device=str(self.device), stream=self._stream(), record_tape=False)
         return maps
@@ -130,7 +126,7 @@ class CudaHandCropper:
     def project(self, joints: Float32[Tensor, "n 25 3"]) -> Float32[Tensor, "n 25 2"]:
         """Project source-camera joints using the same lens as the crop sampler."""
         pixels = torch.empty((*joints.shape[:-1], 2), device=joints.device)
-        wp.launch(_project_joints, dim=joints.shape[:2], inputs=[wp.from_torch(joints.contiguous(), dtype=wp.vec3), self.intrinsic,
+        wp.launch(project_joints, dim=joints.shape[:2], inputs=[wp.from_torch(joints.contiguous(), dtype=wp.vec3), self.intrinsic,
                   self.coefficients, self.tilt, self.radius_bound, self.radial_count], outputs=[wp.from_torch(pixels, dtype=wp.vec2)],
                   device=str(self.device), stream=self._stream(), record_tape=False)
         return pixels
@@ -169,6 +165,5 @@ class CudaHandCropper:
         """Capture-safe crop body with all changing inputs in device storage."""
         focal, rotation = self.geometry(boxes, padding)
         maps = self.maps(focal, rotation, mirrored)
-        normalize = _normalize_crops if os.environ.get("PIXI_DEV_MODE") == "1" else _compiled_normalize_crops
-        images = normalize(frames, frame_indices, maps)
+        images = normalize_crops(frames, frame_indices, maps)
         return PreparedHandCrops(images, focal, rotation)

@@ -100,14 +100,14 @@ def _inverse(pixel: wp.vec2d, intrinsic: wp.vec4d, coefficients: wp.array(dtype=
 
 
 @wp.kernel(enable_backward=False)
-def _unproject_pixels(pixels: wp.array2d(dtype=wp.vec2d), intrinsic: wp.vec4d, coefficients: wp.array(dtype=wp.float64), tilt: wp.vec4d,
+def unproject_pixels(pixels: wp.array2d(dtype=wp.vec2d), intrinsic: wp.vec4d, coefficients: wp.array(dtype=wp.float64), tilt: wp.vec4d,
                       radius_bound: wp.float64, radial_count: int, rays: wp.array2d(dtype=wp.vec3d)):
     hand, point = wp.tid()
     rays[hand, point] = _inverse(pixels[hand, point], intrinsic, coefficients, tilt, radius_bound, radial_count)
 
 
 @wp.kernel(enable_backward=False)
-def _remap(focal: wp.array(dtype=wp.float64), rotation: wp.array(dtype=wp.mat33d), mirrored: wp.array(dtype=wp.bool),
+def remap(focal: wp.array(dtype=wp.float64), rotation: wp.array(dtype=wp.mat33d), mirrored: wp.array(dtype=wp.bool),
            intrinsic: wp.vec4d, coefficients: wp.array(dtype=wp.float64), tilt: wp.vec4d, radius_bound: wp.float64, radial_count: int,
            pixels: wp.array3d(dtype=wp.vec2)):
     hand, row, col = wp.tid()
@@ -124,7 +124,7 @@ def _remap(focal: wp.array(dtype=wp.float64), rotation: wp.array(dtype=wp.mat33d
 
 
 @wp.kernel(enable_backward=False)
-def _project_joints(points: wp.array2d(dtype=wp.vec3), intrinsic: wp.vec4d, coefficients: wp.array(dtype=wp.float64), tilt: wp.vec4d,
+def project_joints(points: wp.array2d(dtype=wp.vec3), intrinsic: wp.vec4d, coefficients: wp.array(dtype=wp.float64), tilt: wp.vec4d,
                     radius_bound: wp.float64, radial_count: int, pixels: wp.array2d(dtype=wp.vec2)):
     hand, joint = wp.tid()
     p = points[hand, joint]
