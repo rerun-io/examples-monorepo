@@ -1215,9 +1215,30 @@ cwd = "packages/posekit"
 depends-on = ["posekit-body-download-examples"]
 description = "Whole-body 3D people (SAM3 masks + MoGe-2 camera + SAM 3D Body) in images (default: the examples) or --video-path, logged to Rerun"
 
+[feature.posekit-body.tasks.posekit-body3d-app]
+cmd = "python tools/apps/body3d_app.py"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-examples"]
+description = "Launch the SAM 3D Body Gradio app with an embedded Rerun viewer (http://127.0.0.1:7871)"
+
+[feature.posekit-body.tasks.posekit-body-download-hocap-sample]
+cmd = "test -d data/hocap/sample || (hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap && unzip -o data/hocap/sample.zip -d data/hocap && rm data/hocap/sample.zip)"
+cwd = "packages/posekit"
+outputs = ["packages/posekit/data/hocap/sample/"]
+description = "Download the HO-Cap multiview sample (~1.7 GB) the multiview demos use"
+
+[feature.posekit-body.tasks.posekit-body3d-mv-video]
+cmd = "python tools/demos/body3d_mv_video.py hocap --root-directory data/hocap/sample --subject-id 8 --sequence-name 20231024_180733 --max-frames 100"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-hocap-sample"]
+description = "Multiview SAM3 video segmentation with TSDF fusion on the HO-Cap sample (8 cameras, 100 frames)"
 
 
-
+[feature.posekit-body.tasks.posekit-body3d-mv-body]
+cmd = "python tools/demos/body3d_mv_body.py hocap --root-directory data/hocap/sample --subject-id 8 --sequence-name 20231024_180733 --max-frames 50"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-hocap-sample"]
+description = "Multiview SAM 3D Body fitting on the HO-Cap sample: per-camera bodies fused by MHR reprojection optimization"
 
 # Hand demo/eval/benchmark tasks; they run in the posekit-hands envs (EgoHand + WiLoR features).
 [feature.posekit-hands]
