@@ -1201,7 +1201,7 @@ description = "Run the GPU video 2D pose demo (detector + top-down pose over tor
 [feature.posekit.tasks.posekit-sapiens-calibrate]
 cmd = "python tools/apps/sapiens_calibrate.py"
 cwd = "packages/posekit"
-description = "Measure Sapiens2 nvfp4-768 activation ranges from person crops (--crops-dir, --output); review the JSON before replacing src/posekit/models/sapiens_net/fast_pose_768.json"
+description = "Measure Sapiens2 nvfp4-768 activation ranges from person crops (--crops-dir, --output); review the .rrd before replacing src/posekit/models/sapiens_net/fast_pose_768.rrd"
 
 [feature.posekit.tasks.posekit-video-track]
 cmd = "python tools/demos/video_track.py"

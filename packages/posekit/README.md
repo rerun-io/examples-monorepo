@@ -272,8 +272,8 @@ numpy only at the Rerun/serialization boundary (`xy_numpy()`):
   1024×768 path, including Torch and ONNX backends or larger checkpoints.
   Fast export caches include the calibration hash and export version.
   Regenerate ranges from person crop images with
-  `pixi run -e posekit posekit-sapiens-calibrate --crops-dir <dir> --output <json>`,
-  then review the JSON before replacing `src/posekit/models/sapiens_net/fast_pose_768.json`.
+  `pixi run -e posekit posekit-sapiens-calibrate --crops-dir <dir> --output <rrd>`,
+  then review the .rrd before replacing `src/posekit/models/sapiens_net/fast_pose_768.rrd`.
   Sapiens fp16 TensorRT overflows; the original TensorRT path uses bf16.
 - **Export outside dev mode** (`-e posekit`, not `-e posekit-dev`):
   `torch.onnx.export` tracing violates beartype hints in instrumented packages.

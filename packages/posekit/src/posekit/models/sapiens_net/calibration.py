@@ -1,17 +1,24 @@
 """Committed activation ranges for the 768x576 fast pose export."""
 
+import hashlib
 import math
 from dataclasses import dataclass
-from json import JSONDecodeError
 from pathlib import Path
 
-from serde import SerdeError, serde
-from serde.json import from_json
+import orjson
+from serde import SerdeError, from_dict, serde
+from serde.json import to_json
+
+from posekit.models.calibration_rrd import CalibrationRecording, CalibrationScalar, range_tables, read_calibration_rrd, write_calibration_rrd
 
 FAST_POSE_INPUT_HW: tuple[int, int] = (768, 576)
 """Crop height and width the fast export runs at and its calibration was measured on."""
 FAST_POSE_HEATMAP_HW: tuple[int, int] = (192, 144)
 """Heatmap height and width of the fast export: the input at stride 4."""
+FAST_POSE_CALIBRATION_MODEL: str = "sapiens2-0.4b-nvfp4-768"
+"""Model name and recording id of the committed ranges."""
+CALIBRATION_PATH: Path = Path(__file__).with_name("fast_pose_768.rrd")
+"""The committed ranges (layout: ``posekit.models.calibration_rrd``)."""
 
 
 @serde(deny_unknown_fields=True)
@@ -37,15 +44,29 @@ class FastPoseCalibration:
             raise ValueError("Calibration maxima must be finite and positive.")
 
 
-def calibration_path() -> Path:
-    """Return the committed calibration file."""
-    return Path(__file__).with_name("fast_pose_768.json")
+def calibration_digest(calibration: FastPoseCalibration) -> str:
+    """SHA-256 of the ranges in the canonical JSON they shipped as before the .rrd; fast export caches are keyed on it."""
+    return hashlib.sha256((to_json(calibration, option=orjson.OPT_INDENT_2) + "\n").encode()).hexdigest()
 
 
-def load_calibration() -> FastPoseCalibration:
-    """Load the strict calibration schema, naming the file on decode errors."""
-    path: Path = calibration_path()
+def write_calibration(path: Path, calibration: FastPoseCalibration) -> None:
+    """Save measured ranges in the layout ``load_calibration`` reads."""
+    height, width = calibration.input_hw
+    properties: dict[str, CalibrationScalar] = {
+        "model": FAST_POSE_CALIBRATION_MODEL, "input_height": height, "input_width": width, "n_crops": calibration.n_crops,
+    }
+    write_calibration_rrd(path, CalibrationRecording(properties, range_tables(calibration.input_amax, calibration.attention_amax)))
+
+
+def load_calibration(path: Path = CALIBRATION_PATH) -> FastPoseCalibration:
+    """Load the committed ranges, or an explicit newly measured .rrd; decode errors name the file."""
+    recording: CalibrationRecording = read_calibration_rrd(path, FAST_POSE_CALIBRATION_MODEL)
     try:
-        return from_json(FastPoseCalibration, path.read_text())
-    except (SerdeError, JSONDecodeError) as error:
-        raise ValueError(f"Invalid calibration {path}: {error}") from error
+        return from_dict(FastPoseCalibration, {
+            "input_hw": [recording.properties["input_height"], recording.properties["input_width"]],
+            "n_crops": recording.properties["n_crops"],
+            "input_amax": recording.ranges("input_amax"),
+            "attention_amax": recording.ranges("attention_amax"),
+        })
+    except (SerdeError, KeyError, ValueError) as error:
+        raise ValueError(f"Invalid calibration {path}: {error!r}") from error

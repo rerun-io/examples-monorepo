@@ -1,14 +1,13 @@
 """ONNX-exportable Sapiens2 pose networks: the plain export and the calibrated, quantized 0.4B fast export."""
 
 import copy
-import hashlib
 from pathlib import Path
 from typing import Any
 
 import torch
 from torch import nn
 
-from posekit.models.sapiens_net.calibration import FAST_POSE_INPUT_HW, calibration_path, load_calibration
+from posekit.models.sapiens_net.calibration import FAST_POSE_INPUT_HW, FastPoseCalibration, calibration_digest, load_calibration
 from posekit.models.sapiens_net.checkpoints import load_pose_model
 from posekit.models.sapiens_net.fast_head import DeferredHead
 from posekit.models.sapiens_net.metadata import coco133_goliath_pairs
@@ -82,13 +81,14 @@ def make_fast_pose_exportable(model: nn.Module) -> nn.Module:
 
 
 def ensure_fast_pose_onnx(cache_dir: Path, max_batch_size: int = 8) -> Path:
-    """Export and quantize once; calibration bytes and export version invalidate caches."""
+    """Export and quantize once; the calibration ranges and export version invalidate caches."""
     from trtkit import export_onnx
     from trtkit.artifacts import build_once
 
     from posekit.models.sapiens_net.quantize import quantize_fast_pose
 
-    digest: str = hashlib.sha256(calibration_path().read_bytes()).hexdigest()[:16]
+    calibration: FastPoseCalibration = load_calibration()
+    digest: str = calibration_digest(calibration)[:16]
     path: Path = cache_dir / f"sapiens2_0.4b_nvfp4-768_dyn{max_batch_size}_{digest}_v{FAST_POSE_EXPORT_VERSION}.onnx"
 
     def export() -> None:
@@ -99,6 +99,6 @@ def ensure_fast_pose_onnx(cache_dir: Path, max_batch_size: int = 8) -> Path:
             model, (inputs,), base, input_names=["inputs"], output_names=["heatmaps"], compute_dtype=torch.bfloat16, dynamic_batch_max=max_batch_size
         )
         # The quantized model and its weights are staged and published model-last.
-        quantize_fast_pose(base, path, load_calibration())
+        quantize_fast_pose(base, path, calibration)
 
     return build_once(path, export)

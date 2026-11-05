@@ -7,12 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import orjson
 import torch
-from serde.json import to_json
 from torch import nn
 
-from posekit.models.sapiens_net.calibration import FAST_POSE_INPUT_HW, FastPoseCalibration
+from posekit.models.sapiens_net.calibration import FAST_POSE_INPUT_HW, FastPoseCalibration, write_calibration
 from posekit.models.sapiens_net.checkpoints import load_pose_model
 from posekit.models.sapiens_net.export import make_fast_pose_exportable
 from posekit.ops.crops import IMAGENET_MEAN_255, IMAGENET_STD_255
@@ -26,7 +24,7 @@ class SapiensCalibrateConfig:
     crops_dir: Path
     """Directory containing person crop images with the production bbox padding."""
     output: Path
-    """JSON destination for review before replacing the package data."""
+    """.rrd destination for review before replacing the package data."""
     max_crops: int = 256
     """Maximum number of images to process."""
 
@@ -81,5 +79,4 @@ def main(config: SapiensCalibrateConfig) -> None:
         for attn, original in originals:
             attn.attn_op = original
     calibration: FastPoseCalibration = FastPoseCalibration(FAST_POSE_INPUT_HW, len(paths), input_amax, attention_amax)
-    config.output.parent.mkdir(parents=True, exist_ok=True)
-    config.output.write_text(to_json(calibration, option=orjson.OPT_INDENT_2) + "\n")
+    write_calibration(config.output, calibration)
