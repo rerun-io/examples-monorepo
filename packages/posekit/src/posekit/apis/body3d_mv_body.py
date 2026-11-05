@@ -59,7 +59,7 @@ class Sam3MVBodyDemoConfig:
     """ExoEgo dataset configuration (Tyro-resolvable)."""
     prompt: str = "person"
     """Text concept to segment across all cameras."""
-    max_frames: int | None = 50
+    max_frames: int | None = None
     """Optional cap on the number of frames to process."""
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer/runtime options for Rerun (window layout, recording, etc.)."""

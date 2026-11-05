@@ -1165,10 +1165,11 @@ cwd = "packages/posekit"
 description = "Per-frame SAM 3D Body speed (decoded GPU frame + person box to the full output), body and full mode, per stage; writes body_bench.json"
 
 [feature.posekit-body.tasks.posekit-body3d-mv-body]
-cmd = "python tools/demos/body3d_mv_body.py hocap"
+args = [{ arg = "body", default = "sam3d-body" }]
+cmd = "python tools/demos/body3d_mv_body.py hocap {{ body }} --max-frames 50"
 cwd = "packages/posekit"
 depends-on = ["posekit-body-download-hocap-sample"]
-description = "Multiview SAM 3D Body fitting on the HO-Cap sample: per-camera bodies fused by MHR reprojection optimization"
+description = "Fit 50 HO-Cap sample frames (optional body subcommand, then -- before extra CLI flags)"
 
 [feature.posekit-body.tasks.posekit-body-calibrate]
 cmd = "python tools/apps/body_calibrate.py"
