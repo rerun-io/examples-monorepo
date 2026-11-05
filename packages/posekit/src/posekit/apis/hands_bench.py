@@ -80,7 +80,7 @@ class HandsBenchConfig:
 
     video_path: Path = EXAMPLES / "selfcap_oak_left.mp4"
     """Fixed input clip."""
-    camera_path: Path = EXAMPLES / "selfcap_oak_left.json"
+    camera_path: Path = EXAMPLES / "selfcap_oak_left.rrd"
     """Its CalibratedCamera."""
     models: tuple[BenchModel, ...] = ("egohand", "wilor-tensorrt", "wilor-torch")
     """Stacks to time."""

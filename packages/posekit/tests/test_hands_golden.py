@@ -49,7 +49,7 @@ def oak() -> tuple[UInt8[Tensor, "100 720 1280 3"], CalibratedCamera]:
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
     frames = VideoDecoder(EXAMPLES / "selfcap_oak_left.mp4", dimension_order="NHWC", device="cuda").get_frames_in_range(0, 100).data.contiguous()
-    return frames, load_calibrated_camera(EXAMPLES / "selfcap_oak_left.json")
+    return frames, load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
 
 
 def assert_detections(actual: HandDetections, expected: dict[str, np.ndarray]) -> None:

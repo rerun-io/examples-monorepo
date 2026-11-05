@@ -46,8 +46,8 @@ class VideoHandsConfig:
     """Rerun logging configuration."""
     video_path: Path = EXAMPLES / "selfcap_oak_left.mp4"
     """Input video path."""
-    camera_path: Path | None = EXAMPLES / "selfcap_oak_left.json"
-    """CalibratedCamera JSON of the video (EgoHand needs it); None for uncalibrated video with WiLoR."""
+    camera_path: Path | None = EXAMPLES / "selfcap_oak_left.rrd"
+    """CalibratedCamera .rrd of the video (EgoHand needs it); None for uncalibrated video with WiLoR."""
     detector: AnnotatedHandDetectorConfig = field(default_factory=WilorHandDetectorConfig)
     """Hand detector selected by subcommand (``wilor`` or ``egohand``)."""
     pose: AnnotatedHandPose3dConfig = field(default_factory=WilorHandPoseConfig)

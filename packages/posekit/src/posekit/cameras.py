@@ -4,13 +4,15 @@ A pure record: the lens projection itself lives with the model that needs it, so
 importing this module pulls in no GPU or warp code.
 """
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
+import numpy as np
+import rerun as rr
 from jaxtyping import Float64
 from numpy import ndarray
+from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from serde import SerdeError, from_dict, serde
 
 LensModel: TypeAlias = Literal["PINHOLE", "RATIONAL_POLYNOMIAL", "FISHEYE624", "KB4"]
@@ -44,19 +46,48 @@ class CalibratedCamera:
             raise ValueError(f"Camera size must be positive, got {self.width}x{self.height}.")
 
 
+def save_calibrated_camera(camera: CalibratedCamera, path: Path) -> None:
+    """Write a camera as a static ``posekit-calibration`` recording: ``/camera`` holds a ``Pinhole`` and the
+    ``distortion`` (float64) and ``lens`` AnyValues.
+
+    Raises:
+        ValueError: If the intrinsics do not survive the float32 the Pinhole stores.
+    """
+    if not np.array_equal(camera.intrinsics.astype(np.float32), camera.intrinsics):
+        raise ValueError(f"{path}: intrinsics are not float32-exact, a Pinhole would round them.")
+    pinhole: Chunk = Chunk.from_columns(
+        "/camera", indexes=[], columns=rr.Pinhole.columns(image_from_camera=[camera.intrinsics], resolution=[[camera.width, camera.height]])
+    )
+    lens: Chunk = Chunk.from_columns(
+        "/camera",
+        indexes=[],
+        columns=[*rr.AnyValues.columns(distortion=camera.distortion).partition([len(camera.distortion)]), *rr.AnyValues.columns(lens=[camera.lens])],
+    )
+    LazyChunkStream.from_iter([pinhole, lens]).write_rrd(path, application_id="posekit-calibration", recording_id=path.stem)
+
+
 def load_calibrated_camera(path: Path) -> CalibratedCamera:
-    """Read a ``CalibratedCamera`` JSON written by us.
+    """Read a ``CalibratedCamera`` .rrd written by ``save_calibrated_camera``.
 
     Args:
-        path: JSON file holding one ``CalibratedCamera``.
+        path: .rrd holding one camera at ``/camera``.
 
     Returns:
         The validated camera.
 
     Raises:
-        ValueError: If the file is not valid JSON or does not match the schema.
+        ValueError: If the recording lacks a component or does not match the schema.
     """
+    row: dict[str, Any] = {}
+    for chunk in RrdReader(path).stream():
+        if chunk.entity_path == "/camera":
+            batch = chunk.to_record_batch()
+            row |= {name: batch.column(name)[0].as_py() for name in batch.schema.names if not name.startswith("rerun.")}
     try:
-        return from_dict(CalibratedCamera, json.loads(path.read_text()))
-    except (SerdeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path}: not a CalibratedCamera: {error}") from error
+        # Rerun matrices are column-major.
+        intrinsics: list[list[float]] = np.reshape(row["Pinhole:image_from_camera"][0], (3, 3)).T.tolist()
+        width, height = row["Pinhole:resolution"][0]
+        fields: dict[str, Any] = {"intrinsics": intrinsics, "distortion": row["distortion"], "width": int(width), "height": int(height), "lens": row["lens"][0]}
+        return from_dict(CalibratedCamera, fields)
+    except (SerdeError, KeyError) as error:
+        raise ValueError(f"{path}: not a CalibratedCamera: {error!r}") from error
