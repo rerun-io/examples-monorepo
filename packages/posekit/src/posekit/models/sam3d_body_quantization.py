@@ -49,6 +49,11 @@ class BodyPrecisionPlan:
             raise ValueError(f"Attention block indices must be between 0 and {DINO_BLOCKS - 1}.")
 
 
+def frame_sha256(frame: UInt8[Tensor, "h w 3"]) -> str:
+    """SHA256 of decoded RGB pixels in row-major order: the identity calibration and evaluation splits compare."""
+    return hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
+
+
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class CalibrationFrame:
@@ -134,7 +139,7 @@ class CalibrationSample:
 
     def reference(self) -> CalibrationFrame:
         """Hash decoded pixels, independently of source/container metadata."""
-        return CalibrationFrame(self.source, self.index, hashlib.sha256(self.image.cpu().contiguous().numpy().tobytes()).hexdigest())
+        return CalibrationFrame(self.source, self.index, frame_sha256(self.image))
 
 
 def load_body_calibration(path: Path | None = None) -> BodyCalibration:

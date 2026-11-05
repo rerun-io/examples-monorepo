@@ -1,6 +1,5 @@
 """Held-out end-to-end accuracy for complete SAM body role outputs."""
 
-import hashlib
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from json import JSONDecodeError
@@ -28,6 +27,7 @@ from posekit.models.sam3d_body_quantization import (
     BodyCalibration,
     BodyCalibrationSplit,
     CalibrationFrame,
+    frame_sha256,
     load_body_calibration,
     load_development_frames,
 )
@@ -209,7 +209,7 @@ def read_local_frames(paths: tuple[Path, ...], frames_per_video: int) -> list[tu
             frames = decoder.get_frames_at(indices).data.contiguous()
             selected = list(zip(indices, frames, strict=True))
         for index, pixels in selected:
-            digest: str = hashlib.sha256(pixels.cpu().numpy().tobytes()).hexdigest()
+            digest: str = frame_sha256(pixels)
             inputs.append((CalibrationFrame(source, index, digest), pixels))
     return inputs
 
@@ -252,7 +252,7 @@ def evaluation_inputs(config: Config, calibration: BodyCalibration) -> list[tupl
             decoder = VideoDecoder(path, device="cuda", dimension_order="NHWC")
             frames = decoder.get_frames_at([row.index for row in rows]).data.contiguous()
         for row, frame in zip(rows, frames, strict=True):
-            digest: str = hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
+            digest: str = frame_sha256(frame)
             if digest != row.sha256 or digest in forbidden:
                 raise ValueError(f"Evaluation pixels changed or overlap calibration: {source} frame {row.index}")
             inputs.append((row, frame.clone()))
@@ -263,7 +263,7 @@ def evaluation_inputs(config: Config, calibration: BodyCalibration) -> list[tupl
             decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec), device="cuda", dimension_order="NHWC", seek_mode="approximate")
             frames = decoder.get_frames_at([frame.index for frame in rows]).data.contiguous()
             for row, frame in zip(rows, frames, strict=True):
-                digest: str = hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
+                digest: str = frame_sha256(frame)
                 if digest != row.sha256 or digest in forbidden:
                     raise ValueError(f"Evaluation pixels changed or overlap calibration: {entity} frame {row.index}")
                 inputs.append((row, frame.clone()))

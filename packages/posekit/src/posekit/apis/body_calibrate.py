@@ -1,6 +1,5 @@
 """Measure SAM body activation ranges on phone frames read from the Rerun catalog."""
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +18,7 @@ from posekit.models.sam3d_body_quantization import (
     BodyCalibrationSplit,
     CalibrationFrame,
     CalibrationSample,
+    frame_sha256,
     measure_body_calibration,
     write_body_calibration,
 )
@@ -98,7 +98,7 @@ def main(config: Config) -> None:
             if position in calibration_positions:
                 selected.append((source, index, frame))
             else:
-                digest: str = hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
+                digest: str = frame_sha256(frame)
                 evaluation.append(CalibrationFrame(source, index, digest))
         print(f"[body-calibrate] {source}: {len(decoder)} frames; {len(calibration_positions)} calibration, {count} evaluation", flush=True)
     for extra_source in config.additional_sources:
@@ -121,7 +121,7 @@ def main(config: Config) -> None:
     evaluation.extend(row for row, _ in read_local_frames(config.evaluation_inputs, config.evaluation_frames_per_video))
     evaluation = list({(row.source, row.index, row.sha256): row for row in evaluation}.values())
     BodyCalibrationSplit([
-        CalibrationFrame(source, index, hashlib.sha256(frame.cpu().contiguous().numpy().tobytes()).hexdigest())
+        CalibrationFrame(source, index, frame_sha256(frame))
         for source, index, frame in selected
     ], evaluation)
     boxes: list[BoxDetections] = person_boxes_per_frame([frame for _, _, frame in selected])
