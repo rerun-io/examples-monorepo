@@ -17,12 +17,8 @@ from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_H
 from simplecv.ops.triangulate import batch_triangulate, projectN3
 from simplecv.rerun_custom_types import Points2DWithConfidence
 from torch import Tensor
-from wilor_nano.hand_keypoints import (
-    FinalWilorPred,
-    HandKeypointDetectorConfig,
-    KeypointResults,
-    WilorHandKeypointDetector,
-)
+
+from mv_api.wilor_refine import WilorKeypointRefiner
 
 WILOR_CONFIDENCE_THRESHOLD: float = 0.5
 WILOR_BBOX_EXPANSION_RATIO: float = 0.25
@@ -169,9 +165,9 @@ class MultiviewBodyTracker:
                 f"filter_body_idxes max index {int(self.filter_body_idxes.max())} exceeds the "
                 f"{self.pose_model.skeleton.name} skeleton's {self.num_keypoints} keypoints."
             )
-        self.hand_keypoint_engine: WilorHandKeypointDetector | None = None
+        self.hand_keypoint_engine: WilorKeypointRefiner | None = None
         if self.config.use_wilor:
-            self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
+            self.hand_keypoint_engine = WilorKeypointRefiner()
 
     def __call__(
         self,
@@ -370,7 +366,7 @@ class MultiviewBodyTracker:
         keypoints: Float32[ndarray, "n_kpts 2"],
         confidences: Float32[ndarray, "n_kpts"],
     ) -> Float32[ndarray, "n_kpts 2"]:
-        engine: WilorHandKeypointDetector | None = self.hand_keypoint_engine
+        engine: WilorKeypointRefiner | None = self.hand_keypoint_engine
         if engine is None:
             return keypoints
 
@@ -395,13 +391,7 @@ class MultiviewBodyTracker:
             if bbox is None:
                 continue
 
-            xyxy: Float32[ndarray, "1 4"] = bbox[np.newaxis, :]
-            wilor_pred: FinalWilorPred | KeypointResults = engine(rgb_hw3=rgb_hw3, xyxy=xyxy, handedness=handedness)
-            raw_pred_uv: Float[ndarray, "1 21 2"] = (
-                wilor_pred.keypoints_2d if isinstance(wilor_pred, KeypointResults) else wilor_pred.pred_keypoints_2d
-            )
-            pred_uv: Float32[ndarray, "1 21 2"] = np.asarray(raw_pred_uv, dtype=np.float32)
-            refined_hand_uv: Float32[ndarray, "21 2"] = pred_uv[0]
+            refined_hand_uv: Float32[ndarray, "21 2"] = engine(np.ascontiguousarray(rgb_hw3), bbox.astype(np.float32), handedness)
             refined_hand_uv[:, 0] = np.clip(refined_hand_uv[:, 0], 0.0, float(width - 1))
             refined_hand_uv[:, 1] = np.clip(refined_hand_uv[:, 1], 0.0, float(height - 1))
             refined_keypoints[hand_indices, :] = refined_hand_uv

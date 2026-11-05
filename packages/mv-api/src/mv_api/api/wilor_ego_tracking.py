@@ -15,8 +15,8 @@ import rerun.blueprint as rrb
 import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
-from tqdm import tqdm
-
+from posekit.models.wilor import WilorHandDetector, WilorHandDetectorConfig
+from posekit.predictions import HandSide
 from simplecv.apis.view_exoego import create_container, setup_scene
 from simplecv.camera_parameters import Fisheye62Parameters, KannalaBrandtDistortion, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
@@ -45,6 +45,9 @@ from simplecv.rerun_custom_types import (
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.video_io import MultiVideoReader
+from tqdm import tqdm
+
+from mv_api.wilor_refine import RtmPoseHandScorer, WilorKeypointRefiner, best_hand_per_side
 
 device: str = "cuda" if torch.cuda.is_available() else "cpu"
 CamNameType = str
@@ -176,25 +179,16 @@ def run_wilor_ego_tracking(
     config: WilorEgoTrackingConfig,
 ) -> None:
     """Run wilor hand tracking on ego cameras and log results to Rerun."""
-    from wilor_nano.hand_detection import DetectionResult, HandDetector, HandDetectorConfig
-    from wilor_nano.hand_keypoints import (
-        HandKeypointDetectorConfig,
-        KeypointResults,
-        WilorHandKeypointDetector,
-    )
-
     # Initialize models
     print(f"Initializing models on device: {device}")
-    hand_detector: HandDetector = HandDetector(
-        HandDetectorConfig(hf_wilor_repo_id="pablovela5620/wilor-nano", verbose=False)
-    )
-    
-    # Only initialize keypoint model if needed
-    hand_keypoint_model: WilorHandKeypointDetector | None = None
+    hand_detector: WilorHandDetector = WilorHandDetectorConfig(score_threshold=config.hand_conf).setup()
+
+    # Only initialize keypoint models if needed
+    hand_keypoint_model: WilorKeypointRefiner | None = None
+    hand_scorer: RtmPoseHandScorer | None = None
     if not config.detection_only:
-        hand_keypoint_model = WilorHandKeypointDetector(
-            HandKeypointDetectorConfig(hf_wilor_repo_id="pablovela5620/wilor-nano", verbose=False)
-        )
+        hand_keypoint_model = WilorKeypointRefiner()
+        hand_scorer = RtmPoseHandScorer()
         print("Wilor keypoint model initialized")
     else:
         print("Detection-only mode: skipping keypoint model initialization")
@@ -301,43 +295,35 @@ def run_wilor_ego_tracking(
             pinhole_log_path: Path = cam_log_path / "pinhole"
 
             uvc_coco: Float32[ndarray, "133 3"] = np.full((133, 3), np.nan, dtype=np.float32)
-            det_results: DetectionResult = hand_detector(rgb_frame, hand_conf=config.hand_conf)
+            best: dict[HandSide, Float32[ndarray, "4"]] = best_hand_per_side(hand_detector(torch.from_numpy(rgb_frame).cuda()[None]), frame=0)
 
-            assert hand_keypoint_model is not None
+            assert hand_keypoint_model is not None and hand_scorer is not None
 
-            if det_results.left_xyxy is not None:
+            if "left" in best:
                 rr.log(
                     f"{pinhole_log_path}/image/{COCO133_ROI_LABELS[Coco133RoiLayer.LEFT_HAND]}",
                     rr.Boxes2D(
-                        array=det_results.left_xyxy,
+                        array=best["left"][None],
                         array_format=rr.Box2DFormat.XYXY,
                         class_ids=int(Coco133RoiLayer.LEFT_HAND),
                         show_labels=True,
                     ),
                 )
-                wilor_preds = hand_keypoint_model(
-                    rgb_hw3=rgb_frame, xyxy=det_results.left_xyxy, handedness="left"
-                )
-                if isinstance(wilor_preds, KeypointResults):
-                    uvc_coco[LEFT_HAND_IDX, :2] = wilor_preds.keypoints_2d[0]
-                    uvc_coco[LEFT_HAND_IDX, 2] = wilor_preds.scores[0]
+                uvc_coco[LEFT_HAND_IDX, :2] = hand_keypoint_model(rgb_frame, best["left"], "left")
+                uvc_coco[LEFT_HAND_IDX, 2] = hand_scorer(rgb_frame, best["left"])
 
-            if det_results.right_xyxy is not None:
+            if "right" in best:
                 rr.log(
                     f"{pinhole_log_path}/image/{COCO133_ROI_LABELS[Coco133RoiLayer.RIGHT_HAND]}",
                     rr.Boxes2D(
-                        array=det_results.right_xyxy,
+                        array=best["right"][None],
                         array_format=rr.Box2DFormat.XYXY,
                         class_ids=int(Coco133RoiLayer.RIGHT_HAND),
                         show_labels=True,
                     ),
                 )
-                wilor_preds = hand_keypoint_model(
-                    rgb_hw3=rgb_frame, xyxy=det_results.right_xyxy, handedness="right"
-                )
-                if isinstance(wilor_preds, KeypointResults):
-                    uvc_coco[RIGHT_HAND_IDX, :2] = wilor_preds.keypoints_2d[0]
-                    uvc_coco[RIGHT_HAND_IDX, 2] = wilor_preds.scores[0]
+                uvc_coco[RIGHT_HAND_IDX, :2] = hand_keypoint_model(rgb_frame, best["right"], "right")
+                uvc_coco[RIGHT_HAND_IDX, 2] = hand_scorer(rgb_frame, best["right"])
 
             # Log 2D keypoints
             rr.log(
