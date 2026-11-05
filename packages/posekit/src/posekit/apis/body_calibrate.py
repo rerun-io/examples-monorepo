@@ -1,7 +1,6 @@
 """Measure SAM body activation ranges on phone frames read from the Rerun catalog."""
 
 import hashlib
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +14,7 @@ from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
 from posekit.apis.body_accuracy import load_accuracy_report, read_local_frames
-from posekit.apis.body_bench import person_boxes
+from posekit.apis.body_bench import person_boxes_per_frame
 from posekit.models.sam3d_body_quantization import (
     BodyCalibrationSplit,
     CalibrationFrame,
@@ -125,19 +124,10 @@ def main(config: Config) -> None:
         CalibrationFrame(source, index, hashlib.sha256(frame.cpu().contiguous().numpy().tobytes()).hexdigest())
         for source, index, frame in selected
     ], evaluation)
-    by_shape: dict[tuple[int, ...], list[int]] = defaultdict(list)
-    for position, (_, _, frame) in enumerate(selected):
-        by_shape[tuple(frame.shape)].append(position)
-    boxes_by_frame: dict[int, BoxDetections] = {}
-    for positions in by_shape.values():
-        frames = torch.stack([selected[position][2] for position in positions])
-        detections = person_boxes(frames)
-        for local, position in enumerate(positions):
-            rows = torch.nonzero(detections.frame_indices == local).flatten()
-            boxes_by_frame[position] = BoxDetections(detections.xyxy[rows], detections.scores[rows], torch.zeros(len(rows), dtype=torch.int64, device=frames.device))
-    samples: list[CalibrationSample] = []
-    for position, (source, index, frame) in enumerate(selected):
-        samples.append(CalibrationSample(source, index, frame, boxes_by_frame[position]))
+    boxes: list[BoxDetections] = person_boxes_per_frame([frame for _, _, frame in selected])
+    samples: list[CalibrationSample] = [
+        CalibrationSample(source, index, frame, frame_boxes) for (source, index, frame), frame_boxes in zip(selected, boxes, strict=True)
+    ]
     calibration = measure_body_calibration(samples, evaluation)
     write_body_calibration(config.output, calibration)
     print(f"[body-calibrate] saved {calibration.body_crops} body and {2 * calibration.body_crops} hand crops to {config.output}", flush=True)

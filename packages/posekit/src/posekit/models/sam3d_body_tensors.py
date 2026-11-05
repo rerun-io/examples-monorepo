@@ -39,8 +39,6 @@ class BodyEstimate:
     """Camera-axis skeleton centres in metres, before camera translation."""
     joint_global_rots: Float32[Tensor, "n 127 3 3"]
     """Global MHR skeleton rotations from the last decoder prediction."""
-    mhr_model_params: Float32[Tensor, "n 204"]
-    """Complete compact pose and scale parameter row consumed by MHR."""
     pred_cam: Float32[Tensor, "n 3"]
     """Network camera parameters, retained for the re-prompt input."""
     pred_keypoints_2d: Float32[Tensor, "n 70 2"]
@@ -51,8 +49,6 @@ class BodyEstimate:
     """Projection focal length in pixels."""
     pred_keypoints_2d_cropped: Float32[Tensor, "n 70 2"]
     """Keypoints in normalized crop coordinates, with crop edges at -0.5 and 0.5."""
-    pred_keypoints_2d_depth: Float32[Tensor, "n 70"]
-    """Projected keypoint camera depths in metres."""
 
     @classmethod
     def from_decoder(cls, output: dict[str, Tensor | np.ndarray | None]) -> "BodyEstimate":
@@ -165,7 +161,6 @@ class BodyHandFusion:
         body.pred_vertices = final[0] * head.axes
         body.pred_keypoints_3d = final[1][:, :70] * head.axes
         body.pred_joint_coords = final[2] * head.axes
-        body.mhr_model_params = final[3]
         # Preserve the released output's decoder rotations (the final merge does not replace them).
         projected: Tensor = body.pred_keypoints_3d + body.pred_cam_t[:, None]
         body.pred_keypoints_2d = (projected[..., :2] * body.focal_length[:, None, None] + image_size[None, None] / 2 * projected[..., 2:]) / projected[..., 2:]

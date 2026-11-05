@@ -13,6 +13,7 @@ This is the eager baseline: crops run on the CPU with OpenCV, everything else in
 """
 
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TypeAlias
@@ -82,6 +83,22 @@ def person_boxes(frames: UInt8[Tensor, "n h w 3"]) -> BoxDetections:
     if not rows:
         return BoxDetections.empty(frames.device)
     return BoxDetections(torch.cat([r.xyxy for r in rows]), torch.cat([r.scores for r in rows]), torch.cat([r.frame_indices for r in rows]))
+
+
+def person_boxes_per_frame(frames: list[UInt8[Tensor, "h w 3"]]) -> list[BoxDetections]:
+    """Each frame's SAM3 person box as frame-0 detections of that frame; frames of one shape share SAM3 calls."""
+    by_shape: dict[tuple[int, ...], list[int]] = defaultdict(list)
+    for position, frame in enumerate(frames):
+        by_shape[tuple(frame.shape)].append(position)
+    per_frame: dict[int, BoxDetections] = {}
+    for positions in by_shape.values():
+        stacked: UInt8[Tensor, "n h w 3"] = torch.stack([frames[position] for position in positions])
+        detections: BoxDetections = person_boxes(stacked)
+        for local, position in enumerate(positions):
+            rows: Tensor = torch.nonzero(detections.frame_indices == local).flatten()
+            per_frame[position] = BoxDetections(detections.xyxy[rows], detections.scores[rows], torch.zeros(len(rows), dtype=torch.int64, device=stacked.device))
+        del stacked
+    return [per_frame[position] for position in range(len(frames))]
 
 
 def bench_mode(

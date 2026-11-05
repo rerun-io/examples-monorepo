@@ -20,7 +20,7 @@ from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 from torchvision.io import ImageReadMode, decode_image
 
-from posekit.apis.body_bench import person_boxes
+from posekit.apis.body_bench import person_boxes_per_frame
 from posekit.models.sam3d_body import Sam3dBodyConfig, Sam3dBodyReconstruction
 from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
 from posekit.models.sam3d_body_quantization import (
@@ -272,18 +272,7 @@ def main(config: Config) -> BodyAccuracyReport:
     """Compare complete eager/fast outputs on disjoint, decoded and hashed inputs."""
     calibration = load_body_calibration(config.calibration)
     inputs = evaluation_inputs(config, calibration)
-    by_shape: dict[tuple[int, ...], list[int]] = defaultdict(list)
-    for index, (_, frame) in enumerate(inputs):
-        by_shape[tuple(frame.shape)].append(index)
-    detections_by_frame: dict[int, BoxDetections] = {}
-    for indices in by_shape.values():
-        frames = torch.stack([inputs[index][1] for index in indices])
-        boxes = person_boxes(frames)
-        for local, position in enumerate(indices):
-            selected = torch.nonzero(boxes.frame_indices == local).flatten()
-            detections_by_frame[position] = BoxDetections(
-                boxes.xyxy[selected], boxes.scores[selected], torch.zeros(len(selected), dtype=torch.int64, device=frames.device),
-            )
+    detections_by_frame: list[BoxDetections] = person_boxes_per_frame([frame for _, frame in inputs])
     reference = Sam3dBodyConfig(mode=config.fast.mode).setup()
     fast = replace(config.fast, calibration=config.calibration).setup()
     errors: dict[str, list[Tensor]] = defaultdict(list)
