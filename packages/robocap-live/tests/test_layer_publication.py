@@ -28,7 +28,8 @@ class FakeDataset(DatasetEntry):
         self.during_wait: Callable[[], None] | None = None
 
     def register(self, recording_uri: list[str], *, layer_name: str | Sequence[str] = "base",
-                 on_duplicate: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.ERROR) -> RegistrationHandle:
+                 on_duplicate: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.ERROR,
+                 object_store_config: str | None = None) -> RegistrationHandle:
         assert layer_name == "hands" and on_duplicate == OnDuplicateSegmentLayer.REPLACE
         assert len(recording_uri) == 1
         candidate: Path = Path(unquote(urlparse(recording_uri[0]).path))
