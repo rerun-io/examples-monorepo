@@ -115,7 +115,6 @@ packages/prompt-da/data/
 packages/zipdepth/data/
 packages/sam3d-body/data/
 packages/sam3/data/
-packages/sapiens2-pose/data/
 packages/robocap-slam/data/
 packages/egoexo-forge/data/
 packages/arkitscenes-download/data/
@@ -145,7 +144,6 @@ packages/robocap-live/data/
 packages/robocap-live/robocap_live/_core.so
 
 # Package-specific ignores
-packages/sapiens2-pose/comparison_outputs/
 packages/simplecv/artifacts/
 
 # Logs

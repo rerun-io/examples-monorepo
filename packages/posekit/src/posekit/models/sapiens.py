@@ -9,12 +9,14 @@ adapter demonstrates the full posekit story on one network:
   generation and UDP decode.
 
 The 308 Goliath keypoints are projected to COCO-133 (unmapped indices are NaN
-with score 0), matching the sapiens-coco133-pose pipeline.
+with score 0).
 
-Requires the ``sapiens2-pose`` package (model definition + checkpoints);
-imports are lazy so the rest of posekit works without it.
+The network is vendored in ``src/sapiens2_lite`` (see its VENDORED.md); the
+export, quantization and checkpoint code is in ``posekit.models.sapiens_net``.
+Imports are lazy so the rest of posekit loads without the network code.
 """
 
+import copy
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -79,9 +81,9 @@ class SapiensPose2d(TopDownPose2d):
         Args:
             config: Model size, backend, and crop padding.
         """
-        from sapiens2_pose.api.fast_calibration import FAST_POSE_HEATMAP_HW, FAST_POSE_INPUT_HW
-        from sapiens2_pose.api.metadata import coco133_goliath_pairs
-        from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
+        from posekit.models.sapiens_net.calibration import FAST_POSE_HEATMAP_HW, FAST_POSE_INPUT_HW
+        from posekit.models.sapiens_net.metadata import coco133_goliath_pairs
+        from sapiens2_lite.pose import MODEL_SPECS
 
         self.config: SapiensPoseConfig = config
         self.skeleton = COCO_133
@@ -96,10 +98,10 @@ class SapiensPose2d(TopDownPose2d):
         input_spec = TensorSpec(name="inputs", shape=(3, self._input_size[1], self._input_size[0]), dtype=torch.float32)
         heatmap_spec = TensorSpec(name="heatmaps", shape=(channels, self._heatmap_size[1], self._heatmap_size[0]), dtype=torch.float32)
         if isinstance(config.backend, TorchBackendConfig):
-            from sapiens2_pose.api.runtime import get_pose_model
+            from posekit.models.sapiens_net.checkpoints import load_pose_model
 
             self.runtime: TensorRuntime = TorchRuntime(
-                get_pose_model(config.model_size, "cuda"),
+                load_pose_model(config.model_size),
                 input_specs=(input_spec,),
                 output_specs=(heatmap_spec,),
                 max_batch_size=config.backend.max_batch_size,
@@ -112,7 +114,7 @@ class SapiensPose2d(TopDownPose2d):
             static_batch: int = backend.opt_batch_size if isinstance(backend, TensorRtBackendConfig) else backend.max_batch_size
             bf16: bool = isinstance(backend, TensorRtBackendConfig)
             if config.variant == "nvfp4-768":
-                from sapiens2_pose.api.fast_export import ensure_fast_pose_onnx
+                from posekit.models.sapiens_net.export import ensure_fast_pose_onnx
 
                 backend = replace(backend, fp8_attention=True)
                 self.runtime = create_runtime_from_onnx(ensure_fast_pose_onnx(DEFAULT_ONNX_CACHE_DIR, backend.max_batch_size), backend)
@@ -175,14 +177,15 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     Returns:
         Path to the cached ONNX export.
     """
-    from sapiens2_pose.api.runtime import get_pose_model
-    from sapiens2_pose.api.tensorrt_pose import make_sapiens_pose_onnx_exportable
-    from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
     from trtkit import export_onnx
+
+    from posekit.models.sapiens_net.checkpoints import load_pose_model
+    from posekit.models.sapiens_net.export import make_sapiens_pose_onnx_exportable
+    from sapiens2_lite.pose import MODEL_SPECS
 
     # bf16=True bakes bf16 autocast into the graph with fp32 I/O for TRT 11's
     # strongly-typed builds (graph dtype = engine dtype; bf16 is the fastest
-    # strict-accuracy precision from the sapiens2-pose sweep — fp16 Sapiens ViT
+    # strict-accuracy precision from the former sapiens2-pose sweep — fp16 Sapiens ViT
     # graphs overflow; opset >= 22 required for bf16 Conv). bf16=False keeps the
     # plain fp32 graph ONNX Runtime has always run (ORT lacks bf16 Conv kernels).
     dtype_key: str = "bf16" if bf16 else "fp32"
@@ -195,7 +198,8 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"[posekit] exporting Sapiens2 {model_size} pose to ONNX (one-time): {onnx_path.name}")
     spec: Any = MODEL_SPECS[model_size]
-    model: Any = make_sapiens_pose_onnx_exportable(get_pose_model(model_size, "cuda")).eval()
+    # Export a copy: the rewrite works in place, and the torch backend runs the cached model.
+    model: Any = make_sapiens_pose_onnx_exportable(copy.deepcopy(load_pose_model(model_size))).eval()
     dummy: Tensor = torch.zeros((static_batch, 3, int(spec.image_size[0]), int(spec.image_size[1])), dtype=torch.float32, device="cuda")
     export_onnx(
         model,
@@ -218,7 +222,7 @@ def _coco133_projection_indices(device: torch.device) -> tuple[Tensor, Tensor]:
     Returns:
         COCO-133 indices and the Goliath-308 indices they map from.
     """
-    from sapiens2_pose.api.metadata import coco133_goliath_pairs
+    from posekit.models.sapiens_net.metadata import coco133_goliath_pairs
 
     coco, goliath = coco133_goliath_pairs()
     return torch.tensor(coco, dtype=torch.long, device=device), torch.tensor(goliath, dtype=torch.long, device=device)

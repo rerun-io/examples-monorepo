@@ -91,8 +91,6 @@ removes that worktree and its `.pixi` directory automatically.
 | [sam2-streaming](packages/sam2-streaming/) | Vendored, inference-only SAM2 fork with frame streaming and bounded-memory banks. |
 | [sam3](packages/sam3/) | Text-conditioned SAM3 image and video segmentation with Rerun. |
 | [sam3d-body](packages/sam3d-body/) | Promptable SAM3D Body reconstruction and visualization playground. |
-| [sapiens-coco133-pose](packages/sapiens-coco133-pose/) | COCO-133 human pose pipelines using Sapiens2 or RTMLib backends. |
-| [sapiens2-pose](packages/sapiens2-pose/) | Top-down 308-keypoint human pose estimation with Rerun. |
 | [simplecv](packages/simplecv/) | Shared Python utilities for datasets, geometry, video, and Rerun logging. |
 | [slam-evals](packages/slam-evals/) | VSLAM benchmark ingestion and browsing through a Rerun catalog. |
 | [vistadream](packages/vistadream/) | Single-image 3D reconstruction and Gaussian-scene tooling. |

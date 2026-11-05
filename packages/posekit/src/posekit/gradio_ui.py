@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable, Iterator
-from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
@@ -205,21 +204,8 @@ def _update_backend_choices(network_name: str) -> dict[str, object]:
     return gr.update(choices=choices, value=DEFAULT_BACKENDS[network_name])
 
 
-def _example_images() -> list[str]:
-    """Find MAMMA examples, falling back to the Sapiens2 assets."""
-    candidate_dirs: list[Path] = []
-    for package_name in ("mamma", "sapiens2_pose"):
-        try:
-            candidate_dirs.append(Path(str(resources.files(package_name))) / "assets" / "images")
-        except ImportError:
-            continue
-    for images_dir in candidate_dirs:
-        if images_dir.is_dir():
-            return sorted(str(path) for path in images_dir.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
-    return []
-
-
-EXAMPLES: list[str] = _example_images()
+EXAMPLES_DIR: Path = Path(__file__).resolve().parents[2] / "assets" / "images"
+EXAMPLES: list[str] = sorted(str(path) for path in EXAMPLES_DIR.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
 
 CUSTOM_CSS: str = """
 :root, body, .gradio-container, button, input, select, textarea,
@@ -364,9 +350,8 @@ def launch() -> None:
         share=False,
         theme=gr.themes.Soft(),
         css=CUSTOM_CSS,
-        # The example images live in sibling packages (mamma/sapiens2-pose
-        # assets), outside this app's cwd — gradio blocks them otherwise.
-        allowed_paths=sorted({str(Path(example).parent) for example in EXAMPLES}),
+        # The example images live outside gradio's default allowed paths.
+        allowed_paths=[str(EXAMPLES_DIR)],
     )
 
 

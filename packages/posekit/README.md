@@ -5,7 +5,7 @@ tracking, re-ID, 2D pose, dense landmarks — over **PyTorch, ONNX Runtime, and
 TensorRT**, with everything (video decode included) staying on the GPU.
 
 It replaces the five near-copies of bbox→crop math, heatmap/SimCC decoders,
-and hand-rolled TensorRT runners that lived in sapiens2-pose,
+and hand-rolled TensorRT runners that lived in sapiens2-pose (now `posekit.models.sapiens`),
 sapiens-coco133-pose, mamma, wilor-nano (now `posekit.models.wilor`), and rtmlib's CPU path.
 EgoHand (formerly `packages/egohand`) lives here too; see [Hands](#hands-wilor-and-egohand).
 
@@ -233,7 +233,7 @@ Every implementation is parity-validated against its reference:
 | RT-DETRv2 | `PersonDetector` | torch | HF processor | ≤ 0.31 px |
 | RTMPose / RTMW | `TopDownPose2d` | onnx · trt | rtmlib | 1.3 px mean |
 | ViTPose | `TopDownPose2d` | torch | HF processor | 0.75 px mean |
-| Sapiens2 pose | `TopDownPose2d` | trt (default); torch · onnx · trt (`bf16-1024`) | stored bf16 | PCK@0.01 body/hands 0.911/0.971 (NVFP4) |
+| Sapiens2 pose | `TopDownPose2d` | trt (default); torch · onnx · trt (`bf16-1024`) | bf16-1024 (d31, 2026-10-31); pre-port goldens | PCK@0.01 body/hands 0.911/0.971 (NVFP4); port bit-identical |
 | SAM3 | `PromptableSegmenter` | torch | HF processor | mask IoU ≥ 0.997 |
 | SAM2/EfficientTAM | `VideoSegmenter` | torch | — | stable 30-frame track, IoU ≥ 0.97 |
 | CLIP ViT-B/32 | `IdentityEncoder` | torch | PIL pipeline | cosine ≥ 0.985 |
@@ -271,8 +271,9 @@ numpy only at the Rerun/serialization boundary (`xy_numpy()`):
   Use `SapiensPoseConfig(variant="bf16-1024", backend=...)` for the original
   1024×768 path, including Torch and ONNX backends or larger checkpoints.
   Fast export caches include the calibration hash and export version.
-  Regenerate ranges with `packages/sapiens2-pose/tools/apps/calibrate_fast_pose.py`
-  from person crop images, then review its JSON before replacing package data.
+  Regenerate ranges from person crop images with
+  `pixi run -e posekit posekit-sapiens-calibrate --crops-dir <dir> --output <rrd>`,
+  then review the .rrd before replacing `src/posekit/models/sapiens_net/fast_pose_768.rrd`.
   Sapiens fp16 TensorRT overflows; the original TensorRT path uses bf16.
 - **Export outside dev mode** (`-e posekit`, not `-e posekit-dev`):
   `torch.onnx.export` tracing violates beartype hints in instrumented packages.

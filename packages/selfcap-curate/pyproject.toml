@@ -3,14 +3,13 @@ name = "selfcap-curate"
 version = "0.1.0"
 authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
-dependencies = ["posekit", "trtkit", "simplecv", "dataforge", "sapiens2-pose", "torchcodec", "tyro>=0.9.1"]
+dependencies = ["posekit", "trtkit", "simplecv", "dataforge", "torchcodec", "tyro>=0.9.1"]
 
 [tool.uv.sources]
 posekit = { path = "../posekit", editable = true }
 trtkit = { path = "../trtkit", editable = true }
 simplecv = { path = "../simplecv", editable = true }
 dataforge = { path = "../dataforge", editable = true }
-sapiens2-pose = { path = "../sapiens2-pose", editable = true }
 
 [build-system]
 requires = ["hatchling"]
