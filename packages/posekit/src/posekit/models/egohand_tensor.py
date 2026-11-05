@@ -1,5 +1,6 @@
 """CUDA execution of EgoHand's released network and full SOMA hand reconstruction."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 import torch
@@ -76,6 +77,30 @@ class _CapturedHand:
     """Captured indexing storage for mirrored hands."""
     wrist_orientation: Float32[Tensor, "n 3 3"]
     """Static hand-dependent orientation for restoring source-camera axes."""
+
+
+def _to_source_camera(
+    hand: _VirtualHand, rotation: Float32[Tensor, "n 3 3"], wrist_orientation: Float32[Tensor, "n 3 3"],
+    project: Callable[[Float32[Tensor, "n 25 3"]], Float32[Tensor, "n 25 2"]],
+) -> EgoHandTensors:
+    """Rotate virtual-camera hands into their source cameras.
+
+    Every returned tensor is new storage, so the next graph replay cannot overwrite it.
+
+    Args:
+        hand: Captured virtual-camera output.
+        rotation: Virtual-camera to source-camera rotation of each hand.
+        wrist_orientation: SOMA wrist orientation of each hand's side.
+        project: Source-lens projection of camera-space joints to pixels.
+    """
+    translation: Float32[Tensor, "n 3"] = (rotation @ hand.translation.unsqueeze(-1)).squeeze(-1)
+    joints: Float32[Tensor, "n 25 3"] = hand.joints @ rotation.transpose(-1, -2) + translation[:, None]
+    vertices: Float32[Tensor, "n v 3"] = hand.vertices @ rotation.transpose(-1, -2) + translation[:, None]
+    wrist: Float32[Tensor, "n 3 3"] = wrist_orientation @ rotation @ wrist_orientation.transpose(-1, -2) @ hand.poses[:, 0]
+    return EgoHandTensors(
+        joints, project(joints), vertices, torch.cat((wrist[:, None], hand.poses[:, 1:]), dim=1),
+        hand.identity.clone(), hand.scales[:, 0].clone(), translation, hand.scales[:, 1:].clone(),
+    )
 
 
 class EgoHandTensorExecutor:
@@ -160,12 +185,7 @@ class EgoHandTensorExecutor:
                 self.stage_ms[stage] = self.stage_ms.get(stage, 0.0) + begin.elapsed_time(end)
         if len(batches) == 1:
             return batches[0]
-        return EgoHandTensors(
-            torch.cat([batch.joints for batch in batches]), torch.cat([batch.pixels for batch in batches]),
-            torch.cat([batch.vertices for batch in batches]), torch.cat([batch.rotations for batch in batches]),
-            torch.cat([batch.identity for batch in batches]), torch.cat([batch.scale for batch in batches]),
-            torch.cat([batch.translation for batch in batches]), torch.cat([batch.scale_parameters for batch in batches]),
-        )
+        return EgoHandTensors(*(torch.cat([getattr(batch, item.name) for batch in batches]) for item in fields(EgoHandTensors)))
 
     def _run_chunk(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], cropper: CudaHandCropper) -> EgoHandTensors:
         """Replay one bounded batch with its left hands first, then restore the caller's hand order.
@@ -214,20 +234,4 @@ class EgoHandTensorExecutor:
         state.focal.copy_(focal)
         state.graph.replay()
         self.stage_events = state.events
-        poses: Float32[Tensor, "n 25 3 3"] = state.output.poses.clone()
-        identity: Float32[Tensor, "n 5"] = state.output.identity.clone()
-        scales: Float32[Tensor, "n 27"] = state.output.scales.clone()
-        translation: Float32[Tensor, "n 3"] = state.output.translation.clone()
-        joints: Float32[Tensor, "n 25 3"] = state.output.joints.clone()
-        vertices: Float32[Tensor, "n v 3"] = state.output.vertices.clone()
-        scale: Float32[Tensor, "n"] = scales[:, 0]
-        scale_parameters: Float32[Tensor, "n 26"] = scales[:, 1:]
-        rotation: Float32[Tensor, "n 3 3"] = prepared.rotation.float()
-        joints = joints @ rotation.transpose(-1, -2)
-        vertices = vertices @ rotation.transpose(-1, -2)
-        translation = (rotation @ translation.unsqueeze(-1)).squeeze(-1)
-        poses[:, 0] = state.wrist_orientation @ rotation @ state.wrist_orientation.transpose(-1, -2) @ poses[:, 0]
-        joints = joints + translation[:, None]
-        vertices = vertices + translation[:, None]
-        pixels: Float32[Tensor, "n 25 2"] = cropper.project(joints)
-        return EgoHandTensors(joints, pixels, vertices, poses, identity, scale, translation, scale_parameters)
+        return _to_source_camera(state.output, prepared.rotation.float(), state.wrist_orientation, cropper.project)
