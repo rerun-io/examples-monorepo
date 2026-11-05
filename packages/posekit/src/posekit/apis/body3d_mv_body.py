@@ -45,9 +45,9 @@ from posekit.body_mv_fusion import FusedFrame, fuse_frame, print_frame_summary
 from posekit.body_mv_inference import CameraSegmentation, Sam3MVBodyModelConfig, Sam3VideoSegmenter, first_person_body
 from posekit.body_mv_rerun import log_camera_outputs, log_exo_videos, log_fallback_mesh, log_fused_frame, log_keypoints_2d, log_static_scene
 from posekit.body_mv_sequence import ExoRig, exo_camera_names, load_exo_rig
-from posekit.models.sam3d_body import Sam3dBodyConfig, Sam3dBodyPredictor
+from posekit.models import AnnotatedBodyPose3dConfig
+from posekit.models.sam3d_body import MhrBodyModel, Sam3dBodyConfig, Sam3dBodyPredictor
 from posekit.ops.multiview_body import MultiviewBodyOptimizer, MultiviewOptimizerConfig
-from sam3d_body.models.heads.mhr_head import MHRHead
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
@@ -59,13 +59,13 @@ class Sam3MVBodyDemoConfig:
     """ExoEgo dataset configuration (Tyro-resolvable)."""
     prompt: str = "person"
     """Text concept to segment across all cameras."""
-    max_frames: int | None = None
+    max_frames: int | None = 50
     """Optional cap on the number of frames to process."""
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer/runtime options for Rerun (window layout, recording, etc.)."""
     model_config: Sam3MVBodyModelConfig = field(default_factory=Sam3MVBodyModelConfig)
     """Checkpoint, device, and dtype settings for the SAM3 video model."""
-    body: Sam3dBodyConfig = field(default_factory=Sam3dBodyConfig)
+    body: AnnotatedBodyPose3dConfig = field(default_factory=Sam3dBodyConfig)
     """SAM 3D Body weights and mode."""
 
 
@@ -125,13 +125,9 @@ def main(cfg: Sam3MVBodyDemoConfig) -> None:
 
     # Initialize multiview optimizer (reused across frames for temporal smoothing)
     optimizer: MultiviewBodyOptimizer | None = None
-    mhr_head: MHRHead | None = None
+    mhr_head: MhrBodyModel | None = None
     if n_views >= 2:
-        # Get the MHR head for differentiable forward kinematics
-        head_pose = body.estimator.model.head_pose
-        if not isinstance(head_pose, MHRHead):
-            raise TypeError(f"Expected MHRHead for multiview optimization, got {type(head_pose).__name__}.")
-        mhr_head = head_pose
+        mhr_head = body.mhr_model
         optimizer = MultiviewBodyOptimizer(
             projection_matrices=rig.projection_matrices,
             first_world_T_cam=rig.world_T_cams[0],

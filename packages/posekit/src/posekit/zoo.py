@@ -157,6 +157,12 @@ ZOO: dict[str, ZooModel] = {
             "mode=full adds a mirrored left-hand and a right-hand pass (3 backbone passes per person); masks and a camera are optional. "
             "Gated checkpoint. Uses the posekit-body Pixi environment.",
         ),
+        ZooModel(
+            "sam3d-body-dinov3-fast", "body-pose3d", "top-down", "huggingface",
+            f"facebook/sam-3d-body-dinov3@{SAM3D_BODY_REVISION[:8]} model.ckpt", (512, 512), "mhr_70", "implemented",
+            "Sam3dBodyFastConfig: captured decoder execution with dynamic MHR geometry and the complete body role output. "
+            "Select sam3d-body-fast in the body CLI; uses the posekit-body environment and CUDA.",
+        ),
         # 3D (Phase 4).
         ZooModel(
             "rtmw3d-l-coco133", "pose3d", "top-down", "local",

@@ -14,9 +14,9 @@ from jaxtyping import Float32
 from numpy import ndarray
 from torch import Tensor
 
+from posekit.models.sam3d_body import MhrBodyModel
 from posekit.ops.multiview_body import OptimizationResult, ValidationResult, validate_reprojection
 from posekit.ops.multiview_body.mhr_output import expect_mhr_tensor_tuple, expect_mhr_vertices
-from sam3d_body.models.heads.mhr_head import MHRHead
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
@@ -92,10 +92,11 @@ def _fixed_params(base_pred: FinalPosePrediction, device: torch.device) -> dict[
 
 
 def fused_mesh_world(
-    mhr_head: MHRHead, result: OptimizationResult, base_pred: FinalPosePrediction, first_world_T_cam: Float32[ndarray, "4 4"], device: torch.device
+    mhr_head: MhrBodyModel, result: OptimizationResult, base_pred: FinalPosePrediction, first_world_T_cam: Float32[ndarray, "4 4"], device: torch.device
 ) -> Float32[ndarray, "n_verts 3"]:
     """Fused mesh from ``mhr_forward`` (same FK as the validation keypoints), in world coordinates."""
     with torch.no_grad():
+        fixed: dict[str, Tensor] = _fixed_params(base_pred, device)
         opt_global_rot_mesh: Float32[Tensor, "1 3"] = torch.from_numpy(result.global_rot[np.newaxis, :].astype(np.float32)).to(device)
         opt_body_pose_mesh: Float32[Tensor, "1 133"] = torch.from_numpy(result.body_pose[np.newaxis, :].astype(np.float32)).to(device)
         zero_trans_mesh: Float32[Tensor, "1 3"] = torch.zeros(1, 3, device=device, dtype=torch.float32)
@@ -104,7 +105,8 @@ def fused_mesh_world(
                 global_trans=zero_trans_mesh,
                 global_rot=opt_global_rot_mesh,
                 body_pose_params=opt_body_pose_mesh,
-                **_fixed_params(base_pred, device),
+                hand_pose_params=fixed["hand_pose_params"], scale_params=fixed["scale_params"],
+                shape_params=fixed["shape_params"], expr_params=fixed["expr_params"],
                 return_keypoints=False,  # Just vertices
             ),
         )
@@ -119,10 +121,11 @@ def fused_mesh_world(
 
 
 def fused_keypoints_world(
-    mhr_head: MHRHead, result: OptimizationResult, base_pred: FinalPosePrediction, first_world_T_cam: Float32[ndarray, "4 4"], device: torch.device
+    mhr_head: MhrBodyModel, result: OptimizationResult, base_pred: FinalPosePrediction, first_world_T_cam: Float32[ndarray, "4 4"], device: torch.device
 ) -> Float32[ndarray, "70 3"]:
     """The 70 fused MHR keypoints from ``mhr_forward`` with the optimized parameters, in world coordinates."""
     with torch.no_grad():
+        fixed: dict[str, Tensor] = _fixed_params(base_pred, device)
         opt_global_rot: Float32[Tensor, "1 3"] = torch.from_numpy(result.global_rot[np.newaxis, :].astype(np.float32)).to(device)
         opt_translation: Float32[Tensor, "1 3"] = torch.from_numpy(result.translation[np.newaxis, :].astype(np.float32)).to(device)
         opt_body_pose: Float32[Tensor, "1 133"] = torch.from_numpy(result.body_pose[np.newaxis, :].astype(np.float32)).to(device)
@@ -133,7 +136,8 @@ def fused_keypoints_world(
                 global_trans=zero_trans_v,  # Always zero
                 global_rot=opt_global_rot,
                 body_pose_params=opt_body_pose,
-                **_fixed_params(base_pred, device),
+                hand_pose_params=fixed["hand_pose_params"], scale_params=fixed["scale_params"],
+                shape_params=fixed["shape_params"], expr_params=fixed["expr_params"],
                 return_keypoints=True,
             ),
             min_len=2,
@@ -151,7 +155,7 @@ def fused_keypoints_world(
 
 def fuse_frame(
     *,
-    mhr_head: MHRHead,
+    mhr_head: MhrBodyModel,
     result: OptimizationResult,
     per_view_predictions: list[FinalPosePrediction],
     keypoints_2d_stack: Float32[ndarray, "n_views n_kpts 3"],

@@ -10,6 +10,7 @@ import pytest
 import torch
 
 pytest.importorskip("warp", reason="EgoHand needs the posekit-hands Pixi environment (posekit-egohand feature)")
+pytest.importorskip("soma", reason="EgoHand needs the SOMA model package in the posekit-hands Pixi environment")
 
 from jaxtyping import Float64
 from numpy import ndarray

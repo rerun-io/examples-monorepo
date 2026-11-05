@@ -200,6 +200,10 @@ came from. `Sam3dBodyConfig` (zoo `sam3d-body-dinov3`) fills it with Meta's SAM 
 body (three DINOv3 passes per person); `mode="body"` runs the body pass alone. Without a camera the model
 assumes its default field of view. Any `PersonDetector` or the SAM3 `PromptableSegmenter` feeds it.
 
+`Sam3dBodyFastConfig` selects GPU crops, captured inference, compiled MHR and
+calibrated TensorRT networks through the same role. See the
+[fast-path configuration and validation guide](docs/sam3d-body-fast.md).
+
 The upstream inference source is vendored under `src/sam3d_body` (see `src/sam3d_body/VENDORED.md`); its
 DINOv3 is posekit's vendored copy. The checkpoint `facebook/sam-3d-body-dinov3` is gated: request access,
 then `hf auth login`. The model needs the `posekit-sam3d-body` feature; the apps run in `posekit-body`

@@ -32,6 +32,7 @@ from posekit.models.rtdetr import RtDetrDetectorConfig
 from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
 from posekit.models.sam3d_body import Sam3dBodyConfig
+from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
 from posekit.models.sapiens import SapiensPoseConfig
 from posekit.models.vitpose import VitPoseConfig
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
@@ -64,6 +65,7 @@ __all__ = (
     "RtmPoseConfig",
     "Sam3SegmenterConfig",
     "Sam3dBodyConfig",
+    "Sam3dBodyFastConfig",
     "SapiensPoseConfig",
     "SegmentationPrompts",
     "TopDownBodyPose3d",
@@ -82,7 +84,7 @@ if TYPE_CHECKING:
     Pose2dConfig = RtmPoseConfig | SapiensPoseConfig | VitPoseConfig
     HandDetectorConfig = WilorHandDetectorConfig | EgoHandDetectorConfig
     HandPose3dConfig = WilorHandPoseConfig | EgoHandConfig | EgoHandFastConfig
-    BodyPose3dConfig = Sam3dBodyConfig
+    BodyPose3dConfig = Sam3dBodyConfig | Sam3dBodyFastConfig
 else:
     DetectorConfig = tyro.extras.subcommand_type_from_defaults(
         {"yolox": YoloxDetectorConfig(), "rtdetr": RtDetrDetectorConfig()}, prefix_names=False
@@ -99,7 +101,10 @@ else:
         {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose}, prefix_names=False
     )
     BodyPose3dConfig = tyro.extras.subcommand_type_from_defaults(
-        {"sam3d-body": Sam3dBodyConfig(mode="full"), "sam3d-body-bodyonly": Sam3dBodyConfig(mode="body")}, prefix_names=False
+        {
+            "sam3d-body": Sam3dBodyConfig(mode="full"), "sam3d-body-bodyonly": Sam3dBodyConfig(mode="body"),
+            "sam3d-body-fast": Sam3dBodyFastConfig(mode="full"), "sam3d-body-fast-bodyonly": Sam3dBodyFastConfig(mode="body"),
+        }, prefix_names=False
     )
 
 AnnotatedDetectorConfig = tyro.conf.OmitSubcommandPrefixes[DetectorConfig]

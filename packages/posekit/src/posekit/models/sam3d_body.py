@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 import numpy as np
 import torch
@@ -33,11 +33,11 @@ from posekit.skeletons import MHR_70, KeypointSkeleton
 
 Sam3dBodyMode: TypeAlias = Literal["full", "body"]
 """``full``: body plus both hand decoders merged into it; ``body``: the body decoder alone."""
-Sam3dBodyPass: TypeAlias = Literal["body", "left_hand", "right_hand", "prompt"]
+Sam3dBodyPass: TypeAlias = Literal["body", "left_hand", "right_hand", "hands", "prompt"]
 """Network passes of one frame: body, mirrored left-hand crop, right-hand crop, keypoint-prompted body decoder."""
 Sam3dBodyStage: TypeAlias = Literal[
-    "backbone_body", "backbone_left_hand", "backbone_right_hand",
-    "decoder_body", "decoder_left_hand", "decoder_right_hand", "decoder_prompt",
+    "backbone_body", "backbone_left_hand", "backbone_right_hand", "backbone_hands",
+    "decoder_body", "decoder_left_hand", "decoder_right_hand", "decoder_hands", "decoder_prompt",
     "mhr", "other", "total",
 ]
 """Stage names of ``stage_ms``. Decoder stages include the MHR heads their layers run; ``mhr`` is the forward kinematics
@@ -52,6 +52,20 @@ ROOT_INDICES: tuple[int, int] = (9, 10)
 MHR_PARAMETER_WIDTHS: dict[str, int] = {"body_pose": 133, "hand_pose": 108, "scale": 28, "shape": 45, "expression": 72}
 """Width of each MHR parameter field of ``Sam3dBodyReconstruction``: the MHR head's compact body pose, its 2 x 54 hand,
 28 scale, 45 shape and 72 face PCA components."""
+
+
+@runtime_checkable
+class MhrBodyModel(Protocol):
+    """Differentiable MHR reconstruction used by multiview body fitting."""
+
+    def mhr_forward(
+        self, global_trans: Tensor, global_rot: Tensor, body_pose_params: Tensor,
+        hand_pose_params: Tensor | None, scale_params: Tensor, shape_params: Tensor,
+        expr_params: Tensor | None = None, return_keypoints: bool = False, do_pcblend: bool = True,
+        return_joint_coords: bool = False, return_model_params: bool = False,
+        return_joint_rotations: bool = False, scale_offsets: Tensor | None = None,
+        vertex_offsets: Tensor | None = None,
+    ) -> Tensor | tuple[Tensor, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,11 +174,13 @@ class _StageClock:
         self.current: Sam3dBodyPass = "body"
         self.hand_passes: int = 0
         self.in_decoder: bool = False
+        self.enabled: bool = False
 
     @contextmanager
-    def recording(self) -> Iterator[None]:
+    def recording(self, hand_backbone: torch.nn.Module | None = None) -> Iterator[None]:
         """Wrap the passes for the duration; on exit the instance attributes and hooks are removed again."""
         model: torch.nn.Module = self.model
+        self.enabled = True
         wrapped: list[tuple[object, str]] = [(model, "forward_step"), (model, "run_keypoint_prompt")]
         self._wrap(model, "forward_step", self._pass_from_decoder_type)
         self._wrap(model, "run_keypoint_prompt", lambda *_: "prompt")
@@ -172,11 +188,14 @@ class _StageClock:
             self._wrap_timed(head, "mhr_forward", lambda: None if self.in_decoder else "mhr")
             wrapped.append((head, "mhr_forward"))
         handles: list[RemovableHandle] = self._hook(model.get_submodule("backbone"), lambda: f"backbone_{self.current}", nested=False)
+        if hand_backbone is not None and hand_backbone is not model.backbone:
+            handles += self._hook(hand_backbone, lambda: "backbone_hands", nested=False)
         for decoder in ("decoder", "decoder_hand"):
             handles += self._hook(model.get_submodule(decoder), lambda: f"decoder_{self.current}", nested=True)
         try:
             yield
         finally:
+            self.enabled = False
             for owner, name in wrapped:
                 delattr(owner, name)
             for handle in handles:
@@ -209,8 +228,8 @@ class _StageClock:
             label: Sam3dBodyStage | None = stage()
             if label is None:
                 return method(*args, **kwargs)
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
+            start = torch.cuda.Event(enable_timing=True, external=True)
+            end = torch.cuda.Event(enable_timing=True, external=True)
             start.record()
             result = method(*args, **kwargs)
             end.record()
@@ -223,9 +242,9 @@ class _StageClock:
         def before(*_: object) -> None:
             if nested:
                 self.in_decoder = True
-            start = torch.cuda.Event(enable_timing=True)
+            start = torch.cuda.Event(enable_timing=True, external=True)
             start.record()
-            self.events.append((stage(), start, torch.cuda.Event(enable_timing=True)))  # type: ignore[arg-type]
+            self.events.append((stage(), start, torch.cuda.Event(enable_timing=True, external=True)))  # type: ignore[arg-type]
 
         def after(*_: object) -> None:
             if nested:
@@ -248,6 +267,14 @@ class Sam3dBodyPredictor(TopDownBodyPose3d):
     """RGB frames + person boxes (+ masks, + camera) -> MHR whole-body people with hands."""
 
     skeleton: KeypointSkeleton = MHR_70
+
+    @property
+    def mhr_model(self) -> MhrBodyModel:
+        """Public differentiable geometry, independent of the inference backend."""
+        head: object = self.estimator.model.head_pose
+        if not isinstance(head, MhrBodyModel):
+            raise TypeError("The body predictor has no differentiable MHR reconstruction.")
+        return head
 
     def __init__(self, config: Sam3dBodyConfig) -> None:
         from sam3d_body.build_models import load_sam_3d_body
@@ -297,8 +324,8 @@ class Sam3dBodyPredictor(TopDownBodyPose3d):
                 if len(selected) == 0:
                     continue
                 self.clock.start_frame()
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
+                start = torch.cuda.Event(enable_timing=True, external=True)
+                end = torch.cuda.Event(enable_timing=True, external=True)
                 if profile:
                     start.record()
                 people: list[Any] = self.estimator.process_one_image(
