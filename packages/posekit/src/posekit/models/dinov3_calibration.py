@@ -6,7 +6,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.hooks import RemovableHandle
 
-from egohand_dinov3.layers.attention import SelfAttention
+from dinov3.layers.attention import SelfAttention
 
 DINO_BLOCKS: int = 32
 """Transformer blocks in the SAM-initialized DINOv3 encoder (EgoHand, SAM 3D Body); each has one native Attention op."""

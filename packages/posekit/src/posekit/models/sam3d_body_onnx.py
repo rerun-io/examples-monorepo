@@ -10,7 +10,7 @@ from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.artifacts import build_once
 from trtkit.onnx_qdq import quantize_qdq, save_with_external_data
 
-from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
+from dinov3.models.vision_transformer import DinoVisionTransformer
 from posekit.models.sam3d_body_quantization import (
     BodyBackbonePrecision,
     BodyCalibration,

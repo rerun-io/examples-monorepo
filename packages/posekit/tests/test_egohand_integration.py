@@ -181,7 +181,7 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
 
 def test_tensorrt_backbone_setup_never_builds_the_eager_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
     """With a cached backbone engine, set-up neither builds nor loads the 3 GB PyTorch DINOv3."""
-    from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
+    from dinov3.models.vision_transformer import DinoVisionTransformer
     from posekit.runtimes import TensorRtBackendConfig
 
     def refuse(*_: object, **__: object) -> None:
