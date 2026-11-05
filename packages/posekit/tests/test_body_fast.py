@@ -16,11 +16,11 @@ from posekit.predictions import BoxDetections
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("mode,gpu_crops", [
-    ("body", False), ("full", False),
-    ("body", True), ("full", True),
+@pytest.mark.parametrize("mode,gpu_crops,compile_backbone", [
+    ("body", False, False), ("full", False, False),
+    ("body", True, False), ("full", True, False), ("full", True, True),
 ])
-def test_fast_body_reuses_graphs_and_preserves_outputs(mode: Sam3dBodyMode, gpu_crops: bool) -> None:
+def test_fast_body_reuses_graphs_and_preserves_outputs(mode: Sam3dBodyMode, gpu_crops: bool, compile_backbone: bool) -> None:
     """Changed pixels and boxes reuse the graph while matching the eager role."""
     from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
 
@@ -31,7 +31,7 @@ def test_fast_body_reuses_graphs_and_preserves_outputs(mode: Sam3dBodyMode, gpu_
     reference = Sam3dBodyConfig(mode=mode, checkpoint_dir=Path(checkpoint).parent).setup()
     fast = Sam3dBodyFastConfig(
         mode=mode, checkpoint_dir=Path(checkpoint).parent, gpu_preprocessing=gpu_crops,
-        backbone_onnx=None, decoder_onnx_dir=None,
+        backbone_onnx=None, decoder_onnx_dir=None, compile_torch_backbone=compile_backbone,
     ).setup()
     frames = decode_image(str(image), mode=ImageReadMode.RGB).permute(1, 2, 0).contiguous().cuda()[None]
     height, width = frames.shape[1:3]

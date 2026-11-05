@@ -53,6 +53,10 @@ engine build and graph warmup are excluded from steady-state timing.
 
 `backbone_onnx=None` keeps the original Torch backbone;
 `decoder_onnx_dir=None` keeps the original learned decoder layers.
+With the Torch backbone selected, `compile_torch_backbone=True` compiles it
+while retaining BF16 intermediate rounding. The whole-pipeline graph remains
+the sole capture owner. Ordinary fusion without those rounding boundaries
+failed the OAK accuracy band in validation.
 `backbone_precision="bf16"` runs the unquantized source backbone through
 TensorRT, with the same decoder layers, geometry and graph execution. On the
 CLI, append `--backbone-precision bf16` after `sam3d-body-fast`.

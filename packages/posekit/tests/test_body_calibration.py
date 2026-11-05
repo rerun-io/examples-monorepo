@@ -115,6 +115,12 @@ def test_cpu_crop_ablation_rejects_a_hand_precision_plan_it_cannot_apply() -> No
         Sam3dBodyFastConfig(gpu_preprocessing=False, hand_backbone_plan=BodyPrecisionPlan(attention={31: "bf16"}))
 
 
+def test_compiled_torch_backbone_rejects_a_simultaneous_tensorrt_backbone() -> None:
+    """A requested Torch optimization must not silently disappear behind TensorRT."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    with pytest.raises(ValueError, match="compile_torch_backbone.*backbone_onnx"):
+        Sam3dBodyFastConfig(compile_torch_backbone=True)
 
 
 @pytest.mark.parametrize("backbone_onnx,precision", [(None, "nvfp4"), (Path("backbone.onnx"), "bf16")])

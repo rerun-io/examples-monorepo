@@ -34,6 +34,8 @@ class Sam3dBodyFastConfig(Sam3dBodyConfig):
     """Capture the complete GPU pipeline; off retains per-decoder graphs for ablations."""
     backbone_onnx: Path | None = CACHED_BODY_BACKBONE
     """Quantized backbone base path (or its resolved calibration path); None keeps the Torch backbone for ablations."""
+    compile_torch_backbone: bool = False
+    """Compile the Torch backbone while retaining BF16 intermediate rounding; requires backbone_onnx=None."""
     backbone_source_onnx: Path = CACHED_BODY_SOURCE
     """BF16 source backbone, exported from these weights when missing."""
     backbone_precision: BodyBackbonePrecision = "nvfp4"
@@ -52,6 +54,8 @@ class Sam3dBodyFastConfig(Sam3dBodyConfig):
     """Additional hand backbone precision overrides, applied after the body plan."""
 
     def __post_init__(self) -> None:
+        if self.compile_torch_backbone and self.backbone_onnx is not None:
+            raise ValueError("compile_torch_backbone requires backbone_onnx=None.")
         if (
             (self.backbone_onnx is None or self.backbone_precision == "bf16")
             and (self.backbone_plan.linears or self.backbone_plan.attention or self.hand_backbone_plan.linears or self.hand_backbone_plan.attention)
@@ -120,6 +124,13 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
                     ),
                 ))
             model.add_module("backbone", backbone)
+        elif config.compile_torch_backbone:
+            # Keep BF16 operator boundaries: ordinary fusion changes rounding
+            # enough to fail the OAK accuracy band. The outer pipeline owns capture.
+            model.backbone.forward = torch.compile(
+                model.backbone.forward, fullgraph=True, dynamic=False,
+                options={"triton.cudagraphs": False, "emulate_precision_casts": True},
+            )
         assert isinstance(model.head_pose, MHRHead) and isinstance(model.head_pose_hand, MHRHead)
         heads: tuple[CaptureMhrHead, CaptureMhrHead] = (CaptureMhrHead(model.head_pose), CaptureMhrHead(model.head_pose_hand))
         model.add_module("head_pose", heads[0])
