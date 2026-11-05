@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 import torch
 
-pytest.importorskip("egohand_inference", reason="EgoHand inference environment is required")
+pytest.importorskip("warp", reason="EgoHand inference environment is required")
 
-from posekit.models.egohand import HandDetections, HandReconstruction
-from posekit.models.egohand_geometry import OAKCamera
-from posekit.predictions import BoxDetections, Keypoints3d
+from posekit.cameras import CalibratedCamera
+from posekit.models.egohand import EgoHandReconstruction
+from posekit.predictions import BoxDetections, HandDetections, Keypoints3d
 from posekit.skeletons import SOMA_HAND
 
 from selfcap_curate.oak_egohand import infer_egohand_frames, select_egohand_frames
@@ -49,10 +49,10 @@ def test_inference_detects_each_frame_independently_and_preserves_box_score():
         xy = torch.arange(50, dtype=torch.float32).reshape(1, 25, 2).repeat(n, 1, 1)
         points = Keypoints3d(xy, torch.zeros((n, 25)), detections.boxes.scores[:, None].repeat(1, 25), detections.boxes.frame_indices,
                             SOMA_HAND, (0,), torch.zeros((n, 25, 3)))
-        return HandReconstruction(points, detections.sides, torch.zeros((n, 25, 3, 3)), torch.zeros((n, 1)),
-                                  torch.ones(n), torch.zeros((n, 3)), None, tuple(torch.zeros((1, 3)) for _ in range(n)))
+        return EgoHandReconstruction(keypoints=points, sides=detections.sides, vertices=torch.zeros((n, 1, 3)), rotations=torch.zeros((n, 25, 3, 3)),
+                                     identity=torch.zeros((n, 1)), scale=torch.ones(n), translation=torch.zeros((n, 3)), scale_parameters=None)
 
-    camera = OAKCamera(np.eye(3), np.zeros(14), 30, 20)
+    camera = CalibratedCamera(np.eye(3), np.zeros(14), 30, 20)
     result = infer_egohand_frames(torch.zeros((6, 20, 30, 3), dtype=torch.uint8), np.arange(6, dtype=np.float64),
                                   np.tile([True, False], (6, 1)), camera, detector, predictor)
     assert calls == [1] * 6

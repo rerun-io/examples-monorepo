@@ -15,22 +15,19 @@ import torch
 from dataforge.datasets.selfcap_raw import Intrinsic
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
+from posekit.cameras import CalibratedCamera
 from posekit.models.egohand import (
-    CACHED_BACKBONE_ONNX,
     EgoHandConfig,
     EgoHandDetector,
     EgoHandDetectorConfig,
     EgoHandPredictor,
-    HandDetections,
-    HandReconstruction,
+    EgoHandReconstruction,
+    selfcap_egohand_configs,
 )
-from posekit.models.egohand_geometry import SOMA_HAND21, HandSide, OAKCamera
-from posekit.predictions import BoxDetections
+from posekit.predictions import SOMA_HAND21, BoxDetections, HandDetections, HandSide
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import CatalogVideo
 from torch import Tensor
-from trtkit import TensorRtBackendConfig
-from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from selfcap_curate.factory import intrinsic_matrix
 from selfcap_curate.hands_gpu import decode_frames
@@ -79,8 +76,8 @@ def select_egohand_frames(
 
 
 def infer_egohand_frames(
-    frames: UInt8[Tensor, "n h w 3"], times: Float64[ndarray, "n"], hands: Bool[ndarray, "n 2"], camera: OAKCamera,
-    detector: Callable[[Tensor], HandDetections], predictor: Callable[[Tensor, HandDetections, OAKCamera], HandReconstruction],
+    frames: UInt8[Tensor, "n h w 3"], times: Float64[ndarray, "n"], hands: Bool[ndarray, "n 2"], camera: CalibratedCamera,
+    detector: Callable[[Tensor], HandDetections], predictor: Callable[[Tensor, HandDetections, CalibratedCamera], EgoHandReconstruction],
 ) -> OakDetections:
     """Detect each frame from scratch; copy its box score to its reconstructed COCO-21 hand."""
     xy: Float64[ndarray, "n 133 2"] = np.full((len(frames), 133, 2), np.nan)
@@ -102,7 +99,7 @@ def infer_egohand_frames(
         if not boxes:
             continue
         detections: HandDetections = HandDetections(BoxDetections(torch.cat(boxes), torch.cat(confidence), torch.cat(frame_ids)), tuple(sides))
-        result: HandReconstruction = predictor(batch, detections, camera)
+        result: EgoHandReconstruction = predictor(batch, detections, camera)
         for row, side in enumerate(result.sides):
             frame = start + int(result.keypoints.frame_indices[row])
             base = HAND_BASE[side]
@@ -113,11 +110,7 @@ def infer_egohand_frames(
 
 def egohand_configs(assets: Path | None) -> tuple[EgoHandDetectorConfig, EgoHandConfig]:
     """The models' files and engines; None takes the pinned downloads and the trtkit cache."""
-    engines: Path = DEFAULT_TRT_CACHE_DIR if assets is None else assets / "engines"
-    detector = EgoHandDetectorConfig(None if assets is None else assets / "weights/detector/hand_detector.onnx", backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=engines))
-    predictor = EgoHandConfig(None if assets is None else assets / "weights/egohand/egohand_s060000.safetensors", None if assets is None else assets / "weights/soma", batch_size=16, gpu_crops=True,
-                              backbone_onnx=CACHED_BACKBONE_ONNX if assets is None else assets / "dinov3-bf16.onnx", backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=engines))
-    return detector, predictor
+    return selfcap_egohand_configs(assets)
 
 
 @cache
@@ -168,10 +161,10 @@ def detect_oak_egohand(
     size: tuple[int, int] = camera.size if camera is not None else (intrinsic.capture_resolution.width, intrinsic.capture_resolution.height)
     pixels: Float32[ndarray, "f 133 2"] | None = project_ego(camera, times, xyz) if camera is not None and rotation is not None else None
     selection: OakFrameSelection = select_egohand_frames(times, pixels, tracked, size)
-    lens: OAKCamera = (
-        OAKCamera(camera.K, camera.distortion, *size)
+    lens: CalibratedCamera = (
+        CalibratedCamera(camera.K, camera.distortion, *size)
         if camera is not None
-        else OAKCamera(intrinsic_matrix(intrinsic), np.asarray(intrinsic.distortion.coefficients, dtype=np.float64), *size)
+        else CalibratedCamera(intrinsic_matrix(intrinsic), np.asarray(intrinsic.distortion.coefficients, dtype=np.float64), *size)
     )
     print(f"EGOHAND_SAMPLE {episode.sync.key}: {len(selection.indices)}/{selection.eligible_count} eligible frames", flush=True)
     if not len(selection.indices):
@@ -225,7 +218,7 @@ def detect_oak_views(
             times: Float64[ndarray, "f"] = video.t_ns.astype(np.float64) * 1e-9
             indices: Int64[ndarray, "n"] = np.clip(np.searchsorted(times, left_times[selection.indices]), 0, len(times) - 1)
             frames: UInt8[Tensor, "n h w 3"] = decode_frames(video, indices, 1e9 / float(np.median(np.diff(video.t_ns))))
-            lens = OAKCamera(lenses[camera].intrinsic, np.pad(lenses[camera].distortion, (0, 14 - len(lenses[camera].distortion))), *lenses[camera].size)
+            lens = CalibratedCamera(lenses[camera].intrinsic, np.pad(lenses[camera].distortion, (0, 14 - len(lenses[camera].distortion))), *lenses[camera].size)
             result[camera] = infer_egohand_frames(frames, times[indices], selection.hands, lens, detector, predictor)
             del frames
         torch.cuda.synchronize()
