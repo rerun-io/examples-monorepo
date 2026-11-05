@@ -1,0 +1,6 @@
+[package]
+name = "egohand-src"
+version = "0.0.1.479063c"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

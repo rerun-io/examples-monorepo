@@ -1,0 +1,34 @@
+--- a/src/python/isaaccapture_egopost/egohand/models/soma_hand_wrapper.py
++++ b/src/python/isaaccapture_egopost/egohand/models/soma_hand_wrapper.py
+@@ -52,6 +52,7 @@
+         if data_root is None:
+             data_root = _resolve_hand_data_root()
+ 
++        self.profile_events = None
+         self.identity_model_type = identity_model_type
+         self._hands = {}
+         for hand_type in ("left", "right"):
+@@ -121,7 +122,11 @@
+             dict with 'vertices' (B, Vh, 3) and 'joints' (B, 25, 3) in meters
+         """
+         hand = self._hands[hand_type]
+-        return hand(
++        if self.profile_events is not None:
++            started = torch.cuda.Event(enable_timing=True)
++            finished = torch.cuda.Event(enable_timing=True)
++            started.record()
++        result = hand(
+             poses.float(),
+             identity_coeffs.float(),
+             pose2rot=pose2rot,
+@@ -129,6 +134,10 @@
+             global_scale=global_scale,
+             scale_params=scale_params,
+         )
++        if self.profile_events is not None:
++            finished.record()
++            self.profile_events.append((started, finished))
++        return result
+ 
+     @torch.no_grad()
+     def body_to_hand_params(self, world_rotations, body_joints, hand_type):

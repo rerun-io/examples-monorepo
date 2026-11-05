@@ -1,0 +1,6 @@
+[package]
+name = "dinov3-src"
+version = "0.0.1.5aa7e93"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

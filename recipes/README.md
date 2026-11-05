@@ -9,6 +9,8 @@ Environments consume it as a source dependency: `<name> = { path = "recipes/<nam
 | --- | --- | --- | --- | --- |
 | `asmk-src` | [jenicek/asmk](https://github.com/jenicek/asmk) git `2a96d9c` | not declared in the recipe | 2 | `mast3r-slam` (linux-64) |
 | `brush-src` | [ArthurBrussee/brush](https://github.com/ArthurBrussee/brush) git `1388f74` | not declared in the recipe | 1 | `gsplat-rust-renderer` |
+| `dinov3-src` | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) archive `5aa7e93`, sha256 `194fc7a6…` | DINOv3 License (`LICENSE.md`) | 0 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate`, `posekit-sam3d-body` |
+| `egohand-src` | [NVIDIA/IsaacCapture](https://github.com/NVIDIA/IsaacCapture) archive `479063c` (`src/python/isaaccapture_egopost`), sha256 `49dd5594…`; installs `egohand` and `egohand_inference` | OpenMDW-1.1 (+ `THIRD_PARTY_LICENSES.md`) | 6 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate` |
 | `hexels-src` (+ `hexel-kernel`, `fused-ssim`, `simple-knn`, `image-gs`) | [honeycomb-surfels/hexels](https://github.com/honeycomb-surfels/hexels) git `698d1af`, its submodules and baselines at the revisions upstream records | not declared in the recipe | 0 (applies upstream's own 2DGS `adaptations.patch`, sha256-checked) | `hexels` |
 | `mast3r-src` | [naver/mast3r](https://github.com/naver/mast3r) git `f5209af` (+ DUSt3R, CroCo submodules) | not declared in the recipe | 5 (+ 2 replaced files) | `mast3r-slam` (linux-64) |
 
@@ -35,4 +37,4 @@ Bump a recipe:
 ## Follow-up
 
 - `packages/dpretrieval` is DPVO's DPRetrieval copied into the repo; it could become a pinned git source here.
-- The four recipes above do not declare their upstream licence yet.
+- `asmk-src`, `brush-src`, `hexels-src` and `mast3r-src` do not declare their upstream licence yet.
