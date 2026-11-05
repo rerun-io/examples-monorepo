@@ -9,20 +9,20 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
-pytest.importorskip("egohand_inference", reason="requires the egohand Pixi environment")
+pytest.importorskip("warp", reason="EgoHand needs the posekit-hands Pixi environment (posekit-egohand feature)")
 
 from jaxtyping import Float64
 from numpy import ndarray
 from simplecv.rrd_query_utils import first_valid_value
 
+from posekit.cameras import CalibratedCamera
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_geometry import OAKCamera
 
 pytestmark = pytest.mark.integration
 
 CAMERA = "/world/rig_04/cam_00/pinhole"
 
-def camera_from_window(table: pa.Table) -> OAKCamera:
+def camera_from_window(table: pa.Table) -> CalibratedCamera:
     """Read the catalog calibration; matrix components are column-major."""
     intrinsics: Float64[ndarray, "3 3"] = (
         np.asarray(first_valid_value(table[f"{CAMERA}:Pinhole:image_from_camera"]), dtype=np.float64).reshape(3, 3).T
@@ -31,7 +31,7 @@ def camera_from_window(table: pa.Table) -> OAKCamera:
         first_valid_value(table[f"{CAMERA}:simplecv.components.DistortionCoefficients"]), dtype=np.float64
     ).reshape(14)
     resolution = first_valid_value(table[f"{CAMERA}:Pinhole:resolution"])
-    return OAKCamera(intrinsics, distortion, int(resolution[0]), int(resolution[1]))
+    return CalibratedCamera(intrinsics, distortion, int(resolution[0]), int(resolution[1]))
 
 
 
@@ -180,7 +180,6 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
 def test_tensorrt_backbone_setup_never_builds_the_eager_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
     """With a cached backbone engine, set-up neither builds nor loads the 3 GB PyTorch DINOv3."""
     from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
-
     from posekit.runtimes import TensorRtBackendConfig
 
     def refuse(*_: object, **__: object) -> None:

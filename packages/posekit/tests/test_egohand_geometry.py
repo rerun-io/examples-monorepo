@@ -4,24 +4,20 @@ import cv2
 import numpy as np
 import pytest
 
-pytest.importorskip("egohand_inference", reason="requires the egohand Pixi environment")
+pytest.importorskip("warp", reason="EgoHand needs the posekit-hands Pixi environment (posekit-egohand feature)")
 
-from posekit.models.egohand_geometry import (
-    OAKCamera,
-    coco_hand_indices,
-    detector_hand_side,
-    soma_to_hand21,
-)
+from posekit.cameras import CalibratedCamera
+from posekit.models.egohand_geometry import coco_hand_indices, detector_hand_side, lens_model, project, soma_to_hand21
 
 
 def test_oak_projection_retains_all_fourteen_coefficients() -> None:
     intrinsics = np.array([[600.0, 0.0, 640.0], [0.0, 601.0, 360.0], [0.0, 0.0, 1.0]])
     distortion = np.array([0.03, -0.01, 0.002, -0.003, 0.004, 0.005, -0.002, 0.001, 0.001, -0.002, 0.003, -0.001, 0.02, -0.03])
     points = np.array([[0.3, -0.2, 1.0], [-0.7, 0.4, 1.5], [0.0, 0.0, 2.0]])
-    camera = OAKCamera(intrinsics, distortion, 1280, 720)
+    camera = CalibratedCamera(intrinsics, distortion, 1280, 720)
     expected, _ = cv2.projectPoints(points, np.zeros(3), np.zeros(3), intrinsics, distortion)
-    np.testing.assert_allclose(camera.project(points), expected[:, 0], atol=1e-8)
-    rays = camera.unproject(expected[:, 0])
+    np.testing.assert_allclose(project(camera, points), expected[:, 0], atol=1e-8)
+    rays = lens_model(camera).unproject(expected[:, 0])
     np.testing.assert_allclose(rays[:, :2] / rays[:, 2:], points[:, :2] / points[:, 2:], atol=1e-7)
 
 
@@ -44,8 +40,8 @@ def test_soma_mapping_skips_extra_metacarpals_for_coco_and_quest21() -> None:
 def test_identity_assignment_precedes_crop_mirroring() -> None:
     import torch
 
-    from posekit.models.egohand import HandDetections, resolve_hand_identities
-    from posekit.predictions import BoxDetections
+    from posekit.models.egohand import resolve_hand_identities
+    from posekit.predictions import BoxDetections, HandDetections
 
     # Released detector at 4.128 s: class 1 covers the wearer's right hand.
     raw = HandDetections(
@@ -67,8 +63,8 @@ def test_identity_assignment_precedes_crop_mirroring() -> None:
 def test_identity_assignment_can_recover_two_hands_with_one_class() -> None:
     import torch
 
-    from posekit.models.egohand import HandDetections, resolve_hand_identities
-    from posekit.predictions import BoxDetections
+    from posekit.models.egohand import resolve_hand_identities
+    from posekit.predictions import BoxDetections, HandDetections
 
     raw = HandDetections(
         BoxDetections(torch.tensor([[100.0, 200.0, 200.0, 300.0], [700.0, 200.0, 800.0, 300.0]]), torch.tensor([0.9, 0.8]), torch.tensor([0, 0])),

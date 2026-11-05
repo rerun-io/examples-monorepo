@@ -1,5 +1,8 @@
-"""Calibrated, top-down SOMA hand reconstruction from NVIDIA EgoHand.
+"""NVIDIA EgoHand as posekit hand roles: RT-DETR hand detector + calibrated top-down SOMA hands.
 
+``EgoHandDetector`` is a :class:`~posekit.models.base.HandDetector` and
+``EgoHandPredictor`` a :class:`~posekit.models.base.TopDownHandPose3d` over the
+vendored IsaacCapture inference source (``src/egohand*``, see VENDORED.md).
 The eager reference and accelerated path share upstream crop and mirroring
 geometry. Optional GPU sampling and TensorRT preserve full SOMA meshes and
 parameters. Remaining CPU output conversion is included in stage timings.
@@ -13,8 +16,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
-from egohand_inference.perf import PerfStage
 from huggingface_hub import hf_hub_download, snapshot_download
 from jaxtyping import Bool, Float32, Int, Int64, UInt8
 from numpy import ndarray
@@ -24,20 +25,13 @@ from torch import Tensor
 from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
-from posekit.models.egohand_geometry import HandSide, OAKCamera, detector_hand_side
-from posekit.predictions import BoxDetections, Keypoints3d, validate_frames_rgb
+from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
+from egohand_inference.perf import PerfStage
+from posekit.cameras import CalibratedCamera
+from posekit.models.base import HandDetector, TopDownHandPose3d
+from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
-from posekit.skeletons import SOMA_HAND
-
-
-@dataclass(frozen=True, slots=True)
-class HandDetections:
-    """Boxes paired with anatomical handedness; row ordering is shared."""
-
-    boxes: BoxDetections
-    """Source-image boxes and batch indices."""
-    sides: tuple[HandSide, ...]
-    """Anatomical side assigned from the ordered ego sequence."""
+from posekit.skeletons import SOMA_HAND, KeypointSkeleton
 
 
 def resolve_hand_identities(detections: HandDetections, frame_count: int) -> HandDetections:
@@ -124,7 +118,7 @@ class EgoHandDetectorConfig:
         return EgoHandDetector(self)
 
 
-class EgoHandDetector:
+class EgoHandDetector(HandDetector):
     """CUDA detector with upstream sequence-level anatomical identity assignment."""
 
     def __init__(self, config: EgoHandDetectorConfig) -> None:
@@ -133,6 +127,8 @@ class EgoHandDetector:
 
     def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"]) -> HandDetections:
         """Detect an ordered RGB sequence; resolve identity before hand mirroring."""
+        from posekit.models.egohand_geometry import detector_hand_side
+
         validate_frames_rgb(frames_rgb)
         boxes: list[Tensor] = []
         scores: list[Tensor] = []
@@ -172,7 +168,7 @@ class EgoHandDetector:
             indices.append(frame + start)
             sides.extend(detector_hand_side(label + 1) for label in hits[1].tolist())
         if not sides:
-            return HandDetections(BoxDetections.empty(frames_rgb.device), ())
+            return HandDetections.empty(frames_rgb.device)
         raw: HandDetections = HandDetections(
             BoxDetections(torch.cat(boxes), torch.cat(scores), torch.cat(indices).to(device=frames_rgb.device, dtype=torch.int64)), tuple(sides)
         )
@@ -200,14 +196,10 @@ class _UpstreamHand:
     """Wrist-relative mesh in source camera axes, metres."""
 
 
-@dataclass(frozen=True, slots=True)
-class HandReconstruction:
-    """Row-aligned metric hand observations and parametric outputs."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EgoHandReconstruction(HandPoses3d):
+    """Metric SOMA hands: camera-space joints and meshes plus the SOMA parameters behind them."""
 
-    keypoints: Keypoints3d
-    """Camera-space joints and distorted source-image projection."""
-    sides: tuple[HandSide, ...]
-    """Anatomical handedness per result row."""
     rotations: Float32[Tensor, "n 25 3 3"]
     """SOMA local joint rotations with source-camera wrist orientation."""
     identity: Float32[Tensor, "n k"]
@@ -218,8 +210,6 @@ class HandReconstruction:
     """Camera-space wrist translation in metres."""
     scale_parameters: Float32[Tensor, "n s"] | None
     """Per-finger MHR scales; None for checkpoints without this head."""
-    vertices: tuple[Float32[Tensor, "v 3"], ...]
-    """Camera-space mesh vertices in metres."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,8 +281,10 @@ def _export_backbone_once(config: EgoHandConfig, weights: Path, soma: Path, onnx
             torch.cuda.empty_cache()
 
 
-class EgoHandPredictor:
-    """RGB frames + anatomical boxes + calibrated camera -> metric hands."""
+class EgoHandPredictor(TopDownHandPose3d):
+    """RGB frames + anatomical boxes + calibrated camera -> metric SOMA hands."""
+
+    skeleton: KeypointSkeleton = SOMA_HAND
 
     def __init__(self, config: EgoHandConfig) -> None:
         from egohand_inference.pipeline.predictor import EgoHandPredictor as UpstreamPredictor
@@ -311,13 +303,26 @@ class EgoHandPredictor:
         self.predictor: UpstreamPredictor = UpstreamPredictor(
             model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True, perf_reporter=self
         )
+        self.faces: dict[HandSide, Tensor] = {
+            side: torch.from_numpy(np.asarray(model.soma_hand.faces(side), dtype=np.int64)).cuda() for side in ("left", "right")
+        }
 
     def record_latency(self, stage: PerfStage, latency_ms: float) -> None:
         """Collect per-frame stage timings; SOMA uses nested CUDA-event timing."""
         self.stage_ms.setdefault(stage.value, []).append(latency_ms)
 
-    def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"], detections: HandDetections, camera: OAKCamera) -> HandReconstruction:
-        """Reconstruct each valid detected hand in its source camera frame."""
+    def __call__(
+        self, frames_rgb: UInt8[Tensor, "b h w 3"], detections: HandDetections, camera: CalibratedCamera | None = None
+    ) -> EgoHandReconstruction:
+        """Reconstruct each valid detected hand in its source camera frame.
+
+        Raises:
+            ValueError: If ``camera`` is missing; EgoHand's perspective crops undo the lens.
+        """
+        if camera is None:
+            raise ValueError("EgoHand needs the CalibratedCamera of the frames: its perspective crops undo the lens.")
+        from posekit.models.egohand_geometry import lens_model, project
+
         validate_frames_rgb(frames_rgb)
         ids: list[str] = [str(index) for index in range(len(frames_rgb))]
         boxes: dict[str, dict[HandSide, ndarray]] = {key: {} for key in ids}
@@ -338,7 +343,7 @@ class EgoHandPredictor:
             frames = [np.ascontiguousarray(frame.cpu().numpy()[:, :, ::-1]) for frame in frames_rgb]
         self.predictor.model.soma_hand.profile_events = []
         raw: dict[str, dict[str, dict]] = self.predictor.run(
-            frames, ids, boxes, ("left", "right"), intrinsics_per_image={key: camera.model for key in ids}, prepared_crops=prepared
+            frames, ids, boxes, ("left", "right"), intrinsics_per_image={key: lens_model(camera) for key in ids}, prepared_crops=prepared
         )
 
         self.stage_ms.setdefault("soma", []).append(
@@ -357,8 +362,8 @@ class EgoHandPredictor:
                 confidence.append(float(detections.boxes.scores[row]))
         device: torch.device = frames_rgb.device
         if not rows:
-            return HandReconstruction(
-                Keypoints3d(
+            return EgoHandReconstruction(
+                keypoints=Keypoints3d(
                     torch.empty((0, 25, 2), dtype=torch.float32, device=device),
                     torch.empty((0, 25), dtype=torch.float32, device=device),
                     torch.empty((0, 25), dtype=torch.float32, device=device),
@@ -367,19 +372,20 @@ class EgoHandPredictor:
                     (0,),
                     torch.empty((0, 25, 3), dtype=torch.float32, device=device),
                 ),
-                (),
-                torch.empty((0, 25, 3, 3), device=device),
-                torch.empty((0, 0), device=device),
-                torch.empty((0,), device=device),
-                torch.empty((0, 3), device=device),
-                None,
-                (),
+                sides=(),
+                vertices=None,
+                faces=self.faces,
+                rotations=torch.empty((0, 25, 3, 3), device=device),
+                identity=torch.empty((0, 0), device=device),
+                scale=torch.empty((0,), device=device),
+                translation=torch.empty((0, 3), device=device),
+                scale_parameters=None,
             )
         xyz: Float32[ndarray, "n 25 3"] = np.stack([row.pred_keypoints_3d + row.transl for row in rows]).astype(np.float32)
-        xy: Float32[ndarray, "n 25 2"] = np.stack([camera.project(points.astype(np.float64)) for points in xyz]).astype(np.float32)
+        xy: Float32[ndarray, "n 25 2"] = np.stack([project(camera, points.astype(np.float64)) for points in xyz]).astype(np.float32)
         xyz_tensor: Float32[Tensor, "n 25 3"] = torch.from_numpy(xyz).to(device)
-        return HandReconstruction(
-            Keypoints3d(
+        return EgoHandReconstruction(
+            keypoints=Keypoints3d(
                 torch.from_numpy(xy).to(device),
                 xyz_tensor[:, :, 2] - xyz_tensor[:, :1, 2],
                 torch.tensor(confidence, dtype=torch.float32, device=device)[:, None].expand(-1, 25).contiguous(),
@@ -388,15 +394,16 @@ class EgoHandPredictor:
                 (0,),
                 xyz_tensor,
             ),
-            tuple(sides),
-            torch.from_numpy(np.stack([row.poses for row in rows])).to(device),
-            torch.from_numpy(np.stack([row.identity_coeffs for row in rows])).to(device),
-            torch.tensor([row.global_scale for row in rows], dtype=torch.float32, device=device),
-            torch.from_numpy(np.stack([row.transl for row in rows])).to(device),
-            torch.from_numpy(np.stack([row.scale_params for row in rows if row.scale_params is not None])).to(device)
+            sides=tuple(sides),
+            vertices=torch.from_numpy(np.stack([row.pred_vertices + row.transl for row in rows]).astype(np.float32)).to(device),
+            faces=self.faces,
+            rotations=torch.from_numpy(np.stack([row.poses for row in rows])).to(device),
+            identity=torch.from_numpy(np.stack([row.identity_coeffs for row in rows])).to(device),
+            scale=torch.tensor([row.global_scale for row in rows], dtype=torch.float32, device=device),
+            translation=torch.from_numpy(np.stack([row.transl for row in rows])).to(device),
+            scale_parameters=torch.from_numpy(np.stack([row.scale_params for row in rows if row.scale_params is not None])).to(device)
             if rows[0].scale_params is not None
             else None,
-            tuple(torch.from_numpy(row.pred_vertices + row.transl).to(device) for row in rows),
         )
 
 
@@ -410,3 +417,29 @@ class _TensorRtBackbone(torch.nn.Module):
     def forward(self, images: Float32[Tensor, "b 3 256 256"]) -> Float32[Tensor, "b 1280 16 16"]:
         """Return the final spatial token map, without class/storage tokens."""
         return run_chunked(self.runtime, {"images": images.float()})["features"]
+
+
+def selfcap_egohand_configs(assets: Path | None) -> tuple[EgoHandDetectorConfig, EgoHandConfig]:
+    """SelfCap's accelerated EgoHand: TRT detector, GPU crops, TRT bf16 backbone, 16 crops per batch.
+
+    Args:
+        assets: Local weights/engines tree (``weights/...``, ``dinov3-bf16.onnx``, ``engines/``);
+            ``None`` takes the pinned downloads and the trtkit engine cache.
+
+    Returns:
+        The detector and predictor configurations.
+    """
+    engines: Path = DEFAULT_TRT_CACHE_DIR if assets is None else assets / "engines"
+    detector = EgoHandDetectorConfig(
+        None if assets is None else assets / "weights/detector/hand_detector.onnx",
+        backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=engines),
+    )
+    predictor = EgoHandConfig(
+        None if assets is None else assets / "weights/egohand/egohand_s060000.safetensors",
+        None if assets is None else assets / "weights/soma",
+        batch_size=16,
+        gpu_crops=True,
+        backbone_onnx=CACHED_BACKBONE_ONNX if assets is None else assets / "dinov3-bf16.onnx",
+        backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=engines),
+    )
+    return detector, predictor

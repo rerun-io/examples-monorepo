@@ -13,22 +13,21 @@ version = "0.1.0"
 
 # Workspace siblings named above resolve to their in-repo path (never to a PyPI
 # namesake); the root manifest installs the same paths editable.
-[project.optional-dependencies]
-egohand = ["egohand-inference"]
-
 [tool.uv.sources]
-egohand-inference = { path = "../egohand", editable = true }
 simplecv = { path = "../simplecv", editable = true }
 
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]
 
+# The vendored EgoHand/DINOv3 inference source keeps its upstream import names:
+# the checkpoint's Hydra cfg instantiates `egohand.models...` by name.
 [tool.hatch.build.targets.wheel]
-packages = ["src/posekit"]
+packages = ["src/posekit", "src/egohand", "src/egohand_inference", "src/egohand_dinov3"]
 
 [tool.ruff]
 line-length = 150
+extend-exclude = ["src/egohand", "src/egohand_inference", "src/egohand_dinov3"]
 
 [tool.pytest.ini_options]
 markers = [
