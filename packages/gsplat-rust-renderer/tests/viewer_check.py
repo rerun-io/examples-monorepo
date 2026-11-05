@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -87,9 +88,21 @@ def splat_view(background: tuple[int, int, int], eye: rrb.EyeControls3D | None, 
         background=rrb.Background(color=background, kind="SolidColor"), line_grid=False, eye_controls=eye)
 
 
-def spawn_viewer(binary: str | None) -> ViewerClient:
-    """Start an owned headless viewer on a free port; the client is a context manager."""
-    return ViewerClient.spawn(headless=True, port=free_port(), executable_path=binary, hide_welcome_screen=True)
+# The stock viewer of this environment's rerun-sdk; PATH may hold another release.
+STOCK_VIEWER: str = str(Path(sys.executable).parent / "rerun")
+
+
+def spawn_viewer(binary: str) -> ViewerClient:
+    """Start an owned headless viewer on a free port; the client is a context manager.
+
+    Every viewer must report the SDK's Rerun version, or its pixels prove nothing about this release.
+    """
+    viewer = ViewerClient.spawn(headless=True, port=free_port(), executable_path=binary, hide_welcome_screen=True)
+    version: str | None = viewer.get_state().viewer_version
+    if version != rr.__version__:
+        viewer.close()
+        raise RuntimeError(f"{binary} is Rerun {version}; the SDK is {rr.__version__}")
+    return viewer
 
 
 def free_port() -> int:
@@ -117,7 +130,7 @@ def check_portable_recording(config: Config) -> None:
         assert recording is not None
         recording.flush(timeout_sec=30.0)
         rr.disconnect()
-        for name, executable in (("compute", str(config.binaries / "gsplat-rust-renderer")), ("stock", None)):
+        for name, executable in (("compute", str(config.binaries / "gsplat-rust-renderer")), ("stock", STOCK_VIEWER)):
             print(f"PORTABLE_VIEWER {label} {name}", flush=True)
             with spawn_viewer(executable) as viewer:
                 viewer.open_url(str(recording_path.resolve()))
@@ -371,7 +384,7 @@ def check_hexels_portable(config: Config, ply: Path) -> None:
     assert recording is not None
     recording.flush(timeout_sec=30.0)
     rr.disconnect()
-    for name, executable in (("compute", str(config.binaries / "gsplat-rust-renderer")), ("stock", None)):
+    for name, executable in (("compute", str(config.binaries / "gsplat-rust-renderer")), ("stock", STOCK_VIEWER)):
         with spawn_viewer(executable) as viewer:
             viewer.open_url(str(recording_path.resolve()))
             image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"hexels-portable-{name}.png")
