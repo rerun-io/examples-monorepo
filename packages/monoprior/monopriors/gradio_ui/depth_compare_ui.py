@@ -99,7 +99,7 @@ def on_submit(
     else:
         defaults = relative_predictor_defaults
         K_33 = None
-        log_fn = partial(log_relative_pred, log_disparity=True)
+        log_fn = cast(Callable[..., None], partial(log_relative_pred, log_disparity=True))
 
     try:
         predictor_configs: list[BaseMetricPredictorConfig | BaseRelativePredictorConfig] = [defaults[name] for name in display_labels]
