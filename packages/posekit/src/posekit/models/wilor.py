@@ -174,6 +174,7 @@ class WilorHandDetector(HandDetector):
         if isinstance(config.backend, TensorRtBackendConfig):
             batch: int = config.static_batch_size
             onnx_path: Path = config.backend.cache_dir / f"wilor-detector-b{batch}-512x416-{config.hf_revision[:8]}.onnx"
+            assert isinstance(self.yolo.model, torch.nn.Module)
             model: torch.nn.Module = _DetectorExport(self.yolo.model).to(device="cuda", dtype=torch.float32).eval()
             _locked_export(
                 onnx_path,
@@ -212,7 +213,9 @@ class WilorHandDetector(HandDetector):
                     # Box, score, class; the head's hand keypoints after them are unused, as before.
                     boxes: Tensor = prediction[:, :6].clone()
                     if len(boxes):
-                        boxes[:, :4] = ops.scale_boxes(DETECTOR_SHAPE, boxes[:, :4], image_hw)
+                        scaled: Tensor | ndarray = ops.scale_boxes(DETECTOR_SHAPE, boxes[:, :4], image_hw)
+                        assert isinstance(scaled, Tensor)
+                        boxes[:, :4] = scaled
                     rows.append(boxes)
                     indices.append(torch.full((len(boxes),), start + offset, dtype=torch.int64, device=boxes.device))
         data_all: Float32[Tensor, "n 6"] = torch.cat(rows).to(frames_rgb.device)
@@ -302,7 +305,8 @@ class WilorHandPose3d(TopDownHandPose3d):
         tensorrt: bool = isinstance(config.backend, TensorRtBackendConfig)
         dtype: torch.dtype = torch.float32 if isinstance(config.backend, TorchBackendConfig) and config.backend.autocast == "fp32" else torch.float16
         network: torch.nn.Module = load_wilor_network(weights_dir(config.hf_repo_id, config.hf_revision, config.weights), dtype)
-        right: Int64[Tensor, "f 3"] = network.mano.th_faces.to(device="cuda", dtype=torch.int64)
+        mano_faces: Tensor = network.get_buffer("mano.th_faces")
+        right: Int64[Tensor, "f 3"] = mano_faces.to(device="cuda", dtype=torch.int64)
         self.faces: dict[HandSide, Tensor] = {"right": right, "left": right[:, [0, 2, 1]].contiguous()}
         self.dtype: torch.dtype = dtype
         self.network: torch.nn.Module | None = network

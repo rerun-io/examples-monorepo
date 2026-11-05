@@ -170,6 +170,7 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
     assert result.keypoints.xyz_camera is not None
     assert result.sides == expected.sides
     assert result.scale_parameters is not None
+    assert result.vertices is not None and expected.vertices is not None
     assert all(mesh.shape == original.shape and mesh.numel() > 0 for mesh, original in zip(result.vertices, expected.vertices, strict=True))
     errors = torch.linalg.vector_norm(result.keypoints.xyz_camera.cpu() - reference, dim=-1) * 1000.0
     assert errors.median() <= 1.0

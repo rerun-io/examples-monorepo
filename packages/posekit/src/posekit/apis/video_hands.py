@@ -202,6 +202,7 @@ def main(config: VideoHandsConfig) -> None:
     if num_frames_raw is None or fps_raw is None or float(fps_raw) <= 0.0:
         raise ValueError(f"Could not read valid video metadata from {config.video_path}.")
     num_frames: int = int(num_frames_raw) if config.max_frames is None else min(int(num_frames_raw), config.max_frames)
+    assert decoder.metadata.width is not None and decoder.metadata.height is not None
     width: int = int(decoder.metadata.width)
     height: int = int(decoder.metadata.height)
     rr.log("world", rr.ViewCoordinates.RDF, static=True)

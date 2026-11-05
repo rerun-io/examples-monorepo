@@ -15,7 +15,7 @@ per-frame errors as scalars.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -37,7 +37,7 @@ from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors,
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
-from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide
+from posekit.predictions import BoxDetections, HandDetections, HandPoses3d
 from posekit.runtimes import TensorRtBackendConfig
 from posekit.skeletons import HAND_21
 
@@ -193,6 +193,10 @@ class ScoredHand:
     pred_uv: Float32[ndarray, "21 2"]
 
 
+def _rounded(value: float | None) -> float | None:
+    return None if value is None else round(value, 2)
+
+
 def evaluate_segment(
     segment: HandGtSegment,
     frames: UInt8[Tensor, "f h w 3"],
@@ -216,13 +220,14 @@ def evaluate_segment(
     any_side: int = 0
     boxes: list[Float32[ndarray, "4"]] = []
     scores: list[float] = []
+    found: HandDetections | None = None
     if protocol == "gt-boxes":
         for (frame, side_index), _ in gt_boxes.items():
             keys.append((frame, side_index))
             boxes.append(joint_box(segment.uv[frame, side_index], segment.valid[frame, side_index], config.box_scale))
             scores.append(1.0)
     else:
-        found: HandDetections = detector(frames)
+        found = detector(frames)
         found_boxes: Float32[ndarray, "n 4"] = found.boxes.xyxy_numpy()
         found_frames: Int64[ndarray, "n"] = found.boxes.frame_indices.cpu().numpy()
         found_scores: Float32[ndarray, "n"] = found.boxes.scores.cpu().numpy().astype(np.float32)
@@ -257,7 +262,7 @@ def evaluate_segment(
             if not metric_root:
                 errors = HandErrors(errors.mpjpe_mm, errors.pa_mpjpe_mm, float("nan"), errors.epe_2d_px)
             scored.append(ScoredHand(frame, side_index, errors, xyz[row], uv[row]))
-    return len(gt_boxes), any_side if protocol == "detector" else len(gt_boxes), scored, found if protocol == "detector" else detections
+    return len(gt_boxes), any_side if protocol == "detector" else len(gt_boxes), scored, found if found is not None else detections
 
 
 def log_segment_frames(
@@ -387,7 +392,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
                     )
                 )
                 print(f"[hands-eval] {model:8s} {dataset:24s} {protocol:9s} gt={gt_hands} scored={len(scored)} "
-                      + " ".join(f"{m}={metrics[m].mean if metrics[m].mean is None else round(metrics[m].mean, 2)}" for m in METRICS))
+                      + " ".join(f"{m}={_rounded(metrics[m].mean)}" for m in METRICS))
         del detector, pose
         torch.cuda.empty_cache()
     report = HandsEvalReport(SUBSETS, config.stride, config.max_frames, config.min_joints, config.box_scale, config.match_iou, tuple(cells))
@@ -410,5 +415,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
                 collapse_panels=True,
             )
         )
-        rr.get_global_data_recording().flush()
+        recording: rr.RecordingStream | None = rr.get_global_data_recording()
+        assert recording is not None
+        recording.flush()
     return report

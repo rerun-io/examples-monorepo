@@ -126,10 +126,11 @@ def read_hand_gt(
         static_rows: list[int] = [i for i, s in enumerate(statics["rerun_segment_id"].to_pylist()) if s == segment_id]
         static_row: int = next(i for i in static_rows if statics[f"{pinhole}:Pinhole:image_from_camera"][i].is_valid)
         camera_model, cam_from_rig = calibrated_camera(statics, static_row, camera)
-        rows: pa.Table = temporal.filter(pc.equal(temporal["rerun_segment_id"], segment_id))
+        rows: pa.Table = temporal.filter(pc.field("rerun_segment_id") == segment_id)
         times: Int64[ndarray, "r"] = rows["video_time"].cast(pa.int64()).to_numpy()
 
-        def stream(column: str) -> tuple[Int64[ndarray, "k"], list]:
+        def stream(column: str, rows: pa.Table = rows, times: Int64[ndarray, "r"] = times) -> tuple[Int64[ndarray, "k"], list]:
+            """One column's non-null samples in time order."""
             values: list = _column(rows, column)
             keep: list[int] = [i for i, v in enumerate(values) if v is not None]
             order: Int64[ndarray, "k"] = np.asarray(sorted(keep, key=lambda i: times[i]), dtype=np.int64)
