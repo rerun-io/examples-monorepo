@@ -40,6 +40,7 @@ min_confidence = 60
 # Foreign-layer entity paths are consumed by packages/prompt-da and packages/gauss-surf.
 ignore_names = [
     "is_in_threedod",
+    "pytestmark",
     "clock_fraction_over_10ms",
     "DEPTH_PROMPTDA",
     "PROMPTDA_MESH",

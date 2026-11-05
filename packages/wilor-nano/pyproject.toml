@@ -57,6 +57,8 @@ exclude = [
 ]
 sort_by_size = true
 min_confidence = 60
+# pytest reads module-level pytestmark and resolves conftest fixtures by name.
+ignore_names = ["pytestmark", "mano_assets", "wilor_assets"]
 
 [tool.pytest.ini_options]
 markers = [
