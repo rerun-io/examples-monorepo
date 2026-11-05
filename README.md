@@ -71,7 +71,6 @@ removes that worktree and its `.pixi` directory automatically.
 | Package | What it contains |
 | --- | --- |
 | [arkitscenes-download](packages/arkitscenes-download/) | ARKitScenes downloader and ingest pipeline that emits layered Rerun recordings. Try `pixi run -e arkitscenes-download arkitscenes-download-sample` for a 5-sequence demo. |
-| [asmk](packages/asmk/) | Pixi-build recipe for the ASMK image-retrieval dependency used by MASt3R-SLAM. |
 | [dpretrieval](packages/dpretrieval/) | Pixi-build recipe for a DBoW2/pybind11 image-retrieval extension used by DPVO. |
 | [dpvo](packages/dpvo/) | Deep Patch Visual Odometry with Rerun and Gradio integrations. |
 | [egoexo-forge](packages/egoexo-forge/) | Rerun and Gradio tools for egocentric and exocentric human datasets. |
@@ -79,7 +78,6 @@ removes that worktree and its `.pixi` directory automatically.
 | [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | GPU Gaussian-splat viewer implemented as a custom Rerun visualizer. See its [README](packages/gsplat-rust-renderer/README.md). |
 | [live-rerun](packages/live-rerun/) | Zero-transcode live H.264/H.265 sensor streaming into Rerun. |
 | [mamma](packages/mamma/) | Streaming multiview body capture from decode through SMPL-X fitting and Rerun logging. |
-| [mast3r](packages/mast3r/) | Pixi-build recipe bundling MASt3R, DUSt3R, and CroCo. |
 | [mast3r-slam](packages/mast3r-slam/) | Dense visual SLAM built on MASt3R reconstruction priors. |
 | [monoprior](packages/monoprior/) | Monocular relative depth, metric depth, surface-normal, and calibration tools. |
 | [mv-api](packages/mv-api/) | Full egocentric/exocentric multiview processing for raw HOCap datasets. |
@@ -93,6 +91,9 @@ removes that worktree and its `.pixi` directory automatically.
 | [simplecv](packages/simplecv/) | Shared Python utilities for datasets, geometry, video, and Rerun logging. |
 | [slam-evals](packages/slam-evals/) | VSLAM benchmark ingestion and browsing through a Rerun catalog. |
 | [vistadream](packages/vistadream/) | Single-image 3D reconstruction and Gaussian-scene tooling. |
+
+Upstream projects built from pinned source (MASt3R, ASMK, Brush, Hexels) are rattler-build recipes in
+[recipes/](recipes/README.md), not packages.
 
 Build-only and vendored packages do not necessarily have standalone root
 environments or demo tasks; their role is described in the second column.
@@ -121,9 +122,9 @@ environments or demo tasks; their role is described in the second column.
   and pin that name to the sibling's path with `[tool.uv.sources]` in their
   own `pyproject.toml`; the root manifest installs the same paths editable.
   The pin keeps a PyPI namesake (there is one for `monopriors`) out of the
-  solve. pixi-build source packages, which `asmk`, `dpretrieval`, and
-  `mast3r` already are, are the eventual replacement once that preview
-  stabilizes.
+  solve. pixi-build source packages, which `dpretrieval` and the upstream
+  recipes in [recipes/](recipes/README.md) already are, are the eventual
+  replacement once that preview stabilizes.
 
 For agent and contributor documentation — architecture, platform rules, adding
 a new package, Rerun version policy, and known issues — see
