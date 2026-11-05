@@ -17,14 +17,12 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand import (
-    EgoHandConfig,
     EgoHandDetector,
-    EgoHandDetectorConfig,
     EgoHandPredictor,
     EgoHandReconstruction,
     selfcap_egohand_configs,
 )
-from posekit.models.egohand_fast import EgoHandFastConfig, FastEgoHandPredictor, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandConfigs, FastEgoHandPredictor, fast_egohand_configs
 from posekit.predictions import SOMA_HAND21, BoxDetections, HandDetections, HandSide
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import CatalogVideo
@@ -109,16 +107,15 @@ def infer_egohand_frames(
     return OakDetections(times, xy, scores)
 
 
-def egohand_configs(assets: Path | None, *, fast: bool = False) -> tuple[EgoHandDetectorConfig, EgoHandConfig | EgoHandFastConfig]:
-    """The models' files and engines; None takes the pinned downloads and the trtkit cache."""
+def egohand_configs(assets: Path | None, *, fast: bool = False) -> EgoHandConfigs:
+    """The reference or fast EgoHand stack; ``assets`` None takes the pinned downloads and the trtkit cache."""
     return fast_egohand_configs(assets) if fast else selfcap_egohand_configs(assets)
 
 
 @cache
-def egohand_models(assets: Path | None, *, fast: bool = False) -> tuple[EgoHandDetector, EgoHandPredictor | FastEgoHandPredictor]:
+def egohand_models(configs: EgoHandConfigs) -> tuple[EgoHandDetector, EgoHandPredictor | FastEgoHandPredictor]:
     """Retain engines for an explicitly long-lived batch worker."""
-    detector, predictor = egohand_configs(assets, fast=fast)
-    return detector.setup(), predictor.setup()
+    return configs[0].setup(), configs[1].setup()
 
 
 @torch.inference_mode()
@@ -127,11 +124,10 @@ def detect_oak_egohand(
     video: CatalogVideo,
     intrinsic: Intrinsic,
     rotation: Float64[ndarray, "3 3"] | None,
-    assets: Path | None,
+    models: EgoHandConfigs,
     *,
     camera: EgoCamera | None = None,
     retain_models: bool = False,
-    fast: bool = False,
 ) -> OakDetections:
     """Run only 64 seeded samples; release this episode's GPU models before returning."""
     qp: float | None = oak_quest_offset_ms(episode.sync)
@@ -176,7 +172,7 @@ def detect_oak_egohand(
     detector: EgoHandDetector | None = None
     predictor: EgoHandPredictor | FastEgoHandPredictor | None = None
     try:
-        detector, predictor = egohand_models(assets, fast=fast)
+        detector, predictor = egohand_models(models)
         result: OakDetections = infer_egohand_frames(frames, times[selection.indices], selection.hands, lens, detector, predictor)
         torch.cuda.synchronize()
         print(f"EGOHAND_CALIB_SECONDS {time.perf_counter() - started:.3f}", flush=True)
@@ -192,7 +188,7 @@ def detect_oak_egohand(
 
 @torch.inference_mode()
 def detect_oak_views(
-    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], assets: Path | None, *, retain_models: bool = False, fast: bool = False,
+    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], models: EgoHandConfigs, *, retain_models: bool = False,
 ) -> dict[str, OakDetections]:
     """EgoHand on the same 64 instants in every OAK camera, sampled on OAK left; videos are read on ``video_time``.
 
@@ -214,7 +210,7 @@ def detect_oak_views(
     detector: EgoHandDetector | None = None
     predictor: EgoHandPredictor | FastEgoHandPredictor | None = None
     try:
-        detector, predictor = egohand_models(assets, fast=fast)
+        detector, predictor = egohand_models(models)
         result: dict[str, OakDetections] = {}
         for camera, video in videos.items():
             times: Float64[ndarray, "f"] = video.t_ns.astype(np.float64) * 1e-9

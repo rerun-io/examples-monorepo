@@ -353,6 +353,21 @@ def export_backbone_once(weights: Path, soma: Path, onnx: Path, *, batch_size: i
     build_once(onnx, export)
 
 
+def _time_module(module: torch.nn.Module, events: list[tuple[torch.cuda.Event, torch.cuda.Event]]) -> None:
+    """Append a CUDA-event pair around every forward of ``module``."""
+
+    def before(*_: object) -> None:
+        start = torch.cuda.Event(enable_timing=True)
+        start.record()
+        events.append((start, torch.cuda.Event(enable_timing=True)))
+
+    def after(*_: object) -> None:
+        events[-1][1].record()
+
+    module.register_forward_pre_hook(before)
+    module.register_forward_hook(after)
+
+
 class EgoHandPredictor(TopDownHandPose3d):
     """RGB frames + anatomical boxes + calibrated camera -> metric SOMA hands."""
 
@@ -378,6 +393,10 @@ class EgoHandPredictor(TopDownHandPose3d):
         self.faces: dict[HandSide, Tensor] = {
             side: torch.from_numpy(np.asarray(model.soma_hand.faces(side), dtype=np.int64)).cuda() for side in ("left", "right")
         }
+        # CUDA events around each backbone and pose-head forward of the current call.
+        self.module_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {"backbone": [], "head": []}
+        _time_module(model.backbone, self.module_events["backbone"])
+        _time_module(model.hand_head, self.module_events["head"])
 
     def record_latency(self, stage: PerfStage, latency_ms: float) -> None:
         """Collect per-frame stage timings; SOMA uses nested CUDA-event timing."""
@@ -414,6 +433,8 @@ class EgoHandPredictor(TopDownHandPose3d):
         else:
             frames = [np.ascontiguousarray(frame.cpu().numpy()[:, :, ::-1]) for frame in frames_rgb]
         self.predictor.model.soma_hand.profile_events = []
+        for events in self.module_events.values():
+            events.clear()
         raw: dict[str, dict[str, dict]] = self.predictor.run(
             frames, ids, boxes, ("left", "right"), intrinsics_per_image={key: lens_model(camera) for key in ids}, prepared_crops=prepared
         )
@@ -421,6 +442,8 @@ class EgoHandPredictor(TopDownHandPose3d):
         self.stage_ms.setdefault("soma", []).append(
             sum(start.elapsed_time(end) for start, end in self.predictor.model.soma_hand.profile_events) / len(frames_rgb)
         )
+        for stage, events in self.module_events.items():
+            self.stage_ms.setdefault(stage, []).append(sum(start.elapsed_time(end) for start, end in events) / len(frames_rgb))
         rows: list[_UpstreamHand] = []
         sides: list[HandSide] = []
         indices: list[int] = []

@@ -45,8 +45,19 @@ from posekit.skeletons import HAND_21
 ModelName: TypeAlias = Literal["wilor", "egohand", "egohand-fast"]
 Protocol: TypeAlias = Literal["gt-boxes", "detector"]
 METRICS: tuple[str, ...] = ("mpjpe_mm", "pa_mpjpe_mm", "rte_mm", "epe_2d_px")
-MODEL_CLASS: dict[ModelName, int] = {"wilor": 2, "egohand": 4, "egohand-fast": 6}
-"""Annotation class of a model's left hand; its right hand is the next id."""
+
+
+@dataclass(frozen=True, slots=True)
+class EvalModel:
+    """How the viewer draws and the metrics score one evaluated model."""
+
+    left_class: int
+    """Annotation class of the model's left hand; its right hand is the next id."""
+    metric_root: bool
+    """The model predicts a metric camera-space wrist, so root translation error is scored; otherwise it is NaN."""
+
+
+EVAL_MODELS: dict[ModelName, EvalModel] = {"wilor": EvalModel(2, False), "egohand": EvalModel(4, True), "egohand-fast": EvalModel(6, True)}
 
 
 @serde(deny_unknown_fields=True)
@@ -282,7 +293,7 @@ def log_segment_frames(
             f"{root}/camera/image/{model}/{protocol}/boxes",
             rr.Boxes2D(
                 array=boxes.boxes.xyxy_numpy()[in_frame].reshape(-1, 4), array_format=rr.Box2DFormat.XYXY,
-                class_ids=[MODEL_CLASS[model] + SIDES.index(boxes.sides[i]) for i in in_frame], show_labels=False,
+                class_ids=[EVAL_MODELS[model].left_class + SIDES.index(boxes.sides[i]) for i in in_frame], show_labels=False,
             ),
         )
         for side_index, side in enumerate(SIDES):
@@ -292,10 +303,10 @@ def log_segment_frames(
                 rr.log(f"{root}/camera/image/{path}", rr.Clear(recursive=False))
                 rr.log(f"{root}/camera/{path}", rr.Clear(recursive=False))
                 continue
-            rr.log(f"{root}/camera/image/{path}", rr.Points2D(hand.pred_uv, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=MODEL_CLASS[model] + side_index, radii=-2.0, show_labels=False))
+            rr.log(f"{root}/camera/image/{path}", rr.Points2D(hand.pred_uv, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=EVAL_MODELS[model].left_class + side_index, radii=-2.0, show_labels=False))
             # Shown wrist-on-wrist with the ground truth, the shape MPJPE scores (WiLoR's root is in a virtual camera).
             shown: Float32[ndarray, "21 3"] = (hand.pred_xyz - hand.pred_xyz[0] + segment.xyz_camera[frame, side_index, 0]).astype(np.float32)
-            rr.log(f"{root}/camera/{path}", rr.Points3D(shown, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=MODEL_CLASS[model] + side_index, radii=0.003, show_labels=False))
+            rr.log(f"{root}/camera/{path}", rr.Points3D(shown, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=EVAL_MODELS[model].left_class + side_index, radii=0.003, show_labels=False))
         for metric in METRICS:
             values: list[float] = [getattr(hand.errors, metric) for hand in rows if np.isfinite(getattr(hand.errors, metric))]
             if values:
@@ -377,7 +388,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
                 scored: list[ScoredHand] = []
                 for segment, frames in tqdm(segments_frames, desc=f"{model} {dataset} {protocol}"):
                     with torch.inference_mode():
-                        count, any_side, hands, boxes = evaluate_segment(segment, frames, detector, pose, protocol, config, metric_root=model in ("egohand", "egohand-fast"))
+                        count, any_side, hands, boxes = evaluate_segment(segment, frames, detector, pose, protocol, config, metric_root=EVAL_MODELS[model].metric_root)
                     gt_hands += count
                     overlapped += any_side
                     scored.extend(hands)

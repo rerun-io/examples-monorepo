@@ -27,6 +27,7 @@ from posekit.models.egohand import (
     CACHED_BACKBONE_ONNX,
     EGOHAND_REVISION,
     SOMA_REVISION,
+    EgoHandConfig,
     EgoHandDetectorConfig,
     EgoHandReconstruction,
     TensorRtBackbone,
@@ -194,6 +195,10 @@ class FastEgoHandPredictor(TopDownHandPose3d):
             translation=output.translation,
             scale_parameters=output.scale_parameters,
         )
+
+
+EgoHandConfigs: TypeAlias = tuple[EgoHandDetectorConfig, EgoHandConfig | EgoHandFastConfig]
+"""One EgoHand stack: the detector and either the reference or the fast hand pose role."""
 
 
 def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
