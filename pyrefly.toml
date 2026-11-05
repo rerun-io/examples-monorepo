@@ -32,8 +32,6 @@ project-includes = [
     "packages/robocap-live/tools/apps/**/*",
     "packages/robocap-live/tests/**/*",
     "packages/arkitscenes-download/arkitscenes_download/**/*",
-    "packages/sapiens2-pose/src/**/*",
-    "packages/sapiens-coco133-pose/src/**/*",
     "packages/posekit/src/**/*",
     "packages/lamp/lamptrack/**/*",
     "packages/trtkit/src/**/*",
@@ -66,13 +64,13 @@ project-excludes = [
     "packages/zipdepth/zipdepth/training/**/*",
     "packages/zipdepth/zipdepth/evaluation/**/*",
     "packages/zipdepth/zipdepth/upstream_cli/**/*",
-    "packages/sapiens2-pose/src/sapiens2_pose/assets/**/*",
-    "packages/sapiens2-pose/src/sapiens2_pose/sapiens_lite/**/*",
     "packages/lamp/tests/reference_data/lamp/**/*",
     # Vendored EgoHand/DINOv3 inference source shipped inside posekit (upstream module names).
     "packages/posekit/src/egohand/**/*",
     "packages/posekit/src/egohand_inference/**/*",
     "packages/posekit/src/egohand_dinov3/**/*",
+    # Vendored Sapiens2 pose network shipped inside posekit.
+    "packages/posekit/src/sapiens2_lite/**/*",
 ]
 
 # Disable heuristics so pyrefly uses only our explicit search-path,
@@ -113,9 +111,6 @@ search-path = [
     "packages/handfit",
     "packages/robocap-live",
     "packages/arkitscenes-download",
-    "packages/sapiens2-pose",
-    "packages/sapiens2-pose/src",
-    "packages/sapiens-coco133-pose/src",
     "packages/posekit/src",
     "packages/lamp",
     "packages/trtkit/src",
@@ -194,10 +189,6 @@ site-package-path = [
     # can be listed and each machine finds the one it has.
     ".pixi/envs/slam-rs-osx-dev/lib/python3.12/site-packages",
     ".pixi/envs/slam-rs-osx-dev/lib/python3.12/site-packages/rerun_sdk",
-    ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages",
-    ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages/rerun_sdk",
-    ".pixi/envs/sapiens-coco133-pose-dev/lib/python3.12/site-packages",
-    ".pixi/envs/sapiens-coco133-pose-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/posekit-dev/lib/python3.12/site-packages",
     ".pixi/envs/posekit-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/lamp-dev/lib/python3.12/site-packages",

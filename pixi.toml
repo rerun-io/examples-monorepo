@@ -1095,134 +1095,6 @@ cwd = "packages/sam3"
 description = "Launch SAM3 segmentation Gradio app with annotated image"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# sapiens2-pose
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.sapiens2-pose]
-platforms = ["linux-64", "linux-aarch64"]
-
-[feature.sapiens2-pose.dependencies]
-python = "3.12.*"
-
-[feature.sapiens2-pose.pypi-dependencies]
-sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
-trtkit = { path = "packages/trtkit", editable = true }
-onnx = "*"
-onnxscript = "*"
-
-[feature.sapiens2-pose.activation.env]
-PACKAGE_DIR = "packages/sapiens2-pose"
-PYREFLY_TARGET = "src/sapiens2_pose/api src/sapiens2_pose/gradio_ui.py src/sapiens2_pose/video_gradio_ui.py src/sapiens2_pose/__init__.py tools"
-SAPIENS_PRELOAD_MODELS = "0"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-app]
-cmd = "python tools/gradio_app.py"
-cwd = "packages/sapiens2-pose"
-description = "Launch the Sapiens2 pose Gradio app"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-video-app]
-cmd = "python tools/video_gradio_app.py"
-cwd = "packages/sapiens2-pose"
-description = "Launch the Sapiens2 video pose Gradio app"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-image]
-cmd = "python tools/demos/image_pose.py"
-cwd = "packages/sapiens2-pose"
-description = "Run Sapiens2 image pose inference and write Rerun/numeric artifacts"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-video]
-cmd = "python tools/demos/video_pose.py"
-cwd = "packages/sapiens2-pose"
-description = "Run Sapiens2 video pose inference and write a Rerun RRD"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-export-onnx]
-cmd = "python tools/conversion/export_onnx.py"
-cwd = "packages/sapiens2-pose"
-description = "Export a Sapiens2 pose checkpoint to ONNX"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-build-trt]
-cmd = "python tools/conversion/build_tensorrt.py"
-cwd = "packages/sapiens2-pose"
-description = "Build a machine-local TensorRT engine from a Sapiens2 pose ONNX graph"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-trt-image]
-cmd = "python tools/demos/tensorrt_image_pose.py"
-cwd = "packages/sapiens2-pose"
-description = "Run Sapiens2 pose inference with a TensorRT heatmap backend"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-compare-artifacts]
-cmd = "python tools/eval/compare_pose_artifacts.py"
-cwd = "packages/sapiens2-pose"
-description = "Compare two Sapiens2 pose numeric artifacts"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-compare-rrds]
-cmd = "python tools/eval/compare_pose_rrds.py"
-cwd = "packages/sapiens2-pose"
-description = "Compare Sapiens2 pose values queried from two Rerun recordings"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-benchmark-trt]
-cmd = "python tools/eval/benchmark_tensorrt_pose.py"
-cwd = "packages/sapiens2-pose"
-description = "Benchmark PyTorch vs TensorRT Sapiens2 pose heatmap inference"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-dev-app]
-cmd = "gradio tools/gradio_app.py"
-cwd = "packages/sapiens2-pose"
-description = "Launch the Sapiens2 pose Gradio app in dev mode"
-
-[feature.sapiens2-pose.tasks.sapiens2-pose-dev-video-app]
-cmd = "GRADIO_SERVER_PORT=7861 gradio tools/video_gradio_app.py"
-cwd = "packages/sapiens2-pose"
-description = "Launch the Sapiens2 video pose Gradio app in dev mode"
-
-# ═══════════════════════════════════════════════════════════════════════════
-# sapiens-coco133-pose
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.sapiens-coco133-pose]
-platforms = ["linux-64"]
-
-[feature.sapiens-coco133-pose.dependencies]
-python = "3.12.*"
-torchcodec = "*"
-tyro = ">=0.9.1,<0.10"
-
-[feature.sapiens-coco133-pose.pypi-dependencies]
-sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
-trtkit = { path = "packages/trtkit", editable = true }
-sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-onnx = "*"
-onnxscript = "*"
-
-[feature.sapiens-coco133-pose.activation.env]
-PACKAGE_DIR = "packages/sapiens-coco133-pose"
-SAPIENS_PRELOAD_MODELS = "0"
-
-[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-iterable-video]
-cmd = "python tools/demos/iterable_video_pose.py"
-cwd = "packages/sapiens-coco133-pose"
-description = "Run non-batched RTMLib YOLOX + Sapiens COCO-133 video pose and write the golden RRD/artifact"
-
-[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-video-trt]
-cmd = "python tools/demos/batched_tensorrt_video_pose.py"
-cwd = "packages/sapiens-coco133-pose"
-description = "Run batched CUDA/TensorRT COCO-133 video pose"
-
-[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-export-pose-onnx]
-cmd = "python tools/conversion/export_sapiens_pose_onnx.py"
-cwd = "packages/sapiens-coco133-pose"
-description = "Export static-batch FP16 Sapiens2 pose ONNX"
-
-[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-build-trt]
-cmd = "python tools/conversion/build_tensorrt_engine.py"
-cwd = "packages/sapiens-coco133-pose"
-description = "Build a static-batch FP16 TensorRT engine from ONNX"
-
-[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-benchmark]
-cmd = "python tools/eval/benchmark.py"
-cwd = "packages/sapiens-coco133-pose"
-description = "Benchmark iterable golden path against batched TensorRT path"
-
-# ═══════════════════════════════════════════════════════════════════════════
 # trtkit — shared PyTorch → ONNX → TensorRT runtimes + engine hub
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.trtkit]
@@ -1254,7 +1126,6 @@ tyro = ">=0.9.1,<0.10"
 [feature.posekit.pypi-dependencies]
 posekit = { path = "packages/posekit", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
-sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
 sam2 = { path = "packages/sam2-streaming", editable = true }
 onnx = "*"
 onnxscript = "*"
@@ -1326,6 +1197,11 @@ PYREFLY_TARGET = "src/posekit tests tools"
 cmd = "python tools/demos/video_pose.py"
 cwd = "packages/posekit"
 description = "Run the GPU video 2D pose demo (detector + top-down pose over torch/onnx/tensorrt backends)"
+
+[feature.posekit.tasks.posekit-sapiens-calibrate]
+cmd = "python tools/apps/sapiens_calibrate.py"
+cwd = "packages/posekit"
+description = "Measure Sapiens2 nvfp4-768 activation ranges from person crops (--crops-dir, --output); review the JSON before replacing src/posekit/models/sapiens_net/fast_pose_768.json"
 
 [feature.posekit.tasks.posekit-video-track]
 cmd = "python tools/demos/video_track.py"
@@ -1624,7 +1500,6 @@ huggingface_hub = "*"
 safetensors = "*"
 
 [feature.selfcap-curate.pypi-dependencies]
-sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
 selfcap-curate = { path = "packages/selfcap-curate", editable = true }
 posekit = { path = "packages/posekit", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
@@ -3819,28 +3694,6 @@ sam3-dev = { features = [
     "sam3",
     "dev",
 ], solve-group = "sam3", no-default-feature = true }
-sapiens2-pose = { features = [
-    "common",
-    "cuda",
-    "sapiens2-pose",
-], solve-group = "sapiens2-pose", no-default-feature = true }
-sapiens2-pose-dev = { features = [
-    "common",
-    "cuda",
-    "sapiens2-pose",
-    "dev",
-], solve-group = "sapiens2-pose", no-default-feature = true }
-sapiens-coco133-pose = { features = [
-    "common",
-    "cuda",
-    "sapiens-coco133-pose",
-], solve-group = "sapiens-coco133-pose", no-default-feature = true }
-sapiens-coco133-pose-dev = { features = [
-    "common",
-    "cuda",
-    "sapiens-coco133-pose",
-    "dev",
-], solve-group = "sapiens-coco133-pose", no-default-feature = true }
 trtkit = { features = [
     "common",
     "cuda",
