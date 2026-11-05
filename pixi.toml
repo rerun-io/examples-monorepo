@@ -1307,8 +1307,15 @@ cmd = "python tools/apps/hands_eval.py"
 cwd = "packages/posekit"
 description = "Ground-truth eval of WiLoR and EgoHand on a fixed HOT3D (Quest 3) + UmeTrack subset read from a dataforge catalog (--catalog-url); writes results.json + hands_eval.rrd"
 
+[feature.posekit-hands.tasks.posekit-hands-bench]
+cmd = "python tools/apps/hands_bench.py"
+cwd = "packages/posekit"
+description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
+
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
+# src/egohand* is vendored upstream EgoHand source (untyped), excluded like other vendor boundaries.
+PYREFLY_TARGET = "src/posekit tests tools"
 
 [feature.posekit.tasks.posekit-video-pose]
 cmd = "python tools/demos/video_pose.py"
