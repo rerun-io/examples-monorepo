@@ -5,6 +5,7 @@ The released MHR parameters remain dynamic: all five identity coefficients,
 each hand. Only the neutral pose corrective and topology tables are cached.
 """
 
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,6 +17,7 @@ from soma.hand.identity_model import MHRHandIdentityModel
 from torch import Tensor
 
 from egohand.models.soma_hand_wrapper import SomaHandWrapper
+from posekit.models.egohand_mhr import MhrHandRestSkinning
 
 
 class _CudaMHRHand(MHRHandIdentityModel):
@@ -44,28 +46,13 @@ class _CudaMHRHand(MHRHandIdentityModel):
         source_vertices, local_faces = torch.unique(self.hand_faces, sorted=True, return_inverse=True)
         self.hand_faces = local_faces
         character = self._mhr_model.module.character_torch
-        self.shape_vectors: Float32[Tensor, "5 m 3"] = character.blend_shape.shape_vectors[40:45, source_vertices].contiguous()
-        self.mean_shape: Float32[Tensor, "1 m 3"] = character.blend_shape.base_shape[None, source_vertices] + self.neutral_correctives[:, source_vertices]
-        skinning = character.linear_blend_skinning
-        selected: Int64[Tensor, "s"] = torch.nonzero(torch.isin(skinning.vert_indices_flattened, source_vertices)).flatten()
-        skinning.vert_indices_flattened = torch.searchsorted(source_vertices, skinning.vert_indices_flattened[selected])
-        skinning.skin_indices_flattened = skinning.skin_indices_flattened[selected]
-        skinning.skin_weights_flattened = skinning.skin_weights_flattened[selected]
-        skinning.num_vertices = len(source_vertices)
+        rest_model = MhrHandRestSkinning(character, source_vertices, self.scale_indices[0], self.neutral_correctives)
+        self.rest_model = rest_model if os.environ.get("PIXI_DEV_MODE") == "1" else torch.compile(rest_model, fullgraph=True, dynamic=True)
 
     def _get_shaped_verts(self, identity_coeffs: Float32[Tensor, "b 5"]) -> Float32[Tensor, "b v 3"]:
         """Evaluate the released shape, scale and FK for every required source vertex."""
-        batch: int = len(identity_coeffs)
-        identity: Float32[Tensor, "b 45"] = torch.nn.functional.pad(identity_coeffs, (40, 0))
-        scales: Float32[Tensor, "b 68"] = torch.zeros((batch, 68), device=identity.device)
-        if self._current_scale_params is not None:
-            scales = scales.scatter(1, self.scale_indices.expand(batch, -1), self._current_scale_params)
-        character = self._mhr_model.module.character_torch
-        rest: Float32[Tensor, "b v 3"] = torch.einsum("nvd,bn->bvd", self.shape_vectors, identity_coeffs) + self.mean_shape
-        parameters: Float32[Tensor, "b 249"] = torch.cat((torch.zeros((batch, 136), device=identity.device), scales, torch.zeros_like(identity)), dim=1)
-        joints: Float32[Tensor, "b 889"] = character.model_parameters_to_joint_parameters(parameters)
-        state = character.joint_parameters_to_skeleton_state(joints)
-        return character.skin_points(state, rest)
+        scales: Float32[Tensor, "b 26"] = self._current_scale_params if self._current_scale_params is not None else torch.zeros((len(identity_coeffs), 26), device=identity_coeffs.device)
+        return self.rest_model(identity_coeffs, scales)
 
     def forward(
         self, identity_coeffs: Float32[Tensor, "b 5"], scale_params: Float32[Tensor, "b 26"] | None = None,
