@@ -94,7 +94,7 @@ pub fn send(
                 .with_timeline("iterations")
                 .with_state(rerun::blueprint::components::PanelState::Collapsed),
         );
-    // SDK 0.38.1 has no public Spatial3DView property setter. Append the eye
+    // SDK 0.42.0 has no public Spatial3DView property setter. Append the eye
     // property to the same blueprint store through its public memory transport.
     let (buffer, storage) = rerun::RecordingStreamBuilder::new("gsplat-train").memory()?;
     blueprint.send(&buffer, BlueprintActivation::default())?;

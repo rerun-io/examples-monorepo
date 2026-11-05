@@ -112,9 +112,10 @@ fn log_surface(
     let pose = camera.pose();
     recording.log(
         "world/camera",
+        // Brush's glam 0.30 pose crosses into Rerun's glam 0.33 as column arrays.
         &rerun::Transform3D::from_translation_mat3x3(
-            pose.w_axis.truncate(),
-            glam::Mat3::from_mat4(pose),
+            pose.w_axis.truncate().to_array(),
+            glam::Mat3::from_mat4(pose).to_cols_array_2d(),
         ),
     )?;
     recording.log(

@@ -31,7 +31,7 @@ pub(crate) fn register(registry: &mut ViewSystemRegistrator<'_>) {
         if !radius.is_finite() || radius == 0.0 {
             radius = 1.0;
         }
-        // EyeController is private in 0.38.1; MIN_ORBIT_DISTANCE is twice its 0.01 near plane.
+        // EyeController is private in 0.42.0; MIN_ORBIT_DISTANCE is twice its 0.01 near plane.
         radius = radius.max(0.02);
         let coordinates = state.state_3d.scene_view_coordinates;
         let right = coordinates.right().map(Vec3::from).unwrap_or(Vec3::X);
@@ -44,7 +44,7 @@ pub(crate) fn register(registry: &mut ViewSystemRegistrator<'_>) {
     });
 }
 
-fn scene_bounds(ctx: &QueryContext<'_>) -> macaw::BoundingBox {
+fn scene_bounds(ctx: &QueryContext<'_>) -> re_math::BoundingBox {
     let splats = ctx
         .store_ctx()
         .memoizer::<GpuCache, _>(|cache| cache.view_bounds(ctx.view_ctx.view_id));
@@ -57,7 +57,7 @@ fn scene_bounds(ctx: &QueryContext<'_>) -> macaw::BoundingBox {
     match (splats, native) {
         (Some(a), Some(b)) => a.union(b),
         (Some(b), _) | (_, Some(b)) => b,
-        _ => macaw::BoundingBox::nothing(),
+        _ => re_math::BoundingBox::nothing(),
     }
 }
 
@@ -107,7 +107,7 @@ mod tests {
             Vec3::X,
         );
         let bounds =
-            macaw::BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE).transform_affine3(&transform);
+            re_math::BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE).transform_affine3(&transform);
         assert!(bounds.min.abs_diff_eq(Vec3::new(0.9999, 0.0, 0.0), 1e-7));
         assert!(bounds.max.abs_diff_eq(Vec3::new(1.0, 0.0001, 0.0001), 1e-7));
     }

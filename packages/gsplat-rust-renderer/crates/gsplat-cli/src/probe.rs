@@ -253,7 +253,10 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
     }
     re_log::setup_logging();
     let (rx, _server) = re_grpc_server::spawn_with_recv(
-        std::net::SocketAddr::from(([127, 0, 0, 1], cli.port)),
+        re_grpc_server::ServerListener::bind(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            cli.port,
+        )))?,
         re_grpc_server::ServerOptions::default(),
         re_grpc_server::shutdown::never(),
     );

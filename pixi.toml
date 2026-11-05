@@ -2119,7 +2119,7 @@ xorg-libxrandr = "*"
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.38.1"  # matches the custom viewer's =0.38.1 re_viewer crates; moves with their Rust port
+rerun-sdk = "==0.42.0"  # matches the custom viewer's =0.42.0 re_viewer crates; moves with their Rust port
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation]
@@ -2168,8 +2168,10 @@ depends-on = ["gsplat-build", { task = "gsplat-download", args = ["all", "all"] 
 cwd = "packages/gsplat-rust-renderer"
 description = "Render and evaluate Blender test splits; --checkpoint-only checks bundled predictions"
 
+# Call the env's cargo-fmt/cargo-clippy directly: `cargo <sub>` searches $CARGO_HOME/bin first, where a
+# rustup proxy may run an older toolchain than the pinned rust (Rerun 0.42 requires rustc 1.98).
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-check]
-cmd = "cargo fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
+cmd = "cargo-fmt -p gsplat-core -p gsplat-viewer -p gsplat-cli -p gsplat-train -- --check && cargo-clippy clippy --locked --workspace --all-targets --all-features -- -D warnings && cargo test --locked --workspace --all-features"
 cwd = "packages/gsplat-rust-renderer"
 description = "Check our Rust formatting, run Clippy including gsplat probe, and run Rust unit tests"
 
@@ -2241,8 +2243,8 @@ lpips = "*"
 hexels-bench = { path = "packages/hexels", editable = true }
 # Arrow tables of the surface recordings (hexels_bench.surface_frames); PyPI, as rerun-sdk already pulls it here.
 pyarrow = "*"
-# Rerun recordings (2D Figure 2 rows, surface recordings); same pin as `common`.
-rerun-sdk = "==0.38.1"
+# Rerun recordings (2D Figure 2 rows, surface recordings); same pin as the gsplat-rust-renderer viewer.
+rerun-sdk = "==0.42.0"
 # NVIDIA FLIP, imported by upstream's 2D image metrics; PyPI only.
 flip-evaluator = "==1.7"
 

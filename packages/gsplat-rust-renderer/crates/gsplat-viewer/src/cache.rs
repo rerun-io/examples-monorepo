@@ -98,14 +98,14 @@ pub(crate) struct GpuCache {
     scenes: IntMap<Hash64, CachedScene>,
     views: HashMap<BatchKey, CachedView>,
     native_sorts: HashMap<BatchKey, (re_renderer::SortOrderCache, u64)>,
-    bounds: HashMap<re_viewer_context::ViewId, (macaw::BoundingBox, u64)>,
+    bounds: HashMap<re_viewer_context::ViewId, (re_math::BoundingBox, u64)>,
 }
 
 fn record_bounds(
-    views: &mut HashMap<re_viewer_context::ViewId, (macaw::BoundingBox, u64)>,
+    views: &mut HashMap<re_viewer_context::ViewId, (re_math::BoundingBox, u64)>,
     frame: u64,
     view_id: re_viewer_context::ViewId,
-    bounds: macaw::BoundingBox,
+    bounds: re_math::BoundingBox,
 ) -> bool {
     if !bounds.min.is_finite() || !bounds.max.is_finite() {
         return false;
@@ -212,7 +212,10 @@ pub fn compute_gpu_bytes(ctx: &re_viewer_context::ViewContext<'_>) -> [u64; 2] {
 }
 
 impl GpuCache {
-    pub(crate) fn view_bounds(&self, id: re_viewer_context::ViewId) -> Option<macaw::BoundingBox> {
+    pub(crate) fn view_bounds(
+        &self,
+        id: re_viewer_context::ViewId,
+    ) -> Option<re_math::BoundingBox> {
         self.bounds.get(&id).map(|(bounds, _)| *bounds)
     }
 
@@ -220,7 +223,7 @@ impl GpuCache {
     pub(crate) fn record_view_bounds(
         &mut self,
         view_id: re_viewer_context::ViewId,
-        bounds: macaw::BoundingBox,
+        bounds: re_math::BoundingBox,
     ) -> bool {
         record_bounds(&mut self.bounds, self.frame, view_id, bounds)
     }
@@ -286,7 +289,7 @@ impl GpuCache {
         let bounds = shared
             .bounds
             .region_of_interest
-            .transform_affine3(&options.world_from_local);
+            .transform_affine3(&crate::visualizer::from_core(options.world_from_local));
         record_bounds(&mut self.bounds, frame, key.view_id, bounds);
         let entry = match self.views.entry(key) {
             Entry::Vacant(entry) => entry.insert(CachedView {
