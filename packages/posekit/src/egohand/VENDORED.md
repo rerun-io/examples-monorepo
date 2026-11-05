@@ -12,9 +12,8 @@
 
 This is a build-only vendored dependency of posekit. The public API is
 `posekit.models.egohand`, and the runtime feature is `posekit-egohand`.
-Use `pixi run -e egohand egohand-selfcap --rr-config.headless --rr-config.save /tmp/egohand/selfcap.rrd`.
-It reads only the fixed SelfCap episode and caches one 0–6.2 second query.
-Inference defaults to 2–6 seconds. It never registers a catalog layer.
+It runs in the `posekit-hands` environment; try it with
+`pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/hands.rrd egohand onnx egohand`.
 
 Sources:
 

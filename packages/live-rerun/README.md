@@ -96,7 +96,7 @@ This package composes the shared `common` feature, and to support Apple Silicon
 it adds `osx-arm64` to `common` and `dev` (plus an osx-scoped `pytorch-cpu`).
 Because those are *shared* features, **any** change to this package's deps — or to
 `common`/`dev` — forces pixi to re-solve the whole workspace lock. Several
-linux-only environments build from source (`wilor-nano`'s git `rtmlib`, the
+linux-only environments build from source (the git `rtmlib`, the
 `no-build-isolation` deps `gsplat`/`dpvo`/`sam2`/`moge`), and those **cannot be
 cross-built from macOS** (`osx-arm64` → `linux-64` build-dispatch fails).
 

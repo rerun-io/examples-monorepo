@@ -96,7 +96,6 @@ removes that worktree and its `.pixi` directory automatically.
 | [simplecv](packages/simplecv/) | Shared Python utilities for datasets, geometry, video, and Rerun logging. |
 | [slam-evals](packages/slam-evals/) | VSLAM benchmark ingestion and browsing through a Rerun catalog. |
 | [vistadream](packages/vistadream/) | Single-image 3D reconstruction and Gaussian-scene tooling. |
-| [wilor-nano](packages/wilor-nano/) | Hand detection and 3D hand-pose estimation with Rerun logging. |
 
 Build-only and vendored packages do not necessarily have standalone root
 environments or demo tasks; their role is described in the second column.

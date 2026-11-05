@@ -114,7 +114,7 @@ class MultiviewBodyTrackerConfig:
     cams_for_detection_idx: list[int] | None = None
     """Subset of camera indices to run detection on; None evaluates every view."""
     use_wilor: bool = False
-    """Whether to use WiLor-Nano for hand keypoints instead of RTMPose."""
+    """Whether to use posekit's WiLoR for hand keypoints instead of RTMPose."""
     perform_tracking: bool = True
     """Whether to extrapolate historical poses to assist detection."""
     verbose: bool = False
