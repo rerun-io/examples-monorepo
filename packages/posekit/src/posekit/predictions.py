@@ -322,3 +322,31 @@ class HandPoses3d:
             vertices=self.vertices,
             faces=self.faces,
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BodyPoses3d:
+    """Row-aligned whole-body 3D people from a top-down body model, with meshes.
+
+    Models subclass this to add their parametric outputs (MHR); every consumer that
+    needs only joints, boxes and meshes reads this base.
+    """
+
+    keypoints: Keypoints3d
+    """Joints with metric ``xyz_camera`` and their source-image projection."""
+    boxes: Float32[Tensor, "n 4"]
+    """Source-image person box (``xyxy``) each row was reconstructed from."""
+    vertices: Float32[Tensor, "n v 3"]
+    """Camera-space mesh vertices in metres (OpenCV axes)."""
+    faces: Int64[Tensor, "f 3"]
+    """Mesh triangle indices shared by every row."""
+
+    def __post_init__(self) -> None:
+        rows: int = self.keypoints.num_instances
+        if int(self.boxes.shape[0]) != rows or int(self.vertices.shape[0]) != rows:
+            raise ValueError(f"BodyPoses3d rows disagree: {rows} keypoint rows, {self.boxes.shape[0]} boxes, {self.vertices.shape[0]} meshes.")
+
+    @property
+    def num_people(self) -> int:
+        """Number of people across the whole frame batch."""
+        return self.keypoints.num_instances

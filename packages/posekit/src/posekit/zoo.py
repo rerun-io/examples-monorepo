@@ -21,10 +21,11 @@ from posekit.models import (
     YoloxDetectorConfig,
 )
 from posekit.models.rtmpose import RTMPOSE_ONNX_ZIP_URLS
+from posekit.models.sam3d_body import SAM3D_BODY_REVISION
 from posekit.models.wilor import WILOR_REVISION
 from posekit.models.yolox import YOLOX_ONNX_ZIP_URLS
 
-ZooRole = Literal["detector", "hand-detector", "pose2d", "instance-pose2d", "pose3d", "hand-pose3d", "segmenter", "identity"]
+ZooRole = Literal["detector", "hand-detector", "pose2d", "instance-pose2d", "pose3d", "hand-pose3d", "body-pose3d", "segmenter", "identity"]
 ZooParadigm = Literal["detector", "top-down", "one-stage", "query-based", "full-frame"]
 ZooSource = Literal["openmmlab-onnx", "transformers", "huggingface", "local"]
 ZooStatus = Literal["implemented", "planned"]
@@ -147,6 +148,14 @@ ZOO: dict[str, ZooModel] = {
             "nvidia/EgoHand-v1", (256, 256), "soma_hand_25", "implemented",
             "EgoHandFastConfig: calibrated NVFP4 DINOv3 with an eight-block FP8 tail, FP8 attention, TensorRT heads, CUDA crops and full SOMA meshes. "
             "Select egohand-fast in the hand-pose3d CLI; requires a CUDA GPU with NVFP4 support.",
+        ),
+        # Whole-body 3D: any PersonDetector (or a SAM3 segmenter for masks) + a top-down body model.
+        ZooModel(
+            "sam3d-body-dinov3", "body-pose3d", "top-down", "huggingface",
+            f"facebook/sam-3d-body-dinov3@{SAM3D_BODY_REVISION[:8]} model.ckpt", (512, 512), "mhr_70", "implemented",
+            "Sam3dBodyConfig: DINOv3 ViT-H+/16 + promptable MHR decoder; full mesh (18,439 vertices), MHR parameters and hands. "
+            "mode=full adds a mirrored left-hand and a right-hand pass (3 backbone passes per person); masks and a camera are optional. "
+            "Gated checkpoint. Uses the posekit-body Pixi environment.",
         ),
         # 3D (Phase 4).
         ZooModel(

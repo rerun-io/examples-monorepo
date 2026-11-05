@@ -21,14 +21,15 @@ build-backend = "hatchling.build"
 requires = ["hatchling"]
 
 # The vendored EgoHand/DINOv3 inference source keeps its upstream import names:
-# the checkpoint's Hydra cfg instantiates `egohand.models...` by name.
+# the checkpoint's Hydra cfg instantiates `egohand.models...` by name. SAM 3D Body's
+# inference source is vendored beside it as `sam3d_body` (see src/sam3d_body/VENDORED.md).
 # src/sapiens2_lite is the vendored Sapiens2 pose network.
 [tool.hatch.build.targets.wheel]
-packages = ["src/posekit", "src/egohand", "src/egohand_inference", "src/egohand_dinov3", "src/sapiens2_lite"]
+packages = ["src/posekit", "src/egohand", "src/egohand_inference", "src/egohand_dinov3", "src/sapiens2_lite", "src/sam3d_body"]
 
 [tool.ruff]
 line-length = 150
-extend-exclude = ["src/egohand", "src/egohand_inference", "src/egohand_dinov3", "src/sapiens2_lite"]
+extend-exclude = ["src/egohand", "src/egohand_inference", "src/egohand_dinov3", "src/sapiens2_lite", "src/sam3d_body"]
 
 [tool.pytest.ini_options]
 markers = [

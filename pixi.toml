@@ -978,82 +978,6 @@ cwd = "packages/mv-api"
 description = "Register existing prediction RRD layers into a running catalog on macOS (needs a running catalog: simplecv-catalog-serve + simplecv-catalog-register)"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# sam3d-body-rerun
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.sam3d-body]
-platforms = ["linux-64"]
-
-[feature.sam3d-body.dependencies]
-python = "3.12.*"
-tomlkit = "==0.12.0"
-audioop-lts = "*"
-pydub = "*"
-open3d = ">=0.19.0,<0.20"
-h5py = ">=3.11"
-torchcodec = "*"
-fsspec = ">=2025.3,<=2026.2.0"
-
-[feature.sam3d-body.pypi-dependencies]
-sam3d_body = { path = "packages/sam3d-body", editable = true }
-monopriors = { path = "packages/monoprior", editable = true }
-sam3 = { path = "packages/sam3", editable = true }
-timm = ">=0.9"
-natsort = ">=8.4"
-datasets = ">=2.20"
-kernels = ">=0.11.3"
-
-[feature.sam3d-body.activation.env]
-PACKAGE_DIR = "packages/sam3d-body"
-PYREFLY_TARGET = "src/sam3d_body/api src/sam3d_body/gradio_ui src/sam3d_body/ops src/sam3d_body/build_models.py src/sam3d_body/sam_3d_body_estimator.py src/sam3d_body/metadata src/sam3d_body/__init__.py"
-
-[feature.sam3d-body.tasks.sam3d-body-app]
-cmd = "python tool/gradio_sam3d_body.py"
-cwd = "packages/sam3d-body"
-description = "Launch SAM3D Gradio app"
-
-[feature.sam3d-body.tasks.sam3d-body-cli]
-cmd = "python tool/demo.py --image-folder data/example-data"
-cwd = "packages/sam3d-body"
-description = "Run SAM3D CLI demo"
-
-[feature.sam3d-body.tasks.sam3d-body-download-hocap-sample]
-cmd = """
-test -d data/sample || \
-(hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data && \
-unzip -o data/sample.zip -d data && \
-rm data/sample.zip)
-"""
-cwd = "packages/sam3d-body"
-outputs = ["packages/sam3d-body/data/sample/"]
-description = "Download HoCap sample data from HuggingFace"
-
-[feature.sam3d-body.tasks.sam3d-body-mv-video-demo]
-cmd = """
-python tool/demo_mv_video.py \
-    --max-frames 100 \
-    hocap \
-    --root-directory data/sample \
-    --subject-id 8 \
-    --sequence-name 20231024_180733
-"""
-cwd = "packages/sam3d-body"
-depends-on = ["sam3d-body-download-hocap-sample"]
-description = "Run multiview video SAM3 segmentation demo with TSDF fusion"
-
-[feature.sam3d-body.tasks.sam3d-body-mv-body-demo]
-cmd = """
-python tool/demo_mv_body.py \
-    --max-frames 50 \
-    hocap \
-    --root-directory data/sample \
-    --subject-id 8 \
-    --sequence-name 20231024_180733
-"""
-cwd = "packages/sam3d-body"
-depends-on = ["sam3d-body-download-hocap-sample"]
-description = "Multiview 3D body mesh fitting with per-camera estimation"
-
-# ═══════════════════════════════════════════════════════════════════════════
 # sam3-rerun
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.sam3]
@@ -1160,6 +1084,89 @@ timm = "*"
 # pyrefly misbinds as unbound methods in this isolated dependency solve.
 [feature.posekit-egohand.activation.env]
 PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
+
+# SAM 3D Body model dependencies (vendored src/sam3d_body), outside the base posekit lane.
+[feature.posekit-sam3d-body]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.posekit-sam3d-body.dependencies]
+yacs = "*"
+omegaconf = "*"
+
+[feature.posekit-sam3d-body.pypi-dependencies]
+roma = "*"
+
+# SAM 3D Body apps (Gradio, CLI, multi-view demos, benchmark): MoGe-2 FOV through monopriors and
+# Open3D TSDF fusion. Only the posekit-body envs carry them; the role itself needs posekit-sam3d-body.
+[feature.posekit-body]
+platforms = ["linux-64"]
+
+[feature.posekit-body.dependencies]
+# The posekit-egohand holds: Gradio needs Pillow <13, s3fs needs python-dateutil <3, AnyIO <4.15 keeps typing_extensions.
+pillow = "<13"
+python-dateutil = "<3"
+anyio = "<4.15"
+# SAM2-streaming (the posekit feature) passes version_base="1.2", which Hydra 1.4 rejects; this solve picked 1.4.0rc1.
+hydra-core = "<1.4"
+tomlkit = "==0.12.0"
+audioop-lts = "*"
+pydub = "*"
+open3d = ">=0.19.0,<0.20"
+h5py = ">=3.11"
+fsspec = ">=2025.3,<=2026.2.0"
+
+[feature.posekit-body.pypi-dependencies]
+monopriors = { path = "packages/monoprior", editable = true }
+sam3 = { path = "packages/sam3", editable = true }
+timm = ">=0.9"
+natsort = ">=8.4"
+datasets = ">=2.20"
+kernels = ">=0.11.3"
+
+[feature.posekit-body.activation.env]
+PACKAGE_DIR = "packages/posekit"
+# The same four Transformers .to() stub false positives as posekit-egohand.
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
+
+[feature.posekit-body.tasks.posekit-body-download-examples]
+cmd = "test -f data/body3d-examples/yoga-example.jpg || curl -fsSL --retry 3 --create-dirs -o data/body3d-examples/Planche.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Planche.jpg -o data/body3d-examples/Amir-Khan-Lamont-Peterson_2689582.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Amir-Khan-Lamont-Peterson_2689582.jpg -o data/body3d-examples/BNAAHPYGMYSE26U6C6T7VA6544.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/BNAAHPYGMYSE26U6C6T7VA6544.jpg -o data/body3d-examples/yoga-example.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/yoga-example.jpg"
+cwd = "packages/posekit"
+description = "Download the four SAM 3D Body example images (public rerun-io/sam3d-body-rerun repo, pinned commit)"
+
+[feature.posekit-body.tasks.posekit-body3d]
+cmd = "python tools/demos/body3d.py --image-folder data/body3d-examples"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-examples"]
+description = "Whole-body 3D people (SAM3 masks + MoGe-2 camera + SAM 3D Body) in images (default: the examples) or --video-path, logged to Rerun"
+
+[feature.posekit-body.tasks.posekit-body3d-app]
+cmd = "python tools/apps/body3d_app.py"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-examples"]
+description = "Launch the SAM 3D Body Gradio app with an embedded Rerun viewer (http://127.0.0.1:7871)"
+
+[feature.posekit-body.tasks.posekit-body-download-hocap-sample]
+cmd = "test -d data/hocap/sample || (hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap && unzip -o data/hocap/sample.zip -d data/hocap && rm data/hocap/sample.zip)"
+cwd = "packages/posekit"
+outputs = ["packages/posekit/data/hocap/sample/"]
+description = "Download the HO-Cap multiview sample (~1.7 GB) the multiview demos use"
+
+[feature.posekit-body.tasks.posekit-body3d-mv-video]
+cmd = "python tools/demos/body3d_mv_video.py hocap --root-directory data/hocap/sample --subject-id 8 --sequence-name 20231024_180733 --max-frames 100"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-hocap-sample"]
+description = "Multiview SAM3 video segmentation with TSDF fusion on the HO-Cap sample (8 cameras, 100 frames)"
+
+[feature.posekit-body.tasks.posekit-body-bench]
+cmd = "python tools/apps/body_bench.py"
+cwd = "packages/posekit"
+description = "Per-frame SAM 3D Body speed (decoded GPU frame + person box to the full output), body and full mode, per stage; writes body_bench.json"
+
+[feature.posekit-body.tasks.posekit-body3d-mv-body]
+cmd = "python tools/demos/body3d_mv_body.py hocap --root-directory data/hocap/sample --subject-id 8 --sequence-name 20231024_180733 --max-frames 50"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-hocap-sample"]
+description = "Multiview SAM 3D Body fitting on the HO-Cap sample: per-camera bodies fused by MHR reprojection optimization"
 
 # Hand demo/eval/benchmark tasks; they run in the posekit-hands envs (EgoHand + WiLoR features).
 [feature.posekit-hands]
@@ -3672,17 +3679,6 @@ zipdepth-catalog-dev = { features = [
     "zipdepth-catalog",
     "dev",
 ], solve-group = "zipdepth-catalog", no-default-feature = true }
-sam3d-body = { features = [
-    "common",
-    "cuda",
-    "sam3d-body",
-], solve-group = "sam3d-body", no-default-feature = true }
-sam3d-body-dev = { features = [
-    "common",
-    "cuda",
-    "sam3d-body",
-    "dev",
-], solve-group = "sam3d-body", no-default-feature = true }
 sam3 = { features = [
     "common",
     "cuda",
@@ -3727,6 +3723,8 @@ posekit = { features = [
 ], solve-group = "posekit", no-default-feature = true }
 posekit-hands = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands"], solve-group = "posekit-hands", no-default-feature = true }
 posekit-hands-dev = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands", "dev"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-body = { features = ["common", "cuda", "posekit", "posekit-sam3d-body", "posekit-body"], solve-group = "posekit-body", no-default-feature = true }
+posekit-body-dev = { features = ["common", "cuda", "posekit", "posekit-sam3d-body", "posekit-body", "dev"], solve-group = "posekit-body", no-default-feature = true }
 posekit-dev = { features = [
     "common",
     "cuda",

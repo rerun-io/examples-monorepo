@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_LINKS
 
+from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_LINKS
+
 
 @dataclass(frozen=True, slots=True)
 class KeypointSkeleton:
@@ -61,5 +63,13 @@ SOMA_HAND: KeypointSkeleton = KeypointSkeleton(
 )
 
 
-SKELETONS: dict[str, KeypointSkeleton] = {skeleton.name: skeleton for skeleton in (COCO_17, COCO_133, HAND_21, SOMA_HAND)}
+MHR_70: KeypointSkeleton = KeypointSkeleton(
+    "mhr_70",
+    tuple(MHR70_ID2NAME[index] for index in range(len(MHR70_ID2NAME))),
+    tuple((int(a), int(b)) for a, b in MHR70_LINKS),
+)
+"""The first 70 of the 308 MHR keypoints (SAM 3D Body): body and feet, right hand 21-41, left hand 42-62 (wrist last), then arm and neck points."""
+
+
+SKELETONS: dict[str, KeypointSkeleton] = {skeleton.name: skeleton for skeleton in (COCO_17, COCO_133, HAND_21, SOMA_HAND, MHR_70)}
 """Registry of built-in skeleton formats keyed by ``KeypointSkeleton.name``."""

@@ -8,7 +8,6 @@ project-includes = [
     "packages/simplecv/simplecv/**/*",
     "packages/prompt-da/src/**/*",
     "packages/zipdepth/zipdepth/**/*",
-    "packages/sam3d-body/src/**/*",
     "packages/sam3/src/**/*",
     "packages/mv-api/src/**/*",
     "packages/robocap-slam/robocap_slam/**/*",
@@ -71,6 +70,8 @@ project-excludes = [
     "packages/posekit/src/egohand_dinov3/**/*",
     # Vendored Sapiens2 pose network shipped inside posekit.
     "packages/posekit/src/sapiens2_lite/**/*",
+    # Vendored SAM 3D Body inference source shipped inside posekit (see its VENDORED.md).
+    "packages/posekit/src/sam3d_body/**/*",
 ]
 
 # Disable heuristics so pyrefly uses only our explicit search-path,
@@ -91,7 +92,6 @@ search-path = [
     "packages/simplecv",
     "packages/prompt-da/src",
     "packages/zipdepth",
-    "packages/sam3d-body/src",
     "packages/sam3/src",
     "packages/mv-api/src",
     "packages/robocap-slam",
@@ -131,6 +131,8 @@ search-path = [
 site-package-path = [
     ".pixi/envs/posekit-hands-dev/lib/python3.12/site-packages",
     ".pixi/envs/posekit-hands-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/posekit-body-dev/lib/python3.12/site-packages",
+    ".pixi/envs/posekit-body-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/agent-traces-dev/lib/python3.12/site-packages",
     ".pixi/envs/agent-traces-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/kornia-staging-dev/lib/python3.12/site-packages",
@@ -151,7 +153,6 @@ site-package-path = [
     ".pixi/envs/zipdepth-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/zipdepth-catalog-dev/lib/python3.12/site-packages",
     ".pixi/envs/zipdepth-catalog-dev/lib/python3.12/site-packages/rerun_sdk",
-    ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-dev/lib/python3.12/site-packages",
     ".pixi/envs/mv-api-dev/lib/python3.12/site-packages",
     ".pixi/envs/robocap-slam-dev/lib/python3.12/site-packages",

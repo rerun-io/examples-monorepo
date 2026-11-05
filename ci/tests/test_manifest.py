@@ -34,12 +34,12 @@ def test_runnable_packages_are_registered_with_pyrefly(package_dir: Path, pyrefl
     config, included = pyrefly
     problems: list[str] = []
     # Rust packages may have src/ alongside a flat Python module. Discover
-    # both layouts; tool/ (sam3d-body), tools/ and tests/ are not modules.
+    # both layouts; tools/ and tests/ are not modules.
     modules: list[Path] = [
         init.parent
         for source_root in (package_dir, package_dir / "src")
         for init in sorted(source_root.glob("*/__init__.py"))
-        if init.parent.name not in {"tests", "tools", "tool"}
+        if init.parent.name not in {"tests", "tools"}
     ]
     assert modules, f"{package_dir.name}: no Python module found"
     for module in modules:

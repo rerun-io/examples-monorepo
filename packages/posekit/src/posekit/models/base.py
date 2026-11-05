@@ -7,6 +7,8 @@ The model roles are the swap points of the design (docs/design.md §3):
 - :class:`HandDetector`: full frames -> hand boxes with anatomical side.
 - :class:`TopDownHandPose3d`: frames + hand boxes (+ calibrated camera) ->
   metric 3D hand joints, optionally with meshes.
+- :class:`TopDownBodyPose3d`: frames + person boxes (+ optional masks and camera)
+  -> whole-body 3D joints and meshes, hands included.
 - :class:`InstancePose2d`: full frames -> boxes AND keypoints in one pass
   (one-stage/query-based nets that cannot consume external boxes).
 - :class:`PromptableSegmenter`: frames + prompts -> instance masks.
@@ -26,7 +28,7 @@ from jaxtyping import Float32, Int64, UInt8
 from torch import Tensor
 
 from posekit.cameras import CalibratedCamera
-from posekit.predictions import BoxDetections, DenseLandmarks2d, HandDetections, HandPoses3d, Keypoints2d
+from posekit.predictions import BodyPoses3d, BoxDetections, DenseLandmarks2d, HandDetections, HandPoses3d, Keypoints2d
 from posekit.skeletons import KeypointSkeleton
 
 
@@ -102,6 +104,28 @@ class TopDownHandPose3d(ABC):
 
         Returns:
             Camera-space hands, row-aligned with the detections they kept.
+        """
+        raise NotImplementedError
+
+
+class TopDownBodyPose3d(ABC):
+    """Reconstructs whole-body 3D people (body, hands and mesh) for cropped person instances (top-down paradigm)."""
+
+    skeleton: KeypointSkeleton
+    """Skeleton format of the predicted joints."""
+
+    @abstractmethod
+    def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"], detections: BoxDetections, camera: CalibratedCamera | None = None) -> BodyPoses3d:
+        """Reconstruct a person for every detection.
+
+        Args:
+            frames_rgb: uint8 RGB NHWC frame batch on the inference device.
+            detections: Person boxes referencing ``frames_rgb`` by index; their optional ``masks`` act as
+                segmentation prompts, weighted by ``scores``.
+            camera: Calibration of the source camera; ``None`` lets the model assume its default field of view.
+
+        Returns:
+            Camera-space people, row-aligned with the detections they kept.
         """
         raise NotImplementedError
 
@@ -302,4 +326,31 @@ class HandPose3dPipeline:
             The hand detections and the reconstructed hands.
         """
         detections: HandDetections = self.detector(frames_rgb)
+        return detections, self.pose(frames_rgb, detections, camera)
+
+
+class BodyPose3dPipeline:
+    """Full-frame whole-body 3D: person detector plus top-down body reconstruction, GPU end to end."""
+
+    def __init__(self, detector: PersonDetector, pose: TopDownBodyPose3d) -> None:
+        """Compose a person detector and a top-down 3D body model.
+
+        Args:
+            detector: Person detector stage.
+            pose: Top-down 3D body stage.
+        """
+        self.detector: PersonDetector = detector
+        self.pose: TopDownBodyPose3d = pose
+
+    def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"], camera: CalibratedCamera | None = None) -> tuple[BoxDetections, BodyPoses3d]:
+        """Run detection and 3D reconstruction on a frame batch.
+
+        Args:
+            frames_rgb: uint8 RGB NHWC frame batch on the inference device.
+            camera: Calibration of the source camera, passed to the pose stage.
+
+        Returns:
+            The person detections and the reconstructed people.
+        """
+        detections: BoxDetections = self.detector(frames_rgb)
         return detections, self.pose(frames_rgb, detections, camera)
