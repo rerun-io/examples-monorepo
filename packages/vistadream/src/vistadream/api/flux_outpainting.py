@@ -8,8 +8,8 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 from monopriors.depth_utils import depth_edges_mask, depth_to_points
 from monopriors.models.relative_depth import (
-    RelativeDepthPrediction,
     MoGeV1Predictor,
+    RelativeDepthPrediction,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from PIL import Image

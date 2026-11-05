@@ -16,8 +16,8 @@ from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
 from monopriors.models.multiview.multiview_model import MultiviewPred, robust_filter_confidences
 from monopriors.models.multiview.multiview_predictor import MultiviewPredictor, MultiviewPredictorConfig
 from monopriors.models.relative_depth import (
-    RelativeDepthPrediction,
     MoGeV1Predictor,
+    RelativeDepthPrediction,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from monopriors.scale_utils import compute_scale_and_shift
