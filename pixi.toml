@@ -1568,6 +1568,9 @@ brush = "==0.3.0"
 platforms = ["linux-64", "linux-aarch64", "linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.soma-runtime.pypi-dependencies]
+# posekit's _CudaMHRHand and _CudaHandSkinning (models/egohand_soma.py) read about 12 private
+# soma-x attributes. A bump must rerun, from packages/posekit,
+# `pixi run -e posekit-hands-dev --frozen pytest -m integration -k test_cuda_soma_preserves_changing_shapes_and_full_meshes`.
 py-soma-x = "==0.3.0"
 
 [feature.selfcap-soma]
