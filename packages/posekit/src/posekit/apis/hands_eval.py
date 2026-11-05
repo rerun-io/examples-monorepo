@@ -35,16 +35,16 @@ from tqdm.auto import tqdm
 from posekit.eval.hand_gt import SIDES, GtDataset, HandGtSegment, read_hand_gt
 from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors, summarize
 from posekit.models.base import HandDetector, TopDownHandPose3d
-from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig
+from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig, fast_egohand_configs
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d
 from posekit.runtimes import TensorRtBackendConfig
 from posekit.skeletons import HAND_21
 
-ModelName: TypeAlias = Literal["wilor", "egohand"]
+ModelName: TypeAlias = Literal["wilor", "egohand", "egohand-fast"]
 Protocol: TypeAlias = Literal["gt-boxes", "detector"]
 METRICS: tuple[str, ...] = ("mpjpe_mm", "pa_mpjpe_mm", "rte_mm", "epe_2d_px")
-MODEL_CLASS: dict[ModelName, int] = {"wilor": 2, "egohand": 4}
+MODEL_CLASS: dict[ModelName, int] = {"wilor": 2, "egohand": 4, "egohand-fast": 6}
 """Annotation class of a model's left hand; its right hand is the next id."""
 
 
@@ -159,6 +159,9 @@ def model_stack(name: ModelName) -> tuple[HandDetector, TopDownHandPose3d]:
     """
     if name == "wilor":
         return WilorHandDetectorConfig(backend=TensorRtBackendConfig()).setup(), WilorHandPoseConfig(backend=TensorRtBackendConfig()).setup()
+    if name == "egohand-fast":
+        detector_config, pose_config = fast_egohand_configs()
+        return detector_config.setup(), pose_config.setup()
     detector = EgoHandDetectorConfig(backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4)).setup()
     pose = EgoHandConfig(batch_size=16, backbone_onnx=CACHED_BACKBONE_ONNX, backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32)).setup()
     return detector, pose
@@ -324,6 +327,7 @@ def log_context() -> None:
         (0, "ground truth", (240, 240, 240)),
         (2, "wilor left", (66, 135, 245)), (3, "wilor right", (245, 135, 66)),
         (4, "egohand left", (60, 200, 90)), (5, "egohand right", (220, 60, 200)),
+        (6, "fast egohand left", (90, 220, 240)), (7, "fast egohand right", (255, 220, 80)),
     ]
     rr.log(
         "/",
@@ -372,7 +376,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
                 scored: list[ScoredHand] = []
                 for segment, frames in tqdm(segments_frames, desc=f"{model} {dataset} {protocol}"):
                     with torch.inference_mode():
-                        count, any_side, hands, boxes = evaluate_segment(segment, frames, detector, pose, protocol, config, metric_root=model == "egohand")
+                        count, any_side, hands, boxes = evaluate_segment(segment, frames, detector, pose, protocol, config, metric_root=model in ("egohand", "egohand-fast"))
                     gt_hands += count
                     overlapped += any_side
                     scored.extend(hands)

@@ -75,3 +75,10 @@ def test_detector_recall_needs_the_right_side_and_overlap() -> None:
         segment, torch.zeros((1, 400, 400, 3), dtype=torch.uint8), FixedDetector(detections), TruthPose(segment), "detector", HandsEvalConfig(), True
     )
     assert (count, any_side, len(scored)) == (2, 1, 0)
+
+
+def test_evaluation_cli_selects_fast_and_reference_egohand() -> None:
+    import tyro
+
+    config = tyro.cli(HandsEvalConfig, args=["--models", "egohand", "egohand-fast"])
+    assert config.models == ("egohand", "egohand-fast")

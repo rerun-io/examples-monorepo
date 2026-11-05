@@ -24,7 +24,7 @@ from posekit.models.base import (
     VideoSegmenter,
 )
 from posekit.models.clip_identity import ClipIdentityConfig
-from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
+from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig, fast_egohand_configs
 from posekit.models.rtdetr import RtDetrDetectorConfig
 from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
@@ -81,9 +81,9 @@ else:
     )
 
     HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig()}, prefix_names=False
+        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": fast_egohand_configs()[0]}, prefix_names=False
     )
-    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults({"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig()}, prefix_names=False)
+    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults({"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": fast_egohand_configs()[1]}, prefix_names=False)
 
 AnnotatedDetectorConfig = tyro.conf.OmitSubcommandPrefixes[DetectorConfig]
 AnnotatedHandDetectorConfig = tyro.conf.OmitSubcommandPrefixes[HandDetectorConfig]
