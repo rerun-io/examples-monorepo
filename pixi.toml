@@ -1312,6 +1312,11 @@ cmd = "python tools/apps/hands_bench.py"
 cwd = "packages/posekit"
 description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
 
+[feature.posekit-hands.tasks.posekit-egohand-calibrate]
+cmd = "python tools/apps/egohand_calibrate.py"
+cwd = "packages/posekit"
+description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames; checks benchmark hashes and mount-fit exclusions"
+
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 # src/egohand* is vendored upstream EgoHand source (untyped), excluded like other vendor boundaries.
