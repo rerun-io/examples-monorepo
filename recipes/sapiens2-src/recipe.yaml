@@ -1,0 +1,42 @@
+# The two Sapiens2 files posekit runs unchanged, from facebookresearch/sapiens2 @ 0e51c12, as the
+# `sapiens2_lite` package (upstream's `sapiens` package __init__ imports its training engine:
+# accelerate, albumentations, a runner registry). posekit keeps the condensed pose head/top-down
+# model (`posekit.models.sapiens_net.pose`) as its own code under the Sapiens2 License.
+# Raw files instead of the 112 MB archive (demo images are committed in the repo).
+package:
+  name: sapiens2-src
+  version: "2.0.0.0e51c12"
+
+source:
+  - url: https://raw.githubusercontent.com/facebookresearch/sapiens2/0e51c12d7c7257d88431b2d50e523a7b03004854/sapiens/backbones/standalone/sapiens2.py
+    sha256: 7046d482da440cbedf56d9c7fd5596fa0fb35747bb7dc9d34d3c5a638d8c51db
+    file_name: backbone.py
+  - url: https://raw.githubusercontent.com/facebookresearch/sapiens2/0e51c12d7c7257d88431b2d50e523a7b03004854/sapiens/pose/configs/_base_/keypoints308.py
+    sha256: 8602450c4c1ba7cad62814d6ac2a32f25d98c9d498fa7366a6846419ee6b0008
+    file_name: keypoints308.py
+  - url: https://raw.githubusercontent.com/facebookresearch/sapiens2/0e51c12d7c7257d88431b2d50e523a7b03004854/LICENSE.md
+    sha256: 1c77a629ee16972ddb9844378038b20321143a6faf0cac26c2c04dc9b61c5288
+    file_name: LICENSE.md
+
+build:
+  number: 0
+  noarch: python
+  script:
+    - rm -rf "$SP_DIR/sapiens2_lite"
+    - mkdir -p "$SP_DIR/sapiens2_lite"
+    - cp backbone.py keypoints308.py "$SP_DIR/sapiens2_lite/"
+    - echo '"""Sapiens2 backbone and Goliath-308 keypoint metadata (facebookresearch/sapiens2 0e51c12)."""' > "$SP_DIR/sapiens2_lite/__init__.py"
+
+requirements:
+  host:
+    - python 3.12.*
+  # Run deps follow the mast3r/asmk convention: python (+ sibling source packages) only.
+  # Imports torch only; posekit's base feature supplies it.
+  run:
+    - python >=3.12
+
+about:
+  homepage: https://github.com/facebookresearch/sapiens2
+  license: LicenseRef-Sapiens2-License
+  license_file: LICENSE.md
+  summary: Sapiens2 standalone backbone + keypoints308 metadata as sapiens2_lite
