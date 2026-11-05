@@ -6,16 +6,16 @@ replicates rtmlib exactly (cv2 top-down affine, BGR input, rtmlib's RGB-ordered
 mean/std applied to BGR channels), so results match the reference pipeline.
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 import torch
+import tyro
 from jaxtyping import Float, UInt8
 from torch import Tensor
 
-from posekit.artifacts import fetch_openmmlab_onnx
+from posekit.artifacts import OnnxTransform, fetch_openmmlab_onnx
 from posekit.models.base import TopDownPose2d
 from posekit.ops.crops import IMAGENET_MEAN_255, IMAGENET_STD_255, CropBatch, CropSpec, crop_coords_to_image, crop_frames
 from posekit.ops.decode import decode_simcc
@@ -49,7 +49,7 @@ class RtmPoseConfig:
     """Accelerated backend running the pose graph."""
     padding: float = 1.25
     """Bbox padding multiplier before cropping."""
-    onnx_transform: Callable[[Path], Path] | None = None
+    onnx_transform: tyro.conf.Suppress[OnnxTransform | None] = None
     """Optional graph transform applied to the fetched artifact before runtime creation."""
 
     def setup(self) -> "RtmPose2d":

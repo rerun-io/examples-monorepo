@@ -10,9 +10,20 @@ family, and get their baked-in NMS stripped here before the backends see them.
 import os
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from simplecv.apis.download_utils import download_file
+
+
+@runtime_checkable
+class OnnxTransform(Protocol):
+    """A graph rewrite applied to a model's ONNX file before its runtime is built (returns the new file).
+
+    A Protocol rather than ``Callable[[Path], Path]``: tyro cannot resolve that generic on Python 3.12,
+    even for a suppressed field.
+    """
+
+    def __call__(self, onnx_path: Path, /) -> Path: ...
 
 __all__ = ("DEFAULT_ONNX_CACHE_DIR", "fetch_openmmlab_onnx", "strip_detector_nms")
 
