@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -29,7 +29,6 @@ from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.artifacts import build_once
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
-from egohand.models.egohand import EgoHand
 from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
 from egohand_inference.perf import PerfStage
 from posekit.cameras import CalibratedCamera
@@ -37,6 +36,13 @@ from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
+
+# Upstream's EgoHand imports Hydra at module load; environments that only reach posekit.models for other
+# roles (mv-api, exo-calib) do not install it. Annotations name the class; at runtime it is an nn.Module.
+if TYPE_CHECKING:
+    from egohand.models.egohand import EgoHand
+else:
+    EgoHand = torch.nn.Module
 
 
 def resolve_hand_identities(detections: HandDetections, frame_count: int) -> HandDetections:
