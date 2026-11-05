@@ -14,7 +14,7 @@ from egohand_inference.camera.perspective_crop import perspective_crop_geometry
 from egohand_inference.preprocessing.mirroring import mirror_full_image_camera_horizontal
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand_geometry import lens_model
-from posekit.ops.crops import remap_frames
+from posekit.ops.crops import _channel_vector, remap_frames
 from posekit.predictions import HandSide
 
 
@@ -67,8 +67,8 @@ def _normalize_crops(
 ) -> Float32[Tensor, "n 3 256 256"]:
     """Fuse uint8 gathering, interpolation and ImageNet normalization."""
     crops = remap_frames(frames, indices, maps) / 255.0
-    mean = torch.tensor([0.485, 0.456, 0.406], device=frames.device)[None, :, None, None]
-    std = torch.tensor([0.229, 0.224, 0.225], device=frames.device)[None, :, None, None]
+    mean = _channel_vector((0.485, 0.456, 0.406), frames.device)
+    std = _channel_vector((0.229, 0.224, 0.225), frames.device)
     return (crops - mean) / std
 
 

@@ -13,6 +13,7 @@ from posekit.apis.hands_bench import EXAMPLES
 from posekit.cameras import CalibratedCamera, LensModel, load_calibrated_camera
 from posekit.models.egohand_cuda_crops import CudaHandCropper
 from posekit.models.egohand_geometry import lens_model
+from posekit.predictions import BoxDetections, HandDetections
 
 pytestmark = pytest.mark.integration
 
@@ -27,6 +28,23 @@ def test_cuda_fisheye_rejects_radii_outside_reference_domain() -> None:
     expected = lens_model(camera).unproject(pixels.cpu().numpy())
     assert np.isfinite(expected[0, 0]).all() and np.isnan(expected[0, 1]).all()
     np.testing.assert_allclose(cropper.unproject(pixels).cpu().numpy(), expected, atol=2e-7, rtol=2e-7)
+
+
+def test_captured_crops_replay_new_boxes_and_keep_prior_outputs() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    camera = CalibratedCamera(np.array([[200.0, 0.0, 128.0], [0.0, 200.0, 128.0], [0.0, 0.0, 1.0]]), np.empty(0), 256, 256, "PINHOLE")
+    cropper = CudaHandCropper(camera, torch.device("cuda:0"))
+    frame = torch.arange(256, device="cuda", dtype=torch.uint8)[None, None, :, None].expand(1, 256, 256, 3).contiguous()
+    boxes = torch.tensor([[50.0, 70.0, 100.0, 130.0]], device="cuda")
+    detected = HandDetections(BoxDetections(boxes, torch.ones(1, device="cuda"), torch.zeros(1, device="cuda", dtype=torch.int64)), ("right",))
+    first = cropper.prepare(frame, detected, 0.2)
+    saved = first.images.clone()
+    boxes[:, [0, 2]] += 60.0
+    second = cropper.prepare(frame, detected, 0.2)
+    torch.testing.assert_close(first.images, saved, rtol=0.0, atol=0.0)
+    assert (second.images - first.images).abs().mean().item() > 0.2
+    assert len(cropper.graphs) == 1
 
 
 @pytest.mark.parametrize("lens", ["RATIONAL_POLYNOMIAL", "PINHOLE", "KB4", "FISHEYE624"])
