@@ -1,6 +1,11 @@
 # SAM 3D Body inference source (facebookresearch/sam-3d-body @ b5c765a), installed under its upstream
 # import name `sam_3d_body`. posekit owns the estimator API it uses (FinalPosePrediction, the RGB/xyxy/K
-# process_one_image) and the Rerun MHR70 helpers; upstream's estimator and visualisation modules ship unused.
+# process_one_image) and the MHR-70 skeleton; upstream's estimator and visualisation modules ship unused.
+#
+# Upstream behaviour kept on purpose (the goldens record it): the hand decoder always runs in full mode
+# (its hand_logits are never read); DEFAULT_INPUT_SIZE is 512; full-mode 2D keypoints are projected
+# about the image centre even when the intrinsics have another principal point; crops are cut on the
+# CPU with cv2.warpAffine, so their pixels depend on the OpenCV version.
 package:
   name: sam-3d-body-src
   version: "1.0.0.b5c765a"

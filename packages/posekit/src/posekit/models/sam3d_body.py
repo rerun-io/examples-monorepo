@@ -1,13 +1,13 @@
 """Meta SAM 3D Body as a posekit role: person boxes (+ masks, camera) -> MHR whole-body meshes with hands.
 
-``Sam3dBodyPredictor`` is a :class:`~posekit.models.base.TopDownBodyPose3d` over the vendored upstream
-inference source (``src/sam3d_body``, see VENDORED.md). ``mode="full"`` runs the body pass, one hand pass
+``Sam3dBodyPredictor`` is a :class:`~posekit.models.base.TopDownBodyPose3d` over upstream's
+inference source (``sam_3d_body``, recipes/sam-3d-body-src). ``mode="full"`` runs the body pass, one hand pass
 per hand crop (the left crop mirrored), a keypoint-prompted body decoder pass, and merges the hands into
 the body with MHR forward kinematics: three backbone passes per person. ``mode="body"`` runs the body
 pass only. Crops are cut on the CPU, one frame at a time, exactly as upstream does: this is the eager
 reference the goldens and the speed baseline measure.
 
-Upstream behaviour kept on purpose (see VENDORED.md): the hand decoder's ``hand_logits`` are computed and
+Upstream behaviour kept on purpose (see the sam-3d-body-src recipe): the hand decoder's ``hand_logits`` are computed and
 never read; the crop size is fixed at 512; 2D keypoints are projected about the image centre even when a
 camera with another principal point is given.
 """

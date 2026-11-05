@@ -66,8 +66,6 @@ project-excludes = [
     "packages/lamp/tests/reference_data/lamp/**/*",
     # Vendored Sapiens2 pose network shipped inside posekit.
     "packages/posekit/src/sapiens2_lite/**/*",
-    # Vendored SAM 3D Body inference source shipped inside posekit (see its VENDORED.md).
-    "packages/posekit/src/sam3d_body/**/*",
 ]
 
 # Disable heuristics so pyrefly uses only our explicit search-path,

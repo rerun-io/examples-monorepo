@@ -204,8 +204,8 @@ assumes its default field of view. Any `PersonDetector` or the SAM3 `PromptableS
 calibrated TensorRT networks through the same role. See the
 [fast-path configuration and validation guide](docs/sam3d-body-fast.md).
 
-The upstream inference source is vendored under `src/sam3d_body` (see `src/sam3d_body/VENDORED.md`); its
-DINOv3 is posekit's vendored copy. The checkpoint `facebook/sam-3d-body-dinov3` is gated: request access,
+The upstream inference source (`sam_3d_body`) installs from the pinned recipe `recipes/sam-3d-body-src`
+(patches and SAM License there); its DINOv3 comes from `recipes/dinov3-src`. The checkpoint `facebook/sam-3d-body-dinov3` is gated: request access,
 then `hf auth login`. The model needs the `posekit-sam3d-body` feature; the apps run in `posekit-body`
 (MoGe-2 camera and depth through monopriors, Open3D).
 
