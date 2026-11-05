@@ -7,7 +7,6 @@ GPU with torchvision.
 """
 
 import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -16,12 +15,13 @@ from uuid import uuid4
 import numpy as np
 import onnx
 import torch
+import tyro
 from jaxtyping import Float, UInt8
 from onnx import numpy_helper
 from torch import Tensor
 from trtkit.trt_builder import onnx_content_hash
 
-from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR, fetch_openmmlab_onnx, strip_detector_nms
+from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR, OnnxTransform, fetch_openmmlab_onnx, strip_detector_nms
 from posekit.models.base import PersonDetector
 from posekit.ops.letterbox import letterbox_frames
 from posekit.ops.yolox import decode_yolox_head_outputs
@@ -56,7 +56,7 @@ class YoloxDetectorConfig:
     nms_thr: float = 0.45
     """Non-maximum suppression IoU threshold."""
 
-    onnx_transform: Callable[[Path], Path] | None = None
+    onnx_transform: tyro.conf.Suppress[OnnxTransform | None] = None
     """Optional graph transform applied after detector NMS removal, before runtime creation."""
 
     def setup(self) -> "YoloxDetector":

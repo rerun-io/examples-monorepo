@@ -21,11 +21,12 @@ from posekit.models import (
     YoloxDetectorConfig,
 )
 from posekit.models.rtmpose import RTMPOSE_ONNX_ZIP_URLS
+from posekit.models.wilor import WILOR_REVISION
 from posekit.models.yolox import YOLOX_ONNX_ZIP_URLS
 
-ZooRole = Literal["detector", "pose2d", "instance-pose2d", "pose3d", "segmenter", "identity"]
+ZooRole = Literal["detector", "hand-detector", "pose2d", "instance-pose2d", "pose3d", "hand-pose3d", "segmenter", "identity"]
 ZooParadigm = Literal["detector", "top-down", "one-stage", "query-based", "full-frame"]
-ZooSource = Literal["openmmlab-onnx", "transformers", "local"]
+ZooSource = Literal["openmmlab-onnx", "transformers", "huggingface", "local"]
 ZooStatus = Literal["implemented", "planned"]
 
 
@@ -113,10 +114,28 @@ ZOO: dict[str, ZooModel] = {
             "https://download.openmmlab.com/mmpose/v1/projects/rtmo/onnx_sdk/rtmo-l_16xb16-600e_body7-640x640-b37118ce_20231211.zip",
             (640, 640), "coco_17", "planned", "One full-frame pass, boxes+keypoints jointly; needs GPU NMS port (Phase 4).",
         ),
+        # Hands: detector + top-down 3D hand model per stack.
         ZooModel(
-            "egohand-v1", "pose3d", "top-down", "local",
+            "wilor-yolo-hand", "hand-detector", "detector", "huggingface",
+            f"pablovela5620/wilor-nano@{WILOR_REVISION[:8]} pretrained_models/detector.pt", (416, 512), None, "implemented",
+            "WilorHandDetectorConfig: Ultralytics YOLO (left/right classes); torch per frame or a static-batch TensorRT engine.",
+        ),
+        ZooModel(
+            "wilor", "hand-pose3d", "top-down", "huggingface",
+            f"pablovela5620/wilor-nano@{WILOR_REVISION[:8]} pretrained_models/wilor_final.ckpt", (256, 256), "hand_21", "implemented",
+            "WilorHandPoseConfig: ViT-H + RefineNet + MANO (21 joints, 778-vertex mesh) in a virtual pinhole camera; torch fp16 or TensorRT fp16. "
+            "Uses the posekit-hands Pixi environment.",
+        ),
+        ZooModel(
+            "rtdetr-hand-v1", "hand-detector", "query-based", "huggingface",
+            "nvidia/RT-DETR-Hand-Detector-v1@55572ddc hand_detector.onnx", (640, 640), None, "implemented",
+            "EgoHandDetectorConfig: ONNX Runtime or TensorRT; sequence-level left/right identity assignment.",
+        ),
+        ZooModel(
+            "egohand-v1", "hand-pose3d", "top-down", "huggingface",
             "nvidia/EgoHand-v1", (256, 256), "soma_hand_25", "implemented",
-            "EgoHandConfig in posekit.models.egohand; downloads pablovela5620/egohand, a safetensors copy of these weights. Calibrated camera and anatomical hand boxes required. Uses the egohand Pixi environment.",
+            "EgoHandConfig: downloads pablovela5620/egohand, a safetensors copy of these weights. SOMA hand mesh; HAND_21 view via "
+            "HandPoses3d.as_hand21(). Needs a CalibratedCamera. Uses the posekit-hands Pixi environment.",
         ),
         # 3D (Phase 4).
         ZooModel(

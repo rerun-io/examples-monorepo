@@ -3,11 +3,9 @@ import pytest
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from wilor_nano.hand_keypoints import KeypointResults
 
 from mv_api.api.full_exoego_pipeline import (
     CALIB_TARGET_RESOLUTION,
-    _extract_wilor_uv,
     _mask_points_outside_intrinsics,
     _scale_pinhole_to_image_shape,
     _select_pose_camera_params,
@@ -246,20 +244,3 @@ def test_compute_square_bbox_uses_finite_hand_keypoints() -> None:
 
     assert bbox is not None
     np.testing.assert_allclose(bbox, np.array([5.0, 15.0, 35.0, 45.0], dtype=np.float32))
-
-
-def test_extract_wilor_uv_converts_keypoint_results_to_float32() -> None:
-    keypoints_2d: ndarray = np.arange(42, dtype=np.float64).reshape(1, 21, 2)
-    scores: ndarray = np.ones((1, 21), dtype=np.float64)
-    wilor_pred: KeypointResults = KeypointResults(
-        keypoints_2d=keypoints_2d,
-        scores=scores,
-        global_orient=None,
-        hand_pose=None,
-        betas=None,
-    )
-
-    pred_uv: Float32[ndarray, "1 21 2"] = _extract_wilor_uv(wilor_pred)
-
-    assert pred_uv.dtype == np.float32
-    np.testing.assert_allclose(pred_uv, keypoints_2d.astype(np.float32))

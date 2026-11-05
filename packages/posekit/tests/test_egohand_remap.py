@@ -26,20 +26,20 @@ def test_perspective_remap_matches_opencv_with_mirrored_grid() -> None:
 
 @pytest.mark.integration
 def test_gpu_perspective_crops_match_reference() -> None:
-    pytest.importorskip("egohand_inference", reason="requires the egohand Pixi environment")
+    pytest.importorskip("warp", reason="EgoHand needs the posekit-hands Pixi environment (posekit-egohand feature)")
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
     from egohand_inference.camera.perspective_crop import perspective_crop
-
+    from posekit.cameras import CalibratedCamera
     from posekit.models.egohand_crops import prepare_gpu_crops
-    from posekit.models.egohand_geometry import OAKCamera
+    from posekit.models.egohand_geometry import lens_model
 
     rng = np.random.default_rng(19)
     rgb = rng.integers(0, 256, (1, 72, 128, 3), dtype=np.uint8)
-    camera = OAKCamera(np.array([[110.0, 0.0, 64.0], [0.0, 110.0, 36.0], [0.0, 0.0, 1.0]]), np.zeros(14), 128, 72)
+    camera = CalibratedCamera(np.array([[110.0, 0.0, 64.0], [0.0, 110.0, 36.0], [0.0, 0.0, 1.0]]), np.zeros(14), 128, 72)
     box = np.array([102.0, 30.0, 45.0], dtype=np.float32)
     prepared = prepare_gpu_crops(torch.from_numpy(rgb).cuda(), {"0": {"right": box}}, camera)
-    expected, _, _, _ = perspective_crop(rgb[0, :, :, ::-1].copy(), box, camera.model, 256)
+    expected, _, _, _ = perspective_crop(rgb[0, :, :, ::-1].copy(), box, lens_model(camera), 256)
     expected = (expected[:, ::-1] - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
     difference = np.abs(prepared[0]["crop_tensor"].cpu().numpy() - expected.transpose(2, 0, 1))
     # CPU/GPU arithmetic can straddle uint8 half-rounding at a few pixels.

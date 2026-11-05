@@ -44,7 +44,6 @@ from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConf
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 from simplecv.video_io import MultiVideoReader, TorchCodecMultiVideoReader, rgb_chw_tensor_to_bgr_hwc
 from tqdm import tqdm
-from wilor_nano.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, KeypointResults, WilorHandKeypointDetector
 
 from mv_api.data.synced_videos import SyncedVideoExoEgoConfig, frame_timestamps_from_reader
 from mv_api.multiview_pose_estimator import (
@@ -53,6 +52,7 @@ from mv_api.multiview_pose_estimator import (
     MVHistory,
     compute_square_bbox_from_uv,
 )
+from mv_api.wilor_refine import WilorKeypointRefiner
 
 np.set_printoptions(suppress=True)
 
@@ -429,14 +429,6 @@ def _bgr_to_rgb(bgr: UInt8[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
     return rgb_frame
 
 
-def _extract_wilor_uv(wilor_pred: FinalWilorPred | KeypointResults) -> Float32[ndarray, "1 21 2"]:
-    raw_uv: Float[ndarray, "1 21 2"] = (
-        wilor_pred.keypoints_2d if isinstance(wilor_pred, KeypointResults) else wilor_pred.pred_keypoints_2d
-    )
-    pred_uv: Float32[ndarray, "1 21 2"] = np.asarray(raw_uv, dtype=np.float32)
-    return pred_uv
-
-
 def _cam_pinhole_log_path(cam_paths: dict[str, Path] | None, name: str, view_idx: int, *, parent_log_path: Path, side: str) -> Path:
     """Resolve a camera's pinhole entity path from the rig layout.
 
@@ -680,9 +672,7 @@ def run_model_backed_pipeline(
     )
 
     rr.set_time(timeline=timeline, duration=np.timedelta64(0, "ns"), recording=recording)
-    hand_kpt_detector: WilorHandKeypointDetector = WilorHandKeypointDetector(
-        cfg=HandKeypointDetectorConfig(verbose=False)
-    )
+    hand_kpt_detector: WilorKeypointRefiner = WilorKeypointRefiner()
     camera_selection: PoseCameraSelection | None = None
     if config.camera_source == "dataset" or (config.camera_source == "auto" and dataset_cameras_available):
         camera_selection = _select_pose_camera_params(
@@ -950,14 +940,7 @@ def run_model_backed_pipeline(
                     expansion_ratio=bbox_expansion_percentage,
                 )
                 if left_bbox_infer is not None:
-                    xyxy_left: Float32[ndarray, "1 4"] = left_bbox_infer[np.newaxis, :]
-                    wilor_left: FinalWilorPred | KeypointResults = hand_kpt_detector(
-                        rgb_hw3=rgb_hw3,
-                        xyxy=xyxy_left,
-                        handedness="left",
-                    )
-                    left_uv_pred: Float32[ndarray, "1 21 2"] = _extract_wilor_uv(wilor_left)
-                    uv[LEFT_HAND_IDX, :] = left_uv_pred[0]
+                    uv[LEFT_HAND_IDX, :] = hand_kpt_detector(rgb_hw3, left_bbox_infer.astype(np.float32), "left")
 
                 right_bbox_infer: Float32[ndarray, "4"] | None = compute_square_bbox(
                     uv[RIGHT_HAND_IDX, :],
@@ -965,14 +948,7 @@ def run_model_backed_pipeline(
                     expansion_ratio=bbox_expansion_percentage,
                 )
                 if right_bbox_infer is not None:
-                    xyxy_right: Float32[ndarray, "1 4"] = right_bbox_infer[np.newaxis, :]
-                    wilor_right: FinalWilorPred | KeypointResults = hand_kpt_detector(
-                        rgb_hw3=rgb_hw3,
-                        xyxy=xyxy_right,
-                        handedness="right",
-                    )
-                    right_uv_pred: Float32[ndarray, "1 21 2"] = _extract_wilor_uv(wilor_right)
-                    uv[RIGHT_HAND_IDX, :] = right_uv_pred[0]
+                    uv[RIGHT_HAND_IDX, :] = hand_kpt_detector(rgb_hw3, right_bbox_infer.astype(np.float32), "right")
 
                 left_bbox_log: Float32[ndarray, "4"] | None = compute_square_bbox(
                     uv[LEFT_HAND_IDX, :],

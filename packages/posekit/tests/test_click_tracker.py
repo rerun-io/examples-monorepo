@@ -11,7 +11,7 @@ from posekit.apis.click_tracker import ClickTracker, Point, PointEdit
 from posekit.models.sam2_video import Sam2VideoSegmenterConfig
 
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-CLIP: Path = Path(__file__).resolve().parents[2] / "wilor-nano" / "assets" / "video.mp4"
+CLIP: Path = Path(__file__).resolve().parents[1] / "assets" / "examples" / "hands_video.mp4"
 CHEST: tuple[float, float] = (360.0, 450.0)
 
 

@@ -5,18 +5,20 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
-from egohand_inference.camera.camera_models import create_perspective_remap_gpu
-from egohand_inference.camera.perspective_crop import perspective_crop_geometry
-from egohand_inference.preprocessing.mirroring import mirror_full_image_camera_horizontal
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from posekit.models.egohand_geometry import HandSide, OAKCamera
+from egohand_inference.camera.camera_models import create_perspective_remap_gpu
+from egohand_inference.camera.perspective_crop import perspective_crop_geometry
+from egohand_inference.preprocessing.mirroring import mirror_full_image_camera_horizontal
+from posekit.cameras import CalibratedCamera
+from posekit.models.egohand_geometry import lens_model
 from posekit.ops.crops import remap_frames
+from posekit.predictions import HandSide
 
 
-def prepare_gpu_crops(frames: UInt8[Tensor, "b h w 3"], boxes: dict[str, dict[HandSide, Float32[ndarray, "3"]]], camera: OAKCamera) -> list[dict]:
+def prepare_gpu_crops(frames: UInt8[Tensor, "b h w 3"], boxes: dict[str, dict[HandSide, Float32[ndarray, "3"]]], camera: CalibratedCamera) -> list[dict]:
     """Prepare model crops while retaining source-camera metadata for restoration.
 
     Small perimeter inversions stay on CPU. Full raster projection, sampling,
@@ -27,13 +29,14 @@ def prepare_gpu_crops(frames: UInt8[Tensor, "b h w 3"], boxes: dict[str, dict[Ha
     ]
     if not jobs:
         return []
+    model = lens_model(camera)
     with ThreadPoolExecutor(max_workers=8) as pool:
         geometry: list[tuple[Float64[ndarray, "3 3"], Float64[ndarray, "3"], Float64[ndarray, "3 3"]]] = list(
-            pool.map(lambda job: perspective_crop_geometry(job[2], camera.model, 256), jobs)
+            pool.map(lambda job: perspective_crop_geometry(job[2], model, 256), jobs)
         )
     maps: Float32[Tensor, "n 256 256 2"] = torch.empty((len(jobs), 256, 256, 2), device=frames.device, dtype=torch.float32)
     for index, (intrinsics, _, rotation) in enumerate(geometry):
-        create_perspective_remap_gpu(camera.model, rotation, float(intrinsics[0, 0]), 256, maps[index].view(-1, 2))
+        create_perspective_remap_gpu(model, rotation, float(intrinsics[0, 0]), 256, maps[index].view(-1, 2))
     mirrored: Bool[Tensor, "n"] = torch.tensor([side == "right" for _, side, _ in jobs], device=frames.device)
     maps = torch.where(mirrored[:, None, None, None], maps.flip(2), maps)
     indices: Int64[Tensor, "n"] = torch.tensor([int(image_id) for image_id, _, _ in jobs], dtype=torch.int64, device=frames.device)

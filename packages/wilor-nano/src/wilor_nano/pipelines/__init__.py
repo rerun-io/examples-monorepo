@@ -1,3 +1,0 @@
-from wilor_nano.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
-
-__all__ = ["WiLorHandPose3dEstimationPipeline"]

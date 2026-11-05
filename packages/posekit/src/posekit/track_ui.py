@@ -70,7 +70,7 @@ EXAMPLE_VIDEOS: list[str] = [
         # robocap segment robocap__f408193e6447b3b0__s00000021, /world/rig_00/cam_0{0,1,2}/pinhole/video
         # (catalog H.264 samples remuxed, cut from t=2s after sensor warm-up, 10 s @ 720p).
         *sorted(_EXAMPLES_DIR.glob("robocap_*.mp4")),
-        Path(__file__).resolve().parents[3] / "wilor-nano" / "assets" / "video.mp4",
+        Path(__file__).resolve().parents[2] / "assets" / "examples" / "hands_video.mp4",
         Path(__file__).resolve().parents[3] / "zipdepth" / "assets" / "examples" / "clip.mp4",
     )
     if path.is_file()

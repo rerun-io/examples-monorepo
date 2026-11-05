@@ -22,7 +22,7 @@ import posekit.track_ui as track_ui
 from posekit.apis.click_tracker import ClickTracker, MaskResult
 from posekit.track_recording import MASK_SCALE, Session, _close_session, _invalidate_track, _mask_hw, _merge_rrd_parts, _open_recording
 
-CLIP: Path = Path(__file__).resolve().parents[2] / "wilor-nano" / "assets" / "video.mp4"
+CLIP: Path = Path(__file__).resolve().parents[1] / "assets" / "examples" / "hands_video.mp4"
 SessionWithMock: TypeAlias = tuple[Session, Mock]
 
 

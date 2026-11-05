@@ -6,7 +6,8 @@ TensorRT**, with everything (video decode included) staying on the GPU.
 
 It replaces the five near-copies of bbox→crop math, heatmap/SimCC decoders,
 and hand-rolled TensorRT runners that lived in sapiens2-pose,
-sapiens-coco133-pose, mamma, wilor-nano, and rtmlib's CPU path.
+sapiens-coco133-pose, mamma, wilor-nano (now `posekit.models.wilor`), and rtmlib's CPU path.
+EgoHand (formerly `packages/egohand`) lives here too; see [Hands](#hands-wilor-and-egohand).
 
 ## How it fits together
 
@@ -98,6 +99,60 @@ pixi run -e posekit --frozen posekit-video-pose --video-path video.mp4 rtdetr vi
 # detect → SAM2 track → pose → CLIP re-ID, streaming (~38 fps end to end)
 pixi run -e posekit --frozen posekit-video-track --video-path video.mp4
 ```
+
+## Hands (WiLoR and EgoHand)
+
+Two roles cover hands. `HandDetector` maps frames to `HandDetections` (boxes plus a
+left/right side per box). `TopDownHandPose3d` maps frames, those detections and an
+optional `CalibratedCamera` (`posekit.cameras`, JSON via `load_calibrated_camera`) to
+`HandPoses3d`: `Keypoints3d` with a hand skeleton, plus per-hand mesh vertices and
+per-side faces. `HandPoses3d.as_hand21()` gives every model the same HAND_21 view.
+
+| Model | Detector | 3D hands | Skeleton | Camera | Backends |
+|---|---|---|---|---|---|
+| WiLoR (`wilor`) | YOLO hand detector | WiLoR ViT + MANO | HAND_21 | not used (virtual camera) | torch fp16, TensorRT |
+| EgoHand (`egohand`) | RT-DETR hand detector | DINOv3 + SOMA hand head | SOMA_HAND (25) | required (perspective crops undo the lens) | torch, TensorRT backbone/detector |
+
+Both run in the `posekit-hands` environment. EgoHand's upstream source is vendored
+under `src/egohand*` with upstream module names (the checkpoint's Hydra targets need
+them); see `src/egohand/VENDORED.md` and its licence files. WiLoR's network lives in
+`posekit/models/wilor_net/`.
+
+```bash
+# Detect + reconstruct hands on a clip, log 2D boxes/skeletons and 3D joints/meshes to Rerun
+pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/hands.rrd \
+    wilor tensorrt wilor tensorrt
+pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/hands.rrd \
+    egohand onnx egohand
+
+# Ground-truth eval on a fixed HOT3D (Quest 3) + UmeTrack subset from a dataforge catalog
+pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/hands-eval
+
+# Per-frame speed, decoded GPU frame to joints + full mesh, per stage
+pixi run -e posekit-hands --frozen posekit-hands-bench
+```
+
+**Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera
+`cam_00`) and three UmeTrack test segments (`cam_01`), every 10th frame, at most 40
+frames each. Ground truth is dataforge's `hand_pose` layer (UmeTrack landmarks in HAND_21
+order; the derived joint 1 is not scored); a hand counts when at least 15 joints are
+valid. `gt-boxes` crops 1.2x the ground-truth joint box (the paper's protocol);
+`detector` uses each model's own detector and scores hands matched at IoU >= 0.3 with
+the correct side. Metrics follow the EgoHand paper (arXiv 2610.30293, Sec. 6.1): MPJPE
+(wrist-aligned), PA-MPJPE, RTE (root translation, metric models only) in mm and 2D EPE
+in px, each as mean / p90. It writes `results.json` and `hands_eval.rrd` (frames, ground
+truth next to every prediction, per-frame errors as scalars).
+
+EgoHand, HOT3D, `gt-boxes`, mean (mm / px):
+
+| | MPJPE | PA-MPJPE | RTE | 2D EPE |
+|---|---|---|---|---|
+| ours (subset above) | 20.8 | 8.1 | 33.1 | 9.3 |
+| paper, Table 2 (no smoothing) | 18.9 | 9.1 | 36.2 | 16.4 |
+
+The paper does not name its HOT3D split, device or camera, fits SOMA to MANO joints for
+ground truth and runs at another image resolution; treat the comparison as a sanity
+check, not a reproduction. WiLoR has HOT3D in its training data.
 
 ## Click-to-track app (SAM2 + Rerun)
 

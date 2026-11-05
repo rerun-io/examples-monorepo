@@ -278,7 +278,6 @@ jaxopt = ">=0.8.5,<0.9"
 lovely-jax = "*"
 smplx = ">=0.1.28"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-wilor-nano = { path = "packages/wilor-nano", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 timm = "<1.0"
 PyTurboJPEG = ">=1.7.0"
@@ -847,62 +846,6 @@ cwd = "packages/zipdepth"
 description = "Mine Polycam frames with the largest edge-region ZipDepth-PromptDA teacher deviation"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# wilor-nano
-# ═══════════════════════════════════════════════════════════════════════════
-# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
-[feature.wilor-nano]
-platforms = ["linux-64", "linux-aarch64"]
-
-[feature.wilor-nano.dependencies]
-python = "3.12.*"
-dill = ">=0.4.0,<0.5"
-trimesh = "*"
-pyrender = "*"
-torchcodec = "*"
-
-[feature.wilor-nano.pypi-dependencies]
-wilor_nano = { path = "packages/wilor-nano", editable = true }
-trtkit = { path = "packages/trtkit", editable = true }
-# daggr (a personal absolute-path editable dep) was removed for reproducibility;
-# the optional tools/daggr_*.py demos need it installed manually.
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-onnx = ">=1.12.0,<1.18.0"
-onnxscript = "*"
-
-[feature.wilor-nano.activation.env]
-PACKAGE_DIR = "packages/wilor-nano"
-
-[feature.wilor-nano.tasks.wilor-nano-image-example]
-cmd = "python tools/wilor_inference.py --image-path assets/img.png"
-cwd = "packages/wilor-nano"
-description = "Run WiLoR inference on example image"
-
-[feature.wilor-nano.tasks.wilor-nano-video-example]
-cmd = "python tools/wilor_inference.py --video-path assets/video.mp4"
-cwd = "packages/wilor-nano"
-description = "Run WiLoR inference on example video using the original PyTorch path"
-
-[feature.wilor-nano.tasks.wilor-nano-video-trt]
-cmd = "python tools/wilor_inference_trt.py"
-cwd = "packages/wilor-nano"
-description = "Run WiLoR video inference with the accepted batched TensorRT detector and full-WiLor backend"
-
-[feature.wilor-nano.tasks.wilor-nano-export-onnx]
-cmd = "python tools/conversion/export_wilor_onnx.py"
-cwd = "packages/wilor-nano"
-description = "Export WiLoR ONNX graphs used to rebuild TensorRT engines"
-
-[feature.wilor-nano.tasks.wilor-nano-build-trt]
-cmd = "python tools/conversion/build_wilor_tensorrt.py"
-cwd = "packages/wilor-nano"
-description = "Build machine-local WiLoR TensorRT engines from exported ONNX graphs"
-
-[feature.wilor-nano.tasks.wilor-nano-compare-reference]
-cmd = "python tools/compare_rrd_reference.py --reference-rrd tests/reference_data/wilor_video_30.rrd --candidate-rrd /tmp/wilor_candidate.rrd --index video_time --rtol 0.01 --atol 0.25"
-cwd = "packages/wilor-nano"
-description = "Compare a candidate WiLoR RRD against the checked-in reference RRD"
-
-# ═══════════════════════════════════════════════════════════════════════════
 # egoexo-forge
 # ═══════════════════════════════════════════════════════════════════════════
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -972,7 +915,6 @@ posekit = { path = "packages/posekit", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 onnx = "*"
 sam3 = { path = "packages/sam3", editable = true }
-wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 
@@ -1247,7 +1189,6 @@ tyro = ">=0.9.1,<0.10"
 sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
-wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = "*"
 onnxscript = "*"
@@ -1318,7 +1259,8 @@ sam2 = { path = "packages/sam2-streaming", editable = true }
 onnx = "*"
 onnxscript = "*"
 
-# EgoHand keeps its inference dependencies outside the base posekit lane.
+# EgoHand keeps its inference dependencies outside the base posekit lane; its
+# vendored source (src/egohand*) ships inside the posekit package itself.
 [feature.posekit-egohand]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -1329,16 +1271,51 @@ python-dateutil = "<3"
 anyio = "<4.15"
 
 [feature.posekit-egohand.pypi-dependencies]
-egohand-inference = { path = "packages/egohand", editable = true }
 warp-lang = "==1.11.1"
+
+# WiLoR (YOLO hand detector + ViT/RefineNet/MANO) dependencies, outside the base posekit lane.
+[feature.posekit-wilor]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.posekit-wilor.dependencies]
+scikit-image = "*"
+
+[feature.posekit-wilor.pypi-dependencies]
+ultralytics = "==8.4.52"
+roma = "*"
+timm = "*"
 
 # These four existing Transformers wrappers have decorated .to() stubs that
 # pyrefly misbinds as unbound methods in this isolated dependency solve.
 [feature.posekit-egohand.activation.env]
 PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
 
+# Hand demo/eval/benchmark tasks; they run in the posekit-hands envs (EgoHand + WiLoR features).
+[feature.posekit-hands]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.posekit-hands.activation.env]
+PACKAGE_DIR = "packages/posekit"
+
+[feature.posekit-hands.tasks.posekit-video-hands]
+cmd = "python tools/demos/video_hands.py"
+cwd = "packages/posekit"
+description = "Run the GPU video 3D hands demo (hand detector + top-down 3D hands: wilor or egohand) and log to Rerun"
+
+[feature.posekit-hands.tasks.posekit-hands-eval]
+cmd = "python tools/apps/hands_eval.py"
+cwd = "packages/posekit"
+description = "Ground-truth eval of WiLoR and EgoHand on a fixed HOT3D (Quest 3) + UmeTrack subset read from a dataforge catalog (--catalog-url); writes results.json + hands_eval.rrd"
+
+[feature.posekit-hands.tasks.posekit-hands-bench]
+cmd = "python tools/apps/hands_bench.py"
+cwd = "packages/posekit"
+description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
+
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
+# src/egohand* is vendored upstream EgoHand source (untyped), excluded like other vendor boundaries.
+PYREFLY_TARGET = "src/posekit tests tools"
 
 [feature.posekit.tasks.posekit-video-pose]
 cmd = "python tools/demos/video_pose.py"
@@ -3812,17 +3789,6 @@ zipdepth-catalog-dev = { features = [
     "zipdepth-catalog",
     "dev",
 ], solve-group = "zipdepth-catalog", no-default-feature = true }
-wilor-nano = { features = [
-    "common",
-    "cuda",
-    "wilor-nano",
-], solve-group = "wilor-nano", no-default-feature = true }
-wilor-nano-dev = { features = [
-    "common",
-    "cuda",
-    "wilor-nano",
-    "dev",
-], solve-group = "wilor-nano", no-default-feature = true }
 sam3d-body = { features = [
     "common",
     "cuda",
@@ -3898,8 +3864,8 @@ posekit = { features = [
     "cuda",
     "posekit",
 ], solve-group = "posekit", no-default-feature = true }
-egohand = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand"], solve-group = "egohand", no-default-feature = true }
-egohand-dev = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "dev"], solve-group = "egohand", no-default-feature = true }
+posekit-hands = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-hands-dev = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands", "dev"], solve-group = "posekit-hands", no-default-feature = true }
 posekit-dev = { features = [
     "common",
     "cuda",
@@ -4004,11 +3970,13 @@ mv-api = { features = [
     "common",
     "cuda",
     "mv-api",
+    "posekit-wilor",
 ], solve-group = "mv-api", no-default-feature = true }
 mv-api-dev = { features = [
     "common",
     "cuda",
     "mv-api",
+    "posekit-wilor",
     "dev",
 ], solve-group = "mv-api", no-default-feature = true }
 mv-api-catalog = { features = [
@@ -4016,6 +3984,7 @@ mv-api-catalog = { features = [
     "rerun-prerelease",
     "cuda",
     "mv-api",
+    "posekit-wilor",
     "mv-api-catalog",
 ], solve-group = "mv-api-catalog", no-default-feature = true }
 mv-api-catalog-dev = { features = [
@@ -4023,6 +3992,7 @@ mv-api-catalog-dev = { features = [
     "rerun-prerelease",
     "cuda",
     "mv-api",
+    "posekit-wilor",
     "mv-api-catalog",
     "dev",
 ], solve-group = "mv-api-catalog", no-default-feature = true }

@@ -8,7 +8,6 @@ project-includes = [
     "packages/simplecv/simplecv/**/*",
     "packages/prompt-da/src/**/*",
     "packages/zipdepth/zipdepth/**/*",
-    "packages/wilor-nano/src/**/*",
     "packages/sam3d-body/src/**/*",
     "packages/sam3/src/**/*",
     "packages/mv-api/src/**/*",
@@ -70,6 +69,10 @@ project-excludes = [
     "packages/sapiens2-pose/src/sapiens2_pose/assets/**/*",
     "packages/sapiens2-pose/src/sapiens2_pose/sapiens_lite/**/*",
     "packages/lamp/tests/reference_data/lamp/**/*",
+    # Vendored EgoHand/DINOv3 inference source shipped inside posekit (upstream module names).
+    "packages/posekit/src/egohand/**/*",
+    "packages/posekit/src/egohand_inference/**/*",
+    "packages/posekit/src/egohand_dinov3/**/*",
 ]
 
 # Disable heuristics so pyrefly uses only our explicit search-path,
@@ -90,7 +93,6 @@ search-path = [
     "packages/simplecv",
     "packages/prompt-da/src",
     "packages/zipdepth",
-    "packages/wilor-nano/src",
     "packages/sam3d-body/src",
     "packages/sam3/src",
     "packages/mv-api/src",
@@ -115,7 +117,6 @@ search-path = [
     "packages/sapiens2-pose/src",
     "packages/sapiens-coco133-pose/src",
     "packages/posekit/src",
-    "packages/egohand/src",
     "packages/lamp",
     "packages/trtkit/src",
     "packages/egoexo-forge/src",
@@ -133,8 +134,8 @@ search-path = [
 # any import regardless of which package file is open.
 # Requires all *-dev envs installed (pixi install -a)
 site-package-path = [
-    ".pixi/envs/egohand-dev/lib/python3.12/site-packages",
-    ".pixi/envs/egohand-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/posekit-hands-dev/lib/python3.12/site-packages",
+    ".pixi/envs/posekit-hands-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/agent-traces-dev/lib/python3.12/site-packages",
     ".pixi/envs/agent-traces-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/kornia-staging-dev/lib/python3.12/site-packages",
@@ -155,7 +156,6 @@ site-package-path = [
     ".pixi/envs/zipdepth-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/zipdepth-catalog-dev/lib/python3.12/site-packages",
     ".pixi/envs/zipdepth-catalog-dev/lib/python3.12/site-packages/rerun_sdk",
-    ".pixi/envs/wilor-nano-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-dev/lib/python3.12/site-packages",
     ".pixi/envs/mv-api-dev/lib/python3.12/site-packages",

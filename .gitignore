@@ -113,7 +113,6 @@ packages/lamp/data/
 packages/simplecv/simplecv/data/body_models/
 packages/prompt-da/data/
 packages/zipdepth/data/
-packages/wilor-nano/data/
 packages/sam3d-body/data/
 packages/sam3/data/
 packages/sapiens2-pose/data/
@@ -146,9 +145,6 @@ packages/robocap-live/data/
 packages/robocap-live/robocap_live/_core.so
 
 # Package-specific ignores
-packages/wilor-nano/onnx_models/
-packages/wilor-nano/demo/
-packages/wilor-nano/results/
 packages/sapiens2-pose/comparison_outputs/
 packages/simplecv/artifacts/
 

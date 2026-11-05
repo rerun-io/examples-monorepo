@@ -1,16 +1,14 @@
-"""Calibrated OAK camera and explicit anatomical hand correspondences."""
+"""EgoHand's lens model for a calibrated camera, and explicit anatomical hand correspondences."""
 
-from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from functools import cache
 
 import numpy as np
-from egohand_inference.camera.camera_models import CameraModel, load_camera_calibration
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 
-HandSide: TypeAlias = Literal["left", "right"]
-SOMA_HAND21: tuple[int, ...] = (0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24)
-"""Wrist, then thumb/index/middle/ring/little: omit non-thumb metacarpals."""
+from egohand_inference.camera.camera_models import CameraModel, load_camera_calibration
+from posekit.cameras import CalibratedCamera
+from posekit.predictions import SOMA_HAND21, HandSide
 
 
 def detector_hand_side(label: int) -> HandSide:
@@ -33,40 +31,28 @@ def soma_to_hand21(joints: Float32[ndarray, "25 3"]) -> Float32[ndarray, "21 3"]
     return joints[np.asarray(SOMA_HAND21)]
 
 
-@dataclass(frozen=True, slots=True)
-class OAKCamera:
-    """An OAK RGB camera retaining all 14 OpenCV distortion terms."""
+def lens_model(camera: CalibratedCamera) -> CameraModel:
+    """The validated upstream camera for ``camera``, built once per distinct calibration.
 
-    intrinsics: Float64[ndarray, "3 3"]
-    """Pixel intrinsics for the original decoded image."""
-    distortion: Float64[ndarray, "14"]
-    """k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4,tx,ty."""
-    width: int
-    """Original image width."""
-    height: int
-    """Original image height."""
-    model: CameraModel = field(init=False, repr=False)
-    """Validated upstream camera; also used by the inference crop path."""
+    The model caches its GPU lens coefficients, so reusing one instance per
+    calibration keeps them resident across calls.
+    """
+    return _lens_model(camera.lens, camera.intrinsics.tobytes(), camera.distortion.tobytes(), camera.width, camera.height)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "model",
-            load_camera_calibration(
-                {
-                    "model": "RATIONAL_POLYNOMIAL",
-                    "image_width": self.width,
-                    "image_height": self.height,
-                    "camera_matrix": {"matrix_3x3": self.intrinsics},
-                    "distortion_coefficients": self.distortion,
-                }
-            ),
-        )
 
-    def project(self, points: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 2"]:
-        """Project camera-space points through all distortion terms."""
-        return self.model.project(points)
+@cache
+def _lens_model(lens: str, intrinsics: bytes, distortion: bytes, width: int, height: int) -> CameraModel:
+    return load_camera_calibration(
+        {
+            "model": lens,
+            "image_width": width,
+            "image_height": height,
+            "camera_matrix": {"matrix_3x3": np.frombuffer(intrinsics, dtype=np.float64).reshape(3, 3)},
+            "distortion_coefficients": np.frombuffer(distortion, dtype=np.float64),
+        }
+    )
 
-    def unproject(self, pixels: Float64[ndarray, "n 2"]) -> Float64[ndarray, "n 3"]:
-        """Recover unit camera-space rays, rejecting non-invertible pixels."""
-        return self.model.unproject(pixels)
+
+def project(camera: CalibratedCamera, points: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 2"]:
+    """Project camera-space points through every distortion term of ``camera``."""
+    return lens_model(camera).project(points)

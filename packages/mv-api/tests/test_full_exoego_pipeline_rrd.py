@@ -21,7 +21,6 @@ from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, E
 from simplecv.data.exoego.hocap import HocapConfig
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader, VideoReader
-from wilor_nano.hand_keypoints import WilorHandKeypointDetector
 
 from mv_api.api import exoego_nodes, full_exoego_app, full_exoego_pipeline
 from mv_api.api.full_exoego_pipeline import CameraSource, RRDPipelineConfig
@@ -254,7 +253,7 @@ class FakeBodyTracker(MultiviewBodyTracker):
         return pred_state
 
 
-class FakeHandKeypointDetector(WilorHandKeypointDetector):
+class FakeHandKeypointDetector:
     def __init__(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
 
@@ -395,7 +394,7 @@ def test_model_backed_hook_logs_calibrated_predictions_with_fake_models(
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewPredictor", FakeMultiviewPredictor)
     monkeypatch.setattr(full_exoego_pipeline, "run_multiview_calibration", fake_run_multiview_calibration)
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewBodyTracker", FakeBodyTracker)
-    monkeypatch.setattr(full_exoego_pipeline, "WilorHandKeypointDetector", FakeHandKeypointDetector)
+    monkeypatch.setattr(full_exoego_pipeline, "WilorKeypointRefiner", FakeHandKeypointDetector)
     def fake_estimate_voxel_size(points: Float32[ndarray, "num_points 3"], target_points: int) -> float:
         del points, target_points
         return 0.01
@@ -482,7 +481,7 @@ def test_dataset_camera_sources_skip_estimated_environment_logging(
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewPredictor", FakeMultiviewPredictor)
     monkeypatch.setattr(full_exoego_pipeline, "run_multiview_calibration", fail_run_multiview_calibration)
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewBodyTracker", FakeBodyTracker)
-    monkeypatch.setattr(full_exoego_pipeline, "WilorHandKeypointDetector", FakeHandKeypointDetector)
+    monkeypatch.setattr(full_exoego_pipeline, "WilorKeypointRefiner", FakeHandKeypointDetector)
 
     rr_config: RerunTyroConfig = RerunTyroConfig(
         application_id="mv_api_dataset_camera_test",

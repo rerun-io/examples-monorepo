@@ -7,7 +7,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-pytest.importorskip("egohand_inference", reason="EgoHand adapters require the optional posekit-egohand feature (egohand-dev environment)")
+pytest.importorskip("warp", reason="EgoHand needs the posekit-hands Pixi environment (posekit-egohand feature)")
 
 from posekit.models import egohand
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
