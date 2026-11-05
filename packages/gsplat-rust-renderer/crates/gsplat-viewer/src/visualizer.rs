@@ -445,11 +445,6 @@ fn to_core(transform: glam::Affine3A) -> gsplat_core::glam::Affine3A {
     gsplat_core::glam::Affine3A::from_cols_array(&transform.to_cols_array())
 }
 
-/// gsplat-core's glam 0.30 transform as Rerun's glam 0.33 one.
-pub(crate) fn from_core(transform: gsplat_core::glam::Affine3A) -> glam::Affine3A {
-    glam::Affine3A::from_cols_array(&transform.to_cols_array())
-}
-
 // Used only for blueprint-valued components, whose source row ids Rerun deliberately clears.
 fn hash_arrow(data: &re_sdk_types::external::arrow::array::ArrayData, hasher: &mut DefaultHasher) {
     data.len().hash(hasher);

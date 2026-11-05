@@ -12,7 +12,7 @@ gsplat-core = { path = "../gsplat-core" }
 anyhow.workspace = true
 clap.workspace = true
 # Rerun 0.42 is on glam 0.33 (re_math); gsplat-core and Brush stay on the workspace glam 0.30.
-# The viewer speaks Rerun's glam and converts at the gsplat-core boundary (`core_glam`).
+# The viewer speaks Rerun's glam and converts at the gsplat-core boundary (`gsplat_core::glam`).
 glam = "0.33"
 wgpu.workspace = true
 # Published Rerun 0.42.0 crates from crates.io — reproducible from a clean
