@@ -11,6 +11,17 @@ from jaxtyping import Float32, Float64, Int64
 from soma.geometry.transforms import quaternion_multiply_xyzw, quaternion_normalize_xyzw, quaternion_xyzw_to_matrix
 from torch import Tensor, nn
 
+MHR_HAND_IDENTITY: slice = slice(40, 45)
+"""Rows of MHR's 45 identity blend shapes that EgoHand's five hand coefficients drive."""
+MHR_SCALE_PARAMETER_OFFSET: int = 136
+"""Model parameters before MHR's 68 scale parameters: the first scale column of the parameter transform."""
+MHR_JOINTS: int = 127
+"""Joints of the MHR body skeleton."""
+MHR_JOINT_PARAMETERS: int = 7
+"""Parameters per MHR joint: translation xyz, rotation xyz, then log2 scale."""
+MHR_LN2: float = 0.69314718246459961
+"""ln 2 as the float32 literal MHR's TorchScript skeleton multiplies log2 scales by."""
+
 
 class MhrHandRestSkinning(nn.Module):
     """Released MHR shape, double-precision scale FK, and all contributing skin influences."""
@@ -20,9 +31,13 @@ class MhrHandRestSkinning(nn.Module):
         neutral_correctives: Float32[Tensor, "1 v 3"],
     ) -> None:
         super().__init__()
-        self.shape_vectors: Float32[Tensor, "5 m 3"] = character.blend_shape.shape_vectors[40:45, source_vertices].contiguous()
+        self.shape_vectors: Float32[Tensor, "5 m 3"] = character.blend_shape.shape_vectors[MHR_HAND_IDENTITY, source_vertices].contiguous()
         self.mean_shape: Float32[Tensor, "1 m 3"] = character.blend_shape.base_shape[None, source_vertices] + neutral_correctives[:, source_vertices]
-        self.parameter_transform: Float32[Tensor, "127 7 26"] = character.parameter_transform.parameter_transform[:, 136 + scale_indices].reshape(127, 7, 26).contiguous()
+        self.parameter_transform: Float32[Tensor, "127 7 26"] = (
+            character.parameter_transform.parameter_transform[:, MHR_SCALE_PARAMETER_OFFSET + scale_indices]
+            .reshape(MHR_JOINTS, MHR_JOINT_PARAMETERS, len(scale_indices))
+            .contiguous()
+        )
         if torch.count_nonzero(self.parameter_transform[:, 3:6]).item():
             raise ValueError("The released MHR hand scales must not change joint rotations.")
         self.translation_offsets: Float32[Tensor, "127 3"] = character.skeleton.joint_translation_offsets
@@ -52,7 +67,7 @@ class MhrHandRestSkinning(nn.Module):
         """Compute each frame's shaped, scaled source vertices; no learned value is cached."""
         parameters: Float32[Tensor, "b 127 7"] = torch.einsum("jpn,bn->bjp", self.parameter_transform, scales)
         translation: Float64[Tensor, "b 127 3"] = (parameters[..., :3] + self.translation_offsets).double()
-        scale: Float64[Tensor, "b 127"] = torch.exp(parameters[..., 6] * 0.69314718246459961).double()
+        scale: Float64[Tensor, "b 127"] = torch.exp(parameters[..., 6] * MHR_LN2).double()
         for indices, rotation in zip(self.prefix_indices, self.prefix_rotations, strict=True):
             source, target = indices.unbind(0)
             updated_translation: Float64[Tensor, "b k 3"] = translation[:, target] + scale[:, target, None] * torch.einsum("kij,bkj->bki", rotation, translation[:, source])

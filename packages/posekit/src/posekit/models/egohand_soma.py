@@ -16,7 +16,7 @@ from soma.hand.identity_model import MHRHandIdentityModel
 from torch import Tensor
 
 from egohand.models.soma_hand_wrapper import SomaHandWrapper
-from posekit.models.egohand_mhr import MhrHandRestSkinning
+from posekit.models.egohand_mhr import MHR_JOINT_PARAMETERS, MHR_JOINTS, MhrHandRestSkinning
 from posekit.ops.compile import compile_unless_dev
 
 
@@ -33,7 +33,7 @@ class _CudaMHRHand(MHRHandIdentityModel):
         self._hand_vert_ids = torch.as_tensor(self._hand_vert_ids, device=self.device)
         self._wrist_boundary_global = torch.as_tensor(self._wrist_boundary_global, device=self.device)
         self.neutral_correctives: Float32[Tensor, "1 v 3"] = self._mhr_model.module.pose_correctives_model(
-            torch.zeros((1, 889), device=self.device)
+            torch.zeros((1, MHR_JOINTS * MHR_JOINT_PARAMETERS), device=self.device)
         )
         interpolation = self._to_soma_interp
         if self._laplacian_mesh is not None or interpolation.tet_normal_scale != "area":
