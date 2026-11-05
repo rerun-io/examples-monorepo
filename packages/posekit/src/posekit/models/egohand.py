@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from einops import rearrange
 from huggingface_hub import hf_hub_download, snapshot_download
 from jaxtyping import Bool, Float32, Int, Int64, UInt8
 from numpy import ndarray
@@ -106,6 +107,8 @@ class EgoHandDetectorConfig:
     """Hugging Face repo holding hand_detector.onnx."""
     hf_detector_revision: str = "55572ddc93a5916c3e486811dc6e62bb2b7bdb9d"
     """Pinned commit of that repo."""
+    gpu_preprocessing: bool = False
+    """Resize decoded CUDA frames in place of the reference PIL host round trip."""
 
     def weights_path(self) -> Path:
         """The ONNX file: ``weights``, or the pinned download in the Hugging Face cache."""
@@ -138,14 +141,19 @@ class EgoHandDetector(HandDetector):
         width: int = int(frames_rgb.shape[2])
         for start in range(0, len(frames_rgb), self.runtime.spec.max_batch_size):
             stop: int = min(start + self.runtime.spec.max_batch_size, len(frames_rgb))
-            host_frames: UInt8[ndarray, "b h w 3"] = frames_rgb[start:stop].cpu().numpy()
-            with ThreadPoolExecutor(max_workers=min(8, stop - start)) as pool:
-                resized: list[UInt8[ndarray, "640 640 3"]] = list(
-                    pool.map(lambda frame: np.asarray(Image.fromarray(frame).resize((640, 640), Image.Resampling.BILINEAR)).copy(), host_frames)
-                )
-            pixels: Float32[Tensor, "b 3 640 640"] = (
-                torch.from_numpy(np.stack(resized)).permute(0, 3, 1, 2).to(device=frames_rgb.device, dtype=torch.float32) / 255.0
-            )
+            pixels: Float32[Tensor, "b 3 640 640"]
+            if self.config.gpu_preprocessing:
+                pixels = torch.nn.functional.interpolate(
+                    rearrange(frames_rgb[start:stop], "b h w c -> b c h w").float(),
+                    size=(640, 640), mode="bilinear", align_corners=False, antialias=True,
+                ).round().clamp_(0, 255) / 255.0
+            else:
+                host_frames: UInt8[ndarray, "b h w 3"] = frames_rgb[start:stop].cpu().numpy()
+                with ThreadPoolExecutor(max_workers=min(8, stop - start)) as pool:
+                    resized: list[UInt8[ndarray, "640 640 3"]] = list(
+                        pool.map(lambda frame: np.asarray(Image.fromarray(frame).resize((640, 640), Image.Resampling.BILINEAR)).copy(), host_frames)
+                    )
+                pixels = torch.from_numpy(np.stack(resized)).permute(0, 3, 1, 2).to(device=frames_rgb.device, dtype=torch.float32) / 255.0
             outputs: dict[str, Tensor] = run_chunked(
                 self.runtime,
                 {

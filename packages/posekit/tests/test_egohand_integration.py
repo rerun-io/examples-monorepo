@@ -201,3 +201,34 @@ def test_tensorrt_backbone_setup_never_builds_the_eager_backbone(monkeypatch: py
     names = [name for name, _ in model.predictor.model.named_parameters()]
     assert names, "the hand head is still loaded"
     assert not [name for name in names if name.startswith("backbone.")]
+
+
+def test_gpu_detector_preprocessing_preserves_boxes_and_sides() -> None:
+    """GPU input preparation keeps the detector's anatomical decisions and boxes."""
+    from dataclasses import replace
+
+    from torchcodec.decoders import VideoDecoder
+
+    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.models.egohand import selfcap_egohand_configs
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    video: Path = EXAMPLES / "selfcap_oak_left.mp4"
+    if not video.is_file():
+        pytest.skip(f"missing detector parity fixture: {video}")
+    config, _ = selfcap_egohand_configs(None)
+    decoder = VideoDecoder(video, dimension_order="NHWC", device="cuda")
+    frames = decoder.get_frames_at([0, 20, 40, 60, 80]).data.contiguous()
+    detector = config.setup()
+    expected = detector(frames)
+    detector.config = replace(config, gpu_preprocessing=True)
+    result = detector(frames)
+    assert result.sides == expected.sides
+    assert torch.equal(result.boxes.frame_indices, expected.boxes.frame_indices)
+    low = torch.maximum(result.boxes.xyxy[:, :2], expected.boxes.xyxy[:, :2])
+    high = torch.minimum(result.boxes.xyxy[:, 2:], expected.boxes.xyxy[:, 2:])
+    intersection = (high - low).clamp_min(0).prod(-1)
+    area = (result.boxes.xyxy[:, 2:] - result.boxes.xyxy[:, :2]).prod(-1)
+    reference_area = (expected.boxes.xyxy[:, 2:] - expected.boxes.xyxy[:, :2]).prod(-1)
+    assert torch.all(intersection / (area + reference_area - intersection) >= 0.85)
