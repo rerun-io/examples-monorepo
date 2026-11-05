@@ -45,7 +45,8 @@ limit use the same GPU pipeline without whole-frame capture.
 
 The first setup exports missing artifacts and builds the local TensorRT
 engines. Source weights are pinned to `SAM3D_BODY_REVISION`. The quantized
-backbone filename includes the measured calibration, FP8 tail length and source-export version. The source preserves
+backbone filename includes the measured calibration, complete per-module
+precision plan, FP8 tail length and source-export version. The source preserves
 the eager model's BF16 tokens, normalization and residual arithmetic. Engines
 use trtkit's normal machine-local cache. Setup, export,
 engine build and graph warmup are excluded from steady-state timing.
@@ -57,6 +58,14 @@ TensorRT, with the same decoder layers, geometry and graph execution. On the
 CLI, append `--backbone-precision bf16` after `sam3d-body-fast`.
 `capture_pipeline=False` retains the per-decoder capture path for comparisons.
 These are config choices; callers do not need backend-specific branches.
+
+`backbone_plan` can override individual linear or attention modules.
+`hand_backbone_plan` applies additional overrides for the hand passes, which
+use their own TensorRT context and artifact. A separate hand plan requires GPU
+preprocessing; the CPU-crop comparison path rejects it. Module plans require
+the quantized TensorRT path. To mix BF16 with quantized modules, use BF16
+overrides in the plan; the wholly unquantized and Torch paths reject plans
+that they cannot apply.
 
 ## Calibration and accuracy
 

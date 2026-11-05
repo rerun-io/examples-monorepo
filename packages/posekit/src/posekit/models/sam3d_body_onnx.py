@@ -11,11 +11,12 @@ from trtkit.artifacts import build_once
 from trtkit.onnx_qdq import quantize_qdq, save_with_external_data
 
 from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
-from posekit.models.egohand_onnx import backbone_qdq_plan
 from posekit.models.sam3d_body_quantization import (
     BodyBackbonePrecision,
     BodyCalibration,
+    BodyPrecisionPlan,
     body_backbone_path,
+    body_qdq_plan,
 )
 from posekit.runtimes import TensorRuntime, create_runtime_from_onnx, run_chunked
 from sam3d_body.models.backbones.dinov3 import Dinov3Backbone
@@ -42,6 +43,7 @@ class ExportBodyBackbone(nn.Module):
 def build_body_backbone(
     backbone: nn.Module, source_path: Path, quantized_base: Path, calibration: BodyCalibration | None,
     backend: TensorRtBackendConfig, fp8_tail_blocks: int, precision: BodyBackbonePrecision = "nvfp4",
+    *, plan: BodyPrecisionPlan | None = None,
 ) -> TensorRuntime:
     """Export the actual SAM weights at 512 pixels and quantize with their own measured ranges."""
     def export() -> None:
@@ -64,11 +66,11 @@ def build_body_backbone(
         return create_runtime_from_onnx(source_path, backend)
     if calibration is None:
         raise ValueError("The NVFP4 backbone requires measured calibration ranges.")
-    quantized: Path = body_backbone_path(quantized_base, calibration, fp8_tail_blocks, source_version=source_path.name)
+    quantized: Path = body_backbone_path(quantized_base, calibration, fp8_tail_blocks, plan=plan, source_version=source_path.name)
 
     def quantize() -> None:
         build_once(source_path, export)
-        save_with_external_data(quantize_qdq(onnx.load(str(source_path)), backbone_qdq_plan(calibration, fp8_tail_blocks=fp8_tail_blocks)), quantized)
+        save_with_external_data(quantize_qdq(onnx.load(str(source_path)), body_qdq_plan(calibration, fp8_tail_blocks, plan)), quantized)
 
     build_once(quantized, quantize)
     return create_runtime_from_onnx(quantized, backend)

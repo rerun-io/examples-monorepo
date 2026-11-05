@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -53,18 +54,80 @@ def test_fast_config_selects_calibrated_gpu_pipeline_by_default() -> None:
     assert config.decoder_onnx_dir is not None
 
 
+def test_body_precision_plan_can_preserve_outliers_without_changing_other_modules() -> None:
+    from trtkit.onnx_qdq import Fp8Linear, KeepPrecision, Nvfp4Linear
+
+    from posekit.models.sam3d_body_quantization import BodyPrecisionPlan, body_qdq_plan, load_body_calibration
+
+    calibration = load_body_calibration()
+    plan = body_qdq_plan(calibration, 8, BodyPrecisionPlan(
+        linears={"encoder.blocks.22.mlp.w3": "bf16", "encoder.blocks.0.attn.qkv": "fp8"},
+        attention={22: "bf16"},
+    ))
+    assert isinstance(plan.modules["encoder.blocks.22.mlp.w3"], KeepPrecision)
+    assert isinstance(plan.modules["encoder.blocks.0.attn.qkv"], Fp8Linear)
+    assert isinstance(plan.modules["encoder.blocks.0.mlp.w3"], Nvfp4Linear)
+    assert isinstance(plan.modules["encoder.blocks.31.mlp.w3"], Fp8Linear)
+    assert isinstance(plan.attention[22], KeepPrecision)
+
+
+def test_body_precision_plan_rejects_misspelled_modules() -> None:
+    from posekit.models.sam3d_body_quantization import BodyPrecisionPlan, body_qdq_plan, load_body_calibration
+
+    with pytest.raises(ValueError, match="Unknown"):
+        body_qdq_plan(load_body_calibration(), 8, BodyPrecisionPlan(linears={"encoder.block.22.mlp.w3": "bf16"}))
+
+
+def test_body_artifact_identity_includes_complete_plan_and_source_version() -> None:
+    from posekit.models.sam3d_body_quantization import BodyPrecisionPlan, body_backbone_path, load_body_calibration
+
+    calibration = load_body_calibration()
+    base = Path("backbone.onnx")
+    kept = BodyPrecisionPlan(linears={"encoder.blocks.22.mlp.w3": "bf16"})
+    fp8 = BodyPrecisionPlan(linears={"encoder.blocks.22.mlp.w3": "fp8"})
+    original = body_backbone_path(base, calibration, 8, plan=kept, source_version="v3")
+    assert body_backbone_path(original, calibration, 8, plan=kept, source_version="v3") == original
+    assert body_backbone_path(base, calibration, 8, plan=fp8, source_version="v3") != original
+    assert body_backbone_path(base, calibration, 8, plan=kept, source_version="v4") != original
+    assert body_backbone_path(base, calibration, 8, plan=BodyPrecisionPlan(attention={22: "bf16"}), source_version="v3") != original
+    reordered = BodyPrecisionPlan(linears={"encoder.blocks.0.mlp.w3": "fp8", "encoder.blocks.22.mlp.w3": "bf16"})
+    reversed_order = BodyPrecisionPlan(linears=dict(reversed(list(reordered.linears.items()))))
+    assert body_backbone_path(base, calibration, 8, plan=reordered) == body_backbone_path(base, calibration, 8, plan=reversed_order)
+
+
+def test_fast_config_accepts_separate_body_and_hand_precision_plans() -> None:
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+    from posekit.models.sam3d_body_quantization import BodyPrecisionPlan
+
+    body = BodyPrecisionPlan(linears={"encoder.blocks.22.mlp.w3": "bf16"})
+    hand = BodyPrecisionPlan(attention={31: "bf16"})
+    config = Sam3dBodyFastConfig(backbone_plan=body, hand_backbone_plan=hand)
+    assert config.backbone_plan == body
+    assert config.hand_backbone_plan == hand
+
+
+def test_cpu_crop_ablation_rejects_a_hand_precision_plan_it_cannot_apply() -> None:
+    """The shared-backbone ablation must not silently ignore a requested hand plan."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+    from posekit.models.sam3d_body_quantization import BodyPrecisionPlan
+
+    with pytest.raises(ValueError, match="hand.*GPU"):
+        Sam3dBodyFastConfig(gpu_preprocessing=False, hand_backbone_plan=BodyPrecisionPlan(attention={31: "bf16"}))
 
 
 
 
+@pytest.mark.parametrize("backbone_onnx,precision", [(None, "nvfp4"), (Path("backbone.onnx"), "bf16")])
+def test_unquantized_backbones_reject_precision_plans_they_cannot_apply(backbone_onnx: Path | None, precision: Literal["nvfp4", "bf16"]) -> None:
+    """An explicit module precision must not be silently ignored by an unquantized path."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+    from posekit.models.sam3d_body_quantization import BodyPrecisionPlan
 
-
-
-
-
-
-
-
+    with pytest.raises(ValueError, match="precision plans require"):
+        Sam3dBodyFastConfig(
+            backbone_onnx=backbone_onnx, backbone_precision=precision,
+            hand_backbone_plan=BodyPrecisionPlan(attention={31: "fp8"}),
+        )
 
 
 

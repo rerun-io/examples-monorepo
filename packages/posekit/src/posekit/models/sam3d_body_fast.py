@@ -13,7 +13,7 @@ from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from posekit.cameras import CalibratedCamera, CameraKey, camera_key
 from posekit.models.sam3d_body import ROOT_INDICES, SAM3D_BODY_REVISION, Sam3dBodyConfig, Sam3dBodyPredictor, Sam3dBodyReconstruction
-from posekit.models.sam3d_body_quantization import BodyBackbonePrecision
+from posekit.models.sam3d_body_quantization import BodyBackbonePrecision, BodyPrecisionPlan
 from posekit.predictions import BoxDetections, Keypoints3d, validate_frames_rgb
 
 CACHED_BODY_BACKBONE: Path = DEFAULT_TRT_CACHE_DIR / "sam3d-body-backbone-nvfp4.onnx"
@@ -46,6 +46,19 @@ class Sam3dBodyFastConfig(Sam3dBodyConfig):
     """SAM-specific 512-pixel ranges; None loads the committed disjoint phone split."""
     fp8_tail_blocks: int = 8
     """Final backbone blocks that use FP8 linears instead of NVFP4."""
+    backbone_plan: BodyPrecisionPlan = field(default_factory=BodyPrecisionPlan)
+    """Per-module body backbone precision overrides, applied after the FP8 tail selection."""
+    hand_backbone_plan: BodyPrecisionPlan = field(default_factory=BodyPrecisionPlan)
+    """Additional hand backbone precision overrides, applied after the body plan."""
+
+    def __post_init__(self) -> None:
+        if (
+            (self.backbone_onnx is None or self.backbone_precision == "bf16")
+            and (self.backbone_plan.linears or self.backbone_plan.attention or self.hand_backbone_plan.linears or self.hand_backbone_plan.attention)
+        ):
+            raise ValueError("Module precision plans require backbone_onnx and backbone_precision='nvfp4'. Use BF16 overrides within the plan for mixed precision.")
+        if not self.gpu_preprocessing and (self.hand_backbone_plan.linears or self.hand_backbone_plan.attention):
+            raise ValueError("A separate hand backbone plan requires GPU preprocessing.")
 
     def setup(self) -> "FastSam3dBodyPredictor":
         """Load the model and prepare capture-safe decoders."""
@@ -92,6 +105,7 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
             backbone = TensorRtBodyBackbone(build_body_backbone(
                 torch_backbone, config.backbone_source_onnx, config.backbone_onnx, calibration,
                 backend, config.fp8_tail_blocks, config.backbone_precision,
+                plan=config.backbone_plan,
             ))
             if config.gpu_preprocessing and config.mode == "full":
                 # TensorRT performs a host synchronization after a shape change.
@@ -100,6 +114,10 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
                 hand_backbone = TensorRtBodyBackbone(build_body_backbone(
                     torch_backbone, config.backbone_source_onnx, config.backbone_onnx, calibration,
                     backend, config.fp8_tail_blocks, config.backbone_precision,
+                    plan=BodyPrecisionPlan(
+                        linears=config.backbone_plan.linears | config.hand_backbone_plan.linears,
+                        attention=config.backbone_plan.attention | config.hand_backbone_plan.attention,
+                    ),
                 ))
             model.add_module("backbone", backbone)
         assert isinstance(model.head_pose, MHRHead) and isinstance(model.head_pose_hand, MHRHead)

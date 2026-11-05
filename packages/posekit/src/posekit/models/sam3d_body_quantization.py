@@ -3,7 +3,8 @@
 import hashlib
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
+from json import dumps
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -12,6 +13,7 @@ from jaxtyping import UInt8
 from serde import SerdeError, from_dict, serde
 from serde.json import to_json
 from torch import Tensor
+from trtkit.onnx_qdq import Fp8Attention, Fp8Linear, KeepPrecision, ModulePrecision, Nvfp4Linear, QdqPlan
 
 from posekit.models.calibration_rrd import (
     CalibrationColumn,
@@ -21,7 +23,8 @@ from posekit.models.calibration_rrd import (
     read_calibration_rrd,
     write_calibration_rrd,
 )
-from posekit.models.dinov3_calibration import CALIBRATED_ATTENTION_INPUTS, CALIBRATED_LINEARS
+from posekit.models.dinov3_calibration import CALIBRATED_ATTENTION_INPUTS, CALIBRATED_LINEARS, DINO_BLOCKS
+from posekit.models.egohand_onnx import backbone_qdq_plan
 from posekit.models.sam3d_body import Sam3dBodyConfig
 from posekit.predictions import BoxDetections
 
@@ -29,6 +32,20 @@ BodyBackbonePrecision: TypeAlias = Literal["nvfp4", "bf16"]
 """Calibrated mixed NVFP4/FP8, or the unchanged BF16 ONNX export."""
 BODY_CALIBRATION_MODEL: str = "sam3d-body"
 """Model name and recording id of the SAM body calibration .rrd."""
+
+
+@dataclass(frozen=True, slots=True)
+class BodyPrecisionPlan:
+    """Explicit SAM-only changes to the calibrated NVFP4/FP8 tail recipe."""
+
+    linears: dict[str, Literal["nvfp4", "fp8", "bf16"]] = field(default_factory=dict)
+    """Precision overrides keyed by the complete encoder linear module name."""
+    attention: dict[int, Literal["fp8", "bf16"]] = field(default_factory=dict)
+    """Q/K/V precision overrides keyed by encoder block index."""
+
+    def __post_init__(self) -> None:
+        if any(not 0 <= index < DINO_BLOCKS for index in self.attention):
+            raise ValueError(f"Attention block indices must be between 0 and {DINO_BLOCKS - 1}.")
 
 
 @serde(deny_unknown_fields=True)
@@ -146,14 +163,41 @@ def write_body_calibration(path: Path, calibration: BodyCalibration) -> None:
 
 
 def body_backbone_path(
-    base: Path, calibration: BodyCalibration, fp8_tail_blocks: int, *, source_version: str = "native-bf16-v3",
+    base: Path, calibration: BodyCalibration, fp8_tail_blocks: int, *,
+    plan: BodyPrecisionPlan | None = None, source_version: str = "native-bf16-v3",
 ) -> Path:
-    """Identify the calibrated tail and source export independently of engine tuning."""
-    digest: str = hashlib.sha256((to_json(calibration) + source_version + str(fp8_tail_blocks)).encode()).hexdigest()[:16]
+    """Identify weights, calibration, the complete precision plan, and the source export."""
+    resolved: QdqPlan = body_qdq_plan(calibration, fp8_tail_blocks, plan)
+    encoded: str = dumps({
+        "source_version": source_version,
+        "modules": {name: (type(precision).__name__, asdict(precision)) for name, precision in resolved.modules.items()},
+        "attention": [(type(precision).__name__, asdict(precision)) for precision in resolved.attention],
+        "weight_device": resolved.weight_device,
+    }, sort_keys=True, separators=(",", ":"))
+    digest: str = hashlib.sha256((to_json(calibration) + encoded).encode()).hexdigest()[:16]
     suffix: str = f"-{digest}-fp8tail{fp8_tail_blocks}"
     return base if base.stem.endswith(suffix) else base.with_stem(f"{base.stem}{suffix}")
 
 
+def body_qdq_plan(calibration: BodyCalibration, fp8_tail_blocks: int, overrides: BodyPrecisionPlan | None = None) -> QdqPlan:
+    """Bind explicit SAM module choices to calibration without changing the EgoHand recipe."""
+    baseline: QdqPlan = backbone_qdq_plan(calibration, fp8_tail_blocks=fp8_tail_blocks)
+    if overrides is None:
+        return baseline
+    unknown: set[str] = set(overrides.linears).difference(baseline.modules)
+    if unknown:
+        raise ValueError(f"Unknown SAM backbone linear modules: {sorted(unknown)}")
+    modules: dict[str, ModulePrecision | KeepPrecision] = dict(baseline.modules)
+    for name, precision in overrides.linears.items():
+        original: ModulePrecision | KeepPrecision = baseline.modules[name]
+        assert isinstance(original, (Nvfp4Linear, Fp8Linear))
+        modules[name] = (KeepPrecision() if precision == "bf16" else
+                         Fp8Linear(original.input_amax) if precision == "fp8" else Nvfp4Linear(original.input_amax))
+    attention: list[Fp8Attention | KeepPrecision] = list(baseline.attention)
+    for index, precision in overrides.attention.items():
+        if precision == "bf16":
+            attention[index] = KeepPrecision()
+    return QdqPlan(modules, tuple(attention), weight_device=baseline.weight_device)
 
 
 
