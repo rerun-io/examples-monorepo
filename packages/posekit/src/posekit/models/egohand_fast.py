@@ -65,7 +65,9 @@ class EgoHandFastConfig:
     padding: float = 0.2
     """Added fraction of the square detector crop side."""
     backbone_onnx: Path = CACHED_FAST_BACKBONE_ONNX
-    """Base path of the quantized DINOv3, exported from the bf16 DINOv3 that sits beside it when absent."""
+    """Base path of the quantized DINOv3; the calibration digest and FP8 tail count are appended to its stem."""
+    backbone_source_onnx: Path = CACHED_BACKBONE_ONNX
+    """bf16 DINOv3 that the quantized backbone is made from; exported from these weights when absent."""
     head_onnx: Path = CACHED_HEAD_ONNX
     """BF16 heads artifact; exported from these weights when absent."""
     backbone_backend: TensorRtBackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2))
@@ -88,17 +90,22 @@ class EgoHandFastConfig:
         return FastEgoHandPredictor(self)
 
 
-def _export_quantized_backbone_once(
-    config: EgoHandFastConfig, weights: Path, soma: Path, onnx: Path, calibration: EgoHandCalibration
-) -> None:
-    """Quantize the bf16 DINOv3 beside ``onnx`` once, exporting that bf16 source first when it is missing."""
+def export_quantized_backbone_once(config: EgoHandFastConfig, weights: Path, soma: Path, calibration: EgoHandCalibration) -> Path:
+    """Quantize ``config.backbone_source_onnx`` once, exporting that bf16 source first when it is missing.
+
+    Returns:
+        The quantized backbone, named by its calibration digest and FP8 tail count.
+    """
+    onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
 
     def quantize() -> None:
-        source: Path = onnx.with_name(CACHED_BACKBONE_ONNX.name)
-        export_backbone_once(weights, soma, source, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size)
-        quantize_backbone(source, onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
+        export_backbone_once(
+            weights, soma, config.backbone_source_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size
+        )
+        quantize_backbone(config.backbone_source_onnx, onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
 
     build_once(onnx, quantize)
+    return onnx
 
 
 def _export_head_once(model: EgoHand, onnx: Path, max_batch_size: int) -> None:
@@ -134,8 +141,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         weights: Path = egohand_weights_path(config.weights, config.hf_egohand_repo_id, config.hf_egohand_revision)
         soma: Path = soma_assets_path(config.soma_assets, config.hf_soma_repo_id, config.hf_soma_revision)
         calibration: EgoHandCalibration = load_calibration(config.calibration)
-        backbone_onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
-        _export_quantized_backbone_once(config, weights, soma, backbone_onnx, calibration)
+        backbone_onnx: Path = export_quantized_backbone_once(config, weights, soma, calibration)
         model, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
         predictor: UpstreamPredictor = UpstreamPredictor(model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True)
         self.faces: dict[HandSide, Tensor] = {
@@ -205,8 +211,8 @@ def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorCon
     """SelfCap's EgoHand detector with GPU resizing, an FP16 trunk and CUDA-graph replay, and the fast hand pose role.
 
     Args:
-        assets: Local weights/engines tree (``weights/...``, ``engines/``); ``None`` takes the
-            pinned downloads and the trtkit engine cache.
+        assets: Local weights/engines tree (``weights/...``, ``dinov3-bf16.onnx``, ``engines/``);
+            ``None`` takes the pinned downloads and the trtkit engine cache.
 
     Returns:
         The detector and predictor configurations.
@@ -223,6 +229,7 @@ def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorCon
             None if assets is None else assets / "weights/egohand/egohand_s060000.safetensors",
             None if assets is None else assets / "weights/soma",
             backbone_onnx=engines / CACHED_FAST_BACKBONE_ONNX.name,
+            backbone_source_onnx=CACHED_BACKBONE_ONNX if assets is None else assets / "dinov3-bf16.onnx",
             head_onnx=engines / CACHED_HEAD_ONNX.name,
             backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2, cache_dir=engines),
         ),
