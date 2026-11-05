@@ -17,6 +17,18 @@ from posekit.models.egohand_geometry import lens_model
 pytestmark = pytest.mark.integration
 
 
+def test_cuda_fisheye_rejects_radii_outside_reference_domain() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    intrinsic = np.array([[500.0, 0.0, 500.0], [0.0, 500.0, 500.0], [0.0, 0.0, 1.0]])
+    camera = CalibratedCamera(intrinsic, np.array([-0.2, 0.0, 0.0, 0.0]), 1000, 1000, "KB4")
+    cropper = CudaHandCropper(camera, torch.device("cuda:0"))
+    pixels = torch.tensor([[[500.0, 750.0], [500.0, 925.0]]], device="cuda", dtype=torch.float64)
+    expected = lens_model(camera).unproject(pixels.cpu().numpy())
+    assert np.isfinite(expected[0, 0]).all() and np.isnan(expected[0, 1]).all()
+    np.testing.assert_allclose(cropper.unproject(pixels).cpu().numpy(), expected, atol=2e-7, rtol=2e-7)
+
+
 @pytest.mark.parametrize("lens", ["RATIONAL_POLYNOMIAL", "PINHOLE", "KB4", "FISHEYE624"])
 def test_cuda_inverse_and_virtual_camera_match_reference(lens: LensModel) -> None:
     if not torch.cuda.is_available():

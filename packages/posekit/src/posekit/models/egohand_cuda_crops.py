@@ -84,6 +84,23 @@ def _inverse(pixel: wp.vec2d, intrinsic: wp.vec4d, coefficients: wp.array(dtype=
     check = _project(wp.vec3d(x, y, wp.float64(1.0)), intrinsic, coefficients, tilt, radius_bound, radial_count) - pixel
     if not wp.isfinite(check[0]) or not wp.isfinite(check[1]) or wp.max(wp.abs(check[0]), wp.abs(check[1])) > wp.float64(1e-6):
         return wp.vec3d(wp.float64(wp.nan), wp.float64(wp.nan), wp.float64(wp.nan))
+    if radial_count > 0:
+        # The released inverse rejects radial coordinates beyond the polynomial
+        # at pi/2, even when a non-monotonic polynomial admits another solution.
+        # Accepting that solution expands edge crops and changes predicted depth.
+        theta = wp.atan(wp.sqrt(x * x + y * y))
+        half_pi = wp.float64(1.5707963267948966)
+        radial = wp.float64(1.0)
+        maximum_radial = wp.float64(1.0)
+        power = theta * theta
+        maximum_power = half_pi * half_pi
+        for i in range(radial_count):
+            radial += coefficients[i] * power
+            maximum_radial += coefficients[i] * maximum_power
+            power *= theta * theta
+            maximum_power *= half_pi * half_pi
+        if theta * radial >= half_pi * maximum_radial:
+            return wp.vec3d(wp.float64(wp.nan), wp.float64(wp.nan), wp.float64(wp.nan))
     return wp.normalize(wp.vec3d(x, y, wp.float64(1.0)))
 
 
