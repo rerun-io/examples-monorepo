@@ -2,16 +2,16 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields
+from typing import TypeAlias
 
 import torch
-import warp as wp
 from jaxtyping import Float, Float32, Int64
 from soma.geometry.rig_utils import precompute_joint_orient, remove_joint_orient_local
 from torch import Tensor
 
 from egohand.models.egohand import EgoHand
 from egohand_inference.pipeline.predictor import EgoHandPredictor
-from posekit.models.egohand_capture import capture_hand_graph
+from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_cuda_crops import CudaHandCropper, PreparedHandCrops
 from posekit.models.egohand_head import EgoHandHead, solve_virtual_translation
 from posekit.models.egohand_soma import prepare_cuda_soma
@@ -59,24 +59,20 @@ class _VirtualHand:
     """Untranslated full SOMA vertices."""
 
 
+StageEvents: TypeAlias = dict[str, tuple[torch.cuda.Event, torch.cuda.Event]]
+"""CUDA event pairs around the captured backbone, head and SOMA work."""
+
+
 @dataclass(frozen=True, slots=True)
 class _CapturedHand:
-    """Graph inputs, outputs and external resources with one lifetime."""
+    """What one replay hands back: model output storage, its stage events and the batch's static wrist orientation."""
 
-    graph: torch.cuda.CUDAGraph
-    """Captured backbone, heads and SOMA work."""
-    crops: Float32[Tensor, "n 3 256 256"]
-    """Stable image input storage."""
-    focal: Float32[Tensor, "n"]
-    """Stable virtual-camera focal input."""
-    output: _VirtualHand
-    """Captured model output storage."""
-    events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]]
-    """External timing events retained until graph destruction."""
-    right_indices: Int64[Tensor, "r"]
-    """Captured indexing storage for mirrored hands."""
+    hand: _VirtualHand
+    """Captured model output storage, overwritten by the next replay."""
+    events: StageEvents
+    """Events recorded by the captured work."""
     wrist_orientation: Float32[Tensor, "n 3 3"]
-    """Static hand-dependent orientation for restoring source-camera axes."""
+    """SOMA wrist orientation of each hand's side, left hands first."""
 
 
 def _to_source_camera(
@@ -115,9 +111,10 @@ class EgoHandTensorExecutor:
         self.right_parents: Int64[Tensor, "25"] = torch.as_tensor(right.joint_parent_ids, device="cuda", dtype=torch.int64)
         self.right_orient, self.right_parent_orient = precompute_joint_orient(right.t_pose_world, right.joint_parent_ids)
         self.reflection: Float32[Tensor, "3"] = torch.tensor([-1.0, 1.0, 1.0], device="cuda")
-        self.graphs: dict[tuple[int, int], _CapturedHand] = {}
-        """Captured hands by hand count and right-hand count; left hands come first in every graph."""
-        self.stage_events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]] = {}
+        # Captured hands by hand count and right-hand count; left hands come first in every graph.
+        self.graphs: dict[tuple[int, int], CapturedGraph[_CapturedHand]] = {}
+        self.pool: GraphPool = torch.cuda.graph_pool_handle()
+        self.stage_events: StageEvents = {}
         assert predictor._model_wrist_orients is not None
         self.wrist_orientations: dict[HandSide, Float32[Tensor, "3 3"]] = {
             side: torch.as_tensor(orientation, device="cuda", dtype=torch.float32)
@@ -126,14 +123,9 @@ class EgoHandTensorExecutor:
         self.stage_ms: dict[str, float] = {}
         self.batch_size: int = min(predictor.batch_size, head_runtime.spec.max_batch_size) if head_runtime is not None else predictor.batch_size
 
-    def __del__(self) -> None:
-        """Destroy captured work while its external events and model buffers are still alive."""
-        for state in getattr(self, "graphs", {}).values():
-            state.graph.reset()
-
     def _run(
         self, crops: Float32[Tensor, "n 3 256 256"], focal: Float32[Tensor, "n"], right_indices: Int64[Tensor, "r"],
-        events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]],
+        events: StageEvents,
     ) -> _VirtualHand:
         """Execute the released heads and full mesh using retained device inputs."""
         model: EgoHand = self.predictor.model
@@ -210,28 +202,22 @@ class EgoHandTensorExecutor:
         count: int = len(crops)
         key: tuple[int, int] = (count, right_count)
         if key not in self.graphs:
-            static_crops: Float32[Tensor, "n 3 256 256"] = crops.clone()
-            static_focal: Float32[Tensor, "n"] = focal.clone()
+            inputs: tuple[Tensor, ...] = (crops.clone(), focal.clone())
             right_indices: Int64[Tensor, "r"] = torch.arange(count - right_count, count, device=device, dtype=torch.int64)
-            events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]] = {name: (torch.cuda.Event(enable_timing=True, external=True), torch.cuda.Event(enable_timing=True, external=True))
-                      for name in ("backbone", "head", "soma")}
-            stream: torch.cuda.Stream = torch.cuda.Stream()
-            warp_stream: wp.Stream = wp.stream_from_torch(stream)
-            stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(stream), wp.ScopedStream(warp_stream):
-                for _ in range(3):
-                    self._run(static_crops, static_focal, right_indices, events)
-            torch.cuda.current_stream().wait_stream(stream)
-            graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
-            with capture_hand_graph(graph, stream, warp_stream):
-                outputs: _VirtualHand = self._run(static_crops, static_focal, right_indices, events)
+            events: StageEvents = {
+                name: (torch.cuda.Event(enable_timing=True, external=True), torch.cuda.Event(enable_timing=True, external=True))
+                for name in ("backbone", "head", "soma")
+            }
             wrist_orientation: Float32[Tensor, "n 3 3"] = torch.stack(
                 [self.wrist_orientations["left"]] * (count - right_count) + [self.wrist_orientations["right"]] * right_count
             )
-            self.graphs[key] = _CapturedHand(graph, static_crops, static_focal, outputs, events, right_indices, wrist_orientation)
-        state: _CapturedHand = self.graphs[key]
-        state.crops.copy_(crops)
-        state.focal.copy_(focal)
-        state.graph.replay()
-        self.stage_events = state.events
-        return _to_source_camera(state.output, prepared.rotation.float(), state.wrist_orientation, cropper.project)
+            model: EgoHand = self.predictor.model
+            self.graphs[key] = CapturedGraph(
+                lambda: _CapturedHand(self._run(inputs[0], inputs[1], right_indices, events), events, wrist_orientation),
+                inputs,
+                pool=self.pool,
+                keep=(right_indices, model, self.head_runtime, self.head, self.right_parents, self.right_orient, self.right_parent_orient, self.reflection),
+            )
+        captured: _CapturedHand = self.graphs[key].replay(crops, focal)
+        self.stage_events = captured.events
+        return _to_source_camera(captured.hand, prepared.rotation.float(), captured.wrist_orientation, cropper.project)

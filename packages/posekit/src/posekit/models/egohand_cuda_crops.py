@@ -10,7 +10,7 @@ from torch import Tensor
 
 from egohand_inference.camera.camera_models import _PerspectiveCamera
 from posekit.cameras import CalibratedCamera
-from posekit.models.egohand_capture import capture_hand_graph
+from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_crops import normalize_crops
 from posekit.models.egohand_geometry import lens_model
 from posekit.models.egohand_lens_kernels import project_joints, remap, unproject_pixels
@@ -56,24 +56,6 @@ class PreparedHandCrops:
     """Virtual-camera to source-camera rotations."""
 
 
-@dataclass(frozen=True, slots=True)
-class _CapturedCrops:
-    """Resources retained until all captured Warp and Torch work is destroyed."""
-
-    graph: torch.cuda.CUDAGraph
-    """Captured crop operations."""
-    frames: UInt8[Tensor, "b h w 3"]
-    """Replay input image storage."""
-    boxes: Float32[Tensor, "n 4"]
-    """Replay input detector boxes."""
-    frame_indices: Int64[Tensor, "n"]
-    """Replay source frame indices."""
-    mirrored: Bool[Tensor, "n"]
-    """Replay anatomical right-hand mask, read by the remap kernel."""
-    output: PreparedHandCrops
-    """Captured output buffers, copied before each public return."""
-
-
 class CudaHandCropper:
     """One camera's immutable lens data shared by inversion, crops and projection."""
 
@@ -87,18 +69,19 @@ class CudaHandCropper:
         self.tilt = wp.vec4d(*np.r_[np.sin(coefficients[-2:]), np.cos(coefficients[-2:])])
         self.radius_bound = wp.float64(model._max_radius_squared if isinstance(model, _PerspectiveCamera) else np.inf)
         self.edge = torch.linspace(0.0, 1.0, 1025, device=device, dtype=torch.float64)
-        self.graphs: dict[tuple[tuple[int, ...], int, float], _CapturedCrops] = {}
-        """Captured crops by frame shape, hand count and padding; the side sequence is replay input."""
+        # Captured crops by frame shape, hand count and padding; boxes and the side sequence are replay inputs.
+        self.graphs: dict[tuple[tuple[int, ...], int, float], CapturedGraph[PreparedHandCrops]] = {}
+        # One static frames buffer per frame shape, shared by every hand count's graph.
+        self.frame_buffers: dict[tuple[int, ...], UInt8[Tensor, "b h w 3"]] = {}
+        self.pool: GraphPool = torch.cuda.graph_pool_handle()
         self.streams: dict[int, wp.Stream] = {}
 
-    def __del__(self) -> None:
-        """Release captured GPU work before its external Warp resources."""
-        for state in getattr(self, "graphs", {}).values():
-            state.graph.reset()
-
     def _stream(self) -> wp.Stream:
-        """Retain Warp's stream wrapper while a Torch graph records its kernels."""
+        """Warp's wrapper of the current Torch stream: the scoped capture stream, or one retained per stream."""
         current: torch.cuda.Stream = torch.cuda.current_stream(self.device)
+        scoped: wp.Stream = wp.get_stream(str(self.device))
+        if scoped.cuda_stream == current.cuda_stream:
+            return scoped
         if current.cuda_stream not in self.streams:
             self.streams[current.cuda_stream] = wp.stream_from_torch(current)
         return self.streams[current.cuda_stream]
@@ -137,29 +120,14 @@ class CudaHandCropper:
         mirrored: Bool[Tensor, "n"] = torch.tensor([side == "right" for side in detections.sides], device=frames.device)
         key: tuple[tuple[int, ...], int, float] = (tuple(frames.shape), len(detections.sides), padding)
         if key not in self.graphs:
-            static_frames: UInt8[Tensor, "b h w 3"] = frames.clone()
-            static_boxes: Float32[Tensor, "n 4"] = detections.boxes.xyxy.clone()
-            static_indices: Int64[Tensor, "n"] = detections.boxes.frame_indices.clone()
-            static_mirrored: Bool[Tensor, "n"] = mirrored.clone()
-            stream: torch.cuda.Stream = torch.cuda.Stream()
-            warp_stream: wp.Stream = wp.stream_from_torch(stream)
-            self.streams[stream.cuda_stream] = warp_stream
-            stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(stream), wp.ScopedStream(warp_stream):
-                for _ in range(3):
-                    self._prepare(static_frames, static_boxes, static_indices, static_mirrored, padding)
-            torch.cuda.current_stream().wait_stream(stream)
-            graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
-            with capture_hand_graph(graph, stream, warp_stream):
-                output: PreparedHandCrops = self._prepare(static_frames, static_boxes, static_indices, static_mirrored, padding)
-            self.graphs[key] = _CapturedCrops(graph, static_frames, static_boxes, static_indices, static_mirrored, output)
-        state: _CapturedCrops = self.graphs[key]
-        state.frames.copy_(frames)
-        state.boxes.copy_(detections.boxes.xyxy)
-        state.frame_indices.copy_(detections.boxes.frame_indices)
-        state.mirrored.copy_(mirrored)
-        state.graph.replay()
-        return PreparedHandCrops(state.output.images.clone(), state.output.focal.clone(), state.output.rotation.clone())
+            if key[0] not in self.frame_buffers:
+                self.frame_buffers[key[0]] = frames.clone()
+            inputs: tuple[Tensor, ...] = (
+                self.frame_buffers[key[0]], detections.boxes.xyxy.clone(), detections.boxes.frame_indices.clone(), mirrored.clone(),
+            )
+            self.graphs[key] = CapturedGraph(lambda: self._prepare(inputs[0], inputs[1], inputs[2], inputs[3], padding), inputs, pool=self.pool, keep=(self.coefficients, self.edge))
+        output: PreparedHandCrops = self.graphs[key].replay(frames, detections.boxes.xyxy, detections.boxes.frame_indices, mirrored)
+        return PreparedHandCrops(output.images.clone(), output.focal.clone(), output.rotation.clone())
 
     def _prepare(
         self, frames: UInt8[Tensor, "b h w 3"], boxes: Float32[Tensor, "n 4"], frame_indices: Int64[Tensor, "n"],
