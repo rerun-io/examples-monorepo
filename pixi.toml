@@ -204,7 +204,9 @@ cmd = "cd $PACKAGE_DIR && ruff check ."
 description = "Lint the package"
 
 [feature.dev.tasks.typecheck]
-cmd = "cd $PACKAGE_DIR && pyrefly check -c ../../pyrefly.toml $PYREFLY_TARGET $PYREFLY_EXTRA_ARGS"
+# Third-party imports resolve from this env first, then the pyrefly.toml list (ci/pyrefly_site_args.py);
+# the config alone takes the first env that has a module.
+cmd = "cd $PACKAGE_DIR && pyrefly check -c ../../pyrefly.toml $(python -I $PIXI_PROJECT_ROOT/ci/pyrefly_site_args.py) $PYREFLY_TARGET $PYREFLY_EXTRA_ARGS"
 description = "Typecheck the package"
 
 [feature.dev.tasks.deadcode]
