@@ -5,9 +5,9 @@ from pathlib import Path
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
+from trtkit.nvfp4 import bf16_round_up, quant_nvfp4_mse
 
 from sapiens2_pose.api.fast_calibration import FastPoseCalibration
-from sapiens2_pose.api.nvfp4 import bf16_round_up, quant_nvfp4_mse
 
 BF16: int = TensorProto.BFLOAT16
 
