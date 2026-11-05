@@ -42,6 +42,17 @@ class EgoHandTensors:
     scale_parameters: Float32[Tensor, "n 26"]
     """MHR segment scales."""
 
+    def select(self, index: Int64[Tensor, "m"]) -> "EgoHandTensors":
+        """The hands at ``index``, a device index tensor."""
+        return EgoHandTensors(*(getattr(self, item.name)[index] for item in fields(EgoHandTensors)))
+
+    @classmethod
+    def cat(cls, batches: list["EgoHandTensors"]) -> "EgoHandTensors":
+        """The hands of ``batches`` in order; a single batch is returned as is."""
+        if len(batches) == 1:
+            return batches[0]
+        return cls(*(torch.cat([getattr(batch, item.name) for batch in batches]) for item in fields(cls)))
+
 
 @dataclass(frozen=True, slots=True)
 class _VirtualHand:
@@ -105,8 +116,8 @@ def _to_source_camera(
 
 def _wrist_orientation(hand: SOMAHandLayer) -> Float64[ndarray, "3 3"]:
     """Bind-to-T-pose wrist rotation of one side, computed as the upstream perspective-crop predictor does."""
-    bind_pose_world: Float64[ndarray, "4 4"] = hand.bind_pose_world[0].detach().cpu().numpy().astype(np.float64)
-    t_pose_world: Float64[ndarray, "4 4"] = hand.t_pose_world[0].detach().cpu().numpy().astype(np.float64)
+    bind_pose_world: Float64[ndarray, "4 4"] = torch.as_tensor(hand.bind_pose_world)[0].detach().cpu().numpy().astype(np.float64)
+    t_pose_world: Float64[ndarray, "4 4"] = torch.as_tensor(hand.t_pose_world)[0].detach().cpu().numpy().astype(np.float64)
     return (np.linalg.inv(bind_pose_world) @ t_pose_world)[:3, :3]
 
 
@@ -179,40 +190,27 @@ class EgoHandTensorExecutor:
 
     @torch.inference_mode()
     def __call__(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], project: Projection, *, profile: bool = False) -> EgoHandTensors:
-        """Run calibrated crops and return a source-camera reconstruction on CUDA.
+        """Run calibrated crops, left hands first, and return a source-camera reconstruction on CUDA.
 
         With ``profile``, each chunk synchronizes once so that its stage events are read
         before a repeated graph records them again; otherwise nothing synchronizes.
+
+        Raises:
+            ValueError: If a right hand comes before a left hand.
         """
+        if list(sides) != sorted(sides, key=lambda side: side == "right"):
+            raise ValueError("EgoHandTensorExecutor needs every left hand before the right hands.")
         self.stage_ms.clear()
         batches: list[EgoHandTensors] = []
         for start in range(0, len(sides), self.batch_size):
             stop: int = min(start + self.batch_size, len(sides))
-            chunk: PreparedHandCrops = PreparedHandCrops(prepared.images[start:stop], prepared.focal[start:stop], prepared.rotation[start:stop])
-            result, events = self._run_chunk(chunk, sides[start:stop], project)
+            result, events = self._run_left_first(prepared.select(slice(start, stop)), sides[start:stop].count("right"), project)
             batches.append(result)
             if profile:
                 torch.cuda.synchronize()
                 for stage, (begin, end) in events.items():
                     self.stage_ms[stage] = self.stage_ms.get(stage, 0.0) + begin.elapsed_time(end)
-        if len(batches) == 1:
-            return batches[0]
-        return EgoHandTensors(*(torch.cat([getattr(batch, item.name) for batch in batches]) for item in fields(EgoHandTensors)))
-
-    def _run_chunk(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], project: Projection) -> tuple[EgoHandTensors, StageEvents]:
-        """Replay one bounded batch with its left hands first, then restore the caller's hand order.
-
-        Retained graph buffers remain live until the executor is released.
-        """
-        right_count: int = sum(side == "right" for side in sides)
-        left_first: list[int] = sorted(range(len(sides)), key=lambda index: sides[index] == "right")
-        if left_first == list(range(len(sides))):
-            return self._run_left_first(prepared, right_count, project)
-        order: Int64[Tensor, "n"] = torch.tensor(left_first, device=prepared.images.device)
-        reordered: PreparedHandCrops = PreparedHandCrops(prepared.images[order], prepared.focal[order], prepared.rotation[order])
-        result, events = self._run_left_first(reordered, right_count, project)
-        restore: Int64[Tensor, "n"] = torch.argsort(order)
-        return EgoHandTensors(*(getattr(result, item.name)[restore] for item in fields(EgoHandTensors))), events
+        return EgoHandTensors.cat(batches)
 
     def _run_left_first(self, prepared: PreparedHandCrops, right_count: int, project: Projection) -> tuple[EgoHandTensors, StageEvents]:
         """Replay the graph for this many hands, the last ``right_count`` of them right hands."""

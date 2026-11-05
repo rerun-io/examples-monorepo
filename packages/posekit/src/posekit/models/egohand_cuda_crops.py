@@ -9,7 +9,7 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from torch import Tensor
 
 from egohand_inference.camera.camera_models import _PerspectiveCamera
-from posekit.cameras import CalibratedCamera
+from posekit.cameras import RADIAL_TERMS, CalibratedCamera
 from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_crops import normalize_crops
 from posekit.models.egohand_geometry import lens_model
@@ -55,20 +55,24 @@ class PreparedHandCrops:
     rotation: Float64[Tensor, "n 3 3"]
     """Virtual-camera to source-camera rotations."""
 
+    def select(self, index: slice | Int64[Tensor, "m"]) -> "PreparedHandCrops":
+        """The crops at ``index``, a slice or device index tensor."""
+        return PreparedHandCrops(self.images[index], self.focal[index], self.rotation[index])
+
 
 class CudaHandCropper:
     """One camera's immutable lens data shared by inversion, crops and projection."""
 
     def __init__(self, camera: CalibratedCamera, device: torch.device) -> None:
         model = lens_model(camera)
-        self.device = device
-        self.radial_count = 6 if camera.lens == "FISHEYE624" else 4 if camera.lens == "KB4" else 0
-        coefficients = np.pad(camera.distortion, (0, 14 - len(camera.distortion)))
-        self.intrinsic = wp.vec4d(camera.intrinsics[0, 0], camera.intrinsics[1, 1], camera.intrinsics[0, 2], camera.intrinsics[1, 2])
-        self.coefficients = wp.array(coefficients, dtype=wp.float64, device=str(device))
-        self.tilt = wp.vec4d(*np.r_[np.sin(coefficients[-2:]), np.cos(coefficients[-2:])])
-        self.radius_bound = wp.float64(model._max_radius_squared if isinstance(model, _PerspectiveCamera) else np.inf)
-        self.edge = torch.linspace(0.0, 1.0, 1025, device=device, dtype=torch.float64)
+        self.device: torch.device = device
+        self.radial_count: int = RADIAL_TERMS[camera.lens]
+        coefficients: Float64[np.ndarray, "14"] = np.pad(camera.distortion, (0, 14 - len(camera.distortion)))
+        self.intrinsic: wp.vec4d = wp.vec4d(camera.intrinsics[0, 0], camera.intrinsics[1, 1], camera.intrinsics[0, 2], camera.intrinsics[1, 2])
+        self.coefficients: wp.array = wp.array(coefficients, dtype=wp.float64, device=str(device))
+        self.tilt: wp.vec4d = wp.vec4d(*np.r_[np.sin(coefficients[-2:]), np.cos(coefficients[-2:])])
+        self.radius_bound: wp.float64 = wp.float64(model._max_radius_squared if isinstance(model, _PerspectiveCamera) else np.inf)
+        self.edge: Float64[Tensor, "1025"] = torch.linspace(0.0, 1.0, 1025, device=device, dtype=torch.float64)
         # Captured crops by frame shape, hand count and padding; boxes and the side sequence are replay inputs.
         self.graphs: dict[tuple[tuple[int, ...], int, float], CapturedGraph[PreparedHandCrops]] = {}
         # One static frames buffer per frame shape, shared by every hand count's graph.
@@ -117,7 +121,7 @@ class CudaHandCropper:
 
     def prepare(self, frames: UInt8[Tensor, "b h w 3"], detections: HandDetections, padding: float) -> PreparedHandCrops:
         """Create normalized, anatomically mirrored crops without host geometry."""
-        mirrored: Bool[Tensor, "n"] = torch.tensor([side == "right" for side in detections.sides], device=frames.device)
+        mirrored: Bool[Tensor, "n"] = torch.tensor([side == "right" for side in detections.sides]).pin_memory().to(frames.device, non_blocking=True)
         key: tuple[tuple[int, ...], int, float] = (tuple(frames.shape), len(detections.sides), padding)
         if key not in self.graphs:
             if key[0] not in self.frame_buffers:

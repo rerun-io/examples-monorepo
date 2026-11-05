@@ -164,10 +164,11 @@ class HandsEvalReport:
 
 
 def model_stack(name: ModelName) -> tuple[HandDetector, TopDownHandPose3d]:
-    """The evaluated configurations: TensorRT detectors, WiLoR TensorRT, EgoHand TensorRT backbone with lens-aware CPU crops.
+    """The evaluated configurations: TensorRT detectors, WiLoR TensorRT, and both EgoHand roles.
 
-    EgoHand's GPU crop sampler handles rational/pinhole lenses only, so fisheye frames take its
-    reference CPU crops; everything else matches SelfCap's accelerated configuration.
+    The reference EgoHand runs a TensorRT bf16 backbone on its lens-aware CPU crops, because its
+    GPU crop sampler handles rational/pinhole lenses only; otherwise it matches SelfCap's
+    accelerated configuration. The fast role's CUDA cropper also handles FISHEYE624 and KB4.
     """
     if name == "wilor":
         return WilorHandDetectorConfig(backend=TensorRtBackendConfig()).setup(), WilorHandPoseConfig(backend=TensorRtBackendConfig()).setup()

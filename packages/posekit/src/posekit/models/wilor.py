@@ -451,10 +451,7 @@ class WilorHandPose3d(TopDownHandPose3d):
         if count == 0:
             empty = torch.empty((0,), dtype=torch.float32, device=device)
             return WilorHands(
-                keypoints=Keypoints3d(
-                    empty.reshape(0, 21, 2), empty.reshape(0, 21), empty.reshape(0, 21), torch.empty((0,), dtype=torch.int64, device=device),
-                    HAND_21, (0,), empty.reshape(0, 21, 3),
-                ),
+                keypoints=Keypoints3d.empty(HAND_21, device, root_indices=(0,), with_xyz_camera=True),
                 sides=(),
                 vertices=empty.reshape(0, 778, 3),
                 faces=self.faces,

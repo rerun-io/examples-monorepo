@@ -11,34 +11,37 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TypeAlias
 
-import numpy as np
 import torch
-from jaxtyping import UInt8
+from jaxtyping import Int64, UInt8
 from torch import Tensor
 from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.artifacts import build_once
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from egohand.models.egohand import EgoHand
-from posekit.cameras import CalibratedCamera
+from posekit.cameras import CalibratedCamera, CameraKey, camera_key
 from posekit.models.base import TopDownHandPose3d
 from posekit.models.egohand import (
     CACHED_BACKBONE_ONNX,
     EGOHAND_REVISION,
     SOMA_REVISION,
+    EgoHandAssetPaths,
     EgoHandConfig,
     EgoHandDetectorConfig,
     EgoHandReconstruction,
     EgoHandStage,
     TensorRtBackbone,
+    asset_paths,
     egohand_weights_path,
     export_backbone_once,
+    require_camera,
     soma_assets_path,
+    soma_faces,
 )
 from posekit.models.egohand_head import EgoHandHead
 from posekit.models.egohand_onnx import quantize_backbone
 from posekit.models.egohand_quantization import EgoHandCalibration, calibrated_backbone_path, load_calibration
-from posekit.predictions import HandDetections, HandSide, Keypoints3d, validate_frames_rgb
+from posekit.predictions import BoxDetections, HandDetections, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.runtimes import create_runtime_from_onnx
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
 
@@ -46,9 +49,6 @@ CACHED_FAST_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4
 """Base path of the calibrated NVFP4 DINOv3; the calibration digest and FP8 tail count are appended to its stem."""
 CACHED_HEAD_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-head-bf16-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Both learned heads with their virtual-camera conditioning, exported in BF16."""
-
-CameraKey: TypeAlias = tuple[str, bytes, bytes, str]
-"""Lens model, intrinsics bytes, distortion bytes and device of one calibrated camera."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,9 +145,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         backbone_onnx: Path = export_quantized_backbone_once(config, weights, soma, calibration)
         loaded, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
         model: EgoHand = loaded.eval().to("cuda")
-        self.faces: dict[HandSide, Tensor] = {
-            side: torch.from_numpy(np.asarray(model.soma_hand.faces(side), dtype=np.int64)).cuda() for side in ("left", "right")
-        }
+        self.faces: dict[HandSide, Tensor] = soma_faces(model)
         _export_head_once(model, config.head_onnx, config.backbone_backend.max_batch_size)
         # The BF16 heads have no Q/DQ attention inputs; FP8 fusion applies only to DINO.
         self.executor: EgoHandTensorExecutor = EgoHandTensorExecutor(
@@ -158,7 +156,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         del model.hand_head, model.kp2d_head
         torch.cuda.empty_cache()
         # One lens cropper, with its captured graphs, per calibrated camera.
-        self.croppers: dict[CameraKey, CudaHandCropper] = {}
+        self.croppers: dict[tuple[CameraKey, str], CudaHandCropper] = {}
 
     def __call__(
         self, frames_rgb: UInt8[Tensor, "b h w 3"], detections: HandDetections, camera: CalibratedCamera | None = None
@@ -171,25 +169,36 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_cuda_crops import CudaHandCropper, PreparedHandCrops
         from posekit.models.egohand_tensor import EgoHandTensors
 
-        if camera is None:
-            raise ValueError("EgoHand needs the CalibratedCamera of the frames: its perspective crops undo the lens.")
+        camera = require_camera(camera)
         validate_frames_rgb(frames_rgb)
         if not detections.num_detections:
             return EgoHandReconstruction.empty(frames_rgb.device, self.faces)
-        camera_key: CameraKey = (camera.lens, camera.intrinsics.tobytes(), camera.distortion.tobytes(), str(frames_rgb.device))
-        if camera_key not in self.croppers:
-            self.croppers[camera_key] = CudaHandCropper(camera, frames_rgb.device)
-        cropper: CudaHandCropper = self.croppers[camera_key]
+        key: tuple[CameraKey, str] = (camera_key(camera), str(frames_rgb.device))
+        if key not in self.croppers:
+            self.croppers[key] = CudaHandCropper(camera, frames_rgb.device)
+        cropper: CudaHandCropper = self.croppers[key]
         profile: bool = self.profile_stages
         crop_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = (
             (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if profile else None
         )
         if crop_events is not None:
             crop_events[0].record()
-        prepared: PreparedHandCrops = cropper.prepare(frames_rgb, detections, self.config.padding)
+        # The executor runs left hands first; sort on the host so that the crops come out in that order.
+        left_first: list[int] = sorted(range(len(detections.sides)), key=lambda index: detections.sides[index] == "right")
+        order: Int64[Tensor, "n"] | None = None
+        hands: HandDetections = detections
+        if left_first != list(range(len(left_first))):
+            order = torch.tensor(left_first, dtype=torch.int64).pin_memory().to(frames_rgb.device, non_blocking=True)
+            boxes: BoxDetections = detections.boxes
+            hands = HandDetections(
+                BoxDetections(boxes.xyxy[order], boxes.scores[order], boxes.frame_indices[order]), tuple(detections.sides[index] for index in left_first)
+            )
+        prepared: PreparedHandCrops = cropper.prepare(frames_rgb, hands, self.config.padding)
         if crop_events is not None:
             crop_events[1].record()
-        output: EgoHandTensors = self.executor(prepared, detections.sides, cropper.project, profile=profile)
+        output: EgoHandTensors = self.executor(prepared, hands.sides, cropper.project, profile=profile)
+        if order is not None:
+            output = output.select(torch.argsort(order))
         if crop_events is not None:
             # The executor synchronized after its last chunk, so the crop events have completed too.
             self.stage_ms.setdefault("preprocessing", []).append(crop_events[0].elapsed_time(crop_events[1]) / len(frames_rgb))
@@ -224,26 +233,26 @@ def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorCon
     """SelfCap's EgoHand detector with GPU resizing, an FP16 trunk and CUDA-graph replay, and the fast hand pose role.
 
     Args:
-        assets: Local weights/engines tree (``weights/...``, ``dinov3-bf16.onnx``, ``engines/``);
-            ``None`` takes the pinned downloads and the trtkit engine cache.
+        assets: Local asset tree (see :func:`~posekit.models.egohand.asset_paths`); ``None`` takes the
+            pinned downloads and the trtkit engine cache.
 
     Returns:
         The detector and predictor configurations.
     """
-    engines: Path = DEFAULT_TRT_CACHE_DIR if assets is None else assets / "engines"
+    paths: EgoHandAssetPaths = asset_paths(assets)
     return (
         EgoHandDetectorConfig(
-            None if assets is None else assets / "weights/detector/hand_detector.onnx",
-            backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=1, cache_dir=engines, use_cuda_graph=True),
+            paths.detector,
+            backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=1, cache_dir=paths.engines, use_cuda_graph=True),
             fp16_trunk=True,
             gpu_preprocessing=True,
         ),
         EgoHandFastConfig(
-            None if assets is None else assets / "weights/egohand/egohand_s060000.safetensors",
-            None if assets is None else assets / "weights/soma",
-            backbone_onnx=engines / CACHED_FAST_BACKBONE_ONNX.name,
-            backbone_source_onnx=CACHED_BACKBONE_ONNX if assets is None else assets / "dinov3-bf16.onnx",
-            head_onnx=engines / CACHED_HEAD_ONNX.name,
-            backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2, cache_dir=engines),
+            paths.weights,
+            paths.soma,
+            backbone_onnx=paths.engines / CACHED_FAST_BACKBONE_ONNX.name,
+            backbone_source_onnx=paths.bf16_backbone,
+            head_onnx=paths.engines / CACHED_HEAD_ONNX.name,
+            backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2, cache_dir=paths.engines),
         ),
     )

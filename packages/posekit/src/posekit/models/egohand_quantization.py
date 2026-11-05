@@ -1,4 +1,4 @@
-"""EgoHand-v1 activation ranges and NVFP4/FP8 backbone export."""
+"""EgoHand-v1 activation ranges: the calibration record, its loader and artifact name, and their measurement."""
 
 import hashlib
 import math
@@ -26,6 +26,21 @@ from posekit.models.calibration_rrd import (
 EGOHAND_CALIBRATION_MODEL: str = "egohand"
 """Model name and recording id of the EgoHand calibration .rrd."""
 
+DINO_BLOCKS: int = 32
+"""Transformer blocks in EgoHand's DINOv3 encoder; each has one native Attention op."""
+LINEARS_PER_BLOCK: int = 5
+"""Linears per block: attention qkv and proj, and the gated MLP's w1, w2 and w3."""
+CALIBRATED_LINEARS: int = DINO_BLOCKS * LINEARS_PER_BLOCK
+"""Linear inputs with a calibrated range."""
+CALIBRATED_ATTENTION_INPUTS: int = DINO_BLOCKS * 3
+"""Query, key and value inputs with a calibrated range."""
+
+
+def validate_fp8_tail_blocks(fp8_tail_blocks: int) -> None:
+    """Raise ValueError unless ``fp8_tail_blocks`` names 0 to all of the DINO blocks."""
+    if not 0 <= fp8_tail_blocks <= DINO_BLOCKS:
+        raise ValueError(f"fp8_tail_blocks must be between 0 and {DINO_BLOCKS}.")
+
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
@@ -43,13 +58,13 @@ class EgoHandCalibration:
     n_crops: int
     """Detected hand crops used to measure ranges."""
     input_amax: dict[str, float]
-    """Absolute activation maxima at the 160 DINO linear inputs."""
+    """Absolute activation maxima at every DINO linear input (CALIBRATED_LINEARS)."""
     attention_amax: dict[str, float]
-    """Absolute Q/K/V maxima after RoPE, for 32 attention blocks."""
+    """Absolute Q/K/V maxima after RoPE, for every attention block (CALIBRATED_ATTENTION_INPUTS)."""
 
     def __post_init__(self) -> None:
-        if self.n_crops < 1 or len(self.input_amax) != 160 or len(self.attention_amax) != 96:
-            raise ValueError("EgoHand calibration requires all 160 linears and 32 Q/K/V attention inputs.")
+        if self.n_crops < 1 or len(self.input_amax) != CALIBRATED_LINEARS or len(self.attention_amax) != CALIBRATED_ATTENTION_INPUTS:
+            raise ValueError(f"EgoHand calibration requires all {CALIBRATED_LINEARS} linears and {DINO_BLOCKS} Q/K/V attention inputs.")
         if not self.frame_indices or len(self.frame_indices) != len(self.frame_sha256):
             raise ValueError("Each calibration frame requires its source index and SHA256 hash.")
         if set(self.frame_indices).intersection(self.excluded_mount_indices):
@@ -95,8 +110,7 @@ def write_calibration(path: Path, calibration: EgoHandCalibration) -> None:
 
 def calibrated_backbone_path(base: Path, calibration: EgoHandCalibration, *, fp8_tail_blocks: int = 0) -> Path:
     """Name the exported backbone by its calibration contents, including the held-out split."""
-    if not 0 <= fp8_tail_blocks <= 32:
-        raise ValueError("fp8_tail_blocks must be between 0 and 32.")
+    validate_fp8_tail_blocks(fp8_tail_blocks)
     digest: str = hashlib.sha256(to_json(calibration).encode()).hexdigest()[:16]
     precision: str = f"-fp8tail{fp8_tail_blocks}" if fp8_tail_blocks else ""
     return base.with_stem(f"{base.stem}-{digest}{precision}")

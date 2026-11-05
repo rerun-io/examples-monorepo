@@ -3,14 +3,21 @@
 from pathlib import Path
 
 import onnx
-from trtkit.onnx_qdq import Fp8Attention, Fp8Conv, ModulePrecision, Nvfp4Linear, QdqPlan, quantize_qdq, save_with_external_data
+from trtkit.onnx_qdq import (
+    LINEAR_INPUT_HEADROOM,
+    Fp8Conv,
+    ModulePrecision,
+    Nvfp4Linear,
+    QdqPlan,
+    fp8_attention_plan,
+    quantize_qdq,
+    save_with_external_data,
+)
 
 from sapiens2_pose.api.fast_calibration import FastPoseCalibration
 
 BACKBONE_BLOCKS: int = 24
 """Transformer blocks of the Sapiens2 0.4B backbone; each has one native Attention op."""
-LINEAR_INPUT_HEADROOM: float = 2.0
-"""Calibrated linear input maxima are doubled before they set the static NVFP4 input scales."""
 
 
 def fast_pose_qdq_plan(calibration: FastPoseCalibration) -> QdqPlan:
@@ -24,18 +31,7 @@ def fast_pose_qdq_plan(calibration: FastPoseCalibration) -> QdqPlan:
             modules[module] = Nvfp4Linear(amax * LINEAR_INPUT_HEADROOM)
         elif module.startswith("decode_head.") and not module.endswith("conv_pose"):
             modules[module] = Fp8Conv(amax)
-    attention: tuple[Fp8Attention, ...] = tuple(
-        Fp8Attention(
-            f"backbone.blocks.{block}.attn",
-            (
-                calibration.attention_amax[f"backbone.blocks.{block}.attn.q"],
-                calibration.attention_amax[f"backbone.blocks.{block}.attn.k"],
-                calibration.attention_amax[f"backbone.blocks.{block}.attn.v"],
-            ),
-        )
-        for block in range(BACKBONE_BLOCKS)
-    )
-    return QdqPlan(modules, attention)
+    return QdqPlan(modules, fp8_attention_plan("backbone.blocks", BACKBONE_BLOCKS, calibration.attention_amax))
 
 
 def quantize_fast_pose(input_path: Path, output_path: Path, calibration: FastPoseCalibration) -> None:

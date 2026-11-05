@@ -99,11 +99,14 @@ def infer_egohand_frames(
             continue
         detections: HandDetections = HandDetections(BoxDetections(torch.cat(boxes), torch.cat(confidence), torch.cat(frame_ids)), tuple(sides))
         result: EgoHandReconstruction = predictor(batch, detections, camera)
+        hand_xy: Float32[ndarray, "m 21 2"] = result.keypoints.xy[:, list(SOMA_HAND21)].cpu().numpy()
+        hand_frames: list[int] = result.keypoints.frame_indices.tolist()
+        hand_scores: list[float] = result.keypoints.scores[:, 0].tolist()
         for row, side in enumerate(result.sides):
-            frame = start + int(result.keypoints.frame_indices[row])
+            frame = start + hand_frames[row]
             base = HAND_BASE[side]
-            xy[frame, base : base + 21] = result.keypoints.xy[row, list(SOMA_HAND21)].cpu().numpy()
-            scores[frame, base : base + 21] = float(result.keypoints.scores[row, 0])
+            xy[frame, base : base + 21] = hand_xy[row]
+            scores[frame, base : base + 21] = hand_scores[row]
     return OakDetections(times, xy, scores)
 
 

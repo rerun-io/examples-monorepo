@@ -66,4 +66,4 @@ def main(config: Config) -> None:
         excluded_mount_indices=split.excluded_mount_indices, excluded_frame_sha256=forbidden, assets=config.assets,
     )
     write_calibration(config.output, measured)
-    print(f"[egohand-calibrate] wrote {measured.n_crops} crops, 160 linear ranges and 96 attention ranges to {config.output}")
+    print(f"[egohand-calibrate] wrote {measured.n_crops} crops, {len(measured.input_amax)} linear ranges and {len(measured.attention_amax)} attention ranges to {config.output}")

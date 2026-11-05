@@ -29,10 +29,10 @@ class _CudaMHRHand(MHRHandIdentityModel):
         self._modules = dict(source._modules)
         self._buffers = dict(source._buffers)
         self._parameters = dict(source._parameters)
-        self.scale_indices: Int64[Tensor, "1 26"] = torch.tensor(self._scale_mhr_indices, device=self.device, dtype=torch.int64)[None]
+        scale_indices: Int64[Tensor, "26"] = torch.tensor(self._scale_mhr_indices, device=self.device, dtype=torch.int64)
         self._hand_vert_ids = torch.as_tensor(self._hand_vert_ids, device=self.device)
         self._wrist_boundary_global = torch.as_tensor(self._wrist_boundary_global, device=self.device)
-        self.neutral_correctives: Float32[Tensor, "1 v 3"] = self._mhr_model.module.pose_correctives_model(
+        neutral_correctives: Float32[Tensor, "1 v 3"] = self._mhr_model.module.pose_correctives_model(
             torch.zeros((1, MHR_JOINTS * MHR_JOINT_PARAMETERS), device=self.device)
         )
         interpolation = self._to_soma_interp
@@ -40,15 +40,15 @@ class _CudaMHRHand(MHRHandIdentityModel):
             raise ValueError("EgoHand requires the released area-based hand topology transfer.")
         source_faces: Int64[Tensor, "f 3"] = interpolation.get_buffer("F_src_torch")
         face_ids: Int64[Tensor, "v"] = interpolation.get_buffer("face_ids")
-        self.hand_faces: Int64[Tensor, "v 3"] = source_faces[face_ids[self._hand_vert_ids]]
+        source_hand_faces: Int64[Tensor, "v 3"] = source_faces[face_ids[self._hand_vert_ids]]
         self.hand_barycentric: Float32[Tensor, "v 4"] = interpolation.bary_coords[self._hand_vert_ids].float()
         self.wrist_boundary: Int64[Tensor, "w"] = torch.searchsorted(self._hand_vert_ids, self._wrist_boundary_global)
         if not torch.equal(self._hand_vert_ids[self.wrist_boundary], self._wrist_boundary_global):
             raise ValueError("The released hand vertex ids must be sorted and contain the wrist boundary.")
-        source_vertices, local_faces = torch.unique(self.hand_faces, sorted=True, return_inverse=True)
-        self.hand_faces = local_faces
+        source_vertices, local_faces = torch.unique(source_hand_faces, sorted=True, return_inverse=True)
+        self.hand_faces: Int64[Tensor, "v 3"] = local_faces
         character = self._mhr_model.module.character_torch
-        self.rest_model = compile_unless_dev(MhrHandRestSkinning(character, source_vertices, self.scale_indices[0], self.neutral_correctives))
+        self.rest_model = compile_unless_dev(MhrHandRestSkinning(character, source_vertices, scale_indices, neutral_correctives))
 
     def _get_shaped_verts(self, identity_coeffs: Float32[Tensor, "b 5"]) -> Float32[Tensor, "b v 3"]:
         """Evaluate the released shape, scale and FK for every required source vertex."""

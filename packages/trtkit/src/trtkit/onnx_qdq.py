@@ -8,7 +8,7 @@ the result. Tensor names and their order are part of the exported bytes, which
 key the TensorRT engine caches.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, TypeAlias
@@ -27,6 +27,8 @@ FP4_MAX: float = 6.0
 """Largest E2M1 magnitude."""
 NVFP4_GLOBAL_HEADROOM: float = 256.0
 """Per-tensor weight scale divisor that leaves E4M3 block scales room for the MSE scale search."""
+LINEAR_INPUT_HEADROOM: float = 2.0
+"""Factor on calibrated linear input maxima before they set static input scales."""
 LINEAR_WEIGHT_CHAIN: list[str] = ["Transpose", "Cast"]
 """Producers between a torch-exported MatMul and its ``[out, in]`` weight initializer."""
 
@@ -66,6 +68,23 @@ class Fp8Attention:
     """Name prefix of the new tensors, e.g. ``encoder.blocks.0.attn``."""
     amax: tuple[float, float, float]
     """Query, key and value magnitudes the static scales cover."""
+
+
+def fp8_attention_plan(prefix: str, blocks: int, attention_amax: dict[str, float]) -> tuple[Fp8Attention, ...]:
+    """FP8 query, key and value inputs of ``blocks`` transformer blocks named ``{prefix}.{block}.attn``.
+
+    Args:
+        prefix: Module path of the block list, e.g. ``encoder.blocks``.
+        blocks: Native Attention ops in the graph, one per block, in block order.
+        attention_amax: Calibrated maxima keyed ``{prefix}.{block}.attn.{q,k,v}``.
+    """
+    return tuple(
+        Fp8Attention(
+            f"{prefix}.{block}.attn",
+            (attention_amax[f"{prefix}.{block}.attn.q"], attention_amax[f"{prefix}.{block}.attn.k"], attention_amax[f"{prefix}.{block}.attn.v"]),
+        )
+        for block in range(blocks)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +171,94 @@ def _nvfp4_input(tensor: str, module: str, amax: float) -> tuple[list[TensorProt
     return [_bf16_scalar(scale, amax / (FP4_MAX * FP8_MAX))], nodes, f"{module}.a_dq"
 
 
+@dataclass(slots=True)
+class _Edits:
+    """New initializers and node insertions of one rewrite, applied by :func:`_splice`."""
+
+    initializers: list[TensorProto] = field(default_factory=list)
+    """New initializers in creation order; their order is part of the exported bytes."""
+    inserted: dict[int, list[onnx.NodeProto]] = field(default_factory=dict)
+    """Nodes to insert before the node at each original index."""
+    quantized_inputs: dict[tuple[str, str], str] = field(default_factory=dict)
+    """Dequantized name of each (activation, precision) already quantized."""
+
+
+def _rewrite_module(index: int, node: onnx.NodeProto, module: str, chain: list[str], weight: Tensor, precision: ModulePrecision, edits: _Edits) -> None:
+    """Quantize one weight MatMul or Conv and its input; ``chain`` names the producers between the node and its weight."""
+    if (node.op_type == "Conv") != isinstance(precision, Fp8Conv):
+        raise ValueError(f"{type(precision).__name__} does not apply to {node.op_type} {module}.")
+    if isinstance(precision, Fp8Conv):
+        weight_initializers, weight_node = _fp8_weight(module, weight)
+        input_initializers, input_nodes, dequantized_input = _fp8_input(node.input[0], module, precision.input_amax, f"{module}.a_zp")
+        edits.initializers.extend([*weight_initializers, *input_initializers])
+        edits.inserted[index] = [weight_node, *input_nodes]
+        node.input[0], node.input[1] = dequantized_input, f"{module}.w_dq"
+        return
+    if chain != LINEAR_WEIGHT_CHAIN:
+        raise ValueError(f"Linear {module} reads its weight through {chain}, not {LINEAR_WEIGHT_CHAIN}.")
+    activation: str = node.input[0]
+    nodes: list[onnx.NodeProto] = []
+    if isinstance(precision, Fp8Linear):
+        weight_initializers, weight_node = _fp8_weight(module, weight)
+        edits.initializers.extend(weight_initializers)
+        nodes.append(weight_node)
+        key: tuple[str, str] = (activation, "fp8")
+        if key not in edits.quantized_inputs:
+            # The zero point name is part of the released EgoHand export bytes.
+            input_initializers, input_nodes, edits.quantized_inputs[key] = _fp8_input(activation, module, precision.input_amax, f"{module}.a_zp8")
+            edits.initializers.extend(input_initializers)
+            nodes.extend(input_nodes)
+    else:
+        weight_initializers, weight_nodes = _nvfp4_weight(module, weight)
+        edits.initializers.extend(weight_initializers)
+        nodes.extend(weight_nodes)
+        key = (activation, "fp4")
+        if key not in edits.quantized_inputs:
+            input_initializers, input_nodes, edits.quantized_inputs[key] = _nvfp4_input(activation, module, precision.input_amax)
+            edits.initializers.extend(input_initializers)
+            nodes.extend(input_nodes)
+    nodes.append(helper.make_node("Transpose", [f"{module}.w_dq"], [f"{module}.w_t"], perm=[1, 0]))
+    node.input[0], node.input[1] = edits.quantized_inputs[key], f"{module}.w_t"
+    edits.inserted[index] = nodes
+
+
+def _rewrite_attention(graph: onnx.GraphProto, attention: tuple[Fp8Attention, ...], edits: _Edits) -> None:
+    """Quantize the query, key and value inputs of every native Attention op, in graph order."""
+    attention_nodes: list[tuple[int, onnx.NodeProto]] = [(index, node) for index, node in enumerate(graph.node) if node.op_type == "Attention"]
+    if len(attention_nodes) != len(attention):
+        raise ValueError(f"Expected {len(attention)} native Attention ops, got {len(attention_nodes)}.")
+    for (index, node), inputs in zip(attention_nodes, attention, strict=True):
+        for slot, (tag, amax) in enumerate(zip("qkv", inputs.amax, strict=True)):
+            prefix: str = f"{inputs.module}.{tag}"
+            input_initializers, input_nodes, node.input[slot] = _fp8_input(node.input[slot], prefix, amax, f"{prefix}.a_zp")
+            edits.initializers.extend(input_initializers)
+            edits.inserted.setdefault(index, []).extend(input_nodes)
+
+
+def _splice(graph: onnx.GraphProto, edits: _Edits) -> None:
+    """Insert the new nodes before their consumers and append the new initializers."""
+    ordered: list[onnx.NodeProto] = [new for index, node in enumerate(graph.node) for new in [*edits.inserted.get(index, []), node]]
+    graph.ClearField("node")
+    graph.node.extend(ordered)
+    graph.initializer.extend(edits.initializers)
+
+
+def _prune_dead(graph: onnx.GraphProto) -> None:
+    """Walk back from the outputs; the replaced weights and their Cast/Transpose chains fall away."""
+    live: set[str] = {output.name for output in graph.output}
+    kept: list[onnx.NodeProto] = []
+    for node in reversed(list(graph.node)):
+        if any(output in live for output in node.output):
+            kept.append(node)
+            live.update(name for name in node.input if name)
+    kept.reverse()
+    graph.ClearField("node")
+    graph.node.extend(kept)
+    kept_initializers: list[TensorProto] = [tensor for tensor in graph.initializer if tensor.name in live]
+    graph.ClearField("initializer")
+    graph.initializer.extend(kept_initializers)
+
+
 def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
     """Rewrite ``model`` in place from ``plan`` and drop the weights it replaces.
 
@@ -165,11 +272,8 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
     graph: onnx.GraphProto = model.graph
     producers: dict[str, onnx.NodeProto] = {output: node for node in graph.node for output in node.output}
     initializers: dict[str, TensorProto] = {tensor.name: tensor for tensor in graph.initializer}
-    added: list[TensorProto] = []
-    inserted: dict[int, list[onnx.NodeProto]] = {}
-    quantized_inputs: dict[tuple[str, str], str] = {}
+    edits: _Edits = _Edits()
     applied: set[str] = set()
-
     for index, node in enumerate(list(graph.node)):
         if node.op_type not in ("MatMul", "Conv"):
             continue
@@ -186,75 +290,15 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
             if node.op_type == "MatMul":
                 raise ValueError(f"The plan has no precision for linear {module}.")
             continue
-        if (node.op_type == "Conv") != isinstance(precision, Fp8Conv):
-            raise ValueError(f"{type(precision).__name__} does not apply to {node.op_type} {module}.")
         weight: Tensor = torch.from_numpy(numpy_helper.to_array(initializers[weight_name]).copy()).to(plan.weight_device)
-        nodes: list[onnx.NodeProto] = []
-        if isinstance(precision, Fp8Conv):
-            weight_initializers, weight_node = _fp8_weight(module, weight)
-            input_initializers, input_nodes, dequantized_input = _fp8_input(node.input[0], module, precision.input_amax, f"{module}.a_zp")
-            added.extend([*weight_initializers, *input_initializers])
-            inserted[index] = [weight_node, *input_nodes]
-            node.input[0], node.input[1] = dequantized_input, f"{module}.w_dq"
-            applied.add(module)
-            continue
-        if chain != LINEAR_WEIGHT_CHAIN:
-            raise ValueError(f"Linear {module} reads its weight through {chain}, not {LINEAR_WEIGHT_CHAIN}.")
-        activation: str = node.input[0]
-        if isinstance(precision, Fp8Linear):
-            weight_initializers, weight_node = _fp8_weight(module, weight)
-            added.extend(weight_initializers)
-            nodes.append(weight_node)
-            key: tuple[str, str] = (activation, "fp8")
-            if key not in quantized_inputs:
-                # The zero point name is part of the released EgoHand export bytes.
-                input_initializers, input_nodes, quantized_inputs[key] = _fp8_input(activation, module, precision.input_amax, f"{module}.a_zp8")
-                added.extend(input_initializers)
-                nodes.extend(input_nodes)
-        else:
-            weight_initializers, weight_nodes = _nvfp4_weight(module, weight)
-            added.extend(weight_initializers)
-            nodes.extend(weight_nodes)
-            key = (activation, "fp4")
-            if key not in quantized_inputs:
-                input_initializers, input_nodes, quantized_inputs[key] = _nvfp4_input(activation, module, precision.input_amax)
-                added.extend(input_initializers)
-                nodes.extend(input_nodes)
-        nodes.append(helper.make_node("Transpose", [f"{module}.w_dq"], [f"{module}.w_t"], perm=[1, 0]))
-        node.input[0], node.input[1] = quantized_inputs[key], f"{module}.w_t"
-        inserted[index] = nodes
+        _rewrite_module(index, node, module, chain, weight, precision, edits)
         applied.add(module)
-
     missing: set[str] = set(plan.modules) - applied
     if missing:
         raise ValueError(f"Planned modules are not weight MatMul/Conv nodes of the graph: {sorted(missing)}.")
-    attention_nodes: list[tuple[int, onnx.NodeProto]] = [(index, node) for index, node in enumerate(graph.node) if node.op_type == "Attention"]
-    if len(attention_nodes) != len(plan.attention):
-        raise ValueError(f"Expected {len(plan.attention)} native Attention ops, got {len(attention_nodes)}.")
-    for (index, node), attention in zip(attention_nodes, plan.attention, strict=True):
-        for slot, (tag, amax) in enumerate(zip("qkv", attention.amax, strict=True)):
-            prefix: str = f"{attention.module}.{tag}"
-            input_initializers, input_nodes, node.input[slot] = _fp8_input(node.input[slot], prefix, amax, f"{prefix}.a_zp")
-            added.extend(input_initializers)
-            inserted.setdefault(index, []).extend(input_nodes)
-
-    ordered: list[onnx.NodeProto] = [new for index, node in enumerate(graph.node) for new in [*inserted.get(index, []), node]]
-    graph.ClearField("node")
-    graph.node.extend(ordered)
-    graph.initializer.extend(added)
-    # Walk back from the outputs; the replaced weights and their Cast/Transpose chains fall away.
-    live: set[str] = {output.name for output in graph.output}
-    kept: list[onnx.NodeProto] = []
-    for node in reversed(list(graph.node)):
-        if any(output in live for output in node.output):
-            kept.append(node)
-            live.update(name for name in node.input if name)
-    kept.reverse()
-    graph.ClearField("node")
-    graph.node.extend(kept)
-    kept_initializers: list[TensorProto] = [tensor for tensor in graph.initializer if tensor.name in live]
-    graph.ClearField("initializer")
-    graph.initializer.extend(kept_initializers)
+    _rewrite_attention(graph, plan.attention, edits)
+    _splice(graph, edits)
+    _prune_dead(graph)
     if not any(opset.domain == "trt.plugins" for opset in model.opset_import):
         model.opset_import.append(helper.make_opsetid("trt.plugins", 1))
     return model
