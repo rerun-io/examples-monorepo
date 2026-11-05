@@ -2,16 +2,15 @@
 
 import hashlib
 import math
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
-from jaxtyping import Float, UInt8
+from jaxtyping import UInt8
 from serde import SerdeError, from_dict, serde
 from serde.json import to_json
 from torch import Tensor, nn
-from torch.utils.hooks import RemovableHandle
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.calibration_rrd import (
@@ -22,18 +21,10 @@ from posekit.models.calibration_rrd import (
     read_calibration_rrd,
     write_calibration_rrd,
 )
+from posekit.models.dinov3_calibration import CALIBRATED_ATTENTION_INPUTS, CALIBRATED_LINEARS, DINO_BLOCKS, DinoActivationObserver
 
 EGOHAND_CALIBRATION_MODEL: str = "egohand"
 """Model name and recording id of the EgoHand calibration .rrd."""
-
-DINO_BLOCKS: int = 32
-"""Transformer blocks in EgoHand's DINOv3 encoder; each has one native Attention op."""
-LINEARS_PER_BLOCK: int = 5
-"""Linears per block: attention qkv and proj, and the gated MLP's w1, w2 and w3."""
-CALIBRATED_LINEARS: int = DINO_BLOCKS * LINEARS_PER_BLOCK
-"""Linear inputs with a calibrated range."""
-CALIBRATED_ATTENTION_INPUTS: int = DINO_BLOCKS * 3
-"""Query, key and value inputs with a calibrated range."""
 
 
 def validate_fp8_tail_blocks(fp8_tail_blocks: int) -> None:
@@ -127,7 +118,6 @@ def measure_calibration(
     exist only during calibration and are removed even when inference fails.
     The caller supplies catalog frames and the held-out evaluation split.
     """
-    from egohand_dinov3.layers.attention import SelfAttention
     from posekit.models.egohand import selfcap_egohand_configs
 
     selected: list[tuple[int, UInt8[Tensor, "h w 3"]]] = list(frames)
@@ -143,42 +133,8 @@ def measure_calibration(
     detector = detector_config.setup()
     predictor = replace(predictor_config, backbone_onnx=None).setup()
     backbone: nn.Module = predictor.predictor.model.backbone
-    maxima: dict[str, float] = {}
-    attention: dict[str, float] = {}
-    handles: list[RemovableHandle] = []
-    originals: list[tuple[SelfAttention, Callable[..., Tensor]]] = []
-
-    def linear_hook(name: str) -> Callable[[nn.Module, tuple[Tensor, ...]], None]:
-        def record(module: nn.Module, args: tuple[Tensor, ...]) -> None:
-            maxima[name] = max(maxima.get(name, 0.0), float(args[0].abs().amax()))
-
-        return record
-
-    def attention_hook(name: str, module: SelfAttention, original: Callable[..., Tensor]) -> Callable[..., Tensor]:
-        def record(
-            qkv: Float[Tensor, "b n c"], attn_bias: Tensor | None = None, rope: tuple[Tensor, Tensor] | None = None,
-        ) -> Tensor:
-            batch: int = qkv.shape[0]
-            tokens: int = qkv.shape[1]
-            channels: int = module.qkv.in_features
-            q, k, v = (item.transpose(1, 2) for item in qkv.reshape(batch, tokens, 3, module.num_heads, channels // module.num_heads).unbind(2))
-            if rope is not None:
-                q, k = module.apply_rope(q, k, rope)
-            for tag, value in zip("qkv", (q, k, v), strict=True):
-                key: str = f"{name}.{tag}"
-                attention[key] = max(attention.get(key, 0.0), float(value.abs().amax()))
-            return original(qkv, attn_bias, rope)
-
-        return record
-
     crops: int = 0
-    try:
-        for name, module in backbone.named_modules():
-            if isinstance(module, nn.Linear):
-                handles.append(module.register_forward_pre_hook(linear_hook(name)))
-            if isinstance(module, SelfAttention):
-                originals.append((module, module.compute_attention))
-                module.compute_attention = attention_hook(name, module, module.compute_attention)
+    with DinoActivationObserver(backbone) as observer:
         for index, frame in selected:
             batch: UInt8[Tensor, "1 h w 3"] = frame.unsqueeze(0)
             detections = detector(batch)
@@ -186,9 +142,5 @@ def measure_calibration(
                 predictor(batch, detections, camera)
                 crops += detections.num_detections
             print(f"[egohand-calibrate] frame {index}: {detections.num_detections} crops", flush=True)
-    finally:
-        for handle in handles:
-            handle.remove()
-        for module, original in originals:
-            module.compute_attention = original
+    maxima, attention = observer.ranges()
     return EgoHandCalibration(segment, indices, list(excluded_mount_indices), hashes, crops, maxima, attention)
