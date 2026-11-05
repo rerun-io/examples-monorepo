@@ -4,7 +4,7 @@ from posekit import skeletons
 from posekit.zoo import PRESETS, ZOO, preset
 
 KNOWN_SKELETONS: dict[str, skeletons.KeypointSkeleton] = {
-    skeleton.name: skeleton for skeleton in (skeletons.COCO_17, skeletons.COCO_133, skeletons.HAND_21, skeletons.SOMA_HAND)
+    skeleton.name: skeleton for skeleton in (skeletons.COCO_17, skeletons.COCO_133, skeletons.HAND_21, skeletons.SOMA_HAND, skeletons.MHR_70)
 }
 
 
@@ -21,7 +21,7 @@ def test_zoo_skeletons_resolve() -> None:
 
 def test_zoo_pose_roles_have_skeletons() -> None:
     for model in ZOO.values():
-        if model.role in ("pose2d", "instance-pose2d", "pose3d", "hand-pose3d"):
+        if model.role in ("pose2d", "instance-pose2d", "pose3d", "hand-pose3d", "body-pose3d"):
             assert model.skeleton is not None, f"{model.key} is a pose model without a skeleton"
         if model.role in ("detector", "hand-detector"):
             assert model.skeleton is None, f"{model.key} is a detector with a skeleton"
@@ -76,3 +76,19 @@ def test_existing_2d_configs_parse_on_the_cli() -> None:
 
     assert isinstance(tyro.cli(AnnotatedDetectorConfig, args=["yolox"]), YoloxDetectorConfig)
     assert isinstance(tyro.cli(AnnotatedPose2dConfig, args=["rtmpose"]), RtmPoseConfig)
+
+
+def test_body_model_is_registered_in_the_zoo() -> None:
+    """SAM 3D Body is the implemented top-down whole-body 3D model on the 70-joint MHR skeleton."""
+    model = ZOO["sam3d-body-dinov3"]
+    assert (model.role, model.paradigm, model.skeleton, model.status, model.input_size) == ("body-pose3d", "top-down", "mhr_70", "implemented", (512, 512))
+
+
+def test_body_config_is_a_tyro_subcommand() -> None:
+    """Both modes of the one role are subcommands (``sam3d-body`` is full, ``sam3d-body-bodyonly`` skips the hand passes), in the base posekit env too."""
+    import tyro
+
+    from posekit.models import AnnotatedBodyPose3dConfig, Sam3dBodyConfig
+
+    assert tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body"]) == Sam3dBodyConfig(mode="full")
+    assert tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body-bodyonly"]) == Sam3dBodyConfig(mode="body")

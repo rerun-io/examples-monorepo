@@ -1204,6 +1204,21 @@ PACKAGE_DIR = "packages/posekit"
 # The same four Transformers .to() stub false positives as posekit-egohand.
 PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
 
+[feature.posekit-body.tasks.posekit-body-download-examples]
+cmd = "test -f data/body3d-examples/yoga-example.jpg || curl -fsSL --retry 3 --create-dirs -o data/body3d-examples/Planche.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Planche.jpg -o data/body3d-examples/Amir-Khan-Lamont-Peterson_2689582.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Amir-Khan-Lamont-Peterson_2689582.jpg -o data/body3d-examples/BNAAHPYGMYSE26U6C6T7VA6544.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/BNAAHPYGMYSE26U6C6T7VA6544.jpg -o data/body3d-examples/yoga-example.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/yoga-example.jpg"
+cwd = "packages/posekit"
+description = "Download the four SAM 3D Body example images (public rerun-io/sam3d-body-rerun repo, pinned commit)"
+
+[feature.posekit-body.tasks.posekit-body3d]
+cmd = "python tools/demos/body3d.py --image-folder data/body3d-examples"
+cwd = "packages/posekit"
+depends-on = ["posekit-body-download-examples"]
+description = "Whole-body 3D people (SAM3 masks + MoGe-2 camera + SAM 3D Body) in images (default: the examples) or --video-path, logged to Rerun"
+
+
+
+
+
 # Hand demo/eval/benchmark tasks; they run in the posekit-hands envs (EgoHand + WiLoR features).
 [feature.posekit-hands]
 platforms = ["linux-64", "linux-aarch64"]

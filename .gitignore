@@ -114,6 +114,7 @@ packages/simplecv/simplecv/data/body_models/
 packages/prompt-da/data/
 packages/zipdepth/data/
 packages/sam3d-body/data/
+packages/posekit/data/
 packages/sam3/data/
 packages/robocap-slam/data/
 packages/egoexo-forge/data/
