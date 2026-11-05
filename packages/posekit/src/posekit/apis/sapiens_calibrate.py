@@ -1,5 +1,6 @@
 """Regenerate the Sapiens2 nvfp4-768 activation ranges from a directory of RGB person crops."""
 
+import copy
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,8 @@ class SapiensCalibrateConfig:
 @torch.inference_mode()
 def main(config: SapiensCalibrateConfig) -> None:
     """Measure input and post-RoPE attention maxima with bf16 compute."""
-    model: nn.Module = make_fast_pose_exportable(load_pose_model("0.4B"))
+    # Rewrite a copy: the cached model serves every other Sapiens2 caller in the process.
+    model: nn.Module = make_fast_pose_exportable(copy.deepcopy(load_pose_model("0.4B")))
     input_amax: dict[str, float] = {}
     attention_amax: dict[str, float] = {}
     handles: list[Any] = []

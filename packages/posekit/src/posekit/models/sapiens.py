@@ -16,6 +16,7 @@ export, quantization and checkpoint code is in ``posekit.models.sapiens_net``.
 Imports are lazy so the rest of posekit loads without the network code.
 """
 
+import copy
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -197,7 +198,8 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"[posekit] exporting Sapiens2 {model_size} pose to ONNX (one-time): {onnx_path.name}")
     spec: Any = MODEL_SPECS[model_size]
-    model: Any = make_sapiens_pose_onnx_exportable(load_pose_model(model_size)).eval()
+    # Export a copy: the rewrite works in place, and the torch backend runs the cached model.
+    model: Any = make_sapiens_pose_onnx_exportable(copy.deepcopy(load_pose_model(model_size))).eval()
     dummy: Tensor = torch.zeros((static_batch, 3, int(spec.image_size[0]), int(spec.image_size[1])), dtype=torch.float32, device="cuda")
     export_onnx(
         model,
