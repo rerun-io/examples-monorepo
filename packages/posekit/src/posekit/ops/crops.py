@@ -124,9 +124,9 @@ def crop_frames(
     if spec.bgr:
         crops = crops.flip(1)
     if spec.mean_rgb is not None:
-        crops = crops - _channel_vector(spec.mean_rgb, crops.device)
+        crops = crops - channel_vector(spec.mean_rgb, crops.device)
     if spec.std_rgb is not None:
-        crops = crops / _channel_vector(spec.std_rgb, crops.device)
+        crops = crops / channel_vector(spec.std_rgb, crops.device)
     return CropBatch(crops.to(dtype=dtype).contiguous(), frame_indices, bboxes, centers, scales, spec)
 
 
@@ -239,7 +239,7 @@ def _crop_meshgrid(
 
 
 @lru_cache(maxsize=32)
-def _channel_vector(values: tuple[float, float, float], device: torch.device) -> Float[Tensor, "1 3 1 1"]:
+def channel_vector(values: tuple[float, float, float], device: torch.device) -> Float[Tensor, "1 3 1 1"]:
     return torch.tensor(values, dtype=torch.float32, device=device).view(1, 3, 1, 1)
 
 

@@ -11,7 +11,6 @@ reduction results as extra ONNX outputs to force materialization and split
 the fusion — see prompt-da's ``export_promptda_onnx`` for a worked example.
 """
 
-import fcntl
 import hashlib
 import json
 import os
@@ -25,6 +24,8 @@ import numpy as np
 import torch
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+from trtkit.artifacts import build_once
 
 DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
 """Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
@@ -293,14 +294,12 @@ def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = 
     """
     onnx_sha256: str = onnx_content_hash(onnx_path, cache_dir=cache_dir)
     engine_path: Path = cached_engine_path(onnx_path, config, cache_dir=cache_dir, onnx_sha256=onnx_sha256)
-    if not engine_path.exists():
-        engine_path.parent.mkdir(parents=True, exist_ok=True)
-        with engine_path.with_name(f"{engine_path.name}.lock").open("w") as lock:  # processes that find it missing take turns
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            if not engine_path.exists():
-                print(f"[trtkit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
-                build_engine(onnx_path, engine_path, config, onnx_sha256=onnx_sha256)
-    return engine_path
+
+    def build() -> None:
+        print(f"[trtkit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
+        build_engine(onnx_path, engine_path, config, onnx_sha256=onnx_sha256)
+
+    return build_once(engine_path, build)
 
 
 def onnx_content_hash(onnx_path: Path, *, cache_dir: Path | None = None) -> str:

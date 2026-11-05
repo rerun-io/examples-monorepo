@@ -13,8 +13,6 @@ principal point at the image centre. ``xyz_camera`` and ``vertices`` are in
 that camera; a supplied ``CalibratedCamera`` is not used.
 """
 
-import fcntl
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -29,6 +27,7 @@ from jaxtyping import Bool, Float, Float32, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 from trtkit import TensorRtBackendConfig, TensorRtRuntime, TensorRuntime, TorchBackendConfig
+from trtkit.artifacts import build_once
 from trtkit.trt_builder import TrtBuildConfig, ensure_engine
 
 from posekit.artifacts import OnnxTransform
@@ -65,18 +64,6 @@ def weights_dir(repo_id: str, revision: str, override: Path | None) -> Path:
     if override is not None:
         return override
     return Path(snapshot_download(repo_id=repo_id, revision=revision))
-
-
-def _locked_export(onnx_path: Path, export: Callable[[], None]) -> Path:
-    """Run ``export`` once across processes; later callers reuse the published file."""
-    if onnx_path.is_file():
-        return onnx_path
-    onnx_path.parent.mkdir(parents=True, exist_ok=True)
-    with onnx_path.with_suffix(".lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if not onnx_path.is_file():
-            export()
-    return onnx_path
 
 
 def _export_static(model: torch.nn.Module, example: Tensor, onnx_path: Path, input_name: str, output_names: list[str], opset: int) -> None:
@@ -176,7 +163,7 @@ class WilorHandDetector(HandDetector):
             onnx_path: Path = config.backend.cache_dir / f"wilor-detector-b{batch}-512x416-{config.hf_revision[:8]}.onnx"
             assert isinstance(self.yolo.model, torch.nn.Module)
             model: torch.nn.Module = _DetectorExport(self.yolo.model).to(device="cuda", dtype=torch.float32).eval()
-            _locked_export(
+            build_once(
                 onnx_path,
                 lambda: _export_static(model, torch.zeros((batch, 3, *DETECTOR_SHAPE), device="cuda"), onnx_path, "images", ["output0"], 18),
             )
@@ -316,7 +303,7 @@ class WilorHandPose3d(TopDownHandPose3d):
             batch: int = config.static_batch_size
             onnx_path: Path = backend.cache_dir / f"wilor-postcrop-b{batch}-fp16-{config.hf_revision[:8]}.onnx"
             export = _NetworkExport(network).to(device="cuda", dtype=torch.float16).eval()
-            _locked_export(
+            build_once(
                 onnx_path,
                 lambda: _export_static(
                     export, torch.zeros((batch, CROP_SIZE, CROP_SIZE, 3), dtype=torch.float16, device="cuda"), onnx_path, "img_patches",
@@ -464,10 +451,7 @@ class WilorHandPose3d(TopDownHandPose3d):
         if count == 0:
             empty = torch.empty((0,), dtype=torch.float32, device=device)
             return WilorHands(
-                keypoints=Keypoints3d(
-                    empty.reshape(0, 21, 2), empty.reshape(0, 21), empty.reshape(0, 21), torch.empty((0,), dtype=torch.int64, device=device),
-                    HAND_21, (0,), empty.reshape(0, 21, 3),
-                ),
+                keypoints=Keypoints3d.empty(HAND_21, device, root_indices=(0,), with_xyz_camera=True),
                 sides=(),
                 vertices=empty.reshape(0, 778, 3),
                 faces=self.faces,

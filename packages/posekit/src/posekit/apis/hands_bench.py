@@ -5,9 +5,10 @@ to the GPU before timing; video decode and model set-up are excluded. Every fram
 (batch 1): hand detection, then the 3D hand model on that frame's hands, CUDA-synchronised.
 
 EgoHand runs SelfCap's accelerated configuration (``selfcap_egohand_configs``): TensorRT
-detector, GPU perspective crops, TensorRT bf16 DINOv3 backbone, PyTorch head, full SOMA mesh.
-Its stages: detection (wall), crops (GPU remap), batch assembly, backbone, head and SOMA (CUDA
-events around each module), and ``other`` = total minus those (forward glue, the right-hand
+detector, GPU perspective crops, TensorRT bf16 DINOv3 backbone, PyTorch head, full SOMA mesh;
+``egohand-fast`` runs ``fast_egohand_configs``. Each predictor reports its stages in
+``stage_ms``: detection (wall), crops (GPU remap), batch assembly, backbone, head and SOMA (CUDA
+events), and ``other`` = total minus those (forward glue, the right-hand
 mirror, device-to-host copies, upstream result dicts and the adapter's output conversion).
 WiLoR is timed as detection + pose on both backends; its TensorRT engines are built for
 batch 1 (detector) and ``wilor_pose_batch`` crops here, since the default static batches
@@ -28,10 +29,12 @@ from torch import Tensor
 
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
 from posekit.models.base import HandDetector, TopDownHandPose3d
+from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, EgoHandStage, selfcap_egohand_configs
+from posekit.models.egohand_fast import EgoHandConfigs, FastEgoHandPredictor, fast_egohand_configs
 from posekit.predictions import HandDetections, HandPoses3d
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
-BenchModel: TypeAlias = Literal["egohand", "wilor-tensorrt", "wilor-torch"]
+BenchModel: TypeAlias = Literal["egohand", "egohand-fast", "wilor-tensorrt", "wilor-torch"]
 
 
 @serde(deny_unknown_fields=True)
@@ -99,40 +102,17 @@ def _synced_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
 
 
-def _time_module(module: torch.nn.Module, events: list[tuple[torch.cuda.Event, torch.cuda.Event]]) -> None:
-    """Append a CUDA-event pair around every forward of ``module``; only the benchmark attaches these."""
-
-    def before(*_: object) -> None:
-        start = torch.cuda.Event(enable_timing=True)
-        start.record()
-        events.append((start, torch.cuda.Event(enable_timing=True)))
-
-    def after(*_: object) -> None:
-        events[-1][1].record()
-
-    module.register_forward_pre_hook(before)
-    module.register_forward_hook(after)
-
-
-def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, warmup: int, repeats: int) -> tuple[StageTimes, float]:
-    """SelfCap's accelerated EgoHand, one frame at a time."""
-    from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, selfcap_egohand_configs
-
-    detector_config, predictor_config = selfcap_egohand_configs(None)
-    detector: EgoHandDetector = detector_config.setup()
-    predictor: EgoHandPredictor = predictor_config.setup()
-    model = predictor.predictor.model
-    events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {"backbone": [], "head": []}
-    _time_module(model.backbone, events["backbone"])
-    _time_module(model.hand_head, events["head"])
+def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, warmup: int, repeats: int, configs: EgoHandConfigs) -> tuple[StageTimes, float]:
+    """One EgoHand stack, one frame at a time; its predictor reports its own stage times."""
+    detector: EgoHandDetector = configs[0].setup()
+    predictor: EgoHandPredictor | FastEgoHandPredictor = configs[1].setup()
+    predictor.profile_stages = True
     times = StageTimes()
     hands: list[int] = []
     order: list[int] = list(range(len(frames))) * repeats
     for step, index in enumerate(list(range(min(warmup, len(frames)))) + order):
         frame: UInt8[Tensor, "1 h w 3"] = frames[index : index + 1]
         predictor.stage_ms.clear()
-        for recorded in events.values():
-            recorded.clear()
         torch.cuda.synchronize()
         started: float = time.perf_counter()
         detections: HandDetections = detector(frame)
@@ -143,13 +123,13 @@ def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, wa
             continue
         assert result.vertices is not None or result.num_hands == 0
         hands.append(result.num_hands)
-        stage: dict[str, float] = {name: sum(values) for name, values in predictor.stage_ms.items()}
+        stage: dict[EgoHandStage, float] = {name: sum(values) for name, values in predictor.stage_ms.items()}
         parts: dict[str, float] = {
             "detection": detection_ms,
             "crops": stage.get("preprocessing", 0.0),
             "batch_assembly": stage.get("batch_assembly", 0.0),
-            "backbone": sum(start.elapsed_time(end) for start, end in events["backbone"]),
-            "head": sum(start.elapsed_time(end) for start, end in events["head"]),
+            "backbone": stage.get("backbone", 0.0),
+            "head": stage.get("head", 0.0),
             "soma": stage.get("soma", 0.0),
         }
         times.add("total", total_ms)
@@ -192,14 +172,15 @@ def main(config: HandsBenchConfig) -> list[BenchResult]:
 
     from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 
+    egohand_stacks: dict[BenchModel, EgoHandConfigs] = {"egohand": selfcap_egohand_configs(None), "egohand-fast": fast_egohand_configs(None)}
     decoder = VideoDecoder(config.video_path, dimension_order="NHWC", device="cuda")
     frames: UInt8[Tensor, "n h w 3"] = decoder.get_frames_in_range(0, len(decoder)).data.contiguous()
     camera: CalibratedCamera = load_calibrated_camera(config.camera_path)
     results: list[BenchResult] = []
     for model in config.models:
         with torch.inference_mode():
-            if model == "egohand":
-                times, hands = bench_egohand(frames, camera, config.warmup, config.repeats)
+            if model in egohand_stacks:
+                times, hands = bench_egohand(frames, camera, config.warmup, config.repeats, egohand_stacks[model])
             else:
                 backend = TensorRtBackendConfig() if model == "wilor-tensorrt" else TorchBackendConfig(autocast="fp16")
                 detector = WilorHandDetectorConfig(backend=backend, static_batch_size=1).setup()

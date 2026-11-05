@@ -13,6 +13,7 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
+from trtkit.artifacts import build_once
 from trtkit.trt_builder import onnx_content_hash
 
 FP32_ONLY_INPUTS: dict[str, frozenset[int]] = {"Resize": frozenset({1, 2})}
@@ -99,10 +100,12 @@ def fp16_trunk(source: Path, cache_dir: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     digest: str = onnx_content_hash(source, cache_dir=directory)[:16]
     dest: Path = directory / f"{source.stem}_{digest}_fp16trunk_v1.onnx"
-    if not dest.exists():
+
+    def rewrite() -> None:
         with TemporaryDirectory(prefix=".fp16-trunk-", dir=directory) as work:
             staged: Path = Path(work) / dest.name
             onnx.save(fp16_conv_trunk(onnx.load(source)), str(staged))
             staged.replace(dest)
-    return dest
+
+    return build_once(dest, rewrite)
 

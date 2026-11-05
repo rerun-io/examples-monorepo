@@ -1312,6 +1312,11 @@ cmd = "python tools/apps/hands_bench.py"
 cwd = "packages/posekit"
 description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
 
+[feature.posekit-hands.tasks.posekit-egohand-calibrate]
+cmd = "python tools/apps/egohand_calibrate.py"
+cwd = "packages/posekit"
+description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames; checks benchmark hashes and mount-fit exclusions"
+
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 # src/egohand* is vendored upstream EgoHand source (untyped), excluded like other vendor boundaries.
@@ -1563,6 +1568,9 @@ brush = "==0.3.0"
 platforms = ["linux-64", "linux-aarch64", "linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.soma-runtime.pypi-dependencies]
+# posekit's _CudaMHRHand and _CudaHandSkinning (models/egohand_soma.py) read about 12 private
+# soma-x attributes. A bump must rerun, from packages/posekit,
+# `pixi run -e posekit-hands-dev --frozen pytest -m integration -k test_cuda_soma_preserves_changing_shapes_and_full_meshes`.
 py-soma-x = "==0.3.0"
 
 [feature.selfcap-soma]

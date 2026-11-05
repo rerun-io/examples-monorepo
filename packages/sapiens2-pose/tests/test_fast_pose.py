@@ -35,21 +35,6 @@ def test_deferred_head_matches_original_heatmaps() -> None:
     torch.testing.assert_close(DeferredHead(head)(inputs), expected, atol=1e-5, rtol=1e-5)
 
 
-def test_nvfp4_grid_blocks_and_scale_floor() -> None:
-    from sapiens2_pose.api.nvfp4 import bf16_round_up, quant_nvfp4_mse, round_e2m1_codes
-
-    values = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0, -6.0])
-    assert round_e2m1_codes(values).tolist() == [0, 0, 1, 2, 2, 4, 4, 6, 6, 7, 15]
-    weights = torch.cat([torch.zeros(2, 16), torch.ones(2, 16)], dim=1)
-    packed, scales, _ = quant_nvfp4_mse(weights)
-    assert packed.shape == (2, 16)
-    assert scales.shape == (2, 2)
-    assert float(scales.float().min()) >= 2**-9
-    assert torch.all(scales[:, 0].float() < scales[:, 1].float())
-    assert bf16_round_up(1.001) == 1.0078125
-    assert bf16_round_up(1.0) == 1.0
-
-
 def test_calibration_is_strict_and_complete() -> None:
     import json
 

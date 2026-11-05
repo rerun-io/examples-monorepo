@@ -19,6 +19,8 @@ LensModel: TypeAlias = Literal["PINHOLE", "RATIONAL_POLYNOMIAL", "FISHEYE624", "
 """Lens models EgoHand's camera code projects: no distortion, OpenCV 14-term, Meta fisheye 6-2-4, Kannala-Brandt 4."""
 LENS_COEFFICIENTS: dict[LensModel, int] = {"PINHOLE": 0, "RATIONAL_POLYNOMIAL": 14, "FISHEYE624": 12, "KB4": 4}
 """Distortion coefficient count of each lens model."""
+RADIAL_TERMS: dict[LensModel, int] = {"PINHOLE": 0, "RATIONAL_POLYNOMIAL": 0, "FISHEYE624": 6, "KB4": 4}
+"""Radial terms of each fisheye model's angle polynomial; 0 marks the pinhole/rational projection."""
 
 
 @serde(deny_unknown_fields=True)
@@ -44,6 +46,15 @@ class CalibratedCamera:
             raise ValueError(f"{self.lens} needs {expected} distortion coefficients, got {self.distortion.shape[0]}.")
         if min(self.width, self.height) <= 0:
             raise ValueError(f"Camera size must be positive, got {self.width}x{self.height}.")
+
+
+CameraKey: TypeAlias = tuple[LensModel, bytes, bytes, int, int]
+"""Lens model, intrinsics bytes, distortion bytes, width and height: one distinct calibration."""
+
+
+def camera_key(camera: CalibratedCamera) -> CameraKey:
+    """A hashable key that is equal for equal calibrations."""
+    return (camera.lens, camera.intrinsics.tobytes(), camera.distortion.tobytes(), camera.width, camera.height)
 
 
 def save_calibrated_camera(camera: CalibratedCamera, path: Path) -> None:

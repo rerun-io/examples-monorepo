@@ -43,6 +43,11 @@ class _TrtEngine:
         self._stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
         self._use_cuda_graph: bool = use_cuda_graph
 
+    def __del__(self) -> None:
+        """Destroy captured engine launches before the execution context and engine they replay are released."""
+        for graph in getattr(self, "_graphs", {}).values():
+            graph.reset()
+
     def _execute(self) -> None:
         """Launch the engine on the private stream, fenced against torch's current stream.
 

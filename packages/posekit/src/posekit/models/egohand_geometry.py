@@ -7,7 +7,7 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 from egohand_inference.camera.camera_models import CameraModel, load_camera_calibration
-from posekit.cameras import CalibratedCamera
+from posekit.cameras import CalibratedCamera, CameraKey, camera_key
 from posekit.predictions import SOMA_HAND21, HandSide
 
 
@@ -37,11 +37,12 @@ def lens_model(camera: CalibratedCamera) -> CameraModel:
     The model caches its GPU lens coefficients, so reusing one instance per
     calibration keeps them resident across calls.
     """
-    return _lens_model(camera.lens, camera.intrinsics.tobytes(), camera.distortion.tobytes(), camera.width, camera.height)
+    return _lens_model(camera_key(camera))
 
 
 @cache
-def _lens_model(lens: str, intrinsics: bytes, distortion: bytes, width: int, height: int) -> CameraModel:
+def _lens_model(key: CameraKey) -> CameraModel:
+    lens, intrinsics, distortion, width, height = key
     return load_camera_calibration(
         {
             "model": lens,

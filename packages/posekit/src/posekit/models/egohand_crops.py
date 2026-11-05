@@ -1,6 +1,5 @@
 """Calibrated GPU crops with upstream perspective and mirroring geometry."""
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -14,7 +13,8 @@ from egohand_inference.camera.perspective_crop import perspective_crop_geometry
 from egohand_inference.preprocessing.mirroring import mirror_full_image_camera_horizontal
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand_geometry import lens_model
-from posekit.ops.crops import remap_frames
+from posekit.ops.compile import compile_unless_dev
+from posekit.ops.crops import channel_vector, remap_frames
 from posekit.predictions import HandSide
 
 
@@ -40,9 +40,7 @@ def prepare_gpu_crops(frames: UInt8[Tensor, "b h w 3"], boxes: dict[str, dict[Ha
     mirrored: Bool[Tensor, "n"] = torch.tensor([side == "right" for _, side, _ in jobs], device=frames.device)
     maps = torch.where(mirrored[:, None, None, None], maps.flip(2), maps)
     indices: Int64[Tensor, "n"] = torch.tensor([int(image_id) for image_id, _, _ in jobs], dtype=torch.int64, device=frames.device)
-    # Development retains every runtime/local check; production fuses the same math.
-    normalize = _normalize_crops if os.environ.get("PIXI_DEV_MODE") == "1" else _compiled_normalize_crops
-    crops: Float32[Tensor, "n 3 256 256"] = normalize(frames, indices, maps)
+    crops: Float32[Tensor, "n 3 256 256"] = normalize_crops(frames, indices, maps)
     prepared: list[dict] = []
     for index, ((image_id, side, _), (intrinsics, bbox, rotation)) in enumerate(zip(jobs, geometry, strict=True)):
         model_bbox, model_intrinsics = mirror_full_image_camera_horizontal(bbox, intrinsics, 256) if side == "right" else (bbox, intrinsics)
@@ -62,14 +60,13 @@ def prepare_gpu_crops(frames: UInt8[Tensor, "b h w 3"], boxes: dict[str, dict[Ha
     return prepared
 
 
-def _normalize_crops(
+@compile_unless_dev
+def normalize_crops(
     frames: UInt8[Tensor, "b h w 3"], indices: Int64[Tensor, "n"], maps: Float32[Tensor, "n 256 256 2"]
 ) -> Float32[Tensor, "n 3 256 256"]:
     """Fuse uint8 gathering, interpolation and ImageNet normalization."""
     crops = remap_frames(frames, indices, maps) / 255.0
-    mean = torch.tensor([0.485, 0.456, 0.406], device=frames.device)[None, :, None, None]
-    std = torch.tensor([0.229, 0.224, 0.225], device=frames.device)[None, :, None, None]
+    mean = channel_vector((0.485, 0.456, 0.406), frames.device)
+    std = channel_vector((0.229, 0.224, 0.225), frames.device)
     return (crops - mean) / std
 
-
-_compiled_normalize_crops = torch.compile(_normalize_crops, fullgraph=True, dynamic=True)

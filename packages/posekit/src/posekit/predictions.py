@@ -217,6 +217,30 @@ class Keypoints3d:
         """Number of pose instances across the whole frame batch."""
         return int(self.xy.shape[0])
 
+    @classmethod
+    def empty(cls, skeleton: KeypointSkeleton, device: torch.device | str, *, root_indices: tuple[int, ...] = (), with_xyz_camera: bool = False) -> "Keypoints3d":
+        """Build a zero-instance result for a skeleton on the given device.
+
+        Args:
+            skeleton: Skeleton format the (absent) keypoints would follow.
+            device: Device the empty tensors live on.
+            root_indices: Root keypoints of the skeleton.
+            with_xyz_camera: Whether to populate an empty ``xyz_camera`` field.
+
+        Returns:
+            Empty keypoints carrying the skeleton.
+        """
+        num_keypoints: int = skeleton.num_keypoints
+        return cls(
+            xy=torch.empty((0, num_keypoints, 2), dtype=torch.float32, device=device),
+            z_root_relative=torch.empty((0, num_keypoints), dtype=torch.float32, device=device),
+            scores=torch.empty((0, num_keypoints), dtype=torch.float32, device=device),
+            frame_indices=torch.empty((0,), dtype=torch.long, device=device),
+            skeleton=skeleton,
+            root_indices=root_indices,
+            xyz_camera=torch.empty((0, num_keypoints, 3), dtype=torch.float32, device=device) if with_xyz_camera else None,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class HandDetections:
