@@ -29,7 +29,7 @@ from torch import Tensor
 
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
 from posekit.models.base import HandDetector, TopDownHandPose3d
-from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, selfcap_egohand_configs
+from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, EgoHandStage, selfcap_egohand_configs
 from posekit.models.egohand_fast import EgoHandConfigs, FastEgoHandPredictor, fast_egohand_configs
 from posekit.predictions import HandDetections, HandPoses3d
 
@@ -106,6 +106,7 @@ def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, wa
     """One EgoHand stack, one frame at a time; its predictor reports its own stage times."""
     detector: EgoHandDetector = configs[0].setup()
     predictor: EgoHandPredictor | FastEgoHandPredictor = configs[1].setup()
+    predictor.profile_stages = True
     times = StageTimes()
     hands: list[int] = []
     order: list[int] = list(range(len(frames))) * repeats
@@ -122,7 +123,7 @@ def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, wa
             continue
         assert result.vertices is not None or result.num_hands == 0
         hands.append(result.num_hands)
-        stage: dict[str, float] = {name: sum(values) for name, values in predictor.stage_ms.items()}
+        stage: dict[EgoHandStage, float] = {name: sum(values) for name, values in predictor.stage_ms.items()}
         parts: dict[str, float] = {
             "detection": detection_ms,
             "crops": stage.get("preprocessing", 0.0),

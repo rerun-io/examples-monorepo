@@ -400,3 +400,35 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
         torch.testing.assert_close(vertices, results[(0, 1, 2, 3)][1], atol=0.001, rtol=0.0)
     assert len(pose.executor.graphs) == 1
     assert [len(cropper.graphs) for cropper in pose.croppers.values()] == [1]
+
+
+def test_stage_times_are_recorded_only_on_request() -> None:
+    """Without profile_stages neither predictor records stage times; with it, both report the benchmark's stages."""
+    from torchcodec.decoders import VideoDecoder
+
+    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.cameras import load_calibrated_camera
+    from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand_fast import fast_egohand_configs
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    video: Path = EXAMPLES / "selfcap_oak_left.mp4"
+    if not video.is_file():
+        pytest.skip(f"missing EgoHand parity fixture: {video}")
+    frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1]
+    camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
+    detector_config, reference_config = selfcap_egohand_configs(None)
+    detections = detector_config.setup()(frames)
+    for pose, stages in (
+        (reference_config.setup(), {"preprocessing", "batch_assembly", "model_forward", "post_forward", "backbone", "head", "soma"}),
+        (fast_egohand_configs()[1].setup(), {"preprocessing", "backbone", "head", "soma"}),
+    ):
+        with torch.inference_mode():
+            pose(frames, detections, camera)
+            assert pose.stage_ms == {}
+            pose.profile_stages = True
+            pose(frames, detections, camera)
+        assert set(pose.stage_ms) == stages
+        assert all(len(values) == 1 and values[0] > 0.0 for values in pose.stage_ms.values())
+        del pose

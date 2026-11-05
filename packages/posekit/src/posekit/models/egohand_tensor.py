@@ -11,6 +11,7 @@ from torch import Tensor
 
 from egohand.models.egohand import EgoHand
 from egohand_inference.pipeline.predictor import EgoHandPredictor
+from posekit.models.egohand import EgoHandStage
 from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_cuda_crops import CudaHandCropper, PreparedHandCrops
 from posekit.models.egohand_head import EgoHandHead, solve_virtual_translation
@@ -59,7 +60,7 @@ class _VirtualHand:
     """Untranslated full SOMA vertices."""
 
 
-StageEvents: TypeAlias = dict[str, tuple[torch.cuda.Event, torch.cuda.Event]]
+StageEvents: TypeAlias = dict[EgoHandStage, tuple[torch.cuda.Event, torch.cuda.Event]]
 """CUDA event pairs around the captured backbone, head and SOMA work."""
 
 
@@ -114,13 +115,13 @@ class EgoHandTensorExecutor:
         # Captured hands by hand count and right-hand count; left hands come first in every graph.
         self.graphs: dict[tuple[int, int], CapturedGraph[_CapturedHand]] = {}
         self.pool: GraphPool = torch.cuda.graph_pool_handle()
-        self.stage_events: StageEvents = {}
         assert predictor._model_wrist_orients is not None
         self.wrist_orientations: dict[HandSide, Float32[Tensor, "3 3"]] = {
             side: torch.as_tensor(orientation, device="cuda", dtype=torch.float32)
             for side, orientation in predictor._model_wrist_orients.items()
         }
-        self.stage_ms: dict[str, float] = {}
+        self.stage_ms: dict[EgoHandStage, float] = {}
+        """GPU milliseconds per stage of the last call that profiled; empty otherwise."""
         self.batch_size: int = min(predictor.batch_size, head_runtime.spec.max_batch_size) if head_runtime is not None else predictor.batch_size
 
     def _run(
@@ -163,23 +164,28 @@ class EgoHandTensorExecutor:
         return _VirtualHand(poses, identity, scales, translation, joints, vertices)
 
     @torch.inference_mode()
-    def __call__(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], cropper: CudaHandCropper) -> EgoHandTensors:
-        """Run calibrated crops and return a source-camera reconstruction on CUDA."""
+    def __call__(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], cropper: CudaHandCropper, *, profile: bool = False) -> EgoHandTensors:
+        """Run calibrated crops and return a source-camera reconstruction on CUDA.
+
+        With ``profile``, each chunk synchronizes once so that its stage events are read
+        before a repeated graph records them again; otherwise nothing synchronizes.
+        """
         self.stage_ms.clear()
         batches: list[EgoHandTensors] = []
         for start in range(0, len(sides), self.batch_size):
             stop: int = min(start + self.batch_size, len(sides))
             chunk: PreparedHandCrops = PreparedHandCrops(prepared.images[start:stop], prepared.focal[start:stop], prepared.rotation[start:stop])
-            batches.append(self._run_chunk(chunk, sides[start:stop], cropper))
-            # Read capture events before a repeated graph reuses them on the next chunk.
-            torch.cuda.synchronize()
-            for stage, (begin, end) in self.stage_events.items():
-                self.stage_ms[stage] = self.stage_ms.get(stage, 0.0) + begin.elapsed_time(end)
+            result, events = self._run_chunk(chunk, sides[start:stop], cropper)
+            batches.append(result)
+            if profile:
+                torch.cuda.synchronize()
+                for stage, (begin, end) in events.items():
+                    self.stage_ms[stage] = self.stage_ms.get(stage, 0.0) + begin.elapsed_time(end)
         if len(batches) == 1:
             return batches[0]
         return EgoHandTensors(*(torch.cat([getattr(batch, item.name) for batch in batches]) for item in fields(EgoHandTensors)))
 
-    def _run_chunk(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], cropper: CudaHandCropper) -> EgoHandTensors:
+    def _run_chunk(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], cropper: CudaHandCropper) -> tuple[EgoHandTensors, StageEvents]:
         """Replay one bounded batch with its left hands first, then restore the caller's hand order.
 
         Retained graph buffers remain live until the executor is released.
@@ -190,11 +196,11 @@ class EgoHandTensorExecutor:
             return self._run_left_first(prepared, right_count, cropper)
         order: Int64[Tensor, "n"] = torch.tensor(left_first, device=prepared.images.device)
         reordered: PreparedHandCrops = PreparedHandCrops(prepared.images[order], prepared.focal[order], prepared.rotation[order])
-        result: EgoHandTensors = self._run_left_first(reordered, right_count, cropper)
+        result, events = self._run_left_first(reordered, right_count, cropper)
         restore: Int64[Tensor, "n"] = torch.argsort(order)
-        return EgoHandTensors(*(getattr(result, item.name)[restore] for item in fields(EgoHandTensors)))
+        return EgoHandTensors(*(getattr(result, item.name)[restore] for item in fields(EgoHandTensors))), events
 
-    def _run_left_first(self, prepared: PreparedHandCrops, right_count: int, cropper: CudaHandCropper) -> EgoHandTensors:
+    def _run_left_first(self, prepared: PreparedHandCrops, right_count: int, cropper: CudaHandCropper) -> tuple[EgoHandTensors, StageEvents]:
         """Replay the graph for this many hands, the last ``right_count`` of them right hands."""
         crops: Float32[Tensor, "n 3 256 256"] = prepared.images
         device: torch.device = crops.device
@@ -219,5 +225,4 @@ class EgoHandTensorExecutor:
                 keep=(right_indices, model, self.head_runtime, self.head, self.right_parents, self.right_orient, self.right_parent_orient, self.reflection),
             )
         captured: _CapturedHand = self.graphs[key].replay(crops, focal)
-        self.stage_events = captured.events
-        return _to_source_camera(captured.hand, prepared.rotation.float(), captured.wrist_orientation, cropper.project)
+        return _to_source_camera(captured.hand, prepared.rotation.float(), captured.wrist_orientation, cropper.project), captured.events

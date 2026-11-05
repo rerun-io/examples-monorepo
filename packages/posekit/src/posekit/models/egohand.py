@@ -14,6 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -83,6 +84,17 @@ def resolve_hand_identities(detections: HandDetections, frame_count: int) -> Han
         tuple(sides),
     )
 
+
+EgoHandStage: TypeAlias = Literal["preprocessing", "batch_assembly", "model_forward", "post_forward", "adaptive_smoothing", "backbone", "head", "soma"]
+"""Stage names of ``stage_ms``: upstream's per-frame stages plus the CUDA-event-timed backbone, head and SOMA."""
+UPSTREAM_STAGES: dict[PerfStage, EgoHandStage] = {
+    PerfStage.PREPROCESSING: "preprocessing",
+    PerfStage.BATCH_ASSEMBLY: "batch_assembly",
+    PerfStage.MODEL_FORWARD: "model_forward",
+    PerfStage.POST_FORWARD: "post_forward",
+    PerfStage.ADAPTIVE_SMOOTHING: "adaptive_smoothing",
+}
+"""The upstream reporter stages EgoHandPredictor keeps."""
 
 EGOHAND_REVISION: str = "24a325fde719fdb985c7fb4606115b0c1912ab7d"
 """Weights of nvidia/EgoHand-v1 a153616c egohand_s060000.ckpt, without its pickle."""
@@ -341,19 +353,28 @@ def export_backbone_once(weights: Path, soma: Path, onnx: Path, *, batch_size: i
     build_once(onnx, export)
 
 
-def _time_module(module: torch.nn.Module, events: list[tuple[torch.cuda.Event, torch.cuda.Event]]) -> None:
-    """Append a CUDA-event pair around every forward of ``module``."""
+class _ModuleTimer:
+    """CUDA-event pairs around every forward of one module, recorded only while enabled."""
 
-    def before(*_: object) -> None:
-        start = torch.cuda.Event(enable_timing=True)
-        start.record()
-        events.append((start, torch.cuda.Event(enable_timing=True)))
+    def __init__(self, module: torch.nn.Module) -> None:
+        self.enabled: bool = False
+        self.events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        module.register_forward_pre_hook(self._before)
+        module.register_forward_hook(self._after)
 
-    def after(*_: object) -> None:
-        events[-1][1].record()
+    def _before(self, *_: object) -> None:
+        if self.enabled:
+            start = torch.cuda.Event(enable_timing=True)
+            start.record()
+            self.events.append((start, torch.cuda.Event(enable_timing=True)))
 
-    module.register_forward_pre_hook(before)
-    module.register_forward_hook(after)
+    def _after(self, *_: object) -> None:
+        if self.enabled:
+            self.events[-1][1].record()
+
+    def elapsed_ms(self) -> float:
+        """GPU time of the recorded forwards; their work must have completed."""
+        return sum(start.elapsed_time(end) for start, end in self.events)
 
 
 class EgoHandPredictor(TopDownHandPose3d):
@@ -366,7 +387,9 @@ class EgoHandPredictor(TopDownHandPose3d):
         from egohand_inference.pipeline.predictor import load_egohand_model
 
         self.config: EgoHandConfig = config
-        self.stage_ms: dict[str, list[float]] = {}
+        self.profile_stages: bool = False
+        """Record per-frame stage times in ``stage_ms``; off, inference adds no synchronization."""
+        self.stage_ms: dict[EgoHandStage, list[float]] = {}
         # A cached backbone artifact replaces the 3 GB PyTorch DINOv3, which is then never built or loaded.
         engine: TensorRtBackbone | None = None
         weights: Path = config.weights_path()
@@ -381,14 +404,12 @@ class EgoHandPredictor(TopDownHandPose3d):
         self.faces: dict[HandSide, Tensor] = {
             side: torch.from_numpy(np.asarray(model.soma_hand.faces(side), dtype=np.int64)).cuda() for side in ("left", "right")
         }
-        # CUDA events around each backbone and pose-head forward of the current call.
-        self.module_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {"backbone": [], "head": []}
-        _time_module(model.backbone, self.module_events["backbone"])
-        _time_module(model.hand_head, self.module_events["head"])
+        self.module_timers: dict[EgoHandStage, _ModuleTimer] = {"backbone": _ModuleTimer(model.backbone), "head": _ModuleTimer(model.hand_head)}
 
     def record_latency(self, stage: PerfStage, latency_ms: float) -> None:
-        """Collect per-frame stage timings; SOMA uses nested CUDA-event timing."""
-        self.stage_ms.setdefault(stage.value, []).append(latency_ms)
+        """Collect upstream's per-frame stage timings while profiling; SOMA uses nested CUDA-event timing."""
+        if stage in UPSTREAM_STAGES:
+            self.stage_ms.setdefault(UPSTREAM_STAGES[stage], []).append(latency_ms)
 
     def __call__(
         self, frames_rgb: UInt8[Tensor, "b h w 3"], detections: HandDetections, camera: CalibratedCamera | None = None
@@ -411,27 +432,32 @@ class EgoHandPredictor(TopDownHandPose3d):
             boxes[str(index)][side] = np.array([*center, size], dtype=np.float32)
         prepared: list[dict] | None = None
         frames: list[UInt8[ndarray, "h w 3"]] = []
+        profile: bool = self.profile_stages
+        # Upstream synchronizes around its timed stages only while it has a reporter.
+        self.predictor.perf_reporter = self if profile else None
         if self.config.gpu_crops:
             from posekit.models.egohand_crops import prepare_gpu_crops
 
             started: float = time.perf_counter()
             prepared = prepare_gpu_crops(frames_rgb, boxes, camera)
-            torch.cuda.synchronize()
-            self.record_latency(PerfStage.PREPROCESSING, (time.perf_counter() - started) * 1000.0 / len(frames_rgb))
+            if profile:
+                torch.cuda.synchronize()
+                self.record_latency(PerfStage.PREPROCESSING, (time.perf_counter() - started) * 1000.0 / len(frames_rgb))
         else:
             frames = [np.ascontiguousarray(frame.cpu().numpy()[:, :, ::-1]) for frame in frames_rgb]
-        self.predictor.model.soma_hand.profile_events = []
-        for events in self.module_events.values():
-            events.clear()
+        soma_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] | None = [] if profile else None
+        self.predictor.model.soma_hand.profile_events = soma_events
+        for timer in self.module_timers.values():
+            timer.events.clear()
+            timer.enabled = profile
         raw: dict[str, dict[str, dict]] = self.predictor.run(
             frames, ids, boxes, ("left", "right"), intrinsics_per_image={key: lens_model(camera) for key in ids}, prepared_crops=prepared
         )
 
-        self.stage_ms.setdefault("soma", []).append(
-            sum(start.elapsed_time(end) for start, end in self.predictor.model.soma_hand.profile_events) / len(frames_rgb)
-        )
-        for stage, events in self.module_events.items():
-            self.stage_ms.setdefault(stage, []).append(sum(start.elapsed_time(end) for start, end in events) / len(frames_rgb))
+        if soma_events is not None:
+            self.stage_ms.setdefault("soma", []).append(sum(start.elapsed_time(end) for start, end in soma_events) / len(frames_rgb))
+            for stage, timer in self.module_timers.items():
+                self.stage_ms.setdefault(stage, []).append(timer.elapsed_ms() / len(frames_rgb))
         rows: list[_UpstreamHand] = []
         sides: list[HandSide] = []
         indices: list[int] = []

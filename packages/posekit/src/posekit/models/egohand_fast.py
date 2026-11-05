@@ -7,7 +7,6 @@ captured CUDA crops, and per-frame SOMA reconstruction. Identity, all 26 segment
 scales, joint rotations and every hand vertex remain dynamic outputs.
 """
 
-import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TypeAlias
@@ -21,7 +20,6 @@ from trtkit.artifacts import build_once
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from egohand.models.egohand import EgoHand
-from egohand_inference.perf import PerfStage
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import TopDownHandPose3d
 from posekit.models.egohand import (
@@ -31,6 +29,7 @@ from posekit.models.egohand import (
     EgoHandConfig,
     EgoHandDetectorConfig,
     EgoHandReconstruction,
+    EgoHandStage,
     TensorRtBackbone,
     egohand_weights_path,
     export_backbone_once,
@@ -137,7 +136,9 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
         self.config: EgoHandFastConfig = config
-        self.stage_ms: dict[str, list[float]] = {}
+        self.profile_stages: bool = False
+        """Record per-frame stage times in ``stage_ms``; off, inference adds no synchronization."""
+        self.stage_ms: dict[EgoHandStage, list[float]] = {}
         weights: Path = egohand_weights_path(config.weights, config.hf_egohand_repo_id, config.hf_egohand_revision)
         soma: Path = soma_assets_path(config.soma_assets, config.hf_soma_repo_id, config.hf_soma_revision)
         calibration: EgoHandCalibration = load_calibration(config.calibration)
@@ -175,13 +176,21 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         if camera_key not in self.croppers:
             self.croppers[camera_key] = CudaHandCropper(camera, frames_rgb.device)
         cropper: CudaHandCropper = self.croppers[camera_key]
-        started: float = time.perf_counter()
+        profile: bool = self.profile_stages
+        crop_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = (
+            (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if profile else None
+        )
+        if crop_events is not None:
+            crop_events[0].record()
         prepared: PreparedHandCrops = cropper.prepare(frames_rgb, detections, self.config.padding)
-        torch.cuda.synchronize()
-        self.stage_ms.setdefault(PerfStage.PREPROCESSING.value, []).append((time.perf_counter() - started) * 1000.0 / len(frames_rgb))
-        output: EgoHandTensors = self.executor(prepared, detections.sides, cropper)
-        for stage, elapsed in self.executor.stage_ms.items():
-            self.stage_ms.setdefault(stage, []).append(elapsed / len(frames_rgb))
+        if crop_events is not None:
+            crop_events[1].record()
+        output: EgoHandTensors = self.executor(prepared, detections.sides, cropper, profile=profile)
+        if crop_events is not None:
+            # The executor synchronized after its last chunk, so the crop events have completed too.
+            self.stage_ms.setdefault("preprocessing", []).append(crop_events[0].elapsed_time(crop_events[1]) / len(frames_rgb))
+            for stage, elapsed in self.executor.stage_ms.items():
+                self.stage_ms.setdefault(stage, []).append(elapsed / len(frames_rgb))
         return EgoHandReconstruction(
             keypoints=Keypoints3d(
                 output.pixels,
