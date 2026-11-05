@@ -130,9 +130,9 @@ class FastEgoHandPredictor(TopDownHandPose3d):
     skeleton: KeypointSkeleton = SOMA_HAND
 
     def __init__(self, config: EgoHandFastConfig) -> None:
-        from egohand_inference.pipeline.predictor import EgoHandPredictor as UpstreamPredictor
         from egohand_inference.pipeline.predictor import load_egohand_model
         from posekit.models.egohand_cuda_crops import CudaHandCropper
+        from posekit.models.egohand_soma import prepare_cuda_soma
         from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
         self.config: EgoHandFastConfig = config
@@ -143,16 +143,20 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         soma: Path = soma_assets_path(config.soma_assets, config.hf_soma_repo_id, config.hf_soma_revision)
         calibration: EgoHandCalibration = load_calibration(config.calibration)
         backbone_onnx: Path = export_quantized_backbone_once(config, weights, soma, calibration)
-        model, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
-        predictor: UpstreamPredictor = UpstreamPredictor(model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True)
+        loaded, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
+        model: EgoHand = loaded.eval().to("cuda")
         self.faces: dict[HandSide, Tensor] = {
             side: torch.from_numpy(np.asarray(model.soma_hand.faces(side), dtype=np.int64)).cuda() for side in ("left", "right")
         }
         _export_head_once(model, config.head_onnx, config.backbone_backend.max_batch_size)
         # The BF16 heads have no Q/DQ attention inputs; FP8 fusion applies only to DINO.
         self.executor: EgoHandTensorExecutor = EgoHandTensorExecutor(
-            predictor, create_runtime_from_onnx(config.head_onnx, replace(config.backbone_backend, fp8_attention=False))
+            model, config.batch_size, create_runtime_from_onnx(config.head_onnx, replace(config.backbone_backend, fp8_attention=False))
         )
+        prepare_cuda_soma(model.soma_hand)
+        # The TensorRT heads replace the torch heads, which nothing else reads.
+        del model.hand_head, model.kp2d_head
+        torch.cuda.empty_cache()
         # One lens cropper, with its captured graphs, per calibrated camera.
         self.croppers: dict[CameraKey, CudaHandCropper] = {}
 
@@ -185,7 +189,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         prepared: PreparedHandCrops = cropper.prepare(frames_rgb, detections, self.config.padding)
         if crop_events is not None:
             crop_events[1].record()
-        output: EgoHandTensors = self.executor(prepared, detections.sides, cropper, profile=profile)
+        output: EgoHandTensors = self.executor(prepared, detections.sides, cropper.project, profile=profile)
         if crop_events is not None:
             # The executor synchronized after its last chunk, so the crop events have completed too.
             self.stage_ms.setdefault("preprocessing", []).append(crop_events[0].elapsed_time(crop_events[1]) / len(frames_rgb))

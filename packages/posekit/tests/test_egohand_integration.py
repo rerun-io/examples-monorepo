@@ -243,6 +243,7 @@ def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
     from posekit.cameras import load_calibrated_camera
     from posekit.models.egohand import selfcap_egohand_configs
     from posekit.models.egohand_cuda_crops import CudaHandCropper
+    from posekit.models.egohand_soma import prepare_cuda_soma
     from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
     if not torch.cuda.is_available():
@@ -256,15 +257,17 @@ def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
     frames = decoder.get_frames_at([0, 30, 80]).data.contiguous()
     detector = detector_config.setup()
     reference = config.setup()
-    # A second copy: the executor prepares its SOMA model for capture in place.
-    executor = EgoHandTensorExecutor(config.setup().predictor)
+    # A second copy: capture preparation changes its SOMA model in place.
+    model = config.setup().predictor.model
+    executor = EgoHandTensorExecutor(model, config.batch_size)
+    prepare_cuda_soma(model.soma_hand)
     cropper = CudaHandCropper(camera, frames.device)
     with torch.inference_mode():
         for frame in frames:
             batch = frame.unsqueeze(0)
             detections = detector(batch)
             expected = reference(batch, detections, camera)
-            result = executor(cropper.prepare(batch, detections, config.padding), detections.sides, cropper)
+            result = executor(cropper.prepare(batch, detections, config.padding), detections.sides, cropper.project)
             assert expected.sides == detections.sides
             assert expected.vertices is not None and expected.keypoints.xyz_camera is not None and expected.scale_parameters is not None
             torch.testing.assert_close(result.joints, expected.keypoints.xyz_camera, atol=0.001, rtol=0.001)
