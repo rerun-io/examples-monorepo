@@ -1302,6 +1302,11 @@ cmd = "python tools/demos/video_hands.py"
 cwd = "packages/posekit"
 description = "Run the GPU video 3D hands demo (hand detector + top-down 3D hands: wilor or egohand) and log to Rerun"
 
+[feature.posekit-hands.tasks.posekit-hands-eval]
+cmd = "python tools/apps/hands_eval.py"
+cwd = "packages/posekit"
+description = "Ground-truth eval of WiLoR and EgoHand on a fixed HOT3D (Quest 3) + UmeTrack subset read from a dataforge catalog (--catalog-url); writes results.json + hands_eval.rrd"
+
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 
