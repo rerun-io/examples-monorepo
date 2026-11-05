@@ -8,6 +8,7 @@ from typing import Literal
 import numpy as np
 import torch
 from jaxtyping import UInt8
+from serde import serde
 from torch import Tensor, nn
 from trtkit import TensorRtBackendConfig
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
@@ -26,6 +27,7 @@ CACHED_BODY_DECODERS: Path = DEFAULT_TRT_CACHE_DIR / f"sam3d-body-decoders-{SAM3
 """The twelve learned decoder layers from the pinned checkpoint."""
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class Sam3dBodyFastConfig(Sam3dBodyConfig):
     """Released SAM 3D Body weights with CUDA graph execution."""

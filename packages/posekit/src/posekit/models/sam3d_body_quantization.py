@@ -34,6 +34,7 @@ BODY_CALIBRATION_MODEL: str = "sam3d-body"
 """Model name and recording id of the SAM body calibration .rrd."""
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class BodyPrecisionPlan:
     """Explicit SAM-only changes to the calibrated NVFP4/FP8 tail recipe."""

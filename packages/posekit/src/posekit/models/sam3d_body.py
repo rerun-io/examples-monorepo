@@ -23,6 +23,7 @@ import torch
 from huggingface_hub import snapshot_download
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
+from serde import serde
 from torch import Tensor
 from torch.utils.hooks import RemovableHandle
 
@@ -68,6 +69,7 @@ class MhrBodyModel(Protocol):
     ) -> Tensor | tuple[Tensor, ...]: ...
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class Sam3dBodyConfig:
     """SAM 3D Body weights and inference mode; the gated checkpoint downloads at a pinned revision unless a local copy is given."""

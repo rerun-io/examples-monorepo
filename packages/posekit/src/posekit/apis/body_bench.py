@@ -26,6 +26,7 @@ from serde.json import to_json
 from torch import Tensor
 
 from posekit.apis.hands_bench import EXAMPLES, StageSummary, StageTimes
+from posekit.body_run import BodyRunIdentity, body_run_identity
 from posekit.models import AnnotatedBodyPose3dConfig, BodyPose3dConfig
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
@@ -47,6 +48,8 @@ class BodyBenchResult:
     frames: int
     people_per_frame: float
     stages: dict[str, StageSummary]
+    run: BodyRunIdentity | None = None
+    """Effective measured settings and export identities; None in legacy reports."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -148,7 +151,7 @@ def main(config: BodyBenchConfig) -> list[BodyBenchResult]:
         boxes: BoxDetections = person_boxes(frames)
         for mode in config.modes:
             times, people = bench_mode(frames, boxes, mode, config.warmup, config.body)
-            result = BodyBenchResult(mode, torch.cuda.get_device_name(), len(times.values.get("wall", [])), people, times.summary())
+            result = BodyBenchResult(mode, torch.cuda.get_device_name(), len(times.values.get("wall", [])), people, times.summary(), body_run_identity(replace(config.body, mode=mode)))
             results.append(result)
             print(f"[body-bench] {mode}: " + ", ".join(f"{stage} {s.median_ms:.2f}" for stage, s in result.stages.items()) + f" ms/frame (median), {people:.2f} people/frame")
     config.output.parent.mkdir(parents=True, exist_ok=True)

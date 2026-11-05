@@ -21,6 +21,7 @@ from torchcodec.decoders import VideoDecoder
 from torchvision.io import ImageReadMode, decode_image
 
 from posekit.apis.body_bench import person_boxes_per_frame
+from posekit.body_run import BodyRunIdentity, body_run_identity
 from posekit.models.sam3d_body import Sam3dBodyConfig, Sam3dBodyReconstruction
 from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
 from posekit.models.sam3d_body_quantization import (
@@ -90,6 +91,8 @@ class BodyAccuracyReport:
     """Aggregate errors on the declared detector-false-positive stress sources."""
     split: Literal["acceptance", "development"] = "acceptance"
     """Whether these inputs were reserved for acceptance or used for precision-plan selection."""
+    run: BodyRunIdentity | None = None
+    """Effective measured settings and export identities; None in legacy reports."""
 
 
 def acceptance_passes(source_bands: dict[str, dict[str, AccuracyBand]], stress_sources: tuple[str, ...]) -> bool:
@@ -274,7 +277,8 @@ def main(config: Config) -> BodyAccuracyReport:
     inputs = evaluation_inputs(config, calibration)
     detections_by_frame: list[BoxDetections] = person_boxes_per_frame([frame for _, frame in inputs])
     reference = Sam3dBodyConfig(mode=config.fast.mode).setup()
-    fast = replace(config.fast, calibration=config.calibration).setup()
+    effective_fast: Sam3dBodyFastConfig = replace(config.fast, calibration=config.calibration)
+    fast = effective_fast.setup()
     errors: dict[str, list[Tensor]] = defaultdict(list)
     stress_errors: dict[str, list[Tensor]] = defaultdict(list)
     repeated_errors: dict[str, list[Tensor]] = defaultdict(list)
@@ -337,6 +341,7 @@ def main(config: Config) -> BodyAccuracyReport:
         [row for row, _ in inputs], people, bands, acceptance_passes(source_bands, config.stress_sources), per_frame,
         summarize(repeated_errors), source_bands, config.stress_sources, summarize(stress_errors),
         "development" if config.development_frames is not None else "acceptance",
+        body_run_identity(effective_fast),
     )
     config.output.parent.mkdir(parents=True, exist_ok=True)
     config.output.write_text(to_json(report) + "\n")
