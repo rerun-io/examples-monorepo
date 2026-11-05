@@ -10,9 +10,7 @@ The GPU-resident fast role, ``FastEgoHandPredictor``, shares the weights,
 detector and backbone export helpers below (see ``posekit.models.egohand_fast``).
 """
 
-import fcntl
 import time
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +25,7 @@ from PIL import Image
 from serde import from_dict, serde
 from torch import Tensor
 from trtkit import TensorRtBackendConfig, export_onnx
+from trtkit.artifacts import build_once
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
@@ -317,17 +316,6 @@ def soma_assets_path(soma_assets: Path | None, repo_id: str, revision: str) -> P
     if soma_assets is not None:
         return soma_assets
     return Path(snapshot_download(repo_id=repo_id, revision=revision, allow_patterns=list(SOMA_HAND_FILES)))
-
-
-def build_once(artifact: Path, build: Callable[[], None]) -> None:
-    """Run ``build`` if ``artifact`` is missing; processes that find it missing take turns, so the first one's build serves them all."""
-    if artifact.is_file():
-        return
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    with artifact.with_suffix(".lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if not artifact.is_file():
-            build()
 
 
 def export_backbone_once(weights: Path, soma: Path, onnx: Path, *, batch_size: int, max_batch_size: int) -> None:

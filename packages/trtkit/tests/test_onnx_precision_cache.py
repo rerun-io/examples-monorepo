@@ -32,7 +32,7 @@ def test_fp16_trunk_is_cached_beside_the_other_rewrites_and_leaves_the_source(tm
     assert [t.data_type for t in onnx.load(result).graph.initializer] == [onnx.TensorProto.FLOAT16]
     written = result.stat().st_mtime_ns
     assert fp16_trunk(source, tmp_path / "cache") == result and result.stat().st_mtime_ns == written
-    assert sorted(path.name for path in result.parent.iterdir()) == sorted([result.name, "onnx-sha256"])
+    assert sorted(path.name for path in result.parent.iterdir()) == sorted([result.name, f"{result.name}.lock", "onnx-sha256"])
 
 
 

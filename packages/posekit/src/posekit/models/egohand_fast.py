@@ -17,6 +17,7 @@ import torch
 from jaxtyping import UInt8
 from torch import Tensor
 from trtkit import TensorRtBackendConfig, export_onnx
+from trtkit.artifacts import build_once
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from egohand.models.egohand import EgoHand
@@ -31,7 +32,6 @@ from posekit.models.egohand import (
     EgoHandDetectorConfig,
     EgoHandReconstruction,
     TensorRtBackbone,
-    build_once,
     egohand_weights_path,
     export_backbone_once,
     soma_assets_path,
