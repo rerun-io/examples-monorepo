@@ -12,7 +12,8 @@ never read; the crop size is fixed at 512; 2D keypoints are projected about the 
 camera with another principal point is given.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
@@ -23,6 +24,7 @@ from huggingface_hub import snapshot_download
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
+from torch.utils.hooks import RemovableHandle
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import TopDownBodyPose3d
@@ -145,29 +147,45 @@ def _person_rows(predictions: list[Any], field: str) -> Float32[ndarray, "n ..."
 
 
 class _StageClock:
-    """CUDA events around every network pass of one model, recorded only while enabled.
+    """CUDA events around every network pass of one model, while ``recording`` is entered.
 
     Upstream's ``forward_step`` tells which pass runs (body, then the left and right hand crops); its keypoint-prompted
     decoder pass runs through ``run_keypoint_prompt``. MHR forward kinematics inside a decoder is part of that decoder.
+    Outside ``recording`` the model carries no wrappers or hooks.
     """
 
     def __init__(self, model: torch.nn.Module) -> None:
-        self.enabled: bool = False
+        self.model: torch.nn.Module = model
         self.events: list[tuple[Sam3dBodyStage, torch.cuda.Event, torch.cuda.Event]] = []
         self.current: Sam3dBodyPass = "body"
         self.hand_passes: int = 0
         self.in_decoder: bool = False
+
+    @contextmanager
+    def recording(self) -> Iterator[None]:
+        """Wrap the passes for the duration; on exit the instance attributes and hooks are removed again."""
+        model: torch.nn.Module = self.model
+        wrapped: list[tuple[object, str]] = [(model, "forward_step"), (model, "run_keypoint_prompt")]
         self._wrap(model, "forward_step", self._pass_from_decoder_type)
         self._wrap(model, "run_keypoint_prompt", lambda *_: "prompt")
         for head in (model.head_pose, model.head_pose_hand):
             self._wrap_timed(head, "mhr_forward", lambda: None if self.in_decoder else "mhr")
-        self._hook(model.get_submodule("backbone"), lambda: f"backbone_{self.current}", nested=False)
+            wrapped.append((head, "mhr_forward"))
+        handles: list[RemovableHandle] = self._hook(model.get_submodule("backbone"), lambda: f"backbone_{self.current}", nested=False)
         for decoder in ("decoder", "decoder_hand"):
-            self._hook(model.get_submodule(decoder), lambda: f"decoder_{self.current}", nested=True)
+            handles += self._hook(model.get_submodule(decoder), lambda: f"decoder_{self.current}", nested=True)
+        try:
+            yield
+        finally:
+            for owner, name in wrapped:
+                delattr(owner, name)
+            for handle in handles:
+                handle.remove()
 
     def start_frame(self) -> None:
         self.current = "body"
         self.hand_passes = 0
+        self.events.clear()
 
     def _pass_from_decoder_type(self, _batch: dict, decoder_type: str = "body") -> Sam3dBodyPass:
         if decoder_type == "body":
@@ -188,7 +206,7 @@ class _StageClock:
         method = getattr(owner, name)
 
         def wrapped(*args: object, **kwargs: object) -> object:
-            label: Sam3dBodyStage | None = stage() if self.enabled else None
+            label: Sam3dBodyStage | None = stage()
             if label is None:
                 return method(*args, **kwargs)
             start = torch.cuda.Event(enable_timing=True)
@@ -201,23 +219,20 @@ class _StageClock:
 
         setattr(owner, name, wrapped)
 
-    def _hook(self, module: torch.nn.Module, stage: Callable[[], str], *, nested: bool) -> None:
+    def _hook(self, module: torch.nn.Module, stage: Callable[[], str], *, nested: bool) -> list[RemovableHandle]:
         def before(*_: object) -> None:
             if nested:
                 self.in_decoder = True
-            if self.enabled:
-                start = torch.cuda.Event(enable_timing=True)
-                start.record()
-                self.events.append((stage(), start, torch.cuda.Event(enable_timing=True)))  # type: ignore[arg-type]
+            start = torch.cuda.Event(enable_timing=True)
+            start.record()
+            self.events.append((stage(), start, torch.cuda.Event(enable_timing=True)))  # type: ignore[arg-type]
 
         def after(*_: object) -> None:
             if nested:
                 self.in_decoder = False
-            if self.enabled:
-                self.events[-1][2].record()
+            self.events[-1][2].record()
 
-        module.register_forward_pre_hook(before)
-        module.register_forward_hook(after)
+        return [module.register_forward_pre_hook(before), module.register_forward_hook(after)]
 
     def stage_ms(self, total_ms: float) -> dict[Sam3dBodyStage, float]:
         """GPU time per stage of the recorded passes, plus ``other`` and ``total``; their work must have completed."""
@@ -276,34 +291,32 @@ class Sam3dBodyPredictor(TopDownBodyPose3d):
         frame_indices: list[int] = []
         rows: list[int] = []
         profile: bool = self.profile_stages
-        self.clock.enabled = profile
-        for frame_index in range(len(frames)):
-            selected: Int64[ndarray, "m"] = np.flatnonzero(frame_of_row == frame_index)
-            if len(selected) == 0:
-                continue
-            self.clock.start_frame()
-            self.clock.events.clear()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            if profile:
-                start.record()
-            people: list[Any] = self.estimator.process_one_image(
-                frames[frame_index],
-                xyxy=boxes[selected],
-                masks=None if masks is None else masks[selected].astype(np.float32),
-                masks_score=None if masks is None else scores[selected],
-                K_33=intrinsics,
-                inference_type=self.config.mode,
-            )
-            if profile:
-                end.record()
-                torch.cuda.synchronize()
-                for stage, milliseconds in self.clock.stage_ms(start.elapsed_time(end)).items():
-                    self.stage_ms.setdefault(stage, []).append(milliseconds)
-            predictions.extend(people)
-            frame_indices.extend([frame_index] * len(people))
-            rows.extend(selected.tolist())
-        self.clock.enabled = False
+        with self.clock.recording() if profile else nullcontext():
+            for frame_index in range(len(frames)):
+                selected: Int64[ndarray, "m"] = np.flatnonzero(frame_of_row == frame_index)
+                if len(selected) == 0:
+                    continue
+                self.clock.start_frame()
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                if profile:
+                    start.record()
+                people: list[Any] = self.estimator.process_one_image(
+                    frames[frame_index],
+                    xyxy=boxes[selected],
+                    masks=None if masks is None else masks[selected].astype(np.float32),
+                    masks_score=None if masks is None else scores[selected],
+                    K_33=intrinsics,
+                    inference_type=self.config.mode,
+                )
+                if profile:
+                    end.record()
+                    torch.cuda.synchronize()
+                    for stage, milliseconds in self.clock.stage_ms(start.elapsed_time(end)).items():
+                        self.stage_ms.setdefault(stage, []).append(milliseconds)
+                predictions.extend(people)
+                frame_indices.extend([frame_index] * len(people))
+                rows.extend(selected.tolist())
         return self._to_reconstruction(predictions, frame_indices, scores[rows], device)
 
     def _to_reconstruction(self, predictions: list[Any], frame_indices: list[int], scores: Float32[ndarray, "n"], device: torch.device) -> Sam3dBodyReconstruction:
