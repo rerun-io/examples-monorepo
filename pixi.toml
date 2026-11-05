@@ -1234,6 +1234,11 @@ depends-on = ["posekit-body-download-hocap-sample"]
 description = "Multiview SAM3 video segmentation with TSDF fusion on the HO-Cap sample (8 cameras, 100 frames)"
 
 
+[feature.posekit-body.tasks.posekit-body-bench]
+cmd = "python tools/apps/body_bench.py"
+cwd = "packages/posekit"
+description = "Per-frame SAM 3D Body speed (decoded GPU frame + person box to the full output), body and full mode, per stage; writes body_bench.json"
+
 [feature.posekit-body.tasks.posekit-body3d-mv-body]
 cmd = "python tools/demos/body3d_mv_body.py hocap --root-directory data/hocap/sample --subject-id 8 --sequence-name 20231024_180733 --max-frames 50"
 cwd = "packages/posekit"
