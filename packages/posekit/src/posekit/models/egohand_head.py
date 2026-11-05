@@ -11,6 +11,8 @@ from egohand.utils.ray_pe import fourier_encode_angles
 class EgoHandHead(nn.Module):
     """The released heads with analytic rays for the 256-pixel virtual camera."""
 
+    patch_xy: Float32[Tensor, "1 256 2"]
+
     def __init__(self, model: EgoHand) -> None:
         super().__init__()
         if model.kp2d_topology != "separate" or model.kp2d_head is None or not model.ray_condition or not model.cliff_condition:

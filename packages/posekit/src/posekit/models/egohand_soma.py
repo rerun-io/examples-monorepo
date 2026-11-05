@@ -38,7 +38,9 @@ class _CudaMHRHand(MHRHandIdentityModel):
         interpolation = self._to_soma_interp
         if self._laplacian_mesh is not None or interpolation.tet_normal_scale != "area":
             raise ValueError("EgoHand requires the released area-based hand topology transfer.")
-        self.hand_faces: Int64[Tensor, "v 3"] = interpolation.F_src_torch[interpolation.face_ids[self._hand_vert_ids]]
+        source_faces: Int64[Tensor, "f 3"] = interpolation.get_buffer("F_src_torch")
+        face_ids: Int64[Tensor, "v"] = interpolation.get_buffer("face_ids")
+        self.hand_faces: Int64[Tensor, "v 3"] = source_faces[face_ids[self._hand_vert_ids]]
         self.hand_barycentric: Float32[Tensor, "v 4"] = interpolation.bary_coords[self._hand_vert_ids].float()
         self.wrist_boundary: Int64[Tensor, "w"] = torch.searchsorted(self._hand_vert_ids, self._wrist_boundary_global)
         if not torch.equal(self._hand_vert_ids[self.wrist_boundary], self._wrist_boundary_global):
