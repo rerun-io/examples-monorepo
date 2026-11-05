@@ -12,19 +12,22 @@ conversion). ``total`` is the event span of the model call; ``wall`` adds the ad
 This is the eager baseline: crops run on the CPU with OpenCV, everything else in PyTorch.
 """
 
-import json
 import time
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TypeAlias
 
 import numpy as np
 import torch
 from jaxtyping import UInt8
-from serde import serde, to_dict
+from serde import serde
+from serde.json import to_json
 from torch import Tensor
 
 from posekit.apis.hands_bench import EXAMPLES, StageSummary, StageTimes
+from posekit.body_run import BodyRunIdentity, body_run_identity
+from posekit.models import AnnotatedBodyPose3dConfig, BodyPose3dConfig
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
 from posekit.models.sam3d_body import Sam3dBodyConfig, Sam3dBodyMode, Sam3dBodyPredictor
@@ -45,6 +48,8 @@ class BodyBenchResult:
     frames: int
     people_per_frame: float
     stages: dict[str, StageSummary]
+    run: BodyRunIdentity | None = None
+    """Effective measured settings and export identities; None in legacy reports."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -61,6 +66,8 @@ class BodyBenchConfig:
     """Untimed frames first (lazy init; the first full-mode call is also numerically different)."""
     output: Path = Path("/tmp/posekit-body-bench/body_bench.json")
     """Where the results go."""
+    body: AnnotatedBodyPose3dConfig = field(default_factory=Sam3dBodyConfig)
+    """Body role to benchmark with the same inputs, modes and timing boundaries."""
 
 
 def person_boxes(frames: UInt8[Tensor, "n h w 3"]) -> BoxDetections:
@@ -76,25 +83,49 @@ def person_boxes(frames: UInt8[Tensor, "n h w 3"]) -> BoxDetections:
                 rows.append(BoxDetections(found.xyxy[best], found.scores[best], torch.full((1,), start + local, dtype=torch.int64, device=frames.device)))
     del segmenter
     torch.cuda.empty_cache()
+    if not rows:
+        return BoxDetections.empty(frames.device)
     return BoxDetections(torch.cat([r.xyxy for r in rows]), torch.cat([r.scores for r in rows]), torch.cat([r.frame_indices for r in rows]))
 
 
-def bench_mode(frames: UInt8[Tensor, "n h w 3"], boxes: BoxDetections, mode: BodyBenchMode, warmup: int) -> tuple[StageTimes, float]:
+def person_boxes_per_frame(frames: list[UInt8[Tensor, "h w 3"]]) -> list[BoxDetections]:
+    """Each frame's SAM3 person box as frame-0 detections of that frame; frames of one shape share SAM3 calls."""
+    by_shape: dict[tuple[int, ...], list[int]] = defaultdict(list)
+    for position, frame in enumerate(frames):
+        by_shape[tuple(frame.shape)].append(position)
+    per_frame: dict[int, BoxDetections] = {}
+    for positions in by_shape.values():
+        stacked: UInt8[Tensor, "n h w 3"] = torch.stack([frames[position] for position in positions])
+        detections: BoxDetections = person_boxes(stacked)
+        for local, position in enumerate(positions):
+            rows: Tensor = torch.nonzero(detections.frame_indices == local).flatten()
+            per_frame[position] = BoxDetections(detections.xyxy[rows], detections.scores[rows], torch.zeros(len(rows), dtype=torch.int64, device=stacked.device))
+        del stacked
+    return [per_frame[position] for position in range(len(frames))]
+
+
+def bench_mode(
+    frames: UInt8[Tensor, "n h w 3"], boxes: BoxDetections, mode: BodyBenchMode, warmup: int,
+    body: BodyPose3dConfig,
+) -> tuple[StageTimes, float]:
     """One mode, one frame at a time; the predictor reports its own stage times."""
-    predictor: Sam3dBodyPredictor = Sam3dBodyConfig(mode=mode).setup()
+    predictor: Sam3dBodyPredictor = replace(body, mode=mode).setup()
     times = StageTimes()
     people: list[int] = []
     for step, index in enumerate(list(range(min(warmup, len(frames)))) + list(range(len(frames)))):
         rows: Tensor = torch.nonzero(boxes.frame_indices == index).flatten()
         frame_boxes = BoxDetections(boxes.xyxy[rows], boxes.scores[rows], torch.zeros(len(rows), dtype=torch.int64, device=frames.device))
-        predictor.profile_stages = step >= min(warmup, len(frames))
+        # Profiling may have its own captured graph. Warm that same execution
+        # path before timing so graph construction is always excluded.
+        is_warmup: bool = step < min(warmup, len(frames))
+        predictor.profile_stages = True
         predictor.stage_ms.clear()
         torch.cuda.synchronize()
         started: float = time.perf_counter()
         result = predictor(frames[index : index + 1], frame_boxes)
         torch.cuda.synchronize()
         wall_ms: float = (time.perf_counter() - started) * 1000.0
-        if not predictor.profile_stages:
+        if is_warmup:
             continue
         people.append(result.num_people)
         times.add("wall", wall_ms)
@@ -119,10 +150,10 @@ def main(config: BodyBenchConfig) -> list[BodyBenchResult]:
     with torch.inference_mode():
         boxes: BoxDetections = person_boxes(frames)
         for mode in config.modes:
-            times, people = bench_mode(frames, boxes, mode, config.warmup)
-            result = BodyBenchResult(mode, torch.cuda.get_device_name(), len(times.values.get("wall", [])), people, times.summary())
+            times, people = bench_mode(frames, boxes, mode, config.warmup, config.body)
+            result = BodyBenchResult(mode, torch.cuda.get_device_name(), len(times.values.get("wall", [])), people, times.summary(), body_run_identity(replace(config.body, mode=mode)))
             results.append(result)
             print(f"[body-bench] {mode}: " + ", ".join(f"{stage} {s.median_ms:.2f}" for stage, s in result.stages.items()) + f" ms/frame (median), {people:.2f} people/frame")
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    config.output.write_text(json.dumps([to_dict(result) for result in results], indent=2) + "\n")
+    config.output.write_text(to_json(results) + "\n")
     return results

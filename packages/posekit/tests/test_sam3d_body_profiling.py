@@ -27,7 +27,10 @@ from posekit.predictions import BoxDetections
 pytestmark = pytest.mark.integration
 
 WRAPPED: tuple[str, ...] = ("forward_step", "run_keypoint_prompt", "mhr_forward")
-EVERY_FRAME: frozenset[str] = frozenset(get_args(Sam3dBodyStage)) - {"decoder_prompt"}
+EVERY_FRAME: frozenset[str] = frozenset({
+    "backbone_body", "backbone_left_hand", "backbone_right_hand",
+    "decoder_body", "decoder_left_hand", "decoder_right_hand", "mhr", "other", "total",
+})
 """Stages of every full-mode frame; upstream runs the keypoint-prompted decoder pass only on some inputs."""
 
 

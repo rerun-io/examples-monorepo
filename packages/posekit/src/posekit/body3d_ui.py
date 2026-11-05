@@ -6,6 +6,7 @@ MoGe-2 camera and depth, SAM 3D Body); each request streams its recording to the
 
 import shutil
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
@@ -19,6 +20,7 @@ from numpy import ndarray
 
 from posekit.apis.body3d import EXAMPLES, Body3dFrame, Body3dPipeline, log_body3d_frame
 from posekit.body_rerun import create_view, export_meshes_to_glb, set_annotation_context
+from posekit.models import AnnotatedBodyPose3dConfig, BodyPose3dConfig
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
 from posekit.models.sam3d_body import Sam3dBodyConfig
 
@@ -36,11 +38,11 @@ EXAMPLE_ROWS: Final[list[tuple[str, bool, bool, bool]]] = [
 _PIPELINE: Body3dPipeline | None = None
 
 
-def pipeline() -> Body3dPipeline:
+def pipeline(body: BodyPose3dConfig | None = None) -> Body3dPipeline:
     """The shared SAM3 + MoGe-2 + SAM 3D Body pipeline, loaded on first use."""
     global _PIPELINE
     if _PIPELINE is None:
-        _PIPELINE = Body3dPipeline(Sam3dBodyConfig(), Sam3SegmenterConfig())
+        _PIPELINE = Body3dPipeline(Sam3dBodyConfig() if body is None else body, Sam3SegmenterConfig())
     return _PIPELINE
 
 
@@ -122,9 +124,21 @@ def build() -> gr.Blocks:
     return demo
 
 
-def launch(server_name: str = "127.0.0.1", server_port: int = 7871) -> None:
+@dataclass(frozen=True, slots=True)
+class Config:
+    """Serve the body viewer with a selectable posekit body role."""
+
+    server_name: str = "127.0.0.1"
+    """Interface on which Gradio listens."""
+    server_port: int = 7871
+    """Gradio HTTP port."""
+    body: AnnotatedBodyPose3dConfig = field(default_factory=Sam3dBodyConfig)
+    """Body reconstruction config shared by all requests."""
+
+
+def launch(config: Config) -> None:
     """Load the pipeline and serve the app."""
-    pipeline()
+    pipeline(config.body)
     demo = build()
     demo.queue(max_size=1, default_concurrency_limit=1)
-    demo.launch(server_name=server_name, server_port=server_port, ssr_mode=False, allowed_paths=[str(EXAMPLES)])
+    demo.launch(server_name=config.server_name, server_port=config.server_port, ssr_mode=False, allowed_paths=[str(EXAMPLES)])

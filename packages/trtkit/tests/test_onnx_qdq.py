@@ -51,3 +51,31 @@ def test_unplanned_linears_and_mismatched_precisions_are_rejected() -> None:
         quantize_qdq(exported_graph(), QdqPlan({"fc1": Fp8Linear(1.0), "fc2": Fp8Linear(1.0), "head": Fp8Linear(1.0)}, ()))
     with pytest.raises(ValueError, match="missing_module"):
         quantize_qdq(exported_graph(), QdqPlan({"fc1": Fp8Linear(1.0), "fc2": Fp8Linear(1.0), "missing_module": Fp8Conv(1.0)}, ()))
+
+
+def test_plan_can_explicitly_preserve_linear_and_attention_precision() -> None:
+    """A precision ablation retains the selected source operations and weights."""
+    from trtkit.onnx_qdq import Fp8Attention, KeepPrecision
+
+    model = exported_graph()
+    model.graph.node.extend([
+        helper.make_node("Attention", ["fc1.out", "fc1.out", "fc1.out"], ["attention.original"]),
+        helper.make_node("Attention", ["fc2.out", "fc2.out", "fc2.out"], ["attention.quantized"]),
+    ])
+    model.graph.output.extend([
+        helper.make_tensor_value_info("attention.original", TensorProto.FLOAT, None),
+        helper.make_tensor_value_info("attention.quantized", TensorProto.FLOAT, None),
+    ])
+    source_weight: bytes = model.graph.initializer[0].SerializeToString()
+    plan = QdqPlan(
+        {"fc1": KeepPrecision(), "fc2": Fp8Linear(1.0)},
+        (KeepPrecision(), Fp8Attention("attention.second", (1.0, 1.0, 1.0))),
+    )
+    result = quantize_qdq(model, plan)
+    weights = {tensor.name: tensor for tensor in result.graph.initializer}
+    assert weights["inner.fc1.weight"].SerializeToString() == source_weight
+    assert "inner.fc2.weight" not in weights
+    assert weights["fc2.w_fp8"].data_type == TensorProto.FLOAT8E4M3FN
+    attention = [node for node in result.graph.node if node.op_type == "Attention"]
+    assert list(attention[0].input) == ["fc1.out"] * 3
+    assert list(attention[1].input) == [f"attention.second.{axis}.a_dq8" for axis in "qkv"]

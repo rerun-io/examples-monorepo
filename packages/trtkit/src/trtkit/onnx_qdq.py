@@ -1,13 +1,14 @@
 """Q/DQ precision rewrites of BF16 ONNX exports for strongly typed TensorRT builds.
 
 A :class:`QdqPlan` names the precision of each module: NVFP4 or FP8 linears, FP8
-convolutions, and FP8 inputs of the native Attention ops. Each entry carries the
-activation maximum its static input scale is derived from. :func:`quantize_qdq`
+convolutions, FP8 inputs of native Attention ops, or unchanged source precision.
+Quantized entries carry the activation maximum that sets their input scale. :func:`quantize_qdq`
 rewrites the graph from that plan and :func:`save_with_external_data` publishes
 the result. Tensor names and their order are part of the exported bytes, which
 key the TensorRT engine caches.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -31,6 +32,11 @@ LINEAR_INPUT_HEADROOM: float = 2.0
 """Factor on calibrated linear input maxima before they set static input scales."""
 LINEAR_WEIGHT_CHAIN: list[str] = ["Transpose", "Cast"]
 """Producers between a torch-exported MatMul and its ``[out, in]`` weight initializer."""
+
+
+@dataclass(frozen=True, slots=True)
+class KeepPrecision:
+    """Explicitly retain a source operation and its weights without adding Q/DQ."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,11 +97,11 @@ def fp8_attention_plan(prefix: str, blocks: int, attention_amax: dict[str, float
 class QdqPlan:
     """Precision of every quantized module in one graph."""
 
-    modules: dict[str, ModulePrecision]
+    modules: Mapping[str, ModulePrecision | KeepPrecision]
     """Precision by module: the weight initializer name without ``inner.`` and ``.weight``.
-    Every weight MatMul needs an entry; a Conv without one keeps its precision."""
-    attention: tuple[Fp8Attention, ...]
-    """One entry per native Attention op, in graph order."""
+    Every weight MatMul needs an entry, including KeepPrecision; an unlisted Conv keeps its precision."""
+    attention: tuple[Fp8Attention | KeepPrecision, ...]
+    """One explicit quantize-or-keep entry per native Attention op, in graph order."""
     weight_device: Literal["cpu", "cuda"] = "cpu"
     """Device that quantizes the weights; it fixes the reduction order of the NVFP4 scale search."""
 
@@ -222,12 +228,14 @@ def _rewrite_module(index: int, node: onnx.NodeProto, module: str, chain: list[s
     edits.inserted[index] = nodes
 
 
-def _rewrite_attention(graph: onnx.GraphProto, attention: tuple[Fp8Attention, ...], edits: _Edits) -> None:
-    """Quantize the query, key and value inputs of every native Attention op, in graph order."""
+def _rewrite_attention(graph: onnx.GraphProto, attention: tuple[Fp8Attention | KeepPrecision, ...], edits: _Edits) -> None:
+    """Apply each native Attention op's quantize-or-keep choice in graph order."""
     attention_nodes: list[tuple[int, onnx.NodeProto]] = [(index, node) for index, node in enumerate(graph.node) if node.op_type == "Attention"]
     if len(attention_nodes) != len(attention):
         raise ValueError(f"Expected {len(attention)} native Attention ops, got {len(attention_nodes)}.")
     for (index, node), inputs in zip(attention_nodes, attention, strict=True):
+        if isinstance(inputs, KeepPrecision):
+            continue
         for slot, (tag, amax) in enumerate(zip("qkv", inputs.amax, strict=True)):
             prefix: str = f"{inputs.module}.{tag}"
             input_initializers, input_nodes, node.input[slot] = _fp8_input(node.input[slot], prefix, amax, f"{prefix}.a_zp")
@@ -285,10 +293,13 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
         if weight_name not in initializers or not weight_name.endswith(".weight"):
             continue
         module: str = weight_name.removeprefix("inner.").removesuffix(".weight")
-        precision: ModulePrecision | None = plan.modules.get(module)
+        precision: ModulePrecision | KeepPrecision | None = plan.modules.get(module)
         if precision is None:
             if node.op_type == "MatMul":
                 raise ValueError(f"The plan has no precision for linear {module}.")
+            continue
+        if isinstance(precision, KeepPrecision):
+            applied.add(module)
             continue
         weight: Tensor = torch.from_numpy(numpy_helper.to_array(initializers[weight_name]).copy()).to(plan.weight_device)
         _rewrite_module(index, node, module, chain, weight, precision, edits)

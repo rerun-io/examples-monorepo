@@ -17,13 +17,13 @@ from numpy import ndarray
 from simplecv.ops.triangulate import batch_triangulate
 from torch import Tensor
 
+from posekit.models.sam3d_body import MhrBodyModel
 from posekit.ops.multiview_body.losses import (
     LossWeights,
     MultiviewLossOutput,
     MultiviewOptimizationLoss,
 )
 from posekit.ops.multiview_body.mhr_output import expect_mhr_tensor_tuple
-from sam3d_body.models.heads.mhr_head import MHRHead
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
@@ -113,7 +113,7 @@ class MultiviewBodyOptimizer:
         self,
         projection_matrices: Float[ndarray, "n_views 3 4"],
         first_world_T_cam: Float[ndarray, "4 4"],
-        mhr_head: MHRHead,
+        mhr_head: MhrBodyModel,
         config: MultiviewOptimizerConfig | None = None,
         device: str = "cuda",
     ) -> None:
@@ -124,7 +124,7 @@ class MultiviewBodyOptimizer:
                 with shape ``[n_views, 3, 4]``.
             first_world_T_cam: Transform from first camera to world coordinates.
                 Used to convert camera-space keypoints to world before projection.
-            mhr_head: MHRHead module for differentiable forward kinematics.
+            mhr_head: Public differentiable MHR geometry supplied by the body role.
                 Used to compute vertices/keypoints from pose parameters.
             config: Optimization configuration. Uses defaults if None.
             device: PyTorch device for optimization.
@@ -143,7 +143,7 @@ class MultiviewBodyOptimizer:
             first_world_T_cam.astype(np.float32)
         ).to(device)
 
-        self.mhr_head: MHRHead = mhr_head
+        self.mhr_head: MhrBodyModel = mhr_head
 
         self.loss_fn = MultiviewOptimizationLoss(weights=self.config.loss_weights)
 

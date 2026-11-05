@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 
 from posekit.body_rerun import create_view, log_people, set_annotation_context
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
-from posekit.models import SegmentationPrompts
+from posekit.models import AnnotatedBodyPose3dConfig, BodyPose3dConfig, SegmentationPrompts
 from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
 from posekit.models.sam3d_body import Sam3dBodyConfig, Sam3dBodyPredictor, Sam3dBodyReconstruction
 from posekit.predictions import BoxDetections
@@ -56,7 +56,7 @@ def pinhole_camera(intrinsics: Float32[ndarray, "3 3"], width: int, height: int)
 class Body3dPipeline:
     """SAM3 person masks + optional MoGe-2 camera + SAM 3D Body, one RGB image at a time."""
 
-    def __init__(self, body: Sam3dBodyConfig, segmenter: Sam3SegmenterConfig, *, prompt: str = "person", estimate_fov: bool = True) -> None:
+    def __init__(self, body: BodyPose3dConfig, segmenter: Sam3SegmenterConfig, *, prompt: str = "person", estimate_fov: bool = True) -> None:
         self.segmenter: Sam3Segmenter = segmenter.setup()
         self.body: Sam3dBodyPredictor = body.setup()
         self.prompt: str = prompt
@@ -116,7 +116,7 @@ class Body3dConfig:
     """A folder of input images."""
     video_path: Path | None = None
     """An input video (one camera for the whole clip)."""
-    body: Sam3dBodyConfig = field(default_factory=Sam3dBodyConfig)
+    body: AnnotatedBodyPose3dConfig = field(default_factory=Sam3dBodyConfig)
     """SAM 3D Body weights and mode (``full`` adds hands)."""
     segmenter: Sam3SegmenterConfig = field(default_factory=Sam3SegmenterConfig)
     """SAM3 person segmentation."""
@@ -209,4 +209,3 @@ def main(config: Body3dConfig) -> None:
             log_body3d_frame(frame, rgb, log_depth=log_depth)
             people += frame.people.num_people
     print(f"[posekit] reconstructed {people} people")
-

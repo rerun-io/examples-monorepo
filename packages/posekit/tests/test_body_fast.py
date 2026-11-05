@@ -1,0 +1,231 @@
+"""The fast body role keeps complete outputs and reuses captures as input values change."""
+
+from dataclasses import fields
+from pathlib import Path
+
+import pytest
+import torch
+
+pytest.importorskip("yacs", reason="SAM 3D Body requires the posekit-body environment")
+
+from huggingface_hub import try_to_load_from_cache
+from torchvision.io import ImageReadMode, decode_image
+
+from posekit.models.sam3d_body import SAM3D_BODY_REVISION, Sam3dBodyConfig, Sam3dBodyMode
+from posekit.predictions import BoxDetections
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mode,gpu_crops,compile_backbone", [
+    ("body", False, False), ("full", False, False),
+    ("body", True, False), ("full", True, False), ("full", True, True),
+])
+def test_fast_body_reuses_graphs_and_preserves_outputs(mode: Sam3dBodyMode, gpu_crops: bool, compile_backbone: bool) -> None:
+    """Changed pixels and boxes reuse the graph while matching the eager role."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    checkpoint = try_to_load_from_cache("facebook/sam-3d-body-dinov3", "model.ckpt", revision=SAM3D_BODY_REVISION)
+    image: Path = Path("/mnt/nas/ssd-8tb/posekit/goldens/sam3d-body-v1/inputs/Planche.jpg")
+    if not torch.cuda.is_available() or not isinstance(checkpoint, str) or not image.is_file():
+        pytest.skip("requires CUDA, cached SAM 3D Body model.ckpt and the Planche.jpg golden input")
+    reference = Sam3dBodyConfig(mode=mode, checkpoint_dir=Path(checkpoint).parent).setup()
+    fast = Sam3dBodyFastConfig(
+        mode=mode, checkpoint_dir=Path(checkpoint).parent, gpu_preprocessing=gpu_crops,
+        backbone_onnx=None, decoder_onnx_dir=None, compile_torch_backbone=compile_backbone,
+    ).setup()
+    frames = decode_image(str(image), mode=ImageReadMode.RGB).permute(1, 2, 0).contiguous().cuda()[None]
+    height, width = frames.shape[1:3]
+    boxes = BoxDetections(
+        torch.tensor([[0.0, 0.0, float(width), float(height)]], device="cuda"),
+        torch.ones(1, device="cuda"), torch.zeros(1, dtype=torch.int64, device="cuda"),
+    )
+    with torch.inference_mode():
+        mesh_tolerance: float = 0.005 if gpu_crops else 0.0005
+        pixel_tolerance: float = 3.0 if gpu_crops else 0.5
+        # The released model's first full call differs slightly from later calls.
+        reference(frames, boxes)
+        fast(frames, boxes)
+        expected = reference(frames, boxes)
+        actual = fast(frames, boxes)
+        torch.testing.assert_close(actual.vertices, expected.vertices, atol=mesh_tolerance, rtol=0.0)
+        # Tiny geometry changes can move the quantized OpenCV hand crop sampler;
+        # this remains stricter than the separate corpus accuracy bands.
+        torch.testing.assert_close(actual.keypoints.xy, expected.keypoints.xy, atol=pixel_tolerance, rtol=0.0)
+        count: int = fast.graph_count
+        assert count > 0
+        changed = frames.flip(2)
+        expected = reference(changed, boxes)
+        actual = fast(changed, boxes)
+        assert fast.graph_count == count
+        torch.testing.assert_close(actual.vertices, expected.vertices, atol=mesh_tolerance, rtol=0.0)
+        torch.testing.assert_close(actual.keypoints.xy, expected.keypoints.xy, atol=pixel_tolerance, rtol=0.0)
+        assert actual.vertices.is_cuda and actual.translation.is_cuda
+
+
+@pytest.mark.integration
+def test_fast_body_preserves_per_frame_prompt_rules_in_mixed_batch() -> None:
+    """Two people in one frame retain dummy prompts; a separate single person removes them."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    checkpoint = try_to_load_from_cache("facebook/sam-3d-body-dinov3", "model.ckpt", revision=SAM3D_BODY_REVISION)
+    image = Path("/mnt/nas/ssd-8tb/posekit/goldens/sam3d-body-v1/inputs/Planche.jpg")
+    if not torch.cuda.is_available() or not isinstance(checkpoint, str) or not image.is_file():
+        pytest.skip("requires CUDA, cached SAM 3D Body model.ckpt and the Planche.jpg golden input")
+    pixels = decode_image(str(image), mode=ImageReadMode.RGB).permute(1, 2, 0).contiguous().cuda()
+    frames = torch.stack((pixels, pixels.flip(1)))
+    height, width = pixels.shape[:2]
+    boxes = BoxDetections(
+        torch.tensor([[0.0, 0.0, float(width), float(height)]], device="cuda").repeat(3, 1),
+        torch.ones(3, device="cuda"), torch.tensor([0, 0, 1], device="cuda"),
+    )
+    reference = Sam3dBodyConfig(checkpoint_dir=Path(checkpoint).parent).setup()
+    fast = Sam3dBodyFastConfig(checkpoint_dir=Path(checkpoint).parent, gpu_preprocessing=True, backbone_onnx=None, decoder_onnx_dir=None).setup()
+    with torch.inference_mode():
+        reference(frames, boxes)
+        fast(frames, boxes)
+        expected = reference(frames, boxes)
+        actual = fast(frames, boxes)
+    torch.testing.assert_close(actual.keypoints.frame_indices, boxes.frame_indices)
+    torch.testing.assert_close(actual.keypoints.xy, expected.keypoints.xy, atol=3.0, rtol=0.0)
+    torch.testing.assert_close(actual.vertices, expected.vertices, atol=0.006, rtol=0.0)
+
+
+@pytest.mark.integration
+def test_fast_body_exposes_differentiable_mhr_for_multiview() -> None:
+    """The public geometry interface retains gradients for multiview fitting."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    checkpoint = try_to_load_from_cache("facebook/sam-3d-body-dinov3", "model.ckpt", revision=SAM3D_BODY_REVISION)
+    if not torch.cuda.is_available() or not isinstance(checkpoint, str):
+        pytest.skip("requires CUDA and the cached SAM 3D Body model.ckpt")
+    fast = Sam3dBodyFastConfig(checkpoint_dir=Path(checkpoint).parent, backbone_onnx=None, decoder_onnx_dir=None).setup()
+    pose = torch.full((1, 133), 0.01, device="cuda", requires_grad=True)
+    rotation = torch.full((1, 3), 0.01, device="cuda", requires_grad=True)
+    result = fast.mhr_model.mhr_forward(
+        torch.zeros(1, 3, device="cuda"), rotation, pose,
+        torch.zeros(1, 108, device="cuda"), torch.zeros(1, 28, device="cuda"),
+        torch.zeros(1, 45, device="cuda"), return_keypoints=True,
+    )
+    assert isinstance(result, tuple)
+    assert result[0].shape == (1, 18439, 3)
+    assert result[1].shape == (1, 308, 3)
+    result[1][:, :70].square().mean().backward()
+    for value in (pose, rotation):
+        assert value.grad is not None
+        assert torch.isfinite(value.grad).all()
+        assert value.grad.abs().max() > 0
+
+
+@pytest.mark.integration
+def test_calibrated_body_reuses_graph_after_batch_and_camera_changes() -> None:
+    """Returning to a previous batch shape keeps its outputs after another camera/batch ran."""
+    import numpy as np
+
+    from posekit.cameras import CalibratedCamera
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+    from posekit.models.sam3d_body_quantization import body_backbone_path, load_body_calibration
+
+    config = Sam3dBodyFastConfig()
+    image = Path("/mnt/nas/ssd-8tb/posekit/goldens/sam3d-body-v1/inputs/Planche.jpg")
+    assert config.backbone_onnx is not None
+    calibration = load_body_calibration(config.calibration)
+    artifact = body_backbone_path(config.backbone_onnx, calibration, config.fp8_tail_blocks,
+                                  plan=config.precision_plans(calibration)[0], source_version=config.backbone_source_onnx.name)
+    if not torch.cuda.is_available() or not artifact.is_file() or not image.is_file():
+        pytest.skip("requires CUDA, cached calibrated SAM body backbone and Planche.jpg")
+    fast = config.setup()
+    pixels = decode_image(str(image), mode=ImageReadMode.RGB).permute(1, 2, 0).contiguous().cuda()
+    height, width = pixels.shape[:2]
+    intrinsics = np.array([[900.0, 0.0, width / 2], [0.0, 900.0, height / 2], [0.0, 0.0, 1.0]], dtype=np.float64)
+    camera = CalibratedCamera(intrinsics, np.zeros(0, dtype=np.float64), width, height, lens="PINHOLE")
+    boxes = BoxDetections(
+        torch.tensor([[0.0, 0.0, float(width), float(height)]], device="cuda"),
+        torch.ones(1, device="cuda"), torch.zeros(1, dtype=torch.int64, device="cuda"),
+        torch.ones((1, height, width), dtype=torch.bool, device="cuda"),
+    )
+    with torch.inference_mode():
+        expected = fast(pixels[None], boxes, camera)
+        retained = [getattr(expected, item.name) for item in fields(expected) if isinstance(getattr(expected, item.name), torch.Tensor)]
+        retained += [getattr(expected.keypoints, item.name) for item in fields(expected.keypoints) if isinstance(getattr(expected.keypoints, item.name), torch.Tensor)]
+        snapshots = [value.clone() for value in retained]
+        first_count = fast.graph_count
+        assert boxes.masks is not None
+        paired = BoxDetections(boxes.xyxy.repeat(2, 1), boxes.scores.repeat(2), torch.arange(2, device="cuda"), boxes.masks.repeat(2, 1, 1))
+        fast(torch.stack((pixels, pixels.flip(1))), paired, camera)
+        assert fast.graph_count > first_count
+        count = fast.graph_count
+        shifted_intrinsics = intrinsics.copy()
+        shifted_intrinsics[0, 2] += 12.0
+        shifted_camera = CalibratedCamera(shifted_intrinsics, np.zeros(0, dtype=np.float64), width, height, lens="PINHOLE")
+        shifted = fast(pixels[None], boxes, shifted_camera)
+        assert fast.graph_count == count
+        assert not torch.allclose(shifted.translation, expected.translation)
+        actual = fast(pixels[None], boxes, camera)
+        assert fast.graph_count == count
+        torch.testing.assert_close(actual.vertices, expected.vertices, atol=1e-6, rtol=0.0)
+        torch.testing.assert_close(actual.keypoints.xy, expected.keypoints.xy, atol=1e-4, rtol=0.0)
+        for retained_value, snapshot in zip(retained, snapshots, strict=True):
+            torch.testing.assert_close(retained_value, snapshot, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.integration
+def test_fast_profiling_is_scoped_and_reuses_its_capture() -> None:
+    """Profiling produces every fast stage without leaving timing hooks on ordinary inference."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    checkpoint = try_to_load_from_cache("facebook/sam-3d-body-dinov3", "model.ckpt", revision=SAM3D_BODY_REVISION)
+    image = Path("/mnt/nas/ssd-8tb/posekit/goldens/sam3d-body-v1/inputs/Planche.jpg")
+    if not torch.cuda.is_available() or not isinstance(checkpoint, str) or not image.is_file():
+        pytest.skip("requires CUDA, cached SAM body checkpoint and Planche.jpg")
+    fast = Sam3dBodyFastConfig().setup()
+    model = fast.estimator.model
+    assert not model.backbone._forward_hooks
+    assert "mhr_forward" not in vars(model.head_pose)
+    pixels = decode_image(str(image), mode=ImageReadMode.RGB).permute(1, 2, 0).contiguous().cuda()
+    height, width = pixels.shape[:2]
+    boxes = BoxDetections(torch.tensor([[0.0, 0.0, float(width), float(height)]], device="cuda"),
+                          torch.ones(1, device="cuda"), torch.zeros(1, dtype=torch.int64, device="cuda"))
+    with torch.inference_mode():
+        ordinary = fast(pixels[None], boxes)
+        fast.profile_stages = True
+        fast(pixels[None], boxes)
+        count = fast.graph_count
+        fast.stage_ms.clear()
+        profiled = fast(pixels[None], boxes)
+        assert fast.graph_count == count
+        for stage in ("backbone_body", "backbone_hands", "decoder_body", "decoder_hands", "decoder_prompt", "mhr", "other", "total"):
+            assert stage in fast.stage_ms and sum(fast.stage_ms[stage]) >= 0.0
+        assert not model.backbone._forward_hooks
+        assert "mhr_forward" not in vars(model.head_pose)
+        fast.profile_stages = False
+        fast.stage_ms.clear()
+        fast(pixels[None], boxes)
+        assert not fast.stage_ms
+        torch.testing.assert_close(profiled.vertices, ordinary.vertices, atol=0.005, rtol=0.0)
+
+
+@pytest.mark.integration
+def test_decoder_profiling_excludes_capture_warmups() -> None:
+    """A fresh per-decoder graph reports its replay, excluding capture warmups."""
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    checkpoint = try_to_load_from_cache("facebook/sam-3d-body-dinov3", "model.ckpt", revision=SAM3D_BODY_REVISION)
+    image = Path("/mnt/nas/ssd-8tb/posekit/goldens/sam3d-body-v1/inputs/Planche.jpg")
+    if not torch.cuda.is_available() or not isinstance(checkpoint, str) or not image.is_file():
+        pytest.skip("requires CUDA, cached SAM body checkpoint and Planche.jpg")
+    fast = Sam3dBodyFastConfig(mode="body", capture_pipeline=False).setup()
+    pixels = decode_image(str(image), mode=ImageReadMode.RGB).permute(1, 2, 0).contiguous().cuda()
+    height, width = pixels.shape[:2]
+    boxes = BoxDetections(torch.tensor([[0.0, 0.0, float(width), float(height)]], device="cuda"),
+                          torch.ones(1, device="cuda"), torch.zeros(1, dtype=torch.int64, device="cuda"))
+    fast.profile_stages = True
+    with torch.inference_mode():
+        fast(pixels[None], boxes)
+        count = fast.graph_count
+        fast(pixels[None], boxes)
+    assert fast.graph_count == count
+    first, replay = fast.stage_ms["decoder_body"]
+    # Three warmups plus capture would exceed this generous one-replay bound.
+    assert first <= 2.0 * replay
+    assert all(value >= 0.0 for value in fast.stage_ms["other"])
+    assert not fast.estimator.model.decoder._forward_hooks

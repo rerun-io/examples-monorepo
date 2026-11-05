@@ -1095,6 +1095,8 @@ omegaconf = "*"
 
 [feature.posekit-sam3d-body.pypi-dependencies]
 roma = "*"
+# GPU crop kernels and the shared Torch/Warp CUDA graph owner.
+warp-lang = "==1.11.*"
 
 # SAM 3D Body apps (Gradio, CLI, multi-view demos, benchmark): MoGe-2 FOV through monopriors and
 # Open3D TSDF fusion. Only the posekit-body envs carry them; the role itself needs posekit-sam3d-body.
@@ -1163,10 +1165,21 @@ cwd = "packages/posekit"
 description = "Per-frame SAM 3D Body speed (decoded GPU frame + person box to the full output), body and full mode, per stage; writes body_bench.json"
 
 [feature.posekit-body.tasks.posekit-body3d-mv-body]
-cmd = "python tools/demos/body3d_mv_body.py hocap --root-directory data/hocap/sample --subject-id 8 --sequence-name 20231024_180733 --max-frames 50"
+args = [{ arg = "body", default = "sam3d-body" }]
+cmd = "python tools/demos/body3d_mv_body.py hocap {{ body }} --max-frames 50"
 cwd = "packages/posekit"
 depends-on = ["posekit-body-download-hocap-sample"]
-description = "Multiview SAM 3D Body fitting on the HO-Cap sample: per-camera bodies fused by MHR reprojection optimization"
+description = "Fit 50 HO-Cap sample frames (optional body subcommand, then -- before extra CLI flags)"
+
+[feature.posekit-body.tasks.posekit-body-calibrate]
+cmd = "python tools/apps/body_calibrate.py"
+cwd = "packages/posekit"
+description = "Measure SAM DINOv3 activation ranges at 512 pixels on disjoint catalog body and hand crops"
+
+[feature.posekit-body.tasks.posekit-body-accuracy]
+cmd = "python tools/apps/body_accuracy.py"
+cwd = "packages/posekit"
+description = "Compare complete fast and eager body outputs on the calibration record's held-out phone frames"
 
 # Hand demo/eval/benchmark tasks; they run in the posekit-hands envs (EgoHand + WiLoR features).
 [feature.posekit-hands]

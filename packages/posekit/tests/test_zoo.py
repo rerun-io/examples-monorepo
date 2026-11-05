@@ -92,3 +92,26 @@ def test_body_config_is_a_tyro_subcommand() -> None:
 
     assert tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body"]) == Sam3dBodyConfig(mode="full")
     assert tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body-bodyonly"]) == Sam3dBodyConfig(mode="body")
+
+
+def test_fast_body_is_registered_and_selectable() -> None:
+    """Fast whole-body inference uses the same config union as the reference."""
+    import tyro
+
+    from posekit.models import AnnotatedBodyPose3dConfig
+    from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
+
+    model = ZOO["sam3d-body-dinov3-fast"]
+    assert (model.role, model.skeleton, model.input_size) == ("body-pose3d", "mhr_70", (512, 512))
+    assert tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body-fast"]) == Sam3dBodyFastConfig()
+    assert tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body-fast-bodyonly"]) == Sam3dBodyFastConfig(mode="body")
+
+
+def test_fast_body_cli_can_select_unquantized_backbone() -> None:
+    import tyro
+
+    from posekit.models import AnnotatedBodyPose3dConfig, Sam3dBodyFastConfig
+
+    config = tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body-fast", "--backbone-precision", "bf16"])
+    assert isinstance(config, Sam3dBodyFastConfig)
+    assert config.backbone_precision == "bf16"
