@@ -13,7 +13,7 @@ camera with another principal point is given.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -47,6 +47,9 @@ SAM3D_BODY_FILES: tuple[str, ...] = ("model.ckpt", "model_config.yaml", "assets/
 """What the model reads from that repo."""
 ROOT_INDICES: tuple[int, int] = (9, 10)
 """MHR-70 left and right hip: their mean is the root of ``z_root_relative``."""
+MHR_PARAMETER_WIDTHS: dict[str, int] = {"body_pose": 133, "hand_pose": 108, "scale": 28, "shape": 45, "expression": 72}
+"""Width of each MHR parameter field of ``Sam3dBodyReconstruction``: the MHR head's compact body pose, its 2 x 54 hand,
+28 scale, 45 shape and 72 face PCA components."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,27 +107,35 @@ class Sam3dBodyReconstruction(BodyPoses3d):
 
     def take(self, rows: Int64[Tensor, "m"]) -> "Sam3dBodyReconstruction":
         """The given rows, e.g. the people of one frame."""
-        keypoints: Keypoints3d = self.keypoints
-        return Sam3dBodyReconstruction(
-            keypoints=Keypoints3d(
-                keypoints.xy[rows], keypoints.z_root_relative[rows], keypoints.scores[rows], keypoints.frame_indices[rows], keypoints.skeleton,
-                keypoints.root_indices, None if keypoints.xyz_camera is None else keypoints.xyz_camera[rows],
-            ),
-            boxes=self.boxes[rows],
-            vertices=self.vertices[rows],
-            faces=self.faces,
-            translation=self.translation[rows],
-            focal_length=self.focal_length[rows],
-            global_rotation=self.global_rotation[rows],
-            body_pose=self.body_pose[rows],
-            hand_pose=self.hand_pose[rows],
-            scale=self.scale[rows],
-            shape=self.shape[rows],
-            expression=self.expression[rows],
-            joint_coordinates=self.joint_coordinates[rows],
-            joint_rotations=self.joint_rotations[rows],
-            left_hand_boxes=None if self.left_hand_boxes is None else self.left_hand_boxes[rows],
-            right_hand_boxes=None if self.right_hand_boxes is None else self.right_hand_boxes[rows],
+
+        def selected(record: "Keypoints3d | Sam3dBodyReconstruction") -> dict[str, Any]:
+            return {
+                field.name: value[rows]
+                for field in fields(record)
+                if field.name != "faces" and isinstance(value := getattr(record, field.name), Tensor)
+            }
+
+        return replace(self, keypoints=replace(self.keypoints, **selected(self.keypoints)), **selected(self))
+
+    @classmethod
+    def empty(
+        cls, faces: Int64[Tensor, "f 3"], *, num_vertices: int, num_mhr_joints: int, hands: bool, device: torch.device | str
+    ) -> "Sam3dBodyReconstruction":
+        """No people, with the shapes a row would have; ``hands`` gives empty hand boxes (full mode) instead of None."""
+        no_boxes: Float32[Tensor, "0 4"] = torch.empty((0, 4), dtype=torch.float32, device=device)
+        return cls(
+            keypoints=Keypoints3d.empty(MHR_70, device, root_indices=ROOT_INDICES, with_xyz_camera=True),
+            boxes=no_boxes,
+            vertices=torch.empty((0, num_vertices, 3), device=device),
+            faces=faces,
+            translation=torch.empty((0, 3), device=device),
+            focal_length=torch.empty((0,), device=device),
+            global_rotation=torch.empty((0, 3), device=device),
+            **{name: torch.empty((0, width), device=device) for name, width in MHR_PARAMETER_WIDTHS.items()},
+            joint_coordinates=torch.empty((0, num_mhr_joints, 3), device=device),
+            joint_rotations=torch.empty((0, num_mhr_joints, 3, 3), device=device),
+            left_hand_boxes=no_boxes if hands else None,
+            right_hand_boxes=no_boxes if hands else None,
         )
 
 
@@ -300,24 +311,8 @@ class Sam3dBodyPredictor(TopDownBodyPose3d):
         count: int = len(predictions)
         joints: int = MHR_70.num_keypoints
         if count == 0:
-            empty = torch.empty((0, 4), dtype=torch.float32, device=device)
-            return Sam3dBodyReconstruction(
-                keypoints=Keypoints3d.empty(MHR_70, device, root_indices=ROOT_INDICES, with_xyz_camera=True),
-                boxes=empty,
-                vertices=torch.empty((0, self.num_vertices, 3), device=device),
-                faces=self.faces,
-                translation=torch.empty((0, 3), device=device),
-                focal_length=torch.empty((0,), device=device),
-                global_rotation=torch.empty((0, 3), device=device),
-                body_pose=torch.empty((0, 133), device=device),
-                hand_pose=torch.empty((0, 108), device=device),
-                scale=torch.empty((0, 28), device=device),
-                shape=torch.empty((0, 45), device=device),
-                expression=torch.empty((0, 72), device=device),
-                joint_coordinates=torch.empty((0, self.num_mhr_joints, 3), device=device),
-                joint_rotations=torch.empty((0, self.num_mhr_joints, 3, 3), device=device),
-                left_hand_boxes=empty if self.config.mode == "full" else None,
-                right_hand_boxes=empty if self.config.mode == "full" else None,
+            return Sam3dBodyReconstruction.empty(
+                self.faces, num_vertices=self.num_vertices, num_mhr_joints=self.num_mhr_joints, hands=self.config.mode == "full", device=device
             )
 
         def tensor(field: str) -> Float32[Tensor, "n ..."]:
