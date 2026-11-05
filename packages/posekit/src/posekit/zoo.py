@@ -145,7 +145,7 @@ ZOO: dict[str, ZooModel] = {
         ZooModel(
             "egohand-v1-fast", "hand-pose3d", "top-down", "huggingface",
             "nvidia/EgoHand-v1", (256, 256), "soma_hand_25", "implemented",
-            "fast_egohand_configs(): calibrated NVFP4 DINOv3, FP8 attention, TensorRT heads, CUDA crop geometry and full SOMA meshes. "
+            "fast_egohand_configs(): calibrated NVFP4 DINOv3 with an eight-block FP8 tail, FP8 attention, TensorRT heads, CUDA crops and full SOMA meshes. "
             "Select egohand-fast in the hand-pose3d CLI; requires a CUDA GPU with NVFP4 support.",
         ),
         # 3D (Phase 4).

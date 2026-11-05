@@ -49,9 +49,9 @@ class VideoHandsConfig:
     camera_path: Path | None = EXAMPLES / "selfcap_oak_left.rrd"
     """CalibratedCamera .rrd of the video (EgoHand needs it); None for uncalibrated video with WiLoR."""
     detector: AnnotatedHandDetectorConfig = field(default_factory=WilorHandDetectorConfig)
-    """Hand detector selected by subcommand (``wilor`` or ``egohand``)."""
+    """Hand detector selected by subcommand (``wilor``, ``egohand`` or ``egohand-fast``)."""
     pose: AnnotatedHandPose3dConfig = field(default_factory=WilorHandPoseConfig)
-    """Top-down 3D hand model selected by subcommand (``wilor`` or ``egohand``)."""
+    """Top-down 3D hand model selected by subcommand (``wilor``, ``egohand`` or ``egohand-fast``)."""
     frame_batch_size: int = 16
     """Frames decoded and processed per step."""
     max_frames: int | None = None
