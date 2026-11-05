@@ -23,3 +23,13 @@ def test_an_asset_root_overrides_every_file(tmp_path: Path) -> None:
     assert (predictor.weights, predictor.soma_assets) == (tmp_path / "weights/egohand/egohand_s060000.safetensors", tmp_path / "weights/soma")
     assert detector.backend.cache_dir == predictor.backbone_backend.cache_dir == tmp_path / "engines"
     assert predictor.backbone_onnx == tmp_path / "dinov3-bf16.onnx"
+
+
+def test_fast_mount_models_use_posekit_fast_roles_without_changing_default() -> None:
+    detector, predictor = egohand_configs(None, fast=True)
+    assert detector.gpu_preprocessing and detector.fp16_trunk
+    assert predictor.nvfp4_backbone and predictor.cuda_execution
+    assert predictor.head_onnx is not None
+    default_detector, default_predictor = egohand_configs(None)
+    assert not default_detector.gpu_preprocessing
+    assert not default_predictor.nvfp4_backbone and not default_predictor.cuda_execution

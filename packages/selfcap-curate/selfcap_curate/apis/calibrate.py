@@ -73,6 +73,8 @@ class Config:
     """Read-only endpoint holding the healthy camera-50 borrow sources when they are not on catalog_url."""
     oak_egohand_assets: Path | None = None
     """Optional local EgoHand root with weights/, engines/ and dinov3-bf16.onnx; None takes the pinned downloads and the trtkit cache."""
+    oak_egohand_fast: bool = False
+    """Use posekit's calibrated NVFP4/FP8 EgoHand roles with GPU crops and full SOMA reconstruction."""
     exo_method: Literal["hands", "head"] = "head"
     """Hands-only phone poses, or v3: extend and refine them with the wearer's head track (single-episode sessions)."""
 
@@ -98,23 +100,25 @@ def read_episodes(dataset: DatasetEntry, keys: tuple[EpisodeKey, ...]) -> tuple[
 def detect_oak_episode(
     episode: SessionEpisode, segment: catalog_io.Segment, ego: FactoryCalibration,
     lenses: dict[str, OakLens] | None, rotation: Float64[ndarray, "3 3"] | None, assets: Path | None,
+    *, fast: bool = False,
 ) -> dict[str, OakDetections]:
     """Infer the available OAK views on the clock used by each calibration path."""
     if lenses is not None:
         videos = read_catalog_videos(
             segment.dataset, segment.id, [video_path(episode.layout.oak_rig, cam) for cam in range(len(OAK_CAMERAS))], "video_time"
         )
-        return detect_oak_views(episode, dict(zip(OAK_CAMERAS, videos, strict=True)), lenses, assets)
+        return detect_oak_views(episode, dict(zip(OAK_CAMERAS, videos, strict=True)), lenses, assets, fast=fast)
     video = read_catalog_videos(segment.dataset, segment.id, [video_path(episode.layout.oak_rig, 0)], "capture_time")[0]
     current = read_ego_cameras(segment.dataset, segment.dataset, segment.id, episode.layout.oak_rig, episode.layout.quest_rig)
     return {"rgb": detect_oak_egohand(
-        episode, video, oak_centre(ego), rotation, assets, camera=next((camera for camera in current if camera.cam == 0), None)
+        episode, video, oak_centre(ego), rotation, assets, camera=next((camera for camera in current if camera.cam == 0), None), fast=fast,
     )}
 
 
 def fit_oak_mount(
     session: str, episodes: list[SessionEpisode], segments: list[catalog_io.Segment], ego: FactoryCalibration,
     output: Path, assets: Path | None,
+    *, fast: bool = False,
 ) -> tuple[OakFit, list[SessionEpisode]]:
     """Choose one mount mode, write its observations, and fit the session mount."""
     gyro, rotations = gyro_mount(session, episodes), read_rotations()
@@ -134,7 +138,7 @@ def fit_oak_mount(
             print("OAK_UNPOSED", segment.id, "missing Quest/OAK clock", flush=True)
             detections = {"rgb": episode.oak}
         else:
-            detections = detect_oak_episode(episode, segment, ego, lenses, rotation, assets)
+            detections = detect_oak_episode(episode, segment, ego, lenses, rotation, assets, fast=fast)
             episode = replace(episode, oak=detections["rgb"])
             posed.append(episode)
             views.append(detections)
@@ -195,7 +199,7 @@ def main(config: Config) -> CalibSession:
     with session_output(config.output_dir) as output:
         episodes, segments = read_episodes(dataset, keys)
         factories = catalog_io.read_factories(segments[0])
-        oak_fit, episodes = fit_oak_mount(session, episodes, segments, factories["ego"], output, config.oak_egohand_assets)
+        oak_fit, episodes = fit_oak_mount(session, episodes, segments, factories["ego"], output, config.oak_egohand_assets, fast=config.oak_egohand_fast)
         focals = vp_focals([phone for episode in episodes for phone in episode.layout.phones]) if config.exo_method == "head" else read_table().focals
         state = CalibSession(
             session, calibrate(session, episodes, focals), oak_fit,
