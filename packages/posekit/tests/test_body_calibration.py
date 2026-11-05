@@ -130,6 +130,16 @@ def test_unquantized_backbones_reject_precision_plans_they_cannot_apply(backbone
         )
 
 
+def test_development_split_excludes_calibration_and_acceptance_pixels() -> None:
+    from posekit.models.sam3d_body_quantization import CalibrationFrame, load_body_calibration, validate_development_split
+
+    calibration = load_body_calibration()
+    for reserved in (calibration.split.calibration[0], calibration.split.evaluation[0]):
+        with pytest.raises(ValueError, match="indices"):
+            validate_development_split(calibration, [replace(reserved, sha256="different")])
+        with pytest.raises(ValueError, match="decoded"):
+            validate_development_split(calibration, [CalibrationFrame("new/source", 0, reserved.sha256)])
+    validate_development_split(calibration, [CalibrationFrame("new/source", 0, "different")])
 
 
 def test_accuracy_policy_keeps_stress_sources_out_of_acceptance() -> None:
@@ -143,3 +153,23 @@ def test_accuracy_policy_keeps_stress_sources_out_of_acceptance() -> None:
     assert not acceptance_passes(bands, ())
     assert not acceptance_passes({"person": {"pixels": bad}, "empty": {"pixels": good}}, ("empty",))
     assert not acceptance_passes({"empty": {"pixels": good}}, ("empty",))
+
+
+def test_prior_development_report_cannot_be_relabelled_as_acceptance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from serde.json import to_json
+
+    from posekit.apis import body_accuracy
+    from posekit.models.sam3d_body_quantization import CalibrationFrame, load_body_calibration
+
+    def unexpected_catalog(*args: object, **kwargs: object) -> None:
+        pytest.fail("Development report must be rejected before catalog access")
+
+    monkeypatch.setattr(body_accuracy, "CatalogClient", unexpected_catalog)
+    report_path = tmp_path / "development.json"
+    report = body_accuracy.BodyAccuracyReport(
+        [CalibrationFrame("development", 0, "d" * 64)], 0, {}, False, [], {}, split="development",
+    )
+    report_path.write_text(to_json(report))
+    config = body_accuracy.Config(calibration=tmp_path / "calibration.rrd", output=tmp_path / "output.json", evaluation_report=report_path)
+    with pytest.raises(ValueError, match="development_frames"):
+        body_accuracy.evaluation_inputs(config, load_body_calibration())

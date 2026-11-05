@@ -88,7 +88,10 @@ vertices. Every real-person source must satisfy each median/p95 band. Declare
 detector-false-positive stress sources before evaluation; they remain in the
 report as a separate table. Repeated eager inference is available to measure
 its own variation. `evaluation_report` reuses an earlier acceptance report's
-exact frame indices and hashes. The evaluated model always uses the
+exact frame indices and hashes. Use `development_frames` for a separate
+selection set: the loader rejects index or decoded-pixel overlap with either
+calibration or acceptance. Development reports retain that label and cannot
+be replayed as acceptance reports. The evaluated model always uses the
 specified calibration.
 
 Save worst-frame comparisons with `evidence_dir`, then inspect the resulting

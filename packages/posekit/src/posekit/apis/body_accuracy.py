@@ -5,6 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from json import JSONDecodeError
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -27,6 +28,7 @@ from posekit.models.sam3d_body_quantization import (
     BodyCalibrationSplit,
     CalibrationFrame,
     load_body_calibration,
+    load_development_frames,
 )
 from posekit.predictions import BoxDetections
 
@@ -86,6 +88,8 @@ class BodyAccuracyReport:
     """Predeclared sources reported separately from real-person acceptance."""
     stress_bands: dict[str, AccuracyBand] = field(default_factory=dict)
     """Aggregate errors on the declared detector-false-positive stress sources."""
+    split: Literal["acceptance", "development"] = "acceptance"
+    """Whether these inputs were reserved for acceptance or used for precision-plan selection."""
 
 
 def acceptance_passes(source_bands: dict[str, dict[str, AccuracyBand]], stress_sources: tuple[str, ...]) -> bool:
@@ -124,6 +128,8 @@ class Config:
     """Evenly spaced decoded frames from each local video."""
     evaluation_report: Path | None = None
     """Reuse exactly the input identities of a prior acceptance report instead of the entire reserved split."""
+    development_frames: Path | None = None
+    """Typed development frame set, disjoint from both calibration and reserved acceptance frames."""
     evidence_dir: Path | None = None
     """Save worst-frame Rerun comparisons here, with eager, fast and optional repeated eager."""
     stress_sources: tuple[str, ...] = ()
@@ -207,8 +213,8 @@ def read_local_frames(paths: tuple[Path, ...], frames_per_video: int) -> list[tu
 
 def evaluation_inputs(config: Config, calibration: BodyCalibration) -> list[tuple[CalibrationFrame, Tensor]]:
     """Read local assets or the reserved catalog split, then check decoded-frame identity."""
-    if sum((bool(config.inputs), config.evaluation_report is not None)) > 1:
-        raise ValueError("Choose local inputs or a prior evaluation report")
+    if sum((bool(config.inputs), config.evaluation_report is not None, config.development_frames is not None)) > 1:
+        raise ValueError("Choose one of local inputs, a prior evaluation report, or a development set")
     if config.inputs:
         inputs = read_local_frames(config.inputs, config.frames_per_video)
         BodyCalibrationSplit(calibration.split.calibration, [row for row, _ in inputs])
@@ -216,7 +222,11 @@ def evaluation_inputs(config: Config, calibration: BodyCalibration) -> list[tupl
     selected_frames: list[CalibrationFrame] = calibration.split.evaluation
     if config.evaluation_report is not None:
         prior: BodyAccuracyReport = load_accuracy_report(config.evaluation_report)
+        if prior.split != "acceptance":
+            raise ValueError("Use development_frames for development inputs; a development report cannot become acceptance evidence.")
         selected_frames = prior.frames
+    if config.development_frames is not None:
+        selected_frames = load_development_frames(config.development_frames, calibration)
     BodyCalibrationSplit(calibration.split.calibration, selected_frames)
     dataset = CatalogClient(config.catalog_url).get_dataset(name=config.dataset)
     by_segment: dict[str, dict[str, list[CalibrationFrame]]] = defaultdict(lambda: defaultdict(list))
@@ -337,6 +347,7 @@ def main(config: Config) -> BodyAccuracyReport:
     report = BodyAccuracyReport(
         [row for row, _ in inputs], people, bands, acceptance_passes(source_bands, config.stress_sources), per_frame,
         summarize(repeated_errors), source_bands, config.stress_sources, summarize(stress_errors),
+        "development" if config.development_frames is not None else "acceptance",
     )
     config.output.parent.mkdir(parents=True, exist_ok=True)
     config.output.write_text(to_json(report) + "\n")

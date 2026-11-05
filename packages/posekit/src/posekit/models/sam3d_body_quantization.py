@@ -4,14 +4,14 @@ import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from json import dumps
+from json import JSONDecodeError, dumps
 from pathlib import Path
 from typing import Literal, TypeAlias
 
 import torch
 from jaxtyping import UInt8
 from serde import SerdeError, from_dict, serde
-from serde.json import to_json
+from serde.json import from_json, to_json
 from torch import Tensor
 from trtkit.onnx_qdq import Fp8Attention, Fp8Linear, KeepPrecision, ModulePrecision, Nvfp4Linear, QdqPlan
 
@@ -82,6 +82,13 @@ class BodyCalibrationSplit:
             raise ValueError("Calibration contains a decoded evaluation frame.")
 
 
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class BodyDevelopmentFrames:
+    """Held-out development inputs used for selecting precision plans."""
+
+    frames: list[CalibrationFrame]
+    """Source indices and decoded-pixel hashes; checked against both reserved splits on load."""
 
 
 @serde(deny_unknown_fields=True)
@@ -200,8 +207,21 @@ def body_qdq_plan(calibration: BodyCalibration, fp8_tail_blocks: int, overrides:
     return QdqPlan(modules, tuple(attention), weight_device=baseline.weight_device)
 
 
+def validate_development_split(calibration: BodyCalibration, development: Sequence[CalibrationFrame]) -> None:
+    """Reject development inputs that overlap calibration or acceptance by index or pixels."""
+    if len({(frame.source, frame.index) for frame in development}) != len(development):
+        raise ValueError("Development source indices must be unique.")
+    BodyCalibrationSplit(calibration.split.calibration + calibration.split.evaluation, list(development))
 
 
+def load_development_frames(path: Path, calibration: BodyCalibration) -> list[CalibrationFrame]:
+    """Read and validate a development set against all calibration and acceptance inputs."""
+    try:
+        document: BodyDevelopmentFrames = from_json(BodyDevelopmentFrames, path.read_text())
+    except (SerdeError, JSONDecodeError) as error:
+        raise ValueError(f"Invalid SAM body development set {path}: {error}") from error
+    validate_development_split(calibration, document.frames)
+    return document.frames
 
 
 @torch.inference_mode()
