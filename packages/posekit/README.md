@@ -114,9 +114,9 @@ per-side faces. `HandPoses3d.as_hand21()` gives every model the same HAND_21 vie
 | WiLoR (`wilor`) | YOLO hand detector | WiLoR ViT + MANO | HAND_21 | not used (virtual camera) | torch fp16, TensorRT |
 | EgoHand (`egohand`) | RT-DETR hand detector | DINOv3 + SOMA hand head | SOMA_HAND (25) | required (perspective crops undo the lens) | torch, TensorRT backbone/detector |
 
-Both run in the `posekit-hands` environment. EgoHand's upstream source is vendored
-under `src/egohand*` with upstream module names (the checkpoint's Hydra targets need
-them); see `src/egohand/VENDORED.md` and its licence files. WiLoR's network lives in
+Both run in the `posekit-hands` environment. EgoHand's upstream source installs from
+the pinned recipe `recipes/egohand-src` (patches and licence there) with upstream module
+names, because the checkpoint's Hydra targets need them. WiLoR's network lives in
 `posekit/models/wilor_net/`.
 
 ```bash

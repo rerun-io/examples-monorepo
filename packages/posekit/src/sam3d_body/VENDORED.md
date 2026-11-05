@@ -12,7 +12,7 @@ named `sam3d_body`, as it was in `packages/sam3d-body`.
 
 Changes from that copy:
 
-- DINOv3 is built from the `dinov3` package (packages/dinov3-src, DINOv3 `5aa7e93`)
+- DINOv3 is built from the `dinov3` package (recipes/dinov3-src, DINOv3 `5aa7e93`)
   instead of `torch.hub.load("facebookresearch/dinov3", source="github")`, which read
   unpinned GitHub main over the network. The architecture arguments are the hub
   factory `dinov3_vith16plus`'s. With SAM 3D Body's weights the two builds have

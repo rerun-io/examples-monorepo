@@ -9,13 +9,13 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
+from egohand.models.soma_hand_wrapper import SomaHandWrapper
 from jaxtyping import Float32, Int64
 from soma.geometry.batched_skinning import BatchedSkinning
 from soma.geometry.transforms import SE3_inverse
 from soma.hand.identity_model import MHRHandIdentityModel
 from torch import Tensor
 
-from egohand.models.soma_hand_wrapper import SomaHandWrapper
 from posekit.models.egohand_mhr import MHR_JOINT_PARAMETERS, MHR_JOINTS, MhrHandRestSkinning
 from posekit.ops.compile import compile_unless_dev
 

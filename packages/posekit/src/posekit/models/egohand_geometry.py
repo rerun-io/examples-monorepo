@@ -3,10 +3,10 @@
 from functools import cache
 
 import numpy as np
+from egohand_inference.camera.camera_models import CameraModel, load_camera_calibration
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 
-from egohand_inference.camera.camera_models import CameraModel, load_camera_calibration
 from posekit.cameras import CalibratedCamera, CameraKey, camera_key
 from posekit.predictions import SOMA_HAND21, HandSide
 

@@ -2,7 +2,7 @@
 
 ``EgoHandDetector`` is a :class:`~posekit.models.base.HandDetector` and
 ``EgoHandPredictor`` a :class:`~posekit.models.base.TopDownHandPose3d` over the
-vendored IsaacCapture inference source (``src/egohand*``, see VENDORED.md).
+IsaacCapture inference source (``egohand``/``egohand_inference``, recipes/egohand-src).
 The eager reference and accelerated path share upstream crop and mirroring
 geometry. Optional GPU sampling and TensorRT preserve full SOMA meshes and
 parameters. Remaining CPU output conversion is included in stage timings.
@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import numpy as np
 import torch
+from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
+from egohand_inference.perf import PerfStage
 from einops import rearrange
 from huggingface_hub import hf_hub_download, snapshot_download
 from jaxtyping import Bool, Float32, Int, Int64, UInt8
@@ -29,8 +31,6 @@ from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.artifacts import build_once
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
-from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
-from egohand_inference.perf import PerfStage
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb

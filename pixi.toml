@@ -1220,7 +1220,7 @@ description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames;
 
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
-# src/egohand* is vendored upstream EgoHand source (untyped), excluded like other vendor boundaries.
+# The vendored upstream trees beside src/posekit (untyped) stay out of the typecheck, like other vendor boundaries.
 PYREFLY_TARGET = "src/posekit tests tools"
 
 [feature.posekit.tasks.posekit-video-pose]

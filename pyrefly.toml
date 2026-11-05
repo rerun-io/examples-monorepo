@@ -64,10 +64,6 @@ project-excludes = [
     "packages/zipdepth/zipdepth/evaluation/**/*",
     "packages/zipdepth/zipdepth/upstream_cli/**/*",
     "packages/lamp/tests/reference_data/lamp/**/*",
-    # Vendored EgoHand/DINOv3 inference source shipped inside posekit (upstream module names).
-    "packages/posekit/src/egohand/**/*",
-    "packages/posekit/src/egohand_inference/**/*",
-    "packages/posekit/src/egohand_dinov3/**/*",
     # Vendored Sapiens2 pose network shipped inside posekit.
     "packages/posekit/src/sapiens2_lite/**/*",
     # Vendored SAM 3D Body inference source shipped inside posekit (see its VENDORED.md).

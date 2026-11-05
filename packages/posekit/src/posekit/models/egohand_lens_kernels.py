@@ -7,7 +7,6 @@ kernels; allocation, capture and public tensor APIs stay checked.
 """
 
 import warp as wp
-
 from egohand_inference.camera.camera_models import _project_rational_ray
 
 

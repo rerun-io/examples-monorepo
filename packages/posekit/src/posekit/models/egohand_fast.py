@@ -137,6 +137,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
 
     def __init__(self, config: EgoHandFastConfig) -> None:
         from egohand_inference.pipeline.predictor import load_egohand_model
+
         from posekit.models.egohand_cuda_crops import CudaHandCropper
         from posekit.models.egohand_soma import prepare_cuda_soma
         from posekit.models.egohand_tensor import EgoHandTensorExecutor

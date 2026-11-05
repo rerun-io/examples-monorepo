@@ -182,6 +182,7 @@ def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
 def test_tensorrt_backbone_setup_never_builds_the_eager_backbone(monkeypatch: pytest.MonkeyPatch) -> None:
     """With a cached backbone engine, set-up neither builds nor loads the 3 GB PyTorch DINOv3."""
     from dinov3.models.vision_transformer import DinoVisionTransformer
+
     from posekit.runtimes import TensorRtBackendConfig
 
     def refuse(*_: object, **__: object) -> None:
@@ -308,6 +309,7 @@ def test_cuda_soma_preserves_changing_shapes_and_full_meshes() -> None:
 def test_exportable_hand_head_preserves_virtual_camera_conditioning() -> None:
     """The exported head includes the same camera rays and both learned heads."""
     from egohand.utils.ray_pe import compute_crop_ray_angles, fourier_encode_angles
+
     from posekit.models.egohand import selfcap_egohand_configs
     from posekit.models.egohand_head import EgoHandHead
 

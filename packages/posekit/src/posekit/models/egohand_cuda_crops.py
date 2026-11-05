@@ -5,10 +5,10 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import warp as wp
+from egohand_inference.camera.camera_models import _PerspectiveCamera
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from torch import Tensor
 
-from egohand_inference.camera.camera_models import _PerspectiveCamera
 from posekit.cameras import RADIAL_TERMS, CalibratedCamera
 from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_crops import normalize_crops
