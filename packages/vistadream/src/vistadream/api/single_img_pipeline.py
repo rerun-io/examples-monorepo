@@ -14,8 +14,8 @@ from icecream import ic
 from jaxtyping import Bool, Float, UInt8
 from monopriors.depth_utils import depth_edges_mask, depth_to_points
 from monopriors.models.relative_depth import (
+    MoGeV1Predictor,
     RelativeDepthPrediction,
-    get_relative_predictor,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from PIL import Image
@@ -85,14 +85,14 @@ def log_frame(parent_log_path: Path, frame: Frame, cam_params: PinholeParameters
         )
 
 
-@dataclass
-
 def _confidence_mask(prediction: RelativeDepthPrediction) -> Bool[np.ndarray, "H W"]:
     """MoGe's confidence is a 0/1 validity mask; VistaDream requires a predictor that emits one."""
     if prediction.confidence is None:
         raise ValueError("VistaDream requires MoGe (the only relative predictor with a validity mask)")
     return prediction.confidence > 0
 
+
+@dataclass
 class SingleImageConfig:
     """
     Configuration for Single Image Processing.
@@ -157,7 +157,7 @@ class SingleImagePipeline:
         self.scene: Gaussian_Scene = Gaussian_Scene()
         if self.config.stage in ["outpaint", "coarse", "fine"]:
             self.flux_inpainter: FluxInpainting = FluxInpainting(FluxInpaintingConfig())
-        self.predictor: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
+        self.predictor: BaseRelativePredictor = MoGeV1Predictor(device="cuda")
         self.smooth_connector: Smooth_Connect_Tool = Smooth_Connect_Tool()
         # Initialize rerun with the provided configuration
         self.shared_intrinsics: Intrinsics | None = None
@@ -345,7 +345,7 @@ class SingleImagePipeline:
         frame.dpt_conf_mask = _confidence_mask(depth_prediction)
 
         # Further refine inpaint_wo_edge with depth confidence mask
-        frame.inpaint_wo_edge = frame.inpaint_wo_edge & dpt_conf_mask_bool
+        frame.inpaint_wo_edge = frame.inpaint_wo_edge & frame.dpt_conf_mask
 
         print(f"[INFO] Inpainted frame with {np.sum(frame_inpaint)}/{frame_inpaint.size} inpaint pixels")
 
