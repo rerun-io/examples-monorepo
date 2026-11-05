@@ -35,7 +35,8 @@ from tqdm.auto import tqdm
 from posekit.eval.hand_gt import SIDES, GtDataset, HandGtSegment, read_hand_gt
 from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors, summarize
 from posekit.models.base import HandDetector, TopDownHandPose3d
-from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig, fast_egohand_configs
+from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig
+from posekit.models.egohand_fast import fast_egohand_configs
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d
 from posekit.runtimes import TensorRtBackendConfig

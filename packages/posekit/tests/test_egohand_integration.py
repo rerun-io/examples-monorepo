@@ -236,14 +236,14 @@ def test_gpu_detector_preprocessing_preserves_boxes_and_sides(fp16_trunk: bool) 
 
 
 def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
-    """The CUDA execution configuration preserves the public reconstruction contract."""
-    from dataclasses import replace
-
+    """Captured CUDA crops and execution preserve the reference reconstruction with the same bf16 networks."""
     from torchcodec.decoders import VideoDecoder
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
     from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand_cuda_crops import CudaHandCropper
+    from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
@@ -256,20 +256,20 @@ def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
     frames = decoder.get_frames_at([0, 30, 80]).data.contiguous()
     detector = detector_config.setup()
     reference = config.setup()
-    accelerated = replace(config, cuda_execution=True).setup()
+    # A second copy: the executor prepares its SOMA model for capture in place.
+    executor = EgoHandTensorExecutor(config.setup().predictor)
+    cropper = CudaHandCropper(camera, frames.device)
     with torch.inference_mode():
         for frame in frames:
             batch = frame.unsqueeze(0)
             detections = detector(batch)
             expected = reference(batch, detections, camera)
-            result = accelerated(batch, detections, camera)
-            assert result.sides == expected.sides
-            assert result.vertices is not None and expected.vertices is not None
-            assert result.keypoints.xyz_camera is not None and expected.keypoints.xyz_camera is not None
-            assert result.scale_parameters is not None and expected.scale_parameters is not None
-            torch.testing.assert_close(result.keypoints.xyz_camera, expected.keypoints.xyz_camera, atol=0.001, rtol=0.001)
+            result = executor(cropper.prepare(batch, detections, config.padding), detections.sides, cropper)
+            assert expected.sides == detections.sides
+            assert expected.vertices is not None and expected.keypoints.xyz_camera is not None and expected.scale_parameters is not None
+            torch.testing.assert_close(result.joints, expected.keypoints.xyz_camera, atol=0.001, rtol=0.001)
             torch.testing.assert_close(result.vertices, expected.vertices, atol=0.001, rtol=0.001)
-            torch.testing.assert_close(result.keypoints.xy, expected.keypoints.xy, atol=0.5, rtol=0.001)
+            torch.testing.assert_close(result.pixels, expected.keypoints.xy, atol=0.5, rtol=0.001)
             torch.testing.assert_close(result.rotations, expected.rotations, atol=0.001, rtol=0.001)
             torch.testing.assert_close(result.scale_parameters, expected.scale_parameters, atol=0.001, rtol=0.001)
 
@@ -334,7 +334,7 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand import fast_egohand_configs
+    from posekit.models.egohand_fast import fast_egohand_configs
     from posekit.predictions import BoxDetections, HandDetections
 
     if not torch.cuda.is_available():
@@ -368,7 +368,7 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand import fast_egohand_configs
+    from posekit.models.egohand_fast import fast_egohand_configs
     from posekit.predictions import BoxDetections, HandDetections
 
     if not torch.cuda.is_available():
@@ -398,6 +398,5 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
     for xyz, vertices in results.values():
         torch.testing.assert_close(xyz, results[(0, 1, 2, 3)][0], atol=0.001, rtol=0.0)
         torch.testing.assert_close(vertices, results[(0, 1, 2, 3)][1], atol=0.001, rtol=0.0)
-    assert pose.tensor_executor is not None
-    assert len(pose.tensor_executor.graphs) == 1
-    assert [len(cropper.graphs) for cropper in pose.cuda_croppers.values()] == [1]
+    assert len(pose.executor.graphs) == 1
+    assert [len(cropper.graphs) for cropper in pose.croppers.values()] == [1]

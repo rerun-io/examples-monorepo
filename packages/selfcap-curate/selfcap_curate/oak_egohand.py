@@ -22,9 +22,9 @@ from posekit.models.egohand import (
     EgoHandDetectorConfig,
     EgoHandPredictor,
     EgoHandReconstruction,
-    fast_egohand_configs,
     selfcap_egohand_configs,
 )
+from posekit.models.egohand_fast import EgoHandFastConfig, FastEgoHandPredictor, fast_egohand_configs
 from posekit.predictions import SOMA_HAND21, BoxDetections, HandDetections, HandSide
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import CatalogVideo
@@ -109,13 +109,13 @@ def infer_egohand_frames(
     return OakDetections(times, xy, scores)
 
 
-def egohand_configs(assets: Path | None, *, fast: bool = False) -> tuple[EgoHandDetectorConfig, EgoHandConfig]:
+def egohand_configs(assets: Path | None, *, fast: bool = False) -> tuple[EgoHandDetectorConfig, EgoHandConfig | EgoHandFastConfig]:
     """The models' files and engines; None takes the pinned downloads and the trtkit cache."""
     return fast_egohand_configs(assets) if fast else selfcap_egohand_configs(assets)
 
 
 @cache
-def egohand_models(assets: Path | None, *, fast: bool = False) -> tuple[EgoHandDetector, EgoHandPredictor]:
+def egohand_models(assets: Path | None, *, fast: bool = False) -> tuple[EgoHandDetector, EgoHandPredictor | FastEgoHandPredictor]:
     """Retain engines for an explicitly long-lived batch worker."""
     detector, predictor = egohand_configs(assets, fast=fast)
     return detector.setup(), predictor.setup()
@@ -174,7 +174,7 @@ def detect_oak_egohand(
     frames: UInt8[Tensor, "n h w 3"] = decode_frames(video, selection.indices, 1e9 / float(np.median(np.diff(video.t_ns))))
     started: float = time.perf_counter()
     detector: EgoHandDetector | None = None
-    predictor: EgoHandPredictor | None = None
+    predictor: EgoHandPredictor | FastEgoHandPredictor | None = None
     try:
         detector, predictor = egohand_models(assets, fast=fast)
         result: OakDetections = infer_egohand_frames(frames, times[selection.indices], selection.hands, lens, detector, predictor)
@@ -212,7 +212,7 @@ def detect_oak_views(
         return {camera: OakDetections(np.empty(0), np.empty((0, 133, 2)), np.empty((0, 133))) for camera in videos}
     started: float = time.perf_counter()
     detector: EgoHandDetector | None = None
-    predictor: EgoHandPredictor | None = None
+    predictor: EgoHandPredictor | FastEgoHandPredictor | None = None
     try:
         detector, predictor = egohand_models(assets, fast=fast)
         result: dict[str, OakDetections] = {}

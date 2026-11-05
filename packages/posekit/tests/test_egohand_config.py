@@ -9,6 +9,7 @@ from trtkit import TensorRtBackendConfig
 
 from posekit.models import HandDetectorConfig, HandPose3dConfig
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
+from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
 
 
 def test_fast_role_subcommands_select_the_calibrated_config() -> None:
@@ -17,8 +18,7 @@ def test_fast_role_subcommands_select_the_calibrated_config() -> None:
     assert isinstance(detector, EgoHandDetectorConfig)
     assert isinstance(detector.backend, TensorRtBackendConfig)
     assert detector.gpu_preprocessing and detector.fp16_trunk
-    assert isinstance(pose, EgoHandConfig)
-    assert pose.cuda_execution and pose.nvfp4_backbone and pose.fp8_tail_blocks == 8
-    original = tyro.cli(HandPose3dConfig, args=["egohand"])
-    assert isinstance(original, EgoHandConfig)
-    assert not original.cuda_execution and not original.nvfp4_backbone
+    assert isinstance(pose, EgoHandFastConfig)
+    assert pose == fast_egohand_configs()[1] == EgoHandFastConfig()
+    assert pose.fp8_tail_blocks == 8
+    assert isinstance(tyro.cli(HandPose3dConfig, args=["egohand"]), EgoHandConfig)

@@ -116,15 +116,16 @@ def _time_module(module: torch.nn.Module, events: list[tuple[torch.cuda.Event, t
 
 def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, warmup: int, repeats: int, *, fast: bool = False) -> tuple[StageTimes, float]:
     """SelfCap's accelerated EgoHand, one frame at a time."""
-    from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, fast_egohand_configs, selfcap_egohand_configs
+    from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, selfcap_egohand_configs
+    from posekit.models.egohand_fast import FastEgoHandPredictor, fast_egohand_configs
 
     detector_config, predictor_config = fast_egohand_configs(None) if fast else selfcap_egohand_configs(None)
     detector: EgoHandDetector = detector_config.setup()
-    predictor: EgoHandPredictor = predictor_config.setup()
-    model = predictor.predictor.model
+    predictor: EgoHandPredictor | FastEgoHandPredictor = predictor_config.setup()
     events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {"backbone": [], "head": []}
-    _time_module(model.backbone, events["backbone"])
-    _time_module(model.hand_head, events["head"])
+    if isinstance(predictor, EgoHandPredictor):
+        _time_module(predictor.predictor.model.backbone, events["backbone"])
+        _time_module(predictor.predictor.model.hand_head, events["head"])
     times = StageTimes()
     hands: list[int] = []
     order: list[int] = list(range(len(frames))) * repeats

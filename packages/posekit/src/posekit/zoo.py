@@ -140,12 +140,12 @@ ZOO: dict[str, ZooModel] = {
         ZooModel(
             "rtdetr-hand-v1-fast", "hand-detector", "query-based", "huggingface",
             "nvidia/RT-DETR-Hand-Detector-v1@55572ddc hand_detector.onnx", (640, 640), None, "implemented",
-            "fast_egohand_configs(): GPU resize, FP16 convolutional trunk and captured TensorRT inference. Select egohand-fast in the hand-detector CLI.",
+            "fast_egohand_configs() detector: GPU resize, FP16 convolutional trunk and captured TensorRT inference. Select egohand-fast in the hand-detector CLI.",
         ),
         ZooModel(
             "egohand-v1-fast", "hand-pose3d", "top-down", "huggingface",
             "nvidia/EgoHand-v1", (256, 256), "soma_hand_25", "implemented",
-            "fast_egohand_configs(): calibrated NVFP4 DINOv3 with an eight-block FP8 tail, FP8 attention, TensorRT heads, CUDA crops and full SOMA meshes. "
+            "EgoHandFastConfig: calibrated NVFP4 DINOv3 with an eight-block FP8 tail, FP8 attention, TensorRT heads, CUDA crops and full SOMA meshes. "
             "Select egohand-fast in the hand-pose3d CLI; requires a CUDA GPU with NVFP4 support.",
         ),
         # 3D (Phase 4).

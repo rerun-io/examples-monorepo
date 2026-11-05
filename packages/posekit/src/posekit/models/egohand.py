@@ -6,12 +6,15 @@ vendored IsaacCapture inference source (``src/egohand*``, see VENDORED.md).
 The eager reference and accelerated path share upstream crop and mirroring
 geometry. Optional GPU sampling and TensorRT preserve full SOMA meshes and
 parameters. Remaining CPU output conversion is included in stage timings.
+The GPU-resident fast role, ``FastEgoHandPredictor``, shares the weights,
+detector and backbone export helpers below (see ``posekit.models.egohand_fast``).
 """
 
 import fcntl
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -86,9 +89,8 @@ EGOHAND_REVISION: str = "24a325fde719fdb985c7fb4606115b0c1912ab7d"
 """Weights of nvidia/EgoHand-v1 a153616c egohand_s060000.ckpt, without its pickle."""
 CACHED_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-bf16-{EGOHAND_REVISION[:8]}.onnx"
 """The bf16 DINOv3 exported from those weights, beside the engines built from it."""
-CACHED_FAST_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
-CACHED_HEAD_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-head-bf16-{EGOHAND_REVISION[:8]}-v1.onnx"
-
+SOMA_REVISION: str = "f81a01796f652260ff930d5318d6c6b845a505ed"
+"""Pinned nvidia/SOMA-X commit holding the SOMA hand model."""
 SOMA_HAND_FILES: tuple[str, ...] = (
     "SOMAHand.npz", "SOMA_neutral.npz", "SOMA_procedural_transforms.json", "SOMA_template_rig.usda",
     "MHR/mhr_model_lod1.pt", "MHR/base_body_lod1.obj", "MHR/SOMA_wrap_lod1.obj",
@@ -131,7 +133,7 @@ class EgoHandDetector(HandDetector):
 
     def __init__(self, config: EgoHandDetectorConfig) -> None:
         self.config: EgoHandDetectorConfig = config
-        weights = config.weights_path()
+        weights: Path = config.weights_path()
         if config.fp16_trunk:
             from trtkit.onnx_precision import fp16_trunk
 
@@ -153,19 +155,9 @@ class EgoHandDetector(HandDetector):
         width: int = int(frames_rgb.shape[2])
         for start in range(0, len(frames_rgb), self.runtime.spec.max_batch_size):
             stop: int = min(start + self.runtime.spec.max_batch_size, len(frames_rgb))
-            pixels: Float32[Tensor, "b 3 640 640"]
-            if self.config.gpu_preprocessing:
-                pixels = torch.nn.functional.interpolate(
-                    rearrange(frames_rgb[start:stop], "b h w c -> b c h w").float(),
-                    size=(640, 640), mode="bilinear", align_corners=False, antialias=True,
-                ).round().clamp_(0, 255) / 255.0
-            else:
-                host_frames: UInt8[ndarray, "b h w 3"] = frames_rgb[start:stop].cpu().numpy()
-                with ThreadPoolExecutor(max_workers=min(8, stop - start)) as pool:
-                    resized: list[UInt8[ndarray, "640 640 3"]] = list(
-                        pool.map(lambda frame: np.asarray(Image.fromarray(frame).resize((640, 640), Image.Resampling.BILINEAR)).copy(), host_frames)
-                    )
-                pixels = torch.from_numpy(np.stack(resized)).permute(0, 3, 1, 2).to(device=frames_rgb.device, dtype=torch.float32) / 255.0
+            pixels: Float32[Tensor, "b 3 640 640"] = (
+                _resize_on_gpu(frames_rgb[start:stop]) if self.config.gpu_preprocessing else _resize_with_pil(frames_rgb[start:stop])
+            )
             outputs: dict[str, Tensor] = run_chunked(
                 self.runtime,
                 {
@@ -193,6 +185,23 @@ class EgoHandDetector(HandDetector):
             BoxDetections(torch.cat(boxes), torch.cat(scores), torch.cat(indices).to(device=frames_rgb.device, dtype=torch.int64)), tuple(sides)
         )
         return resolve_hand_identities(raw, len(frames_rgb))
+
+
+def _resize_with_pil(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b 3 640 640"]:
+    """The reference detector input: PIL bilinear resizes of host copies, on up to eight threads."""
+    host_frames: UInt8[ndarray, "b h w 3"] = frames_rgb.cpu().numpy()
+    with ThreadPoolExecutor(max_workers=min(8, len(host_frames))) as pool:
+        resized: list[UInt8[ndarray, "640 640 3"]] = list(
+            pool.map(lambda frame: np.asarray(Image.fromarray(frame).resize((640, 640), Image.Resampling.BILINEAR)).copy(), host_frames)
+        )
+    return torch.from_numpy(np.stack(resized)).permute(0, 3, 1, 2).to(device=frames_rgb.device, dtype=torch.float32) / 255.0
+
+
+def _resize_on_gpu(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b 3 640 640"]:
+    """Antialiased bilinear resize of the decoded CUDA frames, rounded to 8-bit levels like the PIL path."""
+    return torch.nn.functional.interpolate(
+        rearrange(frames_rgb, "b h w c -> b c h w").float(), size=(640, 640), mode="bilinear", align_corners=False, antialias=True,
+    ).round().clamp_(0, 255) / 255.0
 
 
 @serde
@@ -231,6 +240,30 @@ class EgoHandReconstruction(HandPoses3d):
     scale_parameters: Float32[Tensor, "n s"] | None
     """Per-finger MHR scales; None for checkpoints without this head."""
 
+    @classmethod
+    def empty(cls, device: torch.device, faces: dict[HandSide, Tensor]) -> "EgoHandReconstruction":
+        """No hands: zero-row outputs on ``device``."""
+        joints: int = SOMA_HAND.num_keypoints
+        return cls(
+            keypoints=Keypoints3d(
+                torch.empty((0, joints, 2), dtype=torch.float32, device=device),
+                torch.empty((0, joints), dtype=torch.float32, device=device),
+                torch.empty((0, joints), dtype=torch.float32, device=device),
+                torch.empty((0,), dtype=torch.int64, device=device),
+                SOMA_HAND,
+                (0,),
+                torch.empty((0, joints, 3), dtype=torch.float32, device=device),
+            ),
+            sides=(),
+            vertices=None,
+            faces=faces,
+            rotations=torch.empty((0, joints, 3, 3), device=device),
+            identity=torch.empty((0, 0), device=device),
+            scale=torch.empty((0,), device=device),
+            translation=torch.empty((0, 3), device=device),
+            scale_parameters=None,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class EgoHandConfig:
@@ -256,67 +289,68 @@ class EgoHandConfig:
     """Pinned commit of that repo."""
     hf_soma_repo_id: str = "nvidia/SOMA-X"
     """Hugging Face repo holding the SOMA hand model."""
-    hf_soma_revision: str = "f81a01796f652260ff930d5318d6c6b845a505ed"
+    hf_soma_revision: str = SOMA_REVISION
     """Pinned commit of that repo."""
-    nvfp4_backbone: bool = False
-    """Quantize DINO linears to NVFP4 and native attention to calibrated FP8 on export."""
-    fp8_tail_blocks: int = 0
-    """Keep the final DINO blocks' linears in FP8 instead of NVFP4 (0..32)."""
-    calibration: Path | None = None
-    """Optional activation ranges; None uses the committed disjoint SelfCap split."""
-    head_onnx: Path | None = None
-    """Optional TensorRT artifact for both learned heads and virtual-camera conditioning."""
-    cuda_execution: bool = False
-    """Retain batched head, SOMA, mirroring and reconstructed outputs on CUDA."""
 
     def weights_path(self) -> Path:
         """The safetensors file: ``weights``, or the pinned download in the Hugging Face cache."""
-        if self.weights is not None:
-            return self.weights
-        return Path(hf_hub_download(repo_id=self.hf_egohand_repo_id, filename="egohand_s060000.safetensors", revision=self.hf_egohand_revision))
+        return egohand_weights_path(self.weights, self.hf_egohand_repo_id, self.hf_egohand_revision)
 
     def soma_path(self) -> Path:
         """The SOMA directory: ``soma_assets``, or the pinned download in the Hugging Face cache."""
-        if self.soma_assets is not None:
-            return self.soma_assets
-        return Path(snapshot_download(repo_id=self.hf_soma_repo_id, revision=self.hf_soma_revision, allow_patterns=list(SOMA_HAND_FILES)))
+        return soma_assets_path(self.soma_assets, self.hf_soma_repo_id, self.hf_soma_revision)
 
     def setup(self) -> "EgoHandPredictor":
         """Load the weights and construct the calibrated predictor."""
         return EgoHandPredictor(self)
 
 
-def _export_backbone_once(config: EgoHandConfig, weights: Path, soma: Path, onnx: Path) -> None:
-    """Export the bf16 DINOv3 if no one has yet; processes that find it missing take turns, so the first one's export serves them all."""
-    from egohand_inference.pipeline.predictor import EgoHandPredictor as UpstreamPredictor
-    from egohand_inference.pipeline.predictor import load_egohand_model
+def egohand_weights_path(weights: Path | None, repo_id: str, revision: str) -> Path:
+    """``weights``, or the pinned EgoHand safetensors download in the Hugging Face cache."""
+    if weights is not None:
+        return weights
+    return Path(hf_hub_download(repo_id=repo_id, filename="egohand_s060000.safetensors", revision=revision))
 
-    if onnx.is_file():
+
+def soma_assets_path(soma_assets: Path | None, repo_id: str, revision: str) -> Path:
+    """``soma_assets``, or the pinned download of the SOMA hand files in the Hugging Face cache."""
+    if soma_assets is not None:
+        return soma_assets
+    return Path(snapshot_download(repo_id=repo_id, revision=revision, allow_patterns=list(SOMA_HAND_FILES)))
+
+
+def build_once(artifact: Path, build: Callable[[], None]) -> None:
+    """Run ``build`` if ``artifact`` is missing; processes that find it missing take turns, so the first one's build serves them all."""
+    if artifact.is_file():
         return
-    onnx.parent.mkdir(parents=True, exist_ok=True)
-    with onnx.with_suffix(".lock").open("w") as lock:
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    with artifact.with_suffix(".lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if not onnx.is_file():
-            if config.nvfp4_backbone:
-                from posekit.models.egohand_onnx import quantize_backbone
-                from posekit.models.egohand_quantization import load_calibration
+        if not artifact.is_file():
+            build()
 
-                source: Path = onnx.with_name(CACHED_BACKBONE_ONNX.name)
-                _export_backbone_once(replace(config, nvfp4_backbone=False), weights, soma, source)
-                quantize_backbone(source, onnx, load_calibration(config.calibration), fp8_tail_blocks=config.fp8_tail_blocks)
-                return
-            model, _ = load_egohand_model(weights, soma)
-            export_onnx(
-                UpstreamPredictor(model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True).model.backbone,
-                (torch.zeros((2, 3, 256, 256), device="cuda"),),
-                onnx,
-                input_names=["images"],
-                output_names=["features"],
-                compute_dtype=torch.bfloat16,
-                dynamic_batch_max=config.backbone_backend.max_batch_size,
-            )
-            del model
-            torch.cuda.empty_cache()
+
+def export_backbone_once(weights: Path, soma: Path, onnx: Path, *, batch_size: int, max_batch_size: int) -> None:
+    """Export the released bf16 DINOv3 to ``onnx`` with a dynamic batch up to ``max_batch_size``, unless it exists."""
+
+    def export() -> None:
+        from egohand_inference.pipeline.predictor import EgoHandPredictor as UpstreamPredictor
+        from egohand_inference.pipeline.predictor import load_egohand_model
+
+        model, _ = load_egohand_model(weights, soma)
+        export_onnx(
+            UpstreamPredictor(model, batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True).model.backbone,
+            (torch.zeros((2, 3, 256, 256), device="cuda"),),
+            onnx,
+            input_names=["images"],
+            output_names=["features"],
+            compute_dtype=torch.bfloat16,
+            dynamic_batch_max=max_batch_size,
+        )
+        del model
+        torch.cuda.empty_cache()
+
+    build_once(onnx, export)
 
 
 class EgoHandPredictor(TopDownHandPose3d):
@@ -331,17 +365,12 @@ class EgoHandPredictor(TopDownHandPose3d):
         self.config: EgoHandConfig = config
         self.stage_ms: dict[str, list[float]] = {}
         # A cached backbone artifact replaces the 3 GB PyTorch DINOv3, which is then never built or loaded.
-        engine: _TensorRtBackbone | None = None
+        engine: TensorRtBackbone | None = None
         weights: Path = config.weights_path()
         soma: Path = config.soma_path()
         if config.backbone_onnx is not None:
-            backbone_path: Path = config.backbone_onnx
-            if config.nvfp4_backbone:
-                from posekit.models.egohand_quantization import calibrated_backbone_path, load_calibration
-
-                backbone_path = calibrated_backbone_path(backbone_path, load_calibration(config.calibration), fp8_tail_blocks=config.fp8_tail_blocks)
-            _export_backbone_once(config, weights, soma, backbone_path)
-            engine = _TensorRtBackbone(create_runtime_from_onnx(backbone_path, config.backbone_backend))
+            export_backbone_once(weights, soma, config.backbone_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size)
+            engine = TensorRtBackbone(create_runtime_from_onnx(config.backbone_onnx, config.backbone_backend))
         model, _ = load_egohand_model(weights, soma, backbone=engine)
         self.predictor: UpstreamPredictor = UpstreamPredictor(
             model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True, perf_reporter=self
@@ -349,31 +378,6 @@ class EgoHandPredictor(TopDownHandPose3d):
         self.faces: dict[HandSide, Tensor] = {
             side: torch.from_numpy(np.asarray(model.soma_hand.faces(side), dtype=np.int64)).cuda() for side in ("left", "right")
         }
-        self.cuda_croppers = {}
-        self.tensor_executor = None
-        if config.cuda_execution:
-            from posekit.models.egohand_tensor import EgoHandTensorExecutor
-
-            if config.head_onnx is not None and not config.head_onnx.is_file():
-                from posekit.models.egohand_head import EgoHandHead
-
-                config.head_onnx.parent.mkdir(parents=True, exist_ok=True)
-                with config.head_onnx.with_suffix(".lock").open("w") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    if not config.head_onnx.is_file():
-                        export_onnx(
-                            EgoHandHead(model).eval(),
-                            (torch.zeros((2, 1280, 16, 16), device="cuda"), torch.full((2,), 300.0, device="cuda")),
-                            config.head_onnx, input_names=["features", "focal"],
-                            output_names=["poses", "identity", "scales", "camera", "direct", "presence"],
-                            compute_dtype=torch.bfloat16, dynamic_batch_max=config.backbone_backend.max_batch_size,
-                        )
-            self.tensor_executor = EgoHandTensorExecutor(
-                self.predictor,
-                # The BF16 heads have no Q/DQ attention inputs; FP8 fusion applies only to DINO.
-                create_runtime_from_onnx(config.head_onnx, replace(config.backbone_backend, fp8_attention=False))
-                if config.head_onnx is not None else None,
-            )
 
     def record_latency(self, stage: PerfStage, latency_ms: float) -> None:
         """Collect per-frame stage timings; SOMA uses nested CUDA-event timing."""
@@ -392,39 +396,6 @@ class EgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_geometry import lens_model, project
 
         validate_frames_rgb(frames_rgb)
-        if self.tensor_executor is not None and detections.num_detections:
-            from posekit.models.egohand_cuda_crops import CudaHandCropper
-
-            camera_key = (camera.lens, camera.intrinsics.tobytes(), camera.distortion.tobytes(), str(frames_rgb.device))
-            if camera_key not in self.cuda_croppers:
-                self.cuda_croppers[camera_key] = CudaHandCropper(camera, frames_rgb.device)
-            cropper = self.cuda_croppers[camera_key]
-            started = time.perf_counter()
-            gpu_prepared = cropper.prepare(frames_rgb, detections, self.config.padding)
-            torch.cuda.synchronize()
-            self.record_latency(PerfStage.PREPROCESSING, (time.perf_counter() - started) * 1000.0 / len(frames_rgb))
-            output = self.tensor_executor(gpu_prepared, detections.sides, cropper)
-            for stage, elapsed in self.tensor_executor.stage_ms.items():
-                self.stage_ms.setdefault(stage, []).append(elapsed / len(frames_rgb))
-            return EgoHandReconstruction(
-                keypoints=Keypoints3d(
-                    output.pixels,
-                    output.joints[:, :, 2] - output.joints[:, :1, 2],
-                    detections.boxes.scores[:, None].expand(-1, 25).contiguous(),
-                    detections.boxes.frame_indices,
-                    SOMA_HAND,
-                    (0,),
-                    output.joints,
-                ),
-                sides=detections.sides,
-                vertices=output.vertices,
-                faces=self.faces,
-                rotations=output.rotations,
-                identity=output.identity,
-                scale=output.scale,
-                translation=output.translation,
-                scale_parameters=output.scale_parameters,
-            )
         ids: list[str] = [str(index) for index in range(len(frames_rgb))]
         boxes: dict[str, dict[HandSide, ndarray]] = {key: {} for key in ids}
         for box, index, side in zip(detections.boxes.xyxy_numpy(), detections.boxes.frame_indices.tolist(), detections.sides, strict=True):
@@ -463,25 +434,7 @@ class EgoHandPredictor(TopDownHandPose3d):
                 confidence.append(float(detections.boxes.scores[row]))
         device: torch.device = frames_rgb.device
         if not rows:
-            return EgoHandReconstruction(
-                keypoints=Keypoints3d(
-                    torch.empty((0, 25, 2), dtype=torch.float32, device=device),
-                    torch.empty((0, 25), dtype=torch.float32, device=device),
-                    torch.empty((0, 25), dtype=torch.float32, device=device),
-                    torch.empty((0,), dtype=torch.int64, device=device),
-                    SOMA_HAND,
-                    (0,),
-                    torch.empty((0, 25, 3), dtype=torch.float32, device=device),
-                ),
-                sides=(),
-                vertices=None,
-                faces=self.faces,
-                rotations=torch.empty((0, 25, 3, 3), device=device),
-                identity=torch.empty((0, 0), device=device),
-                scale=torch.empty((0,), device=device),
-                translation=torch.empty((0, 3), device=device),
-                scale_parameters=None,
-            )
+            return EgoHandReconstruction.empty(device, self.faces)
         xyz: Float32[ndarray, "n 25 3"] = np.stack([row.pred_keypoints_3d + row.transl for row in rows]).astype(np.float32)
         xy: Float32[ndarray, "n 25 2"] = np.stack([project(camera, points.astype(np.float64)) for points in xyz]).astype(np.float32)
         xyz_tensor: Float32[Tensor, "n 25 3"] = torch.from_numpy(xyz).to(device)
@@ -508,7 +461,7 @@ class EgoHandPredictor(TopDownHandPose3d):
         )
 
 
-class _TensorRtBackbone(torch.nn.Module):
+class TensorRtBackbone(torch.nn.Module):
     """DINOv3 feature-map contract over a cached dynamic-batch runtime."""
 
     def __init__(self, runtime: TensorRuntime) -> None:
@@ -544,19 +497,3 @@ def selfcap_egohand_configs(assets: Path | None) -> tuple[EgoHandDetectorConfig,
         backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=engines),
     )
     return detector, predictor
-
-
-def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorConfig, EgoHandConfig]:
-    """GPU-resident configuration of the same detector and calibrated hand roles."""
-    detector, predictor = selfcap_egohand_configs(assets)
-    cache: Path = predictor.backbone_backend.cache_dir
-    assert isinstance(detector.backend, TensorRtBackendConfig)
-    return (
-        replace(detector, gpu_preprocessing=True, fp16_trunk=True, backend=replace(detector.backend, opt_batch_size=1, use_cuda_graph=True)),
-        replace(
-            predictor, cuda_execution=True, nvfp4_backbone=True, fp8_tail_blocks=8,
-            backbone_onnx=cache / CACHED_FAST_BACKBONE_ONNX.name,
-            head_onnx=cache / CACHED_HEAD_ONNX.name,
-            backbone_backend=replace(predictor.backbone_backend, opt_batch_size=2),
-        ),
-    )

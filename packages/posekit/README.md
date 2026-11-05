@@ -142,16 +142,16 @@ pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand egohand-f
     --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/egohand-eval
 ```
 
-`fast_egohand_configs()` returns the existing detector and pose configs. It selects
-GPU detector preprocessing, an FP16 detector trunk, NVFP4 DINOv3 linears with the
-last eight blocks in FP8, FP8 attention, BF16 TensorRT heads, captured GPU crops,
-and full per-frame SOMA reconstruction. Identity, all 26 segment scales, joint
+`fast_egohand_configs()` returns the existing `EgoHandDetectorConfig` with GPU
+preprocessing and an FP16 trunk, and an `EgoHandFastConfig`: its `FastEgoHandPredictor`
+runs NVFP4 DINOv3 linears with the last eight blocks in FP8, FP8 attention, BF16
+TensorRT heads, captured GPU crops, and full per-frame SOMA reconstruction. Identity, all 26 segment scales, joint
 rotations, and every hand vertex remain dynamic. The ordinary `egohand` selection
 retains its original defaults. SelfCap's existing calibration CLI selects these
 same roles with `--oak-egohand-fast`.
 
 First setup exports and builds missing artifacts through posekit and trtkit;
-subsequent calls use their cache. `EgoHandConfig.fp8_tail_blocks` controls the
+subsequent calls use their cache. `EgoHandFastConfig.fp8_tail_blocks` controls the
 precision trade-off (0–32); both precision and calibration affect the export cache
 key. The committed calibration (`assets/egohand_nvfp4.rrd`) uses 138 crops from disjoint SelfCap frames, with
 mount-fit indices excluded. Its record includes exact frame indices and RGB
@@ -163,7 +163,7 @@ pixi run -e posekit-hands --frozen posekit-egohand-calibrate \
 ```
 
 The calibration command also rejects every decoded benchmark frame by hash.
-Set `EgoHandConfig.calibration` to use a separate calibration record. Quantization,
+Set `EgoHandFastConfig.calibration` to use a separate calibration record. Quantization,
 head export, and engine building are library code; no preparation scripts are required.
 
 **Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera

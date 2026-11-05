@@ -24,7 +24,8 @@ from posekit.models.base import (
     VideoSegmenter,
 )
 from posekit.models.clip_identity import ClipIdentityConfig
-from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig, fast_egohand_configs
+from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
+from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
 from posekit.models.rtdetr import RtDetrDetectorConfig
 from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
@@ -42,6 +43,7 @@ __all__ = (
     "DetectorConfig",
     "EgoHandConfig",
     "EgoHandDetectorConfig",
+    "EgoHandFastConfig",
     "HandDetector",
     "HandDetectorConfig",
     "HandPose3dConfig",
@@ -71,7 +73,7 @@ if TYPE_CHECKING:
     DetectorConfig = YoloxDetectorConfig | RtDetrDetectorConfig
     Pose2dConfig = RtmPoseConfig | SapiensPoseConfig | VitPoseConfig
     HandDetectorConfig = WilorHandDetectorConfig | EgoHandDetectorConfig
-    HandPose3dConfig = WilorHandPoseConfig | EgoHandConfig
+    HandPose3dConfig = WilorHandPoseConfig | EgoHandConfig | EgoHandFastConfig
 else:
     DetectorConfig = tyro.extras.subcommand_type_from_defaults(
         {"yolox": YoloxDetectorConfig(), "rtdetr": RtDetrDetectorConfig()}, prefix_names=False
@@ -80,10 +82,13 @@ else:
         {"rtmpose": RtmPoseConfig(), "sapiens": SapiensPoseConfig(), "vitpose": VitPoseConfig()}, prefix_names=False
     )
 
+    _fast_hand_detector, _fast_hand_pose = fast_egohand_configs()
     HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": fast_egohand_configs()[0]}, prefix_names=False
+        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector}, prefix_names=False
     )
-    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults({"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": fast_egohand_configs()[1]}, prefix_names=False)
+    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(
+        {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose}, prefix_names=False
+    )
 
 AnnotatedDetectorConfig = tyro.conf.OmitSubcommandPrefixes[DetectorConfig]
 AnnotatedHandDetectorConfig = tyro.conf.OmitSubcommandPrefixes[HandDetectorConfig]
