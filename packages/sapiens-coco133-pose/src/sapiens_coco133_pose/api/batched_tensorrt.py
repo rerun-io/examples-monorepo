@@ -687,6 +687,8 @@ def run_batched_tensorrt_video_coco133(config: BatchedTensorRtVideoConfig) -> Ba
         recording=config.rr_config.rec_stream,
         video_path=config.video_path if config.log_video_media else None,
     )
+    # The summary names the output file, so it must be complete before this returns.
+    config.rr_config.rec_stream.flush()
     return BatchedTensorRtVideoSummary(
         config.rr_config.save,
         len(frames),
