@@ -8,13 +8,13 @@ from typing import Any
 
 import cv2
 import torch
+from sapiens2_lite.backbone import GroupedQueryAttention
 from torch import nn
 
 from posekit.models.sapiens_net.calibration import FAST_POSE_INPUT_HW, FastPoseCalibration, write_calibration
 from posekit.models.sapiens_net.checkpoints import load_pose_model
 from posekit.models.sapiens_net.export import make_fast_pose_exportable
 from posekit.ops.crops import IMAGENET_MEAN_255, IMAGENET_STD_255
-from sapiens2_lite.backbone import GroupedQueryAttention
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,13 +5,13 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from sapiens2_lite.backbone import RopePositionEmbedding
 from torch import nn
 
 from posekit.models.sapiens_net.calibration import FAST_POSE_INPUT_HW, FastPoseCalibration, calibration_digest, load_calibration
 from posekit.models.sapiens_net.checkpoints import load_pose_model
 from posekit.models.sapiens_net.fast_head import DeferredHead
 from posekit.models.sapiens_net.metadata import coco133_goliath_pairs
-from sapiens2_lite.backbone import RopePositionEmbedding
 
 FAST_POSE_EXPORT_VERSION: int = 1
 

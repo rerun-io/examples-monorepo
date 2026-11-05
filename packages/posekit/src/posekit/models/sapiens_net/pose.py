@@ -21,7 +21,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file
-
 from sapiens2_lite.backbone import Sapiens2
 
 
