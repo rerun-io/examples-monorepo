@@ -11,8 +11,8 @@ adapter demonstrates the full posekit story on one network:
 The 308 Goliath keypoints are projected to COCO-133 (unmapped indices are NaN
 with score 0).
 
-The network is vendored in ``src/sapiens2_lite`` (see its VENDORED.md); the
-export, quantization and checkpoint code is in ``posekit.models.sapiens_net``.
+The backbone and keypoint metadata are upstream's (``sapiens2_lite``, recipes/sapiens2-src); the
+pose head, export, quantization and checkpoint code is in ``posekit.models.sapiens_net``.
 Imports are lazy so the rest of posekit loads without the network code.
 """
 
@@ -83,7 +83,7 @@ class SapiensPose2d(TopDownPose2d):
         """
         from posekit.models.sapiens_net.calibration import FAST_POSE_HEATMAP_HW, FAST_POSE_INPUT_HW
         from posekit.models.sapiens_net.metadata import coco133_goliath_pairs
-        from sapiens2_lite.pose import MODEL_SPECS
+        from posekit.models.sapiens_net.pose import MODEL_SPECS
 
         self.config: SapiensPoseConfig = config
         self.skeleton = COCO_133
@@ -181,7 +181,7 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
 
     from posekit.models.sapiens_net.checkpoints import load_pose_model
     from posekit.models.sapiens_net.export import make_sapiens_pose_onnx_exportable
-    from sapiens2_lite.pose import MODEL_SPECS
+    from posekit.models.sapiens_net.pose import MODEL_SPECS
 
     # bf16=True bakes bf16 autocast into the graph with fp32 I/O for TRT 11's
     # strongly-typed builds (graph dtype = engine dtype; bf16 is the fastest

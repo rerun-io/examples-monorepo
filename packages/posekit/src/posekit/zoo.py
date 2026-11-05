@@ -102,7 +102,7 @@ ZOO: dict[str, ZooModel] = {
         ),
         ZooModel(
             "sapiens2-pose-coco133", "pose2d", "full-frame", "local",
-            "facebook/sapiens2-pose-* (network vendored in src/sapiens2_lite)", (768, 1024), "coco_133", "implemented",
+            "facebook/sapiens2-pose-* (network: posekit.models.sapiens_net + sapiens2-src)", (768, 1024), "coco_133", "implemented",
             "308-kpt full-frame net projected to coco133; fp32 graph for ORT, bf16-typed graph for TRT (fp16 overflows).",
         ),
         ZooModel(

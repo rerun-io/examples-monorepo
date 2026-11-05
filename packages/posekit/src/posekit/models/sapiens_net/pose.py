@@ -1,3 +1,9 @@
+# pyrefly: ignore-errors
+# Upstream-shaped code, untyped as upstream wrote it (dict metainfo, mixed nn.Module lists); moved with annotation-only changes.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Condensed from facebookresearch/sapiens2 0e51c12 (sapiens/pose/src/models/heads/pose_heatmap_head.py,
+# sapiens/pose/src/models/core/pose_topdown_estimator.py, sapiens/pose/src/datasets/utils.py); licensed under
+# the Sapiens2 License (LICENSE.md, shipped by recipes/sapiens2-src).
 """Inference-only Sapiens2 pose network: backbone, heatmap head, checkpoint loading, keypoint metadata.
 
 Off the registry, training runners, dense prediction modules, evaluators and
@@ -9,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any
 
 import numpy as np
 import torch
@@ -23,12 +29,12 @@ from sapiens2_lite.backbone import Sapiens2
 class ModelSpec:
     arch: str
     embed_dim: int
-    deconv_out_channels: Tuple[int, ...]
-    conv_out_channels: Tuple[int, ...]
-    image_size: Tuple[int, int] = (1024, 768)
+    deconv_out_channels: tuple[int, ...]
+    conv_out_channels: tuple[int, ...]
+    image_size: tuple[int, int] = (1024, 768)
     patch_size: int = 16
-    input_size: Tuple[int, int] = (768, 1024)
-    heatmap_size: Tuple[int, int] = (192, 256)
+    input_size: tuple[int, int] = (768, 1024)
+    heatmap_size: tuple[int, int] = (192, 256)
     sigma: float = 6.0
     num_keypoints: int = 308
 
@@ -77,10 +83,10 @@ class PoseHeatmapHead(nn.Module):
         self,
         in_channels: int,
         out_channels: int,
-        deconv_out_channels: Tuple[int, ...] = (1024, 768),
-        deconv_kernel_sizes: Tuple[int, ...] = (4, 4),
-        conv_out_channels: Tuple[int, ...] = (512, 512, 256),
-        conv_kernel_sizes: Tuple[int, ...] = (1, 1, 1),
+        deconv_out_channels: tuple[int, ...] = (1024, 768),
+        deconv_kernel_sizes: tuple[int, ...] = (4, 4),
+        conv_out_channels: tuple[int, ...] = (512, 512, 256),
+        conv_kernel_sizes: tuple[int, ...] = (1, 1, 1),
     ):
         super().__init__()
         self.deconv_layers = self._make_deconv_layers(
@@ -124,11 +130,11 @@ class PoseHeatmapHead(nn.Module):
     def _make_conv_layers(
         self,
         in_channels: int,
-        layer_out_channels: Tuple[int, ...],
-        layer_kernel_sizes: Tuple[int, ...],
+        layer_out_channels: tuple[int, ...],
+        layer_kernel_sizes: tuple[int, ...],
     ) -> nn.Module:
         layers = []
-        for out_channels, kernel_size in zip(layer_out_channels, layer_kernel_sizes):
+        for out_channels, kernel_size in zip(layer_out_channels, layer_kernel_sizes, strict=False):
             padding = (kernel_size - 1) // 2
             layers.append(
                 nn.Conv2d(
@@ -147,11 +153,11 @@ class PoseHeatmapHead(nn.Module):
     def _make_deconv_layers(
         self,
         in_channels: int,
-        layer_out_channels: Tuple[int, ...],
-        layer_kernel_sizes: Tuple[int, ...],
+        layer_out_channels: tuple[int, ...],
+        layer_kernel_sizes: tuple[int, ...],
     ) -> nn.Module:
         layers = []
-        for out_channels, kernel_size in zip(layer_out_channels, layer_kernel_sizes):
+        for out_channels, kernel_size in zip(layer_out_channels, layer_kernel_sizes, strict=False):
             if kernel_size == 4:
                 padding = 1
                 output_padding = 0

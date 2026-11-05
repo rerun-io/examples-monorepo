@@ -3,8 +3,8 @@
 from functools import lru_cache
 from typing import Any
 
+from posekit.models.sapiens_net.pose import parse_pose_metainfo
 from sapiens2_lite import keypoints308
-from sapiens2_lite.pose import parse_pose_metainfo
 
 COCO133_GOLIATH_ALIASES: dict[str, str] = {
     **{f"{side}_hand_root": f"{side}_wrist" for side in ("left", "right")},
