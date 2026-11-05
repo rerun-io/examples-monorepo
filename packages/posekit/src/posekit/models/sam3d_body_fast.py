@@ -56,6 +56,15 @@ class Sam3dBodyFastConfig(Sam3dBodyConfig):
     """Additional hand backbone precision overrides, applied after the body plan."""
 
     def __post_init__(self) -> None:
+        alternate_checkpoint: bool = (
+            self.checkpoint_dir is not None or self.hf_repo_id != "facebook/sam-3d-body-dinov3"
+            or self.hf_revision != SAM3D_BODY_REVISION
+        )
+        if alternate_checkpoint and (
+            (self.backbone_onnx is not None and (self.backbone_source_onnx == CACHED_BODY_SOURCE or self.backbone_onnx == CACHED_BODY_BACKBONE))
+            or self.decoder_onnx_dir == CACHED_BODY_DECODERS
+        ):
+            raise ValueError("An alternate checkpoint requires explicit export paths, or backbone_onnx=None and decoder_onnx_dir=None.")
         if self.compile_torch_backbone and self.backbone_onnx is not None:
             raise ValueError("compile_torch_backbone requires backbone_onnx=None.")
         if (
