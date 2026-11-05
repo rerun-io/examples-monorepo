@@ -6,11 +6,11 @@ import numpy as np
 import roma
 import torch
 from jaxtyping import Bool, Float32
+from sam_3d_body.models.modules.mhr_utils import fix_wrist_euler, rotation_angle_difference
 from torch import Tensor
 
 from posekit.models.sam3d_body_geometry import rotmat_to_euler
 from posekit.models.sam3d_body_head import CaptureMhrHead
-from sam3d_body.models.modules.mhr_utils import fix_wrist_euler, rotation_angle_difference
 
 
 @dataclass(slots=True)

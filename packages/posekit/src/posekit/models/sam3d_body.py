@@ -283,12 +283,13 @@ class Sam3dBodyPredictor(TopDownBodyPose3d):
         return head
 
     def __init__(self, config: Sam3dBodyConfig) -> None:
-        from sam3d_body.build_models import load_sam_3d_body
-        from sam3d_body.sam_3d_body_estimator import SAM3DBodyEstimator
+        from sam_3d_body.build_models import load_sam_3d_body
+
+        from posekit.models.sam3d_body_estimator import SAM3DBodyEstimator
 
         self.config: Sam3dBodyConfig = config
         checkpoint: Path = config.checkpoint_path()
-        model, _ = load_sam_3d_body(checkpoint / "model.ckpt", device="cuda", mhr_path=checkpoint / "assets" / "mhr_model.pt")
+        model, _ = load_sam_3d_body(str(checkpoint / "model.ckpt"), device="cuda", mhr_path=str(checkpoint / "assets" / "mhr_model.pt"))
         self.estimator: SAM3DBodyEstimator = SAM3DBodyEstimator(model)
         self.faces: Int64[Tensor, "f 3"] = torch.from_numpy(self.estimator.faces.astype(np.int64)).cuda()
         self.num_vertices: int = int(self.faces.max()) + 1

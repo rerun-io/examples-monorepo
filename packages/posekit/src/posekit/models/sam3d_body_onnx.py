@@ -6,6 +6,8 @@ import onnx
 import torch
 from dinov3.models.vision_transformer import DinoVisionTransformer
 from jaxtyping import Float, Float32
+from sam_3d_body.models.backbones.dinov3 import Dinov3Backbone
+from sam_3d_body.models.modules.transformer import TransformerDecoderLayer
 from torch import Tensor, nn
 from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.artifacts import build_once
@@ -19,8 +21,6 @@ from posekit.models.sam3d_body_quantization import (
     body_qdq_plan,
 )
 from posekit.runtimes import TensorRuntime, create_runtime_from_onnx, run_chunked
-from sam3d_body.models.backbones.dinov3 import Dinov3Backbone
-from sam3d_body.models.modules.transformer import TransformerDecoderLayer
 
 
 class ExportBodyBackbone(nn.Module):

@@ -4,13 +4,13 @@ import numpy as np
 import roma
 import torch
 from jaxtyping import Float32, Int64
+from sam_3d_body.models.heads.mhr_head import MHRHead
+from sam_3d_body.models.modules import rot6d_to_rotmat
 from torch import Tensor, nn
 
 from posekit.models.sam3d_body_geometry import CompactPose, rotmat_to_euler
 from posekit.models.sam3d_body_mhr import BodySkinning, MhrOutput
 from posekit.ops.compile import compile_unless_dev
-from sam3d_body.models.heads.mhr_head import MHRHead
-from sam3d_body.models.modules import rot6d_to_rotmat
 
 
 class CaptureMhrHead(nn.Module):

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 import torch
+from sam_3d_body.models.meta_arch.sam3d_body import SAM3DBody
 from torch import Tensor, nn
 
 from posekit.models.egohand_capture import CapturedGraph, GraphPool
@@ -13,7 +14,6 @@ from posekit.models.sam3d_body_crops import BodyCropper
 from posekit.models.sam3d_body_head import CaptureMhrHead
 from posekit.models.sam3d_body_tensors import BodyEstimate, BodyHandFusion
 from posekit.predictions import BoxDetections
-from sam3d_body.models.meta_arch.sam3d_body import SAM3DBody
 
 FrameOutput: TypeAlias = tuple[BodyEstimate, Tensor | None, Tensor | None]
 FrameKey: TypeAlias = tuple[tuple[int, ...], int, bool, bool, bool, bool]

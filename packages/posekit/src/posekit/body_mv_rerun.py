@@ -21,8 +21,8 @@ from simplecv.rerun_log_utils import log_pinhole, log_video
 from posekit.body_mv_fusion import FusedFrame, to_world
 from posekit.body_mv_inference import CameraSegmentation
 from posekit.body_mv_sequence import exo_video_sources
-from posekit.body_rerun import BOX_PALETTE, SEG_CLASS_OFFSET, SEG_OVERLAY_ALPHA, compute_vertex_normals
-from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
+from posekit.body_rerun import BOX_PALETTE, KEYPOINT_IDS, SEG_CLASS_OFFSET, SEG_OVERLAY_ALPHA, compute_vertex_normals
+from posekit.skeletons import MHR_70
 
 
 def make_blueprint(exo_cam_names: list[str], max_exo_views: Literal[4, 8] = 8) -> rrb.Blueprint:
@@ -82,8 +82,8 @@ def log_annotation_context() -> None:
     # Person class for keypoints
     person_class = rr.ClassDescription(
         info=rr.AnnotationInfo(id=0, label="Person", color=(0, 0, 255)),
-        keypoint_annotations=[rr.AnnotationInfo(id=idx, label=name) for idx, name in MHR70_ID2NAME.items()],
-        keypoint_connections=MHR70_LINKS,
+        keypoint_annotations=[rr.AnnotationInfo(id=idx, label=name) for idx, name in enumerate(MHR_70.keypoint_names)],
+        keypoint_connections=list(MHR_70.links),
     )
 
     # Segmentation classes
@@ -203,7 +203,7 @@ def log_keypoints_2d(pinhole_path: Path, frame_idx: int, kpts_2d: Float32[ndarra
         f"{pinhole_path}/keypoints_2d",
         rr.Points2D(
             positions=kpts_2d,
-            keypoint_ids=MHR70_IDS,
+            keypoint_ids=KEYPOINT_IDS,
             class_ids=0,
             colors=(0, 255, 0),
         ),
@@ -232,7 +232,7 @@ def log_fused_frame(frame_idx: int, fused: FusedFrame, faces: Int[ndarray, "n_fa
         "/world/pred/fused/kpts3d",
         rr.Points3D(
             positions=fused.triangulated_kpts,
-            keypoint_ids=MHR70_IDS,
+            keypoint_ids=KEYPOINT_IDS,
             class_ids=0,
             colors=(255, 128, 0),  # Orange for triangulated
             radii=0.015,
@@ -249,7 +249,7 @@ def log_fused_frame(frame_idx: int, fused: FusedFrame, faces: Int[ndarray, "n_fa
         "/world/pred/fused/mhr_kpts3d",
         rr.Points3D(
             positions=fused.mhr_world,
-            keypoint_ids=MHR70_IDS,
+            keypoint_ids=KEYPOINT_IDS,
             class_ids=0,
             colors=(0, 255, 255),  # Cyan for MHR FK
             radii=0.012,

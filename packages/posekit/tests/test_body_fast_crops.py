@@ -10,11 +10,11 @@ pytest.importorskip("yacs", reason="SAM body crop reference requires the body en
 @pytest.mark.integration
 @pytest.mark.parametrize("padding", [1.25, 0.9])
 def test_cuda_crops_match_opencv(padding: float) -> None:
+    from sam_3d_body.data.transforms import Compose, GetBBoxCenterScale, TopdownAffine, VisionTransformWrapper
+    from sam_3d_body.data.utils.prepare_batch import prepare_batch
     from torchvision.transforms import ToTensor
 
     from posekit.models.sam3d_body_crops import BodyCropper
-    from sam3d_body.data.transforms import Compose, GetBBoxCenterScale, TopdownAffine, VisionTransformWrapper
-    from sam3d_body.data.utils.prepare_batch import prepare_batch
 
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")

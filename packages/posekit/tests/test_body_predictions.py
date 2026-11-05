@@ -20,6 +20,15 @@ def body_rows(people: int, boxes: int) -> BodyPoses3d:
     )
 
 
+def test_mhr70_matches_upstream() -> None:
+    """posekit's MHR-70 names and links are upstream's ``pose_info`` (sam-3d-body-src), in its order."""
+    mhr70 = pytest.importorskip("sam_3d_body.metadata.mhr70", reason="SAM 3D Body needs the posekit-body Pixi environment")
+    keypoints: dict[int, dict[str, object]] = mhr70.pose_info["keypoint_info"]
+    index_of: dict[object, int] = {info["name"]: index for index, info in keypoints.items()}
+    assert MHR_70.keypoint_names == tuple(keypoints[index]["name"] for index in range(len(keypoints)))
+    assert MHR_70.links == tuple((index_of[a], index_of[b]) for a, b in (info["link"] for info in mhr70.pose_info["skeleton_info"].values()))
+
+
 def test_mhr70_names_body_hands_and_links() -> None:
     """70 named joints (both 21-joint hands included) whose links stay inside the skeleton."""
     assert MHR_70.num_keypoints == 70

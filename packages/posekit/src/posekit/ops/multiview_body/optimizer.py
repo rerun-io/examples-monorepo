@@ -18,13 +18,13 @@ from simplecv.ops.triangulate import batch_triangulate
 from torch import Tensor
 
 from posekit.models.sam3d_body import MhrBodyModel
+from posekit.models.sam3d_body_estimator import FinalPosePrediction
 from posekit.ops.multiview_body.losses import (
     LossWeights,
     MultiviewLossOutput,
     MultiviewOptimizationLoss,
 )
 from posekit.ops.multiview_body.mhr_output import expect_mhr_tensor_tuple
-from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
 def axis_angle_to_matrix(axis_angle: Float32[Tensor, "3"]) -> Float32[Tensor, "3 3"]:

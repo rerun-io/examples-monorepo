@@ -17,8 +17,8 @@ from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 from posekit.apis.body3d import pinhole_camera
 from posekit.body_rerun import SEG_CLASS_OFFSET
 from posekit.models.sam3d_body import Sam3dBodyPredictor, Sam3dBodyReconstruction
+from posekit.models.sam3d_body_estimator import FinalPosePrediction
 from posekit.predictions import BoxDetections
-from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
 @dataclass(slots=True)

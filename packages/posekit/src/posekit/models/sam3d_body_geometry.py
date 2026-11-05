@@ -6,10 +6,10 @@ from typing import Literal
 import roma
 import torch
 from jaxtyping import Float
+from sam_3d_body.models.modules.mhr_utils import batchXYZfrom6D
 from torch import Tensor, nn
 
 from posekit.ops.compile import compile_unless_dev
-from sam3d_body.models.modules.mhr_utils import batchXYZfrom6D
 
 
 @compile_unless_dev
