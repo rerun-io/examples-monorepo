@@ -18,12 +18,12 @@ tokio.workspace = true
 tokio-stream = "0.1"
 serde.workspace = true
 serde_json.workspace = true
-rerun = { version = "=0.38.1", default-features = false, features = ["sdk", "glam", "image"] }
+rerun = { version = "=0.42.0", default-features = false, features = ["sdk", "glam", "image"] }
 
 [dev-dependencies]
 brush-serde.workspace = true
-re_log_encoding = "=0.38.1"
-re_chunk = "=0.38.1"
+re_log_encoding = "=0.42.0"
+re_chunk = "=0.42.0"
 tempfile = "3"
 
 [lints]

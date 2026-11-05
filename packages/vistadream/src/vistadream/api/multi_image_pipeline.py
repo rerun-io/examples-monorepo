@@ -16,8 +16,8 @@ from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
 from monopriors.models.multiview.multiview_model import MultiviewPred, robust_filter_confidences
 from monopriors.models.multiview.multiview_predictor import MultiviewPredictor, MultiviewPredictorConfig
 from monopriors.models.relative_depth import (
+    MoGeV1Predictor,
     RelativeDepthPrediction,
-    get_relative_predictor,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from monopriors.scale_utils import compute_scale_and_shift
@@ -504,7 +504,7 @@ def run_inference(config: VGGTInferenceConfig) -> None:
         static=True,
     )
 
-    predictor: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
+    predictor: BaseRelativePredictor = MoGeV1Predictor(device="cuda")
     intri_stack_list: list[Float32[ndarray, "3 3"]] = []
     moge_list: list[Float32[ndarray, "H W"]] = []
     mv_pred: MultiviewPred

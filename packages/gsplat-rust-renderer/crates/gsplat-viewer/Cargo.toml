@@ -11,23 +11,26 @@ path = "src/main.rs"
 gsplat-core = { path = "../gsplat-core" }
 anyhow.workspace = true
 clap.workspace = true
-glam.workspace = true
+# Rerun 0.42 is on glam 0.33 (re_math); gsplat-core and Brush stay on the workspace glam 0.30.
+# The viewer speaks Rerun's glam and converts at the gsplat-core boundary (`gsplat_core::glam`).
+glam = "0.33"
 wgpu.workspace = true
-# Published Rerun 0.38.1 crates from crates.io — reproducible from a clean
-# checkout on any machine. Rerun 0.38 uses egui/eframe 0.36, so the headless
+# Published Rerun 0.42.0 crates from crates.io — reproducible from a clean
+# checkout on any machine. Rerun 0.42 uses egui/eframe 0.37, so the headless
 # kittest harness must stay on the same egui family as re_viewer.
-egui_kittest = { version = "0.36.2", features = ["wgpu", "eframe"] }
+egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }
 # `half::f16` decode for the `SphericalHarmonics3` wire component (viewer only).
 # `bytemuck` feature makes `f16: Pod` so `[f16; 45]` slices out of Arrow.
 half = { workspace = true, features = ["bytemuck"] }
-re_byte_size = { version = "=0.38.1" }
-re_crash_handler = { version = "=0.38.1" }
-re_grpc_server = { version = "=0.38.1" }
-re_viewer = { version = "=0.38.1" }
+re_build_info = "=0.42.0"
+re_byte_size = { version = "=0.42.0" }
+re_crash_handler = { version = "=0.42.0" }
+re_grpc_server = { version = "=0.42.0" }
+re_viewer = { version = "=0.42.0" }
 tokio = { workspace = true }
-re_tracing = "=0.38.1"
-re_format = "=0.38.1"
-macaw = "0.30"
+re_tracing = "=0.42.0"
+re_format = "=0.42.0"
+re_math = "0.33"
 ahash = "0.8"
 
 [lints]

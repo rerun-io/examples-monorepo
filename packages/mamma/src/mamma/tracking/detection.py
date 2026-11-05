@@ -75,12 +75,15 @@ class PersonDetector:
     def detect(self, rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> PersonDetections:
         """Detect persons in one RGB CHW frame (GPU tensor ok; copies to CPU)."""
         rgb_hwc: UInt8[ndarray, "h w 3"] = rgb_chw.permute(1, 2, 0).contiguous().cpu().numpy()
-        # ultralytics expects BGR numpy for array inputs.
-        results = self.model(rgb_hwc[:, :, ::-1], verbose=False)
+        from ultralytics.engine.results import Results
+
+        # ultralytics expects BGR numpy for array inputs; one image gives one Results.
+        (result,) = self.model(rgb_hwc[:, :, ::-1], verbose=False)
+        assert isinstance(result, Results) and result.boxes is not None, "YOLO detection returns boxes"
 
         boxes_list: list[Float32[ndarray, "4"]] = []
         scores_list: list[float] = []
-        for box in results[0].boxes:
+        for box in result.boxes:
             if int(box.cls) != 0 or float(box.conf) < self.confidence:
                 continue
             boxes_list.append(box.xyxy[0].cpu().numpy().astype(np.float32))

@@ -13,7 +13,7 @@ The Cargo workspace has four crates:
 
 The Brush observer patch changes no training or renderer math.
 
-Rerun is pinned to 0.38.1, Burn to `faec3983`, CubeCL to `46752244`, and wgpu to
+Rerun is pinned to 0.42.0, Burn to `faec3983`, CubeCL to `46752244`, and wgpu to
 registry 30.0.0. Rerun's wasm-bindgen pin prevents use of Brush's wgpu 30.0.1 fork.
 The native path is tested; a web build still needs compatible bindings and
 WebGPU subgroup support. Kernels stay within WebGPU workgroup, storage-buffer,
@@ -84,7 +84,7 @@ rule). The PickingLayer and OutlineMask draws are a full-view quad placed throug
 view space (`projection_from_view`, `tan_half_fov`), so it covers the same view
 pixels in the main pass and in the picking pass, whose projection is cropped to
 its rectangle; both write the composite's depth. Hover and selection therefore
-name one hexel or splat row, as stock `GaussianSplats3D` does. The public 0.38.1 view state supplies `last_eye`, which can lag
+name one hexel or splat row, as stock `GaussianSplats3D` does. The public 0.42.0 view state supplies `last_eye`, which can lag
 one UI frame. Upstream integration needs the current full pose, projection, and
 pixel resolution in `DrawableCollectionViewInfo`; camera position alone cannot
 replace those fields.

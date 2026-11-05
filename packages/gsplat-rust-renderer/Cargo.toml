@@ -28,7 +28,7 @@ brush-train = { path = "target/brush-src/crates/brush-train" }
 brush-dataset = { path = "target/brush-src/crates/brush-dataset" }
 
 # Burn and CubeCL are pinned to Brush revisions in Cargo.lock.
-# Rerun 0.38.1 pins wasm-bindgen =0.2.126, requiring registry wgpu 30.0.0.
+# Rerun 0.42.0 pins wasm-bindgen =0.2.129 (0.38.1: =0.2.126); registry wgpu 30.0.0 still resolves with it.
 # Match Brush: thin LTO; codegen-units keeps Cargo's release default (16).
 # Lint policy copied from Rerun main (Cargo.toml `[workspace.lints.*]`, rerun-io/rerun@151102d); see also clippy.toml.
 [workspace.lints.rust]

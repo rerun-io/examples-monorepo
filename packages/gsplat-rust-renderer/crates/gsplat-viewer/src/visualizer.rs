@@ -1,7 +1,6 @@
 //! Native archetype queries, memoized uploads, instance transforms and blueprint properties.
 use crate::cache::{BatchKey, GpuCache, Primitives};
 use crate::renderer::GaussianRenderer;
-use glam::UVec2;
 use gsplat_core::{Camera, RenderMode, RenderOptions, native::NativeSplats};
 use half::f16;
 use re_sdk_types::{Archetype as _, Component as _, archetypes::GaussianSplats3D};
@@ -291,7 +290,7 @@ pub(crate) fn draw_instances(
         };
         let options = RenderOptions {
             render_mode,
-            world_from_local,
+            world_from_local: to_core(world_from_local),
             ..Default::default()
         };
         let prepared = ctx
@@ -428,17 +427,22 @@ pub fn camera_from_view(ctx: &ViewContext<'_>, query: &ViewQuery<'_>) -> Option<
     if !rect.is_positive() {
         return None;
     }
-    let size = UVec2::from_array(
+    let size = gsplat_core::glam::UVec2::from_array(
         re_viewer_context::gpu_bridge::viewport_resolution_in_pixels(
             rect,
             ctx.egui_ctx().pixels_per_point(),
         ),
     );
     Some(Camera::from_view(
-        glam::Affine3A::from_mat4(eye.world_from_rub_view.to_mat4()),
+        to_core(glam::Affine3A::from_mat4(eye.world_from_rub_view.to_mat4())),
         f64::from(fov_y),
         size,
     ))
+}
+
+/// Rerun's glam 0.33 transform as gsplat-core's (Brush's) glam 0.30 one.
+fn to_core(transform: glam::Affine3A) -> gsplat_core::glam::Affine3A {
+    gsplat_core::glam::Affine3A::from_cols_array(&transform.to_cols_array())
 }
 
 // Used only for blueprint-valued components, whose source row ids Rerun deliberately clears.
