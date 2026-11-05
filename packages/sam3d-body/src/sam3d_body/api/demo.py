@@ -10,7 +10,7 @@ import cv2
 import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, UInt8
-from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, get_metric_predictor
+from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, MoGeV2MetricPredictor
 from numpy import ndarray
 from sam3.api.predictor import SAM3Config, SAM3Predictor, SAM3Results
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -42,7 +42,7 @@ class SAM3DBodyE2E:
 
     def __init__(self, config: SAM3DBodyE2EConfig):
         self.sam3_predictor = SAM3Predictor(config.sam3_config)
-        self.intrinsics_predictor: BaseMetricPredictor = get_metric_predictor(config.intrinsics_estimator)(device="cuda")
+        self.intrinsics_predictor: BaseMetricPredictor = MoGeV2MetricPredictor(device="cuda")  # the only allowed intrinsics_estimator
         load_output: tuple[SAM3DBody, CfgNode] = load_sam_3d_body_hf(repo_id="facebook/sam-3d-body-dinov3")
         model: SAM3DBody = load_output[0]
         self.sam3d_body_estimator = SAM3DBodyEstimator(
