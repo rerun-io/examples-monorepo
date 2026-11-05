@@ -1,0 +1,43 @@
+# SAM 3D Body inference source (facebookresearch/sam-3d-body @ b5c765a), installed under its upstream
+# import name `sam_3d_body`. posekit owns the estimator API it uses (FinalPosePrediction, the RGB/xyxy/K
+# process_one_image) and the Rerun MHR70 helpers; upstream's estimator and visualisation modules ship unused.
+package:
+  name: sam-3d-body-src
+  version: "1.0.0.b5c765a"
+
+source:
+  url: https://github.com/facebookresearch/sam-3d-body/archive/b5c765a0d89d789985e186d396315e7590887b94.tar.gz
+  sha256: 71199eafd6c00598a57995af593778a5849f727a8d21dacecb3b563bea6e67b5
+  patches:
+    - patches/0001-drop-pytorch-lightning.patch      # BaseModel is an nn.Module; logger and checkpoint lose their Lightning hooks
+    - patches/0002-dinov3-from-pinned-package.patch  # hub factory from dinov3-src, not torch.hub on unpinned GitHub main
+    - patches/0003-prepare-batch-float-masks.patch   # float32 masks before warpAffine; a dropped detection raises
+
+build:
+  number: 0
+  noarch: python
+  script:
+    # pixi-build reuses the host prefix between rebuilds: clear the target or cp nests a second copy.
+    - rm -rf "$SP_DIR/sam_3d_body"
+    - mkdir -p "$SP_DIR"
+    - cp -r sam_3d_body "$SP_DIR/sam_3d_body"
+    # The Lightning training base class; after 0001 nothing imports it. (backbones/vit.py imports timm and
+    # flash-attn only when a ViT backbone is built; the DINOv3 checkpoint never builds one.)
+    - rm "$SP_DIR/sam_3d_body/models/meta_arch/base_lightning_module.py"
+    - test -z "$(grep -rn pytorch_lightning "$SP_DIR/sam_3d_body")"
+
+requirements:
+  host:
+    - python 3.12.*
+  # Run deps follow the mast3r/asmk convention: python (+ sibling source packages) only.
+  # Import-time needs (supplied by posekit-sam3d-body + cuda + common): torch, torchvision, numpy,
+  # py-opencv, pillow, einops, yacs, omegaconf, roma (PyPI), braceexpand (new: add to posekit-sam3d-body).
+  run:
+    - python >=3.12
+    - dinov3-src
+
+about:
+  homepage: https://github.com/facebookresearch/sam-3d-body
+  license: LicenseRef-SAM-License
+  license_file: LICENSE
+  summary: SAM 3D Body inference source (b5c765a) as sam_3d_body

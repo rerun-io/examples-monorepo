@@ -1,0 +1,17 @@
+--- a/sam_3d_body/models/backbones/dinov3.py
++++ b/sam_3d_body/models/backbones/dinov3.py
+@@ -12,10 +12,10 @@
+         self.name = name
+         self.cfg = cfg
+ 
+-        self.encoder = torch.hub.load(
+-            "facebookresearch/dinov3",
+-            self.name,
+-            source="github",
++        # The hub factory torch.hub ran, from the pinned dinov3-src package (no network).
++        from dinov3.hub import backbones as dinov3_backbones
++
++        self.encoder = getattr(dinov3_backbones, self.name)(
+             pretrained=False,
+             drop_path=self.cfg.MODEL.BACKBONE.DROP_PATH_RATE,
+         )

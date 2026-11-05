@@ -38146,6 +38146,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/bleach-6.4.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/bleach-with-css-6.4.0-hac0b51c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/blinker-1.9.0-pyhff2d567_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/braceexpand-0.1.7-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/cached-property-2.0.1-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/cached_property-2.0.1-pyhcf101f3_0.conda
@@ -38314,6 +38315,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
+      - conda_source: sam-3d-body-src[35be45f8] @ recipes/sam-3d-body-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -38796,6 +38798,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/bleach-6.4.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/bleach-with-css-6.4.0-hac0b51c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/blinker-1.9.0-pyhff2d567_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/braceexpand-0.1.7-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/cached-property-2.0.1-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/cached_property-2.0.1-pyhcf101f3_0.conda
@@ -38969,6 +38972,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
+      - conda_source: sam-3d-body-src[35be45f8] @ recipes/sam-3d-body-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -125365,6 +125369,18 @@ packages:
   run_exports: {}
   size: 13934
   timestamp: 1731096548765
+- conda: https://prefix.dev/conda-forge/noarch/braceexpand-0.1.7-pyhd8ed1ab_1.conda
+  sha256: bd3700e9e7b09705c43b46d5fbced8513d7c0f02677cb7563b19309cfde0131b
+  md5: b2058c73b1e62531fd98b55faadedd06
+  depends:
+  - python >=3.9
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/braceexpand?source=hash-mapping
+  run_exports: {}
+  size: 11017
+  timestamp: 1735227494499
 - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
   sha256: 95619b9c1184be7175392eeb0ee7eeb5ccf25d280951f4225f2d62e725790be3
   md5: 3fd02989038a1e1cee627c14c2d73f29
@@ -143123,6 +143139,37 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/setuptools-84.2.1-pyhe730653_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
+- conda_source: sam-3d-body-src[35be45f8] @ recipes/sam-3d-body-src
+  variants:
+    target_platform: noarch
+  depends:
+  - dinov3-src
+  - python *
+  - python >=3.12
+  license: LicenseRef-SAM-License
+  host_packages:
+  - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/ld_impl_linux-64-2.46.1-default_hbd61a6d_103.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libexpat-2.9.0-hd2095e1_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libffi-3.7.0-h81df57d_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libnsl-2.0.1-hb9d3cd8_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libpython-3.12.16-ha57cdbe_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libsqlite-3.54.1-h0737f62_101.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libuuid-2.42.4-hcfc3c73_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libxcrypt-4.4.38-h280c20c_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_3.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/python-3.12.16-h5f976f7_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/readline-8.3-hd6e31c0_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
+  - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
+  - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
 - conda_source: simple-knn[7a2a25ee] @ recipes/hexels-src
   variants:
     target_platform: linux-64
