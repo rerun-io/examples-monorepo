@@ -10,8 +10,8 @@ from jaxtyping import Bool, Float, Int, UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from wilor_nano.torch_image_patch import generate_rgb_image_patches_torch
-from wilor_nano.utils import utils
+from posekit.models.wilor_net import geometry as utils
+from posekit.models.wilor_net.patches import generate_rgb_image_patches_torch
 
 TORCH_UINT8: torch.dtype = torch.__dict__["uint8"]
 

@@ -81,10 +81,10 @@ def gen_trans_from_patch_cv(
 
 def generate_image_patch_cv2(
     img: ndarray,
-    c_x: int | float,
-    c_y: int | float,
-    bb_width: int | float,
-    bb_height: int | float,
+    c_x: int | float | np.floating,
+    c_y: int | float | np.floating,
+    bb_width: int | float | np.floating,
+    bb_height: int | float | np.floating,
     patch_width: int | float,
     patch_height: int | float,
     do_flip: bool,
@@ -97,10 +97,11 @@ def generate_image_patch_cv2(
     Crop the input image and return the crop and the corresponding transformation matrix.
     Args:
         img (ndarray): Input image of shape (H, W, 3)
-        c_x (int | float): Bounding box center x coordinate in the original image.
-        c_y (int | float): Bounding box center y coordinate in the original image.
-        bb_width (int | float): Bounding box width.
-        bb_height (int | float): Bounding box height.
+        c_x (int | float | np.floating): Bounding box center x coordinate in the original image. A float32
+            centre keeps the flip ``img_width - c_x - 1`` in float32, as the reference crops do.
+        c_y (int | float | np.floating): Bounding box center y coordinate in the original image.
+        bb_width (int | float | np.floating): Bounding box width.
+        bb_height (int | float | np.floating): Bounding box height.
         patch_width (int | float): Output box width.
         patch_height (int | float): Output box height.
         do_flip (bool): Whether to flip image or not.

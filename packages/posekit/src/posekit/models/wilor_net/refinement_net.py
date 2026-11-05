@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 
-from .vit import rot6d_to_rotmat
+from posekit.models.wilor_net.vit import rot6d_to_rotmat
 
 
 class RefineNetOutput(TypedDict):

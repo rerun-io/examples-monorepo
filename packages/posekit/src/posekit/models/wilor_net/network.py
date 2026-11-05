@@ -14,8 +14,8 @@ from jaxtyping import Float
 from simplecv.ops.mano.mano_torch import ManoSimpleLayer
 from torch import Tensor, nn
 
-from wilor_nano.models.refinement_net import RefineNet, RefineNetOutput
-from wilor_nano.models.vit import ViTManoFeats, ViTManoParams, vit
+from posekit.models.wilor_net.refinement_net import RefineNet, RefineNetOutput
+from posekit.models.wilor_net.vit import ViTManoFeats, ViTManoParams, vit
 
 ManoOutput = tuple[Float[Tensor, "b n_verts=778 3"], Float[Tensor, "b joints_and_tips=21 3"]]
 

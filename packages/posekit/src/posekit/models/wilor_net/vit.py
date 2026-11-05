@@ -30,7 +30,7 @@ import torch.linalg as torch_linalg
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
-from timm.models.layers import drop_path, to_2tuple, trunc_normal_
+from timm.layers import drop_path, to_2tuple, trunc_normal_
 from torch import Tensor
 
 
