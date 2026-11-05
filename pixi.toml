@@ -600,6 +600,9 @@ platforms = ["linux-64", "linux-aarch64"]
 # simplecv's SegmentNvdecDecoder decodes catalog video packets on NVDEC. The rerun dataloader extra comes from rerun-prerelease.
 av = ">=18"
 torchcodec = "*"
+# conda-forge anyio 4.15.0 declares typing_extensions >=4.5 but imports typing_extensions.sentinel (4.16),
+# which the workspace's <4.16 cap excludes; gradio's fastapi then fails at import.
+anyio = "<4.15"
 
 [feature.monoprior-catalog.tasks.monoprior-stereo-catalog]
 cmd = "python tools/apps/stereo_catalog.py"
@@ -3739,14 +3742,14 @@ monoprior-dev = { features = [
     "dev",
 ], solve-group = "monoprior", no-default-feature = true }
 monoprior-catalog = { features = [
-    "catalog-common",
+    "common",
     "rerun-prerelease",
     "cuda",
     "monoprior",
     "monoprior-catalog",
 ], solve-group = "monoprior-catalog", no-default-feature = true }
 monoprior-catalog-dev = { features = [
-    "catalog-common",
+    "common",
     "rerun-prerelease",
     "cuda",
     "monoprior",
