@@ -36,7 +36,7 @@ burn.workspace = true
 half.workspace = true
 re_renderer = "=0.42.0"
 re_sdk_types = "=0.42.0"
-rerun = { version = "=0.42.0", default-features = false, features = ["sdk", "glam"] }
+rerun = { version = "=0.42.0", default-features = false, features = ["sdk"] }
 re_types_core = "=0.42.0"
 re_log_encoding = { version = "=0.42.0", features = ["decoder"] }
 re_log_types = "=0.42.0"

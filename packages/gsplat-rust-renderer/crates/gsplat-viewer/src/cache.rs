@@ -286,10 +286,13 @@ impl GpuCache {
             Entry::Occupied(entry) => entry.into_mut(),
         };
         shared.last_frame = frame;
+        // RenderOptions carries gsplat-core's glam 0.30; the bounds are Rerun's glam 0.33.
+        let world_from_local =
+            glam::Affine3A::from_cols_array(&options.world_from_local.to_cols_array());
         let bounds = shared
             .bounds
             .region_of_interest
-            .transform_affine3(&crate::visualizer::from_core(options.world_from_local));
+            .transform_affine3(&world_from_local);
         record_bounds(&mut self.bounds, frame, key.view_id, bounds);
         let entry = match self.views.entry(key) {
             Entry::Vacant(entry) => entry.insert(CachedView {
