@@ -93,10 +93,13 @@ def write_calibration(path: Path, calibration: EgoHandCalibration) -> None:
     write_calibration_rrd(path, CalibrationRecording(properties, tables))
 
 
-def calibrated_backbone_path(base: Path, calibration: EgoHandCalibration) -> Path:
+def calibrated_backbone_path(base: Path, calibration: EgoHandCalibration, *, fp8_tail_blocks: int = 0) -> Path:
     """Name the exported backbone by its calibration contents, including the held-out split."""
+    if not 0 <= fp8_tail_blocks <= 32:
+        raise ValueError("fp8_tail_blocks must be between 0 and 32.")
     digest: str = hashlib.sha256(to_json(calibration).encode()).hexdigest()[:16]
-    return base.with_stem(f"{base.stem}-{digest}")
+    precision: str = f"-fp8tail{fp8_tail_blocks}" if fp8_tail_blocks else ""
+    return base.with_stem(f"{base.stem}-{digest}{precision}")
 
 
 @torch.inference_mode()

@@ -260,6 +260,8 @@ class EgoHandConfig:
     """Pinned commit of that repo."""
     nvfp4_backbone: bool = False
     """Quantize DINO linears to NVFP4 and native attention to calibrated FP8 on export."""
+    fp8_tail_blocks: int = 0
+    """Keep the final DINO blocks' linears in FP8 instead of NVFP4 (0..32)."""
     calibration: Path | None = None
     """Optional activation ranges; None uses the committed disjoint SelfCap split."""
     head_onnx: Path | None = None
@@ -301,7 +303,7 @@ def _export_backbone_once(config: EgoHandConfig, weights: Path, soma: Path, onnx
 
                 source: Path = onnx.with_name(CACHED_BACKBONE_ONNX.name)
                 _export_backbone_once(replace(config, nvfp4_backbone=False), weights, soma, source)
-                quantize_backbone(source, onnx, load_calibration(config.calibration))
+                quantize_backbone(source, onnx, load_calibration(config.calibration), fp8_tail_blocks=config.fp8_tail_blocks)
                 return
             model, _ = load_egohand_model(weights, soma)
             export_onnx(
@@ -337,7 +339,7 @@ class EgoHandPredictor(TopDownHandPose3d):
             if config.nvfp4_backbone:
                 from posekit.models.egohand_quantization import calibrated_backbone_path, load_calibration
 
-                backbone_path = calibrated_backbone_path(backbone_path, load_calibration(config.calibration))
+                backbone_path = calibrated_backbone_path(backbone_path, load_calibration(config.calibration), fp8_tail_blocks=config.fp8_tail_blocks)
             _export_backbone_once(config, weights, soma, backbone_path)
             engine = _TensorRtBackbone(create_runtime_from_onnx(backbone_path, config.backbone_backend))
         model, _ = load_egohand_model(weights, soma, backbone=engine)
@@ -552,7 +554,7 @@ def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorCon
     return (
         replace(detector, gpu_preprocessing=True, fp16_trunk=True, backend=replace(detector.backend, opt_batch_size=1, use_cuda_graph=True)),
         replace(
-            predictor, cuda_execution=True, nvfp4_backbone=True,
+            predictor, cuda_execution=True, nvfp4_backbone=True, fp8_tail_blocks=8,
             backbone_onnx=cache / CACHED_FAST_BACKBONE_ONNX.name,
             head_onnx=cache / CACHED_HEAD_ONNX.name,
             backbone_backend=replace(predictor.backbone_backend, opt_batch_size=2),

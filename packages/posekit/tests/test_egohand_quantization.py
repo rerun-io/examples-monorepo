@@ -55,3 +55,6 @@ def test_changed_calibration_cannot_reuse_an_old_backbone(tmp_path) -> None:
     original = calibrated_backbone_path(tmp_path / "backbone.onnx", calibration)
     assert original == calibrated_backbone_path(tmp_path / "backbone.onnx", load_calibration())
     assert original != calibrated_backbone_path(tmp_path / "backbone.onnx", updated)
+    assert original != calibrated_backbone_path(tmp_path / "backbone.onnx", calibration, fp8_tail_blocks=4)
+    with pytest.raises(ValueError, match="0.*32"):
+        calibrated_backbone_path(tmp_path / "backbone.onnx", calibration, fp8_tail_blocks=33)

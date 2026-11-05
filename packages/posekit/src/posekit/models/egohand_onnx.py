@@ -22,8 +22,10 @@ def raw_tensor(name: str, dtype: int, dims: list[int], data: torch.Tensor) -> on
     return helper.make_tensor(name, dtype, dims, vals=data.contiguous().cpu().view(torch.uint8).numpy().tobytes(), raw=True)
 
 
-def quantize_backbone(input_path: Path, output_path: Path, calibration: EgoHandCalibration) -> None:
+def quantize_backbone(input_path: Path, output_path: Path, calibration: EgoHandCalibration, *, fp8_tail_blocks: int = 0) -> None:
     """Quantize the released 160 linears and 32 native attention blocks."""
+    if not 0 <= fp8_tail_blocks <= 32:
+        raise ValueError("fp8_tail_blocks must be between 0 and 32.")
     cal: dict[str, float] = calibration.input_amax
     m: onnx.ModelProto = onnx.load(str(input_path))
     g: onnx.GraphProto = m.graph
@@ -58,6 +60,34 @@ def quantize_backbone(input_path: Path, output_path: Path, calibration: EgoHandC
         k: int = w.shape[1]
         x = node.input[0]
         amax: float = cal[mod] * 2.0
+        block: int = int(mod.split(".")[2])
+        if block >= 32 - fp8_tail_blocks:
+            # Per-output-channel weight scales retain accuracy near the final
+            # representation consumed by the metric camera and shape heads.
+            weight_scale: torch.Tensor = (w.abs().amax(-1) / 448.0).clamp_min(1e-12).to(torch.bfloat16)
+            weight_fp8: torch.Tensor = (w / weight_scale.float()[:, None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            new_inits.extend([
+                raw_tensor(f"{mod}.w_fp8", TensorProto.FLOAT8E4M3FN, [n_out, k], weight_fp8),
+                raw_tensor(f"{mod}.w_s8", BF16, [n_out], weight_scale),
+            ])
+            ins.append(helper.make_node("DequantizeLinear", [f"{mod}.w_fp8", f"{mod}.w_s8"], [f"{mod}.w_dq"], axis=0))
+            key = (x, "fp8")
+            if key not in act_q:
+                scale_name: str = f"{mod}.a_s8"
+                zero_name: str = f"{mod}.a_zp8"
+                new_inits.extend([
+                    bf16_scalar(scale_name, amax / 448.0),
+                    raw_tensor(zero_name, TensorProto.FLOAT8E4M3FN, [], torch.zeros((), dtype=torch.float8_e4m3fn)),
+                ])
+                ins.extend([
+                    helper.make_node("QuantizeLinear", [x, scale_name, zero_name], [f"{mod}.a_q8"], saturate=1),
+                    helper.make_node("DequantizeLinear", [f"{mod}.a_q8", scale_name], [f"{mod}.a_dq8"]),
+                ])
+                act_q[key] = f"{mod}.a_dq8"
+            ins.append(helper.make_node("Transpose", [f"{mod}.w_dq"], [f"{mod}.w_t"], perm=[1, 0]))
+            node.input[0], node.input[1] = act_q[key], f"{mod}.w_t"
+            new_nodes_before[idx] = ins
+            continue
         s2: float = bf16_round_up(w.abs().amax().item() / (6.0 * 256.0))
         quantized: tuple[torch.Tensor, torch.Tensor, torch.Tensor] = quant_nvfp4_mse(w, tensor_div=1.0 / s2 * w.abs().amax().item())
         wq: torch.Tensor = quantized[0]
@@ -119,8 +149,9 @@ def quantize_backbone(input_path: Path, output_path: Path, calibration: EgoHandC
             node.input[j] = f"{name}.a_dq8"
         attention_index += 1
     fp4_weights: int = sum(tensor.data_type == TensorProto.FLOAT4E2M1 for tensor in new_inits)
-    if fp4_weights != 160:
-        raise ValueError(f"Expected 160 backbone FP4 weights, got {fp4_weights}.")
+    expected_fp4: int = 160 - 5 * fp8_tail_blocks
+    if fp4_weights != expected_fp4:
+        raise ValueError(f"Expected {expected_fp4} backbone FP4 weights, got {fp4_weights}.")
     if attention_index != 32:
         raise ValueError(f"Expected 32 native Attention ops, got {attention_index}.")
     nodes: list[onnx.NodeProto] = []
