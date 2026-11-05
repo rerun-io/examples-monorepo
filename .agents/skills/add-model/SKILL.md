@@ -39,7 +39,7 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
   `cam_1i` (`log_rig_static`, never children of `cam_0i`); TSDF runs on the twins. (b) No per-frame `Points3D` clouds in catalog
   tools (X-Lens: 60 s at 5 fps = 3.4 GB); the viewer unprojects the twin's depth. (c) Per-id entities (`world/people/<id>/…`)
   persist as latest-at after a track ends → `rr.Clear(recursive=True)` at the id path when the tracker removes it. (d) People
-  render like `sam3d-body`: `posekit.rerun_logging` helpers + `person_color(id)` for 2D, joints as
+  render like posekit's body apps (`posekit.body_rerun`): `posekit.rerun_logging` helpers + `person_color(id)` for 2D, joints as
   `rr.Points3D(keypoint_ids=…, class_ids=0)` under an `rr.AnnotationContext` with the skeleton's connections (the viewer draws
   the edges), meshes as `rr.Mesh3D(vertex_normals=…, albedo_factor=(r, g, b, 0.5))`. (e) Sensors that are out of distribution
   for every model (robocap `cam_02/03` eye cameras look at the wearer) are excluded from all runs; name the rig's cameras.

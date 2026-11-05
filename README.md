@@ -83,14 +83,13 @@ removes that worktree and its `.pixi` directory automatically.
 | [mast3r-slam](packages/mast3r-slam/) | Dense visual SLAM built on MASt3R reconstruction priors. |
 | [monoprior](packages/monoprior/) | Monocular relative depth, metric depth, surface-normal, and calibration tools. |
 | [mv-api](packages/mv-api/) | Full egocentric/exocentric multiview processing for raw HOCap datasets. |
-| [posekit](packages/posekit/) | One model API for human perception networks (detect, pose, segment, re-ID) over torch/onnx/tensorrt backends. |
+| [posekit](packages/posekit/) | One model API for human perception networks (detect, pose, segment, re-ID, 3D hands and whole-body 3D with SAM 3D Body) over torch/onnx/tensorrt backends. |
 | [prompt-da](packages/prompt-da/) | Prompt Depth Anything depth completion for Polycam captures and ARKitScenes catalog segments. |
 | [pysfm](packages/pysfm/) | COLMAP/pycolmap structure-from-motion with Rerun visualization. |
 | [pyvrs-viewer](packages/pyvrs-viewer/) | VRS-to-Rerun conversion with compressed video and sensor streams. |
 | [robocap-slam](packages/robocap-slam/) | Multicamera visual odometry and SLAM using NVIDIA cuVSLAM. |
 | [sam2-streaming](packages/sam2-streaming/) | Vendored, inference-only SAM2 fork with frame streaming and bounded-memory banks. |
 | [sam3](packages/sam3/) | Text-conditioned SAM3 image and video segmentation with Rerun. |
-| [sam3d-body](packages/sam3d-body/) | Promptable SAM3D Body reconstruction and visualization playground. |
 | [simplecv](packages/simplecv/) | Shared Python utilities for datasets, geometry, video, and Rerun logging. |
 | [slam-evals](packages/slam-evals/) | VSLAM benchmark ingestion and browsing through a Rerun catalog. |
 | [vistadream](packages/vistadream/) | Single-image 3D reconstruction and Gaussian-scene tooling. |

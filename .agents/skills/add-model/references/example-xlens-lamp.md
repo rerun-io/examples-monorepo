@@ -28,14 +28,14 @@ fork (bumped 1.5.0 → 1.9.x for transformers 5). PR stack #196 → #197 → #20
   `cv2.fisheye.undistortPoints`, window 1152–1272 s chosen by a 1 Hz detection scan): 163–170 ms per frameset (detector 38 / pose 28 / tracker 53 / lifter 20), 20 tracks in 30 s, 32 in 120 s; 30 s = 334 MB, 120 s = 1.06 GB with per-frame normals + half-res previews (2.2 GB before).
 - Equivalence: vendored-vs-pristine lifter bit-identical (16 cases); real-fixture seam (lifter I/O + isolated smoothing window)
   bit-identical / 1e-4 m; full-history smoothing off by ≤0.088 m because the fixture lacks merge events (documented limit).
-- Rendering (user request, mirrors `sam3d-body`): posekit `log_person_bbox`/`log_person_points2d` + `person_color` keyed by track id, joints `Points3D(keypoint_ids, class_ids)` under an SMPL-24 `AnnotationContext`, `Mesh3D` with `compute_vertex_normals` + alpha 0.5, `LivePeopleLogger` clears ended tracks, 960×540 previews under `pinhole/preview/` (excluded from the 3D view: a half-res image on the full-res Pinhole plane covers a quarter).
+- Rendering (user request, mirrors the SAM 3D Body apps, now `posekit.body_rerun`): posekit `log_person_bbox`/`log_person_points2d` + `person_color` keyed by track id, joints `Points3D(keypoint_ids, class_ids)` under an SMPL-24 `AnnotationContext`, `Mesh3D` with `compute_vertex_normals` + alpha 0.5, `LivePeopleLogger` clears ended tracks, 960×540 previews under `pinhole/preview/` (excluded from the 3D view: a half-res image on the full-res Pinhole plane covers a quarter).
 - Gotchas: SMPL ≠ SMPL-X (Hub mirror + chumpy `find_class` shim, private hosting); the port invented a fixture contract before
   the fork produced the real one → the fork owns the layout; ended tracks persist in Rerun without `rr.Clear`; people render
-  like sam3d-body (translucent meshes, annotated joints); `requests` needed explicitly in the isolated catalog lane; measure
+  like the SAM 3D Body apps (translucent meshes, annotated joints); `requests` needed explicitly in the isolated catalog lane; measure
   performance outside the beartype dev env.
 
 ## What the runs changed in this skill
 
-Rerun geometry rules (fisheye twins, Clear on track end, no per-frame clouds, sam3d-body people, OOD sensors), non-stereo
+Rerun geometry rules (fisheye twins, Clear on track end, no per-frame clouds, SAM 3D Body people, OOD sensors), non-stereo
 numbers incl. scale-aligned depth metrics and replay fixtures owned by the fork, the follow-up-by-resume pattern, the
 new-package lane, one-member tyro unions, beartype-forced vendored annotation fixes, verbatim ports of frame-convention helpers.

@@ -978,82 +978,6 @@ cwd = "packages/mv-api"
 description = "Register existing prediction RRD layers into a running catalog on macOS (needs a running catalog: simplecv-catalog-serve + simplecv-catalog-register)"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# sam3d-body-rerun
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.sam3d-body]
-platforms = ["linux-64"]
-
-[feature.sam3d-body.dependencies]
-python = "3.12.*"
-tomlkit = "==0.12.0"
-audioop-lts = "*"
-pydub = "*"
-open3d = ">=0.19.0,<0.20"
-h5py = ">=3.11"
-torchcodec = "*"
-fsspec = ">=2025.3,<=2026.2.0"
-
-[feature.sam3d-body.pypi-dependencies]
-sam3d_body = { path = "packages/sam3d-body", editable = true }
-monopriors = { path = "packages/monoprior", editable = true }
-sam3 = { path = "packages/sam3", editable = true }
-timm = ">=0.9"
-natsort = ">=8.4"
-datasets = ">=2.20"
-kernels = ">=0.11.3"
-
-[feature.sam3d-body.activation.env]
-PACKAGE_DIR = "packages/sam3d-body"
-PYREFLY_TARGET = "src/sam3d_body/api src/sam3d_body/gradio_ui src/sam3d_body/ops src/sam3d_body/build_models.py src/sam3d_body/sam_3d_body_estimator.py src/sam3d_body/metadata src/sam3d_body/__init__.py"
-
-[feature.sam3d-body.tasks.sam3d-body-app]
-cmd = "python tool/gradio_sam3d_body.py"
-cwd = "packages/sam3d-body"
-description = "Launch SAM3D Gradio app"
-
-[feature.sam3d-body.tasks.sam3d-body-cli]
-cmd = "python tool/demo.py --image-folder data/example-data"
-cwd = "packages/sam3d-body"
-description = "Run SAM3D CLI demo"
-
-[feature.sam3d-body.tasks.sam3d-body-download-hocap-sample]
-cmd = """
-test -d data/sample || \
-(hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data && \
-unzip -o data/sample.zip -d data && \
-rm data/sample.zip)
-"""
-cwd = "packages/sam3d-body"
-outputs = ["packages/sam3d-body/data/sample/"]
-description = "Download HoCap sample data from HuggingFace"
-
-[feature.sam3d-body.tasks.sam3d-body-mv-video-demo]
-cmd = """
-python tool/demo_mv_video.py \
-    --max-frames 100 \
-    hocap \
-    --root-directory data/sample \
-    --subject-id 8 \
-    --sequence-name 20231024_180733
-"""
-cwd = "packages/sam3d-body"
-depends-on = ["sam3d-body-download-hocap-sample"]
-description = "Run multiview video SAM3 segmentation demo with TSDF fusion"
-
-[feature.sam3d-body.tasks.sam3d-body-mv-body-demo]
-cmd = """
-python tool/demo_mv_body.py \
-    --max-frames 50 \
-    hocap \
-    --root-directory data/sample \
-    --subject-id 8 \
-    --sequence-name 20231024_180733
-"""
-cwd = "packages/sam3d-body"
-depends-on = ["sam3d-body-download-hocap-sample"]
-description = "Multiview 3D body mesh fitting with per-camera estimation"
-
-# ═══════════════════════════════════════════════════════════════════════════
 # sam3-rerun
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.sam3]
@@ -1232,7 +1156,6 @@ cmd = "python tools/demos/body3d_mv_video.py hocap --root-directory data/hocap/s
 cwd = "packages/posekit"
 depends-on = ["posekit-body-download-hocap-sample"]
 description = "Multiview SAM3 video segmentation with TSDF fusion on the HO-Cap sample (8 cameras, 100 frames)"
-
 
 [feature.posekit-body.tasks.posekit-body-bench]
 cmd = "python tools/apps/body_bench.py"
@@ -3756,17 +3679,6 @@ zipdepth-catalog-dev = { features = [
     "zipdepth-catalog",
     "dev",
 ], solve-group = "zipdepth-catalog", no-default-feature = true }
-sam3d-body = { features = [
-    "common",
-    "cuda",
-    "sam3d-body",
-], solve-group = "sam3d-body", no-default-feature = true }
-sam3d-body-dev = { features = [
-    "common",
-    "cuda",
-    "sam3d-body",
-    "dev",
-], solve-group = "sam3d-body", no-default-feature = true }
 sam3 = { features = [
     "common",
     "cuda",

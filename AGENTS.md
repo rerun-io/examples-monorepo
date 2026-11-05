@@ -335,7 +335,6 @@ linux-64 (pixi >= 0.83, as set by `requires-pixi`) and move back to a public rel
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
 - **gradio from PyPI, not conda** — conda's gradio package has missing transitive deps
 - **No dependency may need a build step during resolution** — `pixi lock` must never need package Python. Vendor the inference subset (as `monopriors/third_party/` does, with the upstream rev and patch list in the package `__init__` docstring), ship a prebuilt wheel, or give the package static metadata and build any CUDA extension through an explicit task.
-- **sam3d-body uses `tool/` (singular)** not `tools/` for its CLI scripts
 - **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. A shared-feature change re-solves the whole workspace; that works from any Linux host, while macOS is limited to `pixi lock --check` (see **Platforms & lockfile**).
 - **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:
   ```python

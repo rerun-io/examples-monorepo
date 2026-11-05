@@ -7,7 +7,8 @@ TensorRT**, with everything (video decode included) staying on the GPU.
 It replaces the five near-copies of bbox→crop math, heatmap/SimCC decoders,
 and hand-rolled TensorRT runners that lived in sapiens2-pose (now `posekit.models.sapiens`),
 sapiens-coco133-pose, mamma, wilor-nano (now `posekit.models.wilor`), and rtmlib's CPU path.
-EgoHand (formerly `packages/egohand`) lives here too; see [Hands](#hands-wilor-and-egohand).
+EgoHand (formerly `packages/egohand`) lives here too; see [Hands](#hands-wilor-and-egohand). So does SAM 3D Body
+(formerly `packages/sam3d-body`); see [Whole-body 3D](#whole-body-3d-sam-3d-body).
 
 ## How it fits together
 
@@ -188,6 +189,55 @@ The paper does not name its HOT3D split, device or camera, fits SOMA to MANO joi
 ground truth and runs at another image resolution; treat the comparison as a sanity
 check, not a reproduction. WiLoR has HOT3D in its training data.
 
+## Whole-body 3D (SAM 3D Body)
+
+`TopDownBodyPose3d` maps frames, person boxes (their optional `masks` act as prompts, weighted by
+`scores`) and an optional `CalibratedCamera` to `BodyPoses3d`: MHR-70 joints (`MHR_70`: body, feet, both
+21-joint hands) in image pixels and camera metres, the full 18,439-vertex MHR mesh, and the box each row
+came from. `Sam3dBodyConfig` (zoo `sam3d-body-dinov3`) fills it with Meta's SAM 3D Body; its
+`Sam3dBodyReconstruction` adds the MHR parameters, translation, focal length and the hand crops.
+`mode="full"` runs the body pass, a mirrored left-hand and a right-hand pass and merges the hands into the
+body (three DINOv3 passes per person); `mode="body"` runs the body pass alone. Without a camera the model
+assumes its default field of view. Any `PersonDetector` or the SAM3 `PromptableSegmenter` feeds it.
+
+The upstream inference source is vendored under `src/sam3d_body` (see `src/sam3d_body/VENDORED.md`); its
+DINOv3 is posekit's vendored copy. The checkpoint `facebook/sam-3d-body-dinov3` is gated: request access,
+then `hf auth login`. The model needs the `posekit-sam3d-body` feature; the apps run in `posekit-body`
+(MoGe-2 camera and depth through monopriors, Open3D).
+
+```bash
+# Images (default: the four examples) or a video; SAM3 masks + MoGe-2 camera + SAM 3D Body -> Rerun
+pixi run -e posekit-body --frozen posekit-body3d --rr-config.headless --rr-config.save /tmp/body3d.rrd
+pixi run -e posekit-body --frozen posekit-body3d --video-path assets/examples/hands_video.mp4 --max-frames 48
+
+# Gradio app with an embedded Rerun viewer, http://127.0.0.1:7871
+pixi run -e posekit-body --frozen posekit-body3d-app
+
+# Multiview demos on the HO-Cap sample (downloaded on first run, ~1.7 GB)
+pixi run -e posekit-body --frozen posekit-body3d-mv-video     # SAM3 video masks + TSDF fusion
+pixi run -e posekit-body --frozen posekit-body3d-mv-body      # per-camera bodies fused by MHR reprojection
+
+# Per-frame speed (decoded GPU frame + person box -> full output), body and full mode, per stage
+pixi run -e posekit-body --frozen posekit-body-bench
+```
+
+| `packages/sam3d-body` task (`-e sam3d-body`) | posekit task (`-e posekit-body`) |
+|---|---|
+| `sam3d-body-app` | `posekit-body3d-app` |
+| `sam3d-body-cli` | `posekit-body3d` (also `--video-path`) |
+| `sam3d-body-download-hocap-sample` | `posekit-body-download-hocap-sample` (to `data/hocap/sample`) |
+| `sam3d-body-mv-video-demo` | `posekit-body3d-mv-video` |
+| `sam3d-body-mv-body-demo` | `posekit-body3d-mv-body` |
+| (none; images were not downloadable) | `posekit-body-download-examples` |
+
+`tool/demo_mv_image.py` (no task; SAM3-only multiview segmentation of one frame) and
+`tool/new_gradio_sam3.py` (it launched `packages/sam3`'s own UI) were not moved.
+
+Goldens: `tests/test_body_golden.py` checks the role against references on the NAS
+(`posekit/goldens/sam3d-body-v1`, README there). Full-mode outputs depend on earlier calls in the
+process (a model's first full-mode call differs from later ones by up to 0.2 mm; other shapes and inputs
+move later calls by up to ~1 mm), so full-mode tolerances are a few millimetres; body mode agrees to 1e-6.
+
 ## Click-to-track app (SAM2 + Rerun)
 
 A Gradio app for single-object video segmentation: upload a clip, click the object in
@@ -238,6 +288,7 @@ Every implementation is parity-validated against its reference:
 | SAM2/EfficientTAM | `VideoSegmenter` | torch | — | stable 30-frame track, IoU ≥ 0.97 |
 | CLIP ViT-B/32 | `IdentityEncoder` | torch | PIL pipeline | cosine ≥ 0.985 |
 | MammaNet (in mamma) | `TopDownDenseLandmarks2d` | torch | mamma estimator | bitwise-equal |
+| SAM 3D Body | `TopDownBodyPose3d` | torch | pre-port package | bitwise in its env; 3x run-to-run noise here |
 
 Adoption: **mv-api**'s `MultiviewBodyTracker` runs on posekit roles (batched
 per tick, 0.3–0.6 px vs its old rtmlib path, roles injectable via
