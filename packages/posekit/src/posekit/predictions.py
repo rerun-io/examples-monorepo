@@ -6,6 +6,7 @@ Use the ``*_numpy`` helpers only at visualization/serialization boundaries.
 """
 
 from dataclasses import dataclass
+from typing import Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -13,7 +14,12 @@ from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from posekit.skeletons import KeypointSkeleton
+from posekit.skeletons import HAND_21, SOMA_HAND, KeypointSkeleton
+
+HandSide: TypeAlias = Literal["left", "right"]
+"""Anatomical handedness of a hand instance."""
+SOMA_HAND21: tuple[int, ...] = (0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24)
+"""SOMA-25 rows of HAND_21 (wrist, then thumb/index/middle/ring/little): omits the non-thumb metacarpals."""
 
 TORCH_UINT8 = torch.__dict__["uint8"]
 
@@ -210,3 +216,85 @@ class Keypoints3d:
     def num_instances(self) -> int:
         """Number of pose instances across the whole frame batch."""
         return int(self.xy.shape[0])
+
+
+@dataclass(frozen=True, slots=True)
+class HandDetections:
+    """Hand boxes paired with anatomical handedness; row ``i`` of ``boxes`` is side ``i``."""
+
+    boxes: BoxDetections
+    """Source-image boxes and batch indices."""
+    sides: tuple[HandSide, ...]
+    """Anatomical side of each box row."""
+
+    def __post_init__(self) -> None:
+        if len(self.sides) != self.boxes.num_detections:
+            raise ValueError(f"HandDetections needs one of sides per box: {len(self.sides)} sides for {self.boxes.num_detections} boxes.")
+
+    @property
+    def num_detections(self) -> int:
+        """Number of hand boxes across the whole frame batch."""
+        return self.boxes.num_detections
+
+    @classmethod
+    def empty(cls, device: torch.device | str) -> "HandDetections":
+        """Build a zero-detection result on the given device."""
+        return cls(BoxDetections.empty(device), ())
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HandPoses3d:
+    """Row-aligned 3D hands from a top-down hand model, optionally with meshes.
+
+    Models subclass this to add their parametric outputs (MANO, SOMA); every
+    consumer that needs only joints, sides and meshes reads this base.
+    """
+
+    keypoints: Keypoints3d
+    """Joints with metric ``xyz_camera`` and their source-image projection."""
+    sides: tuple[HandSide, ...]
+    """Anatomical side of each hand row."""
+    vertices: Float32[Tensor, "n v 3"] | None = None
+    """Camera-space mesh vertices in metres; ``None`` for joint-only models."""
+    faces: dict[HandSide, Int64[Tensor, "f 3"]] | None = None
+    """Mesh triangle indices per side (left and right meshes differ in winding or topology)."""
+
+    def __post_init__(self) -> None:
+        if len(self.sides) != self.keypoints.num_instances:
+            raise ValueError(f"HandPoses3d needs one of sides per hand: {len(self.sides)} sides for {self.keypoints.num_instances} hands.")
+
+    @property
+    def num_hands(self) -> int:
+        """Number of hands across the whole frame batch."""
+        return self.keypoints.num_instances
+
+    def as_hand21(self) -> "HandPoses3d":
+        """The same hands on the 21-joint HAND_21 skeleton (SOMA-25 drops its four non-thumb metacarpals).
+
+        Returns:
+            A plain ``HandPoses3d`` (model-specific parameters dropped) with HAND_21 keypoints.
+
+        Raises:
+            ValueError: If the skeleton has no HAND_21 mapping.
+        """
+        keypoints: Keypoints3d = self.keypoints
+        if keypoints.skeleton == HAND_21:
+            rows: list[int] = list(range(21))
+        elif keypoints.skeleton == SOMA_HAND:
+            rows = list(SOMA_HAND21)
+        else:
+            raise ValueError(f"No HAND_21 view of skeleton {keypoints.skeleton.name!r}.")
+        return HandPoses3d(
+            keypoints=Keypoints3d(
+                xy=keypoints.xy[:, rows],
+                z_root_relative=keypoints.z_root_relative[:, rows],
+                scores=keypoints.scores[:, rows],
+                frame_indices=keypoints.frame_indices,
+                skeleton=HAND_21,
+                root_indices=(0,),
+                xyz_camera=None if keypoints.xyz_camera is None else keypoints.xyz_camera[:, rows],
+            ),
+            sides=self.sides,
+            vertices=self.vertices,
+            faces=self.faces,
+        )
