@@ -207,7 +207,7 @@ site-package-path = [
     ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/hexels-dev/lib/python3.12/site-packages",
     ".pixi/envs/hexels-dev/lib/python3.12/site-packages/rerun_sdk",
-    # Upstream hexels/scripts are put on sys.path by a .pth file (packages/hexels-src).
+    # Upstream hexels/scripts are put on sys.path by a .pth file (recipes/hexels-src).
     ".pixi/envs/hexels-dev/share/hexels-src",
 ]
 

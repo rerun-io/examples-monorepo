@@ -1,5 +1,5 @@
 """Score fused meshes with the paper's evaluators, run unchanged as subprocesses from the patched 2DGS
-tree that `packages/hexels-src` installs: DTU Chamfer (`scripts/eval_dtu/evaluate_single_scene.py`:
+tree that `recipes/hexels-src` installs: DTU Chamfer (`scripts/eval_dtu/evaluate_single_scene.py`:
 mask culling, 0.2 mm sampling, ObsMask/plane crop, accuracy and completeness below 20 mm) and T&T
 precision/recall/F1 (`scripts/eval_tnt/run.py`: trajectory alignment, ICP, crop, tau per scene) in the
 `tnt-eval` env (Python 3.8, Open3D 0.10, upstream environment-tnt-eval.yml), through `pixi run --frozen` from

@@ -1,7 +1,7 @@
 # rattler-build recipe for asmk
 # Builds the ASMK image retrieval library with its Cython C extension
 package:
-  name: asmk
+  name: asmk-src
   version: "0.1.0"
 
 source:

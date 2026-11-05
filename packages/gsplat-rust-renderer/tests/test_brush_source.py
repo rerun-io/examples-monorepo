@@ -30,7 +30,7 @@ class Recipe:
 
 def test_brush_recipe_revision() -> None:
     """The observer patch is applied to the reviewed upstream revision."""
-    source = Path(__file__).resolve().parents[2] / "brush-src"
+    source = Path(__file__).resolve().parents[3] / "recipes" / "brush-src"
     recipe = from_yaml(Recipe, (source / "recipe.yaml").read_text())
     assert recipe.source.git == "https://github.com/ArthurBrussee/brush.git"
     assert recipe.source.rev == "1388f74c6fe0236f68ee4915564bf00e9d2e3747"
@@ -75,7 +75,7 @@ def test_installed_brush_contains_the_reversible_observer_patch(tmp_path: Path) 
         path = Path("crates/brush-process/src") / name
         (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / path).write_bytes((tree / path).read_bytes())
-    patch = root.parent / "brush-src/patches/brush-1388f74c-process-observer.patch"
+    patch = root.parent.parent / "recipes/brush-src/patches/brush-1388f74c-process-observer.patch"
     environment = dict(os.environ, GIT_CEILING_DIRECTORIES=str(tmp_path.parent))
     subprocess.run(["git", "apply", "--reverse", str(patch)], cwd=tmp_path, env=environment, check=True)
     subprocess.run(["git", "apply", "--check", str(patch)], cwd=tmp_path, env=environment, check=True)

@@ -28,7 +28,7 @@ impl Provenance {
                     .success()
                     .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             });
-        let recipe = include_str!("../../../../brush-src/recipe.yaml");
+        let recipe = include_str!("../../../../../recipes/brush-src/recipe.yaml");
         let revision = recipe
             .lines()
             .find_map(|line| line.trim().strip_prefix("rev: "))
@@ -44,7 +44,7 @@ impl Provenance {
             cargo_lock_sha256: std::fs::read(root.join("Cargo.lock"))
                 .ok()
                 .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
-            brush: format!("Brush {revision} + packages/brush-src/{patch}"),
+            brush: format!("Brush {revision} + recipes/brush-src/{patch}"),
         }
     }
 }

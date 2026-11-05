@@ -6,7 +6,7 @@
 # that also lack proper packaging. The build script clones the submodules
 # and applies patches to make everything installable as one package.
 package:
-  name: mast3r
+  name: mast3r-src
   version: "0.0.1"
 
 # NOTE: curope (CUDA RoPE2D from dust3r/croco/models/curope/) is NOT built.
