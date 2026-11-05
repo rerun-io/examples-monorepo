@@ -360,3 +360,44 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
     assert result.keypoints.xyz_camera is not None and expected.keypoints.xyz_camera is not None
     torch.testing.assert_close(result.keypoints.xyz_camera, expected.keypoints.xyz_camera.repeat(33, 1, 1), atol=0.005, rtol=0.005)
     torch.testing.assert_close(result.vertices, expected.vertices.repeat(33, 1, 1), atol=0.005, rtol=0.005)
+
+
+def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
+    """Reordered hands of one batch size replay the same graphs and return the same hands."""
+    from torchcodec.decoders import VideoDecoder
+
+    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.cameras import load_calibrated_camera
+    from posekit.models.egohand import fast_egohand_configs
+    from posekit.predictions import BoxDetections, HandDetections
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    video: Path = EXAMPLES / "selfcap_oak_left.mp4"
+    if not video.is_file():
+        pytest.skip(f"missing EgoHand parity fixture: {video}")
+    detector_config, pose_config = fast_egohand_configs()
+    frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1].repeat(2, 1, 1, 1)
+    camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
+    detector, pose = detector_config.setup(), pose_config.setup()
+    with torch.inference_mode():
+        detections = detector(frames[:1])
+        assert detections.sides == ("left", "right")
+        boxes = detections.boxes.xyxy.repeat(2, 1)
+        frame_indices = torch.tensor([0, 0, 1, 1], device="cuda")
+        results = {}
+        for order in ((0, 1, 2, 3), (1, 0, 3, 2), (0, 2, 1, 3), (3, 1, 2, 0)):
+            rows = torch.tensor(order, device="cuda")
+            hands = HandDetections(
+                BoxDetections(boxes[rows], torch.ones(4, device="cuda"), frame_indices[rows]), tuple(("left", "right")[index % 2] for index in order)
+            )
+            result = pose(frames, hands, camera)
+            assert result.sides == hands.sides
+            assert result.keypoints.xyz_camera is not None and result.vertices is not None
+            results[order] = (result.keypoints.xyz_camera[torch.argsort(rows)], result.vertices[torch.argsort(rows)])
+    for xyz, vertices in results.values():
+        torch.testing.assert_close(xyz, results[(0, 1, 2, 3)][0], atol=0.001, rtol=0.0)
+        torch.testing.assert_close(vertices, results[(0, 1, 2, 3)][1], atol=0.001, rtol=0.0)
+    assert pose.tensor_executor is not None
+    assert len(pose.tensor_executor.graphs) == 1
+    assert [len(cropper.graphs) for cropper in pose.cuda_croppers.values()] == [1]

@@ -15,7 +15,7 @@ from posekit.models.egohand_crops import normalize_crops
 from posekit.models.egohand_geometry import lens_model
 from posekit.models.egohand_lens_kernels import project_joints, remap, unproject_pixels
 from posekit.ops.compile import compile_unless_dev
-from posekit.predictions import HandDetections, HandSide
+from posekit.predictions import HandDetections
 
 
 @compile_unless_dev
@@ -69,7 +69,7 @@ class _CapturedCrops:
     frame_indices: Int64[Tensor, "n"]
     """Replay source frame indices."""
     mirrored: Bool[Tensor, "n"]
-    """Anatomical right-hand mask retained by the remap kernel."""
+    """Replay anatomical right-hand mask, read by the remap kernel."""
     output: PreparedHandCrops
     """Captured output buffers, copied before each public return."""
 
@@ -87,7 +87,8 @@ class CudaHandCropper:
         self.tilt = wp.vec4d(*np.r_[np.sin(coefficients[-2:]), np.cos(coefficients[-2:])])
         self.radius_bound = wp.float64(model._max_radius_squared if isinstance(model, _PerspectiveCamera) else np.inf)
         self.edge = torch.linspace(0.0, 1.0, 1025, device=device, dtype=torch.float64)
-        self.graphs: dict[tuple[tuple[int, ...], tuple[HandSide, ...], float], _CapturedCrops] = {}
+        self.graphs: dict[tuple[tuple[int, ...], int, float], _CapturedCrops] = {}
+        """Captured crops by frame shape, hand count and padding; the side sequence is replay input."""
         self.streams: dict[int, wp.Stream] = {}
 
     def __del__(self) -> None:
@@ -133,28 +134,30 @@ class CudaHandCropper:
 
     def prepare(self, frames: UInt8[Tensor, "b h w 3"], detections: HandDetections, padding: float) -> PreparedHandCrops:
         """Create normalized, anatomically mirrored crops without host geometry."""
-        key: tuple[tuple[int, ...], tuple[HandSide, ...], float] = (tuple(frames.shape), detections.sides, padding)
+        mirrored: Bool[Tensor, "n"] = torch.tensor([side == "right" for side in detections.sides], device=frames.device)
+        key: tuple[tuple[int, ...], int, float] = (tuple(frames.shape), len(detections.sides), padding)
         if key not in self.graphs:
             static_frames: UInt8[Tensor, "b h w 3"] = frames.clone()
             static_boxes: Float32[Tensor, "n 4"] = detections.boxes.xyxy.clone()
             static_indices: Int64[Tensor, "n"] = detections.boxes.frame_indices.clone()
-            mirrored: Bool[Tensor, "n"] = torch.tensor([side == "right" for side in detections.sides], device=frames.device)
+            static_mirrored: Bool[Tensor, "n"] = mirrored.clone()
             stream: torch.cuda.Stream = torch.cuda.Stream()
             warp_stream: wp.Stream = wp.stream_from_torch(stream)
             self.streams[stream.cuda_stream] = warp_stream
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream), wp.ScopedStream(warp_stream):
                 for _ in range(3):
-                    self._prepare(static_frames, static_boxes, static_indices, mirrored, padding)
+                    self._prepare(static_frames, static_boxes, static_indices, static_mirrored, padding)
             torch.cuda.current_stream().wait_stream(stream)
             graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
             with capture_hand_graph(graph, stream, warp_stream):
-                output: PreparedHandCrops = self._prepare(static_frames, static_boxes, static_indices, mirrored, padding)
-            self.graphs[key] = _CapturedCrops(graph, static_frames, static_boxes, static_indices, mirrored, output)
+                output: PreparedHandCrops = self._prepare(static_frames, static_boxes, static_indices, static_mirrored, padding)
+            self.graphs[key] = _CapturedCrops(graph, static_frames, static_boxes, static_indices, static_mirrored, output)
         state: _CapturedCrops = self.graphs[key]
         state.frames.copy_(frames)
         state.boxes.copy_(detections.boxes.xyxy)
         state.frame_indices.copy_(detections.boxes.frame_indices)
+        state.mirrored.copy_(mirrored)
         state.graph.replay()
         return PreparedHandCrops(state.output.images.clone(), state.output.focal.clone(), state.output.rotation.clone())
 

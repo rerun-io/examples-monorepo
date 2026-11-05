@@ -1,6 +1,6 @@
 """CUDA execution of EgoHand's released network and full SOMA hand reconstruction."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import torch
 import warp as wp
@@ -90,7 +90,8 @@ class EgoHandTensorExecutor:
         self.right_parents: Int64[Tensor, "25"] = torch.as_tensor(right.joint_parent_ids, device="cuda", dtype=torch.int64)
         self.right_orient, self.right_parent_orient = precompute_joint_orient(right.t_pose_world, right.joint_parent_ids)
         self.reflection: Float32[Tensor, "3"] = torch.tensor([-1.0, 1.0, 1.0], device="cuda")
-        self.graphs: dict[tuple[HandSide, ...], _CapturedHand] = {}
+        self.graphs: dict[tuple[int, int], _CapturedHand] = {}
+        """Captured hands by hand count and right-hand count; left hands come first in every graph."""
         self.stage_events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]] = {}
         assert predictor._model_wrist_orients is not None
         self.wrist_orientations: dict[HandSide, Float32[Tensor, "3 3"]] = {
@@ -167,14 +168,31 @@ class EgoHandTensorExecutor:
         )
 
     def _run_chunk(self, prepared: PreparedHandCrops, sides: tuple[HandSide, ...], cropper: CudaHandCropper) -> EgoHandTensors:
-        """Replay one bounded batch; retained graph buffers remain live until the executor is released."""
+        """Replay one bounded batch with its left hands first, then restore the caller's hand order.
+
+        Retained graph buffers remain live until the executor is released.
+        """
+        right_count: int = sum(side == "right" for side in sides)
+        left_first: list[int] = sorted(range(len(sides)), key=lambda index: sides[index] == "right")
+        if left_first == list(range(len(sides))):
+            return self._run_left_first(prepared, right_count, cropper)
+        order: Int64[Tensor, "n"] = torch.tensor(left_first, device=prepared.images.device)
+        reordered: PreparedHandCrops = PreparedHandCrops(prepared.images[order], prepared.focal[order], prepared.rotation[order])
+        result: EgoHandTensors = self._run_left_first(reordered, right_count, cropper)
+        restore: Int64[Tensor, "n"] = torch.argsort(order)
+        return EgoHandTensors(*(getattr(result, item.name)[restore] for item in fields(EgoHandTensors)))
+
+    def _run_left_first(self, prepared: PreparedHandCrops, right_count: int, cropper: CudaHandCropper) -> EgoHandTensors:
+        """Replay the graph for this many hands, the last ``right_count`` of them right hands."""
         crops: Float32[Tensor, "n 3 256 256"] = prepared.images
         device: torch.device = crops.device
         focal: Float32[Tensor, "n"] = prepared.focal.float()
-        if sides not in self.graphs:
+        count: int = len(crops)
+        key: tuple[int, int] = (count, right_count)
+        if key not in self.graphs:
             static_crops: Float32[Tensor, "n 3 256 256"] = crops.clone()
             static_focal: Float32[Tensor, "n"] = focal.clone()
-            right_indices: Int64[Tensor, "r"] = torch.tensor([i for i, side in enumerate(sides) if side == "right"], device=device, dtype=torch.int64)
+            right_indices: Int64[Tensor, "r"] = torch.arange(count - right_count, count, device=device, dtype=torch.int64)
             events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]] = {name: (torch.cuda.Event(enable_timing=True, external=True), torch.cuda.Event(enable_timing=True, external=True))
                       for name in ("backbone", "head", "soma")}
             stream: torch.cuda.Stream = torch.cuda.Stream()
@@ -187,9 +205,11 @@ class EgoHandTensorExecutor:
             graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
             with capture_hand_graph(graph, stream, warp_stream):
                 outputs: _VirtualHand = self._run(static_crops, static_focal, right_indices, events)
-            self.graphs[sides] = _CapturedHand(graph, static_crops, static_focal, outputs, events, right_indices,
-                                             torch.stack([self.wrist_orientations[side] for side in sides]))
-        state: _CapturedHand = self.graphs[sides]
+            wrist_orientation: Float32[Tensor, "n 3 3"] = torch.stack(
+                [self.wrist_orientations["left"]] * (count - right_count) + [self.wrist_orientations["right"]] * right_count
+            )
+            self.graphs[key] = _CapturedHand(graph, static_crops, static_focal, outputs, events, right_indices, wrist_orientation)
+        state: _CapturedHand = self.graphs[key]
         state.crops.copy_(crops)
         state.focal.copy_(focal)
         state.graph.replay()
@@ -203,11 +223,10 @@ class EgoHandTensorExecutor:
         scale: Float32[Tensor, "n"] = scales[:, 0]
         scale_parameters: Float32[Tensor, "n 26"] = scales[:, 1:]
         rotation: Float32[Tensor, "n 3 3"] = prepared.rotation.float()
-        wrist_orientation: Float32[Tensor, "n 3 3"] = state.wrist_orientation
         joints = joints @ rotation.transpose(-1, -2)
         vertices = vertices @ rotation.transpose(-1, -2)
         translation = (rotation @ translation.unsqueeze(-1)).squeeze(-1)
-        poses[:, 0] = wrist_orientation @ rotation @ wrist_orientation.transpose(-1, -2) @ poses[:, 0]
+        poses[:, 0] = state.wrist_orientation @ rotation @ state.wrist_orientation.transpose(-1, -2) @ poses[:, 0]
         joints = joints + translation[:, None]
         vertices = vertices + translation[:, None]
         pixels: Float32[Tensor, "n 25 2"] = cropper.project(joints)

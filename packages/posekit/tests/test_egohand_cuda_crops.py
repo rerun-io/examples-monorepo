@@ -47,6 +47,22 @@ def test_captured_crops_replay_new_boxes_and_keep_prior_outputs() -> None:
     assert len(cropper.graphs) == 1
 
 
+
+def test_crop_graphs_depend_on_hand_count_not_side_order() -> None:
+    """Batches with new left/right sequences replay one graph and mirror exactly the right hands."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    camera = CalibratedCamera(np.array([[200.0, 0.0, 128.0], [0.0, 200.0, 128.0], [0.0, 0.0, 1.0]]), np.empty(0), 256, 256, "PINHOLE")
+    cropper = CudaHandCropper(camera, torch.device("cuda:0"))
+    frame = torch.arange(256, device="cuda", dtype=torch.uint8)[None, None, :, None].expand(1, 256, 256, 3).contiguous()
+    boxes = torch.tensor([[50.0, 70.0, 100.0, 130.0], [140.0, 60.0, 200.0, 120.0]], device="cuda")
+    for sides in (("left", "right"), ("right", "left"), ("right", "right"), ("left", "left")):
+        detected = HandDetections(BoxDetections(boxes, torch.ones(2, device="cuda"), torch.zeros(2, device="cuda", dtype=torch.int64)), sides)
+        replayed = cropper.prepare(frame, detected, 0.2)
+        captured = CudaHandCropper(camera, torch.device("cuda:0")).prepare(frame, detected, 0.2)
+        torch.testing.assert_close(replayed.images, captured.images, rtol=0.0, atol=0.0)
+    assert len(cropper.graphs) == 1
+
 @pytest.mark.parametrize("lens", ["RATIONAL_POLYNOMIAL", "PINHOLE", "KB4", "FISHEYE624"])
 def test_cuda_inverse_and_virtual_camera_match_reference(lens: LensModel) -> None:
     if not torch.cuda.is_available():
