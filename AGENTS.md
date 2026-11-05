@@ -198,6 +198,7 @@ are checked on the way in; the rest of the code holds typed objects, never dicts
   catalog layer when the segment is on the catalog), tables in Parquet/Arrow, and
   pyserde carries only the metadata that names them. The test is the role of the data,
   not its size.
+- Data that belongs to a recording or a model (camera calibration, quantization ranges, goldens, eval outputs) lives inside a .rrd (static entities + recording properties), not in JSON sidecars.
 - **No npz/npy.** Never write them: not for outputs, caches, intermediates, test
   fixtures or frozen references. A frozen reference that a golden test needs is an
   `.rrd` in the production entity layout that holds its arrays bit-exactly. Read
