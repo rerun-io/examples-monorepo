@@ -32,8 +32,8 @@ pixi run -e mast3r-slam-dev _mast3r-slam-build-mojo-kernels
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam-dev mojo build --emit shared-lib \
-  -o mast3r_slam/_mojo_backends.so \
-  mast3r_slam/backend/mojo/matching_kernels.mojo
+  -o mast3r_slam_mojo_backends.so \
+  mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo
 ```
 
 **Test command (24 collected pytest cases from 15 test functions):**
@@ -139,39 +139,36 @@ For a 13 µs kernel (iter_proj 64x64), 8 µs overhead = 1.6x. For a 225 µs kern
 
 ### Cached DeviceContext pattern
 ```mojo
-# In PyInit_: allocate and store as Python module attribute
-var ctx_storage = alloc[DeviceContext](1)
-var cached_ctx = DeviceContext()
-ctx_storage.init_pointee_move(cached_ctx^)
+# In PyInit_: allocate, leak on purpose, and store the address as a module attribute
+var ctx_storage = alloc(Layout[DeviceContext](count=1)).unsafe_leak()
+ctx_storage.unsafe_write(DeviceContext())
 Python.add_object(module, "_ctx_addr", PythonObject(Int(ctx_storage)))
 
 # In each wrapper: retrieve via module lookup
-def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
-    var module = Python.import_module("mast3r_slam._mojo_backends")
-    var ctx_addr = Int(py=module._ctx_addr)
-    return UnsafePointer[DeviceContext, MutAnyOrigin](unsafe_from_address=ctx_addr)
+def get_cached_context_ptr() raises -> MutPointer[DeviceContext, MutUntrackedOrigin]:
+    var module = Python.import_module("mast3r_slam_mojo_backends")
+    return MutPointer[DeviceContext, MutUntrackedOrigin](unsafe_from_address=Int(py=module._ctx_addr))
 ```
 
-### UnsafePointer from PyTorch tensor
+### TileTensor view of a PyTorch tensor
 ```mojo
-var ptr_int: Int = Int(py=tensor.data_ptr())
-var ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=ptr_int)
+# python_interop.mojo: torch_tensor (kernel writes) / torch_imm_tensor (kernel only reads)
+var ptr = ImmPointer[Scalar[dtype], ImmUntrackedOrigin](unsafe_from_address=Int(py=tensor.data_ptr()))
+var view = TileTensor(ptr, row_major((batch, num_pts, Idx[3])))   # runtime dims + static Idx[N]
 ```
-- **Must use `MutAnyOrigin`** — `UnsafePointer[Float32]` alone fails to infer the `origin` parameter
-- The `unsafe_from_address` keyword is required (not `address`)
+- Kernel arguments are `ImmTileTensor[...,  ImmUntrackedOrigin]` / `MutTileTensor[..., MutUntrackedOrigin]`
+  with layout types such as `type_of(row_major((0, 0, Idx[3])))` (`0` = runtime extent).
+- Every function that subscripts a `TileTensor` needs `comptime assert t.flat_rank == N`.
+- `t[i, j]` returns `SIMD[dtype, 1]`; `[0]` extracts the scalar.
 
-### SIMD loads on GPU (NO alignment hints!)
+### SIMD loads on GPU (element alignment only)
 ```mojo
-# Float32: load 4 elements (128 bits) — NO alignment=16!
-var v = ptr.load[width=4](offset)          # SIMD[DType.float32, 4]
-var sum = (v * other_v).reduce_add()       # scalar Float32
-
 # Float16: load 8 elements (128 bits), accumulate in f32
-var v16 = ptr_f16.load[width=8](offset)    # SIMD[DType.float16, 8]
-var v32 = v16.cast[DType.float32]()        # SIMD[DType.float32, 8]
-score += (v32 * other_v32).reduce_add()
+comptime DESC_ALIGN = align_of[Float16]()
+var v16 = D11.load[width=8, alignment=DESC_ALIGN]((b, v, u, k))   # SIMD[DType.float16, 8]
+score += (v16.cast[DType.float32]() * other.cast[DType.float32]()).reduce_add()
 ```
-**WARNING**: Never use `alignment=16` with PyTorch tensor pointers. Offsets within the tensor are not guaranteed aligned. This caused `CUDA_ERROR_MISALIGNED_ADDRESS` crashes discovered by Hypothesis fuzz testing.
+**WARNING**: Never use `alignment=16` on descriptor loads from PyTorch memory. Offsets within the tensor are not guaranteed aligned. This caused `CUDA_ERROR_MISALIGNED_ADDRESS` crashes discovered by Hypothesis fuzz testing. Shared memory that the kernel allocates itself (`layout.stack_allocation[..., alignment=align_of[SIMD[DType.float16, 8]]()]`) can use the full vector alignment.
 
 ### Cross-stream synchronization (REQUIRED)
 ```mojo
@@ -208,7 +205,7 @@ Tested: BLOCK=128 made `refine_matches` **2x slower** at fdim=128 due to warp di
 The fundamental issue: Mojo's `DeviceContext` creates its own CUDA stream, separate from PyTorch's default stream. Options:
 - **Enqueue on PyTorch's stream**: If Mojo exposed an API to use an external CUDA stream handle, we could launch the kernel on PyTorch's stream directly. No sync needed.
 - **CUDA events for lightweight sync**: Insert a CUDA event on Mojo's stream after the kernel, then make PyTorch's stream wait on that event. Lighter than device-wide sync (~0.5 µs vs ~2 µs). Requires access to CUDA event APIs from Mojo.
-- **Wait for Mojo stream API**: If Mojo adds `DeviceContext(stream=pytorch_stream_handle)`, this is solved cleanly.
+- **Mojo stream API now exists**: `DeviceContext.create_external_stream(handle)` wraps PyTorch's current CUDA stream (`torch.cuda.current_stream().cuda_stream`). The lietorch-mojo package (`packages/lietorch-mojo`) launches on that stream with no device-wide sync, and its stress tests pass. Moving this backend to the same pattern is an open follow-up; it is not applied here.
 
 ### 2. Profile with nsys/ncu
 We haven't done GPU profiling yet. `nsys` would show:
@@ -258,19 +255,28 @@ The Hypothesis property-based fuzz tests (50 random examples per test, randomizi
 
 ## Mojo API Gotchas
 
-1. **No module-level `var`** — Workaround: `alloc[T](1)` + store address as Python module attribute
-2. **`UnsafePointer` needs full type**: `UnsafePointer[Float32, MutAnyOrigin]`, not `UnsafePointer[Float32]`
-3. **`unsafe_from_address=`** — Not `address=`; the keyword changed between Mojo versions
-4. **No `alignment=` on SIMD loads from PyTorch pointers** — Causes `CUDA_ERROR_MISALIGNED_ADDRESS`
-5. **`Float32` type casts**: Use `Float32(int_value)` explicitly; no implicit int→float
-6. **Kernel functions can't raise** — No `raises` keyword on GPU kernels
-7. **`comptime` not `alias`** — For compile-time constants
-8. **`def` not `fn`** — `fn` is deprecated
-9. **`min`/`max` are free functions** — `from std.math import min, max`
-10. **`SIMD.reduce_add()`** — Not `.sum()` or `.reduce[add]()`
-11. **`floor()` returns Float** — Need `Int(floor(x))` for integer index
-12. **`InlineArray` for GPU kernel return values** — Use `InlineArray[T, N](fill=default)` with `return arr^` (transfer ownership)
-13. **Cross-stream sync is mandatory** — Mojo and PyTorch use different CUDA streams; `torch.cuda.synchronize()` required before returning
+Verified on Mojo 1.2.0 + max-core 26.7.0 (2026-11-06).
+
+1. **No module-level `var`** — Workaround: `alloc(Layout[T](count=1)).unsafe_leak()` + store address as Python module attribute
+2. **GPU APIs and `layout` ship in `max-core`, not `mojo`** — `from max.gpu import ...`, `from max.gpu.host import DeviceContext`, `from layout import ...`; the env needs the `max-core` package beside `mojo`
+3. **`UnsafePointer` is removed** — use `MutPointer` / `ImmPointer` with `MutUntrackedOrigin` / `ImmUntrackedOrigin` for memory Mojo does not own (torch storage, the leaked context); never `MutAnyOrigin`
+4. **`unsafe_from_address=`** — Not `address=`; builds a pointer from a Python `data_ptr()` integer
+5. **`LayoutTensor` is deprecated ("Use TileTensor instead")** — kernels take `TileTensor` (`ImmTileTensor` / `MutTileTensor`); `RuntimeLayout`, `UNKNOWN_VALUE` and `Index(...)` give way to `row_major((n, Idx[N]))` tuples, and the TileTensor `row_major` result does not fit a `LayoutTensor` `Layout` parameter
+6. **`Int` / `UInt` kernel arguments are not `DevicePassable`** — pass `Int64` (or `Int32`) and convert inside the kernel; `Float32` is fine
+7. **`InlineArray` is now `Array`** — `Array[T, N](fill=default)`, returned with `^`
+8. **Closures use capture lists** — `def f(x: Int) {mut acc, imm t}:` (works inside GPU kernels); `@parameter def` closures are deprecated
+9. **`@inline(.always)`** replaces `@always_inline`
+10. **Shared memory** — `layout.stack_allocation[dtype, address_space=AddressSpace.SHARED](row_major[...]())` returns a `TileTensor`; helpers take it as `MutTileTensor[dtype, LT, _, address_space=.SHARED]`
+11. **`alloc` takes a `Layout`** — `alloc(Layout[T](count=n))` returns an `Allocation` that must be `dealloc`ed or `unsafe_leak()`ed; the skill's `Layout[T](length=n)` spelling is rejected by 1.2.0
+12. **Pointer access renamed** — `p[unsafe_offset=i]`, `p.unsafe_load()`, `p.unsafe_write(v)`; the old `p[i]`, `p.load()`, `init_pointee_move` warn or fail
+13. **No `alignment=` wider than the element on SIMD loads from PyTorch memory** — Causes `CUDA_ERROR_MISALIGNED_ADDRESS`
+14. **`Float32` type casts**: Use `Float32(int_value)` explicitly; no implicit int→float
+15. **Kernel functions can't raise** — No `raises` keyword on GPU kernels
+16. **`comptime` not `alias`; `def` not `fn`** — `fn` is a parse error
+17. **`min`/`max`/`clamp` are free functions** — `from std.math import clamp`
+18. **`floor()` returns Float** — Need `Int(floor(x))` for integer index
+19. **Declare the block size** — `@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](N))` on kernels with a fixed block size; query `WARP_SIZE` instead of hard-coding 32
+20. **Cross-stream sync is still mandatory with the cached context** — see Remaining Attack Vectors §1 for the external-stream alternative
 
 ## How the CUDA Kernel Works (for reference)
 

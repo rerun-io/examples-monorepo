@@ -12,14 +12,15 @@ Mojo GPU kernels need two things that PyTorch doesn't natively provide:
      on the extension module (`_ctx_addr`). Every kernel launch recovers
      the pointer via `get_cached_context_ptr()`.
 
-  2. **Raw typed pointers** into PyTorch tensor storage. PyTorch's
-     `tensor.data_ptr()` returns an integer address; the `torch_*_ptr()`
-     helpers here reinterpret-cast it to the appropriate Mojo pointer type.
+  2. **Typed tensors** over PyTorch tensor storage. PyTorch's
+     `tensor.data_ptr()` returns an integer address; `torch_tensor()` and
+     `torch_imm_tensor()` wrap it in a row-major `TileTensor` that kernels
+     index by coordinate.
 
 Safety contract
 ---------------
-Every `torch_*_ptr()` helper assumes:
-  1. The tensor has already been cast to the expected dtype (.float(), etc.).
+`torch_tensor()` / `torch_imm_tensor()` assume:
+  1. The tensor has already been cast to the requested dtype (.float(), etc.).
   2. The tensor is contiguous in memory (.contiguous()).
   3. The Python tensor object stays alive until the launched kernel finishes
      (i.e. the caller holds a reference and calls synchronize before dropping).
@@ -28,7 +29,8 @@ These conditions are enforced at the call sites in `gn.mojo` and `matching.mojo`
 """
 
 from max.gpu.host import DeviceContext
-from std.memory import alloc
+from layout import ImmTileTensor, MutTileTensor, TensorLayout, TileTensor
+from std.memory import Layout, alloc
 from std.python import Python, PythonObject
 
 
@@ -54,63 +56,41 @@ def install_cached_context(module: PythonObject) raises:
 
     Mojo shared libraries cannot store a module-global `DeviceContext`, so the
     Python module owns one heap allocation for the lifetime of the extension.
-    The pointer is stored as an integer and recovered later by
-    `get_cached_context_ptr()`.
+    The allocation is leaked on purpose; its address is stored as an integer
+    and recovered later by `get_cached_context_ptr()`.
     """
-    var ctx_storage = alloc[DeviceContext](1)
-    var cached_ctx = DeviceContext()
-    ctx_storage.init_pointee_move(cached_ctx^)
+    var ctx_storage = alloc(Layout[DeviceContext](count=1)).unsafe_leak()
+    ctx_storage.unsafe_write(DeviceContext())
     Python.add_object(module, "_ctx_addr", PythonObject(Int(ctx_storage)))
 
 
-def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
+def get_cached_context_ptr() raises -> MutPointer[DeviceContext, MutUntrackedOrigin]:
     """Return the shared DeviceContext for kernels launched from this module."""
     var module = get_backend_module()
-    var ctx_addr = Int(py=module._ctx_addr)
-    return UnsafePointer[DeviceContext, MutAnyOrigin](
-        unsafe_from_address=ctx_addr
+    return MutPointer[DeviceContext, MutUntrackedOrigin](
+        unsafe_from_address=Int(py=module._ctx_addr)
     )
 
 
-# ── Tensor → UnsafePointer casts ─────────────────────────────────────────────
-# Each helper reinterpret-casts tensor.data_ptr() (a Python int) to a typed
-# Mojo UnsafePointer. The caller MUST ensure the tensor dtype matches.
+# ── Tensor → TileTensor views ────────────────────────────────────────────────
+# Each helper reinterprets tensor.data_ptr() (a Python int) as typed device
+# memory. The caller MUST ensure the tensor dtype matches `dtype`.
 
-@always_inline
-def torch_float32_ptr(
-    tensor: PythonObject,
-) raises -> UnsafePointer[Float32, MutAnyOrigin]:
-    """Cast a float32 tensor's data_ptr to a Mojo Float32 pointer."""
-    return UnsafePointer[Float32, MutAnyOrigin](
+def torch_tensor[
+    dtype: DType, LT: TensorLayout
+](tensor: PythonObject, layout: LT) raises -> MutTileTensor[dtype, LT, MutUntrackedOrigin]:
+    """View a contiguous torch tensor that a kernel writes."""
+    var ptr = MutPointer[Scalar[dtype], MutUntrackedOrigin](
         unsafe_from_address=Int(py=tensor.data_ptr())
     )
+    return TileTensor(ptr, layout)
 
 
-@always_inline
-def torch_float16_ptr(
-    tensor: PythonObject,
-) raises -> UnsafePointer[Float16, MutAnyOrigin]:
-    """Cast a float16 tensor's data_ptr to a Mojo Float16 pointer."""
-    return UnsafePointer[Float16, MutAnyOrigin](
+def torch_imm_tensor[
+    dtype: DType, LT: TensorLayout
+](tensor: PythonObject, layout: LT) raises -> ImmTileTensor[dtype, LT, ImmUntrackedOrigin]:
+    """View a contiguous torch tensor that a kernel only reads."""
+    var ptr = ImmPointer[Scalar[dtype], ImmUntrackedOrigin](
         unsafe_from_address=Int(py=tensor.data_ptr())
     )
-
-
-@always_inline
-def torch_int64_ptr(
-    tensor: PythonObject,
-) raises -> UnsafePointer[Int64, MutAnyOrigin]:
-    """Cast an int64 tensor's data_ptr to a Mojo Int64 pointer."""
-    return UnsafePointer[Int64, MutAnyOrigin](
-        unsafe_from_address=Int(py=tensor.data_ptr())
-    )
-
-
-@always_inline
-def torch_uint8_ptr(
-    tensor: PythonObject,
-) raises -> UnsafePointer[UInt8, MutAnyOrigin]:
-    """Cast a uint8/bool tensor's data_ptr to a Mojo UInt8 pointer."""
-    return UnsafePointer[UInt8, MutAnyOrigin](
-        unsafe_from_address=Int(py=tensor.data_ptr())
-    )
+    return TileTensor(ptr, layout)
