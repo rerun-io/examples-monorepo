@@ -25216,6 +25216,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64-cuda13:
+      - conda: https://conda.modular.com/max/linux-64/max-core-26.7.0-release.conda
       - conda: https://conda.modular.com/max/linux-64/mojo-1.2.0-release.conda
       - conda: https://conda.modular.com/max/linux-64/mojo-compiler-1.2.0-release.conda
       - conda: https://conda.modular.com/max/noarch/mblack-26.7.0-release.conda
@@ -25885,6 +25886,7 @@ environments:
     - https://pypi.org/simple
     packages:
       linux-64-cuda13:
+      - conda: https://conda.modular.com/max/linux-64/max-core-26.7.0-release.conda
       - conda: https://conda.modular.com/max/linux-64/mojo-1.2.0-release.conda
       - conda: https://conda.modular.com/max/linux-64/mojo-compiler-1.2.0-release.conda
       - conda: https://conda.modular.com/max/noarch/mblack-26.7.0-release.conda
@@ -80918,6 +80920,15 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: https://pypi.nvidia.com/tensorrt-cu13/tensorrt_cu13-11.2.1.2.tar.gz
 packages:
+- conda: https://conda.modular.com/max/linux-64/max-core-26.7.0-release.conda
+  sha256: 591b7ceb5ad8e4f14058730aa9461ab269a212899386f4426aec89f3e216be90
+  md5: fd34161ed5b6df3403d794e26133f5bb
+  depends:
+  - mojo-compiler ==1.2.0
+  license: LicenseRef-Modular-Proprietary
+  run_exports: {}
+  size: 129320947
+  timestamp: 1792188664735
 - conda: https://conda.modular.com/max/linux-64/mojo-1.2.0-release.conda
   sha256: 18485673c7089a187107633a0b9086c5fcb2f0fbe5daf67af44490271e6a2e57
   md5: 24f2a26d0e2cf92bb7ba4712a030a39d
