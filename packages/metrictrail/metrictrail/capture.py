@@ -14,7 +14,9 @@ Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSessi
   patchified on a fixed PCA basis (fit on the first frame) to RGB.
 
 A run can make several DPVO passes (stage A, FP32 recovery). Each pass is written to its own ``.rrd``;
-:meth:`CaptureSession.kept_pass` is the last of the longest passes, the one whose poses ViPE writes. The hooks read
+:meth:`CaptureSession.kept_pass` is the last of the longest passes, the one whose poses ViPE writes. With
+:attr:`CaptureSession.live` set (the Gradio app), every pass logs straight into that recording instead, so the viewer
+sees tracking as it happens; a later pass (FP32 recovery) then overwrites the earlier one frame by frame. The hooks read
 tensors and add host syncs, so a captured run's FPS is not a timing result; they never change a value DPVO uses.
 """
 
@@ -110,8 +112,8 @@ class DinoPca:
 class CapturedPass:
     """One DPVO instance's capture recording."""
 
-    path: Path
-    """Its ``.rrd`` file."""
+    path: Path | None
+    """Its ``.rrd`` file; None when the pass logged into :attr:`CaptureSession.live`."""
     num_frames: int
     """Frames of the tracking pass it ran over."""
 
@@ -132,6 +134,13 @@ class CaptureSession:
     """DINOv3 patch size, pixels (dinov3_vits16)."""
     frustum_depth_m: float = 0.08
     """Depth of the BA-window frustums, metres."""
+    live: rr.RecordingStream | None = None
+    """Recording every pass logs into instead of its own file (the app's streamed recording); None: one file per pass."""
+    every_frame_images: bool = True
+    """Log the depth and the DINOv3 PCA of every tracked frame; False: depth of new keyframes only, no PCA (an
+    uncompressed image per frame is too much to stream to a browser)."""
+    on_frame: Callable[[int, int, int], None] | None = None
+    """Called after each tracked frame with (frame index, frames of the pass, keyframes in the graph); may raise to stop."""
     passes: list[CapturedPass] = field(default_factory=list)
     """Every DPVO instance captured, in creation order."""
     pass_frames: int = 0
@@ -211,10 +220,13 @@ class CaptureSession:
             if rec is not None:
                 new_keyframe: bool = int(self.n) > keyframes_before
                 added: bool = bool(self.is_initialized) or new_keyframe
-                session.log_frame(rec, self, frame, image, intrinsics, metric_depth, metric_mask, added)
+                depth: Tensor | None = metric_depth if session.every_frame_images or new_keyframe else None
+                session.log_frame(rec, self, frame, image, intrinsics, depth, metric_mask, added)
                 if new_keyframe and normals_host is not None:
                     rec.log(entities.CAM_NORMALS, rr.Image(normals_host, color_model="RGB").compress(jpeg_quality=92))
             session.last_dino_rgb = None
+            if session.on_frame is not None:
+                session.on_frame(frame, session.pass_frames, int(self.n))
             return result
 
         def gba(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -223,7 +235,7 @@ class CaptureSession:
 
         def forward(self: Any, dpvo_images: Tensor) -> Tensor:
             features: Tensor = forward_orig(self, dpvo_images)
-            if features.shape[0] * features.shape[1] == 1:
+            if session.every_frame_images and features.shape[0] * features.shape[1] == 1:
                 with torch.no_grad(), torch.autocast(device_type="cuda", enabled=False):
                     single: Float32[Tensor, "c h w"] = features[0, 0].float()
                     if session.pca is None:
@@ -255,15 +267,20 @@ class CaptureSession:
         self.restore = []
         for rec in self.streams.values():
             rec.flush()
-            rec.disconnect()
+            if rec is not self.live:
+                rec.disconnect()
         self.streams = {}
 
     def open_pass(self, instance_id: int) -> None:
         """Start the recording file of a new DPVO instance."""
         self.global_ba_calls = 0
-        path: Path = self.out_dir / f"pass_{len(self.passes)}.rrd"
-        rec: rr.RecordingStream = rr.RecordingStream(self.application_id, recording_id=self.recording_id, send_properties=False)
-        rec.save(path)
+        path: Path | None = None
+        if self.live is not None:
+            rec: rr.RecordingStream = self.live
+        else:
+            path = self.out_dir / f"pass_{len(self.passes)}.rrd"
+            rec = rr.RecordingStream(self.application_id, recording_id=self.recording_id, send_properties=False)
+            rec.save(path)
         self.streams[instance_id] = rec
         # A pass at least as long supersedes the earlier ones (kept_pass), so their normals can go.
         for earlier, captured in zip(self.pass_normals, self.passes, strict=True):

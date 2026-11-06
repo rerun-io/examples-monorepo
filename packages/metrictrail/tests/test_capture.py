@@ -55,7 +55,7 @@ def test_kept_pass_is_the_last_of_the_longest(tmp_path: Path) -> None:
         CapturedPass(tmp_path / "pass_2.rrd", 596),
     ]
     kept = session.kept_pass()
-    assert kept is not None and kept.path.name == "pass_2.rrd"
+    assert kept is not None and kept.path is not None and kept.path.name == "pass_2.rrd"
 
 
 def test_normals_survive_the_8bit_rgb_round_trip() -> None:

@@ -16,6 +16,7 @@ case name, and its ``groundtruth.csv`` is the GT).
 
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,8 +40,8 @@ from metrictrail.palette import RunLabel
 
 
 @dataclass
-class Config:
-    """Run MetricTrail on one sequence or video and log it."""
+class RunSettings:
+    """What to run and how; the Rerun target is separate (:class:`Config` for the CLI, the app's own stream)."""
 
     input: Path
     """A video, a frame directory (its name names the outputs and seeds DPVO) or a VSLAM-LAB sequence directory."""
@@ -68,8 +69,26 @@ class Config:
     """Fuse the metric cloud with upstream's ``vipe.metrictrail.pointcloud.fuse_point_cloud`` (default filter)."""
     max_cloud_points: int = 400_000
     """Display subsample of the cloud."""
+
+
+@dataclass
+class Config(RunSettings):
+    """Run MetricTrail on one sequence or video and log it."""
+
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer / save / connect flags."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    """What :func:`run_and_log` logged, for the caller's blueprint."""
+
+    logged: LoggedRun
+    """Metrics and the eyes that frame the trajectory."""
+    has_capture: bool
+    """Whether a live capture was logged (frames, patches, normals)."""
+    has_gt: bool
+    """Whether GT was logged."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +105,20 @@ class PreparedInput:
     """Extra raster overrides for raw VSLAM-LAB frames."""
 
 
-def prepare_input(config: Config) -> PreparedInput:
+def prepare_input(config: RunSettings) -> PreparedInput:
     """Resolve the input; a VSLAM-LAB sequence's frames are linked under upstream's eval case name."""
     kind: InputKind = input_kind(config.input)
     if kind == "video":
         if BENCHMARKS[config.benchmark].stream != "video":
             raise ValueError(f"a video input needs --benchmark video, not {config.benchmark}")
-        return PreparedInput(stream_path=config.input, name=config.input.stem, gt_sequence=config.gt_sequence, raster_overrides=[])
+        stream_path: Path = config.input
+        if config.input.suffix != ".mp4":
+            # ViPE's raw_mp4_stream refuses any other suffix; it decodes with OpenCV, which reads .mov/.mkv/... as they are.
+            stream_path = config.output / "input" / f"{config.input.stem}.mp4"
+            stream_path.parent.mkdir(parents=True, exist_ok=True)
+            stream_path.unlink(missing_ok=True)
+            stream_path.symlink_to(config.input.resolve())
+        return PreparedInput(stream_path=stream_path, name=config.input.stem, gt_sequence=config.gt_sequence, raster_overrides=[])
     if BENCHMARKS[config.benchmark].stream == "video":
         raise ValueError(f"--benchmark video reads a video file, and {config.input} is a directory")
     if kind == "frame_dir":
@@ -108,7 +134,7 @@ def prepare_input(config: Config) -> PreparedInput:
     )
 
 
-def hydra_overrides(config: Config, prepared: PreparedInput, vipe_out: Path) -> list[str]:
+def hydra_overrides(config: RunSettings, prepared: PreparedInput, vipe_out: Path) -> list[str]:
     """Upstream's command for the preset, our MoGe-2 provider (``ours`` only), the raw-frame raster, then the user's
     overrides (later wins in Hydra)."""
     preset: BenchmarkPreset = BENCHMARKS[config.benchmark]
@@ -154,12 +180,34 @@ def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, 
     )
 
 
-def main(config: Config) -> RunMetrics:
-    """Run the pipeline on ``config.input``, then log the capture and the outputs."""
+def run_and_log(
+    config: RunSettings,
+    rec: rr.RecordingStream,
+    *,
+    live: bool = False,
+    on_stage: Callable[[str], None] | None = None,
+) -> RunResult:
+    """Run the pipeline on ``config.input``, then log the capture and the outputs into ``rec`` (no blueprint).
+
+    Args:
+        config: What to run.
+        rec: Target recording.
+        live: The capture logs every DPVO pass straight into ``rec`` while it tracks, depth on new keyframes only and
+            no DINOv3 PCA (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
+        on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
+            it may raise to stop the run.
+    """
     from vipe._paths import get_config_path
     from vipe.config.parse import parse_typed_config
     from vipe.pipeline import make_pipeline
     from vipe.streams.base import StreamList
+
+    def stage(text: str) -> None:
+        if on_stage is not None:
+            on_stage(text)
+
+    def tracked(frame: int, num_frames: int, keyframes: int) -> None:
+        stage(f"tracking: frame {frame + 1} / {num_frames}, {keyframes} keyframes in the graph")
 
     if config.label == "ours":
         from metrictrail.moge2 import register_providers
@@ -171,15 +219,17 @@ def main(config: Config) -> RunMetrics:
     overrides: list[str] = hydra_overrides(config, prepared, vipe_out)
     config_dir: Path = config.vipe_config_dir if config.vipe_config_dir is not None else get_config_path()
     typed = parse_typed_config("default", hydra_args=overrides, config_dir=config_dir)
-    rec: rr.RecordingStream = config.rr_config.rec_stream
     depth_range_m: tuple[float, float] = DEPTH_RANGES_M.get(config.benchmark, DEFAULT_DEPTH_RANGE_M)
     session: CaptureSession | None = None
     if config.capture:
         session = CaptureSession(
             out_dir=config.output / "capture",
-            application_id=config.rr_config.application_id,
+            application_id=str(rr.get_application_id(recording=rec)),
             recording_id=str(rec.get_recording_id()),
             depth_range_m=depth_range_m,
+            live=rec if live else None,
+            every_frame_images=not live,
+            on_frame=tracked if on_stage is not None else None,
         )
         session.install()
     # This module imports cv2 (metrictrail.frames) before torch, so OpenMP sizes cv2's thread team to every logical
@@ -187,6 +237,7 @@ def main(config: Config) -> RunMetrics:
     # dl-server (15.7 vs 18.2 fps on TUM fr1_desk). Upstream's run.py imports torch first and never sees this.
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
+    stage("loading the models, then SharedK calibration (MoGe-2 + DINOv3 on the whole clip)")
     try:
         pipeline = make_pipeline(typed.pipeline)
         streams = StreamList.make(typed.streams)
@@ -198,17 +249,19 @@ def main(config: Config) -> RunMetrics:
     wall_s: float = time.perf_counter() - started
 
     kept: CapturedPass | None = session.kept_pass() if session is not None else None
-    if kept is not None:
+    if kept is not None and kept.path is not None:
         rec.send_chunks(RrdReader(kept.path).stream())
     outputs: RunOutputs = read_run_outputs(vipe_out, prepared.name)
     frames: FrameSource = open_frames(prepared.stream_path)
     context: GtContext | None = None
     if prepared.gt_sequence is not None:
         context = load_gt_context(prepared.gt_sequence, protocol_for(config.benchmark), frames.names)
-    cloud: ColoredCloud | None = fuse_cloud(outputs, prepared, session.kept_normals() if session is not None else {}) if config.fuse_cloud else None
-    has_gt: bool = context is not None
+    cloud: ColoredCloud | None = None
+    if config.fuse_cloud:
+        stage("fusing the metric point cloud")
+        cloud = fuse_cloud(outputs, prepared, session.kept_normals() if session is not None else {})
+    stage("logging the trajectory and the cloud")
     rec.send_recording_name(f"MetricTrail {config.label}: {prepared.name}")
-    log_waiting_notes(rec, has_capture=kept is not None, has_gt=has_gt)
     import vipe
 
     provenance = make_provenance(
@@ -226,8 +279,18 @@ def main(config: Config) -> RunMetrics:
         max_cloud_points=config.max_cloud_points,
     )
     logged: LoggedRun = log_run_outputs(rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance)
-    blueprint = run_blueprint(config.label, has_capture=kept is not None, has_gt=has_gt, world_eye=logged.world_eye, metric_eye=logged.metric_eye)
+    return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None)
+
+
+def main(config: Config) -> RunMetrics:
+    """Run the pipeline on ``config.input``, then log the capture, the outputs and the default blueprint."""
+    rec: rr.RecordingStream = config.rr_config.rec_stream
+    result: RunResult = run_and_log(config, rec)
+    log_waiting_notes(rec, has_capture=result.has_capture, has_gt=result.has_gt)
+    blueprint = run_blueprint(
+        config.label, has_capture=result.has_capture, has_gt=result.has_gt, world_eye=result.logged.world_eye, metric_eye=result.logged.metric_eye
+    )
     rec.send_blueprint(blueprint, make_active=True, make_default=True)
     rec.flush()
-    print(logged.metrics)
-    return logged.metrics
+    print(result.logged.metrics)
+    return result.logged.metrics
