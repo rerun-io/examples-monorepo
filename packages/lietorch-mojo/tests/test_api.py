@@ -69,8 +69,8 @@ def test_backend_input_errors() -> None:
         backends.logm(3, X.half())
     with pytest.raises(ValueError):
         backends.mul(3, X, X.float())
-    with pytest.raises(NotImplementedError):
-        backends.logm(2, torch.zeros(4, 5, dtype=torch.float64))
+    with pytest.raises(ValueError, match="unknown lietorch group id"):
+        backends.logm(7, torch.zeros(4, 5, dtype=torch.float64))
     assert backends.logm(3, X[:0]).shape == (0, 6)
     assert backends.logm(1, SO3.Identity(4, dtype=torch.float64).data[:0]).shape == (0, 3)
 
