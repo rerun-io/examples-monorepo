@@ -20,6 +20,8 @@ StreamKind: TypeAlias = Literal["frame_dir", "video"]
 
 UPSTREAM_SEED: int = 1234
 """Upstream's ``pipeline.slam.seed`` default; DPVO seeds each sequence with it plus the directory name."""
+UPSTREAM_MAX_FRAMES: int = 1500
+"""Upstream's ``pipeline.init.input_raster.max_frames``: a longer input is strided down to at most this many frames."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +39,7 @@ class BenchmarkPreset:
     tracking_stride: int = 1
     """``pipeline.init.tracking_stride``: DPVO tracks every k-th frame (7-Scenes: 5); SharedK calibrates on all."""
     max_frames: int | None = None
-    """``pipeline.init.input_raster.max_frames`` override (LaMaria raises it); None keeps upstream's 1500."""
+    """``pipeline.init.input_raster.max_frames`` override (LaMaria raises it); None keeps :data:`UPSTREAM_MAX_FRAMES`."""
     focal_refine: bool = False
     """``pipeline.focal_refine.enabled`` (RoMa stage B; VBR only)."""
     known_intrinsics: bool = False

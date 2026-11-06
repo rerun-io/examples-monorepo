@@ -52,6 +52,22 @@ Other tasks:
   It has no normals: they exist only in a live capture (`cam/normals`, `world/cloud_normals`).
 - `metrictrail-check-kernels`: run one small op of each compiled kernel on the GPU.
 
+## App
+
+```bash
+pixi run -e metrictrail metrictrail-app
+```
+
+A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.py`): upload a video or pick an example
+(the task downloads dpvo's example clips into `data/`), and the run streams into an embedded Rerun viewer. It runs
+`metrictrail.apis.run.run_and_log` with the `video` preset and the default MoGe-2 provider, so it calibrates the camera
+itself; there is no intrinsics input. Settings: the tracking stride and `max_frames` (upstream's Hydra keys). The capture
+runs in live mode: DPVO's frames, patches and BA window stream in as it tracks, with depth and normals of new keyframes
+only and no DINOv3 PCA. Calibration has no hook, so the viewer stays empty for those seconds. The trajectory and the
+fused cloud arrive at the end. pool.MOV (86 s, strided to 1,293 frames) takes about 3 min 45 s on the RTX 5090:
+about 1 min of calibration, 35 s of tracking, and 95 s of cloud fusion. Gradio prints the local URL. Open it over HTTPS
+(`tailscale serve`): on plain HTTP the viewer stays empty.
+
 ## Evaluate
 
 ```bash

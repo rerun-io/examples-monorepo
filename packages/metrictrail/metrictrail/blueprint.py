@@ -78,6 +78,52 @@ def log_waiting_notes(rec: rr.RecordingStream, has_capture: bool, has_gt: bool) 
         rec.log(f"notes/waiting/{key}", rr.TextDocument(text, media_type=rr.MediaType.MARKDOWN), static=True)
 
 
+def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
+    """The Gradio app's layout of one live run of ``ours`` (a user video has no GT).
+
+    Left: the tracked frame with DPVO's patches, MoGe-2 metric depth and normals of the keyframes. Right, in tabs: DPVO's
+    keyframe path and BA window as it tracks, then the finished trajectory with the fused metric cloud, and the same
+    cloud coloured by its MoGe-2 normals. While tracking (``final_eye`` None) the DPVO tab is active; the final layout
+    opens the trajectory tab with ``final_eye`` framing it.
+    """
+    background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
+    tracking_view: rrb.Spatial3DView = rrb.Spatial3DView(
+        name="DPVO tracking (keyframes + BA window)", origin=entities.DPVO_ROOT, contents=["/dpvo/**"], background=background
+    )
+    world_view: rrb.Spatial3DView = rrb.Spatial3DView(
+        name="trajectory + metric cloud",
+        origin=entities.WORLD_ROOT,
+        contents=["/world/**", f"- /{entities.WORLD_CLOUD_NORMALS}"],
+        background=background,
+        line_grid=rrb.LineGrid3D(visible=False),
+        eye_controls=final_eye.controls() if final_eye is not None else None,
+    )
+    world_normals_view: rrb.Spatial3DView = rrb.Spatial3DView(
+        name="metric cloud coloured by MoGe-2 normals",
+        origin=entities.WORLD_ROOT,
+        contents=["/world/**", f"- /{entities.WORLD_CLOUD}"],
+        background=background,
+        line_grid=rrb.LineGrid3D(visible=False),
+        eye_controls=final_eye.controls() if final_eye is not None else None,
+    )
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Vertical(
+                rrb.Spatial2DView(name="frame + DPVO patches", origin=entities.CAM, contents=[entities.CAM_RGB, entities.CAM_PATCHES], background=background),
+                rrb.Spatial2DView(name="MoGe-2 metric depth (keyframes)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
+                rrb.Spatial2DView(name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background),
+            ),
+            rrb.Tabs(tracking_view, world_view, world_normals_view, active_tab=0 if final_eye is None else 1),
+            column_shares=[1, 3],
+        ),
+        rrb.BlueprintPanel(state="collapsed"),
+        rrb.SelectionPanel(state="collapsed"),
+        rrb.TimePanel(state="collapsed", timeline=entities.FRAME_TIMELINE),
+        auto_views=False,
+        auto_layout=False,
+    )
+
+
 def run_blueprint(
     label: RunLabel, *, has_capture: bool, has_gt: bool, world_eye: SceneView | None = None, metric_eye: SceneView | None = None
 ) -> rrb.Blueprint:
