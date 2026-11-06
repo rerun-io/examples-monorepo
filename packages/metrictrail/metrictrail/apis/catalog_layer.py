@@ -18,6 +18,10 @@ Runs whose commit was later rebased away pass ``--code-commit`` (the branch comm
 
 The TensorRT shipped path (``--source metrictrail``) also takes ``--capture-rrd`` (each run's live capture, ``{case}``
 filled in) for the surface normals, and ``--depth-source`` names its depth.
+
+``--publish-blueprint default|comparison`` (with ``--catalog-url``) then publishes a MetricTrail layout as the dataset's
+default (:mod:`metrictrail.catalog.blueprint`): ``default`` is ground truth and ours; ``comparison`` adds the torch
+reproduction and upstream ViPE (a development view, published on demand only).
 """
 
 import sys
@@ -27,6 +31,7 @@ from pathlib import Path
 
 from metrictrail.apis.vslamlab_eval import Report, RunScore
 from metrictrail.benchmarks import BENCHMARKS, BenchmarkName, BenchmarkPreset
+from metrictrail.catalog.blueprint import LayoutName, publish_layout
 from metrictrail.catalog.build import RunProvenance, SeedScores, build_layer, find_score, read_report
 from metrictrail.catalog.layer import DEPTH_SOURCE, LayerInputs, LayerProperties, LayerSource, segment_id, write_layer
 from metrictrail.catalog.register import dataset_name, open_dataset, register_layer_run
@@ -87,6 +92,10 @@ class Config:
     catalog_url: str | None = None
     """Register on this catalog after writing (``ERROR`` where the segment has no such layer yet, ``REPLACE`` where it
     has an older run); None: write only."""
+    publish_blueprint: LayoutName | None = None
+    """After registering, publish this MetricTrail layout as the dataset default; None: leave the dataset's layout."""
+    blueprint_root: Path = Path("/mnt/nas/ssd-8tb/metrictrail/catalog-layers")
+    """Published layouts go to ``<blueprint_root>/blueprints/`` (a path the catalog server reads)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,4 +200,9 @@ def main(config: Config) -> list[Path]:
         name_of_dataset: str = dataset_name(protocol.dataset)
         register_layer_run(open_dataset(config.catalog_url, name_of_dataset), paths, config.source)
         print(f"registered {len(paths)} {config.source} layers on {config.catalog_url} / {name_of_dataset}; take the catalog snapshot now")
+        if config.publish_blueprint is not None:
+            publish_layout(config.catalog_url, name_of_dataset, config.publish_blueprint, config.blueprint_root)
+            print(f"published the MetricTrail {config.publish_blueprint} layout as the default of {name_of_dataset}")
+    elif config.publish_blueprint is not None:
+        raise ValueError("--publish-blueprint needs --catalog-url")
     return paths

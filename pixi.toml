@@ -3732,6 +3732,8 @@ trtkit = { path = "packages/trtkit", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 # vipe.utils.geometry / visualization import pycg (Isometry, Quaternion, image); not on conda-forge.
 python-pycg = "==1.0.3"
+# metrictrail.catalog.blueprint publishes MetricTrail's layouts through dataforge's VslamLabDataset catalog-blueprint hook.
+dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.metrictrail.activation.env]
 PACKAGE_DIR = "packages/metrictrail"
