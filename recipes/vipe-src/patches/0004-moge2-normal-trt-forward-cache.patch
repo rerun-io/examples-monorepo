@@ -116,7 +116,7 @@ diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
  def normalized_to_pixel_k4(value: Any, image_hw: tuple[int, int]) -> np.ndarray:
      """MoGe's normalised 3x3 K (optionally batched by one) to pixel ``[fx, fy, cx, cy]``."""
  
-@@ -90,29 +131,195 @@
+@@ -90,29 +131,202 @@
  
  
  @dataclass(frozen=True)
@@ -240,6 +240,13 @@ diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
 +        from monopriors.models.moge_v2 import MoGeV2TorchPredictor, MoGeV2TrtPredictor
 +
 +        if self.backend == "tensorrt":
++            from monopriors.models.moge_v2 import export_moge_v2_onnx
++
++            # The ONNX (cached per grid, batch-dynamic) is exported for batches up to 8 as monoprior's default
++            # predictor does: a batch-1 export fails (torch.export rejects Dim(min=1, max=1)); the engine is batch 1.
++            export_moge_v2_onnx(
++                heads="geometry", encoder=self.encoder, image_hw=network_hw, resolution_level=MOGE2_RESOLUTION_LEVEL, max_batch_size=8
++            )
 +            return MoGeV2TrtPredictor(
 +                encoder=self.encoder,
 +                heads="geometry",
@@ -326,7 +333,7 @@ diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
      """
  
      def __init__(
-@@ -122,67 +329,43 @@
+@@ -122,67 +336,43 @@
          use_fp16: bool = True,
          min_depth_m: float = METRIC_DEPTH_MIN_M,
          max_depth_m: float = METRIC_DEPTH_MAX_M,
@@ -412,7 +419,7 @@ diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
  
      def estimate(self, src: DepthEstimationInput) -> DepthEstimationResult:
          rgb = unpack_optional(src.rgb)
-@@ -209,21 +392,27 @@
+@@ -209,21 +399,27 @@
  
          if rgb_bchw.ndim != 4 or rgb_bchw.shape[0] != 1:
              raise ValueError(f"expected a (1,3,H,W) image, got {tuple(rgb_bchw.shape)}")
@@ -445,7 +452,7 @@ diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
          }
  
  
-@@ -243,8 +432,9 @@
+@@ -243,8 +439,9 @@
  ) -> DepthEstimationModel:
      """Build MetricTrail's depth provider.
  
@@ -457,7 +464,7 @@ diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
      ``make_depth_model(name)``, cached under ViPE's own ``depth/<name>`` key.
      """
  
-@@ -252,11 +442,11 @@
+@@ -252,11 +449,11 @@
          variant = _moge2_variant(name)
          if model_cache is None:
              return MetricTrailMoGe2(variant, use_fp16=use_fp16)
