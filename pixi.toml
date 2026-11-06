@@ -3707,7 +3707,9 @@ description = "Run the Rust author checks for staged Kornia code"
 # ═══════════════════════════════════════════════════════════════════════════
 # vipe-src compiles ViPE's vipe_ext (all of it but lietorch_ext) and MetricTrail's DPVO kernels
 # (cuda_corr, cuda_ba) at package build time; lietorch_backends is not built (see recipes/vipe-src/recipe.yaml).
-# Reuse: DINOv3 from recipes/dinov3-src, MoGe-2 from packages/monoprior (monopriors), lietorch from lietorch-mojo.
+# Reuse: DINOv3 from recipes/dinov3-src, MoGe-2 from packages/monoprior (monopriors), lietorch from lietorch-mojo:
+# ViPE's three lietorch copies re-export `lietorch_mojo` (recipes/vipe-src patch 0001); the environments compose the
+# `lietorch-mojo` feature (like dpvo), and every task that imports lietorch depends on `lietorch-mojo-build`.
 [feature.metrictrail]
 platforms = ["linux-64"]
 
@@ -3718,11 +3720,6 @@ vipe-src = { path = "recipes/vipe-src" }
 dinov3-src = { path = "recipes/dinov3-src" }
 tyro = ">=0.9.1,<0.10"
 pillow = "<13"  # gradio 6.13 (held, common) needs pillow<13; the solve would otherwise pick 13
-# TODO(lietorch-mojo): ViPE's three lietorch copies import `lietorch_mojo` (recipes/vipe-src patch 0001). Until
-# lietorch-mojo lands, the env has no lietorch provider: vipe installs, vipe_ext and the DPVO kernels load, and
-# every module that imports lietorch (vipe.slam, vipe.metrictrail.slam/pipeline/calibration, DPVO) fails to import.
-# Then add `lietorch-mojo = { path = "packages/lietorch-mojo", editable = true }` (pypi) here, or the ai-demos
-# `lietorch` fallback (rebuilt for cp312) with the one import line in patch 0001 switched to `lietorch`.
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
@@ -3750,8 +3747,9 @@ description = "Run one tiny op of each compiled vipe-src kernel (vipe_ext, cuda_
 
 [feature.metrictrail.tasks.metrictrail-run]
 cmd = "python tools/run.py"
+depends-on = ["lietorch-mojo-build"]
 cwd = "packages/metrictrail"
-description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU and a lietorch provider); pass --input --benchmark --output --rr-config.save"
+description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
 
 [feature.metrictrail.tasks.metrictrail-log-run]
 cmd = "python tools/log_run.py"
@@ -3767,6 +3765,13 @@ description = "Score MetricTrail runs (one dir per seed) under the paper protoco
 cmd = "python tools/catalog_layer.py"
 cwd = "packages/metrictrail"
 description = "Write (and with --catalog-url/--dataset register) the MetricTrail catalog layer of one run on a VSLAM-LAB segment; never overwrites a layer file"
+
+# The full-pipeline integration test imports lietorch_mojo's Mojo extension; this shadows the dev feature's task.
+[feature.metrictrail.tasks.tests-integration]
+cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/metrictrail"
+description = "Build the lietorch-mojo extension, then run the package integration tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
@@ -4114,8 +4119,19 @@ gsplat-rust-renderer-dev = { features = [
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
 hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
-metrictrail = { features = ["common", "cuda", "metrictrail"], solve-group = "metrictrail", no-default-feature = true }
-metrictrail-dev = { features = ["common", "cuda", "metrictrail", "dev"], solve-group = "metrictrail", no-default-feature = true }
+metrictrail = { features = [
+    "common",
+    "cuda",
+    "lietorch-mojo",
+    "metrictrail",
+], solve-group = "metrictrail", no-default-feature = true }
+metrictrail-dev = { features = [
+    "common",
+    "cuda",
+    "lietorch-mojo",
+    "metrictrail",
+    "dev",
+], solve-group = "metrictrail", no-default-feature = true }
 dataforge = { features = [
     "common",
     "dataforge",

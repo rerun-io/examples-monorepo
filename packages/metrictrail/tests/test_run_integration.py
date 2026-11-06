@@ -1,6 +1,5 @@
 """Integration: our logging on a REAL finished upstream run (NAS assets), and the full pipeline run (needs lietorch_mojo + GPU)."""
 
-import importlib.util
 import os
 from pathlib import Path
 
@@ -65,8 +64,8 @@ def test_log_run_on_a_real_upstream_output_matches_the_harness(tmp_path: Path) -
 
 
 def test_full_run_on_a_short_real_sequence(tmp_path: Path) -> None:
-    if importlib.util.find_spec("lietorch_mojo") is None:
-        pytest.skip("lietorch_mojo is not installed (ViPE's three lietorch copies import it; asset: the lietorch-mojo package)")
+    # ViPE's three lietorch copies import lietorch_mojo, whose Mojo extension the `lietorch-mojo-build` task compiles.
+    pytest.importorskip("lietorch_mojo._lietorch_mojo_backends", reason="asset: the lietorch-mojo extension (run lietorch-mojo-build)")
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device (asset: a GPU)")

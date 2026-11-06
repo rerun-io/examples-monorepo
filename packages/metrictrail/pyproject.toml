@@ -5,7 +5,7 @@ description = "NVIDIA MetricTrail (ViPE) in the monorepo: benchmark presets, ker
 authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
 # Static metadata only. ViPE + MetricTrail and their CUDA kernels come from the `recipes/vipe-src` conda package;
-# torch comes from the `cuda` feature; lietorch from lietorch-mojo (not wired yet, see pixi.toml [feature.metrictrail]).
+# torch comes from the `cuda` feature; lietorch from the `lietorch-mojo` feature (pixi.toml [environments]).
 dependencies = []
 
 [build-system]
