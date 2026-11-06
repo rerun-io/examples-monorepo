@@ -43,6 +43,9 @@ project-includes = [
     "packages/hexels/hexels_bench/**/*",
     "packages/hexels/tools/**/*",
     "packages/hexels/tests/**/*",
+    "packages/metrictrail/metrictrail/**/*",
+    "packages/metrictrail/tools/**/*",
+    "packages/metrictrail/tests/**/*",
 ]
 project-excludes = [
     "**/node_modules",
@@ -114,6 +117,7 @@ search-path = [
     "packages/gauss-surf/src",
     "packages/live-rerun/src",
     "packages/hexels",
+    "packages/metrictrail",
     # Vendored sam2 fork is installed editable; pyrefly can't follow the
     # __editable__ finder, so resolve `sam2.*` from the source tree directly.
     "packages/sam2-streaming",
@@ -172,6 +176,7 @@ site-package-path = [
     ".pixi/envs/hexels-dev/lib/python3.12/site-packages",
     # Upstream hexels/scripts are put on sys.path by a .pth file (recipes/hexels-src).
     ".pixi/envs/hexels-dev/share/hexels-src",
+    ".pixi/envs/metrictrail-dev/lib/python3.12/site-packages",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"

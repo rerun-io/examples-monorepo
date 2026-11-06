@@ -1,0 +1,103 @@
+# NVIDIA ViPE (nv-tlabs/vipe) at the first commit that carries MetricTrail (vipe/metrictrail); the newest
+# release, v1.2.0, predates it. Built for CUDA 13 against the workspace's conda-forge torch 2.12 (cuda130).
+#
+# What is compiled (MetricTrail's import graph, `pipeline=metrictrail`):
+#   - vipe_ext, ViPE's own extension, without lietorch_ext (replaced by lietorch-mojo). SharedK calibration runs
+#     ViPE's keyframe SLAM (droid_net_ext, slam_ext, scatter_ext), vipe.metrictrail.slam imports vipe.slam.interface
+#     (utils_ext), and vipe.pipeline.processors -- imported by the `vipe infer` CLI and by MetricTrail's optional
+#     masks / depth fusion -- imports corr_ext and grounding_dino_ext at module load, so those stay too.
+#   - vipe.metrictrail.dpvo_ext: DPVO's cuda_corr + cuda_ba (python -m vipe.metrictrail.build), not lietorch_backends.
+#   - Not built: the optional stereo tree (vipe.metrictrail.dpvo_stereo_ext); its sources stay installed, so
+#     VIPE_METRICTRAIL_DPVO_JIT=1 can JIT-compile it on first use.
+# lietorch: ViPE's three vendored copies are thin re-exports of the external `lietorch_mojo` module (patch 0001);
+# this package therefore does NOT depend on lietorch. The consuming feature supplies lietorch-mojo.
+package:
+  name: vipe-src
+  version: "1.2.0.ead2e00"
+
+source:
+  # GitHub archive of ead2e008bc055310121736a49ff306bba50d10dc (rattler-build create-patch needs a url source).
+  url: https://github.com/nv-tlabs/vipe/archive/ead2e008bc055310121736a49ff306bba50d10dc.tar.gz
+  sha256: c312cbf6f25576aa85aa81e3df9615e024cfa79f3a278c08e908035af86a5ad6
+  patches:
+    # The three vendored lietorch copies re-export lietorch_mojo; no lietorch_backends / lietorch_ext build.
+    # The deleted vendored files are removed by build.sh, not by the patch.
+    - patches/0001-lietorch-external-provider.patch
+    # TODO(moge parity agent): if ViPE's vendored MoGe-2 (vipe/priors/depth/moge2) is the same model and weights as
+    # packages/monoprior's MoGe v2, a patch here points ViPE's `moge2-l` depth prior at monopriors instead.
+    # TODO(dinov3 agent): if dinov3_vits16 from recipes/dinov3-src matches ViPE's in-tree DINOv3
+    # (vipe/priors/depth/dap/dino.py make_dinov3_backbone, used by vipe/metrictrail/dino_fusion.py), a patch here
+    # builds it from the `dinov3` package (then add dinov3-src to the run requirements and the feature).
+    # TODO(dpvo agent): MetricTrail's DPVO (vipe/metrictrail/dpvo) stays ViPE's modified copy unless packages/dpvo
+    # is shown to be the same code for a part.
+
+build:
+  number: 0
+  script:
+    file: build.sh
+
+requirements:
+  build:
+    - cuda-compiler 13.0.*
+    - cuda-version 13.0.*
+    - ninja
+  host:
+    - python 3.12.*
+    - pip
+    - setuptools >=77
+    - wheel
+    - cuda-version 13.0.*
+    - pytorch-gpu 2.12.*
+    # DPVO's build recipe (vipe/metrictrail/build.py refuses other versions); slam_ext includes <eigen3/Eigen/...>.
+    - eigen >=3.4.0,<3.5
+    - cuda-cudart-dev
+    - cuda-driver-dev
+    - cuda-cccl
+    - cuda-nvrtc-dev
+    - libcublas-dev
+    - libcusparse-dev
+    - libcusolver-dev
+    - libcurand-dev
+  # What `vipe.metrictrail.pipeline`, `vipe.pipeline.processors` and the `vipe` CLI (vipe.cli.main) import at module
+  # load (upstream pyproject, minus what MetricTrail never reaches: gtsam (vipe_long), ray). transformers (Grounding
+  # DINO's BERT, used only with dynamic masks) comes from the consuming workspace. PyPI-only: python-pycg
+  # (vipe.utils.geometry / visualization) comes from the consuming feature's pypi-dependencies.
+  run:
+    - python 3.12.*
+    - pytorch >=2.12,<2.13
+    - cuda-version >=13.0,<14
+    - torchvision
+    - numpy
+    - omegaconf
+    - hydra-core
+    - pydantic >=2,<3
+    - einops
+    - py-opencv <5
+    - scipy
+    - pillow
+    - imageio
+    - imageio-ffmpeg
+    - matplotlib
+    - tqdm
+    - huggingface_hub
+    - safetensors
+    - kornia
+    # Track Anything's AOT/SAM (vipe.pipeline.processors) and the CLI's `vipe visualize` (vipe.cli.main).
+    - timm
+    - viser
+    - click
+    - gdown
+    - rerun-sdk
+    # Upstream pins OpenEXR<3.3.0 for the classic OpenEXR.InputFile/OutputFile + Imath API. conda-forge's <3.3
+    # (1.3.9) needs openexr 3.3, which conflicts with libopencv 4.13 (openexr 3.4). 3.4 keeps the classic API:
+    # ViPE's depth-zip write/read pattern (vipe/utils/io.py) round-trips fp16 depth exactly.
+    - openexr-python >=3.4,<3.5
+    # MetricTrail's vendored DPVO (vipe/metrictrail/dpvo_deps.py).
+    - yacs
+    - numba
+
+about:
+  homepage: https://github.com/nv-tlabs/vipe
+  license: Apache-2.0
+  license_file: LICENSE
+  summary: NVIDIA ViPE + MetricTrail (source at ead2e00) with its CUDA kernels, import name `vipe`

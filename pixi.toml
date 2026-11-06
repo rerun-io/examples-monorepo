@@ -3703,6 +3703,42 @@ depends-on = ["lint", "typecheck", "deadcode", "kornia-staging-fmt-check", "korn
 description = "Run the Rust author checks for staged Kornia code"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# metrictrail — NVIDIA MetricTrail (ViPE @ ead2e00, recipes/vipe-src) + our benchmark/eval/catalog code
+# ═══════════════════════════════════════════════════════════════════════════
+# vipe-src compiles ViPE's vipe_ext (all of it but lietorch_ext) and MetricTrail's DPVO kernels
+# (cuda_corr, cuda_ba) at package build time; lietorch_backends is not built (see recipes/vipe-src/recipe.yaml).
+[feature.metrictrail]
+platforms = ["linux-64"]
+
+[feature.metrictrail.dependencies]
+python = "3.12.*"
+vipe-src = { path = "recipes/vipe-src" }
+tyro = ">=0.9.1,<0.10"
+pillow = "<13"  # gradio 6.13 (held, common) needs pillow<13; the solve would otherwise pick 13
+# TODO(lietorch-mojo): ViPE's three lietorch copies import `lietorch_mojo` (recipes/vipe-src patch 0001). Until
+# lietorch-mojo lands, the env has no lietorch provider: vipe installs, vipe_ext and the DPVO kernels load, and
+# every module that imports lietorch (vipe.slam, vipe.metrictrail.slam/pipeline/calibration, DPVO) fails to import.
+# Then add `lietorch-mojo = { path = "packages/lietorch-mojo", editable = true }` (pypi) here, or the ai-demos
+# `lietorch` fallback (rebuilt for cp312) with the one import line in patch 0001 switched to `lietorch`.
+# TODO(moge parity agent): xformers (MoGe-2's DINOv2 attention; ViPE falls back to torch SDPA without it) and the
+# reuse of packages/monoprior's MoGe v2 (monopriors) instead of ViPE's vendored copy.
+# TODO(dinov3 agent): dinov3-src = { path = "recipes/dinov3-src" } if MetricTrail's dinov3_vits16 moves onto it.
+
+[feature.metrictrail.pypi-dependencies]
+metrictrail = { path = "packages/metrictrail", editable = true }
+# vipe.utils.geometry / visualization import pycg (Isometry, Quaternion, image); not on conda-forge.
+python-pycg = "==1.0.3"
+
+[feature.metrictrail.activation.env]
+PACKAGE_DIR = "packages/metrictrail"
+PYREFLY_TARGET = "metrictrail tools tests"
+
+[feature.metrictrail.tasks.metrictrail-check-kernels]
+cmd = "python tools/check_kernels.py"
+cwd = "packages/metrictrail"
+description = "Run one tiny op of each compiled vipe-src kernel (vipe_ext, cuda_corr, cuda_ba) on the GPU"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -4048,6 +4084,8 @@ gsplat-rust-renderer-dev = { features = [
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
 hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
+metrictrail = { features = ["common", "cuda", "metrictrail"], solve-group = "metrictrail", no-default-feature = true }
+metrictrail-dev = { features = ["common", "cuda", "metrictrail", "dev"], solve-group = "metrictrail", no-default-feature = true }
 dataforge = { features = [
     "common",
     "dataforge",
