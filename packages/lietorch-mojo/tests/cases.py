@@ -1,7 +1,14 @@
-"""Input sets for the SE3 and SO3 parity tests: random data plus the edge cases of se3.h/so3.h.
+"""Input sets for the raw backend-op parity references: random data plus the edge cases of se3.h, so3.h and rxso3.h.
 
 Every set is built in float64 on the CPU and cast afterwards, so float32 and
-float64 runs see the same values (up to rounding).
+float64 runs see the same values (up to rounding). RxSO3 and Sim3 reuse the
+SE3 sets for their rotation and translation parts; each gets a scale (data)
+and a log-scale (tangent). Two more sets exercise rxso3.h's `calcW` branches
+on sigma: |sigma| < EPS, sigma just above EPS, and theta < EPS with sigma
+away from zero.
+
+`freeze_references.py` builds these sets once from upstream lietorch; the
+tests read the frozen rows back from the reference .rrd.
 """
 
 import math
@@ -12,15 +19,19 @@ from torch import Tensor
 
 
 @dataclass(frozen=True, slots=True)
-class Se3Case:
-    """One named batch of SE3 inputs (or SO3 inputs from `so3_case`: X (B, 4) = qx qy qz qw, a (B, 3) = phi)."""
+class OpCase:
+    """One named batch of group inputs (float64, CPU), laid out as lietorch stores them.
+
+    SE3: X (B, 7) = tx ty tz qx qy qz qw, a (B, 6) = tau phi. SO3: X (B, 4) = q, a (B, 3) = phi.
+    RxSO3: X (B, 5) = q s, a (B, 4) = phi sigma. Sim3: X (B, 8) = t q s, a (B, 7) = tau phi sigma.
+    """
 
     name: str
     """Short label used in test ids and reports."""
     X: Tensor
-    """Group elements (B, 7): tx ty tz qx qy qz qw."""
+    """Group elements (B, N)."""
     a: Tensor
-    """Tangent vectors (B, 6): tau then phi."""
+    """Tangent vectors (B, K)."""
     p3: Tensor
     """Points (B, 3)."""
     p4: Tensor
@@ -46,15 +57,15 @@ def _points(n: int, gen: torch.Generator) -> tuple[Tensor, Tensor]:
     return p3, p4
 
 
-def _case(name: str, t: Tensor, q: Tensor, tau: Tensor, phi: Tensor, gen: torch.Generator) -> Se3Case:
+def _case(name: str, t: Tensor, q: Tensor, tau: Tensor, phi: Tensor, gen: torch.Generator) -> OpCase:
     p3, p4 = _points(t.shape[0], gen)
-    return Se3Case(name=name, X=torch.cat([t, q], dim=-1), a=torch.cat([tau, phi], dim=-1), p3=p3, p4=p4)
+    return OpCase(name=name, X=torch.cat([t, q], dim=-1), a=torch.cat([tau, phi], dim=-1), p3=p3, p4=p4)
 
 
-def se3_cases(n: int = 256, seed: int = 0) -> list[Se3Case]:
+def se3_cases(n: int = 256, seed: int = 0) -> list[OpCase]:
     """The input sets, each with `n` elements (float64, CPU)."""
     gen: torch.Generator = torch.Generator().manual_seed(seed)
-    cases: list[Se3Case] = []
+    cases: list[OpCase] = []
 
     def randn(*shape: int) -> Tensor:
         return torch.randn(*shape, generator=gen, dtype=torch.float64)
@@ -115,7 +126,7 @@ def se3_cases(n: int = 256, seed: int = 0) -> list[Se3Case]:
 # lietorch's float32 Jacobian coefficients (theta - sin theta) / theta^3 etc.
 # cancel catastrophically. Tested by comparing both implementations to a float64
 # reference instead of to each other.
-def se3_ill_conditioned_f32_case(n: int = 256, seed: int = 1) -> Se3Case:
+def se3_ill_conditioned_f32_case(n: int = 256, seed: int = 1) -> OpCase:
     gen: torch.Generator = torch.Generator().manual_seed(seed)
     angles: Tensor = torch.logspace(-5.9, -2, n, dtype=torch.float64)
     axes: Tensor = _axes(n, gen)
@@ -124,11 +135,56 @@ def se3_ill_conditioned_f32_case(n: int = 256, seed: int = 1) -> Se3Case:
     return _case("small_angle_f32", t, _quat_from_angle(axes, angles), tau, axes * angles[:, None], gen)
 
 
-def so3_case(case: Se3Case) -> Se3Case:
+def so3_case(case: OpCase) -> OpCase:
     """The rotation part of an SE3 case: X = its quaternions (B, 4), a = its phi (B, 3); points unchanged."""
     return replace(case, X=case.X[:, 3:].contiguous(), a=case.a[:, 3:].contiguous())
 
 
-def so3_cases(n: int = 256, seed: int = 0) -> list[Se3Case]:
+def so3_cases(n: int = 256, seed: int = 0) -> list[OpCase]:
     """`se3_cases` reduced to SO3 (large_translation is dropped: its rotation part repeats `random`)."""
     return [so3_case(c) for c in se3_cases(n, seed) if c.name != "large_translation"]
+
+
+def _scaled(group_name: str, c: OpCase, scale: Tensor, sigma: Tensor, name: str) -> OpCase:
+    """An RxSO3 or Sim3 case from an SE3 case plus a scale (data) and a log-scale (tangent)."""
+    t, q = c.X.split([3, 4], dim=-1)
+    tau, phi = c.a.split([3, 3], dim=-1)
+    if group_name == "RxSO3":
+        return OpCase(name=name, X=torch.cat([q, scale[:, None]], dim=-1), a=torch.cat([phi, sigma[:, None]], dim=-1), p3=c.p3, p4=c.p4)
+    return OpCase(name=name, X=torch.cat([t, q, scale[:, None]], dim=-1), a=torch.cat([tau, phi, sigma[:, None]], dim=-1), p3=c.p3, p4=c.p4)
+
+
+def scaled_cases(group_name: str, n: int = 256, seed: int = 0) -> list[OpCase]:
+    """The SE3 sets with a scale and log-scale each (RxSO3 or Sim3), plus the two `calcW` sigma-branch sets."""
+    gen: torch.Generator = torch.Generator().manual_seed(seed + 100)
+    out: list[OpCase] = []
+    base: list[OpCase] = se3_cases(n, seed)
+    for c in base:
+        sigma: Tensor = torch.randn(n, generator=gen, dtype=torch.float64)
+        scale: Tensor = torch.exp(torch.randn(n, generator=gen, dtype=torch.float64))
+        if c.name == "identity":
+            sigma = torch.zeros(n, dtype=torch.float64)
+            scale = torch.ones(n, dtype=torch.float64)
+        out.append(_scaled(group_name, c, scale, sigma, c.name))
+    # calcW's sigma branches: |sigma| < EPS, just above, moderate; random rotations.
+    sig: Tensor = torch.tensor([0.0, 1e-9, -5e-7, 9e-7, 2e-6, -2e-6, 1e-3, -0.5, 2.0, -3.0], dtype=torch.float64)
+    sigma = sig.repeat_interleave(math.ceil(n / sig.shape[0]))[:n]
+    out.append(_scaled(group_name, base[0], torch.exp(sigma), sigma, "sigma_branches"))
+    # theta < EPS with sigma away from zero (calcW's third branch).
+    out.append(_scaled(group_name, base[3], torch.exp(-sigma.flip(0) - 0.7), -sigma.flip(0) - 0.7, "tiny_angle_scaled"))
+    return out
+
+
+def op_cases(group_name: str) -> list[OpCase]:
+    """The raw-op input sets of one group: SE3 and SO3 from `se3_cases`/`so3_cases`, RxSO3 and Sim3 from `scaled_cases`."""
+    if group_name == "SE3":
+        return se3_cases()
+    if group_name == "SO3":
+        return so3_cases()
+    return scaled_cases(group_name)
+
+
+def ill_conditioned_case(group_name: str) -> OpCase:
+    """The float32 small-angle set (SE3 and SO3 only; see `se3_ill_conditioned_f32_case`)."""
+    case: OpCase = se3_ill_conditioned_f32_case()
+    return case if group_name == "SE3" else so3_case(case)
