@@ -13,7 +13,7 @@ from rerun.chunk import RrdReader
 
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.catalog.layer import LayerInputs, LayerProperties, backproject_keyframes, layer_entities, segment_id, write_layer
-from metrictrail.catalog.register import layer_uris, register_layers
+from metrictrail.catalog.register import layer_uris, register_layer_run, register_layers
 
 
 def layer_inputs(count: int = 20) -> LayerInputs:
@@ -160,8 +160,8 @@ class FakeTable:
 class FakeDataset:
     """Holds base + gt for one segment; registration appends or replaces a layer, like the server."""
 
-    def __init__(self, segment: str) -> None:
-        self.layers: dict[str, dict[str, str]] = {segment: {"base": "file:///base.rrd", "gt": "file:///gt.rrd"}}
+    def __init__(self, *segments: str) -> None:
+        self.layers: dict[str, dict[str, str]] = {segment: {"base": "file:///base.rrd", "gt": "file:///gt.rrd"} for segment in segments}
         self.duplicates: list[OnDuplicateSegmentLayer] = []
         self.operation = FakeOperation()
 
@@ -173,7 +173,10 @@ class FakeDataset:
         on_duplicate: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.ERROR,
     ) -> FakeOperation:
         self.duplicates.append(on_duplicate)
-        for segment, uri in zip(self.layers, recording_uri, strict=True):
+        for uri in recording_uri:
+            segment: str = Path(uri.removeprefix("file://")).stem  # the layer file is named after its segment
+            if str(layer_name) in self.layers[segment] and on_duplicate == OnDuplicateSegmentLayer.ERROR:
+                raise RuntimeError(f"{segment} already holds {layer_name}")
             self.layers[segment][str(layer_name)] = uri
         return self.operation
 
@@ -190,12 +193,32 @@ class FakeDataset:
 
 
 def test_register_layers_registers_checks_and_never_creates_segments(tmp_path: Path) -> None:
-    (tmp_path / "a.rrd").write_bytes(b"")
+    layer: Path = tmp_path / "vslam-lab-rgbdtum__desk.rrd"
+    layer.write_bytes(b"")
     dataset = FakeDataset("vslam-lab-rgbdtum__desk")
-    register_layers(dataset, [tmp_path / "a.rrd"], ["vslam-lab-rgbdtum__desk"], "metrictrail", replace=False)
-    assert dataset.layers["vslam-lab-rgbdtum__desk"]["metrictrail"] == (tmp_path / "a.rrd").as_uri()
+    register_layers(dataset, [layer], ["vslam-lab-rgbdtum__desk"], "metrictrail", replace=False)
+    assert dataset.layers["vslam-lab-rgbdtum__desk"]["metrictrail"] == layer.as_uri()
     assert dataset.duplicates == [OnDuplicateSegmentLayer.ERROR] and dataset.operation.waited
     with pytest.raises(ValueError, match="register dataforge's base and gt layers first"):
-        register_layers(dataset, [tmp_path / "a.rrd"], ["vslam-lab-rgbdtum__xyz"], "metrictrail", replace=True)
+        register_layers(dataset, [layer], ["vslam-lab-rgbdtum__xyz"], "metrictrail", replace=True)
     with pytest.raises(FileNotFoundError):
         layer_uris([tmp_path / "missing.rrd"])
+
+
+def test_register_layer_run_replaces_only_segments_that_already_hold_the_layer(tmp_path: Path) -> None:
+    old_run, new_run = tmp_path / "old", tmp_path / "new"
+    for run, segments in ((old_run, ("vslam-lab-rgbdtum__desk",)), (new_run, ("vslam-lab-rgbdtum__desk", "vslam-lab-rgbdtum__xyz"))):
+        run.mkdir()
+        for segment in segments:
+            (run / f"{segment}.rrd").write_bytes(b"")
+    dataset = FakeDataset("vslam-lab-rgbdtum__desk", "vslam-lab-rgbdtum__xyz")
+    assert register_layer_run(dataset, sorted(old_run.glob("*.rrd")), "metrictrail") == {"vslam-lab-rgbdtum__desk": False}
+    assert register_layer_run(dataset, sorted(new_run.glob("*.rrd")), "metrictrail") == {
+        "vslam-lab-rgbdtum__xyz": False,
+        "vslam-lab-rgbdtum__desk": True,
+    }
+    assert dataset.duplicates == [OnDuplicateSegmentLayer.ERROR, OnDuplicateSegmentLayer.ERROR, OnDuplicateSegmentLayer.REPLACE]
+    assert {segment: layers["metrictrail"] for segment, layers in dataset.layers.items()} == {
+        "vslam-lab-rgbdtum__desk": (new_run / "vslam-lab-rgbdtum__desk.rrd").as_uri(),
+        "vslam-lab-rgbdtum__xyz": (new_run / "vslam-lab-rgbdtum__xyz.rrd").as_uri(),
+    }

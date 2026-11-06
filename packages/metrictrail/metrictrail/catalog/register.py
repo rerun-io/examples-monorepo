@@ -83,6 +83,24 @@ def register_layers(dataset: LayerDataset, paths: Sequence[Path], segments: Sequ
             raise ValueError(f"{segment}: after registration the layers are {dict(zip(layers, urls, strict=True))}, expected {layer_name} -> {uri}")
 
 
+def register_layer_run(dataset: LayerDataset, paths: Sequence[Path], layer_name: str) -> dict[str, bool]:
+    """Register one run's layer files (each named ``<segment>.rrd``): ``ERROR`` for segments that do not hold
+    ``layer_name`` yet, ``REPLACE`` for those that do, so a newer run never needs a hand-picked ``--replace``.
+
+    Returns:
+        Segment -> whether its earlier ``layer_name`` file was replaced.
+    """
+    rows: list[dict[str, object]] = dataset.segment_table().to_arrow_table().to_pylist()
+    held: set[str] = {str(row["rerun_segment_id"]) for row in rows if isinstance(layers := row["rerun_layer_names"], list) and layer_name in layers}
+    replaced: dict[str, bool] = {}
+    for replace in (False, True):
+        group: list[Path] = [path for path in paths if (path.stem in held) == replace]
+        if group:
+            register_layers(dataset, group, [path.stem for path in group], layer_name, replace=replace)
+            replaced.update(dict.fromkeys((path.stem for path in group), replace))
+    return replaced
+
+
 def open_dataset(catalog_url: str, name: str) -> rr.catalog.DatasetEntry:
     """The dataset ``name`` on ``catalog_url``."""
     return rr.catalog.CatalogClient(catalog_url).get_dataset(name)

@@ -7,7 +7,7 @@ other seeds' reports only add per-seed properties. Files go to
     pixi run -e metrictrail python tools/catalog_layer.py --runs-root /mnt/nas/ssd-8tb/metrictrail/results/upstream/tum/seed1234 \
         --report /tmp/fleet-artifacts/metrictrail/p0/baseline/scores/tum-seed1234/report.json --benchmark tum \
         --source metrictrail_upstream --producer "upstream ViPE @ ead2e00, unmodified" --env <env> \
-        [--catalog-url rerun+http://dgx-spark:51235 --replace]
+        [--catalog-url rerun+http://dgx-spark:51235]
 """
 
 import sys
@@ -19,7 +19,7 @@ from metrictrail.apis.vslamlab_eval import Report, RunScore
 from metrictrail.benchmarks import BENCHMARKS, BenchmarkName, BenchmarkPreset
 from metrictrail.catalog.build import RunProvenance, SeedScores, build_layer, find_score, read_report
 from metrictrail.catalog.layer import LayerInputs, LayerProperties, LayerSource, segment_id, write_layer
-from metrictrail.catalog.register import dataset_name, open_dataset, register_layers
+from metrictrail.catalog.register import dataset_name, open_dataset, register_layer_run
 from metrictrail.eval.protocols import PaperProtocol
 from metrictrail.frames import FrameSource, open_frames
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
@@ -64,9 +64,8 @@ class Config:
     run_tag: str = field(default_factory=lambda: time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
     """New directory per build."""
     catalog_url: str | None = None
-    """Register on this catalog after writing; None: write only."""
-    replace: bool = False
-    """Register with REPLACE (a newer run of a layer already registered); default ERROR."""
+    """Register on this catalog after writing (``ERROR`` where the segment has no such layer yet, ``REPLACE`` where it
+    has an older run); None: write only."""
 
 
 def main(config: Config) -> list[Path]:
@@ -82,7 +81,6 @@ def main(config: Config) -> list[Path]:
     out_dir: Path = config.results_root / "catalog" / config.source / config.run_tag
     provenance = RunProvenance(producer=config.producer, vipe_commit=VIPE_COMMIT, repo_commit=config.repo_commit, env=config.env, seed=config.seed)
     paths: list[Path] = []
-    segments: list[str] = []
     for sequence in sequences:
         name: str = protocol.upstream_cases.get(sequence, sequence)
         score: RunScore = find_score(report, sequence, name, config.report)
@@ -113,9 +111,8 @@ def main(config: Config) -> list[Path]:
         out_dir.chmod(0o775)
         print(f"wrote {path}: {built[1].num_tracked} poses, {built[1].num_keyframes} keyframes, paper ATE {built[1].paper_ate_m:.6f} m")
         paths.append(path)
-        segments.append(segment)
     if config.catalog_url is not None:
         name_of_dataset: str = dataset_name(protocol.dataset)
-        register_layers(open_dataset(config.catalog_url, name_of_dataset), paths, segments, config.source, replace=config.replace)
+        register_layer_run(open_dataset(config.catalog_url, name_of_dataset), paths, config.source)
         print(f"registered {len(paths)} {config.source} layers on {config.catalog_url} / {name_of_dataset}; take the catalog snapshot now")
     return paths
