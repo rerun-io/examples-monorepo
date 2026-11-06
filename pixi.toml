@@ -1187,8 +1187,9 @@ kernels = ">=0.11.3"
 
 [feature.posekit-body.activation.env]
 PACKAGE_DIR = "packages/posekit"
-# The same four Transformers .to() stub false positives as posekit-egohand.
-PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
+# The same four Transformers .to() stub false positives as posekit-egohand; the WiLoR and EgoHand lanes
+# are not installed here (see [feature.posekit.activation.env]).
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit-body.tasks.posekit-body-download-examples]
 cmd = "test -f data/body3d-examples/yoga-example.jpg || curl -fsSL --retry 3 --create-dirs -o data/body3d-examples/Planche.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Planche.jpg -o data/body3d-examples/Amir-Khan-Lamont-Peterson_2689582.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Amir-Khan-Lamont-Peterson_2689582.jpg -o data/body3d-examples/BNAAHPYGMYSE26U6C6T7VA6544.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/BNAAHPYGMYSE26U6C6T7VA6544.jpg -o data/body3d-examples/yoga-example.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/yoga-example.jpg"
@@ -1247,6 +1248,8 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.posekit-hands.activation.env]
 PACKAGE_DIR = "packages/posekit"
+# posekit-egohand's baseline; the SAM 3D Body lane is not installed here (see [feature.posekit.activation.env]).
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py"
 
 [feature.posekit-hands.tasks.posekit-video-hands]
 cmd = "python tools/demos/video_hands.py"
@@ -1271,6 +1274,13 @@ description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames;
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 PYREFLY_TARGET = "src/posekit tests tools"
+# Each posekit env typechecks only the modules whose imports it installs, so the check never leans on
+# another env's site-packages. Three lanes: SAM 3D Body (sam_3d_body, open3d, warp: posekit-sam3d-body +
+# posekit-body), WiLoR (roma, skimage, timm, ultralytics: posekit-wilor) and EgoHand on SOMA (soma, warp:
+# soma-runtime + posekit-egohand). The base lane excludes all three; posekit-body and posekit-hands come
+# before posekit in their envs (the first feature's value wins) and exclude only what they lack.
+# `--project-excludes=<glob>`: with a space the task shell would expand the glob into files to check.
+PYREFLY_EXTRA_ARGS = "--project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit.tasks.posekit-video-pose]
 cmd = "python tools/demos/video_pose.py"
@@ -1314,6 +1324,7 @@ smplx = ">=0.1.28"
 [feature.lamp.activation.env]
 PACKAGE_DIR = "packages/lamp"
 PYREFLY_TARGET = "lamptrack/apis lamptrack/cameras.py lamptrack/catalog_rig.py lamptrack/models lamptrack/rerun_logging.py lamptrack/third_party/lamp lamptrack/__init__.py lamptrack/third_party/__init__.py tools"
+PYREFLY_EXTRA_ARGS = ""  # posekit's lane excludes name posekit files
 
 [feature.lamp.tasks._lamp-download-checkpoint]
 cmd = "test -f data/checkpoints/lamp_smpl_aria_gen2.pt || hf download facebook/LAMP --revision 875ab025bd63c7b0ede9db2485cae72ee414e035 --include 'lamp_smpl_aria_gen2.pt' --local-dir data/checkpoints/"
@@ -3860,10 +3871,10 @@ posekit = { features = [
     "cuda",
     "posekit",
 ], solve-group = "posekit", no-default-feature = true }
-posekit-hands = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands"], solve-group = "posekit-hands", no-default-feature = true }
-posekit-hands-dev = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands", "dev"], solve-group = "posekit-hands", no-default-feature = true }
-posekit-body = { features = ["common", "cuda", "posekit", "posekit-sam3d-body", "posekit-body"], solve-group = "posekit-body", no-default-feature = true }
-posekit-body-dev = { features = ["common", "cuda", "posekit", "posekit-sam3d-body", "posekit-body", "dev"], solve-group = "posekit-body", no-default-feature = true }
+posekit-hands = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-hands-dev = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "dev"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-body = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body"], solve-group = "posekit-body", no-default-feature = true }
+posekit-body-dev = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body", "dev"], solve-group = "posekit-body", no-default-feature = true }
 posekit-dev = { features = [
     "common",
     "cuda",
