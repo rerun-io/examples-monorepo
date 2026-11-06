@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import pytest
+import torch
 
 from monopriors.third_party.moge.model.v1 import MoGeV1Config
-from monopriors.third_party.moge.model.v2 import MoGeV2Config
+from monopriors.third_party.moge.model.v2 import MoGeModel, MoGeV2Config
 
 
 def _v1_checkpoint_config() -> dict[str, object]:
@@ -97,3 +100,28 @@ def test_v2_checkpoint_config_rejects_unknown_nested_keys() -> None:
 
     with pytest.raises(ValueError, match="unexpected"):
         MoGeV2Config.from_checkpoint_config(config)
+
+
+def test_v2_from_checkpoint_loads_a_local_file_exactly(tmp_path: Path) -> None:
+    config: dict[str, object] = _v2_checkpoint_config(include_normals=False)
+    reference: MoGeModel = MoGeModel(MoGeV2Config.from_checkpoint_config(config))
+    checkpoint_path: Path = tmp_path / "model.pt"
+    torch.save({"model_config": config, "model": reference.state_dict()}, checkpoint_path)
+
+    loaded: MoGeModel = MoGeModel.from_checkpoint(checkpoint_path)
+
+    expected: dict[str, torch.Tensor] = reference.state_dict()
+    actual: dict[str, torch.Tensor] = loaded.state_dict()
+    assert actual.keys() == expected.keys()
+    assert all(torch.equal(actual[name], expected[name]) for name in expected)
+
+
+def test_v2_from_checkpoint_rejects_a_state_dict_that_does_not_match(tmp_path: Path) -> None:
+    config: dict[str, object] = _v2_checkpoint_config(include_normals=False)
+    state_dict: dict[str, torch.Tensor] = MoGeModel(MoGeV2Config.from_checkpoint_config(config)).state_dict()
+    state_dict.pop(next(name for name in state_dict if name.startswith("scale_head.")))
+    checkpoint_path: Path = tmp_path / "model.pt"
+    torch.save({"model_config": config, "model": state_dict}, checkpoint_path)
+
+    with pytest.raises(RuntimeError, match="scale_head"):
+        MoGeModel.from_checkpoint(checkpoint_path)

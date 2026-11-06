@@ -1,0 +1,104 @@
+diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
+index 03a793c..5cea138 100644
+--- a/vipe/metrictrail/depth.py
++++ b/vipe/metrictrail/depth.py
+@@ -5,7 +5,7 @@
+ 
+ MetricTrail uses ViPE's ``vipe.priors.depth`` registry as its depth provider.
+ The default, ``moge2-l``, goes through :class:`MetricTrailMoGe2`, a subclass of
+-ViPE's ``MogeModel`` (version 2, the vendored MoGe-2 code and checkpoint
++ViPE's ``MogeModel`` (version 2; [vipe-src] monopriors' MoGe-2 code and ViPE's checkpoint
+ resolution are reused unchanged) that makes MetricTrail's exact MoGe-2 call:
+ 
+ - ``resolution_level=9`` with ``num_tokens=None``;
+diff --git a/vipe/metrictrail/runtime_record.py b/vipe/metrictrail/runtime_record.py
+index 1c49728..fc506e2 100644
+--- a/vipe/metrictrail/runtime_record.py
++++ b/vipe/metrictrail/runtime_record.py
+@@ -26,7 +26,6 @@ bookkeeping is testable on CPU.
+ 
+ from __future__ import annotations
+ 
+-import importlib
+ import os
+ import time
+ from collections.abc import Callable, Iterator
+@@ -47,28 +46,16 @@ PEAK_RESET = "after model load, right before tracking: empty_cache + reset_peak_
+ def attention_backends() -> dict[str, Any]:
+     """The attention kernels of the networks whose backend depends on the environment.
+ 
+-    MoGe-2's DINOv2 (``vipe.priors.depth.moge2.dinov2``, ``MemEffAttention``) calls
+-    ``xformers.ops.memory_efficient_attention`` when xformers imports and
+-    ``XFORMERS_DISABLED`` is unset, otherwise torch's ``scaled_dot_product_attention``;
+-    the two differ at FP16 rounding level. DINO-DPVO's DINOv3 always uses torch SDPA.
++    [vipe-src] MoGe-2 runs on monopriors' DINOv2, which always calls torch's
++    ``scaled_dot_product_attention`` (never xformers). DINO-DPVO's DINOv3 always uses torch SDPA.
+     """
+ 
+-    record: dict[str, Any] = {
++    return {
+         "dinov3_dino_dpvo": "torch_sdpa",
+         "xformers_disabled_env": os.environ.get("XFORMERS_DISABLED") is not None,
++        "moge2_dinov2": "torch_sdpa",
++        "xformers_version": None,
+     }
+-    try:
+-        from vipe.priors.depth.moge2.dinov2.layers import attention as moge_attention
+-    except Exception as error:  # noqa: BLE001 - a record must not fail the run
+-        return {**record, "moge2_dinov2": "unknown", "error": f"{type(error).__name__}: {error}"[:300]}
+-    uses_xformers = bool(getattr(moge_attention, "XFORMERS_AVAILABLE", False))
+-    version = None
+-    if uses_xformers:
+-        try:
+-            version = str(getattr(importlib.import_module("xformers"), "__version__", None))
+-        except Exception:  # noqa: BLE001
+-            version = None
+-    return {**record, "moge2_dinov2": "xformers" if uses_xformers else "torch_sdpa", "xformers_version": version}
+ 
+ 
+ def _gib(value: int | float | None) -> float | None:
+diff --git a/vipe/priors/depth/moge.py b/vipe/priors/depth/moge.py
+index c92239e..28f9b56 100644
+--- a/vipe/priors/depth/moge.py
++++ b/vipe/priors/depth/moge.py
+@@ -32,6 +32,8 @@ from .base import DepthEstimationInput, DepthEstimationModel, DepthEstimationRes
+ # package (Depth Anything 3, MoGe-1). `moge-2-vitl` is the metric,
+ # no-normals ViT-L.
+ MOGE2_HF_REPOS = {"l": "Ruicheng/moge-2-vitl"}
++# [vipe-src] Pinned HF revision (main on 2026-11-06; model.pt sha256 3eefd4ab...0111cd5).
++MOGE2_HF_REVISIONS = {"l": "39c4d5e957afe587e04eec59dc2bcc3be5ecd968"}
+ MOGE2_HF_FILENAME = "model.pt"
+ 
+ #: Optional offline fast path: a checkpoint already sitting in the torch hub cache
+@@ -50,7 +52,7 @@ class MogeModel(DepthEstimationModel):
+     """https://github.com/microsoft/MoGe
+ 
+     ``version=1`` runs MoGe-1 through the optional pip package. ``version=2`` runs
+-    MoGe-2, whose inference code is vendored under ``moge2/`` (no pip dependency),
++    MoGe-2, whose inference code comes from monopriors ([vipe-src]; upstream vendors it under ``moge2/``),
+     with the checkpoint resolved locally or from HuggingFace on first use.
+ 
+     The two differ in more than weights: MoGe-2 has a dedicated ``metric_scale``
+@@ -84,9 +86,11 @@ class MogeModel(DepthEstimationModel):
+                 )
+             self.model = MoGeModel.from_pretrained("Ruicheng/moge-vitl")
+         elif version == 2:
+-            from .moge2 import MoGeModel as MoGe2Model
++            # [vipe-src] monopriors' MoGe v2 (examples-monorepo packages/monoprior; the same microsoft/MoGe
++            # 925b8ed code as ViPE's vendored moge2/, which is not installed).
++            from monopriors.third_party.moge.model.v2 import MoGeModel as MoGe2Model
+ 
+-            self.model = MoGe2Model.from_pretrained(self._checkpoint_path(variant))
++            self.model = MoGe2Model.from_checkpoint(self._checkpoint_path(variant))
+         else:
+             raise ValueError(f"Unknown MoGe version: {version}")
+ 
+@@ -133,7 +137,7 @@ class MogeModel(DepthEstimationModel):
+                 "VIPE_MOGE2_CHECKPOINT to a local checkpoint."
+             ) from exc
+ 
+-        return Path(hf_hub_download(repo_id=MOGE2_HF_REPOS[variant], filename=MOGE2_HF_FILENAME))
++        return Path(hf_hub_download(repo_id=MOGE2_HF_REPOS[variant], filename=MOGE2_HF_FILENAME, revision=MOGE2_HF_REVISIONS[variant]))
+ 
+     @property
+     def depth_type(self) -> DepthType:

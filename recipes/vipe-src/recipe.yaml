@@ -9,8 +9,14 @@
 #   - vipe.metrictrail.dpvo_ext: DPVO's cuda_corr + cuda_ba (python -m vipe.metrictrail.build), not lietorch_backends.
 #   - Not built: the optional stereo tree (vipe.metrictrail.dpvo_stereo_ext); its sources stay installed, so
 #     VIPE_METRICTRAIL_DPVO_JIT=1 can JIT-compile it on first use.
-# lietorch: ViPE's three vendored copies are thin re-exports of the external `lietorch_mojo` module (patch 0001);
-# this package therefore does NOT depend on lietorch. The consuming feature supplies lietorch-mojo.
+# Reuse instead of ViPE's in-tree copies (phase-0 parity proofs in the MetricTrail port notes):
+#   - lietorch: ViPE's three vendored copies re-export the external `lietorch_mojo` module (patch 0001); this
+#     package does NOT depend on lietorch. The consuming feature supplies lietorch-mojo.
+#   - DINOv3 (DINO-DPVO's frozen ViT-S/16): the `dinov3` package from recipes/dinov3-src (patch 0002, a run
+#     dependency). ViPE's in-tree DINOv3 (vipe/priors/depth/dap/dino.py) stays: the DAP panorama prior uses it.
+#   - MoGe-2 (`moge2-l`): packages/monoprior's MoGeModel (patch 0003) on ViPE's checkpoint, Ruicheng/moge-2-vitl
+#     pinned to 39c4d5e; build.sh deletes ViPE's vendored vipe/priors/depth/moge2. monopriors is a PyPI path
+#     package, so the consuming feature supplies it (editable), like lietorch-mojo.
 package:
   name: vipe-src
   version: "1.2.0.ead2e00"
@@ -23,16 +29,18 @@ source:
     # The three vendored lietorch copies re-export lietorch_mojo; no lietorch_backends / lietorch_ext build.
     # The deleted vendored files are removed by build.sh, not by the patch.
     - patches/0001-lietorch-external-provider.patch
-    # TODO(moge parity agent): if ViPE's vendored MoGe-2 (vipe/priors/depth/moge2) is the same model and weights as
-    # packages/monoprior's MoGe v2, a patch here points ViPE's `moge2-l` depth prior at monopriors instead.
-    # TODO(dinov3 agent): if dinov3_vits16 from recipes/dinov3-src matches ViPE's in-tree DINOv3
-    # (vipe/priors/depth/dap/dino.py make_dinov3_backbone, used by vipe/metrictrail/dino_fusion.py), a patch here
-    # builds it from the `dinov3` package (then add dinov3-src to the run requirements and the feature).
-    # TODO(dpvo agent): MetricTrail's DPVO (vipe/metrictrail/dpvo) stays ViPE's modified copy unless packages/dpvo
-    # is shown to be the same code for a part.
+    # make_vipe_dinov3_backbone builds dinov3.hub.backbones.dinov3_vits16 (bit-identical patch tokens).
+    - patches/0002-dinov3-from-dinov3-src.patch
+    # ViPE's `moge2-l` loads monopriors' MoGe v2 (bit-identical on 48 frames, fp16 and fp32) from the pinned
+    # checkpoint; runtime_record records torch SDPA for its DINOv2.
+    - patches/0003-moge2-from-monopriors.patch
+    # MetricTrail's DPVO (vipe/metrictrail/dpvo, csrc/dpvo) stays ViPE's copy: packages/dpvo is a typed rewrite and
+    # its cuda_ba lacks MetricTrail's metric-depth prior arguments and kernel.
 
 build:
-  number: 0
+  # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
+  # shared rattler package cache would otherwise hand an older build to the next install.
+  number: 1
   script:
     file: build.sh
 
@@ -49,7 +57,7 @@ requirements:
     - cuda-version 13.0.*
     - pytorch-gpu 2.12.*
     # DPVO's build recipe (vipe/metrictrail/build.py refuses other versions); slam_ext includes <eigen3/Eigen/...>.
-    - eigen >=3.4.0,<3.5
+    - eigen ==3.4.0
     - cuda-cudart-dev
     - cuda-driver-dev
     - cuda-cccl
@@ -64,8 +72,11 @@ requirements:
   # (vipe.utils.geometry / visualization) comes from the consuming feature's pypi-dependencies.
   run:
     - python 3.12.*
-    - pytorch >=2.12,<2.13
+    # vipe_ext and the DPVO kernels link the CUDA build of torch: never resolve a CPU pytorch.
+    - pytorch >=2.12,<2.13 cuda*
     - cuda-version >=13.0,<14
+    # MetricTrail's frozen DINOv3 (patch 0002). Sibling recipe: the consuming feature lists it too.
+    - dinov3-src
     - torchvision
     - numpy
     - omegaconf

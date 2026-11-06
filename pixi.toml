@@ -3707,12 +3707,15 @@ description = "Run the Rust author checks for staged Kornia code"
 # ═══════════════════════════════════════════════════════════════════════════
 # vipe-src compiles ViPE's vipe_ext (all of it but lietorch_ext) and MetricTrail's DPVO kernels
 # (cuda_corr, cuda_ba) at package build time; lietorch_backends is not built (see recipes/vipe-src/recipe.yaml).
+# Reuse: DINOv3 from recipes/dinov3-src, MoGe-2 from packages/monoprior (monopriors), lietorch from lietorch-mojo.
 [feature.metrictrail]
 platforms = ["linux-64"]
 
 [feature.metrictrail.dependencies]
 python = "3.12.*"
 vipe-src = { path = "recipes/vipe-src" }
+# vipe-src's run dependency (patch 0002: MetricTrail's frozen DINOv3 ViT-S/16); a sibling recipe solves only when listed.
+dinov3-src = { path = "recipes/dinov3-src" }
 tyro = ">=0.9.1,<0.10"
 pillow = "<13"  # gradio 6.13 (held, common) needs pillow<13; the solve would otherwise pick 13
 # TODO(lietorch-mojo): ViPE's three lietorch copies import `lietorch_mojo` (recipes/vipe-src patch 0001). Until
@@ -3720,12 +3723,14 @@ pillow = "<13"  # gradio 6.13 (held, common) needs pillow<13; the solve would ot
 # every module that imports lietorch (vipe.slam, vipe.metrictrail.slam/pipeline/calibration, DPVO) fails to import.
 # Then add `lietorch-mojo = { path = "packages/lietorch-mojo", editable = true }` (pypi) here, or the ai-demos
 # `lietorch` fallback (rebuilt for cp312) with the one import line in patch 0001 switched to `lietorch`.
-# TODO(moge parity agent): xformers (MoGe-2's DINOv2 attention; ViPE falls back to torch SDPA without it) and the
-# reuse of packages/monoprior's MoGe v2 (monopriors) instead of ViPE's vendored copy.
-# TODO(dinov3 agent): dinov3-src = { path = "recipes/dinov3-src" } if MetricTrail's dinov3_vits16 moves onto it.
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
+# ViPE's `moge2-l` prior builds monopriors.third_party.moge.model.v2.MoGeModel (recipes/vipe-src patch 0003);
+# its DINOv2 always uses torch SDPA, so no xformers.
+monopriors = { path = "packages/monoprior", editable = true }
+# monopriors' metadata requires sam3; resolve it to the workspace package like the other monopriors consumers
+sam3 = { path = "packages/sam3", editable = true }
 # vipe.utils.geometry / visualization import pycg (Isometry, Quaternion, image); not on conda-forge.
 python-pycg = "==1.0.3"
 

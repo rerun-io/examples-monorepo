@@ -1,5 +1,6 @@
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Self, TypeAlias, cast
 
 import torch
@@ -399,6 +400,22 @@ class MoGeModel(nn.Module):
             filename="model.pt",
             revision=revision,
         )
+        return cls.from_checkpoint(Path(checkpoint_path))
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path: Path) -> Self:
+        """Load a MoGe v2 ``model.pt`` that is already on disk (for example ViPE's ``VIPE_MOGE2_CHECKPOINT``).
+
+        Args:
+            checkpoint_path: Upstream checkpoint file holding ``model_config`` and ``model``.
+
+        Returns:
+            Model loaded with exact state-dict matching.
+
+        Raises:
+            ValueError: If the checkpoint configuration is unsupported.
+            RuntimeError: If checkpoint parameters do not match the model exactly.
+        """
         checkpoint: dict[str, object] = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         raw_config: Mapping[str, object] = _require_mapping(
             checkpoint.get("model_config"),
