@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 
 import rerun.blueprint as rrb
+from dataforge import schema
 from dataforge.apis.register import republish_blueprints
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.lamaria import LamariaConfig, LamariaDataset
@@ -102,7 +103,7 @@ def restyle(blueprint: rrb.Blueprint, layout: LayoutName, present: set[str], hel
                 for source in shown
                 if source in with_normals
             ]
-            view.contents = [*content_rules(view.contents), *(f"- {run_root(source)}/**" for source in hidden), *normals_rules]
+            view.contents = [*content_rules(view.contents), *(f"- {schema.run_path(source)}/**" for source in hidden), *normals_rules]
         elif isinstance(view, rrb.Spatial2DView):
             for source in shown:
                 rules: list[str] = content_rules(view.contents)
