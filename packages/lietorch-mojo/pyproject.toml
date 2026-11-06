@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=70.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+name = "lietorch-mojo"
+version = "0.0.1"
+description = "lietorch's Lie group API (SO3, RxSO3, SE3, Sim3) on Mojo CPU/GPU kernels"
+requires-python = ">= 3.11"
+dependencies = ["torch", "numpy"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lietorch_mojo", "lietorch_mojo.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+lietorch_mojo = ["*.so", "mojo/*.mojo"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: needs a GPU or the compiled upstream lietorch (parity reference)",
+    "golden: reference comparison against stored ground truth",
+]
+addopts = "-m 'not integration and not golden'"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["lietorch_mojo", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*"]
+# Upstream lietorch API kept for drop-in compatibility, autograd hooks and pytest names.
+ignore_names = [
+    "pytestmark",
+    "__new__",
+    "forward",
+    "forward_op",
+    "backward_op",
+    "ToMatrix",
+    "Random",
+    "IdentityLike",
+    "InitFromVec",
+    "quaternion",
+    "add_",
+    "unbind",
+    "tangent_shape",
+    "translation",
+    "__torch_function__",
+    "_disabled_torch_function_impl",
+    "group_name",
+    # lietorch.gradcheck module constants and API
+    "TORCH_MAJOR",
+    "TORCH_MINOR",
+    "gradgradcheck",
+    "zero_gradients",
+]
+sort_by_size = true
+min_confidence = 60

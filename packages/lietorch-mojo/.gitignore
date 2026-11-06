@@ -1,0 +1,3 @@
+*.so
+__mojocache__/
+tests/mojo/.build/
