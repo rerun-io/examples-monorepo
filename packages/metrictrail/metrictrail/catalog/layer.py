@@ -39,6 +39,7 @@ from scipy.spatial.transform import Rotation
 from serde import serde
 
 from metrictrail.artifacts import ColoredCloud
+from metrictrail.palette import OURS_RGB, UPSTREAM_RGB
 from metrictrail.properties import any_values
 
 LayerSource: TypeAlias = Literal["metrictrail", "metrictrail_upstream"]
@@ -48,10 +49,9 @@ APPLICATION_ID: str = "dataforge"
 """dataforge's application id; every layer of a segment shares it."""
 TIMELINE: str = "video_time"
 """dataforge's duration timeline."""
-LAYER_COLORS: dict[LayerSource, tuple[int, int, int]] = {"metrictrail": (80, 220, 120), "metrictrail_upstream": (255, 140, 60)}
-"""Trajectory colour per source (SPEC section 3: port green, upstream orange; gt stays dataforge's blue)."""
-TRAIL_RGB: tuple[int, int, int] = (255, 215, 90)
-"""Trail colour (SPEC section 3)."""
+LAYER_COLORS: dict[LayerSource, tuple[int, int, int]] = {"metrictrail": OURS_RGB, "metrictrail_upstream": UPSTREAM_RGB}
+"""Trajectory, trail and keyframe colour per source: the explainer legend (port magenta #E040FB, upstream amber #F5A623;
+the gt layer is dataforge's and gets the legend's green from the blueprint)."""
 POINTS_VOXEL_M: dict[str, float] = {"rgbdtum": 0.01, "7scenes": 0.02, "kitti": 0.10}
 """Voxel of the keyframe cloud per VSLAM-LAB dataset (SPEC section 3)."""
 MAX_POINTS: int = 300_000
@@ -97,7 +97,9 @@ class LayerProperties:
     vipe_commit: str
     """ViPE commit of the tree that ran."""
     repo_commit: str | None
-    """Port only: the monorepo commit of the code that ran."""
+    """Port only: the monorepo commit of the code that ran (the run's own ``logs/commit.txt``, not the layer writer's)."""
+    repo_changes: list[str] | None
+    """Port only: uncommitted changes of the worktree the run used (``git status --short``); None when clean."""
     env: str
     """Pixi environment of the run (and lock hash for the port)."""
     host: str
@@ -276,7 +278,7 @@ def write_layer(target: Path, segment: str, source: LayerSource, inputs: LayerIn
         se3: Float64[ndarray, "4 4"] = inputs.gt_T_est_se3
         rec.log(paths["root"], rr.Transform3D(translation=se3[:3, 3], quaternion=rr.Quaternion(xyzw=matrix_to_quat_xyzw(se3[:3, :3]))), static=True)
         rec.log(paths["trajectory"], rr.LineStrips3D([positions], colors=[color], radii=rr.Radius.ui_points(1.5)), static=True)
-        rec.log(paths["trail"], rr.LineStrips3D.from_fields(colors=[TRAIL_RGB], radii=rr.Radius.ui_points(3.0)), static=True)
+        rec.log(paths["trail"], rr.LineStrips3D.from_fields(colors=[color], radii=rr.Radius.ui_points(3.0)), static=True)
         previous: Int64[ndarray, "n"] = np.maximum(np.arange(positions.shape[0]) - 1, 0)
         rec.send_columns(
             paths["trail"], indexes=[duration], columns=rr.LineStrips3D.columns(strips=list(np.stack([positions[previous], positions], axis=1)))

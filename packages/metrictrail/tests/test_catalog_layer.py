@@ -11,9 +11,11 @@ from numpy import ndarray
 from rerun.catalog import OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader
 
+from metrictrail.apis.catalog_layer import Config, read_run_commit, run_provenance
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.catalog.layer import LayerInputs, LayerProperties, backproject_keyframes, layer_entities, segment_id, write_layer
 from metrictrail.catalog.register import layer_uris, register_layer_run, register_layers
+from metrictrail.palette import OURS_RGB, UPSTREAM_RGB
 
 
 def layer_inputs(count: int = 20) -> LayerInputs:
@@ -37,6 +39,7 @@ def layer_properties() -> LayerProperties:
         producer="unit test (synthetic)",
         vipe_commit="ead2e00",
         repo_commit=None,
+        repo_changes=None,
         env="env",
         host="host",
         utc="2026-11-06T00:00:00Z",
@@ -102,6 +105,72 @@ def test_layer_schema(tmp_path: Path) -> None:
     assert "property:metrictrail:vslamlab_ate_m" not in columns  # null fields are left out
     assert "/world/runs/metrictrail/cam/pinhole/depth:DepthImage:buffer" in columns
     assert not any(name.startswith("property:RecordingInfo") for name in columns)  # a derived layer adds no RecordingInfo
+
+
+def packed_rgba(rgb: tuple[int, int, int]) -> int:
+    """Rerun's ``Color`` storage: 0xRRGGBBAA."""
+    return (rgb[0] << 24) | (rgb[1] << 16) | (rgb[2] << 8) | 0xFF
+
+
+@pytest.mark.parametrize(("source", "rgb"), [("metrictrail", OURS_RGB), ("metrictrail_upstream", UPSTREAM_RGB)])
+def test_layer_draws_path_trail_and_keyframes_in_the_legend_colour(tmp_path: Path, source: str, rgb: tuple[int, int, int]) -> None:
+    target: Path = write_layer(tmp_path / "layer.rrd", "s", source, layer_inputs(), layer_properties())  # pyrefly: ignore[bad-argument-type]
+    root: str = f"/world/runs/{source}"
+    colors: dict[str, set[int]] = {}
+    for chunk in RrdReader(target).store().stream():
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        for name in batch.schema.names:
+            if name.endswith(":colors"):
+                colors.setdefault(f"{chunk.entity_path}:{name.rsplit(':', 2)[-2]}", set()).update(
+                    value for row in batch.column(name).to_pylist() if row is not None for value in row
+                )
+    for entity in (f"{root}/trajectory:LineStrips3D", f"{root}/trail:LineStrips3D", f"{root}/keyframes:Points3D"):
+        assert colors[entity] == {packed_rgba(rgb)}, entity
+
+
+def port_config(runs_root: Path, *, repo_commit: str | None = None, producer: str = "examples-monorepo metrictrail @ {commit} (port)") -> Config:
+    return Config(
+        runs_root=runs_root, report=runs_root / "report.json", benchmark="tum", source="metrictrail", producer=producer, repo_commit=repo_commit
+    )
+
+
+RUN_SHA: str = "984620566242314896786000d163252d40a4c348"
+HEAD_SHA: str = "b3034506f76d43456056814fcc09590d5c66b91b"
+
+
+def write_commit_log(runs_root: Path, case: str, text: str) -> None:
+    log: Path = runs_root / "runs" / case / "logs" / "commit.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text(text, encoding="utf-8")
+
+
+def test_port_provenance_is_the_runs_own_commit_not_the_writers(tmp_path: Path) -> None:
+    write_commit_log(tmp_path, "desk", f"{RUN_SHA}\n M packages/metrictrail/metrictrail/apis/run.py\n")
+    provenance = run_provenance(port_config(tmp_path), "desk")
+    assert provenance.repo_commit == RUN_SHA
+    assert provenance.repo_changes == [" M packages/metrictrail/metrictrail/apis/run.py"]
+    assert provenance.producer == "examples-monorepo metrictrail @ 984620566 (port)"
+
+
+def test_port_provenance_refuses_a_commit_or_producer_that_contradicts_the_run_logs(tmp_path: Path) -> None:
+    write_commit_log(tmp_path, "desk", f"{RUN_SHA}\n")
+    with pytest.raises(ValueError, match="says the run used"):
+        run_provenance(port_config(tmp_path, repo_commit=HEAD_SHA), "desk")
+    with pytest.raises(ValueError, match="does not name the run's commit"):
+        run_provenance(port_config(tmp_path, producer=f"examples-monorepo metrictrail @ {HEAD_SHA[:9]}"), "desk")
+
+
+def test_port_provenance_without_run_logs_needs_an_explicit_commit(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="pass --repo-commit"):
+        run_provenance(port_config(tmp_path), "desk")
+    provenance = run_provenance(port_config(tmp_path, repo_commit=RUN_SHA), "desk")
+    assert (provenance.repo_commit, provenance.repo_changes, provenance.producer) == (RUN_SHA, None, "examples-monorepo metrictrail @ 984620566 (port)")
+
+
+def test_read_run_commit_refuses_a_short_or_missing_hash(tmp_path: Path) -> None:
+    (tmp_path / "commit.txt").write_text("9846205\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a full commit hash"):
+        read_run_commit(tmp_path / "commit.txt")
 
 
 def test_layer_is_never_overwritten(tmp_path: Path) -> None:

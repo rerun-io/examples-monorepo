@@ -73,7 +73,9 @@ class RunProvenance:
     vipe_commit: str
     """ViPE commit."""
     repo_commit: str | None
-    """Monorepo commit (our port only)."""
+    """Monorepo commit the run used (our port only)."""
+    repo_changes: list[str] | None
+    """Uncommitted changes of the run's worktree (our port only); None when clean."""
     env: str
     """Pixi environment of the run."""
     seed: int
@@ -150,6 +152,7 @@ def build_layer(
         producer=provenance.producer,
         vipe_commit=provenance.vipe_commit,
         repo_commit=provenance.repo_commit,
+        repo_changes=provenance.repo_changes,
         env=provenance.env,
         host=socket.gethostname(),
         utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
