@@ -50,10 +50,7 @@ def check_patchify(device: torch.device) -> KernelCheck:
     patches: Float32[Tensor, "b m c d d"] = cuda_corr.patchify_forward(net, coords_xy, radius)[0]
     diameter: int = 2 * radius + 2
     expected: Float32[Tensor, "b m c d d"] = torch.stack(
-        [
-            net[0, :, int(y) - radius : int(y) - radius + diameter, int(x) - radius : int(x) - radius + diameter]
-            for x, y in coords_xy[0].tolist()
-        ]
+        [net[0, :, int(y) - radius : int(y) - radius + diameter, int(x) - radius : int(x) - radius + diameter] for x, y in coords_xy[0].tolist()]
     )[None]
     return KernelCheck("vipe.metrictrail.dpvo_ext.cuda_corr", "patchify_forward", float((patches - expected).abs().max()))
 
