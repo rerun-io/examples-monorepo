@@ -49,6 +49,8 @@ from vipe.priors.depth.base import DepthEstimationModel, DepthType
 from vipe.utils.model_cache import ModelCache
 
 MoGe2Backend: TypeAlias = Literal["tensorrt", "torch"]
+MoGe2Encoder: TypeAlias = Literal["vits", "vitb", "vitl"]
+"""monoprior's MoGe-2 encoders (``monopriors.models.moge_v2.export.Encoder``)."""
 ImageKey: TypeAlias = tuple[int, int, bytes]
 """A source frame's cache key: height, width and a BLAKE2b digest of its 8-bit bytes."""
 
@@ -56,7 +58,7 @@ MOGE2_BACKEND_ENV: str = "VIPE_MOGE2_BACKEND"
 """Environment override of the backend choice (``auto`` when unset)."""
 MOGE2_RESOLUTION_LEVEL: int = 9
 """MoGe-2 detail level of every MetricTrail call (3600 tokens)."""
-MOGE2_ENCODERS: dict[str, str] = {"l": "vitl", "b": "vitb", "s": "vits"}
+MOGE2_ENCODERS: dict[str, MoGe2Encoder] = {"l": "vitl", "b": "vitb", "s": "vits"}
 """Registry variant -> monoprior encoder of the pinned ``moge-2-vit*-normal`` checkpoint."""
 MOGE2_FORWARD_CACHE_FRAMES: int = 256
 """Source frames whose raw forward outputs stay cached (least recently used are evicted)."""
@@ -137,7 +139,8 @@ def recover_metric_depth(forward: MoGe2Forward, *, fov_x: float | None, image_hw
 
     points: Float32[Tensor, "1 nh nw 3"] = forward.points[None].clone()
     mask: Bool[Tensor, "1 nh nw"] = forward.mask[None].clone()
-    camera: Any = recover_shift_and_intrinsics(points, mask, fov_x=fov_x, aspect_ratio=points.shape[2] / points.shape[1])
+    # MoGe's stub types fov_x as numbers.Number, which a float is only at runtime.
+    camera: Any = recover_shift_and_intrinsics(points, mask, fov_x=fov_x, aspect_ratio=points.shape[2] / points.shape[1])  # pyrefly: ignore[bad-argument-type]
     depth: Float32[Tensor, "1 nh nw"] = (points[..., 2] + camera.shift_b[:, None, None]) * forward.metric_scale
     mask &= depth > 0
     resized: Float32[Tensor, "1 h w"] = F.interpolate(depth[:, None], size=image_hw, mode="bilinear", align_corners=False)[:, 0]
@@ -162,7 +165,7 @@ class MoGe2Engine:
     def __init__(
         self,
         backend: MoGe2Backend,
-        encoder: str = "vitl",
+        encoder: MoGe2Encoder = "vitl",
         *,
         cache_frames: int = MOGE2_FORWARD_CACHE_FRAMES,
         predictor_factory: Callable[[tuple[int, int]], Any] | None = None,
@@ -170,7 +173,7 @@ class MoGe2Engine:
         if cache_frames < 0:
             raise ValueError(f"cache_frames must be >= 0, got {cache_frames}")
         self.backend: MoGe2Backend = backend
-        self.encoder: str = encoder
+        self.encoder: MoGe2Encoder = encoder
         self.cache_frames: int = int(cache_frames)
         self._factory: Callable[[tuple[int, int]], Any] = predictor_factory if predictor_factory is not None else self._default_predictor
         self._predictors: dict[tuple[int, int], Any] = {}
@@ -334,7 +337,7 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
         """The depth-provider block of the run record."""
         from monopriors.models.moge_v2 import MOGE_V2_CHECKPOINTS
 
-        repo, revision = MOGE_V2_CHECKPOINTS[MOGE2_ENCODERS[self.variant]]  # type: ignore[index]
+        repo, revision = MOGE_V2_CHECKPOINTS[MOGE2_ENCODERS[self.variant]]
         return {
             "model": "MoGe-2",
             "registry_name": f"moge2-{self.variant}-normal",
