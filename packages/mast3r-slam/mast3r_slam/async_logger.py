@@ -26,7 +26,7 @@ import traceback
 import warnings
 from pathlib import Path
 
-import lietorch
+import lietorch_mojo as lietorch
 import numpy as np
 import rerun as rr
 import torch

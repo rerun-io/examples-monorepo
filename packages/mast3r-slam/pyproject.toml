@@ -12,9 +12,13 @@ dependencies = [
     # come from [feature.common] in root pixi.toml.
     # Package-specific deps only:
     "einops",
+    "lietorch-mojo",
     "natsort",
     "pykdtree",
 ]
+
+[tool.uv.sources]
+lietorch-mojo = { path = "../lietorch-mojo", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["."]

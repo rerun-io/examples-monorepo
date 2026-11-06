@@ -1,4 +1,4 @@
-import lietorch
+import lietorch_mojo as lietorch
 import rerun as rr
 import torch
 from jaxtyping import Bool, Float, Int

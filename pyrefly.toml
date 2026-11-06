@@ -149,7 +149,7 @@ site-package-path = [
     ".pixi/envs/vistadream-dev/lib/python3.12/site-packages",
     ".pixi/envs/pyvrs-viewer-dev/lib/python3.12/site-packages",
     ".pixi/envs/gsplat-rust-renderer-dev/lib/python3.12/site-packages",
-    ".pixi/envs/mast3r-slam-dev/lib/python3.11/site-packages",
+    ".pixi/envs/mast3r-slam-dev/lib/python3.12/site-packages",
     ".pixi/envs/dpvo-dev/lib/python3.12/site-packages",
     ".pixi/envs/lietorch-mojo-dev/lib/python3.12/site-packages",
     ".pixi/envs/slam-evals-dev/lib/python3.12/site-packages",

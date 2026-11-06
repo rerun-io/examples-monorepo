@@ -2,7 +2,7 @@
 
 import multiprocessing as mp
 
-import lietorch
+import lietorch_mojo as lietorch
 import torch
 
 from mast3r_slam.frame import Frame, SharedKeyframes

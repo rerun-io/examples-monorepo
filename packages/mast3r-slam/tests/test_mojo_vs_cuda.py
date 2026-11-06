@@ -24,7 +24,7 @@ See also: tools/bench_kernels.py for throughput comparisons.
 
 from __future__ import annotations
 
-import lietorch
+import lietorch_mojo as lietorch
 import pytest
 import torch
 from torch import Tensor

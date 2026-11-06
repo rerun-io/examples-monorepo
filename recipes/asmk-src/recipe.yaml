@@ -27,9 +27,9 @@ requirements:
     # C compiler for the Cython extension (hamming distance computation)
     - ${{ compiler('c') }}
   host:
-    - python 3.11.*
+    - python 3.12.*
     - pip
     - setuptools
     - cython
   run:
-    - python 3.11.*
+    - python 3.12.*

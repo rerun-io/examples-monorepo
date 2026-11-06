@@ -43,7 +43,7 @@ Mojo-specific notes
 - `barrier()` replaces `__syncthreads()`.
 """
 
-from std.math import abs, cos, exp, sin, sqrt
+from std.math import abs, sqrt
 from std.utils.static_tuple import StaticTuple
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, WARP_SIZE, block_dim, block_idx, global_idx, lane_id, thread_idx
 from max.gpu.primitives import warp
@@ -56,7 +56,6 @@ comptime POSE_STRIDE = 8    # in-memory stride per pose (tx, ty, tz, qx, qy, qz,
 comptime RAYS_HDIM = 14 * (14 + 1) // 2  # lower-triangle of 14×14 block Hessian
 comptime RAYS_THREADS = 128  # block size for the rays step kernel
 comptime RAYS_WARPS = RAYS_THREADS // WARP_SIZE
-comptime POSE_RETR_THREADS = 256
 
 # ── Tensor layouts ───────────────────────────────────────────────────────────
 # A `0` extent is a runtime dimension (set when the view is built in gn.mojo);
@@ -192,20 +191,6 @@ struct Sim3Pose(TrivialRegisterPassable):
         var rot_dt = qi_inv.rotate(dt)
         return Sim3Pose(rot_dt * si_inv, qij, si_inv * other.s)
 
-    @inline(.always)
-    def compose(self, other: Sim3Pose) -> Sim3Pose:
-        """Left-multiply: T_new = self · other.
-
-        Used for pose retraction: T_new = Exp(dx) · T_old.
-        """
-        var rot_t = self.q.rotate(other.t)
-        return Sim3Pose(
-            Vec3(rot_t.x * self.s + self.t.x, rot_t.y * self.s + self.t.y, rot_t.z * self.s + self.t.z),
-            self.q * other.q,
-            self.s * other.s,
-        )
-
-
 
 @fieldwise_init
 struct TangentVec7(TrivialRegisterPassable):
@@ -245,82 +230,6 @@ def block_reduce_sum[LT: TensorLayout](
         block_sum = warp.sum(block_sum)
     barrier()
     return block_sum
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Lie-group exponential maps
-# ══════════════════════════════════════════════════════════════════════════════
-
-@inline(.always)
-def exp_so3(phi: Vec3) -> Quat:
-    """SO(3) exponential map: axis-angle vector φ → unit quaternion.
-
-    For small θ we use a Taylor expansion to avoid the sin(θ/2)/θ singularity.
-    Equivalent to CUDA's `expSO3()`.
-    """
-    var theta_sq = phi.squared_norm()
-    var theta_p4 = theta_sq * theta_sq
-    var imag: Float32
-    var real: Float32
-    if theta_sq < 1e-6:
-        imag = 0.5 - (1.0 / 48.0) * theta_sq + (1.0 / 3840.0) * theta_p4
-        real = 1.0 - (1.0 / 8.0) * theta_sq + (1.0 / 384.0) * theta_p4
-    else:
-        var theta = sqrt(theta_sq)
-        imag = sin(0.5 * theta) / theta
-        real = cos(0.5 * theta)
-    return Quat(imag * phi.x, imag * phi.y, imag * phi.z, real)
-
-
-@inline(.always)
-def exp_sim3(xi: TangentVec7) -> Sim3Pose:
-    """Sim(3) exponential map: 7D tangent vector ξ → finite similarity transform.
-
-    ξ = (τ, φ, σ) where τ is translational velocity, φ is axis-angle rotation,
-    and σ is log-scale. The translation includes the "V matrix" coupling.
-    Equivalent to CUDA's `expSIM3()`.
-    """
-    var tau = Vec3(xi.v0, xi.v1, xi.v2)
-    var phi = Vec3(xi.v3, xi.v4, xi.v5)
-    var sigma: Float32 = xi.v6
-
-    var scale = exp(sigma)
-    var q_rot = exp_so3(phi)
-    var theta_sq = phi.squared_norm()
-    var theta = sqrt(theta_sq)
-
-    # V-matrix coefficients: t = (C·I + A·[φ]× + B·[φ]×²) · τ
-    var A: Float32
-    var B: Float32
-    var C: Float32
-    if abs(sigma) < 1e-6:
-        C = 1.0
-        if abs(theta) < 1e-6:
-            A = 0.5
-            B = 1.0 / 6.0
-        else:
-            A = (1.0 - cos(theta)) / theta_sq
-            B = (theta - sin(theta)) / (theta_sq * theta)
-    else:
-        C = (scale - 1.0) / sigma
-        if abs(theta) < 1e-6:
-            var sigma_sq = sigma * sigma
-            A = ((sigma - 1.0) * scale + 1.0) / sigma_sq
-            B = (scale * 0.5 * sigma_sq + scale - 1.0 - sigma * scale) / (sigma_sq * sigma)
-        else:
-            var a = scale * sin(theta)
-            var b = scale * cos(theta)
-            var c = theta_sq + sigma * sigma
-            A = (a * sigma + (1.0 - b) * theta) / (theta * c)
-            B = (C - (((b - 1.0) * sigma + a * theta) / c)) / theta_sq
-
-    # t = C·τ + A·(φ × τ) + B·(φ × (φ × τ))
-    var t_out = tau * C
-    var cx = phi.cross(tau)
-    t_out = t_out + cx * A
-    var c2x = phi.cross(cx)
-    t_out = t_out + c2x * B
-    return Sim3Pose(t_out, q_rot, scale)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -574,45 +483,3 @@ def gauss_newton_rays_step_kernel(
                     hs[3, partial_edge, n - 7, m - 7] = h_sum  # H_jj
                     hs[3, partial_edge, m - 7, n - 7] = h_sum
             l += 1
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Pose retraction kernel
-# ══════════════════════════════════════════════════════════════════════════════
-
-@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](POSE_RETR_THREADS))
-def pose_retr_kernel(
-    poses: MutTileTensor[.float32, POSES_LT, MutUntrackedOrigin],
-    dx: ImmTileTensor[.float32, DX_LT, ImmUntrackedOrigin],
-    num_fix_arg: Int64,
-    num_poses_arg: Int64,
-):
-    """Apply Sim(3) tangent update to every unfixed pose: T_new = Exp(dx) · T_old.
-
-    One thread per unfixed pose; launched with `block_dim=POSE_RETR_THREADS`.
-    Equivalent to CUDA's `pose_retr_kernel()`.
-    """
-    comptime assert poses.flat_rank == 2 and dx.flat_rank == 2
-    var num_fix = Int(num_fix_arg)
-    var k = global_idx.x + num_fix
-    if k >= Int(num_poses_arg):
-        return
-    var dx_row = k - num_fix
-    var xi_tangent = TangentVec7(
-        dx[dx_row, 0][0], dx[dx_row, 1][0], dx[dx_row, 2][0],
-        dx[dx_row, 3][0], dx[dx_row, 4][0], dx[dx_row, 5][0], dx[dx_row, 6][0],
-    )
-    var old_pose = Sim3Pose(
-        Vec3(poses[k, 0][0], poses[k, 1][0], poses[k, 2][0]),
-        Quat(poses[k, 3][0], poses[k, 4][0], poses[k, 5][0], poses[k, 6][0]),
-        poses[k, 7][0],
-    )
-    var new_pose = exp_sim3(xi_tangent).compose(old_pose)
-    poses[k, 0] = new_pose.t.x
-    poses[k, 1] = new_pose.t.y
-    poses[k, 2] = new_pose.t.z
-    poses[k, 3] = new_pose.q.x
-    poses[k, 4] = new_pose.q.y
-    poses[k, 5] = new_pose.q.z
-    poses[k, 6] = new_pose.q.w
-    poses[k, 7] = new_pose.s

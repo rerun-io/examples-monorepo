@@ -1,4 +1,4 @@
-import lietorch
+import lietorch_mojo as lietorch
 import torch
 from jaxtyping import Bool, Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
