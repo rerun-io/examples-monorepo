@@ -1,11 +1,13 @@
 """The catalog layer schema (entity paths, timeline, properties), its refusals, and registration (fake dataset)."""
 
+import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import pytest
+import rerun as rr
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from rerun.catalog import OnDuplicateSegmentLayer
@@ -13,9 +15,18 @@ from rerun.chunk import RrdReader
 
 from metrictrail.apis.catalog_layer import Config, read_run_commit, run_provenance
 from metrictrail.artifacts import ColoredCloud
-from metrictrail.catalog.layer import LayerInputs, LayerProperties, backproject_keyframes, layer_entities, segment_id, write_layer
+from metrictrail.catalog.build import read_capture_normals
+from metrictrail.catalog.layer import (
+    LayerInputs,
+    LayerProperties,
+    backproject_keyframes,
+    layer_entities,
+    normals_entities,
+    segment_id,
+    write_layer,
+)
 from metrictrail.catalog.register import layer_uris, register_layer_run, register_layers
-from metrictrail.palette import OURS_RGB, UPSTREAM_RGB
+from metrictrail.palette import OURS_RGB, TRT_RGB, UPSTREAM_RGB
 
 
 def layer_inputs(count: int = 20) -> LayerInputs:
@@ -112,7 +123,7 @@ def packed_rgba(rgb: tuple[int, int, int]) -> int:
     return (rgb[0] << 24) | (rgb[1] << 16) | (rgb[2] << 8) | 0xFF
 
 
-@pytest.mark.parametrize(("source", "rgb"), [("metrictrail", OURS_RGB), ("metrictrail_upstream", UPSTREAM_RGB)])
+@pytest.mark.parametrize(("source", "rgb"), [("metrictrail", OURS_RGB), ("metrictrail_upstream", UPSTREAM_RGB), ("metrictrail_trt", TRT_RGB)])
 def test_layer_draws_path_trail_and_keyframes_in_the_legend_colour(tmp_path: Path, source: str, rgb: tuple[int, int, int]) -> None:
     target: Path = write_layer(tmp_path / "layer.rrd", "s", source, layer_inputs(), layer_properties())  # pyrefly: ignore[bad-argument-type]
     root: str = f"/world/runs/{source}"
@@ -126,6 +137,62 @@ def test_layer_draws_path_trail_and_keyframes_in_the_legend_colour(tmp_path: Pat
                 )
     for entity in (f"{root}/trajectory:LineStrips3D", f"{root}/trail:LineStrips3D", f"{root}/keyframes:Points3D"):
         assert colors[entity] == {packed_rgba(rgb)}, entity
+
+
+JPEG: bytes = b"\xff\xd8\xff\xe0 not decoded by the writer \xff\xd9"
+
+
+def test_layer_with_normals_logs_each_image_at_its_rows_video_time_and_the_normals_cloud(tmp_path: Path) -> None:
+    inputs: LayerInputs = dataclasses.replace(
+        layer_inputs(),
+        normals_jpeg={7: JPEG, 3: JPEG + b"3"},
+        points_normals=ColoredCloud(points_xyz=np.ones((4, 3), dtype=np.float32), colors_rgb=np.full((4, 3), 128, dtype=np.uint8)),
+    )
+    target: Path = write_layer(tmp_path / "layer.rrd", "s", "metrictrail_trt", inputs, layer_properties())
+    schema = RrdReader(target).store().schema()
+    paths: dict[str, str] = normals_entities("metrictrail_trt")
+    assert set(paths.values()) | set(layer_entities("metrictrail_trt").values()) <= set(schema.entity_paths())
+    assert [index.name for index in schema.index_columns()] == ["video_time"]
+    images: list[tuple[int, bytes]] = []
+    for chunk in RrdReader(target).store().stream():
+        if chunk.entity_path == paths["normals"]:
+            batch: pa.RecordBatch = chunk.to_record_batch()
+            times: list[int] = batch.column("video_time").cast(pa.int64()).to_pylist()
+            images += [(time, bytes(blob[0])) for time, blob in zip(times, batch.column("EncodedImage:blob").to_pylist(), strict=True)]
+    assert images == [(int(inputs.times_ns[3]), JPEG + b"3"), (int(inputs.times_ns[7]), JPEG)]
+
+
+def test_layer_without_normals_writes_no_normals_entities(tmp_path: Path) -> None:
+    target: Path = write_layer(tmp_path / "layer.rrd", "s", "metrictrail", layer_inputs(), layer_properties())
+    assert not set(normals_entities("metrictrail").values()) & set(RrdReader(target).store().schema().entity_paths())
+
+
+def write_capture(path: Path, se3: Float64[ndarray, "4 4"], sim3: Float64[ndarray, "4 4"], est_xyz: Float64[ndarray, "c 3"]) -> None:
+    rec = rr.RecordingStream("run", recording_id="capture")
+    rec.save(path)
+    rec.set_time("frame", sequence=2)
+    rec.log("cam/normals", rr.EncodedImage(contents=JPEG, media_type="image/jpeg"))
+    for entity, gt_T_est in (("metric/cloud_normals", se3), ("world/cloud_normals", sim3)):
+        gt_xyz: Float64[ndarray, "c 3"] = est_xyz @ gt_T_est[:3, :3].T + gt_T_est[:3, 3]
+        rec.log(entity, rr.Points3D(gt_xyz.astype(np.float32), colors=[[10, 20, 30]] * est_xyz.shape[0]), static=True)
+    rec.flush()
+    rec.disconnect()
+
+
+def test_read_capture_normals_maps_the_cloud_back_to_the_estimate_and_keys_images_by_tracked_row(tmp_path: Path) -> None:
+    se3: Float64[ndarray, "4 4"] = np.eye(4)
+    se3[:3, :3] = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    se3[:3, 3] = [1.0, 2.0, 3.0]
+    sim3: Float64[ndarray, "4 4"] = se3.copy()
+    sim3[:3, :3] *= 0.5
+    est_xyz: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, 1.0], [1.0, 0.5, 2.0], [-1.0, 0.0, 0.5]])
+    write_capture(tmp_path / "capture.rrd", se3, sim3, est_xyz)
+    normals = read_capture_normals(tmp_path / "capture.rrd", se3, sim3)
+    assert normals.images_jpeg == {2: JPEG}
+    np.testing.assert_allclose(normals.cloud.points_xyz, est_xyz, atol=1e-6)
+    assert normals.cloud.colors_rgb.tolist() == [[10, 20, 30]] * 3
+    with pytest.raises(ValueError, match="not of this alignment"):
+        read_capture_normals(tmp_path / "capture.rrd", se3, se3)
 
 
 def port_config(runs_root: Path, *, repo_commit: str | None = None, producer: str = "examples-monorepo metrictrail @ {commit} (port)") -> Config:
@@ -164,7 +231,28 @@ def test_port_provenance_without_run_logs_needs_an_explicit_commit(tmp_path: Pat
     with pytest.raises(ValueError, match="pass --repo-commit"):
         run_provenance(port_config(tmp_path), "desk")
     provenance = run_provenance(port_config(tmp_path, repo_commit=RUN_SHA), "desk")
-    assert (provenance.repo_commit, provenance.repo_changes, provenance.producer) == (RUN_SHA, None, "examples-monorepo metrictrail @ 984620566 (port)")
+    assert (provenance.repo_commit, provenance.repo_changes, provenance.producer) == (
+        RUN_SHA,
+        None,
+        "examples-monorepo metrictrail @ 984620566 (port)",
+    )
+
+
+def test_rebased_run_keeps_its_own_commit_beside_the_branch_commit(tmp_path: Path) -> None:
+    log: Path = tmp_path / "runs-of-the-sweep" / "desk" / "logs" / "commit.txt"
+    log.parent.mkdir(parents=True)
+    log.write_text(f"{RUN_SHA}\n", encoding="utf-8")
+    config: Config = dataclasses.replace(
+        port_config(tmp_path), source="metrictrail_trt", code_commit=HEAD_SHA, run_logs_root=tmp_path / "runs-of-the-sweep"
+    )
+    provenance = run_provenance(config, "desk")
+    assert (provenance.repo_commit, provenance.run_commit, provenance.producer) == (
+        HEAD_SHA,
+        RUN_SHA,
+        "examples-monorepo metrictrail @ 984620566 (port)",
+    )
+    with pytest.raises(ValueError, match="needs the run's own"):
+        run_provenance(config, "room")
 
 
 def test_read_run_commit_refuses_a_short_or_missing_hash(tmp_path: Path) -> None:

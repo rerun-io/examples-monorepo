@@ -19,6 +19,9 @@ Layout (``<root>`` = ``/world/runs/<source>``):
 * ``<root>/cam`` (``Transform3D`` per tracked frame) and ``<root>/cam/pinhole`` (static ``Pinhole``, RDF);
 * ``<root>/cam/pinhole/depth``: the run's metric depth (``depth/<name>.zip``, metres) at DPVO's keyframes;
 * ``<root>/keyframes`` (static ``Points3D``) and ``<root>/points`` (static ``Points3D``, the metric cloud);
+* runs with surface normals only: ``<root>/cam/pinhole/normals`` (``EncodedImage``, the live capture's MoGe-2 normals as
+  RGB ``(n + 1) / 2``, at the tracked row they were computed for) and ``<root>/points_normals`` (static ``Points3D``, the
+  fused cloud coloured by its normals in GT axes; Rerun's ``Points3D`` has no normals component);
 * recording property group ``<source>``: :class:`LayerProperties`.
 
 Catalog ``.rrd`` files cannot be overwritten in place: :func:`write_layer` refuses an existing target, so a rebuild
@@ -27,7 +30,7 @@ writes a new path and registers it again.
 
 import os
 from collections.abc import Iterable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -39,19 +42,20 @@ from scipy.spatial.transform import Rotation
 from serde import serde
 
 from metrictrail.artifacts import ColoredCloud
-from metrictrail.palette import OURS_RGB, UPSTREAM_RGB
+from metrictrail.palette import OURS_RGB, TRT_RGB, UPSTREAM_RGB
 from metrictrail.properties import any_values
 
-LayerSource: TypeAlias = Literal["metrictrail", "metrictrail_upstream"]
-"""Layer name and run source: our port, or unmodified upstream ViPE run on this machine."""
+LayerSource: TypeAlias = Literal["metrictrail", "metrictrail_upstream", "metrictrail_trt"]
+"""Layer name and run source: our port, unmodified upstream ViPE run on this machine, or our port's shipped path
+(MoGe-2 ``moge-2-vitl-normal`` through TensorRT, with surface normals)."""
 
 APPLICATION_ID: str = "dataforge"
 """dataforge's application id; every layer of a segment shares it."""
 TIMELINE: str = "video_time"
 """dataforge's duration timeline."""
-LAYER_COLORS: dict[LayerSource, tuple[int, int, int]] = {"metrictrail": OURS_RGB, "metrictrail_upstream": UPSTREAM_RGB}
-"""Trajectory, trail and keyframe colour per source: the explainer legend (port magenta #E040FB, upstream amber #F5A623;
-the gt layer is dataforge's and gets the legend's green from the blueprint)."""
+LAYER_COLORS: dict[LayerSource, tuple[int, int, int]] = {"metrictrail": OURS_RGB, "metrictrail_upstream": UPSTREAM_RGB, "metrictrail_trt": TRT_RGB}
+"""Trajectory, trail and keyframe colour per source: the explainer legend (port magenta #E040FB, upstream amber #F5A623,
+TensorRT shipped path cyan #22D3EE; the gt layer is dataforge's and gets the legend's green from the blueprint)."""
 POINTS_VOXEL_M: dict[str, float] = {"rgbdtum": 0.01, "7scenes": 0.02, "kitti": 0.10}
 """Voxel of the keyframe cloud per VSLAM-LAB dataset (SPEC section 3)."""
 MAX_POINTS: int = 300_000
@@ -82,6 +86,12 @@ def layer_entities(source: LayerSource) -> dict[str, str]:
     }
 
 
+def normals_entities(source: LayerSource) -> dict[str, str]:
+    """The entities a layer with surface normals adds to :func:`layer_entities`, by role."""
+    root: str = run_root(source)
+    return {"normals": f"{root}/cam/pinhole/normals", "points_normals": f"{root}/points_normals"}
+
+
 def segment_id(benchmark_folder: str, sequence: str) -> str:
     """dataforge's segment id of a VSLAM-LAB sequence: ``vslam-lab-<benchmark>__<sequence>`` (benchmark lower-cased)."""
     return f"vslam-lab-{benchmark_folder.lower()}__{sequence}"
@@ -97,7 +107,8 @@ class LayerProperties:
     vipe_commit: str
     """ViPE commit of the tree that ran."""
     repo_commit: str | None
-    """Port only: the monorepo commit of the code that ran (the run's own ``logs/commit.txt``, not the layer writer's)."""
+    """Port only: the monorepo commit of the code that ran (the run's own ``logs/commit.txt``, not the layer writer's,
+    unless ``run_commit`` holds that and this is the branch commit the run's code was rebased to)."""
     repo_changes: list[str] | None
     """Port only: uncommitted changes of the worktree the run used (``git status --short``); None when clean."""
     env: str
@@ -188,6 +199,12 @@ class LayerProperties:
     """End-to-end tracking frames per second (run record ``tracking.end_to_end_fps``)."""
     max_memory_allocated_gib: float | None
     """CUDA peak allocation after model load."""
+    run_commit: str | None = None
+    """The run's own ``logs/commit.txt`` commit when ``repo_commit`` is the branch commit its code was rebased to."""
+    normals_source: str | None = None
+    """What ``cam/pinhole/normals`` and ``points_normals`` are; None: the layer has no normals."""
+    num_normals_images: int | None = None
+    """Images in ``cam/pinhole/normals``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +227,10 @@ class LayerInputs:
     """Keyframe cloud in the estimate's world."""
     gt_T_est_se3: Float64[ndarray, "4 4"]
     """Rigid alignment estimate world -> GT world (the run-root transform)."""
+    normals_jpeg: dict[int, bytes] = field(default_factory=dict)
+    """Row (into ``world_T_cam``) -> JPEG of that frame's normals as RGB ``(n + 1) / 2``; empty: no normals images."""
+    points_normals: ColoredCloud | None = None
+    """The fused cloud in the estimate's world, coloured by its normals; None: none."""
 
 
 def matrix_to_quat_xyzw(rotation: Float64[ndarray, "3 3"]) -> list[float]:
@@ -265,6 +286,8 @@ def write_layer(target: Path, segment: str, source: LayerSource, inputs: LayerIn
         raise ValueError("refusing non-finite poses or non-increasing timestamps")
     if inputs.keyframe_rows.shape[0] != len(inputs.keyframe_depth_m):
         raise ValueError(f"{inputs.keyframe_rows.shape[0]} keyframe rows but {len(inputs.keyframe_depth_m)} depth images")
+    if any(not 0 <= row < inputs.times_ns.shape[0] for row in inputs.normals_jpeg):
+        raise ValueError(f"normals rows outside the {inputs.times_ns.shape[0]} tracked rows")
     paths: dict[str, str] = layer_entities(source)
     color: tuple[int, int, int] = LAYER_COLORS[source]
     positions: Float64[ndarray, "n 3"] = inputs.world_T_cam[:, :3, 3]
@@ -309,6 +332,19 @@ def write_layer(target: Path, segment: str, source: LayerSource, inputs: LayerIn
         if inputs.points is not None:
             rec.log(
                 paths["points"], rr.Points3D(inputs.points.points_xyz, colors=inputs.points.colors_rgb, radii=rr.Radius.ui_points(1.5)), static=True
+            )
+        normals_paths: dict[str, str] = normals_entities(source)
+        if inputs.normals_jpeg:
+            rows: list[int] = sorted(inputs.normals_jpeg)
+            rec.send_columns(
+                normals_paths["normals"],
+                indexes=[rr.TimeColumn(TIMELINE, duration=inputs.times_ns[rows].astype("timedelta64[ns]"))],
+                columns=rr.EncodedImage.columns(blob=[inputs.normals_jpeg[row] for row in rows], media_type=["image/jpeg"] * len(rows)),
+            )
+        if inputs.points_normals is not None:
+            cloud: ColoredCloud = inputs.points_normals
+            rec.log(
+                normals_paths["points_normals"], rr.Points3D(cloud.points_xyz, colors=cloud.colors_rgb, radii=rr.Radius.ui_points(1.5)), static=True
             )
         rec.send_property(source, any_values({item.name: getattr(properties, item.name) for item in fields(properties)}))
         rec.flush()

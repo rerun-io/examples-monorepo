@@ -13,6 +13,11 @@ Provenance is the run's, not the writer's: for our port the monorepo commit come
 ``<runs_root>/runs/<case>/logs/commit.txt`` (``git rev-parse HEAD`` then ``git status --short`` of the worktree when
 the run started), and ``{commit}`` in ``--producer`` is replaced by its short form. A run without those logs needs
 ``--repo-commit``; a ``--repo-commit`` that disagrees with the logs, or a producer naming another commit, is refused.
+Runs whose commit was later rebased away pass ``--code-commit`` (the branch commit that carries their code): it becomes
+``repo_commit`` and the logs' commit is kept as ``run_commit``.
+
+The TensorRT shipped path (``--source metrictrail_trt``) also takes ``--capture-rrd`` (each run's live capture, ``{case}``
+filled in) for the surface normals, and ``--depth-source`` names its depth.
 """
 
 import sys
@@ -23,7 +28,7 @@ from pathlib import Path
 from metrictrail.apis.vslamlab_eval import Report, RunScore
 from metrictrail.benchmarks import BENCHMARKS, BenchmarkName, BenchmarkPreset
 from metrictrail.catalog.build import RunProvenance, SeedScores, build_layer, find_score, read_report
-from metrictrail.catalog.layer import LayerInputs, LayerProperties, LayerSource, segment_id, write_layer
+from metrictrail.catalog.layer import DEPTH_SOURCE, LayerInputs, LayerProperties, LayerSource, segment_id, write_layer
 from metrictrail.catalog.register import dataset_name, open_dataset, register_layer_run
 from metrictrail.eval.protocols import PaperProtocol
 from metrictrail.frames import FrameSource, open_frames
@@ -70,6 +75,15 @@ class Config:
     """Layer files go to ``<results_root>/catalog/<source>/<run_tag>/``."""
     run_tag: str = field(default_factory=lambda: time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
     """New directory per build."""
+    run_logs_root: Path | None = None
+    """Parent of each run's ``<case>/logs/commit.txt``; None: ``<runs_root>/runs``."""
+    code_commit: str | None = None
+    """Branch commit that carries the runs' code when their own commit (``logs/commit.txt``) was rebased away; it
+    becomes ``repo_commit`` and the run's own commit ``run_commit``. Needs the run logs."""
+    depth_source: str = DEPTH_SOURCE
+    """``depth_source`` property: what the depth images are."""
+    capture_rrd: str | None = None
+    """Each run's live-capture ``.rrd`` with ``{case}`` for the case name (surface normals); None: no normals."""
     catalog_url: str | None = None
     """Register on this catalog after writing (``ERROR`` where the segment has no such layer yet, ``REPLACE`` where it
     has an older run); None: write only."""
@@ -105,24 +119,27 @@ def run_provenance(config: Config, name: str) -> RunProvenance:
         ValueError: If a port run has no known commit, ``--repo-commit`` disagrees with the run's logs, or the
             producer names another commit.
     """
-    log: Path = config.runs_root / "runs" / name / "logs" / "commit.txt"
+    log: Path = (config.run_logs_root if config.run_logs_root is not None else config.runs_root / "runs") / name / "logs" / "commit.txt"
     commit: RunCommit | None = read_run_commit(log) if log.is_file() else None
     if commit is not None and config.repo_commit is not None and not commit.sha.startswith(config.repo_commit):
         raise ValueError(f"--repo-commit {config.repo_commit} but {log} says the run used {commit.sha}")
     if commit is None and config.repo_commit is not None:
         commit = RunCommit(sha=config.repo_commit, changes=None)
-    if config.source == "metrictrail" and commit is None:
+    if config.code_commit is not None and not log.is_file():
+        raise ValueError(f"--code-commit needs the run's own {log}")
+    if config.source != "metrictrail_upstream" and commit is None:
         raise ValueError(f"{log} is missing; pass --repo-commit with the commit the port run used")
     producer: str = config.producer.replace("{commit}", commit.sha[:9]) if commit is not None else config.producer
-    if commit is not None and config.source == "metrictrail" and commit.sha[:9] not in producer:
+    if commit is not None and config.source != "metrictrail_upstream" and commit.sha[:9] not in producer:
         raise ValueError(f"producer {producer!r} does not name the run's commit {commit.sha[:9]}; write it as {{commit}}")
     return RunProvenance(
         producer=producer,
         vipe_commit=VIPE_COMMIT,
-        repo_commit=commit.sha if commit is not None else None,
+        repo_commit=config.code_commit if config.code_commit is not None else commit.sha if commit is not None else None,
         repo_changes=commit.changes if commit is not None else None,
         env=config.env,
         seed=config.seed,
+        run_commit=commit.sha if config.code_commit is not None and commit is not None else None,
     )
 
 
@@ -162,6 +179,8 @@ def main(config: Config) -> list[Path]:
             raster_policy=preset.raster_policy,
             tracking_stride=preset.tracking_stride,
             seed_scores=per_seed,
+            depth_source=config.depth_source,
+            capture_rrd=Path(config.capture_rrd.replace("{case}", name)) if config.capture_rrd is not None else None,
         )
         segment: str = segment_id(protocol.benchmark_folder, sequence)
         path: Path = write_layer(out_dir / f"{segment}.rrd", segment, config.source, built[0], built[1])

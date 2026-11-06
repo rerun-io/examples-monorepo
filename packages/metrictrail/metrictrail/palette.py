@@ -16,6 +16,8 @@ UPSTREAM_RGB: tuple[int, int, int] = (245, 166, 35)
 """Upstream ViPE (unmodified) run on this machine: amber #F5A623."""
 OURS_RGB: tuple[int, int, int] = (224, 64, 251)
 """Our port: magenta #E040FB."""
+TRT_RGB: tuple[int, int, int] = (34, 211, 238)
+"""Our port's shipped path (MoGe-2 ``moge-2-vitl-normal`` through TensorRT, with surface normals): cyan #22D3EE."""
 GT_RGB: tuple[int, int, int] = (61, 220, 151)
 """Ground truth: green #3DDC97."""
 BA_WINDOW_RGB: tuple[int, int, int] = (255, 224, 102)

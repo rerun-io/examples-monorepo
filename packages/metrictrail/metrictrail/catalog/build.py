@@ -13,9 +13,11 @@ from pathlib import Path
 import numpy as np
 from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
+from rerun.chunk import RrdReader
 from serde import SerdeError
 from serde.json import from_json
 
+from metrictrail import entities
 from metrictrail.apis.vslamlab_eval import Report, RunScore
 from metrictrail.artifacts import ColoredCloud, iter_depth_zip, subsample_cloud
 from metrictrail.catalog.layer import (
@@ -38,6 +40,14 @@ VALID_DEPTH_M: tuple[float, float] = (0.2, 500.0)
 """Depth kept by the keyframe cloud, metres (the run record's MoGe-2 provider valid rule)."""
 ATE_TOLERANCE_M: float = 1e-9
 """Largest allowed difference between the layer's Sim(3) ATE and the report's ``paper_ate_m``."""
+CLOUD_TOLERANCE_M: float = 1e-4
+"""Largest allowed distance between the capture's SE(3)- and Sim(3)-aligned fused clouds mapped back to the estimate."""
+NORMALS_SOURCE: str = (
+    "live capture <case>.rrd: cam/normals (MoGe-2 normals, JPEG RGB (n+1)/2, logged on the tracked row where DPVO's keyframe "
+    "count grew) at that row's video_time; metric/cloud_normals (upstream fused cloud, normals in GT axes by the SE(3) "
+    "rotation) mapped back to the estimate world"
+)
+"""What a layer's normals entities hold (``normals_source``)."""
 
 
 def read_report(path: Path) -> Report:
@@ -80,6 +90,52 @@ class RunProvenance:
     """Pixi environment of the run."""
     seed: int
     """``pipeline.slam.seed`` of the run."""
+    run_commit: str | None = None
+    """The run's own commit when ``repo_commit`` is the branch commit its code was rebased to."""
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureNormals:
+    """The surface normals a run's live capture holds."""
+
+    images_jpeg: dict[int, bytes]
+    """Tracked row -> JPEG of that frame's normals (RGB ``(n + 1) / 2``)."""
+    cloud: ColoredCloud
+    """The fused cloud in the estimate's world, coloured by its normals in GT axes."""
+
+
+def read_capture_normals(rrd: Path, gt_T_est_se3: Float64[ndarray, "4 4"], gt_T_est_sim3: Float64[ndarray, "4 4"]) -> CaptureNormals:
+    """``cam/normals`` (on the ``frame`` timeline, = tracked row) and ``metric/cloud_normals`` of a live capture.
+
+    The cloud is logged SE(3)-aligned to GT; it is mapped back to the estimate's world here, and must agree with the
+    capture's Sim(3)-aligned ``world/cloud_normals`` mapped back the same way (so the capture is of this run).
+
+    Raises:
+        ValueError: If an entity is missing or the two clouds disagree by more than :data:`CLOUD_TOLERANCE_M`.
+    """
+    images: dict[int, bytes] = {}
+    clouds: dict[str, Float32[ndarray, "c 3"]] = {}
+    colors: UInt8[ndarray, "c 3"] | None = None
+    for chunk in RrdReader(rrd).store().stream():
+        path: str = chunk.entity_path.lstrip("/")
+        if path == entities.CAM_NORMALS:
+            batch = chunk.to_record_batch()
+            for frame, blob in zip(batch.column(entities.FRAME_TIMELINE).to_pylist(), batch.column("EncodedImage:blob").to_pylist(), strict=True):
+                images[int(frame)] = bytes(blob[0])
+        elif path in (entities.METRIC_CLOUD_NORMALS, entities.WORLD_CLOUD_NORMALS):
+            batch = chunk.to_record_batch()
+            clouds[path] = np.asarray(batch.column("Points3D:positions").to_pylist()[-1], dtype=np.float32)
+            if path == entities.METRIC_CLOUD_NORMALS:
+                packed: Int64[ndarray, "c"] = np.asarray(batch.column("Points3D:colors").to_pylist()[-1], dtype=np.int64)
+                colors = np.stack([(packed >> 24) & 255, (packed >> 16) & 255, (packed >> 8) & 255], axis=1).astype(np.uint8)
+    if not images or colors is None or len(clouds) != 2:
+        raise ValueError(f"{rrd}: needs cam/normals, metric/cloud_normals and world/cloud_normals; found {len(images)} images, {sorted(clouds)}")
+    from_se3: Float64[ndarray, "c 3"] = (clouds[entities.METRIC_CLOUD_NORMALS].astype(np.float64) - gt_T_est_se3[:3, 3]) @ gt_T_est_se3[:3, :3]
+    sim3_inverse: Float64[ndarray, "4 4"] = np.linalg.inv(gt_T_est_sim3)
+    from_sim3: Float64[ndarray, "c 3"] = clouds[entities.WORLD_CLOUD_NORMALS].astype(np.float64) @ sim3_inverse[:3, :3].T + sim3_inverse[:3, 3]
+    if from_se3.shape != from_sim3.shape or float(np.abs(from_se3 - from_sim3).max()) > CLOUD_TOLERANCE_M:
+        raise ValueError(f"{rrd}: its SE(3) and Sim(3) clouds do not map back to one estimate cloud; the capture is not of this alignment")
+    return CaptureNormals(images_jpeg=images, cloud=ColoredCloud(points_xyz=from_se3.astype(np.float32), colors_rgb=colors))
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,8 +159,12 @@ def build_layer(
     raster_policy: DisplayRaster,
     tracking_stride: int,
     seed_scores: SeedScores | None,
+    depth_source: str = DEPTH_SOURCE,
+    capture_rrd: Path | None = None,
 ) -> tuple[LayerInputs, LayerProperties]:
     """Layer inputs and properties of ``outputs`` on the VSLAM-LAB sequence of ``context``.
+
+    ``capture_rrd`` (the run's live capture) adds its surface normals (:func:`read_capture_normals`).
 
     Raises:
         ValueError: If a pose is non-finite (the paper contract), there is no keyframe depth, or the layer's Sim(3)
@@ -144,6 +204,7 @@ def build_layer(
     )
     se3: Float64[ndarray, "4 4"] = aligned.se3.gt_T_est
     sim3: Float64[ndarray, "4 4"] = aligned.sim3.gt_T_est
+    normals: CaptureNormals | None = read_capture_normals(capture_rrd, se3, sim3) if capture_rrd is not None else None
     per_seed: list[float] | None = seed_scores.paper_ate_m if seed_scores is not None else None
     gt_rule: str = (
         f"nearest GT within {context.protocol.max_dt_ns / 1e6:g} ms" if context.protocol.gt_match == "nearest_time" else "frame index"
@@ -192,11 +253,14 @@ def build_layer(
         paper_table=report.summary.paper_table,
         paper_dataset_value=report.summary.paper_value,
         paper_units=report.summary.units,
-        depth_source=DEPTH_SOURCE,
+        depth_source=depth_source,
         points_voxel_m=voxel_m,
         runtime_s=record.runtime_seconds if record is not None else None,
         tracking_fps=record.tracking.end_to_end_fps if record is not None and record.tracking is not None else None,
         max_memory_allocated_gib=record.runtime.max_memory_allocated_gib if record is not None and record.runtime is not None else None,
+        run_commit=provenance.run_commit,
+        normals_source=f"{NORMALS_SOURCE} ({capture_rrd})" if normals is not None else None,
+        num_normals_images=len(normals.images_jpeg) if normals is not None else None,
     )
     inputs = LayerInputs(
         world_T_cam=world_T_cam,
@@ -207,5 +271,7 @@ def build_layer(
         keyframe_depth_m=depths,
         points=subsample_cloud(cloud, MAX_POINTS),
         gt_T_est_se3=se3,
+        normals_jpeg=normals.images_jpeg if normals is not None else {},
+        points_normals=subsample_cloud(normals.cloud, MAX_POINTS) if normals is not None else None,
     )
     return inputs, properties
