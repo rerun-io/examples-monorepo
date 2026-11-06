@@ -8,6 +8,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from jaxtyping import Float
+from sam_3d_body.models.decoders.prompt_encoder import PromptEncoder
+from sam_3d_body.models.heads.camera_head import PerspectiveHead
+from sam_3d_body.models.meta_arch.sam3d_body import SAM3DBody
 from torch import Tensor, nn
 from torch.overrides import TorchFunctionMode
 
@@ -16,9 +19,6 @@ from posekit.models.sam3d_body import Sam3dBodyStage, _StageClock
 from posekit.models.sam3d_body_head import CaptureMhrHead
 from posekit.models.sam3d_body_keypoints import sample_keypoint_features
 from posekit.ops.compile import compile_unless_dev
-from sam3d_body.models.decoders.prompt_encoder import PromptEncoder
-from sam3d_body.models.heads.camera_head import PerspectiveHead
-from sam3d_body.models.meta_arch.sam3d_body import SAM3DBody
 
 PoseFields: TypeAlias = dict[str, Tensor | np.ndarray | None]
 DecoderOutput: TypeAlias = tuple[Tensor, list[PoseFields]]
@@ -134,9 +134,10 @@ class CapturePromptEncoder(PromptEncoder):
             self.dense[size] = self.encoder.get_dense_pe(size)
         return self.dense[size]
 
-    def get_mask_embeddings(self, masks: Tensor | None = None, bs: int = 1, size: tuple[int, int] = (16, 16)) -> tuple[Tensor, Tensor]:
+    # Upstream annotates PromptEncoder.get_mask_embeddings as returning a Tensor; it returns (mask, no-mask) embeddings.
+    def get_mask_embeddings(self, masks: Tensor | None = None, bs: int = 1, size: tuple[int, int] = (16, 16)) -> tuple[Tensor, Tensor]:  # pyrefly: ignore[bad-override]
         """Keep the released mask conditioning."""
-        return self.encoder.get_mask_embeddings(masks, bs, size)
+        return self.encoder.get_mask_embeddings(masks, bs, size)  # pyrefly: ignore[bad-return]
 
 
 class CapturedBodyDecoder:

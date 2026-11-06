@@ -1,0 +1,6 @@
+[package]
+name = "sam-3d-body-src"
+version = "1.0.0.b5c765a"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

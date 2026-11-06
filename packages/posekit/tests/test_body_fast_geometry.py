@@ -27,6 +27,7 @@ def test_constant_sparse_linear_matches_values_and_gradients(batch: int) -> None
 
 @pytest.mark.parametrize("convention", ["xyz", "ZYX", "XZY"])
 def test_euler_conversion_matches_roma(convention: str) -> None:
+    pytest.importorskip("sam_3d_body", reason="SAM 3D Body source needs the posekit-body environment")
     from posekit.models.sam3d_body_geometry import rotmat_to_euler
 
     torch.manual_seed(7)
@@ -37,8 +38,10 @@ def test_euler_conversion_matches_roma(convention: str) -> None:
 
 
 def test_compact_pose_conversion_matches_released_math() -> None:
+    pytest.importorskip("sam_3d_body", reason="SAM 3D Body source needs the posekit-body environment")
+    from sam_3d_body.models.modules.mhr_utils import compact_cont_to_model_params_body, compact_cont_to_model_params_hand
+
     from posekit.models.sam3d_body_geometry import CompactPose
-    from sam3d_body.models.modules.mhr_utils import compact_cont_to_model_params_body, compact_cont_to_model_params_hand
 
     torch.manual_seed(11)
     for kind, width, reference in (("body", 260, compact_cont_to_model_params_body), ("hand", 54, compact_cont_to_model_params_hand)):
@@ -50,9 +53,11 @@ def test_compact_pose_conversion_matches_released_math() -> None:
 @pytest.mark.parametrize("twoway", [False, True])
 @pytest.mark.parametrize("skip_first_pe", [False, True])
 def test_export_decoder_mask_matches_released_layer(twoway: bool, skip_first_pe: bool) -> None:
+    pytest.importorskip("sam_3d_body", reason="SAM 3D Body source needs the posekit-body environment")
     pytest.importorskip("trtkit", reason="SAM decoder export requires trtkit")
+    from sam_3d_body.models.modules.transformer import TransformerDecoderLayer
+
     from posekit.models.sam3d_body_onnx import ExportDecoderLayer
-    from sam3d_body.models.modules.transformer import TransformerDecoderLayer
 
     torch.manual_seed(23)
     layer = TransformerDecoderLayer(

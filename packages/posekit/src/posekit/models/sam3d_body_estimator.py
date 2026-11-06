@@ -1,5 +1,9 @@
 """Core inference utilities for SAM 3D Body model (hands + body fusion).
 
+Adapted from upstream's ``sam_3d_body/sam_3d_body_estimator.py`` (facebookresearch/sam-3d-body
+b5c765a, SAM License; see recipes/sam-3d-body-src): typed outputs and an RGB/xyxy/K entry point
+over the upstream ``SAM3DBody`` model.
+
 This module provides:
 
 - ``PoseOutputsNP``: Batched outputs from the model forward pass (internal)
@@ -23,20 +27,18 @@ import numpy as np
 import torch
 from jaxtyping import Float, Int, UInt8
 from numpy import ndarray
-from serde import from_dict, serde
-from torch import Tensor
-from torchvision.transforms import ToTensor
-
-from sam3d_body.data.transforms import (
+from sam_3d_body.data.transforms import (
     Compose,
     GetBBoxCenterScale,
     TopdownAffine,
     VisionTransformWrapper,
 )
-from sam3d_body.data.utils.prepare_batch import PreparedBatchDict, prepare_batch
-from sam3d_body.models.meta_arch import SAM3DBody
-from sam3d_body.models.meta_arch.sam3d_body import BodyPredContainer
-from sam3d_body.utils import recursive_to
+from sam_3d_body.data.utils.prepare_batch import prepare_batch
+from sam_3d_body.models.meta_arch import SAM3DBody
+from sam_3d_body.utils import recursive_to
+from serde import from_dict, serde
+from torch import Tensor
+from torchvision.transforms import ToTensor
 
 
 @serde
@@ -253,10 +255,10 @@ class SAM3DBodyEstimator:
 
         #################### Construct batch data samples ####################
         transform: Callable[[dict[str, Any]], dict[str, Any] | None] = self.transform
-        batch: PreparedBatchDict = prepare_batch(rgb_hw3, transform, xyxy, masks, masks_score)
+        # Upstream annotates recursive_to's target as torch.device; it also takes device strings and "numpy".
+        batch: dict[str, Any] = recursive_to(prepare_batch(rgb_hw3, transform, xyxy, masks, masks_score), "cuda")  # pyrefly: ignore[bad-argument-type]
 
         #################### Run model inference on an image ####################
-        batch: PreparedBatchDict = recursive_to(batch, "cuda")
         batch_img: Float[Tensor, "B=1 N 3 H W"] = batch["img"]
 
         # Handle camera intrinsics
@@ -273,19 +275,25 @@ class SAM3DBodyEstimator:
         batch_dict: dict[Any, Any] = dict(batch)
         self.model._initialize_batch(batch_dict)
 
-        outputs: BodyPredContainer = self.model.run_inference(
+        # Upstream returns (pose_output, batch_lhand, batch_rhand, lhand_output, rhand_output) for "full"
+        # and the bare pose_output for "body" and "hand".
+        outputs: Any = self.model.run_inference(
             rgb_hw3,
             batch_dict,
             inference_type=inference_type,
             transform_hand=self.transform_hand,
             thresh_wrist_angle=self.thresh_wrist_angle,
         )
-        pose_output: dict[str, Any] = outputs.pose_output
-        batch_lhand: dict[str, Any] | None = outputs.batch_lhand
-        batch_rhand: dict[str, Any] | None = outputs.batch_rhand
+        pose_output: dict[str, Any]
+        batch_lhand: dict[str, Any] | None = None
+        batch_rhand: dict[str, Any] | None = None
+        if inference_type == "full":
+            pose_output, batch_lhand, batch_rhand, _, _ = outputs
+        else:
+            pose_output = outputs
 
         mhr_dict: dict[str, Any] = pose_output["mhr"]
-        out_np_dict: dict[str, ndarray] = cast(dict[str, ndarray], recursive_to(recursive_to(mhr_dict, "cpu"), "numpy"))
+        out_np_dict: dict[str, ndarray] = cast(dict[str, ndarray], recursive_to(recursive_to(mhr_dict, "cpu"), "numpy"))  # pyrefly: ignore[bad-argument-type]
         out_np: PoseOutputsNP = from_dict(PoseOutputsNP, out_np_dict)
 
         all_out: list[FinalPosePrediction] = []
@@ -294,10 +302,10 @@ class SAM3DBodyEstimator:
         for idx in range(n_dets):
             mask_arr: UInt8[ndarray, "h w 1"] | None = None
             if masks is not None:
-                mask_arr = masks[idx]
-                if mask_arr.ndim == 2:
-                    mask_arr = mask_arr[..., np.newaxis]
-                mask_arr = (mask_arr > 0.5).astype(np.uint8, copy=False)
+                mask: ndarray = masks[idx]
+                if mask.ndim == 2:
+                    mask = mask[..., np.newaxis]
+                mask_arr = (mask > 0.5).astype(np.uint8, copy=False)
             pred = FinalPosePrediction(
                 bbox=bbox_tensor[0, idx].cpu().numpy(),
                 focal_length=np.asarray(out_np.focal_length[idx]),

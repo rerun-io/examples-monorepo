@@ -13,6 +13,7 @@ Environments consume it as a source dependency: `<name> = { path = "recipes/<nam
 | `egohand-src` | [NVIDIA/IsaacCapture](https://github.com/NVIDIA/IsaacCapture) archive `479063c` (`src/python/isaaccapture_egopost`), sha256 `49dd5594…`; installs `egohand` and `egohand_inference` | OpenMDW-1.1 (+ `THIRD_PARTY_LICENSES.md`) | 6 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate` |
 | `hexels-src` (+ `hexel-kernel`, `fused-ssim`, `simple-knn`, `image-gs`) | [honeycomb-surfels/hexels](https://github.com/honeycomb-surfels/hexels) git `698d1af`, its submodules and baselines at the revisions upstream records | not declared in the recipe | 0 (applies upstream's own 2DGS `adaptations.patch`, sha256-checked) | `hexels` |
 | `mast3r-src` | [naver/mast3r](https://github.com/naver/mast3r) git `f5209af` (+ DUSt3R, CroCo submodules) | not declared in the recipe | 5 (+ 2 replaced files) | `mast3r-slam` (linux-64) |
+| `sam-3d-body-src` | [facebookresearch/sam-3d-body](https://github.com/facebookresearch/sam-3d-body) archive `b5c765a`, sha256 `71199eaf…`; installs `sam_3d_body` | SAM License (`LICENSE`) | 3 | `posekit-sam3d-body` |
 
 Bump a recipe:
 

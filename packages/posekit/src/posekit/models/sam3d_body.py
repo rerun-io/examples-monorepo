@@ -1,13 +1,13 @@
 """Meta SAM 3D Body as a posekit role: person boxes (+ masks, camera) -> MHR whole-body meshes with hands.
 
-``Sam3dBodyPredictor`` is a :class:`~posekit.models.base.TopDownBodyPose3d` over the vendored upstream
-inference source (``src/sam3d_body``, see VENDORED.md). ``mode="full"`` runs the body pass, one hand pass
+``Sam3dBodyPredictor`` is a :class:`~posekit.models.base.TopDownBodyPose3d` over upstream's
+inference source (``sam_3d_body``, recipes/sam-3d-body-src). ``mode="full"`` runs the body pass, one hand pass
 per hand crop (the left crop mirrored), a keypoint-prompted body decoder pass, and merges the hands into
 the body with MHR forward kinematics: three backbone passes per person. ``mode="body"`` runs the body
 pass only. Crops are cut on the CPU, one frame at a time, exactly as upstream does: this is the eager
 reference the goldens and the speed baseline measure.
 
-Upstream behaviour kept on purpose (see VENDORED.md): the hand decoder's ``hand_logits`` are computed and
+Upstream behaviour kept on purpose (see the sam-3d-body-src recipe): the hand decoder's ``hand_logits`` are computed and
 never read; the crop size is fixed at 512; 2D keypoints are projected about the image centre even when a
 camera with another principal point is given.
 """
@@ -283,12 +283,13 @@ class Sam3dBodyPredictor(TopDownBodyPose3d):
         return head
 
     def __init__(self, config: Sam3dBodyConfig) -> None:
-        from sam3d_body.build_models import load_sam_3d_body
-        from sam3d_body.sam_3d_body_estimator import SAM3DBodyEstimator
+        from sam_3d_body.build_models import load_sam_3d_body
+
+        from posekit.models.sam3d_body_estimator import SAM3DBodyEstimator
 
         self.config: Sam3dBodyConfig = config
         checkpoint: Path = config.checkpoint_path()
-        model, _ = load_sam_3d_body(checkpoint / "model.ckpt", device="cuda", mhr_path=checkpoint / "assets" / "mhr_model.pt")
+        model, _ = load_sam_3d_body(str(checkpoint / "model.ckpt"), device="cuda", mhr_path=str(checkpoint / "assets" / "mhr_model.pt"))
         self.estimator: SAM3DBodyEstimator = SAM3DBodyEstimator(model)
         self.faces: Int64[Tensor, "f 3"] = torch.from_numpy(self.estimator.faces.astype(np.int64)).cuda()
         self.num_vertices: int = int(self.faces.max()) + 1

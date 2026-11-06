@@ -47,8 +47,8 @@ from posekit.body_mv_rerun import log_camera_outputs, log_exo_videos, log_fallba
 from posekit.body_mv_sequence import ExoRig, exo_camera_names, load_exo_rig
 from posekit.models import AnnotatedBodyPose3dConfig
 from posekit.models.sam3d_body import MhrBodyModel, Sam3dBodyConfig, Sam3dBodyPredictor
+from posekit.models.sam3d_body_estimator import FinalPosePrediction
 from posekit.ops.multiview_body import MultiviewBodyOptimizer, MultiviewOptimizerConfig
-from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
 @dataclass(slots=True)

@@ -15,9 +15,9 @@ from numpy import ndarray
 from torch import Tensor
 
 from posekit.models.sam3d_body import MhrBodyModel
+from posekit.models.sam3d_body_estimator import FinalPosePrediction
 from posekit.ops.multiview_body import OptimizationResult, ValidationResult, validate_reprojection
 from posekit.ops.multiview_body.mhr_output import expect_mhr_tensor_tuple, expect_mhr_vertices
-from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
 @dataclass(frozen=True, slots=True)

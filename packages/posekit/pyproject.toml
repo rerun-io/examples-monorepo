@@ -20,15 +20,14 @@ simplecv = { path = "../simplecv", editable = true }
 build-backend = "hatchling.build"
 requires = ["hatchling"]
 
-# EgoHand and DINOv3 install from recipes/egohand-src and recipes/dinov3-src. SAM 3D Body's
-# inference source is vendored beside posekit as `sam3d_body` (see src/sam3d_body/VENDORED.md).
+# EgoHand, DINOv3 and SAM 3D Body install from recipes/{egohand-src,dinov3-src,sam-3d-body-src}.
 # src/sapiens2_lite is the vendored Sapiens2 pose network.
 [tool.hatch.build.targets.wheel]
-packages = ["src/posekit", "src/sapiens2_lite", "src/sam3d_body"]
+packages = ["src/posekit", "src/sapiens2_lite"]
 
 [tool.ruff]
 line-length = 150
-extend-exclude = ["src/sapiens2_lite", "src/sam3d_body"]
+extend-exclude = ["src/sapiens2_lite"]
 
 [tool.pytest.ini_options]
 markers = [

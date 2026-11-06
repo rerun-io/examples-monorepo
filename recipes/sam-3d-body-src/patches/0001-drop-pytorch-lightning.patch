@@ -1,0 +1,74 @@
+--- a/sam_3d_body/models/meta_arch/base_model.py
++++ b/sam_3d_body/models/meta_arch/base_model.py
+@@ -11,15 +11,10 @@
+ 
+ from ..optim.fp16_utils import convert_module_to_f16, convert_to_fp16_safe
+ 
+-from .base_lightning_module import BaseLightningModule
+-
+-
+-class BaseModel(BaseLightningModule):
++class BaseModel(torch.nn.Module):
+     def __init__(self, cfg: Optional[CfgNode], **kwargs):
+         super().__init__()
+ 
+-        # Save hyperparameters
+-        self.save_hyperparameters(logger=False)
+         self.cfg = cfg
+ 
+         self._initialze_model(**kwargs)
+--- a/sam_3d_body/utils/logging.py
++++ b/sam_3d_body/utils/logging.py
+@@ -1,26 +1,9 @@
+ # Copyright (c) Meta Platforms, Inc. and affiliates.
+ import logging
+ 
+-from pytorch_lightning.utilities import rank_zero_only
+ 
+ 
+ def get_pylogger(name=__name__) -> logging.Logger:
+     """Initializes multi-GPU-friendly python command line logger."""
+ 
+-    logger = logging.getLogger(name)
+-
+-    # this ensures all logging levels get marked with the rank zero decorator
+-    # otherwise logs would get multiplied for each GPU process in multi-GPU setup
+-    logging_levels = (
+-        "debug",
+-        "info",
+-        "warning",
+-        "error",
+-        "exception",
+-        "fatal",
+-        "critical",
+-    )
+-    for level in logging_levels:
+-        setattr(logger, level, rank_zero_only(getattr(logger, level)))
+-
+-    return logger
++    return logging.getLogger(name)
+--- a/sam_3d_body/utils/checkpoint.py
++++ b/sam_3d_body/utils/checkpoint.py
+@@ -2,7 +2,6 @@
+ 
+ from collections import namedtuple
+ 
+-import pytorch_lightning as pl
+ import torch
+ 
+ from .logging import get_pylogger
+@@ -10,14 +9,6 @@
+ log = get_pylogger(__name__)
+ 
+ 
+-class CheckpointCallback(pl.callbacks.ModelCheckpoint):
+-    """Disable model checkpoint after validation to avoid DDP job hanging after resume"""
+-
+-    def on_validation_end(self, trainer, pl_module):
+-        # Override to do nothing
+-        pass
+-
+-
+ class _IncompatibleKeys(
+     namedtuple("IncompatibleKeys", ["missing_keys", "unexpected_keys"])
+ ):

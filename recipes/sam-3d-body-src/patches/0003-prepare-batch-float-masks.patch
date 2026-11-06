@@ -1,0 +1,23 @@
+--- a/sam_3d_body/data/utils/prepare_batch.py
++++ b/sam_3d_body/data/utils/prepare_batch.py
+@@ -29,7 +29,7 @@
+         data_info["bbox_format"] = "xyxy"
+ 
+         if masks is not None:
+-            data_info["mask"] = masks[idx].copy()
++            data_info["mask"] = masks[idx].astype(np.float32, copy=False)
+             if masks_score is not None:
+                 data_info["mask_score"] = masks_score[idx]
+             else:
+@@ -38,7 +38,10 @@
+             data_info["mask"] = np.zeros((height, width, 1), dtype=np.uint8)
+             data_info["mask_score"] = np.array(0.0, dtype=np.float32)
+ 
+-        data_list.append(transform(data_info))
++        transformed = transform(data_info)
++        if transformed is None:
++            raise ValueError("SAM 3D body transform returned None for an input detection.")
++        data_list.append(transformed)
+ 
+     batch = default_collate(data_list)
+ 

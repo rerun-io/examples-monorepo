@@ -103,12 +103,12 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
 
     def __init__(self, config: Sam3dBodyFastConfig) -> None:
         import warp as wp
+        from sam_3d_body.models.heads.mhr_head import MHRHead
 
         from posekit.models.sam3d_body_capture import CapturedBodyDecoder, CapturePromptEncoder, prepare_decoder_projection
         from posekit.models.sam3d_body_executor import BodyTensorExecutor
         from posekit.models.sam3d_body_head import CaptureMhrHead
         from posekit.models.sam3d_body_quantization import load_body_calibration
-        from sam3d_body.models.heads.mhr_head import MHRHead
 
         calibration = load_body_calibration(config.calibration) if config.backbone_onnx is not None and config.backbone_precision != "bf16" else None
         if calibration is not None and calibration.revision != config.hf_revision:
@@ -120,8 +120,9 @@ class FastSam3dBodyPredictor(Sam3dBodyPredictor):
         capture_pipeline: bool = config.gpu_preprocessing and config.capture_pipeline
         hand_backbone: nn.Module | None = None
         if config.decoder_onnx_dir is not None:
+            from sam_3d_body.models.modules.transformer import TransformerDecoderLayer
+
             from posekit.models.sam3d_body_onnx import build_decoder_layer
-            from sam3d_body.models.modules.transformer import TransformerDecoderLayer
 
             for name, decoder in (("body", model.decoder), ("hand", model.decoder_hand)):
                 for index, layer in enumerate(decoder.layers):
