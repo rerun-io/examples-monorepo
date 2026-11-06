@@ -233,8 +233,9 @@ class FrameTracker:
             uv_k = uv_k.view(-1, 2)
             meas_k = torch.cat((uv_k, torch.log(Xk[..., 2:3])), dim=-1)
             # Avoid any bad calcs in log
-            valid_meas_k = Xk[..., 2:3] > self.cfg["depth_eps"]
-            meas_k[~valid_meas_k.repeat(1, 3)] = 0.0
+            valid_depth: Bool[Tensor, "hw 1"] = Xk[..., 2:3] > self.cfg["depth_eps"]
+            meas_k[~valid_depth.repeat(1, 3)] = 0.0
+            valid_meas_k = valid_depth
 
         return Xf[idx_f2k], Xk, world_sim3_camf, world_sim3_camk, Cf[idx_f2k], Ck, meas_k, valid_meas_k
 
