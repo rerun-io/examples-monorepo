@@ -86,23 +86,31 @@ properties in the layer, not sidecar files.
 Metric: ATE RMSE after one Sim(3) alignment per sequence, unweighted mean, as in the paper. We wrote the tolerance
 before the first result: a dataset passes if |mean - paper| <= max(3 sigma, 10 % of the paper value, half a unit of
 the last printed digit), and the port matches upstream if |port - upstream| <= 3 sqrt(sigma_port^2 + sigma_up^2)
-(0.2 cm floor). "Provisional" means fewer than 3 seeds.
+(0.2 cm floor). All runs are on an RTX 5090.
 
-"Port" means this package. The port results below were made before lietorch-mojo was wired in, with a temporary
-provider (upstream lietorch C++ re-exported as `lietorch_mojo`); see Known gaps.
-"Upstream" means unmodified ViPE `ead2e00` with its own lietorch and MoGe-2. All runs are on an RTX 5090.
+### Shipped path: TensorRT `moge-2-vitl-normal`
 
-<!-- results: p2/evalq/tables.json, 2026-11-06 ~11:34 UTC -->
+TUM RGB-D fr1, 9 sequences, seed 1234: **4.986 cm against the paper's 4.4 cm**, 0.15 cm outside the 0.44 cm band. This is
+a known and accepted trade for the surface normals (2026-11-06). The largest change against the reference path is
+fr1_floor (2.52 -> 4.61 cm); the other sequences stay inside the reference path's seed spread. 7-Scenes, KITTI and LaMAria
+were not re-run on this path. On fr1_xyz the run is 2.1x faster end to end (3:27.5 -> 1:40.5; 1,015 MoGe-2 forwards
+instead of 1,391; tracking 20.7 fps instead of 17.7).
+
+### Paper-match reference: ViPE's `moge-2-vitl`, torch FP32 (before the swap)
+
+The reproduction of the paper. "Port" is this package before the MoGe-2 swap; "upstream" is unmodified ViPE `ead2e00`
+with its own lietorch and MoGe-2. Seed 1234 answers the paper question; extra seeds ran only where time allowed.
 
 | Dataset (paper table) | Paper | Upstream ViPE | Port | Port vs upstream |
 | --- | --- | --- | --- | --- |
-| TUM RGB-D fr1, 9 seq (Table 9) | 4.4 cm | 4.478 ± 0.074 cm, 3 seeds: PASS | 4.497 ± 0.273 cm, 2 seeds: PASS (provisional) | +0.019 cm, band 0.850: PASS (provisional) |
-| 7-Scenes, 18 seq (Table 8) | 6.3 cm | 6.378 cm, 1 seed: PASS (provisional) | not run | not run |
-| KITTI 00-10 (Tables 1, 12) | 14.05 m | 13.482 m, 1 seed: PASS (provisional) | not run | not run |
+| TUM RGB-D fr1, 9 seq (Table 9) | 4.4 cm | 4.478 ± 0.074 cm, 3 seeds: PASS | 4.553 ± 0.217 cm, 3 seeds: PASS | +0.075 cm, band 0.687: PASS |
+| 7-Scenes, 18 seq (Table 8) | 6.3 cm | 6.378 cm, 1 seed: PASS | 6.377 cm, 1 seed: PASS | −0.001 cm (0.2 cm floor): PASS |
+| KITTI 00-10 (Tables 1, 12) | 14.05 m | 13.450 ± 0.044 m, 2 seeds: PASS | 14.089 ± 0.430 m, 2 seeds: PASS | +0.639 m, band 1.298: PASS |
+| LaMAria R_01_easy, 1 of 5 seq (Table 10) | 3.09 m | not run | 3.251 m, 1 seed: PASS (band 0.309) | — |
 
-KITTI per sequence: upstream 01 is outside its band (27.98 m against the paper's 35.94 m, 1 seed).
-
-The run speed of the port is the same as upstream's: 17.4 fps against 17.2 fps on TUM.
+These port runs used a temporary lietorch provider (upstream lietorch C++ re-exported as `lietorch_mojo`). One check on
+lietorch-mojo: TUM fr1_xyz, seed 1234, 1.295 cm against 1.297 cm. KITTI 01 beats the paper on both sides (upstream
+27.98 m against 35.94 m). Tracking speed of the port is +2 % (TUM) to +4 % (KITTI) against upstream.
 
 ## Build time
 
@@ -117,15 +125,18 @@ cache (a cold download was not measured):
 
 ## Known gaps
 
-- **Port results predate lietorch-mojo.** The tables above used upstream lietorch C++ as a temporary `lietorch_mojo`
-  provider. One check on lietorch-mojo: TUM fr1_xyz, seed 1234, 1.295 cm against 1.297 cm with the temporary provider
-  (Sim(3) scale 1.0999 against 1.0988).
-- **Seeds.** Only TUM has 3 upstream seeds. The port has 2 TUM seeds and no 7-Scenes or KITTI runs yet.
+- **TUM on the shipped path misses the band** (4.986 cm, 1 seed); accepted for the normals. Follow-up if paper-exact
+  depth is needed: a `moge-2-vitl` TensorRT engine for depth, plus `vitl-normal` on keyframes only for normals.
+- **Seeds.** Reference path: TUM 3 seeds per side, KITTI 2, 7-Scenes and LaMAria 1; shipped path: TUM 1.
+- **fr1_360** has two Sim(3)-scale modes on the same seed in upstream too (7.86 vs 10.09 cm): GPU nondeterminism in
+  calibration. Same-seed runs are not bit-reproducible.
+- **Not run:** Oxford Spires, VBR, Wild-SLAM, the other four LaMAria sequences, KITTI calibrated / loop closure / stereo.
+- **`metrictrail-log-run`** (post-hoc logging) has no normals; they exist in a live capture only.
 - **KITTI stereo** is not built. The stereo JIT path (`VIPE_METRICTRAIL_DPVO_JIT=1`) has no Eigen 3.4.0 at run time.
 - **linux-64 only.** linux-aarch64 (DGX Spark) was not tried.
 - **monopriors brings its full PyPI closure** (diffusers, pytorch-lightning, sam3, ...), although MoGe-2 needs only a
   few of those packages.
 - **`metrictrail-eval`'s default `--vslamlab-dir`** is a scratch path (`/tmp/metrictrail-scratch/vslamlab/VSLAM-LAB`).
   Pass your VSLAM-LAB checkout.
-- **Catalog.** The layers are registered only on a private catalog. Registration on the shared Spark catalog waits
-  for approval.
+- **Catalog.** The layers on the shared Spark catalog (`rerun+http://dgx-spark:51235`, datasets
+  `dataforge-vslam-lab-{rgbdtum,kitti,7scenes}` and `dataforge-lamaria`) are from the reference path.
