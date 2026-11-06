@@ -71,6 +71,18 @@ pixi run -e lietorch-mojo-dev --frozen gate               # lint, typecheck, dea
 Each test lane builds the extension first (`lietorch-mojo-build`), so a missing
 or stale `.so` cannot skip or pass silently.
 
+The parity tests (`test_backend_parity.py`, `test_api_parity.py`) compare
+against upstream lietorch outputs frozen into
+`tests/fixtures/lietorch_references.rrd` (inputs, forward and backward outputs,
+CPU and CUDA, float32 and float64, all four groups; the recording properties
+name the lietorch build). lietorch is not in any workspace environment. To
+regenerate the references (needs a CUDA GPU; lietorch comes from a throwaway
+`pixi exec` environment, never the lock):
+
+```bash
+pixi run -e lietorch-mojo-dev lietorch-mojo-freeze-references
+```
+
 `tests/test_api_snapshot.py` checks every public name of upstream lietorch
 (modules, classes, members, signatures, group constants, backend arities)
 against `tests/fixtures/lietorch_api.json`, with no lietorch installed. To
