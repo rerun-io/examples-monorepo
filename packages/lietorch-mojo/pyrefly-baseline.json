@@ -365,8 +365,29 @@
       "severity": "error"
     },
     {
+      "column": 12,
+      "path": "tests/api_surface.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `lietorch_backends`",
+      "severity": "error"
+    },
+    {
+      "column": 44,
+      "path": "tests/groups_common.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `retr`",
+      "severity": "error"
+    },
+    {
       "column": 1,
       "path": "tests/parity.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `cases`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/scaled_cases.py",
       "name": "missing-import",
       "concise_description": "Cannot find module `cases`",
       "severity": "error"
@@ -397,6 +418,20 @@
       "path": "tests/test_api.py",
       "name": "missing-attribute",
       "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_api_snapshot.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `api_surface`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_api_snapshot.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
       "severity": "error"
     },
     {
@@ -508,28 +543,28 @@
       "column": 35,
       "path": "tests/test_gradcheck.py",
       "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `Tensor` and `SE3`",
+      "concise_description": "`*` is not supported between `Tensor` and `LieGroup`",
       "severity": "error"
     },
     {
       "column": 35,
       "path": "tests/test_gradcheck.py",
       "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `None` and `SE3`",
+      "concise_description": "`*` is not supported between `None` and `LieGroup`",
       "severity": "error"
     },
     {
       "column": 35,
       "path": "tests/test_gradcheck.py",
       "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `Tensor` and `SE3`",
+      "concise_description": "`*` is not supported between `Tensor` and `LieGroup`",
       "severity": "error"
     },
     {
       "column": 35,
       "path": "tests/test_gradcheck.py",
       "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `None` and `SE3`",
+      "concise_description": "`*` is not supported between `None` and `LieGroup`",
       "severity": "error"
     },
     {
@@ -631,42 +666,49 @@
       "severity": "error"
     },
     {
-      "column": 41,
+      "column": 5,
+      "path": "tests/test_gradcheck.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `series_oracle`",
+      "severity": "error"
+    },
+    {
+      "column": 45,
       "path": "tests/test_gradcheck.py",
       "name": "missing-attribute",
       "concise_description": "Object of class `NoneType` has no attribute `log`",
       "severity": "error"
     },
     {
-      "column": 41,
+      "column": 45,
       "path": "tests/test_gradcheck.py",
       "name": "missing-attribute",
       "concise_description": "Object of class `NoneType` has no attribute `log`",
       "severity": "error"
     },
     {
-      "column": 13,
+      "column": 17,
       "path": "tests/test_gradcheck.py",
       "name": "bad-assignment",
       "concise_description": "`tuple[Literal[1], (a: Unknown, p3: Unknown, p4: Unknown) -> Tensor | None]` is not assignable to dict value type `tuple[int, (...) -> Tensor]`",
       "severity": "error"
     },
     {
-      "column": 13,
+      "column": 17,
       "path": "tests/test_gradcheck.py",
       "name": "bad-assignment",
       "concise_description": "`tuple[Literal[1], (a: Unknown, p3: Unknown, p4: Unknown) -> Tensor | None]` is not assignable to dict value type `tuple[int, (...) -> Tensor]`",
       "severity": "error"
     },
     {
-      "column": 42,
+      "column": 46,
       "path": "tests/test_gradcheck.py",
       "name": "missing-attribute",
       "concise_description": "Object of type `LieGroup | Tensor | None` has no attribute `retr`",
       "severity": "error"
     },
     {
-      "column": 46,
+      "column": 50,
       "path": "tests/test_gradcheck.py",
       "name": "missing-attribute",
       "concise_description": "Object of type `LieGroup | Tensor | None` has no attribute `act`",
@@ -701,31 +743,10 @@
       "severity": "error"
     },
     {
-      "column": 33,
-      "path": "tests/test_group_parity.py",
-      "name": "unsupported-operation",
-      "concise_description": "Cannot set item in `dict[str, list[Tensor]]`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "tests/test_group_parity.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `data`",
-      "severity": "error"
-    },
-    {
-      "column": 9,
-      "path": "tests/test_group_parity.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `object` has no attribute `SE3`",
-      "severity": "error"
-    },
-    {
       "column": 20,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -739,7 +760,7 @@
       "column": 20,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -753,7 +774,7 @@
       "column": 20,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -795,7 +816,7 @@
       "column": 16,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -816,7 +837,7 @@
       "column": 17,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -837,7 +858,7 @@
       "column": 17,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -858,7 +879,7 @@
       "column": 17,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -879,7 +900,7 @@
       "column": 19,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -893,7 +914,7 @@
       "column": 24,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -907,7 +928,7 @@
       "column": 16,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
@@ -921,32 +942,32 @@
       "column": 20,
       "path": "tests/test_group_parity.py",
       "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "concise_description": "`tuple[(ins: object) -> Any, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
       "severity": "error"
     },
     {
-      "column": 62,
+      "column": 69,
       "path": "tests/test_group_parity.py",
       "name": "bad-index",
       "concise_description": "Cannot index into `object`",
       "severity": "error"
     },
     {
-      "column": 22,
+      "column": 35,
       "path": "tests/test_group_parity.py",
-      "name": "bad-assignment",
-      "concise_description": "`tuple[(ins: object) -> Unknown, list[int]]` is not assignable to dict value type `tuple[(object, list[Tensor]) -> Tensor, list[int]]`",
+      "name": "unsupported-operation",
+      "concise_description": "Cannot set item in `dict[str, tuple[(object, list[Tensor]) -> Tensor, list[int]]]`",
       "severity": "error"
     },
     {
-      "column": 41,
+      "column": 54,
       "path": "tests/test_group_parity.py",
       "name": "bad-index",
       "concise_description": "Cannot index into `object`",
       "severity": "error"
     },
     {
-      "column": 55,
+      "column": 68,
       "path": "tests/test_group_parity.py",
       "name": "bad-index",
       "concise_description": "Cannot index into `object`",
@@ -982,9 +1003,352 @@
     },
     {
       "column": 1,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `groups_common`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of type `LieGroup | Tensor | None` has no attribute `inv`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `input` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `LieGroup | Tensor | None` is not assignable to parameter `input` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `other` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `input` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 19,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 48,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `input` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 74,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `input` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 30,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-assignment",
+      "concise_description": "`list[Tensor | Unknown | None]` is not assignable to `list[Tensor]`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `int` has no attribute `backward`",
+      "severity": "error"
+    },
+    {
+      "column": 16,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-return",
+      "concise_description": "Returned type `list[Tensor | None]` is not assignable to declared return type `list[Tensor]`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 74,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 16,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 48,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `square`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `input` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `other` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "tests/test_groups_generic.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `LieGroup | Tensor | None` is not assignable to parameter `group` with type `LieGroup` in function `lietorch_mojo.groups.LieGroupParameter.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 24,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 50,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `log`",
+      "severity": "error"
+    },
+    {
+      "column": 51,
+      "path": "tests/test_groups_generic.py",
+      "name": "unsupported-operation",
+      "concise_description": "`*` is not supported between `Tensor` and `LieGroup`",
+      "severity": "error"
+    },
+    {
+      "column": 51,
+      "path": "tests/test_groups_generic.py",
+      "name": "unsupported-operation",
+      "concise_description": "`*` is not supported between `None` and `LieGroup`",
+      "severity": "error"
+    },
+    {
+      "column": 50,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of type `LieGroup | Tensor | None` has no attribute `act`",
+      "severity": "error"
+    },
+    {
+      "column": 50,
+      "path": "tests/test_groups_generic.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of type `LieGroup | Tensor | None` has no attribute `adj`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_groups_parity_all.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_groups_parity_all.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `groups_common`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "tests/test_groups_parity_all.py",
+      "name": "unsupported-operation",
+      "concise_description": "Cannot set item in `dict[str, list[Tensor]]`",
+      "severity": "error"
+    },
+    {
+      "column": 22,
+      "path": "tests/test_groups_parity_all.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `list[Tensor | None]` is not assignable to parameter `object` with type `list[Tensor]` in function `list.append`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
       "path": "tests/test_math.py",
       "name": "missing-import",
       "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_pose_retr.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_rxso3_sim3_gradcheck.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_rxso3_sim3_gradcheck.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `input` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 40,
+      "path": "tests/test_rxso3_sim3_gradcheck.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Tensor | None` is not assignable to parameter `other` with type `Tensor` in function `torch._C._VariableFunctions.allclose`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_rxso3_sim3_gradcheck.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 56,
+      "path": "tests/test_rxso3_sim3_gradcheck.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_rxso3_sim3_parity.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "tests/test_rxso3_sim3_parity.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `lietorch_backends`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_rxso3_sim3_parity.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_rxso3_sim3_parity.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `scaled_cases`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "tests/test_rxso3_sim3_parity.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `retr`",
+      "severity": "error"
+    },
+    {
+      "column": 32,
+      "path": "tests/test_rxso3_sim3_parity.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `cpu`",
       "severity": "error"
     },
     {
