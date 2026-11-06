@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from einops import reduce, repeat
 from jaxtyping import Float, Float32, Int, UInt8
-from lietorch import SE3
+from lietorch_mojo import SE3
 from torch import Tensor
 
 from . import projective_ops as pops

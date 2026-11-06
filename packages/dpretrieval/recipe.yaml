@@ -25,9 +25,9 @@ requirements:
     - ninja
     - git
   host:
-    - python 3.11.*
+    - python 3.12.*
     - pybind11
     - libopencv <5  # OpenCV 5 dropped/moved features2d; DBoW2's find_package needs the v4 layout
   run:
-    - python 3.11.*
+    - python 3.12.*
     - libopencv <5  # OpenCV 5 dropped/moved features2d; DBoW2's find_package needs the v4 layout

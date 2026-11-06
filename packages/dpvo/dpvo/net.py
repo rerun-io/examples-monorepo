@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float, Int
-from lietorch import SE3
+from lietorch_mojo import SE3
 from torch import Tensor
 
 from . import altcorr, fastba

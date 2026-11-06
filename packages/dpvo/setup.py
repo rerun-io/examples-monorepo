@@ -5,8 +5,8 @@ The package's custom CUDA kernels are built explicitly with:
 
     python setup.py build_ext --inplace
 
-inside the activated Pixi environment, while `lietorch` comes from a
-prebuilt conda package.
+inside the activated Pixi environment. The Lie groups come from lietorch-mojo
+(packages/lietorch-mojo, built by the `lietorch-mojo-build` task).
 """
 
 import os

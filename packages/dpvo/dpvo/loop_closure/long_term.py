@@ -17,7 +17,7 @@ import torch
 import torch.multiprocessing as mp
 from einops import asnumpy, rearrange, repeat
 from jaxtyping import Float, Int, UInt8
-from lietorch import SE3
+from lietorch_mojo import SE3
 from torch import Tensor
 
 from .. import fastba

@@ -32,7 +32,7 @@ from typing import Any
 
 import torch
 from jaxtyping import Bool, Float, Int
-from lietorch import SE3
+from lietorch_mojo import SE3
 from torch import Tensor
 
 from . import projective_ops as pops
