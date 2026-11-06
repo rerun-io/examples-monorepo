@@ -125,6 +125,26 @@ def test_upstream_module_names_exist() -> None:
     assert all(callable(f) for f in (gradcheck, gradgradcheck, get_analytical_jacobian, get_numerical_jacobian))
 
 
+def test_names_vipe_uses_exist() -> None:
+    """The lietorch names ViPE's vendored copies (vipe/ext/lietorch, metrictrail dpvo) call, on every group.
+
+    ViPE's `.rotation` is a field of its own `ScaledTransform` dataclass (vipe/utils/geometry.py), not a lietorch name.
+    """
+    from lietorch_mojo import RxSO3, group_ops
+
+    methods: tuple[str, ...] = (
+        "adj", "adjT", "act", "vec", "translation", "matrix", "retr", "Identity", "IdentityLike", "InitFromVec", "Random",
+        "embedded_dim", "manifold_dim", "Jinv", "quaternion", "exp", "log", "inv", "mul", "detach", "view", "unbind",
+    )  # fmt: skip
+    for group in (SO3, RxSO3, SE3, Sim3):
+        missing: list[str] = [name for name in methods if not hasattr(group, name)]
+        assert not missing, f"{group.group_name}: {missing}"
+    assert callable(SE3.scale)
+    assert all(hasattr(group_ops, name) for name in ("Adj", "AdjT", "Act3", "Act4", "Jinv", "ToMatrix", "ToVec", "FromVec"))
+    assert all(callable(getattr(backends, name)) for name in ("act4", "act4_backward", "Jinv", "as_matrix", "projector"))
+    assert all(callable(getattr(lietorch_mojo, name)) for name in ("cat", "stack", "LieGroupParameter"))
+
+
 def test_gradcheck_module_returns_both_jacobians_like_upstream() -> None:
     """Upstream's gradcheck returns (analytical, numerical) for the first output; run_tests.py compares them."""
     from lietorch_mojo.gradcheck import gradcheck

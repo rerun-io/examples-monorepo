@@ -76,6 +76,14 @@ PYTHONPATH=$PWD pixi run -e mast3r-slam-dev --frozen python -m pytest -q        
 PYTHONPATH=$PWD pixi run -e mast3r-slam-dev --frozen python -m pytest -q -m integration   # CUDA + parity vs lietorch
 ```
 
+`tests/test_api_snapshot.py` checks every public name of upstream lietorch
+(modules, classes, members, signatures, group constants, backend arities)
+against `tests/fixtures/lietorch_api.json`, with no lietorch installed. To
+regenerate the snapshot, in an environment with the compiled lietorch:
+`python tests/api_surface.py`. The four-group tests (`test_groups_generic.py`,
+`test_groups_parity_all.py`) mark a group whose Mojo kernels are not built in
+as `xfail(strict=False)`.
+
 `integration` tests need a CUDA GPU or the compiled upstream lietorch (the
 parity reference, present in `mast3r-slam-dev` and `dpvo-dev`). Before the
 extension is built every module that needs it is skipped. `tests/test_math.py`

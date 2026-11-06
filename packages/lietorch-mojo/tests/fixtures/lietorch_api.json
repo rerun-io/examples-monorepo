@@ -1,0 +1,3800 @@
+{
+ "source": "lietorch (VSLAM-LAB/lietorch @ 3e2695dd, ai-demos lietorch 1.0 build 2)",
+ "regenerate": "python tests/api_surface.py  (from packages/lietorch-mojo, in an env with the compiled lietorch)",
+ "torch": "2.12.1",
+ "modules": {
+  ".": {
+   "LieGroupParameter": {
+    "kind": "reexport",
+    "of": ".groups.LieGroupParameter"
+   },
+   "RxSO3": {
+    "kind": "reexport",
+    "of": ".groups.RxSO3"
+   },
+   "SE3": {
+    "kind": "reexport",
+    "of": ".groups.SE3"
+   },
+   "SO3": {
+    "kind": "reexport",
+    "of": ".groups.SO3"
+   },
+   "Sim3": {
+    "kind": "reexport",
+    "of": ".groups.Sim3"
+   },
+   "broadcasting": {
+    "kind": "module",
+    "name": ".broadcasting"
+   },
+   "cat": {
+    "kind": "reexport",
+    "of": ".groups.cat"
+   },
+   "group_ops": {
+    "kind": "module",
+    "name": ".group_ops"
+   },
+   "groups": {
+    "kind": "module",
+    "name": ".groups"
+   },
+   "stack": {
+    "kind": "reexport",
+    "of": ".groups.stack"
+   }
+  },
+  ".groups": {
+   "Act3": {
+    "kind": "reexport",
+    "of": ".group_ops.Act3"
+   },
+   "Act4": {
+    "kind": "reexport",
+    "of": ".group_ops.Act4"
+   },
+   "Adj": {
+    "kind": "reexport",
+    "of": ".group_ops.Adj"
+   },
+   "AdjT": {
+    "kind": "reexport",
+    "of": ".group_ops.AdjT"
+   },
+   "Exp": {
+    "kind": "reexport",
+    "of": ".group_ops.Exp"
+   },
+   "FromVec": {
+    "kind": "reexport",
+    "of": ".group_ops.FromVec"
+   },
+   "Inv": {
+    "kind": "reexport",
+    "of": ".group_ops.Inv"
+   },
+   "Jinv": {
+    "kind": "reexport",
+    "of": ".group_ops.Jinv"
+   },
+   "LieGroup": {
+    "kind": "class",
+    "bases": [
+     "object"
+    ],
+    "members": {
+     "Identity": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "IdentityLike": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "G",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "InitFromVec": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Jinv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Random": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "sigma",
+        "KEYWORD_ONLY",
+        "1.0"
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__getitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__init__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__mul__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__repr__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__setitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "item",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "act": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "p",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adj": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adjT": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "apply_op": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "op",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "y",
+        "POSITIONAL_OR_KEYWORD",
+        "None"
+       ]
+      ]
+     },
+     "cpu": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "cuda": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "detach": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "device": {
+      "kind": "property"
+     },
+     "double": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "dtype": {
+      "kind": "property"
+     },
+     "exp": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "float": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "inv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "log": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "matrix": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "mul": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "quaternion": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "retr": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "shape": {
+      "kind": "property"
+     },
+     "tangent_shape": {
+      "kind": "property"
+     },
+     "to": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "args",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "translation": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "unbind": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dim",
+        "POSITIONAL_OR_KEYWORD",
+        "0"
+       ]
+      ]
+     },
+     "vec": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "view": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dims",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "LieGroupParameter": {
+    "kind": "class",
+    "bases": [
+     "Tensor"
+    ],
+    "members": {
+     "__getitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__init__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__mul__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__new__": {
+      "kind": "staticmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "requires_grad",
+        "POSITIONAL_OR_KEYWORD",
+        "True"
+       ]
+      ]
+     },
+     "add_": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "update",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "alpha",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adj": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "inv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "log": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "retr": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "Log": {
+    "kind": "reexport",
+    "of": ".group_ops.Log"
+   },
+   "Mul": {
+    "kind": "reexport",
+    "of": ".group_ops.Mul"
+   },
+   "RxSO3": {
+    "kind": "class",
+    "bases": [
+     "LieGroup"
+    ],
+    "members": {
+     "Identity": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "IdentityLike": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "G",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "InitFromVec": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Jinv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Random": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "sigma",
+        "KEYWORD_ONLY",
+        "1.0"
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__getitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__init__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__mul__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__repr__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__setitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "item",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "act": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "p",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adj": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adjT": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "apply_op": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "op",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "y",
+        "POSITIONAL_OR_KEYWORD",
+        "None"
+       ]
+      ]
+     },
+     "cpu": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "cuda": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "detach": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "device": {
+      "kind": "property"
+     },
+     "double": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "dtype": {
+      "kind": "property"
+     },
+     "embedded_dim": {
+      "kind": "constant",
+      "value": 5
+     },
+     "exp": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "float": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "group_id": {
+      "kind": "constant",
+      "value": 2
+     },
+     "group_name": {
+      "kind": "constant",
+      "value": "RxSO3"
+     },
+     "id_elem": {
+      "kind": "constant",
+      "value": {
+       "dtype": "torch.float32",
+       "values": [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0
+       ]
+      }
+     },
+     "inv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "log": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "manifold_dim": {
+      "kind": "constant",
+      "value": 4
+     },
+     "matrix": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "mul": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "quaternion": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "retr": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "shape": {
+      "kind": "property"
+     },
+     "tangent_shape": {
+      "kind": "property"
+     },
+     "to": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "args",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "translation": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "unbind": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dim",
+        "POSITIONAL_OR_KEYWORD",
+        "0"
+       ]
+      ]
+     },
+     "vec": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "view": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dims",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "SE3": {
+    "kind": "class",
+    "bases": [
+     "LieGroup"
+    ],
+    "members": {
+     "Identity": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "IdentityLike": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "G",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "InitFromVec": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Jinv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Random": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "sigma",
+        "KEYWORD_ONLY",
+        "1.0"
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__getitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__init__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__mul__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__repr__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__setitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "item",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "act": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "p",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adj": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adjT": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "apply_op": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "op",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "y",
+        "POSITIONAL_OR_KEYWORD",
+        "None"
+       ]
+      ]
+     },
+     "cpu": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "cuda": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "detach": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "device": {
+      "kind": "property"
+     },
+     "double": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "dtype": {
+      "kind": "property"
+     },
+     "embedded_dim": {
+      "kind": "constant",
+      "value": 7
+     },
+     "exp": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "float": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "group_id": {
+      "kind": "constant",
+      "value": 3
+     },
+     "group_name": {
+      "kind": "constant",
+      "value": "SE3"
+     },
+     "id_elem": {
+      "kind": "constant",
+      "value": {
+       "dtype": "torch.float32",
+       "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+       ]
+      }
+     },
+     "inv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "log": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "manifold_dim": {
+      "kind": "constant",
+      "value": 6
+     },
+     "matrix": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "mul": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "quaternion": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "retr": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "scale": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "s",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "shape": {
+      "kind": "property"
+     },
+     "tangent_shape": {
+      "kind": "property"
+     },
+     "to": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "args",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "translation": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "unbind": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dim",
+        "POSITIONAL_OR_KEYWORD",
+        "0"
+       ]
+      ]
+     },
+     "vec": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "view": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dims",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "SO3": {
+    "kind": "class",
+    "bases": [
+     "LieGroup"
+    ],
+    "members": {
+     "Identity": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "IdentityLike": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "G",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "InitFromVec": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Jinv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Random": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "sigma",
+        "KEYWORD_ONLY",
+        "1.0"
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__getitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__init__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__mul__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__repr__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__setitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "item",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "act": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "p",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adj": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adjT": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "apply_op": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "op",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "y",
+        "POSITIONAL_OR_KEYWORD",
+        "None"
+       ]
+      ]
+     },
+     "cpu": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "cuda": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "detach": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "device": {
+      "kind": "property"
+     },
+     "double": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "dtype": {
+      "kind": "property"
+     },
+     "embedded_dim": {
+      "kind": "constant",
+      "value": 4
+     },
+     "exp": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "float": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "group_id": {
+      "kind": "constant",
+      "value": 1
+     },
+     "group_name": {
+      "kind": "constant",
+      "value": "SO3"
+     },
+     "id_elem": {
+      "kind": "constant",
+      "value": {
+       "dtype": "torch.float32",
+       "values": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+       ]
+      }
+     },
+     "inv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "log": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "manifold_dim": {
+      "kind": "constant",
+      "value": 3
+     },
+     "matrix": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "mul": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "quaternion": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "retr": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "shape": {
+      "kind": "property"
+     },
+     "tangent_shape": {
+      "kind": "property"
+     },
+     "to": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "args",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "translation": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "unbind": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dim",
+        "POSITIONAL_OR_KEYWORD",
+        "0"
+       ]
+      ]
+     },
+     "vec": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "view": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dims",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "Sim3": {
+    "kind": "class",
+    "bases": [
+     "LieGroup"
+    ],
+    "members": {
+     "Identity": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "IdentityLike": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "G",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "InitFromVec": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Jinv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "Random": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "batch_shape",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "sigma",
+        "KEYWORD_ONLY",
+        "1.0"
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__getitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__init__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "data",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__mul__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__repr__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "__setitem__": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "index",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "item",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "act": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "p",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adj": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "adjT": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "apply_op": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "op",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "y",
+        "POSITIONAL_OR_KEYWORD",
+        "None"
+       ]
+      ]
+     },
+     "cpu": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "cuda": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "detach": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "device": {
+      "kind": "property"
+     },
+     "double": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "dtype": {
+      "kind": "property"
+     },
+     "embedded_dim": {
+      "kind": "constant",
+      "value": 8
+     },
+     "exp": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "x",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "float": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "device",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "group_id": {
+      "kind": "constant",
+      "value": 4
+     },
+     "group_name": {
+      "kind": "constant",
+      "value": "Sim3"
+     },
+     "id_elem": {
+      "kind": "constant",
+      "value": {
+       "dtype": "torch.float32",
+       "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0
+       ]
+      }
+     },
+     "inv": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "log": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "manifold_dim": {
+      "kind": "constant",
+      "value": 7
+     },
+     "matrix": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "mul": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "other",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "quaternion": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "retr": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "a",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "shape": {
+      "kind": "property"
+     },
+     "tangent_shape": {
+      "kind": "property"
+     },
+     "to": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "args",
+        "VAR_POSITIONAL",
+        null
+       ],
+       [
+        "kwargs",
+        "VAR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "translation": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "unbind": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dim",
+        "POSITIONAL_OR_KEYWORD",
+        "0"
+       ]
+      ]
+     },
+     "vec": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "view": {
+      "kind": "function",
+      "signature": [
+       [
+        "self",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "dims",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "ToMatrix": {
+    "kind": "reexport",
+    "of": ".group_ops.ToMatrix"
+   },
+   "ToVec": {
+    "kind": "reexport",
+    "of": ".group_ops.ToVec"
+   },
+   "broadcast_inputs": {
+    "kind": "reexport",
+    "of": ".broadcasting.broadcast_inputs"
+   },
+   "cat": {
+    "kind": "function",
+    "signature": [
+     [
+      "group_list",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "dim",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ]
+    ]
+   },
+   "stack": {
+    "kind": "function",
+    "signature": [
+     [
+      "group_list",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "dim",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ]
+    ]
+   }
+  },
+  ".group_ops": {
+   "Act3": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "act_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "act"
+     }
+    }
+   },
+   "Act4": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "act4_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "act4"
+     }
+    }
+   },
+   "Adj": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "adj_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "adj"
+     }
+    }
+   },
+   "AdjT": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "adjT_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "adjT"
+     }
+    }
+   },
+   "Exp": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "expm_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "expm"
+     }
+    }
+   },
+   "FromVec": {
+    "kind": "class",
+    "bases": [
+     "Function"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "GroupOp": {
+    "kind": "class",
+    "bases": [
+     "Function"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     }
+    }
+   },
+   "Inv": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "inv_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "inv"
+     }
+    }
+   },
+   "Jinv": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": null
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "Jinv"
+     }
+    }
+   },
+   "Log": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "logm_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "logm"
+     }
+    }
+   },
+   "Mul": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": "mul_backward"
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "mul"
+     }
+    }
+   },
+   "ToMatrix": {
+    "kind": "class",
+    "bases": [
+     "GroupOp"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "backward_op": {
+      "kind": "backend_op",
+      "name": null
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     },
+     "forward_op": {
+      "kind": "backend_op",
+      "name": "as_matrix"
+     }
+    }
+   },
+   "ToVec": {
+    "kind": "class",
+    "bases": [
+     "Function"
+    ],
+    "members": {
+     "backward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "grad",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ]
+      ]
+     },
+     "forward": {
+      "kind": "classmethod",
+      "signature": [
+       [
+        "cls",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "ctx",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "group_id",
+        "POSITIONAL_OR_KEYWORD",
+        null
+       ],
+       [
+        "inputs",
+        "VAR_POSITIONAL",
+        null
+       ]
+      ]
+     }
+    }
+   }
+  },
+  ".broadcasting": {
+   "broadcast_inputs": {
+    "kind": "function",
+    "signature": [
+     [
+      "x",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "y",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ]
+    ]
+   },
+   "check_broadcastable": {
+    "kind": "function",
+    "signature": [
+     [
+      "x",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "y",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ]
+    ]
+   }
+  },
+  ".gradcheck": {
+   "TORCH_MAJOR": {
+    "kind": "constant",
+    "type": "int"
+   },
+   "TORCH_MINOR": {
+    "kind": "constant",
+    "type": "int"
+   },
+   "get_analytical_jacobian": {
+    "kind": "function",
+    "signature": [
+     [
+      "input",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "output",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "nondet_tol",
+      "POSITIONAL_OR_KEYWORD",
+      "0.0"
+     ],
+     [
+      "grad_out",
+      "POSITIONAL_OR_KEYWORD",
+      "1.0"
+     ]
+    ]
+   },
+   "get_numerical_jacobian": {
+    "kind": "function",
+    "signature": [
+     [
+      "fn",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "input",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "target",
+      "POSITIONAL_OR_KEYWORD",
+      "None"
+     ],
+     [
+      "eps",
+      "POSITIONAL_OR_KEYWORD",
+      "0.001"
+     ],
+     [
+      "grad_out",
+      "POSITIONAL_OR_KEYWORD",
+      "1.0"
+     ]
+    ]
+   },
+   "gradcheck": {
+    "kind": "function",
+    "signature": [
+     [
+      "func",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "inputs",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "eps",
+      "POSITIONAL_OR_KEYWORD",
+      "1e-06"
+     ],
+     [
+      "atol",
+      "POSITIONAL_OR_KEYWORD",
+      "1e-05"
+     ],
+     [
+      "rtol",
+      "POSITIONAL_OR_KEYWORD",
+      "0.001"
+     ],
+     [
+      "raise_exception",
+      "POSITIONAL_OR_KEYWORD",
+      "True"
+     ],
+     [
+      "check_sparse_nnz",
+      "POSITIONAL_OR_KEYWORD",
+      "False"
+     ],
+     [
+      "nondet_tol",
+      "POSITIONAL_OR_KEYWORD",
+      "0.0"
+     ],
+     [
+      "check_undefined_grad",
+      "POSITIONAL_OR_KEYWORD",
+      "True"
+     ],
+     [
+      "check_grad_dtypes",
+      "POSITIONAL_OR_KEYWORD",
+      "False"
+     ]
+    ]
+   },
+   "gradgradcheck": {
+    "kind": "function",
+    "signature": [
+     [
+      "func",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "inputs",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "grad_outputs",
+      "POSITIONAL_OR_KEYWORD",
+      "None"
+     ],
+     [
+      "eps",
+      "POSITIONAL_OR_KEYWORD",
+      "1e-06"
+     ],
+     [
+      "atol",
+      "POSITIONAL_OR_KEYWORD",
+      "1e-05"
+     ],
+     [
+      "rtol",
+      "POSITIONAL_OR_KEYWORD",
+      "0.001"
+     ],
+     [
+      "gen_non_contig_grad_outputs",
+      "POSITIONAL_OR_KEYWORD",
+      "False"
+     ],
+     [
+      "raise_exception",
+      "POSITIONAL_OR_KEYWORD",
+      "True"
+     ],
+     [
+      "nondet_tol",
+      "POSITIONAL_OR_KEYWORD",
+      "0.0"
+     ],
+     [
+      "check_undefined_grad",
+      "POSITIONAL_OR_KEYWORD",
+      "True"
+     ],
+     [
+      "check_grad_dtypes",
+      "POSITIONAL_OR_KEYWORD",
+      "False"
+     ]
+    ]
+   },
+   "iter_tensors": {
+    "kind": "function",
+    "signature": [
+     [
+      "x",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "only_requiring_grad",
+      "POSITIONAL_OR_KEYWORD",
+      "False"
+     ]
+    ]
+   },
+   "make_jacobian": {
+    "kind": "function",
+    "signature": [
+     [
+      "input",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ],
+     [
+      "num_out",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ]
+    ]
+   },
+   "zero_gradients": {
+    "kind": "function",
+    "signature": [
+     [
+      "x",
+      "POSITIONAL_OR_KEYWORD",
+      null
+     ]
+    ]
+   }
+  }
+ },
+ "backends": {
+  "Jinv": 3,
+  "act": 3,
+  "act4": 3,
+  "act4_backward": 4,
+  "act_backward": 4,
+  "adj": 3,
+  "adjT": 3,
+  "adjT_backward": 4,
+  "adj_backward": 4,
+  "as_matrix": 2,
+  "expm": 2,
+  "expm_backward": 3,
+  "inv": 2,
+  "inv_backward": 3,
+  "logm": 2,
+  "logm_backward": 3,
+  "mul": 3,
+  "mul_backward": 4,
+  "projector": 2
+ }
+}
