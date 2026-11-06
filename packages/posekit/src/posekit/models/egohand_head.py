@@ -1,11 +1,19 @@
 """Export adapter for EgoHand's pose and direct-keypoint heads on virtual crops."""
 
+from typing import TYPE_CHECKING
+
 import torch
 from jaxtyping import Float32
 from torch import Tensor, nn
 
-from egohand.models.egohand import EgoHand
 from egohand.utils.ray_pe import fourier_encode_angles
+
+# Upstream's EgoHand imports Hydra at module load; environments that only reach posekit.models for other
+# roles (mv-api, exo-calib) do not install it. Annotations name the class; at runtime it is an nn.Module.
+if TYPE_CHECKING:
+    from egohand.models.egohand import EgoHand
+else:
+    EgoHand = nn.Module
 
 
 class EgoHandHead(nn.Module):

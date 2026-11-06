@@ -9,7 +9,7 @@ scales, joint rotations and every hand vertex remain dynamic outputs.
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 import torch
 from jaxtyping import Int64, UInt8
@@ -18,7 +18,6 @@ from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.artifacts import build_once
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
-from egohand.models.egohand import EgoHand
 from posekit.cameras import CalibratedCamera, CameraKey, camera_key
 from posekit.models.base import TopDownHandPose3d
 from posekit.models.egohand import (
@@ -44,6 +43,13 @@ from posekit.models.egohand_quantization import EgoHandCalibration, calibrated_b
 from posekit.predictions import BoxDetections, HandDetections, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.runtimes import create_runtime_from_onnx
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
+
+# Upstream's EgoHand imports Hydra at module load; environments that only reach posekit.models for other
+# roles (mv-api, exo-calib) do not install it. Annotations name the class; at runtime it is an nn.Module.
+if TYPE_CHECKING:
+    from egohand.models.egohand import EgoHand
+else:
+    EgoHand = torch.nn.Module
 
 CACHED_FAST_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Base path of the calibrated NVFP4 DINOv3; the calibration digest and FP8 tail count are appended to its stem."""
