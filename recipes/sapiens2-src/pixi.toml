@@ -1,0 +1,6 @@
+[package]
+name = "sapiens2-src"
+version = "2.0.0.0e51c12"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

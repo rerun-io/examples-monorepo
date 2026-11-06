@@ -1,4 +1,4 @@
-"""Vendored Sapiens2 against the pre-port outputs (main 2100af2bc, packages/sapiens2-pose) on the same person boxes.
+"""Sapiens2 (posekit.models.sapiens_net over sapiens2-src) against the pre-port outputs (main 2100af2bc, packages/sapiens2-pose) on the same person boxes.
 
 The references live on the NAS (README beside them). Inputs: the 16 example images, one call each, and 32 frames of
 the hands clip in one call (dynamic batches). The stored YOLOX boxes are fed back, so both runs see identical crops;

@@ -898,9 +898,10 @@ description = "Mount HF-hosted egoexo-forge RRDs (5 per source) as a Rerun catal
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.mv-api.dependencies]
-# posekit.models imports EgoHand and DINOv3 (see feature.posekit).
+# posekit's EgoHand, DINOv3 and Sapiens2 sources (see feature.posekit).
 egohand-src = { path = "recipes/egohand-src" }
 dinov3-src = { path = "recipes/dinov3-src" }
+sapiens2-src = { path = "recipes/sapiens2-src" }
 python = "3.12.*"
 h5py = ">=3.13.0,<4"
 natsort = ">=8.4.0,<9"
@@ -1047,10 +1048,12 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.posekit.dependencies]
 # posekit.models imports EgoHand (`egohand`, `egohand_inference`) and DINOv3 (`dinov3`) at import
-# time; every feature that installs posekit installs their pinned recipes (recipes/egohand-src,
-# recipes/dinov3-src). egohand-src's run dependency on dinov3-src only solves when the env lists it too.
+# time and the Sapiens2 role imports `sapiens2_lite`; every feature that installs posekit installs
+# their pinned recipes (recipes/egohand-src, recipes/dinov3-src, recipes/sapiens2-src).
+# egohand-src's run dependency on dinov3-src only solves when the env lists it too.
 egohand-src = { path = "recipes/egohand-src" }
 dinov3-src = { path = "recipes/dinov3-src" }
+sapiens2-src = { path = "recipes/sapiens2-src" }
 python = "3.12.*"
 torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
@@ -1225,7 +1228,6 @@ description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames;
 
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
-# The vendored upstream trees beside src/posekit (untyped) stay out of the typecheck, like other vendor boundaries.
 PYREFLY_TARGET = "src/posekit tests tools"
 
 [feature.posekit.tasks.posekit-video-pose]
@@ -1525,9 +1527,10 @@ cwd = "packages/selfcap-soma"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.selfcap-curate.dependencies]
-# posekit.models imports EgoHand and DINOv3 (see feature.posekit).
+# posekit's EgoHand, DINOv3 and Sapiens2 sources (see feature.posekit).
 egohand-src = { path = "recipes/egohand-src" }
 dinov3-src = { path = "recipes/dinov3-src" }
+sapiens2-src = { path = "recipes/sapiens2-src" }
 python = "3.12.*"
 torchcodec = "*"
 # dataforge.datasets imports its HTTP transport at module load.
@@ -1611,9 +1614,10 @@ description = "Run one new dataset end to end, ingest to blueprints, swapping la
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.exo-calib.dependencies]
-# posekit.models imports EgoHand and DINOv3 (see feature.posekit).
+# posekit's EgoHand, DINOv3 and Sapiens2 sources (see feature.posekit).
 egohand-src = { path = "recipes/egohand-src" }
 dinov3-src = { path = "recipes/dinov3-src" }
+sapiens2-src = { path = "recipes/sapiens2-src" }
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
 open3d = ">=0.19.0,<0.20"
@@ -2813,9 +2817,10 @@ description = "Import the installed slam-rs core output and check the catalog ou
 platforms = ["linux-64"]
 
 [feature.mamma.dependencies]
-# posekit.models imports EgoHand and DINOv3 (see feature.posekit).
+# posekit's EgoHand, DINOv3 and Sapiens2 sources (see feature.posekit).
 egohand-src = { path = "recipes/egohand-src" }
 dinov3-src = { path = "recipes/dinov3-src" }
+sapiens2-src = { path = "recipes/sapiens2-src" }
 python = "3.12.*"
 # The MAMMA MPI download server only talks to wget (rejects python TLS clients).
 wget = "*"

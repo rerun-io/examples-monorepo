@@ -6,7 +6,7 @@ from huggingface_hub import hf_hub_download
 from torch import nn
 
 from posekit.models.sapiens import SapiensModelSize
-from sapiens2_lite.pose import init_pose_model
+from posekit.models.sapiens_net.pose import init_pose_model
 
 POSE_CHECKPOINTS: dict[SapiensModelSize, tuple[str, str]] = {
     "0.4B": ("facebook/sapiens2-pose-0.4b", "sapiens2_0.4b_pose.safetensors"),
