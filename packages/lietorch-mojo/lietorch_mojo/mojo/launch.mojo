@@ -14,8 +14,8 @@ stream-ordered block reuse stays correct.
 """
 
 from std.algorithm import parallelize
-from std.gpu import MAX_THREADS_PER_BLOCK_METADATA, global_idx
-from std.gpu.host import DeviceContext, DeviceStream
+from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, global_idx
+from max.gpu.host import DeviceContext, DeviceStream
 from std.math import ceildiv
 from std.python import PythonObject
 from std.runtime.asyncrt import parallelism_level

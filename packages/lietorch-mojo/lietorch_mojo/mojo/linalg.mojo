@@ -15,12 +15,12 @@ from layout import TileTensor
 
 
 struct Mat[dtype: DType, R: Int, C: Int](ImplicitlyCopyable, Movable):
-    var values: InlineArray[Scalar[Self.dtype], Self.R * Self.C]
+    var values: Array[Scalar[Self.dtype], Self.R * Self.C]
 
     @always_inline
     def __init__(out self):
         """Zero matrix."""
-        self.values = InlineArray[Scalar[Self.dtype], Self.R * Self.C](fill=0)
+        self.values = Array[Scalar[Self.dtype], Self.R * Self.C](fill=0)
 
     @staticmethod
     @always_inline

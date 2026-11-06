@@ -18,7 +18,7 @@ RxSO3, SE3 and Sim3 drop in by implementing it. A group is pure register math:
 from linalg import Mat
 
 
-trait LieGroup(ImplicitlyCopyable, ImplicitlyDeletable):
+trait LieGroup(ImplicitlyCopyable, Deinitable):
     comptime dtype: DType
     comptime N: Int
     comptime K: Int

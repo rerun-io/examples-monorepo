@@ -81,10 +81,10 @@ def _launch_cpu[G: LieGroup](rt: CPURuntime, op: Int, n: Int, tensors: PythonObj
 def _row_widths[G: LieGroup](op: Int) raises -> PythonObject:
     comptime for o in range(NUM_OPS):
         if op == o:
-            comptime W = row_widths[G, o]()
             var widths = Python.list()
-            for k in range(num_tensors(o)):
-                widths.append(W[k])
+            comptime for k in range(num_tensors(o)):
+                comptime width = row_widths[G, o]()[k]
+                widths.append(width)
             return widths
     raise Error(t"lietorch_mojo: unknown op code {op}")
 

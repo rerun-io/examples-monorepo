@@ -32,8 +32,8 @@ shape [batch, H, W, 9] where the 9 channels are:
 """
 
 from std.math import ceildiv, sqrt, min, max, floor
-from std.gpu import block_idx, block_dim, thread_idx, barrier
-from std.gpu.memory import AddressSpace
+from max.gpu import block_idx, block_dim, thread_idx, barrier
+from max.gpu.memory import AddressSpace
 from std.memory import stack_allocation
 from std.python import Python, PythonObject
 from std.utils.index import Index

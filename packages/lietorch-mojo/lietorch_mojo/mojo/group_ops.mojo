@@ -74,7 +74,7 @@ def num_tensors(op: Int) -> Int:
     return 3
 
 
-def row_widths[G: LieGroup, op: Int]() -> InlineArray[Int, 5]:
+def row_widths[G: LieGroup, op: Int]() -> Array[Int, 5]:
     """Width of each of the op's tensors, inputs then outputs (unused slots are 0)."""
     comptime N = G.N
     comptime K = G.K

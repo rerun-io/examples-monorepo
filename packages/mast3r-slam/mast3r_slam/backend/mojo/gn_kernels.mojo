@@ -41,9 +41,9 @@ Mojo-specific notes
 """
 
 from std.math import sqrt, exp, sin, cos, abs
-from std.gpu import global_idx, block_idx, block_dim, thread_idx, barrier, lane_id
-from std.gpu.primitives import warp
-from std.gpu.memory import AddressSpace
+from max.gpu import global_idx, block_idx, block_dim, thread_idx, barrier, lane_id
+from max.gpu.primitives import warp
+from max.gpu.memory import AddressSpace
 from std.memory import stack_allocation
 from std.utils.index import Index
 from layout import Layout, LayoutTensor, RuntimeLayout, UNKNOWN_VALUE

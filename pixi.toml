@@ -1879,7 +1879,7 @@ trimesh = "*"
 mojo = { version = "==1.2.0", channel = "https://conda.modular.com/max/" }
 # Since Mojo 1.2.0, std.gpu (GPU host/kernel APIs) and layout ship in max-core, not mojo-compiler.
 max-core = { version = "==26.7.0", channel = "https://conda.modular.com/max/" }
-pillow = "<13"  # gradio 6.13 (held) needs pillow<13; the solve would otherwise pick 13
+pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
 
 [feature.mast3r-slam.target.linux-64.dependencies]
 # Build 2 adds sm_89/90/120 kernels and compute_120 PTX; build 1 stops at sm_86, so every lietorch

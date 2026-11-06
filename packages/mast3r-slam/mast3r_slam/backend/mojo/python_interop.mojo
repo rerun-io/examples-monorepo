@@ -27,7 +27,7 @@ Every `torch_*_ptr()` helper assumes:
 These conditions are enforced at the call sites in `gn.mojo` and `matching.mojo`.
 """
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.memory import alloc
 from std.python import Python, PythonObject
 
