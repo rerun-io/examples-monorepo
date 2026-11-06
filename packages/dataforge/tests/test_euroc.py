@@ -14,12 +14,12 @@ import pytest
 from dataforge import euroc
 from dataforge.euroc import (
     CameraRow,
-    GtTrajectory,
     TimestampedSamples,
     gt_trajectory,
     read_camera_index,
     read_numeric_csv,
 )
+from dataforge.logging_toolkit import GtTrajectory
 
 CAMERA_CSV: bytes = b"#timestamp [ns],filename\n13000000000000,13000000000000.png\n13000018518000,13000018518000.png\n"
 IMU_CSV: bytes = (

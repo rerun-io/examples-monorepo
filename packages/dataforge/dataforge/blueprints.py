@@ -99,6 +99,14 @@ def sensor_plot(name: str, origin: str, contents: str) -> rrb.TimeSeriesView:
     return rrb.TimeSeriesView(name=name, origin=origin, contents=contents, plot_legend=rrb.PlotLegend(visible=True))
 
 
+def imu_plots(rig: int, imu: int) -> list[rrb.TimeSeriesView]:
+    """One IMU's two plot panes, gyroscope then accelerometer, as every rig layout's bottom row starts."""
+    return [
+        sensor_plot("Gyroscope", schema.imu_path(rig, imu), schema.gyro_path(rig, imu)),
+        sensor_plot("Accelerometer", schema.imu_path(rig, imu), schema.accel_path(rig, imu)),
+    ]
+
+
 def eye_controls_from_pose(
     position: tuple[float, float, float],
     look_target: tuple[float, float, float],
@@ -231,6 +239,8 @@ def rig_blueprint(
     eye_controls: rrb.EyeControls3D,
     plots: Sequence[rrb.TimeSeriesView],
     extra_run_sources: Sequence[str] = (),
+    overview_exclude: Sequence[str] = (),
+    path_colors: Mapping[str, tuple[int, int, int]] | None = None,
 ) -> rrb.Blueprint:
     """The default layout of a single-rig capture: 3D and cameras over the sensor plots.
 
@@ -251,12 +261,25 @@ def rig_blueprint(
         plots: Sensor plot panes for the bottom row.
         extra_run_sources: Further run sources whose trajectory and trail get the
             same overrides, for a dataset that carries more than one pose layer.
+        overview_exclude: Entity paths the overview drops (with their subtrees), e.g. a
+            depth stream that would otherwise be back-projected over the paths.
+        path_colors: Run source -> colour of its trajectory and trail in both views (a
+            figure legend), overriding the layer's own colours; a source left out keeps
+            the dim follow path and its layer's colours.
 
     Returns:
         The blueprint embedded in the dataset's rrds and registered as the
         catalog dataset's default.
     """
     sources: tuple[str, ...] = (run_source, *extra_run_sources)
+    colors: Mapping[str, tuple[int, int, int]] = path_colors or {}
+    trail_window = rrb.VisibleTimeRanges(
+        rrb.VisibleTimeRange(
+            schema.TIMELINE,
+            start=rrb.TimeRangeBoundary.cursor_relative(seconds=TRAIL_WINDOW_S),
+            end=rrb.TimeRangeBoundary.cursor_relative(),
+        )
+    )
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
@@ -264,6 +287,7 @@ def rig_blueprint(
                     rrb.Spatial3DView(
                         name="Rig",
                         origin="/",
+                        contents="\n".join(["$origin/**", *(f"- {path}/**" for path in overview_exclude)]),
                         line_grid=True,
                         overrides={
                             # The rig is centimetres on a path that can be kilometres, so the
@@ -275,6 +299,7 @@ def rig_blueprint(
                                 [[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(9.0), colors=[255, 220, 0], labels=["rig"], show_labels=True
                             ),
                             **{schema.trail_path(source): rrb.EntityBehavior(visible=False) for source in sources},
+                            **{schema.trajectory_path(source): rr.LineStrips3D.from_fields(colors=color) for source, color in colors.items()},
                         },
                     ),
                     rrb.Spatial3DView(
@@ -294,17 +319,13 @@ def rig_blueprint(
                             # as thin dim context underneath.
                             **{
                                 schema.trajectory_path(source): rr.LineStrips3D.from_fields(
-                                    colors=DIM_TRAJECTORY_COLOR, radii=rr.Radius.ui_points(DIM_TRAJECTORY_RADIUS_UI_POINTS)
+                                    colors=colors.get(source, DIM_TRAJECTORY_COLOR), radii=rr.Radius.ui_points(DIM_TRAJECTORY_RADIUS_UI_POINTS)
                                 )
                                 for source in sources
                             },
                             **{
-                                schema.trail_path(source): rrb.VisibleTimeRanges(
-                                    rrb.VisibleTimeRange(
-                                        schema.TIMELINE,
-                                        start=rrb.TimeRangeBoundary.cursor_relative(seconds=TRAIL_WINDOW_S),
-                                        end=rrb.TimeRangeBoundary.cursor_relative(),
-                                    )
+                                schema.trail_path(source): (
+                                    [trail_window, rr.LineStrips3D.from_fields(colors=colors[source])] if source in colors else trail_window
                                 )
                                 for source in sources
                             },
@@ -315,8 +336,9 @@ def rig_blueprint(
                 rrb.Grid(*camera_panes, grid_columns=CAMERA_GRID_COLUMNS, name="Synchronized cameras"),
                 column_shares=list(RIG_COLUMN_SHARES),
             ),
-            rrb.Horizontal(*plots),
-            row_shares=list(PLOT_ROW_SHARES),
+            # A rig with no sensor plots (a camera-only benchmark) gets no empty plot row.
+            *([rrb.Horizontal(*plots)] if plots else []),
+            row_shares=list(PLOT_ROW_SHARES) if plots else None,
         ),
         rrb.TimePanel(timeline=schema.TIMELINE),
         collapse_panels=True,
@@ -378,6 +400,9 @@ def table_blueprint(
     run_source: str,
     eye_controls: rrb.EyeControls3D,
     front_pane: rrb.Spatial2DView,
+    depth_cameras: Sequence[int] = (),
+    exclude: Sequence[str] = (),
+    path_colors: Mapping[str, tuple[int, int, int]] | None = None,
 ) -> rrb.Blueprint:
     """The segment-table preview card: the follow-framed rig beside one video pane.
 
@@ -392,6 +417,10 @@ def table_blueprint(
         run_source: Processing source whose trail is excluded.
         eye_controls: Eye of the 3D view.
         front_pane: The single 2D pane the card decodes.
+        depth_cameras: Cameras carrying a depth stream; excluded too, since a 3D view
+            back-projects every depth image into a point cloud.
+        exclude: Further entity paths the card drops (with their subtrees), e.g. derived images.
+        path_colors: Run source -> trajectory colour (a figure legend), overriding the layer's own.
 
     Returns:
         The blueprint registered with ``segment_table=True``.
@@ -401,8 +430,15 @@ def table_blueprint(
             rrb.Spatial3DView(
                 name="Follow",
                 origin=schema.rig_path(rig),
-                contents=["/**", *video_exclusions((rig, index) for index in range(num_cameras)), f"- {schema.trail_path(run_source)}/**"],
+                contents=[
+                    "/**",
+                    *video_exclusions((rig, index) for index in range(num_cameras)),
+                    *(f"- {schema.depth_path(rig, index)}/**" for index in depth_cameras),
+                    *(f"- {path}/**" for path in exclude),
+                    f"- {schema.trail_path(run_source)}/**",
+                ],
                 line_grid=False,  # rig-rooted, same reason as rig_blueprint's Follow view
+                overrides={schema.trajectory_path(source): rr.LineStrips3D.from_fields(colors=color) for source, color in (path_colors or {}).items()},
                 eye_controls=eye_controls,
             ),
             front_pane,

@@ -253,13 +253,7 @@ def build_blueprint(num_cameras: int, *, has_magnetometer: bool, follow: FollowF
         The blueprint embedded in every base-layer rrd of this device and
         registered as the catalog dataset's default.
     """
-    plots: list[rrb.TimeSeriesView] = [
-        blueprints.sensor_plot(name, origin, contents)
-        for name, origin, contents in (
-            ("Gyroscope", schema.imu_path(RIG, IMU), schema.gyro_path(RIG, IMU)),
-            ("Accelerometer", schema.imu_path(RIG, IMU), schema.accel_path(RIG, IMU)),
-        )
-    ]
+    plots: list[rrb.TimeSeriesView] = blueprints.imu_plots(RIG, IMU)
     if has_magnetometer:
         plots.append(blueprints.sensor_plot("Magnetometer", schema.mag_path(RIG, MAG), schema.field_path(RIG, MAG)))
     return blueprints.rig_blueprint(
