@@ -2183,8 +2183,10 @@ platforms = ["linux-64"]
 
 [feature.hexels.dependencies]
 python = "3.12.*"
-# hexels-src runs need open3d (upstream mesh extraction, 2DGS eval_dtu); conda-forge 0.20.0 fails to import
-# (libOpen3D.so.0.20: undefined filament symbol), so hold the monorepo's 0.19 like every other feature.
+# hexels-src runs need open3d (upstream mesh extraction, 2DGS eval_dtu and eval_tnt). Hold the monorepo's 0.19
+# like every other feature. An earlier conda-forge 0.20.0 build failed to import (libOpen3D.so.0.20: undefined
+# filament symbol); build _2 imports on Python 3.12 (2026-11-06), but 0.20 also moves the TSDF meshes, so the
+# bump is its own change.
 open3d = ">=0.19.0,<0.20"
 hexels-src = { path = "recipes/hexels-src" }
 hexel-kernel = { path = "recipes/hexels-src" }
@@ -2285,7 +2287,7 @@ cwd = "packages/hexels"
 description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
 
 # Surfaces: TSDF meshes from rendered depth (Open3D, upstream Hexels settings), the paper's evaluators run
-# unchanged from the patched 2DGS tree in this env (eval_tnt in `tnt-eval`), and the surface recordings.
+# from the patched 2DGS tree in this env, and the surface recordings.
 [feature.hexels.tasks.hexels-surface-run]
 cmd = "python tools/surface_run.py"
 cwd = "packages/hexels"
@@ -2294,7 +2296,7 @@ description = "Render depth (gsplat render --surface, or upstream CUDA in proces
 [feature.hexels.tasks.hexels-surface-eval]
 cmd = "python tools/surface_eval.py"
 cwd = "packages/hexels"
-description = "Score fuse_post.ply: DTU Chamfer (2DGS eval_dtu) or T&T F1 (2DGS eval_tnt in the tnt-eval env)"
+description = "Score fuse_post.ply: DTU Chamfer (2DGS eval_dtu) or T&T F1 (2DGS eval_tnt)"
 
 [feature.hexels.tasks.hexels-surface-table]
 cmd = "python tools/surface_table.py"
@@ -2305,24 +2307,6 @@ description = "Collect scored surface runs and the paper's per-scene numbers int
 cmd = "python tools/surface_log.py"
 cwd = "packages/hexels"
 description = "Write the per-scene surface recording: meshes, depth and normal maps, cameras, metrics"
-
-# ═══════════════════════════════════════════════════════════════════════════
-# tnt-eval — the Tanks and Temples evaluator's pinned environment (upstream environment-tnt-eval.yml):
-# Python 3.8 and Open3D 0.10, whose registration API the 2DGS `scripts/eval_tnt` code needs.
-# Only an interpreter for that script; never compose it with other features.
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.tnt-eval]
-platforms = ["linux-64"]
-
-[feature.tnt-eval.dependencies]
-python = "3.8.*"
-
-[feature.tnt-eval.pypi-dependencies]
-numpy = "==1.23.5"
-scipy = "==1.10.1"
-open3d = "==0.10.0.0"
-matplotlib = "==3.7.5"
-trimesh = "==4.5.3"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # lietorch-mojo — lietorch's Lie group API on Mojo CPU/GPU kernels (replaces ai-demos lietorch)
@@ -4035,7 +4019,6 @@ gsplat-rust-renderer-dev = { features = [
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
 hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
-tnt-eval = { features = ["tnt-eval"], no-default-feature = true }
 dataforge = { features = [
     "common",
     "dataforge",
