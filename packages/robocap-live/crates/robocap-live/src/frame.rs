@@ -1,9 +1,18 @@
 //! Shared types: camera indices, framesets, IMU samples, the rig, and the `robocap-live-dump/1` replay format.
 //!
-//! Every module uses these types (SPEC.md "The dump format" describes the files). Images are kornia-rs
+//! Every module uses these types. Images are kornia-rs
 //! [`Image<u8, 1>`] behind an [`Arc`], so a frameset is cheap to hand from capture to SLAM, hands and logging. Following
 //! kornia-slam's conventions: integer-nanosecond time (slam-rs's `i64` ns), distinct capture metadata,
 //! combined gyro + accel IMU samples shaped like kornia-sensors' `ImuMeasurement`, and `thiserror` errors (no `anyhow` in the library).
+//!
+//! # The dump directory
+//!
+//! What `--source replay <dir>` reads (1920x1080 frames only): `meta.json` ([`DumpMeta`]); `rig.json` ([`Rig`], the file the
+//! live source reads through `--rig`); `frames.bin` (per frameset a [`FrameHeader`] and its luma planes); `imu.bin` (combined
+//! IMU0 records of [`IMU_RECORD_BYTES`], in time order, accel interpolated onto the gyro stamps); and, optionally,
+//! `reference_world_from_rig.bin` (per frameset `i64 t_ns` + 16 row-major `f64`: the catalog's SLAM pose, which
+//! `--slam reference` replays). A dump's times are the catalog's `video_time`; live times are CLOCK_MONOTONIC. Dumps are cut
+//! from the catalog by a tool outside this crate; [`FrameWriter`] writes `frames.bin` for tests and examples.
 #![deny(missing_docs)]
 
 use std::fs::File;

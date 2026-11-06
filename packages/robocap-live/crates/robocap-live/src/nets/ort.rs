@@ -2,12 +2,12 @@
 //!
 //! Built only with the `ort` cargo feature, so the cap build carries no ONNX Runtime. The library is loaded at run time
 //! (`load-dynamic`, as kornia-rs's `examples/onnx` does): from [`OrtConfig::dylib`], else from `ORT_DYLIB_PATH`. On
-//! a CUDA host both the library and the CUDA libraries come from the monorepo's `handtrack` pixi env (no pip):
+//! a CUDA host both the library and the CUDA libraries come from the monorepo's `robocap-live` pixi env, which composes
+//! `cuda` with onnxruntime-gpu (no pip). The `robocap-live-demo` task sets both:
 //!
 //! ```text
-//! ENV=<checkout>/.pixi/envs/handtrack
-//! ORT_DYLIB_PATH=$ENV/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.29.0
-//! LD_LIBRARY_PATH=$ENV/lib            # cuDNN 9, cuBLAS, cudart 13 for libonnxruntime_providers_cuda.so
+//! ORT_DYLIB_PATH=<libonnxruntime.so* in the env's onnxruntime/capi/>
+//! LD_LIBRARY_PATH=$CONDA_PREFIX/lib   # cuDNN 9, cuBLAS, cudart 13 for libonnxruntime_providers_cuda.so
 //! ```
 //!
 //! The graphs are `detnet_full.onnx` (the 640x480 frame / 255 with the 4x4 pool inside, exactly handtrack's `DetNetDetector`)

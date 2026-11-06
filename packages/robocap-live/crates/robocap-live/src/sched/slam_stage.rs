@@ -1,4 +1,29 @@
 //! The SLAM stage: rate selection, IMU coverage, estimator calls and pose publication.
+//!
+//! - **Lane.** `--slam-lane gpu|cpu` (GPU on aarch64, CPU elsewhere; a GPU that fails to start falls back to CPU with a
+//!   warning). GPU defaults to one worker and `port.frontend_lag=true`, CPU to two workers and no lag; `--slam-set
+//!   port.frontend_lag=..` overrides either, also after a fallback. The startup line and the summary's `slam_lane`,
+//!   `slam_frontend_lag` and `slam_threads` report what ran (null when SLAM is off or replays reference poses).
+//! - **Lag.** With lag the first accepted frameset buffers without a pose and each later call returns the previous one's. A
+//!   result is matched to its pending input by time and keeps that input's index through rate skips and drops. A queued next
+//!   frameset is an optional GPU lookahead hint; the stage never waits for one. EOF and a normal stop flush the last result
+//!   before the pose store closes.
+//! - **Worlds.** A new world starts only on backwards input time (checked before rate selection), a gap of more than
+//!   [`crate::slam::RESET_GAP_NS`] between accepted inputs, or an estimator error. A boundary first flushes the old world's
+//!   pending pose, and each reset prints one stderr line with its count and cause. Pose progress uses monotonic source
+//!   indices, so rewound times never reuse an old world's poses.
+//! - **IMU.** A frame is tracked once a sample strictly after its time has arrived. Live mode waits up to the IMU timeout,
+//!   lossless mode for samples or EOF; an uncovered frame is skipped and counted in `slam_imu_timeouts` (no reset). After
+//!   backwards time the old world's queued IMU tail is dropped.
+//! - **Live and lossless.** Live: progress advances when SLAM consumes or skips an input, and hands take the newest usable
+//!   pose at or before their time within `--hands-wait-ms`, never waiting a frameset for a lagged pose. Lossless: progress
+//!   waits for each accepted input's pose (published or flushed), so hands and output use that frame's own estimate; a skip
+//!   (rate, input, or a missing reference) holds the last pose and first flushes any pending estimate, so the bounded queues
+//!   never stall.
+//! - **Timings.** A pose's index, time, support counts and keyframe flag describe the returned estimate; `compute_ms` describes
+//!   the call that produced it, so with lag the frontend timers belong to the next input. Estimator and frontend overlap: do
+//!   not add their times. The summary's `slam` counts track calls (the buffered first one too), `slam_flush` the drain work,
+//!   and `slam_buffered` / `slam_lookahead` the buffering and the hints.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};

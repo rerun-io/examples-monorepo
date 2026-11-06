@@ -2,7 +2,7 @@
 //! per present camera.
 //!
 //! kornia-imgproc has no area mode: `resize_fast_mono_aa` with Bilinear at exactly /3 samples pixel `3x+1` (point sampling,
-//! aliases), and Bicubic/Lanczos with `antialias` are not the box mean the SPEC fixes (each small pixel = the rounded mean of a
+//! aliases), and Bicubic/Lanczos with `antialias` are not the box mean the runtime needs (each small pixel = the rounded mean of a
 //! 3x3 block, which is also what PR #270's `slam_luma` and the SLAM calibration's `downscale3` assume). [`resize_area_u8`] is
 //! provided by `kornia_staging_imgproc::resize`, with exact integer rounding.
 #![deny(missing_docs)]
