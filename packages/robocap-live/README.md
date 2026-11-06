@@ -3,7 +3,7 @@
 Live SLAM and hand tracking on a RoboCap: six cameras and an IMU in, [Rerun](https://rerun.io/) out. It runs on the cap (RK3588) and replays recorded clips on a PC.
 
 <p align="center">
-  <img src="media/robocap-live.gif" alt="robocap-live replaying a RoboCap clip: the rig with both tracked hands, and the six cameras" width="768">
+  <img src="https://github.com/rerun-io/examples-monorepo/raw/main/packages/robocap-live/media/robocap-live.gif" alt="robocap-live replaying a RoboCap clip: the rig with both tracked hands, and the six cameras" width="768">
 </p>
 
 ## Try it
@@ -18,7 +18,7 @@ This downloads a 5 s clip (640 MB, [Hugging Face](https://huggingface.co/dataset
 
 ## Run it on a cap
 
-<img src="media/robocap-live-panel.png" alt="The cap's panel on a phone" width="240" align="right">
+<img src="https://github.com/rerun-io/examples-monorepo/raw/main/packages/robocap-live/media/robocap-live-panel.png" alt="The cap's panel on a phone" width="240" align="right">
 
 1. Build and copy it to the cap. This needs `robocap-ssh` to reach the cap, the RKNN models ([models/MODELS.md](models/MODELS.md)) and the display asset from the demo's download:
    ```bash
