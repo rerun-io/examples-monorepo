@@ -283,7 +283,7 @@ two things, both from agent sessions on this host:
   instead of inside it:
   ```bash
   systemd-run --user --unit rerun-catalog-9988 --collect --property=WorkingDirectory=$PWD \
-    .pixi/envs/<env>/lib/python3.12/site-packages/rerun_sdk/rerun_cli/rerun server --port 9988
+    .pixi/envs/<env>/lib/python3.12/site-packages/rerun_cli/rerun server --port 9988
   systemctl --user status rerun-catalog-9988      # journalctl --user -u rerun-catalog-9988 for logs
   systemctl --user stop rerun-catalog-9988        # never pkill by name
   ```

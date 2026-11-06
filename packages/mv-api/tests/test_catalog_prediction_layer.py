@@ -448,11 +448,14 @@ def test_pixi_catalog_environment_and_task_are_wired_for_dataloader_lane() -> No
     repo_root: Path = Path(__file__).resolve().parents[3]
     pixi_data: dict[str, Any] = tomllib.loads((repo_root / "pixi.toml").read_text())
 
-    rerun_sdk: dict[str, Any] = pixi_data["feature"]["rerun-prerelease"]["pypi-dependencies"]["rerun-sdk"]
+    prerelease: dict[str, Any] = pixi_data["feature"]["rerun-prerelease"]
     catalog_task: dict[str, Any] = pixi_data["feature"]["mv-api-catalog"]["tasks"]["mv-api-catalog-prediction-layer"]
     catalog_dev_env: dict[str, Any] = pixi_data["environments"]["mv-api-catalog-dev"]
 
-    assert set(rerun_sdk["extras"]) >= {"catalog", "dataloader"}
+    # rerun-sdk comes from conda-forge with its catalog + dataloader extras spelled out beside it.
+    assert prerelease["dependencies"]["rerun-sdk"]["channel"] == "https://prefix.dev/conda-forge"
+    assert {"pandas", "av", "pillow", "torchvision"} <= set(prerelease["dependencies"])
+    assert "datafusion" in prerelease["pypi-dependencies"]
     assert catalog_task["cmd"] == "python tools/apps/catalog_prediction_layer.py"
     assert catalog_task["cwd"] == "packages/mv-api"
     assert {"rerun-prerelease", "mv-api-catalog", "dev"}.issubset(set(catalog_dev_env["features"]))
