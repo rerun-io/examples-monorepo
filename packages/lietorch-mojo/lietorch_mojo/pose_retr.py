@@ -13,9 +13,10 @@ from torch import Tensor
 
 from lietorch_mojo import _lietorch_mojo_backends as _ext
 from lietorch_mojo import backends
+from lietorch_mojo.groups import Sim3
 
-POSE_WIDTH: int = 8
-TANGENT_WIDTH: int = 7
+POSE_WIDTH: int = Sim3.embedded_dim
+TANGENT_WIDTH: int = Sim3.manifold_dim
 
 
 def pose_retr(poses: Tensor, dx: Tensor, num_fix: int) -> None:
@@ -45,8 +46,7 @@ def pose_retr(poses: Tensor, dx: Tensor, num_fix: int) -> None:
     if poses.is_cuda:
         if poses.get_device() != 0:
             raise RuntimeError(f"lietorch_mojo runs on cuda:0 only, got {poses.device}")
-        stream: int = torch._C._cuda_getCurrentRawStream(0)
-        _ext.pose_retr_cuda(backends._runtime(True), stream, poses.data_ptr(), dx.data_ptr(), num_poses, num_fix, is_f64)
+        _ext.pose_retr_cuda(backends._runtime(True), backends._current_raw_stream(0), poses.data_ptr(), dx.data_ptr(), num_poses, num_fix, is_f64)
     elif poses.is_cpu:
         _ext.pose_retr_cpu(backends._runtime(False), poses.data_ptr(), dx.data_ptr(), num_poses, num_fix, is_f64)
     else:

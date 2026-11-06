@@ -27,7 +27,7 @@ from layout import ImmTileTensor, MutTileTensor
 from lie_group import LieGroup
 from lie_linalg import Mat
 
-# Op codes; lietorch_mojo/backends.py uses the same numbers.
+# Op codes; the extension exports them (`op_codes`), and lietorch_mojo/backends.py reads them from there.
 comptime OP_EXP = 0
 comptime OP_EXP_BACKWARD = 1
 comptime OP_LOG = 2

@@ -24,7 +24,34 @@ from std.os import abort
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from group_ops import BINARY, NUM_OPS, UNARY, UNARY_BACKWARD, family, num_tensors, row_widths
+from group_ops import (
+    BINARY,
+    NUM_OPS,
+    OP_ACT,
+    OP_ACT4,
+    OP_ACT4_BACKWARD,
+    OP_ACT_BACKWARD,
+    OP_ADJ,
+    OP_ADJ_BACKWARD,
+    OP_ADJT,
+    OP_ADJT_BACKWARD,
+    OP_AS_MATRIX,
+    OP_EXP,
+    OP_EXP_BACKWARD,
+    OP_INV,
+    OP_INV_BACKWARD,
+    OP_JINV,
+    OP_LOG,
+    OP_LOG_BACKWARD,
+    OP_MUL,
+    OP_MUL_BACKWARD,
+    OP_PROJECTOR,
+    UNARY,
+    UNARY_BACKWARD,
+    family,
+    num_tensors,
+    row_widths,
+)
 from launch import (
     CPURuntime,
     GPURuntime,
@@ -179,7 +206,35 @@ def row_widths_py(spec_obj: PythonObject) raises -> PythonObject:
         return _row_widths[Sim3[.float32]](op)
     if group_id == GROUP_SO3:
         return _row_widths[SO3[.float32]](op)
-    return _row_widths[SE3[.float32]](op)
+    if group_id == GROUP_SE3:
+        return _row_widths[SE3[.float32]](op)
+    raise Error(t"lietorch_mojo: group id {group_id} is not implemented")
+
+
+def op_codes_py() raises -> PythonObject:
+    """Op name -> code from group_ops.mojo; lietorch_mojo/backends.py reads it once at import."""
+    var codes = Python.dict()
+    codes["exp"] = OP_EXP
+    codes["exp_backward"] = OP_EXP_BACKWARD
+    codes["log"] = OP_LOG
+    codes["log_backward"] = OP_LOG_BACKWARD
+    codes["inv"] = OP_INV
+    codes["inv_backward"] = OP_INV_BACKWARD
+    codes["mul"] = OP_MUL
+    codes["mul_backward"] = OP_MUL_BACKWARD
+    codes["adj"] = OP_ADJ
+    codes["adj_backward"] = OP_ADJ_BACKWARD
+    codes["adjT"] = OP_ADJT
+    codes["adjT_backward"] = OP_ADJT_BACKWARD
+    codes["act"] = OP_ACT
+    codes["act_backward"] = OP_ACT_BACKWARD
+    codes["act4"] = OP_ACT4
+    codes["act4_backward"] = OP_ACT4_BACKWARD
+    codes["as_matrix"] = OP_AS_MATRIX
+    codes["projector"] = OP_PROJECTOR
+    codes["Jinv"] = OP_JINV
+    codes["num_ops"] = NUM_OPS
+    return codes
 
 
 def pose_retr_cuda_py(
@@ -242,6 +297,7 @@ def PyInit__lietorch_mojo_backends() abi("C") -> PythonObject:
         m.def_function[launch_cuda_py]("launch_cuda")
         m.def_function[launch_cpu_py]("launch_cpu")
         m.def_function[row_widths_py]("row_widths")
+        m.def_function[op_codes_py]("op_codes")
         m.def_function[pose_retr_cuda_py]("pose_retr_cuda")
         m.def_function[pose_retr_cpu_py]("pose_retr_cpu")
         m.def_function[create_gpu_runtime_py]("create_gpu_runtime")

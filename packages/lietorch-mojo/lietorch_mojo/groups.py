@@ -3,7 +3,7 @@
 Same class names, method names, signatures and data layouts as upstream, so
 `import lietorch_mojo as lietorch` is a drop-in. All four groups (SO3, RxSO3,
 SE3, Sim3) have a Mojo backend; unknown group ids raise
-`NotImplementedError` from `lietorch_mojo.backends`.
+`ValueError` from `lietorch_mojo.backends`.
 `tests/test_api_snapshot.py` checks the public surface against a snapshot of upstream
 lietorch.
 

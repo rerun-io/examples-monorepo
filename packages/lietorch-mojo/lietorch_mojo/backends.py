@@ -3,8 +3,7 @@
 Every function has the name, argument order, output shapes and gradient
 conventions of the pybind11 function of the same name in lietorch
 `src/lietorch.cpp` (VSLAM-LAB/lietorch @ 3e2695dd). `group_index` uses
-lietorch's ids: SO3=1, RxSO3=2, SE3=3, Sim3=4. Groups without a Mojo
-implementation raise `NotImplementedError`.
+lietorch's ids: SO3=1, RxSO3=2, SE3=3, Sim3=4; other ids raise `ValueError`.
 
 Deviations from lietorch, all on inputs lietorch mishandles:
 - A dtype other than float32/float64 raises `TypeError` (lietorch silently
@@ -29,41 +28,41 @@ from torch import Tensor
 
 from lietorch_mojo import _lietorch_mojo_backends as _ext
 
-# Op codes; keep in sync with lietorch_mojo/mojo/group_ops.mojo.
-_OP_EXP: Final[int] = 0
-_OP_EXP_BACKWARD: Final[int] = 1
-_OP_LOG: Final[int] = 2
-_OP_LOG_BACKWARD: Final[int] = 3
-_OP_INV: Final[int] = 4
-_OP_INV_BACKWARD: Final[int] = 5
-_OP_MUL: Final[int] = 6
-_OP_MUL_BACKWARD: Final[int] = 7
-_OP_ADJ: Final[int] = 8
-_OP_ADJ_BACKWARD: Final[int] = 9
-_OP_ADJT: Final[int] = 10
-_OP_ADJT_BACKWARD: Final[int] = 11
-_OP_ACT: Final[int] = 12
-_OP_ACT_BACKWARD: Final[int] = 13
-_OP_ACT4: Final[int] = 14
-_OP_ACT4_BACKWARD: Final[int] = 15
-_OP_AS_MATRIX: Final[int] = 16
-_OP_PROJECTOR: Final[int] = 17
-_OP_JINV: Final[int] = 18
-_NUM_OPS: Final[int] = 19
+# Op codes come from the extension (group_ops.mojo), so Python and the kernels cannot disagree.
+_OP_CODES: Final[dict[str, int]] = dict(_ext.op_codes())
+_OP_EXP: Final[int] = _OP_CODES["exp"]
+_OP_EXP_BACKWARD: Final[int] = _OP_CODES["exp_backward"]
+_OP_LOG: Final[int] = _OP_CODES["log"]
+_OP_LOG_BACKWARD: Final[int] = _OP_CODES["log_backward"]
+_OP_INV: Final[int] = _OP_CODES["inv"]
+_OP_INV_BACKWARD: Final[int] = _OP_CODES["inv_backward"]
+_OP_MUL: Final[int] = _OP_CODES["mul"]
+_OP_MUL_BACKWARD: Final[int] = _OP_CODES["mul_backward"]
+_OP_ADJ: Final[int] = _OP_CODES["adj"]
+_OP_ADJ_BACKWARD: Final[int] = _OP_CODES["adj_backward"]
+_OP_ADJT: Final[int] = _OP_CODES["adjT"]
+_OP_ADJT_BACKWARD: Final[int] = _OP_CODES["adjT_backward"]
+_OP_ACT: Final[int] = _OP_CODES["act"]
+_OP_ACT_BACKWARD: Final[int] = _OP_CODES["act_backward"]
+_OP_ACT4: Final[int] = _OP_CODES["act4"]
+_OP_ACT4_BACKWARD: Final[int] = _OP_CODES["act4_backward"]
+_OP_AS_MATRIX: Final[int] = _OP_CODES["as_matrix"]
+_OP_PROJECTOR: Final[int] = _OP_CODES["projector"]
+_OP_JINV: Final[int] = _OP_CODES["Jinv"]
+_NUM_OPS: Final[int] = _OP_CODES["num_ops"]
 
 # lietorch group id -> (embedded dim N, manifold dim K).
 _GROUP_DIMS: Final[dict[int, tuple[int, int]]] = {1: (4, 3), 2: (5, 4), 3: (7, 6), 4: (8, 7)}
-_IMPLEMENTED_DIMS: Final[dict[int, tuple[int, int]]] = _GROUP_DIMS
-_GROUP_NAMES: Final[dict[int, str]] = {1: "SO3", 2: "RxSO3", 3: "SE3", 4: "Sim3"}
 # (group id, op) -> width of each tensor the op takes, inputs then outputs (from the extension).
 _ROW_WIDTHS: Final[dict[tuple[int, int], tuple[int, ...]]] = {
-    (g, op): tuple(_ext.row_widths(op | (g << 8))) for g in _IMPLEMENTED_DIMS for op in range(_NUM_OPS)
+    (g, op): tuple(_ext.row_widths(op | (g << 8))) for g in _GROUP_DIMS for op in range(_NUM_OPS)
 }
 
 _FLOAT32: Final[torch.dtype] = torch.float32
 _FLOAT64: Final[torch.dtype] = torch.float64
-# Raw cudaStream_t of PyTorch's current stream on a device index (0 = legacy default stream).
-_current_raw_stream: Final[Callable[[int], int]] = torch._C._cuda_getCurrentRawStream
+# Raw cudaStream_t of PyTorch's current stream on a device index (0 = legacy default stream). CPU-only torch
+# builds lack it; their tensors never reach the CUDA branch, so the placeholder is never called.
+_current_raw_stream: Final[Callable[[int], int]] = getattr(torch._C, "_cuda_getCurrentRawStream", lambda _device: 0)
 _launch_cuda: Final[Callable[[object, int, int, int, tuple[int, ...]], None]] = _ext.launch_cuda
 _launch_cpu: Final[Callable[[object, int, int, tuple[int, ...]], None]] = _ext.launch_cpu
 
@@ -84,12 +83,10 @@ def _runtime(on_gpu: bool) -> object:
 
 
 def _dims(group_index: int) -> tuple[int, int]:
-    dims: tuple[int, int] | None = _IMPLEMENTED_DIMS.get(group_index)
-    if dims is not None:
-        return dims
-    if group_index not in _GROUP_DIMS:
+    dims: tuple[int, int] | None = _GROUP_DIMS.get(group_index)
+    if dims is None:
         raise ValueError(f"unknown lietorch group id {group_index}")
-    raise NotImplementedError(f"lietorch_mojo: {_GROUP_NAMES[group_index]} is not implemented yet")
+    return dims
 
 
 def _bad_inputs(tensors: tuple[Tensor, ...], names: tuple[str, ...], widths: tuple[int, ...], n: int) -> Exception:
@@ -108,20 +105,13 @@ def _bad_inputs(tensors: tuple[Tensor, ...], names: tuple[str, ...], widths: tup
 
 
 def _run(op: int, group_index: int, inputs: tuple[Tensor, ...], names: tuple[str, ...]) -> list[Tensor]:
-    """Run Mojo op `op` on `inputs` (roles per op in group_ops.mojo) and return its fresh (batch, width) outputs.
+    """Run Mojo op `op` on `inputs` (roles per op in group_ops.mojo; `names` label them in errors).
 
-    The one launch site. Checks every input (contiguous, one dtype, one
-    device, shape (batch, the op's row width) with one batch size; `names`
-    label them in errors), allocates the outputs like the first input, then
-    enqueues the kernel on PyTorch's current CUDA stream, or runs the CPU
-    loop. GPU launches are asynchronous and ordered with PyTorch's own work on
-    that stream, like any PyTorch op. This runs on every op call, so it does
-    one combined check per input and leaves the error messages to
-    `_bad_inputs`.
+    Returns fresh (batch, width) outputs. Hot path: one combined check per input; `_bad_inputs` builds the errors.
     """
     widths: tuple[int, ...] | None = _ROW_WIDTHS.get((group_index, op))
     if widths is None:
-        _dims(group_index)  # raises for unknown or unimplemented groups
+        _dims(group_index)  # raises for unknown groups
         raise ValueError(f"lietorch_mojo: unknown op code {op}")
     ref: Tensor = inputs[0]
     n: int = ref.shape[0] if ref.dim() == 2 else -1

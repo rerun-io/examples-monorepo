@@ -44,7 +44,7 @@ from gn_kernels import (
     gauss_newton_rays_step_kernel,
 )
 # The Sim(3) retraction is lietorch-mojo's (the build adds -I packages/lietorch-mojo/lietorch_mojo/mojo).
-from pose_retr import POSE_RETR_THREADS, pose_retr_kernel
+from pose_retr import POSE_RETR_THREADS, POSE_WIDTH, TANGENT_WIDTH, pose_retr_kernel
 from python_interop import (
     get_cached_context_ptr,
     get_cuda_backend_module,
@@ -216,8 +216,8 @@ def pose_retr_py(
     var poses = poses_obj.contiguous().float()
     var dx = dx_obj.contiguous().float()
     var num_vars = num_poses - num_fix
-    var poses_t = torch_tensor[.float32](poses, row_major((num_poses, Idx[POSE_STRIDE])))
-    var dx_t = torch_imm_tensor[.float32](dx, row_major((num_vars, Idx[POSE_DIM])))
+    var poses_t = torch_tensor[.float32](poses, row_major((num_poses, Idx[POSE_WIDTH])))
+    var dx_t = torch_imm_tensor[.float32](dx, row_major((num_vars, Idx[TANGENT_WIDTH])))
     var ctx_ptr = get_cached_context_ptr()
     ctx_ptr[].enqueue_function[pose_retr_kernel[.float32]](
         poses_t,

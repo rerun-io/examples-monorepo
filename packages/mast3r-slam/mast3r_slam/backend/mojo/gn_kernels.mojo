@@ -61,7 +61,6 @@ comptime RAYS_WARPS = RAYS_THREADS // WARP_SIZE
 # A `0` extent is a runtime dimension (set when the view is built in gn.mojo);
 # `Idx[N]` keeps a compile-time extent static.
 comptime POSES_LT = type_of(row_major((0, Idx[POSE_STRIDE])))                   # [N_kf, 8]
-comptime DX_LT = type_of(row_major((0, Idx[POSE_DIM])))                         # [N_vars, 7]
 comptime XS_LT = type_of(row_major((0, 0, Idx[3])))                             # [N_kf, N_pts, 3]
 comptime CS_LT = type_of(row_major((0, 0)))                                     # [N_kf, N_pts]
 comptime EDGES_LT = type_of(row_major((0,)))                                    # [N_edges]

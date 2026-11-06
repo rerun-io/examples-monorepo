@@ -30,19 +30,13 @@ module (`expm`, `expm_backward`, `logm`, …, `as_matrix`, `projector`, `Jinv`).
 
 ## Build
 
-One command, from this directory, in an environment with Mojo 1.2.0 and
-`max-core` 26.7.0 (GPU host APIs and `layout` live there; for example
-`mast3r-slam-dev`):
-
 ```bash
-mojo build --emit shared-lib -I lietorch_mojo/mojo -o lietorch_mojo/_lietorch_mojo_backends.so lietorch_mojo/mojo/_lietorch_mojo_backends.mojo
+pixi run -e lietorch-mojo-dev --frozen lietorch-mojo-build
 ```
 
-From the repo root without activating the environment:
-
-```bash
-pixi run -e mast3r-slam-dev --frozen bash -c "cd packages/lietorch-mojo && mojo build --emit shared-lib -I lietorch_mojo/mojo -o lietorch_mojo/_lietorch_mojo_backends.so lietorch_mojo/mojo/_lietorch_mojo_backends.mojo"
-```
+The `lietorch-mojo` pixi feature carries the Mojo 1.2.0 and `max-core` 26.7.0
+pins (GPU host APIs and `layout` live in max-core). dpvo and mast3r-slam compose
+it, and their build and test tasks run `lietorch-mojo-build` first.
 
 The build compiles the GPU kernels ahead of time (ptxas runs during the build;
 the `.so` embeds sm_120a cubins and no PTX, so there is no runtime JIT). The
@@ -68,25 +62,22 @@ everything).
 
 ## Test
 
-There is no pixi feature for this package yet; run with `PYTHONPATH` set:
-
 ```bash
-cd packages/lietorch-mojo
-PYTHONPATH=$PWD pixi run -e mast3r-slam-dev --frozen python -m pytest -q            # unit lane: CPU, no lietorch
-PYTHONPATH=$PWD pixi run -e mast3r-slam-dev --frozen python -m pytest -q -m integration   # CUDA + parity vs lietorch
+pixi run -e lietorch-mojo-dev --frozen tests              # unit lane (CPU)
+pixi run -e lietorch-mojo-dev --frozen tests-integration  # CUDA lane
+pixi run -e lietorch-mojo-dev --frozen gate               # lint, typecheck, deadcode, both lanes
 ```
+
+Each test lane builds the extension first (`lietorch-mojo-build`), so a missing
+or stale `.so` cannot skip or pass silently.
 
 `tests/test_api_snapshot.py` checks every public name of upstream lietorch
 (modules, classes, members, signatures, group constants, backend arities)
 against `tests/fixtures/lietorch_api.json`, with no lietorch installed. To
 regenerate the snapshot, in an environment with the compiled lietorch:
-`python tests/api_surface.py`. The four-group tests (`test_groups_generic.py`,
-`test_groups_parity_all.py`) mark a group whose Mojo kernels are not built in
-as `xfail(strict=False)`.
+`python tests/api_surface.py`.
 
-`integration` tests need a CUDA GPU or the compiled upstream lietorch (the
-parity reference, present in `mast3r-slam-dev` and `dpvo-dev`). Before the
-extension is built every module that needs it is skipped. `tests/test_math.py`
+`integration` tests need a CUDA GPU. `tests/test_math.py`
 builds its own test-only extension (`tests/mojo/math_probe.mojo`, ~4 s, cached
 in `tests/mojo/.build/`), so the production extension has no test hooks.
 
@@ -162,6 +153,6 @@ number of tensors, so a wrong shape raises `ValueError` instead of reading or
 writing out of bounds. The CUDA and CPU contexts are Mojo objects
 (`GPURuntime`, `CPURuntime`) held by Python and type-checked on every call.
 
-Adding a group (SO3) means one Mojo struct that implements
-`LieGroup`, one dispatch line in `_lietorch_mojo_backends.mojo`, and its id in
-`backends._IMPLEMENTED_DIMS`.
+Adding a group means one Mojo struct that implements `LieGroup`, its dispatch
+branches in `_lietorch_mojo_backends.mojo`, and its id and dims in
+`backends._GROUP_DIMS`. The op codes come from the extension (`op_codes`).
