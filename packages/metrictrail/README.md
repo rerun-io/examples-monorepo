@@ -112,8 +112,9 @@ cache (a cold download was not measured):
 
 ## Known gaps
 
-- **Port results predate lietorch-mojo.** All port results above use upstream lietorch C++ as a temporary
-  `lietorch_mojo` provider. Run one TUM seed again on lietorch-mojo and update the table.
+- **Port results predate lietorch-mojo.** The tables above used upstream lietorch C++ as a temporary `lietorch_mojo`
+  provider. One check on lietorch-mojo: TUM fr1_xyz, seed 1234, 1.295 cm against 1.297 cm with the temporary provider
+  (Sim(3) scale 1.0999 against 1.0988).
 - **Seeds.** Only TUM has 3 upstream seeds. The port has 2 TUM seeds and no 7-Scenes or KITTI runs yet.
 - **KITTI stereo** is not built. The stereo JIT path (`VIPE_METRICTRAIL_DPVO_JIT=1`) has no Eigen 3.4.0 at run time.
 - **linux-64 only.** linux-aarch64 (DGX Spark) was not tried.
