@@ -1,8 +1,8 @@
 """Lie group classes: a port of lietorch `groups.py` (VSLAM-LAB/lietorch @ 3e2695dd).
 
 Same class names, method names, signatures and data layouts as upstream, so
-`import lietorch_mojo as lietorch` is a drop-in. SE3, RxSO3 and Sim3 have a
-Mojo backend; SO3 constructs and reshapes, but its ops raise
+`import lietorch_mojo as lietorch` is a drop-in. All four groups (SO3, RxSO3,
+SE3, Sim3) have a Mojo backend; unknown group ids raise
 `NotImplementedError` from `lietorch_mojo.backends`.
 
 Deviations from upstream (both are upstream crashes):

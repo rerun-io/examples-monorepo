@@ -11,8 +11,8 @@ Python passes plain integers and the runtime objects created here:
 - `row_widths(spec)` lists the width of each of those tensors; Python checks
   every tensor's shape against it before it launches.
 
-This file turns the runtime integers into compile-time parameters. SE3,
-RxSO3 and Sim3 are instantiated; a group plugs in here once it implements
+This file turns the runtime integers into compile-time parameters. SO3,
+RxSO3, SE3 and Sim3 are instantiated; a group plugs in here once it implements
 `LieGroup`.
 
 - `pose_retr_cuda(runtime, stream, poses, dx, num_poses, num_fix, is_float64)`
@@ -42,7 +42,9 @@ from pose_retr import pose_retr_cpu, pose_retr_cuda
 from rxso3 import RxSO3
 from se3 import SE3
 from sim3 import Sim3
+from so3 import SO3
 
+comptime GROUP_SO3 = 1
 comptime GROUP_RXSO3 = 2
 comptime GROUP_SE3 = 3
 comptime GROUP_SIM3 = 4
@@ -104,7 +106,7 @@ def _unpack_spec(spec_obj: PythonObject) raises -> Tuple[Int, Int, Bool]:
     """(group id, op, is_float64) of a spec; raises for groups that are not implemented."""
     var spec = Int(py=spec_obj)
     var group_id = (spec >> 8) & 0xFF
-    if group_id != GROUP_SE3 and group_id != GROUP_RXSO3 and group_id != GROUP_SIM3:
+    if group_id != GROUP_SO3 and group_id != GROUP_SE3 and group_id != GROUP_RXSO3 and group_id != GROUP_SIM3:
         raise Error(t"lietorch_mojo: group id {group_id} is not implemented")
     return (group_id, spec & 0xFF, ((spec >> 16) & 1) == 1)
 
@@ -132,6 +134,11 @@ def launch_cuda_py(
                 _launch_cuda[Sim3[.float64]](rt[], stream, op, n, tensors)
             else:
                 _launch_cuda[Sim3[.float32]](rt[], stream, op, n, tensors)
+        elif group_id == GROUP_SO3:
+            if is_f64:
+                _launch_cuda[SO3[.float64]](rt[], stream, op, n, tensors)
+            else:
+                _launch_cuda[SO3[.float32]](rt[], stream, op, n, tensors)
     return Python.none()
 
 
@@ -155,6 +162,11 @@ def launch_cpu_py(runtime: PythonObject, spec_obj: PythonObject, n_obj: PythonOb
                 _launch_cpu[Sim3[.float64]](rt[], op, n, tensors)
             else:
                 _launch_cpu[Sim3[.float32]](rt[], op, n, tensors)
+        elif group_id == GROUP_SO3:
+            if is_f64:
+                _launch_cpu[SO3[.float64]](rt[], op, n, tensors)
+            else:
+                _launch_cpu[SO3[.float32]](rt[], op, n, tensors)
     return Python.none()
 
 
@@ -165,6 +177,8 @@ def row_widths_py(spec_obj: PythonObject) raises -> PythonObject:
         return _row_widths[RxSO3[.float32]](op)
     if group_id == GROUP_SIM3:
         return _row_widths[Sim3[.float32]](op)
+    if group_id == GROUP_SO3:
+        return _row_widths[SO3[.float32]](op)
     return _row_widths[SE3[.float32]](op)
 
 

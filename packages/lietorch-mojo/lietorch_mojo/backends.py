@@ -53,7 +53,7 @@ _NUM_OPS: Final[int] = 19
 
 # lietorch group id -> (embedded dim N, manifold dim K).
 _GROUP_DIMS: Final[dict[int, tuple[int, int]]] = {1: (4, 3), 2: (5, 4), 3: (7, 6), 4: (8, 7)}
-_IMPLEMENTED_DIMS: Final[dict[int, tuple[int, int]]] = {2: _GROUP_DIMS[2], 3: _GROUP_DIMS[3], 4: _GROUP_DIMS[4]}
+_IMPLEMENTED_DIMS: Final[dict[int, tuple[int, int]]] = _GROUP_DIMS
 _GROUP_NAMES: Final[dict[int, str]] = {1: "SO3", 2: "RxSO3", 3: "SE3", 4: "Sim3"}
 # (group id, op) -> width of each tensor the op takes, inputs then outputs (from the extension).
 _ROW_WIDTHS: Final[dict[tuple[int, int], tuple[int, ...]]] = {
