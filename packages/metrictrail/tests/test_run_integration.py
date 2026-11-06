@@ -91,4 +91,11 @@ def test_full_run_on_a_short_real_sequence(tmp_path: Path) -> None:
     assert metrics.num_tracked == 100  # 500 frames, every 5th tracked
     assert metrics.ate_sim3_m is not None and metrics.ate_sim3_m < 0.5
     paths: set[str] = set(RrdReader(rrd).store().schema().entity_paths())
-    assert {"/" + entities.CAM_DINO_PCA, "/" + entities.CAM_PATCHES, "/" + entities.DPVO_WINDOW, "/" + entities.WORLD_CLOUD} <= paths
+    assert {
+        "/" + entities.CAM_DINO_PCA,
+        "/" + entities.CAM_PATCHES,
+        "/" + entities.CAM_NORMALS,
+        "/" + entities.DPVO_WINDOW,
+        "/" + entities.WORLD_CLOUD,
+        "/" + entities.WORLD_CLOUD_NORMALS,
+    } <= paths

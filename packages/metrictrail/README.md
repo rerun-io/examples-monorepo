@@ -3,7 +3,7 @@
 NVIDIA MetricTrail is a monocular SLAM method in ViPE (`pipeline=metrictrail`). It is DPVO with two frozen priors:
 MoGe-2 metric depth starts each new patch at a depth in metres and holds the bundle adjustment to that scale, and
 DINOv3 ViT-S/16 features improve the patch matching. The output is camera poses and intrinsics at metric scale, plus
-per-frame metric depth.
+per-frame metric depth and, from the same MoGe-2 forward, surface normals.
 
 This package holds our code around upstream: benchmark presets, a run CLI with a Rerun logger, the VSLAM-LAB / paper
 evaluation and the catalog layer. ViPE itself comes from `recipes/vipe-src`.
@@ -16,11 +16,15 @@ evaluation and the catalog layer. ViPE itself comes from `recipes/vipe-src`.
 | CUDA kernels | the recipe compiles `vipe_ext` (without `lietorch_ext`) and MetricTrail's DPVO `cuda_corr` + `cuda_ba` at package build time (Python 3.12, conda-forge torch 2.12 cuda130, sm_86 + sm_120 + PTX) | upstream's `python -m vipe.metrictrail.build` step becomes part of `pixi install`. The stereo kernels are not built. |
 | lietorch | patch 0001: ViPE's three vendored lietorch copies import `lietorch_mojo`; `build.sh` deletes the vendored code and `lietorch_backends` is not built | one lietorch for the workspace (lietorch-mojo). ViPE's copies are code-identical to upstream lietorch. |
 | DINOv3 | patch 0002: `recipes/dinov3-src` (a run dependency) | the same ViT-S/16; patch tokens are bit-identical. |
-| MoGe-2 (`moge2-l`) | patch 0003: `packages/monoprior`'s `MoGeModel.from_checkpoint` on ViPE's checkpoint (`Ruicheng/moge-2-vitl` @ `39c4d5e`); `build.sh` deletes ViPE's copy | the same code: depth, mask and focal are bit-identical on 48 TUM frames in fp16 and fp32. |
+| MoGe-2 (`moge2-l`) | patch 0003: `packages/monoprior`'s MoGe-2 code (`build.sh` deletes ViPE's copy). Patch 0004: MetricTrail's prior runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid at 3600 tokens; torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
 | DPVO | the recipe (ViPE's `vipe/metrictrail/dpvo`, `csrc/dpvo`), not `packages/dpvo` | MetricTrail's DPVO is a functional fork: metric-depth local BA, a metric global-BA backend, about 35 new config keys and a `cuda_ba` with 4 more arguments and a new kernel. `packages/dpvo` is a typed rewrite on Python 3.11. MetricTrail does not use DBoW loop closure, so `packages/dpretrieval` is not used. |
 
 Weights are on the NAS (`/mnt/nas/ssd-8tb/metrictrail/weights`, `MANIFEST.md` beside them). The `metrictrail` feature
-sets ViPE's checkpoint variables to these files, so a run never downloads.
+sets ViPE's checkpoint variables to these files. MoGe-2's `moge-2-vitl-normal` is the exception: monoprior loads it from
+the Hugging Face cache (pinned revision) when it exports the ONNX for a new token grid or when the torch fallback runs.
+ONNX files and TensorRT engines are cached under `~/.cache/monoprior` (`MONOPRIOR_TRT_CACHE`); the first run on a new
+raster aspect builds its engines (about 40 s each on the RTX 5090; TUM needs two, 728x966 for tracking and 714x980 for
+the SharedK calibration raster).
 
 ## Run
 
@@ -28,7 +32,7 @@ lietorch comes from `packages/lietorch-mojo`: both envs compose the `lietorch-mo
 depends on `lietorch-mojo-build`, which compiles its Mojo extension for the local GPU on the first run. Use the prod
 env `metrictrail` for runs, not `metrictrail-dev`. Paths must be absolute: the tasks run in `packages/metrictrail`.
 
-One end-to-end run on TUM fr1_xyz (798 frames, about 3 min on the RTX 5090) to a `.rrd`:
+One end-to-end run on TUM fr1_xyz (798 frames, about 1 min 40 s on the RTX 5090) to a `.rrd`:
 
 ```bash
 XFORMERS_DISABLED=1 pixi run -e metrictrail --frozen metrictrail-run \
@@ -45,6 +49,7 @@ quick start). `--no-capture` turns off the live intermediates (faster). Without 
 Other tasks:
 
 - `metrictrail-log-run --run-dir <vipe_out> ...`: log a finished output directory (ours or upstream's) without the GPU.
+  It has no normals: they exist only in a live capture (`cam/normals`, `world/cloud_normals`).
 - `metrictrail-check-kernels`: run one small op of each compiled kernel on the GPU.
 
 ## Evaluate
