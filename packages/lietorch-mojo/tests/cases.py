@@ -1,11 +1,11 @@
-"""Input sets for the SE3 parity tests: random data plus the edge cases of se3.h/so3.h.
+"""Input sets for the SE3 and SO3 parity tests: random data plus the edge cases of se3.h/so3.h.
 
 Every set is built in float64 on the CPU and cast afterwards, so float32 and
 float64 runs see the same values (up to rounding).
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from torch import Tensor
@@ -13,7 +13,7 @@ from torch import Tensor
 
 @dataclass(frozen=True, slots=True)
 class Se3Case:
-    """One named batch of SE3 inputs."""
+    """One named batch of SE3 inputs (or SO3 inputs from `so3_case`: X (B, 4) = qx qy qz qw, a (B, 3) = phi)."""
 
     name: str
     """Short label used in test ids and reports."""
@@ -122,3 +122,13 @@ def se3_ill_conditioned_f32_case(n: int = 256, seed: int = 1) -> Se3Case:
     t: Tensor = torch.randn(n, 3, generator=gen, dtype=torch.float64)
     tau: Tensor = torch.randn(n, 3, generator=gen, dtype=torch.float64)
     return _case("small_angle_f32", t, _quat_from_angle(axes, angles), tau, axes * angles[:, None], gen)
+
+
+def so3_case(case: Se3Case) -> Se3Case:
+    """The rotation part of an SE3 case: X = its quaternions (B, 4), a = its phi (B, 3); points unchanged."""
+    return replace(case, X=case.X[:, 3:].contiguous(), a=case.a[:, 3:].contiguous())
+
+
+def so3_cases(n: int = 256, seed: int = 0) -> list[Se3Case]:
+    """`se3_cases` reduced to SO3 (large_translation is dropped: its rotation part repeats `random`)."""
+    return [so3_case(c) for c in se3_cases(n, seed) if c.name != "large_translation"]

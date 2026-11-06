@@ -12,7 +12,7 @@ Status (step 1 of the lietorch → Mojo evaluation):
 | SE3   | yes     | yes      | yes | yes  | yes               |
 | RxSO3 | yes     | yes      | yes | yes  | yes               |
 | Sim3  | yes     | yes      | yes | yes  | yes               |
-| SO3   | API shell; ops raise `NotImplementedError` | | | | |
+| SO3   | yes     | yes      | yes | yes  | yes               |
 
 Sim3's left Jacobian and its inverse are sim3.h's truncated series, including
 its missing Xi^5/720 term (a stray `;` upstream). So Sim3 `expm_backward`,
