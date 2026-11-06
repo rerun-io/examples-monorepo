@@ -7,7 +7,10 @@ authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
 name = "dpvo"
 version = "0.1.1"
 requires-python = ">= 3.11"
-dependencies = []
+dependencies = ["lietorch-mojo"]
+
+[tool.uv.sources]
+lietorch-mojo = { path = "../lietorch-mojo", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["."]

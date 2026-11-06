@@ -179,10 +179,9 @@ cuda-python = "*"
 onnxscript = "*"
 
 # $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default; ORT needs
-# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer. Both python dirs
-# are listed because cuda envs span 3.11 and 3.12; missing paths are skipped.
+# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer (every cuda env is on Python 3.12).
 [feature.cuda.activation.env]
-LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -306,6 +305,22 @@ vrs = ">=1.1.0"
 PACKAGE_DIR = "packages/simplecv"
 PYREFLY_TARGET = "simplecv"
 PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
+
+# The test lanes build the extension first: a missing or stale .so must not skip or pass silently.
+[feature.lietorch-mojo-pkg.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package unit tests"
+
+[feature.lietorch-mojo-pkg.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package integration tests"
+
+[feature.lietorch-mojo-pkg.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package golden reference tests"
 
 [feature.simplecv.tasks.simplecv-view-polycam-data]
 cmd = "python tools/view_polycam.py --polycam-zip-path data/example-room-scan-poly.zip"
@@ -1852,15 +1867,12 @@ description = "Stream an OAK camera's encoded H.265/H.264 to Rerun (pass --rr-co
 [feature.mast3r-slam]
 channels = [
     "https://prefix.dev/ai-demos",
-    "https://conda.modular.com/max-nightly/",
     "conda-forge",
 ]
 platforms = ["linux-64"]
 
 [feature.mast3r-slam.dependencies]
-# 3.11 because lietorch (below; ai-demos, compiled CUDA) ships cp311 builds only. Moving to 3.12
-# needs a lietorch 1.0 rebuild for cp312 first; the asmk-src/mast3r-src recipes and mojo allow 3.12.
-python = "3.11.*"
+python = "3.12.*"
 torchcodec = "*"
 eigen = ">=3.4.0,<4"
 ffmpeg = ">=7.1.0"
@@ -1873,12 +1885,9 @@ faiss = { version = "*", build = "*openblas*" }
 scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"
-mojo = "*"
+pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
 
 [feature.mast3r-slam.target.linux-64.dependencies]
-# Build 2 adds sm_89/90/120 kernels and compute_120 PTX; build 1 stops at sm_86, so every lietorch
-# kernel fails on an RTX 5090 with "no kernel image is available".
-lietorch = { version = "==1.0", build-number = ">=2" }
 mast3r-src = { path = "recipes/mast3r-src" }
 asmk-src = { path = "recipes/asmk-src" }
 
@@ -1894,8 +1903,21 @@ pyaml = "*"
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
 
-# mojo comes directly from the max-nightly channel, not the modular
-# metapackage (whose starlette pin conflicts with gradio).
+# Its tests import lietorch_mojo, so the test lanes build the extension first.
+[feature.mast3r-slam.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package unit tests"
+
+[feature.mast3r-slam.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package integration tests"
+
+[feature.mast3r-slam.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package golden reference tests"
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-cuda-kernels]
@@ -1912,9 +1934,10 @@ outputs = ["packages/mast3r-slam/mast3r_slam/_backends*.so"]
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-mojo-kernels]
-cmd = "cd packages/mast3r-slam && mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
+depends-on = ["lietorch-mojo-build"]
+cmd = "cd packages/mast3r-slam && mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
 description = "Build mast3r-slam Mojo backend kernels"
-inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo"]
+inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
 outputs = ["packages/mast3r-slam/mast3r_slam_mojo_backends*.so"]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
@@ -2293,19 +2316,60 @@ open3d = "==0.10.0.0"
 matplotlib = "==3.7.5"
 trimesh = "==4.5.3"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# lietorch-mojo — lietorch's Lie group API on Mojo CPU/GPU kernels (replaces ai-demos lietorch)
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.lietorch-mojo]
+channels = ["https://conda.modular.com/max/"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.lietorch-mojo.dependencies]
+python = "3.12.*"
+# Exact stable pins (2026-11-06): `mojo = "*"` from max-nightly had let the lock freeze a June 2026
+# nightly; 1.2.0 is the newest stable Mojo, and since 1.2.0 std.gpu and layout ship in max-core.
+# Bump deliberately: re-run lietorch-mojo's tests and mast3r-slam's Mojo-vs-CUDA tests.
+# mojo comes directly from the stable max channel, not the modular metapackage (whose starlette pin conflicts
+# with gradio). mast3r-slam's Mojo backend build gets mojo and max-core from this feature too.
+mojo = { version = "==1.2.0", channel = "https://conda.modular.com/max/" }
+max-core = { version = "==26.7.0", channel = "https://conda.modular.com/max/" }
+pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
+
+[feature.lietorch-mojo.pypi-dependencies]
+lietorch-mojo = { path = "packages/lietorch-mojo", editable = true }
+
+# Package-only settings live in their own feature so consumers (dpvo) keep their PACKAGE_DIR.
+[feature.lietorch-mojo-pkg]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.lietorch-mojo-pkg.activation.env]
+PACKAGE_DIR = "packages/lietorch-mojo"
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
+
+[feature.lietorch-mojo.tasks.lietorch-mojo-build]
+cmd = "mojo build --emit shared-lib -I lietorch_mojo/mojo -o lietorch_mojo/_lietorch_mojo_backends.so lietorch_mojo/mojo/_lietorch_mojo_backends.mojo"
+cwd = "packages/lietorch-mojo"
+description = "Build the lietorch-mojo extension (CPU + GPU kernels for the local GPU)"
+inputs = ["packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/lietorch-mojo/lietorch_mojo/_lietorch_mojo_backends.so"]
+
+# Upstream lietorch stays out of the lock: a throwaway `pixi exec` env (needs a CUDA GPU) freezes its
+# outputs into the parity tests' reference .rrd. Re-run only when the reference inputs or ops change.
+[feature.lietorch-mojo.tasks.lietorch-mojo-freeze-references]
+cmd = "pixi exec -c https://prefix.dev/ai-demos -c https://prefix.dev/conda-forge -s 'python 3.11.*' -s \"lietorch[version='==1.0',build_number='>=2']\" -s 'pytorch-gpu 2.12.*' -s 'cuda-version 13.0.*' -s 'rerun-sdk ==0.42.0' -s numpy python -I tools/freeze_lietorch_references.py"
+cwd = "packages/lietorch-mojo"
+description = "Freeze upstream lietorch's outputs into tests/fixtures/lietorch_references.rrd (pixi exec env; lietorch is not in the lock)"
+
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 platforms = ["linux-64"]
 
 [feature.dpvo.dependencies]
-# 3.11 because lietorch (ai-demos, compiled CUDA) ships cp311 builds only; 3.12 needs a cp312 rebuild.
-python = "3.11.*"
+python = "3.12.*"
 dpretrieval = { path = "packages/dpretrieval" }
 eigen = ">=3.4.0,<3.5"
 einops = ">=0.8.0,<0.9"
 matplotlib = ">=3.8.4,<3.9"
 icecream = ">=2.1.3,<2.2"
-lietorch = { version = "==1.0", build-number = ">=2" }  # build 2: sm_89/90/120 kernels (see mast3r-slam)
 numba = ">=0.60.0"
 plyfile = ">=1.0.3,<1.1"
 tyro = ">=0.9.1,<0.10"
@@ -2323,6 +2387,22 @@ spaces = ">=0.32.0"
 
 [feature.dpvo.activation.env]
 PACKAGE_DIR = "packages/dpvo"
+
+# Its tests import lietorch_mojo, so the test lanes build the extension first.
+[feature.dpvo.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package unit tests"
+
+[feature.dpvo.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package integration tests"
+
+[feature.dpvo.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package golden reference tests"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.dpvo.tasks._download-dpvo-model]
@@ -2346,6 +2426,7 @@ description = "Download DPVO iPhone example data"
 # ── Build tasks ──────────────────────────────────────────────────────────
 [feature.dpvo.tasks._build-dpvo-cuda-kernels]
 cmd = "python setup.py build_ext --inplace"
+depends-on = ["lietorch-mojo-build"]
 cwd = "packages/dpvo"
 description = "Build DPVO CUDA extensions (cuda_corr, cuda_ba)"
 inputs = [
@@ -3929,11 +4010,13 @@ mv-api-catalog-register-mac = { features = [
 mast3r-slam = { features = [
     "common",
     "cuda",
+    "lietorch-mojo",
     "mast3r-slam",
 ], solve-group = "mast3r-slam", no-default-feature = true }
 mast3r-slam-dev = { features = [
     "common",
     "cuda",
+    "lietorch-mojo",
     "mast3r-slam",
     "dev",
 ], solve-group = "mast3r-slam", no-default-feature = true }
@@ -3987,14 +4070,29 @@ robocap-live-dev = { features = [
 handfit = { features = ["handfit"], solve-group = "handfit", no-default-feature = true }
 handfit-dev = { features = ["handfit", "dev"], solve-group = "handfit", no-default-feature = true }
 handfit-codegen = { features = ["handfit", "handfit-codegen", "dev"], solve-group = "handfit-codegen", no-default-feature = true }
+lietorch-mojo = { features = [
+    "common",
+    "cuda",
+    "lietorch-mojo",
+    "lietorch-mojo-pkg",
+], solve-group = "lietorch-mojo", no-default-feature = true }
+lietorch-mojo-dev = { features = [
+    "common",
+    "cuda",
+    "lietorch-mojo",
+    "lietorch-mojo-pkg",
+    "dev",
+], solve-group = "lietorch-mojo", no-default-feature = true }
 dpvo = { features = [
     "common",
     "cuda",
+    "lietorch-mojo",
     "dpvo",
 ], solve-group = "dpvo", no-default-feature = true }
 dpvo-dev = { features = [
     "common",
     "cuda",
+    "lietorch-mojo",
     "dpvo",
     "dev",
 ], solve-group = "dpvo", no-default-feature = true }

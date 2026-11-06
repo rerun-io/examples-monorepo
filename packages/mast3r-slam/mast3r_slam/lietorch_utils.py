@@ -1,5 +1,5 @@
 import einops
-import lietorch
+import lietorch_mojo as lietorch
 import torch
 from jaxtyping import Float
 from torch import Tensor

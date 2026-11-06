@@ -40,7 +40,7 @@ from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
 
-import lietorch
+import lietorch_mojo as lietorch
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb

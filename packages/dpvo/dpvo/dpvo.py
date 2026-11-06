@@ -39,14 +39,14 @@ import functools
 from collections import OrderedDict
 from collections.abc import Generator
 
-import lietorch
+import lietorch_mojo as lietorch
 import numpy as np
 import torch
 import torch.nn.functional as F
 from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
-from lietorch import SE3
+from lietorch_mojo import SE3
 from numpy import ndarray
 from torch import Tensor
 

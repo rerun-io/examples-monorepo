@@ -15,7 +15,7 @@ import os.path as osp
 import numpy as np
 import torch
 from jaxtyping import Float32, Float64
-from lietorch import SE3
+from lietorch_mojo import SE3
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from torch import Tensor

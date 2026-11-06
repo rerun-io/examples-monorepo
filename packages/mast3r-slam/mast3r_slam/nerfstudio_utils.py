@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Literal
 
 import cv2
-import lietorch
+import lietorch_mojo as lietorch
 import numpy as np
 import open3d as o3d
 import tqdm

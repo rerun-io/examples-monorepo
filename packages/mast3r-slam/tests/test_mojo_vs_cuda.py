@@ -24,7 +24,7 @@ See also: tools/bench_kernels.py for throughput comparisons.
 
 from __future__ import annotations
 
-import lietorch
+import lietorch_mojo as lietorch
 import pytest
 import torch
 from torch import Tensor
@@ -183,6 +183,29 @@ def test_refine_matches_f16_matches_cuda() -> None:
     assert pct_diff < 3.0, (
         f"refine_matches f16: {n_diff}/{n_total} pixels differ ({pct_diff:.1f}%)"
     )
+
+
+@pytest.mark.parametrize(
+    ("batch", "size", "fdim", "radius", "dilation_max"),
+    [
+        (1, 32, 16, 2, 2),  # 1024 points -> block 8 -> cached kernel [16, 8]
+        (2, 64, 128, 2, 2),  # 4096 points -> block 16 -> cached kernel [128, 16]
+        (1, 48, 13, 2, 2),  # fdim not a multiple of 8 -> generic kernel, scalar tail
+    ],
+)
+def test_refine_matches_specialised_paths_match_cuda(batch: int, size: int, fdim: int, radius: int, dilation_max: int) -> None:
+    """The radius=2/dilation=2 cached kernels and the generic kernel's scalar tail agree with CUDA."""
+    D11, D21, p1 = _make_refine_inputs(batch, size, size, fdim)
+
+    (p_cuda,) = cuda_backends.refine_matches(D11.half(), D21.half(), p1, radius, dilation_max)
+    _sync()
+    (p_mojo,) = mojo_backends.refine_matches(D11.half(), D21.half(), p1, radius, dilation_max)
+    _sync()
+
+    n_total: int = int(p1.numel() // 2)
+    n_diff: int = int((p_mojo != p_cuda).any(dim=-1).sum())
+    pct_diff: float = n_diff / n_total * 100
+    assert pct_diff < 3.0, f"refine_matches fdim={fdim}: {n_diff}/{n_total} pixels differ ({pct_diff:.1f}%)"
 
 
 def test_refine_matches_batched_f16_matches_cuda() -> None:

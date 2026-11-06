@@ -2,7 +2,7 @@ import dataclasses
 from enum import Enum
 from typing import Literal
 
-import lietorch
+import lietorch_mojo as lietorch
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor

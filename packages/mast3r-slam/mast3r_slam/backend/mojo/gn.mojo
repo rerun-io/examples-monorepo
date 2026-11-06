@@ -37,21 +37,20 @@ changing call sites.
 
 from std.math import ceildiv, max, min
 from std.python import Python, PythonObject
-from std.utils.index import Index
-from layout import Layout, LayoutTensor, RuntimeLayout, UNKNOWN_VALUE
+from layout import Idx, row_major
 
 from gn_kernels import (
     POSE_DIM, POSE_STRIDE, RAYS_THREADS,
-    POSES_LT, DX_LT, XS_LT, CS_LT, EDGES_LT, IDX_LT, HS_LT, GS_LT,
-    gauss_newton_rays_step_kernel, pose_retr_kernel,
+    gauss_newton_rays_step_kernel,
 )
+# The Sim(3) retraction is lietorch-mojo's (the build adds -I packages/lietorch-mojo/lietorch_mojo/mojo).
+from pose_retr import POSE_RETR_THREADS, POSE_WIDTH, TANGENT_WIDTH, pose_retr_kernel
 from python_interop import (
     get_cached_context_ptr,
     get_cuda_backend_module,
     get_torch_module,
-    torch_float32_ptr,
-    torch_int64_ptr,
-    torch_uint8_ptr,
+    torch_imm_tensor,
+    torch_tensor,
 )
 
 # Maximum number of GPU blocks per edge. Large edges (many points) are split
@@ -202,7 +201,7 @@ def pose_retr_py(
     """Apply solved Sim(3) increments to the pose tensor (in-place on GPU).
 
     Called from Python after the Cholesky solve. Launches the Mojo GPU kernel
-    `pose_retr_kernel` which does:  T_new[k] = Exp(dx[k]) · T_old[k]
+    lietorch-mojo's `pose_retr_kernel`:  T_new[k] = Exp(dx[k]) · T_old[k]
     for every unfixed pose k.
 
     Args:
@@ -217,23 +216,15 @@ def pose_retr_py(
     var poses = poses_obj.contiguous().float()
     var dx = dx_obj.contiguous().float()
     var num_vars = num_poses - num_fix
-    # Wrap PyTorch tensors in LayoutTensors for structured kernel access.
-    var poses_lt = LayoutTensor[DType.float32, POSES_LT, MutAnyOrigin](
-        torch_float32_ptr(poses),
-        RuntimeLayout[POSES_LT].row_major(Index(num_poses, POSE_STRIDE)),
-    )
-    var dx_lt = LayoutTensor[DType.float32, DX_LT, MutAnyOrigin](
-        torch_float32_ptr(dx),
-        RuntimeLayout[DX_LT].row_major(Index(num_vars, POSE_DIM)),
-    )
+    var poses_t = torch_tensor[.float32](poses, row_major((num_poses, Idx[POSE_WIDTH])))
+    var dx_t = torch_imm_tensor[.float32](dx, row_major((num_vars, Idx[TANGENT_WIDTH])))
     var ctx_ptr = get_cached_context_ptr()
-    ctx_ptr[].enqueue_function[pose_retr_kernel](
-        poses_lt,
-        dx_lt,
-        num_fix,
-        num_poses,
-        grid_dim=ceildiv(max(num_poses - num_fix, 0), 256),
-        block_dim=256,
+    ctx_ptr[].enqueue_function[pose_retr_kernel[.float32]](
+        poses_t,
+        dx_t,
+        Int64(num_fix),
+        grid_dim=ceildiv(num_vars, POSE_RETR_THREADS),
+        block_dim=POSE_RETR_THREADS,
     )
     return Python.none()
 
@@ -290,34 +281,20 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
 
     var num_poses = Int(py=twc.shape[0])
 
-    # Wrap PyTorch tensors in LayoutTensors with runtime shapes.
-    # UnsafePointer is only used at the torch bridge (python_interop.mojo);
-    # the kernel receives LayoutTensors with typed multi-dim indexing.
-    var twc_lt = LayoutTensor[DType.float32, POSES_LT, MutAnyOrigin](
-        torch_float32_ptr(twc), RuntimeLayout[POSES_LT].row_major(Index(num_poses, POSE_STRIDE)))
-    var xs_lt = LayoutTensor[DType.float32, XS_LT, MutAnyOrigin](
-        torch_float32_ptr(xs), RuntimeLayout[XS_LT].row_major(Index(num_poses, num_points, 3)))
-    var cs_lt = LayoutTensor[DType.float32, CS_LT, MutAnyOrigin](
-        torch_float32_ptr(cs), RuntimeLayout[CS_LT].row_major(Index(num_poses, num_points)))
-    var ii_lt = LayoutTensor[DType.int64, EDGES_LT, MutAnyOrigin](
-        torch_int64_ptr(ii), RuntimeLayout[EDGES_LT].row_major(Index(num_edges)))
-    var jj_lt = LayoutTensor[DType.int64, EDGES_LT, MutAnyOrigin](
-        torch_int64_ptr(jj), RuntimeLayout[EDGES_LT].row_major(Index(num_edges)))
-    var idx_lt = LayoutTensor[DType.int64, IDX_LT, MutAnyOrigin](
-        torch_int64_ptr(idx_ii2jj), RuntimeLayout[IDX_LT].row_major(Index(num_edges, num_points)))
-    var valid_lt = LayoutTensor[DType.uint8, IDX_LT, MutAnyOrigin](
-        torch_uint8_ptr(valid_match), RuntimeLayout[IDX_LT].row_major(Index(num_edges, num_points)))
-    var q_lt = LayoutTensor[DType.float32, IDX_LT, MutAnyOrigin](
-        torch_float32_ptr(q_tensor), RuntimeLayout[IDX_LT].row_major(Index(num_edges, num_points)))
-    var hs_lt = LayoutTensor[DType.float32, HS_LT, MutAnyOrigin](
-        torch_float32_ptr(hs_partial), RuntimeLayout[HS_LT].row_major(Index(4, num_partials, POSE_DIM, POSE_DIM)))
-    var gs_lt = LayoutTensor[DType.float32, GS_LT, MutAnyOrigin](
-        torch_float32_ptr(gs_partial), RuntimeLayout[GS_LT].row_major(Index(2, num_partials, POSE_DIM)))
-
     var ctx_ptr = get_cached_context_ptr()
     ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel](
-        twc_lt, xs_lt, cs_lt, ii_lt, jj_lt, idx_lt, valid_lt, q_lt, hs_lt, gs_lt,
-        num_points, num_edges, blocks_per_edge, sigma_ray, sigma_dist, c_thresh, q_thresh,
+        torch_imm_tensor[.float32](twc, row_major((num_poses, Idx[POSE_STRIDE]))),
+        torch_imm_tensor[.float32](xs, row_major((num_poses, num_points, Idx[3]))),
+        torch_imm_tensor[.float32](cs, row_major((num_poses, num_points))),
+        torch_imm_tensor[.int64](ii, row_major((num_edges,))),
+        torch_imm_tensor[.int64](jj, row_major((num_edges,))),
+        torch_imm_tensor[.int64](idx_ii2jj, row_major((num_edges, num_points))),
+        torch_imm_tensor[.uint8](valid_match, row_major((num_edges, num_points))),
+        torch_imm_tensor[.float32](q_tensor, row_major((num_edges, num_points))),
+        torch_tensor[.float32](hs_partial, row_major((Idx[4], num_partials, Idx[POSE_DIM], Idx[POSE_DIM]))),
+        torch_tensor[.float32](gs_partial, row_major((Idx[2], num_partials, Idx[POSE_DIM]))),
+        Int64(num_points), Int64(num_edges), Int64(blocks_per_edge),
+        sigma_ray, sigma_dist, c_thresh, q_thresh,
         grid_dim=num_partials,
         block_dim=RAYS_THREADS,
     )

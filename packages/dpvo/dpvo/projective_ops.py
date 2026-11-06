@@ -25,7 +25,7 @@ from typing import Any, Literal, overload
 
 import torch
 from jaxtyping import Bool, Float, Int
-from lietorch import SE3
+from lietorch_mojo import SE3
 from torch import Tensor
 
 MIN_DEPTH: float = 0.2

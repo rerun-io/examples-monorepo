@@ -2,7 +2,7 @@ import pytest
 from beartype.roar import BeartypeException
 
 torch = pytest.importorskip("torch", reason="DPVO requires PyTorch")
-pytest.importorskip("lietorch", reason="DPVO requires lietorch")
+pytest.importorskip("lietorch_mojo", reason="DPVO requires lietorch_mojo")
 
 from dpvo.projective_ops import iproj, proj  # noqa: E402
 

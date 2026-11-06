@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any
 
-import lietorch
+import lietorch_mojo as lietorch
 import torch
 from torch import Tensor
 
