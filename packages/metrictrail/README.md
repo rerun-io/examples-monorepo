@@ -111,9 +111,21 @@ and `MetricTrailLamaria` override `catalog_blueprints`; dataforge's `republish_b
   `metrictrail_upstream` in the colours above, with one keyframe-depth pane per run.
 
 Publish one with `--publish-blueprint default|comparison` together with `--catalog-url` (files go to
-`<blueprint_root>/blueprints/`). The flag is off by default. Do not run `dataforge-publish-blueprints` on these
-datasets: it publishes dataforge's generic layout, which shows every run in its own palette. Take the Spark catalog
-snapshot after every publish.
+`<blueprint_root>/blueprints/`). The flag is off by default. Do not run `dataforge-publish-blueprints` on the
+`dataforge-vslam-lab-*` datasets: it publishes dataforge's generic layout, which shows every run in its own palette.
+Take the Spark catalog snapshot after every publish.
+
+`dataforge-lamaria` is different: it is dataforge's own dataset (10 segments, MetricTrail's layer is on
+`lamaria__R_01_easy` only), so it keeps dataforge's default layout. `default` is refused there. dataforge's Rig and
+Follow views already show the `metrictrail_paper` path and points on R_01. For its keyframe-depth pane, use the
+`comparison` layout (`--publish-blueprint comparison`; the flag reaches VSLAM-LAB datasets only, so on LaMAria call
+`publish_layout(<catalog_url>, "dataforge-lamaria", "comparison", <blueprint_root>)` directly). It replaces dataforge's
+default while it is live, so restore dataforge's layout when you are done:
+
+```bash
+pixi run --frozen -e dataforge dataforge-publish-blueprints --catalog-url <catalog_url> \
+    --catalog-name dataforge-lamaria --output-root <dataforge output root> lamaria
+```
 
 ## Results against the paper
 

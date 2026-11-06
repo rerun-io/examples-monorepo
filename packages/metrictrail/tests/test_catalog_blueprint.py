@@ -16,6 +16,7 @@ from metrictrail.catalog.blueprint import (
     content_rules,
     iter_views,
     metrictrail_dataset,
+    publish_layout,
     shown_predictions,
 )
 from metrictrail.palette import GT_RGB, OURS_RGB, PAPER_PORT_RGB, UPSTREAM_RGB
@@ -102,3 +103,12 @@ def test_lamaria_adds_the_run_panes_to_its_own_layout(tmp_path: Path) -> None:
 def test_unknown_dataset_is_refused() -> None:
     with pytest.raises(ValueError, match="layouts exist for"):
         metrictrail_dataset("dataforge-epfl", "default")
+
+
+def test_lamaria_default_layout_stays_dataforges(tmp_path: Path) -> None:
+    """dataforge-lamaria is dataforge's dataset: our default is refused before any catalog access; comparison stays."""
+    with pytest.raises(ValueError, match="keeps dataforge's default layout"):
+        publish_layout("rerun+http://127.0.0.1:1", "dataforge-lamaria", "default", tmp_path)
+    assert not (tmp_path / "blueprints").exists()
+    assert isinstance(metrictrail_dataset("dataforge-lamaria", "comparison"), MetricTrailLamaria)
+    assert isinstance(metrictrail_dataset("dataforge-vslam-lab-rgbdtum", "default"), MetricTrailVslamLab)

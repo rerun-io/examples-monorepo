@@ -13,6 +13,10 @@ and publishes with ``dataforge.apis.register.republish_blueprints``:
 A run the layout names but the dataset does not hold gets a pane whose title says it was not run there (7-Scenes, KITTI
 and LaMAria have no shipped-path run). dataforge builds the views; this module picks the runs, the legend and the pane
 titles, and hides the runs a layout leaves out (``restyle``).
+
+``dataforge-lamaria`` is dataforge's own dataset (10 segments; MetricTrail has a layer on ``lamaria__R_01_easy`` only),
+so its default layout stays dataforge's: ``default`` is refused there and ``comparison`` is published only on explicit
+request. Restore dataforge's layout afterwards with ``dataforge-publish-blueprints ... lamaria``.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -49,6 +53,8 @@ SOURCE_TITLES: dict[LayerSource, str] = {
 """Pane-title prefix per run (short: a pane is a quarter of the camera grid wide)."""
 NOT_RUN: str = "not run on this dataset"
 """Title suffix of the pane of a run the dataset does not hold."""
+SHARED_DATASETS: frozenset[str] = frozenset({"dataforge-lamaria"})
+"""Datasets whose default layout dataforge owns: MetricTrail publishes only ``comparison`` there, on request."""
 
 
 def depth_entity(source: LayerSource) -> str:
@@ -146,7 +152,7 @@ class MetricTrailLamaria(LamariaDataset):
     """dataforge's LaMAria dataset with MetricTrail's layouts: its own layout plus a depth pane per shown run.
 
     LaMAria's layout takes no prediction layers, so the runs keep their layers' own (legend) colours and the panes are
-    added to its camera grid.
+    added to its camera grid. The dataset is dataforge's: :func:`metrictrail_dataset` gives only ``comparison`` here.
     """
 
     def __init__(self, config: LamariaConfig, layout: LayoutName) -> None:
@@ -187,8 +193,12 @@ def metrictrail_dataset(catalog_name: str, layout: LayoutName) -> DataforgeDatas
     """The dataforge dataset behind ``catalog_name`` with MetricTrail's ``layout``.
 
     Raises:
-        ValueError: If MetricTrail has no layout for that dataset.
+        ValueError: If MetricTrail has no layout for that dataset, or ``layout`` is ``default`` on a shared dataset.
     """
+    if catalog_name in SHARED_DATASETS and layout == "default":
+        raise ValueError(
+            f"{catalog_name} keeps dataforge's default layout; MetricTrail publishes only --publish-blueprint comparison there"
+        )
     if catalog_name == "dataforge-lamaria":
         return MetricTrailLamaria(LamariaConfig(), layout)
     prefix: str = "dataforge-vslam-lab-"
@@ -199,8 +209,14 @@ def metrictrail_dataset(catalog_name: str, layout: LayoutName) -> DataforgeDatas
 
 def publish_layout(catalog_url: str, catalog_name: str, layout: LayoutName, output_root: Path) -> None:
     """Publish ``layout`` as the dataset's default segment and card layouts (dataforge's ``republish_blueprints``: new
-    stamped ``<output_root>/blueprints/*.rbl`` files, the dataset's earlier blueprint entries retired)."""
+    stamped ``<output_root>/blueprints/*.rbl`` files, the dataset's earlier blueprint entries retired).
+
+    Raises:
+        ValueError: Before any catalog access, if MetricTrail may not publish ``layout`` on ``catalog_name``
+            (``default`` on ``dataforge-lamaria``, whose default layout is dataforge's).
+    """
+    dataset: DataforgeDataset = metrictrail_dataset(catalog_name, layout)
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(catalog_name)
-    republish_blueprints(entry, metrictrail_dataset(catalog_name, layout), catalog_name, output_root)
+    republish_blueprints(entry, dataset, catalog_name, output_root)
     for path in (output_root / "blueprints").glob(f"{catalog_name}*.rbl"):
         path.chmod(0o664)  # the ssd-8tb NAS share gives new files mode 000
