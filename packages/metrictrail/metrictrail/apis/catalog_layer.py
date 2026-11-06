@@ -16,7 +16,7 @@ the run started), and ``{commit}`` in ``--producer`` is replaced by its short fo
 Runs whose commit was later rebased away pass ``--code-commit`` (the branch commit that carries their code): it becomes
 ``repo_commit`` and the logs' commit is kept as ``run_commit``.
 
-The TensorRT shipped path (``--source metrictrail_trt``) also takes ``--capture-rrd`` (each run's live capture, ``{case}``
+The TensorRT shipped path (``--source metrictrail``) also takes ``--capture-rrd`` (each run's live capture, ``{case}``
 filled in) for the surface normals, and ``--depth-source`` names its depth.
 """
 

@@ -42,20 +42,20 @@ from scipy.spatial.transform import Rotation
 from serde import serde
 
 from metrictrail.artifacts import ColoredCloud
-from metrictrail.palette import OURS_RGB, TRT_RGB, UPSTREAM_RGB
+from metrictrail.palette import OURS_RGB, PAPER_PORT_RGB, UPSTREAM_RGB
 from metrictrail.properties import any_values
 
-LayerSource: TypeAlias = Literal["metrictrail", "metrictrail_upstream", "metrictrail_trt"]
-"""Layer name and run source: our port, unmodified upstream ViPE run on this machine, or our port's shipped path
-(MoGe-2 ``moge-2-vitl-normal`` through TensorRT, with surface normals)."""
+LayerSource: TypeAlias = Literal["metrictrail", "metrictrail_paper", "metrictrail_upstream"]
+"""Layer name and run source: ours, the shipped path (MoGe-2 ``moge-2-vitl-normal`` through TensorRT, with surface
+normals); our torch reproduction of the paper configuration; or unmodified upstream ViPE run on this machine."""
 
 APPLICATION_ID: str = "dataforge"
 """dataforge's application id; every layer of a segment shares it."""
 TIMELINE: str = "video_time"
 """dataforge's duration timeline."""
-LAYER_COLORS: dict[LayerSource, tuple[int, int, int]] = {"metrictrail": OURS_RGB, "metrictrail_upstream": UPSTREAM_RGB, "metrictrail_trt": TRT_RGB}
-"""Trajectory, trail and keyframe colour per source: the explainer legend (port magenta #E040FB, upstream amber #F5A623,
-TensorRT shipped path cyan #22D3EE; the gt layer is dataforge's and gets the legend's green from the blueprint)."""
+LAYER_COLORS: dict[LayerSource, tuple[int, int, int]] = {"metrictrail": OURS_RGB, "metrictrail_paper": PAPER_PORT_RGB, "metrictrail_upstream": UPSTREAM_RGB}
+"""Trajectory, trail and keyframe colour per source: the explainer legend (ours magenta #E040FB, torch reproduction
+violet #A78BFA, upstream amber #F5A623; the gt layer is dataforge's and gets the legend's green from the blueprint)."""
 POINTS_VOXEL_M: dict[str, float] = {"rgbdtum": 0.01, "7scenes": 0.02, "kitti": 0.10}
 """Voxel of the keyframe cloud per VSLAM-LAB dataset (SPEC section 3)."""
 MAX_POINTS: int = 300_000

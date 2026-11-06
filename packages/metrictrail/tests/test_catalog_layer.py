@@ -26,7 +26,7 @@ from metrictrail.catalog.layer import (
     write_layer,
 )
 from metrictrail.catalog.register import layer_uris, register_layer_run, register_layers
-from metrictrail.palette import OURS_RGB, TRT_RGB, UPSTREAM_RGB
+from metrictrail.palette import OURS_RGB, PAPER_PORT_RGB, UPSTREAM_RGB
 
 
 def layer_inputs(count: int = 20) -> LayerInputs:
@@ -123,7 +123,7 @@ def packed_rgba(rgb: tuple[int, int, int]) -> int:
     return (rgb[0] << 24) | (rgb[1] << 16) | (rgb[2] << 8) | 0xFF
 
 
-@pytest.mark.parametrize(("source", "rgb"), [("metrictrail", OURS_RGB), ("metrictrail_upstream", UPSTREAM_RGB), ("metrictrail_trt", TRT_RGB)])
+@pytest.mark.parametrize(("source", "rgb"), [("metrictrail", OURS_RGB), ("metrictrail_upstream", UPSTREAM_RGB), ("metrictrail_paper", PAPER_PORT_RGB)])
 def test_layer_draws_path_trail_and_keyframes_in_the_legend_colour(tmp_path: Path, source: str, rgb: tuple[int, int, int]) -> None:
     target: Path = write_layer(tmp_path / "layer.rrd", "s", source, layer_inputs(), layer_properties())  # pyrefly: ignore[bad-argument-type]
     root: str = f"/world/runs/{source}"
@@ -148,10 +148,10 @@ def test_layer_with_normals_logs_each_image_at_its_rows_video_time_and_the_norma
         normals_jpeg={7: JPEG, 3: JPEG + b"3"},
         points_normals=ColoredCloud(points_xyz=np.ones((4, 3), dtype=np.float32), colors_rgb=np.full((4, 3), 128, dtype=np.uint8)),
     )
-    target: Path = write_layer(tmp_path / "layer.rrd", "s", "metrictrail_trt", inputs, layer_properties())
+    target: Path = write_layer(tmp_path / "layer.rrd", "s", "metrictrail", inputs, layer_properties())
     schema = RrdReader(target).store().schema()
-    paths: dict[str, str] = normals_entities("metrictrail_trt")
-    assert set(paths.values()) | set(layer_entities("metrictrail_trt").values()) <= set(schema.entity_paths())
+    paths: dict[str, str] = normals_entities("metrictrail")
+    assert set(paths.values()) | set(layer_entities("metrictrail").values()) <= set(schema.entity_paths())
     assert [index.name for index in schema.index_columns()] == ["video_time"]
     images: list[tuple[int, bytes]] = []
     for chunk in RrdReader(target).store().stream():
@@ -243,7 +243,7 @@ def test_rebased_run_keeps_its_own_commit_beside_the_branch_commit(tmp_path: Pat
     log.parent.mkdir(parents=True)
     log.write_text(f"{RUN_SHA}\n", encoding="utf-8")
     config: Config = dataclasses.replace(
-        port_config(tmp_path), source="metrictrail_trt", code_commit=HEAD_SHA, run_logs_root=tmp_path / "runs-of-the-sweep"
+        port_config(tmp_path), source="metrictrail", code_commit=HEAD_SHA, run_logs_root=tmp_path / "runs-of-the-sweep"
     )
     provenance = run_provenance(config, "desk")
     assert (provenance.repo_commit, provenance.run_commit, provenance.producer) == (
