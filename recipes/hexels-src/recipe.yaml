@@ -28,6 +28,8 @@ source:
   - git: https://github.com/hbb1/2d-gaussian-splatting.git
     rev: 335ad612f2e783a4e57b9cbc4d1e167bd599fc98
     target_directory: 2d-gaussian-splatting
+    patches:
+      - patches/0001-eval-tnt-open3d-pipelines.patch  # eval_tnt on o3d.pipelines.registration (Open3D 0.10 -> current)
   # 2DGS's scene/__init__ imports simple_knn._C; commit = 2DGS's submodule record.
   - git: https://gitlab.inria.fr/bkerbl/simple-knn.git
     rev: f155ec04131cb579f53443a06879d37115f4612f

@@ -1,0 +1,77 @@
+# Patch: 2DGS scripts/eval_tnt on the current Open3D registration API
+#
+# The T&T evaluator was written for Open3D 0.10 (upstream environment-tnt-eval.yml, Python 3.8).
+# Open3D 0.11 moved registration to o3d.pipelines.registration, and 0.12 replaced
+# RANSACConvergenceCriteria.max_validation with a confidence-based early stop. Confidence 1.0
+# disables that stop, so the trajectory alignment still runs all 100000 RANSAC iterations.
+# ICP keeps its positional ICPConvergenceCriteria(1e-6, max_itr), which binds the same way in 0.10
+# and 0.19. Nothing else in eval_tnt needs a change; it then runs in the hexels env (Python 3.12).
+diff --git a/scripts/eval_tnt/registration.py b/scripts/eval_tnt/registration.py
+index c55838d..30f6046 100644
+--- a/scripts/eval_tnt/registration.py
++++ b/scripts/eval_tnt/registration.py
+@@ -69,9 +69,9 @@ def trajectory_alignment(map_file, traj_to_register, gt_traj_col, gt_trans,
+         traj_pcd_col.transform(gt_trans)
+     corres = o3d.utility.Vector2iVector(
+         np.asarray(list(map(lambda x: [x, x], range(len(gt_traj_col))))))
+-    rr = o3d.registration.RANSACConvergenceCriteria()
+-    rr.max_iteration = 100000
+-    rr.max_validation = 100000
++    # Open3D >= 0.12 replaced max_validation with a confidence-based early stop; confidence 1.0
++    # disables that stop, so RANSAC still runs all 100000 iterations as it did on Open3D 0.10.
++    rr = o3d.pipelines.registration.RANSACConvergenceCriteria(max_iteration=100000, confidence=1.0)
+ 
+     # in this case a log file was used which contains
+     # every movie frame (see tutorial for details)
+@@ -96,14 +96,14 @@ def trajectory_alignment(map_file, traj_to_register, gt_traj_col, gt_trans,
+             traj_to_register_pcd_rand.points.append(elem)
+ 
+     # Rough registration based on aligned colmap SfM data
+-    reg = o3d.registration.registration_ransac_based_on_correspondence(
++    reg = o3d.pipelines.registration.registration_ransac_based_on_correspondence(
+         traj_to_register_pcd_rand,
+         traj_pcd_col,
+         corres,
+         0.2,
+-        o3d.registration.TransformationEstimationPointToPoint(True),
++        o3d.pipelines.registration.TransformationEstimationPointToPoint(True),
+         6,
+-        rr,
++        criteria=rr,
+     )
+     return reg.transformation
+ 
+@@ -149,13 +149,13 @@ def registration_unif(
+     t = crop_and_downsample(gt_target,
+                             crop_volume,
+                             down_sample_method="uniform")
+-    reg = o3d.registration.registration_icp(
++    reg = o3d.pipelines.registration.registration_icp(
+         s,
+         t,
+         threshold,
+         np.identity(4),
+-        o3d.registration.TransformationEstimationPointToPoint(True),
+-        o3d.registration.ICPConvergenceCriteria(1e-6, max_itr),
++        o3d.pipelines.registration.TransformationEstimationPointToPoint(True),
++        o3d.pipelines.registration.ICPConvergenceCriteria(1e-6, max_itr),
+     )
+     reg.transformation = np.matmul(reg.transformation, init_trans)
+     return reg
+@@ -188,13 +188,13 @@ def registration_vol_ds(
+         down_sample_method="voxel",
+         voxel_size=voxel_size,
+     )
+-    reg = o3d.registration.registration_icp(
++    reg = o3d.pipelines.registration.registration_icp(
+         s,
+         t,
+         threshold,
+         np.identity(4),
+-        o3d.registration.TransformationEstimationPointToPoint(True),
+-        o3d.registration.ICPConvergenceCriteria(1e-6, max_itr),
++        o3d.pipelines.registration.TransformationEstimationPointToPoint(True),
++        o3d.pipelines.registration.ICPConvergenceCriteria(1e-6, max_itr),
+     )
+     reg.transformation = np.matmul(reg.transformation, init_trans)
+     return reg

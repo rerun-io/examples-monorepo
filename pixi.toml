@@ -57,6 +57,14 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 # datafusion stays on PyPI (below).
 pandas = ">=2"
 
+# The workspace's one Pillow cap. gradio (PyPI) <= 6.31.0 requires pillow<13: Pillow 13 broke gradio's
+# 32-bit integer PNG output. Fixed on gradio main (gradio-app/gradio#14034, 2026-11-02, pillow<14) but
+# unreleased as of 2026-11-06. Remove this cap and bump gradio with the next 6.x release; Pillow 13 also
+# carries the fix for CVE-2026-112403 (gradio-app/gradio#13999). Gradio lives only in `common`, so the
+# cap does too; a constraint adds no package.
+[feature.common.constraints]
+pillow = "<13"
+
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
 xorg-xorgproto = "*"
@@ -69,9 +77,12 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# pin-bump: hold — gradio-rerun pins rerun-sdk exactly; the conda rerun-sdk in
-# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping.
-gradio = "==6.13.0"                                        # pin-bump: hold
+# pin-bump: hold — gradio-rerun pins rerun-sdk exactly (0.42.0 needs rerun-sdk==0.42.0 and gradio>=6),
+# so it moves only together with the rerun-sdk pins; the conda rerun-sdk in
+# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping. gradio is exact so
+# that each bump is a deliberate change: re-check that a gradio-rerun app still renders. Every gradio
+# release so far caps pillow<13, see [feature.common.constraints].
+gradio = "==6.31.0"                                        # pin-bump: hold
 gradio-rerun = "==0.42.0"                                  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
@@ -1105,7 +1116,6 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.posekit-egohand.dependencies]
 hydra-core = "*"
-pillow = "<13"
 python-dateutil = "<3"
 anyio = "<4.15"
 
@@ -1155,8 +1165,7 @@ warp-lang = "==1.11.*"
 platforms = ["linux-64"]
 
 [feature.posekit-body.dependencies]
-# The posekit-egohand holds: Gradio needs Pillow <13, s3fs needs python-dateutil <3, AnyIO <4.15 keeps typing_extensions.
-pillow = "<13"
+# The posekit-egohand holds: s3fs needs python-dateutil <3, AnyIO <4.15 keeps typing_extensions.
 python-dateutil = "<3"
 anyio = "<4.15"
 # SAM2-streaming (the posekit feature) passes version_base="1.2", which Hydra 1.4 rejects; this solve picked 1.4.0rc1.
@@ -1178,8 +1187,9 @@ kernels = ">=0.11.3"
 
 [feature.posekit-body.activation.env]
 PACKAGE_DIR = "packages/posekit"
-# The same four Transformers .to() stub false positives as posekit-egohand.
-PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
+# The same four Transformers .to() stub false positives as posekit-egohand; the WiLoR and EgoHand lanes
+# are not installed here (see [feature.posekit.activation.env]).
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit-body.tasks.posekit-body-download-examples]
 cmd = "test -f data/body3d-examples/yoga-example.jpg || curl -fsSL --retry 3 --create-dirs -o data/body3d-examples/Planche.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Planche.jpg -o data/body3d-examples/Amir-Khan-Lamont-Peterson_2689582.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/Amir-Khan-Lamont-Peterson_2689582.jpg -o data/body3d-examples/BNAAHPYGMYSE26U6C6T7VA6544.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/BNAAHPYGMYSE26U6C6T7VA6544.jpg -o data/body3d-examples/yoga-example.jpg https://raw.githubusercontent.com/rerun-io/sam3d-body-rerun/343f51a84616082a040a9697aeeb584ddbd0647a/data/example-data/yoga-example.jpg"
@@ -1238,6 +1248,8 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.posekit-hands.activation.env]
 PACKAGE_DIR = "packages/posekit"
+# posekit-egohand's baseline; the SAM 3D Body lane is not installed here (see [feature.posekit.activation.env]).
+PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py"
 
 [feature.posekit-hands.tasks.posekit-video-hands]
 cmd = "python tools/demos/video_hands.py"
@@ -1262,6 +1274,13 @@ description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames;
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
 PYREFLY_TARGET = "src/posekit tests tools"
+# Each posekit env typechecks only the modules whose imports it installs, so the check never leans on
+# another env's site-packages. Three lanes: SAM 3D Body (sam_3d_body, open3d, warp: posekit-sam3d-body +
+# posekit-body), WiLoR (roma, skimage, timm, ultralytics: posekit-wilor) and EgoHand on SOMA (soma, warp:
+# soma-runtime + posekit-egohand). The base lane excludes all three; posekit-body and posekit-hands come
+# before posekit in their envs (the first feature's value wins) and exclude only what they lack.
+# `--project-excludes=<glob>`: with a space the task shell would expand the glob into files to check.
+PYREFLY_EXTRA_ARGS = "--project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/models/egohand_capture.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit.tasks.posekit-video-pose]
 cmd = "python tools/demos/video_pose.py"
@@ -1305,6 +1324,7 @@ smplx = ">=0.1.28"
 [feature.lamp.activation.env]
 PACKAGE_DIR = "packages/lamp"
 PYREFLY_TARGET = "lamptrack/apis lamptrack/cameras.py lamptrack/catalog_rig.py lamptrack/models lamptrack/rerun_logging.py lamptrack/third_party/lamp lamptrack/__init__.py lamptrack/third_party/__init__.py tools"
+PYREFLY_EXTRA_ARGS = ""  # posekit's lane excludes name posekit files
 
 [feature.lamp.tasks._lamp-download-checkpoint]
 cmd = "test -f data/checkpoints/lamp_smpl_aria_gen2.pt || hf download facebook/LAMP --revision 875ab025bd63c7b0ede9db2485cae72ee414e035 --include 'lamp_smpl_aria_gen2.pt' --local-dir data/checkpoints/"
@@ -1885,7 +1905,6 @@ faiss = { version = "*", build = "*openblas*" }
 scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"
-pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
 
 [feature.mast3r-slam.target.linux-64.dependencies]
 mast3r-src = { path = "recipes/mast3r-src" }
@@ -2175,8 +2194,10 @@ platforms = ["linux-64"]
 
 [feature.hexels.dependencies]
 python = "3.12.*"
-# hexels-src runs need open3d (upstream mesh extraction, 2DGS eval_dtu); conda-forge 0.20.0 fails to import
-# (libOpen3D.so.0.20: undefined filament symbol), so hold the monorepo's 0.19 like every other feature.
+# hexels-src runs need open3d (upstream mesh extraction, 2DGS eval_dtu and eval_tnt). Hold the monorepo's 0.19
+# like every other feature. An earlier conda-forge 0.20.0 build failed to import (libOpen3D.so.0.20: undefined
+# filament symbol); build _2 imports on Python 3.12 (2026-11-06), but 0.20 also moves the TSDF meshes, so the
+# bump is its own change.
 open3d = ">=0.19.0,<0.20"
 hexels-src = { path = "recipes/hexels-src" }
 hexel-kernel = { path = "recipes/hexels-src" }
@@ -2277,7 +2298,7 @@ cwd = "packages/hexels"
 description = "Build runs/TABLE.json and runs/table.rrd from the benchmark run directories"
 
 # Surfaces: TSDF meshes from rendered depth (Open3D, upstream Hexels settings), the paper's evaluators run
-# unchanged from the patched 2DGS tree in this env (eval_tnt in `tnt-eval`), and the surface recordings.
+# from the patched 2DGS tree in this env, and the surface recordings.
 [feature.hexels.tasks.hexels-surface-run]
 cmd = "python tools/surface_run.py"
 cwd = "packages/hexels"
@@ -2286,7 +2307,7 @@ description = "Render depth (gsplat render --surface, or upstream CUDA in proces
 [feature.hexels.tasks.hexels-surface-eval]
 cmd = "python tools/surface_eval.py"
 cwd = "packages/hexels"
-description = "Score fuse_post.ply: DTU Chamfer (2DGS eval_dtu) or T&T F1 (2DGS eval_tnt in the tnt-eval env)"
+description = "Score fuse_post.ply: DTU Chamfer (2DGS eval_dtu) or T&T F1 (2DGS eval_tnt)"
 
 [feature.hexels.tasks.hexels-surface-table]
 cmd = "python tools/surface_table.py"
@@ -2297,24 +2318,6 @@ description = "Collect scored surface runs and the paper's per-scene numbers int
 cmd = "python tools/surface_log.py"
 cwd = "packages/hexels"
 description = "Write the per-scene surface recording: meshes, depth and normal maps, cameras, metrics"
-
-# ═══════════════════════════════════════════════════════════════════════════
-# tnt-eval — the Tanks and Temples evaluator's pinned environment (upstream environment-tnt-eval.yml):
-# Python 3.8 and Open3D 0.10, whose registration API the 2DGS `scripts/eval_tnt` code needs.
-# Only an interpreter for that script; never compose it with other features.
-# ═══════════════════════════════════════════════════════════════════════════
-[feature.tnt-eval]
-platforms = ["linux-64"]
-
-[feature.tnt-eval.dependencies]
-python = "3.8.*"
-
-[feature.tnt-eval.pypi-dependencies]
-numpy = "==1.23.5"
-scipy = "==1.10.1"
-open3d = "==0.10.0.0"
-matplotlib = "==3.7.5"
-trimesh = "==4.5.3"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # lietorch-mojo — lietorch's Lie group API on Mojo CPU/GPU kernels (replaces ai-demos lietorch)
@@ -2332,7 +2335,6 @@ python = "3.12.*"
 # with gradio). mast3r-slam's Mojo backend build gets mojo and max-core from this feature too.
 mojo = { version = "==1.2.0", channel = "https://conda.modular.com/max/" }
 max-core = { version = "==26.7.0", channel = "https://conda.modular.com/max/" }
-pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
 
 [feature.lietorch-mojo.pypi-dependencies]
 lietorch-mojo = { path = "packages/lietorch-mojo", editable = true }
@@ -2492,7 +2494,6 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-evals.dependencies]
 python = "3.12.*"
-pillow = "<13"  # gradio 6.13 (held) needs pillow<13; the solve would otherwise pick 13
 pyyaml = "*"
 pyarrow = ">=20.0.0,<21"
 tqdm = "*"
@@ -3870,10 +3871,10 @@ posekit = { features = [
     "cuda",
     "posekit",
 ], solve-group = "posekit", no-default-feature = true }
-posekit-hands = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands"], solve-group = "posekit-hands", no-default-feature = true }
-posekit-hands-dev = { features = ["common", "cuda", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-hands", "dev"], solve-group = "posekit-hands", no-default-feature = true }
-posekit-body = { features = ["common", "cuda", "posekit", "posekit-sam3d-body", "posekit-body"], solve-group = "posekit-body", no-default-feature = true }
-posekit-body-dev = { features = ["common", "cuda", "posekit", "posekit-sam3d-body", "posekit-body", "dev"], solve-group = "posekit-body", no-default-feature = true }
+posekit-hands = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-hands-dev = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "dev"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-body = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body"], solve-group = "posekit-body", no-default-feature = true }
+posekit-body-dev = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body", "dev"], solve-group = "posekit-body", no-default-feature = true }
 posekit-dev = { features = [
     "common",
     "cuda",
@@ -4029,7 +4030,6 @@ gsplat-rust-renderer-dev = { features = [
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
 hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
-tnt-eval = { features = ["tnt-eval"], no-default-feature = true }
 dataforge = { features = [
     "common",
     "dataforge",
