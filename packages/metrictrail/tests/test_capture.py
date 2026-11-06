@@ -8,7 +8,7 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from metrictrail.capture import CapturedPass, CaptureSession, DinoPca, dpvo_world_T_cam, frustum_strips
+from metrictrail.capture import CapturedPass, CaptureSession, DinoPca, dpvo_world_T_cam, frustum_strips, normals_rgb, rgb_normals
 
 torch = pytest.importorskip("torch", reason="torch comes from the metrictrail env's cuda feature")
 
@@ -56,3 +56,26 @@ def test_kept_pass_is_the_last_of_the_longest(tmp_path: Path) -> None:
     ]
     kept = session.kept_pass()
     assert kept is not None and kept.path.name == "pass_2.rrd"
+
+
+def test_normals_survive_the_8bit_rgb_round_trip() -> None:
+    generator = torch.Generator().manual_seed(0)
+    normals = torch.nn.functional.normalize(torch.randn(6, 5, 3, generator=generator), dim=-1)
+    rgb = normals_rgb(normals)
+    assert rgb.dtype == torch.uint8
+    back: Float32[ndarray, "6 5 3"] = rgb_normals(rgb.numpy())
+    np.testing.assert_allclose(np.linalg.norm(back, axis=-1), 1.0, atol=1e-5)
+    np.testing.assert_allclose(back, normals.numpy(), atol=0.01)
+
+
+def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp_path: Path) -> None:
+    session = CaptureSession(out_dir=tmp_path, application_id="a", recording_id="r", depth_range_m=(0.3, 3.0))
+    assert session.kept_normals() == {}
+    image: np.ndarray = np.zeros((2, 2, 3), dtype=np.uint8)
+    for marker, frames in enumerate((32, 596, 596)):
+        session.pass_frames = frames
+        session.open_pass(len(session.passes))
+        session.pass_normals[-1][0] = image + marker
+    session.uninstall()
+    assert [len(normals) for normals in session.pass_normals] == [0, 0, 1]
+    assert session.kept_normals()[0][0, 0, 0] == 2

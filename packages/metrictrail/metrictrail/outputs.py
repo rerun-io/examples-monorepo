@@ -153,6 +153,12 @@ def rotation_of(gt_T_est: Float64[ndarray, "4 4"]) -> Float64[ndarray, "3 3"]:
     return block / np.cbrt(np.linalg.det(block))
 
 
+def normal_colors(normals_xyz: Float32[ndarray, "n 3"], gt_T_est: Float64[ndarray, "4 4"]) -> UInt8[ndarray, "n 3"]:
+    """Unit normals rotated by an alignment's rotation, as 8-bit RGB ``(n + 1) / 2`` of the target frame's axes."""
+    rotated: Float64[ndarray, "n 3"] = normals_xyz.astype(np.float64) @ rotation_of(gt_T_est).T
+    return np.clip(np.round((rotated + 1.0) * 127.5), 0, 255).astype(np.uint8)
+
+
 def log_run_outputs(
     rec: rr.RecordingStream,
     outputs: RunOutputs,
@@ -236,9 +242,21 @@ def log_run_outputs(
         shown: ColoredCloud = subsample_cloud(cloud_world, options.max_cloud_points)
         world_xyz: Float32[ndarray, "c 3"] = apply_alignment(sim3, shown.points_xyz.astype(np.float64)).astype(np.float32)
         rec.log(entities.WORLD_CLOUD, rr.Points3D(world_xyz, colors=shown.colors_rgb, radii=rr.Radius.ui_points(1.5)), static=True)
+        if shown.normals_xyz is not None:
+            rec.log(
+                entities.WORLD_CLOUD_NORMALS,
+                rr.Points3D(world_xyz, colors=normal_colors(shown.normals_xyz, sim3), radii=rr.Radius.ui_points(1.5)),
+                static=True,
+            )
         if aligned is not None:
             metric_cloud: Float32[ndarray, "c 3"] = apply_alignment(aligned.se3.gt_T_est, shown.points_xyz.astype(np.float64)).astype(np.float32)
             rec.log(entities.METRIC_CLOUD, rr.Points3D(metric_cloud, colors=shown.colors_rgb, radii=rr.Radius.ui_points(1.5)), static=True)
+            if shown.normals_xyz is not None:
+                rec.log(
+                    entities.METRIC_CLOUD_NORMALS,
+                    rr.Points3D(metric_cloud, colors=normal_colors(shown.normals_xyz, aligned.se3.gt_T_est), radii=rr.Radius.ui_points(1.5)),
+                    static=True,
+                )
 
     if options.log_frames:
         log_frames_and_depth(rec, outputs, options, frames, tracked, raster_hw, context)

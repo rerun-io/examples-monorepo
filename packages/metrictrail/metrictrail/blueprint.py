@@ -1,7 +1,8 @@
 """Default blueprint of a MetricTrail run recording (entity layout in :mod:`metrictrail.entities`).
 
-Left: the frame DPVO tracks with its patches, the MoGe-2 metric depth, the DINOv3 feature PCA. Middle: the trajectory
-against GT after the paper's Sim(3) alignment with the fused metric cloud, and DPVO's local BA window. Right: the
+Left: the frame DPVO tracks with its patches, the MoGe-2 metric depth and normals, the DINOv3 feature PCA. Middle: the
+trajectory against GT after the paper's Sim(3) alignment with the fused metric cloud (a second tab colours the cloud by
+its fused MoGe-2 normals), and DPVO's local BA window. Right: the
 per-frame error and running ATE, the SE(3)-only (scale 1) view on a 1 m grid, and the summary card. A view whose
 data the recording does not hold (no live capture, no GT) is a text tile that says what it is waiting for.
 """
@@ -65,7 +66,7 @@ def waiting_notes(has_capture: bool, has_gt: bool) -> dict[str, str]:
         text: str = (
             "waiting for a live capture: `metrictrail run` logs this while the pipeline runs; this recording was logged from finished artifacts"
         )
-        notes |= {"dino": text, "patches": text, "window": text}
+        notes |= {"dino": text, "patches": text, "window": text, "normals": text}
     if not has_gt:
         notes |= {"gt": "waiting for ground truth: pass a VSLAM-LAB sequence (`--gt-sequence`)"}
     return notes
@@ -91,6 +92,13 @@ def run_blueprint(
     depth_view: rrb.Spatial2DView = rrb.Spatial2DView(
         name="MoGe-2 metric depth (m)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background
     )
+    normals_view: rrb.View = (
+        rrb.Spatial2DView(
+            name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background
+        )
+        if has_capture
+        else waiting("MoGe-2 normals", "normals")
+    )
     dino_view: rrb.View = (
         rrb.Spatial2DView(name="DINOv3 feature PCA", origin=entities.CAM, contents=[entities.CAM_DINO_PCA], background=background)
         if has_capture
@@ -100,10 +108,22 @@ def run_blueprint(
     world_view: rrb.Spatial3DView = rrb.Spatial3DView(
         name=world_name,
         origin=entities.WORLD_ROOT,
-        contents=["/world/**"],
+        contents=["/world/**", f"- /{entities.WORLD_CLOUD_NORMALS}"],
         background=background,
         line_grid=rrb.LineGrid3D(visible=False),
         eye_controls=world_eye.controls() if world_eye is not None else None,
+    )
+    world_normals_view: rrb.View = (
+        rrb.Spatial3DView(
+            name="metric cloud coloured by MoGe-2 normals",
+            origin=entities.WORLD_ROOT,
+            contents=["/world/**", f"- /{entities.WORLD_CLOUD}"],
+            background=background,
+            line_grid=rrb.LineGrid3D(visible=False),
+            eye_controls=world_eye.controls() if world_eye is not None else None,
+        )
+        if has_capture
+        else waiting("metric cloud coloured by MoGe-2 normals", "normals")
     )
     window_view: rrb.View = (
         rrb.Spatial3DView(name="DPVO local BA window", origin=entities.DPVO_ROOT, contents=["/dpvo/**"], background=background)
@@ -115,7 +135,7 @@ def run_blueprint(
         metric_view: rrb.View = rrb.Spatial3DView(
             name="SE(3) only, scale 1: metric scale vs GT (1 m grid)",
             origin=entities.METRIC_ROOT,
-            contents=["/metric/**"],
+            contents=["/metric/**", f"- /{entities.METRIC_CLOUD_NORMALS}"],
             background=background,
             line_grid=rrb.LineGrid3D(visible=True, spacing=1.0),
             eye_controls=metric_eye.controls() if metric_eye is not None else None,
@@ -125,8 +145,8 @@ def run_blueprint(
         metric_view = waiting("metric scale vs GT", "gt")
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Vertical(frame_view, depth_view, dino_view),
-            rrb.Vertical(world_view, window_view, row_shares=[3, 2]),
+            rrb.Vertical(frame_view, depth_view, normals_view, dino_view),
+            rrb.Vertical(rrb.Tabs(world_view, world_normals_view, active_tab=0), window_view, row_shares=[3, 2]),
             rrb.Vertical(error_view, metric_view, rrb.TextDocumentView(name="summary", origin=entities.SUMMARY), row_shares=[2, 3, 2]),
             column_shares=[2, 4, 3],
         ),

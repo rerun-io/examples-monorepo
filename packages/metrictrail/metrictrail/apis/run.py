@@ -22,6 +22,8 @@ from pathlib import Path
 import cv2
 import rerun as rr
 import torch
+from jaxtyping import UInt8
+from numpy import ndarray
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -29,7 +31,7 @@ from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
-from metrictrail.capture import CapturedPass, CaptureSession
+from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
 from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, log_run_outputs, make_provenance, read_run_outputs
@@ -113,8 +115,12 @@ def hydra_overrides(config: Config, prepared: PreparedInput, vipe_out: Path) -> 
     return overrides + prepared.raster_overrides + list(config.extra_overrides)
 
 
-def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput) -> ColoredCloud:
-    """Upstream's fused metric cloud of the run in ViPE's world frame (needs the ViPE env with a lietorch provider)."""
+def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, UInt8[ndarray, "h w 3"]]) -> ColoredCloud:
+    """Upstream's fused metric cloud of the run in ViPE's world frame (needs the ViPE env with a lietorch provider).
+
+    ``normals`` (the live capture's MoGe-2 normals per tracked frame, 8-bit RGB) give every point the voxel mean of its
+    pixels' normals rotated into the world by the camera pose; a run without a normal for every frame gets none.
+    """
     from vipe.metrictrail.pointcloud import fuse_point_cloud, fusion_settings, load_vipe_artifacts, open_rgb_source
 
     artifacts = load_vipe_artifacts(outputs.run_dir, outputs.name)
@@ -127,8 +133,23 @@ def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput) -> ColoredCloud:
         input_raster=artifacts.input_raster,
         source_frame_ids=artifacts.source_frame_ids,
     )
-    cloud = fuse_point_cloud(artifacts.depth, artifacts.intrinsics, artifacts.c2w, rgb, fusion_settings("default"), world_frame=True)
-    return ColoredCloud(points_xyz=cloud.points.astype("float32"), colors_rgb=cloud.colors.astype("uint8"))
+    complete: bool = all(index in normals for index in range(len(artifacts.depth)))
+    if normals and not complete:
+        print(f"[metrictrail] {len(normals)} of {len(artifacts.depth)} frames carry MoGe-2 normals; the fused cloud gets none")
+    cloud = fuse_point_cloud(
+        artifacts.depth,
+        artifacts.intrinsics,
+        artifacts.c2w,
+        rgb,
+        fusion_settings("default"),
+        world_frame=True,
+        normals=(lambda index: rgb_normals(normals[index])) if normals and complete else None,
+    )
+    return ColoredCloud(
+        points_xyz=cloud.points.astype("float32"),
+        colors_rgb=cloud.colors.astype("uint8"),
+        normals_xyz=None if cloud.normals is None else cloud.normals.astype("float32"),
+    )
 
 
 def main(config: Config) -> RunMetrics:
@@ -178,7 +199,7 @@ def main(config: Config) -> RunMetrics:
     context: GtContext | None = None
     if prepared.gt_sequence is not None:
         context = load_gt_context(prepared.gt_sequence, protocol_for(config.benchmark), frames.names)
-    cloud: ColoredCloud | None = fuse_cloud(outputs, prepared) if config.fuse_cloud else None
+    cloud: ColoredCloud | None = fuse_cloud(outputs, prepared, session.kept_normals() if session is not None else {}) if config.fuse_cloud else None
     has_gt: bool = context is not None
     rec.send_recording_name(f"MetricTrail {config.label}: {prepared.name}")
     log_waiting_notes(rec, has_capture=kept is not None, has_gt=has_gt)

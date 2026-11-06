@@ -3723,9 +3723,12 @@ pillow = "<13"  # gradio 6.13 (held, common) needs pillow<13; the solve would ot
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
-# ViPE's `moge2-l` prior builds monopriors.third_party.moge.model.v2.MoGeModel (recipes/vipe-src patch 0003);
-# its DINOv2 always uses torch SDPA, so no xformers.
+# ViPE's `moge2-l` prior is monopriors' MoGe-2 on the moge-2-vitl-normal checkpoint (recipes/vipe-src patches 0003,
+# 0004); its DINOv2 always uses torch SDPA, so no xformers.
 monopriors = { path = "packages/monoprior", editable = true }
+# MoGe-2 (moge-2-vitl-normal) runs as monopriors' TensorRT engine (patch 0004): its TRT lane, like [feature.monoprior].
+# tensorrt-cu13 itself comes from the cuda feature.
+trtkit = { path = "packages/trtkit", editable = true }
 # monopriors' metadata requires sam3; resolve it to the workspace package like the other monopriors consumers
 sam3 = { path = "packages/sam3", editable = true }
 # vipe.utils.geometry / visualization import pycg (Isometry, Quaternion, image); not on conda-forge.

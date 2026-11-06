@@ -5,7 +5,10 @@ Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSessi
 * ``vipe.metrictrail.slam.DPVOSLAMSystem.run``: notes the frame count of the tracking pass that starts;
 * ``vipe.metrictrail.dpvo.dpvo.DPVO.__init__``: opens one recording file per DPVO instance (pass);
 * ``DPVO.__call__``: after each tracked frame, logs the frame DPVO saw, the MoGe-2 metric depth it was given, the
-  newest keyframe's patches, the local bundle-adjustment window and its patch points;
+  MoGe-2 normals of a new keyframe, the newest keyframe's patches, the local bundle-adjustment window and its patch points;
+* ``vipe.metrictrail.depth.MetricTrailMoGe2.predict_metric`` and ``DPVOSLAMSystem._prepare``: keep the camera-space
+  normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
+  keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
 * ``DPVO._DPVO__run_global_BA``: counts global bundle adjustments;
 * ``vipe.metrictrail.dino_fusion.FrozenDinoV3.forward``: projects the dinov3_vits16 patch features of the frame being
   patchified on a fixed PCA basis (fit on the first frame) to RGB.
@@ -15,6 +18,7 @@ A run can make several DPVO passes (stage A, FP32 recovery). Each pass is writte
 tensors and add host syncs, so a captured run's FPS is not a timing result; they never change a value DPVO uses.
 """
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +44,18 @@ def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"
     world_T_cam[:, :3, :3] = world_R_cam
     world_T_cam[:, :3, 3] = -np.einsum("nij,nj->ni", world_R_cam, poses[:, :3])
     return world_T_cam
+
+
+def normals_rgb(normals: Float32[Tensor, "h w 3"]) -> UInt8[Tensor, "h w 3"]:
+    """Unit normals as 8-bit RGB, ``(n + 1) / 2`` per axis (monoprior's normals colouring)."""
+    return ((normals.float() + 1.0) * 127.5).round().clamp(0.0, 255.0).to(torch.uint8)
+
+
+def rgb_normals(rgb: UInt8[ndarray, "*batch 3"]) -> Float32[ndarray, "*batch 3"]:
+    """Unit normals back from :func:`normals_rgb` (renormalised; 8-bit steps of about 0.008)."""
+    normals: Float32[ndarray, "*batch 3"] = rgb.astype(np.float32) / 127.5 - 1.0
+    length: Float32[ndarray, "*batch 1"] = np.linalg.norm(normals, axis=-1, keepdims=True)
+    return (normals / np.maximum(length, 1e-6)).astype(np.float32)
 
 
 def frustum_strips(
@@ -130,9 +146,16 @@ class CaptureSession:
     """Open recording per DPVO instance, keyed by ``id(instance)``."""
     restore: list[tuple[type, str, Callable[..., Any]]] = field(default_factory=list)
     """Wrapped methods and their originals."""
+    pending_normals: dict[int, UInt8[Tensor, "h w 3"]] = field(default_factory=dict)
+    """Normals (8-bit RGB, on the GPU) of frames the depth producer prepared and DPVO has not tracked yet, by index."""
+    pass_normals: list[dict[int, UInt8[ndarray, "h w 3"]]] = field(default_factory=list)
+    """Per pass (same order as :attr:`passes`), the normals of every tracked frame; superseded passes are emptied."""
+    producer_local: threading.local = field(default_factory=threading.local)
+    """The normals of the latest MoGe-2 prediction of the calling thread (the depth producer runs in its own)."""
 
     def install(self) -> None:
         """Wrap the ViPE classes of the imported ``vipe`` tree."""
+        import vipe.metrictrail.depth as depth_module
         import vipe.metrictrail.dino_fusion as dino_fusion
         import vipe.metrictrail.dpvo.dpvo as dpvo_module
         import vipe.metrictrail.slam as slam
@@ -144,10 +167,28 @@ class CaptureSession:
         call_orig: Callable[..., Any] = dpvo_module.DPVO.__call__
         gba_orig: Callable[..., Any] = dpvo_module.DPVO._DPVO__run_global_BA
         forward_orig: Callable[..., Any] = dino_fusion.FrozenDinoV3.forward
+        predict_orig: Callable[..., Any] = depth_module.MetricTrailMoGe2.predict_metric
+        prepare_orig: Callable[..., Any] = slam.DPVOSLAMSystem._prepare
 
         def run(self: Any, video_stream: Any, **kwargs: Any) -> Any:
             session.pass_frames = len(video_stream)
             return run_orig(self, video_stream, **kwargs)
+
+        def predict(self: Any, rgb_bchw: Tensor, *, focal_px: float) -> Any:
+            prediction: Any = predict_orig(self, rgb_bchw, focal_px=focal_px)
+            if prediction.normals is not None and prediction.normals.shape[0] == 1:
+                # Queued on the producer's stream before the frame's ``ready`` event, so DPVO's wait covers it.
+                session.producer_local.normals = normals_rgb(prediction.normals[0])
+            return prediction
+
+        def prepare(self: Any, index: int, *args: Any, **kwargs: Any) -> Any:
+            session.producer_local.normals = None
+            item: Any = prepare_orig(self, index, *args, **kwargs)
+            normals: Tensor | None = getattr(session.producer_local, "normals", None)
+            if normals is not None:
+                session.pending_normals[int(index)] = normals
+            session.producer_local.normals = None
+            return item
 
         def init(self: Any, *args: Any, **kwargs: Any) -> None:
             init_orig(self, *args, **kwargs)
@@ -160,9 +201,18 @@ class CaptureSession:
             keyframes_before: int = int(self.n)
             result: Any = call_orig(self, tstamp, image, intrinsics, metric_depth=metric_depth, metric_mask=metric_mask)
             rec: rr.RecordingStream | None = session.streams.get(id(self))
+            normals: Tensor | None = session.pending_normals.pop(frame, None)
+            normals_host: UInt8[ndarray, "h w 3"] | None = None
+            if normals is not None:
+                normals_host = normals.cpu().numpy()
+                if session.pass_normals:
+                    session.pass_normals[-1][frame] = normals_host
             if rec is not None:
-                added: bool = bool(self.is_initialized) or int(self.n) > keyframes_before
+                new_keyframe: bool = int(self.n) > keyframes_before
+                added: bool = bool(self.is_initialized) or new_keyframe
                 session.log_frame(rec, self, frame, image, intrinsics, metric_depth, metric_mask, added)
+                if new_keyframe and normals_host is not None:
+                    rec.log(entities.CAM_NORMALS, rr.Image(normals_host, color_model="RGB").compress(jpeg_quality=92))
             session.last_dino_rgb = None
             return result
 
@@ -186,12 +236,16 @@ class CaptureSession:
             (dpvo_module.DPVO, "__call__", call_orig),
             (dpvo_module.DPVO, "_DPVO__run_global_BA", gba_orig),
             (dino_fusion.FrozenDinoV3, "forward", forward_orig),
+            (depth_module.MetricTrailMoGe2, "predict_metric", predict_orig),
+            (slam.DPVOSLAMSystem, "_prepare", prepare_orig),
         ]
         slam.DPVOSLAMSystem.run = run
         dpvo_module.DPVO.__init__ = init
         dpvo_module.DPVO.__call__ = call
         dpvo_module.DPVO._DPVO__run_global_BA = gba
         dino_fusion.FrozenDinoV3.forward = forward
+        depth_module.MetricTrailMoGe2.predict_metric = predict
+        slam.DPVOSLAMSystem._prepare = prepare
 
     def uninstall(self) -> None:
         """Restore the wrapped methods and close every pass recording."""
@@ -210,7 +264,13 @@ class CaptureSession:
         rec: rr.RecordingStream = rr.RecordingStream(self.application_id, recording_id=self.recording_id, send_properties=False)
         rec.save(path)
         self.streams[instance_id] = rec
+        # A pass at least as long supersedes the earlier ones (kept_pass), so their normals can go.
+        for earlier, captured in zip(self.pass_normals, self.passes, strict=True):
+            if captured.num_frames <= self.pass_frames:
+                earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
+        self.pass_normals.append({})
+        self.pending_normals.clear()
 
     def kept_pass(self) -> CapturedPass | None:
         """The last of the longest passes (the tracking pass whose poses ViPE writes), or None if nothing ran."""
@@ -218,6 +278,13 @@ class CaptureSession:
             return None
         longest: int = max(captured.num_frames for captured in self.passes)
         return [captured for captured in self.passes if captured.num_frames == longest][-1]
+
+    def kept_normals(self) -> dict[int, UInt8[ndarray, "h w 3"]]:
+        """The kept pass's normals (8-bit RGB) by tracked-frame index; empty without a pass or without normals."""
+        kept: CapturedPass | None = self.kept_pass()
+        if kept is None:
+            return {}
+        return self.pass_normals[self.passes.index(kept)]
 
     def log_frame(
         self,

@@ -81,12 +81,14 @@ def iter_depth_zip(path: Path, indices: list[int] | None = None) -> Iterator[tup
 
 @dataclass(frozen=True, slots=True)
 class ColoredCloud:
-    """A coloured point cloud."""
+    """A coloured point cloud, optionally with per-point unit normals."""
 
     points_xyz: Float32[ndarray, "n 3"]
     """Positions, metres, in the frame the producer states."""
     colors_rgb: UInt8[ndarray, "n 3"]
     """Per-point colour."""
+    normals_xyz: Float32[ndarray, "n 3"] | None = None
+    """Unit normals in the same frame as the positions (MoGe-2's normals of the fused frames), if the producer had them."""
 
 
 PLY_VERTEX_DTYPE: np.dtype = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")])
@@ -121,4 +123,8 @@ def subsample_cloud(cloud: ColoredCloud, max_points: int, seed: int = 0) -> Colo
         return cloud
     generator: np.random.Generator = np.random.default_rng(seed)
     keep: Int64[ndarray, "k"] = np.sort(generator.choice(cloud.points_xyz.shape[0], size=max_points, replace=False)).astype(np.int64)
-    return ColoredCloud(points_xyz=cloud.points_xyz[keep], colors_rgb=cloud.colors_rgb[keep])
+    return ColoredCloud(
+        points_xyz=cloud.points_xyz[keep],
+        colors_rgb=cloud.colors_rgb[keep],
+        normals_xyz=None if cloud.normals_xyz is None else cloud.normals_xyz[keep],
+    )

@@ -1,0 +1,658 @@
+diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
+--- a/vipe/metrictrail/depth.py
++++ b/vipe/metrictrail/depth.py
+@@ -4,49 +4,67 @@
+ """MetricTrail's metric depth provider on top of ViPE's depth registry.
+ 
+ MetricTrail uses ViPE's ``vipe.priors.depth`` registry as its depth provider.
+-The default, ``moge2-l``, goes through :class:`MetricTrailMoGe2`, a subclass of
+-ViPE's ``MogeModel`` (version 2; [vipe-src] monopriors' MoGe-2 code and ViPE's checkpoint
+-resolution are reused unchanged) that makes MetricTrail's exact MoGe-2 call:
++The default, ``moge2-l``, goes through :class:`MetricTrailMoGe2`, which makes
++MetricTrail's MoGe-2 call:
+ 
+-- ``resolution_level=9`` with ``num_tokens=None``;
+-- ``use_fp16`` as configured (autocast only, weights stay FP32);
++- [vipe-src] the network is monopriors' MoGe-2 on the ``Ruicheng/moge-2-vitl-normal``
++  checkpoint (depth AND surface normals from one forward pass), run as monopriors'
++  TensorRT engine (``MoGeV2TrtPredictor``, heads ``geometry``) when TensorRT and
++  trtkit import, else monopriors' torch predictor with FP16 autocast on the same
++  checkpoint (:func:`select_moge2_backend`; ``VIPE_MOGE2_BACKEND`` forces one);
++- 3600 tokens (``resolution_level=9``) on the input's own token grid
++  (``token_grid_hw(width / height, 3600)``, one engine per grid), never an aspect bucket;
+ - ``fov_x`` computed from the bound focal in float64 Python arithmetic
+   (``math.atan``), not in float32 torch arithmetic;
+-- ``force_projection=True`` and ``apply_mask=False``;
++- MoGe-2's fov-conditioned post-processing on the raw graph outputs:
++  ``recover_shift_and_intrinsics(points, mask > 0.5, fov_x, aspect_ratio)``, the
++  shift added to z, times ``metric_scale``, then resized to the input raster;
+ - the metric validity rule ``MoGe mask & finite & 0.2 m <= depth <= 500 m``;
+   invalid pixels become 0 ("no prior") in :meth:`estimate`, and a frame without
+   a single valid pixel is an error.
+ 
++[vipe-src] The forward does not depend on ``fov_x``: the engine caches each source
++frame's raw outputs (points, mask, metric scale, normals; keyed by the 8-bit image
++content) and a new focal only re-runs the post-processing. ``forward_count`` and
++``postprocess_count`` go into the run record (:meth:`MetricTrailMoGe2.describe`).
++
+ Any other name is handed to ViPE's ``make_depth_model`` unchanged, so other
+ registry backends can be selected by configuration alone.
+ """
+ 
+ from __future__ import annotations
+ 
++import hashlib
++import importlib.util
+ import math
++import os
++from collections import OrderedDict
++from collections.abc import Callable
+ from dataclasses import dataclass
+-from typing import Any, Mapping, Protocol, runtime_checkable
++from typing import Any, Literal, Protocol, runtime_checkable
+ 
+ import numpy as np
+ import torch
++import torch.nn.functional as F
+ 
+ from vipe.priors.depth import make_depth_model
+-from vipe.priors.depth.base import DepthEstimationInput, DepthEstimationModel, DepthEstimationResult
+-from vipe.priors.depth.moge import MogeModel
++from vipe.priors.depth.base import DepthEstimationInput, DepthEstimationModel, DepthEstimationResult, DepthType
+ from vipe.utils.cameras import CameraType
+ from vipe.utils.misc import unpack_optional
+ from vipe.utils.model_cache import ModelCache
+ 
+ from .calibration.protocol import validate_k4
+ 
+-#: MoGe-2 inference arguments shared by every MetricTrail call (``fov_x`` and
+-#: ``use_fp16`` are supplied per call).
+-MOGE2_INFER_KWARGS: dict[str, Any] = {
+-    "num_tokens": None,
+-    "resolution_level": 9,
+-    "force_projection": True,
+-    "apply_mask": False,
+-}
++MoGe2Backend = Literal["tensorrt", "torch"]
++
++#: Environment override of the backend choice (``auto`` when unset).
++MOGE2_BACKEND_ENV = "VIPE_MOGE2_BACKEND"
++#: MoGe-2 detail level of every MetricTrail call (3600 tokens).
++MOGE2_RESOLUTION_LEVEL = 9
++#: Registry variant -> monopriors encoder of the pinned ``moge-2-vit*-normal`` checkpoint.
++MOGE2_ENCODERS: dict[str, str] = {"l": "vitl", "b": "vitb", "s": "vits"}
++#: Source frames whose raw forward outputs stay cached (least recently used are evicted).
++MOGE2_FORWARD_CACHE_FRAMES = 256
+ 
+ METRIC_DEPTH_MIN_M = 0.2
+ METRIC_DEPTH_MAX_M = 500.0
+@@ -58,6 +76,29 @@
+     return math.degrees(2.0 * math.atan(float(width) / (2.0 * float(focal_px))))
+ 
+ 
++def tensorrt_importable() -> bool:
++    """Whether monopriors' TensorRT lane (``tensorrt`` and ``trtkit``) is installed."""
++
++    return importlib.util.find_spec("tensorrt") is not None and importlib.util.find_spec("trtkit") is not None
++
++
++def select_moge2_backend(choice: str, *, tensorrt_available: bool) -> MoGe2Backend:
++    """The MoGe-2 backend for ``choice``: ``auto`` takes TensorRT when it is available, else torch.
++
++    ``tensorrt`` without TensorRT is an error (no silent fallback when it was asked for).
++    """
++
++    if choice == "torch":
++        return "torch"
++    if choice == "tensorrt":
++        if not tensorrt_available:
++            raise RuntimeError(f"{MOGE2_BACKEND_ENV}=tensorrt, but tensorrt/trtkit do not import")
++        return "tensorrt"
++    if choice == "auto":
++        return "tensorrt" if tensorrt_available else "torch"
++    raise ValueError(f"unknown MoGe-2 backend {choice!r}; choose auto, tensorrt or torch")
++
++
+ def normalized_to_pixel_k4(value: Any, image_hw: tuple[int, int]) -> np.ndarray:
+     """MoGe's normalised 3x3 K (optionally batched by one) to pixel ``[fx, fy, cx, cy]``."""
+ 
+@@ -90,29 +131,195 @@
+ 
+ 
+ @dataclass(frozen=True)
++class MoGe2Forward:
++    """One source frame's raw MoGe-2 outputs: everything a focal change does not touch."""
++
++    points: torch.Tensor
++    """(nh, nw, 3) float32 affine point-head output at network resolution."""
++    mask: torch.Tensor
++    """(nh, nw) bool, mask probability > 0.5, at network resolution."""
++    metric_scale: torch.Tensor
++    """() float32 metric-scale head output."""
++    normals: torch.Tensor
++    """(H, W, 3) float32 unit camera-space normals (x right, y down, z forward) at input resolution."""
++
++
++@dataclass(frozen=True)
++class MoGe2Prediction:
++    """One image's post-processed MoGe-2 output for one FoV."""
++
++    depth: torch.Tensor
++    """(H, W) float32 metric z-depth, metres."""
++    mask: torch.Tensor
++    """(H, W) bool MoGe validity (mask > 0.5 and positive depth)."""
++    intrinsics: torch.Tensor
++    """(3, 3) normalised K."""
++    normals: torch.Tensor
++    """(H, W, 3) float32 unit camera-space normals."""
++
++
++@dataclass(frozen=True)
+ class MetricDepthPrediction:
+-    """Raw MoGe-2 depth plus the MetricTrail validity mask, both shaped like the input batch."""
++    """MoGe-2 depth, the MetricTrail validity mask and the normals, all shaped like the input batch."""
+ 
+     depth: torch.Tensor
+     valid: torch.Tensor
+     fov_x_degrees: float | None
++    normals: torch.Tensor | None = None
++    """(B, H, W, 3) float32 unit camera-space normals, or None for a provider without a normal head."""
++
++
++def recover_metric_depth(
++    forward: MoGe2Forward, *, fov_x: float | None, image_hw: tuple[int, int]
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """MoGe-2's post-processing of one forward: (depth (H,W), mask (H,W) bool, normalised K (3,3)).
++
++    ``fov_x=None`` recovers the focal as well (MoGe-2's free-FoV mode). The cached
++    forward is never modified.
++    """
++
++    from monopriors.third_party.moge.model._inference import recover_shift_and_intrinsics
++
++    points = forward.points[None].clone()
++    mask = forward.mask[None].clone()
++    camera = recover_shift_and_intrinsics(points, mask, fov_x=fov_x, aspect_ratio=points.shape[2] / points.shape[1])
++    depth = (points[..., 2] + camera.shift_b[:, None, None]) * forward.metric_scale
++    mask &= depth > 0
++    depth = F.interpolate(depth[:, None], size=image_hw, mode="bilinear", align_corners=False)[:, 0]
++    mask = F.interpolate(mask[:, None].float(), size=image_hw, mode="nearest")[:, 0] > 0.5
++    return depth[0], mask[0], camera.intrinsics_b33[0]
++
+ 
++def image_key(rgb_u8_hw3: torch.Tensor) -> tuple[int, int, bytes]:
++    """Cache key of one 8-bit (H,W,3) image: its size and a BLAKE2b digest of its bytes."""
+ 
+-def _squeeze_channel(tensor: torch.Tensor) -> torch.Tensor:
+-    while tensor.ndim > 3 and tensor.shape[1] == 1:
+-        tensor = tensor[:, 0]
+-    if tensor.ndim == 2:
+-        tensor = tensor[None]
+-    return tensor
++    data = rgb_u8_hw3.contiguous().cpu().numpy()
++    return int(data.shape[0]), int(data.shape[1]), hashlib.blake2b(data.tobytes(), digest_size=16).digest()
+ 
+ 
+-class MetricTrailMoGe2(MogeModel):
+-    """ViPE's MoGe-2 prior with MetricTrail's exact inference call and validity rule.
+-
+-    ``network`` lets two wrappers share one set of weights (for example an FP32
+-    calibration wrapper and an FP16 tracking wrapper); when omitted the network
+-    is built by ``MogeModel`` itself (``VIPE_MOGE2_CHECKPOINT``, the torch hub
+-    cache, or HuggingFace, in that order).
++class MoGe2Engine:
++    """MoGe-2 (normal checkpoint) forwards with a per-source-frame cache of the raw outputs.
++
++    ``predictor_factory(network_hw)`` returns an object with monopriors'
++    ``forward_geometry(rgb_u8_bhw3)``; the default builds, per token grid, a
++    TensorRT engine (batch 1) or shares one torch FP16-autocast model. Tests inject fakes.
++    """
++
++    def __init__(
++        self,
++        backend: MoGe2Backend,
++        encoder: str = "vitl",
++        *,
++        cache_frames: int = MOGE2_FORWARD_CACHE_FRAMES,
++        predictor_factory: Callable[[tuple[int, int]], Any] | None = None,
++    ) -> None:
++        if cache_frames < 0:
++            raise ValueError(f"cache_frames must be >= 0, got {cache_frames}")
++        self.backend: MoGe2Backend = backend
++        self.encoder = encoder
++        self.cache_frames = int(cache_frames)
++        self._factory = predictor_factory if predictor_factory is not None else self._default_predictor
++        self._predictors: dict[tuple[int, int], Any] = {}
++        self._torch_predictor: Any = None
++        self._cache: OrderedDict[tuple[int, int, bytes], MoGe2Forward] = OrderedDict()
++        self.forward_count = 0
++        self.postprocess_count = 0
++
++    @staticmethod
++    def network_hw(image_hw: tuple[int, int]) -> tuple[int, int]:
++        """The input's own token grid at 3600 tokens (14-px aligned), not an aspect bucket."""
++
++        from monopriors.models.moge_v2 import resolve_num_tokens, token_grid_hw
++
++        return token_grid_hw(image_hw[1] / image_hw[0], resolve_num_tokens(MOGE2_RESOLUTION_LEVEL))
++
++    def _default_predictor(self, network_hw: tuple[int, int]) -> Any:
++        from monopriors.models.moge_v2 import MoGeV2TorchPredictor, MoGeV2TrtPredictor
++
++        if self.backend == "tensorrt":
++            return MoGeV2TrtPredictor(
++                encoder=self.encoder,
++                heads="geometry",
++                network_hw_options=(network_hw,),
++                resolution_level=MOGE2_RESOLUTION_LEVEL,
++                batch_size=1,
++            )
++        if self._torch_predictor is None:
++            # network_hw_options=None: the exact token grid of each input, like the engines.
++            self._torch_predictor = MoGeV2TorchPredictor(
++                encoder=self.encoder, heads="geometry", network_hw_options=None, resolution_level=MOGE2_RESOLUTION_LEVEL
++            )
++        return self._torch_predictor
++
++    def forward(self, rgb_u8_hw3: torch.Tensor) -> MoGe2Forward:
++        """The raw outputs of one (H,W,3) uint8 image: from the cache, or one network forward."""
++
++        from monopriors.models.moge_v2 import MoGeV2NormalGraphOutput, postprocess_moge_v2_normal
++
++        key = image_key(rgb_u8_hw3)
++        cached = self._cache.get(key)
++        if cached is not None:
++            self._cache.move_to_end(key)
++            return cached
++        image_hw = (int(rgb_u8_hw3.shape[0]), int(rgb_u8_hw3.shape[1]))
++        network_hw = self.network_hw(image_hw)
++        predictor = self._predictors.get(network_hw)
++        if predictor is None:
++            predictor = self._predictors[network_hw] = self._factory(network_hw)
++        with torch.inference_mode():
++            graph = predictor.forward_geometry(rgb_u8_hw3[None])
++            if tuple(graph.points_bhw3.shape[1:3]) != network_hw:
++                raise ValueError(f"MoGe-2 ran at {tuple(graph.points_bhw3.shape[1:3])}, not the token grid {network_hw}")
++            normals = postprocess_moge_v2_normal(
++                MoGeV2NormalGraphOutput(normals_bhw3=graph.normals_bhw3, mask_bhw=graph.mask_bhw), image_hw
++            ).normals_bhw3
++            # TensorRT outputs may alias the runtime's buffers: every cached tensor is a copy.
++            result = MoGe2Forward(
++                points=graph.points_bhw3[0].float().clone(),
++                mask=graph.mask_bhw[0].float() > 0.5,
++                metric_scale=graph.metric_scale_b[0].float().clone(),
++                normals=normals[0].contiguous(),
++            )
++        self.forward_count += 1
++        if self.cache_frames > 0:
++            self._cache[key] = result
++            while len(self._cache) > self.cache_frames:
++                self._cache.popitem(last=False)
++        return result
++
++    def predict(self, rgb_u8_hw3: torch.Tensor, *, fov_x: float | None) -> MoGe2Prediction:
++        """One image's depth, mask, normalised K and normals for ``fov_x`` (None: MoGe-2's own focal)."""
++
++        forward = self.forward(rgb_u8_hw3)
++        image_hw = (int(rgb_u8_hw3.shape[0]), int(rgb_u8_hw3.shape[1]))
++        with torch.inference_mode():
++            depth, mask, intrinsics = recover_metric_depth(forward, fov_x=fov_x, image_hw=image_hw)
++        self.postprocess_count += 1
++        return MoGe2Prediction(depth=depth, mask=mask, intrinsics=intrinsics, normals=forward.normals)
++
++    def describe(self) -> dict[str, Any]:
++        return {
++            "backend": self.backend,
++            "network_hw": sorted([int(h), int(w)] for h, w in self._predictors),
++            "forward_count": self.forward_count,
++            "postprocess_count": self.postprocess_count,
++            "cache_frames": self.cache_frames,
++        }
++
++
++def _rgb_u8_bhw3(rgb_bchw: torch.Tensor) -> torch.Tensor:
++    """(B,3,H,W) float RGB in [0,1] holding 8-bit values -> (B,H,W,3) uint8."""
++
++    return (rgb_bchw.float() * 255.0).round().clamp(0.0, 255.0).to(torch.uint8).permute(0, 2, 3, 1).contiguous()
++
++
++class MetricTrailMoGe2(DepthEstimationModel):
++    """MoGe-2 (``moge-2-vit*-normal``) prior with MetricTrail's inference call and validity rule.
++
++    ``engine`` lets wrappers share one set of networks and one forward cache (the
++    calibration and the tracking wrapper); when omitted it is built for the
++    backend :func:`select_moge2_backend` picks. ``use_fp16`` is recorded only:
++    the TensorRT engine has its own precision, the torch fallback always autocasts FP16.
+     """
+ 
+     def __init__(
+@@ -122,67 +329,43 @@
+         use_fp16: bool = True,
+         min_depth_m: float = METRIC_DEPTH_MIN_M,
+         max_depth_m: float = METRIC_DEPTH_MAX_M,
+-        network: torch.nn.Module | None = None,
++        engine: MoGe2Engine | None = None,
+     ) -> None:
+-        if network is None:
+-            super().__init__(version=2, variant=variant, num_tokens=None, use_fp16=use_fp16, fp16_weights=False)
+-        else:
+-            DepthEstimationModel.__init__(self)
+-            self.version = 2
+-            self.num_tokens = None
+-            self.use_fp16 = use_fp16
+-            self.model = network
++        super().__init__()
++        if variant not in MOGE2_ENCODERS:
++            raise ValueError(f"unknown MoGe-2 variant {variant!r}; choose one of {sorted(MOGE2_ENCODERS)}")
+         if not 0.0 < float(min_depth_m) < float(max_depth_m):
+             raise ValueError(f"invalid metric depth range: [{min_depth_m}, {max_depth_m}]")
++        if engine is None:
++            backend = select_moge2_backend(os.environ.get(MOGE2_BACKEND_ENV, "auto"), tensorrt_available=tensorrt_importable())
++            engine = MoGe2Engine(backend, MOGE2_ENCODERS[variant])
++        self.engine = engine
+         self.variant = variant
++        self.use_fp16 = use_fp16
+         self.min_depth_m = float(min_depth_m)
+         self.max_depth_m = float(max_depth_m)
+-        wrong_dtype = [
+-            name
+-            for name, parameter in self.model.named_parameters()
+-            if parameter.is_floating_point() and parameter.dtype != torch.float32
+-        ]
+-        if wrong_dtype:
+-            raise TypeError(f"MoGe-2 must keep FP32 weights (use_fp16 is autocast only): {wrong_dtype[:5]}")
+ 
+     @property
+-    def network(self) -> torch.nn.Module:
+-        return self.model
++    def depth_type(self) -> DepthType:
++        return DepthType.MODEL_METRIC_DEPTH
+ 
+     @property
+     def precision(self) -> str:
+-        return "FP16" if self.use_fp16 else "FP32"
+-
+-    def infer_raw(self, rgb: torch.Tensor, *, fov_x: float | None) -> Mapping[str, torch.Tensor]:
+-        """One MoGe-2 forward with MetricTrail's arguments. ``rgb`` is (3,H,W) or (B,3,H,W) in [0, 1]."""
+-
+-        with torch.inference_mode():
+-            output = self.model.infer(rgb, fov_x=fov_x, use_fp16=self.use_fp16, **MOGE2_INFER_KWARGS)
+-        if not isinstance(output, Mapping) or "depth" not in output:
+-            raise KeyError("MoGe-2 output lacks depth")
+-        return output
++        return "TensorRT" if self.engine.backend == "tensorrt" else "FP16"
+ 
+     def predict_metric(self, rgb_bchw: torch.Tensor, *, focal_px: float) -> MetricDepthPrediction:
+-        """K-conditioned metric depth and validity for a (B,3,H,W) batch."""
++        """K-conditioned metric depth, validity and normals for a (B,3,H,W) batch."""
+ 
+         if rgb_bchw.ndim != 4:
+             raise ValueError(f"expected a (B,3,H,W) batch, got {tuple(rgb_bchw.shape)}")
+         fov = fov_x_degrees(focal_px, int(rgb_bchw.shape[-1]))
+-        output = self.infer_raw(rgb_bchw, fov_x=fov)
+-        depth = _squeeze_channel(output["depth"].detach().float())
+-        expected = (int(rgb_bchw.shape[0]), int(rgb_bchw.shape[-2]), int(rgb_bchw.shape[-1]))
+-        if tuple(depth.shape) != expected:
+-            raise ValueError(f"MoGe-2 depth shape drifted: {tuple(depth.shape)} versus {expected}")
+-        valid = torch.isfinite(depth)
+-        mask = output.get("mask")
+-        if mask is not None:
+-            mask = _squeeze_channel(mask.detach().bool())
+-            if mask.shape != depth.shape:
+-                raise ValueError(f"MoGe-2 mask/depth shape mismatch: {tuple(mask.shape)} versus {tuple(depth.shape)}")
+-            valid &= mask
++        rows = [self.engine.predict(image, fov_x=fov) for image in _rgb_u8_bhw3(rgb_bchw)]
++        depth = torch.stack([row.depth for row in rows])
++        valid = torch.isfinite(depth) & torch.stack([row.mask for row in rows])
+         valid &= depth >= self.min_depth_m
+         valid &= depth <= self.max_depth_m
+-        return MetricDepthPrediction(depth=depth, valid=valid, fov_x_degrees=fov)
++        normals = torch.stack([row.normals for row in rows])
++        return MetricDepthPrediction(depth=depth, valid=valid, fov_x_degrees=fov, normals=normals)
+ 
+     def estimate(self, src: DepthEstimationInput) -> DepthEstimationResult:
+         rgb = unpack_optional(src.rgb)
+@@ -209,21 +392,27 @@
+ 
+         if rgb_bchw.ndim != 4 or rgb_bchw.shape[0] != 1:
+             raise ValueError(f"expected a (1,3,H,W) image, got {tuple(rgb_bchw.shape)}")
+-        output = self.infer_raw(rgb_bchw, fov_x=None)
+-        if "intrinsics" not in output:
+-            raise KeyError("free-FoV MoGe-2 output lacks intrinsics")
++        intrinsics = self.engine.predict(_rgb_u8_bhw3(rgb_bchw)[0], fov_x=None).intrinsics
+         image_hw = (int(rgb_bchw.shape[-2]), int(rgb_bchw.shape[-1]))
+-        return normalized_to_pixel_k4(output["intrinsics"].detach().float().cpu().numpy(), image_hw)
++        return normalized_to_pixel_k4(intrinsics.detach().float().cpu().numpy(), image_hw)
+ 
+     def describe(self) -> dict[str, Any]:
++        from monopriors.models.moge_v2 import MOGE_V2_CHECKPOINTS
++
++        repo, revision = MOGE_V2_CHECKPOINTS[MOGE2_ENCODERS[self.variant]]  # type: ignore[index]
+         return {
+             "model": "MoGe-2",
+             "registry_name": f"moge2-{self.variant}",
++            "checkpoint": f"{repo}@{revision}",
+             "precision": self.precision,
+             "depth_type": self.depth_type.name,
+-            "infer_kwargs": {**MOGE2_INFER_KWARGS, "use_fp16": self.use_fp16},
++            "resolution_level": MOGE2_RESOLUTION_LEVEL,
++            "use_fp16_config": self.use_fp16,
+             "fov_x": "float64 math.atan of the bound focal",
++            "post_processing": "recover_shift_and_intrinsics(points, mask > 0.5, fov_x) at network resolution; "
++            "(z + shift) * metric_scale; depth bilinear, mask nearest to the input raster",
+             "valid_rule": f"mask & finite & {self.min_depth_m} <= depth <= {self.max_depth_m} m",
++            "engine": self.engine.describe(),
+         }
+ 
+ 
+@@ -243,8 +432,9 @@
+ ) -> DepthEstimationModel:
+     """Build MetricTrail's depth provider.
+ 
+-    ``moge2[-variant]`` returns a :class:`MetricTrailMoGe2` (weights shared
+-    through ``model_cache`` across precisions); every other name is ViPE's
++    ``moge2[-variant]`` returns a :class:`MetricTrailMoGe2` (the engine, its
++    networks and its forward cache shared through ``model_cache`` across
++    calibration and tracking); every other name is ViPE's
+     ``make_depth_model(name)``, cached under ViPE's own ``depth/<name>`` key.
+     """
+ 
+@@ -252,11 +442,11 @@
+         variant = _moge2_variant(name)
+         if model_cache is None:
+             return MetricTrailMoGe2(variant, use_fp16=use_fp16)
+-        network = model_cache.get(
+-            f"metrictrail/depth/moge2-{variant}/network",
+-            lambda: MetricTrailMoGe2(variant, use_fp16=use_fp16).network,
++        engine = model_cache.get(
++            f"metrictrail/depth/moge2-{variant}-normal/engine",
++            lambda: MetricTrailMoGe2(variant, use_fp16=use_fp16).engine,
+         )
+-        return MetricTrailMoGe2(variant, use_fp16=use_fp16, network=network)
++        return MetricTrailMoGe2(variant, use_fp16=use_fp16, engine=engine)
+     if model_cache is None:
+         return make_depth_model(name)
+     return model_cache.get(f"depth/{name}", lambda: make_depth_model(name))
+diff --git a/vipe/metrictrail/pointcloud.py b/vipe/metrictrail/pointcloud.py
+--- a/vipe/metrictrail/pointcloud.py
++++ b/vipe/metrictrail/pointcloud.py
+@@ -115,6 +115,9 @@
+     points: np.ndarray  # [M,3] float32
+     colors: np.ndarray  # [M,3] uint8
+     stats: dict
++    # [vipe-src] [M,3] float32 unit normals in the output frame (voxel mean of the frames' normals rotated by
++    # their camera pose), or None when no normals were given.
++    normals: np.ndarray | None = None
+ 
+ 
+ # ----------------------------------------------------------------- back-projection
+@@ -271,11 +274,12 @@
+     point_sums: np.ndarray,
+     color_sums: np.ndarray,
+     counts: np.ndarray,
+-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
++    normal_sums: np.ndarray | None = None,
++) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+     """Merge already-quantized voxel records without changing membership."""
+ 
+     if len(keys) == 0:
+-        return keys, point_sums, color_sums, counts
++        return keys, point_sums, color_sums, counts, normal_sums
+     order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+     sorted_keys = keys[order]
+     group_start = np.empty(len(order), dtype=bool)
+@@ -287,6 +291,7 @@
+         np.add.reduceat(point_sums[order], starts, axis=0),
+         np.add.reduceat(color_sums[order], starts, axis=0),
+         np.add.reduceat(counts[order], starts),
++        None if normal_sums is None else np.add.reduceat(normal_sums[order], starts, axis=0),
+     )
+ 
+ 
+@@ -300,7 +305,10 @@
+     point_sums: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
+     color_sums: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
+     counts: np.ndarray = field(default_factory=lambda: np.empty((0,), dtype=np.int64))
+-    _pending: list[tuple[np.ndarray, np.ndarray]] = field(default_factory=list)
++    # [vipe-src] Optional per-point normals, summed per voxel like the colours (``with_normals``).
++    with_normals: bool = False
++    normal_sums: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
++    _pending: list[tuple[np.ndarray, np.ndarray, np.ndarray | None]] = field(default_factory=list)
+ 
+     def __post_init__(self) -> None:
+         if not np.isfinite(self.voxel_size) or self.voxel_size <= 0:
+@@ -308,14 +316,20 @@
+         if self.compact_every <= 0:
+             raise ValueError("compact_every must be positive")
+ 
+-    def add(self, points: np.ndarray, colors: np.ndarray) -> None:
++    def add(self, points: np.ndarray, colors: np.ndarray, normals: np.ndarray | None = None) -> None:
+         points = np.asarray(points, dtype=np.float32)
+         colors = np.asarray(colors, dtype=np.uint8)
+         if points.ndim != 2 or points.shape[1] != 3 or colors.shape != points.shape:
+             raise ValueError(f"invalid point/color shapes: {points.shape}, {colors.shape}")
++        if (normals is None) == self.with_normals:
++            raise ValueError("normals must be given exactly when the accumulator has with_normals")
++        if normals is not None:
++            normals = np.asarray(normals, dtype=np.float32)
++            if normals.shape != points.shape:
++                raise ValueError(f"invalid normal shape {normals.shape} for points {points.shape}")
+         finite = np.isfinite(points).all(axis=1)
+         if finite.any():
+-            self._pending.append((points[finite], colors[finite]))
++            self._pending.append((points[finite], colors[finite], None if normals is None else normals[finite]))
+         if len(self._pending) >= self.compact_every:
+             self._compact()
+ 
+@@ -329,9 +343,15 @@
+         point_sums = np.concatenate((self.point_sums, points.astype(np.float64)), axis=0)
+         color_sums = np.concatenate((self.color_sums, colors.astype(np.float64)), axis=0)
+         counts = np.concatenate((self.counts, np.ones(len(points), dtype=np.int64)), axis=0)
+-        self.keys, self.point_sums, self.color_sums, self.counts = _merge_voxel_records(
+-            keys, point_sums, color_sums, counts
++        normal_sums = None
++        if self.with_normals:
++            new_normals = np.concatenate([item[2] for item in self._pending], axis=0).astype(np.float64)
++            normal_sums = np.concatenate((self.normal_sums, new_normals), axis=0)
++        self.keys, self.point_sums, self.color_sums, self.counts, merged_normals = _merge_voxel_records(
++            keys, point_sums, color_sums, counts, normal_sums
+         )
++        if merged_normals is not None:
++            self.normal_sums = merged_normals
+         self._pending.clear()
+ 
+     def finish(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+@@ -342,6 +362,14 @@
+         colors = np.rint(self.color_sums / self.counts[:, None]).clip(0, 255).astype(np.uint8)
+         return points, colors, self.counts.copy()
+ 
++    def finish_normals(self) -> np.ndarray:
++        """[vipe-src] Unit voxel normals (the normalised sum), after :meth:`finish`."""
++
++        if not self.with_normals:
++            raise RuntimeError("the accumulator was built without normals")
++        length = np.linalg.norm(self.normal_sums, axis=1, keepdims=True)
++        return (self.normal_sums / np.maximum(length, 1e-12)).astype(np.float32)
++
+ 
+ # ---------------------------------------------------------------------- fusion
+ 
+@@ -381,6 +409,7 @@
+     *,
+     world_frame: bool = False,
+     progress: ProgressCallback | None = None,
++    normals: FrameSource | None = None,
+ ) -> FusedCloud:
+     """Fuse per-frame metric depth into one coloured, voxel-averaged cloud.
+ 
+@@ -390,6 +419,9 @@
+     uint8 on the depth raster. The points are returned in the z-up frame (the
+     fused cloud rotated so the mean camera up is +Z, as the original
+     visualization wrote it), or in the frame of ``c2w`` with ``world_frame``.
++    [vipe-src] ``normals(index)``, when given, returns frame ``index``'s ``HxWx3``
++    camera-space unit normals on the depth raster; each point carries its pixel's
++    normal rotated into world by the pose, averaged per voxel (``FusedCloud.normals``).
+     """
+ 
+     s = settings
+@@ -399,7 +431,7 @@
+     # Spread the budget evenly so a long sequence is not dominated by whichever
+     # frames happen to come first.
+     per_frame_cap = max(1, s.max_input_points // max(1, len(indices)))
+-    accumulator = VoxelAccumulator(s.voxel_size_m)
++    accumulator = VoxelAccumulator(s.voxel_size_m, with_normals=normals is not None)
+     generator = np.random.default_rng(0)
+     sampled = 0
+     rejected = 0
+@@ -425,6 +457,12 @@
+         if image.shape[:2] != frame_depth.shape:
+             raise ValueError(f"frame {index}: RGB {image.shape[:2]} is not on the depth raster {frame_depth.shape}")
+         colors = image[rows, cols]
++        point_normals = None
++        if normals is not None:
++            frame_normals = np.asarray(normals(int(index)), dtype=np.float32)
++            if frame_normals.shape != (*frame_depth.shape, 3):
++                raise ValueError(f"frame {index}: normals {frame_normals.shape} are not on the depth raster {frame_depth.shape}")
++            point_normals = frame_normals[rows, cols]
+ 
+         if s.min_consistent > 0:
+             keep = multiview_consistency_mask(
+@@ -442,22 +480,28 @@
+                 relative_depth_threshold=s.relative_depth_threshold,
+             )
+             local, colors, rows, cols = local[keep], colors[keep], rows[keep], cols[keep]
++            if point_normals is not None:
++                point_normals = point_normals[keep]
+         if local.shape[0] == 0:
+             continue
+ 
+         world = local @ pose[:3, :3].T + pose[:3, 3]
+-        accumulator.add(world.astype(np.float32), colors.astype(np.uint8))
++        world_normals = None if point_normals is None else (point_normals @ pose[:3, :3].T).astype(np.float32)
++        accumulator.add(world.astype(np.float32), colors.astype(np.uint8), world_normals)
+         sampled += local.shape[0]
+         rejected += int(raw_count - local.shape[0])
+         if progress is not None:
+             progress(position, len(indices))
+ 
+     points, colors, counts = accumulator.finish()
++    fused_normals = accumulator.finish_normals() if normals is not None else None
+     rotation = np.eye(3)
+     if not world_frame:
+         # The original visualization rotated the fused cloud by this before writing its PLY.
+         rotation = up_to_z_rotation(up_from_poses(c2w[:count]))
+         points = (points.astype(np.float64) @ rotation.T).astype(np.float32)
++        if fused_normals is not None:
++            fused_normals = (fused_normals.astype(np.float64) @ rotation.T).astype(np.float32)
+     stats = {
+         "frames": int(len(indices)),
+         "voxels": int(points.shape[0]),
+@@ -468,7 +512,7 @@
+         "fusion_seconds": round(time.perf_counter() - started, 3),
+         "settings": dataclasses.asdict(s),
+     }
+-    return FusedCloud(points=points, colors=colors, stats=stats)
++    return FusedCloud(points=points, colors=colors, stats=stats, normals=fused_normals)
+ 
+ 
+ # ------------------------------------------------------------------------- PLY

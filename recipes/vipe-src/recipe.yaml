@@ -14,9 +14,11 @@
 #     package does NOT depend on lietorch. The consuming feature supplies lietorch-mojo.
 #   - DINOv3 (DINO-DPVO's frozen ViT-S/16): the `dinov3` package from recipes/dinov3-src (patch 0002, a run
 #     dependency). ViPE's in-tree DINOv3 (vipe/priors/depth/dap/dino.py) stays: the DAP panorama prior uses it.
-#   - MoGe-2 (`moge2-l`): packages/monoprior's MoGeModel (patch 0003) on ViPE's checkpoint, Ruicheng/moge-2-vitl
-#     pinned to 39c4d5e; build.sh deletes ViPE's vendored vipe/priors/depth/moge2. monopriors is a PyPI path
-#     package, so the consuming feature supplies it (editable), like lietorch-mojo.
+#   - MoGe-2 (`moge2-l`): packages/monoprior's MoGe-2; build.sh deletes ViPE's vendored vipe/priors/depth/moge2.
+#     Patch 0003 builds monopriors' MoGeModel for ViPE's own `MogeModel` (checkpoint Ruicheng/moge-2-vitl @ 39c4d5e);
+#     patch 0004 moves MetricTrail's prior to the moge-2-vitl-normal checkpoint (depth and normals from one forward)
+#     run as monopriors' TensorRT engine, with a per-frame forward cache. monopriors and trtkit are PyPI path
+#     packages, so the consuming feature supplies them (editable), like lietorch-mojo.
 package:
   name: vipe-src
   version: "1.2.0.ead2e00"
@@ -34,13 +36,18 @@ source:
     # ViPE's `moge2-l` loads monopriors' MoGe v2 (bit-identical on 48 frames, fp16 and fp32) from the pinned
     # checkpoint; runtime_record records torch SDPA for its DINOv2.
     - patches/0003-moge2-from-monopriors.patch
+    # MetricTrail's `moge2-l` (vipe/metrictrail/depth.py): moge-2-vitl-normal through monopriors' MoGeV2TrtPredictor
+    # (torch FP16 fallback when TensorRT does not import), one engine per input token grid, ViPE's fov-conditioned
+    # post-processing on the raw outputs, a forward cache per source frame (a focal change re-runs the
+    # post-processing only), normals in MetricDepthPrediction; fuse_point_cloud takes optional per-frame normals.
+    - patches/0004-moge2-normal-trt-forward-cache.patch
     # MetricTrail's DPVO (vipe/metrictrail/dpvo, csrc/dpvo) stays ViPE's copy: packages/dpvo is a typed rewrite and
     # its cuda_ba lacks MetricTrail's metric-depth prior arguments and kernel.
 
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 1
+  number: 2
   script:
     file: build.sh
 
