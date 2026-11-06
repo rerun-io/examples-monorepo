@@ -24,14 +24,14 @@ sets ViPE's checkpoint variables to these files, so a run never downloads.
 
 ## Run
 
-The `metrictrail` env does not have a lietorch provider yet (see Known gaps). Put a `lietorch_mojo` module on
-`PYTHONPATH` first. Use the prod env `metrictrail` for runs, not `metrictrail-dev`. Paths must be absolute: the
-tasks run in `packages/metrictrail`.
+lietorch comes from `packages/lietorch-mojo`: both envs compose the `lietorch-mojo` feature, and `metrictrail-run`
+depends on `lietorch-mojo-build`, which compiles its Mojo extension for the local GPU on the first run. Use the prod
+env `metrictrail` for runs, not `metrictrail-dev`. Paths must be absolute: the tasks run in `packages/metrictrail`.
 
 One end-to-end run on TUM fr1_xyz (798 frames, about 3 min on the RTX 5090) to a `.rrd`:
 
 ```bash
-PYTHONPATH=<dir with lietorch_mojo> XFORMERS_DISABLED=1 pixi run -e metrictrail --frozen metrictrail-run \
+XFORMERS_DISABLED=1 pixi run -e metrictrail --frozen metrictrail-run \
     --input /mnt/nas/ssd-8tb/metrictrail/data/TUM/rgb/xyz --benchmark tum \
     --gt-sequence /mnt/nas/ssd-8tb/datasets/VSLAM-LAB-Benchmark/RGBDTUM/rgbd_dataset_freiburg1_xyz \
     --output /tmp/mt-xyz --seed 1234 --rr-config.headless --rr-config.save /tmp/mt-xyz/xyz.rrd
@@ -83,7 +83,8 @@ before the first result: a dataset passes if |mean - paper| <= max(3 sigma, 10 %
 the last printed digit), and the port matches upstream if |port - upstream| <= 3 sqrt(sigma_port^2 + sigma_up^2)
 (0.2 cm floor). "Provisional" means fewer than 3 seeds.
 
-"Port" means this package with a temporary lietorch provider (upstream lietorch C++ re-exported as `lietorch_mojo`).
+"Port" means this package. The port results below were made before lietorch-mojo was wired in, with a temporary
+provider (upstream lietorch C++ re-exported as `lietorch_mojo`); see Known gaps.
 "Upstream" means unmodified ViPE `ead2e00` with its own lietorch and MoGe-2. All runs are on an RTX 5090.
 
 <!-- results: p2/evalq/tables.json, 2026-11-06 ~11:34 UTC -->
@@ -111,10 +112,8 @@ cache (a cold download was not measured):
 
 ## Known gaps
 
-- **No lietorch provider in the env.** lietorch-mojo is not finished. Until it is, `metrictrail-run` needs
-  `lietorch_mojo` on `PYTHONPATH`, and the end-to-end integration test skips. All port results above use upstream
-  lietorch C++ as that provider. When lietorch-mojo lands, add it to `[feature.metrictrail.pypi-dependencies]`,
-  re-lock on linux-64 and run one TUM seed again.
+- **Port results predate lietorch-mojo.** All port results above use upstream lietorch C++ as a temporary
+  `lietorch_mojo` provider. Run one TUM seed again on lietorch-mojo and update the table.
 - **Seeds.** Only TUM has 3 upstream seeds. The port has 2 TUM seeds and no 7-Scenes or KITTI runs yet.
 - **KITTI stereo** is not built. The stereo JIT path (`VIPE_METRICTRAIL_DPVO_JIT=1`) has no Eigen 3.4.0 at run time.
 - **linux-64 only.** linux-aarch64 (DGX Spark) was not tried.
