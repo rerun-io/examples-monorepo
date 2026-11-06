@@ -297,36 +297,53 @@ re-registers from disk on start (then `Restart=on-failure` becomes safe).
 
 ## Testing Rerun builds
 
-**Rust follows the primary Python Rerun lane.** The `common` / `rerun-prerelease`
-PyPI `rerun-sdk` pin is the source of truth; the Rust `re_*` crates
-(`packages/robocap-live`, `packages/slam-rs`) must match it exactly, or the viewer
-silently loses protocol/tooling parity. To bump: Python first, then the Rust pins
-(matching that release's egui family), then re-lock Pixi and Cargo.
+**The conda-forge `rerun-sdk` pin is the source of truth.** Every environment takes
+`rerun-sdk` from conda-forge as a conda dependency with a named channel,
+`rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }`: the
+`ai-demos` channel carries its own rerun-sdk builds, and channel priority would pick
+those. pixi-build packages (the slam-rs recipe) declare it as a normal conda run
+dependency and resolve against the same package.
 
-The primary workspace lane runs **`rerun-sdk == 0.42.0`** with the `catalog`
-extra through `common`. Catalog/stream environments add the `dataloader` extra
-through `rerun-prerelease`. `gradio-rerun` pins an exact `rerun-sdk`, so bump
-both pins in `[feature.common.pypi-dependencies]` together, never separately.
+The primary workspace lane is `[feature.common.dependencies]`; `rerun-prerelease` restates
+it for the catalog/stream environments. The PyPI extras are spelled out beside each pin
+as packages: `catalog` = conda `pandas` + PyPI `datafusion ==54.0.0` (its conda build pins
+`libprotobuf`/`libabseil` against the opencv/ffmpeg/torchcodec stack), `dataloader` = conda
+`torchvision` + `av` + `pillow` (torch comes from the environment). Lanes that also carry
+simplecv hold `python-dateutil <3` beside the pin: the conda rerun-sdk (ipykernel →
+jupyter_client) would pull 4.x, and PyPI `s3fs` → `aiobotocore` needs <3. `gradio-rerun`
+(PyPI) pins an exact `rerun-sdk`; prefix.dev's conda-to-PyPI hash mapping gives the conda
+package the `rerun-sdk` purl, so uv treats it as installed and adds no second copy (check a
+re-lock for zero PyPI `rerun-sdk` entries).
 
-**The gsplat custom viewer is the exception: it pins its own lane.**
-`[feature.gsplat-rust-renderer.pypi-dependencies]` and `[feature.hexels.pypi-dependencies]`
-(hexels logs recordings for that viewer) pin `rerun-sdk == 0.42.0`, and the Rerun-versioned
-`rerun`/`re_*` crates in `packages/gsplat-rust-renderer/crates/*/Cargo.toml` match it exactly.
-Bump it the same way; re-lock Cargo with `cargo update -p <crate>@<old>` for the re_* family,
-not a blanket update. Brush stays on its own glam; the viewer converts at the gsplat-core boundary.
+To bump, in one change:
+1. every conda `rerun-sdk` pin in `pixi.toml` (`grep -n 'rerun-sdk = ' pixi.toml`) and the
+   `rerun-sdk` run dependency in `packages/slam-rs/recipe.yaml`;
+2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately;
+3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
+   `packages/robocap-live`, `packages/slam-rs` and the gsplat custom viewer
+   (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`; re-lock its Cargo with
+   `cargo update -p <crate>@<old>` for the re_* family, not a blanket update), or the viewer
+   silently loses protocol/tooling parity;
+4. re-lock Pixi on linux-64 and Cargo.
 
-Two macOS lanes restate that exact pin rather than composing `common`, because
-`common` is linux-only (`rerun-sdk[dataloader]` needs a torchvision that does
-not build on `osx-arm64`): `[feature.mv-api-catalog-register-mac]` and
-`[feature.slam-rs-osx]`. Both are tagged `# pin-bump: hold`; a bump has to touch
-all four sites or the Mac silently runs a release behind, and no linux gate and
-no `pixi lock --check` can see it.
+The gsplat custom viewer pins its own lane: `[feature.gsplat-rust-renderer.dependencies]`
+and `[feature.hexels.dependencies]` (hexels logs recordings for that viewer). It moves with
+the viewer's Rust port. Brush stays on its own glam; the viewer converts at the gsplat-core boundary.
 
-To test an **unreleased** Rerun build, add a `find-links` at
+Several lanes restate the exact pin rather than composing `common`:
+`[feature.mv-api-catalog-register-mac]` and `[feature.slam-rs-osx]` (macOS),
+`[feature.agent-traces]` (torch-free) and `[feature.selfcap-soma]`. They are tagged
+`# pin-bump: hold`; a bump that misses one leaves that lane a release behind, and for
+the Mac lanes no linux gate and no `pixi lock --check` can see it.
+
+To test an **unreleased** Rerun build, go back to PyPI for that test only: replace the
+lane's conda `rerun-sdk` pin with `rerun-sdk = { version = "==<ver>", extras = [...] }` in
+`[feature.rerun-prerelease.pypi-dependencies]`, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
 per commit, including PR branches — `curl` the index first to confirm your platform; PR commits
-are usually linux-x86_64 only) and match `rerun-sdk == <ver>` to the wheel filename. Re-lock on
-linux-64 (pixi >= 0.83, as set by `requires-pixi`) and move back to a public release once the fix ships.
+are usually linux-x86_64 only) and match `<ver>` to the wheel filename. Re-lock on
+linux-64 (pixi >= 0.83, as set by `requires-pixi`) and move back to the conda-forge pin once the
+release ships.
 
 ## Gotchas
 

@@ -47,7 +47,7 @@ For catalog/server changes:
 
 ## Pre-release Rerun
 
-Prefer the public `rerun-sdk` release. The catalog runs on the `simplecv-catalog` env, which uses
-the shared `rerun-prerelease` lane, currently pinned to `rerun-io/reality#2496` (`deeb4e6` /
-`0.34.0a1+dev`, fast OSS-catalog register). See the root `AGENTS.md` "Testing Rerun builds" for how
-to pin/repin that lane. Keep prerelease opt-in; move back to a public release once the fix ships.
+Prefer the public `rerun-sdk` release, which the workspace takes from conda-forge. The catalog runs
+on the `simplecv-catalog` env, which uses the shared `rerun-prerelease` lane, currently on the same
+release as the rest of the workspace. See the root `AGENTS.md` "Testing Rerun builds" for how to
+move that lane to an unreleased PyPI build for a test. Keep prerelease opt-in; move back to a public release once the fix ships.

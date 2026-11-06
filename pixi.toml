@@ -49,6 +49,13 @@ huggingface_hub = "*"
 tqdm = "*"
 transformers = ">=5.0.0"
 jupyterlab = "*"
+# pin-bump: hold — gradio-rerun's exact rerun-sdk pin (PyPI, below) must match.
+# Named channel: ai-demos carries its own rerun-sdk builds, which channel priority would pick.
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" } # pin-bump: hold
+python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pandas would take 4.x; PyPI s3fs -> aiobotocore needs <3
+# The PyPI `catalog` extra, spelled out (rerun-sdk[catalog] == datafusion + pandas);
+# datafusion stays on PyPI (below).
+pandas = ">=2"
 
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
@@ -62,10 +69,11 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match.
-rerun-sdk = { version = "==0.42.0", extras = ["catalog"] } # pin-bump: hold
+# pin-bump: hold — gradio-rerun pins rerun-sdk exactly; the conda rerun-sdk in
+# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping.
 gradio = "==6.13.0"                                        # pin-bump: hold
 gradio-rerun = "==0.42.0"                                  # pin-bump: hold
+datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -101,11 +109,18 @@ simplecv = { path = "packages/simplecv", editable = true }
 [feature.rerun-prerelease]
 platforms = ["linux-64", "linux-aarch64"]
 
+[feature.rerun-prerelease.dependencies]
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }
+python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pandas would take 4.x; PyPI s3fs -> aiobotocore needs <3
+# The PyPI `catalog` + `dataloader` extras, spelled out (torch comes from the env;
+# datafusion is on PyPI, see [feature.common.pypi-dependencies]).
+pandas = ">=2"
+av = "*"
+pillow = ">=8"
+torchvision = "*"
+
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.42.0", extras = [
-    "catalog",
-    "dataloader",
-] }
+datafusion = "==54.0.0"  # rerun-sdk[catalog]; PyPI, see [feature.common.pypi-dependencies]
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
@@ -957,6 +972,10 @@ platforms = ["osx-arm64"]
 
 [feature.mv-api-catalog-register-mac.dependencies]
 av = "*"
+# pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" } # pin-bump: hold
+python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pandas would take 4.x; PyPI s3fs -> aiobotocore needs <3
+pandas = ">=2"
 datasets = ">=4.0.0"
 h5py = ">=3.13.0,<4"
 natsort = ">=8.4.0,<9"
@@ -964,10 +983,9 @@ python = "3.12.*"
 scipy = "*"
 
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
+datafusion = "==54.0.0"  # rerun-sdk[catalog]; PyPI, see [feature.common.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-# pin-bump: hold — the macOS lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.42.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1503,10 +1521,12 @@ jaxtyping = "*"
 tyro = ">=0.9.1,<0.10"
 # selfcap_soma.assets downloads SOMA-X from a pinned HF revision.
 huggingface_hub = "*"
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" } # pin-bump: hold
+pandas = ">=2"
 
 [feature.selfcap-soma.pypi-dependencies]
+datafusion = "==54.0.0"  # rerun-sdk[catalog]; PyPI, see [feature.common.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
-rerun-sdk = { version = "==0.42.0", extras = ["catalog"] } # pin-bump: hold
 selfcap-soma = { path = "packages/selfcap-soma", editable = true }
 
 [feature.selfcap-soma.activation.env]
@@ -2004,6 +2024,10 @@ tomli-w = ">=1.2,<2"
 orjson = ">=3.11,<4"
 scipy = "*"
 pillow = "*"
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }  # matches the custom viewer's =0.42.0 re_viewer crates; moves with their Rust port
+python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pandas would take 4.x; PyPI s3fs -> aiobotocore needs <3
+# simplecv asks for pandas; take it from conda beside the conda pyarrow that rerun-sdk brings.
+pandas = ">=2.3.3"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
@@ -2029,7 +2053,6 @@ xorg-libxrandr = "*"
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.42.0"  # matches the custom viewer's =0.42.0 re_viewer crates; moves with their Rust port
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation]
@@ -2148,13 +2171,13 @@ nvidia-ml-py = "*"
 py-opencv = "*"
 plyfile = "*"
 lpips = "*"
+# Arrow tables of the surface recordings (hexels_bench.surface_frames).
+pyarrow = "*"
+# Rerun recordings (2D Figure 2 rows, surface recordings); same pin as the gsplat-rust-renderer viewer.
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }
 
 [feature.hexels.pypi-dependencies]
 hexels-bench = { path = "packages/hexels", editable = true }
-# Arrow tables of the surface recordings (hexels_bench.surface_frames); PyPI, as rerun-sdk already pulls it here.
-pyarrow = "*"
-# Rerun recordings (2D Figure 2 rows, surface recordings); same pin as the gsplat-rust-renderer viewer.
-rerun-sdk = "==0.42.0"
 # NVIDIA FLIP, imported by upstream's 2D image metrics; PyPI only.
 flip-evaluator = "==1.7"
 
@@ -2384,7 +2407,7 @@ description = "Launch DPVO Gradio web UI"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-evals.dependencies]
-python = "3.11.*"  # rerun-sdk 0.42 ships cp311 abi3 wheels only
+python = "3.11.*"  # rerun-sdk 0.42's conda-forge build is abi3 (cpython >=3.11); 3.11 kept on purpose
 pillow = "<13"  # gradio 6.13 (held) needs pillow<13; py3.11 would otherwise pick 13
 pyyaml = "*"
 pyarrow = ">=20.0.0,<21"
@@ -2447,12 +2470,6 @@ dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.slam-rs.target.linux-aarch64.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
-
-[feature.slam-rs.pypi-options.dependency-overrides]
-# rerun-prerelease asks for rerun-sdk[dataloader], whose PyPI torchvision does not
-# load against the CPU lane's conda pytorch-cpu ("operator torchvision::nms does not
-# exist"); nothing here uses the dataloader, so the catalog extra alone is kept.
-rerun-sdk = { version = "==0.42.0", extras = ["catalog"] }
 
 [feature.slam-rs.tasks.slam-rs-demo]
 cmd = "python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy"
@@ -2761,12 +2778,10 @@ description = "Build the release ARM recorder; pass the cap runtime sysroot dire
 # The linux environments get their runtime stack from `catalog-common` and
 # `rerun-prerelease`, and both are linux-only on purpose: eighteen of the twenty
 # environments that compose them also compose `cuda`. Widening them was tried
-# first and `pixi lock` refused, for one reason worth writing down: the
-# `dataloader` extra on `rerun-sdk` requires `torchvision`, and on `osx-arm64`
-# no published torchvision builds against the torch that the conda solve pins,
-# so the environment is unsatisfiable. slam-rs imports no torchvision, so the
-# macOS lane restates what the package actually loads and asks `rerun-sdk` for
-# the `catalog` extra alone. The duplication with `catalog-common` is the price
+# first and `pixi lock` refused: the `dataloader` extra then came from PyPI, and
+# no PyPI torchvision for `osx-arm64` built against the conda torch. slam-rs
+# imports no torchvision, so the macOS lane restates what the package actually
+# loads and spells out the `catalog` extra alone. The duplication with `catalog-common` is the price
 # of not making nineteen other environments solve for a platform none of them
 # runs on.
 [feature.slam-rs-osx]
@@ -2785,12 +2800,15 @@ scipy = "*"
 tqdm = "*"
 # simplecv declares it, and the conda build spares uv a Rust source build.
 hf-transfer = "*"
-
-[feature.slam-rs-osx.pypi-dependencies]
-simplecv = { path = "packages/simplecv", editable = true }
 # pin-bump: hold — the macOS lane restates `common`'s exact pin, so a Rerun bump
 # that misses this line leaves the Mac a release behind with no gate to say so.
-rerun-sdk = { version = "==0.42.0", extras = ["catalog"] } # pin-bump: hold
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" } # pin-bump: hold
+python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pandas would take 4.x; PyPI s3fs -> aiobotocore needs <3
+pandas = ">=2"
+
+[feature.slam-rs-osx.pypi-dependencies]
+datafusion = "==54.0.0"  # rerun-sdk[catalog]; PyPI, see [feature.common.pypi-dependencies]
+simplecv = { path = "packages/simplecv", editable = true }
 
 # ── Package consumer lane ─────────────────────────────────────────────────
 # Installs the two pixi-build outputs of packages/slam-rs (recipe.yaml) the way
@@ -2803,6 +2821,9 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.slam-rs-pkg.dependencies]
 python = "3.12.*"
+# The recipe's run dependency asks for rerun-sdk ==0.42.0; name the channel, as every
+# other pin does, so the ai-demos rerun-sdk builds do not shadow conda-forge's.
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }
 slam-rs = { path = "packages/slam-rs" }
 slam-rs-catalog = { path = "packages/slam-rs" }
 
@@ -3266,11 +3287,13 @@ pyserde = "*"
 orjson = "*"
 tomli-w = "*"
 tyro = ">=0.9.1,<0.10"
+# pin-bump: hold — this torch-free lane restates `common`'s exact pin; see AGENTS.md.
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" } # pin-bump: hold
+pandas = ">=2"
 
 [feature.agent-traces.pypi-dependencies]
+datafusion = "==54.0.0"  # rerun-sdk[catalog]; PyPI, see [feature.common.pypi-dependencies]
 agent-traces = { path = "packages/agent-traces", editable = true }
-# pin-bump: hold — this torch-free lane restates `common`'s exact pin; see AGENTS.md.
-rerun-sdk = { version = "==0.42.0", extras = ["catalog"] } # pin-bump: hold
 
 [feature.agent-traces.pypi-options]
 index-url = "https://pypi.org/simple"
