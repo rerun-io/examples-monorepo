@@ -179,10 +179,9 @@ cuda-python = "*"
 onnxscript = "*"
 
 # $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default; ORT needs
-# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer. Both python dirs
-# are listed because cuda envs span 3.11 and 3.12; missing paths are skipped.
+# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer (every cuda env is on Python 3.12).
 [feature.cuda.activation.env]
-LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -306,6 +305,22 @@ vrs = ">=1.1.0"
 PACKAGE_DIR = "packages/simplecv"
 PYREFLY_TARGET = "simplecv"
 PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
+
+# The test lanes build the extension first: a missing or stale .so must not skip or pass silently.
+[feature.lietorch-mojo-pkg.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package unit tests"
+
+[feature.lietorch-mojo-pkg.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package integration tests"
+
+[feature.lietorch-mojo-pkg.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package golden reference tests"
 
 [feature.simplecv.tasks.simplecv-view-polycam-data]
 cmd = "python tools/view_polycam.py --polycam-zip-path data/example-room-scan-poly.zip"
@@ -1888,8 +1903,21 @@ pyaml = "*"
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
 
-# mojo comes directly from the stable max channel, not the modular
-# metapackage (whose starlette pin conflicts with gradio).
+# Its tests import lietorch_mojo, so the test lanes build the extension first.
+[feature.mast3r-slam.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package unit tests"
+
+[feature.mast3r-slam.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package integration tests"
+
+[feature.mast3r-slam.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package golden reference tests"
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-cuda-kernels]
@@ -1906,6 +1934,7 @@ outputs = ["packages/mast3r-slam/mast3r_slam/_backends*.so"]
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-mojo-kernels]
+depends-on = ["lietorch-mojo-build"]
 cmd = "cd packages/mast3r-slam && mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
 description = "Build mast3r-slam Mojo backend kernels"
 inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
@@ -2299,6 +2328,8 @@ python = "3.12.*"
 # Exact stable pins (2026-11-06): `mojo = "*"` from max-nightly had let the lock freeze a June 2026
 # nightly; 1.2.0 is the newest stable Mojo, and since 1.2.0 std.gpu and layout ship in max-core.
 # Bump deliberately: re-run lietorch-mojo's tests and mast3r-slam's Mojo-vs-CUDA tests.
+# mojo comes directly from the stable max channel, not the modular metapackage (whose starlette pin conflicts
+# with gradio). mast3r-slam's Mojo backend build gets mojo and max-core from this feature too.
 mojo = { version = "==1.2.0", channel = "https://conda.modular.com/max/" }
 max-core = { version = "==26.7.0", channel = "https://conda.modular.com/max/" }
 pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
@@ -2356,6 +2387,22 @@ spaces = ">=0.32.0"
 
 [feature.dpvo.activation.env]
 PACKAGE_DIR = "packages/dpvo"
+
+# Its tests import lietorch_mojo, so the test lanes build the extension first.
+[feature.dpvo.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package unit tests"
+
+[feature.dpvo.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package integration tests"
+
+[feature.dpvo.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build"]
+description = "Build lietorch-mojo, then run the package golden reference tests"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.dpvo.tasks._download-dpvo-model]
