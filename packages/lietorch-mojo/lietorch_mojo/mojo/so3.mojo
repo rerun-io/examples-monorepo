@@ -27,21 +27,23 @@ ai-demos lietorch 1.0 build 2):
   moves results by at most lietorch's own error there.
 """
 
+from std.math import atan
+
 from lie_group import LieGroup
-from lie_math import atan_, sincos_, sqrt_
-from linalg import Mat
+from lie_linalg import Mat
+from lie_math import sincos_, sqrt_
 
 comptime EPS: Float64 = 1e-6
 comptime PI: Float64 = 3.14159265358979323846
 
 
-@always_inline
+@inline(.always)
 def from_double[dtype: DType](v: Float64) -> Scalar[dtype]:
     """`Scalar[dtype](v)` for a double constant such as `1.0 / 24.0`: round to double first, then to dtype, as C++ does."""
     return Scalar[dtype](v)
 
 
-@always_inline
+@inline(.always)
 def hat[dtype: DType, //](phi: Mat[dtype, 3, 1]) -> Mat[dtype, 3, 3]:
     var m = Mat[dtype, 3, 3]()
     m[0, 1] = -phi[2]
@@ -53,7 +55,7 @@ def hat[dtype: DType, //](phi: Mat[dtype, 3, 1]) -> Mat[dtype, 3, 3]:
     return m
 
 
-@always_inline
+@inline(.always)
 def vec3[dtype: DType, //](x: Scalar[dtype], y: Scalar[dtype], z: Scalar[dtype]) -> Mat[dtype, 3, 1]:
     var v = Mat[dtype, 3, 1]()
     v[0] = x
@@ -62,7 +64,7 @@ def vec3[dtype: DType, //](x: Scalar[dtype], y: Scalar[dtype], z: Scalar[dtype])
     return v
 
 
-@always_inline
+@inline(.always)
 def cross[dtype: DType, //](a: Mat[dtype, 3, 1], b: Mat[dtype, 3, 1]) -> Mat[dtype, 3, 1]:
     # Explicit FMAs (see `SO3.act`): a1 b2 - a2 b1 = fma(a1, b2, -(a2 b1)), the form nvcc picks for se3.h.
     return vec3(a[1].fma(b[2], -(a[2] * b[1])), a[2].fma(b[0], -(a[0] * b[2])), a[0].fma(b[1], -(a[1] * b[0])))
@@ -78,7 +80,7 @@ struct SO3[dt: DType](LieGroup):
     var z: Scalar[Self.dt]
     var w: Scalar[Self.dt]
 
-    @always_inline
+    @inline(.always)
     def __init__(out self, x: Scalar[Self.dt], y: Scalar[Self.dt], z: Scalar[Self.dt], w: Scalar[Self.dt]):
         """Normalising constructor (Eigen `Quaternion::normalize`: divide by the norm if it is > 0)."""
         # Explicit FMA chain (Eigen's sequential squaredNorm as nvcc contracts it): left to the compiler,
@@ -96,7 +98,7 @@ struct SO3[dt: DType](LieGroup):
             self.z = z
             self.w = w
 
-    @always_inline
+    @inline(.always)
     def __init__(out self):
         """Identity."""
         self.x = 0
@@ -104,16 +106,16 @@ struct SO3[dt: DType](LieGroup):
         self.z = 0
         self.w = 1
 
-    @always_inline
+    @inline(.always)
     def vec(self) -> Mat[Self.dt, 3, 1]:
         return vec3(self.x, self.y, self.z)
 
     @staticmethod
-    @always_inline
+    @inline(.always)
     def from_data(x: Mat[Self.dtype, Self.N, 1]) -> Self:
         return Self(x[0], x[1], x[2], x[3])
 
-    @always_inline
+    @inline(.always)
     def data(self) -> Mat[Self.dtype, Self.N, 1]:
         var r = Mat[Self.dtype, Self.N, 1]()
         r[0] = self.x
@@ -122,11 +124,11 @@ struct SO3[dt: DType](LieGroup):
         r[3] = self.w
         return r
 
-    @always_inline
+    @inline(.always)
     def inv(self) -> Self:
         return Self(-self.x, -self.y, -self.z, self.w)
 
-    @always_inline
+    @inline(.always)
     def mul(self, o: Self) -> Self:
         # Eigen quat_product, then the normalising SO3 constructor.
         var w = self.w * o.w - self.x * o.x - self.y * o.y - self.z * o.z
@@ -135,25 +137,24 @@ struct SO3[dt: DType](LieGroup):
         var z = self.w * o.z + self.z * o.w + self.x * o.y - self.y * o.x
         return Self(x, y, z, w)
 
-    @always_inline
+    @inline(.always)
     def act(self, p: Mat[Self.dtype, 3, 1]) -> Mat[Self.dtype, 3, 1]:
-        # Every multiply-add is an explicit FMA. Left to the compiler, FP contraction picked different
-        # pairs in different kernels (inv vs mul), so R t rounded differently and float32 X.inv() * X kept
-        # ulp residuals in 29% of rows where lietorch's CPU build cancels exactly.
+        # Explicit FMAs: FP contraction otherwise pairs these differently per kernel, so X.inv() * X
+        # stops cancelling exactly (README, "FMA").
         var v = self.vec()
         var uv = cross(v, p)
         uv = uv + uv
         var c = cross(v, uv)
         return vec3(self.w.fma(uv[0], p[0]) + c[0], self.w.fma(uv[1], p[1]) + c[1], self.w.fma(uv[2], p[2]) + c[2])
 
-    @always_inline
+    @inline(.always)
     def act4(self, p: Mat[Self.dtype, 4, 1]) -> Mat[Self.dtype, 4, 1]:
         var r = Mat[Self.dt, 4, 1]()
         r.set_block[0, 0](self.act(p.block[0, 0, 3, 1]()))
         r[3] = p[3]
         return r
 
-    @always_inline
+    @inline(.always)
     def Matrix(self) -> Mat[Self.dt, 3, 3]:
         # Eigen QuaternionBase::toRotationMatrix.
         var tx = 2 * self.x
@@ -180,17 +181,17 @@ struct SO3[dt: DType](LieGroup):
         m[2, 2] = 1 - (txx + tyy)
         return m
 
-    @always_inline
+    @inline(.always)
     def Adj(self) -> Mat[Self.dtype, Self.K, Self.K]:
         return self.Matrix()
 
-    @always_inline
+    @inline(.always)
     def Matrix4x4(self) -> Mat[Self.dtype, 4, 4]:
         var T = Mat[Self.dt, 4, 4].identity()
         T.set_block[0, 0](self.Matrix())
         return T
 
-    @always_inline
+    @inline(.always)
     def orthogonal_projector(self) -> Mat[Self.dtype, Self.N, Self.N]:
         var J = Mat[Self.dt, 4, 4]()
         var neg_v = -self.vec()
@@ -199,12 +200,13 @@ struct SO3[dt: DType](LieGroup):
         return J
 
     @staticmethod
-    @always_inline
+    @inline(.always)
     def adj(a: Mat[Self.dtype, Self.K, 1]) -> Mat[Self.dtype, Self.K, Self.K]:
         return hat(a)
 
-    @always_inline
+    @inline(.always)
     def Log(self) -> Mat[Self.dtype, Self.K, 1]:
+        comptime assert Self.dt.is_floating_point(), "SO3 needs a floating-point dtype"
         var squared_n = self.x * self.x + self.y * self.y + self.z * self.z
         var w = self.w
         var two_atan_nbyw_by_n: Scalar[Self.dt]
@@ -219,11 +221,11 @@ struct SO3[dt: DType](LieGroup):
                 else:
                     two_atan_nbyw_by_n = -from_double[Self.dt](PI) / n
             else:
-                two_atan_nbyw_by_n = 2 * atan_(n / w) / n
+                two_atan_nbyw_by_n = 2 * atan(n / w) / n
         return two_atan_nbyw_by_n * self.vec()
 
     @staticmethod
-    @always_inline
+    @inline(.always)
     def Exp(phi: Mat[Self.dtype, Self.K, 1]) -> Self:
         var theta2 = phi.squared_norm()
         var theta = sqrt_(theta2)
@@ -234,13 +236,13 @@ struct SO3[dt: DType](LieGroup):
             imag_factor = 0.5 - from_double[Self.dt](1.0 / 48.0) * theta2 + from_double[Self.dt](1.0 / 3840.0) * theta4
             real_factor = 1 - from_double[Self.dt](1.0 / 8.0) * theta2 + from_double[Self.dt](1.0 / 384.0) * theta4
         else:
-            var sc = sincos_(0.5 * theta)
-            imag_factor = sc[0] / theta
-            real_factor = sc[1]
+            var s, c = sincos_(0.5 * theta)
+            imag_factor = s / theta
+            real_factor = c
         return Self(imag_factor * phi[0], imag_factor * phi[1], imag_factor * phi[2], real_factor)
 
     @staticmethod
-    @always_inline
+    @inline(.always)
     def left_jacobian(phi: Mat[Self.dtype, Self.K, 1]) -> Mat[Self.dtype, Self.K, Self.K]:
         var I = Mat[Self.dt, 3, 3].identity()
         var Phi = hat(phi)
@@ -253,21 +255,21 @@ struct SO3[dt: DType](LieGroup):
             coef1 = 0.5 - from_double[Self.dt](1.0 / 24.0) * theta2
             coef2 = from_double[Self.dt](1.0 / 6.0) - from_double[Self.dt](1.0 / 120.0) * theta2
         else:
-            var sc = sincos_(theta)
-            comptime if Self.dt == DType.float64:
+            var s, c = sincos_(theta)
+            comptime if Self.dt == .float64:
                 # 1 - cos = sin^2 / (1 + cos) for theta < 1: no cancellation (module docstring). Select, then
                 # divide once: an FP64 division per branch cost 4% of expm's kernel time.
                 var small = theta < 1.0
-                var num = sc[0] * sc[0] if small else 1 - sc[1]
-                var den = (1 + sc[1]) * theta2 if small else theta2
+                var num = s * s if small else 1 - c
+                var den = (1 + c) * theta2 if small else theta2
                 coef1 = num / den
             else:
-                coef1 = (1 - sc[1]) / theta2
-            coef2 = (theta - sc[0]) / (theta2 * theta)
+                coef1 = (1 - c) / theta2
+            coef2 = (theta - s) / (theta2 * theta)
         return I + coef1 * Phi + coef2 * Phi2
 
     @staticmethod
-    @always_inline
+    @inline(.always)
     def left_jacobian_inverse(phi: Mat[Self.dtype, Self.K, 1]) -> Mat[Self.dtype, Self.K, Self.K]:
         var I = Mat[Self.dt, 3, 3].identity()
         var Phi = hat(phi)
@@ -278,17 +280,17 @@ struct SO3[dt: DType](LieGroup):
         if Float64(theta) < EPS:
             coef2 = from_double[Self.dt](1.0 / 12.0)
         else:
-            var sc = sincos_(0.5 * theta)
-            coef2 = (1 - theta * sc[1] / (2 * sc[0])) / (theta * theta)
+            var s, c = sincos_(0.5 * theta)
+            coef2 = (1 - theta * c / (2 * s)) / (theta * theta)
         return I + (-0.5) * Phi + coef2 * Phi2
 
     @staticmethod
-    @always_inline
+    @inline(.always)
     def act_jacobian(p: Mat[Self.dtype, 3, 1]) -> Mat[Self.dtype, 3, Self.K]:
         return hat(-p)
 
     @staticmethod
-    @always_inline
+    @inline(.always)
     def act4_jacobian(p: Mat[Self.dtype, 4, 1]) -> Mat[Self.dtype, 4, Self.K]:
         var J = Mat[Self.dt, 4, 3]()
         J.set_block[0, 0](hat(-p.block[0, 0, 3, 1]()))

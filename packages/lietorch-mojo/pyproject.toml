@@ -60,6 +60,8 @@ ignore_names = [
     "TORCH_MINOR",
     "gradgradcheck",
     "zero_gradients",
+    # mpmath precision setting in the float64 math references
+    "dps",
 ]
 sort_by_size = true
 min_confidence = 60

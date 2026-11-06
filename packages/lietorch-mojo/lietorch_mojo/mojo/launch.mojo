@@ -13,15 +13,17 @@ are allocated by PyTorch on that stream, so the caching allocator's
 stream-ordered block reuse stays correct.
 """
 
-from std.algorithm import parallelize
+from max.algorithm import parallelize
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, global_idx
 from max.gpu.host import DeviceContext, DeviceStream
+from max.gpu.host.device_context import DeviceContextBase
+from max.runtime.asyncrt import parallelism_level
 from std.math import ceildiv
 from std.python import PythonObject
-from std.runtime.asyncrt import parallelism_level
+from std.sys.info import CompilationTarget
 from std.utils.static_tuple import StaticTuple
 
-from layout import Idx, TileTensor, row_major
+from layout import Idx, ImmTileTensor, MutTileTensor, TileTensor, row_major
 
 from group_ops import binary_backward_row, binary_row, row_widths, unary_backward_row, unary_row
 from lie_group import LieGroup
@@ -32,28 +34,28 @@ comptime NUM_THREADS = 256
 comptime CPU_CHUNK = 2048
 
 comptime RowLayout[width: Int] = type_of(row_major((0, Idx[width])))
-comptime InRows[dtype: DType, width: Int] = TileTensor[dtype, RowLayout[width], ImmutUntrackedOrigin]
-comptime OutRows[dtype: DType, width: Int] = TileTensor[dtype, RowLayout[width], MutUntrackedOrigin]
+comptime InRows[dtype: DType, width: Int] = ImmTileTensor[dtype, RowLayout[width], ImmUntrackedOrigin]
+comptime OutRows[dtype: DType, width: Int] = MutTileTensor[dtype, RowLayout[width], MutUntrackedOrigin]
 
 
-@always_inline
+@inline(.always)
 def in_rows[dtype: DType, width: Int](address: PythonObject, n: Int) raises -> InRows[dtype, width]:
-    var p = UnsafePointer[Scalar[dtype], ImmutUntrackedOrigin](unsafe_from_address=Int(py=address))
+    var p = ImmPointer[Scalar[dtype], ImmUntrackedOrigin](unsafe_from_address=Int(py=address))
     return TileTensor(p, row_major((n, Idx[width])))
 
 
-@always_inline
+@inline(.always)
 def out_rows[dtype: DType, width: Int](address: PythonObject, n: Int) raises -> OutRows[dtype, width]:
-    var p = UnsafePointer[Scalar[dtype], MutUntrackedOrigin](unsafe_from_address=Int(py=address))
+    var p = MutPointer[Scalar[dtype], MutUntrackedOrigin](unsafe_from_address=Int(py=address))
     return TileTensor(p, row_major((n, Idx[width])))
 
 
-@always_inline
-def _stream_ptr(handle: Int) -> Optional[UnsafePointer[NoneType, MutUntrackedOrigin]]:
+@inline(.always)
+def _stream_ptr(handle: Int) -> Optional[MutPointer[NoneType, MutUntrackedOrigin]]:
     """`cudaStream_t` from its integer value; 0 (the legacy default stream) is `None`."""
     if handle == 0:
         return None
-    return UnsafePointer[NoneType, MutUntrackedOrigin](unsafe_from_address=handle)
+    return MutPointer[NoneType, MutUntrackedOrigin](unsafe_from_address=handle)
 
 
 struct GPURuntime(Movable, Writable):
@@ -68,13 +70,14 @@ struct GPURuntime(Movable, Writable):
         self.stream_handle = 0
         self.stream = self.ctx.create_external_stream(_stream_ptr(0))
 
+    # `add_type` needs Writable; reflection cannot derive it (or repr) through a DeviceContext field.
     def write_to(self, mut writer: Some[Writer]):
         writer.write("GPURuntime(cuda:0)")
 
     def write_repr_to(self, mut writer: Some[Writer]):
         writer.write("GPURuntime(cuda:0)")
 
-    @always_inline
+    @inline(.always)
     def torch_stream(mut self, handle: Int) raises -> DeviceStream:
         """Non-owning wrapper of the PyTorch stream `handle` (0 = legacy default stream), cached while it repeats."""
         if handle != self.stream_handle:
@@ -86,10 +89,10 @@ struct GPURuntime(Movable, Writable):
 struct CPURuntime(Movable, Writable):
     """Process-lifetime CPU state: the context of the Mojo thread pool."""
 
-    var ctx: DeviceContext
+    var ctx: DeviceContextBase[CompilationTarget()]
 
     def __init__(out self) raises:
-        self.ctx = DeviceContext(api="cpu")
+        self.ctx = DeviceContextBase[CompilationTarget()](api="cpu")
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write("CPURuntime")
@@ -104,7 +107,7 @@ struct CPURuntime(Movable, Writable):
                 row(i)
             return
 
-        def chunk(c: Int) {read}:
+        def chunk(c: Int) {imm}:
             for i in range(c * CPU_CHUNK, min((c + 1) * CPU_CHUNK, n)):
                 row(i)
 
@@ -113,60 +116,60 @@ struct CPURuntime(Movable, Writable):
 
 
 # ── GPU kernels, one per op family ───────────────────────────────────────────
+# The batch size is the runtime first dimension of the first tensor.
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
-def unary_kernel[G: LieGroup, op: Int, Wx: Int, Wy: Int](x: InRows[G.dtype, Wx], y: OutRows[G.dtype, Wy], n: Int):
+def unary_kernel[G: LieGroup, op: Int, x_width: Int, y_width: Int](x: InRows[G.dtype, x_width], y: OutRows[G.dtype, y_width]):
     var i = global_idx.x
-    if i < n:
+    if i < Int(x.dim[0]()):
         unary_row[G, op](i, x, y)
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
 def unary_backward_kernel[
-    G: LieGroup, op: Int, Wg: Int, Wx: Int
-](grad: InRows[G.dtype, Wg], x: InRows[G.dtype, Wx], dx: OutRows[G.dtype, Wx], n: Int):
+    G: LieGroup, op: Int, grad_width: Int, x_width: Int
+](grad: InRows[G.dtype, grad_width], x: InRows[G.dtype, x_width], dx: OutRows[G.dtype, x_width]):
     var i = global_idx.x
-    if i < n:
+    if i < Int(x.dim[0]()):
         unary_backward_row[G, op](i, grad, x, dx)
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
 def binary_kernel[
-    G: LieGroup, op: Int, Wb: Int
-](X: InRows[G.dtype, G.N], operand: InRows[G.dtype, Wb], y: OutRows[G.dtype, Wb], n: Int):
+    G: LieGroup, op: Int, operand_width: Int
+](X: InRows[G.dtype, G.N], operand: InRows[G.dtype, operand_width], y: OutRows[G.dtype, operand_width]):
     var i = global_idx.x
-    if i < n:
+    if i < Int(X.dim[0]()):
         binary_row[G, op](i, X, operand, y)
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
 def binary_backward_kernel[
-    G: LieGroup, op: Int, Wb: Int
+    G: LieGroup, op: Int, operand_width: Int
 ](
-    grad: InRows[G.dtype, Wb],
+    grad: InRows[G.dtype, operand_width],
     X: InRows[G.dtype, G.N],
-    operand: InRows[G.dtype, Wb],
+    operand: InRows[G.dtype, operand_width],
     dX: OutRows[G.dtype, G.N],
-    d_operand: OutRows[G.dtype, Wb],
-    n: Int,
+    d_operand: OutRows[G.dtype, operand_width],
 ):
     var i = global_idx.x
-    if i < n:
+    if i < Int(X.dim[0]()):
         binary_backward_row[G, op](i, grad, X, operand, dX, d_operand)
 
 
 # ── launchers: tensors are the op's addresses, inputs then outputs ───────────
+# `DeviceStream.enqueue_function` takes only a compiled function (the cubin embedded at build time).
 
 
 def unary_cuda[G: LieGroup, op: Int](mut rt: GPURuntime, stream: Int, n: Int, tensors: PythonObject) raises:
     comptime W = row_widths[G, op]()
-    var func = rt.ctx.compile_function[unary_kernel[G, op, W[0], W[1]]]()  # looks up the cubin embedded at build time
+    var func = rt.ctx.compile_function[unary_kernel[G, op, W[0], W[1]]]()
     rt.torch_stream(stream).enqueue_function(
         func,
         in_rows[G.dtype, W[0]](tensors[0], n),
         out_rows[G.dtype, W[1]](tensors[1], n),
-        n,
         grid_dim=ceildiv(n, NUM_THREADS),
         block_dim=NUM_THREADS,
     )
@@ -177,7 +180,7 @@ def unary_cpu[G: LieGroup, op: Int](rt: CPURuntime, n: Int, tensors: PythonObjec
     var x = in_rows[G.dtype, W[0]](tensors[0], n)
     var y = out_rows[G.dtype, W[1]](tensors[1], n)
 
-    def row(i: Int) {read}:
+    def row(i: Int) {imm}:
         unary_row[G, op](i, x, y)
 
     rt.for_each_row(row, n)
@@ -191,7 +194,6 @@ def unary_backward_cuda[G: LieGroup, op: Int](mut rt: GPURuntime, stream: Int, n
         in_rows[G.dtype, W[0]](tensors[0], n),
         in_rows[G.dtype, W[1]](tensors[1], n),
         out_rows[G.dtype, W[2]](tensors[2], n),
-        n,
         grid_dim=ceildiv(n, NUM_THREADS),
         block_dim=NUM_THREADS,
     )
@@ -203,7 +205,7 @@ def unary_backward_cpu[G: LieGroup, op: Int](rt: CPURuntime, n: Int, tensors: Py
     var x = in_rows[G.dtype, W[1]](tensors[1], n)
     var dx = out_rows[G.dtype, W[2]](tensors[2], n)
 
-    def row(i: Int) {read}:
+    def row(i: Int) {imm}:
         unary_backward_row[G, op](i, grad, x, dx)
 
     rt.for_each_row(row, n)
@@ -217,7 +219,6 @@ def binary_cuda[G: LieGroup, op: Int](mut rt: GPURuntime, stream: Int, n: Int, t
         in_rows[G.dtype, W[0]](tensors[0], n),
         in_rows[G.dtype, W[1]](tensors[1], n),
         out_rows[G.dtype, W[2]](tensors[2], n),
-        n,
         grid_dim=ceildiv(n, NUM_THREADS),
         block_dim=NUM_THREADS,
     )
@@ -229,7 +230,7 @@ def binary_cpu[G: LieGroup, op: Int](rt: CPURuntime, n: Int, tensors: PythonObje
     var operand = in_rows[G.dtype, W[1]](tensors[1], n)
     var y = out_rows[G.dtype, W[2]](tensors[2], n)
 
-    def row(i: Int) {read}:
+    def row(i: Int) {imm}:
         binary_row[G, op](i, X, operand, y)
 
     rt.for_each_row(row, n)
@@ -245,7 +246,6 @@ def binary_backward_cuda[G: LieGroup, op: Int](mut rt: GPURuntime, stream: Int, 
         in_rows[G.dtype, W[2]](tensors[2], n),
         out_rows[G.dtype, W[3]](tensors[3], n),
         out_rows[G.dtype, W[4]](tensors[4], n),
-        n,
         grid_dim=ceildiv(n, NUM_THREADS),
         block_dim=NUM_THREADS,
     )
@@ -259,8 +259,7 @@ def binary_backward_cpu[G: LieGroup, op: Int](rt: CPURuntime, n: Int, tensors: P
     var dX = out_rows[G.dtype, W[3]](tensors[3], n)
     var d_operand = out_rows[G.dtype, W[4]](tensors[4], n)
 
-    def row(i: Int) {read}:
+    def row(i: Int) {imm}:
         binary_backward_row[G, op](i, grad, X, operand, dX, d_operand)
 
     rt.for_each_row(row, n)
-

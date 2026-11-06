@@ -22,10 +22,10 @@ Gradient inputs that belong to a group-valued output are N wide and only
 their first K entries are read, as the C++ does.
 """
 
-from layout import TileTensor
+from layout import ImmTileTensor, MutTileTensor
 
 from lie_group import LieGroup
-from linalg import Mat
+from lie_linalg import Mat
 
 # Op codes; lietorch_mojo/backends.py uses the same numbers.
 comptime OP_EXP = 0
@@ -56,155 +56,168 @@ comptime BINARY_BACKWARD = 3
 
 
 def family(op: Int) -> Int:
-    if op == OP_EXP or op == OP_LOG or op == OP_INV or op == OP_AS_MATRIX or op == OP_PROJECTOR:
-        return UNARY
-    if op == OP_EXP_BACKWARD or op == OP_LOG_BACKWARD or op == OP_INV_BACKWARD:
-        return UNARY_BACKWARD
-    if op == OP_MUL or op == OP_ADJ or op == OP_ADJT or op == OP_ACT or op == OP_ACT4 or op == OP_JINV:
-        return BINARY
-    return BINARY_BACKWARD
+    match op:
+        case == OP_EXP | == OP_LOG | == OP_INV | == OP_AS_MATRIX | == OP_PROJECTOR:
+            return UNARY
+        case == OP_EXP_BACKWARD | == OP_LOG_BACKWARD | == OP_INV_BACKWARD:
+            return UNARY_BACKWARD
+        case == OP_MUL | == OP_ADJ | == OP_ADJT | == OP_ACT | == OP_ACT4 | == OP_JINV:
+            return BINARY
+        case _:
+            return BINARY_BACKWARD
 
 
 def num_tensors(op: Int) -> Int:
-    var f = family(op)
-    if f == UNARY:
-        return 2
-    if f == BINARY_BACKWARD:
-        return 5
-    return 3
+    match family(op):
+        case == UNARY:
+            return 2
+        case == BINARY_BACKWARD:
+            return 5
+        case _:
+            return 3
 
 
 def row_widths[G: LieGroup, op: Int]() -> Array[Int, 5]:
     """Width of each of the op's tensors, inputs then outputs (unused slots are 0)."""
     comptime N = G.N
     comptime K = G.K
-    comptime if op == OP_EXP:
-        return [K, N, 0, 0, 0]
-    elif op == OP_LOG:
-        return [N, K, 0, 0, 0]
-    elif op == OP_INV:
-        return [N, N, 0, 0, 0]
-    elif op == OP_AS_MATRIX:
-        return [N, 16, 0, 0, 0]
-    elif op == OP_PROJECTOR:
-        return [N, N * N, 0, 0, 0]
-    elif op == OP_EXP_BACKWARD:
-        return [N, K, K, 0, 0]
-    elif op == OP_LOG_BACKWARD:
-        return [K, N, N, 0, 0]
-    elif op == OP_INV_BACKWARD:
-        return [N, N, N, 0, 0]
+    comptime match op:
+        case == OP_EXP:
+            return [K, N, 0, 0, 0]
+        case == OP_LOG:
+            return [N, K, 0, 0, 0]
+        case == OP_INV:
+            return [N, N, 0, 0, 0]
+        case == OP_AS_MATRIX:
+            return [N, 16, 0, 0, 0]
+        case == OP_PROJECTOR:
+            return [N, N * N, 0, 0, 0]
+        case == OP_EXP_BACKWARD:
+            return [N, K, K, 0, 0]
+        case == OP_LOG_BACKWARD:
+            return [K, N, N, 0, 0]
+        case == OP_INV_BACKWARD:
+            return [N, N, N, 0, 0]
+        case _:
+            pass
     # Binary families: y, grad and d_operand have the operand's width.
-    var w: Int
-    comptime if op == OP_MUL or op == OP_MUL_BACKWARD:
-        w = N
-    elif op == OP_ACT or op == OP_ACT_BACKWARD:
-        w = 3
-    elif op == OP_ACT4 or op == OP_ACT4_BACKWARD:
-        w = 4
-    else:
-        w = K
+    comptime w = operand_width[G, op]()
     comptime if family(op) == BINARY:
         return [N, w, w, 0, 0]
     else:
         return [w, N, w, N, w]
 
 
-@always_inline
-def load_element[G: LieGroup](rows: TileTensor[mut=False, G.dtype, ...], i: Int) -> G:
+def operand_width[G: LieGroup, op: Int]() -> Int:
+    """Row width of a binary op's second input: a group element, a 3D or homogeneous point, or a tangent vector."""
+    comptime match op:
+        case == OP_MUL | == OP_MUL_BACKWARD:
+            return G.N
+        case == OP_ACT | == OP_ACT_BACKWARD:
+            return 3
+        case == OP_ACT4 | == OP_ACT4_BACKWARD:
+            return 4
+        case _:
+            return G.K
+
+
+@inline(.always)
+def load_element[G: LieGroup](rows: ImmTileTensor[G.dtype, ...], i: Int) -> G:
     return G.from_data(Mat[G.dtype, G.N, 1].load(rows, i))
 
 
-@always_inline
-def unary_row[G: LieGroup, op: Int](i: Int, x: TileTensor[mut=False, G.dtype, ...], y: TileTensor[mut=True, G.dtype, ...]):
-    comptime if op == OP_EXP:
-        G.Exp(Mat[G.dtype, G.K, 1].load(x, i)).data().store(y, i)
-    elif op == OP_LOG:
-        load_element[G](x, i).Log().store(y, i)
-    elif op == OP_INV:
-        load_element[G](x, i).inv().data().store(y, i)
-    elif op == OP_AS_MATRIX:
-        load_element[G](x, i).Matrix4x4().store(y, i)
-    elif op == OP_PROJECTOR:
-        load_element[G](x, i).orthogonal_projector().store(y, i)
-    else:
-        comptime assert False, "not a UNARY op"
+@inline(.always)
+def unary_row[G: LieGroup, op: Int](i: Int, x: ImmTileTensor[G.dtype, ...], y: MutTileTensor[G.dtype, ...]):
+    comptime match op:
+        case == OP_EXP:
+            G.Exp(Mat[G.dtype, G.K, 1].load(x, i)).data().store(y, i)
+        case == OP_LOG:
+            load_element[G](x, i).Log().store(y, i)
+        case == OP_INV:
+            load_element[G](x, i).inv().data().store(y, i)
+        case == OP_AS_MATRIX:
+            load_element[G](x, i).Matrix4x4().store(y, i)
+        case == OP_PROJECTOR:
+            load_element[G](x, i).orthogonal_projector().store(y, i)
+        case _:
+            comptime assert False, "not a UNARY op"
 
 
-@always_inline
+@inline(.always)
 def unary_backward_row[
     G: LieGroup, op: Int
-](i: Int, grad: TileTensor[mut=False, G.dtype, ...], x: TileTensor[mut=False, G.dtype, ...], dx: TileTensor[mut=True, G.dtype, ...]):
-    comptime if op == OP_EXP_BACKWARD:
-        var dX = Mat[G.dtype, 1, G.K].load_head(grad, i)
-        (dX @ G.left_jacobian(Mat[G.dtype, G.K, 1].load(x, i))).store(dx, i)
-    elif op == OP_LOG_BACKWARD:
-        var a = load_element[G](x, i).Log()
-        (Mat[G.dtype, 1, G.K].load(grad, i) @ G.left_jacobian_inverse(a)).store_padded(dx, i)
-    elif op == OP_INV_BACKWARD:
-        var Y = load_element[G](x, i).inv()
-        var dY = Mat[G.dtype, 1, G.K].load_head(grad, i)
-        ((-dY) @ Y.Adj()).store_padded(dx, i)
-    else:
-        comptime assert False, "not a UNARY_BACKWARD op"
+](i: Int, grad: ImmTileTensor[G.dtype, ...], x: ImmTileTensor[G.dtype, ...], dx: MutTileTensor[G.dtype, ...]):
+    comptime match op:
+        case == OP_EXP_BACKWARD:
+            var dX = Mat[G.dtype, 1, G.K].load_head(grad, i)
+            (dX @ G.left_jacobian(Mat[G.dtype, G.K, 1].load(x, i))).store(dx, i)
+        case == OP_LOG_BACKWARD:
+            var a = load_element[G](x, i).Log()
+            (Mat[G.dtype, 1, G.K].load(grad, i) @ G.left_jacobian_inverse(a)).store_padded(dx, i)
+        case == OP_INV_BACKWARD:
+            var Y = load_element[G](x, i).inv()
+            var dY = Mat[G.dtype, 1, G.K].load_head(grad, i)
+            ((-dY) @ Y.Adj()).store_padded(dx, i)
+        case _:
+            comptime assert False, "not a UNARY_BACKWARD op"
 
 
-@always_inline
-def binary_row[
-    G: LieGroup, op: Int
-](i: Int, X: TileTensor[mut=False, G.dtype, ...], operand: TileTensor[mut=False, G.dtype, ...], y: TileTensor[mut=True, G.dtype, ...]):
+@inline(.always)
+def binary_row[G: LieGroup, op: Int](i: Int, X: ImmTileTensor[G.dtype, ...], operand: ImmTileTensor[G.dtype, ...], y: MutTileTensor[G.dtype, ...]):
     var g = load_element[G](X, i)
-    comptime if op == OP_MUL:
-        g.mul(load_element[G](operand, i)).data().store(y, i)
-    elif op == OP_ADJ:
-        (g.Adj() @ Mat[G.dtype, G.K, 1].load(operand, i)).store(y, i)
-    elif op == OP_ADJT:
-        (g.Adj().T() @ Mat[G.dtype, G.K, 1].load(operand, i)).store(y, i)
-    elif op == OP_ACT:
-        g.act(Mat[G.dtype, 3, 1].load(operand, i)).store(y, i)
-    elif op == OP_ACT4:
-        g.act4(Mat[G.dtype, 4, 1].load(operand, i)).store(y, i)
-    elif op == OP_JINV:
-        (G.left_jacobian_inverse(g.Log()) @ Mat[G.dtype, G.K, 1].load(operand, i)).store(y, i)
-    else:
-        comptime assert False, "not a BINARY op"
+    comptime match op:
+        case == OP_MUL:
+            g.mul(load_element[G](operand, i)).data().store(y, i)
+        case == OP_ADJ:
+            (g.Adj() @ Mat[G.dtype, G.K, 1].load(operand, i)).store(y, i)
+        case == OP_ADJT:
+            (g.Adj().T() @ Mat[G.dtype, G.K, 1].load(operand, i)).store(y, i)
+        case == OP_ACT:
+            g.act(Mat[G.dtype, 3, 1].load(operand, i)).store(y, i)
+        case == OP_ACT4:
+            g.act4(Mat[G.dtype, 4, 1].load(operand, i)).store(y, i)
+        case == OP_JINV:
+            (G.left_jacobian_inverse(g.Log()) @ Mat[G.dtype, G.K, 1].load(operand, i)).store(y, i)
+        case _:
+            comptime assert False, "not a BINARY op"
 
 
-@always_inline
+@inline(.always)
 def binary_backward_row[
     G: LieGroup, op: Int
 ](
     i: Int,
-    grad: TileTensor[mut=False, G.dtype, ...],
-    X: TileTensor[mut=False, G.dtype, ...],
-    operand: TileTensor[mut=False, G.dtype, ...],
-    dX: TileTensor[mut=True, G.dtype, ...],
-    d_operand: TileTensor[mut=True, G.dtype, ...],
+    grad: ImmTileTensor[G.dtype, ...],
+    X: ImmTileTensor[G.dtype, ...],
+    operand: ImmTileTensor[G.dtype, ...],
+    dX: MutTileTensor[G.dtype, ...],
+    d_operand: MutTileTensor[G.dtype, ...],
 ):
     var g = load_element[G](X, i)
-    comptime if op == OP_MUL_BACKWARD:
-        var dZ = Mat[G.dtype, 1, G.K].load_head(grad, i)
-        dZ.store_padded(dX, i)
-        (dZ @ g.Adj()).store_padded(d_operand, i)
-    elif op == OP_ADJ_BACKWARD:
-        var db = Mat[G.dtype, 1, G.K].load(grad, i)
-        var Ad = g.Adj()
-        var b = Ad @ Mat[G.dtype, G.K, 1].load(operand, i)
-        (db @ Ad).store(d_operand, i)
-        ((-db) @ G.adj(b)).store_padded(dX, i)
-    elif op == OP_ADJT_BACKWARD:
-        var Ad_db = g.Adj() @ Mat[G.dtype, G.K, 1].load(grad, i)
-        Ad_db.store(d_operand, i)
-        ((-Mat[G.dtype, 1, G.K].load(operand, i)) @ G.adj(Ad_db)).store_padded(dX, i)
-    elif op == OP_ACT_BACKWARD:
-        var p = Mat[G.dtype, 3, 1].load(operand, i)
-        var dq = Mat[G.dtype, 1, 3].load(grad, i)
-        (dq @ g.Matrix4x4().block[0, 0, 3, 3]()).store(d_operand, i)
-        (dq @ G.act_jacobian(g.act(p))).store_padded(dX, i)
-    elif op == OP_ACT4_BACKWARD:
-        var p = Mat[G.dtype, 4, 1].load(operand, i)
-        var dq = Mat[G.dtype, 1, 4].load(grad, i)
-        (dq @ g.Matrix4x4()).store(d_operand, i)
-        (dq @ G.act4_jacobian(g.act4(p))).store_padded(dX, i)
-    else:
-        comptime assert False, "not a BINARY_BACKWARD op"
+    comptime match op:
+        case == OP_MUL_BACKWARD:
+            var dZ = Mat[G.dtype, 1, G.K].load_head(grad, i)
+            dZ.store_padded(dX, i)
+            (dZ @ g.Adj()).store_padded(d_operand, i)
+        case == OP_ADJ_BACKWARD:
+            var db = Mat[G.dtype, 1, G.K].load(grad, i)
+            var Ad = g.Adj()
+            var b = Ad @ Mat[G.dtype, G.K, 1].load(operand, i)
+            (db @ Ad).store(d_operand, i)
+            ((-db) @ G.adj(b)).store_padded(dX, i)
+        case == OP_ADJT_BACKWARD:
+            var Ad_db = g.Adj() @ Mat[G.dtype, G.K, 1].load(grad, i)
+            Ad_db.store(d_operand, i)
+            ((-Mat[G.dtype, 1, G.K].load(operand, i)) @ G.adj(Ad_db)).store_padded(dX, i)
+        case == OP_ACT_BACKWARD:
+            var p = Mat[G.dtype, 3, 1].load(operand, i)
+            var dq = Mat[G.dtype, 1, 3].load(grad, i)
+            (dq @ g.Matrix4x4().block[0, 0, 3, 3]()).store(d_operand, i)
+            (dq @ G.act_jacobian(g.act(p))).store_padded(dX, i)
+        case == OP_ACT4_BACKWARD:
+            var p = Mat[G.dtype, 4, 1].load(operand, i)
+            var dq = Mat[G.dtype, 1, 4].load(grad, i)
+            (dq @ g.Matrix4x4()).store(d_operand, i)
+            (dq @ G.act4_jacobian(g.act4(p))).store_padded(dX, i)
+        case _:
+            comptime assert False, "not a BINARY_BACKWARD op"

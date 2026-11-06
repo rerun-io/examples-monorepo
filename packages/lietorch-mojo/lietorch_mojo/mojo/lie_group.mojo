@@ -3,7 +3,7 @@
 The trait mirrors the member functions that lietorch's CUDA/CPU kernel
 templates (`lietorch_gpu.cu`, `lietorch_cpu.cpp`) call on their `Group`
 template parameter. A group implementation is a struct parameterised on the
-scalar dtype, e.g. `SE3[DType.float32]`, and declares:
+scalar dtype, e.g. `SE3[.float32]`, and declares:
 
 - `dtype` — the scalar type,
 - `N` — the embedded dimension (length of one element's data row),
@@ -15,10 +15,10 @@ RxSO3, SE3 and Sim3 drop in by implementing it. A group is pure register math:
 (SE3: tx ty tz qx qy qz qw; scalar-last quaternion).
 """
 
-from linalg import Mat
+from lie_linalg import Mat
 
 
-trait LieGroup(ImplicitlyCopyable, Deinitable):
+trait LieGroup(Deinitable, ImplicitlyCopyable):
     comptime dtype: DType
     comptime N: Int
     comptime K: Int

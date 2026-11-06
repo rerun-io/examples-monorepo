@@ -47,3 +47,22 @@ def test_inverse_times_self_cancels_in_almost_every_row(device: str, dtype: torc
     X: Tensor = _poses(device, dtype)
     residual: Tensor = backends.mul(3, backends.inv(3, X), X)[:, :3]
     assert (residual != 0).any(dim=1).float().mean().item() <= 0.01
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_exp_is_a_unit_rotation_about_phi_at_huge_angles(device: str, dtype: torch.dtype) -> None:
+    """Regression (Mojo 1.2.0 port): the old sin/cos reduction broke down from ~1e18 rad (garbage, then NaN).
+
+    Exact values at these angles hinge on the last bit of theta (tests/test_math.py checks sincos_
+    itself against mpmath); here exp must give a finite unit quaternion whose vector part lies along phi.
+    """
+    top: float = 100.0 if dtype == torch.float64 else 18.0  # float32: |phi|^2 must not overflow
+    theta: Tensor = 10.0 ** torch.linspace(3.0, top, 64, dtype=torch.float64)
+    axis: Tensor = torch.nn.functional.normalize(torch.randn(64, 3, generator=torch.Generator().manual_seed(5), dtype=torch.float64), dim=-1)
+    xi: Tensor = torch.cat([torch.ones(64, 3, dtype=torch.float64), axis * theta[:, None]], dim=-1).to(dtype)
+    q: Tensor = backends.expm(3, xi.to(device))[:, 3:].cpu().double()
+    assert torch.isfinite(q).all()
+    eps: float = torch.finfo(dtype).eps
+    assert ((q.norm(dim=-1) - 1).abs() <= 4 * eps).all()
+    assert (torch.linalg.cross(q[:, :3], xi[:, 3:].double()).norm(dim=-1) <= 16 * eps * xi[:, 3:].double().norm(dim=-1)).all()

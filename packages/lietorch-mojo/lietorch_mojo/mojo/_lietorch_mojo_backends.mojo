@@ -50,14 +50,15 @@ def _launch_cuda[G: LieGroup](mut rt: GPURuntime, stream: Int, op: Int, n: Int, 
     comptime for o in range(NUM_OPS):
         if op == o:
             _check_tensor_count(o, tensors)
-            comptime if family(o) == UNARY:
-                unary_cuda[G, o](rt, stream, n, tensors)
-            elif family(o) == UNARY_BACKWARD:
-                unary_backward_cuda[G, o](rt, stream, n, tensors)
-            elif family(o) == BINARY:
-                binary_cuda[G, o](rt, stream, n, tensors)
-            else:
-                binary_backward_cuda[G, o](rt, stream, n, tensors)
+            comptime match family(o):
+                case == UNARY:
+                    unary_cuda[G, o](rt, stream, n, tensors)
+                case == UNARY_BACKWARD:
+                    unary_backward_cuda[G, o](rt, stream, n, tensors)
+                case == BINARY:
+                    binary_cuda[G, o](rt, stream, n, tensors)
+                case _:
+                    binary_backward_cuda[G, o](rt, stream, n, tensors)
             return
     raise Error(t"lietorch_mojo: unknown op code {op}")
 
@@ -66,14 +67,15 @@ def _launch_cpu[G: LieGroup](rt: CPURuntime, op: Int, n: Int, tensors: PythonObj
     comptime for o in range(NUM_OPS):
         if op == o:
             _check_tensor_count(o, tensors)
-            comptime if family(o) == UNARY:
-                unary_cpu[G, o](rt, n, tensors)
-            elif family(o) == UNARY_BACKWARD:
-                unary_backward_cpu[G, o](rt, n, tensors)
-            elif family(o) == BINARY:
-                binary_cpu[G, o](rt, n, tensors)
-            else:
-                binary_backward_cpu[G, o](rt, n, tensors)
+            comptime match family(o):
+                case == UNARY:
+                    unary_cpu[G, o](rt, n, tensors)
+                case == UNARY_BACKWARD:
+                    unary_backward_cpu[G, o](rt, n, tensors)
+                case == BINARY:
+                    binary_cpu[G, o](rt, n, tensors)
+                case _:
+                    binary_backward_cpu[G, o](rt, n, tensors)
             return
     raise Error(t"lietorch_mojo: unknown op code {op}")
 
@@ -89,48 +91,47 @@ def _row_widths[G: LieGroup](op: Int) raises -> PythonObject:
     raise Error(t"lietorch_mojo: unknown op code {op}")
 
 
-def _unpack_spec(spec_obj: PythonObject) raises -> Tuple[Int, Int, Bool]:
-    """(op, group id, is_float64) of a spec; raises for groups that are not implemented."""
+def _unpack_spec(spec_obj: PythonObject) raises -> Tuple[Int, Bool]:
+    """(op, is_float64) of a spec; raises for groups that are not implemented."""
     var spec = Int(py=spec_obj)
     var group_id = (spec >> 8) & 0xFF
     if group_id != GROUP_SE3:
         raise Error(t"lietorch_mojo: group id {group_id} is not implemented")
-    return (spec & 0xFF, group_id, ((spec >> 16) & 1) == 1)
+    return (spec & 0xFF, ((spec >> 16) & 1) == 1)
 
 
 def launch_cuda_py(
     runtime: PythonObject, stream_obj: PythonObject, spec_obj: PythonObject, n_obj: PythonObject, tensors: PythonObject
 ) raises -> PythonObject:
-    var op, _, is_f64 = _unpack_spec(spec_obj)
+    var op, is_f64 = _unpack_spec(spec_obj)
     var n = Int(py=n_obj)
     if n > 0:
         var rt = runtime.downcast_value_ptr[GPURuntime]()
         var stream = Int(py=stream_obj)
         if is_f64:
-            _launch_cuda[SE3[DType.float64]](rt[], stream, op, n, tensors)
+            _launch_cuda[SE3[.float64]](rt[], stream, op, n, tensors)
         else:
-            _launch_cuda[SE3[DType.float32]](rt[], stream, op, n, tensors)
+            _launch_cuda[SE3[.float32]](rt[], stream, op, n, tensors)
     return Python.none()
 
 
 def launch_cpu_py(runtime: PythonObject, spec_obj: PythonObject, n_obj: PythonObject, tensors: PythonObject) raises -> PythonObject:
-    var op, _, is_f64 = _unpack_spec(spec_obj)
+    var op, is_f64 = _unpack_spec(spec_obj)
     var n = Int(py=n_obj)
     if n > 0:
         var rt = runtime.downcast_value_ptr[CPURuntime]()
         if is_f64:
-            _launch_cpu[SE3[DType.float64]](rt[], op, n, tensors)
+            _launch_cpu[SE3[.float64]](rt[], op, n, tensors)
         else:
-            _launch_cpu[SE3[DType.float32]](rt[], op, n, tensors)
+            _launch_cpu[SE3[.float32]](rt[], op, n, tensors)
     return Python.none()
 
 
 def row_widths_py(spec_obj: PythonObject) raises -> PythonObject:
-    var op, _, is_f64 = _unpack_spec(spec_obj)
+    var op, is_f64 = _unpack_spec(spec_obj)
     if is_f64:
-        return _row_widths[SE3[DType.float64]](op)
-    return _row_widths[SE3[DType.float32]](op)
-
+        return _row_widths[SE3[.float64]](op)
+    return _row_widths[SE3[.float32]](op)
 
 
 def create_gpu_runtime_py() raises -> PythonObject:

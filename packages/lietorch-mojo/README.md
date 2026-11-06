@@ -17,7 +17,8 @@ module (`expm`, `expm_backward`, `logm`, …, `as_matrix`, `projector`, `Jinv`).
 
 ## Build
 
-One command, from this directory, in an environment with `mojo` (for example
+One command, from this directory, in an environment with Mojo 1.2.0 and
+`max-core` 26.7.0 (GPU host APIs and `layout` live there; for example
 `mast3r-slam-dev`):
 
 ```bash
@@ -45,9 +46,10 @@ always launches on the legacy default stream, so on a non-default stream its
 results can be wrong. Parity tests against lietorch therefore run on the
 default stream. `tests/test_streams.py` stress-tests the ordering.
 
-Preliminary build times on pablo-dl-server (RTX 5090, 32 cores, other jobs
-running): ~12–13.5 s with an empty Mojo cache (`MODULAR_HOME` fresh), ~1.6 s
-when Mojo's compile cache already holds the same source, ~13 s after a
+Preliminary build times with Mojo 1.2.0 on pablo-dl-server (RTX 5090, 32
+cores, load 9-14 from other jobs): 13.4 s with an empty Mojo cache (a fresh
+`MODULAR_HOME`; set it inside `pixi run`, whose activation overrides it),
+1.8 s when the compile cache already holds the same source, 12.4 s after a
 one-line code change (the cache is per module, so any code change rebuilds
 everything).
 
@@ -83,12 +85,29 @@ are in zones where lietorch's own formula loses most of its digits:
   The change moves float64 results by at most lietorch's own error (≤ ~1e-10
   relative).
 
-Separately, `SO3.act` (`cross` included) and the normalising quaternion
-constructor spell out their multiply-adds as explicit FMAs. Left to the
-compiler, FP contraction fused different pairs in different kernels, so the
-same rotation rounded differently in `inv` and `mul` and float32
-`X.inv() * X` kept ulp residuals in 29% of rows; now 0.6% (lietorch's CPU build:
-0.9%).
+## Scalar math
+
+Mojo 1.2.0's `std.math` on an RTX 5090 (sm_120), measured against mpmath over
+~10^6 arguments per function from 1e-30 to 1e100: `sin`/`cos` lower to
+`sin.approx.ftz.f32`/`cos.approx.ftz.f32` for float32 (errors up to 3e12 ulp)
+and do not compile for float64; `sqrt` lowers to `sqrt.approx.ftz.f32` for
+float32. `atan` is a software routine within one ulp on CPU and GPU, so the
+group code calls `std.math.atan`. `lie_math.mojo` keeps only `sqrt_`
+(`llvm.sqrt`, correctly rounded) and `sincos_` (fdlibm kernels; Payne-Hanek
+reduction above 2^20 pi/2 for float64; an error-free five-piece reduction for
+float32 up to 1024, the float64 routine above). Both stay within 0.76 ulp on
+CPU and GPU for every finite argument, so SE3 `exp` is finite and as close to
+the exact result as lietorch for rotation angles up to 1e100.
+
+## FMA
+
+Mojo marks every multiply and add `contract`, so the backend fuses `a + b*c`
+wherever it likes, and its choice changes from kernel to kernel. `SO3.act`
+(`cross` included) and the normalising quaternion constructor therefore spell
+out their multiply-adds as explicit FMAs: with them, `act` and `mul` compute
+`R p + t` bitwise equal on every row; without them, 17.7% of float32 rows
+differ on CPU (Mojo 1.2.0; the CUDA build happened to fuse both alike). `lie_math.mojo` writes its error-free
+transformations so that a fused or unfused product gives the same result.
 
 ## Layout
 
@@ -101,8 +120,8 @@ lietorch_mojo/
   backends.py        lietorch_backends-compatible functions; `_run` is the one Python launch site
   gradcheck.py       port of lietorch gradcheck.py (gradcheck returns (analytical, numerical) like upstream)
   mojo/
-    lie_math.mojo    sin/cos/atan/sqrt that are accurate on CPU and NVIDIA GPU
-    linalg.mojo      fixed-size register matrices (Eigen stand-in)
+    lie_math.mojo    sincos_ and sqrt_, accurate on CPU and NVIDIA GPU (std.math is not, on sm_120)
+    lie_linalg.mojo  fixed-size register matrices (Eigen stand-in)
     lie_group.mojo   the LieGroup trait (dtype, N, K and the group primitives)
     so3.mojo         SO3[dtype], port of so3.h
     se3.mojo         SE3[dtype], port of se3.h
