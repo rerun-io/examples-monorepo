@@ -77,9 +77,43 @@ pixi run -e metrictrail --frozen metrictrail-catalog-layer --runs-root <out seed
 
 The task writes one layer `.rrd` per sequence to a new directory, `<results_root>/catalog/<source>/<run_tag>/`, and
 never overwrites a layer file. With `--catalog-url` it registers the layers on the `dataforge-vslam-lab-<dataset>`
-dataset: `ERROR` where the segment has no such layer yet, `REPLACE` where it has an older run. The layer name is
-`metrictrail` (our port) or `metrictrail_upstream` (unmodified upstream ViPE). The run metrics are recording
-properties in the layer, not sidecar files.
+dataset: `ERROR` where the segment has no such layer yet, `REPLACE` where it has an older run. The run metrics are
+recording properties in the layer, not sidecar files. The layer name is the run source (`/world/runs/<source>`):
+
+| layer | run | colour |
+| --- | --- | --- |
+| `metrictrail` | ours, the shipped path: MoGe-2 `moge-2-vitl-normal` through TensorRT, with surface normals (`--capture-rrd`) | magenta `#E040FB` |
+| `metrictrail_paper` | our torch reproduction of the paper configuration (`moge-2-vitl`, FP32) | violet `#A78BFA` |
+| `metrictrail_upstream` | unmodified upstream ViPE @ ead2e00 on this machine | amber `#F5A623` |
+
+Ground truth is dataforge's `gt` layer (green `#3DDC97` in both layouts). On the shared Spark catalog
+(`rerun+http://dgx-spark:51235`):
+
+| dataset | segments | MetricTrail layers |
+| --- | --- | --- |
+| `dataforge-vslam-lab-rgbdtum` | 9 | `metrictrail`, `metrictrail_paper`, `metrictrail_upstream` |
+| `dataforge-vslam-lab-7scenes` | 18 | `metrictrail_paper`, `metrictrail_upstream` |
+| `dataforge-vslam-lab-kitti` | 11 | `metrictrail_paper`, `metrictrail_upstream` |
+| `dataforge-lamaria` | `lamaria__R_01_easy` only | `metrictrail_paper` |
+
+The shipped path has run on TUM only, so 7-Scenes, KITTI and LaMAria hold no `metrictrail` layer.
+
+### Layouts
+
+`metrictrail.catalog.blueprint` owns two layouts on dataforge's catalog-blueprint hook (`MetricTrailVslamLab`
+and `MetricTrailLamaria` override `catalog_blueprints`; dataforge's `republish_blueprints` publishes them):
+
+- `default`, the dataset default: ground truth and ours (`metrictrail`). Rig and Follow 3D views, rgb, the sensor
+  depth, our keyframe depth and, where the layer has them, our keyframe normals. The 3D views hide every other run.
+  Where the dataset has no `metrictrail` layer, its pane says "not run on this dataset" and the views show ground
+  truth only.
+- `comparison`, a development and validation view: ground truth, `metrictrail`, `metrictrail_paper` and
+  `metrictrail_upstream` in the colours above, with one keyframe-depth pane per run.
+
+Publish one with `--publish-blueprint default|comparison` together with `--catalog-url` (files go to
+`<blueprint_root>/blueprints/`). The flag is off by default. Do not run `dataforge-publish-blueprints` on these
+datasets: it publishes dataforge's generic layout, which shows every run in its own palette. Take the Spark catalog
+snapshot after every publish.
 
 ## Results against the paper
 
@@ -138,5 +172,5 @@ cache (a cold download was not measured):
   few of those packages.
 - **`metrictrail-eval`'s default `--vslamlab-dir`** is a scratch path (`/tmp/metrictrail-scratch/vslamlab/VSLAM-LAB`).
   Pass your VSLAM-LAB checkout.
-- **Catalog.** The layers on the shared Spark catalog (`rerun+http://dgx-spark:51235`, datasets
-  `dataforge-vslam-lab-{rgbdtum,kitti,7scenes}` and `dataforge-lamaria`) are from the reference path.
+- **Catalog.** The shipped path (`metrictrail`) is on the 9 TUM segments only; 7-Scenes, KITTI and LaMAria carry the
+  torch reproduction (`metrictrail_paper`) and, except LaMAria, upstream ViPE.
