@@ -57,6 +57,14 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 # datafusion stays on PyPI (below).
 pandas = ">=2"
 
+# The workspace's one Pillow cap. gradio (PyPI) <= 6.31.0 requires pillow<13: Pillow 13 broke gradio's
+# 32-bit integer PNG output. Fixed on gradio main (gradio-app/gradio#14034, 2026-11-02, pillow<14) but
+# unreleased as of 2026-11-06. Remove this cap and bump gradio with the next 6.x release; Pillow 13 also
+# carries the fix for CVE-2026-112403 (gradio-app/gradio#13999). Gradio lives only in `common`, so the
+# cap does too; a constraint adds no package.
+[feature.common.constraints]
+pillow = "<13"
+
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
 xorg-xorgproto = "*"
@@ -69,9 +77,12 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# pin-bump: hold — gradio-rerun pins rerun-sdk exactly; the conda rerun-sdk in
-# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping.
-gradio = "==6.13.0"                                        # pin-bump: hold
+# pin-bump: hold — gradio-rerun pins rerun-sdk exactly (0.42.0 needs rerun-sdk==0.42.0 and gradio>=6),
+# so it moves only together with the rerun-sdk pins; the conda rerun-sdk in
+# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping. gradio is exact so
+# that each bump is a deliberate change: re-check that a gradio-rerun app still renders. Every gradio
+# release so far caps pillow<13, see [feature.common.constraints].
+gradio = "==6.31.0"                                        # pin-bump: hold
 gradio-rerun = "==0.42.0"                                  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
@@ -1105,7 +1116,6 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.posekit-egohand.dependencies]
 hydra-core = "*"
-pillow = "<13"
 python-dateutil = "<3"
 anyio = "<4.15"
 
@@ -1155,8 +1165,7 @@ warp-lang = "==1.11.*"
 platforms = ["linux-64"]
 
 [feature.posekit-body.dependencies]
-# The posekit-egohand holds: Gradio needs Pillow <13, s3fs needs python-dateutil <3, AnyIO <4.15 keeps typing_extensions.
-pillow = "<13"
+# The posekit-egohand holds: s3fs needs python-dateutil <3, AnyIO <4.15 keeps typing_extensions.
 python-dateutil = "<3"
 anyio = "<4.15"
 # SAM2-streaming (the posekit feature) passes version_base="1.2", which Hydra 1.4 rejects; this solve picked 1.4.0rc1.
@@ -1885,7 +1894,6 @@ faiss = { version = "*", build = "*openblas*" }
 scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"
-pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
 
 [feature.mast3r-slam.target.linux-64.dependencies]
 mast3r-src = { path = "recipes/mast3r-src" }
@@ -2332,7 +2340,6 @@ python = "3.12.*"
 # with gradio). mast3r-slam's Mojo backend build gets mojo and max-core from this feature too.
 mojo = { version = "==1.2.0", channel = "https://conda.modular.com/max/" }
 max-core = { version = "==26.7.0", channel = "https://conda.modular.com/max/" }
-pillow = "<13"  # gradio (PyPI) caps pillow <13; consolidated into feature.common by the workspace/consistency branch
 
 [feature.lietorch-mojo.pypi-dependencies]
 lietorch-mojo = { path = "packages/lietorch-mojo", editable = true }
@@ -2492,7 +2499,6 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-evals.dependencies]
 python = "3.12.*"
-pillow = "<13"  # gradio 6.13 (held) needs pillow<13; the solve would otherwise pick 13
 pyyaml = "*"
 pyarrow = ">=20.0.0,<21"
 tqdm = "*"
