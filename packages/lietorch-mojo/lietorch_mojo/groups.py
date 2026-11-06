@@ -13,7 +13,7 @@ Deviations from upstream (both are upstream crashes):
 """
 
 from collections.abc import Sequence
-from typing import ClassVar, Self, TypeAlias
+from typing import ClassVar, Self, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -339,13 +339,16 @@ class Sim3(LieGroup):
         super().__init__(data)
 
 
-def cat(group_list: Sequence[LieGroup], dim: Dim) -> LieGroup:
+G = TypeVar("G", bound=LieGroup)
+
+
+def cat(group_list: Sequence[G], dim: Dim) -> G:
     """Concatenate groups along dimension"""
     data: Tensor = torch.cat([X.data for X in group_list], dim=dim)
     return group_list[0].__class__(data)
 
 
-def stack(group_list: Sequence[LieGroup], dim: Dim) -> LieGroup:
+def stack(group_list: Sequence[G], dim: Dim) -> G:
     """Concatenate groups along dimension"""
     data: Tensor = torch.stack([X.data for X in group_list], dim=dim)
     return group_list[0].__class__(data)
