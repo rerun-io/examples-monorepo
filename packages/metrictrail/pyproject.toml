@@ -1,0 +1,45 @@
+[project]
+name = "metrictrail"
+version = "0.1.0"
+description = "NVIDIA MetricTrail (ViPE) in the monorepo: benchmark presets, kernel checks, VSLAM-LAB evaluation and Rerun catalog layers"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+# Static metadata only. ViPE + MetricTrail and their CUDA kernels come from the `recipes/vipe-src` conda package;
+# torch comes from the `cuda` feature; lietorch from the `lietorch-mojo` feature (pixi.toml [environments]); monopriors and
+# trtkit (metrictrail.moge2) from the `metrictrail` feature's editable path packages. dataforge (the VSLAM-LAB dataset
+# whose catalog-blueprint hook metrictrail.catalog.blueprint overrides) is a workspace package, pinned below.
+dependencies = ["dataforge"]
+
+[tool.uv.sources]
+dataforge = { path = "../dataforge", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["metrictrail"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e metrictrail-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e metrictrail-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
+# The python-conventions skill requires typing.TypeAlias (PEP 695 `type` is banned); beartype flags it as deprecated.
+filterwarnings = ["ignore::beartype.roar.BeartypeDecorHintPep613DeprecationWarning"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["metrictrail", "tools", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*"]
+min_confidence = 80
+# Framework-used names: pytest's module marker.
+ignore_names = ["pytestmark"]

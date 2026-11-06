@@ -1,0 +1,127 @@
+diff --git a/csrc/bind.cpp b/csrc/bind.cpp
+index 40508aa..42f4bb2 100644
+--- a/csrc/bind.cpp
++++ b/csrc/bind.cpp
+@@ -22,7 +22,6 @@ void pybind_grounding_dino_ext(py::module &m);
+ void pybind_utils_ext(py::module &m);
+ void pybind_slam_ext(py::module &m);
+ void pybind_scatter_ext(py::module &m);
+-void pybind_lietorch_ext(py::module &m);
+ void pybind_corr_ext(py::module &m);
+ 
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+@@ -41,9 +40,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+     py::module m_scatter = m.def_submodule("scatter_ext");
+     pybind_scatter_ext(m_scatter);
+ 
+-    py::module m_lietorch = m.def_submodule("lietorch_ext");
+-    pybind_lietorch_ext(m_lietorch);
+-
+     py::module m_corr = m.def_submodule("corr_ext");
+     pybind_corr_ext(m_corr);
+ }
+diff --git a/vipe/ext/__init__.py b/vipe/ext/__init__.py
+index 3337834..ec0c2ab 100644
+--- a/vipe/ext/__init__.py
++++ b/vipe/ext/__init__.py
+@@ -41,5 +41,4 @@ grounding_dino_ext = _C.grounding_dino_ext
+ utils_ext = _C.utils_ext
+ slam_ext = _C.slam_ext
+ scatter_ext = _C.scatter_ext
+-lietorch_ext = _C.lietorch_ext
+ corr_ext = _C.corr_ext
+diff --git a/vipe/ext/lietorch/__init__.py b/vipe/ext/lietorch/__init__.py
+index 5aa0f43..d50d603 100644
+--- a/vipe/ext/lietorch/__init__.py
++++ b/vipe/ext/lietorch/__init__.py
+@@ -2,5 +2,6 @@
+ # https://github.com/princeton-vl/lietorch
+ # Licensed under the BSD-3 License. See THIRD_PARTY_LICENSES.md for details.
+ 
+-__all__ = ["groups"]
+-from .groups import SE3, SO3, LieGroupParameter, RxSO3, Sim3, cat, stack
++# [vipe-src] lietorch comes from the external lietorch_mojo package (drop-in for lietorch @ VSLAM-LAB 3e2695dd).
++__all__ = ["LieGroupParameter", "SO3", "RxSO3", "SE3", "Sim3", "cat", "stack"]
++from lietorch_mojo import SE3, SO3, LieGroupParameter, RxSO3, Sim3, cat, stack
+diff --git a/vipe/metrictrail/build.py b/vipe/metrictrail/build.py
+index 3657638..559d12b 100644
+--- a/vipe/metrictrail/build.py
++++ b/vipe/metrictrail/build.py
+@@ -18,9 +18,9 @@ tree                   package of the compiled modules                 built
+ ``dpvo_stereo``        ``vipe.metrictrail.dpvo_stereo_ext``             only with ``--stereo``
+ =====================  ==============================================  ======================
+ 
+-Each package holds ``cuda_corr``, ``cuda_ba`` and ``lietorch_backends`` (DPVO's
+-module names; the sources keep ``PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)``, so
+-they must stay three modules). Fully qualified, they cannot clash with a
++Each package holds ``cuda_corr`` and ``cuda_ba`` (DPVO's module names; the sources keep
++``PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)``, so they must stay separate modules;
++[vipe-src] DPVO's ``lietorch_backends`` is not built, lietorch_mojo replaces it). Fully qualified, they cannot clash with a
+ separately installed DPVO or with each other.
+ 
+ Eigen: ViPE's own build helper (``vipe/ext/specs.py``, ``_eigen_include_flags``)
+@@ -84,12 +84,6 @@ EXTENSIONS: tuple[ExtensionSpec, ...] = (
+         ("fastba/ba.cpp", "fastba/ba_cuda.cu", "fastba/block_e.cu"),
+         needs_eigen=True,
+     ),
+-    ExtensionSpec(
+-        "lietorch_backends",
+-        ("lietorch/src/lietorch.cpp", "lietorch/src/lietorch_gpu.cu", "lietorch/src/lietorch_cpu.cpp"),
+-        include_dirs=("lietorch/include",),
+-        needs_eigen=True,
+-    ),
+ )
+ EXTENSION_NAMES = tuple(spec.name for spec in EXTENSIONS)
+ 
+diff --git a/vipe/metrictrail/dpvo/lietorch/__init__.py b/vipe/metrictrail/dpvo/lietorch/__init__.py
+index a5c9a48..6a959ef 100644
+--- a/vipe/metrictrail/dpvo/lietorch/__init__.py
++++ b/vipe/metrictrail/dpvo/lietorch/__init__.py
+@@ -4,5 +4,6 @@
+ # Source: princeton-vl/lietorch, as vendored by princeton-vl/DPVO.
+ # See the component LICENSE and THIRD_PARTY_LICENSES.md.
+ 
+-__all__ = ['groups']
+-from .groups import LieGroupParameter, SO3, RxSO3, SE3, Sim3, cat, stack
++# [vipe-src] lietorch comes from the external lietorch_mojo package (drop-in for lietorch @ VSLAM-LAB 3e2695dd).
++__all__ = ["LieGroupParameter", "SO3", "RxSO3", "SE3", "Sim3", "cat", "stack"]
++from lietorch_mojo import LieGroupParameter, SO3, RxSO3, SE3, Sim3, cat, stack
+diff --git a/vipe/metrictrail/dpvo_ext/__init__.py b/vipe/metrictrail/dpvo_ext/__init__.py
+index f8dd77e..c4ced2a 100644
+--- a/vipe/metrictrail/dpvo_ext/__init__.py
++++ b/vipe/metrictrail/dpvo_ext/__init__.py
+@@ -1,7 +1,7 @@
+ # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ # SPDX-License-Identifier: Apache-2.0
+ 
+-"""DPVO's CUDA extensions for MetricTrail: ``cuda_corr``, ``cuda_ba``, ``lietorch_backends``.
++"""DPVO's CUDA extensions for MetricTrail: ``cuda_corr``, ``cuda_ba``.
+ 
+ Built from ``vipe/metrictrail/csrc/dpvo`` by ``python -m vipe.metrictrail.build``
+ into this package (never shipped in the repository). The vendored DPVO imports
+diff --git a/vipe/metrictrail/dpvo_stereo_ext/__init__.py b/vipe/metrictrail/dpvo_stereo_ext/__init__.py
+index f31e4ad..76e7962 100644
+--- a/vipe/metrictrail/dpvo_stereo_ext/__init__.py
++++ b/vipe/metrictrail/dpvo_stereo_ext/__init__.py
+@@ -1,7 +1,7 @@
+ # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ # SPDX-License-Identifier: Apache-2.0
+ 
+-"""Optional stereo DPVO CUDA extensions (``cuda_corr``, ``cuda_ba``, ``lietorch_backends``).
++"""Optional stereo DPVO CUDA extensions (``cuda_corr``, ``cuda_ba``).
+ 
+ Built from ``vipe/metrictrail/csrc/dpvo_stereo`` only on request
+ (``python -m vipe.metrictrail.build --stereo``). The stereo tree keeps its own
+diff --git a/vipe/metrictrail/stereo/dpvo_stereo/lietorch/__init__.py b/vipe/metrictrail/stereo/dpvo_stereo/lietorch/__init__.py
+index a5c9a48..6a959ef 100644
+--- a/vipe/metrictrail/stereo/dpvo_stereo/lietorch/__init__.py
++++ b/vipe/metrictrail/stereo/dpvo_stereo/lietorch/__init__.py
+@@ -4,5 +4,6 @@
+ # Source: princeton-vl/lietorch, as vendored by princeton-vl/DPVO.
+ # See the component LICENSE and THIRD_PARTY_LICENSES.md.
+ 
+-__all__ = ['groups']
+-from .groups import LieGroupParameter, SO3, RxSO3, SE3, Sim3, cat, stack
++# [vipe-src] lietorch comes from the external lietorch_mojo package (drop-in for lietorch @ VSLAM-LAB 3e2695dd).
++__all__ = ["LieGroupParameter", "SO3", "RxSO3", "SE3", "Sim3", "cat", "stack"]
++from lietorch_mojo import LieGroupParameter, SO3, RxSO3, SE3, Sim3, cat, stack

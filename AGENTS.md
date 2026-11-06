@@ -86,6 +86,8 @@ The workspace `platforms` list defines the full platform vocabulary: the plain `
 
 **Upstream source is a recipe in `recipes/<upstream>-src/`, never a copy in `packages/`** (rules, table and bump
 steps: `recipes/README.md`). `packages/` keeps only our code.
+A recipe patch only redirects a dependency, fixes the build, or adds a hook upstream lacks; new behaviour and real logic
+go in our package (`recipes/README.md`, "Patch or package").
 
 The `recipes/` (`asmk-src`, `brush-src`, `hexels-src`, `mast3r-src`) and our `dpretrieval` and `slam-rs` are built by
 the `pixi-build-rattler-build` backend from a `recipe.yaml` beside a `[package]` manifest, and consumed as source

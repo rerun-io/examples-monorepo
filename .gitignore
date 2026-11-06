@@ -98,6 +98,7 @@ cython_debug/
 
 # Package top-level data directories (downloaded assets, not Python package data/)
 packages/monoprior/data/
+packages/metrictrail/data/
 packages/simplecv/data/
 packages/mvs/data/
 packages/gauss-surf/data/

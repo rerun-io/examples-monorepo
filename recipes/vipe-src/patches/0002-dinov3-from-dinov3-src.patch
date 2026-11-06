@@ -1,0 +1,45 @@
+diff --git a/vipe/metrictrail/dino_fusion.py b/vipe/metrictrail/dino_fusion.py
+index d5b132d..3dc51ec 100644
+--- a/vipe/metrictrail/dino_fusion.py
++++ b/vipe/metrictrail/dino_fusion.py
+@@ -3,9 +3,9 @@
+ 
+ """Frozen DINOv3 features fused into DPVO's patchifier (DINO-DPVO).
+ 
+-The frozen DINOv3 ViT-S/16 is ViPE's in-tree DINOv3
+-(``vipe.priors.depth.dap.dino.make_dinov3_backbone("vits")``), not a DINOv3 hub
+-checkout. Its ``get_intermediate_layers(x, n=1, reshape=False,
++[vipe-src] The frozen DINOv3 ViT-S/16 is the hub model of the ``dinov3`` package
++(facebookresearch/dinov3, the dinov3-src recipe), not ViPE's in-tree copy
++(``vipe.priors.depth.dap.dino``, kept for DAP). Its ``get_intermediate_layers(x, n=1, reshape=False,
+ norm=True)[0]`` equals the hub model's ``forward_features(x)["x_norm_patchtokens"]``
+ bit for bit with the same weights (checked on CPU, float32). The fusion
+ (residual concat/1x1 fusion of matching and context features) is built on the
+@@ -100,18 +100,21 @@ class DINOv3PatchTokens(nn.Module):
+ 
+ 
+ def make_vipe_dinov3_backbone(model_name: str) -> DINOv3PatchTokens:
+-    """ViPE's in-tree DINOv3 for the hub model ``model_name`` (randomly initialised; load weights next)."""
++    """The hub model ``model_name`` from the ``dinov3`` package (randomly initialised; load weights next).
+ 
+-    from vipe.priors.depth.dap.dino import make_dinov3_backbone
++    [vipe-src] facebookresearch/dinov3 (the dinov3-src recipe) instead of ViPE's in-tree copy: same
++    state_dict, bit-identical patch tokens (CPU/CUDA, fp32/bf16/fp16).
++    """
++
++    from dinov3.hub import backbones
+ 
+-    name = VIPE_DINOV3_BACKBONES.get(model_name)
+-    if name is None:
++    if model_name not in VIPE_DINOV3_BACKBONES:
+         raise ValueError(f"no ViPE DINOv3 backbone for {model_name!r}; supported: {sorted(VIPE_DINOV3_BACKBONES)}")
+-    return DINOv3PatchTokens(make_dinov3_backbone(name))
++    return DINOv3PatchTokens(getattr(backbones, model_name)(pretrained=False))
+ 
+ 
+ class FrozenDinoV3(nn.Module):
+-    """Frozen, dense DINOv3 feature extractor on ViPE's in-tree DINOv3.
++    """Frozen, dense DINOv3 feature extractor on the ``dinov3`` package's DINOv3.
+ 
+     DPVO's training readers expose BGR images while the official DINOv3
+     LVD-1689M weights use RGB and the ImageNet evaluation normalization.  The

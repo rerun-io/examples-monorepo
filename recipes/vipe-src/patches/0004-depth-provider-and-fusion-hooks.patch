@@ -1,0 +1,62 @@
+diff --git a/vipe/metrictrail/depth.py b/vipe/metrictrail/depth.py
+--- a/vipe/metrictrail/depth.py
++++ b/vipe/metrictrail/depth.py
+@@ -25,7 +25,7 @@
+ 
+ import math
+ from dataclasses import dataclass
+-from typing import Any, Mapping, Protocol, runtime_checkable
++from typing import Any, Callable, Mapping, Protocol, runtime_checkable
+ 
+ import numpy as np
+ import torch
+@@ -48,6 +48,11 @@
+     "apply_mask": False,
+ }
+ 
++#: [vipe-src] Providers registered by name from outside this tree, tried before the names below:
++#: ``factory(use_fp16=..., model_cache=...)`` returns the provider (MetricTrail's monorepo package registers
++#: its MoGe-2 normal/TensorRT provider here).
++DEPTH_PROVIDERS: dict[str, Callable[..., DepthEstimationModel]] = {}
++
+ METRIC_DEPTH_MIN_M = 0.2
+ METRIC_DEPTH_MAX_M = 500.0
+ 
+@@ -248,6 +253,8 @@
+     ``make_depth_model(name)``, cached under ViPE's own ``depth/<name>`` key.
+     """
+ 
++    if name in DEPTH_PROVIDERS:
++        return DEPTH_PROVIDERS[name](use_fp16=use_fp16, model_cache=model_cache)
+     if is_moge2_name(name):
+         variant = _moge2_variant(name)
+         if model_cache is None:
+diff --git a/vipe/metrictrail/pointcloud.py b/vipe/metrictrail/pointcloud.py
+--- a/vipe/metrictrail/pointcloud.py
++++ b/vipe/metrictrail/pointcloud.py
+@@ -381,6 +381,7 @@
+     *,
+     world_frame: bool = False,
+     progress: ProgressCallback | None = None,
++    on_points: Callable[[int, np.ndarray, np.ndarray, np.ndarray], None] | None = None,
+ ) -> FusedCloud:
+     """Fuse per-frame metric depth into one coloured, voxel-averaged cloud.
+ 
+@@ -390,6 +391,8 @@
+     uint8 on the depth raster. The points are returned in the z-up frame (the
+     fused cloud rotated so the mean camera up is +Z, as the original
+     visualization wrote it), or in the frame of ``c2w`` with ``world_frame``.
++    [vipe-src] ``on_points(index, rows, cols, world)``, when given, sees each frame's kept pixels and their
++    float32 world points just before they enter the voxel accumulator (per-point attributes fused outside).
+     """
+ 
+     s = settings
+@@ -446,6 +449,8 @@
+             continue
+ 
+         world = local @ pose[:3, :3].T + pose[:3, 3]
++        if on_points is not None:
++            on_points(int(index), rows, cols, world.astype(np.float32))
+         accumulator.add(world.astype(np.float32), colors.astype(np.uint8))
+         sampled += local.shape[0]
+         rejected += int(raw_count - local.shape[0])
