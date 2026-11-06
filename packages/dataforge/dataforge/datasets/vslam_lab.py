@@ -23,7 +23,7 @@ compares 1:1 with the upstream file.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
@@ -33,6 +33,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.imu_calibration import ImuCalibration
 
@@ -69,7 +70,7 @@ from dataforge.logging_toolkit import (
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, require_av1_nvenc, resolve_ffmpeg, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES, WorldUpAxis
 
-BenchmarkChoice: TypeAlias = Literal["rgbdtum", "euroc"]
+BenchmarkChoice: TypeAlias = Literal["rgbdtum", "euroc", "7scenes", "kitti"]
 """``--benchmark``: which VSLAM-LAB dataset, and which catalog dataset."""
 RIG: int = 0
 """A VSLAM-LAB sequence is one rig."""
@@ -82,6 +83,66 @@ DEPTH_FRAMES_PER_CHUNK: int = 4
 """Depth frames per sent chunk: about 1 MB of PNG, the chunk size Rerun's own batcher chose for these frames."""
 PNG_SIGNATURE: bytes = b"\x89PNG\r\n\x1a\n"
 """First eight bytes of every PNG file."""
+GT_PATH_COLOR: tuple[int, int, int] = (61, 220, 151)
+"""Ground truth's trajectory and trail colour in both layouts: green, the reference every prediction reads against."""
+PREDICTION_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (255, 127, 14),
+    (148, 103, 189),
+    (23, 190, 207),
+    (227, 119, 194),
+    (31, 119, 180),
+    (214, 39, 40),
+    (188, 189, 34),
+    (140, 86, 75),
+)
+"""Prediction layers' path colours, taken in sorted source order (cycling): Tableau 10 without its green, which is
+ground truth's, and its grey."""
+DEPTH_ARCHETYPES: frozenset[str] = frozenset({"rerun.archetypes.DepthImage", "rerun.archetypes.EncodedDepthImage"})
+"""A prediction's entities that get a depth pane, and that the overview and the card exclude: a 3D view back-projects them."""
+IMAGE_ARCHETYPES: frozenset[str] = frozenset({"rerun.archetypes.Image", "rerun.archetypes.EncodedImage"})
+"""A prediction's other image entities (normals, say), each shown in a pane of its own."""
+
+
+@dataclass(frozen=True, slots=True)
+class Prediction:
+    """One prediction layer on the segments: a run source under ``/world/runs`` other than ground truth."""
+
+    source: str
+    """The run source, ``/world/runs/<source>``."""
+    depth: tuple[str, ...] = ()
+    """Its depth image entities."""
+    images: tuple[str, ...] = ()
+    """Its other image entities."""
+
+
+def find_predictions(columns: Iterable[tuple[str, str | None]]) -> tuple[Prediction, ...]:
+    """Every prediction layer a dataset schema holds, sorted by source, from its (entity path, archetype) columns.
+
+    Found by entity alone: a run source is a prediction whatever pipeline wrote it, and its panes come from the image
+    archetypes it logs, so a new pipeline's layer shows up in the default layout with no change here.
+    """
+    prefix: str = schema.run_path("")
+    depth: dict[str, set[str]] = {}
+    images: dict[str, set[str]] = {}
+    for entity, archetype in columns:
+        if not entity.startswith(prefix):
+            continue
+        source: str = entity.removeprefix(prefix).split("/", 1)[0]
+        if source == schema.GT_RUN_SOURCE:
+            continue
+        depth.setdefault(source, set())
+        images.setdefault(source, set())
+        if archetype in DEPTH_ARCHETYPES:
+            depth[source].add(entity)
+        elif archetype in IMAGE_ARCHETYPES:
+            images[source].add(entity)
+    return tuple(Prediction(source, tuple(sorted(depth[source])), tuple(sorted(images[source]))) for source in sorted(depth))
+
+
+def prediction_colors(predictions: Sequence[Prediction]) -> dict[str, tuple[int, int, int]]:
+    """Ground truth green, then ``PREDICTION_PALETTE`` in the predictions' order."""
+    palette: int = len(PREDICTION_PALETTE)
+    return {schema.GT_RUN_SOURCE: GT_PATH_COLOR} | {prediction.source: PREDICTION_PALETTE[index % palette] for index, prediction in enumerate(predictions)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +213,31 @@ BENCHMARKS: dict[BenchmarkChoice, Benchmark] = {
             source="state_groundtruth_estimate0 (Vicon / Leica MS50, world_T_imu0)",
             zip_member=EUROC_GT_MEMBER,
         ),
+    ),
+    "7scenes": Benchmark(
+        directory="7SCENES",
+        label="kinect",
+        num_cameras=1,
+        depth_cameras=(0,),
+        has_imu=False,
+        # Measured over all eighteen sequences by the rgbdtum rule: the camera's image-up averages -y in the
+        # KinectFusion world (0.81..0.99 along -y per sequence, mean (-0.007, -0.914, 0.042)).
+        world_up="-y",
+        # The body is the RGB camera itself (T_BS identity): it looks along +z, image-up is -y.
+        follow=FollowFrame(forward=(0.0, 0.0, 1.0), up=(0.0, -1.0, 0.0)),
+        gt=GroundTruth(file="groundtruth.csv", read=read_poses, source="KinectFusion camera poses (7-Scenes pose.txt)"),
+    ),
+    "kitti": Benchmark(
+        directory="KITTI",
+        label="stereo",
+        num_cameras=2,
+        depth_cameras=(),
+        has_imu=False,
+        # Measured over sequences 00..10: image-up of cam0 averages -y (0.996..1.0 of unit length).
+        world_up="-y",
+        # The body is cam0 (T_BS identity): it looks along +z, image-up is -y.
+        follow=FollowFrame(forward=(0.0, 0.0, 1.0), up=(0.0, -1.0, 0.0)),
+        gt=GroundTruth(file="groundtruth.csv", read=read_poses, source="KITTI odometry poses/NN.txt (cam0)"),
     ),
 }
 """Every benchmark this converter knows; a new one is one entry once its world up is measured."""
@@ -412,20 +498,68 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
         )
 
     def default_blueprint(self) -> rrb.Blueprint:
-        """Benchmark-wide layout: the rig in 3D beside every camera (and its depth), over the IMU plots."""
+        """The layout embedded at convert: base and gt only, since no prediction layer exists yet."""
+        return self.segment_blueprint(())
+
+    def table_blueprint(self) -> rrb.Blueprint:
+        """The preview card embedded at convert: base and gt only."""
+        return self.card_blueprint(())
+
+    def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
+        """Both layouts with every prediction layer the catalog holds (``find_predictions`` over its schema).
+
+        The hook for a consumer that owns its layout: subclass and override this (``segment_blueprint`` and
+        ``card_blueprint`` take a legend of its own), then publish with ``apis.register.republish_blueprints``.
+        ``dataforge-register`` and ``dataforge-publish-blueprints`` publish this generic one.
+        """
+        found: tuple[Prediction, ...] = find_predictions((column.entity_path, column.archetype) for column in entry.schema().component_columns())
+        return self.segment_blueprint(found), self.card_blueprint(found)
+
+    def segment_blueprint(self, predictions: Sequence[Prediction], path_colors: Mapping[str, tuple[int, int, int]] | None = None) -> rrb.Blueprint:
+        """The rig in 3D beside every camera (and its depth) and every prediction's images, over the IMU plots.
+
+        Args:
+            predictions: Prediction layers whose paths are coloured and whose images get panes.
+            path_colors: Run source -> path colour; ``prediction_colors(predictions)`` when ``None``.
+
+        Returns:
+            The segment layout.
+        """
         panes: list[rrb.Spatial2DView] = []
         for index in range(self.benchmark.num_cameras):
             panes.append(blueprints.camera_view(f"rgb_{index}", RIG, index, contents=[schema.video_path(RIG, index)]))
             if index in self.benchmark.depth_cameras:
                 panes.append(blueprints.camera_view(f"depth_{index}", RIG, index, contents=[schema.depth_path(RIG, index)]))
+        for prediction in predictions:
+            for entity in (*prediction.depth, *prediction.images):
+                parent, name = entity.rsplit("/", 1)
+                panes.append(rrb.Spatial2DView(name=f"{prediction.source}: {name}", origin=parent, contents=[entity]))
         plots: list[rrb.TimeSeriesView] = blueprints.imu_plots(RIG, 0) if self.benchmark.has_imu else []
         follow: FollowFrame = self.benchmark.follow
         return blueprints.rig_blueprint(
-            panes, rig=RIG, run_source=schema.GT_RUN_SOURCE, eye_controls=blueprints.follow_eye_controls(follow.forward, follow.up), plots=plots
+            panes,
+            rig=RIG,
+            run_source=schema.GT_RUN_SOURCE,
+            eye_controls=blueprints.follow_eye_controls(follow.forward, follow.up),
+            plots=plots,
+            extra_run_sources=tuple(prediction.source for prediction in predictions),
+            overview_exclude=[
+                *(schema.depth_path(RIG, index) for index in self.benchmark.depth_cameras),
+                *(entity for prediction in predictions for entity in prediction.depth),
+            ],
+            path_colors=prediction_colors(predictions) if path_colors is None else path_colors,
         )
 
-    def table_blueprint(self) -> rrb.Blueprint:
-        """Preview card: the rig with no video or depth beside ``rgb_0``."""
+    def card_blueprint(self, predictions: Sequence[Prediction], path_colors: Mapping[str, tuple[int, int, int]] | None = None) -> rrb.Blueprint:
+        """Preview card: the rig with no video, depth or prediction image beside ``rgb_0``.
+
+        Args:
+            predictions: Prediction layers whose paths are coloured and whose images are excluded.
+            path_colors: Run source -> path colour; ``prediction_colors(predictions)`` when ``None``.
+
+        Returns:
+            The segment-table layout.
+        """
         follow: FollowFrame = self.benchmark.follow
         return blueprints.table_blueprint(
             self.benchmark.num_cameras,
@@ -434,6 +568,8 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             eye_controls=blueprints.follow_eye_controls(follow.forward, follow.up),
             front_pane=blueprints.camera_view("rgb_0", RIG, 0, contents=[schema.video_path(RIG, 0)]),
             depth_cameras=self.benchmark.depth_cameras,
+            exclude=[entity for prediction in predictions for entity in (*prediction.depth, *prediction.images)],
+            path_colors=prediction_colors(predictions) if path_colors is None else path_colors,
         )
 
     def table_fields(self) -> writing.TableFields:

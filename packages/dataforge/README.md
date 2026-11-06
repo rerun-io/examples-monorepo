@@ -349,6 +349,8 @@ dataset, one per benchmark because each has its own sensor layout:
 | --- | --- | --- | --- | --- |
 | `rgbdtum` | `RGBDTUM` | `vslam-lab-rgbdtum` | RGB 640×480 @ 30 Hz + registered depth (`depth_factor` 5000) | motion capture, the camera's optical centre |
 | `euroc` | `EUROC` | `vslam-lab-euroc` | stereo gray 752×480 @ 20 Hz + 200 Hz IMU | `state_groundtruth_estimate0`, world_T_imu0 at 200 Hz |
+| `7scenes` | `7SCENES` | `vslam-lab-7scenes` | Kinect RGB + registered depth | KinectFusion camera poses (`pose.txt`) |
+| `kitti` | `KITTI` | `vslam-lab-kitti` | stereo pair, no IMU | odometry `poses/NN.txt`, cam0 |
 
 A further benchmark is one `BENCHMARKS` entry: its camera, depth and IMU
 counts, its ground truth, and the two claims its files do not make, the world
@@ -387,6 +389,15 @@ place, the only copy there is: no layer can be rebuilt from a stale one. Delete
 the frames (and EuRoC's zips, after `download`) once base is published; keep
 those small files. `convert` reads and checks them before it writes any layer, so
 a refused sequence leaves the published layers as they were, even under `--force`.
+
+Other pipelines register their prediction layers on these segments: any run
+source under `/world/runs/` other than `gt`. `dataforge-register` and
+`dataforge-publish-blueprints` read the catalog's schema and lay out what it
+holds: each prediction's path in a palette colour, taken in name order (`gt`
+stays green), and one pane per depth or image entity a prediction logs. A
+consumer that wants its own legend or layout subclasses `VslamLabDataset` and
+overrides `catalog_blueprints` (`segment_blueprint` and `card_blueprint` take a
+`path_colors` legend).
 
 `video_time` carries the benchmark's own nanosecond stamps, **unshifted**
 (Unix epoch on both), so a trajectory read back from the catalog lines up

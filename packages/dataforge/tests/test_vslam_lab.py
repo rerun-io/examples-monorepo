@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 import pyarrow as pa
 import pytest
+import rerun as rr
+import rerun.blueprint as rrb
 import rerun.chunk as rrc
 from conftest import column_rows, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64, UInt8, UInt16
@@ -24,7 +26,16 @@ from test_vslam_lab_source import EUROC_CALIBRATION, TUM_CALIBRATION  # pyrefly:
 
 from dataforge import paths, schema, writing
 from dataforge.datasets import dataset_defaults
-from dataforge.datasets.vslam_lab import BENCHMARKS, VslamLabConfig, VslamLabDataset, log_depth
+from dataforge.datasets.vslam_lab import (
+    BENCHMARKS,
+    GT_PATH_COLOR,
+    PREDICTION_PALETTE,
+    Prediction,
+    VslamLabConfig,
+    VslamLabDataset,
+    find_predictions,
+    log_depth,
+)
 from dataforge.datasets.vslam_lab_source import read_frame_index
 from dataforge.identity import SequenceIdentity
 
@@ -372,3 +383,66 @@ def test_the_real_freiburg1_xyz_converts_every_frame(tmp_path: Path, monkeypatch
     store: rrc.ChunkStore = read_back(built.convert(identity, source, force=False))
     assert column_rows(store, f"{schema.video_path(0, 0)}:VideoStream:sample").num_rows == 798
     assert column_rows(store, f"{schema.depth_path(0, 0)}:EncodedDepthImage:meter").num_rows == 798
+
+
+DEPTH: str = f"{schema.run_path('alpha')}/cam/pinhole/depth"
+NORMALS: str = f"{schema.run_path('alpha')}/cam/pinhole/normals"
+COLUMNS: tuple[tuple[str, str | None], ...] = (
+    (schema.trajectory_path(schema.GT_RUN_SOURCE), "rerun.archetypes.LineStrips3D"),
+    (schema.depth_path(0, 0), "rerun.archetypes.EncodedDepthImage"),
+    (schema.trajectory_path("zeta"), "rerun.archetypes.LineStrips3D"),
+    (DEPTH, "rerun.archetypes.DepthImage"),
+    (DEPTH, "rerun.archetypes.DepthImage"),
+    (NORMALS, "rerun.archetypes.EncodedImage"),
+    (f"{schema.run_path('alpha')}/points", "rerun.archetypes.Points3D"),
+)
+"""A schema with ground truth, sensor depth and two prediction layers, ``zeta`` listed before ``alpha``."""
+
+
+def packed_rgb(strips: object) -> tuple[int, int, int]:
+    """The one colour a ``LineStrips3D`` override sets."""
+    assert isinstance(strips, rr.LineStrips3D) and strips.colors is not None
+    packed: int = strips.colors.as_arrow_array().to_pylist()[0]
+    return (packed >> 24) & 0xFF, (packed >> 16) & 0xFF, (packed >> 8) & 0xFF
+
+
+def test_every_run_but_ground_truth_is_a_prediction_with_its_images_found_by_archetype() -> None:
+    assert find_predictions(COLUMNS) == (Prediction("alpha", depth=(DEPTH,), images=(NORMALS,)), Prediction("zeta"))
+
+
+def test_the_card_decodes_no_prediction_image(tmp_path: Path) -> None:
+    card: rrb.Blueprint = dataset(tmp_path, "rgbdtum").card_blueprint(find_predictions(COLUMNS))
+    follow: rrb.View = writing.blueprint_views(card)[0]
+    assert isinstance(follow.contents, list)
+    assert {f"- {DEPTH}/**", f"- {NORMALS}/**"} <= set(follow.contents)
+
+
+def test_predictions_take_the_palette_in_source_order_and_their_depth_stays_out_of_the_overview(tmp_path: Path) -> None:
+    blueprint: rrb.Blueprint = dataset(tmp_path, "rgbdtum").segment_blueprint(find_predictions(COLUMNS))
+    views: list[rrb.View] = writing.blueprint_views(blueprint)
+    rig: rrb.View = next(view for view in views if view.name == "Rig")
+    overrides = rig.visualizer_overrides
+    assert packed_rgb(overrides[schema.trajectory_path(schema.GT_RUN_SOURCE)]) == GT_PATH_COLOR
+    assert packed_rgb(overrides[schema.trajectory_path("alpha")]) == PREDICTION_PALETTE[0]
+    assert packed_rgb(overrides[schema.trajectory_path("zeta")]) == PREDICTION_PALETTE[1]
+    assert {f"- {schema.depth_path(0, 0)}/**", f"- {DEPTH}/**"} <= set(str(rig.contents).splitlines())
+    pane: rrb.View = next(view for view in views if view.name == "alpha: depth")
+    assert (pane.origin, pane.contents) == (DEPTH.rsplit("/", 1)[0], [DEPTH])
+
+
+def test_a_consumer_legend_replaces_the_palette(tmp_path: Path) -> None:
+    legend: dict[str, tuple[int, int, int]] = {schema.GT_RUN_SOURCE: (1, 2, 3), "alpha": (4, 5, 6)}
+    blueprint: rrb.Blueprint = dataset(tmp_path, "rgbdtum").segment_blueprint(find_predictions(COLUMNS), path_colors=legend)
+    rig: rrb.View = next(view for view in writing.blueprint_views(blueprint) if view.name == "Rig")
+    assert packed_rgb(rig.visualizer_overrides[schema.trajectory_path("alpha")]) == (4, 5, 6)
+    assert schema.trajectory_path("zeta") not in rig.visualizer_overrides, "a source the legend leaves out keeps its layer's colour"
+
+
+def test_the_converted_layout_is_base_and_ground_truth_only(tmp_path: Path) -> None:
+    built: VslamLabDataset = dataset(tmp_path, "7scenes")
+    names: set[str] = {str(view.name) for view in writing.blueprint_views(built.default_blueprint())}
+    assert names == {"Rig", "Follow", "rgb_0", "depth_0"}
+
+
+def test_7scenes_and_kitti_are_minus_y_up() -> None:
+    assert BENCHMARKS["7scenes"].world_up == BENCHMARKS["kitti"].world_up == "-y"
