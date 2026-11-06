@@ -1,4 +1,4 @@
-"""ViPE's MoGe-2 provider as recipes/vipe-src patch 0004 builds it: backend selection and the per-frame forward cache.
+"""Our MoGe-2 provider (metrictrail.moge2): registry hook, backend selection, token grid and the per-frame forward cache.
 
 CPU only: a fake predictor stands in for monopriors' TensorRT / torch MoGe-2, so no GPU and no checkpoint is needed.
 """
@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch", reason="torch comes from the metrictrail env's cuda feature")
-depth = pytest.importorskip("vipe.metrictrail.depth", reason="vipe comes from the metrictrail env (recipes/vipe-src)")
+vipe_depth = pytest.importorskip("vipe.metrictrail.depth", reason="vipe comes from the metrictrail env (recipes/vipe-src)")
+
+from vipe.utils.model_cache import ModelCache  # noqa: E402
+
+from metrictrail import moge2 as depth  # noqa: E402
 
 
 class FakeGraph(NamedTuple):
@@ -75,11 +79,11 @@ def test_select_backend_refuses_tensorrt_without_tensorrt_and_unknown_names() ->
 def test_provider_reads_the_backend_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(depth.MOGE2_BACKEND_ENV, "torch")
     monkeypatch.setattr(depth, "tensorrt_importable", lambda: True)
-    provider = depth.MetricTrailMoGe2("l")  # builds nothing until the first forward
+    provider = depth.MoGe2NormalProvider("l")  # builds nothing until the first forward
     assert provider.engine.backend == "torch"
     assert provider.precision == "FP16"
     monkeypatch.setenv(depth.MOGE2_BACKEND_ENV, "auto")
-    assert depth.MetricTrailMoGe2("l").engine.backend == "tensorrt"
+    assert depth.MoGe2NormalProvider("l").engine.backend == "tensorrt"
 
 
 def test_network_size_is_the_inputs_own_token_grid_not_a_bucket() -> None:
@@ -91,7 +95,7 @@ def test_network_size_is_the_inputs_own_token_grid_not_a_bucket() -> None:
 
 def test_a_focal_change_reuses_the_forward_and_matches_an_uncached_run() -> None:
     cached, built = make_engine()
-    provider = depth.MetricTrailMoGe2("l", engine=cached)
+    provider = depth.MoGe2NormalProvider("l", engine=cached)
     image: torch.Tensor = frame(0)
     first = provider.predict_metric(image, focal_px=30.0)
     second = provider.predict_metric(image, focal_px=45.0)
@@ -102,7 +106,7 @@ def test_a_focal_change_reuses_the_forward_and_matches_an_uncached_run() -> None
     torch.testing.assert_close(again.depth, first.depth, rtol=0.0, atol=0.0)
 
     uncached, _ = make_engine(cache_frames=0)
-    fresh = depth.MetricTrailMoGe2("l", engine=uncached).predict_metric(image, focal_px=45.0)
+    fresh = depth.MoGe2NormalProvider("l", engine=uncached).predict_metric(image, focal_px=45.0)
     assert uncached.forward_count == 1
     torch.testing.assert_close(fresh.depth, second.depth, rtol=0.0, atol=0.0)
     torch.testing.assert_close(fresh.valid, second.valid, rtol=0.0, atol=0.0)
@@ -112,7 +116,7 @@ def test_a_focal_change_reuses_the_forward_and_matches_an_uncached_run() -> None
 
 def test_outputs_are_on_the_input_raster_and_follow_the_validity_rule() -> None:
     engine, _ = make_engine()
-    prediction = depth.MetricTrailMoGe2("l", engine=engine).predict_metric(frame(1), focal_px=35.0)
+    prediction = depth.MoGe2NormalProvider("l", engine=engine).predict_metric(frame(1), focal_px=35.0)
     assert prediction.depth.shape == (1, 30, 40)
     assert prediction.normals is not None and prediction.normals.shape == (1, 30, 40, 3)
     torch.testing.assert_close(prediction.normals.norm(dim=-1), torch.ones(1, 30, 40))
@@ -123,7 +127,7 @@ def test_outputs_are_on_the_input_raster_and_follow_the_validity_rule() -> None:
 
 def test_cache_is_keyed_by_content_and_bounded() -> None:
     engine, _ = make_engine(cache_frames=2)
-    provider = depth.MetricTrailMoGe2("l", engine=engine)
+    provider = depth.MoGe2NormalProvider("l", engine=engine)
     for seed in (0, 1, 0, 2, 0, 1):
         provider.predict_metric(frame(seed), focal_px=40.0)
     # 0 (miss), 1 (miss), 0 (hit), 2 (miss, evicts 1), 0 (hit), 1 (miss: evicted)
@@ -134,10 +138,22 @@ def test_cache_is_keyed_by_content_and_bounded() -> None:
 
 def test_free_fov_focal_reuses_the_cached_forward() -> None:
     engine, _ = make_engine()
-    provider = depth.MetricTrailMoGe2("l", engine=engine)
+    provider = depth.MoGe2NormalProvider("l", engine=engine)
     image: torch.Tensor = frame(3)
     k4: np.ndarray = provider.estimate_free_fov_k4(image)
     provider.predict_metric(image, focal_px=float(k4[0]))
     assert engine.forward_count == 1
     assert k4.shape == (4,) and np.isfinite(k4).all() and k4[0] > 0
     np.testing.assert_allclose(k4[2:], [20.0, 15.0])
+
+
+def test_registered_name_builds_our_provider_with_one_engine_per_cache() -> None:
+    depth.register_providers()
+    assert set(depth.PROVIDER_NAMES) <= set(vipe_depth.DEPTH_PROVIDERS)
+    cache = ModelCache()
+    calibration = vipe_depth.make_metrictrail_depth_model(depth.DEFAULT_PROVIDER, use_fp16=False, model_cache=cache)
+    tracking = vipe_depth.make_metrictrail_depth_model(depth.DEFAULT_PROVIDER, use_fp16=True, model_cache=cache)
+    assert isinstance(calibration, depth.MoGe2NormalProvider) and isinstance(tracking, vipe_depth.MetricTrailMoGe2)
+    assert calibration.engine is tracking.engine  # one forward cache across calibration and tracking
+    assert tracking.describe()["registry_name"] == depth.DEFAULT_PROVIDER
+    assert all(override.endswith(f"={depth.DEFAULT_PROVIDER}") for override in depth.PROVIDER_OVERRIDES)

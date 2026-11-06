@@ -109,10 +109,16 @@ def prepare_input(config: Config) -> PreparedInput:
 
 
 def hydra_overrides(config: Config, prepared: PreparedInput, vipe_out: Path) -> list[str]:
-    """Upstream's command for the preset, then the raw-frame raster and the user's overrides (later wins in Hydra)."""
+    """Upstream's command for the preset, our MoGe-2 provider (``ours`` only), the raw-frame raster, then the user's
+    overrides (later wins in Hydra)."""
     preset: BenchmarkPreset = BENCHMARKS[config.benchmark]
     overrides: list[str] = preset.run_overrides(prepared.stream_path, vipe_out, config.intrinsics, config.seed, config.seed_name)
-    return overrides + prepared.raster_overrides + list(config.extra_overrides)
+    provider: list[str] = []
+    if config.label == "ours":
+        from metrictrail.moge2 import PROVIDER_OVERRIDES
+
+        provider = list(PROVIDER_OVERRIDES)
+    return overrides + provider + prepared.raster_overrides + list(config.extra_overrides)
 
 
 def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, UInt8[ndarray, "h w 3"]]) -> ColoredCloud:
@@ -121,7 +127,9 @@ def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, 
     ``normals`` (the live capture's MoGe-2 normals per tracked frame, 8-bit RGB) give every point the voxel mean of its
     pixels' normals rotated into the world by the camera pose; a run without a normal for every frame gets none.
     """
-    from vipe.metrictrail.pointcloud import fuse_point_cloud, fusion_settings, load_vipe_artifacts, open_rgb_source
+    from vipe.metrictrail.pointcloud import fusion_settings, load_vipe_artifacts, open_rgb_source
+
+    from metrictrail.fusion import fuse_world_cloud
 
     artifacts = load_vipe_artifacts(outputs.run_dir, outputs.name)
     raster_hw: tuple[int, int] = (int(artifacts.depth.shape[1]), int(artifacts.depth.shape[2]))
@@ -136,19 +144,13 @@ def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, 
     complete: bool = all(index in normals for index in range(len(artifacts.depth)))
     if normals and not complete:
         print(f"[metrictrail] {len(normals)} of {len(artifacts.depth)} frames carry MoGe-2 normals; the fused cloud gets none")
-    cloud = fuse_point_cloud(
+    return fuse_world_cloud(
         artifacts.depth,
         artifacts.intrinsics,
         artifacts.c2w,
         rgb,
         fusion_settings("default"),
-        world_frame=True,
         normals=(lambda index: rgb_normals(normals[index])) if normals and complete else None,
-    )
-    return ColoredCloud(
-        points_xyz=cloud.points.astype("float32"),
-        colors_rgb=cloud.colors.astype("uint8"),
-        normals_xyz=None if cloud.normals is None else cloud.normals.astype("float32"),
     )
 
 
@@ -159,6 +161,10 @@ def main(config: Config) -> RunMetrics:
     from vipe.pipeline import make_pipeline
     from vipe.streams.base import StreamList
 
+    if config.label == "ours":
+        from metrictrail.moge2 import register_providers
+
+        register_providers()
     config.output.mkdir(parents=True, exist_ok=True)
     vipe_out: Path = (config.output / "vipe_out").resolve()
     prepared: PreparedInput = prepare_input(config)

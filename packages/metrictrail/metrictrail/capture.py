@@ -6,7 +6,7 @@ Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSessi
 * ``vipe.metrictrail.dpvo.dpvo.DPVO.__init__``: opens one recording file per DPVO instance (pass);
 * ``DPVO.__call__``: after each tracked frame, logs the frame DPVO saw, the MoGe-2 metric depth it was given, the
   MoGe-2 normals of a new keyframe, the newest keyframe's patches, the local bundle-adjustment window and its patch points;
-* ``vipe.metrictrail.depth.MetricTrailMoGe2.predict_metric`` and ``DPVOSLAMSystem._prepare``: keep the camera-space
+* :meth:`metrictrail.moge2.MoGe2NormalProvider.predict_metric` and ``DPVOSLAMSystem._prepare``: keep the camera-space
   normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
   keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
 * ``DPVO._DPVO__run_global_BA``: counts global bundle adjustments;
@@ -155,10 +155,11 @@ class CaptureSession:
 
     def install(self) -> None:
         """Wrap the ViPE classes of the imported ``vipe`` tree."""
-        import vipe.metrictrail.depth as depth_module
         import vipe.metrictrail.dino_fusion as dino_fusion
         import vipe.metrictrail.dpvo.dpvo as dpvo_module
         import vipe.metrictrail.slam as slam
+
+        from metrictrail.moge2 import MoGe2NormalProvider
 
         self.out_dir.mkdir(parents=True, exist_ok=True)
         session: CaptureSession = self
@@ -167,7 +168,7 @@ class CaptureSession:
         call_orig: Callable[..., Any] = dpvo_module.DPVO.__call__
         gba_orig: Callable[..., Any] = dpvo_module.DPVO._DPVO__run_global_BA
         forward_orig: Callable[..., Any] = dino_fusion.FrozenDinoV3.forward
-        predict_orig: Callable[..., Any] = depth_module.MetricTrailMoGe2.predict_metric
+        predict_orig: Callable[..., Any] = MoGe2NormalProvider.predict_metric
         prepare_orig: Callable[..., Any] = slam.DPVOSLAMSystem._prepare
 
         def run(self: Any, video_stream: Any, **kwargs: Any) -> Any:
@@ -176,7 +177,7 @@ class CaptureSession:
 
         def predict(self: Any, rgb_bchw: Tensor, *, focal_px: float) -> Any:
             prediction: Any = predict_orig(self, rgb_bchw, focal_px=focal_px)
-            if prediction.normals is not None and prediction.normals.shape[0] == 1:
+            if prediction.normals.shape[0] == 1:
                 # Queued on the producer's stream before the frame's ``ready`` event, so DPVO's wait covers it.
                 session.producer_local.normals = normals_rgb(prediction.normals[0])
             return prediction
@@ -236,7 +237,7 @@ class CaptureSession:
             (dpvo_module.DPVO, "__call__", call_orig),
             (dpvo_module.DPVO, "_DPVO__run_global_BA", gba_orig),
             (dino_fusion.FrozenDinoV3, "forward", forward_orig),
-            (depth_module.MetricTrailMoGe2, "predict_metric", predict_orig),
+            (MoGe2NormalProvider, "predict_metric", predict_orig),
             (slam.DPVOSLAMSystem, "_prepare", prepare_orig),
         ]
         slam.DPVOSLAMSystem.run = run
@@ -244,7 +245,7 @@ class CaptureSession:
         dpvo_module.DPVO.__call__ = call
         dpvo_module.DPVO._DPVO__run_global_BA = gba
         dino_fusion.FrozenDinoV3.forward = forward
-        depth_module.MetricTrailMoGe2.predict_metric = predict
+        MoGe2NormalProvider.predict_metric = predict
         slam.DPVOSLAMSystem._prepare = prepare
 
     def uninstall(self) -> None:
