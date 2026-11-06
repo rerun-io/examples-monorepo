@@ -1,9 +1,7 @@
 """The generic Python layer on all four groups: identities, broadcasting, cat/stack, LieGroupParameter, gradcheck.
 
 No upstream lietorch needed: CPU cases run in the unit lane, CUDA cases are
-integration tests. Groups whose Mojo kernels are not on this branch are
-xfail(strict=False, raises=NotImplementedError); once the kernels land the
-same tests run for real. gradcheck runs in float64 with torch's default
+integration tests. gradcheck runs in float64 with torch's default
 tolerances on composites whose inputs and outputs are Euclidean.
 """
 
@@ -14,24 +12,21 @@ from torch import Tensor
 
 require_mojo_extension()
 
-from groups_common import COMPOSITES, composite_inputs, group_params, random_group_data  # noqa: E402
+from groups_common import COMPOSITES, composite_inputs, group_params, homogeneous, random_group_data  # noqa: E402
 
 import lietorch_mojo  # noqa: E402
 from lietorch_mojo.broadcasting import broadcast_inputs  # noqa: E402
 from lietorch_mojo.groups import LieGroup  # noqa: E402
 
 F64: torch.dtype = torch.float64
-GROUPS: list = group_params()
-# gradcheck and Jinv-by-finite-differences on Sim3 need exact Jacobians (see groups_common.SIM3_APPROXIMATE_JACOBIANS).
-GROUPS_EXACT_JACOBIANS: list = group_params(exact_jacobians=True)
+GROUPS: list[str] = group_params()
+# gradcheck and Jinv-by-finite-differences at unit-scale tangents need exact Jacobians, which Sim3 does not have
+# (groups_common.group_params); test_rxso3_sim3_gradcheck.py gradchecks Sim3 on small tangents.
+GROUPS_EXACT_JACOBIANS: list[str] = group_params(exact_jacobians=True)
 
 
 def _group(name: str) -> type[LieGroup]:
     return getattr(lietorch_mojo, name)
-
-
-def _homogeneous(p: Tensor) -> Tensor:
-    return torch.cat([p, torch.ones_like(p[..., :1])], dim=-1)
 
 
 def _small_tangent(G: type[LieGroup], *shape: int, device: str, scale: float = 0.5, seed: int = 0) -> Tensor:
@@ -66,7 +61,7 @@ def test_act_matrix_translation_agree(name: str, device: str) -> None:
     M: Tensor = X.matrix()
     assert M.shape == (5, 4, 4)
     p4: Tensor = torch.cat([p, torch.randn(5, 1, dtype=F64, device=device)], dim=-1)
-    assert torch.allclose(X.act(p), (M @ _homogeneous(p)[..., None])[..., :3, 0], atol=1e-10)
+    assert torch.allclose(X.act(p), (M @ homogeneous(p)[..., None])[..., :3, 0], atol=1e-10)
     assert torch.allclose(X * p, X.act(p))
     assert torch.allclose(X.act(p4), (M @ p4[..., None])[..., 0], atol=1e-10)
     assert torch.allclose(X.translation(), M[..., :, 3], atol=1e-12)

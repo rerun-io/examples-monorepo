@@ -18,6 +18,8 @@ from torch import Tensor
 
 require_mojo_extension()
 
+from groups_common import homogeneous  # noqa: E402
+
 from lietorch_mojo import SE3, SO3, backends  # noqa: E402
 from lietorch_mojo.groups import LieGroup  # noqa: E402
 
@@ -29,10 +31,6 @@ GROUP_IDS: tuple[str, ...] = tuple(G.group_name for G in GROUPS)
 
 def _matv(A: Tensor, b: Tensor) -> Tensor:
     return torch.matmul(A, b[..., None])[..., 0]
-
-
-def _homogeneous(p: Tensor) -> Tensor:
-    return torch.cat([p, torch.ones_like(p[..., :1])], dim=-1)
 
 
 def _tangent(G: type[LieGroup], translation: Tensor, phi: Tensor) -> Tensor:
@@ -77,9 +75,9 @@ def test_act_matches_matrix(G: type[LieGroup], device: str) -> None:
     X = G.exp(torch.randn(16, G.manifold_dim, device=device, dtype=torch.float64))
     p: Tensor = torch.randn(16, 3, device=device, dtype=torch.float64)
     p1: Tensor = X.act(p)
-    p2: Tensor = _matv(X.matrix(), _homogeneous(p))
+    p2: Tensor = _matv(X.matrix(), homogeneous(p))
     assert torch.allclose(p1, p2[..., :3], atol=1e-8)
-    assert torch.allclose(X.act(_homogeneous(p)), p2, atol=1e-8)
+    assert torch.allclose(X.act(homogeneous(p)), p2, atol=1e-8)
 
 
 @pytest.mark.parametrize("device", DEVICES)

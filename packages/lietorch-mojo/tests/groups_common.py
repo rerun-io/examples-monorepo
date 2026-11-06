@@ -1,53 +1,35 @@
-"""Helpers shared by the four-group tests: group params (xfail where kernels are missing), random data, composites.
+"""Helpers shared by the four-group tests and the reference freezer: group names, random data, composites.
 
-Import after `require_mojo_extension()`: building the params probes the extension.
+Nothing here imports lietorch_mojo, so `freeze_references.py` can use the same
+data builders and composites with upstream lietorch.
 """
 
 from collections.abc import Callable
 from types import ModuleType
+from typing import TYPE_CHECKING
 
-import pytest
 import torch
 from torch import Tensor
 
-from lietorch_mojo import SE3, SO3, RxSO3, Sim3, backends
-from lietorch_mojo.groups import LieGroup
+if TYPE_CHECKING:
+    from lietorch_mojo.groups import LieGroup
 
-GROUPS: tuple[type[LieGroup], ...] = (SO3, RxSO3, SE3, Sim3)
-
-# Upstream lietorch's Sim3 Jacobians are series approximations: d log(Exp a) / da is off the identity by
-# 3.9e-7 at |a| ~ 0.1 and by 1.4e-2 at |a| ~ 0.5 (float64), so gradcheck against finite differences fails
-# there. A Mojo Sim3 that keeps lietorch's formulas for parity inherits that; one with exact Jacobians passes.
-SIM3_APPROXIMATE_JACOBIANS = pytest.mark.xfail(
-    strict=False, reason="Sim3: lietorch's Jacobians are series approximations (exp-log Jacobian off by 1.4e-2 at |a|=0.5)"
-)
+GROUP_NAMES: tuple[str, ...] = ("SO3", "RxSO3", "SE3", "Sim3")
 
 
-def has_kernels(group: type[LieGroup]) -> bool:
-    """True when this branch's Mojo extension implements `group` (the backend raises NotImplementedError otherwise)."""
-    try:
-        backends.expm(group.group_id, torch.zeros(1, group.manifold_dim, dtype=torch.float64))
-    except NotImplementedError:
-        return False
-    return True
+def group_params(exact_jacobians: bool = False) -> list[str]:
+    """The group names to parametrise over.
 
-
-def group_params(exact_jacobians: bool = False) -> list:
-    """One pytest param per group name; groups without Mojo kernels on this branch are xfail(strict=False).
-
-    `exact_jacobians`: the test compares gradients with finite differences, so Sim3 is xfail(strict=False)
-    too (see SIM3_APPROXIMATE_JACOBIANS).
+    `exact_jacobians`: the test compares gradients with finite differences at unit-scale tangents, so Sim3 is
+    left out. Its Jacobians are sim3.h's truncated series (exp-log Jacobian off by 1.4e-2 at |a| = 0.5);
+    test_rxso3_sim3_gradcheck.py gradchecks Sim3 on small tangents instead.
     """
-    params: list = []
-    for group in GROUPS:
-        marks: list = []
-        if not has_kernels(group):
-            reason: str = f"{group.group_name}: Mojo kernels are not on this branch"
-            marks.append(pytest.mark.xfail(raises=NotImplementedError, strict=False, reason=reason))
-        elif exact_jacobians and group is Sim3:
-            marks.append(SIM3_APPROXIMATE_JACOBIANS)
-        params.append(pytest.param(group.group_name, id=group.group_name, marks=marks))
-    return params
+    return [name for name in GROUP_NAMES if not (exact_jacobians and name == "Sim3")]
+
+
+def homogeneous(p: Tensor) -> Tensor:
+    """Points (..., 3) as homogeneous points (..., 4) with w = 1."""
+    return torch.cat([p, torch.ones_like(p[..., :1])], dim=-1)
 
 
 def random_group_data(group_name: str, shape: tuple[int, ...], gen: torch.Generator, dtype: torch.dtype, device: str) -> Tensor:
@@ -79,7 +61,7 @@ COMPOSITES: dict[str, tuple[Composite, list[int | str]]] = {
 }
 
 
-def composite_inputs(G: type[LieGroup], widths: list[int | str], batch: int, gen: torch.Generator, dtype: torch.dtype, device: str) -> list[Tensor]:
+def composite_inputs(G: "type[LieGroup]", widths: list[int | str], batch: int, gen: torch.Generator, dtype: torch.dtype, device: str) -> list[Tensor]:
     """Inputs for a composite: 0.5-scaled Gaussian tangents ("K") and points, built in float64 then cast."""
     return [
         (0.5 * torch.randn(batch, G.manifold_dim if w == "K" else int(w), generator=gen, dtype=torch.float64)).to(device=device, dtype=dtype)

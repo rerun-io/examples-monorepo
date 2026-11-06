@@ -20,13 +20,11 @@ from torch import Tensor
 
 require_mojo_extension()
 
+from groups_common import homogeneous  # noqa: E402
+
 from lietorch_mojo import SE3, RxSO3, Sim3  # noqa: E402
 
 GROUPS: dict[str, type] = {"RxSO3": RxSO3, "Sim3": Sim3}
-
-
-def _homogeneous(p: Tensor) -> Tensor:
-    return torch.cat([p, torch.ones_like(p[..., :1])], dim=-1)
 
 
 # ── forward identities (run_tests.py: test_exp_log, test_inv, test_adj, test_act) ──
@@ -65,9 +63,9 @@ def test_act_matches_matrix(group: str, device: str) -> None:
     G = GROUPS[group]
     X = G.exp(torch.randn(16, G.manifold_dim, device=device, dtype=torch.float64))
     p: Tensor = torch.randn(16, 3, device=device, dtype=torch.float64)
-    p2: Tensor = torch.matmul(X.matrix(), _homogeneous(p)[..., None])[..., 0]
+    p2: Tensor = torch.matmul(X.matrix(), homogeneous(p)[..., None])[..., 0]
     assert torch.allclose(X.act(p), p2[..., :3], atol=1e-8)
-    assert torch.allclose(X.act(_homogeneous(p)), p2, atol=1e-8)
+    assert torch.allclose(X.act(homogeneous(p)), p2, atol=1e-8)
 
 
 @pytest.mark.parametrize("device", DEVICES)
