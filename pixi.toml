@@ -3737,11 +3737,36 @@ python-pycg = "==1.0.3"
 [feature.metrictrail.activation.env]
 PACKAGE_DIR = "packages/metrictrail"
 PYREFLY_TARGET = "metrictrail tools tests"
+# Weights on the NAS SSD tier (MANIFEST.md beside them); ViPE's explicit-file overrides, so a run never downloads.
+VIPE_METRICTRAIL_DPVO_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/metrictrail/dino_dpvo.pth"
+VIPE_DINOV3_VITS16_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/dinov3/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+VIPE_MOGE2_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/moge2/moge-2-vitl/model.pt"
+TORCH_HOME = "/mnt/nas/ssd-8tb/metrictrail/weights/torch_home"
 
 [feature.metrictrail.tasks.metrictrail-check-kernels]
 cmd = "python tools/check_kernels.py"
 cwd = "packages/metrictrail"
 description = "Run one tiny op of each compiled vipe-src kernel (vipe_ext, cuda_corr, cuda_ba) on the GPU"
+
+[feature.metrictrail.tasks.metrictrail-run]
+cmd = "python tools/run.py"
+cwd = "packages/metrictrail"
+description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU and a lietorch provider); pass --input --benchmark --output --rr-config.save"
+
+[feature.metrictrail.tasks.metrictrail-log-run]
+cmd = "python tools/log_run.py"
+cwd = "packages/metrictrail"
+description = "Log a finished MetricTrail output directory (ours or upstream's) to Rerun with the default blueprint; no GPU"
+
+[feature.metrictrail.tasks.metrictrail-eval]
+cmd = "python tools/vslamlab_eval.py"
+cwd = "packages/metrictrail"
+description = "Score MetricTrail runs (one dir per seed) under the paper protocol and VSLAM-LAB's own evaluation (subprocess, private evo HOME)"
+
+[feature.metrictrail.tasks.metrictrail-catalog-layer]
+cmd = "python tools/catalog_layer.py"
+cwd = "packages/metrictrail"
+description = "Write (and with --catalog-url/--dataset register) the MetricTrail catalog layer of one run on a VSLAM-LAB segment; never overwrites a layer file"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
