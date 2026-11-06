@@ -27,6 +27,17 @@ pixi run -e robocap-slam-dev --frozen tests
 
 Prefer `pixi run --frozen` to skip re-solving deps. Only omit `--frozen` when you've modified dependencies. The dev tasks (`pixi run -e <name>-dev {lint,typecheck,deadcode,tests}`) are the canonical runners — `typecheck` applies the monorepo `pyrefly.toml` plus any per-package baseline, whereas a bare `pyrefly check .` skips the baseline and can surface known false-positives.
 
+### Sharing a Gradio app
+
+Share a running app as a tailnet **HTTPS** URL, never as plain `http://<host>:<port>`. Rerun's web viewer (inside gradio-rerun) needs `crypto.randomUUID`, which browsers give only to HTTPS or localhost pages; over plain HTTP the viewer stays empty.
+
+1. Start the app and read its port from `Running on local URL: http://127.0.0.1:<port>` (apps pick different ports; Gradio moves to the next free one).
+2. Serve that port in the foreground and share `https://<machine>.<tailnet>.ts.net:<port>/`:
+   ```bash
+   tailscale serve --https=<port> http://127.0.0.1:<port>
+   ```
+3. When done, stop the serve (Ctrl-C) and the app. Never use `--bg`: it persists after you stop.
+
 ## CI
 
 GitHub Actions uses hosted runners only. Package dev environments are 4–18 GB,
