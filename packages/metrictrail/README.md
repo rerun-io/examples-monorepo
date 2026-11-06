@@ -65,7 +65,7 @@ itself; there is no intrinsics input. Settings: the tracking stride and `max_fra
 runs in live mode: DPVO's frames, patches and BA window stream in as it tracks, with depth and normals of new keyframes
 only and no DINOv3 PCA. Calibration has no hook, so the viewer stays empty for those seconds. The trajectory and the
 fused cloud arrive at the end. pool.MOV (86 s, strided to 1,293 frames) takes about 3 min 45 s on the RTX 5090:
-about 1 min of calibration, 35 s of tracking, and 95 s of cloud fusion. Gradio prints the local URL. Open it over HTTPS
+about 1 min of calibration, 35 s of tracking, and 1.5 min of cloud fusion (estimates from 10 s status polls). Gradio prints the local URL. Open it over HTTPS
 (`tailscale serve`): on plain HTTP the viewer stays empty.
 
 ## Evaluate
