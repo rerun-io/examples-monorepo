@@ -30,6 +30,7 @@ def test_gpu_perspective_crops_match_reference() -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
     from egohand_inference.camera.perspective_crop import perspective_crop
+
     from posekit.cameras import CalibratedCamera
     from posekit.models.egohand_crops import prepare_gpu_crops
     from posekit.models.egohand_geometry import lens_model

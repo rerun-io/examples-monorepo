@@ -1,0 +1,22 @@
+--- a/src/python/isaaccapture_egopost/inference/camera/camera_models.py
++++ b/src/python/isaaccapture_egopost/inference/camera/camera_models.py
+@@ -658,13 +658,12 @@
+         xy = (target - self.K[:2, 2]) / self.K.diagonal()[:2]
+         distorted = self._projection_parameters is not None
+         if distorted and len(target):
+-            xy = cv2.undistortPointsIter(
+-                target[:, None],
+-                self.K,
+-                self.distortion_coefficients,
+-                None,
+-                None,
+-                (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-10),
++            # OpenCV 5 folds the iterative overload into undistortPoints.
++            undistort = getattr(cv2, "undistortPointsIter", cv2.undistortPoints)
++            xy = undistort(
++                target[:, None], self.K, self.distortion_coefficients,
++                R=None, P=None,
++                criteria=(cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-10),
+             ).reshape(-1, 2)
+             error = np.max(
+                 abs(self.project(np.c_[xy, np.ones(len(xy))]) - target), axis=1

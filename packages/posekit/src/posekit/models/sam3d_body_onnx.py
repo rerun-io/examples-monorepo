@@ -4,13 +4,13 @@ from pathlib import Path
 
 import onnx
 import torch
+from dinov3.models.vision_transformer import DinoVisionTransformer
 from jaxtyping import Float, Float32
 from torch import Tensor, nn
 from trtkit import TensorRtBackendConfig, export_onnx
 from trtkit.artifacts import build_once
 from trtkit.onnx_qdq import quantize_qdq, save_with_external_data
 
-from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
 from posekit.models.sam3d_body_quantization import (
     BodyBackbonePrecision,
     BodyCalibration,

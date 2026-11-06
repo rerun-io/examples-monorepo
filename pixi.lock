@@ -8131,6 +8131,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/exo-calib
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
@@ -8636,6 +8638,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/exo-calib
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
@@ -9165,6 +9169,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/exo-calib
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
@@ -9680,6 +9686,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/exo-calib
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
@@ -17117,6 +17125,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/lamp
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -17586,6 +17596,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.7.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/lamp
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -18037,6 +18049,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/lamp
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -18574,6 +18588,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/lamp
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -21585,6 +21601,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/mamma
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -22159,6 +22177,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/mamma
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -29062,6 +29082,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -29725,6 +29747,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -30316,6 +30340,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -30876,6 +30902,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -31453,6 +31481,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -32023,6 +32053,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -32951,6 +32983,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -33624,6 +33658,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/mv-api
       - pypi: ./packages/posekit
@@ -35960,6 +35996,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/mamma
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -36536,6 +36574,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/mamma
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -37087,6 +37127,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -37625,6 +37667,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -38268,6 +38312,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.6.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -38921,6 +38967,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.6.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/monoprior
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
@@ -39477,6 +39525,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -40025,6 +40075,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -40587,6 +40639,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.6.1-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -41143,6 +41197,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.6.1-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -41722,6 +41778,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.6.1-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -42287,6 +42345,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.6.1-pyh5ded981_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/posekit
       - pypi: ./packages/sam2-streaming
       - pypi: ./packages/simplecv
@@ -53012,6 +53072,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.8.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/dataforge
       - pypi: ./packages/posekit
       - pypi: ./packages/selfcap-curate
@@ -53444,6 +53506,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.8.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/dataforge
       - pypi: ./packages/posekit
       - pypi: ./packages/selfcap-curate
@@ -53900,6 +53964,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
+      - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+      - conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
       - pypi: ./packages/dataforge
       - pypi: ./packages/posekit
       - pypi: ./packages/selfcap-curate
@@ -54342,6 +54408,8 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.8.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wadler-lindig-0.1.7-pyhe01879c_0.conda
+      - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+      - conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
       - pypi: ./packages/dataforge
       - pypi: ./packages/posekit
       - pypi: ./packages/selfcap-curate
@@ -116368,6 +116436,20 @@ packages:
     - libsqlite >=3.54.1,<4.0a0
   size: 982114
   timestamp: 1792175598077
+- conda: https://prefix.dev/conda-forge/linux-aarch64/libsqlite-3.54.1-hd26f1b6_101.conda
+  sha256: 61a67f7085f497fa7622c6e1ae8611b8b2796a2eca70dcecc8d9124ca4f0d46b
+  md5: e5ac4a3119ab693d90cd7599982a791e
+  depends:
+  - libgcc >=15
+  - libzlib >=1.3.2,<2.0a0
+  constrains:
+  - icu <0.0a0
+  license: blessing
+  run_exports:
+    weak:
+    - libsqlite >=3.54.1,<4.0a0
+  size: 977839
+  timestamp: 1793051533271
 - conda: https://prefix.dev/conda-forge/linux-aarch64/libssh2-1.11.1-h18c354c_0.conda
   sha256: 1e289bcce4ee6a5817a19c66e296f3c644dcfa6e562e5c1cba807270798814e7
   md5: eecc495bcfdd9da8058969656f916cc2
@@ -117197,6 +117279,18 @@ packages:
     - libuuid >=2.42.4,<3.0a0
   size: 36296
   timestamp: 1790121454455
+- conda: https://prefix.dev/conda-forge/linux-aarch64/libuuid-2.42.4-hd6fdeab_1.conda
+  sha256: 66d4d6201d52b4e3679dcfcc73658902a1cfb1a096f9d72a7b2d93d78e13948a
+  md5: 394dc5a24e06bdea0b41389d1eee9a23
+  depends:
+  - libgcc >=15
+  license: BSD-3-Clause
+  license_family: BSD
+  run_exports:
+    weak:
+    - libuuid >=2.42.4,<3.0a0
+  size: 37956
+  timestamp: 1793891605926
 - conda: https://prefix.dev/conda-forge/linux-aarch64/libuv-1.52.1-h80f16a2_0.conda
   sha256: 3e2ead35f47d01364031f323f1be984018c8f19a3a264f952ddcd043685a1c86
   md5: ac7bcbd2c77691cd6d1ede8c029e8c8a
@@ -142129,6 +142223,66 @@ packages:
 - conda_source: brush-src[74cb6902] @ recipes/brush-src
   variants:
     target_platform: noarch
+- conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
+  variants:
+    target_platform: noarch
+  depends:
+  - python *
+  - python >=3.11
+  license: LicenseRef-DINOv3-License
+  host_packages:
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-20_gnu.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/bzip2-1.0.8-h4777abc_10.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/ld_impl_linux-aarch64-2.46.1-default_h1979696_103.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libexpat-2.9.0-h4154aff_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libffi-3.7.0-hdaad0be_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libgcc-16.2.0-h205dda4_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libgomp-16.2.0-h8acb6b2_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/liblzma-5.8.3-he30d5cf_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libnsl-2.0.1-h86ecc28_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libpython-3.12.16-h3cfa5a6_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libsqlite-3.54.1-hd26f1b6_101.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libuuid-2.42.4-hd6fdeab_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libxcrypt-4.4.38-h80f16a2_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libzlib-1.3.2-hdc9db2a_3.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/ncurses-6.6-h2b6f883_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/openssl-3.6.5-he6ad1d5_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/python-3.12.16-h94ad73b_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/readline-8.3-ha7194a6_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/zstd-1.5.7-h9d15635_7.conda
+  - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
+  - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
+- conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
+  variants:
+    target_platform: noarch
+  depends:
+  - python *
+  - python >=3.11
+  license: LicenseRef-DINOv3-License
+  host_packages:
+  - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/ld_impl_linux-64-2.46.1-default_hbd61a6d_103.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libexpat-2.9.0-hd2095e1_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libffi-3.7.0-h81df57d_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libnsl-2.0.1-hb9d3cd8_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libpython-3.12.16-ha57cdbe_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libsqlite-3.54.1-h0737f62_101.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libuuid-2.42.4-hcfc3c73_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libxcrypt-4.4.38-h280c20c_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_3.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/python-3.12.16-h5f976f7_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/readline-8.3-hd6e31c0_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
+  - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
+  - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
 - conda_source: dpretrieval[e0726e16] @ packages/dpretrieval
   variants:
     target_platform: linux-64
@@ -142390,6 +142544,68 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/pybind11-global-3.1.0-pyh648e204_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
+- conda_source: egohand-src[9c1b3c59] @ recipes/egohand-src
+  variants:
+    target_platform: noarch
+  depends:
+  - dinov3-src
+  - python *
+  - python >=3.12
+  license: LicenseRef-OpenMDW-1.1
+  host_packages:
+  - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/ld_impl_linux-64-2.46.1-default_hbd61a6d_103.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libexpat-2.9.0-hd2095e1_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libffi-3.7.0-h81df57d_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libnsl-2.0.1-hb9d3cd8_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libpython-3.12.16-ha57cdbe_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libsqlite-3.54.1-h0737f62_101.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libuuid-2.42.4-hcfc3c73_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libxcrypt-4.4.38-h280c20c_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_3.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/python-3.12.16-h5f976f7_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/readline-8.3-hd6e31c0_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
+  - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
+  - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
+- conda_source: egohand-src[cf3f0e88] @ recipes/egohand-src
+  variants:
+    target_platform: noarch
+  depends:
+  - dinov3-src
+  - python *
+  - python >=3.12
+  license: LicenseRef-OpenMDW-1.1
+  host_packages:
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-20_gnu.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/bzip2-1.0.8-h4777abc_10.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/ld_impl_linux-aarch64-2.46.1-default_h1979696_103.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libexpat-2.9.0-h4154aff_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libffi-3.7.0-hdaad0be_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libgcc-16.2.0-h205dda4_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libgomp-16.2.0-h8acb6b2_7.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/liblzma-5.8.3-he30d5cf_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libnsl-2.0.1-h86ecc28_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libpython-3.12.16-h3cfa5a6_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libsqlite-3.54.1-hd26f1b6_101.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libuuid-2.42.4-hd6fdeab_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libxcrypt-4.4.38-h80f16a2_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/libzlib-1.3.2-hdc9db2a_3.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/ncurses-6.6-h2b6f883_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/openssl-3.6.5-he6ad1d5_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/python-3.12.16-h94ad73b_0_cpython.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/readline-8.3-ha7194a6_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/zstd-1.5.7-h9d15635_7.conda
+  - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
+  - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
 - conda_source: fused-ssim[7a2a25ee] @ recipes/hexels-src
   variants:
     target_platform: linux-64

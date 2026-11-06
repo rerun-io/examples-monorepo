@@ -1,0 +1,55 @@
+# EgoHand inference source from NVIDIA IsaacCapture (src/python/isaaccapture_egopost) at 479063c.
+# Installs two packages:
+#   egohand            upstream name; the checkpoint's Hydra cfg instantiates `egohand.models...` by name
+#   egohand_inference  upstream `inference`, renamed: a top-level `inference` is too generic to own
+# DINOv3 comes from dinov3-src (upstream import `dinov3.models.vision_transformer`, unchanged).
+# The patches keep only behaviour posekit needs; upstream dead code (file exporters, the body
+# SomaWrapper, results_io) is shipped untouched because it is import-safe (numpy/scipy/json only).
+package:
+  name: egohand-src
+  version: "0.0.1.479063c"
+
+source:
+  # GitHub archive: 3.3 MB; a git clone is 390 MB and smudges ~92 MB of LFS demo videos.
+  url: https://github.com/NVIDIA/IsaacCapture/archive/479063ce7d4b8c6880ebf389b0d63d71624c3d46.tar.gz
+  sha256: 49dd5594fcd1cd3d426147b69348358501e5d1f15f84348ffee00692aa4b1605
+  patches:
+    - patches/0001-drop-chumpy-numpy-shims.patch        # egohand/__init__ patched numpy/inspect globals at import
+    - patches/0002-opencv5-undistort-points.patch       # cv2.undistortPointsIter is gone in OpenCV 5
+    - patches/0003-gpu-perspective-crops.patch          # Warp remap into a CUDA tensor + perspective_crop_geometry split
+    - patches/0004-safetensors-weights-only-loader.patch # load_egohand_model: safetensors + cfg metadata, ready backbone
+    - patches/0005-prepared-crop-input.patch            # predict(..., prepared_crops=) skips the CPU crop
+    - patches/0006-soma-cuda-event-timing.patch         # optional CUDA-event timing around SOMA calls
+
+build:
+  number: 0
+  noarch: python
+  script:
+    - export SRC=src/python/isaaccapture_egopost
+    # pixi-build reuses the host prefix between rebuilds: clear the targets or cp nests a second copy.
+    - rm -rf "$SP_DIR/egohand" "$SP_DIR/egohand_inference"
+    - mkdir -p "$SP_DIR"
+    - cp -r "$SRC/egohand" "$SP_DIR/egohand"
+    - cp -r "$SRC/inference" "$SP_DIR/egohand_inference"
+    - rm -rf "$SP_DIR/egohand_inference/tests" "$SP_DIR/egohand_inference/scripts" "$SP_DIR/egohand_inference/hand_detector_2d/scripts" "$SP_DIR/egohand_inference/docker"
+    # Rename the package's absolute imports (`from inference.x`, `import inference.x`).
+    - find "$SP_DIR/egohand_inference" "$SP_DIR/egohand" -name '*.py' -exec sed -i -E 's/^([[:space:]]*)(from|import) inference([. ])/\1\2 egohand_inference\3/' {} +
+    - test -z "$(grep -rnE '^[[:space:]]*(from|import) inference[. ]' "$SP_DIR/egohand" "$SP_DIR/egohand_inference")"
+    - cp "$SRC/THIRD_PARTY_LICENSES.md" "$SP_DIR/egohand/THIRD_PARTY_LICENSES.md"
+
+requirements:
+  host:
+    - python 3.12.*
+  # Run deps follow the mast3r/asmk convention: python (+ sibling source packages) only.
+  # Import-time needs (supplied by posekit-egohand + cuda + common, as today): torch, numpy, scipy,
+  # einops, hydra-core, omegaconf, py-opencv, warp-lang (PyPI), safetensors; lazily py-soma-x, onnxruntime.
+  run:
+    - python >=3.12
+    - dinov3-src
+
+about:
+  homepage: https://github.com/NVIDIA/IsaacCapture
+  license: LicenseRef-OpenMDW-1.1
+  license_file:
+    - LICENSES/LicenseRef-OpenMDW-1.1.txt
+  summary: EgoHand inference source (IsaacCapture 479063c) as egohand + egohand_inference

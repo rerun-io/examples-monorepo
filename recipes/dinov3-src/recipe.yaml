@@ -1,0 +1,36 @@
+# DINOv3 source at the commit IsaacCapture pins (requirements-dinov3.txt), installed unmodified as the
+# `dinov3` package. EgoHand (egohand.models.backbones.dinov3) and SAM 3D Body (sam_3d_body.models.backbones.dinov3)
+# build their DinoVisionTransformer from it. `dinov3.models.vision_transformer` imports only torch and numpy;
+# the training/eval subpackages are shipped but never imported (their heavy deps are not declared).
+package:
+  name: dinov3-src
+  version: "0.0.1.5aa7e93"
+
+source:
+  url: https://github.com/facebookresearch/dinov3/archive/5aa7e93ab42ae3526291f6b4e3fcd22637e03326.tar.gz
+  sha256: 194fc7a65038ef088181588151a75dc01252f2b1ed1e2f5a8a9431a99de1d2d6
+
+build:
+  number: 0
+  noarch: python
+  script:
+    # No pip install: upstream setup.py pins training deps (submitit, torchmetrics, ftfy...) we do not want.
+    # pixi-build reuses the host prefix between rebuilds: clear the target or cp nests a second copy.
+    - rm -rf "$SP_DIR/dinov3"
+    - mkdir -p "$SP_DIR"
+    - cp -r dinov3 "$SP_DIR/dinov3"
+    - find "$SP_DIR/dinov3" -name tests -type d -prune -exec rm -rf {} +
+
+requirements:
+  host:
+    - python 3.12.*
+  # Run deps follow the mast3r/asmk convention: python (+ sibling source packages) only.
+  # Imports torch + numpy (dinov3.models / dinov3.hub); the consuming feature supplies them.
+  run:
+    - python >=3.11
+
+about:
+  homepage: https://github.com/facebookresearch/dinov3
+  license: LicenseRef-DINOv3-License
+  license_file: LICENSE.md
+  summary: DINOv3 backbones (source at 5aa7e93), import name `dinov3`

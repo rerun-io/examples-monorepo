@@ -7,7 +7,8 @@ pytest.importorskip("yacs", reason="SAM body exports require the posekit-body en
 
 
 def test_body_export_preserves_native_bf16_features() -> None:
-    from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
+    from dinov3.models.vision_transformer import DinoVisionTransformer
+
     from posekit.models.sam3d_body_onnx import ExportBodyBackbone
 
     torch.manual_seed(42)

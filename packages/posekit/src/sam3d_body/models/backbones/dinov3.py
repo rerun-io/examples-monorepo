@@ -6,7 +6,7 @@ from torch import nn
 
 # DINOv3 ViT-H+/16 as built by the facebookresearch/dinov3 hub factory ``dinov3_vith16plus``, which
 # upstream loaded with torch.hub from unpinned GitHub main. The same architecture is vendored in
-# posekit for EgoHand (``egohand_dinov3``, DINOv3 5aa7e93); build it from there instead.
+# posekit's dinov3-src package (DINOv3 5aa7e93, shared with EgoHand); build it from there instead.
 _ARCH_KWARGS = {
     "dinov3_vith16plus": dict(
         img_size=224,
@@ -38,7 +38,7 @@ class Dinov3Backbone(nn.Module):
         self, name="dinov3_vith16plus", pretrained_weight=None, cfg=None, *args, **kwargs
     ):
         super().__init__()
-        from egohand_dinov3.models.vision_transformer import DinoVisionTransformer
+        from dinov3.models.vision_transformer import DinoVisionTransformer
 
         self.name = name
         self.cfg = cfg

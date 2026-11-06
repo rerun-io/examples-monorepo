@@ -6,13 +6,13 @@ from typing import TypeAlias
 
 import numpy as np
 import torch
+from egohand.models.egohand import EgoHand
 from jaxtyping import Float, Float32, Float64, Int64
 from numpy import ndarray
 from soma.geometry.rig_utils import precompute_joint_orient, remove_joint_orient_local
 from soma.hand import SOMAHandLayer
 from torch import Tensor
 
-from egohand.models.egohand import EgoHand
 from posekit.models.egohand import EgoHandStage
 from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_cuda_crops import PreparedHandCrops
