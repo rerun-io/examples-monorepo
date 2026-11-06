@@ -15,7 +15,7 @@ from hexels_bench.metrics import MetricsFile
 from hexels_bench.png16 import read_png16, write_png16
 from hexels_bench.upstream import UPSTREAM_HEXELS_REV
 
-RECIPE: Path = Path(__file__).resolve().parents[2] / "hexels-src" / "recipe.yaml"
+RECIPE: Path = Path(__file__).resolve().parents[3] / "recipes" / "hexels-src" / "recipe.yaml"
 
 
 def test_schedule_is_identity_at_30k_and_scales_to_7k() -> None:

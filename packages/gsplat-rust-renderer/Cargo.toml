@@ -188,6 +188,6 @@ significant_drop_tightening = "allow" # An update of parking_lot made this trigg
 lto = "thin"
 codegen-units = 16
 
-# Brush sources and observer patch: packages/brush-src/recipe.yaml.
+# Brush sources and observer patch: recipes/brush-src/recipe.yaml.
 # Bump the recipe rev, rebase its patch, re-lock/install Pixi, then resolve Cargo offline.
 # The reference brush-cli task uses its own unpatched upstream workspace.

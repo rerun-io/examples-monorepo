@@ -1,4 +1,4 @@
-"""Thin adapters over upstream Hexels (the `hexels` and `scripts` modules from packages/hexels-src).
+"""Thin adapters over upstream Hexels (the `hexels` and `scripts` modules from recipes/hexels-src).
 
 Upstream imports stay inside the functions: they need the hexels env (hexel-kernel CUDA build), while
 the rest of hexels_bench (export, scorer, layout) runs anywhere torch runs.
@@ -22,7 +22,7 @@ from hexels_bench.png16 import from_unit_float, write_png16
 from hexels_bench.surface_frames import SurfaceFrame
 
 UPSTREAM_HEXELS_REV: str = "698d1afb0944d3e766074c3beb70362f16c7550d"
-"""hexels commit packaged by packages/hexels-src/recipe.yaml (a unit test keeps them equal)."""
+"""hexels commit packaged by recipes/hexels-src/recipe.yaml (a unit test keeps them equal)."""
 
 
 @serde

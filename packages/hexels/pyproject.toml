@@ -5,7 +5,7 @@ description = "Hexels beside Brush: upstream checkpoint export to hexel PLY, pro
 authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
 # Static metadata only. Upstream Hexels, its CUDA kernels and Image-GS come from the
-# `packages/hexels-src` conda outputs; torch comes from the `cuda` feature.
+# `recipes/hexels-src` conda outputs; torch comes from the `cuda` feature.
 dependencies = []
 
 [build-system]

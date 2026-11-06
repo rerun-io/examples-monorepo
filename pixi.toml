@@ -1832,8 +1832,8 @@ mojo = "*"
 # Build 2 adds sm_89/90/120 kernels and compute_120 PTX; build 1 stops at sm_86, so every lietorch
 # kernel fails on an RTX 5090 with "no kernel image is available".
 lietorch = { version = "==1.0", build-number = ">=2" }
-mast3r = { path = "packages/mast3r" }
-asmk = { path = "packages/asmk" }
+mast3r-src = { path = "recipes/mast3r-src" }
+asmk-src = { path = "recipes/asmk-src" }
 
 [feature.mast3r-slam.pypi-dependencies]
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
@@ -1959,7 +1959,7 @@ description = "Launch MASt3R-SLAM Gradio web UI"
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.gsplat-rust-renderer.dependencies]
-brush-src = { path = "packages/brush-src" }
+brush-src = { path = "recipes/brush-src" }
 python = "3.12.*"
 # Pinned Rerun and Brush crates share this Rust toolchain.
 rust = "1.98.*"
@@ -2093,7 +2093,7 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Log a Brush PLY and a hexel PLY side by side on one orbit camera with the per-scene metrics table"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# hexels — upstream Hexels (CUDA 13 build in packages/hexels-src) + our protocol tools
+# hexels — upstream Hexels (CUDA 13 build in recipes/hexels-src) + our protocol tools
 # ═══════════════════════════════════════════════════════════════════════════
 # hexel-kernel installs as the Python module `gsplat`: never compose this feature with nerfstudio gsplat.
 # Image-GS runs through upstream's fit_image harness in this env (hexel-kernel carries its 2D kernels).
@@ -2105,11 +2105,11 @@ python = "3.12.*"
 # hexels-src runs need open3d (upstream mesh extraction, 2DGS eval_dtu); conda-forge 0.20.0 fails to import
 # (libOpen3D.so.0.20: undefined filament symbol), so hold the monorepo's 0.19 like every other feature.
 open3d = ">=0.19.0,<0.20"
-hexels-src = { path = "packages/hexels-src" }
-hexel-kernel = { path = "packages/hexels-src" }
-fused-ssim = { path = "packages/hexels-src" }
-simple-knn = { path = "packages/hexels-src" }
-image-gs = { path = "packages/hexels-src" }
+hexels-src = { path = "recipes/hexels-src" }
+hexel-kernel = { path = "recipes/hexels-src" }
+fused-ssim = { path = "recipes/hexels-src" }
+simple-knn = { path = "recipes/hexels-src" }
+image-gs = { path = "recipes/hexels-src" }
 tyro = ">=0.9.1,<0.10"
 pyserde = ">=0.31.2,<0.32"
 tomli-w = ">=1.2,<2"
