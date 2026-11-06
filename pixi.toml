@@ -3719,7 +3719,6 @@ vipe-src = { path = "recipes/vipe-src" }
 # vipe-src's run dependency (patch 0002: MetricTrail's frozen DINOv3 ViT-S/16); a sibling recipe solves only when listed.
 dinov3-src = { path = "recipes/dinov3-src" }
 tyro = ">=0.9.1,<0.10"
-pillow = "<13"  # gradio 6.13 (held, common) needs pillow<13; the solve would otherwise pick 13
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
