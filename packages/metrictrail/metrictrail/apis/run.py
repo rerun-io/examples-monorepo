@@ -19,7 +19,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import rerun as rr
+import torch
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -153,6 +155,10 @@ def main(config: Config) -> RunMetrics:
             depth_range_m=depth_range_m,
         )
         session.install()
+    # This module imports cv2 (metrictrail.frames) before torch, so OpenMP sizes cv2's thread team to every logical
+    # CPU while torch keeps one thread per physical core; both teams spinning cost ~13 % tracking fps on the 32-thread
+    # dl-server (15.7 vs 18.2 fps on TUM fr1_desk). Upstream's run.py imports torch first and never sees this.
+    cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
     try:
         pipeline = make_pipeline(typed.pipeline)
