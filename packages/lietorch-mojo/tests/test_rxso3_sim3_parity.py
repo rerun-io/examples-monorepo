@@ -7,6 +7,14 @@
 
 Tolerances as for SE3 (`row_error`, worst element): 1e-5 for float32, 1e-10
 for float64.
+
+float32 references come from lietorch's CPU build on every device. lietorch's
+CUDA float32 Sim3 is the outlier: against a float64 truth on the same
+float32 inputs it is 2-450x less accurate than its own CPU build (tiny
+angles: expm 1.7e-4 vs 8.0e-5, logm 9.3e-5 vs 2.1e-7, Jinv 5.0e-5 vs 2.1e-7),
+while this port gives the CPU values on both devices. The raw-op test
+also checks that Mojo is never farther from the float64 truth than lietorch on
+the same device.
 """
 
 import pytest
@@ -52,11 +60,25 @@ CASE_PARAMS: list = [pytest.param(g, c, id=f"{g}-{c.name}") for g, cases in CASE
 def test_op_matches_lietorch(group: str, case: ScaledCase, op: str, dtype: torch.dtype, device: str) -> None:
     gid: int = GROUP_IDS[group]
     inputs: OpInputs = make_inputs(gid, case, dtype, device)
-    ref: list[Tensor] = call_op(lietorch_backends, gid, op, inputs)
     ours: list[Tensor] = call_op(backends, gid, op, inputs)
     assert all(bool(torch.isfinite(o).all()) for o in ours)
-    err: float = row_error(ours, ref)
+    ref_device: str = "cpu" if dtype == torch.float32 else device  # module docstring
+    ref: list[Tensor] = call_op(lietorch_backends, gid, op, make_inputs(gid, case, dtype, ref_device))
+    err: float = row_error([o.to(ref_device) for o in ours], ref)
     assert err <= TOLERANCE[dtype], f"{group} {op} {case.name} {dtype} {device}: row error {err:.3e}"
+    if dtype == torch.float32:
+        f64: OpInputs = OpInputs(
+            X=inputs.X.double(),
+            Y=inputs.Y.double(),
+            a=inputs.a.double(),
+            p3=inputs.p3.double(),
+            p4=inputs.p4.double(),
+            grads={k: v.double() for k, v in inputs.grads.items()},
+        )
+        truth: list[Tensor] = [t.float() for t in call_op(lietorch_backends, gid, op, f64)]
+        ours_err: float = row_error(ours, truth)
+        lietorch_err: float = row_error(call_op(lietorch_backends, gid, op, inputs), truth)
+        assert ours_err <= lietorch_err + TOLERANCE[dtype], f"{group} {op} {case.name} {device}: Mojo {ours_err:.3e} vs lietorch {lietorch_err:.3e}"
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -191,13 +213,15 @@ def test_autograd_gradients_match(group: str, name: str, dtype: torch.dtype, dev
     widths: list[int] = _composites(lietorch, group, X_data, Y_data)[name][1]
     base: list[Tensor] = [torch.randn(batch, w, generator=gen, dtype=torch.float64).to(device=device, dtype=dtype) for w in widths]
     grads: dict[str, list[Tensor]] = {}
-    for mod in (lietorch, lietorch_mojo):
-        fn, _ = _composites(mod, group, X_data, Y_data)[name]
-        ins: list[Tensor] = [b.clone().requires_grad_(True) for b in base]
+    # float32 reference: lietorch's CPU build (module docstring).
+    ref_device: str = "cpu" if dtype == torch.float32 else device
+    for mod, dev in ((lietorch, ref_device), (lietorch_mojo, device)):
+        fn, _ = _composites(mod, group, X_data.to(dev), Y_data.to(dev))[name]
+        ins: list[Tensor] = [b.to(dev).clone().requires_grad_(True) for b in base]
         out: Tensor = fn(ins)
-        weight: Tensor = torch.randn(out.shape, generator=torch.Generator().manual_seed(3), dtype=torch.float64).to(device=device, dtype=dtype)
+        weight: Tensor = torch.randn(out.shape, generator=torch.Generator().manual_seed(3), dtype=torch.float64).to(device=dev, dtype=dtype)
         (out * weight).sum().backward()
-        grads[mod.__name__] = [i.grad for i in ins]
+        grads[mod.__name__] = [i.grad.cpu() for i in ins]
     for i, (ours, ref) in enumerate(zip(grads["lietorch_mojo"], grads["lietorch"], strict=True)):
         err: float = ((ours.double() - ref.double()).abs() / ref.double().abs().clamp_min(1.0)).max().item()
         assert err <= TOLERANCE[dtype], f"{group} {name} input {i}: {err:.3e}"
