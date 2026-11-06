@@ -11,9 +11,13 @@ Python passes plain integers and the runtime objects created here:
 - `row_widths(spec)` lists the width of each of those tensors; Python checks
   every tensor's shape against it before it launches.
 
-This file turns the runtime integers into compile-time parameters. Only SE3
-is instantiated in this step; the other groups plug in here once they
-implement `LieGroup`.
+This file turns the runtime integers into compile-time parameters. SE3,
+RxSO3 and Sim3 are instantiated; a group plugs in here once it implements
+`LieGroup`.
+
+- `pose_retr_cuda(runtime, stream, poses, dx, num_poses, num_fix, is_float64)`
+  and `pose_retr_cpu(runtime, poses, dx, num_poses, num_fix, is_float64)`: the
+  in-place Sim3 retraction of `pose_retr.mojo` (Python checks the tensors).
 """
 
 from std.os import abort
@@ -34,9 +38,14 @@ from launch import (
     unary_cuda,
 )
 from lie_group import LieGroup
+from pose_retr import pose_retr_cpu, pose_retr_cuda
+from rxso3 import RxSO3
 from se3 import SE3
+from sim3 import Sim3
 
+comptime GROUP_RXSO3 = 2
 comptime GROUP_SE3 = 3
+comptime GROUP_SIM3 = 4
 
 
 def _check_tensor_count(op: Int, tensors: PythonObject) raises:
@@ -91,47 +100,113 @@ def _row_widths[G: LieGroup](op: Int) raises -> PythonObject:
     raise Error(t"lietorch_mojo: unknown op code {op}")
 
 
-def _unpack_spec(spec_obj: PythonObject) raises -> Tuple[Int, Bool]:
-    """(op, is_float64) of a spec; raises for groups that are not implemented."""
+def _unpack_spec(spec_obj: PythonObject) raises -> Tuple[Int, Int, Bool]:
+    """(group id, op, is_float64) of a spec; raises for groups that are not implemented."""
     var spec = Int(py=spec_obj)
     var group_id = (spec >> 8) & 0xFF
-    if group_id != GROUP_SE3:
+    if group_id != GROUP_SE3 and group_id != GROUP_RXSO3 and group_id != GROUP_SIM3:
         raise Error(t"lietorch_mojo: group id {group_id} is not implemented")
-    return (spec & 0xFF, ((spec >> 16) & 1) == 1)
+    return (group_id, spec & 0xFF, ((spec >> 16) & 1) == 1)
 
 
 def launch_cuda_py(
     runtime: PythonObject, stream_obj: PythonObject, spec_obj: PythonObject, n_obj: PythonObject, tensors: PythonObject
 ) raises -> PythonObject:
-    var op, is_f64 = _unpack_spec(spec_obj)
+    var group_id, op, is_f64 = _unpack_spec(spec_obj)
     var n = Int(py=n_obj)
     if n > 0:
         var rt = runtime.downcast_value_ptr[GPURuntime]()
         var stream = Int(py=stream_obj)
-        if is_f64:
-            _launch_cuda[SE3[.float64]](rt[], stream, op, n, tensors)
-        else:
-            _launch_cuda[SE3[.float32]](rt[], stream, op, n, tensors)
+        if group_id == GROUP_SE3:
+            if is_f64:
+                _launch_cuda[SE3[.float64]](rt[], stream, op, n, tensors)
+            else:
+                _launch_cuda[SE3[.float32]](rt[], stream, op, n, tensors)
+        elif group_id == GROUP_RXSO3:
+            if is_f64:
+                _launch_cuda[RxSO3[.float64]](rt[], stream, op, n, tensors)
+            else:
+                _launch_cuda[RxSO3[.float32]](rt[], stream, op, n, tensors)
+        elif group_id == GROUP_SIM3:
+            if is_f64:
+                _launch_cuda[Sim3[.float64]](rt[], stream, op, n, tensors)
+            else:
+                _launch_cuda[Sim3[.float32]](rt[], stream, op, n, tensors)
     return Python.none()
 
 
 def launch_cpu_py(runtime: PythonObject, spec_obj: PythonObject, n_obj: PythonObject, tensors: PythonObject) raises -> PythonObject:
-    var op, is_f64 = _unpack_spec(spec_obj)
+    var group_id, op, is_f64 = _unpack_spec(spec_obj)
     var n = Int(py=n_obj)
     if n > 0:
         var rt = runtime.downcast_value_ptr[CPURuntime]()
-        if is_f64:
-            _launch_cpu[SE3[.float64]](rt[], op, n, tensors)
-        else:
-            _launch_cpu[SE3[.float32]](rt[], op, n, tensors)
+        if group_id == GROUP_SE3:
+            if is_f64:
+                _launch_cpu[SE3[.float64]](rt[], op, n, tensors)
+            else:
+                _launch_cpu[SE3[.float32]](rt[], op, n, tensors)
+        elif group_id == GROUP_RXSO3:
+            if is_f64:
+                _launch_cpu[RxSO3[.float64]](rt[], op, n, tensors)
+            else:
+                _launch_cpu[RxSO3[.float32]](rt[], op, n, tensors)
+        elif group_id == GROUP_SIM3:
+            if is_f64:
+                _launch_cpu[Sim3[.float64]](rt[], op, n, tensors)
+            else:
+                _launch_cpu[Sim3[.float32]](rt[], op, n, tensors)
     return Python.none()
 
 
 def row_widths_py(spec_obj: PythonObject) raises -> PythonObject:
-    var op, is_f64 = _unpack_spec(spec_obj)
-    if is_f64:
-        return _row_widths[SE3[.float64]](op)
+    var group_id, op, _ = _unpack_spec(spec_obj)
+    # Row widths do not depend on the dtype.
+    if group_id == GROUP_RXSO3:
+        return _row_widths[RxSO3[.float32]](op)
+    if group_id == GROUP_SIM3:
+        return _row_widths[Sim3[.float32]](op)
     return _row_widths[SE3[.float32]](op)
+
+
+def pose_retr_cuda_py(
+    runtime: PythonObject,
+    stream_obj: PythonObject,
+    poses: PythonObject,
+    dx: PythonObject,
+    num_poses_obj: PythonObject,
+    num_fix_obj: PythonObject,
+    is_f64_obj: PythonObject,
+) raises -> PythonObject:
+    """Sim3 pose retraction in place on the GPU (lietorch_mojo.pose_retr checked the tensors)."""
+    var num_poses = Int(py=num_poses_obj)
+    var num_fix = Int(py=num_fix_obj)
+    if num_fix < 0:
+        raise Error(t"lietorch_mojo: num_fix must be >= 0, got {num_fix}")
+    if num_fix < num_poses:
+        var rt = runtime.downcast_value_ptr[GPURuntime]()
+        var stream = Int(py=stream_obj)
+        if Bool(py=is_f64_obj):
+            pose_retr_cuda[.float64](rt[], stream, poses, dx, num_poses, num_fix)
+        else:
+            pose_retr_cuda[.float32](rt[], stream, poses, dx, num_poses, num_fix)
+    return Python.none()
+
+
+def pose_retr_cpu_py(
+    runtime: PythonObject, poses: PythonObject, dx: PythonObject, num_poses_obj: PythonObject, num_fix_obj: PythonObject, is_f64_obj: PythonObject
+) raises -> PythonObject:
+    """Sim3 pose retraction in place on the CPU."""
+    var num_poses = Int(py=num_poses_obj)
+    var num_fix = Int(py=num_fix_obj)
+    if num_fix < 0:
+        raise Error(t"lietorch_mojo: num_fix must be >= 0, got {num_fix}")
+    if num_fix < num_poses:
+        var rt = runtime.downcast_value_ptr[CPURuntime]()
+        if Bool(py=is_f64_obj):
+            pose_retr_cpu[.float64](rt[], poses, dx, num_poses, num_fix)
+        else:
+            pose_retr_cpu[.float32](rt[], poses, dx, num_poses, num_fix)
+    return Python.none()
 
 
 def create_gpu_runtime_py() raises -> PythonObject:
@@ -153,6 +228,8 @@ def PyInit__lietorch_mojo_backends() abi("C") -> PythonObject:
         m.def_function[launch_cuda_py]("launch_cuda")
         m.def_function[launch_cpu_py]("launch_cpu")
         m.def_function[row_widths_py]("row_widths")
+        m.def_function[pose_retr_cuda_py]("pose_retr_cuda")
+        m.def_function[pose_retr_cpu_py]("pose_retr_cpu")
         m.def_function[create_gpu_runtime_py]("create_gpu_runtime")
         m.def_function[create_cpu_runtime_py]("create_cpu_runtime")
         return m.finalize()

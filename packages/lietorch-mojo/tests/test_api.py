@@ -168,7 +168,7 @@ def test_extension_rejects_a_wrong_tensor_count() -> None:
     with pytest.raises(Exception, match="unknown op code"):
         ext.launch_cpu(backends._runtime(False), 99 | (3 << 8), 4, (X.data_ptr(),) * 2)
     with pytest.raises(Exception, match="not implemented"):
-        ext.launch_cpu(backends._runtime(False), 4 | (4 << 8), 4, (X.data_ptr(),) * 2)
+        ext.launch_cpu(backends._runtime(False), 4 | (7 << 8), 4, (X.data_ptr(),) * 2)  # no group 7
     with pytest.raises(Exception, match="expected Mojo .launch.GPURuntime. type value"):  # the downcast is type checked
         ext.launch_cuda(backends._runtime(False), 0, 4 | (3 << 8), 4, (X.data_ptr(),) * 2)
 

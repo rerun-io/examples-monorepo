@@ -170,7 +170,7 @@ def test_setitem_and_shapes_match() -> None:
 
 
 def test_other_groups_raise_not_implemented() -> None:
-    for name, dim in (("SO3", 3), ("RxSO3", 4), ("Sim3", 7)):
+    for name, dim in (("SO3", 3),):
         with pytest.raises(NotImplementedError):
             getattr(lietorch_mojo, name).exp(torch.zeros(1, dim, dtype=torch.float64))
 

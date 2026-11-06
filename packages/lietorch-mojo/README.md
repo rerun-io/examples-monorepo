@@ -10,7 +10,20 @@ Status (step 1 of the lietorch → Mojo evaluation):
 | Group | Forward | Backward | CPU | CUDA | float32 / float64 |
 |-------|---------|----------|-----|------|-------------------|
 | SE3   | yes     | yes      | yes | yes  | yes               |
-| SO3, RxSO3, Sim3 | API shells; ops raise `NotImplementedError` | | | | |
+| RxSO3 | yes     | yes      | yes | yes  | yes               |
+| Sim3  | yes     | yes      | yes | yes  | yes               |
+| SO3   | API shell; ops raise `NotImplementedError` | | | | |
+
+Sim3's left Jacobian and its inverse are sim3.h's truncated series, including
+its missing Xi^5/720 term (a stray `;` upstream). So Sim3 `expm_backward`,
+`logm_backward` and `Jinv` match lietorch, not the exact Jacobians; the error
+grows like |Xi|^5/720 (sim3.mojo).
+
+`lietorch_mojo.pose_retr.pose_retr(poses, dx, num_fix)` is MASt3R-SLAM's
+Gauss-Newton retraction (`pose_retr_py` in mast3r-slam's `gn.mojo`): in place,
+T[k] = Exp(dx[k - num_fix]) * T[k] for k >= num_fix, equal to
+`Sim3(poses[num_fix:]).retr(dx)`. Mojo code builds against the same kernel with
+`-I <this package>/lietorch_mojo/mojo` and `from pose_retr import pose_retr_kernel`.
 
 `lietorch_mojo.backends` is a drop-in for the compiled `lietorch_backends`
 module (`expm`, `expm_backward`, `logm`, …, `as_matrix`, `projector`, `Jinv`).
@@ -125,6 +138,10 @@ lietorch_mojo/
     lie_group.mojo   the LieGroup trait (dtype, N, K and the group primitives)
     so3.mojo         SO3[dtype], port of so3.h
     se3.mojo         SE3[dtype], port of se3.h
+    rxso3.mojo       RxSO3[dtype], port of rxso3.h (SO3 plus a scale; calcW for Sim3)
+    sim3.mojo        Sim3[dtype], port of sim3.h
+    lie_explog.mojo  exp_ and log_ for the scale (std.math.exp is up to ~4e4 ulp off in float64)
+    pose_retr.mojo   MASt3R-SLAM's Sim3 pose retraction (kernel, row function, CPU loop)
     group_ops.mojo   op codes, row widths, and one per-element function per op family (unary, unary backward, binary, binary backward)
     launch.mojo      TileTensor rows, GPU kernels, CPU loop, GPURuntime / CPURuntime
     _lietorch_mojo_backends.mojo   CPython entry (PyInit), runtime → comptime dispatch, tensor-count check
@@ -137,6 +154,6 @@ number of tensors, so a wrong shape raises `ValueError` instead of reading or
 writing out of bounds. The CUDA and CPU contexts are Mojo objects
 (`GPURuntime`, `CPURuntime`) held by Python and type-checked on every call.
 
-Adding a group (SO3, RxSO3, Sim3) means one Mojo struct that implements
+Adding a group (SO3) means one Mojo struct that implements
 `LieGroup`, one dispatch line in `_lietorch_mojo_backends.mojo`, and its id in
 `backends._IMPLEMENTED_DIMS`.

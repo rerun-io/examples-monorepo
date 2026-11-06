@@ -3,8 +3,8 @@
 Every function has the name, argument order, output shapes and gradient
 conventions of the pybind11 function of the same name in lietorch
 `src/lietorch.cpp` (VSLAM-LAB/lietorch @ 3e2695dd). `group_index` uses
-lietorch's ids: SO3=1, RxSO3=2, SE3=3, Sim3=4. Only SE3 is implemented in the
-Mojo extension so far; the other ids raise `NotImplementedError`.
+lietorch's ids: SO3=1, RxSO3=2, SE3=3, Sim3=4. Groups without a Mojo
+implementation raise `NotImplementedError`.
 
 Deviations from lietorch, all on inputs lietorch mishandles:
 - A dtype other than float32/float64 raises `TypeError` (lietorch silently
@@ -53,7 +53,7 @@ _NUM_OPS: Final[int] = 19
 
 # lietorch group id -> (embedded dim N, manifold dim K).
 _GROUP_DIMS: Final[dict[int, tuple[int, int]]] = {1: (4, 3), 2: (5, 4), 3: (7, 6), 4: (8, 7)}
-_IMPLEMENTED_DIMS: Final[dict[int, tuple[int, int]]] = {3: _GROUP_DIMS[3]}
+_IMPLEMENTED_DIMS: Final[dict[int, tuple[int, int]]] = {2: _GROUP_DIMS[2], 3: _GROUP_DIMS[3], 4: _GROUP_DIMS[4]}
 _GROUP_NAMES: Final[dict[int, str]] = {1: "SO3", 2: "RxSO3", 3: "SE3", 4: "Sim3"}
 # (group id, op) -> width of each tensor the op takes, inputs then outputs (from the extension).
 _ROW_WIDTHS: Final[dict[tuple[int, int], tuple[int, ...]]] = {
@@ -89,7 +89,7 @@ def _dims(group_index: int) -> tuple[int, int]:
         return dims
     if group_index not in _GROUP_DIMS:
         raise ValueError(f"unknown lietorch group id {group_index}")
-    raise NotImplementedError(f"lietorch_mojo: {_GROUP_NAMES[group_index]} is not implemented yet (only SE3)")
+    raise NotImplementedError(f"lietorch_mojo: {_GROUP_NAMES[group_index]} is not implemented yet")
 
 
 def _bad_inputs(tensors: tuple[Tensor, ...], names: tuple[str, ...], widths: tuple[int, ...], n: int) -> Exception:

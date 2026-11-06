@@ -1,9 +1,10 @@
 """lietorch_mojo: lietorch's Lie group API on a Mojo backend.
 
 `import lietorch_mojo as lietorch` is a drop-in for upstream lietorch
-(VSLAM-LAB/lietorch @ 3e2695dd). SE3 is backed by Mojo kernels (CPU and CUDA,
-float32 and float64, forward and backward); SO3, RxSO3 and Sim3 are API shells
-whose ops raise NotImplementedError until their Mojo groups land.
+(VSLAM-LAB/lietorch @ 3e2695dd). SE3, RxSO3 and Sim3 are backed by Mojo kernels
+(CPU and CUDA, float32 and float64, forward and backward); SO3 is an API shell
+whose ops raise NotImplementedError until its Mojo group lands.
+`lietorch_mojo.pose_retr.pose_retr` is MASt3R-SLAM's in-place Sim3 retraction.
 """
 
 import os
