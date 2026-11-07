@@ -2447,6 +2447,7 @@ inputs = [
     "packages/dpvo/dpvo/altcorr/*.cu",
     "packages/dpvo/dpvo/fastba/*.cpp",
     "packages/dpvo/dpvo/fastba/*.cu",
+    "packages/dpvo/dpvo/fastba/*.cuh",
 ]
 outputs = [
     "packages/dpvo/dpvo/_cuda_corr*.so",
