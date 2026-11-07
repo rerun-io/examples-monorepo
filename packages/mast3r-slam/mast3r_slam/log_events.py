@@ -24,8 +24,6 @@ class KeyframeSnapshot:
 
     kf_idx: int
     """Keyframe buffer index."""
-    frame_id: int
-    """Dataset frame index of the keyframe (selects its frame in the source video)."""
     world_sim3_cam_data: Float32[ndarray, "8"]
     """Raw lietorch Sim3 data (8 floats) on CPU."""
     rgb: Float32[ndarray, "H W 3"]

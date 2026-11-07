@@ -57,13 +57,11 @@ def _resize_pil_image(img: PIL.Image.Image, long_edge_size: int) -> PIL.Image.Im
     interp: PIL.Image.Resampling = (
         PIL.Image.Resampling.LANCZOS if long_edge_size < longest_edge else PIL.Image.Resampling.BICUBIC
     )
-    return img.resize(_resized_size(img.size[0], img.size[1], long_edge_size), interp)
-
-
-def _resized_size(width: int, height: int, long_edge_size: int) -> tuple[int, int]:
-    """(width, height) after ``_resize_pil_image`` scales the longest edge to ``long_edge_size``."""
-    longest_edge: int = max(width, height)
-    return (int(round(width * long_edge_size / longest_edge)), int(round(height * long_edge_size / longest_edge)))
+    new_size: tuple[int, int] = (
+        int(round(img.size[0] * long_edge_size / longest_edge)),
+        int(round(img.size[1] * long_edge_size / longest_edge)),
+    )
+    return img.resize(new_size, interp)
 
 
 def _center_crop_224(img: PIL.Image.Image) -> PIL.Image.Image:
@@ -75,15 +73,13 @@ def _center_crop_224(img: PIL.Image.Image) -> PIL.Image.Image:
     Returns:
         Square-cropped PIL image.
     """
-    return img.crop(_center_crop_224_box(*img.size))
-
-
-def _center_crop_224_box(w: int, h: int) -> tuple[int, int, int, int]:
-    """(left, top, right, bottom) of the square that ``_center_crop_224`` keeps."""
+    w: int
+    h: int
+    w, h = img.size
     cx: int = w // 2
     cy: int = h // 2
     half: int = min(cx, cy)
-    return (cx - half, cy - half, cx + half, cy + half)
+    return img.crop((cx - half, cy - half, cx + half, cy + half))
 
 
 def _center_crop_512(img: PIL.Image.Image, square_ok: bool) -> PIL.Image.Image:
@@ -100,18 +96,16 @@ def _center_crop_512(img: PIL.Image.Image, square_ok: bool) -> PIL.Image.Image:
     Returns:
         Cropped PIL image with dimensions divisible by 16.
     """
-    return img.crop(_center_crop_512_box(*img.size, square_ok=square_ok))
-
-
-def _center_crop_512_box(w: int, h: int, square_ok: bool) -> tuple[int | float, int | float, int | float, int | float]:
-    """(left, top, right, bottom) of the rectangle that ``_center_crop_512`` keeps."""
+    w: int
+    h: int
+    w, h = img.size
     cx: int = w // 2
     cy: int = h // 2
     halfw: int = ((2 * cx) // 16) * 8
     halfh: int | float = ((2 * cy) // 16) * 8
     if not square_ok and w == h:
         halfh = 3 * halfw / 4
-    return (cx - halfw, cy - halfh, cx + halfw, cy + halfh)
+    return img.crop((cx - halfw, cy - halfh, cx + halfw, cy + halfh))
 
 
 def resize_img(
@@ -206,52 +200,4 @@ def resize_img_with_transform(
     return (
         ResizedImage(rgb_tensor=normalized, true_shape=true_shape, rgb_uint8=unnormalized),
         CropTransform(scale_w=scale_w, scale_h=scale_h, half_crop_w=half_crop_w, half_crop_h=half_crop_h),
-    )
-
-
-class VideoToFrame(NamedTuple):
-    """2D affine map from source-video pixels to MASt3R frame pixels: ``frame = scale * video + translation``."""
-
-    scale: tuple[float, float]
-    """Per-axis (x, y) resize factor, frame pixels per video pixel."""
-    translation: tuple[float, float]
-    """Per-axis (x, y) offset in frame pixels: minus the center-crop offset."""
-
-
-def video_to_frame_transform(
-    video_width: int,
-    video_height: int,
-    size: Literal[224, 512],
-    downsample: int = 1,
-    square_ok: bool = False,
-) -> VideoToFrame:
-    """Map source-video pixels onto the frame that ``resize_img`` (plus ``img_downsample``) produces.
-
-    Mirrors the preprocessing exactly: the same rounded resize as ``_resize_pil_image`` and the
-    same crop box as ``_center_crop_224`` / ``_center_crop_512``.
-
-    Args:
-        video_width: Source video width in pixels.
-        video_height: Source video height in pixels.
-        size: MASt3R encoder size (224 or 512).
-        downsample: ``config["dataset"]["img_downsample"]`` stride applied after the crop.
-        square_ok: Same flag as ``resize_img``.
-
-    Returns:
-        Scale and translation that place a video frame over the MASt3R frame.
-    """
-    resized_w: int
-    resized_h: int
-    left: int | float
-    top: int | float
-    if size == 224:
-        long_edge: int = round(size * max(video_width / video_height, video_height / video_width))
-        resized_w, resized_h = _resized_size(video_width, video_height, long_edge)
-        left, top, _, _ = _center_crop_224_box(resized_w, resized_h)
-    else:
-        resized_w, resized_h = _resized_size(video_width, video_height, size)
-        left, top, _, _ = _center_crop_512_box(resized_w, resized_h, square_ok)
-    return VideoToFrame(
-        scale=(resized_w / video_width / downsample, resized_h / video_height / downsample),
-        translation=(-left / downsample, -top / downsample),
     )
