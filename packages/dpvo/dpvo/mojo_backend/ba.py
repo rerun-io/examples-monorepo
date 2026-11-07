@@ -3,12 +3,10 @@
 Same signatures as the CUDA extension `dpvo._cuda_ba` after dpvo/metric-core (four depth-prior
 arguments after `lmbda`; an empty prior is plain DPVO). `forward` is the extension's Gauss-Newton
 driver (`cuda_ba` in ba_cuda.cu) line for line: the residual/Hessian, depth-prior and retraction
-kernels are Mojo; the Schur complement and the Cholesky solve are PyTorch on the input device
-(on MPS the 6n x 6n solve runs on the CPU: PyTorch has no MPS Cholesky solve).
+kernels are Mojo; the Schur complement and the Cholesky solve are PyTorch on the input device.
 The block-E path (`eff_impl=True`, global BA) builds the extension's `EfficentE` index tables with
 PyTorch ops on the input device; its three Schur products are Mojo kernels.
-`neighbors` is a PyTorch port of the extension's CPU function. Not ported: `solve_system`
-(classical loop closure).
+`neighbors` is a PyTorch port of the extension's CPU function.
 """
 
 from dataclasses import dataclass
@@ -200,8 +198,3 @@ def neighbors(ii: Int64[Tensor, " e"], jj: Int64[Tensor, " e"]) -> list[Int64[Te
     ix[order[1:]] = torch.where(same, order[:-1], -1)
     jx[order[:-1]] = torch.where(same, order[1:], -1)
     return [ix, jx]
-
-
-def solve_system(J_Ginv_i: Tensor, J_Ginv_j: Tensor, ii: Tensor, jj: Tensor, res: Tensor, ep: float, lm: float, freen: int) -> list[Tensor]:
-    """Classical loop closure's sparse pose-graph solve (Eigen in the extension): not ported."""
-    raise NotImplementedError("dpvo.mojo_backend: solve_system (classical loop closure) is CUDA-only")

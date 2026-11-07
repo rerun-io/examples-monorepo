@@ -1,7 +1,6 @@
 """Type stubs for the Mojo extension `_dpvo_mojo` (built by the dpvo-mojo-build task; see mojo/_dpvo_mojo.mojo).
 
-Every op takes a lietorch-mojo runtime object, a scalars tuple (first the raw CUDA stream, 0 on CPU
-and Metal) and a tuple of `(address, *shape)` tensor specs.
+Every op takes a lietorch-mojo runtime object, a scalars tuple (first the raw CUDA stream, 0 on CPU) and a tuple of `(address, *shape)` tensor specs.
 """
 
 Scalars = tuple[int | float | bool, ...]

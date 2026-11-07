@@ -44,7 +44,6 @@ class _CapturingBA:
 
     neighbors = staticmethod(_cuda_ba.neighbors)
     reproject = staticmethod(_cuda_ba.reproject)
-    solve_system = staticmethod(_cuda_ba.solve_system)
 
     def forward(
         self, poses: Tensor, patches: Tensor, intrinsics: Tensor, target: Tensor, weight: Tensor, lmbda: Tensor, depth_prior: Tensor,

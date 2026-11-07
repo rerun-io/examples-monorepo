@@ -6,11 +6,12 @@ complement to jointly optimize camera poses and 3-D patch depths, plus an
 optional robust log-inverse-depth prior on the patches (:class:`BADepthPrior`).
 
 Every op picks its backend from the input tensor's device through
-:mod:`dpvo.kernels`. This module also exposes three backend utilities:
+:mod:`dpvo.kernels`. This module also exposes two backend utilities:
 
 - ``neighbors`` -- find co-visible patch/frame neighbourhoods.
 - ``reproject`` -- project 3-D patches into specified target frames.
-- ``solve_system`` -- sparse PGO solve for loop closure.
+
+and ``solve_system``, loop closure's pose-graph step (:mod:`dpvo.mojo_backend.pgo`).
 """
 
 from collections.abc import Sequence
@@ -21,6 +22,7 @@ from jaxtyping import Float32, Int64
 from torch import Tensor
 
 from dpvo.kernels import ba_kernels
+from dpvo.mojo_backend.pgo import solve_system as solve_system
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,35 +163,3 @@ def reproject(
         Reprojected ``(x, y)`` pixel coordinates per edge and patch pixel.
     """
     return ba_kernels(poses.device).reproject(poses, patches, intrinsics, ii, jj, kk)
-
-
-def solve_system(
-    J_Ginv_i: Float32[Tensor, "n_res 7 7"],
-    J_Ginv_j: Float32[Tensor, "n_res 7 7"],
-    ii: Int64[Tensor, "n_res"],
-    jj: Int64[Tensor, "n_res"],
-    res: Float32[Tensor, "n_res 7"],
-    ep: float,
-    lm: float,
-    freen: int,
-) -> Float32[Tensor, "n_poses 7"]:
-    """Sparse Levenberg-Marquardt step of the Sim(3) pose graph (loop closure PGO).
-
-    The backend is the one serving ``res.device``.
-
-    Args:
-        J_Ginv_i: Residual Jacobian w.r.t. pose ``ii`` per residual.
-        J_Ginv_j: Residual Jacobian w.r.t. pose ``jj`` per residual.
-        ii: First pose index per residual.
-        jj: Second pose index per residual.
-        res: Sim(3) log residual per edge.
-        ep: Constant added to the normal-matrix diagonal.
-        lm: Multiplicative Levenberg-Marquardt damping of the diagonal.
-        freen: Number of free poses (``-1`` = all).
-
-    Returns:
-        Pose update in the Sim(3) tangent space, on ``res.device``.
-    """
-    solved: Sequence[Tensor] = ba_kernels(res.device).solve_system(J_Ginv_i, J_Ginv_j, ii, jj, res, ep, lm, freen)
-    delta: Float32[Tensor, "n_poses 7"] = solved[0]
-    return delta

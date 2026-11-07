@@ -1,7 +1,7 @@
 """The Mojo kernels (dpvo.mojo_backend) against the CUDA extension's outputs on real DPVO inputs.
 
 The references are frozen from `_cuda_corr` / `_cuda_ba` on pool.mp4 (`freeze_kernel_references.py`),
-so no test needs the CUDA extension. CPU runs in the unit lane; CUDA and MPS are integration tests.
+so no test needs the CUDA extension. CPU runs in the unit lane; CUDA is an integration test.
 
 Tolerances: float32 outputs within 1e-5 of the reference (relative to max(|ref|, 1)); float16
 correlation within one float16 ulp of the reference value (the Mojo kernel rounds every product
@@ -136,8 +136,6 @@ def test_unported_paths_raise() -> None:
         corr.backward(empty, empty, empty, empty, empty, empty, 3)
     with pytest.raises(NotImplementedError):
         corr.patchify_backward(empty, empty, empty, 1)
-    with pytest.raises(NotImplementedError):
-        ba.solve_system(empty, empty, empty, empty, empty, 0.0, 0.0, 0)
 
 
 def test_kernel_lookup_finds_the_mojo_backend(monkeypatch: pytest.MonkeyPatch) -> None:

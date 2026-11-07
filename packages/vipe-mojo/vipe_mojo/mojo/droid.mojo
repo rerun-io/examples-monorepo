@@ -1,4 +1,4 @@
-"""ViPE's DROID correlation kernels (`csrc/droid_net_ext/correlation_kernels.cu`, `altcorr_kernel.cu`), one source for CPU, CUDA and Metal.
+"""ViPE's DROID correlation kernels (`csrc/droid_net_ext/correlation_kernels.cu`, `altcorr_kernel.cu`), one source for CPU and CUDA.
 
 Each `*_element` function computes what one CUDA thread computes for one output pixel, with the CUDA
 kernel's loop order and arithmetic, so the GPU kernels and the CPU loop share it. Tensors travel as raw

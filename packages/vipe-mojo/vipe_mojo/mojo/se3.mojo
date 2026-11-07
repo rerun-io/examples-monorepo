@@ -9,8 +9,8 @@ The CUDA source writes some constants as doubles (`2.0 * (...)`, `0.5 - (1.0/48.
 Metal has no float64, so they are float32 here: the factor 2 is exact either way, and the series
 terms differ by at most a float32 rounding.
 
-sin, cos and sqrt come from lietorch-mojo's `lie_math` (`sincos_`, `sqrt_`), within one ulp on CPU,
-NVIDIA and Metal. Mojo 1.2's `std.math.cos` lowers to `cos.approx.ftz.f32` on NVIDIA, and
+sin, cos and sqrt come from lietorch-mojo's `lie_math` (`sincos_`, `sqrt_`), within one ulp on CPU
+and NVIDIA. Mojo 1.2's `std.math.cos` lowers to `cos.approx.ftz.f32` on NVIDIA, and
 `(1 - cos(theta)) / theta^2` in `exp_se3` cancels: at theta ~ 1e-3 that moved poses by 1e-3.
 """
 

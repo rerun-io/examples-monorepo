@@ -43,6 +43,16 @@ from ba import (
 )
 from corr import L1, L3, L4, L5, L6, NUM_THREADS, corr_element, corr_kernel, patchify_element, patchify_kernel
 from launch import CPURuntime, GPURuntime
+from pgo import (
+    pgo_apply_element,
+    pgo_apply_kernel,
+    pgo_blocks_element,
+    pgo_blocks_kernel,
+    pgo_chain_factor,
+    pgo_chain_factor_kernel,
+    pgo_chain_solve,
+    pgo_chain_solve_kernel,
+)
 
 # ── tensor views from (address, *shape) tuples ──────────────────────────────
 
@@ -100,6 +110,11 @@ def out1[dtype: DType](s: PythonObject) raises -> MutTileTensor[dtype, L1, MutUn
 @always_inline
 def out2[dtype: DType](s: PythonObject) raises -> MutTileTensor[dtype, L2, MutUntrackedOrigin]:
     return TileTensor(_mut[dtype](s), row_major((_dim(s, 0), _dim(s, 1))))
+
+
+@always_inline
+def out3[dtype: DType](s: PythonObject) raises -> MutTileTensor[dtype, L3, MutUntrackedOrigin]:
+    return TileTensor(_mut[dtype](s), row_major((_dim(s, 0), _dim(s, 1), _dim(s, 2))))
 
 
 @always_inline
@@ -476,6 +491,129 @@ def _block_e_cpu[which: Int](runtime: PythonObject, scalars: PythonObject, t: Py
     return Python.none()
 
 
+# ── loop closure's pose graph (matrix-free normal equations, float64) ──────────
+
+
+def pgo_blocks_gpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream,); tensors = (Ji, Jj, res, offsets, incident, blocks, grad)."""
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var n = _dim(t[6], 0)
+    var func = rt[].ctx.compile_function[pgo_blocks_kernel]()
+    rt[].torch_stream(Int(py=scalars[0])).enqueue_function(
+        func,
+        in3[DType.float64](t[0]),
+        in3[DType.float64](t[1]),
+        in2[DType.float64](t[2]),
+        in1[DType.int64](t[3]),
+        in1[DType.int64](t[4]),
+        out3[DType.float64](t[5]),
+        out2[DType.float64](t[6]),
+        grid_dim=ceildiv(n, NUM_THREADS),
+        block_dim=NUM_THREADS,
+    )
+    return Python.none()
+
+
+def pgo_blocks_cpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    var rt = runtime.downcast_value_ptr[CPURuntime]()
+    var Ji = in3[DType.float64](t[0])
+    var Jj = in3[DType.float64](t[1])
+    var res = in2[DType.float64](t[2])
+    var offsets = in1[DType.int64](t[3])
+    var incident = in1[DType.int64](t[4])
+    var blocks = out3[DType.float64](t[5])
+    var grad = out2[DType.float64](t[6])
+
+    def element(k: Int) {imm}:
+        pgo_blocks_element(k, Ji, Jj, res, offsets, incident, blocks, grad)
+
+    rt[].for_each_row(element, _dim(t[6], 0))
+    return Python.none()
+
+
+def pgo_apply_gpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream,); tensors = (Ji, Jj, ii, jj, offsets, incident, damp, x, y)."""
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var n = _dim(t[8], 0)
+    var func = rt[].ctx.compile_function[pgo_apply_kernel]()
+    rt[].torch_stream(Int(py=scalars[0])).enqueue_function(
+        func,
+        in3[DType.float64](t[0]),
+        in3[DType.float64](t[1]),
+        in1[DType.int64](t[2]),
+        in1[DType.int64](t[3]),
+        in1[DType.int64](t[4]),
+        in1[DType.int64](t[5]),
+        in2[DType.float64](t[6]),
+        in2[DType.float64](t[7]),
+        out2[DType.float64](t[8]),
+        grid_dim=ceildiv(n, NUM_THREADS),
+        block_dim=NUM_THREADS,
+    )
+    return Python.none()
+
+
+def pgo_apply_cpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    var rt = runtime.downcast_value_ptr[CPURuntime]()
+    var Ji = in3[DType.float64](t[0])
+    var Jj = in3[DType.float64](t[1])
+    var ii = in1[DType.int64](t[2])
+    var jj = in1[DType.int64](t[3])
+    var offsets = in1[DType.int64](t[4])
+    var incident = in1[DType.int64](t[5])
+    var damp = in2[DType.float64](t[6])
+    var x = in2[DType.float64](t[7])
+    var y = out2[DType.float64](t[8])
+
+    def element(k: Int) {imm}:
+        pgo_apply_element(k, Ji, Jj, ii, jj, offsets, incident, damp, x, y)
+
+    rt[].for_each_row(element, _dim(t[8], 0))
+    return Python.none()
+
+
+def pgo_chain_factor_gpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    """Scalars = (stream,); tensors = (diag, sub, l_diag, l_sub); one thread (a sequential sweep)."""
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var func = rt[].ctx.compile_function[pgo_chain_factor_kernel]()
+    rt[].torch_stream(Int(py=scalars[0])).enqueue_function(
+        func,
+        in3[DType.float64](t[0]),
+        in3[DType.float64](t[1]),
+        out3[DType.float64](t[2]),
+        out3[DType.float64](t[3]),
+        grid_dim=1,
+        block_dim=1,
+    )
+    return Python.none()
+
+
+def pgo_chain_factor_cpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    pgo_chain_factor(in3[DType.float64](t[0]), in3[DType.float64](t[1]), out3[DType.float64](t[2]), out3[DType.float64](t[3]))
+    return Python.none()
+
+
+def pgo_chain_solve_gpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    """Scalars = (stream,); tensors = (l_diag, l_sub, rhs, out); one thread (a sequential sweep)."""
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var func = rt[].ctx.compile_function[pgo_chain_solve_kernel]()
+    rt[].torch_stream(Int(py=scalars[0])).enqueue_function(
+        func,
+        in3[DType.float64](t[0]),
+        in3[DType.float64](t[1]),
+        in2[DType.float64](t[2]),
+        out2[DType.float64](t[3]),
+        grid_dim=1,
+        block_dim=1,
+    )
+    return Python.none()
+
+
+def pgo_chain_solve_cpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    pgo_chain_solve(in3[DType.float64](t[0]), in3[DType.float64](t[1]), in2[DType.float64](t[2]), out2[DType.float64](t[3]))
+    return Python.none()
+
+
 @export
 def PyInit__dpvo_mojo() abi("C") -> PythonObject:
     try:
@@ -500,6 +638,14 @@ def PyInit__dpvo_mojo() abi("C") -> PythonObject:
         m.def_function[_block_e_cpu[1]]("ev_cpu")
         m.def_function[_block_e_gpu[2]]("etv_gpu")
         m.def_function[_block_e_cpu[2]]("etv_cpu")
+        m.def_function[pgo_blocks_gpu_py]("pgo_blocks_gpu")
+        m.def_function[pgo_blocks_cpu_py]("pgo_blocks_cpu")
+        m.def_function[pgo_apply_gpu_py]("pgo_apply_gpu")
+        m.def_function[pgo_apply_cpu_py]("pgo_apply_cpu")
+        m.def_function[pgo_chain_factor_gpu_py]("pgo_chain_factor_gpu")
+        m.def_function[pgo_chain_factor_cpu_py]("pgo_chain_factor_cpu")
+        m.def_function[pgo_chain_solve_gpu_py]("pgo_chain_solve_gpu")
+        m.def_function[pgo_chain_solve_cpu_py]("pgo_chain_solve_cpu")
         return m.finalize()
     except e:
         abort(t"failed to create _dpvo_mojo: {e}")

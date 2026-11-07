@@ -1,4 +1,4 @@
-"""DPVO's bundle-adjustment kernels (`dpvo/fastba/ba_cuda.cu`), one source for CPU, CUDA and Metal.
+"""DPVO's bundle-adjustment kernels (`dpvo/fastba/ba_cuda.cu`), one source for CPU and CUDA.
 
 As in corr.mojo, each `*_element` function is one CUDA thread's body, shared by the GPU kernel and
 the CPU loop. The Gauss-Newton driver (unique patches, Schur complement, Cholesky) is PyTorch on the

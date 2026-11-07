@@ -1,4 +1,4 @@
-"""DPVO's correlation and patchify kernels (`dpvo/altcorr/correlation_kernel.cu`), one source for CPU, CUDA and Metal.
+"""DPVO's correlation and patchify kernels (`dpvo/altcorr/correlation_kernel.cu`), one source for CPU and CUDA.
 
 Each `*_element` function computes what one CUDA thread computes, with the CUDA kernel's index
 decomposition and arithmetic order, so the GPU kernels and the CPU loop share it. Half-precision

@@ -262,6 +262,6 @@ class LongTermLoopClosure:
 
         self.lc_in_progress = True
         self.lc_process = self.lc_pool.apply_async(
-            run_DPVO_PGO, (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue, self.pg.device)
+            run_DPVO_PGO, (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue)
         )
         return True

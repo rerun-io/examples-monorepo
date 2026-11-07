@@ -84,12 +84,6 @@ class BAKernels(Protocol):
         """Reproject every patch pixel from frame ``ii`` into frame ``jj``."""
         ...
 
-    def solve_system(
-        self, J_Ginv_i: Tensor, J_Ginv_j: Tensor, ii: Tensor, jj: Tensor, res: Tensor, ep: float, lm: float, freen: int
-    ) -> Sequence[Tensor]:
-        """Sparse Sim(3) pose-graph solve; returns ``(delta,)``."""
-        ...
-
 
 @dataclass(frozen=True, slots=True)
 class _Backend:
