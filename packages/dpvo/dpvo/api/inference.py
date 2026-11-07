@@ -26,6 +26,7 @@ from typing import Annotated, Any
 
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 import torch
 import tyro
 from jaxtyping import Float32, Float64, UInt8
@@ -279,6 +280,49 @@ def log_trajectory(
     return path_list, last_orient_n
 
 
+# ── Blueprint ───────────────────────────────────────────────────────────
+
+# Chase eye of the Follow view, in the camera frame (RDF: x right, y down, z forward). DPVO is monocular, so the
+# units are its own scene scale (initial patch depth ~1): behind and above the camera, aimed ahead of it.
+_FOLLOW_EYE_POSITION: tuple[float, float, float] = (0.0, -0.6, -1.5)
+_FOLLOW_EYE_TARGET: tuple[float, float, float] = (0.0, 0.0, 1.5)
+_FOLLOW_EYE_UP: tuple[float, float, float] = (0.0, -1.0, 0.0)
+
+
+def dpvo_blueprint(parent_log_path: Path) -> rrb.Blueprint:
+    """Overview and Follow 3D views beside the camera, like dataforge's rig layout.
+
+    The overview is rooted at ``/`` so the gravity-alignment transform on
+    ``parent_log_path`` shows (per rerun#9244 a Transform3D on a view's own
+    origin is invisible), and it draws the ground grid. The Follow view is
+    rooted at the camera entity, so its eye, fixed in the camera frame, rides
+    the camera; it has no grid because the camera frame has no ground plane.
+    """
+    camera_path: str = f"{parent_log_path}/camera"
+    overview = rrb.Spatial3DView(name="Overview", origin="/", eye_controls=rrb.EyeControls3D(spin_speed=0.25))
+    follow = rrb.Spatial3DView(
+        name="Follow",
+        origin=camera_path,
+        contents="/**",
+        line_grid=rrb.LineGrid3D(visible=False),
+        eye_controls=rrb.EyeControls3D(
+            kind=rrb.Eye3DKind.Orbital,
+            position=_FOLLOW_EYE_POSITION,
+            look_target=_FOLLOW_EYE_TARGET,
+            eye_up=_FOLLOW_EYE_UP,
+            spin_speed=0.0,
+        ),
+    )
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Vertical(overview, follow),
+            rrb.Spatial2DView(origin=f"{camera_path}/pinhole/image", name="Camera"),
+            column_shares=[3, 2],
+        ),
+        collapse_panels=True,
+    )
+
+
 # ── Intrinsics ──────────────────────────────────────────────────────────
 
 INTRINSICS_FRAMES: int = 8
@@ -365,25 +409,8 @@ def run_dpvo_pipeline(
     if max_frames > 0:
         total_frames = min(total_frames, max_frames)
 
-    # Per rerun#9244, a Transform3D on the view origin entity is invisible.
-    # Set the Spatial3DView origin to "/" so the gravity-alignment transform
-    # on parent_log_path is visible.  No ViewCoordinates needed — the orient
-    # transform handles the scene orientation directly (same as mast3r-slam).
     cam_image_path: str = f"{parent_log_path}/camera/pinhole/image"
-    rr.send_blueprint(
-        rr.blueprint.Blueprint(
-            rr.blueprint.Horizontal(
-                rr.blueprint.Spatial3DView(
-                    origin="/",
-                    name="3D",
-                    eye_controls=rr.blueprint.archetypes.EyeControls3D(spin_speed=0.25),
-                ),
-                rr.blueprint.Spatial2DView(origin=cam_image_path, name="Camera"),
-                column_shares=[3, 2],
-            ),
-            collapse_panels=True,
-        )
-    )
+    rr.send_blueprint(dpvo_blueprint(parent_log_path))
 
     start: float = timer()
 
