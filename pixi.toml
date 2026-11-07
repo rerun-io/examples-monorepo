@@ -2324,7 +2324,8 @@ description = "Write the per-scene surface recording: meshes, depth and normal m
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.lietorch-mojo]
 channels = ["https://conda.modular.com/max/"]
-platforms = ["linux-64", "linux-aarch64"]
+# osx-arm64: the CPU kernels run on the Mac (dpvo-osx); the CUDA environments keep it linux-only by intersection.
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.lietorch-mojo.dependencies]
 python = "3.12.*"
@@ -2363,7 +2364,8 @@ description = "Freeze upstream lietorch's outputs into tests/fixtures/lietorch_r
 
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
-platforms = ["linux-64"]
+# linux-aarch64: the DGX Spark (GB10) through the cuda feature; osx-arm64: the dpvo-osx environments only.
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.dpvo.dependencies]
 python = "3.12.*"
@@ -2379,6 +2381,10 @@ ninja = ">=1.13.2,<2"
 # Video input decodes on NVDEC (simplecv TorchCodecVideoReader); the source video is logged once as an H.264
 # VideoStream (simplecv log_video, FFmpeg re-encode). ffmpeg <902 links libjxl 0.11 and dlopen-fails beside 0.12.
 torchcodec = "*"
+ffmpeg = ">=8.1"
+
+# The libjxl clash is a Linux build matter; conda-forge's osx-arm64 ffmpeg builds number from 100.
+[feature.dpvo.target.linux.dependencies]
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.dpvo.pypi-dependencies]
@@ -2498,6 +2504,13 @@ depends-on = [
 ]
 cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
+
+# ── the macOS lane ───────────────────────────────────────────────────────
+# `cuda` is linux-only, so the Mac composes common + lietorch-mojo + dpvo without it; this feature only pins the
+# lane to osx-arm64 (common, lietorch-mojo and dpvo also allow linux, which no environment here should solve).
+# torch is common's osx-arm64 build (Metal/MPS); there is no NVDEC, TensorRT or CUDA extension on this lane.
+[feature.dpvo-osx]
+platforms = ["osx-arm64"]
 
 # ─── slam-evals feature (VSLAM-LAB benchmark → Rerun catalog ingester) ──────
 [feature.slam-evals]
@@ -3724,7 +3737,8 @@ description = "Run the Rust author checks for staged Kornia code"
 # ViPE's lietorch re-exports `lietorch_mojo` (recipes/vipe-src patch 0001); the environments compose the
 # `lietorch-mojo` feature (like dpvo), and every task that imports lietorch depends on `lietorch-mojo-build`.
 [feature.metrictrail]
-platforms = ["linux-64"]
+# linux-aarch64: the DGX Spark (GB10). vipe-src builds CUDA kernels only, so there is no macOS lane yet.
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.metrictrail.dependencies]
 python = "3.12.*"
@@ -4275,6 +4289,14 @@ dpvo-dev = { features = [
     "dpvo",
     "dev",
 ], solve-group = "dpvo", no-default-feature = true }
+dpvo-osx = { features = ["common", "lietorch-mojo", "dpvo", "dpvo-osx"], solve-group = "dpvo-osx", no-default-feature = true }
+dpvo-osx-dev = { features = [
+    "common",
+    "lietorch-mojo",
+    "dpvo",
+    "dpvo-osx",
+    "dev",
+], solve-group = "dpvo-osx", no-default-feature = true }
 slam-evals = { features = [
     "common",
     "slam-evals",
