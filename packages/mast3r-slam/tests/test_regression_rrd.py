@@ -76,7 +76,7 @@ def test_dense_logging_entities_present(baseline_rrd_path: Path) -> None:
     paths: set[str] = set(_get_entity_paths(baseline_rrd_path))
 
     expected_paths = {
-        "/world/current_camera/pinhole/video",
+        "/video",
         "/world/current_camera/pinhole/pointmap",
         "/world/current_camera/pinhole/pointmap_depth",
         "/world/current_camera/pinhole/confidence",

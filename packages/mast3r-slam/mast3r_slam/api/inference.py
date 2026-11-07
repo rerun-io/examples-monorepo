@@ -220,14 +220,14 @@ def run_slam_pipeline(
     # ── Rerun visualisation setup ──────────────────────────────────────────
     # A reference into a VideoStream resolves on the active timeline, so MP4 input must show VIDEO_TIMELINE.
     active_timeline: str = VIDEO_TIMELINE if video is not None else FRAME_TIMELINE
-    blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline, n_keyframes=0)
+    blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline)
     rr.send_blueprint(blueprint)
 
     # Async logger: events are enqueued here, processed in a background thread.
     # Used as a context manager further down so LogTerminate + join is automatic.
     event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
     async_logger: AsyncRerunLogger = AsyncRerunLogger(
-        event_queue, parent_log_path, active_timeline, recording=recording, video=video,
+        event_queue, parent_log_path, recording=recording, video=video,
     )
 
     h: int

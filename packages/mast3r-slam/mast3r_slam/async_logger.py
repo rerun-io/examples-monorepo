@@ -6,13 +6,13 @@ off the tracking hot-path.  The thread binds to the caller's
 
 Handles camera images (a ``VideoFrameReference`` into the source VideoStream
 for MP4 input, a JPEG otherwise), focal estimation, pointmap/depth conversion,
-camera path accumulation, and blueprint refreshes — all work that was
+and camera path accumulation — all work that was
 previously synchronous on the tracking thread.
 
 Usage as a context manager::
 
     event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
-    with AsyncRerunLogger(event_queue, parent_log_path, timeline, recording=rec) as logger:
+    with AsyncRerunLogger(event_queue, parent_log_path, recording=rec) as logger:
         for frame in frames:
             event_queue.put(snapshot_current_frame(frame, ...))
         # LogTerminate is sent automatically on __exit__
@@ -49,7 +49,7 @@ from mast3r_slam.log_events import (
     LogText,
 )
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
-from mast3r_slam.rerun_log_utils import FRAME_TIMELINE, VIDEO_TIMELINE, VideoSource, create_blueprints
+from mast3r_slam.rerun_log_utils import FRAME_TIMELINE, KEYFRAME_MAPS_PATH, VIDEO_TIMELINE, VideoSource
 
 # ── Snapshot helpers ──────────────────────────────────────────────────────
 # These create CPU-only event objects from live Frame / SharedKeyframes /
@@ -266,13 +266,12 @@ class AsyncRerunLogger:
     Use as a context manager to guarantee the logger thread is started
     and cleanly shut down::
 
-        with AsyncRerunLogger(event_queue, path, timeline) as logger:
+        with AsyncRerunLogger(event_queue, path) as logger:
             event_queue.put(snapshot_current_frame(...))
 
     Args:
         event_queue: Queue of ``LogEvent`` objects.
         parent_log_path: Root Rerun entity path.
-        timeline: Active timeline name.
         recording: Rerun recording to bind in this thread (Gradio).
             ``None`` uses the global recording (CLI).
         video: The logged source video. When set, camera images are references
@@ -283,7 +282,6 @@ class AsyncRerunLogger:
         self,
         event_queue: queue.Queue[LogEvent],
         parent_log_path: Path,
-        timeline: str,
         recording: rr.RecordingStream | None = None,
         video: VideoSource | None = None,
     ) -> None:
@@ -291,15 +289,12 @@ class AsyncRerunLogger:
         self._recording: rr.RecordingStream | None = recording
         self._video: VideoSource | None = video
         self._parent_log_path: Path = parent_log_path
-        self._timeline: str = timeline
         self._thread: threading.Thread | None = None
 
         # Internal visualization state
         self._path_list: list[list[float]] = []
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
-        self._last_blueprint_n_kf: int = -1
-        self._n_keyframes: int = 0
         self._conf_thresh: int = 7
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
@@ -571,13 +566,6 @@ class AsyncRerunLogger:
                 rr.Transform3D(mat3x3=orient_R, translation=orient_t),
             )
 
-        # Blueprint refresh if keyframe count changed
-        if self._n_keyframes != self._last_blueprint_n_kf:
-            rr.send_blueprint(
-                create_blueprints(self._parent_log_path, timeline=self._timeline, n_keyframes=self._n_keyframes)
-            )
-            self._last_blueprint_n_kf = self._n_keyframes
-
     def _log_new_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log a keyframe's static data (image, pointcloud, transform) once."""
         if kf.kf_idx in self._logged_keyframes:
@@ -617,14 +605,19 @@ class AsyncRerunLogger:
             kf.frame_id,
         )
 
-        # Pointmap + confidence
-        self._log_pointmap_and_confidence(
-            kf.X_canon,
-            kf.C,
-            f"{kf_cam_log_path}/pinhole",
-            kf.img_shape[0],
-            kf.img_shape[1],
+        # Pointmap, confidence and depth, under a static copy of the keyframe's Pinhole outside the 3D tree.
+        kf_maps_path: str = f"{KEYFRAME_MAPS_PATH}/keyframe-{kf.kf_idx}"
+        rr.log(
+            kf_maps_path,
+            rr.Pinhole(
+                image_from_camera=pinhole.intrinsics.k_matrix,
+                height=pinhole.intrinsics.height,
+                width=pinhole.intrinsics.width,
+                camera_xyz=rr.ViewCoordinates.RDF,
+            ),
+            static=True,
         )
+        self._log_pointmap_and_confidence(kf.X_canon, kf.C, kf_maps_path, kf.img_shape[0], kf.img_shape[1])
 
         # Confidence-filtered point cloud
         mask: Bool[ndarray, "hw"] = kf.C.squeeze() > self._conf_thresh
@@ -636,7 +629,6 @@ class AsyncRerunLogger:
         )
 
         self._logged_keyframes.add(kf.kf_idx)
-        self._n_keyframes = max(self._n_keyframes, kf.kf_idx + 1)
 
         # Update last-keyframe 2D view
         self._log_last_keyframe(kf)

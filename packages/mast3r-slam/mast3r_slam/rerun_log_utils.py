@@ -34,6 +34,9 @@ FRAME_TIMELINE: str = "frame"
 VIDEO_TIMELINE: str = "video_time"
 # The source video's VideoStream. Camera images reference its frames instead of re-encoding them.
 VIDEO_LOG_PATH: Path = Path("/video")
+# Each keyframe's derived 2D maps (pointmap, confidence, depth) under a static model-resolution Pinhole. They live
+# outside the 3D views' tree, so one static content rule covers any number of keyframes.
+KEYFRAME_MAPS_PATH: Path = Path("/keyframe_maps")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,66 +69,91 @@ class VideoSource:
         return rr.VideoFrameReference(nanoseconds=offset_ns, video_reference=str(self.entity_path))
 
 
-def create_blueprints(
-    parent_log_path: Path,
-    timeline: str = FRAME_TIMELINE,
-    n_keyframes: int = 0,
-) -> rrb.Blueprint:
-    """Create the default Rerun blueprint layout for the SLAM visualiser.
+# Chase eye of the Follow view, in the camera frame (RDF: x right, y down, z forward), like dpvo's. MASt3R's
+# pointmaps are roughly metric, so this sits 0.6 m above and 1.5 m behind the camera, aimed 1.5 m ahead of it.
+_FOLLOW_EYE_POSITION: tuple[float, float, float] = (0.0, -0.6, -1.5)
+_FOLLOW_EYE_TARGET: tuple[float, float, float] = (0.0, 0.0, 1.5)
+_FOLLOW_EYE_UP: tuple[float, float, float] = (0.0, -1.0, 0.0)
+
+
+def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> rrb.Blueprint:
+    """Create the SLAM visualiser's blueprint, sent once at the start of a run.
+
+    Overview and Follow 3D views beside the 2D camera panels, like dpvo. The
+    overview is rooted at ``/`` so the gravity-alignment transform on
+    ``parent_log_path`` shows (rerun#9244: a Transform3D on a view's own origin
+    is invisible), with the ground grid. The Follow view is rooted at the
+    current camera, so its eye, fixed in the camera frame, rides the camera; it
+    has no grid because the camera frame has no ground plane.
+
+    Both 3D views use one static set of rules, whatever the keyframe count: each
+    keyframe's derived 2D maps live under ``KEYFRAME_MAPS_PATH``, outside
+    ``parent_log_path``, so no per-keyframe exclusion is needed.
 
     Args:
         parent_log_path: Root log path for all Rerun entities.
         timeline: Timeline shown in the Rerun time panel.
-        n_keyframes: Number of keyframe depth entities to exclude from the 3D view.
 
     Returns:
         A configured Rerun Blueprint.
     """
-    current_views: rrb.Tabs = rrb.Tabs(
-        rrb.Spatial2DView(origin=str(VIDEO_LOG_PATH), name="Video"),
-        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "image"), name="Image"),
-        active_tab=1,
-        name="Current",
+    root: str = f"/{str(parent_log_path).lstrip('/')}"
+    camera_path: str = f"{root}/current_camera"
+    contents_3d: list[str] = [
+        f"+ {root}/**",
+        # The current camera's derived maps would cover its video frame on the image plane, and its depth
+        # would be back-projected on top of the keyframe point clouds.
+        f"- {camera_path}/pinhole/pointmap",
+        f"- {camera_path}/pinhole/confidence",
+        f"- {camera_path}/pinhole/pointmap_depth",
+        # 2D-only panel content without a pinhole.
+        f"- {root}/last_keyframe/**",
+    ]
+    overview = rrb.Spatial3DView(
+        name="Overview",
+        origin="/",
+        contents=contents_3d,
+        eye_controls=rrb.EyeControls3D(spin_speed=0.25),
     )
-    last_keyframe_views: rrb.Horizontal = rrb.Horizontal(
-        contents=[
-            rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe"), name="Image"),
-            rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "pointmap"), name="Pointmap"),
-        ],
-        column_shares=[1, 1],
-        name="Last Keyframe",
+    follow = rrb.Spatial3DView(
+        name="Follow",
+        origin=camera_path,
+        contents=contents_3d,
+        line_grid=rrb.LineGrid3D(visible=False),
+        eye_controls=rrb.EyeControls3D(
+            kind=rrb.Eye3DKind.Orbital,
+            position=_FOLLOW_EYE_POSITION,
+            look_target=_FOLLOW_EYE_TARGET,
+            eye_up=_FOLLOW_EYE_UP,
+            spin_speed=0.0,
+        ),
     )
+    # The camera image once (a reference into the source video for MP4 input), then what MASt3R derives from
+    # the current frame and the keyframe it tracks against. The source VideoStream gets no view of its own.
     views: rrb.Vertical = rrb.Vertical(
-        contents=[current_views, last_keyframe_views],
+        contents=[
+            rrb.Spatial2DView(origin=f"{camera_path}/pinhole/image", name="Image"),
+            rrb.Grid(
+                rrb.Spatial2DView(origin=f"{camera_path}/pinhole/pointmap_depth", name="Depth"),
+                rrb.Spatial2DView(origin=f"{camera_path}/pinhole/confidence", name="Confidence"),
+                rrb.Spatial2DView(origin=f"{camera_path}/pinhole/pointmap", name="Pointmap"),
+                rrb.Spatial2DView(origin=f"{root}/last_keyframe/image", name="Keyframe"),
+                grid_columns=2,
+            ),
+        ],
         row_shares=[1, 1],
         name="Views",
     )
-    logs: rrb.TextLogView = rrb.TextLogView(
-        origin=str(parent_log_path / "logs"),
-        name="Logs",
-    )
-    parent_log_root = f"/{str(parent_log_path).lstrip('/')}"
-    spatial3d_contents: list[str] = [
-        f"+ {parent_log_root}/**",
-        f"- {parent_log_root}/current_camera/pinhole/pointmap_depth",
-        f"- {parent_log_root}/last_keyframe/pointmap_depth",
-    ]
-    spatial3d_contents.extend(
-        [f"- {parent_log_root}/keyframes/keyframe-{kf_idx}/pinhole/pointmap_depth" for kf_idx in range(n_keyframes)]
-    )
-    blueprint: rrb.Blueprint = rrb.Blueprint(
+    logs: rrb.TextLogView = rrb.TextLogView(origin=f"{root}/logs", name="Logs")
+    return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(
-                origin="/",
-                contents=spatial3d_contents,
-            ),
+            rrb.Vertical(overview, follow),
             rrb.Tabs(views, logs, active_tab=0),
             column_shares=(3, 2),
         ),
         rrb.TimePanel(timeline=timeline, state="collapsed"),
         collapse_panels=True,
     )
-    return blueprint
 
 
 def log_video_for_dataset(dataset: MonocularDataset) -> VideoSource | None:
@@ -169,12 +197,6 @@ class RerunLogger:
         self.image_plane_distance: float = 0.2
         # Number of keyframes used in the last orientation update.
         self._last_orient_n_kf: int = 0
-        # Number of keyframes covered by the latest blueprint refresh.
-        self._last_blueprint_n_kf: int = -1
-
-    def _refresh_blueprint(self, n_kf: int) -> None:
-        rr.send_blueprint(create_blueprints(self.parent_log_path, timeline=self.timeline, n_keyframes=n_kf))
-        self._last_blueprint_n_kf = n_kf
 
     def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
         """Recompute gravity-alignment from all keyframe poses and update the transform.
@@ -280,8 +302,6 @@ class RerunLogger:
         # Recompute gravity-alignment whenever new keyframes appear.
         with keyframes.lock:
             n_kf: int = len(keyframes)
-        if n_kf != self._last_blueprint_n_kf:
-            self._refresh_blueprint(n_kf)
         if n_kf > 0 and n_kf != self._last_orient_n_kf:
             self._log_orient_transform(keyframes, n_kf)
 
@@ -327,7 +347,7 @@ class RerunLogger:
                 )
                 self._log_pointmap_and_confidence(
                     keyframe,
-                    kf_cam_log_path / "pinhole",
+                    KEYFRAME_MAPS_PATH / f"keyframe-{kf_idx}",
                     kf_rgb_uint8.shape[:2],
                 )
                 # Confidence-filtered point cloud

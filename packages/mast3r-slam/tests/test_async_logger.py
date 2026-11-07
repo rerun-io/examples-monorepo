@@ -1,5 +1,6 @@
 """Async logger: the last-keyframe 2D panel logs its image once per keyframe."""
 
+import inspect
 import multiprocessing as mp
 import queue
 from pathlib import Path
@@ -8,6 +9,7 @@ import lietorch_mojo as lietorch
 import numpy as np
 import pytest
 import rerun as rr
+import rerun.blueprint as rrb
 import torch
 from jaxtyping import Float32
 from numpy import ndarray
@@ -18,8 +20,8 @@ from mast3r_slam.async_logger import AsyncRerunLogger, snapshot_current_frame
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.image_utils import VideoToFrame
-from mast3r_slam.log_events import KeyframeSnapshot, LogCurrentFrame, LogEvent
-from mast3r_slam.rerun_log_utils import VideoSource
+from mast3r_slam.log_events import KeyframeSnapshot, LogCurrentFrame, LogEvent, LogMapUpdate
+from mast3r_slam.rerun_log_utils import VideoSource, create_blueprints
 
 H: int = 16
 W: int = 16
@@ -103,7 +105,7 @@ def test_logger_relogs_pointmap_and_logs_image_only_when_sent(monkeypatch: pytes
         last_kf_C=C,
     )
     event_queue: queue.Queue[LogEvent] = queue.Queue()
-    logger: AsyncRerunLogger = AsyncRerunLogger(event_queue, parent_log_path=Path("world"), timeline="frame")
+    logger: AsyncRerunLogger = AsyncRerunLogger(event_queue, parent_log_path=Path("world"))
     logger._handle_current_frame(event)
 
     assert "world/last_keyframe/pointmap" in logged_paths
@@ -134,7 +136,7 @@ def test_video_input_logs_frame_references_not_jpegs(monkeypatch: pytest.MonkeyP
     rgb: Float32[ndarray, "h w 3"] = np.full((H, W, 3), 0.5, dtype=np.float32)
     X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
     C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
-    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"), timeline="video_time", video=video)
+    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"), video=video)
     keyframe: KeyframeSnapshot = KeyframeSnapshot(
         kf_idx=0, frame_id=2, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W)
     )
@@ -166,3 +168,70 @@ def test_video_input_logs_frame_references_not_jpegs(monkeypatch: pytest.MonkeyP
     keyframe_transform = next(e for e in by_path["world/keyframes/keyframe-0/pinhole/image"] if isinstance(e, rr.Transform3D))
     assert keyframe_transform.scale is not None
     np.testing.assert_allclose(keyframe_transform.scale.pa_array.to_pylist()[0], [0.25, 0.25, 1.0])
+
+
+def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One blueprint covers any number of keyframes: no keyframe-count input, no per-keyframe rules, no re-send."""
+    assert "n_keyframes" not in inspect.signature(create_blueprints).parameters
+    views_3d: list[rrb.Spatial3DView] = []
+    origins_2d: list[str] = []
+    pending: list[object] = [create_blueprints(Path("world")).root_container]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, rrb.Spatial3DView):
+            views_3d.append(item)
+        elif isinstance(item, rrb.Spatial2DView):
+            origins_2d.append(str(item.origin))
+        elif isinstance(item, rrb.Container):
+            pending.extend(item.contents)
+    # The camera image shows once: the source video has no 2D view of its own.
+    assert "/video" not in origins_2d
+    assert origins_2d.count("/world/current_camera/pinhole/image") == 1
+    assert sorted(str(view.name) for view in views_3d) == ["Follow", "Overview"]
+    for view in views_3d:
+        assert isinstance(view.contents, list)
+        assert not any("keyframe-" in str(rule) for rule in view.contents), "a 3D view rule names a keyframe"
+
+    sent: list[object] = []
+    monkeypatch.setattr(async_logger.rr, "log", lambda *_a, **_k: None)
+    monkeypatch.setattr(async_logger.rr, "set_time", lambda *_a, **_k: None)
+    monkeypatch.setattr(async_logger.rr, "send_blueprint", lambda *a, **_k: sent.append(a))
+    identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
+    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
+    for kf_idx in range(3):
+        keyframe: KeyframeSnapshot = KeyframeSnapshot(
+            kf_idx=kf_idx,
+            frame_id=kf_idx,
+            world_sim3_cam_data=identity,
+            rgb=np.full((H, W, 3), 0.5, dtype=np.float32),
+            X_canon=_grid_pointmap().numpy(),
+            C=np.full((H * W, 1), 10.0, dtype=np.float32),
+            img_shape=(H, W),
+        )
+        logger._handle_map_update(LogMapUpdate(frame_idx=kf_idx, timestamp_ns=None, new_keyframes=[keyframe]))
+    assert sent == []
+
+
+def test_keyframe_maps_live_outside_the_3d_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A keyframe's pointmap, confidence and depth sit under /keyframe_maps, so the static `+ /world/**` 3D rule never draws them."""
+    logged_paths: list[str] = []
+    monkeypatch.setattr(async_logger.rr, "log", lambda path, *_a, **_k: logged_paths.append(str(path)))
+    monkeypatch.setattr(async_logger.rr, "set_time", lambda *_a, **_k: None)
+    identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
+    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
+    logger._log_new_keyframe(
+        KeyframeSnapshot(
+            kf_idx=5,
+            frame_id=9,
+            world_sim3_cam_data=identity,
+            rgb=np.full((H, W, 3), 0.5, dtype=np.float32),
+            X_canon=_grid_pointmap().numpy(),
+            C=np.full((H * W, 1), 10.0, dtype=np.float32),
+            img_shape=(H, W),
+        )
+    )
+    for name in ("pointmap", "confidence", "pointmap_depth"):
+        assert f"/keyframe_maps/keyframe-5/{name}" in logged_paths
+    assert "/keyframe_maps/keyframe-5" in logged_paths  # its static Pinhole
+    assert not any(path.startswith("world/keyframes/keyframe-5/pinhole/") and path != "world/keyframes/keyframe-5/pinhole/image" for path in logged_paths)
+    assert "world/keyframes/keyframe-5/pointcloud" in logged_paths
