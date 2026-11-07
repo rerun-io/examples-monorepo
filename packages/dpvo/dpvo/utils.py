@@ -3,6 +3,7 @@
 This module provides low-level helpers used throughout the DPVO pipeline:
 
 - :class:`Timer` -- CUDA-event-based timing context manager for profiling.
+- :data:`DEFAULT_DEVICE` -- the device used when a caller names none (CUDA).
 - :func:`coords_grid`, :func:`coords_grid_with_index` -- pixel coordinate
   grid generation for building patch representations.
 - :func:`patchify` -- extract dense overlapping patches from feature maps
@@ -24,6 +25,9 @@ import torch.nn.functional as F
 from jaxtyping import Float, Int
 from torch import Tensor
 
+DEFAULT_DEVICE: torch.device = torch.device("cuda")
+"""Device that the tracker, the frame sources and the inference API use when the caller names none."""
+
 all_times: list[float] = []
 """Module-level accumulator for elapsed times recorded by :class:`Timer`."""
 
@@ -34,17 +38,18 @@ class Timer:
     Uses :class:`torch.cuda.Event` for accurate GPU timing that accounts
     for asynchronous kernel execution.  Elapsed time (in ms) is printed
     on exit and appended to the module-level :data:`all_times` list.
+    On a non-CUDA device the timer records nothing.
 
     Attributes:
         name: Label printed alongside the elapsed time.
         enabled: When False, no events are recorded and no output is
             produced.  Allows timing to be toggled without restructuring
-            calling code.
+            calling code.  Forced to False on a non-CUDA device.
     """
 
-    def __init__(self, name: str, enabled: bool = True) -> None:
+    def __init__(self, name: str, enabled: bool = True, *, device: torch.device = DEFAULT_DEVICE) -> None:
         self.name: str = name
-        self.enabled: bool = enabled
+        self.enabled: bool = enabled and device.type == "cuda"
 
         if self.enabled:
             self.start: torch.cuda.Event = torch.cuda.Event(enable_timing=True)

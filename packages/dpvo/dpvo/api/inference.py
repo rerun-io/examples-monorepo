@@ -40,7 +40,7 @@ from tqdm import tqdm
 from dpvo.config import DPVOConfig
 from dpvo.dpvo import DPVO
 from dpvo.stream import VIDEO_SCALE, Frame, image_dir_frames, load_calib, num_frames, video_frames, video_hw
-from dpvo.utils import Timer
+from dpvo.utils import DEFAULT_DEVICE, Timer
 
 # ── Tyro subcommand aliases for DPVOConfig presets ──────────────────────
 AccurateDPVOConfig = Annotated[
@@ -369,6 +369,7 @@ def run_dpvo_pipeline(
     recording: rr.RecordingStream | None = None,
     timeit: bool = False,
     max_frames: int = 0,
+    device: torch.device = DEFAULT_DEVICE,
 ) -> Generator[str, None, None]:
     """Run the full DPVO visual-odometry pipeline on an image dir or video.
 
@@ -400,6 +401,7 @@ def run_dpvo_pipeline(
             ``None`` uses the active recording (CLI).
         timeit: If ``True``, print per-iteration timing via ``Timer``.
         max_frames: Maximum number of frames to process (0 = no limit).
+        device: Device that decodes the frames and runs the tracker.
 
     Yields:
         Status message strings (e.g. ``"Frame 42/200"``).
@@ -425,7 +427,9 @@ def run_dpvo_pipeline(
             output_codec=rr.VideoCodec.H264,
         )
 
-    frames: Iterator[Frame] = video_frames(Path(imagedir), stride, skip) if is_video else image_dir_frames(imagedir, stride, skip)
+    frames: Iterator[Frame] = (
+        video_frames(Path(imagedir), stride, skip, device=device) if is_video else image_dir_frames(imagedir, stride, skip, device=device)
+    )
     if max_frames > 0:
         frames = islice(frames, max_frames)
     head: list[Frame] = list(islice(frames, INTRINSICS_FRAMES))
@@ -438,13 +442,13 @@ def run_dpvo_pipeline(
     if calib is not None:
         K_33, _ = load_calib(calib)
         native: Float32[ndarray, "4"] = np.array([K_33[0, 0], K_33[1, 1], K_33[0, 2], K_33[1, 2]], dtype=np.float32)
-        intrinsics: Float32[Tensor, "4"] = torch.from_numpy(native * slam_scale).cuda()
+        intrinsics: Float32[Tensor, "4"] = torch.from_numpy(native * slam_scale).to(device)
     else:
         yield "Estimating camera intrinsics with MoGe-2..."
         intrinsics = estimate_intrinsics(
             torch.stack([frame.bgr_3hw for frame in head]),
             intrinsics_model if intrinsics_model is not None else load_intrinsics_model(),
-        )
+        ).to(device)
 
     # The pinhole matches what the 2D view shows: the native video, or the cropped images.
     # Cropping keeps the top-left corner, so the principal point needs no shift.
@@ -463,7 +467,7 @@ def run_dpvo_pipeline(
         static=True,
     )
 
-    slam: DPVO = DPVO(dpvo_config, network_path, ht=slam_h, wd=slam_w)
+    slam: DPVO = DPVO(dpvo_config, network_path, ht=slam_h, wd=slam_w, device=device)
     path_list: list[list[float]] = []
     last_orient_n: int = 0
     last_points_n: int = 0
@@ -477,7 +481,7 @@ def run_dpvo_pipeline(
                 assert frame.bgr_hw3 is not None
                 rr.log(cam_image_path, rr.Image(frame.bgr_hw3, color_model=rr.ColorModel.BGR).compress(jpeg_quality=90))
 
-            with Timer("SLAM", enabled=timeit):
+            with Timer("SLAM", enabled=timeit, device=device):
                 slam(frame.t, frame.bgr_3hw, intrinsics)
 
             if slam.is_initialized:

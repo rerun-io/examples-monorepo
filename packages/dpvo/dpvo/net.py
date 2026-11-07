@@ -17,13 +17,13 @@ See Teed et al. (2022), "Deep Patch Visual Odometry", for the full
 architecture description (Sec. 3).
 """
 
-import functools
+import math
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Float32, Int, Int64
 from lietorch_mojo import SE3
 from torch import Tensor
 
@@ -34,11 +34,77 @@ from .blocks import GatedResidual, GradientClip, SoftAgg
 from .extractor import BasicEncoder4
 from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 
-autocast = functools.partial(torch.amp.autocast, "cuda")
-
 DIM: int = 384
 """Hidden state dimensionality for the GRU update operator.  This is also
 the output dimension of the context network (``inet``)."""
+
+CANDIDATE_FACTOR: int = 4
+"""Masked centroid sampling draws at least this many times the centroids still needed per round."""
+MAX_REJECTION_ROUNDS: int = 64
+"""Rejection rounds before masked centroid sampling gives up (each round expects twice the missing centroids)."""
+
+
+def valid_interior_cells(valid: Bool[Tensor, "h4 w4"]) -> int:
+    """Valid cells where DPVO may put a centroid (``x`` in [1, w-2], ``y`` in [1, h-2])."""
+
+    height, width = valid.shape[-2:]
+    return int(valid[..., 1 : height - 1, 1 : width - 1].sum().item())
+
+
+def sample_valid_centroids(
+    valid: Bool[Tensor, "h4 w4"], frames: int, count: int, *, max_rounds: int = MAX_REJECTION_ROUNDS
+) -> tuple[Int64[Tensor, "frames count"], Int64[Tensor, "frames count"]]:
+    """DPVO's RANDOM centroid draw restricted to ``valid`` (h,w) cells, by rejection sampling.
+
+    Copied from ViPE MetricTrail (``vipe/metrictrail/dynamic.py``, ``sample_valid_centroids``) so that
+    the draws match it exactly. Candidates are drawn as DPVO draws them (``torch.randint(1, w-1)``
+    for x, then ``torch.randint(1, h-1)`` for y, on ``valid``'s device), in rounds of extra
+    candidates; accepted ones keep their draw order and the first ``count`` per frame are returned
+    as (frames, count) int64 ``x``, ``y``. Uniform over the valid interior cells, like DPVO's draw
+    over all of them. Each round reads the accepted count on the host.
+
+    Args:
+        valid: Centroid validity on the 1/4 feature grid.
+        frames: Number of frames to draw for.
+        count: Centroids per frame.
+        max_rounds: Rejection rounds before giving up.
+
+    Returns:
+        ``(x, y)`` integer centroids, each ``(frames, count)``.
+
+    Raises:
+        ValueError: ``valid`` is not a 2-D bool grid or has no valid interior cell.
+        RuntimeError: Fewer than ``count`` valid centroids after ``max_rounds`` rounds.
+    """
+
+    if valid.ndim != 2 or valid.dtype != torch.bool:
+        raise ValueError(f"centroid validity must be a (h,w) bool grid, got {tuple(valid.shape)} {valid.dtype}")
+    height, width = int(valid.shape[0]), int(valid.shape[1])
+    available: int = valid_interior_cells(valid)
+    if available == 0:
+        raise ValueError("no valid centroid position")
+    accept_rate: float = available / float((height - 2) * (width - 2))
+    xs: list[Tensor] = []
+    ys: list[Tensor] = []
+    for _ in range(int(frames)):
+        kept_x: list[Tensor] = []
+        kept_y: list[Tensor] = []
+        found: int = 0
+        for _round in range(int(max_rounds)):
+            draws: int = max(CANDIDATE_FACTOR * count, math.ceil(2.0 * (count - found) / accept_rate))
+            x: Int64[Tensor, "draws"] = torch.randint(1, width - 1, size=[draws], device=valid.device)
+            y: Int64[Tensor, "draws"] = torch.randint(1, height - 1, size=[draws], device=valid.device)
+            keep: Bool[Tensor, "draws"] = valid[y, x]
+            kept_x.append(x[keep])
+            kept_y.append(y[keep])
+            found += int(keep.sum().item())
+            if found >= count:
+                break
+        else:
+            raise RuntimeError(f"rejection sampling found {found}/{count} valid centroids in {max_rounds} rounds")
+        xs.append(torch.cat(kept_x)[:count])
+        ys.append(torch.cat(kept_y)[:count])
+    return torch.stack(xs), torch.stack(ys)
 
 
 class Update(nn.Module):
@@ -255,9 +321,10 @@ class Patchifier(nn.Module):
         self,
         images: Float[Tensor, "1 n 3 h w"],
         patches_per_image: int = 80,
-        disps: Float[Tensor, "1 n h w"] | None = None,
+        disps: Float32[Tensor, "1 n h4 w4"] | None = None,
         gradient_bias: bool = False,
         return_color: bool = False,
+        centroid_valid: Bool[Tensor, "h4 w4"] | None = None,
     ) -> tuple[Float[Tensor, "1 n 128 h4 w4"], Float[Tensor, "1 num_patches 128 p p"], Float[Tensor, "1 num_patches dim 1 1"], Float[Tensor, "1 num_patches 3 p p"], Int[Tensor, "num_patches"]] | tuple[Float[Tensor, "1 n 128 h4 w4"], Float[Tensor, "1 num_patches 128 p p"], Float[Tensor, "1 num_patches dim 1 1"], Float[Tensor, "1 num_patches 3 p p"], Int[Tensor, "num_patches"], Float[Tensor, "1 num_patches 3"]]:
         """Extract features and sample sparse patches from input images.
 
@@ -268,15 +335,26 @@ class Patchifier(nn.Module):
           locations uniformly, evaluate the image gradient magnitude at each,
           and keep the top-M by gradient strength.  This concentrates patches
           on textured regions where correlation matching is more reliable.
+        - **Masked random** (``centroid_valid`` set): the random draw,
+          rejection-sampled until every centroid lies on a valid cell
+          (:func:`sample_valid_centroids`).  This is a different RNG stream.
 
         Args:
             images: Normalised images, shape ``(1, n, 3, h, w)``.
             patches_per_image: Number of patches M to select per frame.
-            disps: Optional inverse-depth maps for initializing the depth
-                channel of patches.  If ``None``, defaults to ones.
+            disps: Optional inverse-depth maps at feature (1/4) resolution for
+                initializing the depth channel of patches.  If ``None``,
+                defaults to ones.
             gradient_bias: Whether to use gradient-biased patch selection.
             return_color: Whether to also return per-patch RGB colors
                 (for visualization).
+            centroid_valid: Optional centroid validity on the feature grid;
+                every centroid is drawn on a ``True`` cell.  ``None`` keeps
+                the unrestricted draw.
+
+        Raises:
+            ValueError: ``centroid_valid`` is combined with
+                ``gradient_bias`` or does not match the feature grid.
 
         Returns:
             A tuple of:
@@ -300,11 +378,22 @@ class Patchifier(nn.Module):
         P: int = self.patch_size
 
         # Patch selection: choose (x, y) locations in stride-4 feature space
-        if gradient_bias:
+        if centroid_valid is not None:
+            if gradient_bias:
+                raise ValueError("centroid_valid supports the random centroid draw only, not gradient_bias")
+            if tuple(centroid_valid.shape) != (h, w):
+                raise ValueError(f"centroid validity {tuple(centroid_valid.shape)} does not match the DPVO grid {(h, w)}")
+            centroids: tuple[Int64[Tensor, "n patches_per_image"], Int64[Tensor, "n patches_per_image"]] = sample_valid_centroids(
+                centroid_valid.to(device=fmap.device), n, patches_per_image
+            )
+            x: Int[Tensor, "n patches_per_image"] = centroids[0]
+            y: Int[Tensor, "n patches_per_image"] = centroids[1]
+
+        elif gradient_bias:
             # Gradient-biased sampling: sample 3x candidates, keep top-M
             g: Float[Tensor, "1 n h4 w4"] = self.__image_gradient(images)
-            x: Int[Tensor, "n candidates"] = torch.randint(1, w-1, size=[n, 3*patches_per_image], device="cuda")
-            y: Int[Tensor, "n candidates"] = torch.randint(1, h-1, size=[n, 3*patches_per_image], device="cuda")
+            x: Int[Tensor, "n candidates"] = torch.randint(1, w-1, size=[n, 3*patches_per_image], device=fmap.device)
+            y: Int[Tensor, "n candidates"] = torch.randint(1, h-1, size=[n, 3*patches_per_image], device=fmap.device)
 
             coords: Float[Tensor, "n candidates 2"] = torch.stack([x, y], dim=-1).float()
             # Evaluate gradient magnitude at each candidate location
@@ -317,8 +406,8 @@ class Patchifier(nn.Module):
 
         else:
             # Uniform random sampling
-            x: Int[Tensor, "n patches_per_image"] = torch.randint(1, w-1, size=[n, patches_per_image], device="cuda")
-            y: Int[Tensor, "n patches_per_image"] = torch.randint(1, h-1, size=[n, patches_per_image], device="cuda")
+            x: Int[Tensor, "n patches_per_image"] = torch.randint(1, w-1, size=[n, patches_per_image], device=fmap.device)
+            y: Int[Tensor, "n patches_per_image"] = torch.randint(1, h-1, size=[n, patches_per_image], device=fmap.device)
 
         coords: Float[Tensor, "n patches_per_image 2"] = torch.stack([x, y], dim=-1).float()
         # Extract context features at patch centers (radius 0 = point sample)
@@ -334,7 +423,7 @@ class Patchifier(nn.Module):
 
         if disps is None:
             # Default inverse-depth: ones (unit depth)
-            disps = torch.ones(b, n, h, w, device="cuda")
+            disps = torch.ones(b, n, h, w, device=fmap.device)
 
         # Build coordinate grid (x, y, d) and extract PxP patches
         grid: Float[Tensor, "1 n 3 h w"]
@@ -343,7 +432,7 @@ class Patchifier(nn.Module):
         patches: Float[Tensor, "1 num_patches 3 p p"] = altcorr.patchify(grid[0], coords, P//2).view(b, -1, 3, P, P)
 
         # Frame index for each patch (which frame it came from)
-        index_2d: Int[Tensor, "n 1"] = torch.arange(n, device="cuda").view(n, 1)
+        index_2d: Int[Tensor, "n 1"] = torch.arange(n, device=fmap.device).view(n, 1)
         index: Int[Tensor, "num_patches"] = index_2d.repeat(1, patches_per_image).reshape(-1)
 
         if return_color:
@@ -460,7 +549,6 @@ class VONet(nn.Module):
         self.RES: int = 4
 
 
-    @autocast(enabled=False)
     def forward(
         self,
         images: Float[Tensor, "1 n_frames 3 h w"],
@@ -503,129 +591,131 @@ class VONet(nn.Module):
             List of ``STEPS`` trajectory snapshots, each a tuple of
             ``(valid, coords, coords_gt, Gs, Ps, kl)`` for loss computation.
         """
-        # Normalize images to [-0.5, 0.5] range
-        images: Float[Tensor, "1 n_frames 3 h w"] = 2 * (images / 255.0) - 0.5
-        # Scale intrinsics to match stride-4 feature map resolution
-        intrinsics: Float[Tensor, "1 n_frames 4"] = intrinsics / 4.0
-        # Subsample depth maps to stride-4 resolution
-        disps: Float[Tensor, "1 n_frames h4 w4"] = disps[:, :, 1::4, 1::4].float()
+        # Training runs in full precision on the input's device (formerly ``@autocast(enabled=False)``).
+        with torch.autocast(device_type=images.device.type, enabled=False):
+            # Normalize images to [-0.5, 0.5] range
+            images: Float[Tensor, "1 n_frames 3 h w"] = 2 * (images / 255.0) - 0.5
+            # Scale intrinsics to match stride-4 feature map resolution
+            intrinsics: Float[Tensor, "1 n_frames 4"] = intrinsics / 4.0
+            # Subsample depth maps to stride-4 resolution
+            disps: Float[Tensor, "1 n_frames h4 w4"] = disps[:, :, 1::4, 1::4].float()
 
-        fmap: Float[Tensor, "1 n_frames 128 h4 w4"]
-        gmap: Float[Tensor, "1 num_patches 128 p p"]
-        imap: Float[Tensor, "1 num_patches dim 1 1"]
-        patches: Float[Tensor, "1 num_patches 3 p p"]
-        ix: Int[Tensor, "num_patches"]
-        fmap, gmap, imap, patches, ix = self.patchify(images, disps=disps)
+            fmap: Float[Tensor, "1 n_frames 128 h4 w4"]
+            gmap: Float[Tensor, "1 num_patches 128 p p"]
+            imap: Float[Tensor, "1 num_patches dim 1 1"]
+            patches: Float[Tensor, "1 num_patches 3 p p"]
+            ix: Int[Tensor, "num_patches"]
+            fmap, gmap, imap, patches, ix = self.patchify(images, disps=disps)
 
-        corr_fn: CorrBlock = CorrBlock(fmap, gmap)
+            corr_fn: CorrBlock = CorrBlock(fmap, gmap)
 
-        b: int
-        N: int
-        c: int
-        h: int
-        w: int
-        b, N, c, h, w = fmap.shape
-        p: int = self.P
+            b: int
+            N: int
+            c: int
+            h: int
+            w: int
+            b, N, c, h, w = fmap.shape
+            p: int = self.P
 
-        # Save ground-truth patches for loss computation
-        patches_gt: Float[Tensor, "1 num_patches 3 p p"] = patches.clone()
-        Ps: SE3 = poses
+            # Save ground-truth patches for loss computation
+            patches_gt: Float[Tensor, "1 num_patches 3 p p"] = patches.clone()
+            Ps: SE3 = poses
 
-        # Randomize inverse depths (training: learn to recover from random init)
-        d: Float[Tensor, "1 num_patches"] = patches[..., 2, p//2, p//2]
-        patches: Float[Tensor, "1 num_patches 3 p p"] = set_depth(patches, torch.rand_like(d))
+            # Randomize inverse depths (training: learn to recover from random init)
+            d: Float[Tensor, "1 num_patches"] = patches[..., 2, p//2, p//2]
+            patches: Float[Tensor, "1 num_patches 3 p p"] = set_depth(patches, torch.rand_like(d))
 
-        # Initialize measurement graph: connect all patches from first 8 frames
-        kk: Int[Tensor, "n_edges"]
-        jj: Int[Tensor, "n_edges"]
-        kk, jj = flatmeshgrid(torch.where(ix < 8)[0], torch.arange(0,8, device="cuda"))
-        ii: Int[Tensor, "n_edges"] = ix[kk]
+            # Initialize measurement graph: connect all patches from first 8 frames
+            kk: Int[Tensor, "n_edges"]
+            jj: Int[Tensor, "n_edges"]
+            kk, jj = flatmeshgrid(torch.where(ix < 8)[0], torch.arange(0,8, device=images.device))
+            ii: Int[Tensor, "n_edges"] = ix[kk]
 
-        imap: Float[Tensor, "1 num_patches dim"] = imap.view(b, -1, DIM)
-        net: Float[Tensor, "1 n_edges dim"] = torch.zeros(b, len(kk), DIM, device="cuda", dtype=torch.float)
+            imap: Float[Tensor, "1 num_patches dim"] = imap.view(b, -1, DIM)
+            net: Float[Tensor, "1 n_edges dim"] = torch.zeros(b, len(kk), DIM, device=images.device, dtype=torch.float)
 
-        # Initialize estimated poses to identity
-        Gs: SE3 = SE3.IdentityLike(poses)
+            # Initialize estimated poses to identity
+            Gs: SE3 = SE3.IdentityLike(poses)
 
-        if structure_only:
-            Gs.data[:] = poses.data[:]
+            if structure_only:
+                Gs.data[:] = poses.data[:]
 
-        traj: list[tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."], SE3, SE3, Tensor]] = []
-        # Relaxed image bounds (allow slight out-of-frame projections)
-        bounds: tuple[float, float, float, float] = (-64.0, -64.0, float(w + 64), float(h + 64))
+            traj: list[tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."], SE3, SE3, Tensor]] = []
+            # Relaxed image bounds (allow slight out-of-frame projections)
+            bounds: tuple[float, float, float, float] = (-64.0, -64.0, float(w + 64), float(h + 64))
 
-        while len(traj) < STEPS:
-            # Detach to limit backprop through time (TBPTT-style)
-            Gs = Gs.detach()
-            patches = patches.detach()
+            while len(traj) < STEPS:
+                # Detach to limit backprop through time (TBPTT-style)
+                Gs = Gs.detach()
+                patches = patches.detach()
 
-            n: int = int(ii.max() + 1)
-            # After 8 warmup steps, incrementally add one frame per iteration
-            if len(traj) >= 8 and n < images.shape[1]:
-                # Initialize new frame's pose from the previous frame
-                if not structure_only:
-                    Gs.data[:,n] = Gs.data[:,n-1]
-                # Forward edges: all existing patches -> new frame
-                kk1: Int[Tensor, "new_edges1"]
-                jj1: Int[Tensor, "new_edges1"]
-                kk1, jj1 = flatmeshgrid(torch.where(ix  < n)[0], torch.arange(n, n+1, device="cuda"))
-                # Backward edges: new frame's patches -> all existing frames
-                kk2: Int[Tensor, "new_edges2"]
-                jj2: Int[Tensor, "new_edges2"]
-                kk2, jj2 = flatmeshgrid(torch.where(ix == n)[0], torch.arange(0, n+1, device="cuda"))
+                n: int = int(ii.max() + 1)
+                # After 8 warmup steps, incrementally add one frame per iteration
+                if len(traj) >= 8 and n < images.shape[1]:
+                    # Initialize new frame's pose from the previous frame
+                    if not structure_only:
+                        Gs.data[:,n] = Gs.data[:,n-1]
+                    # Forward edges: all existing patches -> new frame
+                    kk1: Int[Tensor, "new_edges1"]
+                    jj1: Int[Tensor, "new_edges1"]
+                    kk1, jj1 = flatmeshgrid(torch.where(ix  < n)[0], torch.arange(n, n+1, device=images.device))
+                    # Backward edges: new frame's patches -> all existing frames
+                    kk2: Int[Tensor, "new_edges2"]
+                    jj2: Int[Tensor, "new_edges2"]
+                    kk2, jj2 = flatmeshgrid(torch.where(ix == n)[0], torch.arange(0, n+1, device=images.device))
 
-                ii = torch.cat([ix[kk1], ix[kk2], ii])
-                jj = torch.cat([jj1, jj2, jj])
-                kk = torch.cat([kk1, kk2, kk])
+                    ii = torch.cat([ix[kk1], ix[kk2], ii])
+                    jj = torch.cat([jj1, jj2, jj])
+                    kk = torch.cat([kk1, kk2, kk])
 
-                net1: Float[Tensor, "1 new_edges dim"] = torch.zeros(b, len(kk1) + len(kk2), DIM, device="cuda")
-                net = torch.cat([net1, net], dim=1)
+                    net1: Float[Tensor, "1 new_edges dim"] = torch.zeros(b, len(kk1) + len(kk2), DIM, device=images.device)
+                    net = torch.cat([net1, net], dim=1)
 
-                # Randomly prune edges to frame (n-4) for training augmentation
-                if np.random.rand() < 0.1:
-                    k: Tensor = (ii != (n - 4)) & (jj != (n - 4))
-                    ii = ii[k]
-                    jj = jj[k]
-                    kk = kk[k]
-                    net = net[:,k]
+                    # Randomly prune edges to frame (n-4) for training augmentation
+                    if np.random.rand() < 0.1:
+                        k: Tensor = (ii != (n - 4)) & (jj != (n - 4))
+                        ii = ii[k]
+                        jj = jj[k]
+                        kk = kk[k]
+                        net = net[:,k]
 
-                # Initialize new frame's depth from median of recent frames
-                patches[:,ix==n,2] = torch.median(patches[:,(ix == n-1) | (ix == n-2),2])
-                n = int(ii.max() + 1)
+                    # Initialize new frame's depth from median of recent frames
+                    patches[:,ix==n,2] = torch.median(patches[:,(ix == n-1) | (ix == n-2),2])
+                    n = int(ii.max() + 1)
 
-            # Reproject all patches and compute correlation
-            coords: Float[Tensor, "1 n_edges p p 2"] = pops.transform(Gs, patches, intrinsics, ii, jj, kk)
-            coords1: Float[Tensor, "1 n_edges 2 p p"] = coords.permute(0, 1, 4, 2, 3).contiguous()
+                # Reproject all patches and compute correlation
+                coords: Float[Tensor, "1 n_edges p p 2"] = pops.transform(Gs, patches, intrinsics, ii, jj, kk)
+                coords1: Float[Tensor, "1 n_edges 2 p p"] = coords.permute(0, 1, 4, 2, 3).contiguous()
 
-            corr: Float[Tensor, "1 n_edges corr_feat"] = corr_fn(kk, jj, coords1)
-            # GRU update: predict displacement and confidence
-            delta: Float[Tensor, "1 n_edges 2"]
-            weight: Float[Tensor, "1 n_edges 2"]
-            _damping: None
-            net, (delta, weight, _damping) = self.update(net, imap[:,kk], corr, None, ii, jj, kk)
+                corr: Float[Tensor, "1 n_edges corr_feat"] = corr_fn(kk, jj, coords1)
+                # GRU update: predict displacement and confidence
+                delta: Float[Tensor, "1 n_edges 2"]
+                weight: Float[Tensor, "1 n_edges 2"]
+                _damping: None
+                net, (delta, weight, _damping) = self.update(net, imap[:,kk], corr, None, ii, jj, kk)
 
-            lmbda: float = 1e-4
-            # Target = current reprojection + learned delta
-            target: Float[Tensor, "1 n_edges 2"] = coords[...,p//2,p//2,:] + delta
+                lmbda: float = 1e-4
+                # Target = current reprojection + learned delta
+                target: Float[Tensor, "1 n_edges 2"] = coords[...,p//2,p//2,:] + delta
 
-            # Run 2 iterations of bundle adjustment
-            ep: int = 10
-            for _itr in range(2):
-                Gs, patches = BA(Gs, patches, intrinsics, target, weight, lmbda, ii, jj, kk,
-                    bounds, ep=ep, fixedp=1, structure_only=structure_only)
+                # Run 2 iterations of bundle adjustment
+                ep: int = 10
+                for _itr in range(2):
+                    Gs, patches = BA(Gs, patches, intrinsics, target, weight, lmbda, ii, jj, kk,
+                        bounds, ep=ep, fixedp=1, structure_only=structure_only)
 
-            # Compute loss targets: reproject with estimated and GT poses
-            kl: Tensor = torch.as_tensor(0)
-            dij: Int[Tensor, "n_edges"] = (ii - jj).abs()
-            # Only compute loss on edges with temporal distance 1 or 2
-            k: Tensor = (dij > 0) & (dij <= 2)
+                # Compute loss targets: reproject with estimated and GT poses
+                kl: Tensor = torch.as_tensor(0)
+                dij: Int[Tensor, "n_edges"] = (ii - jj).abs()
+                # Only compute loss on edges with temporal distance 1 or 2
+                k: Tensor = (dij > 0) & (dij <= 2)
 
-            coords: Float[Tensor, "..."] = pops.transform(Gs, patches, intrinsics, ii[k], jj[k], kk[k])
-            coords_gt: Float[Tensor, "..."]
-            valid: Float[Tensor, "..."]
-            _jacobians: tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."]]
-            coords_gt, valid, _jacobians = pops.transform(Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], jacobian=True)
+                coords: Float[Tensor, "..."] = pops.transform(Gs, patches, intrinsics, ii[k], jj[k], kk[k])
+                coords_gt: Float[Tensor, "..."]
+                valid: Float[Tensor, "..."]
+                _jacobians: tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."]]
+                coords_gt, valid, _jacobians = pops.transform(Ps, patches_gt, intrinsics, ii[k], jj[k], kk[k], jacobian=True)
 
-            traj.append((valid, coords, coords_gt, Gs[:,:n], Ps[:,:n], kl))
+                traj.append((valid, coords, coords_gt, Gs[:,:n], Ps[:,:n], kl))
 
-        return traj
+            return traj
