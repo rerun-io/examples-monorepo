@@ -56,11 +56,14 @@ source:
     # Hooks for the macOS lane: setup.py builds no vipe_ext without CUDA torch, and vipe.ext then imports vipe_mojo
     # (packages/vipe-mojo).
     - patches/0007-build-without-cuda-hooks.patch
+    # SharedK calibration's depth on keep: a keyframe gets its MoGe-2 forward once the frontend keeps it (pool: 353 -> 164
+    # forwards; K and the TUM / 7-Scenes / KITTI ATE within single-seed noise).
+    - patches/0008-calibration-depth-on-keep.patch
 
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 8
+  number: 9
   script:
     file: build.sh
 
