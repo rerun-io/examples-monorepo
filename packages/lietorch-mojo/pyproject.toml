@@ -39,6 +39,7 @@ exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*"]
 # Upstream lietorch API kept for drop-in compatibility, autograd hooks and pytest names.
 ignore_names = [
     "pytestmark",
+    "pytest_collection_modifyitems",
     "__new__",
     "forward",
     "forward_op",

@@ -2404,21 +2404,30 @@ spaces = ">=0.32.0"
 [feature.dpvo.activation.env]
 PACKAGE_DIR = "packages/dpvo"
 
-# Its tests import lietorch_mojo, so the test lanes build the extension first.
+# Its tests import lietorch_mojo and the Mojo kernels (dpvo.mojo_backend), so the test lanes build both first.
 [feature.dpvo.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package unit tests"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build"]
+description = "Build lietorch-mojo and the Mojo kernels, then run the package unit tests"
 
 [feature.dpvo.tasks.tests-integration]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package integration tests"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build"]
+description = "Build lietorch-mojo and the Mojo kernels, then run the package integration tests"
 
 [feature.dpvo.tasks.tests-golden]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package golden reference tests"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build"]
+description = "Build lietorch-mojo and the Mojo kernels, then run the package golden reference tests"
+
+# DPVO's correlation / BA kernels in Mojo (dpvo.mojo_backend): CPU, CUDA and Apple GPU from one source, on
+# lietorch-mojo's runtimes. The GPU kernels compile for the local GPU (sm_120 / sm_121 / Metal).
+[feature.dpvo.tasks.dpvo-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I dpvo/mojo_backend/mojo -o dpvo/mojo_backend/_dpvo_mojo.so dpvo/mojo_backend/mojo/_dpvo_mojo.mojo"
+cwd = "packages/dpvo"
+description = "Build the Mojo kernels of dpvo.mojo_backend (CPU + GPU kernels for the local GPU)"
+inputs = ["packages/dpvo/dpvo/mojo_backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/dpvo/dpvo/mojo_backend/_dpvo_mojo.so"]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.dpvo.tasks._download-dpvo-model]
@@ -2459,6 +2468,13 @@ outputs = [
     "packages/dpvo/dpvo/_cuda_corr*.so",
     "packages/dpvo/dpvo/_cuda_ba*.so",
 ]
+
+# The Mojo backend's parity references: CUDA outputs on real DPVO inputs, cut to a few MB (tests/kernel_references.py).
+[feature.dpvo.tasks.dpvo-freeze-kernel-references]
+cmd = "python tests/freeze_kernel_references.py"
+depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpvo-iphone-data"]
+cwd = "packages/dpvo"
+description = "Freeze the CUDA kernels' outputs on real inputs into tests/fixtures/kernel_references.rrd (needs a CUDA GPU)"
 
 [feature.dpvo.tasks._dpvo-download-orb-vocab]
 cmd = "bash -lc 'if [ ! -f ORBvoc.txt ]; then curl -L https://github.com/UZ-SLAMLab/ORB_SLAM3/raw/master/Vocabulary/ORBvoc.txt.tar.gz | tar xz; fi'"
