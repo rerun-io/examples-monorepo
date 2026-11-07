@@ -7,7 +7,8 @@ that serves it, so callers pick the backend from their input tensor's
 access, with no copies and no device syncs.
 
 The CUDA backend (the ``dpvo._cuda_corr`` and ``dpvo._cuda_ba`` extensions)
-is imported lazily on the first CUDA lookup. Any other backend package
+is imported lazily on the first CUDA lookup, and the Mojo backend
+(``dpvo.mojo_backend``) on the first CPU or MPS lookup. Any other backend package
 registers itself at import time::
 
     import dpvo.kernels
@@ -122,7 +123,7 @@ def _register_cuda() -> None:
 
 
 def _backend(device: torch.device) -> _Backend:
-    """Return the backend for ``device.type``, importing the CUDA one on first use.
+    """Return the backend for ``device.type``, importing the CUDA or Mojo one on first use.
 
     Raises:
         LookupError: No backend is registered for ``device.type``.
@@ -131,6 +132,11 @@ def _backend(device: torch.device) -> _Backend:
     if backend is None and device.type == "cuda":
         _register_cuda()
         backend = _BACKENDS["cuda"]
+    if backend is None and device.type in ("cpu", "mps"):
+        from dpvo import mojo_backend
+
+        mojo_backend.register()
+        backend = _BACKENDS[device.type]
     if backend is None:
         raise LookupError(
             f"no DPVO kernel backend for device type {device.type!r}; "

@@ -8,4 +8,21 @@ shapes and dtypes. The Mojo extension `_dpvo_mojo` is built by the `dpvo-mojo-bu
 On CUDA the kernels run on PyTorch's current stream like the extension; on MPS each call
 synchronises and passes Metal GPU addresses (`lietorch_mojo.metal`). Parity with the CUDA
 extension on real DPVO inputs: `tests/test_mojo_backend.py` against `tests/fixtures/kernel_references.rrd`.
+
+Importing the package registers it with `dpvo.kernels` for CPU and MPS tensors; `dpvo.kernels` does that
+import on its first CPU or MPS lookup. CUDA stays on the CUDA extension.
 """
+
+from dpvo import kernels
+from dpvo.mojo_backend import ba, corr
+
+DEVICE_TYPES: tuple[str, ...] = ("cpu", "mps")
+
+
+def register() -> None:
+    """Serve `dpvo.kernels` lookups for CPU and MPS tensors (idempotent)."""
+    for device_type in DEVICE_TYPES:
+        kernels.register(device_type, corr=corr, ba=ba)
+
+
+register()
