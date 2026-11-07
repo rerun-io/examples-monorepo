@@ -3,4 +3,5 @@ name = "vipe-src"
 version = "1.2.0.ead2e00"
 
 [package.build]
-backend = { name = "pixi-build-rattler-build", version = "*" }
+# >=0.4.7: 0.4.6 (cached on the Mac) dropped patch 0001's hunk in vipe/ext/__init__.py when patch 0006 edits the same file.
+backend = { name = "pixi-build-rattler-build", version = ">=0.4.7" }
