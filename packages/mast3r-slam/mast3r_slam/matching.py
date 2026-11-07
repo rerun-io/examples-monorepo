@@ -4,16 +4,8 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 import mast3r_slam.image as img_utils
+from mast3r_slam import mojo_backend
 from mast3r_slam.config import config
-
-# Matching kernel backend selection: prefer Mojo, fall back to CUDA C++ if the
-# Mojo shared library is not built. This comment only describes the matching
-# kernels selected in this module; calibrated and points GN flows may still
-# call into the CUDA backend via global_opt.py.
-try:
-    import mast3r_slam_mojo_backends as _matching_backends  # pyrefly: ignore
-except ImportError:
-    from mast3r_slam import _backends as _matching_backends  # pyrefly: ignore
 
 
 def match(
@@ -166,7 +158,7 @@ def match_iterative_proj(
     )
     p1: Float[Tensor, "b hw 2"]
     valid_proj2: Bool[Tensor, "b hw"]
-    p1, valid_proj2 = _matching_backends.iter_proj(
+    p1, valid_proj2 = mojo_backend.iter_proj(
         rays_with_grad_img,
         pts3d_norm,
         p_init,
@@ -185,7 +177,7 @@ def match_iterative_proj(
     valid_proj2 = valid_proj2 & valid_dists2
 
     if cfg["radius"] > 0:
-        (p1,) = _matching_backends.refine_matches(
+        (p1,) = mojo_backend.refine_matches(
             D11.half(),
             D21.view(b, h * w, -1).half(),
             p1,
