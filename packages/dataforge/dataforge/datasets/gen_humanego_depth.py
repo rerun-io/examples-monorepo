@@ -35,8 +35,8 @@ from serde import serde
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
 from dataforge import schema
-from dataforge.datasets.genrobot_layers import RIG, Retimer, shipped_counts
-from dataforge.datasets.genrobot_source import REFERENCE_CAMERA, CameraCalibration, DoubleSphere, EpisodeClock, EpisodeFile, rig_T_cam
+from dataforge.das_ego.layers import RIG, Retimer, shipped_counts
+from dataforge.das_ego.source import REFERENCE_CAMERA, CameraCalibration, DoubleSphere, EpisodeClock, EpisodeFile, rig_T_cam
 from dataforge.logging_toolkit import ChunkBatcher, log_camera_node
 
 DEPTH_LAYER: str = "depth"

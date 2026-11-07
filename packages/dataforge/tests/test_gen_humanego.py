@@ -13,11 +13,11 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.ops.mano.mano_np import MANOLayerNP
 
+from dataforge.das_ego.dataset import HubEpisode, shard, stratified_subset
+from dataforge.das_ego.pose import MIRROR_X, PoseTrack, check_mano, skin
+from dataforge.das_ego.source import parse_hub_path
 from dataforge.datasets.gen_humanego import GenHumanEgoConfig, GenHumanEgoDataset
 from dataforge.datasets.gen_humanego_depth import decode_predz, zstd_content_size
-from dataforge.datasets.genrobot import HubEpisode, shard, stratified_subset
-from dataforge.datasets.genrobot_pose import MIRROR_X, PoseTrack, check_mano, skin
-from dataforge.datasets.genrobot_source import parse_hub_path
 from dataforge.identity import SequenceIdentity
 
 
@@ -146,7 +146,7 @@ def test_the_config_selects_a_budgeted_shard(tmp_path: Path) -> None:
 
 def test_a_failed_episode_keeps_its_mcap_and_leaves_no_partial_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from dataforge import paths
-    from dataforge.datasets import genrobot
+    from dataforge.das_ego import dataset as das_ego_dataset
 
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
     dataset: GenHumanEgoDataset = GenHumanEgoDataset(GenHumanEgoConfig(root=tmp_path / "raw"))
@@ -165,7 +165,7 @@ def test_a_failed_episode_keeps_its_mcap_and_leaves_no_partial_layers(tmp_path: 
         base.write_bytes(b"base")
         raise RuntimeError("the reader failed half way")
 
-    monkeypatch.setattr(genrobot, "write_sidecar", half_written_sidecar)
+    monkeypatch.setattr(das_ego_dataset, "write_sidecar", half_written_sidecar)
     with pytest.raises(RuntimeError, match="half way"):
         dataset.convert(identity, item, force=False)
     assert mcap.is_file(), "the MCAP stays for the retry"
@@ -173,7 +173,7 @@ def test_a_failed_episode_keeps_its_mcap_and_leaves_no_partial_layers(tmp_path: 
 
 
 def test_every_published_layer_must_hold_bytes_before_the_mcap_goes(tmp_path: Path) -> None:
-    from dataforge.datasets.genrobot import require_published
+    from dataforge.das_ego.dataset import require_published
 
     good: Path = tmp_path / "good.rrd"
     good.write_bytes(b"x")
@@ -187,8 +187,8 @@ def test_every_published_layer_must_hold_bytes_before_the_mcap_goes(tmp_path: Pa
 
 
 def test_the_pinhole_resampling_keeps_each_point_at_its_depth() -> None:
+    from dataforge.das_ego.source import DoubleSphere
     from dataforge.datasets.gen_humanego_depth import PinholeGrid, pinhole_lookup
-    from dataforge.datasets.genrobot_source import DoubleSphere
 
     lens: DoubleSphere = DoubleSphere(fx=172.8, fy=172.8, cx=259.2, cy=207.5, xi=-0.0044, alpha=0.574)
     grid: PinholeGrid = PinholeGrid(width=192, height=156, fov_deg=120.0)
@@ -209,7 +209,7 @@ def test_the_pinhole_resampling_keeps_each_point_at_its_depth() -> None:
 
 
 def test_exposure_is_read_only_from_fields_the_camera_schema_carries() -> None:
-    from dataforge.datasets.genrobot_layers import EXPOSURE_FIELDS, exposure_fields
+    from dataforge.das_ego.layers import EXPOSURE_FIELDS, exposure_fields
 
     old: pa.StructType = pa.struct([("data", pa.binary()), ("format", pa.string()), ("frame_id", pa.string())])
     assert exposure_fields(old) == (), "older firmware ships no exposure fields"

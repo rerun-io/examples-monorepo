@@ -24,6 +24,10 @@ from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 
 from dataforge import blueprints, paths, schema
+from dataforge.das_ego.dataset import PANE_ORDER, DasEgoConfig, DasEgoDataset, HubEpisode
+from dataforge.das_ego.layers import RIG
+from dataforge.das_ego.pose import POSE_LAYER, SIDES, PoseTrack, read_rig_poses, write_pose_layer
+from dataforge.das_ego.source import REFERENCE_CAMERA, Episode, EpisodeClock, EpisodeFile, optional_message, struct_field, topic_rows
 from dataforge.datasets.gen_humanego_depth import (
     DEPTH_CAM,
     DEPTH_INFO_TOPIC,
@@ -35,10 +39,6 @@ from dataforge.datasets.gen_humanego_depth import (
     write_depth_layer,
     write_depth_pinhole_layer,
 )
-from dataforge.datasets.genrobot import PANE_ORDER, DasEgoConfig, DasEgoDataset, HubEpisode
-from dataforge.datasets.genrobot_layers import RIG
-from dataforge.datasets.genrobot_pose import POSE_LAYER, SIDES, PoseTrack, read_rig_poses, write_pose_layer
-from dataforge.datasets.genrobot_source import REFERENCE_CAMERA, Episode, EpisodeClock, EpisodeFile, optional_message, struct_field, topic_rows
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import TRAJECTORY_COLOR, TRAJECTORY_RADIUS_UI_POINTS, frame_index_column, time_column
 

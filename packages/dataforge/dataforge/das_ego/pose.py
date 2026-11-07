@@ -27,7 +27,7 @@ from simplecv.ops.smplx.smplx_coco133 import smplx_joints_to_coco133_xyzc
 from simplecv.sensors.camera.base_camera import pixels_in_image
 
 from dataforge import actions, hands, meshes, paths, schema
-from dataforge.datasets.genrobot_source import (
+from dataforge.das_ego.source import (
     BODY_TOPIC,
     EEF_POSE_TOPIC,
     SOURCE_HEIGHT,

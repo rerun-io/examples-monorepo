@@ -340,7 +340,7 @@ shipped topic are in [docs/genrobot.md](docs/genrobot.md).
 
 The hands release of the same DAS-Ego corpus (`genrobot2025/Gen-HumanEgo`, pinned commit): 44,632 MCAPs,
 62 TB, 1,848 hours, no body track, plus camera2's metric depth. It shares the whole-body converter
-(`DasEgoDataset`: readers, lenses, clock, calibration, MANO check) and adds a `depth` layer.
+(`DasEgoDataset` in `dataforge/das_ego/`: readers, lenses, clock, calibration, MANO check) and adds a `depth` layer.
 
 ```bash
 export DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gen-humanego   # the SSD tier takes pipeline output
@@ -483,7 +483,8 @@ its Apache index parser), `vrs.py` (one VRS header scan, then the JPEG,
 H.265 and IMU readers seek to their records), and `aria.py` (the Aria device
 calibration, frame and IMU readers and the full-lens projection that hot3d, the
 Gen2 pilot and LaMAria share; LaMAria's rig and ground-truth readers are
-`datasets/lamaria_source.py`).
+`datasets/lamaria_source.py`). `das_ego/` is the GenRobot DAS-Ego converter (MCAP source, base
+layer, pose and MANO check, `DasEgoDataset`) that `genrobot` and `gen-humanego` share.
 
 Two of those carry their weight for datasets that do not ship video.
 `encode_frames_to_mp4` pipes PNG or raw frames straight into ffmpeg's stdin, so

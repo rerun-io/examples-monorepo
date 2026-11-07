@@ -25,7 +25,7 @@ from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
 from dataforge import schema, writing
-from dataforge.datasets.genrobot_source import (
+from dataforge.das_ego.source import (
     DOMAIN_LEVELS,
     DUPLICATE_TOPICS,
     EEF_POSE_TOPIC,

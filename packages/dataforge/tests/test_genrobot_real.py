@@ -20,8 +20,8 @@ from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 
 from dataforge import paths, schema, writing
-from dataforge.datasets.genrobot_layers import BaseCensus, shipped_counts, write_base_layer, write_sidecar
-from dataforge.datasets.genrobot_pose import (
+from dataforge.das_ego.layers import BaseCensus, shipped_counts, write_base_layer, write_sidecar
+from dataforge.das_ego.pose import (
     PoseTrack,
     check_mano,
     project,
@@ -31,7 +31,7 @@ from dataforge.datasets.genrobot_pose import (
     write_actions_layer,
     write_pose_layer,
 )
-from dataforge.datasets.genrobot_source import (
+from dataforge.das_ego.source import (
     NUM_CAMERAS,
     REVISION,
     RIG_FROM_CALIB,

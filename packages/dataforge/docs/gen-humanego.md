@@ -2,7 +2,7 @@
 
 The hands release of GenRobot's DAS-Ego corpus. It is the same six-camera rig and MCAP topic family as
 [Gen-HumanWholeBody](genrobot.md), without the body track and with metric depth. dataforge converts both
-with one converter (`DasEgoDataset` in `datasets/genrobot.py`); this page lists only what differs. Read
+with one converter (`DasEgoDataset` in `dataforge/das_ego/dataset.py`); this page lists only what differs. Read
 [genrobot.md](genrobot.md) for everything shared: the double-sphere lens, `RIG_FROM_CALIB`, the clocks,
 the IMU mounting, the H.264 pass-through and the MANO check.
 
@@ -131,7 +131,7 @@ five cameras in yaw order. The table card is the whole-body one without the body
 
 ## Subset
 
-The release is 62 TB; the NAS SSD holds a subset. `--budget-tb 1.0` selects it (`genrobot.stratified_subset`):
+The release is 62 TB; the NAS SSD holds a subset. `--budget-tb 1.0` selects it (`das_ego.dataset.stratified_subset`):
 every one of the 236 task folders in turn, the next episode in uuid order (random hex, so a random draw), task
 order within a round fixed by a hash of the path, until the next episode would pass 1 TB. Every task gets an
 episode before any task gets a second.

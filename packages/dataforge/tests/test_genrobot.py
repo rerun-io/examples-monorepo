@@ -12,8 +12,8 @@ from conftest import raw_asset
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 
-from dataforge.datasets import genrobot_pose
-from dataforge.datasets.genrobot_pose import (
+from dataforge.das_ego import pose as das_ego_pose
+from dataforge.das_ego.pose import (
     PoseTrack,
     check_mano,
     fixed_lists,
@@ -21,7 +21,7 @@ from dataforge.datasets.genrobot_pose import (
     read_pose_track,
     skin,
 )
-from dataforge.datasets.genrobot_source import (
+from dataforge.das_ego.source import (
     DoubleSphere,
     EpisodeClock,
     EpisodeFile,
@@ -181,7 +181,7 @@ def test_a_null_mano_record_is_absent_whatever_its_lists_hold(monkeypatch: pytes
     )
     stamps: Int64[ndarray, "1"] = np.array([1_000], dtype=np.int64)
     empty: tuple[Int64[ndarray, "0"], pa.Array] = (np.zeros(0, dtype=np.int64), pa.array([]))
-    monkeypatch.setattr(genrobot_pose, "topic_rows", lambda file, topic: (stamps, hand) if topic == hand_topic("left") else empty)
+    monkeypatch.setattr(das_ego_pose, "topic_rows", lambda file, topic: (stamps, hand) if topic == hand_topic("left") else empty)
     clock: EpisodeClock = EpisodeClock(t0_ns=0, frame_times_ns=stamps, frame_numbers=np.array([0], dtype=np.int64))
     track: PoseTrack = read_pose_track(EpisodeFile(Path("episode.mcap")), clock)
     np.testing.assert_array_equal(track.mano_present, [[False, False]])
@@ -213,8 +213,8 @@ def test_base_stream_retimes_before_deriving_and_keeps_native_imu_clock() -> Non
     import rerun as rr
     import rerun.chunk as rrc
 
-    from dataforge.datasets.genrobot_layers import Retimer
-    from dataforge.datasets.genrobot_source import IMU_TOPIC
+    from dataforge.das_ego.layers import Retimer
+    from dataforge.das_ego.source import IMU_TOPIC
 
     clock = EpisodeClock(t0_ns=100, frame_times_ns=np.array([110, 120], dtype=np.int64), frame_numbers=np.array([5, 6], dtype=np.int64))
     retimer = Retimer(clock, native_rate=frozenset({IMU_TOPIC}))
@@ -255,8 +255,8 @@ def test_base_clock_discards_only_samples_before_each_camera_first_keyframe() ->
     import rerun as rr
     import rerun.chunk as rrc
 
-    from dataforge.datasets.genrobot_layers import Retimer
-    from dataforge.datasets.genrobot_source import camera_topic
+    from dataforge.das_ego.layers import Retimer
+    from dataforge.das_ego.source import camera_topic
 
     clock = EpisodeClock(t0_ns=100, frame_times_ns=np.array([110, 120], dtype=np.int64), frame_numbers=np.array([5, 6], dtype=np.int64))
     retimer = Retimer(clock, native_rate=frozenset(), starts={camera_topic(0): 120})
@@ -272,8 +272,9 @@ def test_base_clock_discards_only_samples_before_each_camera_first_keyframe() ->
 
 
 def test_manifest_load_names_invalid_sources_and_keeps_revision_guard(tmp_path: Path) -> None:
-    from dataforge.datasets.genrobot import MANIFEST_NAME, GenrobotConfig, GenrobotDataset, Manifest
-    from dataforge.datasets.genrobot_source import REVISION
+    from dataforge.das_ego.dataset import MANIFEST_NAME, Manifest
+    from dataforge.das_ego.source import REVISION
+    from dataforge.datasets.genrobot import GenrobotConfig, GenrobotDataset
 
     dataset = GenrobotDataset(GenrobotConfig(root=tmp_path))
     path = tmp_path / MANIFEST_NAME
@@ -293,7 +294,7 @@ def test_manifest_load_names_invalid_sources_and_keeps_revision_guard(tmp_path: 
 def test_projection_image_bounds_match_existing_policy() -> None:
     from simplecv.sensors.camera.base_camera import pixels_in_image
 
-    from dataforge.datasets.genrobot_source import SOURCE_HEIGHT, SOURCE_WIDTH
+    from dataforge.das_ego.source import SOURCE_HEIGHT, SOURCE_WIDTH
 
     pixels = np.array([[0.0, 0.0], [SOURCE_WIDTH - 1.0, SOURCE_HEIGHT - 1.0], [SOURCE_WIDTH, 0.0], [0.0, SOURCE_HEIGHT],
                        [-1.0, 0.0], [np.nan, 0.0], [0.0, np.inf], [-np.inf, 0.0]], dtype=np.float64)
