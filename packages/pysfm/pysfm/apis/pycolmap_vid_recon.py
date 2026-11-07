@@ -438,13 +438,10 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
             ),
         )
 
-        # Image
+        # Image: the extracted JPEG as-is, no decode + re-encode
         image_path: Path = result.images_dir / image.name
         if image_path.exists():
-            bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            if bgr is not None:
-                rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                rr.log(f"{camera_path}/pinhole/image", rr.Image(rgb, color_model=rr.ColorModel.RGB).compress())
+            rr.log(f"{camera_path}/pinhole/image", rr.EncodedImage(path=image_path))
 
         # 2D keypoints
         keypoints_xy: Float32[ndarray, "M 2"] = _extract_visible_keypoints(image, rec.points3D)
@@ -500,14 +497,7 @@ def log_features(result: VidReconResult, parent_log_path: Path) -> None:
             image_path: Path = result.images_dir / db_image.name
             if not image_path.exists():
                 continue
-            bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            if bgr is None:
-                continue
-            rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            rr.log(
-                f"{parent_log_path}/features/image",
-                rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
-            )
+            rr.log(f"{parent_log_path}/features/image", rr.EncodedImage(path=image_path))
 
             # All keypoints from DB (Nx6: x, y, a11, a12, a21, a22)
             kps: Float32[ndarray, "N 6"] = db.read_keypoints(db_image.image_id)

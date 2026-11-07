@@ -66,6 +66,7 @@ from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create
 from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.log_events import (
     KeyframeSnapshot,
+    LogCurrentFrame,
     LogEvent,
     LogMapUpdate,
     LogText,
@@ -270,6 +271,10 @@ def run_slam_pipeline(
         start_time: float = timer()
         last_orient_n_kf: int = 0
         prev_edge_count: int = 0
+        # Dataset frame id of the keyframe whose image the 2D panel shows
+        # (set by every LogMapUpdate with a new keyframe and by every
+        # LogCurrentFrame that carried a keyframe image).
+        shown_last_kf_id: int | None = None
 
         while True:
             # Check if the backend process crashed (raises BackendError if so).
@@ -328,9 +333,12 @@ def run_slam_pipeline(
                     frame_idx=i, timestamp_ns=ts_ns,
                     new_keyframes=new_kfs_init, orient=orient_init,
                 ))
+                shown_last_kf_id = frame.frame_id
                 if not event_queue.full():
                     with contextlib.suppress(queue.Full):
-                        event_queue.put_nowait(snapshot_current_frame(frame, i, ts_ns, keyframes))
+                        current_event: LogCurrentFrame = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
+                        event_queue.put_nowait(current_event)
+                        shown_last_kf_id = current_event.last_kf_frame_id
 
                 i += 1
                 yield f"Processing frame {i}/{n_frames}"
@@ -426,11 +434,15 @@ def run_slam_pipeline(
                     new_keyframes=new_kfs, pose_updates=pose_updates,
                     edge_positions=edge_pos, orient=orient_data,
                 ))
+            if add_new_kf:
+                shown_last_kf_id = frame.frame_id
 
             # 2. Current frame (droppable) — skip snapshot if queue is full
             if not event_queue.full():
                 with contextlib.suppress(queue.Full):
-                    event_queue.put_nowait(snapshot_current_frame(frame, i, ts_ns, keyframes))
+                    current_event = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
+                    event_queue.put_nowait(current_event)
+                    shown_last_kf_id = current_event.last_kf_frame_id
 
             # FPS text log
             if i % 30 == 0 and i > 0:
