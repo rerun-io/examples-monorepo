@@ -6,7 +6,7 @@ Re-exports:
 - :class:`BADepthPrior` -- optional per-patch inverse-depth prior for :func:`BA`.
 - :func:`neighbors` -- query the co-visibility neighbourhood of a patch.
 - :func:`reproject` -- reproject 3-D patches into target frames.
-- :func:`solve_system` -- sparse PGO solve for loop closure.
+- :func:`solve_system` -- loop closure's pose-graph step (Mojo, preconditioned conjugate gradient).
 """
 
 from .ba import BA as BA

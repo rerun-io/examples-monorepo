@@ -2358,19 +2358,18 @@ description = "Freeze upstream lietorch's outputs into tests/fixtures/lietorch_r
 
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
-platforms = ["linux-64"]
+# linux-aarch64: the DGX Spark (GB10) through the cuda feature.
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.dpvo.dependencies]
 python = "3.12.*"
 dpretrieval = { path = "packages/dpretrieval" }
-eigen = ">=3.4.0,<3.5"
 einops = ">=0.8.0,<0.9"
 matplotlib = ">=3.8.4,<3.9"
 icecream = ">=2.1.3,<2.2"
 numba = ">=0.60.0"
 plyfile = ">=1.0.3,<1.1"
 tyro = ">=0.9.1,<0.10"
-ninja = ">=1.13.2,<2"
 # Video input decodes on NVDEC (simplecv TorchCodecVideoReader); the source video is logged once as an H.264
 # VideoStream (simplecv log_video, FFmpeg re-encode). ffmpeg <902 links libjxl 0.11 and dlopen-fails beside 0.12.
 torchcodec = "*"
@@ -2393,21 +2392,30 @@ spaces = ">=0.32.0"
 [feature.dpvo.activation.env]
 PACKAGE_DIR = "packages/dpvo"
 
-# Its tests import lietorch_mojo, so the test lanes build the extension first.
+# Its tests import lietorch_mojo and the Mojo kernels (dpvo.mojo_backend), so the test lanes build both first.
 [feature.dpvo.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package unit tests"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build"]
+description = "Build lietorch-mojo and the Mojo kernels, then run the package unit tests"
 
 [feature.dpvo.tasks.tests-integration]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package integration tests"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build"]
+description = "Build lietorch-mojo and the Mojo kernels, then run the package integration tests"
 
 [feature.dpvo.tasks.tests-golden]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package golden reference tests"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build"]
+description = "Build lietorch-mojo and the Mojo kernels, then run the package golden reference tests"
+
+# DPVO's correlation / BA kernels in Mojo (dpvo.mojo_backend): CPU and CUDA from one source, on
+# lietorch-mojo's runtimes. The GPU kernels compile for the local GPU (sm_120 / sm_121).
+[feature.dpvo.tasks.dpvo-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I dpvo/mojo_backend/mojo -o dpvo/mojo_backend/_dpvo_mojo.so dpvo/mojo_backend/mojo/_dpvo_mojo.mojo"
+cwd = "packages/dpvo"
+description = "Build the Mojo kernels of dpvo.mojo_backend (CPU + GPU kernels for the local GPU)"
+inputs = ["packages/dpvo/dpvo/mojo_backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/dpvo/dpvo/mojo_backend/_dpvo_mojo.so"]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.dpvo.tasks._download-dpvo-model]
@@ -2430,25 +2438,6 @@ cwd = "packages/dpvo"
 outputs = ["packages/dpvo/data/iphone/pool.mp4"]
 description = "Download DPVO iPhone example data"
 
-# ── Build tasks ──────────────────────────────────────────────────────────
-[feature.dpvo.tasks._build-dpvo-cuda-kernels]
-cmd = "python setup.py build_ext --inplace"
-depends-on = ["lietorch-mojo-build"]
-cwd = "packages/dpvo"
-description = "Build DPVO CUDA extensions (cuda_corr, cuda_ba)"
-inputs = [
-    "packages/dpvo/setup.py",
-    "packages/dpvo/dpvo/altcorr/*.cpp",
-    "packages/dpvo/dpvo/altcorr/*.cu",
-    "packages/dpvo/dpvo/fastba/*.cpp",
-    "packages/dpvo/dpvo/fastba/*.cu",
-    "packages/dpvo/dpvo/fastba/*.cuh",
-]
-outputs = [
-    "packages/dpvo/dpvo/_cuda_corr*.so",
-    "packages/dpvo/dpvo/_cuda_ba*.so",
-]
-
 [feature.dpvo.tasks._dpvo-download-orb-vocab]
 cmd = "bash -lc 'if [ ! -f ORBvoc.txt ]; then curl -L https://github.com/UZ-SLAMLab/ORB_SLAM3/raw/master/Vocabulary/ORBvoc.txt.tar.gz | tar xz; fi'"
 cwd = "packages/dpvo"
@@ -2464,7 +2453,8 @@ description = "Download EuRoC MH_01-MH_05 sequences (~2GB each)"
 [feature.dpvo.tasks.dpvo-eval-euroc]
 cmd = "python tools/eval_euroc.py --modes vo slam --stride 2 --trials 1"
 depends-on = [
-    "_build-dpvo-cuda-kernels",
+    "lietorch-mojo-build",
+    "dpvo-mojo-build",
     "_download-dpvo-model",
     "_dpvo-download-euroc",
 ]
@@ -2475,7 +2465,8 @@ description = "Evaluate DPV-SLAM on EuRoC MH sequences (VO + SLAM)"
 [feature.dpvo.tasks.dpvo-demo]
 cmd = "python tools/demo.py --imagedir data/movies/IMG_0493.mp4"
 depends-on = [
-    "_build-dpvo-cuda-kernels",
+    "lietorch-mojo-build",
+    "dpvo-mojo-build",
     "_download-dpvo-model",
     "_download-dpvo-data",
 ]
@@ -2486,7 +2477,8 @@ description = "Run DPVO demo on example video"
 [feature.dpvo.tasks.dpvo-app]
 cmd = "python tools/gradio_app.py"
 depends-on = [
-    "_build-dpvo-cuda-kernels",
+    "lietorch-mojo-build",
+    "dpvo-mojo-build",
     "_download-dpvo-model",
     "_download-dpvo-data",
     "_download-dpvo-iphone-data",
@@ -3738,15 +3730,17 @@ description = "Run the Rust author checks for staged Kornia code"
 # ═══════════════════════════════════════════════════════════════════════════
 # metrictrail — NVIDIA MetricTrail (ViPE @ ead2e00, recipes/vipe-src) + our benchmark/eval/catalog code
 # ═══════════════════════════════════════════════════════════════════════════
-# vipe-src compiles ViPE's vipe_ext (all of it but lietorch_ext) at package build time (see recipes/vipe-src/recipe.yaml).
+# vipe-src is pure Python: ViPE's CUDA extension vipe_ext is not built, `vipe.ext` imports packages/vipe-mojo's
+# `vipe_mojo` (recipes/vipe-src patch 0007; see recipes/vipe-src/recipe.yaml).
 # MetricTrail's DPVO is packages/dpvo's `dpvo.metric` (MetricDPVO): vipe-src deletes ViPE's vendored copy and installs
-# re-export shims at vipe.metrictrail.dpvo. This feature supplies dpvo (editable) and builds its CUDA kernels
-# (cuda_corr, cuda_ba) with `_build-dpvo-cuda-kernels`, like [feature.dpvo]; every task that tracks depends on it.
+# re-export shims at vipe.metrictrail.dpvo. This feature supplies dpvo and vipe-mojo (editable); every task that tracks
+# depends on their Mojo builds (`dpvo-mojo-build`, `vipe-mojo-build`).
 # Reuse: DINOv3 from recipes/dinov3-src, MoGe-2 from packages/monoprior (monopriors), lietorch from lietorch-mojo:
 # ViPE's lietorch re-exports `lietorch_mojo` (recipes/vipe-src patch 0001); the environments compose the
 # `lietorch-mojo` feature (like dpvo), and every task that imports lietorch depends on `lietorch-mojo-build`.
 [feature.metrictrail]
-platforms = ["linux-64"]
+# linux-aarch64: the DGX Spark (GB10).
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.metrictrail.dependencies]
 python = "3.12.*"
@@ -3762,14 +3756,14 @@ ffmpeg = { version = ">=8.1", build-number = ">=902" }
 tsdf-rs = { path = "packages/tsdf-rs" }
 # Depth persists as millimetre PNG EncodedDepthImages (pass_<k>.rrd, run outputs, catalog layers).
 depth-png = { path = "packages/depth-png" }
-# packages/dpvo's CUDA kernels (`_build-dpvo-cuda-kernels`): fastba includes <Eigen/...>; ninja for torch's extension build.
-eigen = ">=3.4.0,<3.5"
-ninja = ">=1.13.2,<2"
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
-# MetricTrail's DPVO (dpvo.metric) behind vipe-src's vipe.metrictrail.dpvo shims; its kernels: `_build-dpvo-cuda-kernels`.
+# MetricTrail's DPVO (dpvo.metric) behind vipe-src's vipe.metrictrail.dpvo shims; its kernels: `dpvo-mojo-build`.
 dpvo = { path = "packages/dpvo", editable = true }
+
+# ViPE's DROID/SLAM kernels in Mojo: `vipe.ext` imports vipe_mojo (recipes/vipe-src patch 0007); `vipe-mojo-build`.
+vipe-mojo = { path = "packages/vipe-mojo", editable = true }
 # ViPE's `moge2-l` prior is monopriors' MoGe-2 (recipes/vipe-src patch 0003); metrictrail.moge2 runs monopriors' MoGe-2 on
 # the moge-2-vitl-normal checkpoint. Its DINOv2 always uses torch SDPA, so no xformers.
 monopriors = { path = "packages/monoprior", editable = true }
@@ -3792,35 +3786,32 @@ VIPE_DINOV3_VITS16_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/dinov3/din
 VIPE_MOGE2_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/moge2/moge-2-vitl/model.pt"
 TORCH_HOME = "/mnt/nas/ssd-8tb/metrictrail/weights/torch_home"
 
-# packages/dpvo's CUDA extensions, as [feature.dpvo.tasks._build-dpvo-cuda-kernels] (the in-place .so files are shared
-# by the dpvo and metrictrail envs of a worktree: same torch, Python and nvcc). Do not run both builds at once.
-[feature.metrictrail.tasks._build-dpvo-cuda-kernels]
-cmd = "python setup.py build_ext --inplace"
-depends-on = ["lietorch-mojo-build"]
+# dpvo.mojo_backend (packages/dpvo's kernels in Mojo), as [feature.dpvo.tasks.dpvo-mojo-build].
+[feature.metrictrail.tasks.dpvo-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I dpvo/mojo_backend/mojo -o dpvo/mojo_backend/_dpvo_mojo.so dpvo/mojo_backend/mojo/_dpvo_mojo.mojo"
 cwd = "packages/dpvo"
-description = "Build DPVO CUDA extensions (cuda_corr, cuda_ba)"
-inputs = [
-    "packages/dpvo/setup.py",
-    "packages/dpvo/dpvo/altcorr/*.cpp",
-    "packages/dpvo/dpvo/altcorr/*.cu",
-    "packages/dpvo/dpvo/fastba/*.cpp",
-    "packages/dpvo/dpvo/fastba/*.cu",
-    "packages/dpvo/dpvo/fastba/*.cuh",
-]
-outputs = [
-    "packages/dpvo/dpvo/_cuda_corr*.so",
-    "packages/dpvo/dpvo/_cuda_ba*.so",
-]
+description = "Build the Mojo kernels of dpvo.mojo_backend (CPU + GPU kernels for the local GPU)"
+inputs = ["packages/dpvo/dpvo/mojo_backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/dpvo/dpvo/mojo_backend/_dpvo_mojo.so"]
 
-[feature.metrictrail.tasks.metrictrail-check-kernels]
-cmd = "python tools/check_kernels.py"
-depends-on = ["_build-dpvo-cuda-kernels"]
-cwd = "packages/metrictrail"
-description = "Run one tiny op of each compiled kernel (vipe-src's vipe_ext, packages/dpvo's cuda_corr and cuda_ba) on the GPU"
+# ViPE's DROID/SLAM kernels in Mojo (packages/vipe-mojo, import vipe_mojo), the port of ViPE's vipe_ext; `vipe.ext`
+# imports it. Built against lietorch-mojo's runtimes like dpvo's Mojo backend.
+[feature.metrictrail.tasks.vipe-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I vipe_mojo/mojo -o vipe_mojo/_vipe_mojo.so vipe_mojo/mojo/_vipe_mojo.mojo"
+cwd = "packages/vipe-mojo"
+description = "Build the Mojo kernels of vipe_mojo (CPU + GPU kernels for the local GPU)"
+inputs = ["packages/vipe-mojo/vipe_mojo/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/vipe-mojo/vipe_mojo/_vipe_mojo.so"]
+
+[feature.metrictrail.tasks.vipe-mojo-tests]
+cmd = "sh -c 'pytest -q -m \"integration or not integration\" \"$@\"' _"
+depends-on = ["lietorch-mojo-build", "vipe-mojo-build"]
+cwd = "packages/vipe-mojo"
+description = "Build and test vipe_mojo against the frozen vipe_ext references (CPU always, CUDA when present)"
 
 [feature.metrictrail.tasks.metrictrail-run]
 cmd = "python tools/run.py"
-depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build"]
 cwd = "packages/metrictrail"
 description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
 
@@ -3854,7 +3845,7 @@ description = "Download the iPhone example video of the MetricTrail app"
 
 [feature.metrictrail.tasks.metrictrail-app]
 cmd = "python tools/gradio_app.py"
-depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels", "_download-metrictrail-data", "_download-metrictrail-iphone-data"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-data", "_download-metrictrail-iphone-data"]
 cwd = "packages/metrictrail"
 description = "Launch the MetricTrail Gradio app: upload a video, watch the run stream into an embedded Rerun viewer (needs the GPU)"
 
@@ -3866,13 +3857,13 @@ depends-on = ["lietorch-mojo-build"]
 cwd = "packages/metrictrail"
 description = "Build the lietorch-mojo extension, then run the package unit tests"
 
-# The full-pipeline integration test imports lietorch_mojo's Mojo extension and packages/dpvo's CUDA kernels; this
+# The full-pipeline integration test imports lietorch_mojo's Mojo extension and the dpvo and vipe Mojo kernels; this
 # shadows the dev feature's task.
 [feature.metrictrail.tasks.tests-integration]
 cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build"]
 cwd = "packages/metrictrail"
-description = "Build the lietorch-mojo extension and the DPVO kernels, then run the package integration tests"
+description = "Build the lietorch-mojo extension and the DPVO and ViPE kernels, then run the package integration tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments

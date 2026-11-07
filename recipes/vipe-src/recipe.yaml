@@ -1,15 +1,16 @@
 # NVIDIA ViPE (nv-tlabs/vipe) at the first commit that carries MetricTrail (vipe/metrictrail); the newest
-# release, v1.2.0, predates it. Built for CUDA 13 against the workspace's conda-forge torch 2.12 (cuda130).
+# release, v1.2.0, predates it. Pure Python, for the workspace's conda-forge torch 2.12 (cuda130).
 #
-# What is compiled (MetricTrail's import graph, `pipeline=metrictrail`):
-#   - vipe_ext, ViPE's own extension, without lietorch_ext (replaced by lietorch-mojo). SharedK calibration runs
-#     ViPE's keyframe SLAM (droid_net_ext, slam_ext, scatter_ext), vipe.metrictrail.slam imports vipe.slam.interface
-#     (utils_ext), and vipe.pipeline.processors -- imported by the `vipe infer` CLI and by MetricTrail's optional
-#     masks / depth fusion -- imports corr_ext and grounding_dino_ext at module load, so those stay too.
-#   - Nothing else. MetricTrail's DPVO is packages/dpvo's `dpvo.metric` (MetricDPVO), not ViPE's vendored copy:
-#     build.sh deletes vipe/metrictrail/{dpvo,csrc,dpvo_ext,dpvo_ext_loader.py,dpvo_scatter.py,build.py} and copies
-#     the re-export shims of dpvo_shim/ into vipe/metrictrail/dpvo, so slam.py imports them unchanged. The consuming
-#     feature supplies `dpvo` (editable PyPI path package, like lietorch-mojo) and builds its cuda_corr/cuda_ba.
+# Nothing is compiled (MetricTrail's import graph, `pipeline=metrictrail`):
+#   - ViPE's CUDA extension vipe_ext is not built. Patch 0007 makes `vipe.ext` import packages/vipe-mojo's
+#     `vipe_mojo`, which the consuming feature supplies (editable PyPI path package, like lietorch-mojo): the four ops
+#     MetricTrail calls (droid_net_ext.corr_index_forward / altcorr_index_forward, slam_ext.ba_extended /
+#     frame_distance) are Mojo; every other vipe_ext op raises NotImplementedError naming it. build.sh deletes csrc and
+#     vipe/ext/specs.py.
+#   - MetricTrail's DPVO is packages/dpvo's `dpvo.metric` (MetricDPVO), not ViPE's vendored copy: build.sh deletes
+#     vipe/metrictrail/{dpvo,csrc,dpvo_ext,dpvo_ext_loader.py,dpvo_scatter.py,build.py} and copies the re-export shims
+#     of dpvo_shim/ into vipe/metrictrail/dpvo, so slam.py imports them unchanged. The consuming feature supplies
+#     `dpvo` (editable PyPI path package) with its Mojo kernels.
 #   - Deleted, not built: the optional stereo runner and its own DPVO copy (vipe/metrictrail/{stereo,
 #     dpvo_stereo_ext}); nothing outside it imports it.
 # Reuse instead of ViPE's in-tree copies (phase-0 parity proofs in the MetricTrail port notes):
@@ -49,43 +50,33 @@ source:
     # its centroid validity to the base forward, which does the masked draw; its copy of the vendored base forward
     # (_masked_base_forward) is deleted, so the patch is mostly removed lines.
     - patches/0005-dino-patchifier-dpvo-keywords.patch
+    # SharedK calibration's depth on keep: a keyframe gets its MoGe-2 forward once the frontend keeps it (pool: 353 -> 164
+    # forwards; K and the TUM / 7-Scenes / KITTI ATE within single-seed noise).
+    - patches/0006-calibration-depth-on-keep.patch
+    # vipe.ext imports vipe_mojo (packages/vipe-mojo) instead of vipe_ext or its JIT build; setup.py builds no
+    # extension (no torch import, no CUDAExtension). Removed lines only, plus the import.
+    - patches/0007-kernels-from-vipe-mojo.patch
 
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 5
+  number: 7
   script:
     file: build.sh
 
 requirements:
-  build:
-    - cuda-compiler 13.0.*
-    - cuda-version 13.0.*
-    - ninja
   host:
     - python 3.12.*
     - pip
     - setuptools >=77
     - wheel
-    - cuda-version 13.0.*
-    - pytorch-gpu 2.12.*
-    # slam_ext includes <eigen3/Eigen/...> (USE_SYSTEM_EIGEN=1, build.sh).
-    - eigen ==3.4.0
-    - cuda-cudart-dev
-    - cuda-driver-dev
-    - cuda-cccl
-    - cuda-nvrtc-dev
-    - libcublas-dev
-    - libcusparse-dev
-    - libcusolver-dev
-    - libcurand-dev
   # What `vipe.metrictrail.pipeline`, `vipe.pipeline.processors` and the `vipe` CLI (vipe.cli.main) import at module
   # load (upstream pyproject, minus what MetricTrail never reaches: gtsam (vipe_long), ray). transformers (Grounding
   # DINO's BERT, used only with dynamic masks) comes from the consuming workspace. PyPI-only: python-pycg
   # (vipe.utils.geometry / visualization) comes from the consuming feature's pypi-dependencies.
   run:
     - python 3.12.*
-    # vipe_ext links the CUDA build of torch: never resolve a CPU pytorch.
+    # MetricTrail runs on the GPU: never resolve a CPU pytorch.
     - pytorch >=2.12,<2.13 cuda*
     - cuda-version >=13.0,<14
     # MetricTrail's frozen DINOv3 (patch 0002). Sibling recipe: the consuming feature lists it too.
@@ -126,4 +117,4 @@ about:
   homepage: https://github.com/nv-tlabs/vipe
   license: Apache-2.0
   license_file: LICENSE
-  summary: NVIDIA ViPE + MetricTrail (source at ead2e00) with vipe_ext, import name `vipe`; DPVO from packages/dpvo
+  summary: NVIDIA ViPE + MetricTrail (source at ead2e00), import name `vipe`; kernels from packages/vipe-mojo, DPVO from packages/dpvo

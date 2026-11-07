@@ -81,9 +81,16 @@ def test_provider_reads_the_backend_from_the_environment(monkeypatch: pytest.Mon
     monkeypatch.setattr(depth, "tensorrt_importable", lambda: True)
     provider = depth.MoGe2NormalProvider("l")  # builds nothing until the first forward
     assert provider.engine.backend == "torch"
-    assert provider.precision == "FP16"
+    assert provider.precision == "FP16-autocast"
     monkeypatch.setenv(depth.MOGE2_BACKEND_ENV, "auto")
-    assert depth.MoGe2NormalProvider("l").engine.backend == "tensorrt"
+    tensorrt = depth.MoGe2NormalProvider("l")
+    assert tensorrt.engine.backend == "tensorrt"
+    assert tensorrt.precision == "TensorRT-FP16"
+
+
+def test_provider_refuses_fp32_instead_of_ignoring_it() -> None:
+    with pytest.raises(ValueError, match="FP16 on every backend"):
+        depth.MoGe2NormalProvider("l", use_fp16=False)
 
 
 def test_network_size_is_the_inputs_own_token_grid_not_a_bucket() -> None:
@@ -151,9 +158,12 @@ def test_registered_name_builds_our_provider_with_one_engine_per_cache() -> None
     depth.register_providers()
     assert set(depth.PROVIDER_NAMES) <= set(vipe_depth.DEPTH_PROVIDERS)
     cache = ModelCache()
-    calibration = vipe_depth.make_metrictrail_depth_model(depth.DEFAULT_PROVIDER, use_fp16=False, model_cache=cache)
+    calibration = vipe_depth.make_metrictrail_depth_model(depth.DEFAULT_PROVIDER, use_fp16=True, model_cache=cache)
     tracking = vipe_depth.make_metrictrail_depth_model(depth.DEFAULT_PROVIDER, use_fp16=True, model_cache=cache)
     assert isinstance(calibration, depth.MoGe2NormalProvider) and isinstance(tracking, vipe_depth.MetricTrailMoGe2)
     assert calibration.engine is tracking.engine  # one forward cache across calibration and tracking
     assert tracking.describe()["registry_name"] == depth.DEFAULT_PROVIDER
-    assert all(override.endswith(f"={depth.DEFAULT_PROVIDER}") for override in depth.PROVIDER_OVERRIDES)
+    assert f"pipeline.init.calibration.depth_model={depth.DEFAULT_PROVIDER}" in depth.PROVIDER_OVERRIDES
+    assert f"pipeline.slam.keyframe_depth={depth.DEFAULT_PROVIDER}" in depth.PROVIDER_OVERRIDES
+    # The calibration config states the precision our provider runs (upstream's default is FP32 for ViPE's moge2-l).
+    assert "pipeline.init.calibration.depth_use_fp16=true" in depth.PROVIDER_OVERRIDES

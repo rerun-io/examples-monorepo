@@ -459,8 +459,6 @@ class CorrBlock:
     ``2 × 49 × P² = 882`` for P = 3.  See Sec. 3.2 of Teed et al. (2022).
 
     Attributes:
-        dropout: Dropout probability applied during correlation computation
-            (training only).
         radius: Search radius R for the correlation neighborhood.
         levels: List of pooling factors for the feature pyramid.
         gmap: Per-patch feature descriptors, shape ``(1, M, 128, P, P)``.
@@ -472,12 +470,10 @@ class CorrBlock:
         fmap: Float[Tensor, "1 n 128 h4 w4"],
         gmap: Float[Tensor, "1 num_patches 128 p p"],
         radius: int = 3,
-        dropout: float = 0.2,
         levels: list[int] | None = None,
     ) -> None:
         if levels is None:
             levels = [1, 4]
-        self.dropout: float = dropout
         self.radius: int = radius
         self.levels: list[int] = levels
 
@@ -509,7 +505,7 @@ class CorrBlock:
         corrs: list[Float[Tensor, "..."]] = []
         for i in range(len(self.levels)):
             # Scale coordinates to match pyramid level resolution
-            corrs += [ altcorr.corr(self.gmap, self.pyramid[i], coords / self.levels[i], ii, jj, self.radius, self.dropout) ]
+            corrs += [ altcorr.corr(self.gmap, self.pyramid[i], coords / self.levels[i], ii, jj, self.radius) ]
         # Stack levels along last dim, then flatten
         return torch.stack(corrs, -1).view(1, len(ii), -1)
 

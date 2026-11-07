@@ -192,9 +192,9 @@ def residual(Ginv, input_poses, dSloop, ii, jj, jacobian=False):
     return resid, (J_Ginv_i, J_Ginv_j, iii, jjj)
 
 
-def run_DPVO_PGO(pred_poses, loop_poses, loop_ii, loop_jj, queue, kernel_device: torch.device):
-    """Wraps PGO in a multiprocessing-friendly function. ``kernel_device`` is the tracker's device (it picks the kernel backend)."""
-    final_est = perform_updates(pred_poses, loop_poses, loop_ii, loop_jj, iters=30, kernel_device=kernel_device)
+def run_DPVO_PGO(pred_poses, loop_poses, loop_ii, loop_jj, queue):
+    """Wraps PGO in a multiprocessing-friendly function."""
+    final_est = perform_updates(pred_poses, loop_poses, loop_ii, loop_jj, iters=30)
 
     safe_i = loop_ii.max().item() + 1
     aa = SE3_to_Sim3(pred_poses.cpu())
@@ -204,12 +204,12 @@ def run_DPVO_PGO(pred_poses, loop_poses, loop_ii, loop_jj, queue, kernel_device:
 
 
 def perform_updates(
-    input_poses, dSloop, ii_loop, jj_loop, iters, ep=0.0, lmbda=1e-6, fix_opt_window=False, *, kernel_device: torch.device
+    input_poses, dSloop, ii_loop, jj_loop, iters, ep=0.0, lmbda=1e-6, fix_opt_window=False
 ):
     """Run the Levenberg-Marquardt algorithm for pose-graph optimization."""
     import pypose as pp
 
-    from dpvo.kernels import ba_kernels
+    from dpvo.fastba import solve_system
 
     input_poses = input_poses.clone()
 
@@ -222,8 +222,7 @@ def perform_updates(
     for itr in range(iters):
         resid, (J_Ginv_i, J_Ginv_j, iii, jjj) = residual(Ginv, input_poses, dSloop, ii_loop, jj_loop, jacobian=True)
         residual_history.append(resid.square().mean().item())
-        # The PGO tensors are CPU copies and solve_system is host (Eigen) code: the tracker's backend serves it.
-        (delta_pose,) = ba_kernels(kernel_device).solve_system(J_Ginv_i, J_Ginv_j, iii, jjj, resid, ep, lmbda, freen)
+        delta_pose = solve_system(J_Ginv_i, J_Ginv_j, iii, jjj, resid, ep, lmbda, freen)
         assert Ginv.shape == delta_pose.shape
         Ginv_tmp = Ginv + delta_pose
 

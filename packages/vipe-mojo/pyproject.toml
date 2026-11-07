@@ -1,0 +1,50 @@
+[project]
+name = "vipe-mojo"
+version = "0.1.0"
+description = "ViPE's DROID/SLAM CUDA kernels (vipe_ext) in Mojo: CPU and CUDA"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+# Static metadata only. torch, jaxtyping and lietorch-mojo (whose runtimes the kernels share) come from the
+# environment; the Mojo extension `vipe_mojo/_vipe_mojo.so` is built by the `vipe-mojo-build` task.
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vipe_mojo"]
+artifacts = ["vipe_mojo/_vipe_mojo.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs a CUDA GPU (run: pixi run -e metrictrail-dev vipe-mojo-tests)",
+    "golden: reference comparison against stored ground truth",
+]
+addopts = "-m 'not integration and not golden'"
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["vipe_mojo", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*"]
+min_confidence = 60
+# vipe_ext's API kept for drop-in use (read by vipe.ext through getattr), PEP 562 module hooks, pytest names.
+ignore_names = [
+    "pytestmark",
+    "corr_index_forward",
+    "altcorr_index_forward",
+    "ba_extended",
+    "frame_distance",
+    "grounding_dino_ext",
+    "utils_ext",
+    "scatter_ext",
+    "corr_ext",
+    "__getattr__",
+]

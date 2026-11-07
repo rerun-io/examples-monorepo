@@ -1,4 +1,4 @@
-"""Alternative correlation module wrapping CUDA kernels for correlation and patchification.
+"""Correlation and patchification on the kernels of :mod:`dpvo.kernels`.
 
 Re-exports the two main public functions:
 

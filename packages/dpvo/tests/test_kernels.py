@@ -25,17 +25,9 @@ class FakeCorr:
         self.calls.append(("forward", (fmap1, fmap2, coords, ii, jj, radius)))
         return (torch.empty(1, ii.shape[0], 2 * radius + 1, 2 * radius + 1, 3, 3, device=META),)
 
-    def backward(self, fmap1: Tensor, fmap2: Tensor, coords: Tensor, ii: Tensor, jj: Tensor, grad: Tensor, radius: int) -> Sequence[Tensor]:
-        self.calls.append(("backward", (fmap1, fmap2, coords, ii, jj, grad, radius)))
-        return torch.empty_like(fmap1), torch.empty_like(fmap2)
-
     def patchify_forward(self, net: Tensor, coords: Tensor, radius: int) -> Sequence[Tensor]:
         self.calls.append(("patchify_forward", (net, coords, radius)))
         return (torch.empty(coords.shape[0], coords.shape[1], net.shape[1], 2 * radius + 2, 2 * radius + 2, device=META),)
-
-    def patchify_backward(self, net: Tensor, coords: Tensor, grad: Tensor, radius: int) -> Sequence[Tensor]:
-        self.calls.append(("patchify_backward", (net, coords, grad, radius)))
-        return (torch.empty_like(net),)
 
 
 class FakeBA:
@@ -77,12 +69,6 @@ class FakeBA:
     def reproject(self, poses: Tensor, patches: Tensor, intrinsics: Tensor, ii: Tensor, jj: Tensor, kk: Tensor) -> Tensor:
         self.calls.append(("reproject", (poses, patches, intrinsics, ii, jj, kk)))
         return torch.empty(1, ii.shape[0], 2, 3, 3, device=META)
-
-    def solve_system(
-        self, J_Ginv_i: Tensor, J_Ginv_j: Tensor, ii: Tensor, jj: Tensor, res: Tensor, ep: float, lm: float, freen: int
-    ) -> Sequence[Tensor]:
-        self.calls.append(("solve_system", (J_Ginv_i, J_Ginv_j, ii, jj, res, ep, lm, freen)))
-        return [torch.empty(3, 7, device=META)]
 
 
 @pytest.fixture
@@ -196,20 +182,16 @@ def test_depth_prior_validates_its_fields(n_weights: int, lam: float, huber: flo
         BADepthPrior(disps=torch.empty(6, device=META), weights=torch.empty(n_weights, device=META), lam=lam, huber=huber)
 
 
-def test_neighbors_reproject_and_solve_system_dispatch_on_the_input_device(fake_backend: tuple[FakeCorr, FakeBA]) -> None:
+def test_neighbors_and_reproject_dispatch_on_the_input_device(fake_backend: tuple[FakeCorr, FakeBA]) -> None:
     _, ba = fake_backend
     problem = _ba_problem()
 
     ix, jx = fastba.neighbors(problem.kk, problem.jj)
     coords = fastba.reproject(problem.poses, problem.patches, problem.intrinsics, problem.ii, problem.jj, problem.kk)
-    jac = torch.empty(2, 7, 7, device=META)
-    edge = torch.empty(2, dtype=torch.int64, device=META)
-    delta = fastba.solve_system(jac, jac, edge, edge, torch.empty(2, 7, device=META), 0.0, 1e-6, -1)
 
     assert ix is ba.linked[0] and jx is ba.linked[1]
     assert coords.shape == (1, 4, 2, 3, 3)
-    assert delta.shape == (3, 7)
-    assert [name for name, _ in ba.calls] == ["neighbors", "reproject", "solve_system"]
+    assert [name for name, _ in ba.calls] == ["neighbors", "reproject"]
 
 
 def test_corr_and_patchify_dispatch_on_the_input_device(fake_backend: tuple[FakeCorr, FakeBA]) -> None:

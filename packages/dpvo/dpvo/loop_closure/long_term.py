@@ -119,7 +119,9 @@ class LongTermLoopClosure:
         # Construct mini patch graph for triangulation
         true_disp = self.pg.patches_[i, :, 2, 1, 1].median()
         patches = torch.cat((kps1, torch.ones(1, n_pts, 1, device=self.pg.device) * true_disp), dim=-1)
-        patches = repeat(patches, "1 n uvd -> 1 n uvd 3 3", uvd=3)
+        # contiguous: repeat returns a view whose 3 x 3 entries share one depth, so the BA's per-pixel patch update
+        # would land on it 9 times (the CUDA extension did that; the Mojo kernels refuse non-contiguous tensors).
+        patches = repeat(patches, "1 n uvd -> 1 n uvd 3 3", uvd=3).contiguous()
         target = rearrange(torch.stack((kps0, kps2)), "ot 1 n uv -> 1 (ot n) uv", uv=2, n=n_pts, ot=2)
         weight = torch.ones_like(target)
 
@@ -262,6 +264,6 @@ class LongTermLoopClosure:
 
         self.lc_in_progress = True
         self.lc_process = self.lc_pool.apply_async(
-            run_DPVO_PGO, (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue, self.pg.device)
+            run_DPVO_PGO, (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue)
         )
         return True
