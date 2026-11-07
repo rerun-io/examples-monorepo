@@ -11,11 +11,10 @@ Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSessi
   normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
   keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
 * ``DPVO._DPVO__run_global_BA``: counts global bundle adjustments;
-* with :attr:`CaptureSession.live_tsdf` (the app), whenever DPVO's keyframe graph grows on a frame (DPVO adds every
-  frame as a keyframe; the graph grows when keyframe culling keeps it), that frame's depth is integrated at DPVO's
-  current estimate of its pose into a TSDF (``packages/tsdf-rs``), whose changed blocks are logged as meshes under
-  ``dpvo/mesh``, so the surface grows while DPVO tracks. Later bundle adjustment does not move what was integrated;
-  the run's final mesh (:mod:`metrictrail.surface`, final poses) replaces it (:meth:`CaptureSession.retire_live_mesh`);
+* with :attr:`CaptureSession.live_surface` (the app), whenever DPVO's keyframe graph grows on a frame (DPVO adds
+  every frame as a keyframe; the graph grows when keyframe culling keeps it), that frame's depth is integrated at
+  DPVO's current estimate of its pose into the :class:`~metrictrail.live_surface.LiveSurface`, so the surface grows
+  while DPVO tracks;
 * ``vipe.metrictrail.dino_fusion.FrozenDinoV3.forward``: projects the dinov3_vits16 patch features of the frame being
   patchified on a fixed PCA basis (fit on the first frame) to RGB.
 
@@ -35,15 +34,14 @@ from typing import Any
 import numpy as np
 import rerun as rr
 import torch
-from jaxtyping import Bool, Float32, Int64, UInt8, UInt32
+from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from torch import Tensor
-from tsdf_rs import TsdfVolume
 
 from metrictrail import entities
+from metrictrail.live_surface import LiveSurface
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
-from metrictrail.surface import MeshArrays, TsdfSettings, integrate_frame, new_volume
 
 
 def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"]:
@@ -149,15 +147,9 @@ class CaptureSession:
     graph grew, no PCA (an uncompressed image per frame is too much to stream to a browser)."""
     on_frame: Callable[[int, int, int], None] | None = None
     """Called after each tracked frame with (frame index, frames of the pass, keyframes in the graph); may raise to stop."""
-    live_tsdf: TsdfSettings | None = None
-    """Grow a TSDF mesh while tracking from each frame on which DPVO's keyframe graph grew (needs :attr:`live`); None:
-    none."""
-    mesh_every_keyframes: int = 8
-    """Integrated frames between two logs of the live mesh's changed blocks."""
-    volume: TsdfVolume | None = None
-    """The live TSDF volume of the current pass, when :attr:`live_tsdf` is set."""
-    volume_keyframes: int = 0
-    """Frames integrated into :attr:`volume`."""
+    live_surface: LiveSurface | None = None
+    """TSDF mesh grown while tracking from each frame on which DPVO's keyframe graph grew, reset per pass (logging into
+    :attr:`live`); None: none."""
     passes: list[CapturedPass] = field(default_factory=list)
     """Every DPVO instance captured, in creation order."""
     pass_frames: int = 0
@@ -285,8 +277,8 @@ class CaptureSession:
         for owner, name, original in self.restore:
             setattr(owner, name, original)
         self.restore = []
-        if self.volume is not None and self.live is not None:
-            self.log_mesh_blocks(self.live)  # the keyframes since the last log
+        if self.live_surface is not None:
+            self.live_surface.flush()  # the keyframes since the last log
         for rec in self.streams.values():
             rec.flush()
             if rec is not self.live:
@@ -309,55 +301,10 @@ class CaptureSession:
             if captured.num_frames <= self.pass_frames:
                 earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
-        if self.live_tsdf is not None and self.live is not None:
-            # A later pass (FP32 recovery) re-tracks from the start: its surface starts again.
-            rec.log(entities.DPVO_MESH, rr.Clear(recursive=True), static=True)
-            self.volume = new_volume(self.live_tsdf)
-            self.volume_keyframes = 0
+        if self.live_surface is not None:
+            self.live_surface.reset()
         self.pass_normals.append({})
         self.pending_normals.clear()
-
-    def integrate_keyframe(
-        self,
-        rec: rr.RecordingStream,
-        depth_m: Float32[ndarray, "h w"],
-        rgb: UInt8[ndarray, "h w 3"],
-        intrinsics_px: Float32[ndarray, "4"],
-        world_T_cam: Float32[ndarray, "4 4"],
-    ) -> None:
-        """Integrate the current frame's depth at DPVO's current estimate of its pose (``world_T_cam``); log the changed
-        blocks every :attr:`mesh_every_keyframes` integrated frames."""
-        assert self.live_tsdf is not None and self.volume is not None
-        if not integrate_frame(self.volume, self.live_tsdf, depth_m, intrinsics_px, world_T_cam, rgb):
-            return
-        self.volume_keyframes += 1
-        if self.volume_keyframes % self.mesh_every_keyframes == 0:
-            self.log_mesh_blocks(rec)
-
-    def log_mesh_blocks(self, rec: rr.RecordingStream) -> None:
-        """Log the live volume's blocks changed since the last call (a block whose surface vanished is cleared)."""
-        assert self.volume is not None
-        blocks: list[tuple[tuple[int, int, int], MeshArrays]] = self.volume.extract_dirty_block_meshes()
-        for (x, y, z), mesh in blocks:
-            path: str = f"{entities.DPVO_MESH}/{x}_{y}_{z}"
-            vertices_xyz: Float32[ndarray, "v 3"] = mesh[0]
-            triangles: UInt32[ndarray, "t 3"] = mesh[1]
-            if triangles.shape[0] == 0:
-                rec.log(path, rr.Clear(recursive=False), static=True)
-                continue
-            rec.log(
-                path,
-                rr.Mesh3D(vertex_positions=vertices_xyz, triangle_indices=triangles, vertex_normals=mesh[3], vertex_colors=mesh[2]),
-                static=True,
-            )
-
-    def retire_live_mesh(self, rec: rr.RecordingStream) -> None:
-        """Clear the live mesh under ``dpvo/mesh`` and drop its volume, once the run's final mesh supersedes it; nothing
-        without a live mesh."""
-        if self.volume is None:
-            return
-        rec.log(entities.DPVO_MESH, rr.Clear(recursive=True), static=True)
-        self.volume = None
 
     def kept_pass(self) -> CapturedPass | None:
         """The last of the longest passes (the tracking pass whose poses ViPE writes), or None if nothing ran."""
@@ -443,8 +390,8 @@ class CaptureSession:
             ),
         )
         newest_world_T_cam: Float32[ndarray, "4 4"] = world_T_cam[num_keyframes - 1]
-        if self.volume is not None and depth_m is not None:
-            self.integrate_keyframe(rec, depth_m, rgb, intrinsics_px, newest_world_T_cam)
+        if self.live_surface is not None and depth_m is not None:
+            self.live_surface.integrate(depth_m, rgb, intrinsics_px, newest_world_T_cam)
         rec.log(entities.DPVO_CURRENT, rr.Transform3D(translation=newest_world_T_cam[:3, 3], mat3x3=newest_world_T_cam[:3, :3]))
         rec.log(
             entities.DPVO_CURRENT,

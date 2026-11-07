@@ -12,27 +12,6 @@ use crate::volume::{checked_block_origin, local_index, BlockKey, VoxelBlock, BLO
 
 type Blocks = FxHashMap<BlockKey, VoxelBlock>;
 
-/// Per-block meshes from [`crate::TsdfVolume::dirty_block_meshes`], to hand
-/// back to [`crate::TsdfVolume::commit`] once delivered.
-#[derive(Clone, Debug)]
-pub struct DirtyMeshes {
-    pub(crate) meshes: Vec<(BlockKey, Mesh)>,
-    /// The volume's integration count at extraction.
-    pub(crate) integrations: u64,
-}
-
-impl DirtyMeshes {
-    /// `(block_key, mesh)` pairs in sorted key order.
-    pub fn meshes(&self) -> &[(BlockKey, Mesh)] {
-        &self.meshes
-    }
-
-    /// The `(block_key, mesh)` pairs, consuming the extraction.
-    pub fn into_meshes(self) -> Vec<(BlockKey, Mesh)> {
-        self.meshes
-    }
-}
-
 /// A cell edge: its lower voxel and the axis to the other one.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct EdgeKey {

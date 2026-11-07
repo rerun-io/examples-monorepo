@@ -1,8 +1,9 @@
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::changes::{ChangeTracker, DirtyMeshes};
 use crate::error::TsdfError;
-use crate::extract::{self, DirtyMeshes};
+use crate::extract;
 use crate::frame::{Camera, DepthFrame, DepthRange};
 use crate::geometry::{
     add, add_scaled, camera_to_world, checked_floor_i64, invert_3x3, multiply_3x3, transform_point,
@@ -17,18 +18,6 @@ const BLOCK_VOXEL_COUNT: usize =
 const DISCOVERY_CHUNK_PIXELS: usize = 2_048;
 const MIN_BLOCK_INDEX: i64 = i64::MIN / BLOCK_RESOLUTION;
 const MAX_BLOCK_INDEX: i64 = (i64::MAX - BLOCK_RESOLUTION) / BLOCK_RESOLUTION;
-
-/// Offsets of a block and its 26 neighbors.
-const NEIGHBORHOOD: [[i64; 3]; 27] = {
-    let mut offsets = [[0; 3]; 27];
-    let mut index = 0;
-    while index < 27 {
-        let i = index as i64;
-        offsets[index] = [i % 3 - 1, i / 3 % 3 - 1, i / 9 - 1];
-        index += 1;
-    }
-    offsets
-};
 
 /// Integer index of a 16-by-16-by-16 voxel block: block `k` holds global voxel
 /// coordinates `16 * k` to `16 * k + 15` on each axis.
@@ -172,12 +161,7 @@ pub struct TsdfVolume {
     sdf_trunc: f32,
     fuse_color: bool,
     blocks: FxHashMap<BlockKey, VoxelBlock>,
-    /// Blocks whose mesh may have changed since the last [`TsdfVolume::commit`].
-    dirty_blocks: FxHashSet<BlockKey>,
-    /// Blocks whose last reported mesh had triangles.
-    surfaced_blocks: FxHashSet<BlockKey>,
-    /// Frames integrated so far; stamps [`DirtyMeshes`].
-    integrations: u64,
+    changes: ChangeTracker,
     ray_cache: Option<RayCache>,
 }
 
@@ -200,9 +184,7 @@ impl TsdfVolume {
             sdf_trunc,
             fuse_color,
             blocks: FxHashMap::default(),
-            dirty_blocks: FxHashSet::default(),
-            surfaced_blocks: FxHashSet::default(),
-            integrations: 0,
+            changes: ChangeTracker::default(),
             ray_cache: None,
         })
     }
@@ -230,7 +212,6 @@ impl TsdfVolume {
         }
         frame.depth_range.validate()?;
         let rays = cached_rays(&mut self.ray_cache, frame.image_size, camera.intrinsics)?;
-        self.integrations += 1;
 
         let context = FrameContext {
             depth: frame.depth,
@@ -245,22 +226,7 @@ impl TsdfVolume {
             sdf_trunc: self.sdf_trunc,
         };
         let touched = discover_touched_blocks(&context);
-
-        // A block's cells read its {0,1}^3 neighborhood and their normals one
-        // voxel further on both sides, so updating a block stales the meshes
-        // of itself and all 26 neighbors.
-        for &key in &touched {
-            for offset in NEIGHBORHOOD {
-                let neighbor = [
-                    key[0].checked_add(offset[0]),
-                    key[1].checked_add(offset[1]),
-                    key[2].checked_add(offset[2]),
-                ];
-                if let [Some(x), Some(y), Some(z)] = neighbor {
-                    self.dirty_blocks.insert([x, y, z]);
-                }
-            }
-        }
+        self.changes.mark_touched(&touched);
 
         let mut active: Vec<(BlockKey, VoxelBlock)> = touched
             .into_iter()
@@ -294,7 +260,7 @@ impl TsdfVolume {
     }
 
     /// Per-block meshes of the blocks whose surface may have changed since
-    /// the last [`TsdfVolume::commit`], without draining the change tracker.
+    /// the last confirmed [`crate::Delivery`].
     ///
     /// Each mesh holds the triangles of cells anchored in its block, with
     /// vertices deduplicated within the block. The union of the latest mesh
@@ -304,52 +270,21 @@ impl TsdfVolume {
     /// triangles is reported once with an empty mesh so consumers can clear
     /// it; blocks that never had surface are omitted. Keys are sorted.
     ///
-    /// # Errors
-    ///
-    /// [`TsdfError::VertexIndexOverflow`] as for [`TsdfVolume::extract_mesh`].
-    pub fn dirty_block_meshes(&self) -> Result<DirtyMeshes, TsdfError> {
-        let mut keys: Vec<BlockKey> = self
-            .dirty_blocks
-            .iter()
-            .copied()
-            .filter(|key| self.blocks.contains_key(key))
-            .collect();
-        keys.sort_unstable();
-        Ok(DirtyMeshes {
-            meshes: extract::block_meshes(
-                &keys,
-                &self.blocks,
-                &self.surfaced_blocks,
-                self.voxel_size,
-                self.fuse_color,
-            ),
-            integrations: self.integrations,
-        })
+    /// The meshes stay pending until [`crate::Delivery::confirm`]; drop the
+    /// delivery instead to get them again from the next call.
+    pub fn dirty_block_meshes(&mut self) -> DirtyMeshes<'_> {
+        let keys = self.changes.dirty_keys(|key| self.blocks.contains_key(key));
+        let meshes = extract::block_meshes(
+            &keys,
+            &self.blocks,
+            &self.changes.surfaced,
+            self.voxel_size,
+            self.fuse_color,
+        );
+        self.changes.pending(meshes)
     }
 
-    /// Record `dirty` as delivered: remember which blocks have surface and
-    /// drain the change tracker.
-    ///
-    /// # Errors
-    ///
-    /// [`TsdfError::StaleDirtyMeshes`] if a frame was integrated after
-    /// `dirty` was extracted; the tracker is left as it is.
-    pub fn commit(&mut self, dirty: &DirtyMeshes) -> Result<(), TsdfError> {
-        if dirty.integrations != self.integrations {
-            return Err(TsdfError::StaleDirtyMeshes);
-        }
-        for (key, mesh) in dirty.meshes() {
-            if mesh.triangles.is_empty() {
-                self.surfaced_blocks.remove(key);
-            } else {
-                self.surfaced_blocks.insert(*key);
-            }
-        }
-        self.dirty_blocks.clear();
-        Ok(())
-    }
-
-    /// [`TsdfVolume::dirty_block_meshes`] followed by [`TsdfVolume::commit`].
+    /// [`TsdfVolume::dirty_block_meshes`], confirmed at once.
     ///
     /// # Example
     ///
@@ -360,18 +295,14 @@ impl TsdfVolume {
     /// let depth = vec![1.0_f32; 64 * 64];
     /// let camera = Camera::pinhole([60.0, 60.0, 31.5, 31.5], Camera::IDENTITY);
     /// volume.integrate(&DepthFrame::new(&depth, [64, 64]), &camera)?;
-    /// assert!(!volume.extract_dirty_block_meshes()?.is_empty());
-    /// assert!(volume.extract_dirty_block_meshes()?.is_empty());
+    /// assert!(!volume.extract_dirty_block_meshes().is_empty());
+    /// assert!(volume.extract_dirty_block_meshes().is_empty());
     /// # Ok::<(), tsdf::TsdfError>(())
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// As [`TsdfVolume::dirty_block_meshes`].
-    pub fn extract_dirty_block_meshes(&mut self) -> Result<Vec<(BlockKey, Mesh)>, TsdfError> {
-        let dirty = self.dirty_block_meshes()?;
-        self.commit(&dirty)?;
-        Ok(dirty.into_meshes())
+    pub fn extract_dirty_block_meshes(&mut self) -> Vec<(BlockKey, Mesh)> {
+        let DirtyMeshes { meshes, delivery } = self.dirty_block_meshes();
+        delivery.confirm();
+        meshes
     }
 }
 
@@ -507,18 +438,12 @@ fn integrate_voxel(
     if pixel[2] == 0.0 || !pixel[2].is_finite() {
         return;
     }
-    // Nearest pixel without the libm round() call: for an in-range
-    // coordinate, truncating `x + 0.5` gives round(x). `> 0.0` rejects
-    // x = -0.5, which round() sends to -1; NaN fails every comparison.
-    let u = pixel[0] / pixel[2] + 0.5;
-    let v = pixel[1] / pixel[2] + 0.5;
-    if !(u > 0.0 && v > 0.0 && u < context.width as f32 + 0.5 && v < context.height as f32 + 0.5) {
+    let (Some(u), Some(v)) = (
+        nearest_pixel(pixel[0] / pixel[2], context.width),
+        nearest_pixel(pixel[1] / pixel[2], context.height),
+    ) else {
         return;
-    }
-    let (u, v) = (u as usize, v as usize);
-    if u >= context.width || v >= context.height {
-        return;
-    }
+    };
 
     let pixel_index = v * context.width + u;
     let depth = context.depth[pixel_index];
@@ -553,5 +478,63 @@ fn integrate_voxel(
                 / denominator;
         }
         color.weight[index] = denominator;
+    }
+}
+
+/// The pixel `x.round()` (half away from zero) selects on an axis of `size`
+/// pixels, if inside, without the libm `round` call: in `f64`, `x + 0.5`
+/// never rounds across an integer for an `f32` `x`, so truncating it rounds.
+#[inline]
+fn nearest_pixel(x: f32, size: usize) -> Option<usize> {
+    let shifted = f64::from(x) + 0.5;
+    // round() sends x <= -0.5 below zero; the cast saturates infinity, which
+    // the bound then rejects.
+    if shifted.is_nan() || shifted <= 0.0 {
+        return None;
+    }
+    let index = shifted as usize;
+    (index < size).then_some(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nearest_pixel;
+
+    /// The selection of the original `round()` rule.
+    fn rounded(x: f32, size: usize) -> Option<usize> {
+        let r = x.round();
+        (r.is_finite() && r >= 0.0 && r < size as f32).then_some(r as usize)
+    }
+
+    #[test]
+    fn nearest_pixel_matches_round_at_every_half_pixel_boundary() {
+        for k in -4..5_000 {
+            let half = k as f32 + 0.5;
+            let mut x = half.next_down().next_down();
+            for _ in 0..5 {
+                assert_eq!(nearest_pixel(x, 4_096), rounded(x, 4_096), "x = {x:e}");
+                x = x.next_up();
+            }
+        }
+        // The largest f32 below 0.5: `x + 0.5` in f32 rounds up to 1.0.
+        assert_eq!(nearest_pixel(0.499_999_97, 8), Some(0));
+    }
+
+    #[test]
+    fn nearest_pixel_matches_round_across_the_f32_range() {
+        for bits in (0..=u32::MAX).step_by(9_973) {
+            let x = f32::from_bits(bits);
+            assert_eq!(nearest_pixel(x, 4_096), rounded(x, 4_096), "x = {x:e}");
+        }
+        for x in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            4_095.5,
+            4_096.0,
+        ] {
+            assert_eq!(nearest_pixel(x, 4_096), rounded(x, 4_096), "x = {x:e}");
+        }
     }
 }

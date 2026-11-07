@@ -60,9 +60,4 @@ pub enum TsdfError {
         /// Number of vertices produced before the overflow.
         vertex_count: usize,
     },
-
-    /// [`crate::TsdfVolume::commit`] got meshes extracted before a later
-    /// integration, which they do not cover.
-    #[error("dirty-block meshes are stale: the volume integrated a frame after their extraction")]
-    StaleDirtyMeshes,
 }

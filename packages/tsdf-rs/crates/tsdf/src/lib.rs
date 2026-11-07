@@ -12,6 +12,7 @@
 //! and matrices are row-major (see [`Camera`]). Results are deterministic and
 //! independent of the Rayon thread count.
 
+mod changes;
 mod error;
 mod extract;
 mod frame;
@@ -20,8 +21,8 @@ mod mesh;
 mod tables;
 mod volume;
 
+pub use changes::{Delivery, DirtyMeshes};
 pub use error::TsdfError;
-pub use extract::DirtyMeshes;
 pub use frame::{Camera, DepthFrame, DepthRange};
 pub use mesh::Mesh;
 pub use volume::{BlockKey, TsdfVolume};

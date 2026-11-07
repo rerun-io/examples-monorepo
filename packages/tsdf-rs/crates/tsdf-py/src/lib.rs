@@ -1,8 +1,9 @@
 //! The `tsdf_rs` Python module: NumPy bindings for the `tsdf` core.
 //!
 //! Inputs are C-contiguous, row-major NumPy arrays (a Fortran-ordered or
-//! strided array is refused, never read transposed). The GIL is released
-//! while the core integrates or extracts.
+//! strided array is refused, never read transposed). They are copied before
+//! the GIL is released while the core integrates or extracts, so another
+//! Python thread cannot write them mid-call.
 
 use numpy::ndarray::Dimension;
 use numpy::{
@@ -11,7 +12,7 @@ use numpy::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use tsdf::{Camera, DepthFrame, DepthRange, Mesh, TsdfError, TsdfVolume};
+use tsdf::{Camera, DepthFrame, DepthRange, DirtyMeshes, Mesh, TsdfError, TsdfVolume};
 
 /// `(vertices, triangles, colors | None, normals)`.
 type PyMesh<'py> = (
@@ -52,7 +53,7 @@ impl PyTsdfVolume {
         max_depth: f32,
     ) -> PyResult<()> {
         let [height, width] = [depth_hw.shape()[0], depth_hw.shape()[1]];
-        let depth = contiguous(&depth_hw, "depth_hw")?;
+        let depth = contiguous(&depth_hw, "depth_hw")?.to_vec();
         let camera = Camera {
             intrinsics: matrix(&K_33, "K_33")?,
             camera_from_world: matrix(&cam_T_world_44, "cam_T_world_44")?,
@@ -60,14 +61,14 @@ impl PyTsdfVolume {
         let color = match &color_hw3 {
             Some(array) => {
                 check_shape(array, "color_hw3", &[height, width, 3])?;
-                Some(contiguous(array, "color_hw3")?)
+                Some(contiguous(array, "color_hw3")?.to_vec())
             }
             None => None,
         };
         let frame = DepthFrame {
-            depth,
+            depth: &depth,
             image_size: [height, width],
-            color,
+            color: color.as_deref(),
             depth_range: DepthRange {
                 min: min_depth,
                 max: max_depth,
@@ -85,18 +86,15 @@ impl PyTsdfVolume {
     }
 
     fn extract_dirty_block_meshes<'py>(&mut self, py: Python<'py>) -> PyResult<PyBlockMeshes<'py>> {
-        let volume = &self.inner;
-        let dirty = py
-            .detach(|| volume.dirty_block_meshes())
-            .map_err(value_error)?;
-        // Convert before committing, so a NumPy failure leaves the change
-        // tracker intact and the call can be retried.
-        let converted = dirty
-            .meshes()
-            .iter()
-            .map(|(key, mesh)| Ok(((key[0], key[1], key[2]), mesh_to_numpy(py, mesh.clone())?)))
+        let volume = &mut self.inner;
+        let DirtyMeshes { meshes, delivery } = py.detach(|| volume.dirty_block_meshes());
+        // Confirm only after conversion: a NumPy failure drops the delivery,
+        // so the meshes stay pending and the call can be retried.
+        let converted = meshes
+            .into_iter()
+            .map(|([x, y, z], mesh)| Ok(((x, y, z), mesh_to_numpy(py, mesh)?)))
             .collect::<PyResult<PyBlockMeshes<'py>>>()?;
-        self.inner.commit(&dirty).map_err(value_error)?;
+        delivery.confirm();
         Ok(converted)
     }
 }

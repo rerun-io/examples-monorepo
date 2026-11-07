@@ -37,6 +37,7 @@ from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
+from metrictrail.live_surface import LiveSurface
 from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, log_run_outputs, make_provenance, read_run_outputs
 from metrictrail.palette import RunLabel
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
@@ -254,6 +255,7 @@ def run_and_log(
     depth_range_m: tuple[float, float] = DEPTH_RANGES_M.get(config.benchmark, DEFAULT_DEPTH_RANGE_M)
     tsdf: TsdfSettings = TsdfSettings(voxel_size_m=config.tsdf_voxel_m, max_depth_m=config.tsdf_max_depth_m)
     session: CaptureSession | None = None
+    live_surface: LiveSurface | None = LiveSurface(rec, tsdf) if config.capture and live and config.fuse_mesh else None
     if config.capture:
         session = CaptureSession(
             out_dir=config.output / "capture",
@@ -263,7 +265,7 @@ def run_and_log(
             live=rec if live else None,
             every_frame_images=not live,
             on_frame=tracked if on_stage is not None else None,
-            live_tsdf=tsdf if live and config.fuse_mesh else None,
+            live_surface=live_surface,
         )
         session.install()
     # This module imports cv2 (metrictrail.frames) before torch, so OpenMP sizes cv2's thread team to every logical
@@ -321,8 +323,8 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh
     )
-    if mesh is not None and session is not None:
-        session.retire_live_mesh(rec)  # the final mesh (world tab) supersedes the live one
+    if mesh is not None and live_surface is not None:
+        live_surface.retire()  # the final mesh (world tab) supersedes the live one
     return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None)
 
 

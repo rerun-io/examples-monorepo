@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use tsdf::{Camera, DepthFrame, DepthRange, Mesh, TsdfError, TsdfVolume};
+use tsdf::{Camera, DepthFrame, DepthRange, DirtyMeshes, Mesh, TsdfError, TsdfVolume};
 
 /// Per position (f32 bits), the (color, normal bits) of each full-mesh vertex there.
 type AttributesByPosition = HashMap<[u32; 3], Vec<([u8; 3], [u32; 3])>>;
@@ -229,7 +229,7 @@ fn dirty_block_union_matches_full_extraction_after_every_frame() -> Result<(), B
             &DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_color(&color),
             &camera,
         )?;
-        for (key, mesh) in volume.extract_dirty_block_meshes()? {
+        for (key, mesh) in volume.extract_dirty_block_meshes() {
             latest.insert(key, mesh);
         }
 
@@ -278,33 +278,29 @@ fn extract_dirty_block_meshes_drains_the_dirty_set() -> Result<(), Box<dyn Error
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
 
     volume.integrate(&frame, &camera)?;
-    let first = volume.extract_dirty_block_meshes()?;
+    let first = volume.extract_dirty_block_meshes();
     assert!(!first.is_empty());
     // Blocks that never held surface are omitted, not reported as empty.
     assert!(first.iter().all(|(_, mesh)| !mesh.triangles.is_empty()));
-    assert!(volume.extract_dirty_block_meshes()?.is_empty());
+    assert!(volume.extract_dirty_block_meshes().is_empty());
 
     volume.integrate(&frame, &camera)?;
-    assert!(!volume.extract_dirty_block_meshes()?.is_empty());
+    assert!(!volume.extract_dirty_block_meshes().is_empty());
     Ok(())
 }
 
 #[test]
-fn an_uncommitted_extraction_keeps_the_tracker_and_a_stale_one_is_refused(
-) -> Result<(), Box<dyn Error>> {
+fn an_unconfirmed_delivery_keeps_the_meshes_pending() -> Result<(), Box<dyn Error>> {
     let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
     let (depth, camera) = wavy_frame(0);
-    let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
-    volume.integrate(&frame, &camera)?;
+    volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
 
-    let first = volume.dirty_block_meshes()?;
-    assert_eq!(volume.dirty_block_meshes()?.meshes(), first.meshes());
-
-    volume.integrate(&frame, &camera)?;
-    assert_eq!(volume.commit(&first), Err(TsdfError::StaleDirtyMeshes));
-    let current = volume.dirty_block_meshes()?;
-    volume.commit(&current)?;
-    assert!(volume.dirty_block_meshes()?.meshes().is_empty());
+    let first = volume.dirty_block_meshes().meshes;
+    assert!(!first.is_empty());
+    let DirtyMeshes { meshes, delivery } = volume.dirty_block_meshes();
+    assert_eq!(meshes, first);
+    delivery.confirm();
+    assert!(volume.dirty_block_meshes().meshes.is_empty());
     Ok(())
 }
 
@@ -314,7 +310,7 @@ fn dirty_block_meshes_are_invariant_to_rayon_thread_count() -> Result<(), Box<dy
         let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
         let (depth, camera) = wavy_frame(0);
         volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
-        volume.extract_dirty_block_meshes()
+        Ok(volume.extract_dirty_block_meshes())
     };
     let meshes_one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)

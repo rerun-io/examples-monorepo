@@ -81,24 +81,24 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
     assert session.kept_normals()[0][0, 0, 0] == 2
 
 
-def test_live_tsdf_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
+def test_live_surface_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
     import rerun as rr
     from rerun.chunk import RrdReader
 
     from metrictrail import entities
-    from metrictrail.surface import TsdfSettings
+    from metrictrail.live_surface import LiveSurface
 
     rrd: Path = tmp_path / "live.rrd"
     rec = rr.RecordingStream("metrictrail-test", recording_id="live")
     rec.save(rrd)
+    surface = LiveSurface(rec, log_every=2)
     session = CaptureSession(
         out_dir=tmp_path,
         application_id="metrictrail-test",
         recording_id="live",
         depth_range_m=(0.3, 3.0),
         live=rec,
-        live_tsdf=TsdfSettings(),
-        mesh_every_keyframes=2,
+        live_surface=surface,
     )
     session.pass_frames = 3
     session.open_pass(0)
@@ -108,13 +108,12 @@ def test_live_tsdf_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
     for shift in (0.0, 0.05, 0.1):
         pose: np.ndarray = np.eye(4, dtype=np.float32)
         pose[0, 3] = shift
-        session.integrate_keyframe(rec, depth, rgb, intrinsics, pose)
-    session.uninstall()
-    session.retire_live_mesh(rec)  # the run's final mesh would replace it
-    assert session.volume is None
-    session.retire_live_mesh(rec)  # nothing left to retire
+        surface.integrate(depth, rgb, intrinsics, pose)
+    session.uninstall()  # logs the third frame's blocks
+    assert surface.volume.extract_dirty_block_meshes() == []
+    surface.retire()  # the run's final mesh would replace it
     rec.flush()
     rec.disconnect()
     paths: list[str] = [str(path) for path in RrdReader(rrd).store().schema().entity_paths()]
-    assert session.volume_keyframes == 3
+    assert surface.integrated == 3
     assert any(path.startswith("/" + entities.DPVO_MESH + "/") for path in paths)

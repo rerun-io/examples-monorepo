@@ -64,12 +64,12 @@ fn tsdf(c: &mut Criterion) {
     group.bench_function("integrate_all_frames", |b| {
         b.iter(|| fused(black_box(&depth), black_box(&cameras)))
     });
-    let volume = fused(&depth, &cameras);
+    let mut volume = fused(&depth, &cameras);
     group.bench_function("extract_mesh", |b| {
         b.iter(|| volume.extract_mesh().expect("mesh"))
     });
     group.bench_function("dirty_block_meshes_all_blocks", |b| {
-        b.iter(|| volume.dirty_block_meshes().expect("meshes"))
+        b.iter(|| volume.dirty_block_meshes().meshes)
     });
     group.finish();
 }
