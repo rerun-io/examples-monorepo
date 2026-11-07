@@ -2539,6 +2539,12 @@ platforms = ["osx-arm64"]
 # vipe-src's OpenEXR binding (vipe.utils.io): conda-forge's openexr-python has no osx-arm64 build.
 openexr = ">=3.4,<3.5"
 
+[feature.metrictrail-osx.activation.env]
+# The MPS allocator keeps freed blocks until its soft limit, by default 1.4 x the recommended working set (16.6 GiB on
+# a 16 GB M4: never reached). SharedK calibration on pool300 then held 12.9 GiB of Metal memory for 6.5 GiB allocated
+# and the machine paged; at 0.5 (5.9 GiB) the sweep stays at 7-8 GiB and completes.
+PYTORCH_MPS_LOW_WATERMARK_RATIO = "0.5"
+
 # ─── slam-evals feature (VSLAM-LAB benchmark → Rerun catalog ingester) ──────
 [feature.slam-evals]
 platforms = ["linux-64", "linux-aarch64"]
