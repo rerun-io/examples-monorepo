@@ -355,7 +355,7 @@ index 4cedf28..4614e46 100644
                  ),
                  dim=-1,
 diff --git a/vipe/slam/networks/droid_net.py b/vipe/slam/networks/droid_net.py
-index 8fceba7..7c5d35a 100644
+index 8fceba7..23b3e95 100644
 --- a/vipe/slam/networks/droid_net.py
 +++ b/vipe/slam/networks/droid_net.py
 @@ -28,6 +28,7 @@ import torch.nn.functional as F
@@ -383,6 +383,15 @@ index 8fceba7..7c5d35a 100644
      def encode_context(self, images: torch.Tensor):
          """image (torch.Tensor): BCHW image RGB 0-1"""
          # (1, B, C, H, W) - (x, x, 3, 1, 1)
+@@ -570,7 +571,7 @@ class DroidNet(nn.Module):
+             )
+ 
+         state_dict = OrderedDict(
+-            [(k.replace("module.", ""), v) for (k, v) in torch.load(ckpt_path, weights_only=True).items()]
++            [(k.replace("module.", ""), v) for (k, v) in torch.load(ckpt_path, weights_only=True, map_location=vipe_device()).items()]
+         )
+ 
+         state_dict["update.weight.2.weight"] = state_dict["update.weight.2.weight"][:2]
 diff --git a/vipe/streams/base.py b/vipe/streams/base.py
 index 0cf590d..25ba221 100644
 --- a/vipe/streams/base.py

@@ -60,7 +60,7 @@ source:
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 6
+  number: 7
   script:
     file: build.sh
 
