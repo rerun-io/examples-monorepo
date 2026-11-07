@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import rerun as rr
 
-pytest.importorskip("imagecodecs", reason="the ingest CLI needs imagecodecs from the ingest environment")
+pytest.importorskip("depth_png", reason="the ingest CLI needs depth_png from the ingest environment")
 
 from arkitscenes_download.ingest.cli import atomic_recording  # noqa: E402
 

@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     # common/catalog-common: numpy, scipy, jaxtyping, rerun-sdk, av, opencv,
     #                        pyserde, huggingface_hub, hf-transfer
-    # feature deps (conda): ffmpeg (av1_nvenc/libsvtav1), imagecodecs, trimesh, pillow, curl, rich
+    # feature deps (conda): ffmpeg (av1_nvenc/libsvtav1), depth-png (packages/depth-png), imagecodecs, trimesh, pillow, curl, rich
     "tyro",
 ]
 
