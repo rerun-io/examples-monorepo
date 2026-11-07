@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -188,7 +189,9 @@ def main(config: RelogConfig) -> int:
     logger = StreamLogger(sequence, resize_hw=config.resize_hw)
     logger.setup(timing_doc=True)
     _log_stage_timing(config.ma3d_dir, sequence.fps, n_frames)
-    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw)
+    # thread_owned: CUDA (NVDEC) decoders are thread-affine; iter_chunks below
+    # decodes the cameras in parallel while each decoder stays on its own thread.
+    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw, thread_owned=True)
 
     import time
     from concurrent.futures import ThreadPoolExecutor
@@ -200,15 +203,14 @@ def main(config: RelogConfig) -> int:
     # was a pointless CPU->GPU->CPU round-trip since log_tick_tracks copies back).
     timers: dict[str, float] = dict.fromkeys(["decode", "video", "mask", "tracks", "landmarks", "fit", "metrics"], 0.0)
     chunk: int = 32
+    video_chunks: Generator[list[UInt8[torch.Tensor, "b 3 h w"]], None, None] = reader.iter_chunks(chunk_size=chunk, max_frames=n_frames)
     # `with` so the pool (non-daemon worker threads) is always shut down, even if
     # the chunk loop raises (corrupt frame, torchcodec error, a failing log call).
     with ThreadPoolExecutor(max_workers=max(8, len(sequence.camera_names))) as io_pool:
         for start in range(0, n_frames, chunk):
             stop: int = min(start + chunk, n_frames)
             t = time.perf_counter()
-            videos: list[UInt8[torch.Tensor, "b 3 h w"]] = list(
-                io_pool.map(lambda r, s=start, e=stop: r.get_frames_in_range(s, e), reader.video_readers)
-            )
+            videos: list[UInt8[torch.Tensor, "b 3 h w"]] = next(video_chunks)
             timers["decode"] += time.perf_counter() - t
             # Preload every (frame, camera) mask for this chunk in parallel.
             t = time.perf_counter()
@@ -271,6 +273,8 @@ def main(config: RelogConfig) -> int:
                 logger.log_tick_metrics(f, {}, {"floor_contacts": float((floor_contact[f] > 0.5).sum())})
                 timers["metrics"] += time.perf_counter() - t
             print(f"\r{stop}/{n_frames}", end="", flush=True)
+    video_chunks.close()
+    reader.close()
     t = time.perf_counter()
     logger.flush()
     flush_s: float = time.perf_counter() - t

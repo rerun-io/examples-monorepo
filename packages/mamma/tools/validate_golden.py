@@ -75,6 +75,7 @@ def main(config: ValidateConfig) -> int:
         for tail in pipeline.fitting.drain():
             collector.collect(-1, None, None, tail)
     print(f"pipeline: {stats.ticks} ticks in {stats.elapsed_s:.1f}s ({stats.ticks_per_s:.1f} ticks/s)")
+    print(f"decode: {stats.decode_backend}")
 
     # Collect per-frame outputs for the golden slice.
     golden_frames: range = range(GOLDEN_FRAME_START, GOLDEN_FRAME_END)

@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +51,19 @@ def required_torchcodec_float(value: float | int | None, name: str) -> float:
     if value is None:
         raise ValueError(f"TorchCodec metadata field {name} is missing")
     return float(value)
+
+
+def bind_cuda_device(device: str) -> None:
+    """Bind the CUDA device (and its primary context) to the calling thread; no-op for CPU devices.
+
+    torchcodec's NVDEC decoder only decodes on a thread with a current CUDA
+    context. A thread that never touched CUDA fails with ``CUDA_ERROR_INVALID_CONTEXT``
+    at decoder creation, or "Could not receive frame from decoder" when an existing
+    decoder is advanced from it.
+    """
+    parsed: torch.device = torch.device(device)
+    if parsed.type == "cuda":
+        torch.cuda.set_device(parsed.index if parsed.index is not None else 0)
 
 
 def rgb_chw_tensor_to_bgr_hwc(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> ImageBGR:
@@ -398,8 +412,13 @@ class TorchCodecVideoReader:
                 post-resize dimensions; use ``source_width``/``source_height``
                 for the native ones.
             thread_owned: Create the decoder and run every decode on one owned
-                thread. CUDA TorchCodec decoders are thread-affine, so use this
-                when callers may access one reader from several threads.
+                thread. Without it, decodes run on the calling thread, which
+                gets the CUDA device bound first, so any thread may drive the
+                reader; with it, decodes from several threads also serialise.
+
+        Warns (``RuntimeWarning``) when NVDEC cannot decode the stream (for example
+        HEVC or H.264 4:4:4) and torchcodec falls back to CPU decoding; see
+        :attr:`cpu_fallback`.
         """
         from torchcodec.decoders import VideoDecoder
 
@@ -431,6 +450,18 @@ class TorchCodecVideoReader:
             )
         )
 
+        # NVDEC rejects some streams (4:4:4 chroma) and torchcodec then decodes them on
+        # the CPU and uploads every frame; say so instead of running silently slow.
+        fallback_reason: str | None = (
+            self._decode(lambda: str(self._decoder.cpu_fallback) if self._decoder.cpu_fallback else None)
+            if self.device.startswith("cuda")
+            else None
+        )
+        self._cpu_fallback: bool = fallback_reason is not None
+        if fallback_reason is not None:
+            name: str = str(source) if isinstance(source, Path) else f"<{len(source)} bytes>"
+            warnings.warn(f"NVDEC cannot decode {name}; torchcodec decodes it on the CPU ({fallback_reason})", RuntimeWarning, stacklevel=2)
+
         metadata = self._decode(lambda: self._decoder.metadata)
         self._source_width: int = required_torchcodec_int(metadata.width, "width")
         self._source_height: int = required_torchcodec_int(metadata.height, "height")
@@ -452,16 +483,26 @@ class TorchCodecVideoReader:
         self._read_buffer_stop: int = 0
 
     def _decode(self, callback: Callable[[], T]) -> T:
-        """Run decoder work on its owned thread when thread affinity is enabled."""
-        if self._decode_thread is None:
+        """Run decoder work on the owned thread when one exists, else on the caller, with the CUDA device bound."""
+
+        def bound() -> T:
+            bind_cuda_device(self.device)
             return callback()
-        return self._decode_thread.submit(callback).result()
+
+        if self._decode_thread is None:
+            return bound()
+        return self._decode_thread.submit(bound).result()
 
     def close(self) -> None:
         """Stop the owned decoder thread. Safe to call more than once."""
         if self._decode_thread is not None:
             self._decode_thread.shutdown(wait=True, cancel_futures=True)
             self._decode_thread = None
+
+    @property
+    def cpu_fallback(self) -> bool:
+        """bool: ``True`` when a CUDA reader decodes on the CPU because NVDEC rejected the stream."""
+        return self._cpu_fallback
 
     @property
     def width(self) -> int:
@@ -614,8 +655,8 @@ class TorchCodecVideoReader:
                 return empty
             if index.step in (None, 1):
                 return self.get_frames_in_range(indices[0], indices[-1] + 1)
-            stepped_frames: UInt8[torch.Tensor, "b 3 h w"] = torch.stack([self.get_frame(i) for i in indices], dim=0)
-            return stepped_frames
+            stepped_frames: UInt8[torch.Tensor, "b 3 h w"] = self._decode(lambda: self._decoder.get_frames_at(indices).data)
+            return self._maybe_resize(stepped_frames)
         if index < 0:
             index += self._frame_cnt
             if index < 0:
@@ -660,6 +701,7 @@ class TorchCodecMultiVideoReader:
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "approximate",
         resize_hw: tuple[int, int] | None = None,
+        thread_owned: bool = False,
     ) -> None:
         """Initialize the TorchCodec multiview tensor reader.
 
@@ -672,6 +714,8 @@ class TorchCodecMultiVideoReader:
             resize_hw: Optional ``(height, width)`` of yielded frames; see
                 :class:`TorchCodecVideoReader`. ``height``/``width`` report
                 the post-resize dimensions.
+            thread_owned: Give every camera reader its own decode thread; see
+                :class:`TorchCodecVideoReader`.
         """
         if len(video_sources) == 0:
             raise ValueError("video_sources must contain at least one video")
@@ -690,6 +734,7 @@ class TorchCodecMultiVideoReader:
                 num_ffmpeg_threads=self.num_ffmpeg_threads,
                 seek_mode=self.seek_mode,
                 resize_hw=self.resize_hw,
+                thread_owned=thread_owned,
             )
             for source in video_sources
         ]
@@ -745,7 +790,7 @@ class TorchCodecMultiVideoReader:
             idx += len(self)
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
-        rgb_list: list[UInt8[torch.Tensor, "3 h w"]] = [reader.get_frame(idx) for reader in self._video_readers]
+        rgb_list: list[UInt8[torch.Tensor, "3 h w"]] = self.get_frames_at([idx] * len(self._video_readers))
         return rgb_list
 
     def get_frames_at(self, frame_indices: Sequence[int]) -> list[UInt8[torch.Tensor, "3 h w"]]:
@@ -767,50 +812,28 @@ class TorchCodecMultiVideoReader:
         if len(frame_indices) != len(self._video_readers):
             raise ValueError(f"Expected {len(self._video_readers)} frame indices, got {len(frame_indices)}.")
 
-        def _decode_one(reader: TorchCodecVideoReader, frame_idx: int) -> UInt8[torch.Tensor, "3 h w"]:
-            self._bind_cuda_context(reader.device)
-            return reader.get_frame(frame_idx)
-
         if self._frames_at_executor is None:
             # One pool for the reader's lifetime: multiview pipelines call this
             # once per synchronized timestep, so per-call pool setup/teardown
             # lands in the hot loop.
             self._frames_at_executor = ThreadPoolExecutor(max_workers=self.num_workers)
-        return list(self._frames_at_executor.map(_decode_one, self._video_readers, [int(idx) for idx in frame_indices]))
+        return list(
+            self._frames_at_executor.map(lambda reader, idx: reader.get_frame(idx), self._video_readers, [int(idx) for idx in frame_indices])
+        )
 
     def close(self) -> None:
-        """Shut down the persistent per-camera decode pool, if one was created."""
+        """Shut down the persistent per-camera decode pool, if one was created, and any owned decode threads."""
         if self._frames_at_executor is not None:
             self._frames_at_executor.shutdown(wait=False)
             self._frames_at_executor = None
+        for reader in self._video_readers:
+            reader.close()
 
     def __del__(self) -> None:
         # Best-effort: don't leak decode threads when a caller never close()s.
         # getattr guards a partially-constructed reader (failed __init__).
         if getattr(self, "_frames_at_executor", None) is not None:
             self.close()
-
-    @staticmethod
-    def _bind_cuda_context(device: str) -> None:
-        """Bind the CUDA primary context to the calling worker thread.
-
-        NVDEC decoder creation (torchcodec's CUDA interface) fails with
-        ``CUDA_ERROR_INVALID_CONTEXT`` when the first decode of a reader runs
-        on a thread that has never touched CUDA.
-        """
-        parsed: torch.device = torch.device(device)
-        if parsed.type == "cuda":
-            torch.cuda.set_device(parsed.index if parsed.index is not None else 0)
-
-    @staticmethod
-    def _decode_range(
-        reader: TorchCodecVideoReader,
-        start: int,
-        stop: int,
-    ) -> UInt8[torch.Tensor, "b 3 h w"]:
-        TorchCodecMultiVideoReader._bind_cuda_context(reader.device)
-        video: UInt8[torch.Tensor, "b 3 h w"] = reader.get_frames_in_range(start, stop)
-        return video
 
     def iter_chunks(
         self,
@@ -834,6 +857,6 @@ class TorchCodecMultiVideoReader:
             for start in range(0, frame_count, chunk_size):
                 stop: int = min(start + chunk_size, frame_count)
                 videos: list[UInt8[torch.Tensor, "b 3 h w"]] = list(
-                    executor.map(self._decode_range, self._video_readers, repeat(start), repeat(stop))
+                    executor.map(TorchCodecVideoReader.get_frames_in_range, self._video_readers, repeat(start), repeat(stop))
                 )
                 yield videos

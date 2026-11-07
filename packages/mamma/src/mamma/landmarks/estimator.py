@@ -88,11 +88,8 @@ class LandmarkEstimator:
         entries: list[tuple[int, int]] = []
         centers_list: list[Float64[ndarray, "2"]] = []
         sizes_list: list[Float64[ndarray, "2"]] = []
-        crop_frames: list[torch.Tensor] = []
         crop_masks: list[torch.Tensor] = []
-        rgb_source: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor] = frames_hires if frames_hires is not None else frames
         for cam_idx, cam_tracks in enumerate(tracks):
-            frame_f32: torch.Tensor = rgb_source[cam_idx].float()
             for obj_id, track in sorted(cam_tracks.items()):
                 if track.bbox_xyxy is None:
                     continue
@@ -100,22 +97,31 @@ class LandmarkEstimator:
                 entries.append((cam_idx, obj_id))
                 centers_list.append(center)
                 sizes_list.append(bbox_size)
-                crop_frames.append(frame_f32)
                 crop_masks.append(track.mask.unsqueeze(0).float() * 255.0)
 
         results: list[CameraLandmarks] = [{} for _ in tracks]
         if not entries:
             return results
 
-        frames_batch: Float32[torch.Tensor, "n 3 h w"] = torch.stack(crop_frames, dim=0)
         masks_batch: Float32[torch.Tensor, "n 1 h2 w2"] = torch.stack(crop_masks, dim=0)
         centers: Float64[ndarray, "n 2"] = np.stack(centers_list, axis=0)
         sizes: Float64[ndarray, "n 2"] = np.stack(sizes_list, axis=0)
 
         # RGB sampled from the (possibly hi-res) source; masks sampled from the
-        # engine-res tracker output. Same normalized region either way.
+        # engine-res tracker output. Same normalized region either way. Each
+        # camera's frame is converted to float once and expanded (a view, no
+        # copy) over its people: a native-4K float frame is ~100 MB, so copying
+        # it per person and stacking cost ~0.8 GB of writes per tick. Entries
+        # are camera-major, so the per-camera crops concatenate in entry order.
+        rgb_source: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor] = frames_hires if frames_hires is not None else frames
         s: float = hires_scale if frames_hires is not None else 1.0
-        img_crops, _ = gpu_crop_batch(frames_batch, centers * s, sizes * s, None, self.config)
+        cam_crops: list[Float32[torch.Tensor, "k 3 ch cw"]] = []
+        for cam_idx in sorted({cam for cam, _ in entries}):
+            rows: list[int] = [row for row, (cam, _) in enumerate(entries) if cam == cam_idx]
+            frame_view: Float32[torch.Tensor, "k 3 h w"] = rgb_source[cam_idx].float().unsqueeze(0).expand(len(rows), -1, -1, -1)
+            crops, _ = gpu_crop_batch(frame_view, centers[rows] * s, sizes[rows] * s, None, self.config)
+            cam_crops.append(crops)
+        img_crops: Float32[torch.Tensor, "n 3 ch cw"] = torch.cat(cam_crops, dim=0)
         mask_crops = gpu_mask_crop_batch(masks_batch, centers, sizes, self.config)
         if self.runner is not None and img_crops.shape[0] <= 4:
             out: dict[str, torch.Tensor | None] = dict(self.runner({INPUT_NAMES[0]: img_crops, INPUT_NAMES[1]: mask_crops}))

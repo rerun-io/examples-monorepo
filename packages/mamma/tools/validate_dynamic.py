@@ -105,6 +105,7 @@ def main(config: ValidateDynamicConfig) -> int:
             collector.collect(-1, None, None, tail)
     pipeline.close()
     print(f"pipeline: {stats.ticks} ticks in {stats.elapsed_s:.1f}s ({stats.ticks_per_s:.1f} ticks/s)")
+    print(f"decode: {stats.decode_backend}")
 
     # Per-frame PVE over every emitted frame inside the golden range.
     pve_by_frame: dict[int, float] = {}
