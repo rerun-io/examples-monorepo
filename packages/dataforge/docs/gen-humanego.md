@@ -30,7 +30,7 @@ the IMU mounting, the H.264 pass-through and the MANO check.
 | Hand topics | `handtracking/{left,right}` | the same, plus `handtracking_raw/{left,right}` and `handtracking/scores_debug` |
 | Hand flags | `is_valid` False on every frame seen | `is_valid` True wherever MANO is shipped |
 | Left MANO root | as shipped | as shipped on some episodes, mirrored on others (found per episode) |
-| Layers | base, pose, actions, projections, hand_mesh | base, **depth**, pose, actions, projections, hand_mesh |
+| Layers | base, pose, actions, projections, hand_mesh | base, **depth**, **depth_pinhole**, pose, actions, projections, hand_mesh |
 
 The README lists `camera[0-6]`; every episode seen has six cameras, `camera0` to `camera5`, as in the
 whole-body release. The vendor page (docs.genrobot.ai, "DAS-Ego data introduction") documents the topics and
@@ -69,7 +69,16 @@ Every hand, score and depth message is stamped on a reference (camera2) frame.
   range instead, the offset spreads from 41 to 123 mm.
 - The depth image gets its own camera node, `rig_00/cam_06` (`kind = "depth"`, name `camera2_depth`), at
   camera2's `rig_T_cam` with its own lens, so it never pretends to be camera2's 1600x1300 image.
-- 3D views leave it out: a `Pinhole` back-projection would ignore the double-sphere lens.
+- 3D views leave this image out: a `Pinhole` back-projection would ignore the double-sphere lens and bend
+  the cloud. The `depth_pinhole` layer resamples every frame onto an ideal pinhole grid (192x156, 120 degrees
+  across) on node `rig_00/cam_07`, at camera2's pose: each grid pixel takes the depth of the double-sphere pixel
+  its ray passes through (nearest). A point's z does not depend on the lens model, so the values stay exact; only
+  the pixel grid changes. The viewer back-projects it natively. It is built from the depth layer and the
+  sidecar's `depth_info`, never from the MCAP, so it can be added to converted episodes. About 20 % of the depth
+  layer's size.
+- Checked in 3D: on a living-room episode the table below camera2, fitted as a plane in world coordinates from
+  `depth_pinhole`, is a median 2.1 degrees from world up (13 frames, 1.4 to 8.0): the depth, camera2's
+  `rig_T_cam` and the VIO's gravity agree.
 - Size: about 306 KB per frame in the rrd (lz4 on raw float16), two thirds of an episode's output. Half
   resolution would be 82 KB per frame; a millimetre `EncodedDepthImage` (PNG or RVL) would be smaller still
   but no longer bit-exact. Kept at full resolution and bit-exact for now.
@@ -97,13 +106,15 @@ Every hand, score and depth message is stamped on a reference (camera2) frame.
 | --- | --- |
 | `base` | As whole-body: root `ViewCoordinates`, COCO-133 context, `rig_00` with `world_T_rig`, six cameras, `imu_00`, `/frames`, `task/instruction` |
 | `depth` | `rig_00/cam_06` (depth camera node, frustum) and `rig_00/cam_06/pinhole/depth` (`DepthImage`, F16, `meter = 1`, turbo) |
+| `depth_pinhole` | `rig_00/cam_07` (pinhole node at camera2's pose) and `rig_00/cam_07/pinhole/depth` (`DepthImage`, F16, 192x156), shown in 3D |
 | `pose` | `world/gt/coco133_xyz`; per hand `wrist`, `confidence`, `mano`, `quality`, `scores`; `world/runs/vio/trajectory` |
 | `actions` | `task/actions/coarse` and `task/actions/fine` as `StateChange` tracks |
 | `projections` | per camera `pinhole/coco133_uv_projected` (hands only) |
 | `hand_mesh` | per hand `world/gt/hands/<side>/mesh`, written when its MANO joints land within 2 mm of its bones |
 
-Default blueprint: the hands in 3D from an upright eye that tracks the rig (`HANDS_EYE`), over the task and the
-coarse and fine action lanes; on the right camera2 with its projected hands beside its depth, above the other
+Default blueprint: the hands and the depth in 3D from a high eye that tracks the rig (`HANDS_EYE`; the VIO world's
+heading is the wearer's first, so no fixed eye is behind every wearer), over the task and the coarse and fine
+action lanes; on the right camera2 with its projected hands beside its depth, above the other
 five cameras in yaw order. The table card is the whole-body one without the body.
 
 ## Subset
@@ -139,7 +150,7 @@ pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-gen-h
 
 - Each worker fetches one MCAP (the next in the background) into the scratch root with `local_dir`, so the
   Hugging Face hub cache does not grow; checks its LFS sha256; writes the sidecar, the base and depth layers
-  from it, then the derived layers from the sidecar; checks that every written layer file exists and is not
+  from it, then the derived layers from the sidecar (`depth_pinhole` from the depth layer); checks that every written layer file exists and is not
   empty; and only then deletes the MCAP. A failure after the fetch deletes the episode's layers and sidecar
   and keeps the MCAP for the retry, which is the same command.
 - The SSD tier takes the output directly (`atomic_write` publishes each file 0644 by rename).
@@ -154,7 +165,6 @@ projections 12 MB and a 0.1 GB sidecar in 45 s. The output is about 1.5 times th
 
 - `conf_vis_compressed` and `depth/vis_compressed` are renderings and are not ingested; the depth confidence
   itself is not shipped as data.
-- No depth point cloud: the 2D depth pane is the only view of the depth. A `depth_points` layer can be derived
-  from the depth layer alone, without the MCAP.
+- `depth_pinhole` covers 120 degrees across; the fisheye depth's outer ring is only in the 2D pane.
 - `handtracking_raw` stays in the sidecar.
 - Audio stays in the sidecar, as in the whole-body release.

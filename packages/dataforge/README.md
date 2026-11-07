@@ -354,6 +354,7 @@ pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-gen-h
 | --- | --- |
 | `base` | As Gen-HumanWholeBody: six H.264 fisheye streams, double-sphere calibration, VIO `world_T_rig`, IMU, `/frames`, task |
 | `depth` | camera2's Ego-Depth (512x416 float16, metres), decoded from GenRobot's PredZ codec, on its own `cam_06` node |
+| `depth_pinhole` | The same depth resampled onto a 120-degree pinhole grid (`cam_07`), which the 3D view back-projects correctly |
 | `pose` | COCO-133 hand slots, wrists, MANO parameters, shipped flags and detector scores, the VIO path |
 | `actions` | Coarse and fine `StateChange` tracks |
 | `projections` | The hands projected through each camera's double-sphere lens |

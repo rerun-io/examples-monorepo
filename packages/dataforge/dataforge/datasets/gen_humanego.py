@@ -50,8 +50,8 @@ SCORES_TOPIC: str = "/robot0/handtracking/scores_debug"
 """Per frame and hand: the detector's score and its quality estimates."""
 HANDS_EYE: rrb.EyeControls3D = rrb.EyeControls3D(
     kind=rrb.Eye3DKind.Orbital,
-    position=(-0.45, -0.45, 1.25),
-    look_target=(0.0, 0.0, -0.45),
+    position=(-1.0, -1.0, 1.3),
+    look_target=(0.25, 0.25, -0.6),
     eye_up=(0.0, 0.0, 1.0),
     tracking_entity="/world/rig_00",
     spin_speed=0.0,
