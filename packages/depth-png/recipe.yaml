@@ -1,0 +1,41 @@
+# rattler-build recipe for depth-png: lossless 8/16-bit greyscale PNG encoding (Up filter, zlib-rs) and decoding for
+# depth images, as the pyo3 module depth_png. maturin builds it from the crates/depth-png-py workspace member
+# (pyproject.toml `manifest-path`). Same layout as packages/tsdf-rs.
+package:
+  name: depth-png
+  version: "0.1.0"
+
+source:
+  - path: .
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
+
+build:
+  number: 0
+  script:
+    # pixi reuses the host prefix across source builds, and files left there are packaged: drop an earlier install.
+    - export SP_DIR="$(${{ PYTHON }} -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+    - rm -rf "$SP_DIR/depth_png" "$SP_DIR"/depth_png-*.dist-info
+    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    # The C compiler links the extension; no stdlib('c'): it would pin a sysroot to the workspace's glibc 2.35.
+    - ${{ compiler('c') }}
+  host:
+    - python 3.12.*
+    - pip
+    - maturin >=1.9.4,<2
+  run:
+    - python 3.12.*
+    - numpy
+
+tests:
+  - python:
+      imports:
+        - depth_png
+      pip_check: false

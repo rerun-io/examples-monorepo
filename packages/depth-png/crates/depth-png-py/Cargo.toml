@@ -1,0 +1,25 @@
+[package]
+name = "depth-png-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 bindings for the depth-png core, built by maturin as the `depth_png` module."
+
+[lints]
+workspace = true
+
+[lib]
+name = "depth_png"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+# Exercised from Python (packages/dataforge/tests); a Rust test binary would link libpython.
+test = false
+doctest = false
+
+[dependencies]
+depth-png.workspace = true
+numpy.workspace = true
+# No `extension-module` feature (deprecated in PyO3 0.29): maturin sets PYO3_BUILD_EXTENSION_MODULE and passes the
+# macOS `-undefined dynamic_lookup` link arguments itself.
+pyo3 = { workspace = true, features = ["abi3-py312"] }

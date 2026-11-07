@@ -3639,6 +3639,25 @@ cwd = "packages/robocap-live"
 description = "Build the core, then run the package golden reference tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# depth-png (Rust core + PyO3 module; dataforge takes the conda build)
+# ═══════════════════════════════════════════════════════════════════════════
+# The Python module depth_png is a pixi-build source package (packages/depth-png/recipe.yaml), consumed as
+# `depth-png = { path = "packages/depth-png" }`; its Python tests live with its consumers (packages/dataforge/tests).
+# This feature only checks the Rust workspace: rustfmt, clippy with warnings denied, and the core's tests.
+[feature.depth-png-rust]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.depth-png-rust.dependencies]
+rust = "1.98.*"
+# pyo3's build script needs an interpreter to configure crates/depth-png-py.
+python = "3.12.*"
+
+[feature.depth-png-rust.tasks.depth-png-rust-check]
+cmd = "cargo fmt --all --check && cargo clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked -p depth-png"
+cwd = "packages/depth-png"
+description = "rustfmt, clippy and the core crate's tests for packages/depth-png"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # kornia-staging
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.kornia-staging]
@@ -3858,6 +3877,7 @@ agent-traces = { features = ["agent-traces"], solve-group = "agent-traces", no-d
 agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-traces", no-default-feature = true }
 kornia-staging = { features = ["kornia-staging"], solve-group = "kornia-staging", no-default-feature = true }
 kornia-staging-dev = { features = ["kornia-staging", "dev"], solve-group = "kornia-staging", no-default-feature = true }
+depth-png-rust = { features = ["depth-png-rust"], no-default-feature = true }
 arkitscenes-download = { features = [
     "common",
     "arkitscenes-download",
