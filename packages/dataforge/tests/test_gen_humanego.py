@@ -15,9 +15,9 @@ from simplecv.ops.mano.mano_np import MANOLayerNP
 
 from dataforge.das_ego.dataset import HubEpisode, shard, stratified_subset
 from dataforge.das_ego.pose import MIRROR_X, PoseTrack, check_mano, skin
-from dataforge.das_ego.source import parse_hub_path
+from dataforge.das_ego.source import CameraCalibration, parse_hub_path
 from dataforge.datasets.gen_humanego import GenHumanEgoConfig, GenHumanEgoDataset
-from dataforge.datasets.gen_humanego_depth import decode_predz, zstd_content_size
+from dataforge.datasets.gen_humanego_depth import CODEC, DEPTH_TOPIC, DepthInfo, decode_predz, zstd_content_size
 from dataforge.identity import SequenceIdentity
 
 
@@ -232,3 +232,76 @@ def test_a_finished_episode_drops_an_mcap_left_by_an_interrupted_run(tmp_path: P
     stale.write_bytes(b"mcap")
     assert dataset.convert(identity, item, force=False) == dataset.targets(identity)[paths.BASE_LAYER]
     assert not stale.exists(), "every layer is published, so the raw MCAP goes"
+
+
+def test_depth_is_stored_as_millimetre_png_with_zero_for_no_depth() -> None:
+    from dataforge.datasets.gen_humanego_depth import decode_depth_png, depth_png, millimetres
+
+    depth: ndarray = np.array([[0.4567, np.nan, 0.0], [1.19, 0.0805, 2.5]], dtype=np.float16)
+    mm: UInt16[ndarray, "2 3"] = millimetres(depth)
+    np.testing.assert_array_equal(decode_depth_png(depth_png(mm)), mm)
+    assert mm[0, 1] == 0 and mm[0, 2] == 0, "the NaN border and zero stay 'no depth'"
+    valid = np.isfinite(depth) & (depth > 0)
+    assert np.abs(mm[valid] - depth[valid].astype(np.float32) * 1000.0).max() <= 0.5
+
+
+def depth_fixture() -> tuple[ndarray, DepthInfo, CameraCalibration]:
+    """Two float16 depth frames with a NaN border, and the depth stream's ``depth_info`` and calibration."""
+    info: DepthInfo = DepthInfo(
+        depth_topic=DEPTH_TOPIC, height=416, width=512, count=2, K=[172.8, 0.0, 259.2, 0.0, 172.8, 207.5, 0.0, 0.0, 1.0],
+        xi=-0.0044, alpha=0.574, codec=CODEC, dtype="float16",
+    )  # fmt: skip
+    calibration: CameraCalibration = CameraCalibration(width=512, height=416, distortion_model="ds", D=info.coefficients, T_b_c=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], frame_id="test")
+    rng: np.random.Generator = np.random.default_rng(3)
+    depth: ndarray = rng.uniform(0.08, 1.19, size=(2, 416, 512)).astype(np.float16)
+    depth[:, :, :20] = np.nan  # the fisheye border
+    return depth, info, calibration
+
+
+def test_the_pinhole_grid_quantises_once() -> None:
+    from dataforge.das_ego.source import DoubleSphere
+    from dataforge.datasets.gen_humanego_depth import PINHOLE_GRID, millimetres, pinhole_lookup, resample_depth
+
+    depth, info, _ = depth_fixture()
+    rows, cols = pinhole_lookup(DoubleSphere.from_coefficients(info.coefficients), PINHOLE_GRID, source_width=512, source_height=416)
+    from_float: ndarray = millimetres(np.stack([resample_depth(frame, rows, cols) for frame in depth]))
+    from_mm: ndarray = np.stack([resample_depth(frame, rows, cols) for frame in millimetres(depth)])
+    np.testing.assert_array_equal(from_mm, from_float)
+
+
+def test_the_pinhole_layer_resamples_the_millimetre_depth_layer(tmp_path: Path) -> None:
+    import rerun as rr
+    import rerun.chunk as rrc
+
+    from dataforge import writing
+    from dataforge.das_ego.source import DoubleSphere
+    from dataforge.datasets.gen_humanego_depth import (
+        PINHOLE_GRID,
+        decode_depth_png,
+        depth_path,
+        depth_png,
+        log_depth_image,
+        millimetres,
+        pinhole_depth_path,
+        pinhole_lookup,
+        resample_depth,
+        write_depth_pinhole_layer,
+    )
+
+    depth, info, calibration = depth_fixture()
+    depth_rrd: Path = tmp_path / "depth.rrd"
+    with writing.atomic_recording(depth_rrd, recording_id="test", send_properties=False) as recording:
+        log_depth_image(recording, depth_path())
+        for index, frame in enumerate(millimetres(depth)):
+            recording.set_time("video_time", duration=index / 30)
+            rr.log(depth_path(), rr.EncodedDepthImage.from_fields(blob=depth_png(frame)), recording=recording)
+    pinhole_rrd: Path = tmp_path / "depth_pinhole.rrd"
+    with writing.atomic_recording(pinhole_rrd, recording_id="test", send_properties=False) as recording:
+        write_depth_pinhole_layer(recording, depth_rrd, calibration=calibration, info=info)
+
+    blobs: list[bytes] = []
+    for chunk in rrc.RrdReader(pinhole_rrd).store().stream().filter(content=pinhole_depth_path()).drop(is_static=True).to_chunks():
+        blobs.extend(bytes(row[0]) for row in chunk.to_record_batch().column("EncodedDepthImage:blob").to_pylist())
+    rows, cols = pinhole_lookup(DoubleSphere.from_coefficients(info.coefficients), PINHOLE_GRID, source_width=512, source_height=416)
+    expected: ndarray = millimetres(np.stack([resample_depth(frame, rows, cols) for frame in depth]))
+    np.testing.assert_array_equal(np.stack([decode_depth_png(blob) for blob in blobs]), expected)
