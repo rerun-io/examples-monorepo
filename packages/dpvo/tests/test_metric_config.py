@@ -149,12 +149,16 @@ def vipe_slam_configs() -> Path:
     return Path(vipe.__file__).parent / "_configs" / "slam"
 
 
-def test_yacs_defaults_equal_vipe() -> None:
+def test_yacs_defaults_equal_vipe_schema() -> None:
+    """ViPE's Hydra schema (``vipe.metrictrail.config.DPVOConfig``) still lists DPVO's defaults: they must equal ours."""
     vipe_slam_configs()
+    from vipe.metrictrail.config import DPVOConfig as VipeDPVOSchema
     from vipe.metrictrail.dpvo.config import cfg
 
+    schema: dict[str, YacsValue] = VipeDPVOSchema().model_dump()
+    assert schema == dict(YACS_DEFAULTS)
+    assert {key: type(value) for key, value in schema.items()} == {key: type(value) for key, value in YACS_DEFAULTS.items()}
     assert dict(cfg) == dict(YACS_DEFAULTS)
-    assert {key: type(value) for key, value in cfg.items()} == {key: type(value) for key, value in YACS_DEFAULTS.items()}
 
 
 @pytest.mark.parametrize("preset", sorted(PRESETS))
