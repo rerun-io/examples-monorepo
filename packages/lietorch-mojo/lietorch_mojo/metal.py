@@ -17,9 +17,13 @@ got an all-zero `SE3.inv` from a valid pose row). Workaround, until Mojo can tra
 external buffers (draft: /tmp/fleet-artifacts/spark-mac-ports/modular-upstream.md):
 `install_queue_residency` interposes `-[MTLDevice newCommandQueue]` so that every
 queue created afterwards, Mojo's included, carries one `MTLResidencySet`, and
-`gpu_addresses` adds the `MTLHeap` of each launched buffer to that set (PyTorch
-sub-allocates its shared-storage buffers from heaps). The set is committed only when
-a new heap or heapless buffer appears, so a launch normally costs a lookup.
+`gpu_addresses` makes the set hold exactly the `MTLHeap`s of the launch's buffers
+(PyTorch sub-allocates its shared-storage buffers from heaps). The set retains what
+it holds, so it must not keep earlier launches' heaps: once PyTorch releases a heap,
+only the set would keep it alive (a SharedK calibration on the M4 grew to 13 GiB of
+Metal memory that way). The Mojo side finishes each kernel before it returns, so the
+previous launch's heaps no longer need residency. The set is committed only when the
+heaps change, so back-to-back launches on the same heaps cost a lookup.
 """
 
 import ctypes
@@ -85,6 +89,7 @@ class _QueueResidency:
         self._members: set[int] = set()
         self._lock = threading.Lock()
         self._heap, self._add, self._commit = objc.sel(b"heap"), objc.sel(b"addAllocation:"), objc.sel(b"commit")
+        self._remove = objc.sel(b"removeAllocation:")
         self._add_to_queue = objc.sel(b"addResidencySet:")
         self._imp: object | None = None  # the ctypes callback must outlive the swizzle
 
@@ -105,20 +110,19 @@ class _QueueResidency:
         objc.lib.method_setImplementation(method, ctypes.cast(self._imp, _c_id))
 
     def cover(self, buffers: Sequence[int]) -> None:
-        """Add the heap of each `id<MTLBuffer>` (or the buffer, if it has none) to the set; commit when it grew."""
+        """Make the set hold the heap of each `id<MTLBuffer>` (or the buffer, if it has none) and nothing else."""
         objc = self._objc
+        # An empty tensor has no MTLBuffer (data_ptr 0).
+        allocations: set[int] = {objc.send_id(buffer, self._heap) or buffer for buffer in buffers if buffer}
         with self._lock:
-            grew = False
-            for buffer in buffers:
-                if not buffer:  # an empty tensor has no MTLBuffer (data_ptr 0)
-                    continue
-                allocation: int = objc.send_id(buffer, self._heap) or buffer
-                if allocation not in self._members:
-                    self._members.add(allocation)
-                    objc.send_void_id(self.set, self._add, allocation)
-                    grew = True
-            if grew:
-                objc.send_void(self.set, self._commit)
+            if allocations == self._members:
+                return
+            for allocation in self._members - allocations:
+                objc.send_void_id(self.set, self._remove, allocation)
+            for allocation in allocations - self._members:
+                objc.send_void_id(self.set, self._add, allocation)
+            self._members = allocations
+            objc.send_void(self.set, self._commit)
 
 
 @functools.cache
