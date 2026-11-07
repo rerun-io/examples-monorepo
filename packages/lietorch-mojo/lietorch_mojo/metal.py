@@ -64,11 +64,12 @@ class _Residency:
         self._lock = threading.Lock()
 
     def make_resident(self, buffers: Sequence[int]) -> None:
-        """Replace the set's allocations by `buffers` (`id<MTLBuffer>` values) and request their residency."""
+        """Replace the set's allocations by `buffers` (`id<MTLBuffer>` values; 0 = none) and request their residency."""
         with self._lock:
             self._send_void(self._set, self._remove_all)
             for buffer in dict.fromkeys(buffers):
-                self._send_void_id(self._set, self._add, buffer)
+                if buffer:  # an empty tensor has no MTLBuffer (data_ptr 0); addAllocation:nil crashes
+                    self._send_void_id(self._set, self._add, buffer)
             self._send_void(self._set, self._commit)
             self._send_void(self._set, self._request)
 
@@ -90,8 +91,8 @@ def _buffer_gpu_address() -> Callable[[int], int]:
 
 
 def gpu_addresses(tensors: Sequence[Tensor]) -> tuple[int, ...]:
-    """Device addresses of the first elements of the MPS `tensors`, whose buffers are made resident first."""
+    """Device addresses of the first elements of the MPS `tensors` (0 for an empty one), whose buffers are made resident first."""
     buffers: list[int] = [t.untyped_storage().data_ptr() for t in tensors]
     _residency().make_resident(buffers)
     address: Callable[[int], int] = _buffer_gpu_address()
-    return tuple(address(b) + int(t.storage_offset()) * t.element_size() for b, t in zip(buffers, tensors, strict=True))
+    return tuple(address(b) + int(t.storage_offset()) * t.element_size() if b else 0 for b, t in zip(buffers, tensors, strict=True))
