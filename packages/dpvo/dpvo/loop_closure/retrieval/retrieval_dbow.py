@@ -5,7 +5,9 @@ Requires the ``dpretrieval`` workspace package.
 """
 
 import os
+import queue
 import time
+from collections import deque
 from multiprocessing import Process, Queue, Value
 from multiprocessing.queues import Queue as QueueType
 from multiprocessing.sharedctypes import Synchronized
@@ -63,6 +65,8 @@ class RetrievalDBOW:
 
         self.in_queue: QueueType = Queue(maxsize=20)   # carries tuple[int, np.ndarray] (frame_idx, image)
         self.out_queue: QueueType = Queue(maxsize=20)  # carries tuple[int, tuple[float, int, list]] (frame_idx, query_result)
+        # Results save_up_to took off out_queue while it waited for room in in_queue; _detect_loop reads them first.
+        self.drained: deque[tuple[int, tuple[float, int, list]]] = deque()
         ready = Value("i", 0)
         self.proc: Process = Process(target=_dbow_loop, args=(self.in_queue, self.out_queue, vocab_path, ready))
         self.proc.start()
@@ -83,7 +87,18 @@ class RetrievalDBOW:
             if n <= c:
                 assert not self.stored_indices[n]
                 img = self.image_buffer.pop(n)
-                self.in_queue.put((n, img))
+                # No frame is fed while a loop closure's PGO runs, so the backlog can exceed both queues: while
+                # in_queue is full, move finished results aside so the worker can keep going (else both block).
+                while True:
+                    try:
+                        self.in_queue.put((n, img), timeout=0.01)
+                        break
+                    except queue.Full:
+                        while True:
+                            try:
+                                self.drained.append(self.out_queue.get_nowait())
+                            except queue.Empty:
+                                break
                 self.stored_indices[n] = True
                 self.being_processed += 1
 
@@ -116,7 +131,7 @@ class RetrievalDBOW:
 
     def _detect_loop(self, thresh: float, num_repeat: int = 1) -> tuple[int, int] | None:
         assert self.being_processed > 0
-        i, (score, j, _) = self.out_queue.get()
+        i, (score, j, _) = self.drained.popleft() if self.drained else self.out_queue.get()
         self.being_processed -= 1
         if score < thresh:
             return None
