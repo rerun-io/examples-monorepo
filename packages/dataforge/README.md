@@ -336,6 +336,43 @@ pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-genro
 The conventions (solved from the data: GenRobot documents none of them), the clocks and every
 shipped topic are in [docs/genrobot.md](docs/genrobot.md).
 
+### Gen-HumanEgo (gen-humanego)
+
+The hands release of the same DAS-Ego corpus (`genrobot2025/Gen-HumanEgo`, pinned commit): 44,632 MCAPs,
+62 TB, 1,848 hours, no body track, plus camera2's metric depth. It shares the whole-body converter
+(`DasEgoDataset` in `dataforge/das_ego/`: readers, lenses, clock, calibration, MANO check) and adds a `depth` layer.
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gen-humanego   # the SSD tier takes pipeline output
+pixi run -e dataforge --frozen dataforge-download gen-humanego --root /mnt/nas/ssd-8tb/scratch/gen-humanego/raw
+pixi run -e dataforge --frozen dataforge-convert gen-humanego --root /mnt/nas/ssd-8tb/scratch/gen-humanego/raw \
+  --budget-tb 1.0 --shard-index 0 --num-shards 8   # one process per shard
+pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://dgx-spark:51235 --catalog-name dataforge-gen-humanego-subset gen-humanego
+```
+
+| Layer | Contents |
+| --- | --- |
+| `base` | As Gen-HumanWholeBody: six H.264 fisheye streams, double-sphere calibration, VIO `world_T_rig`, IMU, `/frames`, task |
+| `depth` | camera2's Ego-Depth (512x416 float16, metres), decoded from GenRobot's PredZ codec, on its own `cam_06` node |
+| `depth_pinhole` | The same depth resampled onto a 120-degree pinhole grid (`cam_07`), which the 3D view back-projects correctly |
+| `pose` | COCO-133 hand slots, wrists, MANO parameters, shipped flags and detector scores, the VIO path |
+| `actions` | Coarse and fine `StateChange` tracks |
+| `projections` | The hands projected through each camera's double-sphere lens |
+| `hand_mesh` | MANO meshes per hand within 2 mm of the shipped bones; the left root convention is found per episode |
+
+**The subset.** The release does not fit the NAS, so `--budget-tb 1.0` takes a task-stratified sample:
+each of the 236 task folders in turn gives its next episode (uuid order, which is random) until the MCAPs reach
+1 TB. That is 838 episodes covering all 4 domains, 38 scenes, 91 categories and 236 tasks, 1 to 4 episodes per
+task (domestic_services 633, business 166, industry 35, agriculture 4). Tasks, not episodes, are the unit of
+diversity: one task folder alone holds 11,297 episodes of the release, and an episode-proportional sample
+would be a quarter "random daily work". Each MCAP is deleted once its layers are written and checked; only the
+rrds stay: 835 episodes converted, 1.74 TB on the NAS SSD (1.75 times the MCAPs, 1.03 TB of it depth), registered
+on the Spark catalog as `dataforge-gen-humanego-subset`. Three episodes ship a corrupt audio schema that Rerun's
+MCAP reader cannot open; they are listed in `timing/unconverted.json`.
+
+Differences from the whole-body release, the depth codec and the subset are in
+[docs/gen-humanego.md](docs/gen-humanego.md).
+
 ### SLAM benchmarks through VSLAM-LAB (vslam-lab)
 
 [VSLAM-LAB](https://github.com/VSLAM-LAB/VSLAM-LAB) fetches some thirty SLAM
@@ -446,7 +483,8 @@ its Apache index parser), `vrs.py` (one VRS header scan, then the JPEG,
 H.265 and IMU readers seek to their records), and `aria.py` (the Aria device
 calibration, frame and IMU readers and the full-lens projection that hot3d, the
 Gen2 pilot and LaMAria share; LaMAria's rig and ground-truth readers are
-`datasets/lamaria_source.py`).
+`datasets/lamaria_source.py`). `das_ego/` is the GenRobot DAS-Ego converter (MCAP source, base
+layer, pose and MANO check, `DasEgoDataset`) that `genrobot` and `gen-humanego` share.
 
 Two of those carry their weight for datasets that do not ship video.
 `encode_frames_to_mp4` pipes PNG or raw frames straight into ffmpeg's stdin, so
