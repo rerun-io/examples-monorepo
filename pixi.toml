@@ -2363,7 +2363,8 @@ description = "Freeze upstream lietorch's outputs into tests/fixtures/lietorch_r
 
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
-platforms = ["linux-64"]
+# linux-aarch64: the DGX Spark (GB10) through the cuda feature.
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.dpvo.dependencies]
 python = "3.12.*"
@@ -3724,7 +3725,8 @@ description = "Run the Rust author checks for staged Kornia code"
 # ViPE's lietorch re-exports `lietorch_mojo` (recipes/vipe-src patch 0001); the environments compose the
 # `lietorch-mojo` feature (like dpvo), and every task that imports lietorch depends on `lietorch-mojo-build`.
 [feature.metrictrail]
-platforms = ["linux-64"]
+# linux-aarch64: the DGX Spark (GB10).
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.metrictrail.dependencies]
 python = "3.12.*"
