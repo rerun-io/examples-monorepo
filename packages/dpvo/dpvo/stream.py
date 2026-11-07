@@ -1,9 +1,11 @@
 """Frame sources for the DPVO pipeline.
 
-Both sources yield :class:`Frame` tuples whose ``bgr_3hw`` is already on CUDA:
+Both sources yield :class:`Frame` tuples whose ``bgr_3hw`` is already on the tracker's
+device (CUDA by default):
 
-* :func:`video_frames` decodes a video on NVDEC (simplecv ``TorchCodecVideoReader``),
-  halves it with an area resize on the GPU and never copies a frame to the host.
+* :func:`video_frames` decodes a video on that device (NVDEC on CUDA, simplecv
+  ``TorchCodecVideoReader``), halves it with an area resize there and never copies a frame
+  to the host.
 * :func:`image_dir_frames` reads an image directory in a background process
   (:class:`FrameReader`) and keeps the host copy for image logging.
 
@@ -32,6 +34,8 @@ from simplecv.video_io import TorchCodecVideoReader
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder, VideoStreamMetadata
 
+from dpvo.utils import DEFAULT_DEVICE
+
 VIDEO_SCALE: float = 0.5
 """Video frames are halved before DPVO to reduce compute; calibration files describe the native video."""
 
@@ -44,7 +48,7 @@ class Frame(NamedTuple):
     source_index: int
     """Index in the source video or sorted image list."""
     bgr_3hw: UInt8[Tensor, "3 h w"]
-    """BGR image on CUDA, cropped to multiples of 16."""
+    """BGR image on the tracker's device, cropped to multiples of 16."""
     bgr_hw3: UInt8[ndarray, "h w 3"] | None
     """Host copy for image logging; ``None`` for video, which is logged once as a VideoStream."""
 
@@ -54,14 +58,14 @@ def crop16(height: int, width: int) -> tuple[int, int]:
     return height - height % 16, width - width % 16
 
 
-def video_frames(video_path: Path, stride: int, skip: int = 0) -> Iterator[Frame]:
-    """Decode a video on the GPU and yield every ``stride``-th frame after ``skip``.
+def video_frames(video_path: Path, stride: int, skip: int = 0, *, device: torch.device = DEFAULT_DEVICE) -> Iterator[Frame]:
+    """Decode a video on ``device`` and yield every ``stride``-th frame after ``skip``.
 
     Keeps the last frame of each complete stride group (source index
     ``skip + i * stride + stride - 1``), halves it with an area resize and
-    crops it to multiples of 16. Frames stay on CUDA.
+    crops it to multiples of 16. Frames stay on ``device``.
     """
-    reader: TorchCodecVideoReader = TorchCodecVideoReader(video_path, device="cuda")
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(video_path, device=device)
     half_hw: tuple[int, int] = (round(reader.source_height * VIDEO_SCALE), round(reader.source_width * VIDEO_SCALE))
     crop_h, crop_w = crop16(*half_hw)
     try:
@@ -79,14 +83,14 @@ def video_frames(video_path: Path, stride: int, skip: int = 0) -> Iterator[Frame
         reader.close()
 
 
-def image_dir_frames(imagedir: str, stride: int, skip: int = 0) -> Iterator[Frame]:
-    """Yield every ``stride``-th image of a directory after ``skip``, read in a background process."""
+def image_dir_frames(imagedir: str, stride: int, skip: int = 0, *, device: torch.device = DEFAULT_DEVICE) -> Iterator[Frame]:
+    """Yield every ``stride``-th image of a directory after ``skip``, read in a background process, on ``device``."""
     with FrameReader(imagedir, stride, skip) as queue:
         while True:
             t, bgr_hw3 = queue.get()
             if t < 0:
                 return
-            yield Frame(t, skip + t * stride, torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda(), bgr_hw3)
+            yield Frame(t, skip + t * stride, torch.from_numpy(bgr_hw3).permute(2, 0, 1).to(device), bgr_hw3)
 
 
 def _video_metadata(video_path: Path) -> VideoStreamMetadata:

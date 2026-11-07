@@ -58,6 +58,10 @@
  * @param target      Target 2D coordinates per edge [N_edges, 2].
  * @param weight      Confidence weights per edge [N_edges, 2].
  * @param lmbda       Levenberg-Marquardt damping factor (scalar tensor).
+ * @param depth_prior         [0] (disabled) or [N_patches] prior inverse depth.
+ * @param depth_prior_weight  Same numel as depth_prior.
+ * @param depth_prior_lambda  >= 0; 0 skips the prior kernel launch.
+ * @param depth_prior_huber   > 0; Huber threshold in log inverse depth.
  * @param ii          Source frame index per edge [N_edges].
  * @param jj          Target frame index per edge [N_edges].
  * @param kk          Patch index per edge [N_edges].
@@ -77,6 +81,10 @@ std::vector<torch::Tensor> cuda_ba(
     torch::Tensor target,
     torch::Tensor weight,
     torch::Tensor lmbda,
+    torch::Tensor depth_prior,
+    torch::Tensor depth_prior_weight,
+    double depth_prior_lambda,
+    double depth_prior_huber,
     torch::Tensor ii,
     torch::Tensor jj,
     torch::Tensor kk,
@@ -116,12 +124,19 @@ std::vector<torch::Tensor> ba(
     torch::Tensor target,
     torch::Tensor weight,
     torch::Tensor lmbda,
+    torch::Tensor depth_prior,
+    torch::Tensor depth_prior_weight,
+    double depth_prior_lambda,
+    double depth_prior_huber,
     torch::Tensor ii,
     torch::Tensor jj,
     torch::Tensor kk,
     int PPF,
     int t0, int t1, int iterations, bool eff_impl) {
-  return cuda_ba(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, PPF, t0, t1, iterations, eff_impl);
+  return cuda_ba(
+      poses, patches, intrinsics, target, weight, lmbda,
+      depth_prior, depth_prior_weight, depth_prior_lambda, depth_prior_huber,
+      ii, jj, kk, PPF, t0, t1, iterations, eff_impl);
 }
 
 

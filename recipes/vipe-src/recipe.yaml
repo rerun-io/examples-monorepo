@@ -6,12 +6,17 @@
 #     ViPE's keyframe SLAM (droid_net_ext, slam_ext, scatter_ext), vipe.metrictrail.slam imports vipe.slam.interface
 #     (utils_ext), and vipe.pipeline.processors -- imported by the `vipe infer` CLI and by MetricTrail's optional
 #     masks / depth fusion -- imports corr_ext and grounding_dino_ext at module load, so those stay too.
-#   - vipe.metrictrail.dpvo_ext: DPVO's cuda_corr + cuda_ba (python -m vipe.metrictrail.build), not lietorch_backends.
-#   - Not built: the optional stereo tree (vipe.metrictrail.dpvo_stereo_ext); its sources stay installed, so
-#     VIPE_METRICTRAIL_DPVO_JIT=1 can JIT-compile it on first use.
+#   - Nothing else. MetricTrail's DPVO is packages/dpvo's `dpvo.metric` (MetricDPVO), not ViPE's vendored copy:
+#     build.sh deletes vipe/metrictrail/{dpvo,csrc,dpvo_ext,dpvo_ext_loader.py,dpvo_scatter.py,build.py} and copies
+#     the re-export shims of dpvo_shim/ into vipe/metrictrail/dpvo, so slam.py imports them unchanged. The consuming
+#     feature supplies `dpvo` (editable PyPI path package, like lietorch-mojo) and builds its cuda_corr/cuda_ba.
+#   - Deleted, not built: the optional stereo runner and its own DPVO copy (vipe/metrictrail/{stereo,
+#     dpvo_stereo_ext}); nothing outside it imports it.
 # Reuse instead of ViPE's in-tree copies (phase-0 parity proofs in the MetricTrail port notes):
-#   - lietorch: ViPE's three vendored copies re-export the external `lietorch_mojo` module (patch 0001); this
-#     package does NOT depend on lietorch. The consuming feature supplies lietorch-mojo.
+#   - DPVO: packages/dpvo (above); the lockstep proof against ViPE's copy is in the dpvo-metric-core ladder.
+#   - lietorch: ViPE's vipe/ext/lietorch re-exports the external `lietorch_mojo` module (patch 0001), and so does
+#     the shim vipe/metrictrail/dpvo/lietorch; this package does NOT depend on lietorch. The consuming feature
+#     supplies lietorch-mojo.
 #   - DINOv3 (DINO-DPVO's frozen ViT-S/16): the `dinov3` package from recipes/dinov3-src (patch 0002, a run
 #     dependency). ViPE's in-tree DINOv3 (vipe/priors/depth/dap/dino.py) stays: the DAP panorama prior uses it.
 #   - MoGe-2 (`moge2-l`): packages/monoprior's MoGe-2; build.sh deletes ViPE's vendored vipe/priors/depth/moge2.
@@ -28,8 +33,8 @@ source:
   url: https://github.com/nv-tlabs/vipe/archive/ead2e008bc055310121736a49ff306bba50d10dc.tar.gz
   sha256: c312cbf6f25576aa85aa81e3df9615e024cfa79f3a278c08e908035af86a5ad6
   patches:
-    # The three vendored lietorch copies re-export lietorch_mojo; no lietorch_backends / lietorch_ext build.
-    # The deleted vendored files are removed by build.sh, not by the patch.
+    # ViPE's vendored lietorch (vipe/ext/lietorch) re-exports lietorch_mojo; no lietorch_ext build. The deleted
+    # vendored files are removed by build.sh, not by the patch (the DPVO copies go with the whole DPVO tree).
     - patches/0001-lietorch-external-provider.patch
     # make_vipe_dinov3_backbone builds dinov3.hub.backbones.dinov3_vits16 (bit-identical patch tokens).
     - patches/0002-dinov3-from-dinov3-src.patch
@@ -40,13 +45,15 @@ source:
     # registry first (packages/metrictrail registers its MoGe-2 normal provider there), and fuse_point_cloud calls an
     # optional on_points(index, rows, cols, world) before each frame's points enter the voxel accumulator.
     - patches/0004-depth-provider-and-fusion-hooks.patch
-    # MetricTrail's DPVO (vipe/metrictrail/dpvo, csrc/dpvo) stays ViPE's copy: packages/dpvo is a typed rewrite and
-    # its cuda_ba lacks MetricTrail's metric-depth prior arguments and kernel.
+    # The DINO-fused patchifier takes packages/dpvo's patchify keywords (gradient_bias, centroid_valid) and hands
+    # its centroid validity to the base forward, which does the masked draw; its copy of the vendored base forward
+    # (_masked_base_forward) is deleted, so the patch is mostly removed lines.
+    - patches/0005-dino-patchifier-dpvo-keywords.patch
 
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 4
+  number: 5
   script:
     file: build.sh
 
@@ -62,7 +69,7 @@ requirements:
     - wheel
     - cuda-version 13.0.*
     - pytorch-gpu 2.12.*
-    # DPVO's build recipe (vipe/metrictrail/build.py refuses other versions); slam_ext includes <eigen3/Eigen/...>.
+    # slam_ext includes <eigen3/Eigen/...> (USE_SYSTEM_EIGEN=1, build.sh).
     - eigen ==3.4.0
     - cuda-cudart-dev
     - cuda-driver-dev
@@ -78,7 +85,7 @@ requirements:
   # (vipe.utils.geometry / visualization) comes from the consuming feature's pypi-dependencies.
   run:
     - python 3.12.*
-    # vipe_ext and the DPVO kernels link the CUDA build of torch: never resolve a CPU pytorch.
+    # vipe_ext links the CUDA build of torch: never resolve a CPU pytorch.
     - pytorch >=2.12,<2.13 cuda*
     - cuda-version >=13.0,<14
     # MetricTrail's frozen DINOv3 (patch 0002). Sibling recipe: the consuming feature lists it too.
@@ -109,7 +116,9 @@ requirements:
     # (1.3.9) needs openexr 3.3, which conflicts with libopencv 4.13 (openexr 3.4). 3.4 keeps the classic API:
     # ViPE's depth-zip write/read pattern (vipe/utils/io.py) round-trips fp16 depth exactly.
     - openexr-python >=3.4,<3.5
-    # MetricTrail's vendored DPVO (vipe/metrictrail/dpvo_deps.py).
+    # yacs: slam.py's DPVO config is a yacs CfgNode (vipe/metrictrail/dpvo_deps.py, the shim's config.py). numba:
+    # packages/dpvo's proximity loop edges (reduce_edges). dpvo itself is not a run dependency: it comes from the
+    # consuming feature (an editable PyPI path package, like lietorch-mojo and monopriors).
     - yacs
     - numba
 
@@ -117,4 +126,4 @@ about:
   homepage: https://github.com/nv-tlabs/vipe
   license: Apache-2.0
   license_file: LICENSE
-  summary: NVIDIA ViPE + MetricTrail (source at ead2e00) with its CUDA kernels, import name `vipe`
+  summary: NVIDIA ViPE + MetricTrail (source at ead2e00) with vipe_ext, import name `vipe`; DPVO from packages/dpvo

@@ -81,6 +81,7 @@
  *   pose_retr_kernel                      -- per-pose retraction
  *   patch_retr_kernel                     -- per-patch inverse-depth update
  *   reprojection_residuals_and_hessian    -- THE MAIN BA KERNEL
+ *   depth_prior_residuals_and_hessian     -- optional log-inverse-depth prior
  *   reproject                             -- per-edge patch reprojection
  *
  * Host functions:
@@ -843,6 +844,73 @@ __global__ void reprojection_residuals_and_hessian(
 
 
 /* =========================================================================
+ * DEPTH PRIOR KERNEL
+ * =========================================================================
+ * Robust log-inverse-depth unary on each unique BA patch (ViPE MetricTrail's
+ * `metric_depth_residuals_and_hessian`, body verbatim).  It adds only into
+ * the depth diagonal C and the depth RHS u, so it enters every solve path
+ * through Q = 1 / (C + lambda).
+ * ======================================================================= */
+
+/**
+ * Per-unique-patch depth prior.
+ *
+ * For each unique patch n (global flat patch index kx[n]):
+ *   r   = log(prior) - log(current)        (current = patch-centre inverse depth)
+ *   rho = 1 if |r| <= huber_delta else huber_delta / |r|   (IRLS Huber)
+ *   w   = prior_lambda * weight * rho,  J = 1 / max(current, 1e-4)
+ *   C[n] += w * J^2,  u[n] += w * r * J
+ * Patches with a non-positive or NaN weight, a non-positive or non-finite
+ * prior or current depth, or prior_lambda <= 0 are skipped.
+ *
+ * @param patches             Patch data [N_patches, 3, P, P].
+ * @param depth_prior         Prior inverse depth per buffer patch [N_patches].
+ * @param depth_prior_weight  Prior weight per buffer patch [N_patches].
+ * @param kx                  Unique patch indices [M].
+ * @param C                   Depth Hessian diagonal [M] (accumulated).
+ * @param u                   Depth RHS [M] (accumulated).
+ * @param prior_lambda        Global prior weight (> 0 to have any effect).
+ * @param huber_delta         Huber threshold on |r| (log inverse depth).
+ */
+__global__ void depth_prior_residuals_and_hessian(
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> patches,
+    const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> depth_prior,
+    const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> depth_prior_weight,
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> kx,
+    torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> C,
+    torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> u,
+    const float prior_lambda,
+    const float huber_delta)
+{
+  GPU_1D_KERNEL_LOOP(n, kx.size(0)) {
+    const int patch_index = kx[n];
+    if (patch_index >= depth_prior.size(0))
+      continue;
+
+    const float base_weight = depth_prior_weight[patch_index];
+    const float prior = depth_prior[patch_index];
+    const float current = patches[patch_index][2][1][1];
+    if (!(base_weight > 0.0f) || !(prior > 0.0f) || !(current > 0.0f) ||
+        !isfinite(prior) || !isfinite(current) || !(prior_lambda > 0.0f))
+      continue;
+
+    // For r = log(d_prior) - log(d), dr/dd = -1/d. The normal-equation
+    // right-hand side is -J^T r = r/d, so the positive 1/d factor below is
+    // the RHS sensitivity (while J^T J is unchanged by the sign).
+    const float residual = logf(prior) - logf(current);
+    const float abs_residual = fabsf(residual);
+    const float robust = (abs_residual <= huber_delta)
+        ? 1.0f
+        : huber_delta / max(abs_residual, 1e-6f);
+    const float w = prior_lambda * base_weight * robust;
+    const float J = 1.0f / max(current, 1e-4f);
+    atomicAdd(&C[n], w * J * J);
+    atomicAdd(&u[n], w * residual * J);
+  }
+}
+
+
+/* =========================================================================
  * REPROJECTION KERNEL
  * =========================================================================
  * Reprojects all pixels of each patch from the source frame into the
@@ -946,7 +1014,8 @@ __global__ void reproject(
  *   2. Allocates Hessian blocks B, E, C and RHS vectors v, u.
  *   3. Iterates the Gauss-Newton loop:
  *      a. Zero all accumulators.
- *      b. Launch the reprojection_residuals_and_hessian kernel.
+ *      b. Launch the reprojection_residuals_and_hessian kernel, then (if
+ *         enabled) the depth_prior_residuals_and_hessian kernel.
  *      c. Solve the reduced system via the Schur complement:
  *         - Q = 1 / (C + λ)
  *         - S = B - E · Q · Eᵀ    (reduced Hessian for poses only)
@@ -966,6 +1035,10 @@ __global__ void reproject(
  * @param target      Target 2D positions per edge [N_edges, 2].
  * @param weight      Per-edge confidence weights [N_edges, 2].
  * @param lmbda       Levenberg-Marquardt damping scalar tensor.
+ * @param depth_prior         [0] (disabled) or [N_patches] prior inverse depth.
+ * @param depth_prior_weight  Same numel as depth_prior.
+ * @param depth_prior_lambda  >= 0; 0 skips the prior launch.
+ * @param depth_prior_huber   > 0; Huber threshold in log inverse depth.
  * @param ii          Source frame index per edge [N_edges].
  * @param jj          Target frame index per edge [N_edges].
  * @param kk          Patch index per edge [N_edges].
@@ -982,6 +1055,10 @@ std::vector<torch::Tensor> cuda_ba(
     torch::Tensor target,
     torch::Tensor weight,
     torch::Tensor lmbda,
+    torch::Tensor depth_prior,
+    torch::Tensor depth_prior_weight,
+    double depth_prior_lambda,
+    double depth_prior_huber,
     torch::Tensor ii,
     torch::Tensor jj,
     torch::Tensor kk,
@@ -1004,6 +1081,13 @@ std::vector<torch::Tensor> cuda_ba(
 
   target = target.view({-1, 2});
   weight = weight.view({-1, 2});
+  depth_prior = depth_prior.view({-1});
+  depth_prior_weight = depth_prior_weight.view({-1});
+
+  TORCH_CHECK(depth_prior.size(0) == depth_prior_weight.size(0), "depth_prior/depth_prior_weight size mismatch");
+  TORCH_CHECK(depth_prior.size(0) == 0 || depth_prior.size(0) == patches.size(0), "depth_prior must be empty or one per patch");
+  TORCH_CHECK(depth_prior_lambda >= 0.0, "depth_prior_lambda must be >= 0");
+  TORCH_CHECK(depth_prior_huber > 0.0, "depth_prior_huber must be > 0");
 
   const int num = ii.size(0);
   torch::Tensor B = torch::empty({6*N, 6*N}, mdtype);
@@ -1056,6 +1140,18 @@ std::vector<torch::Tensor> cuda_ba(
       C.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
       v.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
       u.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(), t0, blockE->ppf);
+
+    if (depth_prior_lambda > 0.0 && depth_prior.size(0) > 0 && M > 0) {
+      depth_prior_residuals_and_hessian<<<NUM_BLOCKS(M), NUM_THREADS>>>(
+        patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+        depth_prior.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+        depth_prior_weight.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+        kx.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+        C.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
+        u.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
+        static_cast<float>(depth_prior_lambda),
+        static_cast<float>(depth_prior_huber));
+    }
 
     v = v.view({6*N, 1});
     u = u.view({1*M, 1});

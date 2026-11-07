@@ -91,6 +91,42 @@ class DPVOConfig:
     loop_retr_thresh: float = 0.04
     """DBoW2 retrieval score threshold for loop detection."""
 
+    # ── Backend knobs for extensions (defaults = plain DPVO) ────────────
+
+    fmap_memory: int = 36
+    """Length of the dense feature-map ring (``fmap1_``/``fmap2_``): ``mem = min(pmem, fmap_memory)``.
+    The default 36 is plain DPVO's ring; a longer ring lets late re-measurement read older frames."""
+
+    store_inactive: bool = True
+    """Keep the factors that keyframe() prunes from the sliding window as inactive factors for global BA."""
+
+    normalize_global_ba: bool = True
+    """Normalize depth scale and re-center poses (``PatchGraph.normalize``) before each global BA.
+    Turn it off when depths carry a metric scale that must survive."""
+
+    global_ba_t0: Literal["active_min", "first"] = "active_min"
+    """First optimized keyframe of the global BA: the oldest active source frame (``ii.min()``)
+    or ``1`` (every keyframe but the gauge frame 0)."""
+
+    gba_schedule_k: int = 0
+    """Also run the global BA when ``n % gba_schedule_k == 0`` (once per value of ``n``, only while
+    inactive factors exist). 0 disables the schedule."""
+
+    raise_on_ba_failure: bool = False
+    """Re-raise a failed BA solve instead of printing a warning and continuing."""
+
+    motion_scale_by_tstamps: bool = False
+    """Scale the damped-linear motion model by the ratio of the last two timestamp steps,
+    ``(c - b) / (b - a)``. With ordinal timestamps the factor is exactly 1.0."""
+
+    def __post_init__(self) -> None:
+        if self.fmap_memory < 36:
+            raise ValueError(f"fmap_memory must be >= 36 (plain DPVO's ring), got {self.fmap_memory}")
+        if self.gba_schedule_k < 0:
+            raise ValueError(f"gba_schedule_k must be >= 0, got {self.gba_schedule_k}")
+        if self.global_ba_t0 not in ("active_min", "first"):
+            raise ValueError(f"global_ba_t0 must be 'active_min' or 'first', got {self.global_ba_t0!r}")
+
     @classmethod
     def accurate(cls) -> "DPVOConfig":
         """Preset matching the former ``config/default.yaml`` (higher quality)."""
