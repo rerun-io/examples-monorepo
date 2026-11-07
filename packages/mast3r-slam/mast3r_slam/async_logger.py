@@ -60,6 +60,7 @@ def snapshot_current_frame(
     frame_idx: int,
     timestamp_ns: int | None,
     keyframes: SharedKeyframes | None = None,
+    shown_last_kf_id: int | None = None,
 ) -> LogCurrentFrame:
     """Create a CPU snapshot of the current frame for async logging.
 
@@ -69,6 +70,9 @@ def snapshot_current_frame(
         timestamp_ns: Video timestamp in nanoseconds, or None.
         keyframes: Shared keyframe buffer (to snapshot the last keyframe's
             evolving pointmap/confidence for the 2D panel). None skips it.
+        shown_last_kf_id: Dataset frame id of the keyframe whose image the
+            2D panel already shows. The last keyframe's RGB is copied only
+            when it differs, since a keyframe's image never changes.
 
     Returns:
         A ``LogCurrentFrame`` event with CPU-only numpy arrays.
@@ -86,14 +90,19 @@ def snapshot_current_frame(
 
     # Snapshot the last keyframe's current state for the 2D panel.
     # The tracker continuously updates the active keyframe's pointmap/
-    # confidence, so we re-read it each frame.
+    # confidence, so we re-read it each frame; its image is fixed.
+    last_kf_frame_id: int | None = None
+    last_kf_img_shape: tuple[int, int] | None = None
     last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
     last_kf_X_canon: Float32[ndarray, "hw 3"] | None = None
     last_kf_C: Float32[ndarray, "hw 1"] | None = None
     if keyframes is not None:
         last_kf: Frame | None = keyframes.last_keyframe()
         if last_kf is not None:
-            last_kf_rgb = last_kf.rgb.numpy().astype(np.float32)
+            last_kf_frame_id = last_kf.frame_id
+            last_kf_img_shape = (int(last_kf.img_shape.squeeze()[0].item()), int(last_kf.img_shape.squeeze()[1].item()))
+            if last_kf_frame_id != shown_last_kf_id:
+                last_kf_rgb = last_kf.rgb.numpy().astype(np.float32)
             if last_kf.X_canon is not None:
                 last_kf_X_canon = last_kf.X_canon.detach().cpu().numpy().astype(np.float32)
             if last_kf.C is not None:
@@ -107,6 +116,8 @@ def snapshot_current_frame(
         X_canon=X_canon_cpu,
         C=C_cpu,
         img_shape=(h, w),
+        last_kf_frame_id=last_kf_frame_id,
+        last_kf_img_shape=last_kf_img_shape,
         last_kf_rgb=last_kf_rgb,
         last_kf_X_canon=last_kf_X_canon,
         last_kf_C=last_kf_C,
@@ -501,20 +512,19 @@ class AsyncRerunLogger:
         )
 
         # Last keyframe 2D panel — the tracker continuously updates the
-        # active keyframe's pointmap/confidence, so relog it every frame.
+        # active keyframe's pointmap/confidence, so relog those every frame.
+        # The image is logged only when the panel's keyframe changes.
+        lk_path: str = f"{self._parent_log_path}/last_keyframe"
         if event.last_kf_rgb is not None:
-            lk_path: str = f"{self._parent_log_path}/last_keyframe"
             self._log_rgb_image(lk_path, event.last_kf_rgb)
-            if event.last_kf_X_canon is not None and event.last_kf_C is not None:
-                h_lk: int = event.last_kf_rgb.shape[0]
-                w_lk: int = event.last_kf_rgb.shape[1]
-                self._log_pointmap_and_confidence(
-                    event.last_kf_X_canon,
-                    event.last_kf_C,
-                    lk_path,
-                    h_lk,
-                    w_lk,
-                )
+        if event.last_kf_X_canon is not None and event.last_kf_C is not None and event.last_kf_img_shape is not None:
+            self._log_pointmap_and_confidence(
+                event.last_kf_X_canon,
+                event.last_kf_C,
+                lk_path,
+                event.last_kf_img_shape[0],
+                event.last_kf_img_shape[1],
+            )
 
     def _handle_map_update(self, event: LogMapUpdate) -> None:
         """Handle batched structural changes: new keyframes, poses, edges, orient."""

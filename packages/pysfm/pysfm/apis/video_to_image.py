@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Int, UInt8
+from jaxtyping import Int
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import VideoReader
@@ -148,15 +148,11 @@ class VideoToImageNode:
                 image_paths[out_idx] = out_path
                 frames_saved += 1
 
-                # Verbose: log each frame as it's extracted
+                # Verbose: log each frame as it's extracted, as the JPEG just written (no second encode)
                 if self.config.verbose:
                     if frame_timestamps_ns is not None:
                         rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[video_idx]))
-                    rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-                    rr.log(
-                        f"{self.parent_log_path}/extracted/image",
-                        rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
-                    )
+                    rr.log(f"{self.parent_log_path}/extracted/image", rr.EncodedImage(path=out_path))
 
                 if frames_saved == actual_num_frames:
                     break

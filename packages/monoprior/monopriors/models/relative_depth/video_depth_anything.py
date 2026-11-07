@@ -402,9 +402,9 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor[VideoDepthAnything]
         """
         Processes a single chunk of video frames to infer depth maps.
 
-        This function preprocesses each frame in the chunk, prepares a tensor for the model,
-        optionally replaces the first overlapping frames with keyframes from the previous chunk,
-        and performs inference. The resulting depth maps are then resized back to the original frame dimensions.
+        This function prepares a tensor for the model: after the first chunk, the first OVERLAP frames
+        are the keyframes of the previous chunk's input and only the remaining frames are preprocessed;
+        the first chunk preprocesses every frame. It then performs inference. The resulting depth maps are then resized back to the original frame dimensions.
 
         Args:
             frame_list: List of video frames.
@@ -421,8 +421,11 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor[VideoDepthAnything]
                 - depth_chunk: List of inferred depth maps (numpy arrays) for the current chunk.
                 - cur_input: The processed input tensor for the current chunk, to be reused as pre_input in the next iteration.
         """
+        # After the first chunk, the first OVERLAP frames are the previous chunk's keyframes,
+        # so only the remaining frames need preprocessing and upload.
+        first_new: int = 0 if pre_input is None else OVERLAP
         cur_list = []
-        for i in range(INFER_LEN):
+        for i in range(first_new, INFER_LEN):
             # Preprocess the current frame.
             preprocessed_frame: Float32[np.ndarray, "3 H W"] = transform(
                 {"image": frame_list[frame_id + i].astype(np.float32) / 255.0}
@@ -433,11 +436,10 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor[VideoDepthAnything]
             cur_list.append(img_chunk)
 
         # Concatenate frames along the time dimension.
-        cur_input: Float32[torch.Tensor, "1 T 3 H W"] = torch.cat(cur_list, dim=1).to(device)
-
-        # Replace the first OVERLAP frames with keyframes from previous chunk if available.
-        if pre_input is not None:
-            cur_input[:, :OVERLAP, ...] = pre_input[:, KEYFRAMES, ...]
+        new_input: Float32[torch.Tensor, "1 T_new 3 H W"] = torch.cat(cur_list, dim=1).to(device)
+        cur_input: Float32[torch.Tensor, "1 T 3 H W"] = (
+            new_input if pre_input is None else torch.cat([pre_input[:, KEYFRAMES, ...], new_input], dim=1)
+        )
 
         with torch.no_grad(), torch.autocast(device_type=device, enabled=(not fp32)):
             depth: Float32[torch.Tensor, "1 T H W"] = self.model.forward(cur_input)  # Inference
