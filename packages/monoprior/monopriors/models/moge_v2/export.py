@@ -152,14 +152,14 @@ def preprocess_rgb(
         image_hw: Static network height and width.
 
     Returns:
-        float32 CUDA RGB tensor shaped ``b 3 nh nw`` in ``[0, 1]``.
+        float32 GPU RGB tensor shaped ``b 3 nh nw`` in ``[0, 1]``.
 
     Raises:
         ValueError: If the batch is empty or the network size is invalid.
-        RuntimeError: If the input is not already CUDA-resident.
+        RuntimeError: If the input is not already GPU-resident (CUDA or MPS).
     """
-    if not rgb_bhw3.is_cuda:
-        raise RuntimeError("MoGe v2 batched predictors require CUDA input tensors.")
+    if rgb_bhw3.device.type == "cpu":
+        raise RuntimeError("MoGe v2 batched predictors require GPU (CUDA or MPS) input tensors.")
     if rgb_bhw3.shape[0] < 1:
         raise ValueError("MoGe v2 batched predictors require a non-empty batch.")
     if image_hw[0] < 1 or image_hw[1] < 1:
@@ -171,22 +171,23 @@ def preprocess_rgb(
     return image_b3hw
 
 
-def load_pinned_moge_v2(encoder: Encoder, resolution_level: int) -> tuple[MoGeModel, int]:
+def load_pinned_moge_v2(encoder: Encoder, resolution_level: int, device: str = "cuda") -> tuple[MoGeModel, int]:
     """Load one pinned checkpoint and enable its ONNX-compatible forward path.
 
     Args:
         encoder: DINOv2 encoder size.
         resolution_level: Detail level from 0 through 9.
+        device: Torch device of the model (``cuda``; ``mps`` on Apple GPUs).
 
     Returns:
-        CUDA evaluation model and resolved token count.
+        Evaluation model on ``device`` and resolved token count.
 
     Raises:
         ValueError: If the resolution level or pinned token metadata is invalid.
     """
     num_tokens: int = resolve_num_tokens(resolution_level)
     checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS[encoder]
-    model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to("cuda").eval()
+    model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to(device).eval()
     if model.num_tokens_range != MOGE_V2_NUM_TOKENS_RANGE:
         raise ValueError(
             f"Pinned MoGe v2 checkpoint token range changed from {MOGE_V2_NUM_TOKENS_RANGE} to {model.num_tokens_range}; update the export recipe and predictors."

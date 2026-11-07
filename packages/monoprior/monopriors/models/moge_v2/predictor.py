@@ -238,7 +238,7 @@ class MoGeV2TorchPredictor(_MoGeV2Predictor):
         network_hw_options: tuple[tuple[int, int], ...] | None = None,
         resolution_level: int = 9,
     ) -> None:
-        """Load one pinned normal-capable MoGe v2 checkpoint on CUDA.
+        """Load one pinned normal-capable MoGe v2 checkpoint on CUDA, else on an Apple GPU (MPS).
 
         Args:
             encoder: DINOv2 encoder size.
@@ -248,17 +248,18 @@ class MoGeV2TorchPredictor(_MoGeV2Predictor):
             resolution_level: Detail level from 0 through 9.
 
         Raises:
-            RuntimeError: If CUDA is unavailable.
+            RuntimeError: If neither CUDA nor MPS is available.
             ValueError: If a supplied network-size collection is invalid.
         """
-        if not torch.cuda.is_available():
-            raise RuntimeError("MoGe v2 batched prediction requires CUDA.")
+        if not torch.cuda.is_available() and not torch.backends.mps.is_available():
+            raise RuntimeError("MoGe v2 batched prediction requires a GPU (CUDA or MPS).")
+        self.device: str = "cuda" if torch.cuda.is_available() else "mps"
         if network_hw_options is not None:
             if not network_hw_options:
                 raise ValueError("network_hw_options must contain at least one size when provided.")
             if any(height < 1 or width < 1 for height, width in network_hw_options):
                 raise ValueError(f"MoGe v2 network dimensions must be positive, got {network_hw_options}.")
-        loaded: tuple[MoGeModel, int] = load_pinned_moge_v2(encoder, resolution_level)
+        loaded: tuple[MoGeModel, int] = load_pinned_moge_v2(encoder, resolution_level, self.device)
         self.model: MoGeModel = loaded[0]
         self.num_tokens: int = loaded[1]
         self.encoder: Encoder = encoder
@@ -274,7 +275,7 @@ class MoGeV2TorchPredictor(_MoGeV2Predictor):
             else select_aspect_bucket(input_hw, self.network_hw_options)
         )
         image_b3hw: Float32[Tensor, "b 3 nh nw"] = preprocess_rgb(rgb_bhw3, network_hw)
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
+        with torch.inference_mode(), torch.autocast(self.device, dtype=torch.float16):
             output: ForwardOutput = self.model(image_b3hw, num_tokens=self.num_tokens, output_heads=FORWARD_HEADS[self.heads])
         return {name: output[name].float() for name in ONNX_OUTPUT_NAMES[self.heads]}
 
