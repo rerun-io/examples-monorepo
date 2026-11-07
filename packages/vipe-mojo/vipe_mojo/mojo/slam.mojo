@@ -2,21 +2,25 @@
 
 The CUDA kernels run one 256-thread block per edge (or pair): thread t walks the pixels t, t + 256, ...
 and keeps running sums, then `blockReduce` folds the 256 sums in a fixed tree (offsets 128, 64, ..., 1).
-Here that is two launches with the same order: a `*_partial` element is one (block, thread) and writes
-its running sums to a scratch row (blocks, sums, 256), and `block_reduce` folds each row in the same tree.
+`frame_distance_kernel` does that in shared memory. The BA kernels keep two launches with the same order:
+a `*_partial` element is one (block, thread) and writes its running sums to a scratch row (blocks, sums,
+256), and `block_reduce_kernel` folds each row in the same tree in shared memory. On the CPU the
+elements run thread by thread and the tree is folded in a local array.
 No float atomics are involved, so the results do not depend on scheduling, on any device.
 
 The per-pixel outputs of the BA kernel (Cii, bz, Eii, Eij, Efi) are written by the thread that owns the
 pixel, as in CUDA. Tensors travel as raw pointers to contiguous float32 / int64 memory.
 """
 
-from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, global_idx
+from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, block_idx, global_idx, thread_idx
+from max.gpu.sync import barrier
 from std.collections.array import Array
+from std.math import sqrt
 from std.utils.static_tuple import StaticTuple
 
 from droid import F32Ptr, I64Ptr, NUM_THREADS
 from lie_math import sqrt_
-from layout import TileTensor, row_major
+from layout import TileTensor, row_major, stack_allocation
 from se3 import Vec4, Vec8, act_se3, adj_se3, rel_se3, retr_se3
 
 comptime THREADS = 256
@@ -41,8 +45,9 @@ def _pose(poses: F32Ptr, i: Int) -> Tuple[Vec4, Vec4]:
 
 
 @always_inline
-def frame_distance_partial_element(
-    n: Int,
+def _frame_distance_sums(
+    e: Int,
+    t: Int,
     height: Int,
     width: Int,
     beta: Float32,
@@ -54,11 +59,8 @@ def frame_distance_partial_element(
     ri: I64Ptr,
     rj: I64Ptr,
     di: I64Ptr,
-    partial: F32Ptr,
-):
-    """Thread n % 256 of pair n // 256 of `frame_distance_kernel`: sums of beta * flow, beta and valid beta."""
-    var e = n // THREADS
-    var t = n % THREADS
+) -> Tuple[Float32, Float32, Float32]:
+    """Thread t of pair e of `frame_distance_kernel`: its sums of beta * flow, beta and valid beta."""
     var dix = Int(di[unsafe_offset=e])
     var rix = Int(ri[unsafe_offset=e])
     var rjx = Int(rj[unsafe_offset=e])
@@ -101,9 +103,34 @@ def frame_distance_partial_element(
             accum += (1 - beta) * d
             valid += 1 - beta
         k += THREADS
-    partial[unsafe_offset=(e * 3 + 0) * THREADS + t] = accum
-    partial[unsafe_offset=(e * 3 + 1) * THREADS + t] = total
-    partial[unsafe_offset=(e * 3 + 2) * THREADS + t] = valid
+    return (accum, total, valid)
+
+
+@always_inline
+def _frame_distance_value(accum: Float32, total: Float32, valid: Float32) -> Float32:
+    """1000 when under 75 % of the weighted points land in front of camera j, else the mean flow."""
+    return 1000.0 if valid / (total + 1e-8) < 0.75 else accum / valid
+
+
+@always_inline
+def frame_distance_element(
+    e: Int, height: Int, width: Int, beta: Float32, poses: F32Ptr, disps: F32Ptr, intrinsics: F32Ptr,
+    pi: I64Ptr, pj: I64Ptr, ri: I64Ptr, rj: I64Ptr, di: I64Ptr, dist: F32Ptr,
+):  # fmt: skip
+    """Pair e on the CPU: the 256 threads' sums folded in `blockReduce`'s tree, as `frame_distance_kernel`."""
+    var s = Array[Float32, 3 * THREADS](uninitialized=True)
+    for t in range(THREADS):
+        var a, tot, v = _frame_distance_sums(e, t, height, width, beta, poses, disps, intrinsics, pi, pj, ri, rj, di)
+        s[t] = a
+        s[THREADS + t] = tot
+        s[2 * THREADS + t] = v
+    var offset = THREADS // 2
+    while offset > 0:
+        for r in range(3):
+            for t in range(offset):
+                s[r * THREADS + t] = s[r * THREADS + t] + s[r * THREADS + t + offset]
+        offset //= 2
+    dist[unsafe_offset=e] = _frame_distance_value(s[0], s[THREADS], s[2 * THREADS])
 
 
 @always_inline
@@ -211,14 +238,12 @@ def ba_partial_element(
         if ix == jx:
             wu = 0
         var j_i = -adj_se3(tij, qij, j_j)
-        var l = 0
-        for a in range(12):
-            for b in range(a + 1):
-                hij[l] += wu * _jx(j_i, j_j, a) * _jx(j_i, j_j, b)
-                l += 1
+        comptime for a in range(12):
+            comptime for b in range(a + 1):
+                hij[a * (a + 1) // 2 + b] += wu * _jx(j_i, j_j, a) * _jx(j_i, j_j, b)
         var e_i = Array[Float32, 6](uninitialized=True)
         var e_j = Array[Float32, 6](uninitialized=True)
-        for a in range(6):
+        comptime for a in range(6):
             vi[a] += wu * ru * j_i[a]
             vj[a] += wu * ru * j_j[a]
             if optimize_intrinsics:
@@ -241,12 +266,10 @@ def ba_partial_element(
         if ix == jx:
             wv = 0
         j_i = -adj_se3(tij, qij, j_j)
-        l = 0
-        for a in range(12):
-            for b in range(a + 1):
-                hij[l] += wv * _jx(j_i, j_j, a) * _jx(j_i, j_j, b)
-                l += 1
-        for a in range(6):
+        comptime for a in range(12):
+            comptime for b in range(a + 1):
+                hij[a * (a + 1) // 2 + b] += wv * _jx(j_i, j_j, a) * _jx(j_i, j_j, b)
+        comptime for a in range(6):
             vi[a] += wv * rv * j_i[a]
             vj[a] += wv * rv * j_j[a]
             if optimize_intrinsics:
@@ -262,15 +285,15 @@ def ba_partial_element(
         bz[unsafe_offset=block * hw + k] = b_k
         if optimize_intrinsics:
             efi[unsafe_offset=block * hw + k] = f_k
-        for a in range(6):
+        comptime for a in range(6):
             eii[unsafe_offset=(block * 6 + a) * hw + k] = e_i[a]
             eij[unsafe_offset=(block * 6 + a) * hw + k] = e_j[a]
         k += THREADS
 
     var row = block * BA_SUMS
-    for q in range(HIJ):
+    comptime for q in range(HIJ):
         partial[unsafe_offset=(row + q) * THREADS + thread] = hij[q]
-    for a in range(6):
+    comptime for a in range(6):
         partial[unsafe_offset=(row + HIJ + a) * THREADS + thread] = vi[a]
         partial[unsafe_offset=(row + HIJ + 6 + a) * THREADS + thread] = vj[a]
         partial[unsafe_offset=(row + HIJ + 12 + a) * THREADS + thread] = fi[a]
@@ -305,14 +328,14 @@ def eet_partial_element(n: Int, width: Int, e: F32Ptr, q: F32Ptr, idx: I64Ptr, p
         var qk = _ld(q, kx * width + k)
         var ei = Array[Float32, 6](uninitialized=True)
         var ej = Array[Float32, 6](uninitialized=True)
-        for a in range(6):
+        comptime for a in range(6):
             ei[a] = _ld(e, (ix * 6 + a) * width + k) * qk
             ej[a] = _ld(e, (jx * 6 + a) * width + k)
-        for a in range(6):
-            for b in range(6):
+        comptime for a in range(6):
+            comptime for b in range(6):
                 ds[a * 6 + b] += ei[a] * ej[b]
         k += THREADS
-    for a in range(36):
+    comptime for a in range(36):
         partial[unsafe_offset=(p * 36 + a) * THREADS + t] = ds[a]
 
 
@@ -326,10 +349,10 @@ def ev_partial_element(n: Int, width: Int, e: F32Ptr, q: F32Ptr, w: F32Ptr, kk: 
     var k = t
     while k < width:
         var q_w = _ld(q, kx * width + k) * _ld(w, kx * width + k)
-        for a in range(6):
+        comptime for a in range(6):
             b[a] += q_w * _ld(e, (r * 6 + a) * width + k)
         k += THREADS
-    for a in range(6):
+    comptime for a in range(6):
         partial[unsafe_offset=(r * 6 + a) * THREADS + t] = b[a]
 
 
@@ -342,7 +365,7 @@ def evt_element(n: Int, width: Int, num_poses: Int, e: F32Ptr, x: F32Ptr, ix: I6
     if i <= 0 or i >= num_poses:
         return
     var acc: Float32 = 0.0
-    for a in range(6):
+    comptime for a in range(6):
         acc += _ld(e, (r * 6 + a) * width + k) * _ld(x, i * 6 + a)
     dw[unsafe_offset=n] = acc
 
@@ -364,24 +387,137 @@ def pose_retr_element(i: Int, t0: Int, poses: F32Ptr, dx: F32Ptr):
     poses[unsafe_offset=p + 6] = q1[3]
 
 
+comptime F64Ptr = MutPointer[Float64, MutUntrackedOrigin]
+
+
+@always_inline
+def _dot(p: F64Ptr, q: F64Ptr, start: Int, end: Int) -> Float64:
+    """Sum of p[k] * q[k] over k in [start, end)."""
+    var acc = SIMD[DType.float64, 4](0)
+    var k = start
+    while k + 4 <= end:
+        acc += p.load[width=4](k) * q.load[width=4](k)
+        k += 4
+    var s = acc.reduce_add()
+    while k < end:
+        s += p[unsafe_offset=k] * q[unsafe_offset=k]
+        k += 1
+    return s
+
+
+def pose_solve(
+    dim: Int,
+    poses: Int,
+    lm: Float64,
+    ep: Float64,
+    scalar_lm: Float64,
+    scalar_ep: Float64,
+    host: F32Ptr,
+    a_src: I64Ptr,
+    a_dst: I64Ptr,
+    a_sign: F32Ptr,
+    a_count: Int,
+    b_src: I64Ptr,
+    b_dst: I64Ptr,
+    b_sign: F32Ptr,
+    b_count: Int,
+    a: F64Ptr,
+    x: F64Ptr,
+) -> Bool:
+    """The pose step of one BA iteration on the CPU, on one thread (the extension's Eigen `SimplicialLLT` step).
+
+    Assembles (A - S) and (b - s) in float64 from the reduced sums `host` by the scatter tables
+    (`a[a_dst[k]] += a_sign[k] * host[a_src[k]]`, the same for b), damps the diagonal (lm, ep on the 6 * poses
+    pose rows, scalar_lm, scalar_ep on the focal row), and solves by a profile Cholesky: L keeps the row
+    profile of A, which is banded with one dense focal row for BA systems. x holds the solution; False when the
+    matrix is not positive definite.
+    """
+    for k in range(dim * dim):
+        a[unsafe_offset=k] = 0.0
+    for k in range(dim):
+        x[unsafe_offset=k] = 0.0
+    for k in range(a_count):
+        var d = Int(a_dst[unsafe_offset=k])
+        a[unsafe_offset=d] = a[unsafe_offset=d] + Float64(a_sign[unsafe_offset=k]) * Float64(host[unsafe_offset=Int(a_src[unsafe_offset=k])])
+    for k in range(b_count):
+        var d = Int(b_dst[unsafe_offset=k])
+        x[unsafe_offset=d] = x[unsafe_offset=d] + Float64(b_sign[unsafe_offset=k]) * Float64(host[unsafe_offset=Int(b_src[unsafe_offset=k])])
+    for i in range(dim):
+        var d = a[unsafe_offset=i * dim + i]
+        a[unsafe_offset=i * dim + i] = d + (ep + lm * d) if i < 6 * poses else d + (scalar_ep + scalar_lm * d)
+
+    var first = List[Int](capacity=dim)
+    for i in range(dim):
+        var f = i
+        for j in range(i):
+            if a[unsafe_offset=i * dim + j] != 0.0:
+                f = j
+                break
+        first.append(f)
+    for i in range(dim):
+        var row = a.unsafe_offset(i * dim)
+        for j in range(first[i], i + 1):
+            var s = row[unsafe_offset=j] - _dot(row, a.unsafe_offset(j * dim), max(first[i], first[j]), j)
+            if j == i:
+                if not (s > 0.0):
+                    return False
+                row[unsafe_offset=i] = sqrt(s)
+            else:
+                row[unsafe_offset=j] = s / a[unsafe_offset=j * dim + j]
+    for i in range(dim):  # L y = b
+        x[unsafe_offset=i] = (x[unsafe_offset=i] - _dot(a.unsafe_offset(i * dim), x, first[i], i)) / a[unsafe_offset=i * dim + i]
+    var i = dim - 1
+    while i >= 0:  # L^T x = y
+        var xi = x[unsafe_offset=i] / a[unsafe_offset=i * dim + i]
+        x[unsafe_offset=i] = xi
+        for k in range(first[i], i):
+            x[unsafe_offset=k] = x[unsafe_offset=k] - a[unsafe_offset=i * dim + k] * xi
+        i -= 1
+    return True
+
+
 # ── GPU kernels: one element per thread ─────────────────────────────────────
 
 
-@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
-def frame_distance_partial_kernel(
-    total: Int64, height: Int64, width: Int64, beta: Float32, poses: F32Ptr, disps: F32Ptr, intrinsics: F32Ptr,
-    pi: I64Ptr, pj: I64Ptr, ri: I64Ptr, rj: I64Ptr, di: I64Ptr, partial: F32Ptr,
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](THREADS))
+def frame_distance_kernel(
+    height: Int64, width: Int64, beta: Float32, poses: F32Ptr, disps: F32Ptr, intrinsics: F32Ptr,
+    pi: I64Ptr, pj: I64Ptr, ri: I64Ptr, rj: I64Ptr, di: I64Ptr, dist: F32Ptr,
 ):  # fmt: skip
-    var n = global_idx.x
-    if n < Int(total):
-        frame_distance_partial_element(n, Int(height), Int(width), beta, poses, disps, intrinsics, pi, pj, ri, rj, di, partial)
+    """One 256-thread block per pair; `blockReduce` of the three sums in shared memory, as the CUDA kernel."""
+    var e = block_idx.x
+    var t = thread_idx.x
+    var a, tot, v = _frame_distance_sums(e, t, Int(height), Int(width), beta, poses, disps, intrinsics, pi, pj, ri, rj, di)
+    var s = stack_allocation[DType.float32, address_space=.SHARED](row_major[3, THREADS]())
+    s[0, t] = a
+    s[1, t] = tot
+    s[2, t] = v
+    barrier()
+    comptime for level in range(1, 9):
+        comptime offset = THREADS >> level
+        if t < offset:
+            comptime for r in range(3):
+                s[r, t] = s[r, t] + s[r, t + offset]
+        barrier()
+    if t == 0:
+        dist[unsafe_offset=e] = _frame_distance_value(s[0, 0][0], s[1, 0][0], s[2, 0][0])
 
 
-@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
-def block_reduce_kernel(total: Int64, partial: F32Ptr, dst: F32Ptr):
-    var n = global_idx.x
-    if n < Int(total):
-        block_reduce_element(n, partial, dst)
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](THREADS))
+def block_reduce_kernel(partial: F32Ptr, dst: F32Ptr):
+    """One 256-thread block per row: `blockReduce` in shared memory, the tree of `block_reduce_element`."""
+    var row = block_idx.x
+    var t = thread_idx.x
+    var s = stack_allocation[DType.float32, address_space=.SHARED](row_major[THREADS]())
+    s[t] = partial[unsafe_offset=row * THREADS + t]
+    barrier()
+    comptime for level in range(1, 9):
+        comptime offset = THREADS >> level
+        if t < offset:
+            s[t] = s[t] + s[t + offset]
+        barrier()
+    if t == 0:
+        dst[unsafe_offset=row] = s[0][0]
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))

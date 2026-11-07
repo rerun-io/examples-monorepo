@@ -3,15 +3,13 @@
 `ba_extended` is `ba_cuda_impl` (`csrc/slam_ext/geom_kernels.cu`) line for line. The residual / Jacobian
 kernel, the per-frame sums (`accum_kernel`), the Schur products (`EEt6x6`, `Ev6x1`, `EvT6x1`) and the pose
 retraction are Mojo kernels with CUDA's summation order (no float atomics: the result does not depend
-on scheduling). The pose system is assembled and solved in float64 like the extension's Eigen
-`SimplicialLLT`, densely and with PyTorch's Cholesky;
-a factorisation failure gives a zero step, as in the extension. The remaining tensor algebra is PyTorch
-on the input device, with the extension's expressions.
+on scheduling). As in the extension, the reduced sums go to the CPU once per iteration, where the pose
+system is assembled and solved in float64 (Eigen's `SimplicialLLT` there, a dense PyTorch Cholesky
+here; the scatter indices are built once per call); a factorisation failure gives a zero step. The
+remaining tensor algebra is PyTorch on the input device, with the extension's expressions.
 
 Every other slam_ext function raises NotImplementedError when called.
 """
-
-import functools
 
 import torch
 from jaxtyping import Float32, Int64
@@ -43,14 +41,10 @@ def frame_distance(
 
     1000 when less than 75 % of the (beta-weighted) points land in front of camera j (`frame_distance_cuda`).
     """
-    m: int = pi.shape[0]
-    partial: Tensor = torch.empty(m, 3, 256, dtype=torch.float32, device=poses.device)
-    if m == 0:
-        return torch.zeros(0, dtype=torch.float32, device=poses.device)
-    launch("frame_distance", (float(beta),), (poses, disps, intrinsics, pi, pj, qi, qj, di, partial))
-    sums: Tensor = block_reduce(partial)
-    accum, total, valid = sums.unbind(1)
-    return torch.where(valid / (total + 1e-8) < 0.75, torch.full_like(accum, 1000.0), accum / valid)
+    out: Tensor = torch.empty(pi.shape[0], dtype=torch.float32, device=poses.device)
+    if out.numel():
+        launch("frame_distance", (float(beta),), (poses, disps, intrinsics, pi, pj, qi, qj, di, out))
+    return out
 
 
 class _Accum:
@@ -77,81 +71,96 @@ class _Accum:
         return out
 
 
-@functools.cache
-def _triangle() -> tuple[Tensor, Tensor]:
-    """Row and column of each hij entry."""
-    rows, cols = zip(*[(n, m) for n in range(12) for m in range(n + 1)], strict=True)
-    return torch.tensor(rows), torch.tensor(cols)
+def _valid(pose: Tensor, num_poses: int) -> Tensor:
+    return (pose >= 0) & (pose < num_poses)
 
 
-def _blocks(sums: Tensor) -> Tensor:
-    """The four 6 x 6 blocks (ii-ii, ii-jj, jj-ii, jj-jj) of every edge, (4 * num, 6, 6) as `Hs.reshape(-1, 6, 6)`."""
-    rows, cols = _triangle()
-    h: Tensor = torch.zeros(sums.shape[0], 12, 12, dtype=sums.dtype, device=sums.device)
-    h[:, rows.to(sums.device), cols.to(sums.device)] = sums[:, :HIJ]
-    h[:, cols.to(sums.device), rows.to(sums.device)] = sums[:, :HIJ]
-    return torch.cat([h[:, :6, :6], h[:, :6, 6:], h[:, 6:, :6], h[:, 6:, 6:]])
+class _PoseSystem:
+    """The pose step of one BA iteration: scatter tables from the reduced sums into (A - S, b - s), built once per call,
+    and the float64 solve on the CPU on one thread (`pose_solve`, mojo/slam.mojo), as the extension's Eigen step.
 
+    Per iteration the GPU sums arrive in one float32 buffer: the BA kernel's per-edge sums (num, BA_SUMS); unless
+    motion_only, the Schur blocks (pairs, 36), the Schur rhs (rows, 6) and, with the focal, its Schur column
+    (target rows, 6) and the two Schur focal scalars. Poses outside [t0, t1) are dropped, as in the extension.
+    """
 
-class _System:
-    """The extension's `SparseBlock` / `SparseSystem` as a dense float64 matrix: 6 per pose, plus one focal scalar."""
+    def __init__(self, p: int, with_scalar: bool, ii: Tensor, jj: Tensor, t0: int, schur: tuple[Tensor, Tensor, Tensor, Tensor] | None) -> None:
+        self.p: int = p
+        self.dim: int = 6 * p + int(with_scalar)
+        dim, focal = self.dim, 6 * p
+        a_parts: list[tuple[Tensor, Tensor, float]] = []
+        b_parts: list[tuple[Tensor, Tensor, float]] = []
+        num: int = ii.shape[0]
+        edges: Tensor = torch.arange(num).view(-1, 1) * BA_SUMS
+        r6: Tensor = torch.arange(6)
 
-    def __init__(self, num_poses: int, with_scalar: bool, device: torch.device) -> None:
-        self.p: int = num_poses
-        self.dim: int = 6 * num_poses + int(with_scalar)
-        self.a: Tensor = torch.zeros(self.dim, self.dim, dtype=torch.float64, device=device)
-        self.b: Tensor = torch.zeros(self.dim, dtype=torch.float64, device=device)
+        # hij: the lower triangle of each edge's 12 x 12 block (poses ii, jj), both halves of the symmetric matrix.
+        r12: Tensor = torch.arange(12)
+        rows, cols = r12.view(-1, 1).expand(12, 12).reshape(-1), r12.view(1, -1).expand(12, 12).reshape(-1)
+        tri: Tensor = torch.where(rows >= cols, rows * (rows + 1) // 2 + cols, cols * (cols + 1) // 2 + rows)
+        pose_r: Tensor = torch.where(rows < 6, ii.view(-1, 1), jj.view(-1, 1)) - t0
+        pose_c: Tensor = torch.where(cols < 6, ii.view(-1, 1), jj.view(-1, 1)) - t0
+        keep: Tensor = _valid(pose_r, p) & _valid(pose_c, p)
+        a_parts.append(((edges + tri)[keep], ((6 * pose_r + rows % 6) * dim + 6 * pose_c + cols % 6)[keep], 1.0))
+        # vi, vj and, with the focal, fi, fj (its column and row) and the edge sums hf, vfocal.
+        side_pose: Tensor = torch.stack([ii, jj], 1) - t0  # (num, 2)
+        side_rows: Tensor = (6 * side_pose.view(num, 2, 1) + r6).view(num, 12)
+        side_keep: Tensor = _valid(side_pose, p).repeat_interleave(6, 1)
+        b_parts.append(((edges + HIJ + torch.arange(12))[side_keep], side_rows[side_keep], 1.0))
+        if with_scalar:
+            src: Tensor = (edges + HIJ + 12 + torch.arange(12))[side_keep]
+            a_parts += [(src, side_rows[side_keep] * dim + focal, 1.0), (src, focal * dim + side_rows[side_keep], 1.0)]
+            a_parts.append((edges.view(-1) + HIJ + 24, torch.full((num,), focal * dim + focal), 1.0))
+            b_parts.append((edges.view(-1) + HIJ + 25, torch.full((num,), focal), 1.0))
 
-    def _valid(self, *index: Tensor) -> Tensor:
-        ok: Tensor = torch.ones_like(index[0], dtype=torch.bool)
-        for i in index:
-            ok &= (i >= 0) & (i < self.p)
-        return ok
+        at: int = num * BA_SUMS
+        if schur is not None:
+            pair_i, pair_j, exp_pose, target_pose = (x - t0 for x in schur)
+            pairs: int = pair_i.shape[0]
+            pair_keep: Tensor = _valid(pair_i, p) & _valid(pair_j, p)
+            blk: Tensor = (at + 36 * torch.arange(pairs).view(-1, 1, 1) + 6 * r6.view(1, 6, 1) + r6.view(1, 1, 6))[pair_keep]
+            dst: Tensor = ((6 * pair_i.view(-1, 1, 1) + r6.view(1, 6, 1)) * dim + 6 * pair_j.view(-1, 1, 1) + r6.view(1, 1, 6))[pair_keep]
+            a_parts.append((blk.reshape(-1), dst.reshape(-1), -1.0))
+            at += 36 * pairs
+            rows_e: int = exp_pose.shape[0]
+            exp_keep: Tensor = _valid(exp_pose, p)
+            b_parts.append(
+                ((at + 6 * torch.arange(rows_e).view(-1, 1) + r6)[exp_keep].reshape(-1), (6 * exp_pose.view(-1, 1) + r6)[exp_keep].reshape(-1), -1.0)
+            )
+            at += 6 * rows_e
+            if with_scalar:
+                rows_t: int = target_pose.shape[0]
+                t_keep: Tensor = _valid(target_pose, p)
+                src = (at + 6 * torch.arange(rows_t).view(-1, 1) + r6)[t_keep].reshape(-1)
+                col: Tensor = (6 * target_pose.view(-1, 1) + r6)[t_keep].reshape(-1)
+                a_parts += [(src, col * dim + focal, -1.0), (src, focal * dim + col, -1.0)]
+                at += 6 * rows_t
+                a_parts.append((torch.tensor([at]), torch.tensor([focal * dim + focal]), -1.0))
+                b_parts.append((torch.tensor([at + 1]), torch.tensor([focal]), -1.0))
+                at += 2
+        self.host_size: int = at
 
-    def add_pose_blocks(self, blocks: Tensor, i: Tensor, j: Tensor) -> None:
-        dev: torch.device = self.a.device
-        i, j, blocks = i.to(dev), j.to(dev), blocks.to(dev).double()
-        ok: Tensor = self._valid(i, j)
-        grid: Tensor = torch.zeros(self.p, self.p, 6, 6, dtype=torch.float64, device=dev)
-        grid.index_put_((i[ok], j[ok]), blocks[ok], accumulate=True)
-        self.a[: 6 * self.p, : 6 * self.p] += grid.permute(0, 2, 1, 3).reshape(6 * self.p, 6 * self.p)
+        def table(parts: list[tuple[Tensor, Tensor, float]]) -> tuple[Tensor, Tensor, Tensor]:
+            src = torch.cat([s.reshape(-1) for s, _, _ in parts]).contiguous()
+            dst = torch.cat([d.reshape(-1) for _, d, _ in parts]).contiguous()
+            sign = torch.cat([torch.full((s.numel(),), g, dtype=torch.float32) for s, _, g in parts])
+            return src, dst, sign
 
-    def add_pose_rhs(self, values: Tensor, i: Tensor) -> None:
-        dev: torch.device = self.b.device
-        i, values = i.to(dev), values.to(dev).double()
-        ok: Tensor = self._valid(i)
-        rhs: Tensor = torch.zeros(self.p, 6, dtype=torch.float64, device=dev)
-        rhs.index_put_((i[ok],), values[ok], accumulate=True)
-        self.b[: 6 * self.p] += rhs.reshape(-1)
+        self.a_table: tuple[Tensor, Tensor, Tensor] = table(a_parts)
+        self.b_table: tuple[Tensor, Tensor, Tensor] = table(b_parts)
+        self.a: Tensor = torch.empty(dim * dim, dtype=torch.float64)
+        self.x: Tensor = torch.empty(dim, dtype=torch.float64)
 
-    def add_pose_scalar(self, values: Tensor, i: Tensor) -> None:
-        dev: torch.device = self.a.device
-        i, values = i.to(dev), values.to(dev).double()
-        ok: Tensor = self._valid(i)
-        col: Tensor = torch.zeros(self.p, 6, dtype=torch.float64, device=dev)
-        col.index_put_((i[ok],), values[ok], accumulate=True)
-        self.a[: 6 * self.p, 6 * self.p] += col.reshape(-1)
-        self.a[6 * self.p, : 6 * self.p] += col.reshape(-1)
-
-    def add_scalar(self, lhs: float, rhs: float) -> None:
-        self.a[6 * self.p, 6 * self.p] += lhs
-        self.b[6 * self.p] += rhs
-
-    def solve(self, minus: "_System | None", lm: float, ep: float, scalar_lm: float, scalar_ep: float) -> tuple[Tensor, float]:
-        """(dx (P, 6) float32, df) of (A - S + damping) x = b - s; zeros when the Cholesky factorisation fails (Eigen's LLT)."""
-        a: Tensor = self.a - minus.a if minus is not None else self.a.clone()
-        b: Tensor = self.b - minus.b if minus is not None else self.b
-        is_scalar: Tensor = torch.arange(self.dim, device=a.device) >= 6 * self.p
-        lms: Tensor = torch.where(is_scalar, scalar_lm, lm).to(torch.float64)
-        eps: Tensor = torch.where(is_scalar, scalar_ep, ep).to(torch.float64)
-        diag: Tensor = torch.diagonal(a)
-        diag += eps + lms * diag
-        factor, info = torch.linalg.cholesky_ex(a)
-        if int(info) != 0:
+    def solve(self, host: Tensor, lm: float, ep: float, scalar_lm: float, scalar_ep: float) -> tuple[Tensor, float]:
+        """(dx (P, 6) float32, df) on the CPU; zeros when the Cholesky factorisation fails (Eigen's LLT)."""
+        assert host.shape[0] == self.host_size, (host.shape, self.host_size)
+        ok = launch(
+            "pose_solve", (self.p, float(lm), float(ep), float(scalar_lm), float(scalar_ep)), (host, *self.a_table, *self.b_table, self.a, self.x)
+        )
+        if not ok:
             return torch.zeros(self.p, 6, dtype=torch.float32), 0.0
-        x: Tensor = torch.cholesky_solve(b.view(-1, 1), factor).view(-1)
-        df: float = float(x[6 * self.p]) if self.dim > 6 * self.p else 0.0
-        return x[: 6 * self.p].view(self.p, 6).float(), df
+        df: float = float(self.x[6 * self.p]) if self.dim > 6 * self.p else 0.0
+        return self.x[: 6 * self.p].view(self.p, 6).float(), df
 
 
 def _schur_pairs(jj_exp: Tensor, kk_exp: Tensor, t0: int, t1: int) -> tuple[Tensor, Tensor, Tensor]:
@@ -217,9 +226,27 @@ def ba_extended(
     accum_ii_kx = _Accum(ii, kx)
     accum_ii_ts = _Accum(ii, ts)
     accum_exp_kx = _Accum(ii_exp, kx)
-    pair_idx, pair_i, pair_j = _schur_pairs(jj_exp.cpu(), kk_exp.cpu(), t0, t1)
+    ii_cpu, jj_cpu, jj_exp_cpu = ii.cpu(), jj.cpu(), jj_exp.cpu()
+    pair_idx, pair_i, pair_j = _schur_pairs(jj_exp_cpu, kk_exp.cpu(), t0, t1)
+    num_pairs: int = pair_idx.shape[0]
     pair_idx = pair_idx.to(device)
-    rhs_rows: Tensor = jj_exp - t0
+    rhs_rows: Tensor = (jj_exp - t0).contiguous()
+    target_rows: Tensor = torch.nonzero((jj_exp >= t0) & (jj_exp < t1)).view(-1)
+    # The pose system's scatter tables, built once: they only depend on the edges.
+    pose_system = _PoseSystem(
+        p, optimize_intrinsics, ii_cpu, jj_cpu, t0,
+        None if motion_only else (pair_i + t0, pair_j + t0, jj_exp_cpu, jj_exp_cpu[target_rows.cpu()]),
+    )  # fmt: skip
+    # Constant over the iterations.
+    active: Tensor = torch.empty(0, **f32)
+    mask: Tensor = torch.empty(0, **f32)
+    sens: Tensor = torch.empty(0, **f32)
+    if not motion_only:
+        active = depth_active[kx].to(torch.float32).view(-1, 1)
+        mask = (disps_sens[kx] > 0).to(torch.float32).view(-1, hw) * active
+        sens = disps_sens[kx].view(-1, hw)
+    depth_exp: Tensor = depth_active[ii_exp].to(torch.float32).view(-1, 1, 1)
+    eta_v: Tensor = eta.view(-1, hw)
 
     cii: Tensor = torch.zeros(num, hw, **f32)
     wi: Tensor = torch.zeros(num, hw, **f32)
@@ -227,6 +254,8 @@ def ba_extended(
     eij: Tensor = torch.zeros(num, 6, hw, **f32)
     efi: Tensor = torch.zeros(num, hw, **f32)
     partial: Tensor = torch.empty(num, BA_SUMS, 256, **f32)
+    spp: Tensor = torch.empty(num_pairs, 36, 256, **f32)
+    ev: Tensor = torch.empty(ii_exp.shape[0], 6, 256, **f32)
     energy: Tensor = torch.empty(iterations if compute_energy else 0, **f32)
     dx: Tensor | None = None
     dz: Tensor | None = None
@@ -238,61 +267,44 @@ def ba_extended(
                 (int(optimize_intrinsics), float(intrinsics_scale), float(flow_weight)),
                 (targets, weights, poses, disps, intrinsics, depth_active, ii, jj, cii, wi, eii, eij, efi, partial),
             )
-        sums: Tensor = block_reduce(partial)
-        system = _System(p, optimize_intrinsics, device)
-        system.add_pose_blocks(_blocks(sums), torch.cat([ii, ii, jj, jj]) - t0, torch.cat([ii, jj, ii, jj]) - t0)
-        system.add_pose_rhs(torch.cat([sums[:, HIJ : HIJ + 6], sums[:, HIJ + 6 : HIJ + 12]]), torch.cat([ii, jj]) - t0)
-        if optimize_intrinsics:
-            system.add_pose_scalar(torch.cat([sums[:, HIJ + 12 : HIJ + 18], sums[:, HIJ + 18 : HIJ + 24]]), torch.cat([ii, jj]) - t0)
-            system.add_scalar(sums[:, HIJ + 24].sum().item(), sums[:, HIJ + 25].sum().item())
-
-        active: Tensor = torch.empty(0, **f32)
-        mask: Tensor = torch.empty(0, **f32)
-        if not motion_only:
-            active = depth_active[kx].to(torch.float32).view(-1, 1)
-            mask = (disps_sens[kx] > 0).to(torch.float32).view(-1, hw) * active
+        sums_gpu: Tensor = block_reduce(partial)
         if compute_energy:
-            iter_energy: Tensor = sums[:, HIJ + 26].sum()
+            iter_energy: Tensor = sums_gpu[:, HIJ + 26].sum()
             if not motion_only:
-                iter_energy = iter_energy + (mask * alpha * torch.pow((disps[kx] - disps_sens[kx]).view(-1, hw), 2)).sum()
+                iter_energy = iter_energy + (mask * alpha * torch.pow(disps[kx].view(-1, hw) - sens, 2)).sum()
             energy[itr] = iter_energy
 
         if motion_only:
-            dx_cpu, df = system.solve(None, lm, ep, intrinsics_lm, intrinsics_ep)
+            dx_cpu, df = pose_system.solve(sums_gpu.view(-1).cpu(), lm, ep, intrinsics_lm, intrinsics_ep)
             dx = dx_cpu.to(device)
             launch("pose_retr", (t0,), (poses, dx))
             if optimize_intrinsics:
                 intrinsics[:2] += torch.tensor(df * intrinsics_scale, dtype=torch.float32, device=device)
             continue
 
-        c: Tensor = active * (accum_ii_kx(cii) + eta.view(-1, hw) + mask * alpha) + (1 - active)
-        w: Tensor = active * (accum_ii_kx(wi) - mask * alpha * (disps[kx] - disps_sens[kx]).view(-1, hw))
+        c: Tensor = active * (accum_ii_kx(cii) + eta_v + mask * alpha) + (1 - active)
+        w: Tensor = (active * (accum_ii_kx(wi) - mask * alpha * (disps[kx].view(-1, hw) - sens))).contiguous()
         q: Tensor = (1.0 / c).contiguous()
         ei: Tensor = accum_ii_ts(eii.view(num, 6 * hw)).view(p, 6, hw)
-        e: Tensor = (torch.cat([ei, eij], 0) * depth_active[ii_exp].to(torch.float32).view(-1, 1, 1)).contiguous()
-        w = w.contiguous()
+        e: Tensor = (torch.cat([ei, eij], 0) * depth_exp).contiguous()
 
-        schur = _System(p, optimize_intrinsics, device)
-        if pair_idx.shape[0]:
-            spp: Tensor = torch.empty(pair_idx.shape[0], 36, 256, **f32)
+        # Everything the pose system needs, reduced on the GPU and copied to the CPU at once.
+        parts: list[Tensor] = [sums_gpu.view(-1)]
+        if num_pairs:
             launch("eet", (), (e, q, pair_idx, spp))
-            schur.add_pose_blocks(block_reduce(spp).view(-1, 6, 6), pair_i, pair_j)
+            parts.append(block_reduce(spp).view(-1))
         if e.shape[0]:
-            ev: Tensor = torch.empty(e.shape[0], 6, 256, **f32)
             launch("ev", (), (e, q, w, kk_exp, ev))
-            schur.add_pose_rhs(block_reduce(ev), rhs_rows)
+            parts.append(block_reduce(ev).view(-1))
         ef: Tensor = torch.empty(0, **f32)
         if optimize_intrinsics:
             ef = accum_ii_kx(efi) * active
-            rows: Tensor = torch.nonzero((jj_exp >= t0) & (jj_exp < t1)).view(-1)
-            spf: Tensor = (e[rows] * (q[kk_exp[rows]] * ef[kk_exp[rows]]).unsqueeze(1)).sum(2)
-            schur.add_pose_scalar(spf, jj_exp[rows] - t0)
-            schur.add_scalar((ef * q * ef).sum().item(), (ef * q * w).sum().item())
-
-        dx_cpu, df = system.solve(schur, lm, ep, intrinsics_lm, intrinsics_ep)
+            spf: Tensor = (e[target_rows] * (q[kk_exp[target_rows]] * ef[kk_exp[target_rows]]).unsqueeze(1)).sum(2)
+            parts += [spf.view(-1), (ef * q * ef).sum().view(1), (ef * q * w).sum().view(1)]
+        dx_cpu, df = pose_system.solve(torch.cat(parts).cpu(), lm, ep, intrinsics_lm, intrinsics_ep)
         dx = dx_cpu.to(device)
         dw: Tensor = torch.zeros(e.shape[0], hw, **f32)
-        launch("evt", (), (e, dx, rhs_rows.contiguous(), dw))
+        launch("evt", (), (e, dx, rhs_rows, dw))
         dz = q * (w - accum_exp_kx(dw))
         if optimize_intrinsics:
             dz = dz - q * ef * df

@@ -35,9 +35,10 @@ from slam import (
     ev_partial_kernel,
     evt_element,
     evt_kernel,
-    frame_distance_partial_element,
-    frame_distance_partial_kernel,
+    frame_distance_element,
+    frame_distance_kernel,
     pose_retr_element,
+    pose_solve,
     pose_retr_kernel,
 )
 
@@ -70,6 +71,11 @@ def _int(scalars: PythonObject, i: Int) raises -> Int:
 @always_inline
 def _float(scalars: PythonObject, i: Int) raises -> Float32:
     return Float32(Float64(py=scalars[i]))
+
+
+@always_inline
+def _double(scalars: PythonObject, i: Int) raises -> Float64:
+    return Float64(py=scalars[i])
 
 
 @always_inline
@@ -175,7 +181,7 @@ def _altcorr_index_py[gpu: Bool](runtime: PythonObject, scalars: PythonObject, t
 
 
 def _frame_distance_py[gpu: Bool](runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
-    """scalars = (stream, beta); tensors = (poses, disps (ND, H, W), intrinsics (Q, 4), pi, pj, qi, qj, di, partial (M, 3, 256))."""
+    """scalars = (stream, beta); tensors = (poses, disps (ND, H, W), intrinsics (Q, 4), pi, pj, qi, qj, di, dist (M,))."""
     var beta = _float(s, 1)
     var height = _dim(t[1], 1)
     var width = _dim(t[1], 2)
@@ -187,22 +193,21 @@ def _frame_distance_py[gpu: Bool](runtime: PythonObject, s: PythonObject, t: Pyt
     var ri = _i(t[5])
     var rj = _i(t[6])
     var di = _i(t[7])
-    var partial = _f(t[8])
-    var total = _dim(t[3], 0) * THREADS
+    var dist = _f(t[8])
+    var pairs = _dim(t[3], 0)
     comptime if gpu:
         var rt = runtime.downcast_value_ptr[GPURuntime]()
-        var func = rt[].ctx.compile_function[frame_distance_partial_kernel]()
+        var func = rt[].ctx.compile_function[frame_distance_kernel]()
         rt[].torch_stream(_int(s, 0)).enqueue_function(
-            func, Int64(total), Int64(height), Int64(width), beta, poses, disps, intrinsics, pi, pj, ri, rj, di, partial,
-            grid_dim=_grid(total), block_dim=NUM_THREADS,
+            func, Int64(height), Int64(width), beta, poses, disps, intrinsics, pi, pj, ri, rj, di, dist, grid_dim=pairs, block_dim=THREADS,
         )  # fmt: skip
     else:
         var rt = runtime.downcast_value_ptr[CPURuntime]()
 
         def element(n: Int) {imm}:
-            frame_distance_partial_element(n, height, width, beta, poses, disps, intrinsics, pi, pj, ri, rj, di, partial)
+            frame_distance_element(n, height, width, beta, poses, disps, intrinsics, pi, pj, ri, rj, di, dist)
 
-        rt[].for_each_row(element, total)
+        rt[].for_each_row(element, pairs)
     return Python.none()
 
 
@@ -214,7 +219,7 @@ def _block_reduce_py[gpu: Bool](runtime: PythonObject, s: PythonObject, t: Pytho
     comptime if gpu:
         var rt = runtime.downcast_value_ptr[GPURuntime]()
         var func = rt[].ctx.compile_function[block_reduce_kernel]()
-        rt[].torch_stream(_int(s, 0)).enqueue_function(func, Int64(total), partial, dst, grid_dim=_grid(total), block_dim=NUM_THREADS)
+        rt[].torch_stream(_int(s, 0)).enqueue_function(func, partial, dst, grid_dim=total, block_dim=THREADS)
     else:
         var rt = runtime.downcast_value_ptr[CPURuntime]()
 
@@ -384,6 +389,17 @@ def _pose_retr_py[gpu: Bool](runtime: PythonObject, s: PythonObject, t: PythonOb
     return Python.none()
 
 
+def _pose_solve_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """CPU only. scalars = (0, poses, lm, ep, scalar_lm, scalar_ep); tensors = (host f32, a_src, a_dst, a_sign f32,
+    b_src, b_dst, b_sign f32, a f64 (dim * dim) workspace, x f64 (dim)). Returns whether the factorisation succeeded."""
+    var ok = pose_solve(
+        _dim(t[8], 0), _int(s, 1), _double(s, 2), _double(s, 3), _double(s, 4), _double(s, 5), _f(t[0]),
+        _i(t[1]), _i(t[2]), _f(t[3]), _dim(t[1], 0), _i(t[4]), _i(t[5]), _f(t[6]), _dim(t[4], 0),
+        _ptr[DType.float64](t[7]), _ptr[DType.float64](t[8]),
+    )  # fmt: skip
+    return PythonObject(ok)
+
+
 @export
 def PyInit__vipe_mojo() abi("C") -> PythonObject:
     try:
@@ -408,6 +424,7 @@ def PyInit__vipe_mojo() abi("C") -> PythonObject:
         m.def_function[_evt_py[False]]("evt_cpu")
         m.def_function[_pose_retr_py[True]]("pose_retr_gpu")
         m.def_function[_pose_retr_py[False]]("pose_retr_cpu")
+        m.def_function[_pose_solve_py]("pose_solve_cpu")
         return m.finalize()
     except e:
         abort(t"failed to create _vipe_mojo: {e}")

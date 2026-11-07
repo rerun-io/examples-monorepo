@@ -21,6 +21,11 @@ from std.utils.static_tuple import StaticTuple
 
 comptime NUM_THREADS = 256
 comptime CHANNEL_STRIDE = 32
+comptime PIX_WIDTH = 8
+"""Half channels per 16-byte load on the pix path."""
+comptime PIX_VECS = 16
+"""Loads per pixel on the pix path: C <= 128."""
+comptime PIX_ALIGN = 16
 comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
 comptime I64Ptr = MutPointer[Int64, MutUntrackedOrigin]
 
@@ -186,6 +191,12 @@ def altcorr_index_element[
     var f1 = (((b * frames1 + src) * hf + h1) * wf + w1) * channels
 
     comptime if pix:
+        # As the CUDA kernel: this pixel's fmap1 channels stay in registers (16-byte loads, C <= 128), and each
+        # fmap2 pixel is read 16 bytes at a time. Pixel rows are C * 2 bytes, a multiple of 16 since C % 8 == 0.
+        var f1v = Array[SIMD[dtype, PIX_WIDTH], PIX_VECS](fill=SIMD[dtype, PIX_WIDTH](0))
+        comptime for v in range(PIX_VECS):
+            if v * PIX_WIDTH < channels:
+                f1v[v] = fmap1.load[width=PIX_WIDTH, alignment=PIX_ALIGN](f1 + v * PIX_WIDTH)
         for iy in range(rd + 1):
             for ix in range(rd + 1):
                 var hh = y0 - radius + iy
@@ -195,9 +206,13 @@ def altcorr_index_element[
                     var f2 = (((b * frames2 + dst) * height2 + hh) * width2 + ww) * channels
                     var acc_x: Float32 = 0.0
                     var acc_y: Float32 = 0.0
-                    for c in range(0, channels, 2):
-                        acc_x = acc_x + fmap1[unsafe_offset=f1 + c].cast[DType.float32]() * fmap2[unsafe_offset=f2 + c].cast[DType.float32]()
-                        acc_y = acc_y + fmap1[unsafe_offset=f1 + c + 1].cast[DType.float32]() * fmap2[unsafe_offset=f2 + c + 1].cast[DType.float32]()
+                    comptime for v in range(PIX_VECS):
+                        if v * PIX_WIDTH < channels:
+                            var a = f1v[v].cast[DType.float32]()
+                            var g = fmap2.load[width=PIX_WIDTH, alignment=PIX_ALIGN](f2 + v * PIX_WIDTH).cast[DType.float32]()
+                            comptime for u in range(0, PIX_WIDTH, 2):
+                                acc_x = acc_x + a[u] * g[u]
+                                acc_y = acc_y + a[u + 1] * g[u + 1]
                     s = acc_x + acc_y
                 _bilinear_add(corr, base, plane, rd, iy, ix, s, dx, dy)
     else:

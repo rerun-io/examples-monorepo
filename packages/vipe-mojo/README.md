@@ -17,9 +17,11 @@ The four functions MetricTrail calls, with vipe_ext's signatures (calls in one p
 | `slam_ext.ba_extended` | 1,549 | every option: `motion_only`, `optimize_intrinsics`, `compute_energy`, `depth_active`, `alpha` / `disps_sens`, stereo edges (ii == jj) |
 
 `ba_extended` is `ba_cuda_impl` line for line. The CUDA kernels reduce with one 256-thread block per edge
-(`blockReduce`); the Mojo kernels write each thread's running sums to a scratch row and fold them in the
-same tree, so the summation order is CUDA's and there are no float atomics. The pose system is assembled
-and solved in float64 like the extension's Eigen `SimplicialLLT`, densely with PyTorch's Cholesky; a failed factorisation gives a zero step, as in the extension.
+(`blockReduce`); the Mojo kernels fold the 256 running sums in the same tree (in shared memory for
+`frame_distance` and the scratch-row `block_reduce`), so the summation order is CUDA's and there are no
+float atomics. As in the extension, the reduced sums go to the CPU once per iteration and the pose system
+is assembled and solved there in float64 (Eigen's `SimplicialLLT` in the extension, a dense PyTorch
+Cholesky here); a failed factorisation gives a zero step, as in the extension.
 
 Every other function of the six namespaces raises `NotImplementedError` when called: the backward passes,
 `altcorr_forward`, `ba_extended_v2`, `utils_ext`, `scatter_ext`, `corr_ext`, `grounding_dino_ext`.
