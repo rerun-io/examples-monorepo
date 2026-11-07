@@ -28,6 +28,7 @@ ai-demos lietorch 1.0 build 2):
 """
 
 from std.math import atan
+from std.sys.info import is_apple_gpu
 
 from lie_group import LieGroup
 from lie_linalg import Mat
@@ -41,6 +42,20 @@ comptime PI: Float64 = 3.14159265358979323846
 def from_double[dtype: DType](v: Float64) -> Scalar[dtype]:
     """`Scalar[dtype](v)` for a double constant such as `1.0 / 24.0`: round to double first, then to dtype, as C++ does."""
     return Scalar[dtype](v)
+
+
+@inline(.always)
+def less_than[dtype: DType, //, bound: Float64](x: Scalar[dtype]) -> Bool:
+    """`x < bound` as lietorch evaluates it, with `x` widened to double.
+
+    An Apple GPU has no double: there `x` is compared with `bound` rounded to `dtype` at compile time. The two
+    tests disagree only when `x` lies between `bound` and its rounding, i.e. for at most one float32 value.
+    """
+    comptime if is_apple_gpu():
+        comptime rounded = Scalar[dtype](bound)
+        return x < rounded
+    else:
+        return Float64(x) < bound
 
 
 @inline(.always)
@@ -210,12 +225,12 @@ struct SO3[dt: DType](LieGroup):
         var squared_n = self.x * self.x + self.y * self.y + self.z * self.z
         var w = self.w
         var two_atan_nbyw_by_n: Scalar[Self.dt]
-        if Float64(squared_n) < EPS * EPS:
+        if less_than[EPS * EPS](squared_n):
             var squared_w = w * w
             two_atan_nbyw_by_n = 2 / w - from_double[Self.dt](2.0 / 3.0) * squared_n / (w * squared_w)
         else:
             var n = sqrt_(squared_n)
-            if Float64(abs(w)) < EPS:
+            if less_than[EPS](abs(w)):
                 if w > 0:
                     two_atan_nbyw_by_n = from_double[Self.dt](PI) / n
                 else:
@@ -231,7 +246,7 @@ struct SO3[dt: DType](LieGroup):
         var theta = sqrt_(theta2)
         var imag_factor: Scalar[Self.dt]
         var real_factor: Scalar[Self.dt]
-        if Float64(theta) < EPS:
+        if less_than[EPS](theta):
             var theta4 = theta2 * theta2
             imag_factor = 0.5 - from_double[Self.dt](1.0 / 48.0) * theta2 + from_double[Self.dt](1.0 / 3840.0) * theta4
             real_factor = 1 - from_double[Self.dt](1.0 / 8.0) * theta2 + from_double[Self.dt](1.0 / 384.0) * theta4
@@ -251,7 +266,7 @@ struct SO3[dt: DType](LieGroup):
         var theta = sqrt_(theta2)
         var coef1: Scalar[Self.dt]
         var coef2: Scalar[Self.dt]
-        if Float64(theta) < EPS:
+        if less_than[EPS](theta):
             coef1 = 0.5 - from_double[Self.dt](1.0 / 24.0) * theta2
             coef2 = from_double[Self.dt](1.0 / 6.0) - from_double[Self.dt](1.0 / 120.0) * theta2
         else:
@@ -277,7 +292,7 @@ struct SO3[dt: DType](LieGroup):
         var theta2 = phi.squared_norm()
         var theta = sqrt_(theta2)
         var coef2: Scalar[Self.dt]
-        if Float64(theta) < EPS:
+        if less_than[EPS](theta):
             coef2 = from_double[Self.dt](1.0 / 12.0)
         else:
             var s, c = sincos_(0.5 * theta)

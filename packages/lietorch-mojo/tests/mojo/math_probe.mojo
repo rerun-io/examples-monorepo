@@ -4,8 +4,8 @@
 the production extension. `probe_cpu` / `probe_cuda` map x (n, 1) to
 (n, 4) = [sin, cos, atan, sqrt(|x|)] in x's dtype: `sincos_` and `sqrt_` from
 `lie_math.mojo`, `atan` from `std.math`. `x` and `out` are `data_ptr()`s of
-contiguous tensors on that device. The CUDA path runs on its own stream and
-synchronises before it returns.
+contiguous tensors on that device (Metal GPU addresses for MPS tensors). The
+GPU path runs on its own stream and synchronises before it returns.
 """
 
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, global_idx
@@ -18,7 +18,7 @@ from std.utils.static_tuple import StaticTuple
 
 from layout import ImmTileTensor, MutTileTensor
 
-from launch import NUM_THREADS, InRows, OutRows, in_rows, out_rows
+from launch import GPU_HAS_FLOAT64, NUM_THREADS, InRows, OutRows, in_rows, out_rows
 from lie_math import sincos_, sqrt_
 
 
@@ -60,7 +60,10 @@ def probe_cuda_py(is_f64: PythonObject, n_obj: PythonObject, x_addr: PythonObjec
     var n = Int(py=n_obj)
     if n > 0:
         if Bool(py=is_f64):
-            _probe_cuda[.float64](x_addr, y_addr, n)
+            comptime if GPU_HAS_FLOAT64:
+                _probe_cuda[.float64](x_addr, y_addr, n)
+            else:
+                raise Error("math_probe: this GPU (Metal) has no float64")
         else:
             _probe_cuda[.float32](x_addr, y_addr, n)
     return Python.none()

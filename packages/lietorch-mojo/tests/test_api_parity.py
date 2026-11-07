@@ -14,7 +14,7 @@ Error metric: `parity.max_error`. Tolerances: 1e-5 for float32, 1e-10 for float6
 
 import pytest
 import torch
-from conftest import DEVICES, DTYPES, require_mojo_extension
+from conftest import DEVICES, DTYPES, LIETORCH_BUILD, require_mojo_extension
 
 require_mojo_extension()
 
@@ -56,10 +56,10 @@ def _prefixed(rec: Record, prefix: str, device: str) -> dict[str, Tensor]:
 def test_api_forward_matches(shapes: tuple[tuple[int, ...], tuple[int, ...]], name: str, dtype: torch.dtype, device: str) -> None:
     rec: Record = record(f"/api/forward/{name}/{shapes_id(shapes)}")
     ours: dict[str, Tensor] = api_forward_outputs(lietorch_mojo, name, _prefixed(rec, f"in/{DTYPE_NAMES[dtype]}", device))
-    ref: dict[str, Tensor] = _prefixed(rec, f"out/{device}/{DTYPE_NAMES[dtype]}", device)
+    ref: dict[str, Tensor] = _prefixed(rec, f"out/{LIETORCH_BUILD[device]}/{DTYPE_NAMES[dtype]}", "cpu")
     assert ours.keys() == ref.keys()
     for k, r in ref.items():
-        err: float = max_error(ours[k], r)
+        err: float = max_error(ours[k].cpu(), r)
         assert err <= TOLERANCE[dtype], f"{k}: {err:.3e}"
 
 
@@ -84,7 +84,7 @@ def test_autograd_gradients_match(suite: CompositeSuite, name: str, composite: s
         return weight
 
     ours: list[Tensor] = composite_gradients(lietorch_mojo, name, composite, inputs, stored_weight)
-    ref_device: str = reference_device(dtype, device, name, suite.f32_cpu_reference_groups)  # parity.COMPOSITE_SUITES
+    ref_device: str = reference_device(dtype, LIETORCH_BUILD[device], name, suite.f32_cpu_reference_groups)  # parity.COMPOSITE_SUITES
     ref: list[Tensor] = rec.outputs(f"grad/{ref_device}/{DTYPE_NAMES[dtype]}")
     for i, (o, r) in enumerate(zip(ours, ref, strict=True)):
         err: float = max_error(o.cpu(), r)

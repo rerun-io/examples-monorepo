@@ -21,6 +21,8 @@ import torch
 from conftest import DEVICES, DTYPES
 from torch import Tensor
 
+from lietorch_mojo.metal import gpu_address
+
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 MOJO_DIR: Path = PACKAGE_DIR / "lietorch_mojo" / "mojo"
 PROBE_SOURCE: Path = PACKAGE_DIR / "tests" / "mojo" / "math_probe.mojo"
@@ -57,6 +59,9 @@ def _math_probe(probe: ModuleType, x: Tensor) -> Tensor:
     if xc.is_cuda:
         torch.cuda.synchronize()  # the probe runs on its own stream
         probe.probe_cuda(is_f64, xc.shape[0], xc.data_ptr(), out.data_ptr())
+    elif xc.is_mps:
+        torch.mps.synchronize()
+        probe.probe_cuda(is_f64, xc.shape[0], gpu_address(xc), gpu_address(out))
     else:
         probe.probe_cpu(is_f64, xc.shape[0], xc.data_ptr(), out.data_ptr())
     return out
@@ -128,6 +133,9 @@ def _ulps(out: Tensor, ref: Tensor, dtype: torch.dtype) -> Tensor:
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_math_within_one_ulp(probe: ModuleType, device: str, dtype: torch.dtype) -> None:
     x: Tensor = _probe_inputs(dtype)
+    if device == "mps":
+        # No float64 on Metal: sincos_ above |x| = 1024 is std.math's float32 sin/cos there (lie_math.mojo).
+        x = x[x.abs() <= 1024.0]
     out: Tensor = _math_probe(probe, x.to(device)).cpu()
     err: Tensor = _ulps(out, _exact(x), dtype)
     assert torch.isfinite(out).all()
