@@ -86,7 +86,7 @@ def load(path: Path = REFERENCE_FILE) -> dict[str, Record]:
     """Every record in the reference file by entity path (recording properties excluded)."""
     records: dict[str, Record] = {}
     for chunk in RrdReader(path).stream():
-        if chunk.entity_path == "/__properties":
+        if chunk.entity_path.startswith("/__properties"):
             continue
         assert chunk.is_static and chunk.num_rows == 1, chunk.entity_path
         assert chunk.entity_path not in records, f"two chunks for {chunk.entity_path}"
