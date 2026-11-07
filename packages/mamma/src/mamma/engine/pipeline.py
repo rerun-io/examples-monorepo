@@ -6,6 +6,8 @@ No disk writes happen anywhere in this loop; outputs exist only as Rerun logs
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -59,11 +61,62 @@ class PipelineStats:
     """Total wall time of the loop (excluding model construction)."""
     profiler: StageProfiler = field(repr=False)
     """Per-stage timing breakdown."""
+    decode_backend: str
+    """Which decoder produced the frames; see :func:`decode_backend`."""
 
     @property
     def ticks_per_s(self) -> float:
         """Sustained throughput."""
         return self.ticks / self.elapsed_s if self.elapsed_s > 0 else 0.0
+
+
+def decode_backend(reader: TorchCodecMultiVideoReader) -> str:
+    """Name the decoder behind ``reader`` for run summaries.
+
+    NVDEC rejects some streams (HEVC/H.264 4:4:4) and torchcodec then decodes
+    them on the CPU and uploads full frames, an order of magnitude slower; the
+    summary says so instead of the run being silently slow.
+    """
+    fallback_count: int = sum(cam.cpu_fallback for cam in reader.video_readers)
+    if fallback_count > 0:
+        return f"torchcodec CPU fallback (NVDEC rejected {fallback_count}/{len(reader.video_readers)} cameras; slow path)"
+    return "NVDEC" if reader.device.startswith("cuda") else "torchcodec CPU"
+
+
+def iter_decoded_chunks(
+    reader: TorchCodecMultiVideoReader,
+    chunk_ranges: list[tuple[int, int]],
+    cam_pool: ThreadPoolExecutor,
+) -> Generator[list[UInt8[torch.Tensor, "b 3 h w"]], None, None]:
+    """Decode ``chunk_ranges`` camera-parallel on ``cam_pool``, one chunk ahead of the consumer.
+
+    Each chunk's per-camera decodes are queued before the previous chunk is
+    handed out, so NVDEC overlaps with model compute. ``cam_pool`` is the
+    caller's persistent pool (one worker per camera); with a ``thread_owned``
+    reader every decoder still runs on its own thread.
+
+    Args:
+        reader: Multiview reader; one ``get_frames_in_range`` per camera per chunk.
+        chunk_ranges: ``[start, stop)`` frame ranges, in order.
+        cam_pool: Executor that dispatches the per-camera decodes.
+
+    Yields:
+        One RGB ``BCHW`` uint8 tensor per camera for each range.
+    """
+
+    def submit(bounds: tuple[int, int]) -> list[Future]:
+        return [cam_pool.submit(cam.get_frames_in_range, bounds[0], bounds[1]) for cam in reader.video_readers]
+
+    pending: list[Future] = submit(chunk_ranges[0]) if chunk_ranges else []
+    try:
+        for chunk_idx in range(len(chunk_ranges)):
+            chunk: list[UInt8[torch.Tensor, "b 3 h w"]] = [future.result() for future in pending]
+            pending = submit(chunk_ranges[chunk_idx + 1]) if chunk_idx + 1 < len(chunk_ranges) else []
+            yield chunk
+    finally:
+        # A consumer that stops early (exception, generator close) drops the queued chunk.
+        for future in pending:
+            future.cancel()
 
 
 class StreamingPipeline:
@@ -98,8 +151,8 @@ class StreamingPipeline:
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int | None = None, timing_doc: bool = False) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats.
 
-        Decode runs one chunk ahead on background threads (one per camera)
-        so NVDEC overlaps with model compute; wall time approaches
+        Decode runs one chunk ahead on a persistent pool (one worker per
+        camera) so NVDEC overlaps with model compute; wall time approaches
         ``max(decode, compute)`` instead of their sum.
 
         By default the run covers the sequence's calibrated window
@@ -109,8 +162,6 @@ class StreamingPipeline:
         clamped to ``reader.frame_cnt`` so a short video can't overrun.
         """
         import time
-        from concurrent.futures import Future, ThreadPoolExecutor
-        from itertools import repeat
 
         profiler: StageProfiler = StageProfiler()
         self.logger.setup(timing_doc=timing_doc)
@@ -128,41 +179,14 @@ class StreamingPipeline:
             (s, min(s + chunk_size, frame_count)) for s in range(start_frame, frame_count, chunk_size)
         ]
 
-        def decode_chunk(bounds: tuple[int, int]) -> list[UInt8[torch.Tensor, "b 3 h w"]]:
-            with ThreadPoolExecutor(max_workers=len(self.reader.video_readers)) as cam_pool:
-                return list(
-                    cam_pool.map(
-                        lambda reader, b: reader.get_frames_in_range(b[0], b[1]),
-                        self.reader.video_readers,
-                        repeat(bounds),
-                    )
-                )
-
-        def chunk_iter():
-            prefetcher = ThreadPoolExecutor(max_workers=1)
-            try:
-                pending_chunk: Future | None = prefetcher.submit(decode_chunk, chunk_ranges[0]) if chunk_ranges else None
-                for chunk_idx in range(len(chunk_ranges)):
-                    assert pending_chunk is not None
-                    chunk = pending_chunk.result()
-                    pending_chunk = (
-                        prefetcher.submit(decode_chunk, chunk_ranges[chunk_idx + 1])
-                        if chunk_idx + 1 < len(chunk_ranges)
-                        else None
-                    )
-                    yield chunk_ranges[chunk_idx][0], chunk
-            finally:
-                # finally (not fallthrough) so a consumer exception closing this
-                # generator still releases the prefetch thread.
-                prefetcher.shutdown(wait=False, cancel_futures=True)
-
         # Fit + its logging run one tick deep on a worker: fit(t) overlaps
         # track/landmarks(t+1) — fit feeds nothing upstream. With a collector
         # (validation) the tail is awaited inline to keep results exact-ordered.
         fit_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fit")
+        cam_pool = ThreadPoolExecutor(max_workers=len(self.reader.video_readers), thread_name_prefix="decode")
         pending_fit: Future | None = None
         try:
-            for _chunk_start, chunk in chunk_iter():
+            for chunk in iter_decoded_chunks(self.reader, chunk_ranges, cam_pool):
                 chunk_len: int = min(int(video.shape[0]) for video in chunk)
                 for local_idx in range(chunk_len):
                     frames: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in chunk]
@@ -226,22 +250,18 @@ class StreamingPipeline:
                     pending_fit.result()
                 self.logger.flush()
         finally:
-            # The in-process prefetcher releases its own pool in chunk_iter's
-            # finally; here we only join the fit worker. wait=True: an in-flight
-            # fit finishes in ~ms; a non-daemon worker left running would
-            # otherwise block interpreter exit.
+            # wait=True: an in-flight fit finishes in ~ms and an in-flight chunk
+            # decode in ~1 s; non-daemon workers left running would block
+            # interpreter exit, and close() must not shut a reader mid-decode.
+            cam_pool.shutdown(wait=True, cancel_futures=True)
             fit_worker.shutdown(wait=True, cancel_futures=True)
 
         elapsed: float = time.perf_counter() - start
-        return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler)
+        return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler, decode_backend=decode_backend(self.reader))
 
     def close(self) -> None:
-        """No-op retained for API symmetry.
-
-        The in-process prefetcher owns its ``ThreadPoolExecutor`` and releases it
-        in ``chunk_iter``'s ``finally`` block, so the pipeline holds no persistent
-        decode resources to free. Kept so existing callers can still ``close()``.
-        """
+        """Stop the reader's per-camera decode threads (NVDEC decoders and their CUDA work)."""
+        self.reader.close()
 
 
 def build_streaming_pipeline(
@@ -285,7 +305,11 @@ def build_streaming_pipeline(
     scaled_cams: list[CameraCalibration] = sequence.scaled_cameras(resize_hw)
     # hires_crops: decode at native resolution; the pipeline downscales to
     # resize_hw per tick for tracking/logging and crops landmarks from native.
-    reader = TorchCodecMultiVideoReader(list(decode_sequence.video_paths), device=device, resize_hw=None if hires_crops else resize_hw)
+    # thread_owned: CUDA (NVDEC) decoders are thread-affine, so each camera's
+    # decoder is created and always advanced on its own thread.
+    reader = TorchCodecMultiVideoReader(
+        list(decode_sequence.video_paths), device=device, resize_hw=None if hires_crops else resize_hw, thread_owned=True
+    )
     logger = StreamLogger(sequence, resize_hw=resize_hw, seg_stride=seg_stride)
 
     tracker: MultiViewTracker | None = None

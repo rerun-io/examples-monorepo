@@ -205,6 +205,7 @@ def main(config: DumpConfig) -> int:
     pipeline.logger.flush()
     pipeline.close()
     print(f"pipeline: {stats.ticks} ticks in {stats.elapsed_s:.1f}s ({stats.ticks_per_s:.1f} ticks/s)")
+    print(f"decode: {stats.decode_backend}")
     print(stats.profiler.report())
 
     config.out_dir.mkdir(parents=True, exist_ok=True)
@@ -275,6 +276,7 @@ def main(config: DumpConfig) -> int:
         "ticks": stats.ticks,
         "elapsed_s": stats.elapsed_s,
         "ticks_per_s": stats.ticks_per_s,
+        "decode_backend": stats.decode_backend,
         "clip_seconds": sequence.frame_count / sequence.fps,
         "stage_totals_s": stats.profiler.totals,
         "stage_counts": stats.profiler.counts,

@@ -58,6 +58,7 @@ def main(config: DemoConfig) -> None:
     )
     stats: PipelineStats = pipeline.run(max_frames=config.max_frames)
     print(f"processed {stats.ticks} ticks x {len(sequence.cameras)} cams in {stats.elapsed_s:.2f}s ({stats.ticks_per_s:.1f} ticks/s)")
+    print(f"decode: {stats.decode_backend}")
     print(stats.profiler.report())
 
 
