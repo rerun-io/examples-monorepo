@@ -119,6 +119,7 @@ def main(config: BenchmarkConfig) -> int:
     print(f"\nBENCHMARK ({stats.ticks} frames x {len(sequence.cameras)} cams @ {sequence.fps:.0f} fps, incl. Rerun logging):")
     print(stats.profiler.report())
     print(f"\n  wall      {stats.elapsed_s:7.2f} s   (clip duration {clip_seconds:.2f} s)")
+    print(f"  decode    {stats.decode_backend}")
     print(f"  throughput {stats.ticks_per_s:6.1f} ticks/s ({cam_fps:.0f} cam-fps); realtime needs {sequence.fps:.0f} ticks/s")
     gate_seconds: float = clip_seconds / gate_fraction
     ok: bool = stats.elapsed_s <= gate_seconds

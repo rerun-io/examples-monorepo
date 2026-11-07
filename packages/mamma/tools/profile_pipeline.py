@@ -78,6 +78,7 @@ def main(config: ProfileConfig) -> None:
 
     ticks: int = stats.ticks
     print(f"\nprofiled {ticks} ticks in {stats.elapsed_s:.2f}s ({1000 * stats.elapsed_s / ticks:.1f} ms/tick wall)")
+    print(f"decode: {stats.decode_backend}")
 
     # ── Per-stage rollup from record_function ranges ──
     events = prof.key_averages()
