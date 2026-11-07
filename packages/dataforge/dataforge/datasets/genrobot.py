@@ -321,9 +321,12 @@ class DasEgoDataset(DataforgeDataset[DasEgoConfigT, HubEpisode]):
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
         sidecar: Path = self.sidecar(identity)
         if not pending and sidecar.is_file():
+            self.drop_stale_raw(source, targets, sidecar)
             return targets[paths.BASE_LAYER]
         if not self.needs_mcap(identity, force=force):
-            return self.convert_fetched(identity, source, None, targets, pending, force=force)
+            base: Path = self.convert_fetched(identity, source, None, targets, pending, force=force)
+            self.drop_stale_raw(source, targets, sidecar)
+            return base
         with self.timer.stage("fetch"):
             mcap: Path = self.fetch(source)
         try:
@@ -335,6 +338,18 @@ class DasEgoDataset(DataforgeDataset[DasEgoConfigT, HubEpisode]):
         if not self.config.keep_raw:
             mcap.unlink()
         return base
+
+    def drop_stale_raw(self, source: HubEpisode, targets: dict[str, Path], sidecar: Path) -> None:
+        """Delete an MCAP an interrupted run left behind, once the episode's base and sidecar are checked.
+
+        A resumed episode whose MCAP layers were already published never fetches, so the fetch path's deletion
+        does not see the file.
+        """
+        raw: Path = self.config.root / source.path
+        if self.config.keep_raw or not raw.is_file():
+            return
+        require_published({**targets, "sidecar": sidecar}, [paths.BASE_LAYER, "sidecar"])
+        raw.unlink()
 
     def convert_fetched(
         self, identity: SequenceIdentity, source: HubEpisode, mcap: Path | None, targets: dict[str, Path], pending: list[str], *, force: bool

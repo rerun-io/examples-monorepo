@@ -215,3 +215,20 @@ def test_exposure_is_read_only_from_fields_the_camera_schema_carries() -> None:
     assert exposure_fields(old) == (), "older firmware ships no exposure fields"
     new: pa.StructType = pa.struct([("data", pa.binary()), *((name, pa.float64()) for name in EXPOSURE_FIELDS)])
     assert exposure_fields(new) == EXPOSURE_FIELDS
+
+
+def test_a_finished_episode_drops_an_mcap_left_by_an_interrupted_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataforge import paths
+
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset: GenHumanEgoDataset = GenHumanEgoDataset(GenHumanEgoConfig(root=tmp_path / "raw"))
+    item: HubEpisode = episode("home/wash", "cd", 0.001)
+    identity: SequenceIdentity = SequenceIdentity(dataset.config.name, (item.uuid,))
+    for target in [*dataset.targets(identity).values(), dataset.sidecar(identity)]:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"layer")
+    stale: Path = tmp_path / "raw" / item.path
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"mcap")
+    assert dataset.convert(identity, item, force=False) == dataset.targets(identity)[paths.BASE_LAYER]
+    assert not stale.exists(), "every layer is published, so the raw MCAP goes"
