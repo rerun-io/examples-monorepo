@@ -114,9 +114,10 @@ class NvdecStreamList(StreamList):
 
 
 def make_stream_list(streams_config: Any) -> StreamList:
-    """NVDEC streams for a single video file under ViPE's ``raw_mp4_stream`` config, else ViPE's own list."""
+    """NVDEC streams for a single video file under ViPE's ``raw_mp4_stream`` config, else ViPE's own list (also without CUDA)."""
     path: Path = Path(str(streams_config.base_path))
-    if streams_config.instance.endswith("RawMP4StreamList") and path.is_file() and not streams_config.cached:
+    nvdec: bool = torch.cuda.is_available() and streams_config.instance.endswith("RawMP4StreamList")
+    if nvdec and path.is_file() and not streams_config.cached:
         return NvdecStreamList(path, range(streams_config.frame_start, streams_config.frame_end, streams_config.frame_skip))
     return StreamList.make(streams_config)
 

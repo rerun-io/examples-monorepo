@@ -27,6 +27,15 @@ find vipe/metrictrail/dpvo -name __pycache__ -prune -exec rm -rf {} +
 rm -rf vipe/priors/depth/moge2
 # Upstream ships Depth Anything 3's DINOv2 without __init__.py, so find_packages() drops it and pipeline=dav3 fails.
 touch vipe/priors/depth/dav3/model/dinov2/__init__.py
+
+if [[ "$(uname)" == Darwin ]]; then
+    # macOS: no CUDA. setup.py builds no vipe_ext (patch 0007); vipe_mojo carries the kernels.
+    USE_SYSTEM_EIGEN=1 python -m pip install . --no-deps --no-build-isolation -vv
+    test ! -e "$SP_DIR"/vipe_ext*.so
+    test ! -e "$SP_DIR"/vipe/priors/depth/moge2
+    exit 0
+fi
+
 export CUDA_HOME="$BUILD_PREFIX"
 # Ampere (the 3060) and Blackwell RTX 5090, plus compute_120 PTX for newer GPUs (the GB10 JITs it).
 export TORCH_CUDA_ARCH_LIST="8.6;12.0+PTX"

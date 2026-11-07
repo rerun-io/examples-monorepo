@@ -1,0 +1,49 @@
+diff --git a/setup.py b/setup.py
+index 065fd96..10a53f5 100644
+--- a/setup.py
++++ b/setup.py
+@@ -12,8 +12,6 @@ try:
+ 
+     cuda_version = torch.version.cuda
+ 
+-    assert cuda_version is not None, "Pytorch CUDA is required for this installation."
+-
+ except ImportError:
+     raise ValueError("Pytorch not found, please install it first.")
+ 
+@@ -67,12 +65,15 @@ packages = find_packages()
+ setup(
+     packages=packages,
+     include_package_data=True,
++    # [hook] A torch without CUDA (macOS) installs vipe without vipe_ext; vipe.ext then loads vipe_mojo.
+     ext_modules=[
+         CUDAExtension(
+             f"{PACKAGE_NAME}_ext",
+             sources=get_sources(),  # type: ignore
+             extra_compile_args={"cxx": cpp_flags, "nvcc": cuda_flags},  # type: ignore
+         )
+-    ],
++    ]
++    if cuda_version is not None
++    else [],
+     cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True), "build_py": build_py},
+ )
+diff --git a/vipe/ext/__init__.py b/vipe/ext/__init__.py
+index ec0c2ab..59e2539 100644
+--- a/vipe/ext/__init__.py
++++ b/vipe/ext/__init__.py
+@@ -24,7 +24,13 @@ try:
+ 
+     vipe_ext_not_found = False
+ except ImportError:
+-    vipe_ext_not_found = True
++    # [hook] A build without CUDA ships no vipe_ext: the external vipe_mojo kernels stand in when installed.
++    try:
++        import vipe_mojo as _C
++
++        vipe_ext_not_found = False
++    except ImportError:
++        vipe_ext_not_found = True
+ 
+ if vipe_ext_not_found or os.environ.get("VIPE_EXT_JIT", "0") == "1":
+     _C = load(

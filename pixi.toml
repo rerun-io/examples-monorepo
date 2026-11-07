@@ -2528,6 +2528,17 @@ description = "Launch DPVO Gradio web UI"
 [feature.dpvo-osx]
 platforms = ["osx-arm64"]
 
+# MetricTrail's macOS lane, the same way: common + lietorch-mojo + metrictrail on osx-arm64. vipe-src builds without
+# CUDA (recipes/vipe-src patch 0006) and imports vipe_mojo for ViPE's kernels; video decodes through ViPE's OpenCV
+# stream and MoGe-2 runs on monopriors' torch path. The weights live on the NAS, which the Mac does not mount: point
+# the VIPE_*_CHECKPOINT / TORCH_HOME variables at a local copy.
+[feature.metrictrail-osx]
+platforms = ["osx-arm64"]
+
+[feature.metrictrail-osx.pypi-dependencies]
+# vipe-src's OpenEXR binding (vipe.utils.io): conda-forge's openexr-python has no osx-arm64 build.
+openexr = ">=3.4,<3.5"
+
 # ─── slam-evals feature (VSLAM-LAB benchmark → Rerun catalog ingester) ──────
 [feature.slam-evals]
 platforms = ["linux-64", "linux-aarch64"]
@@ -3753,8 +3764,9 @@ description = "Run the Rust author checks for staged Kornia code"
 # ViPE's lietorch re-exports `lietorch_mojo` (recipes/vipe-src patch 0001); the environments compose the
 # `lietorch-mojo` feature (like dpvo), and every task that imports lietorch depends on `lietorch-mojo-build`.
 [feature.metrictrail]
-# linux-aarch64: the DGX Spark (GB10). vipe-src builds CUDA kernels only, so there is no macOS lane yet.
-platforms = ["linux-64", "linux-aarch64"]
+# linux-aarch64: the DGX Spark (GB10) through the cuda feature; osx-arm64: the metrictrail-osx environments only
+# (vipe-src without CUDA, its kernels from vipe-mojo).
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.metrictrail.dependencies]
 python = "3.12.*"
@@ -3765,12 +3777,15 @@ tyro = ">=0.9.1,<0.10"
 # Video input decodes on NVDEC (metrictrail.gpu_video, simplecv TorchCodecVideoReader) instead of ViPE's OpenCV stream.
 # ffmpeg <902 links libjxl 0.11 and dlopen-fails beside 0.12 (as in the dpvo feature).
 torchcodec = "*"
-ffmpeg = { version = ">=8.1", build-number = ">=902" }
+ffmpeg = ">=8.1"
 # The default surface: a sparse colour TSDF (Rust, rayon) fused from every tracked frame, marching-cubes mesh.
 tsdf-rs = { path = "packages/tsdf-rs" }
 # packages/dpvo's CUDA kernels (`_build-dpvo-cuda-kernels`): fastba includes <Eigen/...>; ninja for torch's extension build.
 eigen = ">=3.4.0,<3.5"
 ninja = ">=1.13.2,<2"
+
+[feature.metrictrail.target.linux.dependencies]
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
@@ -3834,6 +3849,13 @@ depends-on = ["lietorch-mojo-build", "vipe-mojo-build"]
 cwd = "packages/vipe-mojo"
 description = "Build and test vipe_mojo against the frozen vipe_ext references (CPU always, CUDA/MPS when present)"
 
+# dpvo.mojo_backend's depth-prior parity reference: the prior kernel lives in ViPE's DPVO extension until dpvo/metric-core.
+[feature.metrictrail.tasks.dpvo-freeze-metric-prior-references]
+cmd = "python tests/freeze_metric_prior_references.py"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/dpvo"
+description = "Freeze MetricTrail's BA with the depth prior (ViPE's cuda_ba) into packages/dpvo/tests/fixtures/metric_prior_references.rrd"
+
 [feature.metrictrail.tasks.metrictrail-check-kernels]
 cmd = "python tools/check_kernels.py"
 depends-on = ["_build-dpvo-cuda-kernels"]
@@ -3845,13 +3867,6 @@ cmd = "python tools/run.py"
 depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
 cwd = "packages/metrictrail"
 description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
-
-# dpvo.mojo_backend's depth-prior parity reference: the prior kernel lives in ViPE's DPVO extension until dpvo/metric-core.
-[feature.metrictrail.tasks.dpvo-freeze-metric-prior-references]
-cmd = "python tests/freeze_metric_prior_references.py"
-depends-on = ["lietorch-mojo-build"]
-cwd = "packages/dpvo"
-description = "Freeze MetricTrail's BA with the depth prior (ViPE's cuda_ba) into packages/dpvo/tests/fixtures/metric_prior_references.rrd"
 
 [feature.metrictrail.tasks.metrictrail-log-run]
 cmd = "python tools/log_run.py"
@@ -4262,6 +4277,19 @@ metrictrail-dev = { features = [
     "metrictrail",
     "dev",
 ], solve-group = "metrictrail", no-default-feature = true }
+metrictrail-osx = { features = [
+    "common",
+    "lietorch-mojo",
+    "metrictrail",
+    "metrictrail-osx",
+], solve-group = "metrictrail-osx", no-default-feature = true }
+metrictrail-osx-dev = { features = [
+    "common",
+    "lietorch-mojo",
+    "metrictrail",
+    "metrictrail-osx",
+    "dev",
+], solve-group = "metrictrail-osx", no-default-feature = true }
 dataforge = { features = [
     "common",
     "dataforge",

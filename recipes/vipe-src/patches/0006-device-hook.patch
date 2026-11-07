@@ -1,0 +1,518 @@
+diff --git a/vipe/metrictrail/calibration/processor.py b/vipe/metrictrail/calibration/processor.py
+index d99d7bc..04d184a 100644
+--- a/vipe/metrictrail/calibration/processor.py
++++ b/vipe/metrictrail/calibration/processor.py
+@@ -51,6 +51,7 @@ from .fallback import (
+ )
+ from .initializer import estimate_initial_k
+ from .protocol import SCHEMA, plausible_k4, validate_k4
++from vipe.utils.device import device as vipe_device
+ 
+ #: Largest distance (in 1/255 units) of ``rgb * 255`` from an integer accepted by
+ #: the metrictrail RGB normalisation.
+@@ -313,7 +314,7 @@ def calibrate_shared_k(
+     started = time.perf_counter()
+     cfg = _as_config(config)
+     require_rgb_only(stream)
+-    device = torch.device("cuda") if device is None else torch.device(device)
++    device = vipe_device() if device is None else torch.device(device)
+     if device.type == "cuda" and device.index is not None:
+         torch.cuda.set_device(device)
+     apply_calibration_determinism(seed=cfg.seed, disable_tf32=cfg.disable_tf32)
+diff --git a/vipe/metrictrail/depth_producer.py b/vipe/metrictrail/depth_producer.py
+index 69ae629..21e77ae 100644
+--- a/vipe/metrictrail/depth_producer.py
++++ b/vipe/metrictrail/depth_producer.py
+@@ -227,6 +227,52 @@ class CudaOps:
+         return float(start.elapsed_time(end)) / 1000.0
+ 
+ 
++
++class _HostEvent:
++    """A timing event for a device without CUDA streams: the host clock after the device drains."""
++
++    def __init__(self, device: torch.device) -> None:
++        self.device = device
++        self.seconds = 0.0
++
++    def record(self, stream: Any = None) -> None:
++        if self.device.type == "mps":
++            torch.mps.synchronize()
++        self.seconds = time.perf_counter()
++
++    def elapsed_time(self, end: _HostEvent) -> float:
++        return (end.seconds - self.seconds) * 1000.0
++
++
++class _HostStream:
++    def wait_event(self, event: Any) -> None:
++        pass
++
++
++class HostOps(CudaOps):
++    """:class:`CudaOps` for MPS and CPU: one in-order queue, so stream waits are no-ops."""
++
++    def current_stream(self) -> Any:
++        return _HostStream()
++
++    def new_stream(self) -> Any:
++        return _HostStream()
++
++    def event(self) -> Any:
++        return _HostEvent(self.device)
++
++    @contextmanager
++    def producer_context(self, stream: Any) -> Iterator[None]:
++        with torch.inference_mode():
++            yield
++
++    def record_stream(self, tensor: torch.Tensor, stream: Any) -> None:
++        pass
++
++    def synchronize(self) -> None:
++        if self.device.type == "mps":
++            torch.mps.synchronize()
++
+ _SENTINEL = object()
+ 
+ PrepareFn = Callable[[int, Any, bool], PreparedFrame]
+diff --git a/vipe/metrictrail/pipeline.py b/vipe/metrictrail/pipeline.py
+index 75d8e30..31ecdb9 100644
+--- a/vipe/metrictrail/pipeline.py
++++ b/vipe/metrictrail/pipeline.py
+@@ -84,6 +84,7 @@ from .raster import prepare_input_raster
+ from .slam import DPVOSLAMOutput, DPVOSLAMSystem
+ from .streams import full_sequence_stream, tracking_stride_stream
+ from .torch_state import preserve_torch_state
++from vipe.utils.device import device as vipe_device
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -233,7 +234,7 @@ class MetricTrailPipeline(Pipeline):
+         self.out_cfg = self.config.output
+         self.out_path = Path(self.out_cfg.path)
+         self.out_path.mkdir(exist_ok=True, parents=True)
+-        self.device = torch.device("cuda")
++        self.device = vipe_device()
+         #: Post-SLAM hooks (extension point), run in order; see :class:`PostSLAMHook`.
+         self.post_slam_hooks: list[PostSLAMHook] = []
+         if self.optional_cfg.loop_closure.enabled:
+diff --git a/vipe/metrictrail/raster.py b/vipe/metrictrail/raster.py
+index 509b6ee..6845b1e 100644
+--- a/vipe/metrictrail/raster.py
++++ b/vipe/metrictrail/raster.py
+@@ -68,6 +68,7 @@ import torch
+ from vipe.streams.base import FrameAttribute, VideoFrame, VideoStream
+ 
+ from .streams import video_orientation
++from vipe.utils.device import device as vipe_device
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -421,7 +422,7 @@ def prepare_input_raster(
+         )
+     target_hw = (int(config.height), int(config.width))
+     device = (
+-        torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
++        torch.device(device) if device is not None else vipe_device()
+     )
+     plan = plan_raster(
+         source_hw,
+diff --git a/vipe/metrictrail/slam.py b/vipe/metrictrail/slam.py
+index 0c4ae4a..9d0d404 100644
+--- a/vipe/metrictrail/slam.py
++++ b/vipe/metrictrail/slam.py
+@@ -74,6 +74,7 @@ from .config import METRIC_DEPTH_RANGE_M, MetricTrailSLAMConfig, resolve_dpvo_bu
+ from .depth_producer import (
+     TRACKING_OK,
+     CudaOps,
++    HostOps,
+     PreparedFrame,
+     jsonable,
+     poses7_xyzw_to_c2w,
+@@ -791,7 +792,7 @@ class DPVOSLAMSystem:
+         self.device = torch.device(device)
+         self.config = _slam_config(config)
+         self.model_cache = model_cache if model_cache is not None else ModelCache()
+-        self.ops = CudaOps(self.device)
++        self.ops = CudaOps(self.device) if self.device.type == "cuda" else HostOps(self.device)
+         if self.config.visualize:
+             logger.warning("slam.visualize is ignored: the MetricTrail DPVO tracker has no viewer")
+ 
+diff --git a/vipe/slam/components/buffer.py b/vipe/slam/components/buffer.py
+index e6f8ab5..030e9da 100644
+--- a/vipe/slam/components/buffer.py
++++ b/vipe/slam/components/buffer.py
+@@ -42,6 +42,7 @@ from ..interface import SLAMMap
+ from ..maths import geom
+ from ..maths.retractor import DenseDispRetractor, IntrinsicsRetractor, PoseRetractor, RigRotationOnlyRetractor
+ from .sparse_tracks import SparseTracks
++from vipe.utils.device import device as vipe_device
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -58,7 +59,7 @@ class GraphBuffer:
+         ba_config: DictConfig,
+         sparse_tracks: SparseTracks,
+         camera_type: CameraType,
+-        device: torch.device = torch.device("cuda"),
++        device: torch.device = vipe_device(),
+     ):
+         if cross_view_idx is None:
+             cross_view_idx = [(i + 1) % n_views for i in range(n_views)]
+diff --git a/vipe/slam/components/factor_graph.py b/vipe/slam/components/factor_graph.py
+index 6c34815..a70a3ef 100644
+--- a/vipe/slam/components/factor_graph.py
++++ b/vipe/slam/components/factor_graph.py
+@@ -29,6 +29,7 @@ from vipe.ext.lietorch import SE3
+ 
+ from ..networks.droid_net import AltCorrBlock, CorrBlock, DroidNet
+ from .buffer import GraphBuffer
++from vipe.utils.device import device as vipe_device
+ 
+ # Disable all future warnings (mainly torch.cuda.amp related)
+ warnings.simplefilter(action="ignore", category=FutureWarning)
+@@ -116,7 +117,7 @@ class FactorGraph:
+         ii, jj, w = ii[ix], jj[ix], w[ix]
+         return np.stack([ii, jj], axis=1), w
+ 
+-    @torch.amp.autocast("cuda", enabled=True)
++    @torch.amp.autocast(vipe_device().type, enabled=True)
+     def add_factors(self, ii, jj, remove=False):
+         """add edges to factor graph"""
+ 
+@@ -154,7 +155,7 @@ class FactorGraph:
+             inp = self.buffer.inps[pi, qi][None]
+             self.inp = inp if self.inp is None else torch.cat([self.inp, inp], 1)
+ 
+-        with torch.cuda.amp.autocast(enabled=False):
++        with torch.amp.autocast(vipe_device().type, enabled=False):
+             target, _ = self.buffer.reproject_dense_disp(ii, jj)
+             target = target[None]
+             weight = torch.zeros_like(target)
+@@ -172,7 +173,7 @@ class FactorGraph:
+         self.target = torch.cat([self.target, target], 1)
+         self.weight = torch.cat([self.weight, weight], 1)
+ 
+-    @torch.amp.autocast("cuda", enabled=True)
++    @torch.amp.autocast(vipe_device().type, enabled=True)
+     def rm_factors(self, mask: torch.Tensor, store: bool = False):
+         """drop edges from factor graph"""
+ 
+@@ -201,7 +202,7 @@ class FactorGraph:
+         self.target = self.target[:, ~exp_mask]
+         self.weight = self.weight[:, ~exp_mask]
+ 
+-    @torch.amp.autocast("cuda", enabled=True)
++    @torch.amp.autocast(vipe_device().type, enabled=True)
+     def rm_second_newest_keyframe(self, ix: int):
+         """
+         Remove the keyframe[ix] from the video and graph.
+@@ -262,7 +263,7 @@ class FactorGraph:
+         self.ii_inac = self.ii_inac - count
+         self.jj_inac = self.jj_inac - count
+ 
+-    @torch.amp.autocast("cuda", enabled=True)
++    @torch.amp.autocast(vipe_device().type, enabled=True)
+     def update(
+         self,
+         t0: int | None = None,  # will limit pose update to >= t0 if provided
+@@ -285,7 +286,7 @@ class FactorGraph:
+             t1 = int(max(self.ii.max().item(), self.jj.max().item()) + 1)
+ 
+         # motion features
+-        with torch.cuda.amp.autocast(enabled=False):
++        with torch.amp.autocast(vipe_device().type, enabled=False):
+             coords1, _ = self.buffer.reproject_dense_disp(self.ii, self.jj)
+             coords1 = coords1[None]  # NV, ht, wd, 2 -> 1, NV, ht, wd, 2
+             # Prepare motion features:
+@@ -306,7 +307,7 @@ class FactorGraph:
+         )
+         weight[:, self.buffer.masks[pi, qi]] = 0.0
+ 
+-        with torch.cuda.amp.autocast(enabled=False):
++        with torch.amp.autocast(vipe_device().type, enabled=False):
+             self.target = coords1 + delta.to(dtype=torch.float)
+             self.weight = weight.to(dtype=torch.float)
+             # Overwrite damping with newly computed values
+@@ -348,7 +349,7 @@ class FactorGraph:
+ 
+         self.age += 1
+ 
+-    @torch.amp.autocast("cuda", enabled=False)
++    @torch.amp.autocast(vipe_device().type, enabled=False)
+     def update_batch(
+         self,
+         itrs: int,
+@@ -374,7 +375,7 @@ class FactorGraph:
+         corr_op = AltCorrBlock(self.buffer.flattened_fmaps[None])
+ 
+         for _ in range(steps):
+-            with torch.cuda.amp.autocast(enabled=False):
++            with torch.amp.autocast(vipe_device().type, enabled=False):
+                 coords1, _ = self.buffer.reproject_dense_disp(self.ii, self.jj)
+                 coords1 = coords1[None]  # NV, ht, wd, 2 -> 1, NV, ht, wd, 2
+                 motn = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
+@@ -391,7 +392,7 @@ class FactorGraph:
+                 corr1 = corr_op(coords1[:, v_exp], dis, djs)
+                 dis, dixs = torch.unique(dis, return_inverse=True)
+ 
+-                with torch.cuda.amp.autocast(enabled=True):
++                with torch.amp.autocast(vipe_device().type, enabled=True):
+                     net, delta, weight, damping, _ = self.net.update.forward(  # type: ignore
+                         self.f_net[:, v_exp],
+                         self.buffer.inps[pis, qis][None],
+diff --git a/vipe/slam/components/motion_filter.py b/vipe/slam/components/motion_filter.py
+index fb4af3c..8f3f20b 100644
+--- a/vipe/slam/components/motion_filter.py
++++ b/vipe/slam/components/motion_filter.py
+@@ -22,6 +22,7 @@ import torch
+ 
+ from ..networks.droid_net import CorrBlock, DroidNet
+ from .sparse_tracks import SparseTracks
++from vipe.utils.device import device as vipe_device
+ 
+ 
+ class MotionFilter:
+@@ -36,7 +37,7 @@ class MotionFilter:
+         droid_net: DroidNet,
+         sparse_tracks: SparseTracks,
+         thresh: float,
+-        device: torch.device = torch.device("cuda"),
++        device: torch.device = vipe_device(),
+     ):
+         self.net = droid_net
+         self.thresh = thresh
+@@ -53,7 +54,7 @@ class MotionFilter:
+         )
+         return torch.stack([x, y], dim=-1)
+ 
+-    @torch.amp.autocast("cuda", enabled=True)
++    @torch.amp.autocast(vipe_device().type, enabled=True)
+     @torch.no_grad()
+     def check(self, images: torch.Tensor, buffer_masks: torch.Tensor | None) -> bool:
+         """
+diff --git a/vipe/slam/components/sparse_tracks/__init__.py b/vipe/slam/components/sparse_tracks/__init__.py
+index a3de902..b919fe9 100644
+--- a/vipe/slam/components/sparse_tracks/__init__.py
++++ b/vipe/slam/components/sparse_tracks/__init__.py
+@@ -21,6 +21,7 @@ from omegaconf.dictconfig import DictConfig
+ 
+ from vipe.streams.base import VideoFrame
+ from vipe.utils.depth import bilinear_splatting_inplace
++from vipe.utils.device import device as vipe_device
+ 
+ 
+ class SparseTracks(ABC):
+@@ -109,8 +110,8 @@ class SparseTracks(ABC):
+             uv_flow = self.get_observations(t_vidx, t_fidx, kp_idx) - uv_source
+ 
+             bilinear_splatting_inplace(
+-                uv_flow.cuda() * uv_factor,
+-                uv_source.cuda() * uv_factor,
++                uv_flow.to(vipe_device()) * uv_factor,
++                uv_source.to(vipe_device()) * uv_factor,
+                 disp_value[term_idx],
+                 disp_weight[term_idx],
+             )
+diff --git a/vipe/slam/interface.py b/vipe/slam/interface.py
+index 4cedf28..4614e46 100644
+--- a/vipe/slam/interface.py
++++ b/vipe/slam/interface.py
+@@ -22,6 +22,7 @@ import torch
+ from vipe.ext import utils_ext
+ from vipe.ext.lietorch import SE3
+ from vipe.utils.cameras import CameraType
++from vipe.utils.device import device as vipe_device
+ 
+ 
+ @dataclass(kw_only=True)
+@@ -153,7 +154,7 @@ class SLAMMap:
+         all_xyz = all_xyz @ target_pose_mat[:3, :3].T + target_pose_mat[:3, 3]
+ 
+         xyz_h = torch.cat(
+-            [all_xyz, torch.ones(all_xyz.shape[0], device="cuda").unsqueeze(-1)],
++            [all_xyz, torch.ones(all_xyz.shape[0], device=vipe_device()).unsqueeze(-1)],
+             dim=-1,
+         )
+         disp = 1.0 / all_xyz[:, 2]
+@@ -166,14 +167,14 @@ class SLAMMap:
+         uu, vv, depth = uu[in_mask], vv[in_mask], disp[in_mask].reciprocal()
+ 
+         if not infill:
+-            target_depth = torch.zeros(target_size, device="cuda")
++            target_depth = torch.zeros(target_size, device=vipe_device())
+             target_depth[vv.floor().long(), uu.floor().long()] = depth
+         else:
+             tree = torch.stack((uu, vv), dim=-1)
+             query = torch.stack(
+                 torch.meshgrid(
+-                    torch.arange(target_size[1], device="cuda").float() + 0.5,
+-                    torch.arange(target_size[0], device="cuda").float() + 0.5,
++                    torch.arange(target_size[1], device=vipe_device()).float() + 0.5,
++                    torch.arange(target_size[0], device=vipe_device()).float() + 0.5,
+                     indexing="xy",
+                 ),
+                 dim=-1,
+diff --git a/vipe/slam/networks/droid_net.py b/vipe/slam/networks/droid_net.py
+index 8fceba7..7c5d35a 100644
+--- a/vipe/slam/networks/droid_net.py
++++ b/vipe/slam/networks/droid_net.py
+@@ -28,6 +28,7 @@ import torch.nn.functional as F
+ from vipe.ext import droid_net_ext
+ from vipe.ext.scatter import scatter_mean
+ from vipe.utils.model_cache import ModelCache
++from vipe.utils.device import device as vipe_device
+ 
+ 
+ class CorrSampler(torch.autograd.Function):
+@@ -541,14 +542,14 @@ class DroidNet(nn.Module):
+         )
+         self.load_weights()
+ 
+-    @torch.amp.autocast("cuda", enabled=True)
++    @torch.amp.autocast(vipe_device().type, enabled=True)
+     def encode_features(self, images: torch.Tensor):
+         """image (torch.Tensor): BCHW image RGB 0-1"""
+         # (1, B, C, H, W) - (x, x, 3, 1, 1)
+         images = (images[None] - self.image_mean) / self.image_std
+         return self.fnet(images).squeeze(0)
+ 
+-    @torch.amp.autocast("cuda", enabled=True)
++    @torch.amp.autocast(vipe_device().type, enabled=True)
+     def encode_context(self, images: torch.Tensor):
+         """image (torch.Tensor): BCHW image RGB 0-1"""
+         # (1, B, C, H, W) - (x, x, 3, 1, 1)
+diff --git a/vipe/streams/base.py b/vipe/streams/base.py
+index 0cf590d..25ba221 100644
+--- a/vipe/streams/base.py
++++ b/vipe/streams/base.py
+@@ -30,6 +30,7 @@ from vipe.config import BaseConfigSchema
+ from vipe.ext.lietorch import SE3
+ from vipe.utils.cameras import CameraType
+ from vipe.utils.logging import pbar
++from vipe.utils.device import device as vipe_device
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -148,11 +149,11 @@ class VideoFrame:
+ 
+     def cuda(self) -> "VideoFrame":
+         def map_cuda(x):
+-            return x.cuda() if x is not None else None
++            return x.to(vipe_device()) if x is not None else None
+ 
+         return VideoFrame(
+             raw_frame_idx=self.raw_frame_idx,
+-            rgb=self.rgb.cuda(),
++            rgb=self.rgb.to(vipe_device()),
+             mask=map_cuda(self.mask),
+             instance=map_cuda(self.instance),
+             instance_phrases=self.instance_phrases,
+@@ -341,7 +342,7 @@ class MultiviewVideoList(Iterable[VideoStream]):
+         return self._name
+ 
+     def rig(self) -> SE3:
+-        return self._rig.cuda()
++        return self._rig.to(vipe_device())
+ 
+     def num_frames(self) -> int:
+         return self._len
+@@ -383,7 +384,7 @@ class CachedVideoStream(VideoStream):
+         assert index < len(self)
+         n_iters_needed = index - len(self.data) + 1
+         if n_iters_needed <= 0:
+-            return self.data[index].cuda()
++            return self.data[index].to(vipe_device())
+ 
+         itr = range(n_iters_needed)
+         if n_iters_needed > self.DISPLAY_THRESH:
+@@ -408,7 +409,7 @@ class CachedVideoStream(VideoStream):
+             self.iterator = None
+             torch.cuda.empty_cache()
+ 
+-        return self.data[index].cuda()
++        return self.data[index].to(vipe_device())
+ 
+     def __iter__(self):
+         for idx in range(len(self)):
+@@ -512,7 +513,7 @@ class AsyncCachedVideoStream(VideoStream):
+             if index >= len(self.data):
+                 raise IndexError(f"Frame index {index} is unavailable in {self._name}; cached {len(self.data)} frames")
+             frame = self.data[index]
+-        return frame.cuda()
++        return frame.to(vipe_device())
+ 
+     def __iter__(self):
+         for idx in range(len(self)):
+diff --git a/vipe/streams/frame_dir_stream.py b/vipe/streams/frame_dir_stream.py
+index f51bbdc..332b2bc 100644
+--- a/vipe/streams/frame_dir_stream.py
++++ b/vipe/streams/frame_dir_stream.py
+@@ -19,6 +19,7 @@ import cv2
+ import torch
+ 
+ from vipe.streams.base import ProcessedVideoStream, StreamList, VideoFrame, VideoStream
++from vipe.utils.device import device as vipe_device
+ 
+ 
+ class FrameDirStream(VideoStream):
+@@ -101,7 +102,7 @@ class FrameDirStream(VideoStream):
+ 
+         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+         frame_rgb = torch.as_tensor(frame).float() / 255.0
+-        frame_rgb = frame_rgb.cuda()
++        frame_rgb = frame_rgb.to(vipe_device())
+ 
+         return VideoFrame(raw_frame_idx=self.current_frame_idx, rgb=frame_rgb)
+ 
+diff --git a/vipe/streams/raw_mp4_stream.py b/vipe/streams/raw_mp4_stream.py
+index 1a4272b..474f6c2 100644
+--- a/vipe/streams/raw_mp4_stream.py
++++ b/vipe/streams/raw_mp4_stream.py
+@@ -19,6 +19,7 @@ import cv2
+ import torch
+ 
+ from vipe.streams.base import ProcessedVideoStream, StreamList, VideoFrame, VideoStream
++from vipe.utils.device import device as vipe_device
+ 
+ 
+ class RawMp4Stream(VideoStream):
+@@ -87,7 +88,7 @@ class RawMp4Stream(VideoStream):
+ 
+         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+         frame_rgb = torch.as_tensor(frame).float() / 255.0
+-        frame_rgb = frame_rgb.cuda()
++        frame_rgb = frame_rgb.to(vipe_device())
+ 
+         return VideoFrame(raw_frame_idx=self.current_frame_idx, rgb=frame_rgb)
+ 
+diff --git a/vipe/utils/device.py b/vipe/utils/device.py
+new file mode 100644
+index 0000000..3370223
+--- /dev/null
++++ b/vipe/utils/device.py
+@@ -0,0 +1,23 @@
++# SPDX-License-Identifier: Apache-2.0
++"""The one device ViPE runs on: CUDA when present, else Apple MPS, else CPU.
++
++``VIPE_DEVICE`` (e.g. ``cpu``, ``mps``, ``cuda:1``) overrides the choice. The result is fixed
++for the process: module-level ``autocast`` decorators read it at import time.
++"""
++
++import functools
++import os
++
++import torch
++
++
++@functools.cache
++def device() -> torch.device:
++    override = os.environ.get("VIPE_DEVICE")
++    if override:
++        return torch.device(override)
++    if torch.cuda.is_available():
++        return torch.device("cuda")
++    if torch.backends.mps.is_available():
++        return torch.device("mps")
++    return torch.device("cpu")
