@@ -8,11 +8,15 @@ the default, at a fraction of its time; ``--fuse-cloud`` still produces that clo
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TypeAlias
 
 import numpy as np
-from jaxtyping import Float32, Float64, UInt8, UInt32
+from jaxtyping import Float, Float32, Float64, UInt8, UInt32
 from numpy import ndarray
+from tsdf_rs import TsdfVolume
+
+MeshArrays: TypeAlias = tuple[Float32[ndarray, "v 3"], UInt32[ndarray, "t 3"], UInt8[ndarray, "v 3"] | None, Float32[ndarray, "v 3"]]
+"""A ``tsdf_rs`` mesh: vertices (metres), triangles, colours (None without colour fusion), unit normals."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,20 +49,44 @@ class ColoredMesh:
     colors_rgb: UInt8[ndarray, "v 3"]
     """Fused vertex colours."""
     normals_xyz: Float32[ndarray, "v 3"]
-    """Area-weighted unit vertex normals."""
+    """Unit vertex normals (the TSDF gradient), facing the cameras that observed the surface."""
 
 
-def vertex_normals(vertices_xyz: Float32[ndarray, "v 3"], triangles: UInt32[ndarray, "t 3"]) -> Float32[ndarray, "v 3"]:
-    """Area-weighted unit normals per vertex (a vertex in no triangle gets the zero vector)."""
-    corners: Float64[ndarray, "t 3 3"] = vertices_xyz.astype(np.float64)[triangles]
-    face: Float64[ndarray, "t 3"] = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
-    count: int = vertices_xyz.shape[0]
-    corner_ids: ndarray = triangles.reshape(-1).astype(np.int64)
-    summed: Float64[ndarray, "v 3"] = np.stack(
-        [np.bincount(corner_ids, weights=np.repeat(face[:, axis], 3), minlength=count) for axis in range(3)], axis=1
+def new_volume(settings: TsdfSettings) -> TsdfVolume:
+    """An empty colour-fusing TSDF volume with the voxel size and truncation of ``settings``."""
+    return TsdfVolume(voxel_size=settings.voxel_size_m, sdf_trunc=settings.truncation_voxels * settings.voxel_size_m, fuse_color=True)
+
+
+def integrate_frame(
+    volume: TsdfVolume,
+    settings: TsdfSettings,
+    depth_m: Float32[ndarray, "h w"],
+    intrinsics_px: Float[ndarray, "4"],
+    world_T_cam: Float[ndarray, "4 4"],
+    rgb: UInt8[ndarray, "h w 3"],
+) -> bool:
+    """Integrate one frame into ``volume`` at its pose; False (nothing integrated) for a non-finite pose or intrinsics.
+
+    Args:
+        volume: The volume to update (:func:`new_volume`).
+        settings: The depth range integrated (depths outside it, or non-finite, are skipped in Rust).
+        depth_m: Metric Z-depth.
+        intrinsics_px: ``fx, fy, cx, cy`` on the depth raster.
+        world_T_cam: OpenCV camera-to-world.
+        rgb: 8-bit RGB on the depth raster.
+    """
+    fx, fy, cx, cy = (float(value) for value in intrinsics_px)
+    if not (np.isfinite(world_T_cam).all() and np.isfinite([fx, fy, cx, cy]).all() and fx > 0):
+        return False
+    volume.integrate(
+        np.ascontiguousarray(depth_m, dtype=np.float32),
+        np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32),
+        np.linalg.inv(world_T_cam.astype(np.float64)).astype(np.float32),
+        np.ascontiguousarray(rgb, dtype=np.uint8),
+        min_depth=settings.min_depth_m,
+        max_depth=settings.max_depth_m,
     )
-    length: Float64[ndarray, "v 1"] = np.linalg.norm(summed, axis=1, keepdims=True)
-    return (summed / np.maximum(length, 1e-12)).astype(np.float32)
+    return True
 
 
 def fuse_tsdf_mesh(
@@ -77,31 +105,15 @@ def fuse_tsdf_mesh(
         rgb: Frame index -> 8-bit RGB on the depth raster.
         settings: Voxel size, truncation and depth range.
     """
-    import tsdf_rs
-
-    volume: Any = tsdf_rs.TsdfVolume(  # pyrefly: ignore[missing-attribute]  # compiled pyo3 module, no stubs
-        voxel_size=settings.voxel_size_m,
-        sdf_trunc=settings.truncation_voxels * settings.voxel_size_m,
-        fuse_color=True,
-    )
+    volume: TsdfVolume = new_volume(settings)
     for index in range(depth.shape[0]):
-        pose: Float64[ndarray, "4 4"] = world_T_cam[index]
-        fx, fy, cx, cy = (float(value) for value in intrinsics[index])
-        if not (np.isfinite(pose).all() and np.isfinite([fx, fy, cx, cy]).all() and fx > 0):
-            continue
-        frame: Float32[ndarray, "h w"] = np.asarray(depth[index], dtype=np.float32)
-        in_range: ndarray = np.isfinite(frame) & (frame >= settings.min_depth_m) & (frame <= settings.max_depth_m)
-        volume.integrate(
-            np.where(in_range, frame, 0.0).astype(np.float32),
-            np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32),
-            np.linalg.inv(pose).astype(np.float32),
-            np.ascontiguousarray(rgb(index), dtype=np.uint8),
-        )
-    vertices, triangles, colors = volume.extract_mesh()
+        integrate_frame(volume, settings, depth[index], intrinsics[index], world_T_cam[index], rgb(index))
+    mesh: MeshArrays = volume.extract_mesh()
+    vertices_xyz: Float32[ndarray, "v 3"] = mesh[0]
+    triangles: UInt32[ndarray, "t 3"] = mesh[1]
+    colors_rgb: UInt8[ndarray, "v 3"] | None = mesh[2]
+    normals_xyz: Float32[ndarray, "v 3"] = mesh[3]
     if triangles.shape[0] == 0:
         return None
-    vertices_xyz: Float32[ndarray, "v 3"] = np.asarray(vertices, dtype=np.float32)
-    faces: UInt32[ndarray, "t 3"] = np.asarray(triangles, dtype=np.uint32)
-    return ColoredMesh(
-        vertices_xyz=vertices_xyz, triangles=faces, colors_rgb=np.asarray(colors, dtype=np.uint8), normals_xyz=vertex_normals(vertices_xyz, faces)
-    )
+    assert colors_rgb is not None, "new_volume fuses colour"
+    return ColoredMesh(vertices_xyz=vertices_xyz, triangles=triangles, colors_rgb=colors_rgb, normals_xyz=normals_xyz)

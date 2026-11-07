@@ -1,13 +1,16 @@
 [build-system]
-requires = ["maturin>=1,<2"]
+# >= 1.9.4: sets PYO3_BUILD_EXTENSION_MODULE, which replaces PyO3's extension-module feature.
+requires = ["maturin>=1.9.4,<2"]
 build-backend = "maturin"
 
 [project]
 name = "tsdf-rs"
 version = "0.1.0"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
+dependencies = ["numpy"]
 
 [tool.maturin]
 bindings = "pyo3"
-features = ["pyo3/extension-module"]
+manifest-path = "crates/tsdf-py/Cargo.toml"
 module-name = "tsdf_rs"
+# tsdf_rs.pyi (next to this file) ships as tsdf_rs/__init__.pyi with py.typed.

@@ -1,22 +1,29 @@
-[package]
-name = "tsdf_rs"
+# tsdf-rs Cargo workspace: a sparse colour TSDF with marching cubes (`crates/tsdf`, pure Rust) and its PyO3 module
+# (`crates/tsdf-py`, imported as `tsdf_rs`). Laid out like a kornia-staging crate plus a binding, for the later move
+# into packages/kornia-staging. maturin builds the module from crates/tsdf-py (pyproject.toml, recipe.yaml).
+[workspace]
+resolver = "2"
+members = ["crates/tsdf", "crates/tsdf-py"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
+publish = false
 
-[lib]
-name = "tsdf_rs"
-crate-type = ["cdylib", "rlib"]
-
-[build-dependencies]
-pyo3-build-config = "0.25"
-
-[dependencies]
-numpy = "0.25"
-pyo3 = { version = "0.25", features = ["extension-module"] }
+[workspace.dependencies]
+tsdf = { path = "crates/tsdf" }
+numpy = "0.29"
+pyo3 = "0.29"
 rayon = "1.10"
 rustc-hash = "2.1"
 thiserror = "2"
+# Inherit only in member dev-dependencies.
+criterion = "0.8"
 
-[[bench]]
-name = "tsdf"
-harness = false
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,15 +1,25 @@
-# rattler-build recipe for tsdf-rs: a sparse colour TSDF volume with marching cubes (Rust, rayon), as a pyo3 module.
+# rattler-build recipe for tsdf-rs: a sparse colour TSDF volume with marching cubes (Rust, rayon), as the pyo3 module
+# tsdf_rs. maturin builds it from the crates/tsdf-py workspace member (pyproject.toml `manifest-path`).
 # Copied from pablovela5620/simplerecon-inference packages/tsdf-rs @ 7abf491.
 package:
   name: tsdf-rs
   version: "0.1.0"
 
 source:
-  path: .
+  - path: .
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
 
 build:
   number: 0
   script:
+    # pixi reuses the host prefix across source builds, and files left there are packaged: drop an earlier install,
+    # whose tsdf_rs.cpython-312-*.so (pre-abi3 builds) would shadow the new tsdf_rs.abi3.so on import.
+    - export SP_DIR="$(${{ PYTHON }} -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+    - rm -rf "$SP_DIR/tsdf_rs" "$SP_DIR"/tsdf_rs-*.dist-info
     - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
 
 requirements:
@@ -20,7 +30,7 @@ requirements:
   host:
     - python 3.12.*
     - pip
-    - maturin >=1,<2
+    - maturin >=1.9.4,<2
   run:
     - python 3.12.*
     - numpy

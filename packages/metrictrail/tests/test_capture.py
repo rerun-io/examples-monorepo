@@ -82,7 +82,6 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
 
 
 def test_live_tsdf_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
-    pytest.importorskip("tsdf_rs", reason="tsdf-rs is the metrictrail env's source package (packages/tsdf-rs)")
     import rerun as rr
     from rerun.chunk import RrdReader
 
@@ -111,6 +110,9 @@ def test_live_tsdf_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
         pose[0, 3] = shift
         session.integrate_keyframe(rec, depth, rgb, intrinsics, pose)
     session.uninstall()
+    session.retire_live_mesh(rec)  # the run's final mesh would replace it
+    assert session.volume is None
+    session.retire_live_mesh(rec)  # nothing left to retire
     rec.flush()
     rec.disconnect()
     paths: list[str] = [str(path) for path in RrdReader(rrd).store().schema().entity_paths()]

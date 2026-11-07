@@ -5,14 +5,17 @@ Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSessi
 * ``vipe.metrictrail.slam.DPVOSLAMSystem.run``: notes the frame count of the tracking pass that starts;
 * ``vipe.metrictrail.dpvo.dpvo.DPVO.__init__``: opens one recording file per DPVO instance (pass);
 * ``DPVO.__call__``: after each tracked frame, logs the frame DPVO saw, the MoGe-2 metric depth it was given, the
-  MoGe-2 normals of a new keyframe, the newest keyframe's patches, the local bundle-adjustment window and its patch points;
+  frame's MoGe-2 normals when DPVO's keyframe graph grew on it, the newest keyframe's patches, the local
+  bundle-adjustment window and its patch points;
 * :meth:`metrictrail.moge2.MoGe2NormalProvider.predict_metric` and ``DPVOSLAMSystem._prepare``: keep the camera-space
   normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
   keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
 * ``DPVO._DPVO__run_global_BA``: counts global bundle adjustments;
-* with :attr:`CaptureSession.live_tsdf` (the app), each new keyframe's depth is integrated at DPVO's current pose into a
-  TSDF (``packages/tsdf-rs``) whose changed blocks are logged as meshes under ``dpvo/mesh``, so the surface grows while
-  DPVO tracks; the run's final mesh (:mod:`metrictrail.surface`, final poses) replaces it;
+* with :attr:`CaptureSession.live_tsdf` (the app), whenever DPVO's keyframe graph grows on a frame (DPVO adds every
+  frame as a keyframe; the graph grows when keyframe culling keeps it), that frame's depth is integrated at DPVO's
+  current estimate of its pose into a TSDF (``packages/tsdf-rs``), whose changed blocks are logged as meshes under
+  ``dpvo/mesh``, so the surface grows while DPVO tracks. Later bundle adjustment does not move what was integrated;
+  the run's final mesh (:mod:`metrictrail.surface`, final poses) replaces it (:meth:`CaptureSession.retire_live_mesh`);
 * ``vipe.metrictrail.dino_fusion.FrozenDinoV3.forward``: projects the dinov3_vits16 patch features of the frame being
   patchified on a fixed PCA basis (fit on the first frame) to RGB.
 
@@ -32,14 +35,15 @@ from typing import Any
 import numpy as np
 import rerun as rr
 import torch
-from jaxtyping import Bool, Float32, Int64, UInt8
+from jaxtyping import Bool, Float32, Int64, UInt8, UInt32
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from torch import Tensor
+from tsdf_rs import TsdfVolume
 
 from metrictrail import entities
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
-from metrictrail.surface import TsdfSettings, vertex_normals
+from metrictrail.surface import MeshArrays, TsdfSettings, integrate_frame, new_volume
 
 
 def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"]:
@@ -141,18 +145,19 @@ class CaptureSession:
     live: rr.RecordingStream | None = None
     """Recording every pass logs into instead of its own file (the app's streamed recording); None: one file per pass."""
     every_frame_images: bool = True
-    """Log the depth and the DINOv3 PCA of every tracked frame; False: depth of new keyframes only, no PCA (an
-    uncompressed image per frame is too much to stream to a browser)."""
+    """Log the depth and the DINOv3 PCA of every tracked frame; False: depth only of frames on which DPVO's keyframe
+    graph grew, no PCA (an uncompressed image per frame is too much to stream to a browser)."""
     on_frame: Callable[[int, int, int], None] | None = None
     """Called after each tracked frame with (frame index, frames of the pass, keyframes in the graph); may raise to stop."""
     live_tsdf: TsdfSettings | None = None
-    """Grow a TSDF mesh from each new keyframe while tracking (needs :attr:`live` and keyframe depth); None: none."""
+    """Grow a TSDF mesh while tracking from each frame on which DPVO's keyframe graph grew (needs :attr:`live`); None:
+    none."""
     mesh_every_keyframes: int = 8
-    """New keyframes between two logs of the live mesh's changed blocks."""
-    volume: Any = None
-    """The live TSDF volume of the current pass (``tsdf_rs.TsdfVolume``), when :attr:`live_tsdf` is set."""
+    """Integrated frames between two logs of the live mesh's changed blocks."""
+    volume: TsdfVolume | None = None
+    """The live TSDF volume of the current pass, when :attr:`live_tsdf` is set."""
     volume_keyframes: int = 0
-    """Keyframes integrated into :attr:`volume`."""
+    """Frames integrated into :attr:`volume`."""
     passes: list[CapturedPass] = field(default_factory=list)
     """Every DPVO instance captured, in creation order."""
     pass_frames: int = 0
@@ -231,11 +236,13 @@ class CaptureSession:
                 pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
                 session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
             if rec is not None:
-                new_keyframe: bool = int(self.n) > keyframes_before
-                added: bool = bool(self.is_initialized) or new_keyframe
-                depth: Tensor | None = metric_depth if session.every_frame_images or new_keyframe else None
+                # DPVO appends every frame to its keyframe graph, then may cull an older keyframe: the graph grew
+                # when culling kept them all. The frame itself is always the newest keyframe after the call.
+                graph_grew: bool = int(self.n) > keyframes_before
+                added: bool = bool(self.is_initialized) or graph_grew
+                depth: Tensor | None = metric_depth if session.every_frame_images or graph_grew else None
                 session.log_frame(rec, self, frame, image, intrinsics, depth, metric_mask, added)
-                if new_keyframe and normals is not None:
+                if graph_grew and normals is not None:
                     rec.log(entities.CAM_NORMALS, rr.Image(normals.cpu().numpy(), color_model="RGB").compress(jpeg_quality=92))
             session.last_dino_rgb = None
             if session.on_frame is not None:
@@ -303,15 +310,9 @@ class CaptureSession:
                 earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
         if self.live_tsdf is not None and self.live is not None:
-            import tsdf_rs
-
             # A later pass (FP32 recovery) re-tracks from the start: its surface starts again.
             rec.log(entities.DPVO_MESH, rr.Clear(recursive=True), static=True)
-            self.volume = tsdf_rs.TsdfVolume(  # pyrefly: ignore[missing-attribute]  # compiled pyo3 module
-                voxel_size=self.live_tsdf.voxel_size_m,
-                sdf_trunc=self.live_tsdf.truncation_voxels * self.live_tsdf.voxel_size_m,
-                fuse_color=True,
-            )
+            self.volume = new_volume(self.live_tsdf)
             self.volume_keyframes = 0
         self.pass_normals.append({})
         self.pending_normals.clear()
@@ -324,34 +325,39 @@ class CaptureSession:
         intrinsics_px: Float32[ndarray, "4"],
         world_T_cam: Float32[ndarray, "4 4"],
     ) -> None:
-        """Integrate a new keyframe at DPVO's current pose; log the changed blocks every :attr:`mesh_every_keyframes`."""
-        assert self.live_tsdf is not None
-        in_range: ndarray = (depth_m >= self.live_tsdf.min_depth_m) & (depth_m <= self.live_tsdf.max_depth_m)
-        fx, fy, cx, cy = (float(value) for value in intrinsics_px)
-        self.volume.integrate(
-            np.where(in_range, depth_m, 0.0).astype(np.float32),
-            np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32),
-            np.linalg.inv(world_T_cam.astype(np.float64)).astype(np.float32),
-            np.ascontiguousarray(rgb),
-        )
+        """Integrate the current frame's depth at DPVO's current estimate of its pose (``world_T_cam``); log the changed
+        blocks every :attr:`mesh_every_keyframes` integrated frames."""
+        assert self.live_tsdf is not None and self.volume is not None
+        if not integrate_frame(self.volume, self.live_tsdf, depth_m, intrinsics_px, world_T_cam, rgb):
+            return
         self.volume_keyframes += 1
         if self.volume_keyframes % self.mesh_every_keyframes == 0:
             self.log_mesh_blocks(rec)
 
     def log_mesh_blocks(self, rec: rr.RecordingStream) -> None:
         """Log the live volume's blocks changed since the last call (a block whose surface vanished is cleared)."""
-        for (x, y, z), (vertices, triangles, colors) in self.volume.extract_dirty_block_meshes():
+        assert self.volume is not None
+        blocks: list[tuple[tuple[int, int, int], MeshArrays]] = self.volume.extract_dirty_block_meshes()
+        for (x, y, z), mesh in blocks:
             path: str = f"{entities.DPVO_MESH}/{x}_{y}_{z}"
+            vertices_xyz: Float32[ndarray, "v 3"] = mesh[0]
+            triangles: UInt32[ndarray, "t 3"] = mesh[1]
             if triangles.shape[0] == 0:
                 rec.log(path, rr.Clear(recursive=False), static=True)
                 continue
-            faces: ndarray = np.asarray(triangles, dtype=np.uint32)
-            points: Float32[ndarray, "v 3"] = np.asarray(vertices, dtype=np.float32)
             rec.log(
                 path,
-                rr.Mesh3D(vertex_positions=points, triangle_indices=faces, vertex_normals=vertex_normals(points, faces), vertex_colors=colors),
+                rr.Mesh3D(vertex_positions=vertices_xyz, triangle_indices=triangles, vertex_normals=mesh[3], vertex_colors=mesh[2]),
                 static=True,
             )
+
+    def retire_live_mesh(self, rec: rr.RecordingStream) -> None:
+        """Clear the live mesh under ``dpvo/mesh`` and drop its volume, once the run's final mesh supersedes it; nothing
+        without a live mesh."""
+        if self.volume is None:
+            return
+        rec.log(entities.DPVO_MESH, rr.Clear(recursive=True), static=True)
+        self.volume = None
 
     def kept_pass(self) -> CapturedPass | None:
         """The last of the longest passes (the tracking pass whose poses ViPE writes), or None if nothing ran."""

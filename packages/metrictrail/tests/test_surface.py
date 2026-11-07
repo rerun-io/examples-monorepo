@@ -5,9 +5,7 @@ import pytest
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 
-pytest.importorskip("tsdf_rs", reason="tsdf-rs is the metrictrail env's source package (packages/tsdf-rs)")
-
-from metrictrail.surface import ColoredMesh, TsdfSettings, fuse_tsdf_mesh, vertex_normals  # noqa: E402
+from metrictrail.surface import ColoredMesh, TsdfSettings, fuse_tsdf_mesh, integrate_frame, new_volume
 
 HEIGHT, WIDTH = 48, 64
 WALL_M = 2.0
@@ -25,9 +23,13 @@ def test_a_wall_seen_by_two_cameras_becomes_one_mesh_at_its_depth() -> None:
     assert mesh is not None and mesh.triangles.shape[0] > 0
     np.testing.assert_allclose(mesh.vertices_xyz[:, 2], WALL_M, atol=0.02)
     assert np.abs(mesh.colors_rgb.astype(int) - np.array(WALL_RGB)).max() <= 2
-    # Interior vertices face the cameras (-Z, RDF), up to the triangle winding's sign.
-    interior = np.abs(mesh.normals_xyz[:, 2]) > 0.5
-    assert interior.mean() > 0.9
+    np.testing.assert_allclose(np.linalg.norm(mesh.normals_xyz, axis=1), 1.0, atol=1e-5)
+    # Interior vertices face the cameras (-Z: the cameras look down +Z at the wall)...
+    assert (mesh.normals_xyz[:, 2] < -0.9).mean() > 0.9
+    # ...and so do the triangles: counter-clockwise seen from the cameras.
+    corners: Float32[ndarray, "t 3 3"] = mesh.vertices_xyz[mesh.triangles]
+    face_z: Float32[ndarray, "t"] = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])[:, 2]
+    assert (face_z <= 0.0).all()
 
 
 def test_out_of_range_depth_and_non_finite_poses_give_no_mesh() -> None:
@@ -39,9 +41,32 @@ def test_out_of_range_depth_and_non_finite_poses_give_no_mesh() -> None:
     assert fuse_tsdf_mesh(depth, intrinsics, world_T_cam, lambda _index: color) is None
 
 
-def test_vertex_normals_are_unit_and_area_weighted() -> None:
-    vertices: Float32[ndarray, "4 3"] = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
-    triangles = np.array([[0, 1, 2]], dtype=np.uint32)
-    normals: Float32[ndarray, "4 3"] = vertex_normals(vertices, triangles)
-    np.testing.assert_allclose(normals[:3], np.tile([0.0, 0.0, 1.0], (3, 1)), atol=1e-6)
-    np.testing.assert_allclose(normals[3], 0.0)
+def test_integrate_frame_skips_a_non_finite_camera() -> None:
+    settings = TsdfSettings(voxel_size_m=0.02)
+    volume = new_volume(settings)
+    depth: Float32[ndarray, "h w"] = np.full((HEIGHT, WIDTH), WALL_M, dtype=np.float32)
+    rgb: UInt8[ndarray, "h w 3"] = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+    intrinsics: Float64[ndarray, "4"] = np.array([60.0, 60.0, WIDTH / 2, HEIGHT / 2])
+    bad_pose: Float64[ndarray, "4 4"] = np.full((4, 4), np.nan)
+    assert not integrate_frame(volume, settings, depth, intrinsics, bad_pose, rgb)
+    assert not integrate_frame(volume, settings, depth, np.array([np.nan, 60.0, 32.0, 24.0]), np.eye(4), rgb)
+    assert volume.extract_mesh()[1].shape[0] == 0
+    assert integrate_frame(volume, settings, depth, intrinsics, np.eye(4), rgb)
+    assert volume.extract_mesh()[1].shape[0] > 0
+
+
+def test_tsdf_rs_refuses_fortran_ordered_arrays() -> None:
+    """A transposed view must raise, not be read as its transpose (K.T of a pinhole K is not a pinhole K)."""
+    volume = new_volume(TsdfSettings())
+    depth: Float32[ndarray, "h w"] = np.full((HEIGHT, WIDTH), WALL_M, dtype=np.float32)
+    K: Float32[ndarray, "3 3"] = np.array([[60.0, 0.0, WIDTH / 2], [0.0, 60.0, HEIGHT / 2], [0.0, 0.0, 1.0]], dtype=np.float32)
+    cam_T_world: Float32[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
+    with pytest.raises(ValueError, match="K_33 must be C-contiguous"):
+        volume.integrate(depth, np.asfortranarray(K), cam_T_world)
+    with pytest.raises(ValueError, match="depth_hw must be C-contiguous"):
+        volume.integrate(np.asfortranarray(depth), K, cam_T_world)
+    with pytest.raises(ValueError, match="K_33 must have shape"):
+        volume.integrate(depth, np.eye(4, dtype=np.float32), cam_T_world)
+    with pytest.raises(ValueError, match="max_depth"):
+        volume.integrate(depth, K, cam_T_world, min_depth=2.0, max_depth=1.0)
+    volume.integrate(depth, K, cam_T_world)

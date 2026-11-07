@@ -29,7 +29,6 @@ from numpy import ndarray
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from metrictrail import entities
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
@@ -226,8 +225,8 @@ def run_and_log(
     Args:
         config: What to run.
         rec: Target recording.
-        live: The capture logs every DPVO pass straight into ``rec`` while it tracks, depth on new keyframes only and
-            no DINOv3 PCA (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
+        live: The capture logs every DPVO pass straight into ``rec`` while it tracks, depth only on frames that grew
+            DPVO's keyframe graph and no DINOv3 PCA (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
         on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
             it may raise to stop the run.
     """
@@ -322,8 +321,8 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh
     )
-    if mesh is not None and session is not None and session.volume is not None:
-        rec.log(entities.DPVO_MESH, rr.Clear(recursive=True), static=True)  # the final mesh (world tab) supersedes it
+    if mesh is not None and session is not None:
+        session.retire_live_mesh(rec)  # the final mesh (world tab) supersedes the live one
     return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None)
 
 

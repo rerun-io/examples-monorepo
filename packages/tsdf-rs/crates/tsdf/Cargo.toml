@@ -1,0 +1,23 @@
+[package]
+name = "tsdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Sparse colour TSDF fusion and marching-cubes mesh extraction with per-vertex normals."
+
+[lints]
+workspace = true
+
+[dependencies]
+rayon.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+rayon.workspace = true
+
+[[bench]]
+name = "tsdf"
+harness = false
