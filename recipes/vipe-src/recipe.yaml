@@ -60,7 +60,7 @@ source:
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 7
+  number: 8
   script:
     file: build.sh
 
@@ -90,9 +90,10 @@ requirements:
         - libcusparse-dev
         - libcusolver-dev
         - libcurand-dev
-      # macOS: pure Python (patch 0007); ViPE's kernels come from vipe-mojo.
+      # macOS: pure Python (patch 0007); ViPE's kernels come from vipe-mojo. Same line as run: libtorch's run_exports
+      # pin vipe-src to the host's minor (a host 2.14 would conflict with torchcodec's 2.13).
       else:
-        - pytorch 2.12.*
+        - pytorch 2.13.*
   # What `vipe.metrictrail.pipeline`, `vipe.pipeline.processors` and the `vipe` CLI (vipe.cli.main) import at module
   # load (upstream pyproject, minus what MetricTrail never reaches: gtsam (vipe_long), ray). transformers (Grounding
   # DINO's BERT, used only with dynamic masks) comes from the consuming workspace. PyPI-only: python-pycg
@@ -104,8 +105,12 @@ requirements:
         # vipe_ext links the CUDA build of torch: never resolve a CPU pytorch.
         - pytorch >=2.12,<2.13 cuda*
         - cuda-version >=13.0,<14
+      # macOS: torch 2.13's MPS SDPA is 6.5x faster than 2.12's (FP16 [1,16,3601,64]: 16 ms vs 105 ms on an M4), which
+      # dominates MoGe-2's ViT-L forward in SharedK calibration. Linux stays on 2.12: conda-forge builds torch 2.13 only
+      # for CUDA 12.9 and 13.4 (cuda129/cuda134), and the Linux hosts run driver 580 (CUDA 13.0) with the workspace on
+      # cuda-version 13.0.*. Unify after a 595+ driver and the workspace move to CUDA 13.4.
       else:
-        - pytorch >=2.12,<2.13
+        - pytorch 2.13.*
     # MetricTrail's frozen DINOv3 (patch 0002). Sibling recipe: the consuming feature lists it too.
     - dinov3-src
     - torchvision
