@@ -9,12 +9,14 @@ source:
   path: .
 
 build:
-  number: 0
+  number: 1
   script:
     # Clone the DBoW2 library at a pinned commit (Lipson's fork used by DPV-SLAM)
     - git clone https://github.com/lahavlipson/DBoW2.git DBoW2
     - cd DBoW2 && git checkout 89f8b270270fa68a399c10cd90427a9f7ec4fa81 && cd ..
-    - cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -GNinja
+    # Name the host prefix's Python: on macOS, CMake and pybind11 otherwise find Xcode's Python 3.9 first and
+    # install a cpython-39 module into the Xcode framework.
+    - cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -DPython_EXECUTABLE=$PYTHON -DPYTHON_EXECUTABLE=$PYTHON -GNinja
     - cmake --build build
     - cmake --install build
 
