@@ -30,11 +30,12 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
+from depth_png import decode as decode_png
+from depth_png import encode as encode_png
 from jaxtyping import Float64, Int32, Int64, UInt8, UInt16
 from numpy import ndarray
 from serde import serde
@@ -71,8 +72,8 @@ ZSTD_MAGIC: bytes = b"\x28\xb5\x2f\xfd"
 """Start of every zstd frame."""
 UNITS_PER_METRE: float = 1000.0
 """Stored depth unit: millimetres, the ``meter`` of every depth image."""
-PNG_PARAMS: tuple[int, ...] = (cv2.IMWRITE_PNG_COMPRESSION, 4, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_UP)
-"""zlib level 4 with the "up" row filter: 3.8 ms a fisheye frame and 1.8 % larger than level 6 with adaptive filters (20 ms)."""
+PNG_LEVEL: int = 4
+"""zlib level of ``depth_png`` (packages/depth-png, "up" row filter on every row): 2.9 ms a fisheye frame, a few percent larger than level 6 with adaptive filters (20 ms)."""
 
 
 @serde
@@ -169,17 +170,18 @@ def millimetres(depth: ndarray) -> ndarray:
 
 def depth_png(mm: UInt16[ndarray, "h w"]) -> bytes:
     """One millimetre image as a 16-bit greyscale PNG."""
-    ok, encoded = cv2.imencode(".png", mm, list(PNG_PARAMS))
-    if not ok:
-        raise ValueError(f"PNG encoding failed for a {mm.shape} depth image")
-    return encoded.tobytes()
+    return encode_png(mm, level=PNG_LEVEL)
 
 
 def decode_depth_png(blob: bytes) -> UInt16[ndarray, "h w"]:
-    """A stored depth frame back as uint16 millimetres."""
-    image: ndarray | None = cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-    if image is None or image.dtype != np.uint16 or image.ndim != 2:
-        raise ValueError("not a 16-bit greyscale PNG")
+    """A stored depth frame back as uint16 millimetres, whichever encoder wrote it (the subset's frames are OpenCV's).
+
+    Raises:
+        ValueError: The blob is not a 16-bit greyscale PNG.
+    """
+    image: ndarray = decode_png(blob)
+    if image.dtype != np.uint16:
+        raise ValueError(f"not a 16-bit greyscale PNG: decodes to {image.dtype}")
     return image
 
 

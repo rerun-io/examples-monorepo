@@ -305,3 +305,53 @@ def test_the_pinhole_layer_resamples_the_millimetre_depth_layer(tmp_path: Path) 
     rows, cols = pinhole_lookup(DoubleSphere.from_coefficients(info.coefficients), PINHOLE_GRID, source_width=512, source_height=416)
     expected: ndarray = millimetres(np.stack([resample_depth(frame, rows, cols) for frame in depth]))
     np.testing.assert_array_equal(np.stack([decode_depth_png(blob) for blob in blobs]), expected)
+
+
+def stored_like_frames() -> list[UInt16[ndarray, "416 512"]]:
+    """Millimetre frames like the depth layer's: a smooth surface, noise, a zero border."""
+    rng: np.random.Generator = np.random.default_rng(5)
+    rows, cols = np.mgrid[0:416, 0:512]
+    frames: list[UInt16[ndarray, "416 512"]] = []
+    for offset in (300, 900):
+        mm: ndarray = (offset + rows + cols // 2 + rng.integers(0, 3, size=(416, 512))).astype(np.uint16)
+        mm[:, :20] = 0
+        frames.append(mm)
+    return frames
+
+
+def test_depth_png_writes_up_filtered_rows_that_opencv_reads() -> None:
+    import zlib
+
+    import cv2
+
+    from dataforge.datasets.gen_humanego_depth import depth_png
+
+    for mm in stored_like_frames():
+        blob: bytes = depth_png(mm)
+        np.testing.assert_array_equal(cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_UNCHANGED), mm)
+        idat: bytes = blob[blob.index(b"IDAT") + 4 : blob.index(b"IEND") - 8]  # one IDAT chunk, without its CRC
+        rows: ndarray = np.frombuffer(zlib.decompress(idat), dtype=np.uint8).reshape(416, 1 + 2 * 512)
+        assert set(rows[:, 0].tolist()) == {2}, "every row carries the Up filter"
+
+
+def test_decode_depth_png_reads_the_opencv_pngs_the_subset_was_written_with() -> None:
+    import cv2
+
+    from dataforge.datasets.gen_humanego_depth import decode_depth_png
+
+    for mm in stored_like_frames():
+        for params in ([cv2.IMWRITE_PNG_COMPRESSION, 6], [cv2.IMWRITE_PNG_COMPRESSION, 4, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_UP]):
+            np.testing.assert_array_equal(decode_depth_png(cv2.imencode(".png", mm, params)[1].tobytes()), mm)
+
+
+def test_decode_depth_png_refuses_images_that_are_not_16_bit_greyscale() -> None:
+    import cv2
+
+    from dataforge.datasets.gen_humanego_depth import decode_depth_png
+
+    grey8: ndarray = np.zeros((4, 5), dtype=np.uint8)
+    for image in (grey8, np.zeros((4, 5, 3), dtype=np.uint8)):
+        with pytest.raises(ValueError):
+            decode_depth_png(cv2.imencode(".png", image)[1].tobytes())
+    with pytest.raises(ValueError):
+        decode_depth_png(b"not a png")

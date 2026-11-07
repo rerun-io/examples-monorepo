@@ -3288,6 +3288,8 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.dataforge.dependencies]
 python = "3.12.*"
+# Gen-HumanEgo's millimetre depth PNGs: Up-filter encode and decode in Rust (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 tyro = ">=0.9.1,<0.10"
 # transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
 requests = "*"

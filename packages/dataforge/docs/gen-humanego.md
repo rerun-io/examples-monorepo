@@ -89,7 +89,7 @@ Firmware differences seen in the subset run (dataforge handles both):
 - Checked in 3D: on a living-room episode the table below camera2, fitted as a plane in world coordinates from
   `depth_pinhole`, is a median 2.1 degrees from world up (13 frames, 1.4 to 8.0): the depth, camera2's
   `rig_T_cam` and the VIO's gravity agree.
-- Stored as `EncodedDepthImage`: uint16 millimetres (`meter = 1000`) in a 16-bit greyscale PNG (zlib level 4, "up" filter),
+- Stored as `EncodedDepthImage`: uint16 millimetres (`meter = 1000`) in a 16-bit greyscale PNG (zlib level 4, "up" filter, written by `depth_png`),
   0 for no depth, full resolution, 30 fps (`millimetres`, `depth_png`). float16 itself resolves only 0.24 mm at
   the 0.46 m median depth and 0.5 mm at 1 m, so rounding adds at most 0.5 mm (p50 0.26 mm). Float16 frames took
   306 KB in the rrd (lz4), two thirds of an episode's output; a PNG takes 123 KB, the pinhole frame 25 KB.
@@ -102,6 +102,11 @@ Firmware differences seen in the subset run (dataforge handles both):
 - PNG settings, one episode (1,187 frames): zlib level 4 with the "up" row filter encodes a fisheye frame in 3.8 ms
   at 105 KB; level 6 with adaptive filters takes 20 ms at 103 KB (+1.8 %; the pinhole frame +3.1 %). The subset was
   re-encoded at level 6; later conversions use level 4 + up. The millimetres are the same either way.
+- `depth_png` (packages/depth-png: Rust, the `png` crate on zlib-rs, "up" on every row) encodes and decodes the
+  frames instead of OpenCV. On episode `0003946848af465d9544e451b165fddc` (5,224 frames, one thread) a fisheye frame
+  encodes in 2.9 ms at 111.4 KB (OpenCV level 4 + up: 3.8 ms, 112.6 KB) and decodes in 0.41 ms (OpenCV: 1.0 ms);
+  re-converting its `depth_pinhole` from the stored depth layer gives the stored millimetres frame for frame.
+  The subset stays as written (OpenCV, level 6); `depth_png` reads any 16-bit greyscale PNG.
 - `EncodedDepthImage` is marked unstable in Rerun 0.42. Its Python docstring gives `meter = 0.001` for
   millimetres, but the viewer reads `meter` as units per metre, as `DepthImage` does (its fallback for integer
   depth is 1000), so the layers set 1000. The 3D view back-projects it under a `Pinhole` as it does a `DepthImage`.
