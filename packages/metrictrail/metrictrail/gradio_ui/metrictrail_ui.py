@@ -8,7 +8,7 @@ Streaming: ``@rr.thread_local_stream`` gives each call its own recording, ``rr.b
 the generator yields ``(stream.read(), status)``. The pipeline runs in a worker thread and logs into that recording
 explicitly; the capture hooks (:mod:`metrictrail.capture`, ``live`` mode) log every tracked frame as DPVO tracks it, and
 the generator yields what has accumulated about once a second. Calibration has no hook, so the viewer stays empty for
-those ~40 s and the status line says what runs. The trajectory and the fused cloud come at the end, from the artifacts.
+those ~40 s and the status line says what runs. The trajectory and the final mesh come at the end, from the artifacts.
 """
 
 import threading
@@ -66,7 +66,7 @@ class RunStatus:
 
 def example_videos(data_dir: Path) -> list[Path]:
     """The example clips under ``data_dir``: the iPhone ones (``iphone/``), then dpvo's ``movies/``."""
-    return sorted((data_dir / "iphone").glob("*.MOV")) + sorted((data_dir / "movies").glob("*.MOV"))
+    return sorted((data_dir / "iphone").glob("*.mp4")) + sorted((data_dir / "movies").glob("*.mp4"))
 
 
 def app_overrides(tracking_stride: int, max_frames: int) -> list[str]:

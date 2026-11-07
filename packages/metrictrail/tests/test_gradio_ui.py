@@ -15,13 +15,13 @@ from metrictrail.gradio_ui.metrictrail_ui import app_overrides, build_app, examp
 
 
 def test_example_videos_list_the_iphone_clips_first(tmp_path: Path) -> None:
-    for relative in ("movies/IMG_0493.MOV", "movies/IMG_0482.MOV", "iphone/pool.MOV", "movies/notes.txt"):
+    for relative in ("movies/IMG_0493.mp4", "movies/IMG_0482.mp4", "iphone/pool.mp4", "movies/IMG_0493.MOV", "movies/notes.txt"):
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).touch()
     assert [path.relative_to(tmp_path).as_posix() for path in example_videos(tmp_path)] == [
-        "iphone/pool.MOV",
-        "movies/IMG_0482.MOV",
-        "movies/IMG_0493.MOV",
+        "iphone/pool.mp4",
+        "movies/IMG_0482.mp4",
+        "movies/IMG_0493.mp4",
     ]
     assert example_videos(tmp_path / "missing") == []
 
@@ -35,7 +35,7 @@ def test_app_overrides_keep_upstream_values_out_of_the_command() -> None:
 
 def test_build_app_wires_a_streaming_viewer_and_the_examples(tmp_path: Path) -> None:
     (tmp_path / "iphone").mkdir()
-    (tmp_path / "iphone" / "pool.MOV").touch()
+    (tmp_path / "iphone" / "pool.mp4").touch()
     demo: gr.Blocks = build_app(tmp_path)
     components: list[object] = list(demo.blocks.values())
     viewers: list[Rerun] = [block for block in components if isinstance(block, Rerun)]

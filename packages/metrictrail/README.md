@@ -85,6 +85,9 @@ pool (2,585 frames strided to 1,293; RTX 5090, CLI with capture, `metrictrail` e
 | GPU video input + fused cloud | 188 s | 94 s | 5.64 M points |
 | GPU video input + TSDF mesh (default) | 97 s | 4 s | 2.94 M triangles |
 
+The rows above ran on the original iPhone `pool.MOV`. The app's examples are now dpvo's H.264 re-encodes
+(`iphone/pool.mp4`, no B-frames): the default row on `pool.mp4` takes 95 s for 2.92 M triangles.
+
 ## Evaluate
 
 ```bash
