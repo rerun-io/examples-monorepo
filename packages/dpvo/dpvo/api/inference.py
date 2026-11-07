@@ -1,9 +1,10 @@
 """High-level inference pipeline for DPVO visual odometry.
 
 This module provides the main entry-point for running DPVO inference on
-image directories or video files.  It handles frame reading (via multiprocessing),
-optional auto-calibration using DUSt3R, the DPVO SLAM loop, and Rerun-based
-visualization of camera trajectories, point clouds, and per-frame images.
+image directories or video files.  Videos decode on NVDEC and stay on the GPU;
+image directories load in a background process.  Without a calibration file,
+MoGe-2 estimates the intrinsics.  Rerun shows the camera trajectory, the point
+cloud and the source video (logged once as a VideoStream) or images.
 
 Both the CLI and Gradio UI consume the same :func:`run_dpvo_pipeline` generator.
 
@@ -15,32 +16,30 @@ Typical CLI usage::
         pass
 """
 
-import os
-from collections.abc import Generator
+import importlib.util
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
+from itertools import chain, islice
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Annotated
+from typing import Annotated, Any
 
-import cv2
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 import torch
 import tyro
-from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8
-from mini_dust3r.api import OptimizedResult, inferece_dust3r
-from mini_dust3r.model import AsymmetricCroCo3DStereo
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
 from tqdm import tqdm
 
 from dpvo.config import DPVOConfig
 from dpvo.dpvo import DPVO
-from dpvo.stream import FrameReader
+from dpvo.stream import VIDEO_SCALE, Frame, image_dir_frames, load_calib, num_frames, video_frames, video_hw
 from dpvo.utils import Timer
 
 # ── Tyro subcommand aliases for DPVOConfig presets ──────────────────────
@@ -116,12 +115,12 @@ class DPVOInferenceConfig:
         default_factory=DPVOConfig.fast
     )
     """DPVO solver configuration preset."""
-    imagedir: str = "data/movies/IMG_0493.MOV"
+    imagedir: str = "data/movies/IMG_0493.mp4"
     """Path to image directory or video file."""
     network_path: str = "checkpoints/dpvo.pth"
     """Path to DPVO network weights."""
     calib: str | None = None
-    """Path to calibration file. If None, uses DUSt3R for estimation."""
+    """Path to calibration file (``fx fy cx cy`` of the native video or images). If None, MoGe-2 estimates it."""
     stride: int = 2
     """Frame stride for sampling."""
     skip: int = 0
@@ -197,20 +196,16 @@ def log_trajectory(
     cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"],
     points: Float32[Tensor, "num_points 3"],
     colors: UInt8[Tensor, "buffer_size num_patches 3"],
-    intri_np: Float32[ndarray, "4"],
-    bgr_hw3: UInt8[ndarray, "h w 3"],
     path_list: list[list[float]],
     last_orient_n: int = 0,
-    jpg_quality: int = 90,
+    log_points: bool = True,
 ) -> tuple[list[list[float]], int]:
     """Log the current SLAM state to Rerun for live visualization.
 
-    For the most recent keyframe this logs:
-    * the camera image (JPEG-compressed),
-    * the pinhole intrinsics,
-    * the camera-to-world transform,
-    * the accumulated camera path as a 3-D line strip, and
-    * the point cloud (after radius-based outlier removal).
+    Every call logs the most recent camera-to-world transform and the
+    accumulated camera path as a 3-D line strip.  With ``log_points`` it also
+    logs the point cloud (after radius-based outlier removal on the GPU);
+    the caller sets it only when a new keyframe joined the buffer.
 
     Args:
         parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
@@ -219,40 +214,21 @@ def log_trajectory(
             (``cam_se3_world``) convention.
         points: All buffered 3-D points (flattened across patches).
         colors: Per-point RGB colors matching ``points``.
-        intri_np: Camera intrinsics as ``[fx, fy, cx, cy]``.
-        bgr_hw3: Current frame in BGR channel order.
         path_list: Running list of world-space camera positions; updated
             in-place and returned.
         last_orient_n: Number of poses used in the last orient recomputation.
             Pass 0 on the first call.
-        jpg_quality: JPEG compression quality for the image log (0--100).
+        log_points: Whether to log the point cloud.
 
     Returns:
         Tuple of ``(path_list, last_orient_n)`` — the updated path list and
         the pose count at which the orient transform was last recomputed.
     """
     cam_log_path: str = f"{parent_log_path}/camera"
-    rr.log(
-        f"{cam_log_path}/pinhole/image",
-        rr.Image(bgr_hw3, color_model=rr.ColorModel.BGR).compress(jpeg_quality=jpg_quality),
-    )
-    rr.log(
-        f"{cam_log_path}/pinhole",
-        rr.Pinhole(
-            height=bgr_hw3.shape[0],
-            width=bgr_hw3.shape[1],
-            focal_length=[intri_np[0], intri_np[1]],
-            principal_point=[intri_np[2], intri_np[3]],
-            image_plane_distance=1,
-        ),
-    )
 
     # Filter out zero-initialized (unused) buffer slots
     poses_mask: Tensor = ~(cam_se3_world_buffer[:, :6] == 0).all(dim=1)
-    points_mask: Tensor = ~(points == 0).all(dim=1)
-
     nonzero_poses: Float32[Tensor, "num_nonzero 7"] = cam_se3_world_buffer[poses_mask]
-    nonzero_points: Float32[Tensor, "num_nonzero 3"] = points[points_mask]
 
     if nonzero_poses.shape[0] == 0:
         return path_list, last_orient_n
@@ -260,74 +236,36 @@ def log_trajectory(
     # Extract the most recent keyframe pose.
     # poses_ stores cam_se3_world (camera-from-world) internally, so the
     # raw [tx, ty, tz, qx, qy, qz, qw] encodes cam_T_world.
-    last_index: int = nonzero_poses.shape[0] - 1
-    cam_se3_world: Float32[ndarray, "7"] = nonzero_poses[last_index].numpy(force=True)
-    cam_t_world: Float32[ndarray, "3"] = cam_se3_world[:3]
-    cam_R_world: Float64[ndarray, "3 3"] = Rotation.from_quat(cam_se3_world[3:]).as_matrix()
-
-    # Build cam_T_world 4×4, then invert to world_T_cam for Rerun logging.
+    cam_se3_world: Float32[ndarray, "7"] = nonzero_poses[-1].numpy(force=True)
     cam_T_world: Float64[ndarray, "4 4"] = np.eye(4)
-    cam_T_world[:3, :3] = cam_R_world
-    cam_T_world[:3, 3] = cam_t_world
+    cam_T_world[:3, :3] = Rotation.from_quat(cam_se3_world[3:]).as_matrix()
+    cam_T_world[:3, 3] = cam_se3_world[:3]
 
     world_T_cam: Float64[ndarray, "4 4"] = np.linalg.inv(cam_T_world)
     world_t_cam: Float64[ndarray, "3"] = world_T_cam[:3, 3]
-    world_R_cam: Float64[ndarray, "3 3"] = world_T_cam[:3, :3]
+    path_list.append(world_t_cam.tolist())
 
-    path_list.append(world_t_cam.copy().tolist())
+    rr.log(cam_log_path, rr.Transform3D(translation=world_t_cam, mat3x3=world_T_cam[:3, :3], from_parent=False))
+    rr.log(f"{parent_log_path}/path", rr.LineStrips3D(strips=[path_list], colors=[255, 0, 0]))
 
-    rr.log(
-        f"{cam_log_path}",
-        rr.Transform3D(
-            translation=world_t_cam,
-            mat3x3=world_R_cam,
-            from_parent=False,
-        ),
-    )
-
-    # log path using linestrip
-    rr.log(
-        f"{parent_log_path}/path",
-        rr.LineStrips3D(
-            strips=[
-                path_list,
-            ],
-            colors=[255, 0, 0],
-        ),
-    )
-
-    # Outlier removal: discard points whose distance from the camera
-    # trajectory median exceeds 5x the maximum camera-center radius.
-    # Use world-space camera positions (world_t_cam from path_list)
-    # instead of cam_se3_world translations (poses_[:, :3]) which live
-    # in a different coordinate frame than the backprojected points.
-    if len(path_list) < 2:
-        # Not enough camera positions yet for meaningful outlier removal;
-        # log all nonzero points unfiltered.
-        points_filtered = nonzero_points.view(-1, 3).numpy(force=True)
-        colors_filtered = colors.view(-1, 3)[points_mask].numpy(force=True)
-    else:
-        cam_positions: Float32[ndarray, "n_cams 3"] = np.array(path_list, dtype=np.float32)
-        trajectory_center: Float32[ndarray, "3"] = np.median(cam_positions, axis=0)
-
-        def radii(a: Float32[ndarray, "n 3"]) -> Float32[ndarray, "n"]:
-            """Compute Euclidean distance of each row to ``trajectory_center``."""
-            return np.linalg.norm(a - trajectory_center, axis=1)
-
-        points_np: Float32[ndarray, "num_points 3"] = nonzero_points.view(-1, 3).numpy(force=True)
-        colors_np: UInt8[ndarray, "num_points 3"] = colors.view(-1, 3)[points_mask].numpy(force=True)
-        inlier_mask: ndarray = radii(points_np) < radii(cam_positions).max() * 5
-        points_filtered = points_np[inlier_mask]
-        colors_filtered = colors_np[inlier_mask]
-
-    # log all points and colors at the same time
-    rr.log(
-        f"{parent_log_path}/pointcloud",
-        rr.Points3D(
-            positions=points_filtered,
-            colors=colors_filtered,
-        ),
-    )
+    if log_points:
+        points_mask: Tensor = ~(points == 0).all(dim=1)
+        kept_points: Float32[Tensor, "n 3"] = points[points_mask]
+        kept_colors: UInt8[Tensor, "n 3"] = colors.view(-1, 3)[points_mask]
+        # Outlier removal: discard points whose distance from the camera
+        # trajectory median exceeds 5x the maximum camera-center radius.
+        # Use world-space camera positions (path_list) instead of
+        # cam_se3_world translations, which live in a different frame.
+        if len(path_list) >= 2:
+            cam_positions: Float32[Tensor, "n_cams 3"] = torch.tensor(path_list, dtype=kept_points.dtype, device=kept_points.device)
+            center: Float32[Tensor, "3"] = cam_positions.median(dim=0).values
+            max_radius: Tensor = (cam_positions - center).norm(dim=1).max()
+            inliers: Tensor = (kept_points - center).norm(dim=1) < max_radius * 5
+            kept_points, kept_colors = kept_points[inliers], kept_colors[inliers]
+        rr.log(
+            f"{parent_log_path}/pointcloud",
+            rr.Points3D(positions=kept_points.numpy(force=True), colors=kept_colors.numpy(force=True)),
+        )
 
     # Recompute gravity-alignment transform periodically.
     # Fire immediately once we have >= 3 poses, then every N keyframes.
@@ -342,142 +280,75 @@ def log_trajectory(
     return path_list, last_orient_n
 
 
-def log_final(
-    parent_log_path: Path,
-    final_poses: Float32[ndarray, "num_keyframes 7"],
-    tstamps: Float64[ndarray, "num_keyframes"],
-    final_points: Float32[Tensor, "num_points 3"],
-    final_colors: UInt8[Tensor, "buffer_size num_patches 3"],
-) -> None:
-    """Log the final optimized per-keyframe camera transforms to Rerun.
+# ── Blueprint ───────────────────────────────────────────────────────────
 
-    After DPVO terminates its SLAM loop and performs final bundle adjustment,
-    this function logs one ``rr.Transform3D`` per keyframe so the user can
-    inspect the full set of optimized camera poses.
+# Chase eye of the Follow view, in the camera frame (RDF: x right, y down, z forward). DPVO is monocular, so the
+# units are its own scene scale (initial patch depth ~1): behind and above the camera, aimed ahead of it.
+_FOLLOW_EYE_POSITION: tuple[float, float, float] = (0.0, -0.6, -1.5)
+_FOLLOW_EYE_TARGET: tuple[float, float, float] = (0.0, 0.0, 1.5)
+_FOLLOW_EYE_UP: tuple[float, float, float] = (0.0, -1.0, 0.0)
 
-    Args:
-        parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
-        final_poses: Optimized keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``
-            in world-from-camera (``world_se3_cam``) convention, as returned
-            by :meth:`~dpvo.dpvo.DPVO.terminate`.
-        tstamps: Timestamp (frame index) per keyframe.
-        final_points: Final 3-D point cloud (unused here, reserved for
-            future extensions).
-        final_colors: Per-point colors (unused here).
+
+def dpvo_blueprint(parent_log_path: Path) -> rrb.Blueprint:
+    """Overview and Follow 3D views beside the camera, like dataforge's rig layout.
+
+    The overview is rooted at ``/`` so the gravity-alignment transform on
+    ``parent_log_path`` shows (per rerun#9244 a Transform3D on a view's own
+    origin is invisible), and it draws the ground grid. The Follow view is
+    rooted at the camera entity, so its eye, fixed in the camera frame, rides
+    the camera; it has no grid because the camera frame has no ground plane.
     """
-    for idx, (world_se3_cam, _tstamp) in enumerate(zip(final_poses, tstamps, strict=False)):
-        cam_log_path: str = f"{parent_log_path}/camera_{idx}"
-        # final_poses are world_se3_cam (world-from-camera) from terminate().
-        world_t_cam: Float32[ndarray, "3"] = world_se3_cam[:3]
-        world_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat(world_se3_cam[3:]).as_matrix()
-        rr.log(
-            f"{cam_log_path}",
-            rr.Transform3D(translation=world_t_cam, mat3x3=world_R_cam, from_parent=False),
-        )
-
-    # Gravity-align the final scene using all keyframe poses
-    if final_poses.shape[0] >= 3:
-        n: int = final_poses.shape[0]
-        world_T_cam_rub: Float64[ndarray, "n 4 4"] = np.zeros((n, 4, 4))
-        for i in range(n):
-            world_T_cam_rub[i] = np.eye(4)
-            world_T_cam_rub[i, :3, :3] = Rotation.from_quat(final_poses[i, 3:]).as_matrix() @ _RDF_TO_RUB
-            world_T_cam_rub[i, :3, 3] = final_poses[i, :3]
-        orient_34 = auto_orient_and_center_poses(
-            world_T_cam_rub.astype(np.float32),
-            method="up",
-            center_method="poses",
-        ).transform
-        rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_34[:, :3], translation=orient_34[:, 3]))
-
-
-# ── Frame I/O helpers ───────────────────────────────────────────────────
-
-
-def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
-    """Calculate the effective number of frames after applying skip and stride.
-
-    For an image directory the total is the number of regular files; for a
-    video file it is the frame count reported by OpenCV.  The returned value
-    accounts for both ``skip`` (dropped leading frames) and ``stride``
-    (sub-sampling interval).
-
-    Args:
-        video_or_image_dir: Path to an image directory or video file.
-        stride: Sampling interval (keep every *stride*-th frame).
-        skip: Number of leading frames to discard.
-
-    Returns:
-        The number of frames that will actually be processed.
-    """
-    total_frames: int = 0
-    if os.path.isdir(video_or_image_dir):
-        total_frames = len(
-            [name for name in os.listdir(video_or_image_dir) if os.path.isfile(os.path.join(video_or_image_dir, name))]
-        )
-    else:
-        cap: cv2.VideoCapture = cv2.VideoCapture(video_or_image_dir)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-
-    total_frames = (total_frames - skip) // stride
-    return total_frames
-
-
-def calib_from_dust3r(
-    bgr_hw3: UInt8[ndarray, "height width 3"],
-    model: AsymmetricCroCo3DStereo,
-    device: str,
-) -> Float32[ndarray, "3 3"]:
-    """Estimate a 3×3 camera intrinsic matrix from a single image using DUSt3R.
-
-    The image is temporarily saved to disk, fed through DUSt3R monocular
-    calibration, and the resulting intrinsics are up-scaled from the DUSt3R
-    processing resolution back to the original image dimensions.
-
-    Args:
-        bgr_hw3: Input image in BGR channel order with shape
-            ``(height, width, 3)``.
-        model: Pre-loaded DUSt3R ``AsymmetricCroCo3DStereo`` model.
-        device: Torch device string (e.g. ``"cuda"``, ``"cpu"``).
-
-    Returns:
-        The 3×3 intrinsic matrix ``K`` scaled to the original image size.
-    """
-    tmp_path: Path = Path("/tmp/dpvo/tmp.png")
-    # Save image to a temporary file for DUSt3R (expects a directory of images)
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(tmp_path), bgr_hw3)
-    optimized_results: OptimizedResult = inferece_dust3r(
-        image_dir_or_list=tmp_path.parent,
-        model=model,
-        device=device,  # pyrefly: ignore[bad-argument-type]
-        batch_size=1,
+    camera_path: str = f"{parent_log_path}/camera"
+    overview = rrb.Spatial3DView(name="Overview", origin="/", eye_controls=rrb.EyeControls3D(spin_speed=0.25))
+    follow = rrb.Spatial3DView(
+        name="Follow",
+        origin=camera_path,
+        contents="/**",
+        line_grid=rrb.LineGrid3D(visible=False),
+        eye_controls=rrb.EyeControls3D(
+            kind=rrb.Eye3DKind.Orbital,
+            position=_FOLLOW_EYE_POSITION,
+            look_target=_FOLLOW_EYE_TARGET,
+            eye_up=_FOLLOW_EYE_UP,
+            spin_speed=0.0,
+        ),
     )
-    # Clean up the temporary file
-    tmp_path.unlink()
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Vertical(overview, follow),
+            rrb.Spatial2DView(origin=f"{camera_path}/pinhole/image", name="Camera"),
+            column_shares=[3, 2],
+        ),
+        collapse_panels=True,
+    )
 
-    # Scale the predicted intrinsics from DUSt3R's internal resolution
-    # back up to the original image dimensions.
-    downscaled_h: int
-    downscaled_w: int
-    downscaled_h, downscaled_w, _ = optimized_results.rgb_hw3_list[0].shape
-    orig_h: int
-    orig_w: int
-    orig_h, orig_w, _ = bgr_hw3.shape
 
-    # Scaling factors
-    scaling_factor_x: float = orig_w / downscaled_w
-    scaling_factor_y: float = orig_h / downscaled_h
+# ── Intrinsics ──────────────────────────────────────────────────────────
 
-    # Apply per-axis scaling to fx, fy, cx, cy
-    K_33_original: Float32[ndarray, "3 3"] = optimized_results.K_b33[0].copy()
-    K_33_original[0, 0] *= scaling_factor_x  # fx
-    K_33_original[1, 1] *= scaling_factor_y  # fy
-    K_33_original[0, 2] *= scaling_factor_x  # cx
-    K_33_original[1, 2] *= scaling_factor_y  # cy
+INTRINSICS_FRAMES: int = 8
+"""Leading frames whose median MoGe-2 intrinsics calibrate a run without a calibration file."""
 
-    return K_33_original
+
+def load_intrinsics_model() -> Any:
+    """MoGe-2 ViT-L geometry predictor: monoprior's TensorRT engines when TensorRT imports, else Torch."""
+    from monopriors.models.moge_v2 import MoGeV2TorchPredictor, MoGeV2TrtPredictor
+
+    if importlib.util.find_spec("tensorrt") is not None and importlib.util.find_spec("trtkit") is not None:
+        return MoGeV2TrtPredictor(encoder="vitl", heads="geometry")
+    return MoGeV2TorchPredictor(encoder="vitl", heads="geometry")
+
+
+def estimate_intrinsics(bgr_b3hw: UInt8[Tensor, "b 3 h w"], model: Any) -> Float32[Tensor, "4"]:
+    """Median ``[fx, fy, cx, cy]`` in pixels of the batch's MoGe-2 intrinsics."""
+    rgb_bhw3: UInt8[Tensor, "b h w 3"] = bgr_b3hw.flip(1).permute(0, 2, 3, 1).contiguous()
+    with torch.inference_mode():
+        K_norm_b33: Float32[Tensor, "b 3 3"] = model.predict_geometry(rgb_bhw3).intrinsics_b33
+    height, width = bgr_b3hw.shape[-2:]
+    normalized: Float32[Tensor, "b 4"] = torch.stack(
+        [K_norm_b33[:, 0, 0], K_norm_b33[:, 1, 1], K_norm_b33[:, 0, 2], K_norm_b33[:, 1, 2]], dim=1
+    )
+    scale: Float32[Tensor, "4"] = torch.tensor([width, height, width, height], dtype=torch.float32, device=normalized.device)
+    return (normalized.median(dim=0).values * scale).float()
 
 
 # ── Main pipeline generator ────────────────────────────────────────────
@@ -492,11 +363,10 @@ def run_dpvo_pipeline(
     calib: str | None = None,
     stride: int = 1,
     skip: int = 0,
-    dust3r_model: AsymmetricCroCo3DStereo | None = None,
+    intrinsics_model: Any | None = None,
     parent_log_path: Path = Path("world"),
     handle: DPVOPipelineHandle | None = None,
     recording: rr.RecordingStream | None = None,
-    jpg_quality: int = 90,
     timeit: bool = False,
     max_frames: int = 0,
 ) -> Generator[str, None, None]:
@@ -506,159 +376,142 @@ def run_dpvo_pipeline(
     frame.  Both the CLI and Gradio UI consume it identically — the CLI
     exhausts it silently while Gradio yields intermediate Rerun bytes.
 
-    1. Spawns a background ``Process`` to read frames into a shared queue.
-    2. Optionally estimates camera intrinsics with DUSt3R when no calibration
-       file is provided.
-    3. Feeds each frame into the DPVO SLAM system.
-    4. Logs live trajectory, point cloud, and images to Rerun after the
-       system is initialized.
-    5. Runs 12 additional update iterations after all frames are consumed
-       for final refinement.
-    6. Populates ``handle.prediction`` and ``handle.elapsed_time``.
+    1. Logs a video once as an H.264 VideoStream on the ``video_time`` timeline.
+    2. Decodes frames on the GPU (video) or in a background process (images).
+    3. Without a calibration file, estimates the intrinsics with MoGe-2 from
+       the median of the first :data:`INTRINSICS_FRAMES` frames.
+    4. Feeds each frame into the DPVO SLAM system and logs the camera pose
+       per frame and the point cloud when a keyframe joins the buffer.
+    5. Populates ``handle.prediction`` and ``handle.elapsed_time``.
 
     Args:
         dpvo_config: DPVO solver configuration.
         network_path: File path to the pre-trained DPVO checkpoint.
         imagedir: Path to an image directory or video file.
-        calib: Path to a calibration text file (``fx fy cx cy`` per line),
-            or ``None`` to auto-estimate intrinsics via DUSt3R.
+        calib: Path to a calibration text file (``fx fy cx cy`` of the native
+            video or images), or ``None`` to estimate intrinsics with MoGe-2.
         stride: Keep every *stride*-th frame.
         skip: Number of leading frames to discard.
-        dust3r_model: Pre-loaded DUSt3R model (Gradio singleton).
-            ``None`` loads one on-the-fly (CLI path).
+        intrinsics_model: Pre-loaded MoGe-2 predictor (Gradio singleton).
+            ``None`` loads one when needed (CLI path).
         parent_log_path: Rerun entity path prefix.
         handle: Mutable handle to store results in.
         recording: Rerun recording stream for Gradio (thread-local).
-            ``None`` uses the global recording (CLI).
-        jpg_quality: JPEG compression quality (0--100) for Rerun image logging.
+            ``None`` uses the active recording (CLI).
         timeit: If ``True``, print per-iteration timing via ``Timer``.
+        max_frames: Maximum number of frames to process (0 = no limit).
 
     Yields:
         Status message strings (e.g. ``"Frame 42/200"``).
     """
-    slam: DPVO | None = None
+    is_video: bool = Path(imagedir).is_file()
+    total_frames: int = num_frames(imagedir, stride, skip)
+    if max_frames > 0:
+        total_frames = min(total_frames, max_frames)
 
-    with FrameReader(imagedir, calib, stride, skip) as (queue, total_frames):
-        # Per rerun#9244, a Transform3D on the view origin entity is invisible.
-        # Set the Spatial3DView origin to "/" so the gravity-alignment transform
-        # on parent_log_path is visible.  No ViewCoordinates needed — the orient
-        # transform handles the scene orientation directly (same as mast3r-slam).
-        cam_image_path: str = f"{parent_log_path}/camera/pinhole/image"
-        rr.send_blueprint(
-            rr.blueprint.Blueprint(
-                rr.blueprint.Horizontal(
-                    rr.blueprint.Spatial3DView(
-                        origin="/",
-                        name="3D",
-                        eye_controls=rr.blueprint.archetypes.EyeControls3D(spin_speed=0.25),
-                    ),
-                    rr.blueprint.Spatial2DView(origin=cam_image_path, name="Camera"),
-                    column_shares=[3, 2],
-                ),
-                collapse_panels=True,
-            )
+    cam_image_path: str = f"{parent_log_path}/camera/pinhole/image"
+    rr.send_blueprint(dpvo_blueprint(parent_log_path))
+
+    start: float = timer()
+
+    video_times_ns: ndarray | None = None
+    if is_video:
+        yield "Logging the source video..."
+        video_times_ns = log_video(
+            Path(imagedir),
+            Path(cam_image_path),
+            timeline="video_time",
+            recording=recording if recording is not None else rr.get_data_recording(),
+            output_codec=rr.VideoCodec.H264,
         )
 
-        start: float = timer()
+    frames: Iterator[Frame] = video_frames(Path(imagedir), stride, skip) if is_video else image_dir_frames(imagedir, stride, skip)
+    if max_frames > 0:
+        frames = islice(frames, max_frames)
+    head: list[Frame] = list(islice(frames, INTRINSICS_FRAMES))
+    if not head:
+        yield "No frames processed"
+        return
 
-        # If no calibration file was provided, use DUSt3R to predict intrinsics
-        # from the very first frame pulled off the reader queue.
-        intri_np_dust3r: Float32[ndarray, "4"] | None = None
-        if calib is None:
-            yield "Estimating camera intrinsics with DUSt3R..."
-            if dust3r_model is None:
-                dust3r_device: str = (
-                    "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-                )
-                dust3r_model = AsymmetricCroCo3DStereo.from_pretrained("naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt").to(
-                    dust3r_device
-                )
+    # SLAM-resolution intrinsics; calibration files describe the native video or images.
+    slam_scale: float = VIDEO_SCALE if is_video else 1.0
+    if calib is not None:
+        K_33, _ = load_calib(calib)
+        native: Float32[ndarray, "4"] = np.array([K_33[0, 0], K_33[1, 1], K_33[0, 2], K_33[1, 2]], dtype=np.float32)
+        intrinsics: Float32[Tensor, "4"] = torch.from_numpy(native * slam_scale).cuda()
+    else:
+        yield "Estimating camera intrinsics with MoGe-2..."
+        intrinsics = estimate_intrinsics(
+            torch.stack([frame.bgr_3hw for frame in head]),
+            intrinsics_model if intrinsics_model is not None else load_intrinsics_model(),
+        )
+
+    # The pinhole matches what the 2D view shows: the native video, or the cropped images.
+    # Cropping keeps the top-left corner, so the principal point needs no shift.
+    slam_h, slam_w = head[0].bgr_3hw.shape[1:]
+    pinhole_hw: tuple[int, int] = video_hw(Path(imagedir)) if is_video else (slam_h, slam_w)
+    pinhole_K: Float32[ndarray, "4"] = intrinsics.numpy(force=True) / slam_scale
+    rr.log(
+        f"{parent_log_path}/camera/pinhole",
+        rr.Pinhole(
+            height=pinhole_hw[0],
+            width=pinhole_hw[1],
+            focal_length=[float(pinhole_K[0]), float(pinhole_K[1])],
+            principal_point=[float(pinhole_K[2]), float(pinhole_K[3])],
+            image_plane_distance=1,
+        ),
+        static=True,
+    )
+
+    slam: DPVO = DPVO(dpvo_config, network_path, ht=slam_h, wd=slam_w)
+    path_list: list[list[float]] = []
+    last_orient_n: int = 0
+    last_points_n: int = 0
+
+    with tqdm(total=total_frames, desc="Processing Frames") as pbar:
+        for frame in chain(head, frames):
+            if video_times_ns is not None:
+                rr.set_time("video_time", duration=np.timedelta64(int(video_times_ns[frame.source_index]), "ns"))
             else:
-                dust3r_device = next(dust3r_model.parameters()).device.type
+                rr.set_time("timestep", sequence=frame.t)
+                assert frame.bgr_hw3 is not None
+                rr.log(cam_image_path, rr.Image(frame.bgr_hw3, color_model=rr.ColorModel.BGR).compress(jpeg_quality=90))
 
-            _, bgr_hw3, _ = queue.get()
-            K_33_pred: Float32[ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
-            intri_np_dust3r = np.array([K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]])
+            with Timer("SLAM", enabled=timeit):
+                slam(frame.t, frame.bgr_3hw, intrinsics)
 
-        # path list for visualizing the trajectory
-        path_list: list[list[float]] = []
-        last_orient_n: int = 0
-        frame_idx: int = 0
+            if slam.is_initialized:
+                path_list, last_orient_n = log_trajectory(
+                    parent_log_path=parent_log_path,
+                    cam_se3_world_buffer=slam.poses_,
+                    points=slam.points_,
+                    colors=slam.colors_,
+                    path_list=path_list,
+                    last_orient_n=last_orient_n,
+                    log_points=slam.n > last_points_n,
+                )
+                last_points_n = slam.n
 
-        with tqdm(total=total_frames, desc="Processing Frames") as pbar:
-            while True:
-                t: int
-                bgr_hw3: UInt8[ndarray, "h w 3"]
-                intri_np: Float32[ndarray, "4"]
-                (t, bgr_hw3, intri_np_calib) = queue.get()
-                if calib is not None:
-                    assert intri_np_calib is not None, "Calibration file did not provide intrinsics"
-                    intri_np = intri_np_calib.astype(np.float32)
-                else:
-                    assert intri_np_dust3r is not None, (
-                        "DUSt3R intrinsics must be estimated when no calib file is provided"
-                    )
-                    intri_np = intri_np_dust3r
-                # queue will have a (-1, image, intrinsics) tuple when the reader is done
-                if t < 0:
-                    break
-                if max_frames > 0 and frame_idx >= max_frames:
-                    break
+            pbar.update(1)
+            yield f"Frame {frame.t + 1}/{total_frames}"
 
-                rr.set_time("timestep", sequence=t)
+    # Terminate: runs loop closure finalization + 12 BA iterations
+    yield "Running final bundle adjustment..."
 
-                bgr_3hw: UInt8[Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
-                intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).float().cuda()
+    total_time: float = timer() - start
+    print(f"Total time: {total_time:.2f}s")
 
-                if slam is None:
-                    slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
+    final_poses, tstamps = slam.terminate()
+    dpvo_pred: DPVOPrediction = DPVOPrediction(
+        final_poses=final_poses,
+        tstamps=tstamps,
+        final_points=slam.points_,
+        final_colors=slam.colors_,
+    )
 
-                with Timer("SLAM", enabled=timeit):
-                    slam(t, bgr_3hw, intri_torch)
-
-                if slam.is_initialized:
-                    cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
-                    points: Float32[Tensor, "num_points 3"] = slam.points_
-                    colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
-                    path_list, last_orient_n = log_trajectory(
-                        parent_log_path=parent_log_path,
-                        cam_se3_world_buffer=cam_se3_world_buffer,
-                        points=points,
-                        colors=colors,
-                        intri_np=intri_np,
-                        bgr_hw3=bgr_hw3,
-                        path_list=path_list,
-                        last_orient_n=last_orient_n,
-                        jpg_quality=jpg_quality,
-                    )
-
-                frame_idx += 1
-                pbar.update(1)
-                yield f"Frame {frame_idx}/{total_frames}"
-
-        if slam is None:
-            yield "No frames processed"
-            return
-
-        # Terminate: runs loop closure finalization + 12 BA iterations
-        yield "Running final bundle adjustment..."
-
-        total_time: float = timer() - start
-        print(f"Total time: {total_time:.2f}s")
-
-        final_poses, tstamps = slam.terminate()
-        final_points: Float32[Tensor, "num_points 3"] = slam.points_
-        final_colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
-        dpvo_pred: DPVOPrediction = DPVOPrediction(
-            final_poses=final_poses,
-            tstamps=tstamps,
-            final_points=final_points,
-            final_colors=final_colors,
-        )
-
-        if handle is not None:
-            handle.prediction = dpvo_pred
-            handle.elapsed_time = total_time
+    if handle is not None:
+        handle.prediction = dpvo_pred
+        handle.elapsed_time = total_time
 
 
 def dpvo_inference(config: DPVOInferenceConfig) -> None:

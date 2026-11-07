@@ -1,36 +1,118 @@
-"""Frame reader utilities for feeding images to the DPVO pipeline.
+"""Frame sources for the DPVO pipeline.
 
-Provides two multiprocessing-friendly generator functions that load frames
-from either a directory of images (:func:`image_stream`) or a video file
-(:func:`video_stream`), pair them with camera intrinsics, and push
-``(timestamp, image, intrinsics)`` tuples into a :class:`multiprocessing.Queue`.
+Both sources yield :class:`Frame` tuples whose ``bgr_3hw`` is already on CUDA:
 
-The sentinel tuple ``(-1, last_image, last_intrinsics)`` signals end-of-stream.
+* :func:`video_frames` decodes a video on NVDEC (simplecv ``TorchCodecVideoReader``),
+  halves it with an area resize on the GPU and never copies a frame to the host.
+* :func:`image_dir_frames` reads an image directory in a background process
+  (:class:`FrameReader`) and keeps the host copy for image logging.
 
-Images are cropped so that both height and width are divisible by 16,
+Frames are cropped so that both height and width are divisible by 16,
 as required by the stride-4 feature extractor (which itself has a stride-2
 convolution followed by stride-2 pooling).
 """
 
-from __future__ import annotations
-
 import os
+from collections.abc import Iterator
 from itertools import chain
 from multiprocessing import Process
 from multiprocessing import Queue as MpQueue
 from multiprocessing.queues import Queue
 from pathlib import Path
 from types import TracebackType
+from typing import NamedTuple
 
 import cv2
 import numpy as np
+import torch
+import torch.nn.functional as F
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
-from simplecv.video_io import VideoReader
+from simplecv.video_io import TorchCodecVideoReader
+from torch import Tensor
+from torchcodec.decoders import VideoDecoder, VideoStreamMetadata
+
+VIDEO_SCALE: float = 0.5
+"""Video frames are halved before DPVO to reduce compute; calibration files describe the native video."""
+
+
+class Frame(NamedTuple):
+    """One frame handed to DPVO."""
+
+    t: int
+    """Index among the processed (strided) frames."""
+    source_index: int
+    """Index in the source video or sorted image list."""
+    bgr_3hw: UInt8[Tensor, "3 h w"]
+    """BGR image on CUDA, cropped to multiples of 16."""
+    bgr_hw3: UInt8[ndarray, "h w 3"] | None
+    """Host copy for image logging; ``None`` for video, which is logged once as a VideoStream."""
+
+
+def crop16(height: int, width: int) -> tuple[int, int]:
+    """Largest ``(height, width)`` divisible by 16 that fits the input."""
+    return height - height % 16, width - width % 16
+
+
+def video_frames(video_path: Path, stride: int, skip: int = 0) -> Iterator[Frame]:
+    """Decode a video on the GPU and yield every ``stride``-th frame after ``skip``.
+
+    Keeps the last frame of each complete stride group (source index
+    ``skip + i * stride + stride - 1``), halves it with an area resize and
+    crops it to multiples of 16. Frames stay on CUDA.
+    """
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(video_path, device="cuda")
+    half_hw: tuple[int, int] = (round(reader.source_height * VIDEO_SCALE), round(reader.source_width * VIDEO_SCALE))
+    crop_h, crop_w = crop16(*half_hw)
+    try:
+        t: int = 0
+        source_index: int = -1
+        while (rgb_3hw := reader.read()) is not None:
+            source_index += 1
+            if source_index < skip or (source_index - skip) % stride != stride - 1:
+                continue
+            half: Tensor = F.interpolate(rgb_3hw[None].float(), size=half_hw, mode="area")[0]
+            bgr_3hw: UInt8[Tensor, "3 h w"] = half.round().to(torch.uint8)[[2, 1, 0], :crop_h, :crop_w].contiguous()
+            yield Frame(t, source_index, bgr_3hw, None)
+            t += 1
+    finally:
+        reader.close()
+
+
+def image_dir_frames(imagedir: str, stride: int, skip: int = 0) -> Iterator[Frame]:
+    """Yield every ``stride``-th image of a directory after ``skip``, read in a background process."""
+    with FrameReader(imagedir, stride, skip) as queue:
+        while True:
+            t, bgr_hw3 = queue.get()
+            if t < 0:
+                return
+            yield Frame(t, skip + t * stride, torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda(), bgr_hw3)
+
+
+def _video_metadata(video_path: Path) -> VideoStreamMetadata:
+    """Container metadata of the video's best stream, as TorchCodec decodes it."""
+    return VideoDecoder(video_path, seek_mode="approximate").metadata
+
+
+def video_hw(video_path: Path) -> tuple[int, int]:
+    """Native ``(height, width)`` of a video's frames."""
+    metadata: VideoStreamMetadata = _video_metadata(video_path)
+    return int(metadata.height or 0), int(metadata.width or 0)
+
+
+def num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
+    """Number of frames a source yields after ``skip`` and ``stride``."""
+    if os.path.isdir(video_or_image_dir):
+        total: int = len(
+            [name for name in os.listdir(video_or_image_dir) if os.path.isfile(os.path.join(video_or_image_dir, name))]
+        )
+    else:
+        total = int(_video_metadata(Path(video_or_image_dir)).num_frames or 0)
+    return max(0, (total - skip) // stride)
 
 
 class FrameReader:
-    """Context manager that runs a frame reader in a background process.
+    """Context manager that runs :func:`image_stream` in a background process.
 
     Automatically kills and joins the reader process on exit — whether
     the block completes normally, raises an exception, or the generator
@@ -39,28 +121,26 @@ class FrameReader:
 
     Usage::
 
-        with FrameReader(imagedir, calib, stride) as (queue, total_frames):
+        with FrameReader(imagedir, stride) as queue:
             while True:
-                t, image, intrinsics = queue.get()
+                t, image = queue.get()
                 if t < 0:
                     break
                 ...
     """
 
-    def __init__(self, imagedir: str, calib: str | None, stride: int, skip: int = 0) -> None:
+    def __init__(self, imagedir: str, stride: int, skip: int = 0) -> None:
         self.imagedir = imagedir
-        self.calib = calib
         self.stride = stride
         self.skip = skip
         self._queue: Queue = MpQueue(maxsize=8)
         self._process: Process | None = None
 
-    def __enter__(self) -> tuple[Queue, int]:
-        stream_fn = image_stream if os.path.isdir(self.imagedir) else video_stream
-        self._process = Process(target=stream_fn, args=(self._queue, self.imagedir, self.calib, self.stride, self.skip))
+    def __enter__(self) -> Queue:
+        self._process = Process(target=image_stream, args=(self._queue, self.imagedir, self.stride, self.skip))
         self._process.daemon = True
         self._process.start()
-        return self._queue, _calculate_num_frames(self.imagedir, self.stride, self.skip)
+        return self._queue
 
     def __exit__(self, _exc_type: type[BaseException] | None, _exc_val: BaseException | None, _exc_tb: TracebackType | None) -> None:
         if self._process is not None:
@@ -68,20 +148,6 @@ class FrameReader:
                 self._process.kill()
             self._process.join(timeout=5)
             self._process = None
-
-
-def _calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
-    """Calculate the effective number of frames after applying skip and stride."""
-    total_frames: int = 0
-    if os.path.isdir(video_or_image_dir):
-        total_frames = len(
-            [name for name in os.listdir(video_or_image_dir) if os.path.isfile(os.path.join(video_or_image_dir, name))]
-        )
-    else:
-        cap = cv2.VideoCapture(video_or_image_dir)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-    return max(0, (total_frames - skip) // stride)
 
 
 def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n"]]:
@@ -114,141 +180,30 @@ def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n
     return K, calib_data
 
 
-def image_stream(
-    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0  # queue carries tuple[int, ndarray | None, ndarray | None]
-) -> None:
+def image_stream(queue: Queue, imagedir: str, stride: int, skip: int = 0) -> None:
     """Read frames from a directory of images and push them to a queue.
 
     Images are sorted lexicographically by filename.  The ``skip`` and
     ``stride`` parameters allow subsampling: ``skip`` initial frames are
     discarded, then every ``stride``-th frame is loaded.
 
-    Each item pushed to the queue is a 3-tuple
-    ``(timestamp: int, image: ndarray[h, w, 3], intrinsics: ndarray[4] | None)``.
-    A sentinel ``(t=-1, ...)`` signals end-of-stream.
+    Each item pushed to the queue is ``(timestamp: int, image: ndarray[h, w, 3])``.
+    A sentinel ``(-1, None)`` signals end-of-stream.
 
     Args:
-        queue: Multiprocessing queue to push ``(t, image, intrinsics)``
-            tuples into.
+        queue: Multiprocessing queue to push ``(t, image)`` tuples into.
         imagedir: Directory containing image files (png, jpeg, jpg).
-        calib: Path to calibration file, or ``None`` if intrinsics are
-            unavailable (in which case ``intrinsics`` is set to ``None``).
         stride: Frame stride -- only every ``stride``-th image is loaded.
         skip: Number of initial frames to skip before striding.
     """
-    calib_data: Float64[ndarray, "n"] | None = None
-    fx: float = 0.0
-    fy: float = 0.0
-    cx: float = 0.0
-    cy: float = 0.0
-
-    if calib is not None:
-        K: Float64[ndarray, "3 3"]
-        K, calib_data = load_calib(calib)
-        fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
-
     img_exts: list[str] = ["*.png", "*.jpeg", "*.jpg"]
-    image_list: list[Path] = sorted(chain.from_iterable(Path(imagedir).glob(e) for e in img_exts))[
-        skip::stride
-    ]
-
-    image: UInt8[ndarray, "h w 3"] | None = None
-    intrinsics: Float64[ndarray, "4"] | None = None
+    image_list: list[Path] = sorted(chain.from_iterable(Path(imagedir).glob(e) for e in img_exts))[skip::stride]
 
     for t, imfile in enumerate(image_list):
-        image = cv2.imread(str(imfile))
+        image: UInt8[ndarray, "h w 3"] | None = cv2.imread(str(imfile))
         assert image is not None, f"Failed to read image: {imfile}"
-
-        if calib_data is not None:  # noqa: SIM108
-            intrinsics = np.array([fx, fy, cx, cy])
-        else:
-            intrinsics = None
-
-        h: int
-        w: int
-        h, w, _ = image.shape
-        # Crop to make dimensions divisible by 16 (required by feature extractor)
-        image = image[: h - h % 16, : w - w % 16]
-
-        queue.put((t, image, intrinsics))
+        crop_h, crop_w = crop16(image.shape[0], image.shape[1])
+        queue.put((t, image[:crop_h, :crop_w]))
 
     # Sentinel: t=-1 signals end of stream
-    queue.put((-1, image, intrinsics))
-
-
-def video_stream(
-    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0  # queue carries tuple[int, ndarray | None, ndarray | None]
-) -> None:
-    """Read frames from a video file and push them to a queue.
-
-    Uses ``simplecv.video_io.VideoReader`` to decode frames.  Frames are downscaled by
-    0.5x (both axes) to reduce memory and compute requirements.  The
-    intrinsics are correspondingly scaled by 0.5.
-
-    Each item pushed to the queue is a 3-tuple
-    ``(timestamp: int, image: ndarray[h, w, 3], intrinsics: ndarray[4] | None)``.
-    A sentinel ``(t=-1, ...)`` signals end-of-stream.
-
-    Args:
-        queue: Multiprocessing queue to push ``(t, image, intrinsics)``
-            tuples into.
-        imagedir: Path to the video file (despite the parameter name).
-        calib: Path to calibration file, or ``None``.
-        stride: Frame stride -- only every ``stride``-th decoded frame is
-            kept.
-        skip: Number of initial frames to skip before striding.
-    """
-    calib_data: Float64[ndarray, "n"] | None = None
-    fx: float = 0.0
-    fy: float = 0.0
-    cx: float = 0.0
-    cy: float = 0.0
-
-    if calib is not None:
-        K: Float64[ndarray, "3 3"]
-        K, calib_data = load_calib(calib)
-        fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
-
-    video_reader: VideoReader = VideoReader(Path(imagedir))
-
-    t: int = 0
-
-    image: UInt8[ndarray, "h w 3"] | None = None
-    intrinsics: Float64[ndarray, "4"] | None = None
-
-    # Skip initial frames
-    for _ in range(skip):
-        image = video_reader.read()
-
-    while True:
-        # Read and discard (stride - 1) frames, keeping only the stride-th
-        for _ in range(stride):
-            image = video_reader.read()
-            if image is None:
-                break
-
-        if image is None:
-            break
-
-        # if len(calib) > 4:
-        #     image = cv2.undistort(image, K, calib[4:])
-
-        # Downscale by 2x to reduce compute
-        image = cv2.resize(image, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-        h: int
-        w: int
-        h, w, _ = image.shape
-        # Crop to make dimensions divisible by 16
-        image = image[: h - h % 16, : w - w % 16]
-
-        if calib_data is not None:  # noqa: SIM108
-            # Scale intrinsics by 0.5 to match the downscaled image
-            intrinsics = np.array([fx * 0.5, fy * 0.5, cx * 0.5, cy * 0.5])
-        else:
-            intrinsics = None
-        queue.put((t, image, intrinsics))
-
-        t += 1
-
-    # Sentinel: t=-1 signals end of stream
-    queue.put((-1, image, intrinsics))
+    queue.put((-1, None))
