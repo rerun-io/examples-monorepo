@@ -1,4 +1,4 @@
-"""Gen-HumanWholeBody base layer and sidecar: one MCAP's cameras, rig, IMU and frames, read through lenses.
+"""DAS-Ego base layer and sidecar (Gen-HumanWholeBody and Gen-HumanEgo): one MCAP's cameras, rig, IMU and frames, read through lenses.
 
 The base layer is the only one that reads the MCAP. Everything a derived layer needs besides it is the
 sidecar: the MCAP's non-camera topics, still protobuf-decoded and on the MCAP clock, in an rrd that
@@ -25,7 +25,7 @@ from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
 from dataforge import schema, writing
-from dataforge.datasets.genrobot_source import (
+from dataforge.das_ego.source import (
     DOMAIN_LEVELS,
     DUPLICATE_TOPICS,
     EEF_POSE_TOPIC,
@@ -123,10 +123,20 @@ EXPOSURE_FIELDS: tuple[str, ...] = ("integration_time", "analog_gain", "aperture
 """Every per-image field besides the pixels, the stamp and the constant format and frame id."""
 
 
-def exposure_lens(cam: int) -> rrc.DeriveLens:
+def exposure_fields(message_type: pa.StructType) -> tuple[str, ...]:
+    """The ``EXPOSURE_FIELDS`` a camera message schema carries, in their order.
+
+    Older DAS-Ego firmware ships ``CompressedImage`` without any of them. A selector on an absent field yields
+    no rows, and the lens then builds a malformed chunk, so only the fields present are derived.
+    """
+    names: set[str] = {message_type.field(index).name for index in range(message_type.num_fields)}
+    return tuple(name for name in EXPOSURE_FIELDS if name in names)
+
+
+def exposure_lens(cam: int, fields: Sequence[str] = EXPOSURE_FIELDS) -> rrc.DeriveLens:
     """The per-image exposure fields as they are shipped."""
     lens: rrc.DeriveLens = rrc.DeriveLens("foxglove.CompressedImage:message", output_entity=exposure_path(cam))
-    for name in EXPOSURE_FIELDS:
+    for name in fields:
         lens = lens.to_component(name, rrc.Selector(f".{name}"))
     return lens
 
@@ -268,7 +278,7 @@ def video_start(file: EpisodeFile, cam: int, *, t0_ns: int, end_ns: int) -> Vide
 
 def base_stream(
     file: EpisodeFile, retimer: Retimer,
-    *, codecs: Sequence[rrc.Chunk],
+    *, codecs: Sequence[rrc.Chunk], exposure: Sequence[str] = EXPOSURE_FIELDS,
 ) -> tuple[rrc.LazyChunkStream, list[ChunkBatcher]]:
     """Cameras from their first keyframe, rig pose, IMU and frames of one MCAP, shaped by lenses and retimed."""
     # Decode/decompress each MCAP block once. Split branches share this reader;
@@ -280,7 +290,7 @@ def base_stream(
         camera, stream = stream.split(content=camera_topic(cam))
         batcher = ChunkBatcher(static_chunks=(codecs[cam],))
         batchers.append(batcher)
-        cameras.append(camera.lenses([video_lens(cam), exposure_lens(cam)]).flat_map(batcher))
+        cameras.append(camera.lenses([video_lens(cam), *([exposure_lens(cam, exposure)] if exposure else [])]).flat_map(batcher))
     stream = stream.lenses(rig_pose_lens(), content=EEF_POSE_TOPIC)
     stream = stream.lenses(imu_lenses(), content=IMU_TOPIC)
     stream = stream.lenses(frames_lens(), content=FRAME_VALIDITY_TOPIC)
@@ -320,11 +330,12 @@ class BaseCensus:
     """``/frames`` rows."""
 
 
-def write_sidecar(mcap: Path, target: Path, *, recording_id: str) -> None:
+def write_sidecar(mcap: Path, target: Path, *, recording_id: str, excluded_topics: Sequence[str] = ()) -> None:
     """Keep the MCAP's non-camera topics, protobuf-decoded, plus its statistics, in an rrd beside the layers.
 
     Left out: the camera packets (they are the base layer's video), the 960x780 calibration of an image
-    the file does not contain, and the two topics that duplicate others (``DUPLICATE_TOPICS``).
+    the file does not contain, the two topics that duplicate others (``DUPLICATE_TOPICS``), and
+    ``excluded_topics`` (Gen-HumanEgo's depth and its two H.264 visualisations).
 
     The audio (16 kHz stereo PCM16) lives here and nowhere else: exoego:v2 has no audio slot. Newer
     Rerun releases can log audio, so a later layer can add it from this file without the MCAP.
@@ -332,7 +343,7 @@ def write_sidecar(mcap: Path, target: Path, *, recording_id: str) -> None:
     excluded: list[str] = [
         *(topic_pattern(camera_topic(cam)) for cam in range(NUM_CAMERAS)),
         *(topic_pattern(resize_calibration_topic(cam)) for cam in range(NUM_CAMERAS)),
-        *(topic_pattern(topic) for topic in DUPLICATE_TOPICS),
+        *(topic_pattern(topic) for topic in (*DUPLICATE_TOPICS, *excluded_topics)),
     ]
     stream: rrc.LazyChunkStream = rrc.McapReader(mcap, decoders=list(SIDECAR_DECODERS), exclude_topic_regex=excluded).stream()
     with writing.atomic_write(target) as temp:
@@ -395,7 +406,8 @@ def write_base_layer(
             rr.log(schema.instruction_path(), rr.TextDocument(episode.annotation.bold_mark, media_type=rr.MediaType.MARKDOWN), static=True, recording=recording)
         codecs = [rrc.Chunk.from_columns(schema.video_path(RIG, cam), indexes=[], columns=rr.VideoStream.columns(codec=[rr.VideoCodec.H264])) for cam in range(NUM_CAMERAS)]
         recording.send_chunks(codecs)
-        stream, batchers = base_stream(file, retimer, codecs=codecs)
+        message_type: pa.StructType = next(messages(file.stream([camera_topic(0)])))[1].type
+        stream, batchers = base_stream(file, retimer, codecs=codecs, exposure=exposure_fields(message_type))
         recording.send_chunks(stream)
         for batcher in batchers:
             recording.send_chunks(batcher.flush())

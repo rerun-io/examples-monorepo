@@ -3,7 +3,7 @@
 ## Source
 
 - Hugging Face dataset `genrobot2025/Gen-HumanWholeBody`, pinned at commit
-  `22a037591598f07992b2488e5eacc62b06a1036d` (`genrobot_source.REVISION`). The repository
+  `22a037591598f07992b2488e5eacc62b06a1036d` (`dataforge.das_ego.source.REVISION`). The repository
   changed on the day of the port, so `--revision` accepts only a full commit sha. The publisher later rewrote its history:
   the first pin, `79fa81bf`, no longer exists. The 48 pilot rrds still name it in `hf_revision`; checked 2026-10-26, the 46
   pilot MCAPs fetched at it have the same SHA-256 at `22a03759`, and the release has the same 15,943 files and 8.79 TB.

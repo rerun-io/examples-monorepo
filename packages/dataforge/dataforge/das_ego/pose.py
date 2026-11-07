@@ -1,4 +1,7 @@
-"""Gen-HumanWholeBody derived layers: ``pose``, ``actions``, ``projections`` and ``hand_mesh``, all from the sidecar.
+"""DAS-Ego derived layers: ``pose``, ``actions``, ``projections`` and ``hand_mesh``, all from the sidecar.
+
+Shared by Gen-HumanWholeBody and Gen-HumanEgo; the second ships no body track, so its layers leave the body out
+(``with_body``).
 
 The body track (``human_pose_fuse_smooth_concat``) is an SMPL-X-shaped skeleton, not SMPL-X parameters:
 its 22 joint positions are good, its rotations are not (no forward kinematics of them keeps a constant
@@ -24,7 +27,7 @@ from simplecv.ops.smplx.smplx_coco133 import smplx_joints_to_coco133_xyzc
 from simplecv.sensors.camera.base_camera import pixels_in_image
 
 from dataforge import actions, hands, meshes, paths, schema
-from dataforge.datasets.genrobot_source import (
+from dataforge.das_ego.source import (
     BODY_TOPIC,
     EEF_POSE_TOPIC,
     SOURCE_HEIGHT,
@@ -70,7 +73,9 @@ MANO_GATE_M: float = 0.002
 MANO_BATCH: int = 256
 """Frames skinned and sent per mesh chunk."""
 MIRROR_X: Float64[ndarray, "3 3"] = np.diag([-1.0, 1.0, 1.0])
-"""The left hand's shipped finger rotations are the right hand's convention: conjugating by this mirrors them."""
+"""The left hand's shipped finger rotations are the right hand's convention: conjugating by this mirrors them.
+
+Some Gen-HumanEgo episodes also ship the left root rotation in that convention; ``check_mano`` finds which."""
 
 
 def body_context() -> rr.AnnotationContext:
@@ -287,11 +292,12 @@ def log_body(recording: rr.RecordingStream, track: PoseTrack) -> None:
     log_points(recording, path, times_ns=track.times_ns, frame_indices=track.frame_indices, positions=track.body)
 
 
-def write_pose_layer(recording: rr.RecordingStream, track: PoseTrack) -> None:
-    """The ``pose`` layer, written where ``PoseTrack.has_pose``: COCO-133, the body22 skeleton, both hands' wrists, MANO
-    parameters and flags."""
+def write_pose_layer(recording: rr.RecordingStream, track: PoseTrack, *, with_body: bool = True) -> None:
+    """The ``pose`` layer, written where ``PoseTrack.has_pose``: COCO-133, the body22 skeleton (``with_body``), both hands' wrists,
+    MANO parameters and flags."""
     hands.log_keypoints3d(recording, times_ns=track.times_ns, frame_indices=track.frame_indices, positions=track.coco133, confidence=None)
-    log_body(recording, track)
+    if with_body:
+        log_body(recording, track)
     for side_index, side in enumerate(SIDES):
         hands.log_hand_confidence(
             recording, side, times_ns=track.times_ns, frame_indices=track.frame_indices, confidence=track.hand_present[:, side_index].astype(np.float64)
@@ -319,13 +325,16 @@ def write_pose_layer(recording: rr.RecordingStream, track: PoseTrack) -> None:
             ),
             recording=recording,
         )
+    body: dict[str, pa.Array] = {
+        "body_source": pa.array([BODY_TOPIC], type=pa.string()),
+        "body_rotations": pa.array(["dropped: no constant rest skeleton under forward kinematics"], type=pa.string()),
+        "coverage_body": pa.array([float(np.isfinite(track.body).all(axis=(1, 2)).mean())], type=pa.float64()),
+    }
     recording.send_property(
         POSE_LAYER,
         rr.AnyValues(
-            body_source=pa.array([BODY_TOPIC], type=pa.string()),
-            body_rotations=pa.array(["dropped: no constant rest skeleton under forward kinematics"], type=pa.string()),
+            **(body if with_body else {}),
             hand_confidence=pa.array(["1.0 where the hand message exists; the shipped is_valid is kept under quality/"], type=pa.string()),
-            coverage_body=pa.array([float(np.isfinite(track.body).all(axis=(1, 2)).mean())], type=pa.float64()),
             coverage_left=pa.array([float(track.hand_present[:, 0].mean())], type=pa.float64()),
             coverage_right=pa.array([float(track.hand_present[:, 1].mean())], type=pa.float64()),
             mano_coverage_left=pa.array([float(track.mano_present[:, 0].mean())], type=pa.float64()),
@@ -356,9 +365,9 @@ def smplx22_uv_projected_path(cam: int) -> str:
 
 
 def write_projections_layer(
-    recording: rr.RecordingStream, track: PoseTrack, rig_poses: Float64[ndarray, "f 4 4"], calibrations: Sequence[CameraCalibration]
+    recording: rr.RecordingStream, track: PoseTrack, rig_poses: Float64[ndarray, "f 4 4"], calibrations: Sequence[CameraCalibration], *, with_body: bool = True
 ) -> None:
-    """The ``projections`` layer: COCO-133 and the body22 skeleton through each camera's double-sphere lens.
+    """The ``projections`` layer: COCO-133 and the body22 skeleton (``with_body``) through each camera's double-sphere lens.
 
     A Rerun ``Pinhole`` cannot draw 3D through this lens, so these 2D points are what the fisheye panes show.
     """
@@ -374,6 +383,8 @@ def write_projections_layer(
     hands.log_projections(
         recording, pixels_by_camera(), times_ns=track.times_ns, frame_indices=track.frame_indices, confidence=confidence,
     )  # fmt: skip
+    if not with_body:
+        return
     count: int = len(BODY_NAMES)
     for cam, calibration in enumerate(calibrations):
         path: str = smplx22_uv_projected_path(cam)
@@ -382,21 +393,31 @@ def write_projections_layer(
         log_points(recording, path, times_ns=track.times_ns, frame_indices=track.frame_indices, positions=project(poses[cam], calibration, track.body))
 
 
-def mano_parameters(track: PoseTrack, side_index: int, rows: Int64[ndarray, "n"]) -> tuple[Float32[ndarray, "n 48"], Float32[ndarray, "n 3"]]:
-    """Axis-angle MANO pose (root, then 15 fingers) and translation of some frames of one hand."""
+def mano_parameters(
+    track: PoseTrack, side_index: int, rows: Int64[ndarray, "n"], *, mirror_root: bool = False
+) -> tuple[Float32[ndarray, "n 48"], Float32[ndarray, "n 3"]]:
+    """Axis-angle MANO pose (root, then 15 fingers) and translation of some frames of one hand.
+
+    A left hand's fingers are always mirrored; ``mirror_root`` mirrors its root rotation too (``check_mano``).
+    """
     fingers: Float64[ndarray, "n 15 3 3"] = track.hand_pose[rows, side_index]
+    root: Float64[ndarray, "n 3 3"] = track.global_orient[rows, side_index]
     if SIDES[side_index] == "left":
         fingers = MIRROR_X @ fingers @ MIRROR_X
-    rotations: Float64[ndarray, "n 16 3 3"] = np.concatenate([track.global_orient[rows, side_index][:, None], fingers], axis=1)
+        if mirror_root:
+            root = MIRROR_X @ root @ MIRROR_X
+    rotations: Float64[ndarray, "n 16 3 3"] = np.concatenate([root[:, None], fingers], axis=1)
     pose: Float32[ndarray, "n 48"] = Rotation.from_matrix(rotations.reshape(-1, 3, 3)).as_rotvec().reshape(-1, 48).astype(np.float32)
     return pose, track.global_transl[rows, side_index].astype(np.float32)
 
 
-def skin(track: PoseTrack, side_index: int, rows: Int64[ndarray, "n"]) -> tuple[Float32[ndarray, "n 778 3"], Float32[ndarray, "n 21 3"]]:
+def skin(
+    track: PoseTrack, side_index: int, rows: Int64[ndarray, "n"], *, mirror_root: bool = False
+) -> tuple[Float32[ndarray, "n 778 3"], Float32[ndarray, "n 21 3"]]:
     """MANO vertices and joints of some frames of one hand, each frame with its own shipped shape (betas)."""
     vertices: Float32[ndarray, "n 778 3"] = np.empty((rows.size, 778, 3), dtype=np.float32)
     joints: Float32[ndarray, "n 21 3"] = np.empty((rows.size, 21, 3), dtype=np.float32)
-    parameters: tuple[Float32[ndarray, "n 48"], Float32[ndarray, "n 3"]] = mano_parameters(track, side_index, rows)
+    parameters: tuple[Float32[ndarray, "n 48"], Float32[ndarray, "n 3"]] = mano_parameters(track, side_index, rows, mirror_root=mirror_root)
     shapes: Float32[ndarray, "s 10"]
     shapes, shape_of_row = np.unique(track.betas[rows, side_index].astype(np.float32), axis=0, return_inverse=True)
     for shape_index, shape in enumerate(shapes):
@@ -416,16 +437,25 @@ class ManoCheck:
     """Median joint distance over every joint of every frame with both MANO parameters and bones; NaN without frames."""
     passed: bool
     """Whether the mesh may be written (``MANO_GATE_M``)."""
+    mirror_root: bool = False
+    """Whether the left root rotation is mirrored like its fingers; always False for the right hand."""
 
 
 def check_mano(track: PoseTrack, side_index: int) -> ManoCheck:
-    """Skin every frame of one hand that ships MANO parameters and bones, and compare its 21 joints with the bones."""
+    """Skin every frame of one hand that ships MANO parameters and bones, and compare its 21 joints with the bones.
+
+    The left hand is tried with its root rotation as shipped and mirrored (Gen-HumanEgo ships both, per episode);
+    the convention with the smaller median wins.
+    """
     rows: Int64[ndarray, "n"] = np.flatnonzero(track.mano_present[:, side_index] & track.hand_present[:, side_index])
     if rows.size == 0:
         return ManoCheck(median_m=float("nan"), passed=False)
-    joints: Float32[ndarray, "n 21 3"] = skin(track, side_index, rows)[1]
-    median: float = float(np.median(np.linalg.norm(joints - track.bones[rows, side_index], axis=-1)))
-    return ManoCheck(median_m=median, passed=median < MANO_GATE_M)
+    candidates: list[ManoCheck] = []
+    for mirror_root in (False, True) if SIDES[side_index] == "left" else (False,):
+        joints: Float32[ndarray, "n 21 3"] = skin(track, side_index, rows, mirror_root=mirror_root)[1]
+        median: float = float(np.median(np.linalg.norm(joints - track.bones[rows, side_index], axis=-1)))
+        candidates.append(ManoCheck(median_m=median, passed=median < MANO_GATE_M, mirror_root=mirror_root))
+    return min(candidates, key=lambda check: check.median_m)
 
 
 def write_hand_mesh_layer(recording: rr.RecordingStream, track: PoseTrack, checks: tuple[ManoCheck, ManoCheck]) -> None:
@@ -444,13 +474,15 @@ def write_hand_mesh_layer(recording: rr.RecordingStream, track: PoseTrack, check
             batch: slice = slice(start, start + MANO_BATCH)
             rows: Int64[ndarray, "n"] = start + np.flatnonzero(present[batch])
             meshes.log_mesh_batch(
-                recording, path, times_ns=track.times_ns[batch], frame_indices=track.frame_indices[batch], vertices=skin(track, side_index, rows)[0],
+                recording, path, times_ns=track.times_ns[batch], frame_indices=track.frame_indices[batch],
+                vertices=skin(track, side_index, rows, mirror_root=checks[side_index].mirror_root)[0],
                 trusted=present[batch].tolist(), topology=faces,
             )  # fmt: skip
     recording.send_property(
         paths.HAND_MESH_LAYER,
         rr.AnyValues(
             model=pa.array(["MANO (full pose, no PCA; left shape fix; left finger rotations mirrored)"], type=pa.string()),
+            left_root_mirrored=pa.array([checks[0].mirror_root]),
             gate_m=pa.array([MANO_GATE_M], type=pa.float64()),
             median_joint_error_left_m=pa.array([checks[0].median_m], type=pa.float64()),
             median_joint_error_right_m=pa.array([checks[1].median_m], type=pa.float64()),
