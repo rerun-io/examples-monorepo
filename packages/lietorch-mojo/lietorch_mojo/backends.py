@@ -30,7 +30,7 @@ import torch
 from torch import Tensor
 
 from lietorch_mojo import _lietorch_mojo_backends as _ext
-from lietorch_mojo.metal import gpu_addresses
+from lietorch_mojo.metal import gpu_addresses, install_queue_residency
 
 # Op codes come from the extension (group_ops.mojo), so Python and the kernels cannot disagree.
 _OP_CODES: Final[dict[str, int]] = dict(_ext.op_codes())
@@ -79,6 +79,8 @@ def _runtime(on_gpu: bool) -> object:
     global _gpu_runtime, _cpu_runtime
     if on_gpu:
         if _gpu_runtime is None:
+            if torch.backends.mps.is_available():
+                install_queue_residency()  # before the Mojo context creates its Metal queue
             _gpu_runtime = _ext.create_gpu_runtime()
         return _gpu_runtime
     if _cpu_runtime is None:
