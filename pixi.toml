@@ -3818,6 +3818,22 @@ outputs = [
     "packages/dpvo/dpvo/_cuda_ba*.so",
 ]
 
+# ViPE's DROID/SLAM kernels in Mojo (packages/vipe-mojo, import vipe_mojo): the Mac lane's vipe_ext. Built against
+# lietorch-mojo's runtimes like dpvo's Mojo backend. Not yet a dependency of any environment: until it is, its tests
+# run with PYTHONPATH=packages/vipe-mojo (vipe-mojo-tests).
+[feature.metrictrail.tasks.vipe-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I vipe_mojo/mojo -o vipe_mojo/_vipe_mojo.so vipe_mojo/mojo/_vipe_mojo.mojo"
+cwd = "packages/vipe-mojo"
+description = "Build the Mojo kernels of vipe_mojo (CPU + GPU kernels for the local GPU)"
+inputs = ["packages/vipe-mojo/vipe_mojo/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/vipe-mojo/vipe_mojo/_vipe_mojo.so"]
+
+[feature.metrictrail.tasks.vipe-mojo-tests]
+cmd = "sh -c 'PYTHONPATH=$PIXI_PROJECT_ROOT/packages/vipe-mojo pytest -q -m \"integration or not integration\" \"$@\"' _"
+depends-on = ["lietorch-mojo-build", "vipe-mojo-build"]
+cwd = "packages/vipe-mojo"
+description = "Build and test vipe_mojo against the frozen vipe_ext references (CPU always, CUDA/MPS when present)"
+
 [feature.metrictrail.tasks.metrictrail-check-kernels]
 cmd = "python tools/check_kernels.py"
 depends-on = ["_build-dpvo-cuda-kernels"]
