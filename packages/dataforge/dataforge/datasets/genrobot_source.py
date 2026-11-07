@@ -1,4 +1,4 @@
-"""Gen-HumanWholeBody (GenRobot DAS-Ego) source: Hub paths, one MCAP's typed records, its clock and its lens.
+"""GenRobot DAS-Ego source, shared by Gen-HumanWholeBody and Gen-HumanEgo: Hub paths, one MCAP's typed records, its clock and its lens.
 
 GenRobot publishes no description of the DAS-Ego MCAP beyond its protobuf schemas (the public
 ``genrobot-ai/das-datakit`` documents the DAS gripper, whose protos have no ``T_b_c``). Every
@@ -34,7 +34,7 @@ from serde import serde
 from dataforge.records import SourceT, decode_values
 
 REPO_ID: str = "genrobot2025/Gen-HumanWholeBody"
-"""Hugging Face dataset repository."""
+"""Hugging Face dataset repository of Gen-HumanWholeBody; Gen-HumanEgo pins its own (``gen_humanego``)."""
 REVISION: str = "22a037591598f07992b2488e5eacc62b06a1036d"
 """Pinned Hub commit. The publisher rewrote the history after the port: the first pin (79fa81bf) is gone; this one serves the same files."""
 
@@ -100,8 +100,11 @@ def hand_topic(side: Side) -> str:
     return f"/robot0/handtracking/{side}"
 
 
-HUB_PATH: re.Pattern[str] = re.compile(r"data/((?:[a-z0-9_]+/){2}(?:(?:[a-z0-9_]+/){2})?)([0-9a-f]{2})/([0-9a-f]{32})\.mcap")
-"""``data/<2 or 4 domain levels>/<shard>/<uuid>.mcap``: the only two layouts at the pinned commit."""
+HUB_PATH: re.Pattern[str] = re.compile(r"data/((?:[A-Za-z0-9_ ]+/){2}(?:(?:[A-Za-z0-9_ ]+/){2})?)([0-9a-f]{2})/([0-9a-f]{32})\.mcap")
+"""``data/<2 or 4 domain levels>/<shard>/<uuid>.mcap``: the only two layouts at either pinned commit.
+
+Gen-HumanEgo always has four levels; two of its task directories have a space or capitals
+(``organize sewing supplies``, ``Sewing_kit_assembly``)."""
 
 
 def parse_hub_path(path: str) -> tuple[tuple[str, ...], str]:
@@ -118,7 +121,7 @@ def parse_hub_path(path: str) -> tuple[tuple[str, ...], str]:
     """
     match: re.Match[str] | None = HUB_PATH.fullmatch(path)
     if match is None:
-        raise ValueError(f"not a Gen-HumanWholeBody episode path: {path}")
+        raise ValueError(f"not a DAS-Ego episode path: {path}")
     shard: str = match.group(2)
     uuid: str = match.group(3)
     if not uuid.startswith(shard):

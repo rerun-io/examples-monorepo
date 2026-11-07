@@ -1,4 +1,4 @@
-"""Gen-HumanWholeBody base layer and sidecar: one MCAP's cameras, rig, IMU and frames, read through lenses.
+"""DAS-Ego base layer and sidecar (Gen-HumanWholeBody and Gen-HumanEgo): one MCAP's cameras, rig, IMU and frames, read through lenses.
 
 The base layer is the only one that reads the MCAP. Everything a derived layer needs besides it is the
 sidecar: the MCAP's non-camera topics, still protobuf-decoded and on the MCAP clock, in an rrd that
@@ -320,11 +320,12 @@ class BaseCensus:
     """``/frames`` rows."""
 
 
-def write_sidecar(mcap: Path, target: Path, *, recording_id: str) -> None:
+def write_sidecar(mcap: Path, target: Path, *, recording_id: str, excluded_topics: Sequence[str] = ()) -> None:
     """Keep the MCAP's non-camera topics, protobuf-decoded, plus its statistics, in an rrd beside the layers.
 
     Left out: the camera packets (they are the base layer's video), the 960x780 calibration of an image
-    the file does not contain, and the two topics that duplicate others (``DUPLICATE_TOPICS``).
+    the file does not contain, the two topics that duplicate others (``DUPLICATE_TOPICS``), and
+    ``excluded_topics`` (Gen-HumanEgo's depth and its two H.264 visualisations).
 
     The audio (16 kHz stereo PCM16) lives here and nowhere else: exoego:v2 has no audio slot. Newer
     Rerun releases can log audio, so a later layer can add it from this file without the MCAP.
@@ -332,7 +333,7 @@ def write_sidecar(mcap: Path, target: Path, *, recording_id: str) -> None:
     excluded: list[str] = [
         *(topic_pattern(camera_topic(cam)) for cam in range(NUM_CAMERAS)),
         *(topic_pattern(resize_calibration_topic(cam)) for cam in range(NUM_CAMERAS)),
-        *(topic_pattern(topic) for topic in DUPLICATE_TOPICS),
+        *(topic_pattern(topic) for topic in (*DUPLICATE_TOPICS, *excluded_topics)),
     ]
     stream: rrc.LazyChunkStream = rrc.McapReader(mcap, decoders=list(SIDECAR_DECODERS), exclude_topic_regex=excluded).stream()
     with writing.atomic_write(target) as temp:

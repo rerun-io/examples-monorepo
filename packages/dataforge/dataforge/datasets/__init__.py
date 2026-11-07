@@ -9,6 +9,7 @@ from dataforge.datasets.assembly101 import Assembly101Config
 from dataforge.datasets.base import DataforgeDatasetConfig
 from dataforge.datasets.egoexo4d import Egoexo4dConfig
 from dataforge.datasets.epfl import EpflConfig
+from dataforge.datasets.gen_humanego import GenHumanEgoConfig
 from dataforge.datasets.genrobot import GenrobotConfig
 from dataforge.datasets.harmony4d import Harmony4dConfig
 from dataforge.datasets.hocap import HocapConfig
@@ -24,7 +25,7 @@ from dataforge.datasets.vslam_lab import VslamLabConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
 dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), GenrobotConfig(), Harmony4dConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MammaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), UmetrackConfig(), VslamLabConfig(), WildcapConfig())
+    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), GenHumanEgoConfig(), GenrobotConfig(), Harmony4dConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MammaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), UmetrackConfig(), VslamLabConfig(), WildcapConfig())
 }
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 
