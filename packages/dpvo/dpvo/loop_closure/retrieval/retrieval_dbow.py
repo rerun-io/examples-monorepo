@@ -68,7 +68,8 @@ class RetrievalDBOW:
         # Results save_up_to took off out_queue while it waited for room in in_queue; _detect_loop reads them first.
         self.drained: deque[tuple[int, tuple[float, int, list]]] = deque()
         ready = Value("i", 0)
-        self.proc: Process = Process(target=_dbow_loop, args=(self.in_queue, self.out_queue, vocab_path, ready))
+        # daemon: an exception in the tracker must not leave the interpreter waiting on this worker at exit.
+        self.proc: Process = Process(target=_dbow_loop, args=(self.in_queue, self.out_queue, vocab_path, ready), daemon=True)
         self.proc.start()
         self.being_processed: int = 0
         while not ready.value:
