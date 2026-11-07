@@ -95,7 +95,7 @@ def run_euroc_eval(
 
     Uses ``run_dpvo_pipeline`` with multiprocessing frame reader and
     Rerun visualization.  Provides EuRoC calibration directly to skip
-    DUSt3R auto-estimation.
+    MoGe-2 auto-estimation.
     """
     # Write calibration file for the pipeline
     with NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
