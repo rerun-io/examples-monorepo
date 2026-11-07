@@ -453,6 +453,8 @@ description = "Download an example Assembly101 720p dataset from Hugging Face"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.monoprior.dependencies]
+# Depth PNGs for catalog and Rerun logging (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
 icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
@@ -1895,6 +1897,8 @@ channels = [
 platforms = ["linux-64"]
 
 [feature.mast3r-slam.dependencies]
+# Depth PNGs for catalog and Rerun logging (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
 torchcodec = "*"
 eigen = ">=3.4.0,<4"
@@ -3069,6 +3073,8 @@ description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base
 platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.mvs.dependencies]
+# The catalog depth layer's millimetre PNGs (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
 einops = ">=0.8,<0.9"
 kornia = ">=0.8,<0.9"
