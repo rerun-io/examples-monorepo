@@ -3,14 +3,14 @@
 from time import perf_counter
 from typing import Protocol, runtime_checkable
 
+import depth_png
 import numpy as np
 import torch
-from arkitscenes_download.ingest.depth import ArkitDepthConfidence, decode_depth_png, decode_depth_png_fast, inflate_depth_png_rows
+from arkitscenes_download.ingest.depth import ArkitDepthConfidence
 from jaxtyping import Bool, Float32, Int32, UInt8, UInt16
 from numpy import ndarray
 from torch import Tensor
 
-from zipdepth.catalog.png import unfilter_up_cuda
 from zipdepth.catalog.stats import BuilderStats
 from zipdepth.catalog.targets import (
     AugmentPolicy,
@@ -31,6 +31,29 @@ from zipdepth.catalog.ultrawide import (
     valid_fraction,
 )
 from zipdepth.data.transforms import AlbumentationsWrapper
+
+TARGET_DECODE_THREADS: int = 2
+"""Threads ``depth_png`` uses for one 1920x1440 target; each producer thread decodes its own sample."""
+
+
+def decode_uint16_png(blob_bytes: UInt8[ndarray, "n"], *, threads: int) -> UInt16[ndarray, "h w"]:
+    """A stored depth PNG as uint16 millimetres.
+
+    Raises:
+        ValueError: The blob is not a 16-bit greyscale PNG.
+    """
+    depth_mm_hw: ndarray = depth_png.decode(blob_bytes, threads=threads)
+    if depth_mm_hw.dtype != np.uint16:
+        raise ValueError(f"depth PNG decodes to {depth_mm_hw.dtype}, not uint16 millimetres")
+    return depth_mm_hw
+
+
+def uint16_to_int32(depth_mm: UInt16[Tensor, "*shape"]) -> Int32[Tensor, "*shape"]:
+    """uint16 millimetres as int32 on the tensor's device; many PyTorch uint16 operations are unsupported.
+
+    Through int16 and a mask: one elementwise kernel, about 7x faster on CUDA than converting from uint16.
+    """
+    return torch.bitwise_and(depth_mm.view(torch.int16).to(torch.int32), 0xFFFF)
 
 
 @runtime_checkable
@@ -167,14 +190,8 @@ class CpuSampleBuilder:
         if camera == "ultrawide":
             _require_landscape_after_rotation(frame_chw, quarter_turns)
         started: float = perf_counter()
-        depth_mm_hw: UInt16[ndarray, "h w"] | None = decode_depth_png_fast(target_blob_bytes)
-        if depth_mm_hw is None:
-            depth_mm_hw = decode_depth_png(target_blob_bytes)
-            self.stats.png_fallbacks += 1
-        prompt_depth_mm_hw: UInt16[ndarray, "prompt_h prompt_w"] | None = decode_depth_png_fast(prompt_blob_bytes)
-        if prompt_depth_mm_hw is None:
-            prompt_depth_mm_hw = decode_depth_png(prompt_blob_bytes)
-            self.stats.png_fallbacks += 1
+        depth_mm_hw: UInt16[ndarray, "h w"] = decode_uint16_png(target_blob_bytes, threads=TARGET_DECODE_THREADS)
+        prompt_depth_mm_hw: UInt16[ndarray, "prompt_h prompt_w"] = decode_uint16_png(prompt_blob_bytes, threads=1)
         if confidence is None:
             # Confidence was not fetched: trust every prompt pixel and let the model's
             # own 0.1-4 m range gate do the filtering.
@@ -255,8 +272,18 @@ class CudaSampleBuilder:
         self._ultrawide_policy: UltrawidePolicy | None = ultrawide_policy
         self._generator: torch.Generator = torch.Generator()
         self._stream: torch.cuda.Stream = torch.cuda.Stream(device=device)
+        self._pinned_targets: dict[tuple[int, int], Tensor] = {}
         self.stats: BuilderStats = BuilderStats()
         """Counters local to this builder."""
+
+    def _pinned_target(self, blob_bytes: UInt8[ndarray, "n"]) -> UInt16[Tensor, "h w"]:
+        """This builder's pinned host buffer for a target PNG of this blob's size."""
+        height, width, bit_depth = depth_png.header(blob_bytes)
+        if bit_depth != 16:
+            raise ValueError(f"PromptDA target PNG is {bit_depth}-bit, not 16-bit millimetres")
+        if (height, width) not in self._pinned_targets:
+            self._pinned_targets[(height, width)] = torch.empty((height, width), dtype=torch.uint16, pin_memory=True)
+        return self._pinned_targets[(height, width)]
 
     def __call__(
         self,
@@ -269,7 +296,7 @@ class CudaSampleBuilder:
         *,
         camera: Camera = "wide",
     ) -> dict[str, Tensor] | None:
-        """Inflate, unfilter, filter, and augment one CUDA sample."""
+        """Decode, filter, and augment one CUDA sample."""
         placement: PromptPlacement | None = _resolve_placement(camera, self._ultrawide_policy)
         if camera == "ultrawide":
             _require_landscape_after_rotation(frame_chw, quarter_turns)
@@ -277,26 +304,12 @@ class CudaSampleBuilder:
         frame_chw.record_stream(self._stream)
         started: float = perf_counter()
         with torch.cuda.stream(self._stream):
-            inflated: tuple[UInt8[ndarray, "h row_bytes"], tuple[int, int]] | None = inflate_depth_png_rows(target_blob_bytes)
-            if inflated is None:
-                depth_mm_hw: UInt16[ndarray, "h w"] = decode_depth_png(target_blob_bytes)
-                depth_mm_cuda_hw: Int32[Tensor, "h w"] = torch.from_numpy(depth_mm_hw).to(
-                    device=self._device,
-                    dtype=torch.int32,
-                    non_blocking=True,
-                )
-                self.stats.png_fallbacks += 1
-            else:
-                filtered_hwb: UInt8[ndarray, "h row_bytes"] = inflated[0]
-                filtered_cuda_hwb: UInt8[Tensor, "h row_bytes"] = torch.from_numpy(filtered_hwb).to(
-                    device=self._device,
-                    non_blocking=True,
-                )
-                depth_mm_cuda_hw = unfilter_up_cuda(filtered_cuda_hwb)
-            prompt_depth_mm_hw: UInt16[ndarray, "prompt_h prompt_w"] | None = decode_depth_png_fast(prompt_blob_bytes)
-            if prompt_depth_mm_hw is None:
-                prompt_depth_mm_hw = decode_depth_png(prompt_blob_bytes)
-                self.stats.png_fallbacks += 1
+            # Decode on the CPU straight into pinned memory, then one H2D copy; the stream is synchronized
+            # before this call returns, so the next call may overwrite the pinned buffer.
+            pinned_hw: UInt16[Tensor, "h w"] = self._pinned_target(target_blob_bytes)
+            depth_png.decode_into(target_blob_bytes, pinned_hw.numpy(), threads=TARGET_DECODE_THREADS)
+            depth_mm_cuda_hw: Int32[Tensor, "h w"] = uint16_to_int32(pinned_hw.to(device=self._device, non_blocking=True))
+            prompt_depth_mm_hw: UInt16[ndarray, "prompt_h prompt_w"] = decode_uint16_png(prompt_blob_bytes, threads=1)
             if confidence is None:
                 # Confidence was not fetched: trust every prompt pixel and let the
                 # model's own 0.1-4 m range gate do the filtering.

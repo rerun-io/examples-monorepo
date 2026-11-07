@@ -199,7 +199,6 @@ def main(config: CatalogThroughputConfig) -> None:
     print(f"jpeg_decode: {stats.jpeg_decode * 1000.0 / video_attempts:.3f} ms/frame")
     print(f"blob_decode: {stats.blob_decode * 1000.0 / decoded_frames:.3f} ms/frame")
     print(f"augment: {stats.augment * 1000.0 / decoded_frames:.3f} ms/frame")
-    print(f"png fallbacks: {stats.png_fallbacks}")
     print(f"skipped frames: {samples.skipped_frames}")
     print(f"skipped flat frames: {samples.skipped_flat_frames}")
     print(f"skipped low-valid ultrawide frames: {stats.skipped_low_valid_frames}")

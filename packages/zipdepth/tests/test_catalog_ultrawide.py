@@ -24,11 +24,11 @@ from zipdepth.catalog.ultrawide import (
     valid_fraction,
 )
 
-pytest.importorskip("imagecodecs", reason="imagecodecs is required by this test module")
+pytest.importorskip("depth_png", reason="depth_png is required by this test module")
 
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
 
-from arkitscenes_download.ingest.depth import encode_depth_png  # noqa: E402
+import depth_png  # noqa: E402
 
 from zipdepth.catalog.builders import CpuSampleBuilder  # noqa: E402
 from zipdepth.catalog.targets import build_eval_transform  # noqa: E402
@@ -218,9 +218,9 @@ def _builder_inputs() -> BuilderInputs:
         np.arange(FRAME_HW[0] * FRAME_HW[1], dtype=np.uint16).reshape(FRAME_HW) % 3000 + 300
     ).astype(np.uint16)
     target_mm_hw[10:20, 12:30] = 0
-    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(depth_png.encode(target_mm_hw), dtype=np.uint8)
     prompt_mm_hw: UInt16[ndarray, "192 256"] = (np.arange(192 * 256, dtype=np.uint16).reshape(192, 256) % 3000 + 300).astype(np.uint16)
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_mm_hw), dtype=np.uint8)
     confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
     return rgb_chw, target_blob_bytes, prompt_blob_bytes, confidence
 
@@ -293,9 +293,9 @@ def test_ultrawide_sample_drops_a_frame_below_the_valid_fraction() -> None:
     rgb_chw: UInt8[Tensor, "3 h w"] = torch.zeros((3, *FRAME_HW), dtype=torch.uint8)
     target_mm_hw: UInt16[ndarray, "h w"] = np.zeros(FRAME_HW, dtype=np.uint16)
     target_mm_hw[:8] = 1500
-    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(depth_png.encode(target_mm_hw), dtype=np.uint8)
     prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1000, dtype=np.uint16)
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_mm_hw), dtype=np.uint8)
     confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
     builder: CpuSampleBuilder = CpuSampleBuilder(
         build_eval_transform(*FRAME_HW),
@@ -329,9 +329,9 @@ def test_portrait_ultrawide_sample_orients_image_target_and_prompt_together() ->
     rgb_chw[:, :8, :] = 255
     target_mm_hw: UInt16[ndarray, "stored_h stored_w"] = np.full(stored_hw, 3000, dtype=np.uint16)
     target_mm_hw[:8, :] = 500
-    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(depth_png.encode(target_mm_hw), dtype=np.uint8)
     prompt_stored_mm_hw: UInt16[ndarray, "256 192"] = np.full((256, 192), 1000, dtype=np.uint16)
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_stored_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_stored_mm_hw), dtype=np.uint8)
     confidence: UInt8[ndarray, "confidence_n"] = np.full(256 * 192, 2, dtype=np.uint8)
     policy: UltrawidePolicy = UltrawidePolicy(min_valid_fraction=0.0, valid_erosion_px=0)
     builder: CpuSampleBuilder = CpuSampleBuilder(
@@ -367,9 +367,9 @@ def test_ultrawide_rejects_a_portrait_frame_that_stays_portrait(quarter_turns: i
     stored_hw: tuple[int, int] = (FRAME_HW[1], FRAME_HW[0])
     rgb_chw: UInt8[Tensor, "3 stored_h stored_w"] = torch.zeros((3, *stored_hw), dtype=torch.uint8)
     target_mm_hw: UInt16[ndarray, "stored_h stored_w"] = np.full(stored_hw, 1500, dtype=np.uint16)
-    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(depth_png.encode(target_mm_hw), dtype=np.uint8)
     prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1000, dtype=np.uint16)
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_mm_hw), dtype=np.uint8)
     confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
     builder: CpuSampleBuilder = CpuSampleBuilder(
         build_eval_transform(*FRAME_HW),
@@ -455,9 +455,9 @@ def test_ultrawide_sample_drops_a_frame_with_one_oversized_hole() -> None:
     # 25% of the frame invalid in one block; the rest is a valid 1.5 m wall.
     target_mm_hw: UInt16[ndarray, "h w"] = np.full(FRAME_HW, 1500, dtype=np.uint16)
     target_mm_hw[: FRAME_HW[0] // 2, : FRAME_HW[1] // 2] = 0
-    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(depth_png.encode(target_mm_hw), dtype=np.uint8)
     prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1000, dtype=np.uint16)
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_mm_hw), dtype=np.uint8)
     confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
 
     def build(max_hole_fraction: float) -> tuple[dict[str, Tensor] | None, CpuSampleBuilder]:
@@ -492,9 +492,9 @@ def test_the_default_hole_policy_keeps_a_frame_that_is_all_hole() -> None:
     rgb_chw: UInt8[Tensor, "3 h w"] = torch.zeros((3, *FRAME_HW), dtype=torch.uint8)
     target_mm_hw: UInt16[ndarray, "h w"] = np.full(FRAME_HW, 1500, dtype=np.uint16)
     target_mm_hw[: FRAME_HW[0] // 2] = 0
-    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(depth_png.encode(target_mm_hw), dtype=np.uint8)
     prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1000, dtype=np.uint16)
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_mm_hw), dtype=np.uint8)
     confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
     builder: CpuSampleBuilder = CpuSampleBuilder(
         build_eval_transform(*FRAME_HW),
