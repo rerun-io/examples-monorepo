@@ -5,3 +5,4 @@ logs/
 *.egg-info/
 build/
 tests/fixtures/*.rrd
+!tests/fixtures/kernel_references.rrd
