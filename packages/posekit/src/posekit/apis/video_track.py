@@ -14,7 +14,7 @@ import numpy as np
 import rerun as rr
 import torch
 import torch.nn.functional as F
-from jaxtyping import Bool, Float32, Int, UInt8, UInt16
+from jaxtyping import Bool, Float32, Int, Int64, UInt8, UInt16
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
@@ -51,6 +51,17 @@ class VideoTrackConfig:
     """Minimum keypoint confidence for Rerun visibility."""
 
 
+def track_label_map(masks: Bool[Tensor, "n h w"], track_ids: Int64[Tensor, "n"], frame_hw: tuple[int, int]) -> UInt8[ndarray, "h w"]:
+    """Segmentation ids ``track_id + 1`` (0 = background), built on the masks' device; a later row wins where masks overlap."""
+    if int(masks.shape[0]) == 0:
+        return np.zeros(frame_hw, dtype=np.uint8)
+    rows: Int64[Tensor, "n"] = torch.arange(1, int(masks.shape[0]) + 1, device=masks.device)
+    last_row: Int64[Tensor, "h w"] = (masks * rows[:, None, None]).amax(dim=0)
+    background: Int64[Tensor, "1"] = torch.zeros(1, dtype=torch.int64, device=masks.device)
+    labels: UInt8[Tensor, "rows_and_background"] = torch.cat([background, track_ids.to(masks.device) + 1]).to(torch.uint8)
+    return labels[last_row].cpu().numpy()
+
+
 def _log_tracked_frame(
     *,
     frame_idx: int,
@@ -67,10 +78,9 @@ def _log_tracked_frame(
     rr.set_time("frame", sequence=frame_idx)
     rr.set_time("video_time", duration=1e-9 * float(timestamp_ns))
     assert tracks.masks is not None and tracks.track_ids is not None
-    label_map: ndarray = np.zeros(frame_hw, dtype=np.uint8)
+    label_map: UInt8[ndarray, "h w"] = track_label_map(tracks.masks, tracks.track_ids, frame_hw)
     boxes: Float32[ndarray, "n 4"] = tracks.xyxy_numpy()
     track_ids: Int[ndarray, "n"] = tracks.track_ids.cpu().numpy()
-    masks: Bool[ndarray, "n h w"] = tracks.masks.cpu().numpy()
     xy: Float32[ndarray, "p k 2"] = keypoints.xy_numpy()
     scores: Float32[ndarray, "p k"] = keypoints.scores_numpy()
     keypoint_ids: UInt16[ndarray, "k"] = np.arange(xy.shape[1], dtype=np.uint16)
@@ -78,7 +88,6 @@ def _log_tracked_frame(
     seen: set[int] = set()
     for row in range(tracks.num_detections):
         track_id: int = int(track_ids[row])
-        label_map[masks[row]] = track_id + 1
         has_box: bool = bool((boxes[row][2:] > boxes[row][:2]).all())
         if not has_box:
             continue
