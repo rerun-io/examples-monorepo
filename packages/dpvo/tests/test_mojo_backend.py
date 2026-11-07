@@ -14,6 +14,8 @@ amplify the order noise, and the CPU path's chunked sums are further from GPU at
 GPU runs are (pool.mp4: depths up to 4.9x CUDA's spread of 3.9e-5; poses 3e-7).
 """
 
+from pathlib import Path
+
 import pytest
 
 torch = pytest.importorskip("torch", reason="DPVO requires PyTorch")
@@ -36,6 +38,7 @@ DEVICES: list = [
     ),
 ]
 TOLERANCE: float = 1e-5
+PRIOR_REFERENCE_FILE: Path = REFERENCE_FILE.parent / "metric_prior_references.rrd"
 BA_SPREAD_FACTOR: dict[str, float] = {"poses": 3.0, "patches": 10.0}
 
 
@@ -95,6 +98,26 @@ def test_ba_matches_cuda(mode: str, device: str) -> None:
     ppf, t0, t1, iterations = rec.tensor("scalars").tolist()
     empty: Tensor = torch.empty(0, dtype=torch.float32, device=device)
     ba.forward(poses, patches, intrinsics, target, weight, lmbda, empty, empty, 0.0, 0.3, ii, jj, kk, ppf, t0, t1, iterations, mode == "block_e")
+    for name, ours in (("poses", poses), ("patches", patches)):
+        ref: Tensor = rec.tensor(f"{name}_{mode}")
+        spread: float = rec.tensor(f"{name}_{mode}_spread").item()
+        bound: float = max(TOLERANCE, BA_SPREAD_FACTOR[name] * spread)
+        assert _rel_error(ours, ref) <= bound, f"{name}: {_rel_error(ours, ref):.3e} (CUDA repeat {spread:.3e})"
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("mode", ["local", "block_e"])
+def test_ba_with_metric_prior_matches_cuda(mode: str, device: str) -> None:
+    """One late BA call of MetricTrail on pool.mp4 with the metric depth prior (ViPE's DPVO extension), on both solve paths."""
+    if not PRIOR_REFERENCE_FILE.exists():
+        pytest.skip(f"missing {PRIOR_REFERENCE_FILE.name}: run pixi run -e metrictrail-dev dpvo-freeze-metric-prior-references on a CUDA host")
+    rec: Record = load(PRIOR_REFERENCE_FILE)["/ba_prior/window"]
+    poses, patches, intrinsics, target, weight, lmbda, prior, prior_weight, ii, jj, kk = _on(
+        rec, device, "poses", "patches", "intrinsics", "target", "weight", "lmbda", "prior", "prior_weight", "ii", "jj", "kk"
+    )
+    ppf, t0, t1, iterations = rec.tensor("scalars").tolist()
+    lam, huber = rec.tensor("prior_scalars").tolist()
+    ba.forward(poses, patches, intrinsics, target, weight, lmbda, prior, prior_weight, lam, huber, ii, jj, kk, ppf, t0, t1, iterations, mode == "block_e")
     for name, ours in (("poses", poses), ("patches", patches)):
         ref: Tensor = rec.tensor(f"{name}_{mode}")
         spread: float = rec.tensor(f"{name}_{mode}_spread").item()
