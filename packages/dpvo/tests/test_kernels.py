@@ -25,17 +25,9 @@ class FakeCorr:
         self.calls.append(("forward", (fmap1, fmap2, coords, ii, jj, radius)))
         return (torch.empty(1, ii.shape[0], 2 * radius + 1, 2 * radius + 1, 3, 3, device=META),)
 
-    def backward(self, fmap1: Tensor, fmap2: Tensor, coords: Tensor, ii: Tensor, jj: Tensor, grad: Tensor, radius: int) -> Sequence[Tensor]:
-        self.calls.append(("backward", (fmap1, fmap2, coords, ii, jj, grad, radius)))
-        return torch.empty_like(fmap1), torch.empty_like(fmap2)
-
     def patchify_forward(self, net: Tensor, coords: Tensor, radius: int) -> Sequence[Tensor]:
         self.calls.append(("patchify_forward", (net, coords, radius)))
         return (torch.empty(coords.shape[0], coords.shape[1], net.shape[1], 2 * radius + 2, 2 * radius + 2, device=META),)
-
-    def patchify_backward(self, net: Tensor, coords: Tensor, grad: Tensor, radius: int) -> Sequence[Tensor]:
-        self.calls.append(("patchify_backward", (net, coords, grad, radius)))
-        return (torch.empty_like(net),)
 
 
 class FakeBA:

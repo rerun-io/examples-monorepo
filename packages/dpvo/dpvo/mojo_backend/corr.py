@@ -1,6 +1,6 @@
 """Correlation and patchify on the Mojo kernels: the `CorrKernels` protocol of `dpvo.kernels`.
 
-Same signatures, shapes and dtypes as the CUDA extension `dpvo._cuda_corr` (float16 or float32
+Signatures, shapes and dtypes of DPVO's former CUDA extension `_cuda_corr` (float16 or float32
 features, float32 coordinates, int64 indices). `forward` runs the integer-offset kernel and then the
 extension's bilinear interpolation, as the same PyTorch ops in the same order. The backward passes
 are training-only and not ported.
@@ -46,11 +46,6 @@ def forward(
     return (out.permute(0, 1, 3, 2, 4, 5),)
 
 
-def backward(fmap1: Tensor, fmap2: Tensor, coords: Tensor, ii: Tensor, jj: Tensor, grad: Tensor, radius: int) -> tuple[Tensor, Tensor]:
-    """Training only: not ported to Mojo."""
-    raise NotImplementedError("dpvo.mojo_backend: the correlation backward pass (training) is CUDA-only")
-
-
 def patchify_forward(net: Float[Tensor, "b c h w"], coords: Float32[Tensor, "b m 2"], radius: int) -> tuple[Float[Tensor, "b m c d d"]]:
     """(2r + 2)^2 windows of `net` at `coords` (x, y), zero outside the map."""
     _check_features("patchify", net)
@@ -60,8 +55,3 @@ def patchify_forward(net: Float[Tensor, "b c h w"], coords: Float32[Tensor, "b m
     if patches.numel() > 0:
         launch("patchify", (net.dtype == torch.float16, radius), (net.contiguous(), coords.contiguous(), patches))
     return (patches,)
-
-
-def patchify_backward(net: Tensor, coords: Tensor, grad: Tensor, radius: int) -> tuple[Tensor]:
-    """Training only: not ported to Mojo."""
-    raise NotImplementedError("dpvo.mojo_backend: the patchify backward pass (training) is CUDA-only")

@@ -1,7 +1,7 @@
-"""The Mojo kernels (dpvo.mojo_backend) against the CUDA extension's outputs on real DPVO inputs.
+"""The Mojo kernels (dpvo.mojo_backend) against the former CUDA extensions' outputs on real DPVO inputs.
 
-The references are frozen from `_cuda_corr` / `_cuda_ba` on pool.mp4 (`freeze_kernel_references.py`),
-so no test needs the CUDA extension. CPU runs in the unit lane; CUDA is an integration test.
+The references were frozen from `_cuda_corr` / `_cuda_ba` on pool.mp4 (provenance in `kernel_references.py`).
+CPU runs in the unit lane; CUDA is an integration test.
 
 Tolerances: float32 outputs within 1e-5 of the reference (relative to max(|ref|, 1)); float16
 correlation within one float16 ulp of the reference value (the Mojo kernel rounds every product
@@ -28,7 +28,7 @@ from torch import Tensor  # noqa: E402
 from dpvo.mojo_backend import ba, corr  # noqa: E402
 
 if not REFERENCE_FILE.exists():
-    pytest.skip(f"missing {REFERENCE_FILE.name}: run pixi run -e dpvo-dev dpvo-freeze-kernel-references on a CUDA host", allow_module_level=True)
+    pytest.skip(f"missing {REFERENCE_FILE.name} (git lfs pull)", allow_module_level=True)
 
 DEVICES: list = [
     "cpu",
@@ -107,7 +107,7 @@ def test_ba_matches_cuda(mode: str, device: str) -> None:
 def test_ba_with_metric_prior_matches_cuda(mode: str, device: str) -> None:
     """One late BA call of MetricTrail on pool.mp4 with the metric depth prior (ViPE's DPVO extension), on both solve paths."""
     if not PRIOR_REFERENCE_FILE.exists():
-        pytest.skip(f"missing {PRIOR_REFERENCE_FILE.name}: run pixi run -e metrictrail-dev dpvo-freeze-metric-prior-references on a CUDA host")
+        pytest.skip(f"missing {PRIOR_REFERENCE_FILE.name} (git lfs pull)")
     rec: Record = load(PRIOR_REFERENCE_FILE)["/ba_prior/window"]
     poses, patches, intrinsics, target, weight, lmbda, prior, prior_weight, ii, jj, kk = _on(
         rec, device, "poses", "patches", "intrinsics", "target", "weight", "lmbda", "prior", "prior_weight", "ii", "jj", "kk"
@@ -130,18 +130,12 @@ def test_neighbors_matches_cuda(device: str) -> None:
     assert torch.equal(ix.cpu(), rec.tensor("ix")) and torch.equal(jx.cpu(), rec.tensor("jx"))
 
 
-def test_unported_paths_raise() -> None:
-    empty: Tensor = torch.empty(0)
-    with pytest.raises(NotImplementedError):
-        corr.backward(empty, empty, empty, empty, empty, empty, 3)
-    with pytest.raises(NotImplementedError):
-        corr.patchify_backward(empty, empty, empty, 1)
-
 
 def test_kernel_lookup_finds_the_mojo_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`dpvo.kernels` imports dpvo.mojo_backend on the first CPU lookup; no caller registers it by hand."""
+    """`dpvo.kernels` imports dpvo.mojo_backend on the first CPU or CUDA lookup; no caller registers it by hand."""
     from dpvo import kernels
 
-    monkeypatch.setattr(kernels, "_BACKENDS", {})
-    assert kernels.corr_kernels(torch.device("cpu")) is corr
-    assert kernels.ba_kernels(torch.device("cpu")) is ba
+    for device in ("cpu", "cuda"):
+        monkeypatch.setattr(kernels, "_BACKENDS", {})
+        assert kernels.corr_kernels(torch.device(device)) is corr
+        assert kernels.ba_kernels(torch.device(device)) is ba

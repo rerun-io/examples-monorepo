@@ -20,7 +20,7 @@ INTRINSICS = (50.0, 50.0, 32.0, 24.0)
 @pytest.fixture
 def cuda() -> torch.device:
     if not torch.cuda.is_available():
-        pytest.skip("needs a CUDA GPU for the dpvo._cuda_ba extension")
+        pytest.skip("needs a CUDA GPU")
     return torch.device("cuda")
 
 

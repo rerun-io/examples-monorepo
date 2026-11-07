@@ -117,7 +117,7 @@ Input Video/Images
        → coords float32[1, E, 3, 3, 2]
 
     2. corr(gmap, fmap1, fmap2, coords, ...)
-       - CUDA kernel: bilinear sample at reprojected coords
+       - kernel: bilinear sample at reprojected coords
        - Multi-scale: radius-3 neighborhood at 2 pyramid levels
        → corr float32[1, E, 98]  (7×7 × 2 scales)
 
@@ -129,7 +129,7 @@ Input Video/Images
        → weight float32[1, E, 2]   confidence (sigmoid, 0-1)
     │
     ▼
-[Bundle Adjustment] (fastba/ via dpvo.kernels; CUDA backend)
+[Bundle Adjustment] (fastba/ via dpvo.kernels; Mojo backend)
     Input: target (coords+delta), weight, poses, patches, intrinsics, ii, jj, kk,
            optional depth prior (DepthPrior.ba_prior("local" | "global"))
     Global BA (run_global_ba) runs when long edges exist, or every
@@ -345,10 +345,10 @@ VONet (net.py)
 | `hooks.py` | Extension points: `DepthPrior`, `GraphPolicy`, `DPVOObserver`, `add_global_observer` |
 | `patchgraph.py` | Patch/keyframe graph (`PatchGraph`) — pose/patch/intrinsic/color/point buffers, ii/jj/kk/net edges, delta interpolation dict, `frame_attrs` registry |
 | `net.py` | VONet neural network (Patchifier + Update) |
-| `ba.py` | Bundle adjustment orchestration (calls fastba CUDA) |
-| `fastba/ba.py` | Schur complement solver (Python + CUDA via `_cuda_ba`) |
+| `ba.py` | Bundle adjustment orchestration (calls fastba) |
+| `fastba/ba.py` | BA entry points on the `dpvo.kernels` backend (Mojo: `mojo_backend/ba.py`, Schur complement in PyTorch) |
 | `projective_ops.py` | Camera projection: iproj, proj, transform, point_cloud |
-| `altcorr/correlation.py` | Local correlation via CUDA (`_cuda_corr`) |
+| `altcorr/correlation.py` | Local correlation and patchify on the `dpvo.kernels` backend (Mojo: `mojo_backend/corr.py`) |
 | `scatter_utils.py` | Pure-PyTorch scatter_sum / scatter_softmax |
 | `blocks.py` | GatedResidual, SoftAgg, GradientClip modules |
 | `extractor.py` | BasicEncoder4 CNN backbone |

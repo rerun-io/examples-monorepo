@@ -1,7 +1,7 @@
 """Python wrapper for the native bundle adjustment solver.
 
-The heavy lifting is performed by the backend's ``forward`` (CUDA:
-``_cuda_ba.forward``), which runs Gauss-Newton iterations with a Schur
+The heavy lifting is performed by the backend's ``forward``
+(:mod:`dpvo.mojo_backend.ba`), which runs Gauss-Newton iterations with a Schur
 complement to jointly optimize camera poses and 3-D patch depths, plus an
 optional robust log-inverse-depth prior on the patches (:class:`BADepthPrior`).
 

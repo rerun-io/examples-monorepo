@@ -1,7 +1,7 @@
 """The one place that calls the Mojo extension: device dispatch, runtimes and tensor specs.
 
 CPU tensors run the CPU loops on the Mojo thread pool. CUDA tensors run on PyTorch's current
-stream, asynchronously, as the CUDA extension does.
+stream, asynchronously.
 
 The runtimes are lietorch-mojo's (`lietorch_mojo.backends._runtime`): the Mojo structs can be
 registered as Python types by one extension only, so both extensions share one runtime per device.

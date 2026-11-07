@@ -5,9 +5,10 @@ Each record is one entity (`/corr_index/<case>`, `/altcorr_index/<case>`, `/fram
 per dtype (fields `float16`, `float32`, `int64`); the `#index` text field (JSON) maps each tensor
 name to [dtype, offset, shape]. The layout is dpvo's `tests/kernel_references.py`.
 
-`freeze_vipe_references.py` (metrictrail environment, needs CUDA and ViPE's `vipe_ext`) writes the
-file from one MetricTrail run on pool.mp4; the parity tests read it with `rerun.chunk.RrdReader`, so
-no test needs `vipe_ext`.
+Provenance: written from one MetricTrail run on pool.mp4 by ViPE's CUDA extension `vipe_ext` (recipes/vipe-src
+build 6) with `tests/freeze_vipe_references.py` at commit e3860d390. vipe_ext and the script were deleted when
+vipe_mojo replaced them; the fixture is the frozen record of vipe_ext's outputs. The parity tests read it with
+`rerun.chunk.RrdReader`.
 """
 
 import functools

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Build NVIDIA ViPE for MetricTrail (CUDA 13, conda-forge torch 2.12): vipe + vipe_ext (ViPE's own extension,
-# without lietorch_ext, patch 0001). MetricTrail's DPVO is packages/dpvo's dpvo.metric (supplied by the consuming
-# feature, kernels included): the vendored DPVO, its kernels and the stereo tree are deleted and vipe/metrictrail/dpvo
-# becomes the re-export shims in $RECIPE_DIR/dpvo_shim. DINOv3 comes from dinov3-src (patch 0002) and MoGe-2 from
-# monopriors (patch 0003).
-# nvcc lives in the build prefix; the cuda-nvcc activation adds the host prefix's CUDA headers and libraries.
+# Build NVIDIA ViPE for MetricTrail, pure Python. ViPE's CUDA extension vipe_ext is not built: `vipe.ext` imports
+# packages/vipe-mojo's `vipe_mojo` (patch 0007) and its sources (csrc, vipe/ext/specs.py) are deleted. MetricTrail's
+# DPVO is packages/dpvo's dpvo.metric (supplied by the consuming feature, kernels included): the vendored DPVO, its
+# kernels and the stereo tree are deleted and vipe/metrictrail/dpvo becomes the re-export shims in $RECIPE_DIR/dpvo_shim.
+# DINOv3 comes from dinov3-src (patch 0002) and MoGe-2 from monopriors (patch 0003).
 set -euxo pipefail
 
 # pixi-build reuses the host prefix between rebuilds: clear the target first.
 rm -rf "$SP_DIR/vipe" "$SP_DIR"/vipe_ext*.so "$SP_DIR"/nvidia_vipe-*.dist-info
 
-# ViPE's vendored lietorch: Python groups + C++ kernels. The patched __init__.py re-exports the external
-# lietorch-mojo package instead (patch 0001).
-rm -rf csrc/lietorch_ext
+# vipe_ext's sources (lietorch_ext included) and build helper: patch 0007 imports vipe_mojo instead.
+rm -rf csrc
+rm -f vipe/ext/specs.py
+# ViPE's vendored lietorch groups: the patched __init__.py re-exports the external lietorch-mojo package (patch 0001).
 rm -f vipe/ext/lietorch/groups.py vipe/ext/lietorch/group_ops.py vipe/ext/lietorch/broadcasting.py vipe/ext/lietorch/groups.pyi
 # MetricTrail's vendored DPVO (Python, CUDA sources, extension package and loader, torch_scatter stand-in, build
 # script) and the optional stereo runner with its own DPVO copy. Nothing outside these trees imports them except
@@ -27,23 +27,14 @@ find vipe/metrictrail/dpvo -name __pycache__ -prune -exec rm -rf {} +
 rm -rf vipe/priors/depth/moge2
 # Upstream ships Depth Anything 3's DINOv2 without __init__.py, so find_packages() drops it and pipeline=dav3 fails.
 touch vipe/priors/depth/dav3/model/dinov2/__init__.py
-export CUDA_HOME="$BUILD_PREFIX"
-# Ampere (the 3060) and Blackwell RTX 5090, plus compute_120 PTX for newer GPUs (the GB10 JITs it).
-export TORCH_CUDA_ARCH_LIST="8.6;12.0+PTX"
-export MAX_JOBS="${MAX_JOBS:-16}"
-# USE_SYSTEM_EIGEN=1 (conda-forge eigen ==3.4.0, no network): vipe/ext/specs.py skips its Eigen download, and
-# slam_ext's <eigen3/Eigen/...> resolves through torch's -I$PREFIX/include.
-export USE_SYSTEM_EIGEN=1
-# ViPE's setup.py uses $CONDA_PREFIX/bin/nvcc when it exists; the host prefix's nvcc has no cicc. Keep the
-# build prefix's nvcc (CUDA_HOME above).
-unset CONDA_PREFIX
 
 t0=$(date +%s)
 python -m pip install . --no-deps --no-build-isolation -vv
 t1=$(date +%s)
-echo "VIPE_SRC_TIMING vipe_ext_pip_install_s=$((t1 - t0))"
+echo "VIPE_SRC_TIMING pip_install_s=$((t1 - t0))"
 
-ls "$SP_DIR"/vipe_ext*.so
+test -z "$(ls "$SP_DIR"/vipe_ext* 2>/dev/null)"
+test ! -e "$SP_DIR"/vipe/ext/specs.py
 test ! -e "$SP_DIR"/vipe/priors/depth/moge2
 test -f "$SP_DIR"/vipe/priors/depth/dav3/model/dinov2/__init__.py
 # The DPVO shims are installed and nothing of the vendored DPVO, its kernels or the stereo tree is.

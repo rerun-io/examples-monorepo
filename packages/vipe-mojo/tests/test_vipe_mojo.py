@@ -1,7 +1,7 @@
 """vipe_mojo against ViPE's CUDA extension (`vipe_ext`) on inputs frozen from one MetricTrail run on pool.mp4.
 
-The references come from `freeze_vipe_references.py`, so no test needs vipe_ext. CPU runs in the unit
-lane; CUDA is an integration test.
+The references were frozen from vipe_ext (provenance in `vipe_references.py`). CPU runs in the unit lane;
+CUDA is an integration test.
 
 Tolerances: float32 outputs within 1e-5 of the reference, relative to max(|ref|, 1). Half-precision
 `corr_index` within one float16 ulp (the Mojo kernel rounds every product and sum to half, as c10::Half
@@ -27,7 +27,7 @@ import vipe_mojo  # noqa: E402
 from vipe_mojo import droid_net_ext, slam_ext  # noqa: E402
 
 if not REFERENCE_FILE.exists():
-    pytest.skip(f"missing {REFERENCE_FILE.name}: run freeze_vipe_references.py on a CUDA host", allow_module_level=True)
+    pytest.skip(f"missing {REFERENCE_FILE.name} (git lfs pull)", allow_module_level=True)
 
 DEVICES: list = [
     "cpu",
@@ -59,6 +59,8 @@ def test_module_surface() -> None:
         droid_net_ext.corr_index_backward()
     with pytest.raises(NotImplementedError):
         slam_ext.ba_extended_v2()
+    with pytest.raises(NotImplementedError, match="vipe_ext.compute_normal_weight_robust"):
+        vipe_mojo.compute_normal_weight_robust()  # vipe.utils.depth reads it from `vipe.ext._C`
     assert not hasattr(vipe_mojo.slam_ext, "_private")
 
 

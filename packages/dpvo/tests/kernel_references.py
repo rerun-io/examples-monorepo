@@ -6,9 +6,11 @@ logged as static `rr.AnyValues`. Its tensors are packed into one flat array per 
 [dtype, offset, shape]. The layout is lietorch-mojo's `tests/references.py` plus float16 (the
 correlation runs in half precision under autocast).
 
-`freeze_kernel_references.py` (pixi task `dpvo-freeze-kernel-references`, needs CUDA and the built
-`_cuda_corr`/`_cuda_ba`) writes the file from real DPVO inputs; the parity tests read it with
-`rerun.chunk.RrdReader`, so no test needs the CUDA extension.
+Provenance: `kernel_references.rrd` was written from real DPVO inputs (pool.mp4) by DPVO's former CUDA
+extensions `_cuda_corr` / `_cuda_ba` with `tests/freeze_kernel_references.py` at commit 60164d1cf, and
+`metric_prior_references.rrd` (MetricTrail's BA with the depth prior) by `tests/freeze_metric_prior_references.py`
+at commit 2526a20bf. The extensions and both scripts were deleted when the Mojo kernels replaced them; the
+fixtures are the frozen record of the extensions' outputs. The parity tests read them with `rerun.chunk.RrdReader`.
 """
 
 import functools

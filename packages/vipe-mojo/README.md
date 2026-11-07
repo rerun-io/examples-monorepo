@@ -33,9 +33,9 @@ lietorch-mojo's, shared, as in `dpvo.mojo_backend`.
 
 ## Parity
 
-References: `tests/fixtures/vipe_references.rrd` (6.7 MB), frozen by `tests/freeze_vipe_references.py`
-from one MetricTrail run on pool.mp4 on an RTX 5090: one late call of each function, cut to a small
-window and recomputed by `vipe_ext` on exactly the stored inputs. Error = max |ours - ref| / max(|ref|, 1).
+References: `tests/fixtures/vipe_references.rrd` (6.7 MB), frozen from one MetricTrail run on pool.mp4 on an
+RTX 5090: one late call of each function, cut to a small window and recomputed by `vipe_ext` on exactly the
+stored inputs (provenance in `tests/vipe_references.py`; vipe_ext and the freeze script are deleted). Error = max |ours - ref| / max(|ref|, 1).
 
 | case | CPU (x86-64) | CUDA (5090) |
 |---|---|---|
@@ -68,5 +68,3 @@ pixi run -e metrictrail-dev --frozen vipe-mojo-build   # Linux: CPU + CUDA kerne
 pixi run -e metrictrail-dev --frozen vipe-mojo-tests   # CPU, plus CUDA when present
 ```
 
-Refreeze on a CUDA host: `cd tests && pixi run -e metrictrail --frozen python freeze_vipe_references.py [scratch_dir]`
-(about 3 minutes; the run outputs, about 100 MB, go to `scratch_dir`).
