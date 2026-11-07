@@ -138,5 +138,5 @@ def gpu_addresses(tensors: Sequence[Tensor]) -> tuple[int, ...]:
     objc: _ObjC = _objc()
     gpu_address = objc.sel(b"gpuAddress")
     return tuple(
-        objc.send_u64(b, gpu_address) + int(t.storage_offset()) * t.element_size() if b else 0 for b, t in zip(buffers, tensors, strict=True)
+        (objc.send_u64(b, gpu_address) or 0) + int(t.storage_offset()) * t.element_size() if b else 0 for b, t in zip(buffers, tensors, strict=True)
     )
