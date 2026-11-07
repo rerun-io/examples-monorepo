@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+import depth_png
 import numpy as np
 import rerun as rr
 from jaxtyping import Float32, Float64, Int64, UInt8
@@ -359,7 +360,12 @@ def log_frames_and_depth(
         depth_m: Float32[ndarray, "h w"] | None = depth_by_row.pop(row, None)
         if depth_m is not None:
             depth_mm: ndarray = np.clip(np.round(np.nan_to_num(depth_m, nan=0.0) * 1000.0), 0, 65535).astype(np.uint16)
-            rec.log(entities.CAM_DEPTH, rr.DepthImage(depth_mm, meter=1000.0, colormap="turbo", depth_range=[low_mm, high_mm]))
+            rec.log(
+                entities.CAM_DEPTH,
+                rr.EncodedDepthImage(
+                    blob=depth_png.encode(depth_mm), media_type="image/png", meter=1000.0, colormap="turbo", depth_range=[low_mm, high_mm]
+                ),
+            )
 
 
 def run_property(record: RunRecord) -> dict[str, PropertyValue | None]:

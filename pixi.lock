@@ -29604,6 +29604,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: depth-png[21849d2e] @ packages/depth-png
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - conda_source: vipe-src[94ed4c09] @ recipes/vipe-src
@@ -30288,6 +30289,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
+      - conda_source: depth-png[21849d2e] @ packages/depth-png
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - conda_source: vipe-src[94ed4c09] @ recipes/vipe-src

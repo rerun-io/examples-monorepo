@@ -3772,6 +3772,8 @@ torchcodec = "*"
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 # The default surface: a sparse colour TSDF (Rust, rayon) fused from every tracked frame, marching-cubes mesh.
 tsdf-rs = { path = "packages/tsdf-rs" }
+# Depth persists as millimetre PNG EncodedDepthImages (pass_<k>.rrd, run outputs, catalog layers).
+depth-png = { path = "packages/depth-png" }
 # packages/dpvo's CUDA kernels (`_build-dpvo-cuda-kernels`): fastba includes <Eigen/...>; ninja for torch's extension build.
 eigen = ">=3.4.0,<3.5"
 ninja = ">=1.13.2,<2"

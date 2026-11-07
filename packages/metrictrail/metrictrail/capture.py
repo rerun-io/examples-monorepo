@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import depth_png
 import numpy as np
 import rerun as rr
 import torch
@@ -321,7 +322,16 @@ class CaptureSession:
             valid: Tensor = torch.isfinite(metric_depth) if metric_mask is None else metric_mask.bool()
             depth_m = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
             depth_mm: ndarray = np.clip(np.round(depth_m * 1000.0), 0, 65535).astype(np.uint16)
-            rec.log(entities.CAM_DEPTH, rr.DepthImage(depth_mm, meter=1000.0, colormap="turbo", depth_range=[r * 1000.0 for r in self.depth_range_m]))
+            rec.log(
+                entities.CAM_DEPTH,
+                rr.EncodedDepthImage(
+                    blob=depth_png.encode(depth_mm),
+                    media_type="image/png",
+                    meter=1000.0,
+                    colormap="turbo",
+                    depth_range=[r * 1000.0 for r in self.depth_range_m],
+                ),
+            )
         if self.last_dino_rgb is not None:
             upsampled: UInt8[ndarray, "H W 3"] = self.last_dino_rgb.repeat(self.dino_patch_px, 0).repeat(self.dino_patch_px, 1)[:height, :width]
             rec.log(entities.CAM_DINO_PCA, rr.Image(np.ascontiguousarray(upsampled), color_model="RGB"))
