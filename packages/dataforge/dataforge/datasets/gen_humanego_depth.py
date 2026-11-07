@@ -1,4 +1,4 @@
-"""Gen-HumanEgo ``depth`` layer: GenRobot's Ego-Depth on camera2, decoded from its PredZ codec into a ``DepthImage``.
+"""Gen-HumanEgo ``depth`` layer: GenRobot's Ego-Depth on camera2, decoded from its PredZ codec into millimetre PNGs.
 
 ``/robot0/sensor/camera2/depth`` ships one ``foxglove.CompressedImage`` per reference frame whose ``format`` is
 ``predz_i_zstd;dtype=float16``. ``/robot0/sensor/camera2/depth_info`` (one message) gives its size (512x416),
@@ -8,6 +8,11 @@ bytes the decoder skips, then one zigzag varint per pixel, row-major, the residu
 against the prediction ``left + up - up_left`` (zero outside the image). That predictor inverts to a 2D prefix
 sum, so a frame decodes with two ``cumsum`` calls. Values are metres along the optical axis (z-depth: the
 datakit point cloud scales each double-sphere ray by ``depth / ray_z``); the fisheye border ships as NaN.
+
+Each frame is stored as an ``EncodedDepthImage``: uint16 millimetres in a 16-bit PNG, 0 for no depth. float16
+itself resolves only 0.24 mm at the 0.46 m median depth and 0.5 mm at 1 m, so rounding to 1 mm adds at most
+0.5 mm, and a frame takes a third of the bytes. PNG and RVL tie on size (RVL 1.2 % smaller over three episodes)
+and decode cost; PNG reads in any image library (``docs/gen-humanego.md``).
 
 The depth image gets its own camera node, ``cam_06`` (``kind = "depth"``): it has its own lens and size, at
 camera2's pose (the shipped depth is a resampling of camera2, ``frame_id = camera2_depth_predz``).
@@ -29,7 +34,9 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Float64, Int64, UInt8, UInt16
+from depth_png import decode as decode_png
+from depth_png import encode as encode_png
+from jaxtyping import Float64, Int32, Int64, UInt8, UInt16
 from numpy import ndarray
 from serde import serde
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
@@ -63,6 +70,10 @@ IMAGE_PLANE_DISTANCE_M: float = 0.05
 """Frustum length, as the RGB cameras'."""
 ZSTD_MAGIC: bytes = b"\x28\xb5\x2f\xfd"
 """Start of every zstd frame."""
+UNITS_PER_METRE: float = 1000.0
+"""Stored depth unit: millimetres, the ``meter`` of every depth image."""
+PNG_LEVEL: int = 4
+"""zlib level of ``depth_png`` (packages/depth-png, "up" row filter on every row): 2.9 ms a fisheye frame, a few percent larger than level 6 with adaptive filters (20 ms)."""
 
 
 @serde
@@ -144,15 +155,59 @@ def decode_predz(frame: bytes, *, height: int, width: int) -> UInt8[ndarray, "n"
     return bits.reshape(-1).view(np.uint8)
 
 
+def millimetres(depth: ndarray) -> ndarray:
+    """float16 metres as uint16 millimetres, rounded; NaN and non-positive depth become 0, "no depth".
+
+    Raises:
+        ValueError: A depth is beyond the 65.535 m a uint16 millimetre holds.
+    """
+    metres: ndarray = depth.astype(np.float32)
+    valid = np.isfinite(metres) & (metres > 0)
+    if np.any(metres[valid] * UNITS_PER_METRE > np.iinfo(np.uint16).max):
+        raise ValueError(f"a depth of {metres[valid].max():.1f} m does not fit a uint16 millimetre")
+    return np.where(valid, np.rint(metres * UNITS_PER_METRE), 0).astype(np.uint16)
+
+
+def depth_png(mm: UInt16[ndarray, "h w"]) -> bytes:
+    """One millimetre image as a 16-bit greyscale PNG."""
+    return encode_png(mm, level=PNG_LEVEL)
+
+
+def decode_depth_png(blob: bytes) -> UInt16[ndarray, "h w"]:
+    """A stored depth frame back as uint16 millimetres, whichever encoder wrote it (the subset's frames are OpenCV's).
+
+    Raises:
+        ValueError: The blob is not a 16-bit greyscale PNG.
+    """
+    image: ndarray = decode_png(blob)
+    if image.dtype != np.uint16:
+        raise ValueError(f"not a 16-bit greyscale PNG: decodes to {image.dtype}")
+    return image
+
+
+def png_blobs(images: list[bytes]) -> pa.ListArray:
+    """Encoded frames as an ``EncodedDepthImage:blob`` column."""
+    offsets: Int32[ndarray, "r"] = np.concatenate([[0], np.cumsum([len(image) for image in images])]).astype(np.int32)
+    return pa.ListArray.from_arrays(pa.array(offsets), pa.array(np.frombuffer(b"".join(images), dtype=np.uint8)))
+
+
 def depth_blobs(frames: pa.BinaryArray, *, height: int, width: int) -> pa.ListArray:
-    """Each shipped frame as ``DepthImage`` buffer bytes; the NaN border becomes 0, the viewer's "no depth"."""
-    images: list[UInt8[ndarray, "n"]] = []
-    for frame in frames.to_pylist():
-        depth: ndarray = decode_predz(frame, height=height, width=width).view(np.float16)
-        images.append(np.where(np.isfinite(depth), depth, np.float16(0.0)).view(np.uint8))
-    offsets: Int64[ndarray, "r"] = np.concatenate([[0], np.cumsum([image.size for image in images])]).astype(np.int32)
-    values: UInt8[ndarray, "n"] = np.concatenate(images) if images else np.zeros(0, dtype=np.uint8)
-    return pa.ListArray.from_arrays(pa.array(offsets), pa.array(values))
+    """Each shipped PredZ frame as a millimetre PNG; the NaN border becomes 0, "no depth"."""
+    return png_blobs(
+        [depth_png(millimetres(decode_predz(frame, height=height, width=width).view(np.float16).reshape(height, width))) for frame in frames.to_pylist()]
+    )
+
+
+def log_depth_image(recording: rr.RecordingStream, entity: str, *, point_fill_ratio: float | None = None) -> None:
+    """The static half of a depth entity: PNG, millimetres, turbo."""
+    rr.log(
+        entity,
+        rr.EncodedDepthImage.from_fields(
+            media_type=rr.components.MediaType.PNG, meter=UNITS_PER_METRE, colormap="turbo", point_fill_ratio=point_fill_ratio
+        ),
+        static=True,
+        recording=recording,
+    )
 
 
 def depth_path() -> str:
@@ -161,9 +216,9 @@ def depth_path() -> str:
 
 
 def depth_lens(info: DepthInfo) -> rrc.DeriveLens:
-    """PredZ frames as ``DepthImage`` buffers; the format and the metre are static."""
+    """PredZ frames as millimetre PNGs; the media type and the unit are static."""
     return rrc.DeriveLens("foxglove.CompressedImage:message", output_entity=depth_path()).to_component(
-        rr.DepthImage.descriptor_buffer(), rrc.Selector(".data").pipe(lambda data: depth_blobs(data, height=info.height, width=info.width)), cast_to="auto"
+        rr.EncodedDepthImage.descriptor_blob(), rrc.Selector(".data").pipe(lambda data: depth_blobs(data, height=info.height, width=info.width)), cast_to="auto"
     )
 
 
@@ -179,15 +234,8 @@ def depth_camera(info: DepthInfo, calibration: CameraCalibration) -> PinholePara
     )
 
 
-def write_depth_layer(recording: rr.RecordingStream, mcap: Path, *, clock: EpisodeClock, calibration: CameraCalibration, info: DepthInfo) -> int:
-    """The ``depth`` layer: the depth camera node and one ``DepthImage`` per shipped frame, on the episode clock.
-
-    Returns:
-        Depth frames written.
-
-    Raises:
-        ValueError: The written frames differ from the MCAP's message count or from ``depth_info.count``.
-    """
+def log_depth_node(recording: rr.RecordingStream, *, calibration: CameraCalibration, info: DepthInfo) -> None:
+    """The static part of the ``depth`` layer: camera node ``cam_06``, its double-sphere coefficients, the depth image's encoding."""
     log_camera_node(
         recording, RIG, DEPTH_CAM, depth_camera(info, calibration),
         name="camera2_depth", kind="depth", image_plane_distance=IMAGE_PLANE_DISTANCE_M, camera_model="ds",
@@ -198,14 +246,32 @@ def write_depth_layer(recording: rr.RecordingStream, mcap: Path, *, clock: Episo
         static=True,
         recording=recording,
     )
-    rr.log(
-        depth_path(),
-        rr.DepthImage.from_fields(
-            format=rr.components.ImageFormat(width=info.width, height=info.height, channel_datatype=rr.ChannelDatatype.F16), meter=1.0, colormap="turbo"
+    log_depth_image(recording, depth_path())
+
+
+def send_depth_property(recording: rr.RecordingStream, *, info: DepthInfo, frames: int) -> None:
+    """The ``depth`` recording property: source, codec, frame count and what a value means."""
+    recording.send_property(
+        DEPTH_LAYER,
+        rr.AnyValues(
+            source_topic=pa.array([DEPTH_TOPIC], type=pa.string()),
+            codec=pa.array([info.codec], type=pa.string()),
+            num_frames=pa.array([frames], type=pa.int64()),
+            value=pa.array(["z-depth in millimetres along camera2's optical axis, uint16 PNG; 0 is no depth (the shipped NaN border)"], type=pa.string()),
         ),
-        static=True,
-        recording=recording,
     )
+
+
+def write_depth_layer(recording: rr.RecordingStream, mcap: Path, *, clock: EpisodeClock, calibration: CameraCalibration, info: DepthInfo) -> int:
+    """The ``depth`` layer: the depth camera node and one millimetre PNG per shipped frame, on the episode clock.
+
+    Returns:
+        Depth frames written.
+
+    Raises:
+        ValueError: The written frames differ from the MCAP's message count or from ``depth_info.count``.
+    """
+    log_depth_node(recording, calibration=calibration, info=info)
     retimer: Retimer = Retimer(clock, native_rate=frozenset())
     batcher: ChunkBatcher = ChunkBatcher()
     stream: rrc.LazyChunkStream = EpisodeFile(mcap).stream([DEPTH_TOPIC]).flat_map(retimer).lenses(depth_lens(info)).flat_map(batcher)
@@ -215,15 +281,7 @@ def write_depth_layer(recording: rr.RecordingStream, mcap: Path, *, clock: Episo
     shipped: int = shipped_counts(mcap).get(DEPTH_TOPIC, 0)
     if written != shipped or written != info.count:
         raise ValueError(f"{mcap}: wrote {written} depth frames, the MCAP holds {shipped} and depth_info counts {info.count}")
-    recording.send_property(
-        DEPTH_LAYER,
-        rr.AnyValues(
-            source_topic=pa.array([DEPTH_TOPIC], type=pa.string()),
-            codec=pa.array([info.codec], type=pa.string()),
-            num_frames=pa.array([written], type=pa.int64()),
-            value=pa.array(["z-depth in metres along camera2's optical axis; the shipped NaN border is 0"], type=pa.string()),
-        ),
-    )
+    send_depth_property(recording, info=info, frames=written)
     return written
 
 
@@ -263,8 +321,11 @@ def pinhole_lookup(lens: DoubleSphere, grid: PinholeGrid, *, source_width: int, 
 
 
 def resample_depth(depth: ndarray, rows: Int64[ndarray, "h w"], cols: Int64[ndarray, "h w"]) -> ndarray:
-    """A float16 depth image on the lookup's grid; 0 (no depth) where the grid pixel has no source pixel."""
-    out: ndarray = np.zeros(rows.shape, dtype=np.float16)
+    """A depth image on the lookup's grid, same dtype; 0 (no depth) where the grid pixel has no source pixel.
+
+    Nearest-pixel resampling only picks values, so it commutes with ``millimetres``: the pinhole layer is quantised once.
+    """
+    out: ndarray = np.zeros(rows.shape, dtype=depth.dtype)
     found = rows >= 0
     out[found] = depth[rows[found], cols[found]]
     return out
@@ -290,32 +351,20 @@ def write_depth_pinhole_layer(recording: rr.RecordingStream, depth_rrd: Path, *,
     log_camera_node(
         recording, RIG, PINHOLE_CAM, camera, name="camera2_depth_pinhole", kind="depth", image_plane_distance=IMAGE_PLANE_DISTANCE_M, camera_model="pinhole"
     )
-    rr.log(
-        pinhole_depth_path(),
-        rr.DepthImage.from_fields(
-            format=rr.components.ImageFormat(width=grid.width, height=grid.height, channel_datatype=rr.ChannelDatatype.F16),
-            meter=1.0,
-            colormap="turbo",
-            point_fill_ratio=0.35,  # sparse enough to see the hand meshes inside the cloud
-        ),
-        static=True,
-        recording=recording,
-    )
+    log_depth_image(recording, pinhole_depth_path(), point_fill_ratio=0.35)  # sparse enough to see the hand meshes inside the cloud
 
     def resample(blobs: pa.ListArray) -> pa.ListArray:
-        """Every frame of a chunk at once: the blobs are equal-sized float16 images, so they stack without a Python loop."""
-        frame_bytes: int = info.height * info.width * 2
-        if not np.all(blobs.value_lengths().to_numpy(zero_copy_only=False) == frame_bytes):
-            raise ValueError(f"{depth_rrd}: a depth frame is not {info.width}x{info.height} float16")
-        depth: ndarray = blobs.flatten().to_numpy(zero_copy_only=False).view("<f2").reshape(len(blobs), info.height, info.width)
-        found = rows >= 0
-        out: ndarray = np.zeros((len(blobs), *rows.shape), dtype="<f2")
-        out[:, found] = depth[:, rows[found], cols[found]]
-        offsets: Int64[ndarray, "r"] = np.arange(len(blobs) + 1, dtype=np.int32) * (out[0].size * 2 if len(blobs) else 0)
-        return pa.ListArray.from_arrays(pa.array(offsets), pa.array(out.view(np.uint8).reshape(-1)))
+        """Every frame of a chunk: decode the millimetre PNG, pick the grid's pixels, encode again."""
+        images: list[bytes] = []
+        for blob in blobs.to_pylist():
+            depth: UInt16[ndarray, "h w"] = decode_depth_png(bytes(blob))
+            if depth.shape != (info.height, info.width):
+                raise ValueError(f"{depth_rrd}: a depth frame is {depth.shape[1]}x{depth.shape[0]}, not {info.width}x{info.height}")
+            images.append(depth_png(resample_depth(depth, rows, cols)))
+        return png_blobs(images)
 
-    lens: rrc.DeriveLens = rrc.DeriveLens("DepthImage:buffer", output_entity=pinhole_depth_path()).to_component(
-        rr.DepthImage.descriptor_buffer(), rrc.Selector(".").pipe(resample), cast_to="auto"
+    lens: rrc.DeriveLens = rrc.DeriveLens("EncodedDepthImage:blob", output_entity=pinhole_depth_path()).to_component(
+        rr.EncodedDepthImage.descriptor_blob(), rrc.Selector(".").pipe(resample), cast_to="auto"
     )
     batcher: ChunkBatcher = ChunkBatcher()
     stream: rrc.LazyChunkStream = rrc.RrdReader(depth_rrd).store().stream().filter(content=depth_path()).drop(is_static=True).lenses(lens).flat_map(batcher)

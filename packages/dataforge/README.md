@@ -353,7 +353,7 @@ pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://dgx
 | Layer | Contents |
 | --- | --- |
 | `base` | As Gen-HumanWholeBody: six H.264 fisheye streams, double-sphere calibration, VIO `world_T_rig`, IMU, `/frames`, task |
-| `depth` | camera2's Ego-Depth (512x416 float16, metres), decoded from GenRobot's PredZ codec, on its own `cam_06` node |
+| `depth` | camera2's Ego-Depth (512x416), decoded from GenRobot's PredZ float16 and stored as millimetre PNGs (`EncodedDepthImage`), on its own `cam_06` node |
 | `depth_pinhole` | The same depth resampled onto a 120-degree pinhole grid (`cam_07`), which the 3D view back-projects correctly |
 | `pose` | COCO-133 hand slots, wrists, MANO parameters, shipped flags and detector scores, the VIO path |
 | `actions` | Coarse and fine `StateChange` tracks |
@@ -366,7 +366,7 @@ each of the 236 task folders in turn gives its next episode (uuid order, which i
 task (domestic_services 633, business 166, industry 35, agriculture 4). Tasks, not episodes, are the unit of
 diversity: one task folder alone holds 11,297 episodes of the release, and an episode-proportional sample
 would be a quarter "random daily work". Each MCAP is deleted once its layers are written and checked; only the
-rrds stay: 835 episodes converted, 1.74 TB on the NAS SSD (1.75 times the MCAPs, 1.03 TB of it depth), registered
+rrds stay: 835 episodes converted, 1.01 TB on the NAS SSD (1.01 times the MCAPs, 0.49 TB of it millimetre depth), registered
 on the Spark catalog as `dataforge-gen-humanego-subset`. Three episodes ship a corrupt audio schema that Rerun's
 MCAP reader cannot open; they are listed in `timing/unconverted.json`.
 

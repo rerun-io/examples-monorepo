@@ -1,0 +1,29 @@
+# depth-png Cargo workspace: lossless PNG encoding and decoding of single-channel depth images (`crates/depth-png`,
+# pure Rust) and its PyO3 module (`crates/depth-png-py`, imported as `depth_png`). Laid out like a kornia-staging crate
+# plus a binding, as packages/tsdf-rs. maturin builds the module from crates/depth-png-py (pyproject.toml, recipe.yaml).
+[workspace]
+resolver = "2"
+members = ["crates/depth-png", "crates/depth-png-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+depth-png = { path = "crates/depth-png" }
+bytemuck = "1.23"
+numpy = "0.29"
+# zlib-rs: flate2's pure-Rust zlib port, bit-identical to zlib's output and 1.7x faster than its default miniz_oxide
+# backend at level 4 on Gen-HumanEgo depth; it builds for wasm32 too.
+png = { version = "0.18.1", features = ["zlib-rs"] }
+pyo3 = "0.29"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
