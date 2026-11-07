@@ -1894,7 +1894,6 @@ platforms = ["linux-64"]
 [feature.mast3r-slam.dependencies]
 python = "3.12.*"
 torchcodec = "*"
-eigen = ">=3.4.0,<4"
 ffmpeg = ">=7.1.0"
 open3d = ">=0.19.0,<0.20"
 # mkl 2026 (forced by cuda13/torch-2.12) breaks faiss's mkl builds (.so.2 vs
@@ -1922,42 +1921,30 @@ pyaml = "*"
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
 
-# Its tests import lietorch_mojo, so the test lanes build the extension first.
+# Its tests import lietorch_mojo and mast3r_slam.mojo_backend, so the test lanes build both extensions first.
 [feature.mast3r-slam.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package unit tests"
+depends-on = ["_mast3r-slam-build-mojo-kernels"]
+description = "Build the Mojo kernels, then run the package unit tests"
 
 [feature.mast3r-slam.tasks.tests-integration]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package integration tests"
+depends-on = ["_mast3r-slam-build-mojo-kernels"]
+description = "Build the Mojo kernels, then run the package integration tests"
 
 [feature.mast3r-slam.tasks.tests-golden]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package golden reference tests"
-
-# ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
-[feature.mast3r-slam.tasks._mast3r-slam-build-cuda-kernels]
-cmd = "python setup.py build_ext --inplace"
-cwd = "packages/mast3r-slam"
-description = "Build mast3r-slam CUDA backend kernels"
-inputs = [
-    "packages/mast3r-slam/setup.py",
-    "packages/mast3r-slam/mast3r_slam/backend/src/*.cpp",
-    "packages/mast3r-slam/mast3r_slam/backend/src/*.cu",
-    "packages/mast3r-slam/mast3r_slam/backend/include/*.h",
-]
-outputs = ["packages/mast3r-slam/mast3r_slam/_backends*.so"]
+depends-on = ["_mast3r-slam-build-mojo-kernels"]
+description = "Build the Mojo kernels, then run the package golden reference tests"
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-mojo-kernels]
 depends-on = ["lietorch-mojo-build"]
-cmd = "cd packages/mast3r-slam && mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
-description = "Build mast3r-slam Mojo backend kernels"
-inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
-outputs = ["packages/mast3r-slam/mast3r_slam_mojo_backends*.so"]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I mast3r_slam/mojo_backend/mojo -o mast3r_slam/mojo_backend/_mast3r_mojo.so mast3r_slam/mojo_backend/mojo/_mast3r_mojo.mojo"
+cwd = "packages/mast3r-slam"
+description = "Build the Mojo kernels of mast3r_slam.mojo_backend (GPU kernels for the local GPU, CPU pose solve)"
+inputs = ["packages/mast3r-slam/mast3r_slam/mojo_backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/mast3r-slam/mast3r_slam/mojo_backend/_mast3r_mojo.so"]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-download-checkpoints]
@@ -1990,7 +1977,6 @@ cmd = """python tools/mast3r_slam_inference.py \
   --config config/test.yaml --max-frames 30 --no-viz \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
 depends-on = [
-    "_mast3r-slam-build-cuda-kernels",
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
     "_mast3r-slam-download-example-data",
@@ -2330,7 +2316,7 @@ platforms = ["linux-64", "linux-aarch64"]
 python = "3.12.*"
 # Exact stable pins (2026-11-06): `mojo = "*"` from max-nightly had let the lock freeze a June 2026
 # nightly; 1.2.0 is the newest stable Mojo, and since 1.2.0 std.gpu and layout ship in max-core.
-# Bump deliberately: re-run lietorch-mojo's tests and mast3r-slam's Mojo-vs-CUDA tests.
+# Bump deliberately: re-run lietorch-mojo's tests and mast3r-slam's Mojo parity tests (tests/test_mojo_backend.py).
 # mojo comes directly from the stable max channel, not the modular metapackage (whose starlette pin conflicts
 # with gradio). mast3r-slam's Mojo backend build gets mojo and max-core from this feature too.
 mojo = { version = "==1.2.0", channel = "https://conda.modular.com/max/" }

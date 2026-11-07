@@ -5,13 +5,16 @@ logged as static `rr.AnyValues`. Its tensors are packed into one flat array per 
 `float32`, `int64`); the `#index` text field (JSON) maps each tensor name to [dtype, offset, shape]. The layout is
 dpvo's and lietorch-mojo's `tests/references.py` plus bool.
 
-`freeze_kernel_references.py` writes the file from real MASt3R-SLAM inputs (normal-apt-tour.mp4, the 30-frame test
-configuration) with the CUDA extension `mast3r_slam._backends`; the parity tests read it with `rerun.chunk.RrdReader`.
+Provenance: `kernel_references.rrd` was written from real MASt3R-SLAM inputs (normal-apt-tour.mp4, the 30-frame test
+configuration) by the former CUDA extension `mast3r_slam._backends` with `tests/freeze_kernel_references.py` at commit
+74a125725: one late `iter_proj`, `refine_matches` and `gauss_newton_rays` call (every 6th query point, the first 3
+keyframes of the GN problem), and the extension's calib solve on that problem with the points constrained to the
+rays of a pinhole K. The extension and the script were deleted when the Mojo kernels replaced them; the fixture is
+the frozen record of the extension's outputs. The parity tests read it with `rerun.chunk.RrdReader`.
 """
 
 import functools
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,29 +27,6 @@ from torch import Tensor
 REFERENCE_FILE: Path = Path(__file__).parent / "fixtures" / "kernel_references.rrd"
 INDEX_FIELD: str = "#index"
 TENSOR_DTYPES: dict[str, torch.dtype] = {"bool": torch.bool, "float16": torch.float16, "float32": torch.float32, "int64": torch.int64}
-
-
-def encode(values: Mapping[str, Tensor | str]) -> dict[str, np.ndarray | str]:
-    """AnyValues fields for one record: the tensors packed into one flat array per dtype, the `#index`, and the strings."""
-    dtype_names: dict[torch.dtype, str] = {v: k for k, v in TENSOR_DTYPES.items()}
-    fields: dict[str, np.ndarray | str] = {}
-    packed: dict[str, list[np.ndarray]] = {}
-    offsets: dict[str, int] = {}
-    index: dict[str, tuple[str, int, list[int]]] = {}
-    for name, value in values.items():
-        assert name != INDEX_FIELD and name not in TENSOR_DTYPES, name
-        if isinstance(value, str):
-            fields[name] = value
-            continue
-        assert value.dtype in dtype_names, (name, value.dtype)
-        dtype: str = dtype_names[value.dtype]
-        flat: np.ndarray = value.detach().cpu().contiguous().numpy().reshape(-1)
-        index[name] = (dtype, offsets.get(dtype, 0), list(value.shape))
-        packed.setdefault(dtype, []).append(flat)
-        offsets[dtype] = offsets.get(dtype, 0) + flat.size
-    fields |= {dtype: np.concatenate(parts) for dtype, parts in packed.items()}
-    fields[INDEX_FIELD] = json.dumps(index)
-    return fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +71,3 @@ def load(path: Path = REFERENCE_FILE) -> dict[str, Record]:
         records[chunk.entity_path] = _decode(chunk.to_record_batch())
     return records
 
-
-def entities(prefix: str) -> list[str]:
-    """Entity paths below `prefix` in the committed reference file, in file order."""
-    return [e for e in load() if e.startswith(prefix + "/")]
