@@ -6,6 +6,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import depth_png
 import numpy as np
 import pytest
 from jaxtyping import Float32, Float64
@@ -224,3 +225,11 @@ def test_installed_session_observes_every_new_dpvo_and_logs_its_frames(tmp_path:
     assert cpu_dpvo().observers == [] and len(session.passes) == 1  # no longer observed
     paths: set[str] = {str(path) for path in RrdReader(tmp_path / "pass_0.rrd").store().schema().entity_paths()}
     assert {"/" + entities.CAM_RGB, "/" + entities.CAM_DEPTH, "/" + entities.CAM_PATCHES} <= paths
+    depth_blobs: list[bytes] = [
+        bytes(blob[0])
+        for chunk in RrdReader(tmp_path / "pass_0.rrd").store().stream()
+        if chunk.entity_path == "/" + entities.CAM_DEPTH
+        for blob in chunk.to_record_batch().column("EncodedDepthImage:blob").to_pylist()
+    ]
+    assert len(depth_blobs) == 1
+    np.testing.assert_array_equal(depth_png.decode(depth_blobs[0]), np.full((32, 32), 2000, dtype=np.uint16))  # 2.0 m, in millimetres

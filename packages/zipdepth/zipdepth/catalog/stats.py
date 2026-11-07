@@ -17,8 +17,6 @@ class BuilderStats:
     """Orientation, target construction, and augmentation time in seconds."""
     samples_built: int = 0
     """Samples successfully built."""
-    png_fallbacks: int = 0
-    """PromptDA frames handled by the general PNG decoder."""
     skipped_flat_frames: int = 0
     """Frames rejected by the configured depth-span filter."""
     skipped_low_valid_frames: int = 0
@@ -43,8 +41,6 @@ class CatalogDatasetStats:
     """Orientation, target construction, and augmentation time in seconds."""
     samples_built: int = 0
     """Samples successfully built, including samples not yet yielded."""
-    png_fallbacks: int = 0
-    """PromptDA frames handled by the general PNG decoder."""
     skipped_frames: int = 0
     """Video frames skipped after decode errors."""
     skipped_flat_frames: int = 0
@@ -74,7 +70,6 @@ class CatalogDatasetStats:
             blob_decode=self.blob_decode + other.blob_decode,
             augment=self.augment + other.augment,
             samples_built=self.samples_built + other.samples_built,
-            png_fallbacks=self.png_fallbacks + other.png_fallbacks,
             skipped_frames=self.skipped_frames + other.skipped_frames,
             skipped_flat_frames=self.skipped_flat_frames + other.skipped_flat_frames,
             skipped_low_valid_frames=self.skipped_low_valid_frames + other.skipped_low_valid_frames,

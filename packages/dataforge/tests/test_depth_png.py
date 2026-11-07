@@ -41,3 +41,39 @@ def test_threads_encode_and_decode_at_once() -> None:
         decoded: list[ndarray] = list(pool.map(lambda frame: depth_png.decode(depth_png.encode(frame)), frames))
     for frame, image in zip(frames, decoded, strict=True):
         np.testing.assert_array_equal(image, frame)
+
+
+def banded_frame() -> ndarray:
+    """A 1920x1440 millimetre frame: large enough for 12 bands of 120 rows."""
+    rows, cols = np.mgrid[0:1440, 0:1920]
+    return (400 + rows // 3 + cols // 5 + np.random.default_rng(2).integers(0, 4, size=(1440, 1920))).astype(np.uint16)
+
+
+def test_banded_pngs_read_as_standard_pngs() -> None:
+    import io
+
+    import cv2
+    from PIL import Image
+
+    depth: ndarray = banded_frame()
+    blob: bytes = depth_png.encode(depth, threads=4)
+    assert b"dpBN" in blob, "a 1920x1440 frame is encoded in bands"
+    np.testing.assert_array_equal(cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_UNCHANGED), depth)
+    np.testing.assert_array_equal(np.asarray(Image.open(io.BytesIO(blob))), depth)
+    for threads in (1, 2, 8):
+        np.testing.assert_array_equal(depth_png.decode(blob, threads=threads), depth)
+
+
+def test_decode_into_fills_a_caller_buffer_from_bytes_or_an_array() -> None:
+    depth: ndarray = banded_frame()
+    blob: bytes = depth_png.encode(depth)
+    out: ndarray = np.zeros_like(depth)
+    assert depth_png.header(blob) == (1440, 1920, 16)
+    depth_png.decode_into(np.frombuffer(blob, dtype=np.uint8), out, threads=4)
+    np.testing.assert_array_equal(out, depth)
+    with pytest.raises(ValueError):
+        depth_png.decode_into(blob, np.zeros((1920, 1440), dtype=np.uint16))
+    with pytest.raises(ValueError):
+        depth_png.decode_into(blob, np.zeros((1440, 1920), dtype=np.uint8))
+    with pytest.raises(TypeError):
+        depth_png.decode_into(blob, np.zeros((1440, 1920), dtype=np.float32))

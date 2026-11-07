@@ -54,13 +54,14 @@ def test_log_run_on_a_real_upstream_output_matches_the_harness(tmp_path: Path) -
     paper: PaperScore = paper_score(trajectory.world_T_cam, trajectory.source_frame_ids, context.frames, context.gt, TUM)
     assert metrics.ate_sim3_m == pytest.approx(paper.sim3.rmse_m, rel=1e-12)
     assert metrics.num_gt_pairs == paper.sim3.num_pairs
-    paths: set[str] = set(RrdReader(rrd).store().schema().entity_paths())
+    schema = RrdReader(rrd).store().schema()
     assert {
         "/" + entities.CAM_RGB,
         "/" + entities.CAM_DEPTH,
         "/" + entities.world_trajectory("upstream"),
         "/" + entities.WORLD_GT_TRAJECTORY,
-    } <= paths
+    } <= set(schema.entity_paths())
+    assert f"/{entities.CAM_DEPTH}:EncodedDepthImage:blob" in set(schema.column_names())  # millimetre PNG
 
 
 def test_full_run_on_a_short_real_sequence(tmp_path: Path) -> None:

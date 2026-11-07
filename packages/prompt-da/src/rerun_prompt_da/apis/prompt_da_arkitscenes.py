@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import depth_png
 import numpy as np
 import open3d as o3d
 import pyarrow as pa
@@ -21,7 +22,6 @@ import torch.nn.functional as F
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
 from arkitscenes_download.ingest.cells import landscape_quarter_turns, portrait_from_segment_row
-from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import DEPTH_PROMPTDA, PROMPTDA_MESH, TIMELINE
 from arkitscenes_download.ingest.recording import atomic_recording
 from einops import rearrange
@@ -140,7 +140,7 @@ def log_promptda_frame(
     rr.log(
         DEPTH_PROMPTDA,
         # TODO(rerun#upstream): drop depth_range once the viewer auto-ranges encoded depth (see DEPTH_RANGE_MM in ingest/blueprint.py).
-        rr.EncodedDepthImage(blob=encode_depth_png(predicted_depth_hw), media_type="image/png", meter=1000.0, depth_range=DEPTH_RANGE_MM),
+        rr.EncodedDepthImage(blob=depth_png.encode(np.ascontiguousarray(predicted_depth_hw)), media_type="image/png", meter=1000.0, depth_range=DEPTH_RANGE_MM),
         recording=recording,
     )
 

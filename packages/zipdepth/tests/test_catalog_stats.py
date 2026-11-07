@@ -14,7 +14,6 @@ def _every_field(scale: int) -> CatalogDatasetStats:
         blob_decode=4.0 * scale,
         augment=5.0 * scale,
         samples_built=6 * scale,
-        png_fallbacks=7 * scale,
         skipped_frames=8 * scale,
         skipped_flat_frames=9 * scale,
         skipped_low_valid_frames=10 * scale,
@@ -33,12 +32,12 @@ def test_stage_fields_name_every_float_timer_of_the_dataset_stats() -> None:
 def test_builder_stats_lift_into_the_dataset_schema_by_name() -> None:
     """Project builder-local counters onto the dataset counters; dataset-only fields stay zero."""
     builder_names: set[str] = {field.name for field in fields(BuilderStats)}
-    builder_stats: BuilderStats = BuilderStats(blob_decode=1.5, augment=0.5, samples_built=3, png_fallbacks=1, skipped_flat_frames=2)
+    builder_stats: BuilderStats = BuilderStats(blob_decode=1.5, augment=0.5, samples_built=3, skipped_flat_frames=2)
 
     lifted: CatalogDatasetStats = CatalogDatasetStats.from_builder(builder_stats)
 
     assert builder_names <= {field.name for field in fields(CatalogDatasetStats)}
-    assert lifted == CatalogDatasetStats(blob_decode=1.5, augment=0.5, samples_built=3, png_fallbacks=1, skipped_flat_frames=2)
+    assert lifted == CatalogDatasetStats(blob_decode=1.5, augment=0.5, samples_built=3, skipped_flat_frames=2)
 
 
 def test_total_sums_every_field_without_mutating_inputs() -> None:

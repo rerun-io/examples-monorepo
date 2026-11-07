@@ -51,18 +51,18 @@ fn fixture(name: &str) -> Vec<u8> {
 #[test]
 fn opencv_16_bit_pngs_in_several_idat_chunks_decode_exactly() {
     for name in ["opencv_u16_level4_up.png", "opencv_u16_default.png"] {
-        assert_eq!(decode(&fixture(name)).unwrap(), expected_u16(), "{name}");
+        assert_eq!(decode(&fixture(name), 0).unwrap(), expected_u16(), "{name}");
     }
 }
 
 #[test]
 fn pillow_pngs_with_mixed_row_filters_decode_exactly() {
     assert_eq!(
-        decode(&fixture("pillow_u16_level6.png")).unwrap(),
+        decode(&fixture("pillow_u16_level6.png"), 0).unwrap(),
         expected_u16()
     );
     assert_eq!(
-        decode(&fixture("pillow_u8_level6.png")).unwrap(),
+        decode(&fixture("pillow_u8_level6.png"), 0).unwrap(),
         expected_u8()
     );
 }
@@ -70,7 +70,7 @@ fn pillow_pngs_with_mixed_row_filters_decode_exactly() {
 #[test]
 fn opencv_8_bit_png_decodes_exactly() {
     assert_eq!(
-        decode(&fixture("opencv_u8_default.png")).unwrap(),
+        decode(&fixture("opencv_u8_default.png"), 0).unwrap(),
         expected_u8()
     );
 }
@@ -78,7 +78,7 @@ fn opencv_8_bit_png_decodes_exactly() {
 #[test]
 fn colour_pngs_are_refused() {
     assert!(matches!(
-        decode(&fixture("pillow_rgb8.png")),
+        decode(&fixture("pillow_rgb8.png"), 0),
         Err(DepthPngError::NotGreyscale {
             color: png::ColorType::Rgb,
             depth: png::BitDepth::Eight

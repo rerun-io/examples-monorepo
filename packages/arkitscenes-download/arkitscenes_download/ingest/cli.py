@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import depth_png
 import numpy as np
 import rerun as rr
 from PIL import Image
@@ -34,7 +35,7 @@ from arkitscenes_download.ingest.clock import (
     recover_clock_from_packets,
     shared_epoch,
 )
-from arkitscenes_download.ingest.depth import ArkitDepthConfidence, encode_depth_png, sorted_timestamped_paths
+from arkitscenes_download.ingest.depth import ArkitDepthConfidence, sorted_timestamped_paths
 from arkitscenes_download.ingest.distortion import OpenCVRationalFit, opencv_rational_from_apple
 from arkitscenes_download.ingest.gt import ArkitMeshSummary, log_arkit_mesh, log_gt_boxes
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
@@ -184,8 +185,8 @@ def _encode_depth_asset(item: tuple[Path, int]) -> bytes:
     asset, quarter_turns = item
     with Image.open(asset) as image:
         depth_hw: np.ndarray = np.asarray(image)
-    rotated_hw: np.ndarray = np.rot90(depth_hw, quarter_turns)
-    return encode_depth_png(rotated_hw)
+    rotated_hw: np.ndarray = np.ascontiguousarray(np.rot90(depth_hw, quarter_turns))
+    return depth_png.encode(rotated_hw, threads=1)  # the ingest pool already encodes eight assets at once
 
 
 def _decode_confidence_asset(item: tuple[Path, int]) -> np.ndarray:

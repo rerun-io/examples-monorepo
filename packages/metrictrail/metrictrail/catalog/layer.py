@@ -17,7 +17,8 @@ Layout (``<root>`` = ``/world/runs/<source>``):
   pinhole below stays drawable and the scale error stays visible); the paper's Sim(3) is in the properties;
 * ``<root>/trajectory`` (static ``LineStrips3D``) and ``<root>/trail`` (one segment per frame on ``video_time``);
 * ``<root>/cam`` (``Transform3D`` per tracked frame) and ``<root>/cam/pinhole`` (static ``Pinhole``, RDF);
-* ``<root>/cam/pinhole/depth``: the run's metric depth (``depth/<name>.zip``, metres) at DPVO's keyframes;
+* ``<root>/cam/pinhole/depth``: the run's metric depth (``depth/<name>.zip``) at DPVO's keyframes, as millimetre PNG
+  ``EncodedDepthImage`` (``meter = 1000``); layers written before 2026-11-07 hold float16-metre ``DepthImage``;
 * ``<root>/keyframes`` (static ``Points3D``) and ``<root>/points`` (static ``Points3D``, the metric cloud);
 * runs with surface normals only: ``<root>/cam/pinhole/normals`` (``EncodedImage``, the live capture's MoGe-2 normals as
   RGB ``(n + 1) / 2``, at the tracked row they were computed for) and ``<root>/points_normals`` (static ``Points3D``, the
@@ -34,6 +35,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal, TypeAlias
 
+import depth_png
 import numpy as np
 import rerun as rr
 from jaxtyping import Float32, Float64, Int64, UInt8
@@ -319,16 +321,19 @@ def write_layer(target: Path, segment: str, source: LayerSource, inputs: LayerIn
             static=True,
         )
         rec.log(paths["keyframes"], rr.Points3D(positions[inputs.keyframe_rows], colors=[color], radii=rr.Radius.ui_points(3.0)), static=True)
-        for row, depth_m in zip(inputs.keyframe_rows.tolist(), inputs.keyframe_depth_m, strict=True):
-            # One column send per keyframe keeps the layer on video_time only (rec.log would add log_time).
-            image: rr.DepthImage = rr.DepthImage(depth_m.astype(np.float16), meter=1.0)
-            if image.buffer is None or image.format is None:
-                raise ValueError(f"keyframe row {row}: depth image without buffer or format")
-            rec.send_columns(
-                paths["depth"],
-                indexes=[rr.TimeColumn(TIMELINE, duration=inputs.times_ns[[row]].astype("timedelta64[ns]"))],
-                columns=rr.DepthImage.columns(buffer=image.buffer.as_arrow_array(), format=image.format.as_arrow_array(), meter=[1.0]),
-            )
+        # Millimetre PNGs; past 65.535 m (KITTI's far field) a pixel is 0, no depth, instead of a wall at the limit.
+        depth_png_blobs: list[bytes] = []
+        for depth_m in inputs.keyframe_depth_m:
+            depth_mm: Float32[ndarray, "h w"] = np.round(np.nan_to_num(depth_m, nan=0.0, posinf=0.0, neginf=0.0) * 1000.0)
+            depth_png_blobs.append(depth_png.encode(np.where((depth_mm > 0) & (depth_mm <= 65535), depth_mm, 0).astype(np.uint16)))
+        # One column send keeps the layer on video_time only (rec.log would add log_time).
+        rec.send_columns(
+            paths["depth"],
+            indexes=[rr.TimeColumn(TIMELINE, duration=inputs.times_ns[inputs.keyframe_rows].astype("timedelta64[ns]"))],
+            columns=rr.EncodedDepthImage.columns(
+                blob=depth_png_blobs, media_type=["image/png"] * len(depth_png_blobs), meter=[1000.0] * len(depth_png_blobs)
+            ),
+        )
         if inputs.points is not None:
             rec.log(
                 paths["points"], rr.Points3D(inputs.points.points_xyz, colors=inputs.points.colors_rgb, radii=rr.Radius.ui_points(1.5)), static=True

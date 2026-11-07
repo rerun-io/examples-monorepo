@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import depth_png
 import numpy as np
 import open3d as o3d
 import pyarrow as pa
 import rerun as rr
 import torch
-from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import (
     DEPTH_ULTRAWIDE_RECT,
     NORMALS_ULTRAWIDE_RECT,
@@ -344,7 +344,8 @@ def _process_and_write(
             )
             coverage_fractions.append(float(np.count_nonzero(depth_m_hw) / depth_m_hw.size))
             depth_mm_hw: ndarray = depth_meters_to_uint16_mm(depth_m_hw)
-            depth_png_blobs.append(encode_depth_png(depth_mm_hw, level=1))
+            # Level 3 on the frame's two bands: as fast as libdeflate's level 1 was, 4 % smaller.
+            depth_png_blobs.append(depth_png.encode(np.ascontiguousarray(depth_mm_hw), level=3))
 
         frames_bhw3: UInt8[ndarray, "batch h=480 w=640 3"] = np.stack(rectified_frames)
         frames_cuda_bhw3: UInt8[Tensor, "batch h=480 w=640 3"] = torch.from_numpy(frames_bhw3).to(device="cuda", dtype=torch.uint8)
