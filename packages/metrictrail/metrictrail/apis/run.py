@@ -34,6 +34,7 @@ from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, Benchm
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
+from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
 from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, log_run_outputs, make_provenance, read_run_outputs
 from metrictrail.palette import RunLabel
@@ -147,11 +148,15 @@ def hydra_overrides(config: RunSettings, prepared: PreparedInput, vipe_out: Path
     return overrides + provider + prepared.raster_overrides + list(config.extra_overrides)
 
 
-def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, UInt8[ndarray, "h w 3"]]) -> ColoredCloud:
+def fuse_cloud(
+    outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, UInt8[ndarray, "h w 3"]], gpu: GpuVideoSession | None = None
+) -> ColoredCloud:
     """Upstream's fused metric cloud of the run in ViPE's world frame (needs the ViPE env with a lietorch provider).
 
     ``normals`` (the live capture's MoGe-2 normals per tracked frame, 8-bit RGB) give every point the voxel mean of its
     pixels' normals rotated into the world by the camera pose; a run without a normal for every frame gets none.
+    ``gpu``: a video run's prepared clip on the GPU colours the points with tracking's own frames (one device-to-host
+    copy) instead of a host decode of the whole video.
     """
     from vipe.metrictrail.pointcloud import fusion_settings, load_vipe_artifacts, open_rgb_source
 
@@ -160,13 +165,17 @@ def fuse_cloud(outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, 
     artifacts = load_vipe_artifacts(outputs.run_dir, outputs.name)
     raster_hw: tuple[int, int] = (int(artifacts.depth.shape[1]), int(artifacts.depth.shape[2]))
     is_video: bool = prepared.stream_path.is_file()
-    rgb, _, _ = open_rgb_source(
-        raster_hw,
-        video=prepared.stream_path if is_video else None,
-        frames=None if is_video else prepared.stream_path,
-        input_raster=artifacts.input_raster,
-        source_frame_ids=artifacts.source_frame_ids,
-    )
+    rgb = None
+    if gpu is not None and artifacts.source_frame_ids is not None:
+        rgb = gpu.rgb_source(artifacts.source_frame_ids)
+    if rgb is None:
+        rgb, _, _ = open_rgb_source(
+            raster_hw,
+            video=prepared.stream_path if is_video else None,
+            frames=None if is_video else prepared.stream_path,
+            input_raster=artifacts.input_raster,
+            source_frame_ids=artifacts.source_frame_ids,
+        )
     complete: bool = all(index in normals for index in range(len(artifacts.depth)))
     if normals and not complete:
         print(f"[metrictrail] {len(normals)} of {len(artifacts.depth)} frames carry MoGe-2 normals; the fused cloud gets none")
@@ -200,7 +209,6 @@ def run_and_log(
     from vipe._paths import get_config_path
     from vipe.config.parse import parse_typed_config
     from vipe.pipeline import make_pipeline
-    from vipe.streams.base import StreamList
 
     def stage(text: str) -> None:
         if on_stage is not None:
@@ -238,11 +246,13 @@ def run_and_log(
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
     stage("loading the models, then SharedK calibration (MoGe-2 + DINOv3 on the whole clip)")
+    gpu: GpuVideoSession
     try:
-        pipeline = make_pipeline(typed.pipeline)
-        streams = StreamList.make(typed.streams)
-        for index in range(len(streams)):
-            pipeline.run(streams[index])
+        with gpu_video_input() as gpu:
+            pipeline = make_pipeline(typed.pipeline)
+            streams = make_stream_list(typed.streams)
+            for index in range(len(streams)):
+                pipeline.run(streams[index])
     finally:
         if session is not None:
             session.uninstall()
@@ -259,7 +269,7 @@ def run_and_log(
     cloud: ColoredCloud | None = None
     if config.fuse_cloud:
         stage("fusing the metric point cloud")
-        cloud = fuse_cloud(outputs, prepared, session.kept_normals() if session is not None else {})
+        cloud = fuse_cloud(outputs, prepared, session.kept_normals() if session is not None else {}, gpu)
     stage("logging the trajectory and the cloud")
     rec.send_recording_name(f"MetricTrail {config.label}: {prepared.name}")
     import vipe

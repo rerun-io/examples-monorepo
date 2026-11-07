@@ -3719,6 +3719,10 @@ vipe-src = { path = "recipes/vipe-src" }
 # vipe-src's run dependency (patch 0002: MetricTrail's frozen DINOv3 ViT-S/16); a sibling recipe solves only when listed.
 dinov3-src = { path = "recipes/dinov3-src" }
 tyro = ">=0.9.1,<0.10"
+# Video input decodes on NVDEC (metrictrail.gpu_video, simplecv TorchCodecVideoReader) instead of ViPE's OpenCV stream.
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside 0.12 (as in the dpvo feature).
+torchcodec = "*"
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }

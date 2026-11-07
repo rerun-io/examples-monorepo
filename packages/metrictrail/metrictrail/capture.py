@@ -157,8 +157,9 @@ class CaptureSession:
     """Wrapped methods and their originals."""
     pending_normals: dict[int, UInt8[Tensor, "h w 3"]] = field(default_factory=dict)
     """Normals (8-bit RGB, on the GPU) of frames the depth producer prepared and DPVO has not tracked yet, by index."""
-    pass_normals: list[dict[int, UInt8[ndarray, "h w 3"]]] = field(default_factory=list)
-    """Per pass (same order as :attr:`passes`), the normals of every tracked frame; superseded passes are emptied."""
+    pass_normals: list[dict[int, UInt8[Tensor, "h w 3"]]] = field(default_factory=list)
+    """Per pass (same order as :attr:`passes`), the normals of every tracked frame in page-locked host memory (copied
+    without a synchronisation); superseded passes are emptied."""
     producer_local: threading.local = field(default_factory=threading.local)
     """The normals of the latest MoGe-2 prediction of the calling thread (the depth producer runs in its own)."""
 
@@ -212,18 +213,18 @@ class CaptureSession:
             result: Any = call_orig(self, tstamp, image, intrinsics, metric_depth=metric_depth, metric_mask=metric_mask)
             rec: rr.RecordingStream | None = session.streams.get(id(self))
             normals: Tensor | None = session.pending_normals.pop(frame, None)
-            normals_host: UInt8[ndarray, "h w 3"] | None = None
-            if normals is not None:
-                normals_host = normals.cpu().numpy()
-                if session.pass_normals:
-                    session.pass_normals[-1][frame] = normals_host
+            if normals is not None and session.pass_normals:
+                # Asynchronous copy into page-locked memory: the tracking loop never waits for it; fusion reads it
+                # after the run, long after the copy finished.
+                pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
+                session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
             if rec is not None:
                 new_keyframe: bool = int(self.n) > keyframes_before
                 added: bool = bool(self.is_initialized) or new_keyframe
                 depth: Tensor | None = metric_depth if session.every_frame_images or new_keyframe else None
                 session.log_frame(rec, self, frame, image, intrinsics, depth, metric_mask, added)
-                if new_keyframe and normals_host is not None:
-                    rec.log(entities.CAM_NORMALS, rr.Image(normals_host, color_model="RGB").compress(jpeg_quality=92))
+                if new_keyframe and normals is not None:
+                    rec.log(entities.CAM_NORMALS, rr.Image(normals.cpu().numpy(), color_model="RGB").compress(jpeg_quality=92))
             session.last_dino_rgb = None
             if session.on_frame is not None:
                 session.on_frame(frame, session.pass_frames, int(self.n))
@@ -302,7 +303,9 @@ class CaptureSession:
         kept: CapturedPass | None = self.kept_pass()
         if kept is None:
             return {}
-        return self.pass_normals[self.passes.index(kept)]
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()  # the asynchronous copies into the pinned buffers are complete
+        return {frame: normals.numpy() for frame, normals in self.pass_normals[self.passes.index(kept)].items()}
 
     def log_frame(
         self,

@@ -75,7 +75,7 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
     for marker, frames in enumerate((32, 596, 596)):
         session.pass_frames = frames
         session.open_pass(len(session.passes))
-        session.pass_normals[-1][0] = image + marker
+        session.pass_normals[-1][0] = torch.from_numpy(image + marker)
     session.uninstall()
     assert [len(normals) for normals in session.pass_normals] == [0, 0, 1]
     assert session.kept_normals()[0][0, 0, 0] == 2
