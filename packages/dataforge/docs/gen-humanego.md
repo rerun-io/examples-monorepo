@@ -26,7 +26,7 @@ the IMU mounting, the H.264 pass-through and the MANO check.
 | Size | 15,943 MCAPs, 8.8 TB | 44,632 MCAPs, 62.0 TB |
 | Path depth | 2 or 4 domain levels | always 4 |
 | Body | SMPL-X body22 skeleton (`robotx/motioncapture/...`) | none |
-| Depth | none | camera2 Ego-Depth, 512x416 float16 (`depth` layer) |
+| Depth | none | camera2 Ego-Depth, 512x416, shipped float16, stored as millimetre PNG (`depth` layer) |
 | Hand topics | `handtracking/{left,right}` | the same, plus `handtracking_raw/{left,right}` and `handtracking/scores_debug` |
 | Hand flags | `is_valid` False on every frame seen | `is_valid` True wherever MANO is shipped |
 | Left MANO root | as shipped | as shipped on some episodes, mirrored on others (found per episode) |
@@ -43,7 +43,7 @@ Every episode seen ships these topics in addition to the whole-body ones (minus 
 
 | Shipped topic | Rate | Layer | Entity, or not ingested: reason |
 | --- | --- | --- | --- |
-| `/robot0/sensor/camera2/depth` (`foxglove.CompressedImage`, `predz_i_zstd;dtype=float16`) | 30 Hz | depth | `rig_00/cam_06/pinhole/depth` (`DepthImage`, F16, metres) |
+| `/robot0/sensor/camera2/depth` (`foxglove.CompressedImage`, `predz_i_zstd;dtype=float16`) | 30 Hz | depth | `rig_00/cam_06/pinhole/depth` (`EncodedDepthImage`, uint16 mm PNG) |
 | `/robot0/sensor/camera2/depth_info` (`foxglove.DepthInfo`) | once | depth, sidecar | `rig_00/cam_06`: `kind = depth`, its own lens (`ds_coefficients`), the codec |
 | `/robot0/sensor/camera2/conf_vis_compressed` (H.264) | 30 Hz | — | not ingested: a picture of the depth confidence over the image, not data |
 | `/robot0/sensor/depth/vis_compressed` (H.264) | 30 Hz | — | not ingested: a colour-mapped rendering of the depth topic |
@@ -89,9 +89,19 @@ Firmware differences seen in the subset run (dataforge handles both):
 - Checked in 3D: on a living-room episode the table below camera2, fitted as a plane in world coordinates from
   `depth_pinhole`, is a median 2.1 degrees from world up (13 frames, 1.4 to 8.0): the depth, camera2's
   `rig_T_cam` and the VIO's gravity agree.
-- Size: about 306 KB per frame in the rrd (lz4 on raw float16), two thirds of an episode's output. Half
-  resolution would be 82 KB per frame; a millimetre `EncodedDepthImage` (PNG or RVL) would be smaller still
-  but no longer bit-exact. Kept at full resolution and bit-exact for now.
+- Stored as `EncodedDepthImage`: uint16 millimetres (`meter = 1000`) in a 16-bit greyscale PNG (zlib level 6),
+  0 for no depth, full resolution, 30 fps (`millimetres`, `depth_png`). float16 itself resolves only 0.24 mm at
+  the 0.46 m median depth and 0.5 mm at 1 m, so rounding adds at most 0.5 mm (p50 0.26 mm). Float16 frames took
+  306 KB in the rrd (lz4), two thirds of an episode's output; a PNG takes 123 KB, the pinhole frame 25 KB.
+  `depth_pinhole` resamples the millimetre layer: nearest-pixel resampling only picks values, so it commutes
+  with the rounding and the pinhole layer is quantised once (`test_the_pinhole_grid_quantises_once`).
+- PNG over RVL, measured on three episodes (11,782 frames, depth to 10 m in a field): the sizes tie (RVL 1.2 %
+  smaller in total; either wins an episode by 5-8 %); both decode in 0.7-1.1 ms a 512x416 frame in Rerun
+  0.42's own decoders (re_rvl; image 0.25 for PNG), bit-exact; PNG encodes in 20 ms (RVL 3 ms). PNG reads in any
+  image library and needs no encoder of ours; Rerun reads RVL only in the ROS `compressedDepth` framing.
+- `EncodedDepthImage` is marked unstable in Rerun 0.42. Its Python docstring gives `meter = 0.001` for
+  millimetres, but the viewer reads `meter` as units per metre, as `DepthImage` does (its fallback for integer
+  depth is 1000), so the layers set 1000. The 3D view back-projects it under a `Pinhole` as it does a `DepthImage`.
 
 ## Hands
 
@@ -117,8 +127,8 @@ Firmware differences seen in the subset run (dataforge handles both):
 | Layer | Entities |
 | --- | --- |
 | `base` | As whole-body: root `ViewCoordinates`, COCO-133 context, `rig_00` with `world_T_rig`, six cameras, `imu_00`, `/frames`, `task/instruction` |
-| `depth` | `rig_00/cam_06` (depth camera node, frustum) and `rig_00/cam_06/pinhole/depth` (`DepthImage`, F16, `meter = 1`, turbo) |
-| `depth_pinhole` | `rig_00/cam_07` (pinhole node at camera2's pose) and `rig_00/cam_07/pinhole/depth` (`DepthImage`, F16, 192x156), shown in 3D |
+| `depth` | `rig_00/cam_06` (depth camera node, frustum) and `rig_00/cam_06/pinhole/depth` (`EncodedDepthImage`, PNG, `meter = 1000`, turbo) |
+| `depth_pinhole` | `rig_00/cam_07` (pinhole node at camera2's pose) and `rig_00/cam_07/pinhole/depth` (`EncodedDepthImage`, PNG, 192x156), shown in 3D |
 | `pose` | `world/gt/coco133_xyz`; per hand `wrist`, `confidence`, `mano`, `quality`, `scores`; `world/runs/vio/trajectory` |
 | `actions` | `task/actions/coarse` and `task/actions/fine` as `StateChange` tracks |
 | `projections` | per camera `pinhole/coco133_uv_projected` (hands only) |
@@ -182,10 +192,17 @@ worker; without that limit the MANO check ran 20 times slower):
 | Capture | 30.4 hours |
 | Wall clock | 2.9 h, download + convert + retry (00:44 to 03:38 CST) |
 | Worker time | 0.71 s per second of capture |
-| Output | 1.74 TB: depth 1.03, base 0.38, depth_pinhole 0.19, hand_mesh 0.06, sidecars 0.06, pose and projections 0.02 |
-| Ratio | 1.75 times the 0.996 TB of MCAPs |
+| Output | 1.01 TB with millimetre depth: depth 0.41, base 0.38, depth_pinhole 0.08, hand_mesh 0.06, sidecars 0.06, pose and projections 0.02 (1.74 TB with the first, float16 depth: depth 1.03, depth_pinhole 0.19) |
+| Ratio | 1.01 times the 0.996 TB of MCAPs (1.75 with float16 depth) |
 | Raw MCAPs left | 0 |
 | Registration | 835 segments x 7 layers on the Spark catalog in 32 s |
+
+The subset was converted with float16 depth and re-encoded on 2026-11-07, RRD to RRD, without the MCAPs: every
+old chunk passed through and each frame became a millimetre PNG (`millimetres`, `depth_png`), `depth_pinhole`
+was rebuilt from the new layer, and every frame was checked against round(float16 x 1000). 3,287,625 frames, 12
+workers, 33.5 worker-hours, 0 failures; the fisheye layer shrank 2.54 times (313 to 123 KB a frame), the pinhole
+2.32 times (59 to 25 KB); error p50 0.26 mm, p99 0.50 mm, max 0.5 mm. The catalog moved to the new files with
+`dataforge-swap-layer` before the float16 files were deleted.
 
 ## Known gaps
 
