@@ -5,16 +5,23 @@ Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSessi
 * ``vipe.metrictrail.slam.DPVOSLAMSystem.run``: notes the frame count of the tracking pass that starts;
 * ``vipe.metrictrail.dpvo.dpvo.DPVO.__init__``: opens one recording file per DPVO instance (pass);
 * ``DPVO.__call__``: after each tracked frame, logs the frame DPVO saw, the MoGe-2 metric depth it was given, the
-  MoGe-2 normals of a new keyframe, the newest keyframe's patches, the local bundle-adjustment window and its patch points;
+  frame's MoGe-2 normals when DPVO's keyframe graph grew on it, the newest keyframe's patches, the local
+  bundle-adjustment window and its patch points;
 * :meth:`metrictrail.moge2.MoGe2NormalProvider.predict_metric` and ``DPVOSLAMSystem._prepare``: keep the camera-space
   normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
   keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
 * ``DPVO._DPVO__run_global_BA``: counts global bundle adjustments;
+* with :attr:`CaptureSession.live_surface` (the app), whenever DPVO's keyframe graph grows on a frame (DPVO adds
+  every frame as a keyframe; the graph grows when keyframe culling keeps it), that frame's depth is integrated at
+  DPVO's current estimate of its pose into the :class:`~metrictrail.live_surface.LiveSurface`, so the surface grows
+  while DPVO tracks;
 * ``vipe.metrictrail.dino_fusion.FrozenDinoV3.forward``: projects the dinov3_vits16 patch features of the frame being
   patchified on a fixed PCA basis (fit on the first frame) to RGB.
 
 A run can make several DPVO passes (stage A, FP32 recovery). Each pass is written to its own ``.rrd``;
-:meth:`CaptureSession.kept_pass` is the last of the longest passes, the one whose poses ViPE writes. The hooks read
+:meth:`CaptureSession.kept_pass` is the last of the longest passes, the one whose poses ViPE writes. With
+:attr:`CaptureSession.live` set (the Gradio app), every pass logs straight into that recording instead, so the viewer
+sees tracking as it happens; a later pass (FP32 recovery) then overwrites the earlier one frame by frame. The hooks read
 tensors and add host syncs, so a captured run's FPS is not a timing result; they never change a value DPVO uses.
 """
 
@@ -33,6 +40,7 @@ from scipy.spatial.transform import Rotation
 from torch import Tensor
 
 from metrictrail import entities
+from metrictrail.live_surface import LiveSurface
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
 
 
@@ -110,8 +118,8 @@ class DinoPca:
 class CapturedPass:
     """One DPVO instance's capture recording."""
 
-    path: Path
-    """Its ``.rrd`` file."""
+    path: Path | None
+    """Its ``.rrd`` file; None when the pass logged into :attr:`CaptureSession.live`."""
     num_frames: int
     """Frames of the tracking pass it ran over."""
 
@@ -132,6 +140,16 @@ class CaptureSession:
     """DINOv3 patch size, pixels (dinov3_vits16)."""
     frustum_depth_m: float = 0.08
     """Depth of the BA-window frustums, metres."""
+    live: rr.RecordingStream | None = None
+    """Recording every pass logs into instead of its own file (the app's streamed recording); None: one file per pass."""
+    every_frame_images: bool = True
+    """Log the depth and the DINOv3 PCA of every tracked frame; False: depth only of frames on which DPVO's keyframe
+    graph grew, no PCA (an uncompressed image per frame is too much to stream to a browser)."""
+    on_frame: Callable[[int, int, int], None] | None = None
+    """Called after each tracked frame with (frame index, frames of the pass, keyframes in the graph); may raise to stop."""
+    live_surface: LiveSurface | None = None
+    """TSDF mesh grown while tracking from each frame on which DPVO's keyframe graph grew, reset per pass (logging into
+    :attr:`live`); None: none."""
     passes: list[CapturedPass] = field(default_factory=list)
     """Every DPVO instance captured, in creation order."""
     pass_frames: int = 0
@@ -148,8 +166,9 @@ class CaptureSession:
     """Wrapped methods and their originals."""
     pending_normals: dict[int, UInt8[Tensor, "h w 3"]] = field(default_factory=dict)
     """Normals (8-bit RGB, on the GPU) of frames the depth producer prepared and DPVO has not tracked yet, by index."""
-    pass_normals: list[dict[int, UInt8[ndarray, "h w 3"]]] = field(default_factory=list)
-    """Per pass (same order as :attr:`passes`), the normals of every tracked frame; superseded passes are emptied."""
+    pass_normals: list[dict[int, UInt8[Tensor, "h w 3"]]] = field(default_factory=list)
+    """Per pass (same order as :attr:`passes`), the normals of every tracked frame in page-locked host memory (copied
+    without a synchronisation); superseded passes are emptied."""
     producer_local: threading.local = field(default_factory=threading.local)
     """The normals of the latest MoGe-2 prediction of the calling thread (the depth producer runs in its own)."""
 
@@ -203,18 +222,23 @@ class CaptureSession:
             result: Any = call_orig(self, tstamp, image, intrinsics, metric_depth=metric_depth, metric_mask=metric_mask)
             rec: rr.RecordingStream | None = session.streams.get(id(self))
             normals: Tensor | None = session.pending_normals.pop(frame, None)
-            normals_host: UInt8[ndarray, "h w 3"] | None = None
-            if normals is not None:
-                normals_host = normals.cpu().numpy()
-                if session.pass_normals:
-                    session.pass_normals[-1][frame] = normals_host
+            if normals is not None and session.pass_normals:
+                # Asynchronous copy into page-locked memory: the tracking loop never waits for it; fusion reads it
+                # after the run, long after the copy finished.
+                pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
+                session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
             if rec is not None:
-                new_keyframe: bool = int(self.n) > keyframes_before
-                added: bool = bool(self.is_initialized) or new_keyframe
-                session.log_frame(rec, self, frame, image, intrinsics, metric_depth, metric_mask, added)
-                if new_keyframe and normals_host is not None:
-                    rec.log(entities.CAM_NORMALS, rr.Image(normals_host, color_model="RGB").compress(jpeg_quality=92))
+                # DPVO appends every frame to its keyframe graph, then may cull an older keyframe: the graph grew
+                # when culling kept them all. The frame itself is always the newest keyframe after the call.
+                graph_grew: bool = int(self.n) > keyframes_before
+                added: bool = bool(self.is_initialized) or graph_grew
+                depth: Tensor | None = metric_depth if session.every_frame_images or graph_grew else None
+                session.log_frame(rec, self, frame, image, intrinsics, depth, metric_mask, added)
+                if graph_grew and normals is not None:
+                    rec.log(entities.CAM_NORMALS, rr.Image(normals.cpu().numpy(), color_model="RGB").compress(jpeg_quality=92))
             session.last_dino_rgb = None
+            if session.on_frame is not None:
+                session.on_frame(frame, session.pass_frames, int(self.n))
             return result
 
         def gba(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -223,7 +247,7 @@ class CaptureSession:
 
         def forward(self: Any, dpvo_images: Tensor) -> Tensor:
             features: Tensor = forward_orig(self, dpvo_images)
-            if features.shape[0] * features.shape[1] == 1:
+            if session.every_frame_images and features.shape[0] * features.shape[1] == 1:
                 with torch.no_grad(), torch.autocast(device_type="cuda", enabled=False):
                     single: Float32[Tensor, "c h w"] = features[0, 0].float()
                     if session.pca is None:
@@ -253,23 +277,32 @@ class CaptureSession:
         for owner, name, original in self.restore:
             setattr(owner, name, original)
         self.restore = []
+        if self.live_surface is not None:
+            self.live_surface.flush()  # the keyframes since the last log
         for rec in self.streams.values():
             rec.flush()
-            rec.disconnect()
+            if rec is not self.live:
+                rec.disconnect()
         self.streams = {}
 
     def open_pass(self, instance_id: int) -> None:
         """Start the recording file of a new DPVO instance."""
         self.global_ba_calls = 0
-        path: Path = self.out_dir / f"pass_{len(self.passes)}.rrd"
-        rec: rr.RecordingStream = rr.RecordingStream(self.application_id, recording_id=self.recording_id, send_properties=False)
-        rec.save(path)
+        path: Path | None = None
+        if self.live is not None:
+            rec: rr.RecordingStream = self.live
+        else:
+            path = self.out_dir / f"pass_{len(self.passes)}.rrd"
+            rec = rr.RecordingStream(self.application_id, recording_id=self.recording_id, send_properties=False)
+            rec.save(path)
         self.streams[instance_id] = rec
         # A pass at least as long supersedes the earlier ones (kept_pass), so their normals can go.
         for earlier, captured in zip(self.pass_normals, self.passes, strict=True):
             if captured.num_frames <= self.pass_frames:
                 earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
+        if self.live_surface is not None:
+            self.live_surface.reset()
         self.pass_normals.append({})
         self.pending_normals.clear()
 
@@ -285,7 +318,9 @@ class CaptureSession:
         kept: CapturedPass | None = self.kept_pass()
         if kept is None:
             return {}
-        return self.pass_normals[self.passes.index(kept)]
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()  # the asynchronous copies into the pinned buffers are complete
+        return {frame: normals.numpy() for frame, normals in self.pass_normals[self.passes.index(kept)].items()}
 
     def log_frame(
         self,
@@ -305,9 +340,10 @@ class CaptureSession:
         intrinsics_px: Float32[ndarray, "4"] = intrinsics.detach().float().cpu().numpy().reshape(4)
         rec.log(entities.CAM, rr.Pinhole(focal_length=intrinsics_px[:2], principal_point=intrinsics_px[2:], resolution=[width, height]))
         rec.log(entities.CAM_RGB, rr.Image(rgb, color_model="RGB").compress(jpeg_quality=92))
+        depth_m: Float32[ndarray, "h w"] | None = None
         if metric_depth is not None:
             valid: Tensor = torch.isfinite(metric_depth) if metric_mask is None else metric_mask.bool()
-            depth_m: Float32[ndarray, "h w"] = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
+            depth_m = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
             depth_mm: ndarray = np.clip(np.round(depth_m * 1000.0), 0, 65535).astype(np.uint16)
             rec.log(entities.CAM_DEPTH, rr.DepthImage(depth_mm, meter=1000.0, colormap="turbo", depth_range=[r * 1000.0 for r in self.depth_range_m]))
         if self.last_dino_rgb is not None:
@@ -354,6 +390,8 @@ class CaptureSession:
             ),
         )
         newest_world_T_cam: Float32[ndarray, "4 4"] = world_T_cam[num_keyframes - 1]
+        if self.live_surface is not None and depth_m is not None:
+            self.live_surface.integrate(depth_m, rgb, intrinsics_px, newest_world_T_cam)
         rec.log(entities.DPVO_CURRENT, rr.Transform3D(translation=newest_world_T_cam[:3, 3], mat3x3=newest_world_T_cam[:3, :3]))
         rec.log(
             entities.DPVO_CURRENT,

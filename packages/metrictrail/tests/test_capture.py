@@ -55,7 +55,7 @@ def test_kept_pass_is_the_last_of_the_longest(tmp_path: Path) -> None:
         CapturedPass(tmp_path / "pass_2.rrd", 596),
     ]
     kept = session.kept_pass()
-    assert kept is not None and kept.path.name == "pass_2.rrd"
+    assert kept is not None and kept.path is not None and kept.path.name == "pass_2.rrd"
 
 
 def test_normals_survive_the_8bit_rgb_round_trip() -> None:
@@ -75,7 +75,45 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
     for marker, frames in enumerate((32, 596, 596)):
         session.pass_frames = frames
         session.open_pass(len(session.passes))
-        session.pass_normals[-1][0] = image + marker
+        session.pass_normals[-1][0] = torch.from_numpy(image + marker)
     session.uninstall()
     assert [len(normals) for normals in session.pass_normals] == [0, 0, 1]
     assert session.kept_normals()[0][0, 0, 0] == 2
+
+
+def test_live_surface_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
+    import rerun as rr
+    from rerun.chunk import RrdReader
+
+    from metrictrail import entities
+    from metrictrail.live_surface import LiveSurface
+
+    rrd: Path = tmp_path / "live.rrd"
+    rec = rr.RecordingStream("metrictrail-test", recording_id="live")
+    rec.save(rrd)
+    surface = LiveSurface(rec, log_every=2)
+    session = CaptureSession(
+        out_dir=tmp_path,
+        application_id="metrictrail-test",
+        recording_id="live",
+        depth_range_m=(0.3, 3.0),
+        live=rec,
+        live_surface=surface,
+    )
+    session.pass_frames = 3
+    session.open_pass(0)
+    depth: np.ndarray = np.full((48, 64), 2.0, dtype=np.float32)
+    rgb: np.ndarray = np.full((48, 64, 3), 128, dtype=np.uint8)
+    intrinsics: np.ndarray = np.array([60.0, 60.0, 32.0, 24.0], dtype=np.float32)
+    for shift in (0.0, 0.05, 0.1):
+        pose: np.ndarray = np.eye(4, dtype=np.float32)
+        pose[0, 3] = shift
+        surface.integrate(depth, rgb, intrinsics, pose)
+    session.uninstall()  # logs the third frame's blocks
+    assert surface.volume.extract_dirty_block_meshes() == []
+    surface.retire()  # the run's final mesh would replace it
+    rec.flush()
+    rec.disconnect()
+    paths: list[str] = [str(path) for path in RrdReader(rrd).store().schema().entity_paths()]
+    assert surface.integrated == 3
+    assert any(path.startswith("/" + entities.DPVO_MESH + "/") for path in paths)

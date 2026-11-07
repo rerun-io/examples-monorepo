@@ -34,7 +34,7 @@ from typing import Any, Literal, TypeAlias
 import numpy as np
 import torch
 import torch.nn.functional as F
-from jaxtyping import Bool, Float, Float32, Float64, UInt8
+from jaxtyping import Bool, Float, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 from vipe.metrictrail.depth import (
@@ -52,7 +52,7 @@ MoGe2Backend: TypeAlias = Literal["tensorrt", "torch"]
 MoGe2Encoder: TypeAlias = Literal["vits", "vitb", "vitl"]
 """monoprior's MoGe-2 encoders (``monopriors.models.moge_v2.export.Encoder``)."""
 ImageKey: TypeAlias = tuple[int, int, bytes]
-"""A source frame's cache key: height, width and a BLAKE2b digest of its 8-bit bytes."""
+"""A source frame's cache key: height, width and a 16-byte digest of its 8-bit bytes."""
 
 MOGE2_BACKEND_ENV: str = "VIPE_MOGE2_BACKEND"
 """Environment override of the backend choice (``auto`` when unset)."""
@@ -148,10 +148,31 @@ def recover_metric_depth(forward: MoGe2Forward, *, fov_x: float | None, image_hw
     return MoGe2Prediction(depth=resized[0], mask=resized_mask[0], intrinsics=camera.intrinsics_b33[0], normals=forward.normals)
 
 
+DEVICE_KEY_MAX_VALUES: int = 8_000_000
+"""Largest image (values) keyed on the GPU; its two weight vectors take 16 bytes per value."""
+_device_key_weights: dict[tuple[int, str], Int64[Tensor, "2 n"]] = {}
+
+
 def image_key(rgb_u8_hw3: UInt8[Tensor, "h w 3"]) -> ImageKey:
-    """Cache key of one 8-bit image: its size and a BLAKE2b digest of its bytes."""
+    """Cache key of one 8-bit image: its size and a 16-byte digest of its bytes.
+
+    A CUDA image is keyed where it lives: two dot products with fixed pseudo-random 64-bit weights (wrapping modulo
+    2**64), so 16 bytes cross to the host instead of the frame; two different images collide with probability
+    ~2**-128. A host image (or one too large for the weight vectors) gets a BLAKE2b digest.
+    """
+    height, width = int(rgb_u8_hw3.shape[0]), int(rgb_u8_hw3.shape[1])
+    values: int = rgb_u8_hw3.numel()
+    if rgb_u8_hw3.is_cuda and values <= DEVICE_KEY_MAX_VALUES:
+        slot: tuple[int, str] = (values, str(rgb_u8_hw3.device))
+        weights: Int64[Tensor, "2 n"] | None = _device_key_weights.get(slot)
+        if weights is None:
+            generator: torch.Generator = torch.Generator().manual_seed(values)
+            weights = torch.randint(-(2**62), 2**62, (2, values), generator=generator, dtype=torch.int64).to(rgb_u8_hw3.device)
+            _device_key_weights[slot] = weights
+        digest: Int64[Tensor, "2"] = (weights * rgb_u8_hw3.reshape(1, -1).to(torch.int64)).sum(dim=1)
+        return height, width, digest.cpu().numpy().tobytes()
     data: UInt8[ndarray, "h w 3"] = rgb_u8_hw3.contiguous().cpu().numpy()
-    return int(data.shape[0]), int(data.shape[1]), hashlib.blake2b(data.tobytes(), digest_size=16).digest()
+    return height, width, hashlib.blake2b(data.tobytes(), digest_size=16).digest()
 
 
 class MoGe2Engine:

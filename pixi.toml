@@ -3729,6 +3729,12 @@ vipe-src = { path = "recipes/vipe-src" }
 # vipe-src's run dependency (patch 0002: MetricTrail's frozen DINOv3 ViT-S/16); a sibling recipe solves only when listed.
 dinov3-src = { path = "recipes/dinov3-src" }
 tyro = ">=0.9.1,<0.10"
+# Video input decodes on NVDEC (metrictrail.gpu_video, simplecv TorchCodecVideoReader) instead of ViPE's OpenCV stream.
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside 0.12 (as in the dpvo feature).
+torchcodec = "*"
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
+# The default surface: a sparse colour TSDF (Rust, rayon) fused from every tracked frame, marching-cubes mesh.
+tsdf-rs = { path = "packages/tsdf-rs" }
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
@@ -3779,6 +3785,25 @@ description = "Score MetricTrail runs (one dir per seed) under the paper protoco
 cmd = "python tools/catalog_layer.py"
 cwd = "packages/metrictrail"
 description = "Write (and with --catalog-url/--dataset register) the MetricTrail catalog layer of one run on a VSLAM-LAB segment; never overwrites a layer file"
+
+# The Gradio app's example clips: the same Hugging Face dataset as dpvo-app (movies.zip clips and pool.MOV).
+[feature.metrictrail.tasks._download-metrictrail-data]
+cmd = "bash -lc 'hf download pablovela5620/dpvo-example-data movies.zip --repo-type dataset --local-dir . && unzip -o movies.zip -d data/ && rm -f movies.zip && if [ -d data/data/movies ]; then rm -rf data/movies && mv data/data/movies data/movies && rmdir data/data 2>/dev/null || true; fi'"
+cwd = "packages/metrictrail"
+outputs = ["packages/metrictrail/data/movies/IMG_0493.MOV"]
+description = "Download the example video clips of the MetricTrail app"
+
+[feature.metrictrail.tasks._download-metrictrail-iphone-data]
+cmd = "hf download pablovela5620/dpvo-example-data pool.MOV --repo-type dataset --local-dir data/iphone/"
+cwd = "packages/metrictrail"
+outputs = ["packages/metrictrail/data/iphone/pool.MOV"]
+description = "Download the iPhone example video of the MetricTrail app"
+
+[feature.metrictrail.tasks.metrictrail-app]
+cmd = "python tools/gradio_app.py"
+depends-on = ["lietorch-mojo-build", "_download-metrictrail-data", "_download-metrictrail-iphone-data"]
+cwd = "packages/metrictrail"
+description = "Launch the MetricTrail Gradio app: upload a video, watch the run stream into an embedded Rerun viewer (needs the GPU)"
 
 # The full-pipeline integration test imports lietorch_mojo's Mojo extension; this shadows the dev feature's task.
 [feature.metrictrail.tasks.tests-integration]

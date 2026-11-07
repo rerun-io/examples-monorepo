@@ -96,6 +96,9 @@ def test_full_run_on_a_short_real_sequence(tmp_path: Path) -> None:
         "/" + entities.CAM_PATCHES,
         "/" + entities.CAM_NORMALS,
         "/" + entities.DPVO_WINDOW,
-        "/" + entities.WORLD_CLOUD,
-        "/" + entities.WORLD_CLOUD_NORMALS,
+        "/" + entities.WORLD_MESH,
+        "/" + entities.WORLD_MESH_NORMALS,
+        "/" + entities.METRIC_MESH,
     } <= paths
+    assert metrics.mesh_triangles is not None and metrics.mesh_triangles > 0
+    assert "/" + entities.WORLD_CLOUD not in paths  # upstream's cloud is opt-in (--fuse-cloud)
