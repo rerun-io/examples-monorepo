@@ -105,8 +105,10 @@ Firmware differences seen in the subset run (dataforge handles both):
   the whole-body release). The root rotation is not consistent: on some episodes it is as shipped (the
   whole-body convention), on others it must be mirrored too (`M·R·M`, `M = diag(-1, 1, 1)`). Each convention
   lands at 0.00-0.16 mm median on its episodes and 37-120 mm on the others, so `check_mano` tries both for the
-  left hand and keeps the closer; `property:hand_mesh:left_root_mirrored` records which. Seen mirrored on
-  firmware 2.1.4 (V5) and 2.1.10 (V6), as shipped on 2.1.21 and 2.1.26 (V6); the subset run counts both.
+  left hand and keeps the closer; `property:hand_mesh:left_root_mirrored` records which. On the 835-episode
+  subset it is mirrored on 568 and as shipped on 267, and it follows the firmware: 2.1.1 to 2.1.10 almost always
+  mirrored (2.1.10: 320 of 346), 2.1.18 and later never (2.1.21: 0 of 175, 2.1.26: 0 of 49). Every hand of every
+  subset episode passes the 2 mm check under its convention (1,670 of 1,670; the worst left median is 0.71 mm).
 - `handtracking_raw` is the unsmoothed track: its bones are within a few millimetres of the smoothed ones, but
   its MANO parameters fit nothing (0.26-0.29 m under all eight conventions tried), so it stays in the sidecar.
 
@@ -155,7 +157,7 @@ for i in 0 1 2 3 4 5 6 7; do              # one transient user unit per shard, e
   pixi run -e dataforge --frozen dataforge-convert gen-humanego --root /mnt/nas/ssd-8tb/scratch/gen-humanego/raw \
     --budget-tb 1.0 --shard-index $i --num-shards 8
 done
-pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-gen-humanego-subset gen-humanego --budget-tb 1.0
+pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://dgx-spark:51235 --catalog-name dataforge-gen-humanego-subset gen-humanego
 ```
 
 - Each worker fetches one MCAP (the next in the background) into the scratch root with `local_dir`, so the
@@ -165,11 +167,25 @@ pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-gen-h
   and keeps the MCAP for the retry, which is the same command.
 - The SSD tier takes the output directly (`atomic_write` publishes each file 0644 by rename).
 
-## Timing
+## Timing and size
 
-Smoke, pablo-dl-server, prod environment: 0.25 s of conversion per second of capture; depth decoding is 60 %
-of it. A 179 s episode (1.59 GB MCAP) writes base 559 MB, depth 1.70 GB, hand_mesh 102 MB, pose 15 MB,
-projections 12 MB and a 0.1 GB sidecar in 45 s. The output is about 1.5 times the MCAP.
+Smoke, pablo-dl-server, prod environment, idle host: 0.25 s of conversion per second of capture; depth decoding
+is 60 % of it. A 179 s episode (1.59 GB MCAP) writes base 559 MB, depth 1.70 GB, hand_mesh 102 MB, pose 15 MB,
+projections 12 MB and a 0.1 GB sidecar in 45 s.
+
+The subset run, 2026-11-07, 8 workers on pablo-dl-server shared with other jobs (BLAS limited to 2 threads per
+worker; without that limit the MANO check ran 20 times slower):
+
+| | |
+| --- | --- |
+| Episodes | 835 of 838 converted, all seven layers checked; 3 unconvertible (corrupt audio schema, `timing/unconverted.json`) |
+| Capture | 30.4 hours |
+| Wall clock | 2.9 h, download + convert + retry (00:44 to 03:38 CST) |
+| Worker time | 0.71 s per second of capture |
+| Output | 1.74 TB: depth 1.03, base 0.38, depth_pinhole 0.19, hand_mesh 0.06, sidecars 0.06, pose and projections 0.02 |
+| Ratio | 1.75 times the 0.996 TB of MCAPs |
+| Raw MCAPs left | 0 |
+| Registration | 835 segments x 7 layers on the Spark catalog in 32 s |
 
 ## Known gaps
 

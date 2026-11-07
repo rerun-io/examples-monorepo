@@ -347,7 +347,7 @@ export DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gen-humanego   # the SSD 
 pixi run -e dataforge --frozen dataforge-download gen-humanego --root /mnt/nas/ssd-8tb/scratch/gen-humanego/raw
 pixi run -e dataforge --frozen dataforge-convert gen-humanego --root /mnt/nas/ssd-8tb/scratch/gen-humanego/raw \
   --budget-tb 1.0 --shard-index 0 --num-shards 8   # one process per shard
-pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-gen-humanego-subset gen-humanego --budget-tb 1.0
+pixi run -e dataforge --frozen dataforge-register --catalog-url rerun+http://dgx-spark:51235 --catalog-name dataforge-gen-humanego-subset gen-humanego
 ```
 
 | Layer | Contents |
@@ -366,7 +366,9 @@ each of the 236 task folders in turn gives its next episode (uuid order, which i
 task (domestic_services 633, business 166, industry 35, agriculture 4). Tasks, not episodes, are the unit of
 diversity: one task folder alone holds 11,297 episodes of the release, and an episode-proportional sample
 would be a quarter "random daily work". Each MCAP is deleted once its layers are written and checked; only the
-rrds stay (about 1.5 times the MCAP size, two thirds of it depth).
+rrds stay: 835 episodes converted, 1.74 TB on the NAS SSD (1.75 times the MCAPs, 1.03 TB of it depth), registered
+on the Spark catalog as `dataforge-gen-humanego-subset`. Three episodes ship a corrupt audio schema that Rerun's
+MCAP reader cannot open; they are listed in `timing/unconverted.json`.
 
 Differences from the whole-body release, the depth codec and the subset are in
 [docs/gen-humanego.md](docs/gen-humanego.md).
