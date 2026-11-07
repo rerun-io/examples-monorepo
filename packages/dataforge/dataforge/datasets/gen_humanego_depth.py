@@ -11,8 +11,8 @@ datakit point cloud scales each double-sphere ray by ``depth / ray_z``); the fis
 
 Each frame is stored as an ``EncodedDepthImage``: uint16 millimetres in a 16-bit PNG, 0 for no depth. float16
 itself resolves only 0.24 mm at the 0.46 m median depth and 0.5 mm at 1 m, so rounding to 1 mm adds at most
-0.5 mm, and a frame takes a third of the bytes. PNG beat RVL by 8% on the fisheye frames and decodes as fast
-(``docs/gen-humanego.md``).
+0.5 mm, and a frame takes a third of the bytes. PNG and RVL tie on size (RVL 1.2 % smaller over three episodes)
+and decode cost; PNG reads in any image library (``docs/gen-humanego.md``).
 
 The depth image gets its own camera node, ``cam_06`` (``kind = "depth"``): it has its own lens and size, at
 camera2's pose (the shipped depth is a resampling of camera2, ``frame_id = camera2_depth_predz``).
@@ -71,8 +71,8 @@ ZSTD_MAGIC: bytes = b"\x28\xb5\x2f\xfd"
 """Start of every zstd frame."""
 UNITS_PER_METRE: float = 1000.0
 """Stored depth unit: millimetres, the ``meter`` of every depth image."""
-PNG_COMPRESSION: int = 6
-"""zlib level: 7% smaller than level 3 at 20 ms a frame; level 9 saves 3% more at ten times the time."""
+PNG_PARAMS: tuple[int, ...] = (cv2.IMWRITE_PNG_COMPRESSION, 4, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_UP)
+"""zlib level 4 with the "up" row filter: 3.8 ms a fisheye frame and 1.8 % larger than level 6 with adaptive filters (20 ms)."""
 
 
 @serde
@@ -169,7 +169,7 @@ def millimetres(depth: ndarray) -> ndarray:
 
 def depth_png(mm: UInt16[ndarray, "h w"]) -> bytes:
     """One millimetre image as a 16-bit greyscale PNG."""
-    ok, encoded = cv2.imencode(".png", mm, [cv2.IMWRITE_PNG_COMPRESSION, PNG_COMPRESSION])
+    ok, encoded = cv2.imencode(".png", mm, list(PNG_PARAMS))
     if not ok:
         raise ValueError(f"PNG encoding failed for a {mm.shape} depth image")
     return encoded.tobytes()
