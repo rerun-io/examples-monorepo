@@ -29027,6 +29027,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/dbus-1.16.2-he8c428d_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/debugpy-1.8.22-py312h80505a6_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/double-conversion-3.4.0-hecca717_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/eigen-3.4.0-h54a6638_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/epoxy-1.5.10-hb03c661_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ffmpeg-8.1.2-gpl_h95e667c_906.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fmt-12.1.0-h76c4fd7_1.conda
@@ -29233,6 +29234,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/msgspec-0.22.0-py312h5cc1888_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nccl-2.32.3.1-hf1e94c4_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/ninja-1.13.2-h171cf75_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nlohmann_json-3.12.0-h54a6638_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numba-0.68.1-py312h80505a6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.5.4-py312he827f4e_0.conda
@@ -29521,8 +29523,9 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
-      - conda_source: vipe-src[ff5dea51] @ recipes/vipe-src
+      - conda_source: vipe-src[94ed4c09] @ recipes/vipe-src
       - pypi: ./packages/dataforge
+      - pypi: ./packages/dpvo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/metrictrail
       - pypi: ./packages/monoprior
@@ -29700,6 +29703,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/dbus-1.16.2-he8c428d_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/debugpy-1.8.22-py312h80505a6_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/double-conversion-3.4.0-hecca717_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/eigen-3.4.0-h54a6638_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/epoxy-1.5.10-hb03c661_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ffmpeg-8.1.2-gpl_h95e667c_906.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fmt-12.1.0-h76c4fd7_1.conda
@@ -29907,6 +29911,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/msgspec-0.22.0-py312h5cc1888_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nccl-2.32.3.1-hf1e94c4_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/ninja-1.13.2-h171cf75_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nlohmann_json-3.12.0-h54a6638_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numba-0.68.1-py312h80505a6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.5.4-py312he827f4e_0.conda
@@ -30202,8 +30207,9 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
-      - conda_source: vipe-src[ff5dea51] @ recipes/vipe-src
+      - conda_source: vipe-src[94ed4c09] @ recipes/vipe-src
       - pypi: ./packages/dataforge
+      - pypi: ./packages/dpvo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/metrictrail
       - pypi: ./packages/monoprior
@@ -158087,7 +158093,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/tomli-2.5.0-pyh5ded981_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
-- conda_source: vipe-src[ff5dea51] @ recipes/vipe-src
+- conda_source: vipe-src[94ed4c09] @ recipes/vipe-src
   variants:
     target_platform: linux-64
   depends:
@@ -158385,6 +158391,7 @@ packages:
   name: metrictrail
   requires_dist:
   - dataforge @ ./packages/dataforge
+  - dpvo @ ./packages/dpvo
   requires_python: '>=3.12'
 - pypi: ./packages/monoprior
   name: monopriors
