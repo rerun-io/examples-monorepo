@@ -1,6 +1,6 @@
 //! Encode then decode returns the input exactly, and the bytes are a standard PNG.
 
-use depth_png::{decode, encode_u16, encode_u8, DepthImage, DepthPngError};
+use depth_png::{decode, encode_u16, encode_u8, DepthImage, DepthPngError, EncodeOptions};
 
 /// A depth-like ramp with a hole pattern.
 fn ramp(width: u32, height: u32) -> Vec<u16> {
@@ -22,7 +22,11 @@ fn round_trip_is_exact_at_odd_sizes_and_every_level() {
         let u16_depth = ramp(width, height);
         let u8_depth: Vec<u8> = u16_depth.iter().map(|&d| d as u8).collect();
         for level in 0..=9 {
-            let decoded = decode(&encode_u16(&u16_depth, [width, height], level).unwrap()).unwrap();
+            let decoded = decode(
+                &encode_u16(&u16_depth, [width, height], &at_level(level)).unwrap(),
+                0,
+            )
+            .unwrap();
             assert_eq!(
                 decoded,
                 DepthImage::U16 {
@@ -32,7 +36,11 @@ fn round_trip_is_exact_at_odd_sizes_and_every_level() {
                 },
                 "u16 {width}x{height} level {level}"
             );
-            let decoded = decode(&encode_u8(&u8_depth, [width, height], level).unwrap()).unwrap();
+            let decoded = decode(
+                &encode_u8(&u8_depth, [width, height], &at_level(level)).unwrap(),
+                0,
+            )
+            .unwrap();
             assert_eq!(
                 decoded,
                 DepthImage::U8 {
@@ -49,7 +57,7 @@ fn round_trip_is_exact_at_odd_sizes_and_every_level() {
 #[test]
 fn samples_are_stored_big_endian_behind_up_filter_bytes() {
     // 2x2 image: rows [0x0102, 0xA0B0] and [0x0103, 0xA0B0].
-    let png_bytes = encode_u16(&[0x0102, 0xA0B0, 0x0103, 0xA0B0], [2, 2], 0).unwrap();
+    let png_bytes = encode_u16(&[0x0102, 0xA0B0, 0x0103, 0xA0B0], [2, 2], &at_level(0)).unwrap();
     // Level 0 stores the filtered rows verbatim in one stored deflate block: find them in the IDAT payload.
     let filtered_rows = [
         2, 0x01, 0x02, 0xA0, 0xB0, // Up filter on the first row: the row above is zero
@@ -74,7 +82,8 @@ fn samples_are_stored_big_endian_behind_up_filter_bytes() {
 fn every_row_uses_the_up_filter_at_every_level() {
     let (width, height) = (33, 21);
     for level in 0..=9 {
-        let png_bytes = encode_u16(&ramp(width, height), [width, height], level).unwrap();
+        let png_bytes =
+            encode_u16(&ramp(width, height), [width, height], &at_level(level)).unwrap();
         let rows = miniz_oxide::inflate::decompress_to_vec_zlib(&idat_payload(&png_bytes)).unwrap();
         // Each row is its filter-type byte followed by the filtered samples.
         let filters: Vec<u8> = rows
@@ -88,11 +97,11 @@ fn every_row_uses_the_up_filter_at_every_level() {
 #[test]
 fn bad_inputs_are_refused() {
     assert!(matches!(
-        encode_u16(&[0; 4], [2, 2], 10),
+        encode_u16(&[0; 4], [2, 2], &at_level(10)),
         Err(DepthPngError::InvalidLevel(10))
     ));
     assert!(matches!(
-        encode_u8(&[0; 3], [2, 2], 4),
+        encode_u8(&[0; 3], [2, 2], &at_level(4)),
         Err(DepthPngError::SampleCount {
             expected: 4,
             actual: 3,
@@ -100,7 +109,7 @@ fn bad_inputs_are_refused() {
         })
     ));
     assert!(matches!(
-        decode(b"not a png"),
+        decode(b"not a png", 0),
         Err(DepthPngError::Decoding(_))
     ));
 }
@@ -117,4 +126,36 @@ fn idat_payload(png_bytes: &[u8]) -> Vec<u8> {
         at += 12 + length;
     }
     payload
+}
+
+/// Default options at `level`.
+fn at_level(level: u8) -> EncodeOptions {
+    EncodeOptions {
+        level,
+        ..EncodeOptions::default()
+    }
+}
+
+#[test]
+fn banded_pngs_read_as_one_stream_in_the_png_crate() {
+    // The png crate is the PNG decoder behind the image crate, which the Rerun viewer uses.
+    let (width, height) = (300, 97);
+    let depth = ramp(width, height);
+    let options = EncodeOptions {
+        band_rows: Some(10),
+        threads: 4,
+        ..EncodeOptions::default()
+    };
+    let png_bytes = encode_u16(&depth, [width, height], &options).unwrap();
+    assert!(png_bytes.windows(4).any(|kind| kind == b"dpBN"));
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&png_bytes))
+        .read_info()
+        .unwrap();
+    let mut raw = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut raw).unwrap();
+    let samples: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    assert_eq!(samples, depth);
 }

@@ -46,9 +46,12 @@ name = "depth-png"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "crc32fast",
+ "flate2",
  "miniz_oxide 0.8.9",
  "png",
  "thiserror",
+ "zlib-rs",
 ]
 
 [[package]]

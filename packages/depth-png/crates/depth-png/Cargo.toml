@@ -11,8 +11,11 @@ workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
 png.workspace = true
 thiserror.workspace = true
+zlib-rs.workspace = true
 
 [dev-dependencies]
 # Inflates the IDAT payload in tests/round_trip.rs; already in the tree through png.
