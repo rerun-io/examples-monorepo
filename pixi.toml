@@ -3865,10 +3865,10 @@ depends-on = ["lietorch-mojo-build"]
 cwd = "packages/vipe-mojo/tests"
 description = "Freeze vipe_ext's four ported kernels on pool.mp4 into packages/vipe-mojo/tests/fixtures/vipe_references.rrd (CUDA host)"
 
-# dpvo.mojo_backend's depth-prior parity reference: the prior kernel lives in ViPE's DPVO extension until dpvo/metric-core.
+# dpvo.mojo_backend's depth-prior parity reference: MetricTrail's BA calls on the CUDA extension dpvo._cuda_ba.
 [feature.metrictrail.tasks.dpvo-freeze-metric-prior-references]
 cmd = "python tests/freeze_metric_prior_references.py"
-depends-on = ["lietorch-mojo-build"]
+depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
 cwd = "packages/dpvo"
 description = "Freeze MetricTrail's BA with the depth prior (ViPE's cuda_ba) into packages/dpvo/tests/fixtures/metric_prior_references.rrd"
 
