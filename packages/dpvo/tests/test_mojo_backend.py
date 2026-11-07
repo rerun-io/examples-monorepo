@@ -138,3 +138,12 @@ def test_unported_paths_raise() -> None:
         corr.patchify_backward(empty, empty, empty, 1)
     with pytest.raises(NotImplementedError):
         ba.solve_system(empty, empty, empty, empty, empty, 0.0, 0.0, 0)
+
+
+def test_kernel_lookup_finds_the_mojo_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`dpvo.kernels` imports dpvo.mojo_backend on the first CPU lookup; no caller registers it by hand."""
+    from dpvo import kernels
+
+    monkeypatch.setattr(kernels, "_BACKENDS", {})
+    assert kernels.corr_kernels(torch.device("cpu")) is corr
+    assert kernels.ba_kernels(torch.device("cpu")) is ba

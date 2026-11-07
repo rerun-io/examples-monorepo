@@ -3809,6 +3809,14 @@ outputs = [
     "packages/dpvo/dpvo/_cuda_ba*.so",
 ]
 
+# dpvo.mojo_backend (packages/dpvo's kernels in Mojo), as [feature.dpvo.tasks.dpvo-mojo-build].
+[feature.metrictrail.tasks.dpvo-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I dpvo/mojo_backend/mojo -o dpvo/mojo_backend/_dpvo_mojo.so dpvo/mojo_backend/mojo/_dpvo_mojo.mojo"
+cwd = "packages/dpvo"
+description = "Build the Mojo kernels of dpvo.mojo_backend (CPU + GPU kernels for the local GPU)"
+inputs = ["packages/dpvo/dpvo/mojo_backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/dpvo/dpvo/mojo_backend/_dpvo_mojo.so"]
+
 # ViPE's DROID/SLAM kernels in Mojo (packages/vipe-mojo, import vipe_mojo), the port of vipe_ext. Built against
 # lietorch-mojo's runtimes like dpvo's Mojo backend.
 [feature.metrictrail.tasks.vipe-mojo-build]
