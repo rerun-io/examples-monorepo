@@ -10,12 +10,11 @@ blocks B (6n, 6n), E (6n, m), C (m,), v (6n,), u (m,) and E_lookup (num_ij, ppf,
 zeroed by the caller; the Hessian kernel accumulates into them with float atomics (CUDA's
 atomicAdd), so they are passed as pointers with their row lengths.
 
-`r_total` (the CUDA kernel's float64 cost, which the extension never returns) is not computed:
-Metal has no float64.
+`r_total` (the CUDA kernel's float64 cost) is not computed: the extension never returns it.
 """
 
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, global_idx
-from std.atomic import Atomic
+from std.atomic import Atomic, Ordering
 from std.math import isfinite, log
 from std.utils.static_tuple import StaticTuple
 
@@ -32,7 +31,9 @@ comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
 
 @always_inline
 def _add(p: F32Ptr, offset: Int, value: Float32):
-    _ = Atomic.fetch_add(p.unsafe_offset(offset), value)
+    # CUDA's atomicAdd: relaxed, device scope (RED.E.ADD.F32...GPU). Mojo's default on NVIDIA is sequentially
+    # consistent at system scope, a fence and cache invalidation per add: 2.4x slower Hessian on the 5090.
+    _ = Atomic[Float32, scope="device"].fetch_add[ordering=Ordering.RELAXED](p.unsafe_offset(offset), value)
 
 
 @always_inline
@@ -142,7 +143,8 @@ def hessian_element(
 
     ix = ix - t0
     jx = jx - t0
-    for row in range(2):
+    # Unrolled (as nvcc does) so j_i / j_j stay in registers; a runtime loop put them on the stack.
+    comptime for row in range(2):
         var r: Float32
         var w: Float32
         var jz: Float32
@@ -159,8 +161,8 @@ def hessian_element(
             j_j = Vec8(0, fy * W * d, fy * -Y * W * d2, fy * (-1 - Y * Y * d2), fy * (X * Y * d2), fy * X * d, 0, 0)
         var j_i = adj_se3(tij, qij, j_j)
 
-        for i in range(6):
-            for j in range(6):
+        comptime for i in range(6):
+            comptime for j in range(6):
                 if ix >= 0:
                     _add(b, (6 * ix + i) * b_row + 6 * ix + j, w * j_i[i] * j_i[j])
                 if jx >= 0:
@@ -169,7 +171,7 @@ def hessian_element(
                     _add(b, (6 * ix + i) * b_row + 6 * jx + j, -w * j_i[i] * j_j[j])
                     _add(b, (6 * jx + i) * b_row + 6 * ix + j, -w * j_j[i] * j_i[j])
 
-        for i in range(6):
+        comptime for i in range(6):
             if eff_impl:
                 _add(e_lookup, (ijs * ppf + kx % ppf) * 6 + i, -w * jz * j_i[i])
                 _add(e_lookup, (ijx * ppf + kx % ppf) * 6 + i, w * jz * j_j[i])
@@ -179,7 +181,7 @@ def hessian_element(
                 if jx >= 0:
                     _add(e, (6 * jx + i) * e_row + k, w * jz * j_j[i])
 
-        for i in range(6):
+        comptime for i in range(6):
             if ix >= 0:
                 _add(v, 6 * ix + i, -w * r * j_i[i])
             if jx >= 0:
