@@ -1,0 +1,107 @@
+diff --git a/vipe/metrictrail/dino_fusion.py b/vipe/metrictrail/dino_fusion.py
+index 3dc51ec..6b41ba3 100644
+--- a/vipe/metrictrail/dino_fusion.py
++++ b/vipe/metrictrail/dino_fusion.py
+@@ -321,91 +321,24 @@ def make_dino_patchifier_class(net_module: Any | None = None, altcorr_module: An
+         #: MetricTrail's dynamic masking (:mod:`vipe.metrictrail.dynamic`). None: DPVO's own draw, unchanged.
+         centroid_valid: torch.Tensor | None = None
+ 
+-        def _masked_base_forward(
+-            self,
+-            images: torch.Tensor,
+-            patches_per_image: int,
+-            disps: torch.Tensor | None,
+-            centroid_sel_strat: str,
+-            return_color: bool,
+-            valid: torch.Tensor,
+-        ):
+-            """The vendored ``Patchifier.forward`` with every centroid drawn on a ``valid`` cell.
+-
+-            Line for line the vendored DPVO forward, except that the uniform
+-            ``torch.randint`` centroid draws are rejection-sampled to ``valid``
+-            (:func:`vipe.metrictrail.dynamic.sample_valid_centroids`).
+-            """
+-
+-            from .dynamic import sample_valid_centroids
+-
+-            fmap = self.fnet(images) / 4.0
+-            imap = self.inet(images) / 4.0
+-
+-            b, n, c, h, w = fmap.shape
+-            P = self.patch_size
+-            if tuple(valid.shape) != (h, w):
+-                raise ValueError(f"centroid validity {tuple(valid.shape)} does not match the DPVO grid {(h, w)}")
+-            valid = valid.to(device=fmap.device)
+-
+-            if centroid_sel_strat == "GRADIENT_BIAS":
+-                g = getattr(self, "_Patchifier__image_gradient")(images)
+-                x, y = sample_valid_centroids(valid, n, 3 * patches_per_image)
+-
+-                coords = torch.stack([x, y], dim=-1).float()
+-                g = altcorr.patchify(g[0, :, None], coords, 0).view(n, 3 * patches_per_image)
+-
+-                ix = torch.argsort(g, dim=1)
+-                x = torch.gather(x, 1, ix[:, -patches_per_image:])
+-                y = torch.gather(y, 1, ix[:, -patches_per_image:])
+-
+-            elif centroid_sel_strat == "RANDOM":
+-                x, y = sample_valid_centroids(valid, n, patches_per_image)
+-
+-            else:
+-                raise NotImplementedError(f"Patch centroid selection not implemented: {centroid_sel_strat}")
+-
+-            coords = torch.stack([x, y], dim=-1).float()
+-            imap = altcorr.patchify(imap[0], coords, 0).view(b, -1, DIM, 1, 1)
+-            gmap = altcorr.patchify(fmap[0], coords, P // 2).view(b, -1, 128, P, P)
+-
+-            if return_color:
+-                clr = altcorr.patchify(images[0], 4 * (coords + 0.5), 0).view(b, -1, 3)
+-
+-            if disps is None:
+-                disps = torch.ones(b, n, h, w, device=fmap.device)
+-
+-            grid, _ = coords_grid_with_index(disps, device=fmap.device)
+-            patches = altcorr.patchify(grid[0], coords, P // 2).view(b, -1, 3, P, P)
+-
+-            index = torch.arange(n, device=fmap.device).view(n, 1)
+-            index = index.repeat(1, patches_per_image).reshape(-1)
+-
+-            if return_color:
+-                return fmap, gmap, imap, patches, index, clr
+-
+-            return fmap, gmap, imap, patches, index
+-
+         def forward(
+             self,
+             images: torch.Tensor,
+             patches_per_image: int = 80,
+             disps: torch.Tensor | None = None,
+-            centroid_sel_strat: str = "RANDOM",
++            gradient_bias: bool = False,
+             return_color: bool = False,
++            centroid_valid: torch.Tensor | None = None,
+         ):
+-            if self.centroid_valid is None:
+-                base = super().forward(
+-                    images,
+-                    patches_per_image=patches_per_image,
+-                    disps=disps,
+-                    centroid_sel_strat=centroid_sel_strat,
+-                    return_color=return_color,
+-                )
+-            else:
+-                base = self._masked_base_forward(
+-                    images, patches_per_image, disps, centroid_sel_strat, return_color, self.centroid_valid
+-                )
++            # [vipe-src] packages/dpvo's Patchifier keywords; its base forward draws the masked centroids itself.
++            base = super().forward(
++                images,
++                patches_per_image=patches_per_image,
++                disps=disps,
++                gradient_bias=gradient_bias,
++                return_color=return_color,
++                centroid_valid=self.centroid_valid if centroid_valid is None else centroid_valid,
++            )
+             if return_color:
+                 fmap, base_gmap, imap, patches, index, color = base
+             else:

@@ -2447,6 +2447,7 @@ inputs = [
     "packages/dpvo/dpvo/altcorr/*.cu",
     "packages/dpvo/dpvo/fastba/*.cpp",
     "packages/dpvo/dpvo/fastba/*.cu",
+    "packages/dpvo/dpvo/fastba/*.cuh",
 ]
 outputs = [
     "packages/dpvo/dpvo/_cuda_corr*.so",
@@ -3715,10 +3716,12 @@ description = "Run the Rust author checks for staged Kornia code"
 # ═══════════════════════════════════════════════════════════════════════════
 # metrictrail — NVIDIA MetricTrail (ViPE @ ead2e00, recipes/vipe-src) + our benchmark/eval/catalog code
 # ═══════════════════════════════════════════════════════════════════════════
-# vipe-src compiles ViPE's vipe_ext (all of it but lietorch_ext) and MetricTrail's DPVO kernels
-# (cuda_corr, cuda_ba) at package build time; lietorch_backends is not built (see recipes/vipe-src/recipe.yaml).
+# vipe-src compiles ViPE's vipe_ext (all of it but lietorch_ext) at package build time (see recipes/vipe-src/recipe.yaml).
+# MetricTrail's DPVO is packages/dpvo's `dpvo.metric` (MetricDPVO): vipe-src deletes ViPE's vendored copy and installs
+# re-export shims at vipe.metrictrail.dpvo. This feature supplies dpvo (editable) and builds its CUDA kernels
+# (cuda_corr, cuda_ba) with `_build-dpvo-cuda-kernels`, like [feature.dpvo]; every task that tracks depends on it.
 # Reuse: DINOv3 from recipes/dinov3-src, MoGe-2 from packages/monoprior (monopriors), lietorch from lietorch-mojo:
-# ViPE's three lietorch copies re-export `lietorch_mojo` (recipes/vipe-src patch 0001); the environments compose the
+# ViPE's lietorch re-exports `lietorch_mojo` (recipes/vipe-src patch 0001); the environments compose the
 # `lietorch-mojo` feature (like dpvo), and every task that imports lietorch depends on `lietorch-mojo-build`.
 [feature.metrictrail]
 platforms = ["linux-64"]
@@ -3735,9 +3738,14 @@ torchcodec = "*"
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 # The default surface: a sparse colour TSDF (Rust, rayon) fused from every tracked frame, marching-cubes mesh.
 tsdf-rs = { path = "packages/tsdf-rs" }
+# packages/dpvo's CUDA kernels (`_build-dpvo-cuda-kernels`): fastba includes <Eigen/...>; ninja for torch's extension build.
+eigen = ">=3.4.0,<3.5"
+ninja = ">=1.13.2,<2"
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
+# MetricTrail's DPVO (dpvo.metric) behind vipe-src's vipe.metrictrail.dpvo shims; its kernels: `_build-dpvo-cuda-kernels`.
+dpvo = { path = "packages/dpvo", editable = true }
 # ViPE's `moge2-l` prior is monopriors' MoGe-2 (recipes/vipe-src patch 0003); metrictrail.moge2 runs monopriors' MoGe-2 on
 # the moge-2-vitl-normal checkpoint. Its DINOv2 always uses torch SDPA, so no xformers.
 monopriors = { path = "packages/monoprior", editable = true }
@@ -3760,14 +3768,35 @@ VIPE_DINOV3_VITS16_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/dinov3/din
 VIPE_MOGE2_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/moge2/moge-2-vitl/model.pt"
 TORCH_HOME = "/mnt/nas/ssd-8tb/metrictrail/weights/torch_home"
 
+# packages/dpvo's CUDA extensions, as [feature.dpvo.tasks._build-dpvo-cuda-kernels] (the in-place .so files are shared
+# by the dpvo and metrictrail envs of a worktree: same torch, Python and nvcc). Do not run both builds at once.
+[feature.metrictrail.tasks._build-dpvo-cuda-kernels]
+cmd = "python setup.py build_ext --inplace"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/dpvo"
+description = "Build DPVO CUDA extensions (cuda_corr, cuda_ba)"
+inputs = [
+    "packages/dpvo/setup.py",
+    "packages/dpvo/dpvo/altcorr/*.cpp",
+    "packages/dpvo/dpvo/altcorr/*.cu",
+    "packages/dpvo/dpvo/fastba/*.cpp",
+    "packages/dpvo/dpvo/fastba/*.cu",
+    "packages/dpvo/dpvo/fastba/*.cuh",
+]
+outputs = [
+    "packages/dpvo/dpvo/_cuda_corr*.so",
+    "packages/dpvo/dpvo/_cuda_ba*.so",
+]
+
 [feature.metrictrail.tasks.metrictrail-check-kernels]
 cmd = "python tools/check_kernels.py"
+depends-on = ["_build-dpvo-cuda-kernels"]
 cwd = "packages/metrictrail"
-description = "Run one tiny op of each compiled vipe-src kernel (vipe_ext, cuda_corr, cuda_ba) on the GPU"
+description = "Run one tiny op of each compiled kernel (vipe-src's vipe_ext, packages/dpvo's cuda_corr and cuda_ba) on the GPU"
 
 [feature.metrictrail.tasks.metrictrail-run]
 cmd = "python tools/run.py"
-depends-on = ["lietorch-mojo-build"]
+depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
 cwd = "packages/metrictrail"
 description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
 
@@ -3801,16 +3830,25 @@ description = "Download the iPhone example video of the MetricTrail app"
 
 [feature.metrictrail.tasks.metrictrail-app]
 cmd = "python tools/gradio_app.py"
-depends-on = ["lietorch-mojo-build", "_download-metrictrail-data", "_download-metrictrail-iphone-data"]
+depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels", "_download-metrictrail-data", "_download-metrictrail-iphone-data"]
 cwd = "packages/metrictrail"
 description = "Launch the MetricTrail Gradio app: upload a video, watch the run stream into an embedded Rerun viewer (needs the GPU)"
 
-# The full-pipeline integration test imports lietorch_mojo's Mojo extension; this shadows the dev feature's task.
-[feature.metrictrail.tasks.tests-integration]
-cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+# metrictrail.capture imports packages/dpvo, which imports lietorch_mojo's Mojo extension; this shadows the dev
+# feature's task.
+[feature.metrictrail.tasks.tests]
+cmd = "pytest -q"
 depends-on = ["lietorch-mojo-build"]
 cwd = "packages/metrictrail"
-description = "Build the lietorch-mojo extension, then run the package integration tests"
+description = "Build the lietorch-mojo extension, then run the package unit tests"
+
+# The full-pipeline integration test imports lietorch_mojo's Mojo extension and packages/dpvo's CUDA kernels; this
+# shadows the dev feature's task.
+[feature.metrictrail.tasks.tests-integration]
+cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
+cwd = "packages/metrictrail"
+description = "Build the lietorch-mojo extension and the DPVO kernels, then run the package integration tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments

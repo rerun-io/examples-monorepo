@@ -1,6 +1,10 @@
-"""Pure parts of the live capture: DPVO pose conversion, frustums, DINOv3 PCA, the kept pass."""
+"""Pure parts of the live capture: DPVO pose conversion, frustums, DINOv3 PCA, the kept pass, and the DPVO observer
+(on a CPU DPVO with stand-in ViPE modules, no GPU)."""
 
+import sys
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import numpy as np
 import pytest
@@ -8,9 +12,23 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from metrictrail.capture import CapturedPass, CaptureSession, DinoPca, dpvo_world_T_cam, frustum_strips, normals_rgb, rgb_normals
-
 torch = pytest.importorskip("torch", reason="torch comes from the metrictrail env's cuda feature")
+
+from dpvo.config import DPVOConfig  # noqa: E402
+from dpvo.dpvo import DPVO  # noqa: E402
+from dpvo.hooks import FrameDepth, FrameEvent  # noqa: E402
+from dpvo.net import VONet  # noqa: E402
+
+from metrictrail.capture import (  # noqa: E402
+    CapturedPass,
+    CaptureObserver,
+    CaptureSession,
+    DinoPca,
+    dpvo_world_T_cam,
+    frustum_strips,
+    normals_rgb,
+    rgb_normals,
+)
 
 
 def test_dpvo_world_T_cam_inverts_dpvo_world_to_camera_poses() -> None:
@@ -117,3 +135,92 @@ def test_live_surface_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
     paths: list[str] = [str(path) for path in RrdReader(rrd).store().schema().entity_paths()]
     assert surface.integrated == 3
     assert any(path.startswith("/" + entities.DPVO_MESH + "/") for path in paths)
+
+
+class _SlamSystem:
+    """Stands in for ``vipe.metrictrail.slam.DPVOSLAMSystem`` (the two methods capture wraps)."""
+
+    def run(self, video_stream: Any, **kwargs: Any) -> None: ...
+
+    def _prepare(self, index: int, *args: Any, **kwargs: Any) -> None: ...
+
+
+class _FrozenDino:
+    """Stands in for ``vipe.metrictrail.dino_fusion.FrozenDinoV3``."""
+
+    def forward(self, dpvo_images: Any) -> None: ...
+
+
+class _NormalProvider:
+    """Stands in for ``metrictrail.moge2.MoGe2NormalProvider``."""
+
+    def predict_metric(self, rgb_bchw: Any, *, focal_px: float) -> None: ...
+
+
+@pytest.fixture
+def stand_in_vipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ViPE modules :meth:`CaptureSession.install` wraps, as stand-ins (the real ones need vipe_ext and the GPU)."""
+    modules: dict[str, dict[str, type]] = {
+        "vipe": {},
+        "vipe.metrictrail": {},
+        "vipe.metrictrail.slam": {"DPVOSLAMSystem": _SlamSystem},
+        "vipe.metrictrail.dino_fusion": {"FrozenDinoV3": _FrozenDino},
+        "metrictrail.moge2": {"MoGe2NormalProvider": _NormalProvider},
+    }
+    for name, attributes in modules.items():
+        module: ModuleType = ModuleType(name)
+        for attribute, value in attributes.items():
+            setattr(module, attribute, value)
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(sys.modules["vipe"], "metrictrail", sys.modules["vipe.metrictrail"], raising=False)
+    for child in ("slam", "dino_fusion"):
+        monkeypatch.setattr(sys.modules["vipe.metrictrail"], child, sys.modules[f"vipe.metrictrail.{child}"], raising=False)
+
+
+def cpu_dpvo() -> DPVO:
+    """A small DPVO on the CPU (random weights; built, never run)."""
+    return DPVO(DPVOConfig(buffer_size=24, patches_per_frame=4, gradient_bias=False), VONet(), ht=32, wd=32, device=torch.device("cpu"))
+
+
+@pytest.mark.usefixtures("stand_in_vipe")
+def test_installed_session_observes_every_new_dpvo_and_logs_its_frames(tmp_path: Path) -> None:
+    from rerun.chunk import RrdReader
+
+    from metrictrail import entities
+
+    status: list[tuple[int, int, int]] = []
+    session = CaptureSession(
+        out_dir=tmp_path,
+        application_id="metrictrail-test",
+        recording_id="observer",
+        depth_range_m=(0.3, 3.0),
+        on_frame=lambda frame, frames, keyframes: status.append((frame, frames, keyframes)),
+    )
+    session.install()
+    assert _SlamSystem.run is not session.restore[0][2]  # the ViPE-level wraps are in place
+    session.pass_frames = 5
+    tracker: DPVO = cpu_dpvo()
+    observer = tracker.observers[-1]
+    assert isinstance(observer, CaptureObserver)
+    assert [captured.num_frames for captured in session.passes] == [5] and id(tracker) in session.streams
+
+    tracker.n = 1  # as after __call__ added the frame as a keyframe (before the motion probe initialised DPVO)
+    event = FrameEvent(
+        tstamp=0,
+        frame_index=0,
+        keyframes_before=0,
+        keyframe_added=True,
+        image=torch.full((3, 32, 32), 100, dtype=torch.uint8),
+        intrinsics=torch.tensor([30.0, 30.0, 16.0, 16.0]),
+        depth=FrameDepth(depth=torch.full((32, 32), 2.0), mask=None),
+    )
+    observer.on_frame(tracker, event)
+    observer.on_global_ba(tracker)
+    assert status == [(0, 5, 1)]
+    assert session.global_ba_calls == 1
+
+    session.uninstall()
+    assert session.remove_observer is None and session.restore == []
+    assert cpu_dpvo().observers == [] and len(session.passes) == 1  # no longer observed
+    paths: set[str] = {str(path) for path in RrdReader(tmp_path / "pass_0.rrd").store().schema().entity_paths()}
+    assert {"/" + entities.CAM_RGB, "/" + entities.CAM_DEPTH, "/" + entities.CAM_PATCHES} <= paths

@@ -60,13 +60,13 @@ class LongTermLoopClosure:
         # Warmup the numba JIT compiler
         ransac_umeyama(np.random.randn(3, 3), np.random.randn(3, 3), iterations=200, threshold=0.01)
 
-        self.detector = KF.DISK.from_pretrained("depth").to("cuda").eval()
-        self.matcher = KF.LightGlue("disk").to("cuda").eval()
+        self.detector = KF.DISK.from_pretrained("depth").to(patchgraph.device).eval()
+        self.matcher = KF.LightGlue("disk").to(patchgraph.device).eval()
 
     def detect_keypoints(self, images: Float[Tensor, "batch 3 height width"], num_features: int = 2048) -> list[dict]:
         """Detect DISK keypoints in a batch of images."""
         _, _, h, w = images.shape
-        wh = torch.tensor([w, h]).view(1, 2).float().cuda()
+        wh = torch.tensor([w, h]).view(1, 2).float().to(self.pg.device)
         features = self.detector(images, num_features, pad_if_not_divisible=True, window_size=15, score_threshold=40.0)
         return [{"keypoints": f.keypoints[None], "descriptors": f.descriptors[None], "image_size": wh} for f in features]
 
@@ -88,7 +88,7 @@ class LongTermLoopClosure:
         fl = self.detect_keypoints(image)
 
         # Form keypoint trajectories across the triplet
-        trajectories = torch.full((2048, 3), -1, device="cuda", dtype=torch.long)
+        trajectories = torch.full((2048, 3), -1, device=self.pg.device, dtype=torch.long)
         trajectories[:, 1] = torch.arange(2048)
 
         out = self.matcher({"image0": fl[0], "image1": fl[1]})
@@ -111,14 +111,14 @@ class LongTermLoopClosure:
         desc1 = fl[1]["descriptors"][:, b]
         image_size = fl[1]["image_size"]
 
-        kk = torch.arange(n_pts).cuda().repeat(2)
-        ii = torch.ones(2 * n_pts, device="cuda", dtype=torch.long)
-        jj = torch.zeros(2 * n_pts, device="cuda", dtype=torch.long)
+        kk = torch.arange(n_pts, device=self.pg.device).repeat(2)
+        ii = torch.ones(2 * n_pts, device=self.pg.device, dtype=torch.long)
+        jj = torch.zeros(2 * n_pts, device=self.pg.device, dtype=torch.long)
         jj[n_pts:] = 2
 
         # Construct mini patch graph for triangulation
         true_disp = self.pg.patches_[i, :, 2, 1, 1].median()
-        patches = torch.cat((kps1, torch.ones(1, n_pts, 1).cuda() * true_disp), dim=-1)
+        patches = torch.cat((kps1, torch.ones(1, n_pts, 1, device=self.pg.device) * true_disp), dim=-1)
         patches = repeat(patches, "1 n uvd -> 1 n uvd 3 3", uvd=3)
         target = rearrange(torch.stack((kps0, kps2)), "ot 1 n uv -> 1 (ot n) uv", uv=2, n=n_pts, ot=2)
         weight = torch.ones_like(target)
@@ -127,7 +127,7 @@ class LongTermLoopClosure:
         intrinsics = self.pg.intrinsics[:, i - 1 : i + 2].clone() * 4
 
         # Structure-only bundle adjustment
-        lmbda = torch.as_tensor([1e-3], device="cuda")
+        lmbda = torch.as_tensor([1e-3], device=self.pg.device)
         fastba.BA(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, 3, 3, M=-1, iterations=6, eff_impl=False)
 
         # Keep points with small residuals
@@ -140,7 +140,7 @@ class LongTermLoopClosure:
         mask = scatter_max(residual_val, kk)[0] < 2
 
         # Un-project keypoints
-        points = pops.iproj(patches, intrinsics[:, torch.ones(n_pts, device="cuda", dtype=torch.long)])
+        points = pops.iproj(patches, intrinsics[:, torch.ones(n_pts, device=self.pg.device, dtype=torch.long)])
         points = points[..., 1, 1, :3] / points[..., 1, 1, 3:]
 
         return points[:, mask].squeeze(0), {"keypoints": kps1[:, mask], "descriptors": desc1[:, mask], "image_size": image_size}
@@ -197,7 +197,7 @@ class LongTermLoopClosure:
         self.lc_in_progress = False
         final_est = self.result_queue.get()
         safe_i, _ = final_est.shape
-        res, s = final_est.tensor().cuda().split([7, 1], dim=1)
+        res, s = final_est.tensor().to(self.pg.device).split([7, 1], dim=1)
         s1 = torch.ones(self.pg.n, device=s.device)
         s1[:safe_i] = s.squeeze()
 
@@ -262,6 +262,6 @@ class LongTermLoopClosure:
 
         self.lc_in_progress = True
         self.lc_process = self.lc_pool.apply_async(
-            run_DPVO_PGO, (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue)
+            run_DPVO_PGO, (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue, self.pg.device)
         )
         return True

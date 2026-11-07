@@ -53,25 +53,36 @@ Input Video/Images
     ▼
 [Stream] (stream.py)
     Video: NVDEC decode + GPU area resize (0.5x); image dir: multiprocessing.Process + Queue
-    Output: Frame(t, source_index, bgr_3hw: cuda uint8[3,h,w], bgr_hw3: host copy for images only)
+    Output: Frame(t, source_index, bgr_3hw: uint8[3,h,w] on the tracker device (CUDA by default), bgr_hw3: host copy for images only)
     │
     ▼
 [Camera Calibration] (api/inference.py)
     If no calibration file: estimate K via MoGe-2 (median of the first 8 frames)
-    Output: intrinsics [fx, fy, cx, cy] as cuda float32[4]
+    Output: intrinsics [fx, fy, cx, cy] as float32[4] on the tracker device
+    │
+    ▼
+[Depth prior: prepare] (hooks.py: DepthPrior.prepare)
+    Optional disps grid float32[1, 1, H/4, W/4] for patchify (default: None = ones);
+    may reject the frame (ValueError) before any state changes
     │
     ▼
 [Patchify] (net.py: Patchifier)
     Input:  image float32[1, 1, 3, H, W] (normalized to [-0.5, 0.5])
     ├─ fnet (BasicEncoder4) → fmap float32[1, 1, 128, H/4, W/4]
     ├─ inet (BasicEncoder4) → imap float32[1, 1, DIM=384, H/4, W/4]
-    └─ gradient-biased random sampling → M=PATCHES_PER_FRAME patch locations
+    └─ random (optionally gradient-biased, or rejection-sampled to a
+       centroid_valid mask) sampling → M=PATCHES_PER_FRAME patch locations
     Output:
       fmap:    float16[1, 1, 128, H/4, W/4]   feature map (2 pyramid levels)
       imap:    float16[1, M, DIM]              per-patch descriptors
       gmap:    float16[1, M, 128, 3, 3]        correlation template
       patches: float32[1, M, 3, 3, 3]          patch coords (x, y, disp) at 3×3
       clr:     uint8[M, 3]                     RGB at patch centers
+    │
+    ▼
+[Depth prior: init_patch_depth] (hooks.py)
+    Writes patches[:, :, 2] before any state write. Default RandomDepthInit:
+    rand_like per patch, then (once initialized) the median of the last 3 keyframes
     │
     ▼
 [Buffer Storage] (patchgraph.py via self.pg; imap_/gmap_/fmap1_/fmap2_ on dpvo.py)
@@ -85,6 +96,8 @@ Input Video/Images
       gmap_[n%pmem, M, 128,3,3] float16           correlation templates
       fmap1_[1, n%mem, 128, H/4, W/4]   float16   pyramid level 1
       fmap2_[1, n%mem, 128, H/16,W/16]  float16   pyramid level 2
+      pg.frame_attrs[name][n, ...]      any       extension buffers (add_frame_attr)
+    pmem = 36 (max_edge_age with loop closure); mem = min(pmem, fmap_memory = 36)
     │
     ▼
 [Edge Creation] (dpvo.py)
@@ -116,8 +129,11 @@ Input Video/Images
        → weight float32[1, E, 2]   confidence (sigmoid, 0-1)
     │
     ▼
-[Bundle Adjustment] (ba.py → fastba/ CUDA)
-    Input: target (coords+delta), weight, poses, patches, intrinsics, ii, jj, kk
+[Bundle Adjustment] (fastba/ via dpvo.kernels; CUDA backend)
+    Input: target (coords+delta), weight, poses, patches, intrinsics, ii, jj, kk,
+           optional depth prior (DepthPrior.ba_prior("local" | "global"))
+    Global BA (run_global_ba) runs when long edges exist, or every
+    gba_schedule_k keyframes; it normalizes first only if normalize_global_ba
     1. Compute Jacobians:
        Ji float32[1,E,2,6]: ∂projection / ∂pose_ii
        Jj float32[1,E,2,6]: ∂projection / ∂pose_jj
@@ -133,11 +149,14 @@ Input Video/Images
     Bidirectional flow between frames n-keyframe_index-1 and n-keyframe_index+1
     (candidate keyframe at n-keyframe_index; keyframe_index defaults to 4),
     averaged over both directions via motionmag()
-    If mean motion < keyframe_thresh:
+    If mean motion < keyframe_thresh and not graph_policy.force_keep():
       - Store relative pose in delta dict for later interpolation
+      - graph_policy.on_cull(k), then observers' on_cull(k)
       - Remove all edges connecting to this frame
-      - Shift buffers to keep contiguous indexing
-      - Decrement n, m counters
+      - Shift buffers (incl. pg.frame_attrs) to keep contiguous indexing
+      - Decrement n, m counters; zero the vacated frame_attrs row
+    Else: graph_policy.on_keep(k, forced)
+    Prune old edges; store them as inactive factors if store_inactive
     │
     ▼
 [Output]
@@ -194,12 +213,42 @@ The DPVO class operates in two phases controlled by `is_initialized: bool`:
 │      (terminate())           │
 │                              │
 │  • 12 final BA iterations    │
+│  • observers: on_terminate   │
 │  • Build pose trajectory     │
 │  • Interpolate deleted       │
 │    keyframes via delta chain │
+│  • observers:                │
+│    refine_trajectory         │
 │  • Return (poses, tstamps)   │
 └──────────────────────────────┘
 ```
+
+## Extension Points (`hooks.py`)
+
+`DPVO(cfg, network, ht, wd, *, device=cuda, depth_prior=None, graph_policy=None, observers=())`.
+The defaults reproduce plain DPVO exactly: the same op order, the same RNG draws
+(patchify `randint` x then y, then `rand_like` for the depths) and the same kernel calls.
+
+| Hook | Called | Default |
+|---|---|---|
+| `DepthPrior.prepare(dpvo, image_hw, frame)` | before patchify; may raise `ValueError` | `None` (patchify's ones) |
+| `DepthPrior.init_patch_depth(dpvo, patches)` | after patchify, before any state write | `rand_like`, then median of last 3 keyframes |
+| `DepthPrior.ba_prior(dpvo, kind)` | before each local / global BA solve | `None` (no unary) |
+| `GraphPolicy.force_keep(dpvo)` | every `keyframe()` call | `False` |
+| `GraphPolicy.on_cull(dpvo, k)` / `on_keep(dpvo, k, forced)` | cull branch / keep branch | no-op |
+| `GraphPolicy.extra_loop_edges(dpvo, lii, ljj)` | after proximity loop edges are appended | `None` |
+| `DPVOObserver.on_frame(dpvo, FrameEvent)` | end of `__call__` (both exits) | no-op |
+| `DPVOObserver.on_cull` / `on_global_ba` / `on_terminate` | cull (before compaction) / `run_global_ba` entry / after the final updates | no-op |
+| `DPVOObserver.refine_trajectory(dpvo, poses)` | stacked world-to-camera poses before `.inv()` | identity |
+
+`add_global_observer(factory)` registers a process-wide factory that every new `DPVO`
+calls (for callers that do not build the tracker). Public helpers for extensions:
+`run_global_ba(t0=None)`, `refresh_factors(ii, jj, kk, target, weight, net, block_frames=40)`,
+`release_inactive_factors()` and `pg.add_frame_attr(name, tail, dtype)`.
+
+Backend config fields (all default to plain DPVO): `fmap_memory`, `store_inactive`,
+`normalize_global_ba`, `global_ba_t0`, `gba_schedule_k`, `raise_on_ba_failure`,
+`motion_scale_by_tstamps`. `update()`'s autocast follows `mixed_precision`.
 
 ## Tensor Shape Reference
 
@@ -292,8 +341,9 @@ VONet (net.py)
 
 | Module | Purpose |
 |--------|---------|
-| `dpvo.py` | Core SLAM class — state machine, keyframe management, feature buffers (imap_/gmap_/fmap1_/fmap2_) |
-| `patchgraph.py` | Patch/keyframe graph (`PatchGraph`) — pose/patch/intrinsic/color/point buffers, ii/jj/kk/net edges, delta interpolation dict |
+| `dpvo.py` | Core SLAM class — state machine, keyframe management, feature buffers (imap_/gmap_/fmap1_/fmap2_), hook calls |
+| `hooks.py` | Extension points: `DepthPrior`, `GraphPolicy`, `DPVOObserver`, `add_global_observer` |
+| `patchgraph.py` | Patch/keyframe graph (`PatchGraph`) — pose/patch/intrinsic/color/point buffers, ii/jj/kk/net edges, delta interpolation dict, `frame_attrs` registry |
 | `net.py` | VONet neural network (Patchifier + Update) |
 | `ba.py` | Bundle adjustment orchestration (calls fastba CUDA) |
 | `fastba/ba.py` | Schur complement solver (Python + CUDA via `_cuda_ba`) |
@@ -303,7 +353,7 @@ VONet (net.py)
 | `blocks.py` | GatedResidual, SoftAgg, GradientClip modules |
 | `extractor.py` | BasicEncoder4 CNN backbone |
 | `stream.py` | Video/image frame reader (multiprocessing) |
-| `config.py` | YACS config defaults |
+| `config.py` | `DPVOConfig` frozen dataclass and presets |
 | `utils.py` | Misc helpers (timers, image padding, etc.) |
 | `logger.py` | Logging utilities |
 | `plot_utils.py` | Trajectory/plot helpers |

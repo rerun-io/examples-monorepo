@@ -9,6 +9,9 @@ into a standalone class to support:
 - **Loop closure edges**: via :meth:`edges_loop`, which creates edges
   from old patches to recent frames based on camera proximity.
 - **Depth normalization**: :meth:`normalize` for scale consistency.
+- **Per-frame attributes**: :meth:`add_frame_attr` registers extra
+  keyframe-slot buffers (e.g. per-patch depth priors) that
+  :meth:`~dpvo.dpvo.DPVO.keyframe` compacts together with the patches.
 
 See Lipson et al. (2024), "Deep Patch Visual SLAM" for details.
 """
@@ -36,14 +39,16 @@ class PatchGraph:
         P: Patch side length (typically 3).
         DIM: GRU hidden state dimensionality.
         pmem: Patch memory size (circular buffer size for imap/gmap).
-        **kwargs: Passed to ``torch.zeros`` for edge tensors (device, dtype).
+        device: Device of every buffer.
+        feature_dtype: Dtype of the GRU hidden state ``net`` (half under mixed precision).
     """
 
-    def __init__(self, cfg: DPVOConfig, P: int, DIM: int, pmem: int, **kwargs: object) -> None:
+    def __init__(self, cfg: DPVOConfig, P: int, DIM: int, pmem: int, *, device: torch.device, feature_dtype: torch.dtype) -> None:
         self.cfg: DPVOConfig = cfg
         self.P: int = P
         self.pmem: int = pmem
         self.DIM: int = DIM
+        self.device: torch.device = device
 
         self.n: int = 0  # number of active keyframes
         self.m: int = 0  # number of active patches
@@ -53,15 +58,15 @@ class PatchGraph:
 
         # Fixed-size GPU buffers
         self.tstamps_: np.ndarray = np.zeros(self.N, dtype=np.int64)
-        self.poses_: Float32[Tensor, "N 7"] = torch.zeros(self.N, 7, dtype=torch.float, device="cuda")
-        self.patches_: Float32[Tensor, "N M 3 P P"] = torch.zeros(self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda")
-        self.intrinsics_: Float32[Tensor, "N 4"] = torch.zeros(self.N, 4, dtype=torch.float, device="cuda")
+        self.poses_: Float32[Tensor, "N 7"] = torch.zeros(self.N, 7, dtype=torch.float, device=device)
+        self.patches_: Float32[Tensor, "N M 3 P P"] = torch.zeros(self.N, self.M, 3, self.P, self.P, dtype=torch.float, device=device)
+        self.intrinsics_: Float32[Tensor, "N 4"] = torch.zeros(self.N, 4, dtype=torch.float, device=device)
 
-        self.points_: Float32[Tensor, "NM 3"] = torch.zeros(self.N * self.M, 3, dtype=torch.float, device="cuda")
-        self.colors_: UInt8[Tensor, "N M 3"] = torch.zeros(self.N, self.M, 3, dtype=torch.uint8, device="cuda")
+        self.points_: Float32[Tensor, "NM 3"] = torch.zeros(self.N * self.M, 3, dtype=torch.float, device=device)
+        self.colors_: UInt8[Tensor, "N M 3"] = torch.zeros(self.N, self.M, 3, dtype=torch.uint8, device=device)
 
-        self.index_: Int[Tensor, "N M"] = torch.zeros(self.N, self.M, dtype=torch.long, device="cuda")
-        self.index_map_: Int[Tensor, "N"] = torch.zeros(self.N, dtype=torch.long, device="cuda")
+        self.index_: Int[Tensor, "N M"] = torch.zeros(self.N, self.M, dtype=torch.long, device=device)
+        self.index_map_: Int[Tensor, "N"] = torch.zeros(self.N, dtype=torch.long, device=device)
 
         # Initialize poses to identity (quaternion w=1)
         self.poses_[:, 6] = 1.0
@@ -69,22 +74,48 @@ class PatchGraph:
         # Store relative poses for removed frames (for interpolation at terminate)
         self.delta: dict[int, tuple[int, SE3]] = {}
 
+        # Extra per-keyframe-slot buffers registered by extensions (see add_frame_attr)
+        self.frame_attrs: dict[str, Tensor] = {}
+
         ### Active edge information ###
-        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, **kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
-        self.ii: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
-        self.jj: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
-        self.kk: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
+        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, device=device, dtype=feature_dtype)
+        self.ii: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device=device)
+        self.jj: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device=device)
+        self.kk: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device=device)
 
         # Target and weight for active edges (set during update())
-        self.target: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, device="cuda")
-        self.weight: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, device="cuda")
+        self.target: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, device=device)
+        self.weight: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, device=device)
 
         ### Inactive edge information (removed from GRU updates, kept for global BA) ###
-        self.ii_inac: Int[Tensor, "n_inac"] = torch.as_tensor([], dtype=torch.long, device="cuda")
-        self.jj_inac: Int[Tensor, "n_inac"] = torch.as_tensor([], dtype=torch.long, device="cuda")
-        self.kk_inac: Int[Tensor, "n_inac"] = torch.as_tensor([], dtype=torch.long, device="cuda")
-        self.weight_inac: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, dtype=torch.float, device="cuda")
-        self.target_inac: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, dtype=torch.float, device="cuda")
+        self.ii_inac: Int[Tensor, "n_inac"] = torch.as_tensor([], dtype=torch.long, device=device)
+        self.jj_inac: Int[Tensor, "n_inac"] = torch.as_tensor([], dtype=torch.long, device=device)
+        self.kk_inac: Int[Tensor, "n_inac"] = torch.as_tensor([], dtype=torch.long, device=device)
+        self.weight_inac: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, dtype=torch.float, device=device)
+        self.target_inac: Float[Tensor, "1 0 2"] = torch.zeros(1, 0, 2, dtype=torch.float, device=device)
+
+    def add_frame_attr(self, name: str, tail: tuple[int, ...], dtype: torch.dtype) -> Tensor:
+        """Register a zero-initialised per-keyframe-slot buffer ``(N, *tail)`` on the graph's device.
+
+        :meth:`~dpvo.dpvo.DPVO.keyframe` shifts every registered buffer with the
+        patches when it removes a keyframe and zeroes the slot it vacates.
+
+        Args:
+            name: Registry key; must be new.
+            tail: Shape after the keyframe-slot axis, e.g. ``(M,)`` for one value per patch.
+            dtype: Buffer dtype.
+
+        Returns:
+            The registered buffer, also held in :attr:`frame_attrs`.
+
+        Raises:
+            ValueError: ``name`` is already registered.
+        """
+        if name in self.frame_attrs:
+            raise ValueError(f"frame attribute {name!r} is already registered")
+        buffer: Tensor = torch.zeros(self.N, *tail, dtype=dtype, device=self.device)
+        self.frame_attrs[name] = buffer
+        return buffer
 
     def edges_loop(self) -> tuple[Int[Tensor, "n_loop"], Int[Tensor, "n_loop"]]:
         """Create loop closure edges from old patches to recent frames.
@@ -106,12 +137,12 @@ class PatchGraph:
         old_bound: int = self.n - self.cfg.removal_window  # upper bound for "old" patches
 
         if old_bound <= 0:
-            return torch.empty(0, dtype=torch.long, device="cuda"), torch.empty(0, dtype=torch.long, device="cuda")
+            return torch.empty(0, dtype=torch.long, device=self.device), torch.empty(0, dtype=torch.long, device=self.device)
 
         # Create candidate edges: recent frames × old patches
         jj, kk = flatmeshgrid(
-            torch.arange(self.n - self.cfg.global_opt_freq, self.n - self.cfg.keyframe_index, device="cuda"),
-            torch.arange(max(old_bound - lc_range, 0) * self.M, old_bound * self.M, device="cuda"),
+            torch.arange(self.n - self.cfg.global_opt_freq, self.n - self.cfg.keyframe_index, device=self.device),
+            torch.arange(max(old_bound - lc_range, 0) * self.M, old_bound * self.M, device=self.device),
             indexing="ij",
         )
         ii = self.ix[kk]
@@ -139,7 +170,7 @@ class PatchGraph:
 
         edges: Int[Tensor, "E 2"] = torch.as_tensor(es, device=ii.device)
         if edges.numel() == 0:
-            return torch.empty(0, dtype=torch.long, device="cuda"), torch.empty(0, dtype=torch.long, device="cuda")
+            return torch.empty(0, dtype=torch.long, device=self.device), torch.empty(0, dtype=torch.long, device=self.device)
 
         ii_out, jj_out = repeat(edges, "E ij -> ij E M", M=self.M, ij=2)
         kk_out = ii_out.mul(self.M) + torch.arange(self.M, device=ii.device)

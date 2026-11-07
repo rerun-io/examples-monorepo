@@ -28,6 +28,69 @@ pixi run -e dpvo --frozen dpvo-demo
 - `pixi run -e dpvo --frozen dpvo-demo` has been validated on an RTX 5090 with the current lockfile.
 - Rerun and GUI flows require a valid display session. In headless shells, Rerun will fail unless `DISPLAY`/`XAUTHORITY` are set.
 
+## Extension points
+
+The tracker (`dpvo.dpvo.DPVO`) is plain DPVO with a few seams. With the defaults it runs exactly as before; see
+`docs/architecture.md` for the call order.
+
+### `dpvo.hooks`
+
+- `DepthPrior` (default `RandomDepthInit`, plain DPVO's draw): `prepare(dpvo, image_hw, frame)` returns the `disps`
+  grid for patchify, `init_patch_depth(dpvo, patches)` writes the new patches' depths before any state changes (a
+  `ValueError` from either rejects the frame), `ba_prior(dpvo, kind)` gives the local or global BA a
+  `dpvo.fastba.BADepthPrior` (or `None`).
+- `GraphPolicy` (default `DefaultGraphPolicy`): `force_keep` vetoes a keyframe cull, `on_cull`/`on_keep` see the
+  decision, `extra_loop_edges` appends edges after the proximity loop edges.
+- `DPVOObserver`: no-op callbacks `on_frame(dpvo, FrameEvent)` (end of `__call__`, both exits), `on_cull`,
+  `on_global_ba` (entry of `run_global_ba`), `on_terminate` and `refine_trajectory(dpvo, poses)`. Observer exceptions
+  propagate.
+- `add_global_observer(factory) -> remover`: `DPVO.__init__` calls every registered factory with the new tracker and
+  keeps the non-`None` observers, for callers that do not build the tracker themselves (MetricTrail's
+  `metrictrail.capture`: ViPE builds the tracker).
+
+Pass them as `DPVO(cfg, network, ht, wd, *, device=torch.device("cuda"), depth_prior=None, graph_policy=None,
+observers=())`. `device` places the network and every buffer; the native ops then come from `dpvo.kernels`.
+
+### `dpvo.kernels`
+
+Kernel ops dispatch on the input tensor's `device.type`, with no copies and no syncs. CUDA is built in: the
+`dpvo._cuda_corr` and `dpvo._cuda_ba` extensions (`_build-dpvo-cuda-kernels`), imported on the first CUDA lookup.
+Another backend package registers itself at import time:
+
+```python
+import dpvo.kernels
+
+dpvo.kernels.register("mps", corr=my_corr_module, ba=my_ba_module)
+```
+
+A backend is any object (a module of functions is enough) that has the extension signatures, the
+`CorrKernels` and `BAKernels` protocols:
+
+| Group | Op | Signature |
+| --- | --- | --- |
+| corr | `forward` | `(fmap1, fmap2, coords, ii, jj, radius: int) -> (corr,)` |
+| corr | `backward` | `(fmap1, fmap2, coords, ii, jj, grad, radius: int) -> (fmap1_grad, fmap2_grad)` |
+| corr | `patchify_forward` | `(net, coords, radius: int) -> (patches,)` |
+| corr | `patchify_backward` | `(net, coords, grad, radius: int) -> (net_grad,)` |
+| ba | `forward` | `(poses, patches, intrinsics, target, weight, lmbda, depth_prior, depth_prior_weight, depth_prior_lambda: float, depth_prior_huber: float, ii, jj, kk, M: int, t0: int, t1: int, iterations: int, eff_impl: bool) -> ()`; updates `poses` and `patches` in place |
+| ba | `neighbors` | `(ii, jj) -> (ix, jx)` |
+| ba | `reproject` | `(poses, patches, intrinsics, ii, jj, kk) -> coords` |
+| ba | `solve_system` | `(J_Ginv_i, J_Ginv_j, ii, jj, res, ep: float, lm: float, freen: int) -> (delta,)` |
+
+`corr_kernels(device)` and `ba_kernels(device)` return the registered group; an unregistered device type raises
+`LookupError`.
+
+### `dpvo.metric`
+
+`MetricDPVO(cfg: MetricDPVOConfig, network, ht, wd, *, device, observers=())` is ViPE MetricTrail's DPVO on these
+hooks: a per-frame metric-depth prior (patch depths from the depth map, a log-inverse-depth unary in the local and
+global BA after a warm-up), proximity loop edges into a metric global BA, a keyframe-cull guard, reverse loop edges,
+culled-frame interpolation and a final re-measured global BA. `__call__(tstamp, image, intrinsics, metric_depth=None,
+metric_mask=None)` needs the depth; `metric_prior_diagnostics()` returns the counters ViPE checks.
+`MetricDPVOConfig.from_yacs(block)` / `to_yacs()` map ViPE's 43 uppercase yacs keys (`YACS_DEFAULTS`); the presets
+`metrictrail_local`, `metrictrail_gba` and `metrictrail_gba_refine` run ViPE's operations in ViPE's order.
+MetricTrail (`packages/metrictrail`) runs it through `recipes/vipe-src`'s `vipe.metrictrail.dpvo` shims.
+
 ## Demo
 Hosted Demos can be found in either lightning studio or huggingface spaces
 

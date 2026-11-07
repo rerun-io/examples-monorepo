@@ -1,13 +1,12 @@
-"""Smoke checks of the CUDA kernels that `recipes/vipe-src` compiles at package build time.
+"""Smoke checks of the CUDA kernels MetricTrail runs on: ``vipe_ext`` (compiled by `recipes/vipe-src` at package build
+time) and packages/dpvo's DPVO kernels (``_build-dpvo-cuda-kernels``).
 
 Each check runs one tiny op of a compiled module on the GPU and returns its largest absolute error against a
 plain-torch reference, so a wrong build (missing architecture, broken ABI, wrong module) fails loudly.
 
-- ``vipe.metrictrail.dpvo_ext.cuda_corr``: ``patchify_forward`` (DPVO patch extraction).
-- ``vipe.metrictrail.dpvo_ext.cuda_ba``: ``reproject`` (DPVO patch reprojection under a relative pose).
+- :func:`dpvo.kernels.corr_kernels` (``dpvo._cuda_corr`` on CUDA): ``patchify_forward`` (DPVO patch extraction).
+- :func:`dpvo.kernels.ba_kernels` (``dpvo._cuda_ba`` on CUDA): ``reproject`` (DPVO patch reprojection under a relative pose).
 - ``vipe_ext.scatter_ext``: ``scatter_max`` (ViPE's own extension, used by its keyframe SLAM).
-
-None of these import lietorch, so they run before a lietorch provider is installed.
 """
 
 import importlib
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 from types import ModuleType
 
 import torch
+from dpvo.kernels import BAKernels, CorrKernels, ba_kernels, corr_kernels
 from jaxtyping import Float32, Int64
 from torch import Tensor
 
@@ -40,9 +40,14 @@ def _import(name: str) -> ModuleType:
     return importlib.import_module(name)
 
 
+def _module_name(backend: object) -> str:
+    """Name of the module that serves a :mod:`dpvo.kernels` backend (the backend is a module on CUDA)."""
+    return backend.__name__ if isinstance(backend, ModuleType) else type(backend).__qualname__
+
+
 def check_patchify(device: torch.device) -> KernelCheck:
-    """``cuda_corr.patchify_forward`` against direct indexing (integer coordinates, radius 1)."""
-    cuda_corr: ModuleType = _import("vipe.metrictrail.dpvo_ext.cuda_corr")
+    """DPVO's ``patchify_forward`` against direct indexing (integer coordinates, radius 1)."""
+    cuda_corr: CorrKernels = corr_kernels(device)
     generator: torch.Generator = torch.Generator().manual_seed(0)
     net: Float32[Tensor, "b c h w"] = torch.rand(1, 4, 12, 16, generator=generator).to(device)
     coords_xy: Float32[Tensor, "b m 2"] = torch.tensor([[[5.0, 4.0], [10.0, 7.0], [3.0, 8.0]]], device=device)
@@ -52,12 +57,12 @@ def check_patchify(device: torch.device) -> KernelCheck:
     expected: Float32[Tensor, "b m c d d"] = torch.stack(
         [net[0, :, int(y) - radius : int(y) - radius + diameter, int(x) - radius : int(x) - radius + diameter] for x, y in coords_xy[0].tolist()]
     )[None]
-    return KernelCheck("vipe.metrictrail.dpvo_ext.cuda_corr", "patchify_forward", float((patches - expected).abs().max()))
+    return KernelCheck(_module_name(cuda_corr), "patchify_forward", float((patches - expected).abs().max()))
 
 
 def check_reproject(device: torch.device) -> KernelCheck:
-    """``cuda_ba.reproject`` of 3x3 patches from frame 0 (identity) into frame 1 (pure translation)."""
-    cuda_ba: ModuleType = _import("vipe.metrictrail.dpvo_ext.cuda_ba")
+    """DPVO's ``reproject`` of 3x3 patches from frame 0 (identity) into frame 1 (pure translation)."""
+    cuda_ba: BAKernels = ba_kernels(device)
     fx, fy, cx, cy = 200.0, 210.0, 64.0, 48.0
     translation: Float32[Tensor, "3"] = torch.tensor([0.1, -0.05, 0.2])
     # DPVO layout: [tx, ty, tz, qx, qy, qz, qw]; world-to-camera, so the relative pose of frame 1 to 0 is pose 1.
@@ -81,7 +86,7 @@ def check_reproject(device: torch.device) -> KernelCheck:
     expected_x: Float32[Tensor, "m p p"] = fx * ((pixel_x - cx) / fx + translation[0] * inverse_depth) / depth_j + cx
     expected_y: Float32[Tensor, "m p p"] = fy * ((pixel_y - cy) / fy + translation[1] * inverse_depth) / depth_j + cy
     expected: Float32[Tensor, "1 e 2 p p"] = torch.stack([expected_x, expected_y], dim=1)[None]
-    return KernelCheck("vipe.metrictrail.dpvo_ext.cuda_ba", "reproject", float((coords.cpu() - expected).abs().max()))
+    return KernelCheck(_module_name(cuda_ba), "reproject", float((coords.cpu() - expected).abs().max()))
 
 
 def check_scatter_max(device: torch.device) -> KernelCheck:

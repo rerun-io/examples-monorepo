@@ -53,6 +53,10 @@ ignore_names = [
     "layer4", "layer5", "layer6", "layer7", "up1", "up2",
     # DPVO internal attributes
     "image_", "__edges_all",
+    # Hook protocol parameters (dpvo.hooks) that the default strategies ignore
+    "image_hw", "kind", "forced",
+    # Kernel protocol parameters (dpvo.kernels BAKernels.forward)
+    "depth_prior_weight", "depth_prior_lambda", "depth_prior_huber",
 ]
 
 [tool.pytest.ini_options]

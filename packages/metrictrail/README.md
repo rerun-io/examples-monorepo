@@ -13,11 +13,11 @@ evaluation and the catalog layer. ViPE itself comes from `recipes/vipe-src`.
 | Part | Where it comes from | Why |
 | --- | --- | --- |
 | ViPE + MetricTrail | `recipes/vipe-src`: the GitHub archive of ViPE `ead2e00`, sha256-pinned | `ead2e00` is the first commit with `vipe/metrictrail`; no release has it (v1.2.0 predates it). |
-| CUDA kernels | the recipe compiles `vipe_ext` (without `lietorch_ext`) and MetricTrail's DPVO `cuda_corr` + `cuda_ba` at package build time (Python 3.12, conda-forge torch 2.12 cuda130, sm_86 + sm_120 + PTX) | upstream's `python -m vipe.metrictrail.build` step becomes part of `pixi install`. The stereo kernels are not built. |
-| lietorch | patch 0001: ViPE's three vendored lietorch copies import `lietorch_mojo`; `build.sh` deletes the vendored code and `lietorch_backends` is not built | one lietorch for the workspace (lietorch-mojo). ViPE's copies are code-identical to upstream lietorch. |
+| CUDA kernels | the recipe compiles `vipe_ext` (without `lietorch_ext`) at package build time (Python 3.12, conda-forge torch 2.12 cuda130, sm_86 + sm_120 + PTX). DPVO's `cuda_corr` + `cuda_ba` are `packages/dpvo`'s, built in place by the `metrictrail` feature's `_build-dpvo-cuda-kernels` task (a `depends-on` of `metrictrail-run`, `metrictrail-app`, `metrictrail-check-kernels` and `tests-integration`; for the local GPU only) | `vipe_ext` is part of `pixi install`; the DPVO kernels are the same build as the `dpvo` env's (the `.so` files in `packages/dpvo/dpvo` serve both envs). |
+| lietorch | patch 0001: ViPE's vendored lietorch (`vipe/ext/lietorch`) imports `lietorch_mojo` and `build.sh` deletes the vendored code; the DPVO shim's `lietorch` re-exports it too (the DPVO copies go with ViPE's DPVO) | one lietorch for the workspace (lietorch-mojo). ViPE's copies are code-identical to upstream lietorch. |
 | DINOv3 | patch 0002: `recipes/dinov3-src` (a run dependency) | the same ViT-S/16; patch tokens are bit-identical. |
 | MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds only that registry and the `fuse_point_cloud` hook `metrictrail.fusion` uses for the normals) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid at 3600 tokens; torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
-| DPVO | the recipe (ViPE's `vipe/metrictrail/dpvo`, `csrc/dpvo`), not `packages/dpvo` | MetricTrail's DPVO is a functional fork: metric-depth local BA, a metric global-BA backend, about 35 new config keys and a `cuda_ba` with 4 more arguments and a new kernel. `packages/dpvo` is a typed rewrite on Python 3.11. MetricTrail does not use DBoW loop closure, so `packages/dpretrieval` is not used. |
+| DPVO | `packages/dpvo`'s `dpvo.metric.MetricDPVO` (an editable path dependency of the `metrictrail` feature). The recipe deletes ViPE's vendored DPVO, its kernels and the stereo runner, and installs re-export shims at `vipe.metrictrail.dpvo` (`recipes/vipe-src/dpvo_shim`), so ViPE's `slam.py` builds `MetricDPVO` from its yacs config unchanged; patch 0005 hands the DINO patchifier `packages/dpvo`'s patchify keywords | one DPVO for the workspace. ViPE's fork (metric-depth local BA, the metric global-BA backend, the `cuda_ba` prior kernel) is ported onto the typed core's hooks; the three presets run ViPE's operations in ViPE's order (lockstep against ViPE's copy on TUM, 7-Scenes and KITTI). MetricTrail does not use DBoW loop closure, so `packages/dpretrieval` is not used. `metrictrail.capture` observes DPVO through `dpvo.hooks.add_global_observer`. |
 
 Weights are on the NAS (`/mnt/nas/ssd-8tb/metrictrail/weights`, `MANIFEST.md` beside them). The `metrictrail` feature
 sets ViPE's checkpoint variables to these files. MoGe-2's `moge-2-vitl-normal` is the exception: monoprior loads it from
@@ -50,7 +50,7 @@ Other tasks:
 
 - `metrictrail-log-run --run-dir <vipe_out> ...`: log a finished output directory (ours or upstream's) without the GPU.
   It has no normals: they exist only in a live capture (`cam/normals`, `world/cloud_normals` with `--fuse-cloud`).
-- `metrictrail-check-kernels`: run one small op of each compiled kernel on the GPU.
+- `metrictrail-check-kernels`: run one small op of each compiled kernel (`vipe_ext`, and DPVO's through `dpvo.kernels`) on the GPU.
 
 ## App
 
@@ -203,7 +203,7 @@ cache (a cold download was not measured):
 | --- | --- |
 | `pixi install -e metrictrail-dev`, recipe rebuilt | 127 s |
 | rattler-build recipe step | about 2 min |
-| `vipe_ext` + DPVO kernels | 50 s + 69 s |
+| `vipe_ext` + DPVO kernels | 50 s + 69 s (before the switch to `packages/dpvo`: the recipe now builds only `vipe_ext`) |
 
 ## Known gaps
 
@@ -214,7 +214,7 @@ cache (a cold download was not measured):
   calibration. Same-seed runs are not bit-reproducible.
 - **Not run:** Oxford Spires, VBR, Wild-SLAM, the other four LaMAria sequences, KITTI calibrated / loop closure / stereo.
 - **`metrictrail-log-run`** (post-hoc logging) has no normals; they exist in a live capture only.
-- **KITTI stereo** is not built. The stereo JIT path (`VIPE_METRICTRAIL_DPVO_JIT=1`) has no Eigen 3.4.0 at run time.
+- **KITTI stereo** is not available: the recipe deletes ViPE's stereo runner and its DPVO copy.
 - **linux-64 only.** linux-aarch64 (DGX Spark) was not tried.
 - **monopriors brings its full PyPI closure** (diffusers, pytorch-lightning, sam3, ...), although MoGe-2 needs only a
   few of those packages.
