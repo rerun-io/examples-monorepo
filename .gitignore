@@ -121,6 +121,7 @@ packages/egoexo-forge/data/
 packages/arkitscenes-download/data/
 packages/pysfm/data/
 packages/gsplat-rust-renderer/data/
+packages/depth-video-viewer/data/
 packages/dpvo/data/
 packages/slam-rs/data/
 packages/*/outputs/
@@ -129,6 +130,9 @@ packages/*/_checkpoints/
 packages/*/pretrained_models/
 
 packages/vistadream/ckpt/
+
+# depth-video-viewer
+packages/depth-video-viewer/target/
 
 # gsplat-rust-renderer
 packages/gsplat-rust-renderer/target/

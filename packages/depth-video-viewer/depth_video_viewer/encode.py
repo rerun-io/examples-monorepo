@@ -1,0 +1,64 @@
+"""Depth codes <-> AV1 Main 10-bit monochrome lossless, one temporal unit per frame.
+
+The settings are the phase-2 prototype's (libaom realtime, cpu-used 8, lossless, fixed GOP): lossless keeps every
+10-bit code, so the codes the viewer decodes are the codes written here.
+"""
+
+import subprocess
+
+import numpy as np
+from jaxtyping import UInt16
+from numpy import ndarray
+
+MAX_CODE = 1023
+"""Largest code a 10-bit stream holds."""
+
+_IVF_HEADER = 32
+_IVF_FRAME_HEADER = 12
+
+
+def encode_av1(codes: UInt16[ndarray, "n h w"], gop: int = 10, ffmpeg: str = "ffmpeg") -> list[bytes]:
+    """Encode 10-bit codes as AV1 Main 10-bit monochrome lossless; returns one sample (temporal unit) per frame.
+
+    Every `gop`-th frame is a keyframe, so a viewer decodes at most `gop` samples for a seek.
+    """
+    if int(codes.max(initial=0)) > MAX_CODE:
+        raise ValueError(f"codes must fit 10 bits (max {MAX_CODE}), got {int(codes.max())}")
+    n, h, w = codes.shape
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "gray10le", "-color_range", "pc", "-s", f"{w}x{h}",
+           "-r", "30", "-i", "pipe:0", "-c:v", "libaom-av1", "-usage", "realtime", "-cpu-used", "8", "-row-mt", "1", "-threads", "8",
+           "-aom-params", "lossless=1", "-g", str(gop), "-keyint_min", str(gop), "-color_range", "pc", "-f", "ivf", "pipe:1"]  # fmt: skip
+    ivf = subprocess.run(cmd, input=codes.astype("<u2").tobytes(), capture_output=True, check=True).stdout
+    samples = split_ivf(ivf)
+    if len(samples) != n:
+        raise RuntimeError(f"libaom returned {len(samples)} temporal units for {n} frames")
+    return samples
+
+
+def split_ivf(ivf: bytes) -> list[bytes]:
+    """The frames of an IVF container, in order."""
+    if ivf[:4] != b"DKIF":
+        raise ValueError("not an IVF stream")
+    pos = int.from_bytes(ivf[6:8], "little")
+    samples = []
+    while pos < len(ivf):
+        size = int.from_bytes(ivf[pos : pos + 4], "little")
+        samples.append(ivf[pos + _IVF_FRAME_HEADER : pos + _IVF_FRAME_HEADER + size])
+        pos += _IVF_FRAME_HEADER + size
+    return samples
+
+
+def join_ivf(samples: list[bytes], height: int, width: int) -> bytes:
+    """Wrap AV1 temporal units in an IVF container (the inverse of `split_ivf`)."""
+    header = b"".join([b"DKIF", (0).to_bytes(2, "little"), _IVF_HEADER.to_bytes(2, "little"), b"AV01", width.to_bytes(2, "little"),
+                       height.to_bytes(2, "little"), (30).to_bytes(4, "little"), (1).to_bytes(4, "little"), len(samples).to_bytes(4, "little"),
+                       bytes(4)])  # fmt: skip
+    frames = [len(s).to_bytes(4, "little") + i.to_bytes(8, "little") + s for i, s in enumerate(samples)]
+    return header + b"".join(frames)
+
+
+def decode_av1(samples: list[bytes], height: int, width: int, ffmpeg: str = "ffmpeg") -> UInt16[ndarray, "n h w"]:
+    """Reference decode through ffmpeg (gray10le, no range conversion), for checking an encode offline."""
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "ivf", "-i", "pipe:0", "-f", "rawvideo", "-pix_fmt", "gray10le", "pipe:1"]
+    raw = subprocess.run(cmd, input=join_ivf(samples, height, width), capture_output=True, check=True).stdout
+    return np.frombuffer(raw, "<u2").reshape(len(samples), height, width).astype(np.uint16)
