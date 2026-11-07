@@ -79,7 +79,7 @@ def set_annotation_context() -> None:
 
 def log_people(
     people: Sam3dBodyReconstruction,
-    rgb: UInt8[ndarray, "h w 3"],
+    rgb: UInt8[ndarray, "h w 3"] | tuple[int, int],
     parent_log_path: Path,
     *,
     masks: Bool[ndarray, "n h w"] | None = None,
@@ -91,15 +91,23 @@ def log_people(
 
     Args:
         people: The frame's people (every row belongs to this frame).
-        rgb: The frame.
+        rgb: The frame, logged as an image; or only its ``(height, width)`` when the source is a video
+            logged once as a VideoStream at ``<parent>/cam/pinhole/image``.
         parent_log_path: Root entity, ``/world`` in the apps.
         masks: Each person's mask, row-aligned with ``people``.
         depth_meters: Metric depth of the frame (MoGe-2), for the depth point clouds.
         depth_confidence: Its per-pixel confidence.
         depth_intrinsics: The intrinsics the depth was estimated with.
+
+    Raises:
+        ValueError: If depth is given without the frame, which colours the depth clouds.
     """
-    height: int = int(rgb.shape[0])
-    width: int = int(rgb.shape[1])
+    frame: UInt8[ndarray, "h w 3"] | None = None if isinstance(rgb, tuple) else rgb
+    frame_hw: tuple[int, int] = rgb if isinstance(rgb, tuple) else (int(rgb.shape[0]), int(rgb.shape[1]))
+    height: int = frame_hw[0]
+    width: int = frame_hw[1]
+    if frame is None and depth_meters is not None:
+        raise ValueError("Depth clouds need the frame for their colours; pass the image, not only its size.")
     cam_log_path: Path = parent_log_path / "cam"
     pinhole_log_path: Path = cam_log_path / "pinhole"
     pred_log_path: Path = pinhole_log_path / "pred"
@@ -110,7 +118,8 @@ def log_people(
     extrinsics = Extrinsics(world_R_cam=np.eye(3, dtype=np.float32), world_t_cam=np.zeros(3, dtype=np.float32))
     log_pinhole(camera=PinholeParameters(intrinsics=intrinsics, extrinsics=extrinsics, name="pinhole"), cam_log_path=cam_log_path)
     rr.log(str(pred_log_path), rr.Clear(recursive=True))
-    rr.log(str(pinhole_log_path / "image"), rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(jpeg_quality=90))
+    if frame is not None:
+        rr.log(str(pinhole_log_path / "image"), rr.Image(frame, color_model=rr.ColorModel.RGB).compress(jpeg_quality=90))
     rr.log(str(mesh_root_path), rr.Clear(recursive=True))
 
     boxes: Float32[ndarray, "n 4"] = people.boxes.cpu().numpy()
@@ -143,8 +152,8 @@ def log_people(
         )
     if np.any(segmentation != SEG_CLASS_OFFSET):
         rr.log(f"{pred_log_path}/segmentation_ids", rr.SegmentationImage(segmentation))
-    if depth_meters is not None and depth_confidence is not None and depth_intrinsics is not None:
-        log_depth_clouds(rgb, depth_meters, depth_confidence, depth_intrinsics, people_mask, parent_log_path / "depth")
+    if frame is not None and depth_meters is not None and depth_confidence is not None and depth_intrinsics is not None:
+        log_depth_clouds(frame, depth_meters, depth_confidence, depth_intrinsics, people_mask, parent_log_path / "depth")
 
 
 def log_depth_clouds(
