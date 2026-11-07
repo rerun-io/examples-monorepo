@@ -26,6 +26,7 @@ import traceback
 import warnings
 from pathlib import Path
 
+import depth_png
 import lietorch_mojo as lietorch
 import numpy as np
 import rerun as rr
@@ -455,7 +456,7 @@ class AsyncRerunLogger:
         depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(filtered_depth_hw)
 
         rr.log(f"{log_path}/pointmap", rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
-        rr.log(f"{log_path}/pointmap_depth", rr.DepthImage(depth_uint16_mm, meter=1000.0).compress())
+        rr.log(f"{log_path}/pointmap_depth", rr.EncodedDepthImage(blob=depth_png.encode(depth_uint16_mm), media_type=rr.components.MediaType.PNG, meter=1000.0))
         rr.log(f"{log_path}/confidence", rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
 
     # ── Event handlers ────────────────────────────────────────────────

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import cv2
+import depth_png
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -210,19 +211,9 @@ def _depth_millimeters(depth_m_hw: Float32[ndarray, "height width"], max_depth_m
 
 def _encode_depth(depth_m_hw: Float32[ndarray, "height width"], max_depth_m: float) -> bytes:
     """Encode valid metric depth as a 16-bit millimetre PNG."""
-    depth_mm: UInt16[ndarray, "height width"] = _depth_millimeters(depth_m_hw, max_depth_m)
-    encoded: ndarray
-    ok: bool
-    ok, encoded = cv2.imencode(
-        ".png",
-        depth_mm,
-        # zlib level 1: 16 ms per 1120x630 map vs 355 ms at level 9 with the filtered
-        # strategy, for a file only ~6 % larger (py-spy: level 9 was 60 % of the run).
-        [cv2.IMWRITE_PNG_COMPRESSION, 1],
-    )
-    if not ok:
-        raise RuntimeError("OpenCV failed to encode rig-depth PNG")
-    return encoded.tobytes()
+    # depth_png level 4 in parallel bands: 2.7 ms and 216 KB per 1120x630 map, vs 10.8 ms and 282 KB
+    # for OpenCV's level 1 (packages/depth-png).
+    return depth_png.encode(np.ascontiguousarray(_depth_millimeters(depth_m_hw, max_depth_m)))
 
 
 def _depth_colormap(depth_m_hw: Float32[ndarray, "height width"], max_depth_m: float) -> UInt8[ndarray, "height width 3"]:

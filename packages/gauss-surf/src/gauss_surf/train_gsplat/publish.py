@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeAlias
 
+import depth_png
 import numpy as np
 import rerun as rr
 import torch
-from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import (
     DEPTH_SPLAT_ULTRAWIDE,
     DEPTH_SPLAT_WIDE,
@@ -449,8 +449,9 @@ def publish_in_process(
             d2h_transfers["depth"] += len(wide_products)
             d2h_transfers["normal"] += len(wide_products)
 
+            # The executor runs frames in parallel, so one thread each; level 2 is about as fast as libdeflate's level 1, ~10 % larger.
             wide_depth_futures: list[Future[bytes]] = [
-                executor.submit(encode_depth_png, product.depth_mm_hw, level=1) for product in wide_products
+                executor.submit(depth_png.encode, np.ascontiguousarray(product.depth_mm_hw), level=2, threads=1) for product in wide_products
             ]
             wide_normal_futures: list[Future[bytes]] = [
                 executor.submit(encode_rgb_png, product.normal_rgb_hw3) for product in wide_products
@@ -493,7 +494,7 @@ def publish_in_process(
             d2h_transfers["rgb"] += len(ultrawide_products)
 
             ultrawide_depth_futures: list[Future[bytes]] = [
-                executor.submit(encode_depth_png, product.depth_mm_hw, level=1) for product in ultrawide_products
+                executor.submit(depth_png.encode, np.ascontiguousarray(product.depth_mm_hw), level=2, threads=1) for product in ultrawide_products
             ]
             ultrawide_normal_futures: list[Future[bytes]] = [
                 executor.submit(encode_rgb_png, product.normal_rgb_hw3) for product in ultrawide_products

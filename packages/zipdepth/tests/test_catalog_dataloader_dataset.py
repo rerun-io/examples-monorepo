@@ -14,14 +14,17 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("rerun.catalog", reason="Rerun catalog dependencies live in the zipdepth catalog lane")
 pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
-pytest.importorskip("imagecodecs", reason="imagecodecs is required by this test module")
+pytest.importorskip("depth_png", reason="depth_png is required by this test module")
 
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
+import depth_png  # noqa: E402
+import pyarrow as pa  # noqa: E402
 from rerun.catalog import DatasetEntry  # noqa: E402
 from rerun.experimental.dataloader import NoShuffle  # noqa: E402
+from rerun.experimental.dataloader.decoders._base import DecodeRequest, FieldBatch  # noqa: E402
 
 from zipdepth.catalog.builders import CudaSampleBuilder  # noqa: E402
-from zipdepth.catalog.dataloader_dataset import RerunPromptDepthDataset, _ExactTimestampSampleIndex  # noqa: E402
+from zipdepth.catalog.dataloader_dataset import CudaDepthPngDecoder, RerunPromptDepthDataset, _ExactTimestampSampleIndex  # noqa: E402
 from zipdepth.catalog.dataset import CatalogPromptDepthDataset  # noqa: E402
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog  # noqa: E402
 from zipdepth.catalog.targets import AugmentPolicy  # noqa: E402
@@ -117,3 +120,30 @@ def test_rerun_dataloader_matches_every_sample_from_one_segment() -> None:
 
     assert current_digests
     assert idiomatic_digests == current_digests
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the depth column decoder copies to CUDA")
+def test_depth_column_decoder_decodes_every_row_into_cuda_int32() -> None:
+    """Rows of two stored shapes, a null row and one-frame tiles: each row decodes to its own millimetres."""
+    rng: np.random.Generator = np.random.default_rng(5)
+    depths: list[ndarray | None] = [
+        rng.integers(0, 65536, size=(30, 40), dtype=np.uint16),
+        None,
+        rng.integers(0, 65536, size=(10, 20), dtype=np.uint16),
+        rng.integers(0, 65536, size=(30, 40), dtype=np.uint16),
+    ]
+    blobs: list[list[bytes] | None] = [None if depth is None else [depth_png.encode(depth)] for depth in depths]
+    column: pa.Array = pa.array(blobs, type=pa.list_(pa.list_(pa.uint8())))
+    requests: list[DecodeRequest] = [
+        DecodeRequest(sample_position=row, segment_id="segment", index_value=row, decode_row_indices=(row,), output_row_indices=(row,), starts_at_keyframe=True)
+        for row in range(len(depths))
+    ]
+    decoder: CudaDepthPngDecoder = CudaDepthPngDecoder("depth:blob", torch.device("cuda"), cuda_tile_size=1, decode_threads=2)
+
+    decoded: list[torch.Tensor | None] = list(decoder.decode(FieldBatch(column=column), requests))
+
+    assert decoded[1] is None
+    for depth, result in zip(depths, decoded, strict=True):
+        if depth is not None:
+            assert result is not None and result.dtype == torch.int32 and result.device.type == "cuda"
+            np.testing.assert_array_equal(result.cpu().numpy(), depth.astype(np.int32))

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("imagecodecs", reason="the ingest batch helpers need imagecodecs from the ingest environment")
+pytest.importorskip("depth_png", reason="the ingest batch helpers need depth_png from the ingest environment")
 
 from arkitscenes_download.ingest.batch import SequenceResult, discover_video_ids, has_all_layers, summarize  # noqa: E402
 

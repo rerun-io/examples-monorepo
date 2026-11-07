@@ -14,12 +14,12 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("rerun.catalog", reason="Rerun catalog dependencies live in the zipdepth catalog lane")
 pytest.importorskip("rerun.experimental.dataloader", reason="rerun.experimental.dataloader is required by this test module")
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
-pytest.importorskip("imagecodecs", reason="imagecodecs is required by this test module")
+pytest.importorskip("depth_png", reason="depth_png is required by this test module")
 
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
 pa = pytest.importorskip("pyarrow", reason="Arrow catalog dependencies live in the zipdepth catalog lane")
 
-from arkitscenes_download.ingest.depth import encode_depth_png  # noqa: E402
+import depth_png  # noqa: E402
 from rerun.catalog import DatasetEntry  # noqa: E402
 
 from zipdepth.apis.catalog_throughput import CatalogThroughputConfig  # noqa: E402
@@ -114,9 +114,9 @@ def test_cpu_sample_builder_decodes_and_reports_local_stats() -> None:
     """Build one CPU sample through the typed callable and retain lock-free counters."""
     rgb_chw: UInt8[torch.Tensor, "3 h w"] = torch.arange(3 * 6 * 8, dtype=torch.uint8).reshape(3, 6, 8)
     depth_mm_hw: UInt16[ndarray, "h w"] = np.arange(6 * 8, dtype=np.uint16).reshape(6, 8) + 100
-    blob_bytes: UInt8[ndarray, "n"] = np.frombuffer(encode_depth_png(depth_mm_hw), dtype=np.uint8)
+    blob_bytes: UInt8[ndarray, "n"] = np.frombuffer(depth_png.encode(depth_mm_hw), dtype=np.uint8)
     prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1250, dtype=np.uint16)
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_mm_hw), dtype=np.uint8)
     confidence_hw: UInt8[ndarray, "192 256"] = np.full((192, 256), 2, dtype=np.uint8)
     confidence: UInt8[ndarray, "confidence_n"] = confidence_hw.reshape(-1)
     builder: CpuSampleBuilder = CpuSampleBuilder(build_eval_transform(6, 8), min_depth_span=0.0)
@@ -136,7 +136,6 @@ def test_cpu_sample_builder_decodes_and_reports_local_stats() -> None:
     assert sample["prompt_depth"].shape == (1, 192, 256)
     assert sample["prompt_valid"].all()
     assert builder.stats.samples_built == 1
-    assert builder.stats.png_fallbacks == 0
     assert builder.stats.blob_decode > 0.0
     assert builder.stats.augment > 0.0
 
@@ -145,10 +144,10 @@ def test_cpu_metric_builder_orients_prompt_and_confidence_with_rgb_and_target() 
     """Apply one counter-clockwise turn to every spatial catalog input."""
     rgb_chw: UInt8[torch.Tensor, "3 stored_h stored_w"] = torch.arange(3 * 8 * 6, dtype=torch.uint8).reshape(3, 8, 6)
     target_mm_hw: UInt16[ndarray, "stored_h stored_w"] = np.full((8, 6), 2000, dtype=np.uint16)
-    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(depth_png.encode(target_mm_hw), dtype=np.uint8)
     prompt_stored_mm_hw: UInt16[ndarray, "256 192"] = np.full((256, 192), 1000, dtype=np.uint16)
     prompt_stored_mm_hw[:, :96] = 3000
-    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_stored_mm_hw), dtype=np.uint8)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(depth_png.encode(prompt_stored_mm_hw), dtype=np.uint8)
     confidence_stored_hw: UInt8[ndarray, "256 192"] = np.full((256, 192), 2, dtype=np.uint8)
     confidence_stored_hw[:128] = 0
     builder: CpuSampleBuilder = CpuSampleBuilder(build_eval_transform(6, 8), min_depth_span=0.0, target_mode="metric")

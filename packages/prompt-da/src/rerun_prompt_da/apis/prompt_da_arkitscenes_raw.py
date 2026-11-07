@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import depth_png
 import numpy as np
 import open3d as o3d
 import pyarrow as pa
@@ -20,7 +21,7 @@ import torch
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
 from arkitscenes_download.ingest.clock import clamped_to_epoch, nearest_index, path_timestamps, recover_clock_from_packets, shared_epoch
-from arkitscenes_download.ingest.depth import encode_depth_png, sorted_timestamped_paths
+from arkitscenes_download.ingest.depth import sorted_timestamped_paths
 from arkitscenes_download.ingest.metadata import PoseSelection, select_pose_source
 from arkitscenes_download.ingest.mov import MetadataPacket, demux_metadata_streams, track_packet_times
 from arkitscenes_download.ingest.paths import PINHOLE_WIDE
@@ -345,8 +346,8 @@ def process_segment_raw(
             rr.log(
                 DEPTH_PROMPTDA_RAW,
                 rr.EncodedDepthImage(
-                    # Deflate level 1 trades ~12% blob size for half the encode wall time.
-                    blob=encode_depth_png(depth_baked_hw, level=1),
+                    # Level 4 in parallel bands: faster than libdeflate's level 1 was, and about 12 % smaller.
+                    blob=depth_png.encode(np.ascontiguousarray(depth_baked_hw)),
                     media_type="image/png",
                     meter=1000.0,
                     # TODO(rerun#upstream): drop depth_range once the viewer auto-ranges encoded depth (see DEPTH_RANGE_MM in ingest/blueprint.py).

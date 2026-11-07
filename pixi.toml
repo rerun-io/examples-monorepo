@@ -453,6 +453,8 @@ description = "Download an example Assembly101 720p dataset from Hugging Face"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.monoprior.dependencies]
+# Depth PNGs for catalog and Rerun logging (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
 icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
@@ -733,6 +735,8 @@ description = "Run the gradio app in dev mode"
 platforms = ["linux-64"]
 
 [feature.prompt-da-stream.dependencies]
+# arkitscenes_download and the depth PNG writers here use depth_png (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 imagecodecs = ">=2024.9.22"
 # arkitscenes_download.ingest imports these at package load.
 trimesh = "*"
@@ -786,6 +790,8 @@ pyyaml = ">=6.0"
 tensorboard = ">=2.16.0"
 # dataset.py decodes JPEGs with PyTurboJPEG (pypi) on top of the conda libjpeg-turbo
 libjpeg-turbo = ">=3.0.0,<4"
+# apis/smoke_data.py writes its uint16 inverse-depth PNGs with depth_png (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 
 [feature.zipdepth.pypi-dependencies]
 zipdepth = { path = "packages/zipdepth", editable = true }
@@ -825,6 +831,7 @@ platforms = ["linux-64"]
 [feature.zipdepth-catalog.dependencies]
 # arkitscenes_download.ingest imports these at package load.
 imagecodecs = ">=2024.9.22"
+depth-png = { path = "packages/depth-png" }
 trimesh = "*"
 pillow = "*"
 av = ">=18"
@@ -1892,9 +1899,10 @@ channels = [
 platforms = ["linux-64"]
 
 [feature.mast3r-slam.dependencies]
+# Depth PNGs for catalog and Rerun logging (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
 torchcodec = "*"
-eigen = ">=3.4.0,<4"
 ffmpeg = ">=7.1.0"
 open3d = ">=0.19.0,<0.20"
 # mkl 2026 (forced by cuda13/torch-2.12) breaks faiss's mkl builds (.so.2 vs
@@ -1922,42 +1930,30 @@ pyaml = "*"
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
 
-# Its tests import lietorch_mojo, so the test lanes build the extension first.
+# Its tests import lietorch_mojo and mast3r_slam.mojo_backend, so the test lanes build both extensions first.
 [feature.mast3r-slam.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package unit tests"
+depends-on = ["_mast3r-slam-build-mojo-kernels"]
+description = "Build the Mojo kernels, then run the package unit tests"
 
 [feature.mast3r-slam.tasks.tests-integration]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package integration tests"
+depends-on = ["_mast3r-slam-build-mojo-kernels"]
+description = "Build the Mojo kernels, then run the package integration tests"
 
 [feature.mast3r-slam.tasks.tests-golden]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build"]
-description = "Build lietorch-mojo, then run the package golden reference tests"
-
-# ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
-[feature.mast3r-slam.tasks._mast3r-slam-build-cuda-kernels]
-cmd = "python setup.py build_ext --inplace"
-cwd = "packages/mast3r-slam"
-description = "Build mast3r-slam CUDA backend kernels"
-inputs = [
-    "packages/mast3r-slam/setup.py",
-    "packages/mast3r-slam/mast3r_slam/backend/src/*.cpp",
-    "packages/mast3r-slam/mast3r_slam/backend/src/*.cu",
-    "packages/mast3r-slam/mast3r_slam/backend/include/*.h",
-]
-outputs = ["packages/mast3r-slam/mast3r_slam/_backends*.so"]
+depends-on = ["_mast3r-slam-build-mojo-kernels"]
+description = "Build the Mojo kernels, then run the package golden reference tests"
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-mojo-kernels]
 depends-on = ["lietorch-mojo-build"]
-cmd = "cd packages/mast3r-slam && mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
-description = "Build mast3r-slam Mojo backend kernels"
-inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
-outputs = ["packages/mast3r-slam/mast3r_slam_mojo_backends*.so"]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I mast3r_slam/mojo_backend/mojo -o mast3r_slam/mojo_backend/_mast3r_mojo.so mast3r_slam/mojo_backend/mojo/_mast3r_mojo.mojo"
+cwd = "packages/mast3r-slam"
+description = "Build the Mojo kernels of mast3r_slam.mojo_backend (GPU kernels for the local GPU, CPU pose solve)"
+inputs = ["packages/mast3r-slam/mast3r_slam/mojo_backend/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/mast3r-slam/mast3r_slam/mojo_backend/_mast3r_mojo.so"]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-download-checkpoints]
@@ -1990,7 +1986,6 @@ cmd = """python tools/mast3r_slam_inference.py \
   --config config/test.yaml --max-frames 30 --no-viz \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
 depends-on = [
-    "_mast3r-slam-build-cuda-kernels",
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
     "_mast3r-slam-download-example-data",
@@ -2330,7 +2325,7 @@ platforms = ["linux-64", "linux-aarch64"]
 python = "3.12.*"
 # Exact stable pins (2026-11-06): `mojo = "*"` from max-nightly had let the lock freeze a June 2026
 # nightly; 1.2.0 is the newest stable Mojo, and since 1.2.0 std.gpu and layout ship in max-core.
-# Bump deliberately: re-run lietorch-mojo's tests and mast3r-slam's Mojo-vs-CUDA tests.
+# Bump deliberately: re-run lietorch-mojo's tests and mast3r-slam's Mojo parity tests (tests/test_mojo_backend.py).
 # mojo comes directly from the stable max channel, not the modular metapackage (whose starlette pin conflicts
 # with gradio). mast3r-slam's Mojo backend build gets mojo and max-core from this feature too.
 mojo = { version = "==1.2.0", channel = "https://conda.modular.com/max/" }
@@ -3058,6 +3053,8 @@ description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base
 platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.mvs.dependencies]
+# The catalog depth layer's millimetre PNGs (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 python = "3.12.*"
 einops = ">=0.8,<0.9"
 kornia = ">=0.8,<0.9"
@@ -3097,6 +3094,8 @@ platforms = ["linux-64"]
 
 [feature.arkitscenes-download.dependencies]
 python = "3.12.*"
+# Depth PNG encode/decode (Up filter, Rust): packages/depth-png.
+depth-png = { path = "packages/depth-png" }
 ffmpeg = ">=8.1"
 imagecodecs = ">=2024.9.22"
 trimesh = "*"
@@ -3164,6 +3163,8 @@ description = "Open the native Rerun viewer on the local catalog"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.gauss-surf.dependencies]
+# arkitscenes_download and the depth PNG writers here use depth_png (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 # Pinned to match the pyrefly site-package-path registration (python3.12).
 python = "3.12.*"
 # Open3D RaycastingScene renders ultrawide depth from the PromptDA TSDF mesh.
@@ -3280,6 +3281,8 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.dataforge.dependencies]
 python = "3.12.*"
+# Gen-HumanEgo's millimetre depth PNGs: Up-filter encode and decode in Rust (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 tyro = ">=0.9.1,<0.10"
 # transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
 requests = "*"
@@ -3631,6 +3634,25 @@ cwd = "packages/robocap-live"
 description = "Build the core, then run the package golden reference tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# depth-png (Rust core + PyO3 module; dataforge takes the conda build)
+# ═══════════════════════════════════════════════════════════════════════════
+# The Python module depth_png is a pixi-build source package (packages/depth-png/recipe.yaml), consumed as
+# `depth-png = { path = "packages/depth-png" }`; its Python tests live with its consumers (packages/dataforge/tests).
+# This feature only checks the Rust workspace: rustfmt, clippy with warnings denied, and the core's tests.
+[feature.depth-png-rust]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.depth-png-rust.dependencies]
+rust = "1.98.*"
+# pyo3's build script needs an interpreter to configure crates/depth-png-py.
+python = "3.12.*"
+
+[feature.depth-png-rust.tasks.depth-png-rust-check]
+cmd = "cargo fmt --all --check && cargo clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked -p depth-png"
+cwd = "packages/depth-png"
+description = "rustfmt, clippy and the core crate's tests for packages/depth-png"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # kornia-staging
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.kornia-staging]
@@ -3732,6 +3754,8 @@ torchcodec = "*"
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 # The default surface: a sparse colour TSDF (Rust, rayon) fused from every tracked frame, marching-cubes mesh.
 tsdf-rs = { path = "packages/tsdf-rs" }
+# Depth persists as millimetre PNG EncodedDepthImages (pass_<k>.rrd, run outputs, catalog layers).
+depth-png = { path = "packages/depth-png" }
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }
@@ -3849,6 +3873,7 @@ agent-traces = { features = ["agent-traces"], solve-group = "agent-traces", no-d
 agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-traces", no-default-feature = true }
 kornia-staging = { features = ["kornia-staging"], solve-group = "kornia-staging", no-default-feature = true }
 kornia-staging-dev = { features = ["kornia-staging", "dev"], solve-group = "kornia-staging", no-default-feature = true }
+depth-png-rust = { features = ["depth-png-rust"], no-default-feature = true }
 arkitscenes-download = { features = [
     "common",
     "arkitscenes-download",

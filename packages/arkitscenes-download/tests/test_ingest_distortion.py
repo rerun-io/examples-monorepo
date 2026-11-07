@@ -9,7 +9,7 @@ import rerun as rr
 from rerun.chunk import RrdReader
 from simplecv.camera_parameters import Intrinsics as SimpleCVIntrinsics
 
-pytest.importorskip("imagecodecs", reason="the ingest CLI needs imagecodecs from the ingest environment")
+pytest.importorskip("depth_png", reason="the ingest CLI needs depth_png from the ingest environment")
 
 from arkitscenes_download.ingest.cli import _log_distortions  # noqa: E402
 from arkitscenes_download.ingest.metadata import CameraDistortion, decode_camera_distortions  # noqa: E402

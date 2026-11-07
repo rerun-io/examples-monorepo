@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import depth_png
 import numpy as np
 import open3d as o3d
 import pyarrow as pa
 import rerun as rr
 import torch
-from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import (
     DEPTH_ULTRAWIDE_RECT,
     PINHOLE_ULTRAWIDE,
@@ -240,7 +240,8 @@ def generate_ultrawide_depth(reader: SegmentReader, rrd_path: Path, *, batch_siz
             coverage_fractions.extend(float(np.count_nonzero(depth_m_hw) / depth_m_hw.size) for depth_m_hw in depth_m_bhw)
             rgb_jpeg_blobs: list[bytes] = list(encoders.map(encode_rgb_jpeg, rectified_frames))
             depth_png_blobs: list[bytes] = list(
-                encoders.map(lambda depth_m_hw: encode_depth_png(depth_meters_to_uint16_mm(depth_m_hw), level=1), depth_m_bhw)
+                # One thread per frame inside this pool; level 2 runs about as fast as libdeflate's level 1, ~10 % larger.
+                encoders.map(lambda depth_m_hw: depth_png.encode(np.ascontiguousarray(depth_meters_to_uint16_mm(depth_m_hw)), level=2, threads=1), depth_m_bhw)
             )
             rr.send_columns(
                 RGB_ULTRAWIDE_RECT,

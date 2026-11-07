@@ -14,13 +14,13 @@ from functools import partial
 from time import perf_counter
 from typing import TypeAlias
 
+import depth_png
 import numpy as np
 import pyarrow as pa
 import torch
 import torch.distributed as dist
-from arkitscenes_download.ingest.depth import decode_depth_png, inflate_depth_png_rows
 from arkitscenes_download.ingest.paths import DEPTH_PROMPTDA, TIMELINE, VIDEO_WIDE
-from jaxtyping import Int32, Int64, Shaped, UInt8
+from jaxtyping import Int32, Int64, Shaped, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.experimental.dataloader import (
@@ -43,9 +43,8 @@ from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE, SegmentNvdec
 from torch import Tensor
 from torch.utils.data import IterableDataset, get_worker_info
 
-from zipdepth.catalog.builders import CudaSampleBuilder
+from zipdepth.catalog.builders import CudaSampleBuilder, uint16_to_int32
 from zipdepth.catalog.dataset import CONFIDENCE_COLUMN, NATIVE_VIDEO_FPS, PROMPT_BLOB_COLUMN, PROMPTDA_BLOB_COLUMN
-from zipdepth.catalog.png import unfilter_up_cuda_batch
 from zipdepth.catalog.segments import SegmentRow
 from zipdepth.catalog.stats import BuilderStats, CatalogDatasetStats
 
@@ -193,7 +192,7 @@ def _component_views(column: pa.Array, column_name: str) -> list[UInt8[ndarray, 
 
 
 class CudaDepthPngDecoder(ColumnDecoder[Tensor]):
-    """Decode every requested depth PNG in a FieldBatch with batched CUDA unfiltering."""
+    """Decode every requested depth PNG in a FieldBatch on CPU threads into pinned memory, then copy it to CUDA."""
 
     def __init__(
         self,
@@ -201,23 +200,21 @@ class CudaDepthPngDecoder(ColumnDecoder[Tensor]):
         device: torch.device,
         metadata_by_timestamp: dict[tuple[str, int], _SampleMetadata] | None = None,
         cuda_tile_size: int = 32,
-        inflate_threads: int = 8,
+        decode_threads: int = 8,
     ) -> None:
         """Bind one depth column and optional target-sample metadata."""
         if device.type != "cuda":
             raise ValueError("CudaDepthPngDecoder requires a CUDA device")
-        if cuda_tile_size <= 0 or inflate_threads <= 0:
-            raise ValueError("cuda_tile_size and inflate_threads must be positive")
+        if cuda_tile_size <= 0 or decode_threads <= 0:
+            raise ValueError("cuda_tile_size and decode_threads must be positive")
         self._column_name: str = column_name
         self._device: torch.device = device
         self._cuda_tile_size: int = cuda_tile_size
-        self._inflate_threads: int = inflate_threads
+        self._decode_threads: int = decode_threads
         self._metadata_by_timestamp: dict[tuple[str, int], _SampleMetadata] | None = metadata_by_timestamp
         self._metadata_by_tensor: dict[int, _SampleMetadata] = {}
         self.decode_s: float = 0.0
-        """Synchronized Arrow extraction, PNG inflation, transfer, and CUDA unfilter time."""
-        self.png_fallbacks: int = 0
-        """Rows that required the general PNG decoder."""
+        """Synchronized Arrow extraction, PNG decode, and host-to-device transfer time."""
 
     def reset_metadata(self) -> None:
         """Drop metadata retained for samples abandoned by a stopped iterator."""
@@ -231,72 +228,34 @@ class CudaDepthPngDecoder(ColumnDecoder[Tensor]):
             raise RuntimeError("decoded target metadata was already consumed or is absent") from None
 
     def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[Tensor | None]:
-        """Decode all resolved output rows with one CUDA pass per stored shape."""
+        """Decode the resolved rows on the CPU into pinned tiles, one host-to-device copy per tile and stored shape."""
         started: float = perf_counter()
         views: list[UInt8[ndarray, "n_bytes"] | None] = _component_views(batch.column, self._column_name)
         decoded: list[Tensor | None] = [None] * len(requests)
-        filtered_groups: dict[tuple[int, int], list[tuple[int, UInt8[ndarray, "h row_bytes"]]]] = defaultdict(list)
-        fallback_groups: dict[tuple[int, int], list[tuple[int, Int32[ndarray, "h w"]]]] = defaultdict(list)
-
-        requested_blobs: list[UInt8[ndarray, "n_bytes"] | None] = []
+        groups: dict[tuple[int, int], list[tuple[int, UInt8[ndarray, "n_bytes"]]]] = defaultdict(list)
         request: DecodeRequest
-        for request in requests:
+        for position, request in enumerate(requests):
             if len(request.output_row_indices) != 1:
                 raise ValueError("ZipDepth depth fields must be unwindowed")
             blob: UInt8[ndarray, "n_bytes"] | None = views[request.output_row_indices[0]]
-            requested_blobs.append(blob)
-        present_blobs: list[UInt8[ndarray, "n_bytes"]] = [blob for blob in requested_blobs if blob is not None]
-        with ThreadPoolExecutor(max_workers=self._inflate_threads, thread_name_prefix="depth-png-inflate") as pool:
-            inflated_present: list[tuple[UInt8[ndarray, "h row_bytes"], tuple[int, int]] | None] = list(
-                pool.map(inflate_depth_png_rows, present_blobs)
-            )
-        inflated_iterator: Iterator[tuple[UInt8[ndarray, "h row_bytes"], tuple[int, int]] | None] = iter(inflated_present)
-
-        position: int
-        blob: UInt8[ndarray, "n_bytes"] | None
-        for position, blob in enumerate(requested_blobs):
             if blob is None:
                 continue
-            inflated: tuple[UInt8[ndarray, "h row_bytes"], tuple[int, int]] | None = next(inflated_iterator)
-            if inflated is None:
-                depth_mm: Int32[ndarray, "h w"] = decode_depth_png(blob).astype(np.int32)
-                fallback_groups[depth_mm.shape].append((position, depth_mm))
-                self.png_fallbacks += 1
-            else:
-                filtered_rows: UInt8[ndarray, "h row_bytes"] = inflated[0]
-                filtered_groups[filtered_rows.shape].append((position, filtered_rows))
+            height, width, bit_depth = depth_png.header(blob)
+            if bit_depth != 16:
+                raise ValueError(f"{self._column_name}: depth PNG is {bit_depth}-bit, not 16-bit millimetres")
+            groups[(height, width)].append((position, blob))
 
-        group: list[tuple[int, UInt8[ndarray, "h row_bytes"]]]
-        for group in filtered_groups.values():
-            tile_start: int
-            for tile_start in range(0, len(group), self._cuda_tile_size):
-                tile: list[tuple[int, UInt8[ndarray, "h row_bytes"]]] = group[
-                    tile_start : tile_start + self._cuda_tile_size
-                ]
-                filtered_batch: UInt8[ndarray, "n h row_bytes"] = np.stack([item[1] for item in tile])
-                filtered_tensor: UInt8[Tensor, "n h row_bytes"] = torch.from_numpy(filtered_batch).to(
-                    device=self._device,
-                    non_blocking=True,
-                )
-                depths_mm: Int32[Tensor, "n h w"] = unfilter_up_cuda_batch(filtered_tensor)
-                row: int
-                for row, (position, _) in enumerate(tile):
-                    decoded[position] = depths_mm[row]
-
-        fallback_group: list[tuple[int, Int32[ndarray, "h w"]]]
-        for fallback_group in fallback_groups.values():
-            for tile_start in range(0, len(fallback_group), self._cuda_tile_size):
-                fallback_tile: list[tuple[int, Int32[ndarray, "h w"]]] = fallback_group[
-                    tile_start : tile_start + self._cuda_tile_size
-                ]
-                fallback_depths_mm: Int32[ndarray, "n h w"] = np.stack([item[1] for item in fallback_tile])
-                fallback_tensors: Int32[Tensor, "n h w"] = torch.from_numpy(fallback_depths_mm).to(
-                    device=self._device,
-                    non_blocking=True,
-                )
-                row = 0
-                for row, (position, _) in enumerate(fallback_tile):
-                    decoded[position] = fallback_tensors[row]
+        with ThreadPoolExecutor(max_workers=self._decode_threads, thread_name_prefix="depth-png-decode") as pool:
+            for (height, width), group in groups.items():
+                for tile_start in range(0, len(group), self._cuda_tile_size):
+                    tile: list[tuple[int, UInt8[ndarray, "n_bytes"]]] = group[tile_start : tile_start + self._cuda_tile_size]
+                    pinned: UInt16[Tensor, "n h w"] = torch.empty((len(tile), height, width), dtype=torch.uint16, pin_memory=True)
+                    pinned_nhw: UInt16[ndarray, "n h w"] = pinned.numpy()
+                    # One thread per frame: the pool already decodes the tile's frames in parallel.
+                    list(pool.map(partial(depth_png.decode_into, threads=1), [blob for _, blob in tile], pinned_nhw))
+                    depths_mm: Int32[Tensor, "n h w"] = uint16_to_int32(pinned.to(device=self._device, non_blocking=True))
+                    for row, (position, _) in enumerate(tile):
+                        decoded[position] = depths_mm[row]
         torch.cuda.synchronize(self._device)
         self.decode_s += perf_counter() - started
 
@@ -479,7 +438,6 @@ class RerunPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             blob_decode=decoder_s,
             augment=builder_stats.augment,
             samples_built=builder_stats.samples_built,
-            png_fallbacks=self._target_decoder.png_fallbacks + self._prompt_decoder.png_fallbacks,
             skipped_frames=0,
             skipped_flat_frames=builder_stats.skipped_flat_frames,
         )

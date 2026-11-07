@@ -4,6 +4,7 @@ import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
+import depth_png
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -114,8 +115,38 @@ def test_layer_schema(tmp_path: Path) -> None:
         "property:metrictrail:seeds",
     } <= columns
     assert "property:metrictrail:vslamlab_ate_m" not in columns  # null fields are left out
-    assert "/world/runs/metrictrail/cam/pinhole/depth:DepthImage:buffer" in columns
     assert not any(name.startswith("property:RecordingInfo") for name in columns)  # a derived layer adds no RecordingInfo
+
+
+def test_layer_depth_is_millimetre_png(tmp_path: Path) -> None:
+    target: Path = write_layer(tmp_path / "layer.rrd", "s", "metrictrail", layer_inputs(), layer_properties())
+    depth_mm: list[ndarray] = []
+    for chunk in RrdReader(target).store().stream():
+        if chunk.entity_path != "/world/runs/metrictrail/cam/pinhole/depth":
+            continue
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        assert {media_type for row in batch.column("EncodedDepthImage:media_type").to_pylist() for media_type in row} == {"image/png"}
+        assert {meter for row in batch.column("EncodedDepthImage:meter").to_pylist() for meter in row} == {1000.0}
+        depth_mm += [depth_png.decode(bytes(blob[0])) for blob in batch.column("EncodedDepthImage:blob").to_pylist()]
+    assert len(depth_mm) == 2  # one per keyframe
+    for depth in depth_mm:
+        assert depth.dtype == np.uint16
+        np.testing.assert_array_equal(depth, np.full((8, 10), 2000, dtype=np.uint16))  # the inputs' 2.0 m
+
+
+def test_layer_depth_beyond_millimetre_range_is_no_depth(tmp_path: Path) -> None:
+    depth: Float32[ndarray, "8 10"] = np.full((8, 10), 2.0, dtype=np.float32)
+    depth[0, :3] = [70.0, np.nan, np.inf]  # KITTI's far field, then two invalid pixels
+    inputs: LayerInputs = dataclasses.replace(layer_inputs(), keyframe_depth_m=[depth, depth])
+    target: Path = write_layer(tmp_path / "layer.rrd", "s", "metrictrail", inputs, layer_properties())
+    blob: bytes = next(
+        bytes(row[0])
+        for chunk in RrdReader(target).store().stream()
+        if chunk.entity_path == "/world/runs/metrictrail/cam/pinhole/depth"
+        for row in chunk.to_record_batch().column("EncodedDepthImage:blob").to_pylist()
+    )
+    decoded = depth_png.decode(blob)
+    assert decoded[0, :4].tolist() == [0, 0, 0, 2000]
 
 
 def packed_rgba(rgb: tuple[int, int, int]) -> int:

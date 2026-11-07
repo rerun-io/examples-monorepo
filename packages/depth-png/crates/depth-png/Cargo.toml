@@ -1,0 +1,23 @@
+[package]
+name = "depth-png"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Lossless 8- and 16-bit greyscale PNG encoding and decoding for depth images, with the Up row filter."
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+png.workspace = true
+thiserror.workspace = true
+zlib-rs.workspace = true
+
+[dev-dependencies]
+# Inflates the IDAT payload in tests/round_trip.rs; already in the tree through png.
+miniz_oxide = "0.8"
+png.workspace = true

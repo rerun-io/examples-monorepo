@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import depth_png
 import numpy as np
 import rerun as rr
 from einops import rearrange
@@ -129,7 +130,10 @@ def main(config: Config) -> None:
                         camera_xyz=rr.ViewCoordinates.RDF,
                     ),
                 )
-                rr.log(f"{PINHOLE_LOWRES_PATH}/depth", rr.DepthImage(depth_mm_hw, meter=1000.0).compress())
+                rr.log(
+                    f"{PINHOLE_LOWRES_PATH}/depth",
+                    rr.EncodedDepthImage(blob=depth_png.encode(depth_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0),
+                )
                 segment_depth_frames += 1
                 total_depth_frames += 1
 
