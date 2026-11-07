@@ -20,6 +20,7 @@ from metrictrail.frames import DisplayRaster, FrameReader, FrameSource, fit_for_
 from metrictrail.ground_truth import AlignedRun, GtContext, align_to_gt
 from metrictrail.palette import GT_RGB, RUNNING_RMSE_RGB, RunLabel, run_rgb
 from metrictrail.properties import PropertyValue, any_values
+from metrictrail.surface import ColoredMesh
 
 GT_VIEW: dict[VslamlabDataset, rr.components.ViewCoordinates] = {
     "rgbdtum": rr.ViewCoordinates.RIGHT_HAND_Z_UP,
@@ -125,6 +126,8 @@ class RunMetrics:
     """ATE RMSE after SE(3) alignment with scale 1 (metric-scale diagnostic), metres."""
     cloud_points: int | None
     """Points of the fused cloud before display subsampling."""
+    mesh_triangles: int | None = None
+    """Triangles of the TSDF mesh (:mod:`metrictrail.surface`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +162,17 @@ def normal_colors(normals_xyz: Float32[ndarray, "n 3"], gt_T_est: Float64[ndarra
     return np.clip(np.round((rotated + 1.0) * 127.5), 0, 255).astype(np.uint8)
 
 
+def log_mesh(rec: rr.RecordingStream, mesh: ColoredMesh, gt_T_est: Float64[ndarray, "4 4"], colour_path: str, normals_path: str) -> None:
+    """The mesh moved by an alignment, twice: fused colours (lit) at ``colour_path``, normals as RGB at ``normals_path``."""
+    vertices: Float32[ndarray, "v 3"] = apply_alignment(gt_T_est, mesh.vertices_xyz.astype(np.float64)).astype(np.float32)
+    normals: Float32[ndarray, "v 3"] = (mesh.normals_xyz.astype(np.float64) @ rotation_of(gt_T_est).T).astype(np.float32)
+    lit = rr.Mesh3D(vertex_positions=vertices, triangle_indices=mesh.triangles, vertex_normals=normals, vertex_colors=mesh.colors_rgb)
+    rec.log(colour_path, lit, static=True)
+    # The normals copy carries its normals as colours only: no lighting needed, 12 bytes per vertex fewer.
+    colours = normal_colors(mesh.normals_xyz, gt_T_est)
+    rec.log(normals_path, rr.Mesh3D(vertex_positions=vertices, triangle_indices=mesh.triangles, vertex_colors=colours), static=True)
+
+
 def log_run_outputs(
     rec: rr.RecordingStream,
     outputs: RunOutputs,
@@ -168,6 +182,7 @@ def log_run_outputs(
     context: GtContext | None,
     cloud_world: ColoredCloud | None,
     provenance: Provenance,
+    mesh_world: ColoredMesh | None = None,
 ) -> LoggedRun:
     """Log trajectory, GT, cloud, errors, frames and depth of a finished run, and its properties.
 
@@ -179,6 +194,7 @@ def log_run_outputs(
         context: GT of the sequence; None logs the trajectory in ViPE's world frame with no errors.
         cloud_world: The fused metric cloud in ViPE's world frame (the frame of ``pose/<name>.npz``); None skips it.
         provenance: The ``provenance`` property.
+        mesh_world: The TSDF mesh in ViPE's world frame; None skips it.
 
     Returns:
         The numbers also sent as the ``metrics`` property, and eyes that frame the trajectory.
@@ -258,6 +274,11 @@ def log_run_outputs(
                     static=True,
                 )
 
+    if mesh_world is not None:
+        log_mesh(rec, mesh_world, sim3, entities.WORLD_MESH, entities.WORLD_MESH_NORMALS)
+        if aligned is not None:
+            log_mesh(rec, mesh_world, aligned.se3.gt_T_est, entities.METRIC_MESH, entities.METRIC_MESH_NORMALS)
+
     if options.log_frames:
         log_frames_and_depth(rec, outputs, options, frames, tracked, raster_hw, context)
 
@@ -269,6 +290,7 @@ def log_run_outputs(
         sim3_scale=aligned.sim3.scale if aligned is not None else None,
         ate_se3_m=aligned.se3.rmse_m if aligned is not None else None,
         cloud_points=cloud_points,
+        mesh_triangles=int(mesh_world.triangles.shape[0]) if mesh_world is not None else None,
     )
     rec.log(entities.SUMMARY, rr.TextDocument(summary_markdown(outputs, options.label, metrics), media_type=rr.MediaType.MARKDOWN), static=True)
     rec.send_property(entities.PROVENANCE_PROPERTY, any_values({item.name: getattr(provenance, item.name) for item in fields(provenance)}))
@@ -363,6 +385,8 @@ def summary_markdown(outputs: RunOutputs, label: RunLabel, metrics: RunMetrics) 
     """The ``summary`` card."""
     who: str = "our port" if label == "ours" else "upstream ViPE (unmodified)"
     lines: list[str] = [f"### MetricTrail, {who}: `{outputs.name}`", "", f"- tracked frames: **{metrics.num_tracked}** ({metrics.num_finite} finite)"]
+    if metrics.mesh_triangles is not None:
+        lines.append(f"- TSDF mesh: **{metrics.mesh_triangles:,}** triangles")
     if metrics.cloud_points is not None:
         lines.append(f"- fused metric cloud: **{metrics.cloud_points:,}** points")
     if metrics.ate_sim3_m is not None and metrics.sim3_scale is not None and metrics.ate_se3_m is not None:

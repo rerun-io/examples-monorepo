@@ -3723,6 +3723,8 @@ tyro = ">=0.9.1,<0.10"
 # ffmpeg <902 links libjxl 0.11 and dlopen-fails beside 0.12 (as in the dpvo feature).
 torchcodec = "*"
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
+# The default surface: a sparse colour TSDF (Rust, rayon) fused from every tracked frame, marching-cubes mesh.
+tsdf-rs = { path = "packages/tsdf-rs" }
 
 [feature.metrictrail.pypi-dependencies]
 metrictrail = { path = "packages/metrictrail", editable = true }

@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import cv2
 import rerun as rr
@@ -38,6 +39,7 @@ from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
 from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, log_run_outputs, make_provenance, read_run_outputs
 from metrictrail.palette import RunLabel
+from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
 
 
 @dataclass
@@ -66,8 +68,14 @@ class RunSettings:
     """Which tree runs: ``ours`` (``recipes/vipe-src`` + lietorch-mojo) or ``upstream`` (an unmodified ViPE on ``sys.path``)."""
     capture: bool = True
     """Log the live intermediates (frames, depth, DINOv3 PCA, DPVO patches, BA window); adds host syncs."""
-    fuse_cloud: bool = True
-    """Fuse the metric cloud with upstream's ``vipe.metrictrail.pointcloud.fuse_point_cloud`` (default filter)."""
+    fuse_mesh: bool = True
+    """Fuse a colour TSDF mesh from every tracked frame (:mod:`metrictrail.surface`, tsdf-rs): the default surface."""
+    tsdf_voxel_m: float = DEFAULT_TSDF.voxel_size_m
+    """TSDF voxel edge, metres (finer for close-up indoor clips; the mesh grows ~4x per halving)."""
+    tsdf_max_depth_m: float = DEFAULT_TSDF.max_depth_m
+    """Farthest depth the TSDF integrates, metres."""
+    fuse_cloud: bool = False
+    """Also fuse upstream's metric cloud (``vipe.metrictrail.pointcloud.fuse_point_cloud``, default filter; slow)."""
     max_cloud_points: int = 400_000
     """Display subsample of the cloud."""
 
@@ -148,6 +156,36 @@ def hydra_overrides(config: RunSettings, prepared: PreparedInput, vipe_out: Path
     return overrides + provider + prepared.raster_overrides + list(config.extra_overrides)
 
 
+def frame_rgb_source(artifacts: Any, prepared: PreparedInput, gpu: GpuVideoSession | None) -> Callable[[int], UInt8[ndarray, "h w 3"]]:
+    """Artifact frame ``i`` -> its 8-bit RGB on the depth raster: a video run's prepared clip on the GPU (tracking's
+    own frames, one device-to-host copy), else upstream's decode of the input (``open_rgb_source``)."""
+    from vipe.metrictrail.pointcloud import open_rgb_source
+
+    if gpu is not None and artifacts.source_frame_ids is not None:
+        rgb = gpu.rgb_source(artifacts.source_frame_ids)
+        if rgb is not None:
+            return rgb
+    is_video: bool = prepared.stream_path.is_file()
+    rgb, _, _ = open_rgb_source(
+        (int(artifacts.depth.shape[1]), int(artifacts.depth.shape[2])),
+        video=prepared.stream_path if is_video else None,
+        frames=None if is_video else prepared.stream_path,
+        input_raster=artifacts.input_raster,
+        source_frame_ids=artifacts.source_frame_ids,
+    )
+    return rgb
+
+
+def fuse_mesh(
+    outputs: RunOutputs, prepared: PreparedInput, gpu: GpuVideoSession | None = None, settings: TsdfSettings = DEFAULT_TSDF
+) -> ColoredMesh | None:
+    """The run's colour TSDF mesh in ViPE's world frame: every tracked frame's depth artifact at its final pose."""
+    from vipe.metrictrail.pointcloud import load_vipe_artifacts
+
+    artifacts = load_vipe_artifacts(outputs.run_dir, outputs.name)
+    return fuse_tsdf_mesh(artifacts.depth, artifacts.intrinsics, artifacts.c2w, frame_rgb_source(artifacts, prepared, gpu), settings)
+
+
 def fuse_cloud(
     outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, UInt8[ndarray, "h w 3"]], gpu: GpuVideoSession | None = None
 ) -> ColoredCloud:
@@ -155,27 +193,13 @@ def fuse_cloud(
 
     ``normals`` (the live capture's MoGe-2 normals per tracked frame, 8-bit RGB) give every point the voxel mean of its
     pixels' normals rotated into the world by the camera pose; a run without a normal for every frame gets none.
-    ``gpu``: a video run's prepared clip on the GPU colours the points with tracking's own frames (one device-to-host
-    copy) instead of a host decode of the whole video.
+    ``gpu``: see :func:`frame_rgb_source`.
     """
-    from vipe.metrictrail.pointcloud import fusion_settings, load_vipe_artifacts, open_rgb_source
+    from vipe.metrictrail.pointcloud import fusion_settings, load_vipe_artifacts
 
     from metrictrail.fusion import fuse_world_cloud
 
     artifacts = load_vipe_artifacts(outputs.run_dir, outputs.name)
-    raster_hw: tuple[int, int] = (int(artifacts.depth.shape[1]), int(artifacts.depth.shape[2]))
-    is_video: bool = prepared.stream_path.is_file()
-    rgb = None
-    if gpu is not None and artifacts.source_frame_ids is not None:
-        rgb = gpu.rgb_source(artifacts.source_frame_ids)
-    if rgb is None:
-        rgb, _, _ = open_rgb_source(
-            raster_hw,
-            video=prepared.stream_path if is_video else None,
-            frames=None if is_video else prepared.stream_path,
-            input_raster=artifacts.input_raster,
-            source_frame_ids=artifacts.source_frame_ids,
-        )
     complete: bool = all(index in normals for index in range(len(artifacts.depth)))
     if normals and not complete:
         print(f"[metrictrail] {len(normals)} of {len(artifacts.depth)} frames carry MoGe-2 normals; the fused cloud gets none")
@@ -183,7 +207,7 @@ def fuse_cloud(
         artifacts.depth,
         artifacts.intrinsics,
         artifacts.c2w,
-        rgb,
+        frame_rgb_source(artifacts, prepared, gpu),
         fusion_settings("default"),
         normals=(lambda index: rgb_normals(normals[index])) if normals and complete else None,
     )
@@ -266,11 +290,15 @@ def run_and_log(
     context: GtContext | None = None
     if prepared.gt_sequence is not None:
         context = load_gt_context(prepared.gt_sequence, protocol_for(config.benchmark), frames.names)
+    mesh: ColoredMesh | None = None
+    if config.fuse_mesh:
+        stage("fusing the TSDF mesh")
+        mesh = fuse_mesh(outputs, prepared, gpu, TsdfSettings(voxel_size_m=config.tsdf_voxel_m, max_depth_m=config.tsdf_max_depth_m))
     cloud: ColoredCloud | None = None
     if config.fuse_cloud:
         stage("fusing the metric point cloud")
         cloud = fuse_cloud(outputs, prepared, session.kept_normals() if session is not None else {}, gpu)
-    stage("logging the trajectory and the cloud")
+    stage("logging the trajectory and the surface")
     rec.send_recording_name(f"MetricTrail {config.label}: {prepared.name}")
     import vipe
 
@@ -288,7 +316,9 @@ def run_and_log(
         depth_range_m=depth_range_m,
         max_cloud_points=config.max_cloud_points,
     )
-    logged: LoggedRun = log_run_outputs(rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance)
+    logged: LoggedRun = log_run_outputs(
+        rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh
+    )
     return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None)
 
 

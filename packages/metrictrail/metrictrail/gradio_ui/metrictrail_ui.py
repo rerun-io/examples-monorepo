@@ -83,8 +83,9 @@ def app_overrides(tracking_stride: int, max_frames: int) -> list[str]:
 
 def summary(metrics: RunMetrics, wall_s: float) -> str:
     """The final status line."""
+    mesh: str = f", TSDF mesh of {metrics.mesh_triangles:,} triangles" if metrics.mesh_triangles is not None else ""
     cloud: str = f", {metrics.cloud_points:,} cloud points" if metrics.cloud_points is not None else ""
-    return f"done in {wall_s:.0f} s: {metrics.num_tracked} frames tracked ({metrics.num_finite} finite poses){cloud}"
+    return f"done in {wall_s:.0f} s: {metrics.num_tracked} frames tracked ({metrics.num_finite} finite poses){mesh}{cloud}"
 
 
 def run_locked(settings: RunSettings, rec: rr.RecordingStream, status: RunStatus) -> RunResult:

@@ -49,7 +49,7 @@ quick start). `--no-capture` turns off the live intermediates (faster). Without 
 Other tasks:
 
 - `metrictrail-log-run --run-dir <vipe_out> ...`: log a finished output directory (ours or upstream's) without the GPU.
-  It has no normals: they exist only in a live capture (`cam/normals`, `world/cloud_normals`).
+  It has no normals: they exist only in a live capture (`cam/normals`, `world/cloud_normals` with `--fuse-cloud`).
 - `metrictrail-check-kernels`: run one small op of each compiled kernel on the GPU.
 
 ## App
@@ -64,9 +64,26 @@ A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.
 itself; there is no intrinsics input. Settings: the tracking stride and `max_frames` (upstream's Hydra keys). The capture
 runs in live mode: DPVO's frames, patches and BA window stream in as it tracks, with depth and normals of new keyframes
 only and no DINOv3 PCA. Calibration has no hook, so the viewer stays empty for those seconds. The trajectory and the
-fused cloud arrive at the end. pool.MOV (86 s, strided to 1,293 frames) takes about 3 min 45 s on the RTX 5090:
-about 1 min of calibration, 35 s of tracking, and 1.5 min of cloud fusion (estimates from 10 s status polls). Gradio prints the local URL. Open it over HTTPS
-(`tailscale serve`): on plain HTTP the viewer stays empty.
+surface arrive at the end. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
+viewer stays empty.
+
+**Video input stays on the GPU** (`metrictrail.gpu_video`): a video decodes on NVDEC (simplecv `TorchCodecVideoReader`,
+display rotation applied as OpenCV does), ViPE's input raster (`raster_frame`) resizes and crops on the GPU, and the
+prepared clip stays in GPU memory for every pass and for the surface colours. Upstream's video path decodes with
+OpenCV, rasters on the host and re-uploads the clip each pass. Frame directories (every benchmark) keep upstream's path.
+
+**The surface is a TSDF mesh** (`metrictrail.surface`, `packages/tsdf-rs`: a sparse colour TSDF in Rust with marching
+cubes, from pablovela5620/simplerecon-inference): every tracked frame's metric depth at its final pose, 4 cm voxels to
+8 m (`--tsdf-voxel-m`, `--tsdf-max-depth-m`). `--fuse-cloud` adds upstream's fused point cloud
+(`fuse_point_cloud`: multi-view consistency filter, 2 cm voxel means, NumPy).
+
+pool (2,585 frames strided to 1,293; RTX 5090, CLI with capture, `metrictrail` env):
+
+| | wall | fusion | surface |
+|---|---|---|---|
+| upstream video path + fused cloud | 224 s | 94 s | 5.64 M points |
+| GPU video input + fused cloud | 188 s | 94 s | 5.64 M points |
+| GPU video input + TSDF mesh (default) | 97 s | 4 s | 2.94 M triangles |
 
 ## Evaluate
 

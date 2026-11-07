@@ -1,0 +1,22 @@
+[package]
+name = "tsdf_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tsdf_rs"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+pyo3-build-config = "0.25"
+
+[dependencies]
+numpy = "0.25"
+pyo3 = { version = "0.25", features = ["extension-module"] }
+rayon = "1.10"
+rustc-hash = "2.1"
+thiserror = "2"
+
+[[bench]]
+name = "tsdf"
+harness = false

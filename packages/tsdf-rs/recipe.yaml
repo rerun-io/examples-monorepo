@@ -1,0 +1,32 @@
+# rattler-build recipe for tsdf-rs: a sparse colour TSDF volume with marching cubes (Rust, rayon), as a pyo3 module.
+# Copied from pablovela5620/simplerecon-inference packages/tsdf-rs @ 7abf491.
+package:
+  name: tsdf-rs
+  version: "0.1.0"
+
+source:
+  path: .
+
+build:
+  number: 0
+  script:
+    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    # The C compiler links the extension; no stdlib('c'): it would pin a sysroot to the workspace's glibc 2.35.
+    - ${{ compiler('c') }}
+  host:
+    - python 3.12.*
+    - pip
+    - maturin >=1,<2
+  run:
+    - python 3.12.*
+    - numpy
+
+tests:
+  - python:
+      imports:
+        - tsdf_rs
+      pip_check: false

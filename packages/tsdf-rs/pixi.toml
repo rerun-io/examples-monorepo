@@ -1,0 +1,8 @@
+[package]
+name = "tsdf-rs"
+version = "0.1.0"
+
+# rattler-build (recipe.yaml), as dpretrieval: its compilers take the C stdlib from the variant defaults, while
+# pixi-build-python asks for a sysroot matching the workspace's glibc 2.35 virtual package, which conda-forge lacks.
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }
