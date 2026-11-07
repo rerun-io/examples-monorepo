@@ -52,6 +52,16 @@ Every episode seen ships these topics in addition to the whole-body ones (minus 
 
 Every hand, score and depth message is stamped on a reference (camera2) frame.
 
+Firmware differences seen in the subset run (dataforge handles both):
+
+- Some episodes ship `CompressedImage` without any exposure field (`integration_time` ... `metadata`) and no
+  `system_info` topic. The base layer derives only the exposure fields the schema carries (`exposure_fields`):
+  a selector on an absent field yields no rows and Rerun 0.42 then builds a malformed chunk instead of failing
+  clearly.
+- Some episodes ship a corrupt `foxglove.AudioData` schema (its `FileDescriptorSet` does not parse). Rerun's
+  `McapReader` parses every schema of the file before reading any topic, even topics it was told to skip, so
+  no topic of such a file can be read and the episode is not converted. The run summary lists them.
+
 ## Depth
 
 - `depth_info` gives the size (512x416, camera2's 1600x1300 scaled by 0.32), intrinsics `K`, and its own

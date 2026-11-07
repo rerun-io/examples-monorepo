@@ -206,3 +206,12 @@ def test_the_pinhole_resampling_keeps_each_point_at_its_depth() -> None:
     resampled: np.ndarray = resample_depth(depth, rows, cols)
     assert resampled.dtype == np.float16 and resampled.shape == (156, 192)
     assert np.all(resampled[rows >= 0] == np.float16(0.7)), "z is the same for the point whatever the lens"
+
+
+def test_exposure_is_read_only_from_fields_the_camera_schema_carries() -> None:
+    from dataforge.datasets.genrobot_layers import EXPOSURE_FIELDS, exposure_fields
+
+    old: pa.StructType = pa.struct([("data", pa.binary()), ("format", pa.string()), ("frame_id", pa.string())])
+    assert exposure_fields(old) == (), "older firmware ships no exposure fields"
+    new: pa.StructType = pa.struct([("data", pa.binary()), *((name, pa.float64()) for name in EXPOSURE_FIELDS)])
+    assert exposure_fields(new) == EXPOSURE_FIELDS
