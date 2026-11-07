@@ -49,11 +49,14 @@ source:
     # its centroid validity to the base forward, which does the masked draw; its copy of the vendored base forward
     # (_masked_base_forward) is deleted, so the patch is mostly removed lines.
     - patches/0005-dino-patchifier-dpvo-keywords.patch
+    # SharedK calibration's depth on keep: a keyframe gets its MoGe-2 forward once the frontend keeps it (pool: 353 -> 164
+    # forwards; K and the TUM / 7-Scenes / KITTI ATE within single-seed noise).
+    - patches/0006-calibration-depth-on-keep.patch
 
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 5
+  number: 6
   script:
     file: build.sh
 

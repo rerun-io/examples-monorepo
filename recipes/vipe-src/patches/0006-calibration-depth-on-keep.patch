@@ -1,0 +1,61 @@
+diff --git a/vipe/metrictrail/calibration/engine.py b/vipe/metrictrail/calibration/engine.py
+--- a/vipe/metrictrail/calibration/engine.py
++++ b/vipe/metrictrail/calibration/engine.py
+@@ -188,7 +188,12 @@
+ 
+ 
+ class ViPESharedFocalEngine:
+-    """:class:`~vipe.metrictrail.calibration.driver.SharedFocalEngine` on ViPE's ``SLAMSystem``."""
++    """:class:`~vipe.metrictrail.calibration.driver.SharedFocalEngine` on ViPE's ``SLAMSystem``.
++
++    Depth on keep: once the frontend is initialised, a new keyframe gets its metric-depth forward only after the
++    frontend's redundancy check keeps it (on the pool clip 193 of 353 forwards went to candidates it then dropped).
++    Until then it carries no depth prior (``disps_sens`` 0). Every pending keyframe gets its depth before a backend run.
++    """
+ 
+     def __init__(
+         self,
+@@ -230,6 +235,7 @@
+         system.backend.depth_model = depth_model
+         self.system = system
+         self._pending: tuple[int, torch.Tensor, torch.Tensor | None, list[Any]] | None = None
++        self._depth_pending: set[int] = set()
+         self._gpu_start: torch.cuda.Event | None = None
+         self._gpu_end: torch.cuda.Event | None = None
+ 
+@@ -246,12 +252,34 @@
+         if self._pending is None or self._pending[0] != frame_index:
+             raise RuntimeError("add_keyframe must follow candidate() for the same frame")
+         _, inputs, buffer_masks, frame_list = self._pending
+-        self.system._add_keyframe(frame_index, inputs, buffer_masks, frame_list, phase=1)
++        system = self.system
++        if not system.frontend.is_initialized:
++            system._add_keyframe(frame_index, inputs, buffer_masks, frame_list, phase=1)
++            return
++        slot = system.buffer.n_frames
++        system.metric_depth = None  # _add_keyframe skips the depth forward
++        try:
++            system._add_keyframe(frame_index, inputs, buffer_masks, frame_list, phase=1)
++        finally:
++            system.metric_depth = self.depth_model
++        system.buffer.disps_sens[slot] = 0.0  # the slot may still hold a dropped candidate's depth
++        self._depth_pending.add(frame_index)
++
++    def _attach_pending_depth(self, *, keep_newest: bool) -> None:
++        """Depth for every pending keyframe, or for all but the newest (the frontend has not judged it yet)."""
++        buffer = self.system.buffer
++        tstamps = [int(t) for t in buffer.tstamp[: buffer.n_frames].tolist()]
++        for slot, tstamp in enumerate(tstamps):
++            if tstamp in self._depth_pending and not (keep_newest and slot == len(tstamps) - 1):
++                buffer.update_disps_sens(self.depth_model, frame_idx=slot)
++        self._depth_pending &= {tstamps[-1]} if keep_newest and tstamps else set()
+ 
+     def run_frontend(self) -> None:
+         self.system.frontend.run()
++        self._attach_pending_depth(keep_newest=True)  # the frontend kept every older pending keyframe
+ 
+     def run_backend(self, steps: int, *, update_depth: bool) -> None:
++        self._attach_pending_depth(keep_newest=False)
+         self.system.backend.run(steps, update_depth=update_depth)
+ 
+     def accepted_keyframes(self) -> int:
