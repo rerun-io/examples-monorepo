@@ -8,13 +8,18 @@ context's queue are not ordered with each other: callers run
 `torch.mps.synchronize()` before a launch, and the Mojo side waits for its own
 kernel before it returns (`GPURuntime.finish`).
 
-A kernel that reaches a buffer only through its address must also have the
-buffer resident: Metal makes a command buffer's resources resident through
-`useResource:` or a residency set, and the Mojo runtime does that for its own
-allocations only. A PyTorch buffer that is not resident reads as zeros (MetricTrail's
-SharedK calibration on pool.mp4 got an all-zero `SE3.inv` from a valid pose row
-after a few hundred launches). So `gpu_addresses` first puts the launch's buffers
-into one `MTLResidencySet` and requests its residency (macOS 15).
+A kernel that reaches a buffer only through its address also needs the buffer
+resident. At each launch Mojo calls `useResource:` for its own buffers only
+(`MetalDeviceContext.cpp`, Mojo 1.2): a raw address carries no buffer handle, and
+Mojo 1.2 has neither a Metal queue accessor nor a host-memory wrap. A PyTorch buffer
+that is not resident reads as zeros (MetricTrail's SharedK calibration on pool.mp4
+got an all-zero `SE3.inv` from a valid pose row). Workaround, until Mojo can track
+external buffers (draft: /tmp/fleet-artifacts/spark-mac-ports/modular-upstream.md):
+`install_queue_residency` interposes `-[MTLDevice newCommandQueue]` so that every
+queue created afterwards, Mojo's included, carries one `MTLResidencySet`, and
+`gpu_addresses` adds the `MTLHeap` of each launched buffer to that set (PyTorch
+sub-allocates its shared-storage buffers from heaps). The set is committed only when
+a new heap or heapless buffer appears, so a launch normally costs a lookup.
 """
 
 import ctypes
@@ -27,72 +32,111 @@ from torch import Tensor
 _c_id = ctypes.c_void_p
 
 
-class _Residency:
-    """One `MTLResidencySet` on the system GPU, holding the buffers of the current launch."""
+class _ObjC:
+    """The few Objective-C runtime and Metal calls this module makes, bound once."""
 
     def __init__(self) -> None:
-        objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
-        objc.sel_registerName.restype = _c_id
-        objc.sel_registerName.argtypes = [ctypes.c_char_p]
-        objc.objc_getClass.restype = _c_id
-        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        self.lib = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+        lib = self.lib
+        lib.sel_registerName.restype = _c_id
+        lib.sel_registerName.argtypes = [ctypes.c_char_p]
+        lib.objc_getClass.restype = _c_id
+        lib.objc_getClass.argtypes = [ctypes.c_char_p]
+        lib.object_getClass.restype = _c_id
+        lib.object_getClass.argtypes = [_c_id]
+        lib.class_getInstanceMethod.restype = _c_id
+        lib.class_getInstanceMethod.argtypes = [_c_id, _c_id]
+        lib.method_getImplementation.restype = _c_id
+        lib.method_getImplementation.argtypes = [_c_id]
+        lib.method_setImplementation.restype = _c_id
+        lib.method_setImplementation.argtypes = [_c_id, _c_id]
         metal = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Metal.framework/Metal")
         metal.MTLCreateSystemDefaultDevice.restype = _c_id
+        self.device: int | None = metal.MTLCreateSystemDefaultDevice()
+        self.send_id = self.send(_c_id)
+        self.send_u64 = self.send(ctypes.c_uint64)
+        self.send_void = self.send(None)
+        self.send_void_id = self.send(None, _c_id)
 
-        def send(restype: type | None, *argtypes: type) -> Callable[..., int | None]:
-            return ctypes.CFUNCTYPE(restype, _c_id, _c_id, *argtypes)(("objc_msgSend", objc))
+    def send(self, restype: type | None, *argtypes: type) -> Callable[..., int | None]:
+        """`objc_msgSend` typed as `restype (id, SEL, *argtypes)`."""
+        return ctypes.CFUNCTYPE(restype, _c_id, _c_id, *argtypes)(("objc_msgSend", self.lib))
 
-        def sel(name: bytes) -> int:
-            return objc.sel_registerName(name)
+    def sel(self, name: bytes) -> int:
+        return self.lib.sel_registerName(name)
 
-        send_id = send(_c_id)
-        self._send_void = send(None)
-        self._send_void_id = send(None, _c_id)
-        device: int | None = metal.MTLCreateSystemDefaultDevice()
-        descriptor = send_id(send_id(objc.objc_getClass(b"MTLResidencySetDescriptor"), sel(b"alloc")), sel(b"init"))
+
+@functools.cache
+def _objc() -> _ObjC:
+    return _ObjC()
+
+
+class _QueueResidency:
+    """One `MTLResidencySet` attached to every command queue created after `install`, holding PyTorch's heaps."""
+
+    def __init__(self, objc: _ObjC) -> None:
+        self._objc = objc
+        descriptor = objc.send_id(objc.send_id(objc.lib.objc_getClass(b"MTLResidencySetDescriptor"), objc.sel(b"alloc")), objc.sel(b"init"))
         error = _c_id(0)
-        new_set = send(_c_id, _c_id, ctypes.POINTER(_c_id))
-        self._set: int | None = new_set(device, sel(b"newResidencySetWithDescriptor:error:"), descriptor, ctypes.byref(error))
-        if not self._set:
+        new_set = objc.send(_c_id, _c_id, ctypes.POINTER(_c_id))
+        self.set: int | None = new_set(objc.device, objc.sel(b"newResidencySetWithDescriptor:error:"), descriptor, ctypes.byref(error))
+        if not self.set:
             raise RuntimeError("lietorch_mojo: Metal refused a residency set (needs macOS 15)")
-        self._remove_all, self._add, self._commit, self._request = (
-            sel(b"removeAllAllocations"),
-            sel(b"addAllocation:"),
-            sel(b"commit"),
-            sel(b"requestResidency"),
-        )
+        self._members: set[int] = set()
         self._lock = threading.Lock()
+        self._heap, self._add, self._commit = objc.sel(b"heap"), objc.sel(b"addAllocation:"), objc.sel(b"commit")
+        self._add_to_queue = objc.sel(b"addResidencySet:")
+        self._imp: object | None = None  # the ctypes callback must outlive the swizzle
 
-    def make_resident(self, buffers: Sequence[int]) -> None:
-        """Replace the set's allocations by `buffers` (`id<MTLBuffer>` values; 0 = none) and request their residency."""
+    def install(self) -> None:
+        """Interpose `newCommandQueue` on the device's class: each new queue gets the set (call before Mojo's context)."""
+        objc = self._objc
+        method = objc.lib.class_getInstanceMethod(objc.lib.object_getClass(objc.device), objc.sel(b"newCommandQueue"))
+        prototype = ctypes.CFUNCTYPE(_c_id, _c_id, _c_id)
+        original = prototype(objc.lib.method_getImplementation(method))
+
+        def new_command_queue(device: int, selector: int) -> int | None:
+            queue: int | None = original(device, selector)
+            if queue:
+                objc.send_void_id(queue, self._add_to_queue, self.set)
+            return queue
+
+        self._imp = prototype(new_command_queue)
+        objc.lib.method_setImplementation(method, ctypes.cast(self._imp, _c_id))
+
+    def cover(self, buffers: Sequence[int]) -> None:
+        """Add the heap of each `id<MTLBuffer>` (or the buffer, if it has none) to the set; commit when it grew."""
+        objc = self._objc
         with self._lock:
-            self._send_void(self._set, self._remove_all)
-            for buffer in dict.fromkeys(buffers):
-                if buffer:  # an empty tensor has no MTLBuffer (data_ptr 0); addAllocation:nil crashes
-                    self._send_void_id(self._set, self._add, buffer)
-            self._send_void(self._set, self._commit)
-            self._send_void(self._set, self._request)
+            grew = False
+            for buffer in buffers:
+                if not buffer:  # an empty tensor has no MTLBuffer (data_ptr 0)
+                    continue
+                allocation: int = objc.send_id(buffer, self._heap) or buffer
+                if allocation not in self._members:
+                    self._members.add(allocation)
+                    objc.send_void_id(self.set, self._add, allocation)
+                    grew = True
+            if grew:
+                objc.send_void(self.set, self._commit)
 
 
 @functools.cache
-def _residency() -> _Residency:
-    return _Residency()
+def _queue_residency() -> _QueueResidency:
+    return _QueueResidency(_objc())
 
 
-@functools.cache
-def _buffer_gpu_address() -> Callable[[int], int]:
-    """`[buffer gpuAddress]` for an `id<MTLBuffer>`, bound once (libobjc is loaded on the first MPS launch only)."""
-    objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
-    objc.sel_registerName.restype = _c_id
-    objc.sel_registerName.argtypes = [ctypes.c_char_p]
-    selector: int = objc.sel_registerName(b"gpuAddress")
-    send = ctypes.CFUNCTYPE(ctypes.c_uint64, _c_id, _c_id)(("objc_msgSend", objc))
-    return lambda buffer: send(buffer, selector)
+def install_queue_residency() -> None:
+    """Make PyTorch's MPS buffers resident for the Mojo context's queue; call once before the GPU runtime exists."""
+    _queue_residency().install()
 
 
 def gpu_addresses(tensors: Sequence[Tensor]) -> tuple[int, ...]:
-    """Device addresses of the first elements of the MPS `tensors` (0 for an empty one), whose buffers are made resident first."""
+    """Device addresses of the first elements of the MPS `tensors` (0 for an empty one), their heaps made resident."""
     buffers: list[int] = [t.untyped_storage().data_ptr() for t in tensors]
-    _residency().make_resident(buffers)
-    address: Callable[[int], int] = _buffer_gpu_address()
-    return tuple(address(b) + int(t.storage_offset()) * t.element_size() if b else 0 for b, t in zip(buffers, tensors, strict=True))
+    _queue_residency().cover(buffers)
+    objc: _ObjC = _objc()
+    gpu_address = objc.sel(b"gpuAddress")
+    return tuple(
+        objc.send_u64(b, gpu_address) + int(t.storage_offset()) * t.element_size() if b else 0 for b, t in zip(buffers, tensors, strict=True)
+    )
