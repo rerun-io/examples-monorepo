@@ -163,8 +163,8 @@ def build_app(data_dir: Path = DATA_DIR) -> gr.Blocks:
     with gr.Blocks(title="MetricTrail") as demo:
         gr.Markdown(
             "# MetricTrail\nMonocular metric SLAM (ViPE `pipeline=metrictrail`): DPVO with MoGe-2 metric depth and DINOv3 "
-            "features. The camera is calibrated from the video itself (about 40 s), then tracking streams in; the "
-            "trajectory and the fused metric cloud arrive at the end."
+            "features. The camera is calibrated from the video itself (about 40 s), then tracking streams in, with a TSDF "
+            "mesh growing from each keyframe; the trajectory and the final mesh arrive at the end."
         )
         with gr.Row():
             with gr.Column(scale=1):

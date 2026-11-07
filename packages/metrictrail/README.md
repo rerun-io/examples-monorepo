@@ -64,7 +64,7 @@ A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.
 itself; there is no intrinsics input. Settings: the tracking stride and `max_frames` (upstream's Hydra keys). The capture
 runs in live mode: DPVO's frames, patches and BA window stream in as it tracks, with depth and normals of new keyframes
 only and no DINOv3 PCA. Calibration has no hook, so the viewer stays empty for those seconds. The trajectory and the
-surface arrive at the end. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
+surface arrive at the end; the TSDF mesh grows in the DPVO tracking view from each new keyframe (at DPVO's current pose) and the final mesh (final poses) replaces it. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
 viewer stays empty.
 
 **Video input stays on the GPU** (`metrictrail.gpu_video`): a video decodes on NVDEC (simplecv `TorchCodecVideoReader`,

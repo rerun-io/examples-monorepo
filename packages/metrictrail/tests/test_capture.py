@@ -79,3 +79,40 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
     session.uninstall()
     assert [len(normals) for normals in session.pass_normals] == [0, 0, 1]
     assert session.kept_normals()[0][0, 0, 0] == 2
+
+
+def test_live_tsdf_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
+    pytest.importorskip("tsdf_rs", reason="tsdf-rs is the metrictrail env's source package (packages/tsdf-rs)")
+    import rerun as rr
+    from rerun.chunk import RrdReader
+
+    from metrictrail import entities
+    from metrictrail.surface import TsdfSettings
+
+    rrd: Path = tmp_path / "live.rrd"
+    rec = rr.RecordingStream("metrictrail-test", recording_id="live")
+    rec.save(rrd)
+    session = CaptureSession(
+        out_dir=tmp_path,
+        application_id="metrictrail-test",
+        recording_id="live",
+        depth_range_m=(0.3, 3.0),
+        live=rec,
+        live_tsdf=TsdfSettings(),
+        mesh_every_keyframes=2,
+    )
+    session.pass_frames = 3
+    session.open_pass(0)
+    depth: np.ndarray = np.full((48, 64), 2.0, dtype=np.float32)
+    rgb: np.ndarray = np.full((48, 64, 3), 128, dtype=np.uint8)
+    intrinsics: np.ndarray = np.array([60.0, 60.0, 32.0, 24.0], dtype=np.float32)
+    for shift in (0.0, 0.05, 0.1):
+        pose: np.ndarray = np.eye(4, dtype=np.float32)
+        pose[0, 3] = shift
+        session.integrate_keyframe(rec, depth, rgb, intrinsics, pose)
+    session.uninstall()
+    rec.flush()
+    rec.disconnect()
+    paths: list[str] = [str(path) for path in RrdReader(rrd).store().schema().entity_paths()]
+    assert session.volume_keyframes == 3
+    assert any(path.startswith("/" + entities.DPVO_MESH + "/") for path in paths)

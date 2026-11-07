@@ -29,6 +29,7 @@ from numpy import ndarray
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 
+from metrictrail import entities
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
@@ -252,6 +253,7 @@ def run_and_log(
     config_dir: Path = config.vipe_config_dir if config.vipe_config_dir is not None else get_config_path()
     typed = parse_typed_config("default", hydra_args=overrides, config_dir=config_dir)
     depth_range_m: tuple[float, float] = DEPTH_RANGES_M.get(config.benchmark, DEFAULT_DEPTH_RANGE_M)
+    tsdf: TsdfSettings = TsdfSettings(voxel_size_m=config.tsdf_voxel_m, max_depth_m=config.tsdf_max_depth_m)
     session: CaptureSession | None = None
     if config.capture:
         session = CaptureSession(
@@ -262,6 +264,7 @@ def run_and_log(
             live=rec if live else None,
             every_frame_images=not live,
             on_frame=tracked if on_stage is not None else None,
+            live_tsdf=tsdf if live and config.fuse_mesh else None,
         )
         session.install()
     # This module imports cv2 (metrictrail.frames) before torch, so OpenMP sizes cv2's thread team to every logical
@@ -293,7 +296,7 @@ def run_and_log(
     mesh: ColoredMesh | None = None
     if config.fuse_mesh:
         stage("fusing the TSDF mesh")
-        mesh = fuse_mesh(outputs, prepared, gpu, TsdfSettings(voxel_size_m=config.tsdf_voxel_m, max_depth_m=config.tsdf_max_depth_m))
+        mesh = fuse_mesh(outputs, prepared, gpu, tsdf)
     cloud: ColoredCloud | None = None
     if config.fuse_cloud:
         stage("fusing the metric point cloud")
@@ -319,6 +322,8 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh
     )
+    if mesh is not None and session is not None and session.volume is not None:
+        rec.log(entities.DPVO_MESH, rr.Clear(recursive=True), static=True)  # the final mesh (world tab) supersedes it
     return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None)
 
 

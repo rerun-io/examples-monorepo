@@ -54,6 +54,8 @@ DPVO_KEYFRAME_PATH: str = "dpvo/keyframe_path"
 DPVO_WINDOW: str = "dpvo/window"
 DPVO_CURRENT: str = "dpvo/current"
 DPVO_WINDOW_POINTS: str = "dpvo/window_points"
+DPVO_MESH: str = "dpvo/mesh"
+"""Live TSDF mesh of the app, one ``Mesh3D`` per changed 16^3-voxel block (static, overwritten as it grows)."""
 DPVO_METRICS: str = "metrics/dpvo"
 
 WORLD_ROOT: str = "world"

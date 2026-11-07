@@ -10,6 +10,9 @@ Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSessi
   normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
   keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
 * ``DPVO._DPVO__run_global_BA``: counts global bundle adjustments;
+* with :attr:`CaptureSession.live_tsdf` (the app), each new keyframe's depth is integrated at DPVO's current pose into a
+  TSDF (``packages/tsdf-rs``) whose changed blocks are logged as meshes under ``dpvo/mesh``, so the surface grows while
+  DPVO tracks; the run's final mesh (:mod:`metrictrail.surface`, final poses) replaces it;
 * ``vipe.metrictrail.dino_fusion.FrozenDinoV3.forward``: projects the dinov3_vits16 patch features of the frame being
   patchified on a fixed PCA basis (fit on the first frame) to RGB.
 
@@ -36,6 +39,7 @@ from torch import Tensor
 
 from metrictrail import entities
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
+from metrictrail.surface import TsdfSettings, vertex_normals
 
 
 def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"]:
@@ -141,6 +145,14 @@ class CaptureSession:
     uncompressed image per frame is too much to stream to a browser)."""
     on_frame: Callable[[int, int, int], None] | None = None
     """Called after each tracked frame with (frame index, frames of the pass, keyframes in the graph); may raise to stop."""
+    live_tsdf: TsdfSettings | None = None
+    """Grow a TSDF mesh from each new keyframe while tracking (needs :attr:`live` and keyframe depth); None: none."""
+    mesh_every_keyframes: int = 8
+    """New keyframes between two logs of the live mesh's changed blocks."""
+    volume: Any = None
+    """The live TSDF volume of the current pass (``tsdf_rs.TsdfVolume``), when :attr:`live_tsdf` is set."""
+    volume_keyframes: int = 0
+    """Keyframes integrated into :attr:`volume`."""
     passes: list[CapturedPass] = field(default_factory=list)
     """Every DPVO instance captured, in creation order."""
     pass_frames: int = 0
@@ -266,6 +278,8 @@ class CaptureSession:
         for owner, name, original in self.restore:
             setattr(owner, name, original)
         self.restore = []
+        if self.volume is not None and self.live is not None:
+            self.log_mesh_blocks(self.live)  # the keyframes since the last log
         for rec in self.streams.values():
             rec.flush()
             if rec is not self.live:
@@ -288,8 +302,56 @@ class CaptureSession:
             if captured.num_frames <= self.pass_frames:
                 earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
+        if self.live_tsdf is not None and self.live is not None:
+            import tsdf_rs
+
+            # A later pass (FP32 recovery) re-tracks from the start: its surface starts again.
+            rec.log(entities.DPVO_MESH, rr.Clear(recursive=True), static=True)
+            self.volume = tsdf_rs.TsdfVolume(  # pyrefly: ignore[missing-attribute]  # compiled pyo3 module
+                voxel_size=self.live_tsdf.voxel_size_m,
+                sdf_trunc=self.live_tsdf.truncation_voxels * self.live_tsdf.voxel_size_m,
+                fuse_color=True,
+            )
+            self.volume_keyframes = 0
         self.pass_normals.append({})
         self.pending_normals.clear()
+
+    def integrate_keyframe(
+        self,
+        rec: rr.RecordingStream,
+        depth_m: Float32[ndarray, "h w"],
+        rgb: UInt8[ndarray, "h w 3"],
+        intrinsics_px: Float32[ndarray, "4"],
+        world_T_cam: Float32[ndarray, "4 4"],
+    ) -> None:
+        """Integrate a new keyframe at DPVO's current pose; log the changed blocks every :attr:`mesh_every_keyframes`."""
+        assert self.live_tsdf is not None
+        in_range: ndarray = (depth_m >= self.live_tsdf.min_depth_m) & (depth_m <= self.live_tsdf.max_depth_m)
+        fx, fy, cx, cy = (float(value) for value in intrinsics_px)
+        self.volume.integrate(
+            np.where(in_range, depth_m, 0.0).astype(np.float32),
+            np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32),
+            np.linalg.inv(world_T_cam.astype(np.float64)).astype(np.float32),
+            np.ascontiguousarray(rgb),
+        )
+        self.volume_keyframes += 1
+        if self.volume_keyframes % self.mesh_every_keyframes == 0:
+            self.log_mesh_blocks(rec)
+
+    def log_mesh_blocks(self, rec: rr.RecordingStream) -> None:
+        """Log the live volume's blocks changed since the last call (a block whose surface vanished is cleared)."""
+        for (x, y, z), (vertices, triangles, colors) in self.volume.extract_dirty_block_meshes():
+            path: str = f"{entities.DPVO_MESH}/{x}_{y}_{z}"
+            if triangles.shape[0] == 0:
+                rec.log(path, rr.Clear(recursive=False), static=True)
+                continue
+            faces: ndarray = np.asarray(triangles, dtype=np.uint32)
+            points: Float32[ndarray, "v 3"] = np.asarray(vertices, dtype=np.float32)
+            rec.log(
+                path,
+                rr.Mesh3D(vertex_positions=points, triangle_indices=faces, vertex_normals=vertex_normals(points, faces), vertex_colors=colors),
+                static=True,
+            )
 
     def kept_pass(self) -> CapturedPass | None:
         """The last of the longest passes (the tracking pass whose poses ViPE writes), or None if nothing ran."""
@@ -325,9 +387,10 @@ class CaptureSession:
         intrinsics_px: Float32[ndarray, "4"] = intrinsics.detach().float().cpu().numpy().reshape(4)
         rec.log(entities.CAM, rr.Pinhole(focal_length=intrinsics_px[:2], principal_point=intrinsics_px[2:], resolution=[width, height]))
         rec.log(entities.CAM_RGB, rr.Image(rgb, color_model="RGB").compress(jpeg_quality=92))
+        depth_m: Float32[ndarray, "h w"] | None = None
         if metric_depth is not None:
             valid: Tensor = torch.isfinite(metric_depth) if metric_mask is None else metric_mask.bool()
-            depth_m: Float32[ndarray, "h w"] = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
+            depth_m = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
             depth_mm: ndarray = np.clip(np.round(depth_m * 1000.0), 0, 65535).astype(np.uint16)
             rec.log(entities.CAM_DEPTH, rr.DepthImage(depth_mm, meter=1000.0, colormap="turbo", depth_range=[r * 1000.0 for r in self.depth_range_m]))
         if self.last_dino_rgb is not None:
@@ -374,6 +437,8 @@ class CaptureSession:
             ),
         )
         newest_world_T_cam: Float32[ndarray, "4 4"] = world_T_cam[num_keyframes - 1]
+        if self.volume is not None and depth_m is not None:
+            self.integrate_keyframe(rec, depth_m, rgb, intrinsics_px, newest_world_T_cam)
         rec.log(entities.DPVO_CURRENT, rr.Transform3D(translation=newest_world_T_cam[:3, 3], mat3x3=newest_world_T_cam[:3, :3]))
         rec.log(
             entities.DPVO_CURRENT,
