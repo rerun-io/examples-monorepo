@@ -95,11 +95,11 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
             spin_speed=0.0,
         ),
     )
-    # What MASt3R sees: the cropped camera image, then what it derives from the current frame and the
-    # keyframe it tracks against. The source VideoStream is logged but gets no view of its own.
+    # The original video on top, then what MASt3R derives from the current frame and the keyframe it
+    # tracks against. The model's cropped frame shows on the camera frustum in the 3D views.
     views: rrb.Vertical = rrb.Vertical(
         contents=[
-            rrb.Spatial2DView(origin=f"{camera_path}/pinhole/image", name="Image"),
+            rrb.Spatial2DView(origin=str(VIDEO_LOG_PATH), name="Video"),
             rrb.Grid(
                 rrb.Spatial2DView(origin=f"{camera_path}/pinhole/pointmap_depth", name="Depth"),
                 rrb.Spatial2DView(origin=f"{camera_path}/pinhole/confidence", name="Confidence"),

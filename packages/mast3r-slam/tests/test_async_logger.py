@@ -126,9 +126,9 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
             origins_2d.append(str(item.origin))
         elif isinstance(item, rrb.Container):
             pending.extend(item.contents)
-    # The camera image shows once: the source video has no 2D view of its own.
-    assert "/video" not in origins_2d
-    assert origins_2d.count("/world/current_camera/pinhole/image") == 1
+    # The original video is the one camera image in 2D; the model's crop shows on the frustum in 3D.
+    assert origins_2d.count("/video") == 1
+    assert "/world/current_camera/pinhole/image" not in origins_2d
     assert sorted(str(view.name) for view in views_3d) == ["Follow", "Overview"]
     for view in views_3d:
         assert isinstance(view.contents, list)
