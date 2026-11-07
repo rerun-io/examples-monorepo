@@ -154,6 +154,20 @@ def shard(items: Sequence[T], index: int, count: int) -> list[T]:  # noqa: UP047
     return list(items[index::count])
 
 
+def require_published(targets: dict[str, Path], layers: Sequence[str]) -> None:
+    """Check that every named layer file exists and holds bytes; the MCAP is deleted only after this passes.
+
+    Raises:
+        ValueError: A layer file is missing or empty.
+    """
+    for layer in layers:
+        target: Path = targets[layer]
+        if not target.is_file():
+            raise ValueError(f"{target}: {layer} layer missing after conversion")
+        if target.stat().st_size == 0:
+            raise ValueError(f"{target}: {layer} layer is empty after conversion")
+
+
 def pane_contents(cam: int, *, with_body: bool = True) -> list[str]:
     """One fisheye pane: its video and the 2D projected through its lens.
 
@@ -189,7 +203,7 @@ class DasEgoConfig(DataforgeDatasetConfig):
     num_shards: int = 1
     """Processes the selection is split across."""
     keep_raw: bool = False
-    """Keep each MCAP after its layers that read it are published."""
+    """Keep each MCAP after its layers are published; by default it is deleted once every layer file is checked."""
     revision: str = REVISION
     """Pinned Hub commit; an override must be a full commit sha."""
 
@@ -293,24 +307,42 @@ class DasEgoDataset(DataforgeDataset[DasEgoConfigT, HubEpisode]):
         return partial(write_pose_layer, track=track, with_body=self.with_body)
 
     def convert(self, identity: SequenceIdentity, source: HubEpisode, *, force: bool) -> Path:
+        """Convert one episode; the MCAP is deleted only once every layer is published and checked.
+
+        A failure after the fetch deletes the episode's layers and sidecar, so nothing partial is registered,
+        and keeps the MCAP for the retry.
+        """
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
         sidecar: Path = self.sidecar(identity)
         if not pending and sidecar.is_file():
             return targets[paths.BASE_LAYER]
-        mcap: Path | None = None
-        if self.needs_mcap(identity, force=force):
-            with self.timer.stage("fetch"):
-                mcap = self.fetch(source)
-            if force or not sidecar.is_file():
-                with self.timer.stage("write:sidecar"):
-                    write_sidecar(mcap, sidecar, recording_id=identity.recording_id, excluded_topics=self.sidecar_exclusions)
+        if not self.needs_mcap(identity, force=force):
+            return self.convert_fetched(identity, source, None, targets, pending, force=force)
+        with self.timer.stage("fetch"):
+            mcap: Path = self.fetch(source)
+        try:
+            base: Path = self.convert_fetched(identity, source, mcap, targets, pending, force=force)
+        except BaseException:
+            for target in (*targets.values(), sidecar):
+                target.unlink(missing_ok=True)
+            raise
+        if not self.config.keep_raw:
+            mcap.unlink()
+        return base
+
+    def convert_fetched(
+        self, identity: SequenceIdentity, source: HubEpisode, mcap: Path | None, targets: dict[str, Path], pending: list[str], *, force: bool
+    ) -> Path:
+        """Write the sidecar and the MCAP layers when ``mcap`` is given, then the derived layers; check every layer written."""
+        sidecar: Path = self.sidecar(identity)
+        if mcap is not None and (force or not sidecar.is_file()):
+            with self.timer.stage("write:sidecar"):
+                write_sidecar(mcap, sidecar, recording_id=identity.recording_id, excluded_topics=self.sidecar_exclusions)
         file: EpisodeFile = EpisodeFile(sidecar)
         episode: Episode = read_episode(file)  # once, from the sidecar: the MCAP layers and every derived one
         self.timer.capture_s = episode.clock.duration_s
         if mcap is not None:
             self.write_mcap_layers(identity, mcap, targets, [layer for layer in pending if layer in self.mcap_layers], episode=episode, source=source)
-            if not self.config.keep_raw:
-                mcap.unlink()
         # A derived layer gets a writer only when it has something to publish.
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {}
         annotation: Annotation | None = episode.annotation
@@ -341,7 +373,9 @@ class DasEgoDataset(DataforgeDataset[DasEgoConfigT, HubEpisode]):
                 targets[layer].unlink(missing_ok=True)
             print(f"{identity.sequence_key}: nothing to publish for {', '.join(skipped)}")
         self.write_layers(identity, targets, [layer for layer in derived if layer in writers], writers)
-        print(f"done {identity.sequence_key}: {', '.join(layer for layer in pending if layer not in skipped)}")
+        written: list[str] = [layer for layer in pending if layer not in skipped and targets[layer].exists()]
+        require_published({**targets, "sidecar": sidecar}, [*dict.fromkeys([paths.BASE_LAYER, *written]), "sidecar"])  # base is never optional
+        print(f"done {identity.sequence_key}: {', '.join(written)}")
         return targets[paths.BASE_LAYER]
 
     def world_contents(self) -> list[str]:

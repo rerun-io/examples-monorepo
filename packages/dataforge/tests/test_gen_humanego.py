@@ -18,6 +18,7 @@ from dataforge.datasets.gen_humanego_depth import decode_predz, zstd_content_siz
 from dataforge.datasets.genrobot import HubEpisode, shard, stratified_subset
 from dataforge.datasets.genrobot_pose import MIRROR_X, PoseTrack, check_mano, skin
 from dataforge.datasets.genrobot_source import parse_hub_path
+from dataforge.identity import SequenceIdentity
 
 
 def test_hub_paths_with_spaces_and_capitals_name_the_episode() -> None:
@@ -141,3 +142,45 @@ def test_the_config_selects_a_budgeted_shard(tmp_path: Path) -> None:
     assert isinstance(config.setup(), GenHumanEgoDataset)
     with pytest.raises(ValueError):
         GenHumanEgoConfig(root=tmp_path, shard_index=2, num_shards=2)
+
+
+def test_a_failed_episode_keeps_its_mcap_and_leaves_no_partial_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataforge import paths
+    from dataforge.datasets import genrobot
+
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
+    dataset: GenHumanEgoDataset = GenHumanEgoConfig(root=tmp_path / "raw").setup()
+    item: HubEpisode = episode("home/wash", "ab", 0.001)
+    identity: SequenceIdentity = SequenceIdentity(dataset.config.name, (item.uuid,))
+    mcap: Path = tmp_path / "raw" / item.path
+    mcap.parent.mkdir(parents=True)
+    mcap.write_bytes(b"mcap")
+    monkeypatch.setattr(dataset, "fetch", lambda source: mcap)
+    base: Path = dataset.targets(identity)[paths.BASE_LAYER]
+
+    def half_written_sidecar(source: Path, target: Path, **_: object) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"sidecar")
+        base.parent.mkdir(parents=True, exist_ok=True)
+        base.write_bytes(b"base")
+        raise RuntimeError("the reader failed half way")
+
+    monkeypatch.setattr(genrobot, "write_sidecar", half_written_sidecar)
+    with pytest.raises(RuntimeError, match="half way"):
+        dataset.convert(identity, item, force=False)
+    assert mcap.is_file(), "the MCAP stays for the retry"
+    assert not base.exists() and not dataset.sidecar(identity).exists(), "no partial layer is left to be registered"
+
+
+def test_every_published_layer_must_hold_bytes_before_the_mcap_goes(tmp_path: Path) -> None:
+    from dataforge.datasets.genrobot import require_published
+
+    good: Path = tmp_path / "good.rrd"
+    good.write_bytes(b"x")
+    require_published({"base": good}, ["base"])
+    empty: Path = tmp_path / "empty.rrd"
+    empty.write_bytes(b"")
+    with pytest.raises(ValueError, match="empty"):
+        require_published({"base": good, "depth": empty}, ["base", "depth"])
+    with pytest.raises(ValueError, match="missing"):
+        require_published({"pose": tmp_path / "absent.rrd"}, ["pose"])
