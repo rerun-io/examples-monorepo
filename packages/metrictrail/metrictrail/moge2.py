@@ -68,9 +68,11 @@ DEFAULT_PROVIDER: str = "moge2-l-normal"
 """The provider our port runs."""
 PROVIDER_OVERRIDES: list[str] = [
     f"pipeline.init.calibration.depth_model={DEFAULT_PROVIDER}",
+    # Upstream's FP32 default is for ViPE's own moge2-l; our provider runs FP16 on every backend.
+    "pipeline.init.calibration.depth_use_fp16=true",
     f"pipeline.slam.keyframe_depth={DEFAULT_PROVIDER}",
 ]
-"""Hydra overrides that select :data:`DEFAULT_PROVIDER` for SharedK calibration and for tracking."""
+"""Hydra overrides that select :data:`DEFAULT_PROVIDER` (and its FP16 precision) for SharedK calibration and for tracking."""
 
 
 def tensorrt_importable() -> bool:
@@ -298,8 +300,9 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
     ``__init__`` is skipped, as it loads the ``moge-2-vitl`` torch weights this provider does not use.
 
     ``engine`` lets wrappers share one set of networks and one forward cache (the calibration and the tracking
-    wrapper); when omitted it is built for the backend :func:`select_moge2_backend` picks. ``use_fp16`` is recorded
-    only: the TensorRT engine has its own precision, the torch fallback always autocasts FP16.
+    wrapper); when omitted it is built for the backend :func:`select_moge2_backend` picks. Both backends compute in FP16
+    (the TensorRT engine is strongly typed from an FP16 ONNX export, the torch predictor autocasts), so ``use_fp16=False``
+    is refused rather than ignored.
     """
 
     def __init__(
@@ -312,6 +315,8 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
         engine: MoGe2Engine | None = None,
     ) -> None:
         DepthEstimationModel.__init__(self)
+        if not use_fp16:
+            raise ValueError(f"moge2-{variant}-normal runs FP16 on every backend (TensorRT FP16 engine, torch FP16 autocast); FP32 is not available")
         if variant not in MOGE2_ENCODERS:
             raise ValueError(f"unknown MoGe-2 variant {variant!r}; choose one of {sorted(MOGE2_ENCODERS)}")
         if not 0.0 < float(min_depth_m) < float(max_depth_m):
@@ -321,7 +326,6 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
             engine = MoGe2Engine(backend, MOGE2_ENCODERS[variant])
         self.engine: MoGe2Engine = engine
         self.variant: str = variant
-        self.use_fp16: bool = use_fp16
         self.min_depth_m: float = float(min_depth_m)
         self.max_depth_m: float = float(max_depth_m)
 
@@ -331,7 +335,7 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
 
     @property
     def precision(self) -> str:
-        return "TensorRT" if self.engine.backend == "tensorrt" else "FP16"
+        return "TensorRT-FP16" if self.engine.backend == "tensorrt" else "FP16-autocast"
 
     def predict_metric(self, rgb_bchw: Float[Tensor, "b 3 h w"], *, focal_px: float) -> MetricDepthNormalsPrediction:
         """K-conditioned metric depth, validity and normals for a batch."""
@@ -366,7 +370,6 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
             "precision": self.precision,
             "depth_type": self.depth_type.name,
             "resolution_level": MOGE2_RESOLUTION_LEVEL,
-            "use_fp16_config": self.use_fp16,
             "fov_x": "float64 math.atan of the bound focal",
             "post_processing": "recover_shift_and_intrinsics(points, mask > 0.5, fov_x) at network resolution; "
             "(z + shift) * metric_scale; depth bilinear, mask nearest to the input raster",
