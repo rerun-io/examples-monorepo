@@ -1,4 +1,4 @@
-"""The compiled vipe-src kernels load and compute (GPU)."""
+"""The compiled kernels (vipe-src's vipe_ext, packages/dpvo's DPVO kernels through dpvo.kernels) load and compute (GPU)."""
 
 import importlib
 from types import ModuleType
@@ -27,9 +27,10 @@ def test_vipe_ext_has_exactly_the_built_submodules() -> None:
     assert [name for name in kernels.VIPE_EXT_DROPPED if hasattr(vipe_ext, name)] == []
 
 
-def test_lietorch_backends_is_not_built() -> None:
+def test_vipe_dpvo_kernels_are_not_built() -> None:
+    """MetricTrail's DPVO kernels are packages/dpvo's (dpvo.kernels); vipe-src builds no DPVO extension package."""
     with pytest.raises(ImportError):
-        importlib.import_module("vipe.metrictrail.dpvo_ext.lietorch_backends")
+        importlib.import_module("vipe.metrictrail.dpvo_ext")
 
 
 @pytest.mark.parametrize("check", [kernels.check_scatter_max, kernels.check_patchify, kernels.check_reproject])

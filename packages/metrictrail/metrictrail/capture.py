@@ -1,16 +1,22 @@
-"""Log MetricTrail's live intermediates to Rerun while ViPE runs, by wrapping ViPE methods (no ViPE file is edited).
+"""Log MetricTrail's live intermediates to Rerun while ViPE runs, through DPVO's observer hooks and by wrapping ViPE methods
+(no ViPE file is edited).
+
+DPVO (``dpvo.metric.MetricDPVO``, which ViPE builds itself through ``vipe.metrictrail.dpvo.dpvo.DPVO``) is observed,
+not wrapped: :meth:`CaptureSession.install` registers :meth:`CaptureSession.observe` with
+:func:`dpvo.hooks.add_global_observer`, so every DPVO built while the session is installed
+
+* opens one recording file per DPVO instance (pass);
+* after each tracked frame (:meth:`CaptureObserver.on_frame`), logs the frame DPVO saw, the MoGe-2 metric depth it was
+  given, the frame's MoGe-2 normals when DPVO's keyframe graph grew on it, the newest keyframe's patches, the local
+  bundle-adjustment window and its patch points;
+* counts global bundle adjustments (:meth:`CaptureObserver.on_global_ba`).
 
 Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSession.uninstall` restores them):
 
 * ``vipe.metrictrail.slam.DPVOSLAMSystem.run``: notes the frame count of the tracking pass that starts;
-* ``vipe.metrictrail.dpvo.dpvo.DPVO.__init__``: opens one recording file per DPVO instance (pass);
-* ``DPVO.__call__``: after each tracked frame, logs the frame DPVO saw, the MoGe-2 metric depth it was given, the
-  frame's MoGe-2 normals when DPVO's keyframe graph grew on it, the newest keyframe's patches, the local
-  bundle-adjustment window and its patch points;
 * :meth:`metrictrail.moge2.MoGe2NormalProvider.predict_metric` and ``DPVOSLAMSystem._prepare``: keep the camera-space
   normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
   keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
-* ``DPVO._DPVO__run_global_BA``: counts global bundle adjustments;
 * with :attr:`CaptureSession.live_surface` (the app), whenever DPVO's keyframe graph grows on a frame (DPVO adds
   every frame as a keyframe; the graph grows when keyframe culling keeps it), that frame's depth is integrated at
   DPVO's current estimate of its pose into the :class:`~metrictrail.live_surface.LiveSurface`, so the surface grows
@@ -22,7 +28,9 @@ A run can make several DPVO passes (stage A, FP32 recovery). Each pass is writte
 :meth:`CaptureSession.kept_pass` is the last of the longest passes, the one whose poses ViPE writes. With
 :attr:`CaptureSession.live` set (the Gradio app), every pass logs straight into that recording instead, so the viewer
 sees tracking as it happens; a later pass (FP32 recovery) then overwrites the earlier one frame by frame. The hooks read
-tensors and add host syncs, so a captured run's FPS is not a timing result; they never change a value DPVO uses.
+tensors and add host syncs, so a captured run's FPS is not a timing result; they never change a value DPVO uses. An
+unmodified upstream ViPE (``--label upstream``) runs its own vendored DPVO, which has no observer hooks: its passes are
+not captured.
 """
 
 import threading
@@ -34,6 +42,8 @@ from typing import Any
 import numpy as np
 import rerun as rr
 import torch
+from dpvo.dpvo import DPVO
+from dpvo.hooks import DPVOObserver, FrameEvent, add_global_observer
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -164,6 +174,8 @@ class CaptureSession:
     """Open recording per DPVO instance, keyed by ``id(instance)``."""
     restore: list[tuple[type, str, Callable[..., Any]]] = field(default_factory=list)
     """Wrapped methods and their originals."""
+    remove_observer: Callable[[], None] | None = None
+    """Unregisters :meth:`observe` from :mod:`dpvo.hooks`; None while not installed."""
     pending_normals: dict[int, UInt8[Tensor, "h w 3"]] = field(default_factory=dict)
     """Normals (8-bit RGB, on the GPU) of frames the depth producer prepared and DPVO has not tracked yet, by index."""
     pass_normals: list[dict[int, UInt8[Tensor, "h w 3"]]] = field(default_factory=list)
@@ -173,9 +185,8 @@ class CaptureSession:
     """The normals of the latest MoGe-2 prediction of the calling thread (the depth producer runs in its own)."""
 
     def install(self) -> None:
-        """Wrap the ViPE classes of the imported ``vipe`` tree."""
+        """Observe every DPVO built from now on and wrap the ViPE classes of the imported ``vipe`` tree."""
         import vipe.metrictrail.dino_fusion as dino_fusion
-        import vipe.metrictrail.dpvo.dpvo as dpvo_module
         import vipe.metrictrail.slam as slam
 
         from metrictrail.moge2 import MoGe2NormalProvider
@@ -183,9 +194,6 @@ class CaptureSession:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         session: CaptureSession = self
         run_orig: Callable[..., Any] = slam.DPVOSLAMSystem.run
-        init_orig: Callable[..., Any] = dpvo_module.DPVO.__init__
-        call_orig: Callable[..., Any] = dpvo_module.DPVO.__call__
-        gba_orig: Callable[..., Any] = dpvo_module.DPVO._DPVO__run_global_BA
         forward_orig: Callable[..., Any] = dino_fusion.FrozenDinoV3.forward
         predict_orig: Callable[..., Any] = MoGe2NormalProvider.predict_metric
         prepare_orig: Callable[..., Any] = slam.DPVOSLAMSystem._prepare
@@ -210,41 +218,6 @@ class CaptureSession:
             session.producer_local.normals = None
             return item
 
-        def init(self: Any, *args: Any, **kwargs: Any) -> None:
-            init_orig(self, *args, **kwargs)
-            session.open_pass(id(self))
-
-        def call(
-            self: Any, tstamp: Any, image: Tensor, intrinsics: Tensor, metric_depth: Tensor | None = None, metric_mask: Tensor | None = None
-        ) -> Any:
-            frame: int = int(self.counter)
-            keyframes_before: int = int(self.n)
-            result: Any = call_orig(self, tstamp, image, intrinsics, metric_depth=metric_depth, metric_mask=metric_mask)
-            rec: rr.RecordingStream | None = session.streams.get(id(self))
-            normals: Tensor | None = session.pending_normals.pop(frame, None)
-            if normals is not None and session.pass_normals:
-                # Asynchronous copy into page-locked memory: the tracking loop never waits for it; fusion reads it
-                # after the run, long after the copy finished.
-                pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
-                session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
-            if rec is not None:
-                # DPVO appends every frame to its keyframe graph, then may cull an older keyframe: the graph grew
-                # when culling kept them all. The frame itself is always the newest keyframe after the call.
-                graph_grew: bool = int(self.n) > keyframes_before
-                added: bool = bool(self.is_initialized) or graph_grew
-                depth: Tensor | None = metric_depth if session.every_frame_images or graph_grew else None
-                session.log_frame(rec, self, frame, image, intrinsics, depth, metric_mask, added)
-                if graph_grew and normals is not None:
-                    rec.log(entities.CAM_NORMALS, rr.Image(normals.cpu().numpy(), color_model="RGB").compress(jpeg_quality=92))
-            session.last_dino_rgb = None
-            if session.on_frame is not None:
-                session.on_frame(frame, session.pass_frames, int(self.n))
-            return result
-
-        def gba(self: Any, *args: Any, **kwargs: Any) -> Any:
-            session.global_ba_calls += 1
-            return gba_orig(self, *args, **kwargs)
-
         def forward(self: Any, dpvo_images: Tensor) -> Tensor:
             features: Tensor = forward_orig(self, dpvo_images)
             if session.every_frame_images and features.shape[0] * features.shape[1] == 1:
@@ -257,23 +230,26 @@ class CaptureSession:
 
         self.restore = [
             (slam.DPVOSLAMSystem, "run", run_orig),
-            (dpvo_module.DPVO, "__init__", init_orig),
-            (dpvo_module.DPVO, "__call__", call_orig),
-            (dpvo_module.DPVO, "_DPVO__run_global_BA", gba_orig),
             (dino_fusion.FrozenDinoV3, "forward", forward_orig),
             (MoGe2NormalProvider, "predict_metric", predict_orig),
             (slam.DPVOSLAMSystem, "_prepare", prepare_orig),
         ]
         slam.DPVOSLAMSystem.run = run
-        dpvo_module.DPVO.__init__ = init
-        dpvo_module.DPVO.__call__ = call
-        dpvo_module.DPVO._DPVO__run_global_BA = gba
         dino_fusion.FrozenDinoV3.forward = forward
         MoGe2NormalProvider.predict_metric = predict
         slam.DPVOSLAMSystem._prepare = prepare
+        self.remove_observer = add_global_observer(self.observe)
+
+    def observe(self, dpvo: DPVO) -> "CaptureObserver":
+        """The global observer factory: open the pass of a new DPVO instance and observe it."""
+        self.open_pass(id(dpvo))
+        return CaptureObserver(self)
 
     def uninstall(self) -> None:
-        """Restore the wrapped methods and close every pass recording."""
+        """Stop observing new DPVO instances, restore the wrapped methods and close every pass recording."""
+        if self.remove_observer is not None:
+            self.remove_observer()
+            self.remove_observer = None
         for owner, name, original in self.restore:
             setattr(owner, name, original)
         self.restore = []
@@ -325,7 +301,7 @@ class CaptureSession:
     def log_frame(
         self,
         rec: rr.RecordingStream,
-        dpvo: Any,
+        dpvo: DPVO,
         frame: int,
         image: Tensor,
         intrinsics: Tensor,
@@ -367,7 +343,7 @@ class CaptureSession:
         rec.log(f"{entities.DPVO_METRICS}/patch_depth_median_m", rr.Scalars(float(np.median(patch_depth_m))))
         if not dpvo.is_initialized:
             return
-        window_start: int = max(num_keyframes - int(dpvo.cfg.OPTIMIZATION_WINDOW), 1)
+        window_start: int = max(num_keyframes - dpvo.cfg.optimization_window, 1)
         world_T_cam: Float32[ndarray, "n 4 4"] = dpvo_world_T_cam(dpvo.poses[0, :num_keyframes].float().cpu().numpy())
         centres: Float32[ndarray, "n 3"] = world_T_cam[:, :3, 3]
         in_window: Bool[ndarray, "n"] = np.arange(num_keyframes) >= window_start
@@ -412,3 +388,38 @@ class CaptureSession:
         rec.log(entities.DPVO_WINDOW_POINTS, rr.Points3D(points_world, colors=np.ascontiguousarray(colors_rgb), radii=rr.Radius.ui_points(3.0)))
         rec.log(f"{entities.DPVO_METRICS}/keyframes_in_graph", rr.Scalars(float(num_keyframes)))
         rec.log(f"{entities.DPVO_METRICS}/global_ba_calls", rr.Scalars(float(self.global_ba_calls)))
+
+
+class CaptureObserver(DPVOObserver):
+    """Logs one DPVO pass into its :class:`CaptureSession` recording (built by :meth:`CaptureSession.observe`)."""
+
+    def __init__(self, session: CaptureSession) -> None:
+        self.session: CaptureSession = session
+
+    def on_frame(self, dpvo: DPVO, event: FrameEvent) -> None:
+        """Log the frame DPVO just tracked, then call :attr:`CaptureSession.on_frame` (which may raise to stop the run)."""
+        session: CaptureSession = self.session
+        frame: int = event.frame_index
+        rec: rr.RecordingStream | None = session.streams.get(id(dpvo))
+        normals: Tensor | None = session.pending_normals.pop(frame, None)
+        if normals is not None and session.pass_normals:
+            # Asynchronous copy into page-locked memory: the tracking loop never waits for it; fusion reads it
+            # after the run, long after the copy finished.
+            pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
+            session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
+        if rec is not None:
+            # DPVO appends every frame to its keyframe graph, then may cull an older keyframe: the graph grew
+            # when culling kept them all. The frame itself is always the newest keyframe after the call.
+            graph_grew: bool = dpvo.n > event.keyframes_before
+            added: bool = dpvo.is_initialized or graph_grew
+            depth: Tensor | None = event.depth.depth if session.every_frame_images or graph_grew else None
+            session.log_frame(rec, dpvo, frame, event.image, event.intrinsics, depth, event.depth.mask, added)
+            if graph_grew and normals is not None:
+                rec.log(entities.CAM_NORMALS, rr.Image(normals.cpu().numpy(), color_model="RGB").compress(jpeg_quality=92))
+        session.last_dino_rgb = None
+        if session.on_frame is not None:
+            session.on_frame(frame, session.pass_frames, dpvo.n)
+
+    def on_global_ba(self, dpvo: DPVO) -> None:
+        """Count the global bundle adjustment that is about to run."""
+        self.session.global_ba_calls += 1
