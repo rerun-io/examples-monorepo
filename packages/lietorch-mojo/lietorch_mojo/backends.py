@@ -12,6 +12,9 @@ Deviations from lietorch, all on inputs lietorch mishandles:
   than cuda:0, or of the wrong shape (not (batch, width) with the op's row
   width and one batch size) raise `ValueError`/`RuntimeError` (lietorch reads
   or writes out of bounds or uses the wrong device).
+- MPS tensors (Apple GPU, float32 only) run the Mojo Metal kernels: the call
+  synchronises PyTorch's MPS queue first and returns when the kernel is done
+  (`lietorch_mojo.metal`). lietorch has no MPS support.
 
 All kernel launches go through `_run`, the only place that knows how the
 Mojo extension is called. The extension owns the row widths (`row_widths`),
@@ -27,6 +30,7 @@ import torch
 from torch import Tensor
 
 from lietorch_mojo import _lietorch_mojo_backends as _ext
+from lietorch_mojo.metal import gpu_addresses, install_queue_residency
 
 # Op codes come from the extension (group_ops.mojo), so Python and the kernels cannot disagree.
 _OP_CODES: Final[dict[str, int]] = dict(_ext.op_codes())
@@ -75,6 +79,8 @@ def _runtime(on_gpu: bool) -> object:
     global _gpu_runtime, _cpu_runtime
     if on_gpu:
         if _gpu_runtime is None:
+            if torch.backends.mps.is_available():
+                install_queue_residency()  # before the Mojo context creates its Metal queue
             _gpu_runtime = _ext.create_gpu_runtime()
         return _gpu_runtime
     if _cpu_runtime is None:
@@ -117,11 +123,9 @@ def _run(op: int, group_index: int, inputs: tuple[Tensor, ...], names: tuple[str
     n: int = ref.shape[0] if ref.dim() == 2 else -1
     dtype: torch.dtype = ref.dtype
     device: int = ref.get_device()  # -1 on CPU
-    ptrs: list[int] = []
     for t, width in zip(inputs, widths, strict=False):
         if not t.is_contiguous() or t.dtype is not dtype or t.get_device() != device or t.shape != (n, width):
             raise _bad_inputs(inputs, names, widths, ref.shape[0] if ref.dim() > 0 else 0)
-        ptrs.append(t.data_ptr())
     if dtype is _FLOAT32:
         spec: int = op | (group_index << 8)
     elif dtype is _FLOAT64:
@@ -131,15 +135,18 @@ def _run(op: int, group_index: int, inputs: tuple[Tensor, ...], names: tuple[str
     outputs: list[Tensor] = [ref.new_empty(n, width) for width in widths[len(inputs) :]]
     if n == 0:
         return outputs
-    ptrs.extend(t.data_ptr() for t in outputs)
     if device == 0 and ref.is_cuda:
-        _launch_cuda(_gpu_runtime or _runtime(True), _current_raw_stream(0), spec, n, tuple(ptrs))
+        ptrs: tuple[int, ...] = tuple(t.data_ptr() for t in (*inputs, *outputs))
+        _launch_cuda(_gpu_runtime or _runtime(True), _current_raw_stream(0), spec, n, ptrs)
     elif device < 0 and ref.is_cpu:
-        _launch_cpu(_cpu_runtime or _runtime(False), spec, n, tuple(ptrs))
+        _launch_cpu(_cpu_runtime or _runtime(False), spec, n, tuple(t.data_ptr() for t in (*inputs, *outputs)))
+    elif ref.is_mps:
+        torch.mps.synchronize()
+        _launch_cuda(_gpu_runtime or _runtime(True), 0, spec, n, gpu_addresses((*inputs, *outputs)))
     elif ref.is_cuda:
         raise RuntimeError(f"lietorch_mojo runs on cuda:0 only, got {ref.device}")
     else:
-        raise RuntimeError(f"lietorch_mojo supports CPU and CUDA tensors, got {ref.device}")
+        raise RuntimeError(f"lietorch_mojo supports CPU, CUDA and MPS tensors, got {ref.device}")
     return outputs
 
 

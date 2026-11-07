@@ -171,7 +171,7 @@ class DPVO:
     def load_weights(self, network: str | VONet) -> None:
         """Load network weights from a checkpoint file or use an existing VONet."""
         if isinstance(network, str):
-            state_dict: dict[str, Tensor] = torch.load(network)
+            state_dict: dict[str, Tensor] = torch.load(network, map_location=self.device)  # dpvo.pth was saved on CUDA
             new_state_dict: OrderedDict[str, Tensor] = OrderedDict()
             for k, v in state_dict.items():
                 if "update.lmbda" not in k:

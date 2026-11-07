@@ -63,9 +63,11 @@ def video_frames(video_path: Path, stride: int, skip: int = 0, *, device: torch.
 
     Keeps the last frame of each complete stride group (source index
     ``skip + i * stride + stride - 1``), halves it with an area resize and
-    crops it to multiples of 16. Frames stay on ``device``.
+    crops it to multiples of 16. Frames stay on ``device``. TorchCodec decodes on CUDA or CPU only, so an
+    MPS (or CPU) tracker gets CPU-decoded frames moved to its device.
     """
-    reader: TorchCodecVideoReader = TorchCodecVideoReader(video_path, device=device)
+    decode_device: torch.device = device if device.type == "cuda" else torch.device("cpu")
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(video_path, device=decode_device)
     half_hw: tuple[int, int] = (round(reader.source_height * VIDEO_SCALE), round(reader.source_width * VIDEO_SCALE))
     crop_h, crop_w = crop16(*half_hw)
     try:
@@ -75,7 +77,7 @@ def video_frames(video_path: Path, stride: int, skip: int = 0, *, device: torch.
             source_index += 1
             if source_index < skip or (source_index - skip) % stride != stride - 1:
                 continue
-            half: Tensor = F.interpolate(rgb_3hw[None].float(), size=half_hw, mode="area")[0]
+            half: Tensor = F.interpolate(rgb_3hw[None].to(device).float(), size=half_hw, mode="area")[0]
             bgr_3hw: UInt8[Tensor, "3 h w"] = half.round().to(torch.uint8)[[2, 1, 0], :crop_h, :crop_w].contiguous()
             yield Frame(t, source_index, bgr_3hw, None)
             t += 1

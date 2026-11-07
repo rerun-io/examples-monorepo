@@ -49,45 +49,63 @@ source:
     # its centroid validity to the base forward, which does the masked draw; its copy of the vendored base forward
     # (_masked_base_forward) is deleted, so the patch is mostly removed lines.
     - patches/0005-dino-patchifier-dpvo-keywords.patch
+    # vipe.utils.device.device(): CUDA, else MPS, else CPU (VIPE_DEVICE overrides). The "cuda" literals, autocast
+    # device types and stream/event ops on MetricTrail's path go through it (HostOps for MPS/CPU); on CUDA it
+    # returns "cuda", so CUDA runs are unchanged.
+    - patches/0006-device-hook.patch
+    # Hooks for the macOS lane: setup.py builds no vipe_ext without CUDA torch, and vipe.ext then imports vipe_mojo
+    # (packages/vipe-mojo).
+    - patches/0007-build-without-cuda-hooks.patch
 
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 5
+  number: 7
   script:
     file: build.sh
 
 requirements:
   build:
-    - cuda-compiler 13.0.*
-    - cuda-version 13.0.*
-    - ninja
+    - if: linux
+      then:
+        - cuda-compiler 13.0.*
+        - cuda-version 13.0.*
+        - ninja
   host:
     - python 3.12.*
     - pip
     - setuptools >=77
     - wheel
-    - cuda-version 13.0.*
-    - pytorch-gpu 2.12.*
-    # slam_ext includes <eigen3/Eigen/...> (USE_SYSTEM_EIGEN=1, build.sh).
-    - eigen ==3.4.0
-    - cuda-cudart-dev
-    - cuda-driver-dev
-    - cuda-cccl
-    - cuda-nvrtc-dev
-    - libcublas-dev
-    - libcusparse-dev
-    - libcusolver-dev
-    - libcurand-dev
+    - if: linux
+      then:
+        - cuda-version 13.0.*
+        - pytorch-gpu 2.12.*
+        # slam_ext includes <eigen3/Eigen/...> (USE_SYSTEM_EIGEN=1, build.sh).
+        - eigen ==3.4.0
+        - cuda-cudart-dev
+        - cuda-driver-dev
+        - cuda-cccl
+        - cuda-nvrtc-dev
+        - libcublas-dev
+        - libcusparse-dev
+        - libcusolver-dev
+        - libcurand-dev
+      # macOS: pure Python (patch 0007); ViPE's kernels come from vipe-mojo.
+      else:
+        - pytorch 2.12.*
   # What `vipe.metrictrail.pipeline`, `vipe.pipeline.processors` and the `vipe` CLI (vipe.cli.main) import at module
   # load (upstream pyproject, minus what MetricTrail never reaches: gtsam (vipe_long), ray). transformers (Grounding
   # DINO's BERT, used only with dynamic masks) comes from the consuming workspace. PyPI-only: python-pycg
   # (vipe.utils.geometry / visualization) comes from the consuming feature's pypi-dependencies.
   run:
     - python 3.12.*
-    # vipe_ext links the CUDA build of torch: never resolve a CPU pytorch.
-    - pytorch >=2.12,<2.13 cuda*
-    - cuda-version >=13.0,<14
+    - if: linux
+      then:
+        # vipe_ext links the CUDA build of torch: never resolve a CPU pytorch.
+        - pytorch >=2.12,<2.13 cuda*
+        - cuda-version >=13.0,<14
+      else:
+        - pytorch >=2.12,<2.13
     # MetricTrail's frozen DINOv3 (patch 0002). Sibling recipe: the consuming feature lists it too.
     - dinov3-src
     - torchvision
@@ -114,8 +132,10 @@ requirements:
     - rerun-sdk
     # Upstream pins OpenEXR<3.3.0 for the classic OpenEXR.InputFile/OutputFile + Imath API. conda-forge's <3.3
     # (1.3.9) needs openexr 3.3, which conflicts with libopencv 4.13 (openexr 3.4). 3.4 keeps the classic API:
-    # ViPE's depth-zip write/read pattern (vipe/utils/io.py) round-trips fp16 depth exactly.
-    - openexr-python >=3.4,<3.5
+    # ViPE's depth-zip write/read pattern (vipe/utils/io.py) round-trips fp16 depth exactly. conda-forge has no
+    # osx-arm64 build: the metrictrail-osx feature takes PyPI OpenEXR 3.4 instead.
+    - if: linux
+      then: openexr-python >=3.4,<3.5
     # yacs: slam.py's DPVO config is a yacs CfgNode (vipe/metrictrail/dpvo_deps.py, the shim's config.py). numba:
     # packages/dpvo's proximity loop edges (reduce_edges). dpvo itself is not a run dependency: it comes from the
     # consuming feature (an editable PyPI path package, like lietorch-mojo and monopriors).

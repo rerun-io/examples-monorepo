@@ -13,7 +13,7 @@ up to ~1 normwise). float64 keeps se3.h's closed forms unchanged.
 from lie_group import LieGroup
 from lie_linalg import Mat
 from lie_math import sincos_, sqrt_
-from so3 import EPS, SO3, from_double, hat
+from so3 import EPS, SO3, from_double, hat, less_than
 
 
 @inline(.always)
@@ -144,7 +144,7 @@ struct SE3[dt: DType](LieGroup):
         var coef1: Scalar[Self.dt]
         var coef2: Scalar[Self.dt]
         var coef3: Scalar[Self.dt]
-        if Float64(theta) < EPS:
+        if less_than[EPS](theta):
             coef1 = from_double[Self.dt](1.0 / 6.0) - from_double[Self.dt](1.0 / 120.0) * theta_pow2
             coef2 = from_double[Self.dt](1.0 / 24.0) - from_double[Self.dt](1.0 / 720.0) * theta_pow2
             coef3 = from_double[Self.dt](1.0 / 120.0) - from_double[Self.dt](1.0 / 2520.0) * theta_pow2

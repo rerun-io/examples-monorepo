@@ -10,10 +10,12 @@ float64 but loses almost all relative accuracy near 1 in float32 on the GPU
   Remez polynomial; < 1 ulp), in float64. float32 rounds the float64 result.
 - `log_` is `std.math.log` in float64; float32 rounds the float64 result.
 
-float32 therefore spends one FP64 exp or log per call (two in Sim3 `Exp`).
+float32 therefore spends one FP64 exp or log per call (two in Sim3 `Exp`). An
+Apple GPU has no float64: there float32 takes `std.math.exp`/`log` in float32.
 """
 
-from std.math import floor, log
+from std.math import exp, floor, log
+from std.sys.info import is_apple_gpu
 from std.memory import bitcast
 
 comptime _LN2_HI: Float64 = 6.93147180369123816490e-01
@@ -64,7 +66,10 @@ def exp_[dtype: DType, //](x: Scalar[dtype]) -> Scalar[dtype]:
     """exp(x) within one ulp on CPU and GPU (float32 and float64)."""
     comptime match dtype:
         case .float32 | .float64:
-            return Scalar[dtype](_exp_f64(Float64(x)))
+            comptime if is_apple_gpu():
+                return Scalar[dtype](exp(Float32(x)))
+            else:
+                return Scalar[dtype](_exp_f64(Float64(x)))
         case _:
             comptime assert False, "lietorch_mojo supports float32 and float64"
 
@@ -74,6 +79,9 @@ def log_[dtype: DType, //](x: Scalar[dtype]) -> Scalar[dtype]:
     """log(x) within one ulp on CPU and GPU (float32 and float64)."""
     comptime match dtype:
         case .float32 | .float64:
-            return Scalar[dtype](log(Float64(x)))
+            comptime if is_apple_gpu():
+                return Scalar[dtype](log(Float32(x)))
+            else:
+                return Scalar[dtype](log(Float64(x)))
         case _:
             comptime assert False, "lietorch_mojo supports float32 and float64"

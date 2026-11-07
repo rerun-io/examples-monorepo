@@ -67,6 +67,7 @@ def pose_retr_cuda[
         grid_dim=ceildiv(num_vars, POSE_RETR_THREADS),
         block_dim=POSE_RETR_THREADS,
     )
+    rt.finish()
 
 
 def pose_retr_cpu[dtype: DType](rt: CPURuntime, poses_address: PythonObject, dx_address: PythonObject, num_poses: Int, num_fix: Int) raises:

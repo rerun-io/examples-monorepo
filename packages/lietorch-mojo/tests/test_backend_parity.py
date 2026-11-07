@@ -22,7 +22,7 @@ lietorch's float32 error on the same device (plus 1e-5).
 
 import pytest
 import torch
-from conftest import DEVICES, DTYPES, require_mojo_extension
+from conftest import DEVICES, DTYPES, LIETORCH_BUILD, require_mojo_extension
 
 require_mojo_extension()
 
@@ -55,6 +55,11 @@ def _on(tensors: list[Tensor], device: str) -> list[Tensor]:
     return [t.to(device) for t in tensors]
 
 
+def _error_device(device: str) -> str:
+    """Where errors are computed: `row_error` works in float64, which MPS lacks."""
+    return "cpu" if device == "mps" else device
+
+
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("op", ALL_OPS)
@@ -66,14 +71,17 @@ def test_op_matches_lietorch(entity: str, op: str, dtype: torch.dtype, device: s
     inputs: OpInputs = _inputs(rec, dtype, device)
     ours: list[Tensor] = call_op(backends, G, op, inputs)
     assert all(bool(torch.isfinite(o).all()) for o in ours)
-    ref_device: str = reference_device(dtype, device, group, F32_CPU_REFERENCE_GROUPS)  # module docstring
-    ref: list[Tensor] = _on(rec.outputs(f"out/{ref_device}/{DTYPE_NAMES[dtype]}/{op}"), ref_device)
+    build: str = LIETORCH_BUILD[device]
+    ref_build: str = reference_device(dtype, build, group, F32_CPU_REFERENCE_GROUPS)  # module docstring
+    ref_device: str = "cpu" if ref_build == "cpu" else _error_device(device)
+    ref: list[Tensor] = _on(rec.outputs(f"out/{ref_build}/{DTYPE_NAMES[dtype]}/{op}"), ref_device)
     err: float = row_error(_on(ours, ref_device), ref)
     assert err <= TOLERANCE[dtype], f"{entity} {op} {dtype} {device}: row error {err:.3e}"
     if dtype == torch.float32 and group in F32_CPU_REFERENCE_GROUPS:
-        truth: list[Tensor] = _on([t.float() for t in rec.outputs(f"truth/{device}/{op}")], device)
-        ours_err: float = row_error(ours, truth)
-        lietorch_err: float = row_error(_on(rec.outputs(f"out/{device}/float32/{op}"), device), truth)
+        at: str = _error_device(device)
+        truth: list[Tensor] = _on([t.float() for t in rec.outputs(f"truth/{build}/{op}")], at)
+        ours_err: float = row_error(_on(ours, at), truth)
+        lietorch_err: float = row_error(_on(rec.outputs(f"out/{build}/float32/{op}"), at), truth)
         assert ours_err <= lietorch_err + TOLERANCE[dtype], f"{entity} {op} {device}: Mojo {ours_err:.3e} vs lietorch {lietorch_err:.3e}"
 
 
@@ -85,9 +93,11 @@ def test_small_angle_float32_no_less_accurate_than_lietorch(group: str, op: str,
     rec: Record = record(f"/ops_small_angle/{group}")
     ours: list[Tensor] = call_op(backends, G, op, _inputs(rec, torch.float32, device))
     # float64 truth evaluated on exactly the float32-rounded inputs.
-    truth32: list[Tensor] = _on([t.float() for t in rec.outputs(f"truth/{device}/{op}")], device)
-    ref: list[Tensor] = _on(rec.outputs(f"out/{device}/float32/{op}"), device)
-    ours_err: float = row_error(ours, truth32)
+    build: str = LIETORCH_BUILD[device]
+    at: str = _error_device(device)
+    truth32: list[Tensor] = _on([t.float() for t in rec.outputs(f"truth/{build}/{op}")], at)
+    ref: list[Tensor] = _on(rec.outputs(f"out/{build}/float32/{op}"), at)
+    ours_err: float = row_error(_on(ours, at), truth32)
     lietorch_err: float = row_error(ref, truth32)
     assert ours_err <= lietorch_err + 1e-5, f"{op} {device}: Mojo {ours_err:.3e} vs lietorch {lietorch_err:.3e}"
 
