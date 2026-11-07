@@ -29,4 +29,4 @@ def _buffer_gpu_address() -> Callable[[int], int]:
 
 def gpu_address(t: Tensor) -> int:
     """Device address of the first element of the MPS tensor `t`."""
-    return _buffer_gpu_address()(t.untyped_storage().data_ptr()) + t.storage_offset() * t.element_size()
+    return _buffer_gpu_address()(t.untyped_storage().data_ptr()) + int(t.storage_offset()) * t.element_size()

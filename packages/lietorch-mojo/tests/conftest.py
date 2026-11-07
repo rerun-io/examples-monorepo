@@ -44,10 +44,12 @@ FLOAT64_TESTS: frozenset[str] = frozenset(
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """MPS has no float64 (neither PyTorch's MPS backend nor Metal): skip float64 cases and float64-only modules there."""
     for item in items:
-        params: dict = getattr(getattr(item, "callspec", None), "params", {})
+        if not isinstance(item, pytest.Function) or not hasattr(item, "callspec"):
+            continue
+        params: dict = item.callspec.params
         if params.get("device") != "mps":
             continue
-        if params.get("dtype") is torch.float64 or item.module.__name__ in FLOAT64_MODULES or item.originalname in FLOAT64_TESTS:
+        if params.get("dtype") is torch.float64 or item.path.stem in FLOAT64_MODULES or item.originalname in FLOAT64_TESTS:
             item.add_marker(pytest.mark.skip(reason="MPS has no float64"))
         elif item.originalname == "test_autograd_gradients_match" and params.get("name") == "Sim3" and params["suite"].name == "unit":
             # Open (2026-11-07, Apple M4): Sim3 float32 composite gradients at unit-scale tangents differ from
