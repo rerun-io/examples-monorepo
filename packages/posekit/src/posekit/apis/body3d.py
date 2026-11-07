@@ -3,6 +3,8 @@
 Moved from ``packages/sam3d-body`` (its ``sam3d-body-cli`` demo), now over posekit roles: the SAM3
 ``PromptableSegmenter`` finds every person with a mask, MoGe-2 estimates the camera unless a calibration is
 given, and the ``TopDownBodyPose3d`` role reconstructs each person. Images also log MoGe-2 depth clouds.
+A video is logged once as a VideoStream on the ``video_time`` timeline; each frame's people go on the same
+timeline at that frame's timestamp, and its frames stay on the GPU.
 """
 
 from collections.abc import Iterator
@@ -14,9 +16,9 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Bool, Float32, UInt8
+from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
 from tqdm.auto import tqdm
 
@@ -27,6 +29,8 @@ from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
 from posekit.models.sam3d_body import Sam3dBodyConfig, Sam3dBodyPredictor, Sam3dBodyReconstruction
 from posekit.predictions import BoxDetections
 
+VIDEO_TIMELINE: str = "video_time"
+"""Timeline of the source VideoStream and of the per-frame people over it."""
 IMAGE_SUFFIXES: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp")
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "data" / "body3d-examples"
 """Example images (``pixi run -e posekit-body posekit-body-download-examples``)."""
@@ -186,17 +190,20 @@ def main(config: Body3dConfig) -> None:
     pipeline = Body3dPipeline(config.body, config.segmenter, prompt=config.prompt, estimate_fov=config.estimate_fov and camera is None)
     people: int = 0
     if config.video_path is not None:
+        video_times_ns: Int64[ndarray, "num_frames"] = log_video(config.video_path, Path("/world/cam/pinhole/image"), timeline=VIDEO_TIMELINE)
         for start, frames_rgb in video_chunks(config.video_path, config.frame_batch_size, config.max_frames):
+            if start + len(frames_rgb) > len(video_times_ns):
+                raise ValueError(f"{config.video_path}: the logged VideoStream has {len(video_times_ns)} frames, fewer than torchcodec decodes.")
             if camera is None and pipeline.fov is not None:
                 camera = pipeline.estimate_camera(frames_rgb[0].cpu().numpy())[0]
             with torch.inference_mode():
                 detections, result = pipeline.frames(frames_rgb, camera)
-            host: UInt8[ndarray, "b h w 3"] = frames_rgb.cpu().numpy()
-            for local in range(len(host)):
+            frame_hw: tuple[int, int] = (int(frames_rgb.shape[1]), int(frames_rgb.shape[2]))
+            for local in range(len(frames_rgb)):
                 rows: Tensor = torch.nonzero(result.keypoints.frame_indices == local).flatten()
                 masks: ndarray | None = None if detections.masks is None else detections.masks[detections.frame_indices == local].cpu().numpy()
-                rr.set_time("frame", sequence=start + local)
-                log_people(result.take(rows), host[local], Path("/world"), masks=masks)
+                rr.set_time(VIDEO_TIMELINE, duration=np.timedelta64(int(video_times_ns[start + local]), "ns"))
+                log_people(result.take(rows), frame_hw, Path("/world"), masks=masks)
             people += result.num_people
     else:
         for index, path in enumerate(tqdm(images, desc="posekit body3d")):
