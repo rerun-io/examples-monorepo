@@ -24,7 +24,17 @@ from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 
 from dataforge import blueprints, paths, schema
-from dataforge.datasets.gen_humanego_depth import DEPTH_CAM, DEPTH_INFO_TOPIC, DEPTH_LAYER, DEPTH_TOPICS, DepthInfo, depth_path, write_depth_layer
+from dataforge.datasets.gen_humanego_depth import (
+    DEPTH_CAM,
+    DEPTH_INFO_TOPIC,
+    DEPTH_LAYER,
+    DEPTH_PINHOLE_LAYER,
+    DEPTH_TOPICS,
+    DepthInfo,
+    depth_path,
+    write_depth_layer,
+    write_depth_pinhole_layer,
+)
 from dataforge.datasets.genrobot import PANE_ORDER, DasEgoConfig, DasEgoDataset, HubEpisode
 from dataforge.datasets.genrobot_layers import RIG
 from dataforge.datasets.genrobot_pose import POSE_LAYER, SIDES, PoseTrack, read_rig_poses, write_pose_layer
@@ -40,17 +50,20 @@ SCORES_TOPIC: str = "/robot0/handtracking/scores_debug"
 """Per frame and hand: the detector's score and its quality estimates."""
 HANDS_EYE: rrb.EyeControls3D = rrb.EyeControls3D(
     kind=rrb.Eye3DKind.Orbital,
-    position=(-0.55, -0.5, 0.2),
-    look_target=(0.1, 0.0, -0.35),
+    position=(-0.45, -0.45, 1.25),
+    look_target=(0.0, 0.0, -0.45),
     eye_up=(0.0, 0.0, 1.0),
     tracking_entity="/world/rig_00",
     spin_speed=0.0,
 )
-"""An upright three-quarter eye under a metre from the head, aimed at the hands below it, that rides along with the rig.
+"""A steep eye above the head, looking down at the hands and the depth around them, that rides along with the rig.
+
+The VIO world's heading is wherever the wearer first looked, so no fixed eye is "behind" every wearer; from above,
+any heading reads.
 
 Without a body there is nothing to frame at the whole-body ``SCENE_EYE``'s distance: the hands are 0.3-0.5 m below
-the device. The eye tracks the rig's position, so a wearer who walks stays in view; it stays upright because the
-view is rooted at the world, not the rig."""
+the device and the depth reaches a few metres ahead. The eye tracks the rig's position, so a wearer who walks stays
+in view; it stays upright because the view is rooted at the world, not the rig."""
 VIO_RUN_SOURCE: str = "vio"
 """``/world/runs/vio``: the device's own VIO, the only trajectory the release ships."""
 
@@ -120,7 +133,7 @@ class GenHumanEgoDataset(DasEgoDataset[GenHumanEgoConfig]):
     with_body: ClassVar[bool] = False
     mcap_layers: ClassVar[tuple[str, ...]] = (paths.BASE_LAYER, DEPTH_LAYER)
     sidecar_exclusions: ClassVar[tuple[str, ...]] = DEPTH_TOPICS
-    layers: tuple[str, ...] = (paths.BASE_LAYER, DEPTH_LAYER, POSE_LAYER, paths.ACTIONS_LAYER, paths.PROJECTIONS_LAYER, paths.HAND_MESH_LAYER)
+    layers: tuple[str, ...] = (paths.BASE_LAYER, DEPTH_LAYER, DEPTH_PINHOLE_LAYER, POSE_LAYER, paths.ACTIONS_LAYER, paths.PROJECTIONS_LAYER, paths.HAND_MESH_LAYER)
     """Publication and loading order."""
 
     def write_mcap_layers(
@@ -138,11 +151,21 @@ class GenHumanEgoDataset(DasEgoDataset[GenHumanEgoConfig]):
         writer = partial(write_depth_layer, mcap=mcap, clock=episode.clock, calibration=episode.calibrations[REFERENCE_CAMERA], info=info)
         self.write_layers(identity, targets, [DEPTH_LAYER], {DEPTH_LAYER: lambda recording: print(f"{identity.sequence_key}: depth {writer(recording)} frames")})
 
+    def extra_writers(
+        self, targets: dict[str, Path], pending: Sequence[str], file: EpisodeFile, episode: Episode
+    ) -> dict[str, Callable[[rr.RecordingStream], None]]:
+        """``depth_pinhole``, from the published depth layer and the sidecar's ``depth_info``; the MCAP is not needed."""
+        info: DepthInfo | None = optional_message(file, DEPTH_INFO_TOPIC, DepthInfo)
+        if DEPTH_PINHOLE_LAYER not in pending or info is None or not targets[DEPTH_LAYER].is_file():
+            return {}
+        calibration = episode.calibrations[REFERENCE_CAMERA]
+        return {DEPTH_PINHOLE_LAYER: partial(write_depth_pinhole_layer, depth_rrd=targets[DEPTH_LAYER], calibration=calibration, info=info)}
+
     def pose_writer(self, file: EpisodeFile, episode: Episode, track: PoseTrack) -> Callable[[rr.RecordingStream], None]:
         return partial(write_humanego_pose_layer, file=file, episode=episode, track=track)
 
     def world_contents(self) -> list[str]:
-        """The shared 3D scene without the depth image, which a ``Pinhole`` would back-project through the wrong lens."""
+        """The shared 3D scene with the pinhole-resampled depth, without the fisheye depth image a ``Pinhole`` would bend."""
         return [*super().world_contents(), f"- {depth_path()}"]
 
     def default_blueprint(self) -> rrb.Blueprint:

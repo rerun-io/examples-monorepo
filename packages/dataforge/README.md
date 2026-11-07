@@ -336,6 +336,40 @@ pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-genro
 The conventions (solved from the data: GenRobot documents none of them), the clocks and every
 shipped topic are in [docs/genrobot.md](docs/genrobot.md).
 
+### Gen-HumanEgo (gen-humanego)
+
+The hands release of the same DAS-Ego corpus (`genrobot2025/Gen-HumanEgo`, pinned commit): 44,632 MCAPs,
+62 TB, 1,848 hours, no body track, plus camera2's metric depth. It shares the whole-body converter
+(`DasEgoDataset`: readers, lenses, clock, calibration, MANO check) and adds a `depth` layer.
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gen-humanego   # the SSD tier takes pipeline output
+pixi run -e dataforge --frozen dataforge-download gen-humanego --root /mnt/nas/ssd-8tb/scratch/gen-humanego/raw
+pixi run -e dataforge --frozen dataforge-convert gen-humanego --root /mnt/nas/ssd-8tb/scratch/gen-humanego/raw \
+  --budget-tb 1.0 --shard-index 0 --num-shards 8   # one process per shard
+pixi run -e dataforge --frozen dataforge-register --catalog-name dataforge-gen-humanego-subset gen-humanego --budget-tb 1.0
+```
+
+| Layer | Contents |
+| --- | --- |
+| `base` | As Gen-HumanWholeBody: six H.264 fisheye streams, double-sphere calibration, VIO `world_T_rig`, IMU, `/frames`, task |
+| `depth` | camera2's Ego-Depth (512x416 float16, metres), decoded from GenRobot's PredZ codec, on its own `cam_06` node |
+| `pose` | COCO-133 hand slots, wrists, MANO parameters, shipped flags and detector scores, the VIO path |
+| `actions` | Coarse and fine `StateChange` tracks |
+| `projections` | The hands projected through each camera's double-sphere lens |
+| `hand_mesh` | MANO meshes per hand within 2 mm of the shipped bones; the left root convention is found per episode |
+
+**The subset.** The release does not fit the NAS, so `--budget-tb 1.0` takes a task-stratified sample:
+each of the 236 task folders in turn gives its next episode (uuid order, which is random) until the MCAPs reach
+1 TB. That is 838 episodes covering all 4 domains, 38 scenes, 91 categories and 236 tasks, 1 to 4 episodes per
+task (domestic_services 633, business 166, industry 35, agriculture 4). Tasks, not episodes, are the unit of
+diversity: one task folder alone holds 11,297 episodes of the release, and an episode-proportional sample
+would be a quarter "random daily work". Each MCAP is deleted once its layers are written and checked; only the
+rrds stay (about 1.5 times the MCAP size, two thirds of it depth).
+
+Differences from the whole-body release, the depth codec and the subset are in
+[docs/gen-humanego.md](docs/gen-humanego.md).
+
 ### SLAM benchmarks through VSLAM-LAB (vslam-lab)
 
 [VSLAM-LAB](https://github.com/VSLAM-LAB/VSLAM-LAB) fetches some thirty SLAM

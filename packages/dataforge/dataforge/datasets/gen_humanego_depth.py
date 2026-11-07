@@ -11,6 +11,12 @@ datakit point cloud scales each double-sphere ray by ``depth / ray_z``); the fis
 
 The depth image gets its own camera node, ``cam_06`` (``kind = "depth"``): it has its own lens and size, at
 camera2's pose (the shipped depth is a resampling of camera2, ``frame_id = camera2_depth_predz``).
+
+A 3D view back-projects a ``DepthImage`` through a plain ``Pinhole``, which would bend this fisheye depth. The
+``depth_pinhole`` layer therefore resamples each frame onto an ideal pinhole grid (``PINHOLE_GRID``) on node
+``cam_07``: every grid pixel takes the depth of the double-sphere pixel its ray passes through. A point's z is
+the same under either lens model, so the values stay exact; only the pixel grid changes. It is derived from
+the depth layer alone, so it never needs the MCAP.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
 from dataforge import schema
 from dataforge.datasets.genrobot_layers import RIG, Retimer, shipped_counts
-from dataforge.datasets.genrobot_source import REFERENCE_CAMERA, CameraCalibration, EpisodeClock, EpisodeFile, first_message, rig_T_cam
+from dataforge.datasets.genrobot_source import REFERENCE_CAMERA, CameraCalibration, DoubleSphere, EpisodeClock, EpisodeFile, first_message, rig_T_cam
 from dataforge.logging_toolkit import ChunkBatcher, log_camera_node
 
 DEPTH_LAYER: str = "depth"
@@ -47,6 +53,10 @@ DEPTH_TOPICS: tuple[str, ...] = (DEPTH_TOPIC, CONFIDENCE_VIS_TOPIC, DEPTH_VIS_TO
 """Image topics kept out of the sidecar: the depth lives in its layer, the two renderings are not ingested."""
 DEPTH_CAM: int = 6
 """Camera node of the depth image, after the six RGB cameras."""
+DEPTH_PINHOLE_LAYER: str = "depth_pinhole"
+"""The depth resampled onto a pinhole grid, which a 3D view back-projects correctly."""
+PINHOLE_CAM: int = 7
+"""Camera node of the pinhole-resampled depth."""
 CODEC: str = "float16_predz_i_frame_zstd"
 """The only depth codec dataforge decodes."""
 IMAGE_PLANE_DISTANCE_M: float = 0.05
@@ -125,10 +135,8 @@ def decode_predz(frame: bytes, *, height: int, width: int) -> UInt8[ndarray, "n"
     if ends.size != height * width or (body.size and ends[-1] != body.size - 1):
         raise ValueError(f"{ends.size} residuals for a {width}x{height} image")
     starts: Int64[ndarray, "p"] = np.concatenate([[0], ends[:-1] + 1])
-    group: Int64[ndarray, "k"] = np.repeat(np.arange(ends.size), ends - starts + 1)
-    shifts: Int64[ndarray, "k"] = (np.arange(body.size) - starts[group]) * 7
-    values: Int64[ndarray, "p"] = np.zeros(ends.size, dtype=np.int64)
-    np.add.at(values, group, (body & 0x7F).astype(np.int64) << shifts)
+    shifts: Int64[ndarray, "k"] = (np.arange(body.size) - np.repeat(starts, ends - starts + 1)) * 7
+    values: Int64[ndarray, "p"] = np.add.reduceat((body & 0x7F).astype(np.int64) << shifts, starts)  # each varint's bytes are contiguous
     residuals: Int64[ndarray, "p"] = np.where(values & 1, -((values + 1) >> 1), values >> 1)
     bits: UInt16[ndarray, "h w"] = (np.cumsum(np.cumsum(residuals.reshape(height, width), axis=0), axis=1) & 0xFFFF).astype("<u2")
     return bits.reshape(-1).view(np.uint8)
@@ -220,3 +228,106 @@ def write_depth_layer(recording: rr.RecordingStream, mcap: Path, *, clock: Episo
         ),
     )
     return written
+
+
+@dataclass(frozen=True, slots=True)
+class PinholeGrid:
+    """An ideal pinhole image centred on the optical axis, square pixels."""
+
+    width: int
+    """Pixels across."""
+    height: int
+    """Pixels down."""
+    fov_deg: float
+    """Horizontal field of view, degrees."""
+
+    @property
+    def focal(self) -> float:
+        """Focal length in pixels."""
+        return self.width / 2 / float(np.tan(np.radians(self.fov_deg) / 2))
+
+
+PINHOLE_GRID: PinholeGrid = PinholeGrid(width=192, height=156, fov_deg=120.0)
+"""About 30,000 points per frame over 120 x 103 degrees; the fisheye's far edges are left out."""
+
+
+def pinhole_lookup(lens: DoubleSphere, grid: PinholeGrid, *, source_width: int, source_height: int) -> tuple[Int64[ndarray, "h w"], Int64[ndarray, "h w"]]:
+    """For every grid pixel, the nearest source pixel its ray lands on through ``lens``; -1 where it lands on none."""
+    v, u = np.mgrid[0 : grid.height, 0 : grid.width].astype(np.float64)
+    rays: Float64[ndarray, "n 3"] = np.stack(
+        [((u - grid.width / 2) / grid.focal).reshape(-1), ((v - grid.height / 2) / grid.focal).reshape(-1), np.ones(u.size)], axis=1
+    )
+    pixels: Float64[ndarray, "n 2"] = lens.project(rays)
+    cols: Int64[ndarray, "n"] = np.rint(np.nan_to_num(pixels[:, 0], nan=-1.0)).astype(np.int64)
+    rows: Int64[ndarray, "n"] = np.rint(np.nan_to_num(pixels[:, 1], nan=-1.0)).astype(np.int64)
+    inside = (cols >= 0) & (cols < source_width) & (rows >= 0) & (rows < source_height)
+    shape: tuple[int, int] = (grid.height, grid.width)
+    return np.where(inside, rows, -1).reshape(shape), np.where(inside, cols, -1).reshape(shape)
+
+
+def resample_depth(depth: ndarray, rows: Int64[ndarray, "h w"], cols: Int64[ndarray, "h w"]) -> ndarray:
+    """A float16 depth image on the lookup's grid; 0 (no depth) where the grid pixel has no source pixel."""
+    out: ndarray = np.zeros(rows.shape, dtype=np.float16)
+    found = rows >= 0
+    out[found] = depth[rows[found], cols[found]]
+    return out
+
+
+def pinhole_depth_path() -> str:
+    """``/world/rig_00/cam_07/pinhole/depth``."""
+    return schema.depth_path(RIG, PINHOLE_CAM)
+
+
+def write_depth_pinhole_layer(recording: rr.RecordingStream, depth_rrd: Path, *, calibration: CameraCalibration, info: DepthInfo) -> None:
+    """The ``depth_pinhole`` layer: the depth layer's frames resampled onto ``PINHOLE_GRID`` at camera2's pose, read from its rrd."""
+    grid: PinholeGrid = PINHOLE_GRID
+    rows, cols = pinhole_lookup(DoubleSphere.from_coefficients(info.coefficients), grid, source_width=info.width, source_height=info.height)
+    transform: Float64[ndarray, "4 4"] = rig_T_cam(calibration.T_b_c)
+    camera: PinholeParameters = PinholeParameters(
+        name="camera2_depth_pinhole",
+        extrinsics=Extrinsics(world_R_cam=transform[:3, :3], world_t_cam=transform[:3, 3]),
+        intrinsics=Intrinsics.from_focal_principal_point(
+            camera_conventions="RDF", fl_x=grid.focal, fl_y=grid.focal, cx=grid.width / 2, cy=grid.height / 2, height=grid.height, width=grid.width
+        ),
+    )
+    log_camera_node(
+        recording, RIG, PINHOLE_CAM, camera, name="camera2_depth_pinhole", kind="depth", image_plane_distance=IMAGE_PLANE_DISTANCE_M, camera_model="pinhole"
+    )
+    rr.log(
+        pinhole_depth_path(),
+        rr.DepthImage.from_fields(
+            format=rr.components.ImageFormat(width=grid.width, height=grid.height, channel_datatype=rr.ChannelDatatype.F16),
+            meter=1.0,
+            colormap="turbo",
+            point_fill_ratio=0.35,  # sparse enough to see the hand meshes inside the cloud
+        ),
+        static=True,
+        recording=recording,
+    )
+
+    def resample(blobs: pa.ListArray) -> pa.ListArray:
+        """Every frame of a chunk at once: the blobs are equal-sized float16 images, so they stack without a Python loop."""
+        frame_bytes: int = info.height * info.width * 2
+        if not np.all(blobs.value_lengths().to_numpy(zero_copy_only=False) == frame_bytes):
+            raise ValueError(f"{depth_rrd}: a depth frame is not {info.width}x{info.height} float16")
+        depth: ndarray = blobs.flatten().to_numpy(zero_copy_only=False).view("<f2").reshape(len(blobs), info.height, info.width)
+        found = rows >= 0
+        out: ndarray = np.zeros((len(blobs), *rows.shape), dtype="<f2")
+        out[:, found] = depth[:, rows[found], cols[found]]
+        offsets: Int64[ndarray, "r"] = np.arange(len(blobs) + 1, dtype=np.int32) * (out[0].size * 2 if len(blobs) else 0)
+        return pa.ListArray.from_arrays(pa.array(offsets), pa.array(out.view(np.uint8).reshape(-1)))
+
+    lens: rrc.DeriveLens = rrc.DeriveLens("DepthImage:buffer", output_entity=pinhole_depth_path()).to_component(
+        rr.DepthImage.descriptor_buffer(), rrc.Selector(".").pipe(resample), cast_to="auto"
+    )
+    batcher: ChunkBatcher = ChunkBatcher()
+    stream: rrc.LazyChunkStream = rrc.RrdReader(depth_rrd).store().stream().filter(content=depth_path()).drop(is_static=True).lenses(lens).flat_map(batcher)
+    recording.send_chunks(stream)
+    recording.send_chunks(batcher.flush())
+    recording.send_property(
+        DEPTH_PINHOLE_LAYER,
+        rr.AnyValues(
+            grid=pa.array([f"{grid.width}x{grid.height}, {grid.fov_deg:g} degrees across"], type=pa.string()),
+            source=pa.array(["depth layer, resampled through camera2_depth's double sphere, nearest pixel"], type=pa.string()),
+        ),
+    )

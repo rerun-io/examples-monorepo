@@ -184,3 +184,25 @@ def test_every_published_layer_must_hold_bytes_before_the_mcap_goes(tmp_path: Pa
         require_published({"base": good, "depth": empty}, ["base", "depth"])
     with pytest.raises(ValueError, match="missing"):
         require_published({"pose": tmp_path / "absent.rrd"}, ["pose"])
+
+
+def test_the_pinhole_resampling_keeps_each_point_at_its_depth() -> None:
+    from dataforge.datasets.gen_humanego_depth import PinholeGrid, pinhole_lookup
+    from dataforge.datasets.genrobot_source import DoubleSphere
+
+    lens: DoubleSphere = DoubleSphere(fx=172.8, fy=172.8, cx=259.2, cy=207.5, xi=-0.0044, alpha=0.574)
+    grid: PinholeGrid = PinholeGrid(width=192, height=156, fov_deg=120.0)
+    rows, cols = pinhole_lookup(lens, grid, source_width=512, source_height=416)
+    assert rows.shape == (156, 192) and cols.shape == (156, 192)
+    # The principal ray maps to the depth image's principal point.
+    assert abs(cols[78, 96] - 259) <= 1 and abs(rows[78, 96] - 207) <= 1
+    # A ray 45 degrees off axis lands where the double-sphere model sends it.
+    u: int = 96 + round(grid.focal)  # tan(45°) = 1
+    pixel = lens.project(np.array([[1.0, 0.0, 1.0]]))[0]
+    assert abs(cols[78, u] - pixel[0]) <= 1.0
+    depth: np.ndarray = np.full((416, 512), 0.7, dtype=np.float16)
+    from dataforge.datasets.gen_humanego_depth import resample_depth
+
+    resampled: np.ndarray = resample_depth(depth, rows, cols)
+    assert resampled.dtype == np.float16 and resampled.shape == (156, 192)
+    assert np.all(resampled[rows >= 0] == np.float16(0.7)), "z is the same for the point whatever the lens"

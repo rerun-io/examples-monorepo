@@ -302,6 +302,12 @@ class DasEgoDataset(DataforgeDataset[DasEgoConfigT, HubEpisode]):
             )  # fmt: skip
         print(f"{identity.sequence_key}: base {census.camera_frames} camera frames, {census.rig_poses} rig poses, {census.imu_samples} IMU samples")
 
+    def extra_writers(
+        self, targets: dict[str, Path], pending: Sequence[str], file: EpisodeFile, episode: Episode
+    ) -> dict[str, Callable[[rr.RecordingStream], None]]:
+        """Writers of a release's own derived layers that have something to publish; none by default."""
+        return {}
+
     def pose_writer(self, file: EpisodeFile, episode: Episode, track: PoseTrack) -> Callable[[rr.RecordingStream], None]:
         """The ``pose`` layer's writer; a release may add what only it ships."""
         return partial(write_pose_layer, track=track, with_body=self.with_body)
@@ -365,6 +371,7 @@ class DasEgoDataset(DataforgeDataset[DasEgoConfigT, HubEpisode]):
                 print(f"{identity.sequence_key}: MANO joints vs shipped bones: {', '.join(errors_mm)}")
                 if any(check.passed for check in checks):
                     writers[paths.HAND_MESH_LAYER] = partial(write_hand_mesh_layer, track=track, checks=checks)
+        writers.update(self.extra_writers(targets, pending, file, episode))
         derived: list[str] = [layer for layer in pending if layer not in self.mcap_layers]
         skipped: list[str] = [layer for layer in derived if layer not in writers]
         if skipped:
