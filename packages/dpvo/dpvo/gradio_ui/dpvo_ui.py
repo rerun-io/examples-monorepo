@@ -2,7 +2,7 @@
 
 Provides a streaming Rerun viewer that visualizes camera trajectories and
 point clouds in real time as DPVO processes an uploaded video.  Camera
-intrinsics are auto-estimated via DUSt3R (no calibration file required).
+intrinsics are auto-estimated via MoGe-2 (no calibration file required).
 
 The module follows the **monoprior sync_config pattern**: a module-level
 ``_CONFIG`` singleton is kept in sync with UI widgets via ``_sync_config``,
@@ -24,10 +24,10 @@ import rerun.blueprint as rrb
 import spaces  # type: ignore
 import torch
 from gradio_rerun import Rerun
-from mini_dust3r.model import AsymmetricCroCo3DStereo
 
 from dpvo.api.inference import (
     DPVOPipelineHandle,
+    load_intrinsics_model,
     run_dpvo_pipeline,
 )
 from dpvo.config import DPVOConfig
@@ -35,16 +35,7 @@ from dpvo.config import DPVOConfig
 # ── Heavy resources (loaded once, survive hot-reload) ───────────────────
 if gr.NO_RELOAD:
     NETWORK_PATH: str = "checkpoints/dpvo.pth"
-    DEVICE: str = (
-        "mps"
-        if torch.backends.mps.is_available()
-        else "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-    DUST3R_MODEL: AsymmetricCroCo3DStereo = AsymmetricCroCo3DStereo.from_pretrained(
-        "nielsr/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
-    ).to(DEVICE)
+    INTRINSICS_MODEL = load_intrinsics_model()
 
 # ── Module-level config singleton ───────────────────────────────────────
 _CONFIG: DPVOConfig = DPVOConfig.fast()
@@ -70,7 +61,6 @@ def dpvo_streaming_fn(
     video_file_path: str,
     stride: int,
     skip: int,
-    jpg_quality: int,
 ) -> Generator[tuple[bytes | None, str], None, None]:
     """Run DPVO pipeline and stream Rerun bytes to the viewer.
 
@@ -84,7 +74,6 @@ def dpvo_streaming_fn(
         video_file_path: Local path to the uploaded video file.
         stride: Keep every *stride*-th frame.
         skip: Number of leading frames to discard.
-        jpg_quality: JPEG compression quality (0--100) for Rerun image logging.
 
     Yields:
         Tuple of (Rerun binary stream bytes, status message string).
@@ -104,10 +93,9 @@ def dpvo_streaming_fn(
         calib=None,
         stride=stride,
         skip=skip,
-        dust3r_model=DUST3R_MODEL,
+        intrinsics_model=INTRINSICS_MODEL,
         handle=handle,
         recording=recording,
-        jpg_quality=jpg_quality,
     ):
         yield stream.read(), msg
 
@@ -191,12 +179,6 @@ def main() -> gr.Blocks:
                                 value=0,
                                 precision=0,
                             )
-                            jpg_quality_radio = gr.Radio(
-                                label="JPEG Quality %",
-                                choices=[10, 50, 90],
-                                value=90,
-                                type="value",
-                            )
 
                     with gr.TabItem("Outputs", id="outputs"):
                         status_text = gr.Textbox(
@@ -209,8 +191,8 @@ def main() -> gr.Blocks:
                 # Pre-populate the examples gallery from bundled video directories
                 example_dpvo_dir: Path = Path("data/movies")
                 example_iphone_dir: Path = Path("data/iphone")
-                example_video_paths: list[Path] = sorted(example_iphone_dir.glob("*.MOV")) + sorted(
-                    example_dpvo_dir.glob("*.MOV")
+                example_video_paths: list[Path] = sorted(example_iphone_dir.glob("*.mp4")) + sorted(
+                    example_dpvo_dir.glob("*.mp4")
                 )
                 example_video_paths_str: list[str] = [str(path) for path in example_video_paths]
 
@@ -243,7 +225,7 @@ def main() -> gr.Blocks:
             inputs=[preset_dropdown],
         ).then(
             fn=dpvo_streaming_fn,
-            inputs=[video_input, stride_slider, skip_number, jpg_quality_radio],
+            inputs=[video_input, stride_slider, skip_number],
             outputs=[rr_viewer, status_text],
         )
 

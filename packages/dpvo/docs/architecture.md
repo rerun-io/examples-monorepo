@@ -11,7 +11,7 @@ This document explains the DPVO inference architecture: the patch-based visual o
 │  CLI: run_dpvo_pipeline()                Gradio: dpvo_streaming_fn()       │
 │  ┌───────────────────────────┐           ┌──────────────────────────────┐   │
 │  │ 1. Load config (yacs)     │           │ 1. Load model (module-level) │   │
-│  │ 2. Estimate calib (dust3r)│           │ 2. @rr.thread_local_stream   │   │
+│  │ 2. Estimate calib (MoGe-2)│           │ 2. @rr.thread_local_stream   │   │
 │  │ 3. Process all frames     │           │ 3. Process frames, yield     │   │
 │  │ 4. Return DPVOPrediction  │           │    stream.read() per frame   │   │
 │  └───────────┬───────────────┘           └──────────────┬───────────────┘   │
@@ -52,13 +52,13 @@ Input Video/Images
     │
     ▼
 [Stream] (stream.py)
-    multiprocessing.Process reads frames into Queue
-    Output: (timestamp: int, bgr_hw3: uint8[h,w,3], intrinsics: float64[4] | None)
+    Video: NVDEC decode + GPU area resize (0.5x); image dir: multiprocessing.Process + Queue
+    Output: Frame(t, source_index, bgr_3hw: cuda uint8[3,h,w], bgr_hw3: host copy for images only)
     │
     ▼
 [Camera Calibration] (api/inference.py)
-    If no calibration file: estimate K via mini-dust3r on first frame
-    Output: intrinsics [fx, fy, cx, cy] as float64[4]
+    If no calibration file: estimate K via MoGe-2 (median of the first 8 frames)
+    Output: intrinsics [fx, fy, cx, cy] as cuda float32[4]
     │
     ▼
 [Patchify] (net.py: Patchifier)

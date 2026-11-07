@@ -2376,10 +2376,18 @@ numba = ">=0.60.0"
 plyfile = ">=1.0.3,<1.1"
 tyro = ">=0.9.1,<0.10"
 ninja = ">=1.13.2,<2"
+# Video input decodes on NVDEC (simplecv TorchCodecVideoReader); the source video is logged once as an H.264
+# VideoStream (simplecv log_video, FFmpeg re-encode). ffmpeg <902 links libjxl 0.11 and dlopen-fails beside 0.12.
+torchcodec = "*"
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.dpvo.pypi-dependencies]
 dpvo = { path = "packages/dpvo", editable = true }
-mini-dust3r = ">=0.1.1,<0.2"
+# Intrinsics without a calibration file come from MoGe-2 (monopriors' TensorRT predictor, torch fallback).
+monopriors = { path = "packages/monoprior", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+# monopriors' metadata requires sam3; resolve it to the workspace package like the other monopriors consumers
+sam3 = { path = "packages/sam3", editable = true }
 evo = ">=1.28.0"
 kornia = ">=0.7.0"
 pypose = ">=0.6.0"
@@ -2413,16 +2421,18 @@ cwd = "packages/dpvo"
 outputs = ["packages/dpvo/checkpoints/dpvo.pth"]
 description = "Download DPVO model checkpoint"
 
+# The example videos are H.264 MP4s without B-frames: NVDEC decodes them and Rerun logs them as a VideoStream
+# without a transcode (ffmpeg -c:v h264_nvenc -preset p5 -cq 32 -bf 0 -g 30 -an, from the original iPhone MOVs).
 [feature.dpvo.tasks._download-dpvo-data]
-cmd = "bash -lc 'hf download pablovela5620/dpvo-example-data movies.zip --repo-type dataset --local-dir . && unzip -o movies.zip -d data/ && rm -f movies.zip && if [ -d data/data/movies ]; then rm -rf data/movies && mv data/data/movies data/movies && rmdir data/data 2>/dev/null || true; fi'"
+cmd = "hf download pablovela5620/dpvo-example-data --repo-type dataset --include 'movies/*.mp4' --local-dir data/"
 cwd = "packages/dpvo"
-outputs = ["packages/dpvo/data/movies/IMG_0493.MOV"]
+outputs = ["packages/dpvo/data/movies/IMG_0493.mp4"]
 description = "Download DPVO example video data"
 
 [feature.dpvo.tasks._download-dpvo-iphone-data]
-cmd = "hf download pablovela5620/dpvo-example-data pool.MOV --repo-type dataset --local-dir data/iphone/"
+cmd = "hf download pablovela5620/dpvo-example-data iphone/pool.mp4 --repo-type dataset --local-dir data/"
 cwd = "packages/dpvo"
-outputs = ["packages/dpvo/data/iphone/pool.MOV"]
+outputs = ["packages/dpvo/data/iphone/pool.mp4"]
 description = "Download DPVO iPhone example data"
 
 # ── Build tasks ──────────────────────────────────────────────────────────
@@ -2467,7 +2477,7 @@ description = "Evaluate DPV-SLAM on EuRoC MH sequences (VO + SLAM)"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.dpvo.tasks.dpvo-demo]
-cmd = "python tools/demo.py --imagedir data/movies/IMG_0493.MOV"
+cmd = "python tools/demo.py --imagedir data/movies/IMG_0493.mp4"
 depends-on = [
     "_build-dpvo-cuda-kernels",
     "_download-dpvo-model",
