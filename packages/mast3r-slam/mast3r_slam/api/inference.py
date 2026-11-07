@@ -80,6 +80,7 @@ from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
 from mast3r_slam.rerun_log_utils import (
     FRAME_TIMELINE,
     VIDEO_TIMELINE,
+    VideoSource,
     create_blueprints,
     log_video_for_dataset,
 )
@@ -212,14 +213,13 @@ def run_slam_pipeline(
 
     dataset: MonocularDataset = load_dataset(dataset_path, img_size=img_size)
     dataset.subsample(config["dataset"]["subsample"])
-    frame_timestamps_ns: Int[ndarray, "num_frames"] | None = log_video_for_dataset(
-        dataset,
-        parent_log_path / "current_camera" / "pinhole" / "video",
-        timeline=VIDEO_TIMELINE,
-    )
+    # MP4 input: the video is logged once; camera images reference its frames.
+    video: VideoSource | None = log_video_for_dataset(dataset)
+    frame_timestamps_ns: Int[ndarray, "num_frames"] | None = video.frame_timestamps_ns if video is not None else None
 
     # ── Rerun visualisation setup ──────────────────────────────────────────
-    active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
+    # A reference into a VideoStream resolves on the active timeline, so MP4 input must show VIDEO_TIMELINE.
+    active_timeline: str = VIDEO_TIMELINE if video is not None else FRAME_TIMELINE
     blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline, n_keyframes=0)
     rr.send_blueprint(blueprint)
 
@@ -227,7 +227,7 @@ def run_slam_pipeline(
     # Used as a context manager further down so LogTerminate + join is automatic.
     event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
     async_logger: AsyncRerunLogger = AsyncRerunLogger(
-        event_queue, parent_log_path, active_timeline, recording=recording,
+        event_queue, parent_log_path, active_timeline, recording=recording, video=video,
     )
 
     h: int

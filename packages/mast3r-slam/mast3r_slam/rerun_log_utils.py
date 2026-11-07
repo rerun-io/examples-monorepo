@@ -9,6 +9,7 @@ for debugging and tests.  The active logging path is
 ``AsyncRerunLogger`` in ``async_logger.py``.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import depth_png
@@ -23,12 +24,46 @@ from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.rerun_log_utils import log_pinhole, log_video
 from torch import Tensor
 
+from mast3r_slam.config import config
 from mast3r_slam.dataloader import MonocularDataset, MP4Dataset
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
+from mast3r_slam.image_utils import VideoToFrame, video_to_frame_transform
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
 FRAME_TIMELINE: str = "frame"
 VIDEO_TIMELINE: str = "video_time"
+# The source video's VideoStream. Camera images reference its frames instead of re-encoding them.
+VIDEO_LOG_PATH: Path = Path("/video")
+
+
+@dataclass(frozen=True, slots=True)
+class VideoSource:
+    """The logged source video that camera images reference with ``rr.VideoFrameReference``."""
+
+    entity_path: Path
+    """Entity of the ``rr.VideoStream``."""
+    frame_timestamps_ns: Int[ndarray, "num_frames"]
+    """Sample time on ``VIDEO_TIMELINE`` of each dataset frame (after subsampling)."""
+    first_sample_ns: int
+    """Time of the stream's first sample; a reference into a VideoStream is an offset from it."""
+    video_to_frame: VideoToFrame
+    """Maps video pixels onto the MASt3R frame, so a reference lines up with the frame's Pinhole."""
+
+    def log_frame_transform(self, image_path: str) -> None:
+        """Log the static 2D transform that places a video frame at ``image_path`` over the MASt3R frame."""
+        rr.log(
+            image_path,
+            rr.Transform3D(
+                scale=[*self.video_to_frame.scale, 1.0],
+                translation=[*self.video_to_frame.translation, 0.0],
+            ),
+            static=True,
+        )
+
+    def frame_reference(self, frame_id: int) -> rr.VideoFrameReference:
+        """Reference to the video frame of dataset frame ``frame_id``."""
+        offset_ns: int = int(self.frame_timestamps_ns[frame_id]) - self.first_sample_ns
+        return rr.VideoFrameReference(nanoseconds=offset_ns, video_reference=str(self.entity_path))
 
 
 def create_blueprints(
@@ -47,7 +82,7 @@ def create_blueprints(
         A configured Rerun Blueprint.
     """
     current_views: rrb.Tabs = rrb.Tabs(
-        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "video"), name="Video"),
+        rrb.Spatial2DView(origin=str(VIDEO_LOG_PATH), name="Video"),
         rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "image"), name="Image"),
         active_tab=1,
         name="Current",
@@ -72,8 +107,6 @@ def create_blueprints(
     parent_log_root = f"/{str(parent_log_path).lstrip('/')}"
     spatial3d_contents: list[str] = [
         f"+ {parent_log_root}/**",
-        f"- {parent_log_root}/current_camera/pinhole/video",
-        f"- {parent_log_root}/current_camera/pinhole/video/**",
         f"- {parent_log_root}/current_camera/pinhole/pointmap_depth",
         f"- {parent_log_root}/last_keyframe/pointmap_depth",
     ]
@@ -95,21 +128,28 @@ def create_blueprints(
     return blueprint
 
 
-def log_video_for_dataset(
-    dataset: MonocularDataset,
-    video_log_path: Path,
-    timeline: str = VIDEO_TIMELINE,
-) -> Int[ndarray, "num_frames"] | None:
-    """Log a source video asset and return timestamps aligned to the dataset frames."""
+def log_video_for_dataset(dataset: MonocularDataset) -> VideoSource | None:
+    """Log the source video once as a VideoStream on ``VIDEO_TIMELINE``.
+
+    Returns ``None`` for datasets that are not an MP4; their camera images stay JPEGs.
+    """
     if not isinstance(dataset, MP4Dataset) or dataset.dataset_path is None:
         return None
 
-    frame_timestamps_ns: Int[ndarray, "all_video_frames"] = log_video(
+    all_timestamps_ns: Int[ndarray, "all_video_frames"] = log_video(
         video_source=dataset.dataset_path,
-        video_log_path=video_log_path,
-        timeline=timeline,
+        video_log_path=VIDEO_LOG_PATH,
+        timeline=VIDEO_TIMELINE,
     )
-    return np.asarray(frame_timestamps_ns[:: dataset.stride][: len(dataset)], dtype=np.int64)
+    raw_h: int
+    raw_w: int
+    _, (raw_h, raw_w) = dataset.get_img_shape()
+    return VideoSource(
+        entity_path=VIDEO_LOG_PATH,
+        frame_timestamps_ns=np.asarray(all_timestamps_ns[:: dataset.stride][: len(dataset)], dtype=np.int64),
+        first_sample_ns=int(all_timestamps_ns[0]),
+        video_to_frame=video_to_frame_transform(raw_w, raw_h, dataset.img_size, downsample=config["dataset"]["img_downsample"]),
+    )
 
 
 class RerunLogger:
@@ -316,7 +356,7 @@ class RerunLogger:
         if N_keyframes > 0:
             last_kf: Frame = keyframes[N_keyframes - 1]
             last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-                self.parent_log_path / "last_keyframe", last_kf.rgb
+                self.parent_log_path / "last_keyframe" / "image", last_kf.rgb
             )
             self._log_pointmap_and_confidence(
                 last_kf,

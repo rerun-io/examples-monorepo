@@ -4,7 +4,8 @@ Consumes ``LogEvent`` objects from a queue and performs all Rerun logging
 off the tracking hot-path.  The thread binds to the caller's
 ``RecordingStream`` (for Gradio) or uses the global recording (for CLI).
 
-Handles JPEG compression, focal estimation, pointmap/depth conversion,
+Handles camera images (a ``VideoFrameReference`` into the source VideoStream
+for MP4 input, a JPEG otherwise), focal estimation, pointmap/depth conversion,
 camera path accumulation, and blueprint refreshes — all work that was
 previously synchronous on the tracking thread.
 
@@ -48,7 +49,7 @@ from mast3r_slam.log_events import (
     LogText,
 )
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
-from mast3r_slam.rerun_log_utils import FRAME_TIMELINE, VIDEO_TIMELINE, create_blueprints
+from mast3r_slam.rerun_log_utils import FRAME_TIMELINE, VIDEO_TIMELINE, VideoSource, create_blueprints
 
 # ── Snapshot helpers ──────────────────────────────────────────────────────
 # These create CPU-only event objects from live Frame / SharedKeyframes /
@@ -141,6 +142,7 @@ def snapshot_keyframe(frame: Frame, kf_idx: int) -> KeyframeSnapshot:
     assert frame.C is not None
     return KeyframeSnapshot(
         kf_idx=kf_idx,
+        frame_id=frame.frame_id,
         world_sim3_cam_data=frame.world_sim3_cam.data.squeeze().cpu().numpy().astype(np.float32),
         rgb=frame.rgb.numpy().astype(np.float32),
         X_canon=frame.X_canon.detach().cpu().numpy().astype(np.float32),
@@ -257,7 +259,7 @@ def snapshot_to_frame(
 class AsyncRerunLogger:
     """Consumes log events from a queue on a dedicated thread.
 
-    All expensive work (JPEG compression, focal estimation, pointmap
+    All expensive work (JPEG compression for non-video input, focal estimation, pointmap
     conversion, ``rr.log()`` calls) happens in this thread, keeping the
     tracking pipeline unblocked.
 
@@ -273,6 +275,8 @@ class AsyncRerunLogger:
         timeline: Active timeline name.
         recording: Rerun recording to bind in this thread (Gradio).
             ``None`` uses the global recording (CLI).
+        video: The logged source video. When set, camera images are references
+            into it; ``None`` (image folders) logs a JPEG per image.
     """
 
     def __init__(
@@ -281,9 +285,11 @@ class AsyncRerunLogger:
         parent_log_path: Path,
         timeline: str,
         recording: rr.RecordingStream | None = None,
+        video: VideoSource | None = None,
     ) -> None:
         self._queue: queue.Queue[LogEvent] = event_queue
         self._recording: rr.RecordingStream | None = recording
+        self._video: VideoSource | None = video
         self._parent_log_path: Path = parent_log_path
         self._timeline: str = timeline
         self._thread: threading.Thread | None = None
@@ -358,6 +364,9 @@ class AsyncRerunLogger:
         """Main loop: bind recording, then process events until LogTerminate."""
         if self._recording is not None:
             rr.set_thread_local_data_recording(self._recording)
+        if self._video is not None:
+            self._video.log_frame_transform(f"{self._parent_log_path}/current_camera/pinhole/image")
+            self._video.log_frame_transform(f"{self._parent_log_path}/last_keyframe/image")
 
         try:
             while True:
@@ -406,13 +415,20 @@ class AsyncRerunLogger:
 
     # ── Image helpers ─────────────────────────────────────────────────
 
-    def _log_rgb_image(self, image_path: str, rgb: Float32[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
-        """Convert [0,1] float RGB to uint8, JPEG-compress, and log."""
+    def _log_rgb_image(self, image_path: str, rgb: Float32[ndarray, "H W 3"], frame_id: int) -> UInt8[ndarray, "H W 3"]:
+        """Log a camera image: a reference into the source video, or a JPEG when there is none.
+
+        The reference's static frame transform (``VideoSource.log_frame_transform``) must
+        already be on ``image_path``. Returns the uint8 RGB (point-cloud colors).
+        """
         rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb * 255).astype(np.uint8)
-        rr.log(
-            image_path,
-            rr.Image(image=rgb_uint8, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
-        )
+        if self._video is not None:
+            rr.log(image_path, self._video.frame_reference(frame_id))
+        else:
+            rr.log(
+                image_path,
+                rr.Image(image=rgb_uint8, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
+            )
         return rgb_uint8
 
     def _normalize_to_uint8(self, values: Float32[ndarray, "..."]) -> UInt8[ndarray, "..."]:
@@ -487,6 +503,7 @@ class AsyncRerunLogger:
         rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
             f"{cam_log_path}/pinhole/image",
             event.rgb,
+            event.frame_idx,
         )
 
         # Pointmap, depth, confidence
@@ -516,8 +533,8 @@ class AsyncRerunLogger:
         # active keyframe's pointmap/confidence, so relog those every frame.
         # The image is logged only when the panel's keyframe changes.
         lk_path: str = f"{self._parent_log_path}/last_keyframe"
-        if event.last_kf_rgb is not None:
-            self._log_rgb_image(lk_path, event.last_kf_rgb)
+        if event.last_kf_rgb is not None and event.last_kf_frame_id is not None:
+            self._log_rgb_image(f"{lk_path}/image", event.last_kf_rgb, event.last_kf_frame_id)
         if event.last_kf_X_canon is not None and event.last_kf_C is not None and event.last_kf_img_shape is not None:
             self._log_pointmap_and_confidence(
                 event.last_kf_X_canon,
@@ -592,9 +609,12 @@ class AsyncRerunLogger:
         )
 
         # RGB image
+        if self._video is not None:
+            self._video.log_frame_transform(f"{kf_cam_log_path}/pinhole/image")
         kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
             f"{kf_cam_log_path}/pinhole/image",
             kf.rgb,
+            kf.frame_id,
         )
 
         # Pointmap + confidence
@@ -623,7 +643,7 @@ class AsyncRerunLogger:
     def _log_last_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log the last keyframe's image and pointmap to the 2D view."""
         lk_path: str = f"{self._parent_log_path}/last_keyframe"
-        self._log_rgb_image(lk_path, kf.rgb)
+        self._log_rgb_image(f"{lk_path}/image", kf.rgb, kf.frame_id)
         self._log_pointmap_and_confidence(
             kf.X_canon,
             kf.C,
