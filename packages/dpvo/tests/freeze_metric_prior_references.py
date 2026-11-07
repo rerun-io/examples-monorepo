@@ -1,8 +1,8 @@
 """Freeze MetricTrail's BA with the metric depth prior into `fixtures/metric_prior_references.rrd`.
 
-The depth-prior kernel exists only in ViPE's DPVO extension until dpvo/metric-core lands, so this
-runs in the metrictrail environment: MetricTrail on the first frames of pool.mp4, capturing one late
-`vipe.metrictrail.dpvo_ext.cuda_ba.forward` call with a positive prior weight. The case keeps the
+This runs in the metrictrail environment: MetricTrail on the first frames of pool.mp4 (its DPVO is
+dpvo.metric on the CUDA extension `dpvo._cuda_ba`), capturing one late `forward` call of the CUDA
+backend of `dpvo.kernels` with a positive prior weight. The case keeps the
 first n frames' poses, patch slots and prior values (no re-indexing) and, for each solve path (dense
 `local` and the block-E Schur `block_e`), the outputs of BA_REPEATS reruns of the CUDA call on them
 (the float atomics make CUDA nondeterministic; the tests bound the Mojo result by that spread).
@@ -18,10 +18,11 @@ from typing import Any
 
 import rerun as rr
 import torch
-import vipe.metrictrail.dpvo_ext.cuda_ba as cuda_ba
 from kernel_references import encode  # pyrefly: ignore[missing-import]
 from metrictrail.apis.run import RunSettings, run_and_log
 from torch import Tensor
+
+from dpvo import _cuda_ba, _cuda_corr, kernels
 
 VIDEO: Path = Path("../metrictrail/data/iphone/pool.mp4")
 OUTPUT: Path = Path(__file__).parent / "fixtures" / "metric_prior_references.rrd"
@@ -31,20 +32,32 @@ SEED: int = 1234
 
 captured: list[tuple[Any, ...]] = []
 calls: list[int] = [0]
-_forward = cuda_ba.forward
+_forward = _cuda_ba.forward
 
 
 class _Done(Exception):
     """Raised once the call is captured, to stop the run early."""
 
 
-def _capture(*args: Any) -> Any:
-    calls[0] += 1
-    lam: float = args[8]
-    if calls[0] >= CAPTURE_AFTER and lam > 0.0:
-        captured.append(tuple(a.detach().clone() if isinstance(a, Tensor) else a for a in args))
-        raise _Done
-    return _forward(*args)
+class _CapturingBA:
+    """`dpvo._cuda_ba` as a `dpvo.kernels.BAKernels` whose `forward` records the first late call with a prior."""
+
+    neighbors = staticmethod(_cuda_ba.neighbors)
+    reproject = staticmethod(_cuda_ba.reproject)
+    solve_system = staticmethod(_cuda_ba.solve_system)
+
+    def forward(
+        self, poses: Tensor, patches: Tensor, intrinsics: Tensor, target: Tensor, weight: Tensor, lmbda: Tensor, depth_prior: Tensor,
+        depth_prior_weight: Tensor, depth_prior_lambda: float, depth_prior_huber: float, ii: Tensor, jj: Tensor, kk: Tensor, M: int,
+        t0: int, t1: int, iterations: int, eff_impl: bool,
+    ) -> list[Tensor]:  # fmt: skip
+        args: tuple[Any, ...] = (poses, patches, intrinsics, target, weight, lmbda, depth_prior, depth_prior_weight, depth_prior_lambda,
+                                 depth_prior_huber, ii, jj, kk, M, t0, t1, iterations, eff_impl)  # fmt: skip
+        calls[0] += 1
+        if calls[0] >= CAPTURE_AFTER and depth_prior_lambda > 0.0:
+            captured.append(tuple(a.detach().clone() if isinstance(a, Tensor) else a for a in args))
+            raise _Done
+        return _forward(*args)
 
 
 def _case(args: tuple[Any, ...]) -> dict[str, Tensor]:
@@ -83,7 +96,7 @@ def _case(args: tuple[Any, ...]) -> dict[str, Tensor]:
 
 def main() -> None:
     torch.manual_seed(SEED)
-    cuda_ba.forward = _capture
+    kernels.register("cuda", corr=_cuda_corr, ba=_CapturingBA())  # the CUDA backend, with a capturing forward
     with tempfile.TemporaryDirectory(prefix="metric-prior-freeze-") as scratch:  # ~100 MB of run outputs, not kept
         rec_run = rr.RecordingStream("metric-prior-freeze")
         rec_run.save(str(Path(scratch) / "run.rrd"))

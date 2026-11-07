@@ -3838,6 +3838,13 @@ depends-on = ["lietorch-mojo-build"]
 cwd = "packages/vipe-mojo/tests"
 description = "Freeze vipe_ext's four ported kernels on pool.mp4 into packages/vipe-mojo/tests/fixtures/vipe_references.rrd (CUDA host)"
 
+# dpvo.mojo_backend's depth-prior parity reference: MetricTrail's BA calls on the CUDA extension dpvo._cuda_ba.
+[feature.metrictrail.tasks.dpvo-freeze-metric-prior-references]
+cmd = "python tests/freeze_metric_prior_references.py"
+depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
+cwd = "packages/dpvo"
+description = "Freeze MetricTrail's BA with the depth prior (ViPE's cuda_ba) into packages/dpvo/tests/fixtures/metric_prior_references.rrd"
+
 [feature.metrictrail.tasks.metrictrail-check-kernels]
 cmd = "python tools/check_kernels.py"
 depends-on = ["_build-dpvo-cuda-kernels"]
@@ -3849,13 +3856,6 @@ cmd = "python tools/run.py"
 depends-on = ["lietorch-mojo-build", "_build-dpvo-cuda-kernels"]
 cwd = "packages/metrictrail"
 description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
-
-# dpvo.mojo_backend's depth-prior parity reference: the prior kernel lives in ViPE's DPVO extension until dpvo/metric-core.
-[feature.metrictrail.tasks.dpvo-freeze-metric-prior-references]
-cmd = "python tests/freeze_metric_prior_references.py"
-depends-on = ["lietorch-mojo-build"]
-cwd = "packages/dpvo"
-description = "Freeze MetricTrail's BA with the depth prior (ViPE's cuda_ba) into packages/dpvo/tests/fixtures/metric_prior_references.rrd"
 
 [feature.metrictrail.tasks.metrictrail-log-run]
 cmd = "python tools/log_run.py"

@@ -174,7 +174,9 @@ def ba_case(args: tuple[Any, ...]) -> dict[str, Tensor]:
         runs: list[tuple[Tensor, Tensor]] = []
         for _ in range(BA_REPEATS):
             p, x = case["poses"].clone(), case["patches"].clone()
-            _cuda_ba.forward(p, x, case["intrinsics"], case["target"], case["weight"], case["lmbda"], case["ii"], case["jj"], case["kk"], ppf, t0, t1, iterations, eff)
+            no_prior: Tensor = torch.empty(0, dtype=torch.float32, device=p.device)
+            _cuda_ba.forward(p, x, case["intrinsics"], case["target"], case["weight"], case["lmbda"], no_prior, no_prior, 0.0, 0.3,
+                             case["ii"], case["jj"], case["kk"], ppf, t0, t1, iterations, eff)
             runs.append((p, x))
         for k, name in enumerate(("poses", "patches")):
             ref: Tensor = runs[0][k]
