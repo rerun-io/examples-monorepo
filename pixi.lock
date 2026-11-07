@@ -81524,6 +81524,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: depth-png[21849d2e] @ packages/depth-png
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv
@@ -82138,6 +82139,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: depth-png[28fd7a0f] @ packages/depth-png
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv
@@ -83903,6 +83905,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: depth-png[21849d2e] @ packages/depth-png
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv
@@ -84526,6 +84529,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - conda_source: depth-png[28fd7a0f] @ packages/depth-png
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv

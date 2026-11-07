@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+import depth_png
 import numpy as np
 from jaxtyping import Float32, UInt8
 from monopriors.models.relative_depth.zipdepth import ZipDepthPredictor
@@ -46,7 +47,7 @@ def build_smoke_data(config: SmokeDataConfig) -> None:
         inv: Float32[np.ndarray, "h w"] = teacher(rgb, None).disparity
         inv_norm: Float32[np.ndarray, "h w"] = (inv - inv.min()) / (inv.max() - inv.min() + 1e-8)
         cv2.imwrite(str(rgb_dir / f"{stem}.jpg"), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        cv2.imwrite(str(depth_dir / f"{stem}.png"), (inv_norm * 65535).astype(np.uint16))
+        (depth_dir / f"{stem}.png").write_bytes(depth_png.encode((inv_norm * 65535).astype(np.uint16)))
 
     video = VideoReader(config.clip)
     for i, idx in enumerate(np.linspace(0, video.frame_cnt - 1, config.num_frames).astype(int)):

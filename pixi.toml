@@ -790,6 +790,8 @@ pyyaml = ">=6.0"
 tensorboard = ">=2.16.0"
 # dataset.py decodes JPEGs with PyTurboJPEG (pypi) on top of the conda libjpeg-turbo
 libjpeg-turbo = ">=3.0.0,<4"
+# apis/smoke_data.py writes its uint16 inverse-depth PNGs with depth_png (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 
 [feature.zipdepth.pypi-dependencies]
 zipdepth = { path = "packages/zipdepth", editable = true }
