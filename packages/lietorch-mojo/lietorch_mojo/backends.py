@@ -30,7 +30,7 @@ import torch
 from torch import Tensor
 
 from lietorch_mojo import _lietorch_mojo_backends as _ext
-from lietorch_mojo.metal import gpu_address
+from lietorch_mojo.metal import gpu_addresses
 
 # Op codes come from the extension (group_ops.mojo), so Python and the kernels cannot disagree.
 _OP_CODES: Final[dict[str, int]] = dict(_ext.op_codes())
@@ -140,7 +140,7 @@ def _run(op: int, group_index: int, inputs: tuple[Tensor, ...], names: tuple[str
         _launch_cpu(_cpu_runtime or _runtime(False), spec, n, tuple(t.data_ptr() for t in (*inputs, *outputs)))
     elif ref.is_mps:
         torch.mps.synchronize()
-        _launch_cuda(_gpu_runtime or _runtime(True), 0, spec, n, tuple(gpu_address(t) for t in (*inputs, *outputs)))
+        _launch_cuda(_gpu_runtime or _runtime(True), 0, spec, n, gpu_addresses((*inputs, *outputs)))
     elif ref.is_cuda:
         raise RuntimeError(f"lietorch_mojo runs on cuda:0 only, got {ref.device}")
     else:
