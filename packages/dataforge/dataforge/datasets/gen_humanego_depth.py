@@ -36,7 +36,7 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
 from dataforge import schema
 from dataforge.datasets.genrobot_layers import RIG, Retimer, shipped_counts
-from dataforge.datasets.genrobot_source import REFERENCE_CAMERA, CameraCalibration, DoubleSphere, EpisodeClock, EpisodeFile, first_message, rig_T_cam
+from dataforge.datasets.genrobot_source import REFERENCE_CAMERA, CameraCalibration, DoubleSphere, EpisodeClock, EpisodeFile, rig_T_cam
 from dataforge.logging_toolkit import ChunkBatcher, log_camera_node
 
 DEPTH_LAYER: str = "depth"
@@ -90,6 +90,8 @@ class DepthInfo:
     """``float16``."""
 
     def __post_init__(self) -> None:
+        if self.depth_topic != DEPTH_TOPIC:
+            raise ValueError(f"depth_info describes {self.depth_topic!r}, not {DEPTH_TOPIC!r}")
         if self.codec != CODEC or self.dtype != "float16":
             raise ValueError(f"unsupported depth codec {self.codec!r} ({self.dtype}); dataforge decodes {CODEC!r}")
         if len(self.K) != 9:
@@ -175,11 +177,6 @@ def depth_camera(info: DepthInfo, calibration: CameraCalibration) -> PinholePara
             camera_conventions="RDF", fl_x=info.K[0], fl_y=info.K[4], cx=info.K[2], cy=info.K[5], height=info.height, width=info.width
         ),
     )
-
-
-def read_depth_info(mcap: Path) -> DepthInfo:
-    """The episode's one ``depth_info`` message."""
-    return first_message(EpisodeFile(mcap), DEPTH_INFO_TOPIC, DepthInfo)
 
 
 def write_depth_layer(recording: rr.RecordingStream, mcap: Path, *, clock: EpisodeClock, calibration: CameraCalibration, info: DepthInfo) -> int:

@@ -149,7 +149,7 @@ def test_a_failed_episode_keeps_its_mcap_and_leaves_no_partial_layers(tmp_path: 
     from dataforge.datasets import genrobot
 
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
-    dataset: GenHumanEgoDataset = GenHumanEgoConfig(root=tmp_path / "raw").setup()
+    dataset: GenHumanEgoDataset = GenHumanEgoDataset(GenHumanEgoConfig(root=tmp_path / "raw"))
     item: HubEpisode = episode("home/wash", "ab", 0.001)
     identity: SequenceIdentity = SequenceIdentity(dataset.config.name, (item.uuid,))
     mcap: Path = tmp_path / "raw" / item.path
