@@ -34,8 +34,11 @@ samples = encode_av1(codes, gop=10)  # (n, h, w) uint16 codes <= 1023 -> one AV1
 log_depth_video("world/cam/pinhole/depth_video", samples, times_ns, DepthVideoProperties(meter=1000.0 / unit_mm))
 ```
 
-`tools/make_comparison_rrd.py` builds a test recording from a published depth layer: the layer itself, the depth as a
-`DepthVideoStream` (`depth_video`), and the same codes as 16-bit PNGs (`depth_codes_png`, the control).
+`tools/make_comparison_rrd.py` builds a test recording from a published millimetre depth layer: raw uint16 mm
+(`DepthImage`), the PNG layer as published and the `DepthVideoStream`, with per-pixel error maps |decoded - raw| in mm
+and per-frame max/p99 error plots. Its default blueprint shows raw / PNG / video in 2D and as 3D clouds from one eye,
+then the error maps and the plot; view names carry bytes per frame and the largest error. It also logs the 10-bit codes
+as 16-bit PNG (`depth_codes_png`), which the viewer must draw pixel-identical to the video.
 
 ## The archetype
 
@@ -62,8 +65,8 @@ The in-tree prototype (branch `pablo/depth-video-stream` in a Rerun checkout) ad
 - **2D hover depth readout**: picking uses the crate-private `PickableTexturedRect`. Hovering the image shows no depth.
 - **Auto-framing and the empty-view overlay**: the scene bounds (`SpatialViewVisualizerData`) are not exported, so the
   views ignore the depth when they frame the scene. Set `VisualBounds2D` / `EyeControls3D`. A 2D view whose only
-  content is the depth video also draws "No data available." over the image (`ui_2d.rs:411` checks the bounds); add
-  another entity, e.g. the `Pinhole`, to the view to avoid it. (gsplat works around the 3D framing with fallback
+  content is the depth video also draws "No data available." over the image (`ui_2d.rs:411` checks the bounds). The
+  `Pinhole` at the view origin does not help; a transparent `Boxes2D` over the image does (the comparison tool logs one). (gsplat works around the 3D framing with fallback
   providers for the eye; not done here.)
 - **Typed SDK archetype**: no generated Python/C++ `DepthVideoStream`; the helper logs built-in components under the
   archetype's descriptors.
