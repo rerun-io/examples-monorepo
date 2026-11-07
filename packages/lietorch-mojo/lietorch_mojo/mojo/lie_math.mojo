@@ -14,7 +14,8 @@ is accurate on both devices, so the group code calls it directly.
 - `sincos_` in float32: Cody-Waite reduction into a float-float argument for
   |x| <= 1024 (pi/2 in five pieces, error-free sums), then the fdlibm kernels
   with float32 Taylor coefficients; larger or non-finite arguments take the
-  float64 routine.
+  float64 routine. An Apple GPU has no float64: there they take
+  `std.math.sin`/`cos` in float32.
 
 Both are within one ulp of the exact result everywhere, including arguments up
 to the float range.
@@ -23,7 +24,9 @@ to the float range.
 from std.bit import count_leading_zeros
 from std.math import floor
 from std.memory import bitcast
+from std.math import cos, sin
 from std.sys import llvm_intrinsic
+from std.sys.info import is_apple_gpu
 
 
 # ── Square root ──────────────────────────────────────────────────────────────
@@ -284,8 +287,11 @@ def _two_sum(a: Float32, b: Float32) -> Tuple[Float32, Float32]:
 @inline(.never)
 def _sincos_f32_wide(x: Float32) -> Tuple[Float32, Float32]:
     """|x| > 1024 or non-finite: the float64 routine, rounded. Out of line so float32 kernels carry no FP64 code."""
-    var s, c = _sincos_f64(Float64(x))
-    return (Float32(s), Float32(c))
+    comptime if is_apple_gpu():
+        return (sin(x), cos(x))
+    else:
+        var s, c = _sincos_f64(Float64(x))
+        return (Float32(s), Float32(c))
 
 
 @inline(.always)

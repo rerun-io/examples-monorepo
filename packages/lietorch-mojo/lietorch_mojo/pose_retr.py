@@ -14,6 +14,7 @@ from torch import Tensor
 from lietorch_mojo import _lietorch_mojo_backends as _ext
 from lietorch_mojo import backends
 from lietorch_mojo.groups import Sim3
+from lietorch_mojo.metal import gpu_address
 
 POSE_WIDTH: int = Sim3.embedded_dim
 TANGENT_WIDTH: int = Sim3.manifold_dim
@@ -23,8 +24,8 @@ def pose_retr(poses: Tensor, dx: Tensor, num_fix: int) -> None:
     """Retract `poses` (N, 8) in place by `dx` (N - num_fix, 7); the first `num_fix` poses stay fixed.
 
     Both tensors must be contiguous, of one dtype (float32 or float64) and on
-    one device (CPU or cuda:0). On CUDA the kernel runs on PyTorch's current
-    stream, asynchronously.
+    one device (CPU, cuda:0 or MPS, float32 only). On CUDA the kernel runs on
+    PyTorch's current stream, asynchronously; on MPS the call synchronises.
     """
     if num_fix < 0:
         raise ValueError(f"num_fix must be >= 0, got {num_fix}")
@@ -49,5 +50,8 @@ def pose_retr(poses: Tensor, dx: Tensor, num_fix: int) -> None:
         _ext.pose_retr_cuda(backends._runtime(True), backends._current_raw_stream(0), poses.data_ptr(), dx.data_ptr(), num_poses, num_fix, is_f64)
     elif poses.is_cpu:
         _ext.pose_retr_cpu(backends._runtime(False), poses.data_ptr(), dx.data_ptr(), num_poses, num_fix, is_f64)
+    elif poses.is_mps:
+        torch.mps.synchronize()
+        _ext.pose_retr_cuda(backends._runtime(True), 0, gpu_address(poses), gpu_address(dx), num_poses, num_fix, is_f64)
     else:
-        raise RuntimeError(f"lietorch_mojo supports CPU and CUDA tensors, got {poses.device}")
+        raise RuntimeError(f"lietorch_mojo supports CPU, CUDA and MPS tensors, got {poses.device}")

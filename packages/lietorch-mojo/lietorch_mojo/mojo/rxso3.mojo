@@ -18,7 +18,7 @@ from lie_explog import exp_, log_
 from lie_group import LieGroup
 from lie_linalg import Mat
 from lie_math import sincos_, sqrt_
-from so3 import EPS, SO3, from_double, hat
+from so3 import EPS, SO3, from_double, hat, less_than
 
 
 struct RxSO3[dt: DType](LieGroup):
@@ -121,9 +121,9 @@ struct RxSO3[dt: DType](LieGroup):
         var A: Scalar[Self.dt]
         var B: Scalar[Self.dt]
         var C: Scalar[Self.dt]
-        if Float64(abs(sigma)) < EPS:
+        if less_than[EPS](abs(sigma)):
             C = 1
-            if Float64(abs(theta)) < EPS:
+            if less_than[EPS](abs(theta)):
                 A = 0.5
                 B = from_double[Self.dt](1.0 / 6.0)
             else:
@@ -133,7 +133,7 @@ struct RxSO3[dt: DType](LieGroup):
                 B = (theta - s) / (theta_sq * theta)
         else:
             C = (scale - 1) / sigma
-            if Float64(abs(theta)) < EPS:
+            if less_than[EPS](abs(theta)):
                 var sigma_sq = sigma * sigma
                 A = ((sigma - 1) * scale + 1) / sigma_sq
                 B = (scale * 0.5 * sigma_sq + scale - 1 - sigma * scale) / (sigma_sq * sigma)

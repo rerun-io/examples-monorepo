@@ -53,6 +53,7 @@ from group_ops import (
     row_widths,
 )
 from launch import (
+    GPU_HAS_FLOAT64,
     CPURuntime,
     GPURuntime,
     binary_backward_cpu,
@@ -85,20 +86,23 @@ def _check_tensor_count(op: Int, tensors: PythonObject) raises:
 
 
 def _launch_cuda[G: LieGroup](mut rt: GPURuntime, stream: Int, op: Int, n: Int, tensors: PythonObject) raises:
-    comptime for o in range(NUM_OPS):
-        if op == o:
-            _check_tensor_count(o, tensors)
-            comptime match family(o):
-                case == UNARY:
-                    unary_cuda[G, o](rt, stream, n, tensors)
-                case == UNARY_BACKWARD:
-                    unary_backward_cuda[G, o](rt, stream, n, tensors)
-                case == BINARY:
-                    binary_cuda[G, o](rt, stream, n, tensors)
-                case _:
-                    binary_backward_cuda[G, o](rt, stream, n, tensors)
-            return
-    raise Error(t"lietorch_mojo: unknown op code {op}")
+    comptime if G.dtype == DType.float64 and not GPU_HAS_FLOAT64:
+        raise Error("lietorch_mojo: this GPU (Metal) has no float64")
+    else:
+        comptime for o in range(NUM_OPS):
+            if op == o:
+                _check_tensor_count(o, tensors)
+                comptime match family(o):
+                    case == UNARY:
+                        unary_cuda[G, o](rt, stream, n, tensors)
+                    case == UNARY_BACKWARD:
+                        unary_backward_cuda[G, o](rt, stream, n, tensors)
+                    case == BINARY:
+                        binary_cuda[G, o](rt, stream, n, tensors)
+                    case _:
+                        binary_backward_cuda[G, o](rt, stream, n, tensors)
+                return
+        raise Error(t"lietorch_mojo: unknown op code {op}")
 
 
 def _launch_cpu[G: LieGroup](rt: CPURuntime, op: Int, n: Int, tensors: PythonObject) raises:
@@ -255,7 +259,10 @@ def pose_retr_cuda_py(
         var rt = runtime.downcast_value_ptr[GPURuntime]()
         var stream = Int(py=stream_obj)
         if Bool(py=is_f64_obj):
-            pose_retr_cuda[.float64](rt[], stream, poses, dx, num_poses, num_fix)
+            comptime if GPU_HAS_FLOAT64:
+                pose_retr_cuda[.float64](rt[], stream, poses, dx, num_poses, num_fix)
+            else:
+                raise Error("lietorch_mojo: this GPU (Metal) has no float64")
         else:
             pose_retr_cuda[.float32](rt[], stream, poses, dx, num_poses, num_fix)
     return Python.none()
