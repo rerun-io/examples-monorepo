@@ -1,5 +1,6 @@
 """MOV track remuxing and QuickTime timed-metadata framing."""
 
+import functools
 import hashlib
 import os
 import shutil
@@ -209,30 +210,81 @@ def _restore_source_pts(encoded_path: Path, source_pts: list[Fraction], output_p
             raise ValueError(f"transcode frame count changed: {len(source_pts)} -> {packet_index}")
 
 
+@dataclass(frozen=True, slots=True)
+class DecodeChain:
+    """ffmpeg decode options and filter graph that feed the AV1 encoder."""
+
+    input_args: tuple[str, ...]
+    """Options placed before ``-i``; empty for software decode."""
+    video_filter: str
+    """The ``-vf`` graph: optional leading-frame trim, rotation, then PTS rebase."""
+
+
+CPU_ROTATIONS: dict[int, str] = {0: "", 1: "transpose=2,", 2: "hflip,vflip,", 3: "transpose=1,"}
+CUDA_ROTATIONS: dict[int, str] = {0: "", 1: "transpose_cuda=dir=cclock,", 2: "transpose_cuda=dir=reversal,", 3: "transpose_cuda=dir=clock,"}
+CUDA_INPUT_ARGS: tuple[str, ...] = ("-hwaccel", "cuda", "-hwaccel_output_format", "cuda")
+
+
+def _trim_filter(drop_leading: int) -> str:
+    """Drop leading frames post-decode in presentation order, so the encoder opens the kept range on a fresh keyframe."""
+    return f"select='gte(n\\,{drop_leading})'," if drop_leading else ""
+
+
+def cpu_decode_chain(quarter_turns: int, drop_leading: int) -> DecodeChain:
+    """Software decode with CPU rotation; works with every encoder and ffmpeg build."""
+    return DecodeChain((), _trim_filter(drop_leading) + CPU_ROTATIONS[quarter_turns % 4] + "setpts=PTS-STARTPTS")
+
+
+def cuda_decode_chain(quarter_turns: int, drop_leading: int, cuda_filters: frozenset[str] | None) -> DecodeChain | None:
+    """NVDEC decode with frames kept on the GPU for ``av1_nvenc``, or None when the build lacks a filter it needs.
+
+    Args:
+        quarter_turns: Counter-clockwise quarter turns baked into the output.
+        drop_leading: Leading frames dropped after decode.
+        cuda_filters: The build's ``*_cuda`` filter names, or None without the cuda hwaccel.
+    """
+    rotation: str = CUDA_ROTATIONS[quarter_turns % 4]
+    if cuda_filters is None or (rotation and "transpose_cuda" not in cuda_filters):
+        return None
+    return DecodeChain(CUDA_INPUT_ARGS, _trim_filter(drop_leading) + rotation + "setpts=PTS-STARTPTS")
+
+
+def parse_cuda_filters(hwaccels: str, filters: str) -> frozenset[str] | None:
+    """The ``*_cuda`` filter names from ``ffmpeg -filters``, or None when ``ffmpeg -hwaccels`` has no cuda."""
+    if "cuda" not in hwaccels.split():
+        return None
+    rows: list[list[str]] = [line.split() for line in filters.splitlines()]
+    return frozenset(row[1] for row in rows if len(row) >= 3 and row[1].endswith("_cuda"))
+
+
+@functools.cache
+def ffmpeg_cuda_filters(ffmpeg_path: Path) -> frozenset[str] | None:
+    """Probe one ffmpeg build for NVDEC decode and its ``*_cuda`` filters (conda-forge linux-aarch64 has none)."""
+    hwaccels: str = subprocess.run([str(ffmpeg_path), "-hide_banner", "-hwaccels"], check=True, capture_output=True, text=True).stdout
+    filters: str = subprocess.run([str(ffmpeg_path), "-hide_banner", "-filters"], check=True, capture_output=True, text=True).stdout
+    return parse_cuda_filters(hwaccels, filters)
+
+
 def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0, drop_leading: int = 0) -> tuple[Path, str, str, str]:
     """Transcode one video track to calibrated AV1 settings, dropping leading frames."""
     TRANSCODE_DIR.mkdir(parents=True, exist_ok=True)
     source_pts: list[Fraction] = _packet_pts(path, stream_index)[drop_leading:]
     if not source_pts:
         raise ValueError(f"dropping {drop_leading} leading frames leaves track {stream_index} empty")
-    encoders: list[tuple[str, list[str]]] = [
-        ("av1_nvenc", ["-c:v", "av1_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "30"]),
-        ("svt_av1", ["-c:v", "libsvtav1", "-preset", "6", "-crf", "32"]),
-    ]
+    nvenc: list[str] = ["-c:v", "av1_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "30"]
+    svt: list[str] = ["-c:v", "libsvtav1", "-preset", "6", "-crf", "32"]
     ffmpeg_path: Path = resolve_ffmpeg()
     version: str = subprocess.run([str(ffmpeg_path), "-version"], check=True, capture_output=True, text=True).stdout.splitlines()[0]
     stat = path.stat()
     errors: list[str] = []
-    filters: dict[int, str] = {
-        0: "setpts=PTS-STARTPTS",
-        1: "transpose=2,setpts=PTS-STARTPTS",
-        2: "hflip,vflip,setpts=PTS-STARTPTS",
-        3: "transpose=1,setpts=PTS-STARTPTS",
-    }
-    # Trimming happens post-decode in presentation order, so the encoder opens
-    # the kept range with a fresh keyframe and every retained frame decodes.
-    trim: str = f"select='gte(n\\,{drop_leading})'," if drop_leading else ""
-    for encoder_name, encoder in encoders:
+    cpu_chain: DecodeChain = cpu_decode_chain(quarter_turns, drop_leading)
+    cuda_chain: DecodeChain | None = cuda_decode_chain(quarter_turns, drop_leading, ffmpeg_cuda_filters(ffmpeg_path))
+    # NVDEC + transpose_cuda gives av1_nvenc the same pixels as the CPU chain
+    # (byte-identical AV1 on a real MOV), so the decode path is not part of the
+    # settings or cache identity. Any failure on the GPU chain retries on the CPU.
+    attempts: list[tuple[str, list[str], DecodeChain]] = [("av1_nvenc", nvenc, cuda_chain)] if cuda_chain is not None else []
+    attempts += [("av1_nvenc", nvenc, cpu_chain), ("svt_av1", svt, cpu_chain)]
+    for encoder_name, encoder, chain in attempts:
         settings: str = " ".join(encoder)
         identity: str = f"{stat.st_size}:{stat.st_mtime_ns}:{stream_index}:{quarter_turns % 4}:{drop_leading}:{settings}"
         fingerprint: str = hashlib.sha256(identity.encode()).hexdigest()[:16]
@@ -254,13 +306,14 @@ def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0, drop_l
             "warning",
             "-copyts",
             "-noautorotate",
+            *chain.input_args,
             "-i",
             str(path),
             "-map",
             f"0:{stream_index}",
             "-an",
             "-vf",
-            trim + filters[quarter_turns % 4],
+            chain.video_filter,
             *encoder,
             "-fps_mode",
             "passthrough",
@@ -281,7 +334,7 @@ def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0, drop_l
         finally:
             encoded_path.unlink(missing_ok=True)
             restored_path.unlink(missing_ok=True)
-    raise RuntimeError("both AV1 transcoders failed:\n" + "\n".join(errors))
+    raise RuntimeError("every AV1 transcode attempt failed:\n" + "\n".join(errors))
 
 
 def prepare_video_track(
