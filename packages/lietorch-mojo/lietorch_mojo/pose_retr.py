@@ -14,7 +14,7 @@ from torch import Tensor
 from lietorch_mojo import _lietorch_mojo_backends as _ext
 from lietorch_mojo import backends
 from lietorch_mojo.groups import Sim3
-from lietorch_mojo.metal import gpu_address
+from lietorch_mojo.metal import gpu_addresses
 
 POSE_WIDTH: int = Sim3.embedded_dim
 TANGENT_WIDTH: int = Sim3.manifold_dim
@@ -52,6 +52,6 @@ def pose_retr(poses: Tensor, dx: Tensor, num_fix: int) -> None:
         _ext.pose_retr_cpu(backends._runtime(False), poses.data_ptr(), dx.data_ptr(), num_poses, num_fix, is_f64)
     elif poses.is_mps:
         torch.mps.synchronize()
-        _ext.pose_retr_cuda(backends._runtime(True), 0, gpu_address(poses), gpu_address(dx), num_poses, num_fix, is_f64)
+        _ext.pose_retr_cuda(backends._runtime(True), 0, *gpu_addresses((poses, dx)), num_poses, num_fix, is_f64)
     else:
         raise RuntimeError(f"lietorch_mojo supports CPU, CUDA and MPS tensors, got {poses.device}")

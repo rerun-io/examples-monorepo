@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import torch
 from lietorch_mojo.backends import _current_raw_stream, _runtime
-from lietorch_mojo.metal import gpu_address
+from lietorch_mojo.metal import gpu_addresses
 from torch import Tensor
 
 from dpvo.mojo_backend import _dpvo_mojo as _ext
@@ -38,7 +38,7 @@ def launch(op: str, scalars: tuple[int | float, ...], tensors: Sequence[Tensor])
             getattr(_ext, f"{op}_gpu")(_runtime(True), (_current_raw_stream(0), *scalars), specs)
         case "mps":
             torch.mps.synchronize()
-            specs = tuple((gpu_address(t), *t.shape) for t in tensors)
+            specs = tuple((address, *t.shape) for address, t in zip(gpu_addresses(tensors), tensors, strict=True))
             getattr(_ext, f"{op}_gpu")(_runtime(True), (0, *scalars), specs)
         case _:
             raise RuntimeError(f"dpvo.mojo_backend supports CPU, CUDA and MPS tensors, got {device}")

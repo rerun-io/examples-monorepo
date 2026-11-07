@@ -21,7 +21,7 @@ import torch
 from conftest import DEVICES, DTYPES
 from torch import Tensor
 
-from lietorch_mojo.metal import gpu_address
+from lietorch_mojo.metal import gpu_addresses
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 MOJO_DIR: Path = PACKAGE_DIR / "lietorch_mojo" / "mojo"
@@ -61,7 +61,7 @@ def _math_probe(probe: ModuleType, x: Tensor) -> Tensor:
         probe.probe_cuda(is_f64, xc.shape[0], xc.data_ptr(), out.data_ptr())
     elif xc.is_mps:
         torch.mps.synchronize()
-        probe.probe_cuda(is_f64, xc.shape[0], gpu_address(xc), gpu_address(out))
+        probe.probe_cuda(is_f64, xc.shape[0], *gpu_addresses((xc, out)))
     else:
         probe.probe_cpu(is_f64, xc.shape[0], xc.data_ptr(), out.data_ptr())
     return out
