@@ -733,6 +733,8 @@ description = "Run the gradio app in dev mode"
 platforms = ["linux-64"]
 
 [feature.prompt-da-stream.dependencies]
+# arkitscenes_download and the depth PNG writers here use depth_png (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 imagecodecs = ">=2024.9.22"
 # arkitscenes_download.ingest imports these at package load.
 trimesh = "*"
@@ -825,6 +827,7 @@ platforms = ["linux-64"]
 [feature.zipdepth-catalog.dependencies]
 # arkitscenes_download.ingest imports these at package load.
 imagecodecs = ">=2024.9.22"
+depth-png = { path = "packages/depth-png" }
 trimesh = "*"
 pillow = "*"
 av = ">=18"
@@ -3105,6 +3108,8 @@ platforms = ["linux-64"]
 
 [feature.arkitscenes-download.dependencies]
 python = "3.12.*"
+# Depth PNG encode/decode (Up filter, Rust): packages/depth-png.
+depth-png = { path = "packages/depth-png" }
 ffmpeg = ">=8.1"
 imagecodecs = ">=2024.9.22"
 trimesh = "*"
@@ -3172,6 +3177,8 @@ description = "Open the native Rerun viewer on the local catalog"
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.gauss-surf.dependencies]
+# arkitscenes_download and the depth PNG writers here use depth_png (packages/depth-png).
+depth-png = { path = "packages/depth-png" }
 # Pinned to match the pyrefly site-package-path registration (python3.12).
 python = "3.12.*"
 # Open3D RaycastingScene renders ultrawide depth from the PromptDA TSDF mesh.

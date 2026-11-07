@@ -14,7 +14,7 @@ pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.
 pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
 
-from arkitscenes_download.ingest.depth import encode_depth_png
+import depth_png
 
 from gauss_surf.uw_geometry import (
     build_brown_conrady_undistortion,
@@ -211,7 +211,7 @@ def test_depth_png_preserves_zero_sentinel_and_clamps_uint16_overflow() -> None:
     )
 
     depth_mm_hw: UInt16[ndarray, "h=2 w=3"] = depth_meters_to_uint16_mm(depth_m_hw)
-    png_bytes: bytes = encode_depth_png(depth_mm_hw)
+    png_bytes: bytes = depth_png.encode(np.ascontiguousarray(depth_mm_hw))
     with Image.open(BytesIO(png_bytes)) as image:
         decoded_mm_hw: UInt16[ndarray, "h=2 w=3"] = np.asarray(image, dtype=np.uint16)
 
