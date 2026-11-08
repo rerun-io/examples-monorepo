@@ -26,7 +26,6 @@ object pointers are cloned here).
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,17 +66,16 @@ class _Captured:
 class SteadyTickGraphs:
     """Cache of CUDA graphs for the steady batched tick, keyed by memory structure."""
 
-    def __init__(self, predictor: Any, video_hw: tuple[int, int], max_graphs: int = 6) -> None:
+    def __init__(self, predictor: Any, video_hw: tuple[int, int]) -> None:
         if predictor.add_tpos_enc_to_obj_ptrs:
             raise ValueError("pointer temporal encodings depend on frame offsets; CUDA graphs unsupported")
         self.predictor: Any = predictor
         self.video_hw: tuple[int, int] = video_hw
-        self.max_graphs: int = max_graphs
-        self._graphs: OrderedDict[GraphKey, _Captured] = OrderedDict()
-        self._last_key: GraphKey | None = None
+        self._graphs: dict[GraphKey, _Captured] = {}
         self.replays: int = 0
         self.captures: int = 0
-        self.misses: int = 0
+        self.misses: dict[GraphKey, int] = {}
+        """Ticks that ran eagerly, per memory structure without a graph."""
 
     def _body(
         self,
@@ -154,34 +152,65 @@ class SteadyTickGraphs:
             "obj_scores_logits": result.obj_score_logits,
         }
 
-    def _capture(
-        self, key: GraphKey, frames: list[UInt8[torch.Tensor, "3 h w"]], selections: list[Any]
-    ) -> _Captured:
-        """Allocate static inputs, warm up on a side stream, then capture."""
-        n_cond, n_noncond, n_ptr, _ = key
-        n_cams: int = len(frames)
-        first = selections[0]
-        ref = (first.conditional_memories + first.non_conditional_memories)[0]
-        n_spatial: int = n_cond + n_noncond
-        static_frames = frames[0].new_empty((n_cams, *frames[0].shape))
-        mem_emb = ref.memory_embeddings.new_empty((n_spatial * n_cams, *ref.memory_embeddings.shape[1:]))
-        mem_pos = ref.memory_pos_embeddings.new_empty((n_spatial * n_cams, *ref.memory_pos_embeddings.shape[1:]))
-        ptr_ref: torch.Tensor = first.ptr_memories[0].ptr if n_ptr else ref.ptr
-        ptrs = ptr_ref.new_empty((n_ptr * n_cams, *ptr_ref.shape[1:]))
-        self._fill(static_frames, mem_emb, mem_pos, ptrs, frames, selections)
+    def _probe(self, frames: UInt8[torch.Tensor, "c 3 h w"]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One memory-free eager pass: the bank's memory and pointer dtypes/shapes."""
+        p: Any = self.predictor
+        n_cams: int = frames.shape[0]
+        sparse, dense = p.empty_prompt_embeddings
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            emb, _ = p.encode_image(frames)
+            result = p.generate_masks(
+                orig_hw=self.video_hw,
+                img_embeddings=emb,
+                prompt_embeddings=(sparse.expand(n_cams, -1, -1), dense.expand(n_cams, -1, -1, -1)),
+                multimask_output=True,
+            )
+            mem, mem_pos = p.encode_memory(
+                img_embeddings=emb,
+                masks_logits=result.best_mask_logits,
+                obj_score_logits=result.obj_score_logits,
+                is_prompt=torch.zeros(n_cams, dtype=torch.bool, device=frames.device),
+            )
+        return mem[:1], mem_pos[:1], result.obj_ptrs[:1]
 
+    def precapture(self, n_cams: int, structures: list[tuple[int, int, int]]) -> None:
+        """Capture one graph per memory structure ``(n_cond, n_noncond, n_ptr)``.
+
+        Call it while no other thread uses the GPU (tracker construction).
+        A capture cannot overlap the fit worker: CUDA rejects that thread's
+        torch.cuda.synchronize() while any stream captures, in every capture
+        mode, and the error invalidates this capture too.
+        """
+        p: Any = self.predictor
+        h, w = self.video_hw
+        frames = torch.zeros((n_cams, 3, h, w), dtype=torch.uint8, device=p.device)
+        mem_ref, pos_ref, ptr_ref = self._probe(frames)
+        pool = torch.cuda.graph_pool_handle()
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(side):
-            for _ in range(2):
+        for n_cond, n_noncond, n_ptr in structures:
+            key: GraphKey = (n_cond, n_noncond, n_ptr, mem_ref.dtype)
+            n_spatial: int = n_cond + n_noncond
+            mem_emb = mem_ref.new_zeros((n_spatial * n_cams, *mem_ref.shape[1:]))
+            mem_pos = pos_ref.new_zeros((n_spatial * n_cams, *pos_ref.shape[1:]))
+            ptrs = ptr_ref.new_zeros((n_ptr * n_cams, *ptr_ref.shape[1:]))
+            static_frames = torch.zeros_like(frames)
+            with torch.cuda.stream(side):
+                # Side-stream warmup per the torch CUDA-graph recipe.
                 self._body(static_frames, mem_emb, mem_pos, ptrs, n_cond, n_ptr)
+                graph = torch.cuda.CUDAGraph()
+                # One pool for all graphs: they replay serially on one
+                # stream and each tick consumes its outputs before the
+                # next replay, so sharing temporaries is safe.
+                graph.capture_begin(pool=pool, capture_error_mode="thread_local")
+                try:
+                    out = self._body(static_frames, mem_emb, mem_pos, ptrs, n_cond, n_ptr)
+                finally:
+                    graph.capture_end()
+            self._graphs[key] = _Captured(graph, static_frames, mem_emb, mem_pos, ptrs, out)
+            self.captures += 1
         torch.cuda.current_stream().wait_stream(side)
-        graph = torch.cuda.CUDAGraph()
-        # thread_local: the fit/decode threads keep launching while we capture.
-        with torch.cuda.graph(graph, stream=side, capture_error_mode="thread_local"):
-            out = self._body(static_frames, mem_emb, mem_pos, ptrs, n_cond, n_ptr)
-        self.captures += 1
-        return _Captured(graph, static_frames, mem_emb, mem_pos, ptrs, out)
+        torch.cuda.synchronize()
 
     @staticmethod
     def _fill(
@@ -215,14 +244,12 @@ class SteadyTickGraphs:
         """Run one steady tick from a graph and update the memory banks.
 
         Returns None (nothing run, banks untouched) when the tick cannot be
-        batched or its memory structure has no graph yet; a structure seen on
-        two consecutive ticks is captured on the second.
+        batched or its memory structure has no precaptured graph.
         """
         from sam2.modeling.sam2_result import SAM2Result
 
         selections: list[Any] | None = select_aligned_memories(self.predictor, states, frame_idx)
         if selections is None:
-            self._last_key = None
             return None
         first = selections[0]
         spatial = first.conditional_memories + first.non_conditional_memories
@@ -234,18 +261,9 @@ class SteadyTickGraphs:
         )
         captured: _Captured | None = self._graphs.get(key)
         if captured is None:
-            if key != self._last_key:
-                self._last_key = key
-                self.misses += 1
-                return None
-            captured = self._capture(key, frames, selections)
-            self._graphs[key] = captured
-            if len(self._graphs) > self.max_graphs:
-                self._graphs.popitem(last=False)
-        else:
-            self._graphs.move_to_end(key)
-            self._fill(captured.frames, captured.mem_emb, captured.mem_pos, captured.ptrs, frames, selections)
-        self._last_key = key
+            self.misses[key] = self.misses.get(key, 0) + 1
+            return None
+        self._fill(captured.frames, captured.mem_emb, captured.mem_pos, captured.ptrs, frames, selections)
         captured.graph.replay()
         self.replays += 1
 
@@ -269,3 +287,54 @@ class SteadyTickGraphs:
             )
             state.memory_bank.prune_memories(obj_ids=[0], current_frame_idx=frame_idx)
         return SteadyTickOutputs(masks=out["masks"].clone(), stats=out["stats"])
+
+
+def steady_structures(predictor: Any, empty_bank: Any, max_conditional: int, ticks_per_prompt: int = 12) -> list[GraphKey]:
+    """Memory structures ``(n_cond, n_noncond, n_ptr)`` a single-object stream visits.
+
+    Replays a synthetic stream (a prompt, then ``ticks_per_prompt`` propagated
+    ticks, repeated ``max_conditional`` times) through a copy of the real
+    memory bank, so the bank's own selection rules (window, pruning, pointer
+    selection) decide the counts. The ramp right after bootstrap, while
+    fewer than ``num_maskmem - 2`` non-conditional memories exist, visits each
+    structure once and is left to the eager path. Dtype is filled in later.
+    """
+    import copy
+
+    from sam2.modeling.sam2_prompt import SAM2Prompt
+    from sam2.modeling.sam2_result import SAM2Result
+
+    bank = copy.deepcopy(empty_bank)
+    z4 = torch.zeros(1, 1, 1, 1)
+    z2 = torch.zeros(1, 1)
+    prompt = SAM2Prompt(obj_id=0, boxes=torch.zeros(1, 4))
+    min_noncond: int = predictor.num_maskmem - 2
+    keys: list[tuple[int, int, int]] = []
+    frame: int = 0
+    for _ in range(max_conditional):
+        for tick in range(ticks_per_prompt + 1):
+            is_prompt: bool = tick == 0
+            if not is_prompt:
+                sel = bank.select_memories(
+                    obj_ids=[0],
+                    current_frame_idx=frame,
+                    max_conditional_memories=predictor.max_cond_frames_in_attn,
+                    max_non_conditional_memories=predictor.num_maskmem - 1,
+                    max_ptr_memories=predictor.max_obj_ptrs_in_encoder,
+                    only_include_pointers_in_past=predictor.only_obj_ptrs_in_the_past_for_eval,
+                    reverse_tracking=False,
+                )[0]
+                key = (len(sel.conditional_memories), len(sel.non_conditional_memories), len(sel.ptr_memories))
+                if key[1] >= min_noncond and key not in keys:
+                    keys.append(key)
+            bank.try_add_memories(
+                frame_idx=frame,
+                obj_ids=[0],
+                memory_embeddings=z4,
+                memory_pos_embeddings=z4,
+                results=SAM2Result(masks_logits=z4, ious=z2, obj_ptrs=z2, obj_scores_logits=z2),
+                prompts=[prompt] if is_prompt else [],
+            )
+            bank.prune_memories(obj_ids=[0], current_frame_idx=frame)
+            frame += 1
+    return keys  # type: ignore[return-value]

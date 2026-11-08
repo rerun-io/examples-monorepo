@@ -25,7 +25,6 @@ from numpy import ndarray
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
 from mamma.tracking.detection import PersonDetections, PersonDetector, bbox_iou_xyxy
-from mamma.tracking.steady_graph import SteadyTickGraphs, SteadyTickOutputs
 from mamma.tracking.identity import (
     ClipEncoder,
     FeatureBank,
@@ -34,6 +33,7 @@ from mamma.tracking.identity import (
     fundamental_matrix,
     resolve_epipolar_px,
 )
+from mamma.tracking.steady_graph import SteadyTickGraphs, SteadyTickOutputs, steady_structures
 
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP+epipolar score to accept a cross-camera bootstrap match."""
@@ -123,7 +123,10 @@ class TrackerConfig:
     cuda_graph: bool = False
     """Replay the steady-state batched tick (single object, no prompts) from a
     CUDA graph per memory structure instead of ~1200 eager launches. Prompt,
-    re-detect, multi-object, and first-seen-structure ticks stay eager."""
+    re-detect, multi-object, and non-precaptured-structure ticks stay eager."""
+    cuda_graph_max_conditional: int = 4
+    """Graphs are captured at construction for 1..N conditional memories (one
+    per prompt tick: bootstrap + each re-prompt); later ticks run eagerly."""
     device: str = "cuda"
     """Compute device."""
 
@@ -151,9 +154,6 @@ class MultiViewTracker:
             self.predictor.empty_prompt_embeddings = tuple(
                 t.to(config.device) for t in self.predictor.empty_prompt_embeddings
             )
-        self._graphs: SteadyTickGraphs | None = (
-            SteadyTickGraphs(self.predictor, self._video_hw) if config.cuda_graph else None
-        )
         self._states = [
             SAM2GenericVideoPredictorState.create(
                 video_hw=self._video_hw,
@@ -165,6 +165,15 @@ class MultiViewTracker:
             )
             for _ in cameras
         ]
+        self._graphs: SteadyTickGraphs | None = None
+        if config.cuda_graph:
+            # Captured now, before the pipeline starts its worker threads.
+            self._graphs = SteadyTickGraphs(self.predictor, self._video_hw)
+            structures = steady_structures(
+                self.predictor, self._states[0].memory_bank, config.cuda_graph_max_conditional
+            )
+            with torch.inference_mode():
+                self._graphs.precapture(len(cameras), structures)
         self.detector: PersonDetector = PersonDetector(config.yolo_checkpoint, device=config.device)
         self.encoder: ClipEncoder = ClipEncoder(device=config.device)
         self.bank: FeatureBank = FeatureBank()
