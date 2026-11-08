@@ -30,6 +30,14 @@ def test_sample_count_must_match_timestamps() -> None:
         log_depth_video("depth", [b"a", b"b"], np.array([0], np.int64), DepthVideoProperties(meter=1000.0), recording=rec)
 
 
+def test_decreasing_timestamps_are_rejected() -> None:
+    rec = rr.RecordingStream("depth_video_viewer_test")
+    props = DepthVideoProperties(meter=1000.0)
+    with pytest.raises(ValueError, match="timestamps decrease"):
+        log_depth_video("depth", [b"a", b"b", b"c"], np.array([0, 2, 1], np.int64), props, recording=rec)
+    log_depth_video("depth", [b"a", b"b"], np.array([1, 1], np.int64), props, recording=rec)  # equal times keep their order
+
+
 def test_timestamps_survive_an_rrd_round_trip(tmp_path: Path) -> None:
     # Nanosecond timestamps that a float64 in seconds cannot hold exactly.
     times = np.array([1_700_000_000_123_456_789, 1_700_000_000_156_790_123], np.int64)

@@ -1,17 +1,21 @@
+from pathlib import Path
+
 import numpy as np
-import pytest
+import rerun as rr
+import rerun.chunk as rrc
 
-from depth_video_viewer.apis.comparison import to_codes
-
-
-def test_codes_are_linear_in_depth_with_zero_kept_as_no_depth() -> None:
-    depth = np.array([[[0, 1023, 2046]]], np.uint16)
-    codes, unit = to_codes(depth)
-    assert unit == 2.0
-    assert codes.tolist() == [[[0, 512, 1023]]]
+from depth_video_viewer.apis.comparison import png_u16, read_depth_pngs
 
 
-def test_positive_depths_that_would_become_no_depth_are_rejected() -> None:
-    # unit = 3000 / 1023 mm, so 1 mm rounds to code 0.
-    with pytest.raises(ValueError, match="1 depths below"):
-        to_codes(np.array([[[0, 1, 3000]]], np.uint16))
+def test_depth_pngs_come_back_byte_exact_in_time_order(tmp_path: Path) -> None:
+    pngs = [png_u16(np.full((4, 6), v, np.uint16)) for v in (7, 300, 1023)]
+    times = np.array([20, 0, 10], np.int64)
+    path = tmp_path / "depth.rrd"
+    rec = rr.RecordingStream("depth_video_viewer_test")
+    rec.save(path)
+    rr.send_columns("cam/depth", indexes=[rr.TimeColumn("video_time", duration=times.astype("timedelta64[ns]"))],
+                    columns=rr.EncodedDepthImage.columns(blob=pngs), recording=rec)  # fmt: skip
+    rec.disconnect()
+    read_times, read_pngs = read_depth_pngs(list(rrc.RrdReader(path).store().stream()), "/cam/depth", "video_time")
+    assert read_times.tolist() == [0, 10, 20]
+    assert read_pngs == [pngs[1], pngs[2], pngs[0]]
