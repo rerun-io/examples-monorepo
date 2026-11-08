@@ -169,9 +169,8 @@ class MultiViewTracker:
         # The fork builds these before the model moves to the GPU; keep them
         # resident so no tick pays (or graph-captures) a host->device copy.
         with torch.inference_mode():
-            self.predictor.empty_prompt_embeddings = tuple(
-                t.to(config.device) for t in self.predictor.empty_prompt_embeddings
-            )
+            sparse, dense = self.predictor.empty_prompt_embeddings
+            self.predictor.empty_prompt_embeddings = (sparse.to(config.device), dense.to(config.device))
         self._states = [
             SAM2GenericVideoPredictorState.create(
                 video_hw=self._video_hw,

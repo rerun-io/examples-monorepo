@@ -34,8 +34,10 @@ from jaxtyping import Bool, Float32, UInt8
 
 from mamma.tracking.batched_forward import first_hypothesis_stats, select_aligned_memories
 
+Structure = tuple[int, int, int]
+"""(n_conditional, n_non_conditional, n_pointer) memories selected for a tick."""
 GraphKey = tuple[int, int, int, torch.dtype]
-"""(n_conditional, n_non_conditional, n_pointer, memory dtype)."""
+"""A ``Structure`` plus the memory dtype."""
 
 
 @dataclass(slots=True)
@@ -173,7 +175,7 @@ class SteadyTickGraphs:
             )
         return mem[:1], mem_pos[:1], result.obj_ptrs[:1]
 
-    def precapture(self, n_cams: int, structures: list[tuple[int, int, int]]) -> None:
+    def precapture(self, n_cams: int, structures: list[Structure]) -> None:
         """Capture one graph per memory structure ``(n_cond, n_noncond, n_ptr)``.
 
         Call it while no other thread uses the GPU (tracker construction).
@@ -223,11 +225,8 @@ class SteadyTickGraphs:
     ) -> None:
         """Copy this tick's frames and memories into the static input buffers."""
         torch.stack(frames, dim=0, out=static_frames)
-        spatial = [
-            [sel.conditional_memories[k] for sel in selections] for k in range(len(selections[0].conditional_memories))
-        ] + [
-            [sel.non_conditional_memories[k] for sel in selections]
-            for k in range(len(selections[0].non_conditional_memories))
+        spatial = [[sel.conditional_memories[k] for sel in selections] for k in range(len(selections[0].conditional_memories))] + [
+            [sel.non_conditional_memories[k] for sel in selections] for k in range(len(selections[0].non_conditional_memories))
         ]
         torch.cat([m.memory_embeddings for per_cam in spatial for m in per_cam], dim=0, out=mem_emb)
         torch.cat([m.memory_pos_embeddings for per_cam in spatial for m in per_cam], dim=0, out=mem_pos)
@@ -238,9 +237,7 @@ class SteadyTickGraphs:
                 out=ptrs,
             )
 
-    def step(
-        self, states: list[Any], frame_idx: int, frames: list[UInt8[torch.Tensor, "3 h w"]]
-    ) -> SteadyTickOutputs | None:
+    def step(self, states: list[Any], frame_idx: int, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> SteadyTickOutputs | None:
         """Run one steady tick from a graph and update the memory banks.
 
         Returns None (nothing run, banks untouched) when the tick cannot be
@@ -289,7 +286,7 @@ class SteadyTickGraphs:
         return SteadyTickOutputs(masks=out["masks"].clone(), stats=out["stats"])
 
 
-def steady_structures(predictor: Any, empty_bank: Any, max_conditional: int, ticks_per_prompt: int = 12) -> list[GraphKey]:
+def steady_structures(predictor: Any, empty_bank: Any, max_conditional: int, ticks_per_prompt: int = 12) -> list[Structure]:
     """Memory structures ``(n_cond, n_noncond, n_ptr)`` a single-object stream visits.
 
     Replays a synthetic stream (a prompt, then ``ticks_per_prompt`` propagated
@@ -297,7 +294,7 @@ def steady_structures(predictor: Any, empty_bank: Any, max_conditional: int, tic
     memory bank, so the bank's own selection rules (window, pruning, pointer
     selection) decide the counts. The ramp right after bootstrap, while
     fewer than ``num_maskmem - 2`` non-conditional memories exist, visits each
-    structure once and is left to the eager path. Dtype is filled in later.
+    structure once and is left to the eager path.
     """
     import copy
 
@@ -309,7 +306,7 @@ def steady_structures(predictor: Any, empty_bank: Any, max_conditional: int, tic
     z2 = torch.zeros(1, 1)
     prompt = SAM2Prompt(obj_id=0, boxes=torch.zeros(1, 4))
     min_noncond: int = predictor.num_maskmem - 2
-    keys: list[tuple[int, int, int]] = []
+    keys: list[Structure] = []
     frame: int = 0
     for _ in range(max_conditional):
         for tick in range(ticks_per_prompt + 1):
@@ -337,4 +334,4 @@ def steady_structures(predictor: Any, empty_bank: Any, max_conditional: int, tic
             )
             bank.prune_memories(obj_ids=[0], current_frame_idx=frame)
             frame += 1
-    return keys  # type: ignore[return-value]
+    return keys
