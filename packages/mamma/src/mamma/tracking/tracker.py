@@ -131,6 +131,11 @@ class TrackerConfig:
     """Rotary position encoding in one Triton kernel per q/k (memory attention
     12.3 -> 8.1 ms GPU per batched tick, identical output) instead of five
     fp32/complex passes. Process-wide switch for the vendored sam2 fork."""
+    compile_image_encoder: bool = False
+    """torch.compile (inductor, static shapes) the SAM2 image encoder: fuses its
+    window-partition copies, casts and norms (8.4 -> 5.1 ms GPU per B=4
+    encode) at ~10 s first-build compile. Not bit-identical: inductor skips
+    intermediate bf16 rounding (feature mean |diff| ~1.5% of mean |x|)."""
     device: str = "cuda"
     """Compute device."""
 
@@ -152,6 +157,9 @@ class MultiViewTracker:
             config.sam2_config, str(config.sam2_checkpoint), device=config.device
         )
         _disable_dead_hole_filling(self.predictor)
+        if config.compile_image_encoder:
+            encoder = self.predictor.image_encoder
+            encoder.forward = torch.compile(encoder.forward, dynamic=False)
         if config.fused_rope:
             from sam2.modeling import fused_rope
 
