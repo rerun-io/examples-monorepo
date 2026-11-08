@@ -2201,9 +2201,8 @@ numpy = "*"
 jaxtyping = "*"
 pillow = "*"
 tyro = ">=0.9.1,<0.10"
-rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }  # matches the viewer's =0.42.0 re_viewer crates
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }  # pin-bump: hold — matches the viewer's =0.42.0 re_viewer crates
 python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) would take 4.x
-pandas = ">=2.3.3"
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
 libudev = "257.*"
 libxkbcommon = "*"

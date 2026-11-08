@@ -333,9 +333,10 @@ To bump, in one change:
    `rerun-sdk` run dependency in `packages/slam-rs/recipe.yaml`;
 2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately;
 3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
-   `packages/robocap-live`, `packages/slam-rs` and the gsplat custom viewer
-   (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`; re-lock its Cargo with
-   `cargo update -p <crate>@<old>` for the re_* family, not a blanket update), or the viewer
+   `packages/robocap-live`, `packages/slam-rs`, the gsplat custom viewer
+   (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`) and the depth-video viewer
+   (`packages/depth-video-viewer/Cargo.toml`); re-lock their Cargo with
+   `cargo update -p <crate>@<old>` for the re_* family, not a blanket update, or the viewer
    silently loses protocol/tooling parity;
 4. re-lock Pixi on linux-64 and Cargo.
 
@@ -345,7 +346,8 @@ the viewer's Rust port. Brush stays on its own glam; the viewer converts at the 
 
 Several lanes restate the exact pin rather than composing `common`:
 `[feature.mv-api-catalog-register-mac]` and `[feature.slam-rs-osx]` (macOS),
-`[feature.agent-traces]` (torch-free) and `[feature.selfcap-soma]`. They are tagged
+`[feature.agent-traces]` (torch-free), `[feature.selfcap-soma]` and `[feature.depth-video-viewer]`
+(moves with its viewer's `re_*` crates). They are tagged
 `# pin-bump: hold`; a bump that misses one leaves that lane a release behind, and for
 the Mac lanes no linux gate and no `pixi lock --check` can see it.
 

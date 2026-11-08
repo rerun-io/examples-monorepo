@@ -4416,7 +4416,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/openjpeg-2.5.4-heb1ab33_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/orc-2.3.1-hdc56c17_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/pandas-3.1.1-np2py312h91ec553_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pango-1.58.2-h2f58602_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pcre2-10.47-h8b3dc9c_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pillow-13.0.0-py312h38079b3_0.conda
@@ -4716,7 +4715,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/openjpeg-2.5.4-h504851f_2.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/openssl-3.6.5-he6ad1d5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/orc-2.3.1-h8700781_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-aarch64/pandas-3.1.1-np2py312h45f7807_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/pango-1.58.2-ha8baf52_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/pcre2-10.47-he574923_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/pillow-13.0.0-py312h7f6b78e_0.conda
@@ -5032,7 +5030,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/openjpeg-2.5.4-heb1ab33_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/orc-2.3.1-hdc56c17_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/pandas-3.1.1-np2py312h91ec553_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pango-1.58.2-h2f58602_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pcre2-10.47-h8b3dc9c_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pillow-13.0.0-py312h38079b3_0.conda
@@ -5344,7 +5341,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/openjpeg-2.5.4-h504851f_2.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/openssl-3.6.5-he6ad1d5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/orc-2.3.1-h8700781_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-aarch64/pandas-3.1.1-np2py312h45f7807_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/pango-1.58.2-ha8baf52_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/pcre2-10.47-he574923_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/pillow-13.0.0-py312h7f6b78e_0.conda
