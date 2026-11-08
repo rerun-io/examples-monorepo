@@ -24,6 +24,7 @@ project-includes = [
     "packages/dpvo/dpvo/**/*",
     "packages/lietorch-mojo/lietorch_mojo/**/*",
     "packages/vipe-mojo/vipe_mojo/**/*",
+    "packages/hexels-mojo/hexels_mojo/**/*",
     # Vendored SAM 2: only the Mojo wrapper is ours to typecheck (and the package marker the manifest test looks for).
     "packages/sam2-streaming/sam2/__init__.py",
     "packages/sam2-streaming/sam2/mojo_cc.py",
@@ -108,6 +109,7 @@ search-path = [
     "packages/dpvo",
     "packages/lietorch-mojo",
     "packages/vipe-mojo",
+    "packages/hexels-mojo",
     "packages/slam-evals",
     "packages/slam-rs",
     "packages/handfit",
