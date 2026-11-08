@@ -34,9 +34,7 @@ KEYFRAME_MAPS_PATH: Path = Path("/keyframe_maps")
 """Each keyframe's pointmap, confidence and depth, under a static copy of its Pinhole."""
 
 
-# Chase eye of the Follow view (simplecv's follow_eye_controls, the eye_control_example pattern), in the camera frame
-# (RDF: forward +z, up -y). MASt3R's pointmaps are roughly metric: 1.5 m behind and 0.6 m above the camera, aimed
-# 1.5 m ahead of it.
+# Chase eye of the Follow view, in the camera's RDF frame; MASt3R's pointmaps are roughly metric, so metres apply.
 _FOLLOW_EYE: rrb.EyeControls3D = follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=1.5, up_m=0.6, ahead_m=1.5)
 
 

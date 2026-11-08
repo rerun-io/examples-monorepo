@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 
-from mvs.catalog import PINHOLE_LOWRES_PATH, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_source_video
+from mvs.catalog import DEPTH_HW, FRAME_TIMELINE, PINHOLE_LOWRES_PATH, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_source_video
 from mvs.depth_engine import DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
 
@@ -71,7 +71,7 @@ def main(config: Config) -> None:
             segment_frames += 1
             total_frames += 1
             rr.set_time(TIMELINE, duration=np.timedelta64(sample.timestamp_ns, "ns"))
-            rr.set_time("frame", sequence=sample.frame_index)
+            rr.set_time(FRAME_TIMELINE, sequence=sample.frame_index)
 
             # numpy appears only at the rr.log boundary, as zero-copy views of CPU tensors.
             K_native_33: Float32[ndarray, "3 3"] = sample.K_native_33.numpy()
@@ -82,7 +82,13 @@ def main(config: Config) -> None:
             if sample.inputs is not None:
                 depth_outputs: DepthOutputs = engine(sample.inputs)
                 depth_hw: Float32[ndarray, "h=192 w=256"]
-                depth_hw, _ = depth_at_lowres(depth_outputs, K_native_33, native_wh)
+                K_depth_33: Float32[ndarray, "3 3"]
+                depth_hw, K_depth_33 = depth_at_lowres(depth_outputs, K_native_33, native_wh)
+                # The viewer back-projects the depth with its parent's intrinsics: the 256x192 raster's own Pinhole.
+                rr.log(
+                    PINHOLE_LOWRES_PATH,
+                    rr.Pinhole(image_from_camera=K_depth_33, width=DEPTH_HW[1], height=DEPTH_HW[0], camera_xyz=rr.ViewCoordinates.RDF),
+                )
                 depth_mm_hw: UInt16[ndarray, "h=192 w=256"] = np.rint(depth_hw * 1000.0).astype(np.uint16)
                 rr.log(
                     f"{PINHOLE_LOWRES_PATH}/depth",

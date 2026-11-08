@@ -690,9 +690,8 @@ class AsyncRerunLogger:
             intrinsics=pinhole.intrinsics,
         )
 
-        # The image stays under its Pinhole. Moving it out (CoordinateFrame into the Pinhole's frame) would let the
-        # Overview drop all keyframe images with one rule, but in 0.42 any explicit frame breaks the Follow view's
-        # chase camera: it then looks at the whole map from far away.
+        # The image stays under its Pinhole: no explicit CoordinateFrame, which breaks the Follow view (see
+        # simplecv.rerun_eye_controls).
         kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(f"{kf_cam_log_path}/pinhole/image", kf.rgb)
 
         # Pointmap, confidence and depth are 2D-only: under a static copy of the Pinhole, outside the 3D tree.

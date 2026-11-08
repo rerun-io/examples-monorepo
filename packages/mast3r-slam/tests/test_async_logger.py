@@ -186,7 +186,7 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
         "world/current_camera/pinhole/depth",
         "world/keyframes/keyframe-5/pinhole/image",
     }
-    # No explicit CoordinateFrame anywhere: in 0.42 one breaks the Follow view's chase camera.
+    # No explicit CoordinateFrame anywhere (see simplecv.rerun_eye_controls).
     assert not any(kind == "CoordinateFrame" for _, kind, _ in logged)
     for image_path in under_world_2d:
         pinhole_path: str = image_path.rsplit("/", 1)[0]

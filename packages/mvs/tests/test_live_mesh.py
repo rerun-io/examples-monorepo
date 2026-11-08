@@ -36,3 +36,21 @@ def test_depth_raster_rgb_undoes_the_model_normalisation() -> None:
     assert rgb_hw3.shape == (192, 256, 3) and rgb_hw3.dtype.name == "uint8"
     assert rgb_hw3[0, 0].tolist() == [255, 0, 0]
     assert rgb_hw3[0, 255].tolist() == [255, 0, 128]
+
+
+def test_one_segment_per_run() -> None:
+    """Two segments would restart the frame index on the same entity paths and mix their mesh histories."""
+    from mvs.apis.live_mesh import single_segment
+
+    assert single_segment(["41126369"]) == "41126369"
+    for segment_ids in ([], ["41126369", "42899799"]):
+        with pytest.raises(ValueError, match="one segment per recording"):
+            single_segment(segment_ids)
+
+
+def test_fusion_config_rejects_a_log_cadence_below_one() -> None:
+    from mvs.apis.live_mesh import FusionConfig
+
+    assert FusionConfig(log_every=1).log_every == 1
+    with pytest.raises(ValueError, match="log_every"):
+        FusionConfig(log_every=0)
