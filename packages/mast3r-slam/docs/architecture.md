@@ -168,7 +168,7 @@ sequenceDiagram
 
 ### Why not just call a function?
 
-A regular function runs to completion before returning. The Gradio Rerun viewer needs **incremental bytes** after each frame so the user sees real-time progress (camera moving, point cloud growing). A generator lets the tracking loop `yield` after each frame, giving Gradio a chance to send `stream.read()` bytes to the viewer, then resume exactly where it left off.
+A regular function runs to completion before returning. The Gradio Rerun viewer needs **incremental bytes** during the run so the user sees real-time progress (camera moving, point cloud growing). A generator lets the tracking loop `yield`, giving Gradio a chance to send `stream.read()` bytes to the viewer, then resume exactly where it left off. Tracking waits while the caller handles a yield, so the loop yields at most every `STATUS_INTERVAL_S` (0.1 s), not every frame.
 
 Both callers make the same two calls, `load_slam_model(settings)` and `run_slam_pipeline(settings, model)`. `SlamSettings` holds what to run; the CLI's `InferenceConfig(SlamSettings)` adds only the Rerun target (metrictrail's `RunSettings`/`Config` pattern). The CLI doesn't need incremental updates, so it just exhausts the generator:
 
@@ -181,7 +181,7 @@ for _msg in run_slam_pipeline(inf_config, model, rr_application_id=rr_app_id):
 
 ```python
 # Gradio — build_app() loads the model once; @rr.thread_local_stream sets up a
-# per-call recording; stream bytes to the viewer after each frame
+# per-call recording; stream bytes to the viewer on each yield (at most 10 per second)
 settings = SlamSettings(dataset=video_file, subsample=subsample, ns_save_path=run_dir / "nerfstudio-output")
 stream = rr.binary_stream()
 for msg in run_slam_pipeline(settings, model, recording=recording):

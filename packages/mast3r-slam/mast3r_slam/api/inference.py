@@ -155,6 +155,10 @@ class InferenceConfig(SlamSettings):
 
 CURRENT_FRAME_BACKLOG: int = 32
 """Logger events queued before the tracking thread stops enqueueing current frames (map events are always queued)."""
+STATUS_INTERVAL_S: float = 0.1
+"""Shortest wall-clock time between two status yields of :func:`run_slam_pipeline`. Tracking runs inside the generator,
+so the caller's work per yield stalls it: the Gradio app streams the recording to its viewer on every yield, which
+cost about 5 ms per frame when every frame was yielded."""
 
 
 def load_slam_model(settings: SlamSettings, device: str = DEVICE) -> AsymmetricMASt3R:
@@ -221,7 +225,7 @@ def run_slam_pipeline(
             (Gradio).  ``None`` uses the global recording (CLI).
 
     Yields:
-        Status message string after each processed frame.
+        Status message string, at most every ``STATUS_INTERVAL_S`` and after the last frame.
 
     Raises:
         ValueError: If the config asks for calibration and the dataset has none.
@@ -288,6 +292,7 @@ def run_slam_pipeline(
 
         i: int = 0
         fps_timer: float = time.time()
+        last_status: float = 0.0
         start_time: float = timer()
         last_orient_n_kf: int = 0
         prev_edge_count: int = 0
@@ -438,7 +443,9 @@ def run_slam_pipeline(
                 event_queue.put(LogText(path=LOG_PATH, message=f"FPS: {FPS:.1f}"))
             i += 1
 
-            yield f"Processing frame {i}/{n_frames}"
+            if time.monotonic() - last_status >= STATUS_INTERVAL_S or i == n_frames:
+                last_status = time.monotonic()
+                yield f"Processing frame {i}/{n_frames}"
 
         # ── Post-loop: flush logger, log timing, export nerfstudio ────────
         # Nerfstudio export MUST happen before ctx.join() / __exit__ because
