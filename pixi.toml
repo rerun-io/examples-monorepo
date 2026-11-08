@@ -1901,6 +1901,8 @@ platforms = ["linux-64"]
 [feature.mast3r-slam.dependencies]
 # Depth PNGs for catalog and Rerun logging (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
+# The map surface: keyframes re-fused into a sparse colour TSDF, marching-cubes mesh (packages/tsdf-rs).
+tsdf-rs = { path = "packages/tsdf-rs" }
 python = "3.12.*"
 torchcodec = "*"
 ffmpeg = ">=7.1.0"

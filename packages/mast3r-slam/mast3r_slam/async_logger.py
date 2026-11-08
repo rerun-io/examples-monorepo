@@ -47,8 +47,12 @@ from mast3r_slam.log_events import (
     LogTerminate,
     LogText,
 )
+from mast3r_slam.map_surface import KeyframeDepth, fuse_keyframes
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 from mast3r_slam.rerun_log_utils import FRAME_TIMELINE, KEYFRAME_MAPS_PATH, VIDEO_TIMELINE
+
+SURFACE_REFUSE_EVERY_N_KEYFRAMES: int = 5
+"""New keyframes between map-surface re-fuses during a run; the run's end always re-fuses once more."""
 
 # ── Snapshot helpers ──────────────────────────────────────────────────────
 # These create CPU-only event objects from live Frame / SharedKeyframes /
@@ -292,6 +296,10 @@ class AsyncRerunLogger:
         self._conf_thresh: int = 7
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
+        # Map surface inputs per keyframe index, and the keyframe count of the last fused mesh.
+        self._surface_keyframes: dict[int, KeyframeDepth] = {}
+        self._surface_poses: dict[int, Float32[ndarray, "8"]] = {}
+        self._surface_fused_n_kf: int = 0
 
     # ── Context manager ───────────────────────────────────────────────
 
@@ -363,6 +371,8 @@ class AsyncRerunLogger:
 
                 if isinstance(event, LogTerminate):
                     self._drain_queue()
+                    # The final surface, at the backend's final poses.
+                    self._log_surface()
                     break
 
                 self._handle_event(event)
@@ -549,8 +559,23 @@ class AsyncRerunLogger:
                 rr.Transform3D(mat3x3=orient_R, translation=orient_t),
             )
 
+        # Map surface, re-fused every few keyframes (each re-fuse logs the whole mesh again).
+        if len(self._surface_keyframes) - self._surface_fused_n_kf >= SURFACE_REFUSE_EVERY_N_KEYFRAMES:
+            self._log_surface()
+
+    def _log_surface(self) -> None:
+        """Re-fuse every keyframe at its latest pose and log the mesh, replacing the previous one."""
+        if not self._surface_keyframes:
+            return
+        mesh: rr.Mesh3D | None = fuse_keyframes(
+            [(self._surface_keyframes[kf_idx], self._surface_poses[kf_idx]) for kf_idx in sorted(self._surface_keyframes)]
+        )
+        if mesh is not None:
+            rr.log(f"{self._parent_log_path}/mesh", mesh)
+        self._surface_fused_n_kf = len(self._surface_keyframes)
+
     def _log_new_keyframe(self, kf: KeyframeSnapshot) -> None:
-        """Log a keyframe's static data (image, pointcloud, transform) once."""
+        """Log a keyframe once: its camera, its 2D maps, and its input to the map surface."""
         if kf.kf_idx in self._logged_keyframes:
             return
 
@@ -579,13 +604,9 @@ class AsyncRerunLogger:
             intrinsics=pinhole.intrinsics,
         )
 
-        # RGB image
-        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{kf_cam_log_path}/pinhole/image",
-            kf.rgb,
-        )
-
-        # Pointmap, confidence and depth, under a static copy of the keyframe's Pinhole outside the 3D tree.
+        # Image, pointmap, confidence and depth, under a static copy of the keyframe's Pinhole outside the 3D tree.
+        # In 3D the keyframe is its frustum and its share of the fused mesh; a 2D image under the frustum would
+        # also exist before the keyframe does, and every 3D view would report it as lacking a pinhole there.
         kf_maps_path: str = f"{KEYFRAME_MAPS_PATH}/keyframe-{kf.kf_idx}"
         rr.log(
             kf_maps_path,
@@ -597,21 +618,27 @@ class AsyncRerunLogger:
             ),
             static=True,
         )
+        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(f"{kf_maps_path}/image", kf.rgb)
         self._log_pointmap_and_confidence(kf.X_canon, kf.C, kf_maps_path, kf.img_shape[0], kf.img_shape[1])
 
-        # Confidence-filtered point cloud
-        mask: Bool[ndarray, "hw"] = kf.C.squeeze() > self._conf_thresh
-        positions: Float32[ndarray, "num_points 3"] = kf.X_canon
-        colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
-        rr.log(
-            f"{kf_cam_log_path}/pointcloud",
-            rr.Points3D(positions=positions[mask], colors=colors[mask]),
+        # The keyframe's share of the map surface: confidence-filtered depth, re-fused at its latest pose.
+        height: int = kf.img_shape[0]
+        width: int = kf.img_shape[1]
+        confident: Bool[ndarray, "h w"] = kf.C.reshape(height, width) > self._conf_thresh
+        depth_hw: Float32[ndarray, "h w"] = np.where(confident, kf.X_canon[:, 2].reshape(height, width), 0.0).astype(np.float32)
+        assert pinhole.intrinsics.k_matrix is not None, "frame_to_pinhole always sets K"
+        self._surface_keyframes[kf.kf_idx] = KeyframeDepth(
+            depth_hw=depth_hw,
+            k_33=pinhole.intrinsics.k_matrix.astype(np.float32),
+            rgb_hw3=kf_rgb_uint8,
         )
+        self._surface_poses[kf.kf_idx] = kf.world_sim3_cam_data
 
         self._logged_keyframes.add(kf.kf_idx)
 
         # Update last-keyframe 2D view
         self._log_last_keyframe(kf)
+
     def _log_last_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log the last keyframe's image and pointmap to the 2D view."""
         lk_path: str = f"{self._parent_log_path}/last_keyframe"
@@ -626,6 +653,8 @@ class AsyncRerunLogger:
 
     def _relog_keyframe_camera(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
         """Replay a keyframe camera update after backend refinement using cached intrinsics."""
+        if kf_idx in self._surface_poses:
+            self._surface_poses[kf_idx] = world_sim3_cam_data
         kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
         cached_pinhole: PinholeParameters | None = self._keyframe_pinhole_static.get(kf_idx)
         if cached_pinhole is None:

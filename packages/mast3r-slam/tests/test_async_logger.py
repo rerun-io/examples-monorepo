@@ -154,7 +154,7 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
 
 
 def test_keyframe_maps_live_outside_the_3d_tree(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A keyframe's pointmap, confidence and depth sit under /keyframe_maps, so the static `+ /world/**` 3D rule never draws them."""
+    """A keyframe's image, pointmap, confidence and depth sit under /keyframe_maps, so no 3D view draws them."""
     logged_paths: list[str] = []
     monkeypatch.setattr(async_logger.rr, "log", lambda path, *_a, **_k: logged_paths.append(str(path)))
     monkeypatch.setattr(async_logger.rr, "set_time", lambda *_a, **_k: None)
@@ -170,8 +170,10 @@ def test_keyframe_maps_live_outside_the_3d_tree(monkeypatch: pytest.MonkeyPatch)
             img_shape=(H, W),
         )
     )
-    for name in ("pointmap", "confidence", "pointmap_depth"):
+    for name in ("image", "pointmap", "confidence", "pointmap_depth"):
         assert f"/keyframe_maps/keyframe-5/{name}" in logged_paths
     assert "/keyframe_maps/keyframe-5" in logged_paths  # its static Pinhole
-    assert not any(path.startswith("world/keyframes/keyframe-5/pinhole/") and path != "world/keyframes/keyframe-5/pinhole/image" for path in logged_paths)
-    assert "world/keyframes/keyframe-5/pointcloud" in logged_paths
+    # In the 3D tree a keyframe is only its camera: no 2D entity that exists before its Pinhole does.
+    assert not any(path.startswith("world/keyframes/keyframe-5/pinhole/") for path in logged_paths)
+    # The map is a fused TSDF mesh now, not a point cloud per keyframe.
+    assert "world/keyframes/keyframe-5/pointcloud" not in logged_paths

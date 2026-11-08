@@ -29529,6 +29529,7 @@ environments:
       - conda_source: asmk-src[d556df31] @ recipes/asmk-src
       - conda_source: depth-png[21849d2e] @ packages/depth-png
       - conda_source: mast3r-src[d2a36135] @ recipes/mast3r-src
+      - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/mast3r-slam
       - pypi: ./packages/simplecv
@@ -30206,6 +30207,7 @@ environments:
       - conda_source: asmk-src[d556df31] @ recipes/asmk-src
       - conda_source: depth-png[21849d2e] @ packages/depth-png
       - conda_source: mast3r-src[d2a36135] @ recipes/mast3r-src
+      - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/mast3r-slam
       - pypi: ./packages/simplecv
