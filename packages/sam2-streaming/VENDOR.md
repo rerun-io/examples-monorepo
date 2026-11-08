@@ -28,9 +28,8 @@
     four `*_hf` builders, `_hf_download`, the HF id→filename map).
   - Removed dead in-fork code: `SAM2GenericVideoPredictorVOS` + the `vos_optimized`
     builder branch, and the training-only `Hiera.get_layer_id`/`get_num_layers`.
-  - Kept (load-bearing): all model config YAMLs, the `hiera` + `vitdet` backbones,
-    the `_C` connected-components extension, and the `SAM2ObjectMemoryBank`
-    default-factory import.
+  - Kept (load-bearing): all model config YAMLs, the `hiera` + `vitdet` backbones
+    and the `SAM2ObjectMemoryBank` default-factory import.
   - Further YAGNI polish still possible (other dead in-`misc.py`/decoder branches).
 - **Removed (repo-size only, no runtime impact)**: `demo/`, `notebooks/`,
   `sav_dataset/`, `assets/`, `training/`, `tools/`, `backend.Dockerfile`,
@@ -39,9 +38,6 @@
   `INSTALL.md`, `RELEASE_NOTES.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`) and
   the dangling `configs/sam2.1_training/` finetune YAML (training code already
   removed; never composed on the inference path).
-- **Install note**: `pyproject.toml` build-system requires `torch>=2.5.1` at
-  build time → this package must be listed under `[pypi-options]
-  no-build-isolation` in the root `pixi.toml`.
 - **Known gotcha**: the EfficientTAM yaml configs declare
   `_target_: sam2.modeling.efficienttam_base.EfficientTAMBase`, which does not
   exist — EfficientTAM checkpoints only work through the `build_sam2_generic*`
@@ -62,3 +58,13 @@
   which indexed a Python list with a list of `ObjectMemory` instances, and copy
   the stored non-conditional list before appending unselected conditional
   memories so a read-only selection no longer mutates the bank.
+- Connected components (`sam2/csrc/connected_components.cu`, the `_C` extension, and
+  `setup.py`, which only built it): ported to Mojo in `sam2/mojo/` (`sam2._sam2_mojo`,
+  wrapper `sam2/mojo_cc.py`; build: `pixi run -e sam2-streaming-dev sam2-mojo-build`).
+  The CUDA extension never built against torch 2.12, so every caller ran without
+  upstream's 8-pixel hole fill (each frame raised inside `get_connected_components`,
+  warned and skipped). `build_sam2_generic_video_predictor` keeps that behaviour by
+  default and takes `fill_holes=True` for upstream's fill on the Mojo kernel; the
+  labels and areas are bit-exact against `cv2.connectedComponentsWithStats`
+  (8-connectivity), the label being each component's smallest 2x2-block index + 1
+  as in CUDA.

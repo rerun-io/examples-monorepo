@@ -16,6 +16,7 @@ from jaxtyping import UInt8
 from simplecv.video_io import TorchCodecMultiVideoReader
 
 from mamma.calibration.npz_contract import CameraCalibration
+from mamma.capture_lock import GRAPH_CAPTURE_LOCK
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.profiler import StageProfiler
 from mamma.engine.types import CameraTracks
@@ -63,6 +64,14 @@ class PipelineStats:
     """Per-stage timing breakdown."""
     decode_backend: str
     """Which decoder produced the frames; see :func:`decode_backend`."""
+    tick_end_s: list[float] = field(default_factory=list, repr=False)
+    """Main-thread completion time of each tick, seconds since the loop start."""
+
+    def steady_ticks_per_s(self, skip: int) -> float:
+        """Throughput after the first ``skip`` ticks (bootstrap, graph capture)."""
+        if len(self.tick_end_s) <= skip + 1:
+            return self.ticks_per_s
+        return (len(self.tick_end_s) - 1 - skip) / (self.tick_end_s[-1] - self.tick_end_s[skip])
 
     @property
     def ticks_per_s(self) -> float:
@@ -132,6 +141,7 @@ class StreamingPipeline:
         fitting: FittingStage | None = None,
         collector: ResultCollector | None = None,
         engine_hw: tuple[int, int] | None = None,
+        observe_tracked_only: bool = False,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
         self.reader: TorchCodecMultiVideoReader = reader
@@ -147,6 +157,11 @@ class StreamingPipeline:
         # self-occluded poses).
         self.engine_hw: tuple[int, int] | None = engine_hw
         self._hires_scale: float = 1.0 if engine_hw is None else reader.width / engine_hw[1]
+        # With the tracker's track_stride > 1, a skipped tick returns the
+        # previous tracks unchanged; observe_tracked_only also skips landmarks
+        # and the fit there, so the body is observed at fps / track_stride while
+        # decode, video logging and the timeline stay at the full frame rate.
+        self.observe_tracked_only: bool = observe_tracked_only
 
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int | None = None, timing_doc: bool = False) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats.
@@ -169,6 +184,8 @@ class StreamingPipeline:
         if start_frame is None:
             start_frame = self.sequence.frame_start
         start: float = time.perf_counter()
+        tick_end_s: list[float] = []
+        prev_tracks: list[CameraTracks] | None = None
         frame_idx: int = start_frame
         if max_frames is None:
             window_end: int = self.sequence.frame_start + self.sequence.frame_count
@@ -183,6 +200,11 @@ class StreamingPipeline:
         # track/landmarks(t+1) — fit feeds nothing upstream. With a collector
         # (validation) the tail is awaited inline to keep results exact-ordered.
         fit_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fit")
+        # Own (non-blocking) stream for the fit worker: on the shared legacy
+        # default stream every main-thread sync (the tracker's per-tick stats
+        # D2H) also waited for the fit's queued Adam replays, serialising the
+        # two; on its own stream they overlap on the GPU.
+        fit_stream: torch.cuda.Stream | None = torch.cuda.Stream() if self.reader.device.startswith("cuda") else None
         cam_pool = ThreadPoolExecutor(max_workers=len(self.reader.video_readers), thread_name_prefix="decode")
         pending_fit: Future | None = None
         try:
@@ -193,35 +215,64 @@ class StreamingPipeline:
                     frames_hires: list[UInt8[torch.Tensor, "3 hh ww"]] | None = None
                     if self.engine_hw is not None:
                         frames_hires = frames
-                        lo: UInt8[torch.Tensor, "c 3 h w"] = (
-                            torch.nn.functional.interpolate(torch.stack(frames).float(), size=self.engine_hw, mode="area")
-                            .round_()
-                            .clamp_(0, 255)
-                            .to(torch.uint8)
-                        )
+                        with torch.profiler.record_function("stage::resize"):
+                            lo: UInt8[torch.Tensor, "c 3 h w"] = (
+                                torch.nn.functional.interpolate(torch.stack(frames).float(), size=self.engine_hw, mode="area")
+                                .round_()
+                                .clamp_(0, 255)
+                                .to(torch.uint8)
+                            )
                         frames = [lo[i] for i in range(lo.shape[0])]
                     tracks: list[CameraTracks] | None = None
                     landmarks: list[CameraLandmarks] | None = None
-                    if self.tracker is not None:
-                        with profiler.stage("track"):
-                            tracks = self.tracker.step(frame_idx, frames)
-                    if self.landmarks is not None and tracks is not None:
-                        with profiler.stage("landmarks"):
-                            landmarks = self.landmarks.estimate(frames, tracks, frames_hires=frames_hires, hires_scale=self._hires_scale)
+                    # See mamma.capture_lock: YOLO re-detect syncs the device and the
+                    # tracker/TRT capture graphs; neither may overlap a fit capture.
+                    with GRAPH_CAPTURE_LOCK:
+                        if self.tracker is not None:
+                            with profiler.stage("track"):
+                                tracks = self.tracker.step(frame_idx, frames)
+                        observe: bool = not (self.observe_tracked_only and tracks is not None and tracks is prev_tracks)
+                        prev_tracks = tracks
+                        if self.landmarks is not None and tracks is not None and observe:
+                            with profiler.stage("landmarks"):
+                                landmarks = self.landmarks.estimate(frames, tracks, frames_hires=frames_hires, hires_scale=self._hires_scale)
                     if self.fitting is not None and landmarks is not None:
                         with profiler.stage("fit_wait"):
                             if pending_fit is not None:
                                 pending_fit.result()
 
-                        def fit_tail(idx: int, lms: list[CameraLandmarks]) -> TickFitOutput:
+                        def fit_tail(idx: int, lms: list[CameraLandmarks], ready: torch.cuda.Event | None) -> TickFitOutput:
                             assert self.fitting is not None
-                            out: TickFitOutput = self.fitting.step(idx, lms)
-                            self.logger.log_tick_fit(idx, out.fits, out.triangulated, self.fitting.faces)
+                            if fit_stream is None or ready is None:
+                                return fit_tail_on_stream(idx, lms)
+                            fit_stream.wait_event(ready)
+                            # The landmark tensors were allocated on the main thread's
+                            # stream; keep the caching allocator from recycling them
+                            # while the fit stream still reads them.
+                            for cam_lms in lms:
+                                for result in cam_lms.values():
+                                    for t in (result.joints2d, result.visibility, result.contact, result.floor_contact):
+                                        t.record_stream(fit_stream)
+                            with torch.cuda.stream(fit_stream):
+                                return fit_tail_on_stream(idx, lms)
+
+                        def fit_tail_on_stream(idx: int, lms: list[CameraLandmarks]) -> TickFitOutput:
+                            assert self.fitting is not None
+                            # Bare ranges, not StageProfiler (main-thread state): they let
+                            # tools/profile_pipeline.py attribute the fit worker's GPU time.
+                            with torch.profiler.record_function("stage::fit"):
+                                out: TickFitOutput = self.fitting.step(idx, lms)
+                            with torch.profiler.record_function("stage::log_fit"):
+                                self.logger.log_tick_fit(idx, out.fits, out.triangulated, self.fitting.faces)
                             if out.metrics:
                                 self.logger.log_tick_metrics(idx, {}, out.metrics)
                             return out
 
-                        pending_fit = fit_worker.submit(fit_tail, frame_idx, landmarks)
+                        ready: torch.cuda.Event | None = None
+                        if fit_stream is not None:
+                            ready = torch.cuda.Event()
+                            ready.record()
+                        pending_fit = fit_worker.submit(fit_tail, frame_idx, landmarks, ready)
                         if self.collector is not None:
                             with profiler.stage("fit_wait"):
                                 fit_output: TickFitOutput | None = pending_fit.result()
@@ -244,6 +295,7 @@ class StreamingPipeline:
                         self.collector.collect(frame_idx, tracks, landmarks, fit_output)
                     with profiler.stage("log_metrics"):
                         self.logger.log_tick_metrics(frame_idx, dict(profiler.last_ms), {})
+                    tick_end_s.append(time.perf_counter() - start)
                     frame_idx += 1
             with profiler.stage("log_video"):
                 if pending_fit is not None:
@@ -257,7 +309,9 @@ class StreamingPipeline:
             fit_worker.shutdown(wait=True, cancel_futures=True)
 
         elapsed: float = time.perf_counter() - start
-        return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler, decode_backend=decode_backend(self.reader))
+        return PipelineStats(
+            ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler, decode_backend=decode_backend(self.reader), tick_end_s=tick_end_s
+        )
 
     def close(self) -> None:
         """Stop the reader's per-camera decode threads (NVDEC decoders and their CUDA work)."""
@@ -276,6 +330,7 @@ def build_streaming_pipeline(
     hires_crops: bool = True,
     proxy_dir: Path | None = None,
     seg_stride: int = 5,
+    observe_tracked_only: bool = False,
 ) -> StreamingPipeline:
     """Assemble the standard decode->track->landmarks->fit->log pipeline.
 
@@ -335,4 +390,5 @@ def build_streaming_pipeline(
         fitting=fitting,
         collector=collector,
         engine_hw=resize_hw if hires_crops else None,
+        observe_tracked_only=observe_tracked_only,
     )

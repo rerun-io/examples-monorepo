@@ -36,7 +36,8 @@ class Frameset:
     """One synchronized capture from the four-camera rig."""
 
     timestamp_ns: int
-    images: UInt8[ndarray, "v h w 3"]
+    images: UInt8[ndarray, "v h w 3"] | UInt8[Tensor, "v h w 3"]
+    """Host frames, or device frames the tracker uses in place (no upload)."""
     world_T_rig: Float64[ndarray, "4 4"]
 
 
@@ -217,7 +218,9 @@ class LampTracker:
         if frameset.images.shape[0] != _NUM_VIEWS:
             raise ValueError(f"LAMP requires exactly four images, got shape {frameset.images.shape}")
 
-        frames: UInt8[Tensor, "4 h w 3"] = torch.from_numpy(np.ascontiguousarray(frameset.images)).to(self._device)
+        frames: UInt8[Tensor, "4 h w 3"] = (
+            torch.from_numpy(np.ascontiguousarray(frameset.images)) if isinstance(frameset.images, ndarray) else frameset.images
+        ).to(self._device)
         stage = time.perf_counter()
         detections = self._detector(frames)
         detector_ms = (time.perf_counter() - stage) * 1000.0
