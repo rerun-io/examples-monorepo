@@ -295,6 +295,15 @@ def run_slam_pipeline(
 
             # Stop condition: processed all requested frames.
             if i == n_frames:
+                # A fast frontend outruns the backend: let it optimise the keyframes still queued, so the final
+                # map is the same however fast tracking ran.
+                backlog: int = len(states.global_optimizer_tasks)
+                drain_start: float = time.perf_counter()
+                while len(states.global_optimizer_tasks) > 0:
+                    ctx.check_backend()
+                    time.sleep(0.01)
+                if backlog > 0:
+                    print(f"Backend finished {backlog} queued keyframes in {time.perf_counter() - drain_start:.2f} s")
                 states.set_mode(Mode.TERMINATED)
                 break
 
@@ -323,6 +332,7 @@ def run_slam_pipeline(
                 frame.update_pointmap(X_init, C_init)
                 keyframes.append(frame)
                 states.queue_global_optimization(len(keyframes) - 1)
+                wait_for_backend(states, ctx)
                 states.set_mode(Mode.TRACKING)
                 states.set_frame(frame)
 
@@ -384,12 +394,7 @@ def run_slam_pipeline(
             if add_new_kf:
                 keyframes.append(frame)
                 states.queue_global_optimization(len(keyframes) - 1)
-                # In single-threaded mode, block until the backend finishes.
-                while config["single_thread"]:
-                    with states.lock:
-                        if len(states.global_optimizer_tasks) == 0:
-                            break
-                    time.sleep(0.01)
+                wait_for_backend(states, ctx)
 
             # ── Async logging: create events and enqueue ──────────────────
             # 1. Collect structural changes (non-droppable)
@@ -603,6 +608,19 @@ def relocalization(
             else:
                 factor_graph.solve_GN_rays()
         return successful_loop_closure
+
+
+def wait_for_backend(states: SharedStates, ctx: SlamBackend) -> None:
+    """Block while the backend has more keyframes queued than ``max_backend_backlog`` (0 when single-threaded).
+
+    A fast frontend otherwise runs several keyframes ahead of the backend, most of all while
+    the backend warms up, and global optimisation then starts from stale poses: some runs settled in a wrong
+    minimum (final keyframe ATE 0.5-12 on a path of 12).
+    """
+    max_backlog: int = 0 if config["single_thread"] else int(config.get("max_backend_backlog", 2))
+    while len(states.global_optimizer_tasks) > max_backlog:
+        ctx.check_backend()
+        time.sleep(0.002)
 
 
 def run_backend(

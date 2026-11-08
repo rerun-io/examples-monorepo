@@ -1,5 +1,9 @@
 use_calib: False
 single_thread: False
+# Keyframes the frontend may queue ahead of the backend before it waits. A new keyframe starts from the
+# tracked pose of the one before it; if the backend lags far behind, global optimisation starts from a stale
+# chain and can settle in a wrong minimum.
+max_backend_backlog: 2
 dataset:
   subsample: 1
   img_downsample: 1
