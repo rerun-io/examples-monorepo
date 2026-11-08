@@ -1,10 +1,13 @@
 """The bf16 TensorRT tracking engine against the eager fp32 forward on real frames.
 
 Needs a CUDA GPU, the MASt3R checkpoint and the example video. The first run on a machine exports and builds the
-engine (about 90 s); later runs load it from trtkit's cache.
+engines for each image size (about 3 min at 224, longer at 512); later runs load them from trtkit's cache. 224 crops
+every video to a square; 512 keeps the video's aspect ratio (512x288 for this 16:9 video), so it covers a size the
+engines are built for on first use.
 """
 
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -18,8 +21,12 @@ VIDEO: Path = PACKAGE_DIR / "data" / "normal-apt-tour.mp4"
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")]
 
 
-def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every output of the engine stays within cosine 0.999 of the eager fp32 forward, the precision gate."""
+@pytest.mark.parametrize("img_size", [224, 512])
+def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch, img_size: Literal[224, 512]) -> None:
+    """Every output of the engine stays within cosine 0.999 of the eager fp32 forward, the precision gate.
+
+    A second use of the same size reuses the loaded engine instead of loading it again.
+    """
     for asset in (CHECKPOINT, VIDEO):
         if not asset.exists():
             pytest.skip(f"missing {asset.name} (pixi run -e mast3r-slam mast3r-slam-example-quick downloads it)")
@@ -33,8 +40,9 @@ def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch) 
 
     load_config("config/fast.yaml")
     model = mast3r_utils.load_mast3r().eval()
-    dataset = load_dataset(str(VIDEO), img_size=224)
+    dataset = load_dataset(str(VIDEO), img_size=img_size)
     dataset.subsample(5)
+    img_hw: tuple[int, int] = dataset.get_img_shape()[0]
     identity = lietorch.Sim3.Identity(1, device="cuda:0")
 
     def forward(keyframe_idx: int, frame_idx: int) -> list:
@@ -49,8 +57,12 @@ def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch) 
     pairs: list[tuple[int, int]] = [(0, 3), (40, 43), (120, 125)]
     with torch.inference_mode():
         eager = {pair: forward(*pair) for pair in pairs}
-        mast3r_utils.use_tracking_engine(model, (224, 224))
+        mast3r_utils.use_tracking_engine(model, img_hw)
         try:
+            loaded = mast3r_utils._TRACKING_ENGINES[id(model), img_hw]
+            mast3r_utils.use_tracking_engine(model, img_hw)
+            assert mast3r_utils._TRACKING_ENGINES[id(model), img_hw] is loaded
+            assert mast3r_utils.tracking_engine_size(model) == img_hw
             for pair in pairs:
                 for name, got, want in zip(("X", "C", "D", "Q", "feat", "pos"), forward(*pair), eager[pair], strict=True):
                     assert got.shape == want.shape, name
@@ -58,9 +70,12 @@ def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch) 
                     assert cosine >= 0.999, f"{name} at {pair}: cosine {cosine:.5f}"
         finally:
             mast3r_utils._TRACKING_FORWARD.pop(id(model), None)
+            mast3r_utils._TRACKING_ENGINE_HW.pop(id(model), None)
+            mast3r_utils._TRACKING_ENGINES.pop((id(model), img_hw), None)
 
 
-def test_pair_decoder_engine_matches_eager_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("img_size", [224, 512])
+def test_pair_decoder_engine_matches_eager_decoder(monkeypatch: pytest.MonkeyPatch, img_size: Literal[224, 512]) -> None:
     """The backend's batched pair decoder stays within cosine 0.999 of the eager fp32 decoder, in both directions."""
     for asset in (CHECKPOINT, VIDEO):
         if not asset.exists():
@@ -72,16 +87,18 @@ def test_pair_decoder_engine_matches_eager_decoder(monkeypatch: pytest.MonkeyPat
 
     load_config("config/fast.yaml")
     model = mast3r_utils.load_mast3r().eval()
-    dataset = load_dataset(str(VIDEO), img_size=224)
+    dataset = load_dataset(str(VIDEO), img_size=img_size)
     dataset.subsample(5)
+    img_hw: tuple[int, int] = dataset.get_img_shape()[0]
+    true_shape = torch.tensor([img_hw], device="cuda")
     with torch.inference_mode():
-        encoded = [model._encode_image(dataset.read_resized(i).rgb_tensor.cuda(), torch.tensor([[224, 224]], device="cuda")) for i in (0, 4, 40, 45)]
+        encoded = [model._encode_image(dataset.read_resized(i).rgb_tensor.cuda(), true_shape) for i in (0, 4, 40, 45)]
         feat = torch.cat([f for f, _, _ in encoded])
         pos = torch.cat([p for _, p, _ in encoded])
-        shapes = [torch.tensor([[224, 224]], device="cuda")] * 2
+        shapes = [true_shape] * 2
         args = (feat[[0, 2]], pos[[0, 2]], feat[[1, 3]], pos[[1, 3]], shapes, shapes)
         eager = mast3r_utils.mast3r_decode_symmetric_batch(model, *args)
-        mast3r_utils.use_pair_decoder_engine(model, (224, 224))
+        mast3r_utils.use_pair_decoder_engine(model, img_hw)
         try:
             engine = mast3r_utils.mast3r_decode_symmetric_batch(model, *args)
         finally:

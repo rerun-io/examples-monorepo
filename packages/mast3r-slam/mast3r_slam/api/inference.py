@@ -74,10 +74,12 @@ from mast3r_slam.log_events import (
 )
 from mast3r_slam.mast3r_utils import (
     compile_tracking_forward,
+    enable_trt_engines,
     load_mast3r,
     load_retriever,
     mast3r_inference_mono,
     tracking_engine_size,
+    trt_engines_enabled,
     use_pair_decoder_engine,
     use_tracking_engine,
 )
@@ -128,9 +130,10 @@ class InferenceConfig:
     """Run the tracker's MASt3R forward as compiled CUDA graphs: about 2x faster per frame, but the first tracked
     frame waits for the compile (about 30 s cold, 14 s with a warm inductor cache)."""
     trt_model: bool = True
-    """Run tracking's MASt3R forward and the backend's pair decoder as bf16 TensorRT engines (224 px only; other
-    sizes run eager). The first run on a machine exports and builds the engines (about 3 min); later runs load them
-    from the cache. ``--no-trt-model`` runs eager fp32."""
+    """Run tracking's MASt3R forward and the backend's pair decoder as bf16 TensorRT engines, one pair per frame size
+    (512 keeps the video's aspect ratio, so each aspect ratio is its own size). The first run at a new size on a
+    machine exports and builds its engines (about 3 min at 224, longer at 512); later runs load them from the cache.
+    ``--no-trt-model`` runs eager fp32."""
 
 
 @dataclass
@@ -235,6 +238,9 @@ def run_slam_pipeline(
     h: int
     w: int
     h, w = dataset.get_img_shape()[0]
+    if trt_engines_enabled(model):
+        # Before any pipeline thread starts: loading captures the engine's CUDA graph.
+        use_tracking_engine(model, (h, w))
     blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline)
     rr.send_blueprint(blueprint)
 
@@ -523,9 +529,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     model.share_memory()
     if inf_config.compile_model:
         compile_tracking_forward(model)
-    elif inf_config.trt_model and inf_config.img_size == 224:
-        # Only 224 crops every video to one size, which the engines are built for.
-        use_tracking_engine(model, (224, 224))
+    elif inf_config.trt_model:
+        enable_trt_engines(model)
 
     # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
     # Only works when the main process uses spawn/serve/connect (not save-to-file).
@@ -668,7 +673,7 @@ def run_backend(
         rr_application_id: When set, initialize Rerun in this subprocess and
             connect via gRPC so ``rr.TextLog`` entries reach the main viewer.
         pair_decoder_hw: When set, decode keyframe pairs with the TensorRT pair decoder for this image size
-            (the frontend built it; see ``use_tracking_engine``).
+            (the frontend built it; see ``prepare_trt_engines``).
     """
     load_config(config_path)
     if pair_decoder_hw is not None:

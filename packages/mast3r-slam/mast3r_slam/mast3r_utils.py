@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Callable
 from typing import Literal, TypeAlias
 
@@ -154,11 +155,17 @@ TrackingForwardFn: TypeAlias = Callable[[Frame, Frame], tuple[Tensor, ...]]
 """Tracking's encode + decode: (new frame i, keyframe j with cached features) -> ``(feat_i, pos_i, X, C, D, Q)``, owned by the caller."""
 
 _TRACKING_FORWARD: dict[int, TrackingForwardFn] = {}
+"""Accelerated tracking forward keyed by ``id(model)``; see :func:`compile_tracking_forward` and :func:`use_tracking_engine`."""
 _TRACKING_ENGINE_HW: dict[int, tuple[int, int]] = {}
-"""Image size of the TensorRT tracking engine, keyed by ``id(model)``; the backend builds its pair decoder for it."""
+"""Image size of the TensorRT tracking engine in use, keyed by ``id(model)``; the backend loads its pair decoder for it."""
+_TRACKING_ENGINES: dict[tuple[int, tuple[int, int]], tuple[TensorRtRuntime, Int[Tensor, "1 n_patches 2"]]] = {}
+"""Loaded tracking engines and their patch positions, keyed by ``(id(model), img_hw)``; see :func:`prepare_trt_engines`."""
+_TRT_MODELS: set[int] = set()
+"""``id(model)`` of the models that track and decode pairs on TensorRT engines; see :func:`enable_trt_engines`."""
+_ENGINE_LOCK: threading.Lock = threading.Lock()
+"""Serialises engine builds and loads: the Gradio app prepares engines on a thread while a run may ask for one."""
 _PAIR_DECODER: dict[int, TensorRtRuntime] = {}
 """The backend's TensorRT pair decoder, keyed by ``id(model)``; see :func:`use_pair_decoder_engine`."""
-"""Accelerated tracking forward keyed by ``id(model)``; see :func:`compile_tracking_forward` and :func:`use_tracking_engine`."""
 
 
 def compile_tracking_forward(model: AsymmetricMASt3R) -> None:
@@ -191,26 +198,53 @@ def compile_tracking_forward(model: AsymmetricMASt3R) -> None:
     _TRACKING_FORWARD[id(model)] = run
 
 
-def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> None:
-    """Run the tracker's forward as the bf16 TensorRT engine of :mod:`mast3r_slam.tracking_engine`.
+def enable_trt_engines(model: AsymmetricMASt3R) -> None:
+    """Track and decode the backend's keyframe pairs with bf16 TensorRT engines, one pair of engines per image size.
 
-    About 4x faster than eager fp32 and 2x faster than :func:`compile_tracking_forward`, with no compile on the
-    first frame once the engine is cached (the first run on a machine exports and builds it, about 90 s).
-    Every tracked frame must be ``img_hw``.
+    :func:`mast3r_slam.api.inference.run_slam_pipeline` then calls :func:`use_tracking_engine` with each video's
+    frame size. The first run at a new size on a machine exports and builds that size's engines (about 3 min at
+    224 px, longer at 512); later runs load them from trtkit's cache.
+    """
+    _TRT_MODELS.add(id(model))
+
+
+def trt_engines_enabled(model: AsymmetricMASt3R) -> bool:
+    """Whether :func:`enable_trt_engines` was called for ``model``."""
+    return id(model) in _TRT_MODELS
+
+
+def prepare_trt_engines(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> None:
+    """Load the tracking engine for ``img_hw`` and build the backend's pair decoder for it; both are built on first use.
+
+    The tracking engine stays loaded, so later runs at the same size start at once. Its CUDA graph is captured
+    here, so call this before the pipeline starts its threads: a device-wide sync on any other thread (the frame
+    prefetcher, the logger) during a capture invalidates it.
     """
     from mast3r_slam.tracking_engine import build_pair_decoder_engine, load_tracking_engine
 
-    loaded: tuple[TensorRtRuntime, Int[Tensor, "1 n_patches 2"]] = load_tracking_engine(model, img_hw)
-    runtime: TensorRtRuntime = loaded[0]
-    pos: Int[Tensor, "1 n_patches 2"] = loaded[1]
-    # Capture the engine's CUDA graph now, before the pipeline starts its threads: a device-wide sync on any other
-    # thread (the frame prefetcher, the logger) during a capture invalidates it.
-    feat_dim: int = model.enc_embed_dim
-    runtime({"img_i": torch.zeros(1, 3, *img_hw, device=pos.device), "feat_j": torch.zeros(1, pos.shape[1], feat_dim, device=pos.device)})
-    torch.cuda.synchronize(pos.device)
-    # The backend decodes keyframe pairs with the matching engine; build it here, where the model lives, so the
-    # backend process only loads it.
-    build_pair_decoder_engine(model, img_hw)
+    with _ENGINE_LOCK:
+        if (id(model), img_hw) in _TRACKING_ENGINES:
+            return
+        loaded: tuple[TensorRtRuntime, Int[Tensor, "1 n_patches 2"]] = load_tracking_engine(model, img_hw)
+        pos: Int[Tensor, "1 n_patches 2"] = loaded[1]
+        feat_dim: int = model.enc_embed_dim
+        loaded[0]({"img_i": torch.zeros(1, 3, *img_hw, device=pos.device), "feat_j": torch.zeros(1, pos.shape[1], feat_dim, device=pos.device)})
+        torch.cuda.synchronize(pos.device)
+        # The backend decodes keyframe pairs with the matching engine; build it here, where the model lives, so the
+        # backend process only loads it.
+        build_pair_decoder_engine(model, img_hw)
+        _TRACKING_ENGINES[id(model), img_hw] = loaded
+
+
+def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> None:
+    """Run the tracker's forward as the bf16 TensorRT engine of :mod:`mast3r_slam.tracking_engine` for ``img_hw``.
+
+    About 4x faster than eager fp32 and 2x faster than :func:`compile_tracking_forward` at 224 px, with no compile
+    on the first frame once the engine is cached (see :func:`prepare_trt_engines`, which this calls).
+    Every tracked frame must be ``img_hw``.
+    """
+    prepare_trt_engines(model, img_hw)
+    runtime, pos = _TRACKING_ENGINES[id(model), img_hw]
     _TRACKING_ENGINE_HW[id(model)] = img_hw
 
     def run(frame_i: Frame, frame_j: Frame) -> tuple[Tensor, ...]:
@@ -232,7 +266,7 @@ def tracking_engine_size(model: AsymmetricMASt3R) -> tuple[int, int] | None:
 def use_pair_decoder_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> None:
     """Decode the backend's keyframe pairs with the bf16 TensorRT engine of :func:`tracking_engine.build_pair_decoder_engine`.
 
-    Loads an engine the frontend built (see :func:`use_tracking_engine`); for the backend process.
+    Loads an engine the frontend built (see :func:`prepare_trt_engines`); for the backend process.
     """
     from mast3r_slam.tracking_engine import build_pair_decoder_engine
 
