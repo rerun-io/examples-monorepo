@@ -64,6 +64,14 @@ class PipelineStats:
     """Per-stage timing breakdown."""
     decode_backend: str
     """Which decoder produced the frames; see :func:`decode_backend`."""
+    tick_end_s: list[float] = field(default_factory=list, repr=False)
+    """Main-thread completion time of each tick, seconds since the loop start."""
+
+    def steady_ticks_per_s(self, skip: int) -> float:
+        """Throughput after the first ``skip`` ticks (bootstrap, graph capture)."""
+        if len(self.tick_end_s) <= skip + 1:
+            return self.ticks_per_s
+        return (len(self.tick_end_s) - 1 - skip) / (self.tick_end_s[-1] - self.tick_end_s[skip])
 
     @property
     def ticks_per_s(self) -> float:
@@ -170,6 +178,7 @@ class StreamingPipeline:
         if start_frame is None:
             start_frame = self.sequence.frame_start
         start: float = time.perf_counter()
+        tick_end_s: list[float] = []
         frame_idx: int = start_frame
         if max_frames is None:
             window_end: int = self.sequence.frame_start + self.sequence.frame_count
@@ -277,6 +286,7 @@ class StreamingPipeline:
                         self.collector.collect(frame_idx, tracks, landmarks, fit_output)
                     with profiler.stage("log_metrics"):
                         self.logger.log_tick_metrics(frame_idx, dict(profiler.last_ms), {})
+                    tick_end_s.append(time.perf_counter() - start)
                     frame_idx += 1
             with profiler.stage("log_video"):
                 if pending_fit is not None:
@@ -290,7 +300,9 @@ class StreamingPipeline:
             fit_worker.shutdown(wait=True, cancel_futures=True)
 
         elapsed: float = time.perf_counter() - start
-        return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler, decode_backend=decode_backend(self.reader))
+        return PipelineStats(
+            ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler, decode_backend=decode_backend(self.reader), tick_end_s=tick_end_s
+        )
 
     def close(self) -> None:
         """Stop the reader's per-camera decode threads (NVDEC decoders and their CUDA work)."""
