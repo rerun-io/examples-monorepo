@@ -43,6 +43,7 @@ from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+from torchvision.io import encode_jpeg
 
 from zipdepth.apis.eval_catalog import (
     FootprintSplitMetrics,
@@ -417,7 +418,9 @@ def run_camera(
         target_valid_bhw: Bool[ndarray, "b h w"] = batch["target_valid"][:, 0].bool().cpu().numpy()
         prompt_depth_host_bhw: Float32[ndarray, "b 192 256"] = batch["prompt_depth"][:, 0].float().cpu().numpy()
         prompt_valid_bhw: Bool[ndarray, "b 192 256"] = batch["prompt_valid"][:, 0].bool().cpu().numpy()
-        rgb_bhwc: UInt8[ndarray, "b h w 3"] = batch["image"].permute(0, 2, 3, 1).contiguous().cpu().numpy()
+        # The logged network input is JPEG-encoded on the model device (nvjpeg on CUDA); only the encoded bytes come back.
+        rgb_jpegs: Tensor | list[Tensor] = encode_jpeg(list(image_bchw), quality=90)
+        assert isinstance(rgb_jpegs, list)
         index: int
         for index in range(prediction_bhw.shape[0]):
             if config.max_frames is not None and logged_count >= config.max_frames:
@@ -432,8 +435,7 @@ def run_camera(
             )
 
             rr.set_time(TIMELINE, duration=np.timedelta64(int(batch["video_time_ns"][index].item()), "ns"))
-            rgb_hwc: UInt8[ndarray, "h w 3"] = rgb_bhwc[index]
-            rr.log(f"{root}/rgb", rr.Image(rgb_hwc).compress(jpeg_quality=90))
+            rr.log(f"{root}/rgb", rr.EncodedImage(contents=rgb_jpegs[index].cpu().numpy().tobytes(), media_type="image/jpeg"))
             rr.log(f"{root}/depth_pred", rr.DepthImage(depth_mm(prediction_hw), meter=1000.0, depth_range=DEPTH_RANGE_MM))
             rr.log(
                 f"{root}/depth_target",
