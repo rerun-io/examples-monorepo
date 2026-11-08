@@ -1,11 +1,15 @@
 """The map's surface: every keyframe's depth fused into a sparse colour TSDF (``packages/tsdf-rs``), one mesh.
 
-The backend keeps refining keyframe poses, so a volume that only grows goes stale; the logger re-fuses every
-keyframe at its latest pose from scratch instead (:func:`fuse_keyframes`), which ``tsdf-rs`` does in well under a
-second for a few hundred keyframes at MASt3R's resolution.
+The backend keeps refining keyframe poses, so a volume that only grows goes stale; every keyframe is re-fused at its
+latest pose from scratch instead (:func:`fuse_keyframes`). That runs on its own thread (:class:`LatestWinsWorker`,
+fed by the async logger on every new keyframe), so the logger never waits on it; ``tsdf-rs`` releases the GIL while
+it integrates and extracts.
 """
 
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 import lietorch_mojo as lietorch
 import numpy as np
@@ -82,3 +86,66 @@ def fuse_keyframes(
         vertex_normals=normals,
         face_rendering=rr.components.MeshFaceRendering.Front,
     )
+
+
+T = TypeVar("T")
+
+
+class LatestWinsWorker(Generic[T]):
+    """Runs ``handle`` on its own thread for the newest request; a request that arrives while one is pending
+    replaces it (a size-1 slot, never a growing queue). :meth:`close` handles the pending request, then joins."""
+
+    def __init__(self, handle: Callable[[T], None], name: str) -> None:
+        self._handle: Callable[[T], None] = handle
+        self._condition: threading.Condition = threading.Condition()
+        self._pending: T | None = None
+        self._closing: bool = False
+        self._thread: threading.Thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
+
+    def submit(self, request: T) -> None:
+        """Replace the pending request, if any, and wake the worker; returns at once."""
+        with self._condition:
+            self._pending = request
+            self._condition.notify()
+
+    def close(self, timeout: float | None = None) -> None:
+        """Handle the pending request, then stop the thread and join it."""
+        with self._condition:
+            self._closing = True
+            self._condition.notify()
+        self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while self._pending is None and not self._closing:
+                    self._condition.wait()
+                request: T | None = self._pending
+                self._pending = None
+                if request is None:
+                    return
+            # An exception ends the thread; threading.excepthook prints it (no bare except around beartype checks).
+            self._handle(request)
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceRequest:
+    """Every keyframe at its latest pose, and the time point the mesh is logged at."""
+
+    keyframes: list[tuple[KeyframeDepth, Float32[ndarray, "8"]]]
+    frame_idx: int
+    timestamp_ns: int | None
+
+
+def log_surface_request(request: SurfaceRequest, mesh_path: str, recording: rr.RecordingStream | None, timelines: tuple[str, str]) -> None:
+    """Fuse ``request`` and log the mesh at its time point on ``recording`` (pass it explicitly: a worker thread
+    does not see the caller's thread- or context-local recording)."""
+    mesh: rr.Mesh3D | None = fuse_keyframes(request.keyframes)
+    if mesh is None:
+        return
+    frame_timeline, video_timeline = timelines
+    rr.set_time(frame_timeline, sequence=request.frame_idx, recording=recording)
+    if request.timestamp_ns is not None:
+        rr.set_time(video_timeline, duration=1e-9 * float(request.timestamp_ns), recording=recording)
+    rr.log(mesh_path, mesh, recording=recording)

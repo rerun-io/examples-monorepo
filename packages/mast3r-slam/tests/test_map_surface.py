@@ -1,4 +1,6 @@
-"""fuse_keyframes: keyframes at their Sim3 poses become one front-faced TSDF mesh."""
+"""fuse_keyframes: keyframes at their Sim3 poses become one front-faced TSDF mesh, fused on a latest-wins thread."""
+
+import threading
 
 import lietorch_mojo as lietorch
 import numpy as np
@@ -9,7 +11,7 @@ from numpy import ndarray
 
 pytest.importorskip("tsdf_rs", reason="the map surface needs the tsdf-rs extension from the mast3r-slam envs")
 
-from mast3r_slam.map_surface import KeyframeDepth, SurfaceSettings, fuse_keyframes  # noqa: E402
+from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, SurfaceSettings, fuse_keyframes  # noqa: E402
 
 H: int = 48
 W: int = 64
@@ -48,3 +50,28 @@ def test_mesh_lands_at_the_scaled_depth_and_shows_front_faces_only() -> None:
 def test_no_depth_gives_no_mesh() -> None:
     """Keyframes whose depth is all filtered out produce no surface."""
     assert fuse_keyframes([(_plane_keyframe(0.0), _sim3_data(1.0))]) is None
+
+
+def test_latest_wins_worker_coalesces_pending_requests_and_runs_the_last_on_close() -> None:
+    """Requests that arrive while the worker is busy collapse to the newest; close() still runs a pending one."""
+    handled: list[int] = []
+    started: threading.Event = threading.Event()
+    release: threading.Event = threading.Event()
+
+    def _handle(request: int) -> None:
+        if request == 1:
+            started.set()
+            assert release.wait(timeout=5.0)
+        handled.append(request)
+
+    worker: LatestWinsWorker[int] = LatestWinsWorker(_handle, name="test-latest-wins")
+    worker.submit(1)
+    assert started.wait(timeout=5.0)
+    for request in (2, 3, 4):
+        worker.submit(request)
+    release.set()
+    worker.submit(5)  # pending while 1 (or 4) runs: the final request must still run before close returns
+    worker.close(timeout=5.0)
+    assert handled[0] == 1
+    assert handled[-1] == 5
+    assert 2 not in handled and 3 not in handled

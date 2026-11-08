@@ -47,15 +47,12 @@ from mast3r_slam.log_events import (
     LogTerminate,
     LogText,
 )
-from mast3r_slam.map_surface import KeyframeDepth, fuse_keyframes
+from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, SurfaceRequest, log_surface_request
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
 
 _HIDDEN_IMAGE_PLANE_DISTANCE: float = 1e-6
 """Image-plane distance of a keyframe's placeholder Pinhole before the keyframe exists: a frustum too small to see."""
-
-SURFACE_REFUSE_EVERY_N_KEYFRAMES: int = 5
-"""New keyframes between map-surface re-fuses during a run; the run's end always re-fuses once more."""
 
 # ── Snapshot helpers ──────────────────────────────────────────────────────
 # These create CPU-only event objects from live Frame / SharedKeyframes /
@@ -302,10 +299,12 @@ class AsyncRerunLogger:
         # (frame index, video timestamp) of the first event logged, and of the event being logged.
         self._first_time: tuple[int, int | None] | None = None
         self._now: tuple[int, int | None] = (0, None)
-        # Map surface inputs per keyframe index, and the keyframe count of the last fused mesh.
+        # Map surface inputs per keyframe index, the keyframe count of the last request, and the worker thread
+        # that fuses (started with the logger thread, once the recording is bound).
         self._surface_keyframes: dict[int, KeyframeDepth] = {}
         self._surface_poses: dict[int, Float32[ndarray, "8"]] = {}
-        self._surface_fused_n_kf: int = 0
+        self._surface_requested_n_kf: int = 0
+        self._surface_worker: LatestWinsWorker[SurfaceRequest] | None = None
 
     # ── Context manager ───────────────────────────────────────────────
 
@@ -367,6 +366,13 @@ class AsyncRerunLogger:
         """Main loop: bind recording, then process events until LogTerminate."""
         if self._recording is not None:
             rr.set_thread_local_data_recording(self._recording)
+        # The worker thread sees neither a thread-local nor a context-local recording: hand it this one.
+        surface_recording: rr.RecordingStream | None = rr.get_data_recording(self._recording)
+        mesh_path: str = f"{self._parent_log_path}/mesh"
+        self._surface_worker = LatestWinsWorker(
+            lambda request: log_surface_request(request, mesh_path, surface_recording, (FRAME_TIMELINE, VIDEO_TIMELINE)),
+            name="tsdf-surface",
+        )
 
         try:
             while True:
@@ -377,8 +383,10 @@ class AsyncRerunLogger:
 
                 if isinstance(event, LogTerminate):
                     self._drain_queue()
-                    # The final surface, at the backend's final poses.
-                    self._log_surface()
+                    # The final surface, at the backend's final poses, logged before the recording closes.
+                    self._request_surface()
+                    if self._surface_worker is not None:
+                        self._surface_worker.close()
                     break
 
                 self._handle_event(event)
@@ -571,20 +579,22 @@ class AsyncRerunLogger:
                 rr.Transform3D(mat3x3=orient_R, translation=orient_t),
             )
 
-        # Map surface, re-fused every few keyframes (each re-fuse logs the whole mesh again).
-        if len(self._surface_keyframes) - self._surface_fused_n_kf >= SURFACE_REFUSE_EVERY_N_KEYFRAMES:
-            self._log_surface()
+        # Map surface: re-fuse on every new keyframe; the worker coalesces requests it cannot keep up with.
+        if len(self._surface_keyframes) != self._surface_requested_n_kf:
+            self._request_surface()
 
-    def _log_surface(self) -> None:
-        """Re-fuse every keyframe at its latest pose and log the mesh, replacing the previous one."""
-        if not self._surface_keyframes:
+    def _request_surface(self) -> None:
+        """Hand the worker every keyframe at its latest pose; returns at once (the arrays are never mutated)."""
+        if not self._surface_keyframes or self._surface_worker is None:
             return
-        mesh: rr.Mesh3D | None = fuse_keyframes(
-            [(self._surface_keyframes[kf_idx], self._surface_poses[kf_idx]) for kf_idx in sorted(self._surface_keyframes)]
+        self._surface_worker.submit(
+            SurfaceRequest(
+                keyframes=[(self._surface_keyframes[kf_idx], self._surface_poses[kf_idx]) for kf_idx in sorted(self._surface_keyframes)],
+                frame_idx=self._now[0],
+                timestamp_ns=self._now[1],
+            )
         )
-        if mesh is not None:
-            rr.log(f"{self._parent_log_path}/mesh", mesh)
-        self._surface_fused_n_kf = len(self._surface_keyframes)
+        self._surface_requested_n_kf = len(self._surface_keyframes)
 
     def _log_new_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log a keyframe once: its camera, its 2D maps, and its input to the map surface."""
