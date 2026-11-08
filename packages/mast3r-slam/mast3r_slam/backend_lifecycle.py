@@ -10,7 +10,7 @@ Usage::
         keyframes = ctx.keyframes
         states = ctx.states
         tracker = FrameTracker(model, keyframes, device)
-        for frame in dataset:
+        for frame in frames:  # e.g. a FramePrefetcher
             ctx.check_backend()  # raises BackendError if backend died
             tracker.track(frame)
     # __exit__ handles: signal backend, join/terminate/kill, manager shutdown, GPU cleanup
@@ -68,10 +68,10 @@ class SlamBackend:
         self._K: Float[Tensor, "3 3"] | None = K
         self._device: str = device
         self._rr_application_id: str | None = rr_application_id
-        self._pair_decoder_hw: tuple[int, int] | None = pair_decoder_hw
-        """When set, the backend decodes keyframe pairs with the TensorRT pair decoder for this image size."""
         """When set, the backend subprocess will call ``rr.init`` + ``rr.connect_grpc``
         so that ``rr.TextLog`` entries reach the same viewer as the main process."""
+        self._pair_decoder_hw: tuple[int, int] | None = pair_decoder_hw
+        """When set, the backend decodes keyframe pairs with the TensorRT pair decoder for this image size."""
 
         self._manager: SyncManager | None = None
         self._backend: mp.Process | None = None
@@ -184,11 +184,6 @@ class SlamBackend:
                 pass  # Backend died without writing to the queue
 
         raise BackendError(error_msg)
-
-    @property
-    def is_alive(self) -> bool:
-        """Whether the backend process is still running."""
-        return self._backend is not None and self._backend.is_alive()
 
     def join(self, timeout: float | None = None) -> None:
         """Wait for the backend process to finish normally."""

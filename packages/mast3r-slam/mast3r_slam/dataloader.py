@@ -9,22 +9,17 @@ import yaml
 from jaxtyping import Float32, UInt8
 from natsort import natsorted
 from numpy import ndarray
+from simplecv.video_io import TorchCodecVideoReader
 
 from mast3r_slam.config import config
 from mast3r_slam.image_types import RgbNormalized
 from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_tensor, resize_img_with_transform
 
-HAS_TORCHCODEC: bool = True
-try:
-    from simplecv.video_io import TorchCodecVideoReader
-except (ImportError, ModuleNotFoundError):
-    HAS_TORCHCODEC = False
-
 
 class MonocularDataset(torch.utils.data.Dataset):
     """Base class for monocular image datasets.
 
-    Subclasses populate ``rgb_files`` and ``timestamps`` and optionally set
+    Subclasses populate ``rgb_files`` and optionally set
     ``camera_intrinsics`` for calibrated operation.
     """
 
@@ -35,7 +30,6 @@ class MonocularDataset(torch.utils.data.Dataset):
     ) -> None:
         self.dtype: type = dtype
         self.rgb_files: list[str | pathlib.Path] = []
-        self.timestamps: list[float | str] = []
         self.img_size: Literal[224, 512] = img_size
         self.dataset_path: pathlib.Path | None = None
         """Filesystem path to the dataset root, or None for live sources (webcam, realsense)."""
@@ -46,34 +40,9 @@ class MonocularDataset(torch.utils.data.Dataset):
         """Return the number of frames in the dataset."""
         return len(self.rgb_files)
 
-    def __getitem__(self, index: int) -> tuple[float | str, RgbNormalized]:
-        """Return (timestamp, image) for the given index.
-
-        Args:
-            index: Frame index.
-
-        Returns:
-            A tuple of (timestamp, normalized RGB float image).
-        """
-        # Call get_rgb_normalized before timestamp for realsense camera.
-        rgb_normalized: RgbNormalized = self.get_rgb_normalized(index)
-        timestamp = self.get_timestamp(index)
-        return timestamp, rgb_normalized
-
     def read_resized(self, idx: int) -> ResizedImage:
         """Return the frame at ``idx`` resized and normalised for the MASt3R encoder."""
         return resize_img(self.get_rgb_normalized(idx), self.img_size)
-
-    def get_timestamp(self, idx: int) -> float | str:
-        """Return the timestamp for a given frame index.
-
-        Args:
-            idx: Frame index.
-
-        Returns:
-            Timestamp value (float or string depending on dataset).
-        """
-        return self.timestamps[idx]
 
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         """Read the raw RGB image at the given index.
@@ -125,7 +94,6 @@ class MonocularDataset(torch.utils.data.Dataset):
             subsample: Step size for subsampling.
         """
         self.rgb_files = self.rgb_files[::subsample]
-        self.timestamps = self.timestamps[::subsample]
 
     def has_calib(self) -> bool:
         """Return whether camera intrinsics are available.
@@ -143,7 +111,6 @@ class TUMDataset(MonocularDataset):
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = list(tstamp_rgb[:, 0])
 
         match = re.search(r"freiburg(\d+)", dataset_path)
         assert match is not None, f"Could not find freiburg index in path: {dataset_path}"
@@ -171,7 +138,6 @@ class EurocDataset(MonocularDataset):
         rgb_list: pathlib.Path = self.dataset_path / "mav0/cam0/data.csv"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=",", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / "mav0/cam0/data" / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = list(tstamp_rgb[:, 0])
         with open(self.dataset_path / "mav0/cam0/sensor.yaml") as f:
             self.cam0 = yaml.load(f, Loader=yaml.FullLoader)
         W: int
@@ -197,7 +163,6 @@ class ETH3DDataset(MonocularDataset):
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = list(tstamp_rgb[:, 0])
         calibration = np.loadtxt(
             self.dataset_path / "calibration.txt",
             delimiter=" ",
@@ -213,7 +178,6 @@ class SevenScenesDataset(MonocularDataset):
         super().__init__(img_size=img_size)
         self.dataset_path = pathlib.Path(dataset_path)
         self.rgb_files = natsorted(list((self.dataset_path / "seq-01").glob("*.color.png")))
-        self.timestamps = list(np.arange(0, len(self.rgb_files)).astype(self.dtype))
         fx: float = 585.0
         fy: float = 585.0
         cx: float = 320.0
@@ -232,11 +196,6 @@ class Webcam(MonocularDataset):
     def __len__(self) -> int:
         return 999999
 
-    def get_timestamp(self, idx: int) -> float:
-        ts: float | str = self.timestamps[idx]
-        assert isinstance(ts, float)
-        return ts
-
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         ret: bool
         bgr: UInt8[ndarray, "h w 3"]
@@ -244,8 +203,6 @@ class Webcam(MonocularDataset):
         if not ret:
             raise ValueError("Failed to read image")
         rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        self.timestamps.append(idx / 30)
-
         return rgb
 
 
@@ -254,16 +211,9 @@ class MP4Dataset(MonocularDataset):
         super().__init__(img_size=img_size)
         self.use_calibration: bool = False
         self.dataset_path = pathlib.Path(dataset_path)
-        if HAS_TORCHCODEC:
-            # NVDEC when there is a GPU; frames stay on it for the resize (CPU decode otherwise).
-            self.reader = TorchCodecVideoReader(self.dataset_path, seek_mode="exact")
-            self.fps: float = self.reader.fps
-            self.total_frames: int = self.reader.frame_cnt
-        else:
-            print("Warning: torchcodec is not installed. This may slow down the dataloader")
-            self.cap = cv2.VideoCapture(str(self.dataset_path))
-            self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
-            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # NVDEC when there is a GPU; frames stay on it for the resize (CPU decode otherwise).
+        self.reader = TorchCodecVideoReader(self.dataset_path, seek_mode="exact")
+        self.total_frames: int = self.reader.frame_cnt
 
         self.stride: int = config["dataset"]["subsample"]
 
@@ -271,23 +221,10 @@ class MP4Dataset(MonocularDataset):
         return self.total_frames // self.stride
 
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
-        if HAS_TORCHCODEC:
-            rgb: UInt8[ndarray, "h w 3"] = self.reader.get_frame(idx * self.stride).permute(1, 2, 0).cpu().numpy()
-        else:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx * self.stride)
-            ret: bool
-            ret, bgr = self.cap.read()
-            if not ret:
-                raise ValueError("Failed to read image")
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        timestamp: float = idx / self.fps
-        self.timestamps.append(timestamp)
+        rgb: UInt8[ndarray, "h w 3"] = self.reader.get_frame(idx * self.stride).permute(1, 2, 0).cpu().numpy()
         return rgb
 
     def read_resized(self, idx: int) -> ResizedImage:
-        if not HAS_TORCHCODEC:
-            return super().read_resized(idx)
-        self.timestamps.append(idx / self.fps)
         return resize_img_tensor(self.reader.get_frame(idx * self.stride), self.img_size)
 
 
@@ -301,7 +238,6 @@ class RGBFiles(MonocularDataset):
         jpg_files: list[pathlib.Path] = list((self.dataset_path).glob("*.jpg"))
         jpeg_files: list[pathlib.Path] = list((self.dataset_path).glob("*.jpeg"))
         self.rgb_files = natsorted(png_files + jpg_files + jpeg_files)
-        self.timestamps = list(np.arange(0, len(self.rgb_files)).astype(self.dtype) / 30.0)
 
 
 class Intrinsics:

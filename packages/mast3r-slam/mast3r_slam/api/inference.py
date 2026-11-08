@@ -146,8 +146,6 @@ class InferenceConfig(SlamSettings):
 
     rr_config: RerunTyroConfig
     """Rerun recording configuration (save path, application id, etc.)."""
-    no_viz: bool = False
-    """If True, skip launching visualisation processes."""
 
 
 CURRENT_FRAME_BACKLOG: int = 32
@@ -369,9 +367,8 @@ def run_slam_pipeline(
                     # Normal tracking: match this frame against the last keyframe,
                     # estimate its relative pose via Gauss-Newton, and decide
                     # whether the overlap is low enough to warrant a new keyframe.
-                    _match_info: list
                     try_reloc: bool
-                    add_new_kf, _match_info, try_reloc = tracker.track(frame)
+                    add_new_kf, try_reloc = tracker.track(frame)
                     if try_reloc:
                         # Too few matches — tracking is lost, switch to reloc mode.
                         states.set_mode(Mode.RELOC)
@@ -509,8 +506,6 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         pass
 
     rr.log(f"{PARENT_LOG_PATH}/logs", rr.TextLog("Done", level="INFO"))
-    if not inf_config.no_viz:
-        rr.log(f"{PARENT_LOG_PATH}/logs", rr.TextLog("All visualization processes terminated", level="INFO"))
 
 
 def relocalization(
@@ -643,7 +638,7 @@ def run_backend(
         mode = states.get_mode()
 
         # Wait for the frontend to finish initialisation.
-        if mode == Mode.INIT or states.is_paused():
+        if mode == Mode.INIT:
             time.sleep(0.01)
             continue
 

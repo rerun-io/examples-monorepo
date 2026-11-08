@@ -48,17 +48,16 @@ class FrameTracker:
         """Reset the frame-to-keyframe correspondence cache to identity."""
         self.idx_f2k: Int[Tensor, "1 hw"] | None = None
 
-    def track(self, frame: Frame) -> tuple[bool, list, bool]:
+    def track(self, frame: Frame) -> tuple[bool, bool]:
         """Track the frame pose against the last keyframe.
 
         Args:
             frame: The current Frame to track; its ``world_sim3_cam`` is updated in place.
 
         Returns:
-            A tuple of (new_kf, match_info, try_reloc) where new_kf is True
-            when a new keyframe should be created, match_info contains
-            diagnostic tensors, and try_reloc is True when relocalization
-            should be attempted.
+            A tuple of (new_kf, try_reloc) where new_kf is True when a new
+            keyframe should be created and try_reloc is True when
+            relocalization should be attempted.
         """
         last_kf: Frame | None = self.keyframes.last_keyframe()
         assert last_kf is not None, "Cannot track without a keyframe"
@@ -108,7 +107,7 @@ class FrameTracker:
         match_frac: Float[Tensor, ""] = valid_opt.sum() / valid_opt.numel()
         if match_frac < self.cfg["min_match_frac"]:
             rr.log("/world/logs", rr.TextLog(f"Skipped frame {frame.frame_id}", level="DEBUG"))
-            return False, [], True
+            return False, True
 
         try:
             # Track
@@ -136,7 +135,7 @@ class FrameTracker:
             raise
         except torch.linalg.LinAlgError:
             rr.log("/world/logs", rr.TextLog(f"Cholesky failed {frame.frame_id}", level="WARN"))
-            return False, [], True
+            return False, True
 
         frame.world_sim3_cam = world_sim3_camf
 
@@ -161,18 +160,7 @@ class FrameTracker:
         if new_kf:
             self.reset_idx_f2k()
 
-        return (
-            new_kf,
-            [
-                keyframe.X_canon,
-                keyframe.get_average_conf(),
-                frame.X_canon,
-                frame.get_average_conf(),
-                Qkf,
-                Qff,
-            ],
-            False,
-        )
+        return new_kf, False
 
     def get_points_poses(
         self,

@@ -279,7 +279,6 @@ class SharedStates:
         self.device: str = device
 
         self.lock = manager.RLock()
-        self.paused = manager.Value("i", 0)
         self.mode = manager.Value("i", Mode.INIT)
         self.reloc_sem = manager.Value("i", 0)
         self.global_optimizer_tasks = manager.list()
@@ -384,11 +383,6 @@ class SharedStates:
         """
         with self.lock:
             self.mode.value = mode
-
-    def is_paused(self) -> bool:
-        """Return whether the system is currently paused."""
-        with self.lock:
-            return self.paused.value == 1
 
 
 class SharedKeyframes:
