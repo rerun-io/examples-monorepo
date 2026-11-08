@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,6 +15,28 @@ from numpy import ndarray
 
 from mamma.landmarks.config import MammaNetConfig
 from mamma.landmarks.mammanet import DEFAULT_MEAN, DEFAULT_STD
+
+
+def to_device_f32(values: ndarray | torch.Tensor, device: torch.device | str) -> Float32[torch.Tensor, "..."]:
+    """Float32 device tensor from host (numpy) or device values.
+
+    Host arrays go through ONE pinned, non-blocking copy: a pageable
+    ``torch.as_tensor(..., device=cuda)`` blocks the calling thread until every
+    kernel already queued on the stream has finished.
+    """
+    if isinstance(values, torch.Tensor):
+        return values.to(device=device, dtype=torch.float32)
+    host: torch.Tensor = torch.from_numpy(np.ascontiguousarray(values, dtype=np.float32))
+    return host.pin_memory().to(device, non_blocking=True)
+
+
+@functools.cache
+def _normalization(device: torch.device) -> tuple[Float32[torch.Tensor, "1 3 1 1"], Float32[torch.Tensor, "1 3 1 1"]]:
+    """ImageNet mean/std on ``device``, uploaded once."""
+    return (
+        torch.as_tensor(DEFAULT_MEAN, device=device).view(1, 3, 1, 1),
+        torch.as_tensor(DEFAULT_STD, device=device).view(1, 3, 1, 1),
+    )
 
 
 def expand_to_aspect_ratio(input_wh: Float64[ndarray, "2"], target_wh: tuple[int, int]) -> Float64[ndarray, "2"]:
@@ -43,8 +67,8 @@ def box_geometry(box_xyxy: Float32[ndarray, "4"], config: MammaNetConfig) -> tup
 
 def gpu_crop_batch(
     frames: Float32[torch.Tensor, "n 3 h w"],
-    centers: Float64[ndarray, "n 2"],
-    bbox_sizes: Float64[ndarray, "n 2"],
+    centers: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
+    bbox_sizes: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
     masks: Float32[torch.Tensor, "n 1 h w"] | None,
     config: MammaNetConfig,
 ) -> tuple[Float32[torch.Tensor, "n 3 ch cw"], Float32[torch.Tensor, "n 1 ch cw"] | None]:
@@ -67,8 +91,8 @@ def gpu_crop_batch(
     ph: int = config.crop_height
     dev: torch.device = frames.device
 
-    c: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(centers), dtype=torch.float32, device=dev)
-    bs: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(bbox_sizes), dtype=torch.float32, device=dev)
+    c: Float32[torch.Tensor, "n 2"] = to_device_f32(centers, dev)
+    bs: Float32[torch.Tensor, "n 2"] = to_device_f32(bbox_sizes, dev)
 
     ys: Float32[torch.Tensor, "ph"] = torch.arange(ph, dtype=torch.float32, device=dev)
     xs: Float32[torch.Tensor, "pw"] = torch.arange(pw, dtype=torch.float32, device=dev)
@@ -88,9 +112,8 @@ def gpu_crop_batch(
     img_crops: Float32[torch.Tensor, "n 3 ph pw"] = F.grid_sample(
         frames, grid, mode="bilinear", padding_mode="zeros", align_corners=True
     )
-    mean_t: Float32[torch.Tensor, "3"] = torch.as_tensor(DEFAULT_MEAN, device=dev)
-    std_t: Float32[torch.Tensor, "3"] = torch.as_tensor(DEFAULT_STD, device=dev)
-    img_crops = (img_crops - mean_t.view(1, 3, 1, 1)) / std_t.view(1, 3, 1, 1)
+    mean_t, std_t = _normalization(dev)
+    img_crops = (img_crops - mean_t) / std_t
 
     mask_crops: Float32[torch.Tensor, "n 1 ph pw"] | None = None
     if masks is not None:
@@ -100,8 +123,8 @@ def gpu_crop_batch(
 
 def unproject_joints2d(
     joints2d: Float32[torch.Tensor, "n j 3"],
-    centers: Float64[ndarray, "n 2"],
-    bbox_sizes: Float64[ndarray, "n 2"],
+    centers: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
+    bbox_sizes: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
     config: MammaNetConfig,
 ) -> Float32[torch.Tensor, "n j 3"]:
     """Map model-output landmarks from crop coords to image pixel coords.
@@ -113,8 +136,8 @@ def unproject_joints2d(
     out: Float32[torch.Tensor, "n j 3"] = joints2d.clone()
     if config.normalize_plus_min_one:
         out[:, :, :2] = (out[:, :, :2] + 1.0) / 2.0
-    c: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(centers), dtype=out.dtype, device=out.device)
-    bs: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(bbox_sizes), dtype=out.dtype, device=out.device)
+    c: Float32[torch.Tensor, "n 2"] = to_device_f32(centers, out.device).to(out.dtype)
+    bs: Float32[torch.Tensor, "n 2"] = to_device_f32(bbox_sizes, out.device).to(out.dtype)
     out[:, :, 0] = out[:, :, 0] * bs[:, 0:1] - bs[:, 0:1] / 2.0 + c[:, 0:1]
     out[:, :, 1] = out[:, :, 1] * bs[:, 1:2] - bs[:, 1:2] / 2.0 + c[:, 1:2]
     return out
@@ -122,8 +145,8 @@ def unproject_joints2d(
 
 def gpu_mask_crop_batch(
     masks: Float32[torch.Tensor, "n 1 h w"],
-    centers: Float64[ndarray, "n 2"],
-    bbox_sizes: Float64[ndarray, "n 2"],
+    centers: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
+    bbox_sizes: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
     config: MammaNetConfig,
 ) -> Float32[torch.Tensor, "n 1 ch cw"]:
     """Mask-only variant of :func:`gpu_crop_batch` (same analytic grid).
@@ -138,8 +161,8 @@ def gpu_mask_crop_batch(
     ph: int = config.crop_height
     dev: torch.device = masks.device
 
-    c: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(centers), dtype=torch.float32, device=dev)
-    bs: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(bbox_sizes), dtype=torch.float32, device=dev)
+    c: Float32[torch.Tensor, "n 2"] = to_device_f32(centers, dev)
+    bs: Float32[torch.Tensor, "n 2"] = to_device_f32(bbox_sizes, dev)
     ys: Float32[torch.Tensor, "ph"] = torch.arange(ph, dtype=torch.float32, device=dev)
     xs: Float32[torch.Tensor, "pw"] = torch.arange(pw, dtype=torch.float32, device=dev)
     gy, gx = torch.meshgrid(ys, xs, indexing="ij")

@@ -1,0 +1,24 @@
+# asmk-rs Cargo workspace: ASMK's binary-signature helpers (`crates/hamming`, pure Rust) and their PyO3 module
+# (`crates/hamming-py`, imported as `asmk_rs`). Laid out like packages/tsdf-rs. maturin builds the module from
+# crates/hamming-py (pyproject.toml, recipe.yaml).
+[workspace]
+resolver = "2"
+members = ["crates/hamming", "crates/hamming-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+hamming = { path = "crates/hamming" }
+numpy = "0.29"
+pyo3 = "0.29"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

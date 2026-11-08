@@ -24,6 +24,9 @@ project-includes = [
     "packages/dpvo/dpvo/**/*",
     "packages/lietorch-mojo/lietorch_mojo/**/*",
     "packages/vipe-mojo/vipe_mojo/**/*",
+    # Vendored SAM 2: only the Mojo wrapper is ours to typecheck (and the package marker the manifest test looks for).
+    "packages/sam2-streaming/sam2/__init__.py",
+    "packages/sam2-streaming/sam2/mojo_cc.py",
     "packages/slam-evals/slam_evals/**/*",
     "packages/slam-rs/slam_rs/**/*",
     "packages/handfit/handfit/**/*",
@@ -158,6 +161,7 @@ site-package-path = [
     ".pixi/envs/mast3r-slam-dev/lib/python3.12/site-packages",
     ".pixi/envs/dpvo-dev/lib/python3.12/site-packages",
     ".pixi/envs/lietorch-mojo-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sam2-streaming-dev/lib/python3.12/site-packages",
     ".pixi/envs/slam-evals-dev/lib/python3.12/site-packages",
     ".pixi/envs/slam-rs-dev/lib/python3.12/site-packages",
     ".pixi/envs/handfit-dev/lib/python3.12/site-packages",

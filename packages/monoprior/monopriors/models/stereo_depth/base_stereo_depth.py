@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Generic, Literal, TypeVar
 
 import numpy as np
+import torch
 from jaxtyping import Float32, UInt8
 
 from monopriors.models._protocols import DeviceMovable
@@ -47,16 +48,16 @@ class BaseStereoPredictor(ABC, Generic[ModelT]):
     @abstractmethod
     def infer_disparity(
         self,
-        left_rgb: UInt8[np.ndarray, "h w 3"],
-        right_rgb: UInt8[np.ndarray, "h w 3"],
+        left_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"],
+        right_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"],
     ) -> Float32[np.ndarray, "h w"]:
         """Predict left-view disparity in pixels for a rectified stereo pair."""
         raise NotImplementedError
 
     def __call__(
         self,
-        left_rgb: UInt8[np.ndarray, "h w 3"],
-        right_rgb: UInt8[np.ndarray, "h w 3"],
+        left_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"],
+        right_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"],
         K_33: Float32[np.ndarray, "3 3"],
         baseline_m: float,
     ) -> StereoDepthPrediction:

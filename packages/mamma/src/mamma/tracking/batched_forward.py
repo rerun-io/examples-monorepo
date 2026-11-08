@@ -36,34 +36,10 @@ def batched_propagate(
     from sam2.modeling.memory import ObjectMemory
 
     n_cams: int = len(states)
-    selections: list[Any] = []
-    for state in states:
-        known = state.memory_bank.known_obj_ids
-        if known != {0}:
-            return None
-        selection = state.memory_bank.select_memories(
-            obj_ids=[0],
-            current_frame_idx=frame_idx,
-            max_conditional_memories=predictor.max_cond_frames_in_attn,
-            max_non_conditional_memories=predictor.num_maskmem - 1,
-            max_ptr_memories=predictor.max_obj_ptrs_in_encoder,
-            only_include_pointers_in_past=predictor.only_obj_ptrs_in_the_past_for_eval,
-            reverse_tracking=False,
-        )[0]
-        if len(selection.conditional_memories) == 0 and len(selection.non_conditional_memories) == 0:
-            return None
-        selections.append(selection)
-
-    def signature(sel: Any) -> tuple:
-        return (
-            [m.frame_idx for m in sel.conditional_memories],
-            [m.frame_idx for m in sel.non_conditional_memories],
-            [m.frame_idx for m in sel.ptr_memories],
-        )
-
-    first_sig: tuple = signature(selections[0])
-    if any(signature(sel) != first_sig for sel in selections[1:]):
+    selections: list[Any] | None = select_aligned_memories(predictor, states, frame_idx)
+    if selections is None:
         return None
+    first_sig: tuple = memory_signature(selections[0])
 
     def stack_slot(per_cam: list[Any]) -> Any:
         return ObjectMemory(
@@ -124,3 +100,68 @@ def batched_propagate(
         )
         state.memory_bank.prune_memories(obj_ids=[0], current_frame_idx=frame_idx)
     return result
+
+
+def memory_signature(selection: Any) -> tuple[list[int], list[int], list[int]]:
+    """Frame indices of a selection's (conditional, non-conditional, pointer) memories."""
+    return (
+        [m.frame_idx for m in selection.conditional_memories],
+        [m.frame_idx for m in selection.non_conditional_memories],
+        [m.frame_idx for m in selection.ptr_memories],
+    )
+
+
+def select_aligned_memories(predictor: Any, states: list[Any], frame_idx: int) -> list[Any] | None:
+    """Per-camera memory selections for object 0, or None if they cannot be batched.
+
+    Batching needs exactly one tracked object (id 0) in every camera, at least
+    one spatial memory, and the same frame-index structure in every camera.
+    """
+    selections: list[Any] = []
+    for state in states:
+        if state.memory_bank.known_obj_ids != {0}:
+            return None
+        selection = state.memory_bank.select_memories(
+            obj_ids=[0],
+            current_frame_idx=frame_idx,
+            max_conditional_memories=predictor.max_cond_frames_in_attn,
+            max_non_conditional_memories=predictor.num_maskmem - 1,
+            max_ptr_memories=predictor.max_obj_ptrs_in_encoder,
+            only_include_pointers_in_past=predictor.only_obj_ptrs_in_the_past_for_eval,
+            reverse_tracking=False,
+        )[0]
+        if len(selection.conditional_memories) == 0 and len(selection.non_conditional_memories) == 0:
+            return None
+        selections.append(selection)
+    first_sig = memory_signature(selections[0])
+    if any(memory_signature(sel) != first_sig for sel in selections[1:]):
+        return None
+    return selections
+
+
+def first_hypothesis_stats(
+    masks_logits: torch.Tensor, ious: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Binary mask of hypothesis 0 and its per-camera stats, all on GPU.
+
+    Returns ``(masks (c, h, w) bool, stats (c, 7) float32)`` with stats rows
+    ``[bbox_h_rows, x_min, y_min, x_max, y_max, pred_iou, area_px]``.
+    """
+    masks: torch.Tensor = masks_logits[:, 0] > 0.0
+    h: int = masks.shape[1]
+    w: int = masks.shape[2]
+    rows: torch.Tensor = masks.any(dim=2).int()
+    cols: torch.Tensor = masks.any(dim=1).int()
+    stats: torch.Tensor = torch.stack(
+        [
+            rows.sum(dim=1),
+            cols.argmax(dim=1),
+            rows.argmax(dim=1),
+            (w - 1) - cols.flip(1).argmax(dim=1),
+            (h - 1) - rows.flip(1).argmax(dim=1),
+        ],
+        dim=1,
+    ).float()
+    area_px: torch.Tensor = masks.reshape(masks.shape[0], -1).sum(dim=1, keepdim=True).float()
+    stats = torch.cat([stats, ious[:, 0:1].float(), area_px], dim=1)
+    return masks, stats

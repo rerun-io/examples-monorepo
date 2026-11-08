@@ -57,7 +57,7 @@ class SAM2Generic(SAM2Base):
                 img = img.unsqueeze(0)
             if img.dtype == torch.uint8 and scale:
                 img = img.float() / 255.0
-            img_list[i] = self._transforms.transforms(img)
+            img_list[i] = self._transforms.resize_normalize(img)
 
         return torch.cat(img_list, dim=0)
 
@@ -199,15 +199,15 @@ class SAM2Generic(SAM2Base):
 
         tpos_sign_mul = -1 if reverse_time else 1
 
-        obj_ptrs_frame_idx = torch.tensor(obj_ptrs_frame_idx, device=obj_ptrs.device)
-
-        obj_tpos_rel = (
-            (current_frame_idx - obj_ptrs_frame_idx) * tpos_sign_mul
-            if self.use_signed_tpos_enc_to_obj_ptrs
-            else torch.abs(current_frame_idx - obj_ptrs_frame_idx)
-        )
-
         if self.add_tpos_enc_to_obj_ptrs:
+            # Only built when used: the host->device copy of the python frame
+            # indices is a sync point and blocks CUDA-graph capture.
+            obj_ptrs_frame_idx = torch.tensor(obj_ptrs_frame_idx, device=obj_ptrs.device)
+            obj_tpos_rel = (
+                (current_frame_idx - obj_ptrs_frame_idx) * tpos_sign_mul
+                if self.use_signed_tpos_enc_to_obj_ptrs
+                else torch.abs(current_frame_idx - obj_ptrs_frame_idx)
+            )
             t_diff_max = self.max_obj_ptrs_in_encoder - 1
             tpos_dim = (
                 self.hidden_dim if self.proj_tpos_enc_in_obj_ptrs else self.mem_dim
@@ -217,7 +217,7 @@ class SAM2Generic(SAM2Base):
             obj_tpos_rel = self.obj_ptr_tpos_proj.forward(obj_tpos_rel)
             obj_tpos_rel = obj_tpos_rel.unsqueeze(1).expand(-1, B, self.mem_dim)
         else:
-            obj_tpos_rel = obj_ptrs.new_zeros(len(obj_tpos_rel), B, self.mem_dim)
+            obj_tpos_rel = obj_ptrs.new_zeros(len(obj_ptrs_frame_idx), B, self.mem_dim)
 
         if self.mem_dim < self.hidden_dim:
             # Split a pointer into (self.hidden_dim // self.mem_dim) tokens for self.mem_dim < self.hidden_dim

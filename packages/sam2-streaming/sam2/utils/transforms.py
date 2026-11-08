@@ -27,12 +27,33 @@ class SAM2Transforms(nn.Module):
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
         self.to_tensor = ToTensor()
+        self._mean_std_cache: dict[tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
         self.transforms = torch.jit.script(
             nn.Sequential(
                 Resize((self.resolution, self.resolution)),
                 Normalize(self.mean, self.std),
             )
         )
+
+    def resize_normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Same math as ``self.transforms`` on a float (B, 3, H, W) batch.
+
+        torchvision's ``Normalize`` builds its mean/std tensors from python
+        lists on every call (a host->device copy) and checks ``std == 0`` on
+        the device (a sync); both block CUDA-graph capture. Cache the tensors.
+        """
+        x = F.interpolate(
+            x, size=(self.resolution, self.resolution), mode="bilinear", align_corners=False, antialias=True
+        )
+        key = (x.device, x.dtype)
+        mean_std = self._mean_std_cache.get(key)
+        if mean_std is None:
+            mean_std = (
+                torch.as_tensor(self.mean, dtype=x.dtype, device=x.device).view(-1, 1, 1),
+                torch.as_tensor(self.std, dtype=x.dtype, device=x.device).view(-1, 1, 1),
+            )
+            self._mean_std_cache[key] = mean_std
+        return (x - mean_std[0]) / mean_std[1]
 
     def __call__(self, x):
         x = self.to_tensor(x)
