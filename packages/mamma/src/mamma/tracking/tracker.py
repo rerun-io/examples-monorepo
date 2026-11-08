@@ -168,12 +168,20 @@ class MultiViewTracker:
             return quality
 
         ref_idx: int = int(np.argmax([cam_quality(d) for d in detections]))
+        if expected is not None and max(len(d) for d in detections) > expected:
+            # Bystanders in view (operators, a ball thrower on MammaEval): take
+            # the camera that sees the most people so every candidate can be
+            # ranked by where it stands, instead of trusting one camera's
+            # most confident box.
+            ref_idx = int(np.argmax([len(d) * float(d.scores.mean()) if len(d) else 0.0 for d in detections]))
         ref: PersonDetections = detections[ref_idx]
         if len(ref) == 0:
             return [{} for _ in self.cameras]
 
         n_subjects: int = min(len(ref), expected) if expected is not None else len(ref)
         ref_order: list[int] = [int(i) for i in np.argsort(-ref.scores)[:n_subjects]]
+        if expected is not None and len(ref) > expected:
+            ref_order = self._rig_central_order(ref_idx, detections)[:n_subjects]
         obj_ids: list[int] = list(range(n_subjects))
 
         ref_feats: Float32[torch.Tensor, "n 512"] = self.encoder.encode([ref.crops[i] for i in ref_order])
@@ -208,6 +216,53 @@ class MultiViewTracker:
 
         self.bootstrapped = True
         return self._forward_all(frame_idx, frames, prompts_per_cam)
+
+    def _rig_central_order(self, ref_idx: int, detections: list[PersonDetections]) -> list[int]:
+        """Reference detections ordered by 3D distance to the rig centre (XY).
+
+        Each reference box centre is triangulated (two-view DLT) with its best
+        epipolar match in every other camera; the median over cameras is its
+        rough position. The capture subject stands inside the camera ring,
+        bystanders at its edge. Boxes with no match in any camera go last.
+        """
+        ref: PersonDetections = detections[ref_idx]
+        src: CameraCalibration = self.cameras[ref_idx]
+        p_ref: Float64[ndarray, "3 4"] = src.k_matrix @ src.world_to_cam[:3, :]
+        cam_centers: Float64[ndarray, "c 3"] = np.stack(
+            [-cam.world_to_cam[:3, :3].T @ cam.world_to_cam[:3, 3] for cam in self.cameras]
+        )
+        rig_xy: Float64[ndarray, "2"] = cam_centers[:, :2].mean(axis=0)
+        distances: list[float] = []
+        for x_ref in ref.centers_xy1:
+            points: list[Float64[ndarray, "3"]] = []
+            for cam_idx, dets in enumerate(detections):
+                f_matrix: Float64[ndarray, "3 3"] | None = self._fundamental(ref_idx, cam_idx) if cam_idx != ref_idx else None
+                if f_matrix is None or len(dets) == 0:
+                    continue
+                scores: list[float] = [
+                    epipolar_score(f_matrix, x_ref, x_t, self._sigma_px, self._max_dist_px) for x_t in dets.centers_xy1
+                ]
+                best: int = int(np.argmax(scores))
+                if scores[best] < BOOTSTRAP_MIN_SCORE:
+                    continue
+                tgt: CameraCalibration = self.cameras[cam_idx]
+                p_tgt: Float64[ndarray, "3 4"] = tgt.k_matrix @ tgt.world_to_cam[:3, :]
+                x_t = dets.centers_xy1[best]
+                a: Float64[ndarray, "4 4"] = np.stack(
+                    [
+                        x_ref[0] * p_ref[2] - p_ref[0],
+                        x_ref[1] * p_ref[2] - p_ref[1],
+                        x_t[0] * p_tgt[2] - p_tgt[0],
+                        x_t[1] * p_tgt[2] - p_tgt[1],
+                    ]
+                )
+                homog: Float64[ndarray, "4"] = np.linalg.svd(a)[2][-1]
+                if abs(homog[3]) > 1e-9:
+                    points.append(homog[:3] / homog[3])
+            distances.append(
+                float(np.linalg.norm(np.median(np.stack(points), axis=0)[:2] - rig_xy)) if points else float("inf")
+            )
+        return [int(i) for i in np.lexsort((-ref.scores, np.asarray(distances)))]
 
     # ── Steady state ───────────────────────────────────────────────────────
 
