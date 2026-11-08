@@ -327,42 +327,18 @@ def run_slam_pipeline(
 
             add_new_kf: bool = False
 
-            # INIT is handled separately because it uses `continue` to skip
-            # the keyframe-selection and logging below.
-            if mode == Mode.INIT:
-                # Bootstrap: run MASt3R mono inference to get initial 3D points
-                # and features.  The first frame is always a keyframe.
-                X_init: Float[Tensor, "hw 3"]
-                C_init: Float[Tensor, "hw 1"]
-                X_init, C_init = mast3r_inference_mono(model, frame)
-                frame.update_pointmap(X_init, C_init)
-                keyframes.append(frame)
-                states.queue_global_optimization(len(keyframes) - 1)
-                wait_for_backend(states, ctx)
-                states.set_mode(Mode.TRACKING)
-                states.set_frame(frame)
-
-                # ── Async logging for INIT frame ──────────────────────────
-                kf_idx_init: int = len(keyframes) - 1
-                n_kf_init: int = len(keyframes)
-                new_kfs_init: list[KeyframeSnapshot] = [snapshot_keyframe(frame, kf_idx_init)]
-                orient_init: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] = compute_orient(keyframes, n_kf_init)
-                last_orient_n_kf = n_kf_init
-                event_queue.put(LogMapUpdate(
-                    frame_idx=i, timestamp_ns=ts_ns,
-                    new_keyframes=new_kfs_init, orient=orient_init,
-                ))
-                shown_last_kf_id = frame.frame_id
-                if event_queue.qsize() < CURRENT_FRAME_BACKLOG:
-                    current_event: LogCurrentFrame = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
-                    event_queue.put_nowait(current_event)
-                    shown_last_kf_id = current_event.last_kf_frame_id
-
-                i += 1
-                yield f"Processing frame {i}/{n_frames}"
-                continue
-
+            X: Float[Tensor, "hw 3"]
+            C: Float[Tensor, "hw 1"]
             match mode:
+                case Mode.INIT:
+                    # Bootstrap: mono inference gives the first frame its pointmap and features; it is the first
+                    # keyframe. TRACKING is set before the keyframe is queued: the backend skips its queue in INIT.
+                    X, C = mast3r_inference_mono(model, frame)
+                    frame.update_pointmap(X, C)
+                    states.set_mode(Mode.TRACKING)
+                    states.set_frame(frame)
+                    add_new_kf = True
+
                 case Mode.TRACKING:
                     # Normal tracking: match this frame against the last keyframe,
                     # estimate its relative pose via Gauss-Newton, and decide
@@ -377,8 +353,6 @@ def run_slam_pipeline(
                 case Mode.RELOC:
                     # Relocalization: run mono inference to get features, then the
                     # backend process will try to match against the retrieval DB.
-                    X: Float[Tensor, "hw 3"]
-                    C: Float[Tensor, "hw 1"]
                     X, C = mast3r_inference_mono(model, frame)
                     frame.update_pointmap(X, C)
                     states.set_frame(frame)
@@ -451,7 +425,7 @@ def run_slam_pipeline(
 
             # 2. Current frame (droppable) — skipped, snapshot included, while the logger is behind
             if event_queue.qsize() < CURRENT_FRAME_BACKLOG:
-                current_event = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
+                current_event: LogCurrentFrame = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
                 event_queue.put_nowait(current_event)
                 shown_last_kf_id = current_event.last_kf_frame_id
 
