@@ -22,9 +22,6 @@ from collections.abc import Iterable, Mapping, Sequence
 import rerun as rr
 import rerun.blueprint as rrb
 from rerun.encodings import EntityPathLike
-from simplecv.rerun_eye_controls import FOLLOW_AHEAD_M as FOLLOW_AHEAD_M
-from simplecv.rerun_eye_controls import FOLLOW_BACK_M as FOLLOW_BACK_M
-from simplecv.rerun_eye_controls import FOLLOW_UP_M as FOLLOW_UP_M
 from simplecv.rerun_eye_controls import eye_controls_from_pose as eye_controls_from_pose
 from simplecv.rerun_eye_controls import follow_eye_controls as follow_eye_controls
 
@@ -48,6 +45,8 @@ INSTRUCTION_SHARES: tuple[int, int] = (5, 1)
 """Height split between the 3D view and the instruction strip under it."""
 EXO_PANES_PER_TAB: int = 9
 """Most exo panes one strip shows; a larger rig continues in further tabs, filled in order."""
+
+
 def camera_view(
     name: str, rig: int, cam: int, *, contents: list[str] | None = None, overrides: Mapping[EntityPathLike, rrb.EntityBehavior] | None = None
 ) -> rrb.Spatial2DView:
@@ -98,8 +97,6 @@ def imu_plots(rig: int, imu: int) -> list[rrb.TimeSeriesView]:
         sensor_plot("Gyroscope", schema.imu_path(rig, imu), schema.gyro_path(rig, imu)),
         sensor_plot("Accelerometer", schema.imu_path(rig, imu), schema.accel_path(rig, imu)),
     ]
-
-
 
 
 def headset_eye_controls(forward: tuple[float, float, float], up: tuple[float, float, float]) -> rrb.EyeControls3D:

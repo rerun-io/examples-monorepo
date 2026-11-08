@@ -38,14 +38,11 @@ FULL: str = "full"
 def merge_meshes(meshes: Sequence[MeshArrays]) -> MeshArrays:
     """One mesh from several: vertices stacked, triangle indices offset; colours only if every part has them."""
     offsets: list[int] = np.cumsum([0] + [mesh[0].shape[0] for mesh in meshes[:-1]]).tolist()
-    vertices: Float32[ndarray, "v 3"] = np.concatenate([mesh[0] for mesh in meshes]).astype(np.float32, copy=False)
-    triangles: UInt32[ndarray, "t 3"] = np.concatenate([mesh[1] + np.uint32(offset) for mesh, offset in zip(meshes, offsets, strict=True)]).astype(
-        np.uint32, copy=False
-    )
-    colors: UInt8[ndarray, "v 3"] | None = None
-    if all(mesh[2] is not None for mesh in meshes):
-        colors = np.concatenate([mesh[2] for mesh in meshes if mesh[2] is not None])
-    normals: Float32[ndarray, "v 3"] = np.concatenate([mesh[3] for mesh in meshes]).astype(np.float32, copy=False)
+    vertices: Float32[ndarray, "v 3"] = np.concatenate([mesh[0] for mesh in meshes])
+    triangles: UInt32[ndarray, "t 3"] = np.concatenate([mesh[1] + np.uint32(offset) for mesh, offset in zip(meshes, offsets, strict=True)])
+    part_colors: list[UInt8[ndarray, "v 3"]] = [mesh[2] for mesh in meshes if mesh[2] is not None]
+    colors: UInt8[ndarray, "v 3"] | None = np.concatenate(part_colors) if len(part_colors) == len(meshes) else None
+    normals: Float32[ndarray, "v 3"] = np.concatenate([mesh[3] for mesh in meshes])
     return vertices, triangles, colors, normals
 
 
@@ -68,6 +65,10 @@ class LiveMeshLog:
 
     Entities: ``root/blocks/<x>_<y>_<z>`` (super-block coordinates) while the run goes on, ``root/full`` from the
     run's last time point. Nothing is static, so every time point shows the surface as it was then.
+
+    One instance logs one run, on a time that only moves forward: a clear hides older rows only from its own time
+    point on, so a run that starts again at an earlier time point (a second pass, another segment) needs its own
+    ``root`` or its own recording. After :meth:`finish` the instance is closed and every method raises.
     """
 
     root: str
@@ -80,9 +81,16 @@ class LiveMeshLog:
     group 2 left 1,320 entities and 28 ms per frame in playback, group 4 322 entities and 10 ms."""
     _groups: dict[BlockKey, dict[BlockKey, MeshArrays]] = field(default_factory=dict, init=False, repr=False)
     """Latest non-empty mesh of every block, by super-block, to rebuild a super-block when one of its blocks changes."""
+    _finished: bool = field(default=False, init=False, repr=False)
+    """Set by :meth:`finish`: the run is over."""
+
+    def _check_open(self) -> None:
+        if self._finished:
+            raise RuntimeError(f"LiveMeshLog({self.root!r}) is finished; a new run needs a new LiveMeshLog")
 
     def log_changed(self, changed: Iterable[tuple[BlockKey, MeshArrays]]) -> None:
         """Log again every super-block with a changed block (an empty mesh means the block's surface vanished)."""
+        self._check_open()
         dirty: set[BlockKey] = set()
         for key, mesh in changed:
             group_key: BlockKey = (key[0] // self.group, key[1] // self.group, key[2] // self.group)
@@ -99,14 +107,18 @@ class LiveMeshLog:
                 rr.log(path, front_faced_mesh(merge_meshes(parts)), recording=self.recording)
             else:
                 rr.log(path, rr.Clear(recursive=False), recording=self.recording)
+                del self._groups[group_key]
 
     def restart(self) -> None:
-        """Clear every block from this time point on (a re-fusion that logs all of its blocks again follows)."""
+        """Clear every block from this time point on, which must not precede the last logged one (a re-fusion that
+        logs all of its blocks again follows)."""
+        self._check_open()
         rr.log(f"{self.root}/{BLOCKS}", rr.Clear(recursive=True), recording=self.recording)
         self._groups = {}
 
     def finish(self, mesh: MeshArrays) -> None:
         """The run's end: clear the blocks and log ``mesh``, the whole surface, as one entity at this time point."""
         self.restart()
+        self._finished = True
         if mesh[1].shape[0] > 0:
             rr.log(f"{self.root}/{FULL}", front_faced_mesh(mesh), recording=self.recording)

@@ -15,9 +15,8 @@ FOLLOW_UP_M: float = 0.45
 FOLLOW_AHEAD_M: float = 0.3
 """How far ahead of the device the follow eye aims, so the shot leads the motion.
 
-The three distances were tuned together on LaMAria's R_01_easy and hold for the MSD
-headsets as they stand: a shot that keeps the camera frusta and the last ten seconds
-of trail in view at once without the ground filling it."""
+The three defaults are dataforge's headset tuning (LaMAria's R_01_easy, the MSD headsets): a shot that keeps the
+camera frusta and the last ten seconds of trail in view without the ground filling it. Other devices pass their own."""
 
 
 def eye_controls_from_pose(
@@ -27,11 +26,10 @@ def eye_controls_from_pose(
 ) -> rrb.EyeControls3D:
     """An orbital eye placed by hand, in the coordinates of the view's origin.
 
-    Orbital is the default for every 3D view here: the eye orbits
-    ``look_target`` when dragged, which is what a person inspecting a rig or a
-    scene wants, whereas first-person controls fly the eye and lose the subject.
-    The follow view's origin is the rig node, so an eye fixed in that frame rides
-    the rig (the ``rerun-io/eye_control_example`` pattern).
+    Orbital: the eye orbits ``look_target`` when dragged, which is what a person
+    inspecting a rig or a scene wants, whereas first-person controls fly the eye and
+    lose the subject. When the view's origin is a moving body, an eye fixed in that
+    frame rides the body (the ``rerun-io/eye_control_example`` pattern).
 
     Args:
         position: Where the eye sits.
@@ -39,7 +37,7 @@ def eye_controls_from_pose(
         eye_up: Which way is up for the eye; it fixes the horizon's roll.
 
     Returns:
-        The eye both 3D views of a rig layout can be given.
+        An orbital eye with spin off.
     """
     # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
     return rrb.EyeControls3D(
@@ -79,7 +77,7 @@ def follow_eye_controls(
         side_m: Offset to the device's right, for a three-quarter view.
 
     Returns:
-        The eye the Follow view of both blueprints uses.
+        An orbital eye in the device's frame, for a view whose origin is the device.
     """
     right: tuple[float, float, float] = (
         forward[1] * up[2] - forward[2] * up[1],

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pytest
 import rerun as rr
 from rerun.chunk import RrdReader
 
@@ -75,3 +76,22 @@ def test_group_one_logs_every_block(tmp_path: Path) -> None:
     _log_run(rrd, group=1)
     paths = {path for path, _, _, _ in _rows(rrd) if path.startswith(f"/world/mesh/{BLOCKS}/")}
     assert paths == {f"/world/mesh/{BLOCKS}/{x}_0_0" for x in range(3)}
+
+
+def test_a_finished_log_refuses_reuse() -> None:
+    rec = rr.RecordingStream("live-mesh-test", recording_id="closed")
+    rec.memory_recording()
+    log = LiveMeshLog("world/mesh", rec)
+    log.finish(_triangle(0.0))
+    for call in (lambda: log.log_changed([((0, 0, 0), _triangle(1.0))]), log.restart, lambda: log.finish(_triangle(1.0))):
+        with pytest.raises(RuntimeError, match="finished"):
+            call()
+
+
+def test_a_super_block_whose_surface_vanished_is_forgotten() -> None:
+    rec = rr.RecordingStream("live-mesh-test", recording_id="forget")
+    rec.memory_recording()
+    log = LiveMeshLog("world/mesh", rec, group=1)
+    log.log_changed([((0, 0, 0), _triangle(0.0)), ((1, 0, 0), _triangle(1.0))])
+    log.log_changed([((1, 0, 0), EMPTY)])
+    assert list(log._groups) == [(0, 0, 0)]
