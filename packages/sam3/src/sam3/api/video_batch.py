@@ -23,6 +23,8 @@ import torch
 from jaxtyping import Bool, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.video_io import TorchCodecVideoReader
+from torch import Tensor
 from tqdm import tqdm
 from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 
@@ -385,19 +387,18 @@ def main(cfg: Sam3VideoDemoConfig) -> None:
     # Load model and processor
     model, processor = load_sam3_model(cfg.model_config, device, dtype)
 
-    # Load video frames into memory
-    from transformers.video_utils import Path as TransformersVideoPath
-    from transformers.video_utils import load_video
-
     # Check video constraints (duration + resolution)
     check_video_constraints(cfg.video_path, cfg.max_frames)
 
-    video_frames_np, video_metadata = load_video(
-        TransformersVideoPath(str(cfg.video_path)),
-        num_frames=cfg.max_frames,
-    )
-    video_frames: UInt8[ndarray, "t h w 3"] = video_frames_np  # type: ignore[assignment]
-    total_frames: int = video_frames.shape[0]
+    # Decode the first ``max_frames`` frames (all by default) on NVDEC, into one device tensor the
+    # processor preprocesses where it lies. Session frame i is then video frame i, which the logged
+    # VideoStream's timestamps assume; transformers' load_video(num_frames=N) sampled N frames spread
+    # over the whole clip and put the masks on the wrong frames.
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(cfg.video_path, device=device)
+    video_fps: float = reader.fps
+    total_frames: int = len(reader) if cfg.max_frames is None else min(cfg.max_frames, len(reader))
+    video_frames: UInt8[Tensor, "t 3 h w"] = reader.get_frames_in_range(0, total_frames)
+    reader.close()
 
     # Initialize inference session with full video
     inference_session: Sam3VideoInferenceSession = processor.init_video_session(
@@ -431,19 +432,16 @@ def main(cfg: Sam3VideoDemoConfig) -> None:
             desc="Propagating masks",
         ):
             frame_idx: int = int(model_outputs.frame_idx)
-            frame_rgb: UInt8[ndarray, "h w 3"] = video_frames[frame_idx]
             processed_outputs = processor.postprocess_outputs(inference_session, model_outputs)
             log_frame_outputs(
                 frame_idx,
                 frame_timestamps_ns,
                 processed_outputs,
-                frame_shape=(frame_rgb.shape[0], frame_rgb.shape[1]),
+                frame_shape=(video_frames.shape[2], video_frames.shape[3]),
             )
 
     # Summary
-    fps: float | None = getattr(video_metadata, "fps", None)
-    fps_msg: str = f" @ {fps:.2f} fps" if fps is not None else ""
-    print(f"[done] Processed {total_frames} frames{fps_msg} (prompt='{cfg.prompt}').")
+    print(f"[done] Processed {total_frames} frames @ {video_fps:.2f} fps (prompt='{cfg.prompt}').")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

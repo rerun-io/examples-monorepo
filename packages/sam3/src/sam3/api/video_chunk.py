@@ -26,6 +26,8 @@ import torch
 from jaxtyping import Bool, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.video_io import TorchCodecVideoReader
+from torch import Tensor
 from tqdm import tqdm
 from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 
@@ -104,56 +106,6 @@ def compute_chunk_size(meta: VideoMetadata, target_memory_gb: float) -> int:
     target_bytes: int = int(target_memory_gb * (1024**3))
     chunk_frames: int = max(1, target_bytes // meta.bytes_per_frame)
     return chunk_frames
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Chunk Loading
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def load_video_chunk(
-    video_path: Path,
-    start_frame: int,
-    num_frames: int,
-) -> UInt8[ndarray, "t h w 3"]:
-    """
-    Load a specific chunk of frames from a video file.
-
-    Args:
-        video_path: Path to the video file.
-        start_frame: Starting frame index (0-based).
-        num_frames: Number of frames to load.
-
-    Returns:
-        Array of shape (num_frames, height, width, 3) in RGB format.
-
-    Raises:
-        RuntimeError: If video cannot be opened or seek fails.
-    """
-    cap: cv2.VideoCapture = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
-
-    # Seek to start frame
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-    frames: list[UInt8[ndarray, "h w 3"]] = []
-    for _ in range(num_frames):
-        ret: bool
-        frame: UInt8[ndarray, "h w 3"]
-        ret, frame = cap.read()
-        if not ret:
-            break
-        # Convert BGR to RGB
-        frame_rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append(frame_rgb)
-
-    cap.release()
-
-    if len(frames) == 0:
-        raise RuntimeError(f"No frames loaded from {video_path} at position {start_frame}")
-
-    return np.stack(frames, axis=0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -454,18 +406,23 @@ def main(cfg: Sam3ChunkVideoDemoConfig) -> None:
     chunk_frames: int = compute_chunk_size(meta, cfg.chunk_memory_gb)
     chunk_duration: float = chunk_frames / meta.fps
 
+    # Resolve device and dtype
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype: torch.dtype = safe_dtype(cfg.model_config.dtype, device)
+
+    # One NVDEC reader for the whole run: each chunk is an exact frame range on the GPU, where the
+    # processor takes it, instead of a new cv2 capture, an inexact seek and a host colour conversion.
+    # Its frame count comes from the stream index, not the container header cv2 reports.
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(cfg.video_path, device=device, seek_mode="exact")
+
     # Apply max_frames limit
-    total_frames: int = meta.total_frames
+    total_frames: int = len(reader)
     if cfg.max_frames is not None:
         total_frames = min(total_frames, cfg.max_frames)
 
     print(f"[Chunk config] {meta.width}x{meta.height} @ {meta.fps:.1f}fps")
     print(f"[Chunk config] Total: {total_frames} frames, Chunk: {chunk_frames} frames (~{chunk_duration:.1f}s)")
     print(f"[Chunk config] Overlap: {cfg.overlap_frames} frames")
-
-    # Resolve device and dtype
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype: torch.dtype = safe_dtype(cfg.model_config.dtype, device)
 
     # Load model and processor once
     model, processor = load_sam3_model(cfg.model_config, device, dtype)
@@ -501,14 +458,11 @@ def main(cfg: Sam3ChunkVideoDemoConfig) -> None:
             if actual_chunk_size <= 0:
                 break
 
-            # Load chunk frames
-            chunk_frames_np: UInt8[ndarray, "t h w 3"] = load_video_chunk(
-                cfg.video_path, chunk_start, actual_chunk_size
-            )
+            chunk_video: UInt8[Tensor, "t 3 h w"] = reader.get_frames_in_range(chunk_start, chunk_end)
 
             # Initialize inference session for this chunk
             inference_session: Sam3VideoInferenceSession = processor.init_video_session(
-                video=chunk_frames_np,
+                video=chunk_video,
                 inference_device=device,
                 processing_device=cfg.model_config.processing_device,
                 video_storage_device=cfg.model_config.video_storage_device,
@@ -535,25 +489,23 @@ def main(cfg: Sam3ChunkVideoDemoConfig) -> None:
 
                 frames_yielded.add(global_frame_idx)
 
-                # Get frame shape from chunk
-                frame_rgb: UInt8[ndarray, "h w 3"] = chunk_frames_np[local_frame_idx]
-
                 # Postprocess and log
                 processed_outputs = processor.postprocess_outputs(inference_session, model_outputs)
                 log_frame_outputs(
                     global_frame_idx,
                     frame_timestamps_ns,
                     processed_outputs,
-                    frame_shape=(frame_rgb.shape[0], frame_rgb.shape[1]),
+                    frame_shape=(chunk_video.shape[2], chunk_video.shape[3]),
                 )
 
                 pbar.update(1)
                 total_processed += 1
 
             # Free chunk memory
-            del chunk_frames_np
+            del chunk_video
             del inference_session
 
+    reader.close()
     pbar.close()
 
     # Summary

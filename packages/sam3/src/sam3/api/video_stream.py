@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -24,6 +23,8 @@ import torch
 from jaxtyping import Bool, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.video_io import TorchCodecVideoReader
+from torch import Tensor
 from tqdm import tqdm
 from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 
@@ -119,44 +120,30 @@ def safe_dtype(dtype_pref: str, device: torch.device) -> torch.dtype:
 # Video Frame Iteration (Streaming)
 # ──────────────────────────────────────────────────────────────────────────────
 
-FrameData = tuple[int, UInt8[ndarray, "h w 3"], float | None, int, int]
-"""Type alias for frame iteration: (frame_idx, rgb_array, fps, width, height)."""
+FrameData = tuple[int, UInt8[Tensor, "3 h w"], float, int, int]
+"""Type alias for frame iteration: (frame_idx, rgb_chw, fps, width, height)."""
 
 
-def iter_video_frames(path: Path) -> Generator[FrameData, None, None]:
+def iter_video_frames(path: Path, device: torch.device) -> Generator[FrameData, None, None]:
     """
-    Yield RGB frames from a video file, streaming from disk.
+    Yield RGB frames from a video file, decoded in small batches on ``device`` (NVDEC on CUDA).
 
-    Uses OpenCV's VideoCapture which leverages FFmpeg for broad codec support
-    including H.264, H.265, AV1, VP9, etc.
+    The processor preprocesses each frame on the inference device, so the frames stay there
+    instead of taking a host colour conversion and an upload each.
 
     Args:
         path: Path to the video file.
+        device: Decode device.
 
     Yields:
-        Tuple of (frame_idx, rgb_array, fps, width, height) for each frame.
-
-    Raises:
-        RuntimeError: If the video cannot be opened.
+        Tuple of (frame_idx, rgb_chw, fps, width, height) for each frame.
     """
-    cap: cv2.VideoCapture = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video: {path}")
-
-    fps: float | None = float(cap.get(cv2.CAP_PROP_FPS)) or None
-    width: int = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height: int = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(path, device=device)
     try:
-        frame_idx: int = 0
-        ok, frame_bgr = cap.read()
-        while ok:
-            frame_rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            yield frame_idx, frame_rgb, fps, width, height
-            frame_idx += 1
-            ok, frame_bgr = cap.read()
+        for frame_idx, frame_rgb in enumerate(reader):
+            yield frame_idx, frame_rgb, reader.fps, reader.width, reader.height
     finally:
-        cap.release()
+        reader.close()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -377,7 +364,7 @@ def main(cfg: Sam3StreamDemoConfig) -> None:
     model, processor = load_sam3_model(cfg.model_config, device, dtype)
 
     # Initialize frame iterator
-    frame_iter: Generator[FrameData, None, None] = iter_video_frames(cfg.video_path)
+    frame_iter: Generator[FrameData, None, None] = iter_video_frames(cfg.video_path, device)
 
     try:
         # Get first frame to validate video
@@ -409,7 +396,7 @@ def main(cfg: Sam3StreamDemoConfig) -> None:
         )
 
         # Frame processing function
-        def process_frame(frame_idx: int, frame_rgb: UInt8[ndarray, "h w 3"]) -> None:
+        def process_frame(frame_idx: int, frame_rgb: UInt8[Tensor, "3 h w"]) -> None:
             """Process a single frame through the model and log to Rerun."""
             inputs = processor(images=frame_rgb, device=device, return_tensors="pt")
             model_outputs = model(
@@ -426,7 +413,7 @@ def main(cfg: Sam3StreamDemoConfig) -> None:
                 frame_idx,
                 frame_timestamps_ns,
                 processed_outputs,
-                frame_shape=(frame_rgb.shape[0], frame_rgb.shape[1]),
+                frame_shape=(frame_rgb.shape[1], frame_rgb.shape[2]),
             )
 
         # Run streaming inference
