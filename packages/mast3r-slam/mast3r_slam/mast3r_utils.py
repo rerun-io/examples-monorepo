@@ -19,7 +19,7 @@ from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
 
 
-class FixedLengthRoPE2D(RoPE2D):
+class FixedLengthRoPE2D(RoPE2D):  # pyrefly: ignore  # croco aliases RoPE2D to cuRoPE2D when that extension is built
     """croco's pytorch RoPE2D with its cos/sin table sized once, for the largest patch grid the model takes.
 
     The stock module sizes the table from ``int(positions.max())`` on every call: a GPU->CPU sync per query and
@@ -54,7 +54,7 @@ def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt
     model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
     # Without croco's compiled cuRoPE2D the model falls back to the pytorch RoPE2D; swap in the sync-free one.
     if type(model.rope) is RoPE2D:
-        max_positions: int = max(model.patch_embed.img_size) // model.patch_embed.patch_size[0]
+        max_positions: int = int(max(model.patch_embed.img_size)) // int(model.patch_embed.patch_size[0])  # pyrefly: ignore
         rope: FixedLengthRoPE2D = FixedLengthRoPE2D(model.rope.base, model.rope.F0, max_positions)
         for module in model.modules():
             if getattr(module, "rope", None) is not None:
