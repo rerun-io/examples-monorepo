@@ -9,9 +9,8 @@ extend-exclude = [
     "**/dist",
     "**/node_modules",
     "**/target",
-    # Upstream-source recipes, the dpretrieval build and the vendored SAM 2 dependency.
+    # Upstream-source recipes and the vendored SAM 2 dependency.
     "recipes",
-    "packages/dpretrieval",
     "packages/sam2-streaming",
     # Vendor trees, including src-layout packages.
     "packages/**/third_party",

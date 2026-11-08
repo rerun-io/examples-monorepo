@@ -141,24 +141,12 @@ def test_to_yacs_rejects_values_yacs_cannot_express() -> None:
         MetricDPVOConfig(gradient_bias=True).to_yacs()
 
 
-# ── against ViPE (metrictrail env only) ────────────────────────────────
+# ── against ViPE (metrictrail env only; the schema check lives in packages/metrictrail/tests) ──
 
 
 def vipe_slam_configs() -> Path:
     vipe = pytest.importorskip("vipe", reason="ViPE is installed only in the metrictrail env")
     return Path(vipe.__file__).parent / "_configs" / "slam"
-
-
-def test_yacs_defaults_equal_vipe_schema() -> None:
-    """ViPE's Hydra schema (``vipe.metrictrail.config.DPVOConfig``) still lists DPVO's defaults: they must equal ours."""
-    vipe_slam_configs()
-    from vipe.metrictrail.config import DPVOConfig as VipeDPVOSchema
-    from vipe.metrictrail.dpvo.config import cfg
-
-    schema: dict[str, YacsValue] = VipeDPVOSchema().model_dump()
-    assert schema == dict(YACS_DEFAULTS)
-    assert {key: type(value) for key, value in schema.items()} == {key: type(value) for key, value in YACS_DEFAULTS.items()}
-    assert dict(cfg) == dict(YACS_DEFAULTS)
 
 
 @pytest.mark.parametrize("preset", sorted(PRESETS))

@@ -97,19 +97,43 @@ def read_segment_packets(dataset: DatasetEntry, segment_id: str, entity: str, ti
 
 
 def relay_video_stream(dataset: DatasetEntry, segment_id: str, entity: str, timeline: str, start_ns: int, end_ns: int) -> int:
-    """Log the catalog's stored video packets for [keyframe-before-start, end] as a Rerun VideoStream at ``entity`` on ``timeline``; return the number of samples logged.
+    """Fetch a segment's stored video packets and relay [keyframe-before-start, end] with :func:`relay_video_packets`.
+
+    Callers that already hold the packets (an :func:`open_segment_decoder` caller does) should call
+    :func:`relay_video_packets` directly instead of fetching the whole column a second time.
+
+    Returns:
+        The number of samples logged.
+    """
+    times, samples, keyframes, codec_value = read_segment_packets(dataset, segment_id, entity, timeline)
+    return relay_video_packets(entity, timeline, times, samples, keyframes, rr.VideoCodec(codec_value), start_ns, end_ns)
+
+
+def relay_video_packets(
+    entity: str,
+    timeline: str,
+    times: TimedeltaNs,
+    samples: Sequence[bytes],
+    keyframes: Sequence[bool],
+    codec: rr.VideoCodec,
+    start_ns: int,
+    end_ns: int,
+) -> int:
+    """Log stored video packets for [keyframe-before-start, end] as a Rerun VideoStream at ``entity`` on ``timeline``.
 
     Relaying the stored samples keeps the source resolution and bitrate that a
     re-encoded per-frame image throws away, and costs the viewer one decode of
-    the bytes the catalog already holds.
+    the bytes the catalog already holds. The window goes out as one ``send_columns``.
 
     Args:
-        dataset: Rerun catalog dataset entry holding the segment.
-        segment_id: Segment whose packets are relayed.
         entity: Entity path the ``VideoStream`` is logged at, without a leading
             slash. Use the catalog's own video path so the relayed stream lines
             up with a future layer registration.
-        timeline: Index timeline the packets are read and re-logged on.
+        timeline: Index timeline the packets are re-logged on.
+        times: Sample index values in timeline order, as :func:`read_segment_packets` returns them.
+        samples: Raw video samples.
+        keyframes: Keyframe flag per sample.
+        codec: The stream's codec.
         start_ns: First nanosecond of the window of interest. The relay opens at
             the last keyframe at or before it, because a decoder cannot start
             mid-GOP.
@@ -118,20 +142,22 @@ def relay_video_stream(dataset: DatasetEntry, segment_id: str, entity: str, time
     Returns:
         The number of samples logged.
     """
-    times, samples, keyframes, codec_value = read_segment_packets(dataset, segment_id, entity, timeline)
     times_ns: Int64[ndarray, " n_samples"] = times.astype("timedelta64[ns]").astype(np.int64)
     keyframe_indices: Int64[ndarray, " n_keyframes"] = np.flatnonzero(np.asarray(keyframes, dtype=bool))
     if len(keyframe_indices) == 0:
-        raise ValueError(f"{entity} in segment {segment_id} has no keyframe, so no window can be decoded")
+        raise ValueError(f"{entity} has no keyframe, so no window can be decoded")
     # A decoder must start on a keyframe, so the window opens at the last one at or before
     # start_ns — or at the stream's first, when the window opens before every keyframe.
     anchors: Int64[ndarray, " n_anchors"] = keyframe_indices[times_ns[keyframe_indices] <= start_ns]
     first: int = int(anchors[-1]) if len(anchors) else int(keyframe_indices[0])
     last: int = int(np.searchsorted(times_ns, end_ns, side="right"))
-    rr.log(entity, rr.VideoStream(codec=rr.VideoCodec(codec_value)), static=True)
-    for index in range(first, last):
-        rr.set_time(timeline, duration=np.timedelta64(int(times_ns[index]), "ns"))
-        rr.log(entity, rr.VideoStream.from_fields(sample=samples[index], is_keyframe=keyframes[index]))
+    rr.log(entity, rr.VideoStream(codec=codec), static=True)
+    if last > first:
+        rr.send_columns(
+            entity,
+            indexes=[rr.TimeColumn(timeline, duration=times_ns[first:last].astype("timedelta64[ns]"))],
+            columns=rr.VideoStream.columns(sample=list(samples[first:last]), is_keyframe=list(keyframes[first:last])),
+        )
     return max(0, last - first)
 
 

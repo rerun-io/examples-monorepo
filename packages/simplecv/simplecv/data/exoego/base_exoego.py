@@ -446,6 +446,22 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
 
         return cam_params_list, bgr_list
 
+    def exo_depths_at(
+        self, idx: int
+    ) -> tuple[int, list[PinholeParameters | Fisheye62Parameters | None] | None, list[UInt16[ndarray, "H W"]] | None]:
+        """Canonical timestamp, exo camera parameters and exo depth maps of one index, without decoding video.
+
+        The same cameras and depths ``self[idx]`` returns; for depth-only consumers that would
+        otherwise decode every ego and exo frame and drop them.
+        """
+        _, ts_ns = self._resolve_canonical(idx=idx, ts_nano=None)
+        if self.exo_sequence is None:
+            return ts_ns, None, None
+        cam_params_list: list[PinholeParameters | Fisheye62Parameters | None] = [
+            self.exo_sequence.exo_cam_list[stream_idx] for stream_idx in range(len(self._exo_stream_names))
+        ]
+        return ts_ns, cam_params_list, self._sample_exo_depths(ts_ns)
+
     def _sample_exo_depths(self, ts_ns: int) -> list[UInt16[ndarray, "H W"]] | None:
         """Fetch exo depth maps aligned to ``ts_ns`` (uint16 millimetres)."""
         if self.exo_sequence is None:

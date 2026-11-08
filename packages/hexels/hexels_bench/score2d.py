@@ -2,7 +2,7 @@
 
 Same math as upstream `scripts/image_compression_training.basic_metrics` and `scripts/evaluate_image.py`:
 clamp once to [0, 1]; PSNR = -10 log10 of the float64 MSE over all pixels and channels; SSIM =
-`fused_ssim` (11x11 Gaussian, sigma 1.5); LPIPS = `lpips.LPIPS(net="alex")` on inputs mapped to [-1, 1].
+fused-ssim (`hexels_mojo.fused_ssim`, 11x11 Gaussian, sigma 1.5); LPIPS = `lpips.LPIPS(net="alex")` on inputs mapped to [-1, 1].
 """
 
 import math
@@ -41,7 +41,7 @@ class ImageScorer:
 
     @torch.no_grad()
     def score(self, prediction: Float[torch.Tensor, "3 h w"], target: Float[torch.Tensor, "3 h w"]) -> ImageScores:
-        from fused_ssim import fused_ssim
+        from hexels_mojo.fused_ssim import fused_ssim
 
         image: torch.Tensor = prediction.to(device=self.device, dtype=torch.float32).clamp(0, 1)
         truth: torch.Tensor = target.to(device=self.device, dtype=torch.float32)

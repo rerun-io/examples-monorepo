@@ -40,6 +40,10 @@ class ProfileConfig:
     """Converted MammaNet weights."""
     resize_hw: tuple[int, int] = (720, 1280)
     """Engine resolution."""
+    trt_engine: Path | None = None
+    """Optional MammaNet TensorRT engine plan (tools/build_trt_engine.py)."""
+    observe_tracked_only: bool = False
+    """With --tracker.track-stride N, run landmarks + fit only on tracked ticks."""
     warmup_frames: int = 45
     """Steady-state warmup before the profiled window (must exceed bootstrap)."""
     profile_frames: int = 48
@@ -61,6 +65,8 @@ def main(config: ProfileConfig) -> None:
         tracker_config=config.tracker,
         fitter_config=config.fitter,
         mammanet_weights=config.mammanet_weights,
+        trt_engine=config.trt_engine,
+        observe_tracked_only=config.observe_tracked_only,
     )
 
     print(f"warmup: {config.warmup_frames} ticks")

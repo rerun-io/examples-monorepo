@@ -13,8 +13,10 @@ from torch import Tensor
 
 from zipdepth.catalog.stats import BuilderStats
 from zipdepth.catalog.targets import (
+    EVAL_AUGMENT_POLICY,
     AugmentPolicy,
     TargetMode,
+    build_eval_transform,
     build_metric_training_sample,
     build_training_sample,
     build_training_sample_cuda,
@@ -466,3 +468,14 @@ class CudaSampleBuilder:
                 self.stats.samples_built += 1
                 accepted.append(sample)
         return accepted
+
+
+def eval_sample_builder(out_hw: tuple[int, int], device: torch.device, ultrawide_policy: UltrawidePolicy | None = None) -> SampleBuilder:
+    """The evaluation sample builder: centre resize to ``out_hw`` with metric targets and no augmentation.
+
+    On CUDA the samples are built where NVDEC decoded the frame (:class:`CudaSampleBuilder` with
+    :data:`EVAL_AUGMENT_POLICY`); on the CPU through the eval transform. Both resize the same way.
+    """
+    if device.type == "cuda":
+        return CudaSampleBuilder(out_hw, EVAL_AUGMENT_POLICY, min_depth_span=0.0, device=device, target_mode="metric", ultrawide_policy=ultrawide_policy)
+    return CpuSampleBuilder(build_eval_transform(out_hw[0], out_hw[1]), min_depth_span=0.0, target_mode="metric", ultrawide_policy=ultrawide_policy)

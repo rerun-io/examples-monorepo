@@ -1,0 +1,10 @@
+[package]
+name = "hamming"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "ASMK's binarize-and-pack and packed Hamming distances (jenicek/asmk cython/hamming.pyx)."
+
+[lints]
+workspace = true

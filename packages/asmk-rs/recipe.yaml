@@ -1,0 +1,40 @@
+# rattler-build recipe for asmk-rs: ASMK's binary-signature helpers (jenicek/asmk `cython/hamming.pyx`) in Rust, as
+# the pyo3 module asmk_rs. recipes/asmk-src imports it as `asmk.hamming`; maturin builds it from crates/hamming-py.
+package:
+  name: asmk-rs
+  version: "0.1.0"
+
+source:
+  - path: .
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
+
+build:
+  number: 0
+  script:
+    # pixi reuses the host prefix across source builds, and files left there are packaged: drop an earlier install.
+    - export SP_DIR="$(${{ PYTHON }} -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+    - rm -rf "$SP_DIR/asmk_rs" "$SP_DIR"/asmk_rs-*.dist-info
+    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    # The C compiler links the extension; no stdlib('c'): it would pin a sysroot to the workspace's glibc 2.35.
+    - ${{ compiler('c') }}
+  host:
+    - python 3.12.*
+    - pip
+    - maturin >=1.9.4,<2
+  run:
+    - python 3.12.*
+    - numpy
+
+tests:
+  - python:
+      imports:
+        - asmk_rs
+      pip_check: false

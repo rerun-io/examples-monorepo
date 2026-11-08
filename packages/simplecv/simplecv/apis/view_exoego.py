@@ -19,7 +19,7 @@ from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack, SmplxStack
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample, RigLayout
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, RigLayout
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
     COCO_133_IDS,
@@ -151,10 +151,9 @@ def log_depths(
     """
 
     for idx in tqdm(range(len(exoego_sequence))):
-        sample: ExoEgoSample = exoego_sequence[idx]
-        rr.set_time(timeline, duration=sample.canonical_timestamp_ns * 1e-9)
-        exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters | None] | None = sample.exo_cam_params_list
-        exo_depth_list: list[UInt16[ndarray, "H W"]] | None = sample.exo_depth_list
+        # Depths only: indexing the sequence would also decode every ego and exo frame and drop them.
+        timestamp_ns, exo_cam_params_list, exo_depth_list = exoego_sequence.exo_depths_at(idx)
+        rr.set_time(timeline, duration=timestamp_ns * 1e-9)
         assert exo_cam_params_list is not None and exo_depth_list is not None
         for idx, exo_cam_param in enumerate(exo_cam_params_list):
             if exo_cam_param is None:

@@ -69,7 +69,7 @@ def load_xlens_model(checkpoint: Path | None, device: Literal["cpu", "cuda"]) ->
     return pipeline.model, checkpoint_path
 
 
-def validate_rig_inputs(images: UInt8[ndarray, "s h w 3"], rays: Float32[ndarray, "s h w 3"], cam_types: Int64[ndarray, "s"]) -> None:
+def validate_rig_inputs(images: UInt8[ndarray, "s h w 3"] | UInt8[Tensor, "s h w 3"], rays: Float32[ndarray, "s h w 3"], cam_types: Int64[ndarray, "s"]) -> None:
     """Reject rigs X-Lens cannot process.
 
     Raises:
@@ -87,20 +87,21 @@ def validate_rig_inputs(images: UInt8[ndarray, "s h w 3"], rays: Float32[ndarray
         raise ValueError("X-Lens images, rays, and camera types must have matching view and image dimensions")
 
 
-def normalize_framesets(images: UInt8[ndarray, "b s h w 3"], device: torch.device) -> Float32[Tensor, "b s 3 h w"]:
+def normalize_framesets(images: UInt8[ndarray, "b s h w 3"] | UInt8[Tensor, "b s h w 3"], device: torch.device) -> Float32[Tensor, "b s 3 h w"]:
     """ImageNet-normalise a batch of uint8 RGB framesets on the inference device.
 
     Same operation order as the upstream numpy ``normalize_image`` (divide,
     subtract, divide), so the float32 results are identical.
 
     Args:
-        images: RGB framesets, ``UInt8[ndarray, "b s h w 3"]``.
+        images: RGB framesets, host ``UInt8[ndarray, "b s h w 3"]`` or a tensor already on ``device``
+            (no upload then).
         device: Device that owns the result.
 
     Returns:
         Normalised network input, ``Float32[Tensor, "b s 3 h w"]``.
     """
-    rgb: UInt8[Tensor, "b s h w 3"] = torch.from_numpy(np.ascontiguousarray(images)).to(device)
+    rgb: UInt8[Tensor, "b s h w 3"] = (torch.from_numpy(np.ascontiguousarray(images)) if isinstance(images, ndarray) else images).to(device)
     mean: Float32[Tensor, "3"] = torch.as_tensor(IMAGENET_MEAN, device=device)
     std: Float32[Tensor, "3"] = torch.as_tensor(IMAGENET_STD, device=device)
     normalized: Float32[Tensor, "b s h w 3"] = (rgb.to(torch.float32) / 255.0 - mean) / std
@@ -248,7 +249,7 @@ class XLensPredictor(BaseRigDepthPredictor):
 
     def __call__(
         self,
-        images: UInt8[ndarray, "s h w 3"],
+        images: UInt8[ndarray, "s h w 3"] | UInt8[Tensor, "s h w 3"],
         rays: Float32[ndarray, "s h w 3"],
         cam_types: Int64[ndarray, "s"],
         cam_T_ref: Float64[ndarray, "s 4 4"] | None,
@@ -256,7 +257,7 @@ class XLensPredictor(BaseRigDepthPredictor):
         """Predict per-view camera-frame metric z-depth.
 
         Args:
-            images: Shared-resolution RGB views, ``UInt8[ndarray, "s h w 3"]``.
+            images: Shared-resolution RGB views, host ``UInt8[ndarray, "s h w 3"]`` or a device tensor.
             rays: Camera-frame unit rays, ``Float32[ndarray, "s h w 3"]``.
             cam_types: X-Lens camera ids, ``Int64[ndarray, "s"]``.
             cam_T_ref: Optional camera-to-reference poses,
