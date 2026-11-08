@@ -202,12 +202,12 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
     assert not any(kind == "Points3D" for _, kind, _ in logged)
 
 
-def test_camera_path_sends_only_the_open_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each frame logs one strip of at most PATH_CHUNK_SEGMENTS segments; consecutive chunks share an end point."""
+def test_camera_path_logs_one_segment_per_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each frame after the first logs one two-point segment at /world/path; the blueprint shows the history."""
     strips: list[tuple[str, int]] = []
 
     def _capture(path: str, entity: object, *_a: object, **_k: object) -> None:
-        if isinstance(entity, rr.LineStrips3D) and str(path).startswith("world/path/"):
+        if isinstance(entity, rr.LineStrips3D):
             assert entity.strips is not None
             strips.append((str(path), len(entity.strips.pa_array.to_pylist()[0])))
 
@@ -218,12 +218,8 @@ def test_camera_path_sends_only_the_open_chunk(monkeypatch: pytest.MonkeyPatch) 
     X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
     C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
     logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
-    n_frames: int = 2 * async_logger.PATH_CHUNK_SEGMENTS + 5
-    for frame_idx in range(n_frames):
+    for frame_idx in range(5):
         logger._handle_current_frame(
             LogCurrentFrame(frame_idx=frame_idx, timestamp_ns=None, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
         )
-    assert len(strips) == n_frames
-    assert max(n_points for _, n_points in strips) == async_logger.PATH_CHUNK_SEGMENTS + 1
-    assert [path for path, _ in strips[-1:]] == ["world/path/00002"]
-    assert strips[async_logger.PATH_CHUNK_SEGMENTS + 1] == ("world/path/00001", 2), "a new chunk starts at the last point"
+    assert strips == [("world/path", 2)] * 4

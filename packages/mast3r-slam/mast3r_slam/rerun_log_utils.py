@@ -72,16 +72,25 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
     root: str = f"/{str(parent_log_path).lstrip('/')}"
     camera_path: str = f"{root}/current_camera"
     contents_3d: str = f"+ {root}/**"
+    # The camera path is logged one segment per frame; show every segment from the start up to the cursor.
+    path_history: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
+        [
+            rrb.VisibleTimeRange(name, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
+            for name in (FRAME_TIMELINE, VIDEO_TIMELINE)
+        ]
+    )
     overview = rrb.Spatial3DView(
         name="Overview",
         origin="/",
         contents=contents_3d,
+        overrides={f"{root}/path": path_history},
         eye_controls=rrb.EyeControls3D(spin_speed=0.25),
     )
     follow = rrb.Spatial3DView(
         name="Follow",
         origin=camera_path,
         contents=contents_3d,
+        overrides={f"{root}/path": path_history},
         line_grid=rrb.LineGrid3D(visible=False),
         eye_controls=rrb.EyeControls3D(
             kind=rrb.Eye3DKind.Orbital,

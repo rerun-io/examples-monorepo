@@ -54,10 +54,6 @@ from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFR
 LAST_KEYFRAME_MAPS_EVERY: int = 10
 """Frames between refreshes of the last keyframe's pointmap/confidence/depth panels while it stays the active one."""
 
-PATH_CHUNK_SEGMENTS: int = 50
-"""Camera-path segments per ``path/<chunk>`` strip: each frame re-sends only the open chunk, so the logged path
-grows O(n * 50) over a run instead of O(n^2); closed chunks keep their last value and the trail stays whole."""
-
 _HIDDEN_IMAGE_PLANE_DISTANCE: float = 1e-6
 """Image-plane distance of a keyframe's placeholder Pinhole before the keyframe exists: a frustum too small to see."""
 
@@ -299,9 +295,8 @@ class AsyncRerunLogger:
         self._thread: threading.Thread | None = None
 
         # Internal visualization state
-        # Camera path: points of the open chunk (the first repeats the previous chunk's last point) and its index.
-        self._path_chunk_points: list[list[float]] = []
-        self._path_chunk_idx: int = 0
+        # Camera path: the previous position; each frame logs one segment from it (the blueprint shows the history).
+        self._path_previous: list[float] | None = None
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
         self._conf_thresh: int = 7
@@ -548,18 +543,16 @@ class AsyncRerunLogger:
         # Camera path
         assert pinhole.extrinsics.world_t_cam is not None
         translation: Float32[ndarray, "3"] = pinhole.extrinsics.world_t_cam
-        if len(self._path_chunk_points) == PATH_CHUNK_SEGMENTS + 1:
-            self._path_chunk_points = self._path_chunk_points[-1:]
-            self._path_chunk_idx += 1
-        self._path_chunk_points.append(translation.tolist())
-        rr.log(
-            f"{self._parent_log_path}/path/{self._path_chunk_idx:05d}",
-            rr.LineStrips3D(
-                strips=[self._path_chunk_points],
-                colors=(255, 0, 0),
-                labels="Camera Path" if self._path_chunk_idx == 0 else None,
-            ),
-        )
+        # One segment per frame: the blueprint's visible time range on the path entity draws every segment from
+        # the start up to the cursor, so the whole path is never re-sent.
+        # No label: in a time range every segment row would draw it.
+        position: list[float] = translation.tolist()
+        if self._path_previous is not None:
+            rr.log(
+                f"{self._parent_log_path}/path",
+                rr.LineStrips3D(strips=[[self._path_previous, position]], colors=(255, 0, 0)),
+            )
+        self._path_previous = position
 
         # Last keyframe 2D panel — the tracker continuously updates the
         # active keyframe's pointmap/confidence, so relog those every frame.
