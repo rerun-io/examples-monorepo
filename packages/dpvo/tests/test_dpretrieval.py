@@ -1,7 +1,8 @@
-"""dpretrieval (DBoW2 + OpenCV's cross-checked matcher, in Rust) on a synthetic vocabulary and synthetic images.
+"""dpretrieval (OpenCV ORB, kornia-bow bags of words, kornia-staging-bow database) on a synthetic vocabulary.
 
-The port was checked against the former C++ module (pybind11 + DBoW2) on 2 x 400 frames of two apartment videos
-with ORBvoc.txt: every query's (score, frame, matches) was identical. The KITTI 00 loop-closure test
+Against the DBoW2 port it replaces, on 2 x 400 frames of two apartment videos with ORBvoc.txt: the same frame for
+every query (15 loops), the same 14 candidates above dpvo's loop_retr_thresh and the same 3,833 matches; scores
+differ by at most 1e-6 relative (kornia-bow keeps idf weights in float32). The KITTI 00 loop-closure test
 (test_classic_loop_closure.py) runs it end to end.
 """
 
@@ -15,12 +16,12 @@ dpretrieval = pytest.importorskip("dpretrieval", reason="classic loop closure ne
 
 
 def _vocabulary(path: Path) -> Path:
-    """A two-level tree: 8 random root children, 4 random leaves under each, idf weight 1."""
+    """A two-level tree (branching 10, as ORBvoc.txt): 10 random root children, 4 random leaves under each, idf 1."""
     rng = np.random.default_rng(0)
-    lines = ["8 2 0 0"]
-    for _ in range(8):
+    lines = ["10 2 0 0"]
+    for _ in range(10):
         lines.append("0 0 " + " ".join(map(str, rng.integers(0, 256, 32))) + " 0")
-    for parent in range(1, 9):
+    for parent in range(1, 11):
         for _ in range(4):
             lines.append(f"{parent} 1 " + " ".join(map(str, rng.integers(0, 256, 32))) + " 1")
     path.write_text("\n".join(lines) + "\n")
@@ -40,7 +41,7 @@ def test_query_finds_the_repeated_frame_beyond_the_radius(tmp_path: Path) -> Non
     assert db.query(1) == (-1.0, -1, [])  # frames 0-3 are all closer than rad to frame 1
     db.insert_image(_image(0))
     score, j, matches = db.query(4)
-    assert (score, j) == (1.0, 0)  # the same image: identical bags of words
+    assert j == 0 and score == pytest.approx(1.0, abs=1e-6)  # the same image: identical bags of words
     assert matches and all(m[4] == 0.0 for m in matches)  # cross-checked ORB matches of an image with itself
 
 
@@ -50,7 +51,7 @@ def test_bad_input_raises(tmp_path: Path) -> None:
         db.insert_image(np.zeros((8, 8), dtype=np.uint8))
     with pytest.raises(ValueError, match="index invalid"):
         db.query(0)
-    with pytest.raises(ValueError, match="DBoW2 text vocabulary"):
+    with pytest.raises(ValueError, match="cannot load the ORB vocabulary"):
         dpretrieval.DPRetrieval(str(_write(tmp_path / "bad.txt", "99 99 0 0\n")), 3)
 
 

@@ -1,21 +1,23 @@
-# dpretrieval Cargo workspace: DBoW2's ORB vocabulary tree and database plus OpenCV's cross-checked brute-force
-# Hamming matcher (`crates/dbow`, pure Rust) and their PyO3 module (`crates/dpretrieval-py`, imported as
-# `dpretrieval._core`). Laid out like packages/tsdf-rs. maturin builds the module (pyproject.toml, recipe.yaml).
+# dpretrieval Cargo workspace: the PyO3 module `dpretrieval._core` (`crates/dpretrieval-py`) over kornia-rs: the
+# ORB-SLAM3 vocabulary and bags of words (kornia-bow), the cross-checked Hamming matcher (kornia-imgproc), and the
+# inverted-file database staged in packages/kornia-staging (kornia-staging-bow). ORB features come from OpenCV.
+# maturin builds the module (pyproject.toml, recipe.yaml).
 [workspace]
 resolver = "2"
-members = ["crates/dbow", "crates/dpretrieval-py"]
+members = ["crates/dpretrieval-py"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
-dbow = { path = "crates/dbow" }
+kornia-bow = "0.2"
+kornia-imgproc = { version = "0.2", default-features = false }
+kornia-staging-bow = { path = "../kornia-staging/crates/kornia-staging-bow" }
 numpy = "0.29"
 pyo3 = "0.29"
-thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

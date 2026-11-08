@@ -1,0 +1,21 @@
+[package]
+name = "kornia-staging-bow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Staged for kornia-rs / kornia-bow: an inverted-file database with DBoW2's L1 query over kornia-bow bags of words."
+
+[dependencies]
+kornia-bow.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "database"
+harness = false

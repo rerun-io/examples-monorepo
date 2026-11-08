@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "PyO3 bindings for the dbow crate, built by maturin as `dpretrieval._core`."
+description = "PyO3 module `dpretrieval._core`: kornia-rs bags of words, inverted-file queries and cross-checked ORB matches."
 
 [lints]
 workspace = true
@@ -18,7 +18,9 @@ test = false
 doctest = false
 
 [dependencies]
-dbow.workspace = true
+kornia-bow.workspace = true
+kornia-imgproc.workspace = true
+kornia-staging-bow.workspace = true
 numpy.workspace = true
 # No `extension-module` feature (deprecated in PyO3 0.29): maturin sets PYO3_BUILD_EXTENSION_MODULE.
 pyo3 = { workspace = true, features = ["abi3-py312"] }

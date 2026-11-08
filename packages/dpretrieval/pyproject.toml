@@ -5,7 +5,7 @@ build-backend = "maturin"
 
 [project]
 name = "dpretrieval"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.12"
 # numpy, OpenCV (cv2, for ORB) and jaxtyping come from the conda recipe's run requirements.
 dependencies = []
