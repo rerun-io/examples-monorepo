@@ -268,6 +268,34 @@ def test_map_update_relogs_only_moved_cameras_and_changed_edges(monkeypatch: pyt
     assert {"world/keyframes/keyframe-5", "world/edges"} <= moved_paths
 
 
+@pytest.mark.parametrize(("panel_hz", "frames_with_panels"), [(10.0, [0]), (0.0, [0, 1, 2])])
+def test_current_frame_panels_follow_the_wall_clock_rate(monkeypatch: pytest.MonkeyPatch, panel_hz: float, frames_with_panels: list[int]) -> None:
+    """Back-to-back frames log the current panels at most ``panel_hz`` times a second (0: every frame); the camera
+    pose and the path are logged for every frame."""
+    logged: list[tuple[str, int]] = []
+    frame_now: list[int] = [-1]
+
+    def _set_time(timeline: str, *, sequence: int | None = None, **_kwargs: object) -> None:
+        if timeline == "frame" and sequence is not None:
+            frame_now[0] = sequence
+
+    monkeypatch.setattr(async_logger.rr, "log", lambda path, *_a, **_k: logged.append((str(path), frame_now[0])))
+    monkeypatch.setattr(async_logger.rr, "set_time", _set_time)
+    identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
+    rgb: Float32[ndarray, "h w 3"] = np.full((H, W, 3), 0.5, dtype=np.float32)
+    X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
+    C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
+    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"), panel_hz=panel_hz)
+    for frame_idx in range(3):
+        logger._handle_current_frame(
+            LogCurrentFrame(frame_idx=frame_idx, timestamp_ns=None, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
+        )
+    assert sorted({frame for path, frame in logged if path == "world/current_camera/pinhole/image"}) == frames_with_panels
+    assert sorted({frame for path, frame in logged if path == "/current_maps/confidence"}) == frames_with_panels
+    assert sorted({frame for path, frame in logged if path == "world/current_camera"}) == [0, 1, 2]
+    assert sorted({frame for path, frame in logged if path == "world/path"}) == [1, 2]
+
+
 def test_logger_crash_is_raised_on_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     """An exception on the logger thread reaches the caller (check() and __exit__), not just stderr."""
 
