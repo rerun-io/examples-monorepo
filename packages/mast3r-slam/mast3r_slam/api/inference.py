@@ -54,6 +54,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
 from mast3r_slam.async_logger import (
+    DEFAULT_CONF_THRESHOLD,
     AsyncRerunLogger,
     compute_orient,
     snapshot_current_frame,
@@ -126,6 +127,9 @@ class SlamSettings:
     """Stop after processing this many frames (None = process all)."""
     ns_save_path: None | Path = None
     """Optional path to export keyframes in NerfStudio format."""
+    conf_threshold: float = DEFAULT_CONF_THRESHOLD
+    """Smallest MASt3R confidence (1 = none) a pixel needs to show in the depth panels and to fuse into the map
+    surface. Lower it when a hard clip (water, sky, low texture) shows black depth."""
     compile_model: bool = False
     """Run the tracker's MASt3R forward as compiled CUDA graphs: about 2x faster per frame, but the first tracked
     frame waits for the compile (about 30 s cold, 14 s with a warm inductor cache)."""
@@ -250,7 +254,7 @@ def run_slam_pipeline(
     # dropped, and current-frame events are only enqueued while the backlog is short (CURRENT_FRAME_BACKLOG).
     event_queue: queue.Queue[LogEvent] = queue.Queue()
     async_logger: AsyncRerunLogger = AsyncRerunLogger(
-        event_queue, PARENT_LOG_PATH, recording=recording,
+        event_queue, PARENT_LOG_PATH, conf_threshold=settings.conf_threshold, recording=recording,
     )
 
     # ── Camera calibration (optional) ──────────────────────────────────────

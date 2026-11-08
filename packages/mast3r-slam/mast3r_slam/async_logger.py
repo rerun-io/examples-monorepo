@@ -52,6 +52,8 @@ from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, LiveSurface
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_intri, frame_to_pinhole
 from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
 
+DEFAULT_CONF_THRESHOLD: float = 7.0
+"""Smallest MASt3R confidence (1 = none) shown in the depth panels and fused into the map surface."""
 LAST_KEYFRAME_MAPS_EVERY: int = 10
 """Frames between refreshes of the last keyframe's pointmap/confidence/depth panels while it stays the active one."""
 
@@ -280,6 +282,7 @@ class AsyncRerunLogger:
     Args:
         event_queue: Queue of ``LogEvent`` objects.
         parent_log_path: Root Rerun entity path.
+        conf_threshold: Smallest confidence a pixel needs to show in the depth panels and to fuse into the map surface.
         recording: Rerun recording to bind in this thread (Gradio).
             ``None`` uses the global recording (CLI).
     """
@@ -288,6 +291,7 @@ class AsyncRerunLogger:
         self,
         event_queue: queue.Queue[LogEvent],
         parent_log_path: Path,
+        conf_threshold: float = DEFAULT_CONF_THRESHOLD,
         recording: rr.RecordingStream | None = None,
     ) -> None:
         self._queue: queue.Queue[LogEvent] = event_queue
@@ -300,7 +304,7 @@ class AsyncRerunLogger:
         self._path_previous: list[float] | None = None
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
-        self._conf_thresh: int = 7
+        self._conf_thresh: float = conf_threshold
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
         # The newest keyframe's intrinsics, which the current camera reuses, and the ones last logged for it.
