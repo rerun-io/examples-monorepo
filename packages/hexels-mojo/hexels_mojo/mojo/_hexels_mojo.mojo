@@ -17,6 +17,7 @@ from std.os import abort
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 
+import gaussians2d
 from knn import BOX_SIZE, MORTON_THREADS, box_bounds_kernel, box_mean_dist_kernel, morton_kernel
 from launch import GPURuntime
 from prune import BLOCK, F32Ptr, removal_scores_kernel
@@ -203,6 +204,59 @@ def _raster2d_backward[color_grad: Bool](runtime: PythonObject, s: PythonObject,
     )  # fmt: skip
 
 
+def _gaussians2d_project_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream, stage, width, height); stage 0 (forward): tensors = (means (N, 2), scales (N, 2), rotation (N, 1),
+    xys, radii i32 (N), conics (N, 3), num_tiles_hit i32 (N)), outputs zeroed; stage 1 (backward): tensors = (scales,
+    rotation, radii i32, conics, v_xy (N, 2), v_conic (N, 3), v_cov2d, v_mean, v_scale, v_rot), outputs zeroed."""
+    var width = _int(s, 2)
+    var height = _int(s, 3)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var stream = rt[].torch_stream(_int(s, 0))
+    var n = _dim(t[0], 0)
+    var grid = ceildiv(n, gaussians2d.POINT_THREADS)
+    if _int(s, 1) == 0:
+        stream.enqueue_function(
+            rt[].ctx.compile_function[gaussians2d.project_forward_kernel](), Int32(n), Int32(width), Int32(height),
+            Int32(ceildiv(width, TILE)), Int32(ceildiv(height, TILE)), _f(t[0]), _f(t[1]), _f(t[2]), _f(t[3]), _i32(t[4]), _f(t[5]),
+            _i32(t[6]), grid_dim=grid, block_dim=gaussians2d.POINT_THREADS,
+        )  # fmt: skip
+    else:
+        stream.enqueue_function(
+            rt[].ctx.compile_function[gaussians2d.project_backward_kernel](), Int32(n), Int32(width), Int32(height), _f(t[0]), _f(t[1]),
+            _i32(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), _f(t[7]), _f(t[8]), _f(t[9]),
+            grid_dim=grid, block_dim=gaussians2d.POINT_THREADS,
+        )  # fmt: skip
+    return Python.none()
+
+
+def _gaussians2d_forward_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream,); tensors = (ids_sorted i32, tile_bins i32 (T, 2), xys, conics (N, 3), colors (N, C),
+    out_img (H, W, C), pixel_topk i32 (H, W, 10))."""
+    var height = _dim(t[5], 0)
+    var width = _dim(t[5], 1)
+    var channels = _dim(t[5], 2)
+    var tiles_x = ceildiv(width, TILE)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    rt[].torch_stream(_int(s, 0)).enqueue_function(
+        rt[].ctx.compile_function[gaussians2d.forward_kernel](), Int32(tiles_x), Int32(width), Int32(height), Int32(channels), _i32(t[0]),
+        _i32(t[1]), _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _i32(t[6]), grid_dim=(tiles_x, ceildiv(height, TILE)), block_dim=(TILE, TILE),
+    )  # fmt: skip
+    return Python.none()
+
+
+def _gaussians2d_backward_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream,); tensors = (xys, conics, colors (N, C), v_output (H, W, C), pixel_topk i32, v_xy, v_conic, v_colors)."""
+    var height = _dim(t[3], 0)
+    var width = _dim(t[3], 1)
+    var channels = _dim(t[3], 2)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    rt[].torch_stream(_int(s, 0)).enqueue_function(
+        rt[].ctx.compile_function[gaussians2d.backward_kernel](), Int32(width), Int32(height), Int32(channels), _f(t[0]), _f(t[1]), _f(t[2]),
+        _f(t[3]), _i32(t[4]), _f(t[5]), _f(t[6]), _f(t[7]), grid_dim=(ceildiv(width, TILE), ceildiv(height, TILE)), block_dim=(TILE, TILE),
+    )  # fmt: skip
+    return Python.none()
+
+
 @export
 def PyInit__hexels_mojo() abi("C") -> PythonObject:
     try:
@@ -214,6 +268,9 @@ def PyInit__hexels_mojo() abi("C") -> PythonObject:
         m.def_function[_raster2d_binning_py]("raster2d_binning")
         m.def_function[_raster2d_forward_py]("raster2d_forward")
         m.def_function[_raster2d_backward_py]("raster2d_backward")
+        m.def_function[_gaussians2d_project_py]("gaussians2d_project")
+        m.def_function[_gaussians2d_forward_py]("gaussians2d_forward")
+        m.def_function[_gaussians2d_backward_py]("gaussians2d_backward")
         return m.finalize()
     except e:
         abort(t"failed to create _hexels_mojo: {e}")

@@ -35,5 +35,5 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 paths = ["hexels_mojo", "tests"]
 exclude = ["*/.pixi/*", "*/__pycache__/*"]
 min_confidence = 60
-# upstream's API kept for drop-in use (distCUDA2, FusedSSIMMap's autograd hooks), the fixture writer, pytest names.
-ignore_names = ["pytestmark", "distCUDA2", "backward", "forward", "encode"]
+# upstream's API kept for drop-in use (distCUDA2, the autograd hooks and their unused gradient arguments), the fixture writer, pytest names.
+ignore_names = ["pytestmark", "distCUDA2", "backward", "forward", "encode", "v_radii", "v_num_tiles_hit"]

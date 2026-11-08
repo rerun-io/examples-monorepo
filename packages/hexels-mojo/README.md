@@ -14,7 +14,9 @@ color-gradient (forward + backward, scalar / per-hexel / per-edge softness, opti
 tile binning are Mojo too (`hexels_mojo.raster2d`): they are every hexel-kernel call of Image-GS's 2D hexel fits
 (`hexels-fit-2d`, rich and flat). Patch 0005 wraps `gsplat_hexels.py`'s `gsplat` handles in `raster2d.overlay`,
 which serves those nine functions and passes every other one to hexel-kernel's CUDA (3D rasterizer, affine 2D
-variants, Image-GS's Gaussian kernels). The plan for the rest: `/mnt/nas/ssd-8tb/scratch/overnight-2026-11-08/ports/HEXEL_KERNEL_PLAN.md`
+variants). Image-GS's Gaussian projection and top-K rasterizer (the `imagegs-2d` baseline) are `hexels_mojo.gaussians2d`;
+patches 0003/0004 import them in place of `gsplat`'s (`rasterize_gaussians_no_tiles`, off in Image-GS's configs, stays
+CUDA). The plan for the rest: `/mnt/nas/ssd-8tb/scratch/overnight-2026-11-08/ports/HEXEL_KERNEL_PLAN.md`
 (to be moved into this README with the next port).
 
 ```bash
@@ -39,6 +41,8 @@ RTX 5090), written by `tests/freeze_hexels_references.py` (deleted with the exte
 | 2D rasterizer forward, flat and color-gradient (image, top-10 ids, weights sum, entropy) | bit-exact: the kernel issues nvcc's `--use_fast_math` PTX (`.ftz`, `.approx`) in nvcc's order through inline PTX (`mojo/fastmath.mojo`) |
 | 2D rasterizer backward | ≤ 1e-5 relative to max(\|ref\|, 1); float atomics sum in scheduling order |
 | tile binning | bit-exact (intersection keys, ids, tile ranges) |
+| Image-GS projection (forward + backward), top-K forward | bit-exact (projection backward has no atomics: same PTX order) |
+| Image-GS top-K backward | ≤ 1e-5 relative (float atomics) |
 
 Upstream's SSIM scratch buffer is declared (42, 32) but indexed at column tx + 5, so its last row writes five
 floats past the array; the port indexes it at tx (same arithmetic, no overrun).
@@ -53,6 +57,7 @@ floats past the array; the port indexes it at tx (same arithmetic, no overrun).
 | `distCUDA2`, 100K clustered points | 3.40 ms | 3.16 ms |
 | 2D rasterizer, color-gradient: binning + forward + backward, 20K hexels, 2048×2048 | 0.148 + 1.076 + 10.946 ms | 0.124 + 1.170 + 10.452 ms |
 | 2D rasterizer, flat: binning + forward + backward, same scene | 0.132 + 1.040 + 6.293 ms | 0.129 + 1.004 + 5.675 ms |
+| Image-GS step: projection + binning + forward + backward, 10K Gaussians, 2048×2048 | 8.251 ms | 6.466 ms |
 
 Real run, `hexels-fit-2d --variant rich` on anime-2_2k (5,100 steps, 20K → 10K hexels), two runs each: CUDA
 36.18 / 36.08 dB, 85.9 / 88.1 s; every ported kernel on Mojo (rasterizer, binning, SSIM, prune) 36.12 / 36.14 dB,

@@ -74,6 +74,14 @@ def rsqrt(a: Float32) -> Float32:
 
 
 @always_inline
+def sqrt(a: Float32) -> Float32:
+    comptime if is_nvidia_gpu():
+        return inlined_assembly["sqrt.approx.ftz.f32 $0, $1;", Float32, constraints="=f,f", has_side_effect=False](a)
+    else:
+        return math.sqrt(a)
+
+
+@always_inline
 def sin(a: Float32) -> Float32:
     comptime if is_nvidia_gpu():
         return inlined_assembly["sin.approx.ftz.f32 $0, $1;", Float32, constraints="=f,f", has_side_effect=False](a)

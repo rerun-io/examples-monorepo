@@ -140,9 +140,18 @@ index c9ceeed..0000000
 -    return {scores, error};
 -}
 diff --git a/scripts/image_compression_training.py b/scripts/image_compression_training.py
-index 523fcca..4e1b622 100644
+index 523fcca..a340e70 100644
 --- a/scripts/image_compression_training.py
 +++ b/scripts/image_compression_training.py
+@@ -21,7 +21,7 @@ from PIL import Image
+ # Bind the installed hexel-kernel `gsplat` before exposing the upstream checkout.
+ # `image-gs/gsplat` has no `__init__.py`, so a later import would resolve it as
+ # an empty namespace package ahead of an editable kernel install.
+-from gsplat import project_gaussians_2d_scale_rot, rasterize_gaussians_sum
++from hexels_mojo.gaussians2d import project_gaussians_2d_scale_rot, rasterize_gaussians_sum  # Image-GS kernels in Mojo (packages/hexels-mojo)
+ 
+ from scripts.image_compression_codec import decode, encode, stored_bytes
+ 
 @@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT / "image-gs"))
  with chdir(ROOT / "image-gs"):
      from model import GaussianSplatting2D
