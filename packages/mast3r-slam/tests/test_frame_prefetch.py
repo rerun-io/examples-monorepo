@@ -32,11 +32,9 @@ def _read_resized(i: int, fail_at: int | None):
 
 
 def test_frames_arrive_in_order_and_ready() -> None:
-    from mast3r_slam.config import load_config
     from mast3r_slam.frame_prefetch import FramePrefetcher
 
-    load_config("config/fast.yaml")
-    with FramePrefetcher(_fake_dataset(), 6) as frames:
+    with FramePrefetcher(_fake_dataset(), 6, img_downsample=1) as frames:
         for i in range(6):
             frame = frames.get()
             assert frame.frame_id == i
@@ -45,11 +43,9 @@ def test_frames_arrive_in_order_and_ready() -> None:
 
 
 def test_worker_errors_reach_the_caller() -> None:
-    from mast3r_slam.config import load_config
     from mast3r_slam.frame_prefetch import FramePrefetcher
 
-    load_config("config/fast.yaml")
-    with FramePrefetcher(_fake_dataset(fail_at=2), 6) as frames:
+    with FramePrefetcher(_fake_dataset(fail_at=2), 6, img_downsample=1) as frames:
         frames.get()
         frames.get()
         with pytest.raises(ValueError, match="frame 2 is broken"):
@@ -57,9 +53,7 @@ def test_worker_errors_reach_the_caller() -> None:
 
 
 def test_exit_does_not_wait_for_unread_frames() -> None:
-    from mast3r_slam.config import load_config
     from mast3r_slam.frame_prefetch import FramePrefetcher
 
-    load_config("config/fast.yaml")
-    with FramePrefetcher(_fake_dataset(), 1000) as frames:
+    with FramePrefetcher(_fake_dataset(), 1000, img_downsample=1) as frames:
         frames.get()

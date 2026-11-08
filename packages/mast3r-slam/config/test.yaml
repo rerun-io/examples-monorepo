@@ -1,6 +1,0 @@
-# Deterministic test config: fast.yaml, single-threaded for reproducible regression testing.
-inherit: "config/base.yaml"
-
-single_thread: True
-dataset:
-  subsample: 5

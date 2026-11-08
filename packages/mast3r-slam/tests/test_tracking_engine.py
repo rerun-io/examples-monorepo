@@ -34,22 +34,20 @@ def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch, 
     import lietorch_mojo as lietorch
 
     import mast3r_slam.mast3r_utils as mast3r_utils
-    from mast3r_slam.config import load_config
+    from mast3r_slam.config import SlamConfig
     from mast3r_slam.dataloader import load_dataset
     from mast3r_slam.frame import Frame, create_frame
 
-    load_config("config/fast.yaml")
     model = mast3r_utils.load_mast3r().eval()
-    dataset = load_dataset(str(VIDEO), img_size=img_size)
-    dataset.subsample(5)
+    dataset = load_dataset(str(VIDEO), img_size, SlamConfig.fast())
     img_hw: tuple[int, int] = dataset.get_img_shape()[0]
     identity = lietorch.Sim3.Identity(1, device="cuda:0")
 
     def forward(keyframe_idx: int, frame_idx: int) -> list:
-        keyframe: Frame = create_frame(keyframe_idx, dataset.read_resized(keyframe_idx), identity)
+        keyframe: Frame = create_frame(keyframe_idx, dataset.read_resized(keyframe_idx), identity, img_downsample=1)
         keyframe.feat, keyframe.pos, _ = model._encode_image(keyframe.rgb_tensor, keyframe.img_true_shape)
-        frame: Frame = create_frame(frame_idx, dataset.read_resized(frame_idx), identity)
-        outputs = mast3r_utils.mast3r_asymmetric_inference(model, frame, keyframe)
+        frame: Frame = create_frame(frame_idx, dataset.read_resized(frame_idx), identity, img_downsample=1)
+        outputs = mast3r_utils.mast3r_asymmetric_inference(model, frame, keyframe, img_downsample=1)
         assert frame.feat is not None
         assert frame.pos is not None
         return [*(t.clone() for t in outputs), frame.feat.clone(), frame.pos.clone()]
@@ -80,13 +78,11 @@ def test_pair_decoder_engine_matches_eager_decoder(monkeypatch: pytest.MonkeyPat
             pytest.skip(f"missing {asset.name} (pixi run -e mast3r-slam mast3r-slam-example-quick downloads it)")
     monkeypatch.chdir(PACKAGE_DIR)
     import mast3r_slam.mast3r_utils as mast3r_utils
-    from mast3r_slam.config import load_config
+    from mast3r_slam.config import SlamConfig
     from mast3r_slam.dataloader import load_dataset
 
-    load_config("config/fast.yaml")
     model = mast3r_utils.load_mast3r().eval()
-    dataset = load_dataset(str(VIDEO), img_size=img_size)
-    dataset.subsample(5)
+    dataset = load_dataset(str(VIDEO), img_size, SlamConfig.fast())
     img_hw: tuple[int, int] = dataset.get_img_shape()[0]
     true_shape = torch.tensor([img_hw], device="cuda")
     with torch.inference_mode():
@@ -94,7 +90,7 @@ def test_pair_decoder_engine_matches_eager_decoder(monkeypatch: pytest.MonkeyPat
         feat = torch.cat([f for f, _, _ in encoded])
         pos = torch.cat([p for _, p, _ in encoded])
         shapes = [true_shape] * 2
-        args = (feat[[0, 2]], pos[[0, 2]], feat[[1, 3]], pos[[1, 3]], shapes, shapes)
+        args = (feat[[0, 2]], pos[[0, 2]], feat[[1, 3]], pos[[1, 3]], shapes, shapes, 1)
         eager = mast3r_utils.mast3r_decode_symmetric_batch(model, *args)
         mast3r_utils.use_pair_decoder_engine(model, img_hw)
         try:

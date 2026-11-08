@@ -87,7 +87,7 @@ stateDiagram-v2
 |------|-------------|-------------------|
 | **INIT** | Run MASt3R mono inference on first frame to get 3D points + features. Set `TRACKING`, then add the frame as the first keyframe (the backend skips its queue in INIT). | Frontend sets `TRACKING` |
 | **TRACKING** | Match frame against last keyframe via `FrameTracker.track()`. Estimate pose with Gauss-Newton. If overlap is low, promote to keyframe and queue for backend. | Frontend sets `RELOC` if too few matches |
-| **RELOC** | Run mono inference to get features, then the backend attempts relocalization against the retrieval database. | Backend sets `TRACKING` on success |
+| **RELOC** | Run mono inference to get features and queue one relocalization request per frame; the backend attempts each request once against the retrieval database. | Backend sets `TRACKING` on success, unless the mode already moved on (`TERMINATED`) |
 | **TERMINATED** | Both processes exit their loops. `SlamBackend.__exit__` handles cleanup. | Frontend (end of video) or `SlamBackend.__exit__` (the generator was closed: Ctrl+C, the app's Stop button) |
 
 ## Backend Process
@@ -156,8 +156,8 @@ sequenceDiagram
 
     G->>L: LogTerminate → flush & join
     G->>R: Nerfstudio export (if ns_save_path set)
-    G->>B: Set TERMINATED, ctx.join()
-    Note over G: SlamBackend.__exit__()<br/>cleanup GPU, manager
+    G->>B: Set TERMINATED
+    Note over G: SlamBackend.__exit__()<br/>join 5 s, terminate, kill;<br/>cleanup GPU, manager
     G-->>C: StopIteration
 
     alt Gradio only
@@ -168,7 +168,7 @@ sequenceDiagram
 
 ### Why not just call a function?
 
-A regular function runs to completion before returning. The Gradio Rerun viewer needs **incremental bytes** after each frame so the user sees real-time progress (camera moving, point cloud growing). A generator lets the tracking loop `yield` after each frame, giving Gradio a chance to send `stream.read()` bytes to the viewer, then resume exactly where it left off.
+A regular function runs to completion before returning. The Gradio Rerun viewer needs **incremental bytes** during the run so the user sees real-time progress (camera moving, point cloud growing). A generator lets the tracking loop `yield`, giving Gradio a chance to send `stream.read()` bytes to the viewer, then resume exactly where it left off. Tracking waits while the caller handles a yield, so the loop yields at most every `STATUS_INTERVAL_S` (0.1 s), not every frame.
 
 Both callers make the same two calls, `load_slam_model(settings)` and `run_slam_pipeline(settings, model)`. `SlamSettings` holds what to run; the CLI's `InferenceConfig(SlamSettings)` adds only the Rerun target (metrictrail's `RunSettings`/`Config` pattern). The CLI doesn't need incremental updates, so it just exhausts the generator:
 
@@ -181,7 +181,7 @@ for _msg in run_slam_pipeline(inf_config, model, rr_application_id=rr_app_id):
 
 ```python
 # Gradio — build_app() loads the model once; @rr.thread_local_stream sets up a
-# per-call recording; stream bytes to the viewer after each frame
+# per-call recording; stream bytes to the viewer on each yield (at most 10 per second)
 settings = SlamSettings(dataset=video_file, subsample=subsample, ns_save_path=run_dir / "nerfstudio-output")
 stream = rr.binary_stream()
 for msg in run_slam_pipeline(settings, model, recording=recording):
@@ -281,5 +281,5 @@ mast3r_slam/
 ├── mast3r_utils.py              # Model loading, mono inference, matching, engine selection
 ├── retrieval_database.py        # Image retrieval for loop closure
 ├── nerfstudio_utils.py          # Keyframes → NerfStudio (simplecv's writer)
-└── config.py                    # YAML config loader
+└── config.py                    # SlamConfig: frozen hyper-parameter tree + presets
 ```

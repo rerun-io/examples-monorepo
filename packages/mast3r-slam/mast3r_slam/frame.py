@@ -6,7 +6,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from mast3r_slam.config import config
+from mast3r_slam.config import FilteringScoreName, TrackingConfig
 from mast3r_slam.image_utils import ResizedImage
 
 
@@ -126,16 +126,17 @@ class Frame:
     score: Float[Tensor, ""] | None = None
     """Scalar filtering score (set by ``best_score`` filtering mode)."""
 
-    def get_score(self, C: Float[Tensor, "hw 1"]) -> Float[Tensor, ""]:
+    def get_score(self, C: Float[Tensor, "hw 1"], score_name: FilteringScoreName) -> Float[Tensor, ""]:
         """Compute a scalar filtering score from confidence values.
 
         Args:
             C: Per-point confidence tensor of shape (hw, 1).
+            score_name: The config's ``tracking.filtering_score``.
 
         Returns:
-            Scalar score tensor (median or mean of C, depending on config).
+            Scalar score tensor (median or mean of C).
         """
-        score_fn: FilteringScore = FilteringScore(config["tracking"]["filtering_score"])
+        score_fn: FilteringScore = FilteringScore(score_name)
         match score_fn:
             case FilteringScore.MEDIAN:
                 return torch.median(C)
@@ -148,6 +149,7 @@ class Frame:
         self,
         X: Float[Tensor, "hw 3"],
         C: Float[Tensor, "hw 1"],
+        cfg: TrackingConfig,
     ) -> None:
         """Update the canonical point map using the configured filtering strategy.
 
@@ -156,8 +158,9 @@ class Frame:
         Args:
             X: New 3D point map of shape (h*w, 3).
             C: New confidence values of shape (h*w, 1).
+            cfg: Tracking hyper-parameters (``filtering_mode`` and ``filtering_score``).
         """
-        mode: FilteringMode = FilteringMode(config["tracking"]["filtering_mode"])
+        mode: FilteringMode = FilteringMode(cfg.filtering_mode)
 
         # First observation — always accept regardless of mode.
         if self.N == 0:
@@ -166,7 +169,7 @@ class Frame:
             self.N = 1
             self.N_updates = 1
             if mode is FilteringMode.BEST_SCORE:
-                self.score = self.get_score(C)
+                self.score = self.get_score(C, cfg.filtering_score)
             return
 
         match mode:
@@ -185,7 +188,7 @@ class Frame:
 
             case FilteringMode.BEST_SCORE:
                 # Keep whichever full observation has the highest aggregate score.
-                new_score: Float[Tensor, ""] = self.get_score(C)
+                new_score: Float[Tensor, ""] = self.get_score(C, cfg.filtering_score)
                 assert self.score is not None
                 if new_score > self.score:
                     self.X_canon = X.clone()
@@ -232,6 +235,7 @@ def create_frame(
     i: int,
     resized: ResizedImage,
     world_sim3_cam: lietorch.Sim3,
+    img_downsample: int,
     device: str = "cuda:0",
 ) -> Frame:
     """Create a Frame from a resized dataset image and a Sim3 pose.
@@ -240,6 +244,7 @@ def create_frame(
         i: Frame index in the dataset.
         resized: The image as ``MonocularDataset.read_resized`` returns it.
         world_sim3_cam: World-from-camera Sim3 pose.
+        img_downsample: Stride over the frame image (the config's ``dataset.img_downsample``).
         device: Torch device string.
 
     Returns:
@@ -249,10 +254,9 @@ def create_frame(
     img_shape: Int[Tensor, "1 2"] = torch.tensor(resized.true_shape, device=device)
     img_true_shape: Int[Tensor, "1 2"] = img_shape.clone()
     rgb_cropped: Float[Tensor, "h w 3"] = torch.from_numpy(resized.rgb_uint8) / 255.0
-    downsample: int = config["dataset"]["img_downsample"]
-    if downsample > 1:
-        rgb_cropped = rgb_cropped[::downsample, ::downsample]
-        img_shape = img_shape // downsample
+    if img_downsample > 1:
+        rgb_cropped = rgb_cropped[::img_downsample, ::img_downsample]
+        img_shape = img_shape // img_downsample
     frame: Frame = Frame(i, rgb_tensor, img_shape, img_true_shape, rgb_cropped, world_sim3_cam)
     return frame
 
@@ -366,6 +370,11 @@ class SharedStates:
                 return
             self.reloc_sem.value -= 1
 
+    def has_reloc_request(self) -> bool:
+        """Whether the frontend has queued a relocalization the backend has not attempted yet."""
+        with self.lock:
+            return self.reloc_sem.value > 0
+
     def get_mode(self) -> Mode:
         """Return the current operating mode.
 
@@ -384,6 +393,18 @@ class SharedStates:
         with self.lock:
             self.mode.value = mode
 
+    def set_mode_if(self, expected: Mode, mode: Mode) -> bool:
+        """Set the mode to ``mode`` only if it is still ``expected``; returns whether it did.
+
+        The backend's relocalization uses it, so a success that finishes after the frontend set ``TERMINATED`` does
+        not switch the run back to ``TRACKING``.
+        """
+        with self.lock:
+            if self.mode.value is not expected:
+                return False
+            self.mode.value = mode
+            return True
+
 
 class SharedKeyframes:
     """Thread-safe shared-memory buffer of keyframes.
@@ -401,12 +422,15 @@ class SharedKeyframes:
         buffer: int = 512,
         dtype: torch.dtype = torch.float32,
         device: str = "cuda",
+        use_calib: bool = False,
     ) -> None:
         self.lock = manager.RLock()
         self.n_size = manager.Value("i", 0)
 
         self.h: int = h
         self.w: int = w
+        self.use_calib: bool = use_calib
+        """The run uses the camera calibration: keyframes read back carry ``K`` (see :meth:`set_intrinsics`)."""
         self.buffer: int = buffer
         self.dtype: torch.dtype = dtype
         self.device: str = device
@@ -456,7 +480,7 @@ class SharedKeyframes:
             kf.pos = self.pos[idx]
             kf.N = int(self.N[idx])
             kf.N_updates = int(self.N_updates[idx])
-            if config["use_calib"]:
+            if self.use_calib:
                 kf.K = self.K
             return kf
 
@@ -566,11 +590,11 @@ class SharedKeyframes:
             return idx
 
     def set_intrinsics(self, K: Float[Tensor, "3 3"]) -> None:
-        """Set the shared camera intrinsic matrix (requires ``use_calib`` config).
+        """Set the shared camera intrinsic matrix (requires ``use_calib``).
 
         Args:
             K: 3x3 intrinsic matrix.
         """
-        assert config["use_calib"]
+        assert self.use_calib
         with self.lock:
             self.K[:] = K

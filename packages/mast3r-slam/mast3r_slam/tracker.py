@@ -11,7 +11,7 @@ except ImportError:
     BeartypeException = ()
 
 from mast3r_slam import mojo_backend
-from mast3r_slam.config import config
+from mast3r_slam.config import MatchingConfig, SlamConfig, TrackingConfig
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     act_Sim3,
@@ -53,11 +53,15 @@ class FrameTracker:
         self,
         model: AsymmetricMASt3R,
         frames: SharedKeyframes,
+        cfg: SlamConfig,
         device: str,
     ) -> None:
-        self.cfg: dict = config["tracking"]
-        if not config["use_calib"]:
-            check_rays_tracking_settings(float(self.cfg["huber"]), float(self.cfg["rel_error"]))
+        self.cfg: TrackingConfig = cfg.tracking
+        self.matching_cfg: MatchingConfig = cfg.matching
+        self.img_downsample: int = cfg.dataset.img_downsample
+        self.use_calib: bool = cfg.use_calib
+        if not self.use_calib:
+            check_rays_tracking_settings(self.cfg.huber, self.cfg.rel_error)
         self.model: AsymmetricMASt3R = model
         self.keyframes: SharedKeyframes = frames
         self.device: str = device
@@ -85,7 +89,7 @@ class FrameTracker:
         keyframe: Frame = last_kf
 
         idx_f2k, valid_match_k, Xff, Cff, Qff, Xkf, Ckf, Qkf = mast3r_match_asymmetric(
-            self.model, frame, keyframe, idx_i2j_init=self.idx_f2k
+            self.model, frame, keyframe, self.matching_cfg, self.img_downsample, idx_i2j_init=self.idx_f2k
         )
         # Save idx for next
         self.idx_f2k = idx_f2k.clone()
@@ -97,9 +101,9 @@ class FrameTracker:
         Qk: Float[Tensor, "hw 1"] = torch.sqrt(Qff[idx_f2k] * Qkf)
 
         # Update keyframe pointmap after registration (need pose)
-        frame.update_pointmap(Xff, Cff)
+        frame.update_pointmap(Xff, Cff, self.cfg)
 
-        use_calib: bool = config["use_calib"]
+        use_calib: bool = self.use_calib
         img_size: tuple[int, int] = (int(frame.rgb_tensor.shape[-2]), int(frame.rgb_tensor.shape[-1]))
         K: Float[Tensor, "3 3"] | None = keyframe.K if use_calib else None
 
@@ -118,15 +122,15 @@ class FrameTracker:
 
         # Get valid
         # Use canonical confidence average
-        valid_Cf: Bool[Tensor, "hw 1"] = Cf > self.cfg["C_conf"]
-        valid_Ck: Bool[Tensor, "hw 1"] = Ck > self.cfg["C_conf"]
-        valid_Q: Bool[Tensor, "hw 1"] = Qk > self.cfg["Q_conf"]
+        valid_Cf: Bool[Tensor, "hw 1"] = Cf > self.cfg.C_conf
+        valid_Ck: Bool[Tensor, "hw 1"] = Ck > self.cfg.C_conf
+        valid_Q: Bool[Tensor, "hw 1"] = Qk > self.cfg.Q_conf
 
         valid_opt: Bool[Tensor, "hw 1"] = valid_match_k & valid_Cf & valid_Ck & valid_Q
         valid_kf: Bool[Tensor, "hw 1"] = valid_match_k & valid_Q
 
         match_frac: Float[Tensor, ""] = valid_opt.sum() / valid_opt.numel()
-        if match_frac < self.cfg["min_match_frac"]:
+        if match_frac < self.cfg.min_match_frac:
             rr.log(LOG_PATH, rr.TextLog(f"Skipped frame {frame.frame_id}", level="DEBUG"))
             return False, True
 
@@ -164,7 +168,7 @@ class FrameTracker:
         Xkk_raw = camk_sim3_camf.act(Xkf)
         assert isinstance(Xkk_raw, torch.Tensor)
         Xkk: Float[Tensor, "hw 3"] = Xkk_raw
-        keyframe.update_pointmap(Xkk, Ckf)
+        keyframe.update_pointmap(Xkk, Ckf, self.cfg)
         # write back the filtered pointmap
         self.keyframes.update_pointmap(len(self.keyframes) - 1, keyframe)
 
@@ -175,7 +179,7 @@ class FrameTracker:
             torch.unique(idx_f2k[valid_match_k[:, 0]]).shape[0] / valid_kf.numel()
         )
 
-        new_kf: bool = bool(min(match_frac_k, unique_frac_f) < self.cfg["match_frac_thresh"])
+        new_kf: bool = bool(min(match_frac_k, unique_frac_f) < self.cfg.match_frac_thresh)
 
         # Rest idx if new keyframe
         if new_kf:
@@ -242,7 +246,7 @@ class FrameTracker:
             uv_k = uv_k.view(-1, 2)
             meas_k = torch.cat((uv_k, torch.log(Xk[..., 2:3])), dim=-1)
             # Avoid any bad calcs in log
-            valid_depth: Bool[Tensor, "hw 1"] = Xk[..., 2:3] > self.cfg["depth_eps"]
+            valid_depth: Bool[Tensor, "hw 1"] = Xk[..., 2:3] > self.cfg.depth_eps
             meas_k[~valid_depth.repeat(1, 3)] = 0.0
             valid_meas_k = valid_depth
 
@@ -267,7 +271,7 @@ class FrameTracker:
         """
         whitened_r: Float[Tensor, "n r"] = sqrt_info * r
         robust_sqrt_info: Float[Tensor, "n r"] = sqrt_info * torch.sqrt(
-            huber(whitened_r, k=self.cfg["huber"])
+            huber(whitened_r, k=self.cfg.huber)
         )
         mdim: int = J.shape[-1]
         A: Float[Tensor, "N m"] = (robust_sqrt_info[..., None] * J).view(-1, mdim)  # dr_dX
@@ -317,12 +321,12 @@ class FrameTracker:
             torch.stack([Xk, Xf]),
             valid.view(1, n, 1).contiguous(),
             Qk.view(1, n, 1).contiguous(),
-            self.cfg["sigma_ray"],
-            self.cfg["sigma_dist"],
-            self.cfg["max_iters"],
-            self.cfg["delta_norm"],
+            self.cfg.sigma_ray,
+            self.cfg.sigma_dist,
+            self.cfg.max_iters,
+            self.cfg.delta_norm,
         )
-        if n_iters == self.cfg["max_iters"]:
+        if n_iters == self.cfg.max_iters:
             rr.log(LOG_PATH, rr.TextLog("Max iters reached", level="DEBUG"))
         camk_sim3_camf: lietorch.Sim3 = lietorch.Sim3(Twc[1:2])
 
@@ -364,8 +368,8 @@ class FrameTracker:
             pose and the optimised relative pose.
         """
         last_error: float = float("inf")
-        sqrt_info_pixel: Float[Tensor, "hw 1"] = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
-        sqrt_info_depth: Float[Tensor, "hw 1"] = 1 / self.cfg["sigma_depth"] * valid * torch.sqrt(Qk)
+        sqrt_info_pixel: Float[Tensor, "hw 1"] = 1 / self.cfg.sigma_pixel * valid * torch.sqrt(Qk)
+        sqrt_info_depth: Float[Tensor, "hw 1"] = 1 / self.cfg.sigma_depth * valid * torch.sqrt(Qk)
         sqrt_info: Float[Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
 
         # Solving for relative pose without scale!
@@ -374,7 +378,7 @@ class FrameTracker:
         camk_sim3_camf: lietorch.Sim3 = camk_sim3_camf_raw
 
         old_cost: float = float("inf")
-        for step in range(self.cfg["max_iters"]):
+        for step in range(self.cfg.max_iters):
             act_result = act_Sim3(camk_sim3_camf, Xf, jacobian=True)
             assert isinstance(act_result, tuple)
             Xf_Ck: Float[Tensor, "hw 3"] = act_result[0]
@@ -384,8 +388,8 @@ class FrameTracker:
                 K,
                 img_size,
                 jacobian=True,
-                border=self.cfg["pixel_border"],
-                z_eps=self.cfg["depth_eps"],
+                border=self.cfg.pixel_border,
+                z_eps=self.cfg.depth_eps,
             )
             assert len(proj_result) == 3
             pzf_Ck: Float[Tensor, "hw 3"] = proj_result[0]
@@ -409,8 +413,8 @@ class FrameTracker:
 
             if check_convergence(
                 step,
-                self.cfg["rel_error"],
-                self.cfg["delta_norm"],
+                self.cfg.rel_error,
+                self.cfg.delta_norm,
                 old_cost,
                 new_cost,
                 tau_ij_sim3,
@@ -418,7 +422,7 @@ class FrameTracker:
                 break
             old_cost = new_cost
 
-            if step == self.cfg["max_iters"] - 1:
+            if step == self.cfg.max_iters - 1:
                 rr.log(LOG_PATH, rr.TextLog(f"Max iters reached {last_error}", level="DEBUG"))
 
         # Assign new pose based on relative pose

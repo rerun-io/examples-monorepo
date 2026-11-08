@@ -8,10 +8,10 @@ optimisation and relocalization.
 
 Usage::
 
-    with SlamBackend(config_path, model, h, w, K) as ctx:
+    with SlamBackend(cfg, model, h, w, K) as ctx:
         keyframes = ctx.keyframes
         states = ctx.states
-        tracker = FrameTracker(model, keyframes, device)
+        tracker = FrameTracker(model, keyframes, cfg, device)
         for frame in frames:  # e.g. a FramePrefetcher
             ctx.check_backend()  # raises BackendError if backend died
             tracker.track(frame)
@@ -35,7 +35,7 @@ from jaxtyping import Float
 from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
-from mast3r_slam.config import config, load_config
+from mast3r_slam.config import RetrievalConfig, SlamConfig
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates
 from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.mast3r_utils import load_retriever, use_pair_decoder_engine
@@ -61,7 +61,7 @@ class SlamBackend:
 
     def __init__(
         self,
-        config_path: str,
+        cfg: SlamConfig,
         model: AsymmetricMASt3R,
         h: int,
         w: int,
@@ -70,7 +70,7 @@ class SlamBackend:
         rr_application_id: str | None = None,
         pair_decoder_hw: tuple[int, int] | None = None,
     ) -> None:
-        self._config_path: str = config_path
+        self._cfg: SlamConfig = cfg
         self._model: AsymmetricMASt3R = model
         self._h: int = h
         self._w: int = w
@@ -93,16 +93,16 @@ class SlamBackend:
         self._manager = mp.Manager()
         self._error_queue = MPQueue(ctx=multiprocessing.get_context())
 
-        self.keyframes = SharedKeyframes(self._manager, self._h, self._w, device=self._device)
+        self.keyframes = SharedKeyframes(self._manager, self._h, self._w, device=self._device, use_calib=self._cfg.use_calib)
         self.states = SharedStates(self._manager, self._h, self._w, device=self._device)
 
-        if self._K is not None and config["use_calib"]:
+        if self._K is not None and self._cfg.use_calib:
             self.keyframes.set_intrinsics(self._K)
 
         self._backend = mp.Process(
             target=_backend_entry,
             args=(
-                self._config_path,
+                self._cfg,
                 self._model,
                 self.states,
                 self.keyframes,
@@ -197,7 +197,7 @@ class SlamBackend:
     def wait_for_backlog(self, max_backlog: int | None = None) -> None:
         """Block while the backend has more than ``max_backlog`` keyframes queued.
 
-        ``None`` means the config's ``max_backend_backlog`` (0 when single-threaded). A fast frontend otherwise runs
+        ``None`` means the config's ``max_backend_backlog`` (0 when ``single_thread``). A fast frontend otherwise runs
         several keyframes ahead of the backend, most of all while the backend warms up, and global optimisation then
         starts from stale poses: some runs settled in a wrong minimum (final keyframe ATE 0.5-12 on a path of 12).
 
@@ -205,20 +205,15 @@ class SlamBackend:
             BackendError: If the backend process dies while the frontend waits.
         """
         if max_backlog is None:
-            max_backlog = 0 if config["single_thread"] else int(config.get("max_backend_backlog", 2))
+            max_backlog = 0 if self._cfg.single_thread else self._cfg.max_backend_backlog
         assert self.states is not None
         while len(self.states.global_optimizer_tasks) > max_backlog:
             self.check_backend()
             time.sleep(0.002)
 
-    def join(self, timeout: float | None = None) -> None:
-        """Wait for the backend process to finish normally."""
-        if self._backend is not None:
-            self._backend.join(timeout=timeout)
-
 
 def _backend_entry(
-    config_path: str,
+    cfg: SlamConfig,
     model: AsymmetricMASt3R,
     states: SharedStates,
     keyframes: SharedKeyframes,
@@ -233,7 +228,7 @@ def _backend_entry(
     process can detect and surface backend crashes.
     """
     try:
-        run_backend(config_path, model, states, keyframes, K, rr_application_id=rr_application_id, pair_decoder_hw=pair_decoder_hw)
+        run_backend(cfg, model, states, keyframes, K, rr_application_id=rr_application_id, pair_decoder_hw=pair_decoder_hw)
     except KeyboardInterrupt:
         pass  # Normal Ctrl+C propagation, not an error
     except BeartypeException:
@@ -249,14 +244,9 @@ def _backend_entry(
         print(f"[Backend FATAL] {tb_str}", flush=True)
 
 
-def _retrieve(retrieval_database: RetrievalDatabase, frame: Frame, add_after_query: bool) -> list[int]:
-    """Keyframes similar to ``frame`` (the config's ``retrieval`` k and threshold); adds ``frame`` when asked."""
-    return retrieval_database.update(
-        frame,
-        add_after_query=add_after_query,
-        k=config["retrieval"]["k"],
-        min_thresh=config["retrieval"]["min_thresh"],
-    )
+def _retrieve(retrieval_database: RetrievalDatabase, frame: Frame, add_after_query: bool, cfg: RetrievalConfig) -> list[int]:
+    """Keyframes similar to ``frame`` (``cfg``'s k and threshold); adds ``frame`` when asked."""
+    return retrieval_database.update(frame, add_after_query=add_after_query, k=cfg.k, min_thresh=cfg.min_thresh)
 
 
 def relocalization(
@@ -264,6 +254,7 @@ def relocalization(
     keyframes: SharedKeyframes,
     factor_graph: FactorGraph,
     retrieval_database: RetrievalDatabase,
+    cfg: SlamConfig,
 ) -> bool:
     """Attempt relocalization of a frame against the keyframe database.
 
@@ -278,23 +269,24 @@ def relocalization(
             to prevent the frontend from modifying keyframes concurrently).
         factor_graph: The global factor graph to add reloc edges to.
         retrieval_database: Image retrieval database for finding candidates.
+        cfg: SLAM config (the ``retrieval`` and ``reloc`` groups).
 
     Returns:
         True if relocalization succeeded (edges added, pose copied), False otherwise.
     """
     with keyframes.lock:
-        kf_idx: list[int] = _retrieve(retrieval_database, frame, add_after_query=False)
+        kf_idx: list[int] = _retrieve(retrieval_database, frame, add_after_query=False, cfg=cfg.retrieval)
         if not kf_idx:
             return False
         keyframes.append(frame)
         n_kf: int = len(keyframes)
         frame_idx: list[int] = [n_kf - 1] * len(kf_idx)
         rr.log(LOG_PATH, rr.TextLog(f"Relocalizing against kf {n_kf - 1} and {kf_idx}", level="INFO"))
-        if not factor_graph.add_factors(frame_idx, kf_idx, config["reloc"]["min_match_frac"], is_reloc=config["reloc"]["strict"]):
+        if not factor_graph.add_factors(frame_idx, kf_idx, cfg.reloc.min_match_frac, is_reloc=cfg.reloc.strict):
             keyframes.pop_last()
             rr.log(LOG_PATH, rr.TextLog("Failed to relocalize", level="WARN"))
             return False
-        _retrieve(retrieval_database, frame, add_after_query=True)
+        _retrieve(retrieval_database, frame, add_after_query=True, cfg=cfg.retrieval)
         rr.log(LOG_PATH, rr.TextLog("Relocalized successfully", level="INFO"))
         # Copy the pose from the matched keyframe as initial estimate.
         keyframes.update_world_sim3_cams(
@@ -306,7 +298,7 @@ def relocalization(
 
 
 def run_backend(
-    config_path: str,
+    cfg: SlamConfig,
     model: AsymmetricMASt3R,
     states: SharedStates,
     keyframes: SharedKeyframes,
@@ -324,7 +316,7 @@ def run_backend(
     The loop exits when the frontend sets ``Mode.TERMINATED`` in shared state.
 
     Args:
-        config_path: Path to the SLAM config YAML (reloaded in this process).
+        cfg: SLAM hyper-parameters (pickled into this process by ``spawn``).
         model: Shared MASt3R model (parameters in shared GPU memory).
         states: Shared mutable state for mode, task queue, and current frame.
         keyframes: Shared keyframe buffer (poses, pointmaps, features).
@@ -334,7 +326,6 @@ def run_backend(
         pair_decoder_hw: When set, decode keyframe pairs with the TensorRT pair decoder for this image size
             (the frontend built it; see ``prepare_trt_engines``).
     """
-    load_config(config_path)
     if pair_decoder_hw is not None:
         use_pair_decoder_engine(model, pair_decoder_hw)
 
@@ -344,7 +335,7 @@ def run_backend(
         rr.connect_grpc()
 
     device: str = keyframes.device
-    factor_graph: FactorGraph = FactorGraph(model, keyframes, K, device)
+    factor_graph: FactorGraph = FactorGraph(model, keyframes, cfg, K, device)
     retrieval_database: RetrievalDatabase = load_retriever(model)
 
     mode: Mode
@@ -354,12 +345,13 @@ def run_backend(
             time.sleep(0.01)
             continue
 
-        # Handle relocalization requests from the frontend.
-        if mode == Mode.RELOC:
+        # Handle relocalization requests from the frontend: one attempt per request. Retrying the same frame for as
+        # long as the mode stays RELOC never ends when the input runs out while tracking is lost, and the keyframe
+        # queue the frontend then waits for is never drained.
+        if mode == Mode.RELOC and states.has_reloc_request():
             frame: Frame = states.get_frame()
-            success: bool = relocalization(frame, keyframes, factor_graph, retrieval_database)
-            if success:
-                states.set_mode(Mode.TRACKING)
+            if relocalization(frame, keyframes, factor_graph, retrieval_database, cfg):
+                states.set_mode_if(Mode.RELOC, Mode.TRACKING)
             states.dequeue_reloc()
             continue
 
@@ -375,7 +367,7 @@ def run_backend(
         # ── Graph construction for the new keyframe ────────────────────────
         # Connect to the previous keyframe and to any visually similar keyframes found via retrieval.
         frame = keyframes[idx]
-        retrieval_inds: list[int] = _retrieve(retrieval_database, frame, add_after_query=True)
+        retrieval_inds: list[int] = _retrieve(retrieval_database, frame, add_after_query=True, cfg=cfg.retrieval)
 
         # Log loop closure candidates (excluding the consecutive neighbour).
         lc_inds: set[int] = set(retrieval_inds)
@@ -393,7 +385,7 @@ def run_backend(
 
         # Run symmetric MASt3R matching to build factor graph edges.
         if kf_idx:
-            factor_graph.add_factors(kf_idx, frame_idx, config["local_opt"]["min_match_frac"])
+            factor_graph.add_factors(kf_idx, frame_idx, cfg.local_opt.min_match_frac)
 
         # Publish edge list to shared state (for Rerun visualisation).
         with states.lock:

@@ -8,8 +8,12 @@ The app loads the model with :func:`mast3r_slam.api.inference.load_slam_model` a
 :func:`mast3r_slam.api.inference.run_slam_pipeline`, the same two functions the CLI calls.
 This module only handles Gradio-specific concerns: file validation, recording
 setup, binary streaming, and nerfstudio output zipping.
+
+The Run button passes the Config widgets to the streaming callback, which builds the run's
+:class:`~mast3r_slam.config.SlamConfig` from them, so runs and sessions share no config state.
 """
 
+import dataclasses
 import shutil
 import tempfile
 import threading
@@ -24,14 +28,33 @@ from gradio_rerun import Rerun
 from mast3r.model import AsymmetricMASt3R
 
 from mast3r_slam.api.inference import APPLICATION_ID, SlamSettings, load_slam_dataset, load_slam_model, run_slam_pipeline
+from mast3r_slam.async_logger import DEFAULT_CONF_THRESHOLD
+from mast3r_slam.config import SLAM_PRESETS, SlamConfig, SlamPresetName
 from mast3r_slam.mast3r_utils import prepare_trt_engines
 from mast3r_slam.rerun_log_utils import LOG_PATH
 
-EXAMPLE_VIDEOS: list[str] = ["data/livingroom-tour.mp4", "data/normal-apt-tour.mp4"]
+EXAMPLE_VIDEOS: list[str] = [
+    "data/livingroom-tour.mp4",
+    "data/normal-apt-tour.mp4",
+    # The dpvo / MetricTrail example clips, for comparisons across the three apps.
+    "data/iphone/pool.mp4",
+    "data/movies/IMG_0493.mp4",
+    "data/movies/IMG_0494.mp4",
+    "data/movies/IMG_0495.mp4",
+]
 
 engine_status: str = "Preparing TensorRT engines for the example videos..."
 """Shown above the Run button while :func:`_prepare_example_engines` runs."""
 engines_ready: threading.Event = threading.Event()
+
+VIDEO_PRESETS: list[SlamPresetName] = [name for name, (_, cfg) in SLAM_PRESETS.items() if not cfg.use_calib]
+"""The presets an uploaded video can run: a video carries no calibration."""
+DEFAULT_PRESET: SlamPresetName = "fast"
+
+def _preset_values(preset: SlamPresetName) -> tuple[int, bool]:
+    """The Config widgets' values for ``preset``: subsample, single_thread."""
+    cfg: SlamConfig = SLAM_PRESETS[preset][1]
+    return cfg.dataset.subsample, cfg.single_thread
 
 
 def _prepare_example_engines(model: AsymmetricMASt3R) -> None:
@@ -70,10 +93,13 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
     @rr.thread_local_stream(APPLICATION_ID)
     def streaming_mast3r_slam_fn(
         video_file: str | None,
-        subsample: int,
+        preset: SlamPresetName,
+        subsample: int | float,
+        single_thread: bool,
+        conf_threshold: float,
         progress=gr.Progress(),  # noqa: B008
     ) -> Generator[tuple[bytes | None, str | None, str], None, None]:
-        """Gradio streaming callback that runs the SLAM pipeline.
+        """Gradio streaming callback that runs the SLAM pipeline with the Config widgets' values.
 
         Uses ``@rr.thread_local_stream`` to create a per-call recording.
         All ``rr.log()`` calls from the nested ``run_slam_pipeline()``
@@ -82,7 +108,10 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
 
         Args:
             video_file: Path to the uploaded video file.
-            subsample: Frame subsample rate.
+            preset: Name of a preset in ``SLAM_PRESETS``; the widgets below override its fields.
+            subsample: Keep every n-th frame.
+            single_thread: Run frontend and backend in lockstep.
+            conf_threshold: Smallest confidence shown in the depth panels and fused into the map surface.
             progress: Gradio progress callback.
 
         Yields:
@@ -99,7 +128,8 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
         # A fresh directory per run, so a download never mixes in another run's frames.
         run_dir: Path = Path(tempfile.mkdtemp(prefix="mast3r-slam-"))
         ns_output_dir: Path = run_dir / "nerfstudio-output"
-        settings: SlamSettings = SlamSettings(dataset=video_file, subsample=subsample, ns_save_path=ns_output_dir)
+        slam_config: SlamConfig = dataclasses.replace(SLAM_PRESETS[preset][1], single_thread=single_thread).with_subsample(int(subsample))
+        settings: SlamSettings = SlamSettings(dataset=video_file, slam=slam_config, ns_save_path=ns_output_dir, conf_threshold=float(conf_threshold))
         for msg in run_slam_pipeline(settings, model, recording=recording):
             yield stream.read(), None, msg
 
@@ -156,17 +186,32 @@ def build_app() -> gr.Blocks:
                         run_slam_btn = gr.Button("Run MASt3R-SLAM", variant="primary")
 
                         with gr.Accordion("Config", open=False):
+                            preset_dropdown = gr.Dropdown(
+                                label="SLAM Preset",
+                                choices=[(f"{name}: {SLAM_PRESETS[name][0]}", name) for name in VIDEO_PRESETS],
+                                value=DEFAULT_PRESET,
+                                info="Sets the fields below; the calibrated presets need a calibrated dataset (CLI).",
+                            )
                             subsample_slider = gr.Slider(
                                 label="Frame Subsample",
                                 minimum=1,
                                 maximum=8,
                                 step=1,
-                                value=4,
+                                precision=0,
+                                value=SLAM_PRESETS[DEFAULT_PRESET][1].dataset.subsample,
                             )
-                            gr.Markdown(
-                                f"Base config file: `{defaults.config}`\n\n"
-                                "Advanced calibration and backend settings remain in the YAML "
-                                "for now so the UI does not expose partially applied controls."
+                            single_thread_checkbox = gr.Checkbox(
+                                label="Single-threaded",
+                                value=SLAM_PRESETS[DEFAULT_PRESET][1].single_thread,
+                                info="Frontend and backend in lockstep: deterministic, slower.",
+                            )
+                            conf_threshold_slider = gr.Slider(
+                                label="Confidence Threshold",
+                                minimum=1.0,
+                                maximum=20.0,
+                                step=0.5,
+                                value=DEFAULT_CONF_THRESHOLD,
+                                info="Depth and the map surface keep pixels above this MASt3R confidence; lower it if depth is black.",
                             )
 
                     with gr.TabItem("Outputs", id="outputs"):
@@ -206,6 +251,12 @@ def build_app() -> gr.Blocks:
                 api_visibility="private",
             )
 
+        preset_dropdown.change(
+            fn=_preset_values,
+            inputs=[preset_dropdown],
+            outputs=[subsample_slider, single_thread_checkbox],
+            api_visibility="private",
+        )
         engine_timer.tick(fn=_engine_status_tick, inputs=None, outputs=[engine_status_md, engine_timer], api_visibility="private")
 
         run_event = run_slam_btn.click(
@@ -220,10 +271,7 @@ def build_app() -> gr.Blocks:
             api_visibility="private",
         ).then(
             fn=_make_streaming_fn(model),
-            inputs=[
-                video_file,
-                subsample_slider,
-            ],
+            inputs=[video_file, preset_dropdown, subsample_slider, single_thread_checkbox, conf_threshold_slider],
             outputs=[viewer, output_zip_file, status_text],
         )
 

@@ -5,7 +5,7 @@ from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
 from mast3r_slam import mojo_backend
-from mast3r_slam.config import config
+from mast3r_slam.config import LocalOptConfig, MatchingConfig, SlamConfig
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     constrain_points_to_ray,
@@ -25,13 +25,17 @@ class FactorGraph:
         self,
         model: AsymmetricMASt3R,
         frames: SharedKeyframes,
+        cfg: SlamConfig,
         K: Float[Tensor, "3 3"] | None = None,
         device: str = "cuda",
     ) -> None:
         self.model: AsymmetricMASt3R = model
         self.frames: SharedKeyframes = frames
         self.device: str = device
-        self.cfg: dict = config["local_opt"]
+        self.cfg: LocalOptConfig = cfg.local_opt
+        self.matching_cfg: MatchingConfig = cfg.matching
+        self.img_downsample: int = cfg.dataset.img_downsample
+        self.use_calib: bool = cfg.use_calib
         self.ii: Int[Tensor, "..."] = torch.as_tensor([], dtype=torch.long, device=self.device)
         self.jj: Int[Tensor, "..."] = torch.as_tensor([], dtype=torch.long, device=self.device)
         self.idx_ii2jj: Int[Tensor, "..."] = torch.as_tensor([], dtype=torch.long, device=self.device)
@@ -97,7 +101,7 @@ class FactorGraph:
             Qji,
             Qij,
         ) = mast3r_match_symmetric(
-            self.model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j
+            self.model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j, self.matching_cfg, self.img_downsample
         )
 
         batch_inds: Int[Tensor, "b hw"] = torch.arange(idx_i2j.shape[0], device=idx_i2j.device)[
@@ -106,8 +110,8 @@ class FactorGraph:
         Qj: Float[Tensor, "b hw 1"] = torch.sqrt(Qii[batch_inds, idx_i2j] * Qji)
         Qi: Float[Tensor, "b hw 1"] = torch.sqrt(Qjj[batch_inds, idx_j2i] * Qij)
 
-        valid_Qj: Bool[Tensor, "b hw 1"] = Qj > self.cfg["Q_conf"]
-        valid_Qi: Bool[Tensor, "b hw 1"] = Qi > self.cfg["Q_conf"]
+        valid_Qj: Bool[Tensor, "b hw 1"] = Qj > self.cfg.Q_conf
+        valid_Qi: Bool[Tensor, "b hw 1"] = Qi > self.cfg.Q_conf
         valid_j: Bool[Tensor, "b hw 1"] = valid_match_j & valid_Qj
         valid_i: Bool[Tensor, "b hw 1"] = valid_match_i & valid_Qi
         nj: int = valid_j.shape[1] * valid_j.shape[2]
@@ -213,7 +217,7 @@ class FactorGraph:
 
     def solve(self) -> None:
         """Run global Gauss-Newton: calibrated reprojection when ``use_calib`` is set, ray-distance otherwise."""
-        if config["use_calib"]:
+        if self.use_calib:
             self.solve_GN_calib()
         else:
             self.solve_GN_rays()
@@ -224,7 +228,7 @@ class FactorGraph:
         Pins the first ``pin`` keyframes and optimises the rest.  Writes
         the updated poses back into the shared keyframe buffer.
         """
-        pin: int = self.cfg["pin"]
+        pin: int = self.cfg.pin
         unique_kf_idx: Int[Tensor, "n_unique"] = self.get_unique_kf_idx()
         n_unique_kf: int = unique_kf_idx.numel()
         if n_unique_kf <= pin:
@@ -242,12 +246,12 @@ class FactorGraph:
         Q_ii2jj: Float[Tensor, "n_edges hw 1"]
         ii, jj, idx_ii2jj, valid_match, Q_ii2jj = self.prep_two_way_edges()
 
-        C_thresh: float = self.cfg["C_conf"]
-        Q_thresh: float = self.cfg["Q_conf"]
-        max_iter: int = self.cfg["max_iters"]
-        sigma_ray: float = self.cfg["sigma_ray"]
-        sigma_dist: float = self.cfg["sigma_dist"]
-        delta_thresh: float = self.cfg["delta_norm"]
+        C_thresh: float = self.cfg.C_conf
+        Q_thresh: float = self.cfg.Q_conf
+        max_iter: int = self.cfg.max_iters
+        sigma_ray: float = self.cfg.sigma_ray
+        sigma_dist: float = self.cfg.sigma_dist
+        delta_thresh: float = self.cfg.delta_norm
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
         mojo_backend.gauss_newton_rays(
@@ -279,7 +283,7 @@ class FactorGraph:
         """
         assert self.K is not None
         K: Float[Tensor, "3 3"] = self.K
-        pin: int = self.cfg["pin"]
+        pin: int = self.cfg.pin
         unique_kf_idx: Int[Tensor, "n_unique"] = self.get_unique_kf_idx()
         n_unique_kf: int = unique_kf_idx.numel()
         if n_unique_kf <= pin:
@@ -302,14 +306,14 @@ class FactorGraph:
         Q_ii2jj: Float[Tensor, "n_edges hw 1"]
         ii, jj, idx_ii2jj, valid_match, Q_ii2jj = self.prep_two_way_edges()
 
-        C_thresh: float = self.cfg["C_conf"]
-        Q_thresh: float = self.cfg["Q_conf"]
-        pixel_border: int = self.cfg["pixel_border"]
-        z_eps: float = self.cfg["depth_eps"]
-        max_iter: int = self.cfg["max_iters"]
-        sigma_pixel: float = self.cfg["sigma_pixel"]
-        sigma_depth: float = self.cfg["sigma_depth"]
-        delta_thresh: float = self.cfg["delta_norm"]
+        C_thresh: float = self.cfg.C_conf
+        Q_thresh: float = self.cfg.Q_conf
+        pixel_border: int = self.cfg.pixel_border
+        z_eps: float = self.cfg.depth_eps
+        max_iter: int = self.cfg.max_iters
+        sigma_pixel: float = self.cfg.sigma_pixel
+        sigma_depth: float = self.cfg.sigma_depth
+        delta_thresh: float = self.cfg.delta_norm
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
         mojo_backend.gauss_newton_calib(
