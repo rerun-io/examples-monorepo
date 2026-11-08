@@ -1,7 +1,7 @@
-"""MASt3R-SLAM inference pipeline.
+"""MASt3R-SLAM inference pipeline: settings, model loading, the tracking loop and the CLI.
 
-This module implements the main tracking loop (frontend) and the backend
-global optimisation process.  The two run concurrently:
+This module implements the main tracking loop (frontend); the backend global
+optimisation process lives in ``backend_lifecycle.py``.  The two run concurrently:
 
 .. code-block:: text
 
@@ -64,7 +64,6 @@ from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import MonocularDataset, load_dataset
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates
 from mast3r_slam.frame_prefetch import FramePrefetcher
-from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.log_events import (
     KeyframeSnapshot,
     LogCurrentFrame,
@@ -76,11 +75,9 @@ from mast3r_slam.mast3r_utils import (
     compile_tracking_forward,
     enable_trt_engines,
     load_mast3r,
-    load_retriever,
     mast3r_inference_mono,
     tracking_engine_size,
     trt_engines_enabled,
-    use_pair_decoder_engine,
     use_tracking_engine,
 )
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
@@ -90,7 +87,6 @@ from mast3r_slam.rerun_log_utils import (
     create_blueprints,
     log_video_for_dataset,
 )
-from mast3r_slam.retrieval_database import RetrievalDatabase
 from mast3r_slam.tracker import FrameTracker
 
 
@@ -305,9 +301,7 @@ def run_slam_pipeline(
                 # map is the same however fast tracking ran.
                 backlog: int = len(states.global_optimizer_tasks)
                 drain_start: float = time.perf_counter()
-                while len(states.global_optimizer_tasks) > 0:
-                    ctx.check_backend()
-                    time.sleep(0.01)
+                ctx.wait_for_backlog(0)
                 if backlog > 0:
                     print(f"Backend finished {backlog} queued keyframes in {time.perf_counter() - drain_start:.2f} s")
                 states.set_mode(Mode.TERMINATED)
@@ -374,7 +368,7 @@ def run_slam_pipeline(
             if add_new_kf:
                 keyframes.append(frame)
                 states.queue_global_optimization(len(keyframes) - 1)
-                wait_for_backend(states, ctx)
+                ctx.wait_for_backlog()
 
             # ── Async logging: create events and enqueue ──────────────────
             # 1. Collect structural changes (non-droppable)
@@ -481,205 +475,3 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         pass
 
     rr.log(f"{PARENT_LOG_PATH}/logs", rr.TextLog("Done", level="INFO"))
-
-
-def relocalization(
-    frame: Frame,
-    keyframes: SharedKeyframes,
-    factor_graph: FactorGraph,
-    retrieval_database: RetrievalDatabase,
-) -> bool:
-    """Attempt relocalization of a frame against the keyframe database.
-
-    Called by the **backend process** when the frontend signals ``Mode.RELOC``.
-    Queries the retrieval database for visually similar keyframes, attempts to
-    build factor graph edges via symmetric MASt3R matching, and if successful,
-    copies the pose from the matched keyframe and runs global optimisation.
-
-    Args:
-        frame: The current lost frame (with features from mono inference).
-        keyframes: Shared keyframe buffer (locked during the entire operation
-            to prevent the frontend from modifying keyframes concurrently).
-        factor_graph: The global factor graph to add reloc edges to.
-        retrieval_database: Image retrieval database for finding candidates.
-
-    Returns:
-        True if relocalization succeeded (edges added, pose copied), False otherwise.
-    """
-    with keyframes.lock:
-        kf_idx: list[int] = []
-        retrieval_inds: list[int] = retrieval_database.update(
-            frame,
-            add_after_query=False,
-            k=config["retrieval"]["k"],
-            min_thresh=config["retrieval"]["min_thresh"],
-        )
-        kf_idx += retrieval_inds
-        successful_loop_closure: bool = False
-        if kf_idx:
-            keyframes.append(frame)
-            n_kf: int = len(keyframes)
-            kf_idx = list(kf_idx)
-            frame_idx: list[int] = [n_kf - 1] * len(kf_idx)
-            rr.log("/world/logs", rr.TextLog(f"Relocalizing against kf {n_kf - 1} and {kf_idx}", level="INFO"))
-            if factor_graph.add_factors(
-                frame_idx,
-                kf_idx,
-                config["reloc"]["min_match_frac"],
-                is_reloc=config["reloc"]["strict"],
-            ):
-                retrieval_database.update(
-                    frame,
-                    add_after_query=True,
-                    k=config["retrieval"]["k"],
-                    min_thresh=config["retrieval"]["min_thresh"],
-                )
-                rr.log("/world/logs", rr.TextLog("Relocalized successfully", level="INFO"))
-                successful_loop_closure = True
-                # Copy the pose from the matched keyframe as initial estimate.
-                keyframes.update_world_sim3_cams(
-                    lietorch.Sim3(keyframes.world_sim3_cam[kf_idx[0]].clone()),
-                    torch.tensor([n_kf - 1], device=keyframes.world_sim3_cam.device, dtype=torch.long),
-                )
-            else:
-                keyframes.pop_last()
-                rr.log("/world/logs", rr.TextLog("Failed to relocalize", level="WARN"))
-
-        if successful_loop_closure:
-            if config["use_calib"]:
-                factor_graph.solve_GN_calib()
-            else:
-                factor_graph.solve_GN_rays()
-        return successful_loop_closure
-
-
-def wait_for_backend(states: SharedStates, ctx: SlamBackend) -> None:
-    """Block while the backend has more keyframes queued than ``max_backend_backlog`` (0 when single-threaded).
-
-    A fast frontend otherwise runs several keyframes ahead of the backend, most of all while
-    the backend warms up, and global optimisation then starts from stale poses: some runs settled in a wrong
-    minimum (final keyframe ATE 0.5-12 on a path of 12).
-    """
-    max_backlog: int = 0 if config["single_thread"] else int(config.get("max_backend_backlog", 2))
-    while len(states.global_optimizer_tasks) > max_backlog:
-        ctx.check_backend()
-        time.sleep(0.002)
-
-
-def run_backend(
-    config_path: str,
-    model: AsymmetricMASt3R,
-    states: SharedStates,
-    keyframes: SharedKeyframes,
-    K: Float[Tensor, "3 3"] | None,
-    rr_application_id: str | None = None,
-    pair_decoder_hw: tuple[int, int] | None = None,
-) -> None:
-    """Backend process main loop: graph construction, retrieval, and global optimisation.
-
-    This function runs in a **separate process** spawned by ``SlamBackend``.
-    It continuously polls for new keyframes queued by the frontend, builds
-    pairwise matching factors, queries the retrieval database for loop closures,
-    and runs Gauss-Newton global optimisation to refine all keyframe poses.
-
-    The loop exits when the frontend sets ``Mode.TERMINATED`` in shared state.
-
-    Args:
-        config_path: Path to the SLAM config YAML (reloaded in this process).
-        model: Shared MASt3R model (parameters in shared GPU memory).
-        states: Shared mutable state for mode, task queue, and current frame.
-        keyframes: Shared keyframe buffer (poses, pointmaps, features).
-        K: Camera intrinsic matrix, or None for uncalibrated mode.
-        rr_application_id: When set, initialize Rerun in this subprocess and
-            connect via gRPC so ``rr.TextLog`` entries reach the main viewer.
-        pair_decoder_hw: When set, decode keyframe pairs with the TensorRT pair decoder for this image size
-            (the frontend built it; see ``prepare_trt_engines``).
-    """
-    load_config(config_path)
-    if pair_decoder_hw is not None:
-        use_pair_decoder_engine(model, pair_decoder_hw)
-
-    # Connect to the main process's Rerun viewer for TextLog output.
-    if rr_application_id is not None:
-        rr.init(rr_application_id, spawn=False)
-        rr.connect_grpc()
-
-    device: str = keyframes.device
-    factor_graph: FactorGraph = FactorGraph(model, keyframes, K, device)
-    retrieval_database: RetrievalDatabase = load_retriever(model)
-
-    mode: Mode = states.get_mode()
-    while mode is not Mode.TERMINATED:
-        mode = states.get_mode()
-
-        # Wait for the frontend to finish initialisation.
-        if mode == Mode.INIT:
-            time.sleep(0.01)
-            continue
-
-        # Handle relocalization requests from the frontend.
-        if mode == Mode.RELOC:
-            frame: Frame = states.get_frame()
-            success: bool = relocalization(frame, keyframes, factor_graph, retrieval_database)
-            if success:
-                states.set_mode(Mode.TRACKING)
-            states.dequeue_reloc()
-            continue
-
-        # Check if there's a new keyframe to process.
-        idx: int = -1
-        with states.lock:
-            if len(states.global_optimizer_tasks) > 0:
-                idx = states.global_optimizer_tasks[0]
-        if idx == -1:
-            time.sleep(0.01)
-            continue
-
-        # ── Graph construction for the new keyframe ────────────────────────
-        # Connect to the previous consecutive keyframe(s) and to any
-        # visually similar keyframes found via retrieval.
-        kf_idx: list[int] = []
-        n_consec: int = 1
-        for j in range(min(n_consec, idx)):
-            kf_idx.append(idx - 1 - j)
-
-        frame = keyframes[idx]
-        retrieval_inds: list[int] = retrieval_database.update(
-            frame,
-            add_after_query=True,
-            k=config["retrieval"]["k"],
-            min_thresh=config["retrieval"]["min_thresh"],
-        )
-        kf_idx += retrieval_inds
-
-        # Log loop closure candidates (excluding the consecutive neighbour).
-        lc_inds: set[int] = set(retrieval_inds)
-        lc_inds.discard(idx - 1)
-        if len(lc_inds) > 0:
-            rr.log("/world/logs", rr.TextLog(f"Database retrieval {idx}: {lc_inds}", level="INFO"))
-
-        # Deduplicate and remove self-references.
-        kf_idx_set: set[int] = set(kf_idx)
-        kf_idx_set.discard(idx)
-        kf_idx = list(kf_idx_set)
-        frame_idx: list[int] = [idx] * len(kf_idx)
-
-        # Run symmetric MASt3R matching to build factor graph edges.
-        if kf_idx:
-            factor_graph.add_factors(kf_idx, frame_idx, config["local_opt"]["min_match_frac"])
-
-        # Publish edge list to shared state (for Rerun visualisation).
-        with states.lock:
-            states.edges_ii[:] = factor_graph.ii.cpu().tolist()
-            states.edges_jj[:] = factor_graph.jj.cpu().tolist()
-
-        # ── Global Gauss-Newton optimisation ───────────────────────────────
-        if config["use_calib"]:
-            factor_graph.solve_GN_calib()
-        else:
-            factor_graph.solve_GN_rays()
-
-        # Mark this keyframe as processed.
-        with states.lock:
-            if len(states.global_optimizer_tasks) > 0:
-                idx = states.global_optimizer_tasks.pop(0)

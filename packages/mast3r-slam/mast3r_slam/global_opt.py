@@ -211,6 +211,13 @@ class FactorGraph:
 
         return Xs, world_sim3_cams, Cs
 
+    def solve(self) -> None:
+        """Run global Gauss-Newton: calibrated reprojection when ``use_calib`` is set, ray-distance otherwise."""
+        if config["use_calib"]:
+            self.solve_GN_calib()
+        else:
+            self.solve_GN_rays()
+
     def solve_GN_rays(self) -> None:
         """Run Gauss-Newton optimisation using ray-distance residuals.
 
@@ -284,8 +291,9 @@ class FactorGraph:
         Xs, world_sim3_cams, Cs = self.get_poses_points(unique_kf_idx)
 
         # Constrain points to ray
-        img_size: tuple[int, int] = (int(self.frames[0].rgb_tensor.shape[-2]), int(self.frames[0].rgb_tensor.shape[-1]))
-        Xs = constrain_points_to_ray(img_size, Xs, K)
+        height: int = self.frames.h
+        width: int = self.frames.w
+        Xs = constrain_points_to_ray((height, width), Xs, K)
 
         ii: Int[Tensor, "n_edges"]
         jj: Int[Tensor, "n_edges"]
@@ -304,12 +312,6 @@ class FactorGraph:
         delta_thresh: float = self.cfg["delta_norm"]
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
-
-        img_size = (int(self.frames[0].rgb_tensor.shape[-2]), int(self.frames[0].rgb_tensor.shape[-1]))
-        height: int
-        width: int
-        height, width = img_size
-
         mojo_backend.gauss_newton_calib(
             pose_data,
             Xs,
