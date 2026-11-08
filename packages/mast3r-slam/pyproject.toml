@@ -15,10 +15,12 @@ dependencies = [
     "lietorch-mojo",
     "natsort",
     "pykdtree",
+    "trtkit",
 ]
 
 [tool.uv.sources]
 lietorch-mojo = { path = "../lietorch-mojo", editable = true }
+trtkit = { path = "../trtkit", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["."]

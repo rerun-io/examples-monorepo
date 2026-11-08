@@ -76,6 +76,7 @@ from mast3r_slam.mast3r_utils import (
     load_mast3r,
     load_retriever,
     mast3r_inference_mono,
+    use_tracking_engine,
 )
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
 from mast3r_slam.rerun_log_utils import (
@@ -123,6 +124,9 @@ class InferenceConfig:
     compile_model: bool = False
     """Run the tracker's MASt3R forward as compiled CUDA graphs: about 2x faster per frame, but the first tracked
     frame waits for the compile (about 30 s cold, 14 s with a warm inductor cache)."""
+    trt_model: bool = False
+    """Run the tracker's MASt3R forward as a bf16 TensorRT engine (224 px only): about 4x faster than eager per
+    frame. The first run on a machine exports and builds the engine (about 90 s); later runs load it from the cache."""
 
 
 @dataclass
@@ -506,8 +510,14 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # process without copying them (uses CUDA IPC for GPU tensors).
     model: AsymmetricMASt3R = load_mast3r(device=device)
     model.share_memory()
+    if inf_config.compile_model and inf_config.trt_model:
+        raise ValueError("Pick one of --compile-model and --trt-model.")
     if inf_config.compile_model:
         compile_tracking_forward(model)
+    if inf_config.trt_model:
+        if inf_config.img_size != 224:
+            raise ValueError("--trt-model needs --img-size 224: the engine is built for one image size, and only 224 crops every video to it.")
+        use_tracking_engine(model, (224, 224))
 
     # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
     # Only works when the main process uses spawn/serve/connect (not save-to-file).

@@ -1922,6 +1922,8 @@ asmk-src = { path = "recipes/asmk-src" }
 
 [feature.mast3r-slam.pypi-dependencies]
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
+# The tracking forward runs as a bf16 TensorRT engine (packages/trtkit); tensorrt-cu13 comes from the cuda feature.
+trtkit = { path = "packages/trtkit", editable = true }
 einops = ">=0.8.0"
 evo = "*"
 natsort = ">=8.4"
