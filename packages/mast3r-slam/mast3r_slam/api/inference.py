@@ -79,7 +79,6 @@ from mast3r_slam.mast3r_utils import (
     enable_trt_engines,
     load_mast3r,
     mast3r_inference_mono,
-    tracking_engine_size,
     trt_engines_enabled,
     use_tracking_engine,
 )
@@ -250,9 +249,11 @@ def run_slam_pipeline(
     h: int
     w: int
     h, w = dataset.get_img_shape()[0]
-    if trt_engines_enabled(model):
+    # The backend decodes keyframe pairs with the TensorRT engine of the tracking engine's size.
+    trt_hw: tuple[int, int] | None = (h, w) if trt_engines_enabled(model) else None
+    if trt_hw is not None:
         # Before any pipeline thread starts: loading captures the engine's CUDA graph.
-        use_tracking_engine(model, (h, w))
+        use_tracking_engine(model, trt_hw)
     blueprint: rrb.Blueprint = create_blueprints(PARENT_LOG_PATH, timeline=active_timeline)
     rr.send_blueprint(blueprint)
 
@@ -282,7 +283,7 @@ def run_slam_pipeline(
     n_frames: int = len(dataset) if settings.max_frames is None else min(settings.max_frames, len(dataset))
     with (
         SlamBackend(
-            cfg, model, h, w, K, device=device, rr_application_id=rr_application_id, pair_decoder_hw=tracking_engine_size(model)
+            cfg, model, h, w, K, device=device, rr_application_id=rr_application_id, pair_decoder_hw=trt_hw
         ) as ctx,
         async_logger,
         FramePrefetcher(dataset, n_frames, cfg.dataset.img_downsample, device=device) as frames,
