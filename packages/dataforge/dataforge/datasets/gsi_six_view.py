@@ -13,10 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
+import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
+from rerun.encodings import EntityPathLike
 
-from dataforge import paths, transports, writing
+from dataforge import hands, paths, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig, RemoteSequence
 from dataforge.datasets.gsi_six_view_remote import API_URL, GsiSession, Manifest, ManifestEpisode, fetch_episodes, fetch_manifest, read_manifest
 from dataforge.identity import SequenceIdentity
@@ -27,6 +29,8 @@ FILES: dict[str, str] = {paths.BASE_LAYER: "hands.rrd", SLAM_LAYER: "slam.rrd"}
 """The shipped file each layer repacks."""
 CAMERAS: tuple[str, ...] = ("left_eye", "right_eye", "left_front", "right_front", "left_side", "right_side")
 """The six views, in the pairs the default layout shows them: eye, front, side."""
+SIDES: tuple[hands.Side, ...] = ("left", "right")
+"""GSI's two hands, ``/hand/<side>``."""
 TIMELINE: str = "capture_time"
 """GSI's device clock; ``frame`` and ``source_frame`` index the same samples."""
 KEPT: list[str] = ["+ /**", "+ /__properties/episode", "- /__properties"]
@@ -151,14 +155,15 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
                 )
 
     def default_blueprint(self) -> rrb.Blueprint:
-        """The world beside the six views in eye, front and side pairs."""
-        world: rrb.Spatial3DView = rrb.Spatial3DView(name="World", origin="/", contents=["+ /**", *video_exclusions(CAMERAS)])
+        """The world with the six camera frustums beside the six views in eye, front and side pairs, each with the hands projected."""
+        frustums: dict[EntityPathLike, rr.Pinhole | rr.Mesh3D] = {f"/camera/{camera}/image": rr.Pinhole.from_fields() for camera in CAMERAS}
+        world: rrb.Spatial3DView = rrb.Spatial3DView(name="World", origin="/", contents=["+ /**"], overrides=frustums | see_through_hands())
         views: rrb.Grid = rrb.Grid(*(camera_pane(camera) for camera in CAMERAS), grid_columns=2)
         return rrb.Blueprint(rrb.Horizontal(world, views, column_shares=[2, 3]), rrb.TimePanel(timeline=TIMELINE, state="collapsed"), collapse_panels=True)
 
     def table_blueprint(self) -> rrb.Blueprint:
         """The hands in the world beside the left front view: the one stream a card decodes."""
-        world: rrb.Spatial3DView = rrb.Spatial3DView(name="World", origin="/", contents=["+ /hand/**", "+ /slam/**"])
+        world: rrb.Spatial3DView = rrb.Spatial3DView(name="World", origin="/", contents=["+ /hand/**", "+ /slam/**"], overrides=see_through_hands())
         return rrb.Blueprint(rrb.Horizontal(world, camera_pane("left_front")), collapse_panels=True)
 
     def table_fields(self) -> writing.TableFields:
@@ -171,10 +176,14 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
 
 
 def camera_pane(camera: str) -> rrb.Spatial2DView:
-    """One view's video and nothing else."""
-    return rrb.Spatial2DView(name=camera, origin=f"/camera/{camera}/image", contents=[f"+ /camera/{camera}/image"])
+    """One view's video with both hands' meshes and keypoints projected through its pinhole.
+
+    The pane is rooted at the pinhole, so the hands, which hang off the same rig as ``/camera``, land in image space.
+    """
+    hand_parts: list[str] = [f"+ /hand/{side}/{part}" for side in SIDES for part in ("vertices", "keypoints3d")]
+    return rrb.Spatial2DView(name=camera, origin=f"/camera/{camera}/image", contents=[f"+ /camera/{camera}/image", *hand_parts], overrides=see_through_hands())
 
 
-def video_exclusions(cameras: tuple[str, ...]) -> list[str]:
-    """Rules that keep the videos out of a 3D view, which would decode every one of them."""
-    return [f"- /camera/{camera}/image" for camera in cameras]
+def see_through_hands() -> dict[EntityPathLike, rr.Pinhole | rr.Mesh3D]:
+    """Display-only translucent albedo for GSI's opaque MANO meshes, so the keypoints show through; the data stays as shipped."""
+    return {f"/hand/{side}/vertices": rr.Mesh3D.from_fields(albedo_factor=hands.HAND_ALBEDO[side]) for side in SIDES}

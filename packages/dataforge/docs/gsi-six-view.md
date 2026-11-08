@@ -67,8 +67,17 @@ GSI's three timelines are kept: `capture_time` (device duration, ns), `frame` (e
 - Both are compacted with the object-store profile plus `fix_keyframe`. GSI logs `is_keyframe=false` on every non-key
   sample, which Rerun 0.42 rejects (the flag is a sparse marker), and the optimizer then leaves the video un-batched;
   `fix_keyframe` derives the flags from the H.265 samples.
-- Default blueprint: the world (hands, SLAM path, no videos) beside the six views in eye, front and side pairs. Table
-  card: the hands and the path beside `left_front`, with category, caption and duration.
+- Default blueprint: the world (hands, SLAM path, the six camera frustums) beside the six views in eye, front and side
+  pairs. Each view projects both hands' MANO meshes and 3D keypoints through its pinhole. Table card: the hands and the
+  path beside `left_front`, which projects the hands the same way, with category, caption and duration.
+- GSI logs each `VideoStream` on its `Pinhole` entity (`/camera/<view>/image`), so an entity filter cannot keep the
+  frustum and drop the video. The world overrides those entities with the `Pinhole` visualizer alone, so it draws the
+  frustums and decodes no video.
+- GSI's meshes are opaque. The blueprints override `Mesh3D:albedo_factor` with `hands.HAND_ALBEDO` (alpha 110), so the
+  keypoints show through; the data stays as shipped.
+- The projection needs no SLAM: `slam.rrd` gives `/camera` and `/hand` the same rig pose at every frame, so a view
+  places the hands through GSI's `rig_T_cam` and pinhole alone. Each `Pinhole` is the calibration's `K` for its view,
+  not the rectified `P1`/`P2`, and the shipped videos are undistorted, so a plain pinhole is correct.
 - GSI's H.265 makes ffmpeg skip SEI NALUs (type 39) and, after a seek, an IDR slice header (type 5). GSI's untouched
   files log the same warnings; every view still renders.
 

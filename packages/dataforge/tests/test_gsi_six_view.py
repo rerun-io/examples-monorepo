@@ -12,11 +12,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import rerun as rr
+import rerun.blueprint as rrb
 import rerun.chunk as rrc
 from conftest import assert_raw_root_guarded, read_back, read_chunks, recording_properties
 
-from dataforge import transports
-from dataforge.datasets.gsi_six_view import CAMERAS, GsiSixViewConfig
+from dataforge import hands, transports
+from dataforge.datasets.gsi_six_view import CAMERAS, GsiSixViewConfig, GsiSixViewDataset
 
 EDITION: str = "01a0f166-7994-7b43-a622-a325541c4356"
 """The 10 h edition's id, as GSI's API names it."""
@@ -327,3 +328,61 @@ def test_the_live_api_serves_an_episode_that_repacks(tmp_path: Path, monkeypatch
     assert recording_properties(base, "capture")["category"] == "Food preparation"
     assert {f"/camera/{camera}/image" for camera in CAMERAS} <= {str(chunk.entity_path) for chunk in read_chunks(dataset.targets(identity)["base"])}
     assert not source.exists()
+
+
+def layout_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
+    """Every view of ``blueprint``, in layout order."""
+    found: list[rrb.View] = []
+    stack: list[object] = [blueprint.root_container]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, rrb.View):
+            found.append(node)
+        if isinstance(node, rrb.Container):
+            stack.extend(reversed(node.contents))  # type: ignore[arg-type]
+    return found
+
+
+def assert_see_through_hands(view: rrb.View) -> None:
+    """Both MANO meshes draw with the shared translucent hand albedo, so the keypoints show through them."""
+    for side in ("left", "right"):
+        mesh: object = (view.visualizer_overrides or {})[f"/hand/{side}/vertices"]
+        assert isinstance(mesh, rr.Mesh3D)
+        assert mesh.albedo_factor == rr.components.AlbedoFactorBatch(hands.HAND_ALBEDO[side])
+
+
+def assert_projects_the_hands(pane: rrb.Spatial2DView, camera: str) -> None:
+    """A camera pane shows its video and both hands' meshes and keypoints, projected through its pinhole."""
+    assert pane.origin == f"/camera/{camera}/image"
+    assert set(pane.contents) == {  # type: ignore[arg-type]
+        f"+ /camera/{camera}/image",
+        *(f"+ /hand/{side}/{part}" for side in ("left", "right") for part in ("vertices", "keypoints3d")),
+    }
+    assert_see_through_hands(pane)
+
+
+def test_the_default_world_shows_every_frustum_without_decoding_a_video(tmp_path: Path) -> None:
+    dataset = GsiSixViewConfig(root=tmp_path).setup()
+    assert isinstance(dataset, GsiSixViewDataset)
+    world, *panes = layout_views(dataset.default_blueprint())
+    assert isinstance(world, rrb.Spatial3DView)
+    assert list(world.contents) == ["+ /**"]  # type: ignore[arg-type]
+    for camera in CAMERAS:
+        # GSI logs the VideoStream on the pinhole entity itself; an override that names only the Pinhole visualizer
+        # draws the frustum and leaves the video undecoded.
+        assert isinstance((world.visualizer_overrides or {})[f"/camera/{camera}/image"], rr.Pinhole)
+    assert_see_through_hands(world)
+    assert [pane.name for pane in panes] == list(CAMERAS)
+    for pane, camera in zip(panes, CAMERAS, strict=True):
+        assert isinstance(pane, rrb.Spatial2DView)
+        assert_projects_the_hands(pane, camera)
+
+
+def test_the_table_card_projects_the_hands_into_left_front(tmp_path: Path) -> None:
+    dataset = GsiSixViewConfig(root=tmp_path).setup()
+    assert isinstance(dataset, GsiSixViewDataset)
+    world, pane = layout_views(dataset.table_blueprint())
+    assert isinstance(world, rrb.Spatial3DView)
+    assert_see_through_hands(world)
+    assert isinstance(pane, rrb.Spatial2DView)
+    assert_projects_the_hands(pane, "left_front")
