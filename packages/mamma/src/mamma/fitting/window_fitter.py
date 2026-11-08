@@ -16,6 +16,7 @@ import torch
 from jaxtyping import Bool, Float32
 from numpy import ndarray
 
+from mamma.capture_lock import GRAPH_CAPTURE_LOCK
 from mamma.fitting.losses import (
     acceleration_loss,
     anchor3d_loss,
@@ -409,20 +410,22 @@ class SlidingWindowFitter:
         traded for the gate. The graph is single-use; the steady-state graph
         (betas frozen) builds lazily on the first optimize tick.
         """
-        graph, static = self._capture_graph(optimize_betas=True)
-        for _ in range(max(0, self.config.bootstrap_iters - 4)):
-            graph.replay()
-        torch.cuda.synchronize()
-        self._copy_static_to_window(static)
+        with GRAPH_CAPTURE_LOCK:
+            graph, static = self._capture_graph(optimize_betas=True)
+            for _ in range(max(0, self.config.bootstrap_iters - 4)):
+                graph.replay()
+            torch.cuda.synchronize()
+            self._copy_static_to_window(static)
 
     def _build_graph(self) -> None:
         """Capture the steady-state (betas-frozen) iteration and keep it for replay."""
-        graph, static = self._capture_graph(optimize_betas=False)
-        for _ in range(self.config.tick_iters - 4):  # finish the build tick's budget
-            graph.replay()
-        torch.cuda.synchronize()
-        self._graph = graph
-        self._static = static
+        with GRAPH_CAPTURE_LOCK:
+            graph, static = self._capture_graph(optimize_betas=False)
+            for _ in range(self.config.tick_iters - 4):  # finish the build tick's budget
+                graph.replay()
+            torch.cuda.synchronize()
+            self._graph = graph
+            self._static = static
 
     def _lbfgs_polish(self) -> None:
         """One strong-wolfe LBFGS outer step over the window (hard ticks only)."""

@@ -16,6 +16,7 @@ from jaxtyping import UInt8
 from simplecv.video_io import TorchCodecMultiVideoReader
 
 from mamma.calibration.npz_contract import CameraCalibration
+from mamma.capture_lock import GRAPH_CAPTURE_LOCK
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.profiler import StageProfiler
 from mamma.engine.types import CameraTracks
@@ -208,12 +209,15 @@ class StreamingPipeline:
                         frames = [lo[i] for i in range(lo.shape[0])]
                     tracks: list[CameraTracks] | None = None
                     landmarks: list[CameraLandmarks] | None = None
-                    if self.tracker is not None:
-                        with profiler.stage("track"):
-                            tracks = self.tracker.step(frame_idx, frames)
-                    if self.landmarks is not None and tracks is not None:
-                        with profiler.stage("landmarks"):
-                            landmarks = self.landmarks.estimate(frames, tracks, frames_hires=frames_hires, hires_scale=self._hires_scale)
+                    # See mamma.capture_lock: YOLO re-detect syncs the device and the
+                    # tracker/TRT capture graphs; neither may overlap a fit capture.
+                    with GRAPH_CAPTURE_LOCK:
+                        if self.tracker is not None:
+                            with profiler.stage("track"):
+                                tracks = self.tracker.step(frame_idx, frames)
+                        if self.landmarks is not None and tracks is not None:
+                            with profiler.stage("landmarks"):
+                                landmarks = self.landmarks.estimate(frames, tracks, frames_hires=frames_hires, hires_scale=self._hires_scale)
                     if self.fitting is not None and landmarks is not None:
                         with profiler.stage("fit_wait"):
                             if pending_fit is not None:
