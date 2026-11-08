@@ -8,6 +8,7 @@ from pathlib import Path
 import lietorch_mojo as lietorch
 import numpy as np
 import pytest
+import rerun as rr
 import rerun.blueprint as rrb
 import torch
 from jaxtyping import Float32
@@ -51,7 +52,7 @@ def _make_frame(frame_id: int, feat_dim: int) -> Frame:
 
 
 def test_snapshot_copies_last_keyframe_rgb_only_when_not_shown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The keyframe image is copied once; the evolving pointmap is copied every frame."""
+    """The keyframe image is copied once; its evolving pointmap on a keyframe change and every N frames."""
     monkeypatch.setitem(config, "use_calib", False)
     manager = mp.Manager()
     try:
@@ -61,17 +62,20 @@ def test_snapshot_copies_last_keyframe_rgb_only_when_not_shown(monkeypatch: pyte
 
         unseen: LogCurrentFrame = snapshot_current_frame(current, 4, None, keyframes, shown_last_kf_id=None)
         shown: LogCurrentFrame = snapshot_current_frame(current, 4, None, keyframes, shown_last_kf_id=3)
+        refresh: LogCurrentFrame = snapshot_current_frame(current, async_logger.LAST_KEYFRAME_MAPS_EVERY, None, keyframes, shown_last_kf_id=3)
         replaced: LogCurrentFrame = snapshot_current_frame(current, 4, None, keyframes, shown_last_kf_id=1)
     finally:
         manager.shutdown()
 
     assert unseen.last_kf_frame_id == 3
     assert unseen.last_kf_rgb is not None
+    assert unseen.last_kf_X_canon is not None
     assert shown.last_kf_rgb is None
-    assert shown.last_kf_X_canon is not None
-    assert shown.last_kf_C is not None
+    assert shown.last_kf_X_canon is None and shown.last_kf_C is None, "unchanged keyframe between refreshes"
     assert shown.last_kf_img_shape == (H, W)
-    assert replaced.last_kf_rgb is not None
+    assert refresh.last_kf_rgb is None
+    assert refresh.last_kf_X_canon is not None and refresh.last_kf_C is not None
+    assert replaced.last_kf_rgb is not None and replaced.last_kf_X_canon is not None
 
 
 @pytest.mark.parametrize("with_rgb", [False, True])
@@ -196,3 +200,30 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
     assert {"/last_keyframe/image", "/last_keyframe/pointmap", "/last_keyframe/confidence", "/last_keyframe/depth"} <= logged_paths
     # The map is the fused TSDF mesh, not a point cloud per keyframe.
     assert not any(kind == "Points3D" for _, kind, _ in logged)
+
+
+def test_camera_path_sends_only_the_open_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each frame logs one strip of at most PATH_CHUNK_SEGMENTS segments; consecutive chunks share an end point."""
+    strips: list[tuple[str, int]] = []
+
+    def _capture(path: str, entity: object, *_a: object, **_k: object) -> None:
+        if isinstance(entity, rr.LineStrips3D) and str(path).startswith("world/path/"):
+            assert entity.strips is not None
+            strips.append((str(path), len(entity.strips.pa_array.to_pylist()[0])))
+
+    monkeypatch.setattr(async_logger.rr, "log", _capture)
+    monkeypatch.setattr(async_logger.rr, "set_time", lambda *_a, **_k: None)
+    identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
+    rgb: Float32[ndarray, "h w 3"] = np.full((H, W, 3), 0.5, dtype=np.float32)
+    X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
+    C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
+    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
+    n_frames: int = 2 * async_logger.PATH_CHUNK_SEGMENTS + 5
+    for frame_idx in range(n_frames):
+        logger._handle_current_frame(
+            LogCurrentFrame(frame_idx=frame_idx, timestamp_ns=None, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
+        )
+    assert len(strips) == n_frames
+    assert max(n_points for _, n_points in strips) == async_logger.PATH_CHUNK_SEGMENTS + 1
+    assert [path for path, _ in strips[-1:]] == ["world/path/00002"]
+    assert strips[async_logger.PATH_CHUNK_SEGMENTS + 1] == ("world/path/00001", 2), "a new chunk starts at the last point"

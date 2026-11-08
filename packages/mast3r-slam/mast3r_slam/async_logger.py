@@ -51,6 +51,13 @@ from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, SurfaceRequ
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_intri, frame_to_pinhole
 from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
 
+LAST_KEYFRAME_MAPS_EVERY: int = 10
+"""Frames between refreshes of the last keyframe's pointmap/confidence/depth panels while it stays the active one."""
+
+PATH_CHUNK_SEGMENTS: int = 50
+"""Camera-path segments per ``path/<chunk>`` strip: each frame re-sends only the open chunk, so the logged path
+grows O(n * 50) over a run instead of O(n^2); closed chunks keep their last value and the trail stays whole."""
+
 _HIDDEN_IMAGE_PLANE_DISTANCE: float = 1e-6
 """Image-plane distance of a keyframe's placeholder Pinhole before the keyframe exists: a frustum too small to see."""
 
@@ -93,9 +100,9 @@ def snapshot_current_frame(
         frame.C.detach().cpu().numpy().astype(np.float32) if frame.C is not None else None
     )
 
-    # Snapshot the last keyframe's current state for the 2D panel.
-    # The tracker continuously updates the active keyframe's pointmap/
-    # confidence, so we re-read it each frame; its image is fixed.
+    # Snapshot the last keyframe's state for the 2D panel. Its image is fixed; the tracker keeps refining its
+    # pointmap/confidence, which are copied (and re-encoded by the logger) when the keyframe changes and every
+    # LAST_KEYFRAME_MAPS_EVERY frames, not every frame.
     last_kf_frame_id: int | None = None
     last_kf_img_shape: tuple[int, int] | None = None
     last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
@@ -106,12 +113,14 @@ def snapshot_current_frame(
         if last_kf is not None:
             last_kf_frame_id = last_kf.frame_id
             last_kf_img_shape = (int(last_kf.img_shape.squeeze()[0].item()), int(last_kf.img_shape.squeeze()[1].item()))
-            if last_kf_frame_id != shown_last_kf_id:
+            keyframe_changed: bool = last_kf_frame_id != shown_last_kf_id
+            if keyframe_changed:
                 last_kf_rgb = last_kf.rgb.numpy().astype(np.float32)
-            if last_kf.X_canon is not None:
-                last_kf_X_canon = last_kf.X_canon.detach().cpu().numpy().astype(np.float32)
-            if last_kf.C is not None:
-                last_kf_C = last_kf.C.detach().cpu().numpy().astype(np.float32)
+            if keyframe_changed or frame_idx % LAST_KEYFRAME_MAPS_EVERY == 0:
+                if last_kf.X_canon is not None:
+                    last_kf_X_canon = last_kf.X_canon.detach().cpu().numpy().astype(np.float32)
+                if last_kf.C is not None:
+                    last_kf_C = last_kf.C.detach().cpu().numpy().astype(np.float32)
 
     return LogCurrentFrame(
         frame_idx=frame_idx,
@@ -290,7 +299,9 @@ class AsyncRerunLogger:
         self._thread: threading.Thread | None = None
 
         # Internal visualization state
-        self._path_list: list[list[float]] = []
+        # Camera path: points of the open chunk (the first repeats the previous chunk's last point) and its index.
+        self._path_chunk_points: list[list[float]] = []
+        self._path_chunk_idx: int = 0
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
         self._conf_thresh: int = 7
@@ -513,7 +524,11 @@ class AsyncRerunLogger:
         else:
             rr.log(
                 cam_log_path,
-                rr.Transform3D(translation=pinhole.extrinsics.cam_t_world, mat3x3=pinhole.extrinsics.cam_R_world, from_parent=True),
+                rr.Transform3D(
+                    translation=pinhole.extrinsics.cam_t_world,
+                    mat3x3=pinhole.extrinsics.cam_R_world,
+                    relation=rr.TransformRelation.ChildFromParent,
+                ),
             )
 
         # RGB image
@@ -536,13 +551,16 @@ class AsyncRerunLogger:
         # Camera path
         assert pinhole.extrinsics.world_t_cam is not None
         translation: Float32[ndarray, "3"] = pinhole.extrinsics.world_t_cam
-        self._path_list.append(translation.tolist())
+        if len(self._path_chunk_points) == PATH_CHUNK_SEGMENTS + 1:
+            self._path_chunk_points = self._path_chunk_points[-1:]
+            self._path_chunk_idx += 1
+        self._path_chunk_points.append(translation.tolist())
         rr.log(
-            f"{self._parent_log_path}/path",
+            f"{self._parent_log_path}/path/{self._path_chunk_idx:05d}",
             rr.LineStrips3D(
-                strips=self._path_list,
+                strips=[self._path_chunk_points],
                 colors=(255, 0, 0),
-                labels="Camera Path",
+                labels="Camera Path" if self._path_chunk_idx == 0 else None,
             ),
         )
 

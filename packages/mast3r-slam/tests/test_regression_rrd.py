@@ -56,7 +56,7 @@ def test_rrd_has_keyframe_entities(baseline_rrd_path: Path) -> None:
 def test_camera_path_logged(baseline_rrd_path: Path) -> None:
     """Verify camera path entity exists in the baseline."""
     paths: list[str] = _get_entity_paths(baseline_rrd_path)
-    assert "/world/path" in paths, f"No /world/path entity found. Paths: {paths[:20]}"
+    assert any(path.startswith("/world/path/") for path in paths), f"No /world/path/<chunk> entity found. Paths: {paths[:20]}"
 
 
 def test_current_camera_logged(baseline_rrd_path: Path) -> None:
