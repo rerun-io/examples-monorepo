@@ -2,9 +2,11 @@
 
 `rasterize_hexels3d_forward` / `rasterize_hexels3d_forward_cached` take the arguments of the
 `gsplat.cuda_hexels3d._C` bindings and return their outputs bit for bit, saved state included, for the base forward
-without prefiltering (the default training and rendering path). recipes/hexels-src patch 0006 wraps hexel-kernel's
-`_C` in `overlay`: those two calls come from Mojo, everything else (prefiltering, the contribution / overdraw /
-surface / owner variants, and every backward) stays CUDA.
+without prefiltering (the default training and rendering path). `rasterize_hexels3d_backward_cached` takes that saved
+state and returns the binding's twelve gradients (to a float-atomics tolerance; `mojo/raster3d_backward.mojo`).
+recipes/hexels-src patch 0006 wraps hexel-kernel's `_C` in `overlay`: those three calls come from Mojo, everything
+else (prefiltering, the contribution / overdraw / surface / owner variants and their backward, the uncached
+backward) stays CUDA.
 """
 
 from typing import Any
@@ -174,15 +176,98 @@ def rasterize_hexels3d_forward(*args: object) -> tuple[Tensor, Tensor]:
     return out_color, radii
 
 
+def rasterize_hexels3d_backward_cached(
+    means3d: Tensor,
+    means2d: Tensor,
+    scales: Tensor,
+    rotations: Tensor,
+    colors: Tensor,
+    color_grads: Tensor,
+    color_quads: Tensor,
+    view_grads: Tensor,
+    specular_ks: Tensor,
+    specular_log_s: Tensor,
+    opacities: Tensor,
+    softnesses: Tensor,
+    viewmatrix: Tensor,
+    projmatrix: Tensor,
+    campos: Tensor,
+    background: Tensor,
+    grad_out_color: Tensor,
+    grad_out_overdraw: Tensor,
+    grad_out_surf_depth: Tensor,
+    grad_out_surf_alpha: Tensor,
+    grad_out_surf_normals: Tensor,
+    image_width: int,
+    image_height: int,
+    tan_fovx: float,
+    tan_fovy: float,
+    softness: float,
+    scale_modifier: float,
+    color_model: int,
+    view_model: int,
+    use_view_grads: bool,
+    overdraw_base_count: int,
+    prefilter_edge_on: bool,
+    conservative_bounds: bool,
+    debug: bool,
+    saved: list[Tensor],
+) -> tuple[Tensor, ...]:
+    """The binding's (means3d, means2d, scales, rotations, colors, color_grads, color_quads, view_grads, specular_ks,
+    specular_log_s, opacities, softnesses) gradients from the cached forward's `saved` list."""
+    del viewmatrix, tan_fovx, tan_fovy, softness, overdraw_base_count, conservative_bounds, debug  # unused by CUDA too
+    if prefilter_edge_on or any(t.numel() for t in (grad_out_overdraw, grad_out_surf_depth, grad_out_surf_alpha, grad_out_surf_normals)):
+        raise NotImplementedError("hexels_mojo.raster3d: prefiltering and auxiliary gradients are not ported yet")
+    radii, transmats, opacities_out, softnesses_out, view_dirs, normals, _, ranges, values_sorted, final_transmittance, last_index = saved
+    zeros_like = lambda t: torch.zeros_like(t, dtype=torch.float32)  # noqa: E731
+    num_points: int = means3d.shape[0]
+    grad_means3d = torch.zeros(num_points, 3, dtype=torch.float32, device=means3d.device)
+    grad_means2d, grad_scales, grad_rotations, grad_colors = zeros_like(means2d), zeros_like(scales), zeros_like(rotations), zeros_like(colors)
+    grad_color_grads, grad_color_quads, grad_view_grads = zeros_like(color_grads), zeros_like(color_quads), zeros_like(view_grads)
+    grad_specular_ks, grad_specular_log_s, grad_opacities = zeros_like(specular_ks), zeros_like(specular_log_s), zeros_like(opacities)
+    grad_softnesses = zeros_like(softnesses)
+    grads = (grad_means3d, grad_means2d, grad_scales, grad_rotations, grad_colors, grad_color_grads, grad_color_quads, grad_view_grads,
+             grad_specular_ks, grad_specular_log_s, grad_opacities, grad_softnesses)  # fmt: skip
+    if values_sorted.numel() == 0:
+        return grads
+    grad_transmats = torch.zeros(num_points, 9, dtype=torch.float32, device=means3d.device)
+    grad_view_dirs = torch.zeros(num_points, 3, dtype=torch.float32, device=means3d.device)
+    has_normals: bool = normals.numel() > 0
+    grad_normals = torch.zeros(num_points, 3, dtype=torch.float32, device=means3d.device) if has_normals else grad_view_dirs
+    stride: int = means2d.shape[1] if means2d.numel() else 3
+    pick = lambda t: t.contiguous() if t.numel() else colors  # noqa: E731
+    launch(
+        "raster3d_backward",
+        (0, image_width, image_height, color_model, view_model, int(use_view_grads), 3 if softnesses_out.dim() == 2 else 1,
+         int(softnesses.numel() > 0), int(stride == 4)),
+        (ranges, values_sorted, colors.contiguous(), pick(color_grads), pick(color_quads), pick(view_grads), pick(specular_ks),
+         pick(specular_log_s), view_dirs, pick(normals), transmats, opacities_out, softnesses_out, background.contiguous(),
+         grad_out_color.contiguous(), final_transmittance, last_index, grad_colors, pick(grad_color_grads), pick(grad_color_quads),
+         pick(grad_view_grads), pick(grad_specular_ks), pick(grad_specular_log_s), grad_opacities, pick(grad_softnesses), grad_transmats,
+         pick(grad_means2d), grad_view_dirs, grad_normals),
+    )  # fmt: skip
+    if means2d.numel():
+        launch("raster3d_backward", (1, image_width, image_height, stride), (radii, transmats, grad_transmats, grad_means2d))
+    launch(
+        "raster3d_backward",
+        (2, image_width, image_height, scale_modifier, int(has_normals)),
+        (means3d.contiguous(), scales.contiguous(), rotations.contiguous(), projmatrix.contiguous(), campos.contiguous(), radii,
+         grad_transmats, grad_view_dirs, grad_normals, grad_means3d, grad_scales, grad_rotations),
+    )  # fmt: skip
+    return grads
+
+
 PREFILTER_ARG: int = 24
 """Index of `prefilter_edge_on` among the forward bindings' arguments."""
+BACKWARD_PREFILTER_ARG: int = 31
+"""Index of `prefilter_edge_on` among the backward bindings' arguments (grad_out_overdraw .. surf normals: 17-20)."""
 
 
 class _Overlay:
-    """hexel-kernel's `gsplat.cuda_hexels3d._C` with the two base forwards on Mojo (CUDA when prefiltering is on).
+    """hexel-kernel's `gsplat.cuda_hexels3d._C` with the two base forwards and the cached backward on Mojo (CUDA when
+    prefiltering is on or auxiliary gradients flow).
 
-    The cached forward returns the binding's saved state bit for bit, so `rasterize_hexels3d_backward_cached`
-    (still CUDA) consumes it unchanged.
+    The cached forward returns the binding's saved state bit for bit, so either backward consumes it unchanged.
     """
 
     def __init__(self, module: object) -> None:
@@ -201,7 +286,13 @@ class _Overlay:
             return self._module.rasterize_hexels3d_forward_cached(*args)  # pyrefly: ignore[missing-attribute]
         return rasterize_hexels3d_forward_cached(*args)  # pyrefly: ignore[bad-argument-type]
 
+    def rasterize_hexels3d_backward_cached(self, *args: object) -> object:
+        aux: list[Tensor] = list(args[17:21])  # pyrefly: ignore[bad-assignment]
+        if args[BACKWARD_PREFILTER_ARG] or any(t.numel() for t in aux):
+            return self._module.rasterize_hexels3d_backward_cached(*args)  # pyrefly: ignore[missing-attribute]
+        return rasterize_hexels3d_backward_cached(*args)  # pyrefly: ignore[bad-argument-type]
+
 
 def overlay(module: object) -> Any:
-    """`module` (hexel-kernel's `gsplat.cuda_hexels3d._C`) with the Mojo forward in front."""
+    """`module` (hexel-kernel's `gsplat.cuda_hexels3d._C`) with the Mojo forward and cached backward in front."""
     return _Overlay(module)

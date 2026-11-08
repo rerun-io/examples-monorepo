@@ -19,6 +19,7 @@ from std.python.bindings import PythonModuleBuilder
 
 import gaussians2d
 import raster3d
+import raster3d_backward
 from knn import BOX_SIZE, MORTON_THREADS, box_bounds_kernel, box_mean_dist_kernel, morton_kernel
 from launch import GPURuntime
 from prune import BLOCK, F32Ptr, removal_scores_kernel
@@ -312,6 +313,62 @@ def _raster3d_render[color_model: Int, use_view_grads: Bool, specular: Bool](run
     )  # fmt: skip
 
 
+
+def _raster3d_backward_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream, stage, width, height, ...). Stage 0 render: (color_model, view_model, use_view_grads,
+    softness_stride, has_softness_grad, abs_means2d); tensors = (ranges, point_list, colors, color_grads, color_quads,
+    view_grads, specular_ks, specular_log_s, view_dirs, normals, transmats, opacities, softnesses, background,
+    grad_out_color, final_transmittance, last_index, then the gradients of colors, color_grads, color_quads, view_grads,
+    specular_ks, specular_log_s, opacities, softnesses, transmats, means2d, view_dirs, normals). Stage 1 means2d:
+    (stride,); tensors = (radii, transmats, grad_transmats, grad_means2d). Stage 2 geometry: (scale_modifier,
+    has_normals); tensors = (means, scales, rotations, projmatrix, campos, radii, grad_transmats, grad_view_dirs,
+    grad_normals, grad_means, grad_scales, grad_rotations)."""
+    var stage = _int(s, 1)
+    var width = _int(s, 2)
+    var height = _int(s, 3)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var stream = rt[].torch_stream(_int(s, 0))
+    if stage == 0:
+        var color_model = _int(s, 4)
+        var use_view_grads = _int(s, 6) != 0
+        var specular = _int(s, 5) == 2
+        comptime for cm in range(4):
+            comptime for vg in range(2):
+                comptime for spec in range(2):
+                    if color_model == cm and use_view_grads == (vg == 1) and specular == (spec == 1):
+                        _raster3d_render_backward[cm, vg == 1, spec == 1](runtime, s, t)
+    elif stage == 1:
+        var n = _dim(t[0], 0)
+        stream.enqueue_function(
+            rt[].ctx.compile_function[raster3d_backward.means2d_backward_kernel](), Int32(n), Int32(width), Int32(height),
+            Int32(_int(s, 4)), _i32(t[0]), _f(t[1]), _f(t[2]), _f(t[3]),
+            grid_dim=ceildiv(n, raster3d.POINT_THREADS), block_dim=raster3d.POINT_THREADS,
+        )  # fmt: skip
+    else:
+        var n = _dim(t[0], 0)
+        stream.enqueue_function(
+            rt[].ctx.compile_function[raster3d_backward.geometry_backward_kernel](), Int32(n), Int32(width), Int32(height),
+            Float32(Float64(py=s[4])), Int32(_int(s, 5)), _f(t[0]), _f(t[1]), _f(t[2]), _f(t[3]), _f(t[4]), _i32(t[5]), _f(t[6]),
+            _f(t[7]), _f(t[8]), _f(t[9]), _f(t[10]), _f(t[11]),
+            grid_dim=ceildiv(n, raster3d.POINT_THREADS), block_dim=raster3d.POINT_THREADS,
+        )  # fmt: skip
+    return Python.none()
+
+
+def _raster3d_render_backward[color_model: Int, use_view_grads: Bool, specular: Bool](
+    runtime: PythonObject, s: PythonObject, t: PythonObject
+) raises:
+    var width = _int(s, 2)
+    var height = _int(s, 3)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    rt[].torch_stream(_int(s, 0)).enqueue_function(
+        rt[].ctx.compile_function[raster3d_backward.render_backward_kernel[color_model, use_view_grads, specular]](), Int32(width),
+        Int32(height), _i32(t[0]), _i32(t[1]), _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), _f(t[7]), _f(t[8]), _f(t[9]), _f(t[10]),
+        _f(t[11]), _f(t[12]), Int32(_int(s, 7)), Int32(_int(s, 8)), Int32(_int(s, 9)), _f(t[13]), _f(t[14]), _f(t[15]), _i32(t[16]),
+        _f(t[17]), _f(t[18]), _f(t[19]), _f(t[20]), _f(t[21]), _f(t[22]), _f(t[23]), _f(t[24]), _f(t[25]), _f(t[26]), _f(t[27]), _f(t[28]),
+        grid_dim=(ceildiv(width, TILE), ceildiv(height, TILE)), block_dim=(TILE, TILE),
+    )  # fmt: skip
+
 @export
 def PyInit__hexels_mojo() abi("C") -> PythonObject:
     try:
@@ -327,6 +384,7 @@ def PyInit__hexels_mojo() abi("C") -> PythonObject:
         m.def_function[_gaussians2d_forward_py]("gaussians2d_forward")
         m.def_function[_gaussians2d_backward_py]("gaussians2d_backward")
         m.def_function[_raster3d_py]("raster3d")
+        m.def_function[_raster3d_backward_py]("raster3d_backward")
         return m.finalize()
     except e:
         abort(t"failed to create _hexels_mojo: {e}")

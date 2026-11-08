@@ -1,9 +1,10 @@
-"""Freeze hexel-kernel's 3D hexel rasterizer forward (`gsplat.cuda_hexels3d._C.rasterize_hexels3d_forward_cached`).
+"""Freeze hexel-kernel's 3D hexel rasterizer forward and cached backward (`gsplat.cuda_hexels3d._C`).
 
 Needs hexel-kernel (still built by recipes/hexels-src). Writes `fixtures/raster3d_references.rrd` (same record layout
 as `hexels_references.py`), one `/raster3d/<case>` record per case: inputs, the image and radii, and
 the saved intermediates (transforms, tile ranges, sorted ids, final transmittance, last index) so the port can be
-checked stage by stage.
+checked stage by stage, and `rasterize_hexels3d_backward_cached`'s twelve gradients (`bwd_<input>`) for a random
+`grad_out_color` with (P, 4) means2d (the |d pixel| statistic on).
 
     python tests/freeze_raster3d_references.py
 """
@@ -23,6 +24,8 @@ CASES = (
     ("flat_scalar_conservative", 1500, 80, 96, 0, 0, False, "scalar", True, 31),
     ("quadratic_bounded_lobe_triplet", 1500, 80, 96, 3, 2, False, "triplet", False, 32),
 )
+GRADS = ("means3d", "means2d", "scales", "rotations", "colors", "color_grads", "color_quads", "view_grads", "specular_ks",
+         "specular_log_s", "opacities", "softnesses")  # fmt: skip
 SAVED = ("radii_saved", "transmats", "opacities_out", "softnesses_out", "view_dirs", "normals", "points_xy_center", "ranges",
          "values_sorted", "final_transmittance", "last_index")  # fmt: skip
 
@@ -78,6 +81,16 @@ def _case(cuda, name, n, h, w, color_model, view_model, use_view_grads, softness
     for key, value in zip(SAVED, saved, strict=True):
         if value.numel():
             record[key] = value.int() if value.dtype in (torch.int32, torch.int64) else value
+    grad_out_color = torch.randn(3, h, w, generator=g)
+    empty = torch.empty(0, device="cuda")
+    grads = cuda.rasterize_hexels3d_backward_cached(
+        cuda_inputs[0], torch.zeros(n, 4, device="cuda"), *cuda_inputs[1:], grad_out_color.cuda(), empty, empty, empty, empty, w, h, tan_x,
+        tan_y, 6.0, 1.0, color_model, view_model, use_view_grads, -1, False, conservative, False, list(saved),
+    )  # fmt: skip
+    record["grad_out_color"] = grad_out_color
+    for key, value in zip(GRADS, grads, strict=True):
+        if value.numel():
+            record[f"bwd_{key}"] = value
     return record
 
 
