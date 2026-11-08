@@ -77,6 +77,8 @@ from mast3r_slam.mast3r_utils import (
     load_mast3r,
     load_retriever,
     mast3r_inference_mono,
+    tracking_engine_size,
+    use_pair_decoder_engine,
     use_tracking_engine,
 )
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
@@ -264,7 +266,9 @@ def run_slam_pipeline(
     # AsyncRerunLogger.__exit__ sends LogTerminate and joins the thread.
     n_frames: int = len(dataset) if max_frames is None else min(max_frames, len(dataset))
     with (
-        SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx,
+        SlamBackend(
+            config_path, model, h, w, K, device=device, rr_application_id=rr_application_id, pair_decoder_hw=tracking_engine_size(model)
+        ) as ctx,
         async_logger,
         FramePrefetcher(dataset, n_frames, device=device) as frames,
     ):
@@ -646,6 +650,7 @@ def run_backend(
     keyframes: SharedKeyframes,
     K: Float[Tensor, "3 3"] | None,
     rr_application_id: str | None = None,
+    pair_decoder_hw: tuple[int, int] | None = None,
 ) -> None:
     """Backend process main loop: graph construction, retrieval, and global optimisation.
 
@@ -664,8 +669,12 @@ def run_backend(
         K: Camera intrinsic matrix, or None for uncalibrated mode.
         rr_application_id: When set, initialize Rerun in this subprocess and
             connect via gRPC so ``rr.TextLog`` entries reach the main viewer.
+        pair_decoder_hw: When set, decode keyframe pairs with the TensorRT pair decoder for this image size
+            (the frontend built it; see ``use_tracking_engine``).
     """
     load_config(config_path)
+    if pair_decoder_hw is not None:
+        use_pair_decoder_engine(model, pair_decoder_hw)
 
     # Connect to the main process's Rerun viewer for TextLog output.
     if rr_application_id is not None:

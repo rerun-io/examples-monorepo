@@ -12,7 +12,7 @@ from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.ops import conventions
 from torch import Tensor
-from trtkit import TensorRtRuntime
+from trtkit import TensorRtRuntime, run_chunked
 
 import mast3r_slam.matching as matching
 from mast3r_slam.config import config
@@ -154,6 +154,10 @@ TrackingForwardFn: TypeAlias = Callable[[Frame, Frame], tuple[Tensor, ...]]
 """Tracking's encode + decode: (new frame i, keyframe j with cached features) -> ``(feat_i, pos_i, X, C, D, Q)``, owned by the caller."""
 
 _TRACKING_FORWARD: dict[int, TrackingForwardFn] = {}
+_TRACKING_ENGINE_HW: dict[int, tuple[int, int]] = {}
+"""Image size of the TensorRT tracking engine, keyed by ``id(model)``; the backend builds its pair decoder for it."""
+_PAIR_DECODER: dict[int, TensorRtRuntime] = {}
+"""The backend's TensorRT pair decoder, keyed by ``id(model)``; see :func:`use_pair_decoder_engine`."""
 """Accelerated tracking forward keyed by ``id(model)``; see :func:`compile_tracking_forward` and :func:`use_tracking_engine`."""
 
 
@@ -194,7 +198,7 @@ def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> Non
     first frame once the engine is cached (the first run on a machine exports and builds it, about 90 s).
     Every tracked frame must be ``img_hw``.
     """
-    from mast3r_slam.tracking_engine import load_tracking_engine
+    from mast3r_slam.tracking_engine import build_pair_decoder_engine, load_tracking_engine
 
     loaded: tuple[TensorRtRuntime, Int[Tensor, "1 n_patches 2"]] = load_tracking_engine(model, img_hw)
     runtime: TensorRtRuntime = loaded[0]
@@ -204,6 +208,10 @@ def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> Non
     feat_dim: int = model.enc_embed_dim
     runtime({"img_i": torch.zeros(1, 3, *img_hw, device=pos.device), "feat_j": torch.zeros(1, pos.shape[1], feat_dim, device=pos.device)})
     torch.cuda.synchronize(pos.device)
+    # The backend decodes keyframe pairs with the matching engine; build it here, where the model lives, so the
+    # backend process only loads it.
+    build_pair_decoder_engine(model, img_hw)
+    _TRACKING_ENGINE_HW[id(model)] = img_hw
 
     def run(frame_i: Frame, frame_j: Frame) -> tuple[Tensor, ...]:
         if tuple(frame_i.rgb_tensor.shape[-2:]) != img_hw:
@@ -214,6 +222,21 @@ def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> Non
         return (outputs["feat_i"].clone(), pos, *(outputs[name].clone() for name in ("X", "C", "D", "Q")))
 
     _TRACKING_FORWARD[id(model)] = run
+
+
+def tracking_engine_size(model: AsymmetricMASt3R) -> tuple[int, int] | None:
+    """Image size of the model's TensorRT tracking engine, or None when tracking runs another forward."""
+    return _TRACKING_ENGINE_HW.get(id(model))
+
+
+def use_pair_decoder_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> None:
+    """Decode the backend's keyframe pairs with the bf16 TensorRT engine of :func:`tracking_engine.build_pair_decoder_engine`.
+
+    Loads an engine the frontend built (see :func:`use_tracking_engine`); for the backend process.
+    """
+    from mast3r_slam.tracking_engine import build_pair_decoder_engine
+
+    _PAIR_DECODER[id(model)] = TensorRtRuntime(build_pair_decoder_engine(model, img_hw), use_cuda_graph=True)
 
 
 def downsample(
@@ -287,6 +310,14 @@ def mast3r_decode_symmetric_batch(
         A tuple ``(X, C, D, Q)`` each with shape ``(4, B, h, w, ...)``.
     """
     B = feat_i.shape[0]
+    pair_decoder: TensorRtRuntime | None = _PAIR_DECODER.get(id(model))
+    if pair_decoder is not None:
+        # Both directions in one batch: rows :B decode i against j, rows B: decode j against i.
+        out: dict[str, Tensor] = run_chunked(pair_decoder, {"feat1": torch.cat([feat_i, feat_j]), "feat2": torch.cat([feat_j, feat_i])})
+        stacked: list[Tensor] = [
+            torch.stack([out[f"{key}1"][:B], out[f"{key}2"][:B], out[f"{key}1"][B:], out[f"{key}2"][B:]]) for key in ("X", "C", "D", "Q")
+        ]
+        return downsample(stacked[0], stacked[1], stacked[2], stacked[3])
     X, C, D, Q = [], [], [], []
     for b in range(B):
         feat1 = feat_i[b][None]

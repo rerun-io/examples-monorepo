@@ -1,10 +1,14 @@
-"""The tracker's MASt3R forward as a bf16 TensorRT engine.
+"""The tracker's MASt3R forward, and the backend's pair decoder, as bf16 TensorRT engines.
 
 Tracking runs one forward per frame: encode the new frame, decode it against the keyframe's cached features, and
 run both heads. :class:`TrackingForward` is that forward with a fixed image size, exported once to ONNX in bf16
 (heads included) and built by trtkit into a machine-local engine. At 224 px on an RTX 5090 the engine replays as a
 CUDA graph in 5 ms, against 21 ms eager fp32 and 11 ms for ``torch.compile``; the outputs match fp32 to cosine
 0.9995 or better.
+
+The backend decodes keyframe pairs in both directions for every new keyframe (eager fp32: about 100 ms for the
+usual two pairs, nearly all of its per-keyframe time). :class:`PairDecoderForward` is that decoder plus both heads
+with a dynamic batch of pairs, one engine call for all of them.
 """
 
 from pathlib import Path
@@ -18,8 +22,21 @@ from trtkit.artifacts import build_once
 
 TRACKING_INPUT_NAMES: list[str] = ["img_i", "feat_j"]
 TRACKING_OUTPUT_NAMES: list[str] = ["feat_i", "X", "C", "D", "Q"]
+DECODER_INPUT_NAMES: list[str] = ["feat1", "feat2"]
+DECODER_OUTPUT_NAMES: list[str] = ["X1", "C1", "D1", "Q1", "X2", "C2", "D2", "Q2"]
+DECODER_MAX_PAIRS: int = 8
+"""Largest batch of decoded pairs per engine call: a keyframe's usual edges (one consecutive, up to three retrieved),
+in both directions. Larger batches run in chunks."""
 DEFAULT_ONNX_DIR: Path = Path("checkpoints/onnx")
 """Beside the MASt3R weights the ONNX graph is exported from; the engines go to trtkit's machine-local cache."""
+
+
+def _patch_positions(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> tuple[Int[Tensor, "1 2"], Int[Tensor, "1 n_patches 2"]]:
+    """The true shape tensor and the patch positions of one image size."""
+    true_shape: Int[Tensor, "1 2"] = torch.tensor([img_hw], device=next(model.parameters()).device)
+    with torch.inference_mode():
+        _, pos = model.patch_embed(torch.zeros(1, 3, *img_hw, device=true_shape.device), true_shape=true_shape)
+    return true_shape, pos.clone()
 
 
 class TrackingForward(torch.nn.Module):
@@ -34,11 +51,9 @@ class TrackingForward(torch.nn.Module):
         super().__init__()
         self.model: AsymmetricMASt3R = model
         self.img_hw: tuple[int, int] = img_hw
-        true_shape: Int[Tensor, "1 2"] = torch.tensor([img_hw], device=next(model.parameters()).device)
-        with torch.inference_mode():
-            _, pos = model.patch_embed(torch.zeros(1, 3, *img_hw, device=true_shape.device), true_shape=true_shape)
+        true_shape, pos = _patch_positions(model, img_hw)
         self.register_buffer("true_shape", true_shape)
-        self.register_buffer("pos", pos.clone())
+        self.register_buffer("pos", pos)
 
     def forward(
         self, img_i: Float[Tensor, "1 3 h w"], feat_j: Float[Tensor, "1 n_patches feat_dim"]
@@ -93,3 +108,49 @@ def load_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int], onnx_
     )
     engine_path: Path = ensure_engine(onnx_path, TrtBuildConfig(max_batch_size=1, opt_batch_size=1))
     return TensorRtRuntime(engine_path, use_cuda_graph=True), forward.pos
+
+
+class PairDecoderForward(torch.nn.Module):
+    """Decode a batch of feature pairs (image 1 against image 2) and run both heads; one fixed image size.
+
+    ``mast3r_slam.mast3r_utils.decoder`` for a batch: head 1 sees image 1, head 2 image 2 in image 1's frame.
+    """
+
+    def __init__(self, model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> None:
+        super().__init__()
+        self.model: AsymmetricMASt3R = model
+        self.img_hw: tuple[int, int] = img_hw
+        self.register_buffer("pos", _patch_positions(model, img_hw)[1])
+
+    def forward(self, feat1: Float[Tensor, "b n_patches feat_dim"], feat2: Float[Tensor, "b n_patches feat_dim"]) -> tuple[Tensor, ...]:
+        pos: Int[Tensor, "b n_patches 2"] = self.pos.expand(feat1.shape[0], -1, -1)
+        dec1, dec2 = self.model._decoder(feat1, pos, feat2, pos)
+        res1: dict[str, Tensor] = self.model.downstream_head1(list(dec1), self.img_hw)
+        res2: dict[str, Tensor] = self.model.downstream_head2(list(dec2), self.img_hw)
+        return tuple(res[key] for res in (res1, res2) for key in ("pts3d", "conf", "desc", "desc_conf"))
+
+
+def build_pair_decoder_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int], onnx_dir: Path = DEFAULT_ONNX_DIR) -> Path:
+    """Export (once) and build (once per machine) the bf16 pair-decoder engine; returns the engine path.
+
+    Run it in the process that owns the model before the backend starts, so the backend only loads the engine.
+    """
+    forward: PairDecoderForward = PairDecoderForward(model, img_hw).eval()
+    onnx_path: Path = onnx_dir / f"mast3r_pair_decoder_{img_hw[0]}x{img_hw[1]}_bf16.onnx"
+    # Two distinct tensors: the exporter traces one tensor passed twice as an alias and merges the two
+    # decoder_embed projections into one, so image 2's features would be ignored.
+    feat1: Float[Tensor, "b n_patches feat_dim"] = torch.zeros(4, forward.pos.shape[1], model.enc_embed_dim, device=forward.pos.device)
+    feat2: Float[Tensor, "b n_patches feat_dim"] = torch.zeros_like(feat1)
+    build_once(
+        onnx_path,
+        lambda: export_onnx(
+            forward,
+            (feat1, feat2),
+            onnx_path,
+            input_names=DECODER_INPUT_NAMES,
+            output_names=DECODER_OUTPUT_NAMES,
+            compute_dtype=torch.bfloat16,
+            dynamic_batch_max=DECODER_MAX_PAIRS,
+        ),
+    )
+    return ensure_engine(onnx_path, TrtBuildConfig(max_batch_size=DECODER_MAX_PAIRS, opt_batch_size=4))

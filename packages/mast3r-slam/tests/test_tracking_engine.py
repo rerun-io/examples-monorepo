@@ -58,3 +58,36 @@ def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch) 
                     assert cosine >= 0.999, f"{name} at {pair}: cosine {cosine:.5f}"
         finally:
             mast3r_utils._TRACKING_FORWARD.pop(id(model), None)
+
+
+def test_pair_decoder_engine_matches_eager_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The backend's batched pair decoder stays within cosine 0.999 of the eager fp32 decoder, in both directions."""
+    for asset in (CHECKPOINT, VIDEO):
+        if not asset.exists():
+            pytest.skip(f"missing {asset.name} (pixi run -e mast3r-slam mast3r-slam-example-quick downloads it)")
+    monkeypatch.chdir(PACKAGE_DIR)
+    import mast3r_slam.mast3r_utils as mast3r_utils
+    from mast3r_slam.config import load_config
+    from mast3r_slam.dataloader import load_dataset
+
+    load_config("config/fast.yaml")
+    model = mast3r_utils.load_mast3r().eval()
+    dataset = load_dataset(str(VIDEO), img_size=224)
+    dataset.subsample(5)
+    with torch.inference_mode():
+        encoded = [model._encode_image(dataset.read_resized(i).rgb_tensor.cuda(), torch.tensor([[224, 224]], device="cuda")) for i in (0, 4, 40, 45)]
+        feat = torch.cat([f for f, _, _ in encoded])
+        pos = torch.cat([p for _, p, _ in encoded])
+        shapes = [torch.tensor([[224, 224]], device="cuda")] * 2
+        args = (feat[[0, 2]], pos[[0, 2]], feat[[1, 3]], pos[[1, 3]], shapes, shapes)
+        eager = mast3r_utils.mast3r_decode_symmetric_batch(model, *args)
+        mast3r_utils.use_pair_decoder_engine(model, (224, 224))
+        try:
+            engine = mast3r_utils.mast3r_decode_symmetric_batch(model, *args)
+        finally:
+            mast3r_utils._PAIR_DECODER.pop(id(model), None)
+        for name, got, want in zip(("X", "C", "D", "Q"), engine, eager, strict=True):
+            assert got.shape == want.shape, name
+            for direction in range(4):
+                cosine: float = torch.nn.functional.cosine_similarity(got[direction].flatten().double(), want[direction].flatten().double(), dim=0).item()
+                assert cosine >= 0.999, f"{name}[{direction}]: cosine {cosine:.5f}"
