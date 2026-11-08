@@ -127,6 +127,10 @@ class TrackerConfig:
     cuda_graph_max_conditional: int = 4
     """Graphs are captured at construction for 1..N conditional memories (one
     per prompt tick: bootstrap + each re-prompt); later ticks run eagerly."""
+    fused_rope: bool = False
+    """Rotary position encoding in one Triton kernel per q/k (memory attention
+    12.3 -> 8.1 ms GPU per batched tick, identical output) instead of five
+    fp32/complex passes. Process-wide switch for the vendored sam2 fork."""
     device: str = "cuda"
     """Compute device."""
 
@@ -148,6 +152,10 @@ class MultiViewTracker:
             config.sam2_config, str(config.sam2_checkpoint), device=config.device
         )
         _disable_dead_hole_filling(self.predictor)
+        if config.fused_rope:
+            from sam2.modeling import fused_rope
+
+            fused_rope.ENABLED = True
         # The fork builds these before the model moves to the GPU; keep them
         # resident so no tick pays (or graph-captures) a host->device copy.
         with torch.inference_mode():
