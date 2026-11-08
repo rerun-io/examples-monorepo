@@ -2,7 +2,8 @@
 
 The archetype exists only in the depth-video-viewer, so it is logged as built-in component types under its own
 descriptors. They are the descriptors of the in-tree prototype (`rerun.archetypes.DepthVideoStream`), so one
-recording works in both viewers.
+recording works in both viewers. Out-of-tree scaffolding: a generated SDK archetype replaces this module once
+`DepthVideoStream` ships in Rerun.
 """
 
 from dataclasses import dataclass
@@ -26,7 +27,8 @@ class DepthVideoProperties:
 
     meter: float
     """Decoded codes per meter. For codes in units of `u` millimetres this is `1000 / u`."""
-    colormap: rr.components.Colormap = rr.components.Colormap.Turbo
+    colormap: rr.components.Colormap | None = None
+    """The viewer uses Rerun's depth colormap without it."""
     depth_range: tuple[float, float] | None = None
     """Visible range in codes; the viewer uses [0, 2^bit_depth - 1] without it."""
     point_fill_ratio: float | None = None
@@ -37,8 +39,9 @@ def static_components(props: DepthVideoProperties) -> list[rr.DescribedComponent
     batches = [
         _described(rr.components.VideoCodecBatch([rr.components.VideoCodec.AV1]), "codec", "VideoCodec"),
         _described(rr.components.DepthMeterBatch([props.meter]), "meter", "DepthMeter"),
-        _described(rr.components.ColormapBatch([props.colormap]), "colormap", "Colormap"),
     ]
+    if props.colormap is not None:
+        batches.append(_described(rr.components.ColormapBatch([props.colormap]), "colormap", "Colormap"))
     if props.depth_range is not None:
         batches.append(_described(rr.components.ValueRangeBatch([list(props.depth_range)]), "depth_range", "ValueRange"))
     if props.point_fill_ratio is not None:
@@ -61,7 +64,7 @@ def log_depth_video(
     sample = _described(rr.components.VideoSampleBatch(samples), "sample", "VideoSample")
     rr.send_columns(
         entity,
-        indexes=[rr.TimeColumn(timeline, duration=np.asarray(times_ns, np.float64) * 1e-9)],
+        indexes=[rr.TimeColumn(timeline, duration=np.asarray(times_ns, np.int64).astype("timedelta64[ns]"))],
         columns=[sample.partition()],
         recording=recording,
     )
