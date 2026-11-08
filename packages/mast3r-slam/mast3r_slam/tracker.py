@@ -20,8 +20,26 @@ from mast3r_slam.geometry import (
     project_calib,
 )
 from mast3r_slam.mast3r_utils import mast3r_match_asymmetric
+from mast3r_slam.mojo_backend.gn import RAYS_TRACKING_HUBER, RAYS_TRACKING_REL_ERROR
 from mast3r_slam.nonlinear_optimizer import check_convergence, huber
 from mast3r_slam.rerun_log_utils import LOG_PATH
+
+
+def check_rays_tracking_settings(huber: float, rel_error: float) -> None:
+    """Reject ``tracking.huber`` / ``tracking.rel_error`` values the uncalibrated pose solve would silently ignore.
+
+    Without calibration, tracking solves on the rays kernel (:func:`mojo_backend.track_pose_rays`), which fixes the
+    Huber threshold and stops on the step norm (``tracking.delta_norm``) alone. The calibrated solve honours both.
+
+    Raises:
+        ValueError: If either value differs from the one the rays kernel uses.
+    """
+    if huber != RAYS_TRACKING_HUBER or rel_error != RAYS_TRACKING_REL_ERROR:
+        raise ValueError(
+            f"tracking.huber={huber} and tracking.rel_error={rel_error} have no effect without calibration: the rays pose "
+            f"solve fixes Huber at {RAYS_TRACKING_HUBER} and stops on the step norm (tracking.delta_norm). Keep huber="
+            f"{RAYS_TRACKING_HUBER} and rel_error={RAYS_TRACKING_REL_ERROR}, or track with calibration (use_calib)."
+        )
 
 
 class FrameTracker:
@@ -42,6 +60,8 @@ class FrameTracker:
         self.matching_cfg: MatchingConfig = cfg.matching
         self.img_downsample: int = cfg.dataset.img_downsample
         self.use_calib: bool = cfg.use_calib
+        if not self.use_calib:
+            check_rays_tracking_settings(self.cfg.huber, self.cfg.rel_error)
         self.model: AsymmetricMASt3R = model
         self.keyframes: SharedKeyframes = frames
         self.device: str = device

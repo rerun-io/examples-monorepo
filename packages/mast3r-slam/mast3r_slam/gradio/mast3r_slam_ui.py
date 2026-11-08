@@ -9,8 +9,8 @@ The app loads the model with :func:`mast3r_slam.api.inference.load_slam_model` a
 This module only handles Gradio-specific concerns: file validation, recording
 setup, binary streaming, and nerfstudio output zipping.
 
-The SLAM hyper-parameters are a module-level ``_CONFIG`` (a :class:`~mast3r_slam.config.SlamConfig`) that
-``_sync_config`` rebuilds from the Config widgets when Run is clicked, before the run starts.
+The Run button passes the Config widgets to the streaming callback, which builds the run's
+:class:`~mast3r_slam.config.SlamConfig` from them, so runs and sessions share no config state.
 """
 
 import dataclasses
@@ -50,26 +50,6 @@ engines_ready: threading.Event = threading.Event()
 VIDEO_PRESETS: list[SlamPresetName] = [name for name, (_, cfg) in SLAM_PRESETS.items() if not cfg.use_calib]
 """The presets an uploaded video can run: a video carries no calibration."""
 DEFAULT_PRESET: SlamPresetName = "fast"
-
-_CONFIG: SlamConfig = SLAM_PRESETS[DEFAULT_PRESET][1]
-"""Module-level SLAM config, kept in sync with the Config widgets via ``_sync_config``."""
-_CONF_THRESHOLD: float = DEFAULT_CONF_THRESHOLD
-"""The depth panels' confidence threshold, kept in sync with its slider via ``_sync_config``."""
-
-
-def _sync_config(preset: SlamPresetName, subsample: int | float, single_thread: bool, conf_threshold: float) -> None:
-    """Rebuild ``_CONFIG`` and ``_CONF_THRESHOLD`` from the Config widgets: the preset, with the widgets' values over it.
-
-    Args:
-        preset: Name of a preset in ``SLAM_PRESETS``.
-        subsample: Keep every n-th frame.
-        single_thread: Run frontend and backend in lockstep.
-        conf_threshold: Smallest confidence shown in the depth panels and fused into the map surface.
-    """
-    global _CONFIG, _CONF_THRESHOLD
-    _CONFIG = dataclasses.replace(SLAM_PRESETS[preset][1], single_thread=single_thread).with_subsample(int(subsample))
-    _CONF_THRESHOLD = float(conf_threshold)
-
 
 def _preset_values(preset: SlamPresetName) -> tuple[int, bool]:
     """The Config widgets' values for ``preset``: subsample, single_thread."""
@@ -113,9 +93,13 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
     @rr.thread_local_stream(APPLICATION_ID)
     def streaming_mast3r_slam_fn(
         video_file: str | None,
+        preset: SlamPresetName,
+        subsample: int | float,
+        single_thread: bool,
+        conf_threshold: float,
         progress=gr.Progress(),  # noqa: B008
     ) -> Generator[tuple[bytes | None, str | None, str], None, None]:
-        """Gradio streaming callback that runs the SLAM pipeline with ``_CONFIG``.
+        """Gradio streaming callback that runs the SLAM pipeline with the Config widgets' values.
 
         Uses ``@rr.thread_local_stream`` to create a per-call recording.
         All ``rr.log()`` calls from the nested ``run_slam_pipeline()``
@@ -124,6 +108,10 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
 
         Args:
             video_file: Path to the uploaded video file.
+            preset: Name of a preset in ``SLAM_PRESETS``; the widgets below override its fields.
+            subsample: Keep every n-th frame.
+            single_thread: Run frontend and backend in lockstep.
+            conf_threshold: Smallest confidence shown in the depth panels and fused into the map surface.
             progress: Gradio progress callback.
 
         Yields:
@@ -140,7 +128,8 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
         # A fresh directory per run, so a download never mixes in another run's frames.
         run_dir: Path = Path(tempfile.mkdtemp(prefix="mast3r-slam-"))
         ns_output_dir: Path = run_dir / "nerfstudio-output"
-        settings: SlamSettings = SlamSettings(dataset=video_file, slam=_CONFIG, ns_save_path=ns_output_dir, conf_threshold=_CONF_THRESHOLD)
+        slam_config: SlamConfig = dataclasses.replace(SLAM_PRESETS[preset][1], single_thread=single_thread).with_subsample(int(subsample))
+        settings: SlamSettings = SlamSettings(dataset=video_file, slam=slam_config, ns_save_path=ns_output_dir, conf_threshold=float(conf_threshold))
         for msg in run_slam_pipeline(settings, model, recording=recording):
             yield stream.read(), None, msg
 
@@ -209,11 +198,11 @@ def build_app() -> gr.Blocks:
                                 maximum=8,
                                 step=1,
                                 precision=0,
-                                value=_CONFIG.dataset.subsample,
+                                value=SLAM_PRESETS[DEFAULT_PRESET][1].dataset.subsample,
                             )
                             single_thread_checkbox = gr.Checkbox(
                                 label="Single-threaded",
-                                value=_CONFIG.single_thread,
+                                value=SLAM_PRESETS[DEFAULT_PRESET][1].single_thread,
                                 info="Frontend and backend in lockstep: deterministic, slower.",
                             )
                             conf_threshold_slider = gr.Slider(
@@ -221,7 +210,7 @@ def build_app() -> gr.Blocks:
                                 minimum=1.0,
                                 maximum=20.0,
                                 step=0.5,
-                                value=_CONF_THRESHOLD,
+                                value=DEFAULT_CONF_THRESHOLD,
                                 info="Depth and the map surface keep pixels above this MASt3R confidence; lower it if depth is black.",
                             )
 
@@ -281,13 +270,8 @@ def build_app() -> gr.Blocks:
             outputs=[output_zip_file, status_text],
             api_visibility="private",
         ).then(
-            fn=_sync_config,
-            inputs=[preset_dropdown, subsample_slider, single_thread_checkbox, conf_threshold_slider],
-            outputs=None,
-            api_visibility="private",
-        ).then(
             fn=_make_streaming_fn(model),
-            inputs=[video_file],
+            inputs=[video_file, preset_dropdown, subsample_slider, single_thread_checkbox, conf_threshold_slider],
             outputs=[viewer, output_zip_file, status_text],
         )
 
