@@ -25,6 +25,7 @@ import torch.multiprocessing as mp
 from gradio_rerun import Rerun
 
 from mast3r_slam.api.inference import SlamPipelineHandle, run_slam_pipeline
+from mast3r_slam.config import load_config
 from mast3r_slam.dataloader import load_dataset
 from mast3r_slam.frame import Mode, SharedStates
 from mast3r_slam.mast3r_utils import enable_trt_engines, load_mast3r, prepare_trt_engines
@@ -43,6 +44,7 @@ model = load_mast3r(device=DEVICE)
 model.share_memory()
 enable_trt_engines(model)
 
+CONFIG_PATH: str = "config/base.yaml"
 EXAMPLE_VIDEOS: list[str] = ["data/livingroom-tour.mp4", "data/normal-apt-tour.mp4"]
 IMG_SIZE: Literal[224, 512] = 512
 """What :func:`run_slam_pipeline` defaults to; the long side goes to 512, so each aspect ratio is its own engine size."""
@@ -60,6 +62,7 @@ def _prepare_example_engines() -> None:
     """
     global engine_status
     try:
+        load_config(CONFIG_PATH)  # the dataloader reads it
         sizes: list[tuple[int, int]] = sorted({load_dataset(path, img_size=IMG_SIZE).get_img_shape()[0] for path in EXAMPLE_VIDEOS})
         for n, (h, w) in enumerate(sizes, start=1):
             engine_status = f"Preparing TensorRT engines for {w}x{h} frames ({n}/{len(sizes)}); a first build on this machine takes a few minutes..."
@@ -167,7 +170,7 @@ def streaming_mast3r_slam_fn(
     for msg in run_slam_pipeline(
         model=model,
         dataset_path=str(video_path),
-        config_path="config/base.yaml",
+        config_path=CONFIG_PATH,
         device=DEVICE,
         img_size=IMG_SIZE,
         subsample=subsample,
