@@ -53,6 +53,8 @@ class BenchmarkConfig:
     realtime speed). Fraction-based so the same gate covers any clip length."""
     warmup_frames: int = 33
     """Frames run once beforehand to absorb model load/compile/cudnn autotune."""
+    observe_tracked_only: bool = False
+    """With --tracker.track-stride N, run landmarks + fit only on tracked ticks (body observed at fps/N)."""
     steady_skip: int = 60
     """Ticks excluded from the steady-state rate (fitter bootstrap, graph capture, first re-detect)."""
     device: str = "cuda"
@@ -77,6 +79,7 @@ def build_pipeline(config: BenchmarkConfig, sequence: MultiViewSequence) -> Stre
         trt_engine=config.trt_engine,
         hires_crops=hires_crops,
         proxy_dir=config.proxy_dir,
+        observe_tracked_only=config.observe_tracked_only,
     )
 
 

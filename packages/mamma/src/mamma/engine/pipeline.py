@@ -141,6 +141,7 @@ class StreamingPipeline:
         fitting: FittingStage | None = None,
         collector: ResultCollector | None = None,
         engine_hw: tuple[int, int] | None = None,
+        observe_tracked_only: bool = False,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
         self.reader: TorchCodecMultiVideoReader = reader
@@ -156,6 +157,11 @@ class StreamingPipeline:
         # self-occluded poses).
         self.engine_hw: tuple[int, int] | None = engine_hw
         self._hires_scale: float = 1.0 if engine_hw is None else reader.width / engine_hw[1]
+        # With the tracker's track_stride > 1, a skipped tick returns the
+        # previous tracks unchanged; observe_tracked_only also skips landmarks
+        # and the fit there, so the body is observed at fps / track_stride while
+        # decode, video logging and the timeline stay at the full frame rate.
+        self.observe_tracked_only: bool = observe_tracked_only
 
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int | None = None, timing_doc: bool = False) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats.
@@ -179,6 +185,7 @@ class StreamingPipeline:
             start_frame = self.sequence.frame_start
         start: float = time.perf_counter()
         tick_end_s: list[float] = []
+        prev_tracks: list[CameraTracks] | None = None
         frame_idx: int = start_frame
         if max_frames is None:
             window_end: int = self.sequence.frame_start + self.sequence.frame_count
@@ -224,7 +231,9 @@ class StreamingPipeline:
                         if self.tracker is not None:
                             with profiler.stage("track"):
                                 tracks = self.tracker.step(frame_idx, frames)
-                        if self.landmarks is not None and tracks is not None:
+                        observe: bool = not (self.observe_tracked_only and tracks is not None and tracks is prev_tracks)
+                        prev_tracks = tracks
+                        if self.landmarks is not None and tracks is not None and observe:
                             with profiler.stage("landmarks"):
                                 landmarks = self.landmarks.estimate(frames, tracks, frames_hires=frames_hires, hires_scale=self._hires_scale)
                     if self.fitting is not None and landmarks is not None:
@@ -321,6 +330,7 @@ def build_streaming_pipeline(
     hires_crops: bool = True,
     proxy_dir: Path | None = None,
     seg_stride: int = 5,
+    observe_tracked_only: bool = False,
 ) -> StreamingPipeline:
     """Assemble the standard decode->track->landmarks->fit->log pipeline.
 
@@ -380,4 +390,5 @@ def build_streaming_pipeline(
         fitting=fitting,
         collector=collector,
         engine_hw=resize_hw if hires_crops else None,
+        observe_tracked_only=observe_tracked_only,
     )
