@@ -21,16 +21,13 @@ from __future__ import annotations
 import hashlib
 from os import stat_result
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import onnx
 import torch
 from jaxtyping import Float32
 
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
 from mamma.landmarks.mammanet import MammaNet
-
-if TYPE_CHECKING:
-    import onnx
 
 ENGINE_BATCH: int = 4
 """Static batch baked into the engine (cameras x persons rounded up)."""
@@ -214,7 +211,6 @@ def quantize_mammanet_fp8(onnx_path: Path, output_path: Path, input_amax: dict[s
     Every other weight MatMul keeps fp16. The graph opset is raised to 21,
     the first that types FP8 QuantizeLinear with fp16 scales.
     """
-    import onnx
     from trtkit.onnx_qdq import Fp8Linear, KeepPrecision, QdqPlan, quantize_qdq, save_with_external_data
 
     model: onnx.ModelProto = onnx.load(str(onnx_path))
