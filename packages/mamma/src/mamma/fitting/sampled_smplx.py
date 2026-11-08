@@ -59,6 +59,59 @@ def rigid_transform_chain(
     return rel_transforms
 
 
+def kinematic_levels(parents: list[int]) -> list[tuple[list[int], list[int]]]:
+    """Group joints by tree depth: ``[(joints, parent_pos_in_prev_level), ...]``.
+
+    Every joint's parent sits exactly one level up, so a level composes with
+    one gather + one batched 3x3 product instead of one matmul per joint.
+    """
+    depth: list[int] = [0] * len(parents)
+    for i in range(1, len(parents)):
+        depth[i] = depth[parents[i]] + 1
+    levels: list[list[int]] = [[] for _ in range(max(depth) + 1)]
+    for i, d in enumerate(depth):
+        levels[d].append(i)
+    out: list[tuple[list[int], list[int]]] = [(levels[0], [])]
+    for d in range(1, len(levels)):
+        prev_pos: dict[int, int] = {j: k for k, j in enumerate(levels[d - 1])}
+        out.append((levels[d], [prev_pos[parents[j]] for j in levels[d]]))
+    return out
+
+
+def rigid_transform_levels(
+    rot_mats: Float32[torch.Tensor, "t j 3 3"],
+    rest_joints: Float32[torch.Tensor, "t j 3"],
+    parent_index: torch.Tensor,
+    levels: list[tuple[torch.Tensor, torch.Tensor]],
+    level_inverse: torch.Tensor,
+) -> tuple[Float32[torch.Tensor, "t j 3 3"], Float32[torch.Tensor, "t j 3"]]:
+    """Same result as :func:`rigid_transform_chain` (rotation + translation of
+    the relative transforms; the constant [0 0 0 1] row is dropped), composed
+    one tree level at a time with elementwise 3x3 products.
+
+    54 per-joint 4x4 cuBLAS matmuls (x3 with backward) were ~60% of a compiled
+    fit iteration; per-level elementwise products are ~depth kernels that
+    inductor fuses. ``levels`` holds device index tensors (capture-safe).
+    """
+    rel_joints: Float32[torch.Tensor, "t j 3"] = torch.cat(
+        [rest_joints[:, :1], rest_joints[:, 1:] - rest_joints[:, parent_index]], dim=1
+    )
+    root_idx, _ = levels[0]
+    rot_lv: list[torch.Tensor] = [rot_mats[:, root_idx]]
+    trans_lv: list[torch.Tensor] = [rel_joints[:, root_idx]]
+    for joint_idx, parent_pos in levels[1:]:
+        rot_p: Float32[torch.Tensor, "t k 3 3"] = rot_lv[-1][:, parent_pos]
+        trans_p: Float32[torch.Tensor, "t k 3"] = trans_lv[-1][:, parent_pos]
+        rot_l: Float32[torch.Tensor, "t k 3 3"] = rot_mats[:, joint_idx]
+        trans_l: Float32[torch.Tensor, "t k 3"] = rel_joints[:, joint_idx]
+        rot_lv.append((rot_p.unsqueeze(-1) * rot_l.unsqueeze(-3)).sum(-2))
+        trans_lv.append((rot_p * trans_l.unsqueeze(-2)).sum(-1) + trans_p)
+    rot_world: Float32[torch.Tensor, "t j 3 3"] = torch.cat(rot_lv, dim=1)[:, level_inverse]
+    trans_world: Float32[torch.Tensor, "t j 3"] = torch.cat(trans_lv, dim=1)[:, level_inverse]
+    rel_trans: Float32[torch.Tensor, "t j 3"] = trans_world - (rot_world * rest_joints.unsqueeze(-2)).sum(-1)
+    return rot_world, rel_trans
+
+
 class SampledSmplx:
     """Exact SMPL-X sampled-vertex forward (matches ``sampling @ model.vertices``)."""
 
@@ -84,6 +137,15 @@ class SampledSmplx:
         j_regressor: Float32[torch.Tensor, "55 v"] = model.J_regressor.float()
         self.joints_template: Float32[torch.Tensor, "55 3"] = j_regressor @ v_template
         self.joints_shapedirs: Float32[torch.Tensor, "55 3 nb"] = torch.einsum("jv,vck->jck", j_regressor, model.shapedirs.float())
+        levels: list[tuple[list[int], list[int]]] = kinematic_levels(self.parents)
+        self.levels: list[tuple[torch.Tensor, torch.Tensor]] = [
+            (torch.tensor(j, device=device, dtype=torch.long), torch.tensor(p, device=device, dtype=torch.long)) for j, p in levels
+        ]
+        order: list[int] = [j for joints, _ in levels for j in joints]
+        inverse: list[int] = [0] * len(order)
+        for pos, j in enumerate(order):
+            inverse[j] = pos
+        self.level_inverse: torch.Tensor = torch.tensor(inverse, device=device, dtype=torch.long)
 
     def forward(
         self,
@@ -115,10 +177,14 @@ class SampledSmplx:
             self.v_template_s + torch.einsum("nck,bk->bnc", self.shapedirs_s, betas_t) + pose_offsets
         )
 
-        rel_transforms: Float32[torch.Tensor, "t 55 4 4"] = rigid_transform_chain(
-            rot_mats, rest_joints, self.parents, self.parent_index
-        )
-        skin_t: Float32[torch.Tensor, "t n 4 4"] = torch.einsum("nj,bjxy->bnxy", self.lbs_weights_s, rel_transforms)
-        v_h: Float32[torch.Tensor, "t n 4"] = torch.cat([v_posed, torch.ones_like(v_posed[..., :1])], dim=-1)
-        verts: Float32[torch.Tensor, "t n 3"] = torch.einsum("bnxy,bny->bnx", skin_t, v_h)[..., :3]
+        rel_rot: Float32[torch.Tensor, "t 55 3 3"]
+        rel_trans: Float32[torch.Tensor, "t 55 3"]
+        rel_rot, rel_trans = rigid_transform_levels(rot_mats, rest_joints, self.parent_index, self.levels, self.level_inverse)
+        # Skinning: blend the 3x4 [R|t] per vertex as ONE (n,55)@(55,t*12) GEMM.
+        rel_34: Float32[torch.Tensor, "t 55 12"] = torch.cat([rel_rot.reshape(t, 55, 9), rel_trans], dim=-1)
+        skin: Float32[torch.Tensor, "n t 12"] = (self.lbs_weights_s @ rel_34.permute(1, 0, 2).reshape(55, t * 12)).view(-1, t, 12)
+        skin = skin.permute(1, 0, 2)
+        skin_rot: Float32[torch.Tensor, "t n 3 3"] = skin[..., :9].reshape(t, -1, 3, 3)
+        skin_trans: Float32[torch.Tensor, "t n 3"] = skin[..., 9:]
+        verts: Float32[torch.Tensor, "t n 3"] = (skin_rot * v_posed.unsqueeze(-2)).sum(-1) + skin_trans
         return verts + transl.unsqueeze(1)
