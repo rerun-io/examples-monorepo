@@ -85,18 +85,21 @@ T = TypeVar("T")
 
 class LatestWinsWorker(Generic[T]):
     """Runs ``handle`` on its own thread for the newest request; a request that arrives while one is pending
-    replaces it (a size-1 slot, never a growing queue). :meth:`close` handles the pending request, then joins."""
+    replaces it (a size-1 slot, never a growing queue). :meth:`close` handles the pending request, then joins.
+    An exception in ``handle`` ends the thread; the next :meth:`submit` or :meth:`close` re-raises it."""
 
     def __init__(self, handle: Callable[[T], None], name: str) -> None:
         self._handle: Callable[[T], None] = handle
         self._condition: threading.Condition = threading.Condition()
         self._pending: T | None = None
         self._closing: bool = False
+        self._error: Exception | None = None
         self._thread: threading.Thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
     def submit(self, request: T) -> None:
         """Replace the pending request, if any, and wake the worker; returns at once."""
+        self._raise_error()
         with self._condition:
             self._pending = request
             self._condition.notify()
@@ -107,6 +110,11 @@ class LatestWinsWorker(Generic[T]):
             self._closing = True
             self._condition.notify()
         self._thread.join(timeout=timeout)
+        self._raise_error()
+
+    def _raise_error(self) -> None:
+        if self._error is not None:
+            raise self._error
 
     def _run(self) -> None:
         while True:
@@ -117,8 +125,12 @@ class LatestWinsWorker(Generic[T]):
                 self._pending = None
                 if request is None:
                     return
-            # An exception ends the thread; threading.excepthook prints it (no bare except around beartype checks).
-            self._handle(request)
+            try:
+                self._handle(request)
+            except Exception as exc:
+                # Kept for submit()/close(), which re-raise it on the caller's thread (BeartypeException included).
+                self._error = exc
+                return
 
 
 @dataclass(frozen=True, slots=True)

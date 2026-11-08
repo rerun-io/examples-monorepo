@@ -5,7 +5,7 @@ from torch import Tensor
 
 import mast3r_slam.image as img_utils
 from mast3r_slam import mojo_backend
-from mast3r_slam.config import config
+from mast3r_slam.config import MatchingConfig
 
 
 def match(
@@ -13,6 +13,7 @@ def match(
     X21: Float[Tensor, "b h w 3"],
     D11: Float[Tensor, "b h w d"],
     D21: Float[Tensor, "b h w d"],
+    cfg: MatchingConfig,
     idx_1_to_2_init: Int[Tensor, "b hw"] | None = None,
 ) -> tuple[Int[Tensor, "b hw"], Bool[Tensor, "b hw 1"]]:
     """Compute dense correspondences from frame 2 to frame 1 via iterative projection.
@@ -22,6 +23,7 @@ def match(
         X21: 3D point map of frame 2 in frame 1 coordinates.
         D11: Descriptor map for frame 1.
         D21: Descriptor map for frame 2.
+        cfg: Matching hyper-parameters.
         idx_1_to_2_init: Optional initial linear-index correspondence guess.
 
     Returns:
@@ -30,7 +32,7 @@ def match(
     """
     idx_1_to_2: Int[Tensor, "b hw"]
     valid_match2: Bool[Tensor, "b hw 1"]
-    idx_1_to_2, valid_match2 = match_iterative_proj(X11, X21, D11, D21, idx_1_to_2_init)
+    idx_1_to_2, valid_match2 = match_iterative_proj(X11, X21, D11, D21, cfg, idx_1_to_2_init)
     return idx_1_to_2, valid_match2
 
 
@@ -128,6 +130,7 @@ def match_iterative_proj(
     X21: Float[Tensor, "b h w 3"],
     D11: Float[Tensor, "b h w d"],
     D21: Float[Tensor, "b h w d"],
+    cfg: MatchingConfig,
     idx_1_to_2_init: Int[Tensor, "b hw"] | None = None,
 ) -> tuple[Int[Tensor, "b hw"], Bool[Tensor, "b hw 1"]]:
     """Run iterative-projection matching followed by optional descriptor refinement.
@@ -137,13 +140,13 @@ def match_iterative_proj(
         X21: 3D point map of frame 2 in frame 1 coordinates.
         D11: Descriptor map for frame 1.
         D21: Descriptor map for frame 2.
+        cfg: Matching hyper-parameters.
         idx_1_to_2_init: Optional initial correspondence guess.
 
     Returns:
         A tuple of (idx_1_to_2, valid_proj2) with linear correspondence indices
         and a boolean validity mask.
     """
-    cfg: dict = config["matching"]
     b: int
     h: int
     w: int
@@ -162,9 +165,9 @@ def match_iterative_proj(
         rays_with_grad_img,
         pts3d_norm,
         p_init,
-        cfg["max_iter"],
-        cfg["lambda_init"],
-        cfg["convergence_thresh"],
+        cfg.max_iter,
+        cfg.lambda_init,
+        cfg.convergence_thresh,
     )
     p1 = p1.long()
 
@@ -173,16 +176,16 @@ def match_iterative_proj(
     dists2: Float[Tensor, "b h w"] = torch.linalg.norm(
         X11[batch_inds, p1[..., 1], p1[..., 0], :].reshape(b, h, w, 3) - X21, dim=-1
     )
-    valid_dists2: Bool[Tensor, "b hw"] = (dists2 < cfg["dist_thresh"]).view(b, -1)
+    valid_dists2: Bool[Tensor, "b hw"] = (dists2 < cfg.dist_thresh).view(b, -1)
     valid_proj2 = valid_proj2 & valid_dists2
 
-    if cfg["radius"] > 0:
+    if cfg.radius > 0:
         (p1,) = mojo_backend.refine_matches(
             D11.half(),
             D21.view(b, h * w, -1).half(),
             p1,
-            cfg["radius"],
-            cfg["dilation_max"],
+            cfg.radius,
+            cfg.dilation_max,
         )
 
     # Convert to linear index
