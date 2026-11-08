@@ -62,7 +62,6 @@ def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch, 
             loaded = mast3r_utils._TRACKING_ENGINES[id(model), img_hw]
             mast3r_utils.use_tracking_engine(model, img_hw)
             assert mast3r_utils._TRACKING_ENGINES[id(model), img_hw] is loaded
-            assert mast3r_utils.tracking_engine_size(model) == img_hw
             for pair in pairs:
                 for name, got, want in zip(("X", "C", "D", "Q", "feat", "pos"), forward(*pair), eager[pair], strict=True):
                     assert got.shape == want.shape, name
@@ -70,7 +69,6 @@ def test_tracking_engine_matches_eager_forward(monkeypatch: pytest.MonkeyPatch, 
                     assert cosine >= 0.999, f"{name} at {pair}: cosine {cosine:.5f}"
         finally:
             mast3r_utils._TRACKING_FORWARD.pop(id(model), None)
-            mast3r_utils._TRACKING_ENGINE_HW.pop(id(model), None)
             mast3r_utils._TRACKING_ENGINES.pop((id(model), img_hw), None)
 
 
