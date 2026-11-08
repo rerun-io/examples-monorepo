@@ -143,6 +143,9 @@ class FitterConfig:
     losses (and, via AOTAutograd, its backward) before CUDA-graph capture."""
     fused_adam: bool = False
     """Use the fused (single-kernel) capturable Adam in the graphed paths."""
+    fit_stream: bool = False
+    """Run FittingStage.step on a private non-blocking CUDA stream so the
+    pipeline's main-thread default-stream syncs don't wait on queued fit work."""
     device: str = "cuda"
     """Compute device."""
 

@@ -39,9 +39,55 @@ class FittingStage:
         self._fitters: dict[int, SlidingWindowFitter] = {}
         self.faces = None
         """Triangle faces of the SMPL-X mesh (set after the first fitter exists)."""
+        self._stream: torch.cuda.Stream | None = (
+            torch.cuda.Stream(device=config.device) if config.fit_stream and torch.device(config.device).type == "cuda" else None
+        )
+        if config.compile_iter:
+            self._prewarm_compile()
+
+    def _prewarm_compile(self) -> None:
+        """Compile the fitter's graphed iterations now, before streaming starts.
+
+        Fitters are created lazily when a person first appears, so without this
+        the inductor compile (~27 s cold cache, ~1.7 s warm) stalls the fit
+        worker mid-stream. A throwaway fitter fed one window of zero
+        observations runs both captures (bootstrap + steady state); later
+        fitters reuse the compiled code (~0.15 s to re-capture).
+        """
+        dummy: SlidingWindowFitter = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
+        n: int = dummy.verts_to_landmarks.shape[0]
+        device: torch.device = self.k_per_cam[0].device
+        n_cams: int = len(self.k_per_cam)
+        for i in range(self.config.window_size + 1):
+            dummy.push(
+                i,
+                [torch.zeros(n, 3, device=device) for _ in range(n_cams)],
+                [torch.zeros(n, device=device) for _ in range(n_cams)],
+                torch.zeros(n, 3, device=device),
+                torch.zeros(n, dtype=torch.bool, device=device),
+            )
+        torch.cuda.synchronize()
 
     def step(self, frame_idx: int, landmarks: list[CameraLandmarks]) -> TickFitOutput:
-        """Triangulate + fit every person visible in >= 2 cameras this tick."""
+        """Triangulate + fit every person visible in >= 2 cameras this tick.
+
+        With ``fit_stream`` the work runs on a private non-blocking stream: the
+        pipeline's main thread (track/landmarks) syncs the legacy default
+        stream many times per tick, and each such sync otherwise also waits
+        for every fit kernel queued from the worker thread. The step ends with
+        a sync of its own stream only, so every tensor it read or produced is
+        settled before references are dropped or handed to the logger.
+        """
+        if self._stream is None:
+            return self._step(frame_idx, landmarks)
+        self._stream.wait_stream(torch.cuda.current_stream())  # landmarks were produced on the caller's stream
+        with torch.cuda.stream(self._stream):
+            out: TickFitOutput = self._step(frame_idx, landmarks)
+        self._stream.synchronize()
+        return out
+
+    def _step(self, frame_idx: int, landmarks: list[CameraLandmarks]) -> TickFitOutput:
+        """:meth:`step` body on the current stream."""
         obj_ids: set[int] = set()
         for cam_landmarks in landmarks:
             obj_ids.update(cam_landmarks.keys())
