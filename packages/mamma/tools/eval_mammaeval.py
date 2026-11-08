@@ -86,6 +86,11 @@ class EvalConfig:
     """Body-models root with smplx_lockedhead/ and smplx_v1_1/ (GT models)."""
     chunk_size: int = 32
     """Frames decoded per camera per chunk."""
+    observe_tracked_only: bool = False
+    """With --tracker.track-stride N, run landmarks + fit only on tracked ticks (body observed at fps/N)."""
+    hold_missing: bool = False
+    """Score a frame without its own fit with the latest earlier fit of that track (what the viewer shows when the
+    body is observed below the frame rate, e.g. with --observe-tracked-only); the count is reported as frames_held."""
     sync_fit: bool = False
     """Await each tick's fit inline (as validate_golden's collector does) instead of overlapping it with the next
     tick. Slower, but avoids a race in the overlapped path: the fit worker's CUDA-graph capture (bootstrap, first
@@ -287,6 +292,20 @@ class PredictedTrack:
     """Frames emitted more than once (first emission kept: the causal output)."""
 
 
+def hold_previous_fit(track: PredictedTrack, frames: range) -> int:
+    """Fill frames without a fit with the latest earlier fit (sample-and-hold); returns how many were filled."""
+    filled: int = 0
+    last: int | None = None
+    for frame in frames:
+        if frame in track.joints:
+            last = frame
+        elif last is not None:
+            track.joints[frame] = track.joints[last]
+            track.vertices[frame] = track.vertices[last]
+            filled += 1
+    return filled
+
+
 def collect_tracks(outputs: list[TickFitOutput]) -> dict[int, PredictedTrack]:
     """Group emitted fits by track id and video frame (``FitResult.frame_idx``, so emit lag is already undone)."""
     tracks: dict[int, PredictedTrack] = {}
@@ -365,6 +384,7 @@ def build_pipeline(config: EvalConfig, sequence: MultiViewSequence) -> Streaming
         trt_engine=config.trt_engine,
         hires_crops=hires_crops,
         collector=_InlineFitCollector() if config.sync_fit else None,
+        observe_tracked_only=config.observe_tracked_only,
     )
 
 
@@ -418,6 +438,9 @@ def main(config: EvalConfig) -> int:
     emit_lag: int = pipeline.fitting.config.emit_lag
     window_size: int = pipeline.fitting.config.window_size
     tracks: dict[int, PredictedTrack] = collect_tracks(head + outputs + tail)
+    if config.hold_missing:
+        held: int = sum(hold_previous_fit(track, range(start, end)) for track in tracks.values())
+        print(f"held {held} frames without their own fit (latest earlier fit)")
     fps: float = sequence.fps
     realtime = RealtimeReport(
         ticks=stats.ticks,
