@@ -28,6 +28,41 @@ class WilorKeypointRefinerConfig:
     """posekit WiLoR configuration (torch fp16 reference by default)."""
 
 
+def hand_patch(rgb_hw3: UInt8[ndarray, "h w 3"], xyxy: Float32[ndarray, "4"], side: HandSide, rescale_factor: float) -> Float[ndarray, "256 256 3"]:
+    """WiLoR's square hand crop: integer centre and size, blurred first when it downsamples, mirrored for left hands.
+
+    Only the source window the crop samples is converted to float and blurred: its bilinear
+    neighbours plus the Gaussian's reach (scipy ``truncate=4``) around them, so every sampled
+    pixel equals the full-frame blur. A 1080p frame took ~55 ms per hand before.
+
+    Args:
+        rgb_hw3: Source RGB image.
+        xyxy: Hand box in source pixels.
+        side: Anatomical side; left hands are mirrored.
+        rescale_factor: Box enlargement before the crop.
+
+    Returns:
+        The 256x256 float crop (float64 after a blur, float32 otherwise).
+    """
+    center: Float32[ndarray, "2"] = (xyxy[2:4] + xyxy[0:2]) / 2.0
+    box_size: float = float((rescale_factor * (xyxy[2:4] - xyxy[0:2])).max())
+    center_x, center_y, size = int(center[0]), int(center[1]), int(box_size)
+    # Blur before downsampling to avoid aliasing, as WiLoR's demo does.
+    downsampling: float = box_size / CROP_SIZE / 2.0
+    sigma: float = (downsampling - 1) / 2 if downsampling > 1.1 else 0.0
+    margin: int = int(4.0 * sigma + 0.5) + 2
+    height, width = rgb_hw3.shape[:2]
+    x0, y0 = max(center_x - size // 2 - margin, 0), max(center_y - size // 2 - margin, 0)
+    x1, y1 = min(center_x + size // 2 + margin + 1, width), min(center_y + size // 2 + margin + 1, height)
+    image: Float[ndarray, "wh ww 3"] = rgb_hw3[y0:y1, x0:x1].astype(np.float32)
+    if sigma > 0.0:
+        image = gaussian(image, sigma=sigma, channel_axis=2, preserve_range=True)
+    patch, _ = generate_image_patch_cv2(
+        image, center_x - x0, center_y - y0, size, size, CROP_SIZE, CROP_SIZE, side == "left", 1.0, 0, border_mode=cv2.BORDER_CONSTANT
+    )
+    return patch
+
+
 class WilorKeypointRefiner:
     """RGB frame + hand box + side -> 21 WiLoR keypoints in source pixels (MediaPipe order)."""
 
@@ -47,17 +82,7 @@ class WilorKeypointRefiner:
         Returns:
             The 21 hand keypoints in source pixels.
         """
-        center: Float32[ndarray, "2"] = (xyxy[2:4] + xyxy[0:2]) / 2.0
-        box_size: float = float((self.config.pose.rescale_factor * (xyxy[2:4] - xyxy[0:2])).max())
-        image: ndarray = rgb_hw3.copy().astype(np.float32)
-        # Blur before downsampling to avoid aliasing, as WiLoR's demo does.
-        downsampling: float = box_size / CROP_SIZE / 2.0
-        if downsampling > 1.1:
-            image = gaussian(image, sigma=(downsampling - 1) / 2, channel_axis=2, preserve_range=True)
-        patch, _ = generate_image_patch_cv2(
-            image, int(center[0]), int(center[1]), int(box_size), int(box_size), CROP_SIZE, CROP_SIZE, side == "left", 1.0, 0,
-            border_mode=cv2.BORDER_CONSTANT,
-        )
+        patch: Float[ndarray, "256 256 3"] = hand_patch(rgb_hw3, xyxy, side, self.config.pose.rescale_factor)
         # float32, or float64 after the blur; the model casts it to fp16 once, as before the port.
         crops: Float[Tensor, "1 256 256 3"] = torch.from_numpy(np.ascontiguousarray(patch)[None]).cuda()
         detections = HandDetections(
