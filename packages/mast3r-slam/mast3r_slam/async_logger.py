@@ -60,6 +60,10 @@ DEFAULT_PANEL_HZ: float = 10.0
 second, more than the web viewer ingests; the camera pose, the path and the map are logged for every frame."""
 LAST_KEYFRAME_MAPS_EVERY: int = 10
 """Frames between refreshes of the last keyframe's pointmap/confidence/depth panels while it stays the active one."""
+PATH_WINDOW_FRAMES: int = 30
+"""Segments per camera-path polyline. Each window is its own entity (``path/<k>``), logged again on every frame with
+the window's points so far, so the cursor shows the path up to that frame and the viewer draws ~n/30 strips, not one
+strip per frame."""
 
 _HIDDEN_IMAGE_PLANE_DISTANCE: float = 1e-6
 """Image-plane distance of a keyframe's placeholder Pinhole before the keyframe exists: a frustum too small to see."""
@@ -307,8 +311,9 @@ class AsyncRerunLogger:
         self._thread: threading.Thread | None = None
 
         # Internal visualization state
-        # Camera path: the previous position; each frame logs one segment from it (the blueprint shows the history).
-        self._path_previous: list[float] | None = None
+        # Camera path: the points of the current window (PATH_WINDOW_FRAMES) and its index.
+        self._path_points: list[list[float]] = []
+        self._path_window: int = 0
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
         # Tracking marks its keyframe dirty on every frame without moving it; what was logged last skips those re-logs.
@@ -560,16 +565,16 @@ class AsyncRerunLogger:
         # Camera path
         assert pinhole.extrinsics.world_t_cam is not None
         translation: Float32[ndarray, "3"] = pinhole.extrinsics.world_t_cam
-        # One segment per frame: the blueprint's visible time range on the path entity draws every segment from
-        # the start up to the cursor, so the whole path is never re-sent.
-        # No label: in a time range every segment row would draw it.
-        position: list[float] = translation.tolist()
-        if self._path_previous is not None:
+        # A full window starts the next one at its last point, so the path stays one continuous line.
+        self._path_points.append(translation.tolist())
+        if len(self._path_points) > PATH_WINDOW_FRAMES + 1:
+            self._path_window += 1
+            self._path_points = self._path_points[-2:]
+        if len(self._path_points) >= 2:
             rr.log(
-                f"{self._parent_log_path}/path",
-                rr.LineStrips3D(strips=[[self._path_previous, position]], colors=(255, 0, 0)),
+                f"{self._parent_log_path}/path/{self._path_window}",
+                rr.LineStrips3D(strips=[self._path_points], colors=(255, 0, 0)),
             )
-        self._path_previous = position
 
         # Last keyframe 2D panel — the tracker continuously updates the
         # active keyframe's pointmap/confidence, so relog those every frame.
@@ -685,7 +690,11 @@ class AsyncRerunLogger:
             intrinsics=pinhole.intrinsics,
         )
 
-        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(f"{kf_cam_log_path}/pinhole/image", kf.rgb)
+        # The image sits outside the camera's subtree, in the Pinhole's frame: it still draws on the frustum, and a view
+        # can leave every keyframe image out with one rule (the Overview does; see create_blueprints).
+        kf_image_path: str = f"{self._parent_log_path}/keyframe_images/keyframe-{kf.kf_idx}"
+        rr.log(kf_image_path, rr.CoordinateFrame(f"tf#/{str(kf_cam_log_path).lstrip('/')}/pinhole"), static=True)
+        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(kf_image_path, kf.rgb)
 
         # Pointmap, confidence and depth are 2D-only: under a static copy of the Pinhole, outside the 3D tree.
         kf_maps_path: str = f"{KEYFRAME_MAPS_PATH}/keyframe-{kf.kf_idx}"

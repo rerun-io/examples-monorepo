@@ -52,7 +52,9 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
 
     Both 3D views show ``parent_log_path`` and nothing else: the entity layout
     keeps 2D-only maps outside it (``CURRENT_MAPS_PATH``, ``LAST_KEYFRAME_PATH``,
-    ``KEYFRAME_MAPS_PATH``), so the rule needs no exclusions.
+    ``KEYFRAME_MAPS_PATH``). The keyframe images in their frustums (``keyframe_images``,
+    each in its Pinhole's frame) show in the Follow view only: in the Overview they
+    are a few pixels wide, and 90 of them cost the viewer ~3 ms a frame.
 
     Args:
         parent_log_path: Root log path for all Rerun entities.
@@ -64,25 +66,16 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
     root: str = f"/{str(parent_log_path).lstrip('/')}"
     camera_path: str = f"{root}/current_camera"
     contents_3d: str = f"+ {root}/**"
-    # The camera path is logged one segment per frame; show every segment from the start up to the cursor.
-    path_history: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
-        [
-            rrb.VisibleTimeRange(name, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
-            for name in (FRAME_TIMELINE, VIDEO_TIMELINE)
-        ]
-    )
     overview = rrb.Spatial3DView(
         name="Overview",
         origin="/",
-        contents=contents_3d,
-        overrides={f"{root}/path": path_history},
+        contents=[contents_3d, f"- {root}/keyframe_images/**"],
         eye_controls=rrb.EyeControls3D(spin_speed=0.25),
     )
     follow = rrb.Spatial3DView(
         name="Follow",
         origin=camera_path,
         contents=contents_3d,
-        overrides={f"{root}/path": path_history},
         line_grid=rrb.LineGrid3D(visible=False),
         eye_controls=rrb.EyeControls3D(
             kind=rrb.Eye3DKind.Orbital,

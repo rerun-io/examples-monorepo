@@ -133,9 +133,9 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
     assert origins_2d.count("/video") == 1
     assert "/world/current_camera/pinhole/image" not in origins_2d
     assert sorted(str(view.name) for view in views_3d) == ["Follow", "Overview"]
-    for view in views_3d:
-        # One static rule: the entity layout keeps 2D-only maps out of /world, so nothing needs excluding.
-        assert view.contents == "+ /world/**"
+    # The entity layout keeps 2D-only maps out of /world; the Overview also leaves the keyframe images out.
+    contents: dict[str, object] = {str(view.name): view.contents for view in views_3d}
+    assert contents == {"Follow": "+ /world/**", "Overview": ["+ /world/**", "- /world/keyframe_images/**"]}
 
     sent: list[object] = []
     monkeypatch.setattr(async_logger.rr, "log", lambda *_a, **_k: None)
@@ -157,8 +157,8 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
 
 
 def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under /world only the current camera's image and depth and each keyframe's image are 2D, each under a Pinhole
-    that has a value from the run's first time point; every other map lives outside /world."""
+    """Under /world only the current camera's image and depth and each keyframe's image are 2D, each in a Pinhole's
+    frame that has a value from the run's first time point; every other map lives outside /world."""
     logged: list[tuple[str, str, int]] = []
     frame_now: list[int] = [-1]
 
@@ -166,7 +166,14 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
         if timeline == "frame" and sequence is not None:
             frame_now[0] = sequence
 
-    monkeypatch.setattr(async_logger.rr, "log", lambda path, entity, *_a, **_k: logged.append((str(path), type(entity).__name__, frame_now[0])))
+    frames_of: dict[str, str] = {}
+
+    def _log(path: object, entity: object, *_a: object, **_k: object) -> None:
+        logged.append((str(path), type(entity).__name__, frame_now[0]))
+        if isinstance(entity, rr.CoordinateFrame):
+            frames_of[str(path)] = str(entity.frame.pa_array.to_pylist()[0])  # pyrefly: ignore
+
+    monkeypatch.setattr(async_logger.rr, "log", _log)
     monkeypatch.setattr(async_logger.rr, "set_time", _set_time)
     identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
     rgb: Float32[ndarray, "h w 3"] = np.full((H, W, 3), 0.5, dtype=np.float32)
@@ -184,13 +191,17 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
     assert under_world_2d == {
         "world/current_camera/pinhole/image",
         "world/current_camera/pinhole/depth",
-        "world/keyframes/keyframe-5/pinhole/image",
+        "world/keyframe_images/keyframe-5",
     }
+    # The keyframe image sits outside the camera subtree, in its Pinhole's frame (so a view can leave all of them out).
+    assert frames_of["world/keyframe_images/keyframe-5"] == "tf#/world/keyframes/keyframe-5/pinhole"
     for image_path in under_world_2d:
-        pinhole_path: str = image_path.rsplit("/", 1)[0]
+        pinhole_path: str = frames_of[image_path].removeprefix("tf#/") if image_path in frames_of else image_path.rsplit("/", 1)[0]
         pinhole_frames: list[int] = [frame for path, kind, frame in logged if path == pinhole_path and kind in {"Pinhole", "PinholeWithDistortion"}]
         assert pinhole_frames and min(pinhole_frames) == 0, f"{pinhole_path} needs a Pinhole from the first time point"
-    keyframe_image_frames: list[int] = [frame for path, _, frame in logged if path == "world/keyframes/keyframe-5/pinhole/image"]
+    keyframe_image_frames: list[int] = [
+        frame for path, kind, frame in logged if path == "world/keyframe_images/keyframe-5" and kind in images_2d
+    ]
     assert keyframe_image_frames == [40], "the keyframe image is logged at the keyframe's own time"
 
     logged_paths: set[str] = {path for path, _, _ in logged}
@@ -201,8 +212,8 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
     assert not any(kind == "Points3D" for _, kind, _ in logged)
 
 
-def test_camera_path_logs_one_segment_per_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each frame after the first logs one two-point segment at /world/path; the blueprint shows the history."""
+def test_camera_path_logs_one_polyline_per_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each frame logs its window's polyline so far at /world/path/<k>; a full window starts the next at its last point."""
     strips: list[tuple[str, int]] = []
 
     def _capture(path: str, entity: object, *_a: object, **_k: object) -> None:
@@ -217,11 +228,13 @@ def test_camera_path_logs_one_segment_per_frame(monkeypatch: pytest.MonkeyPatch)
     X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
     C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
     logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
+    monkeypatch.setattr(async_logger, "PATH_WINDOW_FRAMES", 2)
     for frame_idx in range(5):
         logger._handle_current_frame(
             LogCurrentFrame(frame_idx=frame_idx, timestamp_ns=None, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
         )
-    assert strips == [("world/path", 2)] * 4
+    # Windows of 2 segments: frames 1-2 grow window 0, frames 3-4 grow window 1 from frame 2's point.
+    assert strips == [("world/path/0", 2), ("world/path/0", 3), ("world/path/1", 2), ("world/path/1", 3)]
 
 
 
@@ -293,7 +306,7 @@ def test_current_frame_panels_follow_the_wall_clock_rate(monkeypatch: pytest.Mon
     assert sorted({frame for path, frame in logged if path == "world/current_camera/pinhole/image"}) == frames_with_panels
     assert sorted({frame for path, frame in logged if path == "/current_maps/confidence"}) == frames_with_panels
     assert sorted({frame for path, frame in logged if path == "world/current_camera"}) == [0, 1, 2]
-    assert sorted({frame for path, frame in logged if path == "world/path"}) == [1, 2]
+    assert sorted({frame for path, frame in logged if path == "world/path/0"}) == [1, 2]
 
 
 def test_logger_crash_is_raised_on_exit(monkeypatch: pytest.MonkeyPatch) -> None:
