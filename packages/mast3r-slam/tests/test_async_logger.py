@@ -186,11 +186,15 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
         "world/current_camera/pinhole/depth",
         "world/keyframes/keyframe-5/pinhole/image",
     }
+    # No explicit CoordinateFrame anywhere (see simplecv.rerun_eye_controls).
+    assert not any(kind == "CoordinateFrame" for _, kind, _ in logged)
     for image_path in under_world_2d:
         pinhole_path: str = image_path.rsplit("/", 1)[0]
         pinhole_frames: list[int] = [frame for path, kind, frame in logged if path == pinhole_path and kind in {"Pinhole", "PinholeWithDistortion"}]
         assert pinhole_frames and min(pinhole_frames) == 0, f"{pinhole_path} needs a Pinhole from the first time point"
-    keyframe_image_frames: list[int] = [frame for path, _, frame in logged if path == "world/keyframes/keyframe-5/pinhole/image"]
+    keyframe_image_frames: list[int] = [
+        frame for path, kind, frame in logged if path == "world/keyframes/keyframe-5/pinhole/image" and kind in images_2d
+    ]
     assert keyframe_image_frames == [40], "the keyframe image is logged at the keyframe's own time"
 
     logged_paths: set[str] = {path for path, _, _ in logged}
@@ -201,8 +205,8 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
     assert not any(kind == "Points3D" for _, kind, _ in logged)
 
 
-def test_camera_path_logs_one_segment_per_frame(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each frame after the first logs one two-point segment at /world/path; the blueprint shows the history."""
+def test_camera_path_logs_one_polyline_per_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each frame logs its window's polyline so far at /world/path/<k>; a full window starts the next at its last point."""
     strips: list[tuple[str, int]] = []
 
     def _capture(path: str, entity: object, *_a: object, **_k: object) -> None:
@@ -217,11 +221,13 @@ def test_camera_path_logs_one_segment_per_frame(monkeypatch: pytest.MonkeyPatch)
     X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
     C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
     logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
+    monkeypatch.setattr(async_logger, "PATH_WINDOW_FRAMES", 2)
     for frame_idx in range(5):
         logger._handle_current_frame(
             LogCurrentFrame(frame_idx=frame_idx, timestamp_ns=None, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
         )
-    assert strips == [("world/path", 2)] * 4
+    # Windows of 2 segments: frames 1-2 grow window 0, frames 3-4 grow window 1 from frame 2's point.
+    assert strips == [("world/path/0", 2), ("world/path/0", 3), ("world/path/1", 2), ("world/path/1", 3)]
 
 
 
@@ -293,7 +299,7 @@ def test_current_frame_panels_follow_the_wall_clock_rate(monkeypatch: pytest.Mon
     assert sorted({frame for path, frame in logged if path == "world/current_camera/pinhole/image"}) == frames_with_panels
     assert sorted({frame for path, frame in logged if path == "/current_maps/confidence"}) == frames_with_panels
     assert sorted({frame for path, frame in logged if path == "world/current_camera"}) == [0, 1, 2]
-    assert sorted({frame for path, frame in logged if path == "world/path"}) == [1, 2]
+    assert sorted({frame for path, frame in logged if path == "world/path/0"}) == [1, 2]
 
 
 def test_logger_crash_is_raised_on_exit(monkeypatch: pytest.MonkeyPatch) -> None:

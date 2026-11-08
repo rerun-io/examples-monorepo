@@ -15,8 +15,14 @@ ONNX Runtime CUDA or a cached machine-local TensorRT engine (dynamic batch
 
 ```bash
 pixi run -e mvs --frozen mvs-catalog-depth   # depth demo (downloads the model on first use)
-pixi run -e mvs --frozen mvs-live-mesh       # catalog video streaming only, no model
+pixi run -e mvs --frozen mvs-live-mesh       # depth fused into a TSDF mesh, logged as it grows
 ```
+
+The live mesh fuses each depth frame into a sparse colour TSDF (`packages/tsdf-rs`) at the catalog pose and logs
+it with `simplecv.rerun_live_mesh.LiveMeshLog`: the changed blocks on the timeline while the segment plays (scrub
+back to watch it grow), one mesh from the segment's last depth frame. The source video is relayed once as the
+catalog's own AV1 VideoStream. A run meshes exactly one segment (`--data.segments <id>`): segments restart
+their frame index at 0, so two in one recording would mix their mesh histories.
 
 The model artifact lives in the public HF repo `pablovela5620/mvs-depth`;
 `mvs-download-depth-model` fetches it with `hf download` (no login needed).
