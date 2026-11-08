@@ -5,7 +5,7 @@ import multiprocessing as mp
 import lietorch_mojo as lietorch
 import torch
 
-from mast3r_slam.frame import Frame, SharedKeyframes
+from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 
 
 def test_update_world_sim3_cams_marks_keyframes_dirty() -> None:
@@ -73,5 +73,29 @@ def test_update_pointmap_keeps_the_backend_pose() -> None:
         assert torch.equal(keyframes.X[0], frame.X_canon)
         assert torch.equal(keyframes.C[0], frame.C)
         assert (int(keyframes.N[0]), int(keyframes.N_updates[0])) == (2, 2)
+    finally:
+        manager.shutdown()
+
+
+def test_reloc_requests_are_counted_and_a_late_success_never_overwrites_terminated() -> None:
+    """The backend relocalises only while a request is pending, and its TRACKING after a success must not undo a
+    TERMINATED the frontend set meanwhile (both left the backend running after the run: the CLI hung, the app leaked it)."""
+    from mast3r_slam.frame import Mode
+
+    manager = mp.Manager()
+    try:
+        states = SharedStates(manager, 16, 16, device="cpu")
+        assert not states.has_reloc_request()
+        states.queue_reloc()
+        assert states.has_reloc_request()
+        states.dequeue_reloc()
+        assert not states.has_reloc_request()
+
+        states.set_mode(Mode.RELOC)
+        assert states.set_mode_if(Mode.RELOC, Mode.TRACKING)
+        assert states.get_mode() is Mode.TRACKING
+        states.set_mode(Mode.TERMINATED)
+        assert not states.set_mode_if(Mode.RELOC, Mode.TRACKING)
+        assert states.get_mode() is Mode.TERMINATED
     finally:
         manager.shutdown()
