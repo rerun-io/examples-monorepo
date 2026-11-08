@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
+from models.pos_embed import RoPE2D
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.ops import conventions
@@ -16,6 +17,26 @@ from mast3r_slam.config import config
 from mast3r_slam.frame import Frame
 from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
+
+
+class FixedLengthRoPE2D(RoPE2D):
+    """croco's pytorch RoPE2D with its cos/sin table sized once, for the largest patch grid the model takes.
+
+    The stock module sizes the table from ``int(positions.max())`` on every call: a GPU->CPU sync per query and
+    key in every attention layer, about 190 per tracked frame, each of which stops the CPU from queueing kernels
+    ahead. Rows of the table do not depend on its length, so the output is the same.
+    """
+
+    def __init__(self, freq: float, F0: float, max_positions: int) -> None:
+        super().__init__(freq, F0)
+        self.max_positions: int = max_positions
+
+    def forward(self, tokens: Float[Tensor, "b h n d"], positions: Int[Tensor, "b n 2"]) -> Float[Tensor, "b h n d"]:
+        cos, sin = self.get_cos_sin(tokens.size(3) // 2, self.max_positions, tokens.device, tokens.dtype)
+        y, x = tokens.chunk(2, dim=-1)
+        y = self.apply_rope1d(y, positions[:, :, 0], cos, sin)
+        x = self.apply_rope1d(x, positions[:, :, 1], cos, sin)
+        return torch.cat((y, x), dim=-1)
 
 
 def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt3R:
@@ -31,6 +52,13 @@ def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt
     """
     weights_path = "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" if path is None else path
     model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
+    # Without croco's compiled cuRoPE2D the model falls back to the pytorch RoPE2D; swap in the sync-free one.
+    if type(model.rope) is RoPE2D:
+        max_positions: int = max(model.patch_embed.img_size) // model.patch_embed.patch_size[0]
+        rope: FixedLengthRoPE2D = FixedLengthRoPE2D(model.rope.base, model.rope.F0, max_positions)
+        for module in model.modules():
+            if getattr(module, "rope", None) is not None:
+                module.rope = rope
     return model
 
 
