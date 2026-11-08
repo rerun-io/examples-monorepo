@@ -26,6 +26,7 @@ from mast3r.model import AsymmetricMASt3R
 
 from mast3r_slam.api.inference import APPLICATION_ID, SlamSettings, load_slam_dataset, load_slam_model, run_slam_pipeline
 from mast3r_slam.mast3r_utils import prepare_trt_engines
+from mast3r_slam.rerun_log_utils import LOG_PATH
 
 EXAMPLE_VIDEOS: list[str] = ["data/livingroom-tour.mp4", "data/normal-apt-tour.mp4"]
 
@@ -123,7 +124,7 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
 
         # The generator exported the keyframes while the shared buffers were alive; zip them for the download.
         zip_output_path: Path = run_dir / "nerfstudio-output.zip"
-        rr.log("world/logs", rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
+        rr.log(LOG_PATH, rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
         shutil.make_archive(
             base_name=str(zip_output_path.with_suffix("")),
             format="zip",
@@ -131,7 +132,7 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
             base_dir="nerfstudio-output",
         )
 
-        rr.log("world/logs", rr.TextLog("Finished processing", level="INFO"))
+        rr.log(LOG_PATH, rr.TextLog("Finished processing", level="INFO"))
         yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
 
     return streaming_mast3r_slam_fn

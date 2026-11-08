@@ -21,6 +21,7 @@ from mast3r_slam.geometry import (
 )
 from mast3r_slam.mast3r_utils import mast3r_match_asymmetric
 from mast3r_slam.nonlinear_optimizer import check_convergence, huber
+from mast3r_slam.rerun_log_utils import LOG_PATH
 
 
 class FrameTracker:
@@ -106,7 +107,7 @@ class FrameTracker:
 
         match_frac: Float[Tensor, ""] = valid_opt.sum() / valid_opt.numel()
         if match_frac < self.cfg["min_match_frac"]:
-            rr.log("/world/logs", rr.TextLog(f"Skipped frame {frame.frame_id}", level="DEBUG"))
+            rr.log(LOG_PATH, rr.TextLog(f"Skipped frame {frame.frame_id}", level="DEBUG"))
             return False, True
 
         try:
@@ -134,7 +135,7 @@ class FrameTracker:
         except BeartypeException:
             raise
         except torch.linalg.LinAlgError:
-            rr.log("/world/logs", rr.TextLog(f"Cholesky failed {frame.frame_id}", level="WARN"))
+            rr.log(LOG_PATH, rr.TextLog(f"Cholesky failed {frame.frame_id}", level="WARN"))
             return False, True
 
         frame.world_sim3_cam = world_sim3_camf
@@ -302,7 +303,7 @@ class FrameTracker:
             self.cfg["delta_norm"],
         )
         if n_iters == self.cfg["max_iters"]:
-            rr.log("/world/logs", rr.TextLog("Max iters reached", level="DEBUG"))
+            rr.log(LOG_PATH, rr.TextLog("Max iters reached", level="DEBUG"))
         camk_sim3_camf: lietorch.Sim3 = lietorch.Sim3(Twc[1:2])
 
         # Assign new pose based on relative pose
@@ -398,7 +399,7 @@ class FrameTracker:
             old_cost = new_cost
 
             if step == self.cfg["max_iters"] - 1:
-                rr.log("/world/logs", rr.TextLog(f"Max iters reached {last_error}", level="DEBUG"))
+                rr.log(LOG_PATH, rr.TextLog(f"Max iters reached {last_error}", level="DEBUG"))
 
         # Assign new pose based on relative pose
         world_sim3_camf_new = world_sim3_camk * camk_sim3_camf

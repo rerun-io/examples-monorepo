@@ -83,6 +83,8 @@ from mast3r_slam.mast3r_utils import (
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
 from mast3r_slam.rerun_log_utils import (
     FRAME_TIMELINE,
+    LOG_PATH,
+    PARENT_LOG_PATH,
     VIDEO_TIMELINE,
     create_blueprints,
     log_video_for_dataset,
@@ -107,7 +109,6 @@ def format_time(seconds: float) -> str:
 DEVICE: str = "cuda:0"
 APPLICATION_ID: str = "mast3r-slam"
 """Recording id of the Gradio app (the CLI's comes from ``--rr-config.application-id``)."""
-PARENT_LOG_PATH: Path = Path("world")
 
 
 @dataclass
@@ -223,10 +224,9 @@ def run_slam_pipeline(
         ValueError: If the config asks for calibration and the dataset has none.
     """
     # ── Load SLAM config and dataset ───────────────────────────────────────
-    log_path: str = f"{PARENT_LOG_PATH}/logs"
     dataset: MonocularDataset = load_slam_dataset(settings)
-    rr.log(log_path, rr.TextLog(f"Dataset: {settings.dataset}", level="INFO"))
-    rr.log(log_path, rr.TextLog(f"Config: {config}", level="DEBUG"))
+    rr.log(LOG_PATH, rr.TextLog(f"Dataset: {settings.dataset}", level="INFO"))
+    rr.log(LOG_PATH, rr.TextLog(f"Config: {config}", level="DEBUG"))
     frame_timestamps_ns: Int[ndarray, "num_frames"] | None = log_video_for_dataset(dataset)
 
     # ── Rerun visualisation setup ──────────────────────────────────────────
@@ -427,7 +427,7 @@ def run_slam_pipeline(
             # FPS text log
             if i % 30 == 0 and i > 0:
                 FPS: float = i / (time.time() - fps_timer)
-                event_queue.put(LogText(path=log_path, message=f"FPS: {FPS:.1f}"))
+                event_queue.put(LogText(path=LOG_PATH, message=f"FPS: {FPS:.1f}"))
             i += 1
 
             yield f"Processing frame {i}/{n_frames}"
@@ -436,8 +436,8 @@ def run_slam_pipeline(
         # Nerfstudio export MUST happen before ctx.join() / __exit__ because
         # SharedKeyframes uses mp.Manager-backed values (e.g. n_size) that
         # become invalid after the manager shuts down.
-        event_queue.put(LogText(path=log_path, message=f"Inference time: {format_time(timer() - start_time)}"))
-        event_queue.put(LogText(path=log_path, message=f"Processed {len(keyframes)} keyframes"))
+        event_queue.put(LogText(path=LOG_PATH, message=f"Inference time: {format_time(timer() - start_time)}"))
+        event_queue.put(LogText(path=LOG_PATH, message=f"Processed {len(keyframes)} keyframes"))
 
         if settings.ns_save_path is not None:
             pcd = save_kf_to_nerfstudio(
@@ -474,4 +474,4 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     for _msg in run_slam_pipeline(inf_config, model, rr_application_id=rr_app_id):
         pass
 
-    rr.log(f"{PARENT_LOG_PATH}/logs", rr.TextLog("Done", level="INFO"))
+    rr.log(LOG_PATH, rr.TextLog("Done", level="INFO"))

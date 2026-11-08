@@ -15,6 +15,10 @@ from simplecv.rerun_log_utils import log_video
 
 from mast3r_slam.dataloader import MonocularDataset, MP4Dataset
 
+PARENT_LOG_PATH: Path = Path("world")
+"""Root of everything that projects in 3D; the blueprint's 3D views show it."""
+LOG_PATH: str = f"/{PARENT_LOG_PATH}/logs"
+"""Text logs of the frontend, the backend and the app (the blueprint's Logs view)."""
 FRAME_TIMELINE: str = "frame"
 VIDEO_TIMELINE: str = "video_time"
 # The source video, logged once as a VideoStream. Camera panels show the model's cropped frame instead.

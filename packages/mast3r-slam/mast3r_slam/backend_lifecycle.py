@@ -39,6 +39,7 @@ from mast3r_slam.config import config, load_config
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates
 from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.mast3r_utils import load_retriever, use_pair_decoder_engine
+from mast3r_slam.rerun_log_utils import LOG_PATH
 from mast3r_slam.retrieval_database import RetrievalDatabase
 
 try:
@@ -288,13 +289,13 @@ def relocalization(
         keyframes.append(frame)
         n_kf: int = len(keyframes)
         frame_idx: list[int] = [n_kf - 1] * len(kf_idx)
-        rr.log("/world/logs", rr.TextLog(f"Relocalizing against kf {n_kf - 1} and {kf_idx}", level="INFO"))
+        rr.log(LOG_PATH, rr.TextLog(f"Relocalizing against kf {n_kf - 1} and {kf_idx}", level="INFO"))
         if not factor_graph.add_factors(frame_idx, kf_idx, config["reloc"]["min_match_frac"], is_reloc=config["reloc"]["strict"]):
             keyframes.pop_last()
-            rr.log("/world/logs", rr.TextLog("Failed to relocalize", level="WARN"))
+            rr.log(LOG_PATH, rr.TextLog("Failed to relocalize", level="WARN"))
             return False
         _retrieve(retrieval_database, frame, add_after_query=True)
-        rr.log("/world/logs", rr.TextLog("Relocalized successfully", level="INFO"))
+        rr.log(LOG_PATH, rr.TextLog("Relocalized successfully", level="INFO"))
         # Copy the pose from the matched keyframe as initial estimate.
         keyframes.update_world_sim3_cams(
             lietorch.Sim3(keyframes.world_sim3_cam[kf_idx[0]].clone()),
@@ -382,7 +383,7 @@ def run_backend(
         lc_inds: set[int] = set(retrieval_inds)
         lc_inds.discard(idx - 1)
         if len(lc_inds) > 0:
-            rr.log("/world/logs", rr.TextLog(f"Database retrieval {idx}: {lc_inds}", level="INFO"))
+            rr.log(LOG_PATH, rr.TextLog(f"Database retrieval {idx}: {lc_inds}", level="INFO"))
 
         # Deduplicate and remove self-references.
         kf_idx_set: set[int] = set(retrieval_inds)
