@@ -19,6 +19,10 @@ NUM_FIX: int = 1
 SUMS: int = 119
 """The float32 sums per edge that the step kernel writes (gn.mojo's SUMS: 105 Hessian entries, 7 + 7 gradient)."""
 THREADS: int = 128
+RAYS_TRACKING_HUBER: float = 1.345
+"""Huber threshold the rays kernel fixes (``_huber`` in ``gn.mojo``): :func:`track_pose_rays` cannot take another."""
+RAYS_TRACKING_REL_ERROR: float = 1e-3
+"""The only ``tracking.rel_error`` :func:`track_pose_rays` accepts: it stops on the step norm alone, never on the cost."""
 """gn.mojo's THREADS."""
 
 
@@ -79,6 +83,47 @@ def gauss_newton_rays(
     # Rays have no intrinsics: Twc stands in for K, whose pointer the rays kernel never reads.
     scalars = (0, 0, 0, sigma_ray, sigma_dist, C_thresh, Q_thresh, 0.0)
     return _gauss_newton("gn_rays_step", scalars, Twc, (Xs, Cs, Twc, idx_ii2jj, valid_match, Q), ii, jj, max_iter, delta_thresh)
+
+
+def track_pose_rays(
+    Twc: Float32[Tensor, "2 8"],
+    Xs: Float32[Tensor, "2 n 3"],
+    valid: Bool[Tensor, "1 n 1"],
+    Q: Float32[Tensor, "1 n 1"],
+    sigma_ray: float,
+    sigma_dist: float,
+    max_iter: int,
+    delta_thresh: float,
+) -> int:
+    """Tracking's pose solve (``FrameTracker.opt_pose_ray_dist_sim3``) on the rays kernels: a two-pose problem.
+
+    Pose 0 is the keyframe, fixed; pose 1 is the frame relative to it, optimised in place. Row k of ``Xs[1]`` is
+    the frame point matched to keyframe point ``Xs[0][k]``; ``valid`` already holds the confidence and quality
+    tests, so the kernel's own thresholds are switched off. Returns the number of iterations run.
+
+    Raises:
+        torch.linalg.LinAlgError: When the system is not positive definite, as ``torch.linalg.cholesky`` did.
+    """
+    device: torch.device = Twc.device
+    num_points: int = Xs.shape[1]
+    rows: Tensor = torch.arange(2, device=device)
+    idx: Tensor = torch.arange(num_points, device=device).view(1, num_points)
+    cs: Tensor = Xs.new_ones(2, num_points, 1)
+    ii_opt: Tensor = torch.tensor([-NUM_FIX])
+    jj_opt: Tensor = torch.tensor([0])
+    blocks: int = max(1, min(2048, -(-num_points // (THREADS * 8))))
+    sums: Tensor = torch.empty(1, SUMS, device=device)
+    dx_host: Tensor = torch.zeros(1, 7)
+    scalars: tuple[int | float, ...] = (blocks, 0, 0, 0, sigma_ray, sigma_dist, 0.0, -1.0, 0.0)
+    for iteration in range(max_iter):
+        sums.zero_()
+        launch("gn_rays_step", scalars, (Twc, Xs, cs, Twc, rows[:1], rows[1:], idx, valid, Q, sums))
+        if not launch("gn_solve", (), (sums.cpu(), ii_opt, jj_opt, dx_host)):
+            raise torch.linalg.LinAlgError("tracking pose solve: the system is not positive definite")
+        pose_retr(Twc, dx_host.to(device), NUM_FIX)
+        if float(dx_host.norm()) < delta_thresh:
+            return iteration + 1
+    return max_iter
 
 
 def gauss_newton_calib(

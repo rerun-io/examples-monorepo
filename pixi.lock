@@ -30758,11 +30758,12 @@ environments:
       - conda_source: asmk-rs[ccc7d3d7] @ packages/asmk-rs
       - conda_source: asmk-src[90d69584] @ recipes/asmk-src
       - conda_source: depth-png[21849d2e] @ packages/depth-png
-      - conda_source: mast3r-src[d2a36135] @ recipes/mast3r-src
+      - conda_source: mast3r-src[bd650267] @ recipes/mast3r-src
       - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/mast3r-slam
       - pypi: ./packages/simplecv
+      - pypi: ./packages/trtkit
       - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/94/050e35c9febf6dd2fce4a76be587ae4a323964865700467d9d7b082f7133/botocore-1.43.117-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/9b/81c8c39d95acc791a13de90434478d2952b83ad2a713cc0f92d492570ca2/rosbags-0.11.9-py3-none-any.whl
@@ -31437,11 +31438,12 @@ environments:
       - conda_source: asmk-rs[ccc7d3d7] @ packages/asmk-rs
       - conda_source: asmk-src[90d69584] @ recipes/asmk-src
       - conda_source: depth-png[21849d2e] @ packages/depth-png
-      - conda_source: mast3r-src[d2a36135] @ recipes/mast3r-src
+      - conda_source: mast3r-src[bd650267] @ recipes/mast3r-src
       - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/mast3r-slam
       - pypi: ./packages/simplecv
+      - pypi: ./packages/trtkit
       - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/94/050e35c9febf6dd2fce4a76be587ae4a323964865700467d9d7b082f7133/botocore-1.43.117-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/9b/81c8c39d95acc791a13de90434478d2952b83ad2a713cc0f92d492570ca2/rosbags-0.11.9-py3-none-any.whl
@@ -96686,6 +96688,25 @@ packages:
   run_exports: {}
   size: 11920563
   timestamp: 1790670380845
+- conda: https://prefix.dev/conda-forge/linux-64/git-2.56.0-pl5440hd619e0c_1.conda
+  sha256: 0f862fe73023b7bc8fb8fe19dc84006b5590c7e2a5a3f4abcfc2a7b7b41234df
+  md5: a646c171e720f77647604702cc6eff49
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libcurl >=8.23.0,<9.0a0
+  - libexpat >=2.9.0,<3.0a0
+  - libgcc >=15
+  - libiconv >=1.18,<2.0a0
+  - libzlib >=1.3.2,<2.0a0
+  - openssl >=3.5.9,<4.0a0
+  - pcre2 >=10.49,<10.50.0a0
+  - perl 5.*
+  constrains:
+  - __glibc >=2.17
+  license: GPL-2.0-or-later and LGPL-2.1-or-later
+  run_exports: {}
+  size: 13001325
+  timestamp: 1794045439538
 - conda: https://prefix.dev/conda-forge/linux-64/gl2ps-1.4.2-h36e74d4_2.conda
   sha256: e28a214c71590a09f75f1aaccf5795bbcfb99b00c2d6ef55d34320b4f47485bd
   md5: 787c780ff43f9f79d78d01e476b81a7c
@@ -114267,6 +114288,21 @@ packages:
     - pcre2 >=10.47,<10.48.0a0
   size: 1222481
   timestamp: 1763655398280
+- conda: https://prefix.dev/conda-forge/linux-64/pcre2-10.49-h8b3dc9c_0.conda
+  sha256: 63784a2dd0231cf8944b31a781b4ebab48954a94cd455d13585874370e46b658
+  md5: db724d35be3a1c7b6cd49b7a03de4027
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - bzip2 >=1.0.8,<2.0a0
+  - libgcc >=15
+  - libzlib >=1.3.2,<2.0a0
+  license: BSD-3-Clause
+  license_family: BSD
+  run_exports:
+    weak:
+    - pcre2 >=10.49,<10.50.0a0
+  size: 1234818
+  timestamp: 1793902484896
 - conda: https://prefix.dev/conda-forge/linux-64/perl-5.44.0-0_h7cc23a3_perl5.conda
   build_number: 0
   sha256: 37b594b2bfc5691757ecd657ccc7d921ff30f2931600a5515f73da023981859b
@@ -164658,7 +164694,7 @@ packages:
 - conda_source: image-gs[e0f38d3e] @ recipes/hexels-src
   variants:
     target_platform: noarch
-- conda_source: mast3r-src[d2a36135] @ recipes/mast3r-src
+- conda_source: mast3r-src[bd650267] @ recipes/mast3r-src
   variants:
     target_platform: noarch
   depends:
@@ -164668,7 +164704,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
   - conda: https://prefix.dev/conda-forge/linux-64/c-ares-1.34.9-hebe6cf0_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/git-2.56.0-pl5440h3795e67_0.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/git-2.56.0-pl5440hd619e0c_1.conda
   - conda: https://prefix.dev/conda-forge/linux-64/icu-79.1-py314hb486520_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/keyutils-1.6.3-h7cc23a3_1.conda
   - conda: https://prefix.dev/conda-forge/linux-64/krb5-1.22.2-hbc21106_2.conda
@@ -164688,7 +164724,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
   - conda: https://prefix.dev/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/patch-2.8-h280c20c_1003.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/pcre2-10.47-h8b3dc9c_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/pcre2-10.49-h8b3dc9c_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/perl-5.44.0-1_h7cc23a3_perl5.conda
   - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
   - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
@@ -165578,6 +165614,7 @@ packages:
   - lietorch-mojo @ ./packages/lietorch-mojo
   - natsort
   - pykdtree
+  - trtkit @ ./packages/trtkit
   requires_python: '>=3.11'
 - pypi: ./packages/metrictrail
   name: metrictrail

@@ -41,8 +41,13 @@ pixi run -e mast3r-slam --frozen mast3r-slam-app
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam --frozen python tools/mast3r_slam_inference.py \
-    --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml
+    base --dataset data/normal-apt-tour.mp4 --img-size 512
 ```
+
+The first argument names a SLAM preset (`base`, `fast`, `test`, `calib`, `eval_calib`, `eval_no_calib`, `eth3d`;
+`base` when omitted; they live in `mast3r_slam/config.py`). Override any field with `--slam.<group>.<field>`, e.g.
+`fast --slam.tracking.max-iters 30`; `<preset> --help` lists every field with that preset's value. A recording
+carries the resolved config as its `slam_config` property.
 
 ## First Run
 
@@ -58,11 +63,9 @@ Subsequent runs skip all install steps (idempotent checks).
 ## Notes
 
 - **Linux only** with an NVIDIA GPU (CUDA required)
-- Python 3.11 (pinned for lietorch compatibility)
 - curope (CUDA RoPE2D) is skipped; falls back to a slower PyTorch implementation.
   **TODO:** Add curope as a pixi-build workspace package (`packages/curope/`) to enable
   the faster CUDA kernel from `naver/croco/models/curope/`.
-- `pyrealsense2` is optional (only needed for live RealSense camera input)
 
 ## Acknowledgements
 

@@ -1930,6 +1930,8 @@ asmk-rs = { path = "packages/asmk-rs" }
 
 [feature.mast3r-slam.pypi-dependencies]
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
+# The tracking forward runs as a bf16 TensorRT engine (packages/trtkit); tensorrt-cu13 comes from the cuda feature.
+trtkit = { path = "packages/trtkit", editable = true }
 einops = ">=0.8.0"
 evo = "*"
 natsort = ">=8.4"
@@ -1939,6 +1941,10 @@ pyaml = "*"
 
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
+# Cap the CPU thread pools of every mast3r-slam process (frontend, backend, logger): with one pool per core in
+# each, ~350 mostly spinning threads made example-fast 25.0 ms/frame; capped, 15.2.
+OMP_NUM_THREADS = "4"
+OPENBLAS_NUM_THREADS = "1"
 
 # Its tests import lietorch_mojo and mast3r_slam.mojo_backend, so the test lanes build both extensions first.
 [feature.mast3r-slam.tasks.tests]
@@ -1986,19 +1992,27 @@ outputs = [
 ]
 
 [feature.mast3r-slam.tasks._mast3r-slam-download-example-data]
-cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/"
+# The tours are mast3r-slam's own; pool and the IMG_049x clips are the dpvo / MetricTrail examples, so the same
+# clip can be compared across the three apps.
+cmd = """hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/ \
+  && hf download pablovela5620/dpvo-example-data iphone/pool.mp4 movies/IMG_0493.mp4 movies/IMG_0494.mp4 movies/IMG_0495.mp4 \
+  --repo-type dataset --local-dir data/"""
 cwd = "packages/mast3r-slam"
 outputs = [
     "packages/mast3r-slam/data/normal-apt-tour.mp4",
     "packages/mast3r-slam/data/livingroom-tour.mp4",
+    "packages/mast3r-slam/data/iphone/pool.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0493.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0494.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0495.mp4",
 ]
-description = "Download example video data"
+description = "Download the example videos (mast3r-slam's tours and the dpvo / MetricTrail clips)"
 
 # ── Test baseline task ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-generate-test-baseline]
-cmd = """python tools/mast3r_slam_inference.py \
+cmd = """python tools/mast3r_slam_inference.py test \
   --dataset data/normal-apt-tour.mp4 --img-size 224 \
-  --config config/test.yaml --max-frames 30 --no-viz \
+  --max-frames 30 \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
@@ -2011,7 +2025,7 @@ outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.mast3r-slam-example-quick]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --max-frames 100"
+cmd = "python tools/mast3r_slam_inference.py fast --dataset data/normal-apt-tour.mp4 --img-size 224 --max-frames 100"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -2021,7 +2035,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-fast]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
+cmd = "python tools/mast3r_slam_inference.py fast --dataset data/normal-apt-tour.mp4 --img-size 224"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -2031,7 +2045,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-base]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
+cmd = "python tools/mast3r_slam_inference.py base --dataset data/normal-apt-tour.mp4 --img-size 512"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",

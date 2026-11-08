@@ -122,3 +122,15 @@ def test_latest_wins_worker_coalesces_pending_requests_and_runs_the_last_on_clos
     assert handled[0] == 1
     assert handled[-1] == 5
     assert 2 not in handled and 3 not in handled
+
+
+def test_latest_wins_worker_re_raises_a_crash_on_close() -> None:
+    """A request that raises ends the worker; close() raises it on the caller's thread instead of dropping it."""
+
+    def _handle(_request: int) -> None:
+        raise ValueError("surface failed")
+
+    worker: LatestWinsWorker[int] = LatestWinsWorker(_handle, name="test-latest-wins-crash")
+    worker.submit(1)
+    with pytest.raises(ValueError, match="surface failed"):
+        worker.close(timeout=5.0)
