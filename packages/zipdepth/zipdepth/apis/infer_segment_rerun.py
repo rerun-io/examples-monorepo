@@ -52,10 +52,9 @@ from zipdepth.apis.eval_catalog import (
     score_footprint_split,
     score_metric_depth,
 )
-from zipdepth.catalog.builders import CudaSampleBuilder
+from zipdepth.catalog.builders import eval_sample_builder
 from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, SegmentRow, load_promptda_catalog
-from zipdepth.catalog.targets import EVAL_AUGMENT_POLICY
 from zipdepth.catalog.ultrawide import (
     DEFAULT_ULTRAWIDE_PROMPT_SCALE,
     PROMPT_CANVAS_HW,
@@ -381,9 +380,7 @@ def run_camera(
         device=device,
         # The evaluation sample built where NVDEC decoded the frame: rotation, the exact resize and
         # the targets on the GPU, not a full-resolution host copy and a CPU resize per frame.
-        builder_factory=lambda: CudaSampleBuilder(
-            NETWORK_HW, EVAL_AUGMENT_POLICY, min_depth_span=0.0, device=device, target_mode="metric", ultrawide_policy=policy
-        ),
+        builder_factory=lambda: eval_sample_builder(NETWORK_HW, device, policy),
         shuffle_buffer_size=1,
         frame_stride=config.frame_stride,
         num_producers=1,
