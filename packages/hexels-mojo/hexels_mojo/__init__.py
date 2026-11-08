@@ -4,6 +4,8 @@
 - `hexels_mojo.simple_knn.distCUDA2`: simple-knn (2DGS's initial scales).
 - `hexels_mojo.prune.removal_scores_cuda`: the 2D prune scorer that upstream JIT-compiles from
   `scripts/image_compression_prune_scores.cu`.
+- `hexels_mojo.raster2d`: hexel-kernel's 2D color-gradient rasterizer and tile binning (patch 0005 overlays them
+  on hexel-kernel's `gsplat` module).
 """
 
 import os

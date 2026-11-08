@@ -1,0 +1,19 @@
+diff --git a/gsplat_hexels.py b/gsplat_hexels.py
+index 9cf5443..a162369 100644
+--- a/gsplat_hexels.py
++++ b/gsplat_hexels.py
+@@ -46,8 +46,12 @@ def _load_gsplat_api() -> ModuleType:
+     return gsplat_module
+ 
+ 
+-_gsplat_api = _load_gsplat_api()
+-_gsplat_cuda = importlib.import_module("gsplat.cuda")
++# The 2D color-gradient rasterizer and its tile binning run on Mojo (packages/hexels-mojo, hexels_mojo.raster2d);
++# every other kernel stays hexel-kernel's CUDA.
++from hexels_mojo.raster2d import overlay as _mojo_overlay  # noqa: E402
++
++_gsplat_api = _mojo_overlay(_load_gsplat_api())
++_gsplat_cuda = _mojo_overlay(importlib.import_module("gsplat.cuda"))
+ 
+ TOP_K = 10  # compile-time constant in gsplat CUDA kernels
+ 

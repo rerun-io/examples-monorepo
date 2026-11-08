@@ -9,7 +9,13 @@ Three of the hexels-src CUDA extensions in Mojo. `recipes/hexels-src` no longer 
 | simple-knn `distCUDA2` (bkerbl/simple-knn@f155ec0, ~250 lines CUDA + cub) | `hexels_mojo.simple_knn` | 2DGS `GaussianModel.create_from_pcd` (imported when hexels loads 2DGS scenes) |
 | `scripts/image_compression_prune_scores.cu` (94 lines, JIT-compiled with nvcc at run time) | `hexels_mojo.prune` | `image_compression_allocation.prune_model` (`hexels-fit-2d --variant rich`, 20K → 10K) |
 
-hexel-kernel (the 14k-line gsplat fork with the hexel rasterizers) is still CUDA.
+From hexel-kernel (the 14k-line gsplat fork with the hexel rasterizers), the 2D color-gradient rasterizer
+(forward + backward, scalar / per-hexel / per-edge softness, optional peak and emission) and its tile binning are
+Mojo too (`hexels_mojo.raster2d`): they are every hexel-kernel call of Image-GS's rich 2D fit (`hexels-fit-2d
+--variant rich`). Patch 0005 wraps `gsplat_hexels.py`'s `gsplat` handles in `raster2d.overlay`, which serves those
+five functions and passes every other one to hexel-kernel's CUDA (3D rasterizer, flat/affine 2D variants,
+Image-GS's Gaussian kernels). The plan for the rest: `/mnt/nas/ssd-8tb/scratch/overnight-2026-11-08/ports/HEXEL_KERNEL_PLAN.md`
+(to be moved into this README with the next port).
 
 ```bash
 pixi run -e hexels-dev hexels-mojo-build   # Mojo shared library for the local GPU (cubins, no PTX JIT)
@@ -30,6 +36,9 @@ RTX 5090), written by `tests/freeze_hexels_references.py` (deleted with the exte
 | `fused_ssim` backward | bit-exact given the same derivative maps |
 | `fused_ssim` forward | map ≤ 5e-6, mean SSIM ≤ 1e-7, end-to-end gradient ≤ 4e-5 (relative to max(\|ref\|, 1)); d map / d σ1² up to 3.4e-4 on smooth images, where σ² = E[x²] − μ² cancels. nvcc and Mojo's LLVM fuse different multiply-adds in the moments. |
 | prune scores | ≤ 2.2e-5 absolute on scores up to 5.6; upstream uses `--use_fast_math` and float atomics. The kept half agrees away from the boundary score. |
+| 2D rasterizer forward (image, top-10 ids, weights sum, entropy) | bit-exact: the kernel issues nvcc's `--use_fast_math` PTX (`.ftz`, `.approx`) in nvcc's order through inline PTX (`mojo/fastmath.mojo`) |
+| 2D rasterizer backward | ≤ 1e-5 relative to max(\|ref\|, 1); float atomics sum in scheduling order |
+| tile binning | bit-exact (intersection keys, ids, tile ranges) |
 
 Upstream's SSIM scratch buffer is declared (42, 32) but indexed at column tx + 5, so its last row writes five
 floats past the array; the port indexes it at tx (same arithmetic, no overrun).
@@ -42,3 +51,8 @@ floats past the array; the port indexes it at tx (same arithmetic, no overrun).
 | `fused_ssim` fwd + bwd, 1×3×512×768 | 0.124 ms | 0.127 ms |
 | `removal_scores`, 20K hexels, 1080p | 1.525 ms (+ an nvcc JIT build on first use) | 1.563 ms |
 | `distCUDA2`, 100K clustered points | 3.40 ms | 3.16 ms |
+| 2D rasterizer: binning + forward + backward, 20K hexels, 2048×2048 | 0.148 + 1.076 + 10.946 ms | 0.124 + 1.170 + 10.452 ms |
+
+Real run, `hexels-fit-2d --variant rich` on anime-2_2k (5,100 steps, 20K → 10K hexels), two runs each: CUDA
+36.18 / 36.08 dB, 85.9 / 88.1 s; every ported kernel on Mojo (rasterizer, binning, SSIM, prune) 36.12 / 36.14 dB,
+77.8 / 80.7 s.
