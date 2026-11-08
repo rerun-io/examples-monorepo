@@ -2365,6 +2365,45 @@ cmd = "pixi exec -c https://prefix.dev/ai-demos -c https://prefix.dev/conda-forg
 cwd = "packages/lietorch-mojo"
 description = "Freeze upstream lietorch's outputs into tests/fixtures/lietorch_references.rrd (pixi exec env; lietorch is not in the lock)"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# sam2-streaming — the vendored SAM 2 fork's own lane: its connected-components kernel in Mojo
+# (sam2/mojo/, the port of sam2/csrc's CUDA extension) and its tests. posekit and mamma install sam2 without
+# the Mojo toolchain; there the kernel is off (build_sam2_generic_video_predictor(fill_holes=False)).
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.sam2-streaming]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.sam2-streaming.dependencies]
+python = "3.12.*"
+hydra-core = ">=1.3.2,<1.4"
+iopath = ">=0.1.10"
+
+[feature.sam2-streaming.pypi-dependencies]
+sam2 = { path = "packages/sam2-streaming", editable = true }
+
+[feature.sam2-streaming.activation.env]
+PACKAGE_DIR = "packages/sam2-streaming"
+# The vendored upstream code is not typed; typecheck the Mojo wrapper and the tests.
+PYREFLY_TARGET = "sam2/mojo_cc.py tests"
+
+[feature.sam2-streaming.tasks.sam2-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I sam2/mojo -o sam2/_sam2_mojo.so sam2/mojo/_sam2_mojo.mojo"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/sam2-streaming"
+description = "Build SAM 2's connected-components kernel in Mojo (GPU kernels for the local GPU)"
+inputs = ["packages/sam2-streaming/sam2/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/sam2-streaming/sam2/_sam2_mojo.so"]
+
+[feature.sam2-streaming.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["sam2-mojo-build"]
+description = "Build the Mojo kernel, then run the sam2-streaming unit tests"
+
+[feature.sam2-streaming.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["sam2-mojo-build"]
+description = "Build the Mojo kernel, then run the sam2-streaming integration tests (CUDA)"
+
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 # linux-aarch64: the DGX Spark (GB10) through the cuda feature.
@@ -4287,6 +4326,14 @@ lietorch-mojo-dev = { features = [
     "lietorch-mojo-pkg",
     "dev",
 ], solve-group = "lietorch-mojo", no-default-feature = true }
+sam2-streaming = { features = ["common", "cuda", "lietorch-mojo", "sam2-streaming"], solve-group = "sam2-streaming", no-default-feature = true }
+sam2-streaming-dev = { features = [
+    "common",
+    "cuda",
+    "lietorch-mojo",
+    "sam2-streaming",
+    "dev",
+], solve-group = "sam2-streaming", no-default-feature = true }
 dpvo = { features = [
     "common",
     "cuda",
