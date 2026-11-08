@@ -245,6 +245,8 @@ class SteadyTickGraphs:
         """
         from sam2.modeling.sam2_result import SAM2Result
 
+        if tuple(frames[0].shape[1:]) != self.video_hw or frames[0].dtype != torch.uint8:
+            return None
         selections: list[Any] | None = select_aligned_memories(self.predictor, states, frame_idx)
         if selections is None:
             return None
@@ -286,7 +288,9 @@ class SteadyTickGraphs:
         return SteadyTickOutputs(masks=out["masks"].clone(), stats=out["stats"])
 
 
-def steady_structures(predictor: Any, empty_bank: Any, max_conditional: int, ticks_per_prompt: int = 12) -> list[Structure]:
+def steady_structures(
+    predictor: Any, empty_bank: Any, max_conditional: int, ticks_per_prompt: int = 12
+) -> list[Structure]:
     """Memory structures ``(n_cond, n_noncond, n_ptr)`` a single-object stream visits.
 
     Replays a synthetic stream (a prompt, then ``ticks_per_prompt`` propagated
