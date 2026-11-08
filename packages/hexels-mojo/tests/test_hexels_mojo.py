@@ -14,6 +14,8 @@ to max(|ref|, 1):
 - 2D rasterizer (flat and color-gradient): tile binning and the forward outputs (image, top-10 ids, weights sum,
   entropy) bit-exact: the kernel issues nvcc's fast-math PTX instructions in nvcc's order (mojo/fastmath.mojo).
   Backward within 1e-4 of max(|ref|, 1): float atomics sum in scheduling order (measured <= 1e-5).
+- Image-GS's Gaussian kernels: projection (forward and backward) and the top-K forward bit-exact (same technique);
+  rasterizer backward within 1e-4 (float atomics; measured <= 1e-5).
 """
 
 import pytest
@@ -173,3 +175,48 @@ def test_overlay_falls_back_to_the_wrapped_module() -> None:
     view = raster2d.overlay(wrapped)
     assert view.other() == "cuda"
     assert view.bin_and_sort_gaussians is raster2d.bin_and_sort_gaussians
+
+
+@pytest.mark.parametrize("entity", entities("/gaussians2d"))
+def test_imagegs_gaussians(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo import gaussians2d
+
+    rec = load()[entity]
+    t = lambda name: rec.tensor(name).cuda()  # noqa: E731
+    height, width = rec.tensor("size").tolist()
+    n = rec.tensor("means").shape[0]
+    tile_bounds = ((width + 15) // 16, (height + 15) // 16, 1)
+    projected = gaussians2d.project_gaussians_2d_scale_rot_forward(n, t("means"), t("scales"), t("rotation"), height, width, tile_bounds)
+    for name, ours in zip(("xys", "radii", "conics", "num_tiles_hit"), projected, strict=True):
+        assert torch.equal(ours.cpu(), rec.tensor(name)), name
+    bins = (t("gaussian_ids_sorted"), t("tile_bins"))
+    out_img, pixel_topk = gaussians2d.nd_rasterize_forward_topk_norm(
+        tile_bounds, (16, 16, 1), (width, height, 1), *bins, t("xys"), t("conics"), t("colors")
+    )
+    assert torch.equal(out_img.cpu(), rec.tensor("out_img"))
+    assert torch.equal(pixel_topk.cpu(), rec.tensor("pixel_topk"))
+    grads = gaussians2d.nd_rasterize_backward_topk_norm(height, width, 16, 16, *bins, t("xys"), t("conics"), t("colors"), t("v_out"), t("pixel_topk"))
+    for name, ours in zip(("v_xy", "v_conic", "v_colors"), grads, strict=True):
+        assert _rel_error(ours, rec.tensor(name)) < RASTER_GRAD_TOLERANCE, name
+    projection_grads = gaussians2d.project_gaussians_2d_scale_rot_backward(
+        n, t("means"), t("scales"), t("rotation"), height, width, t("radii"), t("conics"), t("v_xys_in"), t("v_conics_in")
+    )
+    for name, ours in zip(("v_cov2d", "v_mean", "v_scale", "v_rot"), projection_grads, strict=True):
+        assert torch.equal(ours.cpu(), rec.tensor(name)), name
+
+
+def test_imagegs_autograd_matches_the_kernels() -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo import gaussians2d
+
+    rec = load()["/gaussians2d/imagegs"]
+    height, width = rec.tensor("size").tolist()
+    means = rec.tensor("means").cuda().requires_grad_(True)
+    scales, rotation, colors = (rec.tensor(n).cuda() for n in ("scales", "rotation", "colors"))
+    tile_bounds = ((width + 15) // 16, (height + 15) // 16, 1)
+    xys, radii, conics, hits = gaussians2d.project_gaussians_2d_scale_rot(means, scales, rotation, height, width, tile_bounds)
+    image = gaussians2d.rasterize_gaussians_sum(xys, radii, conics, hits, colors, height, width, 16, 16, True)
+    assert torch.equal(image.detach().cpu(), rec.tensor("out_img"))
+    image.square().sum().backward()
+    assert means.grad is not None and torch.isfinite(means.grad).all() and means.grad.abs().sum() > 0

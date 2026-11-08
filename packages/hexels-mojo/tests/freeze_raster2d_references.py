@@ -2,7 +2,7 @@
 
 Needs hexel-kernel (`gsplat`, still built by recipes/hexels-src) and `gsplat_hexels.py` for its radius and tile
 helpers. The kernels are called on `gsplat.cuda` / `gsplat.utils` directly: `gsplat_hexels`'s own handles serve
-hexels_mojo's ports since patch 0005. Rewrites the `/raster2d/<case>` and `/binning/<case>` records of
+hexels_mojo's ports since patch 0005. Rewrites the `/raster2d/`, `/binning/` and `/gaussians2d/` (Image-GS's Gaussian kernels) records of
 `fixtures/hexels_references.rrd` (the other records are copied over unchanged).
 
     python tests/freeze_raster2d_references.py --root <hexels-src checkout>
@@ -119,6 +119,37 @@ def _case(gh, utils, cuda, name, color_grad, n, h, w, softness_kind, with_sharpn
     return {f"/raster2d/{name}": raster, f"/binning/{name}": binning}
 
 
+def _gaussian_case(utils, cuda, name, n, h, w, seed) -> dict[str, dict[str, Tensor]]:
+    """Image-GS's projection, binning and top-K rasterizer, forward and backward (`/gaussians2d/<case>`)."""
+    g = torch.Generator().manual_seed(seed)
+    means = torch.rand(n, 2, generator=g).float().cuda()
+    scales = (0.5 + 4.0 * torch.rand(n, 2, generator=g)).float()
+    scales[:5] = 0.0  # zero determinant: projected to nothing
+    scales = scales.cuda()
+    rotation = ((torch.rand(n, 1, generator=g) - 0.5) * 6.283).float().cuda()
+    colors = torch.rand(n, 3, generator=g).float().cuda()
+    tile_bounds = ((w + 15) // 16, (h + 15) // 16, 1)
+    xys, radii, conics, num_tiles_hit = cuda.project_gaussians_2d_scale_rot_forward(n, means, scales, rotation, h, w, tile_bounds)
+    num_intersects, cum_tiles_hit = utils.compute_cumulative_intersects(num_tiles_hit)
+    _, _, _, ids_sorted, tile_bins = utils.bin_and_sort_gaussians(n, num_intersects, xys, radii, cum_tiles_hit, tile_bounds)
+    out_img, pixel_topk = cuda.nd_rasterize_forward_topk_norm(tile_bounds, (16, 16, 1), (w, h, 1), ids_sorted, tile_bins, xys, conics, colors)
+    v_out = torch.randn(h, w, 3, generator=g).float().cuda()
+    v_xy, v_conic, v_colors = cuda.nd_rasterize_backward_topk_norm(h, w, 16, 16, ids_sorted, tile_bins, xys, conics, colors, v_out, pixel_topk)
+    v_xys_in = torch.randn(n, 2, generator=g).float().cuda()
+    v_conics_in = torch.randn(n, 3, generator=g).float().cuda()
+    v_cov2d, v_mean, v_scale, v_rot = cuda.project_gaussians_2d_scale_rot_backward(
+        n, means, scales, rotation, h, w, radii, conics, v_xys_in, v_conics_in
+    )
+    record = {
+        "means": means, "scales": scales, "rotation": rotation, "colors": colors, "size": torch.tensor([h, w], dtype=torch.int32),
+        "xys": xys, "radii": radii.int(), "conics": conics, "num_tiles_hit": num_tiles_hit.int(),
+        "gaussian_ids_sorted": ids_sorted.int(), "tile_bins": tile_bins.int(), "out_img": out_img, "pixel_topk": pixel_topk.int(),
+        "v_out": v_out, "v_xy": v_xy, "v_conic": v_conic, "v_colors": v_colors,
+        "v_xys_in": v_xys_in, "v_conics_in": v_conics_in, "v_cov2d": v_cov2d, "v_mean": v_mean, "v_scale": v_scale, "v_rot": v_rot,
+    }  # fmt: skip
+    return {f"/gaussians2d/{name}": record}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True, help="hexels-src checkout ($PREFIX/share/hexels-src)")
@@ -131,11 +162,13 @@ def main() -> None:
     records: dict[str, dict[str, Tensor]] = {}
     for case in CASES:
         records |= _case(gh, gsplat.utils, gsplat.cuda, *case)
+    records |= _gaussian_case(gsplat.utils, gsplat.cuda, "imagegs", 1000, 96, 112, 20)
+    records |= _gaussian_case(gsplat.utils, gsplat.cuda, "small", 300, 48, 64, 21)
     existing = load()
     rec = rr.RecordingStream("hexels_mojo_references")
     rec.save(str(REFERENCE_FILE))
     for path, r in existing.items():
-        if not path.startswith(("/raster2d/", "/binning/")):
+        if not path.startswith(("/raster2d/", "/binning/", "/gaussians2d/")):
             rec.log(path, rr.AnyValues(**encode(r.tensors | r.texts)), static=True)
     for path, values in records.items():
         rec.log(path, rr.AnyValues(**encode({k: v.cpu() for k, v in values.items()})), static=True)

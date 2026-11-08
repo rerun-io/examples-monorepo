@@ -8,7 +8,8 @@
 # fused-ssim, simple-knn and upstream's JIT-compiled 2D prune scorer are not built: patches 0002-0004
 # import their Mojo ports from packages/hexels-mojo (`hexels_mojo`), which the hexels feature installs. Patch 0005
 # runs hexel-kernel's 2D hexel rasterizers (flat and color-gradient) and tile binning (the 2D fits) on hexels_mojo too; hexel-kernel
-# still provides every other kernel.
+# still provides every other kernel. Image-GS's Gaussian projection and top-K rasterizer come from hexels_mojo too
+# (patches 0003/0004).
 #
 # Runtime layout of `hexels-src`: upstream resolves helpers relative to its checkout root
 # (ROOT/2d-gaussian-splatting, ROOT/image-gs, ROOT/configs), so the tree is installed whole at
@@ -22,7 +23,7 @@ source:
     rev: 698d1afb0944d3e766074c3beb70362f16c7550d
     target_directory: hexels
     patches:
-      - patches/0003-hexels-kernels-from-hexels-mojo.patch  # fused_ssim + the prune scorer from hexels_mojo; drops the .cu
+      - patches/0003-hexels-kernels-from-hexels-mojo.patch  # fused_ssim, the prune scorer, Image-GS kernels from hexels_mojo; drops the .cu
       - patches/0005-gsplat-hexels-raster2d-from-hexels-mojo.patch  # 2D hexel rasterizers (flat, color-gradient) + tile binning from hexels_mojo
   # The two submodules, at the commits hexels@698d1af records.
   - git: https://github.com/honeycomb-surfels/hexel-kernel.git
@@ -43,7 +44,7 @@ source:
     rev: 03088368d42684fb54225c981cfd94b58cc0393a
     target_directory: image-gs
     patches:
-      - patches/0004-image-gs-fused-ssim-from-hexels-mojo.patch  # fused_ssim -> hexels_mojo.fused_ssim
+      - patches/0004-image-gs-kernels-from-hexels-mojo.patch  # fused_ssim, Gaussian projection + top-K rasterizer -> hexels_mojo
 
 outputs:
   # ── CUDA extension ──────────────────────────────────────────────────────
