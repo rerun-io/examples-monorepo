@@ -28,6 +28,7 @@ from gradio_rerun import Rerun
 from mast3r.model import AsymmetricMASt3R
 
 from mast3r_slam.api.inference import APPLICATION_ID, SlamSettings, load_slam_dataset, load_slam_model, run_slam_pipeline
+from mast3r_slam.async_logger import DEFAULT_CONF_THRESHOLD
 from mast3r_slam.config import SLAM_PRESETS, SlamConfig, SlamPresetName
 from mast3r_slam.mast3r_utils import prepare_trt_engines
 from mast3r_slam.rerun_log_utils import LOG_PATH
@@ -95,6 +96,7 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
         preset: SlamPresetName,
         subsample: int | float,
         single_thread: bool,
+        conf_threshold: float,
         progress=gr.Progress(),  # noqa: B008
     ) -> Generator[tuple[bytes | None, str | None, str], None, None]:
         """Gradio streaming callback that runs the SLAM pipeline with the Config widgets' values.
@@ -109,6 +111,7 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
             preset: Name of a preset in ``SLAM_PRESETS``; the widgets below override its fields.
             subsample: Keep every n-th frame.
             single_thread: Run frontend and backend in lockstep.
+            conf_threshold: Smallest confidence shown in the depth panels and fused into the map surface.
             progress: Gradio progress callback.
 
         Yields:
@@ -126,7 +129,7 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
         run_dir: Path = Path(tempfile.mkdtemp(prefix="mast3r-slam-"))
         ns_output_dir: Path = run_dir / "nerfstudio-output"
         slam_config: SlamConfig = dataclasses.replace(SLAM_PRESETS[preset][1], single_thread=single_thread).with_subsample(int(subsample))
-        settings: SlamSettings = SlamSettings(dataset=video_file, slam=slam_config, ns_save_path=ns_output_dir)
+        settings: SlamSettings = SlamSettings(dataset=video_file, slam=slam_config, ns_save_path=ns_output_dir, conf_threshold=float(conf_threshold))
         for msg in run_slam_pipeline(settings, model, recording=recording):
             yield stream.read(), None, msg
 
@@ -202,6 +205,14 @@ def build_app() -> gr.Blocks:
                                 value=SLAM_PRESETS[DEFAULT_PRESET][1].single_thread,
                                 info="Frontend and backend in lockstep: deterministic, slower.",
                             )
+                            conf_threshold_slider = gr.Slider(
+                                label="Confidence Threshold",
+                                minimum=1.0,
+                                maximum=20.0,
+                                step=0.5,
+                                value=DEFAULT_CONF_THRESHOLD,
+                                info="Depth and the map surface keep pixels above this MASt3R confidence; lower it if depth is black.",
+                            )
 
                     with gr.TabItem("Outputs", id="outputs"):
                         status_text = gr.Textbox(
@@ -260,7 +271,7 @@ def build_app() -> gr.Blocks:
             api_visibility="private",
         ).then(
             fn=_make_streaming_fn(model),
-            inputs=[video_file, preset_dropdown, subsample_slider, single_thread_checkbox],
+            inputs=[video_file, preset_dropdown, subsample_slider, single_thread_checkbox, conf_threshold_slider],
             outputs=[viewer, output_zip_file, status_text],
         )
 

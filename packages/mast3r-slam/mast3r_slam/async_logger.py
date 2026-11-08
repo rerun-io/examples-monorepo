@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import warnings
 from pathlib import Path
 
@@ -52,6 +53,11 @@ from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, LiveSurface
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_intri, frame_to_pinhole
 from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
 
+DEFAULT_CONF_THRESHOLD: float = 7.0
+"""Smallest MASt3R confidence (1 = none) shown in the depth panels and fused into the map surface."""
+DEFAULT_PANEL_HZ: float = 10.0
+"""Rate of the current frame's 2D panels in a live viewer. At subsample 1 they are ~300 KB a frame at 50+ frames a
+second, more than the web viewer ingests; the camera pose, the path and the map are logged for every frame."""
 LAST_KEYFRAME_MAPS_EVERY: int = 10
 """Frames between refreshes of the last keyframe's pointmap/confidence/depth panels while it stays the active one."""
 
@@ -280,6 +286,9 @@ class AsyncRerunLogger:
     Args:
         event_queue: Queue of ``LogEvent`` objects.
         parent_log_path: Root Rerun entity path.
+        conf_threshold: Smallest confidence a pixel needs to show in the depth panels and to fuse into the map surface.
+        panel_hz: Most current-frame panels (image, depth, pointmap, confidence) logged per second of wall-clock
+            time; 0 logs them for every frame.
         recording: Rerun recording to bind in this thread (Gradio).
             ``None`` uses the global recording (CLI).
     """
@@ -288,6 +297,8 @@ class AsyncRerunLogger:
         self,
         event_queue: queue.Queue[LogEvent],
         parent_log_path: Path,
+        conf_threshold: float = DEFAULT_CONF_THRESHOLD,
+        panel_hz: float = DEFAULT_PANEL_HZ,
         recording: rr.RecordingStream | None = None,
     ) -> None:
         self._queue: queue.Queue[LogEvent] = event_queue
@@ -300,7 +311,12 @@ class AsyncRerunLogger:
         self._path_previous: list[float] | None = None
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
-        self._conf_thresh: int = 7
+        # Tracking marks its keyframe dirty on every frame without moving it; what was logged last skips those re-logs.
+        self._logged_kf_poses: dict[int, Float32[ndarray, "8"]] = {}
+        self._logged_edges: Float32[ndarray, "2 n 3"] | None = None
+        self._conf_thresh: float = conf_threshold
+        self._panel_interval_s: float = 1.0 / panel_hz if panel_hz > 0 else 0.0
+        self._panels_logged_at: float = -float("inf")
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
         # The newest keyframe's intrinsics, which the current camera reuses, and the ones last logged for it.
@@ -524,21 +540,21 @@ class AsyncRerunLogger:
                 ),
             )
 
-        # RGB image
-        rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{cam_log_path}/pinhole/image",
-            event.rgb,
-        )
+        # The 2D panels at most ``panel_hz`` times a second; the pose above and the path below every frame.
+        panels_due: bool = time.monotonic() - self._panels_logged_at >= self._panel_interval_s
+        if panels_due:
+            self._panels_logged_at = time.monotonic()
+            self._log_rgb_image(f"{cam_log_path}/pinhole/image", event.rgb)
 
         # Depth under the Pinhole (back-projected in 3D); pointmap and confidence are 2D-only.
-        if event.X_canon is not None and event.C is not None:
+        if panels_due and event.X_canon is not None and event.C is not None:
             self._log_pointmap_and_confidence(
                 event.X_canon,
                 event.C,
                 str(CURRENT_MAPS_PATH),
                 f"{cam_log_path}/pinhole/depth",
-                rgb_uint8.shape[0],
-                rgb_uint8.shape[1],
+                event.rgb.shape[0],
+                event.rgb.shape[1],
             )
 
         # Camera path
@@ -561,7 +577,7 @@ class AsyncRerunLogger:
         lk_path: str = str(LAST_KEYFRAME_PATH)
         if event.last_kf_rgb is not None:
             self._log_rgb_image(f"{lk_path}/image", event.last_kf_rgb)
-        if event.last_kf_X_canon is not None and event.last_kf_C is not None and event.last_kf_img_shape is not None:
+        if panels_due and event.last_kf_X_canon is not None and event.last_kf_C is not None and event.last_kf_img_shape is not None:
             self._log_pointmap_and_confidence(
                 event.last_kf_X_canon,
                 event.last_kf_C,
@@ -585,9 +601,10 @@ class AsyncRerunLogger:
 
         # Factor graph edges
         if event.edge_positions is not None:
-            positions_i: Float32[ndarray, "n 3"] = event.edge_positions[0]
-            positions_j: Float32[ndarray, "n 3"] = event.edge_positions[1]
-            self._log_edges(positions_i, positions_j)
+            edges: Float32[ndarray, "2 n 3"] = np.stack(event.edge_positions)
+            if self._logged_edges is None or not np.array_equal(self._logged_edges, edges):
+                self._log_edges(edges[0], edges[1])
+                self._logged_edges = edges
 
         # Orient transform
         if event.orient is not None:
@@ -661,6 +678,7 @@ class AsyncRerunLogger:
             image_plane_distance=self._image_plane_distance,
         )
         self._latest_keyframe_intrinsics = pinhole.intrinsics
+        self._logged_kf_poses[kf.kf_idx] = kf.world_sim3_cam_data
         self._keyframe_pinhole_static[kf.kf_idx] = PinholeParameters(
             name=pinhole.name,
             extrinsics=pinhole.extrinsics,
@@ -719,8 +737,10 @@ class AsyncRerunLogger:
             self._surface_poses[kf_idx] = world_sim3_cam_data
         kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
         cached_pinhole: PinholeParameters | None = self._keyframe_pinhole_static.get(kf_idx)
-        if cached_pinhole is None:
+        logged_pose: Float32[ndarray, "8"] | None = self._logged_kf_poses.get(kf_idx)
+        if cached_pinhole is None or (logged_pose is not None and np.array_equal(logged_pose, world_sim3_cam_data)):
             return
+        self._logged_kf_poses[kf_idx] = world_sim3_cam_data
         frame: Frame = snapshot_to_frame(
             world_sim3_cam_data,
             rgb=np.zeros((1, 1, 3), dtype=np.float32),
