@@ -267,17 +267,20 @@ class SlidingWindowFitter:
                 # extrapolation overshoots at direction reversals — the anchors
                 # track real motion either way.
                 both: Float32[torch.Tensor, "n"] = anchors_valid_f * prev.anchors_valid
-                if both.sum() > 50:
-                    mask = both > 0
-                    # Component-wise median of per-anchor motion (robust to a
-                    # subset of mis-triangulated anchors), clamped to a sane
-                    # per-frame root speed so one glitchy tick can't teleport
-                    # the init (~0.12 m/frame = 3.6 m/s; jumps measure ~0.06).
-                    per_anchor: Float32[torch.Tensor, "m 3"] = anchors3d_d[mask] - prev.anchors3d[mask]
-                    delta: Float32[torch.Tensor, "3"] = per_anchor.median(dim=0).values
-                    speed: Float32[torch.Tensor, ""] = torch.linalg.norm(delta)
-                    delta = torch.where(speed > 0.12, delta * (0.12 / speed.clamp(min=1e-6)), delta)
-                    trans = (prev.trans + delta).detach()
+                # Component-wise median of per-anchor motion (robust to a
+                # subset of mis-triangulated anchors), clamped to a sane
+                # per-frame root speed so one glitchy tick can't teleport
+                # the init (~0.12 m/frame = 3.6 m/s; jumps measure ~0.06).
+                # Sync-free: invalid anchors become NaN for nanmedian (same
+                # lower-median as median over the valid subset) and the
+                # >50-anchor test is a device-side select, not a host branch.
+                per_anchor: Float32[torch.Tensor, "n 3"] = torch.where(
+                    both.unsqueeze(-1) > 0, anchors3d_d - prev.anchors3d, torch.full_like(anchors3d_d, float("nan"))
+                )
+                delta: Float32[torch.Tensor, "3"] = per_anchor.nanmedian(dim=0).values
+                speed: Float32[torch.Tensor, ""] = torch.linalg.norm(delta)
+                delta = torch.where(speed > 0.12, delta * (0.12 / speed.clamp(min=1e-6)), delta)
+                trans = torch.where(both.sum() > 50, prev.trans + delta, prev.trans).detach()
         else:
             global_orient = torch.zeros(3, device=self.device)
             body_pose = _initial_body_pose(self.device)

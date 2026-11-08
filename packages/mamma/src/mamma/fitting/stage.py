@@ -152,8 +152,9 @@ class FittingStage:
             if result is not None:
                 fits[obj_id] = result
             if obj_id == 0:
-                metrics["valid_anchors"] = float(valid.sum().item())
-                metrics["floor_contacts"] = float((floor_contact > 0.25).sum().item())
+                # One host read for both scalars (each .item() is a stream sync).
+                counts: list[float] = torch.stack([valid.sum(), (floor_contact > 0.25).sum()]).float().tolist()
+                metrics["valid_anchors"], metrics["floor_contacts"] = counts[0], counts[1]
         return TickFitOutput(fits=fits, triangulated=triangulated, metrics=metrics)
 
     def drain_head(self) -> list[TickFitOutput]:
