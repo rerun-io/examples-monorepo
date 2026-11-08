@@ -16,16 +16,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import cv2
-import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Bool, Float32, Int, UInt8, UInt16
+from jaxtyping import Int, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.video_io import TorchCodecVideoReader
+from torch import Tensor
 from tqdm import tqdm
 from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 
+from sam3.api.video_logging import log_frame_outputs
 from sam3.viz_constants import BOX_PALETTE, SEG_OVERLAY_ALPHA
 
 if TYPE_CHECKING:
@@ -35,7 +37,6 @@ if TYPE_CHECKING:
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-BOX_DRAW_ORDER: int = 6
 """Rerun draw order for bounding boxes (above segmentation)."""
 
 MAX_VIDEO_MEMORY_GB: float = 4.0
@@ -211,112 +212,6 @@ def build_blueprint() -> rrb.Blueprint:
     return rrb.Blueprint(view, collapse_panels=True)
 
 
-def to_numpy(array_like: torch.Tensor | np.ndarray | list) -> np.ndarray:
-    """
-    Convert tensors/lists to numpy array.
-
-    Args:
-        array_like: Input tensor, array, or list.
-
-    Returns:
-        Numpy array on CPU.
-    """
-    if isinstance(array_like, torch.Tensor):
-        return array_like.detach().cpu().numpy()
-    return np.asarray(array_like)
-
-
-def log_frame_outputs(
-    frame_idx: int,
-    frame_timestamps_ns: Int[ndarray, "num_frames"],
-    processed_outputs: dict,
-    frame_shape: tuple[int, int],
-) -> None:
-    """
-    Log segmentation masks and bounding boxes for a video frame to Rerun.
-
-    Args:
-        frame_idx: Current frame index (used as timeline sequence).
-        frame_timestamps_ns: Array of frame timestamps in nanoseconds from the video asset.
-        processed_outputs: Dict containing 'masks', 'boxes', and optionally 'scores'.
-        frame_shape: Tuple of (height, width) for the frame.
-    """
-    # Set time on video_time timeline to match the video asset
-    if frame_idx < len(frame_timestamps_ns):
-        rr.set_time("video_time", duration=1e-9 * frame_timestamps_ns[frame_idx])
-    rr.set_time("frame_idx", sequence=frame_idx)
-
-    raw_masks = processed_outputs.get("masks")
-    raw_boxes = processed_outputs.get("boxes")
-    raw_scores = processed_outputs.get("scores")
-
-    if raw_masks is None or len(raw_masks) == 0:
-        return
-
-    # Process masks
-    masks_np: Float32[ndarray, "n h w"] = to_numpy(raw_masks).astype(np.float32, copy=False)
-    if masks_np.ndim == 2:
-        masks_np = masks_np[None, ...]
-
-    h: int = frame_shape[0]
-    w: int = frame_shape[1]
-    num_instances: int = masks_np.shape[0]
-
-    # Build per-instance colors (used for boxes)
-    colors: UInt8[ndarray, "k 4"] = np.asarray(
-        [BOX_PALETTE[idx % BOX_PALETTE.shape[0]] for idx in range(num_instances)],
-        dtype=np.uint8,
-    )
-
-    # Create segmentation map (use uint8 if <=255 objects for 50% storage savings)
-    if num_instances <= 255:
-        seg_map: UInt8[ndarray, "h w"] | UInt16[ndarray, "h w"] = np.zeros((h, w), dtype=np.uint8)
-        for idx in range(num_instances):
-            mask: Float32[ndarray, "h w"] = masks_np[idx]
-            mask_bool: Bool[ndarray, "h w"] = mask >= 0.5
-            class_id: int = idx + 1  # Reserve 0 for background
-            seg_map = np.where(mask_bool, np.uint8(class_id), seg_map)
-    else:
-        seg_map = np.zeros((h, w), dtype=np.uint16)
-        for idx in range(num_instances):
-            mask = masks_np[idx]
-            mask_bool = mask >= 0.5
-            class_id = idx + 1
-            seg_map = np.where(mask_bool, np.uint16(class_id), seg_map)
-
-    # Log segmentation (video is already logged as static asset)
-    rr.log(
-        "video/segmentation",
-        rr.SegmentationImage(seg_map),
-    )
-
-    # Log bounding boxes if present
-    if raw_boxes is not None:
-        boxes_np: Float32[ndarray, "n 4"] = to_numpy(raw_boxes).astype(np.float32, copy=False)
-        if boxes_np.ndim == 1:
-            boxes_np = boxes_np[None, :]
-
-        class_ids: Int[ndarray, "n"] = np.arange(1, boxes_np.shape[0] + 1, dtype=np.int32)
-
-        labels: list[str] | None = None
-        if raw_scores is not None:
-            scores_np: Float32[ndarray, "n"] = to_numpy(raw_scores).astype(np.float32, copy=False).reshape(-1)
-            labels = [f"{score:.2f}" for score in scores_np.tolist()]
-
-        rr.log(
-            "video/boxes",
-            rr.Boxes2D(
-                array=boxes_np,
-                array_format=rr.Box2DFormat.XYXY,
-                class_ids=class_ids,
-                labels=labels,
-                colors=colors[:, :3],
-                show_labels=True,
-                draw_order=BOX_DRAW_ORDER,
-            ),
-        )
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Model Loading
 # ──────────────────────────────────────────────────────────────────────────────
@@ -385,19 +280,18 @@ def main(cfg: Sam3VideoDemoConfig) -> None:
     # Load model and processor
     model, processor = load_sam3_model(cfg.model_config, device, dtype)
 
-    # Load video frames into memory
-    from transformers.video_utils import Path as TransformersVideoPath
-    from transformers.video_utils import load_video
-
     # Check video constraints (duration + resolution)
     check_video_constraints(cfg.video_path, cfg.max_frames)
 
-    video_frames_np, video_metadata = load_video(
-        TransformersVideoPath(str(cfg.video_path)),
-        num_frames=cfg.max_frames,
-    )
-    video_frames: UInt8[ndarray, "t h w 3"] = video_frames_np  # type: ignore[assignment]
-    total_frames: int = video_frames.shape[0]
+    # Decode the first ``max_frames`` frames (all by default) on NVDEC, into one device tensor the
+    # processor preprocesses where it lies. Session frame i is then video frame i, which the logged
+    # VideoStream's timestamps assume; transformers' load_video(num_frames=N) sampled N frames spread
+    # over the whole clip and put the masks on the wrong frames.
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(cfg.video_path, device=device)
+    video_fps: float = reader.fps
+    total_frames: int = len(reader) if cfg.max_frames is None else min(cfg.max_frames, len(reader))
+    video_frames: UInt8[Tensor, "t 3 h w"] = reader.get_frames_in_range(0, total_frames)
+    reader.close()
 
     # Initialize inference session with full video
     inference_session: Sam3VideoInferenceSession = processor.init_video_session(
@@ -431,19 +325,16 @@ def main(cfg: Sam3VideoDemoConfig) -> None:
             desc="Propagating masks",
         ):
             frame_idx: int = int(model_outputs.frame_idx)
-            frame_rgb: UInt8[ndarray, "h w 3"] = video_frames[frame_idx]
             processed_outputs = processor.postprocess_outputs(inference_session, model_outputs)
             log_frame_outputs(
                 frame_idx,
                 frame_timestamps_ns,
                 processed_outputs,
-                frame_shape=(frame_rgb.shape[0], frame_rgb.shape[1]),
+                frame_shape=(video_frames.shape[2], video_frames.shape[3]),
             )
 
     # Summary
-    fps: float | None = getattr(video_metadata, "fps", None)
-    fps_msg: str = f" @ {fps:.2f} fps" if fps is not None else ""
-    print(f"[done] Processed {total_frames} frames{fps_msg} (prompt='{cfg.prompt}').")
+    print(f"[done] Processed {total_frames} frames @ {video_fps:.2f} fps (prompt='{cfg.prompt}').")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

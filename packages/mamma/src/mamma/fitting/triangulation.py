@@ -102,24 +102,29 @@ def triangulate_gated(
     """
     n_cams: int = len(pts2d_per_cam)
     gated: list[Float32[torch.Tensor, "n"]] = [v.clone() for v in vis_per_cam]
-    proj: list[Float32[torch.Tensor, "3 4"]] = [k_per_cam[c] @ world_to_cam_per_cam[c][:3, :] for c in range(n_cams)]
+    proj: Float32[torch.Tensor, "c 3 4"] = torch.stack([k_per_cam[c] @ world_to_cam_per_cam[c][:3, :] for c in range(n_cams)])
+    pts2d: Float32[torch.Tensor, "c n 2"] = torch.stack(pts2d_per_cam)[..., :2]
     active: list[int] = list(range(n_cams))
     points3d: Float32[torch.Tensor, "n 3"]
     valid: Bool[torch.Tensor, "n"]
     points3d, valid = triangulate_points(pts2d_per_cam, k_per_cam, world_to_cam_per_cam, gated, vis_thresh=vis_thresh)
     while len(active) > min_cams:
+        # All cameras' confident-landmark counts + mean reprojection errors in
+        # one batched pass and ONE host read per round (was 2 syncs/camera).
         xh: Float32[torch.Tensor, "n 4"] = torch.cat([points3d, torch.ones_like(points3d[:, :1])], dim=-1)
+        uvw: Float32[torch.Tensor, "c n 3"] = xh @ proj.transpose(1, 2)
+        uv: Float32[torch.Tensor, "c n 2"] = uvw[..., :2] / (uvw[..., 2:3].abs() + 1e-6)
+        conf: Bool[torch.Tensor, "c n"] = (torch.stack(gated) > vis_thresh) & valid
+        err: Float32[torch.Tensor, "c n"] = torch.where(conf, (uv - pts2d).norm(dim=-1), torch.zeros_like(uv[..., 0]))
+        count: Float32[torch.Tensor, "c"] = conf.sum(dim=-1).float()
+        stats: list[list[float]] = torch.stack([count, err.sum(dim=-1) / count.clamp(min=1.0)]).tolist()
         worst_c: int = -1
         worst_err: float = reproj_thresh_px
         for c in active:
-            conf: Bool[torch.Tensor, "n"] = (gated[c] > vis_thresh) & valid
-            if int(conf.sum().item()) < 4:
+            if stats[0][c] < 4:
                 continue
-            uvw: Float32[torch.Tensor, "n 3"] = xh @ proj[c].T
-            uv: Float32[torch.Tensor, "n 2"] = uvw[:, :2] / (uvw[:, 2:3].abs() + 1e-6)
-            merr: float = float((uv - pts2d_per_cam[c][:, :2]).norm(dim=-1)[conf].mean().item())
-            if merr > worst_err:
-                worst_err, worst_c = merr, c
+            if stats[1][c] > worst_err:
+                worst_err, worst_c = stats[1][c], c
         if worst_c < 0:
             break
         active.remove(worst_c)

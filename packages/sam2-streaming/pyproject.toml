@@ -68,3 +68,19 @@ markers = [
     "golden: reference comparison against stored ground truth (run: pixi run -e sam2-streaming-dev tests-golden)",
 ]
 addopts = "-m 'not integration and not golden'"
+
+[tool.vulture]
+# The vendored upstream code is not ours to prune; check the Mojo wrapper and the tests.
+paths = ["sam2/mojo_cc.py", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*"]
+min_confidence = 60
+ignore_names = ["pytestmark"]
+
+[tool.ruff]
+# The vendored upstream code keeps its own style (the root ruff.toml excludes it); lint only what we own.
+include = ["sam2/mojo_cc.py", "tests/**/*.py"]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]

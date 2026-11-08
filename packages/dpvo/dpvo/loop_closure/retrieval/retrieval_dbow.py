@@ -18,7 +18,7 @@ from einops import parse_shape
 try:
     import dpretrieval  # pyrefly: ignore[missing-import]
 
-    # Import-time check: verify the C++ class is loadable (fail fast).
+    # Import-time check: verify the class is loadable (fail fast).
     # The temporary reference is deleted to avoid polluting module namespace.
     _cls = dpretrieval.DPRetrieval
     del _cls

@@ -16,6 +16,7 @@ import torch
 from jaxtyping import Bool, Float32
 from numpy import ndarray
 
+from mamma.capture_lock import GRAPH_CAPTURE_LOCK
 from mamma.fitting.losses import (
     acceleration_loss,
     anchor3d_loss,
@@ -54,8 +55,9 @@ class FitterConfig:
     bootstrap_iters: int = 300
     """Adam iterations for the first-window solve (betas optimized here)."""
     tick_iters: int = 48
-    """Adam iterations per optimize tick (betas frozen; graph replays are
-    ~1 ms/iter so the default 48 costs ~48 ms on the overlapped fit worker). Shipped
+    """Adam iterations per optimize tick (betas frozen; compiled graph replays
+    are ~0.14 ms/iter on GB10 so the default 48 costs ~7 ms GPU on the overlapped
+    fit worker; ~0.6 ms/iter with compile_iter off). Shipped
     defaults pass BOTH golden gates: crossing_arms MPJPE/PVE <= 30 mm and
     running_jumping per-frame PVE p95/max <= 30 mm vs the original DAG."""
     learning_rate: float = 0.02
@@ -137,6 +139,17 @@ class FitterConfig:
     """One-sided floor-penetration penalty (verts below world z=0). Jump
     landings measured 60-70 mm underground without it; airborne frames are
     unaffected (one-sided)."""
+    compile_iter: bool = True
+    """torch.compile (inductor, default mode) the captured iteration's forward +
+    losses (and, via AOTAutograd, its backward) before CUDA-graph capture:
+    ~0.62 -> 0.14 ms/iter. Costs a one-time compile at FittingStage
+    construction (~27 s with a cold inductor cache, ~2.6 s warm)."""
+    fused_adam: bool = True
+    """Use the fused (single-kernel) capturable Adam in the graphed paths."""
+    fit_stream: bool = True
+    """Run FittingStage.step on a private non-blocking CUDA stream so the
+    pipeline's main-thread default-stream syncs don't wait on queued fit work
+    (BENCH 39.7 -> 38.0 s wall, 2+2 runs at tick_iters 48)."""
     device: str = "cuda"
     """Compute device."""
 
@@ -258,17 +271,20 @@ class SlidingWindowFitter:
                 # extrapolation overshoots at direction reversals — the anchors
                 # track real motion either way.
                 both: Float32[torch.Tensor, "n"] = anchors_valid_f * prev.anchors_valid
-                if both.sum() > 50:
-                    mask = both > 0
-                    # Component-wise median of per-anchor motion (robust to a
-                    # subset of mis-triangulated anchors), clamped to a sane
-                    # per-frame root speed so one glitchy tick can't teleport
-                    # the init (~0.12 m/frame = 3.6 m/s; jumps measure ~0.06).
-                    per_anchor: Float32[torch.Tensor, "m 3"] = anchors3d_d[mask] - prev.anchors3d[mask]
-                    delta: Float32[torch.Tensor, "3"] = per_anchor.median(dim=0).values
-                    speed: Float32[torch.Tensor, ""] = torch.linalg.norm(delta)
-                    delta = torch.where(speed > 0.12, delta * (0.12 / speed.clamp(min=1e-6)), delta)
-                    trans = (prev.trans + delta).detach()
+                # Component-wise median of per-anchor motion (robust to a
+                # subset of mis-triangulated anchors), clamped to a sane
+                # per-frame root speed so one glitchy tick can't teleport
+                # the init (~0.12 m/frame = 3.6 m/s; jumps measure ~0.06).
+                # Sync-free: invalid anchors become NaN for nanmedian (same
+                # lower-median as median over the valid subset) and the
+                # >50-anchor test is a device-side select, not a host branch.
+                per_anchor: Float32[torch.Tensor, "n 3"] = torch.where(
+                    both.unsqueeze(-1) > 0, anchors3d_d - prev.anchors3d, torch.full_like(anchors3d_d, float("nan"))
+                )
+                delta: Float32[torch.Tensor, "3"] = per_anchor.nanmedian(dim=0).values
+                speed: Float32[torch.Tensor, ""] = torch.linalg.norm(delta)
+                delta = torch.where(speed > 0.12, delta * (0.12 / speed.clamp(min=1e-6)), delta)
+                trans = torch.where(both.sum() > 50, prev.trans + delta, prev.trans).detach()
         else:
             global_orient = torch.zeros(3, device=self.device)
             body_pose = _initial_body_pose(self.device)
@@ -362,22 +378,35 @@ class SlidingWindowFitter:
         if optimize_betas:
             params.append(self.betas)
         betas: Float32[torch.Tensor, "1 nb"] = self.betas if optimize_betas else self.betas.detach()
-        optimizer = torch.optim.Adam(params, lr=cfg.learning_rate, capturable=True)
+        optimizer = torch.optim.Adam(params, lr=cfg.learning_rate, capturable=True, fused=cfg.fused_adam)
 
-        def one_iter() -> None:
-            optimizer.zero_grad(set_to_none=False)
-            sampled = self.sampled_model.forward(
-                static["go"], static["bp"], static["hl"], static["hr"], static["jaw"], betas, static["tr"]
-            )
+        def window_loss(
+            go: Float32[torch.Tensor, "w 3"],
+            bp: Float32[torch.Tensor, "w 63"],
+            tr: Float32[torch.Tensor, "w 3"],
+            betas_in: Float32[torch.Tensor, "1 nb"],
+        ) -> Float32[torch.Tensor, ""]:
+            """Sampled forward + every loss term for one iteration."""
+            sampled = self.sampled_model.forward(go, bp, static["hl"], static["hr"], static["jaw"], betas_in, tr)
             loss = reprojection_loss(
                 static["pts2d"], sampled, self.k_per_cam, self.world_to_cam_per_cam, static["vis"], vis_clip_value=cfg.vis_clip_value, weight=cfg.weight_reproj, delta_px=cfg.reproj_delta_px
             ) + anchor3d_loss(sampled, static["anchors"], static["avalid"], weight=cfg.weight_anchor3d)
             if optimize_betas:
-                loss = loss + shape_prior_loss(self.betas, weight=cfg.weight_shape_prior)
-            loss = loss + temporal_smoothness_loss(static["tr"], static["bp"], cfg.weight_temp_trans, cfg.weight_temp_pose)
+                loss = loss + shape_prior_loss(betas_in, weight=cfg.weight_shape_prior)
+            loss = loss + temporal_smoothness_loss(tr, bp, cfg.weight_temp_trans, cfg.weight_temp_pose)
             loss = loss + floor_penetration_loss(sampled, weight=cfg.weight_floor)
             loss = loss + floor_contact_loss(sampled, static["fc"], weight=cfg.weight_floor_contact)
             loss = loss + acceleration_loss(sampled, weight=cfg.weight_accel)
+            return loss
+
+        # Inductor (default mode: no cudagraphs of its own) fuses the forward and
+        # AOTAutograd's backward into a handful of triton kernels; the manual
+        # graph below then captures those instead of hundreds of tiny eager ops.
+        loss_fn = torch.compile(window_loss, dynamic=False) if cfg.compile_iter else window_loss
+
+        def one_iter() -> None:
+            optimizer.zero_grad(set_to_none=False)
+            loss = loss_fn(static["go"], static["bp"], static["tr"], betas)
             loss.backward()
             optimizer.step()
 
@@ -409,20 +438,22 @@ class SlidingWindowFitter:
         traded for the gate. The graph is single-use; the steady-state graph
         (betas frozen) builds lazily on the first optimize tick.
         """
-        graph, static = self._capture_graph(optimize_betas=True)
-        for _ in range(max(0, self.config.bootstrap_iters - 4)):
-            graph.replay()
-        torch.cuda.synchronize()
-        self._copy_static_to_window(static)
+        with GRAPH_CAPTURE_LOCK:
+            graph, static = self._capture_graph(optimize_betas=True)
+            for _ in range(max(0, self.config.bootstrap_iters - 4)):
+                graph.replay()
+            torch.cuda.synchronize()
+            self._copy_static_to_window(static)
 
     def _build_graph(self) -> None:
         """Capture the steady-state (betas-frozen) iteration and keep it for replay."""
-        graph, static = self._capture_graph(optimize_betas=False)
-        for _ in range(self.config.tick_iters - 4):  # finish the build tick's budget
-            graph.replay()
-        torch.cuda.synchronize()
-        self._graph = graph
-        self._static = static
+        with GRAPH_CAPTURE_LOCK:
+            graph, static = self._capture_graph(optimize_betas=False)
+            for _ in range(self.config.tick_iters - 4):  # finish the build tick's budget
+                graph.replay()
+            torch.cuda.synchronize()
+            self._graph = graph
+            self._static = static
 
     def _lbfgs_polish(self) -> None:
         """One strong-wolfe LBFGS outer step over the window (hard ticks only)."""

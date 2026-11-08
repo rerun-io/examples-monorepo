@@ -1,0 +1,24 @@
+[package]
+name = "hamming-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 bindings for the hamming crate, built by maturin as the `asmk_rs` module."
+
+[lints]
+workspace = true
+
+[lib]
+name = "asmk_rs"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+# Exercised from Python (tests/); a Rust test binary would link libpython.
+test = false
+doctest = false
+
+[dependencies]
+hamming.workspace = true
+numpy.workspace = true
+# No `extension-module` feature (deprecated in PyO3 0.29): maturin sets PYO3_BUILD_EXTENSION_MODULE.
+pyo3 = { workspace = true, features = ["abi3-py312"] }

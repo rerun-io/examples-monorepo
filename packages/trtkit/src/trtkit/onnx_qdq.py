@@ -34,6 +34,11 @@ LINEAR_WEIGHT_CHAIN: list[str] = ["Transpose", "Cast"]
 """Producers between a torch-exported MatMul and its ``[out, in]`` weight initializer."""
 
 
+ScaleDtype: TypeAlias = Literal["bfloat16", "float16"]
+"""Dtype of FP8 Q/DQ scales; it must match the activation dtype of the graph being quantized."""
+_SCALE_TYPES: dict[str, tuple[torch.dtype, int]] = {"bfloat16": (torch.bfloat16, TensorProto.BFLOAT16), "float16": (torch.float16, TensorProto.FLOAT16)}
+
+
 @dataclass(frozen=True, slots=True)
 class KeepPrecision:
     """Explicitly retain a source operation and its weights without adding Q/DQ."""
@@ -104,24 +109,29 @@ class QdqPlan:
     """One explicit quantize-or-keep entry per native Attention op, in graph order."""
     weight_device: Literal["cpu", "cuda"] = "cpu"
     """Device that quantizes the weights; it fixes the reduction order of the NVFP4 scale search."""
+    scale_dtype: ScaleDtype = "bfloat16"
+    """FP8 scale dtype: ``float16`` for fp16-compute exports. NVFP4 entries require ``bfloat16``."""
 
 
-def _bf16_scalar(name: str, value: float) -> TensorProto:
-    bits: Tensor = torch.tensor([value], dtype=torch.bfloat16).view(torch.uint16)
-    return helper.make_tensor(name, TensorProto.BFLOAT16, [], vals=bits.numpy().tobytes(), raw=True)
+def _bf16_scalar(name: str, value: float, dtype: ScaleDtype = "bfloat16") -> TensorProto:
+    torch_dtype, proto_dtype = _SCALE_TYPES[dtype]
+    bits: Tensor = torch.tensor([value], dtype=torch_dtype).view(torch.uint16)
+    return helper.make_tensor(name, proto_dtype, [], vals=bits.numpy().tobytes(), raw=True)
 
 
 def _raw_tensor(name: str, data_type: int, dims: list[int], data: Tensor) -> TensorProto:
     return helper.make_tensor(name, data_type, dims, vals=data.contiguous().cpu().view(torch.uint8).numpy().tobytes(), raw=True)
 
 
-def _fp8_input(tensor: str, prefix: str, amax: float, zero_point: str) -> tuple[list[TensorProto], list[onnx.NodeProto], str]:
+def _fp8_input(
+    tensor: str, prefix: str, amax: float, zero_point: str, scale_dtype: ScaleDtype = "bfloat16"
+) -> tuple[list[TensorProto], list[onnx.NodeProto], str]:
     """Static FP8 quantize/dequantize of ``tensor``; returns new initializers, nodes and the dequantized name."""
     scale: str = f"{prefix}.a_s8"
     quantized: str = f"{prefix}.a_q8"
     dequantized: str = f"{prefix}.a_dq8"
     initializers: list[TensorProto] = [
-        _bf16_scalar(scale, amax / FP8_MAX),
+        _bf16_scalar(scale, amax / FP8_MAX, scale_dtype),
         _raw_tensor(zero_point, TensorProto.FLOAT8E4M3FN, [], torch.zeros((), dtype=torch.float8_e4m3fn)),
     ]
     nodes: list[onnx.NodeProto] = [
@@ -131,13 +141,23 @@ def _fp8_input(tensor: str, prefix: str, amax: float, zero_point: str) -> tuple[
     return initializers, nodes, dequantized
 
 
-def _fp8_weight(module: str, weight: Float[Tensor, "out *rest"]) -> tuple[list[TensorProto], onnx.NodeProto]:
-    """FP8 weights with BF16 per-output-channel scales; the node writes ``{module}.w_dq``."""
-    scales: Tensor = (weight.abs().flatten(1).amax(1) / FP8_MAX).clamp_min(1e-12).to(torch.bfloat16)
+def fp8_input_qdq(tensor: str, prefix: str, amax: float, scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], list[onnx.NodeProto], str]:
+    """Static FP8 Q/DQ of one activation for model-specific rewrites (e.g. attention operands of a non-native MHA).
+
+    Returns:
+        New initializers, the Q/DQ nodes to insert before the consumer, and the dequantized tensor name.
+    """
+    return _fp8_input(tensor, prefix, amax, f"{prefix}.a_zp", scale_dtype)
+
+
+def _fp8_weight(module: str, weight: Float[Tensor, "out *rest"], scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], onnx.NodeProto]:
+    """FP8 weights with per-output-channel scales of ``scale_dtype``; the node writes ``{module}.w_dq``."""
+    torch_dtype, proto_dtype = _SCALE_TYPES[scale_dtype]
+    scales: Tensor = (weight.abs().flatten(1).amax(1) / FP8_MAX).clamp_min(1e-12).to(torch_dtype)
     codes: Tensor = (weight / scales.float().reshape(-1, *[1] * (weight.ndim - 1))).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
     initializers: list[TensorProto] = [
         _raw_tensor(f"{module}.w_fp8", TensorProto.FLOAT8E4M3FN, list(weight.shape), codes),
-        _raw_tensor(f"{module}.w_s8", TensorProto.BFLOAT16, [int(weight.shape[0])], scales),
+        _raw_tensor(f"{module}.w_s8", proto_dtype, [int(weight.shape[0])], scales),
     ]
     return initializers, helper.make_node("DequantizeLinear", [f"{module}.w_fp8", f"{module}.w_s8"], [f"{module}.w_dq"], axis=0)
 
@@ -189,13 +209,18 @@ class _Edits:
     """Dequantized name of each (activation, precision) already quantized."""
 
 
-def _rewrite_module(index: int, node: onnx.NodeProto, module: str, chain: list[str], weight: Tensor, precision: ModulePrecision, edits: _Edits) -> None:
+def _rewrite_module(
+    index: int, node: onnx.NodeProto, module: str, chain: list[str], weight: Tensor, precision: ModulePrecision, edits: _Edits,
+    scale_dtype: ScaleDtype = "bfloat16",
+) -> None:
     """Quantize one weight MatMul or Conv and its input; ``chain`` names the producers between the node and its weight."""
+    if isinstance(precision, Nvfp4Linear) and scale_dtype != "bfloat16":
+        raise ValueError(f"NVFP4 linear {module} requires bfloat16 scales, got {scale_dtype}.")
     if (node.op_type == "Conv") != isinstance(precision, Fp8Conv):
         raise ValueError(f"{type(precision).__name__} does not apply to {node.op_type} {module}.")
     if isinstance(precision, Fp8Conv):
-        weight_initializers, weight_node = _fp8_weight(module, weight)
-        input_initializers, input_nodes, dequantized_input = _fp8_input(node.input[0], module, precision.input_amax, f"{module}.a_zp")
+        weight_initializers, weight_node = _fp8_weight(module, weight, scale_dtype)
+        input_initializers, input_nodes, dequantized_input = _fp8_input(node.input[0], module, precision.input_amax, f"{module}.a_zp", scale_dtype)
         edits.initializers.extend([*weight_initializers, *input_initializers])
         edits.inserted[index] = [weight_node, *input_nodes]
         node.input[0], node.input[1] = dequantized_input, f"{module}.w_dq"
@@ -205,13 +230,15 @@ def _rewrite_module(index: int, node: onnx.NodeProto, module: str, chain: list[s
     activation: str = node.input[0]
     nodes: list[onnx.NodeProto] = []
     if isinstance(precision, Fp8Linear):
-        weight_initializers, weight_node = _fp8_weight(module, weight)
+        weight_initializers, weight_node = _fp8_weight(module, weight, scale_dtype)
         edits.initializers.extend(weight_initializers)
         nodes.append(weight_node)
         key: tuple[str, str] = (activation, "fp8")
         if key not in edits.quantized_inputs:
             # The zero point name is part of the released EgoHand export bytes.
-            input_initializers, input_nodes, edits.quantized_inputs[key] = _fp8_input(activation, module, precision.input_amax, f"{module}.a_zp8")
+            input_initializers, input_nodes, edits.quantized_inputs[key] = _fp8_input(
+                activation, module, precision.input_amax, f"{module}.a_zp8", scale_dtype
+            )
             edits.initializers.extend(input_initializers)
             nodes.extend(input_nodes)
     else:
@@ -228,7 +255,9 @@ def _rewrite_module(index: int, node: onnx.NodeProto, module: str, chain: list[s
     edits.inserted[index] = nodes
 
 
-def _rewrite_attention(graph: onnx.GraphProto, attention: tuple[Fp8Attention | KeepPrecision, ...], edits: _Edits) -> None:
+def _rewrite_attention(
+    graph: onnx.GraphProto, attention: tuple[Fp8Attention | KeepPrecision, ...], edits: _Edits, scale_dtype: ScaleDtype = "bfloat16"
+) -> None:
     """Apply each native Attention op's quantize-or-keep choice in graph order."""
     attention_nodes: list[tuple[int, onnx.NodeProto]] = [(index, node) for index, node in enumerate(graph.node) if node.op_type == "Attention"]
     if len(attention_nodes) != len(attention):
@@ -238,7 +267,7 @@ def _rewrite_attention(graph: onnx.GraphProto, attention: tuple[Fp8Attention | K
             continue
         for slot, (tag, amax) in enumerate(zip("qkv", inputs.amax, strict=True)):
             prefix: str = f"{inputs.module}.{tag}"
-            input_initializers, input_nodes, node.input[slot] = _fp8_input(node.input[slot], prefix, amax, f"{prefix}.a_zp")
+            input_initializers, input_nodes, node.input[slot] = _fp8_input(node.input[slot], prefix, amax, f"{prefix}.a_zp", scale_dtype)
             edits.initializers.extend(input_initializers)
             edits.inserted.setdefault(index, []).extend(input_nodes)
 
@@ -302,12 +331,12 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
             applied.add(module)
             continue
         weight: Tensor = torch.from_numpy(numpy_helper.to_array(initializers[weight_name]).copy()).to(plan.weight_device)
-        _rewrite_module(index, node, module, chain, weight, precision, edits)
+        _rewrite_module(index, node, module, chain, weight, precision, edits, plan.scale_dtype)
         applied.add(module)
     missing: set[str] = set(plan.modules) - applied
     if missing:
         raise ValueError(f"Planned modules are not weight MatMul/Conv nodes of the graph: {sorted(missing)}.")
-    _rewrite_attention(graph, plan.attention, edits)
+    _rewrite_attention(graph, plan.attention, edits, plan.scale_dtype)
     _splice(graph, edits)
     _prune_dead(graph)
     if not any(opset.domain == "trt.plugins" for opset in model.opset_import):
