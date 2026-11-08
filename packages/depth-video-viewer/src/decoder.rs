@@ -1,12 +1,23 @@
 //! AV1 → full-bit-depth luma, and seeking within a stream of samples.
 //!
-//! Rerun's built-in AV1 decoder builds rav1d 8-bit only and truncates 10-bit luma (`re_video`'s
-//! `decode/av1.rs`, TODO #7594). Here rav1d runs with 16-bit pixels on and the Y plane is copied as is,
-//! so every 10-bit code comes back exact. Decoding is synchronous: a seek decodes from the nearest
-//! keyframe, and playing forward continues from the last decoded sample.
+//! Out-of-tree scaffolding: deleted once `DepthVideoStream` ships in Rerun, where `re_video` would gain a raw-luma
+//! decode output instead.
+//!
+//! `re_video` pulls in rav1d with `bitdepth_8` only; its `nasm` feature (on in release builds of the `rerun` binary)
+//! turns on all rav1d defaults, `bitdepth_16` included. Either way `re_video` then right-shifts 10/12-bit samples to
+//! 8 bits (`decode/av1.rs:295-297`, TODO #7594). Here rav1d runs with `bitdepth_16` and the Y plane is copied as is, so
+//! every 10-bit code comes back exact. Decoding is synchronous: a seek decodes from the nearest keyframe, and playing
+//! forward continues from the last decoded sample.
 
 use re_rav1d::dav1d;
+use re_viewer::external::re_sdk_types::encodings::Blob;
 use std::sync::Arc;
+
+// rav1d's 16-bit planes are native-endian and `L16` textures are little-endian, so the rows are copied unchanged.
+const _: () = assert!(
+    cfg!(target_endian = "little"),
+    "needs a little-endian target"
+);
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -40,14 +51,14 @@ impl From<dav1d::Error> for DecodeError {
     }
 }
 
-/// One decoded depth frame: the luma codes, row-major.
+/// One decoded depth frame: the coded luma values as packed little-endian `u16` rows (an `L16` image).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LumaFrame {
     pub width: u32,
     pub height: u32,
     /// Coded bits per sample (8, 10 or 12).
     pub bit_depth: u8,
-    pub codes: Vec<u16>,
+    pub data: Blob,
 }
 
 /// rav1d with 16-bit pixels, handing back the Y plane of each picture.
@@ -72,10 +83,13 @@ impl LumaDecoder {
     }
 
     /// Decode one temporal unit and return the picture it shows.
-    pub fn decode(&mut self, sample: &[u8]) -> Result<LumaFrame, DecodeError> {
+    pub fn decode<D: AsRef<[u8]> + Send + Sync + 'static>(
+        &mut self,
+        sample: D,
+    ) -> Result<LumaFrame, DecodeError> {
         re_tracing::profile_function!();
         let mut shown = None;
-        match self.decoder.send_data(sample.to_vec(), None, None, None) {
+        match self.decoder.send_data(sample, None, None, None) {
             Ok(()) => {}
             Err(dav1d::Error::Again) => loop {
                 // The decoder is full: drain pictures until it takes the rest of the data.
@@ -104,7 +118,7 @@ impl LumaDecoder {
     }
 }
 
-/// Copy the Y plane without its row padding; 10/12-bit samples are native-endian `u16` in rav1d.
+/// Copy the Y plane without its row padding; 8-bit values are widened to `u16`.
 fn luma_frame(picture: &dav1d::Picture) -> Result<LumaFrame, DecodeError> {
     let bits = picture
         .bits_per_component()
@@ -113,36 +127,37 @@ fn luma_frame(picture: &dav1d::Picture) -> Result<LumaFrame, DecodeError> {
     let height = picture.height() as usize;
     let stride = picture.stride(dav1d::PlanarImageComponent::Y) as usize;
     let plane = picture.plane(dav1d::PlanarImageComponent::Y);
-    let rows = plane.chunks(stride).take(height);
-    let codes: Vec<u16> = match bits {
-        8 => rows
-            .flat_map(|row| row[..width].iter().map(|&v| u16::from(v)))
-            .collect(),
-        9..=16 => rows
-            .flat_map(|row| {
-                row[..2 * width]
-                    .as_chunks::<2>()
-                    .0
+    let mut data = Vec::with_capacity(2 * width * height);
+    for row in plane.chunks(stride).take(height) {
+        match bits {
+            8 => data.extend(
+                row[..width]
                     .iter()
-                    .map(|&b| u16::from_ne_bytes(b))
-            })
-            .collect(),
-        _ => return Err(DecodeError::BitDepth(bits)),
-    };
+                    .flat_map(|&v| u16::from(v).to_le_bytes()),
+            ),
+            9..=16 => data.extend_from_slice(&row[..2 * width]),
+            _ => return Err(DecodeError::BitDepth(bits)),
+        }
+    }
     Ok(LumaFrame {
         width: picture.width(),
         height: picture.height(),
         bit_depth: bits as u8,
-        codes,
+        data: data.into(),
     })
 }
 
-/// One encoded sample of the stream, as the visualizer reads it from the store.
-pub struct Sample<K> {
-    /// Where the sample sits on the timeline; the visualizer uses (time, row id).
+/// One encoded sample of a stream. A stream is a slice of these in decode order: sorted by time, then row id.
+pub struct Sample<K, D> {
     pub key: K,
-    pub data: Vec<u8>,
-    pub is_keyframe: bool,
+    pub data: D,
+}
+
+/// The sample that shows at `time`: the last one at or before it. Several samples may share a time point.
+pub fn latest_at<T: Ord + Copy, R, D>(samples: &[Sample<(T, R), D>], time: T) -> Option<usize> {
+    samples
+        .partition_point(|sample| sample.key.0 <= time)
+        .checked_sub(1)
 }
 
 /// The longest run of samples a seek may decode before it gives up looking for a keyframe.
@@ -163,14 +178,19 @@ impl<K: Copy + Eq> StreamDecoder<K> {
         })
     }
 
-    /// The frame `target` shows. `previous(key)` returns the sample before `key` on the timeline.
-    pub fn frame(
+    /// The last decoded frame, the one `frame` returns again for the same sample.
+    pub fn last(&self) -> Option<&LumaFrame> {
+        self.last.as_ref().map(|(_, frame)| frame.as_ref())
+    }
+
+    /// The frame that `samples[target]` shows.
+    pub fn frame<D: AsRef<[u8]> + Clone + Send + Sync + 'static>(
         &mut self,
-        target: Sample<K>,
-        mut previous: impl FnMut(K) -> Option<Sample<K>>,
+        samples: &[Sample<K, D>],
+        target: usize,
     ) -> Result<Arc<LumaFrame>, DecodeError> {
         if let Some((key, frame)) = &self.last
-            && *key == target.key
+            && *key == samples[target].key
         {
             return Ok(frame.clone());
         }
@@ -178,26 +198,29 @@ impl<K: Copy + Eq> StreamDecoder<K> {
 
         // Walk back to the first sample that can start the decode: a keyframe (restart there),
         // or the sample after the one decoded last (continue from the decoder's state).
-        let mut pending = vec![target];
+        let mut start = target;
         let restart = loop {
-            let oldest = &pending[pending.len() - 1];
-            if oldest.is_keyframe {
+            let is_keyframe =
+                re_video::is_start_of_gop(samples[start].data.as_ref(), re_video::VideoCodec::AV1)
+                    .unwrap_or(false);
+            if is_keyframe {
                 break true;
             }
-            match previous(oldest.key) {
-                Some(sample) if Some(sample.key) == last_key => break false,
-                Some(sample) if pending.len() < MAX_GOP => pending.push(sample),
-                _ => return Err(DecodeError::NoKeyframe(pending.len())),
+            if start == 0 || target - start + 1 >= MAX_GOP {
+                return Err(DecodeError::NoKeyframe(target - start + 1));
             }
+            if Some(samples[start - 1].key) == last_key {
+                break false;
+            }
+            start -= 1;
         };
 
         if restart {
             self.decoder.reset();
         }
         let mut frame = None;
-        let key = pending[0].key;
-        for sample in pending.iter().rev() {
-            match self.decoder.decode(&sample.data) {
+        for sample in &samples[start..=target] {
+            match self.decoder.decode(sample.data.clone()) {
                 Ok(decoded) => frame = Some(decoded),
                 Err(err) => {
                     // Unknown reference state: the next request restarts at a keyframe.
@@ -207,7 +230,7 @@ impl<K: Copy + Eq> StreamDecoder<K> {
             }
         }
         let frame = Arc::new(frame.ok_or(DecodeError::NoPicture)?);
-        self.last = Some((key, frame.clone()));
+        self.last = Some((samples[target].key, frame.clone()));
         Ok(frame)
     }
 }
@@ -227,74 +250,75 @@ mod tests {
             .collect()
     }
 
-    fn samples() -> Vec<Vec<u8>> {
+    fn codes(frame: &LumaFrame) -> Vec<u16> {
+        frame
+            .data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| u16::from_le_bytes(b))
+            .collect()
+    }
+
+    /// The fixture's samples with `key(frame index)` as keys.
+    fn samples<K>(key: impl Fn(usize) -> K) -> Vec<Sample<K, Vec<u8>>> {
         let mut pos = usize::from(u16::from_le_bytes([STREAM[6], STREAM[7]]));
         let mut out = Vec::new();
         while pos < STREAM.len() {
             let size = u32::from_le_bytes(STREAM[pos..pos + 4].try_into().unwrap()) as usize;
-            out.push(STREAM[pos + 12..pos + 12 + size].to_vec());
+            out.push(Sample {
+                key: key(out.len()),
+                data: STREAM[pos + 12..pos + 12 + size].to_vec(),
+            });
             pos += 12 + size;
         }
         out
     }
 
-    fn sample(samples: &[Vec<u8>], i: usize) -> Sample<usize> {
-        Sample {
-            key: i,
-            data: samples[i].clone(),
-            is_keyframe: re_video::is_start_of_gop(&samples[i], re_video::VideoCodec::AV1).unwrap(),
-        }
-    }
-
     #[test]
     fn decodes_the_exact_10_bit_codes() {
-        let samples = samples();
+        let samples = samples(|f| f);
         assert_eq!(samples.len(), FRAMES);
         let mut decoder = LumaDecoder::new().unwrap();
-        for (f, data) in samples.iter().enumerate() {
-            let frame = decoder.decode(data).unwrap();
+        for (f, sample) in samples.iter().enumerate() {
+            let frame = decoder.decode(sample.data.clone()).unwrap();
             assert_eq!((frame.width, frame.height, frame.bit_depth), (32, 16, 10));
-            assert_eq!(frame.codes, expected(f), "frame {f}");
+            assert_eq!(codes(&frame), expected(f), "frame {f}");
         }
-    }
-
-    #[test]
-    fn keyframes_are_every_tenth_sample() {
-        let samples = samples();
-        let keyframes: Vec<_> = (0..FRAMES)
-            .filter(|&i| sample(&samples, i).is_keyframe)
-            .collect();
-        assert_eq!(keyframes, [0, 10, 20]);
     }
 
     /// Forward steps, a jump into another GOP, a backward seek and a repeat all show the right frame.
     #[test]
     fn seeks_show_the_requested_frame() {
-        let samples = samples();
+        let samples = samples(|f| f);
         let mut decoder = StreamDecoder::new().unwrap();
         for target in [15, 16, 19, 23, 3, 3, 12, 0, 9] {
-            let mut visited = 0;
-            let frame = decoder
-                .frame(sample(&samples, target), |key| {
-                    visited += 1;
-                    key.checked_sub(1).map(|i| sample(&samples, i))
-                })
-                .unwrap();
-            assert_eq!(frame.codes, expected(target), "frame {target}");
-            assert!(
-                visited <= 10,
-                "frame {target}: walked back {visited} samples"
-            );
+            let frame = decoder.frame(&samples, target).unwrap();
+            assert_eq!(codes(&frame), expected(target), "frame {target}");
         }
+    }
+
+    /// Two samples per time point, keyframes sharing their time with the next frame: the time cursor
+    /// shows the later row, and decoding it still starts at the keyframe of the same time.
+    #[test]
+    fn samples_sharing_a_time_point() {
+        let samples = samples(|f| (f / 2, f));
+        let mut decoder = StreamDecoder::new().unwrap();
+        for (time, frame) in [(5, 11), (0, 1), (10, 21), (6, 13)] {
+            let target = latest_at(&samples, time).unwrap();
+            assert_eq!(target, frame);
+            let decoded = decoder.frame(&samples, target).unwrap();
+            assert_eq!(codes(&decoded), expected(frame), "time {time}");
+        }
+        assert_eq!(latest_at(&samples[1..], 0), Some(0));
+        assert!(latest_at(&samples[2..], 0).is_none());
     }
 
     #[test]
     fn a_stream_without_keyframe_is_an_error() {
-        let samples = samples();
+        let samples = samples(|f| f);
         let mut decoder = StreamDecoder::new().unwrap();
-        let result = decoder.frame(sample(&samples, 5), |key| {
-            (key > 1).then(|| sample(&samples, key - 1))
-        });
-        assert!(matches!(result, Err(DecodeError::NoKeyframe(_))));
+        let result = decoder.frame(&samples[1..], 4);
+        assert!(matches!(result, Err(DecodeError::NoKeyframe(5))));
     }
 }

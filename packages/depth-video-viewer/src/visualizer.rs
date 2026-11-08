@@ -1,13 +1,16 @@
 //! The `DepthVideoStream` visualizer: decode the sample at the time cursor, then draw it like a depth image.
 //!
+//! Out-of-tree scaffolding, deleted once `DepthVideoStream` ships in Rerun; there the visualizer would be a thin
+//! adapter over the built-in video stream path instead of this per-entity decoder cache.
+//!
 //! The decoded codes become an `ImageInfo` of kind depth and go through the same public upload as
 //! `DepthImage` (`gpu_bridge::image_to_gpu`, an `R16Uint` texture with the colormap), so the pixels match
 //! a PNG `EncodedDepthImage` of the same codes. In 2D the texture is a colormapped rectangle; in 3D a
 //! `DepthCloud` under the entity's pinhole (copy of `re_view_spatial`'s private
 //! `process_entity_view_as_depth_cloud`).
 
-use crate::archetype;
-use crate::decoder::{LumaFrame, Sample, StreamDecoder};
+use crate::archetype::{self, Field};
+use crate::decoder::{DecodeError, LumaFrame, Sample, StreamDecoder, latest_at};
 use re_renderer::renderer::{
     ColormappedTexture, DepthCloud, DepthCloudDrawData, DepthClouds, RectangleDrawData,
     RectangleOptions, TextureFilterMag, TextureFilterMin, TexturedRect,
@@ -18,21 +21,26 @@ use re_sdk_types::components::{
 use re_sdk_types::{RowId, View as _};
 use re_view_spatial::{EntityDepthOffsets, TransformTreeContext};
 use re_viewer::external::{
-    re_chunk_store::LatestAtQuery,
-    re_log_types::{EntityPath, EntityPathHash, TimeInt},
+    arrow::buffer::ScalarBuffer,
+    re_chunk_store::{ChunkStoreEvent, ChunkTrackingMode, RangeQuery},
+    re_entity_db::EntityDb,
+    re_log_types::{AbsoluteTimeRange, EntityPath, EntityPathHash, TimeInt, TimelineName},
     re_renderer, re_sdk_types, re_view, re_view_spatial, re_viewer_context,
 };
 use re_viewer_context::{
-    ColormapWithRange, DataResult, IdentifiedViewSystem, ImageInfo, ImageStatsCache, ViewContext,
+    ColormapWithRange, DataResult, IdentifiedViewSystem, ImageInfo, ImageStats, ViewContext,
     ViewContextCollection, ViewQuery, ViewSystemExecutionError, ViewSystemIdentifier,
     ViewerReportSeverity, VisualizerExecutionOutput, VisualizerInstruction, VisualizerQueryInfo,
     VisualizerSystem, gpu_bridge,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// (time, row id) of a sample on the queried timeline.
+/// (time, row id) of a sample on the queried timeline: the order samples decode in.
 type SampleKey = (TimeInt, RowId);
+
+/// A sample as stored: the blob shares the store's buffer.
+type StoredSample = Sample<SampleKey, ScalarBuffer<u8>>;
 
 #[derive(Default)]
 pub struct DepthVideoStreamVisualizer;
@@ -50,7 +58,7 @@ impl VisualizerSystem for DepthVideoStreamVisualizer {
 
     fn visualizer_query_info(&self, _: &re_viewer_context::AppOptions) -> VisualizerQueryInfo {
         VisualizerQueryInfo::single_required_component::<VideoCodec>(
-            &archetype::descriptor_codec(),
+            &Field::Codec.descriptor(),
             &archetype::all_components(),
         )
     }
@@ -72,38 +80,54 @@ impl VisualizerSystem for DepthVideoStreamVisualizer {
         let mut rects = Vec::new();
         for (data, instruction) in query.iter_visualizer_instruction_for(Self::identifier()) {
             let entity = data.entity_path.hash();
-            let drawn = match depth_texture(ctx, query, data, instruction) {
-                Ok(Some(drawn)) => drawn,
-                Ok(None) => continue, // Nothing logged at or before the time cursor.
-                Err(message) => {
-                    output.report_unspecified_source(
-                        instruction.id,
-                        ViewerReportSeverity::Error,
-                        message,
-                    );
+            let report = |message: String| {
+                output.report_unspecified_source(
+                    instruction.id,
+                    ViewerReportSeverity::Error,
+                    message,
+                );
+            };
+
+            // Where to draw comes first: nothing is decoded for an entity that cannot be placed.
+            let transform = match transforms.target_from_entity_path(entity) {
+                Some(Ok(transform)) => transform,
+                Some(Err(err)) => {
+                    report(format!("Invalid transform: {err}"));
+                    continue;
+                }
+                None => {
+                    report("No transform from this entity to the view's origin.".to_owned());
                     continue;
                 }
             };
-            let Some(Ok(transform)) = transforms.target_from_entity_path(entity) else {
-                continue;
-            };
-            let outline_mask = query.highlights.entity_outline_mask(entity).overall;
-            if is_3d {
-                // A depth cloud needs a pinhole at or above the entity.
+            // A depth cloud needs a pinhole at or above the entity.
+            let pinhole = if is_3d {
                 let root = transform.tree_root();
                 let (Some(pinhole), Some(world_from_view)) = (
                     transforms.pinhole_tree_root_info(root),
                     transforms.target_from_pinhole_root(root),
                 ) else {
-                    output.report_unspecified_source(
-                        instruction.id,
-                        ViewerReportSeverity::Error,
+                    report(
                         "Cannot draw depth video as a 3D point cloud: it is not under a pinhole camera."
                             .to_owned(),
                     );
                     continue;
                 };
-                let pinhole = &pinhole.pinhole_projection;
+                Some((&pinhole.pinhole_projection, world_from_view))
+            } else {
+                None
+            };
+
+            let drawn = match depth_texture(ctx, query, data, instruction, &output) {
+                Ok(Some(drawn)) => drawn,
+                Ok(None) => continue, // Nothing at or before the time cursor, or chunks still loading.
+                Err(message) => {
+                    report(message);
+                    continue;
+                }
+            };
+            let outline_mask = query.highlights.entity_outline_mask(entity).overall;
+            if let Some((pinhole, world_from_view)) = pinhole {
                 let world_from_rdf = world_from_view.as_affine3a()
                     * glam::Affine3A::from_mat3(pinhole.view_coordinates.from_rdf());
                 let texture = &drawn.texture;
@@ -188,24 +212,30 @@ fn depth_texture(
     query: &ViewQuery<'_>,
     data: &DataResult,
     instruction: &VisualizerInstruction,
+    output: &VisualizerExecutionOutput,
 ) -> Result<Option<DrawnDepth>, String> {
-    let latest_at = query.latest_at_query();
-    let codec_c = archetype::descriptor_codec().component;
-    let meter_c = archetype::descriptor_meter().component;
-    let colormap_c = archetype::descriptor_colormap().component;
-    let range_c = archetype::descriptor_depth_range().component;
-    let fill_c = archetype::descriptor_point_fill_ratio().component;
-    let sample_c = archetype::descriptor_sample().component;
+    let [codec_c, meter_c, colormap_c, range_c, fill_c] = [
+        Field::Codec,
+        Field::Meter,
+        Field::Colormap,
+        Field::DepthRange,
+        Field::PointFillRatio,
+    ]
+    .map(Field::component);
 
     // Properties may be overridden in the blueprint; samples are read straight from the store.
     let properties = re_view::latest_at_with_blueprint_resolved_data(
         ctx,
         None,
-        &latest_at,
+        &query.latest_at_query(),
         data,
         [codec_c, meter_c, colormap_c, range_c, fill_c],
         Some(instruction),
     );
+    if properties.any_missing_chunks() {
+        output.set_missing_chunks();
+        return Ok(None);
+    }
     match properties.get_mono::<VideoCodec>(codec_c) {
         Some(VideoCodec::AV1) => {}
         Some(codec) => return Err(format!("DepthVideoStream supports AV1 only, got {codec:?}")),
@@ -213,59 +243,65 @@ fn depth_texture(
     }
 
     let entity_path = &data.entity_path;
-    let read_sample = |at: &LatestAtQuery| -> Option<Sample<SampleKey>> {
-        let results = ctx.recording().latest_at(at, entity_path, [sample_c]);
-        let VideoSample(blob) = results.component_mono_quiet::<VideoSample>(sample_c)?;
-        let key = results.max_index();
-        Some(Sample {
-            key,
-            is_keyframe: re_video::is_start_of_gop(&blob, re_video::VideoCodec::AV1)
-                .unwrap_or(false),
-            data: blob.to_vec(),
-        })
-    };
-    let Some(target) = read_sample(&latest_at) else {
-        return Ok(None);
-    };
-    let target_key = target.key;
-    let previous = |(time, _): SampleKey| {
-        // One sample per time point, as for `VideoStream`; a static sample has no predecessor.
-        if time.is_static() || time == TimeInt::MIN {
-            return None;
-        }
-        read_sample(&LatestAtQuery::new(query.timeline, time.as_i64() - 1))
-    };
-
-    let image = ctx
+    let mut partial = false;
+    let decoded = ctx
         .viewer_ctx
         .store_context
-        .memoizer::<DecoderCache, _>(|cache| cache.image(entity_path, target, previous))
+        .memoizer::<DecoderCache, _>(|cache| {
+            cache.frame(
+                (entity_path.hash(), query.timeline),
+                query.latest_at,
+                || {
+                    let samples = read_samples(ctx.recording(), entity_path, query.timeline);
+                    partial = samples.is_none();
+                    samples
+                },
+            )
+        })
         .map_err(|err| format!("Failed to decode depth video: {err}"))?;
-    let frame_max = ((1_u32 << image.bit_depth) - 1) as f32;
+    if partial {
+        output.set_missing_chunks();
+    }
+    let Some((row_id, frame)) = decoded else {
+        return Ok(None);
+    };
 
     let meter = properties
         .get_mono::<DepthMeter>(meter_c)
         .map_or(archetype::DEFAULT_METER, |m| *m.0);
     let colormap = properties
         .get_mono::<Colormap>(colormap_c)
-        .unwrap_or(archetype::DEFAULT_COLORMAP);
-    let value_range = properties
-        .get_mono::<ValueRange>(range_c)
-        .map_or([0.0, frame_max], |r| [r.0.0[0] as f32, r.0.0[1] as f32]);
+        .unwrap_or(ColormapWithRange::DEFAULT_DEPTH_COLORMAP);
+    let value_range = properties.get_mono::<ValueRange>(range_c).map_or_else(
+        || [0.0, ((1_u32 << frame.bit_depth) - 1) as f32],
+        |r| [r.0.0[0] as f32, r.0.0[1] as f32],
+    );
     let fill_ratio = properties
         .get_mono::<FillRatio>(fill_c)
         .map_or(1.0, |f| *f.0);
 
-    let image_info = image.info;
-    let stats = ctx
-        .viewer_ctx
-        .store_context
-        .memoizer_read_or_compute::<ImageStatsCache, _, _>(&image_info);
+    // Keyed by the sample's row id, so the texture manager uploads each decoded frame once.
+    let image = ImageInfo::from_stored_blob(
+        row_id,
+        Field::Sample.component(),
+        frame.data.clone(),
+        re_sdk_types::components::ImageFormat::depth(
+            [frame.width, frame.height],
+            re_sdk_types::datatypes::ChannelDatatype::U16,
+        )
+        .0,
+        re_sdk_types::image::ImageKind::Depth,
+    );
+    // With an explicit colormap range the depth upload never reads the image statistics.
+    let no_stats = ImageStats {
+        range: None,
+        finite_range: (0.0, 0.0),
+    };
     let texture = gpu_bridge::image_to_gpu(
         ctx.render_ctx(),
-        &format!("{entity_path} @ {target_key:?}"),
-        &image_info,
-        &stats,
+        &format!("{entity_path} @ {row_id}"),
+        &image,
+        &no_stats,
         None,
         Some(&ColormapWithRange {
             colormap,
@@ -280,72 +316,84 @@ fn depth_texture(
     }))
 }
 
-/// One decoded frame as a depth image, keyed by its sample's row id for the texture cache.
-#[derive(Clone)]
-struct DecodedImage {
-    info: ImageInfo,
-    bit_depth: u8,
-}
-
-impl DecodedImage {
-    fn new(row_id: RowId, frame: &LumaFrame) -> Self {
-        let bytes: Vec<u8> = frame.codes.iter().flat_map(|c| c.to_le_bytes()).collect();
-        Self {
-            info: ImageInfo::from_stored_blob(
-                row_id,
-                archetype::descriptor_sample().component,
-                bytes.into(),
-                re_sdk_types::components::ImageFormat::depth(
-                    [frame.width, frame.height],
-                    re_sdk_types::datatypes::ChannelDatatype::U16,
-                )
-                .0,
-                re_sdk_types::image::ImageKind::Depth,
-            ),
-            bit_depth: frame.bit_depth,
-        }
+/// All samples of an entity on a timeline in decode order, or `None` while some of its chunks are not loaded.
+fn read_samples(
+    recording: &EntityDb,
+    entity_path: &EntityPath,
+    timeline: TimelineName,
+) -> Option<Vec<StoredSample>> {
+    re_tracing::profile_function!();
+    let component = Field::Sample.component();
+    let results = recording.storage_engine().cache().range(
+        ChunkTrackingMode::Report,
+        &RangeQuery::new(timeline, AbsoluteTimeRange::EVERYTHING),
+        entity_path,
+        [component],
+    );
+    if results.is_partial() {
+        return None;
     }
+    let mut samples: Vec<_> = results
+        .get(component)
+        .unwrap_or(&[])
+        .iter()
+        .flat_map(|chunk| {
+            chunk
+                .iter_component_indices(timeline, component)
+                .zip(chunk.iter_component::<VideoSample>(component))
+                .filter_map(|(key, batch)| {
+                    Some(Sample {
+                        key,
+                        data: batch.first()?.0.0.clone(),
+                    })
+                })
+        })
+        .collect();
+    samples.sort_by_key(|sample| sample.key);
+    Some(samples)
 }
 
-/// Per-recording decoder state, one stream decoder per entity.
+/// Per-recording decoder state: a sample index and a decoder per entity and timeline.
 #[derive(Default)]
 struct DecoderCache {
-    frame: u64,
-    streams: HashMap<EntityPathHash, CachedStream>,
+    streams: BTreeMap<(EntityPathHash, TimelineName), CachedStream>,
 }
 
 struct CachedStream {
+    /// Rebuilt after the entity's chunks change.
+    samples: Option<Vec<StoredSample>>,
     decoder: StreamDecoder<SampleKey>,
-    shown: Option<(SampleKey, DecodedImage)>,
-    last_used: u64,
+    used: bool,
 }
 
 impl DecoderCache {
-    fn image(
+    /// The frame shown at `time` and its sample's row id; builds the sample index with `read_samples` if needed.
+    fn frame(
         &mut self,
-        entity: &EntityPath,
-        target: Sample<SampleKey>,
-        previous: impl FnMut(SampleKey) -> Option<Sample<SampleKey>>,
-    ) -> Result<DecodedImage, crate::decoder::DecodeError> {
-        let stream = match self.streams.entry(entity.hash()) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(CachedStream {
+        key: (EntityPathHash, TimelineName),
+        time: TimeInt,
+        read_samples: impl FnOnce() -> Option<Vec<StoredSample>>,
+    ) -> Result<Option<(RowId, Arc<LumaFrame>)>, DecodeError> {
+        let stream = match self.streams.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(CachedStream {
+                samples: None,
                 decoder: StreamDecoder::new()?,
-                shown: None,
-                last_used: 0,
+                used: false,
             }),
         };
-        stream.last_used = self.frame;
-        if let Some((key, image)) = &stream.shown
-            && *key == target.key
-        {
-            return Ok(image.clone());
+        stream.used = true;
+        if stream.samples.is_none() {
+            stream.samples = read_samples();
         }
-        let key = target.key;
-        let frame = stream.decoder.frame(target, previous)?;
-        let image = DecodedImage::new(key.1, &frame);
-        stream.shown = Some((key, image.clone()));
-        Ok(image)
+        let Some(samples) = &stream.samples else {
+            return Ok(None);
+        };
+        let Some(target) = latest_at(samples, time) else {
+            return Ok(None);
+        };
+        let frame = stream.decoder.frame(samples, target)?;
+        Ok(Some((samples[target].key.1, frame)))
     }
 }
 
@@ -355,24 +403,40 @@ impl re_viewer_context::Cache for DecoderCache {
     }
 
     fn begin_frame(&mut self) {
-        // Keep a stream's decoder while it is on screen, plus a second for blueprint transitions.
-        self.streams
-            .retain(|_, stream| stream.last_used + 60 >= self.frame);
-        self.frame += 1;
+        for stream in self.streams.values_mut() {
+            stream.used = false;
+        }
     }
 
     fn purge_memory(&mut self) {
-        self.streams.clear();
+        // Called before `begin_frame`: keep what the last frame drew.
+        self.streams.retain(|_, stream| stream.used);
+    }
+
+    fn on_store_events(&mut self, events: &[&ChunkStoreEvent], _: &EntityDb) {
+        for event in events {
+            if event.is_virtual_addition() {
+                self.streams.clear();
+            } else if let Some(chunk) = event.delta_chunk() {
+                let entity = chunk.entity_path().hash();
+                for ((stream_entity, _), stream) in &mut self.streams {
+                    if *stream_entity == entity {
+                        stream.samples = None;
+                    }
+                }
+            }
+        }
     }
 }
 
 impl re_byte_size::MemUsageTreeCapture for DecoderCache {
     fn capture_mem_usage_tree(&self) -> re_byte_size::MemUsageTree {
+        // The sample index shares the store's buffers; the decoded frame is ours.
         let bytes = self
             .streams
             .values()
-            .filter_map(|stream| stream.shown.as_ref())
-            .map(|(_, image)| image.info.buffer.len() as u64)
+            .filter_map(|stream| stream.decoder.last())
+            .map(|frame| frame.data.len() as u64)
             .sum();
         re_byte_size::MemUsageTree::Bytes(bytes)
     }
