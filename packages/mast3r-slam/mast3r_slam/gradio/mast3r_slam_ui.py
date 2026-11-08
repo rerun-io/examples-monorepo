@@ -37,7 +37,9 @@ EXAMPLE_VIDEOS: list[str] = [
     "data/livingroom-tour.mp4",
     "data/normal-apt-tour.mp4",
     # The dpvo / MetricTrail example clips, for comparisons across the three apps.
-    "data/iphone/pool.mp4",
+    # TODO(relocalisation): pool.mp4 is left out on purpose. mast3r-slam loses tracking there and never
+    # relocalises (see "Known limitations" in the README); not being worked on for now.
+    # "data/iphone/pool.mp4",
     "data/movies/IMG_0493.mp4",
     "data/movies/IMG_0494.mp4",
     "data/movies/IMG_0495.mp4",

@@ -67,6 +67,17 @@ Subsequent runs skip all install steps (idempotent checks).
   **TODO:** Add curope as a pixi-build workspace package (`packages/curope/`) to enable
   the faster CUDA kernel from `naver/croco/models/curope/`.
 
+## Known limitations
+
+- **TODO (relocalisation, not being worked on):** once tracking is lost (fewer than 5 % valid matches, e.g. a blank
+  wall or glass filling the view), mast3r-slam freezes the pose and only recovers if image retrieval finds an
+  already-mapped keyframe that matches. When the camera keeps moving into new areas, every attempt fails and the
+  rest of the clip is lost. dpvo's `iphone/pool.mp4` shows this (lost at 78.5 s with every frame, at 8.3 s with
+  every 5th frame), so it is left out of the example clips and the download task. Possible fixes, smallest first:
+  record relocalisation attempts in the saved recording (today they only reach a connected viewer); try
+  `reloc.strict = False`; start a new map after repeated failures and join the maps on loop closure (as ORB-SLAM3
+  does). Related: in single-thread mode the relocalisation wait spins forever if the backend process dies.
+
 ## Acknowledgements
 
 [MASt3R-SLAM](https://github.com/rmurai0610/MASt3R-SLAM)
