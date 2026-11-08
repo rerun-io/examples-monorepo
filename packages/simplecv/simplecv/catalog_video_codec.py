@@ -35,10 +35,17 @@ def catalog_codec_name(fourcc: int) -> CatalogCodecName:
     return _CODEC_NAME[codec]
 
 
-def video_codec(name: CatalogCodecName) -> rr.VideoCodec:
+def video_codec(name: str | None) -> rr.VideoCodec:
     """The ``rr.VideoCodec`` for a decoder codec name (inverse of :func:`catalog_codec_name`; torchcodec's
-    ``metadata.codec`` uses the same names)."""
-    return {codec_name: codec for codec, codec_name in _CODEC_NAME.items()}[name]
+    ``metadata.codec`` uses the same names).
+
+    Raises:
+        ValueError: If ``name`` is not one of the workspace's codec names.
+    """
+    codecs: dict[str, rr.VideoCodec] = {codec_name: codec for codec, codec_name in _CODEC_NAME.items()}
+    if name not in codecs:
+        raise ValueError(f"unsupported video codec {name!r}; expected one of {sorted(codecs)}")
+    return codecs[name]
 
 
 def wrap_mp4(samples: Sequence[Buffer], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
