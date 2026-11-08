@@ -145,8 +145,8 @@ class FrameTracker:
         assert isinstance(Xkk_raw, torch.Tensor)
         Xkk: Float[Tensor, "hw 3"] = Xkk_raw
         keyframe.update_pointmap(Xkk, Ckf)
-        # write back the fitered pointmap
-        self.keyframes[len(self.keyframes) - 1] = keyframe
+        # write back the filtered pointmap
+        self.keyframes.update_pointmap(len(self.keyframes) - 1, keyframe)
 
         # Keyframe selection
         n_valid: Int[Tensor, ""] = valid_kf.sum()

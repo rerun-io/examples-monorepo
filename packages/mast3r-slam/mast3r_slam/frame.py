@@ -499,6 +499,26 @@ class SharedKeyframes:
             self.is_dirty[idx] = True
             return idx
 
+    def update_pointmap(self, idx: int, value: Frame) -> None:
+        """Write back a keyframe's filtered pointmap after tracking refined it.
+
+        Tracking changes only ``X_canon``, ``C``, ``N`` and ``N_updates``. Rewriting the pose too would race the
+        backend: that copy can read the pose before a concurrent global-optimisation write and store the stale
+        value after it.
+
+        Args:
+            idx: Buffer index of the keyframe.
+            value: The keyframe, with its refined pointmap.
+        """
+        assert value.X_canon is not None
+        assert value.C is not None
+        with self.lock:
+            self.X[idx] = value.X_canon
+            self.C[idx] = value.C
+            self.N[idx] = value.N
+            self.N_updates[idx] = value.N_updates
+            self.is_dirty[idx] = True
+
     def __len__(self) -> int:
         """Return the number of keyframes currently stored."""
         with self.lock:
