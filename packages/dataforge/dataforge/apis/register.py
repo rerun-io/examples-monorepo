@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlparse
 import rerun.blueprint as rrb
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
-from dataforge import paths, schema, writing
+from dataforge import paths, writing
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.timing import RegisterRecord, SequenceTimer, append_record
@@ -123,7 +123,7 @@ def republish_blueprints(entry: DatasetEntry, dataset: DataforgeDataset, catalog
             table_layout.save(catalog_name, str(temp_path))
     else:
         columns: list[str] = entry.segment_table().schema().names
-        writing.save_table_blueprint(table_layout, table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
+        writing.save_table_blueprint(table_layout, table_path, timeline=dataset.timeline, fields=dataset.table_fields(), columns=columns)
     entry.register_blueprint(table_path.as_uri(), set_default=True, segment_table=True)
     if blueprint_entries is not None and retiring:
         blueprint_entries.unregister(segments_to_drop=list(retiring), layers_to_drop=[]).wait()

@@ -373,6 +373,23 @@ MCAP reader cannot open; they are listed in `timing/unconverted.json`.
 Differences from the whole-body release, the depth codec and the subset are in
 [docs/gen-humanego.md](docs/gen-humanego.md).
 
+### GSI Egocentric Six-View (gsi-six-view)
+
+GSI's private partner edition (10 h, 1,685 episodes, 174 GB) ships every episode as two Rerun rrds already, so
+dataforge repacks rather than converts: `download` signs in with `GSI_PARTNER_USERNAME`/`GSI_PARTNER_PASSWORD`
+(from `~/.secrets.env`) and fetches the sha256-checked files, and `convert` streams `hands.rrd` into `base` and
+`slam.rrd` into `slam` under the dataforge recording id, compacted, with GSI's entity paths, H.265 samples and
+timelines untouched, then deletes the download. About a second per episode.
+
+```bash
+source ~/.secrets.env
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gsi-six-view
+pixi run -e dataforge --frozen dataforge-download gsi-six-view --root /mnt/nas/ssd-8tb/downloads/gsi/egocentric-six-view-10h --sequences <episode_id>
+pixi run -e dataforge --frozen dataforge-convert gsi-six-view --root /mnt/nas/ssd-8tb/downloads/gsi/egocentric-six-view-10h
+```
+
+The API, the layers and the clocks are in [docs/gsi-six-view.md](docs/gsi-six-view.md).
+
 ### SLAM benchmarks through VSLAM-LAB (vslam-lab)
 
 [VSLAM-LAB](https://github.com/VSLAM-LAB/VSLAM-LAB) fetches some thirty SLAM
@@ -505,6 +522,7 @@ is a nominal-rate fiction for such a file.
 | `egoexo4d` | one Ego-Exo4D take with an Ego-Exo4D-HM fit; take files fetched on demand (licence keys) and deleted after base | **four** rrds: `base` with the localized GoPros (KB4, 1080p AV1), the Aria RGB/SLAM/eye cameras and its trajectory; `body_pose` (SMPL-H parameters, COCO-133 keypoints), `body_mesh` (SMPL-H, 10 Hz), `projections`; see [docs/egoexo4d.md](docs/egoexo4d.md) |
 | `mamma` | one MAMMA sequence of the `--family` (eval, markerless-dance, markerless-multiple-people, markerless-iphones; syn and syn-bedlam: the MammaSyn renders and BEDLAM clips from their WebDataset shards), read in place from the release | **four to six** rrds: `base` with every camera (AV1, videos above 3.2 MP at half size, the Vicon radial lens as data); `body_pose` (SMPL-X parameters and COCO-133 keypoints per person, tagged `mosh_gt`, `mamma_pred` or `synthetic_gt`), `body_mesh` (SMPL-X, 10 Hz; syn: every 6 Hz frame), `projections` (through the Vicon lens; syn: pinhole); eval and syn add `masks` (palette PNGs at a quarter size) and, on Extra, `markers`; see [docs/mamma.md](docs/mamma.md) and [docs/mamma-syn.md](docs/mamma-syn.md) |
 | `harmony4d` | one Harmony4D sequence, read in place from its release zip (one zip per scene and split, fetched from the Hub) | **four** rrds: `base` with ~20 GoPros (OPENCV_FISHEYE, 4K JPEG frames as 1080p AV1) and, when worn, both Aria glasses' rgb/slam cameras (upright) and per-frame poses; `body_pose` (SMPL parameters, SMPL-45 joints, COCO-17 keypoints in COCO-133 per person), `body_mesh` (shipped SMPL vertices, 10 Hz), `projections` (through each full lens, plus the shipped boxes); see [docs/harmony4d.md](docs/harmony4d.md) |
+| `gsi-six-view` | one GSI episode, its two shipped rrds fetched through GSI's API | **two** rrds repacked unchanged: `base` (GSI's `hands.rrd`: six H.265 views, pinholes, MANO hands, calibration, episode properties) and `slam` (GSI's `slam.rrd`: the rig, camera and hand world poses and the path); see [docs/gsi-six-view.md](docs/gsi-six-view.md) |
 | `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as the sensor's 16-bit PNGs (`EncodedDepthImage`) where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
