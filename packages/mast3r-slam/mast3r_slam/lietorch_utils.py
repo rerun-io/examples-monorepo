@@ -11,7 +11,7 @@ def as_SE3(X: lietorch.Sim3 | lietorch.SE3) -> lietorch.SE3:
         return X
     t: Float[Tensor, "... 3"]
     q: Float[Tensor, "... 4"]
-    s: Float[Tensor, "... 1"]
-    t, q, s = einops.rearrange(X.data.detach().cpu(), "... c -> (...) c").split([3, 4, 1], -1)
+    _scale: Float[Tensor, "... 1"]
+    t, q, _scale = einops.rearrange(X.data.detach().cpu(), "... c -> (...) c").split([3, 4, 1], -1)
     world_se3_cam: lietorch.SE3 = lietorch.SE3(torch.cat([t, q], dim=-1))
     return world_se3_cam

@@ -138,6 +138,10 @@ class SlamPipelineHandle:
     """True if the pipeline was terminated before processing all frames."""
 
 
+CURRENT_FRAME_BACKLOG: int = 32
+"""Logger events queued before the tracking thread stops enqueueing current frames (map events are always queued)."""
+
+
 def run_slam_pipeline(
     *,
     model: AsymmetricMASt3R,
@@ -224,7 +228,9 @@ def run_slam_pipeline(
 
     # Async logger: events are enqueued here, processed in a background thread.
     # Used as a context manager further down so LogTerminate + join is automatic.
-    event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
+    # Unbounded, so the tracking thread never blocks on the logger: map events (keyframes, poses, edges) are never
+    # dropped, and current-frame events are only enqueued while the backlog is short (CURRENT_FRAME_BACKLOG).
+    event_queue: queue.Queue[LogEvent] = queue.Queue()
     async_logger: AsyncRerunLogger = AsyncRerunLogger(
         event_queue, parent_log_path, recording=recording,
     )
@@ -329,11 +335,10 @@ def run_slam_pipeline(
                     new_keyframes=new_kfs_init, orient=orient_init,
                 ))
                 shown_last_kf_id = frame.frame_id
-                if not event_queue.full():
-                    with contextlib.suppress(queue.Full):
-                        current_event: LogCurrentFrame = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
-                        event_queue.put_nowait(current_event)
-                        shown_last_kf_id = current_event.last_kf_frame_id
+                if event_queue.qsize() < CURRENT_FRAME_BACKLOG:
+                    current_event: LogCurrentFrame = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
+                    event_queue.put_nowait(current_event)
+                    shown_last_kf_id = current_event.last_kf_frame_id
 
                 i += 1
                 yield f"Processing frame {i}/{n_frames}"
@@ -432,12 +437,11 @@ def run_slam_pipeline(
             if add_new_kf:
                 shown_last_kf_id = frame.frame_id
 
-            # 2. Current frame (droppable) — skip snapshot if queue is full
-            if not event_queue.full():
-                with contextlib.suppress(queue.Full):
-                    current_event = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
-                    event_queue.put_nowait(current_event)
-                    shown_last_kf_id = current_event.last_kf_frame_id
+            # 2. Current frame (droppable) — skipped, snapshot included, while the logger is behind
+            if event_queue.qsize() < CURRENT_FRAME_BACKLOG:
+                current_event = snapshot_current_frame(frame, i, ts_ns, keyframes, shown_last_kf_id)
+                event_queue.put_nowait(current_event)
+                shown_last_kf_id = current_event.last_kf_frame_id
 
             # FPS text log
             if i % 30 == 0 and i > 0:

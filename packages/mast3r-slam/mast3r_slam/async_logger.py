@@ -34,7 +34,7 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.camera_parameters import PinholeParameters
+from simplecv.camera_parameters import Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
@@ -48,7 +48,7 @@ from mast3r_slam.log_events import (
     LogText,
 )
 from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, SurfaceRequest, log_surface_request
-from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
+from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_intri, frame_to_pinhole
 from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
 
 _HIDDEN_IMAGE_PLANE_DISTANCE: float = 1e-6
@@ -296,6 +296,9 @@ class AsyncRerunLogger:
         self._conf_thresh: int = 7
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
+        # The newest keyframe's intrinsics, which the current camera reuses, and the ones last logged for it.
+        self._latest_keyframe_intrinsics: Intrinsics | None = None
+        self._logged_current_intrinsics: Intrinsics | None = None
         # (frame index, video timestamp) of the first event logged, and of the event being logged.
         self._first_time: tuple[int, int | None] | None = None
         self._now: tuple[int, int | None] = (0, None)
@@ -499,12 +502,19 @@ class AsyncRerunLogger:
         )
 
         cam_log_path: str = f"{self._parent_log_path}/current_camera"
-        pinhole = frame_to_pinhole(frame)
-        log_pinhole(
-            camera=pinhole,
-            cam_log_path=Path(cam_log_path),
-            image_plane_distance=self._image_plane_distance * 2,
-        )
+        # Focal estimation from the pointmap costs tens of ms per call inside a run (torch's CPU pool contends with
+        # tracking), so it runs once per keyframe; the current frame, same camera, reuses the latest keyframe's
+        # intrinsics. The Pinhole is re-logged only when those change, the pose every frame.
+        intrinsics: Intrinsics = self._latest_keyframe_intrinsics if self._latest_keyframe_intrinsics is not None else frame_to_intri(frame)
+        pinhole: PinholeParameters = PinholeParameters(name="current", extrinsics=frame_to_extrinsics(frame), intrinsics=intrinsics)
+        if intrinsics is not self._logged_current_intrinsics:
+            log_pinhole(camera=pinhole, cam_log_path=Path(cam_log_path), image_plane_distance=self._image_plane_distance * 2)
+            self._logged_current_intrinsics = intrinsics
+        else:
+            rr.log(
+                cam_log_path,
+                rr.Transform3D(translation=pinhole.extrinsics.cam_t_world, mat3x3=pinhole.extrinsics.cam_R_world, from_parent=True),
+            )
 
         # RGB image
         rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
@@ -640,6 +650,7 @@ class AsyncRerunLogger:
             cam_log_path=Path(kf_cam_log_path),
             image_plane_distance=self._image_plane_distance,
         )
+        self._latest_keyframe_intrinsics = pinhole.intrinsics
         self._keyframe_pinhole_static[kf.kf_idx] = PinholeParameters(
             name=pinhole.name,
             extrinsics=pinhole.extrinsics,

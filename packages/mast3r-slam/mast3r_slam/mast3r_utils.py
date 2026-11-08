@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Literal
 
 import einops
 import mast3r.utils.path_to_dust3r  # noqa
@@ -416,139 +416,33 @@ def mast3r_match_asymmetric(
     return idx_i2j, valid_match_j, Xii, Cii, Qii, Xji, Cji, Qji
 
 
-def xy_grid(
-    W: int,
-    H: int,
-    device: torch.device | str | None = None,
-    origin: tuple[int, int] = (0, 0),
-    unsqueeze: int | None = None,
-    cat_dim: int | None = -1,
-    homogeneous: bool = False,
-    **arange_kw: Any,
-) -> Float[Tensor, "h w 2"] | Float[ndarray, "h w 2"] | Any:
-    """Generate a 2D pixel coordinate grid.
+def estimate_focal_knowing_depth(pts3d_hw3: Float32[ndarray, "h w 3"], cx: float, cy: float) -> float:
+    """Focal length (pixels, square pixels) that best reprojects a pointmap onto its pixel grid.
 
-    Produces an ``(H, W, 2)`` grid where ``grid[j, i, 0] = i + origin[0]``
-    and ``grid[j, i, 1] = j + origin[1]``. When ``homogeneous=True``, the
-    last dimension becomes 3 with an appended ones channel.
-
-    Uses numpy when ``device`` is ``None``, otherwise uses torch on the
-    specified device.
+    Weiszfeld's iteratively re-weighted least squares on ``|pixel - f * (x, y) / z|``, started from the L2 closed
+    form (DUSt3R's ``estimate_focal_knowing_depth``, ``focal_mode="weiszfeld"``). NumPy, single-threaded: inside a
+    run, torch's CPU thread pool contends with tracking and the same math took 50-175 ms per call instead of a few.
 
     Args:
-        W: Grid width in pixels.
-        H: Grid height in pixels.
-        device: Torch device for the output tensor. ``None`` produces a
-            numpy array instead.
-        origin: ``(x_origin, y_origin)`` offset added to all coordinates.
-        unsqueeze: If not ``None``, unsqueeze each coordinate tensor along
-            this dimension before stacking.
-        cat_dim: Dimension along which to stack the coordinate arrays.
-            ``None`` returns the raw tuple of grids.
-        homogeneous: When ``True``, append an all-ones channel.
-        **arange_kw: Extra keyword arguments forwarded to ``np.arange`` or
-            ``torch.arange``.
-
-    Returns:
-        A stacked coordinate grid as a numpy array or torch tensor with
-        shape ``(H, W, 2)`` (or ``(H, W, 3)`` when ``homogeneous``).
+        pts3d_hw3: 3D points in the camera frame, one per pixel.
+        cx: Principal point x, pixels.
+        cy: Principal point y, pixels.
     """
-    if device is None:
-        # numpy
-        arange, meshgrid, stack, ones = np.arange, np.meshgrid, np.stack, np.ones  # pyrefly: ignore
-    else:
-        # torch
-        def arange(*a, **kw):  # pyrefly: ignore
-            return torch.arange(*a, device=device, **kw)
-
-        meshgrid, stack = torch.meshgrid, torch.stack  # pyrefly: ignore
-
-        def ones(*a):  # pyrefly: ignore
-            return torch.ones(*a, device=device)
-
-    tw, th = [arange(o, o + s, **arange_kw) for s, o in zip((W, H), origin, strict=False)]
-    grid = meshgrid(tw, th, indexing="xy")  # pyrefly: ignore
-    if homogeneous:
-        grid = grid + (ones((H, W)),)
-    if unsqueeze is not None:
-        grid = (grid[0].unsqueeze(unsqueeze), grid[1].unsqueeze(unsqueeze))  # pyrefly: ignore
-    if cat_dim is not None:
-        grid = stack(grid, cat_dim)  # pyrefly: ignore
-    return grid
-
-
-def estimate_focal_knowing_depth(
-    pts3d: Float32[Tensor, "B H W 3"],
-    pp: Float[Tensor, "... 2"],
-    focal_mode: Literal["median", "weiszfeld"] = "median",
-    min_focal: float = 0.0,
-    max_focal: float = np.inf,
-) -> Float[Tensor, "B"]:
-    """Estimate camera focal length from 3D points with known absolute depth.
-
-    Uses either a median-based or Weiszfeld iterative re-weighted least-squares
-    estimator to robustly recover the focal length that best explains the
-    observed 3D-to-2D reprojection geometry.
-
-    Args:
-        pts3d: Predicted 3D point maps of shape ``(B, H, W, 3)``.
-        pp: Principal point ``(cx, cy)`` for each batch element.
-        focal_mode: Estimation strategy -- ``"median"`` for a direct robust
-            median or ``"weiszfeld"`` for IRLS refinement.
-        min_focal: Minimum focal length as a multiple of the default baseline
-            focal (derived from image size and 60-degree FOV).
-        max_focal: Maximum focal length as a multiple of the default baseline
-            focal.
-
-    Returns:
-        Estimated focal lengths of shape ``(B,)``, clamped to
-        ``[min_focal, max_focal]`` scaled by the baseline focal.
-    """
-    B, H, W, THREE = pts3d.shape
-    assert THREE == 3
-
-    # centered pixel grid
-    pixels = xy_grid(W, H, device=pts3d.device).view(1, -1, 2) - pp.view(  # pyrefly: ignore
-        -1, 1, 2
-    )  # B,HW,2
-    pts3d = pts3d.flatten(1, 2)  # (B, HW, 3)
-
-    if focal_mode == "median":
-        with torch.no_grad():
-            # direct estimation of focal
-            u, v = pixels.unbind(dim=-1)
-            x, y, z = pts3d.unbind(dim=-1)
-            fx_votes = (u * z) / x
-            fy_votes = (v * z) / y
-
-            # assume square pixels, hence same focal for X and Y
-            f_votes = torch.cat((fx_votes.view(B, -1), fy_votes.view(B, -1)), dim=-1)
-            focal = torch.nanmedian(f_votes, dim=-1).values
-
-    elif focal_mode == "weiszfeld":
-        # init focal with l2 closed form
-        # we try to find focal = argmin Sum | pixel - focal * (x,y)/z|
-        xy_over_z = (pts3d[..., :2] / pts3d[..., 2:3]).nan_to_num(posinf=0, neginf=0)  # homogeneous (x,y,1)
-
-        dot_xy_px = (xy_over_z * pixels).sum(dim=-1)
-        dot_xy_xy = xy_over_z.square().sum(dim=-1)
-
-        focal = dot_xy_px.mean(dim=1) / dot_xy_xy.mean(dim=1)
-
-        # iterative re-weighted least-squares
-        for _iter in range(10):
-            # re-weighting by inverse of distance
-            dis = (pixels - focal.view(-1, 1, 1) * xy_over_z).norm(dim=-1)
-            # print(dis.nanmean(-1))
-            w = dis.clip(min=1e-8).reciprocal()
-            # update the scaling with the new weights
-            focal = (w * dot_xy_px).mean(dim=1) / (w * dot_xy_xy).mean(dim=1)
-    else:
-        raise ValueError(f"bad {focal_mode=}")
-
-    focal_base = max(H, W) / (2 * np.tan(np.deg2rad(60) / 2))  # size / 1.1547005383792515
-    focal = focal.clip(min=min_focal * focal_base, max=max_focal * focal_base)
-    # print(focal)
+    height: int = pts3d_hw3.shape[0]
+    width: int = pts3d_hw3.shape[1]
+    u_hw: Float32[ndarray, "h w"]
+    v_hw: Float32[ndarray, "h w"]
+    u_hw, v_hw = np.meshgrid(np.arange(width, dtype=np.float32) - cx, np.arange(height, dtype=np.float32) - cy, indexing="xy")
+    pixels: Float32[ndarray, "n 2"] = np.stack([u_hw.ravel(), v_hw.ravel()], axis=-1)
+    points: Float32[ndarray, "n 3"] = pts3d_hw3.reshape(-1, 3).astype(np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        xy_over_z: Float32[ndarray, "n 2"] = np.nan_to_num(points[:, :2] / points[:, 2:3], nan=0.0, posinf=0.0, neginf=0.0)
+    dot_xy_px: Float32[ndarray, "n"] = (xy_over_z * pixels).sum(axis=-1)
+    dot_xy_xy: Float32[ndarray, "n"] = np.square(xy_over_z).sum(axis=-1)
+    focal: float = float(dot_xy_px.mean() / dot_xy_xy.mean())
+    for _ in range(10):
+        weights: Float32[ndarray, "n"] = 1.0 / np.maximum(np.linalg.norm(pixels - focal * xy_over_z, axis=-1), 1e-8)
+        focal = float((weights * dot_xy_px).mean() / (weights * dot_xy_xy).mean())
     return focal
 
 
@@ -565,17 +459,16 @@ def frame_to_intri(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RD
     H: int = int(frame.img_shape.squeeze()[0].item())
     W: int = int(frame.img_shape.squeeze()[1].item())
 
-    pp: Float32[Tensor, "2"] = torch.tensor((W / 2, H / 2))
     assert frame.X_canon is not None
-    pts3d: Float32[Tensor, "H W 3"] = frame.X_canon.clone().cpu().reshape(H, W, 3)
-    focal: float = float(estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld"))
+    pts3d: Float32[ndarray, "H W 3"] = frame.X_canon.detach().cpu().numpy().reshape(H, W, 3)
+    focal: float = estimate_focal_knowing_depth(pts3d, cx=W / 2, cy=H / 2)
 
     return Intrinsics.from_focal_principal_point(
         camera_conventions=camera_conventions,
         fl_x=focal,
         fl_y=focal,
-        cx=float(pp[0].item()),
-        cy=float(pp[1].item()),
+        cx=W / 2,
+        cy=H / 2,
         height=H,
         width=W,
     )
