@@ -1,17 +1,18 @@
-"""hexel-kernel's 2D hexel rasterizer, the color-gradient family (`gsplat/cuda/csrc/hexels_{forward,backward}.cu`,
-`forward.cu` tile binning), which Image-GS's rich 2D fit (`hexels-fit-2d --variant rich`) runs every step.
+"""hexel-kernel's 2D hexel rasterizer, flat and color-gradient (`gsplat/cuda/csrc/hexels_{forward,backward}.cu`,
+`forward.cu` tile binning), which Image-GS's 2D hexel fits (`hexels-fit-2d`, rich and flat) run every step.
 
 Tile binning: every hexel lists the 16x16 tiles its bounding square touches (`map_gaussian_to_intersects`); PyTorch
 sorts the (tile << 32) keys and `get_tile_bin_edges` turns them into one id range per tile.
 
-Forward (`nd_rasterize_forward_topk_norm_hexels_color_grad[_softness]`): one 16x16 block per tile, one thread per
+Forward (`nd_rasterize_forward_topk_norm_hexels[_color_grad][_softness]`; `color_grad` selects the variant): one
+16x16 block per tile, one thread per
 pixel. The tile's hexels are streamed through shared memory in batches of 256; each pixel keeps the 10 largest
 alphas (sigmoid of the hexagon SDF, optionally times a Gaussian peak) and outputs their alpha-normalized colors
-(base color + color_grad_scale * (delta . color gradient)) plus peak-weighted emission, the normalizer
+(the flat color, or base color + color_grad_scale * (delta . color gradient)) plus peak-weighted emission, the normalizer
 (alpha sum + 1e-4) and the entropy of the normalized weights. Every float op is nvcc's fast-math instruction in
 the order of its PTX (`fastmath`), so the outputs match the CUDA build bit for bit.
 
-Backward (`nd_rasterize_backward_topk_norm_hexels_color_grad[_softness]_kernel`): one thread per pixel over its
+Backward (`nd_rasterize_backward_topk_norm_hexels[_color_grad]_kernel`): one thread per pixel over its
 saved top-10, gradients scattered with float atomics (scheduling-order sums, as in CUDA).
 
 Softness: stride 0 = one scalar for all hexels, 1 = one per hexel, 3 = one per hexagon edge orientation.
@@ -145,7 +146,7 @@ def _softness(softnesses: F32Ptr, stride: Int, default: Float32, g: Int) -> Tupl
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BLOCK_SIZE))
-def forward_kernel(
+def forward_kernel[color_grad: Bool](
     tiles_x: Int32,
     width: Int32,
     height: Int32,
@@ -279,11 +280,13 @@ def forward_kernel(
             var g = Int(topk[k])
             if g >= 0:
                 var vis = fm.div(topk_vals[k], denom)
-                var dx = fm.sub(xys.unsafe_load(2 * g), px)
-                var dy = fm.sub(xys.unsafe_load(2 * g + 1), py)
-                var grad_x = color_grads.unsafe_load((2 * g) * ch + c)
-                var grad_y = color_grads.unsafe_load((2 * g + 1) * ch + c)
-                var color = fm.fma(color_grad_scale, fm.fma(dx, grad_x, fm.mul(dy, grad_y)), colors.unsafe_load(g * ch + c))
+                var color = colors.unsafe_load(g * ch + c)
+                comptime if color_grad:
+                    var dx = fm.sub(xys.unsafe_load(2 * g), px)
+                    var dy = fm.sub(xys.unsafe_load(2 * g + 1), py)
+                    var grad_x = color_grads.unsafe_load((2 * g) * ch + c)
+                    var grad_y = color_grads.unsafe_load((2 * g + 1) * ch + c)
+                    color = fm.fma(color_grad_scale, fm.fma(dx, grad_x, fm.mul(dy, grad_y)), color)
                 pix_out[unsafe_offset=c] = fm.fma(vis, color, pix_out.unsafe_load(c))
     if has_emission != 0:
         for c in range(ch):
@@ -386,7 +389,7 @@ def _sigmoid_neg(dist: Float32, softness: Float32) -> Float32:
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BLOCK_SIZE))
-def backward_kernel(
+def backward_kernel[color_grad: Bool](
     width: Int32,
     height: Int32,
     channels: Int32,
@@ -474,15 +477,17 @@ def backward_kernel(
             var v_dy_color: Float32 = 0.0
             for c in range(ch):
                 var vo = v_output.unsafe_load(pix * ch + c)
-                var grad_x = color_grads.unsafe_load((2 * g) * ch + c)
-                var grad_y = color_grads.unsafe_load((2 * g + 1) * ch + c)
-                var color = colors.unsafe_load(g * ch + c) + color_grad_scale * (dx * grad_x + dy * grad_y)
+                var color = colors.unsafe_load(g * ch + c)
                 _atomic_add(v_colors, g * ch + c, norm_d * vo)
-                _atomic_add(v_color_grads, (2 * g) * ch + c, norm_d * vo * color_grad_scale * dx)
-                _atomic_add(v_color_grads, (2 * g + 1) * ch + c, norm_d * vo * color_grad_scale * dy)
+                comptime if color_grad:
+                    var grad_x = color_grads.unsafe_load((2 * g) * ch + c)
+                    var grad_y = color_grads.unsafe_load((2 * g + 1) * ch + c)
+                    color += color_grad_scale * (dx * grad_x + dy * grad_y)
+                    _atomic_add(v_color_grads, (2 * g) * ch + c, norm_d * vo * color_grad_scale * dx)
+                    _atomic_add(v_color_grads, (2 * g + 1) * ch + c, norm_d * vo * color_grad_scale * dy)
+                    v_dx_color += norm_d * vo * color_grad_scale * grad_x
+                    v_dy_color += norm_d * vo * color_grad_scale * grad_y
                 v_norm_d += color * vo
-                v_dx_color += norm_d * vo * color_grad_scale * grad_x
-                v_dy_color += norm_d * vo * color_grad_scale * grad_y
             if has_emission != 0 and prim_peak[k] > 0.0:
                 var acc: Float32 = 0.0
                 for c in range(ch):
@@ -490,8 +495,9 @@ def backward_kernel(
                     _atomic_add(v_emission, g * ch + c, prim_peak[k] * vo)
                     acc += emission.unsafe_load(g * ch + c) * vo
                 v_peak_emit[k] = acc
-            _atomic_add(v_xy, 2 * g, v_dx_color)
-            _atomic_add(v_xy, 2 * g + 1, v_dy_color)
+            comptime if color_grad:
+                _atomic_add(v_xy, 2 * g, v_dx_color)
+                _atomic_add(v_xy, 2 * g + 1, v_dy_color)
             v_d_local[k] = fm.div(v_norm_d, denom)
             v_d_sum += fm.div(-alpha, denom * denom) * v_norm_d
     comptime for k in range(TOP_K):

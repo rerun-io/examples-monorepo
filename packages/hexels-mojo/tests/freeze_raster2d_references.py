@@ -1,4 +1,4 @@
-"""Freeze hexel-kernel's 2D hexel rasterizer (color-gradient family) outputs for hexels_mojo's raster2d tests.
+"""Freeze hexel-kernel's 2D hexel rasterizer (flat and color-gradient) outputs for hexels_mojo's raster2d tests.
 
 Needs hexel-kernel (`gsplat`, still built by recipes/hexels-src) and `gsplat_hexels.py` for its radius and tile
 helpers. The kernels are called on `gsplat.cuda` / `gsplat.utils` directly: `gsplat_hexels`'s own handles serve
@@ -17,15 +17,17 @@ import torch
 from hexels_references import REFERENCE_FILE, encode, load  # pyrefly: ignore[missing-import]
 from torch import Tensor
 
-# (name, N, H, W, softness: "tensor" | "triplet" | float, sharpness, emission, aa_kernel_size, seed)
+# (name, color gradients, N, H, W, softness: "tensor" | "triplet" | float, sharpness, emission, aa_kernel_size, seed)
 CASES = (
-    ("rich", 1500, 128, 160, "tensor", False, False, 0.0, 10),
-    ("triplet_peak_emission_aa", 800, 96, 112, "triplet", True, True, 0.3, 11),
-    ("scalar", 600, 80, 96, 10.0, False, False, 0.0, 12),
+    ("rich", True, 1500, 128, 160, "tensor", False, False, 0.0, 10),
+    ("triplet_peak_emission_aa", True, 800, 96, 112, "triplet", True, True, 0.3, 11),
+    ("scalar", True, 600, 80, 96, 10.0, False, False, 0.0, 12),
+    ("flat", False, 1200, 112, 128, "tensor", False, False, 0.0, 13),
+    ("flat_scalar_peak_emission", False, 600, 80, 96, 10.0, True, True, 0.2, 14),
 )
 
 
-def _case(gh, utils, cuda, name, n, h, w, softness_kind, with_sharpness, with_emission, aa, seed) -> dict[str, dict[str, Tensor]]:
+def _case(gh, utils, cuda, name, color_grad, n, h, w, softness_kind, with_sharpness, with_emission, aa, seed) -> dict[str, dict[str, Tensor]]:
     g = torch.Generator().manual_seed(seed)
     u = lambda *s: torch.rand(*s, generator=g)  # noqa: E731
     xys = (u(n, 2) * torch.tensor([w, h])).float().cuda()
@@ -52,7 +54,13 @@ def _case(gh, utils, cuda, name, n, h, w, softness_kind, with_sharpness, with_em
     empty = torch.empty(0, device="cuda", dtype=torch.float32)
     sharp_t = sharpness if sharpness is not None else empty
     emit_t = emission if emission is not None else empty
-    if tensor_softness:
+    if not color_grad:
+        geo = (tile_bounds, (16, 16, 1), (w, h, 1), gaussian_ids_sorted, tile_bins, xys, scales, rotations, colors, aa)
+        if tensor_softness:
+            out_img, pixel_topk, weights_sum, entropy = cuda.nd_rasterize_forward_topk_norm_hexels_softness(*geo, softness, 0.0, sharp_t, emit_t)
+        else:
+            out_img, pixel_topk, weights_sum, entropy = cuda.nd_rasterize_forward_topk_norm_hexels(*geo, float(softness), sharp_t, emit_t)
+    elif tensor_softness:
         out_img, pixel_topk, weights_sum, entropy = cuda.nd_rasterize_forward_topk_norm_hexels_color_grad_softness(
             tile_bounds, (16, 16, 1), (w, h, 1), gaussian_ids_sorted, tile_bins, xys, scales, rotations, colors, color_grads, 0.1, aa,
             softness, 0.0, sharp_t, emit_t,
@@ -65,7 +73,19 @@ def _case(gh, utils, cuda, name, n, h, w, softness_kind, with_sharpness, with_em
     v_out = torch.randn(h, w, 3, generator=g).float().cuda()
     v_ws = (0.1 * torch.randn(h, w, generator=g)).float().cuda()
     v_ent = (0.1 * torch.randn(h, w, generator=g)).float().cuda()
-    if tensor_softness:
+    if not color_grad:
+        bgeo = (h, w, 16, 16, gaussian_ids_sorted, tile_bins, xys, scales, rotations, colors)
+        if tensor_softness:
+            grads = cuda.nd_rasterize_backward_topk_norm_hexels_softness(
+                *bgeo, softness, v_out, v_ws, v_ent, pixel_topk.contiguous(), aa, 0.0, sharp_t, emit_t
+            )
+            names = ("v_xy", "v_scale", "v_rot", "v_colors", "v_emission", "v_sharpness", "v_softness")
+        else:
+            grads = cuda.nd_rasterize_backward_topk_norm_hexels(
+                *bgeo, v_out, v_ws, v_ent, pixel_topk.contiguous(), aa, float(softness), sharp_t, emit_t
+            )
+            names = ("v_xy", "v_scale", "v_rot", "v_colors", "v_emission", "v_sharpness")
+    elif tensor_softness:
         grads = cuda.nd_rasterize_backward_topk_norm_hexels_color_grad_softness(
             h, w, 16, 16, gaussian_ids_sorted, tile_bins, xys, scales, rotations, colors, color_grads, softness, 0.1,
             v_out, v_ws, v_ent, pixel_topk.contiguous(), aa, 0.0, sharp_t, emit_t,
@@ -81,6 +101,7 @@ def _case(gh, utils, cuda, name, n, h, w, softness_kind, with_sharpness, with_em
         "xys": xys, "scales": scales, "rotations": rotations, "colors": colors, "color_grads": color_grads,
         "softness": softness if tensor_softness else torch.tensor([softness]),
         "softness_is_tensor": torch.tensor([int(tensor_softness)], dtype=torch.int32),
+        "color_grad": torch.tensor([int(color_grad)], dtype=torch.int32),
         "size": torch.tensor([h, w], dtype=torch.int32), "aa_kernel_size": torch.tensor([aa]),
         "gaussian_ids_sorted": gaussian_ids_sorted.int(), "tile_bins": tile_bins.int(),
         "out_img": out_img, "pixel_topk": pixel_topk.int(), "weights_sum": weights_sum, "entropy": entropy,

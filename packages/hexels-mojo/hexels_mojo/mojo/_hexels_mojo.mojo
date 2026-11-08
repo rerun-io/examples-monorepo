@@ -153,40 +153,54 @@ def _raster2d_binning_py(runtime: PythonObject, s: PythonObject, t: PythonObject
 
 
 def _raster2d_forward_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
-    """scalars = (stream, color_grad_scale, aa, softness_stride, softness_default, has_sharpness, has_emission);
+    """scalars = (stream, color_grad_scale, aa, softness_stride, softness_default, has_sharpness, has_emission, color_grad);
     tensors = (ids_sorted i32, tile_bins i32 (T, 2), xys, scales, rotation, colors (N, C), color_grads, softnesses,
     sharpness, emission, out_img (H, W, C), pixel_topk i32 (H, W, 10), weights_sum (H, W), entropy (H, W))."""
+    if Bool(py=s[7]):
+        _raster2d_forward[True](runtime, s, t)
+    else:
+        _raster2d_forward[False](runtime, s, t)
+    return Python.none()
+
+
+def _raster2d_forward[color_grad: Bool](runtime: PythonObject, s: PythonObject, t: PythonObject) raises:
     var height = _dim(t[10], 0)
     var width = _dim(t[10], 1)
     var channels = _dim(t[10], 2)
     var tiles_x = ceildiv(width, TILE)
     var rt = runtime.downcast_value_ptr[GPURuntime]()
     rt[].torch_stream(_int(s, 0)).enqueue_function(
-        rt[].ctx.compile_function[forward_kernel](), Int32(tiles_x), Int32(width), Int32(height), Int32(channels), _i32(t[0]), _i32(t[1]),
+        rt[].ctx.compile_function[forward_kernel[color_grad]](), Int32(tiles_x), Int32(width), Int32(height), Int32(channels), _i32(t[0]), _i32(t[1]),
         _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), Float32(Float64(py=s[1])), Float32(Float64(py=s[2])), _f(t[7]),
         Int32(_int(s, 3)), Float32(Float64(py=s[4])), Int32(_int(s, 5)), _f(t[8]), Int32(_int(s, 6)), _f(t[9]), _f(t[10]), _i32(t[11]),
         _f(t[12]), _f(t[13]), grid_dim=(tiles_x, ceildiv(height, TILE)), block_dim=(TILE, TILE),
     )  # fmt: skip
-    return Python.none()
 
 
 def _raster2d_backward_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
-    """scalars = (stream, color_grad_scale, aa, softness_stride, softness_default, has_sharpness, has_emission);
+    """scalars = (stream, color_grad_scale, aa, softness_stride, softness_default, has_sharpness, has_emission, color_grad);
     tensors = (xys, scales, rotation, colors (N, C), color_grads, emission, v_output (H, W, C), v_weights_sum, v_entropy,
     pixel_topk i32, softnesses, sharpness, then the zeroed outputs v_xy, v_scale, v_rot, v_colors, v_color_grads,
     v_emission, v_sharpness, v_softnesses)."""
+    if Bool(py=s[7]):
+        _raster2d_backward[True](runtime, s, t)
+    else:
+        _raster2d_backward[False](runtime, s, t)
+    return Python.none()
+
+
+def _raster2d_backward[color_grad: Bool](runtime: PythonObject, s: PythonObject, t: PythonObject) raises:
     var height = _dim(t[6], 0)
     var width = _dim(t[6], 1)
     var channels = _dim(t[6], 2)
     var rt = runtime.downcast_value_ptr[GPURuntime]()
     rt[].torch_stream(_int(s, 0)).enqueue_function(
-        rt[].ctx.compile_function[backward_kernel](), Int32(width), Int32(height), Int32(channels), _f(t[0]), _f(t[1]), _f(t[2]), _f(t[3]),
+        rt[].ctx.compile_function[backward_kernel[color_grad]](), Int32(width), Int32(height), Int32(channels), _f(t[0]), _f(t[1]), _f(t[2]), _f(t[3]),
         _f(t[4]), Float32(Float64(py=s[1])), Int32(_int(s, 6)), _f(t[5]), _f(t[6]), _f(t[7]), _f(t[8]), _i32(t[9]),
         Float32(Float64(py=s[2])), _f(t[10]), Int32(_int(s, 3)), Float32(Float64(py=s[4])), Int32(_int(s, 5)), _f(t[11]), _f(t[12]),
         _f(t[13]), _f(t[14]), _f(t[15]), _f(t[16]), _f(t[17]), _f(t[18]), _f(t[19]),
         grid_dim=(ceildiv(width, TILE), ceildiv(height, TILE)), block_dim=(TILE, TILE),
     )  # fmt: skip
-    return Python.none()
 
 
 @export
