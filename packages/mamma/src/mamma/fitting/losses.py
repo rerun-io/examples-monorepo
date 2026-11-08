@@ -39,27 +39,28 @@ def reprojection_loss(
     ``exp(0.5*logvar)/2*img_size`` clamped to [1, 50] (the original stored
     sigma directly; we convert from logvar here — same operating range).
     """
-    total: Float32[torch.Tensor, ""] = pts3d_world.new_zeros(())
+    # All cameras in one batched pass with elementwise 3x3 products (no per-camera
+    # GEMMs): under torch.compile the whole term fuses into a few kernels.
     n_cams: int = len(pts2d_per_cam)
-    for cam_id in range(n_cams):
-        w2c: Float32[torch.Tensor, "4 4"] = world_to_cam_per_cam[cam_id]
-        pts_cam: Float32[torch.Tensor, "t n 3"] = pts3d_world @ w2c[:3, :3].T + w2c[:3, 3]
-        proj: Float32[torch.Tensor, "t n 3"] = pts_cam @ k_per_cam[cam_id].T
-        proj = proj / proj[..., 2:3].clamp(min=1e-6)
-        pts2d: Float32[torch.Tensor, "t n 3"] = pts2d_per_cam[cam_id]
-        in_img: Float32[torch.Tensor, "t n 1"] = (pts2d[..., :2].sum(-1, keepdim=True) > 0).float()
-        sigma: Float32[torch.Tensor, "t n 1"] = (torch.exp(0.5 * pts2d[..., 2:3]) / 2.0 * img_size_px).clamp(1.0, 50.0)
-        point_weight: Float32[torch.Tensor, "t n 1"] = weight * in_img
-        if vis_per_cam is not None:
-            point_weight = torch.clip(vis_per_cam[cam_id][..., None], min=vis_clip_value) * point_weight
-        error: Float32[torch.Tensor, ""] = geman_mcclure(
-            proj[..., :2], pts2d[..., :2], delta=delta_px, weight=point_weight, uncertainties=sigma
-        )
-        # Sync-free NaN/Inf guard: `if torch.isnan(error)` forces a host sync
-        # per camera per iteration (and invalidates CUDA-graph capture).
-        error = torch.nan_to_num(error, nan=0.0, posinf=0.0, neginf=0.0)
-        total = total + error / n_cams
-    return total
+    w2c: Float32[torch.Tensor, "c 4 4"] = torch.stack(world_to_cam_per_cam, dim=0)
+    k: Float32[torch.Tensor, "c 3 3"] = torch.stack(k_per_cam, dim=0)
+    rot: Float32[torch.Tensor, "c 1 1 3 3"] = w2c[:, None, None, :3, :3]
+    pts_cam: Float32[torch.Tensor, "c t n 3"] = (pts3d_world[None, :, :, None, :] * rot).sum(-1) + w2c[:, None, None, :3, 3]
+    proj: Float32[torch.Tensor, "c t n 3"] = (pts_cam.unsqueeze(-2) * k[:, None, None]).sum(-1)
+    proj = proj / proj[..., 2:3].clamp(min=1e-6)
+    pts2d: Float32[torch.Tensor, "c t n 3"] = torch.stack(pts2d_per_cam, dim=0)
+    in_img: Float32[torch.Tensor, "c t n 1"] = (pts2d[..., :2].sum(-1, keepdim=True) > 0).float()
+    sigma: Float32[torch.Tensor, "c t n 1"] = (torch.exp(0.5 * pts2d[..., 2:3]) / 2.0 * img_size_px).clamp(1.0, 50.0)
+    point_weight: Float32[torch.Tensor, "c t n 1"] = weight * in_img
+    if vis_per_cam is not None:
+        vis: Float32[torch.Tensor, "c t n"] = torch.stack(vis_per_cam, dim=0)
+        point_weight = torch.clip(vis[..., None], min=vis_clip_value) * point_weight
+    x_squared: Float32[torch.Tensor, "c t n 2"] = ((proj[..., :2] - pts2d[..., :2]) / sigma) ** 2
+    per_cam: Float32[torch.Tensor, "c"] = (point_weight * x_squared / (delta_px**2 + x_squared)).flatten(1).mean(-1)
+    # Sync-free NaN/Inf guard: `if torch.isnan(error)` forces a host sync
+    # per camera per iteration (and invalidates CUDA-graph capture).
+    per_cam = torch.nan_to_num(per_cam, nan=0.0, posinf=0.0, neginf=0.0)
+    return (per_cam / n_cams).sum()
 
 
 def anchor3d_loss(
