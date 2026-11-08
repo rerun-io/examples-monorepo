@@ -1,0 +1,15 @@
+diff --git a/gsplat/cuda_hexels3d/__init__.py b/gsplat/cuda_hexels3d/__init__.py
+index dbc47e8..9345d97 100644
+--- a/gsplat/cuda_hexels3d/__init__.py
++++ b/gsplat/cuda_hexels3d/__init__.py
+@@ -90,4 +90,10 @@ except ImportError as error:
+     ) from error
+ _validate_extension(_C)
+ 
++# The base forward (no prefiltering) runs on Mojo (packages/hexels-mojo, hexels_mojo.raster3d), bit-exact with the CUDA
++# build, saved state included; every other entry point, the backward passes among them, stays this extension's.
++from hexels_mojo.raster3d import overlay as _mojo_overlay  # noqa: E402
++
++_C = _mojo_overlay(_C)
++
+ __all__ = ["_C"]

@@ -13,11 +13,13 @@ From hexel-kernel (the 14k-line gsplat fork with the hexel rasterizers), the 2D 
 color-gradient (forward + backward, scalar / per-hexel / per-edge softness, optional peak and emission), and their
 tile binning are Mojo too (`hexels_mojo.raster2d`): they are every hexel-kernel call of Image-GS's 2D hexel fits
 (`hexels-fit-2d`, rich and flat). Patch 0005 wraps `gsplat_hexels.py`'s `gsplat` handles in `raster2d.overlay`,
-which serves those nine functions and passes every other one to hexel-kernel's CUDA (3D rasterizer, affine 2D
-variants). Image-GS's Gaussian projection and top-K rasterizer (the `imagegs-2d` baseline) are `hexels_mojo.gaussians2d`;
+which serves those nine functions and passes every other one to hexel-kernel's CUDA (affine 2D variants). Image-GS's Gaussian projection and top-K rasterizer (the `imagegs-2d` baseline) are `hexels_mojo.gaussians2d`;
 patches 0003/0004 import them in place of `gsplat`'s (`rasterize_gaussians_no_tiles`, off in Image-GS's configs, stays
-CUDA). The plan for the rest: `/mnt/nas/ssd-8tb/scratch/overnight-2026-11-08/ports/HEXEL_KERNEL_PLAN.md`
-(to be moved into this README with the next port).
+CUDA). hexel-kernel's 3D rasterizer forward (preprocess, tile keys, front-to-back render; every color and view model, no
+prefiltering) is `hexels_mojo.raster3d`; patch 0006 overlays it on `gsplat.cuda_hexels3d._C`. Its cached forward returns
+the CUDA binding's saved state bit for bit, so training runs the Mojo forward with hexel-kernel's CUDA backward.
+Still CUDA: the 3D backward, prefiltering, the contribution / overdraw / surface / owner forward variants, and the
+affine 2D kernels. The plan for the rest: `/mnt/nas/ssd-8tb/scratch/overnight-2026-11-08/ports/HEXEL_KERNEL_PLAN.md`.
 
 ```bash
 pixi run -e hexels-dev hexels-mojo-build   # Mojo shared library for the local GPU (cubins, no PTX JIT)
@@ -43,6 +45,7 @@ RTX 5090), written by `tests/freeze_hexels_references.py` (deleted with the exte
 | tile binning | bit-exact (intersection keys, ids, tile ranges) |
 | Image-GS projection (forward + backward), top-K forward | bit-exact (projection backward has no atomics: same PTX order) |
 | Image-GS top-K backward | ≤ 1e-5 relative (float atomics) |
+| 3D forward (radii, transforms, tile ranges, sorted ids, final transmittance, last index, image) | bit-exact, 3 configurations (`tests/test_raster3d.py`, `fixtures/raster3d_references.rrd`) |
 
 Upstream's SSIM scratch buffer is declared (42, 32) but indexed at column tx + 5, so its last row writes five
 floats past the array; the port indexes it at tx (same arithmetic, no overrun).
@@ -57,8 +60,20 @@ floats past the array; the port indexes it at tx (same arithmetic, no overrun).
 | `distCUDA2`, 100K clustered points | 3.40 ms | 3.16 ms |
 | 2D rasterizer, color-gradient: binning + forward + backward, 20K hexels, 2048×2048 | 0.148 + 1.076 + 10.946 ms | 0.124 + 1.170 + 10.452 ms |
 | 2D rasterizer, flat: binning + forward + backward, same scene | 0.132 + 1.040 + 6.293 ms | 0.129 + 1.004 + 5.675 ms |
-| Image-GS step: projection + binning + forward + backward, 10K Gaussians, 2048×2048 | 8.251 ms | 6.466 ms |
+| Image-GS step: projection + binning + forward + backward, 10K Gaussians, 2048×2048 | 8.251 ms | 6.220 ms |
+| 3D forward, 300K hexels, 1600×1080, linear color + view gradients (render stage) | 2.03 ms (1.68 ms) | 1.54 ms (1.09 ms) |
+| 3D forward, same scene, linear color, no view model (the protocol's training config) | 1.99 ms (1.64 ms) | 1.30 ms (0.85 ms) |
 
 Real run, `hexels-fit-2d --variant rich` on anime-2_2k (5,100 steps, 20K → 10K hexels), two runs each: CUDA
 36.18 / 36.08 dB, 85.9 / 88.1 s; every ported kernel on Mojo (rasterizer, binning, SSIM, prune) 36.12 / 36.14 dB,
 77.8 / 80.7 s. `--variant flat` (constant colors): CUDA 33.88 dB in 52.9 s, Mojo 33.89 dB in 48.5 s.
+
+Real run, 3D: `hexels.train` on DTU scan105 with the protocol's v1 command at 7,000 iterations (hexels_bench
+`prepare_command`), scored on the 8 test views. CUDA: 27.06 / 26.97 dB, SSIM 0.880 / 0.867, 78.3 / 76.7 s. The Mojo forward
+(backward still CUDA): 26.90 / 26.97 / 26.94 dB, SSIM 0.872 / 0.875 / 0.879, 81.7 / 82.0 / 76.6 s (the last run on the
+reconverging render loop below). Runs differ because the CUDA backward's float atomics are not deterministic. The test
+views of one Mojo-trained checkpoint, rendered by the CUDA env and by the Mojo env, are byte-identical PNGs.
+
+Render loops branch with nested `if`s, not `continue` / `break`: with `continue`, LLVM placed the warp's reconvergence
+point outside the per-hexel loop, the lanes of a warp drifted onto different hexels, and the 3D render ran at 2.3 ms
+instead of 1.1 ms for the same instructions.

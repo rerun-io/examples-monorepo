@@ -7,6 +7,7 @@
 - `hexels_mojo.raster2d`: hexel-kernel's 2D hexel rasterizers (flat and color-gradient) and tile binning (patch 0005
   overlays them on hexel-kernel's `gsplat` module).
 - `hexels_mojo.gaussians2d`: Image-GS's Gaussian projection and top-K rasterizer (`imagegs-2d` baseline).
+- `hexels_mojo.raster3d`: hexel-kernel's base 3D forward (patch 0006 overlays it on `gsplat.cuda_hexels3d._C`).
 """
 
 import os
