@@ -19,6 +19,10 @@ NUM_FIX: int = 1
 SUMS: int = 119
 """The float32 sums per edge that the step kernel writes (gn.mojo's SUMS: 105 Hessian entries, 7 + 7 gradient)."""
 THREADS: int = 128
+RAYS_TRACKING_HUBER: float = 1.345
+"""Huber threshold the rays kernel fixes (``_huber`` in ``gn.mojo``): :func:`track_pose_rays` cannot take another."""
+RAYS_TRACKING_REL_ERROR: float = 1e-3
+"""The only ``tracking.rel_error`` :func:`track_pose_rays` accepts: it stops on the step norm alone, never on the cost."""
 """gn.mojo's THREADS."""
 
 
