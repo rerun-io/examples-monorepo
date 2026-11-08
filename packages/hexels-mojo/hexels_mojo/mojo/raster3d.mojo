@@ -12,9 +12,10 @@ CUDA build bit for bit. Not ported: prefiltering, surface / owner / contribution
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, block_idx, global_idx, thread_idx
 from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
-from std.atomic import Atomic, Ordering
 from std.math import ceil
 from std.memory import bitcast, stack_allocation
+from std.sys._assembly import inlined_assembly
+from std.sys.info import is_nvidia_gpu
 from std.utils.static_tuple import StaticTuple
 
 import fastmath as fm
@@ -351,12 +352,23 @@ def duplicate_kernel(
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BLOCK_SIZE))
-def render_kernel(
+@always_inline
+def _block_count(pred: Bool) -> Int:
+    """CUDA's `__syncthreads_count(pred)`: a block barrier that returns how many threads passed a true `pred`."""
+    comptime if is_nvidia_gpu():
+        return Int(
+            inlined_assembly[
+                "{ .reg .pred p; setp.ne.s32 p, $1, 0; bar.red.popc.u32 $0, 0, p; }", Int32, constraints="=r,r", has_side_effect=True
+            ](Int32(1) if pred else Int32(0))
+        )
+    else:
+        barrier()
+        return 0
+
+
+def render_kernel[color_model: Int, use_view_grads: Bool, specular: Bool](
     width: Int32,
     height: Int32,
-    color_model: Int32,
-    view_model: Int32,
-    use_view_grads: Int32,
     ranges: I32Ptr,
     point_list: I32Ptr,
     colors: F32Ptr,
@@ -388,8 +400,8 @@ def render_kernel(
     var start = Int(ranges.unsafe_load(2 * tile))
     var end = Int(ranges.unsafe_load(2 * tile + 1))
     var tr = thread_idx.y * TILE + thread_idx.x
-    # Per-hexel batch in shared memory: opacity, softness x3, T (9). Staging colors and gradients too (as CUDA does)
-    # measured slower here (3.05 vs 2.32 ms per 300K-hexel frame); they are read from global memory per contributor.
+    # Per-hexel batch in shared memory: opacity, softness x3, T (9). Colors and gradients are read from global memory
+    # per contributor (CUDA stages them too; here that costs occupancy: 14 KB of shared memory per block instead of 45 KB).
     var ids = stack_allocation[BLOCK_SIZE, Int32, address_space=AddressSpace.SHARED]()
     var params = stack_allocation[BLOCK_SIZE * PARAMS, Float32, address_space=AddressSpace.SHARED]()
     var stride = Int(softness_stride)
@@ -397,18 +409,10 @@ def render_kernel(
     var trans: Float32 = 1.0
     var c_acc = Vec3(0.0)
     var n_visited = 0
-    var cm = Int(color_model)
     var rounds = (end - start + BLOCK_SIZE - 1) // BLOCK_SIZE
-    # CUDA's `__syncthreads_count(done) == kBlockSize`: stop loading batches once every pixel of the tile is done.
-    var done_count = stack_allocation[1, Int32, address_space=AddressSpace.SHARED]()
     for i in range(rounds):
-        if tr == 0:
-            done_count[unsafe_offset=0] = 0
-        barrier()
-        if done:
-            _ = Atomic[Int32, scope="block"].fetch_add[ordering=Ordering.RELAXED](done_count, 1)
-        barrier()
-        if Int(done_count.unsafe_load(0)) == BLOCK_SIZE:
+        # Stop loading batches once every pixel of the tile is done.
+        if _block_count(done) == BLOCK_SIZE:
             break
         var progress = start + i * BLOCK_SIZE + tr
         if progress < end:
@@ -431,9 +435,10 @@ def render_kernel(
         if done:
             continue
         var batch = min(BLOCK_SIZE, end - start - i * BLOCK_SIZE)
-        for j in range(batch):
-            if done:
-                break
+        # Nested ifs, not continue / break: every lane of a warp then reconverges after each hexel (as nvcc's
+        # build does), so the warp reads one shared slot at a time instead of drifting apart.
+        var j = 0
+        while j < batch and not done:
             var q = params.unsafe_offset(PARAMS * j)
             # Op for op as nvcc's PTX of render_hexels3d<false, false, false>.
             var k0 = fm.sub(fm.mul(q.unsafe_load(10), pixf_x), q.unsafe_load(4))
@@ -445,74 +450,73 @@ def render_kernel(
             var p_x = fm.sub(fm.mul(k1, l2), fm.mul(l1, k2))
             var p_y = fm.sub(fm.mul(l0, k2), fm.mul(k0, l2))
             var p_z = fm.sub(fm.mul(k0, l1), fm.mul(l0, k1))
-            if p_z == 0.0:
-                continue
-            var su = fm.div(p_x, p_z)
-            var sv = fm.div(p_y, p_z)
-            var depth = fm.add(q.unsafe_load(12), fm.fma(q.unsafe_load(10), su, fm.mul(q.unsafe_load(11), sv)))
-            if depth < NEAR:
-                continue
-            var d0 = abs(sv)
-            var ua = fm.mul(su, 0.8660254)
-            var vb = fm.mul(sv, 0.5)
-            var d1 = abs(fm.add(ua, vb))
-            var d2 = abs(fm.sub(ua, vb))
-            var slant_is_1 = d2 < d1
-            var slant = d1 if slant_is_1 else d2
-            var not_edge0 = d0 <= slant
-            var dist = fm.add(slant if not_edge0 else d0, -1.0)
-            var soft = (q.unsafe_load(2) if slant_is_1 else q.unsafe_load(3)) if not_edge0 else q.unsafe_load(1)
-            var boundary = fm.rcp(fm.add(fm.ex2(fm.mul(fm.mul(dist, soft), fm.LOG2E)), 1.0))
-            var alpha = min(fm.mul(q.unsafe_load(0), boundary), Float32(0.99))
-            if alpha < 1.0 / 255.0:
-                continue
-            var test_t = fm.mul(trans, fm.sub(1.0, alpha))
-            if test_t < 0.0001:
-                done = True
-                break
-            var wgt = fm.mul(trans, alpha)
-            var g = Int(ids.unsafe_load(j))
-            var c = Vec3(colors.unsafe_load(3 * g), colors.unsafe_load(3 * g + 1), colors.unsafe_load(3 * g + 2), 0.0)
-            if cm >= 1:
-                comptime for ch in range(3):
-                    c[ch] = fm.add(c[ch], fm.fma(su, color_grads.unsafe_load(6 * g + ch), fm.mul(sv, color_grads.unsafe_load(6 * g + 3 + ch))))
-            if cm >= 2:
-                var qu = su
-                var qv = sv
-                if cm == 3:
-                    var rho = fm.add(dist, 1.0)
-                    var inv = fm.rcp(rho) if rho > 1.0 else Float32(1.0)
-                    qu = fm.mul(su, inv)
-                    qv = fm.mul(sv, inv)
-                var u2 = fm.mul(qu, qu)
-                var uv = fm.mul(qu, qv)
-                var v2 = fm.mul(qv, qv)
-                comptime for ch in range(3):
-                    var quad = fm.fma(
-                        v2, color_quads.unsafe_load(9 * g + 6 + ch),
-                        fm.fma(uv, color_quads.unsafe_load(9 * g + 3 + ch), fm.mul(u2, color_quads.unsafe_load(9 * g + ch))),
-                    )  # fmt: skip
-                    c[ch] = fm.add(quad, c[ch])
-            var vd = Vec3(view_dirs.unsafe_load(3 * g), view_dirs.unsafe_load(3 * g + 1), view_dirs.unsafe_load(3 * g + 2), 0.0)
-            if use_view_grads != 0:
-                comptime for ch in range(3):
-                    var vg = view_grads.unsafe_offset(9 * g + 3 * ch)
-                    var term = fm.fma(vd[2], vg.unsafe_load(2), fm.fma(vd[0], vg.unsafe_load(0), fm.mul(vd[1], vg.unsafe_load(1))))
-                    c[ch] = fm.add(term, c[ch])
-            if view_model == 2:
-                var n = normals.unsafe_offset(3 * g)
-                var ndv = fm.fma(vd[2], n.unsafe_load(2), fm.fma(vd[0], n.unsafe_load(0), fm.mul(vd[1], n.unsafe_load(1))))
-                var cos_nv = max(-ndv, Float32(0.0))
-                var spec: Float32 = 0.0
-                if cos_nv > 0.0:
-                    var s_exp = fm.ex2(fm.mul(min(max(specular_log_s.unsafe_load(g), Float32(0.0)), Float32(5.0)), fm.LOG2E))
-                    spec = fm.ex2(fm.mul(s_exp, fm.lg2(cos_nv)))
-                comptime for ch in range(3):
-                    c[ch] = fm.fma(specular_ks.unsafe_load(3 * g + ch), spec, c[ch])
-            comptime for ch in range(3):
-                c_acc[ch] = fm.fma(wgt, c[ch], c_acc[ch])
-            trans = test_t
-            n_visited = i * BLOCK_SIZE + j + 1
+            if p_z != 0.0:
+                var su = fm.div(p_x, p_z)
+                var sv = fm.div(p_y, p_z)
+                var depth = fm.add(q.unsafe_load(12), fm.fma(q.unsafe_load(10), su, fm.mul(q.unsafe_load(11), sv)))
+                if not depth < NEAR:
+                    var d0 = abs(sv)
+                    var ua = fm.mul(su, 0.8660254)
+                    var vb = fm.mul(sv, 0.5)
+                    var d1 = abs(fm.add(ua, vb))
+                    var d2 = abs(fm.sub(ua, vb))
+                    var slant_is_1 = d2 < d1
+                    var slant = d1 if slant_is_1 else d2
+                    var not_edge0 = d0 <= slant
+                    var dist = fm.add(slant if not_edge0 else d0, -1.0)
+                    var soft = (q.unsafe_load(2) if slant_is_1 else q.unsafe_load(3)) if not_edge0 else q.unsafe_load(1)
+                    var boundary = fm.rcp(fm.add(fm.ex2(fm.mul(fm.mul(dist, soft), fm.LOG2E)), 1.0))
+                    var alpha = min(fm.mul(q.unsafe_load(0), boundary), Float32(0.99))
+                    if not alpha < 1.0 / 255.0:
+                        var test_t = fm.mul(trans, fm.sub(1.0, alpha))
+                        if test_t < 0.0001:
+                            done = True
+                        else:
+                            var wgt = fm.mul(trans, alpha)
+                            var g = Int(ids.unsafe_load(j))
+                            var c = Vec3(colors.unsafe_load(3 * g), colors.unsafe_load(3 * g + 1), colors.unsafe_load(3 * g + 2), 0.0)
+                            comptime if color_model >= 1:
+                                comptime for ch in range(3):
+                                    c[ch] = fm.add(c[ch], fm.fma(su, color_grads.unsafe_load(6 * g + ch), fm.mul(sv, color_grads.unsafe_load(6 * g + 3 + ch))))
+                            comptime if color_model >= 2:
+                                var qu = su
+                                var qv = sv
+                                comptime if color_model == 3:
+                                    var rho = fm.add(dist, 1.0)
+                                    var inv = fm.rcp(rho) if rho > 1.0 else Float32(1.0)
+                                    qu = fm.mul(su, inv)
+                                    qv = fm.mul(sv, inv)
+                                var u2 = fm.mul(qu, qu)
+                                var uv = fm.mul(qu, qv)
+                                var v2 = fm.mul(qv, qv)
+                                comptime for ch in range(3):
+                                    var quad = fm.fma(
+                                        v2, color_quads.unsafe_load(9 * g + 6 + ch),
+                                        fm.fma(uv, color_quads.unsafe_load(9 * g + 3 + ch), fm.mul(u2, color_quads.unsafe_load(9 * g + ch))),
+                                    )  # fmt: skip
+                                    c[ch] = fm.add(quad, c[ch])
+                            var vd = Vec3(view_dirs.unsafe_load(3 * g), view_dirs.unsafe_load(3 * g + 1), view_dirs.unsafe_load(3 * g + 2), 0.0)
+                            comptime if use_view_grads:
+                                comptime for ch in range(3):
+                                    var vg = view_grads.unsafe_offset(9 * g + 3 * ch)
+                                    var term = fm.fma(vd[2], vg.unsafe_load(2), fm.fma(vd[0], vg.unsafe_load(0), fm.mul(vd[1], vg.unsafe_load(1))))
+                                    c[ch] = fm.add(term, c[ch])
+                            comptime if specular:
+                                var n = normals.unsafe_offset(3 * g)
+                                var ndv = fm.fma(vd[2], n.unsafe_load(2), fm.fma(vd[0], n.unsafe_load(0), fm.mul(vd[1], n.unsafe_load(1))))
+                                var cos_nv = max(-ndv, Float32(0.0))
+                                var spec: Float32 = 0.0
+                                if cos_nv > 0.0:
+                                    var s_exp = fm.ex2(fm.mul(min(max(specular_log_s.unsafe_load(g), Float32(0.0)), Float32(5.0)), fm.LOG2E))
+                                    spec = fm.ex2(fm.mul(s_exp, fm.lg2(cos_nv)))
+                                comptime for ch in range(3):
+                                    c[ch] = fm.fma(specular_ks.unsafe_load(3 * g + ch), spec, c[ch])
+                            comptime for ch in range(3):
+                                c_acc[ch] = fm.fma(wgt, c[ch], c_acc[ch])
+                            trans = test_t
+                            n_visited = i * BLOCK_SIZE + j + 1
+            j += 1
+
     if inside:
         var pix = py * w + px
         comptime for ch in range(3):

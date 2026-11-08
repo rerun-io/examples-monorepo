@@ -288,13 +288,28 @@ def _raster3d_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises
             grid_dim=ceildiv(n, raster3d.POINT_THREADS), block_dim=raster3d.POINT_THREADS,
         )  # fmt: skip
     else:
-        stream.enqueue_function(
-            rt[].ctx.compile_function[raster3d.render_kernel](), Int32(width), Int32(height), Int32(_int(s, 4)), Int32(_int(s, 5)),
-            Int32(_int(s, 6)), _i32(t[0]), _i32(t[1]), _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), _f(t[7]), _f(t[8]), _f(t[9]),
-            _f(t[10]), _f(t[11]), _f(t[12]), Int32(_int(s, 7)), _f(t[13]), _f(t[14]), _f(t[15]), _i32(t[16]),
-            grid_dim=(ceildiv(width, TILE), ceildiv(height, TILE)), block_dim=(TILE, TILE),
-        )  # fmt: skip
+        # One kernel per (color model, view gradients, specular lobe): the flags are compile-time, as hot-loop branches.
+        var color_model = _int(s, 4)
+        var use_view_grads = _int(s, 6) != 0
+        var specular = _int(s, 5) == 2
+        comptime for cm in range(4):
+            comptime for vg in range(2):
+                comptime for spec in range(2):
+                    if color_model == cm and use_view_grads == (vg == 1) and specular == (spec == 1):
+                        _raster3d_render[cm, vg == 1, spec == 1](runtime, s, t)
     return Python.none()
+
+
+def _raster3d_render[color_model: Int, use_view_grads: Bool, specular: Bool](runtime: PythonObject, s: PythonObject, t: PythonObject) raises:
+    var width = _int(s, 2)
+    var height = _int(s, 3)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    rt[].torch_stream(_int(s, 0)).enqueue_function(
+        rt[].ctx.compile_function[raster3d.render_kernel[color_model, use_view_grads, specular]](), Int32(width), Int32(height), _i32(t[0]),
+        _i32(t[1]), _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), _f(t[7]), _f(t[8]), _f(t[9]), _f(t[10]), _f(t[11]), _f(t[12]),
+        Int32(_int(s, 7)), _f(t[13]), _f(t[14]), _f(t[15]), _i32(t[16]),
+        grid_dim=(ceildiv(width, TILE), ceildiv(height, TILE)), block_dim=(TILE, TILE),
+    )  # fmt: skip
 
 
 @export

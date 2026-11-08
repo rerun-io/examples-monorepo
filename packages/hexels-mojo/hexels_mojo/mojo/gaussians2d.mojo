@@ -238,23 +238,22 @@ def forward_kernel(
             var sigma = _sigma(
                 p.unsafe_load(2), p.unsafe_load(3), p.unsafe_load(4), fm.sub(p.unsafe_load(0), px), fm.sub(p.unsafe_load(1), py)
             )
-            if sigma < 0.0 or isnan(sigma) or isinf(sigma):
-                continue
-            var alpha = fm.ex2(fm.mul(sigma, -fm.LOG2E))
-            var min_id = -1
-            var min_val: Float32 = 1e30
-            for k in range(TOP_K):
-                if topk_ids.unsafe_load(k) < 0:
-                    min_id = k
-                    min_val = -1.0
-                    break
-                var v = topk_val.unsafe_load(k)
-                if v < min_val:
-                    min_id = k
-                    min_val = v
-            if alpha > min_val:
-                topk_ids[unsafe_offset=min_id] = id_batch.unsafe_load(t)
-                topk_val[unsafe_offset=min_id] = alpha
+            if not (sigma < 0.0 or isnan(sigma) or isinf(sigma)):  # an if, not continue: lanes reconverge per Gaussian
+                var alpha = fm.ex2(fm.mul(sigma, -fm.LOG2E))
+                var min_id = -1
+                var min_val: Float32 = 1e30
+                for k in range(TOP_K):
+                    if topk_ids.unsafe_load(k) < 0:
+                        min_id = k
+                        min_val = -1.0
+                        break
+                    var v = topk_val.unsafe_load(k)
+                    if v < min_val:
+                        min_id = k
+                        min_val = v
+                if alpha > min_val:
+                    topk_ids[unsafe_offset=min_id] = id_batch.unsafe_load(t)
+                    topk_val[unsafe_offset=min_id] = alpha
     if not inside:
         return
     var sum_val: Float32 = 0.0

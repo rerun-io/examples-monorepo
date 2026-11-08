@@ -60,9 +60,20 @@ floats past the array; the port indexes it at tx (same arithmetic, no overrun).
 | `distCUDA2`, 100K clustered points | 3.40 ms | 3.16 ms |
 | 2D rasterizer, color-gradient: binning + forward + backward, 20K hexels, 2048×2048 | 0.148 + 1.076 + 10.946 ms | 0.124 + 1.170 + 10.452 ms |
 | 2D rasterizer, flat: binning + forward + backward, same scene | 0.132 + 1.040 + 6.293 ms | 0.129 + 1.004 + 5.675 ms |
-| Image-GS step: projection + binning + forward + backward, 10K Gaussians, 2048×2048 | 8.251 ms | 6.466 ms |
-| 3D forward, 300K hexels, 1600×1080 (linear color, view gradients) | 2.05 ms | 2.79 ms (render 2.3 vs 1.7 ms: to tune) |
+| Image-GS step: projection + binning + forward + backward, 10K Gaussians, 2048×2048 | 8.251 ms | 6.220 ms |
+| 3D forward, 300K hexels, 1600×1080, linear color + view gradients (render stage) | 2.03 ms (1.68 ms) | 1.54 ms (1.09 ms) |
+| 3D forward, same scene, linear color, no view model (the protocol's training config) | 1.99 ms (1.64 ms) | 1.30 ms (0.85 ms) |
 
 Real run, `hexels-fit-2d --variant rich` on anime-2_2k (5,100 steps, 20K → 10K hexels), two runs each: CUDA
 36.18 / 36.08 dB, 85.9 / 88.1 s; every ported kernel on Mojo (rasterizer, binning, SSIM, prune) 36.12 / 36.14 dB,
 77.8 / 80.7 s. `--variant flat` (constant colors): CUDA 33.88 dB in 52.9 s, Mojo 33.89 dB in 48.5 s.
+
+Real run, 3D: `hexels.train` on DTU scan105 with the protocol's v1 command at 7,000 iterations (hexels_bench
+`prepare_command`), scored on the 8 test views. CUDA: 27.06 / 26.97 dB, SSIM 0.880 / 0.867, 78.3 / 76.7 s. The Mojo forward
+(backward still CUDA): 26.90 / 26.97 / 26.94 dB, SSIM 0.872 / 0.875 / 0.879, 81.7 / 82.0 / 76.6 s (the last run on the
+reconverging render loop below). Runs differ because the CUDA backward's float atomics are not deterministic. The test
+views of one Mojo-trained checkpoint, rendered by the CUDA env and by the Mojo env, are byte-identical PNGs.
+
+Render loops branch with nested `if`s, not `continue` / `break`: with `continue`, LLVM placed the warp's reconvergence
+point outside the per-hexel loop, the lanes of a warp drifted onto different hexels, and the 3D render ran at 2.3 ms
+instead of 1.1 ms for the same instructions.
