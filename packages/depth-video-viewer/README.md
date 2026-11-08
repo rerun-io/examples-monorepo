@@ -31,10 +31,11 @@ pixi run -e depth-video-viewer --frozen depth-video-viewer -- recording.rrd     
 Log from Python with the stock rerun-sdk (`depth_video_viewer/log.py`, `encode.py`):
 
 ```python
-from depth_video_viewer.encode import encode_av1
+from depth_video_viewer.encode import encode_av1, to_codes
 from depth_video_viewer.log import DepthVideoProperties, log_depth_video
 
-samples = encode_av1(codes, gop=10)  # (n, h, w) uint16 codes <= 1023 -> one AV1 temporal unit per frame
+codes, unit_mm = to_codes(depth_mm)  # (n, h, w) uint16 mm -> linear 10-bit codes and their unit
+samples = encode_av1(codes, gop=10)  # one AV1 temporal unit per frame
 log_depth_video("world/cam/pinhole/depth_video", samples, times_ns, DepthVideoProperties(meter=1000.0 / unit_mm))
 ```
 
@@ -56,14 +57,16 @@ Encoding (`encode.py`): libaom with `lossless=1`, so every code comes back exact
 (`cpu-used 8`), since a lossless stream decodes to the same codes at any preset, only its size changes; a fixed GOP (`-g` and
 `-keyint_min`, default 10), so a seek decodes at most that many samples; `gray10le` input in full range, so no
 limited-range scaling touches the codes. Codes are linear in depth with a per-recording unit, `meter = 1000 / unit_mm`;
-code 0 means no depth, so depths below half a unit are rejected.
+code 0 means no depth, so depths below half a unit are rejected (`to_codes`).
 
 ## Decoding and seeking
 
-Decoding is synchronous in the visualizer (`src/decoder.rs`). Each entity keeps an index of its samples in decode
-order (one range query, sorted by time then row id, rebuilt when its chunks change), one rav1d decoder, and the last
-decoded sample: playing forward decodes one sample per frame; a seek walks back in the index to the keyframe at or
-before the target and decodes from there (at most one GOP). Samples may share a time point.
+Decoding is synchronous in the visualizer (`src/decoder.rs`). Each entity keeps an index of its loaded rows in
+decode order (sorted by time then row id, without their bytes, rebuilt when its sample chunks change), one rav1d
+decoder, and the last decoded sample. Each draw reads only the rows from the keyframe before the cursor to the cursor,
+and waits only for those chunks when the recording loads lazily. Playing forward decodes one sample per frame; a seek
+decodes from that keyframe (at most one GOP). Samples may share a time point. An empty sample batch is a clear: the
+entity shows nothing from there until its next sample, which still decodes from the history before the clear.
 
 ## What is lost compared with the in-tree route
 
@@ -88,4 +91,4 @@ The in-tree prototype (branch `pablo/depth-video-stream` in a Rerun checkout) ad
 `pixi run -e depth-video-viewer-dev --frozen gate` runs Ruff, pyrefly, vulture, pytest, and
 `depth-video-viewer-rust-check` (rustfmt, Clippy `-D warnings`, `cargo test`). The Rust test decodes a 24-frame
 32x16 AV1 10-bit stream (`src/testdata/`, made with `encode_av1`) and checks every code, then seeks forward, across
-GOPs and backward.
+GOPs and backward; store-backed tests cover clears and a lazily loaded recording whose later chunk is not loaded.
