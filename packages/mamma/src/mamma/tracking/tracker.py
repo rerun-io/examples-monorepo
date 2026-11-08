@@ -25,6 +25,7 @@ from numpy import ndarray
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
 from mamma.tracking.detection import PersonDetections, PersonDetector, bbox_iou_xyxy
+from mamma.tracking.steady_graph import SteadyTickGraphs, SteadyTickOutputs
 from mamma.tracking.identity import (
     ClipEncoder,
     FeatureBank,
@@ -45,6 +46,25 @@ ANCHOR_CONFLICT_IOU: float = 0.65
 are de-conflicted (suppress the lower-scoring one) — mirrors the original's
 ``anchor_conflict_iou`` so SAM2 is never prompted with two near-identical boxes
 for two people during contact (prevents per-object memory poisoning)."""
+
+
+def _disable_dead_hole_filling(predictor: object) -> None:
+    """Turn off SAM2 mask hole/sprinkle filling when its CUDA extension is absent.
+
+    ``build_sam2_generic_video_predictor`` sets ``max_hole_area=8``, but the
+    filling needs the compiled ``sam2._C`` connected-components kernel. Without
+    it, ``postprocess_masks`` launches the threshold ops, raises inside a
+    try/except, emits a warning, and returns the input masks unchanged — every
+    tick. Zeroing the areas skips that dead work and the exception and gives
+    byte-identical masks. With ``_C`` present, the filling stays enabled.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("sam2._C") is not None:
+        return
+    transforms = predictor._transforms  # type: ignore[attr-defined]
+    transforms.max_hole_area = 0.0
+    transforms.max_sprinkle_area = 0.0
 
 
 @dataclass(slots=True)
@@ -100,6 +120,10 @@ class TrackerConfig:
     (displayed-mask IoU vs per-frame baseline bottoms at 0.17); stride 1 is
     pixel-identical (0.999 IoU) at ~15.0 s vs 11.76 s wall for the 12.1 s clip.
     Set 4 to prioritize the realtime gate over mask cosmetics."""
+    cuda_graph: bool = False
+    """Replay the steady-state batched tick (single object, no prompts) from a
+    CUDA graph per memory structure instead of ~1200 eager launches. Prompt,
+    re-detect, multi-object, and first-seen-structure ticks stay eager."""
     device: str = "cuda"
     """Compute device."""
 
@@ -119,6 +143,16 @@ class MultiViewTracker:
 
         self.predictor = build_sam2_generic_video_predictor(
             config.sam2_config, str(config.sam2_checkpoint), device=config.device
+        )
+        _disable_dead_hole_filling(self.predictor)
+        # The fork builds these before the model moves to the GPU; keep them
+        # resident so no tick pays (or graph-captures) a host->device copy.
+        with torch.inference_mode():
+            self.predictor.empty_prompt_embeddings = tuple(
+                t.to(config.device) for t in self.predictor.empty_prompt_embeddings
+            )
+        self._graphs: SteadyTickGraphs | None = (
+            SteadyTickGraphs(self.predictor, self._video_hw) if config.cuda_graph else None
         )
         self._states = [
             SAM2GenericVideoPredictorState.create(
@@ -442,28 +476,19 @@ class MultiViewTracker:
 
     def _tracks_from_batched(self, batched, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[CameraTracks]:
         """Convert a B=n_cams SAM2Result into per-camera tracks (sync-free)."""
-        results: list[CameraTracks] = []
-        h: int = frames[0].shape[1]
-        w: int = frames[0].shape[2]
-        masks: Bool[torch.Tensor, "c h w"] = batched.masks_logits[:, 0] > 0.0
-        rows: torch.Tensor = masks.any(dim=2).int()
-        cols: torch.Tensor = masks.any(dim=1).int()
-        stats: torch.Tensor = torch.stack(
-            [
-                rows.sum(dim=1),
-                cols.argmax(dim=1),
-                rows.argmax(dim=1),
-                (w - 1) - cols.flip(1).argmax(dim=1),
-                (h - 1) - rows.flip(1).argmax(dim=1),
-            ],
-            dim=1,
-        ).float()
-        area_px: torch.Tensor = masks.reshape(masks.shape[0], -1).sum(dim=1, keepdim=True).float()
-        stats = torch.cat([stats, batched.ious[:, 0:1].float(), area_px], dim=1)
+        from mamma.tracking.batched_forward import first_hypothesis_stats
+
+        masks, stats = first_hypothesis_stats(batched.masks_logits, batched.ious)
+        return self._tracks_from_masks(masks, stats)
+
+    def _tracks_from_masks(
+        self, masks: Bool[torch.Tensor, "c h w"], stats: Float32[torch.Tensor, "c 7"]
+    ) -> list[CameraTracks]:
+        """Per-camera object-0 tracks from batched masks + GPU stats (one host copy)."""
         all_stats: Float32[ndarray, "c 7"] = stats.cpu().numpy()
-        for cam_idx in range(len(frames)):
-            results.append({0: self._resolve_track(cam_idx, 0, masks[cam_idx], all_stats[cam_idx])})
-        return results
+        return [
+            {0: self._resolve_track(cam_idx, 0, masks[cam_idx], all_stats[cam_idx])} for cam_idx in range(masks.shape[0])
+        ]
 
     def _forward_all(
         self,
@@ -477,6 +502,12 @@ class MultiViewTracker:
         # cheap per-camera memory/decoder via forward_embeddings. One autocast/
         # inference_mode context for the whole tick (entering per camera costs
         # measurable CPU at this rate).
+        if self._graphs is not None and not any(prompts_per_cam):
+            with torch.inference_mode():
+                replayed: SteadyTickOutputs | None = self._graphs.step(self._states, frame_idx, frames)
+            if replayed is not None:
+                return self._tracks_from_masks(replayed.masks, replayed.stats)
+
         autocast = torch.autocast("cuda", dtype=torch.bfloat16)
         with torch.inference_mode(), autocast:
             batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
