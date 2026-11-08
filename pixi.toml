@@ -2966,7 +2966,7 @@ description = "Import the installed slam-rs core output and check the catalog ou
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mamma]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.mamma.dependencies]
 # posekit's EgoHand, DINOv3 and Sapiens2 sources (see feature.posekit).
@@ -2995,7 +2995,7 @@ sam2 = { path = "packages/sam2-streaming", editable = true }
 PACKAGE_DIR = "packages/mamma"
 
 [feature.mamma.tasks._download-mamma-inputs]
-cmd = "test -e data/inputs/indoors/crossing_arms/meta/global.npz || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'inputs/**' 'golden/**' 'body_models/**' --local-dir data/"
+cmd = "test -e data/inputs/indoors/crossing_arms/meta/global.npz || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'inputs/**' --include 'golden/**' --include 'body_models/**' --local-dir data/"
 cwd = "packages/mamma"
 outputs = ["packages/mamma/data/inputs/indoors/crossing_arms/meta/global.npz"]
 description = "Download crossing_arms inputs + slim golden + body models (private HF repo)"
