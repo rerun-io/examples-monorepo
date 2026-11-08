@@ -170,19 +170,24 @@ pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 # onnxruntime comes from PyPI (see [feature.cuda.pypi-dependencies]); conda-forge
 # supplies only the CUDA/cuDNN libraries it dlopens.
+# TensorRT's shared libraries are conda packages, so every env hard-links one
+# cached copy. The pypi.nvidia.com tensorrt-cu13-libs wheel is sent with
+# `cache-control: no-store`, and uv unpacked a fresh 4.4 GB copy per env install.
+# conda-pypi-map-ai-demos.json maps libnvinfer to tensorrt-cu13-libs, which
+# satisfies the PyPI tensorrt-cu13 requirement below.
+# TODO(tensorrt-conda-forge): Stopgap: drop this ai-demos build and the channel pin once conda-forge's
+# tensorrt-feedstock ships >= 11.2 (watch conda-forge/tensorrt-feedstock PRs #5/#8); then switch
+# libnvinfer* to conda-forge and delete the recipe (pablovela5620/ai-demos recipes/tensorrt).
+libnvinfer = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
+libnvinfer-plugin = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
+libnvonnxparser = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
 
-# TensorRT — one shared source for every cuda env (pypi.nvidia.com ships both
-# platforms, cp310–cp313). tensorrt-cu13-libs' stale metadata demands
-# nvidia-cuda-runtime-cu13; NVIDIA's empty 0.0.0a0 placeholder satisfies it
-# (conda supplies the real CUDA runtime).
+# TensorRT's Python API from plain PyPI, which uv caches: the tensorrt-cu13
+# metapackage (a small setuptools sdist) and the cp312 bindings wheels.
 [feature.cuda.pypi-dependencies]
-tensorrt-cu13 = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
-# Its -libs dependency from the same index: there it is a real wheel (x86_64 manylinux_2_28, aarch64 manylinux_2_35).
-# On PyPI it is only an sdist stub that downloads the 3.6 GB wheel at build time, and uv rebuilt and cached it for
-# every cuda env install (~8 GB of uv cache each, ~870 GB over four days).
-tensorrt-cu13-libs = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-# onnxruntime from PyPI, like TensorRT: conda-forge's build ships no sm_121 kernels
+tensorrt-cu13 = "==11.2.1.2"
+tensorrt-cu13-bindings = "==11.2.1.2"
+# onnxruntime from PyPI, like the TensorRT bindings: conda-forge's build ships no sm_121 kernels
 # (its CUDA EP dies on the GB10), and 1.29.0 is the first release whose aarch64
 # CUDA 13 wheels carry sm_121a. No [cuda]/[cudnn] extras — cudart/cuBLAS/cuDNN come
 # from conda above through the LD_LIBRARY_PATH activation. Exact pin: bump
@@ -193,10 +198,10 @@ cuda-python = "*"
 # strongly-typed networks mandatory — imports onnxscript at export time.
 onnxscript = "*"
 
-# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default; ORT needs
-# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer (every cuda env is on Python 3.12).
+# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default): ORT needs
+# conda's cuDNN/cuBLAS, and the tensorrt bindings find conda's libnvinfer there.
 [feature.cuda.activation.env]
-LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
