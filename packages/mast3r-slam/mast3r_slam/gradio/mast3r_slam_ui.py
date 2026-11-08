@@ -32,7 +32,15 @@ from mast3r_slam.config import SLAM_PRESETS, SlamConfig, SlamPresetName
 from mast3r_slam.mast3r_utils import prepare_trt_engines
 from mast3r_slam.rerun_log_utils import LOG_PATH
 
-EXAMPLE_VIDEOS: list[str] = ["data/livingroom-tour.mp4", "data/normal-apt-tour.mp4"]
+EXAMPLE_VIDEOS: list[str] = [
+    "data/livingroom-tour.mp4",
+    "data/normal-apt-tour.mp4",
+    # The dpvo / MetricTrail example clips, for comparisons across the three apps.
+    "data/iphone/pool.mp4",
+    "data/movies/IMG_0493.mp4",
+    "data/movies/IMG_0494.mp4",
+    "data/movies/IMG_0495.mp4",
+]
 
 engine_status: str = "Preparing TensorRT engines for the example videos..."
 """Shown above the Run button while :func:`_prepare_example_engines` runs."""

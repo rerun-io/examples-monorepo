@@ -1979,13 +1979,21 @@ outputs = [
 ]
 
 [feature.mast3r-slam.tasks._mast3r-slam-download-example-data]
-cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/"
+# The tours are mast3r-slam's own; pool and the IMG_049x clips are the dpvo / MetricTrail examples, so the same
+# clip can be compared across the three apps.
+cmd = """hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/ \
+  && hf download pablovela5620/dpvo-example-data iphone/pool.mp4 movies/IMG_0493.mp4 movies/IMG_0494.mp4 movies/IMG_0495.mp4 \
+  --repo-type dataset --local-dir data/"""
 cwd = "packages/mast3r-slam"
 outputs = [
     "packages/mast3r-slam/data/normal-apt-tour.mp4",
     "packages/mast3r-slam/data/livingroom-tour.mp4",
+    "packages/mast3r-slam/data/iphone/pool.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0493.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0494.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0495.mp4",
 ]
-description = "Download example video data"
+description = "Download the example videos (mast3r-slam's tours and the dpvo / MetricTrail clips)"
 
 # ── Test baseline task ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-generate-test-baseline]
