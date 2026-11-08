@@ -34,6 +34,7 @@ from simplecv.rig import CameraSensor, Rig, RigCalibration, entity_id
 from torch import Tensor
 from torch.utils.data import DataLoader
 
+from monopriors.gpu_image import area_resize
 from monopriors.models.rig_depth import (
     AnnotatedRigDepthPredictorUnion,
     BaseRigDepthPredictor,
@@ -371,30 +372,27 @@ def main(config: RigDepthCatalogConfig) -> None:
 
     wait_started: float = time.perf_counter()
     for batch in loader:
-        # "decode" now covers the wait on the loader (which owns the NVDEC decoders) plus the
-        # host-side resize onto the network grid, so it stays comparable to the pre-loader runs.
-        selected: list[int] = []
-        resized: list[UInt8[ndarray, "views height width 3"]] = []
-        for row, row_t_ns in enumerate(batch.t_ns):
-            if not start_ns <= row_t_ns <= end_ns:
-                continue
-            views: list[UInt8[ndarray, "height width 3"]] = []
-            for view_index in range(len(config.cams)):
-                frame: UInt8[ndarray, "video_height video_width 3"] = rearrange(batch.images[row, view_index], "c h w -> h w c").cpu().numpy()
-                views.append(cv2.resize(frame, (config.width, config.height), interpolation=cv2.INTER_AREA))
-            selected.append(row)
-            resized.append(np.stack(views))
-        decode_s: float = time.perf_counter() - wait_started
+        # "decode" covers the wait on the loader (which owns the NVDEC decoders) plus the resize
+        # onto the network grid, so it stays comparable to the pre-loader runs.
+        selected: list[int] = [row for row, row_t_ns in enumerate(batch.t_ns) if start_ns <= row_t_ns <= end_ns]
         reached_end: bool = batch.t_ns[-1] >= end_ns
         if not selected:
             if reached_end:
                 break
             wait_started = time.perf_counter()
             continue
-        batch_images: UInt8[ndarray, "framesets views height width 3"] = np.stack(resized)
+        # The frames stay on the decoder's device: one area resize of every view there, the
+        # predictor takes the device grid, and only the network-size grid goes to the host for the
+        # remap, fusion and logging (instead of every full-resolution frame and a re-upload).
+        video_frames: UInt8[Tensor, "framesets_views 3 video_height video_width"] = batch.images[selected].flatten(0, 1)
+        device_images: UInt8[Tensor, "framesets views height width 3"] = rearrange(
+            area_resize(video_frames, config.height, config.width), "(b s) c h w -> b s h w c", b=len(selected)
+        ).contiguous()
+        batch_images: UInt8[ndarray, "framesets views height width 3"] = device_images.cpu().numpy()
+        decode_s: float = time.perf_counter() - wait_started
 
         predict_started: float = time.perf_counter()
-        predictions: list[RigDepthPrediction] = predictor.predict_batch(batch_images, rays, cam_types, rig_T_cam)
+        predictions: list[RigDepthPrediction] = predictor.predict_batch(device_images, rays, cam_types, rig_T_cam)
         torch.cuda.synchronize()
         predict_s: float = time.perf_counter() - predict_started
 

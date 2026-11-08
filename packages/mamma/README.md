@@ -71,6 +71,42 @@ Defaults trade the last 2.5 s for mask quality: `track_stride=1` keeps masks
 pixel-identical to the original tracker (stride 4 reaches 11.8 s but
 transiently collapses masks to the head during fast motion).
 
+## DGX Spark (GB10)
+
+The env resolves on `linux-aarch64` (CUDA 13, sm_121). Measured on the 4-camera
+`crossing_arms` clip from the AV1 1080p mirror
+(`/mnt/nas/datasets/mamma-av1-1080/...`, 363 frames, 12.1 s), Rerun logging to a
+gRPC sink included, steady state after tick 60:
+
+| mode | flags | wall | steady |
+|---|---|---|---|
+| start (HEVC 4:4:4 4K → CPU decode, eager MammaNet) | defaults | 80.2 s | 4.5 ticks/s |
+| quality: every stage every frame | `--trt-engine <fp8 plan>` | 27.5 s | 14.5 ticks/s |
+| realtime: body observed at 15 Hz, video/timeline at 30 Hz | `--trt-engine <fp8 plan> --tracker.compile-image-encoder --tracker.track-stride 2 --fitter.tick-iters 16 --observe-tracked-only` | 15.3–15.7 s | 26–30 ticks/s |
+
+```bash
+# from packages/mamma; engines are per-GPU (sm121) and per-TRT-version
+pixi run -e mamma --frozen python tools/build_trt_engine.py --precision fp8 --calib-crops <crops.pt>   # FP8 MammaNet (tools/record_mammanet_crops.py records crops)
+pixi run -e mamma --frozen python tools/benchmark.py --data-dir <av1-1080 clip> --trt-engine .trt_cache/mammanet_b4_fp8_trt11212_sm121.plan [realtime flags]
+pixi run -e mamma --frozen python tools/eval_mammaeval.py --seq-dir <prepared MammaEval seq> --cameras IOI_01 IOI_03 IOI_05 IOI_07 ...
+```
+
+Notes:
+
+- torchcodec's CUDA decoder rejects HEVC 4:4:4 (the HF `videos_light` clip and all raw
+  MAMMA videos); it falls back to CPU decode. Use 4:2:0 inputs (AV1 1080p mirror, or
+  the prepared MammaEval copies) for realtime runs.
+- Full-rate 30 fps is not reached on GB10: at full rate the per-tick GPU work
+  (tracker ~22 ms, FP8 MammaNet ~15 ms, fit ~9 ms, resize ~3 ms) already exceeds the
+  33 ms budget. The realtime mode halves tracker/landmark/fit work by observing the
+  body every second frame.
+- `tools/eval_mammaeval.py` scores against the MAMMA paper protocol (MoSh++ GT, 55-joint
+  MPJPE, PVE, world frame). The streaming fitter keeps the finger pose fixed, so
+  hand-joint error cannot match the paper's offline fit.
+- On dynamic clips (`running_jumping`) the eager LBFGS polish on hard ticks costs
+  ~4 ticks/s (`--fitter.no-lbfgs-polish`: 10.2 → 14.4 steady in quality mode); kept on
+  until the dynamic gate can run on the Spark.
+
 ## Layout
 
 ```

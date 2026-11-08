@@ -52,7 +52,7 @@ class BaseRigDepthPredictor(ABC):
     @abstractmethod
     def __call__(
         self,
-        images: UInt8[ndarray, "s h w 3"],
+        images: UInt8[ndarray, "s h w 3"] | UInt8[Tensor, "s h w 3"],
         rays: Float32[ndarray, "s h w 3"],
         cam_types: Int64[ndarray, "s"],
         cam_T_ref: Float64[ndarray, "s 4 4"] | None,
@@ -62,7 +62,7 @@ class BaseRigDepthPredictor(ABC):
 
     def predict_batch(
         self,
-        images: UInt8[ndarray, "b s h w 3"],
+        images: UInt8[ndarray, "b s h w 3"] | UInt8[Tensor, "b s h w 3"],
         rays: Float32[ndarray, "s h w 3"],
         cam_types: Int64[ndarray, "s"],
         cam_T_ref: Float64[ndarray, "s 4 4"] | None,
@@ -70,7 +70,7 @@ class BaseRigDepthPredictor(ABC):
         """Predict several framesets of one rig, one per call unless the backend batches them.
 
         Args:
-            images: RGB framesets sharing one rig, ``UInt8[ndarray, "b s h w 3"]``.
+            images: RGB framesets sharing one rig, host ``UInt8[ndarray, "b s h w 3"]`` or a device tensor.
             rays: Camera-frame unit rays shared by all framesets, ``Float32[ndarray, "s h w 3"]``.
             cam_types: X-Lens camera ids, ``Int64[ndarray, "s"]``.
             cam_T_ref: Optional camera-to-reference poses, ``Float64[ndarray, "s 4 4"]``.

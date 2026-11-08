@@ -1,0 +1,163 @@
+diff --git a/hexels/trainer.py b/hexels/trainer.py
+index 8d2abba..3d07f43 100644
+--- a/hexels/trainer.py
++++ b/hexels/trainer.py
+@@ -1354,7 +1354,7 @@ class Hexels3DTrainer:
+         self.ssim = ssim
+         self.metric_ssim = ssim
+         if opt.use_fused_ssim:
+-            from fused_ssim import fused_ssim
++            from hexels_mojo.fused_ssim import fused_ssim  # fused-ssim in Mojo (packages/hexels-mojo)
+ 
+             self.ssim = lambda prediction, target: fused_ssim(
+                 prediction.unsqueeze(0), target.unsqueeze(0), padding="same"
+diff --git a/scripts/image_compression_allocation.py b/scripts/image_compression_allocation.py
+index 1398ba0..5cfd3ba 100644
+--- a/scripts/image_compression_allocation.py
++++ b/scripts/image_compression_allocation.py
+@@ -11,19 +11,10 @@ import torch
+ 
+ @lru_cache(maxsize=1)
+ def load_prune_scores():
+-    """Build an isolated scorer from the renderer's own floating-point SDF helper."""
+-    import gsplat
+-    from torch.utils.cpp_extension import load_inline
+-
+-    directory = Path(gsplat.__file__).parent / "cuda/csrc"
+-    helper = (directory / "hexels_forward.cu").read_text().split("namespace {", 1)[1].split("} // namespace", 1)[0]
+-    source = "#include <cuda_runtime.h>\n" + (directory / "config.h").read_text()
+-    source += "\nnamespace {" + helper + "}\n"
+-    source += Path(__file__).with_name("image_compression_prune_scores.cu").read_text()
+-    declaration = "std::vector<torch::Tensor> removal_scores_cuda(" + ", ".join(["torch::Tensor"] * 9) + ", bool);"
+-    return load_inline(name="hexel_prune_scores", cpp_sources=declaration, cuda_sources=source,
+-                       functions=["removal_scores_cuda"],
+-                       extra_cuda_cflags=["-O3", "--use_fast_math"], verbose=False)
++    """The scorer's `removal_scores_cuda`: image_compression_prune_scores.cu in Mojo (packages/hexels-mojo)."""
++    from hexels_mojo import prune
++
++    return prune
+ 
+ 
+ def removal_deltas(image: torch.Tensor, target: torch.Tensor,
+diff --git a/scripts/image_compression_prune_scores.cu b/scripts/image_compression_prune_scores.cu
+deleted file mode 100644
+index c9ceeed..0000000
+--- a/scripts/image_compression_prune_scores.cu
++++ /dev/null
+@@ -1,94 +0,0 @@
+-#include <torch/extension.h>
+-#include <ATen/cuda/CUDAContext.h>
+-#include <c10/cuda/CUDAGuard.h>
+-#include <c10/cuda/CUDAException.h>
+-
+-__global__ void removal_scores_kernel(
+-    int width, int height, const float2* xy, const float2* scales,
+-    const float* rotations, const float* colors, const float* gradients,
+-    const float* softness, const float* image, const float* target,
+-    const int* selected, bool rich, float* scores, float* max_error) {
+-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+-    if (x >= width || y >= height) return;
+-    const int pixel = y * width + x;
+-    float weights[10], local_colors[10][3];
+-    float sum = 0.f;
+-    for (int k = 0; k < 10; ++k) {
+-        const int id = selected[pixel * 10 + k];
+-        weights[k] = 0.f;
+-        if (id < 0) continue;
+-        const float2 delta = {xy[id].x - x, xy[id].y - y};
+-        const float soft = rich ? softness[id] : 10.f;
+-        float peak = 0.f;
+-        weights[k] = hexel_alpha(delta, scales[id], rotations[id], 0.f,
+-                                {soft, soft, soft}, 0.f, peak);
+-        sum += weights[k];
+-        for (int c = 0; c < 3; ++c) {
+-            const float base = colors[id * 3 + c];
+-            local_colors[k][c] = rich ? base + 0.1f * (
+-                delta.x * gradients[(id * 2) * 3 + c] +
+-                delta.y * gradients[(id * 2 + 1) * 3 + c]) : base;
+-        }
+-    }
+-    const float denominator = sum + 1e-4f;
+-    const float error = fabsf(denominator - image[pixel * 4 + 3]);
+-    if (error > *max_error) atomicMax(reinterpret_cast<unsigned int*>(max_error), __float_as_uint(error));
+-    float before = 0.f;
+-    for (int c = 0; c < 3; ++c) {
+-        const float difference = image[pixel * 4 + c] - target[pixel * 3 + c];
+-        before += difference * difference / 3.f;
+-    }
+-    for (int k = 0; k < 10; ++k) {
+-        const int id = selected[pixel * 10 + k];
+-        if (id < 0 || weights[k] == 0.f) continue;
+-        const float remaining = fmaxf(denominator - weights[k], 1e-4f);
+-        float after = 0.f;
+-        for (int c = 0; c < 3; ++c) {
+-            const float removed = (image[pixel * 4 + c] * denominator -
+-                                   weights[k] * local_colors[k][c]) / remaining;
+-            const float difference = removed - target[pixel * 3 + c];
+-            after += difference * difference / 3.f;
+-        }
+-        atomicAdd(scores + id, after - before);
+-    }
+-}
+-
+-std::vector<torch::Tensor> removal_scores_cuda(
+-    torch::Tensor xy, torch::Tensor scales, torch::Tensor rotations,
+-    torch::Tensor colors, torch::Tensor gradients, torch::Tensor softness,
+-    torch::Tensor image, torch::Tensor target, torch::Tensor selected, bool rich) {
+-    for (const auto& tensor : {xy, scales, rotations, colors, gradients, softness, image, target}) {
+-        TORCH_CHECK(tensor.is_cuda() && tensor.scalar_type() == torch::kFloat32 && tensor.is_contiguous(),
+-                    "Prune inputs must be contiguous CUDA float32");
+-        TORCH_CHECK(tensor.device() == xy.device(), "Prune input devices must match");
+-    }
+-    const auto count = xy.size(0);
+-    TORCH_CHECK(xy.dim() == 2 && xy.size(1) == 2 && scales.sizes() == xy.sizes(),
+-                "Prune centers/scales must have shape (N,2)");
+-    TORCH_CHECK(rotations.dim() == 2 && rotations.size(0) == count && rotations.size(1) == 1,
+-                "Prune rotations must have shape (N,1)");
+-    TORCH_CHECK(colors.dim() == 2 && colors.size(0) == count && colors.size(1) == 3,
+-                "Prune colors must have shape (N,3)");
+-    TORCH_CHECK(gradients.dim() == 3 && gradients.size(0) == count && gradients.size(1) == 2 && gradients.size(2) == 3,
+-                "Prune color gradients must have shape (N,2,3)");
+-    TORCH_CHECK(softness.dim() == 1 && softness.size(0) == count, "Prune softness must have shape (N)");
+-    TORCH_CHECK(image.dim() == 3 && image.size(2) == 4 && target.dim() == 3 && target.size(2) == 3 &&
+-                image.size(0) == target.size(0) && image.size(1) == target.size(1), "Prune image/target shapes disagree");
+-    TORCH_CHECK(selected.is_cuda() && selected.scalar_type() == torch::kInt32 && selected.is_contiguous() &&
+-                selected.device() == xy.device() && selected.dim() == 3 && selected.size(0) == image.size(0) &&
+-                selected.size(1) == image.size(1) && selected.size(2) == 10, "Prune IDs must have shape (H,W,10), CUDA int32");
+-    const c10::cuda::CUDAGuard guard(xy.device());
+-    auto scores = torch::zeros({count}, xy.options());
+-    auto error = torch::zeros({}, xy.options());
+-    const int height = image.size(0), width = image.size(1);
+-    removal_scores_kernel<<<dim3((width + 15) / 16, (height + 15) / 16), dim3(16, 16), 0,
+-                            at::cuda::getCurrentCUDAStream()>>>(
+-        width, height, reinterpret_cast<const float2*>(xy.data_ptr<float>()),
+-        reinterpret_cast<const float2*>(scales.data_ptr<float>()), rotations.data_ptr<float>(),
+-        colors.data_ptr<float>(), gradients.data_ptr<float>(), softness.data_ptr<float>(),
+-        image.data_ptr<float>(), target.data_ptr<float>(), selected.data_ptr<int>(), rich,
+-        scores.data_ptr<float>(), error.data_ptr<float>());
+-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+-    return {scores, error};
+-}
+diff --git a/scripts/image_compression_training.py b/scripts/image_compression_training.py
+index 523fcca..a340e70 100644
+--- a/scripts/image_compression_training.py
++++ b/scripts/image_compression_training.py
+@@ -21,7 +21,7 @@ from PIL import Image
+ # Bind the installed hexel-kernel `gsplat` before exposing the upstream checkout.
+ # `image-gs/gsplat` has no `__init__.py`, so a later import would resolve it as
+ # an empty namespace package ahead of an editable kernel install.
+-from gsplat import project_gaussians_2d_scale_rot, rasterize_gaussians_sum
++from hexels_mojo.gaussians2d import project_gaussians_2d_scale_rot, rasterize_gaussians_sum  # Image-GS kernels in Mojo (packages/hexels-mojo)
+ 
+ from scripts.image_compression_codec import decode, encode, stored_bytes
+ 
+@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT / "image-gs"))
+ with chdir(ROOT / "image-gs"):
+     from model import GaussianSplatting2D
+     from utils.quantization_utils import ste_quantize
+-from fused_ssim import fused_ssim
++from hexels_mojo.fused_ssim import fused_ssim  # fused-ssim in Mojo (packages/hexels-mojo)
+ from gsplat_hexels import rasterize_hexels_sum
+ 
+ 

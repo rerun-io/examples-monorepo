@@ -1,6 +1,7 @@
 """Public streaming LAMP tracker tests with learned-stage doubles."""
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import UInt8
 from posekit.models.base import PersonDetector, TopDownPose2d
@@ -90,8 +91,9 @@ def _camera(name: str) -> RigCamera:
     return RigCamera(PinholeParameters(name=name, extrinsics=extrinsics, intrinsics=intrinsics))
 
 
-def test_step_returns_smoothed_person_and_binary_keypoints() -> None:
-    """Two frames fill the window, preserve one ID, and lift binary COCO input."""
+@pytest.mark.parametrize("device_frames", [False, True])
+def test_step_returns_smoothed_person_and_binary_keypoints(device_frames: bool) -> None:
+    """Two frames fill the window, preserve one ID, and lift binary COCO input; host or tensor frames."""
     model = _RecordingLampNet()
     lifter = Lifter(model, torch.device("cpu"), LifterSettings(snippet_length=2))
     tracker = LampTracker(
@@ -99,6 +101,8 @@ def test_step_returns_smoothed_person_and_binary_keypoints() -> None:
     )
     tracker.configure_cameras(tuple(_camera(f"cam_{index}") for index in range(4)))
     images = np.zeros((4, 128, 128, 3), dtype=np.uint8)
+    if device_frames:
+        images = torch.from_numpy(images)
     world_T_rig = np.eye(4, dtype=np.float64)
 
     first = tracker.step(Frameset(1_000_000_000, images, world_T_rig))
