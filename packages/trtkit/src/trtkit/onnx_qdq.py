@@ -141,6 +141,15 @@ def _fp8_input(
     return initializers, nodes, dequantized
 
 
+def fp8_input_qdq(tensor: str, prefix: str, amax: float, scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], list[onnx.NodeProto], str]:
+    """Static FP8 Q/DQ of one activation for model-specific rewrites (e.g. attention operands of a non-native MHA).
+
+    Returns:
+        New initializers, the Q/DQ nodes to insert before the consumer, and the dequantized tensor name.
+    """
+    return _fp8_input(tensor, prefix, amax, f"{prefix}.a_zp", scale_dtype)
+
+
 def _fp8_weight(module: str, weight: Float[Tensor, "out *rest"], scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], onnx.NodeProto]:
     """FP8 weights with per-output-channel scales of ``scale_dtype``; the node writes ``{module}.w_dq``."""
     torch_dtype, proto_dtype = _SCALE_TYPES[scale_dtype]

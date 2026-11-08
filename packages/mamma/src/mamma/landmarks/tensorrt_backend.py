@@ -28,6 +28,7 @@ from jaxtyping import Float32
 
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
 from mamma.landmarks.mammanet import MammaNet
+from mamma.landmarks.vit import Attention
 
 ENGINE_BATCH: int = 4
 """Static batch baked into the engine (cameras x persons rounded up)."""
@@ -131,6 +132,82 @@ def calibrate_backbone_amax(
     return amax
 
 
+def calibrate_attention_amax(
+    model: MammaNet, crops: Float32[torch.Tensor, "n b 3 h w"], masks: Float32[torch.Tensor, "n b 1 h w"]
+) -> dict[str, tuple[float, float, float]]:
+    """Max ``|q * scale|``, ``|k|``, ``|v|`` of every ViT block attention, keyed ``backbone.blocks.N.attn``."""
+    amax: dict[str, tuple[float, float, float]] = {}
+    hooks: list[torch.utils.hooks.RemovableHandle] = []
+    for name, module in model.named_modules():
+        if name.startswith("backbone.blocks.") and name.endswith(".attn.qkv"):
+            block: str = name.removesuffix(".qkv")
+            attention: torch.nn.Module = model.get_submodule(block)
+            assert isinstance(attention, Attention)
+            scale: float = attention.scale
+
+            def record(_module: torch.nn.Module, _args: tuple[torch.Tensor, ...], out: torch.Tensor, block: str = block, scale: float = scale) -> None:
+                parts: torch.Tensor = out.detach().float().reshape(out.shape[0], out.shape[1], 3, -1).abs().amax(dim=(0, 1, 3))
+                q, k, v = (float(value) for value in parts.tolist())
+                previous: tuple[float, float, float] = amax.get(block, (0.0, 0.0, 0.0))
+                amax[block] = (max(previous[0], q * scale), max(previous[1], k), max(previous[2], v))
+
+            hooks.append(module.register_forward_hook(record))
+    try:
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+            for batch_crops, batch_masks in zip(crops, masks, strict=True):
+                model(batch_crops.cuda().float(), batch_masks.cuda().float())
+    finally:
+        for hook in hooks:
+            hook.remove()
+    return amax
+
+
+def _quantize_attention(model: onnx.ModelProto, attention_amax: dict[str, tuple[float, float, float]]) -> int:
+    """FP8 Q/DQ on ``q * scale``, ``k^T``, softmax output and ``v`` of each split ViT block attention, in place.
+
+    Myelin then fuses an FP8 MHA. The softmax output needs its own Q/DQ
+    (static range [0, 1]): with only q/k/v quantized the MHA fusion breaks
+    and the engine doubles in latency. Blocks are found by the ``attn.v``
+    head tensor ``_split_qkv_linears`` names; decoder attention keeps fp16.
+
+    Returns:
+        Number of attention blocks quantized.
+    """
+    from trtkit.onnx_qdq import fp8_input_qdq
+
+    graph = model.graph
+    producers: dict[str, onnx.NodeProto] = {output: node for node in graph.node for output in node.output}
+    consumers: dict[str, list[onnx.NodeProto]] = {}
+    for node in graph.node:
+        for name in node.input:
+            consumers.setdefault(name, []).append(node)
+    index_of: dict[str, int] = {node.output[0]: index for index, node in enumerate(graph.node)}
+    inserted: dict[int, list[onnx.NodeProto]] = {}
+    count: int = 0
+    for node in list(graph.node):
+        if node.op_type != "Softmax":
+            continue
+        scores: onnx.NodeProto | None = producers.get(node.input[0])
+        following: list[onnx.NodeProto] = consumers.get(node.output[0], [])
+        if scores is None or scores.op_type != "MatMul" or len(following) != 1 or following[0].op_type != "MatMul":
+            continue
+        context: onnx.NodeProto = following[0]
+        value_heads: onnx.NodeProto | None = producers.get(context.input[1])
+        if value_heads is None or not value_heads.input[0].endswith("attn.v.heads"):
+            continue
+        block: str = value_heads.input[0].removesuffix(".v.heads")
+        q_amax, k_amax, v_amax = attention_amax[block.removeprefix("inner.").removeprefix("model.")]
+        for target, slot, tag, amax in ((scores, 0, "q", q_amax), (scores, 1, "k", k_amax), (context, 0, "softmax", 1.0), (context, 1, "v", v_amax)):
+            initializers, nodes, target.input[slot] = fp8_input_qdq(target.input[slot], f"{block}.{tag}_fp8", amax, "float16")
+            graph.initializer.extend(initializers)
+            inserted.setdefault(index_of[target.output[0]], []).extend(nodes)
+        count += 1
+    ordered: list[onnx.NodeProto] = [new for index, node in enumerate(graph.node) for new in [*inserted.get(index, []), node]]
+    graph.ClearField("node")
+    graph.node.extend(ordered)
+    return count
+
+
 def _split_qkv_linears(model: onnx.ModelProto) -> int:
     """Rewrite each ViT ``attn.qkv`` linear into separate q/k/v linears, in place.
 
@@ -203,12 +280,20 @@ def _split_qkv_linears(model: onnx.ModelProto) -> int:
     return len(inserted)
 
 
-def quantize_mammanet_fp8(onnx_path: Path, output_path: Path, input_amax: dict[str, float], linears: tuple[str, ...] = FP8_LINEARS) -> None:
-    """Rewrite the fp16 MammaNet export with FP8 Q/DQ on the chosen ViT block linears.
+def quantize_mammanet_fp8(
+    onnx_path: Path,
+    output_path: Path,
+    input_amax: dict[str, float],
+    linears: tuple[str, ...] = FP8_LINEARS,
+    attention_amax: dict[str, tuple[float, float, float]] | None = None,
+) -> None:
+    """Rewrite the fp16 MammaNet export with FP8 Q/DQ on the chosen ViT block linears (and attention).
 
     Weights get per-output-channel FP8 scales; inputs get static per-tensor
     scales from ``input_amax`` (keyed like ``backbone.blocks.0.mlp.fc1``).
-    Every other weight MatMul keeps fp16. The graph opset is raised to 21,
+    Every other weight MatMul keeps fp16. With ``attention_amax`` (from
+    :func:`calibrate_attention_amax`; needs ``qkv`` in ``linears``) the ViT
+    block attentions run as FP8 MHA too. The graph opset is raised to 21,
     the first that types FP8 QuantizeLinear with fp16 scales.
     """
     from trtkit.onnx_qdq import Fp8Linear, KeepPrecision, QdqPlan, quantize_qdq, save_with_external_data
@@ -238,6 +323,10 @@ def quantize_mammanet_fp8(onnx_path: Path, output_path: Path, input_amax: dict[s
         modules[module] = Fp8Linear(input_amax[key]) if quantize else KeepPrecision()
     plan: QdqPlan = QdqPlan(modules, attention=(), weight_device="cuda", scale_dtype="float16")
     quantized: onnx.ModelProto = quantize_qdq(model, plan)
+    if attention_amax is not None:
+        if "q" not in linears:
+            raise ValueError("FP8 attention needs the qkv split: include 'qkv' in linears.")
+        _quantize_attention(quantized, attention_amax)
     for opset in quantized.opset_import:
         if opset.domain in ("", "ai.onnx"):
             opset.version = max(int(opset.version), 21)

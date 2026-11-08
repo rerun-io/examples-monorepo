@@ -20,6 +20,7 @@ from mamma.landmarks.tensorrt_backend import (
     ENGINE_BATCH,
     FP8_LINEARS,
     build_engine,
+    calibrate_attention_amax,
     calibrate_backbone_amax,
     export_mammanet_onnx,
     quantize_mammanet_fp8,
@@ -41,6 +42,8 @@ class BuildConfig:
     (``tools/record_mammanet_crops.py``). Required for ``fp8``; also used for real-crop parity."""
     fp8_linears: tuple[str, ...] = FP8_LINEARS
     """ViT block linear names (``qkv``/``proj``/``fc1``/``fc2``) the fp8 build quantizes."""
+    fp8_attention: bool = True
+    """Also run the ViT block attentions as FP8 MHA (q/k/v and softmax Q/DQ) in the fp8 build."""
 
 
 def engine_path_for(cache_dir: Path, precision: str = "fp16") -> Path:
@@ -72,9 +75,15 @@ def main(config: BuildConfig) -> None:
     if config.precision == "fp8":
         assert calib is not None
         amax: dict[str, float] = calibrate_backbone_amax(model, calib["crops"], calib["masks"])
+        attention_amax: dict[str, tuple[float, float, float]] | None = (
+            calibrate_attention_amax(model, calib["crops"], calib["masks"]) if config.fp8_attention else None
+        )
         fp8_onnx: Path = config.cache_dir / "mammanet_fp8.onnx"
-        print(f"inserting FP8 Q/DQ on ViT {', '.join(config.fp8_linears)} ({len(calib['crops'])} calibration batches)...")
-        quantize_mammanet_fp8(onnx_path, fp8_onnx, amax, config.fp8_linears)
+        print(
+            f"inserting FP8 Q/DQ on ViT {', '.join(config.fp8_linears)}{' + attention' if config.fp8_attention else ''} "
+            f"({len(calib['crops'])} calibration batches)..."
+        )
+        quantize_mammanet_fp8(onnx_path, fp8_onnx, amax, config.fp8_linears, attention_amax)
         onnx_path = fp8_onnx
 
     # Compute the eager-fp16 parity reference BEFORE the engine build and free
@@ -115,7 +124,7 @@ def main(config: BuildConfig) -> None:
         runner({"crops": x, "masks": masks})
     end.record()
     torch.cuda.synchronize()
-    print(f"TRT latency: {start.elapsed_time(end) / 50:.2f} ms per {ENGINE_BATCH}-crop call (GB10: fp16 17.7, fp8 15.9)")
+    print(f"TRT latency: {start.elapsed_time(end) / 50:.2f} ms per {ENGINE_BATCH}-crop call (GB10: fp16 17.7, fp8 linears 15.9, fp8 linears+attention 14.3)")
 
 
 if __name__ == "__main__":

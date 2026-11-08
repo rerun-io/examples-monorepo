@@ -5,7 +5,7 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 from onnx.reference import ReferenceEvaluator
 
-from mamma.landmarks.tensorrt_backend import _split_qkv_linears
+from mamma.landmarks.tensorrt_backend import _quantize_attention, _split_qkv_linears
 
 TOKENS: int = 5
 HEADS: int = 2
@@ -62,3 +62,41 @@ def test_split_qkv_linears_matches_the_fused_projection() -> None:
     for got, want in zip(actual, expected, strict=True):
         assert got.shape == want.shape == (1, HEADS, TOKENS, HEAD_DIM)
         np.testing.assert_array_equal(got, want)
+
+
+def exported_split_attention() -> onnx.ModelProto:
+    """``softmax(q * scale @ k^T) @ v`` over the head tensors ``_split_qkv_linears`` writes, plus a decoder-style softmax."""
+    heads: dict[str, str] = {part: f"inner.model.backbone.blocks.0.attn.{part}.heads" for part in "qkv"}
+    nodes: list[onnx.NodeProto] = [
+        *(helper.make_node("Transpose", [heads[part]], [part], perm=[0, 2, 1, 3]) for part in "qkv"),
+        helper.make_node("Mul", ["q", "scale"], ["q_scaled"]),
+        helper.make_node("Transpose", ["k"], ["k_t"], perm=[0, 1, 3, 2]),
+        helper.make_node("MatMul", ["q_scaled", "k_t"], ["scores"]),
+        helper.make_node("Softmax", ["scores"], ["probs"], axis=-1),
+        helper.make_node("MatMul", ["probs", "v"], ["context"]),
+        helper.make_node("Softmax", ["context"], ["decoder_probs"], axis=-1),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "split_attention",
+        [helper.make_tensor_value_info(name, TensorProto.FLOAT16, [1, TOKENS, HEADS, HEAD_DIM]) for name in heads.values()],
+        [helper.make_tensor_value_info("decoder_probs", TensorProto.FLOAT16, [1, HEADS, TOKENS, HEAD_DIM])],
+        [numpy_helper.from_array(np.array(HEAD_DIM**-0.5, dtype=np.float16), "scale")],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+
+
+def test_quantize_attention_adds_fp8_qdq_to_vit_attention_operands_only() -> None:
+    model: onnx.ModelProto = exported_split_attention()
+    assert _quantize_attention(model, {"backbone.blocks.0.attn": (2.0, 3.0, 4.0)}) == 1
+    quantized: list[str] = [node.input[0] for node in model.graph.node if node.op_type == "QuantizeLinear"]
+    assert quantized == ["q_scaled", "k_t", "probs", "v"]
+    onnx.checker.check_model(model)
+    rng: np.random.Generator = np.random.default_rng(2)
+    feeds: dict[str, np.ndarray] = {
+        tensor.name: rng.uniform(-1.0, 1.0, (1, TOKENS, HEADS, HEAD_DIM)).astype(np.float16) for tensor in model.graph.input
+    }
+    reference: list[np.ndarray] | dict = ReferenceEvaluator(exported_split_attention()).run(None, feeds)
+    fp8: list[np.ndarray] | dict = ReferenceEvaluator(model).run(None, feeds)
+    assert isinstance(reference, list) and isinstance(fp8, list)
+    np.testing.assert_allclose(fp8[0].astype(np.float32), reference[0].astype(np.float32), atol=0.05)
