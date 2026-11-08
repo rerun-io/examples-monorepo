@@ -13,11 +13,13 @@ From hexel-kernel (the 14k-line gsplat fork with the hexel rasterizers), the 2D 
 color-gradient (forward + backward, scalar / per-hexel / per-edge softness, optional peak and emission), and their
 tile binning are Mojo too (`hexels_mojo.raster2d`): they are every hexel-kernel call of Image-GS's 2D hexel fits
 (`hexels-fit-2d`, rich and flat). Patch 0005 wraps `gsplat_hexels.py`'s `gsplat` handles in `raster2d.overlay`,
-which serves those nine functions and passes every other one to hexel-kernel's CUDA (3D rasterizer, affine 2D
-variants). Image-GS's Gaussian projection and top-K rasterizer (the `imagegs-2d` baseline) are `hexels_mojo.gaussians2d`;
+which serves those nine functions and passes every other one to hexel-kernel's CUDA (affine 2D variants). Image-GS's Gaussian projection and top-K rasterizer (the `imagegs-2d` baseline) are `hexels_mojo.gaussians2d`;
 patches 0003/0004 import them in place of `gsplat`'s (`rasterize_gaussians_no_tiles`, off in Image-GS's configs, stays
-CUDA). The plan for the rest: `/mnt/nas/ssd-8tb/scratch/overnight-2026-11-08/ports/HEXEL_KERNEL_PLAN.md`
-(to be moved into this README with the next port).
+CUDA). hexel-kernel's 3D rasterizer forward (preprocess, tile keys, front-to-back render; every color and view model, no
+prefiltering) is `hexels_mojo.raster3d`; patch 0006 overlays it on `gsplat.cuda_hexels3d._C`. Its cached forward returns
+the CUDA binding's saved state bit for bit, so training runs the Mojo forward with hexel-kernel's CUDA backward.
+Still CUDA: the 3D backward, prefiltering, the contribution / overdraw / surface / owner forward variants, and the
+affine 2D kernels. The plan for the rest: `/mnt/nas/ssd-8tb/scratch/overnight-2026-11-08/ports/HEXEL_KERNEL_PLAN.md`.
 
 ```bash
 pixi run -e hexels-dev hexels-mojo-build   # Mojo shared library for the local GPU (cubins, no PTX JIT)
@@ -43,6 +45,7 @@ RTX 5090), written by `tests/freeze_hexels_references.py` (deleted with the exte
 | tile binning | bit-exact (intersection keys, ids, tile ranges) |
 | Image-GS projection (forward + backward), top-K forward | bit-exact (projection backward has no atomics: same PTX order) |
 | Image-GS top-K backward | ≤ 1e-5 relative (float atomics) |
+| 3D forward (radii, transforms, tile ranges, sorted ids, final transmittance, last index, image) | bit-exact, 3 configurations (`tests/test_raster3d.py`, `fixtures/raster3d_references.rrd`) |
 
 Upstream's SSIM scratch buffer is declared (42, 32) but indexed at column tx + 5, so its last row writes five
 floats past the array; the port indexes it at tx (same arithmetic, no overrun).
@@ -58,6 +61,7 @@ floats past the array; the port indexes it at tx (same arithmetic, no overrun).
 | 2D rasterizer, color-gradient: binning + forward + backward, 20K hexels, 2048×2048 | 0.148 + 1.076 + 10.946 ms | 0.124 + 1.170 + 10.452 ms |
 | 2D rasterizer, flat: binning + forward + backward, same scene | 0.132 + 1.040 + 6.293 ms | 0.129 + 1.004 + 5.675 ms |
 | Image-GS step: projection + binning + forward + backward, 10K Gaussians, 2048×2048 | 8.251 ms | 6.466 ms |
+| 3D forward, 300K hexels, 1600×1080 (linear color, view gradients) | 2.05 ms | 2.79 ms (render 2.3 vs 1.7 ms: to tune) |
 
 Real run, `hexels-fit-2d --variant rich` on anime-2_2k (5,100 steps, 20K → 10K hexels), two runs each: CUDA
 36.18 / 36.08 dB, 85.9 / 88.1 s; every ported kernel on Mojo (rasterizer, binning, SSIM, prune) 36.12 / 36.14 dB,

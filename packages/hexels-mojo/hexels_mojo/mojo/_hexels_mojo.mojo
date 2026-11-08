@@ -18,6 +18,7 @@ from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 
 import gaussians2d
+import raster3d
 from knn import BOX_SIZE, MORTON_THREADS, box_bounds_kernel, box_mean_dist_kernel, morton_kernel
 from launch import GPURuntime
 from prune import BLOCK, F32Ptr, removal_scores_kernel
@@ -257,6 +258,45 @@ def _gaussians2d_backward_py(runtime: PythonObject, s: PythonObject, t: PythonOb
     return Python.none()
 
 
+def _raster3d_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream, stage, width, height, ...). Stage 0 preprocess: (scale_modifier, softness_default, softness_stride,
+    has_softness, conservative, want_normals); tensors = (means, scales, rotations, opacities, softnesses, viewmatrix,
+    projmatrix, campos, radii, tile_radii, points_xy, depths, transmats, tiles_touched, opacities_out, softnesses_out,
+    view_dirs, normals). Stage 1 duplicate: tensors = (points_xy, depths, offsets, radii, tile_radii, keys i64, values i32).
+    Stage 2 render: (color_model, view_model, use_view_grads, softness_stride); tensors = (ranges, point_list, colors,
+    color_grads, color_quads, view_grads, specular_ks, specular_log_s, view_dirs, normals, transmats, opacities, softnesses,
+    background, out_color (3, H, W), final_transmittance (H, W), last_index i32 (H, W))."""
+    var stage = _int(s, 1)
+    var width = _int(s, 2)
+    var height = _int(s, 3)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var stream = rt[].torch_stream(_int(s, 0))
+    if stage == 0:
+        var n = _dim(t[0], 0)
+        stream.enqueue_function(
+            rt[].ctx.compile_function[raster3d.preprocess_kernel](), Int32(n), Int32(width), Int32(height), Float32(Float64(py=s[4])),
+            Float32(Float64(py=s[5])), Int32(_int(s, 6)), Int32(_int(s, 7)), Int32(_int(s, 8)), Int32(_int(s, 9)), _f(t[0]), _f(t[1]),
+            _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), _f(t[7]), _i32(t[8]), _i32(t[9]), _f(t[10]), _f(t[11]), _f(t[12]),
+            _i32(t[13]), _f(t[14]), _f(t[15]), _f(t[16]), _f(t[17]),
+            grid_dim=ceildiv(n, raster3d.POINT_THREADS), block_dim=raster3d.POINT_THREADS,
+        )  # fmt: skip
+    elif stage == 1:
+        var n = _dim(t[0], 0)
+        stream.enqueue_function(
+            rt[].ctx.compile_function[raster3d.duplicate_kernel](), Int32(n), Int32(width), Int32(height), _f(t[0]), _f(t[1]),
+            _i32(t[2]), _i32(t[3]), _i32(t[4]), _ptr[DType.int64](t[5]), _i32(t[6]),
+            grid_dim=ceildiv(n, raster3d.POINT_THREADS), block_dim=raster3d.POINT_THREADS,
+        )  # fmt: skip
+    else:
+        stream.enqueue_function(
+            rt[].ctx.compile_function[raster3d.render_kernel](), Int32(width), Int32(height), Int32(_int(s, 4)), Int32(_int(s, 5)),
+            Int32(_int(s, 6)), _i32(t[0]), _i32(t[1]), _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), _f(t[7]), _f(t[8]), _f(t[9]),
+            _f(t[10]), _f(t[11]), _f(t[12]), Int32(_int(s, 7)), _f(t[13]), _f(t[14]), _f(t[15]), _i32(t[16]),
+            grid_dim=(ceildiv(width, TILE), ceildiv(height, TILE)), block_dim=(TILE, TILE),
+        )  # fmt: skip
+    return Python.none()
+
+
 @export
 def PyInit__hexels_mojo() abi("C") -> PythonObject:
     try:
@@ -271,6 +311,7 @@ def PyInit__hexels_mojo() abi("C") -> PythonObject:
         m.def_function[_gaussians2d_project_py]("gaussians2d_project")
         m.def_function[_gaussians2d_forward_py]("gaussians2d_forward")
         m.def_function[_gaussians2d_backward_py]("gaussians2d_backward")
+        m.def_function[_raster3d_py]("raster3d")
         return m.finalize()
     except e:
         abort(t"failed to create _hexels_mojo: {e}")
