@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import torch
 import tyro
@@ -83,7 +84,7 @@ def main(config: BuildEncoderConfig) -> None:
 
     def eager(batch: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            return predictor.encode_image(batch)
+            return cast("tuple[list[torch.Tensor], list[torch.Tensor]]", predictor.encode_image(batch))
 
     def trt(batch: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -91,7 +92,7 @@ def main(config: BuildEncoderConfig) -> None:
 
     def eager_fp32(batch: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         with torch.inference_mode():
-            return predictor.encode_image(batch)
+            return cast("tuple[list[torch.Tensor], list[torch.Tensor]]", predictor.encode_image(batch))
 
     # Per level: (max abs, rel L2) of eager bf16 and TensorRT fp16 vs eager fp32.
     stats: dict[str, list[tuple[float, float]]] = {"eager bf16": [], "TensorRT fp16": []}
