@@ -2918,7 +2918,7 @@ description = "Import the installed slam-rs core output and check the catalog ou
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mamma]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.mamma.dependencies]
 # posekit's EgoHand, DINOv3 and Sapiens2 sources (see feature.posekit).
