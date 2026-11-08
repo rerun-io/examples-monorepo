@@ -183,6 +183,11 @@ class StreamingPipeline:
         # track/landmarks(t+1) — fit feeds nothing upstream. With a collector
         # (validation) the tail is awaited inline to keep results exact-ordered.
         fit_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fit")
+        # Own (non-blocking) stream for the fit worker: on the shared legacy
+        # default stream every main-thread sync (the tracker's per-tick stats
+        # D2H) also waited for the fit's queued Adam replays, serialising the
+        # two; on its own stream they overlap on the GPU.
+        fit_stream: torch.cuda.Stream | None = torch.cuda.Stream() if self.reader.device.startswith("cuda") else None
         cam_pool = ThreadPoolExecutor(max_workers=len(self.reader.video_readers), thread_name_prefix="decode")
         pending_fit: Future | None = None
         try:
@@ -214,7 +219,22 @@ class StreamingPipeline:
                             if pending_fit is not None:
                                 pending_fit.result()
 
-                        def fit_tail(idx: int, lms: list[CameraLandmarks]) -> TickFitOutput:
+                        def fit_tail(idx: int, lms: list[CameraLandmarks], ready: torch.cuda.Event | None) -> TickFitOutput:
+                            assert self.fitting is not None
+                            if fit_stream is None or ready is None:
+                                return fit_tail_on_stream(idx, lms)
+                            fit_stream.wait_event(ready)
+                            # The landmark tensors were allocated on the main thread's
+                            # stream; keep the caching allocator from recycling them
+                            # while the fit stream still reads them.
+                            for cam_lms in lms:
+                                for result in cam_lms.values():
+                                    for t in (result.joints2d, result.visibility, result.contact, result.floor_contact):
+                                        t.record_stream(fit_stream)
+                            with torch.cuda.stream(fit_stream):
+                                return fit_tail_on_stream(idx, lms)
+
+                        def fit_tail_on_stream(idx: int, lms: list[CameraLandmarks]) -> TickFitOutput:
                             assert self.fitting is not None
                             # Bare ranges, not StageProfiler (main-thread state): they let
                             # tools/profile_pipeline.py attribute the fit worker's GPU time.
@@ -226,7 +246,11 @@ class StreamingPipeline:
                                 self.logger.log_tick_metrics(idx, {}, out.metrics)
                             return out
 
-                        pending_fit = fit_worker.submit(fit_tail, frame_idx, landmarks)
+                        ready: torch.cuda.Event | None = None
+                        if fit_stream is not None:
+                            ready = torch.cuda.Event()
+                            ready.record()
+                        pending_fit = fit_worker.submit(fit_tail, frame_idx, landmarks, ready)
                         if self.collector is not None:
                             with profiler.stage("fit_wait"):
                                 fit_output: TickFitOutput | None = pending_fit.result()
