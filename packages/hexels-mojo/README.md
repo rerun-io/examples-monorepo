@@ -29,6 +29,12 @@ pixi run -e hexels-dev hexels-mojo-tests   # parity against the frozen CUDA outp
 The kernels are CUDA-only (as upstream) and run on PyTorch's current stream through lietorch-mojo's
 runtime (`lietorch_mojo.backends._runtime`), like vipe-mojo.
 
+Kernels index TileTensors (`mojo/tensors.mojo`): the launcher wraps each torch tensor as `(rows, width)` with a
+static width (`Rows[3]` for (P, 3), `Rows[6]` for (P, 2, 3)), as a runtime `Grid` where the channel count varies,
+or as `Planes` for images; inputs are immutable, outputs mutable, and an absent tensor arrives with zero rows. Each
+runtime-shaped tensor keeps its strides in registers, so the SSIM kernels (1024 threads, 64 registers each) index
+same-shaped images through one layout and write the map and its partials as one stacked tensor.
+
 ## Parity
 
 `tests/fixtures/hexels_references.rrd` holds inputs and outputs of the CUDA extensions (torch 2.12 cu130,
@@ -55,8 +61,8 @@ floats past the array; the port indexes it at tx (same arithmetic, no overrun).
 
 | Op | CUDA | Mojo |
 |----|------|------|
-| `fused_ssim` fwd + bwd, 1×3×1080×1920 | 0.577 ms | 0.605 ms |
-| `fused_ssim` fwd + bwd, 1×3×512×768 | 0.124 ms | 0.127 ms |
+| `fused_ssim` fwd + bwd, 1×3×1080×1920 | 0.577 ms | 0.64 ms (0.605 before TileTensor indexing: more live strides, see above) |
+| `fused_ssim` fwd + bwd, 1×3×512×768 | 0.124 ms | 0.145 ms |
 | `removal_scores`, 20K hexels, 1080p | 1.525 ms (+ an nvcc JIT build on first use) | 1.563 ms |
 | `distCUDA2`, 100K clustered points | 3.40 ms | 3.16 ms |
 | 2D rasterizer, color-gradient: binning + forward + backward, 20K hexels, 2048×2048 | 0.148 + 1.076 + 10.946 ms | 0.124 + 1.170 + 10.452 ms |
@@ -79,7 +85,8 @@ views of one Mojo-trained checkpoint, rendered by the CUDA env and by the Mojo e
 
 Render loops branch with nested `if`s, not `continue` / `break`: with `continue`, LLVM placed the warp's reconvergence
 point outside the per-hexel loop, the lanes of a warp drifted onto different hexels, and the 3D render ran at 2.3 ms
-instead of 1.1 ms for the same instructions.
+instead of 1.1 ms for the same instructions. That holds where the warp should walk shared data in step; where the
+skipped body is itself a long, per-thread loop (simple-knn's box search), `continue` is faster (nested `if`: +39 %).
 
 The 3D backward walks each tile's hexel list together (CUDA gives each pixel its own walk): every lane of a warp
 then holds the same hexel, so its gradients are summed across the warp and written by one atomic instead of up to 32.

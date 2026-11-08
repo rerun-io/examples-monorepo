@@ -74,20 +74,20 @@ def test_fused_ssim(entity: str) -> None:
 
     rec = load()[entity]
     img1, img2, dl_dmap = (rec.tensor(n).cuda() for n in ("img1", "img2", "dl_dmap"))
-    outputs = [torch.empty_like(img1) for _ in range(4)]
-    launch("fused_ssim", (C1, C2, True), (img1, img2, *outputs))
-    for name, ours in zip(("ssim_map", "dm_dmu1", "dm_dsigma1_sq", "dm_dsigma12"), outputs, strict=True):
+    maps = torch.empty(4, *img1.shape, device="cuda")  # the map and its three partials, stacked
+    launch("fused_ssim", (C1, C2, True), (img1, img2, maps))
+    for name, ours in zip(("ssim_map", "dm_dmu1", "dm_dsigma1_sq", "dm_dsigma12"), maps, strict=True):
         assert _rel_error(ours, rec.tensor(name)) < (SSIM_MAP_TOLERANCE if name == "ssim_map" else SSIM_DERIVATIVE_TOLERANCE), name
 
-    ref_derivatives = [rec.tensor(n).cuda() for n in ("dm_dmu1", "dm_dsigma1_sq", "dm_dsigma12")]
+    ref_partials = torch.stack([rec.tensor(n).cuda() for n in ("dm_dmu1", "dm_dsigma1_sq", "dm_dsigma12")])
     grad = torch.empty_like(img1)
-    launch("fused_ssim_backward", (), (img1, img2, dl_dmap, grad, *ref_derivatives))
+    launch("fused_ssim_backward", (), (img1, img2, dl_dmap, grad, ref_partials))
     assert torch.equal(grad.cpu(), rec.tensor("grad"))
 
     x = img1.clone().requires_grad_(True)
     loss = fused_ssim(x, img2)
     assert abs(loss.item() - rec.tensor("ssim_map").double().mean().item()) < 1e-6
-    launch("fused_ssim_backward", (), (img1, img2, dl_dmap, grad, *outputs[1:]))
+    launch("fused_ssim_backward", (), (img1, img2, dl_dmap, grad, maps[1:]))
     assert _rel_error(grad, rec.tensor("grad")) < SSIM_GRAD_TOLERANCE
 
 

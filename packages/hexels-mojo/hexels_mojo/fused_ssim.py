@@ -28,22 +28,23 @@ class FusedSSIMMap(torch.autograd.Function):
     def forward(ctx: Any, c1: float, c2: float, img1: Tensor, img2: Tensor, padding: str = "same", train: bool = True) -> Tensor:
         _check(img1, img2)
         img1, img2 = img1.contiguous(), img2.contiguous()
-        ssim_map: Tensor = torch.empty_like(img1)
-        derivatives: list[Tensor] = [torch.empty_like(img1) if train else ssim_map for _ in range(3)]
-        launch("fused_ssim", (c1, c2, train), (img1, img2, ssim_map, *derivatives))
-        ctx.save_for_backward(img1.detach(), img2, *derivatives)
+        # The map and, when training, its three partials (d/dmu1, d/dsigma1^2, d/dsigma12) in one stacked buffer.
+        maps: Tensor = torch.empty(4 if train else 1, *img1.shape, dtype=img1.dtype, device=img1.device)
+        launch("fused_ssim", (c1, c2, train), (img1, img2, maps))
+        ssim_map: Tensor = maps[0]
+        ctx.save_for_backward(img1.detach(), img2, maps[1:])
         ctx.padding = padding
         return ssim_map[:, :, 5:-5, 5:-5] if padding == "valid" else ssim_map
 
     @staticmethod
     def backward(ctx: Any, opt_grad: Tensor) -> tuple[Tensor | None, ...]:  # pyrefly: ignore[bad-override]
-        img1, img2, dm_dmu1, dm_dsigma1_sq, dm_dsigma12 = ctx.saved_tensors
+        img1, img2, partials = ctx.saved_tensors
         dl_dmap: Tensor = opt_grad
         if ctx.padding == "valid":
             dl_dmap = torch.zeros_like(img1)
             dl_dmap[:, :, 5:-5, 5:-5] = opt_grad
         grad: Tensor = torch.empty_like(img1)
-        launch("fused_ssim_backward", (), (img1, img2, dl_dmap.contiguous(), grad, dm_dmu1, dm_dsigma1_sq, dm_dsigma12))
+        launch("fused_ssim_backward", (), (img1, img2, dl_dmap.contiguous(), grad, partials))
         return None, None, grad, None, None, None
 
 

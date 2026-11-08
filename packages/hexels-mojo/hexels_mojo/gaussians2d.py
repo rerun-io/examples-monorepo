@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.autograd import Function
 
 from hexels_mojo._launch import launch
-from hexels_mojo.raster2d import TOP_K, bin_and_sort_gaussians
+from hexels_mojo.raster2d import TOP_K, bin_and_sort_gaussians, check_channels
 
 TILE: int = 16
 
@@ -73,7 +73,8 @@ def nd_rasterize_forward_topk_norm(
     """`gsplat.cuda.nd_rasterize_forward_topk_norm`: (out_img (H, W, C), pixel_topk i32 (H, W, 10))."""
     del tile_bounds, block
     width, height = img_size[0], img_size[1]
-    out_img: Tensor = torch.zeros(height, width, colors.shape[1], dtype=torch.float32, device=xys.device)
+    _, channels = check_channels(colors)
+    out_img: Tensor = torch.zeros(height, width, channels, dtype=torch.float32, device=xys.device)
     pixel_topk: Tensor = torch.zeros(height, width, TOP_K, dtype=torch.int32, device=xys.device)
     launch(
         "gaussians2d_forward",

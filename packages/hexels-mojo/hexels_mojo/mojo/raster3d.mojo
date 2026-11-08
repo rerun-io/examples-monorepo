@@ -9,17 +9,19 @@ its bounds and the render's float ops follow nvcc's fast-math PTX op for op (`fa
 CUDA build bit for bit. Not ported: prefiltering, surface / owner / contribution / overdraw outputs, the backward.
 """
 
+from layout import row_major
+from layout import stack_allocation as tile_allocation
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, block_idx, global_idx, thread_idx
-from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
-from std.math import ceil
-from std.memory import bitcast, stack_allocation
+from std.math import ceil, ceildiv, clamp
+from std.memory import bitcast
 from std.sys._assembly import inlined_assembly
 from std.sys.info import is_nvidia_gpu
 from std.utils.static_tuple import StaticTuple
 
 import fastmath as fm
-from raster2d import BLOCK_SIZE, F32Ptr, I32Ptr, I64Ptr, TILE
+from raster2d import BLOCK_SIZE, TILE
+from tensors import Grid, In, Out, Planes, Rows
 
 comptime POINT_THREADS = 256
 comptime PARAMS = 13  # floats per staged hexel in render_kernel
@@ -29,15 +31,15 @@ comptime HEX_RADIUS: Float32 = 1.15470053838
 comptime LOG254: Float32 = 5.537334267
 comptime FLT_MAX = Float32.MAX_FINITE
 comptime FLT_EPSILON: Float32 = 1.1920929e-07
-comptime Vec3 = SIMD[DType.float32, 4]
+comptime Vec3 = SIMD[.float32, 4]
 
 
-@always_inline
+@inline(.always)
 def _dot(a: Vec3, b: Vec3) -> Float32:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
-@always_inline
+@inline(.always)
 def _rect(px: Float32, py: Float32, rx: Int, ry: Int, tiles_x: Int, tiles_y: Int) -> Tuple[Int, Int, Int, Int]:
     """`get_rect`: (min x, min y, max x, max y) tiles of the square around (px, py)."""
     var x0 = min(tiles_x, max(0, Int(fm.div(px - Float32(rx), Float32(TILE)))))
@@ -47,7 +49,7 @@ def _rect(px: Float32, py: Float32, rx: Int, ry: Int, tiles_x: Int, tiles_y: Int
     return (x0, y0, x1, y1)
 
 
-@always_inline
+@inline(.always)
 def _hex_sdf(u: Float32, v: Float32) -> Tuple[Float32, Int]:
     var d0 = abs(v)
     var t1 = 0.8660254 * u + 0.5 * v
@@ -62,15 +64,15 @@ def _hex_sdf(u: Float32, v: Float32) -> Tuple[Float32, Int]:
     return (max_slant - 1.0, edge)
 
 
-@always_inline
+@inline(.always)
 def _hex_bounds(t0: Vec3, t1: Vec3, t2: Vec3, apothem_: Float32, w: Int, h: Int) -> Tuple[Bool, Float32, Float32, Int, Int]:
     """`compute_hex_bounds`: (ok, center x, center y, radius x, radius y) of the hexagon's screen bounds."""
     var apothem = apothem_ + 4e-5 * max(Float32(1.0), abs(apothem_))
     if apothem <= 0.0:
         return (False, 0.0, 0.0, 0, 0)
     var r = HEX_RADIUS * apothem
-    var vx = SIMD[DType.float32, 8](r, 0.5 * r, -0.5 * r, -r, -0.5 * r, 0.5 * r, 0.0, 0.0)
-    var vy = SIMD[DType.float32, 8](0.0, apothem, apothem, 0.0, -apothem, -apothem, 0.0, 0.0)
+    var vx = SIMD[.float32, 8](r, 0.5 * r, -0.5 * r, -r, -0.5 * r, 0.5 * r, 0.0, 0.0)
+    var vy = SIMD[.float32, 8](0.0, apothem, apothem, 0.0, -apothem, -apothem, 0.0, 0.0)
     var lo_x = FLT_MAX
     var lo_y = FLT_MAX
     var hi_x = -FLT_MAX
@@ -115,51 +117,50 @@ def preprocess_kernel(
     has_softness: Int32,
     conservative: Int32,
     want_normals: Int32,
-    means: F32Ptr,
-    scales: F32Ptr,
-    rotations: F32Ptr,
-    opacities: F32Ptr,
-    softnesses: F32Ptr,
-    viewmatrix: F32Ptr,
-    projmatrix: F32Ptr,
-    campos: F32Ptr,
-    radii: I32Ptr,
-    tile_radii: I32Ptr,
-    points_xy: F32Ptr,
-    depths: F32Ptr,
-    transmats: F32Ptr,
-    tiles_touched: I32Ptr,
-    opacities_out: F32Ptr,
-    softnesses_out: F32Ptr,
-    view_dirs: F32Ptr,
-    normals: F32Ptr,
+    means: In[.float32, Rows[3]],
+    scales: In[.float32, Rows[2]],
+    rotations: In[.float32, Rows[4]],
+    opacities: In[.float32, Rows[1]],
+    softnesses: In[.float32, Grid],
+    viewmatrix: In[.float32, Rows[16]],
+    projmatrix: In[.float32, Rows[16]],
+    campos: In[.float32, Rows[3]],
+    radii: Out[.int32, Rows[1]],
+    tile_radii: Out[.int32, Rows[2]],
+    points_xy: Out[.float32, Rows[2]],
+    depths: Out[.float32, Rows[1]],
+    transmats: Out[.float32, Rows[9]],
+    tiles_touched: Out[.int32, Rows[1]],
+    opacities_out: Out[.float32, Rows[1]],
+    softnesses_out: Out[.float32, Grid],
+    view_dirs: Out[.float32, Rows[3]],
+    normals: Out[.float32, Rows[3]],
 ):
     var idx = global_idx.x
     if idx >= Int(num_points):
         return
     var w = Int(width)
     var h = Int(height)
-    var tiles_x = (w + TILE - 1) // TILE
-    var tiles_y = (h + TILE - 1) // TILE
-    radii[unsafe_offset=idx] = 0
-    tile_radii[unsafe_offset=2 * idx] = 0
-    tile_radii[unsafe_offset=2 * idx + 1] = 0
-    tiles_touched[unsafe_offset=idx] = 0
-    var p = Vec3(means.unsafe_load(3 * idx), means.unsafe_load(3 * idx + 1), means.unsafe_load(3 * idx + 2), 0.0)
-    var d = p - Vec3(campos.unsafe_load(0), campos.unsafe_load(1), campos.unsafe_load(2), 0.0)
+    var tiles_x = ceildiv(w, TILE)
+    var tiles_y = ceildiv(h, TILE)
+    radii[idx, 0] = 0
+    tile_radii[idx, 0] = 0
+    tile_radii[idx, 1] = 0
+    tiles_touched[idx, 0] = 0
+    var p = Vec3(means[idx, 0][0], means[idx, 1][0], means[idx, 2][0], 0.0)
+    var d = p - Vec3(campos[0, 0][0], campos[0, 1][0], campos[0, 2][0], 0.0)
     var inv_norm = fm.rsqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2] + 1e-8)
     comptime for k in range(3):
-        view_dirs[unsafe_offset=3 * idx + k] = d[k] * inv_norm
-    var m = viewmatrix
-    var z_view = fm.add(m.unsafe_load(14), fm.fma(p[2], m.unsafe_load(10), fm.fma(p[0], m.unsafe_load(2), fm.mul(p[1], m.unsafe_load(6)))))
+        view_dirs[idx, k] = d[k] * inv_norm
+    var z_view = fm.add(viewmatrix[0, 14][0], fm.fma(p[2], viewmatrix[0, 10][0], fm.fma(p[0], viewmatrix[0, 2][0], fm.mul(p[1], viewmatrix[0, 6][0]))))
     if not z_view > NEAR:
         return
 
     # T = S2W^T world2ndc ndc2pix with glm's products, op for op as nvcc's PTX (multiplications by zero included).
-    var qa = rotations.unsafe_load(4 * idx)
-    var qb = rotations.unsafe_load(4 * idx + 1)
-    var qc = rotations.unsafe_load(4 * idx + 2)
-    var qd = rotations.unsafe_load(4 * idx + 3)
+    var qa = rotations[idx, 0][0]
+    var qb = rotations[idx, 1][0]
+    var qc = rotations[idx, 2][0]
+    var qd = rotations[idx, 3][0]
     var s = fm.rsqrt(fm.fma(qc, qc, fm.fma(qb, qb, fm.fma(qa, qa, fm.mul(qd, qd)))))
     var qw = fm.mul(qa, s)
     var qx = fm.mul(qb, s)
@@ -192,8 +193,8 @@ def preprocess_kernel(
     var t237 = fm.fma(qx, qx, yy)
     var r22 = fm.sub(1.0, fm.add(t237, t237))
     var r2 = Vec3(r20, r21, r22, 0.0)
-    var sx = fm.mul(scale_modifier, scales.unsafe_load(2 * idx))
-    var sy = fm.mul(scale_modifier, scales.unsafe_load(2 * idx + 1))
+    var sx = fm.mul(scale_modifier, scales[idx, 0][0])
+    var sy = fm.mul(scale_modifier, scales[idx, 1][0])
     var l0x = fm.fma(r20, 0.0, fm.fma(r10, 0.0, fm.mul(sx, r00)))
     var l0y = fm.fma(r21, 0.0, fm.fma(sx, r01, fm.mul(r11, 0.0)))
     var l0z = fm.fma(r22, 0.0, fm.fma(sx, r02, fm.mul(r12, 0.0)))
@@ -205,12 +206,12 @@ def preprocess_kernel(
     var half_h = fm.div(Float32(h), 2.0)
     var off_h = fm.div(fm.add(Float32(h), -1.0), 2.0)
     # M1[j] = S2W^T world2ndc, column j of world2ndc being (pm[j], pm[4 + j], pm[8 + j], pm[12 + j]).
-    var m1 = SIMD[DType.float32, 16](0.0)  # m1[4 j + row]
+    var m1 = SIMD[.float32, 16](0.0)  # m1[4 j + row]
     comptime for j in range(4):
-        var c0 = projmatrix.unsafe_load(j)
-        var c1 = projmatrix.unsafe_load(4 + j)
-        var c2 = projmatrix.unsafe_load(8 + j)
-        var c3 = projmatrix.unsafe_load(12 + j)
+        var c0 = projmatrix[0, j][0]
+        var c1 = projmatrix[0, 4 + j][0]
+        var c2 = projmatrix[0, 8 + j][0]
+        var c3 = projmatrix[0, 12 + j][0]
         m1[4 * j] = fm.fma(c3, 0.0, fm.fma(c2, l0z, fm.fma(c0, l0x, fm.mul(c1, l0y))))
         m1[4 * j + 1] = fm.fma(c3, 0.0, fm.fma(c2, l1z, fm.fma(c0, l1x, fm.mul(c1, l1y))))
         m1[4 * j + 2] = fm.add(c3, fm.fma(p[2], c2, fm.fma(p[0], c0, fm.mul(p[1], c1))))
@@ -228,11 +229,11 @@ def preprocess_kernel(
     var s2 = softness_default
     if has_softness != 0:
         if softness_stride == 3:
-            s0 = softnesses.unsafe_load(3 * idx)
-            s1 = softnesses.unsafe_load(3 * idx + 1)
-            s2 = softnesses.unsafe_load(3 * idx + 2)
+            s0 = softnesses[idx, 0][0]
+            s1 = softnesses[idx, 1][0]
+            s2 = softnesses[idx, 2][0]
         else:
-            s0 = softnesses.unsafe_load(idx)
+            s0 = softnesses[idx, 0][0]
             s1 = s0
             s2 = s0
     s0 = max(s0, 1e-4)
@@ -265,10 +266,10 @@ def preprocess_kernel(
     var corrected = conservative != 0
     if not old_visible and not corrected:
         return
-    radii[unsafe_offset=idx] = Int32(radius) if old_visible else 0
+    radii[idx, 0] = Int32(radius) if old_visible else 0
     var trx: Int
     var try_: Int
-    var opacity = opacities.unsafe_load(idx)
+    var opacity = opacities[idx, 0][0]
     if bounded and opacity <= 1.0:
         trx = min(radius, Int(ceil(max(ext_x, cutoff * FILTER_SIZE))) + 1)
         try_ = min(radius, Int(ceil(max(ext_y, cutoff * FILTER_SIZE))) + 1)
@@ -304,55 +305,61 @@ def preprocess_kernel(
         trx = (x1 - x0) * (TILE // 2)
         try_ = (y1 - y0) * (TILE // 2)
     if corrected and not old_visible:
-        radii[unsafe_offset=idx] = Int32(max(trx, try_))
-    tile_radii[unsafe_offset=2 * idx] = Int32(trx)
-    tile_radii[unsafe_offset=2 * idx + 1] = Int32(try_)
-    depths[unsafe_offset=idx] = z_view
-    points_xy[unsafe_offset=2 * idx] = pix_x
-    points_xy[unsafe_offset=2 * idx + 1] = pix_y
-    opacities_out[unsafe_offset=idx] = opacity
+        radii[idx, 0] = Int32(max(trx, try_))
+    tile_radii[idx, 0] = Int32(trx)
+    tile_radii[idx, 1] = Int32(try_)
+    depths[idx, 0] = z_view
+    points_xy[idx, 0] = pix_x
+    points_xy[idx, 1] = pix_y
+    opacities_out[idx, 0] = opacity
     if softness_stride == 3:
-        softnesses_out[unsafe_offset=3 * idx] = s0
-        softnesses_out[unsafe_offset=3 * idx + 1] = s1
-        softnesses_out[unsafe_offset=3 * idx + 2] = s2
+        softnesses_out[idx, 0] = s0
+        softnesses_out[idx, 1] = s1
+        softnesses_out[idx, 2] = s2
     else:
-        softnesses_out[unsafe_offset=idx] = s0
-    tiles_touched[unsafe_offset=idx] = Int32((y1 - y0) * (x1 - x0))
+        softnesses_out[idx, 0] = s0
+    tiles_touched[idx, 0] = Int32((y1 - y0) * (x1 - x0))
     comptime for k in range(3):
-        transmats[unsafe_offset=9 * idx + k] = t0[k]
-        transmats[unsafe_offset=9 * idx + 3 + k] = t1[k]
-        transmats[unsafe_offset=9 * idx + 6 + k] = t2[k]
+        transmats[idx, k] = t0[k]
+        transmats[idx, 3 + k] = t1[k]
+        transmats[idx, 6 + k] = t2[k]
     if want_normals != 0:
         comptime for k in range(3):
-            normals[unsafe_offset=3 * idx + k] = r2[k]
+            normals[idx, k] = r2[k]
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](POINT_THREADS))
 def duplicate_kernel(
-    num_points: Int32, width: Int32, height: Int32, points_xy: F32Ptr, depths: F32Ptr, offsets: I32Ptr, radii: I32Ptr, tile_radii: I32Ptr,
-    keys: I64Ptr, values: I32Ptr,
-):  # fmt: skip
+    width: Int32,
+    height: Int32,
+    points_xy: In[.float32, Rows[2]],
+    depths: In[.float32, Rows[1]],
+    offsets: In[.int32, Rows[1]],
+    radii: In[.int32, Rows[1]],
+    tile_radii: In[.int32, Rows[2]],
+    keys: Out[.int64, Rows[1]],
+    values: Out[.int32, Rows[1]],
+):
     var idx = global_idx.x
-    if idx >= Int(num_points):
+    if idx >= Int(points_xy.dim[0]()):
         return
-    var rx = Int(tile_radii.unsafe_load(2 * idx))
-    var ry = Int(tile_radii.unsafe_load(2 * idx + 1))
-    if radii.unsafe_load(idx) <= 0 or rx <= 0 or ry <= 0:
+    var rx = Int(tile_radii[idx, 0][0])
+    var ry = Int(tile_radii[idx, 1][0])
+    if radii[idx, 0][0] <= 0 or rx <= 0 or ry <= 0:
         return
-    var tiles_x = (Int(width) + TILE - 1) // TILE
-    var tiles_y = (Int(height) + TILE - 1) // TILE
-    var off = 0 if idx == 0 else Int(offsets.unsafe_load(idx - 1))
-    var x0, y0, x1, y1 = _rect(points_xy.unsafe_load(2 * idx), points_xy.unsafe_load(2 * idx + 1), rx, ry, tiles_x, tiles_y)
-    var depth_bits = Int64(bitcast[DType.uint32](depths.unsafe_load(idx)))
+    var tiles_x = ceildiv(Int(width), TILE)
+    var tiles_y = ceildiv(Int(height), TILE)
+    var off = 0 if idx == 0 else Int(offsets[idx - 1, 0][0])
+    var x0, y0, x1, y1 = _rect(points_xy[idx, 0][0], points_xy[idx, 1][0], rx, ry, tiles_x, tiles_y)
+    var depth_bits = Int64(bitcast[.uint32](depths[idx, 0][0]))
     for y in range(y0, y1):
         for x in range(x0, x1):
-            keys[unsafe_offset=off] = (Int64(y * tiles_x + x) << 32) | depth_bits
-            values[unsafe_offset=off] = Int32(idx)
+            keys[off, 0] = (Int64(y * tiles_x + x) << 32) | depth_bits
+            values[off, 0] = Int32(idx)
             off += 1
 
 
-@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BLOCK_SIZE))
-@always_inline
+@inline(.always)
 def _block_count(pred: Bool) -> Int:
     """CUDA's `__syncthreads_count(pred)`: a block barrier that returns how many threads passed a true `pred`."""
     comptime if is_nvidia_gpu():
@@ -366,71 +373,70 @@ def _block_count(pred: Bool) -> Int:
         return 0
 
 
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BLOCK_SIZE))
 def render_kernel[color_model: Int, use_view_grads: Bool, specular: Bool](
-    width: Int32,
-    height: Int32,
-    ranges: I32Ptr,
-    point_list: I32Ptr,
-    colors: F32Ptr,
-    color_grads: F32Ptr,
-    color_quads: F32Ptr,
-    view_grads: F32Ptr,
-    specular_ks: F32Ptr,
-    specular_log_s: F32Ptr,
-    view_dirs: F32Ptr,
-    normals: F32Ptr,
-    transmats: F32Ptr,
-    opacities: F32Ptr,
-    softnesses: F32Ptr,
+    ranges: In[.int32, Rows[2]],
+    point_list: In[.int32, Rows[1]],
+    colors: In[.float32, Rows[3]],
+    color_grads: In[.float32, Rows[6]],
+    color_quads: In[.float32, Rows[9]],
+    view_grads: In[.float32, Rows[9]],
+    specular_ks: In[.float32, Rows[3]],
+    specular_log_s: In[.float32, Rows[1]],
+    view_dirs: In[.float32, Rows[3]],
+    normals: In[.float32, Rows[3]],
+    transmats: In[.float32, Rows[9]],
+    opacities: In[.float32, Rows[1]],
+    softnesses: In[.float32, Grid],
     softness_stride: Int32,
-    background: F32Ptr,
-    out_color: F32Ptr,
-    final_transmittance: F32Ptr,
-    last_index: I32Ptr,
+    background: In[.float32, Rows[3]],
+    out_color: Out[.float32, Planes],
+    final_transmittance: Out[.float32, Rows[1]],
+    last_index: Out[.int32, Rows[1]],
 ):
-    var w = Int(width)
-    var h = Int(height)
-    var tiles_x = (w + TILE - 1) // TILE
+    """out_color is (3, H, W); final_transmittance and last_index one value per pixel."""
+    var h = Int(out_color.dim[1]())
+    var w = Int(out_color.dim[2]())
+    var tiles_x = ceildiv(w, TILE)
     var px = block_idx.x * TILE + thread_idx.x
     var py = block_idx.y * TILE + thread_idx.y
     var inside = px < w and py < h
     var pixf_x = Float32(px)
     var pixf_y = Float32(py)
     var tile = block_idx.y * tiles_x + block_idx.x
-    var start = Int(ranges.unsafe_load(2 * tile))
-    var end = Int(ranges.unsafe_load(2 * tile + 1))
+    var start = Int(ranges[tile, 0][0])
+    var end = Int(ranges[tile, 1][0])
     var tr = thread_idx.y * TILE + thread_idx.x
     # Per-hexel batch in shared memory: opacity, softness x3, T (9). Colors and gradients are read from global memory
     # per contributor (CUDA stages them too; here that costs occupancy: 14 KB of shared memory per block instead of 45 KB).
-    var ids = stack_allocation[BLOCK_SIZE, Int32, address_space=AddressSpace.SHARED]()
-    var params = stack_allocation[BLOCK_SIZE * PARAMS, Float32, address_space=AddressSpace.SHARED]()
+    var ids = tile_allocation[.int32, address_space=.SHARED](row_major[BLOCK_SIZE]())
+    var params = tile_allocation[.float32, address_space=.SHARED](row_major[BLOCK_SIZE, PARAMS]())
     var stride = Int(softness_stride)
     var done = not inside
     var trans: Float32 = 1.0
     var c_acc = Vec3(0.0)
     var n_visited = 0
-    var rounds = (end - start + BLOCK_SIZE - 1) // BLOCK_SIZE
+    var rounds = ceildiv(end - start, BLOCK_SIZE)
     for i in range(rounds):
         # Stop loading batches once every pixel of the tile is done.
         if _block_count(done) == BLOCK_SIZE:
             break
         var progress = start + i * BLOCK_SIZE + tr
         if progress < end:
-            var g = Int(point_list.unsafe_load(progress))
-            ids[unsafe_offset=tr] = Int32(g)
-            var q = params.unsafe_offset(PARAMS * tr)
-            q[unsafe_offset=0] = opacities.unsafe_load(g)
+            var g = Int(point_list[progress, 0][0])
+            ids[tr] = Int32(g)
+            params[tr, 0] = opacities[g, 0][0]
             if stride == 3:
-                q[unsafe_offset=1] = softnesses.unsafe_load(3 * g)
-                q[unsafe_offset=2] = softnesses.unsafe_load(3 * g + 1)
-                q[unsafe_offset=3] = softnesses.unsafe_load(3 * g + 2)
+                params[tr, 1] = softnesses[g, 0][0]
+                params[tr, 2] = softnesses[g, 1][0]
+                params[tr, 3] = softnesses[g, 2][0]
             else:
-                var sv = softnesses.unsafe_load(g)
-                q[unsafe_offset=1] = sv
-                q[unsafe_offset=2] = sv
-                q[unsafe_offset=3] = sv
+                var sv = softnesses[g, 0][0]
+                params[tr, 1] = sv
+                params[tr, 2] = sv
+                params[tr, 3] = sv
             comptime for k in range(9):
-                q[unsafe_offset=4 + k] = transmats.unsafe_load(9 * g + k)
+                params[tr, 4 + k] = transmats[g, k][0]
         barrier()
         if done:
             continue
@@ -439,21 +445,20 @@ def render_kernel[color_model: Int, use_view_grads: Bool, specular: Bool](
         # build does), so the warp reads one shared slot at a time instead of drifting apart.
         var j = 0
         while j < batch and not done:
-            var q = params.unsafe_offset(PARAMS * j)
             # Op for op as nvcc's PTX of render_hexels3d<false, false, false>.
-            var k0 = fm.sub(fm.mul(q.unsafe_load(10), pixf_x), q.unsafe_load(4))
-            var k1 = fm.sub(fm.mul(q.unsafe_load(11), pixf_x), q.unsafe_load(5))
-            var k2 = fm.sub(fm.mul(q.unsafe_load(12), pixf_x), q.unsafe_load(6))
-            var l0 = fm.sub(fm.mul(q.unsafe_load(10), pixf_y), q.unsafe_load(7))
-            var l1 = fm.sub(fm.mul(q.unsafe_load(11), pixf_y), q.unsafe_load(8))
-            var l2 = fm.sub(fm.mul(q.unsafe_load(12), pixf_y), q.unsafe_load(9))
+            var k0 = fm.sub(fm.mul(params[j, 10][0], pixf_x), params[j, 4][0])
+            var k1 = fm.sub(fm.mul(params[j, 11][0], pixf_x), params[j, 5][0])
+            var k2 = fm.sub(fm.mul(params[j, 12][0], pixf_x), params[j, 6][0])
+            var l0 = fm.sub(fm.mul(params[j, 10][0], pixf_y), params[j, 7][0])
+            var l1 = fm.sub(fm.mul(params[j, 11][0], pixf_y), params[j, 8][0])
+            var l2 = fm.sub(fm.mul(params[j, 12][0], pixf_y), params[j, 9][0])
             var p_x = fm.sub(fm.mul(k1, l2), fm.mul(l1, k2))
             var p_y = fm.sub(fm.mul(l0, k2), fm.mul(k0, l2))
             var p_z = fm.sub(fm.mul(k0, l1), fm.mul(l0, k1))
             if p_z != 0.0:
                 var su = fm.div(p_x, p_z)
                 var sv = fm.div(p_y, p_z)
-                var depth = fm.add(q.unsafe_load(12), fm.fma(q.unsafe_load(10), su, fm.mul(q.unsafe_load(11), sv)))
+                var depth = fm.add(params[j, 12][0], fm.fma(params[j, 10][0], su, fm.mul(params[j, 11][0], sv)))
                 if not depth < NEAR:
                     var d0 = abs(sv)
                     var ua = fm.mul(su, 0.8660254)
@@ -464,20 +469,20 @@ def render_kernel[color_model: Int, use_view_grads: Bool, specular: Bool](
                     var slant = d1 if slant_is_1 else d2
                     var not_edge0 = d0 <= slant
                     var dist = fm.add(slant if not_edge0 else d0, -1.0)
-                    var soft = (q.unsafe_load(2) if slant_is_1 else q.unsafe_load(3)) if not_edge0 else q.unsafe_load(1)
+                    var soft = (params[j, 2][0] if slant_is_1 else params[j, 3][0]) if not_edge0 else params[j, 1][0]
                     var boundary = fm.rcp(fm.add(fm.ex2(fm.mul(fm.mul(dist, soft), fm.LOG2E)), 1.0))
-                    var alpha = min(fm.mul(q.unsafe_load(0), boundary), Float32(0.99))
+                    var alpha = min(fm.mul(params[j, 0][0], boundary), Float32(0.99))
                     if not alpha < 1.0 / 255.0:
                         var test_t = fm.mul(trans, fm.sub(1.0, alpha))
                         if test_t < 0.0001:
                             done = True
                         else:
                             var wgt = fm.mul(trans, alpha)
-                            var g = Int(ids.unsafe_load(j))
-                            var c = Vec3(colors.unsafe_load(3 * g), colors.unsafe_load(3 * g + 1), colors.unsafe_load(3 * g + 2), 0.0)
+                            var g = Int(ids[j][0])
+                            var c = Vec3(colors[g, 0][0], colors[g, 1][0], colors[g, 2][0], 0.0)
                             comptime if color_model >= 1:
                                 comptime for ch in range(3):
-                                    c[ch] = fm.add(c[ch], fm.fma(su, color_grads.unsafe_load(6 * g + ch), fm.mul(sv, color_grads.unsafe_load(6 * g + 3 + ch))))
+                                    c[ch] = fm.add(c[ch], fm.fma(su, color_grads[g, ch][0], fm.mul(sv, color_grads[g, 3 + ch][0])))
                             comptime if color_model >= 2:
                                 var qu = su
                                 var qv = sv
@@ -491,26 +496,24 @@ def render_kernel[color_model: Int, use_view_grads: Bool, specular: Bool](
                                 var v2 = fm.mul(qv, qv)
                                 comptime for ch in range(3):
                                     var quad = fm.fma(
-                                        v2, color_quads.unsafe_load(9 * g + 6 + ch),
-                                        fm.fma(uv, color_quads.unsafe_load(9 * g + 3 + ch), fm.mul(u2, color_quads.unsafe_load(9 * g + ch))),
+                                        v2, color_quads[g, 6 + ch][0],
+                                        fm.fma(uv, color_quads[g, 3 + ch][0], fm.mul(u2, color_quads[g, ch][0])),
                                     )  # fmt: skip
                                     c[ch] = fm.add(quad, c[ch])
-                            var vd = Vec3(view_dirs.unsafe_load(3 * g), view_dirs.unsafe_load(3 * g + 1), view_dirs.unsafe_load(3 * g + 2), 0.0)
+                            var vd = Vec3(view_dirs[g, 0][0], view_dirs[g, 1][0], view_dirs[g, 2][0], 0.0)
                             comptime if use_view_grads:
                                 comptime for ch in range(3):
-                                    var vg = view_grads.unsafe_offset(9 * g + 3 * ch)
-                                    var term = fm.fma(vd[2], vg.unsafe_load(2), fm.fma(vd[0], vg.unsafe_load(0), fm.mul(vd[1], vg.unsafe_load(1))))
+                                    var term = fm.fma(vd[2], view_grads[g, 3 * ch + 2][0], fm.fma(vd[0], view_grads[g, 3 * ch + 0][0], fm.mul(vd[1], view_grads[g, 3 * ch + 1][0])))
                                     c[ch] = fm.add(term, c[ch])
                             comptime if specular:
-                                var n = normals.unsafe_offset(3 * g)
-                                var ndv = fm.fma(vd[2], n.unsafe_load(2), fm.fma(vd[0], n.unsafe_load(0), fm.mul(vd[1], n.unsafe_load(1))))
+                                var ndv = fm.fma(vd[2], normals[g, 2][0], fm.fma(vd[0], normals[g, 0][0], fm.mul(vd[1], normals[g, 1][0])))
                                 var cos_nv = max(-ndv, Float32(0.0))
                                 var spec: Float32 = 0.0
                                 if cos_nv > 0.0:
-                                    var s_exp = fm.ex2(fm.mul(min(max(specular_log_s.unsafe_load(g), Float32(0.0)), Float32(5.0)), fm.LOG2E))
+                                    var s_exp = fm.ex2(fm.mul(clamp(specular_log_s[g, 0][0], 0.0, 5.0), fm.LOG2E))
                                     spec = fm.ex2(fm.mul(s_exp, fm.lg2(cos_nv)))
                                 comptime for ch in range(3):
-                                    c[ch] = fm.fma(specular_ks.unsafe_load(3 * g + ch), spec, c[ch])
+                                    c[ch] = fm.fma(specular_ks[g, ch][0], spec, c[ch])
                             comptime for ch in range(3):
                                 c_acc[ch] = fm.fma(wgt, c[ch], c_acc[ch])
                             trans = test_t
@@ -520,6 +523,6 @@ def render_kernel[color_model: Int, use_view_grads: Bool, specular: Bool](
     if inside:
         var pix = py * w + px
         comptime for ch in range(3):
-            out_color[unsafe_offset=ch * h * w + pix] = fm.fma(trans, background.unsafe_load(ch), c_acc[ch])
-        final_transmittance[unsafe_offset=pix] = trans
-        last_index[unsafe_offset=pix] = Int32(n_visited)
+            out_color[ch, py, px] = fm.fma(trans, background[0, ch][0], c_acc[ch])
+        final_transmittance[pix, 0] = trans
+        last_index[pix, 0] = Int32(n_visited)

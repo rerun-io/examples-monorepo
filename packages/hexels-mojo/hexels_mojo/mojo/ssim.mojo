@@ -10,22 +10,23 @@ the array; here the scratch is indexed at tx, which is the same arithmetic witho
 and sums follow upstream's order with nvcc's default contraction of a * b + c into one fma.
 """
 
+from layout import TileTensor, row_major
+from layout import stack_allocation as tile_allocation
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, block_idx, thread_idx
-from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
-from std.math import fma
-from std.memory import stack_allocation
+from std.math import ceildiv, fma
 from std.sys import llvm_intrinsic
 from std.utils.static_tuple import StaticTuple
 
-comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
-comptime SharedPtr = MutPointer[Float32, MutUntrackedOrigin, address_space=AddressSpace.SHARED]
+from tensors import In, Out, Planes, StackedPlanes
+
 comptime BX = 32
 comptime BY = 32
 comptime HALO = 5
 comptime SX = BX + 2 * HALO
 comptime SY = BY + 2 * HALO
-comptime G = SIMD[DType.float32, 16](
+comptime HALO_ROUNDS = ceildiv(SY * SX, BX * BY)
+comptime G = SIMD[.float32, 16](
     0.001028380123898387,
     0.0075987582094967365,
     0.036000773310661316,
@@ -45,98 +46,120 @@ comptime G = SIMD[DType.float32, 16](
 )
 
 
-@always_inline
+@inline(.always)
 def _div(a: Float32, b: Float32) -> Float32:
     """IEEE round-to-nearest a / b (PTX div.rn.f32), as nvcc emits without --use_fast_math."""
     return llvm_intrinsic["llvm.nvvm.div.rn.f", Float32](a, b)
 
 
-@always_inline
-def _pix(img: F32Ptr, plane: Int, y: Int, x: Int, height: Int, width: Int) -> Float32:
-    if x >= width or y >= height or x < 0 or y < 0:
+@inline(.always)
+def _pix(img: TileTensor[.float32, ...], plane: Int, y: Int, x: Int, h: Int, w: Int) -> Float32:
+    """img[plane, y, x], 0 outside the h x w image (one h, w for every image: fewer live registers than each
+    tensor's own dims)."""
+    comptime assert img.flat_rank == 3
+    if x >= w or y >= h or x < 0 or y < 0:
         return 0.0
-    return img.unsafe_load(plane + y * width + x)
+    return img[plane, y, x][0]
 
 
-@always_inline
-def _load_tile(tile: SharedPtr, img: F32Ptr, plane: Int, height: Int, width: Int):
-    """tile[ly, lx] = img[plane][y0 + ly - 5, x0 + lx - 5] (0 outside) for the (42, 42) halo tile."""
+@inline(.always)
+def _load_tile(tile: TileTensor[mut=True, .float32, ...], img: TileTensor[.float32, ...], plane: Int, h: Int, w: Int):
+    """tile[ly, lx] = img[plane, y0 + ly - 5, x0 + lx - 5] (0 outside) for the (42, 42) halo tile."""
+    comptime assert tile.flat_rank == 2
     var start_y = block_idx.y * BY
     var start_x = block_idx.x * BX
     var rank = thread_idx.y * BX + thread_idx.x
-    comptime for b in range((SY * SX + BX * BY - 1) // (BX * BY)):
+    comptime for b in range(HALO_ROUNDS):
         var tid = b * BX * BY + rank
         if tid < SY * SX:
-            var ly = tid // SX
-            var lx = tid % SX
-            tile[unsafe_offset=tid] = _pix(img, plane, start_y + ly - HALO, start_x + lx - HALO, height, width)
+            var ly, lx = divmod(tid, SX)
+            tile[ly, lx] = _pix(img, plane, start_y + ly - HALO, start_x + lx - HALO, h, w)
 
 
-@always_inline
-def _multiply_tile(tile: SharedPtr, other: SharedPtr):
+@inline(.always)
+def _load_stacked_tile(tile: TileTensor[mut=True, .float32, ...], stack: TileTensor[.float32, ...], k: Int, plane: Int, h: Int, w: Int):
+    """`_load_tile` from plane `plane` of image `k` of a (K, planes, h, w) stack."""
+    comptime assert tile.flat_rank == 2 and stack.flat_rank == 4
+    var start_y = block_idx.y * BY
+    var start_x = block_idx.x * BX
     var rank = thread_idx.y * BX + thread_idx.x
-    comptime for b in range((SY * SX + BX * BY - 1) // (BX * BY)):
+    comptime for b in range(HALO_ROUNDS):
         var tid = b * BX * BY + rank
         if tid < SY * SX:
-            tile[unsafe_offset=tid] = tile[unsafe_offset=tid] * other[unsafe_offset=tid]
+            var ly, lx = divmod(tid, SX)
+            var y = start_y + ly - HALO
+            var x = start_x + lx - HALO
+            tile[ly, lx] = stack[k, plane, y, x][0] if 0 <= y < h and 0 <= x < w else Float32(0.0)
 
 
-@always_inline
-def _row_conv[square: Bool](tile: SharedPtr, row: Int, tx: Int) -> Float32:
+@inline(.always)
+def _multiply_tile(tile: TileTensor[mut=True, .float32, ...], other: TileTensor[.float32, ...]):
+    comptime assert tile.flat_rank == 2 and other.flat_rank == 2
+    var rank = thread_idx.y * BX + thread_idx.x
+    comptime for b in range(HALO_ROUNDS):
+        var tid = b * BX * BY + rank
+        if tid < SY * SX:
+            var ly, lx = divmod(tid, SX)
+            tile[ly, lx] = tile[ly, lx][0] * other[ly, lx][0]
+
+
+@inline(.always)
+def _row_conv[square: Bool](tile: TileTensor[.float32, ...], row: Int, tx: Int) -> Float32:
+    comptime assert tile.flat_rank == 2
     var val: Float32 = 0.0
     comptime for k in range(11):
-        var p = tile[unsafe_offset=row * SX + tx + k]
+        var p = tile[row, tx + k][0]
         comptime if square:
             p = p * p
         val = fma(G[k], p, val)
     return val
 
 
-@always_inline
-def _conv[square: Bool](tile: SharedPtr, scratch: SharedPtr) -> Float32:
+@inline(.always)
+def _conv[square: Bool](tile: TileTensor[.float32, ...], scratch: TileTensor[mut=True, .float32, ...]) -> Float32:
     """The Gaussian-windowed mean of the tile (of its squares) at this thread's pixel; leaves all threads synced."""
+    comptime assert scratch.flat_rank == 2
     var tx = thread_idx.x
     var ty = thread_idx.y
-    scratch[unsafe_offset=ty * BX + tx] = _row_conv[square](tile, ty, tx)
+    scratch[ty, tx] = _row_conv[square](tile, ty, tx)
     if ty + BY < SY:
-        scratch[unsafe_offset=(ty + BY) * BX + tx] = _row_conv[square](tile, ty + BY, tx)
+        scratch[ty + BY, tx] = _row_conv[square](tile, ty + BY, tx)
     barrier()
     var val: Float32 = 0.0
     comptime for k in range(11):
-        val = fma(G[k], scratch[unsafe_offset=(ty + k) * BX + tx], val)
+        val = fma(G[k], scratch[ty + k, tx][0], val)
     barrier()
     return val
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BX * BY))
 def fused_ssim_kernel[train: Bool](
-    height: Int32,
-    width: Int32,
     channels: Int32,
     c1: Float32,
     c2: Float32,
-    img1: F32Ptr,
-    img2: F32Ptr,
-    ssim_map: F32Ptr,
-    dm_dmu1: F32Ptr,
-    dm_dsigma1_sq: F32Ptr,
-    dm_dsigma12: F32Ptr,
+    img1: In[.float32, Planes],
+    img2: In[.float32, Planes],
+    maps: Out[.float32, StackedPlanes],
 ):
-    var h = Int(height)
-    var w = Int(width)
+    """Images are (batch * channels, H, W) planes; maps stacks the SSIM map and, when training, its three partials
+    d/dmu1, d/dsigma1^2, d/dsigma12 (one tensor: one set of strides, not four, in registers)."""
+    var h = Int(img1.dim[1]())
+    var w = Int(img1.dim[2]())
     var ch = Int(channels)
     var pix_y = block_idx.y * BY + thread_idx.y
     var pix_x = block_idx.x * BX + thread_idx.x
-    var buf1 = stack_allocation[SY * SX, Float32, address_space=AddressSpace.SHARED]()
-    var buf2 = stack_allocation[SY * SX, Float32, address_space=AddressSpace.SHARED]()
-    var buf3 = stack_allocation[SY * BX, Float32, address_space=AddressSpace.SHARED]()
+    # Every image has img1's shape: index them all through img1's layout (one set of strides in registers).
+    var image2 = TileTensor(img2.unsafe_ptr(), img1.layout)
+    var buf1 = tile_allocation[.float32, address_space=.SHARED](row_major[SY, SX]())
+    var buf2 = tile_allocation[.float32, address_space=.SHARED](row_major[SY, SX]())
+    var buf3 = tile_allocation[.float32, address_space=.SHARED](row_major[SY, BX]())
     for i in range(ch):
-        var plane = (block_idx.z * ch + i) * h * w
+        var plane = block_idx.z * ch + i
         _load_tile(buf1, img1, plane, h, w)
         barrier()
         var mu1 = _conv[False](buf1, buf3)
         var sigma1_sq = fma(-mu1, mu1, _conv[True](buf1, buf3))
-        _load_tile(buf2, img2, plane, h, w)
+        _load_tile(buf2, image2, plane, h, w)
         barrier()
         var mu2 = _conv[False](buf2, buf3)
         var sigma2_sq = fma(-mu2, mu2, _conv[True](buf2, buf3))
@@ -150,63 +173,63 @@ def fused_ssim_kernel[train: Bool](
         var aa = fma(mu1, mu1, mu2 * mu2) + c1
         var bb = sigma1_sq + sigma2_sq + c2
         if pix_x < w and pix_y < h:
-            var at = plane + pix_y * w + pix_x
-            ssim_map[unsafe_offset=at] = _div(cc * dd, aa * bb)
+            maps[0, plane, pix_y, pix_x] = _div(cc * dd, aa * bb)
             comptime if train:
-                dm_dmu1[unsafe_offset=at] = (
+                maps[1, plane, pix_y, pix_x] = (
                     _div(mu2 * 2.0 * dd, aa * bb)
                     - _div(mu2 * 2.0 * cc, aa * bb)
                     - _div(mu1 * 2.0 * cc * dd, aa * aa * bb)
                     + _div(mu1 * 2.0 * cc * dd, aa * bb * bb)
                 )
-                dm_dsigma1_sq[unsafe_offset=at] = _div(-cc * dd, aa * bb * bb)
-                dm_dsigma12[unsafe_offset=at] = _div(2.0 * cc, aa * bb)
+                maps[2, plane, pix_y, pix_x] = _div(-cc * dd, aa * bb * bb)
+                maps[3, plane, pix_y, pix_x] = _div(2.0 * cc, aa * bb)
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BX * BY))
 def fused_ssim_backward_kernel(
-    height: Int32,
-    width: Int32,
     channels: Int32,
-    img1: F32Ptr,
-    img2: F32Ptr,
-    dl_dmap: F32Ptr,
-    dl_dimg1: F32Ptr,
-    dm_dmu1: F32Ptr,
-    dm_dsigma1_sq: F32Ptr,
-    dm_dsigma12: F32Ptr,
+    img1: In[.float32, Planes],
+    img2: In[.float32, Planes],
+    dl_dmap: In[.float32, Planes],
+    dl_dimg1: Out[.float32, Planes],
+    partials: In[.float32, StackedPlanes],
 ):
-    var h = Int(height)
-    var w = Int(width)
+    """partials: the forward's d/dmu1, d/dsigma1^2, d/dsigma12, stacked."""
+    var h = Int(img1.dim[1]())
+    var w = Int(img1.dim[2]())
     var ch = Int(channels)
     var pix_y = block_idx.y * BY + thread_idx.y
     var pix_x = block_idx.x * BX + thread_idx.x
-    var buf1 = stack_allocation[SY * SX, Float32, address_space=AddressSpace.SHARED]()
-    var buf2 = stack_allocation[SY * SX, Float32, address_space=AddressSpace.SHARED]()
-    var buf3 = stack_allocation[SY * BX, Float32, address_space=AddressSpace.SHARED]()
+    # Every image has img1's shape: index them all through img1's layout (one set of strides in registers).
+    var image2 = TileTensor(img2.unsafe_ptr(), img1.layout)
+    var dmap = TileTensor(dl_dmap.unsafe_ptr(), img1.layout)
+    var grad = TileTensor(dl_dimg1.unsafe_ptr(), img1.layout)
+    var buf1 = tile_allocation[.float32, address_space=.SHARED](row_major[SY, SX]())
+    var buf2 = tile_allocation[.float32, address_space=.SHARED](row_major[SY, SX]())
+    var buf3 = tile_allocation[.float32, address_space=.SHARED](row_major[SY, BX]())
     for i in range(ch):
-        var plane = (block_idx.z * ch + i) * h * w
+        var plane = block_idx.z * ch + i
         var pix1 = _pix(img1, plane, pix_y, pix_x, h, w)
-        var pix2 = _pix(img2, plane, pix_y, pix_x, h, w)
-        _load_tile(buf1, dl_dmap, plane, h, w)
+        var pix2 = _pix(image2, plane, pix_y, pix_x, h, w)
+        _load_tile(buf1, dmap, plane, h, w)
 
-        _load_tile(buf2, dm_dmu1, plane, h, w)
+        _load_stacked_tile(buf2, partials, 0, plane, h, w)
         barrier()
         _multiply_tile(buf2, buf1)
         barrier()
         var dl_dpix = _conv[False](buf2, buf3)
 
-        _load_tile(buf2, dm_dsigma1_sq, plane, h, w)
+        _load_stacked_tile(buf2, partials, 1, plane, h, w)
         barrier()
         _multiply_tile(buf2, buf1)
         barrier()
         dl_dpix = fma(pix1 * 2.0, _conv[False](buf2, buf3), dl_dpix)
 
-        _load_tile(buf2, dm_dsigma12, plane, h, w)
+        _load_stacked_tile(buf2, partials, 2, plane, h, w)
         barrier()
         _multiply_tile(buf2, buf1)
         barrier()
         dl_dpix = fma(pix2, _conv[False](buf2, buf3), dl_dpix)
 
         if pix_x < w and pix_y < h:
-            dl_dimg1[unsafe_offset=plane + pix_y * w + pix_x] = dl_dpix
+            grad[plane, pix_y, pix_x] = dl_dpix
