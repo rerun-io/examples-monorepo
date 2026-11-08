@@ -12,8 +12,10 @@ setup, binary streaming, and nerfstudio output zipping.
 import contextlib
 import shutil
 import subprocess
+import threading
 from collections.abc import Generator
 from pathlib import Path
+from typing import Literal
 
 import beartype
 import gradio as gr
@@ -23,8 +25,9 @@ import torch.multiprocessing as mp
 from gradio_rerun import Rerun
 
 from mast3r_slam.api.inference import SlamPipelineHandle, run_slam_pipeline
+from mast3r_slam.dataloader import load_dataset
 from mast3r_slam.frame import Mode, SharedStates
-from mast3r_slam.mast3r_utils import load_mast3r
+from mast3r_slam.mast3r_utils import enable_trt_engines, load_mast3r, prepare_trt_engines
 
 # Global reference to the active states so the stop button can signal termination.
 # The SlamBackend context manager handles all cleanup.
@@ -38,6 +41,45 @@ with contextlib.suppress(RuntimeError):
 DEVICE: str = "cuda:0"
 model = load_mast3r(device=DEVICE)
 model.share_memory()
+enable_trt_engines(model)
+
+EXAMPLE_VIDEOS: list[str] = ["data/livingroom-tour.mp4", "data/normal-apt-tour.mp4"]
+IMG_SIZE: Literal[224, 512] = 512
+"""What :func:`run_slam_pipeline` defaults to; the long side goes to 512, so each aspect ratio is its own engine size."""
+
+engine_status: str = "Preparing TensorRT engines for the example videos..."
+"""Shown above the Run button while :func:`_prepare_example_engines` runs."""
+engines_ready: threading.Event = threading.Event()
+
+
+def _prepare_example_engines() -> None:
+    """Build (first time on a machine) or load the TensorRT engines for the example videos' frame sizes.
+
+    Runs on a thread at app start, so the first Run on an example does not wait for them. A Run that starts earlier
+    waits for the engine lock instead.
+    """
+    global engine_status
+    try:
+        sizes: list[tuple[int, int]] = sorted({load_dataset(path, img_size=IMG_SIZE).get_img_shape()[0] for path in EXAMPLE_VIDEOS})
+        for n, (h, w) in enumerate(sizes, start=1):
+            engine_status = f"Preparing TensorRT engines for {w}x{h} frames ({n}/{len(sizes)}); a first build on this machine takes a few minutes..."
+            prepare_trt_engines(model, (h, w))
+        engine_status = f"TensorRT engines ready for {', '.join(f'{w}x{h}' for h, w in sizes)} frames."
+    except beartype.roar.BeartypeException:
+        raise
+    except Exception as exc:
+        engine_status = f"Preparing TensorRT engines failed ({exc}); runs build them on first use."
+        raise
+    finally:
+        engines_ready.set()
+
+
+threading.Thread(target=_prepare_example_engines, name="prepare-trt-engines", daemon=True).start()
+
+
+def _engine_status_tick() -> tuple[str, gr.Timer]:
+    """The engine status line; stops its timer once the engines are ready."""
+    return engine_status, gr.Timer(active=not engines_ready.is_set())
 
 
 def stop_streaming():
@@ -115,7 +157,7 @@ def streaming_mast3r_slam_fn(
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_grad_enabled(False)
 
-    progress(0.05, desc="Loading pipeline")
+    progress(0.05, desc="Loading pipeline" if engines_ready.is_set() else "Waiting for the TensorRT engines")
     handle: SlamPipelineHandle = SlamPipelineHandle()
 
     # Nerfstudio export happens inside the generator (before
@@ -127,6 +169,7 @@ def streaming_mast3r_slam_fn(
         dataset_path=str(video_path),
         config_path="config/base.yaml",
         device=DEVICE,
+        img_size=IMG_SIZE,
         subsample=subsample,
         ns_save_path=ns_output_dir,
         handle=handle,
@@ -191,6 +234,8 @@ with gr.Blocks() as mast3r_slam_block:
                         label="Input Video",
                         file_types=[".mp4", ".mov", ".MOV"],
                     )
+                    engine_status_md = gr.Markdown(engine_status)
+                    engine_timer = gr.Timer(1.0)
                     run_slam_btn = gr.Button("Run MASt3R-SLAM", variant="primary")
 
                     with gr.Accordion("Config", open=False):
@@ -220,10 +265,7 @@ with gr.Blocks() as mast3r_slam_block:
                     )
 
                 examples = gr.Examples(
-                    examples=[
-                        ["data/livingroom-tour.mp4"],
-                        ["data/normal-apt-tour.mp4"],
-                    ],
+                    examples=[[path] for path in EXAMPLE_VIDEOS],
                     inputs=[video_file],
                     cache_examples=False,
                 )
@@ -246,6 +288,8 @@ with gr.Blocks() as mast3r_slam_block:
             outputs=[tabs],
             api_visibility="private",
         )
+
+    engine_timer.tick(fn=_engine_status_tick, inputs=None, outputs=[engine_status_md, engine_timer], api_visibility="private")
 
     run_event = run_slam_btn.click(
         fn=_switch_to_outputs,
