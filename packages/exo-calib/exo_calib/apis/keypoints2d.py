@@ -11,6 +11,7 @@ into the ``exocalib_kp2d`` layer's ``…_raw`` entities, which the refine stage
 queries back: the catalog is the stage store, not a side channel.
 """
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -24,6 +25,7 @@ from posekit.models.base import PersonDetector
 from posekit.models.rtmpose import RtmPose2d
 from posekit.predictions import BoxDetections
 from simplecv.rerun_custom_types import Points2DWithConfidence
+from simplecv.video_io import bind_cuda_device
 from torch import Tensor
 
 from exo_calib.boxes import boxes_from_projected_keypoints, boxes_needing_detection, crop_rectangles, extrapolate_keypoints
@@ -131,12 +133,21 @@ def track_multiview_keypoints(streams: ExoVideoStreams, detector: PersonDetector
     last_anchor_ns: int | None = None
     reanchor_interval_ns: int = int(DETECTOR_REANCHOR_INTERVAL_S * 1e9)
 
-    for frame_idx, sample_idx_value in enumerate(sample_indices):
-        sample_idx: int = int(sample_idx_value)
+    def decode_frameset(sample_idx: int) -> UInt8[Tensor, "v h w 3"]:
         frames: list[UInt8[Tensor, "3 h w"]] = [streams.decoders[view_idx].get_frames_at([sample_idx]).data[0] for view_idx in range(num_views)]
         if len({tuple(frame.shape) for frame in frames}) != 1:
             raise ValueError(f"exo cameras must share one video resolution; got {[tuple(frame.shape[1:]) for frame in frames]}")
-        frames_hwc: UInt8[Tensor, "v h w 3"] = torch.stack(frames).permute(0, 2, 3, 1).contiguous()
+        return torch.stack(frames).permute(0, 2, 3, 1).contiguous()
+
+    # NVDEC decodes the next frameset on one owned thread (CUDA device bound first) while detection, pose and
+    # triangulation run on this one.
+    decode_pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="exocalib-decode", initializer=bind_cuda_device, initargs=("cuda",))
+    pending: Future[UInt8[Tensor, "v h w 3"]] = decode_pool.submit(decode_frameset, int(sample_indices[0]))
+    for frame_idx, sample_idx_value in enumerate(sample_indices):
+        sample_idx: int = int(sample_idx_value)
+        frames_hwc: UInt8[Tensor, "v h w 3"] = pending.result()
+        if frame_idx + 1 < num_frames:
+            pending = decode_pool.submit(decode_frameset, int(sample_indices[frame_idx + 1]))
         frame_wh: Int64[ndarray, "2"] = np.array([frames_hwc.shape[2], frames_hwc.shape[1]], dtype=np.int64)
         video_wh = frame_wh
         image_wh: tuple[int, int] = (int(frame_wh[0]), int(frame_wh[1]))
@@ -208,6 +219,7 @@ def track_multiview_keypoints(streams: ExoVideoStreams, detector: PersonDetector
             history.append(TrackedFrame(sample_idx=sample_idx, points_xyz=tracked_xyz, conf=tracked_conf))
             history = history[-2:]
 
+    decode_pool.shutdown()
     assert video_wh is not None  # num_frames >= 1: sampled_frame_indices rejects empty captures
     per_camera: dict[str, CameraKeypoints] = {}
     for view_idx, name in enumerate(streams.names):
