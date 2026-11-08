@@ -1,11 +1,7 @@
-"""Regression tests: validate baseline .rrd and compare against fresh inference.
+"""Regression tests: properties of the baseline .rrd (keyframes, camera path).
 
 The baseline is generated once via:
-    pixi run -e mast3r-slam --frozen _generate-test-baseline
-
-The inference comparison test uses config/test.yaml which sets
-single_thread=True — this means NO backend subprocess is spawned,
-eliminating any zombie process risk on test failure.
+    pixi run -e mast3r-slam --frozen _mast3r-slam-generate-test-baseline
 """
 
 from pathlib import Path
@@ -76,13 +72,14 @@ def test_dense_logging_entities_present(baseline_rrd_path: Path) -> None:
     paths: set[str] = set(_get_entity_paths(baseline_rrd_path))
 
     expected_paths = {
-        "/world/current_camera/pinhole/video",
-        "/world/current_camera/pinhole/pointmap",
-        "/world/current_camera/pinhole/pointmap_depth",
-        "/world/current_camera/pinhole/confidence",
-        "/world/last_keyframe/pointmap",
-        "/world/last_keyframe/pointmap_depth",
-        "/world/last_keyframe/confidence",
+        "/video",
+        "/world/current_camera/pinhole/image",
+        "/world/current_camera/pinhole/depth",
+        "/current_maps/pointmap",
+        "/current_maps/confidence",
+        "/last_keyframe/pointmap",
+        "/last_keyframe/depth",
+        "/last_keyframe/confidence",
     }
 
     missing_paths = sorted(expected_paths - paths)
