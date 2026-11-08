@@ -12,11 +12,11 @@ from numpy import ndarray
 
 from mast3r_slam.config import config
 from mast3r_slam.image_types import RgbNormalized
-from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_with_transform
+from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_tensor, resize_img_with_transform
 
 HAS_TORCHCODEC: bool = True
 try:
-    from torchcodec.decoders import VideoDecoder
+    from simplecv.video_io import TorchCodecVideoReader
 except (ImportError, ModuleNotFoundError):
     HAS_TORCHCODEC = False
 
@@ -59,6 +59,10 @@ class MonocularDataset(torch.utils.data.Dataset):
         rgb_normalized: RgbNormalized = self.get_rgb_normalized(index)
         timestamp = self.get_timestamp(index)
         return timestamp, rgb_normalized
+
+    def read_resized(self, idx: int) -> ResizedImage:
+        """Return the frame at ``idx`` resized and normalised for the MASt3R encoder."""
+        return resize_img(self.get_rgb_normalized(idx), self.img_size)
 
     def get_timestamp(self, idx: int) -> float | str:
         """Return the timestamp for a given frame index.
@@ -251,11 +255,10 @@ class MP4Dataset(MonocularDataset):
         self.use_calibration: bool = False
         self.dataset_path = pathlib.Path(dataset_path)
         if HAS_TORCHCODEC:
-            self.decoder = VideoDecoder(str(self.dataset_path))
-            assert self.decoder.metadata.average_fps is not None, "Video has no FPS metadata"
-            assert self.decoder.metadata.num_frames is not None, "Video has no frame count metadata"
-            self.fps: float = self.decoder.metadata.average_fps
-            self.total_frames: int = self.decoder.metadata.num_frames
+            # NVDEC when there is a GPU; frames stay on it for the resize (CPU decode otherwise).
+            self.reader = TorchCodecVideoReader(self.dataset_path, seek_mode="exact")
+            self.fps: float = self.reader.fps
+            self.total_frames: int = self.reader.frame_cnt
         else:
             print("Warning: torchcodec is not installed. This may slow down the dataloader")
             self.cap = cv2.VideoCapture(str(self.dataset_path))
@@ -269,8 +272,7 @@ class MP4Dataset(MonocularDataset):
 
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         if HAS_TORCHCODEC:
-            rgb_tensor = self.decoder[idx * self.stride]  # c,h,w uint8  # pyrefly: ignore
-            rgb: UInt8[ndarray, "h w 3"] = rgb_tensor.permute(1, 2, 0).numpy()
+            rgb: UInt8[ndarray, "h w 3"] = self.reader.get_frame(idx * self.stride).permute(1, 2, 0).cpu().numpy()
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx * self.stride)
             ret: bool
@@ -281,6 +283,12 @@ class MP4Dataset(MonocularDataset):
         timestamp: float = idx / self.fps
         self.timestamps.append(timestamp)
         return rgb
+
+    def read_resized(self, idx: int) -> ResizedImage:
+        if not HAS_TORCHCODEC:
+            return super().read_resized(idx)
+        self.timestamps.append(idx / self.fps)
+        return resize_img_tensor(self.reader.get_frame(idx * self.stride), self.img_size)
 
 
 class RGBFiles(MonocularDataset):

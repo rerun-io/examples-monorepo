@@ -1,6 +1,5 @@
 import dataclasses
 from enum import Enum
-from typing import Literal
 
 import lietorch_mojo as lietorch
 import torch
@@ -8,8 +7,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from mast3r_slam.config import config
-from mast3r_slam.image_types import RgbNormalized
-from mast3r_slam.image_utils import ResizedImage, resize_img
+from mast3r_slam.image_utils import ResizedImage
 
 
 class Mode(Enum):
@@ -232,24 +230,21 @@ class Frame:
 
 def create_frame(
     i: int,
-    rgb: RgbNormalized,
+    resized: ResizedImage,
     world_sim3_cam: lietorch.Sim3,
-    img_size: Literal[224, 512] = 512,
     device: str = "cuda:0",
 ) -> Frame:
-    """Create a Frame from a raw image dict and a Sim3 pose.
+    """Create a Frame from a resized dataset image and a Sim3 pose.
 
     Args:
         i: Frame index in the dataset.
-        rgb: Normalized RGB image passed to ``resize_img``.
+        resized: The image as ``MonocularDataset.read_resized`` returns it.
         world_sim3_cam: World-from-camera Sim3 pose.
-        img_size: Target image size for MASt3R encoder (224 or 512).
         device: Torch device string.
 
     Returns:
         A fully constructed Frame ready for tracking.
     """
-    resized: ResizedImage = resize_img(rgb, img_size)
     rgb_tensor: Float[Tensor, "1 3 h w"] = resized.rgb_tensor.to(device=device)
     img_shape: Int[Tensor, "1 2"] = torch.tensor(resized.true_shape, device=device)
     img_true_shape: Int[Tensor, "1 2"] = img_shape.clone()

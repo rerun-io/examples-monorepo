@@ -9,8 +9,10 @@ from typing import Literal, NamedTuple
 import numpy as np
 import PIL
 import PIL.Image
+import torch
+import torch.nn.functional as F
 from dust3r.utils.image import ImgNorm
-from jaxtyping import Float, Int32
+from jaxtyping import Float, Int32, UInt8
 from numpy import ndarray
 from torch import Tensor
 
@@ -148,6 +150,41 @@ def resize_img(
     true_shape: Int32[ndarray, "1 2"] = np.array([pil_img.size[::-1]], dtype=np.int32)
     unnormalized: np.ndarray = np.asarray(pil_img)
     return ResizedImage(rgb_tensor=normalized, true_shape=true_shape, rgb_uint8=unnormalized)
+
+
+def resize_img_tensor(rgb: UInt8[Tensor, "3 H W"], size: Literal[224, 512]) -> ResizedImage:
+    """``resize_img`` for a decoded frame that is already a tensor, on its device (the GPU for an NVDEC frame).
+
+    Same geometry as :func:`resize_img`: the short side to 224 then a square centre crop, or the long side to 512
+    then a 16-aligned centre crop. Antialiased bicubic stands in for PIL's Lanczos, so pixels differ from the PIL
+    path by a few levels. Only the cropped uint8 image comes back to the host, for logging.
+    """
+    assert size in (224, 512)
+    h: int = int(rgb.shape[1])
+    w: int = int(rgb.shape[2])
+    long_edge: int = round(size * max(w / h, h / w)) if size == 224 else size
+    new_w: int = int(round(w * long_edge / max(w, h)))
+    new_h: int = int(round(h * long_edge / max(w, h)))
+    resized: UInt8[Tensor, "3 h w"] = (
+        F.interpolate(rgb[None].float(), size=(new_h, new_w), mode="bicubic", antialias=True, align_corners=False)[0]
+        .round_()
+        .clamp_(0, 255)
+        .to(torch.uint8)
+    )
+    cx: int = new_w // 2
+    cy: int = new_h // 2
+    if size == 224:
+        half_w: int = min(cx, cy)
+        half_h: int = half_w
+    else:
+        half_w = ((2 * cx) // 16) * 8
+        half_h = ((2 * cy) // 16) * 8
+        if new_w == new_h:
+            half_h = 3 * half_w // 4
+    cropped: UInt8[Tensor, "3 h w"] = resized[:, cy - half_h : cy + half_h, cx - half_w : cx + half_w]
+    normalized: Float[Tensor, "1 3 h w"] = (cropped.float() / 255.0 - 0.5)[None] / 0.5
+    true_shape: Int32[ndarray, "1 2"] = np.array([cropped.shape[1:]], dtype=np.int32)
+    return ResizedImage(rgb_tensor=normalized, true_shape=true_shape, rgb_uint8=cropped.permute(1, 2, 0).cpu().numpy())
 
 
 def resize_img_with_transform(
