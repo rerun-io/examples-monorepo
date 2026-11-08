@@ -55,8 +55,9 @@ class FitterConfig:
     bootstrap_iters: int = 300
     """Adam iterations for the first-window solve (betas optimized here)."""
     tick_iters: int = 48
-    """Adam iterations per optimize tick (betas frozen; graph replays are
-    ~1 ms/iter so the default 48 costs ~48 ms on the overlapped fit worker). Shipped
+    """Adam iterations per optimize tick (betas frozen; compiled graph replays
+    are ~0.14 ms/iter on GB10 so the default 48 costs ~7 ms GPU on the overlapped
+    fit worker; ~0.6 ms/iter with compile_iter off). Shipped
     defaults pass BOTH golden gates: crossing_arms MPJPE/PVE <= 30 mm and
     running_jumping per-frame PVE p95/max <= 30 mm vs the original DAG."""
     learning_rate: float = 0.02
@@ -138,14 +139,17 @@ class FitterConfig:
     """One-sided floor-penetration penalty (verts below world z=0). Jump
     landings measured 60-70 mm underground without it; airborne frames are
     unaffected (one-sided)."""
-    compile_iter: bool = False
+    compile_iter: bool = True
     """torch.compile (inductor, default mode) the captured iteration's forward +
-    losses (and, via AOTAutograd, its backward) before CUDA-graph capture."""
-    fused_adam: bool = False
+    losses (and, via AOTAutograd, its backward) before CUDA-graph capture:
+    ~0.62 -> 0.14 ms/iter. Costs a one-time compile at FittingStage
+    construction (~27 s with a cold inductor cache, ~2.6 s warm)."""
+    fused_adam: bool = True
     """Use the fused (single-kernel) capturable Adam in the graphed paths."""
-    fit_stream: bool = False
+    fit_stream: bool = True
     """Run FittingStage.step on a private non-blocking CUDA stream so the
-    pipeline's main-thread default-stream syncs don't wait on queued fit work."""
+    pipeline's main-thread default-stream syncs don't wait on queued fit work
+    (BENCH 39.7 -> 38.0 s wall, 2+2 runs at tick_iters 48)."""
     device: str = "cuda"
     """Compute device."""
 

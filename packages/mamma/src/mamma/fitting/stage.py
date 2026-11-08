@@ -42,7 +42,7 @@ class FittingStage:
         self._stream: torch.cuda.Stream | None = (
             torch.cuda.Stream(device=config.device) if config.fit_stream and torch.device(config.device).type == "cuda" else None
         )
-        if config.compile_iter:
+        if config.compile_iter and config.use_cuda_graph and torch.device(config.device).type == "cuda":
             self._prewarm_compile()
 
     def _prewarm_compile(self) -> None:
