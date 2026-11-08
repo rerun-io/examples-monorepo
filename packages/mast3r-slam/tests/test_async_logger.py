@@ -17,7 +17,6 @@ from torch import Tensor
 
 from mast3r_slam import async_logger
 from mast3r_slam.async_logger import AsyncRerunLogger, snapshot_current_frame
-from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 from mast3r_slam.log_events import KeyframeSnapshot, LogCurrentFrame, LogEvent, LogMapUpdate
 from mast3r_slam.mast3r_utils import frame_to_extrinsics
@@ -52,9 +51,8 @@ def _make_frame(frame_id: int, feat_dim: int) -> Frame:
     )
 
 
-def test_snapshot_copies_last_keyframe_rgb_only_when_not_shown(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_snapshot_copies_last_keyframe_rgb_only_when_not_shown() -> None:
     """The keyframe image is copied once; its evolving pointmap on a keyframe change and every N frames."""
-    monkeypatch.setitem(config, "use_calib", False)
     manager = mp.Manager()
     try:
         keyframes: SharedKeyframes = SharedKeyframes(manager, H, W, buffer=4, device="cpu")
@@ -268,7 +266,6 @@ def _random_sim3(n: int, seed: int) -> Float32[Tensor, "n 8"]:
 
 def test_compute_orient_matches_the_per_keyframe_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
     """The batched pose read hands auto-orient the poses that converting each keyframe's Frame gives."""
-    monkeypatch.setitem(config, "use_calib", False)
     captured: list[Float32[ndarray, "n 4 4"]] = []
 
     def fake_auto_orient(world_T_cam: Float32[ndarray, "n 4 4"], **_options: str) -> object:
@@ -309,9 +306,8 @@ class _CountingListProxy:
         return self._items[index]
 
 
-def test_snapshot_edges_reads_each_edge_list_in_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_snapshot_edges_reads_each_edge_list_in_one_call() -> None:
     """The edge lists cross the process boundary once per snapshot, not once per edge."""
-    monkeypatch.setitem(config, "use_calib", False)
     manager = mp.Manager()
     try:
         keyframes: SharedKeyframes = SharedKeyframes(manager, H, W, buffer=8, device="cpu")

@@ -16,7 +16,7 @@ from torch import Tensor
 from trtkit import TensorRtRuntime, run_chunked
 
 import mast3r_slam.matching as matching
-from mast3r_slam.config import config
+from mast3r_slam.config import MatchingConfig
 from mast3r_slam.frame import Frame
 from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
@@ -278,6 +278,7 @@ def downsample(
     C: Float[Tensor, "*batch h w"],
     D: Float[Tensor, "*batch h w d"],
     Q: Float[Tensor, "*batch h w"],
+    factor: int,
 ) -> tuple[
     Float[Tensor, "*batch h2 w2 3"],
     Float[Tensor, "*batch h2 w2"],
@@ -286,26 +287,26 @@ def downsample(
 ]:
     """Spatially downsample point maps, confidence, and descriptors.
 
-    Uses the ``config["dataset"]["img_downsample"]`` factor for stride-based
-    subsampling. When the factor is 1, the tensors are returned unchanged.
+    Stride-based subsampling by ``factor`` (the config's ``dataset.img_downsample``). When the factor is 1, the
+    tensors are returned unchanged.
 
     Args:
         X: 3D point map with trailing shape ``(..., H, W, 3)``.
         C: Confidence map with trailing shape ``(..., H, W)``.
         D: Descriptor map with trailing shape ``(..., H, W, d)``.
         Q: Descriptor confidence map with trailing shape ``(..., H, W)``.
+        factor: Stride in both image axes.
 
     Returns:
-        A tuple ``(X, C, D, Q)`` downsampled by the configured factor.
+        A tuple ``(X, C, D, Q)`` downsampled by ``factor``.
     """
-    downsample = config["dataset"]["img_downsample"]
-    if downsample > 1:
+    if factor > 1:
         # C and Q: (...xHxW)
         # X and D: (...xHxWxF)
-        X = X[..., ::downsample, ::downsample, :].contiguous()
-        C = C[..., ::downsample, ::downsample].contiguous()
-        D = D[..., ::downsample, ::downsample, :].contiguous()
-        Q = Q[..., ::downsample, ::downsample].contiguous()
+        X = X[..., ::factor, ::factor, :].contiguous()
+        C = C[..., ::factor, ::factor].contiguous()
+        D = D[..., ::factor, ::factor, :].contiguous()
+        Q = Q[..., ::factor, ::factor].contiguous()
     return X, C, D, Q
 
 
@@ -319,6 +320,7 @@ def mast3r_decode_symmetric_batch(
     pos_j: Int[Tensor, "b n_patches 2"],
     shape_i: list[Int[Tensor, "1 2"]],
     shape_j: list[Int[Tensor, "1 2"]],
+    img_downsample: int,
 ) -> tuple[
     Float[Tensor, "4 b h w 3"],
     Float[Tensor, "4 b h w"],
@@ -339,6 +341,7 @@ def mast3r_decode_symmetric_batch(
         pos_j: Batch of positional encodings for frames j.
         shape_i: True image shapes for frames i.
         shape_j: True image shapes for frames j.
+        img_downsample: Stride over the decoded maps (the config's ``dataset.img_downsample``).
 
     Returns:
         A tuple ``(X, C, D, Q)`` each with shape ``(4, B, h, w, ...)``.
@@ -351,7 +354,7 @@ def mast3r_decode_symmetric_batch(
         stacked: list[Tensor] = [
             torch.stack([out[f"{key}1"][:B], out[f"{key}2"][:B], out[f"{key}1"][B:], out[f"{key}2"][B:]]) for key in ("X", "C", "D", "Q")
         ]
-        return downsample(stacked[0], stacked[1], stacked[2], stacked[3])
+        return downsample(stacked[0], stacked[1], stacked[2], stacked[3], img_downsample)
     per_pair: list[tuple[Tensor, Tensor, Tensor, Tensor]] = []
     for b in range(B):
         feat1 = feat_i[b][None]
@@ -362,11 +365,11 @@ def mast3r_decode_symmetric_batch(
         res22, res12 = decoder(model, feat2, feat1, pos2, pos1, shape_j[b], shape_i[b])
         per_pair.append(_stack_results([res11, res21, res22, res12]))
     X, C, D, Q = (torch.stack([pair[k] for pair in per_pair], dim=1) for k in range(4))
-    return downsample(X, C, D, Q)
+    return downsample(X, C, D, Q, img_downsample)
 
 
 @torch.inference_mode()
-def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame) -> tuple[Float[Tensor, "hw 3"], Float[Tensor, "hw 1"]]:
+def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame, img_downsample: int) -> tuple[Float[Tensor, "hw 3"], Float[Tensor, "hw 1"]]:
     """Run monocular self-inference on a single frame.
 
     Decodes the frame against itself (symmetric self-pair) to obtain a
@@ -375,6 +378,7 @@ def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame) -> tuple[Float[
     Args:
         model: The MASt3R model.
         frame: The input frame (features cached on ``frame.feat``).
+        img_downsample: Stride over the decoded maps (the config's ``dataset.img_downsample``).
 
     Returns:
         A tuple ``(Xii, Cii)`` where ``Xii`` is the self-predicted 3D point
@@ -390,7 +394,7 @@ def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame) -> tuple[Float[
     shape = frame.img_true_shape
 
     res11, res21 = decoder(model, feat, feat, pos, pos, shape, shape)
-    X, C, D, Q = downsample(*_stack_results([res11, res21]))
+    X, C, D, Q = downsample(*_stack_results([res11, res21]), img_downsample)
 
     Xii, Xji = einops.rearrange(X, "b h w c -> b (h w) c")
     Cii, Cji = einops.rearrange(C, "b h w -> b (h w) 1")
@@ -406,6 +410,8 @@ def mast3r_match_symmetric(
     pos_j: Int[Tensor, "b n_patches 2"],
     shape_i: list[Int[Tensor, "1 2"]],
     shape_j: list[Int[Tensor, "1 2"]],
+    matching_cfg: MatchingConfig,
+    img_downsample: int,
 ) -> tuple[
     Int[Tensor, "b hw"],
     Int[Tensor, "b hw"],
@@ -430,6 +436,8 @@ def mast3r_match_symmetric(
         pos_j: Positional encodings for frames j.
         shape_i: True image shapes for frames i.
         shape_j: True image shapes for frames j.
+        matching_cfg: Matching hyper-parameters.
+        img_downsample: Stride over the decoded maps (the config's ``dataset.img_downsample``).
 
     Returns:
         An 8-tuple of ``(idx_i2j, idx_j2i, valid_match_j, valid_match_i,
@@ -437,7 +445,7 @@ def mast3r_match_symmetric(
         correspondences, ``valid_match_*`` are boolean validity masks, and
         ``Q*`` are per-pixel descriptor confidences.
     """
-    X, C, D, Q = mast3r_decode_symmetric_batch(model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j)
+    X, C, D, Q = mast3r_decode_symmetric_batch(model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j, img_downsample)
 
     # Ordering 4xbxhxwxc
     b = X.shape[1]
@@ -452,7 +460,7 @@ def mast3r_match_symmetric(
     D11 = torch.cat((Dii, Djj), dim=0)
     D21 = torch.cat((Dji, Dij), dim=0)
 
-    idx_1_to_2, valid_match_2 = matching.match(X11, X21, D11, D21)
+    idx_1_to_2, valid_match_2 = matching.match(X11, X21, D11, D21, matching_cfg)
 
     match_b = X11.shape[0] // 2
     idx_i2j = idx_1_to_2[:match_b]
@@ -474,7 +482,7 @@ def mast3r_match_symmetric(
 
 @torch.inference_mode()
 def mast3r_asymmetric_inference(
-    model: AsymmetricMASt3R, frame_i: Frame, frame_j: Frame
+    model: AsymmetricMASt3R, frame_i: Frame, frame_j: Frame, img_downsample: int
 ) -> tuple[
     Float[Tensor, "2 h w 3"],
     Float[Tensor, "2 h w"],
@@ -491,6 +499,7 @@ def mast3r_asymmetric_inference(
         model: The MASt3R model.
         frame_i: Reference frame (features cached on ``frame_i.feat``).
         frame_j: Target frame (features cached on ``frame_j.feat``).
+        img_downsample: Stride over the decoded maps (the config's ``dataset.img_downsample``).
 
     Returns:
         A tuple ``(X, C, D, Q)`` each of shape ``(2, h, w, ...)``, where
@@ -500,7 +509,7 @@ def mast3r_asymmetric_inference(
     if tracking_forward is not None and frame_i.feat is None and frame_j.feat is not None:
         outputs: tuple[Tensor, ...] = tracking_forward(frame_i, frame_j)
         frame_i.feat, frame_i.pos = outputs[0], outputs[1]
-        return downsample(outputs[2], outputs[3], outputs[4], outputs[5])
+        return downsample(outputs[2], outputs[3], outputs[4], outputs[5], img_downsample)
     if frame_i.feat is None:
         frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.rgb_tensor, frame_i.img_true_shape)
     if frame_j.feat is None:
@@ -514,7 +523,7 @@ def mast3r_asymmetric_inference(
 
     res11, res21 = decoder(model, feat1, feat2, pos1, pos2, shape1, shape2)
     X, C, D, Q = _stack_results([res11, res21])
-    X, C, D, Q = downsample(X, C, D, Q)
+    X, C, D, Q = downsample(X, C, D, Q, img_downsample)
     return X, C, D, Q
 
 
@@ -522,6 +531,8 @@ def mast3r_match_asymmetric(
     model: AsymmetricMASt3R,
     frame_i: Frame,
     frame_j: Frame,
+    matching_cfg: MatchingConfig,
+    img_downsample: int,
     idx_i2j_init: Int[Tensor, "b hw"] | None = None,
 ) -> tuple[
     Int[Tensor, "b hw"],
@@ -543,6 +554,8 @@ def mast3r_match_asymmetric(
         model: The MASt3R model.
         frame_i: Reference frame.
         frame_j: Target frame.
+        matching_cfg: Matching hyper-parameters.
+        img_downsample: Stride over the decoded maps (the config's ``dataset.img_downsample``).
         idx_i2j_init: Optional initial correspondence guess (linear pixel
             indices) to warm-start the iterative matcher.
 
@@ -552,7 +565,7 @@ def mast3r_match_asymmetric(
         validity mask, and the remaining tensors are flattened ``(b, h*w, ...)``
         point maps, confidences, and descriptor confidences.
     """
-    X, C, D, Q = mast3r_asymmetric_inference(model, frame_i, frame_j)
+    X, C, D, Q = mast3r_asymmetric_inference(model, frame_i, frame_j, img_downsample)
 
     b, h, w = X.shape[:-1]
     # 2 outputs per inference
@@ -563,7 +576,7 @@ def mast3r_match_asymmetric(
     Dii, Dji = D[:b], D[b:]
     Qii, Qji = Q[:b], Q[b:]
 
-    idx_i2j, valid_match_j = matching.match(Xii, Xji, Dii, Dji, idx_1_to_2_init=idx_i2j_init)
+    idx_i2j, valid_match_j = matching.match(Xii, Xji, Dii, Dji, matching_cfg, idx_1_to_2_init=idx_i2j_init)
 
     # How rest of system expects it
     Xii, Xji = einops.rearrange(X, "b h w c -> b (h w) c")

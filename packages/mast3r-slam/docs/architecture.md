@@ -281,5 +281,5 @@ mast3r_slam/
 ├── mast3r_utils.py              # Model loading, mono inference, matching, engine selection
 ├── retrieval_database.py        # Image retrieval for loop closure
 ├── nerfstudio_utils.py          # Keyframes → NerfStudio (simplecv's writer)
-└── config.py                    # YAML config loader
+└── config.py                    # SlamConfig: frozen hyper-parameter tree + presets
 ```

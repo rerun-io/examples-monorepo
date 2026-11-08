@@ -23,9 +23,10 @@ class FramePrefetcher:
     The frames come with an identity pose: the tracker sets the real one, which depends on the frame before.
     """
 
-    def __init__(self, dataset: MonocularDataset, n_frames: int, device: str = "cuda:0", depth: int = 2) -> None:
+    def __init__(self, dataset: MonocularDataset, n_frames: int, img_downsample: int, device: str = "cuda:0", depth: int = 2) -> None:
         self._dataset: MonocularDataset = dataset
         self._n_frames: int = n_frames
+        self._img_downsample: int = img_downsample
         self._device: str = device
         self._ready: queue.Queue[tuple[Frame, torch.cuda.Event] | BaseException] = queue.Queue(maxsize=depth)
         self._stop: threading.Event = threading.Event()
@@ -50,7 +51,9 @@ class FramePrefetcher:
                 for i in range(self._n_frames):
                     if self._stop.is_set():
                         return
-                    frame: Frame = create_frame(i, self._dataset.read_resized(i), lietorch.Sim3.Identity(1, device=self._device), device=self._device)
+                    frame: Frame = create_frame(
+                        i, self._dataset.read_resized(i), lietorch.Sim3.Identity(1, device=self._device), self._img_downsample, device=self._device
+                    )
                     ready: torch.cuda.Event = torch.cuda.Event()
                     ready.record(stream)
                     self._put((frame, ready))

@@ -6,8 +6,9 @@
 import dataclasses
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
+import tyro
 import yaml
 
 FilteringModeName: TypeAlias = Literal["recent", "first", "best_score", "weighted_pointmap", "weighted_spherical", "indep_conf"]
@@ -216,6 +217,16 @@ SLAM_PRESETS: dict[SlamPresetName, tuple[str, SlamConfig]] = {
 }
 """Preset name -> (one-line description, config). The CLI's preset subcommands and the app's dropdown both read it."""
 
+if TYPE_CHECKING:
+    SlamPreset = SlamConfig
+else:
+    SlamPreset = tyro.extras.subcommand_type_from_defaults(
+        {name: cfg for name, (_, cfg) in SLAM_PRESETS.items()},
+        {name: description for name, (description, _) in SLAM_PRESETS.items()},
+        prefix_names=False,
+    )
+"""``SlamConfig`` for code; for tyro, one subcommand per preset whose defaults are that preset's values."""
+
 
 def flat_config(cfg: SlamConfig) -> dict[str, bool | int | float | str]:
     """``cfg`` as one level of dotted keys (``tracking.max_iters``), for a recording property."""
@@ -227,9 +238,6 @@ def flat_config(cfg: SlamConfig) -> dict[str, bool | int | float | str]:
             flat[name] = value
     return flat
 
-from typing import Any
-
-import yaml
 
 config: dict[str, Any] = {}
 
