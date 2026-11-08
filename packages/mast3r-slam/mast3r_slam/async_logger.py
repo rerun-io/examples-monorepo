@@ -304,6 +304,9 @@ class AsyncRerunLogger:
         self._path_previous: list[float] | None = None
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
+        # Tracking marks its keyframe dirty on every frame without moving it; what was logged last skips those re-logs.
+        self._logged_kf_poses: dict[int, Float32[ndarray, "8"]] = {}
+        self._logged_edges: Float32[ndarray, "2 n 3"] | None = None
         self._conf_thresh: float = conf_threshold
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
@@ -585,10 +588,11 @@ class AsyncRerunLogger:
             self._relog_keyframe_camera(kf_idx, world_sim3_cam_data)
 
         # Factor graph edges
-        if event.edge_positions is not None:
+        if event.edge_positions is not None and not np.array_equal(self._logged_edges, np.stack(event.edge_positions)):
             positions_i: Float32[ndarray, "n 3"] = event.edge_positions[0]
             positions_j: Float32[ndarray, "n 3"] = event.edge_positions[1]
             self._log_edges(positions_i, positions_j)
+            self._logged_edges = np.stack(event.edge_positions)
 
         # Orient transform
         if event.orient is not None:
@@ -662,6 +666,7 @@ class AsyncRerunLogger:
             image_plane_distance=self._image_plane_distance,
         )
         self._latest_keyframe_intrinsics = pinhole.intrinsics
+        self._logged_kf_poses[kf.kf_idx] = kf.world_sim3_cam_data
         self._keyframe_pinhole_static[kf.kf_idx] = PinholeParameters(
             name=pinhole.name,
             extrinsics=pinhole.extrinsics,
@@ -720,8 +725,9 @@ class AsyncRerunLogger:
             self._surface_poses[kf_idx] = world_sim3_cam_data
         kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
         cached_pinhole: PinholeParameters | None = self._keyframe_pinhole_static.get(kf_idx)
-        if cached_pinhole is None:
+        if cached_pinhole is None or np.array_equal(self._logged_kf_poses.get(kf_idx), world_sim3_cam_data):
             return
+        self._logged_kf_poses[kf_idx] = world_sim3_cam_data
         frame: Frame = snapshot_to_frame(
             world_sim3_cam_data,
             rgb=np.zeros((1, 1, 3), dtype=np.float32),

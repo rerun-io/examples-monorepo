@@ -242,6 +242,32 @@ def test_edges_log_one_two_point_strip_per_edge(monkeypatch: pytest.MonkeyPatch)
     assert strips == [[2, 2, 2]]
 
 
+def test_map_update_relogs_only_moved_cameras_and_changed_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracking marks its keyframe dirty on every frame without moving it: an unchanged pose or edge set logs nothing."""
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(async_logger.rr, "log", lambda path, entity, *_a, **_k: logged.append((str(path), type(entity).__name__)))
+    monkeypatch.setattr(async_logger.rr, "set_time", lambda *_a, **_k: None)
+    identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
+    moved: Float32[ndarray, "8"] = identity.copy()
+    moved[0] = 1.0
+    rgb: Float32[ndarray, "h w 3"] = np.full((H, W, 3), 0.5, dtype=np.float32)
+    X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
+    C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
+    edges: tuple[Float32[ndarray, "1 3"], Float32[ndarray, "1 3"]] = (np.zeros((1, 3), np.float32), np.ones((1, 3), np.float32))
+    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
+    keyframe: KeyframeSnapshot = KeyframeSnapshot(kf_idx=5, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
+    logger._handle_map_update(LogMapUpdate(frame_idx=1, timestamp_ns=None, new_keyframes=[keyframe], edge_positions=edges))
+
+    def logged_by(update: LogMapUpdate) -> set[str]:
+        logged.clear()
+        logger._handle_map_update(update)
+        return {path for path, _ in logged}
+
+    assert logged_by(LogMapUpdate(frame_idx=2, timestamp_ns=None, pose_updates=[(5, identity.copy())], edge_positions=edges)) == set()
+    moved_paths: set[str] = logged_by(LogMapUpdate(frame_idx=3, timestamp_ns=None, pose_updates=[(5, moved)], edge_positions=(edges[0] + 1, edges[1])))
+    assert {"world/keyframes/keyframe-5", "world/edges"} <= moved_paths
+
+
 def test_logger_crash_is_raised_on_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     """An exception on the logger thread reaches the caller (check() and __exit__), not just stderr."""
 
