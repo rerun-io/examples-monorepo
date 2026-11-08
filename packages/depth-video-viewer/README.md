@@ -8,11 +8,16 @@ It is an out-of-tree extension, like `gsplat-rust-renderer`'s viewer: published 
 no Rerun fork, no `[patch]`. It adds one visualizer to `Spatial2DView` and `Spatial3DView` through
 `App::extend_view_class`.
 
+The Rust archetype, decoder and visualizer and the Python `log.py` are out-of-tree scaffolding for checking depth as
+video end to end. They are deleted once `DepthVideoStream` ships in Rerun; the encoder settings, the comparison tool
+and the evidence stay here.
+
 ## Why a custom viewer
 
-Stock Rerun decodes AV1 with rav1d built 8-bit only and truncates 10-bit luma to 8 bits
-(`re_video` `decode/av1.rs`, TODO #7594). This viewer decodes with the same crate (`re_rav1d`) with `bitdepth_16` on and
-copies the Y plane as is, so every 10-bit code comes back exact. The codes then go through the same public upload
+Stock Rerun keeps only 8 bits of 10-bit AV1 luma. `re_video` pulls in rav1d with `bitdepth_8` only; its `nasm`
+feature, on in release builds of the `rerun` binary, turns on all rav1d defaults including `bitdepth_16`. Either way
+`re_video` then right-shifts 10/12-bit samples to 8 bits (`decode/av1.rs:295-297`, TODO #7594). This viewer decodes
+with the same crate (`re_rav1d`) with `bitdepth_16` on and copies the Y plane as is, so every 10-bit code comes back exact. The codes then go through the same public upload
 as `DepthImage` (`gpu_bridge::image_to_gpu`, an `R16Uint` texture), so the pixels equal those of a PNG
 `EncodedDepthImage` of the same codes.
 
@@ -35,27 +40,31 @@ log_depth_video("world/cam/pinhole/depth_video", samples, times_ns, DepthVideoPr
 ```
 
 `tools/make_comparison_rrd.py` builds a test recording from a published millimetre depth layer: raw uint16 mm
-(`DepthImage`), the PNG layer as published and the `DepthVideoStream`, with per-pixel error maps |decoded - raw| in mm
-and per-frame max/p99 error plots. Its default blueprint shows raw / PNG / video in 2D and as 3D clouds from one eye,
-then the error maps and the plot; view names carry bytes per frame and the largest error. It also logs the 10-bit codes
+(`DepthImage`), the PNG layer as published and the `DepthVideoStream`, with a per-pixel error map |video - raw| in mm
+and per-frame max/p99 error plots (the PNG error is zero by construction). Its default blueprint shows raw / PNG /
+video in 2D and as 3D clouds from one eye, then the error map and the plot; view names carry bytes per frame and the largest error. It also logs the 10-bit codes
 as 16-bit PNG (`depth_codes_png`), which the viewer must draw pixel-identical to the video.
 
 ## The archetype
 
 `DepthVideoStream` uses built-in component types: `codec` (`VideoCodec`, required, AV1 only), `sample`
 (`VideoSample`, one temporal unit per frame), `meter` (`DepthMeter`, codes per meter; default 1000), `colormap`
-(default turbo), `depth_range` (`ValueRange` in codes; default `[0, 2^bit_depth - 1]`) and `point_fill_ratio`
+(default: Rerun's depth colormap), `depth_range` (`ValueRange` in codes; default `[0, 2^bit_depth - 1]`) and `point_fill_ratio`
 (`FillRatio`). The descriptors are those of the in-tree prototype, `rerun.archetypes.DepthVideoStream` /
 `DepthVideoStream:<field>`, so one recording works in both viewers.
 
-Encoding (the phase-2 settings): libaom `realtime`, `cpu-used 8`, `lossless=1`, fixed GOP (default 10), `gray10le`
-full range. Codes are linear in depth with a per-recording unit, `meter = 1000 / unit_mm`.
+Encoding (`encode.py`): libaom with `lossless=1`, so every code comes back exact; a fast `realtime` preset
+(`cpu-used 8`), since a lossless stream decodes to the same codes at any preset, only its size changes; a fixed GOP (`-g` and
+`-keyint_min`, default 10), so a seek decodes at most that many samples; `gray10le` input in full range, so no
+limited-range scaling touches the codes. Codes are linear in depth with a per-recording unit, `meter = 1000 / unit_mm`;
+code 0 means no depth, so depths below half a unit are rejected.
 
 ## Decoding and seeking
 
-Decoding is synchronous in the visualizer (`src/decoder.rs`). Each entity keeps one rav1d decoder and remembers the
-last decoded sample: playing forward decodes one sample per frame; a seek walks back with latest-at queries to the
-keyframe at or before the target and decodes from there (at most one GOP).
+Decoding is synchronous in the visualizer (`src/decoder.rs`). Each entity keeps an index of its samples in decode
+order (one range query, sorted by time then row id, rebuilt when its chunks change), one rav1d decoder, and the last
+decoded sample: playing forward decodes one sample per frame; a seek walks back in the index to the keyframe at or
+before the target and decodes from there (at most one GOP). Samples may share a time point.
 
 ## What is lost compared with the in-tree route
 

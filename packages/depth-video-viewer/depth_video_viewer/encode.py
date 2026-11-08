@@ -1,7 +1,9 @@
 """Depth codes <-> AV1 Main 10-bit monochrome lossless, one temporal unit per frame.
 
-The settings are the phase-2 prototype's (libaom realtime, cpu-used 8, lossless, fixed GOP): lossless keeps every
-10-bit code, so the codes the viewer decodes are the codes written here.
+Settings: libaom `lossless=1`, so the codes the viewer decodes are the codes written here; a fast `realtime`
+preset (`cpu-used 8`), since a lossless stream decodes to the same codes at any preset, only its size changes;
+a fixed GOP (`-g` = `-keyint_min`), so a seek decodes at most `gop` samples; `gray10le` in full range, so no
+limited-range scaling touches the codes.
 """
 
 import subprocess
