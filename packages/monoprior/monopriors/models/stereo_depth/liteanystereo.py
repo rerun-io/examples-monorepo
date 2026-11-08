@@ -82,11 +82,11 @@ class LiteAnyStereoPredictor(BaseStereoPredictor[nn.Module]):
         self.max_disp: int = max_disp
         self.model: nn.Module = load_liteanystereo(model_size, checkpoint or download_liteanystereo_checkpoint(model_size), max_disp).to(device).eval()
 
-    def infer_disparity(self, left_rgb: UInt8[np.ndarray, "h w 3"], right_rgb: UInt8[np.ndarray, "h w 3"]) -> Float32[np.ndarray, "h w"]:
+    def infer_disparity(self, left_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"], right_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"]) -> Float32[np.ndarray, "h w"]:
         """Left-view disparity in pixels at input resolution."""
         device: torch.device = next(self.model.parameters()).device
-        left_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.from_numpy(left_rgb).to(device).float(), "h w c -> 1 c h w")
-        right_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.from_numpy(right_rgb).to(device).float(), "h w c -> 1 c h w")
+        left_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.as_tensor(left_rgb).to(device).float(), "h w c -> 1 c h w")
+        right_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.as_tensor(right_rgb).to(device).float(), "h w c -> 1 c h w")
         padder: InputPadder = InputPadder(left_13hw.shape, divis_by=32)
         padded: list[Float32[torch.Tensor, "1 3 hp wp"]] = padder.pad(left_13hw, right_13hw)
         with torch.no_grad():
