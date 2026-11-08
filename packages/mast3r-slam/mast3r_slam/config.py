@@ -57,11 +57,13 @@ class TrackingConfig:
     Q_conf: float = 1.5
     """Smallest descriptor confidence a match needs."""
     rel_error: float = 1e-3
-    """Relative cost change below which Gauss-Newton stops."""
+    """Relative cost change below which Gauss-Newton stops (calibrated). The uncalibrated solve stops on ``delta_norm``
+    alone, so without calibration this must stay 1e-3; the tracker rejects another value."""
     delta_norm: float = 1e-3
     """Step norm below which Gauss-Newton stops."""
     huber: float = 1.345
-    """Huber threshold on the whitened residuals."""
+    """Huber threshold on the whitened residuals (calibrated). The uncalibrated solve's kernel fixes it at 1.345; the
+    tracker rejects another value without calibration."""
     match_frac_thresh: float = 0.333
     """Fraction of matches to the keyframe below which the frame becomes a new keyframe."""
     sigma_ray: float = 0.003
