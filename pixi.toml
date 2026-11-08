@@ -1040,6 +1040,8 @@ platforms = ["linux-64"]
 
 [feature.sam3.dependencies]
 python = "3.12.*"
+# NVDEC decode of the input video (simplecv.video_io.TorchCodecVideoReader).
+torchcodec = "*"
 
 [feature.sam3.pypi-dependencies]
 sam3 = { path = "packages/sam3", editable = true }
