@@ -20,6 +20,7 @@ from mast3r_slam.config import config
 from mast3r_slam.frame import Frame
 from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
+from mast3r_slam.tracking_engine import build_pair_decoder_engine, load_tracking_engine
 
 
 class FixedLengthRoPE2D(RoPE2D):  # pyrefly: ignore  # croco aliases RoPE2D to cuRoPE2D when that extension is built
@@ -156,8 +157,6 @@ TrackingForwardFn: TypeAlias = Callable[[Frame, Frame], tuple[Tensor, ...]]
 
 _TRACKING_FORWARD: dict[int, TrackingForwardFn] = {}
 """Accelerated tracking forward keyed by ``id(model)``; see :func:`compile_tracking_forward` and :func:`use_tracking_engine`."""
-_TRACKING_ENGINE_HW: dict[int, tuple[int, int]] = {}
-"""Image size of the TensorRT tracking engine in use, keyed by ``id(model)``; the backend loads its pair decoder for it."""
 _TRACKING_ENGINES: dict[tuple[int, tuple[int, int]], tuple[TensorRtRuntime, Int[Tensor, "1 n_patches 2"]]] = {}
 """Loaded tracking engines and their patch positions, keyed by ``(id(model), img_hw)``; see :func:`prepare_trt_engines`."""
 _TRT_MODELS: set[int] = set()
@@ -220,8 +219,6 @@ def prepare_trt_engines(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> Non
     here, so call this before the pipeline starts its threads: a device-wide sync on any other thread (the frame
     prefetcher, the logger) during a capture invalidates it.
     """
-    from mast3r_slam.tracking_engine import build_pair_decoder_engine, load_tracking_engine
-
     with _ENGINE_LOCK:
         if (id(model), img_hw) in _TRACKING_ENGINES:
             return
@@ -245,7 +242,6 @@ def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> Non
     """
     prepare_trt_engines(model, img_hw)
     runtime, pos = _TRACKING_ENGINES[id(model), img_hw]
-    _TRACKING_ENGINE_HW[id(model)] = img_hw
 
     def run(frame_i: Frame, frame_j: Frame) -> tuple[Tensor, ...]:
         if tuple(frame_i.rgb_tensor.shape[-2:]) != img_hw:
@@ -258,18 +254,11 @@ def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> Non
     _TRACKING_FORWARD[id(model)] = run
 
 
-def tracking_engine_size(model: AsymmetricMASt3R) -> tuple[int, int] | None:
-    """Image size of the model's TensorRT tracking engine, or None when tracking runs another forward."""
-    return _TRACKING_ENGINE_HW.get(id(model))
-
-
 def use_pair_decoder_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> None:
     """Decode the backend's keyframe pairs with the bf16 TensorRT engine of :func:`tracking_engine.build_pair_decoder_engine`.
 
     Loads an engine the frontend built (see :func:`prepare_trt_engines`); for the backend process.
     """
-    from mast3r_slam.tracking_engine import build_pair_decoder_engine
-
     _PAIR_DECODER[id(model)] = TensorRtRuntime(build_pair_decoder_engine(model, img_hw), use_cuda_graph=True)
 
 
