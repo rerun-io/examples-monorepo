@@ -1,11 +1,7 @@
-"""Regression tests: validate baseline .rrd and compare against fresh inference.
+"""Regression tests: properties of the baseline .rrd (keyframes, camera path).
 
 The baseline is generated once via:
-    pixi run -e mast3r-slam --frozen _generate-test-baseline
-
-The inference comparison test uses config/test.yaml which sets
-single_thread=True — this means NO backend subprocess is spawned,
-eliminating any zombie process risk on test failure.
+    pixi run -e mast3r-slam --frozen _mast3r-slam-generate-test-baseline
 """
 
 from pathlib import Path
