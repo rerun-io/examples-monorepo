@@ -321,6 +321,16 @@ def run_slam_pipeline(
                 ctx.wait_for_backlog(0)
                 if backlog > 0:
                     print(f"Backend finished {backlog} queued keyframes in {time.perf_counter() - drain_start:.2f} s")
+                # The drained optimisations moved keyframes after the last frame's update: send their final poses,
+                # which the logger's final map surface fuses at.
+                final_poses: list[tuple[int, Float32[ndarray, "8"]]] = [
+                    (kf_idx, keyframes.world_sim3_cam[kf_idx, 0].cpu().numpy().astype(np.float32)) for kf_idx in keyframes.get_dirty_idx().tolist()
+                ]
+                if final_poses:
+                    event_queue.put(LogMapUpdate(
+                        frame_idx=i - 1, timestamp_ns=int(frame_timestamps_ns[i - 1]) if frame_timestamps_ns is not None and i - 1 < len(frame_timestamps_ns) else None,
+                        pose_updates=final_poses, edge_positions=snapshot_edges(states, keyframes),
+                    ))
                 states.set_mode(Mode.TERMINATED)
                 break
 
