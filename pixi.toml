@@ -1933,6 +1933,10 @@ pyaml = "*"
 
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
+# Cap the CPU thread pools of every mast3r-slam process (frontend, backend, logger): with one pool per core in
+# each, ~350 mostly spinning threads made example-fast 25.0 ms/frame; capped, 15.2.
+OMP_NUM_THREADS = "4"
+OPENBLAS_NUM_THREADS = "1"
 
 # Its tests import lietorch_mojo and mast3r_slam.mojo_backend, so the test lanes build both extensions first.
 [feature.mast3r-slam.tasks.tests]
