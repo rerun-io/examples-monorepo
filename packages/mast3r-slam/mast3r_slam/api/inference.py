@@ -62,7 +62,8 @@ from mast3r_slam.async_logger import (
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import MonocularDataset, load_dataset
-from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create_frame
+from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates
+from mast3r_slam.frame_prefetch import FramePrefetcher
 from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.log_events import (
     KeyframeSnapshot,
@@ -261,7 +262,12 @@ def run_slam_pipeline(
     # buffers, and spawns the backend process.  __exit__ guarantees cleanup
     # (backend shutdown, manager shutdown, GPU memory release).
     # AsyncRerunLogger.__exit__ sends LogTerminate and joins the thread.
-    with SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx, async_logger:
+    n_frames: int = len(dataset) if max_frames is None else min(max_frames, len(dataset))
+    with (
+        SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx,
+        async_logger,
+        FramePrefetcher(dataset, n_frames, device=device) as frames,
+    ):
         assert ctx.keyframes is not None
         assert ctx.states is not None
         keyframes: SharedKeyframes = ctx.keyframes
@@ -273,7 +279,6 @@ def run_slam_pipeline(
             handle.keyframes = keyframes
 
         tracker: FrameTracker = FrameTracker(model, keyframes, device)
-        n_frames: int = len(dataset) if max_frames is None else min(max_frames, len(dataset))
 
         i: int = 0
         fps_timer: float = time.time()
@@ -321,7 +326,8 @@ def run_slam_pipeline(
             world_sim3_cam: lietorch.Sim3 = (
                 lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_sim3_cam
             )
-            frame: Frame = create_frame(i, dataset.read_resized(i), world_sim3_cam, device=device)
+            frame: Frame = frames.get()
+            frame.world_sim3_cam = world_sim3_cam
 
             add_new_kf: bool = False
 
