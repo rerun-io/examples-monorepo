@@ -18,7 +18,8 @@ from posekit.skeletons import COCO_17
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
 from scipy.spatial.transform import Rotation, Slerp
 from simplecv.camera_parameters import Fisheye62Parameters
-from simplecv.rerun_dataloader import open_segment_decoder, relay_video_stream
+from simplecv.catalog_video_codec import video_codec
+from simplecv.rerun_dataloader import open_segment_decoder, relay_video_packets
 from simplecv.rerun_log_utils import RerunTyroConfig, compute_vertex_normals
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
@@ -236,12 +237,12 @@ def _frame_at(
     times: np.ndarray,
     decoder: SegmentVideoDecoder,
     timestamp_ns: int,
-) -> UInt8[ndarray, "h w 3"]:
-    """Decode the latest camera frame at or before one grid timestamp."""
+) -> UInt8[torch.Tensor, "h w 3"]:
+    """Decode the latest camera frame at or before one grid timestamp, on the decoder's device."""
     index = int(np.searchsorted(times, np.timedelta64(timestamp_ns, "ns"), side="right")) - 1
     if index < 0:
         raise ValueError(f"Timestamp {timestamp_ns} precedes the first video sample")
-    return decoder.get_frame_at(index).data.permute(1, 2, 0).contiguous().cpu().numpy()
+    return decoder.get_frame_at(index).data.permute(1, 2, 0)
 
 
 def _log_camera_observations(
@@ -342,6 +343,7 @@ def run(config: Config) -> RunMetrics:
     pose_times_ns = pose_times.astype("timedelta64[ns]").astype(np.int64)
     device = torch.device("cuda")
     decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], SegmentVideoDecoder]] = {}
+    codecs: dict[str, rr.VideoCodec] = {}
     for cam in config.cams:
         times, samples, keyframes, decoder = open_segment_decoder(
             dataset,
@@ -352,6 +354,7 @@ def run(config: Config) -> RunMetrics:
             30,
         )
         decoders[cam] = (times, samples, keyframes, decoder)
+        codecs[cam] = video_codec(decoder.metadata.codec)
     grid_ns = build_time_grid(
         [entry[0] for entry in decoders.values()],
         fps=config.fps,
@@ -377,11 +380,12 @@ def run(config: Config) -> RunMetrics:
     )
     log_rig_static(rig)
     # Relay the stored H.264 packets instead of re-encoding decoded frames: full sensor
-    # resolution and the source frame rate, for a fraction of the bytes. The tracker keeps
-    # decoding the same segment through its own NVDEC decoders.
+    # resolution and the source frame rate, for a fraction of the bytes. They are the packets
+    # the tracker's NVDEC decoders were opened from, so the catalog is not queried again.
     for cam in config.cams:
-        relayed: int = relay_video_stream(
-            dataset, config.segment_id, f"{RIG}/{cam}/pinhole/video", TIMELINE, int(grid_ns[0]), int(grid_ns[-1])
+        times, samples, keyframes, _ = decoders[cam]
+        relayed: int = relay_video_packets(
+            f"{RIG}/{cam}/pinhole/video", TIMELINE, times, samples, keyframes, codecs[cam], int(grid_ns[0]), int(grid_ns[-1])
         )
         print(f"relayed {relayed} {cam} video samples")
 
@@ -398,9 +402,8 @@ def run(config: Config) -> RunMetrics:
     for frame_index, timestamp_ns_raw in enumerate(grid_ns):
         timestamp_ns = int(timestamp_ns_raw)
         world_T_rig = interpolate_pose(pose_times_ns, world_T_rig_values, timestamp_ns)
-        images = np.stack(
-            [_frame_at(decoders[cam][0], decoders[cam][3], timestamp_ns) for cam in config.cams]
-        ).astype(np.uint8, copy=False)
+        # The NVDEC frames stay on the GPU: the tracker's detector and pose models read them there.
+        images: UInt8[torch.Tensor, "v h w 3"] = torch.stack([_frame_at(decoders[cam][0], decoders[cam][3], timestamp_ns) for cam in config.cams])
         step: LampStep = tracker.step(Frameset(timestamp_ns=timestamp_ns, images=images, world_T_rig=world_T_rig))
         current_people = [state for state in step.people.values() if int(state.timestamps_ns[-1]) == timestamp_ns]
         rr.set_time(TIMELINE, duration=np.timedelta64(timestamp_ns, "ns"))

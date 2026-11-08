@@ -19,7 +19,6 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog, split_holdout_segments
-from zipdepth.catalog.targets import build_eval_transform
 from zipdepth.catalog.ultrawide import (
     DEFAULT_ULTRAWIDE_PROMPT_SCALE,
     ULTRAWIDE_LAYER,
@@ -29,7 +28,6 @@ from zipdepth.catalog.ultrawide import (
     footprint_box,
     prompt_placement,
 )
-from zipdepth.data.transforms import AlbumentationsWrapper
 from zipdepth.evaluation.edge_metrics import EdgeStratifiedResult, edge_stratified_mae
 from zipdepth.evaluation.metrics import abs_relative_difference, align_depth_least_square, delta1_acc, disparity2depth, fit_affine_least_squares
 
@@ -381,10 +379,9 @@ def _evaluate_ultrawide(
         RuntimeError: If no ultrawide frame could be scored.
     """
     # Catalog-only imports stay local so pure metric tests run outside the catalog lane.
-    from zipdepth.catalog.builders import CpuSampleBuilder
+    from zipdepth.catalog.builders import eval_sample_builder
     from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 
-    transform: AlbumentationsWrapper = build_eval_transform(config.height, config.width)
     policy: UltrawidePolicy = UltrawidePolicy(
         min_valid_fraction=config.ultrawide_min_valid_fraction,
         valid_erosion_px=config.ultrawide_valid_erosion_px,
@@ -406,7 +403,7 @@ def _evaluate_ultrawide(
             [segment_id],
             catalog.row_by_id,
             device=device,
-            builder_factory=lambda: CpuSampleBuilder(transform, min_depth_span=0.0, target_mode="metric", ultrawide_policy=policy),
+            builder_factory=lambda: eval_sample_builder((config.height, config.width), device, policy),
             shuffle_buffer_size=1,
             frame_stride=config.frame_stride,
             num_producers=1,
@@ -417,10 +414,10 @@ def _evaluate_ultrawide(
         segment_records: list[FootprintSplitMetrics] = []
         batch: dict[str, Tensor]
         for batch in loader:
-            target_depth_hw: Float32[ndarray, "h w"] = batch["target_depth"][0, 0].numpy().astype(np.float32, copy=False)
-            target_valid_hw: Bool[ndarray, "h w"] = batch["target_valid"][0, 0].numpy().astype(bool, copy=False)
-            prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][0, 0].numpy().astype(np.float32, copy=False)
-            prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][0, 0].numpy().astype(bool, copy=False)
+            target_depth_hw: Float32[ndarray, "h w"] = batch["target_depth"][0, 0].cpu().numpy().astype(np.float32, copy=False)
+            target_valid_hw: Bool[ndarray, "h w"] = batch["target_valid"][0, 0].cpu().numpy().astype(bool, copy=False)
+            prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][0, 0].cpu().numpy().astype(np.float32, copy=False)
+            prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][0, 0].cpu().numpy().astype(bool, copy=False)
             if prompted_model is not None:
                 image_bchw: UInt8[Tensor, "b 3 h w"] = batch["image"].to(device=device, non_blocking=True)
                 prompt_depth_bchw: Float32[Tensor, "b 1 192 256"] = batch["prompt_depth"].to(device=device, non_blocking=True)
@@ -483,7 +480,6 @@ def main(config: EvalCatalogConfig) -> Path:
         raise ValueError(f"ultrawide scoring supports the metric and prompt-upsample evaluations, not {config.evaluation!r}")
     catalog: PromptDACatalog = load_promptda_catalog(config.catalog_url, config.dataset_name)
     segment_ids: list[str] = _selected_segments(config, catalog)
-    transform: AlbumentationsWrapper = build_eval_transform(config.height, config.width)
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint: Path | None = None
     output_tag: str = "prompt-baseline"
@@ -502,7 +498,7 @@ def main(config: EvalCatalogConfig) -> Path:
             )
 
     # Catalog-only imports stay local so pure metric tests run outside the catalog lane.
-    from zipdepth.catalog.builders import CpuSampleBuilder
+    from zipdepth.catalog.builders import eval_sample_builder
     from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 
     per_segment: list[dict[str, float | int | str]] = []
@@ -517,7 +513,7 @@ def main(config: EvalCatalogConfig) -> Path:
             [segment_id],
             catalog.row_by_id,
             device=device,
-            builder_factory=lambda: CpuSampleBuilder(transform, min_depth_span=0.0, target_mode="metric"),
+            builder_factory=lambda: eval_sample_builder((config.height, config.width), device),
             shuffle_buffer_size=1,
             frame_stride=config.frame_stride,
             num_producers=1,
@@ -530,10 +526,10 @@ def main(config: EvalCatalogConfig) -> Path:
         skipped_frame_count: int = 0
         batch: dict[str, Tensor]
         for batch in loader:
-            target_depth_hw: Float32[ndarray, "h w"] = batch["target_depth"][0, 0].numpy().astype(np.float32, copy=False)
-            target_valid_hw: Bool[ndarray, "h w"] = batch["target_valid"][0, 0].numpy().astype(bool, copy=False)
-            prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][0, 0].numpy().astype(np.float32, copy=False)
-            prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][0, 0].numpy().astype(bool, copy=False)
+            target_depth_hw: Float32[ndarray, "h w"] = batch["target_depth"][0, 0].cpu().numpy().astype(np.float32, copy=False)
+            target_valid_hw: Bool[ndarray, "h w"] = batch["target_valid"][0, 0].cpu().numpy().astype(bool, copy=False)
+            prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][0, 0].cpu().numpy().astype(np.float32, copy=False)
+            prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][0, 0].cpu().numpy().astype(bool, copy=False)
 
             if config.evaluation == "prompt-upsample":
                 # Zero-parameter control: bilinearly resize the confidence-masked
@@ -551,7 +547,7 @@ def main(config: EvalCatalogConfig) -> Path:
             else:
                 if relative_predictor is None:
                     raise RuntimeError("relative predictor was not initialized")
-                image_chw: UInt8[ndarray, "3 h w"] = batch["image"][0].numpy()
+                image_chw: UInt8[ndarray, "3 h w"] = batch["image"][0].cpu().numpy()
                 rgb_hwc: UInt8[ndarray, "h w 3"] = np.ascontiguousarray(np.moveaxis(image_chw, 0, -1))
                 relative_inverse_hw: Float32[ndarray, "h w"] = relative_predictor(rgb_hwc, None).disparity
                 if config.evaluation == "affine-reference":

@@ -12,6 +12,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import tyro
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -52,6 +53,10 @@ class BenchmarkConfig:
     realtime speed). Fraction-based so the same gate covers any clip length."""
     warmup_frames: int = 33
     """Frames run once beforehand to absorb model load/compile/cudnn autotune."""
+    observe_tracked_only: bool = False
+    """With --tracker.track-stride N, run landmarks + fit only on tracked ticks (body observed at fps/N)."""
+    steady_skip: int = 60
+    """Ticks excluded from the steady-state rate (fitter bootstrap, graph capture, first re-detect)."""
     device: str = "cuda"
     """Compute device."""
 
@@ -74,6 +79,7 @@ def build_pipeline(config: BenchmarkConfig, sequence: MultiViewSequence) -> Stre
         trt_engine=config.trt_engine,
         hires_crops=hires_crops,
         proxy_dir=config.proxy_dir,
+        observe_tracked_only=config.observe_tracked_only,
     )
 
 
@@ -121,6 +127,12 @@ def main(config: BenchmarkConfig) -> int:
     print(f"\n  wall      {stats.elapsed_s:7.2f} s   (clip duration {clip_seconds:.2f} s)")
     print(f"  decode    {stats.decode_backend}")
     print(f"  throughput {stats.ticks_per_s:6.1f} ticks/s ({cam_fps:.0f} cam-fps); realtime needs {sequence.fps:.0f} ticks/s")
+    intervals_ms: np.ndarray = np.diff(np.asarray(stats.tick_end_s)[config.steady_skip :]) * 1000.0
+    if intervals_ms.size:
+        print(
+            f"  steady    {stats.steady_ticks_per_s(config.steady_skip):6.1f} ticks/s after tick {config.steady_skip}"
+            f"  (tick interval p50 {np.percentile(intervals_ms, 50):.1f} ms, p95 {np.percentile(intervals_ms, 95):.1f} ms)"
+        )
     gate_seconds: float = clip_seconds / gate_fraction
     ok: bool = stats.elapsed_s <= gate_seconds
     print(f"  gate      {gate_seconds:.1f} s ({gate_fraction:.0%} of realtime)  ->  {'PASS' if ok else 'FAIL'}")

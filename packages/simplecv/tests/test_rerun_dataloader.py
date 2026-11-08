@@ -90,24 +90,21 @@ def test_relay_video_stream_opens_at_the_keyframe_before_the_window(monkeypatch:
         return times, samples, keyframes, rr.VideoCodec.H264.value
 
     logged: list[tuple[str, object, dict[str, object]]] = []
-    timed: list[np.timedelta64] = []
+    sent: list[tuple[str, list[rr.TimeColumn], object]] = []
     monkeypatch.setattr(rerun_dataloader, "read_segment_packets", read_packets)
     monkeypatch.setattr(rr, "log", lambda entity_path, archetype, **kwargs: logged.append((entity_path, archetype, kwargs)))
-    monkeypatch.setattr(rr, "set_time", lambda _timeline, *, duration: timed.append(duration))
+    monkeypatch.setattr(rr, "send_columns", lambda entity_path, *, indexes, columns: sent.append((entity_path, indexes, columns)))
     dataset: DatasetEntry = object.__new__(DatasetEntry)
 
     relayed: int = rerun_dataloader.relay_video_stream(dataset, "segment-a", "world/cam/video", "video_time", 6, 7)
 
     assert relayed == 4, "the window [6, 7] opens at the keyframe at t=4"
-    assert timed == [np.timedelta64(t_ns, "ns") for t_ns in (4, 5, 6, 7)]
-    entity_paths, archetypes, keywords = zip(*logged, strict=True)
-    assert entity_paths == ("world/cam/video",) * 5
-    assert [kwargs.get("static", False) for kwargs in keywords] == [True, False, False, False, False]
-    codec = {batch.component_descriptor().component: batch for batch in archetypes[0].as_component_batches()}
+    assert [(entity, kwargs.get("static", False)) for entity, _, kwargs in logged] == [("world/cam/video", True)], "codec once, static"
+    codec = {batch.component_descriptor().component: batch for batch in logged[0][1].as_component_batches()}
     assert codec["VideoStream:codec"].as_arrow_array().to_pylist() == [rr.VideoCodec.H264.value]
-    relayed_samples = [
-        {batch.component_descriptor().component: batch for batch in archetype.as_component_batches()} for archetype in archetypes[1:]
-    ]
-    assert [bytes(fields["VideoStream:sample"].as_arrow_array().to_pylist()[0]) for fields in relayed_samples] == samples[4:8]
-    keyframe_flags = [fields["VideoStream:is_keyframe"].as_arrow_array().to_pylist() for fields in relayed_samples]
-    assert keyframe_flags == [[True], [False], [False], [False]], "only the anchor packet is a keyframe"
+    (entity_path, indexes, columns), = sent
+    assert entity_path == "world/cam/video"
+    assert indexes[0].as_arrow_array().cast("int64").to_pylist() == [4, 5, 6, 7], "one send_columns for the window, on its own timestamps"
+    by_component = {column.component_descriptor().component: column.as_arrow_array().to_pylist() for column in columns}
+    assert [bytes(sample[0]) for sample in by_component["VideoStream:sample"]] == samples[4:8]
+    assert by_component["VideoStream:is_keyframe"] == [[True], [False], [False], [False]], "only the anchor packet is a keyframe"

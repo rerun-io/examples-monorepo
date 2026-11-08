@@ -47,6 +47,10 @@ class AugmentPolicy:
                 raise ValueError("augmentation probabilities must be in [0, 1]")
 
 
+EVAL_AUGMENT_POLICY: AugmentPolicy = AugmentPolicy(flip_p=0.0, channel_shuffle_p=0.0, gray_p=0.0)
+"""No augmentation: with it the CUDA sample builder builds the evaluation sample (centre resize only)."""
+
+
 def inverse_depth_from_mm(depth_mm_hw: UInt16[ndarray, "h w"]) -> Float32[ndarray, "h w"]:
     """Convert valid millimetre depth to inverse metres and set invalid pixels to zero.
 
