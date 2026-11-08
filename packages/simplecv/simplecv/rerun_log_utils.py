@@ -285,7 +285,7 @@ def log_pinhole(
         rr.Transform3D(
             translation=camera.extrinsics.cam_t_world,
             mat3x3=camera.extrinsics.cam_R_world,
-            from_parent=True,
+            relation=rr.TransformRelation.ChildFromParent,
         ),
         static=static,
         recording=recording,

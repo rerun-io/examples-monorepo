@@ -1,9 +1,9 @@
-"""The map's surface: every keyframe's depth fused into a sparse colour TSDF (``packages/tsdf-rs``), one mesh.
+"""The map's surface: keyframe depth fused into a sparse colour TSDF (``packages/tsdf-rs``), logged block by block.
 
-The backend keeps refining keyframe poses, so a volume that only grows goes stale; every keyframe is re-fused at its
-latest pose from scratch instead (:func:`fuse_keyframes`). That runs on its own thread (:class:`LatestWinsWorker`,
-fed by the async logger on every new keyframe), so the logger never waits on it; ``tsdf-rs`` releases the GIL while
-it integrates and extracts.
+:class:`LiveSurface` runs on its own thread (:class:`LatestWinsWorker`, fed by the async logger on every new
+keyframe): each new keyframe is integrated into a live volume and only the changed blocks are logged; every few
+keyframes and at the end, everything is re-fused at the backend's latest poses. ``tsdf-rs`` releases the GIL while it
+integrates and extracts.
 """
 
 import threading
@@ -45,40 +45,32 @@ class SurfaceSettings:
     """Signed-distance truncation in voxels (Open3D's ``3 * voxel`` convention)."""
 
 
-def fuse_keyframes(
-    keyframes: list[tuple[KeyframeDepth, Float32[ndarray, "8"]]],
-    settings: SurfaceSettings | None = None,
-) -> rr.Mesh3D | None:
-    """Fuse keyframes, each at its world-from-camera Sim3 (lietorch ``[t, q, s]``), into one front-faced mesh.
+def new_volume(settings: SurfaceSettings) -> TsdfVolume:
+    """An empty colour-fusing TSDF volume."""
+    return TsdfVolume(voxel_size=settings.voxel_size, sdf_trunc=settings.truncation_voxels * settings.voxel_size, fuse_color=True)
+
+
+def integrate_keyframe(volume: TsdfVolume, keyframe: KeyframeDepth, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
+    """Integrate one keyframe at its world-from-camera Sim3 (lietorch ``[t, q, s]``).
 
     A Sim3 maps a camera point ``X`` to ``s R X + t``: the rigid pose ``(R, t)`` with the depth scaled by ``s``.
-
-    Returns:
-        The mesh, rendering only front faces (the side the cameras saw), so walls seen from outside a room do not
-        hide it; None if no surface came out.
     """
-    if settings is None:
-        settings = SurfaceSettings()
-    volume: TsdfVolume = TsdfVolume(
-        voxel_size=settings.voxel_size, sdf_trunc=settings.truncation_voxels * settings.voxel_size, fuse_color=True
+    sim3: lietorch.Sim3 = lietorch.Sim3(torch.from_numpy(world_sim3_cam_data).unsqueeze(0))
+    world_T_cam: Float32[ndarray, "4 4"] = as_SE3(sim3).matrix()[0].numpy().astype(np.float32)
+    scale: float = float(world_sim3_cam_data[7])
+    volume.integrate(
+        np.ascontiguousarray(keyframe.depth_hw * scale, dtype=np.float32),
+        keyframe.k_33,
+        np.linalg.inv(world_T_cam.astype(np.float64)).astype(np.float32),
+        np.ascontiguousarray(keyframe.rgb_hw3),
     )
-    for keyframe, world_sim3_cam_data in keyframes:
-        sim3: lietorch.Sim3 = lietorch.Sim3(torch.from_numpy(world_sim3_cam_data).unsqueeze(0))
-        world_T_cam: Float32[ndarray, "4 4"] = as_SE3(sim3).matrix()[0].numpy().astype(np.float32)
-        scale: float = float(world_sim3_cam_data[7])
-        volume.integrate(
-            np.ascontiguousarray(keyframe.depth_hw * scale, dtype=np.float32),
-            keyframe.k_33,
-            np.linalg.inv(world_T_cam.astype(np.float64)).astype(np.float32),
-            np.ascontiguousarray(keyframe.rgb_hw3),
-        )
-    vertices: Float32[ndarray, "v 3"]
-    triangles: UInt32[ndarray, "t 3"]
-    colors: UInt8[ndarray, "v 3"] | None
-    normals: Float32[ndarray, "v 3"]
-    vertices, triangles, colors, normals = volume.extract_mesh()
-    if triangles.shape[0] == 0:
-        return None
+
+
+def front_faced_mesh(
+    vertices: Float32[ndarray, "v 3"], triangles: UInt32[ndarray, "t 3"], colors: UInt8[ndarray, "v 3"] | None, normals: Float32[ndarray, "v 3"]
+) -> rr.Mesh3D:
+    """A ``tsdf-rs`` mesh as a Mesh3D that renders only front faces (the side the cameras saw), so walls seen from
+    outside a room do not hide it."""
     return rr.Mesh3D(
         vertex_positions=vertices,
         triangle_indices=triangles,
@@ -131,21 +123,64 @@ class LatestWinsWorker(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class SurfaceRequest:
-    """Every keyframe at its latest pose, and the time point the mesh is logged at."""
+    """Every keyframe so far (index, depth, latest pose) and the time point the update is logged at."""
 
-    keyframes: list[tuple[KeyframeDepth, Float32[ndarray, "8"]]]
+    keyframes: list[tuple[int, KeyframeDepth, Float32[ndarray, "8"]]]
     frame_idx: int
     timestamp_ns: int | None
+    final: bool = False
+    """The run's end: re-fuse everything at the final poses."""
 
 
-def log_surface_request(request: SurfaceRequest, mesh_path: str, recording: rr.RecordingStream | None, timelines: tuple[str, str]) -> None:
-    """Fuse ``request`` and log the mesh at its time point on ``recording`` (pass it explicitly: a worker thread
-    does not see the caller's thread- or context-local recording)."""
-    mesh: rr.Mesh3D | None = fuse_keyframes(request.keyframes)
-    if mesh is None:
-        return
-    frame_timeline, video_timeline = timelines
-    rr.set_time(frame_timeline, sequence=request.frame_idx, recording=recording)
-    if request.timestamp_ns is not None:
-        rr.set_time(video_timeline, duration=1e-9 * float(request.timestamp_ns), recording=recording)
-    rr.log(mesh_path, mesh, recording=recording)
+class LiveSurface:
+    """The map surface, grown on the worker thread and logged block by block under ``mesh_path``.
+
+    Each request integrates only the keyframes not yet in the live volume, at their current pose, and logs the
+    blocks that changed (``mesh_path/<x>_<y>_<z>``), so an update is small. The backend keeps refining poses,
+    which does not move what was integrated: every ``refuse_every`` keyframes, and for the final request, a fresh
+    volume is fused from every keyframe at its latest pose, the logged blocks are cleared, and all of its blocks are
+    logged; it becomes the live volume. Blocks are logged at the request's time point, so scrubbing shows growth.
+    (MetricTrail's ``live_surface`` pattern; see ``packages/metrictrail``.)
+    """
+
+    def __init__(
+        self,
+        mesh_path: str,
+        recording: rr.RecordingStream | None,
+        timelines: tuple[str, str],
+        refuse_every: int = 10,
+        settings: SurfaceSettings | None = None,
+    ) -> None:
+        self._mesh_path: str = mesh_path
+        self._recording: rr.RecordingStream | None = recording
+        self._timelines: tuple[str, str] = timelines
+        self._refuse_every: int = refuse_every
+        self._settings: SurfaceSettings = settings if settings is not None else SurfaceSettings()
+        self._volume: TsdfVolume = new_volume(self._settings)
+        self._integrated: set[int] = set()
+        self._n_kf_at_refuse: int = 0
+
+    def handle(self, request: SurfaceRequest) -> None:
+        """Bring the surface up to ``request`` and log what changed (run on the worker thread)."""
+        refuse: bool = request.final or len(request.keyframes) - self._n_kf_at_refuse >= self._refuse_every
+        if refuse:
+            self._volume = new_volume(self._settings)
+            self._integrated = set()
+            self._n_kf_at_refuse = len(request.keyframes)
+        for kf_idx, keyframe, world_sim3_cam_data in request.keyframes:
+            if kf_idx not in self._integrated:
+                integrate_keyframe(self._volume, keyframe, world_sim3_cam_data)
+                self._integrated.add(kf_idx)
+
+        frame_timeline, video_timeline = self._timelines
+        rr.set_time(frame_timeline, sequence=request.frame_idx, recording=self._recording)
+        if request.timestamp_ns is not None:
+            rr.set_time(video_timeline, duration=1e-9 * float(request.timestamp_ns), recording=self._recording)
+        if refuse:
+            rr.log(self._mesh_path, rr.Clear(recursive=True), recording=self._recording)
+        for (x, y, z), (vertices, triangles, colors, normals) in self._volume.extract_dirty_block_meshes():
+            block_path: str = f"{self._mesh_path}/{x}_{y}_{z}"
+            if triangles.shape[0] == 0:
+                rr.log(block_path, rr.Clear(recursive=False), recording=self._recording)
+            else:
+                rr.log(block_path, front_faced_mesh(vertices, triangles, colors, normals), recording=self._recording)

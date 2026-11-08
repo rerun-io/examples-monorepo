@@ -11,7 +11,16 @@ from numpy import ndarray
 
 pytest.importorskip("tsdf_rs", reason="the map surface needs the tsdf-rs extension from the mast3r-slam envs")
 
-from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, SurfaceSettings, fuse_keyframes  # noqa: E402
+from mast3r_slam import map_surface  # noqa: E402
+from mast3r_slam.map_surface import (  # noqa: E402
+    KeyframeDepth,
+    LatestWinsWorker,
+    LiveSurface,
+    SurfaceRequest,
+    SurfaceSettings,
+    integrate_keyframe,
+    new_volume,
+)
 
 H: int = 48
 W: int = 64
@@ -33,23 +42,61 @@ def _sim3_data(scale: float) -> Float32[ndarray, "8"]:
     return data
 
 
-def test_mesh_lands_at_the_scaled_depth_and_shows_front_faces_only() -> None:
+def test_mesh_lands_at_the_scaled_depth() -> None:
     """A Sim3 scale of 2 puts a wall seen at Z=1 in its camera frame at Z=2 in the world."""
-    mesh: rr.Mesh3D | None = fuse_keyframes(
-        [(_plane_keyframe(1.0), _sim3_data(2.0)), (_plane_keyframe(1.0), _sim3_data(2.0))],
-        SurfaceSettings(voxel_size=0.02),
-    )
-    assert mesh is not None
-    assert mesh.vertex_positions is not None
-    vertices_z: Float32[ndarray, "v"] = np.asarray(mesh.vertex_positions.pa_array.to_pylist(), dtype=np.float32)[:, 2]
-    np.testing.assert_allclose(np.median(vertices_z), 2.0, atol=0.03)
-    assert mesh.face_rendering is not None
-    assert mesh.face_rendering.pa_array.to_pylist() == [rr.components.MeshFaceRendering.Front.value]
+    volume = new_volume(SurfaceSettings(voxel_size=0.02))
+    for _ in range(2):
+        integrate_keyframe(volume, _plane_keyframe(1.0), _sim3_data(2.0))
+    vertices: Float32[ndarray, "v 3"] = volume.extract_mesh()[0]
+    np.testing.assert_allclose(np.median(vertices[:, 2]), 2.0, atol=0.03)
 
 
-def test_no_depth_gives_no_mesh() -> None:
-    """Keyframes whose depth is all filtered out produce no surface."""
-    assert fuse_keyframes([(_plane_keyframe(0.0), _sim3_data(1.0))]) is None
+def _live_logs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(map_surface.rr, "log", lambda path, entity, *_a, **_k: logged.append((str(path), type(entity).__name__)))
+    monkeypatch.setattr(map_surface.rr, "set_time", lambda *_a, **_k: None)
+    return logged
+
+
+def test_live_surface_logs_changed_blocks_then_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """New keyframes log only changed blocks; the re-fuse clears the subtree and logs every block, front-faced."""
+    logged: list[tuple[str, str]] = _live_logs(monkeypatch)
+    meshes: list[rr.Mesh3D] = []
+    real_front_faced = map_surface.front_faced_mesh
+
+    def _capture_mesh(*args: object) -> rr.Mesh3D:
+        meshes.append(real_front_faced(*args))  # pyrefly: ignore
+        return meshes[-1]
+
+    monkeypatch.setattr(map_surface, "front_faced_mesh", _capture_mesh)
+    live: LiveSurface = LiveSurface("world/mesh", None, ("frame", "video_time"), refuse_every=3, settings=SurfaceSettings(voxel_size=0.02))
+    wall: KeyframeDepth = _plane_keyframe(1.0)
+    far_wall: KeyframeDepth = _plane_keyframe(2.0)
+
+    live.handle(SurfaceRequest(keyframes=[(0, wall, _sim3_data(1.0))], frame_idx=0, timestamp_ns=None))
+    first: list[tuple[str, str]] = list(logged)
+    assert first and all(path.startswith("world/mesh/") and kind == "Mesh3D" for path, kind in first)
+
+    logged.clear()
+    live.handle(SurfaceRequest(keyframes=[(0, wall, _sim3_data(1.0)), (1, wall, _sim3_data(1.0))], frame_idx=1, timestamp_ns=None))
+    assert logged and set(logged) <= set(first), "the same wall again only touches blocks it already had"
+
+    logged.clear()
+    keyframes = [(0, wall, _sim3_data(1.0)), (1, wall, _sim3_data(1.0)), (2, far_wall, _sim3_data(1.0))]
+    live.handle(SurfaceRequest(keyframes=keyframes, frame_idx=2, timestamp_ns=None))
+    assert logged[0] == ("world/mesh", "Clear"), "a re-fuse clears the live blocks first"
+    assert {path for path, _ in logged[1:]} > {path for path, _ in first}, "then logs every block, the new wall included"
+    for mesh in meshes:
+        assert mesh.face_rendering is not None
+        assert mesh.face_rendering.pa_array.to_pylist() == [rr.components.MeshFaceRendering.Front.value]
+
+
+def test_final_request_always_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's last request re-fuses at the final poses whatever the cadence."""
+    logged: list[tuple[str, str]] = _live_logs(monkeypatch)
+    live: LiveSurface = LiveSurface("world/mesh", None, ("frame", "video_time"), refuse_every=100)
+    live.handle(SurfaceRequest(keyframes=[(0, _plane_keyframe(1.0), _sim3_data(1.0))], frame_idx=0, timestamp_ns=None, final=True))
+    assert logged[0] == ("world/mesh", "Clear")
 
 
 def test_latest_wins_worker_coalesces_pending_requests_and_runs_the_last_on_close() -> None:

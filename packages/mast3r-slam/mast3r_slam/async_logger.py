@@ -47,7 +47,7 @@ from mast3r_slam.log_events import (
     LogTerminate,
     LogText,
 )
-from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, SurfaceRequest, log_surface_request
+from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, LiveSurface, SurfaceRequest
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_intri, frame_to_pinhole
 from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
 
@@ -382,11 +382,8 @@ class AsyncRerunLogger:
             rr.set_thread_local_data_recording(self._recording)
         # The worker thread sees neither a thread-local nor a context-local recording: hand it this one.
         surface_recording: rr.RecordingStream | None = rr.get_data_recording(self._recording)
-        mesh_path: str = f"{self._parent_log_path}/mesh"
-        self._surface_worker = LatestWinsWorker(
-            lambda request: log_surface_request(request, mesh_path, surface_recording, (FRAME_TIMELINE, VIDEO_TIMELINE)),
-            name="tsdf-surface",
-        )
+        live_surface: LiveSurface = LiveSurface(f"{self._parent_log_path}/mesh", surface_recording, (FRAME_TIMELINE, VIDEO_TIMELINE))
+        self._surface_worker = LatestWinsWorker(live_surface.handle, name="tsdf-surface")
 
         try:
             while True:
@@ -398,7 +395,7 @@ class AsyncRerunLogger:
                 if isinstance(event, LogTerminate):
                     self._drain_queue()
                     # The final surface, at the backend's final poses, logged before the recording closes.
-                    self._request_surface()
+                    self._request_surface(final=True)
                     if self._surface_worker is not None:
                         self._surface_worker.close()
                     break
@@ -607,19 +604,20 @@ class AsyncRerunLogger:
                 rr.Transform3D(mat3x3=orient_R, translation=orient_t),
             )
 
-        # Map surface: re-fuse on every new keyframe; the worker coalesces requests it cannot keep up with.
+        # Map surface: update on every new keyframe; the worker coalesces requests it cannot keep up with.
         if len(self._surface_keyframes) != self._surface_requested_n_kf:
             self._request_surface()
 
-    def _request_surface(self) -> None:
+    def _request_surface(self, final: bool = False) -> None:
         """Hand the worker every keyframe at its latest pose; returns at once (the arrays are never mutated)."""
         if not self._surface_keyframes or self._surface_worker is None:
             return
         self._surface_worker.submit(
             SurfaceRequest(
-                keyframes=[(self._surface_keyframes[kf_idx], self._surface_poses[kf_idx]) for kf_idx in sorted(self._surface_keyframes)],
+                keyframes=[(kf_idx, self._surface_keyframes[kf_idx], self._surface_poses[kf_idx]) for kf_idx in sorted(self._surface_keyframes)],
                 frame_idx=self._now[0],
                 timestamp_ns=self._now[1],
+                final=final,
             )
         )
         self._surface_requested_n_kf = len(self._surface_keyframes)
