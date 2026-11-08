@@ -347,10 +347,8 @@ def run_backend(
     factor_graph: FactorGraph = FactorGraph(model, keyframes, K, device)
     retrieval_database: RetrievalDatabase = load_retriever(model)
 
-    mode: Mode = states.get_mode()
-    while mode is not Mode.TERMINATED:
-        mode = states.get_mode()
-
+    mode: Mode
+    while (mode := states.get_mode()) is not Mode.TERMINATED:
         # Wait for the frontend to finish initialisation.
         if mode == Mode.INIT:
             time.sleep(0.01)
@@ -408,4 +406,4 @@ def run_backend(
         # Mark this keyframe as processed.
         with states.lock:
             if len(states.global_optimizer_tasks) > 0:
-                idx = states.global_optimizer_tasks.pop(0)
+                states.global_optimizer_tasks.pop(0)
