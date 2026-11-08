@@ -199,6 +199,11 @@ def use_tracking_engine(model: AsymmetricMASt3R, img_hw: tuple[int, int]) -> Non
     loaded: tuple[TensorRtRuntime, Int[Tensor, "1 n_patches 2"]] = load_tracking_engine(model, img_hw)
     runtime: TensorRtRuntime = loaded[0]
     pos: Int[Tensor, "1 n_patches 2"] = loaded[1]
+    # Capture the engine's CUDA graph now, before the pipeline starts its threads: a device-wide sync on any other
+    # thread (the frame prefetcher, the logger) during a capture invalidates it.
+    feat_dim: int = model.enc_embed_dim
+    runtime({"img_i": torch.zeros(1, 3, *img_hw, device=pos.device), "feat_j": torch.zeros(1, pos.shape[1], feat_dim, device=pos.device)})
+    torch.cuda.synchronize(pos.device)
 
     def run(frame_i: Frame, frame_j: Frame) -> tuple[Tensor, ...]:
         if tuple(frame_i.rgb_tensor.shape[-2:]) != img_hw:
