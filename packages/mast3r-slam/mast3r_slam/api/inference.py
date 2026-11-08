@@ -55,6 +55,7 @@ from torch import Tensor
 
 from mast3r_slam.async_logger import (
     DEFAULT_CONF_THRESHOLD,
+    DEFAULT_PANEL_HZ,
     AsyncRerunLogger,
     compute_orient,
     snapshot_current_frame,
@@ -129,6 +130,9 @@ class SlamSettings:
     conf_threshold: float = DEFAULT_CONF_THRESHOLD
     """Smallest MASt3R confidence (1 = none) a pixel needs to show in the depth panels and to fuse into the map
     surface. Lower it when a hard clip (water, sky, low texture) shows black depth."""
+    live_panel_hz: float = DEFAULT_PANEL_HZ
+    """Most current-frame panels (image, depth, pointmap, confidence) logged per second; 0 logs every frame. The
+    camera pose, the path and the map are logged for every frame."""
     compile_model: bool = False
     """Run the tracker's MASt3R forward as compiled CUDA graphs: about 2x faster per frame, but the first tracked
     frame waits for the compile (about 30 s cold, 14 s with a warm inductor cache)."""
@@ -154,6 +158,10 @@ class InferenceConfig(SlamSettings):
 
 CURRENT_FRAME_BACKLOG: int = 32
 """Logger events queued before the tracking thread stops enqueueing current frames (map events are always queued)."""
+STATUS_INTERVAL_S: float = 0.1
+"""Shortest wall-clock time between two status yields of :func:`run_slam_pipeline`. Tracking runs inside the generator,
+so the caller's work per yield stalls it: the Gradio app streams the recording to its viewer on every yield, which
+cost about 5 ms per frame when every frame was yielded."""
 
 
 def load_slam_model(settings: SlamSettings, device: str = DEVICE) -> AsymmetricMASt3R:
@@ -204,7 +212,7 @@ def run_slam_pipeline(
     5. Run frame-by-frame tracking loop.
     6. Log FPS metrics and timing.
     7. Export keyframes to NerfStudio format (if ``settings.ns_save_path`` is set).
-    8. Wait for backend to finish (``ctx.join()``).
+    8. Stop the backend and the manager (``SlamBackend.__exit__``: terminate, then kill, if it does not exit).
 
     Nerfstudio export happens inside the generator (before
     ``SlamBackend.__exit__``) because ``SharedKeyframes`` depends on the
@@ -220,7 +228,7 @@ def run_slam_pipeline(
             (Gradio).  ``None`` uses the global recording (CLI).
 
     Yields:
-        Status message string after each processed frame.
+        Status message string, at most every ``STATUS_INTERVAL_S`` and after the last frame.
 
     Raises:
         ValueError: If the config asks for calibration and the dataset has none.
@@ -255,7 +263,7 @@ def run_slam_pipeline(
     # dropped, and current-frame events are only enqueued while the backlog is short (CURRENT_FRAME_BACKLOG).
     event_queue: queue.Queue[LogEvent] = queue.Queue()
     async_logger: AsyncRerunLogger = AsyncRerunLogger(
-        event_queue, PARENT_LOG_PATH, conf_threshold=settings.conf_threshold, recording=recording,
+        event_queue, PARENT_LOG_PATH, conf_threshold=settings.conf_threshold, panel_hz=settings.live_panel_hz, recording=recording,
     )
 
     # ── Camera calibration (optional) ──────────────────────────────────────
@@ -289,6 +297,7 @@ def run_slam_pipeline(
 
         i: int = 0
         fps_timer: float = time.time()
+        last_status: float = 0.0
         start_time: float = timer()
         last_orient_n_kf: int = 0
         prev_edge_count: int = 0
@@ -313,6 +322,16 @@ def run_slam_pipeline(
                 ctx.wait_for_backlog(0)
                 if backlog > 0:
                     print(f"Backend finished {backlog} queued keyframes in {time.perf_counter() - drain_start:.2f} s")
+                # The drained optimisations moved keyframes after the last frame's update: send their final poses,
+                # which the logger's final map surface fuses at.
+                final_poses: list[tuple[int, Float32[ndarray, "8"]]] = [
+                    (kf_idx, keyframes.world_sim3_cam[kf_idx, 0].cpu().numpy().astype(np.float32)) for kf_idx in keyframes.get_dirty_idx().tolist()
+                ]
+                if final_poses:
+                    event_queue.put(LogMapUpdate(
+                        frame_idx=i - 1, timestamp_ns=int(frame_timestamps_ns[i - 1]) if frame_timestamps_ns is not None and i - 1 < len(frame_timestamps_ns) else None,
+                        pose_updates=final_poses, edge_positions=snapshot_edges(states, keyframes),
+                    ))
                 states.set_mode(Mode.TERMINATED)
                 break
 
@@ -439,10 +458,12 @@ def run_slam_pipeline(
                 event_queue.put(LogText(path=LOG_PATH, message=f"FPS: {FPS:.1f}"))
             i += 1
 
-            yield f"Processing frame {i}/{n_frames}"
+            if time.monotonic() - last_status >= STATUS_INTERVAL_S or i == n_frames:
+                last_status = time.monotonic()
+                yield f"Processing frame {i}/{n_frames}"
 
         # ── Post-loop: flush logger, log timing, export nerfstudio ────────
-        # Nerfstudio export MUST happen before ctx.join() / __exit__ because
+        # Nerfstudio export MUST happen before SlamBackend.__exit__ because
         # SharedKeyframes uses mp.Manager-backed values (e.g. n_size) that
         # become invalid after the manager shuts down.
         event_queue.put(LogText(path=LOG_PATH, message=f"Inference time: {format_time(timer() - start_time)}"))
@@ -457,8 +478,6 @@ def run_slam_pipeline(
                 f"{PARENT_LOG_PATH}/final_pointcloud",
                 rr.Points3D(positions=pcd.points, colors=pcd.colors),
             )
-
-        ctx.join()
 
     # async_logger.__exit__ has now run: LogTerminate sent, thread joined.
 

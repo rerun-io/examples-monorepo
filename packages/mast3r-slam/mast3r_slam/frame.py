@@ -370,6 +370,11 @@ class SharedStates:
                 return
             self.reloc_sem.value -= 1
 
+    def has_reloc_request(self) -> bool:
+        """Whether the frontend has queued a relocalization the backend has not attempted yet."""
+        with self.lock:
+            return self.reloc_sem.value > 0
+
     def get_mode(self) -> Mode:
         """Return the current operating mode.
 
@@ -387,6 +392,18 @@ class SharedStates:
         """
         with self.lock:
             self.mode.value = mode
+
+    def set_mode_if(self, expected: Mode, mode: Mode) -> bool:
+        """Set the mode to ``mode`` only if it is still ``expected``; returns whether it did.
+
+        The backend's relocalization uses it, so a success that finishes after the frontend set ``TERMINATED`` does
+        not switch the run back to ``TRACKING``.
+        """
+        with self.lock:
+            if self.mode.value is not expected:
+                return False
+            self.mode.value = mode
+            return True
 
 
 class SharedKeyframes:
