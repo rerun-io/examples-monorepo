@@ -1,33 +1,44 @@
-# rattler-build recipe for dpretrieval
-# Builds DBoW2 (bag-of-words image retrieval) as a static library and links it
-# into a pybind11 Python extension module for ORB-based loop closure detection.
+# rattler-build recipe for dpretrieval: ORB image retrieval for DPV-SLAM's classical loop closure. DBoW2's vocabulary
+# tree and database and OpenCV's cross-checked Hamming matcher are Rust (crates/dbow, pyo3 module dpretrieval._core);
+# ORB detection is OpenCV's, through cv2. maturin builds the module from crates/dpretrieval-py (pyproject.toml).
 package:
   name: dpretrieval
-  version: "0.1.0"
+  version: "0.2.0"
 
 source:
-  path: .
+  - path: .
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
 
 build:
   number: 0
   script:
-    # Clone the DBoW2 library at a pinned commit (Lipson's fork used by DPV-SLAM)
-    - git clone https://github.com/lahavlipson/DBoW2.git DBoW2
-    - cd DBoW2 && git checkout 89f8b270270fa68a399c10cd90427a9f7ec4fa81 && cd ..
-    - cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -GNinja
-    - cmake --build build
-    - cmake --install build
+    # pixi reuses the host prefix across source builds, and files left there are packaged: drop an earlier install,
+    # including the pybind11 module (dpretrieval.cpython-312-*.so) of the C++ build, which would shadow the package.
+    - export SP_DIR="$(${{ PYTHON }} -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+    - rm -rf "$SP_DIR/dpretrieval" "$SP_DIR"/dpretrieval-*.dist-info "$SP_DIR"/dpretrieval.cpython-*.so
+    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
 
 requirements:
   build:
-    - ${{ compiler('cxx') }}
-    - cmake
-    - ninja
-    - git
+    - ${{ compiler('rust') }}
+    # The C compiler links the extension; no stdlib('c'): it would pin a sysroot to the workspace's glibc 2.35.
+    - ${{ compiler('c') }}
   host:
     - python 3.12.*
-    - pybind11
-    - libopencv <5  # OpenCV 5 dropped/moved features2d; DBoW2's find_package needs the v4 layout
+    - pip
+    - maturin >=1.9.4,<2
   run:
     - python 3.12.*
-    - libopencv <5  # OpenCV 5 dropped/moved features2d; DBoW2's find_package needs the v4 layout
+    - numpy
+    - py-opencv
+    - jaxtyping
+
+tests:
+  - python:
+      imports:
+        - dpretrieval
+      pip_check: false

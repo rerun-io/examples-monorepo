@@ -1,0 +1,13 @@
+[package]
+name = "dbow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "DBoW2's ORB vocabulary tree, TF-IDF bag-of-words and L1 database query (lahavlipson/DBoW2@89f8b27), and OpenCV's cross-checked Hamming matcher."
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
