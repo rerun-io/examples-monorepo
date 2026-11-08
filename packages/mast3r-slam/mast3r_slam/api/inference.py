@@ -127,9 +127,10 @@ class InferenceConfig:
     compile_model: bool = False
     """Run the tracker's MASt3R forward as compiled CUDA graphs: about 2x faster per frame, but the first tracked
     frame waits for the compile (about 30 s cold, 14 s with a warm inductor cache)."""
-    trt_model: bool = False
-    """Run the tracker's MASt3R forward as a bf16 TensorRT engine (224 px only): about 4x faster than eager per
-    frame. The first run on a machine exports and builds the engine (about 90 s); later runs load it from the cache."""
+    trt_model: bool = True
+    """Run tracking's MASt3R forward and the backend's pair decoder as bf16 TensorRT engines (224 px only; other
+    sizes run eager). The first run on a machine exports and builds the engines (about 3 min); later runs load them
+    from the cache. ``--no-trt-model`` runs eager fp32."""
 
 
 @dataclass
@@ -520,13 +521,10 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # process without copying them (uses CUDA IPC for GPU tensors).
     model: AsymmetricMASt3R = load_mast3r(device=device)
     model.share_memory()
-    if inf_config.compile_model and inf_config.trt_model:
-        raise ValueError("Pick one of --compile-model and --trt-model.")
     if inf_config.compile_model:
         compile_tracking_forward(model)
-    if inf_config.trt_model:
-        if inf_config.img_size != 224:
-            raise ValueError("--trt-model needs --img-size 224: the engine is built for one image size, and only 224 crops every video to it.")
+    elif inf_config.trt_model and inf_config.img_size == 224:
+        # Only 224 crops every video to one size, which the engines are built for.
         use_tracking_engine(model, (224, 224))
 
     # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
