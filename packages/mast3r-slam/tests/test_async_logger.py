@@ -18,8 +18,9 @@ from torch import Tensor
 from mast3r_slam import async_logger
 from mast3r_slam.async_logger import AsyncRerunLogger, snapshot_current_frame
 from mast3r_slam.config import config
-from mast3r_slam.frame import Frame, SharedKeyframes
+from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 from mast3r_slam.log_events import KeyframeSnapshot, LogCurrentFrame, LogEvent, LogMapUpdate
+from mast3r_slam.mast3r_utils import frame_to_extrinsics
 from mast3r_slam.rerun_log_utils import create_blueprints
 
 H: int = 16
@@ -223,3 +224,83 @@ def test_camera_path_logs_one_segment_per_frame(monkeypatch: pytest.MonkeyPatch)
             LogCurrentFrame(frame_idx=frame_idx, timestamp_ns=None, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
         )
     assert strips == [("world/path", 2)] * 4
+
+
+def _random_sim3(n: int, seed: int) -> Float32[Tensor, "n 8"]:
+    """Sim3 data ``[t, q, s]`` with unit quaternions and positive scales."""
+    generator: torch.Generator = torch.Generator().manual_seed(seed)
+    t_n3: Float32[Tensor, "n 3"] = torch.randn(n, 3, generator=generator)
+    q_n4: Float32[Tensor, "n 4"] = torch.nn.functional.normalize(torch.randn(n, 4, generator=generator), dim=-1)
+    s_n1: Float32[Tensor, "n 1"] = 0.5 + torch.rand(n, 1, generator=generator)
+    return torch.cat([t_n3, q_n4, s_n1], dim=-1)
+
+
+def test_compute_orient_matches_the_per_keyframe_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The batched pose read hands auto-orient the poses that converting each keyframe's Frame gives."""
+    monkeypatch.setitem(config, "use_calib", False)
+    captured: list[Float32[ndarray, "n 4 4"]] = []
+
+    def fake_auto_orient(world_T_cam: Float32[ndarray, "n 4 4"], method: str, center_method: str) -> object:
+        captured.append(world_T_cam)
+        return type("Orient", (), {"transform": np.eye(4)[:3]})()
+
+    monkeypatch.setattr(async_logger, "auto_orient_and_center_poses", fake_auto_orient)
+    n_kf: int = 6
+    manager = mp.Manager()
+    try:
+        keyframes: SharedKeyframes = SharedKeyframes(manager, H, W, buffer=8, device="cpu")
+        for i, sim3_8 in enumerate(_random_sim3(n_kf, seed=0)):
+            frame: Frame = _make_frame(frame_id=i, feat_dim=keyframes.feat_dim)
+            frame.world_sim3_cam = lietorch.Sim3(sim3_8[None])
+            keyframes.append(frame)
+        expected: Float32[ndarray, "n 4 4"] = np.stack(
+            [frame_to_extrinsics(keyframes[i], camera_conventions="RUB").world_T_cam.astype(np.float32) for i in range(n_kf)]
+        )
+        async_logger.compute_orient(keyframes, n_kf)
+    finally:
+        manager.shutdown()
+
+    np.testing.assert_array_equal(captured[0], expected)
+
+
+class _CountingListProxy:
+    """A Manager ListProxy stand-in: no ``__iter__``, so iterating it calls ``__getitem__`` (one IPC each) per item."""
+
+    def __init__(self, items: list[int]) -> None:
+        self._items: list[int] = items
+        self.getitem_calls: int = 0
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index: int | slice) -> int | list[int]:
+        self.getitem_calls += 1
+        return self._items[index]
+
+
+def test_snapshot_edges_reads_each_edge_list_in_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The edge lists cross the process boundary once per snapshot, not once per edge."""
+    monkeypatch.setitem(config, "use_calib", False)
+    manager = mp.Manager()
+    try:
+        keyframes: SharedKeyframes = SharedKeyframes(manager, H, W, buffer=8, device="cpu")
+        sim3_n8: Float32[Tensor, "n 8"] = _random_sim3(4, seed=1)
+        for i, sim3_8 in enumerate(sim3_n8):
+            frame: Frame = _make_frame(frame_id=i, feat_dim=keyframes.feat_dim)
+            frame.world_sim3_cam = lietorch.Sim3(sim3_8[None])
+            keyframes.append(frame)
+        edges_ii: _CountingListProxy = _CountingListProxy([0, 1, 2, 0])
+        edges_jj: _CountingListProxy = _CountingListProxy([1, 2, 3, 3])
+        states: SharedStates = SharedStates(manager, H, W, device="cpu")
+        states.edges_ii = edges_ii  # pyrefly: ignore[bad-assignment]
+        states.edges_jj = edges_jj  # pyrefly: ignore[bad-assignment]
+        snapshot = async_logger.snapshot_edges(states, keyframes)
+    finally:
+        manager.shutdown()
+
+    assert snapshot is not None
+    positions_i, positions_j = snapshot
+    np.testing.assert_allclose(positions_i, sim3_n8[[0, 1, 2, 0], :3].numpy(), atol=1e-6)
+    np.testing.assert_allclose(positions_j, sim3_n8[[1, 2, 3, 3], :3].numpy(), atol=1e-6)
+    assert edges_ii.getitem_calls == 1
+    assert edges_jj.getitem_calls == 1

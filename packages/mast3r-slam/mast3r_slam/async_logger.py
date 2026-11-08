@@ -35,10 +35,12 @@ from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.camera_parameters import Intrinsics, PinholeParameters
+from simplecv.ops import conventions
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
+from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.log_events import (
     KeyframeSnapshot,
     LogCurrentFrame,
@@ -172,8 +174,9 @@ def snapshot_edges(
         (positions_i, positions_j) tuple or None if no edges.
     """
     with states.lock:
-        ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
-        jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
+        # One slice each: a Manager ListProxy has no __iter__, so iterating it is one IPC round trip per edge.
+        ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii[:], dtype=torch.long)
+        jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj[:], dtype=torch.long)
         if ii.numel() == 0 or jj.numel() == 0:
             return None
         world_sim3_cami: lietorch.Sim3 = lietorch.Sim3(keyframes.world_sim3_cam[ii, 0])
@@ -196,14 +199,13 @@ def compute_orient(
     Returns:
         (orient_R, orient_t) rotation and translation arrays.
     """
-    world_T_cam_list: list[Float32[ndarray, "4 4"]] = []
-    for i in range(n_kf):
-        kf: Frame = keyframes[i]
-        kf_ext = frame_to_extrinsics(kf, camera_conventions="RUB")
-        assert kf_ext.world_T_cam is not None
-        world_T_cam_list.append(kf_ext.world_T_cam.astype(np.float32))
-
-    world_T_cam: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_list)
+    # All poses in one read; building a Frame per keyframe costs a lock and GPU syncs each.
+    with keyframes.lock:
+        world_sim3_cam: lietorch.Sim3 = lietorch.Sim3(keyframes.world_sim3_cam[:n_kf, 0].cpu())
+    world_T_cam_cv: Float32[ndarray, "n_kf 4 4"] = as_SE3(world_sim3_cam).matrix().numpy().astype(np.float32)
+    world_T_cam: Float32[ndarray, "n_kf 4 4"] = conventions.convert_pose(
+        world_T_cam_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
+    )
     orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
         world_T_cam, method="up", center_method="poses"
     ).transform
