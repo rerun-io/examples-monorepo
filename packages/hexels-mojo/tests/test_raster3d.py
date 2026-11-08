@@ -4,8 +4,8 @@ fixtures/raster3d_references.rrd (tests/freeze_raster3d_references.py, from `ras
 `rasterize_hexels3d_backward_cached`): three configurations (linear color + view gradients + per-hexel softness; flat +
 scalar softness + conservative bounds; quadratic-bounded color + specular lobe + per-edge softness). The forward is
 bit-exact: the kernels issue nvcc's fast-math PTX in nvcc's order, and the stable sort reproduces cub's radix sort.
-The backward scatters float atomics, so its gradients match to 1e-5 of each tensor's largest magnitude (two CUDA runs
-differ by up to 4e-7 of it; the port by up to 1.1e-6).
+The backward sums with float atomics, so its gradients match to 1e-5 of each tensor's largest magnitude (two CUDA runs
+differ by up to 8e-7 of it, and so does the port).
 """
 
 from pathlib import Path

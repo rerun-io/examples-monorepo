@@ -46,7 +46,7 @@ RTX 5090), written by `tests/freeze_hexels_references.py` (deleted with the exte
 | Image-GS projection (forward + backward), top-K forward | bit-exact (projection backward has no atomics: same PTX order) |
 | Image-GS top-K backward | ≤ 1e-5 relative (float atomics) |
 | 3D forward (radii, transforms, tile ranges, sorted ids, final transmittance, last index, image) | bit-exact, 3 configurations (`tests/test_raster3d.py`, `fixtures/raster3d_references.rrd`) |
-| 3D cached backward (all twelve gradients, incl. the (P, 4) means2d statistic) | ≤ 1.1e-6 of each tensor's largest magnitude (two CUDA runs: ≤ 4e-7); test bound 1e-5 |
+| 3D cached backward (all twelve gradients, incl. the (P, 4) means2d statistic) | ≤ 8e-7 of each tensor's largest magnitude (two CUDA runs: ≤ 8e-7); test bound 1e-5 |
 
 Upstream's SSIM scratch buffer is declared (42, 32) but indexed at column tx + 5, so its last row writes five
 floats past the array; the port indexes it at tx (same arithmetic, no overrun).
@@ -64,8 +64,8 @@ floats past the array; the port indexes it at tx (same arithmetic, no overrun).
 | Image-GS step: projection + binning + forward + backward, 10K Gaussians, 2048×2048 | 8.251 ms | 6.220 ms |
 | 3D forward, 300K hexels, 1600×1080, linear color + view gradients (render stage) | 2.03 ms (1.68 ms) | 1.54 ms (1.09 ms) |
 | 3D forward, same scene, linear color, no view model (the protocol's training config) | 1.99 ms (1.64 ms) | 1.30 ms (0.85 ms) |
-| 3D cached backward, same scene, linear color + view gradients | 27.58 ms | 28.70 ms |
-| 3D cached backward, same scene, training config | 17.62 ms | 18.62 ms |
+| 3D cached backward, same scene, linear color + view gradients | 27.19 ms | 8.47 ms |
+| 3D cached backward, same scene, training config | 17.23 ms | 4.89 ms |
 
 Real run, `hexels-fit-2d --variant rich` on anime-2_2k (5,100 steps, 20K → 10K hexels), two runs each: CUDA
 36.18 / 36.08 dB, 85.9 / 88.1 s; every ported kernel on Mojo (rasterizer, binning, SSIM, prune) 36.12 / 36.14 dB,
@@ -80,3 +80,7 @@ views of one Mojo-trained checkpoint, rendered by the CUDA env and by the Mojo e
 Render loops branch with nested `if`s, not `continue` / `break`: with `continue`, LLVM placed the warp's reconvergence
 point outside the per-hexel loop, the lanes of a warp drifted onto different hexels, and the 3D render ran at 2.3 ms
 instead of 1.1 ms for the same instructions.
+
+The 3D backward walks each tile's hexel list together (CUDA gives each pixel its own walk): every lane of a warp
+then holds the same hexel, so its gradients are summed across the warp and written by one atomic instead of up to 32.
+That makes it 3.5x faster than CUDA; the sums only change order.
