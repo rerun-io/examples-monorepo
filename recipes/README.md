@@ -7,7 +7,7 @@ Environments consume it as a source dependency: `<name> = { path = "recipes/<nam
 
 | Package | Upstream, pinned source | Licence | Patches | Consuming features |
 | --- | --- | --- | --- | --- |
-| `asmk-src` | [jenicek/asmk](https://github.com/jenicek/asmk) git `2a96d9c` | not declared in the recipe | 2 | `mast3r-slam` (linux-64) |
+| `asmk-src` | [jenicek/asmk](https://github.com/jenicek/asmk) git `2a96d9c`; pure Python: the Cython `asmk.hamming` is `packages/asmk-rs`'s `asmk_rs` | not declared in the recipe | 2 (`pyproject.toml`; `asmk.hamming` → `asmk_rs`, no `setup.py`) | `mast3r-slam` (linux-64) |
 | `brush-src` | [ArthurBrussee/brush](https://github.com/ArthurBrussee/brush) git `1388f74` | not declared in the recipe | 1 | `gsplat-rust-renderer` |
 | `dinov3-src` | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) archive `5aa7e93`, sha256 `194fc7a6…` | DINOv3 License (`LICENSE.md`) | 0 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate`, `posekit-sam3d-body`, `metrictrail` |
 | `egohand-src` | [NVIDIA/IsaacCapture](https://github.com/NVIDIA/IsaacCapture) archive `479063c` (`src/python/isaaccapture_egopost`), sha256 `49dd5594…`; installs `egohand` and `egohand_inference` | OpenMDW-1.1 (+ `THIRD_PARTY_LICENSES.md`) | 6 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate` |
