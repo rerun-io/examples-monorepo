@@ -187,7 +187,10 @@ class MultiViewTracker:
             # Captured now, before the pipeline starts its worker threads.
             self._graphs = SteadyTickGraphs(self.predictor, self._video_hw)
             structures = steady_structures(
-                self.predictor, self._states[0].memory_bank, config.cuda_graph_max_conditional
+                self.predictor,
+                self._states[0].memory_bank,
+                config.cuda_graph_max_conditional,
+                frame_step=config.track_stride,
             )
             with torch.inference_mode():
                 self._graphs.precapture(len(cameras), structures)

@@ -289,7 +289,7 @@ class SteadyTickGraphs:
 
 
 def steady_structures(
-    predictor: Any, empty_bank: Any, max_conditional: int, ticks_per_prompt: int = 12
+    predictor: Any, empty_bank: Any, max_conditional: int, ticks_per_prompt: int = 12, frame_step: int = 1
 ) -> list[Structure]:
     """Memory structures ``(n_cond, n_noncond, n_ptr)`` a single-object stream visits.
 
@@ -298,7 +298,9 @@ def steady_structures(
     memory bank, so the bank's own selection rules (window, pruning, pointer
     selection) decide the counts. The ramp right after bootstrap, while
     fewer than ``num_maskmem - 2`` non-conditional memories exist, visits each
-    structure once and is left to the eager path.
+    structure once and is left to the eager path. ``frame_step`` is the
+    tracker's ``track_stride``: memories then land every ``frame_step``
+    frames, and the bank's frame-window selection sees those gaps.
     """
     import copy
 
@@ -309,7 +311,6 @@ def steady_structures(
     z4 = torch.zeros(1, 1, 1, 1)
     z2 = torch.zeros(1, 1)
     prompt = SAM2Prompt(obj_id=0, boxes=torch.zeros(1, 4))
-    min_noncond: int = predictor.num_maskmem - 2
     keys: list[Structure] = []
     frame: int = 0
     for _ in range(max_conditional):
@@ -326,7 +327,7 @@ def steady_structures(
                     reverse_tracking=False,
                 )[0]
                 key = (len(sel.conditional_memories), len(sel.non_conditional_memories), len(sel.ptr_memories))
-                if key[1] >= min_noncond and key not in keys:
+                if key not in keys:
                     keys.append(key)
             bank.try_add_memories(
                 frame_idx=frame,
@@ -337,5 +338,8 @@ def steady_structures(
                 prompts=[prompt] if is_prompt else [],
             )
             bank.prune_memories(obj_ids=[0], current_frame_idx=frame)
-            frame += 1
-    return keys
+            frame += frame_step
+    # The ramp after each prompt visits short structures once; keep the plateau
+    # (num_maskmem - 2 .. -1 memories at stride 1, fewer at larger strides).
+    plateau: int = max((key[1] for key in keys), default=0)
+    return [key for key in keys if key[1] >= plateau - 1]
