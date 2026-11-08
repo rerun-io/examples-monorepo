@@ -177,6 +177,10 @@ torchvision = "*"
 # (conda supplies the real CUDA runtime).
 [feature.cuda.pypi-dependencies]
 tensorrt-cu13 = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
+# Its -libs dependency from the same index: there it is a real wheel (x86_64 manylinux_2_28, aarch64 manylinux_2_35).
+# On PyPI it is only an sdist stub that downloads the 3.6 GB wheel at build time, and uv rebuilt and cached it for
+# every cuda env install (~8 GB of uv cache each, ~870 GB over four days).
+tensorrt-cu13-libs = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
 nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 # onnxruntime from PyPI, like TensorRT: conda-forge's build ships no sm_121 kernels
 # (its CUDA EP dies on the GB10), and 1.29.0 is the first release whose aarch64
