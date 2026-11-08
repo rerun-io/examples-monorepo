@@ -1,11 +1,7 @@
-"""Regression tests: validate baseline .rrd and compare against fresh inference.
+"""Regression tests: properties of the baseline .rrd (keyframes, camera path).
 
 The baseline is generated once via:
-    pixi run -e mast3r-slam --frozen _generate-test-baseline
-
-The inference comparison test uses config/test.yaml which sets
-single_thread=True — this means NO backend subprocess is spawned,
-eliminating any zombie process risk on test failure.
+    pixi run -e mast3r-slam --frozen _mast3r-slam-generate-test-baseline
 """
 
 from pathlib import Path
@@ -56,7 +52,7 @@ def test_rrd_has_keyframe_entities(baseline_rrd_path: Path) -> None:
 def test_camera_path_logged(baseline_rrd_path: Path) -> None:
     """Verify camera path entity exists in the baseline."""
     paths: list[str] = _get_entity_paths(baseline_rrd_path)
-    assert "/world/path" in paths, f"No /world/path entity found. Paths: {paths[:20]}"
+    assert any(path.startswith("/world/path/") for path in paths), f"No /world/path/<window> entity found. Paths: {paths[:20]}"
 
 
 def test_current_camera_logged(baseline_rrd_path: Path) -> None:
@@ -76,13 +72,14 @@ def test_dense_logging_entities_present(baseline_rrd_path: Path) -> None:
     paths: set[str] = set(_get_entity_paths(baseline_rrd_path))
 
     expected_paths = {
-        "/world/current_camera/pinhole/video",
-        "/world/current_camera/pinhole/pointmap",
-        "/world/current_camera/pinhole/pointmap_depth",
-        "/world/current_camera/pinhole/confidence",
-        "/world/last_keyframe/pointmap",
-        "/world/last_keyframe/pointmap_depth",
-        "/world/last_keyframe/confidence",
+        "/video",
+        "/world/current_camera/pinhole/image",
+        "/world/current_camera/pinhole/depth",
+        "/current_maps/pointmap",
+        "/current_maps/confidence",
+        "/last_keyframe/pointmap",
+        "/last_keyframe/depth",
+        "/last_keyframe/confidence",
     }
 
     missing_paths = sorted(expected_paths - paths)

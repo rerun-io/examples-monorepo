@@ -4,7 +4,7 @@ import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
 
-from mast3r_slam.geometry import backproject, get_pixel_coords, point_to_dist, point_to_ray_dist, project_calib, skew_sym
+from mast3r_slam.geometry import backproject, get_pixel_coords, project_calib, skew_sym
 
 
 def test_skew_sym_antisymmetric() -> None:
@@ -30,35 +30,6 @@ def test_skew_sym_batched() -> None:
     S: Float[Tensor, "2 3 3"] = skew_sym(x)
     assert S.shape == (2, 3, 3)
     torch.testing.assert_close(S, -S.transpose(-2, -1))
-
-
-def test_point_to_dist_unit_vector() -> None:
-    """Unit vectors should have distance 1."""
-    X: Float[Tensor, "3 3"] = torch.eye(3)
-    d: Float[Tensor, "3 1"] = point_to_dist(X)
-    torch.testing.assert_close(d, torch.ones(3, 1))
-
-
-def test_point_to_ray_dist_roundtrip() -> None:
-    """ray * distance should reconstruct the original point."""
-    X: Float[Tensor, "5 3"] = torch.randn(5, 3)
-    rd_result = point_to_ray_dist(X, jacobian=False)
-    assert isinstance(rd_result, torch.Tensor)
-    rd: Float[Tensor, "5 4"] = rd_result
-    ray: Float[Tensor, "5 3"] = rd[..., :3]
-    dist: Float[Tensor, "5 1"] = rd[..., 3:]
-    reconstructed: Float[Tensor, "5 3"] = ray * dist
-    torch.testing.assert_close(reconstructed, X, atol=1e-5, rtol=1e-5)
-
-
-def test_point_to_ray_dist_jacobian_shape() -> None:
-    """Jacobian should have shape (..., 4, 3)."""
-    X: Float[Tensor, "2 3 3"] = torch.randn(2, 3, 3)
-    rd_jac_result = point_to_ray_dist(X, jacobian=True)
-    assert isinstance(rd_jac_result, tuple)
-    rd, drd_dX = rd_jac_result
-    assert rd.shape == (2, 3, 4)
-    assert drd_dX.shape == (2, 3, 4, 3)
 
 
 def test_project_backproject_roundtrip() -> None:

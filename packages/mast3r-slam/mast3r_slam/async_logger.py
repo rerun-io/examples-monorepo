@@ -5,14 +5,15 @@ off the tracking hot-path.  The thread binds to the caller's
 ``RecordingStream`` (for Gradio) or uses the global recording (for CLI).
 
 Handles JPEG compression, focal estimation, pointmap/depth conversion,
-camera path accumulation, and blueprint refreshes — all work that was
+and camera path accumulation — all work that was
 previously synchronous on the tracking thread.
 
 Usage as a context manager::
 
-    event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
-    with AsyncRerunLogger(event_queue, parent_log_path, timeline, recording=rec) as logger:
+    event_queue: queue.Queue[LogEvent] = queue.Queue()
+    with AsyncRerunLogger(event_queue, parent_log_path, recording=rec) as logger:
         for frame in frames:
+            logger.check()  # re-raises a crash of the logger thread
             event_queue.put(snapshot_current_frame(frame, ...))
         # LogTerminate is sent automatically on __exit__
 """
@@ -20,9 +21,8 @@ Usage as a context manager::
 from __future__ import annotations
 
 import queue
-import sys
 import threading
-import traceback
+import time
 import warnings
 from pathlib import Path
 
@@ -34,11 +34,13 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.camera_parameters import PinholeParameters
+from simplecv.camera_parameters import Intrinsics, PinholeParameters
+from simplecv.ops import conventions
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
+from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.log_events import (
     KeyframeSnapshot,
     LogCurrentFrame,
@@ -47,8 +49,24 @@ from mast3r_slam.log_events import (
     LogTerminate,
     LogText,
 )
-from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
-from mast3r_slam.rerun_log_utils import FRAME_TIMELINE, VIDEO_TIMELINE, create_blueprints
+from mast3r_slam.map_surface import KeyframeDepth, LatestWinsWorker, LiveSurface, SurfaceRequest
+from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_intri, frame_to_pinhole
+from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
+
+DEFAULT_CONF_THRESHOLD: float = 7.0
+"""Smallest MASt3R confidence (1 = none) shown in the depth panels and fused into the map surface."""
+DEFAULT_PANEL_HZ: float = 10.0
+"""Rate of the current frame's 2D panels in a live viewer. At subsample 1 they are ~300 KB a frame at 50+ frames a
+second, more than the web viewer ingests; the camera pose, the path and the map are logged for every frame."""
+LAST_KEYFRAME_MAPS_EVERY: int = 10
+"""Frames between refreshes of the last keyframe's pointmap/confidence/depth panels while it stays the active one."""
+PATH_WINDOW_FRAMES: int = 30
+"""Segments per camera-path polyline. Each window is its own entity (``path/<k>``), logged again on every frame with
+the window's points so far, so the cursor shows the path up to that frame and the viewer draws ~n/30 strips, not one
+strip per frame."""
+
+_HIDDEN_IMAGE_PLANE_DISTANCE: float = 1e-6
+"""Image-plane distance of a keyframe's placeholder Pinhole before the keyframe exists: a frustum too small to see."""
 
 # ── Snapshot helpers ──────────────────────────────────────────────────────
 # These create CPU-only event objects from live Frame / SharedKeyframes /
@@ -89,9 +107,9 @@ def snapshot_current_frame(
         frame.C.detach().cpu().numpy().astype(np.float32) if frame.C is not None else None
     )
 
-    # Snapshot the last keyframe's current state for the 2D panel.
-    # The tracker continuously updates the active keyframe's pointmap/
-    # confidence, so we re-read it each frame; its image is fixed.
+    # Snapshot the last keyframe's state for the 2D panel. Its image is fixed; the tracker keeps refining its
+    # pointmap/confidence, which are copied (and re-encoded by the logger) when the keyframe changes and every
+    # LAST_KEYFRAME_MAPS_EVERY frames, not every frame.
     last_kf_frame_id: int | None = None
     last_kf_img_shape: tuple[int, int] | None = None
     last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
@@ -102,12 +120,14 @@ def snapshot_current_frame(
         if last_kf is not None:
             last_kf_frame_id = last_kf.frame_id
             last_kf_img_shape = (int(last_kf.img_shape.squeeze()[0].item()), int(last_kf.img_shape.squeeze()[1].item()))
-            if last_kf_frame_id != shown_last_kf_id:
+            keyframe_changed: bool = last_kf_frame_id != shown_last_kf_id
+            if keyframe_changed:
                 last_kf_rgb = last_kf.rgb.numpy().astype(np.float32)
-            if last_kf.X_canon is not None:
-                last_kf_X_canon = last_kf.X_canon.detach().cpu().numpy().astype(np.float32)
-            if last_kf.C is not None:
-                last_kf_C = last_kf.C.detach().cpu().numpy().astype(np.float32)
+            if keyframe_changed or frame_idx % LAST_KEYFRAME_MAPS_EVERY == 0:
+                if last_kf.X_canon is not None:
+                    last_kf_X_canon = last_kf.X_canon.detach().cpu().numpy().astype(np.float32)
+                if last_kf.C is not None:
+                    last_kf_C = last_kf.C.detach().cpu().numpy().astype(np.float32)
 
     return LogCurrentFrame(
         frame_idx=frame_idx,
@@ -163,8 +183,9 @@ def snapshot_edges(
         (positions_i, positions_j) tuple or None if no edges.
     """
     with states.lock:
-        ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
-        jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
+        # One slice each: a Manager ListProxy has no __iter__, so iterating it is one IPC round trip per edge.
+        ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii[:], dtype=torch.long)
+        jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj[:], dtype=torch.long)
         if ii.numel() == 0 or jj.numel() == 0:
             return None
         world_sim3_cami: lietorch.Sim3 = lietorch.Sim3(keyframes.world_sim3_cam[ii, 0])
@@ -187,14 +208,13 @@ def compute_orient(
     Returns:
         (orient_R, orient_t) rotation and translation arrays.
     """
-    world_T_cam_list: list[Float32[ndarray, "4 4"]] = []
-    for i in range(n_kf):
-        kf: Frame = keyframes[i]
-        kf_ext = frame_to_extrinsics(kf, camera_conventions="RUB")
-        assert kf_ext.world_T_cam is not None
-        world_T_cam_list.append(kf_ext.world_T_cam.astype(np.float32))
-
-    world_T_cam: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_list)
+    # All poses in one read; building a Frame per keyframe costs a lock and GPU syncs each.
+    with keyframes.lock:
+        world_sim3_cam: lietorch.Sim3 = lietorch.Sim3(keyframes.world_sim3_cam[:n_kf, 0].cpu())
+    world_T_cam_cv: Float32[ndarray, "n_kf 4 4"] = as_SE3(world_sim3_cam).matrix().numpy().astype(np.float32)
+    world_T_cam: Float32[ndarray, "n_kf 4 4"] = conventions.convert_pose(
+        world_T_cam_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
+    )
     orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
         world_T_cam, method="up", center_method="poses"
     ).transform
@@ -264,13 +284,15 @@ class AsyncRerunLogger:
     Use as a context manager to guarantee the logger thread is started
     and cleanly shut down::
 
-        with AsyncRerunLogger(event_queue, path, timeline) as logger:
+        with AsyncRerunLogger(event_queue, path) as logger:
             event_queue.put(snapshot_current_frame(...))
 
     Args:
         event_queue: Queue of ``LogEvent`` objects.
         parent_log_path: Root Rerun entity path.
-        timeline: Active timeline name.
+        conf_threshold: Smallest confidence a pixel needs to show in the depth panels and to fuse into the map surface.
+        panel_hz: Most current-frame panels (image, depth, pointmap, confidence) logged per second of wall-clock
+            time; 0 logs them for every frame.
         recording: Rerun recording to bind in this thread (Gradio).
             ``None`` uses the global recording (CLI).
     """
@@ -279,24 +301,41 @@ class AsyncRerunLogger:
         self,
         event_queue: queue.Queue[LogEvent],
         parent_log_path: Path,
-        timeline: str,
+        conf_threshold: float = DEFAULT_CONF_THRESHOLD,
+        panel_hz: float = DEFAULT_PANEL_HZ,
         recording: rr.RecordingStream | None = None,
     ) -> None:
         self._queue: queue.Queue[LogEvent] = event_queue
         self._recording: rr.RecordingStream | None = recording
         self._parent_log_path: Path = parent_log_path
-        self._timeline: str = timeline
         self._thread: threading.Thread | None = None
 
         # Internal visualization state
-        self._path_list: list[list[float]] = []
+        # Camera path: the points of the current window (PATH_WINDOW_FRAMES) and its index.
+        self._path_points: list[list[float]] = []
+        self._path_window: int = 0
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
-        self._last_blueprint_n_kf: int = -1
-        self._n_keyframes: int = 0
-        self._conf_thresh: int = 7
+        # Tracking marks its keyframe dirty on every frame without moving it; what was logged last skips those re-logs.
+        self._logged_kf_poses: dict[int, Float32[ndarray, "8"]] = {}
+        self._logged_edges: Float32[ndarray, "2 n 3"] | None = None
+        self._conf_thresh: float = conf_threshold
+        self._panel_interval_s: float = 1.0 / panel_hz if panel_hz > 0 else 0.0
+        self._panels_logged_at: float = -float("inf")
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
+        # The newest keyframe's intrinsics, which the current camera reuses, and the ones last logged for it.
+        self._latest_keyframe_intrinsics: Intrinsics | None = None
+        self._logged_current_intrinsics: Intrinsics | None = None
+        # (frame index, video timestamp) of the first event logged, and of the event being logged.
+        self._first_time: tuple[int, int | None] | None = None
+        self._now: tuple[int, int | None] = (0, None)
+        # Map surface inputs per keyframe index, the keyframe count of the last request, and the worker thread
+        # that fuses (started with the logger thread, once the recording is bound).
+        self._surface_keyframes: dict[int, KeyframeDepth] = {}
+        self._surface_poses: dict[int, Float32[ndarray, "8"]] = {}
+        self._surface_requested_n_kf: int = 0
+        self._surface_worker: LatestWinsWorker[SurfaceRequest] | None = None
 
     # ── Context manager ───────────────────────────────────────────────
 
@@ -306,20 +345,8 @@ class AsyncRerunLogger:
         return self
 
     def __exit__(self, _exc_type: type | None, _exc_val: BaseException | None, _exc_tb: object) -> None:
-        """Send LogTerminate, join the thread, and warn if it outlives the timeout."""
-        # Use a bounded put so we don't deadlock if the logger thread
-        # crashed and the queue is full.
-        try:
-            self._queue.put(LogTerminate(), timeout=5.0)
-        except queue.Full:
-            # Queue is stuck — the logger thread is likely dead.
-            if self._error is not None:
-                warnings.warn(
-                    f"Async logger thread crashed: {self._error}. {self._queue.qsize()} events were not processed.",
-                    stacklevel=2,
-                )
-            return
-
+        """Send LogTerminate, join the thread, warn if it outlives the timeout, and re-raise its crash."""
+        self._queue.put(LogTerminate())
         self.join(timeout=30.0)
         if self.is_alive():
             warnings.warn(
@@ -327,6 +354,8 @@ class AsyncRerunLogger:
                 "Some trailing log entries may be lost.",
                 stacklevel=2,
             )
+        if _exc_type is None:
+            self.check()
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -352,13 +381,30 @@ class AsyncRerunLogger:
         """Return True if the logger thread is still running."""
         return self._thread is not None and self._thread.is_alive()
 
+    def check(self) -> None:
+        """Re-raise the exception that ended the logger thread, if any; call it from the tracking loop."""
+        if self._error is not None:
+            raise self._error
+
     # ── Thread main loop ──────────────────────────────────────────────
 
     def _run(self) -> None:
-        """Main loop: bind recording, then process events until LogTerminate."""
+        """Thread target: keep an exception for :meth:`check`, which re-raises it on the tracking thread."""
+        try:
+            self._process_events()
+        except Exception as exc:  # BeartypeException included: it is re-raised, not swallowed
+            self._error = exc
+
+    def _process_events(self) -> None:
+        """Bind the recording, then process events until LogTerminate."""
         if self._recording is not None:
             rr.set_thread_local_data_recording(self._recording)
+        # The worker thread sees neither a thread-local nor a context-local recording: hand it this one.
+        surface_recording: rr.RecordingStream | None = rr.get_data_recording(self._recording)
+        live_surface: LiveSurface = LiveSurface(f"{self._parent_log_path}/mesh", surface_recording, (FRAME_TIMELINE, VIDEO_TIMELINE))
+        self._surface_worker = LatestWinsWorker(live_surface.handle, name="tsdf-surface")
 
+        # The worker closes on a crash too: a long-lived app would otherwise keep one idle worker per failed run.
         try:
             while True:
                 try:
@@ -368,12 +414,13 @@ class AsyncRerunLogger:
 
                 if isinstance(event, LogTerminate):
                     self._drain_queue()
+                    # The final surface, at the backend's final poses, logged before the recording closes.
+                    self._request_surface(final=True)
                     break
 
                 self._handle_event(event)
-        except Exception as exc:
-            self._error = exc
-            traceback.print_exc(file=sys.stderr)
+        finally:
+            self._surface_worker.close()
 
     def _drain_queue(self) -> None:
         """Process all remaining non-terminate events."""
@@ -399,7 +446,10 @@ class AsyncRerunLogger:
     # ── Timeline management ───────────────────────────────────────────
 
     def _set_time(self, frame_idx: int, timestamp_ns: int | None) -> None:
-        """Set Rerun timeline state before logging."""
+        """Set Rerun timeline state before logging; remember the run's first time point and the current one."""
+        if self._first_time is None:
+            self._first_time = (frame_idx, timestamp_ns)
+        self._now = (frame_idx, timestamp_ns)
         rr.set_time(FRAME_TIMELINE, sequence=frame_idx)
         if timestamp_ns is not None:
             rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(timestamp_ns))
@@ -407,7 +457,7 @@ class AsyncRerunLogger:
     # ── Image helpers ─────────────────────────────────────────────────
 
     def _log_rgb_image(self, image_path: str, rgb: Float32[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
-        """Convert [0,1] float RGB to uint8, JPEG-compress, and log."""
+        """Convert the model's [0,1] float RGB crop to uint8, JPEG-compress, and log."""
         rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb * 255).astype(np.uint8)
         rr.log(
             image_path,
@@ -438,11 +488,12 @@ class AsyncRerunLogger:
         self,
         X_canon: Float32[ndarray, "hw 3"],
         C: Float32[ndarray, "hw 1"],
-        log_path: str,
+        maps_path: str,
+        depth_path: str,
         height: int,
         width: int,
     ) -> None:
-        """Log pointmap depth, pointmap image, and confidence to Rerun."""
+        """Log the pointmap and confidence images under ``maps_path`` and the confidence-filtered depth at ``depth_path``."""
         pointmap_hw3: Float32[ndarray, "H W 3"] = X_canon.reshape(height, width, 3).astype(np.float32)
         pointmap_hw3 = np.nan_to_num(pointmap_hw3, nan=0.0, posinf=0.0, neginf=0.0)
         depth_hw: Float32[ndarray, "H W"] = np.maximum(pointmap_hw3[..., 2], 0.0)
@@ -455,9 +506,9 @@ class AsyncRerunLogger:
         pointmap_uint8: UInt8[ndarray, "H W 3"] = self._normalize_to_uint8(pointmap_hw3)
         depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(filtered_depth_hw)
 
-        rr.log(f"{log_path}/pointmap", rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
-        rr.log(f"{log_path}/pointmap_depth", rr.EncodedDepthImage(blob=depth_png.encode(depth_uint16_mm), media_type=rr.components.MediaType.PNG, meter=1000.0))
-        rr.log(f"{log_path}/confidence", rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
+        rr.log(f"{maps_path}/pointmap", rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
+        rr.log(depth_path, rr.EncodedDepthImage(blob=depth_png.encode(depth_uint16_mm), media_type=rr.components.MediaType.PNG, meter=1000.0))
+        rr.log(f"{maps_path}/confidence", rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
 
     # ── Event handlers ────────────────────────────────────────────────
 
@@ -476,53 +527,67 @@ class AsyncRerunLogger:
         )
 
         cam_log_path: str = f"{self._parent_log_path}/current_camera"
-        pinhole = frame_to_pinhole(frame)
-        log_pinhole(
-            camera=pinhole,
-            cam_log_path=Path(cam_log_path),
-            image_plane_distance=self._image_plane_distance * 2,
-        )
+        # Focal estimation from the pointmap costs tens of ms per call inside a run (torch's CPU pool contends with
+        # tracking), so it runs once per keyframe; the current frame, same camera, reuses the latest keyframe's
+        # intrinsics. The Pinhole is re-logged only when those change, the pose every frame.
+        intrinsics: Intrinsics = self._latest_keyframe_intrinsics if self._latest_keyframe_intrinsics is not None else frame_to_intri(frame)
+        pinhole: PinholeParameters = PinholeParameters(name="current", extrinsics=frame_to_extrinsics(frame), intrinsics=intrinsics)
+        if intrinsics is not self._logged_current_intrinsics:
+            log_pinhole(camera=pinhole, cam_log_path=Path(cam_log_path), image_plane_distance=self._image_plane_distance * 2)
+            self._logged_current_intrinsics = intrinsics
+        else:
+            rr.log(
+                cam_log_path,
+                rr.Transform3D(
+                    translation=pinhole.extrinsics.cam_t_world,
+                    mat3x3=pinhole.extrinsics.cam_R_world,
+                    relation=rr.TransformRelation.ChildFromParent,
+                ),
+            )
 
-        # RGB image
-        rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{cam_log_path}/pinhole/image",
-            event.rgb,
-        )
+        # The 2D panels at most ``panel_hz`` times a second; the pose above and the path below every frame.
+        panels_due: bool = time.monotonic() - self._panels_logged_at >= self._panel_interval_s
+        if panels_due:
+            self._panels_logged_at = time.monotonic()
+            self._log_rgb_image(f"{cam_log_path}/pinhole/image", event.rgb)
 
-        # Pointmap, depth, confidence
-        if event.X_canon is not None and event.C is not None:
+        # Depth under the Pinhole (back-projected in 3D); pointmap and confidence are 2D-only.
+        if panels_due and event.X_canon is not None and event.C is not None:
             self._log_pointmap_and_confidence(
                 event.X_canon,
                 event.C,
-                f"{cam_log_path}/pinhole",
-                rgb_uint8.shape[0],
-                rgb_uint8.shape[1],
+                str(CURRENT_MAPS_PATH),
+                f"{cam_log_path}/pinhole/depth",
+                event.rgb.shape[0],
+                event.rgb.shape[1],
             )
 
         # Camera path
         assert pinhole.extrinsics.world_t_cam is not None
         translation: Float32[ndarray, "3"] = pinhole.extrinsics.world_t_cam
-        self._path_list.append(translation.tolist())
-        rr.log(
-            f"{self._parent_log_path}/path",
-            rr.LineStrips3D(
-                strips=self._path_list,
-                colors=(255, 0, 0),
-                labels="Camera Path",
-            ),
-        )
+        # A full window starts the next one at its last point, so the path stays one continuous line.
+        self._path_points.append(translation.tolist())
+        if len(self._path_points) > PATH_WINDOW_FRAMES + 1:
+            self._path_window += 1
+            self._path_points = self._path_points[-2:]
+        if len(self._path_points) >= 2:
+            rr.log(
+                f"{self._parent_log_path}/path/{self._path_window}",
+                rr.LineStrips3D(strips=[self._path_points], colors=(255, 0, 0)),
+            )
 
         # Last keyframe 2D panel — the tracker continuously updates the
         # active keyframe's pointmap/confidence, so relog those every frame.
         # The image is logged only when the panel's keyframe changes.
-        lk_path: str = f"{self._parent_log_path}/last_keyframe"
+        lk_path: str = str(LAST_KEYFRAME_PATH)
         if event.last_kf_rgb is not None:
-            self._log_rgb_image(lk_path, event.last_kf_rgb)
-        if event.last_kf_X_canon is not None and event.last_kf_C is not None and event.last_kf_img_shape is not None:
+            self._log_rgb_image(f"{lk_path}/image", event.last_kf_rgb)
+        if panels_due and event.last_kf_X_canon is not None and event.last_kf_C is not None and event.last_kf_img_shape is not None:
             self._log_pointmap_and_confidence(
                 event.last_kf_X_canon,
                 event.last_kf_C,
                 lk_path,
+                f"{lk_path}/depth",
                 event.last_kf_img_shape[0],
                 event.last_kf_img_shape[1],
             )
@@ -541,9 +606,10 @@ class AsyncRerunLogger:
 
         # Factor graph edges
         if event.edge_positions is not None:
-            positions_i: Float32[ndarray, "n 3"] = event.edge_positions[0]
-            positions_j: Float32[ndarray, "n 3"] = event.edge_positions[1]
-            self._log_edges(positions_i, positions_j)
+            edges: Float32[ndarray, "2 n 3"] = np.stack(event.edge_positions)
+            if self._logged_edges is None or not np.array_equal(self._logged_edges, edges):
+                self._log_edges(edges[0], edges[1])
+                self._logged_edges = edges
 
         # Orient transform
         if event.orient is not None:
@@ -554,15 +620,26 @@ class AsyncRerunLogger:
                 rr.Transform3D(mat3x3=orient_R, translation=orient_t),
             )
 
-        # Blueprint refresh if keyframe count changed
-        if self._n_keyframes != self._last_blueprint_n_kf:
-            rr.send_blueprint(
-                create_blueprints(self._parent_log_path, timeline=self._timeline, n_keyframes=self._n_keyframes)
+        # Map surface: update on every new keyframe; the worker coalesces requests it cannot keep up with.
+        if len(self._surface_keyframes) != self._surface_requested_n_kf:
+            self._request_surface()
+
+    def _request_surface(self, final: bool = False) -> None:
+        """Hand the worker every keyframe at its latest pose; returns at once (the arrays are never mutated)."""
+        if not self._surface_keyframes or self._surface_worker is None:
+            return
+        self._surface_worker.submit(
+            SurfaceRequest(
+                keyframes=[(kf_idx, self._surface_keyframes[kf_idx], self._surface_poses[kf_idx]) for kf_idx in sorted(self._surface_keyframes)],
+                frame_idx=self._now[0],
+                timestamp_ns=self._now[1],
+                final=final,
             )
-            self._last_blueprint_n_kf = self._n_keyframes
+        )
+        self._surface_requested_n_kf = len(self._surface_keyframes)
 
     def _log_new_keyframe(self, kf: KeyframeSnapshot) -> None:
-        """Log a keyframe's static data (image, pointcloud, transform) once."""
+        """Log a keyframe once: its camera, its 2D maps, and its input to the map surface."""
         if kf.kf_idx in self._logged_keyframes:
             return
 
@@ -578,66 +655,99 @@ class AsyncRerunLogger:
             frame_id=kf.kf_idx,
         )
 
-        # Camera transform
         pinhole = frame_to_pinhole(frame)
+        assert pinhole.intrinsics.k_matrix is not None, "frame_to_pinhole always sets K"
+
+        # The keyframe's image entity is in the entity tree for the whole recording, and 0.42 reports a 2D entity
+        # without a Pinhole ancestor at the cursor even when it has no data there. So the Pinhole also gets a value
+        # at the run's first time point: a frustum with a vanishing image plane, invisible until the keyframe exists.
+        if self._first_time is not None:
+            now: tuple[int, int | None] = self._now
+            self._set_time(*self._first_time)
+            rr.log(
+                f"{kf_cam_log_path}/pinhole",
+                rr.Pinhole(
+                    image_from_camera=pinhole.intrinsics.k_matrix,
+                    height=pinhole.intrinsics.height,
+                    width=pinhole.intrinsics.width,
+                    camera_xyz=rr.ViewCoordinates.RDF,
+                    image_plane_distance=_HIDDEN_IMAGE_PLANE_DISTANCE,
+                ),
+            )
+            self._set_time(*now)
+
+        # Camera transform, Pinhole and image, all at the keyframe's own time point.
         log_pinhole(
             camera=pinhole,
             cam_log_path=Path(kf_cam_log_path),
             image_plane_distance=self._image_plane_distance,
         )
+        self._latest_keyframe_intrinsics = pinhole.intrinsics
+        self._logged_kf_poses[kf.kf_idx] = kf.world_sim3_cam_data
         self._keyframe_pinhole_static[kf.kf_idx] = PinholeParameters(
             name=pinhole.name,
             extrinsics=pinhole.extrinsics,
             intrinsics=pinhole.intrinsics,
         )
 
-        # RGB image
-        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{kf_cam_log_path}/pinhole/image",
-            kf.rgb,
-        )
+        # The image stays under its Pinhole: no explicit CoordinateFrame, which breaks the Follow view (see
+        # simplecv.rerun_eye_controls).
+        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(f"{kf_cam_log_path}/pinhole/image", kf.rgb)
 
-        # Pointmap + confidence
-        self._log_pointmap_and_confidence(
-            kf.X_canon,
-            kf.C,
-            f"{kf_cam_log_path}/pinhole",
-            kf.img_shape[0],
-            kf.img_shape[1],
-        )
-
-        # Confidence-filtered point cloud
-        mask: Bool[ndarray, "hw"] = kf.C.squeeze() > self._conf_thresh
-        positions: Float32[ndarray, "num_points 3"] = kf.X_canon
-        colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
+        # Pointmap, confidence and depth are 2D-only: under a static copy of the Pinhole, outside the 3D tree.
+        kf_maps_path: str = f"{KEYFRAME_MAPS_PATH}/keyframe-{kf.kf_idx}"
         rr.log(
-            f"{kf_cam_log_path}/pointcloud",
-            rr.Points3D(positions=positions[mask], colors=colors[mask]),
+            kf_maps_path,
+            rr.Pinhole(
+                image_from_camera=pinhole.intrinsics.k_matrix,
+                height=pinhole.intrinsics.height,
+                width=pinhole.intrinsics.width,
+                camera_xyz=rr.ViewCoordinates.RDF,
+            ),
+            static=True,
         )
+        self._log_pointmap_and_confidence(kf.X_canon, kf.C, kf_maps_path, f"{kf_maps_path}/depth", kf.img_shape[0], kf.img_shape[1])
+
+        # The keyframe's share of the map surface: confidence-filtered depth, re-fused at its latest pose.
+        height: int = kf.img_shape[0]
+        width: int = kf.img_shape[1]
+        confident: Bool[ndarray, "h w"] = kf.C.reshape(height, width) > self._conf_thresh
+        depth_hw: Float32[ndarray, "h w"] = np.where(confident, kf.X_canon[:, 2].reshape(height, width), 0.0).astype(np.float32)
+        self._surface_keyframes[kf.kf_idx] = KeyframeDepth(
+            depth_hw=depth_hw,
+            k_33=pinhole.intrinsics.k_matrix.astype(np.float32),
+            rgb_hw3=kf_rgb_uint8,
+        )
+        self._surface_poses[kf.kf_idx] = kf.world_sim3_cam_data
 
         self._logged_keyframes.add(kf.kf_idx)
-        self._n_keyframes = max(self._n_keyframes, kf.kf_idx + 1)
 
         # Update last-keyframe 2D view
         self._log_last_keyframe(kf)
+
     def _log_last_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log the last keyframe's image and pointmap to the 2D view."""
-        lk_path: str = f"{self._parent_log_path}/last_keyframe"
-        self._log_rgb_image(lk_path, kf.rgb)
+        lk_path: str = str(LAST_KEYFRAME_PATH)
+        self._log_rgb_image(f"{lk_path}/image", kf.rgb)
         self._log_pointmap_and_confidence(
             kf.X_canon,
             kf.C,
             lk_path,
+            f"{lk_path}/depth",
             kf.img_shape[0],
             kf.img_shape[1],
         )
 
     def _relog_keyframe_camera(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
         """Replay a keyframe camera update after backend refinement using cached intrinsics."""
+        if kf_idx in self._surface_poses:
+            self._surface_poses[kf_idx] = world_sim3_cam_data
         kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
         cached_pinhole: PinholeParameters | None = self._keyframe_pinhole_static.get(kf_idx)
-        if cached_pinhole is None:
+        logged_pose: Float32[ndarray, "8"] | None = self._logged_kf_poses.get(kf_idx)
+        if cached_pinhole is None or (logged_pose is not None and np.array_equal(logged_pose, world_sim3_cam_data)):
             return
+        self._logged_kf_poses[kf_idx] = world_sim3_cam_data
         frame: Frame = snapshot_to_frame(
             world_sim3_cam_data,
             rgb=np.zeros((1, 1, 3), dtype=np.float32),
@@ -663,12 +773,9 @@ class AsyncRerunLogger:
         positions_i: Float32[ndarray, "n 3"],
         positions_j: Float32[ndarray, "n 3"],
     ) -> None:
-        """Log factor graph edges as line strips."""
-        line_strips: list[list[float]] = []
-        for t_i, t_j in zip(positions_i, positions_j, strict=False):
-            line_strips.append(t_i.tolist())
-            line_strips.append(t_j.tolist())
+        """Log factor graph edges, one two-point line strip per edge."""
+        strips: Float32[ndarray, "n 2 3"] = np.stack([positions_i, positions_j], axis=1)
         rr.log(
             f"{self._parent_log_path}/edges",
-            rr.LineStrips3D(strips=line_strips, colors=(0, 255, 0), labels="Factor Graph"),
+            rr.LineStrips3D(strips=strips, colors=(0, 255, 0), labels="Factor Graph"),
         )

@@ -5,6 +5,8 @@ import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
 
+from mast3r_slam.rerun_log_utils import LOG_PATH
+
 
 def check_convergence(
     iter: int,
@@ -24,7 +26,7 @@ def check_convergence(
 
     converged: bool = rel_dec < rel_error_threshold or bool(delta_norm < delta_norm_threshold)
     if verbose:
-        rr.log("/world/logs", rr.TextLog(f"{iter=} | {new_cost=} {cost_diff=} {rel_dec=} {delta_norm=} | {converged=}", level="DEBUG"))
+        rr.log(LOG_PATH, rr.TextLog(f"{iter=} | {new_cost=} {cost_diff=} {rel_dec=} {delta_norm=} | {converged=}", level="DEBUG"))
 
     return converged
 

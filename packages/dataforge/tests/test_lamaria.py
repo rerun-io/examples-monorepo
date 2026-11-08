@@ -38,6 +38,7 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
+from simplecv.rerun_eye_controls import FOLLOW_AHEAD_M
 
 from dataforge import aria, blueprints, paths, schema
 from dataforge.datasets import dataset_defaults, lamaria, lamaria_source
@@ -401,7 +402,7 @@ def test_the_follow_eye_chases_the_wearer_from_behind_and_above() -> None:
     forward: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_FORWARD, dtype=np.float64)
     up: Float64[ndarray, "3"] = np.array(lamaria.FOLLOW_UP, dtype=np.float64)
 
-    assert eye_vector(eye.look_target) == pytest.approx((blueprints.FOLLOW_AHEAD_M * forward).tolist(), abs=1e-6)
+    assert eye_vector(eye.look_target) == pytest.approx((FOLLOW_AHEAD_M * forward).tolist(), abs=1e-6)
     assert eye_vector(eye.eye_up) == pytest.approx(list(lamaria.FOLLOW_UP), abs=1e-6)
     position: list[float] = eye_vector(eye.position)
     assert float(np.dot(position, forward)) < 0.0, "the eye leans against forward"

@@ -41,8 +41,13 @@ pixi run -e mast3r-slam --frozen mast3r-slam-app
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam --frozen python tools/mast3r_slam_inference.py \
-    --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml
+    base --dataset data/normal-apt-tour.mp4 --img-size 512
 ```
+
+The first argument names a SLAM preset (`base`, `fast`, `test`, `calib`, `eval_calib`, `eval_no_calib`, `eth3d`;
+`base` when omitted; they live in `mast3r_slam/config.py`). Override any field with `--slam.<group>.<field>`, e.g.
+`fast --slam.tracking.max-iters 30`; `<preset> --help` lists every field with that preset's value. A recording
+carries the resolved config as its `slam_config` property.
 
 ## First Run
 
@@ -58,11 +63,20 @@ Subsequent runs skip all install steps (idempotent checks).
 ## Notes
 
 - **Linux only** with an NVIDIA GPU (CUDA required)
-- Python 3.11 (pinned for lietorch compatibility)
 - curope (CUDA RoPE2D) is skipped; falls back to a slower PyTorch implementation.
   **TODO:** Add curope as a pixi-build workspace package (`packages/curope/`) to enable
   the faster CUDA kernel from `naver/croco/models/curope/`.
-- `pyrealsense2` is optional (only needed for live RealSense camera input)
+
+## Known limitations
+
+- **TODO (relocalisation, not being worked on):** once tracking is lost (fewer than 5 % valid matches, e.g. a blank
+  wall or glass filling the view), mast3r-slam freezes the pose and only recovers if image retrieval finds an
+  already-mapped keyframe that matches. When the camera keeps moving into new areas, every attempt fails and the
+  rest of the clip is lost. dpvo's `iphone/pool.mp4` shows this (lost at 78.5 s with every frame, at 8.3 s with
+  every 5th frame), so it is left out of the example clips and the download task. Possible fixes, smallest first:
+  record relocalisation attempts in the saved recording (today they only reach a connected viewer); try
+  `reloc.strict = False`; start a new map after repeated failures and join the maps on loop closure (as ORB-SLAM3
+  does). Related: in single-thread mode the relocalisation wait spins forever if the backend process dies.
 
 ## Acknowledgements
 

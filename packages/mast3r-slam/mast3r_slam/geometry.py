@@ -15,38 +15,6 @@ def skew_sym(x: Float[Tensor, "... 3"]) -> Float[Tensor, "... 3 3"]:
     return torch.stack([o, -z_comp, y_comp, z_comp, o, -x_comp, -y_comp, x_comp, o], dim=-1).view(*b, 3, 3)
 
 
-def point_to_dist(X: Float[Tensor, "... 3"]) -> Float[Tensor, "... 1"]:
-    """Compute Euclidean distance (norm) of 3D points."""
-    d: Float[Tensor, "... 1"] = torch.linalg.norm(X, dim=-1, keepdim=True)
-    return d
-
-
-def point_to_ray_dist(
-    X: Float[Tensor, "... 3"],
-    jacobian: bool = False,
-) -> Float[Tensor, "... 4"] | tuple[Float[Tensor, "... 4"], Float[Tensor, "... 4 3"]]:
-    """Convert 3D points to ray-distance representation (unit_ray, distance).
-
-    Returns a 4-vector [rx, ry, rz, d] where r is the unit ray and d is the distance.
-    If jacobian=True, also returns the 4x3 Jacobian drd/dX.
-    """
-    b: tuple[int, ...] = X.shape[:-1]
-
-    d: Float[Tensor, "... 1"] = point_to_dist(X)
-    d_inv: Float[Tensor, "... 1"] = 1.0 / d
-    r: Float[Tensor, "... 3"] = d_inv * X
-    rd: Float[Tensor, "... 4"] = torch.cat((r, d), dim=-1)
-    if not jacobian:
-        return rd
-
-    d_inv_2: Float[Tensor, "... 1"] = d_inv**2
-    eye: Float[Tensor, "... 3 3"] = torch.eye(3, device=X.device, dtype=X.dtype).repeat(*b, 1, 1)
-    dr_dX: Float[Tensor, "... 3 3"] = d_inv.unsqueeze(-1) * (eye - d_inv_2.unsqueeze(-1) * (X.unsqueeze(-1) @ X.unsqueeze(-2)))
-    dd_dX: Float[Tensor, "... 1 3"] = r.unsqueeze(-2)
-    drd_dX: Float[Tensor, "... 4 3"] = torch.cat((dr_dX, dd_dX), dim=-2)
-    return rd, drd_dX
-
-
 def constrain_points_to_ray(
     img_size: tuple[int, int],
     Xs: Float[Tensor, "b h w 3"],

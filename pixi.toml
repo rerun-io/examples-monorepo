@@ -170,19 +170,24 @@ pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 # onnxruntime comes from PyPI (see [feature.cuda.pypi-dependencies]); conda-forge
 # supplies only the CUDA/cuDNN libraries it dlopens.
+# TensorRT's shared libraries are conda packages, so every env hard-links one
+# cached copy. The pypi.nvidia.com tensorrt-cu13-libs wheel is sent with
+# `cache-control: no-store`, and uv unpacked a fresh 4.4 GB copy per env install.
+# conda-pypi-map-ai-demos.json maps libnvinfer to tensorrt-cu13-libs, which
+# satisfies the PyPI tensorrt-cu13 requirement below.
+# TODO(tensorrt-conda-forge): Stopgap: drop this ai-demos build and the channel pin once conda-forge's
+# tensorrt-feedstock ships >= 11.2 (watch conda-forge/tensorrt-feedstock PRs #5/#8); then switch
+# libnvinfer* to conda-forge and delete the recipe (pablovela5620/ai-demos recipes/tensorrt).
+libnvinfer = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
+libnvinfer-plugin = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
+libnvonnxparser = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
 
-# TensorRT — one shared source for every cuda env (pypi.nvidia.com ships both
-# platforms, cp310–cp313). tensorrt-cu13-libs' stale metadata demands
-# nvidia-cuda-runtime-cu13; NVIDIA's empty 0.0.0a0 placeholder satisfies it
-# (conda supplies the real CUDA runtime).
+# TensorRT's Python API from plain PyPI, which uv caches: the tensorrt-cu13
+# metapackage (a small setuptools sdist) and the cp312 bindings wheels.
 [feature.cuda.pypi-dependencies]
-tensorrt-cu13 = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
-# Its -libs dependency from the same index: there it is a real wheel (x86_64 manylinux_2_28, aarch64 manylinux_2_35).
-# On PyPI it is only an sdist stub that downloads the 3.6 GB wheel at build time, and uv rebuilt and cached it for
-# every cuda env install (~8 GB of uv cache each, ~870 GB over four days).
-tensorrt-cu13-libs = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-# onnxruntime from PyPI, like TensorRT: conda-forge's build ships no sm_121 kernels
+tensorrt-cu13 = "==11.2.1.2"
+tensorrt-cu13-bindings = "==11.2.1.2"
+# onnxruntime from PyPI, like the TensorRT bindings: conda-forge's build ships no sm_121 kernels
 # (its CUDA EP dies on the GB10), and 1.29.0 is the first release whose aarch64
 # CUDA 13 wheels carry sm_121a. No [cuda]/[cudnn] extras — cudart/cuBLAS/cuDNN come
 # from conda above through the LD_LIBRARY_PATH activation. Exact pin: bump
@@ -193,10 +198,10 @@ cuda-python = "*"
 # strongly-typed networks mandatory — imports onnxscript at export time.
 onnxscript = "*"
 
-# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default; ORT needs
-# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer (every cuda env is on Python 3.12).
+# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default): ORT needs
+# conda's cuDNN/cuBLAS, and the tensorrt bindings find conda's libnvinfer there.
 [feature.cuda.activation.env]
-LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -1907,6 +1912,8 @@ platforms = ["linux-64"]
 [feature.mast3r-slam.dependencies]
 # Depth PNGs for catalog and Rerun logging (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
+# The map surface: keyframes re-fused into a sparse colour TSDF, marching-cubes mesh (packages/tsdf-rs).
+tsdf-rs = { path = "packages/tsdf-rs" }
 python = "3.12.*"
 torchcodec = "*"
 ffmpeg = ">=7.1.0"
@@ -1928,6 +1935,8 @@ asmk-rs = { path = "packages/asmk-rs" }
 
 [feature.mast3r-slam.pypi-dependencies]
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
+# The tracking forward runs as a bf16 TensorRT engine (packages/trtkit); tensorrt-cu13 comes from the cuda feature.
+trtkit = { path = "packages/trtkit", editable = true }
 einops = ">=0.8.0"
 evo = "*"
 natsort = ">=8.4"
@@ -1937,6 +1946,10 @@ pyaml = "*"
 
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
+# Cap the CPU thread pools of every mast3r-slam process (frontend, backend, logger): with one pool per core in
+# each, ~350 mostly spinning threads made example-fast 25.0 ms/frame; capped, 15.2.
+OMP_NUM_THREADS = "4"
+OPENBLAS_NUM_THREADS = "1"
 
 # Its tests import lietorch_mojo and mast3r_slam.mojo_backend, so the test lanes build both extensions first.
 [feature.mast3r-slam.tasks.tests]
@@ -1984,19 +1997,27 @@ outputs = [
 ]
 
 [feature.mast3r-slam.tasks._mast3r-slam-download-example-data]
-cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/"
+# The tours are mast3r-slam's own; the IMG_049x clips are dpvo / MetricTrail examples, so the same clip can be
+# compared across the three apps. TODO(relocalisation): dpvo's iphone/pool.mp4 is left out on purpose — mast3r-slam
+# loses tracking there and never relocalises (see "Known limitations" in packages/mast3r-slam/README.md).
+cmd = """hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/ \
+  && hf download pablovela5620/dpvo-example-data movies/IMG_0493.mp4 movies/IMG_0494.mp4 movies/IMG_0495.mp4 \
+  --repo-type dataset --local-dir data/"""
 cwd = "packages/mast3r-slam"
 outputs = [
     "packages/mast3r-slam/data/normal-apt-tour.mp4",
     "packages/mast3r-slam/data/livingroom-tour.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0493.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0494.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0495.mp4",
 ]
-description = "Download example video data"
+description = "Download the example videos (mast3r-slam's tours and the dpvo / MetricTrail clips)"
 
 # ── Test baseline task ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-generate-test-baseline]
-cmd = """python tools/mast3r_slam_inference.py \
+cmd = """python tools/mast3r_slam_inference.py test \
   --dataset data/normal-apt-tour.mp4 --img-size 224 \
-  --config config/test.yaml --max-frames 30 --no-viz \
+  --max-frames 30 \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
@@ -2009,7 +2030,7 @@ outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.mast3r-slam-example-quick]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --max-frames 100"
+cmd = "python tools/mast3r_slam_inference.py fast --dataset data/normal-apt-tour.mp4 --img-size 224 --max-frames 100"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -2019,7 +2040,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-fast]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
+cmd = "python tools/mast3r_slam_inference.py fast --dataset data/normal-apt-tour.mp4 --img-size 224"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -2029,7 +2050,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-base]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
+cmd = "python tools/mast3r_slam_inference.py base --dataset data/normal-apt-tour.mp4 --img-size 512"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -3121,6 +3142,8 @@ platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 [feature.mvs.dependencies]
 # The catalog depth layer's millimetre PNGs (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
+# The live mesh: predicted depth fused into a sparse colour TSDF, marching-cubes mesh (packages/tsdf-rs).
+tsdf-rs = { path = "packages/tsdf-rs" }
 python = "3.12.*"
 einops = ">=0.8,<0.9"
 kornia = ">=0.8,<0.9"
@@ -3139,7 +3162,8 @@ PACKAGE_DIR = "packages/mvs"
 [feature.mvs.tasks.mvs-live-mesh]
 cmd = "python tools/apps/live_mesh.py"
 cwd = "packages/mvs"
-description = "Stream catalog AV1 segments through NVDEC and log the frames to Rerun"
+depends-on = ["mvs-download-depth-model"]
+description = "Fuse the depth model's predictions over catalog segments into a TSDF mesh, logged as it grows"
 
 [feature.mvs.tasks.mvs-download-depth-model]
 cmd = "hf download pablovela5620/mvs-depth depth_model_dot.onnx --local-dir data/models"

@@ -13,8 +13,8 @@ BASELINE_RRD: Path = FIXTURES_DIR / "baseline_30frames.rrd"
 def baseline_rrd_path() -> Path:
     """Path to the pre-generated baseline .rrd for regression tests.
 
-    Generate with: pixi run -e mast3r-slam --frozen _generate-test-baseline
+    Generate with: pixi run -e mast3r-slam --frozen _mast3r-slam-generate-test-baseline
     """
     if not BASELINE_RRD.exists():
-        pytest.skip(f"Baseline RRD not found at {BASELINE_RRD}. Run _generate-test-baseline first.")
+        pytest.skip(f"Baseline RRD not found at {BASELINE_RRD}. Run _mast3r-slam-generate-test-baseline first.")
     return BASELINE_RRD

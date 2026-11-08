@@ -323,8 +323,6 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh
     )
-    if mesh is not None and live_surface is not None:
-        live_surface.retire()  # the final mesh (world tab) supersedes the live one
     return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None)
 
 
