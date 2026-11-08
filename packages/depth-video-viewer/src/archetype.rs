@@ -13,7 +13,10 @@
 //! - `depth_range`: visible range in decoded units (default `[0, 2^bit_depth - 1]`);
 //! - `point_fill_ratio`: 3D point radius as a fraction of the projected pixel size.
 
-use re_viewer::external::re_sdk_types::{ArchetypeName, ComponentDescriptor, ComponentIdentifier};
+use re_viewer::external::re_sdk_types::{
+    ArchetypeName, Component as _, ComponentDescriptor, ComponentIdentifier, ComponentType,
+    components,
+};
 
 /// The archetype name the descriptors carry.
 pub const ARCHETYPE: &str = "rerun.archetypes.DepthVideoStream";
@@ -28,32 +31,35 @@ pub enum Field {
     PointFillRatio,
 }
 
-/// Field name and component type, indexed by [`Field`].
-const FIELDS: [(Field, &str, &str); 6] = [
-    (Field::Codec, "codec", "rerun.components.VideoCodec"),
-    (Field::Sample, "sample", "rerun.components.VideoSample"),
-    (Field::Meter, "meter", "rerun.components.DepthMeter"),
-    (Field::Colormap, "colormap", "rerun.components.Colormap"),
-    (
-        Field::DepthRange,
-        "depth_range",
-        "rerun.components.ValueRange",
-    ),
-    (
-        Field::PointFillRatio,
-        "point_fill_ratio",
-        "rerun.components.FillRatio",
-    ),
-];
-
 impl Field {
+    const ALL: [Self; 6] = [
+        Self::Codec,
+        Self::Sample,
+        Self::Meter,
+        Self::Colormap,
+        Self::DepthRange,
+        Self::PointFillRatio,
+    ];
+
+    /// Field name and component type.
+    fn name_and_type(self) -> (&'static str, ComponentType) {
+        match self {
+            Self::Codec => ("codec", components::VideoCodec::name()),
+            Self::Sample => ("sample", components::VideoSample::name()),
+            Self::Meter => ("meter", components::DepthMeter::name()),
+            Self::Colormap => ("colormap", components::Colormap::name()),
+            Self::DepthRange => ("depth_range", components::ValueRange::name()),
+            Self::PointFillRatio => ("point_fill_ratio", components::FillRatio::name()),
+        }
+    }
+
     pub fn descriptor(self) -> ComponentDescriptor {
-        let (_, field, component_type) = FIELDS[self as usize];
+        let (field, component_type) = self.name_and_type();
         let archetype = ArchetypeName::from(ARCHETYPE);
         ComponentDescriptor {
             archetype: Some(archetype),
             component: ComponentIdentifier::from_archetype_field(archetype, field),
-            component_type: Some(component_type.into()),
+            component_type: Some(component_type),
         }
     }
 
@@ -63,26 +69,22 @@ impl Field {
 }
 
 pub fn all_components() -> Vec<ComponentDescriptor> {
-    FIELDS
-        .iter()
-        .map(|(field, ..)| field.descriptor())
-        .collect()
+    Field::ALL.map(Field::descriptor).to_vec()
 }
 
 /// Viewer default for `meter`: one unit is one millimetre.
 pub const DEFAULT_METER: f32 = 1000.0;
 
+/// Viewer default for `point_fill_ratio`: points as wide as a pixel.
+pub const DEFAULT_POINT_FILL_RATIO: f32 = 1.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use re_viewer::external::re_sdk_types::{Component as _, components};
 
     /// The Python helper and the prototype write `DepthVideoStream:<field>` under the full archetype name.
     #[test]
     fn descriptors_match_the_python_helper() {
-        for (i, (field, ..)) in FIELDS.iter().enumerate() {
-            assert_eq!(*field as usize, i, "FIELDS is indexed by Field");
-        }
         let codec = Field::Codec.descriptor();
         assert_eq!(codec.component.as_str(), "DepthVideoStream:codec");
         assert_eq!(codec.archetype.unwrap().as_str(), ARCHETYPE);

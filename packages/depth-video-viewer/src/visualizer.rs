@@ -10,7 +10,7 @@
 //! `process_entity_view_as_depth_cloud`).
 
 use crate::archetype::{self, Field};
-use crate::decoder::{DecodeError, LumaFrame, Sample, StreamDecoder, latest_at};
+use crate::decoder::{DecodeError, LumaFrame, MAX_GOP, Sample, StreamDecoder, latest_at};
 use re_renderer::renderer::{
     ColormappedTexture, DepthCloud, DepthCloudDrawData, DepthClouds, RectangleDrawData,
     RectangleOptions, TextureFilterMag, TextureFilterMin, TexturedRect,
@@ -39,8 +39,17 @@ use std::sync::Arc;
 /// (time, row id) of a sample on the queried timeline: the order samples decode in.
 type SampleKey = (TimeInt, RowId);
 
-/// A sample as stored: the blob shares the store's buffer.
-type StoredSample = Sample<SampleKey, ScalarBuffer<u8>>;
+/// A row of the sample component as stored: its blob, which shares the store's buffer, or `None` for an empty
+/// batch, which clears the entity from that time on.
+type StoredRow = Sample<SampleKey, Option<ScalarBuffer<u8>>>;
+
+/// What a loaded row holds. The index keeps only this, no sample bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RowKind {
+    Clear,
+    Keyframe,
+    Frame,
+}
 
 #[derive(Default)]
 pub struct DepthVideoStreamVisualizer;
@@ -214,7 +223,7 @@ fn depth_texture(
     instruction: &VisualizerInstruction,
     output: &VisualizerExecutionOutput,
 ) -> Result<Option<DrawnDepth>, String> {
-    let [codec_c, meter_c, colormap_c, range_c, fill_c] = [
+    let components = [
         Field::Codec,
         Field::Meter,
         Field::Colormap,
@@ -222,6 +231,7 @@ fn depth_texture(
         Field::PointFillRatio,
     ]
     .map(Field::component);
+    let [codec_c, meter_c, colormap_c, range_c, fill_c] = components;
 
     // Properties may be overridden in the blueprint; samples are read straight from the store.
     let properties = re_view::latest_at_with_blueprint_resolved_data(
@@ -229,7 +239,7 @@ fn depth_texture(
         None,
         &query.latest_at_query(),
         data,
-        [codec_c, meter_c, colormap_c, range_c, fill_c],
+        components,
         Some(instruction),
     );
     if properties.any_missing_chunks() {
@@ -243,27 +253,25 @@ fn depth_texture(
     }
 
     let entity_path = &data.entity_path;
-    let mut partial = false;
-    let decoded = ctx
+    let shown = ctx
         .viewer_ctx
         .store_context
         .memoizer::<DecoderCache, _>(|cache| {
             cache.frame(
-                (entity_path.hash(), query.timeline),
+                ctx.recording(),
+                entity_path,
+                query.timeline,
                 query.latest_at,
-                || {
-                    let samples = read_samples(ctx.recording(), entity_path, query.timeline);
-                    partial = samples.is_none();
-                    samples
-                },
             )
         })
         .map_err(|err| format!("Failed to decode depth video: {err}"))?;
-    if partial {
-        output.set_missing_chunks();
-    }
-    let Some((row_id, frame)) = decoded else {
-        return Ok(None);
+    let (row_id, frame) = match shown {
+        Shown::Frame(row_id, frame) => (row_id, frame),
+        Shown::Nothing => return Ok(None),
+        Shown::Loading => {
+            output.set_missing_chunks();
+            return Ok(None);
+        }
     };
 
     let meter = properties
@@ -278,7 +286,7 @@ fn depth_texture(
     );
     let fill_ratio = properties
         .get_mono::<FillRatio>(fill_c)
-        .map_or(1.0, |f| *f.0);
+        .map_or(archetype::DEFAULT_POINT_FILL_RATIO, |f| *f.0);
 
     // Keyed by the sample's row id, so the texture manager uploads each decoded frame once.
     let image = ImageInfo::from_stored_blob(
@@ -316,24 +324,23 @@ fn depth_texture(
     }))
 }
 
-/// All samples of an entity on a timeline in decode order, or `None` while some of its chunks are not loaded.
-fn read_samples(
+/// The rows of the sample component in `range`, in decode order, and whether some of their chunks are not loaded.
+fn read_rows(
     recording: &EntityDb,
     entity_path: &EntityPath,
     timeline: TimelineName,
-) -> Option<Vec<StoredSample>> {
+    range: AbsoluteTimeRange,
+    tracking: ChunkTrackingMode,
+) -> (Vec<StoredRow>, bool) {
     re_tracing::profile_function!();
     let component = Field::Sample.component();
     let results = recording.storage_engine().cache().range(
-        ChunkTrackingMode::Report,
-        &RangeQuery::new(timeline, AbsoluteTimeRange::EVERYTHING),
+        tracking,
+        &RangeQuery::new(timeline, range),
         entity_path,
         [component],
     );
-    if results.is_partial() {
-        return None;
-    }
-    let mut samples: Vec<_> = results
+    let mut rows: Vec<_> = results
         .get(component)
         .unwrap_or(&[])
         .iter()
@@ -341,59 +348,136 @@ fn read_samples(
             chunk
                 .iter_component_indices(timeline, component)
                 .zip(chunk.iter_component::<VideoSample>(component))
-                .filter_map(|(key, batch)| {
-                    Some(Sample {
-                        key,
-                        data: batch.first()?.0.0.clone(),
-                    })
+                .map(|(key, batch)| Sample {
+                    key,
+                    data: batch.first().map(|sample| sample.0.0.clone()),
                 })
         })
         .collect();
-    samples.sort_by_key(|sample| sample.key);
-    Some(samples)
+    rows.sort_by_key(|row| row.key);
+    (rows, results.is_partial())
 }
 
-/// Per-recording decoder state: a sample index and a decoder per entity and timeline.
+/// The loaded rows of the sample component on a timeline, without their bytes.
+fn read_index(
+    recording: &EntityDb,
+    entity_path: &EntityPath,
+    timeline: TimelineName,
+) -> Vec<Sample<SampleKey, RowKind>> {
+    // Ignore: the index only bounds the span a decode reads, and that read reports what is missing.
+    let (rows, _) = read_rows(
+        recording,
+        entity_path,
+        timeline,
+        AbsoluteTimeRange::EVERYTHING,
+        ChunkTrackingMode::Ignore,
+    );
+    rows.into_iter()
+        .map(|row| Sample {
+            key: row.key,
+            data: match row.data {
+                None => RowKind::Clear,
+                Some(blob)
+                    if re_video::is_start_of_gop(&blob, re_video::VideoCodec::AV1)
+                        .unwrap_or(false) =>
+                {
+                    RowKind::Keyframe
+                }
+                Some(_) => RowKind::Frame,
+            },
+        })
+        .collect()
+}
+
+/// The first time a decode for `time` reads: the keyframe before the loaded row shown at `time`, or that row if it is
+/// a clear. Without either among the loaded rows, the start of the timeline: the read then reports what to load.
+fn span_start(index: &[Sample<SampleKey, RowKind>], time: TimeInt) -> TimeInt {
+    let Some(target) = latest_at(index, time) else {
+        return TimeInt::MIN;
+    };
+    if index[target].data == RowKind::Clear {
+        return index[target].key.0;
+    }
+    index[..=target]
+        .iter()
+        .rev()
+        .filter(|row| row.data != RowKind::Clear)
+        .take(MAX_GOP)
+        .find(|row| row.data == RowKind::Keyframe)
+        .map_or(TimeInt::MIN, |row| row.key.0)
+}
+
+/// What an entity shows at the time cursor.
+enum Shown {
+    /// Chunks the decode needs are not loaded yet; they have been requested.
+    Loading,
+    /// No sample at or before the cursor, or a clear.
+    Nothing,
+    /// The decoded frame and its sample's row id.
+    Frame(RowId, Arc<LumaFrame>),
+}
+
+/// Per-recording decoder state: a loaded-row index and a decoder per entity and timeline.
 #[derive(Default)]
 struct DecoderCache {
     streams: BTreeMap<(EntityPathHash, TimelineName), CachedStream>,
 }
 
 struct CachedStream {
-    /// Rebuilt after the entity's chunks change.
-    samples: Option<Vec<StoredSample>>,
+    /// Rebuilt after the entity's sample chunks change.
+    index: Option<Vec<Sample<SampleKey, RowKind>>>,
     decoder: StreamDecoder<SampleKey>,
     used: bool,
 }
 
 impl DecoderCache {
-    /// The frame shown at `time` and its sample's row id; builds the sample index with `read_samples` if needed.
+    /// The frame `entity_path` shows at `time`. Only the rows from the keyframe to `time` are read (and their chunks
+    /// requested); clears never reach the decoder, which keeps its reference state across them.
     fn frame(
         &mut self,
-        key: (EntityPathHash, TimelineName),
+        recording: &EntityDb,
+        entity_path: &EntityPath,
+        timeline: TimelineName,
         time: TimeInt,
-        read_samples: impl FnOnce() -> Option<Vec<StoredSample>>,
-    ) -> Result<Option<(RowId, Arc<LumaFrame>)>, DecodeError> {
-        let stream = match self.streams.entry(key) {
+    ) -> Result<Shown, DecodeError> {
+        let stream = match self.streams.entry((entity_path.hash(), timeline)) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => entry.insert(CachedStream {
-                samples: None,
+                index: None,
                 decoder: StreamDecoder::new()?,
                 used: false,
             }),
         };
         stream.used = true;
-        if stream.samples.is_none() {
-            stream.samples = read_samples();
+        let index = stream
+            .index
+            .get_or_insert_with(|| read_index(recording, entity_path, timeline));
+        let span = AbsoluteTimeRange::new(span_start(index, time), time);
+        let (rows, partial) = read_rows(
+            recording,
+            entity_path,
+            timeline,
+            span,
+            ChunkTrackingMode::Report,
+        );
+        if partial {
+            return Ok(Shown::Loading);
         }
-        let Some(samples) = &stream.samples else {
-            return Ok(None);
-        };
-        let Some(target) = latest_at(samples, time) else {
-            return Ok(None);
-        };
-        let frame = stream.decoder.frame(samples, target)?;
-        Ok(Some((samples[target].key.1, frame)))
+        if rows.last().is_none_or(|row| row.data.is_none()) {
+            return Ok(Shown::Nothing);
+        }
+        let samples: Vec<_> = rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(Sample {
+                    key: row.key,
+                    data: row.data?,
+                })
+            })
+            .collect();
+        let target = samples.len() - 1;
+        let frame = stream.decoder.frame(&samples, target)?;
+        Ok(Shown::Frame(samples[target].key.1, frame))
     }
 }
 
@@ -414,14 +498,17 @@ impl re_viewer_context::Cache for DecoderCache {
     }
 
     fn on_store_events(&mut self, events: &[&ChunkStoreEvent], _: &EntityDb) {
+        let component = Field::Sample.component();
         for event in events {
             if event.is_virtual_addition() {
                 self.streams.clear();
-            } else if let Some(chunk) = event.delta_chunk() {
+            } else if let Some(chunk) = event.delta_chunk()
+                && chunk.components().contains_component(component)
+            {
                 let entity = chunk.entity_path().hash();
                 for ((stream_entity, _), stream) in &mut self.streams {
                     if *stream_entity == entity {
-                        stream.samples = None;
+                        stream.index = None;
                     }
                 }
             }
@@ -431,7 +518,7 @@ impl re_viewer_context::Cache for DecoderCache {
 
 impl re_byte_size::MemUsageTreeCapture for DecoderCache {
     fn capture_mem_usage_tree(&self) -> re_byte_size::MemUsageTree {
-        // The sample index shares the store's buffers; the decoded frame is ours.
+        // The index holds no sample bytes; the decoded frame is ours.
         let bytes = self
             .streams
             .values()
@@ -439,5 +526,147 @@ impl re_byte_size::MemUsageTreeCapture for DecoderCache {
             .map(|frame| frame.data.len() as u64)
             .sum();
         re_byte_size::MemUsageTree::Bytes(bytes)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "frame indices of a 24-frame fixture"
+)]
+mod tests {
+    use super::*;
+    use crate::decoder::testdata::{FRAMES, codes, expected, units};
+    use re_viewer::external::re_chunk::{Chunk, ChunkBuilder, ChunkId, TimePoint, Timeline};
+    use re_viewer::external::re_log_types::{StoreId, StoreKind};
+
+    const ENTITY: &str = "depth";
+
+    fn timeline() -> Timeline {
+        Timeline::new_sequence("frame")
+    }
+
+    fn new_db() -> EntityDb {
+        EntityDb::new(StoreId::random(StoreKind::Recording, "depth_video_test"))
+    }
+
+    /// One chunk with a row per `(time, samples)`; an empty list is a clear.
+    fn chunk(rows: &[(i64, Vec<VideoSample>)]) -> Arc<Chunk> {
+        let mut builder = ChunkBuilder::new(ChunkId::new(), ENTITY.into());
+        for (time, samples) in rows {
+            builder = builder.with_component_batch(
+                RowId::new(),
+                TimePoint::from_iter([(timeline(), *time)]),
+                (Field::Sample.descriptor(), samples as _),
+            );
+        }
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn frame_rows(
+        frames: std::ops::Range<usize>,
+        time: impl Fn(usize) -> i64,
+    ) -> Vec<(i64, Vec<VideoSample>)> {
+        let units = units();
+        frames
+            .map(|f| (time(f), vec![VideoSample::from(units[f].clone())]))
+            .collect()
+    }
+
+    fn add(db: &mut EntityDb, cache: &mut DecoderCache, chunk: &Arc<Chunk>) {
+        let events = db.add_chunk(chunk).unwrap();
+        re_viewer_context::Cache::on_store_events(cache, &events.iter().collect::<Vec<_>>(), db);
+    }
+
+    fn shown(db: &EntityDb, cache: &mut DecoderCache, time: i64) -> Result<Shown, DecodeError> {
+        cache.frame(
+            db,
+            &ENTITY.into(),
+            *timeline().name(),
+            TimeInt::new_temporal(time),
+        )
+    }
+
+    fn assert_frame(db: &EntityDb, cache: &mut DecoderCache, time: i64, f: usize) {
+        match shown(db, cache, time) {
+            Ok(Shown::Frame(_, frame)) => assert_eq!(codes(&frame), expected(f), "time {time}"),
+            Ok(Shown::Loading) => panic!("time {time}: loading, expected frame {f}"),
+            Ok(Shown::Nothing) => panic!("time {time}: nothing, expected frame {f}"),
+            Err(err) => panic!("time {time}: {err}, expected frame {f}"),
+        }
+    }
+
+    /// Frames 0-4 at times 0-4, a clear at 5, frames 5-9 at 6-10 (one GOP): the clear hides the depth until the next
+    /// frame, and later frames still decode from the history before it, after seeks in either direction.
+    #[test]
+    fn a_clear_hides_the_depth_until_the_next_frame() {
+        let mut rows = frame_rows(0..5, |f| f as i64);
+        rows.push((5, vec![]));
+        rows.extend(frame_rows(5..10, |f| f as i64 + 1));
+        let mut db = new_db();
+        let mut cache = DecoderCache::default();
+        add(&mut db, &mut cache, &chunk(&rows));
+
+        assert_frame(&db, &mut cache, 3, 3);
+        assert!(matches!(shown(&db, &mut cache, 5), Ok(Shown::Nothing)));
+        assert_frame(&db, &mut cache, 6, 5);
+        assert_frame(&db, &mut cache, 2, 2);
+        assert!(matches!(shown(&db, &mut cache, 5), Ok(Shown::Nothing)));
+        assert_frame(&db, &mut cache, 10, 9);
+        assert_frame(&db, &mut cache, 4, 4);
+    }
+
+    /// A row holding one zero-byte sample is a sample, not a clear: the decoder rejects it (rav1d would abort).
+    #[test]
+    fn a_zero_byte_sample_is_not_a_clear() {
+        let mut rows = frame_rows(0..3, |f| f as i64);
+        rows.push((3, vec![VideoSample::from(Vec::<u8>::new())]));
+        let mut db = new_db();
+        let mut cache = DecoderCache::default();
+        add(&mut db, &mut cache, &chunk(&rows));
+        assert_frame(&db, &mut cache, 2, 2);
+        assert!(matches!(
+            shown(&db, &mut cache, 3),
+            Err(DecodeError::EmptySample)
+        ));
+        assert_frame(&db, &mut cache, 1, 1);
+    }
+
+    /// Both chunks are in the manifest, only the first GOP is loaded: its frames draw, a later time waits for its
+    /// chunk, and draws once that chunk arrives.
+    #[test]
+    fn an_unloaded_later_chunk_does_not_block_the_current_gop() {
+        let first = chunk(&frame_rows(0..10, |f| f as i64));
+        let later = chunk(&frame_rows(10..FRAMES, |f| f as i64));
+        let mut db = new_db();
+        let mut builder = re_chunk_index::RrdManifestBuilder::default();
+        for (i, chunk) in [&first, &later].into_iter().enumerate() {
+            let span = re_span::Span {
+                start: 100 * i as u64,
+                len: 100,
+            };
+            builder
+                .append(&chunk.to_chunk_batch().unwrap(), span, 100)
+                .unwrap();
+        }
+        let manifest = builder.build(db.store_id().clone()).unwrap();
+        let manifest = re_chunk_index::RrdManifest::try_new(&manifest).unwrap();
+        let mut cache = DecoderCache::default();
+        let events = db.add_rrd_manifest_message(Arc::new(manifest));
+        re_viewer_context::Cache::on_store_events(
+            &mut cache,
+            &events.iter().collect::<Vec<_>>(),
+            &db,
+        );
+        assert!(matches!(shown(&db, &mut cache, 5), Ok(Shown::Loading)));
+
+        add(&mut db, &mut cache, &first);
+        assert_frame(&db, &mut cache, 5, 5);
+        assert_frame(&db, &mut cache, 9, 9);
+        assert!(matches!(shown(&db, &mut cache, 15), Ok(Shown::Loading)));
+
+        add(&mut db, &mut cache, &later);
+        assert_frame(&db, &mut cache, 15, 15);
+        assert_frame(&db, &mut cache, 3, 3);
     }
 }

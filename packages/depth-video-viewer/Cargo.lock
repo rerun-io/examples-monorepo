@@ -2638,12 +2638,15 @@ dependencies = [
  "glam",
  "re_build_info",
  "re_byte_size",
+ "re_chunk_index",
  "re_crash_handler",
  "re_grpc_server",
  "re_rav1d",
+ "re_span",
  "re_tracing",
  "re_video",
  "re_viewer",
+ "thiserror 2.0.20",
  "tokio",
 ]
 

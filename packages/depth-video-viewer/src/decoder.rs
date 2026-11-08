@@ -18,36 +18,18 @@ const _: () = assert!(
     "needs a little-endian target"
 );
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
-    Dav1d(dav1d::Error),
+    #[error("AV1 decoder: {0}")]
+    Dav1d(#[from] dav1d::Error),
+    #[error("the AV1 sample produced no picture")]
     NoPicture,
+    #[error("an AV1 sample of zero bytes")]
+    EmptySample,
+    #[error("unsupported luma bit depth {0}")]
     BitDepth(usize),
+    #[error("no AV1 keyframe within {0} samples before this one")]
     NoKeyframe(usize),
-}
-
-impl std::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Dav1d(err) => write!(f, "AV1 decoder: {err}"),
-            Self::NoPicture => write!(f, "the AV1 sample produced no picture"),
-            Self::BitDepth(bits) => write!(f, "unsupported luma bit depth {bits}"),
-            Self::NoKeyframe(searched) => {
-                write!(
-                    f,
-                    "no AV1 keyframe within {searched} samples before this one"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for DecodeError {}
-
-impl From<dav1d::Error> for DecodeError {
-    fn from(err: dav1d::Error) -> Self {
-        Self::Dav1d(err)
-    }
 }
 
 /// One decoded depth frame: the coded luma values as packed little-endian `u16` rows (an `L16` image).
@@ -85,8 +67,12 @@ impl LumaDecoder {
     pub fn decode<D: AsRef<[u8]> + Send + Sync + 'static>(
         &mut self,
         sample: D,
-    ) -> Result<LumaFrame, DecodeError> {
+    ) -> Result<dav1d::Picture, DecodeError> {
         re_tracing::profile_function!();
+        // rav1d aborts the process on an empty buffer.
+        if sample.as_ref().is_empty() {
+            return Err(DecodeError::EmptySample);
+        }
         let mut shown = None;
         match self.decoder.send_data(sample, None, None, None) {
             Ok(()) => {}
@@ -102,8 +88,7 @@ impl LumaDecoder {
             Err(err) => return Err(err.into()),
         }
         self.drain(&mut shown)?;
-        let picture = shown.ok_or(DecodeError::NoPicture)?;
-        luma_frame(&picture)
+        shown.ok_or(DecodeError::NoPicture)
     }
 
     fn drain(&mut self, shown: &mut Option<dav1d::Picture>) -> Result<(), DecodeError> {
@@ -118,24 +103,27 @@ impl LumaDecoder {
 }
 
 /// Copy the Y plane without its row padding; 8-bit values are widened to `u16`.
-fn luma_frame(picture: &dav1d::Picture) -> Result<LumaFrame, DecodeError> {
+pub fn luma_frame(picture: &dav1d::Picture) -> Result<LumaFrame, DecodeError> {
     let bits = picture
         .bits_per_component()
         .map_or_else(|| picture.bit_depth(), |bpc| bpc.0);
+    if !(8..=16).contains(&bits) {
+        return Err(DecodeError::BitDepth(bits));
+    }
     let width = picture.width() as usize;
     let height = picture.height() as usize;
     let stride = picture.stride(dav1d::PlanarImageComponent::Y) as usize;
     let plane = picture.plane(dav1d::PlanarImageComponent::Y);
     let mut data = Vec::with_capacity(2 * width * height);
     for row in plane.chunks(stride).take(height) {
-        match bits {
-            8 => data.extend(
+        if bits == 8 {
+            data.extend(
                 row[..width]
                     .iter()
                     .flat_map(|&v| u16::from(v).to_le_bytes()),
-            ),
-            9..=16 => data.extend_from_slice(&row[..2 * width]),
-            _ => return Err(DecodeError::BitDepth(bits)),
+            );
+        } else {
+            data.extend_from_slice(&row[..2 * width]);
         }
     }
     Ok(LumaFrame {
@@ -217,10 +205,11 @@ impl<K: Copy + Eq> StreamDecoder<K> {
         if restart {
             self.decoder.reset();
         }
-        let mut frame = None;
+        // Only the target's picture is copied out; the samples before it only build the reference state.
+        let mut picture = None;
         for sample in &samples[start..=target] {
             match self.decoder.decode(sample.data.clone()) {
-                Ok(decoded) => frame = Some(decoded),
+                Ok(decoded) => picture = Some(decoded),
                 Err(err) => {
                     // Unknown reference state: the next request restarts at a keyframe.
                     self.decoder.reset();
@@ -228,28 +217,28 @@ impl<K: Copy + Eq> StreamDecoder<K> {
                 }
             }
         }
-        let frame = Arc::new(frame.ok_or(DecodeError::NoPicture)?);
+        let frame = Arc::new(luma_frame(&picture.ok_or(DecodeError::NoPicture)?)?);
         self.last = Some((samples[target].key, frame.clone()));
         Ok(frame)
     }
 }
 
+/// The test stream: 24 frames of 32x16 AV1 Main 10-bit monochrome lossless, keyframes at 0, 10 and 20, made with
+/// `depth_video_viewer.encode.encode_av1` (libaom); the codes are `(37 x + 101 y + 53 f) % 1024`.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub mod testdata {
+    use super::LumaFrame;
 
-    /// 24 frames of 32x16 AV1 Main 10-bit monochrome lossless, keyframes at 0, 10 and 20, made with
-    /// `depth_video_viewer.encode.encode_av1` (libaom); the codes are `(37 x + 101 y + 53 f) % 1024`.
     const STREAM: &[u8] = include_bytes!("testdata/ramp_32x16_24f_gop10.ivf");
-    const FRAMES: usize = 24;
+    pub const FRAMES: usize = 24;
 
-    fn expected(f: usize) -> Vec<u16> {
+    pub fn expected(f: usize) -> Vec<u16> {
         (0..16)
             .flat_map(|y| (0..32).map(move |x| ((37 * x + 101 * y + 53 * f) % 1024) as u16))
             .collect()
     }
 
-    fn codes(frame: &LumaFrame) -> Vec<u16> {
+    pub fn codes(frame: &LumaFrame) -> Vec<u16> {
         frame
             .data
             .as_chunks::<2>()
@@ -259,19 +248,31 @@ mod tests {
             .collect()
     }
 
-    /// The fixture's samples with `key(frame index)` as keys.
-    fn samples<K>(key: impl Fn(usize) -> K) -> Vec<Sample<K, Vec<u8>>> {
+    /// The temporal units of the IVF file, in order.
+    pub fn units() -> Vec<Vec<u8>> {
         let mut pos = usize::from(u16::from_le_bytes([STREAM[6], STREAM[7]]));
         let mut out = Vec::new();
         while pos < STREAM.len() {
             let size = u32::from_le_bytes(STREAM[pos..pos + 4].try_into().unwrap()) as usize;
-            out.push(Sample {
-                key: key(out.len()),
-                data: STREAM[pos + 12..pos + 12 + size].to_vec(),
-            });
+            out.push(STREAM[pos + 12..pos + 12 + size].to_vec());
             pos += 12 + size;
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testdata::{FRAMES, codes, expected, units};
+    use super::*;
+
+    /// The fixture's samples with `key(frame index)` as keys.
+    fn samples<K>(key: impl Fn(usize) -> K) -> Vec<Sample<K, Vec<u8>>> {
+        units()
+            .into_iter()
+            .enumerate()
+            .map(|(f, data)| Sample { key: key(f), data })
+            .collect()
     }
 
     #[test]
@@ -280,7 +281,7 @@ mod tests {
         assert_eq!(samples.len(), FRAMES);
         let mut decoder = LumaDecoder::new().unwrap();
         for (f, sample) in samples.iter().enumerate() {
-            let frame = decoder.decode(sample.data.clone()).unwrap();
+            let frame = luma_frame(&decoder.decode(sample.data.clone()).unwrap()).unwrap();
             assert_eq!((frame.width, frame.height, frame.bit_depth), (32, 16, 10));
             assert_eq!(codes(&frame), expected(f), "frame {f}");
         }
