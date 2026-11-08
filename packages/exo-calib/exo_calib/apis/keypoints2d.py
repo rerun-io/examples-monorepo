@@ -141,85 +141,85 @@ def track_multiview_keypoints(streams: ExoVideoStreams, detector: PersonDetector
 
     # NVDEC decodes the next frameset on one owned thread (CUDA device bound first) while detection, pose and
     # triangulation run on this one.
-    decode_pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="exocalib-decode", initializer=bind_cuda_device, initargs=("cuda",))
-    pending: Future[UInt8[Tensor, "v h w 3"]] = decode_pool.submit(decode_frameset, int(sample_indices[0]))
-    for frame_idx, sample_idx_value in enumerate(sample_indices):
-        sample_idx: int = int(sample_idx_value)
-        frames_hwc: UInt8[Tensor, "v h w 3"] = pending.result()
-        if frame_idx + 1 < num_frames:
-            pending = decode_pool.submit(decode_frameset, int(sample_indices[frame_idx + 1]))
-        frame_wh: Int64[ndarray, "2"] = np.array([frames_hwc.shape[2], frames_hwc.shape[1]], dtype=np.int64)
-        video_wh = frame_wh
-        image_wh: tuple[int, int] = (int(frame_wh[0]), int(frame_wh[1]))
-        boxes: Float64[ndarray, "v 4"] = np.full((num_views, 4), np.nan, dtype=np.float64)
-        frame_box_sources: list[BoxSource] = ["none"] * num_views
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="exocalib-decode", initializer=bind_cuda_device, initargs=("cuda",)) as decode_pool:
+        pending: Future[UInt8[Tensor, "v h w 3"]] | None = decode_pool.submit(decode_frameset, int(sample_indices[0])) if num_frames else None
+        for frame_idx, sample_idx_value in enumerate(sample_indices):
+            sample_idx: int = int(sample_idx_value)
+            assert pending is not None  # submitted for every index the loop reaches
+            frames_hwc: UInt8[Tensor, "v h w 3"] = pending.result()
+            if frame_idx + 1 < num_frames:
+                pending = decode_pool.submit(decode_frameset, int(sample_indices[frame_idx + 1]))
+            frame_wh: Int64[ndarray, "2"] = np.array([frames_hwc.shape[2], frames_hwc.shape[1]], dtype=np.int64)
+            video_wh = frame_wh
+            image_wh: tuple[int, int] = (int(frame_wh[0]), int(frame_wh[1]))
+            boxes: Float64[ndarray, "v 4"] = np.full((num_views, 4), np.nan, dtype=np.float64)
+            frame_box_sources: list[BoxSource] = ["none"] * num_views
 
-        if history:
-            latest: TrackedFrame = history[-1]
-            predicted_xyz: Float64[ndarray, "133 3"] = latest.points_xyz
-            if len(history) >= 2:
-                previous: TrackedFrame = history[-2]
-                history_interval: int = latest.sample_idx - previous.sample_idx
-                step_ratio: float = (sample_idx - latest.sample_idx) / float(history_interval) if history_interval > 0 else 1.0
-                predicted_xyz = extrapolate_keypoints(latest.points_xyz, previous.points_xyz, step_ratio=step_ratio)
-            for view_idx in range(num_views):
-                boxes[view_idx] = boxes_from_projected_keypoints(
-                    predicted_xyz,
-                    latest.conf,
-                    cameras.intrinsics[view_idx],
-                    cameras.cam_T_world[view_idx],
-                    image_wh,
-                    pad=BOX_PADDING,
-                    min_joints=BOX_MIN_JOINTS,
-                    min_confidence=BOX_CONFIDENCE_TAU,
+            if history:
+                latest: TrackedFrame = history[-1]
+                predicted_xyz: Float64[ndarray, "133 3"] = latest.points_xyz
+                if len(history) >= 2:
+                    previous: TrackedFrame = history[-2]
+                    history_interval: int = latest.sample_idx - previous.sample_idx
+                    step_ratio: float = (sample_idx - latest.sample_idx) / float(history_interval) if history_interval > 0 else 1.0
+                    predicted_xyz = extrapolate_keypoints(latest.points_xyz, previous.points_xyz, step_ratio=step_ratio)
+                for view_idx in range(num_views):
+                    boxes[view_idx] = boxes_from_projected_keypoints(
+                        predicted_xyz,
+                        latest.conf,
+                        cameras.intrinsics[view_idx],
+                        cameras.cam_T_world[view_idx],
+                        image_wh,
+                        pad=BOX_PADDING,
+                        min_joints=BOX_MIN_JOINTS,
+                        min_confidence=BOX_CONFIDENCE_TAU,
+                    )
+                    if np.isfinite(boxes[view_idx]).all():
+                        frame_box_sources[view_idx] = "tracked"
+
+            detector_view_mask: Bool[ndarray, "v"] = boxes_needing_detection(boxes, image_wh)
+            frame_time_ns: int = int(frame_times_ns[frame_idx])
+            if last_anchor_ns is None or frame_time_ns - last_anchor_ns >= reanchor_interval_ns:
+                detector_view_mask[:] = True
+                last_anchor_ns = frame_time_ns
+            detector_view_idx: Int64[ndarray, "d"] = np.flatnonzero(detector_view_mask).astype(np.int64)
+            if detector_view_idx.size:
+                detector_frames_hwc: UInt8[Tensor, "d h w 3"] = frames_hwc[torch.as_tensor(detector_view_idx, dtype=torch.long, device=frames_hwc.device)]
+                detected_boxes: Float32[ndarray, "d 4"] = _best_box_per_frame(detector(detector_frames_hwc), detector_view_idx.size)
+                for detector_row, view_idx_value in enumerate(detector_view_idx):
+                    view_idx: int = int(view_idx_value)
+                    if np.isfinite(detected_boxes[detector_row]).all():
+                        boxes[view_idx] = detected_boxes[detector_row]
+                        frame_box_sources[view_idx] = "yolox"
+
+            usable_view_idx: Int64[ndarray, "u"] = np.flatnonzero(np.isfinite(boxes).all(axis=1)).astype(np.int64)
+            if usable_view_idx.size:
+                pose_boxes: BoxDetections = BoxDetections(
+                    xyxy=torch.as_tensor(boxes[usable_view_idx], dtype=torch.float32, device=frames_hwc.device),
+                    scores=torch.ones(usable_view_idx.size, dtype=torch.float32, device=frames_hwc.device),
+                    frame_indices=torch.as_tensor(usable_view_idx, dtype=torch.long, device=frames_hwc.device),
                 )
-                if np.isfinite(boxes[view_idx]).all():
-                    frame_box_sources[view_idx] = "tracked"
+                keypoints = pose(frames_hwc, pose_boxes)
+                keypoint_view_idx: Int64[ndarray, "u"] = keypoints.frame_indices.cpu().numpy().astype(np.int64, copy=False)
+                kp_xy[keypoint_view_idx, frame_idx] = keypoints.xy.cpu().numpy().astype(np.float32, copy=False)
+                conf[keypoint_view_idx, frame_idx] = keypoints.scores.cpu().numpy().astype(np.float32, copy=False)
 
-        detector_view_mask: Bool[ndarray, "v"] = boxes_needing_detection(boxes, image_wh)
-        frame_time_ns: int = int(frame_times_ns[frame_idx])
-        if last_anchor_ns is None or frame_time_ns - last_anchor_ns >= reanchor_interval_ns:
-            detector_view_mask[:] = True
-            last_anchor_ns = frame_time_ns
-        detector_view_idx: Int64[ndarray, "d"] = np.flatnonzero(detector_view_mask).astype(np.int64)
-        if detector_view_idx.size:
-            detector_frames_hwc: UInt8[Tensor, "d h w 3"] = frames_hwc[torch.as_tensor(detector_view_idx, dtype=torch.long, device=frames_hwc.device)]
-            detected_boxes: Float32[ndarray, "d 4"] = _best_box_per_frame(detector(detector_frames_hwc), detector_view_idx.size)
-            for detector_row, view_idx_value in enumerate(detector_view_idx):
-                view_idx: int = int(view_idx_value)
-                if np.isfinite(detected_boxes[detector_row]).all():
-                    boxes[view_idx] = detected_boxes[detector_row]
-                    frame_box_sources[view_idx] = "yolox"
+            bbox_xyxy[:, frame_idx] = boxes.astype(np.float32)
+            for view_idx in range(num_views):
+                box_sources[view_idx].append(frame_box_sources[view_idx])
 
-        usable_view_idx: Int64[ndarray, "u"] = np.flatnonzero(np.isfinite(boxes).all(axis=1)).astype(np.int64)
-        if usable_view_idx.size:
-            pose_boxes: BoxDetections = BoxDetections(
-                xyxy=torch.as_tensor(boxes[usable_view_idx], dtype=torch.float32, device=frames_hwc.device),
-                scores=torch.ones(usable_view_idx.size, dtype=torch.float32, device=frames_hwc.device),
-                frame_indices=torch.as_tensor(usable_view_idx, dtype=torch.long, device=frames_hwc.device),
+            tracked_xyz, tracked_conf = triangulate_frame_keypoints(
+                kp_xy[:, frame_idx].astype(np.float64),
+                conf[:, frame_idx].astype(np.float64),
+                cameras.intrinsics,
+                cameras.cam_T_world,
+                min_confidence=BOX_CONFIDENCE_TAU,
+                reproj_threshold_px=TRACKING_REPROJECTION_THRESHOLD_PX,
             )
-            keypoints = pose(frames_hwc, pose_boxes)
-            keypoint_view_idx: Int64[ndarray, "u"] = keypoints.frame_indices.cpu().numpy().astype(np.int64, copy=False)
-            kp_xy[keypoint_view_idx, frame_idx] = keypoints.xy.cpu().numpy().astype(np.float32, copy=False)
-            conf[keypoint_view_idx, frame_idx] = keypoints.scores.cpu().numpy().astype(np.float32, copy=False)
+            if int(np.isfinite(tracked_xyz).all(axis=1).sum()) >= BOX_MIN_JOINTS:
+                history.append(TrackedFrame(sample_idx=sample_idx, points_xyz=tracked_xyz, conf=tracked_conf))
+                history = history[-2:]
 
-        bbox_xyxy[:, frame_idx] = boxes.astype(np.float32)
-        for view_idx in range(num_views):
-            box_sources[view_idx].append(frame_box_sources[view_idx])
-
-        tracked_xyz, tracked_conf = triangulate_frame_keypoints(
-            kp_xy[:, frame_idx].astype(np.float64),
-            conf[:, frame_idx].astype(np.float64),
-            cameras.intrinsics,
-            cameras.cam_T_world,
-            min_confidence=BOX_CONFIDENCE_TAU,
-            reproj_threshold_px=TRACKING_REPROJECTION_THRESHOLD_PX,
-        )
-        if int(np.isfinite(tracked_xyz).all(axis=1).sum()) >= BOX_MIN_JOINTS:
-            history.append(TrackedFrame(sample_idx=sample_idx, points_xyz=tracked_xyz, conf=tracked_conf))
-            history = history[-2:]
-
-    decode_pool.shutdown()
     assert video_wh is not None  # num_frames >= 1: sampled_frame_indices rejects empty captures
     per_camera: dict[str, CameraKeypoints] = {}
     for view_idx, name in enumerate(streams.names):
