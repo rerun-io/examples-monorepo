@@ -9,6 +9,8 @@ path never re-decodes source video.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from pathlib import Path
 
 import numpy as np
@@ -116,6 +118,12 @@ class StreamLogger:
 
         self._video_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-log")
         self._video_pending: list = []
+        # Boxes/masks/landmarks: the main thread only enqueues sync-free GPU
+        # gathers; their D2H copies run here. A .cpu() on the main thread waits
+        # for every kernel queued on the shared default stream (the fit
+        # worker's included), which cost ~16 ms/tick of main-thread stall on GB10.
+        self._aux_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aux-log")
+        self._aux_pending: list = []
         rerun_codec_by_choice: dict[VideoCodecChoice, rr.VideoCodec] = {
             VideoCodecChoice.H264: rr.VideoCodec.H264,
             VideoCodecChoice.H265: rr.VideoCodec.H265,
@@ -235,16 +243,25 @@ class StreamLogger:
             self._video_pending.pop(0).result()
         self._video_pending.append(self._video_worker.submit(encode_and_log, list(frames)))
 
+    def _submit_aux(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` on the aux-log worker, never queueing more than 4 ticks."""
+        if len(self._aux_pending) >= 4:
+            self._aux_pending.pop(0).result()
+        self._aux_pending.append(self._aux_worker.submit(fn))
+
     def log_tick_tracks(self, frame_idx: int, tracks: list[CameraTracks], seg_stride: int | None = None) -> None:
         """Log per-camera person boxes every tick + segmentation ids at a stride.
 
         Full-resolution segmentation images every tick would dominate the RRD
         (~1 MB/cam/tick raw), so masks are logged only every ``seg_stride``
         ticks (full resolution — they must share the pinhole pixel space);
-        boxes are logged every tick.
+        boxes are logged every tick. The id image is built on the GPU without a
+        host sync (``masked_fill_``, not boolean indexing) into a fresh tensor,
+        so the worker can copy it after the tracker's buffers move on.
         """
         stride: int = seg_stride if seg_stride is not None else self.seg_stride
-        set_tick_time(frame_idx, self.fps)
+        boxes_per_cam: list[tuple[str, ndarray, list[int]] | None] = []
+        segs: list[tuple[str, torch.Tensor]] = []
         for cam_name, cam_tracks in zip(self.sequence.camera_names, tracks, strict=True):
             boxes: list[ndarray] = []
             class_ids: list[int] = []
@@ -253,16 +270,7 @@ class StreamLogger:
                     boxes.append(track.bbox_xyxy)
                     class_ids.append(obj_id + 1)
             entity: str = pinhole_entity(cam_name)
-            if boxes:
-                boxes_arr: ndarray = np.stack(boxes, axis=0)
-                rr.log(
-                    f"{entity}/persons",
-                    rr.Boxes2D(
-                        array=boxes_arr,
-                        array_format=rr.Box2DFormat.XYXY,
-                        class_ids=class_ids,
-                    ),
-                )
+            boxes_per_cam.append((entity, np.stack(boxes, axis=0), class_ids) if boxes else None)
             if frame_idx % stride == 0 and cam_tracks:
                 seg: torch.Tensor = torch.zeros(
                     self.resize_hw,
@@ -270,21 +278,47 @@ class StreamLogger:
                     device=next(iter(cam_tracks.values())).mask.device,
                 )
                 for obj_id, track in sorted(cam_tracks.items()):
-                    seg[track.mask] = obj_id + 1
+                    seg.masked_fill_(track.mask, obj_id + 1)
+                segs.append((entity, seg))
+
+        def log() -> None:
+            set_tick_time(frame_idx, self.fps)
+            for item in boxes_per_cam:
+                if item is not None:
+                    entity, boxes_arr, class_ids = item
+                    rr.log(
+                        f"{entity}/persons",
+                        rr.Boxes2D(array=boxes_arr, array_format=rr.Box2DFormat.XYXY, class_ids=class_ids),
+                    )
+            for entity, seg in segs:
                 rr.log(f"{entity}/mask", rr.SegmentationImage(seg.cpu().numpy()))
 
+        self._submit_aux(log)
+
     def log_tick_landmarks(self, frame_idx: int, landmarks: list[CameraLandmarks]) -> None:
-        """Log dense 2D landmarks per camera/person, colored by visibility."""
-        set_tick_time(frame_idx, self.fps)
+        """Log dense 2D landmarks per camera/person, colored by visibility.
+
+        All (camera, person) results are gathered into ONE fresh GPU tensor on
+        the calling thread (no sync); the worker does a single D2H copy.
+        """
+        entities: list[str] = []
+        rows: list[torch.Tensor] = []
         for cam_name, cam_landmarks in zip(self.sequence.camera_names, landmarks, strict=True):
             entity_base: str = pinhole_entity(cam_name)
             for obj_id, result in sorted(cam_landmarks.items()):
-                positions_xy: Float32[ndarray, "p 2"] = result.joints2d[:, :2].cpu().numpy()
-                vis: Float32[ndarray, "p"] = result.visibility.cpu().numpy()
-                rr.log(
-                    f"{entity_base}/landmarks/person_{obj_id}",
-                    Points2DWithConfidence(positions=positions_xy, confidences=vis, radii=1.5),
-                )
+                entities.append(f"{entity_base}/landmarks/person_{obj_id}")
+                rows.append(torch.cat([result.joints2d[:, :2], result.visibility.reshape(-1, 1)], dim=1).float())
+        if not rows:
+            return
+        packed: Float32[torch.Tensor, "k p 3"] = torch.stack(rows)
+
+        def log() -> None:
+            set_tick_time(frame_idx, self.fps)
+            host: Float32[ndarray, "k p 3"] = packed.cpu().numpy()
+            for entity, row in zip(entities, host, strict=True):
+                rr.log(entity, Points2DWithConfidence(positions=row[:, :2], confidences=row[:, 2], radii=1.5))
+
+        self._submit_aux(log)
 
     def log_tick_fit(
         self,
@@ -405,9 +439,10 @@ class StreamLogger:
         fresh encoders replace the drained ones; the per-camera PTS offset
         keeps the shared timeline monotonic across multiple ``run()`` calls.
         """
-        for pending in self._video_pending:
+        for pending in self._video_pending + self._aux_pending:
             pending.result()
         self._video_pending.clear()
+        self._aux_pending.clear()
         for cam_name, encoder in self._encoders.items():
             self._log_packets(cam_name, encoder.flush())
             self._pts_offset[cam_name] += encoder.next_pts
