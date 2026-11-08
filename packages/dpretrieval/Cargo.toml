@@ -1,0 +1,25 @@
+# dpretrieval Cargo workspace: DBoW2's ORB vocabulary tree and database plus OpenCV's cross-checked brute-force
+# Hamming matcher (`crates/dbow`, pure Rust) and their PyO3 module (`crates/dpretrieval-py`, imported as
+# `dpretrieval._core`). Laid out like packages/tsdf-rs. maturin builds the module (pyproject.toml, recipe.yaml).
+[workspace]
+resolver = "2"
+members = ["crates/dbow", "crates/dpretrieval-py"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+dbow = { path = "crates/dbow" }
+numpy = "0.29"
+pyo3 = "0.29"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

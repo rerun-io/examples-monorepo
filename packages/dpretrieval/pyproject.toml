@@ -1,0 +1,17 @@
+[build-system]
+# >= 1.9.4: sets PYO3_BUILD_EXTENSION_MODULE, which replaces PyO3's extension-module feature.
+requires = ["maturin>=1.9.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "dpretrieval"
+version = "0.2.0"
+requires-python = ">=3.12"
+# numpy, OpenCV (cv2, for ORB) and jaxtyping come from the conda recipe's run requirements.
+dependencies = []
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "crates/dpretrieval-py/Cargo.toml"
+module-name = "dpretrieval._core"
+python-source = "python"
