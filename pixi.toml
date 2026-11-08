@@ -1917,6 +1917,8 @@ trimesh = "*"
 [feature.mast3r-slam.target.linux-64.dependencies]
 mast3r-src = { path = "recipes/mast3r-src" }
 asmk-src = { path = "recipes/asmk-src" }
+# asmk.hamming (asmk's Cython extension) in Rust; asmk-src re-exports it (recipes/asmk-src hamming-from-asmk-rs.patch).
+asmk-rs = { path = "packages/asmk-rs" }
 
 [feature.mast3r-slam.pypi-dependencies]
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
