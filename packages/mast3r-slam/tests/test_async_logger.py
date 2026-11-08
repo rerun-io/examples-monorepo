@@ -240,7 +240,7 @@ def test_compute_orient_matches_the_per_keyframe_conversion(monkeypatch: pytest.
     monkeypatch.setitem(config, "use_calib", False)
     captured: list[Float32[ndarray, "n 4 4"]] = []
 
-    def fake_auto_orient(world_T_cam: Float32[ndarray, "n 4 4"], method: str, center_method: str) -> object:
+    def fake_auto_orient(world_T_cam: Float32[ndarray, "n 4 4"], **_options: str) -> object:
         captured.append(world_T_cam)
         return type("Orient", (), {"transform": np.eye(4)[:3]})()
 
