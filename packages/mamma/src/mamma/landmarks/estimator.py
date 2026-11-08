@@ -12,7 +12,7 @@ from numpy import ndarray
 
 from mamma.engine.types import CameraTracks
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
-from mamma.landmarks.crops import box_geometry, gpu_crop_batch, gpu_mask_crop_batch, unproject_joints2d
+from mamma.landmarks.crops import box_geometry, gpu_crop_batch, gpu_mask_crop_batch, to_device_f32, unproject_joints2d
 from mamma.landmarks.mammanet import MammaNet, load_mammanet
 from mamma.landmarks.tensorrt_backend import INPUT_NAMES, OUTPUT_NAMES
 
@@ -115,14 +115,22 @@ class LandmarkEstimator:
         # are camera-major, so the per-camera crops concatenate in entry order.
         rgb_source: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor] = frames_hires if frames_hires is not None else frames
         s: float = hires_scale if frames_hires is not None else 1.0
+        # One host->device upload of all crop geometry (engine-res and hi-res,
+        # scaled in float64 on the host as before); per-camera rows are
+        # contiguous slices because entries are camera-major.
+        geom: Float32[torch.Tensor, "n 8"] = to_device_f32(
+            np.concatenate([centers, sizes, centers * s, sizes * s], axis=1), masks_batch.device
+        )
+        centers_t, sizes_t = geom[:, 0:2], geom[:, 2:4]
         cam_crops: list[Float32[torch.Tensor, "k 3 ch cw"]] = []
         for cam_idx in sorted({cam for cam, _ in entries}):
             rows: list[int] = [row for row, (cam, _) in enumerate(entries) if cam == cam_idx]
+            lo, hi = rows[0], rows[-1] + 1
             frame_view: Float32[torch.Tensor, "k 3 h w"] = rgb_source[cam_idx].float().unsqueeze(0).expand(len(rows), -1, -1, -1)
-            crops, _ = gpu_crop_batch(frame_view, centers[rows] * s, sizes[rows] * s, None, self.config)
+            crops, _ = gpu_crop_batch(frame_view, geom[lo:hi, 4:6], geom[lo:hi, 6:8], None, self.config)
             cam_crops.append(crops)
         img_crops: Float32[torch.Tensor, "n 3 ch cw"] = torch.cat(cam_crops, dim=0)
-        mask_crops = gpu_mask_crop_batch(masks_batch, centers, sizes, self.config)
+        mask_crops = gpu_mask_crop_batch(masks_batch, centers_t, sizes_t, self.config)
         if self.runner is not None and img_crops.shape[0] <= 4:
             out: dict[str, torch.Tensor | None] = dict(self.runner({INPUT_NAMES[0]: img_crops, INPUT_NAMES[1]: mask_crops}))
         else:
@@ -134,7 +142,7 @@ class LandmarkEstimator:
         contact_raw = out[OUTPUT_NAMES[2]]
         floor_raw = out[OUTPUT_NAMES[3]]
         assert joints2d_raw is not None and visibility_raw is not None and contact_raw is not None and floor_raw is not None
-        joints2d_px: Float32[torch.Tensor, "n j 3"] = unproject_joints2d(joints2d_raw.float(), centers, sizes, self.config)
+        joints2d_px: Float32[torch.Tensor, "n j 3"] = unproject_joints2d(joints2d_raw.float(), centers_t, sizes_t, self.config)
         visibility: Float32[torch.Tensor, "n j"] = torch.sigmoid(visibility_raw.squeeze(-1).float())
         contact: Float32[torch.Tensor, "n j"] = torch.sigmoid(contact_raw.squeeze(-1).float())
         floor_contact: Float32[torch.Tensor, "n j"] = torch.sigmoid(floor_raw.squeeze(-1).float())
