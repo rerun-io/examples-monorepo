@@ -10,7 +10,6 @@ path never re-decodes source video.
 from __future__ import annotations
 
 from collections.abc import Callable
-
 from pathlib import Path
 
 import numpy as np
