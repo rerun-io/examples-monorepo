@@ -72,6 +72,7 @@ from mast3r_slam.log_events import (
     LogText,
 )
 from mast3r_slam.mast3r_utils import (
+    compile_tracking_forward,
     load_mast3r,
     load_retriever,
     mast3r_inference_mono,
@@ -119,6 +120,9 @@ class InferenceConfig:
     """Stop after processing this many frames (None = process all)."""
     ns_save_path: None | Path = None
     """Optional path to export keyframes in NerfStudio format."""
+    compile_model: bool = False
+    """Run the tracker's MASt3R forward as compiled CUDA graphs: about 2x faster per frame, but the first tracked
+    frame waits for the compile (about 30 s cold, 14 s with a warm inductor cache)."""
 
 
 @dataclass
@@ -497,6 +501,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # process without copying them (uses CUDA IPC for GPU tensors).
     model: AsymmetricMASt3R = load_mast3r(device=device)
     model.share_memory()
+    if inf_config.compile_model:
+        compile_tracking_forward(model)
 
     # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
     # Only works when the main process uses spawn/serve/connect (not save-to-file).
