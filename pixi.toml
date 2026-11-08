@@ -1946,6 +1946,11 @@ cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
 depends-on = ["_mast3r-slam-build-mojo-kernels"]
 description = "Build the Mojo kernels, then run the package golden reference tests"
 
+# typecheck resolves mast3r_slam.mojo_backend._mast3r_mojo, so the gate builds the kernels before it, not only before the tests.
+[feature.mast3r-slam.tasks.gate]
+depends-on = ["_mast3r-slam-build-mojo-kernels", "lint", "typecheck", "deadcode", "tests", "tests-integration"]
+description = "Build the Mojo kernels, then run the author pre-merge checks for the package"
+
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-mojo-kernels]
 depends-on = ["lietorch-mojo-build"]
