@@ -28,7 +28,7 @@ from rerun.experimental.dataloader import (
 from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE, SegmentNvdecDecoder
 from torch import Tensor
 
-from mvs.apis.live_mesh import NATIVE_FPS, TIMELINE, VIDEO_WIDE
+from mvs.catalog import NATIVE_FPS, TIMELINE, VIDEO_WIDE
 from mvs.depth_engine import DepthInputs, preprocess_image, s1_intrinsics
 from mvs.pose_stream import (
     CAM_QUATERNION,

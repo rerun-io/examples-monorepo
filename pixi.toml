@@ -3137,6 +3137,8 @@ platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 [feature.mvs.dependencies]
 # The catalog depth layer's millimetre PNGs (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
+# The live mesh: predicted depth fused into a sparse colour TSDF, marching-cubes mesh (packages/tsdf-rs).
+tsdf-rs = { path = "packages/tsdf-rs" }
 python = "3.12.*"
 einops = ">=0.8,<0.9"
 kornia = ">=0.8,<0.9"
@@ -3155,7 +3157,8 @@ PACKAGE_DIR = "packages/mvs"
 [feature.mvs.tasks.mvs-live-mesh]
 cmd = "python tools/apps/live_mesh.py"
 cwd = "packages/mvs"
-description = "Stream catalog AV1 segments through NVDEC and log the frames to Rerun"
+depends-on = ["mvs-download-depth-model"]
+description = "Fuse the depth model's predictions over catalog segments into a TSDF mesh, logged as it grows"
 
 [feature.mvs.tasks.mvs-download-depth-model]
 cmd = "hf download pablovela5620/mvs-depth depth_model_dot.onnx --local-dir data/models"

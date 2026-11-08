@@ -7,7 +7,6 @@ from pathlib import Path
 import depth_png
 import numpy as np
 import rerun as rr
-from einops import rearrange
 from jaxtyping import Float32, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
@@ -17,17 +16,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 
-from mvs.apis.live_mesh import TIMELINE, CatalogDataConfig
+from mvs.catalog import PINHOLE_LOWRES_PATH, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_source_video
 from mvs.depth_engine import DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
-
-CAMERA_PATH: str = "world/rig_00/cam_00"
-PINHOLE_PATH: str = f"{CAMERA_PATH}/pinhole"
-VIDEO_PATH: str = f"{PINHOLE_PATH}/video"
-# The viewer back-projects a DepthImage with its parent pinhole's intrinsics, so the
-# 256x192 depth needs its own depth-resolution pinhole beside the native one. Path
-# names mirror the arkitscenes-download rig schema (ingest/paths.py).
-PINHOLE_LOWRES_PATH: str = f"{CAMERA_PATH}/pinhole_lowres"
 
 
 @dataclass
@@ -84,52 +75,15 @@ def main(config: Config) -> None:
 
             # numpy appears only at the rr.log boundary, as zero-copy views of CPU tensors.
             K_native_33: Float32[ndarray, "3 3"] = sample.K_native_33.numpy()
-            rr.log(
-                CAMERA_PATH,
-                rr.Transform3D(
-                    mat3x3=sample.world_T_cam_44[:3, :3].numpy(),
-                    translation=sample.world_T_cam_44[:3, 3].numpy(),
-                ),
-            )
-            rr.log(
-                PINHOLE_PATH,
-                rr.Pinhole(
-                    image_from_camera=K_native_33,
-                    width=native_wh[0],
-                    height=native_wh[1],
-                    camera_xyz=rr.ViewCoordinates.RDF,
-                ),
-            )
-            # The decoder already fetched the segment's raw AV1 samples: relog them once
-            # as a VideoStream layer (the source catalog's own schema) instead of
-            # re-encoding every decoded frame to JPEG.
+            log_camera(sample.world_T_cam_44.numpy(), K_native_33, native_wh)
             if segment_frames == 1:
-                assert video_decoder.samples is not None and video_decoder.keyframes is not None
-                rr.log(VIDEO_PATH, rr.VideoStream(codec=rr.VideoCodec.AV1), static=True)
-                rr.send_columns(
-                    VIDEO_PATH,
-                    indexes=[rr.TimeColumn(TIMELINE, duration=video_decoder.times)],
-                    columns=rr.VideoStream.columns(sample=video_decoder.samples, is_keyframe=video_decoder.keyframes),
-                )
+                log_source_video(video_decoder)
 
             if sample.inputs is not None:
                 depth_outputs: DepthOutputs = engine(sample.inputs)
-                depth_hw: Float32[ndarray, "h=192 w=256"] = (
-                    rearrange(depth_outputs.depth_b1hw, "1 1 h w -> h w").cpu().numpy()
-                )
+                depth_hw: Float32[ndarray, "h=192 w=256"]
+                depth_hw, _ = depth_at_lowres(depth_outputs, K_native_33, native_wh)
                 depth_mm_hw: UInt16[ndarray, "h=192 w=256"] = np.rint(depth_hw * 1000.0).astype(np.uint16)
-                K_depth_33: Float32[ndarray, "3 3"] = K_native_33.copy()
-                K_depth_33[0] *= 256.0 / native_wh[0]
-                K_depth_33[1] *= 192.0 / native_wh[1]
-                rr.log(
-                    PINHOLE_LOWRES_PATH,
-                    rr.Pinhole(
-                        image_from_camera=K_depth_33,
-                        width=256,
-                        height=192,
-                        camera_xyz=rr.ViewCoordinates.RDF,
-                    ),
-                )
                 rr.log(
                     f"{PINHOLE_LOWRES_PATH}/depth",
                     rr.EncodedDepthImage(blob=depth_png.encode(depth_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0),
