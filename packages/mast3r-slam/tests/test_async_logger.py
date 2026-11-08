@@ -106,9 +106,9 @@ def test_logger_relogs_pointmap_and_logs_image_only_when_sent(monkeypatch: pytes
     logger: AsyncRerunLogger = AsyncRerunLogger(event_queue, parent_log_path=Path("world"))
     logger._handle_current_frame(event)
 
-    assert "world/last_keyframe/pointmap" in logged_paths
-    assert "world/last_keyframe/confidence" in logged_paths
-    assert ("world/last_keyframe/image" in logged_paths) == with_rgb
+    assert "/last_keyframe/pointmap" in logged_paths
+    assert "/last_keyframe/confidence" in logged_paths
+    assert ("/last_keyframe/image" in logged_paths) == with_rgb
     assert "world/current_camera/pinhole/image" in logged_paths
 
 
@@ -131,8 +131,8 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
     assert "/world/current_camera/pinhole/image" not in origins_2d
     assert sorted(str(view.name) for view in views_3d) == ["Follow", "Overview"]
     for view in views_3d:
-        assert isinstance(view.contents, list)
-        assert not any("keyframe-" in str(rule) for rule in view.contents), "a 3D view rule names a keyframe"
+        # One static rule: the entity layout keeps 2D-only maps out of /world, so nothing needs excluding.
+        assert view.contents == "+ /world/**"
 
     sent: list[object] = []
     monkeypatch.setattr(async_logger.rr, "log", lambda *_a, **_k: None)
@@ -153,27 +153,46 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
     assert sent == []
 
 
-def test_keyframe_maps_live_outside_the_3d_tree(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A keyframe's image, pointmap, confidence and depth sit under /keyframe_maps, so no 3D view draws them."""
-    logged_paths: list[str] = []
-    monkeypatch.setattr(async_logger.rr, "log", lambda path, *_a, **_k: logged_paths.append(str(path)))
-    monkeypatch.setattr(async_logger.rr, "set_time", lambda *_a, **_k: None)
+def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under /world only the current camera's image and depth and each keyframe's image are 2D, each under a Pinhole
+    that has a value from the run's first time point; every other map lives outside /world."""
+    logged: list[tuple[str, str, int]] = []
+    frame_now: list[int] = [-1]
+
+    def _set_time(timeline: str, *, sequence: int | None = None, **_kwargs: object) -> None:
+        if timeline == "frame" and sequence is not None:
+            frame_now[0] = sequence
+
+    monkeypatch.setattr(async_logger.rr, "log", lambda path, entity, *_a, **_k: logged.append((str(path), type(entity).__name__, frame_now[0])))
+    monkeypatch.setattr(async_logger.rr, "set_time", _set_time)
     identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
+    rgb: Float32[ndarray, "h w 3"] = np.full((H, W, 3), 0.5, dtype=np.float32)
+    X_canon: Float32[ndarray, "hw 3"] = _grid_pointmap().numpy()
+    C: Float32[ndarray, "hw 1"] = np.full((H * W, 1), 10.0, dtype=np.float32)
     logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
-    logger._log_new_keyframe(
-        KeyframeSnapshot(
-            kf_idx=5,
-            world_sim3_cam_data=identity,
-            rgb=np.full((H, W, 3), 0.5, dtype=np.float32),
-            X_canon=_grid_pointmap().numpy(),
-            C=np.full((H * W, 1), 10.0, dtype=np.float32),
-            img_shape=(H, W),
-        )
+    logger._handle_current_frame(
+        LogCurrentFrame(frame_idx=0, timestamp_ns=None, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
     )
-    for name in ("image", "pointmap", "confidence", "pointmap_depth"):
-        assert f"/keyframe_maps/keyframe-5/{name}" in logged_paths
-    assert "/keyframe_maps/keyframe-5" in logged_paths  # its static Pinhole
-    # In the 3D tree a keyframe is only its camera: no 2D entity that exists before its Pinhole does.
-    assert not any(path.startswith("world/keyframes/keyframe-5/pinhole/") for path in logged_paths)
-    # The map is a fused TSDF mesh now, not a point cloud per keyframe.
-    assert "world/keyframes/keyframe-5/pointcloud" not in logged_paths
+    keyframe: KeyframeSnapshot = KeyframeSnapshot(kf_idx=5, world_sim3_cam_data=identity, rgb=rgb, X_canon=X_canon, C=C, img_shape=(H, W))
+    logger._handle_map_update(LogMapUpdate(frame_idx=40, timestamp_ns=None, new_keyframes=[keyframe]))
+
+    images_2d: set[str] = {"Image", "EncodedImage", "EncodedDepthImage"}
+    under_world_2d: set[str] = {path for path, kind, _ in logged if kind in images_2d and path.startswith("world/")}
+    assert under_world_2d == {
+        "world/current_camera/pinhole/image",
+        "world/current_camera/pinhole/depth",
+        "world/keyframes/keyframe-5/pinhole/image",
+    }
+    for image_path in under_world_2d:
+        pinhole_path: str = image_path.rsplit("/", 1)[0]
+        pinhole_frames: list[int] = [frame for path, kind, frame in logged if path == pinhole_path and kind in {"Pinhole", "PinholeWithDistortion"}]
+        assert pinhole_frames and min(pinhole_frames) == 0, f"{pinhole_path} needs a Pinhole from the first time point"
+    keyframe_image_frames: list[int] = [frame for path, _, frame in logged if path == "world/keyframes/keyframe-5/pinhole/image"]
+    assert keyframe_image_frames == [40], "the keyframe image is logged at the keyframe's own time"
+
+    logged_paths: set[str] = {path for path, _, _ in logged}
+    assert {"/current_maps/pointmap", "/current_maps/confidence"} <= logged_paths
+    assert {"/keyframe_maps/keyframe-5/pointmap", "/keyframe_maps/keyframe-5/confidence", "/keyframe_maps/keyframe-5/depth"} <= logged_paths
+    assert {"/last_keyframe/image", "/last_keyframe/pointmap", "/last_keyframe/confidence", "/last_keyframe/depth"} <= logged_paths
+    # The map is the fused TSDF mesh, not a point cloud per keyframe.
+    assert not any(kind == "Points3D" for _, kind, _ in logged)

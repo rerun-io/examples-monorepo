@@ -31,9 +31,14 @@ FRAME_TIMELINE: str = "frame"
 VIDEO_TIMELINE: str = "video_time"
 # The source video, logged once as a VideoStream. Camera panels show the model's cropped frame instead.
 VIDEO_LOG_PATH: Path = Path("/video")
-# Each keyframe's derived 2D maps (pointmap, confidence, depth) under a static model-resolution Pinhole. They live
-# outside the 3D views' tree, so one static content rule covers any number of keyframes.
+# Entity layout. Under the parent log path (``/world``) every Pinhole owns only what projects in 3D: the current
+# camera its image and depth, each keyframe its image. 2D-only maps live outside it, where no 3D view looks:
+CURRENT_MAPS_PATH: Path = Path("/current_maps")
+"""The current frame's pointmap and confidence."""
+LAST_KEYFRAME_PATH: Path = Path("/last_keyframe")
+"""The keyframe being tracked against: image, pointmap, confidence, depth."""
 KEYFRAME_MAPS_PATH: Path = Path("/keyframe_maps")
+"""Each keyframe's pointmap, confidence and depth, under a static copy of its Pinhole."""
 
 
 # Chase eye of the Follow view, in the camera frame (RDF: x right, y down, z forward), like dpvo's. MASt3R's
@@ -53,9 +58,9 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
     current camera, so its eye, fixed in the camera frame, rides the camera; it
     has no grid because the camera frame has no ground plane.
 
-    Both 3D views use one static set of rules, whatever the keyframe count: each
-    keyframe's derived 2D maps live under ``KEYFRAME_MAPS_PATH``, outside
-    ``parent_log_path``, so no per-keyframe exclusion is needed.
+    Both 3D views show ``parent_log_path`` and nothing else: the entity layout
+    keeps 2D-only maps outside it (``CURRENT_MAPS_PATH``, ``LAST_KEYFRAME_PATH``,
+    ``KEYFRAME_MAPS_PATH``), so the rule needs no exclusions.
 
     Args:
         parent_log_path: Root log path for all Rerun entities.
@@ -66,16 +71,7 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
     """
     root: str = f"/{str(parent_log_path).lstrip('/')}"
     camera_path: str = f"{root}/current_camera"
-    contents_3d: list[str] = [
-        f"+ {root}/**",
-        # The current camera's derived maps would cover its image on the image plane, and its depth
-        # would be back-projected on top of the keyframe point clouds.
-        f"- {camera_path}/pinhole/pointmap",
-        f"- {camera_path}/pinhole/confidence",
-        f"- {camera_path}/pinhole/pointmap_depth",
-        # 2D-only panel content without a pinhole.
-        f"- {root}/last_keyframe/**",
-    ]
+    contents_3d: str = f"+ {root}/**"
     overview = rrb.Spatial3DView(
         name="Overview",
         origin="/",
@@ -101,10 +97,10 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
         contents=[
             rrb.Spatial2DView(origin=str(VIDEO_LOG_PATH), name="Video"),
             rrb.Grid(
-                rrb.Spatial2DView(origin=f"{camera_path}/pinhole/pointmap_depth", name="Depth"),
-                rrb.Spatial2DView(origin=f"{camera_path}/pinhole/confidence", name="Confidence"),
-                rrb.Spatial2DView(origin=f"{camera_path}/pinhole/pointmap", name="Pointmap"),
-                rrb.Spatial2DView(origin=f"{root}/last_keyframe/image", name="Keyframe"),
+                rrb.Spatial2DView(origin=f"{camera_path}/pinhole/depth", name="Depth"),
+                rrb.Spatial2DView(origin=str(CURRENT_MAPS_PATH / "confidence"), name="Confidence"),
+                rrb.Spatial2DView(origin=str(CURRENT_MAPS_PATH / "pointmap"), name="Pointmap"),
+                rrb.Spatial2DView(origin=str(LAST_KEYFRAME_PATH / "image"), name="Keyframe"),
                 grid_columns=2,
             ),
         ],

@@ -77,12 +77,13 @@ def test_dense_logging_entities_present(baseline_rrd_path: Path) -> None:
 
     expected_paths = {
         "/video",
-        "/world/current_camera/pinhole/pointmap",
-        "/world/current_camera/pinhole/pointmap_depth",
-        "/world/current_camera/pinhole/confidence",
-        "/world/last_keyframe/pointmap",
-        "/world/last_keyframe/pointmap_depth",
-        "/world/last_keyframe/confidence",
+        "/world/current_camera/pinhole/image",
+        "/world/current_camera/pinhole/depth",
+        "/current_maps/pointmap",
+        "/current_maps/confidence",
+        "/last_keyframe/pointmap",
+        "/last_keyframe/depth",
+        "/last_keyframe/confidence",
     }
 
     missing_paths = sorted(expected_paths - paths)

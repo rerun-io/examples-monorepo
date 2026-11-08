@@ -49,7 +49,10 @@ from mast3r_slam.log_events import (
 )
 from mast3r_slam.map_surface import KeyframeDepth, fuse_keyframes
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
-from mast3r_slam.rerun_log_utils import FRAME_TIMELINE, KEYFRAME_MAPS_PATH, VIDEO_TIMELINE
+from mast3r_slam.rerun_log_utils import CURRENT_MAPS_PATH, FRAME_TIMELINE, KEYFRAME_MAPS_PATH, LAST_KEYFRAME_PATH, VIDEO_TIMELINE
+
+_HIDDEN_IMAGE_PLANE_DISTANCE: float = 1e-6
+"""Image-plane distance of a keyframe's placeholder Pinhole before the keyframe exists: a frustum too small to see."""
 
 SURFACE_REFUSE_EVERY_N_KEYFRAMES: int = 5
 """New keyframes between map-surface re-fuses during a run; the run's end always re-fuses once more."""
@@ -296,6 +299,9 @@ class AsyncRerunLogger:
         self._conf_thresh: int = 7
         self._image_plane_distance: float = 0.2
         self._error: Exception | None = None
+        # (frame index, video timestamp) of the first event logged, and of the event being logged.
+        self._first_time: tuple[int, int | None] | None = None
+        self._now: tuple[int, int | None] = (0, None)
         # Map surface inputs per keyframe index, and the keyframe count of the last fused mesh.
         self._surface_keyframes: dict[int, KeyframeDepth] = {}
         self._surface_poses: dict[int, Float32[ndarray, "8"]] = {}
@@ -404,7 +410,10 @@ class AsyncRerunLogger:
     # ── Timeline management ───────────────────────────────────────────
 
     def _set_time(self, frame_idx: int, timestamp_ns: int | None) -> None:
-        """Set Rerun timeline state before logging."""
+        """Set Rerun timeline state before logging; remember the run's first time point and the current one."""
+        if self._first_time is None:
+            self._first_time = (frame_idx, timestamp_ns)
+        self._now = (frame_idx, timestamp_ns)
         rr.set_time(FRAME_TIMELINE, sequence=frame_idx)
         if timestamp_ns is not None:
             rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(timestamp_ns))
@@ -443,11 +452,12 @@ class AsyncRerunLogger:
         self,
         X_canon: Float32[ndarray, "hw 3"],
         C: Float32[ndarray, "hw 1"],
-        log_path: str,
+        maps_path: str,
+        depth_path: str,
         height: int,
         width: int,
     ) -> None:
-        """Log pointmap depth, pointmap image, and confidence to Rerun."""
+        """Log the pointmap and confidence images under ``maps_path`` and the confidence-filtered depth at ``depth_path``."""
         pointmap_hw3: Float32[ndarray, "H W 3"] = X_canon.reshape(height, width, 3).astype(np.float32)
         pointmap_hw3 = np.nan_to_num(pointmap_hw3, nan=0.0, posinf=0.0, neginf=0.0)
         depth_hw: Float32[ndarray, "H W"] = np.maximum(pointmap_hw3[..., 2], 0.0)
@@ -460,9 +470,9 @@ class AsyncRerunLogger:
         pointmap_uint8: UInt8[ndarray, "H W 3"] = self._normalize_to_uint8(pointmap_hw3)
         depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(filtered_depth_hw)
 
-        rr.log(f"{log_path}/pointmap", rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
-        rr.log(f"{log_path}/pointmap_depth", rr.EncodedDepthImage(blob=depth_png.encode(depth_uint16_mm), media_type=rr.components.MediaType.PNG, meter=1000.0))
-        rr.log(f"{log_path}/confidence", rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
+        rr.log(f"{maps_path}/pointmap", rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
+        rr.log(depth_path, rr.EncodedDepthImage(blob=depth_png.encode(depth_uint16_mm), media_type=rr.components.MediaType.PNG, meter=1000.0))
+        rr.log(f"{maps_path}/confidence", rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
 
     # ── Event handlers ────────────────────────────────────────────────
 
@@ -494,12 +504,13 @@ class AsyncRerunLogger:
             event.rgb,
         )
 
-        # Pointmap, depth, confidence
+        # Depth under the Pinhole (back-projected in 3D); pointmap and confidence are 2D-only.
         if event.X_canon is not None and event.C is not None:
             self._log_pointmap_and_confidence(
                 event.X_canon,
                 event.C,
-                f"{cam_log_path}/pinhole",
+                str(CURRENT_MAPS_PATH),
+                f"{cam_log_path}/pinhole/depth",
                 rgb_uint8.shape[0],
                 rgb_uint8.shape[1],
             )
@@ -520,7 +531,7 @@ class AsyncRerunLogger:
         # Last keyframe 2D panel — the tracker continuously updates the
         # active keyframe's pointmap/confidence, so relog those every frame.
         # The image is logged only when the panel's keyframe changes.
-        lk_path: str = f"{self._parent_log_path}/last_keyframe"
+        lk_path: str = str(LAST_KEYFRAME_PATH)
         if event.last_kf_rgb is not None:
             self._log_rgb_image(f"{lk_path}/image", event.last_kf_rgb)
         if event.last_kf_X_canon is not None and event.last_kf_C is not None and event.last_kf_img_shape is not None:
@@ -528,6 +539,7 @@ class AsyncRerunLogger:
                 event.last_kf_X_canon,
                 event.last_kf_C,
                 lk_path,
+                f"{lk_path}/depth",
                 event.last_kf_img_shape[0],
                 event.last_kf_img_shape[1],
             )
@@ -591,8 +603,28 @@ class AsyncRerunLogger:
             frame_id=kf.kf_idx,
         )
 
-        # Camera transform
         pinhole = frame_to_pinhole(frame)
+        assert pinhole.intrinsics.k_matrix is not None, "frame_to_pinhole always sets K"
+
+        # The keyframe's image entity is in the entity tree for the whole recording, and 0.42 reports a 2D entity
+        # without a Pinhole ancestor at the cursor even when it has no data there. So the Pinhole also gets a value
+        # at the run's first time point: a frustum with a vanishing image plane, invisible until the keyframe exists.
+        if self._first_time is not None:
+            now: tuple[int, int | None] = self._now
+            self._set_time(*self._first_time)
+            rr.log(
+                f"{kf_cam_log_path}/pinhole",
+                rr.Pinhole(
+                    image_from_camera=pinhole.intrinsics.k_matrix,
+                    height=pinhole.intrinsics.height,
+                    width=pinhole.intrinsics.width,
+                    camera_xyz=rr.ViewCoordinates.RDF,
+                    image_plane_distance=_HIDDEN_IMAGE_PLANE_DISTANCE,
+                ),
+            )
+            self._set_time(*now)
+
+        # Camera transform, Pinhole and image, all at the keyframe's own time point.
         log_pinhole(
             camera=pinhole,
             cam_log_path=Path(kf_cam_log_path),
@@ -604,9 +636,9 @@ class AsyncRerunLogger:
             intrinsics=pinhole.intrinsics,
         )
 
-        # Image, pointmap, confidence and depth, under a static copy of the keyframe's Pinhole outside the 3D tree.
-        # In 3D the keyframe is its frustum and its share of the fused mesh; a 2D image under the frustum would
-        # also exist before the keyframe does, and every 3D view would report it as lacking a pinhole there.
+        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(f"{kf_cam_log_path}/pinhole/image", kf.rgb)
+
+        # Pointmap, confidence and depth are 2D-only: under a static copy of the Pinhole, outside the 3D tree.
         kf_maps_path: str = f"{KEYFRAME_MAPS_PATH}/keyframe-{kf.kf_idx}"
         rr.log(
             kf_maps_path,
@@ -618,15 +650,13 @@ class AsyncRerunLogger:
             ),
             static=True,
         )
-        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(f"{kf_maps_path}/image", kf.rgb)
-        self._log_pointmap_and_confidence(kf.X_canon, kf.C, kf_maps_path, kf.img_shape[0], kf.img_shape[1])
+        self._log_pointmap_and_confidence(kf.X_canon, kf.C, kf_maps_path, f"{kf_maps_path}/depth", kf.img_shape[0], kf.img_shape[1])
 
         # The keyframe's share of the map surface: confidence-filtered depth, re-fused at its latest pose.
         height: int = kf.img_shape[0]
         width: int = kf.img_shape[1]
         confident: Bool[ndarray, "h w"] = kf.C.reshape(height, width) > self._conf_thresh
         depth_hw: Float32[ndarray, "h w"] = np.where(confident, kf.X_canon[:, 2].reshape(height, width), 0.0).astype(np.float32)
-        assert pinhole.intrinsics.k_matrix is not None, "frame_to_pinhole always sets K"
         self._surface_keyframes[kf.kf_idx] = KeyframeDepth(
             depth_hw=depth_hw,
             k_33=pinhole.intrinsics.k_matrix.astype(np.float32),
@@ -641,12 +671,13 @@ class AsyncRerunLogger:
 
     def _log_last_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log the last keyframe's image and pointmap to the 2D view."""
-        lk_path: str = f"{self._parent_log_path}/last_keyframe"
+        lk_path: str = str(LAST_KEYFRAME_PATH)
         self._log_rgb_image(f"{lk_path}/image", kf.rgb)
         self._log_pointmap_and_confidence(
             kf.X_canon,
             kf.C,
             lk_path,
+            f"{lk_path}/depth",
             kf.img_shape[0],
             kf.img_shape[1],
         )
