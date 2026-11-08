@@ -213,7 +213,7 @@ def run_slam_pipeline(
     5. Run frame-by-frame tracking loop.
     6. Log FPS metrics and timing.
     7. Export keyframes to NerfStudio format (if ``settings.ns_save_path`` is set).
-    8. Wait for backend to finish (``ctx.join()``).
+    8. Stop the backend and the manager (``SlamBackend.__exit__``: terminate, then kill, if it does not exit).
 
     Nerfstudio export happens inside the generator (before
     ``SlamBackend.__exit__``) because ``SharedKeyframes`` depends on the
@@ -462,7 +462,7 @@ def run_slam_pipeline(
                 yield f"Processing frame {i}/{n_frames}"
 
         # ── Post-loop: flush logger, log timing, export nerfstudio ────────
-        # Nerfstudio export MUST happen before ctx.join() / __exit__ because
+        # Nerfstudio export MUST happen before SlamBackend.__exit__ because
         # SharedKeyframes uses mp.Manager-backed values (e.g. n_size) that
         # become invalid after the manager shuts down.
         event_queue.put(LogText(path=LOG_PATH, message=f"Inference time: {format_time(timer() - start_time)}"))
@@ -477,8 +477,6 @@ def run_slam_pipeline(
                 f"{PARENT_LOG_PATH}/final_pointcloud",
                 rr.Points3D(positions=pcd.points, colors=pcd.colors),
             )
-
-        ctx.join()
 
     # async_logger.__exit__ has now run: LogTerminate sent, thread joined.
 

@@ -87,7 +87,7 @@ stateDiagram-v2
 |------|-------------|-------------------|
 | **INIT** | Run MASt3R mono inference on first frame to get 3D points + features. Set `TRACKING`, then add the frame as the first keyframe (the backend skips its queue in INIT). | Frontend sets `TRACKING` |
 | **TRACKING** | Match frame against last keyframe via `FrameTracker.track()`. Estimate pose with Gauss-Newton. If overlap is low, promote to keyframe and queue for backend. | Frontend sets `RELOC` if too few matches |
-| **RELOC** | Run mono inference to get features, then the backend attempts relocalization against the retrieval database. | Backend sets `TRACKING` on success |
+| **RELOC** | Run mono inference to get features and queue one relocalization request per frame; the backend attempts each request once against the retrieval database. | Backend sets `TRACKING` on success, unless the mode already moved on (`TERMINATED`) |
 | **TERMINATED** | Both processes exit their loops. `SlamBackend.__exit__` handles cleanup. | Frontend (end of video) or `SlamBackend.__exit__` (the generator was closed: Ctrl+C, the app's Stop button) |
 
 ## Backend Process
@@ -156,8 +156,8 @@ sequenceDiagram
 
     G->>L: LogTerminate → flush & join
     G->>R: Nerfstudio export (if ns_save_path set)
-    G->>B: Set TERMINATED, ctx.join()
-    Note over G: SlamBackend.__exit__()<br/>cleanup GPU, manager
+    G->>B: Set TERMINATED
+    Note over G: SlamBackend.__exit__()<br/>join 5 s, terminate, kill;<br/>cleanup GPU, manager
     G-->>C: StopIteration
 
     alt Gradio only

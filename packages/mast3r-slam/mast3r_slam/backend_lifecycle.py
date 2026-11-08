@@ -211,11 +211,6 @@ class SlamBackend:
             self.check_backend()
             time.sleep(0.002)
 
-    def join(self, timeout: float | None = None) -> None:
-        """Wait for the backend process to finish normally."""
-        if self._backend is not None:
-            self._backend.join(timeout=timeout)
-
 
 def _backend_entry(
     cfg: SlamConfig,
@@ -352,12 +347,13 @@ def run_backend(
             time.sleep(0.01)
             continue
 
-        # Handle relocalization requests from the frontend.
-        if mode == Mode.RELOC:
+        # Handle relocalization requests from the frontend: one attempt per request. Retrying the same frame for as
+        # long as the mode stays RELOC never ends when the input runs out while tracking is lost, and the keyframe
+        # queue the frontend then waits for is never drained.
+        if mode == Mode.RELOC and states.has_reloc_request():
             frame: Frame = states.get_frame()
-            success: bool = relocalization(frame, keyframes, factor_graph, retrieval_database, cfg)
-            if success:
-                states.set_mode(Mode.TRACKING)
+            if relocalization(frame, keyframes, factor_graph, retrieval_database, cfg):
+                states.set_mode_if(Mode.RELOC, Mode.TRACKING)
             states.dequeue_reloc()
             continue
 
