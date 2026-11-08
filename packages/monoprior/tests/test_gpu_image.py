@@ -8,7 +8,7 @@ from jaxtyping import UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from monopriors.gpu_image import area_resize, area_weights
+from monopriors.gpu_image import LinearRemap, area_resize, area_weights
 
 
 @pytest.mark.parametrize(("source_hw", "target_hw"), [((108, 192), (50, 89)), ((108, 192), (54, 96)), ((63, 112), (63, 112)), ((90, 160), (63, 112))])
@@ -30,3 +30,18 @@ def test_area_weights_rows_sum_to_one_and_refuse_upscale() -> None:
     assert (weights >= 0.0).all()
     with pytest.raises(ValueError, match="downscale only"):
         area_weights(630, 1120)
+
+
+def test_linear_remap_equals_cv2_remap() -> None:
+    """Random sub-pixel maps that also leave the source on every side: OpenCV's level, off by one on rare float ties."""
+    rng: np.random.Generator = np.random.default_rng(1)
+    frames: UInt8[ndarray, "n h w 3"] = rng.integers(0, 256, size=(2, 40, 64, 3), dtype=np.uint8)
+    map_x: ndarray = rng.uniform(-3.0, 67.0, size=(120, 200)).astype(np.float32)
+    map_y: ndarray = rng.uniform(-3.0, 43.0, size=(120, 200)).astype(np.float32)
+    remap: LinearRemap = LinearRemap.from_maps(map_x, map_y, (40, 64), torch.device("cpu"))
+    remapped: UInt8[Tensor, "n 3 120 200"] = remap(torch.from_numpy(frames).permute(0, 3, 1, 2))
+    for frame, ours in zip(frames, remapped, strict=True):
+        reference: UInt8[ndarray, "120 200 3"] = cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR)
+        diff: ndarray = np.abs(ours.permute(1, 2, 0).numpy().astype(np.int16) - reference.astype(np.int16))
+        assert diff.max() <= 1
+        assert (diff > 0).mean() < 1e-4
