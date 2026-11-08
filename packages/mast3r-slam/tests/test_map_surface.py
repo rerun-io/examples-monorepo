@@ -51,52 +51,49 @@ def test_mesh_lands_at_the_scaled_depth() -> None:
     np.testing.assert_allclose(np.median(vertices[:, 2]), 2.0, atol=0.03)
 
 
-def _live_logs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    logged: list[tuple[str, str]] = []
-    monkeypatch.setattr(map_surface.rr, "log", lambda path, entity, *_a, **_k: logged.append((str(path), type(entity).__name__)))
+def _live_logs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
+    logged: list[tuple[str, object]] = []
+    monkeypatch.setattr(map_surface.rr, "log", lambda path, entity, *_a, **_k: logged.append((str(path), entity)))
     monkeypatch.setattr(map_surface.rr, "set_time", lambda *_a, **_k: None)
     return logged
 
 
+def _kinds(logged: list[tuple[str, object]]) -> list[tuple[str, str]]:
+    return [(path, type(entity).__name__) for path, entity in logged]
+
+
 def test_live_surface_logs_changed_blocks_then_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """New keyframes log only changed blocks; the re-fuse clears the subtree and logs every block, front-faced."""
-    logged: list[tuple[str, str]] = _live_logs(monkeypatch)
-    meshes: list[rr.Mesh3D] = []
-    real_front_faced = map_surface.front_faced_mesh
-
-    def _capture_mesh(*args: object) -> rr.Mesh3D:
-        meshes.append(real_front_faced(*args))  # pyrefly: ignore
-        return meshes[-1]
-
-    monkeypatch.setattr(map_surface, "front_faced_mesh", _capture_mesh)
+    """New keyframes log only changed super-blocks; the re-fuse clears them and logs every block, front-faced."""
+    logged: list[tuple[str, object]] = _live_logs(monkeypatch)
     live: LiveSurface = LiveSurface("world/mesh", None, ("frame", "video_time"), refuse_every=3, settings=SurfaceSettings(voxel_size=0.02))
     wall: KeyframeDepth = _plane_keyframe(1.0)
     far_wall: KeyframeDepth = _plane_keyframe(2.0)
 
     live.handle(SurfaceRequest(keyframes=[(0, wall, _sim3_data(1.0))], frame_idx=0, timestamp_ns=None))
-    first: list[tuple[str, str]] = list(logged)
-    assert first and all(path.startswith("world/mesh/") and kind == "Mesh3D" for path, kind in first)
+    first: list[tuple[str, str]] = _kinds(logged)
+    assert first and all(path.startswith("world/mesh/blocks/") and kind == "Mesh3D" for path, kind in first)
 
     logged.clear()
     live.handle(SurfaceRequest(keyframes=[(0, wall, _sim3_data(1.0)), (1, wall, _sim3_data(1.0))], frame_idx=1, timestamp_ns=None))
-    assert logged and set(logged) <= set(first), "the same wall again only touches blocks it already had"
+    assert logged and set(_kinds(logged)) <= set(first), "the same wall again only touches blocks it already had"
 
     logged.clear()
     keyframes = [(0, wall, _sim3_data(1.0)), (1, wall, _sim3_data(1.0)), (2, far_wall, _sim3_data(1.0))]
     live.handle(SurfaceRequest(keyframes=keyframes, frame_idx=2, timestamp_ns=None))
-    assert logged[0] == ("world/mesh", "Clear"), "a re-fuse clears the live blocks first"
-    assert {path for path, _ in logged[1:]} > {path for path, _ in first}, "then logs every block, the new wall included"
-    for mesh in meshes:
-        assert mesh.face_rendering is not None
-        assert mesh.face_rendering.pa_array.to_pylist() == [rr.components.MeshFaceRendering.Front.value]
+    refused: list[tuple[str, str]] = _kinds(logged)
+    assert refused[0] == ("world/mesh/blocks", "Clear"), "a re-fuse clears the live blocks first"
+    assert {path for path, _ in refused[1:]} > {path for path, _ in first}, "then logs every block, the new wall included"
+    for _, entity in logged[1:]:
+        assert isinstance(entity, rr.Mesh3D) and entity.face_rendering is not None
+        assert entity.face_rendering.pa_array.to_pylist() == [rr.components.MeshFaceRendering.Front.value]
 
 
-def test_final_request_always_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The run's last request re-fuses at the final poses whatever the cadence."""
-    logged: list[tuple[str, str]] = _live_logs(monkeypatch)
+def test_final_request_logs_one_mesh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's last request re-fuses at the final poses whatever the cadence, clears the blocks and logs one mesh."""
+    logged: list[tuple[str, object]] = _live_logs(monkeypatch)
     live: LiveSurface = LiveSurface("world/mesh", None, ("frame", "video_time"), refuse_every=100)
     live.handle(SurfaceRequest(keyframes=[(0, _plane_keyframe(1.0), _sim3_data(1.0))], frame_idx=0, timestamp_ns=None, final=True))
-    assert logged[0] == ("world/mesh", "Clear")
+    assert _kinds(logged) == [("world/mesh/blocks", "Clear"), ("world/mesh/full", "Mesh3D")]
 
 
 def test_latest_wins_worker_coalesces_pending_requests_and_runs_the_last_on_close() -> None:
