@@ -45,6 +45,18 @@ def _softness_args(softnesses: Tensor | None, num_points: int) -> tuple[int, Ten
     raise ValueError("softnesses must have dimensions (num_points,) or (num_points, 3)")
 
 
+MAX_CHANNELS: int = 12
+"""Channels the forward kernels hold per pixel (`MAX_CHANNELS` in mojo/raster2d.mojo)."""
+
+
+def check_channels(colors: Tensor) -> tuple[int, int]:
+    """(num_points, channels) of (N, C) colors; C must fit the kernels' per-pixel accumulator."""
+    num_points, channels = colors.shape
+    if channels > MAX_CHANNELS:
+        raise ValueError(f"hexels_mojo rasterizes at most {MAX_CHANNELS} channels, got {channels}")
+    return num_points, channels
+
+
 def _optional(t: Tensor, num_points: int, name: str, width: int) -> Tensor | None:
     if t.numel() == 0:
         return None
@@ -70,7 +82,7 @@ def _forward(
     emission: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     width, height = img_size[0], img_size[1]
-    num_points, channels = colors.shape
+    num_points, channels = check_channels(colors)
     if color_grads is not None and color_grads.shape != (num_points, 2, channels):
         raise ValueError("color_grads must have dimensions (num_points, 2, channels)")
     stride, soft = _softness_args(softnesses, num_points)
@@ -81,15 +93,13 @@ def _forward(
     pixel_topk: Tensor = torch.zeros(height, width, TOP_K, dtype=torch.int32, device=device)
     weights_sum: Tensor = torch.zeros(height, width, dtype=torch.float32, device=device)
     entropy: Tensor = torch.zeros(height, width, dtype=torch.float32, device=device)
-    placeholder: Tensor = xys
     launch(
         "raster2d_forward",
         (color_grad_scale, aa_kernel_size, stride, softness_default, int(sharp is not None), int(emit is not None), color_grads is not None),
         (
             gaussian_ids_sorted.to(torch.int32).contiguous(), tile_bins.to(torch.int32).contiguous(), xys.contiguous(), scales.contiguous(),
-            rotation.contiguous(), colors.contiguous(), color_grads.contiguous() if color_grads is not None else placeholder,
-            soft if soft is not None else placeholder,
-            sharp if sharp is not None else placeholder, emit if emit is not None else placeholder, out_img, pixel_topk, weights_sum, entropy,
+            rotation.contiguous(), colors.contiguous(), color_grads.contiguous() if color_grads is not None else None, soft, sharp, emit,
+            out_img, pixel_topk, weights_sum, entropy,
         ),
     )  # fmt: skip
     return out_img, pixel_topk, weights_sum, entropy
@@ -163,7 +173,7 @@ def _backward(
     sharpness: Tensor,
     emission: Tensor,
 ) -> list[Tensor]:
-    num_points, channels = colors.shape
+    num_points, channels = check_channels(colors)
     stride, soft = _softness_args(softnesses, num_points)
     sharp = _optional(sharpness, num_points, "sharpness", 1)
     emit = _optional(emission, num_points, "emission", channels)
@@ -171,21 +181,18 @@ def _backward(
     zeros = lambda *shape: torch.zeros(*shape, dtype=torch.float32, device=device)  # noqa: E731
     v_xy, v_scale, v_rot = zeros(num_points, 2), zeros(num_points, 2), zeros(num_points, 1)
     v_colors = zeros(num_points, channels)
-    v_color_grads: Tensor = zeros(num_points, 2, channels) if color_grads is not None else xys
+    v_color_grads: Tensor = zeros(num_points, 2, channels) if color_grads is not None else zeros(0)
     v_emission: Tensor = zeros(num_points, channels) if emit is not None else zeros(0)
     v_sharpness: Tensor = zeros(num_points, 1)
     v_softness: Tensor = zeros(*soft.shape) if soft is not None else zeros(0)
-    placeholder: Tensor = xys
     launch(
         "raster2d_backward",
         (color_grad_scale, aa_kernel_size, stride, softness_default, int(sharp is not None), int(emit is not None), color_grads is not None),
         (
             xys.contiguous(), scales.contiguous(), rotation.contiguous(), colors.contiguous(),
-            color_grads.contiguous() if color_grads is not None else placeholder,
-            emit if emit is not None else placeholder, v_output.contiguous(), v_weights_sum.contiguous(), v_entropy.contiguous(),
-            pixel_topk.to(torch.int32).contiguous(), soft if soft is not None else placeholder, sharp if sharp is not None else placeholder,
-            v_xy, v_scale, v_rot, v_colors, v_color_grads, v_emission if emit is not None else placeholder, v_sharpness,
-            v_softness if soft is not None else placeholder,
+            color_grads.contiguous() if color_grads is not None else None, emit, v_output.contiguous(), v_weights_sum.contiguous(),
+            v_entropy.contiguous(), pixel_topk.to(torch.int32).contiguous(), soft, sharp, v_xy, v_scale, v_rot, v_colors, v_color_grads,
+            v_emission, v_sharpness, v_softness,
         ),
     )  # fmt: skip
     if color_grads is None:

@@ -58,13 +58,12 @@ def _forward(
     view_dirs = f32(num_points, 3)
     want_normals: bool = view_model == 2
     normals = f32(num_points, 3) if want_normals else f32(0)
-    placeholder = means3d
     launch(
         "raster3d",
         (0, image_width, image_height, scale_modifier, softness, stride, int(softnesses.numel() > 0), int(conservative_bounds), int(want_normals)),
-        (means3d, scales, rotations, opacities, softnesses if softnesses.numel() else placeholder, viewmatrix, projmatrix, campos, radii,
+        (means3d, scales, rotations, opacities, softnesses, viewmatrix, projmatrix, campos, radii,
          tile_radii, points_xy, depths, transmats, tiles_touched, opacities_out, softnesses_out, view_dirs,
-         normals if want_normals else placeholder),
+         normals),
     )  # fmt: skip
     offsets: Tensor = torch.cumsum(tiles_touched, dim=0, dtype=torch.int32)
     num_rendered: int = int(offsets[-1].item()) if num_points else 0
@@ -84,10 +83,10 @@ def _forward(
     launch(
         "raster3d",
         (2, image_width, image_height, color_model, view_model, int(use_view_grads), stride),
-        (ranges, values_sorted if num_rendered else ranges, colors, color_grads if color_grads.numel() else placeholder,
-         color_quads if color_quads.numel() else placeholder, view_grads if view_grads.numel() else placeholder,
-         specular_ks if specular_ks.numel() else placeholder, specular_log_s if specular_log_s.numel() else placeholder, view_dirs,
-         normals if want_normals else placeholder, transmats, opacities_out, softnesses_out, background, out_color, final_transmittance,
+        (ranges, values_sorted, colors, color_grads,
+         color_quads, view_grads,
+         specular_ks, specular_log_s, view_dirs,
+         normals, transmats, opacities_out, softnesses_out, background, out_color, final_transmittance,
          last_index),
     )  # fmt: skip
     saved = [radii, transmats, opacities_out, softnesses_out, view_dirs, normals, f32(0), ranges, values_sorted, final_transmittance, last_index]
@@ -120,12 +119,11 @@ def render(
     out_color = torch.zeros(3, image_height, image_width, dtype=torch.float32, device=device)
     final_transmittance = torch.zeros(image_height, image_width, dtype=torch.float32, device=device)
     last_index = torch.zeros(image_height, image_width, dtype=torch.int32, device=device)
-    pick = lambda t: t.contiguous() if t.numel() else colors  # noqa: E731
     launch(
         "raster3d",
         (2, image_width, image_height, color_model, view_model, int(use_view_grads), 3 if softnesses.dim() == 2 else 1),
-        (ranges.contiguous(), pick(values_sorted), colors.contiguous(), pick(color_grads), pick(color_quads), pick(view_grads), pick(specular_ks),
-         pick(specular_log_s), view_dirs.contiguous(), pick(normals), transmats.contiguous(), opacities.contiguous(), softnesses.contiguous(),
+        (ranges.contiguous(), values_sorted.contiguous(), colors.contiguous(), color_grads.contiguous(), color_quads.contiguous(), view_grads.contiguous(), specular_ks.contiguous(),
+         specular_log_s.contiguous(), view_dirs.contiguous(), normals.contiguous(), transmats.contiguous(), opacities.contiguous(), softnesses.contiguous(),
          background.contiguous(), out_color, final_transmittance, last_index),
     )  # fmt: skip
     return out_color, final_transmittance, last_index
@@ -235,16 +233,15 @@ def rasterize_hexels3d_backward_cached(
     has_normals: bool = normals.numel() > 0
     grad_normals = torch.zeros(num_points, 3, dtype=torch.float32, device=means3d.device) if has_normals else grad_view_dirs
     stride: int = means2d.shape[1] if means2d.numel() else 3
-    pick = lambda t: t.contiguous() if t.numel() else colors  # noqa: E731
     launch(
         "raster3d_backward",
         (0, image_width, image_height, color_model, view_model, int(use_view_grads), 3 if softnesses_out.dim() == 2 else 1,
          int(softnesses.numel() > 0), int(stride == 4)),
-        (ranges, values_sorted, colors.contiguous(), pick(color_grads), pick(color_quads), pick(view_grads), pick(specular_ks),
-         pick(specular_log_s), view_dirs, pick(normals), transmats, opacities_out, softnesses_out, background.contiguous(),
-         grad_out_color.contiguous(), final_transmittance, last_index, grad_colors, pick(grad_color_grads), pick(grad_color_quads),
-         pick(grad_view_grads), pick(grad_specular_ks), pick(grad_specular_log_s), grad_opacities, pick(grad_softnesses), grad_transmats,
-         pick(grad_means2d), grad_view_dirs, grad_normals),
+        (ranges, values_sorted, colors.contiguous(), color_grads.contiguous(), color_quads.contiguous(), view_grads.contiguous(), specular_ks.contiguous(),
+         specular_log_s.contiguous(), view_dirs, normals.contiguous(), transmats, opacities_out, softnesses_out, background.contiguous(),
+         grad_out_color.contiguous(), final_transmittance, last_index, grad_colors, grad_color_grads.contiguous(), grad_color_quads.contiguous(),
+         grad_view_grads.contiguous(), grad_specular_ks.contiguous(), grad_specular_log_s.contiguous(), grad_opacities, grad_softnesses.contiguous(), grad_transmats,
+         grad_means2d.contiguous(), grad_view_dirs, grad_normals),
     )  # fmt: skip
     if means2d.numel():
         launch("raster3d_backward", (1, image_width, image_height, stride), (radii, transmats, grad_transmats, grad_means2d))

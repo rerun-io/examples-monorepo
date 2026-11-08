@@ -16,14 +16,13 @@ from std.math import cos, exp, sin
 from std.memory import bitcast
 from std.utils.static_tuple import StaticTuple
 
-comptime F32Ptr = MutPointer[Float32, MutUntrackedOrigin]
-comptime I32Ptr = MutPointer[Int32, MutUntrackedOrigin]
-comptime U32Ptr = MutPointer[UInt32, MutUntrackedOrigin]
+from tensors import In, Out, Rows, atomic_add
+
 comptime TOP_K = 10
 comptime BLOCK = 16
 
 
-@always_inline
+@inline(.always)
 def hexel_alpha(dx: Float32, dy: Float32, sx: Float32, sy: Float32, rotation: Float32, softness: Float32) -> Float32:
     """sigmoid(-sdf * softness) of the pointy-top hexagon SDF max(|v|, |a u + b v|, |a u - b v|) - 1."""
     comptime a: Float32 = 0.5 * 1.7320508
@@ -40,57 +39,57 @@ def hexel_alpha(dx: Float32, dy: Float32, sx: Float32, sy: Float32, rotation: Fl
 def removal_scores_kernel[rich: Bool](
     width: Int32,
     height: Int32,
-    xy: F32Ptr,
-    scales: F32Ptr,
-    rotations: F32Ptr,
-    colors: F32Ptr,
-    gradients: F32Ptr,
-    softness: F32Ptr,
-    image: F32Ptr,
-    target: F32Ptr,
-    selected: I32Ptr,
-    scores: F32Ptr,
-    max_error: U32Ptr,
+    xy: In[.float32, Rows[2]],
+    scales: In[.float32, Rows[2]],
+    rotations: In[.float32, Rows[1]],
+    colors: In[.float32, Rows[3]],
+    gradients: In[.float32, Rows[6]],
+    softness: In[.float32, Rows[1]],
+    image: In[.float32, Rows[4]],
+    target: In[.float32, Rows[3]],
+    selected: In[.int32, Rows[TOP_K]],
+    scores: Out[.float32, Rows[1]],
+    max_error: Out[.uint32, Rows[1]],
 ):
     var x = global_idx.x
     var y = global_idx.y
     if x >= Int(width) or y >= Int(height):
         return
     var pixel = y * Int(width) + x
-    var weights = SIMD[DType.float32, 16](0.0)
-    var local = SIMD[DType.float32, 32](0.0)
+    var weights = SIMD[.float32, 16](0.0)
+    var local = SIMD[.float32, 32](0.0)
     var total: Float32 = 0.0
     comptime for k in range(TOP_K):
-        var id = Int(selected.unsafe_load(pixel * TOP_K + k))
+        var id = Int(selected[pixel, k][0])
         if id >= 0:
-            var dx = xy.unsafe_load(2 * id) - Float32(x)
-            var dy = xy.unsafe_load(2 * id + 1) - Float32(y)
+            var dx = xy[id, 0][0] - Float32(x)
+            var dy = xy[id, 1][0] - Float32(y)
             var soft: Float32
             comptime if rich:
-                soft = softness.unsafe_load(id)
+                soft = softness[id, 0][0]
             else:
                 soft = 10.0
-            weights[k] = hexel_alpha(dx, dy, scales.unsafe_load(2 * id), scales.unsafe_load(2 * id + 1), rotations.unsafe_load(id), soft)
+            weights[k] = hexel_alpha(dx, dy, scales[id, 0][0], scales[id, 1][0], rotations[id, 0][0], soft)
             total += weights[k]
             comptime for c in range(3):
-                local[k * 3 + c] = colors.unsafe_load(id * 3 + c)
+                local[k * 3 + c] = colors[id, c][0]
                 comptime if rich:
-                    local[k * 3 + c] += 0.1 * (dx * gradients.unsafe_load(id * 6 + c) + dy * gradients.unsafe_load(id * 6 + 3 + c))
+                    local[k * 3 + c] += 0.1 * (dx * gradients[id, c][0] + dy * gradients[id, 3 + c][0])
     var denominator = total + 1e-4
-    var error = abs(denominator - image.unsafe_load(pixel * 4 + 3))
+    var error = abs(denominator - image[pixel, 3][0])
     # Non-negative floats order like their bit patterns, so an unsigned max is a float max.
-    Atomic[UInt32, scope="device"].max[ordering=Ordering.RELAXED](max_error, bitcast[DType.uint32](error))
+    Atomic[UInt32, scope="device"].max[ordering=Ordering.RELAXED](max_error.unsafe_ptr(), bitcast[.uint32](error))
     var before: Float32 = 0.0
     comptime for c in range(3):
-        var difference = image.unsafe_load(pixel * 4 + c) - target.unsafe_load(pixel * 3 + c)
+        var difference = image[pixel, c][0] - target[pixel, c][0]
         before += difference * difference / 3.0
     comptime for k in range(TOP_K):
-        var id = Int(selected.unsafe_load(pixel * TOP_K + k))
+        var id = Int(selected[pixel, k][0])
         if id >= 0 and weights[k] != 0.0:
             var remaining = max(denominator - weights[k], 1e-4)
             var after: Float32 = 0.0
             comptime for c in range(3):
-                var removed = (image.unsafe_load(pixel * 4 + c) * denominator - weights[k] * local[k * 3 + c]) / remaining
-                var difference = removed - target.unsafe_load(pixel * 3 + c)
+                var removed = (image[pixel, c][0] * denominator - weights[k] * local[k * 3 + c]) / remaining
+                var difference = removed - target[pixel, c][0]
                 after += difference * difference / 3.0
-            _ = Atomic[Float32, scope="device"].fetch_add[ordering=Ordering.RELAXED](scores.unsafe_offset(id), after - before)
+            atomic_add(scores, id, 0, after - before)

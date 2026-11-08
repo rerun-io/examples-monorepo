@@ -10,15 +10,17 @@ so they match the CUDA build bit for bit; the projection backward has no atomics
 backward scatters with float atomics (scheduling-order sums).
 """
 
+from layout import row_major
+from layout import stack_allocation as tile_allocation
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, block_idx, global_idx, thread_idx
-from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
-from std.math import ceil, isinf, isnan
+from std.math import ceil, ceildiv, clamp, isinf, isnan
 from std.memory import stack_allocation
 from std.utils.static_tuple import StaticTuple
 
 import fastmath as fm
-from raster2d import BLOCK_SIZE, EPS, F32Ptr, I32Ptr, MAX_CHANNELS, TILE, TOP_K, _atomic_add
+from raster2d import BLOCK_SIZE, EPS, MAX_CHANNELS, TILE, TOP_K
+from tensors import Grid, In, Out, Rows, atomic_add
 
 comptime POINT_THREADS = 256
 
@@ -30,26 +32,26 @@ def project_forward_kernel(
     height: Int32,
     tiles_x: Int32,
     tiles_y: Int32,
-    means: F32Ptr,
-    scales: F32Ptr,
-    rotation: F32Ptr,
-    xys: F32Ptr,
-    radii: I32Ptr,
-    conics: F32Ptr,
-    num_tiles_hit: I32Ptr,
+    means: In[.float32, Rows[2]],
+    scales: In[.float32, Rows[2]],
+    rotation: In[.float32, Rows[1]],
+    xys: Out[.float32, Rows[2]],
+    radii: Out[.int32, Rows[1]],
+    conics: Out[.float32, Rows[3]],
+    num_tiles_hit: Out[.int32, Rows[1]],
 ):
     var idx = global_idx.x
     if idx >= Int(num_points):
         return
-    radii[unsafe_offset=idx] = 0
-    num_tiles_hit[unsafe_offset=idx] = 0
-    var cx = fm.mul(means.unsafe_load(2 * idx), Float32(Int(width)))
-    var cy = fm.mul(means.unsafe_load(2 * idx + 1), Float32(Int(height)))
-    var rot = rotation.unsafe_load(idx)
+    radii[idx, 0] = 0
+    num_tiles_hit[idx, 0] = 0
+    var cx = fm.mul(means[idx, 0][0], Float32(width))
+    var cy = fm.mul(means[idx, 1][0], Float32(height))
+    var rot = rotation[idx, 0][0]
     var c = fm.cos(rot)
     var s = fm.sin(rot)
-    var sx = scales.unsafe_load(2 * idx)
-    var sy = scales.unsafe_load(2 * idx + 1)
+    var sx = scales[idx, 0][0]
+    var sy = scales[idx, 1][0]
     # M = R S (glm, column-major), then cov = M M^T.
     var s0 = fm.mul(s, 0.0)
     var m00 = fm.fma(c, sx, s0)
@@ -67,22 +69,22 @@ def project_forward_kernel(
     var b = fm.mul(fm.add(cov_x, cov_z), 0.5)
     var root = fm.sqrt(max(fm.sub(fm.mul(b, b), det), Float32(0.1)))
     var radius = ceil(fm.mul(fm.sqrt(max(fm.add(b, root), fm.sub(b, root))), 3.0))
-    conics[unsafe_offset=3 * idx] = fm.mul(cov_z, inv_det)
-    conics[unsafe_offset=3 * idx + 1] = fm.mul(inv_det, -cov_y)
-    conics[unsafe_offset=3 * idx + 2] = fm.mul(cov_x, inv_det)
-    xys[unsafe_offset=2 * idx] = cx
-    xys[unsafe_offset=2 * idx + 1] = cy
-    radii[unsafe_offset=idx] = Int32(Int(radius))
+    conics[idx, 0] = fm.mul(cov_z, inv_det)
+    conics[idx, 1] = fm.mul(inv_det, -cov_y)
+    conics[idx, 2] = fm.mul(cov_x, inv_det)
+    xys[idx, 0] = cx
+    xys[idx, 1] = cy
+    radii[idx, 0] = Int32(radius)
     var tcx = fm.div(cx, Float32(TILE))
     var tcy = fm.div(cy, Float32(TILE))
     var tr = fm.div(radius, Float32(TILE))
-    var x0 = min(max(Int(fm.sub(tcx, tr)), 0), Int(tiles_x))
-    var x1 = min(max(Int(fm.add(fm.add(tcx, tr), 1.0)), 0), Int(tiles_x))
-    var y0 = min(max(Int(fm.sub(tcy, tr)), 0), Int(tiles_y))
-    var y1 = min(max(Int(fm.add(fm.add(tcy, tr), 1.0)), 0), Int(tiles_y))
+    var x0 = clamp(Int(fm.sub(tcx, tr)), 0, Int(tiles_x))
+    var x1 = clamp(Int(fm.add(fm.add(tcx, tr), 1.0)), 0, Int(tiles_x))
+    var y0 = clamp(Int(fm.sub(tcy, tr)), 0, Int(tiles_y))
+    var y1 = clamp(Int(fm.add(fm.add(tcy, tr), 1.0)), 0, Int(tiles_y))
     var area = (x1 - x0) * (y1 - y0)
     if area > 0:
-        num_tiles_hit[unsafe_offset=idx] = Int32(area)
+        num_tiles_hit[idx, 0] = Int32(area)
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](POINT_THREADS))
@@ -90,28 +92,28 @@ def project_backward_kernel(
     num_points: Int32,
     width: Int32,
     height: Int32,
-    scales: F32Ptr,
-    rotation: F32Ptr,
-    radii: I32Ptr,
-    conics: F32Ptr,
-    v_xy: F32Ptr,
-    v_conic: F32Ptr,
-    v_cov2d: F32Ptr,
-    v_mean: F32Ptr,
-    v_scale: F32Ptr,
-    v_rot: F32Ptr,
+    scales: In[.float32, Rows[2]],
+    rotation: In[.float32, Rows[1]],
+    radii: In[.int32, Rows[1]],
+    conics: In[.float32, Rows[3]],
+    v_xy: In[.float32, Rows[2]],
+    v_conic: In[.float32, Rows[3]],
+    v_cov2d: Out[.float32, Rows[3]],
+    v_mean: Out[.float32, Rows[2]],
+    v_scale: Out[.float32, Rows[2]],
+    v_rot: Out[.float32, Rows[1]],
 ):
     """Op for op as nvcc's PTX of `project_gaussians_2d_scale_rot_backward_kernel` (register names in comments)."""
     var idx = global_idx.x
-    if idx >= Int(num_points) or radii.unsafe_load(idx) <= 0:
+    if idx >= Int(num_points) or radii[idx, 0][0] <= 0:
         return
     # v_Sigma = -X G X with X the conic, G = dL/dconic (cov2d_to_conic_vjp).
-    var f1 = conics.unsafe_load(3 * idx)
-    var f2 = conics.unsafe_load(3 * idx + 1)
-    var f3 = conics.unsafe_load(3 * idx + 2)
-    var f4 = v_conic.unsafe_load(3 * idx)
-    var f5 = v_conic.unsafe_load(3 * idx + 1)
-    var f6 = v_conic.unsafe_load(3 * idx + 2)
+    var f1 = conics[idx, 0][0]
+    var f2 = conics[idx, 1][0]
+    var f3 = conics[idx, 2][0]
+    var f4 = v_conic[idx, 0][0]
+    var f5 = v_conic[idx, 1][0]
+    var f6 = v_conic[idx, 2][0]
     var f11 = fm.sub(fm.mul(f5, -f2), fm.mul(f1, f4))
     var f14 = fm.sub(fm.mul(f5, -f3), fm.mul(f2, f4))
     var f17 = fm.sub(fm.mul(f6, -f2), fm.mul(f1, f5))
@@ -121,15 +123,15 @@ def project_backward_kernel(
     var f26 = fm.fma(f2, f11, fm.mul(f3, f17))
     var f28 = fm.fma(f2, f14, fm.mul(f3, f20))
     var f29 = fm.add(f26, f24)
-    v_cov2d[unsafe_offset=3 * idx] = f22
-    v_cov2d[unsafe_offset=3 * idx + 1] = f29
-    v_cov2d[unsafe_offset=3 * idx + 2] = f28
+    v_cov2d[idx, 0] = f22
+    v_cov2d[idx, 1] = f29
+    v_cov2d[idx, 2] = f28
     # Rotation and scale gradients through M = R S (glm's full 2x2 products).
-    var rot = rotation.unsafe_load(idx)
+    var rot = rotation[idx, 0][0]
     var f31 = fm.cos(rot)
     var f32 = fm.sin(rot)
-    var f34 = scales.unsafe_load(2 * idx)
-    var f35 = scales.unsafe_load(2 * idx + 1)
+    var f34 = scales[idx, 0][0]
+    var f35 = scales[idx, 1][0]
     var f36 = fm.mul(f31, f34)
     var f37 = fm.fma(f32, 0.0, f36)
     var f38 = fm.mul(f31, 0.0)
@@ -170,14 +172,14 @@ def project_backward_kernel(
     var f93 = fm.fma(f32, f90, f86)
     var f95 = fm.sub(fm.mul(f31, f90), f84)
     var f96 = fm.add(f29, f29)
-    v_scale[unsafe_offset=2 * idx] = fm.fma(f28, f88, fm.fma(f22, f83, fm.mul(f96, f85)))
-    v_scale[unsafe_offset=2 * idx + 1] = fm.fma(f28, f95, fm.fma(f22, f92, fm.mul(f96, f93)))
-    v_rot[unsafe_offset=idx] = fm.fma(f28, f73, fm.fma(f22, f71, fm.mul(f96, f72)))
-    v_mean[unsafe_offset=2 * idx] = fm.mul(v_xy.unsafe_load(2 * idx), Float32(Int(width)))
-    v_mean[unsafe_offset=2 * idx + 1] = fm.mul(v_xy.unsafe_load(2 * idx + 1), Float32(Int(height)))
+    v_scale[idx, 0] = fm.fma(f28, f88, fm.fma(f22, f83, fm.mul(f96, f85)))
+    v_scale[idx, 1] = fm.fma(f28, f95, fm.fma(f22, f92, fm.mul(f96, f93)))
+    v_rot[idx, 0] = fm.fma(f28, f73, fm.fma(f22, f71, fm.mul(f96, f72)))
+    v_mean[idx, 0] = fm.mul(v_xy[idx, 0][0], Float32(width))
+    v_mean[idx, 1] = fm.mul(v_xy[idx, 1][0], Float32(height))
 
 
-@always_inline
+@inline(.always)
 def _sigma(cx: Float32, cy: Float32, cz: Float32, dx: Float32, dy: Float32) -> Float32:
     """0.5 (cx dx^2 + cz dy^2) + cy dx dy, as nvcc fuses it."""
     return fm.fma(fm.mul(cy, dx), dy, fm.mul(fm.fma(dx, fm.mul(cx, dx), fm.mul(dy, fm.mul(cz, dy))), 0.5))
@@ -188,17 +190,16 @@ def forward_kernel(
     tiles_x: Int32,
     width: Int32,
     height: Int32,
-    channels: Int32,
-    ids_sorted: I32Ptr,
-    tile_bins: I32Ptr,
-    xys: F32Ptr,
-    conics: F32Ptr,
-    colors: F32Ptr,
-    out_img: F32Ptr,
-    pixel_topk: I32Ptr,
+    ids_sorted: In[.int32, Rows[1]],
+    tile_bins: In[.int32, Rows[2]],
+    xys: In[.float32, Rows[2]],
+    conics: In[.float32, Rows[3]],
+    colors: In[.float32, Grid],
+    out_img: Out[.float32, Grid],
+    pixel_topk: Out[.int32, Rows[TOP_K]],
 ):
     var w = Int(width)
-    var ch = Int(channels)
+    var ch = Int(colors.dim[1]())
     var tile_id = block_idx.y * Int(tiles_x) + block_idx.x
     var i = block_idx.y * TILE + thread_idx.y
     var j = block_idx.x * TILE + thread_idx.x
@@ -206,92 +207,89 @@ def forward_kernel(
     var py = Float32(i)
     var pix = i * w + j
     var inside = i < Int(height) and j < w
-    var start = Int(tile_bins.unsafe_load(2 * tile_id))
-    var end = Int(tile_bins.unsafe_load(2 * tile_id + 1))
-    var id_batch = stack_allocation[BLOCK_SIZE, Int32, address_space=AddressSpace.SHARED]()
-    var param_batch = stack_allocation[BLOCK_SIZE * 5, Float32, address_space=AddressSpace.SHARED]()
+    var start = Int(tile_bins[tile_id, 0][0])
+    var end = Int(tile_bins[tile_id, 1][0])
+    var id_batch = tile_allocation[.int32, address_space=.SHARED](row_major[BLOCK_SIZE]())
+    var param_batch = tile_allocation[.float32, address_space=.SHARED](row_major[BLOCK_SIZE, 5]())  # x, y, conic
     var tr = thread_idx.y * TILE + thread_idx.x
     var topk_ids = stack_allocation[TOP_K, Int32]()
     var topk_val = stack_allocation[TOP_K, Float32]()
     comptime for k in range(TOP_K):
         topk_ids[unsafe_offset=k] = -1
         topk_val[unsafe_offset=k] = 0.0
-    var num_batches = (end - start + BLOCK_SIZE - 1) // BLOCK_SIZE
+    var num_batches = ceildiv(end - start, BLOCK_SIZE)
     for b in range(num_batches):
         barrier()
         var batch_start = start + BLOCK_SIZE * b
         var idx = batch_start + tr
         if idx < end:
-            var g = Int(ids_sorted.unsafe_load(idx))
-            id_batch[unsafe_offset=tr] = Int32(g)
-            var p = param_batch.unsafe_offset(5 * tr)
-            p[unsafe_offset=0] = xys.unsafe_load(2 * g)
-            p[unsafe_offset=1] = xys.unsafe_load(2 * g + 1)
-            p[unsafe_offset=2] = conics.unsafe_load(3 * g)
-            p[unsafe_offset=3] = conics.unsafe_load(3 * g + 1)
-            p[unsafe_offset=4] = conics.unsafe_load(3 * g + 2)
+            var g = Int(ids_sorted[idx, 0][0])
+            id_batch[tr] = Int32(g)
+            param_batch[tr, 0] = xys[g, 0][0]
+            param_batch[tr, 1] = xys[g, 1][0]
+            param_batch[tr, 2] = conics[g, 0][0]
+            param_batch[tr, 3] = conics[g, 1][0]
+            param_batch[tr, 4] = conics[g, 2][0]
         barrier()
         if not inside:
             continue
         for t in range(min(BLOCK_SIZE, end - batch_start)):
-            var p = param_batch.unsafe_offset(5 * t)
             var sigma = _sigma(
-                p.unsafe_load(2), p.unsafe_load(3), p.unsafe_load(4), fm.sub(p.unsafe_load(0), px), fm.sub(p.unsafe_load(1), py)
+                param_batch[t, 2][0], param_batch[t, 3][0], param_batch[t, 4][0], fm.sub(param_batch[t, 0][0], px), fm.sub(param_batch[t, 1][0], py)
             )
             if not (sigma < 0.0 or isnan(sigma) or isinf(sigma)):  # an if, not continue: lanes reconverge per Gaussian
                 var alpha = fm.ex2(fm.mul(sigma, -fm.LOG2E))
                 var min_id = -1
                 var min_val: Float32 = 1e30
                 for k in range(TOP_K):
-                    if topk_ids.unsafe_load(k) < 0:
+                    if topk_ids[unsafe_offset=k] < 0:
                         min_id = k
                         min_val = -1.0
                         break
-                    var v = topk_val.unsafe_load(k)
+                    var v = topk_val[unsafe_offset=k]
                     if v < min_val:
                         min_id = k
                         min_val = v
                 if alpha > min_val:
-                    topk_ids[unsafe_offset=min_id] = id_batch.unsafe_load(t)
+                    topk_ids[unsafe_offset=min_id] = id_batch[t][0]
                     topk_val[unsafe_offset=min_id] = alpha
     if not inside:
         return
     var sum_val: Float32 = 0.0
     comptime for k in range(TOP_K):
-        if topk_ids.unsafe_load(k) >= 0:
-            sum_val = fm.add(sum_val, topk_val.unsafe_load(k))
+        if topk_ids[unsafe_offset=k] >= 0:
+            sum_val = fm.add(sum_val, topk_val[unsafe_offset=k])
     var denom = Float32(Float64(sum_val) + EPS)
     var pix_out = stack_allocation[MAX_CHANNELS, Float32]()
     for c in range(ch):
         pix_out[unsafe_offset=c] = 0.0
     for c in range(ch):
         comptime for k in range(TOP_K):
-            var g = Int(topk_ids.unsafe_load(k))
+            var g = Int(topk_ids[unsafe_offset=k])
             if g >= 0:
-                var vis = fm.div(topk_val.unsafe_load(k), denom)
-                pix_out[unsafe_offset=c] = fm.fma(vis, colors.unsafe_load(g * ch + c), pix_out.unsafe_load(c))
+                var vis = fm.div(topk_val[unsafe_offset=k], denom)
+                pix_out[unsafe_offset=c] = fm.fma(vis, colors[g, c][0], pix_out[unsafe_offset=c])
     for c in range(ch):
-        out_img[unsafe_offset=pix * ch + c] = pix_out.unsafe_load(c)
+        out_img[pix, c] = pix_out[unsafe_offset=c]
     comptime for k in range(TOP_K):
-        pixel_topk[unsafe_offset=pix * TOP_K + k] = topk_ids.unsafe_load(k)
+        pixel_topk[pix, k] = topk_ids[unsafe_offset=k]
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](BLOCK_SIZE))
 def backward_kernel(
     width: Int32,
     height: Int32,
-    channels: Int32,
-    xys: F32Ptr,
-    conics: F32Ptr,
-    colors: F32Ptr,
-    v_output: F32Ptr,
-    pixel_topk: I32Ptr,
-    v_xy: F32Ptr,
-    v_conic: F32Ptr,
-    v_colors: F32Ptr,
+    xys: In[.float32, Rows[2]],
+    conics: In[.float32, Rows[3]],
+    colors: In[.float32, Grid],
+    v_output: In[.float32, Grid],
+    pixel_topk: In[.int32, Rows[TOP_K]],
+    v_xy: Out[.float32, Rows[2]],
+    v_conic: Out[.float32, Rows[3]],
+    v_colors: Out[.float32, Grid],
 ):
     var w = Int(width)
-    var ch = Int(channels)
+    var ch = Int(colors.dim[1]())
     var i = global_idx.y
     var j = global_idx.x
     if i >= Int(height) or j >= w:
@@ -299,21 +297,21 @@ def backward_kernel(
     var px = Float32(j)
     var py = Float32(i)
     var pix = i * w + j
-    var topk = SIMD[DType.int32, 16](-1)
+    var topk = SIMD[.int32, 16](-1)
     comptime for k in range(TOP_K):
-        topk[k] = pixel_topk.unsafe_load(pix * TOP_K + k)
-    var d_local = SIMD[DType.float32, 16](0.0)
+        topk[k] = pixel_topk[pix, k][0]
+    var d_local = SIMD[.float32, 16](0.0)
     var denom = Float32(EPS)
     comptime for k in range(TOP_K):
         var g = Int(topk[k])
         if g >= 0:
             var d = fm.expf(
-                -_sigma(conics.unsafe_load(3 * g), conics.unsafe_load(3 * g + 1), conics.unsafe_load(3 * g + 2), xys.unsafe_load(2 * g) - px,
-                        xys.unsafe_load(2 * g + 1) - py)
+                -_sigma(conics[g, 0][0], conics[g, 1][0], conics[g, 2][0], xys[g, 0][0] - px,
+                        xys[g, 1][0] - py)
             )  # fmt: skip
             denom += d
             d_local[k] = d
-    var v_d_local = SIMD[DType.float32, 16](0.0)
+    var v_d_local = SIMD[.float32, 16](0.0)
     comptime for k in range(TOP_K):
         var g = Int(topk[k])
         if g >= 0:
@@ -321,9 +319,9 @@ def backward_kernel(
             var norm_d = fm.div(d, denom)
             var v_norm_d: Float32 = 0.0
             for c in range(ch):
-                var vo = v_output.unsafe_load(pix * ch + c)
-                _atomic_add(v_colors, g * ch + c, norm_d * vo)
-                v_norm_d += colors.unsafe_load(g * ch + c) * vo
+                var vo = v_output[pix, c][0]
+                atomic_add(v_colors, g, c, norm_d * vo)
+                v_norm_d += colors[g, c][0] * vo
             var tmp = fm.div(-d, denom * denom) * v_norm_d
             comptime for l in range(TOP_K):
                 comptime if l == k:
@@ -334,13 +332,13 @@ def backward_kernel(
         var g = Int(topk[k])
         if g >= 0:
             var v_sigma = v_d_local[k] * -d_local[k]
-            var cx = conics.unsafe_load(3 * g)
-            var cy = conics.unsafe_load(3 * g + 1)
-            var cz = conics.unsafe_load(3 * g + 2)
-            var dx = xys.unsafe_load(2 * g) - px
-            var dy = xys.unsafe_load(2 * g + 1) - py
-            _atomic_add(v_conic, 3 * g, 0.5 * v_sigma * dx * dx)
-            _atomic_add(v_conic, 3 * g + 1, v_sigma * dx * dy)
-            _atomic_add(v_conic, 3 * g + 2, 0.5 * v_sigma * dy * dy)
-            _atomic_add(v_xy, 2 * g, v_sigma * (cx * dx + cy * dy))
-            _atomic_add(v_xy, 2 * g + 1, v_sigma * (cy * dx + cz * dy))
+            var cx = conics[g, 0][0]
+            var cy = conics[g, 1][0]
+            var cz = conics[g, 2][0]
+            var dx = xys[g, 0][0] - px
+            var dy = xys[g, 1][0] - py
+            atomic_add(v_conic, g, 0, 0.5 * v_sigma * dx * dx)
+            atomic_add(v_conic, g, 1, v_sigma * dx * dy)
+            atomic_add(v_conic, g, 2, 0.5 * v_sigma * dy * dy)
+            atomic_add(v_xy, g, 0, v_sigma * (cx * dx + cy * dy))
+            atomic_add(v_xy, g, 1, v_sigma * (cy * dx + cz * dy))
