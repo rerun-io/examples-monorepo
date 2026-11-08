@@ -1,16 +1,29 @@
-# rattler-build recipe for dpretrieval: ORB image retrieval for DPV-SLAM's classical loop closure. DBoW2's vocabulary
-# tree and database and OpenCV's cross-checked Hamming matcher are Rust (crates/dbow, pyo3 module dpretrieval._core);
-# ORB detection is OpenCV's, through cv2. maturin builds the module from crates/dpretrieval-py (pyproject.toml).
+# rattler-build recipe for dpretrieval: ORB image retrieval for DPV-SLAM's classical loop closure, on kornia-rs
+# (pyo3 module dpretrieval._core in crates/dpretrieval-py: kornia-bow vocabulary and bags of words, kornia-imgproc's
+# cross-checked matcher, kornia-staging-bow's inverted-file database); ORB detection is OpenCV's, through cv2.
+# maturin builds the module (pyproject.toml).
 package:
   name: dpretrieval
-  version: "0.2.0"
+  version: "0.3.0"
 
 source:
+  # The two packages keep their relative layout, so the Cargo path dependency on packages/kornia-staging
+  # (../kornia-staging/crates/kornia-staging-bow) resolves as in the repository. pixi rebuilds on changes under
+  # packages/dpretrieval only; after editing kornia-staging-bow, bump the build number.
   - path: .
+    target_directory: dpretrieval
     filter:
       exclude:
         - target/**
         - .pixi/**
+        - '**/__pycache__/**'
+  - path: ../kornia-staging
+    target_directory: kornia-staging
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - fixtures/**
         - '**/__pycache__/**'
 
 build:
@@ -20,7 +33,7 @@ build:
     # including the pybind11 module (dpretrieval.cpython-312-*.so) of the C++ build, which would shadow the package.
     - export SP_DIR="$(${{ PYTHON }} -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
     - rm -rf "$SP_DIR/dpretrieval" "$SP_DIR"/dpretrieval-*.dist-info "$SP_DIR"/dpretrieval.cpython-*.so
-    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+    - cd dpretrieval && ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
 
 requirements:
   build:
