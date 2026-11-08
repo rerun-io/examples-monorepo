@@ -138,6 +138,11 @@ class FitterConfig:
     """One-sided floor-penetration penalty (verts below world z=0). Jump
     landings measured 60-70 mm underground without it; airborne frames are
     unaffected (one-sided)."""
+    compile_iter: bool = False
+    """torch.compile (inductor, default mode) the captured iteration's forward +
+    losses (and, via AOTAutograd, its backward) before CUDA-graph capture."""
+    fused_adam: bool = False
+    """Use the fused (single-kernel) capturable Adam in the graphed paths."""
     device: str = "cuda"
     """Compute device."""
 
@@ -363,22 +368,35 @@ class SlidingWindowFitter:
         if optimize_betas:
             params.append(self.betas)
         betas: Float32[torch.Tensor, "1 nb"] = self.betas if optimize_betas else self.betas.detach()
-        optimizer = torch.optim.Adam(params, lr=cfg.learning_rate, capturable=True)
+        optimizer = torch.optim.Adam(params, lr=cfg.learning_rate, capturable=True, fused=cfg.fused_adam)
 
-        def one_iter() -> None:
-            optimizer.zero_grad(set_to_none=False)
-            sampled = self.sampled_model.forward(
-                static["go"], static["bp"], static["hl"], static["hr"], static["jaw"], betas, static["tr"]
-            )
+        def window_loss(
+            go: Float32[torch.Tensor, "w 3"],
+            bp: Float32[torch.Tensor, "w 63"],
+            tr: Float32[torch.Tensor, "w 3"],
+            betas_in: Float32[torch.Tensor, "1 nb"],
+        ) -> Float32[torch.Tensor, ""]:
+            """Sampled forward + every loss term for one iteration."""
+            sampled = self.sampled_model.forward(go, bp, static["hl"], static["hr"], static["jaw"], betas_in, tr)
             loss = reprojection_loss(
                 static["pts2d"], sampled, self.k_per_cam, self.world_to_cam_per_cam, static["vis"], vis_clip_value=cfg.vis_clip_value, weight=cfg.weight_reproj, delta_px=cfg.reproj_delta_px
             ) + anchor3d_loss(sampled, static["anchors"], static["avalid"], weight=cfg.weight_anchor3d)
             if optimize_betas:
-                loss = loss + shape_prior_loss(self.betas, weight=cfg.weight_shape_prior)
-            loss = loss + temporal_smoothness_loss(static["tr"], static["bp"], cfg.weight_temp_trans, cfg.weight_temp_pose)
+                loss = loss + shape_prior_loss(betas_in, weight=cfg.weight_shape_prior)
+            loss = loss + temporal_smoothness_loss(tr, bp, cfg.weight_temp_trans, cfg.weight_temp_pose)
             loss = loss + floor_penetration_loss(sampled, weight=cfg.weight_floor)
             loss = loss + floor_contact_loss(sampled, static["fc"], weight=cfg.weight_floor_contact)
             loss = loss + acceleration_loss(sampled, weight=cfg.weight_accel)
+            return loss
+
+        # Inductor (default mode: no cudagraphs of its own) fuses the forward and
+        # AOTAutograd's backward into a handful of triton kernels; the manual
+        # graph below then captures those instead of hundreds of tiny eager ops.
+        loss_fn = torch.compile(window_loss, dynamic=False) if cfg.compile_iter else window_loss
+
+        def one_iter() -> None:
+            optimizer.zero_grad(set_to_none=False)
+            loss = loss_fn(static["go"], static["bp"], static["tr"], betas)
             loss.backward()
             optimizer.step()
 
