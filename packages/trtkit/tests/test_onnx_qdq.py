@@ -79,3 +79,13 @@ def test_plan_can_explicitly_preserve_linear_and_attention_precision() -> None:
     attention = [node for node in result.graph.node if node.op_type == "Attention"]
     assert list(attention[0].input) == ["fc1.out"] * 3
     assert list(attention[1].input) == [f"attention.second.{axis}.a_dq8" for axis in "qkv"]
+
+
+def test_fp16_scale_dtype_types_fp8_scales_for_fp16_graphs() -> None:
+    """FP8 Q/DQ scales follow the plan's scale dtype, so fp16-compute exports stay strongly typed."""
+    plan = QdqPlan({"fc1": Fp8Linear(2.0), "fc2": Fp8Linear(2.0), "head": Fp8Conv(1.0)}, (), scale_dtype="float16")
+    types = {tensor.name: tensor.data_type for tensor in quantize_qdq(exported_graph(), plan).graph.initializer}
+    assert types["fc1.a_s8"] == types["fc1.w_s8"] == types["head.w_s8"] == types["head.a_s8"] == TensorProto.FLOAT16
+    assert types["fc1.w_fp8"] == TensorProto.FLOAT8E4M3FN
+    with pytest.raises(ValueError, match="requires bfloat16 scales"):
+        quantize_qdq(exported_graph(), QdqPlan({"fc1": Nvfp4Linear(1.0), "fc2": Nvfp4Linear(1.0)}, (), scale_dtype="float16"))
