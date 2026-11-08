@@ -1,0 +1,16 @@
+[build-system]
+# >= 1.9.4: sets PYO3_BUILD_EXTENSION_MODULE, which replaces PyO3's extension-module feature.
+requires = ["maturin>=1.9.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "asmk-rs"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["numpy"]
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "crates/hamming-py/Cargo.toml"
+module-name = "asmk_rs"
+# asmk_rs.pyi (next to this file) ships as asmk_rs/__init__.pyi with py.typed.

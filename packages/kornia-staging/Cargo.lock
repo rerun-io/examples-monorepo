@@ -2514,6 +2514,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-bow"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f56365c5b88412594d0164be70c4ab639d9e674bdea0756d48c3515394713d2c"
+dependencies = [
+ "bincode",
+ "rand 0.10.3",
+ "rayon",
+ "serde",
+ "serde-big-array",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "kornia-image"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2568,6 +2582,15 @@ dependencies = [
  "nalgebra",
  "proptest",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "kornia-staging-bow"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "kornia-bow",
+ "proptest",
 ]
 
 [[package]]
@@ -3482,7 +3505,7 @@ dependencies = [
  "combine",
  "downcast-rs",
  "dyn-clone",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
  "hi_sparse_bitset",
  "indexmap",
  "inventory",
@@ -4271,6 +4294,15 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-big-array"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

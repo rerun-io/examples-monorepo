@@ -47,7 +47,6 @@ from zipdepth.apis.eval_catalog import (
     score_metric_depth,
 )
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog, split_holdout_segments
-from zipdepth.catalog.targets import build_eval_transform
 from zipdepth.catalog.ultrawide import (
     DEFAULT_ULTRAWIDE_PROMPT_SCALE,
     ULTRAWIDE_LAYER,
@@ -55,7 +54,6 @@ from zipdepth.catalog.ultrawide import (
     UltrawidePolicy,
     prompt_placement,
 )
-from zipdepth.data.transforms import AlbumentationsWrapper
 
 TEACHER_NAME: str = "promptda-l"
 """Report key for PromptDA-L on the lane's zero-padded prompt canvas."""
@@ -295,13 +293,12 @@ def main(config: TeacherReferenceConfig) -> Path:
         raise ValueError("height and width must be positive")
 
     # Catalog-only imports stay local, matching the rest of the evaluation lane.
-    from zipdepth.catalog.builders import CpuSampleBuilder
+    from zipdepth.catalog.builders import eval_sample_builder
     from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 
     catalog: PromptDACatalog = load_promptda_catalog(config.catalog_url, config.dataset_name)
     segment_ids: list[str] = _selected_segments(config, catalog)
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    transform: AlbumentationsWrapper = build_eval_transform(config.height, config.width)
     policy: UltrawidePolicy = UltrawidePolicy(
         min_valid_fraction=config.ultrawide_min_valid_fraction,
         valid_erosion_px=config.ultrawide_valid_erosion_px,
@@ -342,7 +339,7 @@ def main(config: TeacherReferenceConfig) -> Path:
             [segment_id],
             catalog.row_by_id,
             device=device,
-            builder_factory=lambda: CpuSampleBuilder(transform, min_depth_span=0.0, target_mode="metric", ultrawide_policy=policy),
+            builder_factory=lambda: eval_sample_builder((config.height, config.width), device, policy),
             shuffle_buffer_size=1,
             frame_stride=config.frame_stride,
             num_producers=1,
@@ -385,10 +382,10 @@ def main(config: TeacherReferenceConfig) -> Path:
 
             index: int
             for index in range(int(image_bchw.shape[0])):
-                target_depth_hw: Float32[ndarray, "h w"] = batch["target_depth"][index, 0].numpy().astype(np.float32, copy=False)
-                target_valid_hw: Bool[ndarray, "h w"] = batch["target_valid"][index, 0].numpy().astype(bool, copy=False)
-                prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][index, 0].numpy().astype(np.float32, copy=False)
-                prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][index, 0].numpy().astype(bool, copy=False)
+                target_depth_hw: Float32[ndarray, "h w"] = batch["target_depth"][index, 0].cpu().numpy().astype(np.float32, copy=False)
+                target_valid_hw: Bool[ndarray, "h w"] = batch["target_valid"][index, 0].cpu().numpy().astype(bool, copy=False)
+                prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][index, 0].cpu().numpy().astype(np.float32, copy=False)
+                prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][index, 0].cpu().numpy().astype(bool, copy=False)
                 scored: dict[str, FootprintSplitMetrics] = {}
                 name_iter: str
                 for name_iter in model_names:
@@ -416,7 +413,7 @@ def main(config: TeacherReferenceConfig) -> Path:
                     config.dump_frames_dir.mkdir(parents=True, exist_ok=True)
                     np.savez_compressed(
                         config.dump_frames_dir / f"{orientation}_{segment_id}.npz",
-                        image_hwc=np.moveaxis(batch["image"][index].numpy(), 0, -1),
+                        image_hwc=np.moveaxis(batch["image"][index].cpu().numpy(), 0, -1),
                         target_depth_hw=target_depth_hw,
                         target_valid_hw=target_valid_hw,
                         prompt_depth_hw=prompt_depth_hw,

@@ -1003,6 +1003,7 @@ def build_rerun_iterable_dataset(
         RerunIterableDataset,
         VideoFrameDecoder,
     )
+    from simplecv.rerun_dataloader import SegmentNvdecDecoder
 
     native_fps: float = (
         config.native_fps_override
@@ -1011,10 +1012,14 @@ def build_rerun_iterable_dataset(
     )
     codecs: dict[str, CatalogCodecName] = detect_video_codecs(dataset_entry=dataset_entry, segment=segment, streams=streams)
     print(f"Video codecs: {codecs}", flush=True)
+    # A CUDA tracker gets NVDEC: one whole-segment decoder per stream, frames stay on the GPU.
+    # A CPU tracker keeps rerun's PyAV decoder.
     fields: dict[str, Any] = {
         stream.name: Field(
             path=stream.field_path,
-            decode=VideoFrameDecoder(codec=codecs[stream.name]),
+            decode=SegmentNvdecDecoder(dataset_entry, stream.video_entity.lstrip("/"), CATALOG_TIMELINE, torch.device("cuda"), round(native_fps))
+            if config.tracker_device == "cuda"
+            else VideoFrameDecoder(codec=codecs[stream.name]),
         )
         for stream in streams
     }
@@ -1242,9 +1247,9 @@ def _run_mvapi_inference(
 
         _segment_meta, index_value = rerun_dataset.sample_index.global_to_local(sample_idx)
         timestamp_ns: int = index_value_to_time_ns(index_value)
-        # Dataloader samples are RGB CHW uint8 tensors already — upload once,
-        # then view as NHWC for the tracker (a wrong dtype fails loudly in the
-        # tracker's frame validation rather than being silently cast here).
+        # Dataloader samples are RGB CHW uint8 tensors already, on the GPU when NVDEC decoded them
+        # (the move is then a no-op); view as NHWC for the tracker (a wrong dtype fails loudly in
+        # the tracker's frame validation rather than being silently cast here).
         frames_rgb: UInt8[torch.Tensor, "n_views h w 3"] = rearrange(
             torch.stack([torch.as_tensor(sample[stream.name]) for stream in streams]).to(config.tracker_device, non_blocking=True),
             "views c h w -> views h w c",

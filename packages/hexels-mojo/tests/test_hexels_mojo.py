@@ -1,0 +1,222 @@
+"""hexels_mojo against the hexels-src CUDA extensions, on inputs and outputs frozen in fixtures/hexels_references.rrd.
+
+The kernels are CUDA-only (as upstream), so every parity test is an integration test. Tolerances, relative
+to max(|ref|, 1):
+- prune scores 1e-4: upstream's scorer is built with `--use_fast_math` (approximate sin, cos, exp and
+  division) and both accumulate with float atomics in scheduling order. The kept set (`prune_model`'s
+  stable descending argsort) must agree except where two scores are within that tolerance.
+- fused-ssim backward: bit-exact given upstream's derivative maps (multiplies and fma chains only).
+- fused-ssim forward: map 1e-5, derivative maps 1e-3, mean SSIM 1e-6, end-to-end gradient 1e-4. Upstream
+  is built without fast math, but nvcc and Mojo's LLVM fuse different multiply-adds in the windowed
+  moments; sigma^2 = E[x^2] - mu^2 cancels on smooth images, and d map / d sigma1^2 = -C D / (A B^2)
+  amplifies that most (measured 3.4e-4 on `/fused_ssim/smooth`; the map itself 5e-6).
+- distCUDA2: bit-exact (the same Morton order, box pruning and fma chains; min/max and the stable sort are exact).
+- 2D rasterizer (flat and color-gradient): tile binning and the forward outputs (image, top-10 ids, weights sum,
+  entropy) bit-exact: the kernel issues nvcc's fast-math PTX instructions in nvcc's order (mojo/fastmath.mojo).
+  Backward within 1e-4 of max(|ref|, 1): float atomics sum in scheduling order (measured <= 1e-5).
+- Image-GS's Gaussian kernels: projection (forward and backward) and the top-K forward bit-exact (same technique);
+  rasterizer backward within 1e-4 (float atomics; measured <= 1e-5).
+"""
+
+import pytest
+
+torch = pytest.importorskip("torch", reason="hexels_mojo requires PyTorch")
+pytest.importorskip("rerun", reason="the references are an .rrd")
+
+from hexels_references import REFERENCE_FILE, entities, load  # noqa: E402  # pyrefly: ignore[missing-import]
+from torch import Tensor  # noqa: E402
+
+if not REFERENCE_FILE.exists():
+    pytest.skip(f"missing {REFERENCE_FILE.name}", allow_module_level=True)
+
+pytestmark = [pytest.mark.integration, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")]
+
+PRUNE_TOLERANCE: float = 1e-4
+SSIM_MAP_TOLERANCE: float = 1e-5
+SSIM_DERIVATIVE_TOLERANCE: float = 1e-3
+SSIM_GRAD_TOLERANCE: float = 1e-4
+RASTER_GRAD_TOLERANCE: float = 1e-4
+
+
+def _rel_error(ours: Tensor, ref: Tensor) -> float:
+    ours_d, ref_d = ours.detach().cpu().double(), ref.double()
+    return ((ours_d - ref_d).abs() / ref_d.abs().clamp_min(1.0)).max().item()
+
+
+@pytest.mark.parametrize("entity", entities("/prune"))
+def test_removal_scores(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo.prune import removal_scores_cuda
+
+    rec = load()[entity]
+    xy, scales, rotations, colors, gradients, softness, image, target, selected = (
+        rec.tensor(n).cuda() for n in ("xy", "scales", "rotations", "colors", "gradients", "softness", "image", "target", "selected")
+    )
+    scores, max_error = removal_scores_cuda(
+        xy, scales, rotations, colors, gradients, softness, image, target, selected, bool(rec.tensor("rich").item())
+    )
+    ref_scores = rec.tensor("scores")
+    assert _rel_error(scores, ref_scores) < PRUNE_TOLERANCE
+    assert abs(max_error.item() - rec.tensor("max_error").item()) < PRUNE_TOLERANCE
+    keep = len(ref_scores) // 2
+    ours_kept = set(scores.cpu().argsort(descending=True, stable=True)[:keep].tolist())
+    ref_kept = set(ref_scores.argsort(descending=True, stable=True)[:keep].tolist())
+    boundary = ref_scores.sort(descending=True).values[keep - 1].item()
+    disagree = {i for i in ours_kept ^ ref_kept if abs(ref_scores[i].item() - boundary) > PRUNE_TOLERANCE}
+    assert not disagree, f"kept sets differ away from the boundary score: {sorted(disagree)}"
+
+
+@pytest.mark.parametrize("entity", entities("/fused_ssim"))
+def test_fused_ssim(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo._launch import launch
+    from hexels_mojo.fused_ssim import C1, C2, fused_ssim
+
+    rec = load()[entity]
+    img1, img2, dl_dmap = (rec.tensor(n).cuda() for n in ("img1", "img2", "dl_dmap"))
+    maps = torch.empty(4, *img1.shape, device="cuda")  # the map and its three partials, stacked
+    launch("fused_ssim", (C1, C2, True), (img1, img2, maps))
+    for name, ours in zip(("ssim_map", "dm_dmu1", "dm_dsigma1_sq", "dm_dsigma12"), maps, strict=True):
+        assert _rel_error(ours, rec.tensor(name)) < (SSIM_MAP_TOLERANCE if name == "ssim_map" else SSIM_DERIVATIVE_TOLERANCE), name
+
+    ref_partials = torch.stack([rec.tensor(n).cuda() for n in ("dm_dmu1", "dm_dsigma1_sq", "dm_dsigma12")])
+    grad = torch.empty_like(img1)
+    launch("fused_ssim_backward", (), (img1, img2, dl_dmap, grad, ref_partials))
+    assert torch.equal(grad.cpu(), rec.tensor("grad"))
+
+    x = img1.clone().requires_grad_(True)
+    loss = fused_ssim(x, img2)
+    assert abs(loss.item() - rec.tensor("ssim_map").double().mean().item()) < 1e-6
+    launch("fused_ssim_backward", (), (img1, img2, dl_dmap, grad, maps[1:]))
+    assert _rel_error(grad, rec.tensor("grad")) < SSIM_GRAD_TOLERANCE
+
+
+def test_fused_ssim_valid_padding_crops_the_map() -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo.fused_ssim import FusedSSIMMap, fused_ssim
+
+    img1 = torch.rand(1, 3, 40, 50, device="cuda", requires_grad=True)
+    img2 = torch.rand(1, 3, 40, 50, device="cuda")
+    full = FusedSSIMMap.apply(0.01**2, 0.03**2, img1, img2, "same", True)
+    valid = fused_ssim(img1, img2, padding="valid")
+    assert torch.equal(valid, full[:, :, 5:-5, 5:-5].mean())
+    valid.backward()
+    assert img1.grad is not None and img1.grad.shape == img1.shape
+
+
+@pytest.mark.parametrize("entity", entities("/distcuda2"))
+def test_dist_cuda2(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo.simple_knn import distCUDA2
+
+    rec = load()[entity]
+    assert torch.equal(distCUDA2(rec.tensor("points").cuda()).cpu(), rec.tensor("dists"))
+
+
+@pytest.mark.parametrize("entity", entities("/binning"))
+def test_tile_binning(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo.raster2d import bin_and_sort_gaussians
+
+    rec = load()[entity]
+    xys, radii, cum = (rec.tensor(n).cuda() for n in ("xys", "radii", "cum_tiles_hit"))
+    tile_bounds = tuple(rec.tensor("tile_bounds").tolist())
+    isect, ids, isect_sorted, _, tile_bins = bin_and_sort_gaussians(xys.shape[0], rec.tensor("isect_ids").numel(), xys, radii, cum, tile_bounds)
+    for name, ours in (("isect_ids", isect), ("gaussian_ids", ids), ("isect_ids_sorted", isect_sorted), ("tile_bins", tile_bins)):
+        assert torch.equal(ours.cpu(), rec.tensor(name)), name
+
+
+@pytest.mark.parametrize("entity", entities("/raster2d"))
+def test_raster2d(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo import raster2d
+
+    rec = load()[entity]
+    t = lambda name: rec.tensor(name).cuda()  # noqa: E731
+    height, width = rec.tensor("size").tolist()
+    aa = float(rec.tensor("aa_kernel_size").item())
+    empty = torch.empty(0, device="cuda")
+    sharpness = t("sharpness") if "sharpness" in rec.tensors else empty
+    emission = t("emission") if "emission" in rec.tensors else empty
+    per_hexel = bool(rec.tensor("softness_is_tensor").item())
+    color_grad = bool(rec.tensor("color_grad").item())
+    softness = t("softness") if per_hexel else float(rec.tensor("softness").item())
+    bins = (t("gaussian_ids_sorted"), t("tile_bins"))
+    geometry = (t("xys"), t("scales"), t("rotations"), t("colors"))
+    gradients = (t("color_grads"), 0.1) if color_grad else ()
+    softness_args = (softness, 0.0) if per_hexel else (softness,)
+    suffix = ("_color_grad" if color_grad else "") + ("_softness" if per_hexel else "")
+    forward = getattr(raster2d, f"nd_rasterize_forward_topk_norm_hexels{suffix}")
+    outputs = forward((0, 0, 1), (16, 16, 1), (width, height, 1), *bins, *geometry, *gradients, aa, *softness_args, sharpness, emission)
+    for name, ours in zip(("out_img", "pixel_topk", "weights_sum", "entropy"), outputs, strict=True):
+        assert torch.equal(ours.cpu(), rec.tensor(name)), name
+
+    backward = getattr(raster2d, f"nd_rasterize_backward_topk_norm_hexels{suffix}")
+    # The bindings take softnesses before the color-grad scale (color-grad) or before the output gradients (flat).
+    upstream = (t("v_out"), t("v_weights_sum"), t("v_entropy"), t("pixel_topk"), aa)
+    head = (height, width, 16, 16, *bins, *geometry)
+    softnesses = (softness,) if per_hexel else ()
+    middle = (t("color_grads"), *softnesses, 0.1) if color_grad else softnesses
+    tail = (0.0,) if per_hexel else (softness,)
+    grads = backward(*head, *middle, *upstream, *tail, sharpness, emission)
+    names = ["v_xy", "v_scale", "v_rot", "v_colors", *(["v_color_grads"] if color_grad else []), "v_emission", "v_sharpness"]
+    names += ["v_softness"] if per_hexel else []
+    for name, ours in zip(names, grads, strict=True):
+        if name in rec.tensors:
+            assert _rel_error(ours, rec.tensor(name)) < RASTER_GRAD_TOLERANCE, name
+
+
+def test_overlay_falls_back_to_the_wrapped_module() -> None:
+    from types import SimpleNamespace
+
+    from hexels_mojo import raster2d
+
+    wrapped = SimpleNamespace(other=lambda: "cuda", bin_and_sort_gaussians=lambda: "cuda")
+    view = raster2d.overlay(wrapped)
+    assert view.other() == "cuda"
+    assert view.bin_and_sort_gaussians is raster2d.bin_and_sort_gaussians
+
+
+@pytest.mark.parametrize("entity", entities("/gaussians2d"))
+def test_imagegs_gaussians(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo import gaussians2d
+
+    rec = load()[entity]
+    t = lambda name: rec.tensor(name).cuda()  # noqa: E731
+    height, width = rec.tensor("size").tolist()
+    n = rec.tensor("means").shape[0]
+    tile_bounds = ((width + 15) // 16, (height + 15) // 16, 1)
+    projected = gaussians2d.project_gaussians_2d_scale_rot_forward(n, t("means"), t("scales"), t("rotation"), height, width, tile_bounds)
+    for name, ours in zip(("xys", "radii", "conics", "num_tiles_hit"), projected, strict=True):
+        assert torch.equal(ours.cpu(), rec.tensor(name)), name
+    bins = (t("gaussian_ids_sorted"), t("tile_bins"))
+    out_img, pixel_topk = gaussians2d.nd_rasterize_forward_topk_norm(
+        tile_bounds, (16, 16, 1), (width, height, 1), *bins, t("xys"), t("conics"), t("colors")
+    )
+    assert torch.equal(out_img.cpu(), rec.tensor("out_img"))
+    assert torch.equal(pixel_topk.cpu(), rec.tensor("pixel_topk"))
+    grads = gaussians2d.nd_rasterize_backward_topk_norm(height, width, 16, 16, *bins, t("xys"), t("conics"), t("colors"), t("v_out"), t("pixel_topk"))
+    for name, ours in zip(("v_xy", "v_conic", "v_colors"), grads, strict=True):
+        assert _rel_error(ours, rec.tensor(name)) < RASTER_GRAD_TOLERANCE, name
+    projection_grads = gaussians2d.project_gaussians_2d_scale_rot_backward(
+        n, t("means"), t("scales"), t("rotation"), height, width, t("radii"), t("conics"), t("v_xys_in"), t("v_conics_in")
+    )
+    for name, ours in zip(("v_cov2d", "v_mean", "v_scale", "v_rot"), projection_grads, strict=True):
+        assert torch.equal(ours.cpu(), rec.tensor(name)), name
+
+
+def test_imagegs_autograd_matches_the_kernels() -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo import gaussians2d
+
+    rec = load()["/gaussians2d/imagegs"]
+    height, width = rec.tensor("size").tolist()
+    means = rec.tensor("means").cuda().requires_grad_(True)
+    scales, rotation, colors = (rec.tensor(n).cuda() for n in ("scales", "rotation", "colors"))
+    tile_bounds = ((width + 15) // 16, (height + 15) // 16, 1)
+    xys, radii, conics, hits = gaussians2d.project_gaussians_2d_scale_rot(means, scales, rotation, height, width, tile_bounds)
+    image = gaussians2d.rasterize_gaussians_sum(xys, radii, conics, hits, colors, height, width, 16, 16, True)
+    assert torch.equal(image.detach().cpu(), rec.tensor("out_img"))
+    image.square().sum().backward()
+    assert means.grad is not None and torch.isfinite(means.grad).all() and means.grad.abs().sum() > 0

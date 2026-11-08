@@ -1,9 +1,16 @@
-# Upstream Hexels (honeycomb-surfels/hexels) for CUDA 13, plus the CUDA extensions it imports
+# Upstream Hexels (honeycomb-surfels/hexels) for CUDA 13, plus the CUDA extension it imports
 # at train/render/eval time; Image-GS runs through hexels' fit_image harness on hexel-kernel's 2D kernels.
 #
-# Upstream pins torch 2.5.1 + CUDA 12.1 + sm_86; these outputs build against the workspace's
+# Upstream pins torch 2.5.1 + CUDA 12.1 + sm_86; hexel-kernel builds against the workspace's
 # conda-forge torch 2.12 (cuda130) for sm_86, sm_120 and sm_121 (+PTX). Every output has its own
 # script (no `staging:`, see AGENTS.md "Pixi-build packages").
+#
+# fused-ssim, simple-knn and upstream's JIT-compiled 2D prune scorer are not built: patches 0002-0004
+# import their Mojo ports from packages/hexels-mojo (`hexels_mojo`), which the hexels feature installs. Patch 0005
+# runs hexel-kernel's 2D hexel rasterizers (flat and color-gradient) and tile binning (the 2D fits) on hexels_mojo too; hexel-kernel
+# still provides every other kernel. Image-GS's Gaussian projection and top-K rasterizer come from hexels_mojo too
+# (patches 0003/0004), and hexel-kernel's base 3D forward (no prefiltering) and cached backward too (patch 0006: the
+# other forward variants, their backward and prefiltering stay CUDA).
 #
 # Runtime layout of `hexels-src`: upstream resolves helpers relative to its checkout root
 # (ROOT/2d-gaussian-splatting, ROOT/image-gs, ROOT/configs), so the tree is installed whole at
@@ -16,10 +23,15 @@ source:
   - git: https://github.com/honeycomb-surfels/hexels.git
     rev: 698d1afb0944d3e766074c3beb70362f16c7550d
     target_directory: hexels
+    patches:
+      - patches/0003-hexels-kernels-from-hexels-mojo.patch  # fused_ssim, the prune scorer, Image-GS kernels from hexels_mojo; drops the .cu
+      - patches/0005-gsplat-hexels-raster2d-from-hexels-mojo.patch  # 2D hexel rasterizers (flat, color-gradient) + tile binning from hexels_mojo
   # The two submodules, at the commits hexels@698d1af records.
   - git: https://github.com/honeycomb-surfels/hexel-kernel.git
     rev: 3af322068baef2505db8388293ea4beb9737240f
     target_directory: hexel-kernel
+    patches:
+      - patches/0006-hexel-kernel-raster3d-from-hexels-mojo.patch  # base 3D forward + cached backward from hexels_mojo
   - git: https://github.com/honeycomb-surfels/hexel-viewer.git
     rev: ff497d44d3c2ecdb907e0346b0b8e8de0a64f9ec
     target_directory: hexel-viewer
@@ -30,19 +42,15 @@ source:
     target_directory: 2d-gaussian-splatting
     patches:
       - patches/0001-eval-tnt-open3d-pipelines.patch  # eval_tnt on o3d.pipelines.registration (Open3D 0.10 -> current)
-  # 2DGS's scene/__init__ imports simple_knn._C; commit = 2DGS's submodule record.
-  - git: https://gitlab.inria.fr/bkerbl/simple-knn.git
-    rev: f155ec04131cb579f53443a06879d37115f4612f
-    target_directory: simple-knn
-  - git: https://github.com/rahul-goel/fused-ssim.git
-    rev: 1272e21a282342e89537159e4bad508b19b34157
-    target_directory: fused-ssim
+      - patches/0002-2dgs-distcuda2-from-hexels-mojo.patch  # simple_knn._C.distCUDA2 -> hexels_mojo.simple_knn
   - git: https://github.com/NYU-ICL/image-gs.git
     rev: 03088368d42684fb54225c981cfd94b58cc0393a
     target_directory: image-gs
+    patches:
+      - patches/0004-image-gs-kernels-from-hexels-mojo.patch  # fused_ssim, Gaussian projection + top-K rasterizer -> hexels_mojo
 
 outputs:
-  # ── CUDA extensions ─────────────────────────────────────────────────────
+  # ── CUDA extension ──────────────────────────────────────────────────────
   - package:
       name: hexel-kernel
     build:
@@ -50,70 +58,6 @@ outputs:
         file: build_cuda_ext.sh
         env:
           EXT_DIR: hexel-kernel
-    requirements:
-      build:
-        - cuda-compiler 13.0.*
-        - cuda-version 13.0.*
-      host:
-        - python 3.12.*
-        - pip
-        - setuptools
-        - wheel
-        - cuda-version 13.0.*
-        - pytorch-gpu 2.12.*
-        - cuda-cudart-dev
-        - cuda-driver-dev
-        - cuda-cccl
-        - cuda-nvrtc-dev
-        - libcublas-dev
-        - libcusparse-dev
-        - libcusolver-dev
-        - libcurand-dev
-      run:
-        - python 3.12.*
-        - pytorch >=2.12,<2.13
-        - cuda-version >=13.0,<14
-        - jaxtyping
-
-  - package:
-      name: fused-ssim
-    build:
-      script:
-        file: build_cuda_ext.sh
-        env:
-          EXT_DIR: fused-ssim
-    requirements:
-      build:
-        - cuda-compiler 13.0.*
-        - cuda-version 13.0.*
-      host:
-        - python 3.12.*
-        - pip
-        - setuptools
-        - wheel
-        - cuda-version 13.0.*
-        - pytorch-gpu 2.12.*
-        - cuda-cudart-dev
-        - cuda-driver-dev
-        - cuda-cccl
-        - cuda-nvrtc-dev
-        - libcublas-dev
-        - libcusparse-dev
-        - libcusolver-dev
-        - libcurand-dev
-      run:
-        - python 3.12.*
-        - pytorch >=2.12,<2.13
-        - cuda-version >=13.0,<14
-        - jaxtyping
-
-  - package:
-      name: simple-knn
-    build:
-      script:
-        file: build_cuda_ext.sh
-        env:
-          EXT_DIR: simple-knn
     requirements:
       build:
         - cuda-compiler 13.0.*
@@ -178,8 +122,6 @@ outputs:
       run:
         - python 3.12.*
         - ${{ pin_subpackage('hexel-kernel', exact=True) }}
-        - ${{ pin_subpackage('fused-ssim', exact=True) }}
-        - ${{ pin_subpackage('simple-knn', exact=True) }}
         - ${{ pin_subpackage('image-gs', exact=True) }}
         - pytorch >=2.12,<2.13
         - torchvision
