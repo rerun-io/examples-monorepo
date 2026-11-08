@@ -11,7 +11,6 @@ setup, binary streaming, and nerfstudio output zipping.
 """
 
 import shutil
-import subprocess
 import tempfile
 import threading
 from collections.abc import Callable, Generator
@@ -62,20 +61,6 @@ def _engine_status_tick() -> tuple[str, gr.Timer]:
     return engine_status, gr.Timer(active=not engines_ready.is_set())
 
 
-def _mov_to_mp4(video_path: Path) -> Path:
-    """Convert a MOV file to MP4 using ffmpeg."""
-    mp4_path: Path = video_path.with_suffix(".mp4")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-i", str(video_path), "-c:v", "copy", "-an", "-y", str(mp4_path)],
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}") from e
-    return mp4_path
-
-
 StreamingFn: TypeAlias = Callable[..., Generator[tuple[bytes | None, str | None, str], None, None]]
 
 
@@ -108,17 +93,13 @@ def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
         stream = rr.binary_stream()
         recording: rr.RecordingStream | None = rr.get_thread_local_data_recording()
 
-        video_path: Path = Path(video_file)
-        if video_path.suffix.lower() == ".mov":
-            video_path = _mov_to_mp4(video_path)
-
         progress(0.05, desc="Loading pipeline" if engines_ready.is_set() else "Waiting for the TensorRT engines")
         engines_ready.wait()
 
         # A fresh directory per run, so a download never mixes in another run's frames.
         run_dir: Path = Path(tempfile.mkdtemp(prefix="mast3r-slam-"))
         ns_output_dir: Path = run_dir / "nerfstudio-output"
-        settings: SlamSettings = SlamSettings(dataset=str(video_path), subsample=subsample, ns_save_path=ns_output_dir)
+        settings: SlamSettings = SlamSettings(dataset=video_file, subsample=subsample, ns_save_path=ns_output_dir)
         for msg in run_slam_pipeline(settings, model, recording=recording):
             yield stream.read(), None, msg
 
