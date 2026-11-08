@@ -1,9 +1,9 @@
-"""The map's surface: keyframe depth fused into a sparse colour TSDF (``packages/tsdf-rs``), logged block by block.
+"""The map's surface: keyframe depth fused into a sparse colour TSDF (``packages/tsdf-rs``), logged as it grows.
 
 :class:`LiveSurface` runs on its own thread (:class:`LatestWinsWorker`, fed by the async logger on every new
 keyframe): each new keyframe is integrated into a live volume and only the changed blocks are logged; every few
-keyframes and at the end, everything is re-fused at the backend's latest poses. ``tsdf-rs`` releases the GIL while it
-integrates and extracts.
+keyframes everything is re-fused at the backend's latest poses, and at the end the final surface is logged as one
+mesh (:class:`simplecv.rerun_live_mesh.LiveMeshLog`). ``tsdf-rs`` releases the GIL while it integrates and extracts.
 """
 
 import threading
@@ -15,8 +15,9 @@ import lietorch_mojo as lietorch
 import numpy as np
 import rerun as rr
 import torch
-from jaxtyping import Float32, UInt8, UInt32
+from jaxtyping import Float32, UInt8
 from numpy import ndarray
+from simplecv.rerun_live_mesh import LiveMeshLog
 from tsdf_rs import TsdfVolume
 
 from mast3r_slam.lietorch_utils import as_SE3
@@ -63,20 +64,6 @@ def integrate_keyframe(volume: TsdfVolume, keyframe: KeyframeDepth, world_sim3_c
         keyframe.k_33,
         np.linalg.inv(world_T_cam.astype(np.float64)).astype(np.float32),
         np.ascontiguousarray(keyframe.rgb_hw3),
-    )
-
-
-def front_faced_mesh(
-    vertices: Float32[ndarray, "v 3"], triangles: UInt32[ndarray, "t 3"], colors: UInt8[ndarray, "v 3"] | None, normals: Float32[ndarray, "v 3"]
-) -> rr.Mesh3D:
-    """A ``tsdf-rs`` mesh as a Mesh3D that renders only front faces (the side the cameras saw), so walls seen from
-    outside a room do not hide it."""
-    return rr.Mesh3D(
-        vertex_positions=vertices,
-        triangle_indices=triangles,
-        vertex_colors=colors,
-        vertex_normals=normals,
-        face_rendering=rr.components.MeshFaceRendering.Front,
     )
 
 
@@ -145,14 +132,14 @@ class SurfaceRequest:
 
 
 class LiveSurface:
-    """The map surface, grown on the worker thread and logged block by block under ``mesh_path``.
+    """The map surface, grown on the worker thread and logged under ``mesh_path`` (:class:`LiveMeshLog`).
 
     Each request integrates only the keyframes not yet in the live volume, at their current pose, and logs the
-    blocks that changed (``mesh_path/<x>_<y>_<z>``), so an update is small. The backend keeps refining poses,
-    which does not move what was integrated: every ``refuse_every`` keyframes, and for the final request, a fresh
-    volume is fused from every keyframe at its latest pose, the logged blocks are cleared, and all of its blocks are
-    logged; it becomes the live volume. Blocks are logged at the request's time point, so scrubbing shows growth.
-    (MetricTrail's ``live_surface`` pattern; see ``packages/metrictrail``.)
+    super-blocks that changed, so an update is small. The backend keeps refining poses, which does not move what was
+    integrated: every ``refuse_every`` keyframes a fresh volume is fused from every keyframe at its latest pose, the
+    logged blocks are cleared and all of its blocks are logged; it becomes the live volume. The final request fuses
+    every keyframe at its final pose and logs that surface as one mesh. Everything is logged at the request's time
+    point, so scrubbing shows the growth.
     """
 
     def __init__(
@@ -163,7 +150,7 @@ class LiveSurface:
         refuse_every: int = 10,
         settings: SurfaceSettings | None = None,
     ) -> None:
-        self._mesh_path: str = mesh_path
+        self._mesh_log: LiveMeshLog = LiveMeshLog(mesh_path, recording)
         self._recording: rr.RecordingStream | None = recording
         self._timelines: tuple[str, str] = timelines
         self._refuse_every: int = refuse_every
@@ -188,11 +175,9 @@ class LiveSurface:
         rr.set_time(frame_timeline, sequence=request.frame_idx, recording=self._recording)
         if request.timestamp_ns is not None:
             rr.set_time(video_timeline, duration=1e-9 * float(request.timestamp_ns), recording=self._recording)
+        if request.final:
+            self._mesh_log.finish(self._volume.extract_mesh())
+            return
         if refuse:
-            rr.log(self._mesh_path, rr.Clear(recursive=True), recording=self._recording)
-        for (x, y, z), (vertices, triangles, colors, normals) in self._volume.extract_dirty_block_meshes():
-            block_path: str = f"{self._mesh_path}/{x}_{y}_{z}"
-            if triangles.shape[0] == 0:
-                rr.log(block_path, rr.Clear(recursive=False), recording=self._recording)
-            else:
-                rr.log(block_path, front_faced_mesh(vertices, triangles, colors, normals), recording=self._recording)
+            self._mesh_log.restart()
+        self._mesh_log.log_changed(self._volume.extract_dirty_block_meshes())

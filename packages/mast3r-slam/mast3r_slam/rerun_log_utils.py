@@ -11,6 +11,7 @@ import numpy as np
 import rerun.blueprint as rrb
 from jaxtyping import Int
 from numpy import ndarray
+from simplecv.rerun_eye_controls import follow_eye_controls
 from simplecv.rerun_log_utils import log_video
 
 from mast3r_slam.dataloader import MonocularDataset, MP4Dataset
@@ -33,11 +34,8 @@ KEYFRAME_MAPS_PATH: Path = Path("/keyframe_maps")
 """Each keyframe's pointmap, confidence and depth, under a static copy of its Pinhole."""
 
 
-# Chase eye of the Follow view, in the camera frame (RDF: x right, y down, z forward), like dpvo's. MASt3R's
-# pointmaps are roughly metric, so this sits 0.6 m above and 1.5 m behind the camera, aimed 1.5 m ahead of it.
-_FOLLOW_EYE_POSITION: tuple[float, float, float] = (0.0, -0.6, -1.5)
-_FOLLOW_EYE_TARGET: tuple[float, float, float] = (0.0, 0.0, 1.5)
-_FOLLOW_EYE_UP: tuple[float, float, float] = (0.0, -1.0, 0.0)
+# Chase eye of the Follow view, in the camera's RDF frame; MASt3R's pointmaps are roughly metric, so metres apply.
+_FOLLOW_EYE: rrb.EyeControls3D = follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=1.5, up_m=0.6, ahead_m=1.5)
 
 
 def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> rrb.Blueprint:
@@ -64,33 +62,18 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
     root: str = f"/{str(parent_log_path).lstrip('/')}"
     camera_path: str = f"{root}/current_camera"
     contents_3d: str = f"+ {root}/**"
-    # The camera path is logged one segment per frame; show every segment from the start up to the cursor.
-    path_history: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
-        [
-            rrb.VisibleTimeRange(name, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
-            for name in (FRAME_TIMELINE, VIDEO_TIMELINE)
-        ]
-    )
     overview = rrb.Spatial3DView(
         name="Overview",
         origin="/",
         contents=contents_3d,
-        overrides={f"{root}/path": path_history},
         eye_controls=rrb.EyeControls3D(spin_speed=0.25),
     )
     follow = rrb.Spatial3DView(
         name="Follow",
         origin=camera_path,
         contents=contents_3d,
-        overrides={f"{root}/path": path_history},
         line_grid=rrb.LineGrid3D(visible=False),
-        eye_controls=rrb.EyeControls3D(
-            kind=rrb.Eye3DKind.Orbital,
-            position=_FOLLOW_EYE_POSITION,
-            look_target=_FOLLOW_EYE_TARGET,
-            eye_up=_FOLLOW_EYE_UP,
-            spin_speed=0.0,
-        ),
+        eye_controls=_FOLLOW_EYE,
     )
     # The original video on top, then what MASt3R derives from the current frame and the keyframe it
     # tracks against. The model's cropped frame shows on the camera frustum in the 3D views.

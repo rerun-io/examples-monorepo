@@ -255,7 +255,7 @@ class CaptureSession:
             setattr(owner, name, original)
         self.restore = []
         if self.live_surface is not None:
-            self.live_surface.flush()  # the keyframes since the last log
+            self.live_surface.finish()  # the whole surface as one mesh at the pass's last integrated frame
         for rec in self.streams.values():
             rec.flush()
             if rec is not self.live:
@@ -279,7 +279,7 @@ class CaptureSession:
                 earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
         if self.live_surface is not None:
-            self.live_surface.reset()
+            self.live_surface.open_pass()
         self.pass_normals.append({})
         self.pending_normals.clear()
 
@@ -377,7 +377,7 @@ class CaptureSession:
         )
         newest_world_T_cam: Float32[ndarray, "4 4"] = world_T_cam[num_keyframes - 1]
         if self.live_surface is not None and depth_m is not None:
-            self.live_surface.integrate(depth_m, rgb, intrinsics_px, newest_world_T_cam)
+            self.live_surface.integrate(depth_m, rgb, intrinsics_px, newest_world_T_cam, frame)
         rec.log(entities.DPVO_CURRENT, rr.Transform3D(translation=newest_world_T_cam[:3, 3], mat3x3=newest_world_T_cam[:3, :3]))
         rec.log(
             entities.DPVO_CURRENT,

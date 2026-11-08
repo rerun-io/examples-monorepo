@@ -8,14 +8,13 @@ the default, at a fraction of its time; ``--fuse-cloud`` still produces that clo
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
 
 import numpy as np
 from jaxtyping import Float, Float32, Float64, UInt8, UInt32
 from numpy import ndarray
+from simplecv.rerun_live_mesh import MeshArrays
 from tsdf_rs import TsdfVolume
 
-MeshArrays: TypeAlias = tuple[Float32[ndarray, "v 3"], UInt32[ndarray, "t 3"], UInt8[ndarray, "v 3"] | None, Float32[ndarray, "v 3"]]
 """A ``tsdf_rs`` mesh: vertices (metres), triangles, colours (None without colour fusion), unit normals."""
 
 

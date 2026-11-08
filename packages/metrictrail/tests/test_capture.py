@@ -100,7 +100,7 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
     assert session.kept_normals()[0][0, 0, 0] == 2
 
 
-def test_live_surface_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
+def test_live_surface_grows_temporal_blocks_then_ends_as_one_mesh(tmp_path: Path) -> None:
     import rerun as rr
     from rerun.chunk import RrdReader
 
@@ -124,18 +124,76 @@ def test_live_surface_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
     depth: np.ndarray = np.full((48, 64), 2.0, dtype=np.float32)
     rgb: np.ndarray = np.full((48, 64, 3), 128, dtype=np.uint8)
     intrinsics: np.ndarray = np.array([60.0, 60.0, 32.0, 24.0], dtype=np.float32)
-    for shift in (0.0, 0.05, 0.1):
+    for frame, shift in enumerate((0.0, 0.05, 0.1)):
+        rec.set_time(entities.FRAME_TIMELINE, sequence=frame)
         pose: np.ndarray = np.eye(4, dtype=np.float32)
         pose[0, 3] = shift
-        surface.integrate(depth, rgb, intrinsics, pose)
-    session.uninstall()  # logs the third frame's blocks
-    assert surface.volume.extract_dirty_block_meshes() == []
-    surface.retire()  # the run's final mesh would replace it
+        surface.integrate(depth, rgb, intrinsics, pose, frame)
+    session.uninstall()  # the whole surface as one mesh at frame 2
     rec.flush()
     rec.disconnect()
-    paths: list[str] = [str(path) for path in RrdReader(rrd).store().schema().entity_paths()]
     assert surface.integrated == 3
-    assert any(path.startswith("/" + entities.DPVO_MESH + "/") for path in paths)
+    mesh_chunks = [chunk for chunk in RrdReader(rrd).stream() if str(chunk.entity_path).startswith("/" + entities.DPVO_MESH)]
+    assert mesh_chunks and not any(chunk.is_static for chunk in mesh_chunks), "on the timeline, so scrubbing shows the growth"
+    block_frames = {
+        frame
+        for chunk in mesh_chunks
+        if str(chunk.entity_path).startswith(f"/{entities.DPVO_MESH}/pass_0/blocks/")
+        for frame in chunk.to_record_batch().column(entities.FRAME_TIMELINE).to_pylist()
+    }
+    assert block_frames == {1}, "the blocks after the second integrated frame (log_every=2)"
+    full_frames = [
+        chunk.to_record_batch().column(entities.FRAME_TIMELINE).to_pylist() for chunk in mesh_chunks if str(chunk.entity_path) == f"/{entities.DPVO_MESH}/pass_0/full"
+    ]
+    assert full_frames == [[2]], "one mesh at the last integrated frame"
+
+
+def test_a_recovery_pass_gets_its_own_mesh_subtree_and_hides_the_earlier_one(tmp_path: Path) -> None:
+    """Pass 0 tracks 6 frames of a wall 5.5 m away; the recovery pass restarts at frame 0 and tracks 3 frames of a wall
+    1 m away (other super-blocks: 64 voxels of 4 cm each). Pass 0's rows stay in the recording but a static clear hides them at every time."""
+    import rerun as rr
+    from rerun.chunk import RrdReader
+
+    from metrictrail import entities
+    from metrictrail.live_surface import LiveSurface
+
+    rrd: Path = tmp_path / "two-pass.rrd"
+    rec = rr.RecordingStream("metrictrail-test", recording_id="two-pass")
+    rec.save(rrd)
+    surface = LiveSurface(rec, log_every=2)
+    session = CaptureSession(
+        out_dir=tmp_path, application_id="metrictrail-test", recording_id="two-pass", depth_range_m=(0.3, 3.0), live=rec, live_surface=surface
+    )
+    rgb: np.ndarray = np.full((48, 64, 3), 128, dtype=np.uint8)
+    intrinsics: np.ndarray = np.array([60.0, 60.0, 32.0, 24.0], dtype=np.float32)
+    for instance, (frames, wall_m) in enumerate(((6, 5.5), (3, 1.0))):
+        session.pass_frames = frames
+        session.open_pass(instance)
+        for frame in range(frames):
+            rec.set_time(entities.FRAME_TIMELINE, sequence=frame)
+            pose: np.ndarray = np.eye(4, dtype=np.float32)
+            pose[0, 3] = 0.05 * frame
+            surface.integrate(np.full((48, 64), wall_m, dtype=np.float32), rgb, intrinsics, pose, frame)
+    session.uninstall()
+    rec.flush()
+    rec.disconnect()
+
+    rows: list[tuple[str, bool, list[int]]] = []
+    for chunk in RrdReader(rrd).stream():
+        path: str = str(chunk.entity_path)
+        if path.startswith(f"/{entities.DPVO_MESH}/"):
+            batch = chunk.to_record_batch()
+            frames_logged = batch.column(entities.FRAME_TIMELINE).to_pylist() if entities.FRAME_TIMELINE in batch.schema.names else []
+            rows.append((path, chunk.is_static, frames_logged))
+    pass0, pass1 = f"/{entities.DPVO_MESH}/pass_0", f"/{entities.DPVO_MESH}/pass_1"
+    blocks0 = {path for path, _, _ in rows if path.startswith(f"{pass0}/blocks/")}
+    blocks1 = {path for path, _, _ in rows if path.startswith(f"{pass1}/blocks/")}
+    assert blocks0 and blocks1
+    assert {path.rsplit("/", 1)[1] for path in blocks0}.isdisjoint(path.rsplit("/", 1)[1] for path in blocks1), "other walls, other blocks"
+    assert (pass0, True, []) in rows, "the recovery pass hides pass 0 with a static recursive clear"
+    assert not any(static for path, static, _ in rows if path.startswith(pass1)), "the recovery pass stays on the timeline"
+    assert [frames for path, _, frames in rows if path == f"{pass1}/full"] == [[2]], "its own last integrated frame"
+    assert not any(path == f"{pass0}/full" for path, _, _ in rows), "pass 0 never finished"
 
 
 class _SlamSystem:

@@ -47224,6 +47224,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda_source: depth-png[21849d2e] @ packages/depth-png
+      - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - pypi: ./packages/mvs
       - pypi: ./packages/simplecv
       - pypi: ./packages/trtkit
@@ -47732,6 +47733,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda_source: depth-png[28fd7a0f] @ packages/depth-png
+      - conda_source: tsdf-rs[adf3c863] @ packages/tsdf-rs
       - pypi: ./packages/mvs
       - pypi: ./packages/simplecv
       - pypi: ./packages/trtkit
@@ -48264,6 +48266,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.49-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda_source: depth-png[21849d2e] @ packages/depth-png
+      - conda_source: tsdf-rs[b58a986d] @ packages/tsdf-rs
       - pypi: ./packages/mvs
       - pypi: ./packages/simplecv
       - pypi: ./packages/trtkit
@@ -48782,6 +48785,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda_source: depth-png[28fd7a0f] @ packages/depth-png
+      - conda_source: tsdf-rs[adf3c863] @ packages/tsdf-rs
       - pypi: ./packages/mvs
       - pypi: ./packages/simplecv
       - pypi: ./packages/trtkit
