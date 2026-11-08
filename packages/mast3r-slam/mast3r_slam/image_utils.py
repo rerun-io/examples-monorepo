@@ -132,24 +132,7 @@ def resize_img(
         A ``ResizedImage`` with the normalized tensor, true shape, and
         unnormalized uint8 image.
     """
-    assert size in (224, 512)
-    pil_img: PIL.Image.Image = PIL.Image.fromarray((rgb * 255).astype(np.uint8))
-    if size == 224:
-        # Resize short side to 224, then center-crop to square.
-        orig_w: int
-        orig_h: int
-        orig_w, orig_h = pil_img.size
-        pil_img = _resize_pil_image(pil_img, round(size * max(orig_w / orig_h, orig_h / orig_w)))
-        pil_img = _center_crop_224(pil_img)
-    else:
-        # Resize long side to 512, then crop to 16-pixel-aligned dims.
-        pil_img = _resize_pil_image(pil_img, size)
-        pil_img = _center_crop_512(pil_img, square_ok)
-
-    normalized: Float[Tensor, "1 3 h w"] = ImgNorm(pil_img)[None]
-    true_shape: Int32[ndarray, "1 2"] = np.array([pil_img.size[::-1]], dtype=np.int32)
-    unnormalized: np.ndarray = np.asarray(pil_img)
-    return ResizedImage(rgb_tensor=normalized, true_shape=true_shape, rgb_uint8=unnormalized)
+    return resize_img_with_transform(rgb, size, square_ok)[0]
 
 
 def resize_img_tensor(rgb: UInt8[Tensor, "3 H W"], size: Literal[224, 512]) -> ResizedImage:
@@ -194,7 +177,7 @@ def resize_img_with_transform(
 ) -> tuple[ResizedImage, CropTransform]:
     """Resize an image and return the crop/scale transform for coordinate mapping.
 
-    Same as ``resize_img`` but additionally returns the ``CropTransform``
+    :func:`resize_img` plus the ``CropTransform``
     needed to map MASt3R frame coordinates back to original image coordinates
     (used for adjusting camera intrinsics after resizing).
 

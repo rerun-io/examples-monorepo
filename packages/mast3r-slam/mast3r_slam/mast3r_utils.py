@@ -352,7 +352,7 @@ def mast3r_decode_symmetric_batch(
             torch.stack([out[f"{key}1"][:B], out[f"{key}2"][:B], out[f"{key}1"][B:], out[f"{key}2"][B:]]) for key in ("X", "C", "D", "Q")
         ]
         return downsample(stacked[0], stacked[1], stacked[2], stacked[3])
-    X, C, D, Q = [], [], [], []
+    per_pair: list[tuple[Tensor, Tensor, Tensor, Tensor]] = []
     for b in range(B):
         feat1 = feat_i[b][None]
         feat2 = feat_j[b][None]
@@ -360,24 +360,9 @@ def mast3r_decode_symmetric_batch(
         pos2 = pos_j[b][None]
         res11, res21 = decoder(model, feat1, feat2, pos1, pos2, shape_i[b], shape_j[b])
         res22, res12 = decoder(model, feat2, feat1, pos2, pos1, shape_j[b], shape_i[b])
-        res = [res11, res21, res22, res12]
-        Xb, Cb, Db, Qb = zip(
-            *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
-            strict=False,
-        )
-        X.append(torch.stack(Xb, dim=0))
-        C.append(torch.stack(Cb, dim=0))
-        D.append(torch.stack(Db, dim=0))
-        Q.append(torch.stack(Qb, dim=0))
-
-    X, C, D, Q = (
-        torch.stack(X, dim=1),
-        torch.stack(C, dim=1),
-        torch.stack(D, dim=1),
-        torch.stack(Q, dim=1),
-    )
-    X, C, D, Q = downsample(X, C, D, Q)
-    return X, C, D, Q
+        per_pair.append(_stack_results([res11, res21, res22, res12]))
+    X, C, D, Q = (torch.stack([pair[k] for pair in per_pair], dim=1) for k in range(4))
+    return downsample(X, C, D, Q)
 
 
 @torch.inference_mode()
@@ -405,14 +390,7 @@ def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame) -> tuple[Float[
     shape = frame.img_true_shape
 
     res11, res21 = decoder(model, feat, feat, pos, pos, shape, shape)
-    res = [res11, res21]
-    X, C, D, Q = zip(
-        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
-        strict=False,
-    )
-    # 4xhxwxc
-    X, C, D, Q = torch.stack(X), torch.stack(C), torch.stack(D), torch.stack(Q)
-    X, C, D, Q = downsample(X, C, D, Q)
+    X, C, D, Q = downsample(*_stack_results([res11, res21]))
 
     Xii, Xji = einops.rearrange(X, "b h w c -> b (h w) c")
     Cii, Cji = einops.rearrange(C, "b h w -> b (h w) 1")
@@ -474,11 +452,8 @@ def mast3r_match_symmetric(
     D11 = torch.cat((Dii, Djj), dim=0)
     D21 = torch.cat((Dji, Dij), dim=0)
 
-    # tic()
     idx_1_to_2, valid_match_2 = matching.match(X11, X21, D11, D21)
-    # toc("Match")
 
-    # TODO: Avoid this
     match_b = X11.shape[0] // 2
     idx_i2j = idx_1_to_2[:match_b]
     idx_j2i = idx_1_to_2[match_b:]
