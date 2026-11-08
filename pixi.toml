@@ -170,15 +170,24 @@ pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 # onnxruntime comes from PyPI (see [feature.cuda.pypi-dependencies]); conda-forge
 # supplies only the CUDA/cuDNN libraries it dlopens.
+# TensorRT's shared libraries are conda packages, so every env hard-links one
+# cached copy. The pypi.nvidia.com tensorrt-cu13-libs wheel is sent with
+# `cache-control: no-store`, and uv unpacked a fresh 4.4 GB copy per env install.
+# conda-pypi-map-ai-demos.json maps libnvinfer to tensorrt-cu13-libs, which
+# satisfies the PyPI tensorrt-cu13 requirement below.
+# TODO(tensorrt-conda-forge): Stopgap: drop this ai-demos build and the channel pin once conda-forge's
+# tensorrt-feedstock ships >= 11.2 (watch conda-forge/tensorrt-feedstock PRs #5/#8); then switch
+# libnvinfer* to conda-forge and delete the recipe (pablovela5620/ai-demos recipes/tensorrt).
+libnvinfer = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
+libnvinfer-plugin = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
+libnvonnxparser = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-demos" }
 
-# TensorRT — one shared source for every cuda env (pypi.nvidia.com ships both
-# platforms, cp310–cp313). tensorrt-cu13-libs' stale metadata demands
-# nvidia-cuda-runtime-cu13; NVIDIA's empty 0.0.0a0 placeholder satisfies it
-# (conda supplies the real CUDA runtime).
+# TensorRT's Python API from plain PyPI, which uv caches: the tensorrt-cu13
+# metapackage (a small setuptools sdist) and the cp312 bindings wheels.
 [feature.cuda.pypi-dependencies]
-tensorrt-cu13 = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-# onnxruntime from PyPI, like TensorRT: conda-forge's build ships no sm_121 kernels
+tensorrt-cu13 = "==11.2.1.2"
+tensorrt-cu13-bindings = "==11.2.1.2"
+# onnxruntime from PyPI, like the TensorRT bindings: conda-forge's build ships no sm_121 kernels
 # (its CUDA EP dies on the GB10), and 1.29.0 is the first release whose aarch64
 # CUDA 13 wheels carry sm_121a. No [cuda]/[cudnn] extras — cudart/cuBLAS/cuDNN come
 # from conda above through the LD_LIBRARY_PATH activation. Exact pin: bump
@@ -189,10 +198,10 @@ cuda-python = "*"
 # strongly-typed networks mandatory — imports onnxscript at export time.
 onnxscript = "*"
 
-# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default; ORT needs
-# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer (every cuda env is on Python 3.12).
+# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default): ORT needs
+# conda's cuDNN/cuBLAS, and the tensorrt bindings find conda's libnvinfer there.
 [feature.cuda.activation.env]
-LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -1040,6 +1049,8 @@ platforms = ["linux-64"]
 
 [feature.sam3.dependencies]
 python = "3.12.*"
+# NVDEC decode of the input video (simplecv.video_io.TorchCodecVideoReader).
+torchcodec = "*"
 
 [feature.sam3.pypi-dependencies]
 sam3 = { path = "packages/sam3", editable = true }
@@ -1901,6 +1912,8 @@ platforms = ["linux-64"]
 [feature.mast3r-slam.dependencies]
 # Depth PNGs for catalog and Rerun logging (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
+# The map surface: keyframes re-fused into a sparse colour TSDF, marching-cubes mesh (packages/tsdf-rs).
+tsdf-rs = { path = "packages/tsdf-rs" }
 python = "3.12.*"
 torchcodec = "*"
 ffmpeg = ">=7.1.0"
@@ -1917,9 +1930,13 @@ trimesh = "*"
 [feature.mast3r-slam.target.linux-64.dependencies]
 mast3r-src = { path = "recipes/mast3r-src" }
 asmk-src = { path = "recipes/asmk-src" }
+# asmk.hamming (asmk's Cython extension) in Rust; asmk-src re-exports it (recipes/asmk-src hamming-from-asmk-rs.patch).
+asmk-rs = { path = "packages/asmk-rs" }
 
 [feature.mast3r-slam.pypi-dependencies]
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
+# The tracking forward runs as a bf16 TensorRT engine (packages/trtkit); tensorrt-cu13 comes from the cuda feature.
+trtkit = { path = "packages/trtkit", editable = true }
 einops = ">=0.8.0"
 evo = "*"
 natsort = ">=8.4"
@@ -1929,6 +1946,10 @@ pyaml = "*"
 
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
+# Cap the CPU thread pools of every mast3r-slam process (frontend, backend, logger): with one pool per core in
+# each, ~350 mostly spinning threads made example-fast 25.0 ms/frame; capped, 15.2.
+OMP_NUM_THREADS = "4"
+OPENBLAS_NUM_THREADS = "1"
 
 # Its tests import lietorch_mojo and mast3r_slam.mojo_backend, so the test lanes build both extensions first.
 [feature.mast3r-slam.tasks.tests]
@@ -1945,6 +1966,11 @@ description = "Build the Mojo kernels, then run the package integration tests"
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
 depends-on = ["_mast3r-slam-build-mojo-kernels"]
 description = "Build the Mojo kernels, then run the package golden reference tests"
+
+# typecheck resolves mast3r_slam.mojo_backend._mast3r_mojo, so the gate builds the kernels before it, not only before the tests.
+[feature.mast3r-slam.tasks.gate]
+depends-on = ["_mast3r-slam-build-mojo-kernels", "lint", "typecheck", "deadcode", "tests", "tests-integration"]
+description = "Build the Mojo kernels, then run the author pre-merge checks for the package"
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-mojo-kernels]
@@ -1971,19 +1997,27 @@ outputs = [
 ]
 
 [feature.mast3r-slam.tasks._mast3r-slam-download-example-data]
-cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/"
+# The tours are mast3r-slam's own; the IMG_049x clips are dpvo / MetricTrail examples, so the same clip can be
+# compared across the three apps. TODO(relocalisation): dpvo's iphone/pool.mp4 is left out on purpose — mast3r-slam
+# loses tracking there and never relocalises (see "Known limitations" in packages/mast3r-slam/README.md).
+cmd = """hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/ \
+  && hf download pablovela5620/dpvo-example-data movies/IMG_0493.mp4 movies/IMG_0494.mp4 movies/IMG_0495.mp4 \
+  --repo-type dataset --local-dir data/"""
 cwd = "packages/mast3r-slam"
 outputs = [
     "packages/mast3r-slam/data/normal-apt-tour.mp4",
     "packages/mast3r-slam/data/livingroom-tour.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0493.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0494.mp4",
+    "packages/mast3r-slam/data/movies/IMG_0495.mp4",
 ]
-description = "Download example video data"
+description = "Download the example videos (mast3r-slam's tours and the dpvo / MetricTrail clips)"
 
 # ── Test baseline task ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._mast3r-slam-generate-test-baseline]
-cmd = """python tools/mast3r_slam_inference.py \
+cmd = """python tools/mast3r_slam_inference.py test \
   --dataset data/normal-apt-tour.mp4 --img-size 224 \
-  --config config/test.yaml --max-frames 30 --no-viz \
+  --max-frames 30 \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
@@ -1996,7 +2030,7 @@ outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.mast3r-slam-example-quick]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --max-frames 100"
+cmd = "python tools/mast3r_slam_inference.py fast --dataset data/normal-apt-tour.mp4 --img-size 224 --max-frames 100"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -2006,7 +2040,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-fast]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
+cmd = "python tools/mast3r_slam_inference.py fast --dataset data/normal-apt-tour.mp4 --img-size 224"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -2016,7 +2050,7 @@ cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-example-base]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
+cmd = "python tools/mast3r_slam_inference.py base --dataset data/normal-apt-tour.mp4 --img-size 512"
 depends-on = [
     "_mast3r-slam-build-mojo-kernels",
     "_mast3r-slam-download-checkpoints",
@@ -2261,8 +2295,6 @@ python = "3.12.*"
 open3d = ">=0.19.0,<0.20"
 hexels-src = { path = "recipes/hexels-src" }
 hexel-kernel = { path = "recipes/hexels-src" }
-fused-ssim = { path = "recipes/hexels-src" }
-simple-knn = { path = "recipes/hexels-src" }
 image-gs = { path = "recipes/hexels-src" }
 tyro = ">=0.9.1,<0.10"
 pyserde = ">=0.31.2,<0.32"
@@ -2284,12 +2316,28 @@ rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }
 
 [feature.hexels.pypi-dependencies]
 hexels-bench = { path = "packages/hexels", editable = true }
+# fused-ssim, simple-knn and the 2D prune scorer in Mojo; hexels-src imports them (recipes/hexels-src patches 0002-0004).
+hexels-mojo = { path = "packages/hexels-mojo", editable = true }
 # NVIDIA FLIP, imported by upstream's 2D image metrics; PyPI only.
 flip-evaluator = "==1.7"
 
 [feature.hexels.activation.env]
 PACKAGE_DIR = "packages/hexels"
 PYREFLY_TARGET = "hexels_bench tools tests"
+
+[feature.hexels.tasks.hexels-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I hexels_mojo/mojo -o hexels_mojo/_hexels_mojo.so hexels_mojo/mojo/_hexels_mojo.mojo"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/hexels-mojo"
+description = "Build hexels_mojo's Mojo kernels (fused-ssim, simple-knn, the 2D prune scorer) for the local GPU"
+inputs = ["packages/hexels-mojo/hexels_mojo/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/hexels-mojo/hexels_mojo/_hexels_mojo.so"]
+
+[feature.hexels.tasks.hexels-mojo-tests]
+cmd = "pytest -q -m 'integration or not integration'"
+depends-on = ["hexels-mojo-build"]
+cwd = "packages/hexels-mojo"
+description = "Build and test hexels_mojo against the frozen CUDA references (CUDA tests need a GPU)"
 
 # Run directories follow packages/hexels/docs/run-layout.md. Roots default to $GSPLAT_MODERN_DATA and
 # $HEXELS_WORK/runs (unset: ~/gsplat-modern-data, ~/hexels-work); every tool takes --roots.data / --roots.runs.
@@ -2420,6 +2468,45 @@ outputs = ["packages/lietorch-mojo/lietorch_mojo/_lietorch_mojo_backends.so"]
 cmd = "pixi exec -c https://prefix.dev/ai-demos -c https://prefix.dev/conda-forge -s 'python 3.11.*' -s \"lietorch[version='==1.0',build_number='>=2']\" -s 'pytorch-gpu 2.12.*' -s 'cuda-version 13.0.*' -s 'rerun-sdk ==0.42.0' -s numpy python -I tools/freeze_lietorch_references.py"
 cwd = "packages/lietorch-mojo"
 description = "Freeze upstream lietorch's outputs into tests/fixtures/lietorch_references.rrd (pixi exec env; lietorch is not in the lock)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# sam2-streaming — the vendored SAM 2 fork's own lane: its connected-components kernel in Mojo
+# (sam2/mojo/, the port of sam2/csrc's CUDA extension) and its tests. posekit and mamma install sam2 without
+# the Mojo toolchain; there the kernel is off (build_sam2_generic_video_predictor(fill_holes=False)).
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.sam2-streaming]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.sam2-streaming.dependencies]
+python = "3.12.*"
+hydra-core = ">=1.3.2,<1.4"
+iopath = ">=0.1.10"
+
+[feature.sam2-streaming.pypi-dependencies]
+sam2 = { path = "packages/sam2-streaming", editable = true }
+
+[feature.sam2-streaming.activation.env]
+PACKAGE_DIR = "packages/sam2-streaming"
+# The vendored upstream code is not typed; typecheck the Mojo wrapper and the tests.
+PYREFLY_TARGET = "sam2/mojo_cc.py tests"
+
+[feature.sam2-streaming.tasks.sam2-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I sam2/mojo -o sam2/_sam2_mojo.so sam2/mojo/_sam2_mojo.mojo"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/sam2-streaming"
+description = "Build SAM 2's connected-components kernel in Mojo (GPU kernels for the local GPU)"
+inputs = ["packages/sam2-streaming/sam2/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/sam2-streaming/sam2/_sam2_mojo.so"]
+
+[feature.sam2-streaming.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+depends-on = ["sam2-mojo-build"]
+description = "Build the Mojo kernel, then run the sam2-streaming unit tests"
+
+[feature.sam2-streaming.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["sam2-mojo-build"]
+description = "Build the Mojo kernel, then run the sam2-streaming integration tests (CUDA)"
 
 [feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
@@ -2983,7 +3070,7 @@ description = "Import the installed slam-rs core output and check the catalog ou
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mamma]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.mamma.dependencies]
 # posekit's EgoHand, DINOv3 and Sapiens2 sources (see feature.posekit).
@@ -3012,7 +3099,7 @@ sam2 = { path = "packages/sam2-streaming", editable = true }
 PACKAGE_DIR = "packages/mamma"
 
 [feature.mamma.tasks._download-mamma-inputs]
-cmd = "test -e data/inputs/indoors/crossing_arms/meta/global.npz || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'inputs/**' 'golden/**' 'body_models/**' --local-dir data/"
+cmd = "test -e data/inputs/indoors/crossing_arms/meta/global.npz || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'inputs/**' --include 'golden/**' --include 'body_models/**' --local-dir data/"
 cwd = "packages/mamma"
 outputs = ["packages/mamma/data/inputs/indoors/crossing_arms/meta/global.npz"]
 description = "Download crossing_arms inputs + slim golden + body models (private HF repo)"
@@ -4282,8 +4369,8 @@ depth-video-viewer-dev = { features = [
     "depth-video-viewer",
     "dev",
 ], solve-group = "depth-video-viewer", no-default-feature = true }
-hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
-hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
+hexels = { features = ["cuda", "lietorch-mojo", "hexels"], solve-group = "hexels", no-default-feature = true }
+hexels-dev = { features = ["cuda", "lietorch-mojo", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
 metrictrail = { features = [
     "common",
     "cuda",
@@ -4350,6 +4437,14 @@ lietorch-mojo-dev = { features = [
     "lietorch-mojo-pkg",
     "dev",
 ], solve-group = "lietorch-mojo", no-default-feature = true }
+sam2-streaming = { features = ["common", "cuda", "lietorch-mojo", "sam2-streaming"], solve-group = "sam2-streaming", no-default-feature = true }
+sam2-streaming-dev = { features = [
+    "common",
+    "cuda",
+    "lietorch-mojo",
+    "sam2-streaming",
+    "dev",
+], solve-group = "sam2-streaming", no-default-feature = true }
 dpvo = { features = [
     "common",
     "cuda",

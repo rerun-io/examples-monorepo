@@ -4,165 +4,151 @@ Provides an interactive web interface for running the MASt3R-SLAM pipeline.
 The left panel holds video upload, a run button, and config; the right panel
 streams results into an embedded Rerun viewer.
 
-The actual tracking loop lives in :func:`mast3r_slam.api.inference.run_slam_pipeline`.
+The app loads the model with :func:`mast3r_slam.api.inference.load_slam_model` and runs
+:func:`mast3r_slam.api.inference.run_slam_pipeline`, the same two functions the CLI calls.
 This module only handles Gradio-specific concerns: file validation, recording
 setup, binary streaming, and nerfstudio output zipping.
+
+The Run button passes the Config widgets to the streaming callback, which builds the run's
+:class:`~mast3r_slam.config.SlamConfig` from them, so runs and sessions share no config state.
 """
 
-import contextlib
+import dataclasses
 import shutil
-import subprocess
-from collections.abc import Generator
+import tempfile
+import threading
+from collections.abc import Callable, Generator
 from pathlib import Path
+from typing import TypeAlias
 
 import beartype
 import gradio as gr
 import rerun as rr
-import torch
-import torch.multiprocessing as mp
 from gradio_rerun import Rerun
+from mast3r.model import AsymmetricMASt3R
 
-from mast3r_slam.api.inference import SlamPipelineHandle, run_slam_pipeline
-from mast3r_slam.frame import Mode, SharedStates
-from mast3r_slam.mast3r_utils import load_mast3r
+from mast3r_slam.api.inference import APPLICATION_ID, SlamSettings, load_slam_dataset, load_slam_model, run_slam_pipeline
+from mast3r_slam.async_logger import DEFAULT_CONF_THRESHOLD
+from mast3r_slam.config import SLAM_PRESETS, SlamConfig, SlamPresetName
+from mast3r_slam.mast3r_utils import prepare_trt_engines
+from mast3r_slam.rerun_log_utils import LOG_PATH
 
-# Global reference to the active states so the stop button can signal termination.
-# The SlamBackend context manager handles all cleanup.
-active_states: SharedStates | None = None
+EXAMPLE_VIDEOS: list[str] = [
+    "data/livingroom-tour.mp4",
+    "data/normal-apt-tour.mp4",
+    # The dpvo / MetricTrail example clips, for comparisons across the three apps.
+    # TODO(relocalisation): pool.mp4 is left out on purpose. mast3r-slam loses tracking there and never
+    # relocalises (see "Known limitations" in the README); not being worked on for now.
+    # "data/iphone/pool.mp4",
+    "data/movies/IMG_0493.mp4",
+    "data/movies/IMG_0494.mp4",
+    "data/movies/IMG_0495.mp4",
+]
 
-# Initialize multiprocessing start method (spawn required for CUDA).
-# If already set (e.g. by a parent process), reuse the existing setting.
-with contextlib.suppress(RuntimeError):
-    mp.set_start_method("spawn")
+engine_status: str = "Preparing TensorRT engines for the example videos..."
+"""Shown above the Run button while :func:`_prepare_example_engines` runs."""
+engines_ready: threading.Event = threading.Event()
 
-DEVICE: str = "cuda:0"
-model = load_mast3r(device=DEVICE)
-model.share_memory()
+VIDEO_PRESETS: list[SlamPresetName] = [name for name, (_, cfg) in SLAM_PRESETS.items() if not cfg.use_calib]
+"""The presets an uploaded video can run: a video carries no calibration."""
+DEFAULT_PRESET: SlamPresetName = "fast"
 
-
-def stop_streaming():
-    """Signal the backend to terminate.  Actual cleanup is handled by the
-    ``SlamBackend`` context manager in the generator function."""
-    global active_states
-    if active_states is not None:
-        try:
-            active_states.set_mode(Mode.TERMINATED)
-        except beartype.roar.BeartypeException:
-            raise
-        except (OSError, BrokenPipeError, EOFError):
-            pass
-    return None
-
-
-def _mov_to_mp4(video_path: Path) -> Path:
-    """Convert a MOV file to MP4 using ffmpeg."""
-    mp4_path: Path = video_path.with_suffix(".mp4")
-    try:
-        subprocess.run(
-            ["ffmpeg", "-i", str(video_path), "-c:v", "copy", "-an", "-y", str(mp4_path)],
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}") from e
-    return mp4_path
+def _preset_values(preset: SlamPresetName) -> tuple[int, bool]:
+    """The Config widgets' values for ``preset``: subsample, single_thread."""
+    cfg: SlamConfig = SLAM_PRESETS[preset][1]
+    return cfg.dataset.subsample, cfg.single_thread
 
 
-@rr.thread_local_stream("rerun_example_streaming_blur")
-def streaming_mast3r_slam_fn(
-    video_file: str,
-    subsample: int,
-    progress=gr.Progress(),  # noqa: B008
-) -> Generator[tuple[bytes | None, str | None, str], None, None]:
-    """Gradio streaming callback that runs the SLAM pipeline.
+def _prepare_example_engines(model: AsymmetricMASt3R) -> None:
+    """Build (first time on a machine) or load the TensorRT engines for the example videos' frame sizes.
 
-    Uses ``@rr.thread_local_stream`` to create a per-call recording.
-    All ``rr.log()`` calls from the nested ``run_slam_pipeline()``
-    generator target this recording, and ``stream.read()`` yields
-    the accumulated bytes to the embedded Rerun viewer.
-
-    Args:
-        video_file: Path to the uploaded video file.
-        subsample: Frame subsample rate.
-        progress: Gradio progress callback.
-
-    Yields:
-        Tuple of (Rerun binary stream bytes, zip file path or None, status message).
+    Runs on a thread at app start, so the first Run on an example does not wait for them. A Run that starts earlier
+    waits for this thread (``engines_ready``): an engine's CUDA graph capture must not overlap a run's threads.
     """
-    global active_states
-
-    stream = rr.binary_stream()
-    recording: rr.RecordingStream | None = rr.get_thread_local_data_recording()
-
+    global engine_status
     try:
-        video_path: Path = Path(video_file)
-    except beartype.roar.BeartypeCallHintParamViolation:
-        raise gr.Error(  # noqa: B904
-            "Did you make sure the zipfile finished uploading?. Try to hit run again.",
-            duration=20,
+        sizes: list[tuple[int, int]] = sorted({load_slam_dataset(SlamSettings(dataset=path)).get_img_shape()[0] for path in EXAMPLE_VIDEOS})
+        for n, (h, w) in enumerate(sizes, start=1):
+            engine_status = f"Preparing TensorRT engines for {w}x{h} frames ({n}/{len(sizes)}); a first build on this machine takes a few minutes..."
+            prepare_trt_engines(model, (h, w))
+        engine_status = f"TensorRT engines ready for {', '.join(f'{w}x{h}' for h, w in sizes)} frames."
+    except beartype.roar.BeartypeException:
+        raise
+    except Exception as exc:
+        engine_status = f"Preparing TensorRT engines failed ({exc}); runs build them on first use."
+        raise
+    finally:
+        engines_ready.set()
+
+
+def _engine_status_tick() -> tuple[str, gr.Timer]:
+    """The engine status line; stops its timer once the engines are ready."""
+    return engine_status, gr.Timer(active=not engines_ready.is_set())
+
+
+StreamingFn: TypeAlias = Callable[..., Generator[tuple[bytes | None, str | None, str], None, None]]
+
+
+def _make_streaming_fn(model: AsymmetricMASt3R) -> StreamingFn:
+    """The Run button's streaming callback, bound to the app's model."""
+
+    @rr.thread_local_stream(APPLICATION_ID)
+    def streaming_mast3r_slam_fn(
+        video_file: str | None,
+        preset: SlamPresetName,
+        subsample: int | float,
+        single_thread: bool,
+        conf_threshold: float,
+        progress=gr.Progress(),  # noqa: B008
+    ) -> Generator[tuple[bytes | None, str | None, str], None, None]:
+        """Gradio streaming callback that runs the SLAM pipeline with the Config widgets' values.
+
+        Uses ``@rr.thread_local_stream`` to create a per-call recording.
+        All ``rr.log()`` calls from the nested ``run_slam_pipeline()``
+        generator target this recording, and ``stream.read()`` yields
+        the accumulated bytes to the embedded Rerun viewer.
+
+        Args:
+            video_file: Path to the uploaded video file.
+            preset: Name of a preset in ``SLAM_PRESETS``; the widgets below override its fields.
+            subsample: Keep every n-th frame.
+            single_thread: Run frontend and backend in lockstep.
+            conf_threshold: Smallest confidence shown in the depth panels and fused into the map surface.
+            progress: Gradio progress callback.
+
+        Yields:
+            Tuple of (Rerun binary stream bytes, zip file path or None, status message).
+        """
+        if video_file is None:
+            raise gr.Error("Upload a video first.")
+        stream = rr.binary_stream()
+        recording: rr.RecordingStream | None = rr.get_thread_local_data_recording()
+
+        progress(0.05, desc="Loading pipeline" if engines_ready.is_set() else "Waiting for the TensorRT engines")
+        engines_ready.wait()
+
+        # A fresh directory per run, so a download never mixes in another run's frames.
+        run_dir: Path = Path(tempfile.mkdtemp(prefix="mast3r-slam-"))
+        ns_output_dir: Path = run_dir / "nerfstudio-output"
+        slam_config: SlamConfig = dataclasses.replace(SLAM_PRESETS[preset][1], single_thread=single_thread).with_subsample(int(subsample))
+        settings: SlamSettings = SlamSettings(dataset=video_file, slam=slam_config, ns_save_path=ns_output_dir, conf_threshold=float(conf_threshold))
+        for msg in run_slam_pipeline(settings, model, recording=recording):
+            yield stream.read(), None, msg
+
+        # The generator exported the keyframes while the shared buffers were alive; zip them for the download.
+        zip_output_path: Path = run_dir / "nerfstudio-output.zip"
+        rr.log(LOG_PATH, rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
+        shutil.make_archive(
+            base_name=str(zip_output_path.with_suffix("")),
+            format="zip",
+            root_dir=run_dir,
+            base_dir="nerfstudio-output",
         )
-    except Exception as e:
-        raise gr.Error(  # noqa: B904
-            f"Error: {e}\n Did you wait for zip file to upload?", duration=20
-        )
 
-    # Convert MOV to MP4 if needed.
-    if video_path.suffix.lower() == ".mov":
-        video_path = _mov_to_mp4(video_path)
+        rr.log(LOG_PATH, rr.TextLog("Finished processing", level="INFO"))
+        yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
 
-    # Enable TF32 for faster matmuls on Ampere+ GPUs; disable autograd
-    # since the entire pipeline runs in inference mode.
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.set_grad_enabled(False)
-
-    progress(0.05, desc="Loading pipeline")
-    handle: SlamPipelineHandle = SlamPipelineHandle()
-
-    # Nerfstudio export happens inside the generator (before
-    # SlamBackend.__exit__) because SharedKeyframes needs the mp.Manager.
-    ns_output_dir: Path = video_path.parent / "nerfstudio-output"
-
-    for msg in run_slam_pipeline(
-        model=model,
-        dataset_path=str(video_path),
-        config_path="config/base.yaml",
-        device=DEVICE,
-        subsample=subsample,
-        ns_save_path=ns_output_dir,
-        handle=handle,
-        recording=recording,
-    ):
-        active_states = handle.states
-        yield stream.read(), None, msg
-
-    # Post-loop: either stopped early or completed.
-    if handle.stopped_early:
-        yield stream.read(), None, "MASt3R-SLAM stopped"
-        active_states = None
-        return
-
-    # Nerfstudio export already happened inside the generator.
-    # Only the zip step needs to happen here.
-    zip_output_path: Path = video_path.parent / "nerfstudio-output.zip"
-
-    try:
-        if ns_output_dir.exists():
-            rr.log("world/logs", rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
-            shutil.make_archive(
-                base_name=str(zip_output_path.with_suffix("")),
-                format="zip",
-                root_dir=video_path.parent,
-                base_dir="nerfstudio-output",
-            )
-    except Exception as e:
-        raise gr.Error(f"Failed to zip nerfstudio output: {e}") from e
-
-    assert zip_output_path.exists(), f"Zip file {zip_output_path} does not exist"
-
-    rr.log("world/logs", rr.TextLog("Finished processing", level="INFO"))
-    yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
-
-    active_states = None
+    return streaming_mast3r_slam_fn
 
 
 def _switch_to_outputs():
@@ -177,103 +163,131 @@ def _reset_run_outputs():
     return None, "Starting MASt3R-SLAM..."
 
 
-with gr.Blocks() as mast3r_slam_block:
-    with gr.Row():
-        with gr.Column(scale=1):
-            tabs = gr.Tabs(selected="inputs")
-            with tabs:
-                with gr.TabItem("Inputs", id="inputs"):
-                    gr.Markdown(
-                        "Upload a video, preview it in the Rerun viewer, then run the full "
-                        "MASt3R-SLAM pipeline."
-                    )
-                    video_file = gr.File(
-                        label="Input Video",
-                        file_types=[".mp4", ".mov", ".MOV"],
-                    )
-                    run_slam_btn = gr.Button("Run MASt3R-SLAM", variant="primary")
+def build_app() -> gr.Blocks:
+    """Load the model, start preparing the example videos' TensorRT engines, and build the app."""
+    defaults: SlamSettings = SlamSettings()
+    model: AsymmetricMASt3R = load_slam_model(defaults)
+    threading.Thread(target=_prepare_example_engines, args=(model,), name="prepare-trt-engines", daemon=True).start()
 
-                    with gr.Accordion("Config", open=False):
-                        subsample_slider = gr.Slider(
-                            label="Frame Subsample",
-                            minimum=1,
-                            maximum=8,
-                            step=1,
-                            value=4,
-                        )
+    with gr.Blocks() as mast3r_slam_block:
+        with gr.Row():
+            with gr.Column(scale=1):
+                tabs = gr.Tabs(selected="inputs")
+                with tabs:
+                    with gr.TabItem("Inputs", id="inputs"):
                         gr.Markdown(
-                            "Base config file: `config/base.yaml`\n\n"
-                            "Advanced calibration and backend settings remain in the YAML "
-                            "for now so the UI does not expose partially applied controls."
+                            "Upload a video, preview it in the Rerun viewer, then run the full "
+                            "MASt3R-SLAM pipeline."
+                        )
+                        video_file = gr.File(
+                            label="Input Video",
+                            file_types=[".mp4", ".mov", ".MOV"],
+                        )
+                        engine_status_md = gr.Markdown(engine_status)
+                        engine_timer = gr.Timer(1.0)
+                        run_slam_btn = gr.Button("Run MASt3R-SLAM", variant="primary")
+
+                        with gr.Accordion("Config", open=False):
+                            preset_dropdown = gr.Dropdown(
+                                label="SLAM Preset",
+                                choices=[(f"{name}: {SLAM_PRESETS[name][0]}", name) for name in VIDEO_PRESETS],
+                                value=DEFAULT_PRESET,
+                                info="Sets the fields below; the calibrated presets need a calibrated dataset (CLI).",
+                            )
+                            subsample_slider = gr.Slider(
+                                label="Frame Subsample",
+                                minimum=1,
+                                maximum=8,
+                                step=1,
+                                precision=0,
+                                value=SLAM_PRESETS[DEFAULT_PRESET][1].dataset.subsample,
+                            )
+                            single_thread_checkbox = gr.Checkbox(
+                                label="Single-threaded",
+                                value=SLAM_PRESETS[DEFAULT_PRESET][1].single_thread,
+                                info="Frontend and backend in lockstep: deterministic, slower.",
+                            )
+                            conf_threshold_slider = gr.Slider(
+                                label="Confidence Threshold",
+                                minimum=1.0,
+                                maximum=20.0,
+                                step=0.5,
+                                value=DEFAULT_CONF_THRESHOLD,
+                                info="Depth and the map surface keep pixels above this MASt3R confidence; lower it if depth is black.",
+                            )
+
+                    with gr.TabItem("Outputs", id="outputs"):
+                        status_text = gr.Textbox(
+                            label="Status",
+                            value="Upload a video to begin.",
+                            interactive=False,
+                        )
+                        stop_slam_btn = gr.Button("Stop MASt3R-SLAM")
+                        output_zip_file = gr.File(
+                            label="Download Nerfstudio Output",
+                            file_count="single",
                         )
 
-                with gr.TabItem("Outputs", id="outputs"):
-                    status_text = gr.Textbox(
-                        label="Status",
-                        value="Upload a video to begin.",
-                        interactive=False,
-                    )
-                    stop_slam_btn = gr.Button("Stop MASt3R-SLAM")
-                    output_zip_file = gr.File(
-                        label="Download Nerfstudio Output",
-                        file_count="single",
+                    examples = gr.Examples(
+                        examples=[[path] for path in EXAMPLE_VIDEOS],
+                        inputs=[video_file],
+                        cache_examples=False,
                     )
 
-                examples = gr.Examples(
-                    examples=[
-                        ["data/livingroom-tour.mp4"],
-                        ["data/normal-apt-tour.mp4"],
-                    ],
-                    inputs=[video_file],
-                    cache_examples=False,
+            with gr.Column(scale=5):
+                viewer = Rerun(
+                    streaming=True,
+                    panel_states={
+                        "time": "collapsed",
+                        "blueprint": "hidden",
+                        "selection": "hidden",
+                    },
+                    height=800,
                 )
 
-        with gr.Column(scale=5):
-            viewer = Rerun(
-                streaming=True,
-                panel_states={
-                    "time": "collapsed",
-                    "blueprint": "hidden",
-                    "selection": "hidden",
-                },
-                height=800,
+        if hasattr(examples, "load_input_event"):
+            examples.load_input_event.then(
+                fn=_switch_to_inputs,
+                inputs=None,
+                outputs=[tabs],
+                api_visibility="private",
             )
 
-    if hasattr(examples, "load_input_event"):
-        examples.load_input_event.then(
-            fn=_switch_to_inputs,
+        preset_dropdown.change(
+            fn=_preset_values,
+            inputs=[preset_dropdown],
+            outputs=[subsample_slider, single_thread_checkbox],
+            api_visibility="private",
+        )
+        engine_timer.tick(fn=_engine_status_tick, inputs=None, outputs=[engine_status_md, engine_timer], api_visibility="private")
+
+        run_event = run_slam_btn.click(
+            fn=_switch_to_outputs,
             inputs=None,
             outputs=[tabs],
             api_visibility="private",
+        ).then(
+            fn=_reset_run_outputs,
+            inputs=None,
+            outputs=[output_zip_file, status_text],
+            api_visibility="private",
+        ).then(
+            fn=_make_streaming_fn(model),
+            inputs=[video_file, preset_dropdown, subsample_slider, single_thread_checkbox, conf_threshold_slider],
+            outputs=[viewer, output_zip_file, status_text],
         )
 
-    run_event = run_slam_btn.click(
-        fn=_switch_to_outputs,
-        inputs=None,
-        outputs=[tabs],
-        api_visibility="private",
-    ).then(
-        fn=_reset_run_outputs,
-        inputs=None,
-        outputs=[output_zip_file, status_text],
-        api_visibility="private",
-    ).then(
-        fn=streaming_mast3r_slam_fn,
-        inputs=[
-            video_file,
-            subsample_slider,
-        ],
-        outputs=[viewer, output_zip_file, status_text],
-    )
+        # Cancelling the run closes the pipeline generator, whose SlamBackend.__exit__ shuts the backend down.
+        stop_slam_btn.click(
+            fn=None,
+            inputs=[],
+            outputs=[],
+            cancels=[run_event],
+        ).then(
+            fn=lambda: "MASt3R-SLAM stopped",
+            inputs=None,
+            outputs=[status_text],
+            api_visibility="private",
+        )
 
-    stop_slam_btn.click(
-        fn=stop_streaming,
-        inputs=[],
-        outputs=[],
-        cancels=[run_event],
-    ).then(
-        fn=lambda: "MASt3R-SLAM stopped",
-        inputs=None,
-        outputs=[status_text],
-        api_visibility="private",
-    )
+    return mast3r_slam_block

@@ -159,6 +159,18 @@ def test_log_video_timestamps_match(synthetic_h264_mp4: Path, tmp_path: Path) ->
     np.testing.assert_array_equal(np.sort(ts_asset), np.sort(ts_stream))
 
 
+def test_log_video_uses_the_context_recording(synthetic_h264_mp4: Path, tmp_path: Path) -> None:
+    """Without ``recording=``, log_video logs to a context-local stream (``with rec:``, as gradio-rerun uses)."""
+    rec: rr.RecordingStream = rr.RecordingStream(application_id="test-log-video-context", recording_id="ctx")
+    rec.save(str(tmp_path / "ctx.rrd"))
+    assert rr.get_global_data_recording() is None
+
+    with rec:
+        timestamps_ns: Int64[ndarray, "num_frames"] = log_video(synthetic_h264_mp4, Path("/video"))
+
+    assert len(timestamps_ns) == _FRAME_COUNT
+
+
 def test_log_video_accepts_quicktime_brand(synthetic_h264_mp4: Path, tmp_path: Path) -> None:
     """iPhone .MOV files carry the ``qt`` brand (sniffed as video/quicktime, which rr.AssetVideo rejects)."""
     mov_path: Path = tmp_path / "clip.MOV"

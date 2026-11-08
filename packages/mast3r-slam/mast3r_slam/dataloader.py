@@ -9,22 +9,17 @@ import yaml
 from jaxtyping import Float32, UInt8
 from natsort import natsorted
 from numpy import ndarray
+from simplecv.video_io import TorchCodecVideoReader
 
-from mast3r_slam.config import config
+from mast3r_slam.config import SlamConfig
 from mast3r_slam.image_types import RgbNormalized
-from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_with_transform
-
-HAS_TORCHCODEC: bool = True
-try:
-    from torchcodec.decoders import VideoDecoder
-except (ImportError, ModuleNotFoundError):
-    HAS_TORCHCODEC = False
+from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_tensor, resize_img_with_transform
 
 
 class MonocularDataset(torch.utils.data.Dataset):
     """Base class for monocular image datasets.
 
-    Subclasses populate ``rgb_files`` and ``timestamps`` and optionally set
+    Subclasses populate ``rgb_files`` and optionally set
     ``camera_intrinsics`` for calibrated operation.
     """
 
@@ -32,44 +27,23 @@ class MonocularDataset(torch.utils.data.Dataset):
         self,
         dtype: type = np.float32,
         img_size: Literal[224, 512] = 512,
+        use_calib: bool = False,
     ) -> None:
         self.dtype: type = dtype
         self.rgb_files: list[str | pathlib.Path] = []
-        self.timestamps: list[float | str] = []
         self.img_size: Literal[224, 512] = img_size
         self.dataset_path: pathlib.Path | None = None
         """Filesystem path to the dataset root, or None for live sources (webcam, realsense)."""
         self.camera_intrinsics = None  # Intrinsics | None — forward ref, typed by subclasses
-        self.use_calibration: bool = config["use_calib"]
+        self.use_calibration: bool = use_calib
 
     def __len__(self) -> int:
         """Return the number of frames in the dataset."""
         return len(self.rgb_files)
 
-    def __getitem__(self, index: int) -> tuple[float | str, RgbNormalized]:
-        """Return (timestamp, image) for the given index.
-
-        Args:
-            index: Frame index.
-
-        Returns:
-            A tuple of (timestamp, normalized RGB float image).
-        """
-        # Call get_rgb_normalized before timestamp for realsense camera.
-        rgb_normalized: RgbNormalized = self.get_rgb_normalized(index)
-        timestamp = self.get_timestamp(index)
-        return timestamp, rgb_normalized
-
-    def get_timestamp(self, idx: int) -> float | str:
-        """Return the timestamp for a given frame index.
-
-        Args:
-            idx: Frame index.
-
-        Returns:
-            Timestamp value (float or string depending on dataset).
-        """
-        return self.timestamps[idx]
+    def read_resized(self, idx: int) -> ResizedImage:
+        """Return the frame at ``idx`` resized and normalised for the MASt3R encoder."""
+        return resize_img(self.get_rgb_normalized(idx), self.img_size)
 
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         """Read the raw RGB image at the given index.
@@ -121,7 +95,6 @@ class MonocularDataset(torch.utils.data.Dataset):
             subsample: Step size for subsampling.
         """
         self.rgb_files = self.rgb_files[::subsample]
-        self.timestamps = self.timestamps[::subsample]
 
     def has_calib(self) -> bool:
         """Return whether camera intrinsics are available.
@@ -133,13 +106,12 @@ class MonocularDataset(torch.utils.data.Dataset):
 
 
 class TUMDataset(MonocularDataset):
-    def __init__(self, dataset_path: str, img_size: Literal[224, 512]) -> None:
-        super().__init__(img_size=img_size)
+    def __init__(self, dataset_path: str, img_size: Literal[224, 512], cfg: SlamConfig) -> None:
+        super().__init__(img_size=img_size, use_calib=cfg.use_calib)
         self.dataset_path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = list(tstamp_rgb[:, 0])
 
         match = re.search(r"freiburg(\d+)", dataset_path)
         assert match is not None, f"Could not find freiburg index in path: {dataset_path}"
@@ -154,11 +126,11 @@ class TUMDataset(MonocularDataset):
             raise ValueError(f"Unknown TUM freiburg index: {idx}")
         W: int = 640
         H: int = 480
-        self.camera_intrinsics = Intrinsics.from_calib(self.img_size, W, H, calib)
+        self.camera_intrinsics = Intrinsics.from_calib(self.img_size, W, H, calib, cfg)
 
 
 class EurocDataset(MonocularDataset):
-    def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
+    def __init__(self, dataset_path: str, img_size: Literal[224, 512], cfg: SlamConfig) -> None:
         super().__init__(img_size=img_size)
         # For Euroc dataset, the distortion is too much to handle for MASt3R.
         # So we always undistort the images, but the calibration will not be used for any later optimization unless specified.
@@ -167,7 +139,6 @@ class EurocDataset(MonocularDataset):
         rgb_list: pathlib.Path = self.dataset_path / "mav0/cam0/data.csv"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=",", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / "mav0/cam0/data" / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = list(tstamp_rgb[:, 0])
         with open(self.dataset_path / "mav0/cam0/sensor.yaml") as f:
             self.cam0 = yaml.load(f, Loader=yaml.FullLoader)
         W: int
@@ -176,7 +147,7 @@ class EurocDataset(MonocularDataset):
         intrinsics = self.cam0["intrinsics"]
         distortion = np.array(self.cam0["distortion_coefficients"])
         self.camera_intrinsics = Intrinsics.from_calib(
-            self.img_size, W, H, [*intrinsics, *distortion], always_undistort=True
+            self.img_size, W, H, [*intrinsics, *distortion], cfg, always_undistort=True
         )
 
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
@@ -187,13 +158,12 @@ class EurocDataset(MonocularDataset):
 
 
 class ETH3DDataset(MonocularDataset):
-    def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
-        super().__init__(img_size=img_size)
+    def __init__(self, dataset_path: str, img_size: Literal[224, 512], cfg: SlamConfig) -> None:
+        super().__init__(img_size=img_size, use_calib=cfg.use_calib)
         self.dataset_path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = list(tstamp_rgb[:, 0])
         calibration = np.loadtxt(
             self.dataset_path / "calibration.txt",
             delimiter=" ",
@@ -201,20 +171,19 @@ class ETH3DDataset(MonocularDataset):
             skiprows=0,
         )
         _, (H, W) = self.get_img_shape()
-        self.camera_intrinsics = Intrinsics.from_calib(self.img_size, W, H, calibration)
+        self.camera_intrinsics = Intrinsics.from_calib(self.img_size, W, H, calibration, cfg)
 
 
 class SevenScenesDataset(MonocularDataset):
-    def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
-        super().__init__(img_size=img_size)
+    def __init__(self, dataset_path: str, img_size: Literal[224, 512], cfg: SlamConfig) -> None:
+        super().__init__(img_size=img_size, use_calib=cfg.use_calib)
         self.dataset_path = pathlib.Path(dataset_path)
         self.rgb_files = natsorted(list((self.dataset_path / "seq-01").glob("*.color.png")))
-        self.timestamps = list(np.arange(0, len(self.rgb_files)).astype(self.dtype))
         fx: float = 585.0
         fy: float = 585.0
         cx: float = 320.0
         cy: float = 240.0
-        self.camera_intrinsics = Intrinsics.from_calib(self.img_size, 640, 480, [fx, fy, cx, cy])
+        self.camera_intrinsics = Intrinsics.from_calib(self.img_size, 640, 480, [fx, fy, cx, cy], cfg)
 
 
 class Webcam(MonocularDataset):
@@ -228,11 +197,6 @@ class Webcam(MonocularDataset):
     def __len__(self) -> int:
         return 999999
 
-    def get_timestamp(self, idx: int) -> float:
-        ts: float | str = self.timestamps[idx]
-        assert isinstance(ts, float)
-        return ts
-
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         ret: bool
         bgr: UInt8[ndarray, "h w 3"]
@@ -240,8 +204,6 @@ class Webcam(MonocularDataset):
         if not ret:
             raise ValueError("Failed to read image")
         rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        self.timestamps.append(idx / 30)
-
         return rgb
 
 
@@ -250,37 +212,25 @@ class MP4Dataset(MonocularDataset):
         super().__init__(img_size=img_size)
         self.use_calibration: bool = False
         self.dataset_path = pathlib.Path(dataset_path)
-        if HAS_TORCHCODEC:
-            self.decoder = VideoDecoder(str(self.dataset_path))
-            assert self.decoder.metadata.average_fps is not None, "Video has no FPS metadata"
-            assert self.decoder.metadata.num_frames is not None, "Video has no frame count metadata"
-            self.fps: float = self.decoder.metadata.average_fps
-            self.total_frames: int = self.decoder.metadata.num_frames
-        else:
-            print("Warning: torchcodec is not installed. This may slow down the dataloader")
-            self.cap = cv2.VideoCapture(str(self.dataset_path))
-            self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
-            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # NVDEC when there is a GPU; frames stay on it for the resize (CPU decode otherwise).
+        self.reader = TorchCodecVideoReader(self.dataset_path, seek_mode="exact")
+        self.total_frames: int = self.reader.frame_cnt
 
-        self.stride: int = config["dataset"]["subsample"]
+        self.stride: int = 1
 
     def __len__(self) -> int:
         return self.total_frames // self.stride
 
+    def subsample(self, subsample: int) -> None:
+        """Keep every ``subsample``-th frame: a stride into the video, as there is no file list to slice."""
+        self.stride *= subsample
+
     def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
-        if HAS_TORCHCODEC:
-            rgb_tensor = self.decoder[idx * self.stride]  # c,h,w uint8  # pyrefly: ignore
-            rgb: UInt8[ndarray, "h w 3"] = rgb_tensor.permute(1, 2, 0).numpy()
-        else:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx * self.stride)
-            ret: bool
-            ret, bgr = self.cap.read()
-            if not ret:
-                raise ValueError("Failed to read image")
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        timestamp: float = idx / self.fps
-        self.timestamps.append(timestamp)
+        rgb: UInt8[ndarray, "h w 3"] = self.reader.get_frame(idx * self.stride).permute(1, 2, 0).cpu().numpy()
         return rgb
+
+    def read_resized(self, idx: int) -> ResizedImage:
+        return resize_img_tensor(self.reader.get_frame(idx * self.stride), self.img_size)
 
 
 class RGBFiles(MonocularDataset):
@@ -293,7 +243,6 @@ class RGBFiles(MonocularDataset):
         jpg_files: list[pathlib.Path] = list((self.dataset_path).glob("*.jpg"))
         jpeg_files: list[pathlib.Path] = list((self.dataset_path).glob("*.jpeg"))
         self.rgb_files = natsorted(png_files + jpg_files + jpeg_files)
-        self.timestamps = list(np.arange(0, len(self.rgb_files)).astype(self.dtype) / 30.0)
 
 
 class Intrinsics:
@@ -358,6 +307,7 @@ class Intrinsics:
         W: int,
         H: int,
         calib: list | np.ndarray,
+        cfg: SlamConfig,
         always_undistort: bool = False,
     ) -> "Intrinsics | None":
         """Construct an Intrinsics instance from a calibration vector.
@@ -367,13 +317,14 @@ class Intrinsics:
             W: Original image width.
             H: Original image height.
             calib: Calibration parameters [fx, fy, cx, cy, ...distortion].
+            cfg: SLAM config (``use_calib`` and ``dataset.center_principle_point``).
             always_undistort: Force undistortion even when ``use_calib`` is off.
 
         Returns:
             An Intrinsics instance, or None if calibration is not active and
             ``always_undistort`` is False.
         """
-        if not config["use_calib"] and not always_undistort:
+        if not cfg.use_calib and not always_undistort:
             return None
         fx: float = calib[0]
         fy: float = calib[1]
@@ -386,7 +337,7 @@ class Intrinsics:
         K_opt: Float32[ndarray, "3 3"] = K.copy()
         mapx: Float32[ndarray, "H W"] | None = None
         mapy: Float32[ndarray, "H W"] | None = None
-        center: bool = config["dataset"]["center_principle_point"]
+        center: bool = cfg.dataset.center_principle_point
         K_opt, _ = cv2.getOptimalNewCameraMatrix(K, distortion, (W, H), 0, (W, H), centerPrincipalPoint=center)
         mapx, mapy = cv2.initUndistortRectifyMap(
             K, distortion, np.eye(3, dtype=np.float64), K_opt, (W, H), cv2.CV_32FC1
@@ -395,11 +346,8 @@ class Intrinsics:
         return Intrinsics(img_size, W, H, K, K_opt, distortion, mapx, mapy)
 
 
-def load_dataset(
-    dataset_path: str,
-    img_size: Literal[224, 512] = 512,
-) -> MonocularDataset:
-    """Load a dataset by auto-detecting its type from the path.
+def load_dataset(dataset_path: str, img_size: Literal[224, 512], cfg: SlamConfig) -> MonocularDataset:
+    """Load a dataset by auto-detecting its type from the path, subsampled to every ``cfg.dataset.subsample``-th frame.
 
     Supports TUM, EuRoC, ETH3D, 7-Scenes, RealSense, webcam, MP4/AVI/MOV
     video files, and directories of RGB image files.
@@ -407,25 +355,29 @@ def load_dataset(
     Args:
         dataset_path: Filesystem path or special keyword (e.g. "realsense").
         img_size: Target image size for MASt3R (224 or 512).
+        cfg: SLAM config (calibration and the ``dataset`` group).
 
     Returns:
         A MonocularDataset subclass instance.
     """
     split_dataset_type: list[str] = dataset_path.split("/")
-    if "tum" in split_dataset_type:
-        return TUMDataset(dataset_path, img_size)
-    if "euroc" in split_dataset_type:
-        return EurocDataset(dataset_path, img_size)
-    if "eth3d" in split_dataset_type:
-        return ETH3DDataset(dataset_path, img_size)
-    if "7-scenes" in split_dataset_type:
-        return SevenScenesDataset(dataset_path, img_size)
-    if "realsense" in split_dataset_type:
-        raise NotImplementedError("RealSense input is not implemented in mast3r-slam.")
-    if "webcam" in split_dataset_type:
-        return Webcam(img_size)
-
     ext: str = split_dataset_type[-1].split(".")[-1]
-    if ext in ["mp4", "avi", "MOV", "mov"]:
-        return MP4Dataset(dataset_path, img_size)
-    return RGBFiles(dataset_path, img_size)
+    dataset: MonocularDataset
+    if "tum" in split_dataset_type:
+        dataset = TUMDataset(dataset_path, img_size, cfg)
+    elif "euroc" in split_dataset_type:
+        dataset = EurocDataset(dataset_path, img_size, cfg)
+    elif "eth3d" in split_dataset_type:
+        dataset = ETH3DDataset(dataset_path, img_size, cfg)
+    elif "7-scenes" in split_dataset_type:
+        dataset = SevenScenesDataset(dataset_path, img_size, cfg)
+    elif "realsense" in split_dataset_type:
+        raise NotImplementedError("RealSense input is not implemented in mast3r-slam.")
+    elif "webcam" in split_dataset_type:
+        dataset = Webcam(img_size)
+    elif ext in ["mp4", "avi", "MOV", "mov"]:
+        dataset = MP4Dataset(dataset_path, img_size)
+    else:
+        dataset = RGBFiles(dataset_path, img_size)
+    dataset.subsample(cfg.dataset.subsample)
+    return dataset

@@ -285,7 +285,7 @@ def log_pinhole(
         rr.Transform3D(
             translation=camera.extrinsics.cam_t_world,
             mat3x3=camera.extrinsics.cam_R_world,
-            from_parent=True,
+            relation=rr.TransformRelation.ChildFromParent,
         ),
         static=static,
         recording=recording,
@@ -316,9 +316,9 @@ def log_video(
     Raises:
         RuntimeError: When Rerun cannot ingest or transcode the MP4.
     """
-    target_recording: rr.RecordingStream | None = (
-        recording if recording is not None else rr.get_global_data_recording()
-    )
+    # get_data_recording also sees a context-local stream (``with rec:``, gradio-rerun's
+    # per-request recordings); the global one is unset there.
+    target_recording: rr.RecordingStream | None = rr.get_data_recording(recording)
     if target_recording is None:
         raise RuntimeError("No active Rerun recording. Call rr.init() or pass recording= before logging video.")
     # The VideoStream chunks carry the sample times on ``timeline``; they are the frame

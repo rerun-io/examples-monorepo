@@ -40,8 +40,17 @@ def build_sam2_generic_video_predictor(
     mode="eval",
     hydra_overrides_extra=[],
     apply_postprocessing=True,
+    fill_holes=False,
     **kwargs,
 ) -> SAM2GenericVideoPredictor:
+    """Build the streaming video predictor.
+
+    fill_holes: upstream SAM 2's post-processing step that fills holes of up to 8 pixels in the low-res
+        masks (connected components of the background). It runs on the Mojo kernel (`sam2.mojo_cc`), which
+        needs the Mojo toolchain and lietorch-mojo in the environment (`pixi run -e sam2-streaming-dev
+        sam2-mojo-build`). Off by default: the CUDA extension it replaces never built against torch 2.12, so
+        every caller has run without the fill, and turning it on changes masks.
+    """
     hydra_overrides = [
         "++model._target_=sam2.sam2_generic_video_predictor.SAM2GenericVideoPredictor",
     ]
@@ -55,9 +64,10 @@ def build_sam2_generic_video_predictor(
             "++model.sam_mask_decoder_extra_args.dynamic_multimask_stability_thresh=0.98",
             # the sigmoid mask logits on interacted frames with clicks in the memory encoder so that the encoded masks are exactly as what users see from clicking
             "++model.binarize_mask_from_pts_for_mem_enc=true",
-            # fill small holes in the low-res masks up to `fill_hole_area` (before resizing them to the original video resolution)
-            "++model.max_hole_area=8",
         ]
+        if fill_holes:
+            # fill small holes in the low-res masks up to `fill_hole_area` (before resizing them to the original video resolution)
+            hydra_overrides_extra.append("++model.max_hole_area=8")
     hydra_overrides.extend(hydra_overrides_extra)
 
     # Read config and init model
