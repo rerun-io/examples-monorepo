@@ -120,17 +120,19 @@ class TrackerConfig:
     (displayed-mask IoU vs per-frame baseline bottoms at 0.17); stride 1 is
     pixel-identical (0.999 IoU) at ~15.0 s vs 11.76 s wall for the 12.1 s clip.
     Set 4 to prioritize the realtime gate over mask cosmetics."""
-    cuda_graph: bool = False
+    cuda_graph: bool = True
     """Replay the steady-state batched tick (single object, no prompts) from a
-    CUDA graph per memory structure instead of ~1200 eager launches. Prompt,
+    CUDA graph per memory structure instead of ~1200 eager launches; outputs
+    identical to the eager path. Prompt,
     re-detect, multi-object, and non-precaptured-structure ticks stay eager."""
     cuda_graph_max_conditional: int = 4
     """Graphs are captured at construction for 1..N conditional memories (one
     per prompt tick: bootstrap + each re-prompt); later ticks run eagerly."""
-    fused_rope: bool = False
+    fused_rope: bool = True
     """Rotary position encoding in one Triton kernel per q/k (memory attention
     12.3 -> 8.1 ms GPU per batched tick, identical output) instead of five
-    fp32/complex passes. Process-wide switch for the vendored sam2 fork."""
+    fp32/complex passes. Process-wide switch for the vendored sam2 fork;
+    ignored when Triton is missing."""
     compile_image_encoder: bool = False
     """torch.compile (inductor, static shapes) the SAM2 image encoder: fuses its
     window-partition copies, casts and norms (8.4 -> 5.1 ms GPU per B=4
@@ -163,7 +165,7 @@ class MultiViewTracker:
         if config.fused_rope:
             from sam2.modeling import fused_rope
 
-            fused_rope.ENABLED = True
+            fused_rope.ENABLED = fused_rope.triton is not None
         # The fork builds these before the model moves to the GPU; keep them
         # resident so no tick pays (or graph-captures) a host->device copy.
         with torch.inference_mode():
