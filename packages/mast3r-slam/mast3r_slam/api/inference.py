@@ -293,8 +293,9 @@ def run_slam_pipeline(
         shown_last_kf_id: int | None = None
 
         while True:
-            # Check if the backend process crashed (raises BackendError if so).
+            # Re-raise a crash of the backend process (BackendError) or of the logger thread.
             ctx.check_backend()
+            async_logger.check()
 
             mode: Mode = states.get_mode()
 

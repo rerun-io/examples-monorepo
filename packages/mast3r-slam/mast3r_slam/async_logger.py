@@ -10,9 +10,10 @@ previously synchronous on the tracking thread.
 
 Usage as a context manager::
 
-    event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
+    event_queue: queue.Queue[LogEvent] = queue.Queue()
     with AsyncRerunLogger(event_queue, parent_log_path, recording=rec) as logger:
         for frame in frames:
+            logger.check()  # re-raises a crash of the logger thread
             event_queue.put(snapshot_current_frame(frame, ...))
         # LogTerminate is sent automatically on __exit__
 """
@@ -20,9 +21,7 @@ Usage as a context manager::
 from __future__ import annotations
 
 import queue
-import sys
 import threading
-import traceback
 import warnings
 from pathlib import Path
 
@@ -325,20 +324,8 @@ class AsyncRerunLogger:
         return self
 
     def __exit__(self, _exc_type: type | None, _exc_val: BaseException | None, _exc_tb: object) -> None:
-        """Send LogTerminate, join the thread, and warn if it outlives the timeout."""
-        # Use a bounded put so we don't deadlock if the logger thread
-        # crashed and the queue is full.
-        try:
-            self._queue.put(LogTerminate(), timeout=5.0)
-        except queue.Full:
-            # Queue is stuck — the logger thread is likely dead.
-            if self._error is not None:
-                warnings.warn(
-                    f"Async logger thread crashed: {self._error}. {self._queue.qsize()} events were not processed.",
-                    stacklevel=2,
-                )
-            return
-
+        """Send LogTerminate, join the thread, warn if it outlives the timeout, and re-raise its crash."""
+        self._queue.put(LogTerminate())
         self.join(timeout=30.0)
         if self.is_alive():
             warnings.warn(
@@ -346,6 +333,8 @@ class AsyncRerunLogger:
                 "Some trailing log entries may be lost.",
                 stacklevel=2,
             )
+        if _exc_type is None:
+            self.check()
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -371,10 +360,22 @@ class AsyncRerunLogger:
         """Return True if the logger thread is still running."""
         return self._thread is not None and self._thread.is_alive()
 
+    def check(self) -> None:
+        """Re-raise the exception that ended the logger thread, if any; call it from the tracking loop."""
+        if self._error is not None:
+            raise self._error
+
     # ── Thread main loop ──────────────────────────────────────────────
 
     def _run(self) -> None:
-        """Main loop: bind recording, then process events until LogTerminate."""
+        """Thread target: keep an exception for :meth:`check`, which re-raises it on the tracking thread."""
+        try:
+            self._process_events()
+        except Exception as exc:  # BeartypeException included: it is re-raised, not swallowed
+            self._error = exc
+
+    def _process_events(self) -> None:
+        """Bind the recording, then process events until LogTerminate."""
         if self._recording is not None:
             rr.set_thread_local_data_recording(self._recording)
         # The worker thread sees neither a thread-local nor a context-local recording: hand it this one.
@@ -382,25 +383,20 @@ class AsyncRerunLogger:
         live_surface: LiveSurface = LiveSurface(f"{self._parent_log_path}/mesh", surface_recording, (FRAME_TIMELINE, VIDEO_TIMELINE))
         self._surface_worker = LatestWinsWorker(live_surface.handle, name="tsdf-surface")
 
-        try:
-            while True:
-                try:
-                    event: LogEvent = self._queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
+        while True:
+            try:
+                event: LogEvent = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
 
-                if isinstance(event, LogTerminate):
-                    self._drain_queue()
-                    # The final surface, at the backend's final poses, logged before the recording closes.
-                    self._request_surface(final=True)
-                    if self._surface_worker is not None:
-                        self._surface_worker.close()
-                    break
+            if isinstance(event, LogTerminate):
+                self._drain_queue()
+                # The final surface, at the backend's final poses, logged before the recording closes.
+                self._request_surface(final=True)
+                self._surface_worker.close()
+                break
 
-                self._handle_event(event)
-        except Exception as exc:
-            self._error = exc
-            traceback.print_exc(file=sys.stderr)
+            self._handle_event(event)
 
     def _drain_queue(self) -> None:
         """Process all remaining non-terminate events."""

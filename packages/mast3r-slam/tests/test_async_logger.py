@@ -243,6 +243,20 @@ def test_edges_log_one_two_point_strip_per_edge(monkeypatch: pytest.MonkeyPatch)
     logger._log_edges(positions_i, positions_j)
     assert strips == [[2, 2, 2]]
 
+
+def test_logger_crash_is_raised_on_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exception on the logger thread reaches the caller (check() and __exit__), not just stderr."""
+
+    def _fail(_event: LogEvent) -> None:
+        raise ValueError("logging failed")
+
+    event_queue: queue.Queue[LogEvent] = queue.Queue()
+    logger: AsyncRerunLogger = AsyncRerunLogger(event_queue, parent_log_path=Path("world"))
+    monkeypatch.setattr(logger, "_handle_event", _fail)
+    with pytest.raises(ValueError, match="logging failed"), logger:
+        event_queue.put(LogMapUpdate(frame_idx=0, timestamp_ns=None))
+        logger.join(timeout=5.0)
+
 def _random_sim3(n: int, seed: int) -> Float32[Tensor, "n 8"]:
     """Sim3 data ``[t, q, s]`` with unit quaternions and positive scales."""
     generator: torch.Generator = torch.Generator().manual_seed(seed)
