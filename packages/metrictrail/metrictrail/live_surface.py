@@ -5,6 +5,11 @@ estimate of that frame's pose. The changed super-blocks are logged on the timeli
 pass's last integrated frame the blocks are cleared and the whole surface is logged as one mesh
 (:class:`simplecv.rerun_live_mesh.LiveMeshLog`). Later bundle adjustment does not move what was integrated; the run's
 final mesh (:mod:`metrictrail.surface`, final poses) is logged separately, in the world tab.
+
+Every DPVO pass logs under its own ``dpvo/mesh/pass_<n>``. A later pass (FP32 recovery) restarts at frame 0 in the
+same recording, and a temporal clear cannot hide the earlier pass's rows at the frames before it, so when a pass opens
+the previous pass's subtree is cleared *statically*, which hides it at every time point. The view therefore shows the
+latest pass, as it does for every other entity of the live recording.
 """
 
 from dataclasses import dataclass, field
@@ -30,23 +35,23 @@ class LiveSurface:
     log_every: int = 8
     """Integrated frames between two logs of the changed blocks."""
     volume: TsdfVolume = field(init=False)
-    """The volume of the current pass."""
+    """The volume of the current pass; set by :meth:`open_pass`."""
     integrated: int = field(init=False, default=0)
     """Frames integrated into :attr:`volume`."""
+    passes: int = field(init=False, default=0)
+    """Passes opened so far; the current one logs under ``dpvo/mesh/pass_<passes - 1>``."""
     last_frame: int | None = field(init=False, default=None)
     """Tracked-frame index of the last integrated frame: :meth:`finish` logs the whole surface there."""
     mesh_log: LiveMeshLog = field(init=False)
-    """The ``dpvo/mesh`` entities."""
+    """The current pass's ``dpvo/mesh/pass_<n>`` entities."""
 
-    def __post_init__(self) -> None:
-        self.volume = new_volume(self.settings)
-        self.mesh_log = LiveMeshLog(entities.DPVO_MESH, self.rec)
-
-    def reset(self) -> None:
-        """Clear the logged blocks from this time point on and start an empty volume: a new pass (FP32 recovery)
-        re-tracks from the start. Its blocks overlap the earlier pass's on the frames both tracked."""
-        if self.integrated > 0:
-            self.mesh_log.restart()
+    def open_pass(self) -> None:
+        """Start a new pass (call before the pass's first :meth:`integrate`): an empty volume logged under its own ``dpvo/mesh/pass_<n>``. The previous pass's
+        subtree is cleared statically (hidden at every time point), since the new pass re-tracks from frame 0."""
+        if self.passes > 0:
+            self.rec.log(self.mesh_log.root, rr.Clear(recursive=True), static=True)
+        self.mesh_log = LiveMeshLog(f"{entities.DPVO_MESH}/pass_{self.passes}", self.rec)
+        self.passes += 1
         self.volume = new_volume(self.settings)
         self.integrated = 0
         self.last_frame = None

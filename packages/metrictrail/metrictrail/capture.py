@@ -279,7 +279,7 @@ class CaptureSession:
                 earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
         if self.live_surface is not None:
-            self.live_surface.reset()
+            self.live_surface.open_pass()
         self.pass_normals.append({})
         self.pending_normals.clear()
 
