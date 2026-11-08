@@ -690,11 +690,10 @@ class AsyncRerunLogger:
             intrinsics=pinhole.intrinsics,
         )
 
-        # The image sits outside the camera's subtree, in the Pinhole's frame: it still draws on the frustum, and a view
-        # can leave every keyframe image out with one rule (the Overview does; see create_blueprints).
-        kf_image_path: str = f"{self._parent_log_path}/keyframe_images/keyframe-{kf.kf_idx}"
-        rr.log(kf_image_path, rr.CoordinateFrame(f"tf#/{str(kf_cam_log_path).lstrip('/')}/pinhole"), static=True)
-        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(kf_image_path, kf.rgb)
+        # The image stays under its Pinhole. Moving it out (CoordinateFrame into the Pinhole's frame) would let the
+        # Overview drop all keyframe images with one rule, but in 0.42 any explicit frame breaks the Follow view's
+        # chase camera: it then looks at the whole map from far away.
+        kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(f"{kf_cam_log_path}/pinhole/image", kf.rgb)
 
         # Pointmap, confidence and depth are 2D-only: under a static copy of the Pinhole, outside the 3D tree.
         kf_maps_path: str = f"{KEYFRAME_MAPS_PATH}/keyframe-{kf.kf_idx}"

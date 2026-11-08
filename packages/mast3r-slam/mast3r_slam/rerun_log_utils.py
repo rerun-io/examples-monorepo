@@ -11,6 +11,7 @@ import numpy as np
 import rerun.blueprint as rrb
 from jaxtyping import Int
 from numpy import ndarray
+from simplecv.rerun_eye_controls import follow_eye_controls
 from simplecv.rerun_log_utils import log_video
 
 from mast3r_slam.dataloader import MonocularDataset, MP4Dataset
@@ -33,11 +34,10 @@ KEYFRAME_MAPS_PATH: Path = Path("/keyframe_maps")
 """Each keyframe's pointmap, confidence and depth, under a static copy of its Pinhole."""
 
 
-# Chase eye of the Follow view, in the camera frame (RDF: x right, y down, z forward), like dpvo's. MASt3R's
-# pointmaps are roughly metric, so this sits 0.6 m above and 1.5 m behind the camera, aimed 1.5 m ahead of it.
-_FOLLOW_EYE_POSITION: tuple[float, float, float] = (0.0, -0.6, -1.5)
-_FOLLOW_EYE_TARGET: tuple[float, float, float] = (0.0, 0.0, 1.5)
-_FOLLOW_EYE_UP: tuple[float, float, float] = (0.0, -1.0, 0.0)
+# Chase eye of the Follow view (simplecv's follow_eye_controls, the eye_control_example pattern), in the camera frame
+# (RDF: forward +z, up -y). MASt3R's pointmaps are roughly metric: 1.5 m behind and 0.6 m above the camera, aimed
+# 1.5 m ahead of it.
+_FOLLOW_EYE: rrb.EyeControls3D = follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=1.5, up_m=0.6, ahead_m=1.5)
 
 
 def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> rrb.Blueprint:
@@ -52,9 +52,7 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
 
     Both 3D views show ``parent_log_path`` and nothing else: the entity layout
     keeps 2D-only maps outside it (``CURRENT_MAPS_PATH``, ``LAST_KEYFRAME_PATH``,
-    ``KEYFRAME_MAPS_PATH``). The keyframe images in their frustums (``keyframe_images``,
-    each in its Pinhole's frame) show in the Follow view only: in the Overview they
-    are a few pixels wide, and 90 of them cost the viewer ~3 ms a frame.
+    ``KEYFRAME_MAPS_PATH``), so the rule needs no exclusions.
 
     Args:
         parent_log_path: Root log path for all Rerun entities.
@@ -69,7 +67,7 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
     overview = rrb.Spatial3DView(
         name="Overview",
         origin="/",
-        contents=[contents_3d, f"- {root}/keyframe_images/**"],
+        contents=contents_3d,
         eye_controls=rrb.EyeControls3D(spin_speed=0.25),
     )
     follow = rrb.Spatial3DView(
@@ -77,13 +75,7 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
         origin=camera_path,
         contents=contents_3d,
         line_grid=rrb.LineGrid3D(visible=False),
-        eye_controls=rrb.EyeControls3D(
-            kind=rrb.Eye3DKind.Orbital,
-            position=_FOLLOW_EYE_POSITION,
-            look_target=_FOLLOW_EYE_TARGET,
-            eye_up=_FOLLOW_EYE_UP,
-            spin_speed=0.0,
-        ),
+        eye_controls=_FOLLOW_EYE,
     )
     # The original video on top, then what MASt3R derives from the current frame and the keyframe it
     # tracks against. The model's cropped frame shows on the camera frustum in the 3D views.

@@ -133,9 +133,9 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
     assert origins_2d.count("/video") == 1
     assert "/world/current_camera/pinhole/image" not in origins_2d
     assert sorted(str(view.name) for view in views_3d) == ["Follow", "Overview"]
-    # The entity layout keeps 2D-only maps out of /world; the Overview also leaves the keyframe images out.
-    contents: dict[str, object] = {str(view.name): view.contents for view in views_3d}
-    assert contents == {"Follow": "+ /world/**", "Overview": ["+ /world/**", "- /world/keyframe_images/**"]}
+    for view in views_3d:
+        # One static rule: the entity layout keeps 2D-only maps out of /world, so nothing needs excluding.
+        assert view.contents == "+ /world/**"
 
     sent: list[object] = []
     monkeypatch.setattr(async_logger.rr, "log", lambda *_a, **_k: None)
@@ -157,8 +157,8 @@ def test_blueprint_is_static_and_logger_never_resends_it(monkeypatch: pytest.Mon
 
 
 def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under /world only the current camera's image and depth and each keyframe's image are 2D, each in a Pinhole's
-    frame that has a value from the run's first time point; every other map lives outside /world."""
+    """Under /world only the current camera's image and depth and each keyframe's image are 2D, each under a Pinhole
+    that has a value from the run's first time point; every other map lives outside /world."""
     logged: list[tuple[str, str, int]] = []
     frame_now: list[int] = [-1]
 
@@ -166,14 +166,7 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
         if timeline == "frame" and sequence is not None:
             frame_now[0] = sequence
 
-    frames_of: dict[str, str] = {}
-
-    def _log(path: object, entity: object, *_a: object, **_k: object) -> None:
-        logged.append((str(path), type(entity).__name__, frame_now[0]))
-        if isinstance(entity, rr.CoordinateFrame):
-            frames_of[str(path)] = str(entity.frame.pa_array.to_pylist()[0])  # pyrefly: ignore
-
-    monkeypatch.setattr(async_logger.rr, "log", _log)
+    monkeypatch.setattr(async_logger.rr, "log", lambda path, entity, *_a, **_k: logged.append((str(path), type(entity).__name__, frame_now[0])))
     monkeypatch.setattr(async_logger.rr, "set_time", _set_time)
     identity: Float32[ndarray, "8"] = lietorch.Sim3.Identity(1, device="cpu").data.squeeze().numpy().astype(np.float32)
     rgb: Float32[ndarray, "h w 3"] = np.full((H, W, 3), 0.5, dtype=np.float32)
@@ -191,16 +184,16 @@ def test_entity_layout_each_pinhole_owns_what_projects_in_3d(monkeypatch: pytest
     assert under_world_2d == {
         "world/current_camera/pinhole/image",
         "world/current_camera/pinhole/depth",
-        "world/keyframe_images/keyframe-5",
+        "world/keyframes/keyframe-5/pinhole/image",
     }
-    # The keyframe image sits outside the camera subtree, in its Pinhole's frame (so a view can leave all of them out).
-    assert frames_of["world/keyframe_images/keyframe-5"] == "tf#/world/keyframes/keyframe-5/pinhole"
+    # No explicit CoordinateFrame anywhere: in 0.42 one breaks the Follow view's chase camera.
+    assert not any(kind == "CoordinateFrame" for _, kind, _ in logged)
     for image_path in under_world_2d:
-        pinhole_path: str = frames_of[image_path].removeprefix("tf#/") if image_path in frames_of else image_path.rsplit("/", 1)[0]
+        pinhole_path: str = image_path.rsplit("/", 1)[0]
         pinhole_frames: list[int] = [frame for path, kind, frame in logged if path == pinhole_path and kind in {"Pinhole", "PinholeWithDistortion"}]
         assert pinhole_frames and min(pinhole_frames) == 0, f"{pinhole_path} needs a Pinhole from the first time point"
     keyframe_image_frames: list[int] = [
-        frame for path, kind, frame in logged if path == "world/keyframe_images/keyframe-5" and kind in images_2d
+        frame for path, kind, frame in logged if path == "world/keyframes/keyframe-5/pinhole/image" and kind in images_2d
     ]
     assert keyframe_image_frames == [40], "the keyframe image is logged at the keyframe's own time"
 
