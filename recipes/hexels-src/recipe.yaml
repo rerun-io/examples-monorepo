@@ -9,8 +9,8 @@
 # import their Mojo ports from packages/hexels-mojo (`hexels_mojo`), which the hexels feature installs. Patch 0005
 # runs hexel-kernel's 2D hexel rasterizers (flat and color-gradient) and tile binning (the 2D fits) on hexels_mojo too; hexel-kernel
 # still provides every other kernel. Image-GS's Gaussian projection and top-K rasterizer come from hexels_mojo too
-# (patches 0003/0004), and hexel-kernel's base 3D forward (no prefiltering) too (patch 0006: the backward passes and
-# the other forward variants stay CUDA).
+# (patches 0003/0004), and hexel-kernel's base 3D forward (no prefiltering) and cached backward too (patch 0006: the
+# other forward variants, their backward and prefiltering stay CUDA).
 #
 # Runtime layout of `hexels-src`: upstream resolves helpers relative to its checkout root
 # (ROOT/2d-gaussian-splatting, ROOT/image-gs, ROOT/configs), so the tree is installed whole at
@@ -31,7 +31,7 @@ source:
     rev: 3af322068baef2505db8388293ea4beb9737240f
     target_directory: hexel-kernel
     patches:
-      - patches/0006-hexel-kernel-raster3d-forward-from-hexels-mojo.patch  # base 3D forward from hexels_mojo (CUDA backward)
+      - patches/0006-hexel-kernel-raster3d-from-hexels-mojo.patch  # base 3D forward + cached backward from hexels_mojo
   - git: https://github.com/honeycomb-surfels/hexel-viewer.git
     rev: ff497d44d3c2ecdb907e0346b0b8e8de0a64f9ec
     target_directory: hexel-viewer

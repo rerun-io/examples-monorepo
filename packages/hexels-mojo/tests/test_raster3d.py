@@ -1,9 +1,11 @@
-"""hexels_mojo.raster3d (hexel-kernel's 3D hexel forward in Mojo) against frozen CUDA outputs, stage by stage.
+"""hexels_mojo.raster3d (hexel-kernel's 3D hexel rasterizer in Mojo) against frozen CUDA outputs, stage by stage.
 
-fixtures/raster3d_references.rrd (tests/freeze_raster3d_references.py, from `rasterize_hexels3d_forward_cached`):
-three configurations (linear color + view gradients + per-hexel softness; flat + scalar softness + conservative
-bounds; quadratic-bounded color + specular lobe + per-edge softness). Everything is bit-exact: the kernels issue
-nvcc's fast-math PTX in nvcc's order, and the stable sort reproduces cub's radix sort.
+fixtures/raster3d_references.rrd (tests/freeze_raster3d_references.py, from `rasterize_hexels3d_forward_cached` and
+`rasterize_hexels3d_backward_cached`): three configurations (linear color + view gradients + per-hexel softness; flat +
+scalar softness + conservative bounds; quadratic-bounded color + specular lobe + per-edge softness). The forward is
+bit-exact: the kernels issue nvcc's fast-math PTX in nvcc's order, and the stable sort reproduces cub's radix sort.
+The backward sums with float atomics, so its gradients match to 1e-5 of each tensor's largest magnitude (two CUDA runs
+differ by up to 8e-7 of it, and so does the port).
 """
 
 from pathlib import Path
@@ -25,6 +27,8 @@ INPUTS = ("means3d", "scales", "rotations", "colors", "color_grads", "color_quad
           "opacities", "softnesses", "viewmatrix", "projmatrix", "campos", "background")  # fmt: skip
 SAVED = ("radii_saved", "transmats", "opacities_out", "softnesses_out", "view_dirs", "normals", "points_xy_center", "ranges",
          "values_sorted", "final_transmittance", "last_index")  # fmt: skip
+GRADS = ("means3d", "means2d", "scales", "rotations", "colors", "color_grads", "color_quads", "view_grads", "specular_ks",
+         "specular_log_s", "opacities", "softnesses")  # fmt: skip
 ENTITIES = list(load(RASTER3D_FILE))
 
 
@@ -69,6 +73,29 @@ def test_render_stage_is_bit_exact_from_cuda_intermediates(entity: str) -> None:
     assert torch.equal(last_index.cpu(), tensors["last_index"])
 
 
+@pytest.mark.parametrize("entity", ENTITIES)
+def test_cached_backward_matches_cuda(entity: str) -> None:
+    pytest.importorskip("hexels_mojo._hexels_mojo", reason="build the Mojo kernels first (hexels-mojo-build)")
+    from hexels_mojo.raster3d import rasterize_hexels3d_backward_cached
+
+    tensors = load(RASTER3D_FILE)[entity].tensors
+    args = _args(tensors)
+    num_points: int = tensors["means3d"].shape[0]
+    saved = [tensors[n].cuda() if n in tensors else torch.empty(0, device="cuda") for n in SAVED]
+    empty = torch.empty(0, device="cuda")
+    backward_args: list = [args[0], torch.zeros(num_points, 4, device="cuda"), *args[1:15], tensors["grad_out_color"].cuda(), empty, empty,
+                           empty, empty, *args[15:24], -1, False, args[25], False, saved]  # fmt: skip
+    grads = rasterize_hexels3d_backward_cached(*backward_args)
+    for name, ours in zip(GRADS, grads, strict=True):
+        key = f"bwd_{name}"
+        if key not in tensors:
+            assert ours.numel() == 0, name
+            continue
+        reference = tensors[key]
+        bound = 1e-5 * max(1.0, float(reference.abs().max()))
+        assert float((ours.cpu() - reference).abs().max()) <= bound, name
+
+
 def test_overlay_keeps_prefiltering_and_backward_on_the_wrapped_module() -> None:
     from types import SimpleNamespace
 
@@ -76,11 +103,19 @@ def test_overlay_keeps_prefiltering_and_backward_on_the_wrapped_module() -> None
 
     calls: list[str] = []
     wrapped = SimpleNamespace(
-        rasterize_hexels3d_forward=lambda *_: calls.append("cuda forward"), rasterize_hexels3d_backward=lambda *_: calls.append("cuda backward")
+        rasterize_hexels3d_forward=lambda *_: calls.append("cuda forward"),
+        rasterize_hexels3d_backward=lambda *_: calls.append("cuda backward"),
+        rasterize_hexels3d_backward_cached=lambda *_: calls.append("cuda cached backward"),
     )
     view = raster3d.overlay(wrapped)
     args: list[object] = [None] * 27
     args[raster3d.PREFILTER_ARG] = True
     view.rasterize_hexels3d_forward(*args)
     view.rasterize_hexels3d_backward()
-    assert calls == ["cuda forward", "cuda backward"]
+    backward_args: list[object] = [torch.empty(0)] * 35
+    backward_args[raster3d.BACKWARD_PREFILTER_ARG] = True
+    view.rasterize_hexels3d_backward_cached(*backward_args)
+    backward_args[raster3d.BACKWARD_PREFILTER_ARG] = False
+    backward_args[18] = torch.ones(2, 2)  # a surface depth gradient
+    view.rasterize_hexels3d_backward_cached(*backward_args)
+    assert calls == ["cuda forward", "cuda backward", "cuda cached backward", "cuda cached backward"]

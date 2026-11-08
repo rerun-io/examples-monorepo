@@ -6,8 +6,8 @@ index dbc47e8..9345d97 100644
      ) from error
  _validate_extension(_C)
  
-+# The base forward (no prefiltering) runs on Mojo (packages/hexels-mojo, hexels_mojo.raster3d), bit-exact with the CUDA
-+# build, saved state included; every other entry point, the backward passes among them, stays this extension's.
++# The base forward (no prefiltering; bit-exact with the CUDA build, saved state included) and the cached backward run
++# on Mojo (packages/hexels-mojo, hexels_mojo.raster3d); every other entry point stays this extension's.
 +from hexels_mojo.raster3d import overlay as _mojo_overlay  # noqa: E402
 +
 +_C = _mojo_overlay(_C)
