@@ -193,12 +193,13 @@ class StreamingPipeline:
                     frames_hires: list[UInt8[torch.Tensor, "3 hh ww"]] | None = None
                     if self.engine_hw is not None:
                         frames_hires = frames
-                        lo: UInt8[torch.Tensor, "c 3 h w"] = (
-                            torch.nn.functional.interpolate(torch.stack(frames).float(), size=self.engine_hw, mode="area")
-                            .round_()
-                            .clamp_(0, 255)
-                            .to(torch.uint8)
-                        )
+                        with torch.profiler.record_function("stage::resize"):
+                            lo: UInt8[torch.Tensor, "c 3 h w"] = (
+                                torch.nn.functional.interpolate(torch.stack(frames).float(), size=self.engine_hw, mode="area")
+                                .round_()
+                                .clamp_(0, 255)
+                                .to(torch.uint8)
+                            )
                         frames = [lo[i] for i in range(lo.shape[0])]
                     tracks: list[CameraTracks] | None = None
                     landmarks: list[CameraLandmarks] | None = None
@@ -215,8 +216,12 @@ class StreamingPipeline:
 
                         def fit_tail(idx: int, lms: list[CameraLandmarks]) -> TickFitOutput:
                             assert self.fitting is not None
-                            out: TickFitOutput = self.fitting.step(idx, lms)
-                            self.logger.log_tick_fit(idx, out.fits, out.triangulated, self.fitting.faces)
+                            # Bare ranges, not StageProfiler (main-thread state): they let
+                            # tools/profile_pipeline.py attribute the fit worker's GPU time.
+                            with torch.profiler.record_function("stage::fit"):
+                                out: TickFitOutput = self.fitting.step(idx, lms)
+                            with torch.profiler.record_function("stage::log_fit"):
+                                self.logger.log_tick_fit(idx, out.fits, out.triangulated, self.fitting.faces)
                             if out.metrics:
                                 self.logger.log_tick_metrics(idx, {}, out.metrics)
                             return out
