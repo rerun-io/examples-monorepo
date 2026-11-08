@@ -747,12 +747,9 @@ class AsyncRerunLogger:
         positions_i: Float32[ndarray, "n 3"],
         positions_j: Float32[ndarray, "n 3"],
     ) -> None:
-        """Log factor graph edges as line strips."""
-        line_strips: list[list[float]] = []
-        for t_i, t_j in zip(positions_i, positions_j, strict=False):
-            line_strips.append(t_i.tolist())
-            line_strips.append(t_j.tolist())
+        """Log factor graph edges, one two-point line strip per edge."""
+        strips: Float32[ndarray, "n 2 3"] = np.stack([positions_i, positions_j], axis=1)
         rr.log(
             f"{self._parent_log_path}/edges",
-            rr.LineStrips3D(strips=line_strips, colors=(0, 255, 0), labels="Factor Graph"),
+            rr.LineStrips3D(strips=strips, colors=(0, 255, 0), labels="Factor Graph"),
         )

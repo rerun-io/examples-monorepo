@@ -226,6 +226,23 @@ def test_camera_path_logs_one_segment_per_frame(monkeypatch: pytest.MonkeyPatch)
     assert strips == [("world/path", 2)] * 4
 
 
+
+def test_edges_log_one_two_point_strip_per_edge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each factor-graph edge is its own segment; a flat list of points would draw one polyline through them all."""
+    strips: list[list[int]] = []
+
+    def _capture(_path: str, entity: object, *_a: object, **_k: object) -> None:
+        if isinstance(entity, rr.LineStrips3D):
+            assert entity.strips is not None
+            strips.append([len(strip) for strip in entity.strips.pa_array.to_pylist()])
+
+    monkeypatch.setattr(async_logger.rr, "log", _capture)
+    positions_i: Float32[ndarray, "3 3"] = np.arange(9, dtype=np.float32).reshape(3, 3)
+    positions_j: Float32[ndarray, "3 3"] = positions_i + 1.0
+    logger: AsyncRerunLogger = AsyncRerunLogger(queue.Queue(), parent_log_path=Path("world"))
+    logger._log_edges(positions_i, positions_j)
+    assert strips == [[2, 2, 2]]
+
 def _random_sim3(n: int, seed: int) -> Float32[Tensor, "n 8"]:
     """Sim3 data ``[t, q, s]`` with unit quaternions and positive scales."""
     generator: torch.Generator = torch.Generator().manual_seed(seed)
