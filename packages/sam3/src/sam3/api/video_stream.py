@@ -16,17 +16,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import cv2
-import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Bool, Float32, Int, UInt8, UInt16
+from jaxtyping import Int, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.video_io import TorchCodecVideoReader
+from torch import Tensor
 from tqdm import tqdm
 from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 
+from sam3.api.video_logging import log_frame_outputs
 from sam3.viz_constants import BOX_PALETTE, SEG_OVERLAY_ALPHA
 
 if TYPE_CHECKING:
@@ -36,7 +37,6 @@ if TYPE_CHECKING:
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-BOX_DRAW_ORDER: int = 6
 """Rerun draw order for bounding boxes (above segmentation)."""
 
 
@@ -119,44 +119,30 @@ def safe_dtype(dtype_pref: str, device: torch.device) -> torch.dtype:
 # Video Frame Iteration (Streaming)
 # ──────────────────────────────────────────────────────────────────────────────
 
-FrameData = tuple[int, UInt8[ndarray, "h w 3"], float | None, int, int]
-"""Type alias for frame iteration: (frame_idx, rgb_array, fps, width, height)."""
+FrameData = tuple[int, UInt8[Tensor, "3 h w"], float, int, int]
+"""Type alias for frame iteration: (frame_idx, rgb_chw, fps, width, height)."""
 
 
-def iter_video_frames(path: Path) -> Generator[FrameData, None, None]:
+def iter_video_frames(path: Path, device: torch.device) -> Generator[FrameData, None, None]:
     """
-    Yield RGB frames from a video file, streaming from disk.
+    Yield RGB frames from a video file, decoded in small batches on ``device`` (NVDEC on CUDA).
 
-    Uses OpenCV's VideoCapture which leverages FFmpeg for broad codec support
-    including H.264, H.265, AV1, VP9, etc.
+    The processor preprocesses each frame on the inference device, so the frames stay there
+    instead of taking a host colour conversion and an upload each.
 
     Args:
         path: Path to the video file.
+        device: Decode device.
 
     Yields:
-        Tuple of (frame_idx, rgb_array, fps, width, height) for each frame.
-
-    Raises:
-        RuntimeError: If the video cannot be opened.
+        Tuple of (frame_idx, rgb_chw, fps, width, height) for each frame.
     """
-    cap: cv2.VideoCapture = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video: {path}")
-
-    fps: float | None = float(cap.get(cv2.CAP_PROP_FPS)) or None
-    width: int = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height: int = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
+    reader: TorchCodecVideoReader = TorchCodecVideoReader(path, device=device)
     try:
-        frame_idx: int = 0
-        ok, frame_bgr = cap.read()
-        while ok:
-            frame_rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            yield frame_idx, frame_rgb, fps, width, height
-            frame_idx += 1
-            ok, frame_bgr = cap.read()
+        for frame_idx, frame_rgb in enumerate(reader):
+            yield frame_idx, frame_rgb, reader.fps, reader.width, reader.height
     finally:
-        cap.release()
+        reader.close()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -201,112 +187,6 @@ def build_blueprint() -> rrb.Blueprint:
         contents=["video/raw", "video/segmentation", "video/boxes"],
     )
     return rrb.Blueprint(view, collapse_panels=True)
-
-
-def to_numpy(array_like: torch.Tensor | np.ndarray | list) -> np.ndarray:
-    """
-    Convert tensors/lists to numpy array.
-
-    Args:
-        array_like: Input tensor, array, or list.
-
-    Returns:
-        Numpy array on CPU.
-    """
-    if isinstance(array_like, torch.Tensor):
-        return array_like.detach().cpu().numpy()
-    return np.asarray(array_like)
-
-
-def log_frame_outputs(
-    frame_idx: int,
-    frame_timestamps_ns: Int[ndarray, "num_frames"],
-    processed_outputs: dict,
-    frame_shape: tuple[int, int],
-) -> None:
-    """
-    Log segmentation masks and bounding boxes for a video frame to Rerun.
-
-    Args:
-        frame_idx: Current frame index (used as timeline sequence).
-        frame_timestamps_ns: Array of frame timestamps in nanoseconds from the video asset.
-        processed_outputs: Dict containing 'masks', 'boxes', and optionally 'scores'.
-        frame_shape: Tuple of (height, width) for the frame.
-    """
-    # Set time on video_time timeline to match the video asset
-    if frame_idx < len(frame_timestamps_ns):
-        rr.set_time("video_time", duration=1e-9 * frame_timestamps_ns[frame_idx])
-    rr.set_time("frame_idx", sequence=frame_idx)
-
-    raw_masks = processed_outputs.get("masks")
-    raw_boxes = processed_outputs.get("boxes")
-    raw_scores = processed_outputs.get("scores")
-
-    if raw_masks is None or len(raw_masks) == 0:
-        return
-
-    # Process masks
-    masks_np: Float32[ndarray, "n h w"] = to_numpy(raw_masks).astype(np.float32, copy=False)
-    if masks_np.ndim == 2:
-        masks_np = masks_np[None, ...]
-
-    h: int = frame_shape[0]
-    w: int = frame_shape[1]
-    num_instances: int = masks_np.shape[0]
-
-    # Build per-instance colors (used for boxes)
-    colors: UInt8[ndarray, "k 4"] = np.asarray(
-        [BOX_PALETTE[idx % BOX_PALETTE.shape[0]] for idx in range(num_instances)],
-        dtype=np.uint8,
-    )
-
-    # Create segmentation map (use uint8 if <=255 objects for 50% storage savings)
-    if num_instances <= 255:
-        seg_map: UInt8[ndarray, "h w"] | UInt16[ndarray, "h w"] = np.zeros((h, w), dtype=np.uint8)
-        for idx in range(num_instances):
-            mask: Float32[ndarray, "h w"] = masks_np[idx]
-            mask_bool: Bool[ndarray, "h w"] = mask >= 0.5
-            class_id: int = idx + 1  # Reserve 0 for background
-            seg_map = np.where(mask_bool, np.uint8(class_id), seg_map)
-    else:
-        seg_map = np.zeros((h, w), dtype=np.uint16)
-        for idx in range(num_instances):
-            mask = masks_np[idx]
-            mask_bool = mask >= 0.5
-            class_id = idx + 1
-            seg_map = np.where(mask_bool, np.uint16(class_id), seg_map)
-
-    # Log segmentation (video is already logged as static asset)
-    rr.log(
-        "video/segmentation",
-        rr.SegmentationImage(seg_map),
-    )
-
-    # Log bounding boxes if present
-    if raw_boxes is not None:
-        boxes_np: Float32[ndarray, "n 4"] = to_numpy(raw_boxes).astype(np.float32, copy=False)
-        if boxes_np.ndim == 1:
-            boxes_np = boxes_np[None, :]
-
-        class_ids: Int[ndarray, "n"] = np.arange(1, boxes_np.shape[0] + 1, dtype=np.int32)
-
-        labels: list[str] | None = None
-        if raw_scores is not None:
-            scores_np: Float32[ndarray, "n"] = to_numpy(raw_scores).astype(np.float32, copy=False).reshape(-1)
-            labels = [f"{score:.2f}" for score in scores_np.tolist()]
-
-        rr.log(
-            "video/boxes",
-            rr.Boxes2D(
-                array=boxes_np,
-                array_format=rr.Box2DFormat.XYXY,
-                class_ids=class_ids,
-                labels=labels,
-                colors=colors[:, :3],
-                show_labels=True,
-                draw_order=BOX_DRAW_ORDER,
-            ),
-        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -377,7 +257,7 @@ def main(cfg: Sam3StreamDemoConfig) -> None:
     model, processor = load_sam3_model(cfg.model_config, device, dtype)
 
     # Initialize frame iterator
-    frame_iter: Generator[FrameData, None, None] = iter_video_frames(cfg.video_path)
+    frame_iter: Generator[FrameData, None, None] = iter_video_frames(cfg.video_path, device)
 
     try:
         # Get first frame to validate video
@@ -409,7 +289,7 @@ def main(cfg: Sam3StreamDemoConfig) -> None:
         )
 
         # Frame processing function
-        def process_frame(frame_idx: int, frame_rgb: UInt8[ndarray, "h w 3"]) -> None:
+        def process_frame(frame_idx: int, frame_rgb: UInt8[Tensor, "3 h w"]) -> None:
             """Process a single frame through the model and log to Rerun."""
             inputs = processor(images=frame_rgb, device=device, return_tensors="pt")
             model_outputs = model(
@@ -426,7 +306,7 @@ def main(cfg: Sam3StreamDemoConfig) -> None:
                 frame_idx,
                 frame_timestamps_ns,
                 processed_outputs,
-                frame_shape=(frame_rgb.shape[0], frame_rgb.shape[1]),
+                frame_shape=(frame_rgb.shape[1], frame_rgb.shape[2]),
             )
 
         # Run streaming inference

@@ -1,0 +1,26 @@
+[package]
+name = "dpretrieval-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 module `dpretrieval._core`: kornia-rs bags of words, inverted-file queries and cross-checked ORB matches."
+
+[lints]
+workspace = true
+
+[lib]
+name = "_core"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+# Exercised from Python (packages/dpvo/tests); a Rust test binary would link libpython.
+test = false
+doctest = false
+
+[dependencies]
+kornia-bow.workspace = true
+kornia-imgproc.workspace = true
+kornia-staging-bow.workspace = true
+numpy.workspace = true
+# No `extension-module` feature (deprecated in PyO3 0.29): maturin sets PYO3_BUILD_EXTENSION_MODULE.
+pyo3 = { workspace = true, features = ["abi3-py312"] }

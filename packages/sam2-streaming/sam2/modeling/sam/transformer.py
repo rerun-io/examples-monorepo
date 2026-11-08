@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
+from sam2.modeling import fused_rope
 from sam2.modeling.position_encoding import apply_rotary_enc, compute_axial_cis
 from sam2.modeling.sam2_utils import MLP
 
@@ -294,12 +295,18 @@ class RoPEAttention(Attention):
             assert self.rope_k_repeat
 
         num_k_rope = k.size(-2) - num_k_exclude_rope
-        q, k[:, :, :num_k_rope] = apply_rotary_enc(
-            q,
-            k[:, :, :num_k_rope],
-            freqs_cis=self.freqs_cis,
-            repeat_freqs_k=self.rope_k_repeat,
-        )
+        if fused_rope.ENABLED and q.is_cuda:
+            # Same rotation, one kernel per tensor, keys rotated in place.
+            q = fused_rope.rope_(q, self.freqs_cis)
+            k_rope = k[:, :, :num_k_rope]
+            fused_rope.rope_(k_rope, self.freqs_cis, out=k_rope)
+        else:
+            q, k[:, :, :num_k_rope] = apply_rotary_enc(
+                q,
+                k[:, :, :num_k_rope],
+                freqs_cis=self.freqs_cis,
+                repeat_freqs_k=self.rope_k_repeat,
+            )
 
         dropout_p = self.dropout_p if self.training else 0.0
         # Attention

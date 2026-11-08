@@ -135,19 +135,19 @@ class FastFoundationStereoPredictor(BaseStereoPredictor[nn.Module]):
         checkpoint_path: Path = checkpoint or download_fast_foundationstereo_checkpoint()
         self.model: nn.Module = load_fast_foundationstereo(checkpoint_path, valid_iters=valid_iters, max_disp=max_disp).to(device).eval()
 
-    def infer_disparity(self, left_rgb: UInt8[np.ndarray, "h w 3"], right_rgb: UInt8[np.ndarray, "h w 3"]) -> Float32[np.ndarray, "h w"]:
+    def infer_disparity(self, left_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"], right_rgb: UInt8[np.ndarray, "h w 3"] | UInt8[torch.Tensor, "h w 3"]) -> Float32[np.ndarray, "h w"]:
         """Predict left-view disparity in pixels at the input resolution.
 
         Args:
-            left_rgb: Rectified left RGB image, ``UInt8[ndarray, "h w 3"]``.
-            right_rgb: Rectified right RGB image, ``UInt8[ndarray, "h w 3"]``.
+            left_rgb: Rectified left RGB image, host ``UInt8[ndarray, "h w 3"]`` or a device tensor.
+            right_rgb: Rectified right RGB image, host ``UInt8[ndarray, "h w 3"]`` or a device tensor.
 
         Returns:
             Non-negative disparity, ``Float32[ndarray, "h w"]``.
         """
         device: torch.device = next(self.model.parameters()).device
-        left_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.from_numpy(left_rgb).to(device=device, dtype=torch.float32), "h w c -> 1 c h w")
-        right_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.from_numpy(right_rgb).to(device=device, dtype=torch.float32), "h w c -> 1 c h w")
+        left_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.as_tensor(left_rgb).to(device=device, dtype=torch.float32), "h w c -> 1 c h w")
+        right_13hw: Float32[torch.Tensor, "1 3 h w"] = rearrange(torch.as_tensor(right_rgb).to(device=device, dtype=torch.float32), "h w c -> 1 c h w")
         padder: InputPadder = InputPadder(left_13hw.shape, divis_by=32, force_square=False)
         padded: list[Float32[torch.Tensor, "1 3 hp wp"]] = padder.pad(left_13hw, right_13hw)
         with torch.inference_mode(), torch.amp.autocast("cuda", enabled=device.type == "cuda", dtype=torch.float16):

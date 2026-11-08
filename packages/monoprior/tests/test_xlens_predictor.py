@@ -77,6 +77,7 @@ def test_device_preprocessing_matches_upstream_numpy() -> None:
     batch: AssembledBatch = assemble_batch(list(images), list(rays), cam_types.tolist(), c2w=cam_T_ref, device=torch.device("cpu"))
     normalized: Float32[Tensor, "1 s 3 h w"] = normalize_framesets(images[None], torch.device("cpu"))
     assert torch.equal(normalized, batch["images"])
+    assert torch.equal(normalize_framesets(torch.from_numpy(images[None]), torch.device("cpu")), normalized)  # device-tensor input, no upload
     assert torch.equal(normalized[0, 1], torch.from_numpy(normalize_image(images[1])))
     tensors: RigTensors = rig_tensors(rays, cam_types, cam_T_ref, torch.device("cpu"))
     assert torch.equal(tensors.d_cam, batch["d_cam"])

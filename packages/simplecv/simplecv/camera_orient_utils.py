@@ -6,8 +6,6 @@ are annotated with jaxtyping shapes/dtypes for consistency with the rest of
 the codebase. See `camera_utils.py` for original reference.
 """
 
-from __future__ import annotations
-
 import math
 from typing import Literal, NamedTuple, TypeAlias
 
@@ -100,6 +98,9 @@ OrientedPoses: TypeAlias = Float[ndarray, "*n 3 4"]
 Transform34: TypeAlias = Float[ndarray, "3 4"]
 
 
+# No ``from __future__ import annotations`` in this module: the NamedTuple's ``__new__`` lives in a
+# synthesized ``namedtuple_OrientResults`` module, where beartype >= 0.23 cannot resolve a
+# stringified ``"OrientedPoses"`` and every dev-env call raises.
 class OrientResults(NamedTuple):
     oriented_poses: OrientedPoses
     transform: Transform34
