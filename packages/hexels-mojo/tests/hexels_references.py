@@ -1,14 +1,16 @@
 """The frozen upstream CUDA references of hexels_mojo: one .rrd of static records, read back bit-exactly.
 
-Each record is one entity (`/prune/<case>`, `/fused_ssim/<case>`, `/distcuda2/<case>`) logged as static
+Each record is one entity (`/prune/<case>`, `/fused_ssim/<case>`, `/distcuda2/<case>`, `/raster2d/<case>`,
+`/binning/<case>`) logged as static
 `rr.AnyValues`. Its tensors are packed into one flat array per dtype (fields `float32`, `int32`, `int64`);
 the `#index` text field (JSON) maps each tensor name to [dtype, offset, shape]. The layout is vipe-mojo's
 `tests/vipe_references.py`.
 
 Provenance: written by the hexels-src CUDA extensions (hexel-kernel's gsplat 2D rasterizer, upstream's JIT
 prune scorer, `fused_ssim_cuda`, `simple_knn._C`; torch 2.12 cu130, RTX 5090) with
-`tests/freeze_hexels_references.py`. Those extensions and the script were deleted when hexels_mojo replaced
-them; the fixture is the frozen record of their outputs.
+`tests/freeze_hexels_references.py`, deleted with those extensions (the fixture is the frozen record of their
+outputs), and `tests/freeze_raster2d_references.py` (hexel-kernel's 2D rasterizer and binning; hexel-kernel is still
+built, so it can be rerun).
 """
 
 import functools

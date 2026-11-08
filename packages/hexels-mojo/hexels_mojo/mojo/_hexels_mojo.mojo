@@ -20,6 +20,7 @@ from std.python.bindings import PythonModuleBuilder
 from knn import BOX_SIZE, MORTON_THREADS, box_bounds_kernel, box_mean_dist_kernel, morton_kernel
 from launch import GPURuntime
 from prune import BLOCK, F32Ptr, removal_scores_kernel
+from raster2d import BINNING_THREADS, TILE, backward_kernel, forward_kernel, map_to_intersects_kernel, tile_bin_edges_kernel
 from ssim import BX, BY, fused_ssim_backward_kernel, fused_ssim_kernel
 
 
@@ -127,6 +128,67 @@ def _knn_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> P
     return Python.none()
 
 
+def _i32(spec: PythonObject) raises -> MutPointer[Int32, MutUntrackedOrigin]:
+    return _ptr[DType.int32](spec)
+
+
+def _raster2d_binning_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream, stage, tiles_x, tiles_y); stage 0: tensors = (xys (N, 2), radii i32 (N), cum_tiles_hit i32 (N),
+    isect_ids i64 (M), gaussian_ids i32 (M)); stage 1: tensors = (isect_ids_sorted i64 (M), tile_bins i32 (T, 2) zeroed)."""
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var stream = rt[].torch_stream(_int(s, 0))
+    if _int(s, 1) == 0:
+        var n = _dim(t[0], 0)
+        stream.enqueue_function(
+            rt[].ctx.compile_function[map_to_intersects_kernel](), Int32(n), Int32(_int(s, 2)), Int32(_int(s, 3)), _f(t[0]), _i32(t[1]),
+            _i32(t[2]), _ptr[DType.int64](t[3]), _i32(t[4]), grid_dim=ceildiv(n, BINNING_THREADS), block_dim=BINNING_THREADS,
+        )  # fmt: skip
+    else:
+        var m = _dim(t[0], 0)
+        stream.enqueue_function(
+            rt[].ctx.compile_function[tile_bin_edges_kernel](), Int32(m), _ptr[DType.int64](t[0]), _i32(t[1]),
+            grid_dim=ceildiv(m, BINNING_THREADS), block_dim=BINNING_THREADS,
+        )  # fmt: skip
+    return Python.none()
+
+
+def _raster2d_forward_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream, color_grad_scale, aa, softness_stride, softness_default, has_sharpness, has_emission);
+    tensors = (ids_sorted i32, tile_bins i32 (T, 2), xys, scales, rotation, colors (N, C), color_grads, softnesses,
+    sharpness, emission, out_img (H, W, C), pixel_topk i32 (H, W, 10), weights_sum (H, W), entropy (H, W))."""
+    var height = _dim(t[10], 0)
+    var width = _dim(t[10], 1)
+    var channels = _dim(t[10], 2)
+    var tiles_x = ceildiv(width, TILE)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    rt[].torch_stream(_int(s, 0)).enqueue_function(
+        rt[].ctx.compile_function[forward_kernel](), Int32(tiles_x), Int32(width), Int32(height), Int32(channels), _i32(t[0]), _i32(t[1]),
+        _f(t[2]), _f(t[3]), _f(t[4]), _f(t[5]), _f(t[6]), Float32(Float64(py=s[1])), Float32(Float64(py=s[2])), _f(t[7]),
+        Int32(_int(s, 3)), Float32(Float64(py=s[4])), Int32(_int(s, 5)), _f(t[8]), Int32(_int(s, 6)), _f(t[9]), _f(t[10]), _i32(t[11]),
+        _f(t[12]), _f(t[13]), grid_dim=(tiles_x, ceildiv(height, TILE)), block_dim=(TILE, TILE),
+    )  # fmt: skip
+    return Python.none()
+
+
+def _raster2d_backward_py(runtime: PythonObject, s: PythonObject, t: PythonObject) raises -> PythonObject:
+    """scalars = (stream, color_grad_scale, aa, softness_stride, softness_default, has_sharpness, has_emission);
+    tensors = (xys, scales, rotation, colors (N, C), color_grads, emission, v_output (H, W, C), v_weights_sum, v_entropy,
+    pixel_topk i32, softnesses, sharpness, then the zeroed outputs v_xy, v_scale, v_rot, v_colors, v_color_grads,
+    v_emission, v_sharpness, v_softnesses)."""
+    var height = _dim(t[6], 0)
+    var width = _dim(t[6], 1)
+    var channels = _dim(t[6], 2)
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    rt[].torch_stream(_int(s, 0)).enqueue_function(
+        rt[].ctx.compile_function[backward_kernel](), Int32(width), Int32(height), Int32(channels), _f(t[0]), _f(t[1]), _f(t[2]), _f(t[3]),
+        _f(t[4]), Float32(Float64(py=s[1])), Int32(_int(s, 6)), _f(t[5]), _f(t[6]), _f(t[7]), _f(t[8]), _i32(t[9]),
+        Float32(Float64(py=s[2])), _f(t[10]), Int32(_int(s, 3)), Float32(Float64(py=s[4])), Int32(_int(s, 5)), _f(t[11]), _f(t[12]),
+        _f(t[13]), _f(t[14]), _f(t[15]), _f(t[16]), _f(t[17]), _f(t[18]), _f(t[19]),
+        grid_dim=(ceildiv(width, TILE), ceildiv(height, TILE)), block_dim=(TILE, TILE),
+    )  # fmt: skip
+    return Python.none()
+
+
 @export
 def PyInit__hexels_mojo() abi("C") -> PythonObject:
     try:
@@ -135,6 +197,9 @@ def PyInit__hexels_mojo() abi("C") -> PythonObject:
         m.def_function[_fused_ssim_py]("fused_ssim")
         m.def_function[_fused_ssim_backward_py]("fused_ssim_backward")
         m.def_function[_knn_py]("knn")
+        m.def_function[_raster2d_binning_py]("raster2d_binning")
+        m.def_function[_raster2d_forward_py]("raster2d_forward")
+        m.def_function[_raster2d_backward_py]("raster2d_backward")
         return m.finalize()
     except e:
         abort(t"failed to create _hexels_mojo: {e}")
