@@ -100,6 +100,9 @@ class TrackerConfig:
     (displayed-mask IoU vs per-frame baseline bottoms at 0.17); stride 1 is
     pixel-identical (0.999 IoU) at ~15.0 s vs 11.76 s wall for the 12.1 s clip.
     Set 4 to prioritize the realtime gate over mask cosmetics."""
+    trt_encoder_engine: Path | None = None
+    """Optional TensorRT engine for the image encoder (``tools/build_trt_encoder.py``);
+    ``None`` runs the eager bf16 encoder. Same outputs, ~370 fewer launches per tick."""
     device: str = "cuda"
     """Compute device."""
 
@@ -120,6 +123,11 @@ class MultiViewTracker:
         self.predictor = build_sam2_generic_video_predictor(
             config.sam2_config, str(config.sam2_checkpoint), device=config.device
         )
+        self._encode_image = self.predictor.encode_image
+        if config.trt_encoder_engine is not None:
+            from mamma.tracking.trt_encoder import TrtImageEncoder
+
+            self._encode_image = TrtImageEncoder(self.predictor, config.trt_encoder_engine)
         self._states = [
             SAM2GenericVideoPredictorState.create(
                 video_hw=self._video_hw,
@@ -482,7 +490,7 @@ class MultiViewTracker:
             batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
             # The fork annotates encode_image as Tensor pairs, but it returns
             # multi-level lists (one tensor per FPN level) at runtime.
-            encoded = cast("tuple[list[torch.Tensor], list[torch.Tensor]]", self.predictor.encode_image(batch))
+            encoded = cast("tuple[list[torch.Tensor], list[torch.Tensor]]", self._encode_image(batch))
             embeddings: list[torch.Tensor] = encoded[0]
             pos_embeddings: list[torch.Tensor] = encoded[1]
 
