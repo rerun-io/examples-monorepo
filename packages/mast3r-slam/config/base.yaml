@@ -30,7 +30,6 @@ tracking:
   sigma_dist: 1e+1
   sigma_pixel: 1.0
   sigma_depth: 1e+1 # NOTE: log-depth!
-  sigma_point: 0.05
   pixel_border: -10 # Only in calib (negative means allow pixels outside image up to that distance)
   depth_eps: 1e-6 # Only in calib case
   filtering_mode: weighted_pointmap # recent, first, best_score, weighted_pointmap, weighted_spherical, indep_conf
@@ -38,7 +37,6 @@ tracking:
 
 local_opt:
   pin: 1
-  window_size: 1e+6   
   C_conf: 0.0
   Q_conf: 1.5
   min_match_frac: 0.1
@@ -49,9 +47,7 @@ local_opt:
   sigma_dist: 1e+1
   sigma_pixel: 1.0
   sigma_depth: 1e+1 # NOTE: log-depth!
-  sigma_point: 0.05
   delta_norm: 1e-8
-  use_cuda: True
 
 retrieval:
   k: 3
