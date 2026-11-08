@@ -8,7 +8,7 @@ index 9cf5443..a162369 100644
  
 -_gsplat_api = _load_gsplat_api()
 -_gsplat_cuda = importlib.import_module("gsplat.cuda")
-+# The 2D color-gradient rasterizer and its tile binning run on Mojo (packages/hexels-mojo, hexels_mojo.raster2d);
++# The 2D hexel rasterizers (flat, color-gradient) and tile binning run on Mojo (packages/hexels-mojo, raster2d);
 +# every other kernel stays hexel-kernel's CUDA.
 +from hexels_mojo.raster2d import overlay as _mojo_overlay  # noqa: E402
 +

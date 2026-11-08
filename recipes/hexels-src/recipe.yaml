@@ -7,7 +7,7 @@
 #
 # fused-ssim, simple-knn and upstream's JIT-compiled 2D prune scorer are not built: patches 0002-0004
 # import their Mojo ports from packages/hexels-mojo (`hexels_mojo`), which the hexels feature installs. Patch 0005
-# runs hexel-kernel's 2D color-gradient rasterizer and tile binning (the rich 2D fit) on hexels_mojo too; hexel-kernel
+# runs hexel-kernel's 2D hexel rasterizers (flat and color-gradient) and tile binning (the 2D fits) on hexels_mojo too; hexel-kernel
 # still provides every other kernel.
 #
 # Runtime layout of `hexels-src`: upstream resolves helpers relative to its checkout root
@@ -23,7 +23,7 @@ source:
     target_directory: hexels
     patches:
       - patches/0003-hexels-kernels-from-hexels-mojo.patch  # fused_ssim + the prune scorer from hexels_mojo; drops the .cu
-      - patches/0005-gsplat-hexels-raster2d-from-hexels-mojo.patch  # 2D color-gradient rasterizer + tile binning from hexels_mojo
+      - patches/0005-gsplat-hexels-raster2d-from-hexels-mojo.patch  # 2D hexel rasterizers (flat, color-gradient) + tile binning from hexels_mojo
   # The two submodules, at the commits hexels@698d1af records.
   - git: https://github.com/honeycomb-surfels/hexel-kernel.git
     rev: 3af322068baef2505db8388293ea4beb9737240f
