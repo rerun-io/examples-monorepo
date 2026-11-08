@@ -14,10 +14,9 @@ and the evidence stay here.
 
 ## Why a custom viewer
 
-Stock Rerun keeps only 8 bits of 10-bit AV1 luma. `re_video` pulls in rav1d with `bitdepth_8` only; its `nasm`
-feature, on in release builds of the `rerun` binary, turns on all rav1d defaults including `bitdepth_16`. Either way
-`re_video` then right-shifts 10/12-bit samples to 8 bits (`decode/av1.rs:295-297`, TODO #7594). This viewer decodes
-with the same crate (`re_rav1d`) with `bitdepth_16` on and copies the Y plane as is, so every 10-bit code comes back exact. The codes then go through the same public upload
+Stock Rerun keeps only 8 bits of 10-bit AV1 luma: rav1d decodes 10-bit streams in every build, and `re_video` then
+right-shifts the samples to 8 bits (`decode/av1.rs:295-297`, TODO #7594). This viewer decodes with the same crate
+(`re_rav1d`) and copies the Y plane as is, so every 10-bit code comes back exact. The codes then go through the same public upload
 as `DepthImage` (`gpu_bridge::image_to_gpu`, an `R16Uint` texture), so the pixels equal those of a PNG
 `EncodedDepthImage` of the same codes.
 

@@ -3,11 +3,10 @@
 //! Out-of-tree scaffolding: deleted once `DepthVideoStream` ships in Rerun, where `re_video` would gain a raw-luma
 //! decode output instead.
 //!
-//! `re_video` pulls in rav1d with `bitdepth_8` only; its `nasm` feature (on in release builds of the `rerun` binary)
-//! turns on all rav1d defaults, `bitdepth_16` included. Either way `re_video` then right-shifts 10/12-bit samples to
-//! 8 bits (`decode/av1.rs:295-297`, TODO #7594). Here rav1d runs with `bitdepth_16` and the Y plane is copied as is, so
-//! every 10-bit code comes back exact. Decoding is synchronous: a seek decodes from the nearest keyframe, and playing
-//! forward continues from the last decoded sample.
+//! rav1d decodes 10-bit streams in every build; stock `re_video` then right-shifts the samples to 8 bits
+//! (`decode/av1.rs:295-297`, TODO #7594). Here the Y plane is copied as is, so every 10-bit code comes back exact.
+//! Decoding is synchronous: a seek decodes from the nearest keyframe, and playing forward continues from the last
+//! decoded sample.
 
 use re_rav1d::dav1d;
 use re_viewer::external::re_sdk_types::encodings::Blob;
