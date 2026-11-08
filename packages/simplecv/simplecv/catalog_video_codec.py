@@ -35,6 +35,12 @@ def catalog_codec_name(fourcc: int) -> CatalogCodecName:
     return _CODEC_NAME[codec]
 
 
+def video_codec(name: CatalogCodecName) -> rr.VideoCodec:
+    """The ``rr.VideoCodec`` for a decoder codec name (inverse of :func:`catalog_codec_name`; torchcodec's
+    ``metadata.codec`` uses the same names)."""
+    return {codec_name: codec for codec, codec_name in _CODEC_NAME.items()}[name]
+
+
 def wrap_mp4(samples: Sequence[Buffer], keyframes: list[bool], fps: int, codec: CatalogCodecName) -> bytes:
     """Mux pre-encoded samples into an in-memory MP4 with positional pts (no re-encode).
 
