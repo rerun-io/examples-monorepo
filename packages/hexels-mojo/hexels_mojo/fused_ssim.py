@@ -36,7 +36,7 @@ class FusedSSIMMap(torch.autograd.Function):
         return ssim_map[:, :, 5:-5, 5:-5] if padding == "valid" else ssim_map
 
     @staticmethod
-    def backward(ctx: Any, opt_grad: Tensor) -> tuple[None, None, Tensor, None, None, None]:
+    def backward(ctx: Any, opt_grad: Tensor) -> tuple[Tensor | None, ...]:  # pyrefly: ignore[bad-override]
         img1, img2, dm_dmu1, dm_dsigma1_sq, dm_dsigma12 = ctx.saved_tensors
         dl_dmap: Tensor = opt_grad
         if ctx.padding == "valid":

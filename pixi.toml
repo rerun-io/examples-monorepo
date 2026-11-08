@@ -2196,8 +2196,6 @@ python = "3.12.*"
 open3d = ">=0.19.0,<0.20"
 hexels-src = { path = "recipes/hexels-src" }
 hexel-kernel = { path = "recipes/hexels-src" }
-fused-ssim = { path = "recipes/hexels-src" }
-simple-knn = { path = "recipes/hexels-src" }
 image-gs = { path = "recipes/hexels-src" }
 tyro = ">=0.9.1,<0.10"
 pyserde = ">=0.31.2,<0.32"
@@ -2219,12 +2217,28 @@ rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }
 
 [feature.hexels.pypi-dependencies]
 hexels-bench = { path = "packages/hexels", editable = true }
+# fused-ssim, simple-knn and the 2D prune scorer in Mojo; hexels-src imports them (recipes/hexels-src patches 0002-0004).
+hexels-mojo = { path = "packages/hexels-mojo", editable = true }
 # NVIDIA FLIP, imported by upstream's 2D image metrics; PyPI only.
 flip-evaluator = "==1.7"
 
 [feature.hexels.activation.env]
 PACKAGE_DIR = "packages/hexels"
 PYREFLY_TARGET = "hexels_bench tools tests"
+
+[feature.hexels.tasks.hexels-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I hexels_mojo/mojo -o hexels_mojo/_hexels_mojo.so hexels_mojo/mojo/_hexels_mojo.mojo"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/hexels-mojo"
+description = "Build hexels_mojo's Mojo kernels (fused-ssim, simple-knn, the 2D prune scorer) for the local GPU"
+inputs = ["packages/hexels-mojo/hexels_mojo/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/hexels-mojo/hexels_mojo/_hexels_mojo.so"]
+
+[feature.hexels.tasks.hexels-mojo-tests]
+cmd = "pytest -q -m 'integration or not integration'"
+depends-on = ["hexels-mojo-build"]
+cwd = "packages/hexels-mojo"
+description = "Build and test hexels_mojo against the frozen CUDA references (CUDA tests need a GPU)"
 
 # Run directories follow packages/hexels/docs/run-layout.md. Roots default to $GSPLAT_MODERN_DATA and
 # $HEXELS_WORK/runs (unset: ~/gsplat-modern-data, ~/hexels-work); every tool takes --roots.data / --roots.runs.
@@ -4210,8 +4224,8 @@ gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
     "dev",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
-hexels = { features = ["cuda", "hexels"], solve-group = "hexels", no-default-feature = true }
-hexels-dev = { features = ["cuda", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
+hexels = { features = ["cuda", "lietorch-mojo", "hexels"], solve-group = "hexels", no-default-feature = true }
+hexels-dev = { features = ["cuda", "lietorch-mojo", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
 metrictrail = { features = [
     "common",
     "cuda",

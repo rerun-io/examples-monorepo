@@ -22,7 +22,7 @@ runtime (`lietorch_mojo.backends._runtime`), like vipe-mojo.
 ## Parity
 
 `tests/fixtures/hexels_references.rrd` holds inputs and outputs of the CUDA extensions (torch 2.12 cu130,
-RTX 5090), written by `tests/freeze_hexels_references.py` before they were deleted (see git history).
+RTX 5090), written by `tests/freeze_hexels_references.py` (deleted with the extensions; see this package's first commit).
 
 | Op | Result |
 |----|--------|

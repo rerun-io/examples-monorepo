@@ -6,9 +6,6 @@ from torch import Tensor
 
 from hexels_mojo._launch import launch
 
-TOP_K: int = 10
-"""Renderer-selected hexels per pixel (hexel-kernel `config.h` TOP_K)."""
-
 
 def removal_scores_cuda(
     xy: Float32[Tensor, "n 2"],

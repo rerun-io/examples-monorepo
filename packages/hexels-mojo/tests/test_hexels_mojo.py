@@ -43,9 +43,12 @@ def test_removal_scores(entity: str) -> None:
     from hexels_mojo.prune import removal_scores_cuda
 
     rec = load()[entity]
-    names = ("xy", "scales", "rotations", "colors", "gradients", "softness", "image", "target", "selected")
-    inputs = [rec.tensor(n).cuda() for n in names]
-    scores, max_error = removal_scores_cuda(*inputs, bool(rec.tensor("rich").item()))
+    xy, scales, rotations, colors, gradients, softness, image, target, selected = (
+        rec.tensor(n).cuda() for n in ("xy", "scales", "rotations", "colors", "gradients", "softness", "image", "target", "selected")
+    )
+    scores, max_error = removal_scores_cuda(
+        xy, scales, rotations, colors, gradients, softness, image, target, selected, bool(rec.tensor("rich").item())
+    )
     ref_scores = rec.tensor("scores")
     assert _rel_error(scores, ref_scores) < PRUNE_TOLERANCE
     assert abs(max_error.item() - rec.tensor("max_error").item()) < PRUNE_TOLERANCE
