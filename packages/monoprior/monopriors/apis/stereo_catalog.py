@@ -31,8 +31,9 @@ from simplecv.rig import CameraSensor, Rig, RigCalibration
 from simplecv.rrd_query_utils import first_valid_value
 
 from monopriors.depth_utils import depth_edges_mask
+from monopriors.gpu_image import LinearRemap, area_resize
 from monopriors.models.stereo_depth import AnnotatedStereoPredictorUnion, BaseStereoPredictor, LiteAnyStereoConfig, StereoDepthPrediction
-from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_stereo_rectify, rectify_pair
+from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_stereo_rectify
 
 TIMELINE: str = "video_time"
 RIG: str = "world/rig_00"
@@ -227,22 +228,31 @@ def main(config: StereoCatalogConfig) -> None:
     colormap_max_mm: float = config.colormap_max_m * 1000.0
     fuser: Open3DFuser | None = Open3DFuser(fusion_resolution=config.fusion_voxel_m, max_fusion_depth=config.fusion_max_depth_m) if config.fuse else None
 
-    def frame_at(cam: str, t_ns: int) -> UInt8[np.ndarray, "h w 3"]:
+    def frame_at(cam: str, t_ns: int) -> UInt8[torch.Tensor, "1 3 h w"]:
         times, _, _, decoder = decoders[cam]
         index: int = int(np.searchsorted(times, np.timedelta64(t_ns, "ns"), side="right")) - 1
-        return rearrange(decoder.get_frame_at(index).data, "c h w -> h w c").cpu().numpy()
+        return decoder.get_frame_at(index).data[None]
 
+    # Rectify on the decoder's device and hand the predictor device tensors; only the logged
+    # (output-scale) left image goes to the host.
+    video_hw: tuple[int, int] = (left.intrinsics.height, left.intrinsics.width)
+    left_remap: LinearRemap = LinearRemap.from_maps(rect.map0_x, rect.map0_y, video_hw, device)
+    right_remap: LinearRemap = LinearRemap.from_maps(rect.map1_x, rect.map1_y, video_hw, device)
     for i, t_ns in enumerate(grid_ns.tolist()):
         world_T_rig: Float64[np.ndarray, "4 4"] = world_T_rig_n44[min(int(np.searchsorted(pose_times, np.timedelta64(t_ns, "ns"))), len(pose_times) - 1)]
-        left_rect, right_rect = rectify_pair(rect, frame_at(config.left_cam, t_ns), frame_at(config.right_cam, t_ns))
-        pred: StereoDepthPrediction = predictor(left_rect, right_rect, K_33=K_rect_32, baseline_m=rect.baseline_m)
+        left_rect_13hw: UInt8[torch.Tensor, "1 3 h w"] = left_remap(frame_at(config.left_cam, t_ns))
+        right_rect_13hw: UInt8[torch.Tensor, "1 3 h w"] = right_remap(frame_at(config.right_cam, t_ns))
+        pred: StereoDepthPrediction = predictor(
+            rearrange(left_rect_13hw, "1 c h w -> h w c"), rearrange(right_rect_13hw, "1 c h w -> h w c"), K_33=K_rect_32, baseline_m=rect.baseline_m
+        )
         depth_hw: Float32[np.ndarray, "h w"] = np.where(pred.depth_meters > config.max_depth_m, 0.0, pred.depth_meters).astype(np.float32)
         if config.remove_flying_pixels:
             depth_hw = np.asarray(depth_hw * ~depth_edges_mask(depth_hw, threshold=config.depth_edge_threshold), dtype=np.float32)
         depth_mm_hw: UInt16[np.ndarray, "h w"] = np.clip(depth_hw * 1000.0, 0.0, 65535.0).astype(np.uint16)
         if config.output_scale != 1.0:
             depth_mm_hw = cv2.resize(depth_mm_hw, output_wh, interpolation=cv2.INTER_NEAREST)
-            left_rect = cv2.resize(left_rect, output_wh, interpolation=cv2.INTER_AREA)
+            left_rect_13hw = area_resize(left_rect_13hw, output_wh[1], output_wh[0])
+        left_rect: UInt8[np.ndarray, "out_h out_w 3"] = rearrange(left_rect_13hw, "1 c h w -> h w c").cpu().numpy()
         # depth_png level 4 in parallel bands: about 4x faster and 23 % smaller than OpenCV's level 1 at 1120x630.
         png: bytes = depth_png.encode(np.ascontiguousarray(depth_mm_hw))
 

@@ -13,6 +13,7 @@ principal point at the image centre. ``xyz_camera`` and ``vertices`` are in
 that camera; a supplied ``CalibratedCamera`` is not used.
 """
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -23,7 +24,7 @@ import torch
 import torch.nn.functional as F
 import tyro
 from huggingface_hub import snapshot_download
-from jaxtyping import Bool, Float, Float32, Int64, UInt8
+from jaxtyping import Bool, Float, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 from trtkit import TensorRtBackendConfig, TensorRtRuntime, TensorRuntime, TorchBackendConfig
@@ -33,7 +34,7 @@ from trtkit.trt_builder import TrtBuildConfig, ensure_engine
 from posekit.artifacts import OnnxTransform
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import HandDetector, TopDownHandPose3d
-from posekit.models.wilor_net.geometry import cam_crop_to_full, generate_image_patch_cv2, perspective_projection
+from posekit.models.wilor_net.geometry import cam_crop_to_full, gen_trans_from_patch_cv, generate_image_patch_cv2, perspective_projection
 from posekit.models.wilor_net.patches import generate_rgb_image_patches_torch
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.skeletons import HAND_21, KeypointSkeleton
@@ -270,6 +271,49 @@ class WilorHandPoseConfig:
         return WilorHandPose3d(self)
 
 
+def reference_hand_patch(
+    image: UInt8[ndarray, "h w 3"], center_x: np.float32, center_y: np.float32, box_size: np.float32, flip: bool
+) -> UInt8[ndarray, "256 256 3"] | Float64[ndarray, "256 256 3"]:
+    """The torch path's crop: Gaussian blur before downsampling (as the WiLoR demo does), then an OpenCV warp.
+
+    Only the source window the warp samples is blurred: the box, its bilinear neighbours and the
+    Gaussian's reach (scipy ``truncate=4``), so every sampled pixel equals the full-frame blur. The
+    window goes into a lazily zeroed full-size canvas, so the warp runs with the reference's exact
+    transform; a shifted origin rounds OpenCV's fixed-point source coordinates differently.
+
+    Returns:
+        The crop; uint8 without a blur, float64 after one (skimage's float type for uint8).
+    """
+    from skimage.filters import gaussian
+
+    # float32 like the reference, so sigma matches bit for bit.
+    downsampling: np.float32 = box_size * 1.0 / CROP_SIZE / 2.0
+    if downsampling <= 1.1:
+        patch, _ = generate_image_patch_cv2(
+            image, center_x, center_y, box_size, box_size, CROP_SIZE, CROP_SIZE, flip, 1.0, 0, border_mode=cv2.BORDER_CONSTANT
+        )
+        return patch
+    sigma: np.float32 = (downsampling - 1) / 2
+    margin: int = int(4.0 * float(sigma) + 0.5) + 2
+    height, width = image.shape[:2]
+    half: float = float(box_size) / 2.0
+    x0: int = max(math.floor(center_x - half) - margin, 0)
+    y0: int = max(math.floor(center_y - half) - margin, 0)
+    x1: int = min(math.ceil(center_x + half) + margin + 1, width)
+    y1: int = min(math.ceil(center_y + half) + margin + 1, height)
+    window: Float64[ndarray, "wh ww 3"] = gaussian(image[y0:y1, x0:x1], sigma=sigma, channel_axis=2, preserve_range=True)
+    canvas: Float64[ndarray, "h w 3"] = np.zeros((height, width, 3), dtype=np.float64)
+    if flip:
+        canvas[y0:y1, width - x1 : width - x0] = window[:, ::-1]
+    else:
+        canvas[y0:y1, x0:x1] = window
+    # generate_image_patch_cv2's transform and warp, with the flip already applied to the canvas.
+    trans: Float64[ndarray, "2 3"] = gen_trans_from_patch_cv(
+        width - center_x - 1 if flip else center_x, center_y, box_size, box_size, CROP_SIZE, CROP_SIZE, 1.0, 0
+    )
+    return cv2.warpAffine(canvas, trans, (CROP_SIZE, CROP_SIZE), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
 def load_wilor_network(directory: Path, dtype: torch.dtype) -> torch.nn.Module:
     """The WiLoR network (``wilor_net.network.WiLor``) with its MANO layer, on CUDA in eval mode."""
     from posekit.models.wilor_net.network import WiLor
@@ -382,25 +426,14 @@ class WilorHandPose3d(TopDownHandPose3d):
         rights: Bool[ndarray, "n"],
     ) -> dict[str, Float32[ndarray, "..."]]:
         """OpenCV crops with an anti-aliasing blur, one network call per frame (the reference path)."""
-        from skimage.filters import gaussian
-
         assert self.network is not None
         chunks: dict[str, list[ndarray]] = {name: [] for name in WILOR_OUTPUT_NAMES}
         for frame in np.unique(frames):
             rows: Int64[ndarray, "m"] = np.flatnonzero(frames == frame)
             image: UInt8[ndarray, "h w 3"] = frames_rgb[int(frame)].cpu().numpy()
-            patches: list[ndarray] = []
-            for row in rows:
-                source: ndarray = image.copy()
-                # Blur before downsampling, as the WiLoR demo does; float32 like the reference, so sigma matches bit for bit.
-                downsampling = box_sizes[row] * 1.0 / CROP_SIZE / 2.0
-                if downsampling > 1.1:
-                    source = gaussian(source, sigma=(downsampling - 1) / 2, channel_axis=2, preserve_range=True)
-                patch, _ = generate_image_patch_cv2(
-                    source, centers[row, 0], centers[row, 1], box_sizes[row], box_sizes[row], CROP_SIZE, CROP_SIZE,
-                    bool(not rights[row]), 1.0, 0, border_mode=cv2.BORDER_CONSTANT,
-                )
-                patches.append(patch)
+            patches: list[ndarray] = [
+                reference_hand_patch(image, centers[row, 0], centers[row, 1], box_sizes[row], bool(not rights[row])) for row in rows
+            ]
             output: dict[str, Tensor] = self.network(torch.from_numpy(np.stack(patches)).to(device="cuda", dtype=self.dtype))
             for name in WILOR_OUTPUT_NAMES:
                 chunks[name].append(output[name].cpu().float().numpy())

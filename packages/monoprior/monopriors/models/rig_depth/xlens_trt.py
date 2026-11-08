@@ -683,7 +683,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
 
     def predict_batch(
         self,
-        images: UInt8[ndarray, "b s h w 3"],
+        images: UInt8[ndarray, "b s h w 3"] | UInt8[Tensor, "b s h w 3"],
         rays: Float32[ndarray, "s h w 3"],
         cam_types: Int64[ndarray, "s"],
         cam_T_ref: Float64[ndarray, "s 4 4"] | None,
@@ -694,7 +694,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         geometry inputs are batch-1 and shared, so only the images are chunked here.
 
         Args:
-            images: RGB framesets, ``UInt8[ndarray, "b s h w 3"]``.
+            images: RGB framesets, host ``UInt8[ndarray, "b s h w 3"]`` or a CUDA tensor.
             rays: Camera-frame unit rays shared by all framesets, ``Float32[ndarray, "s h w 3"]``.
             cam_types: X-Lens camera ids, ``Int64[ndarray, "s"]``.
             cam_T_ref: Optional camera-to-reference poses, ``Float64[ndarray, "s 4 4"]``.
@@ -714,7 +714,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
 
     def __call__(
         self,
-        images: UInt8[ndarray, "s h w 3"],
+        images: UInt8[ndarray, "s h w 3"] | UInt8[Tensor, "s h w 3"],
         rays: Float32[ndarray, "s h w 3"],
         cam_types: Int64[ndarray, "s"],
         cam_T_ref: Float64[ndarray, "s 4 4"] | None,
@@ -722,7 +722,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         """Predict per-view camera-frame metric z-depth for one frameset with the cached engine.
 
         Args:
-            images: Shared-resolution RGB views, ``UInt8[ndarray, "s h w 3"]``.
+            images: Shared-resolution RGB views, host ``UInt8[ndarray, "s h w 3"]`` or a device tensor.
             rays: Camera-frame unit rays, ``Float32[ndarray, "s h w 3"]``; must not be mutated in place between calls.
             cam_types: X-Lens camera ids, ``Int64[ndarray, "s"]``.
             cam_T_ref: Optional camera-to-reference poses, ``Float64[ndarray, "s 4 4"]``.

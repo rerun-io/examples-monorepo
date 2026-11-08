@@ -58,9 +58,9 @@ def get_connected_components(mask):
     - counts: A tensor of shape (N, 1, H, W) containing the area of the connected
               components for foreground pixels and 0 for background pixels.
     """
-    from sam2 import _C
+    from sam2.mojo_cc import get_connected_components as mojo_connected_components
 
-    return _C.get_connected_componnets(mask.to(torch.uint8).contiguous())
+    return mojo_connected_components(mask)
 
 
 def mask_to_box(masks: torch.Tensor):
