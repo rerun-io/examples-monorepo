@@ -387,20 +387,23 @@ class AsyncRerunLogger:
         live_surface: LiveSurface = LiveSurface(f"{self._parent_log_path}/mesh", surface_recording, (FRAME_TIMELINE, VIDEO_TIMELINE))
         self._surface_worker = LatestWinsWorker(live_surface.handle, name="tsdf-surface")
 
-        while True:
-            try:
-                event: LogEvent = self._queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
+        # The worker closes on a crash too: a long-lived app would otherwise keep one idle worker per failed run.
+        try:
+            while True:
+                try:
+                    event: LogEvent = self._queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
 
-            if isinstance(event, LogTerminate):
-                self._drain_queue()
-                # The final surface, at the backend's final poses, logged before the recording closes.
-                self._request_surface(final=True)
-                self._surface_worker.close()
-                break
+                if isinstance(event, LogTerminate):
+                    self._drain_queue()
+                    # The final surface, at the backend's final poses, logged before the recording closes.
+                    self._request_surface(final=True)
+                    break
 
-            self._handle_event(event)
+                self._handle_event(event)
+        finally:
+            self._surface_worker.close()
 
     def _drain_queue(self) -> None:
         """Process all remaining non-terminate events."""
