@@ -55,7 +55,8 @@ DPVO_WINDOW: str = "dpvo/window"
 DPVO_CURRENT: str = "dpvo/current"
 DPVO_WINDOW_POINTS: str = "dpvo/window_points"
 DPVO_MESH: str = "dpvo/mesh"
-"""Live TSDF mesh of the app, one ``Mesh3D`` per changed 16^3-voxel block (static, overwritten as it grows)."""
+"""Live TSDF mesh of the app: changed super-blocks under ``blocks/`` on the timeline while tracking, one mesh under
+``full`` from the pass's last integrated frame (:class:`simplecv.rerun_live_mesh.LiveMeshLog`)."""
 DPVO_METRICS: str = "metrics/dpvo"
 
 WORLD_ROOT: str = "world"

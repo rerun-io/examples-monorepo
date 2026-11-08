@@ -100,7 +100,7 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
     assert session.kept_normals()[0][0, 0, 0] == 2
 
 
-def test_live_surface_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
+def test_live_surface_grows_temporal_blocks_then_ends_as_one_mesh(tmp_path: Path) -> None:
     import rerun as rr
     from rerun.chunk import RrdReader
 
@@ -124,18 +124,28 @@ def test_live_surface_grows_mesh_blocks_from_keyframes(tmp_path: Path) -> None:
     depth: np.ndarray = np.full((48, 64), 2.0, dtype=np.float32)
     rgb: np.ndarray = np.full((48, 64, 3), 128, dtype=np.uint8)
     intrinsics: np.ndarray = np.array([60.0, 60.0, 32.0, 24.0], dtype=np.float32)
-    for shift in (0.0, 0.05, 0.1):
+    for frame, shift in enumerate((0.0, 0.05, 0.1)):
+        rec.set_time(entities.FRAME_TIMELINE, sequence=frame)
         pose: np.ndarray = np.eye(4, dtype=np.float32)
         pose[0, 3] = shift
-        surface.integrate(depth, rgb, intrinsics, pose)
-    session.uninstall()  # logs the third frame's blocks
-    assert surface.volume.extract_dirty_block_meshes() == []
-    surface.retire()  # the run's final mesh would replace it
+        surface.integrate(depth, rgb, intrinsics, pose, frame)
+    session.uninstall()  # the whole surface as one mesh at frame 2
     rec.flush()
     rec.disconnect()
-    paths: list[str] = [str(path) for path in RrdReader(rrd).store().schema().entity_paths()]
     assert surface.integrated == 3
-    assert any(path.startswith("/" + entities.DPVO_MESH + "/") for path in paths)
+    mesh_chunks = [chunk for chunk in RrdReader(rrd).stream() if str(chunk.entity_path).startswith("/" + entities.DPVO_MESH)]
+    assert mesh_chunks and not any(chunk.is_static for chunk in mesh_chunks), "on the timeline, so scrubbing shows the growth"
+    block_frames = {
+        frame
+        for chunk in mesh_chunks
+        if str(chunk.entity_path).startswith(f"/{entities.DPVO_MESH}/blocks/")
+        for frame in chunk.to_record_batch().column(entities.FRAME_TIMELINE).to_pylist()
+    }
+    assert block_frames == {1}, "the blocks after the second integrated frame (log_every=2)"
+    full_frames = [
+        chunk.to_record_batch().column(entities.FRAME_TIMELINE).to_pylist() for chunk in mesh_chunks if str(chunk.entity_path) == f"/{entities.DPVO_MESH}/full"
+    ]
+    assert full_frames == [[2]], "one mesh at the last integrated frame"
 
 
 class _SlamSystem:
