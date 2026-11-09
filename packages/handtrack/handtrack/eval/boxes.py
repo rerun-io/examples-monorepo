@@ -15,6 +15,9 @@ PRESENCE_THRESHOLD: float = 0.5
 MIN_IOU: float = 0.5
 IOU_BINS: int = 100
 """Histogram bins over [0, 1] that keep median IoU additive across batches."""
+RATIO_BINS: int = 64
+RATIO_LOG2_SPAN: float = 2.0
+"""Radius ratios are binned as log2(predicted r / true r) over [-2, 2] (a quarter to four times), clamped at the ends."""
 NET_SCALE: tuple[float, float, float] = (640.0, 480.0, 640.0)
 """Normalized (cx / 640, cy / 480, r / 640) to net pixels."""
 
@@ -47,6 +50,26 @@ class BoxCounts:
     """Positive slots on those images."""
     iou_histogram: list[int] = field(default_factory=lambda: [0] * IOU_BINS)
     """IoU of present hands whose slot is positive, binned over [0, 1]."""
+    detected_true_radius: int = 0
+    """Present hands whose own slot is positive with IoU >= MIN_IOU once its radius is replaced by the true one (centre only)."""
+    radius_ratio_histogram: list[int] = field(default_factory=lambda: [0] * RATIO_BINS)
+    """log2(predicted r / true r) of present hands whose positive slot puts its centre inside the true circle."""
+
+    def recall_at(self, iou: float) -> float | None:
+        """Recall at another IoU threshold, from the IoU histogram (to its bin width, 0.01)."""
+        return sum(self.iou_histogram[round(iou * IOU_BINS):]) / self.present if self.present else None
+
+    def radius_ratio_percentile(self, q: float) -> float | None:
+        """The q-quantile of predicted r / true r, at its bin centre."""
+        total: int = sum(self.radius_ratio_histogram)
+        if not total:
+            return None
+        seen: int = 0
+        for index, count in enumerate(self.radius_ratio_histogram):
+            seen += count
+            if seen >= q * total:
+                return float(2.0 ** ((index + 0.5) / RATIO_BINS * 2 * RATIO_LOG2_SPAN - RATIO_LOG2_SPAN))
+        raise AssertionError("unreachable: the histogram sums to total")
 
     @property
     def recall(self) -> float | None:
@@ -82,7 +105,9 @@ class BoxCounts:
         return BoxCounts(self.present + other.present, self.detected + other.detected, self.predicted + other.predicted,
                          self.swapped + other.swapped, self.absent_frames + other.absent_frames,
                          self.absent_frame_alarms + other.absent_frame_alarms,
-                         [a + b for a, b in zip(self.iou_histogram, other.iou_histogram, strict=True)])
+                         [a + b for a, b in zip(self.iou_histogram, other.iou_histogram, strict=True)],
+                         self.detected_true_radius + other.detected_true_radius,
+                         [a + b for a, b in zip(self.radius_ratio_histogram, other.radius_ratio_histogram, strict=True)])
 
 
 def box_counts(predicted: Float32[Tensor, "n 2 3"], probability: Float32[Tensor, "n 2"], target: Float32[Tensor, "n 2 3"],
@@ -98,5 +123,13 @@ def box_counts(predicted: Float32[Tensor, "n 2 3"], probability: Float32[Tensor,
     hand_free: Bool[Tensor, "n"] = (scored & ~present).all(-1)
     ious: Float32[Tensor, "m"] = mine[positive & present]
     histogram: list[int] = torch.histc(ious.float(), bins=IOU_BINS, min=0.0, max=1.0).long().tolist() if ious.numel() else [0] * IOU_BINS
+    true_radius: Float32[Tensor, "n 2 3"] = torch.cat((predicted[..., :2], target[..., 2:]), dim=-1)
+    centred: Bool[Tensor, "n 2"] = positive & present & (square_iou(true_radius * scale, target * scale) >= MIN_IOU)
+    pixels_pred: Float32[Tensor, "n 2 3"] = predicted * scale
+    pixels_true: Float32[Tensor, "n 2 3"] = target * scale
+    inside: Bool[Tensor, "n 2"] = positive & present & ((pixels_pred[..., :2] - pixels_true[..., :2]).norm(dim=-1) < pixels_true[..., 2])
+    ratios: Float32[Tensor, "k"] = torch.log2(pixels_pred[..., 2][inside].clamp(min=1e-6) / pixels_true[..., 2][inside].clamp(min=1e-6))
+    ratio_histogram: list[int] = (torch.histc(ratios.clamp(-RATIO_LOG2_SPAN, RATIO_LOG2_SPAN).float(), bins=RATIO_BINS, min=-RATIO_LOG2_SPAN, max=RATIO_LOG2_SPAN)
+                                  .long().tolist() if ratios.numel() else [0] * RATIO_BINS)
     return BoxCounts(int(present.sum()), int(detected.sum()), int(positive.sum()), int(swapped.sum()), int(hand_free.sum()),
-                     int((positive & hand_free[:, None]).sum()), histogram)
+                     int((positive & hand_free[:, None]).sum()), histogram, int(centred.sum()), ratio_histogram)
