@@ -232,9 +232,9 @@ def decisions_to_labels(info: dict, answer: dict, reviewer: str) -> list[dict]:
     return labels
 
 
-def ask_codex(sheet_jpg: bytes, info: dict, model: str, effort: str, codex_home: str, workdir: Path) -> dict:
+def ask_codex(sheet_jpg: bytes, info: dict, model: str, effort: str, codex_home: str) -> dict:
     """One ``codex exec`` call with the sheet image; returns the parsed structured answer."""
-    with tempfile.TemporaryDirectory(dir=workdir) as tmp_str:
+    with tempfile.TemporaryDirectory(prefix="label-codex-") as tmp_str:
         tmp = Path(tmp_str)
         (tmp / "sheet.jpg").write_bytes(sheet_jpg)
         (tmp / "schema.json").write_text(json.dumps(SCHEMA))
@@ -255,7 +255,7 @@ def review_keyframe(server: str, sid: str, t_ns: int, args: argparse.Namespace, 
     answer: dict = {}
     for attempt in range(3):
         try:
-            answer = ask_codex(jpg, info, args.model, args.effort, args.codex_home, workdir)
+            answer = ask_codex(jpg, info, args.model, args.effort, args.codex_home)
             check_answer(info, answer)
             break
         except (RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired, json.JSONDecodeError) as err:
