@@ -20,7 +20,7 @@ MEgATrack loop (``posekit.labeler.tracker``, ``posekit.labeler.actions``):
   first grid time, 10)
 - ``POST /api/accept_range`` body ``AcceptRange`` -> ``AcceptResult``: the machine box of every (t, cam, side) in
   [t0, t1] without a label becomes a ``tracker`` label (``accepted``, or ``no_hand`` where the machine has none)
-- ``GET  /api/playback/<sid>/<t0_ns>.jpg?n=10`` -> filmstrip, ``n`` rows x 6 cameras with the machine boxes;
+- ``GET  /api/playback/<sid>/<t0_ns>.jpg?n=10&stride=1`` -> filmstrip, ``n`` rows (every ``stride``-th grid time) x 6 cameras with the machine boxes;
   ``.json`` -> ``PlaybackInfo``
 - ``GET  /api/actions/<sid>`` -> ``list[ActionEvent]``; ``GET /api/effort/<sid>`` -> ``EffortSummary``
 
@@ -213,6 +213,8 @@ CellKey: TypeAlias = tuple[int, int]
 """(cam, t_ns) of one filmstrip cell."""
 MAX_PLAYBACK_ROWS: int = 50
 """Most rows one filmstrip may have."""
+MAX_PLAYBACK_STRIDE: int = 10
+"""Most grid steps between two filmstrip rows."""
 
 
 class LabelApp:
@@ -566,25 +568,30 @@ class LabelApp:
 
     # -- playback -------------------------------------------------------------------------------------------
 
-    def _playback_layout(self, segment: Segment, t0_ns: int, n: int) -> PlaybackInfo:
+    def _playback_layout(self, segment: Segment, t0_ns: int, n: int, stride: int = 1) -> PlaybackInfo:
         if not 1 <= n <= MAX_PLAYBACK_ROWS:
             raise ValueError(f"n must be in [1, {MAX_PLAYBACK_ROWS}]")
+        if not 1 <= stride <= MAX_PLAYBACK_STRIDE:
+            raise ValueError(f"stride must be in [1, {MAX_PLAYBACK_STRIDE}]")
         start: int = segment.tracker.index(t0_ns)
-        return playback_info(segment.info.segment_id, segment.info.cams, segment.info.times_ns[start : start + n])
+        return playback_info(segment.info.segment_id, segment.info.cams, segment.info.times_ns[start : start + n * stride : stride])
 
-    def playback_info(self, segment_id: str, t0_ns: int, n: int) -> PlaybackInfo:
-        """Layout of the filmstrip of ``n`` grid times from ``t0_ns`` (no decoding)."""
-        return self._playback_layout(self.segment(segment_id), t0_ns, n)
+    def playback_info(self, segment_id: str, t0_ns: int, n: int, stride: int = 1) -> PlaybackInfo:
+        """Layout of the filmstrip of ``n`` grid times from ``t0_ns``, every ``stride``-th grid time (no decoding)."""
+        return self._playback_layout(self.segment(segment_id), t0_ns, n, stride)
 
-    def playback_jpeg(self, segment_id: str, t0_ns: int, n: int) -> bytes:
-        """The filmstrip with the machine boxes; the next window's cells are decoded in the background."""
+    def playback_jpeg(self, segment_id: str, t0_ns: int, n: int, stride: int = 1) -> bytes:
+        """The filmstrip with the machine boxes; the next window's cells are decoded in the background.
+
+        ``stride`` > 1 shows every ``stride``-th grid time, so one look covers a longer stretch of video.
+        """
         segment: Segment = self.segment(segment_id)
-        info: PlaybackInfo = self._playback_layout(segment, t0_ns, n)
+        info: PlaybackInfo = self._playback_layout(segment, t0_ns, n, stride)
         cells: dict[CellKey, Future[UInt8[ndarray, "ch cw 3"]]] = self._strip_cells(segment, info)
         after: int = segment.tracker.index(info.rows[-1].t_ns) + 1
         if after < len(segment.info.times_ns):
-            self._strip_cells(segment, self._playback_layout(segment, segment.info.times_ns[after], n))
-        track: list[TrackFrame] = segment.tracker.frames(t0_ns, len(info.rows))
+            self._strip_cells(segment, self._playback_layout(segment, segment.info.times_ns[after], n, stride))
+        track: list[TrackFrame] = segment.tracker.frames(t0_ns, (len(info.rows) - 1) * stride + 1)[::stride]
         images: list[list[UInt8[ndarray, "ch cw 3"]]] = [[cells[(cell.cam, row.t_ns)].result() for cell in info.cells] for row in info.rows]
         return filmstrip(info, images, track, segment.info.times_ns[0])
 
@@ -771,10 +778,11 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
                 self._json(app.track(match.group(1), t0_ns, int(query.get("n", ["10"])[0])))
             elif match := ROUTE_PLAYBACK.match(path):
                 rows: int = int(query.get("n", ["10"])[0])
+                stride: int = int(query.get("stride", ["1"])[0])
                 if match.group(3) == "json":
-                    self._json(app.playback_info(match.group(1), int(match.group(2)), rows))
+                    self._json(app.playback_info(match.group(1), int(match.group(2)), rows, stride))
                 else:
-                    self._send(200, app.playback_jpeg(match.group(1), int(match.group(2)), rows), "image/jpeg")
+                    self._send(200, app.playback_jpeg(match.group(1), int(match.group(2)), rows, stride), "image/jpeg")
             elif match := ROUTE_ACTIONS.match(path):
                 self._json(app.actions(match.group(1)))
             elif match := ROUTE_EFFORT.match(path):

@@ -335,7 +335,7 @@ def label_segment(server: str, sid: str, args: argparse.Namespace, workdir: Path
 WATCH_PROMPT = """You are a hand-labeling reviewer watching a playback of a head-worn camera rig (RoboCap), like a person
 watching a tracker's output and stopping only when it fails (MEgATrack's semi-automatic box labelling).
 
-The image is a filmstrip: {rows} consecutive frames, 0.2 s apart, one per row (row label r0, r1, ... at the left), and the
+The image is a filmstrip: {rows} frames, {gap} s apart, one per row (row label r0, r1, ... at the left), and the
 6 cameras of the rig as columns (names in the header): cam_00 left_front, cam_01 right_front, cam_02 left_eye,
 cam_03 right_eye, cam_04 left, cam_05 right. The eye cameras look down at the wearer's hands; the front cameras see them
 at the bottom edge; the side cameras rarely see them. The boxes are the MACHINE's current hand boxes: blue = the
@@ -477,6 +477,7 @@ def megatrack_segment(server: str, sid: str, args: argparse.Namespace, workdir: 
         print(f"[{sid}] resuming at frame {i}/{len(times)} ({len(actions)} earlier actions)", flush=True)
     t_start = time.time()
     n_watch = n_fix = 0
+    stride = 1
 
     def log(event: dict) -> None:
         with log_path.open("a") as fh:
@@ -488,28 +489,35 @@ def megatrack_segment(server: str, sid: str, args: argparse.Namespace, workdir: 
 
     def step(i: int) -> int:
         """Watch one window from grid index i; accept it or fix its first failure. Returns the next index."""
-        nonlocal n_watch, n_fix
-        n = min(window, len(times) - i)
-        jpg = http_bytes(f"{server}/api/playback/{sid}/{times[i]}.jpg?n={n}")
-        watch = ask_with_retries(jpg, WATCH_PROMPT.format(rows=n), WATCH_SCHEMA, args, lambda a, n=n: check_watch(n, a), f"{sid} watch {times[i]}")
+        nonlocal n_watch, n_fix, stride
+        s = stride
+        n = min(window, (len(times) - i - 1) // s + 1)
+        jpg = http_bytes(f"{server}/api/playback/{sid}/{times[i]}.jpg?n={n}&stride={s}")
+        prompt = WATCH_PROMPT.format(rows=n, gap=f"{0.2 * s:.1f}")
+        watch = ask_with_retries(jpg, prompt, WATCH_SCHEMA, args, lambda a, n=n: check_watch(n, a), f"{sid} watch {times[i]}")
         n_watch += 1
-        log({"action": "watch", "t_ns": times[i], "rows": n, "answer": watch})
+        log({"action": "watch", "t_ns": times[i], "rows": n, "stride": s, "answer": watch})
         failure = watch["failure"]
         if failure is None:
-            accept(i, i + n - 1)
-            return i + n
+            last = i + (n - 1) * s
+            accept(i, last)
+            stride = min(stride + 1, args.max_stride)  # the track holds: look at a longer stretch next time
+            return last + 1
+        stride = 1
         r: int = failure["row"]
         if r > 0:
-            accept(i, i + r - 1)
-        t_f: int = times[i + r]
+            accept(i, i + (r - 1) * s)
+            if s > 1:
+                return i + (r - 1) * s + 1  # re-watch the unseen frames before the failure at full rate
+        t_f: int = times[i + r * s]
         fails_at[t_f] = fails_at.get(t_f, 0) + 1
         if fails_at[t_f] > 2:
             # the reviewer keeps stopping on the same frame after fixing it twice: reject that view there and go on
             json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_f, "labels": [
                 {"cam": failure["cam"], "side": failure["side"], "status": "rejected", "box": None, "source": "agent", "reviewer": args.reviewer}]})
             log({"action": "reject_after_repeats", "t_ns": t_f, "failure": failure})
-            accept(i + r, i + r)
-            return i + r + 1
+            accept(i + r * s, i + r * s)
+            return i + r * s + 1
         sheet = json_object(f"{server}/api/sheet/{sid}/{t_f}.json")
         sheet_jpg = http_bytes(f"{server}/api/sheet/{sid}/{t_f}.jpg")
         prompt = FIX_PROMPT.format(cam=failure["cam"], side=failure["side"], kind=failure["kind"], proposals=proposal_lines(sheet))
@@ -519,9 +527,9 @@ def megatrack_segment(server: str, sid: str, args: argparse.Namespace, workdir: 
         log({"action": "fix", "t_ns": t_f, "failure": failure, "answer": fix, "n_labels": len(labels)})
         if labels:
             json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_f, "labels": labels})
-            return i + r  # watch again from the fixed frame; propagation now starts from the fix
-        accept(i + r, i + r)  # on a closer look nothing was wrong
-        return i + r + 1
+            return i + r * s  # watch again from the fixed frame; propagation now starts from the fix
+        accept(i + r * s, i + r * s)  # on a closer look nothing was wrong
+        return i + r * s + 1
 
     errors_in_a_row = 0
     while i < len(times):
@@ -551,7 +559,8 @@ def main() -> None:
     parser.add_argument("--server", default="http://dgx-spark:9898")
     parser.add_argument("--segment", action="append", default=[], help="segment id; repeat; default = every segment")
     parser.add_argument("--mode", choices=["megatrack", "keyframes"], default="megatrack")
-    parser.add_argument("--window", type=int, default=10, help="megatrack: grid frames per playback window (5 fps)")
+    parser.add_argument("--window", type=int, default=10, help="megatrack: filmstrip rows per playback window")
+    parser.add_argument("--max-stride", type=int, default=3, help="megatrack: grid steps between rows once windows keep passing (1 = every 5 fps frame)")
     parser.add_argument("--model", default="gpt-6-astra")
     parser.add_argument("--effort", default="medium")
     parser.add_argument("--reviewer", default="astra")
