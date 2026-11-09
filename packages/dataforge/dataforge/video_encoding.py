@@ -408,11 +408,63 @@ def transcode_mp4(
     return written
 
 
-def turn_filter(turns: int) -> str:
-    """An ffmpeg filter-chain suffix that turns frames ``turns`` quarter turns clockwise (empty for none)."""
-    if turns not in (0, 1, 2, 3):
-        raise ValueError("turns must be 0, 1, 2 or 3")
-    return ("", ",transpose=clock", ",transpose=clock,transpose=clock", ",transpose=cclock")[turns]
+TRANSPOSE_CUDA: tuple[str, ...] = ("", "clock", "reversal", "cclock")
+"""``transpose_cuda`` direction for 0-3 clockwise quarter turns (a half turn is ``reversal``)."""
+
+
+def gpu_tile_graph(crops: list[tuple[int, int, int, int]], turns: list[int], *, crop_on_gpu: bool) -> str:
+    """One filter graph from NVDEC frames to one CUDA frame per tile, each turned upright.
+
+    ``crop_on_gpu`` crops the CUDA frames in place (the crop rides on the frame; ``scale_cuda`` or ``transpose_cuda`` applies it);
+    otherwise the decoded frame comes down once, is cropped on the CPU, and each tile goes back up for its turn and its encode.
+    """
+    if len(crops) != len(turns) or any(turn not in (0, 1, 2, 3) for turn in turns):
+        raise ValueError("one turn count in 0-3 per crop required")
+    head: str = "[0:v]" + ("" if crop_on_gpu else "hwdownload,format=nv12,") + f"split={len(crops)}" + "".join(f"[tile{i}]" for i in range(len(crops)))
+    chains: list[str] = [head]
+    for index, (crop, turn) in enumerate(zip(crops, turns, strict=True)):
+        stages: list[str] = ["crop=" + ":".join(str(value) for value in crop)]
+        if not crop_on_gpu:
+            stages.append("hwupload_cuda")
+        stages.append(f"transpose_cuda=dir={TRANSPOSE_CUDA[turn]}" if turn else ("scale_cuda=format=nv12" if crop_on_gpu else ""))
+        chains.append(f"[tile{index}]" + ",".join(stage for stage in stages if stage) + f"[cam{index}]")
+    return ";".join(chains)
+
+
+def transcode_tiles_on_gpu(
+    source: Path,
+    outputs: list[Path],
+    *,
+    crops: list[tuple[int, int, int, int]],
+    turns: list[int],
+    fps: int,
+    frames: int,
+    gop: int,
+    cq: int,
+    crop_on_gpu: bool = False,
+) -> None:
+    """One GPU pass per source: NVDEC decodes the mosaic once, each tile is cropped and turned upright, NVENC encodes each tile once.
+
+    The encoder sessions of one call are reserved together (``run_nvenc``), so concurrent calls queue for encoder slots instead of
+    failing at the driver's session limit. Output order and frame counts survive.
+    """
+    if not outputs or len(outputs) != len(crops) or frames <= 0:
+        raise ValueError("positive frame count and one crop per output required")
+    binary: Path = resolve_ffmpeg()
+    require_av1_nvenc(binary)
+    command: list[str] = [str(binary), "-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                          "-r", str(fps), "-i", str(source), "-filter_complex", gpu_tile_graph(crops, turns, crop_on_gpu=crop_on_gpu)]
+    for index, output in enumerate(outputs):
+        command.extend(["-map", f"[cam{index}]", "-an", "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq), "-frames:v", str(frames), str(output)])
+    result: subprocess.CompletedProcess[str] = run_nvenc(
+        lambda fds: subprocess.run(command, pass_fds=fds, capture_output=True, text=True, check=False), slots=len(outputs)
+    )
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg exited {result.returncode} while transcoding {source} on the GPU:\n{result.stderr[-4000:]}")
+    for output in outputs:
+        written: int = mp4_frame_count(output)
+        if written != frames:
+            raise ValueError(f"{output} holds {written} samples, expected {frames}")
 
 
 def transcode_crops(
@@ -424,7 +476,6 @@ def transcode_crops(
     frames: int,
     gop: int,
     cq: int,
-    turns: list[int] | None = None,
 ) -> None:
     """Share one CPU decode across cropped gray outputs, batching at the NVENC slot limit.
 
@@ -434,8 +485,6 @@ def transcode_crops(
     """
     if not outputs or len(outputs) != len(crops) or frames <= 0:
         raise ValueError("positive frame count and one crop per output required")
-    if turns is not None and len(turns) != len(crops):
-        raise ValueError("one turn count per crop required")
     if any(min(crop[:2]) <= 0 or min(crop[2:]) < 0 for crop in crops):
         raise ValueError("crop requires positive dimensions and nonnegative offsets")
     slots: int = nvenc_slot_count()
@@ -446,8 +495,7 @@ def transcode_crops(
         filters: list[str] = [f"[0:v]split={len(batch)}" + "".join(f"[tile{i}]" for i in range(len(batch)))]
         command: list[str] = [str(binary), "-hide_banner", "-loglevel", "error", "-y", "-filter_complex_threads", "1", "-r", str(fps), "-i", str(source)]
         for index, crop in enumerate(crops[start:start + slots]):
-            turn: str = turn_filter(turns[start + index]) if turns is not None else ""
-            filters.append(f"[tile{index}]crop=" + ":".join(str(value) for value in crop) + f"{turn},format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}[cam{index}]")
+            filters.append(f"[tile{index}]crop=" + ":".join(str(value) for value in crop) + f",format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}[cam{index}]")
         command.extend(["-filter_complex", ";".join(filters)])
         for index, output in enumerate(batch):
             command.extend(["-map", f"[cam{index}]", "-an", "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq), "-frames:v", str(frames), str(output)])

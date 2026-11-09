@@ -8,7 +8,6 @@ from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
 from dataforge.datasets.umetrack_layers import fisheye_camera
 from dataforge.datasets.umetrack_source import Camera, quarter_turn_rotation, quarter_turns_from_angle, turn_camera
-from dataforge.video_encoding import turn_filter
 
 REAL: Camera = Camera(ImageSizeX=636, ImageSizeY=480, fx=237.3, fy=237.5, cx=316.8, cy=239.6, DistortionModel="FishEye62",
                       k1=-0.0207, k2=0.1058, k3=-0.0927, k4=0.0332, p1=-0.00073, p2=0.00056, k5=-0.0066, k6=0.0011)
@@ -47,5 +46,28 @@ def test_the_release_angles_name_the_turns_and_leave_no_roll() -> None:
     assert [quarter_turns_from_angle(a) for a in (0.0, 90.0, 90.0, 180.0)] == [0, 3, 3, 2]
 
 
-def test_ffmpeg_turns_are_transposes() -> None:
-    assert [turn_filter(k) for k in range(4)] == ["", ",transpose=clock", ",transpose=clock,transpose=clock", ",transpose=cclock"]
+def test_one_gpu_graph_crops_turns_and_names_every_camera() -> None:
+    from dataforge.video_encoding import gpu_tile_graph
+
+    crops = [(636, 480, 636 * k, 0) for k in range(4)]
+    downloaded = gpu_tile_graph(crops, [0, 3, 3, 2], crop_on_gpu=False)
+    assert downloaded == (
+        "[0:v]hwdownload,format=nv12,split=4[tile0][tile1][tile2][tile3];"
+        "[tile0]crop=636:480:0:0,hwupload_cuda[cam0];"
+        "[tile1]crop=636:480:636:0,hwupload_cuda,transpose_cuda=dir=cclock[cam1];"
+        "[tile2]crop=636:480:1272:0,hwupload_cuda,transpose_cuda=dir=cclock[cam2];"
+        "[tile3]crop=636:480:1908:0,hwupload_cuda,transpose_cuda=dir=reversal[cam3]"
+    )
+    on_gpu = gpu_tile_graph(crops[:2], [0, 1], crop_on_gpu=True)
+    assert on_gpu == "[0:v]split=2[tile0][tile1];[tile0]crop=636:480:0:0,scale_cuda=format=nv12[cam0];[tile1]crop=636:480:636:0,transpose_cuda=dir=clock[cam1]"
+
+
+def test_a_turn_rebuild_can_skip_the_world_space_layers() -> None:
+    """The upright turn changes the base layer (video, cameras) and the projections; hand_pose and hand_mesh are world-space."""
+    from dataforge import paths
+    from dataforge.datasets.umetrack import UmetrackConfig
+    from dataforge.identity import SequenceIdentity
+
+    dataset = UmetrackConfig(only_layers=(paths.BASE_LAYER, paths.PROJECTIONS_LAYER)).setup()
+    identity = SequenceIdentity("umetrack", ("real", "hand_hand", "training", "user_03", "recording_05"))
+    assert set(dataset.targets(identity)) == {paths.BASE_LAYER, paths.PROJECTIONS_LAYER}

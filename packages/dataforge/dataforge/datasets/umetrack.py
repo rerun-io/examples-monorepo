@@ -31,12 +31,24 @@ class UmetrackConfig(FrameLimitedConfig):
     """Raw recording root, the source repository's ``raw_data/`` inside the dataset directory; ``download()`` fills it and conversion only reads it."""
     sequences: tuple[str, ...] | None = None
     """Domain/interaction/split/user/recording keys; None selects all."""
+    only_layers: tuple[str, ...] | None = None
+    """Convert only these layers, e.g. ``base projections`` to apply the upright turn: hand_pose and hand_mesh are world-space and
+    do not change with it. None converts every layer."""
 
 
 class UmetrackDataset(DataforgeDataset[UmetrackConfig, Path]):
     """One catalog dataset for real and synthetic captures."""
 
     layers: tuple[str, ...] = (paths.BASE_LAYER, paths.HAND_POSE_LAYER, paths.HAND_MESH_LAYER, paths.PROJECTIONS_LAYER)
+
+    def targets(self, identity: SequenceIdentity) -> dict[str, Path]:
+        targets: dict[str, Path] = super().targets(identity)
+        if self.config.only_layers is None:
+            return targets
+        unknown: set[str] = set(self.config.only_layers) - set(targets)
+        if unknown:
+            raise ValueError(f"umetrack has no layers {sorted(unknown)}; it writes {sorted(targets)}")
+        return {layer: path for layer, path in targets.items() if layer in self.config.only_layers}
 
     def discover(self) -> list[tuple[SequenceIdentity, Path]]:
         """Pair every recording whose label and video are both present; a selected key must be."""

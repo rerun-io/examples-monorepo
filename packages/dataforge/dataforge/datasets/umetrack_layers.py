@@ -20,7 +20,7 @@ from dataforge.datasets.umetrack_source import FISHEYE62, Camera, SequenceData
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.umetrack_hands import log_hand_meshes
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, transcode_crops, work_dir
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, transcode_tiles_on_gpu, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
 
@@ -135,9 +135,10 @@ def write_base(recording: rr.RecordingStream, scene: SequenceData, identity: Seq
         clips: list[Path] = [work / f"cam_{index:02}.mp4" for index in range(4)]
 
         with timer.stage("transcode"):
-            transcode_crops(
-                scene.source.with_suffix(".mp4"), clips, crops=[scene.crop(index) for index in range(4)],
-                gop=AV1_GOP, cq=AV1_CQ, fps=scene.fps, frames=scene.count, turns=list(scene.quarter_turns),
+            # One GPU pass from the raw stacked MP4: NVDEC once, crop and turn each tile upright, NVENC each camera once.
+            transcode_tiles_on_gpu(
+                scene.source.with_suffix(".mp4"), clips, crops=[scene.crop(index) for index in range(4)], turns=list(scene.quarter_turns),
+                gop=AV1_GOP, cq=AV1_CQ, fps=scene.fps, frames=scene.count,
             )
         for index, clip in enumerate(clips):
             logging_toolkit.log_video_stream(
