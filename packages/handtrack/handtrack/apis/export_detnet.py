@@ -19,6 +19,7 @@ from serde.json import to_json
 from handtrack.apis.export_nets_onnx import DetNetGraph, GraphRecord, check_graph, export_graph, read_checked_state, torch_detnet
 from handtrack.data.array_table import read_arrays, write_arrays
 from handtrack.models.detnet import DetNetF
+from handtrack.train.safetensors_checkpoint import file_sha256, load_model
 
 OUTPUTS: list[str] = ["center", "radius", "presence_logit"]
 
@@ -36,7 +37,7 @@ class DetNetExportReport:
 
 @dataclass(frozen=True, slots=True)
 class ExportDetNetConfig:
-    """Export one DetNet-F weights file (``*.weights.pt`` with its ``.sha256`` sidecar)."""
+    """Export one DetNet-F weights file: ``*.weights.pt`` with its ``.sha256`` sidecar, or a ``model.safetensors``."""
 
     weights: Path
     heldout: Path
@@ -93,9 +94,14 @@ def main(config: ExportDetNetConfig) -> DetNetExportReport:
     config.out_dir.mkdir(parents=True, exist_ok=True)
     if not config.heldout.exists():
         sample_heldout(config.heldout, config.sample_per_dataset, config.upright, config.catalog_url)
-    state, sha256 = read_checked_state(config.weights)
     model: DetNetF = DetNetF()
-    model.load_state_dict(state)
+    sha256: str
+    if config.weights.suffix == ".safetensors":
+        load_model(config.weights, model)
+        sha256 = file_sha256(config.weights)
+    else:
+        state, sha256 = read_checked_state(config.weights)
+        model.load_state_dict(state)
     model = model.eval()
     frames: dict[str, ndarray] = read_arrays(config.heldout)
     pooled: UInt8[ndarray, "n 120 160"] = frames["pooled_u8"]
