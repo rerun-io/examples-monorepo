@@ -55,3 +55,18 @@ def test_counts_add_up_across_batches() -> None:
     total = hit + alarm
     assert (total.present, total.detected, total.predicted, total.absent_frames, total.absent_frame_alarms) == (1, 1, 2, 1, 1)
     assert total.precision == 0.5
+
+
+def test_a_centred_box_twice_too_big_is_found_only_at_low_iou_or_with_the_true_radius() -> None:
+    # Squares of side 200 and 100 on one centre: IoU = 1 / 4. log2(r_pred / r_true) = +1.
+    counts = frame([circle(200, 240, 100), NONE], [0.9, 0.1], [circle(200, 240, 50), NONE], [1.0, 0.0])
+    assert counts.recall == 0.0
+    assert counts.recall_at(0.2) == 1.0 and counts.recall_at(0.3) == 0.0
+    assert counts.detected_true_radius == 1
+    assert counts.radius_ratio_percentile(0.5) == pytest.approx(2.0, rel=0.08)
+
+
+def test_a_box_outside_the_true_circle_adds_no_radius_ratio() -> None:
+    counts = frame([circle(320, 240, 50), NONE], [0.9, 0.1], [circle(200, 240, 50), NONE], [1.0, 0.0])
+    assert sum(counts.radius_ratio_histogram) == 0
+    assert counts.radius_ratio_percentile(0.5) is None

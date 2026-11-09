@@ -206,7 +206,9 @@ def main(config: DetectorEvalConfig) -> DetectorEvalReport:
         for name in config.names:
             both: BoxCounts = totals[name].both
             print(f"  {name:>12}: recall {both.recall} precision {both.precision} side {both.side_accuracy} "
-                  f"median IoU {both.median_iou} FA/1k {both.false_alarms_per_1k}", flush=True)
+                  f"median IoU {both.median_iou} FA/1k {both.false_alarms_per_1k} recall@0.1/0.3 {both.recall_at(0.1)}/{both.recall_at(0.3)} "
+                  f"true-radius recall {both.detected_true_radius / both.present if both.present else None} "
+                  f"r ratio p10/50/90 {[both.radius_ratio_percentile(q) for q in (0.1, 0.5, 0.9)]}", flush=True)
     report: DetectorEvalReport = DetectorEvalReport(weights, results)
     config.out_dir.mkdir(parents=True, exist_ok=True)
     (config.out_dir / "detector_eval.json").write_text(to_json(report))
