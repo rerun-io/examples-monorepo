@@ -167,14 +167,9 @@ The calibration command also rejects every decoded benchmark frame by hash.
 Set `EgoHandFastConfig.calibration` to use a separate calibration record. Quantization,
 head export, and engine building are library code; no preparation scripts are required.
 
-`catalog_egohand_configs()` exposes the five-dataset calibrated preset:
-Spark **153.31 → 14.98 ms/frame (10.23x)**, all 45 accuracy bands passing.
-Use `backbone_precision="bf16"` on Ampere; the 3060 result is **6.08x**.
-Paired CLI roles are `egohand-catalog` and `egohand-catalog-bf16`.
-The [Spark/Ampere experiment guide](docs/egohand-spark.md) covers the offline
-five-dataset median/p95 protocol, precision controls, shared-GPU timing audit,
-and complete Rerun evidence. Its cached benchmark uses the default model
-classes as its reference.
+`catalog_egohand_configs()` is the five-dataset calibrated preset (CLI role `egohand-catalog`):
+DGX Spark **153.31 → 14.98 ms/frame (10.23x)** with all 45 accuracy bands passing. See
+[EgoHand fast path on DGX Spark](docs/egohand-spark.md) for the results and how to reproduce them.
 
 **Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera
 `cam_00`) and three UmeTrack test segments (`cam_01`), every 10th frame, at most 40

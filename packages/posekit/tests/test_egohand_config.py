@@ -11,12 +11,12 @@ from trtkit import TensorRtBackendConfig
 
 from posekit.models import HandDetectorConfig, HandPose3dConfig
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, catalog_egohand_configs, fast_egohand_configs
 
 
 def test_fast_role_subcommands_select_the_calibrated_config() -> None:
-    detector: object = tyro.cli(HandDetectorConfig, args=["egohand-fast", "tensorrt"])
-    pose: object = tyro.cli(HandPose3dConfig, args=["egohand-fast"])
+    detector = tyro.cli(HandDetectorConfig, args=["egohand-fast", "tensorrt"])
+    pose = tyro.cli(HandPose3dConfig, args=["egohand-fast"])
     assert isinstance(detector, EgoHandDetectorConfig)
     assert isinstance(detector.backend, TensorRtBackendConfig)
     assert detector.gpu_preprocessing and detector.fp16_trunk
@@ -45,7 +45,7 @@ def test_fast_role_quantizes_the_asset_tree_bf16_backbone(tmp_path: Path, monkey
     monkeypatch.setattr(egohand_fast, "export_backbone_once", export_missing)
     monkeypatch.setattr(egohand_fast, "quantize_backbone", quantize)
     _, config = fast_egohand_configs(tmp_path)
-    quantized: Path = egohand_fast.export_quantized_backbone_once(config, tmp_path / "weights", tmp_path / "soma", load_calibration())
+    quantized = egohand_fast.export_quantized_backbone_once(config, tmp_path / "weights", tmp_path / "soma", load_calibration())
     assert sources == [tmp_path / "dinov3-bf16.onnx"]
     assert quantized.parent == tmp_path / "engines" and quantized.is_file()
 
@@ -60,11 +60,15 @@ def test_catalog_cli_selects_measured_paired_roles(preset: str, precision: str, 
     assert pose.backbone_precision == precision and pose.batch_size == 2
 
 
-def test_cached_benchmark_can_run_the_public_catalog_preset() -> None:
-    from posekit.apis.hands_cached_bench import Config
-
-    config: Config = tyro.cli(Config, args=["--model", "catalog", "--precision", "bf16", "--no-measure-timing"])
-    assert config.model == "catalog" and config.precision == "bf16" and not config.measure_timing
+def test_catalog_preset_is_the_measured_configuration() -> None:
+    detector, pose = catalog_egohand_configs()
+    assert isinstance(detector.backend, TensorRtBackendConfig)
+    assert detector.backend.max_batch_size == detector.backend.opt_batch_size == 1
+    assert detector.gpu_preprocessing and not detector.fp16_trunk
+    assert detector.fp8_calibration is not None and detector.fp8_calibration.is_file()
+    assert pose.backbone_precision == "nvfp4" and pose.fp8_tail_blocks == 24
+    assert pose.batch_size == pose.backbone_backend.max_batch_size == pose.backbone_backend.opt_batch_size == 2
+    assert pose.calibration is not None and pose.calibration.is_file()
 
 
 def test_detector_rejects_two_precision_choices(tmp_path: Path) -> None:

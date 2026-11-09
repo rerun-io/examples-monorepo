@@ -1296,12 +1296,7 @@ description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-sta
 [feature.posekit-hands.tasks.posekit-hands-cached-bench]
 cmd = "python tools/apps/hands_cached_bench.py"
 cwd = "packages/posekit"
-description = "Fixed native-RRD hand accuracy and isolated batch-one latency, with shared-GPU audit and full Rerun evidence"
-
-[feature.posekit-hands.tasks.posekit-hands-cached-calibrate]
-cmd = "python tools/apps/hands_cached_calibrate.py"
-cwd = "packages/posekit"
-description = "Calibrate detector and pose QDQ from disjoint native RRDs; reject decoded evaluation-frame overlap"
+description = "EgoHand accuracy and batch-one latency on a fixed native-RRD cache; --baseline checks the 45 accuracy bands"
 
 [feature.posekit-hands.tasks.posekit-egohand-calibrate]
 cmd = "python tools/apps/egohand_calibrate.py"

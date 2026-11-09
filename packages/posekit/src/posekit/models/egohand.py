@@ -98,8 +98,6 @@ def resolve_hand_identities(detections: HandDetections, frame_count: int) -> Han
 
 EgoHandStage: TypeAlias = Literal["preprocessing", "batch_assembly", "model_forward", "post_forward", "adaptive_smoothing", "backbone", "head", "soma"]
 """Stage names of ``stage_ms``: upstream's per-frame stages plus the CUDA-event-timed backbone, head and SOMA."""
-DetectorFp8Scope: TypeAlias = Literal["all", "backbone", "late_backbone", "projections"]
-"""Detector convolutions in FP8: all, residual backbone, final residual stage, or the three encoder input projections."""
 UPSTREAM_STAGES: dict[PerfStage, EgoHandStage] = {
     PerfStage.PREPROCESSING: "preprocessing",
     PerfStage.BATCH_ASSEMBLY: "batch_assembly",
@@ -142,10 +140,7 @@ class EgoHandDetectorConfig:
     """Resize decoded CUDA frames in place of the reference PIL host round trip."""
 
     fp8_calibration: Path | None = None
-    """Disjoint detector activation ranges; enables FP8 convolutions with an FP32 decoding tail."""
-
-    fp8_scope: DetectorFp8Scope = "all"
-    """Quantize all, residual backbone, final residual stage, or three encoder feature projections."""
+    """Detector activation ranges; set, the three encoder input projections run in FP8, the other convolutions in FP16, decoding in FP32."""
 
     def __post_init__(self) -> None:
         if self.fp16_trunk and self.fp8_calibration is not None:
@@ -175,7 +170,7 @@ class EgoHandDetector(HandDetector):
                 raise ValueError("The FP8 detector requires a TensorRT backend.")
             if torch.cuda.get_device_capability()[0] < 9:
                 raise ValueError("The FP8 detector requires an FP8-capable CUDA GPU.")
-            weights = quantized_detector_path(weights, config.fp8_calibration, config.backend.cache_dir, scope=config.fp8_scope)
+            weights = quantized_detector_path(weights, config.fp8_calibration, config.backend.cache_dir)
         elif config.fp16_trunk:
             from trtkit.onnx_precision import fp16_trunk
 

@@ -51,9 +51,7 @@ if TYPE_CHECKING:
 else:
     EgoHand = torch.nn.Module
 
-EgoHandBackbonePrecision: TypeAlias = Literal["bf16", "fp8", "nvfp4"]
-"""DINO backbone precision: BF16 for Ampere, all-FP8 linears, or the calibrated NVFP4/FP8 hybrid."""
-CACHED_FAST_BACKBONE_ONNX: Path =DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
+CACHED_FAST_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Base path of the calibrated NVFP4 DINOv3; the calibration digest and FP8 tail count are appended to its stem."""
 CACHED_HEAD_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-head-bf16-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Both learned heads with their virtual-camera conditioning, exported in BF16."""
@@ -92,11 +90,8 @@ class EgoHandFastConfig:
     hf_soma_revision: str = SOMA_REVISION
     """Pinned commit of that repo."""
 
-    backbone_precision: EgoHandBackbonePrecision = "nvfp4"
-    """BF16 for Ampere, all-FP8 linears, or the calibrated NVFP4/FP8 hybrid."""
-
-    fp8_prefix_blocks: int = 0
-    """Initial DINO blocks retained in FP8 to protect early representations (0..32)."""
+    backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4"
+    """The calibrated NVFP4 backbone with its FP8 tail, or unquantized BF16 for GPUs without NVFP4 (Ampere)."""
 
     def setup(self) -> "FastEgoHandPredictor":
         """Export or reuse the calibrated artifacts and construct the CUDA predictor."""
@@ -109,25 +104,16 @@ def export_quantized_backbone_once(config: EgoHandFastConfig, weights: Path, som
     Returns:
         The quantized backbone, named by its calibration digest and FP8 tail count.
     """
-    onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks, fp8_prefix_blocks=config.fp8_prefix_blocks)
+    onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
 
     def quantize() -> None:
         export_backbone_once(
             weights, soma, config.backbone_source_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size
         )
-        quantize_backbone(config.backbone_source_onnx, onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks, fp8_prefix_blocks=config.fp8_prefix_blocks)
+        quantize_backbone(config.backbone_source_onnx, onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
 
     build_once(onnx, quantize)
     return onnx
-
-
-def export_fast_backbone_once(config: EgoHandFastConfig, weights: Path, soma: Path) -> Path:
-    """Export the requested precision, leaving BF16 independent of calibration assets."""
-    if config.backbone_precision == "bf16":
-        export_backbone_once(weights, soma, config.backbone_source_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size)
-        return config.backbone_source_onnx
-    quantized: EgoHandFastConfig = replace(config, fp8_tail_blocks=32, fp8_prefix_blocks=0) if config.backbone_precision == "fp8" else config
-    return export_quantized_backbone_once(quantized, weights, soma, load_calibration(config.calibration))
 
 
 def _export_head_once(model: EgoHand, onnx: Path, max_batch_size: int) -> None:
@@ -159,16 +145,19 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_soma import prepare_cuda_soma
         from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
-        major, _ = torch.cuda.get_device_capability()
-        if (config.backbone_precision == "fp8" and major < 9) or (config.backbone_precision == "nvfp4" and major < 10):
-            raise ValueError(f"{config.backbone_precision} is unsupported on this CUDA device; use backbone_precision='bf16'.")
+        if config.backbone_precision == "nvfp4" and torch.cuda.get_device_capability()[0] < 10:
+            raise ValueError("NVFP4 needs a Blackwell GPU; use backbone_precision='bf16'.")
         self.config: EgoHandFastConfig = config
         self.profile_stages: bool = False
         """Record per-frame stage times in ``stage_ms``; off, inference adds no synchronization."""
         self.stage_ms: dict[EgoHandStage, list[float]] = {}
         weights: Path = egohand_weights_path(config.weights, config.hf_egohand_repo_id, config.hf_egohand_revision)
         soma: Path = soma_assets_path(config.soma_assets, config.hf_soma_repo_id, config.hf_soma_revision)
-        backbone_onnx: Path = export_fast_backbone_once(config, weights, soma)
+        if config.backbone_precision == "bf16":
+            export_backbone_once(weights, soma, config.backbone_source_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size)
+            backbone_onnx: Path = config.backbone_source_onnx
+        else:
+            backbone_onnx = export_quantized_backbone_once(config, weights, soma, load_calibration(config.calibration))
         loaded, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
         model: EgoHand = loaded.eval().to("cuda")
         self.faces: dict[HandSide, Tensor] = soma_faces(model)
@@ -285,32 +274,29 @@ def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorCon
 
 
 def catalog_egohand_configs(
-    assets: Path | None = None, *, backbone_precision: EgoHandBackbonePrecision = "nvfp4"
+    assets: Path | None = None, *, backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4"
 ) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
-    """The five-dataset calibrated, batch-one detector and full two-hand pose stack.
+    """The five-dataset calibrated stack: batch-one detector and two-hand pose batches, full outputs.
 
-    NVFP4 uses eight NVFP4 blocks, twenty-four FP8 blocks, and three FP8
-    detector feature projections. BF16 supports Ampere without quantization;
-    the all-FP8 alternative also keeps the detector in FP16. These presets
-    retain the released weights, thresholds, image resolution and full outputs.
+    NVFP4 (Blackwell): first 8 DINO blocks NVFP4, last 24 FP8, and the detector's three
+    encoder input projections FP8. BF16 (Ampere): unquantized pose and an FP16 detector.
     """
     detector, pose = fast_egohand_configs(assets)
     assert isinstance(detector.backend, TensorRtBackendConfig)
     calibration: Path = Path(__file__).resolve().parents[1] / "assets"
-    quantize_detector: bool = backbone_precision == "nvfp4"
+    quantize: bool = backbone_precision == "nvfp4"
     return (
         replace(
             detector,
             backend=replace(detector.backend, max_batch_size=1, opt_batch_size=1),
-            fp16_trunk=not quantize_detector,
-            fp8_calibration=calibration / "egohand_detector_catalog.rrd" if quantize_detector else None,
-            fp8_scope="projections",
+            fp16_trunk=not quantize,
+            fp8_calibration=calibration / "egohand_detector_catalog.rrd" if quantize else None,
         ),
         replace(
             pose,
             backbone_precision=backbone_precision,
             fp8_tail_blocks=24,
-            calibration=calibration / "egohand_catalog.rrd" if backbone_precision != "bf16" else None,
+            calibration=calibration / "egohand_catalog.rrd" if quantize else None,
             batch_size=2,
             backbone_backend=replace(pose.backbone_backend, max_batch_size=2, opt_batch_size=2),
         ),
