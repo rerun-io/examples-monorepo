@@ -143,19 +143,44 @@ def http_bytes(url: str, timeout: float = 120.0, attempts: int = 8) -> bytes:
     raise AssertionError("unreachable")
 
 
-def sheet_to_native(cells: list[dict], box: list[float]) -> tuple[int, list[float]] | None:
-    """Map a sheet-pixel box to (cam, native box) using the cell that holds its centre; None outside every cell."""
+def sheet_to_native(cells: list[dict], cam: int, box: list[float]) -> list[float] | None:
+    """Map a sheet-pixel box inside camera ``cam``'s cell to native pixels, clipped to that image.
+
+    None when the box's centre is not in that camera's cell (the answer contradicts itself), or when the
+    clipped box is smaller than 4 px on a side.
+    """
+    cell = next((c for c in cells if c["cam"] == cam), None)
+    if cell is None or not all(isinstance(v, int | float) and v == v and abs(v) < 1e6 for v in box):
+        return None
     cx: float = (box[0] + box[2]) / 2
     cy: float = (box[1] + box[3]) / 2
-    for cell in cells:
-        if cell["x"] <= cx < cell["x"] + cell["w"] and cell["y"] <= cy < cell["y"] + cell["h"]:
-            s: float = cell["scale"]
-            x0 = (min(box[0], box[2]) - cell["x"]) / s
-            y0 = (min(box[1], box[3]) - cell["y"]) / s
-            x1 = (max(box[0], box[2]) - cell["x"]) / s
-            y1 = (max(box[1], box[3]) - cell["y"]) / s
-            return cell["cam"], [x0, y0, x1, y1]
-    return None
+    if not (cell["x"] <= cx < cell["x"] + cell["w"] and cell["y"] <= cy < cell["y"] + cell["h"]):
+        return None
+    s: float = cell["scale"]
+    width: float = cell["w"] / s
+    height: float = cell["h"] / s
+    x0 = min(max((min(box[0], box[2]) - cell["x"]) / s, 0.0), width)
+    y0 = min(max((min(box[1], box[3]) - cell["y"]) / s, 0.0), height)
+    x1 = min(max((max(box[0], box[2]) - cell["x"]) / s, 0.0), width)
+    y1 = min(max((max(box[1], box[3]) - cell["y"]) / s, 0.0), height)
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def check_answer(info: dict, answer: dict) -> None:
+    """Raise ValueError unless the answer judges every numbered proposal exactly once (no unknown numbers).
+
+    An answer that skips a proposal would turn that hand into a confident ``no_hand``; retry instead.
+    """
+    expected: list[int] = sorted(p["k"] for p in info["proposals"])
+    got: list[int] = sorted(v["k"] for v in answer.get("verdicts", []))
+    if got != expected:
+        raise ValueError(f"verdicts for {got}, expected exactly {expected}")
+    cams: set[int] = {c["cam"] for c in info["cells"]}
+    for miss in answer.get("missed", []):
+        if miss["cam"] not in cams:
+            raise ValueError(f"missed hand in unknown camera {miss['cam']}")
 
 
 def decisions_to_labels(info: dict, answer: dict, reviewer: str) -> list[dict]:
@@ -182,20 +207,17 @@ def decisions_to_labels(info: dict, answer: dict, reviewer: str) -> list[dict]:
             other = "left" if side == "right" else "right"
             offer(cam, other, prop["score"], {"status": "corrected", "box": box, "source": "agent"})
         elif v == "loose" and verdict.get("box"):
-            mapped = sheet_to_native(cells, verdict["box"])
-            if mapped is not None and mapped[0] == cam:
-                x0, y0, x1, y1 = mapped[1]
-                if x1 > x0 and y1 > y0:
-                    offer(cam, side, prop["score"], {"status": "corrected", "box": {"x0": x0, "y0": y0, "x1": x1, "y1": y1}, "source": "agent"})
+            fixed = sheet_to_native(cells, cam, verdict["box"])
+            if fixed is not None:
+                offer(cam, side, prop["score"], {"status": "corrected", "box": dict(zip(("x0", "y0", "x1", "y1"), fixed, strict=True)), "source": "agent"})
     for miss in answer.get("missed", []):
-        mapped = sheet_to_native(cells, miss["box"])
-        if mapped is None or mapped[0] in unjudgeable:
+        if miss["cam"] in unjudgeable:
             continue
-        x0, y0, x1, y1 = mapped[1]
-        if x1 - x0 < 4 or y1 - y0 < 4:
+        drawn = sheet_to_native(cells, miss["cam"], miss["box"])
+        if drawn is None:
             continue
         # a model-drawn box ranks below any accepted proposal for the same (cam, side)
-        offer(mapped[0], miss["side"], -1.0, {"status": "corrected", "box": {"x0": x0, "y0": y0, "x1": x1, "y1": y1}, "source": "agent"})
+        offer(miss["cam"], miss["side"], -1.0, {"status": "corrected", "box": dict(zip(("x0", "y0", "x1", "y1"), drawn, strict=True)), "source": "agent"})
 
     labels: list[dict] = []
     for cam in cams:
@@ -234,8 +256,9 @@ def review_keyframe(server: str, sid: str, t_ns: int, args: argparse.Namespace, 
     for attempt in range(3):
         try:
             answer = ask_codex(jpg, info, args.model, args.effort, args.codex_home, workdir)
+            check_answer(info, answer)
             break
-        except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as err:
+        except (RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired, json.JSONDecodeError) as err:
             print(f"[{sid} {t_ns}] codex attempt {attempt + 1} failed: {err}", file=sys.stderr, flush=True)
             if "usage limit" in str(err).lower():
                 raise
@@ -278,9 +301,18 @@ def label_segment(server: str, sid: str, args: argparse.Namespace, workdir: Path
                 print(f"[{sid}] {done}/{len(todo)} keyframes, {rate * 60:.1f}/min", flush=True)
     if args.limit:
         return
+    # Fill only between keyframes that are now fully reviewed; a keyframe skipped above stays in the queue
+    # and its two neighbouring runs stay unfilled until it is reviewed.
+    unreviewed: set[int] = {q["t_ns"] for q in json_list(f"{server}/api/queue?sid={sid}&limit=100000") if "keyframe" in q["reasons"]}
     filled = 0
     for t0, t1 in zip(keyframes, keyframes[1:], strict=False):
-        result = json_object(f"{server}/api/range", {"segment_id": sid, "t0_ns": t0, "t1_ns": t1, "reviewer": args.reviewer})
+        if t0 in unreviewed or t1 in unreviewed:
+            continue
+        try:
+            result = json_object(f"{server}/api/range", {"segment_id": sid, "t0_ns": t0, "t1_ns": t1, "reviewer": args.reviewer})
+        except RuntimeError as err:
+            print(f"[{sid}] range {t0}..{t1} not filled: {err}", file=sys.stderr, flush=True)
+            continue
         filled += result["filled"]
     commit = json_object(f"{server}/api/commit/{sid}", {})
     print(f"[{sid}] skipped {skipped}; range-filled {filled}; committed {commit}", flush=True)
