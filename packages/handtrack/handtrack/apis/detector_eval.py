@@ -110,7 +110,8 @@ def side_counts(predicted: Float32[Tensor, "n 2 3"], probability: Float32[Tensor
 
 @dataclass(slots=True)
 class Examples:
-    """Missed hands and hand-free false alarms of the first model, with every model's prediction."""
+    """Missed hands and hand-free false alarms of each model (kind ``missed/<model>``, ``false_alarm/<model>``), with every model's
+    prediction on the same image."""
 
     pooled: list[Tensor] = field(default_factory=list)
     truth: list[Tensor] = field(default_factory=list)
@@ -144,7 +145,7 @@ def log_examples(path: Path, names: tuple[str, ...], examples: dict[str, Example
     pooled_scale: Float32[Tensor, "3"] = torch.tensor((160.0, 120.0, 160.0))
     for dataset, found in examples.items():
         for index in range(len(found.kind)):
-            rec.set_time("example", sequence=index)
+            rec.set_time("example", sequence=found.kind[:index].count(found.kind[index]))  # numbered within its kind
             base: str = f"{dataset}/{found.kind[index]}"
             rec.log(f"{base}/image", rr.Image(found.pooled[index].numpy(), color_model="L"))
             truth: Tensor = found.truth[index] * pooled_scale
@@ -158,7 +159,8 @@ def log_examples(path: Path, names: tuple[str, ...], examples: dict[str, Example
                                                            labels=[f"{name} {'LR'[s]} {float(found.probability[index][m, s]):.2f}" for s in keep],
                                                            colors=[colours[m % len(colours)]]))
             rec.log(f"{base}/camera", rr.TextDocument(f"camera id {found.camera[index]}"))
-    views = [rrb.Spatial2DView(origin=f"{dataset}/{kind}/image", name=f"{dataset}: {kind}") for dataset in examples for kind in ("missed", "false_alarm")]
+    views = [rrb.Spatial2DView(origin=f"{dataset}/{kind}/image", name=f"{dataset}: {kind}") for dataset, found in examples.items()
+             for kind in sorted(set(found.kind))]
     rec.send_blueprint(rrb.Blueprint(rrb.Grid(*views), collapse_panels=True))
 
 
@@ -191,15 +193,18 @@ def main(config: DetectorEvalConfig) -> DetectorEvalReport:
                 totals[name] = totals[name] + side_counts(predicted[-1], probability[-1], samples)
             stacked: Float32[Tensor, "m n 2 3"] = torch.stack(predicted)
             probabilities: Float32[Tensor, "m n 2"] = torch.stack(probability)
-            first_positive: Bool[Tensor, "n 2"] = probabilities[0] > PRESENCE_THRESHOLD
             present: Bool[Tensor, "n 2"] = samples.presence_mask & (samples.presence > 0.5)
             scale: Float32[Tensor, "3"] = torch.tensor(NET_SCALE, device=device)
-            hit: Bool[Tensor, "n 2"] = first_positive & (square_iou(stacked[0] * scale, samples.circle * scale) >= MIN_IOU)
-            missed: Int64[Tensor, "k"] = (present & ~hit).any(-1).nonzero().flatten()
             hand_free: Bool[Tensor, "n"] = (samples.presence_mask & ~present).all(-1)
-            alarms: Int64[Tensor, "k"] = (hand_free & first_positive.any(-1)).nonzero().flatten()
-            found.take("missed", missed[torch.randperm(missed.numel(), device=missed.device)], samples, stacked, probabilities, config.misses_per_dataset)
-            found.take("false_alarm", alarms[torch.randperm(alarms.numel(), device=alarms.device)], samples, stacked, probabilities, config.misses_per_dataset)
+            for m, name in enumerate(config.names):
+                positive: Bool[Tensor, "n 2"] = probabilities[m] > PRESENCE_THRESHOLD
+                hit: Bool[Tensor, "n 2"] = positive & (square_iou(stacked[m] * scale, samples.circle * scale) >= MIN_IOU)
+                missed: Int64[Tensor, "k"] = (present & ~hit).any(-1).nonzero().flatten()
+                alarms: Int64[Tensor, "k"] = (hand_free & positive.any(-1)).nonzero().flatten()
+                found.take(f"missed/{name}", missed[torch.randperm(missed.numel(), device=missed.device)], samples, stacked, probabilities,
+                           config.misses_per_dataset)
+                found.take(f"false_alarm/{name}", alarms[torch.randperm(alarms.numel(), device=alarms.device)], samples, stacked, probabilities,
+                           config.misses_per_dataset)
         results[dataset] = DatasetResult(segments, images, totals)
         examples[dataset] = found
         print(f"{dataset}: {len(segments)} segments, {images} images", flush=True)
