@@ -15,12 +15,12 @@ from numpy import ndarray
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
 from serde import SerdeError, from_dict, serde
 
-LensModel: TypeAlias = Literal["PINHOLE", "RATIONAL_POLYNOMIAL", "FISHEYE624", "KB4"]
-"""Lens models EgoHand's camera code projects: no distortion, OpenCV 14-term, Meta fisheye 6-2-4, Kannala-Brandt 4."""
-LENS_COEFFICIENTS: dict[LensModel, int] = {"PINHOLE": 0, "RATIONAL_POLYNOMIAL": 14, "FISHEYE624": 12, "KB4": 4}
+LensModel: TypeAlias = Literal["PINHOLE", "RATIONAL_POLYNOMIAL", "FISHEYE624", "KB4", "DOUBLE_SPHERE"]
+"""Lens models EgoHand's camera code projects: no distortion, OpenCV 14-term, Meta fisheye 6-2-4, Kannala-Brandt 4, and double sphere."""
+LENS_COEFFICIENTS: dict[LensModel, int] = {"PINHOLE": 0, "RATIONAL_POLYNOMIAL": 14, "FISHEYE624": 12, "KB4": 4, "DOUBLE_SPHERE": 2}
 """Distortion coefficient count of each lens model."""
-RADIAL_TERMS: dict[LensModel, int] = {"PINHOLE": 0, "RATIONAL_POLYNOMIAL": 0, "FISHEYE624": 6, "KB4": 4}
-"""Radial terms of each fisheye model's angle polynomial; 0 marks the pinhole/rational projection."""
+RADIAL_TERMS: dict[LensModel, int] = {"PINHOLE": 0, "RATIONAL_POLYNOMIAL": 0, "FISHEYE624": 6, "KB4": 4, "DOUBLE_SPHERE": -1}
+"""Radial terms of each fisheye model's angle polynomial; 0 marks pinhole/rational projection; -1 marks the double-sphere analytic model."""
 
 
 @serde(deny_unknown_fields=True)
@@ -32,7 +32,7 @@ class CalibratedCamera:
     """Pixel intrinsics ``K`` of the original decoded image (zero skew)."""
     distortion: Float64[ndarray, "d"]
     """Distortion coefficients in the order of ``lens``: OpenCV ``k1,k2,p1,p2,k3,k4,k5,k6,s1..s4,tx,ty``;
-    FISHEYE624 ``k0..k5, p0, p1, s0..s3``; KB4 ``k1..k4``; PINHOLE none."""
+    FISHEYE624 ``k0..k5, p0, p1, s0..s3``; KB4 ``k1..k4``; DOUBLE_SPHERE ``xi, alpha``; PINHOLE none."""
     width: int
     """Original image width in pixels."""
     height: int

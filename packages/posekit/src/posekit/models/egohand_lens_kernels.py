@@ -36,6 +36,19 @@ def _fisheye_project(ray: wp.vec3d, intrinsic: wp.vec4d, coefficients: wp.array(
 
 @wp.func
 def _project(ray: wp.vec3d, intrinsic: wp.vec4d, coefficients: wp.array(dtype=wp.float64), tilt: wp.vec4d, radius_bound: wp.float64, radial_count: int):
+    if radial_count == -1:
+        xi, a = coefficients[0], coefficients[1]
+        d1 = wp.length(ray)
+        zz = xi*d1 + ray[2]
+        d2 = wp.sqrt(ray[0]*ray[0] + ray[1]*ray[1] + zz*zz)
+        w1 = (wp.float64(1.0)-a)/a
+        if a <= wp.float64(0.5):
+            w1 = a/(wp.float64(1.0)-a)
+        w2 = (w1+xi)/wp.sqrt(wp.float64(2.0)*w1*xi+xi*xi+wp.float64(1.0))
+        denominator = a*d2 + (wp.float64(1.0)-a)*zz
+        if ray[2] <= -w2*d1 or denominator <= wp.float64(0.0):
+            return wp.vec2d(wp.float64(wp.nan), wp.float64(wp.nan))
+        return wp.vec2d(intrinsic[0]*ray[0]/denominator+intrinsic[2], intrinsic[1]*ray[1]/denominator+intrinsic[3])
     if radial_count == 0:
         return _project_rational_ray(ray, intrinsic, coefficients, tilt, radius_bound)
     return _fisheye_project(ray, intrinsic, coefficients, radial_count)
@@ -46,6 +59,14 @@ def _inverse(pixel: wp.vec2d, intrinsic: wp.vec4d, coefficients: wp.array(dtype=
     x = (pixel[0] - intrinsic[2]) / intrinsic[0]
     y = (pixel[1] - intrinsic[3]) / intrinsic[1]
     r2 = x * x + y * y
+    if radial_count == -1:
+        xi, a = coefficients[0], coefficients[1]
+        mz = (wp.float64(1.0)-a*a*r2)/(a*wp.sqrt(wp.float64(1.0)-(wp.float64(2.0)*a-wp.float64(1.0))*r2)+wp.float64(1.0)-a)
+        k = (mz*xi+wp.sqrt(mz*mz+(wp.float64(1.0)-xi*xi)*r2))/(mz*mz+r2)
+        ray = wp.vec3d(k*x, k*y, k*mz-xi)
+        if not wp.isfinite(ray[0]) or not wp.isfinite(ray[1]) or not wp.isfinite(ray[2]) or ray[2] <= wp.float64(0.0):
+            return wp.vec3d(wp.float64(wp.nan), wp.float64(wp.nan), wp.float64(wp.nan))
+        return wp.normalize(ray)
     if radial_count == 0 and wp.isfinite(radius_bound) and r2 >= radius_bound:
         scale = wp.sqrt(wp.float64(0.9) * radius_bound / r2)
         x *= scale

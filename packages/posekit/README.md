@@ -161,6 +161,29 @@ evaluation segments and checked against every evaluation frame by decoded-RGB SH
 records are frozen artifacts; the calibration contents are part of the export cache key. First
 setup exports and builds the missing artifacts through posekit and trtkit.
 
+**Fast-stack speed and accuracy** (1,500 fixed frames: 3 segments × 100 from each of UmeTrack,
+HOT3D Quest 3, SHOW3D, GSI six-view and Gen-HumanEgo; batch one, detection on every frame, full
+outputs; latency excludes decode and engine builds):
+
+| GPU | `egohand` (reference) | Fast stack | Speed-up | Accuracy bands |
+|---|---|---|---|---|
+| DGX Spark (GB10), `egohand-fast` | 153.31 ms/frame | 14.98 ms/frame | **10.23x** | 45/45 |
+| RTX 3060, `egohand-fast-bf16` | 238.62 ms/frame | 39.24 ms/frame | 6.08x | 45/45 |
+
+A band is one metric on one dataset, relative to the reference: recall, mean IoU and side
+accuracy stay ≥ 0.95×; 2D median/p95 pixel error and absolute and wrist-relative 3D median/p95
+(mm) stay ≤ 1.05× (nine metrics × five datasets). The 10x is the mean over all frames (UmeTrack
+8.5x … Gen-HumanEgo 10.7x). The fixed frames also guided the precision choice. Reproduce from a cache
+of camera-scoped catalog RRDs (`<cache>/<dataset>/eval/*.rrd`; the team copy is
+`dgx-spark:~/egohand-spark-cache`), on an otherwise idle GPU:
+
+```bash
+pixi run -e posekit-hands --frozen posekit-hands-cached-bench --cache <cache> --output /tmp/egohand-ref \
+    --stack egohand --no-measure-timing
+pixi run -e posekit-hands --frozen posekit-hands-cached-bench --cache <cache> --output /tmp/egohand-fast \
+    --stack egohand-fast --baseline /tmp/egohand-ref/results.json   # egohand-fast-bf16 below Blackwell
+```
+
 **Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera
 `cam_00`) and three UmeTrack test segments (`cam_01`), every 10th frame, at most 40
 frames each. Ground truth is dataforge's `hand_pose` layer (UmeTrack landmarks in HAND_21

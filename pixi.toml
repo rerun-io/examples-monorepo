@@ -1264,6 +1264,15 @@ description = "Compare complete fast and eager body outputs on the calibration r
 [feature.posekit-hands]
 platforms = ["linux-64", "linux-aarch64"]
 
+# cholespy 2.2 calls nanobind's pre-3.0 keep_alive API. PyPI has no
+# aarch64 wheel, so its source build must use these pinned build dependencies.
+[feature.posekit-hands.target.linux-aarch64.dependencies]
+nanobind = ">=2.0,<3"
+scikit-build-core = ">=0.4.3"
+
+[feature.posekit-hands.pypi-options]
+no-build-isolation = ["cholespy"]
+
 [feature.posekit-hands.activation.env]
 PACKAGE_DIR = "packages/posekit"
 # posekit-egohand's baseline; the SAM 3D Body lane is not installed here (see [feature.posekit.activation.env]).
@@ -1283,6 +1292,11 @@ description = "Ground-truth eval of WiLoR and EgoHand on a fixed HOT3D (Quest 3)
 cmd = "python tools/apps/hands_bench.py"
 cwd = "packages/posekit"
 description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
+
+[feature.posekit-hands.tasks.posekit-hands-cached-bench]
+cmd = "python tools/apps/hands_cached_bench.py"
+cwd = "packages/posekit"
+description = "EgoHand accuracy and batch-one latency of one stack (--stack) on a fixed native-RRD cache; --baseline checks the 45 accuracy bands"
 
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
