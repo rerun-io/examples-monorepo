@@ -231,7 +231,7 @@ def test_gpu_detector_preprocessing_preserves_boxes_and_sides(fp16_trunk: bool) 
 
     from torchcodec.decoders import VideoDecoder
 
-    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.apis.video_hands import EXAMPLES
     from posekit.models.egohand_fast import EgoHandStack
 
     if not torch.cuda.is_available():
@@ -260,7 +260,7 @@ def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
     """Captured CUDA crops and execution preserve the reference reconstruction with the same bf16 networks."""
     from torchcodec.decoders import VideoDecoder
 
-    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.apis.video_hands import EXAMPLES
     from posekit.cameras import load_calibrated_camera
     from posekit.models.egohand_cuda_crops import CudaHandCropper
     from posekit.models.egohand_fast import EgoHandStack
@@ -358,7 +358,7 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
     """Offline callers can pass more hands than one TensorRT execution profile holds."""
     from torchcodec.decoders import VideoDecoder
 
-    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.apis.video_hands import EXAMPLES
     from posekit.cameras import load_calibrated_camera
     from posekit.models.egohand_fast import EgoHandStack
     from posekit.predictions import BoxDetections, HandDetections
@@ -393,7 +393,7 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
     """Reordered hands of one batch size replay the same graphs and return the same hands."""
     from torchcodec.decoders import VideoDecoder
 
-    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.apis.video_hands import EXAMPLES
     from posekit.cameras import load_calibrated_camera
     from posekit.models.egohand_fast import EgoHandStack
     from posekit.predictions import BoxDetections, HandDetections
@@ -441,7 +441,7 @@ def test_stage_times_are_recorded_only_on_request() -> None:
     """Without profile_stages neither predictor records stage times; with it, both report the benchmark's stages."""
     from torchcodec.decoders import VideoDecoder
 
-    from posekit.apis.hands_bench import EXAMPLES
+    from posekit.apis.video_hands import EXAMPLES
     from posekit.cameras import load_calibrated_camera
     from posekit.models.egohand_fast import EgoHandStack
 

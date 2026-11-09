@@ -13,18 +13,28 @@ name. Every chunk is static and holds one row; there is no timeline.
 Ranges are float64, so every value round-trips bit-exactly. Reading needs no viewer or server.
 """
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
 import pyarrow as pa
 import rerun as rr
+from jaxtyping import UInt8
 from rerun.chunk import Chunk, LazyChunkStream, RrdReader
+from torch import Tensor
 
 APPLICATION_ID: str = "posekit-calibration"
 """Application id shared by every posekit calibration recording."""
 PROPERTY: str = "calibration"
 """Recording property holding the model name and the record's scalar fields."""
+
+
+def frame_sha256(frame: UInt8[Tensor, "h w 3"]) -> str:
+    """SHA256 of decoded RGB pixels in row-major order: the identity calibration and evaluation splits compare."""
+    return hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
+
+
 COLUMN_TYPES: dict[str, pa.DataType] = {
     "module": pa.string(), "amax": pa.float64(), "source": pa.string(), "index": pa.int64(), "sha256": pa.string(),
 }

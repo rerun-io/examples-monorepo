@@ -1,24 +1,23 @@
 """Regenerate EgoHand activation ranges from the held-out Rerun catalog split."""
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import torch
-from einops import rearrange
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
-from posekit.apis.hands_bench import EXAMPLES
+from posekit.apis.video_hands import EXAMPLES
 from posekit.cameras import CalibratedCamera
+from posekit.eval.hand_gt import decode_catalog_frames
+from posekit.models.calibration_rrd import frame_sha256
 from posekit.models.egohand_quantization import EgoHandCalibration, load_calibration, measure_calibration, write_calibration
 
 
@@ -56,11 +55,9 @@ def main(config: Config) -> None:
     resolution: list[float] = first_valid_value(statics[f"{config.pinhole}:Pinhole:resolution"])
     camera = CalibratedCamera(intrinsic, distortion, int(resolution[0]), int(resolution[1]))
     video: CatalogVideo = read_catalog_videos(dataset, split.segment, [f"{config.pinhole}/video"], "video_time")[0]
-    fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
-    decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec), device="cuda", seek_mode="approximate")
-    frames: UInt8[Tensor, "f h w 3"] = rearrange(decoder.get_frames_at(split.frame_indices).data, "f c h w -> f h w c").contiguous()
+    frames: UInt8[Tensor, "f h w 3"] = decode_catalog_frames(video, split.frame_indices)
     evaluation = VideoDecoder(config.evaluation_video, device="cuda", dimension_order="NHWC")
-    forbidden: list[str] = [hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest() for frame in evaluation[:]]
+    forbidden: list[str] = [frame_sha256(frame) for frame in evaluation[:]]
     measured: EgoHandCalibration = measure_calibration(
         zip(split.frame_indices, frames, strict=True), camera, segment=split.segment,
         excluded_mount_indices=split.excluded_mount_indices, excluded_frame_sha256=forbidden, assets=config.assets,

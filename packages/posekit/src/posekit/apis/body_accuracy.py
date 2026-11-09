@@ -21,13 +21,13 @@ from torchvision.io import ImageReadMode, decode_image
 
 from posekit.apis.body_bench import person_boxes_per_frame
 from posekit.body_run import BodyRunIdentity, body_run_identity
+from posekit.models.calibration_rrd import frame_sha256
 from posekit.models.sam3d_body import Sam3dBodyConfig, Sam3dBodyReconstruction
 from posekit.models.sam3d_body_fast import Sam3dBodyFastConfig
 from posekit.models.sam3d_body_quantization import (
     BodyCalibration,
     BodyCalibrationSplit,
     CalibrationFrame,
-    frame_sha256,
     load_body_calibration,
     load_development_frames,
 )

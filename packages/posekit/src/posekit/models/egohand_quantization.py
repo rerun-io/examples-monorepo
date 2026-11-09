@@ -17,6 +17,7 @@ from posekit.models.calibration_rrd import (
     CalibrationColumn,
     CalibrationRecording,
     CalibrationScalar,
+    frame_sha256,
     range_tables,
     read_calibration_rrd,
     write_calibration_rrd,
@@ -127,7 +128,7 @@ def measure_calibration(
         raise ValueError("Calibration needs a non-empty set of distinct frame indices.")
     if set(indices).intersection(excluded_mount_indices):
         raise ValueError("Calibration frames overlap the mount-fit evaluation sample.")
-    hashes: list[str] = [hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest() for _, frame in selected]
+    hashes: list[str] = [frame_sha256(frame) for _, frame in selected]
     if set(hashes).intersection(excluded_frame_sha256):
         raise ValueError("Calibration contains a decoded evaluation frame.")
     stack: EgoHandStack[EgoHandConfig] = EgoHandStack.selfcap(assets)

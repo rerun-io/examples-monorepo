@@ -10,7 +10,7 @@ pytest.importorskip("warp", reason="GPU calibrated crops require posekit-hands")
 
 from egohand_inference.camera.perspective_crop import perspective_crop_geometry
 
-from posekit.apis.hands_bench import EXAMPLES
+from posekit.apis.video_hands import EXAMPLES
 from posekit.cameras import CalibratedCamera, LensModel, load_calibrated_camera
 from posekit.models.egohand_cuda_crops import CudaHandCropper
 from posekit.models.egohand_geometry import lens_model

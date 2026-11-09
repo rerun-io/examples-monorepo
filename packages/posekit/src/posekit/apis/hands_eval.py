@@ -23,16 +23,14 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from serde import serde, to_dict
-from simplecv.catalog_video_codec import wrap_mp4
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from posekit.eval.hand_gt import SIDES, GtDataset, HandGtSegment, read_hand_gt
+from posekit.eval.hand_gt import SIDES, GtDataset, HandGtSegment, decode_catalog_frames, read_hand_gt
 from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors, summarize
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.models.egohand import EgoHandConfig
@@ -179,15 +177,6 @@ def model_stack(name: ModelName) -> tuple[HandDetector, TopDownHandPose3d]:
     stack: EgoHandStack[EgoHandConfig] | EgoHandStack[EgoHandFastConfig] = EGOHAND_STACKS[name](None)
     pose: EgoHandConfig | EgoHandFastConfig = replace(stack.pose, gpu_crops=False) if isinstance(stack.pose, EgoHandConfig) else stack.pose
     return stack.detector.setup(), pose.setup()
-
-
-def decode_samples(segment: HandGtSegment) -> UInt8[Tensor, "f h w 3"]:
-    """CUDA-decode the evaluation samples of a segment's catalog video."""
-    from torchcodec.decoders import VideoDecoder
-
-    fps: float = 1e9 / float(np.median(np.diff(segment.video.t_ns)))
-    decoder = VideoDecoder(wrap_mp4(segment.video.samples, segment.video.keyframes, round(fps), codec=segment.video.codec), device="cuda", seek_mode="approximate")
-    return rearrange(decoder.get_frames_at(segment.sample_indices.tolist()).data, "n c h w -> n h w c").contiguous()
 
 
 def joint_box(uv: Float32[ndarray, "21 2"], valid: Bool[ndarray, "21"], scale: float) -> Float32[ndarray, "4"]:
@@ -374,7 +363,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
         segments: list[HandGtSegment] = read_hand_gt(
             client.get_dataset(subset.dataset), subset.dataset, subset.segments, subset.camera, stride=config.stride, max_frames=config.max_frames
         )
-        data[subset.dataset] = [(segment, decode_samples(segment)) for segment in segments]
+        data[subset.dataset] = [(segment, decode_catalog_frames(segment.video, segment.sample_indices.tolist())) for segment in segments]
         for segment, frames in data[subset.dataset]:
             offsets[segment.segment_id] = offset
             if config.log_rrd:

@@ -27,13 +27,13 @@ from jaxtyping import UInt8
 from serde import serde, to_dict
 from torch import Tensor
 
+from posekit.apis.video_hands import EXAMPLES
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.models.egohand import EgoHandConfig, EgoHandPredictor, EgoHandStage
 from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandFastConfig, EgoHandStack, EgoHandStackName, FastEgoHandPredictor
 from posekit.predictions import HandDetections, HandPoses3d
 
-EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
 BenchModel: TypeAlias = EgoHandStackName | Literal["wilor-tensorrt", "wilor-torch"]
 
 

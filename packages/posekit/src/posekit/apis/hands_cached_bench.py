@@ -21,10 +21,10 @@ from serde import serde
 from serde.json import from_json, to_json
 from torch import Tensor
 
-from posekit.apis.hands_eval import decode_samples, eval_model, joint_box, log_context
+from posekit.apis.hands_eval import eval_model, joint_box, log_context
 from posekit.eval.cached_hand_gt import load_cached_hand_gt
 from posekit.eval.hand_accuracy_bands import error_quantiles, within_accuracy_band
-from posekit.eval.hand_gt import SIDES, HandGtSegment
+from posekit.eval.hand_gt import SIDES, HandGtSegment, decode_catalog_frames
 from posekit.eval.hand_metrics import box_iou
 from posekit.models.egohand import EgoHandConfig, EgoHandDetector, EgoHandPredictor, EgoHandReconstruction
 from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandFastConfig, EgoHandStack, EgoHandStackName, FastEgoHandPredictor
@@ -275,7 +275,7 @@ def main(config: Config) -> None:
             offset: int = 0
             for path in sorted((config.cache / dataset / "eval").glob("*.rrd")):
                 segment: HandGtSegment = load_cached_hand_gt(path, max_frames=config.max_frames)
-                frames: UInt8[Tensor, "f h w 3"] = decode_samples(segment)
+                frames: UInt8[Tensor, "f h w 3"] = decode_catalog_frames(segment.video, segment.sample_indices.tolist())
                 image_frames: set[int] = set(np.linspace(0, len(frames) - 1, 10, dtype=int).tolist())
                 for index, frame in enumerate(frames):
                     detections: HandDetections = detector(frame[None])

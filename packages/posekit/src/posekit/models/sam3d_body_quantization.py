@@ -19,6 +19,7 @@ from posekit.models.calibration_rrd import (
     CalibrationColumn,
     CalibrationRecording,
     CalibrationScalar,
+    frame_sha256,
     range_tables,
     read_calibration_rrd,
     write_calibration_rrd,
@@ -47,11 +48,6 @@ class BodyPrecisionPlan:
     def __post_init__(self) -> None:
         if any(not 0 <= index < DINO_BLOCKS for index in self.attention):
             raise ValueError(f"Attention block indices must be between 0 and {DINO_BLOCKS - 1}.")
-
-
-def frame_sha256(frame: UInt8[Tensor, "h w 3"]) -> str:
-    """SHA256 of decoded RGB pixels in row-major order: the identity calibration and evaluation splits compare."""
-    return hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
 
 
 @serde(deny_unknown_fields=True)

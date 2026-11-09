@@ -14,11 +14,11 @@ from torchcodec.decoders import VideoDecoder
 
 from posekit.apis.body_accuracy import load_accuracy_report, read_local_frames
 from posekit.apis.body_bench import person_boxes_per_frame
+from posekit.models.calibration_rrd import frame_sha256
 from posekit.models.sam3d_body_quantization import (
     BodyCalibrationSplit,
     CalibrationFrame,
     CalibrationSample,
-    frame_sha256,
     measure_body_calibration,
     write_body_calibration,
 )

@@ -15,11 +15,14 @@ from typing import Literal, TypeAlias
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
-from jaxtyping import Bool, Float32, Float64, Int64
+from einops import rearrange
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_codec import wrap_mp4
+from torch import Tensor
 
 from posekit.cameras import CalibratedCamera
 from posekit.predictions import HandSide
@@ -178,3 +181,12 @@ def read_hand_gt(
                 valid[out, side_index, list(DERIVED_JOINTS)] = False
         segments.append(HandGtSegment(segment_id, camera_model, video, chosen.astype(np.int64), sample_times[chosen], xyz, uv, valid))
     return segments
+
+
+def decode_catalog_frames(video: CatalogVideo, indices: Sequence[int]) -> UInt8[Tensor, "f h w 3"]:
+    """CUDA-decode the samples ``indices`` of a catalog video into NHWC RGB frames."""
+    from torchcodec.decoders import VideoDecoder
+
+    fps: float = 1e9 / float(np.median(np.diff(video.t_ns)))
+    decoder = VideoDecoder(wrap_mp4(video.samples, video.keyframes, round(fps), codec=video.codec), device="cuda", seek_mode="approximate")
+    return rearrange(decoder.get_frames_at(list(indices)).data, "n c h w -> n h w c").contiguous()
