@@ -93,20 +93,54 @@ SCHEMA = {
 }
 
 
-def http_json(url: str, body: dict | None = None, timeout: float = 120.0) -> dict | list:
-    """GET (body None) or POST JSON; raise with the server's message on HTTP errors."""
+def http_json(url: str, body: dict | None = None, timeout: float = 120.0, attempts: int = 8) -> object:
+    """GET (body None) or POST JSON; retry 5xx and connection errors (a restarting server); raise on 4xx."""
     data: bytes | None = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"} if data else {})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as err:
-        raise RuntimeError(f"{url}: HTTP {err.code}: {err.read().decode(errors='replace')[:500]}") from err
+    for attempt in range(attempts):
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"} if data else {})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as err:
+            if err.code < 500 or attempt == attempts - 1:
+                raise RuntimeError(f"{url}: HTTP {err.code}: {err.read().decode(errors='replace')[:500]}") from err
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == attempts - 1:
+                raise
+        time.sleep(min(60, 5 * 2**attempt))
+    raise AssertionError("unreachable")
 
 
-def http_bytes(url: str, timeout: float = 120.0) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        return resp.read()
+def json_object(url: str, body: dict | None = None) -> dict:
+    """An endpoint that answers a JSON object."""
+    value = http_json(url, body)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{url}: expected a JSON object, got {type(value).__name__}")
+    return value
+
+
+def json_list(url: str) -> list:
+    """An endpoint that answers a JSON array."""
+    value = http_json(url)
+    if not isinstance(value, list):
+        raise RuntimeError(f"{url}: expected a JSON array, got {type(value).__name__}")
+    return value
+
+
+def http_bytes(url: str, timeout: float = 120.0, attempts: int = 8) -> bytes:
+    """GET raw bytes with the same retry rule as ``http_json``."""
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as err:
+            if err.code < 500 or attempt == attempts - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == attempts - 1:
+                raise
+        time.sleep(min(60, 5 * 2**attempt))
+    raise AssertionError("unreachable")
 
 
 def sheet_to_native(cells: list[dict], box: list[float]) -> tuple[int, list[float]] | None:
@@ -194,7 +228,7 @@ def ask_codex(sheet_jpg: bytes, info: dict, model: str, effort: str, codex_home:
 
 
 def review_keyframe(server: str, sid: str, t_ns: int, args: argparse.Namespace, workdir: Path) -> dict:
-    info = http_json(f"{server}/api/sheet/{sid}/{t_ns}.json")
+    info = json_object(f"{server}/api/sheet/{sid}/{t_ns}.json")
     jpg = http_bytes(f"{server}/api/sheet/{sid}/{t_ns}.jpg")
     answer: dict = {}
     for attempt in range(3):
@@ -209,7 +243,7 @@ def review_keyframe(server: str, sid: str, t_ns: int, args: argparse.Namespace, 
     else:
         raise RuntimeError(f"codex failed 3 times on {sid} {t_ns}")
     labels = decisions_to_labels(info, answer, args.reviewer)
-    http_json(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_ns, "labels": labels})
+    json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_ns, "labels": labels})
     log = {"segment_id": sid, "t_ns": t_ns, "answer": answer, "n_labels": len(labels)}
     with (workdir / "answers.jsonl").open("a") as fh:
         fh.write(json.dumps(log) + "\n")
@@ -217,18 +251,27 @@ def review_keyframe(server: str, sid: str, t_ns: int, args: argparse.Namespace, 
 
 
 def label_segment(server: str, sid: str, args: argparse.Namespace, workdir: Path) -> None:
-    info = http_json(f"{server}/api/segment/{sid}")
+    info = json_object(f"{server}/api/segment/{sid}")
     keyframes: list[int] = info["keyframes_ns"]
-    todo: list[int] = [t for t in (q["t_ns"] for q in http_json(f"{server}/api/queue?sid={sid}&limit=100000")) if t in set(keyframes)]
+    todo: list[int] = [t for t in (q["t_ns"] for q in json_list(f"{server}/api/queue?sid={sid}&limit=100000")) if t in set(keyframes)]
     if args.limit:
         todo = todo[: args.limit]
     print(f"[{sid}] {len(todo)} of {len(keyframes)} keyframes to review", flush=True)
     t_start = time.time()
     done = 0
+    skipped = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(review_keyframe, server, sid, t, args, workdir): t for t in todo}
         for fut in concurrent.futures.as_completed(futures):
-            fut.result()
+            try:
+                fut.result()
+            except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as err:
+                # One bad keyframe (missing frame, server hiccup, model failure) must not stop the night's run;
+                # it stays unreviewed and comes back in the queue next time. A usage limit stops everything.
+                if "usage limit" in str(err).lower():
+                    raise
+                skipped += 1
+                print(f"[{sid}] skipped keyframe {futures[fut]}: {err}", file=sys.stderr, flush=True)
             done += 1
             if done % 10 == 0 or done == len(todo):
                 rate = done / max(time.time() - t_start, 1e-6)
@@ -237,10 +280,10 @@ def label_segment(server: str, sid: str, args: argparse.Namespace, workdir: Path
         return
     filled = 0
     for t0, t1 in zip(keyframes, keyframes[1:], strict=False):
-        result = http_json(f"{server}/api/range", {"segment_id": sid, "t0_ns": t0, "t1_ns": t1, "reviewer": args.reviewer})
+        result = json_object(f"{server}/api/range", {"segment_id": sid, "t0_ns": t0, "t1_ns": t1, "reviewer": args.reviewer})
         filled += result["filled"]
-    commit = http_json(f"{server}/api/commit/{sid}", {})
-    print(f"[{sid}] range-filled {filled}; committed {commit}", flush=True)
+    commit = json_object(f"{server}/api/commit/{sid}", {})
+    print(f"[{sid}] skipped {skipped}; range-filled {filled}; committed {commit}", flush=True)
 
 
 def main() -> None:
@@ -257,7 +300,7 @@ def main() -> None:
     args = parser.parse_args()
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    segments: list[str] = args.segment or [s["segment_id"] for s in http_json(f"{args.server}/api/segments")]
+    segments: list[str] = args.segment or [s["segment_id"] for s in json_list(f"{args.server}/api/segments")]
     for sid in segments:
         label_segment(args.server, sid, args, workdir)
 

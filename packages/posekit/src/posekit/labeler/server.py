@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Protocol, TypeAlias, runtime_checkable
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 from beartype.roar import BeartypeException
 from jaxtyping import UInt8
 from numpy import ndarray
@@ -368,10 +369,20 @@ class LabelApp:
         """The rendered contact sheet."""
         segment: Segment = self.segment(segment_id)
         self._grid_time(segment, t_ns)
-        images: list[UInt8[ndarray, "h w 3"]] = [self.frame(segment_id, camera.cam, t_ns) for camera in segment.info.cams]
+        images: list[UInt8[ndarray, "h w 3"]] = [self._frame_or_black(segment_id, camera, t_ns) for camera in segment.info.cams]
         return contact_sheet(
             segment_id, t_ns, segment.info.cams, images, self.proposals.proposals(segment_id, t_ns), segment.store.get(t_ns)
         ).jpeg
+
+    def _frame_or_black(self, segment_id: str, camera: CameraInfo, t_ns: int) -> UInt8[ndarray, "h w 3"]:
+        """The frame, or a black image when this camera has none at ``t_ns`` (cameras start and stop a few frames apart).
+
+        A reviewer sees the black cell and marks that camera unjudgeable (``rejected``).
+        """
+        try:
+            return self.frame(segment_id, camera.cam, t_ns)
+        except NotFoundError:
+            return np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
 
     # -- labels ---------------------------------------------------------------------------------------------
 

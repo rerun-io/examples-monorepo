@@ -189,7 +189,10 @@ def write_proposal_layer(
     try:
         with rr.RecordingStream(application_id, recording_id=segment_id, send_properties=False) as recording:
             recording.save(temp, write_footer=True)
-            recording.send_property(PROPOSAL_LAYER, rr.AnyValues(**properties))
+            provenance: rr.AnyValues = rr.AnyValues()
+            for key, value in properties.items():
+                provenance = provenance.with_component_from_data(key, value)
+            recording.send_property(PROPOSAL_LAYER, provenance)
             for cam in cams:
                 entity: str = proposal_path(cam.cam, "egohand")
                 for t_ns in sorted(proposals):
