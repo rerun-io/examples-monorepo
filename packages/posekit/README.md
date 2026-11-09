@@ -141,8 +141,8 @@ Select `egohand-fast` for the opt-in TensorRT path on an NVFP4-capable CUDA GPU:
 ```bash
 pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/egohand-fast.rrd \
     egohand-fast tensorrt egohand-fast
-pixi run -e posekit-hands --frozen posekit-hands-bench --models egohand egohand-fast
-pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand egohand-fast \
+pixi run -e posekit-hands --frozen posekit-hands-bench --models egohand-selfcap egohand-fast egohand-catalog
+pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand-selfcap egohand-fast egohand-catalog \
     --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/egohand-eval
 ```
 

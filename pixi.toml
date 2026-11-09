@@ -1296,12 +1296,12 @@ description = "Ground-truth eval of WiLoR and EgoHand on a fixed HOT3D (Quest 3)
 [feature.posekit-hands.tasks.posekit-hands-bench]
 cmd = "python tools/apps/hands_bench.py"
 cwd = "packages/posekit"
-description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
+description = "Per-frame end-to-end speed of EgoHand stacks (default egohand-selfcap, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
 
 [feature.posekit-hands.tasks.posekit-hands-cached-bench]
 cmd = "python tools/apps/hands_cached_bench.py"
 cwd = "packages/posekit"
-description = "EgoHand accuracy and batch-one latency on a fixed native-RRD cache; --baseline checks the 45 accuracy bands"
+description = "EgoHand accuracy and batch-one latency of one stack (--stack, default egohand-catalog) on a fixed native-RRD cache; --baseline checks the 45 accuracy bands"
 
 [feature.posekit-hands.tasks.posekit-egohand-calibrate]
 cmd = "python tools/apps/egohand_calibrate.py"

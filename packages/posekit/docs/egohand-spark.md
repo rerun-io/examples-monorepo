@@ -67,7 +67,7 @@ pixi install --locked -e posekit-hands   # on aarch64 the manifest pins cholespy
 
 # Reference: main's default classes (accuracy only is enough for the bands).
 pixi run --frozen -e posekit-hands posekit-hands-cached-bench \
-  --cache ~/egohand-spark-cache --output ~/egohand-results/default --model default
+  --cache ~/egohand-spark-cache --output ~/egohand-results/default --stack egohand
 
 # Fast path: latency plus the 45-band check against the reference.
 pixi run --frozen -e posekit-hands posekit-hands-cached-bench \
@@ -75,7 +75,7 @@ pixi run --frozen -e posekit-hands posekit-hands-cached-bench \
   --baseline ~/egohand-results/default/results.json
 ```
 
-On a GPU without NVFP4, add `--precision bf16` to the fast run. Run timings on an otherwise idle GPU. Each dataset writes a Rerun recording with the
+On a GPU without NVFP4, add `--stack egohand-catalog-bf16` to the fast run. Run timings on an otherwise idle GPU. Each dataset writes a Rerun recording with the
 source image, boxes, GT vs predicted joints, per-frame errors and latencies. The
 precision trials and per-stage profiles are in the
 [EgoHand speed-up report](https://pablos-4800gt.ilish-ruler.ts.net:8768/egohand-3060/).

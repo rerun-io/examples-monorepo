@@ -3,14 +3,13 @@
 Each cached segment is a camera-scoped native RRD from the catalog (video, calibration, GT).
 Every frame first runs once untimed: that pass scores against GT and logs Rerun evidence.
 ``repeats`` timed passes follow; each times one synchronized detector + full reconstruction
-call per frame. With ``--baseline`` (an earlier ``results.json``, e.g. of ``--model default``),
+call per frame. With ``--baseline`` (an earlier ``results.json``, e.g. of ``--stack egohand``),
 the run fails unless every dataset passes all nine ≤5 % accuracy bands.
 """
 
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -22,21 +21,13 @@ from serde import serde
 from serde.json import from_json, to_json
 from torch import Tensor
 
-from posekit.apis.hands_eval import decode_samples, joint_box, log_context
+from posekit.apis.hands_eval import decode_samples, eval_model, joint_box, log_context
 from posekit.eval.cached_hand_gt import load_cached_hand_gt
 from posekit.eval.hand_accuracy_bands import error_quantiles, within_accuracy_band
 from posekit.eval.hand_gt import SIDES, HandGtSegment
 from posekit.eval.hand_metrics import box_iou
-from posekit.models.egohand import (
-    EgoHandAssetPaths,
-    EgoHandConfig,
-    EgoHandDetector,
-    EgoHandDetectorConfig,
-    EgoHandPredictor,
-    EgoHandReconstruction,
-    asset_paths,
-)
-from posekit.models.egohand_fast import EgoHandFastConfig, EgoHandStack, FastEgoHandPredictor
+from posekit.models.egohand import EgoHandConfig, EgoHandDetector, EgoHandPredictor, EgoHandReconstruction
+from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandFastConfig, EgoHandStack, EgoHandStackName, FastEgoHandPredictor
 from posekit.predictions import HandDetections, HandPoses3d, HandSide
 
 BANDED_METRICS: dict[str, bool] = {
@@ -61,14 +52,11 @@ class Config:
     """Native camera-scoped RRD cache: ``<cache>/<dataset>/eval/*.rrd``."""
     output: Path
     """Directory for ``results.json`` and one Rerun recording per dataset."""
-    model: Literal["default", "fast"] = "fast"
-    """``default``: main's unquantized EgoHand classes (the reference); ``fast``: ``EgoHandStack.catalog``."""
-    precision: Literal["bf16", "nvfp4"] = "nvfp4"
-    """Backbone precision of the fast preset: NVFP4/FP8 on Blackwell, BF16 on Ampere."""
+    stack: EgoHandStackName = "egohand-catalog"
+    """EgoHand stack: ``egohand`` is main's unquantized reference, ``egohand-catalog`` the accepted fast stack (NVFP4/FP8,
+    Blackwell) and ``egohand-catalog-bf16`` the same stack on GPUs without NVFP4."""
     assets: Path | None = None
     """Local asset tree; None uses the pinned Hugging Face downloads."""
-    soma: Path | None = None
-    """Local SOMA directory for the default stack."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-hot3d-quest3", "dataforge-show3d", "gsi-six-view", "dataforge-gen-humanego-subset")
     """Cached datasets to run."""
     max_frames: int = 100
@@ -87,7 +75,7 @@ class Result:
     """One dataset's latency and ground-truth accuracy."""
 
     model: str
-    """``default`` or ``fast-<precision>``."""
+    """The stack name (results written before the stack registry say ``default`` or ``fast-<precision>``)."""
     gpu: str
     """CUDA device name reported by PyTorch."""
     dataset: str
@@ -219,8 +207,10 @@ class DatasetScore:
         return side_errors
 
 
-def log_frame_evidence(segment: HandGtSegment, index: int, frame: UInt8[Tensor, "h w 3"], prediction: FramePrediction, *, image: bool) -> None:
-    """Log the source boxes and GT vs predicted joints in 2D and 3D; ``image`` adds the decoded frame."""
+def log_frame_evidence(
+    segment: HandGtSegment, index: int, frame: UInt8[Tensor, "h w 3"], prediction: FramePrediction, *, image: bool, left_class: int
+) -> None:
+    """Log the source boxes and GT vs predicted joints (in the stack's ``log_context`` class) in 2D and 3D; ``image`` adds the decoded frame."""
     rr.log("source", rr.AnyValues(segment=segment.segment_id, index=int(segment.sample_indices[index])))
     rr.log("camera/image/detection", rr.Boxes2D(array=prediction.boxes, array_format=rr.Box2DFormat.XYXY, labels=list(prediction.box_sides)))
     rr.log("camera/image", rr.Image(frame.cpu().numpy()).compress(jpeg_quality=90) if image else rr.Clear(recursive=False))
@@ -235,10 +225,10 @@ def log_frame_evidence(segment: HandGtSegment, index: int, frame: UInt8[Tensor, 
             row: int = prediction.sides.index(side)
             rr.log(
                 f"camera/image/pred/{side}",
-                rr.Points2D(prediction.uv[row], class_ids=4 + s, keypoint_ids=np.arange(21), radii=2.0, show_labels=False),
+                rr.Points2D(prediction.uv[row], class_ids=left_class + s, keypoint_ids=np.arange(21), radii=2.0, show_labels=False),
             )
             rr.log(
-                f"camera/pred/{side}", rr.Points3D(prediction.xyz[row], class_ids=4 + s, keypoint_ids=np.arange(21), radii=0.002, show_labels=False)
+                f"camera/pred/{side}", rr.Points3D(prediction.xyz[row], class_ids=left_class + s, keypoint_ids=np.arange(21), radii=0.002, show_labels=False)
             )
         else:
             rr.log(f"camera/image/pred/{side}", rr.Clear(recursive=True))
@@ -265,24 +255,18 @@ def failed_bands(baseline: list[Result], results: list[Result]) -> list[str]:
 def main(config: Config) -> None:
     """Score every fixed frame once, time ``repeats`` passes, write ``results.json`` and check the bands."""
     config.output.mkdir(parents=True, exist_ok=True)
-    if config.model == "default":
-        paths: EgoHandAssetPaths = asset_paths(config.assets)
-        detector_config: EgoHandDetectorConfig = EgoHandDetectorConfig(weights=paths.detector)
-        pose_config: EgoHandConfig | EgoHandFastConfig = EgoHandConfig(weights=paths.weights, soma_assets=config.soma or paths.soma)
-        label: str = "default"
-    else:
-        stack: EgoHandStack[EgoHandFastConfig] = EgoHandStack.catalog(config.assets, backbone_precision=config.precision)
-        detector_config, pose_config = stack.detector, stack.pose
-        label = f"fast-{config.precision}"
-    detector: EgoHandDetector = detector_config.setup()
-    pose: EgoHandPredictor | FastEgoHandPredictor = pose_config.setup()
+    stack: EgoHandStack[EgoHandConfig] | EgoHandStack[EgoHandFastConfig] = EGOHAND_STACKS[config.stack](config.assets)
+    label: str = config.stack
+    left_class: int = eval_model(config.stack).left_class
+    detector: EgoHandDetector = stack.detector.setup()
+    pose: EgoHandPredictor | FastEgoHandPredictor = stack.pose.setup()
     print("GPU", torch.cuda.get_device_name(), "MODEL", label, flush=True)
     results: list[Result] = []
     with torch.inference_mode():
         for dataset in config.datasets:
             score: DatasetScore = DatasetScore()
             latencies: list[float] = []
-            rr.init(f"egohand-{label}-{dataset}", spawn=False)
+            rr.init(f"{label}-{dataset}", spawn=False)
             rr.save(config.output / f"{dataset}.rrd")
             recording: rr.RecordingStream | None = rr.get_global_data_recording()
             assert recording is not None
@@ -304,7 +288,7 @@ def main(config: Config) -> None:
                             rr.log(f"error/{side}/millimeters", rr.Scalars(side_errors[side][1]))
                         else:
                             rr.log(f"error/{side}", rr.Clear(recursive=True))
-                    log_frame_evidence(segment, index, frame, prediction, image=index in image_frames)
+                    log_frame_evidence(segment, index, frame, prediction, image=index in image_frames, left_class=left_class)
                 if config.measure_timing:
                     recording.flush()
                     for _ in range(config.repeats):

@@ -4,9 +4,9 @@ Fixed input: the SelfCap OAK left clip in ``assets/examples`` (1280x720, 100 fra
 to the GPU before timing; video decode and model set-up are excluded. Every frame runs alone
 (batch 1): hand detection, then the 3D hand model on that frame's hands, CUDA-synchronised.
 
-EgoHand runs SelfCap's accelerated configuration (``EgoHandStack.selfcap``): TensorRT
-detector, GPU perspective crops, TensorRT bf16 DINOv3 backbone, PyTorch head, full SOMA mesh;
-``egohand-fast`` runs ``EgoHandStack.fast``. Each predictor reports its stages in
+EgoHand stacks are named as everywhere else (``EGOHAND_STACKS``); the default times
+``egohand-selfcap``, SelfCap's accelerated configuration: TensorRT detector, GPU perspective
+crops, TensorRT bf16 DINOv3 backbone, PyTorch head, full SOMA mesh. Each predictor reports its stages in
 ``stage_ms``: detection (wall), crops (GPU remap), batch assembly, backbone, head and SOMA (CUDA
 events), and ``other`` = total minus those (forward glue, the right-hand
 mirror, device-to-host copies, upstream result dicts and the adapter's output conversion).
@@ -30,11 +30,11 @@ from torch import Tensor
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, EgoHandStage
-from posekit.models.egohand_fast import EgoHandStack, FastEgoHandPredictor
+from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandStack, EgoHandStackName, FastEgoHandPredictor
 from posekit.predictions import HandDetections, HandPoses3d
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
-BenchModel: TypeAlias = Literal["egohand", "egohand-fast", "wilor-tensorrt", "wilor-torch"]
+BenchModel: TypeAlias = EgoHandStackName | Literal["wilor-tensorrt", "wilor-torch"]
 
 
 @serde(deny_unknown_fields=True)
@@ -85,8 +85,8 @@ class HandsBenchConfig:
     """Fixed input clip."""
     camera_path: Path = EXAMPLES / "selfcap_oak_left.rrd"
     """Its CalibratedCamera."""
-    models: tuple[BenchModel, ...] = ("egohand", "wilor-tensorrt", "wilor-torch")
-    """Stacks to time."""
+    models: tuple[BenchModel, ...] = ("egohand-selfcap", "wilor-tensorrt", "wilor-torch")
+    """Stacks to time: ``EGOHAND_STACKS`` names, or WiLoR on TensorRT or torch."""
     wilor_pose_batch: int = 4
     """Static crop batch of the WiLoR TensorRT pose engine in this benchmark (more hands run in chunks)."""
     warmup: int = 10
@@ -172,15 +172,14 @@ def main(config: HandsBenchConfig) -> list[BenchResult]:
 
     from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 
-    egohand_stacks: dict[BenchModel, EgoHandStack] = {"egohand": EgoHandStack.selfcap(), "egohand-fast": EgoHandStack.fast()}
     decoder = VideoDecoder(config.video_path, dimension_order="NHWC", device="cuda")
     frames: UInt8[Tensor, "n h w 3"] = decoder.get_frames_in_range(0, len(decoder)).data.contiguous()
     camera: CalibratedCamera = load_calibrated_camera(config.camera_path)
     results: list[BenchResult] = []
     for model in config.models:
         with torch.inference_mode():
-            if model in egohand_stacks:
-                times, hands = bench_egohand(frames, camera, config.warmup, config.repeats, egohand_stacks[model])
+            if model in EGOHAND_STACKS:
+                times, hands = bench_egohand(frames, camera, config.warmup, config.repeats, EGOHAND_STACKS[model](None))
             else:
                 backend = TensorRtBackendConfig() if model == "wilor-tensorrt" else TorchBackendConfig(autocast="fp16")
                 detector = WilorHandDetectorConfig(backend=backend, static_batch_size=1).setup()

@@ -15,7 +15,7 @@ per-frame errors as scalars.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -35,14 +35,14 @@ from tqdm.auto import tqdm
 from posekit.eval.hand_gt import SIDES, GtDataset, HandGtSegment, read_hand_gt
 from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors, summarize
 from posekit.models.base import HandDetector, TopDownHandPose3d
-from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, EgoHandStack
+from posekit.models.egohand import EgoHandConfig
+from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandFastConfig, EgoHandStack, EgoHandStackName
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d
 from posekit.runtimes import TensorRtBackendConfig
 from posekit.skeletons import HAND_21
 
-ModelName: TypeAlias = Literal["wilor", "egohand", "egohand-fast"]
+ModelName: TypeAlias = Literal["wilor"] | EgoHandStackName
 Protocol: TypeAlias = Literal["gt-boxes", "detector"]
 METRICS: tuple[str, ...] = ("mpjpe_mm", "pa_mpjpe_mm", "rte_mm", "epe_2d_px")
 
@@ -57,7 +57,11 @@ class EvalModel:
     """The model predicts a metric camera-space wrist, so root translation error is scored; otherwise it is NaN."""
 
 
-EVAL_MODELS: dict[ModelName, EvalModel] = {"wilor": EvalModel(2, False), "egohand": EvalModel(4, True), "egohand-fast": EvalModel(6, True)}
+def eval_model(name: ModelName) -> EvalModel:
+    """WiLoR blue/orange in a virtual camera; reference EgoHand stacks green/magenta, fast ones cyan/yellow, both metric."""
+    if name == "wilor":
+        return EvalModel(2, False)
+    return EvalModel(4 if isinstance(EGOHAND_STACKS[name](None).pose, EgoHandConfig) else 6, True)
 
 
 @serde(deny_unknown_fields=True)
@@ -101,8 +105,8 @@ class HandsEvalConfig:
     """Catalog serving dataforge-hot3d-quest3 and dataforge-umetrack (base, hand_pose, projections)."""
     output_dir: Path = Path("/tmp/posekit-hands-eval")
     """Where results.json and hands_eval.rrd go."""
-    models: tuple[ModelName, ...] = ("wilor", "egohand")
-    """Models to evaluate."""
+    models: tuple[ModelName, ...] = ("wilor", "egohand-selfcap")
+    """Models to evaluate: ``wilor`` or ``EGOHAND_STACKS`` names."""
     protocols: tuple[Protocol, ...] = ("gt-boxes", "detector")
     """Box sources to evaluate."""
     stride: int = 10
@@ -164,20 +168,17 @@ class HandsEvalReport:
 
 
 def model_stack(name: ModelName) -> tuple[HandDetector, TopDownHandPose3d]:
-    """The evaluated configurations: TensorRT detectors, WiLoR TensorRT, and both EgoHand roles.
+    """WiLoR on TensorRT, or the named EgoHand stack.
 
-    The reference EgoHand runs a TensorRT bf16 backbone on its lens-aware CPU crops, because its
-    GPU crop sampler handles rational/pinhole lenses only; otherwise it matches SelfCap's
-    accelerated configuration. The fast role's CUDA cropper also handles FISHEYE624 and KB4.
+    Reference stacks run on their lens-aware CPU crops: the reference GPU crop sampler
+    handles rational/pinhole lenses only, and HOT3D and UmeTrack are fisheye. The fast
+    role's CUDA cropper handles every lens.
     """
     if name == "wilor":
         return WilorHandDetectorConfig(backend=TensorRtBackendConfig()).setup(), WilorHandPoseConfig(backend=TensorRtBackendConfig()).setup()
-    if name == "egohand-fast":
-        stack: EgoHandStack[EgoHandFastConfig] = EgoHandStack.fast()
-        return stack.detector.setup(), stack.pose.setup()
-    detector = EgoHandDetectorConfig(backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4)).setup()
-    pose = EgoHandConfig(batch_size=16, backbone_onnx=CACHED_BACKBONE_ONNX, backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32)).setup()
-    return detector, pose
+    stack: EgoHandStack[EgoHandConfig] | EgoHandStack[EgoHandFastConfig] = EGOHAND_STACKS[name](None)
+    pose: EgoHandConfig | EgoHandFastConfig = replace(stack.pose, gpu_crops=False) if isinstance(stack.pose, EgoHandConfig) else stack.pose
+    return stack.detector.setup(), pose.setup()
 
 
 def decode_samples(segment: HandGtSegment) -> UInt8[Tensor, "f h w 3"]:
@@ -294,7 +295,7 @@ def log_segment_frames(
             f"{root}/camera/image/{model}/{protocol}/boxes",
             rr.Boxes2D(
                 array=boxes.boxes.xyxy_numpy()[in_frame].reshape(-1, 4), array_format=rr.Box2DFormat.XYXY,
-                class_ids=[EVAL_MODELS[model].left_class + SIDES.index(boxes.sides[i]) for i in in_frame], show_labels=False,
+                class_ids=[eval_model(model).left_class + SIDES.index(boxes.sides[i]) for i in in_frame], show_labels=False,
             ),
         )
         for side_index, side in enumerate(SIDES):
@@ -304,10 +305,10 @@ def log_segment_frames(
                 rr.log(f"{root}/camera/image/{path}", rr.Clear(recursive=False))
                 rr.log(f"{root}/camera/{path}", rr.Clear(recursive=False))
                 continue
-            rr.log(f"{root}/camera/image/{path}", rr.Points2D(hand.pred_uv, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=EVAL_MODELS[model].left_class + side_index, radii=-2.0, show_labels=False))
+            rr.log(f"{root}/camera/image/{path}", rr.Points2D(hand.pred_uv, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=eval_model(model).left_class + side_index, radii=-2.0, show_labels=False))
             # Shown wrist-on-wrist with the ground truth, the shape MPJPE scores (WiLoR's root is in a virtual camera).
             shown: Float32[ndarray, "21 3"] = (hand.pred_xyz - hand.pred_xyz[0] + segment.xyz_camera[frame, side_index, 0]).astype(np.float32)
-            rr.log(f"{root}/camera/{path}", rr.Points3D(shown, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=EVAL_MODELS[model].left_class + side_index, radii=0.003, show_labels=False))
+            rr.log(f"{root}/camera/{path}", rr.Points3D(shown, keypoint_ids=np.arange(21, dtype=np.uint16), class_ids=eval_model(model).left_class + side_index, radii=0.003, show_labels=False))
         for metric in METRICS:
             values: list[float] = [getattr(hand.errors, metric) for hand in rows if np.isfinite(getattr(hand.errors, metric))]
             if values:
@@ -389,7 +390,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
                 scored: list[ScoredHand] = []
                 for segment, frames in tqdm(segments_frames, desc=f"{model} {dataset} {protocol}"):
                     with torch.inference_mode():
-                        count, any_side, hands, boxes = evaluate_segment(segment, frames, detector, pose, protocol, config, metric_root=EVAL_MODELS[model].metric_root)
+                        count, any_side, hands, boxes = evaluate_segment(segment, frames, detector, pose, protocol, config, metric_root=eval_model(model).metric_root)
                     gt_hands += count
                     overlapped += any_side
                     scored.extend(hands)

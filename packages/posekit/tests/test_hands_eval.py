@@ -82,3 +82,16 @@ def test_evaluation_cli_selects_fast_and_reference_egohand() -> None:
 
     config = tyro.cli(HandsEvalConfig, args=["--models", "egohand", "egohand-fast"])
     assert config.models == ("egohand", "egohand-fast")
+
+
+def test_tools_name_egohand_stacks_like_the_cli() -> None:
+    """hands_eval's stack names are the registry's; reference stacks keep their colour, fast ones theirs, and names round-trip."""
+    from serde.json import from_json, to_json
+
+    from posekit.apis.hands_eval import EvalCell, eval_model
+
+    assert eval_model("wilor").left_class == 2 and not eval_model("wilor").metric_root
+    assert eval_model("egohand-selfcap").left_class == eval_model("egohand").left_class == 4
+    assert eval_model("egohand-fast").left_class == eval_model("egohand-catalog").left_class == 6
+    cell = EvalCell("egohand-catalog", "dataforge-umetrack", "detector", 1, 1, 1.0, 1.0, {})
+    assert from_json(EvalCell, to_json(cell)) == cell
