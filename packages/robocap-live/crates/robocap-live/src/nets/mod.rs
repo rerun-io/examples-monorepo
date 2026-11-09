@@ -4,6 +4,8 @@
 //! checked against the same PyTorch reference.
 #![deny(missing_docs)]
 
+use std::path::{Path, PathBuf};
+
 /// DetNet's input frame (BarLetterbox of the 640x360 small image), width x height.
 pub const DETNET_WIDTH: usize = 640;
 /// DetNet's input frame height.
@@ -74,6 +76,46 @@ pub struct KeyNetRaw {
     pub presence_logit: f32,
     /// Thumb-index contact logit when the model has the pinch head (keynet-strong-pinch does).
     pub pinch_logit: Option<f32>,
+}
+
+/// A DetNet's weights version: where its files live (`<models>/detnet/<name>/`) and which input convention it was trained on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DetNetVersion {
+    /// The 2026-11 DetNet-F mix-1 (UmeTrack + SHOW3D + GSI + Gen-HumanEgo), trained on upright cameras.
+    #[default]
+    Mix1Upright,
+    /// The 2026-09-29 DetNet-F (`detnet-demo-0929`), trained on every camera as calibrated.
+    V0929,
+}
+
+impl DetNetVersion {
+    /// Every version, the default first.
+    pub const ALL: [DetNetVersion; 2] = [DetNetVersion::Mix1Upright, DetNetVersion::V0929];
+
+    /// The version's directory name under `<models>/detnet/` (and its CLI name).
+    pub fn name(self) -> &'static str {
+        match self {
+            DetNetVersion::Mix1Upright => "mix1-upright",
+            DetNetVersion::V0929 => "0929",
+        }
+    }
+
+    /// The version called `name`, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|version| version.name() == name)
+    }
+
+    /// Whether the weights were trained on upright cameras (RoboCap's cameras 2 and 3 turned 180 degrees first).
+    pub fn upright(self) -> bool {
+        self == DetNetVersion::Mix1Upright
+    }
+
+    /// The directory holding this version's DetNet files: `<models>/detnet/<name>/` when it exists, else `models` itself (a flat
+    /// directory of one version, as the 2026-10 layout was).
+    pub fn dir(self, models: &Path) -> PathBuf {
+        let versioned: PathBuf = models.join("detnet").join(self.name());
+        if versioned.is_dir() { versioned } else { models.to_path_buf() }
+    }
 }
 
 /// One DetNet input frame without its padding: 640-wide u8 rows (row-major) at net rows `top..top + rows`, black (0) above and

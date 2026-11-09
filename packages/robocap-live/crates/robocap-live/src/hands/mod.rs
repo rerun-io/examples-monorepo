@@ -100,6 +100,12 @@ pub enum DetNetInput {
     Upright,
 }
 
+impl From<crate::nets::DetNetVersion> for DetNetInput {
+    fn from(version: crate::nets::DetNetVersion) -> Self {
+        if version.upright() { DetNetInput::Upright } else { DetNetInput::Legacy }
+    }
+}
+
 impl DetNetInput {
     /// Whether DetNet sees `camera` turned 180 degrees under this convention.
     pub fn half_turned(self, camera: usize) -> bool {

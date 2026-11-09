@@ -1,6 +1,9 @@
 {
   "format": "robocap-live-nets-golden/1",
-  "detnet_weights_sha256": "cc4ee7d8926890eb333ff82f3b88e1710bb8618ac8abed1e10fc9ab72323e12d",
+  "detnet_weights_sha256": {
+    "mix1-upright": "cc4ee7d8926890eb333ff82f3b88e1710bb8618ac8abed1e10fc9ab72323e12d",
+    "0929": "edda4177599bf6f862cdabd5afbca198ff353cb9156d8eaca6f1351818c51a23"
+  },
   "keynet_weights_sha256": "067cf7f677dbeb8c1fbe741f7bf16c395e5d52ebc79f9ab63498bf74a2faac75",
   "detnet": {
     "samples": 4,
@@ -11,7 +14,7 @@
       1679
     ],
     "pooled_u8": "detnet_pooled_u8.bin [k,120,160]",
-    "out_f32": "detnet_out_f32.bin [k,8] = center (l.x, l.y, r.x, r.y), radius (l, r), presence_logit (l, r)"
+    "out_f32": "detnet/<version>/detnet_out_f32.bin [k,8] = center (l.x, l.y, r.x, r.y), radius (l, r), presence_logit (l, r); one per DetNet version, same frames"
   },
   "keynet": {
     "samples": 4,

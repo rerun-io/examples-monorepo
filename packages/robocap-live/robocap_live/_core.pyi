@@ -92,7 +92,7 @@ class HandsLayer:
         ort_dylib: Path | None = None,
         ort_threads: int = 0,
         overlays: str = "debug",
-        detnet_input: str = "upright",
+        detnet_version: str = "mix1-upright",
     ) -> None: ...
     @property
     def nets(self) -> str: ...

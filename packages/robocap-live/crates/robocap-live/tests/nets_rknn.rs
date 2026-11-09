@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use robocap_live::nets::golden::{Comparison, Golden, default_dir};
 use robocap_live::nets::rknn::{DEFAULT_DETNET, DEFAULT_KEYNET, DEFAULT_LIBRARY, RknnNets};
-use robocap_live::nets::{HandNets, KeyNetRaw, NetFrame};
+use robocap_live::nets::{DetNetVersion, HandNets, KeyNetRaw, NetFrame};
 
 fn models_dir() -> PathBuf {
     std::env::var_os("ROBOCAP_LIVE_MODELS").map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models"), PathBuf::from)
@@ -18,18 +18,25 @@ fn golden_dir() -> PathBuf {
 }
 
 #[test]
-fn rknn_matches_pytorch_golden() -> Result<(), Box<dyn std::error::Error>> {
+fn rknn_matches_pytorch_golden_for_every_detnet_version() -> Result<(), Box<dyn std::error::Error>> {
     let library: PathBuf = std::env::var_os("RKNN_LIB").map_or_else(|| PathBuf::from(DEFAULT_LIBRARY), PathBuf::from);
     let models: PathBuf = models_dir();
-    let (detnet, keynet) = (models.join(DEFAULT_DETNET), models.join(DEFAULT_KEYNET));
-    for path in [&library, &detnet, &keynet] {
+    for version in DetNetVersion::ALL {
+        rknn_matches(&library, &models, version)?;
+    }
+    Ok(())
+}
+
+fn rknn_matches(library: &Path, models: &Path, version: DetNetVersion) -> Result<(), Box<dyn std::error::Error>> {
+    let (detnet, keynet) = (version.dir(models).join(DEFAULT_DETNET), models.join(DEFAULT_KEYNET));
+    for path in [library, &detnet, &keynet] {
         if !path.exists() {
-            eprintln!("SKIP rknn_matches_pytorch_golden: {} not found (this test runs on the RK3588 cap)", path.display());
+            eprintln!("SKIP rknn_matches_pytorch_golden {}: {} not found (this test runs on the RK3588 cap)", version.name(), path.display());
             return Ok(());
         }
     }
-    let golden: Golden = Golden::load(golden_dir())?;
-    let mut nets: RknnNets = RknnNets::with_files(&library, &detnet, &keynet, 3, 2)?;
+    let golden: Golden = Golden::load_version(golden_dir(), version)?;
+    let mut nets: RknnNets = RknnNets::with_files(library, &detnet, &keynet, 3, 2)?;
     let frames: Vec<Vec<u8>> = golden.detnet_frames();
     let frame_refs: Vec<NetFrame<'_>> = frames.iter().map(|frame| NetFrame { pixels: frame, top: 0, half_turn: false }).collect();
     let detnet_out = nets.detnet(&frame_refs)?;

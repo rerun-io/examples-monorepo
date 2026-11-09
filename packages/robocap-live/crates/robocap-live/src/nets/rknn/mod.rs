@@ -25,7 +25,7 @@ pub use api::{InputData, NpuCore, RknnError, RknnModel, RknnRuntime, RunTiming, 
 use kornia_staging_imgproc::resize::{pool4_from_sums, pool4_mean_f32, pool4_u8};
 
 use super::{
-    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, HandNets, KEYNET_CROP, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
+    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, DetNetVersion, HEATMAP_LEN, HandNets, KEYNET_CROP, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
 };
 
 /// Where Rockchip's images install the runtime.
@@ -434,15 +434,15 @@ pub struct RknnNets {
 }
 
 impl RknnNets {
-    /// Opens the runtime and loads [`DEFAULT_DETNET`] (3 contexts: cores 0, 1, 2) and [`DEFAULT_KEYNET`] (2 contexts: cores 1,
-    /// 2) from `models_dir`.
+    /// Opens the runtime and loads `detnet`'s [`DEFAULT_DETNET`] ([`DetNetVersion::dir`]; 3 contexts: cores 0, 1, 2) and
+    /// [`DEFAULT_KEYNET`] from `models_dir` (2 contexts: cores 1, 2).
     ///
     /// # Errors
     ///
     /// As [`RknnNets::with_files`].
-    pub fn open(models_dir: impl AsRef<Path>) -> Result<Self, NetsError> {
+    pub fn open(models_dir: impl AsRef<Path>, detnet: DetNetVersion) -> Result<Self, NetsError> {
         let dir: &Path = models_dir.as_ref();
-        Self::with_files(DEFAULT_LIBRARY, dir.join(DEFAULT_DETNET), dir.join(DEFAULT_KEYNET), 3, 2)
+        Self::with_files(DEFAULT_LIBRARY, detnet.dir(dir).join(DEFAULT_DETNET), dir.join(DEFAULT_KEYNET), 3, 2)
     }
 
     /// Loads DetNet contexts on cores 0, 1, 2 and KeyNet contexts on cores 1, 2, 0 (the first `detnet_contexts` and

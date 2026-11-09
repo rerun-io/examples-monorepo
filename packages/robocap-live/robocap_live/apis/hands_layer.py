@@ -52,9 +52,9 @@ class Config:
     """ONNX Runtime intra-op threads per session (0 = its default)."""
     overlays: Literal["fit", "debug", "verbose"] = "debug"
     """How much of the hand pipeline the camera panes show."""
-    detnet_input: Literal["upright", "legacy"] = "upright"
-    """The input convention of ``detnet_full.onnx``: upright (cameras 2-3 turned 180 degrees; the mix-1 weights) or legacy
-    (every camera as calibrated; detnet-demo-0929)."""
+    detnet_version: Literal["mix1-upright", "0929"] = "mix1-upright"
+    """DetNet from ``models_dir/detnet/<version>/`` (else a flat ``models_dir``). Its input convention sets the camera turn:
+    mix1-upright turns cameras 2-3 by 180 degrees, 0929 (detnet-demo-0929) takes every camera as calibrated."""
     decode_threads: int = 2
     """libavcodec threads per camera decoder (six run in lockstep)."""
     max_framesets: int | None = None
@@ -187,7 +187,7 @@ def main(config: Config) -> LayerRun:
     core: _core.HandsLayer = _core.HandsLayer(
         segment.rig, partial, config.segment, segment.poses.t_ns, segment.poses.world_from_rig, models_dir=config.models_dir,
         device=config.device, ort_dylib=config.ort_dylib or default_ort_dylib(), ort_threads=config.ort_threads,
-        overlays=config.overlays, detnet_input=config.detnet_input,
+        overlays=config.overlays, detnet_version=config.detnet_version,
     )
     nets_load_s: float = time.perf_counter() - loaded
     print(f"nets {core.nets} (loaded in {nets_load_s:.1f} s)", flush=True)

@@ -19,10 +19,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use robocap_live::capture::Cap;
 use robocap_live::frame::{NUM_CAMERAS, SMALL_SIZE};
-use robocap_live::hands::{self, DetNetInput, HandsConfig, ScaleMode};
+use robocap_live::hands::{self, HandsConfig, ScaleMode};
 use robocap_live::log::video::{EncoderKind, encoder_config};
 use robocap_live::log::{Logger, LoggerConfig, LoggerSink, VideoMode};
-use robocap_live::nets::{HandNets, NetsError, NoNets};
+use robocap_live::nets::{DetNetVersion, HandNets, NetsError, NoNets};
 use robocap_live::sched::{self, FramesetSink, HandsStage, PipelineConfig, RecordWriter};
 use robocap_live::slam::{
     ReferencePoses, SlamConfig, SlamLane, SlamMode, SlamProfile, parse_override,
@@ -46,11 +46,22 @@ enum HandsArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum DetNetInputArg {
-    /// Cameras 2 and 3 turned 180 degrees for DetNet: the 2026-11 mix-1 weights (models/MODELS.md).
-    Upright,
-    /// Every camera as calibrated: the 2026-09-29 weights (detnet-demo-0929).
-    Legacy,
+enum DetNetVersionArg {
+    /// The 2026-11 DetNet-F mix-1, trained on upright cameras: cameras 2 and 3 are turned 180 degrees for it (models/MODELS.md).
+    #[value(name = "mix1-upright")]
+    Mix1Upright,
+    /// The 2026-09-29 DetNet-F (detnet-demo-0929), trained on every camera as calibrated.
+    #[value(name = "0929")]
+    V0929,
+}
+
+impl From<DetNetVersionArg> for DetNetVersion {
+    fn from(arg: DetNetVersionArg) -> Self {
+        match arg {
+            DetNetVersionArg::Mix1Upright => DetNetVersion::Mix1Upright,
+            DetNetVersionArg::V0929 => DetNetVersion::V0929,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -235,9 +246,9 @@ struct Cli {
     /// (`round-robin`, ROBUST_TRACKER_CONFIG as handtrack runs it; parity with s66-cams4/cams6).
     #[arg(long, value_enum, default_value = "all")]
     detnet: DetNetArg,
-    /// The input convention of the DetNet in --models: `upright` (the default weights) or `legacy` (detnet-demo-0929).
-    #[arg(long, value_enum, default_value = "upright")]
-    detnet_input: DetNetInputArg,
+    /// The DetNet version (`<models>/detnet/<version>/`, else a flat --models directory); the camera turn follows its input convention.
+    #[arg(long, value_enum, default_value = "mix1-upright")]
+    detnet_version: DetNetVersionArg,
     /// Cameras DetNet looks at (default: --hand-cameras).
     #[arg(long)]
     detnet_cameras: Option<Cameras>,
@@ -373,7 +384,7 @@ fn install_signal_handlers() {
     }
 }
 
-fn build_nets(spec: &[String]) -> Result<Option<Box<dyn HandNets>>> {
+fn build_nets(spec: &[String], detnet: DetNetVersion) -> Result<Option<Box<dyn HandNets>>> {
     let dir = |kind: &str| {
         spec.get(1)
             .map(PathBuf::from)
@@ -383,7 +394,7 @@ fn build_nets(spec: &[String]) -> Result<Option<Box<dyn HandNets>>> {
         None | Some("none") => Ok(None),
         Some("rknn") => {
             let dir = dir("rknn")?;
-            let nets = robocap_live::nets::rknn::RknnNets::open(&dir)
+            let nets = robocap_live::nets::rknn::RknnNets::open(&dir, detnet)
                 .with_context(|| format!("load RKNN models from {}", dir.display()))?;
             Ok(Some(Box::new(nets)))
         }
@@ -391,7 +402,7 @@ fn build_nets(spec: &[String]) -> Result<Option<Box<dyn HandNets>>> {
         Some("ort") => {
             let dir = dir("ort")?;
             let options = robocap_live::nets::ort::OrtConfig::default();
-            let nets = robocap_live::nets::ort::OrtNets::new(&dir, &options)
+            let nets = robocap_live::nets::ort::OrtNets::new(&dir, detnet, &options)
                 .with_context(|| format!("load ONNX models from {}", dir.display()))?;
             Ok(Some(Box::new(nets)))
         }
@@ -404,10 +415,10 @@ fn build_nets(spec: &[String]) -> Result<Option<Box<dyn HandNets>>> {
 }
 
 /// Rebuilds the `--nets` backend after a network failure (an RKNN run timeout soft-resets the NPU); `None` for `--nets none`.
-fn nets_factory(spec: &[String]) -> Option<sched::NetsFactory> {
+fn nets_factory(spec: &[String], detnet: DetNetVersion) -> Option<sched::NetsFactory> {
     let spec = spec.to_vec();
     matches!(spec.first().map(String::as_str), Some("rknn" | "ort")).then(|| {
-        let factory: sched::NetsFactory = Box::new(move || match build_nets(&spec) {
+        let factory: sched::NetsFactory = Box::new(move || match build_nets(&spec, detnet) {
             Ok(Some(nets)) => Ok(nets),
             Ok(None) => Err(NetsError::Load {
                 what: "nets".into(),
@@ -572,7 +583,7 @@ fn main() -> Result<()> {
         },
         ScaleArg::Fixed(phi) => ScaleMode::Fixed(phi),
     };
-    let nets = build_nets(&cli.nets)?;
+    let nets = build_nets(&cli.nets, cli.detnet_version.into())?;
     let hands_mode = cli.hands.unwrap_or(if nets.is_some() {
         HandsArg::On
     } else {
@@ -586,10 +597,7 @@ fn main() -> Result<()> {
                 Box::new(NoNets)
             });
             let config = HandsConfig {
-                detnet_input: match cli.detnet_input {
-                    DetNetInputArg::Upright => DetNetInput::Upright,
-                    DetNetInputArg::Legacy => DetNetInput::Legacy,
-                },
+                detnet_input: DetNetVersion::from(cli.detnet_version).into(),
                 scale,
                 cameras: hand_cameras.clone(),
                 detnet_cameras: detnet_cameras.clone(),
@@ -613,7 +621,7 @@ fn main() -> Result<()> {
             Some(HandsStage {
                 tracker,
                 nets,
-                nets_factory: nets_factory(&cli.nets),
+                nets_factory: nets_factory(&cli.nets, cli.detnet_version.into()),
             })
         }
     };

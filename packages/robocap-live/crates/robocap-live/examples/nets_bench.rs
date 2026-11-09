@@ -502,7 +502,7 @@ fn ort_backend(args: &Args) -> BenchResult<Box<dyn HandNets>> {
         dylib: args.get("dylib").map(PathBuf::from),
         intra_threads: 0,
     };
-    let ort: OrtNets = OrtNets::new(&args.models, &options)?;
+    let ort: OrtNets = OrtNets::new(&args.models, robocap_live::nets::DetNetVersion::default(), &options)?;
     println!("backend: {}", ort.describe());
     Ok(Box::new(ort))
 }
