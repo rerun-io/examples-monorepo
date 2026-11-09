@@ -40,6 +40,8 @@ FRAME_NS: int = 33_333_333
 """GSI's 30 fps frame step."""
 FRAMES: int = 3
 """Frames per fake episode."""
+DROPOUT: dict[str, int] = {"ep_v1_cccc": 1}
+"""Fake episodes whose SLAM skips a frame, as two of GSI's real ones do (frame 115 of ep_v1_0afe40df…, 147 of ep_v1_23887c95…)."""
 
 
 def view_rotation(cam: int) -> Float64[ndarray, "3 3"]:
@@ -132,6 +134,8 @@ def episode_rrds(episode: str) -> dict[str, bytes]:
             recording.set_time("capture_time", duration=np.timedelta64(T0_NS - FRAME_NS, "ns"))
             recording.log("/slam/rig", rr.Transform3D(translation=[9.0, 9.0, 9.0]))
             for frame in range(FRAMES):
+                if DROPOUT.get(episode) == frame:
+                    continue
                 recording.set_time("capture_time", duration=np.timedelta64(T0_NS + frame * FRAME_NS, "ns"))
                 recording.set_time("frame", sequence=frame)
                 recording.set_time("source_frame", sequence=100 + frame)
@@ -383,8 +387,15 @@ def rig_T_cam(store: rrc.ChunkStore, cam: int) -> Float64[ndarray, "4 4"]:
 def written_world_T_rig(store: rrc.ChunkStore, frame: int) -> Float64[ndarray, "4 4"]:
     """The rig node's temporal pose on one frame, as written."""
     pose: Float64[ndarray, "4 4"] = np.eye(4)
-    pose[:3, :3] = Rotation.from_quat(np.asarray(rows(store, schema.rig_path(0), "Transform3D:quaternion")[frame]).reshape(4)).as_matrix()
-    pose[:3, 3] = np.asarray(rows(store, schema.rig_path(0), "Transform3D:translation")[frame]).reshape(3)
+    pose[:3, :3] = np.asarray(rows(store, schema.rig_path(0), "Transform3D:mat3x3")[frame], dtype=np.float64).reshape(3, 3).T
+    pose[:3, 3] = np.asarray(rows(store, schema.rig_path(0), "Transform3D:translation")[frame], dtype=np.float64).reshape(3)
+    return pose
+
+
+def view_pose(cam: int) -> Float64[ndarray, "4 4"]:
+    """A fake view's shipped ``rig_T_cam`` (FLU to FLU) as a pose."""
+    pose: Float64[ndarray, "4 4"] = np.eye(4)
+    pose[:3, :3], pose[:3, 3] = view_rotation(cam), view_translation(cam)
     return pose
 
 
@@ -463,6 +474,21 @@ def test_the_hands_reach_the_world_and_every_view_through_its_pinhole(gsi: FakeG
         inside = (optical[:, 2] > 0) & (expected_px[:, 0] >= 0) & (expected_px[:, 0] < 1920) & (expected_px[:, 1] >= 0) & (expected_px[:, 1] < 1080)
         np.testing.assert_allclose(pixels[91:112][inside], expected_px[inside], atol=1e-2)
         assert np.isnan(pixels[91:112][~inside]).all()
+
+
+def test_a_slam_dropout_hides_the_rig_and_the_world_hands_for_that_frame(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    targets: dict[str, Path] = converted(gsi, tmp_path / "raw", tmp_path / "out", monkeypatch, "ep_v1_cccc")
+    base: rrc.ChunkStore = read_back(targets["base"])
+    pose: rrc.ChunkStore = read_back(targets["pose"])
+
+    assert np.isnan(written_world_T_rig(base, 1)[:3]).all(), "exoego:v2: a NaN world_T_rig on the dropout frame"
+    np.testing.assert_allclose(written_world_T_rig(base, 2) @ rig_T_cam(base, 3), world_T_rig(2) @ view_pose(3) @ flu_rdf(), atol=1e-5)
+    assert recording_properties(base, "capture")["slam_missing_frames"] == 1
+    assert base.reader(index=schema.TIMELINE, contents=schema.trail_path("slam")).to_arrow_table().num_rows == FRAMES - 1
+    assert np.isnan(np.asarray(rows(pose, schema.coco133_xyz_path(), ":positions")[1], dtype=np.float32)).all(), "no world position without a pose"
+    assert rows(read_back(targets["hand_mesh"]), schema.hand_mesh_path("right"), "Mesh3D:vertex_positions")[1] == []
+    pixels = np.asarray(rows(read_back(targets["projections"]), schema.coco133_uv_projected_path(0, 0), ":positions")[1], dtype=np.float32)
+    assert np.isfinite(pixels[91:133]).all(), "projections need no SLAM: the hands are in GSI's rig frame"
 
 
 def test_a_kept_download_lets_the_native_mirror_convert_the_same_files(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

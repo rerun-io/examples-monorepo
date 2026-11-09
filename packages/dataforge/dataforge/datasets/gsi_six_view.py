@@ -163,15 +163,11 @@ def rdf_rig_T_cam_translation(translation: pa.FixedSizeListArray) -> pa.Array:
     return pa.FixedSizeListArray.from_arrays(pa.array((offsets @ FLU_R_RDF).reshape(-1), type=translation.type.value_type), 3)
 
 
-def rdf_world_T_rig_quaternion(quaternion: pa.FixedSizeListArray) -> pa.Array:
-    """``world_T_rig`` for the RDF rig frame: world_R_flu · FLU_R_RDF; the rig origin does not move."""
-    world_R_flu: Rotation = Rotation.from_quat(np.asarray(quaternion.flatten(), dtype=np.float64).reshape(-1, 4))
-    turned: Float64[ndarray, "n 4"] = (world_R_flu * Rotation.from_matrix(FLU_R_RDF)).as_quat()
-    return pa.FixedSizeListArray.from_arrays(pa.array(turned.reshape(-1), type=quaternion.type.value_type), 4)
-
-
 def base_stream(hands_rrd: Path, slam_rrd: Path, t0_ns: int) -> rrc.LazyChunkStream:
-    """GSI's cameras, pinholes, videos and SLAM rig at their exoego paths, retimed and turned to RDF; no sample is decoded."""
+    """GSI's cameras, pinholes, videos and SLAM path at their exoego paths, retimed and turned to RDF; no sample is decoded.
+
+    The rig pose is not here: ``write_base`` writes it dense, so a SLAM dropout gets its NaN row (exoego:v2).
+    """
     retimer: Retimer = Retimer(t0_ns)
     cameras: rrc.LazyChunkStream = rrc.RrdReader(hands_rrd).stream().filter(content="/camera/**").flat_map(retimer)
     pinholes, cameras = cameras.split(components=PINHOLE_COMPONENTS)
@@ -194,13 +190,8 @@ def base_stream(hands_rrd: Path, slam_rrd: Path, t0_ns: int) -> rrc.LazyChunkStr
         output_mode="forward_unmatched",
     )
     run: str = schema.run_path(RUN_SOURCE)
-    slam: rrc.LazyChunkStream = rrc.RrdReader(slam_rrd).stream().filter(content=["/slam/rig", "/slam/path", "/slam/index", "/slam/meta"]).flat_map(retimer)
-    slam = slam.map(
-        renamed({"/slam/rig": schema.rig_path(RIG), "/slam/path": schema.trajectory_path(RUN_SOURCE), "/slam/index": f"{run}/index", "/slam/meta": f"{run}/meta"})
-    )
-    slam = slam.lenses(
-        rrc.MutateLens("Transform3D:quaternion", rrc.Selector(".").pipe(rdf_world_T_rig_quaternion)), content=schema.rig_path(RIG), output_mode="forward_unmatched"
-    )
+    slam: rrc.LazyChunkStream = rrc.RrdReader(slam_rrd).stream().filter(content=["/slam/path", "/slam/index", "/slam/meta"]).flat_map(retimer)
+    slam = slam.map(renamed({"/slam/path": schema.trajectory_path(RUN_SOURCE), "/slam/index": f"{run}/index", "/slam/meta": f"{run}/meta"}))
     return rrc.LazyChunkStream.merge(pinholes, cameras, slam)
 
 
@@ -223,7 +214,12 @@ class Episode:
     usable: Bool[ndarray, "f 2"]
     """GSI's ``is_usable`` flag of each hand."""
     world_T_rig: Float64[ndarray, "f 4 4"]
-    """The SLAM pose of GSI's rig frame on every frame."""
+    """The SLAM pose of GSI's rig frame on every frame; NaN where SLAM has none (a tracking dropout)."""
+
+    @property
+    def posed(self) -> Bool[ndarray, "f"]:
+        """Frames with a SLAM pose."""
+        return np.isfinite(self.world_T_rig).all(axis=(1, 2))
     rig_T_cams: Float64[ndarray, "c 4 4"]
     """Each view's shipped ``rig_T_cam``, FLU to FLU."""
     intrinsics: Float64[ndarray, "c 3 3"]
@@ -246,6 +242,24 @@ def frame_rows(store: rrc.ChunkStore, entity: str) -> pa.Table:
     return table
 
 
+def slam_poses(store: rrc.ChunkStore, entity: str, num_frames: int) -> Float64[ndarray, "f 4 4"]:
+    """One SLAM entity's pose on each of ``num_frames`` frames; NaN on a frame it skips (GSI's SLAM drops single frames).
+
+    Raises:
+        ValueError: A frame has two poses, or a pose sits outside the episode's frames.
+    """
+    table: pa.Table = store.reader(index="frame", contents=entity).to_arrow_table()
+    table = table.filter(table.column("frame").is_valid())
+    frames: Int64[ndarray, "n"] = np.asarray(table.column("frame").cast(pa.int64()))
+    if len(np.unique(frames)) != len(frames) or frames.min() < 0 or frames.max() >= num_frames:
+        raise ValueError(f"{entity}: GSI poses repeat a frame or fall outside frames 0-{num_frames - 1}")
+    poses: Float64[ndarray, "f 4 4"] = np.full((num_frames, 4, 4), np.nan)
+    poses[frames] = np.eye(4)
+    poses[frames, :3, :3] = Rotation.from_quat(stacked(column(table, "Transform3D:quaternion"), 4).astype(np.float64)).as_matrix()
+    poses[frames, :3, 3] = stacked(column(table, "Transform3D:translation"), 3)
+    return poses
+
+
 def column(table: pa.Table, component: str) -> pa.ChunkedArray:
     """A component column, whatever entity prefix the reader gave it."""
     return table.column(next(name for name in table.column_names if name.endswith(component)))
@@ -265,15 +279,10 @@ def read_episode(hands_rrd: Path, slam_rrd: Path) -> Episode:
     """
     store: rrc.ChunkStore = rrc.RrdReader(hands_rrd).stream().filter(content=["/hand/**", "/camera/**", "/meta/**", "/__properties/episode"]).collect()
     slam: rrc.ChunkStore = rrc.RrdReader(slam_rrd).stream().filter(content=["/slam/rig", "/hand"]).collect()
-    poses: pa.Table = frame_rows(slam, "/slam/rig")
-    hand_poses: pa.Table = frame_rows(slam, "/hand")
-    quaternions: Float64[ndarray, "f 4"] = stacked(column(poses, "Transform3D:quaternion"), 4).astype(np.float64)
-    translations: Float64[ndarray, "f 3"] = stacked(column(poses, "Transform3D:translation"), 3).astype(np.float64)
-    if not (np.array_equal(quaternions, stacked(column(hand_poses, "Transform3D:quaternion"), 4)) and np.array_equal(translations, stacked(column(hand_poses, "Transform3D:translation"), 3))):
+    num_frames: int = frame_rows(store, "/hand/left/keypoints3d").num_rows
+    world_T_rig: Float64[ndarray, "f 4 4"] = slam_poses(slam, "/slam/rig", num_frames)
+    if not np.array_equal(world_T_rig, slam_poses(slam, "/hand", num_frames), equal_nan=True):
         raise ValueError(f"{slam_rrd}: /hand and /slam/rig carry different poses")
-    world_T_rig: Float64[ndarray, "f 4 4"] = np.tile(np.eye(4), (len(poses), 1, 1))
-    world_T_rig[:, :3, :3] = Rotation.from_quat(quaternions).as_matrix()
-    world_T_rig[:, :3, 3] = translations
     if static_value(store, "/meta/calibration", "views") != list(VIEWS):
         raise ValueError(f"{hands_rrd}: GSI's views are not {VIEWS}")
     rig_T_cams: Float64[ndarray, "c 4 4"] = np.tile(np.eye(4), (len(VIEWS), 1, 1))
@@ -383,13 +392,15 @@ def write_hand_mesh_layer(recording: rr.RecordingStream, episode: Episode) -> No
         meshes.log_mesh_static(recording, path, albedo_factor=hands.HAND_ALBEDO[side])
         for start in range(0, len(episode.frames), MESH_BATCH):
             batch: slice = slice(start, start + MESH_BATCH)
-            trusted: Bool[ndarray, "n"] = episode.usable[batch, side_index]
+            trusted: Bool[ndarray, "n"] = episode.usable[batch, side_index] & episode.posed[batch]
             world_vertices: Float32[ndarray, "n 778 3"] = to_world(episode.world_T_rig[batch], episode.rig_vertices[batch, side_index])
             meshes.log_mesh_batch(
                 recording, path, times_ns=episode.times_ns[batch], frame_indices=episode.frames[batch],
                 vertices=world_vertices[trusted], trusted=trusted.tolist(), topology=episode.faces[side_index],
             )  # fmt: skip
-    recording.send_property(paths.HAND_MESH_LAYER, rr.AnyValues(model="MANO vertices as GSI skinned them, moved from its rig frame to the world by the SLAM pose"))
+    recording.send_property(
+        paths.HAND_MESH_LAYER, rr.AnyValues(model="MANO vertices as GSI skinned them, moved from its rig frame to the world by the SLAM pose; none on a SLAM dropout")
+    )
 
 
 def write_projections_layer(recording: rr.RecordingStream, episode: Episode) -> None:
@@ -528,7 +539,13 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
                 )
             recording.send_chunks(compacted)
             # The rig origin is the same in GSI's FLU frame and the RDF one, so the trail reads GSI's translations.
-            log_trail_segments(recording, schema.trail_path(RUN_SOURCE), times_ns=track.times_ns, translations_xyz=track.world_T_rig[:, :3, 3])
+            # world_T_rig of the RDF rig frame (GSI's pose · FLU_R_RDF), dense: a SLAM dropout is a NaN row, which hides the rig.
+            rdf_turn: Float64[ndarray, "4 4"] = np.eye(4)
+            rdf_turn[:3, :3] = FLU_R_RDF
+            log_dense_pose_track(recording, schema.rig_path(RIG), times_ns=track.times_ns, frame_indices=track.frames, transforms=track.world_T_rig @ rdf_turn)
+            # The rig origin is the same in both frames, so the trail reads GSI's translations; a dropout frame has no segment.
+            posed: Bool[ndarray, "f"] = track.posed
+            log_trail_segments(recording, schema.trail_path(RUN_SOURCE), times_ns=track.times_ns[posed], translations_xyz=track.world_T_rig[posed, :3, 3])
             recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties/episode"))
             recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties", components="RecordingInfo:start_time"))
             recording.send_property("gsi_calibration", rr.AnyValues(**extras))
@@ -539,6 +556,7 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
                 num_frames=frames,
                 category=episode.category,
                 camera_names=",".join(VIEWS),
+                slam_missing_frames=int((~track.posed).sum()),
                 source_resolution=resolutions,
                 gsi_edition=self.config.edition,
                 gsi_source_release=manifest.source_release,

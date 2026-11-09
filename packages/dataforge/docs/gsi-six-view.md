@@ -60,7 +60,7 @@ the whole edition takes about 2.4 h.
 | `hands.rrd` `/meta/calibration` | static | base | `property:gsi_calibration:*`, minus what the cameras state |
 | `hands.rrd` `/` `AnnotationContext` | static | — | replaced by the shared COCO-133 context |
 | `hands.rrd` `/`, `/__properties` | static | base | `ViewCoordinates` FLU (GSI's world), episode properties and start time as shipped |
-| `slam.rrd` `/slam/rig` | per frame | base | `/world/rig_00` `world_T_rig` (the rig frame turned to RDF); its two `capture_time`-only rows are dropped |
+| `slam.rrd` `/slam/rig` | per frame | base | `/world/rig_00` `world_T_rig` (the rig frame turned to RDF), dense `mat3x3` rows with a NaN row on a frame SLAM skips; its two `capture_time`-only rows are dropped |
 | `slam.rrd` `/slam/path`, `/slam/index`, `/slam/meta` | static | base | `/world/runs/slam/{trajectory,index,meta}` |
 | `slam.rrd` `/camera`, `/hand` | per frame | — | not ingested: the same pose as `/slam/rig` (convert checks it for `/hand`) |
 | `slam.rrd` `/slam/trail` | per frame | — | not ingested: a rolling window precomputed on every row (the last 29 segments, about 1 s); base logs one segment per pose at `/world/runs/slam/trail` instead, which the blueprints show through the shared 10 s window |
@@ -80,6 +80,11 @@ the whole edition takes about 2.4 h.
   `FLU_R_RDF`, `camera_xyz` = RDF. Every camera keeps its world pose (`test_every_camera_keeps_gsis_world_pose_in_an_rdf_frame`).
 - `slam.rrd` gives `/camera` and `/hand` the same pose on every frame, so GSI's hands live in its rig frame; convert
   moves them to the world with that pose and refuses an episode where `/hand` and `/slam/rig` differ.
+- GSI's SLAM can skip a single frame while the video and hands go on (2 of the 1,685 episodes: frame 115 of
+  `ep_v1_0afe40df…`, frame 147 of `ep_v1_23887c95…`). Per exoego:v2 that frame gets a NaN `world_T_rig`, so the rig
+  and its frustums disappear for it (the follow view, rooted at the rig, is blank for that frame); it has no world
+  keypoints, wrist, mesh or trail segment, but keeps its `projections`, which need no SLAM. The count is
+  `property:capture:slam_missing_frames`.
 - Each pinhole is the calibration's `K` for its view, not the rectified `P1`/`P2`, and the shipped videos are
   undistorted (straight lines stay straight), so the panes project the meshes live through the pinholes and the
   `projections` layer uses the same pinholes.
