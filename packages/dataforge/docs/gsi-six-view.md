@@ -8,9 +8,10 @@
   `GSI_PARTNER_PASSWORD`, which live in `~/.secrets.env` and nowhere else.
 - Catalog dataset `gsi-six-view`; one segment per episode, recording id `gsi-six-view__<episode_id>`.
 - GSI ships each episode as Rerun recordings already (`gsi.ots.customer-rrd.v2`, written by rerun-sdk 0.37.1, application
-  `gsi_off_the_shelf`, recording id = episode id). `gsi-six-view` repacks them into the exoego:v2 layout without
-  decoding a video: lenses move GSI's cameras, pinholes, H.265 samples and SLAM pose; the hands are read column-wise,
-  moved to the world frame and written through the shared hand helpers.
+  `gsi_off_the_shelf`, recording id = episode id). `gsi-six-view` repacks them into the exoego:v2 layout: lenses
+  move GSI's cameras, pinholes, H.265 samples and SLAM pose without decoding them, except the two views GSI stores upside
+  down, which are re-encoded upright (see Frames); the hands are read column-wise, moved to the world frame and written
+  through the shared hand helpers.
 - `property:capture:*` on base: `category` (GSI's caption task family, from the manifest), `num_cameras` (6),
   `num_frames` (GSI's `n_frames`), `camera_names` (GSI's view of each `cam_NN`), `source_resolution`, `gsi_edition`,
   `gsi_source_release`, `gsi_rrd_contract`, `gsi_privacy_status` (`PRIVATE_INTERIM_EXISTING_BLUR`: faces are blurred)
@@ -54,7 +55,7 @@ the whole edition takes about 2.4 h.
 
 | Shipped file or stream | Rate / clock | Layer | Entity or not ingested: reason |
 | --- | --- | --- | --- |
-| `hands.rrd` `/camera/<view>/image` `VideoStream` | H.265 (`hev1`), 30 fps | base | `/world/rig_00/cam_NN/pinhole/video`, samples unchanged |
+| `hands.rrd` `/camera/<view>/image` `VideoStream` | H.265 (`hev1`), 30 fps | base | `/world/rig_00/cam_NN/pinhole/video`: samples unchanged, except cam_02/cam_03 (left_eye, right_eye), decoded, turned 180° and encoded as AV1 (NVENC, CQ 32, GoP 30) |
 | `hands.rrd` `/camera/<view>/image` `Pinhole` | static | base | `/world/rig_00/cam_NN/pinhole`: K, resolution and image-plane distance as shipped, `camera_xyz` FLU → RDF |
 | `hands.rrd` `/camera/<view>` `Transform3D` | static | base | `/world/rig_00/cam_NN`: `rig_T_cam` between RDF frames (see Frames) |
 | `hands.rrd` `/hand/<side>/keypoints3d` | per frame | pose | `/world/gt/coco133_xyz` slots 91-132, world frame; `projections`: `cam_NN/pinhole/coco133_uv_projected` |
@@ -73,7 +74,8 @@ the whole edition takes about 2.4 h.
 - `video_time` = GSI's `capture_time` minus the episode's `start_ns` (its first frame), so 0 at frame 0.
 - `capture_time` (GSI's device duration, ns) stays on every base row; `frame` becomes `frame_index`.
 - `source_frame` is dropped: it is `frame_index` plus `property:episode:source_frame_start`.
-- The derived layers carry `video_time` and `frame_index`.
+- The derived layers carry `video_time` and `frame_index`, and so do the two re-encoded eye streams: `log_video_stream`
+  can only copy `capture_time` from `video_time`, which for GSI is offset by `start_ns`.
 
 ## Frames
 
@@ -88,7 +90,16 @@ the whole edition takes about 2.4 h.
   and its frustums disappear for it (the follow view, rooted at the rig, is blank for that frame); it has no world
   keypoints, wrist, mesh or trail segment, but keeps its `projections`, which need no SLAM. The count is
   `property:capture:slam_missing_frames`.
-- Each pinhole is the calibration's `K` for its view, not the rectified `P1`/`P2`, and the shipped videos are
+- Dataforge ingests frames upright. GSI stores left_eye and right_eye (cam_02, cam_03, which look steeply down at the
+  hands) upside down: in 57 of 60 sampled episodes world up (the FLU world's +z) lies more than 90° from image up in
+  both views (per-episode circular-mean |roll| p10/p50/p90 = 133/160/176° for left_eye, 128/170/178° for right_eye).
+  Convert turns both 180°: the frames (re-encoded), the principal point (`cx' = W-1-cx`, `cy' = H-1-cy`: GSI's Kalibr K
+  puts pixel centres on integer coordinates, as `basalt.rotate_camera_cw` does) and the pose (`rig_R_cam · diag(-1,-1,1)`
+  in RDF), so every 3D→2D projection, the `projections` layer's included, stays exact; the camera node says
+  `image_rotation_cw_deg = 180`. The other 3 of 60 episodes (the wearer bent far over, e.g. `ep_v1_000906…`) were
+  near upright as shipped and so come out turned; no fixed per-camera turn suits both postures. left_side and right_side
+  lean about 40–50° and stay as shipped: no quarter turn fixes that.
+- Each pinhole is the calibration's `K` for its view (the eye views' principal point turned as above), not the rectified `P1`/`P2`, and the shipped videos are
   undistorted (straight lines stay straight), so the panes project the meshes live through the pinholes and the
   `projections` layer uses the same pinholes.
 
@@ -126,3 +137,6 @@ pablo-dl-server, 2026-11-08, 11 episodes (the smallest, largest, shortest, longe
 categories), prod env, NAS SSD tier: 0.6–7.6 s per episode (24.6 s for all 11, 1.72 GB, against 1.95 GB shipped:
 GSI repeats the triangle list and normals on every mesh row). The whole edition converted in one run on 1e1a9acac:
 1,683 of 1,685 episodes; the other two (SLAM dropouts) convert since b4cc226d4. Download: 21.5 MB/s, about 2.3 h for the whole edition.
+The upright re-encode of the two eye streams adds 0.14–0.20 s per second of capture on the RTX 5090 (3.1 s for the
+15 s `ep_v1_000906…`, 15.5 s for the 114 s `ep_v1_2307ed…`), about 1.4–2.1 h of NVENC time for the whole edition, and
+about 10% to the base layer (AV1 at CQ 32 against GSI's H.265: 474 → 522 MB on `ep_v1_2307ed…`).

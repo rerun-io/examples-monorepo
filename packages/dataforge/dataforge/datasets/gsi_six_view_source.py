@@ -7,7 +7,7 @@ derived layers (``gsi_six_view_layers``). See docs/gsi-six-view.md.
 """
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +15,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Bool, Float32, Float64, Int64, UInt32
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8, UInt32
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
@@ -53,6 +53,12 @@ CALIBRATION_IN_ENTITIES: frozenset[str] = frozenset(
 the ``gsi_calibration`` property."""
 SOURCE_SIZE: tuple[int, int] = (1920, 1080)
 """Every view's image, width by height; ``read_episode`` checks it against the pinholes."""
+UPSIDE_DOWN: tuple[int, ...] = (2, 3)
+"""Cameras GSI stores upside down: left_eye and right_eye, which look down at the hands. Convert turns their frames,
+principal points and poses 180°, so every view is upright. left_side and right_side lean about 33°, which no quarter
+turn fixes; they stay as shipped."""
+CAM_R_HALF_TURN: Float64[ndarray, "3 3"] = np.diag([-1.0, -1.0, 1.0])
+"""180° about an RDF camera's optical axis: ``rig_R_cam' = rig_R_cam · CAM_R_HALF_TURN``."""
 
 VIDEO_TIME_FIELD: pa.Field = (
     rrc.Chunk.from_columns("/", indexes=[time_column(np.array([0], dtype=np.int64))], columns=rr.Scalars.columns(scalars=[0.0]))
@@ -117,16 +123,49 @@ def rdf_rig_T_cam_translation(translation: pa.FixedSizeListArray) -> pa.Array:
     return pa.FixedSizeListArray.from_arrays(pa.array((offsets @ FLU_R_RDF).reshape(-1), type=translation.type.value_type), 3)
 
 
+def half_turned_intrinsics(intrinsics: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
+    """K of a frame turned 180°: ``cx' = W-1-cx``, ``cy' = H-1-cy``, the focal lengths unchanged.
+
+    GSI's K comes from Kalibr, which puts pixel centres on integer coordinates, as ``basalt.rotate_camera_cw`` does; the
+    turn sends pixel ``(u, v)`` to ``(W-1-u, H-1-v)``, so the turned views keep the convention of the other four.
+    """
+    turned: Float64[ndarray, "3 3"] = intrinsics.copy()
+    turned[0, 2] = SOURCE_SIZE[0] - 1 - intrinsics[0, 2]
+    turned[1, 2] = SOURCE_SIZE[1] - 1 - intrinsics[1, 2]
+    return turned
+
+
+def half_turned_image_from_camera(image_from_camera: pa.FixedSizeListArray) -> pa.Array:
+    """``half_turned_intrinsics`` on column-major ``Pinhole:image_from_camera`` values."""
+    matrices: Float64[ndarray, "n 3 3"] = np.asarray(image_from_camera.flatten(), dtype=np.float64).reshape(-1, 3, 3).transpose(0, 2, 1)
+    turned: Float64[ndarray, "n 3 3"] = np.stack([half_turned_intrinsics(matrix) for matrix in matrices])
+    return pa.FixedSizeListArray.from_arrays(pa.array(turned.transpose(0, 2, 1).reshape(-1), type=image_from_camera.type.value_type), 9)
+
+
+def half_turned_rotation(mat3x3: pa.FixedSizeListArray) -> pa.Array:
+    """``rig_R_cam · CAM_R_HALF_TURN`` on column-major ``Transform3D:mat3x3`` values of an RDF camera."""
+    rotations: Float64[ndarray, "n 3 3"] = np.asarray(mat3x3.flatten(), dtype=np.float64).reshape(-1, 3, 3).transpose(0, 2, 1)
+    turned: Float64[ndarray, "n 3 3"] = rotations @ CAM_R_HALF_TURN
+    return pa.FixedSizeListArray.from_arrays(pa.array(turned.transpose(0, 2, 1).reshape(-1), type=mat3x3.type.value_type), 9)
+
+
 def base_stream(hands_rrd: Path, slam_rrd: Path, t0_ns: int) -> rrc.LazyChunkStream:
     """GSI's cameras, pinholes, videos and SLAM path at their exoego paths, retimed and turned to RDF; no sample is decoded.
 
-    The rig pose is not here: ``write_base`` writes it dense, so a SLAM dropout gets its NaN row (exoego:v2).
+    The rig pose is not here: ``write_base`` writes it dense, so a SLAM dropout gets its NaN row (exoego:v2). Nor are the
+    ``UPSIDE_DOWN`` views' samples: ``write_upright_video`` re-encodes them turned; their pinholes and poses turn here.
     """
     retimer: Retimer = Retimer(t0_ns)
     cameras: rrc.LazyChunkStream = rrc.RrdReader(hands_rrd).stream().filter(content="/camera/**").flat_map(retimer)
     pinholes, cameras = cameras.split(components=PINHOLE_COMPONENTS)
     pinholes = pinholes.map(renamed({f"/camera/{view}/image": schema.pinhole_path(RIG, cam) for cam, view in enumerate(VIEWS)}))
     pinholes = pinholes.lenses(rrc.MutateLens("Pinhole:camera_xyz", rrc.Selector(".").pipe(rdf_camera_xyz)), output_mode="forward_unmatched")
+    pinholes = pinholes.lenses(
+        rrc.MutateLens("Pinhole:image_from_camera", rrc.Selector(".").pipe(half_turned_image_from_camera)),
+        content=[schema.pinhole_path(RIG, cam) for cam in UPSIDE_DOWN],
+        output_mode="forward_unmatched",
+    )
+    cameras = cameras.drop(content=[f"/camera/{VIEWS[cam]}/image" for cam in UPSIDE_DOWN])
     cameras = cameras.map(
         renamed(
             {
@@ -141,6 +180,11 @@ def base_stream(hands_rrd: Path, slam_rrd: Path, t0_ns: int) -> rrc.LazyChunkStr
             rrc.MutateLens("Transform3D:translation", rrc.Selector(".").pipe(rdf_rig_T_cam_translation)),
         ],
         content=[schema.cam_path(RIG, cam) for cam in range(len(VIEWS))],
+        output_mode="forward_unmatched",
+    )
+    cameras = cameras.lenses(
+        rrc.MutateLens("Transform3D:mat3x3", rrc.Selector(".").pipe(half_turned_rotation)),
+        content=[schema.cam_path(RIG, cam) for cam in UPSIDE_DOWN],
         output_mode="forward_unmatched",
     )
     run: str = schema.run_path(RUN_SOURCE)
@@ -175,9 +219,9 @@ class Episode:
         """Frames with a SLAM pose."""
         return np.isfinite(self.world_T_rig).all(axis=(1, 2))
     rig_T_cams: Float64[ndarray, "c 4 4"]
-    """Each view's shipped ``rig_T_cam``, FLU to FLU."""
+    """Each view's ``rig_T_cam`` as written: GSI's FLU rig frame to the RDF camera frame, turned for ``UPSIDE_DOWN``."""
     intrinsics: Float64[ndarray, "c 3 3"]
-    """Each view's shipped K."""
+    """Each view's K as written: as shipped, its principal point turned for ``UPSIDE_DOWN``."""
 
 
 def static_value(store: rrc.ChunkStore, entity: str, component: str) -> list:
@@ -212,6 +256,17 @@ def slam_poses(store: rrc.ChunkStore, entity: str, num_frames: int) -> Float64[n
     poses[frames, :3, :3] = Rotation.from_quat(stacked(column(table, "Transform3D:quaternion"), 4).astype(np.float64)).as_matrix()
     poses[frames, :3, 3] = stacked(column(table, "Transform3D:translation"), 3)
     return poses
+
+
+def shipped_samples(hands_rrd: Path, view: str) -> Iterator[memoryview]:
+    """One view's H.265 samples (Annex B, parameter sets in band) in frame order, one per frame."""
+    entity: str = f"/camera/{view}/image"
+    store: rrc.ChunkStore = rrc.RrdReader(hands_rrd).stream().filter(content=entity, components="VideoStream:sample").collect()
+    blobs: pa.ListArray = column(frame_rows(store, entity), "VideoStream:sample").combine_chunks().flatten()
+    data: UInt8[ndarray, "n"] = np.asarray(blobs.flatten(), dtype=np.uint8)
+    offsets: Int64[ndarray, "f"] = np.asarray(blobs.offsets, dtype=np.int64)
+    for start, end in zip(offsets[:-1], offsets[1:], strict=True):
+        yield memoryview(data[start:end])
 
 
 def column(table: pa.Table, component: str) -> pa.ChunkedArray:
@@ -252,6 +307,9 @@ def read_episode(hands_rrd: Path, slam_rrd: Path) -> Episode:
         rig_T_cams[cam, :3, :3] = np.asarray(static_value(store, f"/camera/{view}", "Transform3D:mat3x3"), dtype=np.float64).reshape(3, 3).T
         rig_T_cams[cam, :3, 3] = np.asarray(static_value(store, f"/camera/{view}", "Transform3D:translation"), dtype=np.float64).reshape(3)
         intrinsics[cam] = np.asarray(static_value(store, f"/camera/{view}/image", "Pinhole:image_from_camera"), dtype=np.float64).reshape(3, 3).T
+        rig_T_cams[cam, :3, :3] = rig_T_cams[cam, :3, :3] @ FLU_R_RDF @ (CAM_R_HALF_TURN if cam in UPSIDE_DOWN else np.eye(3))
+        if cam in UPSIDE_DOWN:
+            intrinsics[cam] = half_turned_intrinsics(intrinsics[cam])
         if tuple(np.asarray(static_value(store, f"/camera/{view}/image", "Pinhole:resolution")).reshape(2).astype(int).tolist()) != SOURCE_SIZE:
             raise ValueError(f"{hands_rrd}: {view} is not {SOURCE_SIZE[0]}x{SOURCE_SIZE[1]}")
     keypoints: list[Float32[ndarray, "f 21 3"]] = []

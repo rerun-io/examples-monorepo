@@ -379,7 +379,8 @@ GSI's private partner edition (10 h, 1,685 episodes, 174 GB) ships every episode
 dataforge repacks rather than decodes: `download` signs in with `GSI_PARTNER_USERNAME`/`GSI_PARTNER_PASSWORD`
 (from `~/.secrets.env`) and fetches the sha256-checked files. `convert` writes the exoego:v2 layout: lenses move
 the six H.265 streams, GSI's pinholes and rig extrinsics (turned from FLU to RDF) and the SLAM pose onto
-`/world/rig_00` with `video_time` from 0, and the hands go to the world frame as COCO-133 keypoints, wrists, MANO
+`/world/rig_00` with `video_time` from 0 (the two eye views, stored upside down, are re-encoded upright as AV1 with
+their pinholes and poses turned to match), and the hands go to the world frame as COCO-133 keypoints, wrists, MANO
 records (`pose`), meshes (`hand_mesh`) and per-view projections (`projections`). About two seconds per episode;
 the download is deleted afterwards.
 

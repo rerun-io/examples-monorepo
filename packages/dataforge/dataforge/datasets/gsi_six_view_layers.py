@@ -4,7 +4,7 @@ The hands live in GSI's rig frame; the world-frame layers move them by each fram
 the projections go through each view's shipped pinhole, which needs no SLAM. See docs/gsi-six-view.md.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +12,7 @@ import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from jaxtyping import Bool, Float32, Float64
+from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 from rerun.encodings import EntityPathLike
 from simplecv.sensors.camera.base_camera import pixels_in_image
@@ -27,9 +27,11 @@ from dataforge.datasets.gsi_six_view_source import (
     RUN_SOURCE,
     SIDES,
     SOURCE_SIZE,
+    UPSIDE_DOWN,
     VIEWS,
     Episode,
     base_stream,
+    shipped_samples,
     static_value,
 )
 from dataforge.identity import SequenceIdentity
@@ -39,9 +41,19 @@ from dataforge.logging_toolkit import (
     log_dense_pose_track,
     log_rig_node,
     log_trail_segments,
+    log_video_stream,
     time_column,
 )
+from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, work_dir
 
+FPS: int = 30
+"""GSI's frame rate; the re-encoded mp4's nominal rate (``log_video_stream`` restores each sample's own time)."""
+HALF_TURN_DEG: int = 180
+"""How far ``UPSIDE_DOWN`` views turn, clockwise."""
+UPRIGHT_GOP: int = 30
+"""Keyframe interval of the upright re-encode, in frames."""
+UPRIGHT_CQ: int = 32
+"""NVENC constant-quality target of the upright re-encode."""
 MESH_BATCH: int = 256
 """Frames per hand-mesh chunk."""
 POSE_LAYER: str = "pose"
@@ -60,10 +72,9 @@ def coco133(joints: Float32[ndarray, "f 2 21 d"]) -> Float32[ndarray, "f 133 d"]
 
 
 def project(rig_T_cam: Float64[ndarray, "4 4"], intrinsics: Float64[ndarray, "3 3"], points: Float32[ndarray, "f k 3"]) -> Float32[ndarray, "f k 2"]:
-    """Rig-frame points through one view's shipped pinhole; NaN behind the camera or off the image."""
+    """Rig-frame points through one view's camera as written (``Episode.rig_T_cams``, RDF); NaN behind the camera or off the image."""
     cam_T_rig: Float64[ndarray, "4 4"] = np.linalg.inv(rig_T_cam)
-    in_cam: Float64[ndarray, "f k 3"] = points.astype(np.float64) @ cam_T_rig[:3, :3].T + cam_T_rig[:3, 3]
-    optical: Float64[ndarray, "f k 3"] = in_cam @ FLU_R_RDF
+    optical: Float64[ndarray, "f k 3"] = points.astype(np.float64) @ cam_T_rig[:3, :3].T + cam_T_rig[:3, 3]
     with np.errstate(divide="ignore", invalid="ignore"):
         pixels: Float64[ndarray, "f k 2"] = (optical @ intrinsics.T)[..., :2] / optical[..., 2:]
     flat: Float64[ndarray, "n 2"] = pixels.reshape(-1, 2)
@@ -145,6 +156,28 @@ def trail_overrides() -> dict[EntityPathLike, rrb.VisibleTimeRanges | rr.LineStr
     }
 
 
+def write_upright_video(
+    recording: rr.RecordingStream, cam: int, samples: Iterable[bytes | memoryview], *, times_ns: Int64[ndarray, "f"], frame_indices: Int64[ndarray, "f"]
+) -> None:
+    """One upside-down view's H.265 samples decoded, turned 180° and encoded as AV1 on the GPU, one per frame of ``times_ns``.
+
+    The only decode in this converter: HEVC has no lossless rotation, and Rerun ignores HEVC's display-orientation SEI.
+    ``log_video_stream`` puts every sample back on its frame's ``video_time`` and ``frame_index``; the turned streams
+    carry no ``capture_time``, which ``log_video_stream`` can only copy from ``video_time``.
+
+    Raises:
+        ValueError: The encoder did not get one sample per frame.
+    """
+    with work_dir("gsi-upright-") as work:
+        mp4: Path = work / f"cam_{cam:02d}.mp4"
+        encoded: int = encode_frames_to_mp4(
+            samples, mp4, source=FrameSource(kind="hevc"), fps=FPS, gop=UPRIGHT_GOP, cq=UPRIGHT_CQ, rotate_cw_quarter_turns=HALF_TURN_DEG // 90
+        )
+        if encoded != len(times_ns):
+            raise ValueError(f"{VIEWS[cam]}: {encoded} samples for {len(times_ns)} frames")
+        log_video_stream(recording, mp4, schema.video_path(RIG, cam), times_ns=times_ns, frame_indices=frame_indices)
+
+
 def write_base_layer(
     recording: rr.RecordingStream,
     identity: SequenceIdentity,
@@ -173,11 +206,19 @@ def write_base_layer(
     log_rig_node(recording, RIG, reference=schema.cam_path(RIG, 0).rsplit("/", 1)[1], num_cameras=len(VIEWS), name="gsi-six-view", kind="ego")
     resolutions: list[str] = []
     for cam, view in enumerate(VIEWS):
+        turned: bool = cam in UPSIDE_DOWN
         rr.log(schema.cam_path(RIG, cam), rr.AnyValues(name=view, kind="rgb", camera_model="pinhole"), static=True, recording=recording)
+        if turned:  # the key stays off an unturned camera rather than arriving as a null
+            rr.log(schema.cam_path(RIG, cam), rr.AnyValues(image_rotation_cw_deg=HALF_TURN_DEG), static=True, recording=recording)
         resolutions.append(
-            log_camera_source(recording, RIG, cam, name=view, source_width=SOURCE_SIZE[0], source_height=SOURCE_SIZE[1], video_codec="h265", source_num_frames=frames)
+            log_camera_source(
+                recording, RIG, cam, name=view, source_width=SOURCE_SIZE[0], source_height=SOURCE_SIZE[1], source_num_frames=frames,
+                video_codec="av1" if turned else "h265", cq=UPRIGHT_CQ if turned else None, gop=UPRIGHT_GOP if turned else None,
+            )  # fmt: skip
         )
     recording.send_chunks(compacted)
+    for cam in UPSIDE_DOWN:
+        write_upright_video(recording, cam, shipped_samples(hands_rrd, VIEWS[cam]), times_ns=track.times_ns, frame_indices=track.frames)
     # world_T_rig of the RDF rig frame (GSI's pose · FLU_R_RDF), dense: a SLAM dropout is a NaN row, which hides the rig.
     rdf_turn: Float64[ndarray, "4 4"] = np.eye(4)
     rdf_turn[:3, :3] = FLU_R_RDF

@@ -2,8 +2,9 @@
 
 import hashlib
 import json
+import subprocess
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,11 +17,12 @@ import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
 from conftest import assert_raw_root_guarded, read_back, read_chunks, recording_properties, static_values
-from jaxtyping import Float32, Float64
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from dataforge import blueprints, schema, transports, writing
+from dataforge.datasets import gsi_six_view_layers
 from dataforge.datasets.gsi_six_view import GsiSixViewConfig, GsiSixViewDataset
 from dataforge.datasets.gsi_six_view_remote import fetch_signed
 from dataforge.datasets.gsi_six_view_source import FLU_R_RDF, VIEWS
@@ -299,6 +301,31 @@ def gsi() -> Iterator[FakeGsi]:
         thread.join(timeout=5.0)
 
 
+UPSIDE_DOWN: tuple[int, ...] = (2, 3)
+"""left_eye and right_eye: GSI stores them upside down; convert turns them 180°."""
+HALF_TURN: Float64[ndarray, "4 4"] = np.diag([-1.0, -1.0, 1.0, 1.0])
+"""180° about an RDF camera's optical axis."""
+
+
+@dataclass
+class Reencoded:
+    """The streams convert sent to the upright re-encode, in place of the GPU encoder the unit lane does not have."""
+
+    calls: list[tuple[int, int, list[int]]] = field(default_factory=list)
+    """(camera, samples, frame indices) per call."""
+
+
+@pytest.fixture(autouse=True)
+def reencoded(monkeypatch: pytest.MonkeyPatch) -> Reencoded:
+    record = Reencoded()
+
+    def fake(recording: rr.RecordingStream, cam: int, samples: Iterable[bytes | memoryview], *, times_ns: object, frame_indices: object) -> None:
+        record.calls.append((cam, sum(1 for _ in samples), np.asarray(frame_indices).tolist()))
+
+    monkeypatch.setattr(gsi_six_view_layers, "write_upright_video", fake)
+    return record
+
+
 @pytest.fixture
 def signed_in(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GSI_PARTNER_USERNAME", USERNAME)
@@ -477,11 +504,15 @@ def test_every_camera_keeps_gsis_world_pose_in_an_rdf_frame(gsi: FakeGsi, signed
     for cam in range(6):
         pinhole: dict[str, object] = static_values(base, schema.pinhole_path(0, cam))
         assert pinhole["camera_xyz"] == [3, 2, 5], "RDF"
-        np.testing.assert_allclose(np.asarray(pinhole["image_from_camera"]).reshape(3, 3).T, view_intrinsics(cam), err_msg="K as shipped")
+        written_K: Float64[ndarray, "3 3"] = np.asarray(pinhole["image_from_camera"]).reshape(3, 3).T
+        shipped_K: Float64[ndarray, "3 3"] = view_intrinsics(cam)
+        if cam in UPSIDE_DOWN:  # pixel centres on integers, as GSI's (Kalibr) K and basalt.rotate_camera_cw have them
+            shipped_K[0, 2], shipped_K[1, 2] = 1919.0 - shipped_K[0, 2], 1079.0 - shipped_K[1, 2]
+        np.testing.assert_allclose(written_K, shipped_K, err_msg="K as shipped, its principal point turned with an upside-down view")
         gsi_rig_T_cam: Float64[ndarray, "4 4"] = np.eye(4)
         gsi_rig_T_cam[:3, :3], gsi_rig_T_cam[:3, 3] = view_rotation(cam), view_translation(cam)
         for frame in range(FRAMES):
-            expected: Float64[ndarray, "4 4"] = world_T_rig(frame) @ gsi_rig_T_cam @ flu_rdf()
+            expected: Float64[ndarray, "4 4"] = world_T_rig(frame) @ gsi_rig_T_cam @ flu_rdf() @ (HALF_TURN if cam in UPSIDE_DOWN else np.eye(4))
             np.testing.assert_allclose(written_world_T_rig(base, frame) @ rig_T_cam(base, cam), expected, atol=1e-5)
 
 
@@ -507,9 +538,27 @@ def test_the_hands_reach_the_world_and_every_view_through_its_pinhole(gsi: FakeG
         in_cam: Float64[ndarray, "21 3"] = (rig_keypoints(0, 0) - view_translation(cam)) @ view_rotation(cam)
         optical: Float64[ndarray, "21 3"] = np.stack([-in_cam[:, 1], -in_cam[:, 2], in_cam[:, 0]], axis=1)
         expected_px: Float64[ndarray, "21 2"] = (optical @ view_intrinsics(cam).T)[:, :2] / optical[:, 2:]
+        if cam in UPSIDE_DOWN:  # the turned frame shows GSI's pixel (u, v) at (W-1-u, H-1-v)
+            expected_px = np.array([1919.0, 1079.0]) - expected_px
         inside = (optical[:, 2] > 0) & (expected_px[:, 0] >= 0) & (expected_px[:, 0] < 1920) & (expected_px[:, 1] >= 0) & (expected_px[:, 1] < 1080)
         np.testing.assert_allclose(pixels[91:112][inside], expected_px[inside], atol=1e-2)
         assert np.isnan(pixels[91:112][~inside]).all()
+
+
+def test_the_upside_down_views_are_reencoded_upright(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reencoded: Reencoded) -> None:
+    targets: dict[str, Path] = converted(gsi, tmp_path / "raw", tmp_path / "out", monkeypatch, "ep_v1_bbbb")
+    base: rrc.ChunkStore = read_back(targets["base"])
+
+    assert reencoded.calls == [(cam, FRAMES, list(range(FRAMES))) for cam in UPSIDE_DOWN], "every shipped sample of cams 2 and 3, in frame order"
+    entities: set[str] = {str(chunk.entity_path) for chunk in read_chunks(targets["base"])}
+    for cam in range(6):
+        node: dict[str, object] = static_values(base, schema.cam_path(0, cam))
+        if cam in UPSIDE_DOWN:
+            assert (node.get("image_rotation_cw_deg"), node["video_codec"]) == (180, "av1")
+            assert schema.video_path(0, cam) not in entities, "GSI's upside-down samples are not passed through"
+        else:
+            assert ("image_rotation_cw_deg" not in node, node["video_codec"]) == (True, "h265")
+            assert schema.video_path(0, cam) in entities
 
 
 def test_a_slam_dropout_hides_the_rig_and_the_world_hands_for_that_frame(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -518,7 +567,7 @@ def test_a_slam_dropout_hides_the_rig_and_the_world_hands_for_that_frame(gsi: Fa
     pose: rrc.ChunkStore = read_back(targets["pose"])
 
     assert np.isnan(written_world_T_rig(base, 1)[:3]).all(), "exoego:v2: a NaN world_T_rig on the dropout frame"
-    np.testing.assert_allclose(written_world_T_rig(base, 2) @ rig_T_cam(base, 3), world_T_rig(2) @ view_pose(3) @ flu_rdf(), atol=1e-5)
+    np.testing.assert_allclose(written_world_T_rig(base, 2) @ rig_T_cam(base, 3), world_T_rig(2) @ view_pose(3) @ flu_rdf() @ HALF_TURN, atol=1e-5)
     assert recording_properties(base, "capture")["slam_missing_frames"] == 1
     assert base.reader(index=schema.TIMELINE, contents=schema.trail_path("slam")).to_arrow_table().num_rows == FRAMES - 1
     assert np.isnan(np.asarray(rows(pose, schema.coco133_xyz_path(), ":positions")[1], dtype=np.float32)).all(), "no world position without a pose"
@@ -577,3 +626,30 @@ def test_the_canonical_panes_show_each_view_with_its_keypoints_and_both_meshes(t
     scene, card = writing.blueprint_views(dataset.table_blueprint())
     assert isinstance(card, rrb.Spatial2DView) and card.origin == schema.pinhole_path(0, 0), "the card decodes left_front only"
     assert all(f"- {schema.video_path(0, cam)}/**" in list(scene.contents) for cam in range(6))  # type: ignore[arg-type]
+
+
+def hevc_samples(ffmpeg: Path, frames: int) -> list[bytes]:
+    """A tiny real H.265 stream split into one Annex-B sample per frame, the way GSI ships its samples."""
+    stream: bytes = subprocess.run(
+        [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", f"testsrc=size=320x240:rate=30:duration={frames / 30}", "-frames:v", str(frames),
+         "-c:v", "libx265", "-x265-params", "aud=1:repeat-headers=1:bframes=0:log-level=error", "-f", "hevc", "-"],
+        capture_output=True, check=True,
+    ).stdout  # fmt: skip
+    delimiter: bytes = b"\x00\x00\x00\x01\x46\x01"  # an access-unit delimiter opens every frame
+    return [delimiter + sample for sample in stream.split(delimiter) if sample]
+
+
+@pytest.mark.integration
+def test_an_upside_down_view_reencodes_one_upright_sample_per_frame(nvenc_ffmpeg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.undo()  # the real re-encode, not the unit lane's recorder
+    samples: list[bytes] = hevc_samples(nvenc_ffmpeg, 12)
+    assert len(samples) == 12
+    frames: Int64[ndarray, "f"] = np.arange(12, dtype=np.int64)
+    with writing.recording_to(tmp_path / "base.rrd", recording_id="upright") as recording:
+        gsi_six_view_layers.write_upright_video(recording, 2, samples, times_ns=frames * FRAME_NS, frame_indices=frames)
+
+    store: rrc.ChunkStore = read_back(tmp_path / "base.rrd")
+    video = store.reader(index=schema.TIMELINE, contents=schema.video_path(0, 2)).to_arrow_table()
+    assert video.column(schema.TIMELINE).cast("int64").to_pylist() == (np.arange(12) * FRAME_NS).tolist()
+    assert video.column(schema.FRAME_INDEX).to_pylist() == list(range(12))
+    assert static_values(store, schema.video_path(0, 2))["codec"] == rr.VideoCodec.AV1.value
