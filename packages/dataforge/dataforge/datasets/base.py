@@ -26,7 +26,7 @@ import rerun.blueprint as rrb
 from rerun.catalog import DatasetEntry
 from serde import serde
 
-from dataforge import paths, schema, writing
+from dataforge import paths, writing
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.writing import TableFields
@@ -95,9 +95,6 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
     layers: tuple[str, ...] = paths.LAYERS
     """Layers this dataset publishes, in loading order."""
-
-    timeline: ClassVar[str] = schema.TIMELINE
-    """Timeline the segment-table previews play on; a dataset repacking another layout keeps that layout's clock."""
 
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config

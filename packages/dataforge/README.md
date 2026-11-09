@@ -383,15 +383,11 @@ the six H.265 streams, GSI's pinholes and rig extrinsics (turned from FLU to RDF
 records (`pose`), meshes (`hand_mesh`) and per-view projections (`projections`). About two seconds per episode;
 the download is deleted afterwards.
 
-`gsi-six-view-native` (TODO(gsi-native)) is a temporary comparison mirror in GSI's own layout (`base` = `hands.rrd`,
-`slam` = `slam.rrd`, unchanged) from the same download. Convert the first of the two with `--keep-download`.
-
 ```bash
 source ~/.secrets.env
 R=/mnt/nas/ssd-8tb/downloads/gsi/egocentric-six-view-10h
 pixi run -e dataforge --frozen dataforge-download gsi-six-view --root $R --sequences <episode_id>
-DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gsi-six-view pixi run -e dataforge --frozen dataforge-convert gsi-six-view --root $R --keep-download
-DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gsi-six-view-native pixi run -e dataforge --frozen dataforge-convert gsi-six-view-native --root $R
+DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gsi-six-view pixi run -e dataforge --frozen dataforge-convert gsi-six-view --root $R
 ```
 
 The API, the layers, the frames and the clocks are in [docs/gsi-six-view.md](docs/gsi-six-view.md).
@@ -529,7 +525,6 @@ is a nominal-rate fiction for such a file.
 | `mamma` | one MAMMA sequence of the `--family` (eval, markerless-dance, markerless-multiple-people, markerless-iphones; syn and syn-bedlam: the MammaSyn renders and BEDLAM clips from their WebDataset shards), read in place from the release | **four to six** rrds: `base` with every camera (AV1, videos above 3.2 MP at half size, the Vicon radial lens as data); `body_pose` (SMPL-X parameters and COCO-133 keypoints per person, tagged `mosh_gt`, `mamma_pred` or `synthetic_gt`), `body_mesh` (SMPL-X, 10 Hz; syn: every 6 Hz frame), `projections` (through the Vicon lens; syn: pinhole); eval and syn add `masks` (palette PNGs at a quarter size) and, on Extra, `markers`; see [docs/mamma.md](docs/mamma.md) and [docs/mamma-syn.md](docs/mamma-syn.md) |
 | `harmony4d` | one Harmony4D sequence, read in place from its release zip (one zip per scene and split, fetched from the Hub) | **four** rrds: `base` with ~20 GoPros (OPENCV_FISHEYE, 4K JPEG frames as 1080p AV1) and, when worn, both Aria glasses' rgb/slam cameras (upright) and per-frame poses; `body_pose` (SMPL parameters, SMPL-45 joints, COCO-17 keypoints in COCO-133 per person), `body_mesh` (shipped SMPL vertices, 10 Hz), `projections` (through each full lens, plus the shipped boxes); see [docs/harmony4d.md](docs/harmony4d.md) |
 | `gsi-six-view` | one GSI episode, its two shipped rrds fetched through GSI's API | exoego:v2: `base` (rig, six H.265 views with GSI's pinholes in RDF, SLAM pose and path), `pose` (COCO-133 hands, wrists, confidence, MANO records), `hand_mesh`, `projections`; see [docs/gsi-six-view.md](docs/gsi-six-view.md) |
-| `gsi-six-view-native` | TODO(gsi-native): the same episode, temporary comparison mirror | GSI's layout unchanged: `base` (`hands.rrd`) and `slam` (`slam.rrd`) |
 | `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as the sensor's 16-bit PNGs (`EncodedDepthImage`) where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset

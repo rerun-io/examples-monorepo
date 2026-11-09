@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import os
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -20,9 +19,9 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from dataforge import blueprints, hands, schema, transports
-from dataforge.datasets.gsi_six_view import FLU_R_RDF, VIEWS, GsiSixViewConfig, GsiSixViewDataset
-from dataforge.datasets.gsi_six_view_native import CAMERAS, GsiSixViewNativeConfig, GsiSixViewNativeDataset
+from dataforge import blueprints, schema, transports
+from dataforge.datasets.gsi_six_view import GsiSixViewConfig, GsiSixViewDataset
+from dataforge.datasets.gsi_six_view_source import FLU_R_RDF, VIEWS
 
 EDITION: str = "01a0f166-7994-7b43-a622-a325541c4356"
 """The 10 h edition's id, as GSI's API names it."""
@@ -356,13 +355,10 @@ def test_no_password_or_signed_link_reaches_a_message(gsi: FakeGsi, tmp_path: Pa
     assert SIGNATURE not in str(corrupt.value) and "access-token" not in str(corrupt.value)
 
 
-def converted(
-    gsi: FakeGsi, raw: Path, out: Path, monkeypatch: pytest.MonkeyPatch, episode: str, *, native: bool = False, keep_download: bool = False
-) -> dict[str, Path]:
-    """Download and convert one episode into ``gsi-six-view`` (or its native mirror); its layer targets."""
+def converted(gsi: FakeGsi, raw: Path, out: Path, monkeypatch: pytest.MonkeyPatch, episode: str, *, keep_download: bool = False) -> dict[str, Path]:
+    """Download and convert one episode; its layer targets."""
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(out))
-    kind: type[GsiSixViewConfig] = GsiSixViewNativeConfig if native else GsiSixViewConfig
-    dataset = kind(root=raw, api_url=gsi.url, sequences=(episode,), keep_download=keep_download).setup()
+    dataset = GsiSixViewConfig(root=raw, api_url=gsi.url, sequences=(episode,), keep_download=keep_download).setup()
     dataset.download()
     [(identity, source)] = dataset.discover()
     dataset.convert(identity, source, force=False)
@@ -491,28 +487,6 @@ def test_a_slam_dropout_hides_the_rig_and_the_world_hands_for_that_frame(gsi: Fa
     assert np.isfinite(pixels[91:133]).all(), "projections need no SLAM: the hands are in GSI's rig frame"
 
 
-def test_a_kept_download_lets_the_native_mirror_convert_the_same_files(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    converted(gsi, tmp_path / "raw", tmp_path / "out", monkeypatch, "ep_v1_aaaa", keep_download=True)
-    assert (tmp_path / "raw/episodes/ep_v1_aaaa/hands.rrd").is_file()
-
-    native: dict[str, Path] = converted(gsi, tmp_path / "raw", tmp_path / "native", monkeypatch, "ep_v1_aaaa", native=True)
-    assert all(target.is_file() for target in native.values())
-    assert not (tmp_path / "raw/episodes/ep_v1_aaaa").exists()
-
-
-def test_the_native_mirror_repacks_both_files_as_shipped(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    targets: dict[str, Path] = converted(gsi, tmp_path / "raw", tmp_path / "out", monkeypatch, "ep_v1_bbbb", native=True)
-
-    assert targets == {layer: tmp_path / "out" / layer / "gsi-six-view-native__ep_v1_bbbb.rrd" for layer in ("base", "slam")}
-    base: rrc.ChunkStore = read_back(targets["base"])
-    slam: rrc.ChunkStore = read_back(targets["slam"])
-    assert base.reader(index="frame", contents="/hand/left/keypoints3d").to_arrow_table().num_rows == FRAMES
-    assert slam.reader(index="frame", contents="/slam/rig").to_arrow_table().num_rows >= FRAMES
-    assert recording_properties(base, "RecordingInfo") == {"name": "gsi-six-view-native__ep_v1_bbbb", "start_time": 1_758_686_498_000_000_000}
-    assert recording_properties(base, "capture")["category"] == "Food preparation"
-    assert not any(str(chunk.entity_path).startswith("/__properties") for chunk in read_chunks(targets["slam"]))
-
-
 def test_convert_deletes_the_download_once_every_layer_is_published(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     converted(gsi, tmp_path / "raw", tmp_path / "out", monkeypatch, "ep_v1_aaaa")
 
@@ -522,31 +496,14 @@ def test_convert_deletes_the_download_once_every_layer_is_published(gsi: FakeGsi
     assert gsi.fetched == ["ep_v1_aaaa/hands.rrd", "ep_v1_aaaa/slam.rrd"]
 
 
-@pytest.mark.parametrize("command", ["gsi-six-view", "gsi-six-view-native"])
-def test_convert_refuses_an_output_root_beneath_the_download(command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert_raw_root_guarded(command, tmp_path / "raw/episodes/ep_v1_aaaa", tmp_path, monkeypatch)
+def test_convert_refuses_an_output_root_beneath_the_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert_raw_root_guarded("gsi-six-view", tmp_path / "raw/episodes/ep_v1_aaaa", tmp_path, monkeypatch)
 
 
-SMALLEST: str = "ep_v1_6a03abdb6245d608f61851028dc83477"
-"""The edition's smallest episode, 33 MB of hands.rrd."""
+def test_a_kept_download_stays_for_another_reader(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    converted(gsi, tmp_path / "raw", tmp_path / "out", monkeypatch, "ep_v1_aaaa", keep_download=True)
 
-
-@pytest.mark.integration
-def test_the_live_api_serves_an_episode_that_converts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    if not os.environ.get("GSI_PARTNER_PASSWORD"):
-        pytest.skip("needs GSI's partner sign-in: GSI_PARTNER_USERNAME and GSI_PARTNER_PASSWORD (source ~/.secrets.env)")
-    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path / "out"))
-    dataset = GsiSixViewConfig(root=tmp_path / "raw", sequences=(SMALLEST,)).setup()
-    dataset.download()
-    [(identity, source)] = dataset.discover()
-    dataset.convert(identity, source, force=False)
-
-    targets: dict[str, Path] = dataset.targets(identity)
-    assert all(target.is_file() for target in targets.values())
-    base: rrc.ChunkStore = read_back(targets["base"])
-    assert recording_properties(base, "capture")["category"] == "Food preparation"
-    assert {schema.video_path(0, cam) for cam in range(6)} <= {str(chunk.entity_path) for chunk in read_chunks(targets["base"])}
-    assert not source.exists()
+    assert all((tmp_path / "raw/episodes/ep_v1_aaaa" / name).is_file() for name in ("hands.rrd", "slam.rrd"))
 
 
 def layout_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
@@ -560,51 +517,6 @@ def layout_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
         if isinstance(node, rrb.Container):
             stack.extend(reversed(node.contents))  # type: ignore[arg-type]
     return found
-
-
-def assert_see_through_hands(view: rrb.View) -> None:
-    """Both MANO meshes draw with the shared translucent hand albedo, so the keypoints show through them."""
-    for side in ("left", "right"):
-        mesh: object = (view.visualizer_overrides or {})[f"/hand/{side}/vertices"]
-        assert isinstance(mesh, rr.Mesh3D)
-        assert mesh.albedo_factor == rr.components.AlbedoFactorBatch(hands.HAND_ALBEDO[side])
-
-
-def assert_projects_the_hands(pane: rrb.Spatial2DView, camera: str) -> None:
-    """A camera pane shows its video and both hands' meshes and keypoints, projected through its pinhole."""
-    assert pane.origin == f"/camera/{camera}/image"
-    assert set(pane.contents) == {  # type: ignore[arg-type]
-        f"+ /camera/{camera}/image",
-        *(f"+ /hand/{side}/{part}" for side in ("left", "right") for part in ("vertices", "keypoints3d")),
-    }
-    assert_see_through_hands(pane)
-
-
-def test_the_native_world_shows_every_frustum_without_decoding_a_video(tmp_path: Path) -> None:
-    dataset = GsiSixViewNativeConfig(root=tmp_path).setup()
-    assert isinstance(dataset, GsiSixViewNativeDataset)
-    world, *panes = layout_views(dataset.default_blueprint())
-    assert isinstance(world, rrb.Spatial3DView)
-    assert list(world.contents) == ["+ /**"]  # type: ignore[arg-type]
-    for camera in CAMERAS:
-        # GSI logs the VideoStream on the pinhole entity itself; an override that names only the Pinhole visualizer
-        # draws the frustum and leaves the video undecoded.
-        assert isinstance((world.visualizer_overrides or {})[f"/camera/{camera}/image"], rr.Pinhole)
-    assert_see_through_hands(world)
-    assert [pane.name for pane in panes] == list(CAMERAS)
-    for pane, camera in zip(panes, CAMERAS, strict=True):
-        assert isinstance(pane, rrb.Spatial2DView)
-        assert_projects_the_hands(pane, camera)
-
-
-def test_the_native_table_card_projects_the_hands_into_left_front(tmp_path: Path) -> None:
-    dataset = GsiSixViewNativeConfig(root=tmp_path).setup()
-    assert isinstance(dataset, GsiSixViewNativeDataset)
-    world, pane = layout_views(dataset.table_blueprint())
-    assert isinstance(world, rrb.Spatial3DView)
-    assert_see_through_hands(world)
-    assert isinstance(pane, rrb.Spatial2DView)
-    assert_projects_the_hands(pane, "left_front")
 
 
 def test_the_canonical_panes_show_each_view_with_its_keypoints_and_both_meshes(tmp_path: Path) -> None:

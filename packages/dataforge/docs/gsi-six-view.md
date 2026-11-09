@@ -31,7 +31,7 @@ R=/mnt/nas/ssd-8tb/downloads/gsi/egocentric-six-view-10h
 pixi run -e dataforge --frozen dataforge-download --list-remote gsi-six-view --root $R   # every episode, from the manifest
 pixi run -e dataforge --frozen dataforge-download gsi-six-view --root $R --sequences <episode_id> ...
 pixi run -e dataforge --frozen dataforge-download gsi-six-view --root $R                  # the whole edition
-pixi run -e dataforge --frozen dataforge-convert gsi-six-view --root $R                   # --keep-download while the native mirror also converts
+pixi run -e dataforge --frozen dataforge-convert gsi-six-view --root $R                   # --keep-download leaves the files for another reader
 pixi run -e dataforge --frozen dataforge-register --catalog-url <url> gsi-six-view --root $R
 ```
 
@@ -109,15 +109,6 @@ the whole edition takes about 2.4 h.
 - GSI's H.265 makes ffmpeg skip SEI NALUs (type 39) and, after a seek, an IDR slice header (type 5). GSI's untouched
   files log the same warnings; every view still renders.
 
-## gsi-six-view-native (temporary)
-
-TODO(gsi-native): a comparison mirror for the GSI partnership; drop it, or keep it, once Pablo decides.
-`gsi-six-view-native` reads the same download and repacks each shipped file unchanged under
-`gsi-six-view-native__<episode_id>`: `base` = `hands.rrd`, `slam` = `slam.rrd`, compacted the same way, GSI's paths
-and timelines (`capture_time`, `frame`, `source_frame`) untouched. Its blueprint shows GSI's world with the six
-frustums (a `Pinhole`-only override, since GSI's video shares the pinhole entity) beside the six views with the
-hands projected through each pinhole.
-
 ## Differences from simplecv
 
 None: simplecv never read this dataset.
@@ -129,6 +120,6 @@ Not applicable.
 ## Timing
 
 pablo-dl-server, 2026-11-08, 11 episodes (the smallest, largest, shortest, longest and densest plus one per five
-categories), prod env, NAS SSD tier: `gsi-six-view` 0.6–7.6 s per episode (24.6 s for all 11, 1.72 GB);
-`gsi-six-view-native` 0.1–1.9 s (6.0 s, 1.95 GB). The canonical layers are smaller because GSI repeats the triangle
-list and normals on every mesh row. Download: 21.5 MB/s, about 2.3 h for the whole edition.
+categories), prod env, NAS SSD tier: 0.6–7.6 s per episode (24.6 s for all 11, 1.72 GB, against 1.95 GB shipped:
+GSI repeats the triangle list and normals on every mesh row). The whole edition converted in one run on 1e1a9acac:
+1,683 of 1,685 episodes; the other two (SLAM dropouts) convert since b4cc226d4. Download: 21.5 MB/s, about 2.3 h for the whole edition.
