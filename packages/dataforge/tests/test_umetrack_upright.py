@@ -50,16 +50,13 @@ def test_one_gpu_graph_crops_turns_and_names_every_camera() -> None:
     from dataforge.video_encoding import gpu_tile_graph
 
     crops = [(636, 480, 636 * k, 0) for k in range(4)]
-    downloaded = gpu_tile_graph(crops, [0, 3, 3, 2], crop_on_gpu=False)
-    assert downloaded == (
+    assert gpu_tile_graph(crops, [0, 3, 3, 2]) == (
         "[0:v]hwdownload,format=nv12,split=4[tile0][tile1][tile2][tile3];"
         "[tile0]crop=636:480:0:0,hwupload_cuda[cam0];"
         "[tile1]crop=636:480:636:0,hwupload_cuda,transpose_cuda=dir=cclock[cam1];"
         "[tile2]crop=636:480:1272:0,hwupload_cuda,transpose_cuda=dir=cclock[cam2];"
         "[tile3]crop=636:480:1908:0,hwupload_cuda,transpose_cuda=dir=reversal[cam3]"
     )
-    on_gpu = gpu_tile_graph(crops[:2], [0, 1], crop_on_gpu=True)
-    assert on_gpu == "[0:v]split=2[tile0][tile1];[tile0]crop=636:480:0:0,scale_cuda=format=nv12[cam0];[tile1]crop=636:480:636:0,transpose_cuda=dir=clock[cam1]"
 
 
 def test_a_turn_rebuild_can_skip_the_world_space_layers() -> None:

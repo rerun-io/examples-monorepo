@@ -412,22 +412,21 @@ TRANSPOSE_CUDA: tuple[str, ...] = ("", "clock", "reversal", "cclock")
 """``transpose_cuda`` direction for 0-3 clockwise quarter turns (a half turn is ``reversal``)."""
 
 
-def gpu_tile_graph(crops: list[tuple[int, int, int, int]], turns: list[int], *, crop_on_gpu: bool) -> str:
+def gpu_tile_graph(crops: list[tuple[int, int, int, int]], turns: list[int]) -> str:
     """One filter graph from NVDEC frames to one CUDA frame per tile, each turned upright.
 
-    ``crop_on_gpu`` crops the CUDA frames in place (the crop rides on the frame; ``scale_cuda`` or ``transpose_cuda`` applies it);
-    otherwise the decoded frame comes down once, is cropped on the CPU, and each tile goes back up for its turn and its encode.
+    The decoded frame comes down once, is cropped on the CPU, and each tile goes back up for its turn and its encode. Cropping the
+    CUDA frame in place does not work with this FFmpeg: ``scale_cuda`` ignores the crop that ``crop`` sets on a CUDA frame and
+    passes the whole mosaic on (checked 2026-11-09 on UmeTrack; the CPU crop matches ``np.rot90`` of the decoded crop at 37-38 dB).
     """
     if len(crops) != len(turns) or any(turn not in (0, 1, 2, 3) for turn in turns):
         raise ValueError("one turn count in 0-3 per crop required")
-    head: str = "[0:v]" + ("" if crop_on_gpu else "hwdownload,format=nv12,") + f"split={len(crops)}" + "".join(f"[tile{i}]" for i in range(len(crops)))
-    chains: list[str] = [head]
+    chains: list[str] = ["[0:v]hwdownload,format=nv12," + f"split={len(crops)}" + "".join(f"[tile{i}]" for i in range(len(crops)))]
     for index, (crop, turn) in enumerate(zip(crops, turns, strict=True)):
-        stages: list[str] = ["crop=" + ":".join(str(value) for value in crop)]
-        if not crop_on_gpu:
-            stages.append("hwupload_cuda")
-        stages.append(f"transpose_cuda=dir={TRANSPOSE_CUDA[turn]}" if turn else ("scale_cuda=format=nv12" if crop_on_gpu else ""))
-        chains.append(f"[tile{index}]" + ",".join(stage for stage in stages if stage) + f"[cam{index}]")
+        stages: list[str] = ["crop=" + ":".join(str(value) for value in crop), "hwupload_cuda"]
+        if turn:
+            stages.append(f"transpose_cuda=dir={TRANSPOSE_CUDA[turn]}")
+        chains.append(f"[tile{index}]" + ",".join(stages) + f"[cam{index}]")
     return ";".join(chains)
 
 
@@ -441,7 +440,6 @@ def transcode_tiles_on_gpu(
     frames: int,
     gop: int,
     cq: int,
-    crop_on_gpu: bool = False,
 ) -> None:
     """One GPU pass per source: NVDEC decodes the mosaic once, each tile is cropped and turned upright, NVENC encodes each tile once.
 
@@ -453,7 +451,7 @@ def transcode_tiles_on_gpu(
     binary: Path = resolve_ffmpeg()
     require_av1_nvenc(binary)
     command: list[str] = [str(binary), "-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                          "-r", str(fps), "-i", str(source), "-filter_complex", gpu_tile_graph(crops, turns, crop_on_gpu=crop_on_gpu)]
+                          "-r", str(fps), "-i", str(source), "-filter_complex", gpu_tile_graph(crops, turns)]
     for index, output in enumerate(outputs):
         command.extend(["-map", f"[cam{index}]", "-an", "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq), "-frames:v", str(frames), str(output)])
     result: subprocess.CompletedProcess[str] = run_nvenc(
