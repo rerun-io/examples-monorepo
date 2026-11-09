@@ -35,6 +35,7 @@ from tqdm.auto import tqdm
 from posekit.eval.hand_gt import SIDES, GtDataset, HandGtSegment, read_hand_gt
 from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors, summarize
 from posekit.models.base import HandDetector, TopDownHandPose3d
+from posekit.models.detnet import DetNetHandDetectorConfig
 from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig
 from posekit.models.egohand_fast import fast_egohand_configs
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
@@ -42,7 +43,7 @@ from posekit.predictions import BoxDetections, HandDetections, HandPoses3d
 from posekit.runtimes import TensorRtBackendConfig
 from posekit.skeletons import HAND_21
 
-ModelName: TypeAlias = Literal["wilor", "egohand", "egohand-fast"]
+ModelName: TypeAlias = Literal["wilor", "egohand", "egohand-fast", "detnet", "detnet-legacy"]
 Protocol: TypeAlias = Literal["gt-boxes", "detector"]
 METRICS: tuple[str, ...] = ("mpjpe_mm", "pa_mpjpe_mm", "rte_mm", "epe_2d_px")
 
@@ -57,7 +58,17 @@ class EvalModel:
     """The model predicts a metric camera-space wrist, so root translation error is scored; otherwise it is NaN."""
 
 
-EVAL_MODELS: dict[ModelName, EvalModel] = {"wilor": EvalModel(2, False), "egohand": EvalModel(4, True), "egohand-fast": EvalModel(6, True)}
+EVAL_MODELS: dict[ModelName, EvalModel] = {
+    "wilor": EvalModel(2, False), "egohand": EvalModel(4, True), "egohand-fast": EvalModel(6, True), "detnet": EvalModel(8, False),
+    "detnet-legacy": EvalModel(10, False),
+}
+DETNET_TURNS: dict[str, dict[str, int]] = {
+    "detnet": {"dataforge-hot3d-quest3": 0, "dataforge-umetrack": 3},
+    "detnet-legacy": {"dataforge-hot3d-quest3": 1, "dataforge-umetrack": 0},
+}
+"""Detector-only DetNet-F entries (no pose stage, detector protocol only): clockwise quarter turns of each subset camera before the
+net. ``detnet`` = trained upright (handtrack ``stream.upright``: UmeTrack's front camera is mounted a quarter turn); ``detnet-legacy``
+= the deployed DetNet-F's input (cameras as stored, Quest 3 portrait frames turned once)."""
 
 
 @serde(deny_unknown_fields=True)
@@ -115,6 +126,10 @@ class HandsEvalConfig:
     """GT-box protocol: box side as a multiple of the visible joints' bounding box."""
     match_iou: float = 0.3
     """Detector protocol: minimum IoU between a same-side detection and the ground-truth joint box."""
+    detnet_onnx: Path | None = None
+    """``detnet``: handtrack's exported ``detnet_full.onnx`` of a model trained upright."""
+    detnet_legacy_onnx: Path | None = None
+    """``detnet-legacy``: ``detnet_full.onnx`` of a model trained on the legacy input (the deployed DetNet-F)."""
     log_rrd: bool = True
     """Write hands_eval.rrd beside results.json."""
 
@@ -213,11 +228,19 @@ def _rounded(value: float | None) -> float | None:
     return None if value is None else round(value, 2)
 
 
+def detnet_detector(name: ModelName, dataset: str, config: HandsEvalConfig) -> HandDetector:
+    """A DetNet-F entry's detector for one subset camera (its turn count depends on the camera)."""
+    weights: Path | None = config.detnet_onnx if name == "detnet" else config.detnet_legacy_onnx
+    if weights is None:
+        raise ValueError(f"{name} needs --{name}-onnx")
+    return DetNetHandDetectorConfig(weights=weights, quarter_turns=DETNET_TURNS[name][dataset], backend=TensorRtBackendConfig()).setup()
+
+
 def evaluate_segment(
     segment: HandGtSegment,
     frames: UInt8[Tensor, "f h w 3"],
     detector: HandDetector,
-    pose: TopDownHandPose3d,
+    pose: TopDownHandPose3d | None,
     protocol: Protocol,
     config: HandsEvalConfig,
     metric_root: bool,
@@ -266,7 +289,10 @@ def evaluate_segment(
         tuple(SIDES[side_index] for _, side_index in keys),
     )
     scored: list[ScoredHand] = []
-    if detections.num_detections:
+    if pose is None:  # a detector-only model: each found hand counts for recall and has no pose error
+        nan_errors: HandErrors = HandErrors(float("nan"), float("nan"), float("nan"), float("nan"))
+        scored = [ScoredHand(frame, side_index, nan_errors, np.full((21, 3), np.nan, np.float32), np.full((21, 2), np.nan, np.float32)) for frame, side_index in keys]
+    elif detections.num_detections:
         hands: HandPoses3d = pose(frames, detections, segment.camera).as_hand21()
         assert hands.keypoints.xyz_camera is not None and hands.keypoints.skeleton == HAND_21
         hand_frames: list[int] = hands.keypoints.frame_indices.tolist()
@@ -381,9 +407,13 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
             offset += len(segment.sample_indices) + 1
     cells: list[EvalCell] = []
     for model in config.models:
-        detector, pose = model_stack(model)
+        detector_only: bool = model in DETNET_TURNS
+        detector, pose = (None, None) if detector_only else model_stack(model)
         for dataset, segments_frames in data.items():
-            for protocol in config.protocols:
+            if detector_only:
+                detector = detnet_detector(model, dataset, config)
+            assert detector is not None
+            for protocol in config.protocols if not detector_only else ("detector",):
                 gt_hands: int = 0
                 overlapped: int = 0
                 scored: list[ScoredHand] = []

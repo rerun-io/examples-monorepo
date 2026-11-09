@@ -96,6 +96,15 @@ def _nearest(times: Int64[ndarray, "n"], targets: Int64[ndarray, "m"]) -> Int64[
     return np.where(np.abs(times[best] - targets) <= TIME_TOLERANCE_NS, best, -1).astype(np.int64)
 
 
+RotationKind: TypeAlias = Literal["quaternion", "mat3x3"]
+
+
+def rig_rotation(value: Sequence[float], kind: RotationKind) -> Float64[ndarray, "3 3"]:
+    """A rig's rotation from one ``Transform3D`` cell: a quaternion (x, y, z, w) or a 3x3 matrix, which Rerun stores column-major."""
+    flat: Float64[ndarray, "n"] = np.asarray(value, np.float64).reshape(-1)
+    return Rotation.from_quat(flat.reshape(4)).as_matrix() if kind == "quaternion" else flat.reshape(3, 3).T
+
+
 def read_hand_gt(
     dataset: DatasetEntry, name: GtDataset, segment_ids: Sequence[str], camera: str, *, stride: int, max_frames: int
 ) -> list[HandGtSegment]:
@@ -115,9 +124,11 @@ def read_hand_gt(
     entity, pinhole, video_entity, uv_entity, qa_entity = camera_paths(camera)
     scoped: DatasetSelection = dataset.filter_segments(list(segment_ids))
     statics: pa.Table = scoped.filter_contents([entity, pinhole]).reader(index=None).to_arrow_table()
+    present: set[str] = {field.name for field in dataset.arrow_schema()}
+    kind: RotationKind = "quaternion" if f"{RIG}:Transform3D:quaternion" in present else "mat3x3"  # dataforge now writes mat3x3
     temporal_entities: list[str] = [RIG, GT_XYZ, uv_entity] + ([qa_entity] if name == "dataforge-hot3d-quest3" else [])
     columns: list[str] = [
-        f"{RIG}:Transform3D:translation", f"{RIG}:Transform3D:quaternion", f"{GT_XYZ}:Points3D:positions",
+        f"{RIG}:Transform3D:translation", f"{RIG}:Transform3D:{kind}", f"{GT_XYZ}:Points3D:positions",
         f"{GT_XYZ}:simplecv.KeypointConfidence3D:confidences", f"{uv_entity}:Points2D:positions",
     ] + ([f"{qa_entity}:Scalars:scalars"] if name == "dataforge-hot3d-quest3" else [])
     temporal: pa.Table = scoped.filter_contents(temporal_entities).reader(index="video_time").select("rerun_segment_id", "video_time", *columns).to_arrow_table()
@@ -137,7 +148,7 @@ def read_hand_gt(
             return times[order], [values[i] for i in order]
 
         rig_t, rig_translation = stream(f"{RIG}:Transform3D:translation")
-        _, rig_quaternion = stream(f"{RIG}:Transform3D:quaternion")
+        _, rig_rotations = stream(f"{RIG}:Transform3D:{kind}")
         gt_t, gt_xyz = stream(f"{GT_XYZ}:Points3D:positions")
         _, gt_conf = stream(f"{GT_XYZ}:simplecv.KeypointConfidence3D:confidences")
         uv_t, uv_rows = stream(f"{uv_entity}:Points2D:positions")
@@ -159,7 +170,7 @@ def read_hand_gt(
         valid: Bool[ndarray, "f 2 21"] = np.zeros((len(chosen), 2, 21), bool)
         for out, sample in enumerate(chosen):
             world_from_rig: Float64[ndarray, "4 4"] = np.eye(4)
-            world_from_rig[:3, :3] = Rotation.from_quat(np.asarray(rig_quaternion[rig_at[sample]], np.float64).reshape(4)).as_matrix()
+            world_from_rig[:3, :3] = rig_rotation(rig_rotations[rig_at[sample]], kind)
             world_from_rig[:3, 3] = np.asarray(rig_translation[rig_at[sample]], np.float64).reshape(3)
             cam_from_world: Float64[ndarray, "4 4"] = cam_from_rig @ np.linalg.inv(world_from_rig)
             points: Float64[ndarray, "133 3"] = np.asarray(gt_xyz[gt_at[sample]], np.float64).reshape(133, 3)
