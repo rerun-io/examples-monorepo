@@ -6,7 +6,7 @@ is logged in its side slot (``left_0``, ``right_0``, ...): boxes and 2D joints
 on the image, 3D joints and the mesh in the camera frame beside it.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,25 +39,31 @@ SIDE_COLOR: dict[HandSide, tuple[int, int, int]] = {"left": (66, 135, 245), "rig
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class VideoHandsConfig:
-    """Configuration for the GPU video 3D hands demo."""
+class VideoHandsSettings:
+    """What the 3D hands demo runs: the video, its camera and one hand stack. Shared by the CLI and the app."""
 
-    rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
-    """Rerun logging configuration."""
     video_path: Path = EXAMPLES / "selfcap_oak_left.mp4"
     """Input video path."""
     camera_path: Path | None = EXAMPLES / "selfcap_oak_left.rrd"
     """CalibratedCamera .rrd of the video (EgoHand needs it); None for uncalibrated video with WiLoR."""
     detector: AnnotatedHandDetectorConfig = field(default_factory=WilorHandDetectorConfig)
-    """Hand detector selected by subcommand (``wilor``, ``egohand`` or ``egohand-fast``)."""
+    """Hand detector selected by stack name (``wilor``, ``egohand``, ``egohand-fast`` or ``egohand-fast-bf16``)."""
     pose: AnnotatedHandPose3dConfig = field(default_factory=WilorHandPoseConfig)
-    """Top-down 3D hand model selected by subcommand (``wilor``, ``egohand`` or ``egohand-fast``)."""
+    """Top-down 3D hand model selected by the same stack name as ``detector``."""
     frame_batch_size: int = 16
     """Frames decoded and processed per step."""
     max_frames: int | None = None
     """Maximum number of frames to process; ``None`` runs the full video."""
     keypoint_threshold: float = 0.3
     """Minimum keypoint confidence for 2D visibility."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VideoHandsConfig(VideoHandsSettings):
+    """Configuration for the GPU video 3D hands demo on the command line."""
+
+    rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
+    """Rerun logging configuration."""
 
 
 def log_hand_annotation_context(skeleton: KeypointSkeleton) -> None:
@@ -183,36 +189,49 @@ def pinhole_matrix(pose: object, camera: CalibratedCamera | None, width: int, he
     return camera.intrinsics.astype(np.float32)
 
 
-def main(config: VideoHandsConfig) -> None:
-    """Run the GPU video 3D hands demo and log results to Rerun.
+def build_pipeline(settings: VideoHandsSettings) -> HandPose3dPipeline:
+    """Set up the detector and the 3D hand model the settings name (exports and engine builds happen here)."""
+    return HandPose3dPipeline(settings.detector.setup(), settings.pose.setup())
+
+
+def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline | None = None) -> Iterator[str]:
+    """Decode the video on the GPU, run the hand stack chunk by chunk and log everything to the active recording.
+
+    The CLI drains this generator into its global recording; the app streams a thread-local
+    recording to its viewer after every yield.
 
     Args:
-        config: Demo configuration.
+        settings: Video, camera and hand stack.
+        pipeline: A pipeline already set up for ``settings``; None builds one.
+
+    Yields:
+        A progress line after every chunk, then the summary.
 
     Raises:
         ValueError: If the video metadata cannot be read.
     """
     from torchcodec.decoders import VideoDecoder
 
-    camera: CalibratedCamera | None = None if config.camera_path is None else load_calibrated_camera(config.camera_path)
-    pipeline = HandPose3dPipeline(config.detector.setup(), config.pose.setup())
-    decoder = VideoDecoder(config.video_path, dimension_order="NHWC", device="cuda")
+    camera: CalibratedCamera | None = None if settings.camera_path is None else load_calibrated_camera(settings.camera_path)
+    if pipeline is None:
+        pipeline = build_pipeline(settings)
+    decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
     num_frames_raw = decoder.metadata.num_frames
     fps_raw = decoder.metadata.average_fps
     if num_frames_raw is None or fps_raw is None or float(fps_raw) <= 0.0:
-        raise ValueError(f"Could not read valid video metadata from {config.video_path}.")
-    num_frames: int = int(num_frames_raw) if config.max_frames is None else min(int(num_frames_raw), config.max_frames)
+        raise ValueError(f"Could not read valid video metadata from {settings.video_path}.")
+    num_frames: int = int(num_frames_raw) if settings.max_frames is None else min(int(num_frames_raw), settings.max_frames)
     assert decoder.metadata.width is not None and decoder.metadata.height is not None
     width: int = int(decoder.metadata.width)
     height: int = int(decoder.metadata.height)
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
     rr.log(IMAGE_PATH, rr.Pinhole(image_from_camera=pinhole_matrix(pipeline.pose, camera, width, height), resolution=[width, height], image_plane_distance=0.05), static=True)
-    video_timestamps_ns: Int64[ndarray, "frames"] = log_video(config.video_path, Path(IMAGE_PATH), timeline="video_time")
+    video_timestamps_ns: Int64[ndarray, "frames"] = log_video(settings.video_path, Path(IMAGE_PATH), timeline="video_time")
     log_hand_annotation_context(pipeline.pose.skeleton)
     total_hands: int = 0
     live_slots: set[str] = set()
-    for start in tqdm(range(0, num_frames, config.frame_batch_size), desc="posekit video hands"):
-        stop: int = min(start + config.frame_batch_size, num_frames)
+    for start in tqdm(range(0, num_frames, settings.frame_batch_size), desc="posekit video hands"):
+        stop: int = min(start + settings.frame_batch_size, num_frames)
         frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
@@ -225,7 +244,18 @@ def main(config: VideoHandsConfig) -> None:
         )
         log_chunk_hands(
             frame_indices=chunk.tolist(), timestamps_ns=timestamps.tolist(), detections=detections, hands=hands,
-            keypoint_threshold=config.keypoint_threshold, live_slots=live_slots,
+            keypoint_threshold=settings.keypoint_threshold, live_slots=live_slots,
         )
+        yield f"Frames {stop}/{num_frames}, {total_hands} hands"
     torch.cuda.synchronize()
-    print(f"[posekit] processed {num_frames} frames, {total_hands} hands")
+    yield f"processed {num_frames} frames, {total_hands} hands"
+
+
+def main(config: VideoHandsConfig) -> None:
+    """Run the GPU video 3D hands demo and log results to the recording ``config.rr_config`` set up.
+
+    Args:
+        config: Demo configuration.
+    """
+    statuses: list[str] = list(run_video_hands(config))
+    print(f"[posekit] {statuses[-1]}")

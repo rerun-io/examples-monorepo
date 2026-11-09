@@ -126,6 +126,9 @@ pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr
 pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/hands.rrd \
     egohand onnx egohand
 
+# The same code as a Gradio app with an embedded Rerun viewer (stack picked in the Config accordion)
+pixi run -e posekit-hands --frozen posekit-hands-app            # http://127.0.0.1:7872
+
 # Ground-truth eval on a fixed HOT3D (Quest 3) + UmeTrack subset from a dataforge catalog
 pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/hands-eval
 
