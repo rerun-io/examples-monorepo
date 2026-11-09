@@ -1,7 +1,14 @@
 # robocap-live hand-net models
 
-2026-10-01. Weights: DetNet-F `detnet-demo-0929.weights.pt` (sha256 `edda4177…`), KeyNet-F `keynet-strong-pinch/best.weights.pt`
-(sha256 `067cf7f6…`, with the pinch head, no visibility head). These are the weights the Python s66 runs used.
+2026-11-09. Weights: DetNet-F **mix-1** `robocap-mix-1/detnet/last.weights.pt` (sha256 `cc4ee7d8…`; UmeTrack + SHOW3D + GSI +
+Gen-HumanEgo, 25 % each, 468,750 steps; report https://pablos-4800gt.ilish-ruler.ts.net:8768/hand-detector/), KeyNet-F
+`keynet-strong-pinch/best.weights.pt` (sha256 `067cf7f6…`, with the pinch head, no visibility head), unchanged since 2026-10-01.
+
+**DetNet input convention.** mix-1 was trained on upright cameras: the runtime turns RoboCap's cameras 2 and 3 (mounted upside down
+in their calibration frame) by 180 degrees before DetNet and turns its circles back after it (`HandsConfig::detnet_input`,
+`--detnet-input upright`, the default). The 2026-09-29 DetNet-F (`detnet-demo-0929.weights.pt`, sha256 `edda4177…`; the weights the
+Python s66 runs used) saw every camera as calibrated: run it with `--detnet-input legacy` (Python: `detnet_input="legacy"`). Its
+files are the "legacy" rows below; the runtime loads fixed names, so they live in their own models directory.
 
 ## Which files the runtime loads
 
@@ -20,7 +27,8 @@ The NPU pair is **FP16 DetNet + INT8 KeyNet**:
 
 ## Files
 
-`*.onnx` come from `pixi run -e handtrack python packages/handtrack/tools/export_nets_onnx.py --detnet-weights <pt> --keynet-weights <pt>
+mix-1's DetNet files come from `pixi run -e handtrack python packages/handtrack/tools/export_detnet.py --weights <pt> --heldout <parquet>
+--out-dir <dir>` and `rknn_convert.py --builds detnet_b1_fp16`. The KeyNet `*.onnx` (and the 0929 DetNet's) come from `pixi run -e handtrack python packages/handtrack/tools/export_nets_onnx.py --detnet-weights <pt> --keynet-weights <pt>
 --work-dir <dir> --detnet-cache <dir> --keynet-cache <dir>` (opset 17, TorchScript exporter).
 `*.rknn` come from `pixi run --manifest-path <rknn-toolkit2 project>/pixi.toml python packages/robocap-live/tools/rknn_convert.py
 --work-dir <dir> --keynet-cache <dir> --calibration-dir <dir>` (rknn-toolkit2 2.3.2, target rk3588; that env is its own pixi
@@ -28,13 +36,16 @@ project, not an env of the root pixi.toml: the tool's docstring lists what it ho
 
 | File | sha256 | Bytes | What |
 |---|---|---|---|
-| `detnet_full.onnx` | `f3bc8c78cda4e1aab7c2fd05e1c340e7b1fe29f18c0863324dbb9747b613eea9` | 5,781,667 | DetNet, full frame with the 4x4 pool inside, dynamic batch (ort) |
-| `detnet_pooled_b1.onnx` | `6ed900049d198f9cffda30d9887c16613ca99e6ffb32fdfdbc6cf10c3d03b532` | 5,775,633 | DetNet, pooled input, batch 1 (RKNN source) |
+| `detnet_full.onnx` | `7409ebb67ad4c906a81a278007e32b16975defe8d3815cfde76fb24aafe4a1d2` | 5,781,667 | DetNet mix-1, full frame with the 4x4 pool inside, dynamic batch (ort) |
+| `detnet_pooled_b1.onnx` | `fc7fab95f10525a95062f21d30d35fd168e3f78cea76ef1001f8cf249b677aed` | 5,775,633 | DetNet mix-1, pooled input, batch 1 (RKNN source) |
+| **`detnet_b1_fp16.rknn`** | `887200de38a9afb47061409dc95656f89a35bbe8aeb3d354b26195264d2b95b8` | 3,371,706 | DetNet mix-1 FP16 (**loaded**); simulator vs PyTorch: centres 0.17 px mean, 1.05 px max; presence agreement 1.000 |
+| legacy `detnet_full.onnx` | `f3bc8c78cda4e1aab7c2fd05e1c340e7b1fe29f18c0863324dbb9747b613eea9` | 5,781,667 | DetNet 0929, full frame (ort; `--detnet-input legacy`) |
+| legacy `detnet_pooled_b1.onnx` | `6ed900049d198f9cffda30d9887c16613ca99e6ffb32fdfdbc6cf10c3d03b532` | 5,775,633 | DetNet 0929, pooled input, batch 1 (RKNN source) |
 | `keynet.onnx` | `71dc07cde470f5aa8547328d7995eb74ee6a8b18cf6cceb47a1d83b0019df1c4` | 7,773,501 | KeyNet + pinch head, dynamic batch (ort) |
 | `keynet_b1.onnx` | `4974b4403f46cd9ec7898f78c51a592100521751db5549774f2efbc3b4d56bb5` | 7,773,495 | KeyNet, batch 1 (RKNN source) |
 | `keynet_b4.onnx` | `aeb1c4baa852718d34b186dd1ae5abe9be6f24ccbb4aa28b5e046d259c02db6e` | 7,773,495 | KeyNet, batch 4 (RKNN source) |
-| **`detnet_b1_fp16.rknn`** | `c1a0ffe41d57975f71ef3bb0597802f367620da5699bb8843daced1d2dbf19a9` | 3,371,706 | DetNet FP16 (**loaded**) |
-| `detnet_b1_int8.rknn` | `306f037be04266252c35b91c87a09bd2e928521e21d8f1e2cd493943645cc6b5` | 2,017,454 | DetNet INT8 (rejected: see accuracy) |
+| legacy `detnet_b1_fp16.rknn` | `c1a0ffe41d57975f71ef3bb0597802f367620da5699bb8843daced1d2dbf19a9` | 3,371,706 | DetNet 0929 FP16 (`--detnet-input legacy`) |
+| legacy `detnet_b1_int8.rknn` | `306f037be04266252c35b91c87a09bd2e928521e21d8f1e2cd493943645cc6b5` | 2,017,454 | DetNet 0929 INT8 (rejected: see accuracy) |
 | **`keynet_b1_int8_mmse.rknn`** | `60df340a6ecaa23c685377dafac085a83d1583ad3b303dab1ff86d5a4263058d` | 2,651,547 | KeyNet INT8, mmse calibration (**loaded**) |
 | `keynet_b1_int8.rknn` | `39b625698f7f4967724cd3a90e50dfcd7581708078c842bae49c4725f108e4d6` | 2,651,547 | KeyNet INT8, normal calibration |
 | `keynet_b1_fp16.rknn` | `5af64984d2db7d33a420f07a2005c516e558ade02464fc84e936f3cc8b965357` | 4,487,501 | KeyNet FP16 (fallback) |

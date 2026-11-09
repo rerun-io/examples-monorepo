@@ -18,7 +18,7 @@ use numpy::{
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use robocap_live::frame::{CAMERA_NAMES, FULL_SIZE, NUM_CAMERAS, RigCamera};
-use robocap_live::hands::HandsConfig;
+use robocap_live::hands::{DetNetInput, HandsConfig};
 use robocap_live::layer::{HandsLayerConfig, HandsLayerWriter, LayerError};
 use robocap_live::log::scene::HandOverlays;
 use robocap_live::nets::ort::{OrtConfig, OrtDevice, OrtNets};
@@ -288,7 +288,7 @@ impl HandsLayer {
     #[new]
     #[pyo3(signature = (
         rig, output, recording_id, reference_t_ns, reference_world_from_rig, *, nets = "ort", models_dir = None, device = "auto",
-        ort_dylib = None, ort_threads = 0, overlays = "debug",
+        ort_dylib = None, ort_threads = 0, overlays = "debug", detnet_input = "upright",
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -304,7 +304,13 @@ impl HandsLayer {
         ort_dylib: Option<PathBuf>,
         ort_threads: usize,
         overlays: &str,
+        detnet_input: &str,
     ) -> PyResult<Self> {
+        let detnet_input: DetNetInput = match detnet_input {
+            "upright" => DetNetInput::Upright,
+            "legacy" => DetNetInput::Legacy,
+            other => return Err(value_error(format!("detnet_input {other:?}: expected upright or legacy"))),
+        };
         let hand_overlays: HandOverlays = overlays.parse().map_err(value_error)?;
         let reference = reference_poses(&reference_t_ns, reference_world_from_rig)?;
         let rig = rig.inner.clone();
@@ -327,6 +333,7 @@ impl HandsLayer {
             other => return Err(value_error(format!("nets {other:?}: expected ort or none"))),
         };
         let hands = HandsConfig {
+            detnet_input,
             // Offline, as a lossless replay: switch to the calibrated scale on the frameset that finishes the solve, the same
             // one every run.
             scale_wait: true,

@@ -27,7 +27,7 @@ use robocap_live::hands::letterbox::BarLetterbox;
 use robocap_live::hands::model::{GenericHandModel, landmarks_world};
 use robocap_live::hands::scale::CalibrationBlock;
 use robocap_live::hands::tracker::Perception;
-use robocap_live::hands::{HandsError, LEFT, RIGHT};
+use robocap_live::hands::{HandsConfig, HandsError, LEFT, RIGHT};
 use robocap_live::nets::golden::f32_values;
 use robocap_live::nets::{
     CROP_LEN, DISTANCE_BINS, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, HEATMAP_SIDE, HandNets,
@@ -532,7 +532,12 @@ impl RenderedPerception {
                 if let Some(px) = self.truth.models[camera].project(p) {
                     visible += usize::from(self.truth.models[camera].inside_image(&px));
                     let uv = self.truth.letterbox.to_net(&px);
-                    net.push([uv.x, uv.y]);
+                    // The default (upright) model sees an upside-down camera turned 180 degrees, so its circles are in that frame.
+                    if HandsConfig::default().detnet_input.half_turned(camera) {
+                        net.push([639.0 - uv.x, 479.0 - uv.y]);
+                    } else {
+                        net.push([uv.x, uv.y]);
+                    }
                 }
             }
             if let (true, Some(circle)) = (visible >= 12, min_enclosing_circle(&net)) {
@@ -561,7 +566,8 @@ impl Perception for RenderedPerception {
             self.render_detnet(camera)?;
         }
         let images: Vec<&Image<u8, 1>> = small.iter().map(|image| image.as_ref()).collect();
-        detect(nets, &BarLetterbox::robocap(), &images)
+        let half_turn: Vec<bool> = cameras.iter().map(|&camera| HandsConfig::default().detnet_input.half_turned(camera)).collect();
+        detect(nets, &BarLetterbox::robocap(), &images, &half_turn)
     }
 
     /// Renders each view's KeyNet output (heatmaps of the truth in its planned crop, present when 15 keypoints fall inside), then

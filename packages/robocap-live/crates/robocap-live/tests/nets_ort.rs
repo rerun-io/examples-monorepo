@@ -31,7 +31,7 @@ fn ort_matches_pytorch_golden() -> Result<(), Box<dyn std::error::Error>> {
     let golden: Golden = Golden::load(std::env::var_os("ROBOCAP_LIVE_NETS_GOLDEN").map_or_else(default_dir, PathBuf::from))?;
     let mut nets: OrtNets = OrtNets::new(&models, &OrtConfig { device, dylib: Some(dylib), intra_threads: 0 })?;
     let frames: Vec<Vec<u8>> = golden.detnet_frames();
-    let frame_refs: Vec<NetFrame<'_>> = frames.iter().map(|frame| NetFrame { pixels: frame, top: 0 }).collect();
+    let frame_refs: Vec<NetFrame<'_>> = frames.iter().map(|frame| NetFrame { pixels: frame, top: 0, half_turn: false }).collect();
     let detnet_out = nets.detnet(&frame_refs)?;
     let crops: Vec<&[f32]> = golden.keynet_crops.iter().map(Vec::as_slice).collect();
     let keynet_out: Vec<KeyNetRaw> = nets.keynet(&crops, &golden.keynet_keypoints)?;

@@ -94,6 +94,6 @@ impl BarLetterbox {
         if small.size() != SMALL_SIZE || self.pad_x != 0.0 || self.pad_y != top as f64 || top + SMALL_SIZE.height > NET_SIZE.height {
             return Err(ImageError::InvalidImageSize(small.width(), small.height(), SMALL_SIZE.width, SMALL_SIZE.height));
         }
-        Ok(NetFrame { pixels: small.as_slice(), top })
+        Ok(NetFrame { pixels: small.as_slice(), top, half_turn: false })
     }
 }

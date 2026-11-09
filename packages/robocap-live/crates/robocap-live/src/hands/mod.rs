@@ -58,6 +58,8 @@ pub enum ScaleMode {
 /// Tracker settings; the defaults are ROBUST_TRACKER_CONFIG plus the gate.
 #[derive(Clone, Debug)]
 pub struct HandsConfig {
+    /// The input convention of the DetNet weights in use ([`DetNetInput`]).
+    pub detnet_input: DetNetInput,
     /// How phi is chosen.
     pub scale: ScaleMode,
     /// Cameras the hands may use (subset of 0..6), e.g. `[0, 1, 2, 3]` for parity with the 4-camera Python run.
@@ -83,9 +85,32 @@ pub struct HandsConfig {
     pub acquire_threads: usize,
 }
 
+/// RoboCap's cameras mounted upside down relative to the world in their calibration frame (the frame of the small images): 2 and 3,
+/// measured from the rig calibration against gravity (handtrack `catalog.UPRIGHT_TURNS`, RoboCap row: 0, 0, 2, 2, 0, 0 turns).
+pub const ROBOCAP_UPSIDE_DOWN: [bool; NUM_CAMERAS] = [false, false, true, true, false, false];
+
+/// Which input a DetNet's weights were trained on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DetNetInput {
+    /// Every camera as calibrated (the 2026-09-29 DetNet-F, `detnet-demo-0929`, and handtrack's repro-1).
+    Legacy,
+    /// Every camera turned upright first (handtrack's `--stream.upright`, the 2026-11 mix-1 DetNet-F): RoboCap's cameras 2 and 3
+    /// ([`ROBOCAP_UPSIDE_DOWN`]) are turned 180 degrees before the net and their circles turned back after it.
+    #[default]
+    Upright,
+}
+
+impl DetNetInput {
+    /// Whether DetNet sees `camera` turned 180 degrees under this convention.
+    pub fn half_turned(self, camera: usize) -> bool {
+        self == DetNetInput::Upright && ROBOCAP_UPSIDE_DOWN.get(camera).copied().unwrap_or(false)
+    }
+}
+
 impl Default for HandsConfig {
     fn default() -> Self {
         Self {
+            detnet_input: DetNetInput::default(),
             scale: ScaleMode::Auto { seconds: 10.0 },
             cameras: (0..NUM_CAMERAS).collect(),
             max_views: 2,
@@ -267,7 +292,7 @@ pub trait HandTracking: Send {
 ///
 /// [`HandsError::Invalid`] for a bad camera list, scale or rig; [`HandsError::Model`] when the hand model asset is broken.
 pub fn new_tracker(rig: &Rig, config: HandsConfig) -> Result<Box<dyn HandTracking>, HandsError> {
-    let perception = Box::new(perception::NetsPerception::new(rig)?);
+    let perception = Box::new(perception::NetsPerception::new(rig, config.detnet_input)?);
     Ok(Box::new(tracker::Tracker::new(
         rig,
         &config,

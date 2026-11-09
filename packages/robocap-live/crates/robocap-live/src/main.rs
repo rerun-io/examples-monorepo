@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use robocap_live::capture::Cap;
 use robocap_live::frame::{NUM_CAMERAS, SMALL_SIZE};
-use robocap_live::hands::{self, HandsConfig, ScaleMode};
+use robocap_live::hands::{self, DetNetInput, HandsConfig, ScaleMode};
 use robocap_live::log::video::{EncoderKind, encoder_config};
 use robocap_live::log::{Logger, LoggerConfig, LoggerSink, VideoMode};
 use robocap_live::nets::{HandNets, NetsError, NoNets};
@@ -43,6 +43,14 @@ enum HandsArg {
     On,
     /// No hands stage.
     Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DetNetInputArg {
+    /// Cameras 2 and 3 turned 180 degrees for DetNet: the 2026-11 mix-1 weights (models/MODELS.md).
+    Upright,
+    /// Every camera as calibrated: the 2026-09-29 weights (detnet-demo-0929).
+    Legacy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -227,6 +235,9 @@ struct Cli {
     /// (`round-robin`, ROBUST_TRACKER_CONFIG as handtrack runs it; parity with s66-cams4/cams6).
     #[arg(long, value_enum, default_value = "all")]
     detnet: DetNetArg,
+    /// The input convention of the DetNet in --models: `upright` (the default weights) or `legacy` (detnet-demo-0929).
+    #[arg(long, value_enum, default_value = "upright")]
+    detnet_input: DetNetInputArg,
     /// Cameras DetNet looks at (default: --hand-cameras).
     #[arg(long)]
     detnet_cameras: Option<Cameras>,
@@ -575,6 +586,10 @@ fn main() -> Result<()> {
                 Box::new(NoNets)
             });
             let config = HandsConfig {
+                detnet_input: match cli.detnet_input {
+                    DetNetInputArg::Upright => DetNetInput::Upright,
+                    DetNetInputArg::Legacy => DetNetInput::Legacy,
+                },
                 scale,
                 cameras: hand_cameras.clone(),
                 detnet_cameras: detnet_cameras.clone(),

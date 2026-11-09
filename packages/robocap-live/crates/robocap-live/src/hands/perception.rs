@@ -6,6 +6,7 @@ use nalgebra::Isometry3;
 use super::HandsError;
 use super::detect::{Detections, detect};
 use super::estimator::{KeypointEstimate, PerspectiveKeyNet, ViewRequest};
+use super::DetNetInput;
 use super::letterbox::BarLetterbox;
 use super::tracker::Perception;
 use crate::frame::Luma;
@@ -17,18 +18,21 @@ use kornia_staging_sensors::CameraFrame;
 pub struct NetsPerception {
     estimator: PerspectiveKeyNet,
     letterbox: BarLetterbox,
+    detnet_input: DetNetInput,
 }
 
 impl NetsPerception {
-    /// For a RoboCap rig (1920x1080 KB4 cameras); the tracker sets the hand scale ([`Perception::set_phi`]).
+    /// For a RoboCap rig (1920x1080 KB4 cameras) and DetNet weights of `detnet_input`'s convention; the tracker sets the hand scale
+    /// ([`Perception::set_phi`]).
     ///
     /// # Errors
     ///
     /// The estimator's errors for a rig it cannot model.
-    pub fn new(rig: &Rig) -> Result<Self, HandsError> {
+    pub fn new(rig: &Rig, detnet_input: DetNetInput) -> Result<Self, HandsError> {
         Ok(Self {
             estimator: PerspectiveKeyNet::new(rig, 1.0)?,
             letterbox: BarLetterbox::robocap(),
+            detnet_input,
         })
     }
 }
@@ -37,12 +41,13 @@ impl Perception for NetsPerception {
     fn detect(
         &mut self,
         nets: &mut dyn HandNets,
-        _cameras: &[usize],
+        cameras: &[usize],
         small: &[&Luma],
     ) -> Result<Vec<Detections>, HandsError> {
         let images: Vec<&kornia_image::Image<u8, 1>> =
             small.iter().map(|image| image.as_ref()).collect();
-        detect(nets, &self.letterbox, &images)
+        let half_turn: Vec<bool> = cameras.iter().map(|&camera| self.detnet_input.half_turned(camera)).collect();
+        detect(nets, &self.letterbox, &images, &half_turn)
     }
 
     fn estimate(

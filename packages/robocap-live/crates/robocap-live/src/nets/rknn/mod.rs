@@ -134,17 +134,25 @@ impl PooledInput {
             return Err(NetsError::Input { net: "detnet", message });
         }
         let (first, last): (usize, usize) = (frame.top / 4 * POOLED_WIDTH, (frame.top + rows) / 4 * POOLED_WIDTH);
+        // A half turn commutes with the 4x4 pool (the blocks tile the equal bars and the image alike): pool, then reverse the blocks.
+        let half_turn: bool = frame.half_turn;
         match self {
             PooledInput::U8(dst) => {
                 dst[..first].fill(0);
                 dst[last..].fill(0);
                 pool4_u8(frame.pixels, DETNET_WIDTH, rows, &mut dst[first..last]).map_err(pool_error)?;
+                if half_turn {
+                    dst[first..last].reverse();
+                }
                 Ok(InputData::U8(dst))
             }
             PooledInput::F32(dst) => {
                 dst[..first].fill(0.0);
                 dst[last..].fill(0.0);
                 pool4_mean_f32(frame.pixels, DETNET_WIDTH, rows, &mut dst[first..last]).map_err(pool_error)?;
+                if half_turn {
+                    dst[first..last].reverse();
+                }
                 Ok(InputData::F32(dst))
             }
             PooledInput::F16(dst) => {
@@ -155,6 +163,9 @@ impl PooledInput {
                     half::f16::from_f32(f32::from(sum) / 16.0 * scale).to_bits().to_le_bytes()
                 })
                 .map_err(pool_error)?;
+                if half_turn {
+                    dst[first..last].reverse();
+                }
                 Ok(InputData::Native(dst.as_flattened()))
             }
         }

@@ -272,6 +272,41 @@ fn the_detnet_frame_from_the_area_small_image_matches_handtrack() -> TestResult 
     Ok(())
 }
 
+/// The upright model's input for a camera mounted upside down is handtrack's upright letterbox (`letterbox_for(1920, 1080, 2)`:
+/// same scale and bars, image turned 180 degrees), i.e. Python's legacy frame turned 180 degrees: the tensor the ORT backend
+/// writes for the half-turned frame must equal it exactly where Python's stored box lies (area variant).
+#[test]
+fn the_upright_detnet_frame_is_handtracks_frame_turned_half_way() -> TestResult {
+    let manifest = manifest()?;
+    let bytes = std::fs::read(data_dir().join("letterbox_u8.bin"))?;
+    let letterbox = BarLetterbox::robocap();
+    let mut checked: usize = 0;
+    for entry in manifest["letterbox"]["entries"].as_array().into_iter().flatten() {
+        if entry["variant"].as_str() != Some("area") {
+            continue;
+        }
+        let frame = entry["frame"].as_u64().ok_or("frame")?;
+        let camera = entry["camera"].as_u64().ok_or("camera")? as usize;
+        let mut small = Image::from_size_val(SMALL_SIZE, 0u8)?;
+        resize_area_u8(&masked_frames(&manifest, frame)?[camera], &mut small)?;
+        let mut tensor = vec![0f32; NET_SIZE.width * NET_SIZE.height];
+        letterbox.net_frame(&small)?.with_half_turn(true).write_unit_f32(&mut tensor)?;
+        let b: Vec<usize> = vec1(&entry["box"]).iter().map(|v| *v as usize).collect();
+        let (x0, y0, x1, y1) = (b[0], b[1], b[2], b[3]);
+        let offset = entry["offset"].as_u64().ok_or("offset")? as usize;
+        let expected = &bytes[offset..offset + (x1 - x0) * (y1 - y0)];
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let turned: f32 = tensor[(479 - y) * 640 + (639 - x)];
+                assert_eq!(turned, f32::from(expected[(y - y0) * (x1 - x0) + x - x0]) / 255.0, "f{frame} c{camera} at ({x}, {y})");
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "the manifest has area letterbox entries");
+    Ok(())
+}
+
 #[test]
 fn detnet_decode_matches_handtrack() -> TestResult {
     let manifest = manifest()?;
@@ -668,10 +703,10 @@ fn perspective_keynet_matches_handtrack_end_to_end() -> TestResult {
 
 #[test]
 fn detect_letterboxes_runs_and_decodes() -> TestResult {
-    struct Fixed(Vec<(Vec<u8>, usize)>);
+    struct Fixed(Vec<(Vec<u8>, usize, bool)>);
     impl HandNets for Fixed {
         fn detnet(&mut self, frames: &[NetFrame<'_>]) -> Result<Vec<DetNetRaw>, NetsError> {
-            self.0 = frames.iter().map(|f| (f.pixels.to_vec(), f.top)).collect();
+            self.0 = frames.iter().map(|f| (f.pixels.to_vec(), f.top, f.half_turn)).collect();
             Ok(vec![
                 DetNetRaw {
                     center: [[0.5, 0.25], [0.1, 0.9]],
@@ -704,8 +739,9 @@ fn detect_letterboxes_runs_and_decodes() -> TestResult {
         &mut nets,
         &BarLetterbox::robocap(),
         &[&stale, &stale, &stale],
+        &[false; 3],
     )?;
-    let detections = detect(&mut nets, &BarLetterbox::robocap(), &[&small, &small])?;
+    let detections = detect(&mut nets, &BarLetterbox::robocap(), &[&small, &small], &[false, true])?;
     assert_eq!(
         nets.0.len(),
         2,
@@ -714,9 +750,13 @@ fn detect_letterboxes_runs_and_decodes() -> TestResult {
     assert_eq!(detections.len(), 2);
     assert_eq!(detections[0].circle_net[0], [320.0, 120.0, 32.0]);
     assert!(detections[0].present(0, 0.8) && !detections[0].present(1, 0.8));
-    // The net gets the small image's rows as they are, at net row 60 (the bars are implicit).
-    let (pixels, top) = &nets.0[0];
-    assert_eq!((pixels.as_slice(), *top), (small.as_slice(), 60));
+    // A half-turned input: the net's (320, 120) is (639 - 320, 479 - 120) in the camera's own net frame; radius and slot stay.
+    assert_eq!(detections[1].circle_net[0], [319.0, 359.0, 32.0]);
+    assert!(detections[1].present(0, 0.8) && !detections[1].present(1, 0.8));
+    // The net gets the small image's rows as they are, at net row 60 (the bars are implicit), flagged when it must turn them.
+    let (pixels, top, turned) = &nets.0[0];
+    assert_eq!((pixels.as_slice(), *top, *turned), (small.as_slice(), 60, false));
+    assert!(nets.0[1].2);
     let wrong = Image::<u8, 1>::from_size_val(
         ImageSize {
             width: 640,
@@ -724,6 +764,7 @@ fn detect_letterboxes_runs_and_decodes() -> TestResult {
         },
         0,
     )?;
-    assert!(detect(&mut nets, &BarLetterbox::robocap(), &[&wrong]).is_err());
+    assert!(detect(&mut nets, &BarLetterbox::robocap(), &[&wrong], &[false]).is_err());
+    assert!(detect(&mut nets, &BarLetterbox::robocap(), &[&small], &[]).is_err(), "one half-turn flag per image");
     Ok(())
 }
