@@ -44,7 +44,7 @@ TIMELINE: str = "video_time"
 GRID_PERIOD_NS: int = 200_000_000
 """Label grid spacing: 5 fps."""
 KEYFRAME_STRIDE: int = 5
-"""Every fifth grid time is a review keyframe: 1 fps."""
+"""Every fifth grid time is a review keyframe: 1 fps (and the last grid time, so range fill reaches the end)."""
 GRID_TOLERANCE_NS: int = 50_000_000
 """Largest gap between a grid target and the reference frame that fills it; larger gaps in the recording are skipped."""
 FRAMESET_TOLERANCE_NS: int = 10_000_000
@@ -220,8 +220,15 @@ class FrameSource:
 
     @property
     def keyframes_ns(self) -> list[int]:
-        """The 1 fps review keyframes: every ``KEYFRAME_STRIDE``-th grid time."""
-        return self.grid_ns[::KEYFRAME_STRIDE].tolist()
+        """The 1 fps review keyframes: every ``KEYFRAME_STRIDE``-th grid time, plus the last grid time.
+
+        The last one closes the final run: range fill only covers times strictly between two keyframes, so
+        without it the grid times after the last stride keyframe would never be labelled.
+        """
+        keyframes: list[int] = self.grid_ns[::KEYFRAME_STRIDE].tolist()
+        if len(self.grid_ns) and keyframes[-1] != int(self.grid_ns[-1]):
+            keyframes.append(int(self.grid_ns[-1]))
+        return keyframes
 
     def segment_info(self, split: SegmentSplit, viewer_url: str) -> SegmentInfo:
         """What the browser needs to lay out this segment."""

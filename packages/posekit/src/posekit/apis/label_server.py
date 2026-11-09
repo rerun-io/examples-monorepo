@@ -2,14 +2,19 @@
 
 Frames come from ``posekit.labeler.frames.FrameSource``, proposals from ``posekit.labeler.proposals.read_proposals``
 (read once per segment when it opens), labels from and to the ``hand_boxes`` layer (``posekit.labeler.store``).
+
+SIGTERM (``systemctl stop``) and Ctrl-C stop the server the same way: no new writes, then every unsaved label goes
+to its segment's autosave file before the process exits.
 """
 
 from __future__ import annotations
 
+import signal
 import threading
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import FrameType
 
 from rerun.catalog import DatasetEntry
 
@@ -104,11 +109,20 @@ def main(config: Config) -> None:
     if config.warm:
         threading.Thread(target=app.summaries, name="labeler-warm", daemon=True).start()
     server: ThreadingHTTPServer = make_server(app, config.host, config.port)
+
+    def stop_on_sigterm(signum: int, frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_sigterm)
     print(f"[labeler] {len(segment_ids)} segments of {config.dataset} on http://{config.host}:{server.server_address[1]}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("[labeler] stopping")
     finally:
+        # A second signal (systemd and pixi may both deliver one) must not interrupt the final save.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         server.server_close()
         app.close()
+        print("[labeler] stopped")

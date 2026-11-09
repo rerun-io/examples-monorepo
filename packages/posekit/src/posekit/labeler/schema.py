@@ -152,7 +152,7 @@ class SegmentInfo:
     times_ns: list[int]
     """The 5 fps label grid on ``video_time``, ns (each a real frame time of the reference camera)."""
     keyframes_ns: list[int]
-    """The 1 fps review keyframes, a subset of ``times_ns``."""
+    """The 1 fps review keyframes plus the last grid time, a subset of ``times_ns``."""
     viewer_url: str
     """Segment URL the embedded Rerun web viewer opens."""
 

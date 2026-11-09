@@ -12,7 +12,13 @@ and each (cam, side) without a reviewed label:
   end boxes with IoU >= 0.3 -> ``accepted`` with the proposal box;
 - otherwise the label stays empty and the time is queued as ``range_gap``.
 
-Range labels carry source ``range``; a later fill may overwrite them, never a reviewed label.
+Range labels carry source ``range``; a later fill may overwrite them, never a reviewed label. A refill that can
+no longer decide a view removes that view's old ``range`` label, so the time comes back to the queue. Each time's
+check-and-write is one store operation (``LabelStore.put_range``), so a reviewer's post during a fill always wins.
+
+The open ``range_gap`` times live in memory. When a segment opens they are rebuilt from the stored labels: between
+two consecutive fully reviewed keyframes that hold ``range`` labels (a fill ran there), every grid time that is not
+fully reviewed is open again.
 
 Flags (shown in ``FrameState`` and on queue items):
 
@@ -26,10 +32,11 @@ Flags (shown in ``FrameState`` and on queue items):
 from __future__ import annotations
 
 import threading
+from itertools import pairwise
 from typing import Protocol, runtime_checkable
 
-from posekit.labeler.schema import HAND_SIDES, Box, FrameLabels, HandSide, Proposal, QueueItem, RangeRequest, RangeResult, ViewLabel
-from posekit.labeler.store import LabelStore
+from posekit.labeler.schema import HAND_SIDES, Box, HandSide, Proposal, QueueItem, RangeRequest, RangeResult, ViewLabel
+from posekit.labeler.store import LabelStore, RangeWrite
 
 CONFIDENT: float = 0.5
 """Proposal score at or above which a box counts as a confident detection."""
@@ -126,6 +133,37 @@ def effective_boxes(labels: list[ViewLabel], proposals: list[Proposal]) -> dict[
     return boxes
 
 
+def range_label(start: ViewLabel | None, end: ViewLabel | None, alpha: float, proposals: list[Proposal], reviewer: str) -> ViewLabel | None:
+    """The range decision for one (cam, side) at one time, or None when it needs a reviewer.
+
+    Args:
+        start: The view's label at the start keyframe.
+        end: The view's label at the end keyframe.
+        alpha: Position of the time between the two keyframes, in (0, 1).
+        proposals: Every proposal at this time.
+        reviewer: Reviewer name the range label carries.
+    """
+    if start is None or end is None:
+        return None
+    cam: int = start.cam
+    side: HandSide = start.side
+    same_side: list[Proposal] = [p for p in proposals if p.cam == cam and p.side == side]
+    if start.status == "no_hand" and end.status == "no_hand":
+        if any(p.score >= CONFIDENT for p in same_side):
+            return None
+        return ViewLabel(cam, side, "no_hand", None, "range", reviewer)
+    if start.box is None or end.box is None:
+        return None
+    expected: Box = lerp_box(start.box, end.box, alpha)
+    candidates: list[Proposal] = [p for p in same_side if p.model == "egohand"]
+    if not candidates:
+        return None
+    best: Proposal = max(candidates, key=lambda p: iou(p.box, expected))
+    if iou(best.box, expected) < RANGE_IOU:
+        return None
+    return ViewLabel(cam, side, "accepted", best.box, "range", reviewer)
+
+
 class ReviewQueue:
     """Review queue and range fill of one segment."""
 
@@ -147,8 +185,19 @@ class ReviewQueue:
         self.store: LabelStore = store
         self.proposals: ProposalProvider = proposals
         self._grid_index: dict[int, int] = {t: i for i, t in enumerate(self.times_ns)}
-        self._gaps: set[int] = set()
+        self._gaps: set[int] = self._stored_gaps()
         self._lock = threading.Lock()
+
+    def _stored_gaps(self) -> set[int]:
+        """Open range gaps implied by the stored labels; see the module docstring."""
+        gaps: set[int] = set()
+        keyframes: set[int] = set(self.keyframes_ns)
+        reviewed: list[int] = [t for t in self.keyframes_ns if is_reviewed(self.store, t, self.cams)]
+        for t0, t1 in pairwise(reviewed):
+            inside: list[int] = [t for t in self.times_ns if t0 < t < t1 and t not in keyframes]
+            if any(label.source == "range" for t in inside for label in self.store.get(t)):
+                gaps.update(t for t in inside if not is_reviewed(self.store, t, self.cams))
+        return gaps
 
     def on_grid(self, t_ns: int) -> bool:
         """``t_ns`` is a time of the 5 fps grid."""
@@ -199,53 +248,27 @@ class ReviewQueue:
             raise ValueError("t0_ns and t1_ns must both be keyframes of the segment")
         if request.t0_ns >= request.t1_ns:
             raise ValueError("t0_ns must be before t1_ns")
-        for end in (request.t0_ns, request.t1_ns):
-            if not is_reviewed(self.store, end, self.cams):
-                raise ValueError(f"keyframe {end} is not fully reviewed")
+        for t_end in (request.t0_ns, request.t1_ns):
+            if not is_reviewed(self.store, t_end, self.cams):
+                raise ValueError(f"keyframe {t_end} is not fully reviewed")
+        # One snapshot of each end for the whole fill; a correction posted meanwhile applies to the next fill.
+        start_labels: dict[tuple[int, HandSide], ViewLabel] = {(label.cam, label.side): label for label in self.store.get(request.t0_ns)}
+        end_labels: dict[tuple[int, HandSide], ViewLabel] = {(label.cam, label.side): label for label in self.store.get(request.t1_ns)}
         filled: int = 0
         queued: list[int] = []
         span: float = float(request.t1_ns - request.t0_ns)
         for t_ns in (t for t in self.times_ns if request.t0_ns < t < request.t1_ns):
             alpha: float = (t_ns - request.t0_ns) / span
             proposals: list[Proposal] = self.proposals.proposals(self.segment_id, t_ns)
-            new_labels: list[ViewLabel] = []
-            open_views: int = 0
-            for cam in self.cams:
-                for side in HAND_SIDES:
-                    existing: ViewLabel | None = self.store.get_view(t_ns, cam, side)
-                    if existing is not None and existing.source != "range":
-                        continue
-                    decided: ViewLabel | None = self._range_label(request, cam, side, alpha, proposals)
-                    if decided is None:
-                        open_views += 1
-                    else:
-                        new_labels.append(decided)
-            if new_labels:
-                filled += self.store.put(FrameLabels(self.segment_id, t_ns, new_labels))
-            if open_views:
+            decisions: dict[tuple[int, HandSide], ViewLabel | None] = {
+                (cam, side): range_label(start_labels.get((cam, side)), end_labels.get((cam, side)), alpha, proposals, request.reviewer)
+                for cam in self.cams
+                for side in HAND_SIDES
+            }
+            written: RangeWrite = self.store.put_range(t_ns, decisions)
+            filled += written.stored
+            if written.open_views:
                 queued.append(t_ns)
         with self._lock:
             self._gaps.update(queued)
         return RangeResult(filled, queued)
-
-    def _range_label(self, request: RangeRequest, cam: int, side: HandSide, alpha: float, proposals: list[Proposal]) -> ViewLabel | None:
-        """The range decision for one (cam, side) at one time, or None when it needs a reviewer."""
-        start: ViewLabel | None = self.store.get_view(request.t0_ns, cam, side)
-        end: ViewLabel | None = self.store.get_view(request.t1_ns, cam, side)
-        if start is None or end is None:
-            return None
-        same_side: list[Proposal] = [p for p in proposals if p.cam == cam and p.side == side]
-        if start.status == "no_hand" and end.status == "no_hand":
-            if any(p.score >= CONFIDENT for p in same_side):
-                return None
-            return ViewLabel(cam, side, "no_hand", None, "range", request.reviewer)
-        if start.box is None or end.box is None:
-            return None
-        expected: Box = lerp_box(start.box, end.box, alpha)
-        candidates: list[Proposal] = [p for p in same_side if p.model == "egohand"]
-        if not candidates:
-            return None
-        best: Proposal = max(candidates, key=lambda p: iou(p.box, expected))
-        if iou(best.box, expected) < RANGE_IOU:
-            return None
-        return ViewLabel(cam, side, "accepted", best.box, "range", request.reviewer)

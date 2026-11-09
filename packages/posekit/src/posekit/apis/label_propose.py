@@ -15,8 +15,9 @@ from rerun.catalog import CatalogClient, DatasetEntry
 
 from posekit.labeler.frames import GRID_PERIOD_NS, FrameSource
 from posekit.labeler.proposals import ProposalsByTime
-from posekit.labeler.propose import CameraTiming, base_application_id, detect_camera, detections_to_proposals, register_layer, write_proposal_layer
+from posekit.labeler.propose import CameraTiming, detect_camera, detections_to_proposals, register_layer, write_proposal_layer
 from posekit.labeler.schema import PROPOSAL_LAYER
+from posekit.labeler.store import base_application_id
 from posekit.models.egohand import EgoHandDetector, EgoHandDetectorConfig
 from posekit.runtimes import TensorRtBackendConfig
 

@@ -126,6 +126,23 @@ def test_frame_source_from_the_labeling_catalog() -> None:
     assert [cam.name for cam in source.cams] == ["left_front", "right_front", "left_eye", "right_eye", "left", "right"]
     duration_s = (source.times_ns[-1] - source.times_ns[0]) / 1e9
     assert abs(len(source.times_ns) - (5 * duration_s + 1)) <= 3
-    assert len(source.keyframes_ns) == (len(source.times_ns) + 4) // 5
+    assert len(source.keyframes_ns) == (len(source.times_ns) + 4) // 5 + (1 if (len(source.times_ns) - 1) % 5 else 0)
+    assert source.keyframes_ns[-1] == source.times_ns[-1]
     rgb = source.frame(2, source.keyframes_ns[3])
     assert rgb.shape == (1080, 1920, 3) and rgb.std() > 5
+
+
+def grid_only_camera(n_frames: int) -> CameraVideo:
+    """A camera with frame times only (no video): enough for the grid, never decoded."""
+    times = (np.arange(n_frames, dtype=np.int64) * FRAME_NS + 1_000_000_000).astype(np.int64)
+    return CameraVideo(CameraInfo(cam=0, name="cam0", width=64, height=48), times, b"")
+
+
+def test_the_last_grid_time_is_a_keyframe() -> None:
+    # 61 frames at 30 fps -> 11 grid times: keyframes 0, 5, 10 already end on the last one.
+    source = FrameSource("seg", [grid_only_camera(61)], reference_cam=0)
+    assert len(source.times_ns) == 11 and source.keyframes_ns == source.times_ns[::5]
+    # 73 frames -> 13 grid times: times 11 and 12 lie after keyframe 10, so the last time closes the run.
+    source = FrameSource("seg", [grid_only_camera(73)], reference_cam=0)
+    assert len(source.times_ns) == 13
+    assert source.keyframes_ns == [source.times_ns[i] for i in (0, 5, 10, 12)]

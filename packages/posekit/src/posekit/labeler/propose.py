@@ -18,13 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
 import rerun as rr
 import torch
 from jaxtyping import Bool, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
-from rerun.chunk import RrdReader
 from torch import Tensor
 
 from posekit.labeler.frames import TIMELINE, GridBatch
@@ -213,24 +211,6 @@ def write_proposal_layer(
         temp.replace(path)
     finally:
         temp.unlink(missing_ok=True)
-
-
-def base_application_id(dataset: DatasetEntry, segment_id: str) -> str:
-    """Application id of the segment's ``base`` layer, read from the rrd header the catalog points at.
-
-    Raises:
-        ValueError: If the segment has no file-backed base layer holding exactly one recording.
-    """
-    table: pa.Table = dataset.segment_table().to_arrow_table()
-    for row in table.select(["rerun_segment_id", "rerun_layer_names", "rerun_storage_urls"]).to_pylist():
-        if row["rerun_segment_id"] != segment_id:
-            continue
-        for layer, url in zip(row["rerun_layer_names"], row["rerun_storage_urls"], strict=True):
-            if layer == "base" and url.startswith("file://"):
-                recordings = RrdReader(Path(url.removeprefix("file://"))).recordings()
-                if len(recordings) == 1:
-                    return recordings[0].application_id
-    raise ValueError(f"{segment_id}: no file-backed base layer with one recording on {dataset.name}")
 
 
 def register_layer(dataset: DatasetEntry, path: Path) -> None:

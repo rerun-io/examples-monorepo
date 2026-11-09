@@ -39,6 +39,9 @@ const S = {
   discardArmed: false,
   reviewed: new Set(), // t_ns known to have a decision for every (cam, side)
   loadSeq: 0,
+  loading: false, // a frame set (or segment) is loading: S.t and S.views still show the previous one
+  saving: false, // a POST /api/labels is in flight
+  rev: 0, // edit revision, bumped by every edit; a save marks the frame saved only if it is unchanged
   drag: null,
 };
 
@@ -73,6 +76,20 @@ function fmtTime(tNs) {
 }
 
 const reviewer = () => $("reviewer").value.trim();
+
+// While a frame set loads, the views on screen belong to the previous time: no edits or saves until it is shown.
+function editBlocked() {
+  if (!S.loading) return false;
+  status("the next frame set is still loading: edits and saves wait until it is shown", "err");
+  return true;
+}
+
+// While a save is in flight the frame set stays put, so the answer is applied to the frame it was sent for.
+function navBlocked() {
+  if (!S.saving) return false;
+  status("saving …: wait for the save to finish before moving", "err");
+  return true;
+}
 const round1 = (v) => Math.round(v * 10) / 10;
 const isKeyframe = (t) => S.info?.keyframes_ns.includes(t);
 const chipClass = (reason) =>
@@ -131,14 +148,33 @@ function renderQueue() {
 }
 
 async function selectSegment(sid, t = null) {
-  if (!guardDirty()) {
-    $("segment").value = S.sid;
+  if (navBlocked() || !guardDirty()) {
+    $("segment").value = S.sid ?? "";
     return;
   }
+  const seq = ++S.loadSeq;
+  S.loading = true;
+  let info;
+  try {
+    info = await getJSON(`segment/${encodeURIComponent(sid)}`);
+  } catch (e) {
+    if (seq === S.loadSeq) {
+      S.loading = false;
+      $("segment").value = S.sid ?? "";
+      status(`${String(e.message ?? e)} · still on ${S.sid ?? "no segment"}`, "err");
+    }
+    return;
+  }
+  if (seq !== S.loadSeq) return; // a newer navigation won
+  // No frame set is shown for the new segment until goto succeeds: S.t = null keeps save() from posting.
   S.sid = sid;
+  S.info = info;
+  S.t = null;
+  S.loading = false; // nothing editable is on screen until goto publishes a frame set
+  S.dirty = false;
+  S.discardArmed = false;
   $("segment").value = sid;
   S.reviewed.clear();
-  S.info = await getJSON(`segment/${encodeURIComponent(sid)}`);
   const scrub = $("scrub");
   scrub.max = String(Math.max(0, S.info.times_ns.length - 1));
   renderProgress();
@@ -146,7 +182,6 @@ async function selectSegment(sid, t = null) {
   await loadQueue();
   viewerOpenSegment();
   const start = t ?? S.queue[0]?.t_ns ?? S.info.keyframes_ns[0] ?? S.info.times_ns[0];
-  S.dirty = false;
   if (start !== undefined) await goto(start, { force: true });
 }
 
@@ -188,21 +223,32 @@ function guardDirty() {
   return false;
 }
 
+// The new time and its views are published together, only once the frame set has loaded; until then the
+// previous frame set stays on screen, read-only (editBlocked). A failed load leaves the previous one in place.
 async function goto(t, { force = false } = {}) {
   if (!S.info) return;
+  if (navBlocked()) return;
   if (!force && t !== S.t && !guardDirty()) return;
   const seq = ++S.loadSeq;
-  S.t = t;
-  updateTimeUi();
-  renderQueue();
+  const sid = S.sid;
+  S.loading = true;
+  S.drag = null;
+  $("tlabel").textContent = `${fmtTime(t)} …`;
   let fs;
   try {
-    fs = await getJSON(`frameset/${encodeURIComponent(S.sid)}/${t}`);
+    fs = await getJSON(`frameset/${encodeURIComponent(sid)}/${t}`);
   } catch (e) {
-    status(String(e.message ?? e), "err");
+    if (seq !== S.loadSeq) return; // a newer goto owns the loading state
+    S.loading = false;
+    if (S.t !== null) updateTimeUi();
+    status(`${String(e.message ?? e)} · still on ${S.t === null ? "no frame set" : fmtTime(S.t)}`, "err");
     return;
   }
   if (seq !== S.loadSeq) return; // a newer goto won
+  S.loading = false;
+  S.t = t;
+  S.rev += 1;
+  updateTimeUi();
   S.flags = fs.flags;
   S.sel = null;
   S.dirty = false;
@@ -212,9 +258,9 @@ async function goto(t, { force = false } = {}) {
     const vs = fs.views.find((x) => x.cam === v.cam) ?? { proposals: [], labels: [] };
     initView(v, vs);
     if (vs.labels.length < SIDES.length) complete = false;
-    v.lo = loadImage(v, GRID_SIDE, seq, "lo");
+    v.lo = loadImage(v, GRID_SIDE, seq, "lo", t);
     v.hi = null;
-    if (S.focus === v.cam) v.hi = loadImage(v, FOCUS_SIDE, seq, "hi");
+    if (S.focus === v.cam) v.hi = loadImage(v, FOCUS_SIDE, seq, "hi", t);
   }
   S.confirmed = complete;
   if (complete) S.reviewed.add(t);
@@ -227,7 +273,7 @@ async function goto(t, { force = false } = {}) {
   status(`${S.sid} @ ${fmtTime(t)}${isKeyframe(t) ? " (keyframe)" : ""}${complete ? " · already reviewed" : ""}`);
 }
 
-function loadImage(v, maxSide, seq, which) {
+function loadImage(v, maxSide, seq, which, t) {
   const img = new Image();
   img.decoding = "async";
   img.onload = () => {
@@ -236,7 +282,7 @@ function loadImage(v, maxSide, seq, which) {
   img.onerror = () => {
     if (seq === S.loadSeq) status(`frame cam ${v.cam} failed to load`, "err");
   };
-  img.src = apiUrl(`frame/${encodeURIComponent(S.sid)}/${v.cam}/${S.t}.jpg?max_side=${maxSide}`);
+  img.src = apiUrl(`frame/${encodeURIComponent(S.sid)}/${v.cam}/${t}.jpg?max_side=${maxSide}`);
   return img;
 }
 
@@ -311,6 +357,7 @@ function renderStates() {
 function touch(v) {
   v.touched = true;
   S.dirty = true;
+  S.rev += 1;
   S.discardArmed = false;
   renderStates();
   draw(v);
@@ -463,6 +510,7 @@ function onPointerDown(v, ev) {
     setFocus(v.cam);
     return;
   }
+  if (editBlocked()) return;
   ev.preventDefault();
   v.canvas.setPointerCapture(ev.pointerId);
   const p = toNative(v, ev);
@@ -554,7 +602,7 @@ const fmtBox = (b) => `[${Math.round(b.x0)}, ${Math.round(b.y0)}, ${Math.round(b
 function setSide(side) {
   const v = S.views.find((x) => x.cam === S.focus);
   const b = S.sel;
-  if (!v || !b) return;
+  if (!v || !b || editBlocked()) return;
   if (b.side !== side) {
     const other = v.boxes.find((x) => x !== b && x.side === side);
     if (other) other.side = b.side;
@@ -566,7 +614,7 @@ function setSide(side) {
 
 function deleteSelected() {
   const v = S.views.find((x) => x.cam === S.focus);
-  if (!v || !S.sel) return;
+  if (!v || !S.sel || editBlocked()) return;
   v.boxes = v.boxes.filter((b) => b !== S.sel);
   status(`cam ${v.cam}: ${S.sel.side} removed (no_hand)`);
   S.sel = null;
@@ -580,15 +628,17 @@ function setFocus(cam) {
   root.className = cam === null ? "cams grid" : "cams focus";
   for (const v of S.views) {
     v.el.classList.toggle("focused", v.cam === cam);
-    if (v.cam === cam && !v.hi && S.t !== null) v.hi = loadImage(v, FOCUS_SIDE, S.loadSeq, "hi");
+    if (v.cam === cam && !v.hi && S.t !== null) v.hi = loadImage(v, FOCUS_SIDE, S.loadSeq, "hi", S.t);
   }
   requestAnimationFrame(() => S.views.forEach(draw));
 }
 
 // ---------------------------------------------------------------- actions
 function acceptAll() {
+  if (editBlocked()) return;
   S.confirmed = true;
   S.dirty = true;
+  S.rev += 1;
   S.discardArmed = false;
   let boxes = 0;
   for (const v of S.views) boxes += v.rejected ? 0 : v.boxes.length;
@@ -598,6 +648,7 @@ function acceptAll() {
 }
 
 function rejectFocused() {
+  if (editBlocked()) return;
   const v = S.views.find((x) => x.cam === S.focus);
   if (!v) {
     status("X rejects the focused camera: focus one first (click it or press 1-6)", "err");
@@ -609,30 +660,46 @@ function rejectFocused() {
   status(`cam ${v.cam} ${v.rejected ? "rejected" : "un-rejected"}`);
 }
 
+// Returns true when the frame set on screen is saved as it is now. Edits made while the request was in flight
+// stay unsaved (dirty) and the answer only marks the frame set it was sent for.
 async function save() {
-  if (!S.sid || S.t === null) return false;
+  if (!S.sid || S.t === null || editBlocked()) return false;
+  if (S.saving) {
+    status("a save is already in flight: press Enter again once it is done", "err");
+    return false;
+  }
   if (!reviewer()) {
     status("Enter your name in the reviewer box first", "err");
     $("reviewer").focus();
     return false;
   }
   const body = frameLabels();
+  const sent = { sid: S.sid, t: S.t, rev: S.rev };
+  let res;
+  S.saving = true;
   try {
-    const res = await postJSON("labels", body);
-    S.dirty = false;
-    S.discardArmed = false;
-    S.confirmed = true;
-    S.reviewed.add(S.t);
-    for (const v of S.views) for (const b of v.boxes) b.stored = true;
-    renderStates();
-    S.views.forEach(draw);
-    status(`saved ${fmtTime(S.t)}: stored ${res.stored ?? body.labels.length}`, "ok");
-    await Promise.all([loadQueue(), loadSegments()]).catch((e) => status(String(e.message ?? e), "err"));
-    return true;
+    res = await postJSON("labels", body);
   } catch (e) {
     status(String(e.message ?? e), "err");
     return false;
+  } finally {
+    S.saving = false;
   }
+  if (S.sid === sent.sid) S.reviewed.add(sent.t); // the server now holds a decision for every (cam, side)
+  const current = S.sid === sent.sid && S.t === sent.t && S.rev === sent.rev;
+  if (current) {
+    S.dirty = false;
+    S.discardArmed = false;
+    S.confirmed = true;
+    for (const v of S.views) for (const b of v.boxes) b.stored = true;
+    renderStates();
+    S.views.forEach(draw);
+    status(`saved ${fmtTime(sent.t)}: stored ${res.stored ?? body.labels.length}`, "ok");
+  } else {
+    status(`saved ${fmtTime(sent.t)} as sent; edits made since are not saved yet: Enter saves them`, "err");
+  }
+  await Promise.all([loadQueue(), loadSegments()]).catch((e) => status(String(e.message ?? e), "err"));
+  return current;
 }
 
 async function nextQueue() {
@@ -657,7 +724,7 @@ async function isReviewed(t) {
 }
 
 async function rangeFill() {
-  if (!S.info || S.t === null) return;
+  if (!S.info || S.t === null || editBlocked()) return;
   if (!isKeyframe(S.t)) {
     status("Range fill runs between reviewed keyframes: go to a keyframe first", "err");
     return;
@@ -961,7 +1028,7 @@ async function init() {
   // The labeler keys win everywhere except in text fields (egui's own text input is an <input> too).
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("beforeunload", (e) => {
-    if (S.dirty) e.preventDefault();
+    if (S.dirty || S.saving) e.preventDefault();
   });
   applyViewerPane();
 

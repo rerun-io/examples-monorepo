@@ -18,7 +18,8 @@ Bad input answers 400 with ``{"error": message}``; an unknown segment, camera or
 
 Segments open lazily (frames + labels from the catalog) on first use. Decoded frames sit in a small cache;
 after a queue request a background worker decodes the first queue items, so the next frame sets are warm.
-Every ``autosave_every`` new labels the store is written to its autosave file (never registered).
+Every ``autosave_every`` new labels the store is written to its autosave file (never registered). ``close``
+refuses new writes (503), waits for the writes in flight and autosaves every store with unsaved labels.
 """
 
 from __future__ import annotations
@@ -29,8 +30,9 @@ import threading
 import traceback
 from _thread import LockType
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -79,7 +81,7 @@ class FrameProvider(Protocol):
 
     @property
     def keyframes_ns(self) -> list[int]:
-        """The 1 fps keyframes, a subset of ``times_ns``."""
+        """The 1 fps keyframes plus the last grid time, a subset of ``times_ns``."""
         ...
 
     def frame(self, cam: int, t_ns: int) -> UInt8[ndarray, "h w 3"]:
@@ -110,6 +112,10 @@ class LayerBackend(Protocol):
 
 class NotFoundError(LookupError):
     """An unknown segment, camera, time or file; answered with 404."""
+
+
+class ShuttingDownError(RuntimeError):
+    """A write that arrived after ``LabelApp.close`` started; answered with 503."""
 
 
 @serde(deny_unknown_fields=True)
@@ -226,11 +232,38 @@ class LabelApp:
         self._frames_lock = threading.Lock()
         self._prefetcher: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="labeler-prefetch")
         self._writer: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="labeler-autosave")
+        self._closing: bool = False
+        self._writes_in_flight: int = 0
+        self._writes_changed = threading.Condition()
 
     def close(self) -> None:
-        """Stop the background workers (pending autosaves still run)."""
+        """Refuse new writes, wait for those in flight, autosave every store with unsaved labels, stop the workers."""
+        with self._writes_changed:
+            if self._closing:
+                return
+            self._closing = True
+            self._writes_changed.wait_for(lambda: self._writes_in_flight == 0)
         self._prefetcher.shutdown(wait=False, cancel_futures=True)
+        dirty: list[Segment] = [segment for segment in list(self._segments.values()) if segment.store.unsaved]
+        print(f"[labeler] shutting down: saving {len(dirty)} segment(s) with unsaved labels")
+        saves: list[Future[None]] = [self._writer.submit(self._autosave, segment) for segment in dirty]
         self._writer.shutdown(wait=True)
+        for save in saves:
+            save.result()
+
+    @contextmanager
+    def _write(self) -> Iterator[None]:
+        """Run one label write; refused once ``close`` has started, and ``close`` waits for it to finish."""
+        with self._writes_changed:
+            if self._closing:
+                raise ShuttingDownError("the labeler is shutting down; nothing was stored")
+            self._writes_in_flight += 1
+        try:
+            yield
+        finally:
+            with self._writes_changed:
+                self._writes_in_flight -= 1
+                self._writes_changed.notify_all()
 
     # -- segments -------------------------------------------------------------------------------------------
 
@@ -392,8 +425,9 @@ class LabelApp:
         self._grid_time(segment, frame.t_ns)
         for label in frame.labels:
             self._camera(segment, label.cam)
-        stored: int = segment.store.put(frame)
-        self._maybe_autosave(segment)
+        with self._write():
+            stored: int = segment.store.put(frame)
+            self._maybe_autosave(segment)
         return stored
 
     def _maybe_autosave(self, segment: Segment) -> None:
@@ -415,8 +449,9 @@ class LabelApp:
     def fill_range(self, request: RangeRequest) -> RangeResult:
         """Range fill between two reviewed keyframes."""
         segment: Segment = self.segment(request.segment_id)
-        result: RangeResult = segment.queue.fill_range(request)
-        self._maybe_autosave(segment)
+        with self._write():
+            result: RangeResult = segment.queue.fill_range(request)
+            self._maybe_autosave(segment)
         return result
 
     def queue(self, segment_id: str, limit: int) -> list[QueueItem]:
@@ -430,7 +465,7 @@ class LabelApp:
     def commit(self, segment_id: str) -> CommitResponse:
         """Write the ``hand_boxes`` layer file and register it on the catalog (REPLACE)."""
         segment: Segment = self.segment(segment_id)
-        with segment.save_lock:
+        with self._write(), segment.save_lock:
             path: Path = self.layers.layer_path(segment_id)
             count: int = segment.store.save_layer(path)
             self.layers.register(path)
@@ -486,6 +521,8 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
                     self._post()
             except NotFoundError as error:
                 self._error(404, str(error))
+            except ShuttingDownError as error:
+                self._error(503, str(error))
             except BeartypeException as error:
                 self._error(500, f"type violation: {error}")
                 raise

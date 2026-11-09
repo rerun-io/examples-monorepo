@@ -238,6 +238,20 @@ def test_labels_queue_range_commit(running: Running) -> None:
     assert fetch(running.url + "/api/commit/zzz", "")[0] == 404
 
 
+def test_close_saves_labels_below_the_autosave_threshold(running: Running) -> None:
+    labels: list[ViewLabel] = [ViewLabel(0, side, "no_hand", None, "person", "tester") for side in ("left", "right")]
+    assert fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", 1_000, labels)))[0] == 200
+    store: LabelStore = running.app.segment("seg_a").store
+    assert store.unsaved == 2  # below autosave_every=3: no autosave yet
+    running.app.close()
+    assert running.layers.autosave_path("seg_a").exists()
+    assert store.unsaved == 0
+    # After close, writes are refused instead of being acknowledged and lost.
+    status, _, body = fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", 1_000 + STEP, labels)))
+    assert status == 503 and "shutting down" in json.loads(body)["error"]
+    assert store.get(1_000 + STEP) == []
+
+
 @pytest.mark.integration
 def test_committed_file_reads_back(running: Running) -> None:
     labels: list[ViewLabel] = [ViewLabel(0, "left", "accepted", Box(10.0, 10.0, 60.0, 60.0), "egohand", "tester")]

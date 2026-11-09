@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from pathlib import Path
 
 import pyarrow as pa
@@ -12,7 +13,7 @@ from rerun.chunk import RrdReader, StoreEntry
 
 from posekit.labeler.paths import label_path
 from posekit.labeler.schema import Box, FrameLabels, ViewLabel
-from posekit.labeler.store import LAYER_DIR, LabelRow, LabelStore, base_application_id, load_layer, load_layer_file, rows_from_table
+from posekit.labeler.store import LabelRow, LabelStore, base_application_id, load_layer, load_layer_file, rows_from_table
 
 SEGMENT: str = "robocap__test__s00000001"
 
@@ -137,61 +138,50 @@ def test_layer_file_round_trip(tmp_path: Path) -> None:
 
 
 REAL_CATALOG: str = "rerun+http://127.0.0.1:9897"
-REAL_DATASET: str = "robocap-labeling"
-REAL_SEGMENT: str = "robocap__fe6fede545c972fa__s00000013"
+BASE_RRD: Path = Path("/home/pablo/dataforge-dev/rrd/base/robocap__f408193e6447b3b0__s00000044.rrd")
+"""Base layer of one small real segment; its recording id is the segment id."""
+REAL_SEGMENT: str = "robocap__f408193e6447b3b0__s00000044"
 
 
 @pytest.mark.integration
-def test_real_catalog_register_and_read_back() -> None:
-    """Register a tiny hand_boxes layer for one real segment on :9897 with REPLACE, read it back, then restore.
+def test_real_catalog_register_and_read_back(tmp_path: Path) -> None:
+    """Register a tiny hand_boxes layer on :9897 with REPLACE and read it back, in a throwaway dataset.
 
-    Restoring puts back exactly what was there: the earlier hand_boxes file if the segment had one, otherwise
-    the test's layer is unregistered for this segment only. Nothing else is touched.
+    The test creates its own dataset (``robocap-labeling-test-<uuid>``) holding one real base layer, writes its
+    layer under ``tmp_path`` and deletes the whole dataset at the end. It never touches ``robocap-labeling``.
     """
+    if not BASE_RRD.is_file():
+        pytest.skip(f"base layer {BASE_RRD} is not on this host")
     try:
         client: CatalogClient = CatalogClient(REAL_CATALOG)
-        dataset: DatasetEntry = client.get_dataset(REAL_DATASET)
     except (ConnectionError, OSError, ValueError, LookupError) as error:
-        pytest.skip(f"catalog {REAL_CATALOG} dataset {REAL_DATASET} unavailable: {error}")
-    table: pa.Table = dataset.segment_table().to_arrow_table()
-    segment_ids: list[str] = table.column("rerun_segment_id").to_pylist()
-    if REAL_SEGMENT not in segment_ids:
-        pytest.skip(f"segment {REAL_SEGMENT} not on {REAL_DATASET}")
-    index: int = segment_ids.index(REAL_SEGMENT)
-    layers: list[str] = table.column("rerun_layer_names").to_pylist()[index]
-    urls: list[str] = table.column("rerun_storage_urls").to_pylist()[index]
-    start_ns: int = table.column("video_time:start").cast(pa.int64()).to_pylist()[index]
-    previous: str | None = urls[layers.index("hand_boxes")] if "hand_boxes" in layers else None
-
-    application_id: str = base_application_id(dataset, REAL_SEGMENT)
-    assert application_id == "dataforge"
-    store: LabelStore = LabelStore(REAL_SEGMENT, split="eval", application_id=application_id)
-    t_ns: int = start_ns + 1_000_000_000
-    store.put(
-        FrameLabels(
-            REAL_SEGMENT,
-            t_ns,
-            [
-                ViewLabel(0, "left", "accepted", Box(100.0, 200.0, 300.0, 400.0), "egohand", "integration-test"),
-                ViewLabel(1, "right", "no_hand", None, "person", "integration-test"),
-            ],
-        )
-    )
-    target: Path = LAYER_DIR / "_integration" / f"{REAL_SEGMENT}.rrd"
-    store.save_layer(target)
+        pytest.skip(f"catalog {REAL_CATALOG} unavailable: {error}")
+    dataset: DatasetEntry = client.create_dataset(f"robocap-labeling-test-{uuid.uuid4()}")
     try:
+        dataset.register([BASE_RRD.resolve().as_uri()], layer_name="base").wait()
+        table: pa.Table = dataset.segment_table().to_arrow_table()
+        assert table.column("rerun_segment_id").to_pylist() == [REAL_SEGMENT]
+        start_ns: int = table.column("video_time:start").cast(pa.int64()).to_pylist()[0]
+
+        application_id: str = base_application_id(dataset, REAL_SEGMENT)
+        assert application_id == "dataforge"
+        store: LabelStore = LabelStore(REAL_SEGMENT, split="eval", application_id=application_id)
+        t_ns: int = start_ns + 1_000_000_000
+        store.put(
+            FrameLabels(
+                REAL_SEGMENT,
+                t_ns,
+                [
+                    ViewLabel(0, "left", "accepted", Box(100.0, 200.0, 300.0, 400.0), "egohand", "integration-test"),
+                    ViewLabel(1, "right", "no_hand", None, "person", "integration-test"),
+                ],
+            )
+        )
+        target: Path = tmp_path / "hand_boxes" / f"{REAL_SEGMENT}.rrd"
+        store.save_layer(target)
         dataset.register([target.resolve().as_uri()], layer_name="hand_boxes", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
         assert load_layer(dataset, REAL_SEGMENT) == store.rows()
         properties: pa.Table = dataset.segment_table().to_arrow_table()
-        split_by_segment: dict[str, list[str] | None] = dict(
-            zip(properties.column("rerun_segment_id").to_pylist(), properties.column("property:hand_boxes:split").to_pylist(), strict=True)
-        )
-        assert split_by_segment[REAL_SEGMENT] == ["eval"]
+        assert properties.column("property:hand_boxes:split").to_pylist() == [["eval"]]
     finally:
-        if previous is not None:
-            dataset.register([previous], layer_name="hand_boxes", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
-        else:
-            dataset.unregister(segments_to_drop=[REAL_SEGMENT], layers_to_drop=["hand_boxes"]).wait()
-        target.unlink(missing_ok=True)
-        if not any(target.parent.iterdir()):
-            target.parent.rmdir()
+        dataset.delete()

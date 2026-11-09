@@ -6,7 +6,7 @@ import pytest
 
 from posekit.labeler.queue import ReviewQueue, effective_boxes, frame_flags, iou, lerp_box
 from posekit.labeler.schema import Box, FrameLabels, HandSide, Proposal, QueueItem, RangeRequest, RangeResult, ViewLabel
-from posekit.labeler.store import LabelStore
+from posekit.labeler.store import LabelStore, RangeWrite
 
 SEGMENT: str = "seg"
 STEP: int = 200_000_000
@@ -161,3 +161,87 @@ def test_queue_items_carry_flags() -> None:
     queue, _, proposals = make_queue()
     proposals.by_time[0] = [Proposal(0, "left", box_at(0.0), 0.35, "egohand")]
     assert queue.items(1) == [QueueItem(SEGMENT, 0, ["keyframe", "low_score"])]
+
+
+def test_refill_removes_range_labels_it_can_no_longer_decide() -> None:
+    queue, store, proposals = make_queue()
+    review(store, 0, box_at(0.0), None)
+    review(store, 5 * STEP, box_at(100.0), None)
+    for step in range(1, 5):
+        proposals.by_time[step * STEP] = [Proposal(0, "left", box_at(step * 20.0), 0.9, "egohand")]
+    assert queue.fill_range(RangeRequest(SEGMENT, 0, 5 * STEP, "astra")).queued == []
+    # The reviewer moves the end box far away: the middle proposals no longer follow the interpolated path.
+    review(store, 5 * STEP, box_at(1000.0), None)
+    result: RangeResult = queue.fill_range(RangeRequest(SEGMENT, 0, 5 * STEP, "astra"))
+    assert result.queued == [1 * STEP, 2 * STEP, 3 * STEP, 4 * STEP]
+    assert store.get_view(2 * STEP, 0, "left") is None  # the stale accepted box is gone
+    assert store.get_view(2 * STEP, 0, "right") == ViewLabel(0, "right", "no_hand", None, "range", "astra")
+    assert [item.t_ns for item in queue.items(50)] == [10 * STEP, 1 * STEP, 2 * STEP, 3 * STEP, 4 * STEP]
+
+
+class RacingStore(LabelStore):
+    """A store where a reviewer's post lands while a range fill runs: on the second read of the start keyframe.
+
+    The first read is the fill's check that the ends are reviewed; the post lands after it, before any write.
+    """
+
+    def __init__(self, post: FrameLabels) -> None:
+        super().__init__(SEGMENT, split="train", application_id="test")
+        self.post: FrameLabels | None = post
+        self.start_reads: int = 0
+
+    def _race(self, t_ns: int) -> None:
+        if t_ns != 0 or self.post is None:
+            return
+        self.start_reads += 1
+        if self.start_reads == 2:
+            post: FrameLabels = self.post
+            self.post = None
+            self.put(post)
+
+    def get(self, t_ns: int) -> list[ViewLabel]:
+        self._race(t_ns)
+        return super().get(t_ns)
+
+    def get_view(self, t_ns: int, cam: int, side: HandSide) -> ViewLabel | None:
+        self._race(t_ns)
+        return super().get_view(t_ns, cam, side)
+
+
+def test_fill_never_overwrites_a_label_posted_during_the_fill() -> None:
+    correction: ViewLabel = ViewLabel(0, "left", "corrected", box_at(7.0), "person", "pablo")
+    store: RacingStore = RacingStore(FrameLabels(SEGMENT, 1 * STEP, [correction]))
+    review(store, 0, None, None)
+    review(store, 5 * STEP, None, None)
+    queue: ReviewQueue = ReviewQueue(SEGMENT, times_ns=TIMES, keyframes_ns=KEYFRAMES, cams=CAMS, store=store, proposals=FakeProposals())
+    store.start_reads = 0  # count the fill's reads only
+    queue.fill_range(RangeRequest(SEGMENT, 0, 5 * STEP, "astra"))
+    assert store.post is None
+    assert store.get_view(1 * STEP, 0, "left") == correction
+
+
+def test_range_write_keeps_reviewed_labels_and_drops_undecided_range_labels() -> None:
+    _, store, _ = make_queue()
+    reviewed: ViewLabel = ViewLabel(0, "left", "corrected", box_at(5.0), "person", "pablo")
+    store.put(FrameLabels(SEGMENT, STEP, [reviewed, ViewLabel(1, "left", "no_hand", None, "range", "astra")]))
+    decisions: dict[tuple[int, HandSide], ViewLabel | None] = {
+        (0, "left"): ViewLabel(0, "left", "accepted", box_at(0.0), "range", "astra"),
+        (0, "right"): ViewLabel(0, "right", "no_hand", None, "range", "astra"),
+        (1, "left"): None,
+        (1, "right"): None,
+    }
+    assert store.put_range(STEP, decisions) == RangeWrite(stored=1, open_views=2)
+    assert store.get(STEP) == [reviewed, ViewLabel(0, "right", "no_hand", None, "range", "astra")]
+
+
+def test_restart_keeps_open_range_gaps() -> None:
+    queue, store, proposals = make_queue()
+    review(store, 0, box_at(0.0), None)
+    review(store, 5 * STEP, box_at(100.0), None)
+    proposals.by_time[1 * STEP] = [Proposal(0, "left", box_at(800.0), 0.9, "egohand")]  # far from the path
+    proposals.by_time[3 * STEP] = [Proposal(0, "left", box_at(60.0), 0.9, "egohand")]
+    assert queue.fill_range(RangeRequest(SEGMENT, 0, 5 * STEP, "astra")).queued == [1 * STEP, 2 * STEP, 4 * STEP]
+    review(store, 10 * STEP, None, None)  # reviewed, but no fill ran towards it: nothing to reconstruct there
+    restarted: ReviewQueue = ReviewQueue(SEGMENT, times_ns=TIMES, keyframes_ns=KEYFRAMES, cams=CAMS, store=store, proposals=proposals)
+    items: list[QueueItem] = restarted.items(50)
+    assert [(item.t_ns, item.reasons[0]) for item in items] == [(1 * STEP, "range_gap"), (2 * STEP, "range_gap"), (4 * STEP, "range_gap")]
