@@ -27,7 +27,7 @@ from posekit.models.base import (
 )
 from posekit.models.clip_identity import ClipIdentityConfig
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, catalog_egohand_configs, fast_egohand_configs
 from posekit.models.rtdetr import RtDetrDetectorConfig
 from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
@@ -77,6 +77,8 @@ __all__ = (
     "WilorHandDetectorConfig",
     "WilorHandPoseConfig",
     "YoloxDetectorConfig",
+    "catalog_egohand_configs",
+    "fast_egohand_configs",
 )
 
 if TYPE_CHECKING:
@@ -94,11 +96,15 @@ else:
     )
 
     _fast_hand_detector, _fast_hand_pose = fast_egohand_configs()
+    _catalog_detector, _catalog_pose = catalog_egohand_configs()
+    _ampere_detector, _ampere_pose = catalog_egohand_configs(backbone_precision="bf16")
     HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector}, prefix_names=False
+        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector,
+         "egohand-catalog": _catalog_detector, "egohand-catalog-bf16": _ampere_detector}, prefix_names=False
     )
     HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose}, prefix_names=False
+        {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose,
+         "egohand-catalog": _catalog_pose, "egohand-catalog-bf16": _ampere_pose}, prefix_names=False
     )
     BodyPose3dConfig = tyro.extras.subcommand_type_from_defaults(
         {

@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
+pytest.importorskip("skimage", reason="WiLoR reference blur requires the posekit-hands environment")
 pytest.importorskip("trtkit", reason="posekit.models.wilor needs the posekit-hands Pixi environment (posekit-wilor feature)")
 
 from jaxtyping import UInt8

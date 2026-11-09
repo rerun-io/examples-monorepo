@@ -22,29 +22,30 @@ class DoubleSphereCamera:
         self.xi: float = float(camera.distortion[0])
         self.alpha: float = float(camera.distortion[1])
 
-    def project(self, rays: Float64[ndarray, "... 3"]) -> Float64[ndarray, "... 2"]:
+    def project(self, rays: Float64[ndarray, "*batch 3"]) -> Float64[ndarray, "*batch 2"]:
         """Project rays into source pixels, with NaN outside the physical domain."""
-        x, y, z = np.moveaxis(rays, -1, 0)
-        d1: Float64[ndarray, "..."] | np.float64 = np.linalg.norm(rays, axis=-1)
-        zz: Float64[ndarray, "..."] | np.float64 = self.xi * d1 + z
-        d2: Float64[ndarray, "..."] | np.float64 = np.sqrt(x * x + y * y + zz * zz)
+        points: Float64[ndarray, "n 3"] = rays.reshape(-1, 3)
+        x, y, z = points.T
+        d1: Float64[ndarray, "n"] = np.linalg.norm(points, axis=-1)
+        zz: Float64[ndarray, "n"] = self.xi * d1 + z
+        d2: Float64[ndarray, "n"] = np.sqrt(x * x + y * y + zz * zz)
         a: float = self.alpha
-        denominator: Float64[ndarray, "..."] | np.float64 = a * d2 + (1.0 - a) * zz
+        denominator: Float64[ndarray, "n"] = a * d2 + (1.0 - a) * zz
         w1: float = a / (1.0 - a) if a <= 0.5 else (1.0 - a) / a
         w2: float = (w1 + self.xi) / np.sqrt(2.0 * w1 * self.xi + self.xi * self.xi + 1.0)
         with np.errstate(divide="ignore", invalid="ignore"):
-            pixels: Float64[ndarray, "... 2"] = rays[..., :2] / denominator[..., None] * np.diag(self.K)[:2] + self.K[:2, 2]
-        valid: Bool[ndarray, "..."] | np.bool_ = np.isfinite(d1) & (z > -w2 * d1) & (denominator > 0.0)
-        return np.where(valid[..., None], pixels, np.nan)
+            pixels: Float64[ndarray, "n 2"] = points[:, :2] / denominator[:, None] * np.diag(self.K)[:2] + self.K[:2, 2]
+        valid: Bool[ndarray, "n"] = np.isfinite(d1) & (z > -w2 * d1) & (denominator > 0.0)
+        return np.where(valid[:, None], pixels, np.nan).reshape(*rays.shape[:-1], 2)
 
-    def unproject(self, pixels: Float64[ndarray, "... 2"]) -> Float64[ndarray, "... 3"]:
+    def unproject(self, pixels: Float64[ndarray, "*batch 2"]) -> Float64[ndarray, "*batch 3"]:
         """Invert source pixels into unit forward rays, with NaN outside the domain."""
-        xy: Float64[ndarray, "... 2"] = (pixels - self.K[:2, 2]) / np.diag(self.K)[:2]
-        r2: Float64[ndarray, "..."] | np.float64 = np.sum(xy * xy, axis=-1)
+        xy: Float64[ndarray, "n 2"] = (pixels.reshape(-1, 2) - self.K[:2, 2]) / np.diag(self.K)[:2]
+        r2: Float64[ndarray, "n"] = np.sum(xy * xy, axis=-1)
         a, xi = self.alpha, self.xi
         with np.errstate(divide="ignore", invalid="ignore"):
-            mz: Float64[ndarray, "..."] | np.float64 = (1.0 - a * a * r2) / (a * np.sqrt(1.0 - (2.0 * a - 1.0) * r2) + 1.0 - a)
-            k: Float64[ndarray, "..."] | np.float64 = (mz * xi + np.sqrt(mz * mz + (1.0 - xi * xi) * r2)) / (mz * mz + r2)
-            rays: Float64[ndarray, "... 3"] = np.concatenate([k[..., None] * xy, (k * mz - xi)[..., None]], axis=-1)
+            mz: Float64[ndarray, "n"] = (1.0 - a * a * r2) / (a * np.sqrt(1.0 - (2.0 * a - 1.0) * r2) + 1.0 - a)
+            k: Float64[ndarray, "n"] = (mz * xi + np.sqrt(mz * mz + (1.0 - xi * xi) * r2)) / (mz * mz + r2)
+            rays: Float64[ndarray, "n 3"] = np.concatenate([k[:, None] * xy, (k * mz - xi)[:, None]], axis=-1)
             rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
-        return np.where((np.isfinite(rays).all(-1) & (rays[..., 2] > 0.0))[..., None], rays, np.nan)
+        return np.where((np.isfinite(rays).all(-1) & (rays[:, 2] > 0.0))[:, None], rays, np.nan).reshape(*pixels.shape[:-1], 3)

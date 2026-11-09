@@ -30,22 +30,24 @@ class DinoActivationRanges(Protocol):
     def attention_amax(self) -> dict[str, float]: ...
 
 
-def backbone_qdq_plan(calibration: DinoActivationRanges, *, fp8_tail_blocks: int = 0) -> QdqPlan:
-    """NVFP4 linears, with the last ``fp8_tail_blocks`` blocks in FP8, and FP8 attention inputs.
+def backbone_qdq_plan(calibration: DinoActivationRanges, *, fp8_tail_blocks: int = 0, fp8_prefix_blocks: int = 0) -> QdqPlan:
+    """NVFP4 linears, optional FP8 early/final blocks, and FP8 attention inputs.
 
     Per-output-channel FP8 weight scales in the tail retain accuracy near the
     final representation consumed by the metric camera and shape heads.
     """
     validate_fp8_tail_blocks(fp8_tail_blocks)
+    if not 0 <= fp8_prefix_blocks <= DINO_BLOCKS:
+        raise ValueError(f"fp8_prefix_blocks must be between 0 and {DINO_BLOCKS}.")
     modules: dict[str, ModulePrecision] = {}
     for module, amax in calibration.input_amax.items():
         block: int = int(module.split(".")[2])
         input_amax: float = amax * LINEAR_INPUT_HEADROOM
-        modules[module] = Fp8Linear(input_amax) if block >= DINO_BLOCKS - fp8_tail_blocks else Nvfp4Linear(input_amax)
+        modules[module] = Fp8Linear(input_amax) if block < fp8_prefix_blocks or block >= DINO_BLOCKS - fp8_tail_blocks else Nvfp4Linear(input_amax)
     return QdqPlan(modules, fp8_attention_plan("encoder.blocks", DINO_BLOCKS, calibration.attention_amax), weight_device="cuda")
 
 
-def quantize_backbone(input_path: Path, output_path: Path, calibration: DinoActivationRanges, *, fp8_tail_blocks: int = 0) -> None:
+def quantize_backbone(input_path: Path, output_path: Path, calibration: DinoActivationRanges, *, fp8_tail_blocks: int = 0, fp8_prefix_blocks: int = 0) -> None:
     """Quantize the released 160 linears and 32 native attention blocks."""
-    plan: QdqPlan = backbone_qdq_plan(calibration, fp8_tail_blocks=fp8_tail_blocks)
+    plan: QdqPlan = backbone_qdq_plan(calibration, fp8_tail_blocks=fp8_tail_blocks, fp8_prefix_blocks=fp8_prefix_blocks)
     save_with_external_data(quantize_qdq(onnx.load(str(input_path)), plan), output_path)

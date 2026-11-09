@@ -139,6 +139,12 @@ class EgoHandDetectorConfig:
     gpu_preprocessing: bool = False
     """Resize decoded CUDA frames in place of the reference PIL host round trip."""
 
+    fp8_calibration: Path | None = None
+    """Disjoint detector activation ranges; enables FP8 convolutions with an FP32 decoding tail."""
+
+    fp8_scope: Literal["all", "backbone", "late_backbone", "projections"] = "all"
+    """Quantize all, residual backbone, final residual stage, or three encoder feature projections."""
+
     def weights_path(self) -> Path:
         """The ONNX file: ``weights``, or the pinned download in the Hugging Face cache."""
         if self.weights is not None:
@@ -156,7 +162,15 @@ class EgoHandDetector(HandDetector):
     def __init__(self, config: EgoHandDetectorConfig) -> None:
         self.config: EgoHandDetectorConfig = config
         weights: Path = config.weights_path()
-        if config.fp16_trunk:
+        if config.fp8_calibration is not None:
+            from posekit.models.egohand_detector_quantization import quantized_detector_path
+
+            if not isinstance(config.backend, TensorRtBackendConfig):
+                raise ValueError("The FP8 detector requires a TensorRT backend.")
+            if torch.cuda.get_device_capability()[0] < 9:
+                raise ValueError("The FP8 detector requires an FP8-capable CUDA GPU.")
+            weights = quantized_detector_path(weights, config.fp8_calibration, config.backend.cache_dir, scope=config.fp8_scope)
+        elif config.fp16_trunk:
             from trtkit.onnx_precision import fp16_trunk
 
             if not isinstance(config.backend, TensorRtBackendConfig):

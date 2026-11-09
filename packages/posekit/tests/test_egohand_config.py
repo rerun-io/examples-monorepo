@@ -15,8 +15,8 @@ from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
 
 
 def test_fast_role_subcommands_select_the_calibrated_config() -> None:
-    detector = tyro.cli(HandDetectorConfig, args=["egohand-fast", "tensorrt"])
-    pose = tyro.cli(HandPose3dConfig, args=["egohand-fast"])
+    detector: object = tyro.cli(HandDetectorConfig, args=["egohand-fast", "tensorrt"])
+    pose: object = tyro.cli(HandPose3dConfig, args=["egohand-fast"])
     assert isinstance(detector, EgoHandDetectorConfig)
     assert isinstance(detector.backend, TensorRtBackendConfig)
     assert detector.gpu_preprocessing and detector.fp16_trunk
@@ -45,6 +45,23 @@ def test_fast_role_quantizes_the_asset_tree_bf16_backbone(tmp_path: Path, monkey
     monkeypatch.setattr(egohand_fast, "export_backbone_once", export_missing)
     monkeypatch.setattr(egohand_fast, "quantize_backbone", quantize)
     _, config = fast_egohand_configs(tmp_path)
-    quantized = egohand_fast.export_quantized_backbone_once(config, tmp_path / "weights", tmp_path / "soma", load_calibration())
+    quantized: Path = egohand_fast.export_quantized_backbone_once(config, tmp_path / "weights", tmp_path / "soma", load_calibration())
     assert sources == [tmp_path / "dinov3-bf16.onnx"]
     assert quantized.parent == tmp_path / "engines" and quantized.is_file()
+
+
+@pytest.mark.parametrize("preset,precision,quantized_detector", [("egohand-catalog", "nvfp4", True), ("egohand-catalog-bf16", "bf16", False)])
+def test_catalog_cli_selects_measured_paired_roles(preset: str, precision: str, quantized_detector: bool) -> None:
+    detector: object = tyro.cli(HandDetectorConfig, args=[preset, "tensorrt"])
+    pose: object = tyro.cli(HandPose3dConfig, args=[preset])
+    assert isinstance(detector, EgoHandDetectorConfig)
+    assert isinstance(pose, EgoHandFastConfig)
+    assert (detector.fp8_calibration is not None) == quantized_detector
+    assert pose.backbone_precision == precision and pose.batch_size == 2
+
+
+def test_cached_benchmark_can_run_the_public_catalog_preset() -> None:
+    from posekit.apis.hands_cached_bench import Config
+
+    config: Config = tyro.cli(Config, args=["--model", "catalog", "--precision", "bf16", "--no-measure-timing"])
+    assert config.model == "catalog" and config.precision == "bf16" and not config.measure_timing
