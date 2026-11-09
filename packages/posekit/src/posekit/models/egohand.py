@@ -96,14 +96,13 @@ def resolve_hand_identities(detections: HandDetections, frame_count: int) -> Han
     )
 
 
-EgoHandStage: TypeAlias = Literal["preprocessing", "batch_assembly", "model_forward", "post_forward", "adaptive_smoothing", "backbone", "head", "soma"]
+EgoHandStage: TypeAlias = Literal["preprocessing", "batch_assembly", "model_forward", "post_forward", "backbone", "head", "soma"]
 """Stage names of ``stage_ms``: upstream's per-frame stages plus the CUDA-event-timed backbone, head and SOMA."""
 UPSTREAM_STAGES: dict[PerfStage, EgoHandStage] = {
     PerfStage.PREPROCESSING: "preprocessing",
     PerfStage.BATCH_ASSEMBLY: "batch_assembly",
     PerfStage.MODEL_FORWARD: "model_forward",
     PerfStage.POST_FORWARD: "post_forward",
-    PerfStage.ADAPTIVE_SMOOTHING: "adaptive_smoothing",
 }
 """The upstream reporter stages EgoHandPredictor keeps."""
 
@@ -193,7 +192,7 @@ class EgoHandDetector(HandDetector):
         for start in range(0, len(frames_rgb), self.runtime.spec.max_batch_size):
             stop: int = min(start + self.runtime.spec.max_batch_size, len(frames_rgb))
             pixels: Float32[Tensor, "b 3 640 640"] = (
-                _resize_on_gpu(frames_rgb[start:stop]) if self.config.gpu_preprocessing else _resize_with_pil(frames_rgb[start:stop])
+                resize_bilinear_uint8(frames_rgb[start:stop], (640, 640)) if self.config.gpu_preprocessing else _resize_with_pil(frames_rgb[start:stop])
             )
             # Filled on the device: a host tensor here would be a blocking upload on every call.
             sizes: Int64[Tensor, "b 2"] = torch.empty((stop - start, 2), dtype=torch.int64, device=frames_rgb.device)
@@ -234,11 +233,6 @@ def _resize_with_pil(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b
             pool.map(lambda frame: np.asarray(Image.fromarray(frame).resize((640, 640), Image.Resampling.BILINEAR)).copy(), host_frames)
         )
     return torch.from_numpy(np.stack(resized)).permute(0, 3, 1, 2).to(device=frames_rgb.device, dtype=torch.float32) / 255.0
-
-
-def _resize_on_gpu(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b 3 640 640"]:
-    """Match the reference PIL bilinear input without transferring image pixels."""
-    return resize_bilinear_uint8(frames_rgb, (640, 640))
 
 
 @serde

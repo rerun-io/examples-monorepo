@@ -1,14 +1,14 @@
-"""EgoHand's lens model for a calibrated camera, and explicit anatomical hand correspondences."""
+"""EgoHand's lens model for a calibrated camera, and the detector's raw hand classes."""
 
 from functools import cache
 
 import numpy as np
 from egohand_inference.camera.camera_models import CameraModel, load_camera_calibration
-from jaxtyping import Float32, Float64
+from jaxtyping import Float64
 from numpy import ndarray
 
 from posekit.cameras import CalibratedCamera, CameraKey, camera_key
-from posekit.predictions import SOMA_HAND21, HandSide
+from posekit.predictions import HandSide
 
 
 def detector_hand_side(label: int) -> HandSide:
@@ -18,17 +18,6 @@ def detector_hand_side(label: int) -> HandSide:
     if label == 2:
         return "right"
     raise ValueError(f"Unknown hand label {label}; expected 1 or 2")
-
-
-def coco_hand_indices(side: HandSide) -> tuple[int, ...]:
-    """Return the matching COCO-133 hand indices in MediaPipe order."""
-    start: int = 91 if side == "left" else 112
-    return tuple(range(start, start + 21))
-
-
-def soma_to_hand21(joints: Float32[ndarray, "25 3"]) -> Float32[ndarray, "21 3"]:
-    """Select MediaPipe/COCO and catalog Quest-21 joints from SOMA-25."""
-    return joints[np.asarray(SOMA_HAND21)]
 
 
 def lens_model(camera: CalibratedCamera) -> CameraModel:

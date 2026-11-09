@@ -7,7 +7,8 @@ import pytest
 pytest.importorskip("warp", reason="EgoHand needs the posekit-hands Pixi environment (posekit-egohand feature)")
 
 from posekit.cameras import CalibratedCamera
-from posekit.models.egohand_geometry import coco_hand_indices, detector_hand_side, lens_model, project, soma_to_hand21
+from posekit.models.egohand_geometry import detector_hand_side, lens_model, project
+from posekit.predictions import SOMA_HAND21
 
 
 def test_oak_projection_retains_all_fourteen_coefficients() -> None:
@@ -29,12 +30,8 @@ def test_raw_detector_class_names_match_upstream_and_unknown_labels_fail() -> No
 
 
 def test_soma_mapping_skips_extra_metacarpals_for_coco_and_quest21() -> None:
-    # Unique coordinates make the independently specified anatomical order visible.
-    points = np.repeat(np.arange(25, dtype=np.float32)[:, None], 3, axis=1)
-    expected = [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
-    np.testing.assert_array_equal(soma_to_hand21(points)[:, 0], expected)
-    assert coco_hand_indices("left") == tuple(range(91, 112))
-    assert coco_hand_indices("right") == tuple(range(112, 133))
+    # The independently specified anatomical order: SOMA-25 without the four extra metacarpals.
+    assert list(SOMA_HAND21) == [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
 
 
 def test_identity_assignment_precedes_crop_mirroring() -> None:
