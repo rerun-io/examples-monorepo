@@ -65,3 +65,10 @@ def test_cached_benchmark_can_run_the_public_catalog_preset() -> None:
 
     config: Config = tyro.cli(Config, args=["--model", "catalog", "--precision", "bf16", "--no-measure-timing"])
     assert config.model == "catalog" and config.precision == "bf16" and not config.measure_timing
+
+
+def test_detector_rejects_two_precision_choices(tmp_path: Path) -> None:
+    """The FP8 detector keeps its other convolutions in FP16, so an FP16 trunk on top is a contradiction."""
+    with pytest.raises(ValueError, match="not both"):
+        EgoHandDetectorConfig(fp16_trunk=True, fp8_calibration=tmp_path / "detector.rrd")
+    assert EgoHandDetectorConfig(fp8_calibration=tmp_path / "detector.rrd").fp8_calibration is not None

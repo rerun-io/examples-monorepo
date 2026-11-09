@@ -27,10 +27,12 @@ EGOHAND_CALIBRATION_MODEL: str = "egohand"
 """Model name and recording id of the EgoHand calibration .rrd."""
 
 
-def validate_fp8_tail_blocks(fp8_tail_blocks: int) -> None:
-    """Raise ValueError unless ``fp8_tail_blocks`` names 0 to all of the DINO blocks."""
+def validate_fp8_blocks(fp8_tail_blocks: int, fp8_prefix_blocks: int = 0) -> None:
+    """Raise ValueError unless the FP8 tail and prefix each name 0 to all of the DINO blocks."""
     if not 0 <= fp8_tail_blocks <= DINO_BLOCKS:
         raise ValueError(f"fp8_tail_blocks must be between 0 and {DINO_BLOCKS}.")
+    if not 0 <= fp8_prefix_blocks <= DINO_BLOCKS:
+        raise ValueError(f"fp8_prefix_blocks must be between 0 and {DINO_BLOCKS}.")
 
 
 @serde(deny_unknown_fields=True)
@@ -101,9 +103,7 @@ def write_calibration(path: Path, calibration: EgoHandCalibration) -> None:
 
 def calibrated_backbone_path(base: Path, calibration: EgoHandCalibration, *, fp8_tail_blocks: int = 0, fp8_prefix_blocks: int = 0) -> Path:
     """Name the exported backbone by its calibration contents, including the held-out split."""
-    validate_fp8_tail_blocks(fp8_tail_blocks)
-    if not 0 <= fp8_prefix_blocks <= DINO_BLOCKS:
-        raise ValueError(f"fp8_prefix_blocks must be between 0 and {DINO_BLOCKS}.")
+    validate_fp8_blocks(fp8_tail_blocks, fp8_prefix_blocks)
     digest: str = hashlib.sha256(to_json(calibration).encode()).hexdigest()[:16]
     precision: str = f"-fp8tail{fp8_tail_blocks}" if fp8_tail_blocks else ""
     prefix: str = f"-fp8prefix{fp8_prefix_blocks}" if fp8_prefix_blocks else ""

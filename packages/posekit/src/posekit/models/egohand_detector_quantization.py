@@ -3,7 +3,6 @@
 import hashlib
 import math
 from pathlib import Path
-from typing import Literal
 
 import onnx
 from onnx import TensorProto, helper
@@ -13,6 +12,7 @@ from trtkit.onnx_qdq import Fp8Conv, KeepPrecision, QdqPlan, quantize_qdq, save_
 from trtkit.trt_builder import onnx_content_hash
 
 from posekit.models.calibration_rrd import CalibrationRecording, read_calibration_rrd
+from posekit.models.egohand import DetectorFp8Scope
 
 DETECTOR_CALIBRATION_MODEL: str = "egohand-detector"
 """Recording model identifier for detector activation ranges."""
@@ -38,7 +38,7 @@ def detector_activation_model(source: onnx.ModelProto) -> tuple[onnx.ModelProto,
     return model, names
 
 
-def quantize_detector(source: onnx.ModelProto, ranges: dict[str, float], *, scope: Literal["all", "backbone", "late_backbone", "projections"] = "all") -> onnx.ModelProto:
+def quantize_detector(source: onnx.ModelProto, ranges: dict[str, float], *, scope: DetectorFp8Scope = "all") -> onnx.ModelProto:
     """Use trtkit QDQ for selected convolutions; retain FP32 decode and original graph I/O.
 
     The upstream export folds Conv weights into unnamed initializers. Give each
@@ -82,7 +82,7 @@ def quantize_detector(source: onnx.ModelProto, ranges: dict[str, float], *, scop
     return quantize_qdq(model, QdqPlan(modules, (), scale_dtype="float16"))
 
 
-def quantized_detector_path(source: Path, calibration: Path, cache_dir: Path, *, scope: Literal["all", "backbone", "late_backbone", "projections"] = "all") -> Path:
+def quantized_detector_path(source: Path, calibration: Path, cache_dir: Path, *, scope: DetectorFp8Scope = "all") -> Path:
     """Build once by source bytes, calibration bytes and rewrite version."""
     record: CalibrationRecording = read_calibration_rrd(calibration, DETECTOR_CALIBRATION_MODEL)
     source_hash: str = onnx_content_hash(source, cache_dir=cache_dir)

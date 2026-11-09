@@ -98,6 +98,8 @@ def resolve_hand_identities(detections: HandDetections, frame_count: int) -> Han
 
 EgoHandStage: TypeAlias = Literal["preprocessing", "batch_assembly", "model_forward", "post_forward", "adaptive_smoothing", "backbone", "head", "soma"]
 """Stage names of ``stage_ms``: upstream's per-frame stages plus the CUDA-event-timed backbone, head and SOMA."""
+DetectorFp8Scope: TypeAlias = Literal["all", "backbone", "late_backbone", "projections"]
+"""Detector convolutions in FP8: all, residual backbone, final residual stage, or the three encoder input projections."""
 UPSTREAM_STAGES: dict[PerfStage, EgoHandStage] = {
     PerfStage.PREPROCESSING: "preprocessing",
     PerfStage.BATCH_ASSEMBLY: "batch_assembly",
@@ -142,8 +144,12 @@ class EgoHandDetectorConfig:
     fp8_calibration: Path | None = None
     """Disjoint detector activation ranges; enables FP8 convolutions with an FP32 decoding tail."""
 
-    fp8_scope: Literal["all", "backbone", "late_backbone", "projections"] = "all"
+    fp8_scope: DetectorFp8Scope = "all"
     """Quantize all, residual backbone, final residual stage, or three encoder feature projections."""
+
+    def __post_init__(self) -> None:
+        if self.fp16_trunk and self.fp8_calibration is not None:
+            raise ValueError("Set fp16_trunk or fp8_calibration, not both: the FP8 detector already runs its other convolutions in FP16.")
 
     def weights_path(self) -> Path:
         """The ONNX file: ``weights``, or the pinned download in the Hugging Face cache."""

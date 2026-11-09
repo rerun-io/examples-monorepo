@@ -13,14 +13,17 @@ from serde import serde
 from serde.json import to_json
 
 
+def gpu_utilization(device: int) -> int:
+    """Current device utilization in percent, as nvidia-smi reports it."""
+    return int(
+        subprocess.check_output(["nvidia-smi", "-i", str(device), "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"], text=True).strip()
+    )
+
+
 def require_idle_gpu(device: int = 0, *, allow_idle_residents: bool = False) -> None:
     """Require an empty device, or explicitly authorized residents below 5% utilization."""
     if allow_idle_residents:
-        utilization: int = int(
-            subprocess.check_output(
-                ["nvidia-smi", "-i", str(device), "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"], text=True
-            ).strip()
-        )
+        utilization: int = gpu_utilization(device)
         if utilization > 5:
             raise RuntimeError(f"GPU utilization is {utilization}%, above the 5% pre-run limit.")
         return
@@ -112,11 +115,7 @@ class GpuActivityMonitor:
         # Model setup can leave one stale utilization sample. Allow that sample to drain.
         deadline: float = time.monotonic() + 60.0
         while True:
-            self.utilization = int(
-                subprocess.check_output(
-                    ["nvidia-smi", "-i", str(self.device), "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"], text=True
-                ).strip()
-            )
+            self.utilization = gpu_utilization(self.device)
             if self.utilization <= 5:
                 break
             if time.monotonic() >= deadline:

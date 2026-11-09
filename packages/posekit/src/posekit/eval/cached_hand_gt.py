@@ -3,10 +3,18 @@
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
+from rerun.chunk import ChunkStore, RrdReader
+from scipy.spatial.transform import Rotation
+from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views
 
-from posekit.eval.hand_gt import HandGtSegment
+from posekit.cameras import CalibratedCamera, LensModel
+from posekit.eval.hand_gt import DERIVED_JOINTS, GT_XYZ, SIDE_SLOTS, HandGtSegment, _nearest
+
+HAND_SLOTS: slice = slice(SIDE_SLOTS["left"], SIDE_SLOTS["right"] + 21)
+"""Both hands' COCO-WholeBody slots, left then right."""
 
 
 def select_eval_indices(valid: Bool[ndarray, "f 2 21"], *, max_frames: int, min_joints: int = 15) -> Int64[ndarray, "n"]:
@@ -22,20 +30,13 @@ def select_eval_indices(valid: Bool[ndarray, "f 2 21"], *, max_frames: int, min_
     return available[np.linspace(0, len(available) - 1, min(max_frames, len(available)), dtype=np.int64)]
 
 
-def load_cached_hand_gt(path: "Path", *, max_frames: int = 100) -> "HandGtSegment":
+def load_cached_hand_gt(path: Path, *, max_frames: int = 100) -> HandGtSegment:
     """Read native catalog video, calibration and aligned COCO hand labels locally.
 
     No catalog request is made. Unsupported lenses fail rather than being treated
     as pinhole cameras. Original video indices remain the sample identity.
     """
-    import pyarrow as pa
     from datafusion import col
-    from rerun.chunk import ChunkStore, RrdReader
-    from scipy.spatial.transform import Rotation
-    from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views
-
-    from posekit.cameras import CalibratedCamera, LensModel
-    from posekit.eval.hand_gt import HandGtSegment, _nearest
 
     store: ChunkStore = RrdReader(path).stream().collect()
     entities: list[str] = store.schema().entity_paths()
@@ -84,7 +85,7 @@ def load_cached_hand_gt(path: "Path", *, max_frames: int = 100) -> "HandGtSegmen
         catalog_keyframes(video_table[f"{video_entity}:VideoStream:is_keyframe"]),
         catalog_codec(video_table[f"{video_entity}:VideoStream:codec"], str(path)),
     )
-    gt_entity: str = "/world/gt/coco133_xyz"
+    gt_entity: str = GT_XYZ
     qa_entity: str = f"/world/gt/quality/{rig.rsplit('/', 1)[-1]}/{camera_entity.rsplit('/', 1)[-1]}/qa_pass"
     table: pa.Table = store.reader("video_time", contents=[rig, gt_entity, uv_entity, qa_entity]).to_arrow_table()
     row_times: Int64[ndarray, "r"] = table["video_time"].cast(pa.int64()).to_numpy()
@@ -116,13 +117,13 @@ def load_cached_hand_gt(path: "Path", *, max_frames: int = 100) -> "HandGtSegmen
     world_from_rig[:, :3, :3] = rotations
     world_from_rig[:, :3, 3] = translation.reshape(-1, 3)
     cam_from_world: Float64[ndarray, "f 4 4"] = camera_transform @ np.linalg.inv(world_from_rig)
-    points = points.reshape(-1, 133, 3)[:, 91:133].reshape(-1, 2, 21, 3)
+    points = points.reshape(-1, 133, 3)[:, HAND_SLOTS].reshape(-1, 2, 21, 3)
     xyz: Float32[ndarray, "f 2 21 3"] = (
         np.einsum("fij,fskj->fski", cam_from_world[:, :3, :3], points) + cam_from_world[:, None, None, :3, 3]
     ).astype(np.float32)
-    uv: Float32[ndarray, "f 2 21 2"] = pixels.reshape(-1, 133, 2)[:, 91:133].reshape(-1, 2, 21, 2).astype(np.float32)
+    uv: Float32[ndarray, "f 2 21 2"] = pixels.reshape(-1, 133, 2)[:, HAND_SLOTS].reshape(-1, 2, 21, 2).astype(np.float32)
     valid: Bool[ndarray, "f 2 21"] = (
-        (confidence.reshape(-1, 133)[:, 91:133].reshape(-1, 2, 21) > 0) & np.isfinite(xyz).all(-1) & np.isfinite(uv).all(-1) & (xyz[..., 2] > 0)
+        (confidence.reshape(-1, 133)[:, HAND_SLOTS].reshape(-1, 2, 21) > 0) & np.isfinite(xyz).all(-1) & np.isfinite(uv).all(-1) & (xyz[..., 2] > 0)
     )
     valid &= (uv[..., 0] >= 0) & (uv[..., 0] < width) & (uv[..., 1] >= 0) & (uv[..., 1] < height)
     aligned_ok: Bool[ndarray, "f"] = points_ok & confidence_ok & pixels_ok & pose_ok & rotation_ok
@@ -130,6 +131,6 @@ def load_cached_hand_gt(path: "Path", *, max_frames: int = 100) -> "HandGtSegmen
         qa, qa_ok = aligned(f"{qa_entity}:Scalars:scalars")
         aligned_ok &= qa_ok & (qa.reshape(-1) > 0.5)
     valid &= aligned_ok[:, None, None]
-    valid[:, :, 1] = False
+    valid[:, :, list(DERIVED_JOINTS)] = False
     chosen: Int64[ndarray, "n"] = select_eval_indices(valid, max_frames=max_frames)
     return HandGtSegment(path.stem, camera, video, chosen, times[chosen], xyz[chosen], uv[chosen], valid[chosen])

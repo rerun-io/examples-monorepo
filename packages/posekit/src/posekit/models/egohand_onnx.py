@@ -16,7 +16,7 @@ from trtkit.onnx_qdq import (
 )
 
 from posekit.models.dinov3_calibration import DINO_BLOCKS
-from posekit.models.egohand_quantization import validate_fp8_tail_blocks
+from posekit.models.egohand_quantization import validate_fp8_blocks
 
 
 @runtime_checkable
@@ -36,9 +36,7 @@ def backbone_qdq_plan(calibration: DinoActivationRanges, *, fp8_tail_blocks: int
     Per-output-channel FP8 weight scales in the tail retain accuracy near the
     final representation consumed by the metric camera and shape heads.
     """
-    validate_fp8_tail_blocks(fp8_tail_blocks)
-    if not 0 <= fp8_prefix_blocks <= DINO_BLOCKS:
-        raise ValueError(f"fp8_prefix_blocks must be between 0 and {DINO_BLOCKS}.")
+    validate_fp8_blocks(fp8_tail_blocks, fp8_prefix_blocks)
     modules: dict[str, ModulePrecision] = {}
     for module, amax in calibration.input_amax.items():
         block: int = int(module.split(".")[2])

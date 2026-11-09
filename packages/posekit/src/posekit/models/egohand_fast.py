@@ -51,7 +51,9 @@ if TYPE_CHECKING:
 else:
     EgoHand = torch.nn.Module
 
-CACHED_FAST_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
+EgoHandBackbonePrecision: TypeAlias = Literal["bf16", "fp8", "nvfp4"]
+"""DINO backbone precision: BF16 for Ampere, all-FP8 linears, or the calibrated NVFP4/FP8 hybrid."""
+CACHED_FAST_BACKBONE_ONNX: Path =DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Base path of the calibrated NVFP4 DINOv3; the calibration digest and FP8 tail count are appended to its stem."""
 CACHED_HEAD_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-head-bf16-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Both learned heads with their virtual-camera conditioning, exported in BF16."""
@@ -90,7 +92,7 @@ class EgoHandFastConfig:
     hf_soma_revision: str = SOMA_REVISION
     """Pinned commit of that repo."""
 
-    backbone_precision: Literal["bf16", "fp8", "nvfp4"] = "nvfp4"
+    backbone_precision: EgoHandBackbonePrecision = "nvfp4"
     """BF16 for Ampere, all-FP8 linears, or the calibrated NVFP4/FP8 hybrid."""
 
     fp8_prefix_blocks: int = 0
@@ -283,7 +285,7 @@ def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorCon
 
 
 def catalog_egohand_configs(
-    assets: Path | None = None, *, backbone_precision: Literal["bf16", "fp8", "nvfp4"] = "nvfp4"
+    assets: Path | None = None, *, backbone_precision: EgoHandBackbonePrecision = "nvfp4"
 ) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
     """The five-dataset calibrated, batch-one detector and full two-hand pose stack.
 

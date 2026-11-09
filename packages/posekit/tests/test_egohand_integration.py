@@ -21,7 +21,7 @@ from simplecv.rrd_query_utils import first_valid_value
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, catalog_egohand_configs, fast_egohand_configs
 
 pytestmark = pytest.mark.integration
 
@@ -30,13 +30,9 @@ CAMERA = "/world/rig_04/cam_00/pinhole"
 
 def fast_config_for_device() -> EgoHandFastConfig:
     """Exercise the same fast executor with a precision supported by the test GPU."""
-    config: EgoHandFastConfig = fast_egohand_configs()[1]
     if torch.cuda.get_device_capability()[0] < 10:
-        config = replace(
-            config, backbone_precision="bf16", batch_size=2,
-            backbone_backend=replace(config.backbone_backend, max_batch_size=2, opt_batch_size=2),
-        )
-    return config
+        return catalog_egohand_configs(backbone_precision="bf16")[1]
+    return fast_egohand_configs()[1]
 
 
 @pytest.fixture(autouse=True)

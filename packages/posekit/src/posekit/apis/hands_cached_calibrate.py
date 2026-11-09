@@ -1,9 +1,7 @@
 """Measure detector and pose activation ranges on disjoint cached catalog recordings."""
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import onnx
@@ -30,6 +28,7 @@ from posekit.models.egohand import (
 )
 from posekit.models.egohand_detector_quantization import DETECTOR_CALIBRATION_MODEL, detector_activation_model
 from posekit.models.egohand_quantization import EGOHAND_CALIBRATION_MODEL, EgoHandCalibration, write_calibration
+from posekit.models.sam3d_body_quantization import frame_sha256
 from posekit.predictions import HandDetections
 
 
@@ -69,7 +68,7 @@ def main(config: Config) -> None:
         raise ValueError("Calibration and evaluation segments overlap.")
     for path in evaluation:
         frames: UInt8[Tensor, "f h w 3"] = decode_samples(load_cached_hand_gt(path, max_frames=100))
-        forbidden.update(hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest() for frame in frames)
+        forbidden.update(frame_sha256(frame) for frame in frames)
         del frames
         print("Excluded", path.stem, flush=True)
     detector: EgoHandDetector = detector_config.setup()
@@ -84,15 +83,14 @@ def main(config: Config) -> None:
             segment: HandGtSegment = load_cached_hand_gt(path, max_frames=config.max_frames)
             frames = decode_samples(segment)
             for frame_index, frame in zip(segment.sample_indices, frames, strict=True):
-                digest: str = hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest()
+                digest: str = frame_sha256(frame)
                 if digest in forbidden:
                     raise ValueError(f"{path}:{frame_index} is a decoded evaluation frame.")
                 batch: UInt8[Tensor, "1 h w 3"] = frame[None]
                 resized: Float32[ndarray, "1 3 640 640"] = _resize_with_pil(batch).cpu().numpy()
-                outputs: list[Float32[ndarray, ""]] = cast(list[Float32[ndarray, ""]], session.run(
+                outputs: list[ndarray] = session.run(
                     [f"calibration_{i}" for i in range(len(names))],
                     {"images": resized, "orig_target_sizes": np.array([[frame.shape[1], frame.shape[0]]], dtype=np.int64)},
-                )
                 )
                 maxima = np.maximum(maxima, np.asarray(outputs).reshape(-1))
                 detections: HandDetections = detector(batch)

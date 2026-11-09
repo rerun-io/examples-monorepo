@@ -17,6 +17,10 @@ from posekit.ops.compile import compile_unless_dev
 from posekit.ops.crops import channel_vector, remap_frames
 from posekit.predictions import HandSide
 
+IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
+IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+"""Per-channel RGB normalization of the EgoHand crops."""
+
 
 def prepare_gpu_crops(frames: UInt8[Tensor, "b h w 3"], boxes: dict[str, dict[HandSide, Float32[ndarray, "3"]]], camera: CalibratedCamera) -> list[dict]:
     """Prepare model crops while retaining source-camera metadata for restoration.
@@ -66,7 +70,7 @@ def normalize_crops(
 ) -> Float32[Tensor, "n 3 256 256"]:
     """Fuse uint8 gathering, interpolation and ImageNet normalization."""
     crops = remap_frames(frames, indices, maps) / 255.0
-    mean = channel_vector((0.485, 0.456, 0.406), frames.device)
-    std = channel_vector((0.229, 0.224, 0.225), frames.device)
+    mean = channel_vector(IMAGENET_MEAN, frames.device)
+    std = channel_vector(IMAGENET_STD, frames.device)
     return (crops - mean) / std
 

@@ -2,7 +2,6 @@
 
 import numpy as np
 import rerun as rr
-import torch
 from egohand_inference.camera.perspective_crop import perspective_crop
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
@@ -10,9 +9,11 @@ from torch import Tensor
 
 from posekit.cameras import CalibratedCamera, camera_key
 from posekit.models.egohand import EgoHandPredictor, EgoHandReconstruction
+from posekit.models.egohand_crops import IMAGENET_MEAN, IMAGENET_STD
 from posekit.models.egohand_cuda_crops import PreparedHandCrops
 from posekit.models.egohand_fast import FastEgoHandPredictor
 from posekit.models.egohand_geometry import lens_model
+from posekit.ops.crops import channel_vector
 from posekit.predictions import HandDetections
 
 
@@ -27,8 +28,8 @@ def log_hand_intermediates(
     crops: list[UInt8[ndarray, "256 256 3"]] = []
     if isinstance(predictor, FastEgoHandPredictor) and detections.num_detections:
         prepared: PreparedHandCrops = predictor.croppers[(camera_key(camera), str(frames.device))].prepare(frames, detections, predictor.config.padding)
-        mean: Float32[Tensor, "3 1 1"] = torch.tensor([0.485, 0.456, 0.406], device=frames.device)[:, None, None]
-        std: Float32[Tensor, "3 1 1"] = torch.tensor([0.229, 0.224, 0.225], device=frames.device)[:, None, None]
+        mean: Float32[Tensor, "1 3 1 1"] = channel_vector(IMAGENET_MEAN, frames.device)
+        std: Float32[Tensor, "1 3 1 1"] = channel_vector(IMAGENET_STD, frames.device)
         images: UInt8[Tensor, "n 256 256 3"] = ((prepared.images * std + mean) * 255.0).round().clamp(0, 255).byte().permute(0, 2, 3, 1)
         crops = list(images.cpu().numpy())
     elif detections.num_detections:
