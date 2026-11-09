@@ -22,6 +22,7 @@ from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from posekit.cameras import CalibratedCamera, CameraKey, camera_key
 from posekit.models.base import TopDownHandPose3d
+from posekit.models.dinov3_qdq import quantize_backbone
 from posekit.models.egohand import (
     CACHED_BACKBONE_ONNX,
     EGOHAND_REVISION,
@@ -40,7 +41,6 @@ from posekit.models.egohand import (
     soma_faces,
 )
 from posekit.models.egohand_head import EgoHandHead
-from posekit.models.egohand_onnx import quantize_backbone
 from posekit.models.egohand_quantization import EgoHandCalibration, calibrated_backbone_path, load_calibration
 from posekit.predictions import BoxDetections, HandDetections, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.runtimes import create_runtime_from_onnx

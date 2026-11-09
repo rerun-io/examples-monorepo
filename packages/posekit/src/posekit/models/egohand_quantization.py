@@ -23,15 +23,10 @@ from posekit.models.calibration_rrd import (
     write_calibration_rrd,
 )
 from posekit.models.dinov3_calibration import CALIBRATED_ATTENTION_INPUTS, CALIBRATED_LINEARS, DINO_BLOCKS, DinoActivationObserver
+from posekit.models.dinov3_qdq import validate_fp8_tail_blocks
 
 EGOHAND_CALIBRATION_MODEL: str = "egohand"
 """Model name and recording id of the EgoHand calibration .rrd."""
-
-
-def validate_fp8_tail_blocks(fp8_tail_blocks: int) -> None:
-    """Raise ValueError unless ``fp8_tail_blocks`` names 0 to all of the DINO blocks."""
-    if not 0 <= fp8_tail_blocks <= DINO_BLOCKS:
-        raise ValueError(f"fp8_tail_blocks must be between 0 and {DINO_BLOCKS}.")
 
 
 @serde(deny_unknown_fields=True)

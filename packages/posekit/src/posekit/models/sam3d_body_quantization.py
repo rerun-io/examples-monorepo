@@ -25,7 +25,7 @@ from posekit.models.calibration_rrd import (
     write_calibration_rrd,
 )
 from posekit.models.dinov3_calibration import CALIBRATED_ATTENTION_INPUTS, CALIBRATED_LINEARS, DINO_BLOCKS
-from posekit.models.egohand_onnx import backbone_qdq_plan
+from posekit.models.dinov3_qdq import backbone_qdq_plan
 from posekit.models.sam3d_body import Sam3dBodyConfig
 from posekit.predictions import BoxDetections
 

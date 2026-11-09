@@ -1,4 +1,4 @@
-"""Coordinate Python, Torch and Warp resource lifetimes during CUDA capture."""
+"""Captured CUDA graphs over Torch and Warp work, shared by the EgoHand and SAM 3D Body executors: resource lifetimes during capture and replay."""
 
 import gc
 from collections.abc import Callable, Iterator
@@ -16,7 +16,7 @@ CAPTURE_WARMUPS: int = 3
 
 
 @contextmanager
-def capture_hand_graph(
+def capture_graph(
     graph: torch.cuda.CUDAGraph, stream: torch.cuda.Stream, warp_stream: wp.Stream, pool: GraphPool | None = None
 ) -> Iterator[None]:
     """Keep unrelated TensorRT destructors out of the capture interval.
@@ -68,7 +68,7 @@ class CapturedGraph[Outputs]:
                 run()
         torch.cuda.current_stream().wait_stream(stream)
         self.graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
-        with capture_hand_graph(self.graph, stream, warp_stream, pool):
+        with capture_graph(self.graph, stream, warp_stream, pool):
             self.outputs: Outputs = run()
         self.inputs: tuple[Tensor, ...] = inputs
         self.resources: tuple[object, ...] = (stream, warp_stream, *keep)

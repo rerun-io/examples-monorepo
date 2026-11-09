@@ -1,4 +1,4 @@
-"""EgoHand DINOv3 NVFP4 linears and FP8 native-attention ONNX export."""
+"""DINOv3 ViT-H+/16 NVFP4/FP8 linears and FP8 native attention as ONNX Q/DQ, shared by EgoHand and SAM 3D Body."""
 
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -16,7 +16,12 @@ from trtkit.onnx_qdq import (
 )
 
 from posekit.models.dinov3_calibration import DINO_BLOCKS
-from posekit.models.egohand_quantization import validate_fp8_tail_blocks
+
+
+def validate_fp8_tail_blocks(fp8_tail_blocks: int) -> None:
+    """Raise ValueError unless ``fp8_tail_blocks`` names 0 to all of the DINO blocks."""
+    if not 0 <= fp8_tail_blocks <= DINO_BLOCKS:
+        raise ValueError(f"fp8_tail_blocks must be between 0 and {DINO_BLOCKS}.")
 
 
 @runtime_checkable

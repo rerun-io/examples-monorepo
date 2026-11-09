@@ -14,11 +14,11 @@ from sam_3d_body.models.meta_arch.sam3d_body import SAM3DBody
 from torch import Tensor, nn
 from torch.overrides import TorchFunctionMode
 
-from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.sam3d_body import Sam3dBodyStage, _StageClock
 from posekit.models.sam3d_body_head import CaptureMhrHead
 from posekit.models.sam3d_body_keypoints import sample_keypoint_features
 from posekit.ops.compile import compile_unless_dev
+from posekit.ops.cuda_graph import CapturedGraph, GraphPool
 
 PoseFields: TypeAlias = dict[str, Tensor | np.ndarray | None]
 DecoderOutput: TypeAlias = tuple[Tensor, list[PoseFields]]

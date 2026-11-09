@@ -10,11 +10,11 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from torch import Tensor
 
 from posekit.cameras import RADIAL_TERMS, CalibratedCamera
-from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_crops import normalize_crops
 from posekit.models.egohand_geometry import lens_model
 from posekit.models.egohand_lens_kernels import project_joints, remap, unproject_pixels
 from posekit.ops.compile import compile_unless_dev
+from posekit.ops.cuda_graph import CapturedGraph, GraphPool
 from posekit.predictions import HandDetections
 
 

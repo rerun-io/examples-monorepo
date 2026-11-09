@@ -14,9 +14,9 @@ from soma.hand import SOMAHandLayer
 from torch import Tensor
 
 from posekit.models.egohand import EgoHandStage
-from posekit.models.egohand_capture import CapturedGraph, GraphPool
 from posekit.models.egohand_cuda_crops import PreparedHandCrops
 from posekit.models.egohand_head import EgoHandHead, solve_virtual_translation
+from posekit.ops.cuda_graph import CapturedGraph, GraphPool
 from posekit.predictions import HandSide
 from posekit.runtimes import TensorRuntime
 

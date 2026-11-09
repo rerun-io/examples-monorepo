@@ -21,7 +21,7 @@ def test_calibration_has_complete_ranges_and_a_disjoint_split() -> None:
 
 
 def test_calibration_satisfies_the_runtime_shared_range_contract() -> None:
-    from posekit.models.egohand_onnx import DinoActivationRanges
+    from posekit.models.dinov3_qdq import DinoActivationRanges
 
     assert isinstance(load_calibration(), DinoActivationRanges)
 
