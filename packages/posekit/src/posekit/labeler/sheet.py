@@ -280,7 +280,7 @@ def contact_sheet(
         if cell is not None and machine.box is not None:
             top_left, bottom_right = _to_sheet(cell, machine.box)
             _dashed_rect(canvas, top_left, bottom_right, SIDE_RGB[machine.side])
-            machine_tag: str = f"T {machine.side[0].upper()}{' trk' if machine.origin == 'tracked' else ''}"
+            machine_tag: str = f"T {machine.side[0].upper()}{' trk' if machine.origin == 'tracked' else ''}{' ?' if machine.origin == 'disagree' else ''}"
             _text(canvas, machine_tag, (top_left[0] + 4, top_left[1] + 16), SIDE_RGB[machine.side], 0.45)
     for proposal in info.proposals:
         cell = cell_by_cam.get(proposal.cam)
@@ -376,7 +376,10 @@ def filmstrip(info: PlaybackInfo, images: list[list[UInt8[ndarray, "h w 3"]]], t
                 _dashed_rect(canvas, top_left, bottom_right, rgb)
             else:
                 cv2.rectangle(canvas, top_left, bottom_right, rgb, 3 if machine.origin == "reviewed" else 2)
-            tag: str = f"{machine.side[0].upper()}{'*' if machine.origin == 'reviewed' else ''}{' trk' if machine.origin == 'tracked' else ''}"
+            tag: str = (
+                f"{machine.side[0].upper()}{'*' if machine.origin == 'reviewed' else ''}{' trk' if machine.origin == 'tracked' else ''}"
+                f"{' ?' if machine.origin == 'disagree' else ''}"
+            )
             _text(canvas, tag, (top_left[0] + 3, max(top_left[1] - 3, row.y + 12)), rgb, 0.4)
     return encode_jpeg(canvas)
 

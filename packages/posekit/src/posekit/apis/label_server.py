@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
+from typing import Literal, TypeAlias
 
 import cv2
 from rerun.catalog import DatasetEntry
@@ -25,6 +26,13 @@ from posekit.labeler.proposals import ProposalsByTime, read_proposals
 from posekit.labeler.schema import Proposal
 from posekit.labeler.server import LabelApp, make_server
 from posekit.labeler.store import LAYER_DIR, CatalogLayers
+from posekit.labeler.tracker import Propagator
+
+PropagatorKind: TypeAlias = Literal["chain", "megatrack"]
+"""Machine propagation: ``chain`` (EgoHand chains, ``posekit.labeler.tracker``; the default) or ``megatrack`` (a 3D hand per side
+from KeyNet-F in every view, ``posekit.labeler.megatrack``; needs ``PYTHONPATH=packages/handtrack`` and a GPU)."""
+KEYNET_WEIGHTS: Path = Path.home() / "hand-labeler-data" / "keynet" / "keynet-strong-pinch.weights.pt"
+"""RoboCap's deployed KeyNet-F (sha256 067cf7f6...), copied from pablo-dl-server ``handtrack-data/runs/keynet-strong-pinch``."""
 
 STATIC_DIR: Path = Path(__file__).resolve().parents[1] / "labeler" / "static"
 """The frontend shipped with the package."""
@@ -61,6 +69,12 @@ class Config:
     visual_tracker: VisualTrackerKind = "off"
     """OpenCV tracker that carries reviewed boxes when EgoHand misses (origin ``tracked``, ``posekit.labeler.carry``);
     ``off`` = chains hold one miss and end."""
+    propagator: PropagatorKind = "chain"
+    """``chain`` (default, uses ``visual_tracker``) or ``megatrack`` (``visual_tracker`` is then unused)."""
+    keynet_weights: Path = KEYNET_WEIGHTS
+    """KeyNet-F weights for ``--propagator megatrack``."""
+    keynet_device: str = "cuda"
+    """Torch device of KeyNet for ``--propagator megatrack``."""
 
 
 @dataclass
@@ -101,6 +115,15 @@ def main(config: Config) -> None:
         source: FrameSource = sources[segment_id]
         return VisualCarrier(source, source.times_ns, opencv_tracker(config.visual_tracker))
 
+    def open_megatrack(segment_id: str) -> Propagator:
+        # Imported here: posekit.labeler.keynet needs handtrack on PYTHONPATH, which the default propagator does not.
+        from posekit.labeler.keynet import KeyNetEstimator
+        from posekit.labeler.megatrack import MegaTrackPropagator
+        from posekit.labeler.rig import Kb4Rig, read_rig
+
+        rig: Kb4Rig = read_rig(dataset, segment_id)
+        return MegaTrackPropagator(rig, sources[segment_id], KeyNetEstimator(rig, config.keynet_weights, device=config.keynet_device))
+
     def viewer_url(segment_id: str) -> str:
         url: str = dataset.segment_url(segment_id)
         if config.viewer_catalog_url is not None:
@@ -118,7 +141,8 @@ def main(config: Config) -> None:
         reviewer=config.reviewer,
         dataset=config.dataset,
         autosave_every=config.autosave_every,
-        open_carrier=None if config.visual_tracker == "off" else open_carrier,
+        open_carrier=None if config.visual_tracker == "off" or config.propagator == "megatrack" else open_carrier,
+        open_propagator=open_megatrack if config.propagator == "megatrack" else None,
     )
     if config.warm:
         threading.Thread(target=app.summaries, name="labeler-warm", daemon=True).start()
@@ -130,7 +154,7 @@ def main(config: Config) -> None:
     signal.signal(signal.SIGTERM, stop_on_sigterm)
     print(
         f"[labeler] {len(segment_ids)} segments of {config.dataset} on http://{config.host}:{server.server_address[1]}/"
-        f" (visual tracker: {config.visual_tracker})"
+        f" (propagator: {config.propagator}, visual tracker: {config.visual_tracker if config.propagator == 'chain' else 'unused'})"
     )
     try:
         server.serve_forever()
