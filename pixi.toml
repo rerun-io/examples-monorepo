@@ -1281,7 +1281,12 @@ PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-p
 [feature.posekit-hands.tasks.posekit-video-hands]
 cmd = "python tools/demos/video_hands.py"
 cwd = "packages/posekit"
-description = "Run the GPU video 3D hands demo (hand detector + top-down 3D hands: wilor or egohand) and log to Rerun"
+description = "Run the GPU video 3D hands demo (hand detector + top-down 3D hands; stack names: wilor, egohand, egohand-selfcap, egohand-fast, egohand-catalog, egohand-catalog-bf16) and log to Rerun"
+
+[feature.posekit-hands.tasks.posekit-hands-app]
+cmd = "python tools/apps/hands_app.py"
+cwd = "packages/posekit"
+description = "Launch the 3D hands Gradio app (posekit-video-hands' code: WiLoR or an EgoHand stack) with an embedded Rerun viewer (http://127.0.0.1:7872)"
 
 [feature.posekit-hands.tasks.posekit-hands-eval]
 cmd = "python tools/apps/hands_eval.py"
