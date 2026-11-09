@@ -88,6 +88,27 @@ class Camera:
         )
 
 
+def quarter_turns_from_angle(angle_deg: float) -> int:
+    """Clockwise quarter turns that undo a camera's roll as the release states it (``camera_angles``: 0, 90, 90, 180)."""
+    return int(round(-angle_deg / 90.0)) % 4
+
+
+def quarter_turn_rotation(turns: int) -> Float64[ndarray, "3 3"]:
+    """turned_R_cam: camera axes after ``turns`` clockwise image turns. One turn maps RDF (x, y, z) to (-y, x, z)."""
+    one: Float64[ndarray, "3 3"] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    return np.linalg.matrix_power(one, turns % 4)
+
+
+def turn_camera(camera: "Camera", turns: int) -> "Camera":
+    """The same lens seen through an image turned ``turns`` quarter turns clockwise. One turn sends pixel (u, v) of a W x H image
+    to (H - 1 - v, u): fx and fy swap, cx' = H - 1 - cy, cy' = cx, and the tangential pair becomes (p1, p2) -> (-p2, p1)
+    (simplecv's model: dx = 2 p2 xy + p1 (r^2 + 2x^2), dy = 2 p1 xy + p2 (r^2 + 2y^2)). Radial terms do not change."""
+    for _ in range(turns % 4):
+        camera = replace(camera, ImageSizeX=camera.ImageSizeY, ImageSizeY=camera.ImageSizeX, fx=camera.fy, fy=camera.fx,
+                         cx=camera.ImageSizeY - 1 - camera.cy, cy=camera.cx, p1=-camera.p2, p2=camera.p1)
+    return camera
+
+
 @serde
 @dataclass(frozen=True, slots=True)
 class Labels:
@@ -156,6 +177,10 @@ class SequenceData:
     """Normalized mean roll-corrected image-up over the whole recording."""
     headset_up_spread_deg: float
     """Largest angle from a camera's mean roll-corrected up to headset_up."""
+    quarter_turns: tuple[int, ...] = (0, 0, 0, 0)
+    """Clockwise quarter turns each stored camera image gets so it is upright (from the release's ``camera_angles``)."""
+    cameras: tuple["Camera", ...] = ()
+    """The cameras as stored: the source tiles turned upright (``labels.cameras`` keeps the release's)."""
 
     @property
     def count(self) -> int:
@@ -216,6 +241,13 @@ def read_sequence(source: Path, frame_limit: int | None = None) -> SequenceData:
     camera_up /= np.linalg.norm(camera_up, axis=1, keepdims=True)
     spread_deg: float = float(np.rad2deg(np.arccos(np.clip(camera_up @ up, -1.0, 1.0))).max())
     source_num_frames: int = len(labels.joint_angles)
+    # Store every camera upright: turn its image, its intrinsics and its axes together, so 3D -> 2D stays exact.
+    turns: tuple[int, ...] = tuple(quarter_turns_from_angle(float(angle)) for angle in labels.camera_angles)
+    turned_T_cam: Float64[ndarray, "4 4 4"] = np.tile(np.eye(4), (4, 1, 1))
+    turned_T_cam[:, :3, :3] = np.stack([quarter_turn_rotation(k) for k in turns])
+    cam_T_turned: Float64[ndarray, "4 4 4"] = np.transpose(turned_T_cam, (0, 2, 1))  # pure rotations
+    relative = turned_T_cam[0] @ relative @ cam_T_turned  # the rig frame is camera 0's, which may turn too
+    world = world @ cam_T_turned[0]
     labels = replace(
         labels,
         joint_angles=labels.joint_angles[:count],
@@ -224,5 +256,6 @@ def read_sequence(source: Path, frame_limit: int | None = None) -> SequenceData:
         camera_to_world_transforms=labels.camera_to_world_transforms[:count],
     )
     return SequenceData(
-        source, labels, source_num_frames, profile, fps, times_ns, np.arange(count, dtype=np.int64), tracked[:count], world, relative, up, spread_deg
+        source, labels, source_num_frames, profile, fps, times_ns, np.arange(count, dtype=np.int64), tracked[:count], world, relative, up, spread_deg,
+        turns, tuple(turn_camera(camera, k) for camera, k in zip(labels.cameras, turns, strict=True)),
     )

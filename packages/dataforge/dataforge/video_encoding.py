@@ -408,6 +408,13 @@ def transcode_mp4(
     return written
 
 
+def turn_filter(turns: int) -> str:
+    """An ffmpeg filter-chain suffix that turns frames ``turns`` quarter turns clockwise (empty for none)."""
+    if turns not in (0, 1, 2, 3):
+        raise ValueError("turns must be 0, 1, 2 or 3")
+    return ("", ",transpose=clock", ",transpose=clock,transpose=clock", ",transpose=cclock")[turns]
+
+
 def transcode_crops(
     source: Path,
     outputs: list[Path],
@@ -417,6 +424,7 @@ def transcode_crops(
     frames: int,
     gop: int,
     cq: int,
+    turns: list[int] | None = None,
 ) -> None:
     """Share one CPU decode across cropped gray outputs, batching at the NVENC slot limit.
 
@@ -426,6 +434,8 @@ def transcode_crops(
     """
     if not outputs or len(outputs) != len(crops) or frames <= 0:
         raise ValueError("positive frame count and one crop per output required")
+    if turns is not None and len(turns) != len(crops):
+        raise ValueError("one turn count per crop required")
     if any(min(crop[:2]) <= 0 or min(crop[2:]) < 0 for crop in crops):
         raise ValueError("crop requires positive dimensions and nonnegative offsets")
     slots: int = nvenc_slot_count()
@@ -436,7 +446,8 @@ def transcode_crops(
         filters: list[str] = [f"[0:v]split={len(batch)}" + "".join(f"[tile{i}]" for i in range(len(batch)))]
         command: list[str] = [str(binary), "-hide_banner", "-loglevel", "error", "-y", "-filter_complex_threads", "1", "-r", str(fps), "-i", str(source)]
         for index, crop in enumerate(crops[start:start + slots]):
-            filters.append(f"[tile{index}]crop=" + ":".join(str(value) for value in crop) + f",format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}[cam{index}]")
+            turn: str = turn_filter(turns[start + index]) if turns is not None else ""
+            filters.append(f"[tile{index}]crop=" + ":".join(str(value) for value in crop) + f"{turn},format=gray,{EVEN_DIMENSION_AND_PIXEL_FORMAT}[cam{index}]")
         command.extend(["-filter_complex", ";".join(filters)])
         for index, output in enumerate(batch):
             command.extend(["-map", f"[cam{index}]", "-an", "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq), "-frames:v", str(frames), str(output)])
