@@ -1291,17 +1291,12 @@ description = "Launch the 3D hands Gradio app (posekit-video-hands' code: WiLoR 
 [feature.posekit-hands.tasks.posekit-hands-eval]
 cmd = "python tools/apps/hands_eval.py"
 cwd = "packages/posekit"
-description = "Ground-truth eval of WiLoR and EgoHand on a fixed HOT3D (Quest 3) + UmeTrack subset read from a dataforge catalog (--catalog-url); writes results.json + hands_eval.rrd"
+description = "Ground-truth eval (and with --timing, batch-one speed) of the hand stacks on fixed frames of five dataforge catalog datasets (--catalog-url); writes results.json + hands_eval.rrd; --baseline checks the 45 accuracy bands"
 
 [feature.posekit-hands.tasks.posekit-hands-bench]
 cmd = "python tools/apps/hands_bench.py"
 cwd = "packages/posekit"
 description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
-
-[feature.posekit-hands.tasks.posekit-hands-cached-bench]
-cmd = "python tools/apps/hands_cached_bench.py"
-cwd = "packages/posekit"
-description = "EgoHand accuracy and batch-one latency of one stack (--stack) on a fixed native-RRD cache; --baseline checks the 45 accuracy bands"
 
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"

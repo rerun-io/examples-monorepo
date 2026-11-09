@@ -129,8 +129,8 @@ pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr
 # The same code as a Gradio app with an embedded Rerun viewer (stack picked in the Config accordion)
 pixi run -e posekit-hands --frozen posekit-hands-app            # http://127.0.0.1:7872
 
-# Ground-truth eval on a fixed HOT3D (Quest 3) + UmeTrack subset from a dataforge catalog
-pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/hands-eval
+# Ground-truth eval on fixed frames of five dataforge catalog datasets
+pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://pablo-dl-server:51235 --output-dir /tmp/hands-eval
 
 # Per-frame speed, decoded GPU frame to joints + full mesh, per stage
 pixi run -e posekit-hands --frozen posekit-hands-bench
@@ -144,7 +144,7 @@ pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr
     egohand-fast tensorrt egohand-fast
 pixi run -e posekit-hands --frozen posekit-hands-bench --models egohand egohand-fast
 pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand egohand-fast \
-    --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/egohand-eval
+    --catalog-url rerun+http://pablo-dl-server:51235 --output-dir /tmp/egohand-eval
 ```
 
 `fast_egohand_configs()` pairs a batch-one TensorRT detector (PIL-exact GPU resize, its three
@@ -176,33 +176,39 @@ outputs; latency excludes decode and engine builds):
 A band is one metric on one dataset, relative to the reference: recall, mean IoU and side
 accuracy stay ≥ 0.95×; 2D median/p95 pixel error and absolute and wrist-relative 3D median/p95
 (mm) stay ≤ 1.05× (nine metrics × five datasets). The 10x is the mean over all frames (UmeTrack
-8.5x … Gen-HumanEgo 10.7x). The fixed frames also guided the precision choice. Reproduce from a cache
-of camera-scoped catalog RRDs (`<cache>/<dataset>/eval/*.rrd`; the team copy is
-`dgx-spark:~/egohand-spark-cache`), on an otherwise idle GPU:
+8.5x … Gen-HumanEgo 10.7x). The fixed frames also guided the precision choice. Reproduce with
+`hands_eval`'s `end-to-end` protocol; the first command checks the bands, the second (on an
+otherwise idle GPU) adds the timing:
 
 ```bash
-pixi run -e posekit-hands --frozen posekit-hands-cached-bench --cache <cache> --output /tmp/egohand-ref \
-    --stack egohand --no-measure-timing
-pixi run -e posekit-hands --frozen posekit-hands-cached-bench --cache <cache> --output /tmp/egohand-fast \
-    --stack egohand-fast --baseline /tmp/egohand-ref/results.json   # egohand-fast-bf16 below Blackwell
+pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://pablo-dl-server:51235 \
+    --models egohand egohand-fast --protocols end-to-end --no-log-rrd --output-dir /tmp/egohand-bands
+pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://pablo-dl-server:51235 \
+    --models egohand-fast --protocols end-to-end --no-log-rrd --output-dir /tmp/egohand-speed \
+    --timing --baseline /tmp/egohand-bands/results.json   # egohand-fast-bf16 below Blackwell
 ```
 
-**Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera
-`cam_00`) and three UmeTrack test segments (`cam_01`), every 10th frame, at most 40
-frames each. Ground truth is dataforge's `hand_pose` layer (UmeTrack landmarks in HAND_21
-order; the derived joint 1 is not scored); a hand counts when at least 15 joints are
-valid. `gt-boxes` crops 1.2x the ground-truth joint box (the paper's protocol);
-`detector` uses each model's own detector and scores hands matched at IoU >= 0.3 with
-the correct side. Metrics follow the EgoHand paper (arXiv 2610.30293, Sec. 6.1): MPJPE
-(wrist-aligned), PA-MPJPE, RTE (root translation, metric models only) in mm and 2D EPE
-in px, each as mean / p90. It writes `results.json` and `hands_eval.rrd` (frames, ground
-truth next to every prediction, per-frame errors as scalars).
+The second command reports the fast stack's latency and fails unless all 45 bands hold against
+the first run's `egohand` rows; add `egohand` to its `--models` to time the reference as well.
+
+**Eval protocol** (`posekit.apis.hands_eval`): the frames are fixed in the code
+(`posekit.eval.hand_gt.EVAL_SUBSETS`): three segments and one camera per dataset, 100 frames per
+segment spread evenly over the frames with a visible hand, read straight from the catalog in one
+round trip per dataset. Ground truth is dataforge's `coco133_xyz` (HAND_21 order per side; the
+derived joint 1 is not scored) seen through each camera's native lens (pinhole, Fisheye624,
+double sphere); a hand counts when its wrist and at least 15 joints are valid. `gt-boxes` crops
+1.2x the ground-truth joint box (the paper's protocol); `detector` uses each model's own detector
+and scores hands matched at IoU >= 0.3 with the correct side. Their metrics follow the EgoHand
+paper (arXiv 2610.30293, Sec. 6.1): MPJPE (wrist-aligned), PA-MPJPE, RTE (root translation,
+metric models only) in mm and 2D EPE in px, each as mean / p90. `end-to-end` runs the stack as
+deployed and scores the nine banded metrics above. It writes `results.json` and
+`hands_eval.rrd` (frames, ground truth next to every prediction, per-frame errors as scalars).
 
 EgoHand, HOT3D, `gt-boxes`, mean (mm / px):
 
 | | MPJPE | PA-MPJPE | RTE | 2D EPE |
 |---|---|---|---|---|
-| ours (subset above) | 20.8 | 8.1 | 33.1 | 9.3 |
+| ours (`EVAL_SUBSETS`, RTX 5090) | 20.4 | 8.3 | 29.6 | 10.7 |
 | paper, Table 2 (no smoothing) | 18.9 | 9.1 | 36.2 | 16.4 |
 
 The paper does not name its HOT3D split, device or camera, fits SOMA to MANO joints for
