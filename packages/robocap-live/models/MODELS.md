@@ -10,6 +10,11 @@ in their calibration frame) by 180 degrees before DetNet and turns its circles b
 Python s66 runs used) saw every camera as calibrated: run it with `--detnet-input legacy` (Python: `detnet_input="legacy"`). Its
 files are the "legacy" rows below; the runtime loads fixed names, so they live in their own models directory.
 
+The sample bundle (`robocap-live-download-sample`, Hugging Face `pablovela5620/robocap-live-sample`) holds the mix-1 DetNet files
+since revision `4827d09d3eb8c8f99644b8ded05202f7dfacf285`; the 0929 DetNet is at revision `9887c348de494dda9bbdb86f1381157bc1934895`
+(`hf download … --revision 9887c348…` with `--detnet-input legacy` rolls back). The ONNX golden (`tests/data/nets/detnet_out_f32.bin`)
+holds mix-1's PyTorch outputs on the same four pooled frames.
+
 ## Which files the runtime loads
 
 | Backend | Call | DetNet | KeyNet |
