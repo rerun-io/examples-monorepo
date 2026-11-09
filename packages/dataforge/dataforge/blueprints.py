@@ -112,6 +112,23 @@ def headset_eye_controls(forward: tuple[float, float, float], up: tuple[float, f
     return follow_eye_controls(forward, up, back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15)
 
 
+def trail_window_range() -> rrb.VisibleTimeRanges:
+    """The cursor-relative window every 3D view shows a motion trail through: the last ``TRAIL_WINDOW_S`` on ``video_time``.
+
+    The rule for a moving rig: its layer logs the trail once, one segment per pose
+    (``logging_toolkit.log_trail_segments`` at ``schema.trail_path(source)``), and the blueprint
+    limits it to this window. A trail precomputed as a rolling window on every row (each row of GSI's
+    ``/slam/trail`` holds the last 29 segments) stores every position again and again, and an unlimited one is the path.
+    """
+    return rrb.VisibleTimeRanges(
+        rrb.VisibleTimeRange(
+            schema.TIMELINE,
+            start=rrb.TimeRangeBoundary.cursor_relative(seconds=TRAIL_WINDOW_S),
+            end=rrb.TimeRangeBoundary.cursor_relative(),
+        )
+    )
+
+
 def video_exclusions(slots: Iterable[tuple[int, int]]) -> list[str]:
     """Content rules that drop each ``(rig, cam)`` video, and anything beneath it, from a view.
 
@@ -186,13 +203,7 @@ def rig_blueprint(
     """
     sources: tuple[str, ...] = (run_source, *extra_run_sources)
     colors: Mapping[str, tuple[int, int, int]] = path_colors or {}
-    trail_window = rrb.VisibleTimeRanges(
-        rrb.VisibleTimeRange(
-            schema.TIMELINE,
-            start=rrb.TimeRangeBoundary.cursor_relative(seconds=TRAIL_WINDOW_S),
-            end=rrb.TimeRangeBoundary.cursor_relative(),
-        )
-    )
+    trail_window: rrb.VisibleTimeRanges = trail_window_range()
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(

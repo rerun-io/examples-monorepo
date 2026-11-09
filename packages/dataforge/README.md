@@ -373,6 +373,25 @@ MCAP reader cannot open; they are listed in `timing/unconverted.json`.
 Differences from the whole-body release, the depth codec and the subset are in
 [docs/gen-humanego.md](docs/gen-humanego.md).
 
+### GSI Egocentric Six-View (gsi-six-view)
+
+GSI's private partner edition (10 h, 1,685 episodes, 174 GB) ships every episode as two Rerun rrds already, so
+dataforge repacks rather than decodes: `download` signs in with `GSI_PARTNER_USERNAME`/`GSI_PARTNER_PASSWORD`
+(from `~/.secrets.env`) and fetches the sha256-checked files. `convert` writes the exoego:v2 layout: lenses move
+the six H.265 streams, GSI's pinholes and rig extrinsics (turned from FLU to RDF) and the SLAM pose onto
+`/world/rig_00` with `video_time` from 0, and the hands go to the world frame as COCO-133 keypoints, wrists, MANO
+records (`pose`), meshes (`hand_mesh`) and per-view projections (`projections`). About two seconds per episode;
+the download is deleted afterwards.
+
+```bash
+source ~/.secrets.env
+R=/mnt/nas/ssd-8tb/downloads/gsi/egocentric-six-view-10h
+pixi run -e dataforge --frozen dataforge-download gsi-six-view --root $R --sequences <episode_id>
+DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/gsi-six-view pixi run -e dataforge --frozen dataforge-convert gsi-six-view --root $R
+```
+
+The API, the layers, the frames and the clocks are in [docs/gsi-six-view.md](docs/gsi-six-view.md).
+
 ### SLAM benchmarks through VSLAM-LAB (vslam-lab)
 
 [VSLAM-LAB](https://github.com/VSLAM-LAB/VSLAM-LAB) fetches some thirty SLAM
@@ -505,6 +524,7 @@ is a nominal-rate fiction for such a file.
 | `egoexo4d` | one Ego-Exo4D take with an Ego-Exo4D-HM fit; take files fetched on demand (licence keys) and deleted after base | **four** rrds: `base` with the localized GoPros (KB4, 1080p AV1), the Aria RGB/SLAM/eye cameras and its trajectory; `body_pose` (SMPL-H parameters, COCO-133 keypoints), `body_mesh` (SMPL-H, 10 Hz), `projections`; see [docs/egoexo4d.md](docs/egoexo4d.md) |
 | `mamma` | one MAMMA sequence of the `--family` (eval, markerless-dance, markerless-multiple-people, markerless-iphones; syn and syn-bedlam: the MammaSyn renders and BEDLAM clips from their WebDataset shards), read in place from the release | **four to six** rrds: `base` with every camera (AV1, videos above 3.2 MP at half size, the Vicon radial lens as data); `body_pose` (SMPL-X parameters and COCO-133 keypoints per person, tagged `mosh_gt`, `mamma_pred` or `synthetic_gt`), `body_mesh` (SMPL-X, 10 Hz; syn: every 6 Hz frame), `projections` (through the Vicon lens; syn: pinhole); eval and syn add `masks` (palette PNGs at a quarter size) and, on Extra, `markers`; see [docs/mamma.md](docs/mamma.md) and [docs/mamma-syn.md](docs/mamma-syn.md) |
 | `harmony4d` | one Harmony4D sequence, read in place from its release zip (one zip per scene and split, fetched from the Hub) | **four** rrds: `base` with ~20 GoPros (OPENCV_FISHEYE, 4K JPEG frames as 1080p AV1) and, when worn, both Aria glasses' rgb/slam cameras (upright) and per-frame poses; `body_pose` (SMPL parameters, SMPL-45 joints, COCO-17 keypoints in COCO-133 per person), `body_mesh` (shipped SMPL vertices, 10 Hz), `projections` (through each full lens, plus the shipped boxes); see [docs/harmony4d.md](docs/harmony4d.md) |
+| `gsi-six-view` | one GSI episode, its two shipped rrds fetched through GSI's API | exoego:v2: `base` (rig, six H.265 views with GSI's pinholes in RDF, SLAM pose and path), `pose` (COCO-133 hands, wrists, confidence, MANO records), `hand_mesh`, `projections`; see [docs/gsi-six-view.md](docs/gsi-six-view.md) |
 | `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as the sensor's 16-bit PNGs (`EncodedDepthImage`) where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
@@ -585,6 +605,15 @@ has one, in a strip under it), worn cameras in a column on the right, static cam
 in one strip along the bottom. Past `EXO_PANES_PER_TAB` (9) static cameras the strip
 continues in further tabs, filled in camera order. Panes are titled `rig_NN/cam_MM`,
 as in the entity tree.
+
+**Trails: the blueprint limits them, never the data.** A moving rig shows its recent motion as a trail.
+The layer that carries `world_T_rig` logs it once, one two-point segment per pose
+(`logging_toolkit.log_trail_segments` at `schema.trail_path(source)`), and every 3D view that shows it
+overrides that entity with `blueprints.trail_window_range()`: the last `TRAIL_WINDOW_S` (10 s) before the cursor
+on `video_time`. Do not ship a rolling window precomputed on every row (each row of GSI's `/slam/trail` holds the last 29
+segments, so every position is stored 29 times), and do not show the trail without the window (it is then the
+whole path again). The whole path
+stays a static strip at `schema.trajectory_path(source)`, drawn thin and dim under the trail.
 
 Every `register` run republishes both blueprints from the current code. It writes
 new stamped `.rbl` files (a live server holds the registered ones open, so they are

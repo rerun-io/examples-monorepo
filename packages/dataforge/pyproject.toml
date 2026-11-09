@@ -72,6 +72,7 @@ ignore_names = [
     "protocol_version",
     "do_HEAD",
     "do_GET",
+    "do_POST",
     "log_message",
     # pytest's module-level skip marker.
     "pytestmark",
@@ -83,6 +84,8 @@ ignore_names = [
     # in @pytest.mark.usefixtures instead only moves the report to the fixture
     # itself, since vulture does not read strings.
     "nvenc",
+    # gsi-six-view: the partner sign-in fixture, requested for the environment it sets.
+    "signed_in",
     # Partial profile envelope consumed by pyserde.
     "hand_model",
     # aria_gen2_pilot manifest entries, read by name from FETCHED.
