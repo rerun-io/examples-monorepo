@@ -2214,6 +2214,71 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Log a Brush PLY and a hexel PLY side by side on one orbit camera with the per-scene metrics table"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# depth-video-viewer — out-of-tree Rerun viewer that draws DepthVideoStream (AV1 10-bit depth)
+# ═══════════════════════════════════════════════════════════════════════════
+# Same pattern as the gsplat-rust-renderer viewer: crates.io Rerun =0.42.0 crates, no fork.
+[feature.depth-video-viewer]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.depth-video-viewer.dependencies]
+python = "3.12.*"
+# Pinned Rerun crates share this Rust toolchain (Rerun 0.42 requires rustc 1.98).
+rust = "1.98.*"
+clang = "*"
+cmake = "*"
+pkg-config = "*"
+# rav1d's x86-64 assembly; without it AV1 decoding is ~25x slower.
+nasm = "*"
+# libaom-av1 encoder and the reference gray10le decoder for the logging helper.
+ffmpeg = "*"
+numpy = "*"
+jaxtyping = "*"
+pillow = "*"
+tyro = ">=0.9.1,<0.10"
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }  # pin-bump: hold — matches the viewer's =0.42.0 re_viewer crates
+python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) would take 4.x
+# gilrs (via re_viewer) links libudev through pkg-config at build time.
+libudev = "257.*"
+libxkbcommon = "*"
+wayland = "*"
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxinerama = "*"
+xorg-libxrandr = "*"
+
+[feature.depth-video-viewer.pypi-dependencies]
+depth-video-viewer = { path = "packages/depth-video-viewer", editable = true }
+
+[feature.depth-video-viewer.activation.env]
+PACKAGE_DIR = "packages/depth-video-viewer"
+PYREFLY_TARGET = "depth_video_viewer tools tests"
+CARGO_PROFILE_DEV_DEBUG = "0"
+CARGO_PROFILE_TEST_DEBUG = "0"
+CARGO_INCREMENTAL = "0"
+PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
+
+[feature.depth-video-viewer.tasks.depth-video-viewer-build]
+cmd = "cargo build --release --locked"
+cwd = "packages/depth-video-viewer"
+description = "Build the depth-video-viewer binary (release)"
+
+[feature.depth-video-viewer.tasks.depth-video-viewer]
+cmd = "cargo run --release --locked --"
+cwd = "packages/depth-video-viewer"
+description = "Run the viewer; extra arguments (an .rrd path, --headless, --port) follow"
+
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
+[feature.depth-video-viewer.tasks.depth-video-viewer-rust-check]
+cmd = "cargo-fmt -- --check && cargo-clippy clippy --locked --all-targets -- -D warnings && cargo test --locked"
+cwd = "packages/depth-video-viewer"
+description = "Check Rust formatting, run Clippy and the Rust unit tests"
+
+[feature.depth-video-viewer.tasks.gate]
+depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "depth-video-viewer-rust-check"]
+description = "Run Python and Rust author checks"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # hexels — upstream Hexels (CUDA 13 build in recipes/hexels-src) + our protocol tools
 # ═══════════════════════════════════════════════════════════════════════════
 # hexel-kernel installs as the Python module `gsplat`: never compose this feature with nerfstudio gsplat.
@@ -4300,6 +4365,13 @@ gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
     "dev",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+depth-video-viewer = { features = [
+    "depth-video-viewer",
+], solve-group = "depth-video-viewer", no-default-feature = true }
+depth-video-viewer-dev = { features = [
+    "depth-video-viewer",
+    "dev",
+], solve-group = "depth-video-viewer", no-default-feature = true }
 hexels = { features = ["cuda", "lietorch-mojo", "hexels"], solve-group = "hexels", no-default-feature = true }
 hexels-dev = { features = ["cuda", "lietorch-mojo", "hexels", "dev"], solve-group = "hexels", no-default-feature = true }
 metrictrail = { features = [
