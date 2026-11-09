@@ -20,7 +20,6 @@ import numpy as np
 import torch
 from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
 from egohand_inference.perf import PerfStage
-from einops import rearrange
 from huggingface_hub import hf_hub_download, snapshot_download
 from jaxtyping import Bool, Float32, Int, Int64, UInt8
 from numpy import ndarray
@@ -33,6 +32,7 @@ from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import HandDetector, TopDownHandPose3d
+from posekit.ops.pil_resize import resize_bilinear_uint8
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
@@ -222,10 +222,8 @@ def _resize_with_pil(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b
 
 
 def _resize_on_gpu(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b 3 640 640"]:
-    """Antialiased bilinear resize of the decoded CUDA frames, rounded to 8-bit levels like the PIL path."""
-    return torch.nn.functional.interpolate(
-        rearrange(frames_rgb, "b h w c -> b c h w").float(), size=(640, 640), mode="bilinear", align_corners=False, antialias=True,
-    ).round().clamp_(0, 255) / 255.0
+    """Match the reference PIL bilinear input without transferring image pixels."""
+    return resize_bilinear_uint8(frames_rgb, (640, 640))
 
 
 @serde
