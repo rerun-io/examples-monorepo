@@ -126,6 +126,60 @@ def test_two_tracks_never_share_one_proposal() -> None:
     assert at(frames, 1, 0, "right").origin == "held"
 
 
+def no_hand(cam: int, side: HandSide) -> ViewLabel:
+    return ViewLabel(cam, side, "no_hand", None, "agent", "astra")
+
+
+def test_a_false_box_removed_once_does_not_come_back() -> None:
+    # EgoHand keeps proposing a false "left" box that drifts 5 px per step; the reviewer says no hand at t1.
+    proposals: dict[int, list[Proposal]] = {i: [ego(0, "left", 500.0 + 5.0 * i, 0.9)] for i in range(6)}
+    frames: list[TrackFrame] = run(proposals, {1: [no_hand(0, "left")]})
+    assert at(frames, 0, 0, "left").origin == "detected"
+    assert (at(frames, 1, 0, "left").origin, at(frames, 1, 0, "left").box) == ("reviewed", None)
+    assert [at(frames, i, 0, "left").origin for i in (2, 3, 4)] == ["none"] * 3
+    assert [at(frames, i, 0, "right").origin for i in (2, 3, 4)] == ["none"] * 3  # claimed for every side
+    # Without the no_hand label the same box is shown every frame.
+    assert [at(run(proposals), i, 0, "left").origin for i in (2, 3, 4)] == ["chained"] * 3
+
+
+def test_a_false_box_on_a_chain_does_not_come_back() -> None:
+    # A reviewed chain walks onto a false box; the reviewer says no hand at t2: the chain's continuation becomes negative.
+    proposals: dict[int, list[Proposal]] = {i: [ego(0, "right", 10.0 + 10.0 * i, 0.9)] for i in range(6)}
+    frames: list[TrackFrame] = run(proposals, {0: [reviewed(0, "left", 10.0)], 2: [no_hand(0, "left")]})
+    assert at(frames, 1, 0, "left").origin == "chained"
+    assert [at(frames, i, 0, side).origin for i in (3, 4, 5) for side in ("left", "right")] == ["none"] * 6
+
+
+def test_a_real_hand_elsewhere_in_the_view_is_still_detected() -> None:
+    proposals: dict[int, list[Proposal]] = {i: [ego(0, "left", 500.0, 0.9)] + ([ego(0, "left", 10.0, 0.7)] if i >= 2 else []) for i in range(6)}
+    frames: list[TrackFrame] = run(proposals, {1: [no_hand(0, "left")]})
+    for i in (2, 3, 4):
+        found: TrackBox = at(frames, i, 0, "left")
+        assert (found.origin, found.box) == (("detected", Box(10.0, 100.0, 110.0, 200.0)) if i == 2 else ("chained", Box(10.0, 100.0, 110.0, 200.0)))
+
+
+def test_a_reviewer_box_ends_the_negative_track() -> None:
+    proposals: dict[int, list[Proposal]] = {i: [ego(0, "left", 500.0, 0.9)] for i in range(6)}
+    frames: list[TrackFrame] = run(proposals, {1: [no_hand(0, "left")], 3: [reviewed(0, "left", 500.0)]})
+    assert at(frames, 2, 0, "left").origin == "none"
+    assert at(frames, 3, 0, "left").origin == "reviewed"
+    assert [at(frames, i, 0, "left").origin for i in (4, 5)] == ["chained", "chained"]
+
+
+def test_a_negative_track_holds_one_miss_then_ends() -> None:
+    once: dict[int, list[Proposal]] = {i: [ego(0, "left", 500.0)] for i in (0, 1, 3)}
+    assert at(run(once, {1: [no_hand(0, "left")]}), 3, 0, "left").origin == "none"  # one miss (t2) holds the negative box
+    twice: dict[int, list[Proposal]] = {i: [ego(0, "left", 500.0)] for i in (0, 1, 4)}
+    assert at(run(twice, {1: [no_hand(0, "left")]}), 4, 0, "left").origin == "detected"  # two misses (t2, t3) end it
+
+
+def test_no_negative_track_on_a_side_swap() -> None:
+    # The reviewer moves a hand from left to right in one post: the box is a real hand, the right chain keeps it.
+    proposals: dict[int, list[Proposal]] = {i: [ego(0, "left", 10.0, 0.9)] for i in range(4)}
+    frames: list[TrackFrame] = run(proposals, {1: [no_hand(0, "left"), reviewed(0, "right", 10.0)]})
+    assert [at(frames, i, 0, "right").origin for i in (2, 3)] == ["chained", "chained"]
+
+
 def test_track_cache_recomputes_after_a_label_write() -> None:
     store: LabelStore = LabelStore("seg", split="train", application_id="test")
 
@@ -140,7 +194,8 @@ def test_track_cache_recomputes_after_a_label_write() -> None:
     store.put(FrameLabels("seg", TIMES[3], [ViewLabel(0, "left", "no_hand", None, "person", "tester")]))
     cache.invalidate_from(TIMES[3])
     again: list[TrackFrame] = cache.frames(TIMES[2], 3)
-    assert [at(again, i, 0, "left").origin for i in range(3)] == ["chained", "reviewed", "detected"]
+    # The no_hand at t3 makes the same box a negative track, so it is not detected again at t4.
+    assert [at(again, i, 0, "left").origin for i in range(3)] == ["chained", "reviewed", "none"]
     assert len(cache.frames(TIMES[-2], 10)) == 2
     with pytest.raises(ValueError, match="grid"):
         cache.frames(TIMES[0] + 1, 2)

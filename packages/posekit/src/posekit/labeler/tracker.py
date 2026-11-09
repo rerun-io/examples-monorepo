@@ -18,13 +18,26 @@ For every (cam, side) and grid time the machine box is, in this order:
 4. ``none``: no hand.
 
 A ``no_hand`` label ends the chain at its time; a ``rejected`` label hides only that time (the chain passes through).
+
+**Negative tracks.** A ``no_hand`` label at (t, cam, side) over a box the machine would have shown there starts a negative
+track on that box, so the false box does not come back at the next grid time. That box is the continuation of the side's
+live chain (the proposal of any side with the highest IoU >= ``CHAIN_IOU`` to the chain's box, or the chain's own box if
+none), else the best unclaimed proposal of that side with score >= ``DETECT_SCORE``. No negative track starts on a box
+that overlaps (IoU >= ``CLAIM_IOU``) a stored box of the other side in that camera at t: that hand is real, the reviewer
+only swapped its side. At later grid times a negative track first claims every unclaimed proposal with IoU >=
+``CHAIN_IOU`` to its box (any side), follows the best of them, holds ``MAX_HELD`` missed steps, then ends; a stored label
+with a box for its (cam, side) ends it.
+
 One proposal feeds at most one track per frame: reviewed boxes claim the proposals they overlap (IoU >= ``CLAIM_IOU``),
-then chains take proposals greedily by IoU, then carried boxes re-snap (left before right), then detections take
-what is left.
+then negative tracks claim theirs, then chains take proposals greedily by IoU, then carried boxes re-snap (left before
+right), then detections take what is left.
 
 ``propagate`` is a pure, deterministic function of (proposals, stored labels) and, with a carrier, of the decoded
 frames (the carrier must return the same box for the same run). ``TrackCache`` keeps the computed
 prefix of one segment and recomputes from the earliest time a label write touched.
+
+A ``TrackCache`` runs any ``Propagator``: ``ChainPropagator`` (this module's rules, the default) or the 3D one of
+``posekit.labeler.megatrack`` (``--propagator megatrack``).
 """
 
 from __future__ import annotations
@@ -32,7 +45,7 @@ from __future__ import annotations
 import threading
 from bisect import bisect_left
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, TypeAlias, runtime_checkable
 
 from posekit.labeler.queue import ProposalProvider, iou
@@ -99,6 +112,38 @@ class Chain:
 
 
 @dataclass(frozen=True, slots=True)
+class Negative:
+    """A negative track: a box the reviewer said is not this side's hand, followed so it is not shown again."""
+
+    box: Box
+    """Last box of the negative track."""
+    held: int
+    """Consecutive steps without an overlapping proposal."""
+
+
+@runtime_checkable
+class MachineStep(Protocol):
+    """One grid time of a propagator: the machine boxes and whatever state the next time needs."""
+
+    @property
+    def frame(self) -> TrackFrame:
+        """Boxes of every (cam, side)."""
+        ...
+
+
+@runtime_checkable
+class Propagator(Protocol):
+    """Machine propagation over the grid, one time after the other (``TrackCache`` keeps the steps)."""
+
+    def step(self, t_ns: int, cams: list[int], proposals: list[Proposal], labels: list[ViewLabel], previous: MachineStep | None) -> MachineStep:
+        """The machine boxes at ``t_ns`` given the step before it (None at the first grid time).
+
+        Deterministic: the same inputs and previous step give the same boxes.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class TrackStep:
     """The machine boxes of one grid time and the chains they leave for the next."""
 
@@ -106,6 +151,8 @@ class TrackStep:
     """Boxes of every (cam, side)."""
     chains: dict[TrackKey, Chain]
     """Live chains after this time."""
+    negatives: dict[TrackKey, Negative] = field(default_factory=dict)
+    """Live negative tracks after this time."""
 
 
 def track_step(
@@ -115,6 +162,7 @@ def track_step(
     labels: list[ViewLabel],
     chains: dict[TrackKey, Chain],
     carrier: BoxCarrier | None = None,
+    negatives: dict[TrackKey, Negative] | None = None,
 ) -> TrackStep:
     """Propagate the tracks one grid time; see the module docstring.
 
@@ -125,10 +173,13 @@ def track_step(
         labels: Stored labels at ``t_ns``.
         chains: Live chains after the previous grid time.
         carrier: Visual tracker for reviewed chains; None = chains only hold (``MAX_HELD``).
+        negatives: Live negative tracks after the previous grid time.
     """
     stored: dict[TrackKey, ViewLabel] = {(label.cam, label.side): label for label in labels}
+    live_negatives: dict[TrackKey, Negative] = negatives or {}
     boxes: list[TrackBox] = []
     next_chains: dict[TrackKey, Chain] = {}
+    next_negatives: dict[TrackKey, Negative] = {}
     for cam in cams:
         candidates: list[Proposal] = [p for p in proposals if p.model == "egohand" and p.cam == cam]
         claimed: set[int] = set()
@@ -145,6 +196,35 @@ def track_step(
                 claimed.update(k for k, p in enumerate(candidates) if iou(p.box, label.box) >= CLAIM_IOU)
             elif label.status == "rejected" and (cam, side) in chains:
                 next_chains[(cam, side)] = chains[(cam, side)]
+        for side in HAND_SIDES:
+            negative: Negative | None = live_negatives.get((cam, side))
+            label = stored.get((cam, side))
+            if negative is None or (label is not None and label.box is not None):
+                continue
+            overlapping: list[int] = [k for k, p in enumerate(candidates) if k not in claimed and iou(negative.box, p.box) >= CHAIN_IOU]
+            claimed.update(overlapping)
+            if overlapping:
+                k = max(overlapping, key=lambda k: (iou(negative.box, candidates[k].box), -k))
+                next_negatives[(cam, side)] = Negative(candidates[k].box, 0)
+            elif negative.held < MAX_HELD:
+                next_negatives[(cam, side)] = Negative(negative.box, negative.held + 1)
+        for side in HAND_SIDES:
+            label = stored.get((cam, side))
+            if label is None or label.status != "no_hand" or (cam, side) in next_negatives:
+                continue
+            shown: Box | None = None
+            prior_chain: Chain | None = chains.get((cam, side))
+            if prior_chain is not None:
+                continuing: list[int] = [k for k, p in enumerate(candidates) if k not in claimed and iou(prior_chain.box, p.box) >= CHAIN_IOU]
+                shown = candidates[max(continuing, key=lambda k: (iou(prior_chain.box, candidates[k].box), -k))].box if continuing else prior_chain.box
+            else:
+                confident: list[int] = [k for k, p in enumerate(candidates) if k not in claimed and p.side == side and p.score >= DETECT_SCORE]
+                shown = candidates[max(confident, key=lambda k: (candidates[k].score, -k))].box if confident else None
+            other: ViewLabel | None = stored.get((cam, "right" if side == "left" else "left"))
+            if shown is None or (other is not None and other.box is not None and iou(other.box, shown) >= CLAIM_IOU):
+                continue
+            next_negatives[(cam, side)] = Negative(shown, 0)
+            claimed.update(k for k, p in enumerate(candidates) if iou(shown, p.box) >= CHAIN_IOU)
         chained_sides: list[HandSide] = [side for side in HAND_SIDES if side not in decided and (cam, side) in chains]
         pairs: list[tuple[float, int, int]] = []
         for side_index, side in enumerate(HAND_SIDES):
@@ -195,7 +275,7 @@ def track_step(
             decided[side] = TrackBox(cam, side, candidates[best].box, "detected", candidates[best].score)
             next_chains[(cam, side)] = Chain(candidates[best].box, 0, t_ns)
         boxes.extend(decided[side] for side in HAND_SIDES)
-    return TrackStep(TrackFrame(t_ns, boxes), next_chains)
+    return TrackStep(TrackFrame(t_ns, boxes), next_chains, next_negatives)
 
 
 def propagate(
@@ -216,11 +296,29 @@ def propagate(
     """
     frames: list[TrackFrame] = []
     chains: dict[TrackKey, Chain] = {}
+    negatives: dict[TrackKey, Negative] = {}
     for t_ns in times_ns:
-        step: TrackStep = track_step(t_ns, cams, proposals_at(t_ns), labels_at(t_ns), chains, carrier)
+        step: TrackStep = track_step(t_ns, cams, proposals_at(t_ns), labels_at(t_ns), chains, carrier, negatives)
         frames.append(step.frame)
         chains = step.chains
+        negatives = step.negatives
     return frames
+
+
+@dataclass(frozen=True, slots=True)
+class ChainPropagator:
+    """This module's rules (EgoHand chains, optionally carried by a visual tracker) as a ``Propagator``."""
+
+    carrier: BoxCarrier | None = None
+    """Visual tracker for reviewed chains; None = chains only hold."""
+
+    def step(self, t_ns: int, cams: list[int], proposals: list[Proposal], labels: list[ViewLabel], previous: MachineStep | None) -> TrackStep:
+        """``track_step`` from the previous step's chains."""
+        if previous is not None and not isinstance(previous, TrackStep):
+            raise TypeError(f"ChainPropagator continues a TrackStep, not {type(previous).__name__}")
+        if previous is None:
+            return track_step(t_ns, cams, proposals, labels, {}, self.carrier)
+        return track_step(t_ns, cams, proposals, labels, previous.chains, self.carrier, previous.negatives)
 
 
 class TrackCache:
@@ -235,6 +333,7 @@ class TrackCache:
         proposals: ProposalProvider,
         store: LabelStore,
         carrier: BoxCarrier | None = None,
+        propagator: Propagator | None = None,
     ) -> None:
         """Bind the cache to a segment's grid, proposals and labels.
 
@@ -245,15 +344,16 @@ class TrackCache:
             proposals: Proposal source.
             store: The segment's labels.
             carrier: Visual tracker for reviewed chains (it keeps its own runs; a label write does not drop them).
+            propagator: The propagation rules; None = ``ChainPropagator(carrier)``.
         """
         self.segment_id: str = segment_id
         self.times_ns: list[int] = sorted(times_ns)
         self.cams: list[int] = cams
         self.proposals: ProposalProvider = proposals
         self.store: LabelStore = store
-        self.carrier: BoxCarrier | None = carrier
+        self.propagator: Propagator = ChainPropagator(carrier) if propagator is None else propagator
         self._index: dict[int, int] = {t: i for i, t in enumerate(self.times_ns)}
-        self._steps: list[TrackStep] = []
+        self._steps: list[MachineStep] = []
         """Computed prefix: ``_steps[i]`` is grid time ``times_ns[i]``."""
         self._lock = threading.Lock()
 
@@ -281,9 +381,9 @@ class TrackCache:
                     return [step.frame for step in self._steps[start:stop]]
                 for _ in range(min(STEPS_PER_LOCK, stop - len(self._steps))):
                     t_ns: int = self.times_ns[len(self._steps)]
-                    chains: dict[TrackKey, Chain] = self._steps[-1].chains if self._steps else {}
+                    previous: MachineStep | None = self._steps[-1] if self._steps else None
                     self._steps.append(
-                        track_step(t_ns, self.cams, self.proposals.proposals(self.segment_id, t_ns), self.store.get(t_ns), chains, self.carrier)
+                        self.propagator.step(t_ns, self.cams, self.proposals.proposals(self.segment_id, t_ns), self.store.get(t_ns), previous)
                     )
 
     def frame(self, t_ns: int) -> TrackFrame:
