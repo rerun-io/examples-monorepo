@@ -55,6 +55,10 @@ else:
 
 CACHED_FAST_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Base path of the calibrated NVFP4 DINOv3; the calibration digest and FP8 tail count are appended to its stem."""
+FP8_TAIL_BLOCKS: int = 24
+"""Final DINO blocks whose linears run in FP8 instead of NVFP4; the first 8 stay NVFP4."""
+CATALOG_DETECTOR_CALIBRATION: Path = Path(__file__).resolve().parents[1] / "assets" / "egohand_detector_catalog.rrd"
+"""Activation ranges of the detector's three FP8 encoder input projections."""
 CACHED_HEAD_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-head-bf16-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Both learned heads with their virtual-camera conditioning, exported in BF16."""
 
@@ -67,7 +71,7 @@ class EgoHandFastConfig:
     """EgoHand safetensors path; None downloads it."""
     soma_assets: Path | None = None
     """Directory containing SOMAHand.npz; None downloads it."""
-    batch_size: int = 16
+    batch_size: int = 2
     """Maximum hand crops per captured execution."""
     padding: float = 0.2
     """Added fraction of the square detector crop side."""
@@ -77,12 +81,10 @@ class EgoHandFastConfig:
     """bf16 DINOv3 that the quantized backbone is made from; exported from these weights when absent."""
     head_onnx: Path = CACHED_HEAD_ONNX
     """BF16 heads artifact; exported from these weights when absent."""
-    backbone_backend: TensorRtBackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2))
+    backbone_backend: TensorRtBackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=2, opt_batch_size=2))
     """TensorRT runtime of the backbone; the heads use the same profile without FP8 attention fusion."""
-    fp8_tail_blocks: int = 8
-    """Final DINO blocks whose linears stay FP8 instead of NVFP4 (0..32)."""
     calibration: Path | None = None
-    """Activation ranges; None uses the committed disjoint SelfCap split."""
+    """Backbone activation ranges; None uses the committed five-dataset catalog calibration."""
     hf_egohand_repo_id: str = "pablovela5620/egohand"
     """Hugging Face repo holding the safetensors."""
     hf_egohand_revision: str = EGOHAND_REVISION
@@ -106,13 +108,13 @@ def export_quantized_backbone_once(config: EgoHandFastConfig, weights: Path, som
     Returns:
         The quantized backbone, named by its calibration digest and FP8 tail count.
     """
-    onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
+    onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=FP8_TAIL_BLOCKS)
 
     def quantize() -> None:
         export_backbone_once(
             weights, soma, config.backbone_source_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size
         )
-        quantize_backbone(config.backbone_source_onnx, onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
+        quantize_backbone(config.backbone_source_onnx, onnx, calibration, fp8_tail_blocks=FP8_TAIL_BLOCKS)
 
     build_once(onnx, quantize)
     return onnx
@@ -148,7 +150,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
         if config.backbone_precision == "nvfp4" and torch.cuda.get_device_capability()[0] < 10:
-            raise ValueError('NVFP4 needs a Blackwell GPU (compute capability 10+); without one use EgoHandStack.catalog(backbone_precision="bf16"), the egohand-catalog-bf16 stack.')
+            raise ValueError('NVFP4 needs a Blackwell GPU (compute capability 10+); without one use EgoHandStack.fast(backbone_precision="bf16"), the egohand-fast-bf16 stack.')
         self.config: EgoHandFastConfig = config
         self.profile_stages: bool = False
         """Record per-frame stage times in ``stage_ms``; off, inference adds no synchronization."""
@@ -278,15 +280,21 @@ class EgoHandStack[PoseConfig: (EgoHandConfig, EgoHandFastConfig)]:
         )
 
     @classmethod
-    def fast(cls, assets: Path | None = None) -> "EgoHandStack[EgoHandFastConfig]":
-        """The #487 fast stack: GPU-resize FP16-trunk captured detector, NVFP4 pose with an 8-block FP8 tail on the SelfCap calibration."""
+    def fast(cls, assets: Path | None = None, *, backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4") -> "EgoHandStack[EgoHandFastConfig]":
+        """The accepted fast stack, calibrated on five catalog datasets: batch-one detector, two-hand pose batches, full outputs.
+
+        NVFP4 (Blackwell): first 8 DINO blocks NVFP4, last 24 FP8, and the detector's three encoder input
+        projections FP8. BF16 (GPUs without NVFP4): the same executor unquantized, with an FP16 detector.
+        """
         paths: EgoHandAssetPaths = asset_paths(assets)
+        quantize: bool = backbone_precision == "nvfp4"
         return EgoHandStack(
             EgoHandDetectorConfig(
                 paths.detector,
-                backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=1, cache_dir=paths.engines, use_cuda_graph=True),
-                fp16_trunk=True,
+                backend=TensorRtBackendConfig(max_batch_size=1, opt_batch_size=1, cache_dir=paths.engines, use_cuda_graph=True),
+                fp16_trunk=not quantize,
                 gpu_preprocessing=True,
+                fp8_calibration=CATALOG_DETECTOR_CALIBRATION if quantize else None,
             ),
             EgoHandFastConfig(
                 paths.weights,
@@ -294,51 +302,21 @@ class EgoHandStack[PoseConfig: (EgoHandConfig, EgoHandFastConfig)]:
                 backbone_onnx=paths.engines / CACHED_FAST_BACKBONE_ONNX.name,
                 backbone_source_onnx=paths.bf16_backbone,
                 head_onnx=paths.engines / CACHED_HEAD_ONNX.name,
-                backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2, cache_dir=paths.engines),
-            ),
-        )
-
-    @classmethod
-    def catalog(cls, assets: Path | None = None, *, backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4") -> "EgoHandStack[EgoHandFastConfig]":
-        """The five-dataset calibrated stack: batch-one detector and two-hand pose batches, full outputs.
-
-        NVFP4 (Blackwell): first 8 DINO blocks NVFP4, last 24 FP8, and the detector's three
-        encoder input projections FP8. BF16 (Ampere): unquantized pose and an FP16 detector.
-        """
-        fast: EgoHandStack[EgoHandFastConfig] = EgoHandStack.fast(assets)
-        detector: EgoHandDetectorConfig = fast.detector
-        pose: EgoHandFastConfig = fast.pose
-        assert isinstance(detector.backend, TensorRtBackendConfig)
-        calibration: Path = Path(__file__).resolve().parents[1] / "assets"
-        quantize: bool = backbone_precision == "nvfp4"
-        return EgoHandStack(
-            replace(
-                detector,
-                backend=replace(detector.backend, max_batch_size=1, opt_batch_size=1),
-                fp16_trunk=not quantize,
-                fp8_calibration=calibration / "egohand_detector_catalog.rrd" if quantize else None,
-            ),
-            replace(
-                pose,
+                backbone_backend=TensorRtBackendConfig(max_batch_size=2, opt_batch_size=2, cache_dir=paths.engines),
                 backbone_precision=backbone_precision,
-                fp8_tail_blocks=24,
-                calibration=calibration / "egohand_catalog.rrd" if quantize else None,
-                batch_size=2,
-                backbone_backend=replace(pose.backbone_backend, max_batch_size=2, opt_batch_size=2),
             ),
         )
 
 
-EgoHandStackName: TypeAlias = Literal["egohand", "egohand-selfcap", "egohand-fast", "egohand-catalog", "egohand-catalog-bf16"]
+EgoHandStackName: TypeAlias = Literal["egohand", "egohand-selfcap", "egohand-fast", "egohand-fast-bf16"]
 EGOHAND_STACKS: dict[EgoHandStackName, Callable[[Path | None], EgoHandStack[EgoHandConfig] | EgoHandStack[EgoHandFastConfig]]] = {
     "egohand": EgoHandStack.reference,
     "egohand-selfcap": EgoHandStack.selfcap,
     "egohand-fast": EgoHandStack.fast,
-    "egohand-catalog": EgoHandStack.catalog,
-    "egohand-catalog-bf16": partial(EgoHandStack.catalog, backbone_precision="bf16"),
+    "egohand-fast-bf16": partial(EgoHandStack.fast, backbone_precision="bf16"),
 }
 """Every EgoHand stack by the one name the CLI roles, the app, the benches and the eval all use.
 
-``egohand-catalog`` is the accepted stack (45/45 accuracy bands); ``egohand-catalog-bf16`` is the same
-stack for GPUs without NVFP4/FP8. ``egohand-fast`` is the #487 stack that selfcap-curate's mount fit uses.
+``egohand-fast`` is the accepted fast stack (45/45 accuracy bands, NVFP4, Blackwell); ``egohand-fast-bf16`` is the
+same stack for GPUs without NVFP4.
 """

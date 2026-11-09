@@ -94,7 +94,7 @@ def test_tools_name_egohand_stacks_like_the_cli() -> None:
 
     assert eval_model("wilor").left_class == 2 and not eval_model("wilor").metric_root
     assert eval_model("egohand-selfcap").left_class == eval_model("egohand").left_class == 4
-    assert eval_model("egohand-fast").left_class == eval_model("egohand-catalog").left_class == 6
-    cell = EvalCell("egohand-catalog", "dataforge-umetrack", "detector", 1, 1, 1.0, 1.0, {"mpjpe_mm": Summary(12.5, None, 1)})
+    assert eval_model("egohand-fast").left_class == eval_model("egohand-fast-bf16").left_class == 6
+    cell = EvalCell("egohand-fast", "dataforge-umetrack", "detector", 1, 1, 1.0, 1.0, {"mpjpe_mm": Summary(12.5, None, 1)})
     assert from_json(EvalCell, to_json(cell)) == cell
     assert to_dict(cell)["metrics"] == {"mpjpe_mm": {"mean": 12.5, "p90": None, "count": 1}}

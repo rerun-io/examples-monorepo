@@ -30,7 +30,7 @@ _PIPELINE: tuple[str, HandPose3dPipeline] | None = None
 
 def default_stack() -> str:
     """The accepted EgoHand stack: NVFP4 on Blackwell, BF16 on older GPUs."""
-    return "egohand-catalog" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10 else "egohand-catalog-bf16"
+    return "egohand-fast" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10 else "egohand-fast-bf16"
 
 
 def _sync_config(video: str | None, camera: str | None, stack: str, max_frames: int) -> None:

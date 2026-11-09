@@ -28,11 +28,9 @@ pytestmark = pytest.mark.integration
 CAMERA = "/world/rig_04/cam_00/pinhole"
 
 
-def fast_config_for_device() -> EgoHandFastConfig:
-    """Exercise the same fast executor with a precision supported by the test GPU."""
-    if torch.cuda.get_device_capability()[0] < 10:
-        return EgoHandStack.catalog(backbone_precision="bf16").pose
-    return EgoHandStack.fast().pose
+def fast_stack_for_device() -> EgoHandStack[EgoHandFastConfig]:
+    """The fast stack in the precision the test GPU supports: NVFP4/FP8 on Blackwell, BF16/FP16 below it."""
+    return EgoHandStack.fast(backbone_precision="nvfp4" if torch.cuda.get_device_capability()[0] >= 10 else "bf16")
 
 
 @pytest.fixture(autouse=True)
@@ -368,8 +366,8 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing EgoHand parity fixture: {video}")
-    detector_config = EgoHandStack.fast().detector
-    pose_config: EgoHandFastConfig = fast_config_for_device()
+    stack: EgoHandStack[EgoHandFastConfig] = fast_stack_for_device()
+    detector_config, pose_config = stack.detector, stack.pose
     frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1]
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
     detector, pose = detector_config.setup(), pose_config.setup()
@@ -403,8 +401,8 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing EgoHand parity fixture: {video}")
-    detector_config = EgoHandStack.fast().detector
-    pose_config: EgoHandFastConfig = fast_config_for_device()
+    stack: EgoHandStack[EgoHandFastConfig] = fast_stack_for_device()
+    detector_config, pose_config = stack.detector, stack.pose
     frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1].repeat(2, 1, 1, 1)
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
     detector, pose = detector_config.setup(), pose_config.setup()
@@ -459,7 +457,7 @@ def test_stage_times_are_recorded_only_on_request() -> None:
     reference_config = replace(reference_config, backbone_backend=replace(reference_config.backbone_backend, max_batch_size=2, opt_batch_size=2))
     for config, stages in (
         (reference_config, {"preprocessing", "batch_assembly", "model_forward", "post_forward", "backbone", "head", "soma"}),
-        (fast_config_for_device(), {"preprocessing", "backbone", "head", "soma"}),
+        (fast_stack_for_device().pose, {"preprocessing", "backbone", "head", "soma"}),
     ):
         pose = config.setup()
         with torch.inference_mode():

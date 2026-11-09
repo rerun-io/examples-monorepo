@@ -52,9 +52,9 @@ class Config:
     """Native camera-scoped RRD cache: ``<cache>/<dataset>/eval/*.rrd``."""
     output: Path
     """Directory for ``results.json`` and one Rerun recording per dataset."""
-    stack: EgoHandStackName = "egohand-catalog"
-    """EgoHand stack: ``egohand`` is main's unquantized reference, ``egohand-catalog`` the accepted fast stack (NVFP4/FP8,
-    Blackwell) and ``egohand-catalog-bf16`` the same stack on GPUs without NVFP4."""
+    stack: EgoHandStackName = "egohand-fast"
+    """EgoHand stack: ``egohand`` is main's unquantized reference, ``egohand-fast`` the accepted fast stack (NVFP4/FP8,
+    Blackwell) and ``egohand-fast-bf16`` the same stack on GPUs without NVFP4."""
     assets: Path | None = None
     """Local asset tree; None uses the pinned Hugging Face downloads."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-hot3d-quest3", "dataforge-show3d", "gsi-six-view", "dataforge-gen-humanego-subset")

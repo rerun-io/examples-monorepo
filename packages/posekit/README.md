@@ -137,47 +137,31 @@ pixi run -e posekit-hands --frozen posekit-hands-bench
 ```
 
 Every EgoHand stack has one name (`EGOHAND_STACKS`) that the CLI roles, the app, the bench and
-the evals share: `egohand` (reference), `egohand-selfcap`, `egohand-fast` (#487), `egohand-catalog`
-(the accepted fast stack, NVFP4, Blackwell) and `egohand-catalog-bf16` (the same stack below
+the evals share: `egohand` (reference), `egohand-selfcap` (SelfCap's TensorRT reference),
+`egohand-fast` (the fast stack, NVFP4, Blackwell) and `egohand-fast-bf16` (the same stack below
 Blackwell). Select the same name for the detector and the pose role:
 
 ```bash
-pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/egohand-catalog.rrd \
-    egohand-catalog tensorrt egohand-catalog
-pixi run -e posekit-hands --frozen posekit-hands-bench --models egohand-selfcap egohand-fast egohand-catalog
-pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand-selfcap egohand-fast egohand-catalog \
+pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/egohand-fast.rrd \
+    egohand-fast tensorrt egohand-fast
+pixi run -e posekit-hands --frozen posekit-hands-bench --models egohand-selfcap egohand-fast
+pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand-selfcap egohand-fast \
     --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/egohand-eval
 ```
 
-`EgoHandStack.fast()` returns the existing `EgoHandDetectorConfig` with GPU
-preprocessing and an FP16 trunk, and an `EgoHandFastConfig`: its `FastEgoHandPredictor`
-runs NVFP4 DINOv3 linears with the last eight blocks in FP8, FP8 attention, BF16
-TensorRT heads, captured GPU crops, and full per-frame SOMA reconstruction. Identity, all 26 segment scales, joint
-rotations, and every hand vertex remain dynamic. The ordinary `egohand` selection
-retains its original defaults. SelfCap's existing calibration CLI selects these
-same roles with `--oak-egohand-fast`.
-
-First setup exports and builds missing artifacts through posekit and trtkit;
-subsequent calls use their cache. `EgoHandFastConfig.fp8_tail_blocks` controls the
-precision trade-off (0–32); both precision and calibration affect the export cache
-key. The `egohand-fast` calibration (`assets/egohand_nvfp4.rrd`) uses 138 crops from disjoint SelfCap frames, with
-mount-fit indices excluded. Its record includes exact frame indices and RGB
-SHA256 hashes. Reproduce it from the catalog with:
-
-```bash
-pixi run -e posekit-hands --frozen posekit-egohand-calibrate \
-    --catalog-url rerun+http://127.0.0.1:<port> --output /tmp/egohand-calibration.rrd
-```
-
-The calibration command also rejects every decoded benchmark frame by hash.
-Set `EgoHandFastConfig.calibration` to use a separate calibration record. Quantization,
-head export, and engine building are library code; no preparation scripts are required.
-
-`EgoHandStack.catalog()` is the five-dataset calibrated preset (CLI role `egohand-catalog`):
-DGX Spark **153.31 → 14.98 ms/frame (10.23x)** with all 45 accuracy bands passing. On GPUs
-without NVFP4, `EgoHandStack.catalog(backbone_precision="bf16")` (`egohand-catalog-bf16`)
-is the fast path: RTX 3060 **238.62 → 39.24 ms/frame (6.08x)**, 45/45 bands. See
-[EgoHand fast path on DGX Spark](docs/egohand-spark.md) for the results and how to reproduce them.
+`EgoHandStack.fast()` pairs a batch-one TensorRT detector (PIL-exact GPU resize, its three
+encoder input projections in FP8) with an `EgoHandFastConfig`: its `FastEgoHandPredictor` runs
+the DINOv3 backbone with the first 8 blocks in NVFP4 and the last 24 in FP8, FP8 attention, BF16
+TensorRT heads, captured GPU crops and full per-frame SOMA reconstruction. Identity, all 26
+segment scales, joint rotations and every hand vertex remain dynamic. Both roles load committed
+calibration records measured on five catalog datasets (`assets/egohand_catalog.rrd`,
+`assets/egohand_detector_catalog.rrd`): DGX Spark **153.31 → 14.98 ms/frame (10.23x)** with
+all 45 accuracy bands passing. On GPUs without NVFP4, `EgoHandStack.fast(backbone_precision="bf16")`
+(`egohand-fast-bf16`) runs the same executor unquantized: RTX 3060 **238.62 → 39.24 ms/frame
+(6.08x)**, 45/45 bands. SelfCap's calibration CLI selects the fast stack with `--oak-egohand-fast`.
+First setup exports and builds missing artifacts through posekit and trtkit; the calibration
+contents are part of the export cache key. See [EgoHand fast path on DGX Spark](docs/egohand-spark.md)
+for the results and how to reproduce them.
 
 **Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera
 `cam_00`) and three UmeTrack test segments (`cam_01`), every 10th frame, at most 40

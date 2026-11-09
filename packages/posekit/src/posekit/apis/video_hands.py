@@ -47,7 +47,7 @@ class VideoHandsSettings:
     camera_path: Path | None = EXAMPLES / "selfcap_oak_left.rrd"
     """CalibratedCamera .rrd of the video (EgoHand needs it); None for uncalibrated video with WiLoR."""
     detector: AnnotatedHandDetectorConfig = field(default_factory=WilorHandDetectorConfig)
-    """Hand detector selected by stack name: ``wilor`` or an ``EGOHAND_STACKS`` name (``egohand-catalog``, ``egohand-catalog-bf16``...)."""
+    """Hand detector selected by stack name: ``wilor`` or an ``EGOHAND_STACKS`` name (``egohand-fast``, ``egohand-fast-bf16``...)."""
     pose: AnnotatedHandPose3dConfig = field(default_factory=WilorHandPoseConfig)
     """Top-down 3D hand model selected by the same stack name as ``detector``."""
     frame_batch_size: int = 16

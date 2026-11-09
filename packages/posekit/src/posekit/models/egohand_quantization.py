@@ -1,28 +1,22 @@
-"""EgoHand-v1 activation ranges: the calibration record, its loader and artifact name, and their measurement."""
+"""EgoHand-v1 activation ranges: the calibration record, its loader, writer and artifact name."""
 
 import hashlib
 import math
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
-import torch
-from jaxtyping import UInt8
 from serde import SerdeError, from_dict, serde
 from serde.json import to_json
-from torch import Tensor, nn
 
-from posekit.cameras import CalibratedCamera
 from posekit.models.calibration_rrd import (
     CalibrationColumn,
     CalibrationRecording,
     CalibrationScalar,
-    frame_sha256,
     range_tables,
     read_calibration_rrd,
     write_calibration_rrd,
 )
-from posekit.models.dinov3_calibration import CALIBRATED_ATTENTION_INPUTS, CALIBRATED_LINEARS, DINO_BLOCKS, DinoActivationObserver
+from posekit.models.dinov3_calibration import CALIBRATED_ATTENTION_INPUTS, CALIBRATED_LINEARS, DINO_BLOCKS
 from posekit.models.dinov3_qdq import validate_fp8_tail_blocks
 
 EGOHAND_CALIBRATION_MODEL: str = "egohand"
@@ -32,7 +26,7 @@ EGOHAND_CALIBRATION_MODEL: str = "egohand"
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class EgoHandCalibration:
-    """Activation ranges and the exact SelfCap calibration split."""
+    """Activation ranges and the exact calibration split."""
 
     segment: str
     """Source catalog segment; evaluation uses separate frame indices or datasets."""
@@ -61,8 +55,8 @@ class EgoHandCalibration:
 
 
 def load_calibration(path: Path | None = None) -> EgoHandCalibration:
-    """Load the committed split, or an explicit newly measured calibration .rrd (layout: ``posekit.models.calibration_rrd``)."""
-    source: Path = path if path is not None else Path(__file__).parents[1] / "assets" / "egohand_nvfp4.rrd"
+    """Load the committed five-dataset catalog calibration, or an explicit calibration .rrd (layout: ``posekit.models.calibration_rrd``)."""
+    source: Path = path if path is not None else Path(__file__).parents[1] / "assets" / "egohand_catalog.rrd"
     recording: CalibrationRecording = read_calibration_rrd(source, EGOHAND_CALIBRATION_MODEL)
     tables: dict[str, dict[str, CalibrationColumn]] = recording.tables
     try:
@@ -101,43 +95,3 @@ def calibrated_backbone_path(base: Path, calibration: EgoHandCalibration, *, fp8
     digest: str = hashlib.sha256(to_json(calibration).encode()).hexdigest()[:16]
     precision: str = f"-fp8tail{fp8_tail_blocks}" if fp8_tail_blocks else ""
     return base.with_stem(f"{base.stem}-{digest}{precision}")
-
-
-@torch.inference_mode()
-def measure_calibration(
-    frames: Iterable[tuple[int, UInt8[Tensor, "h w 3"]]], camera: CalibratedCamera, *, segment: str,
-    excluded_mount_indices: Sequence[int] = (), excluded_frame_sha256: Sequence[str] = (), assets: Path | None = None,
-) -> EgoHandCalibration:
-    """Measure released BF16 activations through the ordinary detector and calibrated pose roles.
-
-    Frame indices and decoded RGB hashes are checked before model loading. Hooks
-    exist only during calibration and are removed even when inference fails.
-    The caller supplies catalog frames and the held-out evaluation split.
-    """
-    from posekit.models.egohand import EgoHandConfig
-    from posekit.models.egohand_fast import EgoHandStack
-
-    selected: list[tuple[int, UInt8[Tensor, "h w 3"]]] = list(frames)
-    indices: list[int] = [index for index, _ in selected]
-    if not indices or len(set(indices)) != len(indices):
-        raise ValueError("Calibration needs a non-empty set of distinct frame indices.")
-    if set(indices).intersection(excluded_mount_indices):
-        raise ValueError("Calibration frames overlap the mount-fit evaluation sample.")
-    hashes: list[str] = [frame_sha256(frame) for _, frame in selected]
-    if set(hashes).intersection(excluded_frame_sha256):
-        raise ValueError("Calibration contains a decoded evaluation frame.")
-    stack: EgoHandStack[EgoHandConfig] = EgoHandStack.selfcap(assets)
-    detector = stack.detector.setup()
-    predictor = replace(stack.pose, backbone_onnx=None).setup()
-    backbone: nn.Module = predictor.predictor.model.backbone
-    crops: int = 0
-    with DinoActivationObserver(backbone) as observer:
-        for index, frame in selected:
-            batch: UInt8[Tensor, "1 h w 3"] = frame.unsqueeze(0)
-            detections = detector(batch)
-            if detections.num_detections:
-                predictor(batch, detections, camera)
-                crops += detections.num_detections
-            print(f"[egohand-calibrate] frame {index}: {detections.num_detections} crops", flush=True)
-    maxima, attention = observer.ranges()
-    return EgoHandCalibration(segment, indices, list(excluded_mount_indices), hashes, crops, maxima, attention)

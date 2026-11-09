@@ -31,8 +31,8 @@ def test_an_asset_root_overrides_every_file(tmp_path: Path) -> None:
 def test_fast_mount_models_use_posekit_fast_roles_without_changing_default() -> None:
     stack = egohand_configs(None, fast=True)
     detector, predictor = stack.detector, stack.pose
-    assert detector.gpu_preprocessing and detector.fp16_trunk
-    assert isinstance(predictor, EgoHandFastConfig)
+    assert detector.gpu_preprocessing and detector.fp8_calibration is not None and not detector.fp16_trunk
+    assert isinstance(predictor, EgoHandFastConfig) and predictor.backbone_precision == "nvfp4"
     stack = egohand_configs(None)
     default_detector, default_predictor = stack.detector, stack.pose
     assert not default_detector.gpu_preprocessing

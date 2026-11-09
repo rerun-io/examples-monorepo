@@ -19,11 +19,9 @@ def test_fast_role_subcommands_select_the_calibrated_config() -> None:
     detector = tyro.cli(HandDetectorConfig, args=["egohand-fast", "tensorrt"])
     pose = tyro.cli(HandPose3dConfig, args=["egohand-fast"])
     assert isinstance(detector, EgoHandDetectorConfig)
-    assert isinstance(detector.backend, TensorRtBackendConfig)
-    assert detector.gpu_preprocessing and detector.fp16_trunk
+    assert detector == EgoHandStack.fast().detector
     assert isinstance(pose, EgoHandFastConfig)
     assert pose == EgoHandStack.fast().pose == EgoHandFastConfig()
-    assert pose.fp8_tail_blocks == 8
     assert isinstance(tyro.cli(HandPose3dConfig, args=["egohand"]), EgoHandConfig)
 
 
@@ -51,8 +49,8 @@ def test_fast_role_quantizes_the_asset_tree_bf16_backbone(tmp_path: Path, monkey
     assert quantized.parent == tmp_path / "engines" and quantized.is_file()
 
 
-@pytest.mark.parametrize("preset,precision,quantized_detector", [("egohand-catalog", "nvfp4", True), ("egohand-catalog-bf16", "bf16", False)])
-def test_catalog_cli_selects_measured_paired_roles(preset: str, precision: str, quantized_detector: bool) -> None:
+@pytest.mark.parametrize("preset,precision,quantized_detector", [("egohand-fast", "nvfp4", True), ("egohand-fast-bf16", "bf16", False)])
+def test_fast_cli_selects_measured_paired_roles(preset: str, precision: str, quantized_detector: bool) -> None:
     detector: object = tyro.cli(HandDetectorConfig, args=[preset, "tensorrt"])
     pose: object = tyro.cli(HandPose3dConfig, args=[preset])
     assert isinstance(detector, EgoHandDetectorConfig)
@@ -61,16 +59,19 @@ def test_catalog_cli_selects_measured_paired_roles(preset: str, precision: str, 
     assert pose.backbone_precision == precision and pose.batch_size == 2
 
 
-def test_catalog_preset_is_the_measured_configuration() -> None:
-    stack = EgoHandStack.catalog()
+def test_fast_preset_is_the_measured_configuration() -> None:
+    from posekit.models.egohand_fast import FP8_TAIL_BLOCKS
+    from posekit.models.egohand_quantization import load_calibration
+
+    stack = EgoHandStack.fast()
     detector, pose = stack.detector, stack.pose
     assert isinstance(detector.backend, TensorRtBackendConfig)
     assert detector.backend.max_batch_size == detector.backend.opt_batch_size == 1
     assert detector.gpu_preprocessing and not detector.fp16_trunk
     assert detector.fp8_calibration is not None and detector.fp8_calibration.is_file()
-    assert pose.backbone_precision == "nvfp4" and pose.fp8_tail_blocks == 24
+    assert pose.backbone_precision == "nvfp4" and FP8_TAIL_BLOCKS == 24
     assert pose.batch_size == pose.backbone_backend.max_batch_size == pose.backbone_backend.opt_batch_size == 2
-    assert pose.calibration is not None and pose.calibration.is_file()
+    assert pose.calibration is None and load_calibration().segment == "egohand-catalog-calibration-v1"
 
 
 def test_detector_rejects_two_precision_choices(tmp_path: Path) -> None:
@@ -88,7 +89,7 @@ def test_nvfp4_preset_points_older_gpus_to_the_bf16_preset(tmp_path: Path, monke
     from posekit.models.egohand_fast import FastEgoHandPredictor
 
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args: (8, 6))
-    stack = EgoHandStack.catalog()
+    stack = EgoHandStack.fast()
     detector, pose = stack.detector, stack.pose
     with pytest.raises(ValueError, match='backbone_precision="bf16"'):
         EgoHandDetector(replace(detector, weights=tmp_path / "hand_detector.onnx"))

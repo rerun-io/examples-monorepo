@@ -11,7 +11,7 @@ from posekit import hands_ui
 from posekit.models import HandDetectorConfig, HandPose3dConfig
 
 
-@pytest.mark.parametrize("stack", ["wilor", "egohand-catalog", "egohand-catalog-bf16"])
+@pytest.mark.parametrize("stack", ["wilor", "egohand-fast", "egohand-fast-bf16"])
 def test_sync_config_selects_the_cli_stack(stack: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hands_ui, "_CONFIG", hands_ui.VideoHandsSettings())
     hands_ui._sync_config("/tmp/clip.mp4", None, stack, 32)

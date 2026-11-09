@@ -1,6 +1,6 @@
 # EgoHand fast path on DGX Spark
 
-`EgoHandStack.catalog()` is the EgoHand detector + pose stack calibrated on five
+`EgoHandStack.fast()` (stack `egohand-fast`) is the EgoHand detector + pose stack calibrated on five
 catalog datasets. It returns the same outputs as main's default `EgoHandDetectorConfig`
 + `EgoHandConfig`: boxes, anatomical sides, 2D/3D joints, full SOMA meshes, joint
 rotations, identity, translation, scale and all 26 segment scales.
@@ -11,24 +11,23 @@ rotations, identity, translation, scale and all 26 segment scales.
 - Calibration: `assets/egohand_catalog.rrd` (pose) and `assets/egohand_detector_catalog.rrd`
   (detector), 200 frames / 243 hand crops from segments disjoint from the evaluation
   segments, checked against every evaluation frame by decoded-RGB SHA256. Both records are
-  frozen artifacts: `posekit-egohand-calibrate` regenerates only `assets/egohand_nvfp4.rrd`
-  (the `egohand-fast` stack). Their producer, `apis/hands_cached_calibrate.py`, left the tree
-  in 645156cb7; it is intact at commit 2e7c463ba.
+  frozen artifacts; their producer, `apis/hands_cached_calibrate.py`, left the tree in
+  645156cb7 and is intact at commit 2e7c463ba.
 
 ```python
 from posekit.models import EgoHandStack
 
-stack = EgoHandStack.catalog()
+stack = EgoHandStack.fast()
 detector, pose = stack.detector.setup(), stack.pose.setup()
 detections = detector(frames_rgb)  # decoded uint8 CUDA frames, NHWC
 reconstruction = pose(frames_rgb, detections, camera)
 ```
 
-On the CLI, select `egohand-catalog` for both the detector and the pose role.
+On the CLI, select `egohand-fast` for both the detector and the pose role.
 
 ## GPUs without NVFP4
 
-`EgoHandStack.catalog(backbone_precision="bf16")` (CLI role `egohand-catalog-bf16`) is the
+`EgoHandStack.fast(backbone_precision="bf16")` (CLI role `egohand-fast-bf16`) is the
 fast path for GPUs below Blackwell (compute capability < 10: Ampere, Ada, Hopper). It runs the
 same executor (TensorRT backbone and heads, CUDA crops, batched SOMA) with an unquantized BF16
 backbone and an FP16 detector, and needs no calibration assets. The choice is explicit, not
@@ -41,7 +40,7 @@ lacks FP8 or NVFP4.
 SHOW3D, GSI six-view and Gen-HumanEgo. Batch one, detection on every frame, full outputs.
 Latency excludes decode and engine builds.
 
-| | Default (main) | `EgoHandStack.catalog()` | Speed-up | Accuracy bands |
+| | Default (main) | `EgoHandStack.fast()` | Speed-up | Accuracy bands |
 |---|---|---|---|---|
 | DGX Spark (GB10) | 153.31 ms/frame | 14.98 ms/frame | **10.23x** | 45/45 |
 | RTX 3060, `backbone_precision="bf16"` | 238.62 ms/frame | 39.24 ms/frame | 6.08x | 45/45 |
@@ -78,7 +77,7 @@ pixi run --frozen -e posekit-hands posekit-hands-cached-bench \
   --baseline ~/egohand-results/default/results.json
 ```
 
-On a GPU without NVFP4, add `--stack egohand-catalog-bf16` to the fast run. Run timings on an otherwise idle GPU. Each dataset writes a Rerun recording with the
+On a GPU without NVFP4, add `--stack egohand-fast-bf16` to the fast run. Run timings on an otherwise idle GPU. Each dataset writes a Rerun recording with the
 source image, boxes, GT vs predicted joints, per-frame errors and latencies. The
 precision trials and per-stage profiles are in the
 [EgoHand speed-up report](https://pablos-4800gt.ilish-ruler.ts.net:8768/egohand-3060/).
