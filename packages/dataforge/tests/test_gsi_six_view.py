@@ -164,6 +164,12 @@ class FakeGsi:
     """``<episode>/<name>`` links that serve as many bytes as the listing promises, but not the same ones."""
     fetched: list[str] = field(default_factory=list)
     """``<episode>/<name>`` of every file body served, in order."""
+    reorder_on_refresh: bool = False
+    """A page asked for again lists its episodes in reverse order."""
+    vanish_on_refresh: set[str] = field(default_factory=set)
+    """Episodes a page asked for again no longer lists."""
+    pages_served: dict[int, int] = field(default_factory=dict)
+    """Times each page offset was served."""
     url: str = ""
     """``http://127.0.0.1:<port>`` once serving."""
 
@@ -203,6 +209,10 @@ class FakeGsi:
 
     def page(self, offset: int, limit: int) -> dict[str, object]:
         episodes: list[str] = list(self.files)[offset : offset + min(limit, self.page_size)]
+        self.pages_served[offset] = self.pages_served.get(offset, 0) + 1
+        if self.pages_served[offset] > 1:
+            episodes = [episode for episode in episodes if episode not in self.vanish_on_refresh]
+            episodes = episodes[::-1] if self.reorder_on_refresh else episodes
         following: int = offset + len(episodes)
         return {
             "edition_id": EDITION,
@@ -321,6 +331,22 @@ def test_an_expired_link_is_signed_again(gsi: FakeGsi, signed_in: None, tmp_path
     config(gsi, tmp_path, "ep_v1_bbbb").setup().download()
 
     assert (tmp_path / "episodes/ep_v1_bbbb/slam.rrd").read_bytes() == gsi.files["ep_v1_bbbb"]["slam.rrd"]
+
+
+@pytest.mark.parametrize("episode", ["ep_v1_aaaa", "ep_v1_bbbb"])
+def test_a_refreshed_link_is_matched_by_episode_and_name(episode: str, gsi: FakeGsi, signed_in: None, tmp_path: Path) -> None:
+    gsi.expired.add(f"{episode}/hands.rrd")
+    gsi.reorder_on_refresh = True
+    config(gsi, tmp_path, episode).setup().download()
+
+    assert (tmp_path / "episodes" / episode / "hands.rrd").read_bytes() == gsi.files[episode]["hands.rrd"]
+
+
+def test_a_refreshed_listing_without_the_episode_says_so(gsi: FakeGsi, signed_in: None, tmp_path: Path) -> None:
+    gsi.expired.add("ep_v1_aaaa/hands.rrd")
+    gsi.vanish_on_refresh.add("ep_v1_aaaa")
+    with pytest.raises(ValueError, match="no longer lists ep_v1_aaaa/hands.rrd"):
+        config(gsi, tmp_path, "ep_v1_aaaa").setup().download()
 
 
 def test_bytes_that_differ_from_the_listing_never_take_the_name(gsi: FakeGsi, signed_in: None, tmp_path: Path) -> None:
@@ -506,8 +532,21 @@ def test_convert_deletes_the_download_once_every_layer_is_published(gsi: FakeGsi
 
     assert not (tmp_path / "raw/episodes/ep_v1_aaaa").exists()
     assert (tmp_path / "raw/manifest.json").is_file()
-    config(gsi, tmp_path / "raw", "ep_v1_aaaa").setup().download()
-    assert gsi.fetched == ["ep_v1_aaaa/hands.rrd", "ep_v1_aaaa/slam.rrd"]
+    GsiSixViewConfig(root=tmp_path / "raw", api_url=gsi.url, sequences=("ep_v1_aaaa",), skip_converted=True).setup().download()
+    assert gsi.fetched == ["ep_v1_aaaa/hands.rrd", "ep_v1_aaaa/slam.rrd"], "--skip-converted fetches nothing for a converted episode"
+
+
+def test_a_converted_episode_downloads_again_and_rebuilds_with_force(gsi: FakeGsi, signed_in: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    targets: dict[str, Path] = converted(gsi, tmp_path / "raw", tmp_path / "out", monkeypatch, "ep_v1_aaaa")
+    published: dict[str, int] = {layer: target.stat().st_mtime_ns for layer, target in targets.items()}
+
+    dataset = config(gsi, tmp_path / "raw", "ep_v1_aaaa").setup()
+    dataset.download()  # the request decides, not the published outputs
+    assert gsi.fetched == ["ep_v1_aaaa/hands.rrd", "ep_v1_aaaa/slam.rrd"] * 2
+    [(identity, source)] = dataset.discover()
+    dataset.convert(identity, source, force=True)
+    assert all(target.stat().st_mtime_ns > published[layer] for layer, target in targets.items()), "every layer rebuilt"
+    assert not source.exists()
 
 
 def test_convert_refuses_an_output_root_beneath_the_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

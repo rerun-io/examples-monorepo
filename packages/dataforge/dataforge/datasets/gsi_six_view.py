@@ -14,41 +14,29 @@ from functools import cached_property
 from pathlib import Path
 from typing import ClassVar
 
-import numpy as np
-import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
-import rerun.chunk as rrc
-from jaxtyping import Bool, Float64
-from numpy import ndarray
 
 from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig, RemoteSequence
-from dataforge.datasets.gsi_six_view_layers import POSE_LAYER, trail_overrides, write_hand_mesh_layer, write_pose_layer, write_projections_layer
+from dataforge.datasets.gsi_six_view_layers import (
+    POSE_LAYER,
+    trail_overrides,
+    write_base_layer,
+    write_hand_mesh_layer,
+    write_pose_layer,
+    write_projections_layer,
+)
 from dataforge.datasets.gsi_six_view_remote import API_URL, GsiSession, Manifest, ManifestEpisode, fetch_episodes, fetch_manifest, read_manifest
 from dataforge.datasets.gsi_six_view_source import (
-    CALIBRATION_IN_ENTITIES,
     FILES,
-    FLU_R_RDF,
-    OPTIMIZE,
     RIG,
-    RUN_SOURCE,
     SIDES,
-    SOURCE_SIZE,
     VIEWS,
     Episode,
-    base_stream,
     read_episode,
-    static_value,
 )
 from dataforge.identity import SequenceIdentity
-from dataforge.logging_toolkit import (
-    annotation_context,
-    log_camera_source,
-    log_dense_pose_track,
-    log_rig_node,
-    log_trail_segments,
-)
 
 PANE_ORDER: tuple[int, ...] = (2, 3, 0, 1, 4, 5)
 """The panes in eye, front and side pairs, left before right."""
@@ -74,6 +62,9 @@ class GsiSixViewConfig(DataforgeDatasetConfig):
     """GSI's API."""
     keep_download: bool = False
     """Keep each episode's download once its layers are published, for another reader of the same download root."""
+    skip_converted: bool = False
+    """Fetch no episode whose layers are all published: a whole-edition top-up after converts deleted their downloads.
+    Without it, download fetches every requested episode whose files are not on disk, so ``--force`` can rebuild one."""
 
 
 
@@ -99,7 +90,7 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
         return {episode.episode_id: episode for episode in self.manifest.episodes}
 
     def download(self) -> None:
-        """Fetch the manifest, then every selected episode that is neither on disk nor converted."""
+        """Fetch the manifest, then every selected episode's files not already on disk (and, with ``skip_converted``, not yet converted)."""
         session: GsiSession = GsiSession.sign_in(self.config.api_url)
         fetch_manifest(session, self.config.edition, self.manifest_path)
         episodes: list[str] = [episode.episode_id for episode in read_manifest(self.manifest_path).episodes]
@@ -107,7 +98,11 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
         unknown: list[str] = sorted(set(selected) - set(episodes))
         if unknown:
             raise ValueError(f"{self.config.command}: the edition has no episode(s) {unknown}; see `dataforge-download {self.config.command} --list-remote`")
-        wanted: set[str] = {episode for episode in selected if not all(target.is_file() for target in self.targets(self.identity(episode)).values())}
+        wanted: set[str] = {
+            episode
+            for episode in selected
+            if not (self.config.skip_converted and all(target.is_file() for target in self.targets(self.identity(episode)).values()))
+        }
         print(f"{self.config.command}: {len(wanted)} of {len(selected)} selected episode(s) still to fetch into {self.config.root}")
         if wanted:
             report: transports.FetchReport = fetch_episodes(session, self.config.edition, wanted, lambda episode, name: self.config.root / "episodes" / episode / name)
@@ -171,58 +166,9 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
     def write_base(
         self, identity: SequenceIdentity, hands_rrd: Path, slam_rrd: Path, target: Path, manifest: Manifest, episode: ManifestEpisode, track: Episode
     ) -> None:
-        """The rig, its six cameras with GSI's pinholes and H.265 samples, the SLAM path and trail, and the capture properties.
-
-        Written outside ``write_layers`` so that the base keeps GSI's ``RecordingInfo`` start time, the capture's own.
-        """
-        shipped: rrc.ChunkStore = rrc.RrdReader(hands_rrd).stream().filter(content=["/meta/calibration", "/__properties/episode"]).collect()
-        start_ns: int = int(static_value(shipped, "/__properties/episode", "start_ns")[0])
-        frames: int = int(static_value(shipped, "/__properties/episode", "n_frames")[0])
-        compacted: rrc.ChunkStore = base_stream(hands_rrd, slam_rrd, start_ns).collect(optimize=OPTIMIZE)
-        calibration: pa.Table = shipped.reader(index=None, contents="/meta/calibration").to_arrow_table()
-        extras: dict[str, pa.Array] = {
-            name.rsplit(":", 1)[1]: calibration.column(name).combine_chunks().flatten()
-            for name in calibration.column_names
-            if name.startswith("/meta/calibration:") and name.rsplit(":", 1)[1] not in CALIBRATION_IN_ENTITIES
-        }
+        """The base layer (``write_base_layer``), outside ``write_layers`` so that it keeps GSI's ``RecordingInfo`` start time, the capture's own."""
         with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=self.default_blueprint(), send_properties=False) as recording:
-            rr.log("/", rr.ViewCoordinates.FLU, static=True, recording=recording)
-            rr.log("/", annotation_context(), static=True, recording=recording)
-            log_rig_node(recording, RIG, reference=schema.cam_path(RIG, 0).rsplit("/", 1)[1], num_cameras=len(VIEWS), name="gsi-six-view", kind="ego")
-            resolutions: list[str] = []
-            for cam, view in enumerate(VIEWS):
-                rr.log(schema.cam_path(RIG, cam), rr.AnyValues(name=view, kind="rgb", camera_model="pinhole"), static=True, recording=recording)
-                resolutions.append(
-                    log_camera_source(recording, RIG, cam, name=view, source_width=SOURCE_SIZE[0], source_height=SOURCE_SIZE[1], video_codec="h265", source_num_frames=frames)
-                )
-            recording.send_chunks(compacted)
-            # The rig origin is the same in GSI's FLU frame and the RDF one, so the trail reads GSI's translations.
-            # world_T_rig of the RDF rig frame (GSI's pose · FLU_R_RDF), dense: a SLAM dropout is a NaN row, which hides the rig.
-            rdf_turn: Float64[ndarray, "4 4"] = np.eye(4)
-            rdf_turn[:3, :3] = FLU_R_RDF
-            log_dense_pose_track(recording, schema.rig_path(RIG), times_ns=track.times_ns, frame_indices=track.frames, transforms=track.world_T_rig @ rdf_turn)
-            # The rig origin is the same in both frames, so the trail reads GSI's translations; a dropout frame has no segment.
-            posed: Bool[ndarray, "f"] = track.posed
-            log_trail_segments(recording, schema.trail_path(RUN_SOURCE), times_ns=track.times_ns[posed], translations_xyz=track.world_T_rig[posed, :3, 3])
-            recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties/episode"))
-            recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties", components="RecordingInfo:start_time"))
-            recording.send_property("gsi_calibration", rr.AnyValues(**extras))
-            writing.send_capture_properties(
-                recording,
-                identity,
-                num_cameras=len(VIEWS),
-                num_frames=frames,
-                category=episode.category,
-                camera_names=",".join(VIEWS),
-                slam_missing_frames=int((~track.posed).sum()),
-                source_resolution=resolutions,
-                gsi_edition=self.config.edition,
-                gsi_source_release=manifest.source_release,
-                gsi_rrd_contract=manifest.rrd_contract,
-                gsi_privacy_status=manifest.privacy_status,
-                hands_rrd_sha256=episode.hands_rrd.sha256,
-                slam_rrd_sha256=episode.slam_rrd.sha256,
-            )
+            write_base_layer(recording, identity, hands_rrd, slam_rrd, track, manifest=manifest, episode=episode, edition=self.config.edition)
 
     def world_contents(self) -> list[str]:
         """The rig with its frustums and videos, the SLAM path, the hands; no 2D projections on the image planes."""

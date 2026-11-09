@@ -217,6 +217,20 @@ def fetch_signed(url: str, dest: Path, *, label: str, expected: transports.FileI
             transports.verify_file(temp_path, expected)
 
 
+def listed_file(page: FilesPage, episode_id: str, name: str) -> SignedFile:
+    """The file ``episode_id/name`` of a listing page, found by identity: a refreshed page may list its episodes in another order.
+
+    Raises:
+        ValueError: The page no longer lists that file.
+    """
+    for episode in page.items:
+        if episode.episode_id == episode_id:
+            for file in episode.files:
+                if file.name == name:
+                    return file
+    raise ValueError(f"GSI's refreshed listing no longer lists {episode_id}/{name}")
+
+
 def fetch_manifest(session: GsiSession, edition: str, dest: Path) -> None:
     """Write ``edition``'s current manifest to ``dest``."""
     fetch_signed(session.manifest_link(edition), dest, label="GSI manifest")
@@ -236,7 +250,7 @@ def fetch_episodes(session: GsiSession, edition: str, wanted: set[str], destinat
     offset: int | None = 0
     while remaining and offset is not None:
         page: FilesPage = session.files_page(edition, offset)
-        for index, episode in enumerate(page.items):
+        for episode in page.items:
             if episode.episode_id not in remaining:
                 continue
             for file in episode.files:
@@ -248,7 +262,7 @@ def fetch_episodes(session: GsiSession, edition: str, wanted: set[str], destinat
                 try:
                     fetch_signed(file.url, dest, label=label, expected=file.integrity)
                 except RuntimeError:
-                    fresh: SignedFile = next(f for f in session.files_page(edition, offset).items[index].files if f.name == file.name)
+                    fresh: SignedFile = listed_file(session.files_page(edition, offset), episode.episode_id, file.name)
                     fetch_signed(fresh.url, dest, label=label, expected=file.integrity)
                 report.count(True, file.size_bytes)
             remaining.discard(episode.episode_id)

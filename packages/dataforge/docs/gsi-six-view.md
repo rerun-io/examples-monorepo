@@ -39,7 +39,10 @@ GSI's API takes three calls, read from GSI's CLI (`gsi` 0.2.2), which dataforge 
 a 24 h token, the signed manifest link, and pages of 25 episodes whose files carry a sha256 and a signed Cloudflare R2
 link that lives an hour. The API has no per-episode query, so `--sequences` pages through the listing until every
 selected episode has gone by. Every file is verified against the listing's size and sha256 before it takes its name;
-a file already on disk and matching is skipped, and an episode whose layers are both published is not fetched again.
+a file already on disk and matching is skipped. Download fetches what is requested whatever is already
+converted, so a converted episode can be fetched again and rebuilt with `dataforge-convert --force`;
+`--skip-converted` leaves out episodes whose layers are all published (a whole-edition top-up after converts deleted
+their downloads).
 A failing link is fetched once more from a freshly signed page. R2 links answer only GET (HEAD is 403), so this
 dataset streams them itself instead of using `transports.http_fetch`. Measured from pablo-dl-server: 19.8 MB/s, so
 the whole edition takes about 2.4 h.

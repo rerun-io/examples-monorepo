@@ -5,19 +5,40 @@ the projections go through each view's shipped pinhole, which needs no SLAM. See
 """
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from rerun.encodings import EntityPathLike
 from simplecv.sensors.camera.base_camera import pixels_in_image
 
-from dataforge import blueprints, hands, meshes, paths, schema
-from dataforge.datasets.gsi_six_view_source import FLU_R_RDF, RIG, RUN_SOURCE, SIDES, SOURCE_SIZE, VIEWS, Episode
+from dataforge import blueprints, hands, meshes, paths, schema, writing
+from dataforge.datasets.gsi_six_view_remote import Manifest, ManifestEpisode
+from dataforge.datasets.gsi_six_view_source import (
+    CALIBRATION_IN_ENTITIES,
+    FLU_R_RDF,
+    OPTIMIZE,
+    RIG,
+    RUN_SOURCE,
+    SIDES,
+    SOURCE_SIZE,
+    VIEWS,
+    Episode,
+    base_stream,
+    static_value,
+)
+from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import (
+    annotation_context,
+    log_camera_source,
     log_dense_pose_track,
+    log_rig_node,
+    log_trail_segments,
     time_column,
 )
 
@@ -124,3 +145,62 @@ def trail_overrides() -> dict[EntityPathLike, rrb.VisibleTimeRanges | rr.LineStr
     }
 
 
+def write_base_layer(
+    recording: rr.RecordingStream,
+    identity: SequenceIdentity,
+    hands_rrd: Path,
+    slam_rrd: Path,
+    track: Episode,
+    *,
+    manifest: Manifest,
+    episode: ManifestEpisode,
+    edition: str,
+) -> None:
+    """The ``base`` layer: the rig and its six cameras with GSI's pinholes and H.265 samples (``base_stream``), the dense rig
+    pose, the SLAM path and trail, GSI's episode properties and start time, its calibration extras and the capture properties."""
+    shipped: rrc.ChunkStore = rrc.RrdReader(hands_rrd).stream().filter(content=["/meta/calibration", "/__properties/episode"]).collect()
+    start_ns: int = int(static_value(shipped, "/__properties/episode", "start_ns")[0])
+    frames: int = int(static_value(shipped, "/__properties/episode", "n_frames")[0])
+    compacted: rrc.ChunkStore = base_stream(hands_rrd, slam_rrd, start_ns).collect(optimize=OPTIMIZE)
+    calibration: pa.Table = shipped.reader(index=None, contents="/meta/calibration").to_arrow_table()
+    extras: dict[str, pa.Array] = {
+        name.rsplit(":", 1)[1]: calibration.column(name).combine_chunks().flatten()
+        for name in calibration.column_names
+        if name.startswith("/meta/calibration:") and name.rsplit(":", 1)[1] not in CALIBRATION_IN_ENTITIES
+    }
+    rr.log("/", rr.ViewCoordinates.FLU, static=True, recording=recording)
+    rr.log("/", annotation_context(), static=True, recording=recording)
+    log_rig_node(recording, RIG, reference=schema.cam_path(RIG, 0).rsplit("/", 1)[1], num_cameras=len(VIEWS), name="gsi-six-view", kind="ego")
+    resolutions: list[str] = []
+    for cam, view in enumerate(VIEWS):
+        rr.log(schema.cam_path(RIG, cam), rr.AnyValues(name=view, kind="rgb", camera_model="pinhole"), static=True, recording=recording)
+        resolutions.append(
+            log_camera_source(recording, RIG, cam, name=view, source_width=SOURCE_SIZE[0], source_height=SOURCE_SIZE[1], video_codec="h265", source_num_frames=frames)
+        )
+    recording.send_chunks(compacted)
+    # world_T_rig of the RDF rig frame (GSI's pose · FLU_R_RDF), dense: a SLAM dropout is a NaN row, which hides the rig.
+    rdf_turn: Float64[ndarray, "4 4"] = np.eye(4)
+    rdf_turn[:3, :3] = FLU_R_RDF
+    log_dense_pose_track(recording, schema.rig_path(RIG), times_ns=track.times_ns, frame_indices=track.frames, transforms=track.world_T_rig @ rdf_turn)
+    # The rig origin is the same in both frames, so the trail reads GSI's translations; a dropout frame has no segment.
+    posed: Bool[ndarray, "f"] = track.posed
+    log_trail_segments(recording, schema.trail_path(RUN_SOURCE), times_ns=track.times_ns[posed], translations_xyz=track.world_T_rig[posed, :3, 3])
+    recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties/episode"))
+    recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties", components="RecordingInfo:start_time"))
+    recording.send_property("gsi_calibration", rr.AnyValues(**extras))
+    writing.send_capture_properties(
+        recording,
+        identity,
+        num_cameras=len(VIEWS),
+        num_frames=frames,
+        category=episode.category,
+        camera_names=",".join(VIEWS),
+        slam_missing_frames=int((~track.posed).sum()),
+        source_resolution=resolutions,
+        gsi_edition=edition,
+        gsi_source_release=manifest.source_release,
+        gsi_rrd_contract=manifest.rrd_contract,
+        gsi_privacy_status=manifest.privacy_status,
+        hands_rrd_sha256=episode.hands_rrd.sha256,
+        slam_rrd_sha256=episode.slam_rrd.sha256,
+    )
