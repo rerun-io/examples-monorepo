@@ -6,7 +6,7 @@ import pytest
 import rerun as rr
 import torch
 
-from posekit.apis.video_hands import log_chunk_hands
+from posekit.apis.video_hands import VideoHandsSettings, assumed_pinhole, describe_camera, log_chunk_hands, pinhole_camera
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
 
@@ -49,3 +49,18 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     meshes = [archetype for path, archetype in logged if path == "world/camera/hands/right_0/mesh"]
     faces = meshes[0].triangle_indices.as_arrow_array().to_pylist()
     assert faces == [[0, 1, 2]]
+
+
+def test_unset_intrinsics_come_from_the_assumed_field_of_view() -> None:
+    fx, fy, cx, cy = assumed_pinhole(1920, 1080, 65.0)
+    assert fx == fy == pytest.approx(1507.0, abs=0.5) and (cx, cy) == (960.0, 540.0)
+    camera = pinhole_camera(VideoHandsSettings(fx=1000.0, cy=500.0), 1920, 1080)
+    assert camera.lens == "PINHOLE" and (camera.width, camera.height) == (1920, 1080)
+    assert camera.intrinsics.tolist() == [[1000.0, 0.0, 960.0], [0.0, fy, 500.0], [0.0, 0.0, 1.0]]
+
+
+def test_status_names_the_camera() -> None:
+    settings = VideoHandsSettings()
+    assert describe_camera(settings, pinhole_camera(settings, 1920, 1080)) == "assumed pinhole, f = 1507 px (65° horizontal FOV)"
+    given = VideoHandsSettings(fx=1200.0, fy=1210.0, cx=950.0, cy=530.0)
+    assert describe_camera(given, pinhole_camera(given, 1920, 1080)) == "pinhole fx = 1200, fy = 1210, cx = 950, cy = 530 px"

@@ -109,6 +109,12 @@ optional `CalibratedCamera` (`posekit.cameras`, a static `.rrd` via `load_calibr
 `HandPoses3d`: `Keypoints3d` with a hand skeleton, plus per-hand mesh vertices and
 per-side faces. `HandPoses3d.as_hand21()` gives every model the same HAND_21 view.
 
+The video CLI and the app take one video and a pinhole camera: `--fx/--fy/--cx/--cy` when you know
+them, else a 65° horizontal field of view (`--hfov-deg`) with the principal point at the image
+centre. The status line says which was used ("assumed pinhole, f = 1507 px" for a 1920-wide
+video). The examples are GSI head-camera clips (`assets/examples/gsi_*_left_front.mp4`, 1920x1080
+pinhole, plain H.264).
+
 | Model | Detector | 3D hands | Skeleton | Camera | Backends |
 |---|---|---|---|---|---|
 | WiLoR (`wilor`) | YOLO hand detector | WiLoR ViT + MANO | HAND_21 | not used (virtual camera) | torch fp16, TensorRT |
@@ -121,12 +127,13 @@ names, because the checkpoint's Hydra targets need them. WiLoR's network lives i
 
 ```bash
 # Detect + reconstruct hands on a clip, log 2D boxes/skeletons and 3D joints/meshes to Rerun
+# (default clip: assets/examples/gsi_sewing_left_front.mp4; any --video-path works)
 pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/hands.rrd \
     wilor tensorrt wilor tensorrt
 pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/hands.rrd \
-    egohand onnx egohand
+    --fx 1507 --fy 1507 --cx 960 --cy 540 egohand onnx egohand   # intrinsics are optional
 
-# The same code as a Gradio app with an embedded Rerun viewer (stack picked in the Config accordion)
+# The same code as a Gradio app with an embedded Rerun viewer: one video in, stack and intrinsics under Advanced
 pixi run -e posekit-hands --frozen posekit-hands-app            # http://127.0.0.1:7872
 
 # Ground-truth eval on fixed frames of five dataforge catalog datasets

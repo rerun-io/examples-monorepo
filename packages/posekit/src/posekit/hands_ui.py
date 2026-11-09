@@ -1,13 +1,14 @@
 """Gradio app: 3D hands in a video (WiLoR or an EgoHand stack), streamed into an embedded Rerun viewer.
 
-The app runs the CLI's code path. A module-level ``_CONFIG`` of the same
-:class:`~posekit.apis.video_hands.VideoHandsSettings` the CLI parses is kept in sync with
-the widgets by ``_sync_config`` (chained before Run), and the streaming callback drains
-:func:`~posekit.apis.video_hands.run_video_hands` into a thread-local recording.
+One input, a video. The app runs the CLI's code path: each Run builds the same
+:class:`~posekit.apis.video_hands.VideoHandsSettings` the CLI parses from the widgets and drains
+:func:`~posekit.apis.video_hands.run_video_hands` into a thread-local recording. The camera is a
+pinhole whose intrinsics the Advanced accordion fills from an assumed field of view when a video
+is chosen; edit them if you know the camera.
 """
 
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -16,16 +17,15 @@ import rerun as rr
 import torch
 from gradio_rerun import Rerun
 
-from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, build_pipeline, run_video_hands
+from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, assumed_pinhole, build_pipeline, run_video_hands, video_size
 from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
-
-_CONFIG: VideoHandsSettings = VideoHandsSettings()
-"""Module-level settings, kept in sync with the UI widgets by ``_sync_config``."""
+EXAMPLE_VIDEOS: Final[list[Path]] = [EXAMPLES / "gsi_sewing_left_front.mp4", EXAMPLES / "gsi_car_left_front.mp4"]
+"""GSI head-camera clips (1920x1080 pinhole), plain H.264 mp4 like any user video."""
 _PIPELINE: tuple[str, HandPose3dPipeline] | None = None
-"""The last stack's set-up pipeline; switching stacks releases it before the next one loads."""
+"""The last stack's set-up pipeline (engines stay loaded between runs); switching stacks releases it first."""
 
 
 def default_stack() -> str:
@@ -33,47 +33,59 @@ def default_stack() -> str:
     return "egohand-fast" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10 else "egohand-fast-bf16"
 
 
-def _sync_config(video: str | None, camera: str | None, stack: str, max_frames: int) -> None:
-    """Copy the widget values into ``_CONFIG``; the stack name selects the same detector and pose configs as the CLI."""
-    global _CONFIG
-    _CONFIG = replace(
-        _CONFIG,
-        video_path=_CONFIG.video_path if video is None else Path(video),
-        camera_path=None if camera is None else Path(camera),
-        detector=HAND_DETECTORS[stack],
-        pose=HAND_POSES[stack],
+def fill_intrinsics(video: str | None) -> tuple[float | None, float | None, float | None, float | None]:
+    """``fx, fy, cx, cy`` of the assumed pinhole for the chosen video (the CLI's default for unset intrinsics), to 0.1 px."""
+    if video is None:
+        return None, None, None, None
+    width, height = video_size(Path(video))
+    fx, fy, cx, cy = assumed_pinhole(width, height, VideoHandsSettings().hfov_deg)
+    return round(fx, 1), round(fy, 1), round(cx, 1), round(cy, 1)
+
+
+def settings_from_inputs(
+    video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None
+) -> VideoHandsSettings:
+    """The widget values as the CLI's settings; the stack name selects the same detector and pose configs as the CLI subcommand."""
+    return VideoHandsSettings(
+        video_path=Path(video), fx=fx, fy=fy, cx=cx, cy=cy, detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack],
         max_frames=max_frames if max_frames > 0 else None,
     )
 
 
-def _pipeline(stack: str) -> HandPose3dPipeline:
+def _pipeline(stack: str, settings: VideoHandsSettings) -> HandPose3dPipeline:
     """The pipeline of ``stack``, set up once and reused while the stack stays selected."""
     global _PIPELINE
     if _PIPELINE is None or _PIPELINE[0] != stack:
         _PIPELINE = None
         torch.cuda.empty_cache()
-        _PIPELINE = (stack, build_pipeline(_CONFIG))
+        _PIPELINE = (stack, build_pipeline(settings))
     return _PIPELINE[1]
 
 
 @rr.thread_local_stream("posekit_hands_ui")
-def stream_hands(stack: str) -> Iterator[tuple[bytes | None, str]]:
-    """Run the shared video hands core on ``_CONFIG`` and stream the recording to the viewer after every chunk."""
+def stream_hands(
+    video: str | None, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None
+) -> Iterator[tuple[bytes | None, str]]:
+    """Run the shared video hands core and stream the recording to the viewer after every chunk."""
     stream: rr.BinaryStream = rr.binary_stream()
+    if video is None:
+        yield stream.read(), "Choose a video first."
+        return
+    settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy)
     yield stream.read(), f"Setting up {stack} (the first run builds its TensorRT engines)..."
-    pipeline: HandPose3dPipeline = _pipeline(stack)
-    for status in run_video_hands(_CONFIG, pipeline):
+    pipeline: HandPose3dPipeline = _pipeline(stack, settings)
+    for status in run_video_hands(settings, pipeline):
         yield stream.read(), status
 
 
 def build() -> gr.Blocks:
-    """Inputs and a stack accordion beside a streaming Rerun viewer."""
+    """A video input with an Advanced accordion beside a streaming Rerun viewer."""
     viewer = Rerun(streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=800)
     with gr.Blocks() as demo:
         gr.Markdown(
             "# 3D hands with Rerun\n"
-            "posekit's hand stacks on a video: WiLoR on any video, EgoHand with the video's CalibratedCamera .rrd "
-            "(metric hands in the real camera frame). Same code as `posekit-video-hands`."
+            "posekit's hand stacks on a video: boxes and 2D joints on the video, 3D hands and meshes beside it. "
+            "The camera is an assumed pinhole unless you edit it under Advanced. Same code as `posekit-video-hands`."
         )
         with gr.Row():
             with gr.Column(scale=1):
@@ -81,22 +93,26 @@ def build() -> gr.Blocks:
                 with tabs:
                     with gr.TabItem("Inputs", id="inputs"):
                         video = gr.File(label="Video", file_types=[".mp4"], type="filepath")
-                        camera = gr.File(label="CalibratedCamera .rrd (EgoHand)", file_types=[".rrd"], type="filepath")
                         run = gr.Button("Run", variant="primary")
-                        with gr.Accordion("Config", open=False):
+                        with gr.Accordion("Advanced", open=False):
                             stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
                             max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
+                            gr.Markdown("Pinhole intrinsics in pixels, filled from a 65° horizontal FOV with the principal point at the image centre.")
+                            with gr.Row():
+                                fx = gr.Number(label="fx")
+                                fy = gr.Number(label="fy")
+                            with gr.Row():
+                                cx = gr.Number(label="cx")
+                                cy = gr.Number(label="cy")
                     with gr.TabItem("Outputs", id="outputs"):
                         status = gr.Text("Upload a video to begin.", label="Status")
-                gr.Examples(
-                    examples=[[str(EXAMPLES / "selfcap_oak_left.mp4"), str(EXAMPLES / "selfcap_oak_left.rrd")]],
-                    inputs=[video, camera],
-                )
+                gr.Examples(examples=[[str(path)] for path in EXAMPLE_VIDEOS], inputs=[video])
             with gr.Column(scale=5):
                 viewer.render()
+        video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])
         run.click(fn=lambda: gr.update(selected="outputs"), inputs=None, outputs=[tabs]).then(
-            _sync_config, inputs=[video, camera, stack, max_frames], outputs=None
-        ).then(stream_hands, inputs=[stack], outputs=[viewer, status])
+            stream_hands, inputs=[video, stack, max_frames, fx, fy, cx, cy], outputs=[viewer, status]
+        )
     return demo
 
 

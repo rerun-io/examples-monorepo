@@ -4,8 +4,13 @@ Frames stay on the GPU from TorchCodec's decoder through detection and the
 hand model; boxes, joints and meshes cross to the CPU for logging. Every hand
 is logged in its side slot (``left_0``, ``right_0``, ...): boxes and 2D joints
 on the image, 3D joints and the mesh in the camera frame beside it.
+
+The camera is a pinhole: ``fx``/``fy``/``cx``/``cy`` when given, else an assumed horizontal field
+of view (``hfov_deg``) with the principal point at the image centre. It does not have to be
+exact; it fixes where the metric 3D hands sit in front of the camera.
 """
 
+import math
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +25,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from posekit.cameras import CalibratedCamera, load_calibrated_camera
+from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.models.wilor import CROP_SIZE, FOCAL_LENGTH, WilorHandPose3d
 from posekit.predictions import HandDetections, HandPoses3d, HandSide
@@ -40,12 +45,20 @@ SIDE_COLOR: dict[HandSide, tuple[int, int, int]] = {"left": (66, 135, 245), "rig
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VideoHandsSettings:
-    """What the 3D hands demo runs: the video, its camera and one hand stack. Shared by the CLI and the app."""
+    """What the 3D hands demo runs: the video, its pinhole camera and one hand stack. Shared by the CLI and the app."""
 
-    video_path: Path = EXAMPLES / "selfcap_oak_left.mp4"
+    video_path: Path = EXAMPLES / "gsi_sewing_left_front.mp4"
     """Input video path."""
-    camera_path: Path | None = EXAMPLES / "selfcap_oak_left.rrd"
-    """CalibratedCamera .rrd of the video (EgoHand needs it); None for uncalibrated video with WiLoR."""
+    fx: float | None = None
+    """Focal length along x in pixels; None assumes ``hfov_deg``."""
+    fy: float | None = None
+    """Focal length along y in pixels; None assumes ``hfov_deg``."""
+    cx: float | None = None
+    """Principal point x in pixels; None takes the image centre."""
+    cy: float | None = None
+    """Principal point y in pixels; None takes the image centre."""
+    hfov_deg: float = 65.0
+    """Horizontal field of view assumed for the intrinsics left unset."""
     detector: AnnotatedHandDetectorConfig = field(default_factory=WilorHandDetectorConfig)
     """Hand detector selected by stack name (``wilor``, ``egohand``, ``egohand-fast`` or ``egohand-fast-bf16``)."""
     pose: AnnotatedHandPose3dConfig = field(default_factory=WilorHandPoseConfig)
@@ -181,9 +194,40 @@ def send_blueprint(target: Float32[ndarray, "3"]) -> None:
     )
 
 
-def pinhole_matrix(pose: object, camera: CalibratedCamera | None, width: int, height: int) -> Float32[ndarray, "3 3"]:
-    """The camera the 3D hands are expressed in: WiLoR's virtual pinhole, else the calibration's ``K``."""
-    if isinstance(pose, WilorHandPose3d) or camera is None:
+def assumed_pinhole(width: int, height: int, hfov_deg: float) -> tuple[float, float, float, float]:
+    """``fx, fy, cx, cy`` of a square-pixel pinhole with horizontal field of view ``hfov_deg``, centred on the image."""
+    focal: float = width / 2.0 / math.tan(math.radians(hfov_deg) / 2.0)
+    return focal, focal, width / 2.0, height / 2.0
+
+
+def video_size(path: Path) -> tuple[int, int]:
+    """``width, height`` of a video, from its metadata (no decoding)."""
+    from torchcodec.decoders import VideoDecoder
+
+    metadata = VideoDecoder(path).metadata
+    if metadata.width is None or metadata.height is None:
+        raise ValueError(f"Could not read the frame size of {path}.")
+    return int(metadata.width), int(metadata.height)
+
+
+def pinhole_camera(settings: VideoHandsSettings, width: int, height: int) -> CalibratedCamera:
+    """The settings' pinhole; each unset intrinsic comes from ``assumed_pinhole``."""
+    given: tuple[float | None, ...] = (settings.fx, settings.fy, settings.cx, settings.cy)
+    fx, fy, cx, cy = (value if value is not None else assumed for value, assumed in zip(given, assumed_pinhole(width, height, settings.hfov_deg), strict=True))
+    return CalibratedCamera(np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]), np.zeros(0), width, height, lens="PINHOLE")
+
+
+def describe_camera(settings: VideoHandsSettings, camera: CalibratedCamera) -> str:
+    """``assumed pinhole, f = ...`` when the camera is the assumed one, else its four intrinsics."""
+    fx, fy, cx, cy = camera.intrinsics[0, 0], camera.intrinsics[1, 1], camera.intrinsics[0, 2], camera.intrinsics[1, 2]
+    if np.allclose((fx, fy, cx, cy), assumed_pinhole(camera.width, camera.height, settings.hfov_deg), atol=0.5):
+        return f"assumed pinhole, f = {fx:.0f} px ({settings.hfov_deg:g}° horizontal FOV)"
+    return f"pinhole fx = {fx:.0f}, fy = {fy:.0f}, cx = {cx:.0f}, cy = {cy:.0f} px"
+
+
+def pinhole_matrix(pose: object, camera: CalibratedCamera, width: int, height: int) -> Float32[ndarray, "3 3"]:
+    """The camera the 3D hands are expressed in: WiLoR's virtual pinhole, else the video's pinhole."""
+    if isinstance(pose, WilorHandPose3d):
         focal: float = FOCAL_LENGTH / CROP_SIZE * max(width, height)
         return np.asarray([[focal, 0.0, width / 2], [0.0, focal, height / 2], [0.0, 0.0, 1.0]], dtype=np.float32)
     return camera.intrinsics.astype(np.float32)
@@ -201,18 +245,17 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
     recording to its viewer after every yield.
 
     Args:
-        settings: Video, camera and hand stack.
+        settings: Video, pinhole intrinsics and hand stack.
         pipeline: A pipeline already set up for ``settings``; None builds one.
 
     Yields:
-        A progress line after every chunk, then the summary.
+        A progress line after every chunk, then the summary; both name the camera used.
 
     Raises:
         ValueError: If the video metadata cannot be read.
     """
     from torchcodec.decoders import VideoDecoder
 
-    camera: CalibratedCamera | None = None if settings.camera_path is None else load_calibrated_camera(settings.camera_path)
     if pipeline is None:
         pipeline = build_pipeline(settings)
     decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
@@ -224,6 +267,8 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
     assert decoder.metadata.width is not None and decoder.metadata.height is not None
     width: int = int(decoder.metadata.width)
     height: int = int(decoder.metadata.height)
+    camera: CalibratedCamera = pinhole_camera(settings, width, height)
+    camera_note: str = describe_camera(settings, camera)
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
     rr.log(IMAGE_PATH, rr.Pinhole(image_from_camera=pinhole_matrix(pipeline.pose, camera, width, height), resolution=[width, height], image_plane_distance=0.05), static=True)
     video_timestamps_ns: Int64[ndarray, "frames"] = log_video(settings.video_path, Path(IMAGE_PATH), timeline="video_time")
@@ -246,9 +291,9 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
             frame_indices=chunk.tolist(), timestamps_ns=timestamps.tolist(), detections=detections, hands=hands,
             keypoint_threshold=settings.keypoint_threshold, live_slots=live_slots,
         )
-        yield f"Frames {stop}/{num_frames}, {total_hands} hands"
+        yield f"Frames {stop}/{num_frames}, {total_hands} hands; {camera_note}"
     torch.cuda.synchronize()
-    yield f"processed {num_frames} frames, {total_hands} hands"
+    yield f"processed {num_frames} frames, {total_hands} hands; {camera_note}"
 
 
 def main(config: VideoHandsConfig) -> None:
