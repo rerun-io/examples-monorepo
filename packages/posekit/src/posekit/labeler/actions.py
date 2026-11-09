@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from itertools import pairwise
 
-from posekit.labeler.queue import iou
+from posekit.labeler.proposals import iou
 from posekit.labeler.schema import (
     PASSIVE_ACTIONS,
     ActionEvent,

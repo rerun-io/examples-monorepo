@@ -28,7 +28,7 @@ import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 
-from posekit.labeler.queue import iou
+from posekit.labeler.proposals import iou
 from posekit.labeler.rig import Kb4Rig
 from posekit.labeler.schema import HAND_SIDES, Box, HandSide, Proposal, TrackBox, TrackFrame, ViewLabel
 from posekit.labeler.sphere import HandSphere, solve_views, sphere_box

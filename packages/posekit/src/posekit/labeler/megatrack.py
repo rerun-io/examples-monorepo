@@ -36,7 +36,7 @@ import numpy as np
 from jaxtyping import Bool, Float64, UInt8
 from numpy import ndarray
 
-from posekit.labeler.queue import iou
+from posekit.labeler.proposals import iou
 from posekit.labeler.rig import Fusion, Kb4Rig, ViewKeypoints, fuse_views, keypoint_box, lift_view
 from posekit.labeler.schema import HAND_SIDES, Box, HandSide, Proposal, TrackBox, TrackFrame, ViewLabel
 from posekit.labeler.tracker import CLAIM_IOU, DETECT_SCORE, MACHINE_SOURCES, MachineStep

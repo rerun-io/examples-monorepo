@@ -173,73 +173,6 @@ class SegmentInfo:
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
-class ViewState:
-    """Proposals and current labels of one camera at one time."""
-
-    cam: int
-    """Camera index."""
-    proposals: list[Proposal]
-    """Model proposals for this camera and time."""
-    labels: list[ViewLabel]
-    """Labels already stored for this camera and time."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class FrameState:
-    """Everything shown for one time of one segment."""
-
-    segment_id: str
-    """Catalog segment id."""
-    t_ns: int
-    """``video_time``, ns."""
-    views: list[ViewState]
-    """One entry per camera, rig order."""
-    flags: list[str]
-    """Why this frame is in the review queue (empty when it is not)."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class RangeRequest:
-    """Fill the 5 fps frames between two reviewed keyframes from consistent proposals."""
-
-    segment_id: str
-    """Catalog segment id."""
-    t0_ns: int
-    """Reviewed keyframe at the start."""
-    t1_ns: int
-    """Reviewed keyframe at the end."""
-    reviewer: str
-    """Who asked for the fill."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class RangeResult:
-    """Outcome of a range fill."""
-
-    filled: int
-    """(time, cam, side) labels written with source ``range``."""
-    queued: list[int]
-    """Times (ns) left for review because the proposals were not consistent with both keyframes."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class QueueItem:
-    """One frame set that needs a reviewer."""
-
-    segment_id: str
-    """Catalog segment id."""
-    t_ns: int
-    """``video_time``, ns."""
-    reasons: list[str]
-    """Short reasons (for example ``keyframe``, ``side_flip``, ``views_disagree``, ``range_gap``)."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
 class SegmentSummary:
     """One row of the segment list."""
 
@@ -249,12 +182,8 @@ class SegmentSummary:
     """train or held-out eval."""
     duration_s: float
     """Length of the segment on ``video_time``, s."""
-    n_keyframes: int
-    """1 fps review keyframes."""
-    n_reviewed_keyframes: int
-    """Keyframes with a decision for every (cam, side)."""
     n_labels: int
-    """Stored (time, cam, side) labels, range fills included."""
+    """Stored (time, cam, side) labels."""
 
 
 @serde(deny_unknown_fields=True)

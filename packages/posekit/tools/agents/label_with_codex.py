@@ -2,13 +2,12 @@
 
 The script is a client of the labeler's HTTP API: it only makes the calls a person's clicks in the browser make.
 
-``--mode megatrack`` (default) is MEgATrack's semi-automatic loop (section 4.2): the machine propagates boxes
+The driver uses MEgATrack's semi-automatic loop (section 4.2): the machine propagates boxes
 across frames and views, the reviewer watches 2-second playback windows of all six cameras with the machine boxes
 drawn, accepts every window that looks right, and acts only at the first failure it sees: it accepts the frames
 before it, fixes the failing hand at that frame (pick a proposal, draw a box, set the side, "no hand", reject), and
 resumes watching from there. The server logs every action with wall-clock time, so the effort is measurable.
 
-``--mode keyframes`` is the retired procedure (judge every 1 fps keyframe, fill between); kept for comparison runs.
 
 Why stdlib-only and outside pixi: it runs on the host that holds the Codex login (pablo-dl-server, where no pixi
 environment may run), talks HTTP to the backend on the DGX Spark, and shells out to ``codex exec``.
@@ -30,71 +29,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-PROMPT = """You are reviewing hand-detector proposals for a hand-labeling dataset.
-
-The image is a contact sheet of 6 synchronized fisheye cameras on a head-worn rig (RoboCap), all at the same instant.
-Cells: top row cam_00 left_front, cam_01 right_front, cam_02 left_eye; bottom row cam_03 right_eye, cam_04 left,
-cam_05 right. The eye cameras look down at the wearer's hands; front cameras see the hands at the bottom edge; side
-cameras rarely see them. Each proposal box is drawn and numbered #k with its side (L/R) and score. "left"/"right"
-means the WEARER's anatomical hand, not the image side. Only the wearer's own hands count: other people's hands,
-gloves lying on a table, and pictures of hands are NOT hands to label.
-
-Proposals (native pixel boxes, for reference):
-{proposals}
-
-Tasks:
-1. For EVERY numbered proposal give a verdict:
-   - "correct": the box tightly covers one of the wearer's hands (wrist to fingertips visible part) with the right side.
-   - "wrong_side": it covers a wearer hand but the side is wrong.
-   - "loose": it is on a wearer hand but the box is clearly too big/small/offset; give a corrected box.
-   - "not_hand": it is not on a wearer hand (background, object, another person's hand).
-   - "duplicate": another proposal already covers the same hand in the same camera better.
-2. For each camera, list any VISIBLE wearer hand that no correct/loose proposal covers ("missed"), with its side and
-   a box in SHEET pixel coordinates (the whole image; x right, y down). Partially visible hands at the image edge count
-   if at least a quarter of the hand is visible.
-3. List cameras that cannot be judged at all (black frame, extreme blur/exposure) as "unjudgeable".
-Box coordinates you give are SHEET pixels of this image. Be precise and conservative: when unsure whether
-something is a hand, say not_hand.
-"""
-
-SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["verdicts", "missed", "unjudgeable"],
-    "properties": {
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["k", "verdict", "box"],
-                "properties": {
-                    "k": {"type": "integer"},
-                    "verdict": {"type": "string", "enum": ["correct", "wrong_side", "loose", "not_hand", "duplicate"]},
-                    "box": {
-                        "description": "corrected box in SHEET px for 'loose', else null",
-                        "anyOf": [{"type": "null"}, {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}],
-                    },
-                },
-            },
-        },
-        "missed": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["cam", "side", "box"],
-                "properties": {
-                    "cam": {"type": "integer"},
-                    "side": {"type": "string", "enum": ["left", "right"]},
-                    "box": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
-                },
-            },
-        },
-        "unjudgeable": {"type": "array", "items": {"type": "integer"}},
-    },
-}
 
 
 def http_json(url: str, body: dict | None = None, timeout: float = 120.0, attempts: int = 8) -> object:
@@ -172,70 +106,6 @@ def sheet_to_native(cells: list[dict], cam: int, box: list[float]) -> list[float
     return [x0, y0, x1, y1]
 
 
-def check_answer(info: dict, answer: dict) -> None:
-    """Raise ValueError unless the answer judges every numbered proposal exactly once (no unknown numbers).
-
-    An answer that skips a proposal would turn that hand into a confident ``no_hand``; retry instead.
-    """
-    expected: list[int] = sorted(p["k"] for p in info["proposals"])
-    got: list[int] = sorted(v["k"] for v in answer.get("verdicts", []))
-    if got != expected:
-        raise ValueError(f"verdicts for {got}, expected exactly {expected}")
-    cams: set[int] = {c["cam"] for c in info["cells"]}
-    for miss in answer.get("missed", []):
-        if miss["cam"] not in cams:
-            raise ValueError(f"missed hand in unknown camera {miss['cam']}")
-
-
-def decisions_to_labels(info: dict, answer: dict, reviewer: str) -> list[dict]:
-    """Turn the model's answer into one ViewLabel dict per (cam, side) (pure; unit-tested)."""
-    cells: list[dict] = info["cells"]
-    cams: list[int] = [c["cam"] for c in cells]
-    by_k: dict[int, dict] = {p["k"]: p for p in info["proposals"]}
-    unjudgeable: set[int] = {c for c in answer.get("unjudgeable", []) if c in cams}
-    chosen: dict[tuple[int, str], tuple[float, dict]] = {}  # (cam, side) -> (rank, label)
-
-    def offer(cam: int, side: str, rank: float, label: dict) -> None:
-        if (cam, side) not in chosen or rank > chosen[(cam, side)][0]:
-            chosen[(cam, side)] = (rank, label)
-
-    for verdict in answer.get("verdicts", []):
-        prop = by_k.get(verdict["k"])
-        if prop is None or prop["cam"] in unjudgeable:
-            continue
-        cam, side, box = prop["cam"], prop["side"], prop["box"]
-        v: str = verdict["verdict"]
-        if v == "correct":
-            offer(cam, side, prop["score"], {"status": "accepted", "box": box, "source": prop["model"]})
-        elif v == "wrong_side":
-            other = "left" if side == "right" else "right"
-            offer(cam, other, prop["score"], {"status": "corrected", "box": box, "source": "agent"})
-        elif v == "loose" and verdict.get("box"):
-            fixed = sheet_to_native(cells, cam, verdict["box"])
-            if fixed is not None:
-                offer(cam, side, prop["score"], {"status": "corrected", "box": dict(zip(("x0", "y0", "x1", "y1"), fixed, strict=True)), "source": "agent"})
-    for miss in answer.get("missed", []):
-        if miss["cam"] in unjudgeable:
-            continue
-        drawn = sheet_to_native(cells, miss["cam"], miss["box"])
-        if drawn is None:
-            continue
-        # a model-drawn box ranks below any accepted proposal for the same (cam, side)
-        offer(miss["cam"], miss["side"], -1.0, {"status": "corrected", "box": dict(zip(("x0", "y0", "x1", "y1"), drawn, strict=True)), "source": "agent"})
-
-    labels: list[dict] = []
-    for cam in cams:
-        for side in ("left", "right"):
-            if cam in unjudgeable:
-                label = {"status": "rejected", "box": None, "source": "agent"}
-            elif (cam, side) in chosen:
-                label = chosen[(cam, side)][1]
-            else:
-                label = {"status": "no_hand", "box": None, "source": "agent"}
-            labels.append({"cam": cam, "side": side, "reviewer": reviewer, **label})
-    return labels
-
-
 def run_codex(image: bytes, prompt: str, schema: dict, args: argparse.Namespace) -> dict:
     """One ``codex exec`` call with one image and a structured answer; returns the parsed answer."""
     with tempfile.TemporaryDirectory(prefix="label-codex-") as tmp_str:
@@ -273,63 +143,6 @@ def proposal_lines(info: dict) -> str:
         f"#{p['k']} cam_{p['cam']:02d} {p['side']} score {p['score']:.2f} ({p['model']}) box {[round(p['box'][c]) for c in ('x0', 'y0', 'x1', 'y1')]}"
         for p in info["proposals"]
     ) or "(none)"
-
-
-def review_keyframe(server: str, sid: str, t_ns: int, args: argparse.Namespace, workdir: Path) -> dict:
-    info = json_object(f"{server}/api/sheet/{sid}/{t_ns}.json")
-    jpg = http_bytes(f"{server}/api/sheet/{sid}/{t_ns}.jpg")
-    answer = ask_with_retries(jpg, PROMPT.format(proposals=proposal_lines(info)), SCHEMA, args, lambda a: check_answer(info, a), f"{sid} {t_ns}")
-    labels = decisions_to_labels(info, answer, args.reviewer)
-    json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_ns, "labels": labels})
-    log = {"segment_id": sid, "t_ns": t_ns, "answer": answer, "n_labels": len(labels)}
-    with (workdir / "answers.jsonl").open("a") as fh:
-        fh.write(json.dumps(log) + "\n")
-    return log
-
-
-def label_segment(server: str, sid: str, args: argparse.Namespace, workdir: Path) -> None:
-    info = json_object(f"{server}/api/segment/{sid}")
-    keyframes: list[int] = info["keyframes_ns"]
-    todo: list[int] = [t for t in (q["t_ns"] for q in json_list(f"{server}/api/queue?sid={sid}&limit=100000")) if t in set(keyframes)]
-    if args.limit:
-        todo = todo[: args.limit]
-    print(f"[{sid}] {len(todo)} of {len(keyframes)} keyframes to review", flush=True)
-    t_start = time.time()
-    done = 0
-    skipped = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(review_keyframe, server, sid, t, args, workdir): t for t in todo}
-        for fut in concurrent.futures.as_completed(futures):
-            try:
-                fut.result()
-            except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as err:
-                # One bad keyframe (missing frame, server hiccup, model failure) must not stop the night's run;
-                # it stays unreviewed and comes back in the queue next time. A usage limit stops everything.
-                if "usage limit" in str(err).lower():
-                    raise
-                skipped += 1
-                print(f"[{sid}] skipped keyframe {futures[fut]}: {err}", file=sys.stderr, flush=True)
-            done += 1
-            if done % 10 == 0 or done == len(todo):
-                rate = done / max(time.time() - t_start, 1e-6)
-                print(f"[{sid}] {done}/{len(todo)} keyframes, {rate * 60:.1f}/min", flush=True)
-    if args.limit:
-        return
-    # Fill only between keyframes that are now fully reviewed; a keyframe skipped above stays in the queue
-    # and its two neighbouring runs stay unfilled until it is reviewed.
-    unreviewed: set[int] = {q["t_ns"] for q in json_list(f"{server}/api/queue?sid={sid}&limit=100000") if "keyframe" in q["reasons"]}
-    filled = 0
-    for t0, t1 in zip(keyframes, keyframes[1:], strict=False):
-        if t0 in unreviewed or t1 in unreviewed:
-            continue
-        try:
-            result = json_object(f"{server}/api/range", {"segment_id": sid, "t0_ns": t0, "t1_ns": t1, "reviewer": args.reviewer})
-        except RuntimeError as err:
-            print(f"[{sid}] range {t0}..{t1} not filled: {err}", file=sys.stderr, flush=True)
-            continue
-        filled += result["filled"]
-    commit = json_object(f"{server}/api/commit/{sid}", {})
-    print(f"[{sid}] skipped {skipped}; range-filled {filled}; committed {commit}", flush=True)
 
 
 WATCH_PROMPT = """You are a hand-labeling reviewer watching a playback of a head-worn camera rig (RoboCap), like a person
@@ -564,7 +377,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--server", default="http://dgx-spark:9898")
     parser.add_argument("--segment", action="append", default=[], help="segment id; repeat; default = every segment")
-    parser.add_argument("--mode", choices=["megatrack", "keyframes"], default="megatrack")
     parser.add_argument("--window", type=int, default=10, help="megatrack: filmstrip rows per playback window")
     parser.add_argument("--clip-s", type=float, nargs=2, metavar=("START", "LENGTH"), default=None,
                         help="megatrack: label only this clip, seconds after the segment's first grid time")
@@ -572,18 +384,13 @@ def main() -> None:
     parser.add_argument("--model", default="gpt-6-astra")
     parser.add_argument("--effort", default="medium")
     parser.add_argument("--reviewer", default="astra")
-    parser.add_argument("--workers", type=int, default=4, help="keyframes: parallel keyframes; megatrack: parallel segments")
-    parser.add_argument("--limit", type=int, default=0, help="keyframes: review only the first N keyframes per segment (no range fill / commit)")
+    parser.add_argument("--workers", type=int, default=4, help="parallel segments")
     parser.add_argument("--codex-home", default=str(Path.home() / ".codex-work"))
     parser.add_argument("--workdir", default="/mnt/nas/ssd-8tb/scratch/hand-labeler/astra")
     args = parser.parse_args()
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     segments: list[str] = args.segment or [s["segment_id"] for s in json_list(f"{args.server}/api/segments")]
-    if args.mode == "keyframes":
-        for sid in segments:
-            label_segment(args.server, sid, args, workdir)
-        return
     # One reviewer per segment, segments in parallel: inside a segment the loop is sequential (a fix changes what follows).
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(megatrack_segment, args.server, sid, args, workdir): sid for sid in segments}

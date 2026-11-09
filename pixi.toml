@@ -1325,6 +1325,49 @@ cmd = "pytest -q tests"
 cwd = "packages/sam2-streaming"
 description = "Run SAM2-streaming regression tests"
 
+[feature.posekit.tasks.label-server]
+cmd = "python tools/apps/label_server.py"
+cwd = "packages/posekit"
+depends-on = [{ task = "labeler-ui-build", environment = "labeler-ui" }]
+description = "Hand labeler: build the Svelte UI, then serve it with the label API (pass flags after --)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# labeler-ui — the hand labeler's Svelte + Vite front end (Node and pnpm from conda-forge)
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.labeler-ui]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.labeler-ui.dependencies]
+nodejs = "24.*"
+pnpm = "11.20.*" # = packageManager in package.json; conda pnpm 11.20 needs nodejs >=24.18,<25
+
+[feature.labeler-ui.tasks.labeler-ui-install]
+cmd = "pnpm install --frozen-lockfile"
+cwd = "packages/posekit/labeler-ui"
+inputs = ["packages/posekit/labeler-ui/package.json", "packages/posekit/labeler-ui/pnpm-lock.yaml", "packages/posekit/labeler-ui/pnpm-workspace.yaml"]
+outputs = ["packages/posekit/labeler-ui/node_modules/.modules.yaml"]
+description = "Install the labeler UI's Node dependencies from the lockfile"
+
+[feature.labeler-ui.tasks.labeler-ui-build]
+cmd = "pnpm build"
+cwd = "packages/posekit/labeler-ui"
+depends-on = ["labeler-ui-install"]
+inputs = ["packages/posekit/labeler-ui/src/**", "packages/posekit/labeler-ui/index.html", "packages/posekit/labeler-ui/*.config.*", "packages/posekit/labeler-ui/tsconfig.json", "packages/posekit/labeler-ui/pnpm-lock.yaml"]
+outputs = ["packages/posekit/src/posekit/labeler/static/**"]
+description = "Build the labeler UI into posekit/labeler/static (gitignored), which the label server serves"
+
+[feature.labeler-ui.tasks.labeler-ui-dev]
+cmd = "pnpm dev"
+cwd = "packages/posekit/labeler-ui"
+depends-on = ["labeler-ui-install"]
+description = "Vite dev server with HMR; /api goes to LABEL_SERVER (default http://127.0.0.1:9898)"
+
+[feature.labeler-ui.tasks.labeler-ui-check]
+cmd = "pnpm lint && pnpm check && pnpm test"
+cwd = "packages/posekit/labeler-ui"
+depends-on = ["labeler-ui-install"]
+description = "Prettier + ESLint, svelte-check and vitest for the labeler UI"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # LAMP — CC-BY-NC 4.0, non-commercial use only
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4153,6 +4196,7 @@ posekit-dev = { features = [
     "posekit",
     "dev",
 ], solve-group = "posekit", no-default-feature = true }
+labeler-ui = { features = ["labeler-ui"], solve-group = "labeler-ui", no-default-feature = true }
 lamp = { features = [
     "common",
     "cuda",

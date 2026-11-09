@@ -48,7 +48,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol, TypeAlias, runtime_checkable
 
-from posekit.labeler.queue import ProposalProvider, iou
+from posekit.labeler.proposals import ProposalProvider, iou
 from posekit.labeler.schema import HAND_SIDES, Box, HandSide, LabelSource, Proposal, TrackBox, TrackFrame, ViewLabel
 from posekit.labeler.store import LabelStore
 

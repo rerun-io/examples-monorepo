@@ -17,7 +17,7 @@ Boxes are clipped to the image; a box that is empty after clipping is dropped.
 """
 
 from collections.abc import Sequence
-from typing import TypeAlias
+from typing import Protocol, TypeAlias, runtime_checkable
 
 import numpy as np
 import pyarrow as pa
@@ -39,6 +39,25 @@ KEYNET_MARGIN: float = 0.15
 """Margin added on every side of the keypoint bounding box, as a fraction of its longer side (keypoints are joint centres)."""
 ProposalsByTime: TypeAlias = dict[int, list[Proposal]]
 """Proposals per grid time, ns; every grid time is a key (with an empty list when nothing was proposed)."""
+
+
+@runtime_checkable
+class ProposalProvider(Protocol):
+    """Model proposals for one time of one segment (EgoHand and, on Cap B segments, the ``hands`` layer)."""
+
+    def proposals(self, segment_id: str, t_ns: int) -> list[Proposal]:
+        """Every proposal of every camera at ``t_ns``."""
+        ...
+
+def iou(a: Box, b: Box) -> float:
+    """Intersection over union of two boxes."""
+    width: float = min(a.x1, b.x1) - max(a.x0, b.x0)
+    height: float = min(a.y1, b.y1) - max(a.y0, b.y0)
+    if width <= 0.0 or height <= 0.0:
+        return 0.0
+    inter: float = width * height
+    union: float = (a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter
+    return inter / union
 
 
 def keynet_path(cam: int, side: HandSide) -> str:

@@ -117,6 +117,9 @@ packages/simplecv/simplecv/data/body_models/
 packages/prompt-da/data/
 packages/zipdepth/data/
 packages/posekit/data/
+packages/posekit/src/posekit/labeler/static/
+packages/posekit/labeler-ui/node_modules/
+!packages/posekit/labeler-ui/src/lib/
 packages/sam3/data/
 packages/robocap-slam/data/
 packages/egoexo-forge/data/

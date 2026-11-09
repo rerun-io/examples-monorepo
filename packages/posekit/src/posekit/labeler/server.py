@@ -7,11 +7,8 @@ API (all JSON bodies are the pyserde records of ``posekit.labeler.schema`` and `
 - ``GET  /api/segments`` -> ``list[SegmentSummary]``
 - ``GET  /api/segment/<sid>`` -> ``SegmentInfo``
 - ``GET  /api/frame/<sid>/<cam>/<t_ns>.jpg?max_side=960`` -> JPEG of the native frame, downscaled
-- ``GET  /api/frameset/<sid>/<t_ns>`` -> ``FrameState``
 - ``GET  /api/sheet/<sid>/<t_ns>.jpg`` -> 3x2 contact sheet; ``GET /api/sheet/<sid>/<t_ns>.json`` -> ``SheetInfo``
 - ``POST /api/labels`` body ``FrameLabels`` -> ``{"stored": n}``
-- ``POST /api/range`` body ``RangeRequest`` -> ``RangeResult``
-- ``GET  /api/queue?sid=<sid>&limit=50`` -> ``list[QueueItem]``
 - ``POST /api/commit/<sid>`` -> ``{"path": ..., "n_labels": n}`` (writes and registers ``hand_boxes``)
 
 MEgATrack loop (``posekit.labeler.tracker``, ``posekit.labeler.actions``):
@@ -34,8 +31,7 @@ its time on. A playback request decodes its cells on six threads (one per camera
 
 Bad input answers 400 with ``{"error": message}``; an unknown segment, camera or file answers 404.
 
-Segments open lazily (frames + labels from the catalog) on first use. Decoded frames sit in a small cache;
-after a queue request a background worker decodes the first queue items, so the next frame sets are warm.
+Segments open lazily (frames + labels from the catalog) on first use. Decoded frames sit in a small cache.
 Every ``autosave_every`` new labels the store is written to its autosave file (never registered). ``close``
 refuses new writes (503), waits for the writes in flight and autosaves every store with unsaved labels.
 """
@@ -66,7 +62,7 @@ from serde import SerdeError, serde
 from serde.json import from_json, to_json
 
 from posekit.labeler.actions import classify_labels, effort_summary
-from posekit.labeler.queue import ProposalProvider, ReviewQueue
+from posekit.labeler.proposals import ProposalProvider
 from posekit.labeler.rig import Kb4Rig
 from posekit.labeler.schema import (
     AcceptRange,
@@ -76,11 +72,6 @@ from posekit.labeler.schema import (
     CameraInfo,
     EffortSummary,
     FrameLabels,
-    FrameState,
-    Proposal,
-    QueueItem,
-    RangeRequest,
-    RangeResult,
     SegmentInfo,
     SegmentSplit,
     SegmentSummary,
@@ -89,7 +80,6 @@ from posekit.labeler.schema import (
     SolveResult,
     TrackFrame,
     ViewLabel,
-    ViewState,
 )
 from posekit.labeler.sheet import PlaybackCell, PlaybackInfo, SheetInfo, contact_sheet, encode_jpeg, filmstrip, playback_info, sheet_info, strip_cell
 from posekit.labeler.sphere import ViewSolve, solve_views
@@ -200,8 +190,8 @@ class Segment:
     """Frame decoder."""
     store: LabelStore
     """Labels."""
-    queue: ReviewQueue
-    """Review queue and range fill."""
+    grid: frozenset[int]
+    """Times on the segment grid."""
     tracker: TrackCache
     """Machine track."""
     period_ns: int
@@ -243,7 +233,6 @@ class LabelApp:
         dataset: str = "robocap-labeling",
         autosave_every: int = 50,
         cached_frames: int = 72,
-        prefetch_items: int = 2,
         cached_cells: int = 720,
         open_carrier: Callable[[str], BoxCarrier] | None = None,
         open_propagator: Callable[[str], Propagator] | None = None,
@@ -263,7 +252,6 @@ class LabelApp:
             dataset: Catalog dataset name, reported by ``/api/config``.
             autosave_every: New labels between autosaves.
             cached_frames: Decoded frames kept in memory.
-            prefetch_items: Queue items whose frames are decoded ahead after a queue request.
             cached_cells: Downscaled filmstrip cells kept in memory (six windows of ten rows by default).
             open_carrier: Opens the visual tracker of one segment (called after ``open_frames``), which carries reviewed
                 boxes in the machine track (origin ``tracked``); None = chains only hold.
@@ -281,7 +269,6 @@ class LabelApp:
         self.config: ServerConfig = ServerConfig(reviewer, dataset)
         self.autosave_every: int = autosave_every
         self.cached_frames: int = cached_frames
-        self.prefetch_items: int = prefetch_items
         self.open_carrier: Callable[[str], BoxCarrier] | None = open_carrier
         self.open_propagator: Callable[[str], Propagator] | None = open_propagator
         self.open_rig: Callable[[str], Kb4Rig] | None = open_rig
@@ -289,7 +276,6 @@ class LabelApp:
         self._open_locks: dict[str, LockType] = {sid: threading.Lock() for sid in segment_ids}
         self._frames: OrderedDict[FrameKey, Future[UInt8[ndarray, "h w 3"]]] = OrderedDict()
         self._frames_lock = threading.Lock()
-        self._prefetcher: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="labeler-prefetch")
         self._writer: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="labeler-autosave")
         self.cached_cells: int = cached_cells
         self._cells: OrderedDict[FrameKey, Future[UInt8[ndarray, "ch cw 3"]]] = OrderedDict()
@@ -307,7 +293,6 @@ class LabelApp:
                 return
             self._closing = True
             self._writes_changed.wait_for(lambda: self._writes_in_flight == 0)
-        self._prefetcher.shutdown(wait=False, cancel_futures=True)
         self._cell_decoder.shutdown(wait=False, cancel_futures=True)
         self._warmer.shutdown(wait=False, cancel_futures=True)
         dirty: list[Segment] = [segment for segment in list(self._segments.values()) if segment.store.unsaved]
@@ -357,14 +342,6 @@ class LabelApp:
                 self.viewer_url(segment_id),
             )
             store: LabelStore = self.layers.open_store(segment_id, split)
-            queue: ReviewQueue = ReviewQueue(
-                segment_id,
-                times_ns=info.times_ns,
-                keyframes_ns=info.keyframes_ns,
-                cams=[camera.cam for camera in info.cams],
-                store=store,
-                proposals=self.proposals,
-            )
             cams: list[int] = [camera.cam for camera in info.cams]
             carrier: BoxCarrier | None = None if self.open_carrier is None else self.open_carrier(segment_id)
             propagator: Propagator | None = None if self.open_propagator is None else self.open_propagator(segment_id)
@@ -373,7 +350,7 @@ class LabelApp:
             )
             period_ns: int = int(np.median(np.diff(info.times_ns))) if len(info.times_ns) > 1 else 200_000_000
             rig: Kb4Rig | None = None if self.open_rig is None else self.open_rig(segment_id)
-            opened = Segment(info, frames, store, queue, tracker, period_ns, threading.Lock(), threading.Lock(), rig)
+            opened = Segment(info, frames, store, frozenset(info.times_ns), tracker, period_ns, threading.Lock(), threading.Lock(), rig)
             self._segments[segment_id] = opened
             if info.times_ns:
                 self._warmer.submit(self._warm_track, opened)
@@ -403,15 +380,13 @@ class LabelApp:
                     segment_id,
                     segment.info.split,
                     duration_s,
-                    len(segment.info.keyframes_ns),
-                    segment.queue.n_reviewed_keyframes(),
                     len(segment.store),
                 )
             )
         return rows
 
     def _grid_time(self, segment: Segment, t_ns: int) -> int:
-        if not segment.queue.on_grid(t_ns):
+        if t_ns not in segment.grid:
             raise ValueError(f"t_ns {t_ns} is not on the 5 fps grid of {segment.info.segment_id}")
         return t_ns
 
@@ -424,7 +399,7 @@ class LabelApp:
     # -- frames ---------------------------------------------------------------------------------------------
 
     def frame(self, segment_id: str, cam: int, t_ns: int) -> UInt8[ndarray, "h w 3"]:
-        """Decoded RGB frame, from the cache or decoded now (waits for a prefetch already decoding it)."""
+        """Decoded RGB frame, from the cache or decoded now."""
         segment: Segment = self.segment(segment_id)
         self._camera(segment, cam)
         self._grid_time(segment, t_ns)
@@ -449,20 +424,6 @@ class LabelApp:
                 future.set_exception(NotFoundError(f"no frame: {error}") if isinstance(error, KeyError) else error)
         return future.result()
 
-    def prefetch(self, segment_id: str, times_ns: list[int]) -> None:
-        """Decode every camera of these times in the background."""
-        segment: Segment = self.segment(segment_id)
-        for t_ns in times_ns:
-            for camera in segment.info.cams:
-                self._prefetcher.submit(self._prefetch_one, segment_id, camera.cam, t_ns)
-
-    def _prefetch_one(self, segment_id: str, cam: int, t_ns: int) -> None:
-        try:
-            self.frame(segment_id, cam, t_ns)
-        except BeartypeException:
-            raise
-        except Exception as error:  # a failed prefetch is retried (and reported) by the request that needs it
-            print(f"[labeler] prefetch {segment_id} cam {cam} t {t_ns} failed: {error!r}")
 
     def frame_jpeg(self, segment_id: str, cam: int, t_ns: int, max_side: int | None) -> bytes:
         """JPEG of one frame, longer side at most ``max_side``."""
@@ -472,17 +433,6 @@ class LabelApp:
 
     # -- frame sets -----------------------------------------------------------------------------------------
 
-    def frame_state(self, segment_id: str, t_ns: int) -> FrameState:
-        """Proposals, labels and flags of one time."""
-        segment: Segment = self.segment(segment_id)
-        self._grid_time(segment, t_ns)
-        proposals: list[Proposal] = self.proposals.proposals(segment_id, t_ns)
-        labels: list[ViewLabel] = segment.store.get(t_ns)
-        views: list[ViewState] = [
-            ViewState(camera.cam, [p for p in proposals if p.cam == camera.cam], [label for label in labels if label.cam == camera.cam])
-            for camera in segment.info.cams
-        ]
-        return FrameState(segment_id, t_ns, views, segment.queue.flags(t_ns))
 
     def sheet_info(self, segment_id: str, t_ns: int) -> SheetInfo:
         """Layout and numbering of the contact sheet and the machine track at ``t_ns`` (no decoding)."""
@@ -697,22 +647,6 @@ class LabelApp:
             count: int = segment.store.save_layer(path, self.effort(segment.info.segment_id))
         print(f"[labeler] autosaved {count} labels of {segment.info.segment_id} to {path}")
 
-    def fill_range(self, request: RangeRequest) -> RangeResult:
-        """Range fill between two reviewed keyframes."""
-        segment: Segment = self.segment(request.segment_id)
-        with self._write(), segment.label_lock:
-            result: RangeResult = segment.queue.fill_range(request)
-            segment.tracker.invalidate_from(request.t0_ns)
-            self._maybe_autosave(segment)
-        return result
-
-    def queue(self, segment_id: str, limit: int) -> list[QueueItem]:
-        """Frame sets to review next; the first ``prefetch_items`` are decoded in the background."""
-        if limit < 1:
-            raise ValueError("limit must be at least 1")
-        items: list[QueueItem] = self.segment(segment_id).queue.items(limit)
-        self.prefetch(segment_id, [item.t_ns for item in items[: self.prefetch_items]])
-        return items
 
     def commit(self, segment_id: str) -> CommitResponse:
         """Write the ``hand_boxes`` layer file and register it on the catalog (REPLACE)."""
@@ -738,7 +672,6 @@ STATIC_TYPES: dict[str, str] = {
 }
 """Content types of the built UI's files (``mimetypes`` depends on the host's tables)."""
 ROUTE_FRAME: re.Pattern[str] = re.compile(r"^/api/frame/([^/]+)/(-?\d+)/(-?\d+)\.jpg$")
-ROUTE_FRAMESET: re.Pattern[str] = re.compile(r"^/api/frameset/([^/]+)/(-?\d+)$")
 ROUTE_SHEET: re.Pattern[str] = re.compile(r"^/api/sheet/([^/]+)/(-?\d+)\.(jpg|json)$")
 ROUTE_SEGMENT: re.Pattern[str] = re.compile(r"^/api/segment/([^/]+)$")
 ROUTE_COMMIT: re.Pattern[str] = re.compile(r"^/api/commit/([^/]+)$")
@@ -817,17 +750,11 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
                 self._json(app.config)
             elif path == "/api/segments":
                 self._json(app.summaries())
-            elif path == "/api/queue":
-                if "sid" not in query:
-                    raise ValueError("missing query parameter sid")
-                self._json(app.queue(query["sid"][0], int(query.get("limit", ["50"])[0])))
             elif match := ROUTE_SEGMENT.match(path):
                 self._json(app.segment(match.group(1)).info)
             elif match := ROUTE_FRAME.match(path):
                 max_side: int | None = int(query["max_side"][0]) if "max_side" in query else None
                 self._send(200, app.frame_jpeg(match.group(1), int(match.group(2)), int(match.group(3)), max_side), "image/jpeg")
-            elif match := ROUTE_FRAMESET.match(path):
-                self._json(app.frame_state(match.group(1), int(match.group(2))))
             elif match := ROUTE_SHEET.match(path):
                 if match.group(3) == "json":
                     self._json(app.sheet_info(match.group(1), int(match.group(2))))
@@ -857,8 +784,6 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
             body: str = self._body()
             if path == "/api/labels":
                 self._json(StoredResponse(app.put_labels(from_json(FrameLabels, body))))
-            elif path == "/api/range":
-                self._json(app.fill_range(from_json(RangeRequest, body)))
             elif path == "/api/accept_range":
                 self._json(app.accept_range(from_json(AcceptRange, body)))
             elif path == "/api/solve":

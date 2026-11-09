@@ -10,7 +10,7 @@ from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
 from posekit.labeler.megatrack import CropRequest, MegaTrackPropagator, MegaTrackStep
-from posekit.labeler.queue import iou
+from posekit.labeler.proposals import iou
 from posekit.labeler.rig import Kb4Rig, ViewKeypoints, fuse_views, keypoint_box
 from posekit.labeler.schema import Box, HandSide, Proposal, TrackBox, ViewLabel
 

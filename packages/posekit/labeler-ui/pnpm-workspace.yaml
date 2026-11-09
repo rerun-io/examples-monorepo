@@ -1,0 +1,18 @@
+engineStrict: true
+
+# Only install packages after 3 days, to reduce the risk of installing compromised packages (portal's rule).
+minimumReleaseAge: 4320 # 4320 minutes = 3 days (3 * 24 * 60)
+
+# Exclude the Svelte family from the minimum release age check (portal's list, minus the SvelteKit/WorkOS entries).
+minimumReleaseAgeExclude:
+  - '@sveltejs/vite-plugin-svelte'
+  - esrap
+  - devalue
+  - eslint-plugin-svelte
+  - prettier-plugin-svelte
+  - svelte
+  - svelte-check
+  - svelte-eslint-parser
+
+allowBuilds:
+  esbuild: true

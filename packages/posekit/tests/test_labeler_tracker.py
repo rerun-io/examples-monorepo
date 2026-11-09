@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from posekit.labeler.proposals import iou
 from posekit.labeler.schema import Box, FrameLabels, HandSide, Proposal, TrackBox, TrackFrame, ViewLabel
 from posekit.labeler.store import LabelStore
 from posekit.labeler.tracker import TrackCache, propagate
@@ -306,3 +307,9 @@ def test_track_cache_carries_and_recomputes_with_the_same_boxes() -> None:
     cache.invalidate_from(LONG[6])
     assert cache.frames(LONG[0], 5) == first
     assert at(cache.frames(LONG[7], 1), 0, 1, "right").origin == "tracked"
+
+
+def test_iou() -> None:
+    assert iou(Box(0.0, 0.0, 100.0, 100.0), Box(0.0, 0.0, 100.0, 100.0)) == pytest.approx(1.0)
+    assert iou(Box(0.0, 0.0, 100.0, 100.0), Box(50.0, 0.0, 150.0, 100.0)) == pytest.approx(5000.0 / 15000.0)
+    assert iou(Box(0.0, 0.0, 100.0, 100.0), Box(500.0, 0.0, 600.0, 100.0)) == 0.0

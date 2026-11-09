@@ -103,16 +103,6 @@ class NewWrite:
     """Views that already had a label, left untouched."""
 
 
-@dataclass(frozen=True, slots=True)
-class RangeWrite:
-    """Outcome of ``LabelStore.put_range`` at one time."""
-
-    stored: int
-    """Range labels written."""
-    open_views: int
-    """Views left without any label (no reviewed label, no range decision)."""
-
-
 class LabelStore:
     """Thread-safe labels of one segment, keyed by (t_ns, cam, side)."""
 
@@ -186,36 +176,6 @@ class LabelStore:
         with self._lock:
             return list(self._actions)
 
-    def put_range(self, t_ns: int, decisions: dict[tuple[int, HandSide], ViewLabel | None]) -> RangeWrite:
-        """Apply a range fill's decisions at one time, atomically with respect to every other write.
-
-        A view whose stored label is not a ``range`` label is left as it is. Otherwise a decision replaces the
-        stored label, and an undecided view (``None``) loses its stale ``range`` label.
-
-        Args:
-            t_ns: Grid time.
-            decisions: Per (cam, side): the ``range`` label to store, or None when the fill cannot decide.
-        """
-        stored: int = 0
-        open_views: int = 0
-        with self._lock:
-            at_time: dict[tuple[int, HandSide], ViewLabel] = self._labels.setdefault(t_ns, {})
-            for key, decided in decisions.items():
-                existing: ViewLabel | None = at_time.get(key)
-                if existing is not None and existing.source != "range":
-                    continue
-                if decided is not None:
-                    at_time[key] = decided
-                    stored += 1
-                    self._unsaved += 1
-                    continue
-                open_views += 1
-                if existing is not None:
-                    del at_time[key]
-                    self._unsaved += 1
-            if not at_time:
-                del self._labels[t_ns]
-        return RangeWrite(stored, open_views)
 
     def get(self, t_ns: int) -> list[ViewLabel]:
         """Labels at one time, sorted by (cam, side)."""

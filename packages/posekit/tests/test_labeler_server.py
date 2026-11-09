@@ -19,7 +19,7 @@ from jaxtyping import UInt8
 from numpy import ndarray
 from serde.json import from_json, to_json
 
-from posekit.labeler.queue import ProposalProvider
+from posekit.labeler.proposals import ProposalProvider
 from posekit.labeler.rig import Kb4Rig
 from posekit.labeler.schema import (
     AcceptRange,
@@ -29,11 +29,7 @@ from posekit.labeler.schema import (
     CameraInfo,
     EffortSummary,
     FrameLabels,
-    FrameState,
     Proposal,
-    QueueItem,
-    RangeRequest,
-    RangeResult,
     SegmentInfo,
     SegmentSplit,
     SegmentSummary,
@@ -251,9 +247,9 @@ def test_solve_without_a_rig_is_not_found(running: Running) -> None:
 def test_config_segments_and_segment(running: Running) -> None:
     assert json.loads(get_json(running.url + "/api/config")) == {"reviewer": "tester", "dataset": "robocap-labeling"}
     summaries: list[SegmentSummary] = from_json(list[SegmentSummary], get_json(running.url + "/api/segments"))
-    assert [(row.segment_id, row.split, row.n_keyframes, row.n_reviewed_keyframes, row.n_labels) for row in summaries] == [
-        ("seg_a", "train", 3, 0, 0),
-        ("seg_b", "eval", 3, 0, 0),
+    assert [(row.segment_id, row.split, row.n_labels) for row in summaries] == [
+        ("seg_a", "train", 0),
+        ("seg_b", "eval", 0),
     ]
     assert summaries[0].duration_s == pytest.approx(2.0)
     info: SegmentInfo = from_json(SegmentInfo, get_json(running.url + "/api/segment/seg_b"))
@@ -277,11 +273,7 @@ def test_frame_jpeg(running: Running) -> None:
     assert fetch(running.url + "/api/frame/seg_a/0/1000.jpg?max_side=abc")[0] == 400
 
 
-def test_frameset_and_sheet(running: Running) -> None:
-    state: FrameState = from_json(FrameState, get_json(running.url + "/api/frameset/seg_a/1000"))
-    assert [view.cam for view in state.views] == list(range(6))
-    assert len(state.views[0].proposals) == 1 and state.views[0].labels == []
-    assert state.flags == ["low_score"]
+def test_sheet(running: Running) -> None:
     info: SheetInfo = from_json(SheetInfo, get_json(running.url + "/api/sheet/seg_a/1000.json"))
     assert [p.k for p in info.proposals] == [1, 2]
     assert (info.width, info.cells[0].scale) == (1920, pytest.approx(10 / 3))
@@ -289,14 +281,10 @@ def test_frameset_and_sheet(running: Running) -> None:
     assert (status, content_type) == (200, "image/jpeg")
     sheet: UInt8[ndarray, "h w 3"] = decode_jpeg(body)
     assert sheet.shape == (info.height, info.width, 3)
-    assert fetch(running.url + "/api/frameset/seg_a/7")[0] == 400
 
 
-def test_labels_queue_range_commit(running: Running) -> None:
+def test_labels_and_commit(running: Running) -> None:
     keyframes: list[int] = [1_000, 1_000 + 5 * STEP]
-    queue: list[QueueItem] = from_json(list[QueueItem], get_json(running.url + "/api/queue?sid=seg_a&limit=2"))
-    assert [item.t_ns for item in queue] == keyframes
-    assert queue[0].reasons == ["keyframe", "low_score"]
     for t_ns in keyframes:
         labels: list[ViewLabel] = [
             ViewLabel(cam, side, "accepted", Box(10.0, 10.0, 60.0, 60.0), "egohand", "tester")
@@ -307,14 +295,6 @@ def test_labels_queue_range_commit(running: Running) -> None:
         ]
         status, _, body = fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", t_ns, labels)))
         assert (status, json.loads(body)) == (200, {"stored": 12})
-    result: RangeResult = from_json(
-        RangeResult, fetch(running.url + "/api/range", to_json(RangeRequest("seg_a", keyframes[0], keyframes[1], "tester")))[2]
-    )
-    assert result == RangeResult(filled=4 * 12, queued=[])
-    remaining: list[QueueItem] = from_json(list[QueueItem], get_json(running.url + "/api/queue?sid=seg_a"))
-    assert [item.t_ns for item in remaining] == [1_000 + 10 * STEP]
-    state: FrameState = from_json(FrameState, get_json(running.url + f"/api/frameset/seg_a/{1_000 + STEP}"))
-    assert state.views[0].labels[0].source == "range"
     # The autosave runs in the background after every few labels.
     deadline: float = time.monotonic() + 30.0
     while not running.layers.autosave_path("seg_a").exists() and time.monotonic() < deadline:
@@ -323,11 +303,11 @@ def test_labels_queue_range_commit(running: Running) -> None:
     status, _, body = fetch(running.url + "/api/commit/seg_a", "")
     assert status == 200
     committed: dict[str, object] = json.loads(body)
-    assert committed == {"path": str(running.layers.layer_path("seg_a")), "n_labels": 6 * 12}
+    assert committed == {"path": str(running.layers.layer_path("seg_a")), "n_labels": 2 * 12}
     assert running.layers.registered == [running.layers.layer_path("seg_a")]
     assert not running.layers.autosave_path("seg_a").exists()
     summaries: list[SegmentSummary] = from_json(list[SegmentSummary], get_json(running.url + "/api/segments"))
-    assert (summaries[0].n_reviewed_keyframes, summaries[0].n_labels) == (2, 72)
+    assert summaries[0].n_labels == 24
     assert fetch(running.url + "/api/commit/zzz", "")[0] == 404
 
 
@@ -395,19 +375,12 @@ def test_committed_file_holds_the_action_log(running: Running) -> None:
             "",
         ),
         ("/api/labels", json.dumps({"segment_id": "seg_a", "t_ns": 3, "labels": []}), "grid"),
-        ("/api/range", json.dumps({"segment_id": "seg_a", "t0_ns": 1000, "t1_ns": 1000 + 10 * STEP, "reviewer": "x"}), "reviewed"),
     ],
 )
 def test_bad_input_is_400(running: Running, path: str, body: str, message: str) -> None:
     status, content_type, answer = fetch(running.url + path, body)
     assert (status, content_type) == (400, "application/json")
     assert message in json.loads(answer)["error"]
-
-
-def test_bad_queue_requests(running: Running) -> None:
-    assert fetch(running.url + "/api/queue")[0] == 400
-    assert fetch(running.url + "/api/queue?sid=seg_a&limit=0")[0] == 400
-    assert fetch(running.url + "/api/queue?sid=nope")[0] == 404
 
 
 def track_box(frames: list[TrackFrame], index: int, cam: int, side: str) -> tuple[str, Box | None]:

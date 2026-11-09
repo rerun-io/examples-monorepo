@@ -129,8 +129,7 @@ def test_nanotrack_carries_egohand_boxes_on_robocap_deterministically() -> None:
 
     from posekit.labeler.carry import nanotrack_file, opencv_tracker
     from posekit.labeler.frames import FrameSource
-    from posekit.labeler.proposals import read_proposals
-    from posekit.labeler.queue import iou
+    from posekit.labeler.proposals import iou, read_proposals
     from posekit.labeler.schema import Proposal
     from posekit.labeler.tracker import CARRY_STEPS
 

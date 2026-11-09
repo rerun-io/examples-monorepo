@@ -1,0 +1,49 @@
+/*
+ * Every design token of the labeler, in portal's two layers: the --rr-* palette (Rerun house style, dark values from
+ * DESIGN.md), then the --color-* roles. Components use only --color-*, --font-*, --radius-* and --hand-*.
+ * Colour lives on the data: the two hands and the status colours, nothing else.
+ */
+:root {
+  color-scheme: dark;
+
+  --rr-bg: #000;
+  --rr-panel: oklch(0.145 0 0);
+  --rr-panel-2: oklch(0.205 0 0);
+  --rr-fg: oklch(0.97 0 0);
+  --rr-subtle: oklch(0.922 0 0);
+  --rr-text: oklch(0.708 0 0);
+  --rr-dim: oklch(0.6 0 0);
+  --rr-border: #64646440;
+  --rr-border-strong: oklch(0.371 0 0);
+  --rr-on-fg: #000;
+  --rr-row: #22b5e6;
+  --rr-time: #de7df3;
+  --rr-good: #6cefb4;
+  --rr-warn: #f6da75;
+  --rr-bad: #ff6b5e;
+  --rr-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial,
+    sans-serif;
+  --rr-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --rr-radius-control: 2px;
+
+  --color-bg: var(--rr-bg);
+  --color-surface: var(--rr-panel);
+  --color-surface-2: var(--rr-panel-2);
+  --color-text: var(--rr-text);
+  --color-strong: var(--rr-fg);
+  --color-on-strong: var(--rr-on-fg);
+  --color-muted: var(--rr-dim);
+  --color-border: var(--rr-border);
+  --color-border-strong: var(--rr-border-strong);
+  --color-scrim: color-mix(in srgb, var(--rr-bg) 80%, transparent);
+  --color-success: var(--rr-good);
+  --color-warning: var(--rr-warn);
+  --color-danger: var(--rr-bad);
+  --font-sans: var(--rr-sans);
+  --font-mono: var(--rr-mono);
+  --radius-control: var(--rr-radius-control);
+
+  --hand-left: var(--rr-row);
+  --hand-right: var(--rr-time);
+}
