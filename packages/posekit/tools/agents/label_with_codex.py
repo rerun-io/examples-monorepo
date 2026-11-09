@@ -466,7 +466,15 @@ def megatrack_segment(server: str, sid: str, args: argparse.Namespace, workdir: 
     window: int = args.window
     log_path = workdir / f"{sid}.jsonl"
     fails_at: dict[int, int] = {}
-    i = 0
+    # Resume where the reviewer left off: after the last accepted run, or at the last fixed frame if that is later.
+    actions: list = json_list(f"{server}/api/actions/{sid}")
+    accepted_to: int = max((a["t1_ns"] for a in actions if a["kind"] == "accept_range" and a["t1_ns"] is not None), default=-1)
+    last_fix: int = max((a["t_ns"] for a in actions if a["kind"] not in ("accept_range", "accept_frame")), default=-1)
+    i = next((k for k, t in enumerate(times) if t > accepted_to), len(times))
+    if last_fix > accepted_to and last_fix in times:
+        i = times.index(last_fix)
+    if i:
+        print(f"[{sid}] resuming at frame {i}/{len(times)} ({len(actions)} earlier actions)", flush=True)
     t_start = time.time()
     n_watch = n_fix = 0
 
@@ -478,7 +486,9 @@ def megatrack_segment(server: str, sid: str, args: argparse.Namespace, workdir: 
         result = json_object(f"{server}/api/accept_range", {"segment_id": sid, "t0_ns": times[a], "t1_ns": times[b], "reviewer": args.reviewer})
         log({"action": "accept_range", "t0_ns": times[a], "t1_ns": times[b], "result": result})
 
-    while i < len(times):
+    def step(i: int) -> int:
+        """Watch one window from grid index i; accept it or fix its first failure. Returns the next index."""
+        nonlocal n_watch, n_fix
         n = min(window, len(times) - i)
         jpg = http_bytes(f"{server}/api/playback/{sid}/{times[i]}.jpg?n={n}")
         watch = ask_with_retries(jpg, WATCH_PROMPT.format(rows=n), WATCH_SCHEMA, args, lambda a, n=n: check_watch(n, a), f"{sid} watch {times[i]}")
@@ -487,34 +497,47 @@ def megatrack_segment(server: str, sid: str, args: argparse.Namespace, workdir: 
         failure = watch["failure"]
         if failure is None:
             accept(i, i + n - 1)
-            i += n
-        else:
-            r: int = failure["row"]
-            if r > 0:
-                accept(i, i + r - 1)
-            t_f: int = times[i + r]
-            fails_at[t_f] = fails_at.get(t_f, 0) + 1
-            if fails_at[t_f] > 2:
-                # the reviewer keeps stopping on the same frame after fixing it twice: reject that view there and go on
-                json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_f, "labels": [
-                    {"cam": failure["cam"], "side": failure["side"], "status": "rejected", "box": None, "source": "agent", "reviewer": args.reviewer}]})
-                log({"action": "reject_after_repeats", "t_ns": t_f, "failure": failure})
-                accept(i + r, i + r)
-                i += r + 1
-                continue
-            sheet = json_object(f"{server}/api/sheet/{sid}/{t_f}.json")
-            sheet_jpg = http_bytes(f"{server}/api/sheet/{sid}/{t_f}.jpg")
-            prompt = FIX_PROMPT.format(cam=failure["cam"], side=failure["side"], kind=failure["kind"], proposals=proposal_lines(sheet))
-            fix = ask_with_retries(sheet_jpg, prompt, FIX_SCHEMA, args, lambda a: None, f"{sid} fix {t_f}")
-            n_fix += 1
-            labels = fixes_to_labels(sheet, fix, args.reviewer)
-            log({"action": "fix", "t_ns": t_f, "failure": failure, "answer": fix, "n_labels": len(labels)})
-            if labels:
-                json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_f, "labels": labels})
-                i += r  # watch again from the fixed frame; propagation now starts from the fix
-            else:
-                accept(i + r, i + r)  # on a closer look nothing was wrong
-                i += r + 1
+            return i + n
+        r: int = failure["row"]
+        if r > 0:
+            accept(i, i + r - 1)
+        t_f: int = times[i + r]
+        fails_at[t_f] = fails_at.get(t_f, 0) + 1
+        if fails_at[t_f] > 2:
+            # the reviewer keeps stopping on the same frame after fixing it twice: reject that view there and go on
+            json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_f, "labels": [
+                {"cam": failure["cam"], "side": failure["side"], "status": "rejected", "box": None, "source": "agent", "reviewer": args.reviewer}]})
+            log({"action": "reject_after_repeats", "t_ns": t_f, "failure": failure})
+            accept(i + r, i + r)
+            return i + r + 1
+        sheet = json_object(f"{server}/api/sheet/{sid}/{t_f}.json")
+        sheet_jpg = http_bytes(f"{server}/api/sheet/{sid}/{t_f}.jpg")
+        prompt = FIX_PROMPT.format(cam=failure["cam"], side=failure["side"], kind=failure["kind"], proposals=proposal_lines(sheet))
+        fix = ask_with_retries(sheet_jpg, prompt, FIX_SCHEMA, args, lambda a: None, f"{sid} fix {t_f}")
+        n_fix += 1
+        labels = fixes_to_labels(sheet, fix, args.reviewer)
+        log({"action": "fix", "t_ns": t_f, "failure": failure, "answer": fix, "n_labels": len(labels)})
+        if labels:
+            json_object(f"{server}/api/labels", {"segment_id": sid, "t_ns": t_f, "labels": labels})
+            return i + r  # watch again from the fixed frame; propagation now starts from the fix
+        accept(i + r, i + r)  # on a closer look nothing was wrong
+        return i + r + 1
+
+    errors_in_a_row = 0
+    while i < len(times):
+        try:
+            i = step(i)
+        except (RuntimeError, OSError) as err:
+            # a server hiccup or a model failure: wait and watch the same window again; give up only if it keeps failing
+            if "usage limit" in str(err).lower():
+                raise
+            errors_in_a_row += 1
+            print(f"[{sid}] window at {times[i]} failed ({errors_in_a_row}): {err}", file=sys.stderr, flush=True)
+            if errors_in_a_row >= 6:
+                raise
+            time.sleep(30 * errors_in_a_row)
+            continue
+        errors_in_a_row = 0
         if n_watch % 20 == 0:
             done_s = (times[min(i, len(times) - 1)] - times[0]) / 1e9
             print(f"[{sid}] {i}/{len(times)} frames, {n_watch} windows, {n_fix} fixes, {done_s / max(time.time() - t_start, 1e-6):.2f}x real time", flush=True)
