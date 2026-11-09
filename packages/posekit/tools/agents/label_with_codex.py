@@ -463,6 +463,12 @@ def megatrack_segment(server: str, sid: str, args: argparse.Namespace, workdir: 
     """Watch the whole segment in windows; accept what is right; fix only the first failure of each window."""
     info = json_object(f"{server}/api/segment/{sid}")
     times: list[int] = info["times_ns"]
+    if args.clip_s is not None:
+        # label one clip only: [start, start + length) seconds after the segment's first grid time
+        start_s, length_s = args.clip_s
+        t_lo: int = times[0] + round(start_s * 1e9)
+        times = [t for t in times if t_lo <= t < t_lo + round(length_s * 1e9)]
+        print(f"[{sid}] clip {start_s:.1f}-{start_s + length_s:.1f} s: {len(times)} grid frames", flush=True)
     window: int = args.window
     log_path = workdir / f"{sid}.jsonl"
     fails_at: dict[int, int] = {}
@@ -560,6 +566,8 @@ def main() -> None:
     parser.add_argument("--segment", action="append", default=[], help="segment id; repeat; default = every segment")
     parser.add_argument("--mode", choices=["megatrack", "keyframes"], default="megatrack")
     parser.add_argument("--window", type=int, default=10, help="megatrack: filmstrip rows per playback window")
+    parser.add_argument("--clip-s", type=float, nargs=2, metavar=("START", "LENGTH"), default=None,
+                        help="megatrack: label only this clip, seconds after the segment's first grid time")
     parser.add_argument("--max-stride", type=int, default=3, help="megatrack: grid steps between rows once windows keep passing (1 = every 5 fps frame)")
     parser.add_argument("--model", default="gpt-6-astra")
     parser.add_argument("--effort", default="medium")
