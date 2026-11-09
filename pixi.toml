@@ -1152,11 +1152,6 @@ ultralytics = "==8.4.52"
 roma = "*"
 timm = "*"
 
-# These four existing Transformers wrappers have decorated .to() stubs that
-# pyrefly misbinds as unbound methods in this isolated dependency solve.
-[feature.posekit-egohand.activation.env]
-PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json"
-
 # SAM 3D Body model dependencies, outside the base posekit lane. Its upstream source
 # (`sam_3d_body`) installs from the pinned pixi-build recipe in recipes/sam-3d-body-src.
 [feature.posekit-sam3d-body]
@@ -1205,8 +1200,8 @@ kernels = ">=0.11.3"
 
 [feature.posekit-body.activation.env]
 PACKAGE_DIR = "packages/posekit"
-# The same four Transformers .to() stub false positives as posekit-egohand; the WiLoR and EgoHand lanes
-# are not installed here (see [feature.posekit.activation.env]).
+# The baseline holds four Transformers .to() stub false positives (decorated stubs pyrefly misbinds as unbound
+# methods in this solve); the WiLoR and EgoHand lanes are not installed here (see [feature.posekit.activation.env]).
 PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/wilor.py --project-excludes=src/posekit/models/wilor_net/*.py --project-excludes=src/posekit/ops/cuda_graph.py --project-excludes=src/posekit/models/egohand_cuda_crops.py --project-excludes=src/posekit/models/egohand_mhr.py --project-excludes=src/posekit/models/egohand_soma.py --project-excludes=src/posekit/models/egohand_tensor.py"
 
 [feature.posekit-body.tasks.posekit-body-download-examples]
@@ -1275,7 +1270,7 @@ no-build-isolation = ["cholespy"]
 
 [feature.posekit-hands.activation.env]
 PACKAGE_DIR = "packages/posekit"
-# posekit-egohand's baseline; the SAM 3D Body lane is not installed here (see [feature.posekit.activation.env]).
+# The Transformers .to() baseline (see [feature.posekit-body.activation.env]); the SAM 3D Body lane is not installed here (see [feature.posekit.activation.env]).
 PYREFLY_EXTRA_ARGS = "--baseline ${PIXI_PROJECT_ROOT}/packages/posekit/egohand-pyrefly-baseline.json --project-excludes=src/posekit/models/sam3d_body*.py --project-excludes=src/posekit/body_rerun.py --project-excludes=src/posekit/apis/body3d_mv_video.py --project-excludes=tests/test_body_fast_*.py"
 
 [feature.posekit-hands.tasks.posekit-video-hands]
