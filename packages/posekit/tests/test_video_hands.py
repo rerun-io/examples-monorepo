@@ -2,12 +2,11 @@
 
 from typing import Any
 
-import numpy as np
 import pytest
 import rerun as rr
 import torch
 
-from posekit.apis.video_hands import VideoHandsSettings, assumed_pinhole, describe_camera, image_plane_depth, log_chunk_hands, pinhole_camera
+from posekit.apis.video_hands import VideoHandsSettings, assumed_pinhole, describe_camera, log_chunk_hands, pinhole_camera
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
 
@@ -51,13 +50,6 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     meshes = [archetype for path, archetype in logged if path == "world/camera/hands/right_0/mesh"]
     faces = meshes[0].triangle_indices.as_arrow_array().to_pylist()
     assert faces == [[0, 1, 2]]
-
-
-def test_image_plane_sits_just_behind_the_hands() -> None:
-    # Joints from 0.4 to 0.6 m deep plus one stray far hand: the video plane goes half a hand behind the median joint.
-    z = np.concatenate([np.linspace(0.4, 0.6, 21), [2.0, 2.0]])
-    xyz = np.stack([np.zeros_like(z), np.zeros_like(z), z], axis=-1).astype(np.float32)
-    assert image_plane_depth(xyz) == pytest.approx(0.56, abs=1e-6)
 
 
 def test_unset_intrinsics_come_from_the_assumed_field_of_view() -> None:

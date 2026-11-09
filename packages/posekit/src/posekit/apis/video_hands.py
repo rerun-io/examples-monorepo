@@ -7,7 +7,7 @@ dataforge's: the camera node ``world/camera`` holds the camera transform, its
 ``pinhole/boxes``. Every hand is logged in its side slot (``left_0``, ``right_0``, ...):
 its 3D joints and mesh once, in the camera frame (``world/camera/hands``, a sibling of
 the pinhole), and the video view, whose origin is the pinhole, projects them onto the
-video. In 3D the video plane sits just behind the hands, so the meshes lie on it.
+video. The 3D view looks over the wearer's head at the camera frustum and the hands.
 
 The camera is a pinhole: ``fx``/``fy``/``cx``/``cy`` when given, else an assumed horizontal field
 of view (``hfov_deg``) with the principal point at the image centre. It does not have to be
@@ -25,6 +25,7 @@ import rerun.blueprint as rrb
 import torch
 from jaxtyping import Float32, Int64, UInt8, UInt16
 from numpy import ndarray
+from simplecv.rerun_eye_controls import follow_eye_controls
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
 from tqdm.auto import tqdm
@@ -171,24 +172,14 @@ def log_chunk_hands(
         live_slots.update(present)
 
 
-def image_plane_depth(xyz_camera: Float32[ndarray, "n 3"]) -> float:
-    """Distance of the video plane in 3D: the median depth of the hand joints plus 5 cm (about half a hand).
-
-    The plane then sits at the hands, so their meshes lie on the video instead of floating in front
-    of a small frustum. The median ignores a stray far hand in the first chunk.
-    """
-    return float(np.median(xyz_camera[:, 2])) + 0.05
-
-
-def send_blueprint(plane_depth: float) -> None:
+def send_blueprint() -> None:
     """The video with the hands projected onto it, beside a 3D view of the camera frustum and the same hands.
 
     The video view's origin is the pinhole, so the 3D joints and meshes under ``world/camera/hands``
     project onto the video, as dataforge's camera panes show its hand meshes.
 
-    The 3D eye sits behind the camera, a little above and to the right of its axis, and looks at the
-    centre of the video plane, so the frustum, the video and the hands on it fill the view. It scales
-    with the plane depth: EgoHand's metric hands are at arm's length, WiLoR's virtual camera puts them metres away.
+    The 3D eye is dataforge's headset chase view (``blueprints.headset_eye_controls``): behind and
+    above the head, looking down past the camera at the hands.
     """
     rr.send_blueprint(
         rrb.Horizontal(
@@ -197,9 +188,7 @@ def send_blueprint(plane_depth: float) -> None:
                 origin="world",
                 name="3D hands",
                 contents=["+ world/**", f"- {PINHOLE_PATH}/boxes/**"],
-                eye_controls=rrb.EyeControls3D(
-                    position=[0.15 * plane_depth, -0.25 * plane_depth, -0.9 * plane_depth], look_target=[0.0, 0.0, plane_depth], eye_up=(0.0, -1.0, 0.0)
-                ),
+                eye_controls=follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15),
             ),
         )
     )
@@ -282,7 +271,12 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
     camera_note: str = describe_camera(settings, camera)
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
     rr.log(CAMERA_PATH, rr.Transform3D(), static=True)
-    rr.log(PINHOLE_PATH, rr.Pinhole(image_from_camera=pinhole_matrix(pipeline.pose, camera, width, height), resolution=[width, height]), static=True)
+    rr.log(
+        PINHOLE_PATH,
+        rr.Pinhole(image_from_camera=pinhole_matrix(pipeline.pose, camera, width, height), resolution=[width, height], image_plane_distance=0.05),
+        static=True,
+    )
+    send_blueprint()
     video_timestamps_ns: Int64[ndarray, "frames"] = log_video(settings.video_path, Path(VIDEO_PATH), timeline="video_time")
     log_hand_annotation_context(pipeline.pose.skeleton)
     total_hands: int = 0
@@ -292,10 +286,6 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
-        if total_hands == 0 and hands.num_hands and hands.keypoints.xyz_camera is not None:
-            plane_depth: float = image_plane_depth(hands.keypoints.xyz_camera.reshape(-1, 3).cpu().numpy())
-            rr.log(PINHOLE_PATH, rr.Pinhole.from_fields(image_plane_distance=plane_depth), static=True)
-            send_blueprint(plane_depth)
         total_hands += hands.num_hands
         chunk: Int64[ndarray, "chunk"] = np.arange(start, stop, dtype=np.int64)
         timestamps: Int64[ndarray, "chunk"] = (
