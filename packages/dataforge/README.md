@@ -611,6 +611,15 @@ in one strip along the bottom. Past `EXO_PANES_PER_TAB` (9) static cameras the s
 continues in further tabs, filled in camera order. Panes are titled `rig_NN/cam_MM`,
 as in the entity tree.
 
+**Trails: the blueprint limits them, never the data.** A moving rig shows its recent motion as a trail.
+The layer that carries `world_T_rig` logs it once, one two-point segment per pose
+(`logging_toolkit.log_trail_segments` at `schema.trail_path(source)`), and every 3D view that shows it
+overrides that entity with `blueprints.trail_window_range()`: the last `TRAIL_WINDOW_S` (10 s) before the cursor
+on `video_time`. Do not ship a rolling window precomputed on every row (each row of GSI's `/slam/trail` holds the last 29
+segments, so every position is stored 29 times), and do not show the trail without the window (it is then the
+whole path again). The whole path
+stays a static strip at `schema.trajectory_path(source)`, drawn thin and dim under the trail.
+
 Every `register` run republishes both blueprints from the current code. It writes
 new stamped `.rbl` files (a live server holds the registered ones open, so they are
 never overwritten), makes them the defaults, then unregisters every older blueprint

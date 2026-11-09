@@ -63,7 +63,7 @@ the whole edition takes about 2.4 h.
 | `slam.rrd` `/slam/rig` | per frame | base | `/world/rig_00` `world_T_rig` (the rig frame turned to RDF); its two `capture_time`-only rows are dropped |
 | `slam.rrd` `/slam/path`, `/slam/index`, `/slam/meta` | static | base | `/world/runs/slam/{trajectory,index,meta}` |
 | `slam.rrd` `/camera`, `/hand` | per frame | — | not ingested: the same pose as `/slam/rig` (convert checks it for `/hand`) |
-| `slam.rrd` `/slam/trail` | per frame | — | not ingested: a display trail; the follow view shows the path |
+| `slam.rrd` `/slam/trail` | per frame | — | not ingested: a rolling window precomputed on every row (the last 29 segments, about 1 s); base logs one segment per pose at `/world/runs/slam/trail` instead, which the blueprints show through the shared 10 s window |
 
 ## Clocks
 
@@ -87,7 +87,8 @@ the whole edition takes about 2.4 h.
 ## Layers and entities
 
 - `base`: the rig node (`schema_version`, `reference` = `cam_00`, `num_cameras`), six cameras (`name` = GSI's view,
-  `kind`, `camera_model` = `pinhole`, source keys), pinholes, H.265 samples, `world_T_rig`, the SLAM path.
+  `kind`, `camera_model` = `pinhole`, source keys), pinholes, H.265 samples, `world_T_rig`, the SLAM path and its
+  per-pose trail.
 - `pose`: `/world/gt/coco133_xyz` (GSI's 21 joints per hand in COCO-133 slots, nothing derived, confidence 1.0 for
   every finite joint: GSI ships no score), `/world/gt/hands/<side>/{confidence,wrist,mano}`. `confidence` is GSI's
   `is_usable`; `wrist` puts joint 0 at the MANO `global_orient`; `mano` keeps GSI's record (rig frame).
@@ -96,7 +97,8 @@ the whole edition takes about 2.4 h.
 - The base is compacted with the object-store profile plus `fix_keyframe`. GSI logs `is_keyframe=false` on every
   non-key sample, which Rerun 0.42 rejects (the flag is a sparse marker), and the optimizer then leaves the video
   un-batched; `fix_keyframe` derives the flags from the H.265 samples.
-- Default blueprint: the hands, frustums with their videos and the path in a view that rides the rig, beside the six
+- Default blueprint: the hands, frustums with their videos, the path (thin, dim) and the last 10 s of trail
+  (`blueprints.trail_window_range`) in a view that rides the rig, beside the six
   views in eye, front and side pairs; each view shows its video, its `coco133_uv_projected` and both meshes. Table
   card: the same 3D view without videos beside left_front.
 - GSI's H.265 makes ffmpeg skip SEI NALUs (type 39) and, after a seek, an IDR slice header (type 5). GSI's untouched

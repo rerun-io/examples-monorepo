@@ -20,7 +20,7 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from dataforge import hands, schema, transports
+from dataforge import blueprints, hands, schema, transports
 from dataforge.datasets.gsi_six_view import FLU_R_RDF, VIEWS, GsiSixViewConfig, GsiSixViewDataset
 from dataforge.datasets.gsi_six_view_native import CAMERAS, GsiSixViewNativeConfig, GsiSixViewNativeDataset
 
@@ -411,6 +411,8 @@ def test_convert_writes_the_four_exoego_layers_under_the_dataforge_identity(gsi:
     assert {schema.FRAME_INDEX, "capture_time"} <= set(video.column_names) and "source_frame" not in video.column_names
     assert len(rows(base, schema.rig_path(0), "Transform3D:translation")) == FRAMES, "the two capture-only SLAM poses are gone"
     assert schema.trajectory_path("slam") in {str(chunk.entity_path) for chunk in read_chunks(targets["base"])}
+    trail = base.reader(index=schema.TIMELINE, contents=schema.trail_path("slam")).to_arrow_table()
+    assert trail.num_rows == FRAMES, "one trail segment per pose; the blueprint's window limits it"
     assert recording_properties(base, "RecordingInfo") == {"name": "gsi-six-view__ep_v1_bbbb", "start_time": 1_758_686_498_000_000_000}
     assert recording_properties(base, "episode")["start_ns"] == T0_NS
     capture: dict[str, object] = recording_properties(base, "capture")
@@ -592,6 +594,8 @@ def test_the_canonical_panes_show_each_view_with_its_keypoints_and_both_meshes(t
         assert list(pane.contents) == [  # type: ignore[arg-type]
             schema.video_path(0, cam), schema.coco133_uv_projected_path(0, cam), schema.hand_mesh_path("left"), schema.hand_mesh_path("right")
         ]  # fmt: skip
+    for view in (world, layout_views(dataset.table_blueprint())[0]):
+        assert (view.visualizer_overrides or {})[schema.trail_path("slam")] == blueprints.trail_window_range(), "the trail shows the shared cursor window"
     scene, card = layout_views(dataset.table_blueprint())
     assert isinstance(card, rrb.Spatial2DView) and card.origin == schema.pinhole_path(0, 0), "the card decodes left_front only"
     assert all(f"- {schema.video_path(0, cam)}/**" in list(scene.contents) for cam in range(6))  # type: ignore[arg-type]

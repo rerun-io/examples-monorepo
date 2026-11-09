@@ -23,6 +23,7 @@ import rerun.blueprint as rrb
 import rerun.chunk as rrc
 from jaxtyping import Bool, Float32, Float64, Int64, UInt32
 from numpy import ndarray
+from rerun.encodings import EntityPathLike
 from scipy.spatial.transform import Rotation
 from simplecv.sensors.camera.base_camera import pixels_in_image
 
@@ -36,6 +37,7 @@ from dataforge.logging_toolkit import (
     log_camera_source,
     log_dense_pose_track,
     log_rig_node,
+    log_trail_segments,
     time_column,
 )
 
@@ -403,6 +405,16 @@ def write_projections_layer(recording: rr.RecordingStream, episode: Episode) -> 
     hands.log_projections(recording, pixels_by_camera(), times_ns=episode.times_ns, frame_indices=episode.frames, confidence=confidence)
 
 
+def trail_overrides() -> dict[EntityPathLike, rrb.VisibleTimeRanges | rr.LineStrips3D]:
+    """The SLAM trail through the shared cursor window over the whole path, drawn thin and dim as in ``blueprints.rig_blueprint``'s follow view."""
+    return {
+        schema.trail_path(RUN_SOURCE): blueprints.trail_window_range(),
+        schema.trajectory_path(RUN_SOURCE): rr.LineStrips3D.from_fields(
+            colors=blueprints.DIM_TRAJECTORY_COLOR, radii=rr.Radius.ui_points(blueprints.DIM_TRAJECTORY_RADIUS_UI_POINTS)
+        ),
+    }
+
+
 class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
     """One catalog dataset in the exoego:v2 layout; one segment per episode."""
 
@@ -476,7 +488,7 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
             track: Episode = read_episode(hands_rrd, slam_rrd)
         if paths.BASE_LAYER in pending:
             with self.timer.stage(f"write:{paths.BASE_LAYER}"):
-                self.write_base(identity, hands_rrd, slam_rrd, targets[paths.BASE_LAYER], manifest, episode)
+                self.write_base(identity, hands_rrd, slam_rrd, targets[paths.BASE_LAYER], manifest, episode, track)
         writers: dict[str, Callable[[rr.RecordingStream], None]] = {
             POSE_LAYER: lambda recording: write_pose_layer(recording, track),
             paths.HAND_MESH_LAYER: lambda recording: write_hand_mesh_layer(recording, track),
@@ -484,8 +496,10 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
         }
         self.write_layers(identity, targets, [layer for layer in pending if layer != paths.BASE_LAYER], writers)
 
-    def write_base(self, identity: SequenceIdentity, hands_rrd: Path, slam_rrd: Path, target: Path, manifest: Manifest, episode: ManifestEpisode) -> None:
-        """The rig, its six cameras with GSI's pinholes and H.265 samples, the SLAM path, and the capture properties.
+    def write_base(
+        self, identity: SequenceIdentity, hands_rrd: Path, slam_rrd: Path, target: Path, manifest: Manifest, episode: ManifestEpisode, track: Episode
+    ) -> None:
+        """The rig, its six cameras with GSI's pinholes and H.265 samples, the SLAM path and trail, and the capture properties.
 
         Written outside ``write_layers`` so that the base keeps GSI's ``RecordingInfo`` start time, the capture's own.
         """
@@ -513,6 +527,8 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
                     log_camera_source(recording, RIG, cam, name=view, source_width=SOURCE_SIZE[0], source_height=SOURCE_SIZE[1], video_codec="h265", source_num_frames=frames)
                 )
             recording.send_chunks(compacted)
+            # The rig origin is the same in GSI's FLU frame and the RDF one, so the trail reads GSI's translations.
+            log_trail_segments(recording, schema.trail_path(RUN_SOURCE), times_ns=track.times_ns, translations_xyz=track.world_T_rig[:, :3, 3])
             recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties/episode"))
             recording.send_chunks(rrc.RrdReader(hands_rrd).stream().filter(content="/__properties", components="RecordingInfo:start_time"))
             recording.send_property("gsi_calibration", rr.AnyValues(**extras))
@@ -544,7 +560,9 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
         """The wearer's hands and path in 3D, riding the rig, beside the six views in eye, front and side pairs."""
         return rrb.Blueprint(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="GSI six-view", origin=schema.rig_path(RIG), contents=self.world_contents(), eye_controls=FOLLOW_EYE, line_grid=False),
+                rrb.Spatial3DView(
+                    name="GSI six-view", origin=schema.rig_path(RIG), contents=self.world_contents(), eye_controls=FOLLOW_EYE, line_grid=False, overrides=trail_overrides()
+                ),
                 rrb.Grid(
                     *(blueprints.camera_view(VIEWS[cam], RIG, cam, contents=self.pane_contents(cam)) for cam in PANE_ORDER),
                     grid_columns=2,
@@ -565,6 +583,7 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
                 contents=[*self.world_contents(), *blueprints.video_exclusions((RIG, cam) for cam in range(len(VIEWS)))],
                 eye_controls=FOLLOW_EYE,
                 line_grid=False,
+                overrides=trail_overrides(),
             ),
             blueprints.camera_view(VIEWS[0], RIG, 0, contents=self.pane_contents(0)),
         )
