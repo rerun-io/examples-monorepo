@@ -32,18 +32,19 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
     detections, hands = _chunk()
     live: set[str] = set()
-    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, keypoint_threshold=0.3, live_slots=live)
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=live)
 
     paths = [path for path, _ in logged]
+    # Joints and meshes are logged once in 3D; the video view projects them, so no 2D keypoints.
+    assert not any(path.endswith("/keypoints") for path in paths)
     for slot in ("left_0", "right_0"):
         assert f"world/camera/image/hands/{slot}/box" in paths
-        assert f"world/camera/image/hands/{slot}/keypoints" in paths
         assert f"world/camera/hands/{slot}/joints" in paths
         assert f"world/camera/hands/{slot}/mesh" in paths
     # Frame 1 has no right hand: its slot is cleared once, the left slot is logged again.
     cleared = [path for path, archetype in logged if isinstance(archetype, rr.Clear)]
     assert sorted(cleared) == sorted(
-        [f"world/camera/image/hands/right_0/{name}" for name in ("box", "keypoints")] + [f"world/camera/hands/right_0/{name}" for name in ("joints", "mesh")]
+        ["world/camera/image/hands/right_0/box"] + [f"world/camera/hands/right_0/{name}" for name in ("joints", "mesh")]
     )
     assert live == {"left_0"}
     meshes = [archetype for path, archetype in logged if path == "world/camera/hands/right_0/mesh"]

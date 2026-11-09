@@ -2,8 +2,10 @@
 
 Frames stay on the GPU from TorchCodec's decoder through detection and the
 hand model; boxes, joints and meshes cross to the CPU for logging. Every hand
-is logged in its side slot (``left_0``, ``right_0``, ...): boxes and 2D joints
-on the image, 3D joints and the mesh in the camera frame beside it.
+is logged in its side slot (``left_0``, ``right_0``, ...) the way dataforge logs
+hands: its 3D joints and mesh once, in the camera frame, and the video view (whose
+origin is the camera's pinhole) projects them onto the video; the detector box is
+the only 2D overlay.
 
 The camera is a pinhole: ``fx``/``fy``/``cx``/``cy`` when given, else an assumed horizontal field
 of view (``hfov_deg``) with the principal point at the image centre. It does not have to be
@@ -29,7 +31,6 @@ from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.models.wilor import CROP_SIZE, FOCAL_LENGTH, WilorHandPose3d
 from posekit.predictions import HandDetections, HandPoses3d, HandSide
-from posekit.rerun_logging import log_person_points2d
 from posekit.skeletons import KeypointSkeleton
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
@@ -67,8 +68,6 @@ class VideoHandsSettings:
     """Frames decoded and processed per step."""
     max_frames: int | None = None
     """Maximum number of frames to process; ``None`` runs the full video."""
-    keypoint_threshold: float = 0.3
-    """Minimum keypoint confidence for 2D visibility."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -113,29 +112,28 @@ def log_chunk_hands(
     timestamps_ns: Sequence[int],
     detections: HandDetections,
     hands: HandPoses3d,
-    keypoint_threshold: float,
     live_slots: set[str],
 ) -> None:
     """Log one processed chunk onto the ``frame`` and ``video_time`` timelines.
+
+    Each hand's joints and mesh go under ``world/camera/hands/<slot>`` in the camera frame
+    (the video view projects them through the pinhole); its detector box goes on the image.
 
     Args:
         frame_indices: Global frame index of each chunk frame.
         timestamps_ns: Video timestamp of each chunk frame.
         detections: Hand boxes of the chunk (batch-relative frame indices).
         hands: Reconstructed hands of the chunk (batch-relative frame indices).
-        keypoint_threshold: Minimum keypoint confidence for 2D visibility.
         live_slots: Slots currently holding data, updated in place; a slot is
             cleared only on its populated -> empty transition.
     """
     box_frames: Int64[ndarray, "n"] = detections.boxes.frame_indices.cpu().numpy()
     boxes: Float32[ndarray, "n 4"] = detections.boxes.xyxy_numpy()
     hand_frames: Int64[ndarray, "m"] = hands.keypoints.frame_indices.cpu().numpy()
-    xy: Float32[ndarray, "m k 2"] = hands.keypoints.xy.detach().cpu().numpy()
-    scores: Float32[ndarray, "m k"] = hands.keypoints.scores.detach().cpu().numpy()
     xyz: Float32[ndarray, "m k 3"] | None = None if hands.keypoints.xyz_camera is None else hands.keypoints.xyz_camera.cpu().numpy()
     vertices: Float32[ndarray, "m v 3"] | None = None if hands.vertices is None else hands.vertices.cpu().numpy()
     faces: dict[HandSide, ndarray] = {} if hands.faces is None else {side: value.cpu().numpy() for side, value in hands.faces.items()}
-    keypoint_ids: UInt16[ndarray, "k"] = np.arange(xy.shape[1], dtype=np.uint16)
+    keypoint_ids: UInt16[ndarray, "k"] = np.arange(hands.keypoints.skeleton.num_keypoints, dtype=np.uint16)
     for local, (frame_index, timestamp_ns) in enumerate(zip(frame_indices, timestamps_ns, strict=True)):
         rr.set_time("frame", sequence=int(frame_index))
         rr.set_time("video_time", duration=1e-9 * float(timestamp_ns))
@@ -152,10 +150,6 @@ def log_chunk_hands(
         for row, slot in zip(hand_rows, _slots([hands.sides[r] for r in hand_rows]), strict=True):
             side = hands.sides[row]
             present.add(slot)
-            log_person_points2d(
-                f"{IMAGE_PATH}/hands/{slot}/keypoints", xy[row], scores[row], keypoint_threshold,
-                keypoint_ids=keypoint_ids, class_ids=SIDE_CLASS[side],
-            )
             if xyz is not None:
                 rr.log(
                     f"{CAMERA_PATH}/hands/{slot}/joints",
@@ -167,21 +161,24 @@ def log_chunk_hands(
                     rr.Mesh3D(vertex_positions=vertices[row], triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], 160)),
                 )
         for slot in sorted(live_slots - present):
-            for path in (f"{IMAGE_PATH}/hands/{slot}/box", f"{IMAGE_PATH}/hands/{slot}/keypoints", f"{CAMERA_PATH}/hands/{slot}/joints", f"{CAMERA_PATH}/hands/{slot}/mesh"):
+            for path in (f"{IMAGE_PATH}/hands/{slot}/box", f"{CAMERA_PATH}/hands/{slot}/joints", f"{CAMERA_PATH}/hands/{slot}/mesh"):
                 rr.log(path, rr.Clear(recursive=False))
         live_slots.clear()
         live_slots.update(present)
 
 
 def send_blueprint(target: Float32[ndarray, "3"]) -> None:
-    """Video with 2D hands beside a 3D view that looks at the hands from behind the camera.
+    """The video with the hands projected onto it, beside a 3D view of the same hands from behind the camera.
+
+    The video view's origin is the pinhole, so the 3D joints and meshes under ``world/camera/hands``
+    project onto the video, as dataforge's camera panes show its hand meshes.
 
     The eye sits ~0.75 m from the first hands, above and to the right of the camera ray:
     EgoHand's metric hands are at arm's length, WiLoR's virtual camera puts them metres away.
     """
     rr.send_blueprint(
         rrb.Horizontal(
-            rrb.Spatial2DView(origin=IMAGE_PATH, name="video + 2D hands"),
+            rrb.Spatial2DView(origin=IMAGE_PATH, name="video + projected hands", contents=[f"+ {IMAGE_PATH}/**", f"+ {CAMERA_PATH}/hands/**"]),
             rrb.Spatial3DView(
                 origin="world",
                 name="3D hands",
@@ -289,7 +286,7 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         )
         log_chunk_hands(
             frame_indices=chunk.tolist(), timestamps_ns=timestamps.tolist(), detections=detections, hands=hands,
-            keypoint_threshold=settings.keypoint_threshold, live_slots=live_slots,
+            live_slots=live_slots,
         )
         yield f"Frames {stop}/{num_frames}, {total_hands} hands; {camera_note}"
     torch.cuda.synchronize()
