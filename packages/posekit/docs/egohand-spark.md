@@ -18,8 +18,8 @@ rotations, identity, translation, scale and all 26 segment scales.
 ```python
 from posekit.models import EgoHandStack
 
-detector_config, pose_config = EgoHandStack.catalog()
-detector, pose = detector_config.setup(), pose_config.setup()
+stack = EgoHandStack.catalog()
+detector, pose = stack.detector.setup(), stack.pose.setup()
 detections = detector(frames_rgb)  # decoded uint8 CUDA frames, NHWC
 reconstruction = pose(frames_rgb, detections, camera)
 ```
