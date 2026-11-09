@@ -88,11 +88,11 @@ def main(config: Config) -> None:
                     raise ValueError(f"{path}:{frame_index} is a decoded evaluation frame.")
                 batch: UInt8[Tensor, "1 h w 3"] = frame[None]
                 resized: Float32[ndarray, "1 3 640 640"] = _resize_with_pil(batch).cpu().numpy()
-                outputs: list[ndarray] = session.run(
+                outputs = session.run(
                     [f"calibration_{i}" for i in range(len(names))],
                     {"images": resized, "orig_target_sizes": np.array([[frame.shape[1], frame.shape[0]]], dtype=np.int64)},
                 )
-                maxima = np.maximum(maxima, np.asarray(outputs).reshape(-1))
+                maxima = np.maximum(maxima, np.asarray(outputs, dtype=np.float32).reshape(-1))
                 detections: HandDetections = detector(batch)
                 predictor(batch, detections, segment.camera)
                 crops += detections.num_detections
