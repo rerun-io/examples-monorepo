@@ -33,7 +33,7 @@ def default_stack() -> str:
     return "egohand-catalog" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10 else "egohand-catalog-bf16"
 
 
-def _sync_config(video: str | None, camera: str | None, stack: str, max_frames: float) -> None:
+def _sync_config(video: str | None, camera: str | None, stack: str, max_frames: int) -> None:
     """Copy the widget values into ``_CONFIG``; the stack name selects the same detector and pose configs as the CLI."""
     global _CONFIG
     _CONFIG = replace(
@@ -42,7 +42,7 @@ def _sync_config(video: str | None, camera: str | None, stack: str, max_frames: 
         camera_path=None if camera is None else Path(camera),
         detector=HAND_DETECTORS[stack],
         pose=HAND_POSES[stack],
-        max_frames=int(max_frames) if max_frames > 0 else None,
+        max_frames=max_frames if max_frames > 0 else None,
     )
 
 
