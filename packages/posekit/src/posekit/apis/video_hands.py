@@ -1,11 +1,13 @@
 """Video 3D hands demo: CUDA decode -> hand detector -> top-down 3D hand model -> Rerun.
 
 Frames stay on the GPU from TorchCodec's decoder through detection and the
-hand model; boxes, joints and meshes cross to the CPU for logging. Every hand
-is logged in its side slot (``left_0``, ``right_0``, ...) the way dataforge logs
-hands: its 3D joints and mesh once, in the camera frame, and the video view (whose
-origin is the camera's pinhole) projects them onto the video; the detector box is
-the only 2D overlay.
+hand model; boxes, joints and meshes cross to the CPU for logging. The layout is
+dataforge's: the camera node ``world/camera`` holds the camera transform, its
+``pinhole`` child the Pinhole with the video below it and the detector boxes under
+``pinhole/boxes``. Every hand is logged in its side slot (``left_0``, ``right_0``, ...):
+its 3D joints and mesh once, in the camera frame (``world/camera/hands``, a sibling of
+the pinhole), and the video view, whose origin is the pinhole, projects them onto the
+video. In 3D the video plane sits just behind the hands, so the meshes lie on it.
 
 The camera is a pinhole: ``fx``/``fy``/``cx``/``cy`` when given, else an assumed horizontal field
 of view (``hfov_deg``) with the principal point at the image centre. It does not have to be
@@ -35,9 +37,11 @@ from posekit.skeletons import KeypointSkeleton
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
 CAMERA_PATH: str = "world/camera"
-"""Frame of the source camera: the 3D hands live below it, beside the image."""
-IMAGE_PATH: str = f"{CAMERA_PATH}/image"
-"""Pinhole and video of the source camera; boxes and 2D joints live below it."""
+"""Camera node (dataforge's ``cam_path``): the camera transform; the 3D hands live below it, beside the pinhole."""
+PINHOLE_PATH: str = f"{CAMERA_PATH}/pinhole"
+"""Pinhole of the source camera (dataforge's ``pinhole_path``): the video and the detector boxes live below it."""
+VIDEO_PATH: str = f"{PINHOLE_PATH}/video"
+"""Video stream of the source camera (dataforge's ``video_path``)."""
 SIDE_CLASS: dict[HandSide, int] = {"left": 0, "right": 1}
 """Annotation class of each side (skeleton links and colour)."""
 SIDE_COLOR: dict[HandSide, tuple[int, int, int]] = {"left": (66, 135, 245), "right": (245, 135, 66)}
@@ -117,7 +121,7 @@ def log_chunk_hands(
     """Log one processed chunk onto the ``frame`` and ``video_time`` timelines.
 
     Each hand's joints and mesh go under ``world/camera/hands/<slot>`` in the camera frame
-    (the video view projects them through the pinhole); its detector box goes on the image.
+    (the video view projects them through the pinhole); its detector box goes under ``world/camera/pinhole/boxes/<slot>``.
 
     Args:
         frame_indices: Global frame index of each chunk frame.
@@ -144,7 +148,7 @@ def log_chunk_hands(
             side: HandSide = detections.sides[row]
             present.add(slot)
             rr.log(
-                f"{IMAGE_PATH}/hands/{slot}/box",
+                f"{PINHOLE_PATH}/boxes/{slot}",
                 rr.Boxes2D(array=boxes[row][None], array_format=rr.Box2DFormat.XYXY, class_ids=SIDE_CLASS[side], labels=f"{side} hand"),
             )
         for row, slot in zip(hand_rows, _slots([hands.sides[r] for r in hand_rows]), strict=True):
@@ -161,30 +165,40 @@ def log_chunk_hands(
                     rr.Mesh3D(vertex_positions=vertices[row], triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], 160)),
                 )
         for slot in sorted(live_slots - present):
-            for path in (f"{IMAGE_PATH}/hands/{slot}/box", f"{CAMERA_PATH}/hands/{slot}/joints", f"{CAMERA_PATH}/hands/{slot}/mesh"):
+            for path in (f"{PINHOLE_PATH}/boxes/{slot}", f"{CAMERA_PATH}/hands/{slot}/joints", f"{CAMERA_PATH}/hands/{slot}/mesh"):
                 rr.log(path, rr.Clear(recursive=False))
         live_slots.clear()
         live_slots.update(present)
 
 
-def send_blueprint(target: Float32[ndarray, "3"]) -> None:
-    """The video with the hands projected onto it, beside a 3D view of the same hands from behind the camera.
+def image_plane_depth(xyz_camera: Float32[ndarray, "n 3"]) -> float:
+    """Distance of the video plane in 3D: the median depth of the hand joints plus 5 cm (about half a hand).
+
+    The plane then sits at the hands, so their meshes lie on the video instead of floating in front
+    of a small frustum. The median ignores a stray far hand in the first chunk.
+    """
+    return float(np.median(xyz_camera[:, 2])) + 0.05
+
+
+def send_blueprint(plane_depth: float) -> None:
+    """The video with the hands projected onto it, beside a 3D view of the camera frustum and the same hands.
 
     The video view's origin is the pinhole, so the 3D joints and meshes under ``world/camera/hands``
     project onto the video, as dataforge's camera panes show its hand meshes.
 
-    The eye sits ~0.75 m from the first hands, above and to the right of the camera ray:
-    EgoHand's metric hands are at arm's length, WiLoR's virtual camera puts them metres away.
+    The 3D eye sits behind the camera, a little above and to the right of its axis, and looks at the
+    centre of the video plane, so the frustum, the video and the hands on it fill the view. It scales
+    with the plane depth: EgoHand's metric hands are at arm's length, WiLoR's virtual camera puts them metres away.
     """
     rr.send_blueprint(
         rrb.Horizontal(
-            rrb.Spatial2DView(origin=IMAGE_PATH, name="video + projected hands", contents=[f"+ {IMAGE_PATH}/**", f"+ {CAMERA_PATH}/hands/**"]),
+            rrb.Spatial2DView(origin=PINHOLE_PATH, name="video + projected hands", contents=[f"+ {PINHOLE_PATH}/**", f"+ {CAMERA_PATH}/hands/**"]),
             rrb.Spatial3DView(
                 origin="world",
                 name="3D hands",
-                contents=["+ world/**", f"- {IMAGE_PATH}/hands/**"],
+                contents=["+ world/**", f"- {PINHOLE_PATH}/boxes/**"],
                 eye_controls=rrb.EyeControls3D(
-                    position=(target + np.asarray([0.25, -0.35, -0.6])).tolist(), look_target=target.tolist(), eye_up=(0.0, -1.0, 0.0)
+                    position=[0.15 * plane_depth, -0.25 * plane_depth, -0.9 * plane_depth], look_target=[0.0, 0.0, plane_depth], eye_up=(0.0, -1.0, 0.0)
                 ),
             ),
         )
@@ -267,8 +281,9 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
     camera: CalibratedCamera = pinhole_camera(settings, width, height)
     camera_note: str = describe_camera(settings, camera)
     rr.log("world", rr.ViewCoordinates.RDF, static=True)
-    rr.log(IMAGE_PATH, rr.Pinhole(image_from_camera=pinhole_matrix(pipeline.pose, camera, width, height), resolution=[width, height], image_plane_distance=0.05), static=True)
-    video_timestamps_ns: Int64[ndarray, "frames"] = log_video(settings.video_path, Path(IMAGE_PATH), timeline="video_time")
+    rr.log(CAMERA_PATH, rr.Transform3D(), static=True)
+    rr.log(PINHOLE_PATH, rr.Pinhole(image_from_camera=pinhole_matrix(pipeline.pose, camera, width, height), resolution=[width, height]), static=True)
+    video_timestamps_ns: Int64[ndarray, "frames"] = log_video(settings.video_path, Path(VIDEO_PATH), timeline="video_time")
     log_hand_annotation_context(pipeline.pose.skeleton)
     total_hands: int = 0
     live_slots: set[str] = set()
@@ -278,7 +293,9 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
         if total_hands == 0 and hands.num_hands and hands.keypoints.xyz_camera is not None:
-            send_blueprint(hands.keypoints.xyz_camera.reshape(-1, 3).median(dim=0).values.cpu().numpy())
+            plane_depth: float = image_plane_depth(hands.keypoints.xyz_camera.reshape(-1, 3).cpu().numpy())
+            rr.log(PINHOLE_PATH, rr.Pinhole.from_fields(image_plane_distance=plane_depth), static=True)
+            send_blueprint(plane_depth)
         total_hands += hands.num_hands
         chunk: Int64[ndarray, "chunk"] = np.arange(start, stop, dtype=np.int64)
         timestamps: Int64[ndarray, "chunk"] = (

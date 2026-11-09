@@ -84,7 +84,7 @@ def build() -> gr.Blocks:
     with gr.Blocks() as demo:
         gr.Markdown(
             "# 3D hands with Rerun\n"
-            "posekit's hand stacks on a video: boxes and 2D joints on the video, 3D hands and meshes beside it. "
+            "posekit's hand stacks on a video: boxes and the projected 3D hands on the video, the camera and the 3D hands beside it. "
             "The camera is an assumed pinhole unless you edit it under Advanced. Same code as `posekit-video-hands`."
         )
         with gr.Row():
