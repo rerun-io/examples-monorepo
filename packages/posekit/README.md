@@ -168,7 +168,9 @@ Set `EgoHandFastConfig.calibration` to use a separate calibration record. Quanti
 head export, and engine building are library code; no preparation scripts are required.
 
 `catalog_egohand_configs()` is the five-dataset calibrated preset (CLI role `egohand-catalog`):
-DGX Spark **153.31 → 14.98 ms/frame (10.23x)** with all 45 accuracy bands passing. See
+DGX Spark **153.31 → 14.98 ms/frame (10.23x)** with all 45 accuracy bands passing. On GPUs
+without NVFP4, `catalog_egohand_configs(backbone_precision="bf16")` (`egohand-catalog-bf16`)
+is the fast path: RTX 3060 **238.62 → 39.24 ms/frame (6.08x)**, 45/45 bands. See
 [EgoHand fast path on DGX Spark](docs/egohand-spark.md) for the results and how to reproduce them.
 
 **Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera

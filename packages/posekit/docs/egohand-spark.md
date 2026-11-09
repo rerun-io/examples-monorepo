@@ -11,8 +11,6 @@ rotations, identity, translation, scale and all 26 segment scales.
 - Calibration: `assets/egohand_catalog.rrd` (pose) and `assets/egohand_detector_catalog.rrd`
   (detector), 200 frames / 243 hand crops from segments disjoint from the evaluation
   segments, checked against every evaluation frame by decoded-RGB SHA256.
-- `backbone_precision="bf16"` runs the same executor unquantized with an FP16 detector,
-  for GPUs without NVFP4 (Ampere).
 
 ```python
 from posekit.models import catalog_egohand_configs
@@ -24,6 +22,15 @@ reconstruction = pose(frames_rgb, detections, camera)
 ```
 
 On the CLI, select `egohand-catalog` for both the detector and the pose role.
+
+## GPUs without NVFP4
+
+`catalog_egohand_configs(backbone_precision="bf16")` (CLI role `egohand-catalog-bf16`) is the
+fast path for GPUs below Blackwell (compute capability < 10: Ampere, Ada, Hopper). It runs the
+same executor (TensorRT backbone and heads, CUDA crops, batched SOMA) with an unquantized BF16
+backbone and an FP16 detector, and needs no calibration assets. The choice is explicit, not
+automatic: the default NVFP4 preset raises a `ValueError` naming the BF16 preset when the GPU
+lacks FP8 or NVFP4.
 
 ## Results
 
@@ -68,7 +75,7 @@ pixi run --frozen -e posekit-hands posekit-hands-cached-bench \
   --baseline ~/egohand-results/default/results.json
 ```
 
-Run timings on an otherwise idle GPU. Each dataset writes a Rerun recording with the
+On a GPU without NVFP4, add `--precision bf16` to the fast run. Run timings on an otherwise idle GPU. Each dataset writes a Rerun recording with the
 source image, boxes, GT vs predicted joints, per-frame errors and latencies. The
 precision trials and per-stage profiles are in the
 [EgoHand speed-up report](https://pablos-4800gt.ilish-ruler.ts.net:8768/egohand-3060/).

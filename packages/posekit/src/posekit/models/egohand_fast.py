@@ -146,7 +146,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
         if config.backbone_precision == "nvfp4" and torch.cuda.get_device_capability()[0] < 10:
-            raise ValueError("NVFP4 needs a Blackwell GPU; use backbone_precision='bf16'.")
+            raise ValueError('NVFP4 needs a Blackwell GPU (compute capability 10+); without one use catalog_egohand_configs(backbone_precision="bf16").')
         self.config: EgoHandFastConfig = config
         self.profile_stages: bool = False
         """Record per-frame stage times in ``stage_ms``; off, inference adds no synchronization."""

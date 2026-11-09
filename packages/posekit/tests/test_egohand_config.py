@@ -1,5 +1,6 @@
 """Fast hand roles remain selectable through the ordinary Tyro unions."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -76,3 +77,18 @@ def test_detector_rejects_two_precision_choices(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not both"):
         EgoHandDetectorConfig(fp16_trunk=True, fp8_calibration=tmp_path / "detector.rrd")
     assert EgoHandDetectorConfig(fp8_calibration=tmp_path / "detector.rrd").fp8_calibration is not None
+
+
+def test_nvfp4_preset_points_older_gpus_to_the_bf16_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a GPU without FP8/NVFP4 (here an Ampere RTX 3060, compute capability 8.6) both roles name the BF16 preset."""
+    import torch
+
+    from posekit.models.egohand import EgoHandDetector
+    from posekit.models.egohand_fast import FastEgoHandPredictor
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args: (8, 6))
+    detector, pose = catalog_egohand_configs()
+    with pytest.raises(ValueError, match='backbone_precision="bf16"'):
+        EgoHandDetector(replace(detector, weights=tmp_path / "hand_detector.onnx"))
+    with pytest.raises(ValueError, match='backbone_precision="bf16"'):
+        FastEgoHandPredictor(pose)

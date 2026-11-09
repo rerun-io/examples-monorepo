@@ -169,7 +169,7 @@ class EgoHandDetector(HandDetector):
             if not isinstance(config.backend, TensorRtBackendConfig):
                 raise ValueError("The FP8 detector requires a TensorRT backend.")
             if torch.cuda.get_device_capability()[0] < 9:
-                raise ValueError("The FP8 detector requires an FP8-capable CUDA GPU.")
+                raise ValueError('The FP8 detector needs an FP8 GPU (compute capability 9+); without one use catalog_egohand_configs(backbone_precision="bf16").')
             weights = quantized_detector_path(weights, config.fp8_calibration, config.backend.cache_dir)
         elif config.fp16_trunk:
             from trtkit.onnx_precision import fp16_trunk
