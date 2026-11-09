@@ -29,8 +29,8 @@ from torch import Tensor
 
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
 from posekit.models.base import HandDetector, TopDownHandPose3d
-from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, EgoHandStage
-from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandStack, EgoHandStackName, FastEgoHandPredictor
+from posekit.models.egohand import EgoHandConfig, EgoHandPredictor, EgoHandStage
+from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandFastConfig, EgoHandStack, EgoHandStackName, FastEgoHandPredictor
 from posekit.predictions import HandDetections, HandPoses3d
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
@@ -102,62 +102,46 @@ def _synced_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
 
 
-def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, warmup: int, repeats: int, configs: EgoHandStack) -> tuple[StageTimes, float]:
-    """One EgoHand stack, one frame at a time; its predictor reports its own stage times."""
-    detector: EgoHandDetector = configs.detector.setup()
-    predictor: EgoHandPredictor | FastEgoHandPredictor = configs.pose.setup()
-    predictor.profile_stages = True
+def bench_stack(
+    frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, detector: HandDetector, pose: TopDownHandPose3d, warmup: int, repeats: int
+) -> tuple[StageTimes, float]:
+    """A detector + pose stack, one frame at a time; an EgoHand predictor adds its own stage breakdown, other poses one ``pose`` stage."""
+    profiled: EgoHandPredictor | FastEgoHandPredictor | None = pose if isinstance(pose, EgoHandPredictor | FastEgoHandPredictor) else None
+    if profiled is not None:
+        profiled.profile_stages = True
     times = StageTimes()
     hands: list[int] = []
     order: list[int] = list(range(len(frames))) * repeats
     for step, index in enumerate(list(range(min(warmup, len(frames)))) + order):
         frame: UInt8[Tensor, "1 h w 3"] = frames[index : index + 1]
-        predictor.stage_ms.clear()
+        if profiled is not None:
+            profiled.stage_ms.clear()
         torch.cuda.synchronize()
         started: float = time.perf_counter()
         detections: HandDetections = detector(frame)
         detection_ms: float = _synced_ms(started)
-        result: HandPoses3d = predictor(frame, detections, camera)
-        total_ms: float = _synced_ms(started)
-        if step < min(warmup, len(frames)):
-            continue
-        assert result.vertices is not None or result.num_hands == 0
-        hands.append(result.num_hands)
-        stage: dict[EgoHandStage, float] = {name: sum(values) for name, values in predictor.stage_ms.items()}
-        parts: dict[str, float] = {
-            "detection": detection_ms,
-            "crops": stage.get("preprocessing", 0.0),
-            "batch_assembly": stage.get("batch_assembly", 0.0),
-            "backbone": stage.get("backbone", 0.0),
-            "head": stage.get("head", 0.0),
-            "soma": stage.get("soma", 0.0),
-        }
-        times.add("total", total_ms)
-        for name, milliseconds in parts.items():
-            times.add(name, milliseconds)
-        times.add("other", total_ms - sum(parts.values()))
-    return times, float(np.mean(hands))
-
-
-def bench_pipeline(frames: UInt8[Tensor, "n h w 3"], detector: HandDetector, pose: TopDownHandPose3d, warmup: int, repeats: int) -> tuple[StageTimes, float]:
-    """A detector + pose stack, one frame at a time, timed per stage."""
-    times = StageTimes()
-    hands: list[int] = []
-    order: list[int] = list(range(len(frames))) * repeats
-    for step, index in enumerate(list(range(min(warmup, len(frames)))) + order):
-        frame: UInt8[Tensor, "1 h w 3"] = frames[index : index + 1]
-        torch.cuda.synchronize()
-        started: float = time.perf_counter()
-        detections: HandDetections = detector(frame)
-        detection_ms: float = _synced_ms(started)
-        result: HandPoses3d = pose(frame, detections)
+        result: HandPoses3d = pose(frame, detections, camera)
         total_ms: float = _synced_ms(started)
         if step < min(warmup, len(frames)):
             continue
         hands.append(result.num_hands)
         times.add("total", total_ms)
         times.add("detection", detection_ms)
-        times.add("pose", total_ms - detection_ms)
+        if profiled is None:
+            times.add("pose", total_ms - detection_ms)
+            continue
+        assert result.vertices is not None or result.num_hands == 0
+        stage: dict[EgoHandStage, float] = {name: sum(values) for name, values in profiled.stage_ms.items()}
+        parts: dict[str, float] = {
+            "crops": stage.get("preprocessing", 0.0),
+            "batch_assembly": stage.get("batch_assembly", 0.0),
+            "backbone": stage.get("backbone", 0.0),
+            "head": stage.get("head", 0.0),
+            "soma": stage.get("soma", 0.0),
+        }
+        for name, milliseconds in parts.items():
+            times.add(name, milliseconds)
+        times.add("other", total_ms - detection_ms - sum(parts.values()))
     return times, float(np.mean(hands))
 
 
@@ -179,12 +163,14 @@ def main(config: HandsBenchConfig) -> list[BenchResult]:
     for model in config.models:
         with torch.inference_mode():
             if model in EGOHAND_STACKS:
-                times, hands = bench_egohand(frames, camera, config.warmup, config.repeats, EGOHAND_STACKS[model](None))
+                stack: EgoHandStack[EgoHandConfig] | EgoHandStack[EgoHandFastConfig] = EGOHAND_STACKS[model](None)
+                detector: HandDetector = stack.detector.setup()
+                pose: TopDownHandPose3d = stack.pose.setup()
             else:
                 backend = TensorRtBackendConfig() if model == "wilor-tensorrt" else TorchBackendConfig(autocast="fp16")
                 detector = WilorHandDetectorConfig(backend=backend, static_batch_size=1).setup()
                 pose = WilorHandPoseConfig(backend=backend, static_batch_size=config.wilor_pose_batch).setup()
-                times, hands = bench_pipeline(frames, detector, pose, config.warmup, config.repeats)
+            times, hands = bench_stack(frames, camera, detector, pose, config.warmup, config.repeats)
         result = BenchResult(model, torch.cuda.get_device_name(), len(frames) * config.repeats, hands, times.summary())
         results.append(result)
         print(f"[hands-bench] {model}: " + ", ".join(f"{stage} {s.median_ms:.2f}" for stage, s in result.stages.items()) + f" ms/frame (median), {hands:.2f} hands/frame")
