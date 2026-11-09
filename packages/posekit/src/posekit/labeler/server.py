@@ -24,6 +24,9 @@ MEgATrack loop (``posekit.labeler.tracker``, ``posekit.labeler.actions``):
   ``.json`` -> ``PlaybackInfo``
 - ``GET  /api/actions/<sid>`` -> ``list[ActionEvent]``; ``GET /api/effort/<sid>`` -> ``EffortSummary``
 
+With ``open_carrier`` (``--visual-tracker``), a visual tracker carries reviewed boxes through EgoHand misses (origin
+``tracked``, ``posekit.labeler.carry``); without it the machine track is unchanged.
+
 ``POST /api/labels`` also logs one ``ActionEvent`` per posted label that differs from the machine track (see
 ``posekit.labeler.actions``). Every label write is serialised per segment and forgets the cached machine track from
 its time on. A playback request decodes its cells on six threads (one per camera) and then schedules the next window.
@@ -84,7 +87,7 @@ from posekit.labeler.schema import (
 )
 from posekit.labeler.sheet import PlaybackCell, PlaybackInfo, SheetInfo, contact_sheet, encode_jpeg, filmstrip, playback_info, sheet_info, strip_cell
 from posekit.labeler.store import LabelRow, LabelStore, NewWrite
-from posekit.labeler.tracker import TrackCache
+from posekit.labeler.tracker import BoxCarrier, TrackCache
 
 
 @runtime_checkable
@@ -231,6 +234,7 @@ class LabelApp:
         cached_frames: int = 72,
         prefetch_items: int = 2,
         cached_cells: int = 720,
+        open_carrier: Callable[[str], BoxCarrier] | None = None,
     ) -> None:
         """Bind the labeler to its providers.
 
@@ -248,6 +252,8 @@ class LabelApp:
             cached_frames: Decoded frames kept in memory.
             prefetch_items: Queue items whose frames are decoded ahead after a queue request.
             cached_cells: Downscaled filmstrip cells kept in memory (six windows of ten rows by default).
+            open_carrier: Opens the visual tracker of one segment (called after ``open_frames``), which carries reviewed
+                boxes in the machine track (origin ``tracked``); None = chains only hold.
         """
         self.segment_ids: list[str] = segment_ids
         self.open_frames: Callable[[str], FrameProvider] = open_frames
@@ -260,6 +266,7 @@ class LabelApp:
         self.autosave_every: int = autosave_every
         self.cached_frames: int = cached_frames
         self.prefetch_items: int = prefetch_items
+        self.open_carrier: Callable[[str], BoxCarrier] | None = open_carrier
         self._segments: dict[str, Segment] = {}
         self._open_locks: dict[str, LockType] = {sid: threading.Lock() for sid in segment_ids}
         self._frames: OrderedDict[FrameKey, Future[UInt8[ndarray, "h w 3"]]] = OrderedDict()
@@ -341,7 +348,8 @@ class LabelApp:
                 proposals=self.proposals,
             )
             cams: list[int] = [camera.cam for camera in info.cams]
-            tracker: TrackCache = TrackCache(segment_id, times_ns=info.times_ns, cams=cams, proposals=self.proposals, store=store)
+            carrier: BoxCarrier | None = None if self.open_carrier is None else self.open_carrier(segment_id)
+            tracker: TrackCache = TrackCache(segment_id, times_ns=info.times_ns, cams=cams, proposals=self.proposals, store=store, carrier=carrier)
             period_ns: int = int(np.median(np.diff(info.times_ns))) if len(info.times_ns) > 1 else 200_000_000
             opened = Segment(info, frames, store, queue, tracker, period_ns, threading.Lock(), threading.Lock())
             self._segments[segment_id] = opened

@@ -144,3 +144,110 @@ def test_track_cache_recomputes_after_a_label_write() -> None:
     assert len(cache.frames(TIMES[-2], 10)) == 2
     with pytest.raises(ValueError, match="grid"):
         cache.frames(TIMES[0] + 1, 2)
+
+
+# -- visual carry (MEgATrack: a tracker carries a reviewed box until it truly fails) ----------------------------------
+
+LONG: list[int] = [i * STEP for i in range(14)]
+
+
+class Drift:
+    """Fake visual tracker: the start box moves ``dx`` px right per grid step; lost from grid index ``lost_at`` on."""
+
+    def __init__(self, dx: float = 20.0, lost_at: int | None = None) -> None:
+        self.dx: float = dx
+        self.lost_at: int | None = lost_at
+        self.calls: list[tuple[int, int, Box, int]] = []
+
+    def carry(self, cam: int, start_ns: int, start_box: Box, t_ns: int) -> Box | None:
+        self.calls.append((cam, start_ns, start_box, t_ns))
+        if self.lost_at is not None and t_ns >= LONG[self.lost_at]:
+            return None
+        shift: float = self.dx * (t_ns - start_ns) / STEP
+        return Box(start_box.x0 + shift, start_box.y0, start_box.x1 + shift, start_box.y1)
+
+
+def carried(proposals: dict[int, list[Proposal]], labels: dict[int, list[ViewLabel]], carrier: Drift | None) -> list[TrackFrame]:
+    """Propagate over ``LONG`` with an optional visual tracker; both dicts are keyed by grid index."""
+    return propagate(LONG, CAMS, lambda t: proposals.get(LONG.index(t), []), lambda t: labels.get(LONG.index(t), []), carrier=carrier)
+
+
+def test_a_reviewed_box_is_carried_for_ten_steps_then_the_chain_ends() -> None:
+    carrier: Drift = Drift()
+    frames: list[TrackFrame] = carried({}, {0: [reviewed(0, "left", 10.0)]}, carrier)
+    assert [at(frames, i, 0, "left").origin for i in range(12)] == ["reviewed"] + ["tracked"] * 10 + ["none"]
+    third: TrackBox = at(frames, 3, 0, "left")
+    assert (third.box, third.score) == (Box(70.0, 100.0, 170.0, 200.0), None)
+    # One tracker run, initialised on the reviewed frame and box.
+    assert {(cam, start, box) for cam, start, box, _ in carrier.calls} == {(0, LONG[0], Box(10.0, 100.0, 110.0, 200.0))}
+    # Without the flag the same labels hold once and end.
+    off: list[TrackFrame] = carried({}, {0: [reviewed(0, "left", 10.0)]}, None)
+    assert [at(off, i, 0, "left").origin for i in range(3)] == ["reviewed", "held", "none"]
+
+
+def test_the_tracked_box_snaps_back_to_an_egohand_proposal() -> None:
+    # The tracker moves 80 px per step: the proposal at step 3 misses the step-2 box (IoU 0.11) but matches the tracked box.
+    carrier: Drift = Drift(dx=80.0)
+    frames: list[TrackFrame] = carried({3: [ego(0, "right", 250.0, 0.4)]}, {0: [reviewed(0, "left", 10.0)]}, carrier)
+    assert [at(frames, i, 0, "left").origin for i in range(5)] == ["reviewed", "tracked", "tracked", "chained", "tracked"]
+    snapped: TrackBox = at(frames, 3, 0, "left")
+    assert (snapped.box, snapped.score) == (Box(250.0, 100.0, 350.0, 200.0), 0.4)
+    assert at(frames, 3, 0, "right").origin == "none"  # the proposal belongs to the carried left track
+    # After the re-snap a new run starts from the proposal, and the ten-step budget starts again.
+    assert carrier.calls[-1][1:3] == (LONG[3], Box(250.0, 100.0, 350.0, 200.0))
+    assert [at(frames, i, 0, "left").origin for i in range(4, 14)] == ["tracked"] * 10
+
+
+def test_tracker_failure_ends_the_chain() -> None:
+    frames: list[TrackFrame] = carried({3: [ego(0, "left", 700.0, 0.9)]}, {0: [reviewed(0, "left", 10.0)]}, Drift(lost_at=3))
+    assert [at(frames, i, 0, "left").origin for i in range(4)] == ["reviewed", "tracked", "tracked", "detected"]
+
+
+def test_no_hand_ends_a_carried_chain() -> None:
+    labels: dict[int, list[ViewLabel]] = {0: [reviewed(0, "left", 10.0)], 2: [ViewLabel(0, "left", "no_hand", None, "agent", "astra")]}
+    frames: list[TrackFrame] = carried({}, labels, Drift())
+    assert [at(frames, i, 0, "left").origin for i in range(4)] == ["reviewed", "tracked", "reviewed", "none"]
+
+
+def test_only_chains_from_a_reviewed_box_are_carried() -> None:
+    # A detected box chains and holds as before; the tracker never runs for it.
+    carrier: Drift = Drift()
+    frames: list[TrackFrame] = carried({0: [ego(1, "right", 10.0, 0.9)]}, {}, carrier)
+    assert [at(frames, i, 1, "right").origin for i in range(3)] == ["detected", "held", "none"]
+    assert carrier.calls == []
+
+
+def test_machine_labels_continue_a_carried_chain_but_never_start_one() -> None:
+    accepted: ViewLabel = ViewLabel(0, "left", "accepted", Box(30.0, 100.0, 130.0, 200.0), "tracker", "astra")
+    # The reviewer accepted the carried box at step 1: the chain stays a reviewed chain and the tracker restarts there.
+    carrier: Drift = Drift()
+    frames: list[TrackFrame] = carried({}, {0: [reviewed(0, "left", 10.0)], 1: [accepted]}, carrier)
+    assert [at(frames, i, 0, "left").origin for i in range(3)] == ["reviewed", "reviewed", "tracked"]
+    assert carrier.calls[-1][1:3] == (LONG[1], accepted.box)
+    # A tracker or range label with no reviewed chain behind it only holds.
+    alone: list[TrackFrame] = carried({}, {1: [accepted]}, Drift())
+    assert [at(alone, i, 0, "left").origin for i in range(1, 4)] == ["reviewed", "held", "none"]
+    ranged: ViewLabel = ViewLabel(0, "left", "accepted", Box(30.0, 100.0, 130.0, 200.0), "range", "astra")
+    assert at(carried({}, {1: [ranged]}, Drift()), 2, 0, "left").origin == "held"
+
+
+def test_picked_egohand_boxes_are_reviewed_boxes() -> None:
+    picked: ViewLabel = ViewLabel(0, "left", "accepted", Box(10.0, 100.0, 110.0, 200.0), "egohand", "astra")
+    assert at(carried({}, {0: [picked]}, Drift()), 1, 0, "left").origin == "tracked"
+
+
+def test_track_cache_carries_and_recomputes_with_the_same_boxes() -> None:
+    store: LabelStore = LabelStore("seg", split="train", application_id="test")
+
+    class Nothing:
+        def proposals(self, segment_id: str, t_ns: int) -> list[Proposal]:
+            return []
+
+    store.put(FrameLabels("seg", LONG[0], [reviewed(0, "left", 10.0)]))
+    cache: TrackCache = TrackCache("seg", times_ns=LONG, cams=CAMS, proposals=Nothing(), store=store, carrier=Drift())
+    first: list[TrackFrame] = cache.frames(LONG[0], 5)
+    assert [at(first, i, 0, "left").origin for i in range(5)] == ["reviewed"] + ["tracked"] * 4
+    store.put(FrameLabels("seg", LONG[6], [reviewed(1, "right", 500.0)]))
+    cache.invalidate_from(LONG[6])
+    assert cache.frames(LONG[0], 5) == first
+    assert at(cache.frames(LONG[7], 1), 0, 1, "right").origin == "tracked"

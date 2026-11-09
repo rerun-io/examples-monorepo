@@ -6,6 +6,8 @@ share it:
 
 - ``frame(cam, t_ns)``: random access for the backend (CPU torchcodec, one decoder per camera behind a lock,
   seeking to the previous keyframe; a small in-memory LRU of decoded frames, nothing on disk).
+- ``frame_range(cam, first, stop)``: one forward pass over consecutive frames of one camera for the visual tracker
+  (CPU torchcodec, a second decoder per camera, no cache: ``posekit.labeler.carry`` keeps what it needs).
 - ``iter_grid(...)``: the proposer's batch path, one decoder per camera that walks the camera's grid frames in
   time order (NVDEC on ``cuda``) and yields them as GPU batches.
 
@@ -175,6 +177,8 @@ class FrameSource:
         self._cache_lock = threading.Lock()
         self._decoders: dict[int, VideoDecoder] = {}
         self._decoder_locks = tuple(threading.Lock() for _ in self.videos)
+        self._sequence_decoders: dict[int, VideoDecoder] = {}
+        self._sequence_locks = tuple(threading.Lock() for _ in self.videos)
 
     @classmethod
     def from_catalog(cls, dataset: DatasetEntry, segment_id: str, *, reference_cam: int = REFERENCE_CAM, cache_frames: int = 36) -> "FrameSource":
@@ -272,6 +276,23 @@ class FrameSource:
             while len(self._cache) > self._cache_frames:
                 self._cache.popitem(last=False)
         return rgb
+
+    def frame_count(self, cam: int) -> int:
+        """Frames in ``cam``'s video."""
+        return len(self.videos[cam].times_ns)
+
+    def frame_range(self, cam: int, first: int, stop: int) -> UInt8[ndarray, "b h w 3"]:
+        """Native RGB frames ``first..stop-1`` of ``cam``, decoded in one forward pass (no cache; thread-safe).
+
+        A decoder of its own per camera (not ``frame``'s), so a pass for the visual tracker never waits behind
+        random-access requests, and the next pass continues where the last one stopped.
+        """
+        with self._sequence_locks[cam]:
+            decoder: VideoDecoder | None = self._sequence_decoders.get(cam)
+            if decoder is None:
+                decoder = VideoDecoder(self.videos[cam].mp4, device="cpu", seek_mode="exact", dimension_order="NHWC", num_ffmpeg_threads=4)
+                self._sequence_decoders[cam] = decoder
+            return decoder.get_frames_in_range(first, stop).data.numpy()
 
     def iter_grid(
         self, cams: Sequence[int] | None = None, *, batch_size: int = 32, device: DecodeDevice = "cuda", max_frames: int | None = None

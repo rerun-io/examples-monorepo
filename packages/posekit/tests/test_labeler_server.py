@@ -7,7 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -42,6 +42,7 @@ from posekit.labeler.schema import (
 from posekit.labeler.server import FrameProvider, LabelApp, make_server
 from posekit.labeler.sheet import SIDE_RGB, PlaybackInfo, SheetInfo
 from posekit.labeler.store import LabelStore, LayerContents, load_layer_file, load_layer_file_contents
+from posekit.labeler.tracker import BoxCarrier
 
 SEGMENTS: list[str] = ["seg_a", "seg_b"]
 STEP: int = 200_000_000
@@ -94,8 +95,7 @@ class Running:
     frames: dict[str, FakeFrames]
 
 
-@pytest.fixture
-def running(tmp_path: Path) -> Iterator[Running]:
+def serve(tmp_path: Path, open_carrier: Callable[[str], BoxCarrier] | None = None) -> Iterator[Running]:
     static: Path = tmp_path / "static"
     static.mkdir()
     (static / "index.html").write_text("<html>labeler</html>")
@@ -119,6 +119,7 @@ def running(tmp_path: Path) -> Iterator[Running]:
         static_dir=static,
         reviewer="tester",
         autosave_every=3,
+        open_carrier=open_carrier,
     )
     server: ThreadingHTTPServer = make_server(app, "127.0.0.1", 0)
     thread: threading.Thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -127,6 +128,11 @@ def running(tmp_path: Path) -> Iterator[Running]:
     server.shutdown()
     server.server_close()
     app.close()
+
+
+@pytest.fixture
+def running(tmp_path: Path) -> Iterator[Running]:
+    yield from serve(tmp_path)
 
 
 def decode_jpeg(jpeg: bytes) -> UInt8[ndarray, "h w 3"]:
@@ -415,3 +421,30 @@ def test_sheet_json_carries_the_machine_track(running: Running) -> None:
     info: SheetInfo = from_json(SheetInfo, get_json(running.url + "/api/sheet/seg_a/1000.json"))
     assert [(box.cam, box.side, box.origin) for box in info.track if box.box is not None] == [(0, "left", "detected")]
     assert fetch(running.url + "/api/sheet/seg_a/1000.jpg")[0] == 200
+
+
+class Shift:
+    """Fake visual tracker: the start box moves 5 px right per grid step."""
+
+    def carry(self, cam: int, start_ns: int, start_box: Box, t_ns: int) -> Box | None:
+        shift: float = 5.0 * (t_ns - start_ns) / STEP
+        return Box(start_box.x0 + shift, start_box.y0, start_box.x1 + shift, start_box.y1)
+
+
+def test_a_visual_tracker_carries_reviewed_boxes_and_the_strip_tags_them(tmp_path: Path) -> None:
+    for running in serve(tmp_path, lambda segment_id: Shift()):
+        drawn: ViewLabel = ViewLabel(1, "left", "corrected", Box(100.0, 50.0, 150.0, 100.0), "agent", "tester")
+        assert fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", 1_000 + STEP, [drawn])))[0] == 200
+        frames: list[TrackFrame] = from_json(list[TrackFrame], get_json(running.url + f"/api/track/seg_a?t0={1_000 + STEP}&n=3"))
+        assert [track_box(frames, i, 1, "left") for i in range(3)] == [
+            ("reviewed", drawn.box),
+            ("tracked", Box(105.0, 50.0, 155.0, 100.0)),
+            ("tracked", Box(110.0, 50.0, 160.0, 100.0)),
+        ]
+        assert track_box(frames, 1, 0, "left")[0] == "chained"  # detected chains are not carried
+        assert fetch(running.url + f"/api/playback/seg_a/{1_000 + STEP}.jpg?n=3")[0] == 200
+        assert fetch(running.url + f"/api/sheet/seg_a/{1_000 + 2 * STEP}.jpg")[0] == 200
+        accept: AcceptRange = AcceptRange("seg_a", 1_000 + 2 * STEP, 1_000 + 2 * STEP, "tester")
+        assert from_json(AcceptResult, fetch(running.url + "/api/accept_range", to_json(accept))[2]).accepted == 12
+        stored: ViewLabel | None = running.app.segment("seg_a").store.get_view(1_000 + 2 * STEP, 1, "left")
+        assert stored == ViewLabel(1, "left", "accepted", Box(105.0, 50.0, 155.0, 100.0), "tracker", "tester")

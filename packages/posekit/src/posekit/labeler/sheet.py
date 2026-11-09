@@ -6,11 +6,12 @@ its number ``#k`` (left hand blue, right hand orange; thick = EgoHand, thin = ha
 are drawn dashed green. EgoHand tags sit above their box, hands-layer tags below. ``SheetInfo`` carries the same numbers and each cell's offset and scale:
 ``native_px = (sheet_px - (cell.x, cell.y)) / cell.scale``. Numbers start at 1 and depend only on the
 proposals, so the same (segment, time) always gets the same numbers. The machine track of that time (``TrackBox``) is
-drawn dashed in the side colour with a ``T L``/``T R`` tag inside its top-left corner.
+drawn dashed in the side colour with a ``T L``/``T R`` tag inside its top-left corner (``T L trk`` when a visual
+tracker carried it).
 
 The playback filmstrip (``filmstrip``) shows consecutive grid times as rows and the cameras as columns, each cell
 320x180, with the machine boxes drawn as the reviewer judges them: left blue, right orange; ``reviewed`` thick with a
-``*``; ``held`` dashed. A header row names the cameras; a label column on the left reads ``r<i> <mm:ss.ss>``, the
+``*``; ``held`` dashed; ``tracked`` (carried by the visual tracker) drawn like ``chained`` with a ``trk`` tag. A header row names the cameras; a label column on the left reads ``r<i> <mm:ss.ss>``, the
 time since the segment's first grid time (Cap B ``video_time`` values are days long, so absolute times do not read). ``PlaybackInfo`` gives each cell's ``x``, each row's ``y`` and the per-camera ``scale``:
 ``native_px = (strip_px - (cell.x, row.y)) / cell.scale``.
 """
@@ -279,7 +280,8 @@ def contact_sheet(
         if cell is not None and machine.box is not None:
             top_left, bottom_right = _to_sheet(cell, machine.box)
             _dashed_rect(canvas, top_left, bottom_right, SIDE_RGB[machine.side])
-            _text(canvas, f"T {machine.side[0].upper()}", (top_left[0] + 4, top_left[1] + 16), SIDE_RGB[machine.side], 0.45)
+            machine_tag: str = f"T {machine.side[0].upper()}{' trk' if machine.origin == 'tracked' else ''}"
+            _text(canvas, machine_tag, (top_left[0] + 4, top_left[1] + 16), SIDE_RGB[machine.side], 0.45)
     for proposal in info.proposals:
         cell = cell_by_cam.get(proposal.cam)
         if cell is None:
@@ -374,7 +376,7 @@ def filmstrip(info: PlaybackInfo, images: list[list[UInt8[ndarray, "h w 3"]]], t
                 _dashed_rect(canvas, top_left, bottom_right, rgb)
             else:
                 cv2.rectangle(canvas, top_left, bottom_right, rgb, 3 if machine.origin == "reviewed" else 2)
-            tag: str = f"{machine.side[0].upper()}{'*' if machine.origin == 'reviewed' else ''}"
+            tag: str = f"{machine.side[0].upper()}{'*' if machine.origin == 'reviewed' else ''}{' trk' if machine.origin == 'tracked' else ''}"
             _text(canvas, tag, (top_left[0] + 3, max(top_left[1] - 3, row.y + 12)), rgb, 0.4)
     return encode_jpeg(canvas)
 

@@ -7,15 +7,23 @@ For every (cam, side) and grid time the machine box is, in this order:
    proposal of this camera, of ANY side, with the highest IoU >= ``CHAIN_IOU`` to that box. The track keeps its
    side, so a hand EgoHand mis-sides for a few frames stays on its track.
    ``held``: no such proposal for ONE grid step holds the previous box; a second miss ends the chain.
+   ``tracked`` (only with a visual tracker, ``BoxCarrier``): a chain that started from a reviewed box (a person's or
+   agent's label, or an EgoHand/hands-layer proposal a reviewer picked; ``tracker``/``range`` labels only continue
+   such a chain, they never start one) does not hold on a miss: the visual tracker, initialised on the last frame
+   where the chain had a box, carries that box to this frame. An EgoHand proposal with IoU >= ``CHAIN_IOU`` to the
+   carried box takes over (origin ``chained``, a re-snap). The chain ends after ``CARRY_STEPS`` carried steps without
+   a re-snap, or when the tracker loses the box (failure, or the box left the image).
 3. ``detected``: no chain: the best EgoHand proposal of that side with score >= ``DETECT_SCORE``. This is how a
    box "propagates across views": by EgoHand's per-view side (no 3D fit runs on aarch64).
 4. ``none``: no hand.
 
 A ``no_hand`` label ends the chain at its time; a ``rejected`` label hides only that time (the chain passes through).
 One proposal feeds at most one track per frame: reviewed boxes claim the proposals they overlap (IoU >= ``CLAIM_IOU``),
-then chains take proposals greedily by IoU, then detections take what is left.
+then chains take proposals greedily by IoU, then carried boxes re-snap (left before right), then detections take
+what is left.
 
-``propagate`` is a pure, deterministic function of (proposals, stored labels). ``TrackCache`` keeps the computed
+``propagate`` is a pure, deterministic function of (proposals, stored labels) and, with a carrier, of the decoded
+frames (the carrier must return the same box for the same run). ``TrackCache`` keeps the computed
 prefix of one segment and recomputes from the earliest time a label write touched.
 """
 
@@ -25,10 +33,10 @@ import threading
 from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Protocol, TypeAlias, runtime_checkable
 
 from posekit.labeler.queue import ProposalProvider, iou
-from posekit.labeler.schema import HAND_SIDES, Box, HandSide, Proposal, TrackBox, TrackFrame, ViewLabel
+from posekit.labeler.schema import HAND_SIDES, Box, HandSide, LabelSource, Proposal, TrackBox, TrackFrame, ViewLabel
 from posekit.labeler.store import LabelStore
 
 CHAIN_IOU: float = 0.3
@@ -39,11 +47,39 @@ CLAIM_IOU: float = 0.5
 """IoU with a reviewed box from which a proposal belongs to that box (no other track may take it)."""
 MAX_HELD: int = 1
 """Grid steps a chain may hold its box without a matching proposal."""
+CARRY_STEPS: int = 10
+"""Grid steps (2 s at 5 fps) a visual tracker may carry a reviewed box without an EgoHand re-snap."""
+MACHINE_SOURCES: frozenset[LabelSource] = frozenset({"tracker", "range"})
+"""Label sources that continue a reviewed chain but never start one (the machine made the box)."""
 STEPS_PER_LOCK: int = 50
 """Grid times ``TrackCache`` computes per hold of its lock."""
 
 TrackKey: TypeAlias = tuple[int, HandSide]
 """(cam, side)."""
+
+
+@runtime_checkable
+class BoxCarrier(Protocol):
+    """A visual single-object tracker over one segment's decoded frames (``posekit.labeler.carry.VisualCarrier``)."""
+
+    def carry(self, cam: int, start_ns: int, start_box: Box, t_ns: int) -> Box | None:
+        """The box at grid time ``t_ns`` of the run initialised on camera ``cam``'s frame at ``start_ns`` with ``start_box``.
+
+        Deterministic: the same run always gives the same boxes. None when the tracker lost the box at or before ``t_ns``.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class Carry:
+    """A visual tracker run that carries a reviewed chain's box."""
+
+    start_ns: int
+    """Grid time of the frame the tracker was initialised on."""
+    start_box: Box
+    """Box it was initialised with."""
+    steps: int
+    """Grid steps carried so far without a re-snap."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +90,12 @@ class Chain:
     """Last box of the track (a held step keeps it)."""
     held: int
     """Consecutive held steps so far."""
+    seen_ns: int
+    """Grid time ``box`` was seen at (a held step keeps it)."""
+    reviewed: bool = False
+    """The chain started from a reviewed box, so a visual tracker may carry it."""
+    carry: Carry | None = None
+    """The tracker run carrying the box since the last proposal or label; None when the last box was one."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +108,14 @@ class TrackStep:
     """Live chains after this time."""
 
 
-def track_step(t_ns: int, cams: list[int], proposals: list[Proposal], labels: list[ViewLabel], chains: dict[TrackKey, Chain]) -> TrackStep:
+def track_step(
+    t_ns: int,
+    cams: list[int],
+    proposals: list[Proposal],
+    labels: list[ViewLabel],
+    chains: dict[TrackKey, Chain],
+    carrier: BoxCarrier | None = None,
+) -> TrackStep:
     """Propagate the tracks one grid time; see the module docstring.
 
     Args:
@@ -75,6 +124,7 @@ def track_step(t_ns: int, cams: list[int], proposals: list[Proposal], labels: li
         proposals: Every proposal at ``t_ns`` (only EgoHand ones are used).
         labels: Stored labels at ``t_ns``.
         chains: Live chains after the previous grid time.
+        carrier: Visual tracker for reviewed chains; None = chains only hold (``MAX_HELD``).
     """
     stored: dict[TrackKey, ViewLabel] = {(label.cam, label.side): label for label in labels}
     boxes: list[TrackBox] = []
@@ -89,7 +139,9 @@ def track_step(t_ns: int, cams: list[int], proposals: list[Proposal], labels: li
                 continue
             decided[side] = TrackBox(cam, side, label.box, "reviewed", None)
             if label.box is not None:
-                next_chains[(cam, side)] = Chain(label.box, 0)
+                prior: Chain | None = chains.get((cam, side))
+                continues: bool = prior is not None and prior.reviewed and iou(prior.box, label.box) >= CHAIN_IOU
+                next_chains[(cam, side)] = Chain(label.box, 0, t_ns, label.source not in MACHINE_SOURCES or continues)
                 claimed.update(k for k, p in enumerate(candidates) if iou(p.box, label.box) >= CLAIM_IOU)
             elif label.status == "rejected" and (cam, side) in chains:
                 next_chains[(cam, side)] = chains[(cam, side)]
@@ -109,12 +161,28 @@ def track_step(t_ns: int, cams: list[int], proposals: list[Proposal], labels: li
                 continue
             claimed.add(k)
             decided[side] = TrackBox(cam, side, candidates[k].box, "chained", candidates[k].score)
-            next_chains[(cam, side)] = Chain(candidates[k].box, 0)
+            next_chains[(cam, side)] = Chain(candidates[k].box, 0, t_ns, chains[(cam, side)].reviewed)
         for side in chained_sides:
             chain: Chain = chains[(cam, side)]
-            if side not in decided and chain.held < MAX_HELD:
+            if side in decided:
+                continue
+            if carrier is not None and chain.reviewed:
+                run: Carry = chain.carry or Carry(chain.seen_ns, chain.box, 0)
+                carried: Box | None = carrier.carry(cam, run.start_ns, run.start_box, t_ns) if run.steps < CARRY_STEPS else None
+                if carried is None:
+                    continue
+                snaps: list[int] = [k for k, p in enumerate(candidates) if k not in claimed and iou(carried, p.box) >= CHAIN_IOU]
+                if snaps:
+                    k = max(snaps, key=lambda k: (iou(carried, candidates[k].box), -k))
+                    claimed.add(k)
+                    decided[side] = TrackBox(cam, side, candidates[k].box, "chained", candidates[k].score)
+                    next_chains[(cam, side)] = Chain(candidates[k].box, 0, t_ns, True)
+                else:
+                    decided[side] = TrackBox(cam, side, carried, "tracked", None)
+                    next_chains[(cam, side)] = Chain(carried, 0, t_ns, True, Carry(run.start_ns, run.start_box, run.steps + 1))
+            elif chain.held < MAX_HELD:
                 decided[side] = TrackBox(cam, side, chain.box, "held", None)
-                next_chains[(cam, side)] = Chain(chain.box, chain.held + 1)
+                next_chains[(cam, side)] = Chain(chain.box, chain.held + 1, chain.seen_ns, chain.reviewed)
         for side in HAND_SIDES:
             if side in decided:
                 continue
@@ -125,13 +193,17 @@ def track_step(t_ns: int, cams: list[int], proposals: list[Proposal], labels: li
             best: int = max(confident, key=lambda k: (candidates[k].score, -k))
             claimed.add(best)
             decided[side] = TrackBox(cam, side, candidates[best].box, "detected", candidates[best].score)
-            next_chains[(cam, side)] = Chain(candidates[best].box, 0)
+            next_chains[(cam, side)] = Chain(candidates[best].box, 0, t_ns)
         boxes.extend(decided[side] for side in HAND_SIDES)
     return TrackStep(TrackFrame(t_ns, boxes), next_chains)
 
 
 def propagate(
-    times_ns: list[int], cams: list[int], proposals_at: Callable[[int], list[Proposal]], labels_at: Callable[[int], list[ViewLabel]]
+    times_ns: list[int],
+    cams: list[int],
+    proposals_at: Callable[[int], list[Proposal]],
+    labels_at: Callable[[int], list[ViewLabel]],
+    carrier: BoxCarrier | None = None,
 ) -> list[TrackFrame]:
     """The machine track of every grid time, from the first one.
 
@@ -140,11 +212,12 @@ def propagate(
         cams: Camera indices, rig order.
         proposals_at: Grid time -> every proposal at it.
         labels_at: Grid time -> stored labels at it.
+        carrier: Visual tracker for reviewed chains; None = chains only hold.
     """
     frames: list[TrackFrame] = []
     chains: dict[TrackKey, Chain] = {}
     for t_ns in times_ns:
-        step: TrackStep = track_step(t_ns, cams, proposals_at(t_ns), labels_at(t_ns), chains)
+        step: TrackStep = track_step(t_ns, cams, proposals_at(t_ns), labels_at(t_ns), chains, carrier)
         frames.append(step.frame)
         chains = step.chains
     return frames
@@ -153,7 +226,16 @@ def propagate(
 class TrackCache:
     """The machine track of one segment, computed lazily from the first grid time and kept until a label write."""
 
-    def __init__(self, segment_id: str, *, times_ns: list[int], cams: list[int], proposals: ProposalProvider, store: LabelStore) -> None:
+    def __init__(
+        self,
+        segment_id: str,
+        *,
+        times_ns: list[int],
+        cams: list[int],
+        proposals: ProposalProvider,
+        store: LabelStore,
+        carrier: BoxCarrier | None = None,
+    ) -> None:
         """Bind the cache to a segment's grid, proposals and labels.
 
         Args:
@@ -162,12 +244,14 @@ class TrackCache:
             cams: Camera indices, rig order.
             proposals: Proposal source.
             store: The segment's labels.
+            carrier: Visual tracker for reviewed chains (it keeps its own runs; a label write does not drop them).
         """
         self.segment_id: str = segment_id
         self.times_ns: list[int] = sorted(times_ns)
         self.cams: list[int] = cams
         self.proposals: ProposalProvider = proposals
         self.store: LabelStore = store
+        self.carrier: BoxCarrier | None = carrier
         self._index: dict[int, int] = {t: i for i, t in enumerate(self.times_ns)}
         self._steps: list[TrackStep] = []
         """Computed prefix: ``_steps[i]`` is grid time ``times_ns[i]``."""
@@ -198,7 +282,9 @@ class TrackCache:
                 for _ in range(min(STEPS_PER_LOCK, stop - len(self._steps))):
                     t_ns: int = self.times_ns[len(self._steps)]
                     chains: dict[TrackKey, Chain] = self._steps[-1].chains if self._steps else {}
-                    self._steps.append(track_step(t_ns, self.cams, self.proposals.proposals(self.segment_id, t_ns), self.store.get(t_ns), chains))
+                    self._steps.append(
+                        track_step(t_ns, self.cams, self.proposals.proposals(self.segment_id, t_ns), self.store.get(t_ns), chains, self.carrier)
+                    )
 
     def frame(self, t_ns: int) -> TrackFrame:
         """The machine track at one grid time."""

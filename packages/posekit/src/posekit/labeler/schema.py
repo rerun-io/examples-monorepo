@@ -36,7 +36,7 @@ LabelSource: TypeAlias = Literal["egohand", "hands_layer", "person", "agent", "r
 - ``tracker``: the machine track's box (or its "no hand"), accepted by a reviewer who watched it (``/api/accept_range``).
 """
 
-TrackOrigin: TypeAlias = Literal["reviewed", "chained", "held", "detected", "none"]
+TrackOrigin: TypeAlias = Literal["reviewed", "chained", "held", "tracked", "detected", "none"]
 """Why the machine track has (or has no) box at one (time, cam, side); see ``posekit.labeler.tracker``."""
 
 ActionKind: TypeAlias = Literal["accept_range", "draw_box", "pick_proposal", "set_side", "move_box", "no_hand", "reject", "accept_frame"]
@@ -266,7 +266,7 @@ class TrackBox:
     origin: TrackOrigin
     """Where the box comes from."""
     score: float | None
-    """EgoHand score of the proposal for ``chained``/``detected``; None otherwise."""
+    """EgoHand score of the proposal for ``chained``/``detected``; None otherwise (``tracked`` included)."""
 
 
 @serde(deny_unknown_fields=True)

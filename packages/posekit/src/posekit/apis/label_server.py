@@ -16,8 +16,10 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
 
+import cv2
 from rerun.catalog import DatasetEntry
 
+from posekit.labeler.carry import OPENCV_THREADS, VisualCarrier, VisualTrackerKind, opencv_tracker
 from posekit.labeler.frames import FrameSource
 from posekit.labeler.proposals import ProposalsByTime, read_proposals
 from posekit.labeler.schema import Proposal
@@ -56,6 +58,9 @@ class Config:
     """New labels between autosaves."""
     warm: bool = True
     """Open every segment in the background at start, so the first requests do not wait on the catalog."""
+    visual_tracker: VisualTrackerKind = "off"
+    """OpenCV tracker that carries reviewed boxes when EgoHand misses (origin ``tracked``, ``posekit.labeler.carry``);
+    ``off`` = chains hold one miss and end."""
 
 
 @dataclass
@@ -82,11 +87,19 @@ def main(config: Config) -> None:
     dataset: DatasetEntry = layers.dataset
     segment_ids: list[str] = list(config.segments) or sorted(dataset.segment_ids())
     proposals: CatalogProposals = CatalogProposals(dataset)
+    if config.visual_tracker != "off":
+        cv2.setNumThreads(OPENCV_THREADS)
+    sources: dict[str, FrameSource] = {}
 
     def open_frames(segment_id: str) -> FrameSource:
         source: FrameSource = FrameSource.from_catalog(dataset, segment_id)
         proposals.load(source)
+        sources[segment_id] = source
         return source
+
+    def open_carrier(segment_id: str) -> VisualCarrier:
+        source: FrameSource = sources[segment_id]
+        return VisualCarrier(source, source.times_ns, opencv_tracker(config.visual_tracker))
 
     def viewer_url(segment_id: str) -> str:
         url: str = dataset.segment_url(segment_id)
@@ -105,6 +118,7 @@ def main(config: Config) -> None:
         reviewer=config.reviewer,
         dataset=config.dataset,
         autosave_every=config.autosave_every,
+        open_carrier=None if config.visual_tracker == "off" else open_carrier,
     )
     if config.warm:
         threading.Thread(target=app.summaries, name="labeler-warm", daemon=True).start()
@@ -114,7 +128,10 @@ def main(config: Config) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop_on_sigterm)
-    print(f"[labeler] {len(segment_ids)} segments of {config.dataset} on http://{config.host}:{server.server_address[1]}/")
+    print(
+        f"[labeler] {len(segment_ids)} segments of {config.dataset} on http://{config.host}:{server.server_address[1]}/"
+        f" (visual tracker: {config.visual_tracker})"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
