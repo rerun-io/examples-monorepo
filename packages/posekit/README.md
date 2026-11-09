@@ -136,11 +136,14 @@ pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http:/
 pixi run -e posekit-hands --frozen posekit-hands-bench
 ```
 
-Select `egohand-fast` for the opt-in TensorRT path on an NVFP4-capable CUDA GPU:
+Every EgoHand stack has one name (`EGOHAND_STACKS`) that the CLI roles, the app, the bench and
+the evals share: `egohand` (reference), `egohand-selfcap`, `egohand-fast` (#487), `egohand-catalog`
+(the accepted fast stack, NVFP4, Blackwell) and `egohand-catalog-bf16` (the same stack below
+Blackwell). Select the same name for the detector and the pose role:
 
 ```bash
-pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/egohand-fast.rrd \
-    egohand-fast tensorrt egohand-fast
+pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/egohand-catalog.rrd \
+    egohand-catalog tensorrt egohand-catalog
 pixi run -e posekit-hands --frozen posekit-hands-bench --models egohand-selfcap egohand-fast egohand-catalog
 pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand-selfcap egohand-fast egohand-catalog \
     --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/egohand-eval
