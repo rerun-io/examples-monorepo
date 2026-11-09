@@ -1,6 +1,9 @@
 // hand-labeler frontend: review queue + 6-camera box editor + embedded Rerun web viewer.
 // Plain ES module, no build step. JSON shapes are the pyserde records in posekit/labeler/schema.py.
 // Boxes are kept in NATIVE image pixels (CameraInfo.width x height); canvases show downscaled JPEGs.
+//
+// MEgATrack loop (SPEC-v2-megatrack-loop.md): the default boxes are the machine track (/api/track); W plays the
+// 5 fps grid, A accepts the watched run (/api/accept_range), and the reviewer edits + saves only the failure frame.
 
 // Module URLs tried in order. jsdelivr serves the +esm bundle but answers 403 for the ~40 MB
 // re_viewer_bg.wasm it then fetches (its per-file size limit), so unpkg (which serves the wasm) goes first.
@@ -17,6 +20,10 @@ const GRID_SIDE = 960; // max_side of grid thumbnails (spec)
 const FOCUS_SIDE = 1920; // max_side of the focused camera (native on RoboCap)
 const HANDLE_CSS_PX = 7; // hit tolerance around edges/corners, CSS px
 const MIN_BOX_PX = 4; // smallest box side, native px
+const WATCH_MS = 200; // watch plays the 5 fps grid in real time
+const PREFETCH = 10; // grid frames fetched ahead while watching (frame sets, track, thumbnails)
+const TRACK_CHUNK = 20; // grid times per /api/track request
+const IMG_CACHE_MAX = 6 * 2 * (PREFETCH + 4); // thumbnails kept (cams x a few frames behind and ahead)
 
 // The page is served at <root>/ and this file at <root>/static/app.js; resolve the API from here so a proxy
 // prefix (or loading /static/index.html directly) keeps working.
@@ -43,6 +50,19 @@ const S = {
   saving: false, // a POST /api/labels is in flight
   rev: 0, // edit revision, bumped by every edit; a save marks the frame saved only if it is unchanged
   drag: null,
+  // machine track: t_ns -> TrackFrame. Dropped after every save/accept (the backend recomputes it from the labels).
+  track: new Map(),
+  trackGen: 0,
+  trackPending: [], // in-flight /api/track requests: {lo, hi, p} grid-index ranges
+  trackOk: true, // false when the backend has no /api/track: the old proposal defaults are used then
+  fsCache: new Map(), // t_ns -> Promise<FrameState>, prefetched while watching; each entry is used once
+  imgCache: new Map(), // "sid/cam/t/maxSide" -> Image (LRU)
+  // The run the next A accepts: grid times anchor..watchedTo were on screen since the last accept or jump.
+  anchor: null,
+  watchedTo: null,
+  watch: { on: false, gen: 0, how: null, shown: [] }, // how the last watch stopped: space | key | edit | moved | end | accept
+  accepting: false,
+  effort: null, // EffortSummary or null
 };
 
 // ---------------------------------------------------------------- small helpers
@@ -91,6 +111,9 @@ function navBlocked() {
   return true;
 }
 const round1 = (v) => Math.round(v * 10) / 10;
+const enc = encodeURIComponent;
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+const gridIndex = (t) => (S.info && t !== null ? S.info.times_ns.indexOf(t) : -1);
 const isKeyframe = (t) => S.info?.keyframes_ns.includes(t);
 const chipClass = (reason) =>
   reason === "keyframe" ? "keyframe" : ["range_gap", "decode_error", "no_proposal"].includes(reason) ? "bad" : "warn";
@@ -148,6 +171,7 @@ function renderQueue() {
 }
 
 async function selectSegment(sid, t = null) {
+  if (S.watch.on) stopWatch("moved");
   if (navBlocked() || !guardDirty()) {
     $("segment").value = S.sid ?? "";
     return;
@@ -175,6 +199,15 @@ async function selectSegment(sid, t = null) {
   S.discardArmed = false;
   $("segment").value = sid;
   S.reviewed.clear();
+  dropTrack();
+  S.imgCache.clear();
+  S.trackOk = true;
+  S.anchor = null;
+  S.watchedTo = null;
+  S.watch.how = null;
+  S.effort = null;
+  renderWatch();
+  loadEffort();
   const scrub = $("scrub");
   scrub.max = String(Math.max(0, S.info.times_ns.length - 1));
   renderProgress();
@@ -225,8 +258,10 @@ function guardDirty() {
 
 // The new time and its views are published together, only once the frame set has loaded; until then the
 // previous frame set stays on screen, read-only (editBlocked). A failed load leaves the previous one in place.
-async function goto(t, { force = false } = {}) {
+// watching = a step of the W playback (uses the prefetched frame set); quiet = keep the status line (a refresh).
+async function goto(t, { force = false, watching = false, quiet = false } = {}) {
   if (!S.info) return;
+  if (!watching && S.watch.on) stopWatch("moved");
   if (navBlocked()) return;
   if (!force && t !== S.t && !guardDirty()) return;
   const seq = ++S.loadSeq;
@@ -235,8 +270,9 @@ async function goto(t, { force = false } = {}) {
   S.drag = null;
   $("tlabel").textContent = `${fmtTime(t)} …`;
   let fs;
+  let tr;
   try {
-    fs = await getJSON(`frameset/${encodeURIComponent(sid)}/${t}`);
+    [fs, tr] = await Promise.all([watching ? takeFrameset(t) : getJSON(`frameset/${enc(sid)}/${t}`), trackAt(t)]);
   } catch (e) {
     if (seq !== S.loadSeq) return; // a newer goto owns the loading state
     S.loading = false;
@@ -256,7 +292,7 @@ async function goto(t, { force = false } = {}) {
   let complete = true;
   for (const v of S.views) {
     const vs = fs.views.find((x) => x.cam === v.cam) ?? { proposals: [], labels: [] };
-    initView(v, vs);
+    initView(v, vs, tr);
     if (vs.labels.length < SIDES.length) complete = false;
     v.lo = loadImage(v, GRID_SIDE, seq, "lo", t);
     v.hi = null;
@@ -268,36 +304,134 @@ async function goto(t, { force = false } = {}) {
   renderStates();
   renderQueue();
   S.views.forEach(draw);
-  history.replaceState(null, "", `#sid=${encodeURIComponent(S.sid)}&t=${t}`);
+  history.replaceState(null, "", `#sid=${enc(S.sid)}&t=${t}`);
   viewerFollow(t);
-  status(`${S.sid} @ ${fmtTime(t)}${isKeyframe(t) ? " (keyframe)" : ""}${complete ? " · already reviewed" : ""}`);
+  noteWatched(t);
+  if (watching) S.watch.shown.push(performance.now());
+  if (!quiet) {
+    const machine = tr ? " · machine track" : S.trackOk ? " · no machine track (proposals shown)" : " · backend has no /api/track: proposals shown";
+    status(`${S.sid} @ ${fmtTime(t)}${isKeyframe(t) ? " (keyframe)" : ""}${complete ? " · already reviewed" : ""}${machine}`);
+  }
 }
 
-function loadImage(v, maxSide, seq, which, t) {
-  const img = new Image();
-  img.decoding = "async";
-  img.onload = () => {
-    if (seq === S.loadSeq && v[which] === img) draw(v);
-  };
-  img.onerror = () => {
-    if (seq === S.loadSeq) status(`frame cam ${v.cam} failed to load`, "err");
-  };
-  img.src = apiUrl(`frame/${encodeURIComponent(S.sid)}/${v.cam}/${t}.jpg?max_side=${maxSide}`);
+// Thumbnails are cached (LRU) so W playback and prefetching reuse the same decoded image.
+function cachedImage(cam, t, maxSide) {
+  const key = `${S.sid}/${cam}/${t}/${maxSide}`;
+  let img = S.imgCache.get(key);
+  if (img) {
+    S.imgCache.delete(key);
+  } else {
+    img = new Image();
+    img.decoding = "async";
+    img.addEventListener("error", () => S.imgCache.get(key) === img && S.imgCache.delete(key), { once: true });
+    img.src = apiUrl(`frame/${enc(S.sid)}/${cam}/${t}.jpg?max_side=${maxSide}`);
+  }
+  S.imgCache.set(key, img);
+  while (S.imgCache.size > IMG_CACHE_MAX) S.imgCache.delete(S.imgCache.keys().next().value);
   return img;
 }
 
-// Working boxes: one per (cam, side). Stored labels win; otherwise the best proposal of that side
-// (EgoHand first, then the hands layer). An unedited box keeps its status/source when saved.
-function initView(v, vs) {
+function loadImage(v, maxSide, seq, which, t) {
+  const img = cachedImage(v.cam, t, maxSide);
+  if (img.complete && img.naturalWidth) return img; // goto draws it right away
+  img.addEventListener("load", () => {
+    if (seq === S.loadSeq && v[which] === img) draw(v);
+  }, { once: true });
+  img.addEventListener("error", () => {
+    if (seq === S.loadSeq && v[which] === img) status(`frame cam ${v.cam} failed to load`, "err");
+  }, { once: true });
+  return img;
+}
+
+// ---------------------------------------------------------------- machine track (/api/track)
+function dropTrack() {
+  S.trackGen += 1;
+  S.track.clear();
+  S.trackPending = [];
+  S.fsCache.clear();
+}
+
+// Fetches the TRACK_CHUNK grid times from t0 unless a request in flight already covers t0.
+function fetchTrack(t0) {
+  const ts = S.info?.times_ns ?? [];
+  const i = ts.indexOf(t0);
+  if (i < 0 || !S.trackOk) return Promise.resolve();
+  const pending = S.trackPending.find((e) => e.lo <= i && i <= e.hi);
+  if (pending) return pending.p;
+  const gen = S.trackGen;
+  const sid = S.sid;
+  const entry = { lo: i, hi: i + TRACK_CHUNK - 1, p: null };
+  entry.p = getJSON(`track/${enc(sid)}?t0=${t0}&n=${TRACK_CHUNK}`)
+    .then((frames) => {
+      if (gen === S.trackGen && sid === S.sid) for (const f of frames) S.track.set(f.t_ns, f);
+    })
+    .catch((e) => {
+      if (/: 404 /.test(String(e.message))) S.trackOk = false;
+      else status(`track: ${e.message ?? e}`, "err");
+    })
+    .finally(() => {
+      S.trackPending = S.trackPending.filter((x) => x !== entry);
+    });
+  S.trackPending.push(entry);
+  return entry.p;
+}
+
+// The TrackFrame at t, or null (no track endpoint, or the fetch failed): then the proposals are the defaults.
+async function trackAt(t) {
+  for (let tries = 0; tries < 2 && S.trackOk && !S.track.has(t); tries++) await fetchTrack(t);
+  return S.track.get(t) ?? null;
+}
+
+function takeFrameset(t) {
+  const p = S.fsCache.get(t) ?? getJSON(`frameset/${enc(S.sid)}/${t}`);
+  S.fsCache.delete(t);
+  return p;
+}
+
+// Fetch the frame sets, track and thumbnails of the grid times after index i (watch playback).
+function prefetch(i) {
+  const ts = S.info.times_ns;
+  for (let k = i; k < Math.min(ts.length, i + PREFETCH); k++) {
+    const t = ts[k];
+    if (!S.track.has(t)) fetchTrack(t);
+    if (!S.fsCache.has(t)) {
+      const p = getJSON(`frameset/${enc(S.sid)}/${t}`);
+      p.catch(() => S.fsCache.get(t) === p && S.fsCache.delete(t));
+      S.fsCache.set(t, p);
+    }
+    for (const v of S.views) {
+      cachedImage(v.cam, t, GRID_SIDE);
+      if (S.focus === v.cam) cachedImage(v.cam, t, FOCUS_SIDE);
+    }
+  }
+}
+
+// Resolves once the frame set, the track and every grid thumbnail of t are in hand.
+async function frameReady(t) {
+  const imgs = S.views.map((v) => cachedImage(v.cam, t, GRID_SIDE));
+  await Promise.all([S.fsCache.get(t), trackAt(t), ...imgs.map((img) => img.decode().catch(() => {}))]);
+}
+
+// Working boxes: one per (cam, side). Stored labels win; then the machine track (TrackFrame) of that side;
+// without a track, the best proposal of that side (EgoHand first, then the hands layer).
+// An unedited box keeps its status/source when saved (machine boxes: accepted, source "tracker").
+function initView(v, vs, tr = null) {
   v.proposals = vs.proposals;
   v.boxes = [];
+  v.machineNone = new Set(); // sides the machine says "no hand": an untouched one posts no_hand from the tracker
   v.rejected = vs.labels.some((l) => l.status === "rejected");
   v.el.classList.toggle("rejected", v.rejected);
   v.touched = false;
   for (const side of SIDES) {
     const label = vs.labels.find((l) => l.side === side);
     if (label) {
-      if (label.box) v.boxes.push({ side, origSide: side, box: { ...label.box }, status: label.status, source: label.source, edited: false, stored: true });
+      if (label.box) v.boxes.push({ side, origSide: side, box: { ...label.box }, status: label.status, source: label.source, edited: false, stored: true, origin: "reviewed" });
+      continue;
+    }
+    if (tr) {
+      const tb = tr.boxes.find((b) => b.cam === v.cam && b.side === side);
+      if (tb?.box) v.boxes.push({ side, origSide: side, box: { ...tb.box }, status: "accepted", source: "tracker", edited: false, stored: false, origin: tb.origin, score: tb.score });
+      else v.machineNone.add(side);
       continue;
     }
     const best = (model) =>
@@ -313,7 +447,7 @@ const changed = (b) => b.edited || b.side !== b.origSide;
 function decision(v, side) {
   if (v.rejected) return { status: "rejected", box: null, source: "person" };
   const b = v.boxes.find((x) => x.side === side);
-  if (!b) return { status: "no_hand", box: null, source: "person" };
+  if (!b) return { status: "no_hand", box: null, source: v.machineNone?.has(side) ? "tracker" : "person" };
   if (changed(b)) return { status: "corrected", box: b.box, source: "person" };
   return { status: b.status, box: b.box, source: b.source };
 }
@@ -324,7 +458,11 @@ function frameLabels() {
   for (const v of S.views) {
     for (const side of SIDES) {
       const d = decision(v, side);
-      const box = d.box ? { x0: round1(d.box.x0), y0: round1(d.box.y0), x1: round1(d.box.x1), y1: round1(d.box.y1) } : null;
+      // Edited boxes are rounded to 0.1 px; untouched ones go back bit-exact, so the backend sees them equal to
+      // the machine box (or stored label) they came from and logs no intervention for them.
+      const b = v.boxes.find((x) => x.side === side);
+      const exact = d.box && b && !changed(b);
+      const box = d.box ? (exact ? { ...d.box } : { x0: round1(d.box.x0), y0: round1(d.box.y0), x1: round1(d.box.x1), y1: round1(d.box.y1) }) : null;
       labels.push({ cam: v.cam, side, status: d.status, box, source: d.source, reviewer: who });
     }
   }
@@ -392,20 +530,24 @@ function draw(v) {
   const font = `${Math.round((focused ? 13 : 11) * dpr)}px ui-monospace, Menlo, monospace`;
   const used = new Set(v.boxes.map((b) => b.proposal).filter(Boolean));
 
-  // Proposals not in use: thin reference outlines (EgoHand solid, hands layer dashed).
+  // Proposals not in use: thin reference outlines (EgoHand solid, hands layer dashed), tagged only when focused.
+  const near = (a, b) => Math.max(Math.abs(a.x0 - b.x0), Math.abs(a.y0 - b.y0), Math.abs(a.x1 - b.x1), Math.abs(a.y1 - b.y1)) < 0.5;
   for (const p of v.proposals) {
-    if (used.has(p)) continue;
-    strokeBox(ctx, f, p.box, COLOR[p.side], lw, p.model === "hands_layer", 0.75);
-    tag(ctx, f, p.box, `${p.model === "egohand" ? "EH" : "HL"} ${p.side[0].toUpperCase()} ${p.score.toFixed(2)}`, COLOR[p.side], font, 0.75);
+    if (used.has(p) || v.boxes.some((b) => near(b.box, p.box))) continue; // the machine box already is this proposal
+    strokeBox(ctx, f, p.box, COLOR[p.side], lw * 0.6, p.model === "hands_layer", 0.6);
+    if (focused) tag(ctx, f, p.box, `${p.model === "egohand" ? "EH" : "HL"} ${p.side[0].toUpperCase()} ${p.score.toFixed(2)}`, COLOR[p.side], font, 0.6);
   }
-  // Working boxes: green when stored or edited, side colour when an unedited proposal.
+  // Working boxes: green when stored or edited; otherwise the side colour (machine track, or a proposal without
+  // a track). Machine boxes: "T <origin>", held = dashed; stored labels thick with "*".
   for (const b of v.boxes) {
     const green = b.stored || changed(b);
     const color = green ? COLOR.label : COLOR[b.side];
-    strokeBox(ctx, f, b.box, color, lw * 1.6, !green && b.source === "hands_layer", 1);
+    const dashed = !green && (b.source === "hands_layer" || b.origin === "held");
+    strokeBox(ctx, f, b.box, color, lw * (b.stored ? 2.2 : 1.6), dashed, 1);
     const d = decision(v, b.side);
-    const score = b.proposal && !changed(b) ? ` ${b.proposal.score.toFixed(2)}` : "";
-    const who = green ? d.status : b.source === "egohand" ? "EH" : "HL";
+    const sc = b.proposal?.score ?? b.score;
+    const score = typeof sc === "number" && !changed(b) && !b.stored ? ` ${sc.toFixed(2)}` : "";
+    const who = green ? `${d.status}${b.stored ? "*" : ""}` : b.source === "tracker" ? `T ${b.origin}` : b.source === "egohand" ? "EH" : "HL";
     tag(ctx, f, b.box, `${b.side[0].toUpperCase()} ${who}${score}`, color, font, 1);
     if (focused && b === S.sel) drawHandles(ctx, f, b.box, dpr);
   }
@@ -506,6 +648,7 @@ function clampBox(v, b) {
 
 function onPointerDown(v, ev) {
   if (ev.button !== 0) return;
+  if (S.watch.on) stopWatch("edit"); // a click while watching is a stop at a failure
   if (S.focus !== v.cam) {
     setFocus(v.cam);
     return;
@@ -519,6 +662,7 @@ function onPointerDown(v, ev) {
     // Clicking an unused proposal makes it this side's box (replacing the current one).
     const pr = hit.proposal;
     v.boxes = v.boxes.filter((b) => b.side !== pr.side);
+    v.machineNone?.delete(pr.side);
     const b = { side: pr.side, origSide: pr.side, box: { ...pr.box }, status: "accepted", source: pr.model, edited: false, stored: false, proposal: pr };
     v.boxes.push(b);
     S.sel = b;
@@ -555,6 +699,7 @@ function onPointerMove(v, ev) {
       const taken = new Set(v.boxes.map((b) => b.side));
       const side = SIDES.find((s) => !taken.has(s)) ?? "right";
       v.boxes = v.boxes.filter((b) => b.side !== side);
+      v.machineNone?.delete(side);
       d.box = { side, box: { x0: d.start.x, y0: d.start.y, x1: p.x, y1: p.y }, status: "corrected", source: "person", edited: true, stored: false };
       v.boxes.push(d.box);
       S.sel = d.box;
@@ -606,6 +751,7 @@ function setSide(side) {
   if (b.side !== side) {
     const other = v.boxes.find((x) => x !== b && x.side === side);
     if (other) other.side = b.side;
+    else v.machineNone?.delete(b.side); // that side is now empty by the reviewer's hand
     b.side = side;
   }
   touch(v);
@@ -616,6 +762,7 @@ function deleteSelected() {
   const v = S.views.find((x) => x.cam === S.focus);
   if (!v || !S.sel || editBlocked()) return;
   v.boxes = v.boxes.filter((b) => b !== S.sel);
+  v.machineNone?.delete(S.sel.side);
   status(`cam ${v.cam}: ${S.sel.side} removed (no_hand)`);
   S.sel = null;
   touch(v);
@@ -698,8 +845,185 @@ async function save() {
   } else {
     status(`saved ${fmtTime(sent.t)} as sent; edits made since are not saved yet: Enter saves them`, "err");
   }
-  await Promise.all([loadQueue(), loadSegments()]).catch((e) => status(String(e.message ?? e), "err"));
+  if (S.sid === sent.sid) await refreshAfterAction();
   return current;
+}
+
+// After a save or an accept the backend recomputes the machine track from the new labels: drop the cached track
+// and frame sets, re-show the frame on screen when nothing on it is unsaved, and reload queue, progress, effort.
+async function refreshAfterAction() {
+  dropTrack();
+  const tasks = [loadQueue(), loadSegments(), loadEffort()];
+  if (S.t !== null) {
+    const redraw = !S.dirty && !S.loading && !S.watch.on && !S.drag;
+    tasks.push(redraw ? goto(S.t, { force: true, quiet: true }) : fetchTrack(S.t));
+  }
+  await Promise.all(tasks).catch((e) => status(String(e.message ?? e), "err"));
+}
+
+// ---------------------------------------------------------------- watch (W) + accept the watched run (A)
+// Every frame set shown extends the run when it is at most one grid step past it; a jump starts a new run there.
+function noteWatched(t) {
+  const i = gridIndex(t);
+  const a = gridIndex(S.anchor);
+  const w = gridIndex(S.watchedTo);
+  if (a >= 0 && i >= a && i <= w + 1) {
+    if (i > w) S.watchedTo = t;
+  } else {
+    S.anchor = t;
+    S.watchedTo = t;
+  }
+  renderWatch();
+}
+
+function startWatch() {
+  if (!S.info || S.t === null) return;
+  if (S.watch.on) {
+    stopWatch("space");
+    return;
+  }
+  if (S.dirty) {
+    status("unsaved edits on this frame set: Enter saves them before watching", "err");
+    return;
+  }
+  if (navBlocked()) return;
+  S.watch.on = true;
+  S.watch.how = null;
+  S.watch.shown = [];
+  S.watch.gen += 1;
+  renderWatch();
+  watchLoop(S.watch.gen);
+}
+
+function stopWatch(how) {
+  if (!S.watch.on) return;
+  S.watch.on = false;
+  S.watch.how = how;
+  S.fsCache.clear(); // prefetched frame sets are only trusted during playback
+  renderWatch();
+  if (["space", "key", "edit"].includes(how) && S.t !== null) {
+    const prev = S.info.times_ns[gridIndex(S.t) - 1];
+    const upTo = prev !== undefined && gridIndex(S.anchor) <= gridIndex(prev) ? `A accepts ${fmtTime(S.anchor)} → ${fmtTime(prev)}, ` : "";
+    status(`stopped at ${fmtTime(S.t)}: ${upTo}fix this frame, Enter saves, W resumes (Shift+A: accept this frame too)`);
+  }
+}
+
+async function watchLoop(gen) {
+  const live = () => S.watch.on && S.watch.gen === gen;
+  let last = performance.now();
+  while (live()) {
+    const ts = S.info.times_ns;
+    const i = ts.indexOf(S.t);
+    const next = ts[i + 1];
+    if (next === undefined) {
+      stopWatch("end");
+      status(`end of ${S.sid}: A accepts the run up to ${fmtTime(S.t)}`, "ok");
+      return;
+    }
+    prefetch(i + 1);
+    try {
+      await frameReady(next);
+    } catch (e) {
+      if (live()) {
+        stopWatch("error");
+        status(`watch stopped: ${e.message ?? e}`, "err");
+      }
+      return;
+    }
+    if (!live()) return;
+    $("status").textContent = `watching ${S.sid} @ ${fmtTime(S.t)} · Space stops`;
+    const wait = last + WATCH_MS - performance.now();
+    if (wait > 0) await sleep(wait);
+    if (!live()) return;
+    last = performance.now();
+    await goto(next, { watching: true, quiet: true });
+    if (S.t !== next && live()) {
+      stopWatch("error");
+      return;
+    }
+  }
+}
+
+// A: accept the machine track over the watched run. While playing (or when playback hit the end) the run ends at
+// the frame on screen; once the reviewer stopped (Space, a click, another key) the frame on screen is the failure,
+// so the run ends one grid step before it. Shift+A always includes the frame on screen.
+async function acceptRun(includeCurrent = false) {
+  if (!S.info || S.t === null) return;
+  if (S.saving || S.accepting) {
+    status("a save or accept is in flight: press A again once it is done", "err");
+    return;
+  }
+  if (!reviewer()) {
+    status("Enter your name in the reviewer box first", "err");
+    $("reviewer").focus();
+    return;
+  }
+  const playing = S.watch.on;
+  if (playing) stopWatch("accept");
+  const ts = S.info.times_ns;
+  const i = ts.indexOf(S.t);
+  const a = gridIndex(S.anchor);
+  const toCurrent = includeCurrent || playing || S.watch.how === "end";
+  const j = Math.min(toCurrent ? i : i - 1, gridIndex(S.watchedTo));
+  if (a < 0 || j < a) {
+    status(`nothing watched to accept${a === i ? " before this frame" : ""}: W watches from here (Shift+A includes this frame)`, "err");
+    return;
+  }
+  const body = { segment_id: S.sid, t0_ns: ts[a], t1_ns: ts[j], reviewer: reviewer() };
+  const sid = S.sid;
+  let res;
+  S.accepting = true;
+  try {
+    res = await postJSON("accept_range", body);
+  } catch (e) {
+    status(String(e.message ?? e), "err");
+    return;
+  } finally {
+    S.accepting = false;
+  }
+  if (S.sid !== sid) return;
+  for (let k = a; k <= j; k++) S.reviewed.add(ts[k]);
+  S.anchor = ts[j + 1] ?? null;
+  S.watchedTo = S.anchor === null ? null : ts[j];
+  renderWatch();
+  const fix = j < i ? ` · ${fmtTime(S.t)} is next: fix it, Enter saves, W resumes` : "";
+  status(`accepted ${fmtTime(body.t0_ns)} → ${fmtTime(body.t1_ns)} (${j - a + 1} frames): ${res.accepted} written, ${res.kept} kept${fix}`, "ok");
+  await refreshAfterAction();
+}
+
+function renderWatch() {
+  const el = $("watch");
+  if (!el) return;
+  const a = gridIndex(S.anchor);
+  const w = gridIndex(S.watchedTo);
+  const state = S.watch.on ? `<span class="chip play">watching</span>` : S.watch.how && S.watch.how !== "accept" ? `<span class="chip stop">stopped</span>` : "";
+  const run = a < 0 ? "no run" : w >= a ? `run ${fmtTime(S.anchor)} → ${fmtTime(S.watchedTo)} · ${w - a + 1} fr` : `next run starts ${fmtTime(S.anchor)}`;
+  el.innerHTML = `${state}<span class="mono">${run}</span>`;
+}
+
+async function loadEffort() {
+  if (!S.sid) return;
+  const sid = S.sid;
+  let eff = null;
+  try {
+    eff = await getJSON(`effort/${enc(sid)}`);
+  } catch {
+    // older backend without /api/effort: no chip
+  }
+  if (sid !== S.sid) return;
+  S.effort = eff;
+  renderEffort();
+}
+
+function renderEffort() {
+  const el = $("effort");
+  const e = S.effort;
+  el.hidden = !e;
+  if (!e) return;
+  const num = (x, d) => (typeof x === "number" ? x.toFixed(d) : "–");
+  const pct = typeof e.share_corrected === "number" ? `${(100 * e.share_corrected).toFixed(1)}%` : "–";
+  el.textContent = `${e.n_interventions} interventions · ${num(e.interventions_per_min, 2)}/min · ${pct} corrected`;
+  el.title = Object.entries(e).map(([k, x]) => `${k}: ${typeof x === "number" && !Number.isInteger(x) ? x.toFixed(3) : x}`).join("\n");
 }
 
 async function nextQueue() {
@@ -929,6 +1253,8 @@ function onKey(ev) {
     return;
   }
   const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+  // Any other key while watching stops playback first (the reviewer saw a failure); Shift alone does nothing.
+  if (S.watch.on && !["w", " ", "a", "Shift"].includes(k)) stopWatch("key");
   switch (k) {
     case "Escape":
       if (S.sel) {
@@ -951,7 +1277,13 @@ function onKey(ev) {
     case "Delete": case "Backspace":
       deleteSelected();
       break;
+    case "w":
+      startWatch();
+      break;
     case "a":
+      acceptRun(ev.shiftKey);
+      break;
+    case "f":
       acceptAll();
       break;
     case "x":
@@ -967,7 +1299,8 @@ function onKey(ev) {
       commit();
       break;
     case " ":
-      viewerTogglePlay();
+      if (S.watch.on) stopWatch("space");
+      else viewerTogglePlay();
       break;
     case "ArrowLeft":
       step(-1);
@@ -1008,6 +1341,8 @@ async function init() {
   });
   $("prev").addEventListener("click", () => step(-1));
   $("next").addEventListener("click", () => step(1));
+  $("b-watch").addEventListener("click", startWatch);
+  $("b-run").addEventListener("click", (e) => acceptRun(e.shiftKey));
   $("b-accept").addEventListener("click", acceptAll);
   $("b-save").addEventListener("click", save);
   $("b-next").addEventListener("click", nextQueue);

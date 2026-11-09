@@ -12,6 +12,15 @@ Layout per label (``video_time``, a duration timeline in ns), at ``paths.label_p
 
 The recording property ``hand_boxes:split`` says whether the segment is train or eval.
 
+The reviewer's action log (``schema.ActionEvent``) sits in the same file:
+
+- ``/labeler/actions``: one ``TextLog`` row per action (``"draw_box cam_02 right by astra"``) on ``video_time`` = the
+  action's grid time and on the ``wall_time`` timestamp timeline, with the event's fields as ``AnyValues``
+  (``wall_ns``, ``t_ns``, ``t1_ns``, ``cam``, ``side``, ``kind``, ``reviewer``, ``n_labels``); read back on ``wall_time``,
+  which is unique per action.
+- ``/labeler/interventions/cumulative``: ``Scalars``, the number of interventions at or before each ``video_time``.
+- Recording properties ``hand_boxes_effort``: the ``EffortSummary`` fields (undefined ratios left out).
+
 Autosave writes the same layout to a second file (``autosave_path``) that is never registered: rewriting
 a file the catalog has registered, in place, could hand the catalog bytes that disagree with its manifest.
 ``CatalogLayers.open_store`` recovers from the autosave file when it is newer than the committed layer.
@@ -19,6 +28,7 @@ a file the catalog has registered, in place, could hand the catalog bytes that d
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import tempfile
 import threading
@@ -30,12 +40,22 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Float32, Int64
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection, OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader, StoreEntry
-from serde import from_dict
+from serde import from_dict, to_dict
 
 from posekit.labeler.paths import class_id, label_path
-from posekit.labeler.schema import HAND_SIDES, LABEL_LAYER, FrameLabels, HandSide, SegmentSplit, ViewLabel
+from posekit.labeler.schema import (
+    HAND_SIDES,
+    LABEL_LAYER,
+    PASSIVE_ACTIONS,
+    ActionEvent,
+    EffortSummary,
+    FrameLabels,
+    HandSide,
+    SegmentSplit,
+    ViewLabel,
+)
 
 TIMELINE: str = "video_time"
 """Timeline the labels sit on (a duration timeline, ns)."""
@@ -43,6 +63,14 @@ LAYER_DIR: Path = Path("/mnt/nas/ssd-8tb/scratch/hand-labeler/layers") / LABEL_L
 """Where committed ``hand_boxes`` layer files go, one ``<segment>.rrd`` each."""
 N_CAMS: int = 6
 """Cameras on a RoboCap rig; the layer reader asks for these entity paths."""
+WALL_TIMELINE: str = "wall_time"
+"""Timestamp timeline of the action log (wall clock of each reviewer action)."""
+ACTIONS_ENTITY: str = "/labeler/actions"
+"""Entity of the action log."""
+CUMULATIVE_ENTITY: str = "/labeler/interventions/cumulative"
+"""Entity of the cumulative intervention count."""
+EFFORT_PROPERTY: str = "hand_boxes_effort"
+"""Recording property group of the effort summary."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +81,26 @@ class LabelRow:
     """``video_time``, ns."""
     label: ViewLabel
     """The decision."""
+
+
+@dataclass(frozen=True, slots=True)
+class LayerContents:
+    """Everything a ``hand_boxes`` layer holds for one segment."""
+
+    rows: list[LabelRow]
+    """Labels, sorted by (t_ns, cam, side)."""
+    actions: list[ActionEvent]
+    """Action log, sorted by wall time."""
+
+
+@dataclass(frozen=True, slots=True)
+class NewWrite:
+    """Outcome of ``LabelStore.put_new``."""
+
+    written: int
+    """Labels written where there was none."""
+    kept: int
+    """Views that already had a label, left untouched."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +129,8 @@ class LabelStore:
         self.application_id: str = application_id
         self._labels: dict[int, dict[tuple[int, HandSide], ViewLabel]] = {}
         """Labels by time, then by (cam, side)."""
+        self._actions: list[ActionEvent] = []
+        """Action log, in logging order (wall times strictly increasing)."""
         self._unsaved: int = 0
         self._lock = threading.Lock()
 
@@ -98,6 +148,43 @@ class LabelStore:
                 at_time[(label.cam, label.side)] = label
             self._unsaved += len(frame.labels)
         return len(frame.labels)
+
+    def put_new(self, labels: list[LabelRow]) -> NewWrite:
+        """Write each label only where its (t_ns, cam, side) has no label yet; one critical section, so a label posted meanwhile is never overwritten."""
+        written: int = 0
+        kept: int = 0
+        with self._lock:
+            for row in labels:
+                at_time: dict[tuple[int, HandSide], ViewLabel] = self._labels.setdefault(row.t_ns, {})
+                key: tuple[int, HandSide] = (row.label.cam, row.label.side)
+                if key in at_time:
+                    kept += 1
+                    continue
+                at_time[key] = row.label
+                written += 1
+            self._unsaved += written
+        return NewWrite(written, kept)
+
+    def log_actions(self, events: list[ActionEvent]) -> list[ActionEvent]:
+        """Append actions to the log; a wall time not after the previous one is moved 1 ns past it (so wall times are unique).
+
+        Returns:
+            The events as logged.
+        """
+        logged: list[ActionEvent] = []
+        with self._lock:
+            for event in events:
+                last: int = self._actions[-1].wall_ns if self._actions else -1
+                stored: ActionEvent = event if event.wall_ns > last else dataclasses.replace(event, wall_ns=last + 1)
+                self._actions.append(stored)
+                logged.append(stored)
+            self._unsaved += len(logged)
+        return logged
+
+    def actions(self) -> list[ActionEvent]:
+        """Snapshot of the action log, in logging order."""
+        with self._lock:
+            return list(self._actions)
 
     def put_range(self, t_ns: int, decisions: dict[tuple[int, HandSide], ViewLabel | None]) -> RangeWrite:
         """Apply a range fill's decisions at one time, atomically with respect to every other write.
@@ -157,8 +244,8 @@ class LabelStore:
         with self._lock:
             return self._unsaved
 
-    def save_layer(self, path: Path) -> int:
-        """Write the ``hand_boxes`` layer to ``path`` atomically (temp file + rename, mode 0644).
+    def save_layer(self, path: Path, effort: EffortSummary | None = None) -> int:
+        """Write the ``hand_boxes`` layer (labels, action log, effort properties) to ``path`` atomically (temp file + rename, mode 0644).
 
         Returns:
             Number of labels written.
@@ -166,12 +253,15 @@ class LabelStore:
         with self._lock:
             unsaved_before: int = self._unsaved
         rows: list[LabelRow] = self.rows()
+        actions: list[ActionEvent] = self.actions()
         path.parent.mkdir(parents=True, exist_ok=True)
         handle, temp_name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".rrd.tmp", dir=path.parent)
         os.close(handle)
         temp_path: Path = Path(temp_name)
         try:
-            write_layer_rrd(temp_path, rows, segment_id=self.segment_id, split=self.split, application_id=self.application_id)
+            write_layer_rrd(
+                temp_path, rows, segment_id=self.segment_id, split=self.split, application_id=self.application_id, actions=actions, effort=effort
+            )
             temp_path.chmod(0o644)
             os.replace(temp_path, path)
         finally:
@@ -180,21 +270,89 @@ class LabelStore:
             self._unsaved -= unsaved_before
         return len(rows)
 
-    def load_rows(self, rows: list[LabelRow]) -> None:
-        """Replace the store's contents with ``rows`` (used when rebuilding from a layer)."""
+    def load_rows(self, rows: list[LabelRow], actions: list[ActionEvent] | None = None) -> None:
+        """Replace the store's labels with ``rows`` and its action log with ``actions`` (used when rebuilding from a layer)."""
         with self._lock:
             self._labels = {}
             for row in rows:
                 self._labels.setdefault(row.t_ns, {})[(row.label.cam, row.label.side)] = row.label
+            self._actions = sorted(actions or [], key=lambda event: event.wall_ns)
             self._unsaved = 0
 
 
-def write_layer_rrd(path: Path, rows: list[LabelRow], *, segment_id: str, split: SegmentSplit, application_id: str) -> None:
-    """Write ``rows`` as a ``hand_boxes`` layer recording to exactly ``path`` (no atomicity here)."""
+def action_text(event: ActionEvent) -> str:
+    """One line for the ``TextLog`` of an action, e.g. ``draw_box cam_02 right by astra``."""
+    if event.kind == "accept_range":
+        return f"accept_range to {event.t1_ns} ns: {event.n_labels} labels by {event.reviewer}"
+    if event.cam is None or event.side is None:
+        return f"{event.kind}: {event.n_labels} labels by {event.reviewer}"
+    return f"{event.kind} cam_{event.cam:02d} {event.side} by {event.reviewer}"
+
+
+def write_actions(recording: rr.RecordingStream, actions: list[ActionEvent]) -> None:
+    """Log the action log and the cumulative intervention count into ``recording``; see the module docstring."""
+    if not actions:
+        return
+    ordered: list[ActionEvent] = sorted(actions, key=lambda event: event.wall_ns)
+    video_ns: Int64[ndarray, "n"] = np.array([event.t_ns for event in ordered], dtype=np.int64)
+    wall_ns: Int64[ndarray, "n"] = np.array([event.wall_ns for event in ordered], dtype=np.int64)
+    values: rr.ComponentColumnList = rr.AnyValues.columns(
+        wall_ns=wall_ns,
+        t_ns=video_ns,
+        t1_ns=pa.array([event.t1_ns for event in ordered], type=pa.int64()),
+        cam=pa.array([event.cam for event in ordered], type=pa.int64()),
+        side=pa.array([event.side for event in ordered], type=pa.string()),
+        kind=[event.kind for event in ordered],
+        reviewer=[event.reviewer for event in ordered],
+        n_labels=np.array([event.n_labels for event in ordered], dtype=np.int64),
+    )
+    texts: rr.ComponentColumnList = rr.TextLog.columns(text=[action_text(event) for event in ordered], level=["INFO"] * len(ordered))
+    rr.send_columns(
+        ACTIONS_ENTITY,
+        indexes=[
+            rr.TimeColumn(TIMELINE, duration=video_ns.astype("timedelta64[ns]")),
+            rr.TimeColumn(WALL_TIMELINE, timestamp=wall_ns.astype("datetime64[ns]")),
+        ],
+        columns=[*texts, *values],
+        recording=recording,
+    )
+    interventions: list[ActionEvent] = sorted(
+        (event for event in ordered if event.kind not in PASSIVE_ACTIONS), key=lambda event: (event.t_ns, event.wall_ns)
+    )
+    # Several interventions at one time: the count after the last of them.
+    cumulative: dict[int, int] = {event.t_ns: count for count, event in enumerate(interventions, start=1)}
+    if cumulative:
+        times_ns: Int64[ndarray, "m"] = np.array(list(cumulative), dtype=np.int64)
+        rr.send_columns(
+            CUMULATIVE_ENTITY,
+            indexes=[rr.TimeColumn(TIMELINE, duration=times_ns.astype("timedelta64[ns]"))],
+            columns=rr.Scalars.columns(scalars=np.array(list(cumulative.values()), dtype=np.float64)),
+            recording=recording,
+        )
+
+
+def write_layer_rrd(
+    path: Path,
+    rows: list[LabelRow],
+    *,
+    segment_id: str,
+    split: SegmentSplit,
+    application_id: str,
+    actions: list[ActionEvent] | None = None,
+    effort: EffortSummary | None = None,
+) -> None:
+    """Write ``rows`` (and the action log and effort summary) as a ``hand_boxes`` layer recording to exactly ``path`` (no atomicity here)."""
     # send_properties=False: a layer must not restate the base layer's RecordingInfo (name, start time).
     with rr.RecordingStream(application_id, recording_id=segment_id, send_properties=False) as recording:
         recording.save(path)
         recording.send_property(LABEL_LAYER, rr.AnyValues(split=split))
+        if effort is not None:
+            properties: rr.AnyValues = rr.AnyValues()
+            for name, value in to_dict(effort).items():
+                if value is not None:  # an undefined ratio (nothing covered or measured yet) is left out
+                    properties = properties.with_component_from_data(name, value)
+            recording.send_property(EFFORT_PROPERTY, properties)
+        write_actions(recording, actions or [])
         by_entity: dict[tuple[int, HandSide], list[LabelRow]] = {}
         for row in rows:
             by_entity.setdefault((row.label.cam, row.label.side), []).append(row)
@@ -278,6 +436,22 @@ def rows_from_table(table: pa.Table, n_cams: int = N_CAMS) -> list[LabelRow]:
     return sorted(rows, key=lambda row: (row.t_ns, row.label.cam, row.label.side))
 
 
+def actions_from_table(table: pa.Table) -> list[ActionEvent]:
+    """Decode a catalog reader table (index ``wall_time``) of the action entity into events, sorted by wall time."""
+    events: list[ActionEvent] = []
+    kind_name: str = f"{ACTIONS_ENTITY}:kind"
+    if table.num_rows == 0 or kind_name not in table.column_names:
+        return events
+    names: list[str] = ["wall_ns", "t_ns", "t1_ns", "cam", "side", "kind", "reviewer", "n_labels"]
+    columns: dict[str, list[list[object] | None]] = {name: table.column(f"{ACTIONS_ENTITY}:{name}").to_pylist() for name in names}
+    for index in range(table.num_rows):
+        if not columns["kind"][index]:
+            continue
+        fields: dict[str, object] = {"segment_id": "", **{name: (columns[name][index] or [None])[0] for name in names}}
+        events.append(from_dict(ActionEvent, fields))
+    return sorted(events, key=lambda event: event.wall_ns)
+
+
 def load_layer(dataset: DatasetEntry, segment_id: str, *, n_cams: int = N_CAMS) -> list[LabelRow]:
     """Read the registered ``hand_boxes`` labels of one segment from the catalog (one round trip)."""
     entities: list[str] = label_entities(n_cams)
@@ -285,17 +459,36 @@ def load_layer(dataset: DatasetEntry, segment_id: str, *, n_cams: int = N_CAMS) 
     return rows_from_table(table, n_cams)
 
 
-def load_layer_file(path: Path, *, n_cams: int = N_CAMS) -> list[LabelRow]:
-    """Read labels from an unregistered layer file through a private in-process catalog server.
+def load_actions(dataset: DatasetEntry, segment_id: str) -> list[ActionEvent]:
+    """Read the registered action log of one segment (empty when the dataset has no ``wall_time`` timeline)."""
+    view: DatasetSelection = dataset.filter_segments(segment_id)
+    if WALL_TIMELINE not in [column.name for column in view.schema().index_columns()]:
+        return []
+    table: pa.Table = view.filter_contents([ACTIONS_ENTITY]).reader(index=WALL_TIMELINE).to_arrow_table()
+    return [dataclasses.replace(event, segment_id=segment_id) for event in actions_from_table(table)]
 
-    The same decoder as ``load_layer`` runs on it, so the file and the catalog cannot disagree on layout.
+
+def load_layer_contents(dataset: DatasetEntry, segment_id: str, *, n_cams: int = N_CAMS) -> LayerContents:
+    """Labels and action log of one segment from the catalog."""
+    return LayerContents(load_layer(dataset, segment_id, n_cams=n_cams), load_actions(dataset, segment_id))
+
+
+def load_layer_file_contents(path: Path, *, n_cams: int = N_CAMS) -> LayerContents:
+    """Read labels and actions from an unregistered layer file through a private in-process catalog server.
+
+    The same decoders as ``load_layer_contents`` run on it, so the file and the catalog cannot disagree on layout.
     """
     store_entry: StoreEntry = RrdReader(path).recordings()[0]
     with rr.server.Server(host="127.0.0.1", port=0) as server:
         client: CatalogClient = server.client()
         dataset: DatasetEntry = client.create_dataset("hand_boxes_file")
         dataset.register([path.resolve().as_uri()], layer_name=LABEL_LAYER).wait()
-        return load_layer(dataset, store_entry.recording_id, n_cams=n_cams)
+        return load_layer_contents(dataset, store_entry.recording_id, n_cams=n_cams)
+
+
+def load_layer_file(path: Path, *, n_cams: int = N_CAMS) -> list[LabelRow]:
+    """Labels of an unregistered layer file (see ``load_layer_file_contents``)."""
+    return load_layer_file_contents(path, n_cams=n_cams).rows
 
 
 def base_application_id(dataset: DatasetEntry, segment_id: str) -> str:
@@ -346,9 +539,10 @@ class CatalogLayers:
         committed: Path = self.layer_path(segment_id)
         if autosave.exists() and (not committed.exists() or autosave.stat().st_mtime > committed.stat().st_mtime):
             print(f"[labeler] {segment_id}: recovering labels from autosave {autosave}")
-            store.load_rows(load_layer_file(autosave))
+            contents: LayerContents = load_layer_file_contents(autosave)
         else:
-            store.load_rows(load_layer(self.dataset, segment_id))
+            contents = load_layer_contents(self.dataset, segment_id)
+        store.load_rows(contents.rows, contents.actions)
         return store
 
     def register(self, path: Path) -> None:

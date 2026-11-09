@@ -5,6 +5,11 @@ spec, and generated JPEG frames (two skin-coloured "hands" per camera that drift
 corrections can be checked by eye). Every POST body is decoded with the real pyserde schema; a body that does
 not decode gets a 400 and is logged. Valid bodies are appended to ``--post-log`` (JSON lines).
 
+The v2 MEgATrack loop (SPEC-v2-megatrack-loop.md) is here too: ``/api/track`` runs a small machine tracker over
+the canned EgoHand proposals and the stored labels (reviewed > chained > held > detected > none),
+``/api/accept_range`` writes the machine boxes as ``tracker`` labels, ``/api/labels`` logs one ActionEvent per
+label that differs from the machine track, and ``/api/actions`` + ``/api/effort`` report them.
+
 Run: ``python tests/labeler_fake_backend.py --port 9911``
 """
 
@@ -14,6 +19,7 @@ import argparse
 import json
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,8 +35,13 @@ from serde.json import from_json, to_json
 
 from posekit.labeler.schema import (
     HAND_SIDES,
+    AcceptRange,
+    AcceptResult,
+    ActionEvent,
+    ActionKind,
     Box,
     CameraInfo,
+    EffortSummary,
     FrameLabels,
     FrameState,
     HandSide,
@@ -40,6 +51,8 @@ from posekit.labeler.schema import (
     RangeResult,
     SegmentInfo,
     SegmentSummary,
+    TrackBox,
+    TrackFrame,
     ViewLabel,
     ViewState,
 )
@@ -82,6 +95,7 @@ class FakeState:
     segments: dict[str, FakeSegment]
     labels: dict[tuple[str, int], dict[tuple[int, HandSide], ViewLabel]] = field(default_factory=dict)
     range_queued: dict[str, set[int]] = field(default_factory=dict)
+    actions: list[ActionEvent] = field(default_factory=list)
     post_log: Path | None = None
 
 
@@ -101,8 +115,12 @@ def proposals_for(cam: int, t_ns: int) -> list[Proposal]:
     for side in HAND_SIDES:
         if cam == 5 or (cam == 4 and side == "left"):
             continue
+        if cam == 0 and k % 11 == 5:
+            continue  # a one-step dropout: the machine track holds the previous box
         b: Box = true_hand(cam, side, t_ns)
         off: float = 25.0 * math.sin(k + cam)
+        if cam == 3 and side == "right" and k % 13 == 0:
+            b = Box(x0=b.x0 - 520.0, y0=b.y0, x1=b.x1 - 520.0, y1=b.y1)  # a false detection far off: the chain breaks there
         egohand_side: HandSide = side
         if cam == 1 and k % 7 == 0:
             egohand_side = "right" if side == "left" else "left"  # a side flip to correct
@@ -212,6 +230,170 @@ def range_fill(state: FakeState, req: RangeRequest) -> RangeResult:
     return RangeResult(filled=filled, queued=queued)
 
 
+def iou(a: Box, b: Box) -> float:
+    ix: float = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
+    iy: float = max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
+    inter: float = ix * iy
+    union: float = (a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def track_side(state: FakeState, seg: FakeSegment, cam: int, side: HandSide) -> dict[int, TrackBox]:
+    """The spec's propagation rule for one (cam, side) over the whole segment."""
+    out: dict[int, TrackBox] = {}
+    prev: Box | None = None
+    held: bool = False
+    for t in seg.times_ns:
+        label: ViewLabel | None = state.labels.get((seg.segment_id, t), {}).get((cam, side))
+        if label is not None:
+            out[t] = TrackBox(cam=cam, side=side, box=label.box, origin="reviewed", score=None)
+            if label.status != "rejected":
+                prev, held = label.box, False
+            continue
+        props: list[Proposal] = [p for p in proposals_for(cam, t) if p.model == "egohand"]
+        if prev is not None:
+            chain_from: Box = prev
+            best: Proposal | None = max((p for p in props if iou(p.box, chain_from) >= 0.3), key=lambda p: iou(p.box, chain_from), default=None)
+            if best is not None:
+                out[t] = TrackBox(cam=cam, side=side, box=best.box, origin="chained", score=best.score)
+                prev, held = best.box, False
+                continue
+            if not held:
+                out[t] = TrackBox(cam=cam, side=side, box=prev, origin="held", score=None)
+                held = True
+                continue
+            prev, held = None, False
+        det: Proposal | None = max((p for p in props if p.side == side and p.score >= 0.5), key=lambda p: p.score, default=None)
+        if det is not None:
+            out[t] = TrackBox(cam=cam, side=side, box=det.box, origin="detected", score=det.score)
+            prev = det.box
+        else:
+            out[t] = TrackBox(cam=cam, side=side, box=None, origin="none", score=None)
+    return out
+
+
+def track(state: FakeState, seg: FakeSegment) -> list[TrackFrame]:
+    sides: list[dict[int, TrackBox]] = [track_side(state, seg, cam, side) for cam in range(len(CAM_NAMES)) for side in HAND_SIDES]
+    return [TrackFrame(t_ns=t, boxes=[s[t] for s in sides]) for t in seg.times_ns]
+
+
+def accept_range(state: FakeState, req: AcceptRange) -> AcceptResult:
+    seg: FakeSegment = state.segments[req.segment_id]
+    accepted: int = 0
+    kept: int = 0
+    for frame in track(state, seg):
+        if not (req.t0_ns <= frame.t_ns <= req.t1_ns):
+            continue
+        bucket: dict[tuple[int, HandSide], ViewLabel] = state.labels.setdefault((seg.segment_id, frame.t_ns), {})
+        for tb in frame.boxes:
+            if (tb.cam, tb.side) in bucket:
+                kept += 1
+                continue
+            bucket[(tb.cam, tb.side)] = ViewLabel(
+                cam=tb.cam, side=tb.side, status="accepted" if tb.box else "no_hand", box=tb.box, source="tracker", reviewer=req.reviewer
+            )
+            accepted += 1
+    state.actions.append(
+        ActionEvent(
+            wall_ns=time.time_ns(),
+            segment_id=req.segment_id,
+            t_ns=req.t0_ns,
+            t1_ns=req.t1_ns,
+            cam=None,
+            side=None,
+            kind="accept_range",
+            reviewer=req.reviewer,
+            n_labels=accepted,
+        )
+    )
+    return AcceptResult(accepted=accepted, kept=kept)
+
+
+def classify(machine: TrackBox, label: ViewLabel, props: list[Proposal]) -> ActionKind | None:
+    """The action a posted label stands for, against the machine box before the post (None = unchanged)."""
+    if label.status == "rejected":
+        return "reject"
+    if label.box is None:
+        return "no_hand" if machine.box is not None else None
+    if machine.box is None or iou(machine.box, label.box) < 0.5:
+        near: bool = any(
+            max(abs(p.box.x0 - label.box.x0), abs(p.box.y0 - label.box.y0), abs(p.box.x1 - label.box.x1), abs(p.box.y1 - label.box.y1)) <= 1.0
+            for p in props
+        )
+        return "pick_proposal" if near else "draw_box"
+    if machine.box == label.box:
+        return None
+    return "move_box"
+
+
+def log_label_actions(state: FakeState, fl: FrameLabels) -> None:
+    """Classify a post against the machine track before it is stored (the spec's set_side needs the other side's track)."""
+    seg: FakeSegment = state.segments[fl.segment_id]
+    frame: TrackFrame = next(f for f in track(state, seg) if f.t_ns == fl.t_ns)
+    machine: dict[tuple[int, HandSide], TrackBox] = {(b.cam, b.side): b for b in frame.boxes}
+    wall: int = time.time_ns()
+    events: list[ActionEvent] = []
+    for label in fl.labels:
+        kind: ActionKind | None = classify(machine[(label.cam, label.side)], label, proposals_for(label.cam, fl.t_ns))
+        other: TrackBox = machine[(label.cam, "right" if label.side == "left" else "left")]
+        if kind in ("draw_box", "move_box") and label.box is not None and other.box is not None and iou(other.box, label.box) >= 0.9:
+            kind = "set_side"
+        if kind is not None:
+            events.append(
+                ActionEvent(
+                    wall_ns=wall,
+                    segment_id=fl.segment_id,
+                    t_ns=fl.t_ns,
+                    t1_ns=None,
+                    cam=label.cam,
+                    side=label.side,
+                    kind=kind,
+                    reviewer=label.reviewer,
+                    n_labels=1,
+                )
+            )
+    if not events and fl.labels:
+        events.append(
+            ActionEvent(
+                wall_ns=wall,
+                segment_id=fl.segment_id,
+                t_ns=fl.t_ns,
+                t1_ns=None,
+                cam=None,
+                side=None,
+                kind="accept_frame",
+                reviewer=fl.labels[0].reviewer,
+                n_labels=len(fl.labels),
+            )
+        )
+    state.actions.extend(events)
+
+
+def effort(state: FakeState, seg: FakeSegment) -> EffortSummary:
+    acts: list[ActionEvent] = [a for a in state.actions if a.segment_id == seg.segment_id]
+    interventions: list[ActionEvent] = [a for a in acts if a.kind not in ("accept_range", "accept_frame")]
+    frames: int = sum(1 for (sid, _), v in state.labels.items() if sid == seg.segment_id and v)
+    video_s: float = frames * STEP_NS / 1e9
+    frames_corrected: int = len({a.t_ns for a in interventions})
+    by_watching: int = sum(
+        1 for (sid, _), v in state.labels.items() if sid == seg.segment_id for lb in v.values() if lb.source == "tracker" and lb.box is not None
+    )
+    wall_s: float = (max(a.wall_ns for a in acts) - min(a.wall_ns for a in acts)) / 1e9 if acts else 0.0
+    n_boxes: int = sum(len(v) for (sid, _), v in state.labels.items() if sid == seg.segment_id)
+    return EffortSummary(
+        video_s=video_s,
+        n_actions=len(acts),
+        n_interventions=len(interventions),
+        interventions_per_min=len(interventions) / (video_s / 60.0) if video_s > 0.0 else None,
+        frames=frames,
+        frames_corrected=frames_corrected,
+        share_corrected=frames_corrected / frames if frames else None,
+        boxes_accepted_by_watching=by_watching,
+        reviewer_wall_s=wall_s,
+        boxes_per_reviewer_s=n_boxes / wall_s if wall_s > 0.0 else None,
+    )
+
+
 def make_handler(state: FakeState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
@@ -275,6 +457,18 @@ def make_handler(state: FakeState) -> type[BaseHTTPRequestHandler]:
                 flags: list[str] = next((q.reasons for q in queue(state, state.segments[sid], 1000) if q.t_ns == t), [])
                 self.send_json(to_json(FrameState(segment_id=sid, t_ns=t, views=views, flags=flags)))
                 return
+            if m := re.fullmatch(r"/api/track/([\w-]+)", path):
+                seg = state.segments[m[1]]
+                t0: int = int(query.get("t0", [str(seg.start_ns)])[0])
+                n_frames: int = int(query.get("n", ["10"])[0])
+                self.send_json(to_json([f for f in track(state, seg) if f.t_ns >= t0][:n_frames]))
+                return
+            if m := re.fullmatch(r"/api/actions/([\w-]+)", path):
+                self.send_json(to_json([a for a in state.actions if a.segment_id == m[1]]))
+                return
+            if m := re.fullmatch(r"/api/effort/([\w-]+)", path):
+                self.send_json(to_json(effort(state, state.segments[m[1]])))
+                return
             if path == "/api/queue":
                 sid = query["sid"][0]
                 self.send_json(to_json(queue(state, state.segments[sid], int(query.get("limit", ["50"])[0]))))
@@ -287,11 +481,17 @@ def make_handler(state: FakeState) -> type[BaseHTTPRequestHandler]:
             try:
                 if path == "/api/labels":
                     fl: FrameLabels = from_json(FrameLabels, body)
+                    log_label_actions(state, fl)
                     bucket = state.labels.setdefault((fl.segment_id, fl.t_ns), {})
                     for label in fl.labels:
                         bucket[(label.cam, label.side)] = label
                     self.log_post(path, body)
                     self.send_json(json.dumps({"stored": len(fl.labels)}))
+                    return
+                if path == "/api/accept_range":
+                    ar: AcceptRange = from_json(AcceptRange, body)
+                    self.log_post(path, body)
+                    self.send_json(to_json(accept_range(state, ar)))
                     return
                 if path == "/api/range":
                     req: RangeRequest = from_json(RangeRequest, body)

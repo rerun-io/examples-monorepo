@@ -23,7 +23,9 @@
     <button id="next" class="btn" title="Next 5 fps frame (Right)">&rarr;</button></span>
   <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Time on the 5 fps grid">
   <span class="spacer"></span>
-  <button id="b-accept" class="btn go" title="Accept all as shown"><kbd>A</kbd> accept</button>
+  <button id="b-watch" class="btn" title="Watch: play the 5 fps grid with the machine boxes (Space stops)"><kbd>W</kbd> watch</button>
+  <button id="b-run" class="btn go" title="Accept the watched run (stopped: up to the frame before this one; Shift: including it)"><kbd>A</kbd> accept</button>
+  <button id="b-accept" class="btn" title="Accept this frame set as shown (Enter saves)"><kbd>F</kbd> frame</button>
   <button id="b-save" class="btn go" title="Save the frame set"><kbd>Enter</kbd> save</button>
   <button id="b-next" class="btn" title="Next queue item"><kbd>N</kbd> next</button>
   <button id="b-range" class="btn" title="Range fill to the previous reviewed keyframe"><kbd>R</kbd> range</button>
@@ -38,7 +40,7 @@
   </aside>
 
   <section class="center">
-    <div id="flags" class="flags"></div>
+    <div class="infobar"><span id="watch" class="watch"></span><span id="effort" class="chip effort" hidden></span><div id="flags" class="flags"></div></div>
     <div id="cams" class="cams grid"></div>
     <table id="states" class="states" aria-label="Decision per camera and side"></table>
     <div id="status" class="status" role="status"></div>
@@ -60,22 +62,28 @@
       <tr><td><kbd>click</kbd></td><td>focus a camera (<kbd>Esc</kbd> or the same number key returns to the grid)</td></tr>
       <tr><td><kbd>1</kbd>&ndash;<kbd>6</kbd></td><td>focus cam_00 &ndash; cam_05</td></tr>
       <tr><td><kbd>drag</kbd></td><td>on the focused camera: empty area draws a box, inside moves, corners/edges resize</td></tr>
+      <tr><td><kbd>W</kbd></td><td>watch: play the 5 fps grid from here at 5 frames/s with the machine boxes; <kbd>W</kbd> or <kbd>Space</kbd> stops (any other key or a click stops too)</td></tr>
+      <tr><td><kbd>A</kbd></td><td>accept the watched run (from the last accept, or where you started, to here): the machine boxes become labels.
+        Still playing or at the end: up to this frame. Stopped: up to the frame <em>before</em> this one; fix this frame, <kbd>Enter</kbd>, then <kbd>W</kbd> again</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>A</kbd></td><td>accept the watched run including this frame</td></tr>
       <tr><td><kbd>L</kbd> / <kbd>R</kbd>*</td><td>set the side of the selected box (*R with no box selected = range fill)</td></tr>
       <tr><td><kbd>Del</kbd></td><td>remove the selected box (that side becomes no_hand)</td></tr>
-      <tr><td><kbd>A</kbd></td><td>accept the whole frame set as shown (sides without a box = no_hand)</td></tr>
+      <tr><td><kbd>F</kbd></td><td>accept the whole frame set as shown (sides without a box = no_hand); was <kbd>A</kbd> before the watch loop</td></tr>
       <tr><td><kbd>X</kbd></td><td>reject the focused camera (cannot be judged); again to undo</td></tr>
-      <tr><td><kbd>Enter</kbd></td><td>save the frame set</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>save the frame set (the machine track is recomputed from it)</td></tr>
       <tr><td><kbd>N</kbd></td><td>next queue item</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>R</kbd></td><td>range fill from the previous reviewed keyframe to this one</td></tr>
       <tr><td><kbd>C</kbd></td><td>commit the segment to the <code>hand_boxes</code> layer</td></tr>
       <tr><td><kbd>&larr;</kbd> / <kbd>&rarr;</kbd></td><td>previous / next 5 fps frame</td></tr>
-      <tr><td><kbd>Space</kbd></td><td>play / pause the embedded viewer</td></tr>
+      <tr><td><kbd>Space</kbd></td><td>while watching: stop; otherwise play / pause the embedded viewer</td></tr>
       <tr><td><kbd>?</kbd></td><td>this help</td></tr>
     </table>
     <p class="legend">
-      <span class="sw left"></span>left proposal <span class="sw right"></span>right proposal
-      (solid = EgoHand, dashed = hands layer) <span class="sw label"></span>label / edited box
+      <span class="sw left"></span>left <span class="sw right"></span>right machine box
+      (<code>T chained</code>/<code>T detected</code>, dashed = <code>T held</code>)
+      <span class="sw label"></span>label / edited box (thick + <code>*</code> = stored)
     </p>
+    <p class="legend">thin outlines = proposals (solid = EgoHand, dashed = hands layer); click one on the focused camera to use it</p>
     <p class="muted small">Boxes are stored in native pixels. Frames on screen are downscaled JPEGs.</p>
   </div>
 </div>

@@ -14,6 +14,20 @@ API (all JSON bodies are the pyserde records of ``posekit.labeler.schema`` and `
 - ``GET  /api/queue?sid=<sid>&limit=50`` -> ``list[QueueItem]``
 - ``POST /api/commit/<sid>`` -> ``{"path": ..., "n_labels": n}`` (writes and registers ``hand_boxes``)
 
+MEgATrack loop (``posekit.labeler.tracker``, ``posekit.labeler.actions``):
+
+- ``GET  /api/track/<sid>?t0=<t_ns>&n=<count>`` -> ``list[TrackFrame]``, ``count`` grid times from ``t0`` (default: the
+  first grid time, 10)
+- ``POST /api/accept_range`` body ``AcceptRange`` -> ``AcceptResult``: the machine box of every (t, cam, side) in
+  [t0, t1] without a label becomes a ``tracker`` label (``accepted``, or ``no_hand`` where the machine has none)
+- ``GET  /api/playback/<sid>/<t0_ns>.jpg?n=10`` -> filmstrip, ``n`` rows x 6 cameras with the machine boxes;
+  ``.json`` -> ``PlaybackInfo``
+- ``GET  /api/actions/<sid>`` -> ``list[ActionEvent]``; ``GET /api/effort/<sid>`` -> ``EffortSummary``
+
+``POST /api/labels`` also logs one ``ActionEvent`` per posted label that differs from the machine track (see
+``posekit.labeler.actions``). Every label write is serialised per segment and forgets the cached machine track from
+its time on. A playback request decodes its cells on six threads (one per camera) and then schedules the next window.
+
 Bad input answers 400 with ``{"error": message}``; an unknown segment, camera or file answers 404.
 
 Segments open lazily (frames + labels from the catalog) on first use. Decoded frames sit in a small cache;
@@ -27,6 +41,7 @@ from __future__ import annotations
 import mimetypes
 import re
 import threading
+import time
 import traceback
 from _thread import LockType
 from collections import OrderedDict
@@ -46,9 +61,14 @@ from numpy import ndarray
 from serde import SerdeError, serde
 from serde.json import from_json, to_json
 
+from posekit.labeler.actions import classify_labels, effort_summary
 from posekit.labeler.queue import ProposalProvider, ReviewQueue
 from posekit.labeler.schema import (
+    AcceptRange,
+    AcceptResult,
+    ActionEvent,
     CameraInfo,
+    EffortSummary,
     FrameLabels,
     FrameState,
     Proposal,
@@ -58,11 +78,13 @@ from posekit.labeler.schema import (
     SegmentInfo,
     SegmentSplit,
     SegmentSummary,
+    TrackFrame,
     ViewLabel,
     ViewState,
 )
-from posekit.labeler.sheet import SheetInfo, contact_sheet, encode_jpeg, sheet_info
-from posekit.labeler.store import LabelStore
+from posekit.labeler.sheet import PlaybackCell, PlaybackInfo, SheetInfo, contact_sheet, encode_jpeg, filmstrip, playback_info, sheet_info, strip_cell
+from posekit.labeler.store import LabelRow, LabelStore, NewWrite
+from posekit.labeler.tracker import TrackCache
 
 
 @runtime_checkable
@@ -170,14 +192,24 @@ class Segment:
     """Labels."""
     queue: ReviewQueue
     """Review queue and range fill."""
+    tracker: TrackCache
+    """Machine track."""
+    period_ns: int
+    """Grid period, ns."""
     save_lock: LockType
     """Serialises autosave and commit writes."""
+    label_lock: LockType
+    """Serialises label writes (each write and the track invalidation after it are one step)."""
     autosave_pending: bool = False
     """An autosave is scheduled and has not run yet."""
 
 
 FrameKey: TypeAlias = tuple[str, int, int]
 """(segment id, cam, t_ns)."""
+CellKey: TypeAlias = tuple[int, int]
+"""(cam, t_ns) of one filmstrip cell."""
+MAX_PLAYBACK_ROWS: int = 50
+"""Most rows one filmstrip may have."""
 
 
 class LabelApp:
@@ -198,6 +230,7 @@ class LabelApp:
         autosave_every: int = 50,
         cached_frames: int = 72,
         prefetch_items: int = 2,
+        cached_cells: int = 720,
     ) -> None:
         """Bind the labeler to its providers.
 
@@ -214,6 +247,7 @@ class LabelApp:
             autosave_every: New labels between autosaves.
             cached_frames: Decoded frames kept in memory.
             prefetch_items: Queue items whose frames are decoded ahead after a queue request.
+            cached_cells: Downscaled filmstrip cells kept in memory (six windows of ten rows by default).
         """
         self.segment_ids: list[str] = segment_ids
         self.open_frames: Callable[[str], FrameProvider] = open_frames
@@ -232,6 +266,11 @@ class LabelApp:
         self._frames_lock = threading.Lock()
         self._prefetcher: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="labeler-prefetch")
         self._writer: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="labeler-autosave")
+        self.cached_cells: int = cached_cells
+        self._cells: OrderedDict[FrameKey, Future[UInt8[ndarray, "ch cw 3"]]] = OrderedDict()
+        self._cells_lock = threading.Lock()
+        self._cell_decoder: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="labeler-cells")
+        self._warmer: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="labeler-track")
         self._closing: bool = False
         self._writes_in_flight: int = 0
         self._writes_changed = threading.Condition()
@@ -244,6 +283,8 @@ class LabelApp:
             self._closing = True
             self._writes_changed.wait_for(lambda: self._writes_in_flight == 0)
         self._prefetcher.shutdown(wait=False, cancel_futures=True)
+        self._cell_decoder.shutdown(wait=False, cancel_futures=True)
+        self._warmer.shutdown(wait=False, cancel_futures=True)
         dirty: list[Segment] = [segment for segment in list(self._segments.values()) if segment.store.unsaved]
         print(f"[labeler] shutting down: saving {len(dirty)} segment(s) with unsaved labels")
         saves: list[Future[None]] = [self._writer.submit(self._autosave, segment) for segment in dirty]
@@ -299,10 +340,26 @@ class LabelApp:
                 store=store,
                 proposals=self.proposals,
             )
-            opened = Segment(info, frames, store, queue, threading.Lock())
+            cams: list[int] = [camera.cam for camera in info.cams]
+            tracker: TrackCache = TrackCache(segment_id, times_ns=info.times_ns, cams=cams, proposals=self.proposals, store=store)
+            period_ns: int = int(np.median(np.diff(info.times_ns))) if len(info.times_ns) > 1 else 200_000_000
+            opened = Segment(info, frames, store, queue, tracker, period_ns, threading.Lock(), threading.Lock())
             self._segments[segment_id] = opened
-            print(f"[labeler] opened {segment_id}: {len(info.times_ns)} grid times, {len(store)} stored labels")
+            if info.times_ns:
+                self._warmer.submit(self._warm_track, opened)
+            print(f"[labeler] opened {segment_id}: {len(info.times_ns)} grid times, {len(store)} stored labels, {len(store.actions())} actions")
             return opened
+
+    def _warm_track(self, segment: Segment) -> None:
+        """Compute the whole machine track once in the background, so the first track requests are cache hits."""
+        try:
+            started: float = time.perf_counter()
+            segment.tracker.frames(segment.info.times_ns[0], len(segment.info.times_ns))
+            print(f"[labeler] machine track of {segment.info.segment_id}: {time.perf_counter() - started:.2f} s")
+        except BeartypeException:
+            raise
+        except Exception as error:  # the request that needs the track recomputes it and reports the error
+            print(f"[labeler] warming the track of {segment.info.segment_id} failed: {error!r}")
 
     def summaries(self) -> list[SegmentSummary]:
         """One row per segment (opens every segment)."""
@@ -313,7 +370,12 @@ class LabelApp:
             duration_s: float = (times[-1] - times[0]) / 1e9 if times else 0.0
             rows.append(
                 SegmentSummary(
-                    segment_id, segment.info.split, duration_s, len(segment.info.keyframes_ns), segment.queue.n_reviewed_keyframes(), len(segment.store)
+                    segment_id,
+                    segment.info.split,
+                    duration_s,
+                    len(segment.info.keyframes_ns),
+                    segment.queue.n_reviewed_keyframes(),
+                    len(segment.store),
                 )
             )
         return rows
@@ -393,10 +455,10 @@ class LabelApp:
         return FrameState(segment_id, t_ns, views, segment.queue.flags(t_ns))
 
     def sheet_info(self, segment_id: str, t_ns: int) -> SheetInfo:
-        """Layout and numbering of the contact sheet (no decoding)."""
+        """Layout and numbering of the contact sheet and the machine track at ``t_ns`` (no decoding)."""
         segment: Segment = self.segment(segment_id)
         self._grid_time(segment, t_ns)
-        return sheet_info(segment_id, t_ns, segment.info.cams, self.proposals.proposals(segment_id, t_ns))
+        return sheet_info(segment_id, t_ns, segment.info.cams, self.proposals.proposals(segment_id, t_ns), segment.tracker.frame(t_ns).boxes)
 
     def sheet_jpeg(self, segment_id: str, t_ns: int) -> bytes:
         """The rendered contact sheet."""
@@ -404,7 +466,13 @@ class LabelApp:
         self._grid_time(segment, t_ns)
         images: list[UInt8[ndarray, "h w 3"]] = [self._frame_or_black(segment_id, camera, t_ns) for camera in segment.info.cams]
         return contact_sheet(
-            segment_id, t_ns, segment.info.cams, images, self.proposals.proposals(segment_id, t_ns), segment.store.get(t_ns)
+            segment_id,
+            t_ns,
+            segment.info.cams,
+            images,
+            self.proposals.proposals(segment_id, t_ns),
+            segment.store.get(t_ns),
+            segment.tracker.frame(t_ns).boxes,
         ).jpeg
 
     def _frame_or_black(self, segment_id: str, camera: CameraInfo, t_ns: int) -> UInt8[ndarray, "h w 3"]:
@@ -420,15 +488,134 @@ class LabelApp:
     # -- labels ---------------------------------------------------------------------------------------------
 
     def put_labels(self, frame: FrameLabels) -> int:
-        """Store a reviewer's decisions; schedules an autosave every ``autosave_every`` new labels."""
+        """Store a reviewer's decisions and log what they changed against the machine track; autosaves every ``autosave_every`` writes."""
         segment: Segment = self.segment(frame.segment_id)
         self._grid_time(segment, frame.t_ns)
         for label in frame.labels:
             self._camera(segment, label.cam)
-        with self._write():
+        with self._write(), segment.label_lock:
+            machine: TrackFrame = segment.tracker.frame(frame.t_ns)
+            events: list[ActionEvent] = classify_labels(
+                frame, machine, self.proposals.proposals(frame.segment_id, frame.t_ns), segment.store.get(frame.t_ns), time.time_ns()
+            )
             stored: int = segment.store.put(frame)
+            segment.tracker.invalidate_from(frame.t_ns)
+            segment.store.log_actions(events)
             self._maybe_autosave(segment)
         return stored
+
+    def accept_range(self, request: AcceptRange) -> AcceptResult:
+        """Accept the machine track of every grid time in [t0_ns, t1_ns]: labels where there are none, reviewer labels kept."""
+        segment: Segment = self.segment(request.segment_id)
+        first: int = segment.tracker.index(request.t0_ns)
+        last: int = segment.tracker.index(request.t1_ns)
+        if last < first:
+            raise ValueError("t0_ns must not be after t1_ns")
+        with self._write(), segment.label_lock:
+            frames: list[TrackFrame] = segment.tracker.frames(request.t0_ns, last - first + 1)
+            rows: list[LabelRow] = [
+                LabelRow(frame.t_ns, ViewLabel(box.cam, box.side, "no_hand" if box.box is None else "accepted", box.box, "tracker", request.reviewer))
+                for frame in frames
+                for box in frame.boxes
+                if box.origin != "reviewed"
+            ]
+            reviewed: int = sum(1 for frame in frames for box in frame.boxes if box.origin == "reviewed")
+            written: NewWrite = segment.store.put_new(rows)
+            segment.tracker.invalidate_from(request.t0_ns)
+            segment.store.log_actions(
+                [
+                    ActionEvent(
+                        time.time_ns(),
+                        request.segment_id,
+                        request.t0_ns,
+                        request.t1_ns,
+                        None,
+                        None,
+                        "accept_range",
+                        request.reviewer,
+                        written.written,
+                    )
+                ]
+            )
+            self._maybe_autosave(segment)
+        return AcceptResult(written.written, written.kept + reviewed)
+
+    def track(self, segment_id: str, t0_ns: int | None, n: int) -> list[TrackFrame]:
+        """The machine track of ``n`` grid times from ``t0_ns`` (the first grid time when None)."""
+        segment: Segment = self.segment(segment_id)
+        if not segment.info.times_ns:
+            return []
+        return segment.tracker.frames(segment.info.times_ns[0] if t0_ns is None else t0_ns, n)
+
+    def actions(self, segment_id: str) -> list[ActionEvent]:
+        """The segment's action log, in logging order."""
+        return self.segment(segment_id).store.actions()
+
+    def effort(self, segment_id: str) -> EffortSummary:
+        """Effort summary of the segment."""
+        segment: Segment = self.segment(segment_id)
+        return effort_summary(segment.store.actions(), segment.store.rows(), segment.period_ns)
+
+    # -- playback -------------------------------------------------------------------------------------------
+
+    def _playback_layout(self, segment: Segment, t0_ns: int, n: int) -> PlaybackInfo:
+        if not 1 <= n <= MAX_PLAYBACK_ROWS:
+            raise ValueError(f"n must be in [1, {MAX_PLAYBACK_ROWS}]")
+        start: int = segment.tracker.index(t0_ns)
+        return playback_info(segment.info.segment_id, segment.info.cams, segment.info.times_ns[start : start + n])
+
+    def playback_info(self, segment_id: str, t0_ns: int, n: int) -> PlaybackInfo:
+        """Layout of the filmstrip of ``n`` grid times from ``t0_ns`` (no decoding)."""
+        return self._playback_layout(self.segment(segment_id), t0_ns, n)
+
+    def playback_jpeg(self, segment_id: str, t0_ns: int, n: int) -> bytes:
+        """The filmstrip with the machine boxes; the next window's cells are decoded in the background."""
+        segment: Segment = self.segment(segment_id)
+        info: PlaybackInfo = self._playback_layout(segment, t0_ns, n)
+        cells: dict[CellKey, Future[UInt8[ndarray, "ch cw 3"]]] = self._strip_cells(segment, info)
+        after: int = segment.tracker.index(info.rows[-1].t_ns) + 1
+        if after < len(segment.info.times_ns):
+            self._strip_cells(segment, self._playback_layout(segment, segment.info.times_ns[after], n))
+        track: list[TrackFrame] = segment.tracker.frames(t0_ns, len(info.rows))
+        images: list[list[UInt8[ndarray, "ch cw 3"]]] = [[cells[(cell.cam, row.t_ns)].result() for cell in info.cells] for row in info.rows]
+        return filmstrip(info, images, track, segment.info.times_ns[0])
+
+    def _strip_cells(self, segment: Segment, info: PlaybackInfo) -> dict[CellKey, Future[UInt8[ndarray, "ch cw 3"]]]:
+        """Futures of every cell of a filmstrip; missing cells are decoded on the cell pool, one task per camera in time order."""
+        futures: dict[CellKey, Future[UInt8[ndarray, "ch cw 3"]]] = {}
+        todo: dict[int, list[int]] = {}
+        with self._cells_lock:
+            for cell in info.cells:
+                for row in info.rows:
+                    key: FrameKey = (info.segment_id, cell.cam, row.t_ns)
+                    future: Future[UInt8[ndarray, "ch cw 3"]] | None = self._cells.get(key)
+                    if future is None:
+                        future = Future()
+                        self._cells[key] = future
+                        todo.setdefault(cell.cam, []).append(row.t_ns)
+                    else:
+                        self._cells.move_to_end(key)
+                    futures[(cell.cam, row.t_ns)] = future
+            while len(self._cells) > self.cached_cells:
+                self._cells.popitem(last=False)
+        for cell in info.cells:
+            if cell.cam in todo:
+                self._cell_decoder.submit(self._decode_cells, segment, cell, {t_ns: futures[(cell.cam, t_ns)] for t_ns in todo[cell.cam]})
+        return futures
+
+    def _decode_cells(self, segment: Segment, cell: PlaybackCell, futures: dict[int, Future[UInt8[ndarray, "ch cw 3"]]]) -> None:
+        """Decode one camera's cells in time order; a camera without a frame at a time gets a black cell."""
+        for t_ns, future in futures.items():
+            try:
+                image: UInt8[ndarray, "ch cw 3"] = strip_cell(segment.frames.frame(cell.cam, t_ns), cell)
+            except KeyError:
+                image = np.zeros((cell.h, cell.w, 3), dtype=np.uint8)
+            except BaseException as error:  # handed to the request that waits on this cell (BeartypeException included)
+                with self._cells_lock:
+                    self._cells.pop((segment.info.segment_id, cell.cam, t_ns), None)
+                future.set_exception(error)
+                continue
+            future.set_result(image)
 
     def _maybe_autosave(self, segment: Segment) -> None:
         with segment.save_lock:
@@ -443,14 +630,15 @@ class LabelApp:
             if segment.store.unsaved == 0:  # a commit saved everything since this autosave was scheduled
                 return
             path: Path = self.layers.autosave_path(segment.info.segment_id)
-            count: int = segment.store.save_layer(path)
+            count: int = segment.store.save_layer(path, self.effort(segment.info.segment_id))
         print(f"[labeler] autosaved {count} labels of {segment.info.segment_id} to {path}")
 
     def fill_range(self, request: RangeRequest) -> RangeResult:
         """Range fill between two reviewed keyframes."""
         segment: Segment = self.segment(request.segment_id)
-        with self._write():
+        with self._write(), segment.label_lock:
             result: RangeResult = segment.queue.fill_range(request)
+            segment.tracker.invalidate_from(request.t0_ns)
             self._maybe_autosave(segment)
         return result
 
@@ -467,7 +655,7 @@ class LabelApp:
         segment: Segment = self.segment(segment_id)
         with self._write(), segment.save_lock:
             path: Path = self.layers.layer_path(segment_id)
-            count: int = segment.store.save_layer(path)
+            count: int = segment.store.save_layer(path, self.effort(segment_id))
             self.layers.register(path)
             self.layers.autosave_path(segment_id).unlink(missing_ok=True)
         print(f"[labeler] committed {count} labels of {segment_id} to {path}")
@@ -479,6 +667,10 @@ ROUTE_FRAMESET: re.Pattern[str] = re.compile(r"^/api/frameset/([^/]+)/(-?\d+)$")
 ROUTE_SHEET: re.Pattern[str] = re.compile(r"^/api/sheet/([^/]+)/(-?\d+)\.(jpg|json)$")
 ROUTE_SEGMENT: re.Pattern[str] = re.compile(r"^/api/segment/([^/]+)$")
 ROUTE_COMMIT: re.Pattern[str] = re.compile(r"^/api/commit/([^/]+)$")
+ROUTE_TRACK: re.Pattern[str] = re.compile(r"^/api/track/([^/]+)$")
+ROUTE_PLAYBACK: re.Pattern[str] = re.compile(r"^/api/playback/([^/]+)/(-?\d+)\.(jpg|json)$")
+ROUTE_ACTIONS: re.Pattern[str] = re.compile(r"^/api/actions/([^/]+)$")
+ROUTE_EFFORT: re.Pattern[str] = re.compile(r"^/api/effort/([^/]+)$")
 MAX_BODY: int = 4 * 1024 * 1024
 """Largest accepted request body, bytes."""
 
@@ -566,6 +758,19 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
                     self._json(app.sheet_info(match.group(1), int(match.group(2))))
                 else:
                     self._send(200, app.sheet_jpeg(match.group(1), int(match.group(2))), "image/jpeg")
+            elif match := ROUTE_TRACK.match(path):
+                t0_ns: int | None = int(query["t0"][0]) if "t0" in query else None
+                self._json(app.track(match.group(1), t0_ns, int(query.get("n", ["10"])[0])))
+            elif match := ROUTE_PLAYBACK.match(path):
+                rows: int = int(query.get("n", ["10"])[0])
+                if match.group(3) == "json":
+                    self._json(app.playback_info(match.group(1), int(match.group(2)), rows))
+                else:
+                    self._send(200, app.playback_jpeg(match.group(1), int(match.group(2)), rows), "image/jpeg")
+            elif match := ROUTE_ACTIONS.match(path):
+                self._json(app.actions(match.group(1)))
+            elif match := ROUTE_EFFORT.match(path):
+                self._json(app.effort(match.group(1)))
             else:
                 raise NotFoundError(f"no route GET {path}")
 
@@ -576,6 +781,8 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
                 self._json(StoredResponse(app.put_labels(from_json(FrameLabels, body))))
             elif path == "/api/range":
                 self._json(app.fill_range(from_json(RangeRequest, body)))
+            elif path == "/api/accept_range":
+                self._json(app.accept_range(from_json(AcceptRange, body)))
             elif match := ROUTE_COMMIT.match(path):
                 self._json(app.commit(match.group(1)))
             else:

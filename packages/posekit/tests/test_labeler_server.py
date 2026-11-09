@@ -21,8 +21,12 @@ from serde.json import from_json, to_json
 
 from posekit.labeler.queue import ProposalProvider
 from posekit.labeler.schema import (
+    AcceptRange,
+    AcceptResult,
+    ActionEvent,
     Box,
     CameraInfo,
+    EffortSummary,
     FrameLabels,
     FrameState,
     Proposal,
@@ -32,11 +36,12 @@ from posekit.labeler.schema import (
     SegmentInfo,
     SegmentSplit,
     SegmentSummary,
+    TrackFrame,
     ViewLabel,
 )
 from posekit.labeler.server import FrameProvider, LabelApp, make_server
-from posekit.labeler.sheet import SheetInfo
-from posekit.labeler.store import LabelStore, load_layer_file
+from posekit.labeler.sheet import SIDE_RGB, PlaybackInfo, SheetInfo
+from posekit.labeler.store import LabelStore, LayerContents, load_layer_file, load_layer_file_contents
 
 SEGMENTS: list[str] = ["seg_a", "seg_b"]
 STEP: int = 200_000_000
@@ -132,7 +137,9 @@ def decode_jpeg(jpeg: bytes) -> UInt8[ndarray, "h w 3"]:
 
 def fetch(url: str, body: str | None = None) -> tuple[int, str, bytes]:
     """(status, content type, body) of a GET, or of a POST when ``body`` is given."""
-    request: urllib.request.Request = urllib.request.Request(url, data=None if body is None else body.encode(), method="GET" if body is None else "POST")
+    request: urllib.request.Request = urllib.request.Request(
+        url, data=None if body is None else body.encode(), method="GET" if body is None else "POST"
+    )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.status, response.headers["Content-Type"], response.read()
@@ -216,7 +223,9 @@ def test_labels_queue_range_commit(running: Running) -> None:
         ]
         status, _, body = fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", t_ns, labels)))
         assert (status, json.loads(body)) == (200, {"stored": 12})
-    result: RangeResult = from_json(RangeResult, fetch(running.url + "/api/range", to_json(RangeRequest("seg_a", keyframes[0], keyframes[1], "tester")))[2])
+    result: RangeResult = from_json(
+        RangeResult, fetch(running.url + "/api/range", to_json(RangeRequest("seg_a", keyframes[0], keyframes[1], "tester")))[2]
+    )
     assert result == RangeResult(filled=4 * 12, queued=[])
     remaining: list[QueueItem] = from_json(list[QueueItem], get_json(running.url + "/api/queue?sid=seg_a"))
     assert [item.t_ns for item in remaining] == [1_000 + 10 * STEP]
@@ -239,10 +248,10 @@ def test_labels_queue_range_commit(running: Running) -> None:
 
 
 def test_close_saves_labels_below_the_autosave_threshold(running: Running) -> None:
-    labels: list[ViewLabel] = [ViewLabel(0, side, "no_hand", None, "person", "tester") for side in ("left", "right")]
+    labels: list[ViewLabel] = [ViewLabel(1, "left", "no_hand", None, "person", "tester")]
     assert fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", 1_000, labels)))[0] == 200
     store: LabelStore = running.app.segment("seg_a").store
-    assert store.unsaved == 2  # below autosave_every=3: no autosave yet
+    assert store.unsaved == 2  # one label + its accept_frame action, below autosave_every=3: no autosave yet
     running.app.close()
     assert running.layers.autosave_path("seg_a").exists()
     assert store.unsaved == 0
@@ -261,6 +270,19 @@ def test_committed_file_reads_back(running: Running) -> None:
     assert [(row.t_ns, row.label) for row in rows] == [(1_000, labels[0])]
 
 
+@pytest.mark.integration
+def test_committed_file_holds_the_action_log(running: Running) -> None:
+    accept: AcceptRange = AcceptRange("seg_a", 1_000, 1_000 + 2 * STEP, "tester")
+    assert fetch(running.url + "/api/accept_range", to_json(accept))[0] == 200
+    moved: list[ViewLabel] = [ViewLabel(0, "left", "corrected", Box(15.0, 10.0, 65.0, 60.0), "agent", "tester")]
+    assert fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", 1_000 + STEP, moved)))[0] == 200
+    assert fetch(running.url + "/api/commit/seg_a", "")[0] == 200
+    contents: LayerContents = load_layer_file_contents(running.layers.layer_path("seg_a"))
+    assert contents.actions == running.app.actions("seg_a")
+    assert [event.kind for event in contents.actions] == ["accept_range", "move_box"]
+    assert len(contents.rows) == 36
+
+
 @pytest.mark.parametrize(
     ("path", "body", "message"),
     [
@@ -268,12 +290,24 @@ def test_committed_file_reads_back(running: Running) -> None:
         ("/api/labels", json.dumps({"segment_id": "seg_a", "t_ns": 1000, "labels": [], "extra": 1}), "extra"),
         (
             "/api/labels",
-            json.dumps({"segment_id": "seg_a", "t_ns": 1000, "labels": [{"cam": 0, "side": "left", "status": "accepted", "box": None, "source": "person", "reviewer": "x"}]}),
+            json.dumps(
+                {
+                    "segment_id": "seg_a",
+                    "t_ns": 1000,
+                    "labels": [{"cam": 0, "side": "left", "status": "accepted", "box": None, "source": "person", "reviewer": "x"}],
+                }
+            ),
             "needs a box",
         ),
         (
             "/api/labels",
-            json.dumps({"segment_id": "seg_a", "t_ns": 1000, "labels": [{"cam": 0, "side": "up", "status": "no_hand", "box": None, "source": "person", "reviewer": "x"}]}),
+            json.dumps(
+                {
+                    "segment_id": "seg_a",
+                    "t_ns": 1000,
+                    "labels": [{"cam": 0, "side": "up", "status": "no_hand", "box": None, "source": "person", "reviewer": "x"}],
+                }
+            ),
             "",
         ),
         ("/api/labels", json.dumps({"segment_id": "seg_a", "t_ns": 3, "labels": []}), "grid"),
@@ -290,3 +324,94 @@ def test_bad_queue_requests(running: Running) -> None:
     assert fetch(running.url + "/api/queue")[0] == 400
     assert fetch(running.url + "/api/queue?sid=seg_a&limit=0")[0] == 400
     assert fetch(running.url + "/api/queue?sid=nope")[0] == 404
+
+
+def track_box(frames: list[TrackFrame], index: int, cam: int, side: str) -> tuple[str, Box | None]:
+    found = [box for box in frames[index].boxes if (box.cam, box.side) == (cam, side)]
+    assert len(found) == 1
+    return found[0].origin, found[0].box
+
+
+def test_track_accept_range_actions_and_effort(running: Running) -> None:
+    frames: list[TrackFrame] = from_json(list[TrackFrame], get_json(running.url + "/api/track/seg_a?t0=1000&n=3"))
+    assert [frame.t_ns for frame in frames] == [1_000, 1_000 + STEP, 1_000 + 2 * STEP]
+    assert [(box.cam, box.side) for box in frames[0].boxes] == [(cam, side) for cam in range(6) for side in ("left", "right")]
+    assert track_box(frames, 0, 0, "left") == ("detected", Box(10.0, 10.0, 60.0, 60.0))
+    assert track_box(frames, 1, 0, "left")[0] == "chained"
+    assert track_box(frames, 0, 3, "right") == ("none", None)  # score 0.4
+    assert len(from_json(list[TrackFrame], get_json(running.url + "/api/track/seg_a"))) == 10
+
+    accept: AcceptRange = AcceptRange("seg_a", 1_000, 1_000 + 2 * STEP, "tester")
+    assert from_json(AcceptResult, fetch(running.url + "/api/accept_range", to_json(accept))[2]) == AcceptResult(accepted=36, kept=0)
+    store: LabelStore = running.app.segment("seg_a").store
+    assert store.get_view(1_000 + STEP, 0, "left") == ViewLabel(0, "left", "accepted", Box(10.0, 10.0, 60.0, 60.0), "tracker", "tester")
+    assert store.get_view(1_000 + STEP, 3, "right") == ViewLabel(3, "right", "no_hand", None, "tracker", "tester")
+
+    moved: ViewLabel = ViewLabel(0, "left", "corrected", Box(15.0, 10.0, 65.0, 60.0), "agent", "tester")
+    assert fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", 1_000 + STEP, [moved])))[0] == 200
+    drawn: ViewLabel = ViewLabel(1, "left", "corrected", Box(100.0, 50.0, 150.0, 100.0), "agent", "tester")
+    assert fetch(running.url + "/api/labels", to_json(FrameLabels("seg_a", 1_000 + 3 * STEP, [drawn])))[0] == 200
+    # The machine now starts from the fix; a second accept keeps every label (the agent's included).
+    after: list[TrackFrame] = from_json(list[TrackFrame], get_json(running.url + f"/api/track/seg_a?t0={1_000 + 3 * STEP}&n=2"))
+    assert track_box(after, 0, 1, "left") == ("reviewed", drawn.box)
+    assert track_box(after, 1, 1, "left") == ("held", drawn.box)
+    assert from_json(AcceptResult, fetch(running.url + "/api/accept_range", to_json(accept))[2]) == AcceptResult(accepted=0, kept=36)
+    assert store.get_view(1_000 + STEP, 0, "left") == moved
+
+    actions: list[ActionEvent] = from_json(list[ActionEvent], get_json(running.url + "/api/actions/seg_a"))
+    assert [(event.kind, event.t_ns, event.cam, event.n_labels) for event in actions] == [
+        ("accept_range", 1_000, None, 36),
+        ("move_box", 1_000 + STEP, 0, 1),
+        ("draw_box", 1_000 + 3 * STEP, 1, 1),
+        ("accept_range", 1_000, None, 0),
+    ]
+    assert actions[0].t1_ns == 1_000 + 2 * STEP
+    assert [event.wall_ns for event in actions] == sorted({event.wall_ns for event in actions})
+    effort: EffortSummary = from_json(EffortSummary, get_json(running.url + "/api/effort/seg_a"))
+    assert (effort.frames, effort.n_actions, effort.n_interventions, effort.frames_corrected) == (4, 4, 2, 2)
+    assert effort.video_s == pytest.approx(0.8)
+    assert effort.interventions_per_min == pytest.approx(150.0)
+    assert effort.boxes_accepted_by_watching == 2
+    assert effort.share_corrected == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"segment_id": "seg_a", "t0_ns": 1_000 + STEP, "t1_ns": 1_000, "reviewer": "x"}),
+        json.dumps({"segment_id": "seg_a", "t0_ns": 1_000, "t1_ns": 7, "reviewer": "x"}),
+        json.dumps({"segment_id": "seg_a", "t0_ns": 1_000, "t1_ns": 1_000}),
+    ],
+)
+def test_bad_accept_range_is_400(running: Running, body: str) -> None:
+    assert fetch(running.url + "/api/accept_range", body)[0] == 400
+
+
+def test_playback_filmstrip(running: Running) -> None:
+    info: PlaybackInfo = from_json(PlaybackInfo, get_json(running.url + "/api/playback/seg_a/1000.json?n=3"))
+    assert [(row.r, row.t_ns) for row in info.rows] == [(0, 1_000), (1, 1_000 + STEP), (2, 1_000 + 2 * STEP)]
+    assert [(cell.cam, cell.name, cell.w, cell.h) for cell in info.cells] == [(cam, f"name{cam}", 320, 180) for cam in range(6)]
+    status, content_type, body = fetch(running.url + "/api/playback/seg_a/1000.jpg?n=3")
+    assert (status, content_type) == (200, "image/jpeg")
+    rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(decode_jpeg(body), cv2.COLOR_BGR2RGB)
+    assert rgb.shape == (info.height, info.width, 3)
+    # cam 0's machine left box (native x0=10 -> 10 * 320/192 px into the cell) is blue in row 1.
+    cell = info.cells[0]
+    pixel: UInt8[ndarray, "3"] = rgb[info.rows[1].y + round(35 * cell.scale), cell.x + round(10 * cell.scale)]
+    assert np.abs(pixel.astype(np.int64) - np.array(SIDE_RGB["left"])).max() < 70
+    # The next window is decoded in the background.
+    deadline: float = time.monotonic() + 30.0
+    while (5, 1_000 + 5 * STEP) not in running.frames["seg_a"].decoded and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert (5, 1_000 + 5 * STEP) in running.frames["seg_a"].decoded
+    tail: PlaybackInfo = from_json(PlaybackInfo, get_json(running.url + f"/api/playback/seg_a/{1_000 + 9 * STEP}.json"))
+    assert len(tail.rows) == 2
+    assert fetch(running.url + "/api/playback/seg_a/1000.jpg?n=0")[0] == 400
+    assert fetch(running.url + "/api/playback/seg_a/7.jpg")[0] == 400
+    assert fetch(running.url + "/api/playback/zzz/1000.jpg")[0] == 404
+
+
+def test_sheet_json_carries_the_machine_track(running: Running) -> None:
+    info: SheetInfo = from_json(SheetInfo, get_json(running.url + "/api/sheet/seg_a/1000.json"))
+    assert [(box.cam, box.side, box.origin) for box in info.track if box.box is not None] == [(0, "left", "detected")]
+    assert fetch(running.url + "/api/sheet/seg_a/1000.jpg")[0] == 200

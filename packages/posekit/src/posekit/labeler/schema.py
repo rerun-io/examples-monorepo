@@ -25,7 +25,7 @@ LabelStatus: TypeAlias = Literal["accepted", "corrected", "no_hand", "rejected"]
 - ``rejected``: this camera/time cannot be judged (blur, exposure, decode error); excluded from training and eval.
 """
 
-LabelSource: TypeAlias = Literal["egohand", "hands_layer", "person", "agent", "range"]
+LabelSource: TypeAlias = Literal["egohand", "hands_layer", "person", "agent", "range", "tracker"]
 """Where the box geometry came from.
 
 - ``egohand``: the posekit EgoHand proposal, accepted unchanged.
@@ -33,7 +33,16 @@ LabelSource: TypeAlias = Literal["egohand", "hands_layer", "person", "agent", "r
 - ``person``: drawn or edited by a person.
 - ``agent``: drawn or edited by a labeling agent (for example Astra).
 - ``range``: filled between two reviewed keyframes from consistent proposals (MEgATrack "accept the tracked run").
+- ``tracker``: the machine track's box (or its "no hand"), accepted by a reviewer who watched it (``/api/accept_range``).
 """
+
+TrackOrigin: TypeAlias = Literal["reviewed", "chained", "held", "detected", "none"]
+"""Why the machine track has (or has no) box at one (time, cam, side); see ``posekit.labeler.tracker``."""
+
+ActionKind: TypeAlias = Literal["accept_range", "draw_box", "pick_proposal", "set_side", "move_box", "no_hand", "reject", "accept_frame"]
+"""One reviewer action of the MEgATrack loop; every kind except ``accept_range``/``accept_frame`` is an intervention."""
+PASSIVE_ACTIONS: frozenset[ActionKind] = frozenset({"accept_range", "accept_frame"})
+"""Action kinds that are not interventions (the reviewer only confirmed the machine)."""
 
 SegmentSplit: TypeAlias = Literal["train", "eval"]
 """Held-out eval segments are never trained on."""
@@ -241,3 +250,109 @@ class SegmentSummary:
     """Keyframes with a decision for every (cam, side)."""
     n_labels: int
     """Stored (time, cam, side) labels, range fills included."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class TrackBox:
+    """The machine track of one (cam, side) at one time."""
+
+    cam: int
+    """Camera index."""
+    side: HandSide
+    """Hand side of the track."""
+    box: Box | None
+    """Box in native px; None when the machine says there is no hand (or the reviewer said no hand / rejected)."""
+    origin: TrackOrigin
+    """Where the box comes from."""
+    score: float | None
+    """EgoHand score of the proposal for ``chained``/``detected``; None otherwise."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class TrackFrame:
+    """The machine track of every (cam, side) at one grid time."""
+
+    t_ns: int
+    """``video_time``, ns."""
+    boxes: list[TrackBox]
+    """One per cam x side, rig order, left then right."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class AcceptRange:
+    """Accept the machine track of every grid time in [t0_ns, t1_ns] (a reviewer watched it and saw no failure)."""
+
+    segment_id: str
+    """Catalog segment id."""
+    t0_ns: int
+    """First grid time, inclusive."""
+    t1_ns: int
+    """Last grid time, inclusive."""
+    reviewer: str
+    """Who watched."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class AcceptResult:
+    """Outcome of ``/api/accept_range``."""
+
+    accepted: int
+    """(time, cam, side) labels written from the machine track (source ``tracker``)."""
+    kept: int
+    """(time, cam, side) that already had a label, left untouched."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class ActionEvent:
+    """One logged reviewer action, with its wall-clock time (effort is measured from these)."""
+
+    wall_ns: int
+    """Wall-clock time of the action, ns since the Unix epoch (unique and increasing within a segment)."""
+    segment_id: str
+    """Catalog segment id."""
+    t_ns: int
+    """Grid time the action applies to (the first time of an ``accept_range``), ns."""
+    t1_ns: int | None
+    """Last grid time of an ``accept_range``; None for every other kind."""
+    cam: int | None
+    """Camera of a per-view action; None for ``accept_range``/``accept_frame``."""
+    side: HandSide | None
+    """Hand side of a per-view action; None for ``accept_range``/``accept_frame``."""
+    kind: ActionKind
+    """What the reviewer did."""
+    reviewer: str
+    """Who did it."""
+    n_labels: int
+    """Labels the action wrote."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class EffortSummary:
+    """Reviewer effort of one segment, MEgATrack style (``GET /api/effort/<sid>``); see ``posekit.labeler.actions``."""
+
+    video_s: float
+    """Video covered by labels: grid times with at least one label x the grid period, s."""
+    n_actions: int
+    """Logged actions."""
+    n_interventions: int
+    """Actions other than ``accept_range``/``accept_frame``."""
+    interventions_per_min: float | None
+    """Interventions per minute of ``video_s``; None when no video is covered."""
+    frames: int
+    """Grid times with at least one label."""
+    frames_corrected: int
+    """Grid times with at least one intervention."""
+    share_corrected: float | None
+    """``frames_corrected / frames``; None when ``frames`` is 0."""
+    boxes_accepted_by_watching: int
+    """Stored labels with a box and source ``tracker``."""
+    reviewer_wall_s: float
+    """Wall-clock time between consecutive actions, each gap capped at ``actions.IDLE_CAP_S``, s."""
+    boxes_per_reviewer_s: float | None
+    """Stored labels with a box per ``reviewer_wall_s``; None when no wall time was measured."""

@@ -8,12 +8,23 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
+import rerun as rr
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader, StoreEntry
 
 from posekit.labeler.paths import label_path
-from posekit.labeler.schema import Box, FrameLabels, ViewLabel
-from posekit.labeler.store import LabelRow, LabelStore, base_application_id, load_layer, load_layer_file, rows_from_table
+from posekit.labeler.schema import ActionEvent, Box, EffortSummary, FrameLabels, ViewLabel
+from posekit.labeler.store import (
+    LabelRow,
+    LabelStore,
+    LayerContents,
+    NewWrite,
+    base_application_id,
+    load_layer,
+    load_layer_file,
+    load_layer_file_contents,
+    rows_from_table,
+)
 
 SEGMENT: str = "robocap__test__s00000001"
 
@@ -86,6 +97,34 @@ def test_save_layer_writes_atomic_rrd(tmp_path: Path) -> None:
     assert store.unsaved == 0
 
 
+def test_put_new_keeps_existing_labels() -> None:
+    store: LabelStore = sample_store()
+    rows: list[LabelRow] = [
+        LabelRow(1_000_000_000, ViewLabel(0, "left", "accepted", Box(0.0, 0.0, 5.0, 5.0), "tracker", "astra")),
+        LabelRow(1_000_000_000, ViewLabel(0, "right", "no_hand", None, "tracker", "astra")),
+    ]
+    assert store.put_new(rows) == NewWrite(written=1, kept=1)
+    assert store.get_view(1_000_000_000, 0, "left") == ViewLabel(0, "left", "accepted", Box(10.0, 20.0, 110.0, 220.5), "egohand", "pablo")
+    assert store.get_view(1_000_000_000, 0, "right") == rows[1].label
+    assert store.unsaved == 5
+
+
+def sample_actions() -> list[ActionEvent]:
+    return [
+        ActionEvent(5_000, SEGMENT, 1_000_000_000, 1_400_000_000, None, None, "accept_range", "astra", 22),
+        ActionEvent(5_000, SEGMENT, 1_200_000_000, None, 3, "right", "draw_box", "astra", 1),
+        ActionEvent(4_000, SEGMENT, 1_000_000_000, None, 0, "left", "no_hand", "astra", 1),
+    ]
+
+
+def test_log_actions_makes_wall_times_unique_and_increasing() -> None:
+    store: LabelStore = LabelStore(SEGMENT, split="train", application_id="dataforge")
+    logged: list[ActionEvent] = store.log_actions(sample_actions())
+    assert [event.wall_ns for event in logged] == [5_000, 5_001, 5_002]
+    assert store.actions() == logged
+    assert store.unsaved == 3
+
+
 def test_rows_from_table_decodes_reader_rows() -> None:
     entity: str = label_path(2, "right")
     other: str = label_path(0, "left")
@@ -135,6 +174,31 @@ def test_layer_file_round_trip(tmp_path: Path) -> None:
     target: Path = tmp_path / f"{SEGMENT}.rrd"
     store.save_layer(target)
     assert load_layer_file(target) == store.rows()
+
+
+@pytest.mark.integration
+def test_layer_file_round_trip_with_actions_and_effort(tmp_path: Path) -> None:
+    store: LabelStore = sample_store()
+    logged: list[ActionEvent] = store.log_actions(sample_actions())
+    effort: EffortSummary = EffortSummary(0.6, 3, 2, 200.0, 3, 2, 0.667, 0, 2.0, None)
+    target: Path = tmp_path / f"{SEGMENT}.rrd"
+    store.save_layer(target, effort)
+    contents: LayerContents = load_layer_file_contents(target)
+    assert contents == LayerContents(store.rows(), logged)
+    restored: LabelStore = LabelStore(SEGMENT, split="eval", application_id="dataforge")
+    restored.load_rows(contents.rows, contents.actions)
+    assert restored.actions() == logged
+    # The text log, the cumulative interventions and the effort properties are in the recording too.
+    with rr.server.Server(host="127.0.0.1", port=0) as server:
+        dataset: DatasetEntry = server.client().create_dataset("effort")
+        dataset.register([target.resolve().as_uri()], layer_name="hand_boxes").wait()
+        texts: pa.Table = dataset.filter_contents(["/labeler/actions"]).reader(index="video_time").to_arrow_table()
+        assert "draw_box cam_03 right by astra" in str(texts.column("/labeler/actions:TextLog:text").to_pylist())
+        cumulative: pa.Table = dataset.filter_contents(["/labeler/interventions/cumulative"]).reader(index="video_time").to_arrow_table()
+        assert cumulative.column("/labeler/interventions/cumulative:Scalars:scalars").to_pylist() == [[1.0], [2.0]]
+        properties: pa.Table = dataset.segment_table().to_arrow_table()
+        assert properties.column("property:hand_boxes_effort:n_interventions").to_pylist() == [[2]]
+        assert "property:hand_boxes_effort:boxes_per_reviewer_s" not in properties.column_names
 
 
 REAL_CATALOG: str = "rerun+http://127.0.0.1:9897"
