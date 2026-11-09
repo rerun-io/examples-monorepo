@@ -84,12 +84,13 @@ def write_pose_layer(recording: rr.RecordingStream, episode: Episode) -> None:
 
 def write_hand_mesh_layer(recording: rr.RecordingStream, episode: Episode) -> None:
     """The ``hand_mesh`` layer: GSI's skinned MANO meshes, moved to the world frame, on the frames GSI marks usable."""
+    posed: Bool[ndarray, "f"] = episode.posed
     for side_index, side in enumerate(SIDES):
         path: str = schema.hand_mesh_path(side)
         meshes.log_mesh_static(recording, path, albedo_factor=hands.HAND_ALBEDO[side])
         for start in range(0, len(episode.frames), MESH_BATCH):
             batch: slice = slice(start, start + MESH_BATCH)
-            trusted: Bool[ndarray, "n"] = episode.usable[batch, side_index] & episode.posed[batch]
+            trusted: Bool[ndarray, "n"] = episode.usable[batch, side_index] & posed[batch]
             world_vertices: Float32[ndarray, "n 778 3"] = to_world(episode.world_T_rig[batch], episode.rig_vertices[batch, side_index])
             meshes.log_mesh_batch(
                 recording, path, times_ns=episode.times_ns[batch], frame_indices=episode.frames[batch],

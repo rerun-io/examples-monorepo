@@ -200,15 +200,19 @@ def fetch_signed(url: str, dest: Path, *, label: str, expected: transports.FileI
 
     Raises:
         transports.IntegrityError: The bytes differ from ``expected``; ``dest`` is untouched.
-        RuntimeError: The link answered an error (an expired link answers 403).
+        RuntimeError: The link answered an error (an expired link answers 403) or the connection failed; the message
+            names ``label`` only, because a ``requests`` error quotes the signed link.
     """
     with writing.atomic_write(dest) as temp_path:
-        with requests.get(url, stream=True, timeout=TIMEOUT_S) as response:
-            if not response.ok:
-                raise RuntimeError(f"{label}: the signed link answered HTTP {response.status_code}")
-            with temp_path.open("wb") as sink:
-                for block in response.iter_content(chunk_size=transports.CHUNK_BYTES):
-                    sink.write(block)
+        try:
+            with requests.get(url, stream=True, timeout=TIMEOUT_S) as response:
+                if not response.ok:
+                    raise RuntimeError(f"{label}: the signed link answered HTTP {response.status_code}")
+                with temp_path.open("wb") as sink:
+                    for block in response.iter_content(chunk_size=transports.CHUNK_BYTES):
+                        sink.write(block)
+        except requests.RequestException as error:
+            raise RuntimeError(f"{label}: {type(error).__name__} while fetching the signed link") from None
         if expected is not None:
             transports.verify_file(temp_path, expected)
 

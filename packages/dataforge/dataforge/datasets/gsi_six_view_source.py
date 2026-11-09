@@ -231,9 +231,16 @@ def read_episode(hands_rrd: Path, slam_rrd: Path) -> Episode:
         ValueError: The SLAM poses of ``/hand`` and ``/slam/rig`` differ, so GSI's hands would not sit in its rig frame;
             or a view's calibration differs from what the layout assumes.
     """
-    store: rrc.ChunkStore = rrc.RrdReader(hands_rrd).stream().filter(content=["/hand/**", "/camera/**", "/meta/**", "/__properties/episode"]).collect()
+    store: rrc.ChunkStore = (
+        rrc.RrdReader(hands_rrd)
+        .stream()
+        .filter(content=["/hand/**", "/camera/**", "/meta/**", "/__properties/episode"])
+        .drop(components=["VideoStream:sample", "VideoStream:codec", "Mesh3D:vertex_normals"])
+        .collect()
+    )
     slam: rrc.ChunkStore = rrc.RrdReader(slam_rrd).stream().filter(content=["/slam/rig", "/hand"]).collect()
-    num_frames: int = frame_rows(store, "/hand/left/keypoints3d").num_rows
+    times: pa.Table = frame_rows(store, "/hand/left/keypoints3d")
+    num_frames: int = times.num_rows
     world_T_rig: Float64[ndarray, "f 4 4"] = slam_poses(slam, "/slam/rig", num_frames)
     if not np.array_equal(world_T_rig, slam_poses(slam, "/hand", num_frames), equal_nan=True):
         raise ValueError(f"{slam_rrd}: /hand and /slam/rig carry different poses")
@@ -252,15 +259,16 @@ def read_episode(hands_rrd: Path, slam_rrd: Path) -> Episode:
     faces: list[UInt32[ndarray, "t 3"]] = []
     mano: dict[str, pa.Array] = {}
     usable: list[Bool[ndarray, "f"]] = []
-    times: pa.Table = frame_rows(store, "/hand/left/keypoints3d")
     for side in SIDES:
         keypoints.append(stacked(column(frame_rows(store, f"/hand/{side}/keypoints3d"), "Points3D:positions"), 21 * 3).reshape(-1, 21, 3))
         mesh: pa.Table = frame_rows(store, f"/hand/{side}/vertices")
         vertices.append(stacked(column(mesh, "Mesh3D:vertex_positions"), 778 * 3).reshape(-1, 778, 3))
-        triangles: list = column(mesh, "Mesh3D:triangle_indices").to_pylist()
-        if any(rows != triangles[0] for rows in triangles):
+        triangles: pa.ListArray = column(mesh, "Mesh3D:triangle_indices").combine_chunks()
+        counts: Int64[ndarray, "f"] = np.diff(np.asarray(triangles.offsets, dtype=np.int64))
+        indices: UInt32[ndarray, "n"] = np.asarray(triangles.flatten().flatten(), dtype=np.uint32)
+        if not (counts == counts[0]).all() or not (indices.reshape(len(counts), -1) == indices[: counts[0] * 3]).all():
             raise ValueError(f"{hands_rrd}: the {side} hand changes its triangle list")
-        faces.append(np.asarray(triangles[0], dtype=np.uint32))
+        faces.append(indices[: counts[0] * 3].reshape(-1, 3))
         flags: pa.Table = frame_rows(store, f"/hand/{side}/mano")
         for name in ("hand_pose", "betas", "global_orient", "transl", "is_detected", "is_interpolated", "is_usable"):
             values: pa.Array = column(flags, name).combine_chunks()

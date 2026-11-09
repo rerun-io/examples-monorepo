@@ -10,6 +10,7 @@ frame, so they are read column-wise and written through the shared hand helpers.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import ClassVar
 
@@ -87,6 +88,16 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
         """Where ``download`` keeps the edition manifest."""
         return self.config.root / "manifest.json"
 
+    @cached_property
+    def manifest(self) -> Manifest:
+        """The edition manifest ``download`` fetched, parsed once per run: convert reads it for every episode."""
+        return read_manifest(self.manifest_path)
+
+    @cached_property
+    def manifest_episodes(self) -> dict[str, ManifestEpisode]:
+        """The manifest's episodes by id."""
+        return {episode.episode_id: episode for episode in self.manifest.episodes}
+
     def download(self) -> None:
         """Fetch the manifest, then every selected episode that is neither on disk nor converted."""
         session: GsiSession = GsiSession.sign_in(self.config.api_url)
@@ -130,11 +141,10 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
     def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         """Write each pending layer, then delete the episode's download once every layer is published (unless ``keep_download``)."""
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
-        manifest: Manifest = read_manifest(self.manifest_path)
-        episode: ManifestEpisode = next(entry for entry in manifest.episodes if entry.episode_id == identity.parts[0])
+        episode: ManifestEpisode = self.manifest_episodes[identity.parts[0]]
         self.timer.capture_s = episode.duration_s
         if pending:
-            self.write_episode(identity, source, targets, pending, manifest, episode)
+            self.write_episode(identity, source, targets, pending, self.manifest, episode)
         if not self.config.keep_download and all(target.is_file() for target in targets.values()):
             for name in FILES:
                 (source / name).unlink(missing_ok=True)
@@ -175,10 +185,7 @@ class GsiSixViewDataset(DataforgeDataset[GsiSixViewConfig, Path]):
             for name in calibration.column_names
             if name.startswith("/meta/calibration:") and name.rsplit(":", 1)[1] not in CALIBRATION_IN_ENTITIES
         }
-        with (
-            writing.atomic_write(target) as temp_path,
-            writing.recording_to(temp_path, recording_id=identity.recording_id, default_blueprint=self.default_blueprint(), send_properties=False) as recording,
-        ):
+        with writing.atomic_recording(target, recording_id=identity.recording_id, default_blueprint=self.default_blueprint(), send_properties=False) as recording:
             rr.log("/", rr.ViewCoordinates.FLU, static=True, recording=recording)
             rr.log("/", annotation_context(), static=True, recording=recording)
             log_rig_node(recording, RIG, reference=schema.cam_path(RIG, 0).rsplit("/", 1)[1], num_cameras=len(VIEWS), name="gsi-six-view", kind="ego")

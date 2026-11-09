@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pytest
+import requests
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
@@ -19,8 +20,9 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from dataforge import blueprints, schema, transports
+from dataforge import blueprints, schema, transports, writing
 from dataforge.datasets.gsi_six_view import GsiSixViewConfig, GsiSixViewDataset
+from dataforge.datasets.gsi_six_view_remote import fetch_signed
 from dataforge.datasets.gsi_six_view_source import FLU_R_RDF, VIEWS
 
 EDITION: str = "01a0f166-7994-7b43-a622-a325541c4356"
@@ -355,6 +357,18 @@ def test_no_password_or_signed_link_reaches_a_message(gsi: FakeGsi, tmp_path: Pa
     assert SIGNATURE not in str(corrupt.value) and "access-token" not in str(corrupt.value)
 
 
+def test_a_failed_connection_never_quotes_the_signed_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    link: str = f"https://r2.example/episodes/a/hands.rrd?X-Amz-Signature={SIGNATURE}"
+
+    def refuse(url: str, **_kwargs: object) -> None:
+        raise requests.ConnectionError(f"Max retries exceeded with url: {url}")
+
+    monkeypatch.setattr(requests, "get", refuse)
+    with pytest.raises(RuntimeError) as failed:
+        fetch_signed(link, tmp_path / "hands.rrd", label="GSI a/hands.rrd")
+    assert SIGNATURE not in str(failed.value) and failed.value.__cause__ is None and failed.value.__suppress_context__
+
+
 def converted(gsi: FakeGsi, raw: Path, out: Path, monkeypatch: pytest.MonkeyPatch, episode: str, *, keep_download: bool = False) -> dict[str, Path]:
     """Download and convert one episode; its layer targets."""
     monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(out))
@@ -506,23 +520,10 @@ def test_a_kept_download_stays_for_another_reader(gsi: FakeGsi, signed_in: None,
     assert all((tmp_path / "raw/episodes/ep_v1_aaaa" / name).is_file() for name in ("hands.rrd", "slam.rrd"))
 
 
-def layout_views(blueprint: rrb.Blueprint) -> list[rrb.View]:
-    """Every view of ``blueprint``, in layout order."""
-    found: list[rrb.View] = []
-    stack: list[object] = [blueprint.root_container]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, rrb.View):
-            found.append(node)
-        if isinstance(node, rrb.Container):
-            stack.extend(reversed(node.contents))  # type: ignore[arg-type]
-    return found
-
-
 def test_the_canonical_panes_show_each_view_with_its_keypoints_and_both_meshes(tmp_path: Path) -> None:
     dataset = GsiSixViewConfig(root=tmp_path).setup()
     assert isinstance(dataset, GsiSixViewDataset)
-    world, *panes = layout_views(dataset.default_blueprint())
+    world, *panes = writing.blueprint_views(dataset.default_blueprint())
     assert isinstance(world, rrb.Spatial3DView) and world.origin == schema.rig_path(0)
     assert "+ /world/**" in list(world.contents)  # type: ignore[arg-type]
     assert [pane.name for pane in panes] == ["left_eye", "right_eye", "left_front", "right_front", "left_side", "right_side"]
@@ -532,8 +533,8 @@ def test_the_canonical_panes_show_each_view_with_its_keypoints_and_both_meshes(t
         assert list(pane.contents) == [  # type: ignore[arg-type]
             schema.video_path(0, cam), schema.coco133_uv_projected_path(0, cam), schema.hand_mesh_path("left"), schema.hand_mesh_path("right")
         ]  # fmt: skip
-    for view in (world, layout_views(dataset.table_blueprint())[0]):
+    for view in (world, writing.blueprint_views(dataset.table_blueprint())[0]):
         assert (view.visualizer_overrides or {})[schema.trail_path("slam")] == blueprints.trail_window_range(), "the trail shows the shared cursor window"
-    scene, card = layout_views(dataset.table_blueprint())
+    scene, card = writing.blueprint_views(dataset.table_blueprint())
     assert isinstance(card, rrb.Spatial2DView) and card.origin == schema.pinhole_path(0, 0), "the card decodes left_front only"
     assert all(f"- {schema.video_path(0, cam)}/**" in list(scene.contents) for cam in range(6))  # type: ignore[arg-type]
