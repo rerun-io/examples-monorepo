@@ -118,7 +118,8 @@ def measure_calibration(
     exist only during calibration and are removed even when inference fails.
     The caller supplies catalog frames and the held-out evaluation split.
     """
-    from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand import EgoHandConfig
+    from posekit.models.egohand_fast import EgoHandStack
 
     selected: list[tuple[int, UInt8[Tensor, "h w 3"]]] = list(frames)
     indices: list[int] = [index for index, _ in selected]
@@ -129,9 +130,9 @@ def measure_calibration(
     hashes: list[str] = [hashlib.sha256(frame.cpu().numpy().tobytes()).hexdigest() for _, frame in selected]
     if set(hashes).intersection(excluded_frame_sha256):
         raise ValueError("Calibration contains a decoded evaluation frame.")
-    detector_config, predictor_config = selfcap_egohand_configs(assets)
-    detector = detector_config.setup()
-    predictor = replace(predictor_config, backbone_onnx=None).setup()
+    stack: EgoHandStack[EgoHandConfig] = EgoHandStack.selfcap(assets)
+    detector = stack.detector.setup()
+    predictor = replace(stack.pose, backbone_onnx=None).setup()
     backbone: nn.Module = predictor.predictor.model.backbone
     crops: int = 0
     with DinoActivationObserver(backbone) as observer:

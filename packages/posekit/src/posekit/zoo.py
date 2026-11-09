@@ -141,13 +141,16 @@ ZOO: dict[str, ZooModel] = {
         ZooModel(
             "rtdetr-hand-v1-fast", "hand-detector", "query-based", "huggingface",
             "nvidia/RT-DETR-Hand-Detector-v1@55572ddc hand_detector.onnx", (640, 640), None, "implemented",
-            "fast_egohand_configs() detector: GPU resize, FP16 convolutional trunk and captured TensorRT inference. Select egohand-fast in the hand-detector CLI.",
+            "EgoHandStack.fast()/.catalog() detector: GPU resize and captured TensorRT inference; FP16 trunk (egohand-fast, egohand-catalog-bf16) "
+            "or FP8 encoder input projections (egohand-catalog). Select the stack name in the hand-detector CLI.",
         ),
         ZooModel(
             "egohand-v1-fast", "hand-pose3d", "top-down", "huggingface",
             "nvidia/EgoHand-v1", (256, 256), "soma_hand_25", "implemented",
-            "EgoHandFastConfig: calibrated NVFP4 DINOv3 with an eight-block FP8 tail, FP8 attention, TensorRT heads, CUDA crops and full SOMA meshes. "
-            "Select egohand-fast in the hand-pose3d CLI; requires a CUDA GPU with NVFP4 support.",
+            "EgoHandFastConfig: calibrated NVFP4 DINOv3 with an FP8 tail, FP8 attention, TensorRT heads, CUDA crops and full SOMA meshes. "
+            "egohand-catalog (24-block FP8 tail, five-dataset calibration) is the accepted stack, 45/45 accuracy bands, and needs NVFP4 (Blackwell); "
+            "egohand-catalog-bf16 runs the same stack unquantized on GPUs without NVFP4; egohand-fast is the #487 stack (8-block tail, SelfCap calibration). "
+            "Select the same stack name in the hand-detector and hand-pose3d CLI.",
         ),
         # Whole-body 3D: any PersonDetector (or a SAM3 segmenter for masks) + a top-down body model.
         ZooModel(

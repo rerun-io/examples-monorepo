@@ -36,7 +36,7 @@ from posekit.eval.hand_gt import SIDES, GtDataset, HandGtSegment, read_hand_gt
 from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors, summarize
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.models.egohand import CACHED_BACKBONE_ONNX, EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, EgoHandStack
 from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d
 from posekit.runtimes import TensorRtBackendConfig
@@ -173,8 +173,8 @@ def model_stack(name: ModelName) -> tuple[HandDetector, TopDownHandPose3d]:
     if name == "wilor":
         return WilorHandDetectorConfig(backend=TensorRtBackendConfig()).setup(), WilorHandPoseConfig(backend=TensorRtBackendConfig()).setup()
     if name == "egohand-fast":
-        detector_config, pose_config = fast_egohand_configs()
-        return detector_config.setup(), pose_config.setup()
+        stack: EgoHandStack[EgoHandFastConfig] = EgoHandStack.fast()
+        return stack.detector.setup(), stack.pose.setup()
     detector = EgoHandDetectorConfig(backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4)).setup()
     pose = EgoHandConfig(batch_size=16, backbone_onnx=CACHED_BACKBONE_ONNX, backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32)).setup()
     return detector, pose

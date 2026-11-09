@@ -4,9 +4,9 @@ Fixed input: the SelfCap OAK left clip in ``assets/examples`` (1280x720, 100 fra
 to the GPU before timing; video decode and model set-up are excluded. Every frame runs alone
 (batch 1): hand detection, then the 3D hand model on that frame's hands, CUDA-synchronised.
 
-EgoHand runs SelfCap's accelerated configuration (``selfcap_egohand_configs``): TensorRT
+EgoHand runs SelfCap's accelerated configuration (``EgoHandStack.selfcap``): TensorRT
 detector, GPU perspective crops, TensorRT bf16 DINOv3 backbone, PyTorch head, full SOMA mesh;
-``egohand-fast`` runs ``fast_egohand_configs``. Each predictor reports its stages in
+``egohand-fast`` runs ``EgoHandStack.fast``. Each predictor reports its stages in
 ``stage_ms``: detection (wall), crops (GPU remap), batch assembly, backbone, head and SOMA (CUDA
 events), and ``other`` = total minus those (forward glue, the right-hand
 mirror, device-to-host copies, upstream result dicts and the adapter's output conversion).
@@ -29,8 +29,8 @@ from torch import Tensor
 
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
 from posekit.models.base import HandDetector, TopDownHandPose3d
-from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, EgoHandStage, selfcap_egohand_configs
-from posekit.models.egohand_fast import EgoHandConfigs, FastEgoHandPredictor, fast_egohand_configs
+from posekit.models.egohand import EgoHandDetector, EgoHandPredictor, EgoHandStage
+from posekit.models.egohand_fast import EgoHandStack, FastEgoHandPredictor
 from posekit.predictions import HandDetections, HandPoses3d
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
@@ -102,10 +102,10 @@ def _synced_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
 
 
-def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, warmup: int, repeats: int, configs: EgoHandConfigs) -> tuple[StageTimes, float]:
+def bench_egohand(frames: UInt8[Tensor, "n h w 3"], camera: CalibratedCamera, warmup: int, repeats: int, configs: EgoHandStack) -> tuple[StageTimes, float]:
     """One EgoHand stack, one frame at a time; its predictor reports its own stage times."""
-    detector: EgoHandDetector = configs[0].setup()
-    predictor: EgoHandPredictor | FastEgoHandPredictor = configs[1].setup()
+    detector: EgoHandDetector = configs.detector.setup()
+    predictor: EgoHandPredictor | FastEgoHandPredictor = configs.pose.setup()
     predictor.profile_stages = True
     times = StageTimes()
     hands: list[int] = []
@@ -172,7 +172,7 @@ def main(config: HandsBenchConfig) -> list[BenchResult]:
 
     from posekit.models.wilor import WilorHandDetectorConfig, WilorHandPoseConfig
 
-    egohand_stacks: dict[BenchModel, EgoHandConfigs] = {"egohand": selfcap_egohand_configs(None), "egohand-fast": fast_egohand_configs(None)}
+    egohand_stacks: dict[BenchModel, EgoHandStack] = {"egohand": EgoHandStack.selfcap(), "egohand-fast": EgoHandStack.fast()}
     decoder = VideoDecoder(config.video_path, dimension_order="NHWC", device="cuda")
     frames: UInt8[Tensor, "n h w 3"] = decoder.get_frames_in_range(0, len(decoder)).data.contiguous()
     camera: CalibratedCamera = load_calibrated_camera(config.camera_path)

@@ -7,7 +7,9 @@ captured CUDA crops, and per-frame SOMA reconstruction. Identity, all 26 segment
 scales, joint rotations and every hand vertex remain dynamic outputs.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
@@ -146,7 +148,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
         if config.backbone_precision == "nvfp4" and torch.cuda.get_device_capability()[0] < 10:
-            raise ValueError('NVFP4 needs a Blackwell GPU (compute capability 10+); without one use catalog_egohand_configs(backbone_precision="bf16").')
+            raise ValueError('NVFP4 needs a Blackwell GPU (compute capability 10+); without one use EgoHandStack.catalog(backbone_precision="bf16"), the egohand-catalog-bf16 stack.')
         self.config: EgoHandFastConfig = config
         self.profile_stages: bool = False
         """Record per-frame stage times in ``stage_ms``; off, inference adds no synchronization."""
@@ -240,64 +242,103 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         )
 
 
-EgoHandConfigs: TypeAlias = tuple[EgoHandDetectorConfig, EgoHandConfig | EgoHandFastConfig]
-"""One EgoHand stack: the detector and either the reference or the fast hand pose role."""
+@dataclass(frozen=True, slots=True)
+class EgoHandStack[PoseConfig: (EgoHandConfig, EgoHandFastConfig)]:
+    """One EgoHand stack: the detector and either the reference or the fast hand pose role.
 
-
-def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
-    """SelfCap's EgoHand detector with GPU resizing, an FP16 trunk and CUDA-graph replay, and the fast hand pose role.
-
-    Args:
-        assets: Local asset tree (see :func:`~posekit.models.egohand.asset_paths`); ``None`` takes the
-            pinned downloads and the trtkit engine cache.
-
-    Returns:
-        The detector and predictor configurations.
+    Each preset takes an optional local asset tree (see :func:`~posekit.models.egohand.asset_paths`);
+    ``None`` takes the pinned downloads and the trtkit engine cache.
     """
-    paths: EgoHandAssetPaths = asset_paths(assets)
-    return (
-        EgoHandDetectorConfig(
-            paths.detector,
-            backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=1, cache_dir=paths.engines, use_cuda_graph=True),
-            fp16_trunk=True,
-            gpu_preprocessing=True,
-        ),
-        EgoHandFastConfig(
-            paths.weights,
-            paths.soma,
-            backbone_onnx=paths.engines / CACHED_FAST_BACKBONE_ONNX.name,
-            backbone_source_onnx=paths.bf16_backbone,
-            head_onnx=paths.engines / CACHED_HEAD_ONNX.name,
-            backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2, cache_dir=paths.engines),
-        ),
-    )
+
+    detector: EgoHandDetectorConfig
+    """RT-DETR hand detector."""
+    pose: PoseConfig
+    """Reference or fast top-down hand pose role."""
+
+    @classmethod
+    def reference(cls, assets: Path | None = None) -> "EgoHandStack[EgoHandConfig]":
+        """The released models as upstream runs them: ONNX Runtime detector with PIL resizing, eager pose on CPU crops."""
+        paths: EgoHandAssetPaths = asset_paths(assets)
+        return EgoHandStack(EgoHandDetectorConfig(paths.detector), EgoHandConfig(paths.weights, paths.soma))
+
+    @classmethod
+    def selfcap(cls, assets: Path | None = None) -> "EgoHandStack[EgoHandConfig]":
+        """SelfCap's accelerated reference: TRT detector, GPU crops, TRT bf16 backbone, 16 crops per batch."""
+        paths: EgoHandAssetPaths = asset_paths(assets)
+        return EgoHandStack(
+            EgoHandDetectorConfig(paths.detector, backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=paths.engines)),
+            EgoHandConfig(
+                paths.weights,
+                paths.soma,
+                batch_size=16,
+                gpu_crops=True,
+                backbone_onnx=paths.bf16_backbone,
+                backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=paths.engines),
+            ),
+        )
+
+    @classmethod
+    def fast(cls, assets: Path | None = None) -> "EgoHandStack[EgoHandFastConfig]":
+        """The #487 fast stack: GPU-resize FP16-trunk captured detector, NVFP4 pose with an 8-block FP8 tail on the SelfCap calibration."""
+        paths: EgoHandAssetPaths = asset_paths(assets)
+        return EgoHandStack(
+            EgoHandDetectorConfig(
+                paths.detector,
+                backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=1, cache_dir=paths.engines, use_cuda_graph=True),
+                fp16_trunk=True,
+                gpu_preprocessing=True,
+            ),
+            EgoHandFastConfig(
+                paths.weights,
+                paths.soma,
+                backbone_onnx=paths.engines / CACHED_FAST_BACKBONE_ONNX.name,
+                backbone_source_onnx=paths.bf16_backbone,
+                head_onnx=paths.engines / CACHED_HEAD_ONNX.name,
+                backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2, cache_dir=paths.engines),
+            ),
+        )
+
+    @classmethod
+    def catalog(cls, assets: Path | None = None, *, backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4") -> "EgoHandStack[EgoHandFastConfig]":
+        """The five-dataset calibrated stack: batch-one detector and two-hand pose batches, full outputs.
+
+        NVFP4 (Blackwell): first 8 DINO blocks NVFP4, last 24 FP8, and the detector's three
+        encoder input projections FP8. BF16 (Ampere): unquantized pose and an FP16 detector.
+        """
+        fast: EgoHandStack[EgoHandFastConfig] = EgoHandStack.fast(assets)
+        detector: EgoHandDetectorConfig = fast.detector
+        pose: EgoHandFastConfig = fast.pose
+        assert isinstance(detector.backend, TensorRtBackendConfig)
+        calibration: Path = Path(__file__).resolve().parents[1] / "assets"
+        quantize: bool = backbone_precision == "nvfp4"
+        return EgoHandStack(
+            replace(
+                detector,
+                backend=replace(detector.backend, max_batch_size=1, opt_batch_size=1),
+                fp16_trunk=not quantize,
+                fp8_calibration=calibration / "egohand_detector_catalog.rrd" if quantize else None,
+            ),
+            replace(
+                pose,
+                backbone_precision=backbone_precision,
+                fp8_tail_blocks=24,
+                calibration=calibration / "egohand_catalog.rrd" if quantize else None,
+                batch_size=2,
+                backbone_backend=replace(pose.backbone_backend, max_batch_size=2, opt_batch_size=2),
+            ),
+        )
 
 
-def catalog_egohand_configs(
-    assets: Path | None = None, *, backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4"
-) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
-    """The five-dataset calibrated stack: batch-one detector and two-hand pose batches, full outputs.
+EgoHandStackName: TypeAlias = Literal["egohand", "egohand-selfcap", "egohand-fast", "egohand-catalog", "egohand-catalog-bf16"]
+EGOHAND_STACKS: dict[EgoHandStackName, Callable[[Path | None], EgoHandStack[EgoHandConfig] | EgoHandStack[EgoHandFastConfig]]] = {
+    "egohand": EgoHandStack.reference,
+    "egohand-selfcap": EgoHandStack.selfcap,
+    "egohand-fast": EgoHandStack.fast,
+    "egohand-catalog": EgoHandStack.catalog,
+    "egohand-catalog-bf16": partial(EgoHandStack.catalog, backbone_precision="bf16"),
+}
+"""Every EgoHand stack by the one name the CLI roles, the app, the benches and the eval all use.
 
-    NVFP4 (Blackwell): first 8 DINO blocks NVFP4, last 24 FP8, and the detector's three
-    encoder input projections FP8. BF16 (Ampere): unquantized pose and an FP16 detector.
-    """
-    detector, pose = fast_egohand_configs(assets)
-    assert isinstance(detector.backend, TensorRtBackendConfig)
-    calibration: Path = Path(__file__).resolve().parents[1] / "assets"
-    quantize: bool = backbone_precision == "nvfp4"
-    return (
-        replace(
-            detector,
-            backend=replace(detector.backend, max_batch_size=1, opt_batch_size=1),
-            fp16_trunk=not quantize,
-            fp8_calibration=calibration / "egohand_detector_catalog.rrd" if quantize else None,
-        ),
-        replace(
-            pose,
-            backbone_precision=backbone_precision,
-            fp8_tail_blocks=24,
-            calibration=calibration / "egohand_catalog.rrd" if quantize else None,
-            batch_size=2,
-            backbone_backend=replace(pose.backbone_backend, max_batch_size=2, opt_batch_size=2),
-        ),
-    )
+``egohand-catalog`` is the accepted stack (45/45 accuracy bands); ``egohand-catalog-bf16`` is the same
+stack for GPUs without NVFP4/FP8. ``egohand-fast`` is the #487 stack that selfcap-curate's mount fit uses.
+"""

@@ -20,9 +20,8 @@ from posekit.models.egohand import (
     EgoHandDetector,
     EgoHandPredictor,
     EgoHandReconstruction,
-    selfcap_egohand_configs,
 )
-from posekit.models.egohand_fast import EgoHandConfigs, FastEgoHandPredictor, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandStack, FastEgoHandPredictor
 from posekit.predictions import SOMA_HAND21, BoxDetections, HandDetections, HandSide
 from scipy.spatial.transform import Rotation
 from simplecv.catalog_video import CatalogVideo
@@ -110,15 +109,15 @@ def infer_egohand_frames(
     return OakDetections(times, xy, scores)
 
 
-def egohand_configs(assets: Path | None, *, fast: bool = False) -> EgoHandConfigs:
+def egohand_configs(assets: Path | None, *, fast: bool = False) -> EgoHandStack:
     """The reference or fast EgoHand stack; ``assets`` None takes the pinned downloads and the trtkit cache."""
-    return fast_egohand_configs(assets) if fast else selfcap_egohand_configs(assets)
+    return EgoHandStack.fast(assets) if fast else EgoHandStack.selfcap(assets)
 
 
 @cache
-def egohand_models(configs: EgoHandConfigs) -> tuple[EgoHandDetector, EgoHandPredictor | FastEgoHandPredictor]:
+def egohand_models(configs: EgoHandStack) -> tuple[EgoHandDetector, EgoHandPredictor | FastEgoHandPredictor]:
     """Retain engines for an explicitly long-lived batch worker."""
-    return configs[0].setup(), configs[1].setup()
+    return configs.detector.setup(), configs.pose.setup()
 
 
 @torch.inference_mode()
@@ -127,7 +126,7 @@ def detect_oak_egohand(
     video: CatalogVideo,
     intrinsic: Intrinsic,
     rotation: Float64[ndarray, "3 3"] | None,
-    models: EgoHandConfigs,
+    models: EgoHandStack,
     *,
     camera: EgoCamera | None = None,
     retain_models: bool = False,
@@ -191,7 +190,7 @@ def detect_oak_egohand(
 
 @torch.inference_mode()
 def detect_oak_views(
-    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], models: EgoHandConfigs, *, retain_models: bool = False,
+    episode: SessionEpisode, videos: dict[str, CatalogVideo], lenses: dict[str, OakLens], models: EgoHandStack, *, retain_models: bool = False,
 ) -> dict[str, OakDetections]:
     """EgoHand on the same 64 instants in every OAK camera, sampled on OAK left; videos are read on ``video_time``.
 

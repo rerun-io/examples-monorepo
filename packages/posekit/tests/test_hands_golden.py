@@ -88,10 +88,11 @@ def test_egohand_eager_matches_preport(oak) -> None:
 
 def test_egohand_selfcap_tensorrt_matches_preport(oak) -> None:
     """SelfCap's configuration: TRT detector, GPU crops, TRT bf16 backbone, 8 frames per predictor call."""
-    from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand_fast import EgoHandStack
 
     frames, camera = oak
-    detector_config, predictor_config = selfcap_egohand_configs(None)
+    stack = EgoHandStack.selfcap()
+    detector_config, predictor_config = stack.detector, stack.pose
     with torch.inference_mode():
         detections: HandDetections = detector_config.setup()(frames)
         assert_detections(detections, read_golden("egohand_golden.rrd", "egohand_trt_detections"))

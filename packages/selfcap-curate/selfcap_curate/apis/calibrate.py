@@ -11,7 +11,7 @@ from dataforge.schema import video_path
 from dataforge.writing import atomic_write
 from jaxtyping import Float64
 from numpy import ndarray
-from posekit.models.egohand_fast import EgoHandConfigs
+from posekit.models.egohand_fast import EgoHandStack
 from rerun.catalog import CatalogClient, DatasetEntry
 from serde import serde
 from serde.json import to_json
@@ -100,7 +100,7 @@ def read_episodes(dataset: DatasetEntry, keys: tuple[EpisodeKey, ...]) -> tuple[
 
 def detect_oak_episode(
     episode: SessionEpisode, segment: catalog_io.Segment, ego: FactoryCalibration,
-    lenses: dict[str, OakLens] | None, rotation: Float64[ndarray, "3 3"] | None, models: EgoHandConfigs,
+    lenses: dict[str, OakLens] | None, rotation: Float64[ndarray, "3 3"] | None, models: EgoHandStack,
 ) -> dict[str, OakDetections]:
     """Infer the available OAK views on the clock used by each calibration path."""
     if lenses is not None:
@@ -117,7 +117,7 @@ def detect_oak_episode(
 
 def fit_oak_mount(
     session: str, episodes: list[SessionEpisode], segments: list[catalog_io.Segment], ego: FactoryCalibration,
-    output: Path, models: EgoHandConfigs,
+    output: Path, models: EgoHandStack,
 ) -> tuple[OakFit, list[SessionEpisode]]:
     """Choose one mount mode, write its observations, and fit the session mount."""
     gyro, rotations = gyro_mount(session, episodes), read_rotations()
@@ -198,7 +198,7 @@ def main(config: Config) -> CalibSession:
     with session_output(config.output_dir) as output:
         episodes, segments = read_episodes(dataset, keys)
         factories = catalog_io.read_factories(segments[0])
-        models: EgoHandConfigs = egohand_configs(config.oak_egohand_assets, fast=config.oak_egohand_fast)
+        models: EgoHandStack = egohand_configs(config.oak_egohand_assets, fast=config.oak_egohand_fast)
         oak_fit, episodes = fit_oak_mount(session, episodes, segments, factories["ego"], output, models)
         focals = vp_focals([phone for episode in episodes for phone in episode.layout.phones]) if config.exo_method == "head" else read_table().focals
         state = CalibSession(

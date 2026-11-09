@@ -36,7 +36,7 @@ from posekit.models.egohand import (
     EgoHandReconstruction,
     asset_paths,
 )
-from posekit.models.egohand_fast import EgoHandFastConfig, FastEgoHandPredictor, catalog_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, EgoHandStack, FastEgoHandPredictor
 from posekit.predictions import HandDetections, HandPoses3d, HandSide
 
 BANDED_METRICS: dict[str, bool] = {
@@ -62,7 +62,7 @@ class Config:
     output: Path
     """Directory for ``results.json`` and one Rerun recording per dataset."""
     model: Literal["default", "fast"] = "fast"
-    """``default``: main's unquantized EgoHand classes (the reference); ``fast``: ``catalog_egohand_configs``."""
+    """``default``: main's unquantized EgoHand classes (the reference); ``fast``: ``EgoHandStack.catalog``."""
     precision: Literal["bf16", "nvfp4"] = "nvfp4"
     """Backbone precision of the fast preset: NVFP4/FP8 on Blackwell, BF16 on Ampere."""
     assets: Path | None = None
@@ -271,7 +271,8 @@ def main(config: Config) -> None:
         pose_config: EgoHandConfig | EgoHandFastConfig = EgoHandConfig(weights=paths.weights, soma_assets=config.soma or paths.soma)
         label: str = "default"
     else:
-        detector_config, pose_config = catalog_egohand_configs(config.assets, backbone_precision=config.precision)
+        stack: EgoHandStack[EgoHandFastConfig] = EgoHandStack.catalog(config.assets, backbone_precision=config.precision)
+        detector_config, pose_config = stack.detector, stack.pose
         label = f"fast-{config.precision}"
     detector: EgoHandDetector = detector_config.setup()
     pose: EgoHandPredictor | FastEgoHandPredictor = pose_config.setup()

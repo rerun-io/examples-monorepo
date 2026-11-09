@@ -27,7 +27,7 @@ from posekit.models.base import (
 )
 from posekit.models.clip_identity import ClipIdentityConfig
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, catalog_egohand_configs, fast_egohand_configs
+from posekit.models.egohand_fast import EGOHAND_STACKS, EgoHandFastConfig, EgoHandStack
 from posekit.models.rtdetr import RtDetrDetectorConfig
 from posekit.models.rtmpose import RtmPoseConfig
 from posekit.models.sam3_segmenter import Sam3SegmenterConfig
@@ -48,9 +48,13 @@ __all__ = (
     "BodyPose3dPipeline",
     "ClipIdentityConfig",
     "DetectorConfig",
+    "EGOHAND_STACKS",
     "EgoHandConfig",
     "EgoHandDetectorConfig",
     "EgoHandFastConfig",
+    "EgoHandStack",
+    "HAND_DETECTORS",
+    "HAND_POSES",
     "HandDetector",
     "HandDetectorConfig",
     "HandPose3dConfig",
@@ -77,9 +81,17 @@ __all__ = (
     "WilorHandDetectorConfig",
     "WilorHandPoseConfig",
     "YoloxDetectorConfig",
-    "catalog_egohand_configs",
-    "fast_egohand_configs",
 )
+
+_EGOHAND_DEFAULTS: dict[str, EgoHandStack] = {name: preset(None) for name, preset in EGOHAND_STACKS.items()}
+HAND_DETECTORS: dict[str, WilorHandDetectorConfig | EgoHandDetectorConfig] = {
+    "wilor": WilorHandDetectorConfig(), **{name: stack.detector for name, stack in _EGOHAND_DEFAULTS.items()}
+}
+"""Hand detector of every named hand stack: WiLoR and each ``EGOHAND_STACKS`` preset."""
+HAND_POSES: dict[str, WilorHandPoseConfig | EgoHandConfig | EgoHandFastConfig] = {
+    "wilor": WilorHandPoseConfig(), **{name: stack.pose for name, stack in _EGOHAND_DEFAULTS.items()}
+}
+"""Hand pose role of every named hand stack; same names as ``HAND_DETECTORS``."""
 
 if TYPE_CHECKING:
     DetectorConfig = YoloxDetectorConfig | RtDetrDetectorConfig
@@ -95,17 +107,8 @@ else:
         {"rtmpose": RtmPoseConfig(), "sapiens": SapiensPoseConfig(), "vitpose": VitPoseConfig()}, prefix_names=False
     )
 
-    _fast_hand_detector, _fast_hand_pose = fast_egohand_configs()
-    _catalog_detector, _catalog_pose = catalog_egohand_configs()
-    _ampere_detector, _ampere_pose = catalog_egohand_configs(backbone_precision="bf16")
-    HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector,
-         "egohand-catalog": _catalog_detector, "egohand-catalog-bf16": _ampere_detector}, prefix_names=False
-    )
-    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose,
-         "egohand-catalog": _catalog_pose, "egohand-catalog-bf16": _ampere_pose}, prefix_names=False
-    )
+    HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(HAND_DETECTORS, prefix_names=False)
+    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(HAND_POSES, prefix_names=False)
     BodyPose3dConfig = tyro.extras.subcommand_type_from_defaults(
         {
             "sam3d-body": Sam3dBodyConfig(mode="full"), "sam3d-body-bodyonly": Sam3dBodyConfig(mode="body"),

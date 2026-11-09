@@ -169,7 +169,7 @@ class EgoHandDetector(HandDetector):
             if not isinstance(config.backend, TensorRtBackendConfig):
                 raise ValueError("The FP8 detector requires a TensorRT backend.")
             if torch.cuda.get_device_capability()[0] < 9:
-                raise ValueError('The FP8 detector needs an FP8 GPU (compute capability 9+); without one use catalog_egohand_configs(backbone_precision="bf16").')
+                raise ValueError('The FP8 detector needs an FP8 GPU (compute capability 9+); without one use EgoHandStack.catalog(backbone_precision="bf16"), the egohand-catalog-bf16 stack.')
             weights = quantized_detector_path(weights, config.fp8_calibration, config.backend.cache_dir)
         elif config.fp16_trunk:
             from trtkit.onnx_precision import fp16_trunk
@@ -569,25 +569,3 @@ def asset_paths(assets: Path | None) -> EgoHandAssetPaths:
         assets / "dinov3-bf16.onnx",
         assets / "engines",
     )
-
-
-def selfcap_egohand_configs(assets: Path | None) -> tuple[EgoHandDetectorConfig, EgoHandConfig]:
-    """SelfCap's accelerated EgoHand: TRT detector, GPU crops, TRT bf16 backbone, 16 crops per batch.
-
-    Args:
-        assets: Local asset tree (see :func:`asset_paths`); ``None`` takes the pinned downloads and the trtkit engine cache.
-
-    Returns:
-        The detector and predictor configurations.
-    """
-    paths: EgoHandAssetPaths = asset_paths(assets)
-    detector = EgoHandDetectorConfig(paths.detector, backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=4, cache_dir=paths.engines))
-    predictor = EgoHandConfig(
-        paths.weights,
-        paths.soma,
-        batch_size=16,
-        gpu_crops=True,
-        backbone_onnx=paths.bf16_backbone,
-        backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=32, cache_dir=paths.engines),
-    )
-    return detector, predictor

@@ -10,7 +10,8 @@ from selfcap_curate.oak_egohand import egohand_configs
 
 
 def test_no_asset_root_uses_the_downloads_and_the_trtkit_cache() -> None:
-    detector, predictor = egohand_configs(None)
+    stack = egohand_configs(None)
+    detector, predictor = stack.detector, stack.pose
     assert detector.weights is None and predictor.weights is None and predictor.soma_assets is None
     assert detector.backend.cache_dir == DEFAULT_TRT_CACHE_DIR
     assert predictor.backbone_backend.cache_dir == DEFAULT_TRT_CACHE_DIR
@@ -19,7 +20,8 @@ def test_no_asset_root_uses_the_downloads_and_the_trtkit_cache() -> None:
 
 
 def test_an_asset_root_overrides_every_file(tmp_path: Path) -> None:
-    detector, predictor = egohand_configs(tmp_path)
+    stack = egohand_configs(tmp_path)
+    detector, predictor = stack.detector, stack.pose
     assert detector.weights == tmp_path / "weights/detector/hand_detector.onnx"
     assert (predictor.weights, predictor.soma_assets) == (tmp_path / "weights/egohand/egohand_s060000.safetensors", tmp_path / "weights/soma")
     assert detector.backend.cache_dir == predictor.backbone_backend.cache_dir == tmp_path / "engines"
@@ -27,9 +29,11 @@ def test_an_asset_root_overrides_every_file(tmp_path: Path) -> None:
 
 
 def test_fast_mount_models_use_posekit_fast_roles_without_changing_default() -> None:
-    detector, predictor = egohand_configs(None, fast=True)
+    stack = egohand_configs(None, fast=True)
+    detector, predictor = stack.detector, stack.pose
     assert detector.gpu_preprocessing and detector.fp16_trunk
     assert isinstance(predictor, EgoHandFastConfig)
-    default_detector, default_predictor = egohand_configs(None)
+    stack = egohand_configs(None)
+    default_detector, default_predictor = stack.detector, stack.pose
     assert not default_detector.gpu_preprocessing
     assert isinstance(default_predictor, EgoHandConfig)

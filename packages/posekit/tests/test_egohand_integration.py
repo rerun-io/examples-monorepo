@@ -21,7 +21,7 @@ from simplecv.rrd_query_utils import first_valid_value
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, catalog_egohand_configs, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, EgoHandStack
 
 pytestmark = pytest.mark.integration
 
@@ -31,8 +31,8 @@ CAMERA = "/world/rig_04/cam_00/pinhole"
 def fast_config_for_device() -> EgoHandFastConfig:
     """Exercise the same fast executor with a precision supported by the test GPU."""
     if torch.cuda.get_device_capability()[0] < 10:
-        return catalog_egohand_configs(backbone_precision="bf16")[1]
-    return fast_egohand_configs()[1]
+        return EgoHandStack.catalog(backbone_precision="bf16").pose
+    return EgoHandStack.fast().pose
 
 
 @pytest.fixture(autouse=True)
@@ -232,14 +232,14 @@ def test_gpu_detector_preprocessing_preserves_boxes_and_sides(fp16_trunk: bool) 
     from torchcodec.decoders import VideoDecoder
 
     from posekit.apis.hands_bench import EXAMPLES
-    from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand_fast import EgoHandStack
 
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing detector parity fixture: {video}")
-    config, _ = selfcap_egohand_configs(None)
+    config = EgoHandStack.selfcap().detector
     decoder = VideoDecoder(video, dimension_order="NHWC", device="cuda")
     frames = decoder.get_frames_at([0, 20, 40, 60, 80]).data.contiguous()
     detector = config.setup()
@@ -262,8 +262,8 @@ def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand import selfcap_egohand_configs
     from posekit.models.egohand_cuda_crops import CudaHandCropper
+    from posekit.models.egohand_fast import EgoHandStack
     from posekit.models.egohand_soma import prepare_cuda_soma
     from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
@@ -272,7 +272,8 @@ def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing EgoHand parity fixture: {video}")
-    detector_config, config = selfcap_egohand_configs(None)
+    stack = EgoHandStack.selfcap()
+    detector_config, config = stack.detector, stack.pose
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
     decoder = VideoDecoder(video, dimension_order="NHWC", device="cuda")
     frames = decoder.get_frames_at([0, 30, 80]).data.contiguous()
@@ -300,12 +301,12 @@ def test_cuda_execution_retains_joints_meshes_and_soma_parameters() -> None:
 
 def test_cuda_soma_preserves_changing_shapes_and_full_meshes() -> None:
     """Captured skinning must use each frame's identity and scales on both sides."""
-    from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand_fast import EgoHandStack
     from posekit.models.egohand_soma import prepare_cuda_soma
 
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
-    _, config = selfcap_egohand_configs(None)
+    config = EgoHandStack.selfcap().pose
     model = config.setup().predictor.model.soma_hand
     generator = torch.Generator(device="cuda").manual_seed(72)
     poses = torch.randn((2, 25, 3), device="cuda", generator=generator) * 0.2
@@ -329,12 +330,12 @@ def test_exportable_hand_head_preserves_virtual_camera_conditioning() -> None:
     """The exported head includes the same camera rays and both learned heads."""
     from egohand.utils.ray_pe import compute_crop_ray_angles, fourier_encode_angles
 
-    from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand_fast import EgoHandStack
     from posekit.models.egohand_head import EgoHandHead
 
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
-    _, config = selfcap_egohand_configs(None)
+    config = EgoHandStack.selfcap().pose
     model = config.setup().predictor.model
     features = torch.randn((2, 1280, 16, 16), device="cuda")
     focal = torch.tensor([180.0, 510.0], device="cuda")
@@ -359,7 +360,7 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand_fast import fast_egohand_configs
+    from posekit.models.egohand_fast import EgoHandStack
     from posekit.predictions import BoxDetections, HandDetections
 
     if not torch.cuda.is_available():
@@ -367,7 +368,7 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing EgoHand parity fixture: {video}")
-    detector_config, _ = fast_egohand_configs()
+    detector_config = EgoHandStack.fast().detector
     pose_config: EgoHandFastConfig = fast_config_for_device()
     frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1]
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
@@ -394,7 +395,7 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand_fast import fast_egohand_configs
+    from posekit.models.egohand_fast import EgoHandStack
     from posekit.predictions import BoxDetections, HandDetections
 
     if not torch.cuda.is_available():
@@ -402,7 +403,7 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing EgoHand parity fixture: {video}")
-    detector_config, _ = fast_egohand_configs()
+    detector_config = EgoHandStack.fast().detector
     pose_config: EgoHandFastConfig = fast_config_for_device()
     frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1].repeat(2, 1, 1, 1)
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
@@ -442,7 +443,7 @@ def test_stage_times_are_recorded_only_on_request() -> None:
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand import selfcap_egohand_configs
+    from posekit.models.egohand_fast import EgoHandStack
 
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
@@ -451,7 +452,8 @@ def test_stage_times_are_recorded_only_on_request() -> None:
         pytest.skip(f"missing EgoHand parity fixture: {video}")
     frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1]
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
-    detector_config, reference_config = selfcap_egohand_configs(None)
+    stack = EgoHandStack.selfcap()
+    detector_config, reference_config = stack.detector, stack.pose
     detections = detector_config.setup()(frames)
     assert reference_config.backbone_backend is not None
     reference_config = replace(reference_config, backbone_backend=replace(reference_config.backbone_backend, max_batch_size=2, opt_batch_size=2))

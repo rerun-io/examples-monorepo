@@ -12,7 +12,7 @@ from trtkit import TensorRtBackendConfig
 
 from posekit.models import HandDetectorConfig, HandPose3dConfig
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, catalog_egohand_configs, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, EgoHandStack
 
 
 def test_fast_role_subcommands_select_the_calibrated_config() -> None:
@@ -22,7 +22,7 @@ def test_fast_role_subcommands_select_the_calibrated_config() -> None:
     assert isinstance(detector.backend, TensorRtBackendConfig)
     assert detector.gpu_preprocessing and detector.fp16_trunk
     assert isinstance(pose, EgoHandFastConfig)
-    assert pose == fast_egohand_configs()[1] == EgoHandFastConfig()
+    assert pose == EgoHandStack.fast().pose == EgoHandFastConfig()
     assert pose.fp8_tail_blocks == 8
     assert isinstance(tyro.cli(HandPose3dConfig, args=["egohand"]), EgoHandConfig)
 
@@ -45,7 +45,7 @@ def test_fast_role_quantizes_the_asset_tree_bf16_backbone(tmp_path: Path, monkey
 
     monkeypatch.setattr(egohand_fast, "export_backbone_once", export_missing)
     monkeypatch.setattr(egohand_fast, "quantize_backbone", quantize)
-    _, config = fast_egohand_configs(tmp_path)
+    config = EgoHandStack.fast(tmp_path).pose
     quantized = egohand_fast.export_quantized_backbone_once(config, tmp_path / "weights", tmp_path / "soma", load_calibration())
     assert sources == [tmp_path / "dinov3-bf16.onnx"]
     assert quantized.parent == tmp_path / "engines" and quantized.is_file()
@@ -62,7 +62,8 @@ def test_catalog_cli_selects_measured_paired_roles(preset: str, precision: str, 
 
 
 def test_catalog_preset_is_the_measured_configuration() -> None:
-    detector, pose = catalog_egohand_configs()
+    stack = EgoHandStack.catalog()
+    detector, pose = stack.detector, stack.pose
     assert isinstance(detector.backend, TensorRtBackendConfig)
     assert detector.backend.max_batch_size == detector.backend.opt_batch_size == 1
     assert detector.gpu_preprocessing and not detector.fp16_trunk
@@ -87,8 +88,20 @@ def test_nvfp4_preset_points_older_gpus_to_the_bf16_preset(tmp_path: Path, monke
     from posekit.models.egohand_fast import FastEgoHandPredictor
 
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args: (8, 6))
-    detector, pose = catalog_egohand_configs()
+    stack = EgoHandStack.catalog()
+    detector, pose = stack.detector, stack.pose
     with pytest.raises(ValueError, match='backbone_precision="bf16"'):
         EgoHandDetector(replace(detector, weights=tmp_path / "hand_detector.onnx"))
     with pytest.raises(ValueError, match='backbone_precision="bf16"'):
         FastEgoHandPredictor(pose)
+
+
+def test_every_stack_name_is_one_cli_subcommand_for_both_roles() -> None:
+    """The CLI unions come from EGOHAND_STACKS, so a name means the same stack in every tool."""
+    from posekit.models import EGOHAND_STACKS
+
+    for name, preset in EGOHAND_STACKS.items():
+        stack: EgoHandStack = preset(None)
+        assert tyro.cli(HandDetectorConfig, args=[name]) == stack.detector
+        assert tyro.cli(HandPose3dConfig, args=[name]) == stack.pose
+    assert EgoHandStack.reference() == EgoHandStack(EgoHandDetectorConfig(), EgoHandConfig())

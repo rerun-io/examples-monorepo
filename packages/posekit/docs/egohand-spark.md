@@ -1,6 +1,6 @@
 # EgoHand fast path on DGX Spark
 
-`catalog_egohand_configs()` is the EgoHand detector + pose stack calibrated on five
+`EgoHandStack.catalog()` is the EgoHand detector + pose stack calibrated on five
 catalog datasets. It returns the same outputs as main's default `EgoHandDetectorConfig`
 + `EgoHandConfig`: boxes, anatomical sides, 2D/3D joints, full SOMA meshes, joint
 rotations, identity, translation, scale and all 26 segment scales.
@@ -13,9 +13,9 @@ rotations, identity, translation, scale and all 26 segment scales.
   segments, checked against every evaluation frame by decoded-RGB SHA256.
 
 ```python
-from posekit.models import catalog_egohand_configs
+from posekit.models import EgoHandStack
 
-detector_config, pose_config = catalog_egohand_configs()
+detector_config, pose_config = EgoHandStack.catalog()
 detector, pose = detector_config.setup(), pose_config.setup()
 detections = detector(frames_rgb)  # decoded uint8 CUDA frames, NHWC
 reconstruction = pose(frames_rgb, detections, camera)
@@ -25,7 +25,7 @@ On the CLI, select `egohand-catalog` for both the detector and the pose role.
 
 ## GPUs without NVFP4
 
-`catalog_egohand_configs(backbone_precision="bf16")` (CLI role `egohand-catalog-bf16`) is the
+`EgoHandStack.catalog(backbone_precision="bf16")` (CLI role `egohand-catalog-bf16`) is the
 fast path for GPUs below Blackwell (compute capability < 10: Ampere, Ada, Hopper). It runs the
 same executor (TensorRT backbone and heads, CUDA crops, batched SOMA) with an unquantized BF16
 backbone and an FP16 detector, and needs no calibration assets. The choice is explicit, not
@@ -38,7 +38,7 @@ lacks FP8 or NVFP4.
 SHOW3D, GSI six-view and Gen-HumanEgo. Batch one, detection on every frame, full outputs.
 Latency excludes decode and engine builds.
 
-| | Default (main) | `catalog_egohand_configs()` | Speed-up | Accuracy bands |
+| | Default (main) | `EgoHandStack.catalog()` | Speed-up | Accuracy bands |
 |---|---|---|---|---|
 | DGX Spark (GB10) | 153.31 ms/frame | 14.98 ms/frame | **10.23x** | 45/45 |
 | RTX 3060, `backbone_precision="bf16"` | 238.62 ms/frame | 39.24 ms/frame | 6.08x | 45/45 |
