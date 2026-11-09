@@ -95,7 +95,7 @@ class UmeTrackEstimator:
             native = [np.ascontiguousarray(image.cpu().numpy()) for image in request.native_images]
         else:
             for camera, letterbox in enumerate(self.letterboxes):
-                if letterbox.quarter_turn_cw or letterbox.scale != 1.0:
+                if letterbox.quarter_turns or letterbox.scale != 1.0:
                     raise ValueError("UmeTrack needs native camera images for resized/rotated inputs")
                 start: int = int(letterbox.pad_x)
                 native.append(np.ascontiguousarray(images[camera, :, start:start + letterbox.source_width].cpu().numpy()))

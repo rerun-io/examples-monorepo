@@ -325,3 +325,32 @@ def test_cancel_unblocks_wait_without_completing_epoch(tmp_path: Path, during_va
     assert state.step == int(during_validation)
     assert source.closed and validation.closed
     assert (tmp_path / 'last.pt.sha256').exists()
+
+
+def test_a_step_budget_ends_training_mid_epoch_with_the_cosine_at_zero(tmp_path: Path) -> None:
+    """max_steps counts optimiser steps across epochs; the cosine follows the step, so the last step trains at lr 0."""
+    torch.manual_seed(0)
+    cosine = OptimiserSettings(0.001, schedule='cosine')
+    trainer = Trainer('detnet', cosine, KEYNET_SGD, LoopSettings(epochs=100, max_steps=5, validate_every=0), tmp_path, 'cpu', max_val_batches=1)
+    state = trainer.run(FakeSource(3, 0), FakeSource(1, 1))
+    assert state.step == 5
+    assert state.epoch == 2  # epoch 0 trains 3 steps, epoch 1 stops after 2 and still completes
+    assert trainer.optimisers['detnet'].param_groups[0]['lr'] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_half_way_through_the_budget_the_cosine_is_at_half(tmp_path: Path) -> None:
+    cosine = OptimiserSettings(0.001, schedule='cosine')
+    trainer = Trainer('detnet', cosine, KEYNET_SGD, LoopSettings(epochs=1, max_steps=8, validate_every=0), tmp_path, 'cpu', max_val_batches=1)
+    trainer.run(FakeSource(4, 0), FakeSource(1, 1))
+    assert trainer.state.step == 4
+    assert trainer.optimisers['detnet'].param_groups[0]['lr'] == pytest.approx(0.0005)
+
+
+def test_a_nonfinite_loss_stops_training_by_the_next_log(tmp_path: Path) -> None:
+    """Loss terms stay on the device between logs (no per-step host sync); a NaN still stops the run with a named error."""
+    source = FakeSource(4, 0)
+    source.det = replace(source.det, pooled=torch.full_like(source.det.pooled, float('nan')))
+    trainer = Trainer('detnet', DETNET_SGD, KEYNET_SGD, LoopSettings(epochs=1, log_every=2, validate_every=0), tmp_path, 'cpu', max_val_batches=1)
+    with pytest.raises(ValueError, match='Nonfinite detnet training loss'):
+        trainer.run(source, FakeSource(1, 1))
+    assert trainer.state.step == 2
