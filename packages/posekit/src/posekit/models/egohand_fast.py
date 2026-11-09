@@ -9,7 +9,7 @@ scales, joint rotations and every hand vertex remain dynamic outputs.
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch
 from jaxtyping import Int64, UInt8
@@ -53,6 +53,10 @@ else:
 
 CACHED_FAST_BACKBONE_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-dinov3-nvfp4-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Base path of the calibrated NVFP4 DINOv3; the calibration digest and FP8 tail count are appended to its stem."""
+FP8_TAIL_BLOCKS: int = 24
+"""Final DINO blocks whose linears run in FP8 instead of NVFP4; the first 8 stay NVFP4."""
+DETECTOR_CALIBRATION: Path = Path(__file__).resolve().parents[1] / "assets" / "egohand_detector_catalog.rrd"
+"""Activation ranges of the detector's three FP8 encoder input projections."""
 CACHED_HEAD_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-head-bf16-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Both learned heads with their virtual-camera conditioning, exported in BF16."""
 
@@ -65,7 +69,7 @@ class EgoHandFastConfig:
     """EgoHand safetensors path; None downloads it."""
     soma_assets: Path | None = None
     """Directory containing SOMAHand.npz; None downloads it."""
-    batch_size: int = 16
+    batch_size: int = 2
     """Maximum hand crops per captured execution."""
     padding: float = 0.2
     """Added fraction of the square detector crop side."""
@@ -75,12 +79,12 @@ class EgoHandFastConfig:
     """bf16 DINOv3 that the quantized backbone is made from; exported from these weights when absent."""
     head_onnx: Path = CACHED_HEAD_ONNX
     """BF16 heads artifact; exported from these weights when absent."""
-    backbone_backend: TensorRtBackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2))
+    backbone_backend: TensorRtBackendConfig = field(default_factory=lambda: TensorRtBackendConfig(max_batch_size=2, opt_batch_size=2))
     """TensorRT runtime of the backbone; the heads use the same profile without FP8 attention fusion."""
-    fp8_tail_blocks: int = 8
-    """Final DINO blocks whose linears stay FP8 instead of NVFP4 (0..32)."""
     calibration: Path | None = None
-    """Activation ranges; None uses the committed disjoint SelfCap split."""
+    """Backbone activation ranges; None uses the committed five-dataset catalog calibration."""
+    backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4"
+    """The calibrated NVFP4 backbone with its FP8 tail, or unquantized BF16 for GPUs without NVFP4."""
     hf_egohand_repo_id: str = "pablovela5620/egohand"
     """Hugging Face repo holding the safetensors."""
     hf_egohand_revision: str = EGOHAND_REVISION
@@ -101,13 +105,13 @@ def export_quantized_backbone_once(config: EgoHandFastConfig, weights: Path, som
     Returns:
         The quantized backbone, named by its calibration digest and FP8 tail count.
     """
-    onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
+    onnx: Path = calibrated_backbone_path(config.backbone_onnx, calibration, fp8_tail_blocks=FP8_TAIL_BLOCKS)
 
     def quantize() -> None:
         export_backbone_once(
             weights, soma, config.backbone_source_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size
         )
-        quantize_backbone(config.backbone_source_onnx, onnx, calibration, fp8_tail_blocks=config.fp8_tail_blocks)
+        quantize_backbone(config.backbone_source_onnx, onnx, calibration, fp8_tail_blocks=FP8_TAIL_BLOCKS)
 
     build_once(onnx, quantize)
     return onnx
@@ -142,14 +146,19 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         from posekit.models.egohand_soma import prepare_cuda_soma
         from posekit.models.egohand_tensor import EgoHandTensorExecutor
 
+        if config.backbone_precision == "nvfp4" and torch.cuda.get_device_capability()[0] < 10:
+            raise ValueError('NVFP4 needs a Blackwell GPU (compute capability 10+); without one use fast_egohand_configs(backbone_precision="bf16").')
         self.config: EgoHandFastConfig = config
         self.profile_stages: bool = False
         """Record per-frame stage times in ``stage_ms``; off, inference adds no synchronization."""
         self.stage_ms: dict[EgoHandStage, list[float]] = {}
         weights: Path = egohand_weights_path(config.weights, config.hf_egohand_repo_id, config.hf_egohand_revision)
         soma: Path = soma_assets_path(config.soma_assets, config.hf_soma_repo_id, config.hf_soma_revision)
-        calibration: EgoHandCalibration = load_calibration(config.calibration)
-        backbone_onnx: Path = export_quantized_backbone_once(config, weights, soma, calibration)
+        if config.backbone_precision == "bf16":
+            export_backbone_once(weights, soma, config.backbone_source_onnx, batch_size=config.batch_size, max_batch_size=config.backbone_backend.max_batch_size)
+            backbone_onnx: Path = config.backbone_source_onnx
+        else:
+            backbone_onnx = export_quantized_backbone_once(config, weights, soma, load_calibration(config.calibration))
         loaded, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
         model: EgoHand = loaded.eval().to("cuda")
         self.faces: dict[HandSide, Tensor] = soma_faces(model)
@@ -236,23 +245,31 @@ EgoHandConfigs: TypeAlias = tuple[EgoHandDetectorConfig, EgoHandConfig | EgoHand
 """One EgoHand stack: the detector and either the reference or the fast hand pose role."""
 
 
-def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
-    """SelfCap's EgoHand detector with GPU resizing, an FP16 trunk and CUDA-graph replay, and the fast hand pose role.
+def fast_egohand_configs(
+    assets: Path | None = None, *, backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4"
+) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
+    """The fast EgoHand stack, calibrated on five catalog datasets: a batch-one detector, two-hand pose batches, full outputs.
+
+    NVFP4 (Blackwell): first 8 DINO blocks NVFP4, last 24 FP8, and the detector's three encoder input
+    projections FP8. BF16 (GPUs without NVFP4): the same executor unquantized, with an FP16 detector.
 
     Args:
         assets: Local asset tree (see :func:`~posekit.models.egohand.asset_paths`); ``None`` takes the
             pinned downloads and the trtkit engine cache.
+        backbone_precision: ``nvfp4`` on Blackwell, ``bf16`` below it.
 
     Returns:
         The detector and predictor configurations.
     """
     paths: EgoHandAssetPaths = asset_paths(assets)
+    quantize: bool = backbone_precision == "nvfp4"
     return (
         EgoHandDetectorConfig(
             paths.detector,
-            backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=1, cache_dir=paths.engines, use_cuda_graph=True),
-            fp16_trunk=True,
+            backend=TensorRtBackendConfig(max_batch_size=1, opt_batch_size=1, cache_dir=paths.engines, use_cuda_graph=True),
+            fp16_trunk=not quantize,
             gpu_preprocessing=True,
+            fp8_calibration=DETECTOR_CALIBRATION if quantize else None,
         ),
         EgoHandFastConfig(
             paths.weights,
@@ -260,6 +277,7 @@ def fast_egohand_configs(assets: Path | None = None) -> tuple[EgoHandDetectorCon
             backbone_onnx=paths.engines / CACHED_FAST_BACKBONE_ONNX.name,
             backbone_source_onnx=paths.bf16_backbone,
             head_onnx=paths.engines / CACHED_HEAD_ONNX.name,
-            backbone_backend=TensorRtBackendConfig(max_batch_size=32, opt_batch_size=2, cache_dir=paths.engines),
+            backbone_backend=TensorRtBackendConfig(max_batch_size=2, opt_batch_size=2, cache_dir=paths.engines),
+            backbone_precision=backbone_precision,
         ),
     )

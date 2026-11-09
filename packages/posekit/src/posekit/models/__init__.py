@@ -94,11 +94,14 @@ else:
     )
 
     _fast_hand_detector, _fast_hand_pose = fast_egohand_configs()
+    _bf16_hand_detector, _bf16_hand_pose = fast_egohand_configs(backbone_precision="bf16")
     HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector}, prefix_names=False
+        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector, "egohand-fast-bf16": _bf16_hand_detector},
+        prefix_names=False,
     )
     HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose}, prefix_names=False
+        {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose, "egohand-fast-bf16": _bf16_hand_pose},
+        prefix_names=False,
     )
     BodyPose3dConfig = tyro.extras.subcommand_type_from_defaults(
         {

@@ -133,7 +133,8 @@ pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http:/
 pixi run -e posekit-hands --frozen posekit-hands-bench
 ```
 
-Select `egohand-fast` for the opt-in TensorRT path on an NVFP4-capable CUDA GPU:
+Select `egohand-fast` for the fast TensorRT stack on a Blackwell GPU (NVFP4), or
+`egohand-fast-bf16` on older GPUs; use the same name for the detector and the pose role:
 
 ```bash
 pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/egohand-fast.rrd \
@@ -143,29 +144,22 @@ pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand egohand-f
     --catalog-url rerun+http://127.0.0.1:<port> --output-dir /tmp/egohand-eval
 ```
 
-`fast_egohand_configs()` returns the existing `EgoHandDetectorConfig` with GPU
-preprocessing and an FP16 trunk, and an `EgoHandFastConfig`: its `FastEgoHandPredictor`
-runs NVFP4 DINOv3 linears with the last eight blocks in FP8, FP8 attention, BF16
-TensorRT heads, captured GPU crops, and full per-frame SOMA reconstruction. Identity, all 26 segment scales, joint
-rotations, and every hand vertex remain dynamic. The ordinary `egohand` selection
-retains its original defaults. SelfCap's existing calibration CLI selects these
-same roles with `--oak-egohand-fast`.
+`fast_egohand_configs()` pairs a batch-one TensorRT detector (PIL-exact GPU resize, its three
+encoder input projections in FP8) with an `EgoHandFastConfig`: its `FastEgoHandPredictor` runs
+the DINOv3 backbone with the first 8 blocks in NVFP4 and the last 24 in FP8, FP8 attention, BF16
+TensorRT heads, captured GPU crops and full per-frame SOMA reconstruction. Identity, all 26
+segment scales, joint rotations and every hand vertex remain dynamic. The ordinary `egohand`
+selection keeps its original defaults; SelfCap's calibration CLI selects the fast stack with
+`--oak-egohand-fast`. `fast_egohand_configs(backbone_precision="bf16")` runs the same executor
+unquantized with an FP16 detector. On a GPU without FP8/NVFP4 the default preset raises a
+`ValueError` that names the BF16 preset; the choice is explicit, not automatic.
 
-First setup exports and builds missing artifacts through posekit and trtkit;
-subsequent calls use their cache. `EgoHandFastConfig.fp8_tail_blocks` controls the
-precision trade-off (0–32); both precision and calibration affect the export cache
-key. The committed calibration (`assets/egohand_nvfp4.rrd`) uses 138 crops from disjoint SelfCap frames, with
-mount-fit indices excluded. Its record includes exact frame indices and RGB
-SHA256 hashes. Reproduce it from the catalog with:
-
-```bash
-pixi run -e posekit-hands --frozen posekit-egohand-calibrate \
-    --catalog-url rerun+http://127.0.0.1:<port> --output /tmp/egohand-calibration.rrd
-```
-
-The calibration command also rejects every decoded benchmark frame by hash.
-Set `EgoHandFastConfig.calibration` to use a separate calibration record. Quantization,
-head export, and engine building are library code; no preparation scripts are required.
+Both roles load committed activation ranges (`assets/egohand_catalog.rrd`,
+`assets/egohand_detector_catalog.rrd`): 200 frames / 243 hand crops from one catalog segment per
+dataset (UmeTrack, HOT3D Quest 3, SHOW3D, GSI six-view, Gen-HumanEgo), disjoint from the
+evaluation segments and checked against every evaluation frame by decoded-RGB SHA256. The
+records are frozen artifacts; the calibration contents are part of the export cache key. First
+setup exports and builds the missing artifacts through posekit and trtkit.
 
 **Eval protocol** (`posekit.apis.hands_eval`): three HOT3D Quest 3 segments (camera
 `cam_00`) and three UmeTrack test segments (`cam_01`), every 10th frame, at most 40
