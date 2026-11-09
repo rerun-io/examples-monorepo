@@ -23,14 +23,18 @@ from rerun.catalog import DatasetEntry
 from posekit.labeler.carry import OPENCV_THREADS, VisualCarrier, VisualTrackerKind, opencv_tracker
 from posekit.labeler.frames import FrameSource
 from posekit.labeler.proposals import ProposalsByTime, read_proposals
+from posekit.labeler.rig import Kb4Rig, read_rig
 from posekit.labeler.schema import Proposal
 from posekit.labeler.server import LabelApp, make_server
+from posekit.labeler.spheretrack import SpherePropagator
 from posekit.labeler.store import LAYER_DIR, CatalogLayers
 from posekit.labeler.tracker import Propagator
 
-PropagatorKind: TypeAlias = Literal["chain", "megatrack"]
-"""Machine propagation: ``chain`` (EgoHand chains, ``posekit.labeler.tracker``; the default) or ``megatrack`` (a 3D hand per side
-from KeyNet-F in every view, ``posekit.labeler.megatrack``; needs ``PYTHONPATH=packages/handtrack`` and a GPU)."""
+PropagatorKind: TypeAlias = Literal["sphere", "chain", "megatrack"]
+"""Machine propagation: ``sphere`` (the default: one 3D hand sphere per side through the KB4 rig, fed by EgoHand boxes in
+every view, ``posekit.labeler.spheretrack``), ``chain`` (EgoHand chains per camera, ``posekit.labeler.tracker``) or
+``megatrack`` (a 3D hand per side from KeyNet-F in every view, ``posekit.labeler.megatrack``; needs
+``PYTHONPATH=packages/handtrack`` and a GPU)."""
 KEYNET_WEIGHTS: Path = Path.home() / "hand-labeler-data" / "keynet" / "keynet-strong-pinch.weights.pt"
 """RoboCap's deployed KeyNet-F (sha256 067cf7f6...), copied from pablo-dl-server ``handtrack-data/runs/keynet-strong-pinch``."""
 
@@ -69,8 +73,8 @@ class Config:
     visual_tracker: VisualTrackerKind = "off"
     """OpenCV tracker that carries reviewed boxes when EgoHand misses (origin ``tracked``, ``posekit.labeler.carry``);
     ``off`` = chains hold one miss and end."""
-    propagator: PropagatorKind = "chain"
-    """``chain`` (default, uses ``visual_tracker``) or ``megatrack`` (``visual_tracker`` is then unused)."""
+    propagator: PropagatorKind = "sphere"
+    """``sphere`` (default), ``chain`` (uses ``visual_tracker``) or ``megatrack``; ``visual_tracker`` is used only by ``chain``."""
     keynet_weights: Path = KEYNET_WEIGHTS
     """KeyNet-F weights for ``--propagator megatrack``."""
     keynet_device: str = "cuda"
@@ -115,13 +119,21 @@ def main(config: Config) -> None:
         source: FrameSource = sources[segment_id]
         return VisualCarrier(source, source.times_ns, opencv_tracker(config.visual_tracker))
 
-    def open_megatrack(segment_id: str) -> Propagator:
-        # Imported here: posekit.labeler.keynet needs handtrack on PYTHONPATH, which the default propagator does not.
+    rigs: dict[str, Kb4Rig] = {}
+
+    def open_rig(segment_id: str) -> Kb4Rig:
+        if segment_id not in rigs:
+            rigs[segment_id] = read_rig(dataset, segment_id)
+        return rigs[segment_id]
+
+    def open_propagator(segment_id: str) -> Propagator:
+        if config.propagator == "sphere":
+            return SpherePropagator(open_rig(segment_id))
+        # Imported here: posekit.labeler.keynet needs handtrack on PYTHONPATH, which the other propagators do not.
         from posekit.labeler.keynet import KeyNetEstimator
         from posekit.labeler.megatrack import MegaTrackPropagator
-        from posekit.labeler.rig import Kb4Rig, read_rig
 
-        rig: Kb4Rig = read_rig(dataset, segment_id)
+        rig: Kb4Rig = open_rig(segment_id)
         return MegaTrackPropagator(rig, sources[segment_id], KeyNetEstimator(rig, config.keynet_weights, device=config.keynet_device))
 
     def viewer_url(segment_id: str) -> str:
@@ -141,8 +153,9 @@ def main(config: Config) -> None:
         reviewer=config.reviewer,
         dataset=config.dataset,
         autosave_every=config.autosave_every,
-        open_carrier=None if config.visual_tracker == "off" or config.propagator == "megatrack" else open_carrier,
-        open_propagator=open_megatrack if config.propagator == "megatrack" else None,
+        open_carrier=open_carrier if config.visual_tracker != "off" and config.propagator == "chain" else None,
+        open_propagator=None if config.propagator == "chain" else open_propagator,
+        open_rig=open_rig,
     )
     if config.warm:
         threading.Thread(target=app.summaries, name="labeler-warm", daemon=True).start()

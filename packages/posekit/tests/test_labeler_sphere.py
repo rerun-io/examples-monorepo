@@ -1,5 +1,5 @@
-"""Hand sphere geometry: boxes of a known sphere in every view, triangulation back from 1-2 labeled views, and the 1-view
-depth search against the other views' proposals."""
+"""Hand sphere geometry and its track: boxes of a known sphere in every view, triangulation back from 1-2 labeled views,
+the 1-view depth search against the other views' proposals, and one sphere per hand carried through time."""
 
 from __future__ import annotations
 
@@ -11,8 +11,9 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from posekit.labeler.rig import Kb4Rig
-from posekit.labeler.schema import Box
+from posekit.labeler.schema import Box, HandSide, Proposal, TrackBox, ViewLabel
 from posekit.labeler.sphere import HAND_RADIUS_M, HandSphere, box_iou, lift_box, solve_views, sphere_box, triangulate
+from posekit.labeler.spheretrack import SpherePropagator, SphereStep
 
 YAWS_DEG: tuple[float, ...] = (-70.0, -25.0, 25.0, 70.0, 180.0)
 """Four cameras look forward and down around the head; the last looks backwards and never sees the hands."""
@@ -144,3 +145,118 @@ def test_short_baseline_pair_reports_low_confidence() -> None:
     boxes: dict[int, Box] = truth_boxes(near)
     assert solve_views(near, {0: boxes[0], 1: boxes[1]}, {}).confidence < 0.5
     assert solve_views(near, {1: boxes[1], 2: boxes[2]}, {}).confidence == 1.0
+
+
+# -- the sphere track (posekit.labeler.spheretrack) --------------------------------------------------------------------
+
+STEP_NS: int = 200_000_000
+CAMS: list[int] = [0, 1, 2, 3, 4]
+
+
+def moving(step: int) -> HandSphere:
+    """The left hand moving 3 cm right and 1 cm forward per grid step."""
+    return HandSphere(np.array([-0.06 + 0.03 * step, 0.22, 0.30 + 0.01 * step]), 0.09)
+
+
+def proposals_of(rig: Kb4Rig, sphere: HandSphere, *, flip: bool = False, skip: frozenset[int] = frozenset()) -> list[Proposal]:
+    """EgoHand boxes of the sphere in every camera that sees it (``flip`` = EgoHand calls it the other side)."""
+    side: HandSide = "right" if flip else "left"
+    out: list[Proposal] = []
+    for cam in rig.cams:
+        box: Box | None = sphere_box(rig, cam, sphere)
+        if box is not None and cam not in skip:
+            out.append(Proposal(cam, side, box, 0.8, "egohand"))
+    return out
+
+
+def person(cam: int, box: Box) -> ViewLabel:
+    return ViewLabel(cam, "left", "corrected", box, "person", "pablo")
+
+
+def left(step: SphereStep, cam: int) -> TrackBox:
+    return next(b for b in step.frame.boxes if b.cam == cam and b.side == "left")
+
+
+def run(rig: Kb4Rig, steps: int, seed_cams: tuple[int, ...], skip_at: dict[int, frozenset[int]] | None = None) -> list[SphereStep]:
+    propagator: SpherePropagator = SpherePropagator(rig)
+    out: list[SphereStep] = []
+    previous: SphereStep | None = None
+    for k in range(steps):
+        truth: HandSphere = moving(k)
+        labels: list[ViewLabel] = []
+        if k == 0:
+            for cam in seed_cams:
+                box: Box | None = sphere_box(rig, cam, truth)
+                assert box is not None
+                labels.append(person(cam, box))
+        skip: frozenset[int] = (skip_at or {}).get(k, frozenset())
+        previous = propagator.step(k * STEP_NS, CAMS, proposals_of(rig, truth, flip=k % 2 == 1, skip=skip), labels, previous)
+        out.append(previous)
+    return out
+
+
+def test_two_view_seed_is_tracked_in_every_view() -> None:
+    rig: Kb4Rig = head_rig()
+    steps: list[SphereStep] = run(rig, 10, (1, 2))
+    assert left(steps[0], 1).origin == "reviewed" and left(steps[0], 0).origin == "sphere"
+    for k, step in enumerate(steps):
+        sphere: HandSphere = step.hands["left"].sphere
+        assert np.linalg.norm(sphere.centre - moving(k).centre) < 0.02, k  # the pull towards the last centre lags a moving hand
+        for cam in (0, 1, 2, 3):
+            got: TrackBox = left(step, cam)
+            want: Box | None = sphere_box(rig, cam, moving(k))
+            assert want is not None and got.box is not None and box_iou(got.box, want) > 0.85, (k, cam)
+        assert left(step, 4).box is None  # the backward camera never sees the hand
+
+
+def test_one_missing_step_holds_then_recovers() -> None:
+    rig: Kb4Rig = head_rig()
+    steps: list[SphereStep] = run(rig, 6, (1, 2), skip_at={3: frozenset(CAMS)})
+    assert left(steps[3], 1).origin == "held"
+    assert left(steps[4], 1).origin == "sphere"
+    assert np.linalg.norm(steps[5].hands["left"].sphere.centre - moving(5).centre) < 0.03  # catching up after the 6 cm gap
+
+
+def test_two_missing_steps_end_the_track() -> None:
+    rig: Kb4Rig = head_rig()
+    steps: list[SphereStep] = run(rig, 6, (1, 2), skip_at={3: frozenset(CAMS), 4: frozenset(CAMS)})
+    assert "left" not in steps[4].hands
+    assert left(steps[4], 1).origin != "sphere"
+
+
+def test_one_view_seed_uses_the_proposals_for_depth() -> None:
+    rig: Kb4Rig = head_rig()
+    steps: list[SphereStep] = run(rig, 4, (1,))
+    assert np.linalg.norm(steps[0].hands["left"].sphere.centre - moving(0).centre) < 0.02
+    assert np.linalg.norm(steps[3].hands["left"].sphere.centre - moving(3).centre) < 0.02
+
+
+def test_saved_derived_label_shows_as_derived() -> None:
+    rig: Kb4Rig = head_rig()
+    box: Box | None = sphere_box(rig, 0, moving(0))
+    assert box is not None
+    derived: ViewLabel = ViewLabel(0, "left", "accepted", box, "rig", "pablo")
+    step: SphereStep = SpherePropagator(rig).step(0, CAMS, [], [derived], None)
+    assert left(step, 0).origin == "derived"
+
+
+def test_two_close_hands_never_share_a_box() -> None:
+    """Both hands at the sink: each camera's EgoHand box goes to one hand only, so the tracks do not merge."""
+    rig: Kb4Rig = head_rig()
+    hands: dict[HandSide, HandSphere] = {
+        "left": HandSphere(np.array([-0.05, 0.22, 0.32]), 0.07),
+        "right": HandSphere(np.array([0.09, 0.22, 0.32]), 0.07),
+    }
+    labels: list[ViewLabel] = []
+    for side, sphere in hands.items():
+        for cam in (1, 2):
+            box: Box | None = sphere_box(rig, cam, sphere)
+            assert box is not None
+            labels.append(ViewLabel(cam, side, "corrected", box, "person", "pablo"))
+    propagator: SpherePropagator = SpherePropagator(rig)
+    step: SphereStep = propagator.step(0, CAMS, [], labels, None)
+    # Next step: only the right hand is detected (the left one is hidden), and EgoHand calls it "left".
+    only_right: list[Proposal] = [Proposal(p.cam, "left", p.box, p.score, p.model) for p in proposals_of(rig, hands["right"])]
+    step = propagator.step(STEP_NS, CAMS, only_right, [], step)
+    assert np.linalg.norm(step.hands["right"].sphere.centre - hands["right"].centre) < 0.01
+    assert step.hands["left"].held == 1  # held where it was, not pulled onto the right hand

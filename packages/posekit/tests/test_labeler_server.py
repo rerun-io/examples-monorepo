@@ -20,6 +20,7 @@ from numpy import ndarray
 from serde.json import from_json, to_json
 
 from posekit.labeler.queue import ProposalProvider
+from posekit.labeler.rig import Kb4Rig
 from posekit.labeler.schema import (
     AcceptRange,
     AcceptResult,
@@ -36,11 +37,13 @@ from posekit.labeler.schema import (
     SegmentInfo,
     SegmentSplit,
     SegmentSummary,
+    SolveResult,
     TrackFrame,
     ViewLabel,
 )
 from posekit.labeler.server import FrameProvider, LabelApp, make_server
 from posekit.labeler.sheet import SIDE_RGB, PlaybackInfo, SheetInfo
+from posekit.labeler.sphere import HandSphere, box_iou, sphere_box
 from posekit.labeler.store import LabelStore, LayerContents, load_layer_file, load_layer_file_contents
 from posekit.labeler.tracker import BoxCarrier
 
@@ -95,11 +98,16 @@ class Running:
     frames: dict[str, FakeFrames]
 
 
-def serve(tmp_path: Path, open_carrier: Callable[[str], BoxCarrier] | None = None) -> Iterator[Running]:
+def serve(
+    tmp_path: Path, open_carrier: Callable[[str], BoxCarrier] | None = None, open_rig: Callable[[str], Kb4Rig] | None = None
+) -> Iterator[Running]:
     static: Path = tmp_path / "static"
     static.mkdir()
     (static / "index.html").write_text("<html>labeler</html>")
     (static / "app.js").write_text("console.log('hi')")
+    (static / "assets").mkdir()
+    (static / "assets" / "index-a1b2.js").write_text("export {}")
+    (static / "assets" / "index-a1b2.css").write_text("body{}")
     (tmp_path / "secret.txt").write_text("nope")
     frames: dict[str, FakeFrames] = {}
 
@@ -120,6 +128,7 @@ def serve(tmp_path: Path, open_carrier: Callable[[str], BoxCarrier] | None = Non
         reviewer="tester",
         autosave_every=3,
         open_carrier=open_carrier,
+        open_rig=open_rig,
     )
     server: ThreadingHTTPServer = make_server(app, "127.0.0.1", 0)
     thread: threading.Thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -168,6 +177,75 @@ def test_static_files(running: Running) -> None:
     assert fetch(running.url + "/static/%2e%2e/secret.txt")[0] == 404
     assert fetch(running.url + "/static/missing.css")[0] == 404
     assert fetch(running.url + "/nope")[0] == 404
+
+
+def test_built_ui_assets(running: Running) -> None:
+    """Vite's build (``base: './'``) loads ``./assets/<hash>.js|css`` from the server root."""
+    assert fetch(running.url + "/assets/index-a1b2.js") == (200, "text/javascript", b"export {}")
+    assert fetch(running.url + "/assets/index-a1b2.css") == (200, "text/css", b"body{}")
+    assert fetch(running.url + "/assets/../../secret.txt")[0] == 404
+    assert fetch(running.url + "/api/nope")[0] == 404
+
+
+def look(yaw_deg: float, pitch_deg: float) -> ndarray:
+    """Rig-from-camera rotation of a camera looking at yaw (about +y) and pitch (down); rig x right, y down, z forward."""
+    yaw, pitch = np.radians(yaw_deg), np.radians(pitch_deg)
+    forward: ndarray = np.array([np.sin(yaw) * np.cos(pitch), np.sin(pitch), np.cos(yaw) * np.cos(pitch)])
+    right: ndarray = np.cross([0.0, 1.0, 0.0], forward)
+    right /= np.linalg.norm(right)
+    return np.stack([right, np.cross(forward, right), forward], axis=-1)
+
+
+def six_camera_rig() -> Kb4Rig:
+    """The labeler's six cameras at the fake frames' size, looking out and down around a 9 cm head."""
+    yaws: tuple[float, ...] = (-70.0, -25.0, 25.0, 70.0, 180.0, 180.0)
+    cam_from_rig: ndarray = np.tile(np.eye(4), (6, 1, 1))
+    for cam, yaw in enumerate(yaws):
+        rig_from_cam: ndarray = look(yaw, 35.0 if yaw != 180.0 else 0.0)
+        origin: ndarray = 0.09 * np.array([np.sin(np.radians(yaw)), 0.0, np.cos(np.radians(yaw))])
+        cam_from_rig[cam, :3, :3] = rig_from_cam.T
+        cam_from_rig[cam, :3, 3] = -rig_from_cam.T @ origin
+    return Kb4Rig(
+        tuple(f"name{cam}" for cam in range(6)),
+        np.tile([float(WIDTH), float(HEIGHT)], (6, 1)),
+        np.full((6, 2), 38.0),
+        np.tile([WIDTH / 2.0, HEIGHT / 2.0], (6, 1)),
+        np.zeros((6, 4)),
+        cam_from_rig,
+    )
+
+
+def test_solve_derives_every_view(tmp_path: Path) -> None:
+    rig: Kb4Rig = six_camera_rig()
+    hand: HandSphere = HandSphere(np.array([0.04, 0.22, 0.32]), 0.09)
+    for running in serve(tmp_path, open_rig=lambda sid: rig):
+        t_ns: int = FakeFrames().times_ns[2]
+        labeled: list[dict[str, object]] = []
+        for cam in (1, 2):
+            box: Box | None = sphere_box(rig, cam, hand)
+            assert box is not None
+            labeled.append({"cam": cam, "box": {"x0": box.x0, "y0": box.y0, "x1": box.x1, "y1": box.y1}})
+        status, _, body = fetch(running.url + "/api/solve", json.dumps({"segment_id": "seg_a", "t_ns": t_ns, "side": "left", "labeled": labeled}))
+        assert status == 200, body
+        result: SolveResult = from_json(SolveResult, body.decode())
+        assert (result.side, result.mode, result.labeled) == ("left", "triangulated", [1, 2])
+        assert [item.cam for item in result.boxes] == list(range(6))
+        derived: Box | None = result.boxes[3].box
+        want: Box | None = sphere_box(rig, 3, hand)
+        assert derived is not None and want is not None and box_iou(derived, want) > 0.9
+        assert result.boxes[4].box is None and result.boxes[5].box is None
+        empty: dict[str, object] = {"segment_id": "seg_a", "t_ns": t_ns, "side": "left", "labeled": []}
+        assert fetch(running.url + "/api/solve", json.dumps(empty))[0] == 400
+
+
+def test_solve_without_a_rig_is_not_found(running: Running) -> None:
+    request: dict[str, object] = {
+        "segment_id": "seg_a",
+        "t_ns": FakeFrames().times_ns[0],
+        "side": "left",
+        "labeled": [{"cam": 0, "box": {"x0": 1.0, "y0": 1.0, "x1": 9.0, "y1": 9.0}}],
+    }
+    assert fetch(running.url + "/api/solve", json.dumps(request))[0] == 404
 
 
 def test_config_segments_and_segment(running: Running) -> None:

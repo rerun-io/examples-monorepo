@@ -67,10 +67,12 @@ from serde.json import from_json, to_json
 
 from posekit.labeler.actions import classify_labels, effort_summary
 from posekit.labeler.queue import ProposalProvider, ReviewQueue
+from posekit.labeler.rig import Kb4Rig
 from posekit.labeler.schema import (
     AcceptRange,
     AcceptResult,
     ActionEvent,
+    Box,
     CameraInfo,
     EffortSummary,
     FrameLabels,
@@ -82,11 +84,15 @@ from posekit.labeler.schema import (
     SegmentInfo,
     SegmentSplit,
     SegmentSummary,
+    SolvedBox,
+    SolveRequest,
+    SolveResult,
     TrackFrame,
     ViewLabel,
     ViewState,
 )
 from posekit.labeler.sheet import PlaybackCell, PlaybackInfo, SheetInfo, contact_sheet, encode_jpeg, filmstrip, playback_info, sheet_info, strip_cell
+from posekit.labeler.sphere import ViewSolve, solve_views
 from posekit.labeler.store import LabelRow, LabelStore, NewWrite
 from posekit.labeler.tracker import BoxCarrier, Propagator, TrackCache
 
@@ -204,6 +210,8 @@ class Segment:
     """Serialises autosave and commit writes."""
     label_lock: LockType
     """Serialises label writes (each write and the track invalidation after it are one step)."""
+    rig: Kb4Rig | None = None
+    """The calibrated cameras (``/api/solve``); None when the server has no ``open_rig``."""
     autosave_pending: bool = False
     """An autosave is scheduled and has not run yet."""
 
@@ -239,6 +247,7 @@ class LabelApp:
         cached_cells: int = 720,
         open_carrier: Callable[[str], BoxCarrier] | None = None,
         open_propagator: Callable[[str], Propagator] | None = None,
+        open_rig: Callable[[str], Kb4Rig] | None = None,
     ) -> None:
         """Bind the labeler to its providers.
 
@@ -260,6 +269,7 @@ class LabelApp:
                 boxes in the machine track (origin ``tracked``); None = chains only hold.
             open_propagator: Opens the machine propagator of one segment (called after ``open_frames``); None = the chain
                 tracker (``posekit.labeler.tracker.ChainPropagator`` with ``open_carrier``'s carrier).
+            open_rig: Reads the calibrated cameras of one segment, for ``/api/solve``; None = solving is unavailable.
         """
         self.segment_ids: list[str] = segment_ids
         self.open_frames: Callable[[str], FrameProvider] = open_frames
@@ -274,6 +284,7 @@ class LabelApp:
         self.prefetch_items: int = prefetch_items
         self.open_carrier: Callable[[str], BoxCarrier] | None = open_carrier
         self.open_propagator: Callable[[str], Propagator] | None = open_propagator
+        self.open_rig: Callable[[str], Kb4Rig] | None = open_rig
         self._segments: dict[str, Segment] = {}
         self._open_locks: dict[str, LockType] = {sid: threading.Lock() for sid in segment_ids}
         self._frames: OrderedDict[FrameKey, Future[UInt8[ndarray, "h w 3"]]] = OrderedDict()
@@ -361,7 +372,8 @@ class LabelApp:
                 segment_id, times_ns=info.times_ns, cams=cams, proposals=self.proposals, store=store, carrier=carrier, propagator=propagator
             )
             period_ns: int = int(np.median(np.diff(info.times_ns))) if len(info.times_ns) > 1 else 200_000_000
-            opened = Segment(info, frames, store, queue, tracker, period_ns, threading.Lock(), threading.Lock())
+            rig: Kb4Rig | None = None if self.open_rig is None else self.open_rig(segment_id)
+            opened = Segment(info, frames, store, queue, tracker, period_ns, threading.Lock(), threading.Lock(), rig)
             self._segments[segment_id] = opened
             if info.times_ns:
                 self._warmer.submit(self._warm_track, opened)
@@ -521,6 +533,35 @@ class LabelApp:
             segment.store.log_actions(events)
             self._maybe_autosave(segment)
         return stored
+
+    def solve(self, request: SolveRequest) -> SolveResult:
+        """One hand side's box in every camera from the reviewer's boxes in some (``posekit.labeler.sphere``); with one
+        labeled view the other views' EgoHand proposals at ``t_ns`` choose the depth."""
+        segment: Segment = self.segment(request.segment_id)
+        if segment.rig is None:
+            raise NotFoundError("this server has no camera rig (started without open_rig)")
+        t_ns: int = self._grid_time(segment, request.t_ns)
+        cams: set[int] = {camera.cam for camera in segment.info.cams}
+        labeled: dict[int, Box] = {}
+        for item in request.labeled:
+            if item.cam not in cams or item.cam in labeled:
+                raise ValueError(f"labeled camera {item.cam} is unknown or repeated")
+            labeled[item.cam] = item.box
+        if not labeled:
+            raise ValueError("solve needs at least one labeled box")
+        others: dict[int, list[Box]] = {}
+        for proposal in self.proposals.proposals(request.segment_id, t_ns):
+            if proposal.model == "egohand" and proposal.cam not in labeled:
+                others.setdefault(proposal.cam, []).append(proposal.box)
+        solved: ViewSolve = solve_views(segment.rig, labeled, others)
+        return SolveResult(
+            request.side,
+            solved.mode,
+            round(solved.confidence, 4),
+            round(solved.sphere.radius, 5),
+            list(solved.labeled),
+            [SolvedBox(cam, solved.boxes[cam]) for cam in segment.rig.cams],
+        )
 
     def accept_range(self, request: AcceptRange) -> AcceptResult:
         """Accept the machine track of every grid time in [t0_ns, t1_ns]: labels where there are none, reviewer labels kept."""
@@ -685,6 +726,17 @@ class LabelApp:
         return CommitResponse(str(path), count)
 
 
+STATIC_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".map": "application/json",
+    ".json": "application/json",
+    ".wasm": "application/wasm",
+}
+"""Content types of the built UI's files (``mimetypes`` depends on the host's tables)."""
 ROUTE_FRAME: re.Pattern[str] = re.compile(r"^/api/frame/([^/]+)/(-?\d+)/(-?\d+)\.jpg$")
 ROUTE_FRAMESET: re.Pattern[str] = re.compile(r"^/api/frameset/([^/]+)/(-?\d+)$")
 ROUTE_SHEET: re.Pattern[str] = re.compile(r"^/api/sheet/([^/]+)/(-?\d+)\.(jpg|json)$")
@@ -795,6 +847,8 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
                 self._json(app.actions(match.group(1)))
             elif match := ROUTE_EFFORT.match(path):
                 self._json(app.effort(match.group(1)))
+            elif not path.startswith("/api/"):
+                self._static(path.lstrip("/"))  # the built UI: index.html loads ./assets/<hash>.js|css
             else:
                 raise NotFoundError(f"no route GET {path}")
 
@@ -807,6 +861,8 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
                 self._json(app.fill_range(from_json(RangeRequest, body)))
             elif path == "/api/accept_range":
                 self._json(app.accept_range(from_json(AcceptRange, body)))
+            elif path == "/api/solve":
+                self._json(app.solve(from_json(SolveRequest, body)))
             elif match := ROUTE_COMMIT.match(path):
                 self._json(app.commit(match.group(1)))
             else:
@@ -817,9 +873,7 @@ def make_handler(app: LabelApp) -> type[BaseHTTPRequestHandler]:
             target: Path = (root / name).resolve()
             if not target.is_relative_to(root) or not target.is_file():
                 raise NotFoundError(f"no static file {name!r}")
-            content_type: str = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-            if target.suffix == ".js":
-                content_type = "text/javascript"
+            content_type: str = STATIC_TYPES.get(target.suffix) or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             self._send(200, target.read_bytes(), content_type)
 
     return Handler

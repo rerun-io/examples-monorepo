@@ -243,7 +243,7 @@ class MegaTrackPropagator:
             for side in HAND_SIDES:
                 label: ViewLabel | None = stored.get((cam, side))
                 if label is not None:
-                    decided[(cam, side)] = TrackBox(cam, side, label.box, "reviewed", None)
+                    decided[(cam, side)] = TrackBox(cam, side, label.box, "derived" if label.source == "rig" else "reviewed", None)
                     continue
                 found: SideResult | None = results.get(side)
                 if found is None or cam not in found.views:

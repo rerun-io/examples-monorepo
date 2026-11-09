@@ -25,7 +25,7 @@ LabelStatus: TypeAlias = Literal["accepted", "corrected", "no_hand", "rejected"]
 - ``rejected``: this camera/time cannot be judged (blur, exposure, decode error); excluded from training and eval.
 """
 
-LabelSource: TypeAlias = Literal["egohand", "hands_layer", "person", "agent", "range", "tracker"]
+LabelSource: TypeAlias = Literal["egohand", "hands_layer", "person", "agent", "range", "tracker", "rig"]
 """Where the box geometry came from.
 
 - ``egohand``: the posekit EgoHand proposal, accepted unchanged.
@@ -34,12 +34,15 @@ LabelSource: TypeAlias = Literal["egohand", "hands_layer", "person", "agent", "r
 - ``agent``: drawn or edited by a labeling agent (for example Astra).
 - ``range``: filled between two reviewed keyframes from consistent proposals (MEgATrack "accept the tracked run").
 - ``tracker``: the machine track's box (or its "no hand"), accepted by a reviewer who watched it (``/api/accept_range``).
+- ``rig``: derived from the reviewer's boxes in other cameras at the same time (the hand sphere through the KB4 rig,
+  ``posekit.labeler.sphere``), saved with them.
 """
 
-TrackOrigin: TypeAlias = Literal["reviewed", "chained", "held", "tracked", "detected", "fused", "disagree", "none"]
+TrackOrigin: TypeAlias = Literal["reviewed", "derived", "chained", "held", "tracked", "detected", "fused", "disagree", "sphere", "none"]
 """Why the machine track has (or has no) box at one (time, cam, side); see ``posekit.labeler.tracker``. ``fused`` and
 ``disagree`` come only from ``posekit.labeler.megatrack`` (the box around a 3D hand's projected keypoints; ``disagree``:
-the views do not agree on that hand, so the reviewer should look)."""
+the views do not agree on that hand, so the reviewer should look). ``derived`` is a stored label with source ``rig``;
+``sphere`` is the box of the 3D hand sphere that ``posekit.labeler.spheretrack`` carries through time."""
 
 ActionKind: TypeAlias = Literal["accept_range", "draw_box", "pick_proposal", "set_side", "move_box", "no_hand", "reject", "accept_frame"]
 """One reviewer action of the MEgATrack loop; every kind except ``accept_range``/``accept_frame`` is an intervention."""
@@ -359,3 +362,56 @@ class EffortSummary:
     """Wall-clock time between consecutive actions, each gap capped at ``actions.IDLE_CAP_S``, s."""
     boxes_per_reviewer_s: float | None
     """Stored labels with a box per ``reviewer_wall_s``; None when no wall time was measured."""
+
+
+SolveMode: TypeAlias = Literal["triangulated", "proposals", "prior"]
+"""How a hand sphere was placed: from two or more labeled views, from one view plus the other views' proposals, or from
+one view and the hand-size prior (``posekit.labeler.sphere``)."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class LabeledBox:
+    """A reviewer's box for one hand side in one camera."""
+
+    cam: int
+    box: Box
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class SolveRequest:
+    """Derive one hand side's box in every camera from the reviewer's boxes in one or more cameras (``/api/solve``)."""
+
+    segment_id: str
+    t_ns: int
+    """Grid time; with one labeled view, that time's proposals choose the depth."""
+    side: HandSide
+    labeled: list[LabeledBox]
+    """At least one."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class SolvedBox:
+    """One camera's box from a solve: the reviewer's in a labeled view, the sphere's elsewhere (None = not in view)."""
+
+    cam: int
+    box: Box | None
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class SolveResult:
+    """Answer of ``/api/solve``."""
+
+    side: HandSide
+    mode: SolveMode
+    confidence: float
+    """Depth confidence in [0, 1]; ask for another view when it is low (``posekit.labeler.sphere.ViewSolve``)."""
+    radius_m: float
+    """Sphere radius, m."""
+    labeled: list[int]
+    """Cameras the reviewer boxed."""
+    boxes: list[SolvedBox]
+    """Every camera, rig order."""

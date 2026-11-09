@@ -22,14 +22,14 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Literal, TypeAlias
+from typing import Literal
 
 import numpy as np
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
 from posekit.labeler.rig import Kb4Rig
-from posekit.labeler.schema import Box
+from posekit.labeler.schema import Box, SolveMode
 
 HAND_RADIUS_M: float = 0.095
 """Radius of the sphere around an adult hand (the circle around its keypoints), m."""
@@ -48,8 +48,6 @@ LM_ITERATIONS: int = 30
 FULL_CONFIDENCE_ANGLE_DEG: float = 10.0
 """Angle between two labeled views' rays at the hand from which depth counts as fixed: RoboCap's stacked front/eye
 cameras (2 cm apart) see a hand at 40 cm under about 3 degrees, the left/right pairs (9-10 cm) under about 14."""
-
-SolveMode: TypeAlias = Literal["triangulated", "proposals", "prior"]
 
 
 @dataclass(frozen=True, slots=True)

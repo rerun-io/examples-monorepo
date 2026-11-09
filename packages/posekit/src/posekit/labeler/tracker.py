@@ -188,7 +188,7 @@ def track_step(
             label: ViewLabel | None = stored.get((cam, side))
             if label is None:
                 continue
-            decided[side] = TrackBox(cam, side, label.box, "reviewed", None)
+            decided[side] = TrackBox(cam, side, label.box, "derived" if label.source == "rig" else "reviewed", None)
             if label.box is not None:
                 prior: Chain | None = chains.get((cam, side))
                 continues: bool = prior is not None and prior.reviewed and iou(prior.box, label.box) >= CHAIN_IOU
