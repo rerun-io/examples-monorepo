@@ -157,7 +157,7 @@ same roles with `--oak-egohand-fast`.
 First setup exports and builds missing artifacts through posekit and trtkit;
 subsequent calls use their cache. `EgoHandFastConfig.fp8_tail_blocks` controls the
 precision trade-off (0–32); both precision and calibration affect the export cache
-key. The committed calibration (`assets/egohand_nvfp4.rrd`) uses 138 crops from disjoint SelfCap frames, with
+key. The `egohand-fast` calibration (`assets/egohand_nvfp4.rrd`) uses 138 crops from disjoint SelfCap frames, with
 mount-fit indices excluded. Its record includes exact frame indices and RGB
 SHA256 hashes. Reproduce it from the catalog with:
 

@@ -1306,7 +1306,7 @@ description = "EgoHand accuracy and batch-one latency of one stack (--stack, def
 [feature.posekit-hands.tasks.posekit-egohand-calibrate]
 cmd = "python tools/apps/egohand_calibrate.py"
 cwd = "packages/posekit"
-description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames; checks benchmark hashes and mount-fit exclusions"
+description = "Regenerate the egohand-fast (SelfCap) pose calibration, assets/egohand_nvfp4.rrd, from held-out catalog frames; checks benchmark hashes and mount-fit exclusions (the egohand-catalog records are frozen, see docs/egohand-spark.md)"
 
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"

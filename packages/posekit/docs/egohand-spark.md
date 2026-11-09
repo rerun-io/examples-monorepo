@@ -10,7 +10,10 @@ rotations, identity, translation, scale and all 26 segment scales.
   FP32; batch 1; a CUDA resize that matches the reference PIL input bit for bit.
 - Calibration: `assets/egohand_catalog.rrd` (pose) and `assets/egohand_detector_catalog.rrd`
   (detector), 200 frames / 243 hand crops from segments disjoint from the evaluation
-  segments, checked against every evaluation frame by decoded-RGB SHA256.
+  segments, checked against every evaluation frame by decoded-RGB SHA256. Both records are
+  frozen artifacts: `posekit-egohand-calibrate` regenerates only `assets/egohand_nvfp4.rrd`
+  (the `egohand-fast` stack). Their producer, `apis/hands_cached_calibrate.py`, left the tree
+  in 645156cb7; it is intact at commit 2e7c463ba.
 
 ```python
 from posekit.models import EgoHandStack
