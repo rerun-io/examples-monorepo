@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 from jaxtyping import Bool, Float, Float64
 from numpy import ndarray
+from serde import serde
 from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 
 
@@ -62,6 +63,7 @@ def hand_errors(
     )
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class Summary:
     """Mean and 90th percentile of a per-hand error; ``None`` when no hand was scored."""

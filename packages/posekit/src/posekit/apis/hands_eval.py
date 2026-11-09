@@ -123,16 +123,6 @@ class HandsEvalConfig:
 
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
-class MetricSummary:
-    """Mean and p90 over hands; ``None`` when no hand was scored."""
-
-    mean: float | None
-    p90: float | None
-    count: int
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
 class EvalCell:
     """One model x dataset x protocol."""
 
@@ -147,7 +137,7 @@ class EvalCell:
     """Detector protocol: found with the correct side / visible ground-truth hands."""
     recall_any_side: float | None
     """Detector protocol: a box of either side overlaps the hand / visible ground-truth hands."""
-    metrics: dict[str, MetricSummary]
+    metrics: dict[str, Summary]
     """Per metric (``mpjpe_mm``, ``pa_mpjpe_mm``, ``rte_mm``, ``epe_2d_px``); RTE is ``None`` for WiLoR (virtual camera)."""
 
 
@@ -385,11 +375,10 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
                     scored.extend(hands)
                     if config.log_rrd:
                         log_segment_frames(model, protocol, dataset, segment, hands, boxes, offsets[segment.segment_id])
-                metrics: dict[str, MetricSummary] = {}
+                metrics: dict[str, Summary] = {}
                 for metric in METRICS:
                     values: Float64[ndarray, "n"] = np.asarray([getattr(hand.errors, metric) for hand in scored], np.float64)
-                    summary: Summary = summarize(values[np.isfinite(values)])
-                    metrics[metric] = MetricSummary(summary.mean, summary.p90, summary.count)
+                    metrics[metric] = summarize(values[np.isfinite(values)])
                 cells.append(
                     EvalCell(
                         model, dataset, protocol, gt_hands, len(scored),
