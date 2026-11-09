@@ -20,7 +20,6 @@ import numpy as np
 import torch
 from egohand_inference.hand_detector_2d.rtdetr.tracking import select_new
 from egohand_inference.perf import PerfStage
-from einops import rearrange
 from huggingface_hub import hf_hub_download, snapshot_download
 from jaxtyping import Bool, Float32, Int, Int64, UInt8
 from numpy import ndarray
@@ -33,6 +32,7 @@ from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import HandDetector, TopDownHandPose3d
+from posekit.ops.pil_resize import resize_bilinear_uint8
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb
 from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
@@ -137,7 +137,13 @@ class EgoHandDetectorConfig:
     fp16_trunk: bool = False
     """Run the detector convolutional trunk in FP16, with its outputs retained in FP32."""
     gpu_preprocessing: bool = False
-    """Resize decoded CUDA frames in place of the reference PIL host round trip."""
+    """Resize decoded CUDA frames in place of the reference PIL host round trip; the result is bit-identical."""
+    fp8_calibration: Path | None = None
+    """Detector activation ranges; set, the three encoder input projections run in FP8, the other convolutions in FP16, decoding in FP32."""
+
+    def __post_init__(self) -> None:
+        if self.fp16_trunk and self.fp8_calibration is not None:
+            raise ValueError("Set fp16_trunk or fp8_calibration, not both: the FP8 detector already runs its other convolutions in FP16.")
 
     def weights_path(self) -> Path:
         """The ONNX file: ``weights``, or the pinned download in the Hugging Face cache."""
@@ -156,7 +162,15 @@ class EgoHandDetector(HandDetector):
     def __init__(self, config: EgoHandDetectorConfig) -> None:
         self.config: EgoHandDetectorConfig = config
         weights: Path = config.weights_path()
-        if config.fp16_trunk:
+        if config.fp8_calibration is not None:
+            from posekit.models.egohand_detector_quantization import quantized_detector_path
+
+            if not isinstance(config.backend, TensorRtBackendConfig):
+                raise ValueError("The FP8 detector requires a TensorRT backend.")
+            if torch.cuda.get_device_capability()[0] < 9:
+                raise ValueError('The FP8 detector needs an FP8 GPU (compute capability 9+); without one use fast_egohand_configs(backbone_precision="bf16").')
+            weights = quantized_detector_path(weights, config.fp8_calibration, config.backend.cache_dir)
+        elif config.fp16_trunk:
             from trtkit.onnx_precision import fp16_trunk
 
             if not isinstance(config.backend, TensorRtBackendConfig):
@@ -178,7 +192,7 @@ class EgoHandDetector(HandDetector):
         for start in range(0, len(frames_rgb), self.runtime.spec.max_batch_size):
             stop: int = min(start + self.runtime.spec.max_batch_size, len(frames_rgb))
             pixels: Float32[Tensor, "b 3 640 640"] = (
-                _resize_on_gpu(frames_rgb[start:stop]) if self.config.gpu_preprocessing else _resize_with_pil(frames_rgb[start:stop])
+                resize_bilinear_uint8(frames_rgb[start:stop], (640, 640)) if self.config.gpu_preprocessing else _resize_with_pil(frames_rgb[start:stop])
             )
             # Filled on the device: a host tensor here would be a blocking upload on every call.
             sizes: Int64[Tensor, "b 2"] = torch.empty((stop - start, 2), dtype=torch.int64, device=frames_rgb.device)
@@ -219,13 +233,6 @@ def _resize_with_pil(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b
             pool.map(lambda frame: np.asarray(Image.fromarray(frame).resize((640, 640), Image.Resampling.BILINEAR)).copy(), host_frames)
         )
     return torch.from_numpy(np.stack(resized)).permute(0, 3, 1, 2).to(device=frames_rgb.device, dtype=torch.float32) / 255.0
-
-
-def _resize_on_gpu(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b 3 640 640"]:
-    """Antialiased bilinear resize of the decoded CUDA frames, rounded to 8-bit levels like the PIL path."""
-    return torch.nn.functional.interpolate(
-        rearrange(frames_rgb, "b h w c -> b c h w").float(), size=(640, 640), mode="bilinear", align_corners=False, antialias=True,
-    ).round().clamp_(0, 255) / 255.0
 
 
 @serde
