@@ -1,5 +1,6 @@
 """Per-frame hand logging of the posekit-video-hands app (no models, rr.log captured)."""
 
+import threading
 from typing import Any
 
 import numpy as np
@@ -8,6 +9,7 @@ import rerun as rr
 import torch
 
 from posekit.apis.video_hands import (
+    EXAMPLES,
     JOINT_CLASS,
     LINK_COLOR,
     VideoHandsProgress,
@@ -17,8 +19,10 @@ from posekit.apis.video_hands import (
     log_chunk_hands,
     log_hand_annotation_context,
     pinhole_camera,
+    run_video_hands,
     send_blueprint,
 )
+from posekit.models import HandPose3dPipeline
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
 
@@ -142,3 +146,44 @@ def test_progress_reads_as_the_status_line() -> None:
     assert str(VideoHandsProgress("video", 0, 180, 0, note)) == f"Video loaded, finding hands; {note}"
     assert str(VideoHandsProgress("hands", 16, 180, 32, note)) == f"Frames 16/180, 32 hands; {note}"
     assert str(VideoHandsProgress("done", 180, 180, 360, note)) == f"processed 180 frames, 360 hands; {note}"
+
+
+class _NoHands(HandPose3dPipeline):
+    """A hand pipeline that finds nothing, so a run exercises only the video decode and the logging."""
+
+    def __init__(self) -> None:
+        self.pose = type("Pose", (), {"skeleton": HAND_21})()
+
+    def __call__(self, frames_rgb: torch.Tensor, camera: object = None) -> tuple[HandDetections, HandPoses3d]:
+        return HandDetections.empty(frames_rgb.device), HandPoses3d(
+            keypoints=Keypoints3d.empty(HAND_21, frames_rgb.device, root_indices=(0,), with_xyz_camera=True), sides=()
+        )
+
+
+@pytest.mark.integration
+def test_a_run_resumed_on_new_threads_still_decodes_on_the_gpu() -> None:
+    # Gradio resumes a streaming generator on any worker thread; NVDEC needs the CUDA context current there.
+    pytest.importorskip("torchcodec", reason="the GPU video decoder comes with the hands env")
+    if not torch.cuda.is_available():
+        pytest.skip("NVDEC decoding needs a CUDA GPU")
+    video = EXAMPLES / "gsi_sewing_left_front.mp4"
+    if not video.exists():
+        pytest.skip(f"example clip {video.name} missing")
+    rr.init("thread-hop-test")
+    rr.memory_recording()  # the global recording, visible from every thread; nothing leaves the process
+    run = run_video_hands(VideoHandsSettings(video_path=video, max_frames=64), _NoHands())
+    steps: list[VideoHandsProgress | BaseException] = []
+
+    def step() -> None:
+        try:
+            steps.append(next(run))
+        except BaseException as error:  # the failure is the test's result, re-raised below
+            steps.append(error)
+
+    while not steps or isinstance(steps[-1], VideoHandsProgress) and steps[-1].stage != "done":
+        thread = threading.Thread(target=step)
+        thread.start()
+        thread.join()
+    assert not any(isinstance(item, BaseException) for item in steps), steps[-1]
+    last = steps[-1]
+    assert isinstance(last, VideoHandsProgress) and last.frames_done == 64
