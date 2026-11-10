@@ -371,6 +371,21 @@ def _coco_phi(points: Float32[Tensor, "k 2 21 3"], valid: Bool[Tensor, "k 2"], g
 # --- the producer -------------------------------------------------------------------------------------------------------------------
 
 
+def warm_linalg(device: torch.device) -> None:
+    """Initialise torch's lazily loaded linear-algebra backends on this (the main) thread, once per device, before producer threads
+    start: concurrent first calls race in that lazy initialisation ("lazy wrapper should be called at most once"; it killed the
+    2026-11-09 long run in ``local_crop_from_net``'s ``torch.linalg.inv`` right after a resume)."""
+    for where in {torch.device("cpu"), device}:
+        eye: Float32[Tensor, "2 3 3"] = torch.eye(3, device=where).expand(2, 3, 3).contiguous()
+        torch.linalg.inv(eye)
+        torch.linalg.inv_ex(eye)
+        torch.linalg.cross(eye[:, 0], eye[:, 1])
+        torch.linalg.vector_norm(eye, dim=-1)
+        torch.linalg.solve(eye, eye)
+        if where.type == "cuda":
+            torch.cuda.synchronize(where)
+
+
 def _video_field(camera: str) -> str:
     return f"{camera}/pinhole/video:VideoStream:sample"
 
@@ -388,6 +403,7 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
 
     from handtrack.data.catalog import _generic_model
 
+    warm_linalg(device)  # here, on the thread that builds the producers, never first inside a producer thread
     spec: KeyNetDataset = KEYNET_DATASETS[name]
     generic_rest: Float32[Tensor, "21 3"] = _generic_model().landmark_rest_positions.float()
     coefficients: Float32[Tensor, "3"] = palm_coefficients(generic_rest)

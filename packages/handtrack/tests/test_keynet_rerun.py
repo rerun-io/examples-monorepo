@@ -139,3 +139,37 @@ def test_echo_stream_serves_keynet_batches_split_equally_across_datasets() -> No
         assert Counter(batch.dataset.tolist()) == {0: 8, 1: 8, 2: 8, 3: 8}
     with pytest.raises(RuntimeError):
         stream.next_detnet_batch()
+
+
+_RACE = """
+import threading, torch
+from handtrack.data.keynet_rerun import warm_linalg
+device = torch.device("cuda")
+warm_linalg(device)
+errors = []
+barrier = threading.Barrier(8)
+def work():
+    barrier.wait()
+    try:
+        for _ in range(20):
+            eye = torch.eye(3, device=device).expand(16, 3, 3).contiguous()
+            torch.linalg.inv(eye); torch.linalg.inv_ex(eye); torch.linalg.cross(eye[:, 0], eye[:, 1])
+    except Exception as error:
+        errors.append(repr(error))
+threads = [threading.Thread(target=work) for _ in range(8)]
+[t.start() for t in threads]; [t.join() for t in threads]
+print("ERRORS", errors)
+assert not errors
+"""
+
+
+@pytest.mark.integration
+def test_producer_threads_can_call_linalg_at_once_after_warm_up() -> None:
+    """Regression (2026-11-09): eight threads hit torch.linalg at the same moment in a fresh process, after warm_linalg."""
+    import subprocess
+    import sys
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    result = subprocess.run([sys.executable, "-c", _RACE], capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
