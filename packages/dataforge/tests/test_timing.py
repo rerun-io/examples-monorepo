@@ -213,3 +213,37 @@ def test_finished_prefetch_has_no_fetch_stage(tmp_path: Path, monkeypatch: pytes
     record: ConvertRecord = convert.convert_one(dataset, identity, tmp_path, force=False, version="test", prefetched=pending)
     assert "fetch" not in record.stage_s
     assert record.error == ("OSError: fetch failed" if failed else None)
+
+
+def test_parallel_jobs_convert_every_selected_sequence_with_its_own_timer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    import time
+
+    identities = [SequenceIdentity("robocap", (f"s{i}",)) for i in range(5)]
+    monkeypatch.setenv("DATAFORGE_OUTPUT_ROOT", str(tmp_path))
+    monkeypatch.setattr(RobocapDataset, "discover", lambda self: [(i, tmp_path) for i in identities])
+    running: list[int] = []
+    peak: list[int] = [0]
+    guard = threading.Lock()
+
+    def slow_convert(self, identity, source, *, force):
+        with guard:
+            running.append(1)
+            peak[0] = max(peak[0], len(running))
+        with self.timer.stage("transcode"):
+            time.sleep(0.2)
+        self.timer.capture_s = float(identity.parts[0][1:])  # each record must keep its own sequence's timer
+        with guard:
+            running.pop()
+        target = paths.rrd_path(tmp_path, layer="base", identity=identity)
+        with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
+            rr.send_columns("/value", indexes=[rr.TimeColumn("video_time", duration=[0.0])], columns=rr.Scalars.columns(scalars=[0.0]), recording=recording)
+        return target
+
+    monkeypatch.setattr(RobocapDataset, "convert", slow_convert)
+    convert.main(convert.Config(dataset=RobocapConfig(), jobs=2, max_sequences=4))
+    records = load_records(tmp_path / "timing/convert.jsonl", ConvertRecord)
+    assert sorted(r.recording_id for r in records) == sorted(i.recording_id for i in identities[:4])
+    assert all(r.capture_s == float(r.recording_id.rsplit("s", 1)[1]) for r in records)
+    assert all(r.stage_s["transcode"] >= 0.2 for r in records)
+    assert peak[0] == 2

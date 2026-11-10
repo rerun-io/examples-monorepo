@@ -50,6 +50,7 @@ from handtrack.data.batches import CropKind, DetNetBatch, KeyNetBatch
 from handtrack.data.catalog import (
     CATALOG_URL,
     TIMELINE,
+    UPRIGHT_TURNS,
     CatalogDataError,
     DatasetLayout,
     DatasetName,
@@ -184,6 +185,9 @@ class StreamConfig:
     seed: int = 0
     device: str = "cuda"
     catalog_url: str = CATALOG_URL
+    upright: bool = False
+    """Turn each camera upright before the letterbox (``catalog.UPRIGHT_TURNS``), frames and labels alike; DetNet only (KeyNet's
+    perspective crops undo the camera roll themselves). False keeps the legacy letterbox repro-1 and the deployed DetNet-F used."""
     queue_chunks: int = 64
     """Bound on chunks waiting between producers and the main thread."""
     validation: bool = False
@@ -208,6 +212,8 @@ class StreamConfig:
     5 fps into 15 fps and SHOW3D's 2.5 fps into 7.5 fps."""
 
     def __post_init__(self) -> None:
+        if self.upright and self.nets != "detnet":
+            raise ValueError("upright frames are for DetNet only (nets='detnet')")
         if not 0.0 <= self.row_phase < 1.0:
             raise ValueError("row_phase must lie in [0, 1)")
         if self.row_density < 1:
@@ -1384,7 +1390,7 @@ class CatalogStream:
         entry: DatasetEntry = entries[info.dataset]
         layout: DatasetLayout = layout_for(info.dataset)
         statics: pa.Table = read_statics(entry, info)
-        rig_letterboxes: tuple[CameraRig, tuple[Letterbox, ...]] = read_rig(statics, info)
+        rig_letterboxes: tuple[CameraRig, tuple[Letterbox, ...]] = read_rig(statics, info, UPRIGHT_TURNS[info.dataset] if self.config.upright else None)
         timeline: HandTimeline = read_hand_timeline(entry, info, statics)
         videos: tuple[CatalogVideo, ...] = read_catalog_videos(entry, info.segment_id, [f"{camera}/pinhole/video" for camera in layout.cameras], TIMELINE)
         angles: tuple[float, ...] = camera_angles(statics, info)

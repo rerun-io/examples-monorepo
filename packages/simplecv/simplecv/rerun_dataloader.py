@@ -22,7 +22,7 @@ decoder now reuses one codec context across a GOP, but its PyAV CPU path remains
 slower than this segment-wide torchcodec/NVDEC path.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from time import perf_counter
 from typing import TypeAlias
@@ -161,7 +161,7 @@ def relay_video_packets(
     return max(0, last - first)
 
 
-class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
+class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
     """Serve a fetched request block from the cached whole-segment GPU decoder.
 
     The base-class defaults (no ``prior_keyframe_path``) make the dataloader ship each
@@ -169,7 +169,17 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
     the cached segment-wide NVDEC decoder instead.
     """
 
-    def __init__(self, dataset: DatasetEntry, entity: str, timeline: str, device: torch.device, fps: int) -> None:
+    def __init__(
+        self,
+        dataset: DatasetEntry,
+        entity: str,
+        timeline: str,
+        device: torch.device,
+        fps: int,
+        *,
+        max_frames_per_call: int | None = None,
+        transform: Callable[[UInt8[Tensor, "n 3 h w"]], Tensor] | None = None,
+    ) -> None:
         """Bind the decoder to one dataset's video column.
 
         Args:
@@ -179,7 +189,15 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
                 ``open_segment_decoder``'s ordering guard).
             device: Device decoded frames land on (``cuda`` uses NVDEC).
             fps: Nominal frame rate of the stored video.
+            max_frames_per_call: Decode a fetched block at most this many frames at a time (None: one call per segment run).
+                A 1,024-frame block of 1080p RGB is 6.4 GB on the device; slices bound that peak.
+            transform: Applied on the device to each decoded slice (``n 3 h w`` uint8) before results are kept, e.g. to reduce
+                frames to what the consumer needs; its output's first dimension must stay ``n``.
         """
+        if max_frames_per_call is not None and max_frames_per_call < 1:
+            raise ValueError("max_frames_per_call must be positive")
+        self._max_frames: int | None = max_frames_per_call
+        self._transform: Callable[[UInt8[Tensor, "n 3 h w"]], Tensor] | None = transform
         self._dataset = dataset
         self._entity = entity
         self._timeline = timeline
@@ -222,14 +240,14 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
         self.decode_seconds += perf_counter() - started
         return frame_chw
 
-    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[FrameRgbChw | None]:
-        """Decode one aligned result per request in a fetched field block.
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[Tensor | None]:
+        """Decode one aligned result per request in a fetched field block: an RGB ``FrameRgbChw``, or its ``transform``.
 
         Contiguous same-segment requests share one ``get_frames_at`` call, so a
         block costs one codec pass per segment instead of one seek per request.
         """
         del batch  # decoded from the segment-wide cache, not the fetched point reads
-        decoded: list[FrameRgbChw | None] = [None] * len(requests)
+        decoded: list[Tensor | None] = [None] * len(requests)
         start: int = 0
         while start < len(requests):
             segment_id: str = requests[start].segment_id
@@ -244,12 +262,15 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
                 if frame_index >= 0:
                     positions.append(position)
                     frame_indices.append(frame_index)
-            if frame_indices:
+            step: int = self._max_frames or max(len(frame_indices), 1)
+            for first in range(0, len(frame_indices), step):
                 assert self._decoder is not None
                 started: float = perf_counter()
-                frames_nchw: UInt8[Tensor, "n 3 h w"] = self._decoder.get_frames_at(frame_indices).data
+                frames_nchw: Tensor = self._decoder.get_frames_at(frame_indices[first : first + step]).data
+                if self._transform is not None:
+                    frames_nchw = self._transform(frames_nchw)
                 self.decode_seconds += perf_counter() - started
-                for row, position in enumerate(positions):
+                for row, position in enumerate(positions[first : first + step]):
                     decoded[position] = frames_nchw[row]
             start = stop
         return decoded
@@ -278,5 +299,29 @@ class TimedNvdecDecoder(SegmentNvdecDecoder):
         frames: Sequence[FrameRgbChw | None] = super().decode(batch, requests)
         return [
             None if frame is None else TimedFrame(t_ns=int(np.asarray(request.index_value).astype("timedelta64[ns]").astype(np.int64)), rgb=frame)
+            for request, frame in zip(requests, frames, strict=True)
+        ]
+
+
+@dataclass(slots=True, frozen=True)
+class KeyedFrame:
+    """One decoded frame (or its transform) with the catalog key it answers; dataloader samples carry no key of their own."""
+
+    segment_id: str
+    index: int
+    """The request's index value on an integer timeline (e.g. ``frame_index``)."""
+    image: Tensor
+    """The decoded frame, or the decoder's ``transform`` of it, on the decoder's device."""
+
+
+class KeyedNvdecDecoder(SegmentNvdecDecoder):
+    """``SegmentNvdecDecoder`` whose values also name their segment and integer index, so a consumer can join per-frame labels."""
+
+    # pyrefly: ignore  # bad-override — the base decodes to Tensor; the dataloader only moves the value into the sample dict.
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> list[KeyedFrame | None]:
+        """Pair each decoded frame with its request's segment and index; slots before the first sample stay None."""
+        frames: Sequence[Tensor | None] = super().decode(batch, requests)
+        return [
+            None if frame is None else KeyedFrame(segment_id=request.segment_id, index=int(request.index_value), image=frame)
             for request, frame in zip(requests, frames, strict=True)
         ]

@@ -66,6 +66,9 @@ class LoopSettings:
     """Training and persistence cadence."""
     epochs: int = 75
     """Total epoch count, including epochs completed before resume."""
+    max_steps: int = 0
+    """Optimiser-step budget across epochs (0: none). Training stops when the global step reaches it, after that epoch's
+    validation; a cosine schedule then follows the step (progress = step / max_steps) instead of the epoch."""
     log_every: int = 100
     """Global optimiser steps between JSONL/console records."""
     validate_every: int = 1000
@@ -119,8 +122,8 @@ class LoopSettings:
     the likely way the wrist channel's final BN bias went negative (-0.45) and killed its ReLU in joint-full-1."""
 
     def __post_init__(self) -> None:
-        if min(self.epochs, self.log_every, self.checkpoint_every, self.keynet_steps_per_detnet_step) < 1 or self.validate_every < 0:
-            raise ValueError('Cadences must be positive (validate_every may be zero)')
+        if min(self.epochs, self.log_every, self.checkpoint_every, self.keynet_steps_per_detnet_step) < 1 or min(self.validate_every, self.max_steps) < 0:
+            raise ValueError('Cadences must be positive (validate_every and max_steps may be zero)')
         if min(self.presence_weight, self.detnet_circle_weight, self.detnet_presence_weight) < 0:
             raise ValueError('Loss weights must be nonnegative')
         if self.heatmap_warmup_epochs < 0 or self.heatmap_warmup_steps < 0 or self.heatmap_ramp_steps < 0:
@@ -241,7 +244,8 @@ class Trainer:
         self.elapsed: float = 0.0
         self.wait_seconds: float = 0.0
         self.images: int = 0
-        self.losses: dict[str, dict[str, float]] = {}
+        self.losses: dict[str, dict[str, Tensor]] = {}
+        """Each net's latest loss terms, still on the device until ``log`` reads them."""
 
     def handle_sigterm(self, signum: int, frame: FrameType | None) -> None:
         """Signal-safe request; checkpoint writes happen in the main control flow."""
@@ -298,23 +302,20 @@ class Trainer:
         if isinstance(batch, DetNetBatch):
             det_loss: DetNetLoss = self.detnet_objective(batch, self.forward_detnet(batch))
             loss: DetNetLoss | KeyNetLoss = det_loss
-            terms: dict[str, float] = {'total': float(det_loss.total.detach()), 'circle': float(det_loss.circle), 'presence': float(det_loss.presence)}
+            terms: dict[str, Tensor] = {'total': det_loss.total.detach(), 'circle': det_loss.circle.detach(), 'presence': det_loss.presence.detach()}
             count: int = batch.pooled.shape[0]
         else:
             key_loss: KeyNetLoss = self.keynet_objective(batch, self.forward_keynet(batch))
             loss = key_loss
-            terms: dict[str, float] = {'total': float(key_loss.total.detach()), 'heatmap': float(key_loss.heatmap), 'distance': float(key_loss.distance), 'presence': float(key_loss.presence)}
+            terms = {'total': key_loss.total.detach(), 'heatmap': key_loss.heatmap.detach(), 'distance': key_loss.distance.detach(), 'presence': key_loss.presence.detach()}
             if key_loss.visibility is not None:
-                terms['visibility'] = float(key_loss.visibility)
+                terms['visibility'] = key_loss.visibility.detach()
             if key_loss.pinch is not None:
-                terms['pinch'] = float(key_loss.pinch)
+                terms['pinch'] = key_loss.pinch.detach()
             count = batch.crops.shape[0]
-        if not math.isfinite(terms['total']):
-            raise ValueError(f'Nonfinite {name} training loss at step {self.state.step}')
+        # No host sync here: the CPU queues the next steps while the GPU runs, and ``log`` reads the terms (and checks them).
         loss.total.backward()
         self.optimisers[name].step()
-        if self.device.type == 'cuda':
-            torch.cuda.synchronize(self.device)
         self.images += count
         self.losses[name] = terms
         progress: dict[str, int] = dict(self.state.epoch_steps)
@@ -325,7 +326,13 @@ class Trainer:
         """Append and print a training interval, including final partial intervals."""
         if not self.images:
             return
-        record: TrainLog = TrainLog(self.state.step, self.state.epoch, self.losses, self.images / max(self.elapsed, 1e-9),
+        start: float = time.perf_counter()
+        losses: dict[str, dict[str, float]] = {name: {term: float(value) for term, value in terms.items()} for name, terms in self.losses.items()}
+        self.elapsed += time.perf_counter() - start  # the steps still queued on the GPU belong to this interval
+        for name, terms in losses.items():
+            if not math.isfinite(terms['total']):
+                raise ValueError(f'Nonfinite {name} training loss in the interval ending at step {self.state.step}')
+        record: TrainLog = TrainLog(self.state.step, self.state.epoch, losses, self.images / max(self.elapsed, 1e-9),
                                     self.wait_seconds / max(self.elapsed, 1e-9),
                                     torch.cuda.memory_allocated(self.device) if self.device.type == 'cuda' else 0,
                                     torch.cuda.max_memory_allocated(self.device) if self.device.type == 'cuda' else 0)
@@ -438,8 +445,22 @@ class Trainer:
             export_weights(directory / 'best.weights.pt', self.models[name])
         return record
 
+    def budget_spent(self) -> bool:
+        return bool(self.cadence.max_steps) and self.state.step >= self.cadence.max_steps
+
+    def schedule_step(self) -> None:
+        """With a step budget, set each cosine optimiser's lr from the global step (constant schedules keep lr)."""
+        if not self.cadence.max_steps:
+            return
+        progress: float = min(self.state.step, self.cadence.max_steps) / self.cadence.max_steps
+        for name, optimiser in self.optimisers.items():
+            settings: OptimiserSettings = self.settings[name]
+            factor: float = (1 + math.cos(math.pi * progress)) / 2 if settings.schedule == 'cosine' else 1.0
+            for group in optimiser.param_groups:
+                group['lr'] = settings.lr * factor
+
     def run(self, source: BatchSource, validation: BatchSource) -> TrainingState:
-        """Train to exhaustion of BOTH pools, close sources, and retain checkpoints."""
+        """Train to exhaustion of BOTH pools (or to ``max_steps``), close sources, and retain checkpoints."""
         self.sources = (source, validation)
         if self.stopping:
             for stream in self.sources:
@@ -452,7 +473,7 @@ class Trainer:
         previous: signal.Handlers | int | Callable[[int, FrameType | None], None] | None = signal.signal(signal.SIGTERM, self.handle_sigterm)
         try:
             self.run_dir.mkdir(parents=True, exist_ok=True)
-            while self.state.epoch < self.cadence.epochs and not self.stopping:
+            while self.state.epoch < self.cadence.epochs and not self.stopping and not self.budget_spent():
                 source.start_epoch(self.state.epoch)
                 replay: dict[str, int] = dict(self.state.epoch_steps)
                 active: set[str] = set(self.models)
@@ -461,8 +482,9 @@ class Trainer:
                     factor: float = (1 + math.cos(math.pi * self.state.epoch / self.cadence.epochs)) / 2 if settings.schedule == 'cosine' else 1.0
                     for group in optimiser.param_groups:
                         group['lr'] = settings.lr * factor
+                self.schedule_step()
                 drain_keynet: bool = False
-                while active and not self.stopping:
+                while active and not self.stopping and not self.budget_spent():
                     draws: list[Net] = schedule
                     if len(self.models) == 2 and isinstance(source, ReadySource):
                         det_ready: bool = 'detnet' in active and source.detnet_ready()
@@ -483,7 +505,7 @@ class Trainer:
                             # Both pools are empty and production ended: retain next_*'s
                             # None contract, including resume-cursor checks below.
                     for name in draws:
-                        if name not in active or self.stopping:
+                        if name not in active or self.stopping or self.budget_spent():
                             continue
                         start: float = time.perf_counter()
                         batch: DetNetBatch | KeyNetBatch | None = source.next_detnet_batch() if name == 'detnet' else source.next_keynet_batch()
@@ -499,6 +521,7 @@ class Trainer:
                             replay[name] -= 1
                             continue
                         self.train_batch(batch)
+                        self.schedule_step()
                         self.elapsed += time.perf_counter() - start
                         self.wait_seconds += waited
                         if self.state.step % self.cadence.log_every == 0:

@@ -1,5 +1,8 @@
 """Released-weight EgoHand checks; no synthetic weights or network downloads."""
 
+import gc
+from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -18,10 +21,25 @@ from simplecv.rrd_query_utils import first_valid_value
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
+from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs, supported_backbone_precision
 
 pytestmark = pytest.mark.integration
 
 CAMERA = "/world/rig_04/cam_00/pinhole"
+
+
+def fast_configs_for_device() -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
+    """The fast stack in the precision the test GPU supports: NVFP4/FP8 on Blackwell, BF16/FP16 below it."""
+    return fast_egohand_configs(backbone_precision=supported_backbone_precision())
+
+
+@pytest.fixture(autouse=True)
+def release_cuda_test_models() -> Iterator[None]:
+    """Release captured-graph cycles before the next released-model test, so a 12 GB GPU holds each one."""
+    yield
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 def camera_from_window(table: pa.Table) -> CalibratedCamera:
     """Read the catalog calibration; matrix components are column-major."""
@@ -114,7 +132,6 @@ def test_released_models_return_aligned_hands() -> None:
 
 def test_accelerated_predictor_retains_mesh_and_joint_parity() -> None:
     """TensorRT, GPU crops and batched SOMA stay within the geometry guard."""
-    import gc
 
     from PIL import Image
 
@@ -340,7 +357,6 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand_fast import fast_egohand_configs
     from posekit.predictions import BoxDetections, HandDetections
 
     if not torch.cuda.is_available():
@@ -348,7 +364,7 @@ def test_fast_role_chunks_large_frame_batches_without_losing_hand_alignment() ->
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing EgoHand parity fixture: {video}")
-    detector_config, pose_config = fast_egohand_configs()
+    detector_config, pose_config = fast_configs_for_device()
     frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1]
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
     detector, pose = detector_config.setup(), pose_config.setup()
@@ -374,7 +390,6 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
 
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
-    from posekit.models.egohand_fast import fast_egohand_configs
     from posekit.predictions import BoxDetections, HandDetections
 
     if not torch.cuda.is_available():
@@ -382,7 +397,7 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
     video: Path = EXAMPLES / "selfcap_oak_left.mp4"
     if not video.is_file():
         pytest.skip(f"missing EgoHand parity fixture: {video}")
-    detector_config, pose_config = fast_egohand_configs()
+    detector_config, pose_config = fast_configs_for_device()
     frames = VideoDecoder(video, device="cuda", dimension_order="NHWC")[0:1].repeat(2, 1, 1, 1)
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
     detector, pose = detector_config.setup(), pose_config.setup()
@@ -404,7 +419,8 @@ def test_fast_role_graphs_depend_on_hand_counts_not_side_order() -> None:
     for xyz, vertices in results.values():
         torch.testing.assert_close(xyz, results[(0, 1, 2, 3)][0], atol=0.001, rtol=0.0)
         torch.testing.assert_close(vertices, results[(0, 1, 2, 3)][1], atol=0.001, rtol=0.0)
-    assert len(pose.executor.graphs) == 1
+    # A two-hand profile needs separate all-left and all-right chunks.
+    assert len(pose.executor.graphs) == 2
     assert [len(cropper.graphs) for cropper in pose.croppers.values()] == [1]
 
 
@@ -415,7 +431,6 @@ def test_stage_times_are_recorded_only_on_request() -> None:
     from posekit.apis.hands_bench import EXAMPLES
     from posekit.cameras import load_calibrated_camera
     from posekit.models.egohand import selfcap_egohand_configs
-    from posekit.models.egohand_fast import fast_egohand_configs
 
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
@@ -426,10 +441,13 @@ def test_stage_times_are_recorded_only_on_request() -> None:
     camera = load_calibrated_camera(EXAMPLES / "selfcap_oak_left.rrd")
     detector_config, reference_config = selfcap_egohand_configs(None)
     detections = detector_config.setup()(frames)
-    for pose, stages in (
-        (reference_config.setup(), {"preprocessing", "batch_assembly", "model_forward", "post_forward", "backbone", "head", "soma"}),
-        (fast_egohand_configs()[1].setup(), {"preprocessing", "backbone", "head", "soma"}),
+    assert reference_config.backbone_backend is not None
+    reference_config = replace(reference_config, backbone_backend=replace(reference_config.backbone_backend, max_batch_size=2, opt_batch_size=2))
+    for config, stages in (
+        (reference_config, {"preprocessing", "batch_assembly", "model_forward", "post_forward", "backbone", "head", "soma"}),
+        (fast_configs_for_device()[1], {"preprocessing", "backbone", "head", "soma"}),
     ):
+        pose = config.setup()
         with torch.inference_mode():
             pose(frames, detections, camera)
             assert pose.stage_ms == {}
@@ -438,3 +456,5 @@ def test_stage_times_are_recorded_only_on_request() -> None:
         assert set(pose.stage_ms) == stages
         assert all(len(values) == 1 and values[0] > 0.0 for values in pose.stage_ms.values())
         del pose
+        gc.collect()
+        torch.cuda.empty_cache()

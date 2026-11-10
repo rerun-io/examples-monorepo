@@ -25,11 +25,10 @@ from handtrack.data.catalog import (  # noqa: E402
     read_statics,
 )
 from handtrack.data.segment_labels import SegmentLabels, segment_labels  # noqa: E402
+from handtrack.labels.coco2d import COCO_SLOTS  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
-COCO_SLOTS: dict[int, int] = {91: 5, 93: 6, 94: 7, 95: 0, 96: 8, 97: 9, 98: 10, 99: 1, 100: 11, 101: 12, 102: 13, 103: 2, 104: 14, 105: 15, 106: 16, 107: 3, 108: 17, 109: 18, 110: 19, 111: 4}
-"""COCO-133 left-hand slot -> our landmark (right hand: slot + 21). Slot 92 is the wrist/thumb-CMC midpoint; the palm centre (20) has none."""
 UMETRACK_SEGMENTS: tuple[str, ...] = ("umetrack__real__hand_hand__training__user_00__recording_01", "umetrack__synthetic__separate_hand__training__user_38__recording_12")
 SHOW3D_SEGMENT: str = "show3d__ERI327__milk_shake_7a09"
 HOT3D_SEGMENT: str = "hot3d-quest3__P0002_c7164ba4"
