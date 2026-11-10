@@ -133,6 +133,8 @@ def test_the_viewer_plays_the_video_from_the_start(monkeypatch: pytest.MonkeyPat
     time_panel = sent[0].time_panel
     assert (time_panel.timeline, time_panel.play_state) == ("video_time", "playing")
     assert time_panel.state is None  # the app's panel_states keeps deciding whether the time panel shows
+    view_3d = sent[0].root_container.contents[1]
+    assert view_3d.properties["EyeControls3D"].spin_speed.as_arrow_array().to_pylist() == [0.1]  # a slow orbit around the hands
 
 
 def test_hands_from_a_model_that_uses_the_given_camera_stay_as_they_are() -> None:
