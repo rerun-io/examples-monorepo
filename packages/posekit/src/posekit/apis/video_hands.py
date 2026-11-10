@@ -11,7 +11,9 @@ video. The 3D view looks over the wearer's head at the camera frustum and the ha
 
 The camera is a pinhole: ``fx``/``fy``/``cx``/``cy`` when given, else an assumed horizontal field
 of view (``hfov_deg``) with the principal point at the image centre. It does not have to be
-exact; it fixes where the metric 3D hands sit in front of the camera.
+exact; it fixes where the metric 3D hands sit in front of the camera. Every stack's hands end up
+in it: WiLoR predicts in its own virtual camera, so its hands keep their wrist-relative shape and
+get the translation that reprojects their joints in this pinhole (``WilorHands.in_pinhole``).
 """
 
 import math
@@ -32,7 +34,7 @@ from tqdm.auto import tqdm
 
 from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
-from posekit.models.wilor import CROP_SIZE, FOCAL_LENGTH, WilorHandPose3d
+from posekit.models.wilor import WilorHands
 from posekit.predictions import HandDetections, HandPoses3d, HandSide
 from posekit.skeletons import KeypointSkeleton
 
@@ -225,14 +227,6 @@ def describe_camera(settings: VideoHandsSettings, camera: CalibratedCamera) -> s
     return f"pinhole fx = {fx:.0f}, fy = {fy:.0f}, cx = {cx:.0f}, cy = {cy:.0f} px"
 
 
-def pinhole_matrix(pose: object, camera: CalibratedCamera, width: int, height: int) -> Float32[ndarray, "3 3"]:
-    """The camera the 3D hands are expressed in: WiLoR's virtual pinhole, else the video's pinhole."""
-    if isinstance(pose, WilorHandPose3d):
-        focal: float = FOCAL_LENGTH / CROP_SIZE * max(width, height)
-        return np.asarray([[focal, 0.0, width / 2], [0.0, focal, height / 2], [0.0, 0.0, 1.0]], dtype=np.float32)
-    return camera.intrinsics.astype(np.float32)
-
-
 def build_pipeline(settings: VideoHandsSettings) -> HandPose3dPipeline:
     """Set up the detector and the 3D hand model the settings name (exports and engine builds happen here)."""
     return HandPose3dPipeline(settings.detector.setup(), settings.pose.setup())
@@ -273,7 +267,7 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
     rr.log(CAMERA_PATH, rr.Transform3D(), static=True)
     rr.log(
         PINHOLE_PATH,
-        rr.Pinhole(image_from_camera=pinhole_matrix(pipeline.pose, camera, width, height), resolution=[width, height], image_plane_distance=0.05),
+        rr.Pinhole(image_from_camera=camera.intrinsics, resolution=[width, height], image_plane_distance=0.05),
         static=True,
     )
     send_blueprint()
@@ -286,6 +280,8 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
+            if isinstance(hands, WilorHands):
+                hands = hands.in_pinhole(camera.intrinsics)
         total_hands += hands.num_hands
         chunk: Int64[ndarray, "chunk"] = np.arange(start, stop, dtype=np.int64)
         timestamps: Int64[ndarray, "chunk"] = (

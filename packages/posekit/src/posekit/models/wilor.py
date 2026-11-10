@@ -10,11 +10,14 @@ Two backends keep the two paths of the former ``wilor-nano`` package:
 
 WiLoR predicts in a virtual pinhole camera: focal ``5000 / 256 * max(w, h)``,
 principal point at the image centre. ``xyz_camera`` and ``vertices`` are in
-that camera; a supplied ``CalibratedCamera`` is not used.
+that camera; a supplied ``CalibratedCamera`` is not used. That focal comes from
+WiLoR's near-orthographic training crops and puts the hands metres out;
+``WilorHands.in_pinhole`` keeps the wrist-relative hands and solves their
+translation in a real pinhole instead.
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -233,7 +236,7 @@ def _letterbox_bgr(frames_rgb: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b 3
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WilorHands(HandPoses3d):
-    """MANO hands from WiLoR, in its virtual full-image camera."""
+    """MANO hands from WiLoR, in its virtual full-image camera (``in_pinhole`` moves them into another pinhole)."""
 
     global_orient: Float32[Tensor, "n 1 3"]
     """Wrist orientation (axis-angle), left hands mirrored back from the right-hand frame."""
@@ -245,6 +248,43 @@ class WilorHands(HandPoses3d):
     """Translation of the wrist-relative MANO output into the virtual camera, metres."""
     focal_length: Float32[Tensor, "n"]
     """Virtual camera focal length in pixels; principal point at the image centre."""
+
+    def in_pinhole(self, intrinsics: Float64[ndarray, "3 3"]) -> "WilorHands":
+        """The same hands in the pinhole ``intrinsics``: each hand keeps its wrist-relative joints and mesh
+        and gets the translation (``fit_translation``) that reprojects its joints onto WiLoR's own 2D joints.
+
+        ``keypoints.xy`` stays as predicted; ``cam_t_full`` and ``focal_length`` describe the new camera.
+        """
+        if self.num_hands == 0 or self.keypoints.xyz_camera is None or self.vertices is None:
+            return self
+        camera: Float32[Tensor, "3 3"] = torch.as_tensor(intrinsics, dtype=torch.float32, device=self.keypoints.xy.device)
+        wrist_relative: Float32[Tensor, "n 21 3"] = self.keypoints.xyz_camera - self.cam_t_full[:, None]
+        translation: Float32[Tensor, "n 3"] = fit_translation(wrist_relative, self.keypoints.xy, camera)
+        return replace(
+            self,
+            keypoints=replace(self.keypoints, xyz_camera=wrist_relative + translation[:, None]),
+            vertices=self.vertices - self.cam_t_full[:, None] + translation[:, None],
+            cam_t_full=translation,
+            focal_length=torch.full_like(self.focal_length, float(camera[0, 0])),
+        )
+
+
+def fit_translation(points: Float32[Tensor, "n k 3"], uv: Float32[Tensor, "n k 2"], intrinsics: Float32[Tensor, "3 3"]) -> Float32[Tensor, "n 3"]:
+    """Translation ``t`` per hand such that the pinhole ``intrinsics`` projects ``points + t`` onto ``uv``.
+
+    Each joint gives two equations linear in ``t`` (``fx tx - (u - cx) tz = (u - cx) Z - fx X``, the same in y);
+    one batched least-squares solve answers all hands. The equations weight each joint by its depth, which
+    is nearly constant across one hand, so this is the reprojection least squares in practice.
+    """
+    fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+    du: Float32[Tensor, "n k"] = uv[..., 0] - cx
+    dv: Float32[Tensor, "n k"] = uv[..., 1] - cy
+    zeros: Float32[Tensor, "n k"] = torch.zeros_like(du)
+    rows: Float32[Tensor, "n rows 3"] = torch.cat(
+        [torch.stack([fx.expand_as(du), zeros, -du], dim=-1), torch.stack([zeros, fy.expand_as(dv), -dv], dim=-1)], dim=1
+    )
+    targets: Float32[Tensor, "n rows 1"] = torch.cat([du * points[..., 2] - fx * points[..., 0], dv * points[..., 2] - fy * points[..., 1]], dim=1)[..., None]
+    return torch.linalg.lstsq(rows, targets).solution[..., 0]
 
 
 @dataclass(frozen=True, slots=True)

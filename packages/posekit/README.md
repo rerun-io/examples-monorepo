@@ -119,7 +119,7 @@ example also selects its stack.
 
 | Model | Detector | 3D hands | Skeleton | Camera | Backends |
 |---|---|---|---|---|---|
-| WiLoR (`wilor`) | YOLO hand detector | WiLoR ViT + MANO | HAND_21 | not used (virtual camera) | torch fp16, TensorRT |
+| WiLoR (`wilor`) | YOLO hand detector | WiLoR ViT + MANO | HAND_21 | predicts in a virtual camera; the video CLI and app move each hand into the pinhole (translation fit to its 2D joints) | torch fp16, TensorRT |
 | EgoHand (`egohand`) | RT-DETR hand detector | DINOv3 + SOMA hand head | SOMA_HAND (25) | required (perspective crops undo the lens) | torch, TensorRT backbone/detector |
 
 Both run in the `posekit-hands` environment. EgoHand's upstream source installs from
