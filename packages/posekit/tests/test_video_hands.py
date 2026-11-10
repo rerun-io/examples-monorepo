@@ -43,7 +43,7 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
     detections, hands = _chunk()
     live: set[str] = set()
-    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=live)
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=live, meshed_slots=set())
 
     paths = [path for path, _ in logged]
     # Joints and meshes are logged once in 3D; the video view projects them, so no 2D keypoints.
@@ -61,6 +61,22 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     meshes = [archetype for path, archetype in logged if path == "world/camera/hands/right_0/mesh"]
     faces = meshes[0].triangle_indices.as_arrow_array().to_pylist()
     assert faces == [[0, 1, 2]]
+
+
+def test_mesh_faces_are_logged_once_per_slot_and_frames_carry_only_vertices(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The faces never change; logged with every frame they were 80 % of a recording's bytes.
+    logged: list[tuple[str, Any, bool]] = []
+    monkeypatch.setattr(rr, "log", lambda path, archetype, static=False, **_: logged.append((path, archetype, static)))
+    monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
+    detections, hands = _chunk()
+    meshed: set[str] = set()
+    for _ in range(2):  # two chunks
+        log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set(), meshed_slots=meshed)
+    left = [(archetype, static) for path, archetype, static in logged if path == "world/camera/hands/left_0/mesh"]
+    assert [static for _, static in left] == [True, False, False, False, False]
+    assert left[0][0].triangle_indices is not None and left[0][0].vertex_positions is None
+    assert all(archetype.triangle_indices is None and archetype.vertex_positions is not None for archetype, _ in left[1:])
+    assert meshed == {"left_0", "right_0"}
 
 
 def test_unset_intrinsics_come_from_the_assumed_field_of_view() -> None:
@@ -84,7 +100,7 @@ def test_joints_carry_full_confidence_and_show_green(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(rr, "log", lambda path, archetype, **_: logged.append((path, archetype)))
     monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
     detections, hands = _chunk()
-    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set())
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set(), meshed_slots=set())
 
     joints = next(archetype for path, archetype in logged if path == "world/camera/hands/left_0/joints")
     batches = {batch.component_descriptor().component: batch.as_arrow_array().to_pylist() for batch in joints.as_component_batches()}

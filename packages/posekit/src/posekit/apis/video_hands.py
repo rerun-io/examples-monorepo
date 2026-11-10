@@ -134,6 +134,7 @@ def log_chunk_hands(
     detections: HandDetections,
     hands: HandPoses3d,
     live_slots: set[str],
+    meshed_slots: set[str],
 ) -> None:
     """Log one processed chunk onto the ``frame`` and ``video_time`` timelines.
 
@@ -149,6 +150,8 @@ def log_chunk_hands(
         hands: Reconstructed hands of the chunk (batch-relative frame indices).
         live_slots: Slots currently holding data, updated in place; a slot is
             cleared only on its populated -> empty transition.
+        meshed_slots: Slots whose static mesh faces and colour are already logged, updated in place;
+            each frame then logs only the vertex positions.
     """
     box_frames: Int64[ndarray, "n"] = detections.boxes.frame_indices.cpu().numpy()
     boxes: Float32[ndarray, "n 4"] = detections.boxes.xyxy_numpy()
@@ -181,10 +184,11 @@ def log_chunk_hands(
                     Points3DWithConfidence(xyz[row], full_confidence, class_ids=JOINT_CLASS, keypoint_ids=keypoint_ids, radii=0.004),
                 )
             if vertices is not None and side in faces:
-                rr.log(
-                    f"{CAMERA_PATH}/hands/{slot}/mesh",
-                    rr.Mesh3D(vertex_positions=vertices[row], triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], MESH_ALPHA)),
-                )
+                mesh_path: str = f"{CAMERA_PATH}/hands/{slot}/mesh"
+                if slot not in meshed_slots:  # the faces never change: sent once, not with every frame (they were 80 % of the bytes)
+                    rr.log(mesh_path, rr.Mesh3D.from_fields(triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], MESH_ALPHA)), static=True)
+                    meshed_slots.add(slot)
+                rr.log(mesh_path, rr.Mesh3D.from_fields(vertex_positions=vertices[row]))
         for slot in sorted(live_slots - present):
             for path in (f"{PINHOLE_PATH}/boxes/{slot}", f"{CAMERA_PATH}/hands/{slot}/joints", f"{CAMERA_PATH}/hands/{slot}/mesh"):
                 rr.log(path, rr.Clear(recursive=False))
@@ -297,7 +301,8 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         pipeline: A pipeline already set up for ``settings``; None builds one.
 
     Yields:
-        A progress line after every chunk, then the summary; both name the camera used.
+        A line once the video and the layout are logged (before any chunk runs, so a streaming viewer gets them
+        first), a progress line after every chunk, then the summary; all name the camera used.
 
     Raises:
         ValueError: If the video metadata cannot be read.
@@ -328,10 +333,12 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         video_timestamps_ns: Int64[ndarray, "frames"] = log_video(
             as_mp4(settings.video_path, Path(scratch)), Path(VIDEO_PATH), timeline="video_time"
         )
-    send_blueprint()
+    send_blueprint()  # after the video: "playing" starts the cursor at the start of the logged video
     log_hand_annotation_context(pipeline.pose.skeleton)
+    yield f"Video loaded, finding hands; {camera_note}"  # the app streams the video out before the first chunk runs
     total_hands: int = 0
     live_slots: set[str] = set()
+    meshed_slots: set[str] = set()
     for start in tqdm(range(0, num_frames, settings.frame_batch_size), desc="posekit video hands"):
         stop: int = min(start + settings.frame_batch_size, num_frames)
         frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
@@ -345,7 +352,7 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         )
         log_chunk_hands(
             frame_indices=chunk.tolist(), timestamps_ns=timestamps.tolist(), detections=detections, hands=hands,
-            live_slots=live_slots,
+            live_slots=live_slots, meshed_slots=meshed_slots,
         )
         yield f"Frames {stop}/{num_frames}, {total_hands} hands; {camera_note}"
     torch.cuda.synchronize()
