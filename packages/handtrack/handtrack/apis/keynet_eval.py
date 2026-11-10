@@ -19,7 +19,8 @@ from serde.json import to_json
 from torch import Tensor
 
 from handtrack.data.batches import CropKind
-from handtrack.data.keynet_holdout import VARIANTS, KeyNetHoldout, read_holdout
+from handtrack.data.catalog import CATALOG_URL
+from handtrack.data.keynet_holdout import VARIANTS, KeyNetHoldout, load_holdout
 from handtrack.data.rerun_source import DATASET_SPECS
 from handtrack.data.stream import KeyNetSamples, select_samples
 from handtrack.eval.metrics import KeypointMetrics, keynet_metrics
@@ -59,6 +60,7 @@ class ScoreRow:
 @dataclass(frozen=True, slots=True)
 class ScoreReport:
     holdout: str
+    """The catalog the frozen holdout (``data.keynet_holdout_cuts``) was cut from."""
     models: dict[str, str]
     """Model name -> weights path."""
     rows: list[ScoreRow]
@@ -66,8 +68,6 @@ class ScoreReport:
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    holdout: Path
-    """The frozen evaluation set (``tools/keynet_holdout.py``)."""
     weights: tuple[Path, ...]
     """``*.weights.pt`` files (each with its ``.sha256`` sidecar)."""
     names: tuple[str, ...]
@@ -77,6 +77,8 @@ class Config:
     rrd: Path | None = None
     """Also write example crops (ground truth, every model's tracked and zero-prior keypoints) to this .rrd."""
     examples_per_dataset: int = 12
+    catalog_url: str = CATALOG_URL
+    """The catalog the frozen holdout is cut from (``data.keynet_holdout.load_holdout``)."""
     device: str = "cuda"
     batch: int = 1024
 
@@ -122,7 +124,7 @@ def main(config: Config) -> None:
     if len(config.weights) != len(config.names):
         raise ValueError("one name per weights file")
     device: torch.device = torch.device(config.device)
-    holdout: KeyNetHoldout = read_holdout(config.holdout)
+    holdout: KeyNetHoldout = load_holdout(config.catalog_url, device)
     samples: KeyNetSamples = holdout.samples
     rows: list[ScoreRow] = []
     predictions: dict[tuple[str, str], Predictions] = {}
@@ -141,7 +143,7 @@ def main(config: Config) -> None:
                         for c, camera in enumerate(DATASET_SPECS[dataset][0]):
                             rows.append(score(name, SHORT.get(dataset, dataset), camera, variant, prior, samples, predicted, base & (holdout.camera == c)))
         del model
-    report: ScoreReport = ScoreReport(str(config.holdout), {n: str(p) for n, p in zip(config.names, config.weights, strict=True)}, rows)
+    report: ScoreReport = ScoreReport(config.catalog_url, {n: str(p) for n, p in zip(config.names, config.weights, strict=True)}, rows)
     config.out.parent.mkdir(parents=True, exist_ok=True)
     config.out.write_text(to_json(report))
     for row in rows:

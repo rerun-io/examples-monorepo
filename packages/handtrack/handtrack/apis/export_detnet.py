@@ -1,9 +1,9 @@
 """Export DetNet-F alone to ONNX (full frame, dynamic batch; pooled input, batch 1 for the RKNN converter) and check both graphs
 against PyTorch on held-out frames.
 
-Held-out frames come from ``sample_heldout`` (the detector's frozen holdout episodes, decoded as the training stream decodes them)
-or any Parquet of ``pooled_u8`` + ``dataset`` arrays (``handtrack.data.array_table``). The PyTorch references go out beside the
-graphs as ``detnet_heldout.parquet``, which ``robocap-live/tools/rknn_convert.py`` scores the RKNN builds against.
+Held-out frames come from ``sample_heldout``: the detector's frozen holdout episodes, decoded from the catalog as the training stream
+decodes them (seeded, so every export draws the same frames). The PyTorch references go out beside the graphs as
+``detnet_heldout.parquet``, which ``robocap-live/tools/rknn_convert.py`` scores the RKNN builds against (``data.array_table``).
 """
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +17,7 @@ from serde import serde
 from serde.json import to_json
 
 from handtrack.apis.export_nets_onnx import DetNetGraph, GraphRecord, check_graph, export_graph, read_checked_state, torch_detnet
-from handtrack.data.array_table import read_arrays, write_arrays
+from handtrack.data.array_table import write_arrays
 from handtrack.models.detnet import DetNetF
 from handtrack.train.safetensors_checkpoint import file_sha256, load_model
 
@@ -40,24 +40,22 @@ class ExportDetNetConfig:
     """Export one DetNet-F weights file: ``*.weights.pt`` with its ``.sha256`` sidecar, or a ``model.safetensors``."""
 
     weights: Path
-    heldout: Path
-    """Parquet with ``pooled_u8`` [n, 120, 160] and ``dataset`` [n] arrays."""
     out_dir: Path
     """Receives the two ``.onnx`` graphs, ``detnet_heldout.parquet`` and ``export_report.json``."""
     opset: int = 17
     threads: int = 8
     """CPU threads for PyTorch and ONNX Runtime."""
     sample_per_dataset: int = 64
-    """When ``heldout`` does not exist yet: frames drawn per dataset (``sample_heldout``, needs the catalog and a GPU)."""
+    """Held-out frames drawn per dataset (``sample_heldout``, needs the catalog and a GPU)."""
     upright: bool = True
     """Sampled frames are upright (``stream.upright``); False for a model trained on the legacy input."""
     catalog_url: str = ""
     """Catalog for sampling; empty uses handtrack's default."""
 
 
-def sample_heldout(path: Path, per_dataset: int, upright: bool, catalog_url: str, seed: int = 0) -> None:
+def sample_heldout(per_dataset: int, upright: bool, catalog_url: str, seed: int = 0) -> tuple[UInt8[ndarray, "n 120 160"], Int64[ndarray, "n"]]:
     """Draw ``per_dataset`` frames from each dataset's evaluation segments (``detector_eval.eval_segments``), decoded, luma'd and
-    letterboxed exactly as the training stream does, and write them as ``pooled_u8`` + ``dataset``."""
+    letterboxed exactly as the training stream does: the pooled frames and their dataset index."""
     import json
 
     from serde.json import from_json
@@ -67,7 +65,7 @@ def sample_heldout(path: Path, per_dataset: int, upright: bool, catalog_url: str
     from handtrack.data.catalog import CATALOG_URL
     from handtrack.data.rerun_source import nvdec_producer, source_spec
 
-    defaults: DetectorEvalConfig = DetectorEvalConfig(names=("x",), weights=(path,), out_dir=path.parent)
+    defaults: DetectorEvalConfig = DetectorEvalConfig(names=("x",), weights=(Path(),), out_dir=Path())
     url: str = catalog_url or CATALOG_URL
     holdout: DetectorHoldout = from_json(DetectorHoldout, defaults.holdout.read_text())
     generator: torch.Generator = torch.Generator().manual_seed(seed)
@@ -85,15 +83,17 @@ def sample_heldout(path: Path, per_dataset: int, upright: bool, catalog_url: str
         pooled.append(frames[np.sort(picked)])
         labels.append(np.full(len(picked), index, dtype=np.int64))
         print(f"{dataset}: {len(picked)} frames from {json.dumps(segments[:2])[:80]}...", flush=True)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_arrays(path, {"pooled_u8": np.concatenate(pooled), "dataset": np.concatenate(labels)})
+    return np.concatenate(pooled), np.concatenate(labels)
 
 
 def main(config: ExportDetNetConfig) -> DetNetExportReport:
+    return export(config, *sample_heldout(config.sample_per_dataset, config.upright, config.catalog_url))
+
+
+def export(config: ExportDetNetConfig, pooled: UInt8[ndarray, "n 120 160"], dataset: Int64[ndarray, "n"]) -> DetNetExportReport:
+    """Export both graphs on ``pooled`` held-out frames, write the PyTorch references and the report."""
     torch.set_num_threads(config.threads)
     config.out_dir.mkdir(parents=True, exist_ok=True)
-    if not config.heldout.exists():
-        sample_heldout(config.heldout, config.sample_per_dataset, config.upright, config.catalog_url)
     model: DetNetF = DetNetF()
     sha256: str
     if config.weights.suffix == ".safetensors":
@@ -103,9 +103,6 @@ def main(config: ExportDetNetConfig) -> DetNetExportReport:
         state, sha256 = read_checked_state(config.weights)
         model.load_state_dict(state)
     model = model.eval()
-    frames: dict[str, ndarray] = read_arrays(config.heldout)
-    pooled: UInt8[ndarray, "n 120 160"] = frames["pooled_u8"]
-    dataset: Int64[ndarray, "n"] = frames["dataset"]
     references: tuple[Float32[ndarray, "n 2 2"], Float32[ndarray, "n 2"], Float32[ndarray, "n 2"]] = torch_detnet(model, pooled)
     write_arrays(config.out_dir / "detnet_heldout.parquet", {"pooled_u8": pooled, "dataset": dataset, **dict(zip(OUTPUTS, references, strict=True))})
     pooled_feed: Float32[ndarray, "n 1 120 160"] = (pooled.astype(np.float32) / 255.0)[:, None]

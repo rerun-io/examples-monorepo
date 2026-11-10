@@ -41,8 +41,8 @@ The NPU pair is **FP16 DetNet + INT8 KeyNet**:
 
 ## Files
 
-mix-1's DetNet files come from `pixi run -e handtrack python packages/handtrack/tools/export_detnet.py --weights <pt> --heldout <parquet>
---out-dir <dir>` and `rknn_convert.py --builds detnet_b1_fp16`. The KeyNet `*.onnx` (and the 0929 DetNet's) come from `pixi run -e handtrack python packages/handtrack/tools/export_nets_onnx.py --detnet-weights <pt> --keynet-weights <pt>
+mix-1's DetNet files come from `pixi run -e handtrack python packages/handtrack/tools/export_detnet.py --weights <pt> --out-dir <dir>`
+(held-out frames decoded from the catalog) and `rknn_convert.py --builds detnet_b1_fp16`. The KeyNet `*.onnx` (and the 0929 DetNet's) come from `pixi run -e handtrack python packages/handtrack/tools/export_nets_onnx.py --detnet-weights <pt> --keynet-weights <pt>
 --work-dir <dir> --detnet-cache <dir> --keynet-cache <dir>` (opset 17, TorchScript exporter).
 `*.rknn` come from `pixi run --manifest-path <rknn-toolkit2 project>/pixi.toml python packages/robocap-live/tools/rknn_convert.py
 --work-dir <dir> --keynet-cache <dir> --calibration-dir <dir>` (rknn-toolkit2 2.3.2, target rk3588; that env is its own pixi

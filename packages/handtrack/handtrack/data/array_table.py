@@ -1,8 +1,12 @@
-"""Named arrays that share their first axis (one row per sample), as one Parquet table.
+"""Named arrays that share their first axis (one row per sample), as one Parquet table: the RKNN conversion hand-off, nothing else.
+
+This is the monorepo's one non-Rerun data file (AGENTS.md, Serialization). ``apis/export_detnet.py`` and ``apis/export_keynet.py``
+write their PyTorch references here, and ``robocap-live/tools/rknn_convert.py`` reads them with pyarrow alone in Rockchip's
+RKNN-Toolkit2 environment, which cannot load rerun-sdk: rknn-toolkit2 2.3.2 (and 2.5.0, the latest) pins numpy <=1.26.4, while
+rerun-sdk >=0.24 needs numpy >=2. Revisit when Rockchip supports numpy 2; give no other data this format.
 
 Each array becomes a column of fixed-size lists holding one row's values; the per-row shape and the dtype live in the column's
-field metadata, so a reader gets back exactly the arrays it wrote. This replaces ``.npz`` hand-offs between our tools (the RKNN
-converter reads the same layout with pyarrow alone).
+field metadata, so a reader gets back exactly the arrays it wrote.
 """
 import json
 from pathlib import Path

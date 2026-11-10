@@ -24,6 +24,7 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from serde import serde
 from simplecv.umetrack_temp.generic_hand_model_torch import LANDMARK
 from torch import Tensor
@@ -293,18 +294,48 @@ CutStream = Callable[[int], Iterator[tuple[KeyNetSamples, int, int]]]
 """An epoch of (crops, camera index within the dataset, augmentation variant index) from one dataset."""
 
 
+class KeyNetCutter:
+    """One ``perspective_keynet_samples`` cut per augment on one camera's frames of one segment. Every call draws from the one
+    generator, so the order of the calls fixes the random draws (the frozen holdout replays its calls in their order)."""
+
+    def __init__(self, dataset: DatasetEntry, name: str, dataset_index: int, augments: Sequence[KeyNetAugment], device: torch.device,
+                 generator: torch.Generator, pinch: bool = False) -> None:
+        from handtrack.data.catalog import _generic_model
+
+        labels: str = DATASET_SPECS[name][2]
+        generic_rest: Float32[Tensor, "21 3"] = _generic_model().landmark_rest_positions.float()
+        coefficients: Float32[Tensor, "3"] = palm_coefficients(generic_rest)
+        infos: dict = {i.segment_id: i for i in list_segments(dataset, name)} if labels == "hand_model" else {}
+        # BlockShuffle interleaves segments, so only the current one is worth keeping
+        self.truth: Callable[[str], SegmentTruth] = functools.lru_cache(maxsize=1)(
+            lambda segment: hand_model_truth(dataset, name, segment, infos, pinch) if labels == "hand_model" else coco3d_truth(dataset, name, segment, coefficients, generic_rest))
+        self.dataset_index: int = dataset_index
+        self.augments: Sequence[KeyNetAugment] = augments
+        self.device: torch.device = device
+        self.generator: torch.Generator = generator
+
+    def cut(self, segment: str, camera: int, frames: UInt8[Tensor, "m h w"], rows: Int64[Tensor, "m"]) -> Iterator[tuple[KeyNetSamples, int, int]]:
+        """``(samples, camera, variant)`` per augment with any crop; ``rows`` index the segment truth, the inputs move to the device once."""
+        truth: SegmentTruth = self.truth(segment)
+        inputs = (frames.to(self.device), truth.rig.select([camera]).to(self.device), truth.letterboxes[camera], truth.rolls_rad[camera],
+                  _image_hands(truth.truth, truth.valid, rows, camera, self.device, truth.contact_mm), truth.hand_label[rows, camera].to(self.device))
+        extrapolated: ImageHands = _image_hands(truth.priors.extrapolated, truth.priors.extrapolated_valid, rows, camera, self.device)
+        stale: ImageHands = _image_hands(truth.priors.stale, truth.priors.stale_valid, rows, camera, self.device)
+        for variant, augment in enumerate(self.augments):
+            samples: KeyNetSamples = perspective_keynet_samples(*inputs, extrapolated=extrapolated, stale=stale, phi=truth.phi, dataset=self.dataset_index,
+                                                                augment=augment, generator=self.generator)
+            if sample_count(samples):
+                yield samples, camera, variant
+
+
 def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catalog_url: str, device: torch.device, augments: Sequence[KeyNetAugment],
                 seed: int, endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32, pinch: bool = False) -> CutStream:
     """NVDEC decode in this process, luma at native resolution, and per (segment, camera) chunk of ``chunk`` frames one
-    ``perspective_keynet_samples`` cut per entry of ``augments`` (a cut is a cheap grid sample; a decode is not). ``fetch_block_size``
-    None takes the dataset's (``FETCH_BLOCK_SIZE``); ``pinch`` adds the mesh-contact label (hand-model datasets)."""
+    ``KeyNetCutter.cut`` (a cut is a cheap grid sample; a decode is not). ``fetch_block_size`` None takes the dataset's
+    (``FETCH_BLOCK_SIZE``); ``pinch`` adds the mesh-contact label (hand-model datasets)."""
     from simplecv.rerun_dataloader import KeyedFrame, KeyedNvdecDecoder
 
-    from handtrack.data.catalog import _generic_model
-
-    cameras, _, labels, _, _ = DATASET_SPECS[name]
-    generic_rest: Float32[Tensor, "21 3"] = _generic_model().landmark_rest_positions.float()
-    coefficients: Float32[Tensor, "3"] = palm_coefficients(generic_rest)
+    cameras: tuple[str, ...] = DATASET_SPECS[name][0]
 
     def produce(epoch: int) -> Iterator[tuple[KeyNetSamples, int, int]]:
         import rerun as rr
@@ -316,27 +347,10 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
                   for c, camera in enumerate(cameras)}
         stream = RerunIterableDataset(DataSource(dataset=dataset, segments=list(segments)), index="frame_index", fields=fields,
                                       fetch_block_size=fetch_block_size or FETCH_BLOCK_SIZE.get(name, 1024), shuffle_strategy=BlockShuffle(), decode_threads=1)
-        infos: dict = {i.segment_id: i for i in list_segments(dataset, name)} if labels == "hand_model" else {}
-        generator: torch.Generator = torch.Generator(device=device).manual_seed(seed * 7919 + epoch)
-
-        @functools.lru_cache(maxsize=1)  # BlockShuffle interleaves segments, so only the current one is worth keeping
-        def truth_of(segment: str) -> SegmentTruth:
-            return hand_model_truth(dataset, name, segment, infos, pinch) if labels == "hand_model" else coco3d_truth(dataset, name, segment, coefficients, generic_rest)
+        cutter = KeyNetCutter(dataset, name, dataset_index, augments, device, torch.Generator(device=device).manual_seed(seed * 7919 + epoch), pinch)
 
         def cut(segment: str, camera: int, items: list[tuple[Tensor, int]]) -> Iterator[tuple[KeyNetSamples, int, int]]:
-            """One ``perspective_keynet_samples`` per augment for one camera's frames of one segment; the inputs move to the device once."""
-            truth: SegmentTruth = truth_of(segment)
-            rows: Int64[Tensor, "m"] = torch.tensor([row for _, row in items], dtype=torch.int64)
-            frames: UInt8[Tensor, "m h w"] = torch.stack([image for image, _ in items]).to(device)
-            inputs = (frames, truth.rig.select([camera]).to(device), truth.letterboxes[camera], truth.rolls_rad[camera],
-                      _image_hands(truth.truth, truth.valid, rows, camera, device, truth.contact_mm), truth.hand_label[rows, camera].to(device))
-            extrapolated: ImageHands = _image_hands(truth.priors.extrapolated, truth.priors.extrapolated_valid, rows, camera, device)
-            stale: ImageHands = _image_hands(truth.priors.stale, truth.priors.stale_valid, rows, camera, device)
-            for variant, augment in enumerate(augments):
-                samples: KeyNetSamples = perspective_keynet_samples(*inputs, extrapolated=extrapolated, stale=stale, phi=truth.phi, dataset=dataset_index,
-                                                                    augment=augment, generator=generator)
-                if sample_count(samples):
-                    yield samples, camera, variant
+            return cutter.cut(segment, camera, torch.stack([image for image, _ in items]), torch.tensor([row for _, row in items], dtype=torch.int64))
 
         current: str | None = None
         pending: dict[int, list[tuple[Tensor, int]]] = {}
@@ -351,7 +365,7 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
                         for camera, items in pending.items():
                             yield from cut(current, camera, items) if current is not None else ()
                         pending, current = {}, keyed.segment_id
-                    truth: SegmentTruth = truth_of(current)
+                    truth: SegmentTruth = cutter.truth(current)
                     row: int = int(truth.row_of_frame[keyed.index]) if keyed.index < len(truth.row_of_frame) else -1
                     if row >= 0 and bool(truth.image_valid[row, c]):
                         pending.setdefault(c, []).append((keyed.image, row))

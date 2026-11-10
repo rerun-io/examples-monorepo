@@ -22,7 +22,8 @@ from torch import Tensor
 from handtrack.apis.export_nets_onnx import GraphRecord, KeyNetGraph, check_graph, export_graph, read_checked_state, torch_keynet
 from handtrack.data.array_table import write_arrays
 from handtrack.data.batches import CropKind
-from handtrack.data.keynet_holdout import DATASETS_KEY, KeyNetHoldout, read_holdout
+from handtrack.data.catalog import CATALOG_URL
+from handtrack.data.keynet_holdout import KeyNetHoldout, load_holdout
 from handtrack.data.stream import KeyNetSamples, select_samples
 from handtrack.models.keynet import KeyNetF, keynet_from_state
 
@@ -30,6 +31,8 @@ INPUTS: list[str] = ["crop", "keypoints"]
 OUTPUTS: list[str] = ["heatmaps", "distance", "presence_logit", "pinch_logit"]
 STATIC_BATCHES: tuple[int, ...] = (1, 4)
 """``keynet_b<batch>.onnx`` for the NPU."""
+DATASETS_KEY: bytes = b"keynet_datasets"
+"""Schema metadata of ``keynet_heldout.parquet``: the dataset names its ``dataset`` column indexes, one per line."""
 
 
 @serde(deny_unknown_fields=True)
@@ -54,6 +57,7 @@ class KeyNetExportReport:
     weights: str
     weights_sha256: str
     holdout: str
+    """The catalog the frozen holdout was cut from."""
     seed: int
     """Seed of the reference draw."""
     torch_version: str
@@ -71,8 +75,6 @@ class Config:
 
     weights: Path
     """``*.weights.pt`` state dict with its ``.sha256`` sidecar."""
-    holdout: Path
-    """The frozen KeyNet holdout Parquet (``tools/keynet_holdout.py``)."""
     out_dir: Path
     opset: int = 17
     reference_crops: int = 512
@@ -82,6 +84,10 @@ class Config:
     """CPU threads for PyTorch and ONNX Runtime."""
     tolerance: float = 1e-3
     """See ``KeyNetExportReport.tolerance``."""
+    catalog_url: str = CATALOG_URL
+    """The catalog the frozen holdout is cut from (``data.keynet_holdout.load_holdout``)."""
+    device: str = "cuda"
+    """Where the holdout is decoded and cut; the export itself runs on the CPU."""
 
 
 def sample_rows(holdout: KeyNetHoldout, count: int, seed: int) -> tuple[Int64[ndarray, "m"], Bool[ndarray, "m"]]:
@@ -122,12 +128,15 @@ def dataset_rows(names: tuple[str, ...], arrays: dict[str, ndarray]) -> list[Dat
 
 
 def main(config: Config) -> KeyNetExportReport:
+    return export(config, load_holdout(config.catalog_url, torch.device(config.device)))
+
+
+def export(config: Config, holdout: KeyNetHoldout) -> KeyNetExportReport:
     """Export the three graphs, write the reference rows and the report, print a summary; raise if ONNX Runtime drifts from PyTorch."""
     torch.set_num_threads(config.threads)
     state, sha256 = read_checked_state(config.weights)
     model: KeyNetF = keynet_from_state(state).eval()
     graph: KeyNetGraph = KeyNetGraph(model)  # raises unless the weights have a pinch head and no visibility head
-    holdout: KeyNetHoldout = read_holdout(config.holdout)
     rows, zeroed = sample_rows(holdout, config.reference_crops, config.seed)
     index: Int64[Tensor, "n"] = torch.from_numpy(rows)
     samples: KeyNetSamples = select_samples(holdout.samples, index)
@@ -158,7 +167,7 @@ def main(config: Config) -> KeyNetExportReport:
     export_graph(graph, example, path, INPUTS, OUTPUTS, True, config.opset)
     graphs.append(check_graph(path, [crop_feed, keypoints], targets, None, OUTPUTS, config.threads))
 
-    report: KeyNetExportReport = KeyNetExportReport(str(config.weights), sha256, str(config.holdout), config.seed, torch.__version__, ort.__version__,
+    report: KeyNetExportReport = KeyNetExportReport(str(config.weights), sha256, config.catalog_url, config.seed, torch.__version__, ort.__version__,
                                                     config.opset, config.tolerance, dataset_rows(holdout.dataset_names, arrays), graphs)
     (config.out_dir / "export_report.json").write_text(to_json(report) + "\n")
     print(f"{config.weights} ({sha256[:8]}): {len(crops)} reference rows, {int(zero_prior.sum())} with a zero prior -> {config.out_dir}")

@@ -14,7 +14,7 @@ from handtrack.data.batches import BatchSource
 from handtrack.data.cache import DetNetCache, KeyNetCache
 from handtrack.data.catalog import CATALOG_URL, DatasetName, SplitName, list_segments, select_split
 from handtrack.data.echo import EchoStream, KeyNetProducer, Producer
-from handtrack.data.keynet_holdout import HoldoutSource, read_holdout
+from handtrack.data.keynet_holdout import HoldoutSource, load_holdout
 from handtrack.data.keynet_rerun import CutStream, DrawAugment, keynet_finish, stream_cuts
 from handtrack.data.rerun_source import DATASET_SPECS, build_manifest, nvdec_producer, rerun_producer, source_spec, training_finish
 from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig, sample_count
@@ -60,8 +60,6 @@ class RerunStreamSettings:
     """KeyNet: independently jittered crops cut from each decoded chunk (a cut is a grid sample; a decode is not)."""
     keynet_full_rotation: float = 0.25
     """KeyNet: share of crops rolled by a uniform angle on the whole circle instead of +-30 degrees (RoboCap cuts without a roll)."""
-    keynet_holdout: Path | None = None
-    """KeyNet: the frozen evaluation set (``tools/keynet_holdout.py``) that validation scores; None keeps the catalog validation stream."""
     keynet_draw: DrawAugment = field(default_factory=DrawAugment)
     """KeyNet: augmentation drawn anew every time a stored crop is drawn."""
     holdout: Path = Path("configs/detector_holdout.json")
@@ -185,10 +183,8 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
         if nets == "both":
             raise ValueError("stream.rerun feeds one net at a time; train with nets=detnet or nets=keynet")
         return rerun_source(settings, settings.rerun, torch.device(device), nets)
-    if settings.rerun is not None and nets == "keynet":
-        if settings.rerun.keynet_holdout is None:  # the catalog validation stream would score crops unlike the trained ones
-            raise ValueError("KeyNet on stream.rerun validates on the frozen holdout: set stream.rerun.keynet-holdout")
-        holdout_source: HoldoutSource = HoldoutSource(read_holdout(settings.rerun.keynet_holdout), settings.keynet_batch, device)
+    if settings.rerun is not None and nets == "keynet":  # validation scores the frozen holdout (``data.keynet_holdout_cuts``), cut anew
+        holdout_source: HoldoutSource = HoldoutSource(load_holdout(settings.rerun.catalog_url, torch.device(device)), settings.keynet_batch, device)
         rows: int = sample_count(holdout_source.samples)
         if rows > settings.max_val_batches * settings.keynet_batch:
             raise ValueError(f"the KeyNet holdout has {rows} rows but validation reads at most {settings.max_val_batches} x {settings.keynet_batch}; "

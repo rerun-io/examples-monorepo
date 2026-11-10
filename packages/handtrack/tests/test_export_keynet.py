@@ -11,9 +11,9 @@ from torch import Tensor
 
 pytest.importorskip("onnxruntime", reason="needs onnxruntime")
 
-from handtrack.apis.export_keynet import OUTPUTS, Config, main, sample_rows  # noqa: E402
+from handtrack.apis.export_keynet import DATASETS_KEY, OUTPUTS, Config, export, sample_rows  # noqa: E402
 from handtrack.data.array_table import read_arrays  # noqa: E402
-from handtrack.data.keynet_holdout import DATASETS_KEY, KeyNetHoldout, write_holdout  # noqa: E402
+from handtrack.data.keynet_holdout import KeyNetHoldout  # noqa: E402
 from handtrack.data.stream import KeyNetSamples, empty_keynet_samples  # noqa: E402
 from handtrack.models.keynet import KeyNetF  # noqa: E402
 from handtrack.train.checkpoint import export_weights  # noqa: E402
@@ -38,20 +38,18 @@ def synthetic_holdout(rows: int, dataset: Int64[Tensor, "n"], variant: Int64[Ten
     return KeyNetHoldout(samples, DATASETS, torch.arange(rows) % 3, variant)
 
 
-def write_inputs(tmp_path: Path, model: KeyNetF) -> tuple[Path, Path, KeyNetHoldout]:
+def write_inputs(tmp_path: Path, model: KeyNetF) -> tuple[Path, KeyNetHoldout]:
     rows: int = 16
-    holdout: KeyNetHoldout = synthetic_holdout(rows, torch.arange(rows) % 2, (torch.arange(rows) // 2) % 2)
-    write_holdout(tmp_path / "holdout" / "keynet_holdout.parquet", holdout)
     export_weights(tmp_path / "keynet.weights.pt", model.eval())
-    return tmp_path / "keynet.weights.pt", tmp_path / "holdout" / "keynet_holdout.parquet", holdout
+    return tmp_path / "keynet.weights.pt", synthetic_holdout(rows, torch.arange(rows) % 2, (torch.arange(rows) // 2) % 2)
 
 
 def test_three_graphs_match_pytorch_on_a_balanced_parquet_draw(tmp_path: Path) -> None:
     torch.manual_seed(0)
     model: KeyNetF = KeyNetF(pinch_head=True).eval()
-    weights, holdout_path, holdout = write_inputs(tmp_path, model)
+    weights, holdout = write_inputs(tmp_path, model)
     out_dir: Path = tmp_path / "models"
-    report = main(Config(weights=weights, holdout=holdout_path, out_dir=out_dir, reference_crops=8, threads=2))
+    report = export(Config(weights=weights, out_dir=out_dir, reference_crops=8, threads=2), holdout)
 
     assert {record.file for record in report.graphs} == {"keynet_b1.onnx", "keynet_b4.onnx", "keynet.onnx"}
     assert all((out_dir / name).exists() for name in ("keynet_b1.onnx", "keynet_b4.onnx", "keynet.onnx"))
@@ -96,9 +94,9 @@ def test_three_graphs_match_pytorch_on_a_balanced_parquet_draw(tmp_path: Path) -
 
 @pytest.mark.parametrize("heads", [{"pinch_head": False}, {"pinch_head": True, "visibility_head": True}])
 def test_weights_without_the_deployed_heads_are_refused(tmp_path: Path, heads: dict[str, bool]) -> None:
-    weights, holdout_path, _ = write_inputs(tmp_path, KeyNetF(**heads))
+    weights, holdout = write_inputs(tmp_path, KeyNetF(**heads))
     with pytest.raises(ValueError, match="pinch head"):
-        main(Config(weights=weights, holdout=holdout_path, out_dir=tmp_path / "models", threads=2))
+        export(Config(weights=weights, out_dir=tmp_path / "models", threads=2), holdout)
     assert not (tmp_path / "models").exists()
 
 
