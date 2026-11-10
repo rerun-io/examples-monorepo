@@ -65,3 +65,17 @@ def test_status_names_the_camera() -> None:
     assert describe_camera(settings, pinhole_camera(settings, 1920, 1080)) == "assumed pinhole, f = 1507 px (65° horizontal FOV)"
     given = VideoHandsSettings(fx=1200.0, fy=1210.0, cx=950.0, cy=530.0)
     assert describe_camera(given, pinhole_camera(given, 1920, 1080)) == "pinhole fx = 1200, fy = 1210, cx = 950, cy = 530 px"
+
+
+def test_joints_carry_full_confidence_and_show_green(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The hand models give no per-joint confidence, so every joint is logged at 1.0: the confidence gradient's green.
+    logged: list[tuple[str, Any]] = []
+    monkeypatch.setattr(rr, "log", lambda path, archetype, **_: logged.append((path, archetype)))
+    monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
+    detections, hands = _chunk()
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set())
+
+    joints = next(archetype for path, archetype in logged if path == "world/camera/hands/left_0/joints")
+    batches = {batch.component_descriptor().component: batch.as_arrow_array().to_pylist() for batch in joints.as_component_batches()}
+    assert batches["simplecv.KeypointConfidence3D:confidences"] == [1.0] * 21
+    assert {packed >> 8 for packed in batches["Points3D:colors"]} == {0x00FF00}

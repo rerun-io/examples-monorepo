@@ -27,6 +27,7 @@ import rerun.blueprint as rrb
 import torch
 from jaxtyping import Float32, Int64, UInt8, UInt16
 from numpy import ndarray
+from simplecv.rerun_custom_types import Points3DWithConfidence
 from simplecv.rerun_eye_controls import follow_eye_controls
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
@@ -125,6 +126,7 @@ def log_chunk_hands(
 
     Each hand's joints and mesh go under ``world/camera/hands/<slot>`` in the camera frame
     (the video view projects them through the pinhole); its detector box goes under ``world/camera/pinhole/boxes/<slot>``.
+    Joints are simplecv's ``Points3DWithConfidence`` at confidence 1.0 (no model here gives one per joint), so they show green.
 
     Args:
         frame_indices: Global frame index of each chunk frame.
@@ -141,6 +143,8 @@ def log_chunk_hands(
     vertices: Float32[ndarray, "m v 3"] | None = None if hands.vertices is None else hands.vertices.cpu().numpy()
     faces: dict[HandSide, ndarray] = {} if hands.faces is None else {side: value.cpu().numpy() for side, value in hands.faces.items()}
     keypoint_ids: UInt16[ndarray, "k"] = np.arange(hands.keypoints.skeleton.num_keypoints, dtype=np.uint16)
+    # The hand models give no per-joint confidence (WiLoR's score is its box's), so every joint is logged at 1.0: green.
+    full_confidence: Float32[ndarray, "k"] = np.ones(len(keypoint_ids), dtype=np.float32)
     for local, (frame_index, timestamp_ns) in enumerate(zip(frame_indices, timestamps_ns, strict=True)):
         rr.set_time("frame", sequence=int(frame_index))
         rr.set_time("video_time", duration=1e-9 * float(timestamp_ns))
@@ -160,7 +164,7 @@ def log_chunk_hands(
             if xyz is not None:
                 rr.log(
                     f"{CAMERA_PATH}/hands/{slot}/joints",
-                    rr.Points3D(xyz[row], keypoint_ids=keypoint_ids, class_ids=SIDE_CLASS[side], radii=0.004, show_labels=False),
+                    Points3DWithConfidence(xyz[row], full_confidence, class_ids=SIDE_CLASS[side], keypoint_ids=keypoint_ids, radii=0.004),
                 )
             if vertices is not None and side in faces:
                 rr.log(
