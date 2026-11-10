@@ -26,6 +26,8 @@ from posekit.models.egohand_fast import supported_backbone_precision
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
+VIDEO_SUFFIXES: Final[tuple[str, ...]] = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
+"""Uploads the app takes (Gradio matches them case-insensitively, so an iPhone's .MOV too); ``as_mp4`` remuxes the non-MP4 ones."""
 _PIPELINES: dict[str, HandPose3dPipeline] = {}
 """Set-up pipelines by stack name: engines stay loaded for the app's lifetime, so switching stacks costs nothing."""
 
@@ -133,7 +135,7 @@ def build() -> gr.Blocks:
                 tabs = gr.Tabs(selected="inputs")
                 with tabs:
                     with gr.TabItem("Inputs", id="inputs"):
-                        video = gr.File(label="Video", file_types=[".mp4"], type="filepath")
+                        video = gr.File(label="Video", file_types=list(VIDEO_SUFFIXES), type="filepath")
                         run = gr.Button("Run", variant="primary")
                         with gr.Accordion("Advanced", open=False):
                             stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())

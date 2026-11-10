@@ -45,3 +45,11 @@ def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> 
     assert hands_ui.pipeline_for("wilor") is first
     assert len(built) == 2
 
+
+
+def test_the_upload_takes_an_iphone_mov_and_other_containers() -> None:
+    from gradio_client.utils import is_valid_file
+
+    suffixes = list(hands_ui.VIDEO_SUFFIXES)
+    assert all(is_valid_file(name, suffixes) for name in ("IMG_6261.MOV", "clip.mp4", "clip.mkv", "clip.webm"))
+    assert not is_valid_file("notes.txt", suffixes)

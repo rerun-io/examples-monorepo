@@ -117,7 +117,8 @@ video). The app's egocentric examples run on the EgoHand stack: GSI head-camera 
 (`assets/examples/genhumanego_{kettle,garlic}.mp4`, 1600x1300, the double-sphere head camera remapped into a
 65° pinhole, so the assumed camera is exact), all 6 s or less of plain H.264, and WiLoR's original exocentric demo clip
 (`assets/examples/hands_video.mp4`, a person on stage with a microphone) on WiLoR; choosing an
-example also selects its stack.
+example also selects its stack. A phone video works as it is: an iPhone `.MOV` (HEVC, portrait by its
+rotation flag) comes out upright, and `.mkv`/`.webm` are remuxed to MP4 for the viewer without re-encoding.
 
 | Model | Detector | 3D hands | Skeleton | Camera | Backends |
 |---|---|---|---|---|---|

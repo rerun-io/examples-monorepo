@@ -14,9 +14,15 @@ of view (``hfov_deg``) with the principal point at the image centre. It does not
 exact; it fixes where the metric 3D hands sit in front of the camera. Every stack's hands end up
 in it: WiLoR predicts in its own virtual camera, so its hands keep their wrist-relative shape and
 get the translation that reprojects their joints in this pinhole (``WilorHands.in_pinhole``).
+
+Any container FFmpeg reads is accepted. The models decode the file as it is; the viewer's video reader
+needs MP4, so ``as_mp4`` remuxes other containers without re-encoding. Both readers apply the display
+rotation (an iPhone portrait .MOV), so the frames, their size, the pinhole and the hands are all upright.
 """
 
 import math
+import subprocess
+import tempfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,6 +61,8 @@ JOINT_CLASS: int = 2
 """Annotation class of the joints of either side: it carries the skeleton links in ``LINK_COLOR``."""
 LINK_COLOR: tuple[int, int, int] = (255, 255, 255)
 """Skeleton link colour: white stands out on both side colours and on skin (red would read as low confidence)."""
+MP4_CODECS: frozenset[str] = frozenset({"h264", "hevc", "av1", "vp9"})
+"""Video codecs (FFmpeg names) that go into MP4 as they are and that the Rerun viewer decodes."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -229,6 +237,31 @@ def video_size(path: Path) -> tuple[int, int]:
     return int(metadata.width), int(metadata.height)
 
 
+def as_mp4(video: Path, out_dir: Path) -> Path:
+    """The video in an MP4 (ISO BMFF) file, the container the Rerun video reader takes.
+
+    MP4 and QuickTime files (.mp4, .mov, .m4v) come back as they are. Other containers (.mkv, .webm, ...)
+    are remuxed into ``out_dir`` with stream copy, which keeps the display rotation; only a codec outside
+    ``MP4_CODECS`` is re-encoded, to H.264, and that is printed.
+    """
+    import av
+
+    with av.open(str(video)) as source:
+        if "mp4" in source.format.name.split(","):
+            return video
+        codec: str = source.streams.video[0].codec_context.name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target: Path = out_dir / f"{video.stem}.mp4"
+    video_args: list[str] = ["-c:v", "copy"]
+    if codec not in MP4_CODECS:
+        print(f"[posekit] re-encoding {video.name} to H.264: its {codec} video cannot go into MP4 for the viewer")
+        video_args = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"]
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video), "-map", "0:v:0", *video_args, str(target)], check=True
+    )
+    return target
+
+
 def pinhole_camera(settings: VideoHandsSettings, width: int, height: int) -> CalibratedCamera:
     """The settings' pinhole; each unset intrinsic comes from ``assumed_pinhole``."""
     given: tuple[float | None, ...] = (settings.fx, settings.fy, settings.cx, settings.cy)
@@ -291,7 +324,10 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         rr.Pinhole(image_from_camera=camera.intrinsics, resolution=[width, height], image_plane_distance=0.05),
         static=True,
     )
-    video_timestamps_ns: Int64[ndarray, "frames"] = log_video(settings.video_path, Path(VIDEO_PATH), timeline="video_time")
+    with tempfile.TemporaryDirectory(prefix="posekit-video-") as scratch:
+        video_timestamps_ns: Int64[ndarray, "frames"] = log_video(
+            as_mp4(settings.video_path, Path(scratch)), Path(VIDEO_PATH), timeline="video_time"
+        )
     send_blueprint()
     log_hand_annotation_context(pipeline.pose.skeleton)
     total_hands: int = 0
