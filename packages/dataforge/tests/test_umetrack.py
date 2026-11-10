@@ -297,13 +297,16 @@ def test_typed_camera_distortion_roundtrip(tiny_umetrack: Path, tmp_path: Path, 
     identity: SequenceIdentity = SequenceIdentity("umetrack", ("synthetic" if synthetic else "real", "hand_hand", "training", "user_03", "recording_05"))
     with writing.atomic_recording(target, recording_id=identity.recording_id) as recording:
         write_geometry(recording, scene, identity)
+    # Cameras are stored upright (the fixture's angles 0/90/90/180 turn them 0/3/3/2 quarter turns clockwise); each clockwise
+    # turn maps the tangential pair (p1, p2) to (-p2, p1).
+    tangential: list[tuple[float, float]] = [(0.7, 0.8), (0.8, -0.7), (0.8, -0.7), (-0.7, -0.8)]
     for index in range(4):
         prefix: str = schema.pinhole_path(0, index)
         table: pa.Table = read_back(target).reader(index=None, contents=prefix).to_arrow_table()
         assert table[f"{prefix}:simplecv.components.DistortionModel"][0].as_py() == ["kannala_brandt"]
         np.testing.assert_allclose(
             table[f"{prefix}:simplecv.components.DistortionCoefficients"][0].as_py(),
-            [[0.1, 0.2, 0.3, 0.4, 0.0, 0.0, 0.7, 0.8] if synthetic else [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]],
+            [[0.1, 0.2, 0.3, 0.4, 0.0, 0.0, *tangential[index]] if synthetic else [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, *tangential[index]]],
         )
         radial_names: tuple[str, str] = ("p3", "p4") if synthetic else ("k5", "k6")
         absent_names: tuple[str, str] = ("k5", "k6") if synthetic else ("p3", "p4")
@@ -384,12 +387,16 @@ def test_projections_use_world_hands_camera_pose_and_both_clocks(tiny_umetrack: 
         assert table["frame_index"].to_pylist() == scene.frame_indices.tolist()
         pixels = np.asarray(table["Points2D:positions"].to_pylist())
         assert np.isnan(pixels[2]).all()
-        # Independent scalar equidistant + radial polynomial, for the right wrist; the fixture's p3/p4 are not projected.
+        # Independent scalar equidistant + radial polynomial, for the right wrist; the fixture's p3/p4 are not projected. The
+        # stored image is upright: the source pixel turned 0/3/3/2 times clockwise, (u, v) -> (15 - v, u) per turn on 16x16.
         for frame in range(2):
             x = xyz[frame, 112, 0] - (0.1 + frame * 0.1 + camera * 0.01)
             theta = math.atan2(abs(x), xyz[frame, 112, 2])
             theta_d = theta * (1 + 0.1 * theta**2)
-            np.testing.assert_allclose(pixels[frame, 112], [8 + (20 + camera) * math.copysign(theta_d, x), 8], atol=1e-6, rtol=0)
+            u, v = 8 + (20 + camera) * math.copysign(theta_d, x), 8.0
+            for _ in range((0, 3, 3, 2)[camera]):
+                u, v = 15 - v, u
+            np.testing.assert_allclose(pixels[frame, 112], [u, v], atol=1e-6, rtol=0)
 
 
 def test_no_hand_gt_writes_empty_projections(tiny_umetrack: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

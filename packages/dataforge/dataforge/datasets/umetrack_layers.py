@@ -20,31 +20,25 @@ from dataforge.datasets.umetrack_source import FISHEYE62, Camera, SequenceData
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import SequenceTimer
 from dataforge.umetrack_hands import log_hand_meshes
-from dataforge.video_encoding import AV1_CQ, AV1_GOP, transcode_crops, work_dir
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, transcode_tiles_on_gpu, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
 
+def fisheye_camera(source: Camera, rig_T_cam: Float64[ndarray, "4 4"], name: str = "camera") -> Fisheye62Parameters:
+    """One typed FishEye62 camera with its rig-from-camera extrinsics."""
+    return Fisheye62Parameters(
+        name=name,
+        distortion=source.lens(),
+        extrinsics=Extrinsics(world_R_cam=rig_T_cam[:3, :3], world_t_cam=rig_T_cam[:3, 3]),
+        intrinsics=Intrinsics.from_focal_principal_point(
+            camera_conventions="RDF", fl_x=source.fx, fl_y=source.fy, cx=source.cx, cy=source.cy, width=source.ImageSizeX, height=source.ImageSizeY
+        ),
+    )
+
+
 def rig_cameras(scene: SequenceData) -> list[Fisheye62Parameters]:
-    """Return the four typed cameras with rig-from-camera extrinsics."""
-    cameras: list[Fisheye62Parameters] = []
-    for index, source in enumerate(scene.labels.cameras):
-        transform: Float64[ndarray, "4 4"] = scene.rig_T_cam[index]
-        camera: Fisheye62Parameters = Fisheye62Parameters(
-            name=f"cam_{index:02}",
-            distortion=source.lens(),
-            extrinsics=Extrinsics(world_R_cam=transform[:3, :3], world_t_cam=transform[:3, 3]),
-            intrinsics=Intrinsics.from_focal_principal_point(
-                camera_conventions="RDF",
-                fl_x=source.fx,
-                fl_y=source.fy,
-                cx=source.cx,
-                cy=source.cy,
-                width=source.ImageSizeX,
-                height=source.ImageSizeY,
-            ),
-        )
-        cameras.append(camera)
-    return cameras
+    """Return the four typed cameras as stored (upright), with rig-from-camera extrinsics."""
+    return [fisheye_camera(camera, scene.rig_T_cam[index], f"cam_{index:02}") for index, camera in enumerate(scene.cameras)]
 
 
 def write_geometry(recording: rr.RecordingStream, scene: SequenceData, identity: SequenceIdentity) -> None:
@@ -67,6 +61,8 @@ def write_geometry(recording: rr.RecordingStream, scene: SequenceData, identity:
                 name=camera.name,
                 source_width=source.ImageSizeX,
                 source_height=source.ImageSizeY,
+                stored_width=camera.intrinsics.width,
+                stored_height=camera.intrinsics.height,
                 video_codec="av1",
                 cq=AV1_CQ,
                 gop=AV1_GOP,
@@ -89,7 +85,10 @@ def write_geometry(recording: rr.RecordingStream, scene: SequenceData, identity:
             rr.AnyValues(
                 drop_untyped_nones=True,
                 **coefficients,
-                source_camera_angle_deg=float(scene.labels.camera_angles[index]),
+                # The roll left after the upright turn (the release states 0/90/90/180, so 0 for every camera); KeyNet's crop
+                # cameras read it. The release's own angle is this minus 90 x upright_quarter_turns_cw.
+                source_camera_angle_deg=float((scene.labels.camera_angles[index] + 90.0 * scene.quarter_turns[index] + 180.0) % 360.0 - 180.0),
+                upright_quarter_turns_cw=scene.quarter_turns[index],
             ),
             static=True,
             recording=recording,
@@ -136,8 +135,9 @@ def write_base(recording: rr.RecordingStream, scene: SequenceData, identity: Seq
         clips: list[Path] = [work / f"cam_{index:02}.mp4" for index in range(4)]
 
         with timer.stage("transcode"):
-            transcode_crops(
-                scene.source.with_suffix(".mp4"), clips, crops=[scene.crop(index) for index in range(4)],
+            # One GPU pass from the raw stacked MP4: NVDEC once, crop and turn each tile upright, NVENC each camera once.
+            transcode_tiles_on_gpu(
+                scene.source.with_suffix(".mp4"), clips, crops=[scene.crop(index) for index in range(4)], turns=list(scene.quarter_turns),
                 gop=AV1_GOP, cq=AV1_CQ, fps=scene.fps, frames=scene.count,
             )
         for index, clip in enumerate(clips):

@@ -323,7 +323,7 @@ fn main() -> Result<(), Error> {
     }
     let golden = Arc::new(golden()?);
     let mut real: Option<Box<dyn HandNets>> = match &models {
-        Some(dir) => Some(Box::new(robocap_live::nets::rknn::RknnNets::open(dir)?)),
+        Some(dir) => Some(Box::new(robocap_live::nets::rknn::RknnNets::open(dir, robocap_live::nets::DetNetVersion::default())?)),
         None => None,
     };
     for all_cameras in [false, true] {

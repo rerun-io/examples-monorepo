@@ -25,7 +25,7 @@ pub use api::{InputData, NpuCore, RknnError, RknnModel, RknnRuntime, RunTiming, 
 use kornia_staging_imgproc::resize::{pool4_from_sums, pool4_mean_f32, pool4_u8};
 
 use super::{
-    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, HandNets, KEYNET_CROP, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
+    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, DetNetVersion, HEATMAP_LEN, HandNets, KEYNET_CROP, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
 };
 
 /// Where Rockchip's images install the runtime.
@@ -134,17 +134,25 @@ impl PooledInput {
             return Err(NetsError::Input { net: "detnet", message });
         }
         let (first, last): (usize, usize) = (frame.top / 4 * POOLED_WIDTH, (frame.top + rows) / 4 * POOLED_WIDTH);
+        // A half turn commutes with the 4x4 pool (the blocks tile the equal bars and the image alike): pool, then reverse the blocks.
+        let half_turn: bool = frame.half_turn;
         match self {
             PooledInput::U8(dst) => {
                 dst[..first].fill(0);
                 dst[last..].fill(0);
                 pool4_u8(frame.pixels, DETNET_WIDTH, rows, &mut dst[first..last]).map_err(pool_error)?;
+                if half_turn {
+                    dst[first..last].reverse();
+                }
                 Ok(InputData::U8(dst))
             }
             PooledInput::F32(dst) => {
                 dst[..first].fill(0.0);
                 dst[last..].fill(0.0);
                 pool4_mean_f32(frame.pixels, DETNET_WIDTH, rows, &mut dst[first..last]).map_err(pool_error)?;
+                if half_turn {
+                    dst[first..last].reverse();
+                }
                 Ok(InputData::F32(dst))
             }
             PooledInput::F16(dst) => {
@@ -155,6 +163,9 @@ impl PooledInput {
                     half::f16::from_f32(f32::from(sum) / 16.0 * scale).to_bits().to_le_bytes()
                 })
                 .map_err(pool_error)?;
+                if half_turn {
+                    dst[first..last].reverse();
+                }
                 Ok(InputData::Native(dst.as_flattened()))
             }
         }
@@ -423,15 +434,15 @@ pub struct RknnNets {
 }
 
 impl RknnNets {
-    /// Opens the runtime and loads [`DEFAULT_DETNET`] (3 contexts: cores 0, 1, 2) and [`DEFAULT_KEYNET`] (2 contexts: cores 1,
-    /// 2) from `models_dir`.
+    /// Opens the runtime and loads `detnet`'s [`DEFAULT_DETNET`] ([`DetNetVersion::dir`]; 3 contexts: cores 0, 1, 2) and
+    /// [`DEFAULT_KEYNET`] from `models_dir` (2 contexts: cores 1, 2).
     ///
     /// # Errors
     ///
     /// As [`RknnNets::with_files`].
-    pub fn open(models_dir: impl AsRef<Path>) -> Result<Self, NetsError> {
+    pub fn open(models_dir: impl AsRef<Path>, detnet: DetNetVersion) -> Result<Self, NetsError> {
         let dir: &Path = models_dir.as_ref();
-        Self::with_files(DEFAULT_LIBRARY, dir.join(DEFAULT_DETNET), dir.join(DEFAULT_KEYNET), 3, 2)
+        Self::with_files(DEFAULT_LIBRARY, detnet.dir(dir).join(DEFAULT_DETNET), dir.join(DEFAULT_KEYNET), 3, 2)
     }
 
     /// Loads DetNet contexts on cores 0, 1, 2 and KeyNet contexts on cores 1, 2, 0 (the first `detnet_contexts` and

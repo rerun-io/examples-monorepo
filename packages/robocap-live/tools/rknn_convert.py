@@ -2,7 +2,8 @@
 
 Runs in a separate pixi project for Rockchip's RKNN-Toolkit2 (the x86 converter + simulator; the root pixi.toml has no
 rknn-toolkit2 env): linux-64, conda-forge ``python 3.11.*`` and ``setuptools <70``, and from PyPI ``rknn-toolkit2 ==2.3.2``,
-``torch ==2.4.0`` (CPU wheel index), ``onnx >=1.16.1,<1.18``, ``onnxruntime >=1.17,<1.20``, ``onnxsim`` and ``tyro >=0.9,<0.10``:
+``torch ==2.4.0`` (CPU wheel index), ``onnx >=1.16.1,<1.18``, ``onnxruntime >=1.17,<1.20``, ``onnxsim``, ``tyro >=0.9,<0.10`` and ``pyarrow``
+(Parquet held-out sets):
 
     pixi run --manifest-path <rknn-toolkit2 project>/pixi.toml python packages/robocap-live/tools/rknn_convert.py \
         --work-dir <dir> --keynet-cache <dir> --calibration-dir <dir>
@@ -44,6 +45,7 @@ DISTANCE_RANGE_MM: float = 130.0
 DETNET_OUTPUTS: tuple[str, ...] = ("center", "radius", "presence_logit")
 EvalSet: TypeAlias = Literal["heldout", "s66"]
 EVAL_FILES: dict[str, str] = {"heldout": "{net}_heldout.npz", "s66": "s66_{net}_heldout.npz"}
+"""Legacy npz sets; a ``.parquet`` of the same stem (``handtrack.data.array_table``, e.g. from ``export_detnet``) wins."""
 """``heldout``: the training caches' held-out samples (UmeTrack + SHOW3D, with labels). ``s66``: real RoboCap Cap A inputs that
 handtrack's tracker fed the nets on the s66 clip (every other sample; the rest calibrate), with PyTorch CPU FP32 outputs."""
 KEYNET_OUTPUTS: tuple[str, ...] = ("heatmaps", "distance", "presence_logit", "pinch_logit")
@@ -86,12 +88,12 @@ class Config:
 
     work_dir: Path
     """Holds ``*_heldout.npz`` and the optional s66 calibration sets; receives calibration files and simulator outputs."""
-    keynet_cache: Path
+    keynet_cache: Path | None = None
     """The KeyNet perspective test-samples cache, for ``crop_from_net.npy`` and ``points_crop.npy`` (net-frame errors,
-    ground-truth error)."""
-    calibration_dir: Path
+    ground-truth error); KeyNet builds only."""
+    calibration_dir: Path | None = None
     """The 2026-09-29 study's INT8 calibration sets: ``detnet_pooled/dataset.txt`` and ``keynet/dataset.txt``, one sample per
-    line naming its npy files (float u8 / 255; KeyNet: crop, then keypoint priors)."""
+    line naming its npy files (float u8 / 255; KeyNet: crop, then keypoint priors); INT8 builds only (rknn-toolkit2 reads npy)."""
     models_dir: Path = Path(__file__).resolve().parents[1] / "models"
     """Holds the ONNX inputs; receives the ``.rknn`` files and ``rknn_report.json``."""
     builds: tuple[str, ...] = ()
@@ -309,13 +311,45 @@ def score_keynet(outputs: list[ndarray], reference: dict[str, ndarray], linear: 
                        float(np.quantile(pinch_error, 0.9)), float(pinch_error.max()), float(np.mean((pinch_probability > 0.5) == (pinch_torch > 0.5))), diffs)
 
 
+def read_array_table(path: Path) -> dict[str, ndarray]:
+    """``handtrack.data.array_table.read_arrays`` with pyarrow alone (this env has no handtrack): per-row shape and dtype in the field metadata."""
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path)
+    arrays: dict[str, ndarray] = {}
+    for column_field in table.schema:
+        shape: list[int] = json.loads(column_field.metadata[b"array_shape"])
+        column = table[column_field.name].combine_chunks()
+        values: ndarray = (column.flatten() if shape else column).to_numpy(zero_copy_only=False)
+        arrays[column_field.name] = values.astype(np.dtype(column_field.metadata[b"array_dtype"].decode()), copy=False).reshape(len(column), *shape)
+    return arrays
+
+
+def write_array_table(path: Path, arrays: dict[str, ndarray]) -> None:
+    """``handtrack.data.array_table.write_arrays`` with pyarrow alone."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    columns, fields = [], []
+    for name, value in arrays.items():
+        flat: ndarray = np.ascontiguousarray(value).reshape(len(value), -1)
+        column = pa.FixedSizeListArray.from_arrays(pa.array(flat.reshape(-1)), flat.shape[1]) if value.ndim > 1 else pa.array(value)
+        columns.append(column)
+        fields.append(pa.field(name, column.type, metadata={b"array_shape": json.dumps(list(value.shape[1:])).encode(), b"array_dtype": str(value.dtype).encode()}))
+    pq.write_table(pa.Table.from_arrays(columns, schema=pa.schema(fields)), path)
+
+
 def load_reference(config: Config, net: Net, which: EvalSet) -> dict[str, ndarray] | None:
-    """An evaluation set's inputs and PyTorch outputs; None when its file is absent."""
+    """An evaluation set's inputs and PyTorch outputs (the Parquet set when present, else the legacy npz); None when absent."""
     path: Path = config.work_dir / EVAL_FILES[which].format(net=net)
-    if not path.exists():
+    table: Path = path.with_suffix(".parquet")
+    if table.exists():
+        reference: dict[str, ndarray] = read_array_table(table)
+    elif path.exists():
+        with np.load(path) as archive:
+            reference = {name: archive[name] for name in archive.files}
+    else:
         return None
-    with np.load(path) as archive:
-        reference: dict[str, ndarray] = {name: archive[name] for name in archive.files}
     if config.eval_samples:
         reference = {name: value[: config.eval_samples] for name, value in reference.items()}
     return reference
@@ -323,7 +357,7 @@ def load_reference(config: Config, net: Net, which: EvalSet) -> dict[str, ndarra
 
 def labels(config: Config, which: EvalSet, count: int) -> tuple[ndarray | None, ndarray | None]:
     """The held-out crops' linear crop-to-net maps and ground-truth keypoints (none for s66)."""
-    if which != "heldout":
+    if which != "heldout" or config.keynet_cache is None:
         return None, None
     linear: ndarray = np.linalg.inv(np.load(config.keynet_cache / "crop_from_net.npy")[:count].astype(np.float64))[:, :2, :2]
     return linear, np.load(config.keynet_cache / "points_crop.npy")[:count]
@@ -368,6 +402,8 @@ def run_build(config: Config, build: Build) -> BuildRecord:
         sources: dict[str, int] = {}
         listing: Path | None = None
         if build.precision == "int8":
+            if config.calibration_dir is None:
+                raise ValueError(f"{build.name}: INT8 needs --calibration-dir")
             listing, sources = calibration(build, work, config.calibration_dir)
         if rknn.build(do_quantization=build.precision == "int8", dataset=None if listing is None else str(listing)) != 0:
             raise RuntimeError(f"{build.name}: build failed")
@@ -388,7 +424,7 @@ def run_build(config: Config, build: Build) -> BuildRecord:
             else:
                 outputs = simulate(rknn, build, [image_feed(build, reference)], [(2, 2), (2,), (2,)])
             scores[which] = score_set(config, build.net, which, reference, outputs)
-            np.savez(work / "sim" / f"{build.name}_{which}.npz", **dict(zip(KEYNET_OUTPUTS if is_key else DETNET_OUTPUTS, outputs, strict=True)))
+            write_array_table(work / "sim" / f"{build.name}_{which}.parquet", dict(zip(KEYNET_OUTPUTS if is_key else DETNET_OUTPUTS, outputs, strict=True)))
     finally:
         rknn.release()
     return BuildRecord(build.name, artifact.name, hashlib.sha256(artifact.read_bytes()).hexdigest(), artifact.stat().st_size, build.onnx,
@@ -436,11 +472,13 @@ def main(config: Config) -> None:
     if config.score_device is not None:
         score_device(config, report_path)
         return
-    decoder_error: float = check_decoder(config)
-    print(f"numpy decode_heatmaps vs torch: max {decoder_error:.2e} px")
-    if decoder_error > 1e-3:
-        raise RuntimeError("numpy decode_heatmaps does not reproduce handtrack's decoder")
     chosen: tuple[Build, ...] = tuple(build for build in DEFAULT_BUILDS if not config.builds or build.name in config.builds)
+    decoder_error: float | None = None
+    if any(build.net == "keynet" for build in chosen):
+        decoder_error = check_decoder(config)
+        print(f"numpy decode_heatmaps vs torch: max {decoder_error:.2e} px")
+        if decoder_error > 1e-3:
+            raise RuntimeError("numpy decode_heatmaps does not reproduce handtrack's decoder")
     previous: dict = json.loads(report_path.read_text()) if report_path.exists() else {}
     records: dict[str, dict] = previous.get("builds", {})
     for build in chosen:

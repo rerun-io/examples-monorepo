@@ -22,7 +22,7 @@ use robocap_live::hands::HandsConfig;
 use robocap_live::layer::{HandsLayerConfig, HandsLayerWriter, LayerError};
 use robocap_live::log::scene::HandOverlays;
 use robocap_live::nets::ort::{OrtConfig, OrtDevice, OrtNets};
-use robocap_live::nets::{HandNets, NoNets};
+use robocap_live::nets::{DetNetVersion, HandNets, NoNets};
 use robocap_live::sched::PipelineConfig;
 use robocap_live::slam::ReferencePoses;
 
@@ -284,11 +284,11 @@ impl HandsLayer {
     /// `reference_t_ns` and `reference_world_from_rig` are the segment's SLAM poses (row-major 4x4, NaN rows for none) keyed
     /// by frameset time: each frameset takes the pose within 2 ms of its time, and one without a pose the newest earlier one, as
     /// the runtime's `--slam reference` replay does. `nets` is `ort` (DetNet and KeyNet from `models_dir` on ONNX Runtime, the
-    /// library from `ort_dylib`, else `ORT_DYLIB_PATH`; `device` auto, cpu, cuda or cuda:<n>) or `none` (no hands: tests).
+    /// library from `ort_dylib`, else `ORT_DYLIB_PATH`; DetNet `detnet_version`, whose input convention sets the camera turn; `device` auto, cpu, cuda or cuda:<n>) or `none` (no hands: tests).
     #[new]
     #[pyo3(signature = (
         rig, output, recording_id, reference_t_ns, reference_world_from_rig, *, nets = "ort", models_dir = None, device = "auto",
-        ort_dylib = None, ort_threads = 0, overlays = "debug",
+        ort_dylib = None, ort_threads = 0, overlays = "debug", detnet_version = "mix1-upright",
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -304,14 +304,19 @@ impl HandsLayer {
         ort_dylib: Option<PathBuf>,
         ort_threads: usize,
         overlays: &str,
+        detnet_version: &str,
     ) -> PyResult<Self> {
+        let detnet_version = DetNetVersion::from_name(detnet_version).ok_or_else(|| {
+            let names: Vec<&str> = DetNetVersion::ALL.iter().map(|version| version.name()).collect();
+            value_error(format!("detnet_version {detnet_version:?}: expected one of {names:?}"))
+        })?;
         let hand_overlays: HandOverlays = overlays.parse().map_err(value_error)?;
         let reference = reference_poses(&reference_t_ns, reference_world_from_rig)?;
         let rig = rig.inner.clone();
         let nets: Box<dyn HandNets> = match nets {
             "ort" => {
                 let dir = models_dir.ok_or_else(|| {
-                    value_error("nets='ort' needs models_dir (detnet_full.onnx, keynet.onnx)")
+                    value_error("nets='ort' needs models_dir (detnet/<version>/detnet_full.onnx, keynet.onnx)")
                 })?;
                 let options = OrtConfig {
                     device: ort_device(device)?,
@@ -319,7 +324,7 @@ impl HandsLayer {
                     intra_threads: ort_threads,
                 };
                 Box::new(
-                    py.detach(|| OrtNets::new(&dir, &options))
+                    py.detach(|| OrtNets::new(&dir, detnet_version, &options))
                         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
                 )
             }
@@ -327,6 +332,7 @@ impl HandsLayer {
             other => return Err(value_error(format!("nets {other:?}: expected ort or none"))),
         };
         let hands = HandsConfig {
+            detnet_input: detnet_version.into(),
             // Offline, as a lossless replay: switch to the calibrated scale on the frameset that finishes the solve, the same
             // one every run.
             scale_wait: true,

@@ -76,17 +76,20 @@ fn bits(values: &[f32]) -> Vec<u32> {
 /// The one-pass inputs of `small` equal the old chain's, byte for byte, in every feed. Each buffer first holds the input of a
 /// white full 640x480 frame, so a pass that leaves the bars or any value unwritten fails.
 fn assert_detnet_inputs_match(small: &Image<u8, 1>, what: &str) -> TestResult {
-    let old: OldInputs = old_detnet_inputs(small)?;
-    let letterbox = BarLetterbox::robocap();
+    assert_frame_inputs(&BarLetterbox::robocap().net_frame(small)?, &old_detnet_inputs(small)?, what)
+}
+
+/// `frame`'s one-pass inputs equal `old`, byte for byte, in every feed and in ORT's tensor.
+fn assert_frame_inputs(frame: &NetFrame<'_>, old: &OldInputs, what: &str) -> TestResult {
     let white = vec![255u8; DETNET_WIDTH * DETNET_HEIGHT];
-    let frame = letterbox.net_frame(small)?;
     for feed in [ImageFeed::U8, ImageFeed::F32, ImageFeed::F16Native] {
         let mut input = PooledInput::new(feed);
         input.fill(&NetFrame {
             pixels: &white,
             top: 0,
+            half_turn: false,
         })?;
-        match input.fill(&frame)? {
+        match input.fill(frame)? {
             InputData::U8(values) => assert!(
                 values == old.pooled_u8.as_slice(),
                 "{what}: u8 feed differs"
@@ -117,6 +120,24 @@ fn small_from(
             .map(|i| value(i % width, i / width))
             .collect(),
     )
+}
+
+/// A camera turned upside down for the upright model: its frame is the small image turned 180 degrees, so every feed must equal
+/// the padded chain of the reversed small image (the bars are 60 rows above and below, so the turned image keeps its rows).
+#[test]
+fn a_half_turned_detnet_input_is_the_padded_chain_of_the_reversed_image() -> TestResult {
+    let images: Vec<(&str, Image<u8, 1>)> = vec![
+        ("vertical edge", small_from(|x, _| if x >= 321 { 255 } else { 0 })?),
+        ("first and last rows", small_from(|_, y| if y == 0 { 255 } else if y == 359 { 9 } else { 0 })?),
+        ("ramp", small_from(|x, y| ((x + 3 * y) % 256) as u8)?),
+    ];
+    for (what, image) in &images {
+        let mut reversed: Image<u8, 1> = image.clone();
+        reversed.as_slice_mut().reverse();
+        let frame: NetFrame<'_> = BarLetterbox::robocap().net_frame(image)?.with_half_turn(true);
+        assert_frame_inputs(&frame, &old_detnet_inputs(&reversed)?, what)?;
+    }
+    Ok(())
 }
 
 #[test]

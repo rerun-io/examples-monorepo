@@ -1,5 +1,7 @@
 """Protocol logic of the hands evaluation on a synthetic segment with fake models (no catalog, no GPU)."""
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
@@ -8,9 +10,9 @@ pytest.importorskip("warp", reason="the eval imports EgoHand; it needs the posek
 
 from simplecv.catalog_video import CatalogVideo
 
-from posekit.apis.hands_eval import HandsEvalConfig, evaluate_segment, joint_box
+from posekit.apis.hands_eval import EndToEndCell, HandsEvalConfig, error_quantiles, evaluate_segment, failed_bands, joint_box, within_accuracy_band
 from posekit.cameras import CalibratedCamera
-from posekit.eval.hand_gt import HandGtSegment
+from posekit.eval.hand_gt import GtDataset, HandGtSegment
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
@@ -77,11 +79,55 @@ def test_detector_recall_needs_the_right_side_and_overlap() -> None:
     assert (count, any_side, len(scored)) == (2, 1, 0)
 
 
-def test_evaluation_cli_selects_fast_and_reference_egohand() -> None:
+def test_evaluation_cli_selects_every_egohand_stack() -> None:
     import tyro
 
-    config = tyro.cli(HandsEvalConfig, args=["--models", "egohand", "egohand-fast"])
-    assert config.models == ("egohand", "egohand-fast")
+    config = tyro.cli(HandsEvalConfig, args=["--models", "egohand", "egohand-fast", "egohand-fast-bf16"])
+    assert config.models == ("egohand", "egohand-fast", "egohand-fast-bf16")
+
+
+def test_timing_and_bands_need_the_end_to_end_protocol() -> None:
+    with pytest.raises(ValueError, match="end-to-end"):
+        HandsEvalConfig(timing=True)
+    assert HandsEvalConfig(protocols=("end-to-end",), timing=True).timing
+
+
+def _row(dataset: GtDataset) -> EndToEndCell:
+    return EndToEndCell("egohand-fast", dataset, 10, 1.0, 10, 9, 0.9, 0.8, 1.0, 10.0, 30.0, 20.0, 50.0, 15.0, 40.0, None, None, None)
+
+
+def test_bands_pass_within_five_percent() -> None:
+    reference = [_row("dataforge-umetrack"), _row("gsi-six-view")]
+    assert failed_bands(reference, [replace(_row("dataforge-umetrack"), recall=0.9 * 0.96, epe_2d_p95_px=30.0 * 1.04), _row("gsi-six-view")]) == []
+
+
+def test_bands_name_each_failure_and_a_missing_reference() -> None:
+    reference = [_row("dataforge-umetrack")]
+    candidate = [replace(_row("dataforge-umetrack"), mean_iou=0.7, absolute_3d_median_mm=None), _row("gsi-six-view")]
+    assert failed_bands(reference, candidate) == ["dataforge-umetrack: mean_iou", "dataforge-umetrack: absolute_3d_median_mm", "gsi-six-view: no reference"]
+
+
+def test_lower_is_better_band_includes_five_percent() -> None:
+    assert within_accuracy_band(100.0, 105.0, higher_is_better=False)
+    assert not within_accuracy_band(100.0, 105.01, higher_is_better=False)
+
+
+def test_higher_is_better_band_includes_five_percent() -> None:
+    assert within_accuracy_band(0.8, 0.76, higher_is_better=True)
+    assert not within_accuracy_band(0.8, 0.759, higher_is_better=True)
+
+
+def test_missing_metrics_cannot_pass() -> None:
+    assert not within_accuracy_band(None, 1.0, higher_is_better=True)
+    assert not within_accuracy_band(1.0, None, higher_is_better=False)
+    assert not within_accuracy_band(1.0, float("nan"), higher_is_better=False)
+
+
+def test_errors_report_median_and_p95_without_discarding_failures() -> None:
+    assert error_quantiles([1.0, 2.0, 3.0, 4.0, 5.0]) == pytest.approx((3.0, 4.8))
+    assert error_quantiles([]) == (None, None)
+    with pytest.raises(ValueError, match="finite"):
+        error_quantiles([1.0, float("nan")])
 
 
 def test_a_detector_only_model_scores_recall_and_no_pose() -> None:

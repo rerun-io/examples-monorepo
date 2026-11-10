@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from socket import gethostname
+from threading import Lock, local
 
 from beartype.roar import BeartypeException
 
@@ -29,6 +30,15 @@ class Config:
     """Convert only this sequence (its ``sequence_key``, ``recording_id``, or any part)."""
     force: bool = False
     """Rewrite recordings that already exist instead of skipping them."""
+    jobs: int = 1
+    """Sequences converted at once (no prefetch when above 1). Encoder sessions are shared through ``DATAFORGE_NVENC_SLOTS``, so
+    jobs only overlap the CPU, decode and write stages of different sequences."""
+    max_sequences: int | None = None
+    """Convert only the first N selected sequences (timing runs)."""
+
+    def __post_init__(self) -> None:
+        if self.jobs < 1 or (self.max_sequences is not None and self.max_sequences < 1):
+            raise ValueError("jobs and max_sequences must be positive")
 
 
 def select(discovered: list[tuple[SequenceIdentity, object]], sequence: str | None) -> list[tuple[SequenceIdentity, object]]:
@@ -128,11 +138,30 @@ def main(config: Config) -> None:
     """
     dataset_config: DataforgeDatasetConfig = config.dataset
     dataset: DataforgeDataset = dataset_config.setup()
-    selected: list[tuple[SequenceIdentity, object]] = select(dataset.discover(), config.sequence)
-    print(f"converting {len(selected)} sequence(s)")
+    selected: list[tuple[SequenceIdentity, object]] = select(dataset.discover(), config.sequence)[: config.max_sequences]
+    print(f"converting {len(selected)} sequence(s), {config.jobs} at once")
     failed: list[str] = []
     source_version: str = converter_version()
     root: Path = paths.output_root()
+    if config.jobs > 1:
+        records = Lock()
+        workers = local()  # convert_one keeps its timer on the dataset: one dataset per worker thread
+
+        def run(pair: tuple[SequenceIdentity, object]) -> None:
+            if not hasattr(workers, "dataset"):
+                workers.dataset = dataset_config.setup()
+            record: ConvertRecord = convert_one(workers.dataset, pair[0], pair[1], force=config.force, version=source_version)
+            with records:
+                append_record(root / "timing/convert.jsonl", record)
+                if record.error is not None:
+                    print(f"FAILED {pair[0].sequence_key}: {record.error}")
+                    failed.append(pair[0].sequence_key)
+
+        with ThreadPoolExecutor(max_workers=config.jobs) as pool:
+            list(pool.map(run, selected))
+        if failed:
+            raise SystemExit(f"{len(failed)} of {len(selected)} sequence(s) failed: {', '.join(failed)}")
+        return
     with ThreadPoolExecutor(max_workers=1) as executor:
         prefetched: Future[None] | None = None
         prefetch_timer: SequenceTimer | None = None

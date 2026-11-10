@@ -155,18 +155,22 @@ class SegmentLabels:
     """Pinch as mesh contact per hand (``labels.pinch``), mm; NaN without a pose."""
 
 
-def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence[Letterbox], rows: Int64[ndarray, "k"], pose_gated: bool) -> SegmentLabels:
+def segment_labels(timeline: HandTimeline, rig: CameraRig, letterboxes: Sequence[Letterbox], rows: Int64[ndarray, "k"], pose_gated: bool,
+                   mesh_labels: bool = True) -> SegmentLabels:
     """Labels for the given timeline rows (all at once).
 
     ``pose_gated`` is ``DatasetLayout.pose_gated``: SHOW3D's rule (SHOW3D, HOT3D) when True, UmeTrack's binary confidence when False.
+    ``mesh_labels`` False skips the two labels that skin both hand meshes (per-keypoint visibility and the mesh-contact pinch
+    distance; ``hidden`` is then None and ``contact_mm`` NaN): DetNet reads neither, and at every-frame rows they dominate the cost.
     """
     index: Int64[Tensor, "k"] = torch.from_numpy(rows)
     poses: tuple[HandPose, HandPose] = (select_pose(timeline.poses[0], index), select_pose(timeline.poses[1], index))
     has_pose: Bool[Tensor, "k 2"] = timeline.has_pose[index]
     points_world: Float32[Tensor, "k 2 21 3"] = hand_landmarks(timeline, poses, has_pose)
     projection: HandProjection = project_hands(rig, letterboxes, timeline.world_from_rig[index], points_world)
-    projection = replace(projection, hidden=hidden_keypoints(timeline, rig, timeline.world_from_rig[index], poses, has_pose, projection.points_cam))
-    contact: Float32[Tensor, "k 2"] = hand_contacts(timeline, poses, has_pose)
+    if mesh_labels:
+        projection = replace(projection, hidden=hidden_keypoints(timeline, rig, timeline.world_from_rig[index], poses, has_pose, projection.points_cam))
+    contact: Float32[Tensor, "k 2"] = hand_contacts(timeline, poses, has_pose) if mesh_labels else torch.full((len(rows), 2), torch.nan)
     cameras: int = len(letterboxes)
     confidence: Float32[Tensor, "k 2"] = timeline.confidence[index]
     headset_valid: Bool[Tensor, "k"] = timeline.headset_valid[index]

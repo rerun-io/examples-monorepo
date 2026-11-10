@@ -1264,6 +1264,15 @@ description = "Compare complete fast and eager body outputs on the calibration r
 [feature.posekit-hands]
 platforms = ["linux-64", "linux-aarch64"]
 
+# cholespy 2.2 calls nanobind's pre-3.0 keep_alive API. PyPI has no
+# aarch64 wheel, so its source build must use these pinned build dependencies.
+[feature.posekit-hands.target.linux-aarch64.dependencies]
+nanobind = ">=2.0,<3"
+scikit-build-core = ">=0.4.3"
+
+[feature.posekit-hands.pypi-options]
+no-build-isolation = ["cholespy"]
+
 [feature.posekit-hands.activation.env]
 PACKAGE_DIR = "packages/posekit"
 # posekit-egohand's baseline; the SAM 3D Body lane is not installed here (see [feature.posekit.activation.env]).
@@ -1274,20 +1283,20 @@ cmd = "python tools/demos/video_hands.py"
 cwd = "packages/posekit"
 description = "Run the GPU video 3D hands demo (hand detector + top-down 3D hands: wilor or egohand) and log to Rerun"
 
+[feature.posekit-hands.tasks.posekit-hands-app]
+cmd = "python tools/apps/hands_app.py"
+cwd = "packages/posekit"
+description = "Launch the 3D hands Gradio app (posekit-video-hands' code: WiLoR or an EgoHand stack) with an embedded Rerun viewer (http://127.0.0.1:7872)"
+
 [feature.posekit-hands.tasks.posekit-hands-eval]
 cmd = "python tools/apps/hands_eval.py"
 cwd = "packages/posekit"
-description = "Ground-truth eval of WiLoR and EgoHand on a fixed HOT3D (Quest 3) + UmeTrack subset read from a dataforge catalog (--catalog-url); writes results.json + hands_eval.rrd"
+description = "Ground-truth eval (and with --timing, batch-one speed) of the hand stacks on fixed frames of five dataforge catalog datasets (--catalog-url); writes results.json + hands_eval.rrd; --baseline checks the 45 accuracy bands"
 
 [feature.posekit-hands.tasks.posekit-hands-bench]
 cmd = "python tools/apps/hands_bench.py"
 cwd = "packages/posekit"
 description = "Per-frame end-to-end speed of EgoHand (SelfCap TRT stack, per-stage) and WiLoR (TRT and torch) on the fixed SelfCap OAK clip; writes hands_bench.json"
-
-[feature.posekit-hands.tasks.posekit-egohand-calibrate]
-cmd = "python tools/apps/egohand_calibrate.py"
-cwd = "packages/posekit"
-description = "Regenerate EgoHand NVFP4/FP8 ranges from held-out catalog frames; checks benchmark hashes and mount-fit exclusions"
 
 [feature.posekit.activation.env]
 PACKAGE_DIR = "packages/posekit"
@@ -3751,10 +3760,13 @@ cwd = "packages/robocap-live"
 depends-on = ["robocap-live-build"]
 description = "Track the hands of one robocap catalog segment and register (or replace) its `hands` layer"
 
+# The bundle at one revision: KeyNet in models/, each DetNet version in models/detnet/<version>/ (models/MODELS.md). The nets
+# are fetched again when a version's model.safetensors is missing, so a checkout from before that layout updates itself.
 [feature.robocap-live.tasks.robocap-live-download-sample]
-cmd = "test -e data/robocap-live-sample/capb-s14-445 || (hf download pablovela5620/robocap-live-sample --repo-type dataset --local-dir data/robocap-live-sample && rm -rf data/robocap-live-sample/.unzip && python -m zipfile -e data/robocap-live-sample/robocap-live-clip.zip data/robocap-live-sample/.unzip && mv data/robocap-live-sample/.unzip/capb-s14-445 data/robocap-live-sample/ && rm -rf data/robocap-live-sample/.unzip data/robocap-live-sample/robocap-live-clip.zip)"
+cmd = "((test -e data/robocap-live-sample/models/detnet/mix1-upright/model.safetensors && test -e data/robocap-live-sample/models/detnet/0929/model.safetensors) || hf download pablovela5620/robocap-live-sample --repo-type dataset --revision $ROBOCAP_LIVE_SAMPLE_REVISION --local-dir data/robocap-live-sample --exclude robocap-live-clip.zip) && (test -e data/robocap-live-sample/capb-s14-445 || (hf download pablovela5620/robocap-live-sample robocap-live-clip.zip --repo-type dataset --revision $ROBOCAP_LIVE_SAMPLE_REVISION --local-dir data/robocap-live-sample && rm -rf data/robocap-live-sample/.unzip && python -m zipfile -e data/robocap-live-sample/robocap-live-clip.zip data/robocap-live-sample/.unzip && mv data/robocap-live-sample/.unzip/capb-s14-445 data/robocap-live-sample/ && rm -rf data/robocap-live-sample/.unzip data/robocap-live-sample/robocap-live-clip.zip))"
 cwd = "packages/robocap-live"
-description = "Download the 5 s replay clip, the ONNX hand nets and the display asset from Hugging Face"
+env = { ROBOCAP_LIVE_SAMPLE_REVISION = "09824d17b75d1e0b851dc59bcdfeaa187c442b77" }
+description = "Download the 5 s replay clip, the hand nets (KeyNet; both DetNet versions as ONNX, RKNN and safetensors) and the display asset from Hugging Face"
 
 [feature.robocap-live.tasks.robocap-live-build-host]
 cmd = "cargo build --release -p robocap-live --features ort --bin robocap-live"

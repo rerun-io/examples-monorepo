@@ -158,6 +158,8 @@ pub struct StartRequest {
     /// Cameras with an H.264 pane (0-5); empty = no video.
     video_cameras: Vec<u8>,
     hands: bool,
+    /// `--detnet-version`: which DetNet-F folder under models/detnet/ (mix1-upright or the old 0929); the camera turn follows it.
+    detnet_version: &'static str,
     /// `--hand-overlays`: fit, debug or verbose (each level costs more of the Wi-Fi link).
     hand_overlays: &'static str,
     slam_hz: u32,
@@ -206,6 +208,7 @@ impl StartRequest {
             viewer,
             video_cameras,
             hands: flag("hands", true),
+            detnet_version: choice("detnet_version", "mix1-upright", &["mix1-upright", "0929"])?,
             hand_overlays: choice("hand_overlays", "fit", &["fit", "debug", "verbose"])?,
             slam_hz: number("slam_hz", 15, 1..=30)?,
             slam_lane: choice("slam_lane", "gpu", &["gpu", "cpu"])?,
@@ -226,6 +229,7 @@ impl StartRequest {
             "viewer": self.viewer,
             "video_cameras": self.video_cameras,
             "hands": self.hands,
+            "detnet_version": self.detnet_version,
             "hand_overlays": self.hand_overlays,
             "slam_hz": self.slam_hz,
             "slam_lane": self.slam_lane,
@@ -240,7 +244,7 @@ impl StartRequest {
     fn command(&self, root: &Path, stamp: u64) -> Vec<String> {
         let at = |rel: &str| root.join(rel).display().to_string();
         let mut command = vec![at("bin/robocap-live"), "--source".into(), "live".into(), "--rig".into(), at("rig.json")];
-        command.extend(["--nets".into(), "rknn".into(), at("models"), "--hands".into(), if self.hands { "on" } else { "off" }.into()]);
+        command.extend(["--nets".into(), "rknn".into(), at("models"), "--detnet-version".into(), self.detnet_version.into(), "--hands".into(), if self.hands { "on" } else { "off" }.into()]);
         command.extend(["--hand-overlays".into(), self.hand_overlays.into()]);
         if !self.viewer.is_empty() {
             command.extend(["--viewer".into(), self.viewer.clone()]);
@@ -492,13 +496,13 @@ exit $status
         let request = StartRequest::parse("viewer=rerun%2Bhttp%3A%2F%2F198.51.100.7%3A9876%2Fproxy&video_cameras=0%2C1%2C5&slam_hz=30&duration_s=600&hands=on")?;
         assert_eq!(request.viewer, "rerun+http://198.51.100.7:9876/proxy");
         assert_eq!((request.video_cameras.clone(), request.slam_hz, request.duration_s, request.hands, request.uclamp), (vec![0, 1, 5], 30, 600, true, false));
-        let form = json!({"viewer": "rerun+http://198.51.100.7:9876/proxy", "video_cameras": [0, 1, 5], "hands": true, "hand_overlays": "fit",
+        let form = json!({"viewer": "rerun+http://198.51.100.7:9876/proxy", "video_cameras": [0, 1, 5], "hands": true, "detnet_version": "mix1-upright", "hand_overlays": "fit",
             "slam_hz": 30, "slam_lane": "gpu", "slam_lag": "auto", "uclamp": false, "duration_s": 600, "frame_csv": false});
         assert_eq!(request.to_json(), form, "the page refills its form from these names");
         let command = request.command(Path::new("/root/robocap-live"), 7).join(" ");
         assert_eq!(
             command,
-            "/root/robocap-live/bin/robocap-live --source live --rig /root/robocap-live/rig.json --nets rknn /root/robocap-live/models --hands on \
+            "/root/robocap-live/bin/robocap-live --source live --rig /root/robocap-live/rig.json --nets rknn /root/robocap-live/models --detnet-version mix1-upright --hands on \
              --hand-overlays fit --viewer rerun+http://198.51.100.7:9876/proxy --video h264 --video-cameras 0,1,5 --display /root/robocap-live/assets/robocap-live-display.rrd \
              --slam-hz 30 --slam-lane gpu --slam-uclamp none --hands-uclamp none --duration 600 --summary-json /root/robocap-live/logs/rt-7.json"
         );
@@ -523,6 +527,18 @@ exit $status
         assert!(default.contains(" --hand-overlays fit "), "the live default: {default}");
         assert!(StartRequest::parse("hand_overlays=all").is_err());
         assert!(StartRequest::parse("hand_overlays=fit%3B%20reboot").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_start_form_picks_the_detnet_version() -> Result<(), String> {
+        let default = StartRequest::parse("")?.command(Path::new("/r"), 1).join(" ");
+        assert!(default.contains(" --nets rknn /r/models --detnet-version mix1-upright "), "mix-1 is the live default: {default}");
+        let old = StartRequest::parse("detnet_version=0929")?;
+        assert_eq!(old.to_json()["detnet_version"], "0929", "the page refills the picker");
+        assert!(old.command(Path::new("/r"), 1).join(" ").contains(" --detnet-version 0929 "));
+        assert!(StartRequest::parse("detnet_version=mix2").is_err());
+        assert!(StartRequest::parse("detnet_version=0929%3B%20reboot").is_err());
         Ok(())
     }
 

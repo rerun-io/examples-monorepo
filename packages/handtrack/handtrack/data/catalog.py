@@ -110,6 +110,21 @@ says nothing beyond ``has_pose``; a missing pose is a gap in the mocap labels, n
 also needs HOT3D's own ``qa_pass`` for that camera and frame."""
 
 
+UPRIGHT_TURNS: dict[str, tuple[int, ...]] = {
+    "dataforge-umetrack": (0, 3, 3, 2),
+    "dataforge-show3d": (0, 0),
+    "dataforge-hot3d-quest3": (0, 0),
+    "gsi-six-view": (0, 0, 2, 2, 0, 0),
+    "dataforge-gen-humanego-subset": (0, 0, 0, 0, 0, 0),
+}
+"""Clockwise quarter turns that make each stored camera image upright (image up = world up), per streamed camera in order.
+Measured 2026-11-08 from calibration alone (world up from the dataset's ViewCoordinates, confirmed as the axis most stable in the
+rig frame; up_cam = R_cam_rig R_rig_world up, over 4 segments; /tmp/hand-detector-scratch/orientation_table.py). UmeTrack ships
+raw sensor orientation; its release's source_camera_angle_deg (0, 90, 90, 180) agrees (cameras 0 and 3 sit ~40 degrees off any
+quarter turn). SHOW3D and HOT3D are stored upright portrait (the legacy letterbox turned them sideways). GSI's cameras 2-3 look
+down and are stored upside down; 4-5 lean about 33 degrees. Gen-HumanEgo is upright."""
+
+
 def is_show3d(dataset: str) -> bool:
     return dataset.startswith("dataforge-show3d")
 
@@ -369,8 +384,9 @@ def static_text(statics: pa.Table, column: str, where: str) -> str:
     return value
 
 
-def read_rig(statics: pa.Table, info: SegmentInfo) -> tuple[CameraRig, tuple[Letterbox, ...]]:
-    """The headset cameras (cam_from_rig, K, Fisheye62 or pinhole) and each camera's letterbox into the net frame."""
+def read_rig(statics: pa.Table, info: SegmentInfo, quarter_turns: tuple[int, ...] | None = None) -> tuple[CameraRig, tuple[Letterbox, ...]]:
+    """The headset cameras (cam_from_rig, K, Fisheye62 or pinhole) and each camera's letterbox into the net frame, turned
+    ``quarter_turns[c]`` times clockwise (None: the legacy letterbox)."""
     layout: DatasetLayout = layout_for(info.dataset)
     where: str = f"{info.dataset} {info.segment_id}"
     sizes: list[list[float]] = []
@@ -408,7 +424,10 @@ def read_rig(statics: pa.Table, info: SegmentInfo) -> tuple[CameraRig, tuple[Let
         principal=torch.tensor(principal, dtype=torch.float32),
         fisheye62=None if distortion[0] is None else torch.tensor(distortion, dtype=torch.float32),
     )
-    letterboxes: tuple[Letterbox, ...] = tuple(letterbox_for(int(width), int(height)) for width, height in sizes)
+    if quarter_turns is not None and len(quarter_turns) != len(sizes):
+        raise ValueError(f"{where}: {len(quarter_turns)} turn counts for {len(sizes)} cameras")
+    letterboxes: tuple[Letterbox, ...] = tuple(letterbox_for(int(width), int(height), None if quarter_turns is None else quarter_turns[c])
+                                               for c, (width, height) in enumerate(sizes))
     return rig, letterboxes
 
 

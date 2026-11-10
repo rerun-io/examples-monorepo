@@ -44,25 +44,55 @@ pub fn decode_detections(raw: &DetNetRaw) -> Detections {
     out
 }
 
+/// The circles DetNet found in a frame turned 180 degrees, in the unturned net frame: pixel centres (x, y) -> (639 - x, 479 - y)
+/// (the RoboCap letterbox's bars are equal above and below, so the turned image keeps its rows); radii and slots stay.
+pub fn turn_back(detections: Detections) -> Detections {
+    let mut out = detections;
+    for circle in &mut out.circle_net {
+        circle[0] = (DETNET_WIDTH - 1) as f32 - circle[0];
+        circle[1] = (DETNET_HEIGHT - 1) as f32 - circle[1];
+    }
+    out
+}
+
 /// Letterbox each camera's 640x360 small image, run DetNet on the batch and decode; one [`Detections`] per input, in order.
-/// The backend reads the small images' rows directly (no padded frame is built).
+/// The backend reads the small images' rows directly (no padded frame is built). An image marked in `half_turn` is fed turned
+/// 180 degrees (an upright model on a camera mounted upside down) and its circles come back in the unturned net frame.
 ///
 /// # Arguments
 ///
 /// * `nets` - The DetNet backend.
 /// * `letterbox` - The small image's placement in the 640x480 net frame.
 /// * `small` - One 640x360 image per camera.
+/// * `half_turn` - Per image: feed it turned 180 degrees.
 ///
 /// # Errors
 ///
 /// [`HandsError::Invalid`] for a small image of the wrong size, [`HandsError::Nets`] when the backend fails or returns the
 /// wrong number of outputs.
-pub fn detect(nets: &mut dyn HandNets, letterbox: &BarLetterbox, small: &[&Image<u8, 1>]) -> Result<Vec<Detections>, HandsError> {
+pub fn detect(
+    nets: &mut dyn HandNets,
+    letterbox: &BarLetterbox,
+    small: &[&Image<u8, 1>],
+    half_turn: &[bool],
+) -> Result<Vec<Detections>, HandsError> {
+    if half_turn.len() != small.len() {
+        return Err(HandsError::Invalid(format!("{} half-turn flags for {} images", half_turn.len(), small.len())));
+    }
     let invalid = |error: kornia_image::ImageError| HandsError::Invalid(format!("DetNet letterbox: {error}"));
-    let inputs: Vec<NetFrame<'_>> = small.iter().map(|image| letterbox.net_frame(image)).collect::<Result<_, _>>().map_err(invalid)?;
+    let inputs: Vec<NetFrame<'_>> = small
+        .iter()
+        .zip(half_turn)
+        .map(|(image, &turned)| letterbox.net_frame(image).map(|frame| frame.with_half_turn(turned)))
+        .collect::<Result<_, _>>()
+        .map_err(invalid)?;
     let raw = nets.detnet(&inputs)?;
     if raw.len() != inputs.len() {
         return Err(HandsError::Invalid(format!("DetNet returned {} outputs for {} frames", raw.len(), inputs.len())));
     }
-    Ok(raw.iter().map(decode_detections).collect())
+    Ok(raw
+        .iter()
+        .zip(half_turn)
+        .map(|(raw, &turned)| if turned { turn_back(decode_detections(raw)) } else { decode_detections(raw) })
+        .collect())
 }

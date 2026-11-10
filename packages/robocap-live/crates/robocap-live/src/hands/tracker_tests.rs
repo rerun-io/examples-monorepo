@@ -285,6 +285,7 @@ fn setup(
 /// The tests' `HandsConfig`: four cameras, a fixed scale, handtrack's views and round-robin DetNet.
 fn test_hands() -> HandsConfig {
     HandsConfig {
+        detnet_input: crate::hands::DetNetInput::default(),
         scale: ScaleMode::Fixed(1.0),
         cameras: vec![0, 1, 2, 3],
         max_views: 2,

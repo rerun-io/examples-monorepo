@@ -10,7 +10,7 @@ from typing import Literal, TypeAlias
 
 import numpy as np
 import torch
-from jaxtyping import Bool, Float32, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
@@ -291,6 +291,11 @@ class HandPoses3d:
     def num_hands(self) -> int:
         """Number of hands across the whole frame batch."""
         return self.keypoints.num_instances
+
+    def in_pinhole(self, intrinsics: Float64[ndarray, "3 3"]) -> "HandPoses3d":
+        """These hands in the pinhole ``intrinsics``. A model that predicts in the camera it was given returns its
+        hands as they are; WiLoR, which predicts in its own virtual camera, overrides this to re-solve their translation."""
+        return self
 
     def as_hand21(self) -> "HandPoses3d":
         """The same hands on the 21-joint HAND_21 skeleton (SOMA-25 drops its four non-thumb metacarpals).

@@ -2,11 +2,22 @@
 
 from typing import Any
 
+import numpy as np
 import pytest
 import rerun as rr
 import torch
 
-from posekit.apis.video_hands import log_chunk_hands
+from posekit.apis.video_hands import (
+    JOINT_CLASS,
+    LINK_COLOR,
+    VideoHandsSettings,
+    assumed_pinhole,
+    describe_camera,
+    log_chunk_hands,
+    log_hand_annotation_context,
+    pinhole_camera,
+    send_blueprint,
+)
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
 
@@ -32,20 +43,79 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
     detections, hands = _chunk()
     live: set[str] = set()
-    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, keypoint_threshold=0.3, live_slots=live)
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=live)
 
     paths = [path for path, _ in logged]
+    # Joints and meshes are logged once in 3D; the video view projects them, so no 2D keypoints.
+    assert not any(path.endswith("/keypoints") for path in paths)
     for slot in ("left_0", "right_0"):
-        assert f"world/camera/image/hands/{slot}/box" in paths
-        assert f"world/camera/image/hands/{slot}/keypoints" in paths
+        assert f"world/camera/pinhole/boxes/{slot}" in paths
         assert f"world/camera/hands/{slot}/joints" in paths
         assert f"world/camera/hands/{slot}/mesh" in paths
     # Frame 1 has no right hand: its slot is cleared once, the left slot is logged again.
     cleared = [path for path, archetype in logged if isinstance(archetype, rr.Clear)]
     assert sorted(cleared) == sorted(
-        [f"world/camera/image/hands/right_0/{name}" for name in ("box", "keypoints")] + [f"world/camera/hands/right_0/{name}" for name in ("joints", "mesh")]
+        ["world/camera/pinhole/boxes/right_0"] + [f"world/camera/hands/right_0/{name}" for name in ("joints", "mesh")]
     )
     assert live == {"left_0"}
     meshes = [archetype for path, archetype in logged if path == "world/camera/hands/right_0/mesh"]
     faces = meshes[0].triangle_indices.as_arrow_array().to_pylist()
     assert faces == [[0, 1, 2]]
+
+
+def test_unset_intrinsics_come_from_the_assumed_field_of_view() -> None:
+    fx, fy, cx, cy = assumed_pinhole(1920, 1080, 65.0)
+    assert fx == fy == pytest.approx(1507.0, abs=0.5) and (cx, cy) == (960.0, 540.0)
+    camera = pinhole_camera(VideoHandsSettings(fx=1000.0, cy=500.0), 1920, 1080)
+    assert camera.lens == "PINHOLE" and (camera.width, camera.height) == (1920, 1080)
+    assert camera.intrinsics.tolist() == [[1000.0, 0.0, 960.0], [0.0, fy, 500.0], [0.0, 0.0, 1.0]]
+
+
+def test_status_names_the_camera() -> None:
+    settings = VideoHandsSettings()
+    assert describe_camera(settings, pinhole_camera(settings, 1920, 1080)) == "assumed pinhole, f = 1507 px (65° horizontal FOV)"
+    given = VideoHandsSettings(fx=1200.0, fy=1210.0, cx=950.0, cy=530.0)
+    assert describe_camera(given, pinhole_camera(given, 1920, 1080)) == "pinhole fx = 1200, fy = 1210, cx = 950, cy = 530 px"
+
+
+def test_joints_carry_full_confidence_and_show_green(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The hand models give no per-joint confidence, so every joint is logged at 1.0: the confidence gradient's green.
+    logged: list[tuple[str, Any]] = []
+    monkeypatch.setattr(rr, "log", lambda path, archetype, **_: logged.append((path, archetype)))
+    monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
+    detections, hands = _chunk()
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set())
+
+    joints = next(archetype for path, archetype in logged if path == "world/camera/hands/left_0/joints")
+    batches = {batch.component_descriptor().component: batch.as_arrow_array().to_pylist() for batch in joints.as_component_batches()}
+    assert batches["simplecv.KeypointConfidence3D:confidences"] == [1.0] * 21
+    assert {packed >> 8 for packed in batches["Points3D:colors"]} == {0x00FF00}
+    assert joints.points3d.class_ids.as_arrow_array().to_pylist() == [JOINT_CLASS]
+
+
+def test_skeleton_links_have_their_own_colour_and_the_sides_keep_theirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The links get one contrasting colour; drawn in the side colour they vanish into the mesh of the same colour.
+    logged: list[tuple[str, Any]] = []
+    monkeypatch.setattr(rr, "log", lambda path, archetype, **_: logged.append((path, archetype)))
+    log_hand_annotation_context(HAND_21)
+    context = logged[0][1].context.as_arrow_array().to_pylist()[0]
+    by_id = {entry["class_id"]: entry["class_description"] for entry in context}
+    assert len(by_id[JOINT_CLASS]["keypoint_connections"]) == len(HAND_21.links)
+    assert by_id[JOINT_CLASS]["info"]["color"] >> 8 == (LINK_COLOR[0] << 16) | (LINK_COLOR[1] << 8) | LINK_COLOR[2]
+    assert all(not by_id[class_id]["keypoint_connections"] for class_id in by_id if class_id != JOINT_CLASS)
+
+
+def test_the_viewer_plays_the_video_from_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A streamed viewer follows the newest data; the blueprint makes it play video_time from 0 while the hands arrive.
+    sent: list[Any] = []
+    monkeypatch.setattr(rr, "send_blueprint", lambda blueprint, **_: sent.append(blueprint))
+    send_blueprint()
+    time_panel = sent[0].time_panel
+    assert (time_panel.timeline, time_panel.play_state) == ("video_time", "playing")
+    assert time_panel.state is None  # the app's panel_states keeps deciding whether the time panel shows
+
+
+def test_hands_from_a_model_that_uses_the_given_camera_stay_as_they_are() -> None:
+    # The video core puts every stack's hands in the run's pinhole; only WiLoR (own virtual camera) overrides in_pinhole.
+    _, hands = _chunk()
+    assert hands.in_pinhole(np.eye(3)) is hands

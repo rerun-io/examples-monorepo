@@ -53,6 +53,8 @@ __all__ = (
     "DetNetHandDetectorConfig",
     "EgoHandDetectorConfig",
     "EgoHandFastConfig",
+    "HAND_DETECTORS",
+    "HAND_POSES",
     "HandDetector",
     "HandDetectorConfig",
     "HandPose3dConfig",
@@ -81,6 +83,17 @@ __all__ = (
     "YoloxDetectorConfig",
 )
 
+_fast_hand_detector, _fast_hand_pose = fast_egohand_configs()
+_bf16_hand_detector, _bf16_hand_pose = fast_egohand_configs(backbone_precision="bf16")
+HAND_DETECTORS: dict[str, WilorHandDetectorConfig | EgoHandDetectorConfig] = {
+    "wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector, "egohand-fast-bf16": _bf16_hand_detector,
+}
+"""Hand detector of every named hand stack; the CLI subcommands and the app's stack choices."""
+HAND_POSES: dict[str, WilorHandPoseConfig | EgoHandConfig | EgoHandFastConfig] = {
+    "wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose, "egohand-fast-bf16": _bf16_hand_pose,
+}
+"""3D hand model of every named hand stack; same names as ``HAND_DETECTORS``."""
+
 if TYPE_CHECKING:
     DetectorConfig = YoloxDetectorConfig | RtDetrDetectorConfig
     Pose2dConfig = RtmPoseConfig | SapiensPoseConfig | VitPoseConfig
@@ -95,14 +108,9 @@ else:
         {"rtmpose": RtmPoseConfig(), "sapiens": SapiensPoseConfig(), "vitpose": VitPoseConfig()}, prefix_names=False
     )
 
-    _fast_hand_detector, _fast_hand_pose = fast_egohand_configs()
-    HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandDetectorConfig(), "egohand": EgoHandDetectorConfig(), "egohand-fast": _fast_hand_detector, "detnet": DetNetHandDetectorConfig()},
-        prefix_names=False
-    )
-    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(
-        {"wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose}, prefix_names=False
-    )
+    # DetNet-F is a detector only (no pose stage), so it is a detector subcommand and not a named hand stack.
+    HandDetectorConfig = tyro.extras.subcommand_type_from_defaults({**HAND_DETECTORS, "detnet": DetNetHandDetectorConfig()}, prefix_names=False)
+    HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(HAND_POSES, prefix_names=False)
     BodyPose3dConfig = tyro.extras.subcommand_type_from_defaults(
         {
             "sam3d-body": Sam3dBodyConfig(mode="full"), "sam3d-body-bodyonly": Sam3dBodyConfig(mode="body"),

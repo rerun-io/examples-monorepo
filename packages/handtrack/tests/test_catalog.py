@@ -148,7 +148,7 @@ def test_read_rig_from_statics() -> None:
     torch.testing.assert_close(rig.principal[0], torch.tensor([318.0, 239.0]))
     assert all(letterbox.pad_x == 2.0 for letterbox in letterboxes)
     show3d_rig, show3d_letterboxes = read_rig(_statics(fisheye=False), SegmentInfo(SHOW3D, "s", "show3d", "x", "train", "A", 10, 60))
-    assert show3d_rig.fisheye62 is None and all(letterbox.quarter_turn_cw for letterbox in show3d_letterboxes)
+    assert show3d_rig.fisheye62 is None and all(letterbox.quarter_turns == 1 for letterbox in show3d_letterboxes)
     with pytest.raises(ValueError, match="ChildFromParent"):
         read_rig(_statics(fisheye=True, relation=1), info)
 
@@ -245,7 +245,7 @@ def test_hot3d_layout_rig_and_letterbox() -> None:
     info: SegmentInfo = SegmentInfo(HOT3D_QUEST3, "s", "hot3d", "", "train", "P0002", 10, 30)
     rig, letterboxes = read_rig(_statics(fisheye=True, layout=layout, resolution=(1024.0, 1280.0)), info)
     assert rig.names == layout.cameras and rig.fisheye62 is not None and tuple(rig.fisheye62.shape) == (2, 8)
-    assert all(letterbox.quarter_turn_cw and letterbox.scale == 0.46875 for letterbox in letterboxes)
+    assert all(letterbox.quarter_turns == 1 and letterbox.scale == 0.46875 for letterbox in letterboxes)
 
 
 def test_camera_angles_come_from_umetrack_statics_only() -> None:
