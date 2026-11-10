@@ -49,6 +49,7 @@ def _first_viewer_frame(video: Path, rrd: Path) -> UInt8[ndarray, "h w 3"]:
     recording.flush()
     codec, _, samples = read_video_stream_from_rrd(str(rrd), "camera/video", "video_time")
     decoder = av.CodecContext.create({rr.VideoCodec.H264: "h264", rr.VideoCodec.H265: "hevc"}[codec], "r")
+    assert isinstance(decoder, av.VideoCodecContext)
     for row in samples.combine_chunks().to_pylist():  # one VideoStream sample per row
         for frame in decoder.decode(av.Packet(bytes(row[0]))):
             return frame.to_ndarray(format="rgb24")
