@@ -21,7 +21,7 @@ from handtrack.data.batches import DetNetBatch, KeyNetBatch
 from handtrack.eval.metrics import Counts, DetectionMetrics, KeypointMetrics, detection_metrics, keynet_metrics, presence_counts
 from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
 from handtrack.models.detnet import Detections, DetNetF, DetNetLoss, DetNetOutput, decode_detections, detnet_loss
-from handtrack.models.keynet import HeatmapReduction, KeyNetF, KeyNetLoss, KeyNetOutput, keynet_for_state, keynet_loss
+from handtrack.models.keynet import HeatmapReduction, KeyNetF, KeyNetLoss, KeyNetOutput, keynet_from_state, keynet_loss
 from handtrack.train.checkpoint import MetricRecord, TrainingState, export_weights, load_checkpoint, save_checkpoint
 from handtrack.train.source import BatchSource, DetNetValidation, DetNetValidationSource, KeyNetValidation, KeyNetValidationSource
 
@@ -201,10 +201,7 @@ class Trainer:
             # Warm start: the weights' own heads (pinch, visibility) and BatchNorm epsilon; a pinch head rides along untrained.
             from handtrack.pipeline import read_state
 
-            state, _ = read_state(keynet_init)
-            initial: KeyNetF = keynet_for_state(state)
-            initial.load_state_dict(state)
-            self.models['keynet'] = initial.to(self.device)
+            self.models['keynet'] = keynet_from_state(read_state(keynet_init)[0]).to(self.device)
         elif nets in ('keynet', 'both'):
             self.models['keynet'] = KeyNetF(visibility_head=cadence.keynet_visibility_head, bn_eps=cadence.keynet_bn_eps).to(self.device)
         if cadence.channels_last:

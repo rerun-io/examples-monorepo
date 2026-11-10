@@ -1,10 +1,9 @@
 """The frozen KeyNet evaluation set: perspective crops from each dataset's held-out segments, written once as one Parquet table.
 
-Segments: UmeTrack and SHOW3D validation users/subjects (``catalog.select_split(..., "val")``), every labelled HOT3D Quest 3 scene
-(``"test"``; never trained on), and the frozen detector holdout of GSI and Gen-HumanEgo (``configs/detector_holdout.json``). Each
-chunk of decoded frames is cut twice with the evaluation recipe (``stream.evaluation_augment``: ground-truth crop cameras, the clean
-extrapolated prior, no jitter): variant 0 as deployed (the dataset's crop roll), variant 1 rolled by a uniform angle on the whole
-circle (robustness to cameras cut without a roll). The presence negatives stay. Every model is then scored on the same bytes.
+Segments: UmeTrack / SHOW3D validation users, every labelled HOT3D Quest 3 scene (never trained on), and the frozen detector holdout
+of GSI and Gen-HumanEgo (``configs/detector_holdout.json``). Each chunk is cut twice with ``stream.evaluation_augment`` (ground-truth
+crop cameras, the clean extrapolated prior, no jitter, presence negatives kept): variant 0 as deployed, variant 1 rolled by a uniform
+angle on the whole circle. Every model is then scored on the same bytes.
 """
 
 import dataclasses
@@ -14,13 +13,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from jaxtyping import Bool, Int64
+from jaxtyping import Int64
 from numpy import ndarray
 from torch import Tensor
 
 from handtrack.data.array_table import read_arrays, write_arrays
-from handtrack.data.batches import CropKind, KeyNetBatch
-from handtrack.data.keynet_rerun import KEYNET_DATASETS, keynet_finish, stream_cuts
+from handtrack.data.batches import KeyNetBatch
+from handtrack.data.catalog import list_segments, select_split
+from handtrack.data.keynet_rerun import keynet_finish, stream_cuts
+from handtrack.data.rerun_source import DATASET_SPECS
 from handtrack.data.stream import KeyNetAugment, KeyNetSamples, evaluation_augment, sample_count, select_samples
 from handtrack.train.source import KeyNetValidation
 
@@ -31,8 +32,6 @@ VARIANTS: tuple[str, ...] = ("deployed", "rotated")
 def eval_segments(name: str, held_out: dict[str, list[str]], catalog_url: str) -> list[str]:
     """The segments a dataset is scored on (see the module docstring)."""
     import rerun as rr
-
-    from handtrack.data.catalog import list_segments, select_split
 
     if name in held_out:
         return sorted(held_out[name])
@@ -49,16 +48,16 @@ class KeyNetHoldout:
     dataset_names: tuple[str, ...]
     """``samples.dataset`` indexes this tuple."""
     camera: Int64[Tensor, "n"]
-    """Camera index within its dataset (``KEYNET_DATASETS[name].cameras``)."""
+    """Camera index within its dataset (``rerun_source.DATASET_SPECS``)."""
     variant: Int64[Tensor, "n"]
     """Index into ``VARIANTS``."""
 
 
 def build_holdout(datasets: tuple[str, ...], held_out: dict[str, list[str]], catalog_url: str, device: torch.device, crops_per_dataset: int,
-                  seed: int = 0, negative_margin: float = 0.25) -> KeyNetHoldout:
+                  seed: int = 0) -> KeyNetHoldout:
     """Decode each dataset's evaluation segments in small shuffled blocks (many segments early) until ``crops_per_dataset`` crops of
     variant 0 exist; both variants of the same frames are kept."""
-    base: KeyNetAugment = evaluation_augment(KeyNetAugment(negative_margin=negative_margin))
+    base: KeyNetAugment = evaluation_augment(KeyNetAugment(negative_margin=0.25))
     augments: list[KeyNetAugment] = [base, dataclasses.replace(base, max_rotation=math.pi)]
     parts: list[KeyNetSamples] = []
     cameras: list[Tensor] = []
@@ -94,7 +93,7 @@ def write_holdout(path: Path, holdout: KeyNetHoldout) -> None:
 def read_holdout(path: Path) -> KeyNetHoldout:
     arrays: dict[str, ndarray] = read_arrays(path)
     names: tuple[str, ...] = tuple(path.with_suffix(".datasets.txt").read_text().split())
-    unknown: list[str] = [name for name in names if name not in KEYNET_DATASETS]
+    unknown: list[str] = [name for name in names if name not in DATASET_SPECS]
     if unknown:
         raise ValueError(f"{path}: unknown datasets {unknown}")
     fields: list[str] = [f.name for f in dataclasses.fields(KeyNetSamples)]
@@ -143,9 +142,3 @@ class HoldoutSource:
 
     def close(self) -> None:
         pass
-
-
-def positive_count(holdout: KeyNetHoldout) -> dict[str, int]:
-    """Positive crops of variant 0 per dataset (a report line)."""
-    positive: Bool[Tensor, "n"] = (holdout.samples.kind == int(CropKind.POSITIVE)) & (holdout.variant == 0)
-    return {name: int((positive & (holdout.samples.dataset == i)).sum()) for i, name in enumerate(holdout.dataset_names)}

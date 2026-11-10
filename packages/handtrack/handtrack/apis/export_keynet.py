@@ -1,18 +1,11 @@
-"""Export KeyNet-F alone (pinch head, no visibility head) to the three ONNX graphs robocap-live loads, and check them against PyTorch
-on crops from the frozen KeyNet holdout (``data.keynet_holdout``).
+"""Export KeyNet-F alone (pinch head, no visibility head) to the three ONNX graphs robocap-live loads, checked against PyTorch on
+crops from the frozen KeyNet holdout (``data.keynet_holdout``).
 
-Graphs (``export_nets_onnx.KeyNetGraph``, TorchScript exporter): ``keynet.onnx`` (dynamic batch ``b``, for ONNX Runtime) and
-``keynet_b1.onnx`` / ``keynet_b4.onnx`` (static, the RKNN converter's sources). Inputs ``crop`` f32 [b, 1, 96, 96] in [0, 1] and
-``keypoints`` f32 [b, 63]; outputs ``heatmaps`` [b, 21, 18, 18], ``distance`` [b, 21, 18], ``presence_logit`` [b, 1] and
-``pinch_logit`` [b, 1].
-
-The reference rows are a seeded draw of the holdout's deployed variant (variant 0), balanced over its datasets; about half of each
-dataset's rows get a zero prior (acquisition, as after a DetNet detection), the rest the stored clean prior (tracked). They go out
-beside the graphs as ``keynet_heldout.parquet`` (``data.array_table``): the inputs as fed, the labels (``points_crop`` is the ground
-truth), the PyTorch FP32 outputs and their decoding (``decoded_points_crop``, ``peak``, ``d_rel_mm``), and
-``keynet_heldout.datasets.txt`` names the ``dataset`` indices. ``robocap-live/tools/rknn_convert.py`` scores the RKNN builds on the
-even rows and calibrates INT8 on the odd ones; the priors follow stored, zero, zero, stored, ... within a dataset so that both
-halves hold both priors.
+Graphs (``export_nets_onnx.KeyNetGraph``): ``keynet.onnx`` (dynamic batch, ONNX Runtime) and ``keynet_b1.onnx`` / ``keynet_b4.onnx``
+(static, the RKNN converter's sources). The reference rows, a seeded draw of the deployed variant balanced over datasets, go out as
+``keynet_heldout.parquet``: inputs as fed (about half with a zero prior, following stored, zero, zero, stored, ... within a dataset so
+that ``rknn_convert``'s even rows (scored) and odd rows (INT8 calibration) both hold both priors), labels (``points_crop`` is the
+ground truth), and PyTorch's FP32 outputs with their decoding (``decoded_points_crop``, ``peak``, ``d_rel_mm``).
 """
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +24,7 @@ from handtrack.data.array_table import write_arrays
 from handtrack.data.batches import CropKind
 from handtrack.data.keynet_holdout import KeyNetHoldout, read_holdout
 from handtrack.data.stream import KeyNetSamples, select_samples
-from handtrack.models.keynet import KeyNetF, keynet_for_state
+from handtrack.models.keynet import KeyNetF, keynet_from_state
 
 INPUTS: list[str] = ["crop", "keypoints"]
 OUTPUTS: list[str] = ["heatmaps", "distance", "presence_logit", "pinch_logit"]
@@ -47,11 +40,10 @@ class DatasetRows:
     name: str
     rows: int
     positives: int
-    """Rows of ``CropKind.POSITIVE``: the keypoint errors are taken over these."""
     tracked_error_crop_px: float | None
-    """Mean |decode(PyTorch) - ground truth| over positives with the stored prior, in 96-px crop pixels; None without any."""
+    """Mean |decode(PyTorch) - ground truth| over positives fed a prior, in 96-px crop pixels; None without any."""
     zero_error_crop_px: float | None
-    """The same over positives with a zero prior."""
+    """The same over positives fed a zero prior."""
 
 
 @serde(deny_unknown_fields=True)
@@ -80,9 +72,8 @@ class Config:
     weights: Path
     """``*.weights.pt`` state dict with its ``.sha256`` sidecar."""
     holdout: Path
-    """The frozen KeyNet holdout Parquet (``tools/keynet_holdout.py``), with its ``.datasets.txt``."""
+    """The frozen KeyNet holdout Parquet (``tools/keynet_holdout.py``)."""
     out_dir: Path
-    """Receives the three ``.onnx`` graphs, ``keynet_heldout.parquet`` (+ ``.datasets.txt``) and ``export_report.json``."""
     opset: int = 17
     reference_crops: int = 512
     """Rows drawn from the holdout's deployed variant, balanced over its datasets."""
@@ -94,11 +85,8 @@ class Config:
 
 
 def sample_rows(holdout: KeyNetHoldout, count: int, seed: int) -> tuple[Int64[ndarray, "m"], Bool[ndarray, "m"]]:
-    """Holdout row indices of a seeded draw of ``count`` deployed-variant crops, balanced over datasets, and which of them get a zero prior.
-
-    Each dataset with deployed rows gets an equal share; one that has fewer gives them all and the others share the rest. Rows are
-    grouped by dataset, in holdout order within one; the priors follow stored, zero, zero, stored, ... within each dataset.
-    """
+    """Holdout row indices of a seeded draw of ``count`` deployed-variant crops, balanced over datasets (a dataset with fewer gives
+    them all and the others share the rest), grouped by dataset, and which of them get a zero prior (stored, zero, zero, stored, ...)."""
     rng: np.random.Generator = np.random.default_rng(seed)
     deployed: Bool[ndarray, "n"] = holdout.variant.numpy() == 0
     dataset: Int64[ndarray, "n"] = holdout.samples.dataset.numpy()
@@ -136,25 +124,21 @@ def dataset_rows(names: tuple[str, ...], arrays: dict[str, ndarray]) -> list[Dat
 def main(config: Config) -> KeyNetExportReport:
     """Export the three graphs, write the reference rows and the report, print a summary; raise if ONNX Runtime drifts from PyTorch."""
     torch.set_num_threads(config.threads)
-    loaded: tuple[dict[str, Tensor], str] = read_checked_state(config.weights)
-    state: dict[str, Tensor] = loaded[0]
-    sha256: str = loaded[1]
-    model: KeyNetF = keynet_for_state(state)
-    if model.pinch_head is None or model.visibility_head is not None:
-        raise ValueError(f"{config.weights}: robocap-live's KeyNet graph needs a pinch head and no visibility head "
-                         f"(these weights: pinch head {model.pinch_head is not None}, visibility head {model.visibility_head is not None})")
-    model.load_state_dict(state)
-    model = model.eval()
+    state, sha256 = read_checked_state(config.weights)
+    model: KeyNetF = keynet_from_state(state).eval()
+    graph: KeyNetGraph = KeyNetGraph(model)  # raises unless the weights have a pinch head and no visibility head
     holdout: KeyNetHoldout = read_holdout(config.holdout)
-    picked: tuple[Int64[ndarray, "n"], Bool[ndarray, "n"]] = sample_rows(holdout, config.reference_crops, config.seed)
-    index: Int64[Tensor, "n"] = torch.from_numpy(picked[0])
+    rows, zeroed = sample_rows(holdout, config.reference_crops, config.seed)
+    index: Int64[Tensor, "n"] = torch.from_numpy(rows)
     samples: KeyNetSamples = select_samples(holdout.samples, index)
     crops: UInt8[ndarray, "n 96 96"] = samples.crops.numpy()
     keypoints: Float32[ndarray, "n 63"] = samples.keypoints.numpy().copy()
-    keypoints[picked[1]] = 0.0
+    keypoints[zeroed] = 0.0
+    # A row is a zero-prior row when the prior it is fed is zero: the zeroed ones and those the holdout stores without a prior.
+    zero_prior: Bool[ndarray, "n"] = ~keypoints.any(axis=-1)
     reference: dict[str, ndarray] = torch_keynet(model, crops, keypoints)
     arrays: dict[str, ndarray] = {
-        "crops_u8": crops, "keypoints": keypoints, "zero_prior": picked[1], "dataset": samples.dataset.numpy(), "camera": holdout.camera[index].numpy(),
+        "crops_u8": crops, "keypoints": keypoints, "zero_prior": zero_prior, "dataset": samples.dataset.numpy(), "camera": holdout.camera[index].numpy(),
         "kind": samples.kind.numpy(), "points_crop": samples.points_crop.numpy(), "crop_from_net": samples.crop_from_net.numpy(),
         **{name: reference[name] for name in OUTPUTS}, "decoded_points_crop": reference["points_crop"], "peak": reference["peak"], "d_rel_mm": reference["d_rel_mm"],
     }
@@ -169,16 +153,16 @@ def main(config: Config) -> KeyNetExportReport:
     graphs: list[GraphRecord] = []
     for batch in STATIC_BATCHES:
         path: Path = config.out_dir / f"keynet_b{batch}.onnx"
-        export_graph(KeyNetGraph(model), (example[0][:batch], example[1][:batch]), path, INPUTS, OUTPUTS, False, config.opset)
+        export_graph(graph, (example[0][:batch], example[1][:batch]), path, INPUTS, OUTPUTS, False, config.opset)
         graphs.append(check_graph(path, [crop_feed, keypoints], targets, batch, OUTPUTS, config.threads))
     path = config.out_dir / "keynet.onnx"
-    export_graph(KeyNetGraph(model), example, path, INPUTS, OUTPUTS, True, config.opset)
+    export_graph(graph, example, path, INPUTS, OUTPUTS, True, config.opset)
     graphs.append(check_graph(path, [crop_feed, keypoints], targets, None, OUTPUTS, config.threads))
 
     report: KeyNetExportReport = KeyNetExportReport(str(config.weights), sha256, str(config.holdout), config.seed, torch.__version__, ort.__version__,
                                                     config.opset, config.tolerance, dataset_rows(holdout.dataset_names, arrays), graphs)
     (config.out_dir / "export_report.json").write_text(to_json(report) + "\n")
-    print(f"{config.weights} ({sha256[:8]}): {len(crops)} reference rows, {int(picked[1].sum())} with a zero prior -> {config.out_dir}")
+    print(f"{config.weights} ({sha256[:8]}): {len(crops)} reference rows, {int(zero_prior.sum())} with a zero prior -> {config.out_dir}")
     for row in report.datasets:
         errors: str = " / ".join("-" if value is None else f"{value:.2f}" for value in (row.tracked_error_crop_px, row.zero_error_crop_px))
         print(f"  {row.name:32s} {row.rows:4d} rows, {row.positives:4d} positives, PyTorch GT error tracked / zero prior {errors} crop px")

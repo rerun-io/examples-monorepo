@@ -7,7 +7,7 @@ from typing import Literal, get_args
 
 import torch
 from serde import serde
-from serde.json import to_json
+from serde.json import from_json, to_json
 
 from handtrack.data.augment import DetNetAugment
 from handtrack.data.batches import BatchSource
@@ -15,7 +15,7 @@ from handtrack.data.cache import DetNetCache, KeyNetCache
 from handtrack.data.catalog import CATALOG_URL, DatasetName, SplitName, list_segments, select_split
 from handtrack.data.echo import EchoStream, KeyNetProducer, Producer
 from handtrack.data.keynet_holdout import HoldoutSource, read_holdout
-from handtrack.data.keynet_rerun import DrawAugment, keynet_finish, keynet_producer
+from handtrack.data.keynet_rerun import CutStream, DrawAugment, keynet_finish, stream_cuts
 from handtrack.data.rerun_source import DATASET_SPECS, build_manifest, nvdec_producer, rerun_producer, source_spec, training_finish
 from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig, sample_count
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
@@ -182,12 +182,12 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
     ours: SplitName = SPLITS[split]
     evaluation: bool = ours != "train"
     if settings.rerun is not None and not evaluation:
-        if nets == "keynet":
-            return keynet_rerun_source(settings, settings.rerun, torch.device(device))
-        if nets != "detnet":
+        if nets == "both":
             raise ValueError("stream.rerun feeds one net at a time; train with nets=detnet or nets=keynet")
-        return rerun_source(settings, settings.rerun, torch.device(device))
-    if settings.rerun is not None and settings.rerun.keynet_holdout is not None and nets == "keynet":
+        return rerun_source(settings, settings.rerun, torch.device(device), nets)
+    if settings.rerun is not None and nets == "keynet":
+        if settings.rerun.keynet_holdout is None:  # the catalog validation stream would score crops unlike the trained ones
+            raise ValueError("KeyNet on stream.rerun validates on the frozen holdout: set stream.rerun.keynet-holdout")
         holdout_source: HoldoutSource = HoldoutSource(read_holdout(settings.rerun.keynet_holdout), settings.keynet_batch, device)
         rows: int = sample_count(holdout_source.samples)
         if rows > settings.max_val_batches * settings.keynet_batch:
@@ -251,11 +251,19 @@ def training_segments(name: str, holdout: DetectorHoldout, catalog_url: str) -> 
     return sorted(set(dataset.segment_ids()) - held)
 
 
-def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device) -> EchoStream:
-    """One endless Rerun-dataloader producer per dataset into an ``EchoStream`` with step-budget epochs."""
-    from serde.json import from_json
-
+def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device, nets: Nets = "detnet") -> EchoStream:
+    """One endless Rerun-dataloader producer per dataset into an ``EchoStream`` with step-budget epochs: DetNet frames, or KeyNet
+    crops (``data.keynet_rerun``; their priors are zeroed at draw time by ``DrawAugment``, so every stored crop keeps its prior)."""
     holdout: DetectorHoldout = from_json(DetectorHoldout, rerun.holdout.read_text())
+    if nets == "keynet":
+        augment: KeyNetAugment = KeyNetAugment(negative_margin=settings.keynet_negative_margin, full_rotation_probability=rerun.keynet_full_rotation,
+                                               zero_input_probability=0.0)
+        cuts: list[CutStream] = [stream_cuts(name, index, training_segments(name, holdout, rerun.catalog_url), catalog_url=rerun.catalog_url, device=device,
+                                             augments=[augment] * rerun.keynet_cuts, seed=settings.seed + index, endless=True) for index, name in enumerate(rerun.datasets)]
+        crops: list[KeyNetProducer] = [lambda epoch, cut=cut: (samples for samples, _, _ in cut(epoch)) for cut in cuts]
+        return EchoStream(crops, batch_size=settings.keynet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
+                          device=device, seed=settings.seed, finish=keynet_finish(rerun.keynet_draw), epoch_steps=rerun.epoch_steps, min_echo=rerun.min_echo,
+                          prefetch=rerun.prefetch, keynet=True)
     producers: list[Producer] = []
     for index, (name, workers) in enumerate(zip(rerun.datasets, rerun.workers, strict=True)):
         segments: list[str] = training_segments(name, holdout, rerun.catalog_url)
@@ -269,22 +277,6 @@ def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: t
     return EchoStream(producers, batch_size=settings.detnet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
                       device=device, seed=settings.seed, finish=training_finish(settings.detnet_augment), epoch_steps=rerun.epoch_steps,
                       min_echo=rerun.min_echo, prefetch=rerun.prefetch)
-
-
-def keynet_rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device) -> EchoStream:
-    """One endless KeyNet crop producer per dataset (``data.keynet_rerun``) into KeyNet echo pools with step-budget epochs."""
-    from serde.json import from_json
-
-    holdout: DetectorHoldout = from_json(DetectorHoldout, rerun.holdout.read_text())
-    # Priors are zeroed at draw time (``DrawAugment.zero_input_probability``), so every stored crop keeps its prior.
-    augment: KeyNetAugment = KeyNetAugment(negative_margin=settings.keynet_negative_margin, full_rotation_probability=rerun.keynet_full_rotation,
-                                           zero_input_probability=0.0)
-    producers: list[KeyNetProducer] = [keynet_producer(name, index, training_segments(name, holdout, rerun.catalog_url), catalog_url=rerun.catalog_url, device=device,
-                                                 augment=augment, seed=settings.seed + index, endless=True, cuts=rerun.keynet_cuts)
-                                 for index, name in enumerate(rerun.datasets)]
-    return EchoStream(producers, batch_size=settings.keynet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
-                      device=device, seed=settings.seed, finish=keynet_finish(rerun.keynet_draw), epoch_steps=rerun.epoch_steps, min_echo=rerun.min_echo,
-                      prefetch=rerun.prefetch, keynet=True)
 
 
 GPU_OVERHEAD_GB: float = 0.75

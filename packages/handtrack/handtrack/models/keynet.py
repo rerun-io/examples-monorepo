@@ -248,3 +248,10 @@ def keynet_for_state(state: dict[str, Tensor]) -> KeyNetF:
     """An untrained KeyNetF shaped like ``state``: the visibility head if the weights have one, their BatchNorm eps if stored."""
     eps: float = float(state["bn_eps"]) if "bn_eps" in state else DEFAULT_BN_EPS
     return KeyNetF(visibility_head="visibility_head.weight" in state, bn_eps=eps, pinch_head="pinch_head.weight" in state)
+
+
+def keynet_from_state(state: dict[str, Tensor]) -> KeyNetF:
+    """``keynet_for_state`` with ``state`` loaded into it."""
+    model: KeyNetF = keynet_for_state(state)
+    model.load_state_dict(state)
+    return model

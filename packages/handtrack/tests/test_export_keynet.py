@@ -9,9 +9,8 @@ from numpy import ndarray
 from torch import Tensor
 
 pytest.importorskip("onnxruntime", reason="needs onnxruntime")
-import onnxruntime as ort  # noqa: E402
 
-from handtrack.apis.export_keynet import Config, main, sample_rows  # noqa: E402
+from handtrack.apis.export_keynet import OUTPUTS, Config, main, sample_rows  # noqa: E402
 from handtrack.data.array_table import read_arrays  # noqa: E402
 from handtrack.data.keynet_holdout import KeyNetHoldout, write_holdout  # noqa: E402
 from handtrack.data.stream import KeyNetSamples, empty_keynet_samples  # noqa: E402
@@ -19,7 +18,6 @@ from handtrack.models.keynet import KeyNetF  # noqa: E402
 from handtrack.train.checkpoint import export_weights  # noqa: E402
 
 DATASETS: tuple[str, ...] = ("dataforge-umetrack", "gsi-six-view")
-OUTPUTS: list[str] = ["heatmaps", "distance", "presence_logit", "pinch_logit"]
 
 
 def synthetic_holdout(rows: int, dataset: Int64[Tensor, "n"], variant: Int64[Tensor, "n"]) -> KeyNetHoldout:
@@ -91,11 +89,6 @@ def test_three_graphs_match_pytorch_on_a_balanced_parquet_draw(tmp_path: Path) -
     assert expected.pinch_logit is not None
     np.testing.assert_allclose(references["heatmaps"], expected.heatmaps.numpy(), atol=1e-6)
     np.testing.assert_allclose(references["pinch_logit"], expected.pinch_logit.numpy(), atol=1e-6)
-    session: ort.InferenceSession = ort.InferenceSession(str(out_dir / "keynet.onnx"), providers=["CPUExecutionProvider"])
-    values: list[ndarray] = [np.asarray(value) for value in session.run(OUTPUTS, {"crop": crop, "keypoints": references["keypoints"]})]
-    targets: list[ndarray] = [references["heatmaps"], references["distance"], references["presence_logit"][:, None], references["pinch_logit"][:, None]]
-    for value, target in zip(values, targets, strict=True):
-        np.testing.assert_allclose(value, target, atol=1e-4, rtol=0.0)
 
     assert not [path for path in tmp_path.rglob("*") if path.suffix in (".npy", ".npz")]
 

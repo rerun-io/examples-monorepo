@@ -6,8 +6,9 @@ import torch
 from serde.json import from_json
 
 from handtrack.apis.train import DetectorHoldout
+from handtrack.data.batches import CropKind
 from handtrack.data.catalog import CATALOG_URL
-from handtrack.data.keynet_holdout import HOLDOUT_DATASETS, build_holdout, positive_count, write_holdout
+from handtrack.data.keynet_holdout import HOLDOUT_DATASETS, build_holdout, write_holdout
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,4 +29,6 @@ def main(config: Config) -> None:
     held = from_json(DetectorHoldout, config.holdout.read_text())
     holdout = build_holdout(config.datasets, held.segments, config.catalog_url, torch.device(config.device), config.crops_per_dataset, seed=config.seed)
     write_holdout(config.out, holdout)
-    print(f"wrote {config.out}: {holdout.samples.crops.shape[0]} crops; positives (deployed variant) {positive_count(holdout)}", flush=True)
+    positive = (holdout.samples.kind == int(CropKind.POSITIVE)) & (holdout.variant == 0)
+    counts = {name: int((positive & (holdout.samples.dataset == i)).sum()) for i, name in enumerate(holdout.dataset_names)}
+    print(f"wrote {config.out}: {holdout.samples.crops.shape[0]} crops; positives (deployed variant) {counts}", flush=True)

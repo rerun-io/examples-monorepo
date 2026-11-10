@@ -1,29 +1,22 @@
 """KeyNet-F from the Rerun 0.42 catalog: NVDEC decode in the training process, perspective crops cut on the GPU, per-dataset echo pools.
 
-Each dataset's producer streams its cameras' videos through ``simplecv.rerun_dataloader.KeyedNvdecDecoder`` (BlockShuffle over the
-segments), turns each frame to native-resolution luma on the device and cuts ``stream.perspective_keynet_samples`` crops from it: the
-crop cameras, presence negatives and tracker priors of the old catalog stream, at the camera's own resolution through its own lens.
-The truth per segment comes from one of two places:
+Each producer decodes its dataset's cameras with ``simplecv.rerun_dataloader.KeyedNvdecDecoder`` (BlockShuffle over the segments),
+keeps native-resolution luma on the device and cuts ``stream.perspective_keynet_samples`` crops from it. The truth per segment:
 
-* ``hand_model`` (UmeTrack, SHOW3D, HOT3D): the hand-model timeline (``segment_labels`` and ``keypoint_priors``, as before).
-* ``coco3d`` (GSI six-view, Gen-HumanEgo): the world COCO-133 keypoints (``/world/gt/coco133_xyz``), the rig pose per frame and each
-  camera's extrinsic (``Transform3D:relation`` decides the direction) and lens (pinhole, or the double sphere when the camera has
-  ``ds_coefficients``). Projecting them reproduces the stored ``coco133_uv_projected`` exactly (2026-11-09: 0.000 px on both
-  datasets). COCO has no palm centre, so landmark 20 is built from the palm's rigid points (``palm_centre``). Presence counts follow
-  ``labels.coco2d`` (16 of the 20 COCO points inside the image, confidence above zero, the dataset's trust columns).
+* ``hand_model`` (UmeTrack, SHOW3D, HOT3D): the hand-model timeline (``segment_labels`` and ``keypoint_priors``).
+* ``coco133`` (GSI six-view, Gen-HumanEgo): the world COCO-133 keypoints, the rig pose per frame and each camera's extrinsic and
+  lens (pinhole, or the double sphere of ``ds_coefficients``). Projecting them reproduces the stored ``coco133_uv_projected``
+  exactly (2026-11-09: 0.000 px on both datasets). Landmark 20 (palm centre, absent in COCO) is built from the palm's rigid points.
 
-The crops travel as ``KeyNetSamples`` (uint8 96x96 plus targets) into ``echo.EchoStream`` pools; ``keynet_finish`` augments every draw
-anew on the device (intensity, gamma, blur, sensor noise, border occlusion, coherent whole-hand prior errors, zeroed priors), so a crop
-that is drawn several times is seen differently each time.
+``keynet_finish`` augments every draw from an echo pool anew, so a crop drawn several times is seen differently each time.
 """
 
 import dataclasses
+import functools
 import itertools
 import math
-from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import pyarrow as pa
@@ -36,11 +29,22 @@ from simplecv.umetrack_temp.generic_hand_model_torch import LANDMARK
 from torch import Tensor
 
 from handtrack.data.batches import CropKind, KeyNetBatch
-from handtrack.data.catalog import camera_angles, layout_for, list_segments, read_hand_timeline, read_rig, read_statics
-from handtrack.data.echo import KeyNetProducer
+from handtrack.data.catalog import (
+    camera_angles,
+    column_major_3x3,
+    layout_for,
+    list_rows,
+    list_segments,
+    read_hand_timeline,
+    read_rig,
+    read_statics,
+    rotation_from_quaternion_xyzw,
+    static_floats,
+    static_number,
+)
 from handtrack.data.luma import grey_from_rgb
-from handtrack.data.rerun_source import SIDES, dense_rows
-from handtrack.data.segment_labels import HandProjection, keypoint_priors, project_hands, segment_labels
+from handtrack.data.rerun_source import DATASET_SPECS, HANDS, NOMINAL_FPS, PASS_STRIDE, SIDES, _frame_times, _scalar, _video_field, dense_rows
+from handtrack.data.segment_labels import STALE_TRACKER_STEPS, HandProjection, KeypointPriors, keypoint_priors, project_hands, segment_labels
 from handtrack.data.stream import ImageHands, KeyNetAugment, KeyNetSamples, perspective_keynet_samples, sample_count
 from handtrack.geometry.camera import CameraRig
 from handtrack.geometry.letterbox import Letterbox, letterbox_for
@@ -49,49 +53,12 @@ from handtrack.labels.crops import boundary_occlusion, scale_intensity
 from handtrack.labels.heatmaps import render_distance, render_heatmaps
 from handtrack.labels.validity import HandLabel
 
-LabelKind = Literal["hand_model", "coco3d"]
-HANDS: str = "/world/gt/hands"
 COCO_XYZ: str = "/world/gt/coco133_xyz"
 NVDEC_SLICE: int = 16
-"""Frames per NVDEC call: the luma transform briefly holds them as float RGB (16 x 1080p = 400 MB) before it keeps one byte per pixel."""
-TRUTH_CACHE: int = 12
-"""Segments whose truth a producer keeps (a block covers part of a segment, and BlockShuffle interleaves segments)."""
-NOMINAL_FPS: int = 30
-STALE_STEPS: int = 20
-"""The stale prior is the pose this many tracker steps earlier (the paper's 10 % alternative input; ``segment_labels``)."""
-PASS_STRIDE: int = 1_000_000
-
-
-@dataclass(frozen=True, slots=True)
-class KeyNetDataset:
-    """One catalog dataset as the KeyNet producers read it."""
-
-    cameras: tuple[str, ...]
-    """Camera entities ``/world/rig_NN/cam_MM``; the video is at ``<camera>/pinhole/video``."""
-    codec: Literal["h264", "h265", "av1"]
-    labels: LabelKind
-    rolls_deg: tuple[float, ...] | None
-    """Each camera's crop roll in degrees (UmeTrack's ``camera_angle``); None reads the catalog's ``camera_angles`` (hand-model
-    datasets). 0 for GSI and Gen-HumanEgo: robocap-live cuts RoboCap's crops without a roll (``hands/estimator.rs``), and GSI's eye
-    views, like RoboCap's cameras 2-3, show the hands fingers-up as stored (99 % of hand frames), although world-up points down there."""
-    min_score: float | None = None
-    """coco3d only: a hand is trusted when its ``scores:pred_score_quality`` reaches this (None: no score column)."""
-    tracker_step: int = 1
-    """Frames per tracker step (the priors' extrapolation interval): 1 at 30 fps, 2 at 60 fps."""
-    fetch_block_size: int = 1024
-    """Frames per dataloader block. The dataloader decodes every camera of a block before yielding it, at native resolution here
-    (KeyNet crops need the detail), so a block of six 1080p cameras costs 12.4 MB per frame: keep each block near 1.5 GB."""
-
-
-KEYNET_DATASETS: dict[str, KeyNetDataset] = {
-    "dataforge-umetrack": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(4)), "av1", "hand_model", None),
-    "dataforge-show3d": KeyNetDataset(("/world/rig_01/cam_00", "/world/rig_01/cam_01"), "av1", "hand_model", None, tracker_step=2, fetch_block_size=512),
-    "dataforge-hot3d-quest3": KeyNetDataset(("/world/rig_00/cam_00", "/world/rig_00/cam_01"), "av1", "hand_model", None),
-    "gsi-six-view": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h265", "coco3d", (0.0,) * 6, fetch_block_size=128),
-    "dataforge-gen-humanego-subset": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h264", "coco3d", (0.0,) * 6, min_score=0.8,
-                                                   fetch_block_size=128),
-}
-"""The datasets KeyNet trains and is scored on."""
+"""Frames per NVDEC call: the luma transform briefly holds them as float RGB (16 x 1080p = 400 MB)."""
+FETCH_BLOCK_SIZE: dict[str, int] = {"dataforge-show3d": 512, "gsi-six-view": 128, "dataforge-gen-humanego-subset": 128}
+"""Frames per dataloader block (default 1024). The dataloader decodes every camera of a block before yielding it, at native
+resolution here (KeyNet crops need the detail): six 1080p cameras cost 12.4 MB per frame, so each block stays near 1.5 GB."""
 
 
 # --- the palm centre ----------------------------------------------------------------------------------------------------------------
@@ -101,8 +68,7 @@ _PALM_POINTS: tuple[int, int, int, int, int] = (int(LANDMARK.WRIST_JOINT), int(L
 
 
 def _palm_frame(points: Float32[Tensor, "*b 21 3"]) -> tuple[Float32[Tensor, "*b 3"], Float32[Tensor, "*b 3 3"], Float32[Tensor, "*b"]]:
-    """Origin (wrist), orthonormal axes (rows: wrist->middle MCP, index->pinky MCP made orthogonal, their normal) and the
-    wrist-middle MCP length of each hand."""
+    """Origin (wrist), orthonormal axes (rows: wrist->middle MCP, index->pinky MCP made orthogonal, their normal), wrist-middle MCP length."""
     wrist, index, middle, _, pinky = (points[..., i, :] for i in _PALM_POINTS)
     forward: Float32[Tensor, "*b 3"] = middle - wrist
     length: Float32[Tensor, "*b"] = torch.linalg.vector_norm(forward, dim=-1)
@@ -110,8 +76,7 @@ def _palm_frame(points: Float32[Tensor, "*b 21 3"]) -> tuple[Float32[Tensor, "*b
     across: Float32[Tensor, "*b 3"] = pinky - index
     across = across - (across * e1).sum(-1, keepdim=True) * e1
     e2: Float32[Tensor, "*b 3"] = across / torch.linalg.vector_norm(across, dim=-1, keepdim=True).clamp_min(1e-9)
-    e3: Float32[Tensor, "*b 3"] = torch.linalg.cross(e1, e2)
-    return wrist, torch.stack([e1, e2, e3], dim=-2), length
+    return wrist, torch.stack([e1, e2, torch.linalg.cross(e1, e2)], dim=-2), length
 
 
 def palm_coefficients(rest: Float32[Tensor, "21 3"]) -> Float32[Tensor, "3"]:
@@ -143,19 +108,16 @@ class SegmentTruth:
     hand_label: Int64[Tensor, "k c 2"]
     truth: HandProjection
     valid: Bool[Tensor, "k 2"]
-    extrapolated: HandProjection
-    extrapolated_valid: Bool[Tensor, "k 2"]
-    stale: HandProjection
-    stale_valid: Bool[Tensor, "k 2"]
+    priors: KeypointPriors
     contact_mm: Float32[Tensor, "k 2"] | None = None
     """Mesh-contact pinch distance per hand (``labels.pinch``; hand-model datasets with ``pinch=True``), else None."""
 
-    def image_hands(self, which: Literal["truth", "extrapolated", "stale"], rows: Int64[Tensor, "m"], camera: int, device: torch.device) -> ImageHands:
-        projection: HandProjection = getattr(self, which)
-        valid: Bool[Tensor, "k 2"] = {"truth": self.valid, "extrapolated": self.extrapolated_valid, "stale": self.stale_valid}[which]
-        contact: Float32[Tensor, "m 2"] | None = self.contact_mm[rows].to(device) if which == "truth" and self.contact_mm is not None else None
-        return ImageHands(net_xy=projection.net_xy[rows, camera].to(device), points_cam=projection.points_cam[rows, camera].to(device),
-                          in_front=projection.in_front[rows, camera].to(device), valid=valid[rows].to(device), contact_mm=contact)
+
+def _image_hands(projection: HandProjection, valid: Bool[Tensor, "k 2"], rows: Int64[Tensor, "m"], camera: int, device: torch.device,
+                 contact: Float32[Tensor, "k 2"] | None = None) -> ImageHands:
+    return ImageHands(net_xy=projection.net_xy[rows, camera].to(device), points_cam=projection.points_cam[rows, camera].to(device),
+                      in_front=projection.in_front[rows, camera].to(device), valid=valid[rows].to(device),
+                      contact_mm=None if contact is None else contact[rows].to(device))
 
 
 def _frame_rows(frames: Int64[ndarray, "k"]) -> Int64[ndarray, "F"]:
@@ -165,102 +127,69 @@ def _frame_rows(frames: Int64[ndarray, "k"]) -> Int64[ndarray, "F"]:
 
 
 def hand_model_truth(dataset, name: str, segment: str, infos: dict, pinch: bool = False) -> SegmentTruth:
-    """UmeTrack / SHOW3D / HOT3D: the hand-model labels and ground-truth priors of the old stream, for every timeline row; ``pinch``
-    also skins both meshes for the mesh-contact pinch label (``segment_labels(mesh_labels=True)``, slower)."""
+    """UmeTrack / SHOW3D / HOT3D: the old stream's hand-model labels and priors, every timeline row; ``pinch`` also skins both
+    meshes for the mesh-contact pinch label (``segment_labels(mesh_labels=True)``, slower)."""
     info = infos[segment]
     layout = layout_for(name)
     statics: pa.Table = read_statics(dataset, info)
     rig, letterboxes = read_rig(statics, info, None)
     timeline = read_hand_timeline(dataset, info, statics)
-    entity: str = f"{layout.cameras[0]}/pinhole/video"
-    column: str = f"{entity}:VideoStream:sample"
-    table: pa.Table = dataset.filter_segments([segment]).filter_contents([entity]).reader(index="frame_index").select("frame_index", "video_time", column).to_arrow_table()
-    present: Bool[ndarray, "k"] = np.asarray(table[column].is_valid())
-    frames: Int64[ndarray, "k"] = np.asarray(table["frame_index"].to_numpy(zero_copy_only=False), dtype=np.int64)[present]
-    times: Int64[ndarray, "k"] = table["video_time"].cast(pa.int64()).to_numpy(zero_copy_only=False).astype(np.int64)[present]
+    frames, times = _frame_times(dataset, segment, layout.cameras[0])
     rows: Int64[ndarray, "k"] = np.searchsorted(timeline.video_time_ns, times).clip(0, len(timeline.video_time_ns) - 1)
     matched: Bool[ndarray, "k"] = timeline.video_time_ns[rows] == times
     labels = segment_labels(timeline, rig, letterboxes, rows, layout.pose_gated, mesh_labels=pinch)
-    priors = keypoint_priors(timeline, rig, letterboxes, rows, layout.tracker_step)
     return SegmentTruth(
         rig=rig, letterboxes=letterboxes, rolls_rad=tuple(math.radians(a) for a in camera_angles(statics, info)), phi=float(timeline.hand_scale),
         row_of_frame=_frame_rows(frames), image_valid=labels.image_valid & torch.from_numpy(matched)[:, None], hand_label=labels.hand_label,
         truth=labels.projection, valid=torch.isfinite(labels.landmarks).all(dim=-1).all(dim=-1),
-        extrapolated=priors.extrapolated, extrapolated_valid=priors.extrapolated_valid, stale=priors.stale, stale_valid=priors.stale_valid,
-        contact_mm=labels.contact_mm if pinch else None,
+        priors=keypoint_priors(timeline, rig, letterboxes, rows, layout.tracker_step), contact_mm=labels.contact_mm if pinch else None,
     )
 
 
-def _column_major(values: Sequence[float]) -> Float32[ndarray, "3 3"]:
-    return np.asarray(values, dtype=np.float64).reshape(3, 3).T.astype(np.float32)
-
-
-def _static(statics: pa.Table, column: str) -> list:
-    value = statics[column][0].as_py()
-    return value[0] if isinstance(value, list) and value and isinstance(value[0], list) else value
-
-
-def coco3d_rig(statics: pa.Table, cameras: Sequence[str]) -> tuple[CameraRig, tuple[Letterbox, ...]]:
+def coco3d_rig(statics: pa.Table, cameras: Sequence[str], where: str) -> tuple[CameraRig, tuple[Letterbox, ...]]:
     """cam_from_rig, K and lens of each camera from the static row (``Transform3D:relation`` 2 = ChildFromParent, else ParentFromChild)."""
     cam_from_rig: list[Float32[ndarray, "4 4"]] = []
-    focal: list[list[float]] = []
-    principal: list[list[float]] = []
-    sizes: list[list[float]] = []
-    spheres: list[list[float]] = []
+    focal, principal, sizes, spheres = [], [], [], []
     for camera in cameras:
-        rotation: Float32[ndarray, "3 3"] = _column_major(_static(statics, f"{camera}:Transform3D:mat3x3"))
-        translation: Float32[ndarray, "3"] = np.asarray(_static(statics, f"{camera}:Transform3D:translation"), dtype=np.float32)
+        rotation: Float32[ndarray, "3 3"] = column_major_3x3(np.asarray(static_floats(statics, f"{camera}:Transform3D:mat3x3", where), dtype=np.float32))
+        translation: Float32[ndarray, "3"] = np.asarray(static_floats(statics, f"{camera}:Transform3D:translation", where), dtype=np.float32)
         relation_column: str = f"{camera}:Transform3D:relation"
-        relation = statics[relation_column][0].as_py() if relation_column in statics.column_names else None
-        relation = relation[0] if isinstance(relation, list) else relation
+        child_from_parent: bool = relation_column in statics.column_names and static_number(statics, relation_column, where) == 2
         transform: Float32[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
-        if relation == 2:  # the stored transform maps rig points into the camera
-            transform[:3, :3], transform[:3, 3] = rotation, translation
-        else:  # rig_from_cam: invert it
-            transform[:3, :3], transform[:3, 3] = rotation.T, -rotation.T @ translation
+        transform[:3, :3], transform[:3, 3] = (rotation, translation) if child_from_parent else (rotation.T, -rotation.T @ translation)
         cam_from_rig.append(transform)
-        intrinsics: Float32[ndarray, "3 3"] = _column_major(_static(statics, f"{camera}/pinhole:Pinhole:image_from_camera"))
+        intrinsics: Float32[ndarray, "3 3"] = column_major_3x3(np.asarray(static_floats(statics, f"{camera}/pinhole:Pinhole:image_from_camera", where), dtype=np.float32))
         focal.append([float(intrinsics[0, 0]), float(intrinsics[1, 1])])
         principal.append([float(intrinsics[0, 2]), float(intrinsics[1, 2])])
-        sizes.append([float(v) for v in _static(statics, f"{camera}/pinhole:Pinhole:resolution")])
-        ds_column: str = f"{camera}:ds_coefficients"
-        if ds_column in statics.column_names and statics[ds_column][0].is_valid:
-            fx, fy, cx, cy, xi, alpha = (float(v) for v in _static(statics, ds_column))
+        sizes.append(static_floats(statics, f"{camera}/pinhole:Pinhole:resolution", where))
+        if f"{camera}:ds_coefficients" in statics.column_names and statics[f"{camera}:ds_coefficients"][0].is_valid:
+            fx, fy, cx, cy, xi, alpha = static_floats(statics, f"{camera}:ds_coefficients", where)
             focal[-1], principal[-1] = [fx, fy], [cx, cy]
             spheres.append([xi, alpha])
     if spheres and len(spheres) != len(cameras):
-        raise ValueError("a rig mixes double-sphere and pinhole cameras")
+        raise ValueError(f"{where}: a rig mixes double-sphere and pinhole cameras")
     rig = CameraRig(names=tuple(cameras), image_size=torch.tensor(sizes), cam_from_rig=torch.from_numpy(np.stack(cam_from_rig)), focal=torch.tensor(focal),
                     principal=torch.tensor(principal), fisheye62=None, double_sphere=torch.tensor(spheres) if spheres else None)
     return rig, tuple(letterbox_for(int(w), int(h), None) for w, h in sizes)
 
 
-def _world_from_rig(table: pa.Table, rig_entity: str = "/world/rig_00") -> Float32[ndarray, "k 4 4"]:
-    """The rig pose per row (quaternion xyzw or column-major mat3x3, plus translation); NaN rows where the pose is missing."""
-    translation, has_translation = dense_rows(table[f"{rig_entity}:Transform3D:translation"], 1, inner=3)
-    out: Float32[ndarray, "k 4 4"] = np.full((table.num_rows, 4, 4), np.nan, dtype=np.float32)
-    quaternion_column: str = f"{rig_entity}:Transform3D:quaternion"
-    if quaternion_column in table.column_names and table[quaternion_column].null_count < table.num_rows:
-        quaternion, has_rotation = dense_rows(table[quaternion_column], 1, inner=4)
-        x, y, z, w = (quaternion[:, 0, i].astype(np.float64) for i in range(4))
-        rotation: ndarray = np.stack([
-            np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)], -1),
-            np.stack([2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)], -1),
-            np.stack([2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], -1),
-        ], -2).astype(np.float32)
+def _world_from_rig(table: pa.Table, rig: str = "/world/rig_00") -> Float32[ndarray, "k 4 4"]:
+    """The rig pose per row (xyzw quaternion or column-major mat3x3, plus translation), as ``catalog.hand_timeline``; NaN where missing."""
+    out: Float32[ndarray, "k 4 4"] = np.zeros((table.num_rows, 4, 4), dtype=np.float32)
+    out[:, 3, 3] = 1.0
+    quaternion: str = f"{rig}:Transform3D:quaternion"
+    if quaternion in table.column_names and table[quaternion].null_count < table.num_rows:
+        out[:, :3, :3] = rotation_from_quaternion_xyzw(list_rows(table[quaternion], 4))
     else:
-        matrix, has_rotation = dense_rows(table[f"{rig_entity}:Transform3D:mat3x3"], 1, inner=9)
-        rotation = matrix[:, 0].reshape(-1, 3, 3).transpose(0, 2, 1)
-    ok: Bool[ndarray, "k"] = has_translation & has_rotation
-    out[ok, :3, :3] = rotation[ok]
-    out[ok, :3, 3] = translation[ok, 0]
-    out[ok, 3] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        out[:, :3, :3] = column_major_3x3(list_rows(table[f"{rig}:Transform3D:mat3x3"], 9))
+    out[:, :3, 3] = list_rows(table[f"{rig}:Transform3D:translation"], 3)
+    out[~np.isfinite(out).all(axis=(1, 2))] = np.nan
     return out
 
 
 def coco_landmarks(xyz: Float32[Tensor, "k 133 3"], confidence: Float32[Tensor, "k 133"], coefficients: Float32[Tensor, "3"]) -> tuple[Float32[Tensor, "k 2 21 3"], Bool[Tensor, "k 2 21"]]:
-    """Both hands' 21 landmarks from COCO-133 points (``labels.coco2d.COCO_SLOTS``), the palm centre built from the palm (finite only
-    when its five points are), and which landmarks carry a confident point."""
+    """Both hands' 21 landmarks from COCO-133 points (``labels.coco2d.COCO_SLOTS``) with the palm centre built from the palm (finite
+    only when its five points are), and which landmarks carry a confident point."""
     slots: Int64[Tensor, "20"] = torch.tensor(list(COCO_SLOTS))
     landmarks: Int64[Tensor, "20"] = torch.tensor(list(COCO_SLOTS.values()))
     points: Float32[Tensor, "k 2 21 3"] = torch.full((xyz.shape[0], 2, 21, 3), torch.nan)
@@ -280,15 +209,15 @@ def coco_landmarks(xyz: Float32[Tensor, "k 133 3"], confidence: Float32[Tensor, 
     return points, known
 
 
-def coco3d_truth(dataset, name: str, spec: KeyNetDataset, segment: str, coefficients: Float32[Tensor, "3"], generic_rest: Float32[Tensor, "21 3"]) -> SegmentTruth:
+def coco3d_truth(dataset, name: str, segment: str, coefficients: Float32[Tensor, "3"], generic_rest: Float32[Tensor, "21 3"]) -> SegmentTruth:
     """GSI / Gen-HumanEgo: truth from the world COCO-133 keypoints, the rig poses and the lenses; priors extrapolated from them."""
-    statics: pa.Table = dataset.filter_segments([segment]).filter_contents([*spec.cameras, *(f"{c}/pinhole" for c in spec.cameras)]).reader(index=None).to_arrow_table()
-    rig, letterboxes = coco3d_rig(statics, spec.cameras)
-    entities: list[str] = ["/world/rig_00", COCO_XYZ, *(f"{c}/pinhole/coco133_uv_projected" for c in spec.cameras),
+    cameras, _, _, _, min_score = DATASET_SPECS[name]
+    statics: pa.Table = dataset.filter_segments([segment]).filter_contents([*cameras, *(f"{c}/pinhole" for c in cameras)]).reader(index=None).to_arrow_table()
+    rig, letterboxes = coco3d_rig(statics, cameras, f"{name} {segment}")
+    entities: list[str] = ["/world/rig_00", COCO_XYZ, *(f"{c}/pinhole/coco133_uv_projected" for c in cameras),
                            *(f"{HANDS}/{s}/{p}" for s in SIDES for p in ("confidence", "scores"))]
     table: pa.Table = dataset.filter_segments([segment]).filter_contents(entities).reader(index="frame_index").to_arrow_table()
     frames: Int64[ndarray, "k"] = np.asarray(table["frame_index"].to_numpy(zero_copy_only=False), dtype=np.int64)
-    count: int = len(frames)
     world_from_rig: Float32[Tensor, "k 4 4"] = torch.from_numpy(_world_from_rig(table))
     xyz, has_xyz = dense_rows(table[f"{COCO_XYZ}:Points3D:positions"], 133, inner=3)
     weight, has_weight = dense_rows(table[f"{COCO_XYZ}:simplecv.KeypointConfidence3D:confidences"], 133)
@@ -296,61 +225,53 @@ def coco3d_truth(dataset, name: str, spec: KeyNetDataset, segment: str, coeffici
     xyz[~usable] = np.nan
     weight = np.where(usable[:, None], weight, np.float32(0.0))
     trusted: Bool[ndarray, "k 2"] = np.repeat(usable[:, None], 2, axis=1)
-    for side, hand in enumerate(SIDES):
-        confidence_column: str = f"{HANDS}/{hand}/confidence:Scalars:scalars"
-        if confidence_column in table.column_names:
-            values: Float32[ndarray, "k"] = np.asarray([v[0] if v else np.nan for v in table[confidence_column].to_pylist()], dtype=np.float32)
-            trusted[:, side] &= np.nan_to_num(values) > 0
-        score_column: str = f"{HANDS}/{hand}/scores:pred_score_quality"
-        if spec.min_score is not None and score_column in table.column_names:
-            scores: Float32[ndarray, "k"] = np.asarray([v[0] if isinstance(v, list) and v else (v if v is not None else np.nan) for v in table[score_column].to_pylist()], dtype=np.float32)
-            trusted[:, side] &= np.nan_to_num(scores) >= spec.min_score
+    for side, hand in enumerate(SIDES):  # the trust rule of rerun_source.coco133_labels
+        trusted[:, side] &= np.nan_to_num(_scalar(table[f"{HANDS}/{hand}/confidence:Scalars:scalars"])) > 0
+        if min_score is not None:
+            trusted[:, side] &= np.nan_to_num(_scalar(table[f"{HANDS}/{hand}/scores:pred_score_quality"])) >= min_score
     points_world, known = coco_landmarks(torch.from_numpy(xyz), torch.from_numpy(weight), coefficients)
     valid: Bool[Tensor, "k 2"] = torch.from_numpy(trusted) & known.all(dim=-1)
     points_world = torch.where(valid[..., None, None], points_world, torch.full_like(points_world, torch.nan))
     truth: HandProjection = project_hands(rig, letterboxes, world_from_rig, points_world)
-    # Presence and image validity follow labels.coco2d on the stored projections (the dataset's own visibility statement).
-    image_valid: Bool[Tensor, "k c"] = torch.zeros((count, len(spec.cameras)), dtype=torch.bool)
-    hand_label: Int64[Tensor, "k c 2"] = torch.zeros((count, len(spec.cameras), 2), dtype=torch.int64)
-    for c, camera in enumerate(spec.cameras):
+    # Presence follows labels.coco2d on the stored projections; unlike DetNet's rule (drop the image when either hand is untrusted),
+    # an untrusted hand only becomes PARTIAL (no positive, no negative of its own) and the image still trains the trusted hand.
+    image_valid: Bool[Tensor, "k c"] = torch.from_numpy(usable & trusted.any(axis=1))[:, None].repeat(1, len(cameras))
+    hand_label: Int64[Tensor, "k c 2"] = torch.zeros((len(frames), len(cameras), 2), dtype=torch.int64)
+    for c, camera in enumerate(cameras):
         uv, has_points = dense_rows(table[f"{camera}/pinhole/coco133_uv_projected:Points2D:positions"], 133, inner=2)
         uv_weight, has_uv_weight = dense_rows(table[f"{camera}/pinhole/coco133_uv_projected:simplecv.KeypointConfidence2D:confidences"], 133)
         seen: Bool[ndarray, "k"] = has_points & has_uv_weight
         uv[~seen] = np.nan
-        uv_weight = np.where(seen[:, None], uv_weight, np.float32(0.0))
-        hands = coco133_hands(torch.from_numpy(uv), torch.from_numpy(uv_weight), torch.from_numpy(trusted), letterboxes[c])
-        # Unlike DetNet's rule (drop the image when either hand is untrusted), an untrusted hand only stops being a statement: it
-        # becomes PARTIAL (no positive, no negative of its own), and the image still trains the trusted hand.
-        image_valid[:, c] = torch.from_numpy(usable & trusted.any(axis=1))
+        hands = coco133_hands(torch.from_numpy(uv), torch.from_numpy(np.where(seen[:, None], uv_weight, np.float32(0.0))), torch.from_numpy(trusted), letterboxes[c])
         hand_label[:, c] = torch.where(torch.from_numpy(trusted), hands.hand_label, torch.full_like(hands.hand_label, int(HandLabel.PARTIAL)))
     # A keypoint counts for crop fitting and in-crop counts when it is in front and confidently placed.
     truth = dataclasses.replace(truth, in_front=truth.in_front & known[:, None])
-    extrapolated_world, extrapolated_valid, stale_world, stale_valid = _point_priors(points_world, valid, frames, spec.tracker_step)
-    phi: float = _coco_phi(points_world, valid, generic_rest)
+    extrapolated, extrapolated_valid, stale, stale_valid = _point_priors(points_world, valid, frames)
+    # Crop roll 0: robocap-live cuts RoboCap's crops without a roll (hands/estimator.rs), and GSI's eye views, like RoboCap's cameras
+    # 2-3, show the hands fingers-up as stored (99 % of hand frames), although world-up points down there.
     return SegmentTruth(
-        rig=rig, letterboxes=letterboxes, rolls_rad=tuple(math.radians(r) for r in spec.rolls_deg or (0.0,) * len(spec.cameras)), phi=phi,
+        rig=rig, letterboxes=letterboxes, rolls_rad=(0.0,) * len(cameras), phi=_coco_phi(points_world, valid, generic_rest),
         row_of_frame=_frame_rows(frames), image_valid=image_valid, hand_label=hand_label, truth=truth, valid=valid,
-        extrapolated=project_hands(rig, letterboxes, world_from_rig, extrapolated_world), extrapolated_valid=extrapolated_valid,
-        stale=project_hands(rig, letterboxes, world_from_rig, stale_world), stale_valid=stale_valid,
+        priors=KeypointPriors(project_hands(rig, letterboxes, world_from_rig, extrapolated), extrapolated_valid,
+                              project_hands(rig, letterboxes, world_from_rig, stale), stale_valid),
     )
 
 
-def _point_priors(points: Float32[Tensor, "k 2 21 3"], valid: Bool[Tensor, "k 2"], frames: Int64[ndarray, "k"], step: int
+def _point_priors(points: Float32[Tensor, "k 2 21 3"], valid: Bool[Tensor, "k 2"], frames: Int64[ndarray, "k"]
                   ) -> tuple[Float32[Tensor, "k 2 21 3"], Bool[Tensor, "k 2"], Float32[Tensor, "k 2 21 3"], Bool[Tensor, "k 2"]]:
-    """World-point analogues of ``keypoint_priors``: 2 p(t-s) - p(t-2s), or p(t-s) when p(t-2s) is missing; stale p(t - 20 s)."""
+    """World-point analogues of ``keypoint_priors`` at one frame per tracker step (30 fps): 2 p(t-1) - p(t-2), or p(t-1) when
+    p(t-2) is missing; stale p(t - 20)."""
     rows: Int64[ndarray, "F"] = _frame_rows(frames)
 
     def lookup(offset: int) -> tuple[Float32[Tensor, "k 2 21 3"], Bool[Tensor, "k 2"]]:
         source: Int64[ndarray, "k"] = frames - offset
-        inside: Bool[ndarray, "k"] = (source >= 0) & (source < len(rows))
-        row: Int64[ndarray, "k"] = np.where(inside, rows[np.clip(source, 0, max(len(rows) - 1, 0))], -1)
-        present: Bool[Tensor, "k"] = torch.from_numpy(row >= 0)
+        row: Int64[ndarray, "k"] = np.where((source >= 0) & (source < len(rows)), rows[np.clip(source, 0, max(len(rows) - 1, 0))], -1)
         index: Int64[Tensor, "k"] = torch.from_numpy(np.clip(row, 0, None))
-        return points[index], valid[index] & present[:, None]
+        return points[index], valid[index] & torch.from_numpy(row >= 0)[:, None]
 
-    previous, previous_valid = lookup(step)
-    before, before_valid = lookup(2 * step)
-    stale, stale_valid = lookup(STALE_STEPS * step)
+    previous, previous_valid = lookup(1)
+    before, before_valid = lookup(2)
+    stale, stale_valid = lookup(STALE_TRACKER_STEPS)
     extrapolated: Float32[Tensor, "k 2 21 3"] = torch.where(before_valid[..., None, None], 2 * previous - before, previous)
     nan: Float32[Tensor, "k 2 21 3"] = torch.full_like(points, torch.nan)
     return torch.where(previous_valid[..., None, None], extrapolated, nan), previous_valid, torch.where(stale_valid[..., None, None], stale, nan), stale_valid
@@ -368,26 +289,6 @@ def _coco_phi(points: Float32[Tensor, "k 2 21 3"], valid: Bool[Tensor, "k 2"], g
 
 # --- the producer -------------------------------------------------------------------------------------------------------------------
 
-
-def warm_linalg(device: torch.device) -> None:
-    """Initialise torch's lazily loaded linear-algebra backends on this (the main) thread, once per device, before producer threads
-    start: concurrent first calls race in that lazy initialisation ("lazy wrapper should be called at most once"; it killed the
-    2026-11-09 long run in ``local_crop_from_net``'s ``torch.linalg.inv`` right after a resume)."""
-    for where in {torch.device("cpu"), device}:
-        eye: Float32[Tensor, "2 3 3"] = torch.eye(3, device=where).expand(2, 3, 3).contiguous()
-        torch.linalg.inv(eye)
-        torch.linalg.inv_ex(eye)
-        torch.linalg.cross(eye[:, 0], eye[:, 1])
-        torch.linalg.vector_norm(eye, dim=-1)
-        torch.linalg.solve(eye, eye)
-        if where.type == "cuda":
-            torch.cuda.synchronize(where)
-
-
-def _video_field(camera: str) -> str:
-    return f"{camera}/pinhole/video:VideoStream:sample"
-
-
 CutStream = Callable[[int], Iterator[tuple[KeyNetSamples, int, int]]]
 """An epoch of (crops, camera index within the dataset, augmentation variant index) from one dataset."""
 
@@ -396,13 +297,12 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
                 seed: int, endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32, pinch: bool = False) -> CutStream:
     """NVDEC decode in this process, luma at native resolution, and per (segment, camera) chunk of ``chunk`` frames one
     ``perspective_keynet_samples`` cut per entry of ``augments`` (a cut is a cheap grid sample; a decode is not). ``fetch_block_size``
-    None takes the dataset's own (``KeyNetDataset.fetch_block_size``); ``pinch`` adds the mesh-contact label (hand-model datasets)."""
+    None takes the dataset's (``FETCH_BLOCK_SIZE``); ``pinch`` adds the mesh-contact label (hand-model datasets)."""
     from simplecv.rerun_dataloader import KeyedFrame, KeyedNvdecDecoder
 
     from handtrack.data.catalog import _generic_model
 
-    warm_linalg(device)  # here, on the thread that builds the producers, never first inside a producer thread
-    spec: KeyNetDataset = KEYNET_DATASETS[name]
+    cameras, _, labels, _, _ = DATASET_SPECS[name]
     generic_rest: Float32[Tensor, "21 3"] = _generic_model().landmark_rest_positions.float()
     coefficients: Float32[Tensor, "3"] = palm_coefficients(generic_rest)
 
@@ -413,83 +313,55 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
         dataset = rr.catalog.CatalogClient(catalog_url).get_dataset(name)
         fields = {f"cam{c}": Field(_video_field(camera), decode=KeyedNvdecDecoder(dataset, f"{camera}/pinhole/video".lstrip("/"), "frame_index", device, NOMINAL_FPS,
                                                                                    max_frames_per_call=NVDEC_SLICE, transform=grey_from_rgb))
-                  for c, camera in enumerate(spec.cameras)}
+                  for c, camera in enumerate(cameras)}
         stream = RerunIterableDataset(DataSource(dataset=dataset, segments=list(segments)), index="frame_index", fields=fields,
-                                      fetch_block_size=fetch_block_size or spec.fetch_block_size, shuffle_strategy=BlockShuffle(), decode_threads=1)
-        infos: dict = {i.segment_id: i for i in list_segments(dataset, name)} if spec.labels == "hand_model" else {}
+                                      fetch_block_size=fetch_block_size or FETCH_BLOCK_SIZE.get(name, 1024), shuffle_strategy=BlockShuffle(), decode_threads=1)
+        infos: dict = {i.segment_id: i for i in list_segments(dataset, name)} if labels == "hand_model" else {}
         generator: torch.Generator = torch.Generator(device=device).manual_seed(seed * 7919 + epoch)
-        current: tuple[str, SegmentTruth] | None = None
-        truths: OrderedDict[str, SegmentTruth] = OrderedDict()
-        pending: dict[int, list[tuple[Tensor, int]]] = {}
 
-        def cut_all(truth: SegmentTruth, camera: int, items: list[tuple[Tensor, int]]) -> Iterator[tuple[KeyNetSamples, int, int]]:
+        @functools.lru_cache(maxsize=1)  # BlockShuffle interleaves segments, so only the current one is worth keeping
+        def truth_of(segment: str) -> SegmentTruth:
+            return hand_model_truth(dataset, name, segment, infos, pinch) if labels == "hand_model" else coco3d_truth(dataset, name, segment, coefficients, generic_rest)
+
+        def cut(segment: str, camera: int, items: list[tuple[Tensor, int]]) -> Iterator[tuple[KeyNetSamples, int, int]]:
+            """One ``perspective_keynet_samples`` per augment for one camera's frames of one segment; the inputs move to the device once."""
+            truth: SegmentTruth = truth_of(segment)
+            rows: Int64[Tensor, "m"] = torch.tensor([row for _, row in items], dtype=torch.int64)
+            frames: UInt8[Tensor, "m h w"] = torch.stack([image for image, _ in items]).to(device)
+            inputs = (frames, truth.rig.select([camera]).to(device), truth.letterboxes[camera], truth.rolls_rad[camera],
+                      _image_hands(truth.truth, truth.valid, rows, camera, device, truth.contact_mm), truth.hand_label[rows, camera].to(device))
+            extrapolated: ImageHands = _image_hands(truth.priors.extrapolated, truth.priors.extrapolated_valid, rows, camera, device)
+            stale: ImageHands = _image_hands(truth.priors.stale, truth.priors.stale_valid, rows, camera, device)
             for variant, augment in enumerate(augments):
-                samples: KeyNetSamples = cut_samples(truth, camera, items, dataset_index, augment, generator, device)
+                samples: KeyNetSamples = perspective_keynet_samples(*inputs, extrapolated=extrapolated, stale=stale, phi=truth.phi, dataset=dataset_index,
+                                                                    augment=augment, generator=generator)
                 if sample_count(samples):
                     yield samples, camera, variant
 
+        current: str | None = None
+        pending: dict[int, list[tuple[Tensor, int]]] = {}
         for pass_seed in itertools.count(epoch * PASS_STRIDE) if endless else (epoch,):
             stream.set_epoch(pass_seed)
             for sample in stream:
-                for c in range(len(spec.cameras)):
+                for c in range(len(cameras)):
                     keyed = sample[f"cam{c}"]
                     if not isinstance(keyed, KeyedFrame):
                         raise TypeError(f"{name}: camera {c} decoded to {type(keyed).__name__}, not a KeyedFrame")
-                    if current is None or current[0] != keyed.segment_id:
-                        if current is not None:
-                            for camera, items in pending.items():
-                                if items:
-                                    yield from cut_all(current[1], camera, items)
-                        pending.clear()
-                        cached: SegmentTruth | None = truths.pop(keyed.segment_id, None)
-                        truth: SegmentTruth = cached if cached is not None else (
-                            hand_model_truth(dataset, name, keyed.segment_id, infos, pinch) if spec.labels == "hand_model"
-                            else coco3d_truth(dataset, name, spec, keyed.segment_id, coefficients, generic_rest))
-                        truths[keyed.segment_id] = truth
-                        while len(truths) > TRUTH_CACHE:
-                            truths.popitem(last=False)
-                        current = (keyed.segment_id, truth)
-                    truth = current[1]
+                    if keyed.segment_id != current:  # flush the previous segment's partial chunks
+                        for camera, items in pending.items():
+                            yield from cut(current, camera, items) if current is not None else ()
+                        pending, current = {}, keyed.segment_id
+                    truth: SegmentTruth = truth_of(current)
                     row: int = int(truth.row_of_frame[keyed.index]) if keyed.index < len(truth.row_of_frame) else -1
-                    if row < 0 or not bool(truth.image_valid[row, c]):
-                        continue
-                    pending.setdefault(c, []).append((keyed.image, row))
-                    if len(pending[c]) >= chunk:
-                        yield from cut_all(truth, c, pending[c])
-                        pending[c] = []
-            if current is not None:
-                for camera, items in pending.items():
-                    if items:
-                        yield from cut_all(current[1], camera, items)
-            pending.clear()
+                    if row >= 0 and bool(truth.image_valid[row, c]):
+                        pending.setdefault(c, []).append((keyed.image, row))
+                        if len(pending[c]) >= chunk:
+                            yield from cut(current, c, pending.pop(c))
+            for camera, items in pending.items():
+                yield from cut(current, camera, items) if current is not None else ()
+            pending = {}
 
     return produce
-
-
-def keynet_producer(name: str, dataset_index: int, segments: Sequence[str], *, catalog_url: str, device: torch.device, augment: KeyNetAugment, seed: int,
-                    endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32, cuts: int = 1) -> KeyNetProducer:
-    """A ``Producer`` of training crops for ``echo.EchoStream``: ``stream_cuts`` with ``cuts`` independent jitters of each chunk."""
-    cut_stream: CutStream = stream_cuts(name, dataset_index, segments, catalog_url=catalog_url, device=device, augments=[augment] * cuts, seed=seed,
-                                        endless=endless, fetch_block_size=fetch_block_size, chunk=chunk)
-
-    def produce(epoch: int) -> Iterator[KeyNetSamples]:
-        for samples, _, _ in cut_stream(epoch):
-            yield samples
-
-    return produce
-
-
-def cut_samples(truth: SegmentTruth, camera: int, items: list[tuple[Tensor, int]], dataset_index: int, augment: KeyNetAugment, generator: torch.Generator,
-                device: torch.device) -> KeyNetSamples:
-    """``perspective_keynet_samples`` for one camera's frames of one segment (frames already on the device)."""
-    frames: UInt8[Tensor, "m h w"] = torch.stack([image if image.dim() == 2 else image[0] for image, _ in items]).to(device)
-    rows: Int64[Tensor, "m"] = torch.tensor([row for _, row in items], dtype=torch.int64)
-    return perspective_keynet_samples(
-        frames, truth.rig.select([camera]).to(device), truth.letterboxes[camera], truth.rolls_rad[camera],
-        truth.image_hands("truth", rows, camera, device), truth.hand_label[rows, camera].to(device),
-        extrapolated=truth.image_hands("extrapolated", rows, camera, device), stale=truth.image_hands("stale", rows, camera, device),
-        phi=truth.phi, dataset=dataset_index, augment=augment, generator=generator,
-    )
 
 
 # --- per-draw augmentation ------------------------------------------------------------------------------------------------------------
@@ -498,14 +370,14 @@ def cut_samples(truth: SegmentTruth, camera: int, items: list[tuple[Tensor, int]
 @serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class DrawAugment:
-    """Augmentation applied every time a stored crop is drawn (our choices; the coherent prior error is the deployed net's recipe)."""
+    """Augmentation applied every time a stored crop is drawn (the coherent prior error is the deployed net's recipe)."""
 
     intensity_range: tuple[float, float] = (0.6, 1.4)
     gamma_range: tuple[float, float] = (0.7, 1.4)
-    """Intensity gamma drawn log-uniformly in this range (exposure curves, IR-like grey)."""
+    """Drawn log-uniformly (exposure curves, IR-like grey)."""
     blur_probability: float = 0.25
     blur_sigma_range: tuple[float, float] = (0.4, 1.6)
-    """Gaussian blur sigma in crop pixels (defocus, motion, a camera with less detail than the crop)."""
+    """Gaussian blur sigma in crop pixels."""
     noise_probability: float = 0.3
     noise_std_range: tuple[float, float] = (0.005, 0.04)
     """Additive Gaussian sensor noise (intensity units)."""
@@ -545,8 +417,7 @@ def coherent_prior_noise(keypoints: Float32[Tensor, "b 63"], generator: torch.Ge
     rotation: Float32[Tensor, "b 2 2"] = torch.stack((torch.stack((cosine, -sine), -1), torch.stack((sine, cosine), -1)), -2)
     moved: Float32[Tensor, "b 21 2"] = torch.einsum("bij,bkj->bki", rotation, uv - centre) + centre + draws[:, None, 2:4] * augment.prior_shift_std
     shifted: Float32[Tensor, "b 21 1"] = points[..., 2:] + draws[:, None, 4:5] * augment.prior_d_shift_std
-    noisy: Float32[Tensor, "b 63"] = torch.cat((moved, shifted), dim=-1).reshape(b, 63)
-    return torch.where(chosen[:, None], noisy, keypoints)
+    return torch.where(chosen[:, None], torch.cat((moved, shifted), dim=-1).reshape(b, 63), keypoints)
 
 
 def _blur(images: Float32[Tensor, "b 1 h w"], sigma: Float32[Tensor, "b"]) -> Float32[Tensor, "b 1 h w"]:
@@ -574,17 +445,15 @@ def keynet_finish(augment: DrawAugment | None):
             crops = crops.masked_fill(occluded[:, None], 0.0)
             low, high = math.log(augment.gamma_range[0]), math.log(augment.gamma_range[1])
             gamma: Float32[Tensor, "b 1 1 1"] = torch.exp(low + (high - low) * torch.rand((b, 1, 1, 1), generator=generator, device=device))
-            crops = crops.clamp_min(0.0).pow(gamma)
-            crops = scale_intensity(crops, generator, *augment.intensity_range)
+            crops = scale_intensity(crops.clamp_min(0.0).pow(gamma), generator, *augment.intensity_range)
             draws: Float32[Tensor, "b 4"] = torch.rand((b, 4), generator=generator, device=device)
             sigma: Float32[Tensor, "b"] = augment.blur_sigma_range[0] + draws[:, 0] * (augment.blur_sigma_range[1] - augment.blur_sigma_range[0])
             crops = torch.where((draws[:, 1] < augment.blur_probability)[:, None, None, None], _blur(crops, sigma), crops)
             noise_std: Float32[Tensor, "b"] = augment.noise_std_range[0] + draws[:, 2] * (augment.noise_std_range[1] - augment.noise_std_range[0])
             noise: Float32[Tensor, "b 1 96 96"] = torch.randn(crops.shape, generator=generator, device=device) * noise_std[:, None, None, None]
             crops = torch.where((draws[:, 3] < augment.noise_probability)[:, None, None, None], (crops + noise).clamp(0.0, 1.0), crops)
-            keypoints = coherent_prior_noise(keypoints, generator, augment)
             zero: Bool[Tensor, "b"] = torch.rand(b, generator=generator, device=device) < augment.zero_input_probability
-            keypoints = torch.where(zero[:, None], torch.zeros_like(keypoints), keypoints)
+            keypoints = torch.where(zero[:, None], torch.zeros_like(keypoints), coherent_prior_noise(keypoints, generator, augment))
         positive: Bool[Tensor, "b"] = samples.kind == int(CropKind.POSITIVE)
         return KeyNetBatch(
             crops=crops, keypoints=keypoints, heatmaps=render_heatmaps(samples.points_crop) * positive[:, None, None, None],

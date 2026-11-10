@@ -29,6 +29,13 @@ Finish = Callable[[DetNetSamples, torch.Generator], DetNetBatch]
 KeyNetFinish = Callable[[KeyNetSamples, torch.Generator], KeyNetBatch]
 
 
+def warm_linalg(device: torch.device) -> None:
+    """torch initialises its CUDA linalg backend lazily, and the first call must not race between producer threads ("lazy wrapper
+    should be called at most once"; it killed a KeyNet run in ``local_crop_from_net``): make that first call before they start."""
+    if device.type == "cuda":
+        torch.linalg.inv(torch.eye(3, device=device)[None])
+
+
 def _select(samples: Samples, index: Int64[Tensor, "m"]) -> Samples:
     """``select_samples`` on either sample type (its type variable takes one type at a time)."""
     return select_samples(samples, index) if isinstance(samples, DetNetSamples) else select_samples(samples, index)
@@ -181,6 +188,7 @@ class EchoStream:
         for pool in self.pools:
             pool.alive.zero_()
             pool.exhausted = False
+        warm_linalg(self.device)
         self.threads = [threading.Thread(target=self._produce, args=(i, epoch), daemon=True, name=f"echo-producer-{i}") for i in range(len(self.pools))]
         for thread in self.threads:
             thread.start()
@@ -213,18 +221,12 @@ class EchoStream:
     def next_detnet_batch(self) -> DetNetBatch | None:
         if self.keynet:
             raise RuntimeError("this EchoStream feeds KeyNet")
-        batch = self._next()
-        if batch is not None and not isinstance(batch, DetNetBatch):
-            raise TypeError("the finish of a DetNet EchoStream must return DetNetBatch")
-        return batch
+        return cast(DetNetBatch | None, self._next())
 
     def next_keynet_batch(self) -> KeyNetBatch | None:
         if not self.keynet:
             raise RuntimeError("this EchoStream feeds DetNet")
-        batch = self._next()
-        if batch is not None and not isinstance(batch, KeyNetBatch):
-            raise TypeError("the finish of a KeyNet EchoStream must return KeyNetBatch")
-        return batch
+        return cast(KeyNetBatch | None, self._next())
 
     def _next(self) -> DetNetBatch | KeyNetBatch | None:
         if self.epoch_steps is not None and self.steps >= self.epoch_steps:

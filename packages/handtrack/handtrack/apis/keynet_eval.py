@@ -20,10 +20,11 @@ from torch import Tensor
 
 from handtrack.data.batches import CropKind
 from handtrack.data.keynet_holdout import VARIANTS, KeyNetHoldout, read_holdout
-from handtrack.data.keynet_rerun import KEYNET_DATASETS
+from handtrack.data.rerun_source import DATASET_SPECS
 from handtrack.data.stream import KeyNetSamples, select_samples
+from handtrack.eval.metrics import KeypointMetrics, keynet_metrics
 from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
-from handtrack.models.keynet import KeyNetF, keynet_for_state
+from handtrack.models.keynet import KeyNetF, keynet_from_state
 from handtrack.pipeline import read_state
 
 SHORT: dict[str, str] = {"dataforge-umetrack": "UmeTrack", "dataforge-show3d": "SHOW3D", "dataforge-hot3d-quest3": "HOT3D", "gsi-six-view": "GSI",
@@ -87,13 +88,6 @@ class Predictions:
     presence: Float32[Tensor, "n"]
 
 
-def _load(path: Path, device: torch.device) -> KeyNetF:
-    state, _ = read_state(path)
-    model: KeyNetF = keynet_for_state(state)
-    model.load_state_dict(state)
-    return model.to(device).eval()
-
-
 def predict(model: KeyNetF, samples: KeyNetSamples, zero_prior: bool, device: torch.device, batch: int) -> Predictions:
     points: list[Tensor] = []
     distances: list[Tensor] = []
@@ -113,19 +107,14 @@ def score(name: str, dataset: str, camera: str, variant: str, prior: str, sample
     positive: Bool[Tensor, "n"] = chosen & (samples.kind == int(CropKind.POSITIVE))
     count: int = int(positive.sum())
     error: Float32[Tensor, "p 21"] = (predicted.points[positive] - samples.points_crop[positive]).norm(dim=-1)
-    inverse: Float32[Tensor, "p 3 3"] = torch.linalg.inv(samples.crop_from_net[positive])
-    net_delta: Float32[Tensor, "p 21 2"] = torch.einsum("bij,bkj->bki", inverse[:, :2, :2], predicted.points[positive] - samples.points_crop[positive])
-    said: Bool[Tensor, "n"] = predicted.presence >= 0.5
-    truth: Bool[Tensor, "n"] = samples.presence > 0.5
-    true_positive: int = int((said & truth & chosen).sum())
+    metrics: KeypointMetrics = keynet_metrics(predicted.points, samples.points_crop, samples.crop_from_net, predicted.d_rel, samples.d_rel_mm,
+                                              predicted.presence, samples.presence, positive, chosen)
+    correct: Bool[Tensor, "n"] = ((predicted.presence >= 0.5) == (samples.presence > 0.5)) & chosen
     return ScoreRow(
         model=name, dataset=dataset, camera=camera, variant=variant, prior=prior, positives=count, crops=int(chosen.sum()),
         error_crop_px=float(error.mean()) if count else None, pck05=float((error < 0.05 * 96).float().mean()) if count else None,
-        pck10=float((error < 0.10 * 96).float().mean()) if count else None, error_net_px=float(net_delta.norm(dim=-1).mean()) if count else None,
-        d_rel_mm=float((predicted.d_rel[positive] - samples.d_rel_mm[positive]).abs().mean()) if count else None,
-        presence_accuracy=float(((said == truth) & chosen).sum() / chosen.sum().clamp_min(1)),
-        presence_recall=true_positive / int((truth & chosen).sum()) if int((truth & chosen).sum()) else None,
-        presence_precision=true_positive / int((said & chosen).sum()) if int((said & chosen).sum()) else None,
+        pck10=float((error < 0.10 * 96).float().mean()) if count else None, error_net_px=metrics.error_px, d_rel_mm=metrics.distance_mm,
+        presence_accuracy=float(correct.sum() / chosen.sum().clamp_min(1)), presence_recall=metrics.presence.recall, presence_precision=metrics.presence.precision,
     )
 
 
@@ -138,7 +127,7 @@ def main(config: Config) -> None:
     rows: list[ScoreRow] = []
     predictions: dict[tuple[str, str], Predictions] = {}
     for name, path in zip(config.names, config.weights, strict=True):
-        model: KeyNetF = _load(path, device)
+        model: KeyNetF = keynet_from_state(read_state(path)[0]).to(device).eval()
         for prior in ("tracked", "zero"):
             predicted: Predictions = predict(model, samples, prior == "zero", device, config.batch)
             predictions[(name, prior)] = predicted
@@ -149,7 +138,7 @@ def main(config: Config) -> None:
                     base: Bool[Tensor, "n"] = (samples.dataset == d) & (holdout.variant == v) & (has_prior if prior == "tracked" else torch.ones_like(has_prior))
                     rows.append(score(name, SHORT.get(dataset, dataset), "all", variant, prior, samples, predicted, base))
                     if v == 0 and prior == "tracked":
-                        for c, camera in enumerate(KEYNET_DATASETS[dataset].cameras):
+                        for c, camera in enumerate(DATASET_SPECS[dataset][0]):
                             rows.append(score(name, SHORT.get(dataset, dataset), camera, variant, prior, samples, predicted, base & (holdout.camera == c)))
         del model
     report: ScoreReport = ScoreReport(str(config.holdout), {n: str(p) for n, p in zip(config.names, config.weights, strict=True)}, rows)

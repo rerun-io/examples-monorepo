@@ -71,7 +71,7 @@ def test_point_priors_extrapolate_from_the_two_previous_steps_and_fall_back_to_t
     points: Tensor = torch.arange(30, dtype=torch.float32)[:, None, None, None].expand(30, 2, 21, 3).clone()
     valid: Tensor = torch.ones((30, 2), dtype=torch.bool)
     valid[3, 0] = False
-    extrapolated, extrapolated_valid, stale, stale_valid = _point_priors(points, valid, frames, step=1)
+    extrapolated, extrapolated_valid, stale, stale_valid = _point_priors(points, valid, frames)
     assert float(extrapolated[10, 0, 0, 0]) == 10.0  # 2 * 9 - 8
     assert float(extrapolated[5, 0, 0, 0]) == 4.0  # frame 3 is missing: the last pose as it is
     assert not bool(extrapolated_valid[4, 0]) and bool(extrapolated_valid[4, 1])
@@ -145,7 +145,7 @@ def test_echo_stream_serves_keynet_batches_split_equally_across_datasets() -> No
 
 _RACE = """
 import threading, torch
-from handtrack.data.keynet_rerun import warm_linalg
+from handtrack.data.echo import warm_linalg
 device = torch.device("cuda")
 warm_linalg(device)
 errors = []

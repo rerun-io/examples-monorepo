@@ -12,16 +12,14 @@ Inputs: ``<models>/{detnet_pooled_b1,keynet_b1,keynet_b4}.onnx`` and the held-ou
 ``<work>``: ``detnet_heldout.parquet`` (``handtrack/apis/export_detnet.py``), ``keynet_heldout.parquet`` (``export_keynet.py``),
 or the legacy ``{detnet,keynet}_heldout.npz`` (``export_nets_onnx.py``).
 
-``keynet_heldout.parquet`` (``KEYNET_TABLE``) is a dataset-balanced draw from the frozen KeyNet holdout that carries its own labels row
-by row (``points_crop`` is the ground truth, ``crop_from_net`` the crop affine; PyTorch's decoding is ``decoded_points_crop``), so
-``--keynet-cache`` is not needed with it. Its even rows are scored and its odd rows calibrate the KeyNet INT8 builds, so no build is
-scored on the crops it was calibrated on. The legacy npz is scored whole, with labels from ``--keynet-cache`` by position.
+``keynet_heldout.parquet`` (``KEYNET_TABLE``) carries its labels row by row (``points_crop`` = ground truth, PyTorch's decoding in
+``decoded_points_crop``): its even rows are scored and its odd rows calibrate KeyNet INT8, so no build is scored on its own calibration
+crops. The legacy npz is scored whole, with labels from ``--keynet-cache`` by position.
 
 Every model takes its image as **u8** (``mean 0, std 255`` is baked into the RKNN model, so the NPU sees u8 / 255 as PyTorch
 does); KeyNet's ``keypoints`` stay float32. INT8 models are calibrated on the 2026-09-29 study's sets (256 pooled DetNet frames,
-256 KeyNet crops + priors from the training caches; KeyNet: the odd rows of ``keynet_heldout.parquet`` instead when it is present)
-plus, when present, RoboCap s66 sets in ``<work>/s66_{detnet,keynet}_calib.npz``. The rknn-toolkit2 inputs (``dataset.txt`` listing
-one npy file per input and batch, the toolkit's format) go to ``<work>/calibration/``.
+256 KeyNet crops + priors from the training caches, or ``KEYNET_TABLE``'s odd rows) plus, when present, RoboCap s66 sets in
+``<work>/s66_{detnet,keynet}_calib.npz``; the toolkit's inputs (``dataset.txt`` naming npy files) go to ``<work>/calibration/``.
 
 Scores are decoded the way handtrack decodes them, against the PyTorch outputs on the same inputs:
 - DetNet: centre error px (640 x 480 net frame) and radius error px on the slots PyTorch reports present, presence agreement;
@@ -59,7 +57,7 @@ EVAL_FILES: dict[str, str] = {"heldout": "{net}_heldout.npz", "s66": "s66_{net}_
 handtrack's tracker fed the nets on the s66 clip (every other sample; the rest calibrate), with PyTorch CPU FP32 outputs."""
 KEYNET_OUTPUTS: tuple[str, ...] = ("heatmaps", "distance", "presence_logit", "pinch_logit")
 KEYNET_TABLE: str = "keynet_heldout.parquet"
-"""``handtrack/apis/export_keynet.py``'s reference rows (see the module docstring); ``keynet_heldout.datasets.txt`` names its datasets."""
+"""``handtrack/apis/export_keynet.py``'s reference rows; ``keynet_heldout.datasets.txt`` names its datasets."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,11 +99,10 @@ class Config:
     """Holds ``*_heldout.npz`` and the optional s66 calibration sets; receives calibration files and simulator outputs."""
     keynet_cache: Path | None = None
     """The KeyNet perspective test-samples cache, for ``crop_from_net.npy`` and ``points_crop.npy`` (net-frame errors,
-    ground-truth error); KeyNet builds on the legacy npz only (``keynet_heldout.parquet`` carries its labels)."""
+    ground-truth error); KeyNet builds on the legacy npz only."""
     calibration_dir: Path | None = None
     """The 2026-09-29 study's INT8 calibration sets: ``detnet_pooled/dataset.txt`` and ``keynet/dataset.txt``, one sample per
-    line naming its npy files (float u8 / 255; KeyNet: crop, then keypoint priors); INT8 builds only (rknn-toolkit2 reads npy),
-    and not for KeyNet when ``keynet_heldout.parquet`` is present."""
+    line naming its npy files (float u8 / 255; KeyNet: crop, then keypoint priors); INT8 builds only, KeyNet without ``KEYNET_TABLE``."""
     models_dir: Path = Path(__file__).resolve().parents[1] / "models"
     """Holds the ONNX inputs; receives the ``.rknn`` files and ``rknn_report.json``."""
     builds: tuple[str, ...] = ()
@@ -184,8 +181,7 @@ class BuildRecord:
     build_seconds: float
     simulate_seconds: float
     scores: dict[str, dict] = field(default_factory=dict)
-    """Simulator scores per evaluation set (``heldout``, ``s66``) and, on ``keynet_heldout.parquet``, per slice (``heldout/dataset/<name>``,
-    ``heldout/prior/{tracked,zero}``)."""
+    """Simulator scores per evaluation set (``heldout``, ``s66``) and per ``KEYNET_TABLE`` slice (``heldout/dataset/<name>``, ``heldout/prior/*``)."""
 
 
 def refine_peak(profiles: ndarray, peak: ndarray) -> ndarray:
@@ -240,15 +236,6 @@ def torch_points(reference: dict[str, ndarray]) -> ndarray:
     return reference["decoded_points_crop"] if exported_keynet(reference) else reference["points_crop"]
 
 
-def keynet_table(work: Path) -> dict[str, ndarray] | None:
-    """``<work>/keynet_heldout.parquet`` when it is present in ``export_keynet``'s layout, all rows."""
-    path: Path = work / KEYNET_TABLE
-    if not path.exists():
-        return None
-    table: dict[str, ndarray] = read_array_table(path)
-    return table if exported_keynet(table) else None
-
-
 def calibration(build: Build, work: Path, study_dir: Path | None) -> tuple[Path, dict[str, int]]:
     """Write per-batch npy files + ``dataset.txt`` for an INT8 build; return the list file and the sample counts per source."""
     sources: dict[str, int] = {}
@@ -266,8 +253,8 @@ def calibration(build: Build, work: Path, study_dir: Path | None) -> tuple[Path,
     else:
         crops: list[ndarray]
         priors: list[ndarray]
-        table: dict[str, ndarray] | None = keynet_table(work)
-        if table is not None:  # the odd rows; load_reference scores the even ones
+        table: dict[str, ndarray] | None = read_array_table(work / KEYNET_TABLE) if (work / KEYNET_TABLE).exists() else None
+        if table is not None and exported_keynet(table):  # the odd rows; load_reference scores the even ones
             crops, priors = [table["crops_u8"][1::2]], [table["keypoints"][1::2].astype(np.float32)]
             sources["keynet_heldout_odd_rows"] = len(crops[0])
         elif study_dir is not None:
@@ -383,10 +370,8 @@ def write_array_table(path: Path, arrays: dict[str, ndarray]) -> None:
 
 
 def load_reference(config: Config, net: Net, which: EvalSet) -> dict[str, ndarray] | None:
-    """An evaluation set's inputs and PyTorch outputs (the Parquet set when present, else the legacy npz); None when absent.
-
-    Of ``export_keynet``'s table only the even rows: the odd ones calibrate (``calibration``).
-    """
+    """An evaluation set's inputs and PyTorch outputs (the Parquet set when present, else the legacy npz; of ``KEYNET_TABLE`` the even
+    rows); None when absent."""
     path: Path = config.work_dir / EVAL_FILES[which].format(net=net)
     table: Path = path.with_suffix(".parquet")
     if table.exists():
@@ -404,8 +389,8 @@ def load_reference(config: Config, net: Net, which: EvalSet) -> dict[str, ndarra
 
 
 def labels(config: Config, which: EvalSet, reference: dict[str, ndarray], count: int) -> tuple[ndarray | None, ndarray | None]:
-    """The held-out crops' linear net-from-crop maps and ground-truth keypoints: from the rows of ``export_keynet``'s table, else from
-    ``--keynet-cache`` by position (the legacy npz is the cache's first rows); none for s66."""
+    """The held-out crops' linear net-from-crop maps and ground-truth keypoints: from ``KEYNET_TABLE``'s rows, else ``--keynet-cache`` by
+    position; none for s66."""
     if exported_keynet(reference):
         return np.linalg.inv(reference["crop_from_net"][:count].astype(np.float64))[:, :2, :2], reference["points_crop"][:count]
     if which != "heldout" or config.keynet_cache is None:
@@ -424,12 +409,8 @@ def score_set(config: Config, net: Net, which: EvalSet, reference: dict[str, nda
 def keynet_slices(config: Config, reference: dict[str, ndarray]) -> dict[str, ndarray]:
     """Row masks of ``export_keynet``'s table per dataset (``dataset/<name>``) and per prior (``prior/tracked``, ``prior/zero``), each
     with at least one positive crop (the keypoint scores need one)."""
-    names_path: Path = config.work_dir / Path(KEYNET_TABLE).with_suffix(".datasets.txt")
-    names: list[str] = names_path.read_text().split() if names_path.exists() else []
-    slices: dict[str, ndarray] = {}
-    for index in np.unique(reference["dataset"]):
-        name: str = names[index] if index < len(names) else f"dataset_{index}"
-        slices[f"dataset/{name}"] = reference["dataset"] == index
+    names: list[str] = (config.work_dir / Path(KEYNET_TABLE).with_suffix(".datasets.txt")).read_text().split()
+    slices: dict[str, ndarray] = {f"dataset/{names[index]}": reference["dataset"] == index for index in np.unique(reference["dataset"])}
     slices["prior/tracked"] = ~reference["zero_prior"]
     slices["prior/zero"] = reference["zero_prior"]
     return {label: chosen for label, chosen in slices.items() if (chosen & (reference["kind"] == 0)).any()}
@@ -500,10 +481,8 @@ def run_build(config: Config, build: Build) -> BuildRecord:
 
 
 def check_decoder(config: Config) -> float:
-    """The numpy decoder must reproduce handtrack's torch decoder on the PyTorch heatmaps of the positive crops (max px difference).
-
-    Positives only, as the keypoint scores: a negative's near-flat heatmap makes the log-quadratic refine sensitive to float rounding.
-    """
+    """The numpy decoder must reproduce handtrack's torch decoder on the PyTorch heatmaps of the positive crops (max px difference;
+    positives, as the keypoint scores: a negative's near-flat heatmap makes the log-quadratic refine sensitive to float rounding)."""
     reference: dict[str, ndarray] | None = load_reference(config, "keynet", "heldout")
     if reference is None:
         raise FileNotFoundError(f"{config.work_dir}: no {KEYNET_TABLE} or keynet_heldout.npz; run handtrack's export_keynet (or export_nets_onnx) first")
