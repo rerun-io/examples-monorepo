@@ -130,7 +130,7 @@ names, because the checkpoint's Hydra targets need them. WiLoR's network lives i
 `posekit/models/wilor_net/`.
 
 ```bash
-# Detect + reconstruct hands on a clip, log 2D boxes/skeletons and 3D joints/meshes to Rerun
+# Detect + reconstruct hands on a clip: 2D boxes on the video, 3D joints/meshes in the camera (projected onto the video)
 # (default clip: assets/examples/gsi_sewing_left_front.mp4; any --video-path works)
 pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr-config.save /tmp/hands.rrd \
     wilor tensorrt wilor tensorrt
