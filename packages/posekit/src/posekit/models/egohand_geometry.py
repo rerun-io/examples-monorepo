@@ -43,6 +43,14 @@ def lens_model(camera: CalibratedCamera) -> CameraModel:
 @cache
 def _lens_model(key: CameraKey) -> CameraModel:
     lens, intrinsics, distortion, width, height = key
+    if lens == "DOUBLE_SPHERE":
+        from posekit.models.egohand_double_sphere import DoubleSphereCamera
+
+        return DoubleSphereCamera(
+            CalibratedCamera(
+                np.frombuffer(intrinsics, dtype=np.float64).reshape(3, 3), np.frombuffer(distortion, dtype=np.float64), width, height, lens
+            )
+        )
     return load_camera_calibration(
         {
             "model": lens,
