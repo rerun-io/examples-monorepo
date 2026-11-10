@@ -18,7 +18,11 @@ def test_both_graphs_match_pytorch_and_the_references_are_parquet(tmp_path: Path
     export_weights(tmp_path / "detnet.weights.pt", DetNetF())
     rng = np.random.default_rng(0)
     pooled, dataset = rng.integers(0, 256, (6, 120, 160), dtype=np.uint8), np.arange(6, dtype=np.int64)
-    report = export(ExportDetNetConfig(weights=tmp_path / "detnet.weights.pt", out_dir=tmp_path / "models", threads=2), pooled, dataset)
+    golden: Path = tmp_path / "golden"
+    golden.mkdir()
+    pooled[:2].tofile(golden / "detnet_pooled_u8.bin")  # the crate's fixed golden frames
+    report = export(ExportDetNetConfig(weights=tmp_path / "detnet.weights.pt", out_dir=tmp_path / "models", threads=2, golden_version="v", golden_dir=golden),
+                    pooled, dataset)
     assert {record.file for record in report.graphs} == {"detnet_pooled_b1.onnx", "detnet_full.onnx"}
     for record in report.graphs:
         assert record.checked_samples == 6
@@ -27,3 +31,6 @@ def test_both_graphs_match_pytorch_and_the_references_are_parquet(tmp_path: Path
     assert set(references) == {"pooled_u8", "dataset", "center", "radius", "presence_logit"}
     assert references["center"].shape == (6, 2, 2) and references["presence_logit"].shape == (6, 2)
     assert not list((tmp_path / "models").glob("*.np*"))
+    golden_out = np.fromfile(golden / "detnet" / "v" / "detnet_out_f32.bin", dtype="<f4").reshape(2, 8)
+    np.testing.assert_array_equal(golden_out[:, :4], references["center"][:2].reshape(2, 4))
+    np.testing.assert_array_equal(golden_out[:, 6:], references["presence_logit"][:2])

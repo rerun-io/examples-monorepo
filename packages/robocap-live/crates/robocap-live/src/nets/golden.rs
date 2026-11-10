@@ -1,4 +1,4 @@
-//! The PyTorch reference for the hand nets (`tests/data/nets/`, written by handtrack's `export_nets_onnx`) and the comparisons
+//! The PyTorch reference for the hand nets (`tests/data/nets/`, written by handtrack's `export_detnet` / `export_keynet`) and the comparisons
 //! that the backend tests and `examples/nets_bench.rs` print.
 //!
 //! The files are little-endian raw arrays: DetNet pooled frames (u8 [k, 120, 160]) with their outputs (f32 [k, 8] = center

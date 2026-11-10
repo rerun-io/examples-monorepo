@@ -12,9 +12,9 @@ import torch
 from serde.json import from_json
 
 from handtrack.apis.detector_eval import DetectorEvalReport
-from handtrack.apis.export_nets_onnx import read_checked_state
 from handtrack.eval.boxes import BoxCounts
 from handtrack.models.detnet import DetNetF
+from handtrack.models.onnx_graphs import read_checked_state
 from handtrack.train.checkpoint import TrainingState, load_checkpoint
 from handtrack.train.safetensors_checkpoint import ModelCard, save_model, save_training_state
 

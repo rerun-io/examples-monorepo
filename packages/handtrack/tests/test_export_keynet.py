@@ -16,6 +16,7 @@ from handtrack.data.array_table import read_arrays  # noqa: E402
 from handtrack.data.keynet_holdout import KeyNetHoldout  # noqa: E402
 from handtrack.data.stream import KeyNetSamples, empty_keynet_samples  # noqa: E402
 from handtrack.models.keynet import KeyNetF  # noqa: E402
+from handtrack.models.onnx_graphs import pick_golden  # noqa: E402
 from handtrack.train.checkpoint import export_weights  # noqa: E402
 
 DATASETS: tuple[str, ...] = ("dataforge-umetrack", "gsi-six-view")
@@ -49,7 +50,7 @@ def test_three_graphs_match_pytorch_on_a_balanced_parquet_draw(tmp_path: Path) -
     model: KeyNetF = KeyNetF(pinch_head=True).eval()
     weights, holdout = write_inputs(tmp_path, model)
     out_dir: Path = tmp_path / "models"
-    report = export(Config(weights=weights, out_dir=out_dir, reference_crops=8, threads=2), holdout)
+    report = export(Config(weights=weights, out_dir=out_dir, reference_crops=8, threads=2, golden_dir=tmp_path / "golden"), holdout)
 
     assert {record.file for record in report.graphs} == {"keynet_b1.onnx", "keynet_b4.onnx", "keynet.onnx"}
     assert all((out_dir / name).exists() for name in ("keynet_b1.onnx", "keynet_b4.onnx", "keynet.onnx"))
@@ -68,6 +69,12 @@ def test_three_graphs_match_pytorch_on_a_balanced_parquet_draw(tmp_path: Path) -
     assert {name: value.shape for name, value in references.items()} == shapes
     assert references["crops_u8"].dtype == np.uint8 and references["keypoints"].dtype == np.float32
     assert pq.read_schema(out_dir / "keynet_heldout.parquet").metadata[DATASETS_KEY].decode().split() == list(DATASETS)
+
+    # The Rust crate's golden crops come from the positive reference rows; their outputs are the PyTorch reference's.
+    picked = pick_golden(references["kind"] == 0, 4)
+    np.testing.assert_array_equal(np.fromfile(tmp_path / "golden" / "keynet_crops_u8.bin", dtype=np.uint8).reshape(4, 96, 96), references["crops_u8"][picked])
+    golden_out = np.fromfile(tmp_path / "golden" / "keynet_out_f32.bin", dtype="<f4").reshape(4, -1)
+    np.testing.assert_allclose(golden_out[:, : 21 * 18 * 18], references["heatmaps"][picked].reshape(4, -1), atol=1e-6)
 
     # Every row is a deployed-variant crop with its own labels; half of each dataset's rows get a zero prior, the rest the stored one.
     deployed: ndarray = np.flatnonzero(holdout.variant.numpy() == 0)

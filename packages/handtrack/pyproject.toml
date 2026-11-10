@@ -43,7 +43,7 @@ ignore_names = [
     "error_crop_px", "pck05", "pck10", "error_net_px", "presence_accuracy", "presence_recall", "presence_precision",
     # apis.keynet_pinch_head: PinchScores / PinchHeadReport fields written through serde.
     "pinch_share", "f1", "new_head", "carried_head",
-    # apis.export_nets_onnx (robocap-live nets): ExportReport fields written through serde, and an onnxruntime SessionOptions setting.
+    # models.onnx_graphs / apis.export_*: export report fields written through serde, and an onnxruntime SessionOptions setting.
     "torch_version", "onnxruntime_version", "graphs", "intra_op_num_threads",
     # eval.scorecard: ScoreRow KPI fields (read through serde / dataclasses.asdict) and the scorer entry points the overnight runner calls.
     "contact_f1", "contact_precision", "contact_recall", "hidden_error_share", "mka", "mka_truth", "mkpe", "mpvpe", "mpvpe_p90",

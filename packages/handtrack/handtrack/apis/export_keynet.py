@@ -1,7 +1,7 @@
 """Export KeyNet-F alone (pinch head, no visibility head) to the three ONNX graphs robocap-live loads, checked against PyTorch on
 crops from the frozen KeyNet holdout (``data.keynet_holdout``).
 
-Graphs (``export_nets_onnx.KeyNetGraph``): ``keynet.onnx`` (dynamic batch, ONNX Runtime) and ``keynet_b1.onnx`` / ``keynet_b4.onnx``
+Graphs (``models.onnx_graphs.KeyNetGraph``): ``keynet.onnx`` (dynamic batch, ONNX Runtime) and ``keynet_b1.onnx`` / ``keynet_b4.onnx``
 (static, the RKNN converter's sources). The reference rows, a seeded draw of the deployed variant balanced over datasets, go out as
 ``keynet_heldout.parquet``: inputs as fed (about half with a zero prior, following stored, zero, zero, stored, ... within a dataset so
 that ``rknn_convert``'s even rows (scored) and odd rows (INT8 calibration) both hold both priors), labels (``points_crop`` is the
@@ -19,13 +19,13 @@ from serde import serde
 from serde.json import to_json
 from torch import Tensor
 
-from handtrack.apis.export_nets_onnx import GraphRecord, KeyNetGraph, check_graph, export_graph, read_checked_state, torch_keynet
 from handtrack.data.array_table import write_arrays
 from handtrack.data.batches import CropKind
 from handtrack.data.catalog import CATALOG_URL
 from handtrack.data.keynet_holdout import KeyNetHoldout, load_holdout
 from handtrack.data.stream import KeyNetSamples, select_samples
 from handtrack.models.keynet import KeyNetF, keynet_from_state
+from handtrack.models.onnx_graphs import GraphRecord, KeyNetGraph, check_graph, export_graph, pick_golden, read_checked_state, torch_keynet
 
 INPUTS: list[str] = ["crop", "keypoints"]
 OUTPUTS: list[str] = ["heatmaps", "distance", "presence_logit", "pinch_logit"]
@@ -88,6 +88,11 @@ class Config:
     """The catalog the frozen holdout is cut from (``data.keynet_holdout.load_holdout``)."""
     device: str = "cuda"
     """Where the holdout is decoded and cut; the export itself runs on the CPU."""
+    golden_dir: Path | None = None
+    """Also write these weights' PyTorch outputs on the Rust crate's golden crops (``packages/robocap-live/crates/robocap-live/tests/
+    data/nets``): ``keynet_out_f32.bin`` (f32 [k, 7184]: heatmaps, distance, presence logit, pinch logit) and
+    ``keynet_points_crop_f32.bin`` (decoded, crop px). The crops and priors are fixed: drawn from the positive reference rows only
+    when the directory has none."""
 
 
 def sample_rows(holdout: KeyNetHoldout, count: int, seed: int) -> tuple[Int64[ndarray, "m"], Bool[ndarray, "m"]]:
@@ -153,6 +158,17 @@ def export(config: Config, holdout: KeyNetHoldout) -> KeyNetExportReport:
     }
     config.out_dir.mkdir(parents=True, exist_ok=True)
     write_arrays(config.out_dir / "keynet_heldout.parquet", arrays, {DATASETS_KEY: "\n".join(holdout.dataset_names).encode()})
+    if config.golden_dir is not None:
+        crops_path, priors_path = config.golden_dir / "keynet_crops_u8.bin", config.golden_dir / "keynet_keypoints_f32.bin"
+        if not crops_path.exists():
+            config.golden_dir.mkdir(parents=True, exist_ok=True)
+            picked: Int64[ndarray, "k"] = pick_golden(arrays["kind"] == int(CropKind.POSITIVE), 4)
+            crops[picked].tofile(crops_path)
+            keypoints[picked].astype("<f4").tofile(priors_path)
+        golden_crops: UInt8[ndarray, "k 96 96"] = np.fromfile(crops_path, dtype=np.uint8).reshape(-1, 96, 96)
+        golden: dict[str, ndarray] = torch_keynet(model, golden_crops, np.fromfile(priors_path, dtype="<f4").reshape(-1, 63))
+        np.concatenate([golden[name].reshape(len(golden_crops), -1) for name in OUTPUTS], axis=1).astype("<f4").tofile(config.golden_dir / "keynet_out_f32.bin")
+        golden["points_crop"].astype("<f4").tofile(config.golden_dir / "keynet_points_crop_f32.bin")
 
     crop_feed: Float32[ndarray, "n 1 96 96"] = (crops.astype(np.float32) / 255.0)[:, None]
     targets: list[ndarray] = [reference["heatmaps"], reference["distance"], reference["presence_logit"][:, None], reference["pinch_logit"][:, None]]

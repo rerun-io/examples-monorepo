@@ -16,9 +16,9 @@ from numpy import ndarray
 from serde import serde
 from serde.json import to_json
 
-from handtrack.apis.export_nets_onnx import DetNetGraph, GraphRecord, check_graph, export_graph, read_checked_state, torch_detnet
 from handtrack.data.array_table import write_arrays
 from handtrack.models.detnet import DetNetF
+from handtrack.models.onnx_graphs import DetNetGraph, GraphRecord, check_graph, export_graph, pick_golden, read_checked_state, torch_detnet
 from handtrack.train.safetensors_checkpoint import file_sha256, load_model
 
 OUTPUTS: list[str] = ["center", "radius", "presence_logit"]
@@ -51,6 +51,11 @@ class ExportDetNetConfig:
     """Sampled frames are upright (``stream.upright``); False for a model trained on the legacy input."""
     catalog_url: str = ""
     """Catalog for sampling; empty uses handtrack's default."""
+    golden_version: str | None = None
+    """Also write this DetNet's PyTorch outputs on the Rust crate's golden frames, ``golden_dir/detnet/<version>/detnet_out_f32.bin``
+    (f32 [k, 8]: center l.x, l.y, r.x, r.y, radius l, r, presence logit l, r). The frames (``detnet_pooled_u8.bin``) are the same for
+    every version: drawn from these held-out frames only when ``golden_dir`` has none."""
+    golden_dir: Path = Path(__file__).resolve().parents[3] / "robocap-live/crates/robocap-live/tests/data/nets"
 
 
 def sample_heldout(per_dataset: int, upright: bool, catalog_url: str, seed: int = 0) -> tuple[UInt8[ndarray, "n 120 160"], Int64[ndarray, "n"]]:
@@ -105,6 +110,15 @@ def export(config: ExportDetNetConfig, pooled: UInt8[ndarray, "n 120 160"], data
     model = model.eval()
     references: tuple[Float32[ndarray, "n 2 2"], Float32[ndarray, "n 2"], Float32[ndarray, "n 2"]] = torch_detnet(model, pooled)
     write_arrays(config.out_dir / "detnet_heldout.parquet", {"pooled_u8": pooled, "dataset": dataset, **dict(zip(OUTPUTS, references, strict=True))})
+    if config.golden_version is not None:
+        frames_path: Path = config.golden_dir / "detnet_pooled_u8.bin"
+        if not frames_path.exists():
+            config.golden_dir.mkdir(parents=True, exist_ok=True)
+            pooled[pick_golden((references[2] > 0).all(axis=1), 4)].tofile(frames_path)
+        frames: UInt8[ndarray, "k 120 160"] = np.fromfile(frames_path, dtype=np.uint8).reshape(-1, 120, 160)
+        version_dir: Path = config.golden_dir / "detnet" / config.golden_version
+        version_dir.mkdir(parents=True, exist_ok=True)
+        np.concatenate([part.reshape(len(frames), -1) for part in torch_detnet(model, frames)], axis=1).astype("<f4").tofile(version_dir / "detnet_out_f32.bin")
     pooled_feed: Float32[ndarray, "n 1 120 160"] = (pooled.astype(np.float32) / 255.0)[:, None]
     full_feed: Float32[ndarray, "n 1 480 640"] = np.repeat(np.repeat(pooled_feed, 4, axis=2), 4, axis=3)
     graphs: list[GraphRecord] = []

@@ -13,9 +13,9 @@ pytest.importorskip("onnxruntime", reason="onnxruntime comes with the cuda featu
 import onnx  # noqa: E402
 import onnxruntime as ort  # noqa: E402
 
-from handtrack.apis.export_nets_onnx import DetNetGraph, KeyNetGraph, export_graph  # noqa: E402
 from handtrack.models.detnet import DetNetF  # noqa: E402
 from handtrack.models.keynet import KeyNetF  # noqa: E402
+from handtrack.models.onnx_graphs import DetNetGraph, KeyNetGraph, export_graph  # noqa: E402
 
 
 def randomise(model: torch.nn.Module) -> None:
