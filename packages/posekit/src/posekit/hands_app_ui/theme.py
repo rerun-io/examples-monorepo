@@ -8,6 +8,10 @@ html, body, gradio-app, .gradio-container { height: 100%; overflow: hidden; }
 #left-column { height: 100%; max-height: 100%; overflow-y: auto; scrollbar-gutter: stable; flex-wrap: nowrap; }
 #left-column > * { flex-shrink: 0; }
 #run-log textarea { overflow-y: auto !important; }
+/* The tab strip starts at the viewer's top edge and its underline meets the line under the viewer's top bar. */
+#left-column .tab-wrapper { height: auto !important; }
+#left-column .tab-container { height: 37px !important; margin-top: 0 !important; top: 0 !important; transform: none !important; }
+#left-column .tab-container [role=tab] { height: 100% !important; }
 .gradio-container { max-width: none !important; padding: 0.6rem 1.5rem !important; }
 #app-description h1 { margin: 0 0 0.3rem; }
 #app-description p { margin: 0 0 0.4rem; }
