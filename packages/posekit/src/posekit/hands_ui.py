@@ -16,14 +16,16 @@ import gradio as gr
 import rerun as rr
 import torch
 from gradio_rerun import Rerun
+from jaxtyping import UInt8
+from torch import Tensor
 
-from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, assumed_pinhole, build_pipeline, run_video_hands, video_size
+from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, assumed_pinhole, build_pipeline, pinhole_camera, run_video_hands, video_size
 from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
-_PIPELINE: tuple[str, HandPose3dPipeline] | None = None
-"""The last stack's set-up pipeline (engines stay loaded between runs); switching stacks releases it first."""
+_PIPELINES: dict[str, HandPose3dPipeline] = {}
+"""Set-up pipelines by stack name: engines stay loaded for the app's lifetime, so switching stacks costs nothing."""
 
 
 def default_stack() -> str:
@@ -66,14 +68,30 @@ def settings_from_inputs(
     )
 
 
-def _pipeline(stack: str, settings: VideoHandsSettings) -> HandPose3dPipeline:
-    """The pipeline of ``stack``, set up once and reused while the stack stays selected."""
-    global _PIPELINE
-    if _PIPELINE is None or _PIPELINE[0] != stack:
-        _PIPELINE = None
-        torch.cuda.empty_cache()
-        _PIPELINE = (stack, build_pipeline(settings))
-    return _PIPELINE[1]
+def pipeline_for(stack: str) -> HandPose3dPipeline:
+    """The pipeline of ``stack``, set up (TensorRT engines built or loaded) on first use and kept."""
+    if stack not in _PIPELINES:
+        _PIPELINES[stack] = build_pipeline(VideoHandsSettings(detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack]))
+    return _PIPELINES[stack]
+
+
+def warm_up() -> None:
+    """Set up every example's stack and run it once on the example's first chunk.
+
+    Setup builds or loads the TensorRT engines; the first call compiles and captures CUDA graphs
+    for that frame size (~4 s for ``egohand-fast``). Done at start, the examples run at full speed
+    from the first click; an upload of a new frame size pays well under a second once.
+    """
+    from torchcodec.decoders import VideoDecoder
+
+    for video, stack in example_rows():
+        settings: VideoHandsSettings = settings_from_inputs(video, stack, 0, None, None, None, None)
+        decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
+        width, height = video_size(settings.video_path)
+        frames: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(0, settings.frame_batch_size).data.contiguous()
+        print(f"[posekit] warming up {stack} on {settings.video_path.name}", flush=True)
+        with torch.inference_mode():
+            pipeline_for(stack)(frames, pinhole_camera(settings, width, height))
 
 
 @rr.thread_local_stream("posekit_hands_ui")
@@ -86,8 +104,9 @@ def stream_hands(
         yield stream.read(), "Choose a video first."
         return
     settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy)
-    yield stream.read(), f"Setting up {stack} (the first run builds its TensorRT engines)..."
-    pipeline: HandPose3dPipeline = _pipeline(stack, settings)
+    if stack not in _PIPELINES:
+        yield stream.read(), f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
+    pipeline: HandPose3dPipeline = pipeline_for(stack)
     for status in run_video_hands(settings, pipeline):
         yield stream.read(), status
 
@@ -141,7 +160,8 @@ class Config:
 
 
 def launch(config: Config) -> None:
-    """Serve the app; one request at a time shares the GPU pipeline."""
+    """Warm up the examples' stacks, then serve the app; one request at a time shares the GPU pipelines."""
+    warm_up()
     demo = build()
     demo.queue(max_size=1, default_concurrency_limit=1)
     demo.launch(server_name=config.server_name, server_port=config.server_port, ssr_mode=False, allowed_paths=[str(EXAMPLES)])

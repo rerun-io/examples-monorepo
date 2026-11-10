@@ -9,7 +9,7 @@ pytest.importorskip("gradio_rerun", reason="the hands app needs gradio-rerun")
 
 from posekit import hands_ui
 from posekit.apis.video_hands import EXAMPLES, assumed_pinhole
-from posekit.models import HandDetectorConfig, HandPose3dConfig
+from posekit.models import HandDetectorConfig, HandPose3dConfig, HandPose3dPipeline
 
 
 @pytest.mark.parametrize("stack", ["wilor", "egohand-fast", "egohand-fast-bf16"])
@@ -31,3 +31,16 @@ def test_examples_name_a_clip_and_a_stack_and_the_exocentric_clip_runs_wilor() -
     assert all(Path(video).exists() and stack in hands_ui.STACKS for video, stack in rows)
     assert [stack for video, stack in rows if Path(video).name == "hands_video.mp4"] == ["wilor"]
     assert [Path(video).name for video, _ in rows][0] == "gsi_sewing_left_front.mp4"
+
+
+def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Switching between an EgoHand example and the WiLoR example must not set either stack up again.
+    built: list[str] = []
+    monkeypatch.setattr(hands_ui, "_PIPELINES", {})
+    monkeypatch.setattr(
+        hands_ui, "build_pipeline", lambda settings: built.append(type(settings.pose).__name__) or HandPose3dPipeline.__new__(HandPose3dPipeline)
+    )
+    first = hands_ui.pipeline_for("wilor")
+    hands_ui.pipeline_for("egohand-fast")
+    assert hands_ui.pipeline_for("wilor") is first
+    assert len(built) == 2
