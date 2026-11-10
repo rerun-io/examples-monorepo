@@ -13,10 +13,12 @@ html, body, gradio-app, .gradio-container { height: 100%; overflow: hidden; }
 #app-description p { margin: 0 0 0.4rem; }
 #main-row { min-height: 0; }
 #source-video video { max-height: 320px !important; }
-/* Four small tiles per row with a pager. */
-#examples .gallery { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-#examples .gallery button { flex: none; padding: 0; }
-#examples video, #examples img { height: 96px !important; width: auto !important; max-width: 128px; object-fit: cover; }
+/* The examples side by side: four equal tiles in one row (clips of any shape are cropped to fill), with a pager. */
+/* Gradio also gives each tile's inner box the class "gallery", so the row is the one holding the tiles. */
+#examples .gallery:has(> .gallery-item) { display: grid !important; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.4rem; }
+#examples .gallery-item { padding: 0; min-width: 0; width: 100%; }
+#examples .gallery-item .container { width: 100% !important; height: 72px !important; }
+#examples .gallery-item video, #examples .gallery-item img { width: 100% !important; height: 100% !important; max-width: none !important; object-fit: cover; }
 #run-row button { font-size: 1.1rem; min-height: 3rem; }
 #run-summary td:first-child, #run-summary th:first-child { white-space: nowrap; }
 #run-status {
