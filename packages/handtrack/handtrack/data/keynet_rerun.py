@@ -20,6 +20,7 @@ that is drawn several times is seen differently each time.
 import dataclasses
 import itertools
 import math
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -51,8 +52,10 @@ from handtrack.labels.validity import HandLabel
 LabelKind = Literal["hand_model", "coco3d"]
 HANDS: str = "/world/gt/hands"
 COCO_XYZ: str = "/world/gt/coco133_xyz"
-NVDEC_SLICE: int = 32
-"""Frames per NVDEC call (32 x 1080p RGB = 200 MB before the luma transform keeps one byte per pixel)."""
+NVDEC_SLICE: int = 16
+"""Frames per NVDEC call: the luma transform briefly holds them as float RGB (16 x 1080p = 400 MB) before it keeps one byte per pixel."""
+TRUTH_CACHE: int = 12
+"""Segments whose truth a producer keeps (a block covers part of a segment, and BlockShuffle interleaves segments)."""
 NOMINAL_FPS: int = 30
 STALE_STEPS: int = 20
 """The stale prior is the pose this many tracker steps earlier (the paper's 10 % alternative input; ``segment_labels``)."""
@@ -75,14 +78,18 @@ class KeyNetDataset:
     """coco3d only: a hand is trusted when its ``scores:pred_score_quality`` reaches this (None: no score column)."""
     tracker_step: int = 1
     """Frames per tracker step (the priors' extrapolation interval): 1 at 30 fps, 2 at 60 fps."""
+    fetch_block_size: int = 1024
+    """Frames per dataloader block. The dataloader decodes every camera of a block before yielding it, at native resolution here
+    (KeyNet crops need the detail), so a block of six 1080p cameras costs 12.4 MB per frame: keep each block near 1.5 GB."""
 
 
 KEYNET_DATASETS: dict[str, KeyNetDataset] = {
     "dataforge-umetrack": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(4)), "av1", "hand_model", None),
-    "dataforge-show3d": KeyNetDataset(("/world/rig_01/cam_00", "/world/rig_01/cam_01"), "av1", "hand_model", None, tracker_step=2),
+    "dataforge-show3d": KeyNetDataset(("/world/rig_01/cam_00", "/world/rig_01/cam_01"), "av1", "hand_model", None, tracker_step=2, fetch_block_size=512),
     "dataforge-hot3d-quest3": KeyNetDataset(("/world/rig_00/cam_00", "/world/rig_00/cam_01"), "av1", "hand_model", None),
-    "gsi-six-view": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h265", "coco3d", (0.0,) * 6),
-    "dataforge-gen-humanego-subset": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h264", "coco3d", (0.0,) * 6, min_score=0.8),
+    "gsi-six-view": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h265", "coco3d", (0.0,) * 6, fetch_block_size=128),
+    "dataforge-gen-humanego-subset": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h264", "coco3d", (0.0,) * 6, min_score=0.8,
+                                                   fetch_block_size=128),
 }
 """The datasets KeyNet trains and is scored on. Camera ids across datasets follow ``camera_offsets``."""
 
@@ -373,9 +380,10 @@ CutStream = Callable[[int], Iterator[tuple[KeyNetSamples, int, int]]]
 
 
 def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catalog_url: str, device: torch.device, augments: Sequence[KeyNetAugment],
-                seed: int, endless: bool = False, fetch_block_size: int = 1024, chunk: int = 32) -> CutStream:
+                seed: int, endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32) -> CutStream:
     """NVDEC decode in this process, luma at native resolution, and per (segment, camera) chunk of ``chunk`` frames one
-    ``perspective_keynet_samples`` cut per entry of ``augments`` (a cut is a cheap grid sample; a decode is not)."""
+    ``perspective_keynet_samples`` cut per entry of ``augments`` (a cut is a cheap grid sample; a decode is not). ``fetch_block_size``
+    None takes the dataset's own (``KeyNetDataset.fetch_block_size``)."""
     from simplecv.rerun_dataloader import KeyedFrame, KeyedNvdecDecoder
 
     from handtrack.data.catalog import _generic_model
@@ -393,10 +401,11 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
                                                                                    max_frames_per_call=NVDEC_SLICE, transform=grey_from_rgb))
                   for c, camera in enumerate(spec.cameras)}
         stream = RerunIterableDataset(DataSource(dataset=dataset, segments=list(segments)), index="frame_index", fields=fields,
-                                      fetch_block_size=fetch_block_size, shuffle_strategy=BlockShuffle(), decode_threads=1)
+                                      fetch_block_size=fetch_block_size or spec.fetch_block_size, shuffle_strategy=BlockShuffle(), decode_threads=1)
         infos: dict = {i.segment_id: i for i in list_segments(dataset, name)} if spec.labels == "hand_model" else {}
         generator: torch.Generator = torch.Generator(device=device).manual_seed(seed * 7919 + epoch)
         current: tuple[str, SegmentTruth] | None = None
+        truths: OrderedDict[str, SegmentTruth] = OrderedDict()
         pending: dict[int, list[tuple[Tensor, int]]] = {}
 
         def cut_all(truth: SegmentTruth, camera: int, items: list[tuple[Tensor, int]]) -> Iterator[tuple[KeyNetSamples, int, int]]:
@@ -418,8 +427,13 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
                                 if items:
                                     yield from cut_all(current[1], camera, items)
                         pending.clear()
-                        truth: SegmentTruth = (hand_model_truth(dataset, name, keyed.segment_id, infos) if spec.labels == "hand_model"
-                                               else coco3d_truth(dataset, name, spec, keyed.segment_id, coefficients, generic_rest))
+                        cached: SegmentTruth | None = truths.pop(keyed.segment_id, None)
+                        truth: SegmentTruth = cached if cached is not None else (
+                            hand_model_truth(dataset, name, keyed.segment_id, infos) if spec.labels == "hand_model"
+                            else coco3d_truth(dataset, name, spec, keyed.segment_id, coefficients, generic_rest))
+                        truths[keyed.segment_id] = truth
+                        while len(truths) > TRUTH_CACHE:
+                            truths.popitem(last=False)
                         current = (keyed.segment_id, truth)
                     truth = current[1]
                     row: int = int(truth.row_of_frame[keyed.index]) if keyed.index < len(truth.row_of_frame) else -1
@@ -439,7 +453,7 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
 
 
 def keynet_producer(name: str, dataset_index: int, segments: Sequence[str], *, catalog_url: str, device: torch.device, augment: KeyNetAugment, seed: int,
-                    endless: bool = False, fetch_block_size: int = 1024, chunk: int = 32, cuts: int = 1) -> Producer:
+                    endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32, cuts: int = 1) -> Producer:
     """A ``Producer`` of training crops for ``echo.EchoStream``: ``stream_cuts`` with ``cuts`` independent jitters of each chunk."""
     cut_stream: CutStream = stream_cuts(name, dataset_index, segments, catalog_url=catalog_url, device=device, augments=[augment] * cuts, seed=seed,
                                         endless=endless, fetch_block_size=fetch_block_size, chunk=chunk)

@@ -215,7 +215,9 @@ class Trainer:
         keynet_model: nn.Module | None = self.models.get('keynet')
         if cadence.compile != 'none' and isinstance(keynet_model, KeyNetF):
             keynet_model.forward = torch.compile(keynet_model.forward, mode=cadence.compile, dynamic=False)
-        self.optimisers: dict[str, Optimizer] = {name: torch.optim.SGD(model.parameters(), lr=self.settings[name].lr, momentum=self.settings[name].momentum)
+        # fused: one CUDA kernel updates every parameter (the step is launch-bound while producer threads share the interpreter).
+        self.optimisers: dict[str, Optimizer] = {name: torch.optim.SGD(model.parameters(), lr=self.settings[name].lr, momentum=self.settings[name].momentum,
+                                                                       fused=self.device.type == 'cuda')
                                                 for name, model in self.models.items()}
         self.state: TrainingState = TrainingState(config_json=config_json)
         if resume:
