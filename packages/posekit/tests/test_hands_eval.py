@@ -128,3 +128,27 @@ def test_errors_report_median_and_p95_without_discarding_failures() -> None:
     assert error_quantiles([]) == (None, None)
     with pytest.raises(ValueError, match="finite"):
         error_quantiles([1.0, float("nan")])
+
+
+def test_a_detector_only_model_scores_recall_and_no_pose() -> None:
+    """DetNet-F has no pose stage: its found hands count for recall and carry no pose error."""
+    segment = _segment()
+    left_box = joint_box(segment.uv[0, 0], segment.valid[0, 0], 1.0)
+    detections = HandDetections(BoxDetections(torch.from_numpy(left_box[None]), torch.ones(1), torch.zeros(1, dtype=torch.long)), ("left",))
+    count, any_side, scored, _ = evaluate_segment(
+        segment, torch.zeros((1, 400, 400, 3), dtype=torch.uint8), FixedDetector(detections), None, "detector", HandsEvalConfig(), False
+    )
+    assert (count, any_side, len(scored)) == (2, 1, 1)
+    assert np.isnan(scored[0].errors.mpjpe_mm) and np.isnan(scored[0].errors.epe_2d_px)
+
+
+def test_detnet_models_take_their_own_input_convention() -> None:
+    import tyro
+
+    from posekit.apis.hands_eval import DETNET_TURNS
+
+    config = tyro.cli(HandsEvalConfig, args=["--models", "detnet", "detnet-legacy", "--detnet-onnx", "/x/new.onnx", "--detnet-legacy-onnx", "/x/old.onnx"])
+    assert config.models == ("detnet", "detnet-legacy")
+    # Upright: UmeTrack's front camera is mounted a quarter turn; legacy: Quest 3 portrait frames were turned once.
+    assert DETNET_TURNS["detnet"] == {"dataforge-hot3d-quest3": 0, "dataforge-umetrack": 3}
+    assert DETNET_TURNS["detnet-legacy"] == {"dataforge-hot3d-quest3": 1, "dataforge-umetrack": 0}
