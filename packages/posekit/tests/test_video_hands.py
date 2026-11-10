@@ -10,6 +10,7 @@ import torch
 from posekit.apis.video_hands import (
     JOINT_CLASS,
     LINK_COLOR,
+    VideoHandsProgress,
     VideoHandsSettings,
     assumed_pinhole,
     describe_camera,
@@ -134,3 +135,10 @@ def test_hands_from_a_model_that_uses_the_given_camera_stay_as_they_are() -> Non
     # The video core puts every stack's hands in the run's pinhole; only WiLoR (own virtual camera) overrides in_pinhole.
     _, hands = _chunk()
     assert hands.in_pinhole(np.eye(3)) is hands
+
+
+def test_progress_reads_as_the_status_line() -> None:
+    note = "assumed pinhole, f = 1256 px (65° horizontal FOV)"
+    assert str(VideoHandsProgress("video", 0, 180, 0, note)) == f"Video loaded, finding hands; {note}"
+    assert str(VideoHandsProgress("hands", 16, 180, 32, note)) == f"Frames 16/180, 32 hands; {note}"
+    assert str(VideoHandsProgress("done", 180, 180, 360, note)) == f"processed 180 frames, 360 hands; {note}"

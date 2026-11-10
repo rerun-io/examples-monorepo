@@ -26,6 +26,7 @@ import tempfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -289,12 +290,35 @@ def describe_camera(settings: VideoHandsSettings, camera: CalibratedCamera) -> s
     return f"pinhole fx = {fx:.0f}, fy = {fy:.0f}, cx = {cx:.0f}, cy = {cy:.0f} px"
 
 
+@dataclass(frozen=True, slots=True)
+class VideoHandsProgress:
+    """Where a run is: the video is logged (``video``), a chunk of frames is done (``hands``), or the run ended (``done``)."""
+
+    stage: Literal["video", "hands", "done"]
+    """What just finished."""
+    frames_done: int
+    """Frames processed so far."""
+    num_frames: int
+    """Frames the run processes."""
+    hands: int
+    """Hands found so far."""
+    camera_note: str
+    """The camera used (``describe_camera``)."""
+
+    def __str__(self) -> str:
+        if self.stage == "video":
+            return f"Video loaded, finding hands; {self.camera_note}"
+        if self.stage == "hands":
+            return f"Frames {self.frames_done}/{self.num_frames}, {self.hands} hands; {self.camera_note}"
+        return f"processed {self.num_frames} frames, {self.hands} hands; {self.camera_note}"
+
+
 def build_pipeline(settings: VideoHandsSettings) -> HandPose3dPipeline:
     """Set up the detector and the 3D hand model the settings name (exports and engine builds happen here)."""
     return HandPose3dPipeline(settings.detector.setup(), settings.pose.setup())
 
 
-def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline | None = None) -> Iterator[str]:
+def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline | None = None) -> Iterator[VideoHandsProgress]:
     """Decode the video on the GPU, run the hand stack chunk by chunk and log everything to the active recording.
 
     The CLI drains this generator into its global recording; the app streams a thread-local
@@ -305,8 +329,8 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         pipeline: A pipeline already set up for ``settings``; None builds one.
 
     Yields:
-        A line once the video and the layout are logged (before any chunk runs, so a streaming viewer gets them
-        first), a progress line after every chunk, then the summary; all name the camera used.
+        Progress once the video and the layout are logged (before any chunk runs, so a streaming viewer gets them
+        first), after every chunk, and at the end; ``str()`` of each is the status line, naming the camera used.
 
     Raises:
         ValueError: If the video metadata cannot be read.
@@ -339,7 +363,7 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         )
     send_blueprint()  # after the video: "playing" starts the cursor at the start of the logged video
     log_hand_annotation_context(pipeline.pose.skeleton)
-    yield f"Video loaded, finding hands; {camera_note}"  # the app streams the video out before the first chunk runs
+    yield VideoHandsProgress("video", 0, num_frames, 0, camera_note)  # the app streams the video out before the first chunk runs
     total_hands: int = 0
     live_slots: set[str] = set()
     meshed_slots: set[str] = set()
@@ -358,9 +382,9 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
             frame_indices=chunk.tolist(), timestamps_ns=timestamps.tolist(), detections=detections, hands=hands,
             live_slots=live_slots, meshed_slots=meshed_slots,
         )
-        yield f"Frames {stop}/{num_frames}, {total_hands} hands; {camera_note}"
+        yield VideoHandsProgress("hands", stop, num_frames, total_hands, camera_note)
     torch.cuda.synchronize()
-    yield f"processed {num_frames} frames, {total_hands} hands; {camera_note}"
+    yield VideoHandsProgress("done", num_frames, num_frames, total_hands, camera_note)
 
 
 def main(config: VideoHandsConfig) -> None:
@@ -369,5 +393,5 @@ def main(config: VideoHandsConfig) -> None:
     Args:
         config: Demo configuration.
     """
-    statuses: list[str] = list(run_video_hands(config))
-    print(f"[posekit] {statuses[-1]}")
+    progress: list[VideoHandsProgress] = list(run_video_hands(config))
+    print(f"[posekit] {progress[-1]}")

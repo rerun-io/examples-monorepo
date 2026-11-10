@@ -20,7 +20,16 @@ import torch
 from jaxtyping import UInt8
 from torch import Tensor
 
-from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, assumed_pinhole, build_pipeline, pinhole_camera, run_video_hands, video_size
+from posekit.apis.video_hands import (
+    EXAMPLES,
+    VideoHandsProgress,
+    VideoHandsSettings,
+    assumed_pinhole,
+    build_pipeline,
+    pinhole_camera,
+    run_video_hands,
+    video_size,
+)
 from posekit.cameras import CalibratedCamera
 from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
 from posekit.models.egohand_fast import supported_backbone_precision
@@ -116,20 +125,21 @@ def warm_up() -> None:
 
 @rr.thread_local_stream("posekit_hands_ui")
 def stream_hands(
-    video: str | None, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
+    video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
     mesh_detail: MeshDetail,
-) -> Iterator[tuple[bytes | None, str]]:
-    """Run the shared video hands core and stream the recording to the viewer after every chunk."""
+) -> Iterator[tuple[bytes | None, str | VideoHandsProgress]]:
+    """Run the shared video hands core and stream the recording to the viewer after every step.
+
+    Yields:
+        The new recording bytes, with a setup message while a stack's engines load, then the run's progress.
+    """
     stream: rr.BinaryStream = rr.binary_stream()
-    if video is None:
-        yield stream.read(), "Choose a video first."
-        return
     settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy, mesh_detail)
     if stack not in _PIPELINES:
         yield stream.read(), f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
     pipeline: HandPose3dPipeline = pipeline_for(stack)
-    for status in run_video_hands(settings, pipeline):
-        yield stream.read(), status
+    for progress in run_video_hands(settings, pipeline):
+        yield stream.read(), progress
 
 
 @dataclass(frozen=True, slots=True)

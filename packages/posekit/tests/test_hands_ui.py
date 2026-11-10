@@ -66,3 +66,13 @@ def test_the_layout_takes_the_upload_as_is_and_stop_cancels_run() -> None:
     assert isinstance(video, gr.Video)
     assert video.format is None and video.include_audio  # Gradio converts nothing on upload
     assert any(dependency.get("cancels") for dependency in demo.config["dependencies"])
+
+
+def test_the_outputs_tab_summarises_a_run_and_a_run_without_a_video_asks_for_one() -> None:
+    from posekit.apis.video_hands import VideoHandsProgress
+    from posekit.hands_app_ui.layout import run_hands, summary
+
+    table = summary(VideoHandsProgress("hands", 64, 180, 128, "assumed pinhole"), 2.0, "egohand-fast", "xlo")
+    assert "| Frames | 64 / 180 |" in table and "| Hands | 128 |" in table and "32 fps" in table and "mesh `xlo`" in table
+    updates = list(run_hands(None, "egohand-fast", 0, None, None, None, None, "xlo"))
+    assert len(updates) == 1 and updates[0][1] == "Choose a video first."
