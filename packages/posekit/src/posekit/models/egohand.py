@@ -264,8 +264,8 @@ class SomaMeshLod:
 
     faces: Int64[Tensor, "f 3"]
     """Triangles of this level of detail."""
-    from_mid: Callable[[Tensor], Tensor]
-    """This level's vertices of posed mid meshes ``(n, 2859, 3) -> (n, v, 3)``: ``low`` keeps a subset (SOMA orders the
+    from_mid: Callable[[Float32[Tensor, "n 2859 3"]], Float32[Tensor, "n v 3"]]
+    """This level's vertices of posed mid meshes: ``low`` keeps a subset (SOMA orders the
     mid mesh so it is the first 718), ``xlo`` applies SOMA's barycentric transfer (within 1.6 mm of SOMA's own xlo skinning)."""
 
 
@@ -283,11 +283,10 @@ def soma_mesh_lod(soma: Path, detail: MeshDetail) -> dict[HandSide, SomaMeshLod]
         layer = SOMAHandLayer(
             data_root=str(soma), hand_type=side, device="cpu", identity_model_type="soma", mode="torch", lod=detail, load_correctives_model=False
         )
-        ids: Tensor | None = layer.identity_lod_mid_ids
+        ids: Int64[Tensor, "v"] | None = layer.identity_lod_mid_ids
         transfer: torch.nn.Module | None = layer.identity_lod_transfer
         if ids is not None:
-            mid_ids: Tensor = ids.cuda()
-            from_mid: Callable[[Tensor], Tensor] = lambda mid, mid_ids=mid_ids: mid[:, mid_ids]  # noqa: E731
+            from_mid: Callable[[Float32[Tensor, "n 2859 3"]], Float32[Tensor, "n v 3"]] = functools.partial(torch.index_select, dim=1, index=ids.cuda())
         elif transfer is not None:
             from_mid = transfer.cuda()
         else:
@@ -310,8 +309,8 @@ class EgoHandReconstruction(HandPoses3d):
     """Camera-space wrist translation in metres."""
     scale_parameters: Float32[Tensor, "n s"] | None
     """Per-finger MHR scales; None for checkpoints without this head."""
-    soma: Path | None = None
-    """SOMA directory whose levels of detail ``at_mesh_detail`` sends; None sends the model's mesh only."""
+    soma: Path
+    """SOMA directory whose levels of detail ``at_mesh_detail`` sends."""
 
     def at_mesh_detail(self, detail: MeshDetail) -> HandPoses3d:
         """Each mesh at one of SOMA's levels of detail: ``low`` keeps 718 of the 2,859 vertices (1,422 triangles),
@@ -320,15 +319,15 @@ class EgoHandReconstruction(HandPoses3d):
         The model still runs on the full mesh, so the joints and the hand pose are unchanged; only the mesh sent
         to a viewer is coarser.
         """
-        if detail == "full" or self.soma is None or self.vertices is None or not self.sides:
+        if detail == "full" or self.vertices is None:
             return self
         level: dict[HandSide, SomaMeshLod] = soma_mesh_lod(self.soma, detail)
-        left: Bool[Tensor, "n 1 1"] = torch.tensor([side == "left" for side in self.sides], device=self.vertices.device)[:, None, None]
+        left: Bool[Tensor, "n 1 1"] = torch.tensor([side == "left" for side in self.sides], dtype=torch.bool, device=self.vertices.device)[:, None, None]
         vertices: Tensor = torch.where(left, level["left"].from_mid(self.vertices), level["right"].from_mid(self.vertices))
         return HandPoses3d(keypoints=self.keypoints, sides=self.sides, vertices=vertices, faces={side: mesh.faces for side, mesh in level.items()})
 
     @classmethod
-    def empty(cls, device: torch.device, faces: dict[HandSide, Tensor]) -> "EgoHandReconstruction":
+    def empty(cls, device: torch.device, faces: dict[HandSide, Tensor], soma: Path) -> "EgoHandReconstruction":
         """No hands: zero-row outputs on ``device``."""
         joints: int = SOMA_HAND.num_keypoints
         return cls(
@@ -341,6 +340,7 @@ class EgoHandReconstruction(HandPoses3d):
             scale=torch.empty((0,), device=device),
             translation=torch.empty((0, 3), device=device),
             scale_parameters=None,
+            soma=soma,
         )
 
 
@@ -554,7 +554,7 @@ class EgoHandPredictor(TopDownHandPose3d):
                 confidence.append(float(detections.boxes.scores[row]))
         device: torch.device = frames_rgb.device
         if not rows:
-            return EgoHandReconstruction.empty(device, self.faces)
+            return EgoHandReconstruction.empty(device, self.faces, self.soma)
         xyz: Float32[ndarray, "n 25 3"] = np.stack([row.pred_keypoints_3d + row.transl for row in rows]).astype(np.float32)
         xy: Float32[ndarray, "n 25 2"] = np.stack([project(camera, points.astype(np.float64)) for points in xyz]).astype(np.float32)
         xyz_tensor: Float32[Tensor, "n 25 3"] = torch.from_numpy(xyz).to(device)

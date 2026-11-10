@@ -1,7 +1,8 @@
-"""The app's widgets and how they connect to :mod:`posekit.hands_ui`."""
+"""The hands app's widgets, how a Run streams into them, and the server; the pipelines live in :mod:`posekit.hands_ui`."""
 
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any, get_args
 
 import gradio as gr
@@ -9,7 +10,7 @@ from gradio_rerun import Rerun
 
 from posekit.apis.video_hands import EXAMPLES, VideoHandsProgress, VideoHandsSettings
 from posekit.hands_app_ui.theme import APP_CSS, VIEWER_HEIGHT
-from posekit.hands_ui import STACKS, Config, default_stack, example_rows, example_stack, fill_intrinsics, stream_hands
+from posekit.hands_ui import PIPELINES, STACKS, default_stack, example_rows, fill_intrinsics, settings_from_inputs, stream_hands
 from posekit.predictions import MeshDetail
 from posekit.track_ui_theme import FORCE_DARK_HEAD
 
@@ -19,6 +20,16 @@ DESCRIPTION: str = (
     "in the camera, and each chunk streams into the Rerun viewer as it happens. Same code as `posekit-video-hands`."
 )
 READY: str = "Upload a clip, or pick an example, then press Run."
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    """Serve the hands app."""
+
+    server_name: str = "127.0.0.1"
+    """Interface on which Gradio listens."""
+    server_port: int = 7872
+    """Gradio HTTP port."""
 
 
 def summary(progress: VideoHandsProgress, elapsed_s: float, stack: str, mesh_detail: MeshDetail) -> str:
@@ -41,14 +52,14 @@ def run_hands(
         return
     start: float = time.perf_counter()
     log: list[str] = []
-    for recording, progress in stream_hands(video, stack, max_frames, fx, fy, cx, cy, mesh_detail):
+    if stack not in PIPELINES:
+        setup: str = f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
+        log.append(f"{0.0:5.1f} s  {setup}")
+        yield gr.update(), setup, gr.update(), "", "\n".join(log)
+    settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy, mesh_detail)
+    for recording, progress in stream_hands(settings, stack):
         elapsed_s: float = time.perf_counter() - start
-        if isinstance(progress, str):  # a stack setting up
-            log.append(f"{elapsed_s:5.1f} s  {progress}")
-            yield recording, progress, gr.update(), "", "\n".join(log)
-            continue
-        step: str = {"video": "video loaded", "hands": f"{progress.frames_done}/{progress.num_frames} frames", "done": "done"}[progress.stage]
-        log.append(f"{elapsed_s:5.1f} s  {step}, {progress.hands} hands")
+        log.append(f"{elapsed_s:5.1f} s  {progress.step}")
         bar = gr.update(value=progress.frames_done, maximum=max(progress.num_frames, 1))
         yield recording, str(progress), bar, summary(progress, elapsed_s, stack, mesh_detail), "\n".join(log)
 
@@ -81,8 +92,9 @@ def build() -> gr.Blocks:
                             with gr.Row():
                                 cx = gr.Number(label="cx")
                                 cy = gr.Number(label="cy")
+                        # Picking an example also picks its stack; only the video column shows, as thumbnails.
                         gr.Examples(
-                            examples=[video_path for video_path, _ in example_rows()], inputs=[video], examples_per_page=4,
+                            examples=example_rows(), inputs=[video, stack], visible_columns=[0], examples_per_page=4,
                             cache_examples=False, elem_id="examples",
                         )
                     with gr.Tab("Outputs", id="outputs"):
@@ -98,7 +110,6 @@ def build() -> gr.Blocks:
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=VIEWER_HEIGHT
                 )
         video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])
-        video.change(example_stack, inputs=[video, stack], outputs=[stack])
         run_event = run.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(
             run_hands, inputs=[video, stack, max_frames, fx, fy, cx, cy, mesh_detail], outputs=[viewer, status, progress_bar, run_summary, run_log]
         )

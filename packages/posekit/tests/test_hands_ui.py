@@ -38,7 +38,7 @@ def test_examples_name_a_clip_and_a_stack_and_the_exocentric_clip_runs_wilor() -
 def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     # Switching between an EgoHand example and the WiLoR example must not set either stack up again.
     built: list[str] = []
-    monkeypatch.setattr(hands_ui, "_PIPELINES", {})
+    monkeypatch.setattr(hands_ui, "PIPELINES", {})
     monkeypatch.setattr(
         hands_ui, "build_pipeline", lambda settings: built.append(type(settings.pose).__name__) or HandPose3dPipeline.__new__(HandPose3dPipeline)
     )
@@ -48,13 +48,7 @@ def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(built) == 2
 
 
-def test_picking_an_example_picks_its_stack_and_an_upload_keeps_the_chosen_one() -> None:
-    assert hands_ui.example_stack(str(EXAMPLES / "hands_video.mp4"), "egohand-fast") == "wilor"
-    assert hands_ui.example_stack("/tmp/gradio/abc/IMG_6261.MOV", "egohand") == "egohand"
-    assert hands_ui.example_stack(None, "egohand") == "egohand"
-
-
-def test_the_layout_takes_the_upload_as_is_and_stop_cancels_run() -> None:
+def test_the_layout_takes_the_upload_as_is_picks_an_examples_stack_and_stop_cancels_run() -> None:
     import gradio as gr
 
     from posekit.hands_app_ui.layout import build
@@ -63,6 +57,12 @@ def test_the_layout_takes_the_upload_as_is_and_stop_cancels_run() -> None:
     video = next(block for block in demo.blocks.values() if block.elem_id == "source-video")
     assert isinstance(video, gr.Video)
     assert video.format is None and video.include_audio  # Gradio converts nothing on upload
+    stack = next(block for block in demo.blocks.values() if isinstance(block, gr.Dropdown) and block.label == "Hand stack")
+    examples = next(block for block in demo.blocks.values() if isinstance(block, gr.Dataset))
+    # the examples show only the video (thumbnails), and a click on one sets the video and its stack
+    assert [type(component) for component in examples._components] == [gr.Video]
+    clicks = [dependency for dependency in demo.config["dependencies"] if (examples._id, "click") in dependency["targets"]]
+    assert [dependency["outputs"] for dependency in clicks] == [[video._id, stack._id]]
     assert any(dependency.get("cancels") for dependency in demo.config["dependencies"])
 
 

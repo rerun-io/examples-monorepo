@@ -308,12 +308,17 @@ class VideoHandsProgress:
     camera_note: str
     """The camera used (``describe_camera``)."""
 
-    def __str__(self) -> str:
+    @property
+    def step(self) -> str:
+        """What just finished, in a few words (the app's run log)."""
         if self.stage == "video":
-            return f"Video loaded, finding hands; {self.camera_note}"
+            return "Video loaded, finding hands"
         if self.stage == "hands":
-            return f"Frames {self.frames_done}/{self.num_frames}, {self.hands} hands; {self.camera_note}"
-        return f"processed {self.num_frames} frames, {self.hands} hands; {self.camera_note}"
+            return f"Frames {self.frames_done}/{self.num_frames}, {self.hands} hands"
+        return f"processed {self.num_frames} frames, {self.hands} hands"
+
+    def __str__(self) -> str:
+        return f"{self.step}; {self.camera_note}"
 
 
 def build_pipeline(settings: VideoHandsSettings) -> HandPose3dPipeline:

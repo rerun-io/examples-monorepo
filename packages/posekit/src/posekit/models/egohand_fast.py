@@ -189,7 +189,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         camera = require_camera(camera)
         validate_frames_rgb(frames_rgb)
         if not detections.num_detections:
-            return EgoHandReconstruction.empty(frames_rgb.device, self.faces)
+            return EgoHandReconstruction.empty(frames_rgb.device, self.faces, self.soma)
         key: tuple[CameraKey, str] = (camera_key(camera), str(frames_rgb.device))
         if key not in self.croppers:
             self.croppers[key] = CudaHandCropper(camera, frames_rgb.device)
