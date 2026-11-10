@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 
-av = pytest.importorskip("av", reason="PyAV and TorchCodec come with the hands env")
+pytest.importorskip("av", reason="PyAV and TorchCodec come with the hands env")
 pytest.importorskip("torchcodec", reason="PyAV and TorchCodec come with the hands env")
 
+import av
 import rerun as rr
 from jaxtyping import UInt8
 from numpy import ndarray
