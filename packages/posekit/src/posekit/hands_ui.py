@@ -32,11 +32,10 @@ def default_stack() -> str:
 
 
 def example_rows() -> list[list[str]]:
-    """``[video, stack]`` per example: GSI head-camera clips (1920x1080 pinhole) on the accepted EgoHand stack,
+    """``[video, stack]`` per example: a GSI head-camera clip (1920x1080 pinhole) on the accepted EgoHand stack,
     and WiLoR's original demo clip (a person on stage with a microphone, exocentric) on WiLoR (EgoHand is egocentric)."""
     return [
         [str(EXAMPLES / "gsi_sewing_left_front.mp4"), default_stack()],
-        [str(EXAMPLES / "gsi_car_left_front.mp4"), default_stack()],
         [str(EXAMPLES / "hands_video.mp4"), "wilor"],
     ]
 

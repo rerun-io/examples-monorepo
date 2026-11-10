@@ -112,7 +112,7 @@ per-side faces. `HandPoses3d.as_hand21()` gives every model the same HAND_21 vie
 The video CLI and the app take one video and a pinhole camera: `--fx/--fy/--cx/--cy` when you know
 them, else a 65° horizontal field of view (`--hfov-deg`) with the principal point at the image
 centre. The status line says which was used ("assumed pinhole, f = 1507 px" for a 1920-wide
-video). The app's examples are GSI head-camera clips (`assets/examples/gsi_*_left_front.mp4`, 1920x1080
+video). The app's examples are a GSI head-camera clip (`assets/examples/gsi_sewing_left_front.mp4`, 1920x1080
 pinhole, plain H.264) on the EgoHand stack, and WiLoR's original exocentric demo clip
 (`assets/examples/hands_video.mp4`, a person on stage with a microphone) on WiLoR; choosing an
 example also selects its stack.
