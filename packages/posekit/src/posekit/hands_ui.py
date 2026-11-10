@@ -22,8 +22,6 @@ from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
-EXAMPLE_VIDEOS: Final[list[Path]] = [EXAMPLES / "gsi_sewing_left_front.mp4", EXAMPLES / "gsi_car_left_front.mp4"]
-"""GSI head-camera clips (1920x1080 pinhole), plain H.264 mp4 like any user video."""
 _PIPELINE: tuple[str, HandPose3dPipeline] | None = None
 """The last stack's set-up pipeline (engines stay loaded between runs); switching stacks releases it first."""
 
@@ -31,6 +29,16 @@ _PIPELINE: tuple[str, HandPose3dPipeline] | None = None
 def default_stack() -> str:
     """The accepted EgoHand stack: NVFP4 on Blackwell, BF16 on older GPUs."""
     return "egohand-fast" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10 else "egohand-fast-bf16"
+
+
+def example_rows() -> list[list[str]]:
+    """``[video, stack]`` per example: GSI head-camera clips (1920x1080 pinhole) on the accepted EgoHand stack,
+    and WiLoR's original demo clip (a person on stage with a microphone, exocentric) on WiLoR (EgoHand is egocentric)."""
+    return [
+        [str(EXAMPLES / "gsi_sewing_left_front.mp4"), default_stack()],
+        [str(EXAMPLES / "gsi_car_left_front.mp4"), default_stack()],
+        [str(EXAMPLES / "hands_video.mp4"), "wilor"],
+    ]
 
 
 def fill_intrinsics(video: str | None) -> tuple[float | None, float | None, float | None, float | None]:
@@ -106,7 +114,7 @@ def build() -> gr.Blocks:
                                 cy = gr.Number(label="cy")
                     with gr.TabItem("Outputs", id="outputs"):
                         status = gr.Text("Upload a video to begin.", label="Status")
-                gr.Examples(examples=[[str(path)] for path in EXAMPLE_VIDEOS], inputs=[video])
+                gr.Examples(examples=example_rows(), inputs=[video, stack])
             with gr.Column(scale=5):
                 viewer.render()
         video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])

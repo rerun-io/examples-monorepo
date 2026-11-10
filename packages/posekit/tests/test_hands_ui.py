@@ -24,3 +24,10 @@ def test_inputs_become_the_cli_settings(stack: str) -> None:
 def test_choosing_a_video_fills_the_assumed_pinhole() -> None:
     assert hands_ui.fill_intrinsics(None) == (None, None, None, None)
     assert hands_ui.fill_intrinsics(str(EXAMPLES / "gsi_sewing_left_front.mp4")) == tuple(round(v, 1) for v in assumed_pinhole(1920, 1080, 65.0))
+
+
+def test_examples_name_a_clip_and_a_stack_and_the_exocentric_clip_runs_wilor() -> None:
+    rows = hands_ui.example_rows()
+    assert all(Path(video).exists() and stack in hands_ui.STACKS for video, stack in rows)
+    assert [stack for video, stack in rows if Path(video).name == "hands_video.mp4"] == ["wilor"]
+    assert [Path(video).name for video, _ in rows][0] == "gsi_sewing_left_front.mp4"
