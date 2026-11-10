@@ -21,7 +21,7 @@ from handtrack.data.batches import DetNetBatch, KeyNetBatch
 from handtrack.eval.metrics import Counts, DetectionMetrics, KeypointMetrics, detection_metrics, keynet_metrics, presence_counts
 from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
 from handtrack.models.detnet import Detections, DetNetF, DetNetLoss, DetNetOutput, decode_detections, detnet_loss
-from handtrack.models.keynet import HeatmapReduction, KeyNetF, KeyNetLoss, KeyNetOutput, keynet_loss
+from handtrack.models.keynet import HeatmapReduction, KeyNetF, KeyNetLoss, KeyNetOutput, keynet_for_state, keynet_loss
 from handtrack.train.checkpoint import MetricRecord, TrainingState, export_weights, load_checkpoint, save_checkpoint
 from handtrack.train.source import BatchSource, DetNetValidation, DetNetValidationSource, KeyNetValidation, KeyNetValidationSource
 
@@ -97,6 +97,10 @@ class LoopSettings:
     """Multiplier for the pinch-relation loss (``models.keynet.pinch_loss``), scaled with the heatmap ramp."""
     keynet_bn_eps: float = 1e-5
     """KeyNet-F BatchNorm epsilon (1e-3 bounds the eval-mode amplification of near-dead channels)."""
+    keynet_freeze_bn_after_step: int = 0
+    """From this global step on, KeyNet's BatchNorm layers keep their running statistics (eval mode) while every weight still trains,
+    so training and evaluation compute the same function (the deployed net's frozen-BN continuation: its running statistics alone
+    swung the eval crop error 2.84 -> 6.09 px). 0: never."""
     detnet_circle_weight: float = 100.0
     """Multiplier for DetNet's circle MSE in normalized units (cx/640, cy/480, r/640). The paper's L = MSE + 100 BCE (circle
     weight 1) leaves the circle 0.4 % of the loss at these units: after 150 k steps it stalls near 50 px while presence trains.
@@ -179,7 +183,7 @@ class Trainer:
     """
     def __init__(self, nets: Nets, detnet: OptimiserSettings, keynet: OptimiserSettings,
                  cadence: LoopSettings, run_dir: Path, device: str, *, resume: bool = False,
-                 max_val_batches: int = 20, config_json: str = '{}') -> None:
+                 max_val_batches: int = 20, config_json: str = '{}', keynet_init: Path | None = None) -> None:
         if max_val_batches < 1:
             raise ValueError('max_val_batches must be positive')
         self.cadence: LoopSettings = cadence
@@ -190,7 +194,15 @@ class Trainer:
         self.models: dict[str, nn.Module] = {}
         if nets in ('detnet', 'both'):
             self.models['detnet'] = DetNetF().to(self.device)
-        if nets in ('keynet', 'both'):
+        if nets in ('keynet', 'both') and keynet_init is not None:
+            # Warm start: the weights' own heads (pinch, visibility) and BatchNorm epsilon; a pinch head rides along untrained.
+            from handtrack.pipeline import read_state
+
+            state, _ = read_state(keynet_init)
+            initial: KeyNetF = keynet_for_state(state)
+            initial.load_state_dict(state)
+            self.models['keynet'] = initial.to(self.device)
+        elif nets in ('keynet', 'both'):
             self.models['keynet'] = KeyNetF(visibility_head=cadence.keynet_visibility_head, bn_eps=cadence.keynet_bn_eps).to(self.device)
         if cadence.channels_last:
             for model in self.models.values():
@@ -298,6 +310,10 @@ class Trainer:
         """Apply one SGD step and retain detached scalar loss terms."""
         name: Net = 'detnet' if isinstance(batch, DetNetBatch) else 'keynet'
         self.models[name].train()
+        if name == 'keynet' and 0 < self.cadence.keynet_freeze_bn_after_step <= self.state.step:
+            for module in self.models[name].modules():
+                if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                    module.eval()
         self.optimisers[name].zero_grad(set_to_none=True)
         if isinstance(batch, DetNetBatch):
             det_loss: DetNetLoss = self.detnet_objective(batch, self.forward_detnet(batch))

@@ -116,9 +116,9 @@ def aim(rotation: Float32[Tensor, "n 3 3"], offset_px: Float32[Tensor, "n 2"], f
     return (_minimal_rotation(ray) @ _roll(roll_rad)).transpose(-1, -2) @ rotation
 
 
-def jitter(cameras: CropCameras, generator: torch.Generator, max_rotation: float, scale_range: tuple[float, float], max_shift: float) -> CropCameras:
+def jitter(cameras: CropCameras, generator: torch.Generator, max_rotation: float | Float32[Tensor, "n"], scale_range: tuple[float, float], max_shift: float) -> CropCameras:
     """The affine crops' jitter for crop cameras: shift the aim by up to ``max_shift`` crop sides per axis, roll by
-    +-``max_rotation`` radians, and zoom out by a factor drawn from ``scale_range`` (> 1 zooms out)."""
+    +-``max_rotation`` radians (one limit, or one per crop), and zoom out by a factor drawn from ``scale_range`` (> 1 zooms out)."""
     n: int = cameras.focal.shape[0]
     device: torch.device = cameras.focal.device
     shift: Float32[Tensor, "n 2"] = (torch.rand((n, 2), generator=generator, device=device) * 2 - 1) * max_shift * CROP_SIZE
@@ -186,10 +186,10 @@ def sample_crops(frames: UInt8[Tensor, "m h w"], image: Int64[Tensor, "n"], came
 
 def unproject(camera: CameraRig, pixels: Float32[Tensor, "n 2"], iterations: int = 10) -> Float32[Tensor, "n 3"]:
     """Unit camera-frame rays through native pixels of the one-camera rig ``camera``: exact for a pinhole, Newton steps on
-    the normalised coordinates for Fisheye62 (finite-difference Jacobian of ``project``)."""
+    the normalised coordinates for Fisheye62 and the double sphere (finite-difference Jacobian of ``project``)."""
     normalised: Float32[Tensor, "n 2"] = (pixels - camera.principal[0]) / camera.focal[0]
     guess: Float32[Tensor, "n 3"] = torch.cat([normalised, torch.ones_like(normalised[:, :1])], dim=-1)
-    if camera.fisheye62 is not None:
+    if not camera.pinhole:
         # Solve project([a, b, 1]) = pixel for (a, b), starting from the pinhole guess.
         ab: Float32[Tensor, "n 2"] = normalised.clone()
         step: float = 1e-4

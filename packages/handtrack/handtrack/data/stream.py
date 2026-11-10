@@ -116,6 +116,8 @@ class KeyNetAugment:
 
     max_rotation: float = 0.5236
     """Crop rotation drawn from ±this (radians; 30°), applied to image and keypoints together."""
+    full_rotation_probability: float = 0.0
+    """Share of crops whose rotation is drawn from the whole circle instead (robustness to cameras cut without a roll, e.g. RoboCap's)."""
     scale_range: tuple[float, float] = (0.9, 1.25)
     """Crop side multiplier (> 1 zooms out)."""
     max_shift: float = 0.1
@@ -717,7 +719,11 @@ def perspective_keynet_samples(
     rotation = torch.where((edge_kind | background)[:, None, None], look_at(aimed, roll), rotation)
     focal: Float32[Tensor, "n"] = torch.where(background, CROP_SIZE * source_focal / background_side, fitted.focal)
     placed: CropCameras = CropCameras(rotation, focal, mirror)
-    shaken: CropCameras = jitter(placed, generator, augment.max_rotation, augment.scale_range, augment.max_shift)
+    max_rotation: float | Float32[Tensor, "n"] = augment.max_rotation
+    if augment.full_rotation_probability > 0:
+        full: Bool[Tensor, "n"] = torch.rand(n, generator=generator, device=device) < augment.full_rotation_probability
+        max_rotation = torch.where(full, torch.full((n,), math.pi, device=device), torch.full((n,), augment.max_rotation, device=device))
+    shaken: CropCameras = jitter(placed, generator, max_rotation, augment.scale_range, augment.max_shift)
     # EDGE placement already draws its exact overlap; jitter must not move it off the edge.
     cut: CropCameras = CropCameras(torch.where(edge_kind[:, None, None], placed.rotation, shaken.rotation), torch.where(edge_kind, placed.focal, shaken.focal), mirror)
     truth_uv, truth_depth = to_crop(cut, truth_cam[slot])
@@ -901,6 +907,7 @@ def evaluation_augment(augment: KeyNetAugment) -> KeyNetAugment:
     return dataclasses.replace(
         augment,
         max_rotation=0.0,
+        full_rotation_probability=0.0,
         scale_range=(1.0, 1.0),
         max_shift=0.0,
         zero_input_probability=0.0,

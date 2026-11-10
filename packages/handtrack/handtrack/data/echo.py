@@ -1,4 +1,4 @@
-"""A DetNet batch source that keeps the GPU busy: per-dataset echo pools fed by streaming producers.
+"""A DetNet or KeyNet batch source that keeps the GPU busy: per-dataset echo pools fed by streaming producers.
 
 Each dataset's producer (a Rerun-dataloader stream) runs on its own thread and adds decoded images to that dataset's
 pool on the training device. Every batch takes an equal share from each pool. A decoded image is drawn up to
@@ -16,17 +16,20 @@ from jaxtyping import Bool, Float32, Int64
 from torch import Tensor
 
 from handtrack.data.batches import DetNetBatch, KeyNetBatch
-from handtrack.data.stream import DetNetSamples, empty_detnet_samples, sample_count, select_samples
+from handtrack.data.stream import DetNetSamples, KeyNetSamples, empty_detnet_samples, empty_keynet_samples, sample_count, select_samples
 
-Producer = Callable[[int], Iterable[DetNetSamples]]
-"""One dataset's decoded images for an epoch (CPU or device tensors, any chunk size)."""
-Finish = Callable[[DetNetSamples, torch.Generator], DetNetBatch]
+Samples = DetNetSamples | KeyNetSamples
+Producer = Callable[[int], Iterable[Samples]]
+"""One dataset's decoded images (DetNet) or crops (KeyNet) for an epoch (CPU or device tensors, any chunk size)."""
+Finish = Callable[[Samples, torch.Generator], DetNetBatch | KeyNetBatch]
 """Turns drawn samples into a training batch (augmentation lives here)."""
 
 
-def plain_batch(samples: DetNetSamples, generator: torch.Generator) -> DetNetBatch:
-    """No augmentation: pooled bytes to [0, 1] and the stored targets."""
+def plain_batch(samples: Samples, generator: torch.Generator) -> DetNetBatch:
+    """No augmentation: pooled bytes to [0, 1] and the stored targets (DetNet samples)."""
     del generator
+    if not isinstance(samples, DetNetSamples):
+        raise TypeError("plain_batch takes DetNet samples")
     return DetNetBatch(pooled=samples.pooled[:, None].float() / 255.0, circle=samples.circle, presence=samples.presence,
                        circle_mask=samples.circle_mask, presence_mask=samples.presence_mask, dataset=samples.dataset)
 
@@ -34,8 +37,8 @@ def plain_batch(samples: DetNetSamples, generator: torch.Generator) -> DetNetBat
 class _EchoPool:
     """Fixed slots on the device; ``alive`` rows can still be drawn, ``uses`` counts draws, ``arrival`` orders eviction."""
 
-    def __init__(self, capacity: int, max_echo: int, device: torch.device, generator: torch.Generator, min_echo: int = 1) -> None:
-        self.storage: DetNetSamples = empty_detnet_samples(capacity, device)
+    def __init__(self, capacity: int, max_echo: int, device: torch.device, generator: torch.Generator, min_echo: int = 1, keynet: bool = False) -> None:
+        self.storage: Samples = empty_keynet_samples(capacity, device) if keynet else empty_detnet_samples(capacity, device)
         # Bookkeeping stays on the host: reading counts from device tensors would sync the GPU on every producer check.
         self.alive: Bool[Tensor, "capacity"] = torch.zeros(capacity, dtype=torch.bool)
         self.uses: Int64[Tensor, "capacity"] = torch.zeros(capacity, dtype=torch.int64)
@@ -59,7 +62,7 @@ class _EchoPool:
         """Slots a producer may fill now: free ones plus alive rows drawn at least ``min_echo`` times."""
         return int((~self.alive).sum() + (self.alive & (self.uses >= self.min_echo)).sum())
 
-    def add(self, samples: DetNetSamples) -> None:
+    def add(self, samples: Samples) -> None:
         """Write samples into free slots, evicting the oldest rows drawn ``min_echo`` times if needed (caller checked ``room``)."""
         incoming: int = sample_count(samples)
         free: Int64[Tensor, "f"] = (~self.alive).nonzero().flatten()
@@ -79,11 +82,11 @@ class _EchoPool:
         self.sequence += incoming
         self.decoded += incoming
 
-    def draw(self, n: int) -> DetNetSamples:
+    def draw(self, n: int) -> Samples:
         """n distinct alive rows, the less used ones more likely; rows reaching ``max_echo`` uses leave the pool."""
         weight: Float32[Tensor, "capacity"] = torch.where(self.alive, (self.max_echo - self.uses).float(), torch.zeros_like(self.uses, dtype=torch.float32))
         chosen: Int64[Tensor, "n"] = torch.multinomial(weight, n, replacement=False, generator=self.generator)
-        drawn: DetNetSamples = select_samples(self.storage, chosen.to(self.device, non_blocking=True))
+        drawn: Samples = select_samples(self.storage, chosen.to(self.device, non_blocking=True))
         self.uses[chosen] += 1
         self.alive[chosen] = self.uses[chosen] < self.max_echo
         self.drawn += n
@@ -91,7 +94,7 @@ class _EchoPool:
 
 
 class EchoStream:
-    """``BatchSource`` for DetNet: equal per-dataset shares from echo pools fed by one producer thread per dataset."""
+    """``BatchSource`` for DetNet (or KeyNet, ``keynet=True``): equal per-dataset shares from echo pools fed by one producer thread per dataset."""
 
     def __init__(
         self,
@@ -107,11 +110,13 @@ class EchoStream:
         epoch_steps: int | None = None,
         min_echo: int = 1,
         prefetch: int = 0,
+        keynet: bool = False,
     ) -> None:
         """``epoch_steps`` set: an epoch is that many batches, and later epochs keep the running producers and their pools
         (producers then loop over their data themselves). None: an epoch ends when a dataset runs out, and each epoch restarts.
         ``min_echo``: draws an image must get before its producer may replace it. ``prefetch`` > 0: a thread assembles that many
-        batches ahead, so drawing, merging and augmentation overlap the training step."""
+        batches ahead, so drawing, merging and augmentation overlap the training step. ``keynet``: the pools hold ``KeyNetSamples`` and
+        the stream serves ``next_keynet_batch`` instead of ``next_detnet_batch``."""
         if not 1 <= min_echo <= max_echo:
             raise ValueError("need 1 <= min_echo <= max_echo")
         if batch_size % len(producers):
@@ -127,9 +132,10 @@ class EchoStream:
         """Augmentation randomness on the device (``finish``)."""
         self.draws: torch.Generator = torch.Generator().manual_seed(seed)
         """Draw and eviction randomness on the host (``_EchoPool``)."""
-        self.pools: list[_EchoPool] = [_EchoPool(pool_capacity, max_echo, device, self.draws, min_echo) for _ in producers]
+        self.keynet: bool = keynet
+        self.pools: list[_EchoPool] = [_EchoPool(pool_capacity, max_echo, device, self.draws, min_echo, keynet) for _ in producers]
         self.prefetch: int = prefetch
-        self.ready: queue.Queue[DetNetBatch | BaseException | None] = queue.Queue(maxsize=max(prefetch, 1))
+        self.ready: queue.Queue[DetNetBatch | KeyNetBatch | BaseException | None] = queue.Queue(maxsize=max(prefetch, 1))
         self.assembler: threading.Thread | None = None
         self.threads: list[threading.Thread] = []
         self.stop: threading.Event = threading.Event()
@@ -142,9 +148,9 @@ class EchoStream:
         pool: _EchoPool = self.pools[index]
         try:
             for chunk in self.producers[index](epoch):
-                samples: DetNetSamples = DetNetSamples(**{f.name: getattr(chunk, f.name).to(self.device, non_blocking=True) for f in dataclasses.fields(chunk)})
+                samples: Samples = type(chunk)(**{f.name: getattr(chunk, f.name).to(self.device, non_blocking=True) for f in dataclasses.fields(chunk)})
                 for start in range(0, sample_count(samples), pool.capacity):
-                    part: DetNetSamples = select_samples(samples, torch.arange(start, min(start + pool.capacity, sample_count(samples)), device=self.device))
+                    part: Samples = select_samples(samples, torch.arange(start, min(start + pool.capacity, sample_count(samples)), device=self.device))
                     with pool.lock:
                         pool.lock.wait_for(lambda part=part: self.stop.is_set() or pool.room() >= sample_count(part))
                         if self.stop.is_set():
@@ -181,7 +187,7 @@ class EchoStream:
         """Keep ``prefetch`` batches ready; the end of the data (None) or an error travels through the same queue."""
         while not self.stop.is_set():
             try:
-                item: DetNetBatch | BaseException | None = self._assemble()
+                item: DetNetBatch | KeyNetBatch | BaseException | None = self._assemble()
             except BaseException as error:  # re-raised in the trainer thread
                 item = error
             while not self.stop.is_set():
@@ -190,7 +196,7 @@ class EchoStream:
                     break
                 except queue.Full:
                     continue
-            if not isinstance(item, DetNetBatch):
+            if not isinstance(item, DetNetBatch | KeyNetBatch):
                 return
 
     def _ready(self, pool: _EchoPool) -> bool:
@@ -198,6 +204,22 @@ class EchoStream:
         return self.error is not None or self.stop.is_set() or pool.drawable() >= need or pool.exhausted
 
     def next_detnet_batch(self) -> DetNetBatch | None:
+        if self.keynet:
+            raise RuntimeError("this EchoStream feeds KeyNet")
+        batch = self._next()
+        if batch is not None and not isinstance(batch, DetNetBatch):
+            raise TypeError("the finish of a DetNet EchoStream must return DetNetBatch")
+        return batch
+
+    def next_keynet_batch(self) -> KeyNetBatch | None:
+        if not self.keynet:
+            raise RuntimeError("this EchoStream feeds DetNet")
+        batch = self._next()
+        if batch is not None and not isinstance(batch, KeyNetBatch):
+            raise TypeError("the finish of a KeyNet EchoStream must return KeyNetBatch")
+        return batch
+
+    def _next(self) -> DetNetBatch | KeyNetBatch | None:
         if self.epoch_steps is not None and self.steps >= self.epoch_steps:
             return None
         if self.prefetch:
@@ -210,15 +232,15 @@ class EchoStream:
                     continue
             if isinstance(item, BaseException):
                 raise item
-            batch: DetNetBatch | None = item
+            batch: DetNetBatch | KeyNetBatch | None = item
         else:
             batch = self._assemble()
         if batch is not None:
             self.steps += 1
         return batch
 
-    def _assemble(self) -> DetNetBatch | None:
-        parts: list[DetNetSamples] = []
+    def _assemble(self) -> DetNetBatch | KeyNetBatch | None:
+        parts: list[Samples] = []
         for pool in self.pools:
             with pool.lock:
                 pool.lock.wait_for(lambda pool=pool: self._ready(pool))
@@ -229,11 +251,8 @@ class EchoStream:
                 parts.append(pool.draw(self.share))
                 pool.lock.notify_all()
         self.started = True
-        merged: DetNetSamples = DetNetSamples(**{f.name: torch.cat([getattr(p, f.name) for p in parts]) for f in dataclasses.fields(parts[0])})
+        merged: Samples = type(parts[0])(**{f.name: torch.cat([getattr(p, f.name) for p in parts]) for f in dataclasses.fields(parts[0])})
         return self.finish(merged, self.generator)
-
-    def next_keynet_batch(self) -> KeyNetBatch | None:
-        raise RuntimeError("EchoStream feeds DetNet only")
 
     def cancel(self) -> None:
         self.stop.set()
