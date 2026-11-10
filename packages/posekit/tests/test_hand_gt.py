@@ -9,7 +9,7 @@ from beartype.roar import BeartypeException
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 
-from posekit.eval.hand_gt import EVAL_SUBSETS, select_frames
+from posekit.eval.hand_gt import EVAL_SUBSETS, select_frames, stored_upright_turns
 
 
 def test_frames_span_visible_frames_without_repeats() -> None:
@@ -56,3 +56,12 @@ def test_catalog_labels_project_back_to_the_source_camera(dataset: str) -> None:
         predicted: Float64[ndarray, "2 21 2"] = project(segment.camera, xyz.reshape(-1, 3).astype(np.float64)).reshape(2, 21, 2)
         errors.extend(np.linalg.norm(predicted - uv, axis=-1)[valid].tolist())
     assert np.median(errors) < 1.0
+
+
+def test_the_stored_upright_turn_comes_from_the_pinhole_and_defaults_to_none() -> None:
+    import pyarrow as pa
+
+    camera = "/world/rig_00/cam_01"
+    converted = pa.table({f"{camera}/pinhole:upright_quarter_turns_cw": pa.array([[3]], pa.list_(pa.int64()))})
+    assert stored_upright_turns(converted, camera) == 3
+    assert stored_upright_turns(pa.table({"rerun_segment_id": ["s0"]}), camera) == 0, "converted as recorded"

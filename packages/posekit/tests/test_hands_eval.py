@@ -10,7 +10,16 @@ pytest.importorskip("warp", reason="the eval imports EgoHand; it needs the posek
 
 from simplecv.catalog_video import CatalogVideo
 
-from posekit.apis.hands_eval import EndToEndCell, HandsEvalConfig, error_quantiles, evaluate_segment, failed_bands, joint_box, within_accuracy_band
+from posekit.apis.hands_eval import (
+    EndToEndCell,
+    HandsEvalConfig,
+    detnet_turns,
+    error_quantiles,
+    evaluate_segment,
+    failed_bands,
+    joint_box,
+    within_accuracy_band,
+)
 from posekit.cameras import CalibratedCamera
 from posekit.eval.hand_gt import GtDataset, HandGtSegment
 from posekit.models.base import HandDetector, TopDownHandPose3d
@@ -152,3 +161,12 @@ def test_detnet_models_take_their_own_input_convention() -> None:
     # Upright: UmeTrack's front camera is mounted a quarter turn; legacy: Quest 3 portrait frames were turned once.
     assert DETNET_TURNS["detnet"] == {"dataforge-hot3d-quest3": 0, "dataforge-umetrack": 3}
     assert DETNET_TURNS["detnet-legacy"] == {"dataforge-hot3d-quest3": 1, "dataforge-umetrack": 0}
+
+
+def test_detnet_turns_subtract_what_the_conversion_already_turned() -> None:
+    # UmeTrack as recorded (stored 0): the upright model turns its front camera 3 times, the legacy model not at all.
+    assert (detnet_turns("detnet", "dataforge-umetrack", 0), detnet_turns("detnet-legacy", "dataforge-umetrack", 0)) == (3, 0)
+    # After the upright re-convert (stored 3): the upright model needs nothing; the legacy model turns the frame back as recorded.
+    assert (detnet_turns("detnet", "dataforge-umetrack", 3), detnet_turns("detnet-legacy", "dataforge-umetrack", 3)) == (0, 1)
+    assert detnet_turns("detnet-legacy", "dataforge-hot3d-quest3", 0) == 1
+    assert detnet_turns("detnet", "gsi-six-view", 0) == 0, "a subset the table does not list"

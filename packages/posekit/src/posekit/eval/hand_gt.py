@@ -125,6 +125,16 @@ class HandGtSegment:
     """The 2D labels of those joints, source pixels; NaN where missing."""
     valid: Bool[ndarray, "f 2 21"]
     """Scoreable joints: finite 3D and 2D, inside the image, not a derived joint."""
+    upright_quarter_turns_cw: int = 0
+    """Clockwise quarter turns the conversion already applied to this camera's images (``stored_upright_turns``)."""
+
+
+def stored_upright_turns(statics: pa.Table, camera: str) -> int:
+    """``<camera>/pinhole:upright_quarter_turns_cw`` from one segment's static rows: the quarter turns the conversion applied to
+    stand the camera upright (dataforge's UmeTrack since #558); 0 when the camera was converted as recorded."""
+    name: str = f"{camera}/pinhole:upright_quarter_turns_cw"
+    cells: list[list[int] | None] = statics[name].to_pylist() if name in statics.column_names else []
+    return next((int(cell[0]) % 4 for cell in cells if cell), 0)
 
 
 def calibrated_camera(statics: pa.Table, camera: str) -> tuple[CalibratedCamera, Float64[ndarray, "4 4"]]:
@@ -211,7 +221,8 @@ def read_hand_gt(dataset: DatasetEntry, subset: HandGtSubset, *, max_frames: int
     )
     segments: list[HandGtSegment] = []
     for segment_id in subset.segments:
-        camera, cam_from_rig = calibrated_camera(statics.filter(pc.field("rerun_segment_id") == segment_id), subset.camera)
+        segment_statics: pa.Table = statics.filter(pc.field("rerun_segment_id") == segment_id)
+        camera, cam_from_rig = calibrated_camera(segment_statics, subset.camera)
         rows: pa.Table = temporal.filter(pc.field("rerun_segment_id") == segment_id)
         row_times: Int64[ndarray, "r"] = rows["video_time"].cast(pa.int64()).to_numpy()
         video: CatalogVideo = read_catalog_videos(dataset, segment_id, [f"{pinhole}/video"], "video_time")[0]
@@ -262,5 +273,9 @@ def read_hand_gt(dataset: DatasetEntry, subset: HandGtSubset, *, max_frames: int
         valid &= frame_ok[:, None, None]
         valid[:, :, list(DERIVED_JOINTS)] = False
         chosen: Int64[ndarray, "n"] = select_frames(valid, max_frames=max_frames)
-        segments.append(HandGtSegment(segment_id, camera, video, chosen, times[chosen], xyz[chosen], uv[chosen], valid[chosen]))
+        segments.append(
+            HandGtSegment(
+                segment_id, camera, video, chosen, times[chosen], xyz[chosen], uv[chosen], valid[chosen], stored_upright_turns(segment_statics, subset.camera)
+            )
+        )
     return segments

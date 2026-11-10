@@ -105,8 +105,8 @@ DETNET_TURNS: dict[str, dict[GtDataset, int]] = {
     "detnet": {"dataforge-hot3d-quest3": 0, "dataforge-umetrack": 3},
     "detnet-legacy": {"dataforge-hot3d-quest3": 1, "dataforge-umetrack": 0},
 }
-"""Detector-only DetNet-F entries (no pose stage, detector protocol only): clockwise quarter turns of each subset camera before the
-net; a dataset not listed gets none. ``detnet`` = trained upright (handtrack ``stream.upright``: UmeTrack's front camera is mounted a
+"""Detector-only DetNet-F entries (no pose stage, detector protocol only): clockwise quarter turns of each subset camera's image AS
+RECORDED before the net (``detnet_turns`` subtracts what the conversion already turned); a dataset not listed gets none. ``detnet`` = trained upright (handtrack ``stream.upright``: UmeTrack's front camera is mounted a
 quarter turn); ``detnet-legacy`` = the deployed DetNet-F's input (cameras as stored, Quest 3 portrait frames turned once)."""
 
 
@@ -325,12 +325,21 @@ def model_stack(name: ModelName, assets: Path | None) -> tuple[HandDetector, Top
     return detector_config.setup(), pose_config.setup()
 
 
-def detnet_detector(name: ModelName, dataset: GtDataset, config: HandsEvalConfig) -> HandDetector:
-    """A DetNet-F entry's detector for one subset camera (its turn count depends on the camera)."""
+def detnet_turns(name: ModelName, dataset: GtDataset, stored: int) -> int:
+    """A DetNet-F entry's turns for a subset camera whose conversion already applied ``stored`` (``HandGtSegment.upright_quarter_turns_cw``),
+    so the net sees the same image before and after an upright re-convert."""
+    return (DETNET_TURNS[name].get(dataset, 0) - stored) % 4
+
+
+def detnet_detector(name: ModelName, dataset: GtDataset, segments: Sequence[HandGtSegment], config: HandsEvalConfig) -> HandDetector:
+    """A DetNet-F entry's detector for one subset camera (its turn count depends on the camera and on how it was converted)."""
     weights: Path | None = config.detnet_onnx if name == "detnet" else config.detnet_legacy_onnx
     if weights is None:
         raise ValueError(f"{name} needs --{name}-onnx")
-    return DetNetHandDetectorConfig(weights=weights, quarter_turns=DETNET_TURNS[name].get(dataset, 0), backend=TensorRtBackendConfig()).setup()
+    stored: set[int] = {segment.upright_quarter_turns_cw for segment in segments}
+    if len(stored) != 1:
+        raise ValueError(f"{dataset}: segments were converted with different upright turns {sorted(stored)}; re-convert all of them")
+    return DetNetHandDetectorConfig(weights=weights, quarter_turns=detnet_turns(name, dataset, stored.pop()), backend=TensorRtBackendConfig()).setup()
 
 
 def decode_samples(segment: HandGtSegment) -> UInt8[Tensor, "f h w 3"]:
@@ -577,7 +586,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
         detector, pose = (None, None) if detector_only else model_stack(model, config.assets)
         for dataset, segments in gt.items():
             if detector_only:
-                detector = detnet_detector(model, dataset, config)
+                detector = detnet_detector(model, dataset, segments, config)
             assert detector is not None
             gt_hands: dict[Protocol, int] = dict.fromkeys(protocols, 0)
             overlapped: dict[Protocol, int] = dict.fromkeys(protocols, 0)
