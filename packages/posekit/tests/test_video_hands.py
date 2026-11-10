@@ -172,18 +172,20 @@ def test_a_run_resumed_on_new_threads_still_decodes_on_the_gpu() -> None:
     rr.init("thread-hop-test")
     rr.memory_recording()  # the global recording, visible from every thread; nothing leaves the process
     run = run_video_hands(VideoHandsSettings(video_path=video, max_frames=64), _NoHands())
-    steps: list[VideoHandsProgress | BaseException] = []
+    steps: list[VideoHandsProgress] = []
+    errors: list[BaseException] = []
 
     def step() -> None:
         try:
             steps.append(next(run))
-        except BaseException as error:  # the failure is the test's result, re-raised below
-            steps.append(error)
+        except StopIteration:
+            pass
+        except BaseException as error:  # reported by the assert below
+            errors.append(error)
 
-    while not steps or isinstance(steps[-1], VideoHandsProgress) and steps[-1].stage != "done":
+    while not errors and not (steps and steps[-1].stage == "done"):
         thread = threading.Thread(target=step)
         thread.start()
         thread.join()
-    assert not any(isinstance(item, BaseException) for item in steps), steps[-1]
-    last = steps[-1]
-    assert isinstance(last, VideoHandsProgress) and last.frames_done == 64
+    assert not errors, errors[0]
+    assert steps[-1].frames_done == 64

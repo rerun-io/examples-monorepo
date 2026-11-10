@@ -1,10 +1,12 @@
 """CSS of the 3D hands app: the 4DAnyone Space's look (default theme forced dark, viewer filling the page)."""
 
-APP_CSS: str = """
+VIEWER_HEIGHT: str = "calc(100vh - 9rem)"
+"""Viewer frame height: the viewport minus the title band and the footer, the same as ``#main-row``."""
+
+APP_CSS: str = f"#main-row {{ height: {VIEWER_HEIGHT}; min-height: 0; overflow: hidden; }}\n" + """
 /* The page never scrolls: the viewer fills the window, the run log scrolls inside itself, and the left
    column scrolls on its own only when a window is too short for it. */
 html, body, gradio-app, .gradio-container { height: 100%; overflow: hidden; }
-#main-row { height: calc(100vh - 9rem); min-height: 0; overflow: hidden; }
 #left-column { height: 100%; max-height: 100%; overflow-y: auto; scrollbar-gutter: stable; flex-wrap: nowrap; }
 #left-column > * { flex-shrink: 0; }
 #run-log textarea { overflow-y: auto !important; }
@@ -15,7 +17,6 @@ html, body, gradio-app, .gradio-container { height: 100%; overflow: hidden; }
 .gradio-container { max-width: none !important; padding: 0.6rem 1.5rem !important; }
 #app-description h1 { margin: 0 0 0.3rem; }
 #app-description p { margin: 0 0 0.4rem; }
-#main-row { min-height: 0; }
 #source-video video { max-height: 320px !important; }
 /* The examples side by side: four equal tiles in one row (clips of any shape are cropped to fill), with a pager. */
 /* Gradio also gives each tile's inner box the class "gallery", so the row is the one holding the tiles. */
@@ -36,6 +37,3 @@ html, body, gradio-app, .gradio-container { height: 100%; overflow: hidden; }
 }
 #run-status p { font-size: 1.05rem; line-height: 1.4; margin: 0; }
 """
-
-VIEWER_HEIGHT: str = "calc(100vh - 9rem)"
-"""Viewer frame height: the viewport minus the title band and the footer, the same as ``#main-row``."""

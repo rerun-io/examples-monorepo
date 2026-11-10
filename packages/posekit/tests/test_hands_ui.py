@@ -48,8 +48,6 @@ def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(built) == 2
 
 
-
-
 def test_picking_an_example_picks_its_stack_and_an_upload_keeps_the_chosen_one() -> None:
     assert hands_ui.example_stack(str(EXAMPLES / "hands_video.mp4"), "egohand-fast") == "wilor"
     assert hands_ui.example_stack("/tmp/gradio/abc/IMG_6261.MOV", "egohand") == "egohand"
