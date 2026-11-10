@@ -45,10 +45,3 @@ def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> 
     assert hands_ui.pipeline_for("wilor") is first
     assert len(built) == 2
 
-
-def test_the_viewer_is_rewound_to_the_start_after_a_run() -> None:
-    # Temporary (gradio-rerun-viewer#66 replaces it): the page script defines the rewind the Run chain calls on the viewer's element.
-    script = hands_ui.REWIND_SCRIPT.read_text()
-    assert "window.__rerunRewind = " in script and 'play_state: "paused"' in script
-    assert f"__rerunRewind('{hands_ui.VIEWER_ID}', 'video_time')" in hands_ui.REWIND_JS
-    assert hands_ui.page_head().startswith("<script>") and "window.__rerunRewind" in hands_ui.page_head()

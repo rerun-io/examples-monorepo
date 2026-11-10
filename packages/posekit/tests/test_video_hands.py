@@ -15,6 +15,7 @@ from posekit.apis.video_hands import (
     log_chunk_hands,
     log_hand_annotation_context,
     pinhole_camera,
+    send_blueprint,
 )
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
@@ -101,3 +102,13 @@ def test_skeleton_links_have_their_own_colour_and_the_sides_keep_theirs(monkeypa
     assert len(by_id[JOINT_CLASS]["keypoint_connections"]) == len(HAND_21.links)
     assert by_id[JOINT_CLASS]["info"]["color"] >> 8 == (LINK_COLOR[0] << 16) | (LINK_COLOR[1] << 8) | LINK_COLOR[2]
     assert all(not by_id[class_id]["keypoint_connections"] for class_id in by_id if class_id != JOINT_CLASS)
+
+
+def test_the_viewer_plays_the_video_from_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A streamed viewer follows the newest data; the blueprint makes it play video_time from 0 while the hands arrive.
+    sent: list[Any] = []
+    monkeypatch.setattr(rr, "send_blueprint", lambda blueprint, **_: sent.append(blueprint))
+    send_blueprint()
+    time_panel = sent[0].time_panel
+    assert (time_panel.timeline, time_panel.play_state) == ("video_time", "playing")
+    assert time_panel.state is None  # the app's panel_states keeps deciding whether the time panel shows

@@ -24,14 +24,6 @@ from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
-VIEWER_ID: Final[str] = "hands-viewer"
-"""Element id of the Rerun viewer, so the page script can find its WebViewer."""
-# TODO(https://github.com/rerun-io/gradio-rerun-viewer/pull/66): once released, replace the page script and
-# REWIND_JS with `.then(lambda: set_time("video_time", duration=0.0), outputs=[viewer])` and delete hands_ui_rewind.js.
-REWIND_SCRIPT: Final[Path] = Path(__file__).with_name("hands_ui_rewind.js")
-"""Temporary page script that rewinds the viewer after a run (gradio_rerun 0.42 has no time command)."""
-REWIND_JS: Final[str] = f"() => window.__rerunRewind('{VIEWER_ID}', 'video_time')"
-"""Browser step after a run: once the stream stops growing, pause the viewer at the start of ``video_time``."""
 _PIPELINES: dict[str, HandPose3dPipeline] = {}
 """Set-up pipelines by stack name: engines stay loaded for the app's lifetime, so switching stacks costs nothing."""
 
@@ -121,7 +113,7 @@ def stream_hands(
 
 def build() -> gr.Blocks:
     """A video input with an Advanced accordion beside a streaming Rerun viewer."""
-    viewer = Rerun(streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=800, elem_id=VIEWER_ID)
+    viewer = Rerun(streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=800)
     with gr.Blocks() as demo:
         gr.Markdown(
             "# 3D hands with Rerun\n"
@@ -153,7 +145,7 @@ def build() -> gr.Blocks:
         video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])
         run.click(fn=lambda: gr.update(selected="outputs"), inputs=None, outputs=[tabs]).then(
             stream_hands, inputs=[video, stack, max_frames, fx, fy, cx, cy], outputs=[viewer, status]
-        ).then(fn=None, js=REWIND_JS)
+        )
     return demo
 
 
@@ -167,14 +159,9 @@ class Config:
     """Gradio HTTP port."""
 
 
-def page_head() -> str:
-    """The page script that lets ``REWIND_JS`` reach the viewer; it must load before the viewer mounts."""
-    return f"<script>{REWIND_SCRIPT.read_text()}</script>"
-
-
 def launch(config: Config) -> None:
     """Warm up the examples' stacks, then serve the app; one request at a time shares the GPU pipelines."""
     warm_up()
     demo = build()
     demo.queue(max_size=1, default_concurrency_limit=1)
-    demo.launch(server_name=config.server_name, server_port=config.server_port, ssr_mode=False, allowed_paths=[str(EXAMPLES)], head=page_head())
+    demo.launch(server_name=config.server_name, server_port=config.server_port, ssr_mode=False, allowed_paths=[str(EXAMPLES)])

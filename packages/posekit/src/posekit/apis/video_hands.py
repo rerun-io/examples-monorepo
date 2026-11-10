@@ -193,16 +193,23 @@ def send_blueprint() -> None:
 
     The 3D eye is dataforge's headset chase view (``blueprints.headset_eye_controls``): behind and
     above the head, looking down past the camera at the hands.
+
+    The time panel plays ``video_time`` from the start: a streamed viewer would otherwise follow the
+    newest data and sit at the end. The whole video is logged before the hands, so playback starts at
+    once and the hands appear as their chunks arrive.
     """
     rr.send_blueprint(
-        rrb.Horizontal(
-            rrb.Spatial2DView(origin=PINHOLE_PATH, name="video + projected hands", contents=[f"+ {PINHOLE_PATH}/**", f"+ {CAMERA_PATH}/hands/**"]),
-            rrb.Spatial3DView(
-                origin="world",
-                name="3D hands",
-                contents=["+ world/**", f"- {PINHOLE_PATH}/boxes/**"],
-                eye_controls=follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15),
+        rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial2DView(origin=PINHOLE_PATH, name="video + projected hands", contents=[f"+ {PINHOLE_PATH}/**", f"+ {CAMERA_PATH}/hands/**"]),
+                rrb.Spatial3DView(
+                    origin="world",
+                    name="3D hands",
+                    contents=["+ world/**", f"- {PINHOLE_PATH}/boxes/**"],
+                    eye_controls=follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15),
+                ),
             ),
+            rrb.TimePanel(timeline="video_time", play_state="playing"),
         )
     )
 
@@ -281,8 +288,8 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         rr.Pinhole(image_from_camera=camera.intrinsics, resolution=[width, height], image_plane_distance=0.05),
         static=True,
     )
-    send_blueprint()
     video_timestamps_ns: Int64[ndarray, "frames"] = log_video(settings.video_path, Path(VIDEO_PATH), timeline="video_time")
+    send_blueprint()
     log_hand_annotation_context(pipeline.pose.skeleton)
     total_hands: int = 0
     live_slots: set[str] = set()
