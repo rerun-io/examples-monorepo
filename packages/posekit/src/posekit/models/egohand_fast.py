@@ -245,6 +245,11 @@ EgoHandConfigs: TypeAlias = tuple[EgoHandDetectorConfig, EgoHandConfig | EgoHand
 """One EgoHand stack: the detector and either the reference or the fast hand pose role."""
 
 
+def supported_backbone_precision() -> Literal["bf16", "nvfp4"]:
+    """The backbone precision this machine runs: ``nvfp4`` on Blackwell (compute capability 10+), ``bf16`` below it or without CUDA."""
+    return "nvfp4" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10 else "bf16"
+
+
 def fast_egohand_configs(
     assets: Path | None = None, *, backbone_precision: Literal["bf16", "nvfp4"] = "nvfp4"
 ) -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:

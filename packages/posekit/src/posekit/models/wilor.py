@@ -265,7 +265,7 @@ class WilorHands(HandPoses3d):
             keypoints=replace(self.keypoints, xyz_camera=wrist_relative + translation[:, None]),
             vertices=self.vertices - self.cam_t_full[:, None] + translation[:, None],
             cam_t_full=translation,
-            focal_length=torch.full_like(self.focal_length, float(camera[0, 0])),
+            focal_length=torch.full_like(self.focal_length, float(intrinsics[0, 0])),
         )
 
 

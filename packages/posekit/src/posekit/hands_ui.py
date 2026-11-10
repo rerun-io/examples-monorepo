@@ -20,7 +20,9 @@ from jaxtyping import UInt8
 from torch import Tensor
 
 from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, assumed_pinhole, build_pipeline, pinhole_camera, run_video_hands, video_size
+from posekit.cameras import CalibratedCamera
 from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
+from posekit.models.egohand_fast import supported_backbone_precision
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
@@ -29,8 +31,8 @@ _PIPELINES: dict[str, HandPose3dPipeline] = {}
 
 
 def default_stack() -> str:
-    """The accepted EgoHand stack: NVFP4 on Blackwell, BF16 on older GPUs."""
-    return "egohand-fast" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10 else "egohand-fast-bf16"
+    """The accepted EgoHand stack in the precision this GPU runs: NVFP4 on Blackwell, BF16 on older GPUs."""
+    return "egohand-fast" if supported_backbone_precision() == "nvfp4" else "egohand-fast-bf16"
 
 
 def example_rows() -> list[list[str]]:
@@ -84,14 +86,20 @@ def warm_up() -> None:
     """
     from torchcodec.decoders import VideoDecoder
 
+    warmed: set[tuple[str, int, int]] = set()
     for video, stack in example_rows():
         settings: VideoHandsSettings = settings_from_inputs(video, stack, 0, None, None, None, None)
         decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
-        width, height = video_size(settings.video_path)
+        assert decoder.metadata.width is not None and decoder.metadata.height is not None
+        width, height = int(decoder.metadata.width), int(decoder.metadata.height)
+        if (stack, width, height) in warmed:  # same graphs as an example already run
+            continue
+        warmed.add((stack, width, height))
         frames: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(0, settings.frame_batch_size).data.contiguous()
+        camera: CalibratedCamera = pinhole_camera(settings, width, height)
         print(f"[posekit] warming up {stack} on {settings.video_path.name}", flush=True)
         with torch.inference_mode():
-            pipeline_for(stack)(frames, pinhole_camera(settings, width, height))
+            pipeline_for(stack)(frames, camera)[1].in_pinhole(camera.intrinsics)
 
 
 @rr.thread_local_stream("posekit_hands_ui")
@@ -130,7 +138,10 @@ def build() -> gr.Blocks:
                         with gr.Accordion("Advanced", open=False):
                             stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
                             max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
-                            gr.Markdown("Pinhole intrinsics in pixels, filled from a 65° horizontal FOV with the principal point at the image centre.")
+                            gr.Markdown(
+                                f"Pinhole intrinsics in pixels, filled from a {VideoHandsSettings().hfov_deg:g}° horizontal FOV "
+                                "with the principal point at the image centre."
+                            )
                             with gr.Row():
                                 fx = gr.Number(label="fx")
                                 fy = gr.Number(label="fy")

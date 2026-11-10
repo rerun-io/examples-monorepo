@@ -34,13 +34,13 @@ class EgoHandCalibration:
     """Activation ranges and the exact calibration split."""
 
     segment: str
-    """Source catalog segment; evaluation uses separate frame indices or datasets."""
+    """Name of the calibration set (``egohand-catalog-calibration-v1``: frames from the five catalog datasets)."""
     frame_indices: list[int]
-    """Source OAK-left video frame indices."""
+    """Index of each calibration frame within that set."""
     excluded_mount_indices: list[int]
-    """The segment's mount-fit sample, excluded before calibration."""
+    """Indices held out of calibration; empty for the catalog set, kept because the .rrd table schema has it."""
     frame_sha256: list[str]
-    """Hashes of decoded RGB frames, checked against every benchmark frame."""
+    """Hashes of the decoded RGB calibration frames, one per index."""
     n_crops: int
     """Detected hand crops used to measure ranges."""
     input_amax: dict[str, float]

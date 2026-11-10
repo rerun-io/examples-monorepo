@@ -35,7 +35,6 @@ from tqdm.auto import tqdm
 
 from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
-from posekit.models.wilor import WilorHands
 from posekit.predictions import HandDetections, HandPoses3d, HandSide
 from posekit.skeletons import KeypointSkeleton
 
@@ -224,7 +223,7 @@ def video_size(path: Path) -> tuple[int, int]:
     """``width, height`` of a video, from its metadata (no decoding)."""
     from torchcodec.decoders import VideoDecoder
 
-    metadata = VideoDecoder(path).metadata
+    metadata = VideoDecoder(path, seek_mode="approximate").metadata
     if metadata.width is None or metadata.height is None:
         raise ValueError(f"Could not read the frame size of {path}.")
     return int(metadata.width), int(metadata.height)
@@ -238,7 +237,11 @@ def pinhole_camera(settings: VideoHandsSettings, width: int, height: int) -> Cal
 
 
 def describe_camera(settings: VideoHandsSettings, camera: CalibratedCamera) -> str:
-    """``assumed pinhole, f = ...`` when the camera is the assumed one, else its four intrinsics."""
+    """``assumed pinhole, f = ...`` when the camera is the assumed one, else its four intrinsics.
+
+    Within half a pixel counts as assumed: the app fills its fields with the assumed values rounded to 0.1 px
+    (``hands_ui.fill_intrinsics``), so an untouched app run reports the assumed camera like the CLI does.
+    """
     fx, fy, cx, cy = camera.intrinsics[0, 0], camera.intrinsics[1, 1], camera.intrinsics[0, 2], camera.intrinsics[1, 2]
     if np.allclose((fx, fy, cx, cy), assumed_pinhole(camera.width, camera.height, settings.hfov_deg), atol=0.5):
         return f"assumed pinhole, f = {fx:.0f} px ({settings.hfov_deg:g}° horizontal FOV)"
@@ -298,8 +301,7 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
-            if isinstance(hands, WilorHands):
-                hands = hands.in_pinhole(camera.intrinsics)
+            hands = hands.in_pinhole(camera.intrinsics)
         total_hands += hands.num_hands
         chunk: Int64[ndarray, "chunk"] = np.arange(start, stop, dtype=np.int64)
         timestamps: Int64[ndarray, "chunk"] = (

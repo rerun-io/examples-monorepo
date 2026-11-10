@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import numpy as np
 import pytest
 import rerun as rr
 import torch
@@ -112,3 +113,9 @@ def test_the_viewer_plays_the_video_from_the_start(monkeypatch: pytest.MonkeyPat
     time_panel = sent[0].time_panel
     assert (time_panel.timeline, time_panel.play_state) == ("video_time", "playing")
     assert time_panel.state is None  # the app's panel_states keeps deciding whether the time panel shows
+
+
+def test_hands_from_a_model_that_uses_the_given_camera_stay_as_they_are() -> None:
+    # The video core puts every stack's hands in the run's pinhole; only WiLoR (own virtual camera) overrides in_pinhole.
+    _, hands = _chunk()
+    assert hands.in_pinhole(np.eye(3)) is hands

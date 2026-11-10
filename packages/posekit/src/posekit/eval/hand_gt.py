@@ -6,7 +6,7 @@ Ground truth is dataforge's ``/world/gt/coco133_xyz`` (COCO-WholeBody, 21 hand s
 side in MediaPipe order) in world metres, moved into the camera with the rig pose and the
 camera's extrinsic. The camera's 2D label entity holds dataforge's full-lens projection
 (SHOW3D: its annotated 2D joints). Lenses are read natively (pinhole, Fisheye624, double
-sphere); an unknown lens fails rather than falling back to a pinhole.
+sphere): a camera without distortion components is a pinhole, and an unknown distortion model fails.
 """
 
 from dataclasses import dataclass

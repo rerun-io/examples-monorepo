@@ -41,7 +41,7 @@ from simplecv.catalog_video_codec import wrap_mp4
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from posekit.eval.hand_gt import EVAL_SUBSETS, SIDES, GtDataset, HandGtSegment, HandGtSubset, read_hand_gt
+from posekit.eval.hand_gt import EVAL_SUBSETS, MIN_JOINTS, SIDES, GtDataset, HandGtSegment, HandGtSubset, read_hand_gt
 from posekit.eval.hand_metrics import HandErrors, Summary, box_iou, hand_errors, summarize
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.models.egohand import EgoHandAssetPaths, EgoHandConfig, EgoHandDetectorConfig, asset_paths
@@ -92,10 +92,13 @@ class EvalModel:
     """Annotation class of the model's left hand; its right hand is the next id."""
     metric_root: bool
     """The model predicts a metric camera-space wrist, so root translation error is scored; otherwise it is NaN."""
+    banded: bool = False
+    """End-to-end accuracy must stay within ``BANDED_METRICS``' 5 % of the ``egohand`` reference (the fast stacks)."""
 
 
 EVAL_MODELS: dict[ModelName, EvalModel] = {
-    "wilor": EvalModel(2, False), "egohand": EvalModel(4, True), "egohand-fast": EvalModel(6, True), "egohand-fast-bf16": EvalModel(6, True),
+    "wilor": EvalModel(2, False), "egohand": EvalModel(4, True), "egohand-fast": EvalModel(6, True, banded=True),
+    "egohand-fast-bf16": EvalModel(6, True, banded=True),
 }
 
 
@@ -206,7 +209,7 @@ class EndToEndScore:
         self.frames += 1
         self.hands += len(hands.sides)
         valid: Bool[ndarray, "2 21"] = segment.valid[index]
-        gt_sides: list[int] = [s for s in range(2) if valid[s, 0] and valid[s].sum() >= 15]
+        gt_sides: list[int] = [s for s in range(2) if valid[s, 0] and valid[s].sum() >= MIN_JOINTS]
         self.gt_hands += len(gt_sides)
         gt_boxes: dict[int, Float32[ndarray, "4"]] = {s: joint_box(segment.uv[index, s], valid[s], 1.0) for s in gt_sides}
         pairs: list[tuple[float, int, int]] = sorted(((box_iou(box, gt_boxes[s]), s, j) for s in gt_sides for j, box in enumerate(boxes)), reverse=True)
@@ -222,7 +225,7 @@ class EndToEndScore:
             if detections.sides[j] == SIDES[s]:
                 self.side_correct += 1
                 matches.append(s)
-        self.ious.extend(max((box_iou(b, gt_boxes[s]) for b in boxes), default=0.0) for s in gt_sides)
+        self.ious.extend(max((iou for iou, t, _ in pairs if t == s), default=0.0) for s in gt_sides)
         for s in matches:
             if SIDES[s] not in hands.sides:
                 continue
@@ -619,7 +622,7 @@ def main(config: HandsEvalConfig) -> HandsEvalReport:
             raise ValueError(f"{config.baseline} has no egohand end-to-end rows")
         failures: list[str] = []
         for model in config.models:
-            if not reference or not model.startswith("egohand-fast"):
+            if not reference or not EVAL_MODELS[model].banded:
                 continue
             rows: list[EndToEndCell] = [row for row in report.end_to_end if row.model == model]
             failed: list[str] = failed_bands(reference, rows)

@@ -21,7 +21,7 @@ from simplecv.rrd_query_utils import first_valid_value
 
 from posekit.cameras import CalibratedCamera
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
-from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
+from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs, supported_backbone_precision
 
 pytestmark = pytest.mark.integration
 
@@ -30,7 +30,7 @@ CAMERA = "/world/rig_04/cam_00/pinhole"
 
 def fast_configs_for_device() -> tuple[EgoHandDetectorConfig, EgoHandFastConfig]:
     """The fast stack in the precision the test GPU supports: NVFP4/FP8 on Blackwell, BF16/FP16 below it."""
-    return fast_egohand_configs(backbone_precision="nvfp4" if torch.cuda.get_device_capability()[0] >= 10 else "bf16")
+    return fast_egohand_configs(backbone_precision=supported_backbone_precision())
 
 
 @pytest.fixture(autouse=True)
