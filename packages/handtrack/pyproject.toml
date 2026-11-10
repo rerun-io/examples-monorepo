@@ -39,6 +39,8 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 paths = ["handtrack", "tests"]
 ignore_names = [
     "weights_sha256",  # DetNetExportReport field, serialised
+    # apis.keynet_eval: ScoreRow fields written through serde.
+    "error_crop_px", "pck05", "pck10", "error_net_px", "presence_accuracy", "presence_recall", "presence_precision",
     # apis.export_nets_onnx (robocap-live nets): ExportReport fields written through serde, and an onnxruntime SessionOptions setting.
     "torch_version", "onnxruntime_version", "graphs", "intra_op_num_threads",
     # eval.scorecard: ScoreRow KPI fields (read through serde / dataclasses.asdict) and the scorer entry points the overnight runner calls.

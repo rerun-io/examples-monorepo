@@ -37,7 +37,7 @@ from torch import Tensor
 
 from handtrack.data.batches import CropKind, KeyNetBatch
 from handtrack.data.catalog import camera_angles, layout_for, list_segments, read_hand_timeline, read_rig, read_statics
-from handtrack.data.echo import Producer
+from handtrack.data.echo import KeyNetProducer
 from handtrack.data.luma import grey_from_rgb
 from handtrack.data.rerun_source import SIDES, dense_rows
 from handtrack.data.segment_labels import HandProjection, keypoint_priors, project_hands, segment_labels
@@ -91,17 +91,7 @@ KEYNET_DATASETS: dict[str, KeyNetDataset] = {
     "dataforge-gen-humanego-subset": KeyNetDataset(tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h264", "coco3d", (0.0,) * 6, min_score=0.8,
                                                    fetch_block_size=128),
 }
-"""The datasets KeyNet trains and is scored on. Camera ids across datasets follow ``camera_offsets``."""
-
-
-def camera_offsets(datasets: Sequence[str]) -> dict[str, int]:
-    """First camera id of each dataset, in list order (ids unique across the datasets)."""
-    offsets: dict[str, int] = {}
-    total: int = 0
-    for name in datasets:
-        offsets[name] = total
-        total += len(KEYNET_DATASETS[name].cameras)
-    return offsets
+"""The datasets KeyNet trains and is scored on."""
 
 
 # --- the palm centre ----------------------------------------------------------------------------------------------------------------
@@ -469,7 +459,7 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
 
 
 def keynet_producer(name: str, dataset_index: int, segments: Sequence[str], *, catalog_url: str, device: torch.device, augment: KeyNetAugment, seed: int,
-                    endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32, cuts: int = 1) -> Producer:
+                    endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32, cuts: int = 1) -> KeyNetProducer:
     """A ``Producer`` of training crops for ``echo.EchoStream``: ``stream_cuts`` with ``cuts`` independent jitters of each chunk."""
     cut_stream: CutStream = stream_cuts(name, dataset_index, segments, catalog_url=catalog_url, device=device, augments=[augment] * cuts, seed=seed,
                                         endless=endless, fetch_block_size=fetch_block_size, chunk=chunk)

@@ -10,6 +10,7 @@ import dataclasses
 import queue
 import threading
 from collections.abc import Callable, Iterable, Sequence
+from typing import cast
 
 import torch
 from jaxtyping import Bool, Float32, Int64
@@ -19,17 +20,23 @@ from handtrack.data.batches import DetNetBatch, KeyNetBatch
 from handtrack.data.stream import DetNetSamples, KeyNetSamples, empty_detnet_samples, empty_keynet_samples, sample_count, select_samples
 
 Samples = DetNetSamples | KeyNetSamples
-Producer = Callable[[int], Iterable[Samples]]
-"""One dataset's decoded images (DetNet) or crops (KeyNet) for an epoch (CPU or device tensors, any chunk size)."""
-Finish = Callable[[Samples, torch.Generator], DetNetBatch | KeyNetBatch]
+Producer = Callable[[int], Iterable[DetNetSamples]]
+"""One dataset's decoded images for an epoch (CPU or device tensors, any chunk size)."""
+KeyNetProducer = Callable[[int], Iterable[KeyNetSamples]]
+"""One dataset's KeyNet crops for an epoch."""
+Finish = Callable[[DetNetSamples, torch.Generator], DetNetBatch]
 """Turns drawn samples into a training batch (augmentation lives here)."""
+KeyNetFinish = Callable[[KeyNetSamples, torch.Generator], KeyNetBatch]
 
 
-def plain_batch(samples: Samples, generator: torch.Generator) -> DetNetBatch:
-    """No augmentation: pooled bytes to [0, 1] and the stored targets (DetNet samples)."""
+def _select(samples: Samples, index: Int64[Tensor, "m"]) -> Samples:
+    """``select_samples`` on either sample type (its type variable takes one type at a time)."""
+    return select_samples(samples, index) if isinstance(samples, DetNetSamples) else select_samples(samples, index)
+
+
+def plain_batch(samples: DetNetSamples, generator: torch.Generator) -> DetNetBatch:
+    """No augmentation: pooled bytes to [0, 1] and the stored targets."""
     del generator
-    if not isinstance(samples, DetNetSamples):
-        raise TypeError("plain_batch takes DetNet samples")
     return DetNetBatch(pooled=samples.pooled[:, None].float() / 255.0, circle=samples.circle, presence=samples.presence,
                        circle_mask=samples.circle_mask, presence_mask=samples.presence_mask, dataset=samples.dataset)
 
@@ -86,7 +93,7 @@ class _EchoPool:
         """n distinct alive rows, the less used ones more likely; rows reaching ``max_echo`` uses leave the pool."""
         weight: Float32[Tensor, "capacity"] = torch.where(self.alive, (self.max_echo - self.uses).float(), torch.zeros_like(self.uses, dtype=torch.float32))
         chosen: Int64[Tensor, "n"] = torch.multinomial(weight, n, replacement=False, generator=self.generator)
-        drawn: Samples = select_samples(self.storage, chosen.to(self.device, non_blocking=True))
+        drawn: Samples = _select(self.storage, chosen.to(self.device, non_blocking=True))
         self.uses[chosen] += 1
         self.alive[chosen] = self.uses[chosen] < self.max_echo
         self.drawn += n
@@ -98,7 +105,7 @@ class EchoStream:
 
     def __init__(
         self,
-        producers: Sequence[Producer],
+        producers: Sequence[Producer] | Sequence[KeyNetProducer],
         *,
         batch_size: int,
         pool_capacity: int,
@@ -106,7 +113,7 @@ class EchoStream:
         max_echo: int,
         device: torch.device,
         seed: int,
-        finish: Finish = plain_batch,
+        finish: Finish | KeyNetFinish = plain_batch,
         epoch_steps: int | None = None,
         min_echo: int = 1,
         prefetch: int = 0,
@@ -121,12 +128,12 @@ class EchoStream:
             raise ValueError("need 1 <= min_echo <= max_echo")
         if batch_size % len(producers):
             raise ValueError(f"batch size {batch_size} does not split evenly across {len(producers)} datasets")
-        self.producers: list[Producer] = list(producers)
+        self.producers: list[Producer | KeyNetProducer] = list(producers)
         self.share: int = batch_size // len(producers)
         if not self.share <= min_fill <= pool_capacity:
             raise ValueError("need share <= min_fill <= pool_capacity")
         self.min_fill: int = min_fill
-        self.finish: Finish = finish
+        self.finish: Finish | KeyNetFinish = finish
         self.device: torch.device = device
         self.generator: torch.Generator = torch.Generator(device=device).manual_seed(seed)
         """Augmentation randomness on the device (``finish``)."""
@@ -150,7 +157,7 @@ class EchoStream:
             for chunk in self.producers[index](epoch):
                 samples: Samples = type(chunk)(**{f.name: getattr(chunk, f.name).to(self.device, non_blocking=True) for f in dataclasses.fields(chunk)})
                 for start in range(0, sample_count(samples), pool.capacity):
-                    part: Samples = select_samples(samples, torch.arange(start, min(start + pool.capacity, sample_count(samples)), device=self.device))
+                    part: Samples = _select(samples, torch.arange(start, min(start + pool.capacity, sample_count(samples)), device=self.device))
                     with pool.lock:
                         pool.lock.wait_for(lambda part=part: self.stop.is_set() or pool.room() >= sample_count(part))
                         if self.stop.is_set():
@@ -223,7 +230,7 @@ class EchoStream:
         if self.epoch_steps is not None and self.steps >= self.epoch_steps:
             return None
         if self.prefetch:
-            item: DetNetBatch | BaseException | None = None
+            item: DetNetBatch | KeyNetBatch | BaseException | None = None
             while not self.stop.is_set():
                 try:
                     item = self.ready.get(timeout=0.5)
@@ -252,7 +259,10 @@ class EchoStream:
                 pool.lock.notify_all()
         self.started = True
         merged: Samples = type(parts[0])(**{f.name: torch.cat([getattr(p, f.name) for p in parts]) for f in dataclasses.fields(parts[0])})
-        return self.finish(merged, self.generator)
+        # The constructor pairs the pools' sample type with its finish (keynet=True: KeyNetSamples and a KeyNet finish).
+        if isinstance(merged, KeyNetSamples):
+            return cast(KeyNetFinish, self.finish)(merged, self.generator)
+        return cast(Finish, self.finish)(merged, self.generator)
 
     def cancel(self) -> None:
         self.stop.set()

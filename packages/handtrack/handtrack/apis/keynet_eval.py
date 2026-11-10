@@ -157,15 +157,15 @@ def main(config: Config) -> None:
         if row.camera == "all":
             print(json.dumps({k: (round(v, 3) if isinstance(v, float) else v) for k, v in dataclasses.asdict(row).items()}), flush=True)
     if config.rrd is not None:
-        log_examples(config, holdout, predictions)
+        log_examples(config, config.rrd, holdout, predictions)
 
 
-def log_examples(config: Config, holdout: KeyNetHoldout, predictions: dict[tuple[str, str], Predictions]) -> None:
+def log_examples(config: Config, rrd: Path, holdout: KeyNetHoldout, predictions: dict[tuple[str, str], Predictions]) -> None:
     """Example positives of each dataset (both variants): the crop, ground truth (cyan) and each model's tracked keypoints."""
     import rerun as rr
 
     rec = rr.RecordingStream("handtrack-keynet-eval", recording_id="handtrack-keynet-eval")
-    rec.save(config.rrd)
+    rec.save(rrd)
     palette: list[list[int]] = [[255, 80, 80], [120, 255, 120], [255, 200, 0], [200, 120, 255]]
     samples: KeyNetSamples = holdout.samples
     for d, dataset in enumerate(holdout.dataset_names):

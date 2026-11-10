@@ -13,7 +13,7 @@ from handtrack.data.augment import DetNetAugment
 from handtrack.data.batches import BatchSource
 from handtrack.data.cache import DetNetCache, KeyNetCache
 from handtrack.data.catalog import CATALOG_URL, DatasetName, SplitName, list_segments, select_split
-from handtrack.data.echo import EchoStream, Producer
+from handtrack.data.echo import EchoStream, KeyNetProducer, Producer
 from handtrack.data.keynet_holdout import HoldoutSource, read_holdout
 from handtrack.data.keynet_rerun import DrawAugment, keynet_finish, keynet_producer
 from handtrack.data.rerun_source import DATASET_SPECS, build_manifest, nvdec_producer, rerun_producer, source_spec, training_finish
@@ -274,7 +274,7 @@ def keynet_rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, de
     # Priors are zeroed at draw time (``DrawAugment.zero_input_probability``), so every stored crop keeps its prior.
     augment: KeyNetAugment = KeyNetAugment(negative_margin=settings.keynet_negative_margin, full_rotation_probability=rerun.keynet_full_rotation,
                                            zero_input_probability=0.0)
-    producers: list[Producer] = [keynet_producer(name, index, training_segments(name, holdout, rerun.catalog_url), catalog_url=rerun.catalog_url, device=device,
+    producers: list[KeyNetProducer] = [keynet_producer(name, index, training_segments(name, holdout, rerun.catalog_url), catalog_url=rerun.catalog_url, device=device,
                                                  augment=augment, seed=settings.seed + index, endless=True, cuts=rerun.keynet_cuts)
                                  for index, name in enumerate(rerun.datasets)]
     return EchoStream(producers, batch_size=settings.keynet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from jaxtyping import Bool, Float32, Int64
+from jaxtyping import Bool, Int64
 from numpy import ndarray
 from torch import Tensor
 
@@ -147,8 +147,3 @@ def positive_count(holdout: KeyNetHoldout) -> dict[str, int]:
     """Positive crops of variant 0 per dataset (a report line)."""
     positive: Bool[Tensor, "n"] = (holdout.samples.kind == int(CropKind.POSITIVE)) & (holdout.variant == 0)
     return {name: int((positive & (holdout.samples.dataset == i)).sum()) for i, name in enumerate(holdout.dataset_names)}
-
-
-def crop_errors(predicted: Float32[Tensor, "b 21 2"], target: Float32[Tensor, "b 21 2"]) -> Float32[Tensor, "b 21"]:
-    """Per-keypoint crop-pixel distance (crop side 96; the hand spans about 80 px of it)."""
-    return (predicted - target).norm(dim=-1)
