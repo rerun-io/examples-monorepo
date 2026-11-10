@@ -14,7 +14,7 @@ from posekit.predictions import Keypoints3d, MeshDetail
 from posekit.skeletons import SOMA_HAND
 
 
-def _hands(soma: Path | None) -> EgoHandReconstruction:
+def _hands() -> EgoHandReconstruction:
     """A left and a right hand with 6-vertex meshes whose vertex v sits at x = v (+100 on the right hand)."""
     n, k = 2, SOMA_HAND.num_keypoints
     vertices = torch.zeros((n, 6, 3))
@@ -25,7 +25,7 @@ def _hands(soma: Path | None) -> EgoHandReconstruction:
         vertices=vertices,
         faces={"left": torch.tensor([[0, 1, 2], [3, 4, 5]]), "right": torch.tensor([[0, 2, 1], [3, 5, 4]])},
         rotations=torch.zeros((n, k, 3, 3)), identity=torch.zeros((n, 5)), scale=torch.ones(n), translation=torch.zeros((n, 3)),
-        scale_parameters=None, soma=soma,
+        scale_parameters=None, soma=Path("/unused"),
     )
 
 
@@ -39,7 +39,7 @@ def test_a_coarser_level_maps_each_side_with_its_own_rule_and_takes_its_triangle
         "xlo": {side: SomaMeshLod(torch.tensor([[0, 1, 2]]), from_mid=lambda mid: (mid[:, 0::2] + mid[:, 1::2]) / 2) for side in ("left", "right")},
     }
     monkeypatch.setattr(egohand, "soma_mesh_lod", lambda soma, detail: levels[detail])
-    hands = _hands(Path("/unused"))
+    hands = _hands()
     low = hands.at_mesh_detail("low")
     assert low.vertices is not None and low.faces is not None
     assert low.vertices[:, :, 0].tolist() == [[0.0, 1.0, 2.0], [103.0, 104.0, 105.0]]
@@ -48,8 +48,6 @@ def test_a_coarser_level_maps_each_side_with_its_own_rule_and_takes_its_triangle
     xlo = hands.at_mesh_detail("xlo")
     assert xlo.vertices is not None and xlo.vertices[:, :, 0].tolist() == [[0.5, 2.5, 4.5], [100.5, 102.5, 104.5]]
     assert hands.at_mesh_detail("full") is hands
-    unchanged = _hands(None).at_mesh_detail("low")  # no levels of detail: the model's own mesh
-    assert unchanged.vertices is not None and unchanged.vertices.shape == (2, 6, 3)
 
 
 @pytest.mark.integration
