@@ -42,17 +42,19 @@ def test_palm_centre_reproduces_the_generic_hand_and_follows_a_rigid_motion_and_
     torch.testing.assert_close(palm_centre(moved, coefficients), moved[int(LANDMARK.PALM_CENTER)], atol=1e-3, rtol=0)
 
 
-def test_coco_landmarks_map_the_slots_and_build_the_palm_from_the_palm_points() -> None:
+def test_coco_landmarks_map_the_slots_and_build_the_palm_of_both_hands() -> None:
+    """The left slots hold the generic (left) rest hand, the right slots its MIRROR image (a real right hand), moved and rotated."""
     rest_m: Tensor = _rest() / 1000.0
+    mirrored: Tensor = (rest_m * torch.tensor([-1.0, 1.0, 1.0])) @ _rotation(1.1).T + torch.tensor([0.3, -0.1, 0.5])
     xyz: Tensor = torch.full((1, 133, 3), torch.nan)
     for slot, landmark in COCO_SLOTS.items():
         xyz[0, slot] = rest_m[landmark]
-        xyz[0, slot + 21] = rest_m[landmark] + 1.0
+        xyz[0, slot + 21] = mirrored[landmark]
     confidence: Tensor = torch.ones((1, 133))
     points, known = coco_landmarks(xyz, confidence, palm_coefficients(_rest()))
     assert bool(known.all())
     torch.testing.assert_close(points[0, 0], rest_m, atol=1e-5, rtol=0)
-    torch.testing.assert_close(points[0, 1], rest_m + 1.0, atol=1e-5, rtol=0)
+    torch.testing.assert_close(points[0, 1], mirrored, atol=1e-5, rtol=0)  # landmark 20 included: on the palm side of the right hand
 
 
 def test_coco_landmarks_mark_unconfident_points_unknown_and_drop_the_palm_with_them() -> None:

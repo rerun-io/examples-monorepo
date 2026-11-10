@@ -106,8 +106,10 @@ class HoldoutSource:
     """A validation ``BatchSource`` over one variant of a ``KeyNetHoldout``, with exact metadata (``KeyNetValidationSource``)."""
 
     def __init__(self, holdout: KeyNetHoldout, batch_size: int, device: torch.device | str, variant: int = 0) -> None:
-        chosen: Bool[Tensor, "n"] = holdout.variant == variant
-        self.samples: KeyNetSamples = select_samples(holdout.samples, chosen)
+        chosen: Int64[Tensor, "m"] = (holdout.variant == variant).nonzero()[:, 0]
+        # A seeded permutation: the file is one dataset after another, so any prefix (a capped validation pass) covers every dataset.
+        order: Int64[Tensor, "m"] = chosen[torch.randperm(len(chosen), generator=torch.Generator().manual_seed(0))]
+        self.samples: KeyNetSamples = select_samples(holdout.samples, order)
         self.samples = KeyNetSamples(**{f.name: getattr(self.samples, f.name).to(device) for f in dataclasses.fields(self.samples)})
         self.batch_size: int = batch_size
         self.position: int = 0

@@ -270,7 +270,10 @@ def coco_landmarks(xyz: Float32[Tensor, "k 133 3"], confidence: Float32[Tensor, 
         good: Bool[Tensor, "k 20"] = torch.isfinite(chosen).all(dim=-1) & (confidence[:, slots + side * RIGHT_HAND_SLOT_OFFSET] > 0)
         points[:, side, landmarks] = torch.where(good[..., None], chosen, torch.full_like(chosen, torch.nan))
         known[:, side, landmarks] = good
-    palm: Float32[Tensor, "k 2 3"] = palm_centre(points, coefficients)
+    # The coefficients come from the generic LEFT hand; a right hand is its mirror image, so its palm normal (e1 x e2) flips: negate
+    # the normal coefficient for slot 1, or the palm centre lands ~37 mm on the back of every right hand.
+    right: Float32[Tensor, "3"] = coefficients * torch.tensor([1.0, 1.0, -1.0], dtype=coefficients.dtype, device=coefficients.device)
+    palm: Float32[Tensor, "k 2 3"] = torch.stack([palm_centre(points[:, 0], coefficients), palm_centre(points[:, 1], right)], dim=1)
     palm_known: Bool[Tensor, "k 2"] = known[..., list(_PALM_POINTS)].all(dim=-1) & torch.isfinite(palm).all(dim=-1)
     points[..., int(LANDMARK.PALM_CENTER), :] = torch.where(palm_known[..., None], palm, torch.full_like(palm, torch.nan))
     known[..., int(LANDMARK.PALM_CENTER)] = palm_known

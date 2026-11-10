@@ -142,9 +142,11 @@ def main(config: Config) -> None:
         for prior in ("tracked", "zero"):
             predicted: Predictions = predict(model, samples, prior == "zero", device, config.batch)
             predictions[(name, prior)] = predicted
+            # tracked: rows whose stored prior exists (the evaluation recipe stores zeros when a hand has no history); zero: every row.
+            has_prior: Bool[Tensor, "n"] = samples.keypoints.abs().sum(dim=-1) > 0
             for d, dataset in enumerate(holdout.dataset_names):
                 for v, variant in enumerate(VARIANTS):
-                    base: Bool[Tensor, "n"] = (samples.dataset == d) & (holdout.variant == v)
+                    base: Bool[Tensor, "n"] = (samples.dataset == d) & (holdout.variant == v) & (has_prior if prior == "tracked" else torch.ones_like(has_prior))
                     rows.append(score(name, SHORT.get(dataset, dataset), "all", variant, prior, samples, predicted, base))
                     if v == 0 and prior == "tracked":
                         for c, camera in enumerate(KEYNET_DATASETS[dataset].cameras):

@@ -17,7 +17,7 @@ from handtrack.data.echo import EchoStream, KeyNetProducer, Producer
 from handtrack.data.keynet_holdout import HoldoutSource, read_holdout
 from handtrack.data.keynet_rerun import DrawAugment, keynet_finish, keynet_producer
 from handtrack.data.rerun_source import DATASET_SPECS, build_manifest, nvdec_producer, rerun_producer, source_spec, training_finish
-from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig
+from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig, sample_count
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
 
 
@@ -188,7 +188,12 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
             raise ValueError("stream.rerun feeds one net at a time; train with nets=detnet or nets=keynet")
         return rerun_source(settings, settings.rerun, torch.device(device))
     if settings.rerun is not None and settings.rerun.keynet_holdout is not None and nets == "keynet":
-        return HoldoutSource(read_holdout(settings.rerun.keynet_holdout), settings.keynet_batch, device)
+        holdout_source: HoldoutSource = HoldoutSource(read_holdout(settings.rerun.keynet_holdout), settings.keynet_batch, device)
+        rows: int = sample_count(holdout_source.samples)
+        if rows > settings.max_val_batches * settings.keynet_batch:
+            raise ValueError(f"the KeyNet holdout has {rows} rows but validation reads at most {settings.max_val_batches} x {settings.keynet_batch}; "
+                             "raise stream.max_val_batches so every model is scored on the whole holdout")
+        return holdout_source
     if settings.detnet_cache is not None and not evaluation:
         if nets != "detnet":
             raise ValueError("stream.detnet_cache holds DetNet samples only; train with nets=detnet")
