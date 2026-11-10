@@ -47,9 +47,15 @@ PINHOLE_PATH: str = f"{CAMERA_PATH}/pinhole"
 VIDEO_PATH: str = f"{PINHOLE_PATH}/video"
 """Video stream of the source camera (dataforge's ``video_path``)."""
 SIDE_CLASS: dict[HandSide, int] = {"left": 0, "right": 1}
-"""Annotation class of each side (skeleton links and colour)."""
+"""Annotation class of each side (box and label colour)."""
 SIDE_COLOR: dict[HandSide, tuple[int, int, int]] = {"left": (66, 135, 245), "right": (245, 135, 66)}
 """Display colour of each side."""
+MESH_ALPHA: int = 60
+"""Mesh opacity (0-255): low enough that the hand in the video and the green joints show through."""
+JOINT_CLASS: int = 2
+"""Annotation class of the joints of either side: it carries the skeleton links in ``LINK_COLOR``."""
+LINK_COLOR: tuple[int, int, int] = (255, 255, 255)
+"""Skeleton link colour: white stands out on both side colours and on skin (red would read as low confidence)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -87,17 +93,17 @@ class VideoHandsConfig(VideoHandsSettings):
 
 
 def log_hand_annotation_context(skeleton: KeypointSkeleton) -> None:
-    """One annotation class per side, both with the model's skeleton links."""
+    """One annotation class per side (boxes, labels) and one for the joints with the model's skeleton links in ``LINK_COLOR``."""
     rr.log(
         "world",
         rr.AnnotationContext(
             [
+                *(rr.ClassDescription(info=rr.AnnotationInfo(id=class_id, label=f"{side} hand", color=SIDE_COLOR[side])) for side, class_id in SIDE_CLASS.items()),
                 rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=class_id, label=f"{side} hand", color=SIDE_COLOR[side]),
+                    info=rr.AnnotationInfo(id=JOINT_CLASS, label="hand joints", color=LINK_COLOR),
                     keypoint_annotations=[rr.AnnotationInfo(id=index, label=name) for index, name in enumerate(skeleton.keypoint_names)],
                     keypoint_connections=list(skeleton.links),
-                )
-                for side, class_id in SIDE_CLASS.items()
+                ),
             ]
         ),
         static=True,
@@ -126,7 +132,8 @@ def log_chunk_hands(
 
     Each hand's joints and mesh go under ``world/camera/hands/<slot>`` in the camera frame
     (the video view projects them through the pinhole); its detector box goes under ``world/camera/pinhole/boxes/<slot>``.
-    Joints are simplecv's ``Points3DWithConfidence`` at confidence 1.0 (no model here gives one per joint), so they show green.
+    Joints are simplecv's ``Points3DWithConfidence`` at confidence 1.0 (no model here gives one per joint), so they show green;
+    their class draws the skeleton links in ``LINK_COLOR``.
 
     Args:
         frame_indices: Global frame index of each chunk frame.
@@ -164,12 +171,12 @@ def log_chunk_hands(
             if xyz is not None:
                 rr.log(
                     f"{CAMERA_PATH}/hands/{slot}/joints",
-                    Points3DWithConfidence(xyz[row], full_confidence, class_ids=SIDE_CLASS[side], keypoint_ids=keypoint_ids, radii=0.004),
+                    Points3DWithConfidence(xyz[row], full_confidence, class_ids=JOINT_CLASS, keypoint_ids=keypoint_ids, radii=0.004),
                 )
             if vertices is not None and side in faces:
                 rr.log(
                     f"{CAMERA_PATH}/hands/{slot}/mesh",
-                    rr.Mesh3D(vertex_positions=vertices[row], triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], 160)),
+                    rr.Mesh3D(vertex_positions=vertices[row], triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], MESH_ALPHA)),
                 )
         for slot in sorted(live_slots - present):
             for path in (f"{PINHOLE_PATH}/boxes/{slot}", f"{CAMERA_PATH}/hands/{slot}/joints", f"{CAMERA_PATH}/hands/{slot}/mesh"):

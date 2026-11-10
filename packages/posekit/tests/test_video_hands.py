@@ -6,7 +6,16 @@ import pytest
 import rerun as rr
 import torch
 
-from posekit.apis.video_hands import VideoHandsSettings, assumed_pinhole, describe_camera, log_chunk_hands, pinhole_camera
+from posekit.apis.video_hands import (
+    JOINT_CLASS,
+    LINK_COLOR,
+    VideoHandsSettings,
+    assumed_pinhole,
+    describe_camera,
+    log_chunk_hands,
+    log_hand_annotation_context,
+    pinhole_camera,
+)
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
 
@@ -79,3 +88,16 @@ def test_joints_carry_full_confidence_and_show_green(monkeypatch: pytest.MonkeyP
     batches = {batch.component_descriptor().component: batch.as_arrow_array().to_pylist() for batch in joints.as_component_batches()}
     assert batches["simplecv.KeypointConfidence3D:confidences"] == [1.0] * 21
     assert {packed >> 8 for packed in batches["Points3D:colors"]} == {0x00FF00}
+    assert joints.points3d.class_ids.as_arrow_array().to_pylist() == [JOINT_CLASS]
+
+
+def test_skeleton_links_have_their_own_colour_and_the_sides_keep_theirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The links get one contrasting colour; drawn in the side colour they vanish into the mesh of the same colour.
+    logged: list[tuple[str, Any]] = []
+    monkeypatch.setattr(rr, "log", lambda path, archetype, **_: logged.append((path, archetype)))
+    log_hand_annotation_context(HAND_21)
+    context = logged[0][1].context.as_arrow_array().to_pylist()[0]
+    by_id = {entry["class_id"]: entry["class_description"] for entry in context}
+    assert len(by_id[JOINT_CLASS]["keypoint_connections"]) == len(HAND_21.links)
+    assert by_id[JOINT_CLASS]["info"]["color"] >> 8 == (LINK_COLOR[0] << 16) | (LINK_COLOR[1] << 8) | LINK_COLOR[2]
+    assert all(not by_id[class_id]["keypoint_connections"] for class_id in by_id if class_id != JOINT_CLASS)
