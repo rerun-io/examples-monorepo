@@ -408,6 +408,63 @@ def transcode_mp4(
     return written
 
 
+TRANSPOSE_CUDA: tuple[str, ...] = ("", "clock", "reversal", "cclock")
+"""``transpose_cuda`` direction for 0-3 clockwise quarter turns (a half turn is ``reversal``)."""
+
+
+def gpu_tile_graph(crops: list[tuple[int, int, int, int]], turns: list[int]) -> str:
+    """One filter graph from NVDEC frames to one CUDA frame per tile, each turned upright.
+
+    The decoded frame comes down once, is cropped on the CPU, and each tile goes back up for its turn and its encode. Cropping the
+    CUDA frame in place does not work with this FFmpeg: ``scale_cuda`` ignores the crop that ``crop`` sets on a CUDA frame and
+    passes the whole mosaic on (checked 2026-11-09 on UmeTrack; the CPU crop matches ``np.rot90`` of the decoded crop at 37-38 dB).
+    """
+    if len(crops) != len(turns) or any(turn not in (0, 1, 2, 3) for turn in turns):
+        raise ValueError("one turn count in 0-3 per crop required")
+    chains: list[str] = ["[0:v]hwdownload,format=nv12," + f"split={len(crops)}" + "".join(f"[tile{i}]" for i in range(len(crops)))]
+    for index, (crop, turn) in enumerate(zip(crops, turns, strict=True)):
+        stages: list[str] = ["crop=" + ":".join(str(value) for value in crop), "hwupload_cuda"]
+        if turn:
+            stages.append(f"transpose_cuda=dir={TRANSPOSE_CUDA[turn]}")
+        chains.append(f"[tile{index}]" + ",".join(stages) + f"[cam{index}]")
+    return ";".join(chains)
+
+
+def transcode_tiles_on_gpu(
+    source: Path,
+    outputs: list[Path],
+    *,
+    crops: list[tuple[int, int, int, int]],
+    turns: list[int],
+    fps: int,
+    frames: int,
+    gop: int,
+    cq: int,
+) -> None:
+    """One GPU pass per source: NVDEC decodes the mosaic once, each tile is cropped and turned upright, NVENC encodes each tile once.
+
+    The encoder sessions of one call are reserved together (``run_nvenc``), so concurrent calls queue for encoder slots instead of
+    failing at the driver's session limit. Output order and frame counts survive.
+    """
+    if not outputs or len(outputs) != len(crops) or frames <= 0:
+        raise ValueError("positive frame count and one crop per output required")
+    binary: Path = resolve_ffmpeg()
+    require_av1_nvenc(binary)
+    command: list[str] = [str(binary), "-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                          "-r", str(fps), "-i", str(source), "-filter_complex", gpu_tile_graph(crops, turns)]
+    for index, output in enumerate(outputs):
+        command.extend(["-map", f"[cam{index}]", "-an", "-fps_mode", "passthrough", *_nvenc_args(gop=gop, cq=cq), "-frames:v", str(frames), str(output)])
+    result: subprocess.CompletedProcess[str] = run_nvenc(
+        lambda fds: subprocess.run(command, pass_fds=fds, capture_output=True, text=True, check=False), slots=len(outputs)
+    )
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg exited {result.returncode} while transcoding {source} on the GPU:\n{result.stderr[-4000:]}")
+    for output in outputs:
+        written: int = mp4_frame_count(output)
+        if written != frames:
+            raise ValueError(f"{output} holds {written} samples, expected {frames}")
+
+
 def transcode_crops(
     source: Path,
     outputs: list[Path],
