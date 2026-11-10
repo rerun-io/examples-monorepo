@@ -83,7 +83,10 @@ torchvision = "*"
 # that each bump is a deliberate change: re-check that a gradio-rerun app still renders. Every gradio
 # release so far caps pillow<13, see [feature.common.constraints].
 gradio = "==6.31.0"                                        # pin-bump: hold
-gradio-rerun = "==0.42.0"                                  # pin-bump: hold
+# gradio-rerun 0.42.0 plus one frontend fix (streamed segments load one at a time, in order; without it a slow
+# link delivers a big first segment, the blueprint and a video, after later small ones), from the ai-demos release.
+# TODO: back to `gradio-rerun = "==<version>"` from PyPI once a release loads streamed segments in order.
+gradio-rerun = { url = "https://github.com/pablovela5620/ai-demos/releases/download/gradio-rerun-0.42.0.post1/gradio_rerun-0.42.0.post1-py3-none-any.whl" }  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
 
