@@ -26,6 +26,7 @@ from posekit.models.base import (
     VideoSegmenter,
 )
 from posekit.models.clip_identity import ClipIdentityConfig
+from posekit.models.detnet import DetNetHandDetectorConfig
 from posekit.models.egohand import EgoHandConfig, EgoHandDetectorConfig
 from posekit.models.egohand_fast import EgoHandFastConfig, fast_egohand_configs
 from posekit.models.rtdetr import RtDetrDetectorConfig
@@ -49,6 +50,7 @@ __all__ = (
     "ClipIdentityConfig",
     "DetectorConfig",
     "EgoHandConfig",
+    "DetNetHandDetectorConfig",
     "EgoHandDetectorConfig",
     "EgoHandFastConfig",
     "HAND_DETECTORS",
@@ -95,7 +97,7 @@ HAND_POSES: dict[str, WilorHandPoseConfig | EgoHandConfig | EgoHandFastConfig] =
 if TYPE_CHECKING:
     DetectorConfig = YoloxDetectorConfig | RtDetrDetectorConfig
     Pose2dConfig = RtmPoseConfig | SapiensPoseConfig | VitPoseConfig
-    HandDetectorConfig = WilorHandDetectorConfig | EgoHandDetectorConfig
+    HandDetectorConfig = WilorHandDetectorConfig | EgoHandDetectorConfig | DetNetHandDetectorConfig
     HandPose3dConfig = WilorHandPoseConfig | EgoHandConfig | EgoHandFastConfig
     BodyPose3dConfig = Sam3dBodyConfig | Sam3dBodyFastConfig
 else:
@@ -106,7 +108,8 @@ else:
         {"rtmpose": RtmPoseConfig(), "sapiens": SapiensPoseConfig(), "vitpose": VitPoseConfig()}, prefix_names=False
     )
 
-    HandDetectorConfig = tyro.extras.subcommand_type_from_defaults(HAND_DETECTORS, prefix_names=False)
+    # DetNet-F is a detector only (no pose stage), so it is a detector subcommand and not a named hand stack.
+    HandDetectorConfig = tyro.extras.subcommand_type_from_defaults({**HAND_DETECTORS, "detnet": DetNetHandDetectorConfig()}, prefix_names=False)
     HandPose3dConfig = tyro.extras.subcommand_type_from_defaults(HAND_POSES, prefix_names=False)
     BodyPose3dConfig = tyro.extras.subcommand_type_from_defaults(
         {
