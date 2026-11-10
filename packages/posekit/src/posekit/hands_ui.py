@@ -54,10 +54,12 @@ def example_rows() -> list[list[str]]:
 
 
 def example_stack(video: str | None, stack: str) -> str:
-    """The stack of the example ``video`` is, else ``stack`` unchanged: picking an example also picks its stack."""
-    if video is None:
-        return stack
-    return {Path(example).name: example_stack for example, example_stack in example_rows()}.get(Path(video).name, stack)
+    """The stack of the example ``video`` is, else ``stack`` unchanged: picking an example also picks its stack.
+
+    The examples hold only the video, so Gradio shows them as thumbnails (it shows a table for two inputs).
+    """
+    name: str | None = None if video is None else Path(video).name
+    return next((row_stack for row_video, row_stack in example_rows() if Path(row_video).name == name), stack)
 
 
 def fill_intrinsics(video: str | None) -> tuple[float | None, float | None, float | None, float | None]:
@@ -71,7 +73,7 @@ def fill_intrinsics(video: str | None) -> tuple[float | None, float | None, floa
 
 def settings_from_inputs(
     video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
-    mesh_detail: MeshDetail = "xlo",
+    mesh_detail: MeshDetail,
 ) -> VideoHandsSettings:
     """The widget values as the CLI's settings; the stack name selects the same detector and pose configs as the CLI subcommand."""
     return VideoHandsSettings(
@@ -98,7 +100,7 @@ def warm_up() -> None:
 
     warmed: set[tuple[str, int, int]] = set()
     for video, stack in example_rows():
-        settings: VideoHandsSettings = settings_from_inputs(video, stack, 0, None, None, None, None)
+        settings: VideoHandsSettings = settings_from_inputs(video, stack, 0, None, None, None, None, VideoHandsSettings().mesh_detail)
         decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
         assert decoder.metadata.width is not None and decoder.metadata.height is not None
         width, height = int(decoder.metadata.width), int(decoder.metadata.height)
@@ -109,13 +111,13 @@ def warm_up() -> None:
         camera: CalibratedCamera = pinhole_camera(settings, width, height)
         print(f"[posekit] warming up {stack} on {settings.video_path.name}", flush=True)
         with torch.inference_mode():
-            pipeline_for(stack)(frames, camera)[1].in_pinhole(camera.intrinsics)
+            pipeline_for(stack)(frames, camera)[1].in_pinhole(camera.intrinsics).at_mesh_detail(settings.mesh_detail)
 
 
 @rr.thread_local_stream("posekit_hands_ui")
 def stream_hands(
     video: str | None, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
-    mesh_detail: MeshDetail = "xlo",
+    mesh_detail: MeshDetail,
 ) -> Iterator[tuple[bytes | None, str]]:
     """Run the shared video hands core and stream the recording to the viewer after every chunk."""
     stream: rr.BinaryStream = rr.binary_stream()

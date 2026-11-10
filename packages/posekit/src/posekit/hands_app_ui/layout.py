@@ -1,11 +1,14 @@
 """The app's widgets and how they connect to :mod:`posekit.hands_ui`."""
 
+from typing import get_args
+
 import gradio as gr
 from gradio_rerun import Rerun
 
 from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings
 from posekit.hands_app_ui.theme import APP_CSS, VIEWER_HEIGHT
 from posekit.hands_ui import STACKS, Config, default_stack, example_rows, example_stack, fill_intrinsics, stream_hands
+from posekit.predictions import MeshDetail
 from posekit.track_ui_theme import FORCE_DARK_HEAD
 
 DESCRIPTION: str = (
@@ -28,7 +31,7 @@ def build() -> gr.Blocks:
                     stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
                     max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
                     mesh_detail = gr.Radio(
-                        label="Mesh detail", choices=["full", "low", "xlo"], value="xlo",
+                        label="Mesh detail", choices=list(get_args(MeshDetail)), value=VideoHandsSettings().mesh_detail,
                         info="EgoHand's SOMA levels of detail per hand: full = 2,859 vertices, low = 718 (4x fewer bytes to the viewer), "
                         "xlo = 134 (21x fewer). The joints do not change.",
                     )

@@ -160,7 +160,6 @@ def log_chunk_hands(
     hand_frames: Int64[ndarray, "m"] = hands.keypoints.frame_indices.cpu().numpy()
     xyz: Float32[ndarray, "m k 3"] | None = None if hands.keypoints.xyz_camera is None else hands.keypoints.xyz_camera.cpu().numpy()
     vertices: Float32[ndarray, "m v 3"] | None = None if hands.vertices is None else hands.vertices.cpu().numpy()
-    faces: dict[HandSide, ndarray] = {} if hands.faces is None else {side: value.cpu().numpy() for side, value in hands.faces.items()}
     keypoint_ids: UInt16[ndarray, "k"] = np.arange(hands.keypoints.skeleton.num_keypoints, dtype=np.uint16)
     # The hand models give no per-joint confidence (WiLoR's score is its box's), so every joint is logged at 1.0: green.
     full_confidence: Float32[ndarray, "k"] = np.ones(len(keypoint_ids), dtype=np.float32)
@@ -185,10 +184,13 @@ def log_chunk_hands(
                     f"{CAMERA_PATH}/hands/{slot}/joints",
                     Points3DWithConfidence(xyz[row], full_confidence, class_ids=JOINT_CLASS, keypoint_ids=keypoint_ids, radii=0.004),
                 )
-            if vertices is not None and side in faces:
+            if vertices is not None and hands.faces is not None and side in hands.faces:
                 mesh_path: str = f"{CAMERA_PATH}/hands/{slot}/mesh"
-                if slot not in meshed_slots:  # the faces never change: sent once, not with every frame (they were 80 % of the bytes)
-                    rr.log(mesh_path, rr.Mesh3D.from_fields(triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], MESH_ALPHA)), static=True)
+                # The faces never change: sent once, not with every frame (they were 80 % of the bytes). Static works for a
+                # stream the viewer reads in order; catalog layers keep them per chunk instead (dataforge/meshes.py says why).
+                if slot not in meshed_slots:
+                    faces: ndarray = hands.faces[side].cpu().numpy()
+                    rr.log(mesh_path, rr.Mesh3D.from_fields(triangle_indices=faces, albedo_factor=(*SIDE_COLOR[side], MESH_ALPHA)), static=True)
                     meshed_slots.add(slot)
                 rr.log(mesh_path, rr.Mesh3D.from_fields(vertex_positions=vertices[row]))
         for slot in sorted(live_slots - present):

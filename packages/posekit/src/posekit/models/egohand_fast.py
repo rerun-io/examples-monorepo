@@ -37,6 +37,7 @@ from posekit.models.egohand import (
     require_camera,
     soma_assets_path,
     soma_faces,
+    soma_mesh_lods,
 )
 from posekit.models.egohand_head import EgoHandHead
 from posekit.models.egohand_onnx import quantize_backbone
@@ -163,7 +164,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         loaded, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
         model: EgoHand = loaded.eval().to("cuda")
         self.faces: dict[HandSide, Tensor] = soma_faces(model)
-        self.mesh_lods: SomaMeshLods = SomaMeshLods(soma)
+        self.mesh_lods: SomaMeshLods = soma_mesh_lods(soma)
         _export_head_once(model, config.head_onnx, config.backbone_backend.max_batch_size)
         # The BF16 heads have no Q/DQ attention inputs; FP8 fusion applies only to DINO.
         self.executor: EgoHandTensorExecutor = EgoHandTensorExecutor(

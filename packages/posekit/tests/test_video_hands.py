@@ -64,7 +64,6 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
 
 
 def test_mesh_faces_are_logged_once_per_slot_and_frames_carry_only_vertices(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The faces never change; logged with every frame they were 80 % of a recording's bytes.
     logged: list[tuple[str, Any, bool]] = []
     monkeypatch.setattr(rr, "log", lambda path, archetype, static=False, **_: logged.append((path, archetype, static)))
     monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)

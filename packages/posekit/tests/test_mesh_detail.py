@@ -1,4 +1,4 @@
-"""The viewer's hand mesh at a chosen detail: EgoHand sends SOMA's low level of detail, other models their own mesh."""
+"""The viewer's hand mesh at a chosen detail: EgoHand sends one of SOMA's coarser levels (low, xlo), other models their own mesh."""
 
 import pytest
 import torch
@@ -9,7 +9,7 @@ pytest.importorskip("soma", reason="EgoHand needs the SOMA model package in the 
 from pathlib import Path
 
 from posekit.models.egohand import SOMA_REVISION, EgoHandReconstruction, SomaMeshLod, SomaMeshLods, soma_assets_path
-from posekit.predictions import Keypoints3d
+from posekit.predictions import Keypoints3d, MeshDetail
 from posekit.skeletons import SOMA_HAND
 
 
@@ -29,14 +29,13 @@ def _hands(mesh_lods: SomaMeshLods | None) -> EgoHandReconstruction:
 
 
 def test_a_coarser_level_maps_each_side_with_its_own_rule_and_takes_its_triangles() -> None:
-    mean_of_pairs = torch.nn.Module()
-    mean_of_pairs.forward = lambda mid: (mid[:, 0::2] + mid[:, 1::2]) / 2  # an xlo-like interpolation: 3 vertices from 6
     lods = SomaMeshLods(Path("/unused"), levels={
         "low": {
-            "left": SomaMeshLod(torch.tensor([[0, 1, 2]]), vertex_ids=torch.tensor([0, 1, 2])),
-            "right": SomaMeshLod(torch.tensor([[0, 2, 1]]), vertex_ids=torch.tensor([3, 4, 5])),
+            "left": SomaMeshLod(torch.tensor([[0, 1, 2]]), from_mid=lambda mid: mid[:, :3]),
+            "right": SomaMeshLod(torch.tensor([[0, 2, 1]]), from_mid=lambda mid: mid[:, 3:]),
         },
-        "xlo": {side: SomaMeshLod(torch.tensor([[0, 1, 2]]), interpolator=mean_of_pairs) for side in ("left", "right")},
+        # an xlo-like interpolation: 3 vertices from 6
+        "xlo": {side: SomaMeshLod(torch.tensor([[0, 1, 2]]), from_mid=lambda mid: (mid[:, 0::2] + mid[:, 1::2]) / 2) for side in ("left", "right")},
     })
     hands = _hands(lods)
     low = hands.at_mesh_detail("low")
@@ -53,7 +52,7 @@ def test_a_coarser_level_maps_each_side_with_its_own_rule_and_takes_its_triangle
 
 @pytest.mark.integration
 @pytest.mark.parametrize(("detail", "vertices", "triangles"), [("low", 718, 1422), ("xlo", 134, 258)])
-def test_soma_levels_of_detail_have_their_vertex_and_triangle_counts(detail: str, vertices: int, triangles: int) -> None:
+def test_soma_levels_of_detail_have_their_vertex_and_triangle_counts(detail: MeshDetail, vertices: int, triangles: int) -> None:
     try:
         soma = soma_assets_path(None, "nvidia/SOMA-X", SOMA_REVISION)
     except OSError as error:
@@ -61,6 +60,6 @@ def test_soma_levels_of_detail_have_their_vertex_and_triangle_counts(detail: str
     if not torch.cuda.is_available():
         pytest.skip("SOMA levels of detail are kept on CUDA")
     mid = torch.rand((2, 2859, 3), device="cuda")
-    for side, mesh in SomaMeshLods(soma).level(detail).items():  # type: ignore[arg-type]
-        assert tuple(mesh.vertices(mid).shape) == (2, vertices, 3), side
+    for side, mesh in SomaMeshLods(soma).level(detail).items():
+        assert tuple(mesh.from_mid(mid).shape) == (2, vertices, 3), side
         assert tuple(mesh.faces.shape) == (triangles, 3) and int(mesh.faces.max()) == vertices - 1, side
