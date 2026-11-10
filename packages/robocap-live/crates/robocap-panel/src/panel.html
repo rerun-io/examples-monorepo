@@ -44,7 +44,8 @@
 
   main { max-width: 1480px; margin: 0 auto; padding: 20px 24px 40px; display: grid; gap: 16px; align-items: start;
          grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr); grid-template-areas: "run form" "tiles form" "detail form" "wifi wifi" "log log"; }
-  #run-card { grid-area: run; } #form-card { grid-area: form; position: sticky; top: 72px; } #dev-tiles { grid-area: tiles; }
+  /* The start card sticks inside #form-col, which spans only the rows beside it: it stops above the full-width Wi-Fi row. */
+  #run-card { grid-area: run; } #form-col { grid-area: form; align-self: stretch; } #form-card { position: sticky; top: 72px; } #dev-tiles { grid-area: tiles; }
   .devgrid { grid-area: detail; } #log-box { grid-area: log; } #wifi-card { grid-area: wifi; }
   .card { background: var(--card); border-radius: 14px; box-shadow: inset 0 0 0 1px var(--ring); padding: 18px 20px; min-width: 0; }
   .card h2 { margin: 0 0 14px; font-size: 12px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
@@ -239,6 +240,7 @@
     <div class="notes" id="run-notes"></div>
   </section>
 
+  <div id="form-col">
   <section class="card" id="form-card" aria-label="start a run">
     <h2>Start a run</h2>
     <div class="field">
@@ -280,6 +282,7 @@
     </div>
     <div class="notes" id="msg" aria-live="polite"></div>
   </section>
+  </div>
 
   <section class="tiles" id="dev-tiles" aria-label="device"></section>
 
