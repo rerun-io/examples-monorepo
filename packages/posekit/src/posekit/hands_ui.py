@@ -32,10 +32,17 @@ def default_stack() -> str:
 
 
 def example_rows() -> list[list[str]]:
-    """``[video, stack]`` per example: a GSI head-camera clip (1920x1080 pinhole) on the accepted EgoHand stack,
-    and WiLoR's original demo clip (a person on stage with a microphone, exocentric) on WiLoR (EgoHand is egocentric)."""
+    """``[video, stack]`` per example: egocentric clips on the accepted EgoHand stack, and WiLoR's original
+    demo clip (a person on stage with a microphone, exocentric) on WiLoR (EgoHand is egocentric).
+
+    The GSI clips are head-camera pinholes (1920x1080); the Gen-HumanEgo clips (1600x1300) were remapped from
+    the double-sphere head camera into a 65° pinhole, so the app's assumed camera is their true one.
+    """
     return [
         [str(EXAMPLES / "gsi_sewing_left_front.mp4"), default_stack()],
+        [str(EXAMPLES / "genhumanego_kettle.mp4"), default_stack()],
+        [str(EXAMPLES / "genhumanego_garlic.mp4"), default_stack()],
+        [str(EXAMPLES / "gsi_workbench_left_front.mp4"), default_stack()],
         [str(EXAMPLES / "hands_video.mp4"), "wilor"],
     ]
 
