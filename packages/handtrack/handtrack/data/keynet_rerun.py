@@ -147,12 +147,15 @@ class SegmentTruth:
     extrapolated_valid: Bool[Tensor, "k 2"]
     stale: HandProjection
     stale_valid: Bool[Tensor, "k 2"]
+    contact_mm: Float32[Tensor, "k 2"] | None = None
+    """Mesh-contact pinch distance per hand (``labels.pinch``; hand-model datasets with ``pinch=True``), else None."""
 
     def image_hands(self, which: Literal["truth", "extrapolated", "stale"], rows: Int64[Tensor, "m"], camera: int, device: torch.device) -> ImageHands:
         projection: HandProjection = getattr(self, which)
         valid: Bool[Tensor, "k 2"] = {"truth": self.valid, "extrapolated": self.extrapolated_valid, "stale": self.stale_valid}[which]
+        contact: Float32[Tensor, "m 2"] | None = self.contact_mm[rows].to(device) if which == "truth" and self.contact_mm is not None else None
         return ImageHands(net_xy=projection.net_xy[rows, camera].to(device), points_cam=projection.points_cam[rows, camera].to(device),
-                          in_front=projection.in_front[rows, camera].to(device), valid=valid[rows].to(device))
+                          in_front=projection.in_front[rows, camera].to(device), valid=valid[rows].to(device), contact_mm=contact)
 
 
 def _frame_rows(frames: Int64[ndarray, "k"]) -> Int64[ndarray, "F"]:
@@ -161,8 +164,9 @@ def _frame_rows(frames: Int64[ndarray, "k"]) -> Int64[ndarray, "F"]:
     return out
 
 
-def hand_model_truth(dataset, name: str, segment: str, infos: dict) -> SegmentTruth:
-    """UmeTrack / SHOW3D / HOT3D: the hand-model labels and ground-truth priors of the old stream, for every timeline row."""
+def hand_model_truth(dataset, name: str, segment: str, infos: dict, pinch: bool = False) -> SegmentTruth:
+    """UmeTrack / SHOW3D / HOT3D: the hand-model labels and ground-truth priors of the old stream, for every timeline row; ``pinch``
+    also skins both meshes for the mesh-contact pinch label (``segment_labels(mesh_labels=True)``, slower)."""
     info = infos[segment]
     layout = layout_for(name)
     statics: pa.Table = read_statics(dataset, info)
@@ -176,13 +180,14 @@ def hand_model_truth(dataset, name: str, segment: str, infos: dict) -> SegmentTr
     times: Int64[ndarray, "k"] = table["video_time"].cast(pa.int64()).to_numpy(zero_copy_only=False).astype(np.int64)[present]
     rows: Int64[ndarray, "k"] = np.searchsorted(timeline.video_time_ns, times).clip(0, len(timeline.video_time_ns) - 1)
     matched: Bool[ndarray, "k"] = timeline.video_time_ns[rows] == times
-    labels = segment_labels(timeline, rig, letterboxes, rows, layout.pose_gated, mesh_labels=False)
+    labels = segment_labels(timeline, rig, letterboxes, rows, layout.pose_gated, mesh_labels=pinch)
     priors = keypoint_priors(timeline, rig, letterboxes, rows, layout.tracker_step)
     return SegmentTruth(
         rig=rig, letterboxes=letterboxes, rolls_rad=tuple(math.radians(a) for a in camera_angles(statics, info)), phi=float(timeline.hand_scale),
         row_of_frame=_frame_rows(frames), image_valid=labels.image_valid & torch.from_numpy(matched)[:, None], hand_label=labels.hand_label,
         truth=labels.projection, valid=torch.isfinite(labels.landmarks).all(dim=-1).all(dim=-1),
         extrapolated=priors.extrapolated, extrapolated_valid=priors.extrapolated_valid, stale=priors.stale, stale_valid=priors.stale_valid,
+        contact_mm=labels.contact_mm if pinch else None,
     )
 
 
@@ -385,10 +390,10 @@ CutStream = Callable[[int], Iterator[tuple[KeyNetSamples, int, int]]]
 
 
 def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catalog_url: str, device: torch.device, augments: Sequence[KeyNetAugment],
-                seed: int, endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32) -> CutStream:
+                seed: int, endless: bool = False, fetch_block_size: int | None = None, chunk: int = 32, pinch: bool = False) -> CutStream:
     """NVDEC decode in this process, luma at native resolution, and per (segment, camera) chunk of ``chunk`` frames one
     ``perspective_keynet_samples`` cut per entry of ``augments`` (a cut is a cheap grid sample; a decode is not). ``fetch_block_size``
-    None takes the dataset's own (``KeyNetDataset.fetch_block_size``)."""
+    None takes the dataset's own (``KeyNetDataset.fetch_block_size``); ``pinch`` adds the mesh-contact label (hand-model datasets)."""
     from simplecv.rerun_dataloader import KeyedFrame, KeyedNvdecDecoder
 
     from handtrack.data.catalog import _generic_model
@@ -435,7 +440,7 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
                         pending.clear()
                         cached: SegmentTruth | None = truths.pop(keyed.segment_id, None)
                         truth: SegmentTruth = cached if cached is not None else (
-                            hand_model_truth(dataset, name, keyed.segment_id, infos) if spec.labels == "hand_model"
+                            hand_model_truth(dataset, name, keyed.segment_id, infos, pinch) if spec.labels == "hand_model"
                             else coco3d_truth(dataset, name, spec, keyed.segment_id, coefficients, generic_rest))
                         truths[keyed.segment_id] = truth
                         while len(truths) > TRUTH_CACHE:
