@@ -71,6 +71,9 @@ def test_ground_truth_projects_onto_the_stored_projections() -> None:
 def test_export_writes_layers_and_a_standalone_clip(tmp_path: Path) -> None:
     """A fake track for one real test segment: both layer files, and a standalone rrd with the base video, the GT mesh and the prediction."""
     entry: DatasetEntry = _umetrack()
+    registered: set[str] = set(export_layers.storage_paths(entry.segment_table().to_arrow_table(), SEGMENT))
+    if missing := sorted(set(export_layers.GT_LAYERS) - registered):
+        pytest.skip(f"catalog {catalog.CATALOG_URL} {catalog.UMETRACK} {SEGMENT} has no {missing} layer (registered: {sorted(registered)})")
     truth: rerun_layers.GroundTruth = export_layers.read_ground_truth(entry, _info(entry))
     save_track(fake_track(truth), tmp_path / "run")
     export_layers.main(export_layers.Config(run_dir=tmp_path / "run", clips=(SEGMENT,), layers_root=tmp_path / "layers", export_dir=tmp_path / "export"))

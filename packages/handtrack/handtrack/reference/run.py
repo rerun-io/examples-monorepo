@@ -29,7 +29,7 @@ def native_images(images: UInt8[Tensor, "4 480 640"], data: SegmentData) -> list
     """Losslessly undo UmeTrack's identity resize and horizontal padding."""
     native: list[UInt8[ndarray, "h w"]] = []
     for index, letterbox in enumerate(data.letterboxes):
-        if letterbox.quarter_turn_cw or letterbox.scale != 1.0:
+        if letterbox.quarter_turns or letterbox.scale != 1.0:
             raise ValueError("Reference eval only supports native UmeTrack letterboxes")
         start: int = int(letterbox.pad_x)
         native.append(np.ascontiguousarray(images[index, :, start:start + letterbox.source_width].cpu().numpy()))

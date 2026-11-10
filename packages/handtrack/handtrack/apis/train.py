@@ -1,4 +1,6 @@
 """Tyro training entry point: DetNet-F, KeyNet-F or both, trained from one catalog stream."""
+import hashlib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, get_args
@@ -10,9 +12,62 @@ from serde.json import to_json
 from handtrack.data.augment import DetNetAugment
 from handtrack.data.batches import BatchSource
 from handtrack.data.cache import DetNetCache, KeyNetCache
-from handtrack.data.catalog import DatasetName, SplitName
+from handtrack.data.catalog import CATALOG_URL, DatasetName, SplitName, list_segments, select_split
+from handtrack.data.echo import EchoStream, Producer
+from handtrack.data.rerun_source import DATASET_SPECS, build_manifest, nvdec_producer, rerun_producer, source_spec, training_finish
 from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class DetectorHoldout:
+    """Episodes of the 2D-keypoint datasets held out of DetNet training (configs/detector_holdout.json), frozen before training."""
+    note: str
+    segments: dict[str, list[str]]
+    """Catalog dataset name -> held-out segment ids."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class RerunStreamSettings:
+    """Train DetNet from the Rerun 0.42 dataloader: one streaming producer per dataset into per-dataset echo pools."""
+    datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d", "gsi-six-view", "dataforge-gen-humanego-subset")
+    """Training datasets; each gets an equal share of every batch."""
+    decode: Literal["nvdec", "cpu"] = "nvdec"
+    """nvdec: decode on the GPU in the training process (simplecv's segment-wide decoder); cpu: the 0.42 CPU decoder in spawn workers."""
+    workers: tuple[int, ...] = (4, 6, 8, 8)
+    """Spawn decode workers per dataset for ``decode=cpu`` (same order as ``datasets``)."""
+    pool_capacity: int = 32_768
+    """Images per dataset pool on the device (~20 kB each)."""
+    min_fill: int = 4_096
+    """Images a pool holds before the first batch."""
+    max_echo: int = 16
+    """Draws per decoded image before it leaves the pool."""
+    min_echo: int = 4
+    """Draws an image must get before its producer may replace it, so fast datasets leave decode time to slow ones."""
+    prefetch: int = 3
+    """Batches assembled ahead in a thread, overlapping the training step."""
+    switch_interval_s: float = 0.0005
+    """The interpreter's thread switch interval while this stream runs (Python's default is 5 ms). The training thread gives up the
+    interpreter lock at each kernel launch; with the default a busy producer thread then keeps it up to 5 ms, the GIL convoy that
+    left the GPU idle (2026-11-08: 0.5 ms took a 3-minute run from ~7.3k to ~8.2k images/s, GPU 55-60 % to 73 %)."""
+    epoch_steps: int = 20_000
+    """Batches per trainer epoch (checkpoint cadence); producers keep running across epochs."""
+    holdout: Path = Path("configs/detector_holdout.json")
+    """Held-out episodes of the 2D-keypoint datasets (relative to the package directory)."""
+    manifest_dir: Path = Path("/mnt/nas/ssd-8tb/scratch/hand-detector/manifests")
+    """Where each dataset's frozen sampling manifest is written once and reused."""
+    catalog_url: str = CATALOG_URL
+
+    def __post_init__(self) -> None:
+        if len(self.workers) != len(self.datasets) or min(self.workers) < 1:
+            raise ValueError("rerun.workers needs one positive count per dataset")
+        unknown: list[str] = [name for name in self.datasets if name not in DATASET_SPECS]
+        if unknown:
+            raise ValueError(f"unknown rerun datasets {unknown}; expected some of {sorted(DATASET_SPECS)}")
+        if not 0 < self.switch_interval_s <= 0.005:
+            raise ValueError("switch_interval_s must be in (0, 0.005] seconds")
 
 
 @serde(deny_unknown_fields=True)
@@ -57,6 +112,11 @@ class StreamSettings:
     Epoch e reads pass e mod len(passes). Validation still decodes its fixed evaluation set from the catalog."""
     detnet_augment: DetNetAugment = field(default_factory=DetNetAugment)
     """Geometric, 16:9 and photometric augmentation of cached DetNet batches (``handtrack.data.augment``); off by default."""
+    upright: bool = False
+    """Turn every camera upright (``catalog.UPRIGHT_TURNS``) in training and validation, frames and labels alike; DetNet only.
+    False is the legacy input of repro-1 and the deployed DetNet-F (UmeTrack as the sensors are mounted, Quest 3 turned sideways)."""
+    rerun: RerunStreamSettings | None = None
+    """Train DetNet from the Rerun 0.42 dataloader (``handtrack.data.echo``); validation keeps ``datasets`` on the catalog stream."""
     gpu_memory_gb: float = 0.0
     """Hard cap on this process's GPU memory (torch's allocator gets the cap minus 0.75 GB for the CUDA context and
     NVDEC); 0 leaves it unbounded. At batch 256 the two nets' fp32 activations alone need 7.5 GB, bf16 3.8 GB."""
@@ -109,6 +169,10 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
         raise ValueError(f"unknown datasets {unknown}; expected some of {sorted(DATASETS)}")
     ours: SplitName = SPLITS[split]
     evaluation: bool = ours != "train"
+    if settings.rerun is not None and not evaluation:
+        if nets != "detnet":
+            raise ValueError("stream.rerun feeds DetNet only; train with nets=detnet")
+        return rerun_source(settings, settings.rerun, torch.device(device))
     if settings.detnet_cache is not None and not evaluation:
         if nets != "detnet":
             raise ValueError("stream.detnet_cache holds DetNet samples only; train with nets=detnet")
@@ -148,8 +212,42 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
             validation_samples=settings.max_val_batches * max(settings.detnet_batch, settings.keynet_batch),
             keynet_crop=settings.keynet_crop,
             keynet=KeyNetAugment(negative_margin=settings.keynet_negative_margin),
+            upright=settings.upright,
         )
     )
+
+
+def training_segments(name: str, holdout: DetectorHoldout, catalog_url: str) -> list[str]:
+    """Base datasets: the catalog stream's training split; 2D-keypoint datasets: every segment not held out."""
+    import rerun as rr
+
+    dataset = rr.catalog.CatalogClient(catalog_url).get_dataset(name)
+    if name in DATASETS:
+        return [info.segment_id for info in select_split(list_segments(dataset, name), "train")]
+    held: set[str] = set(holdout.segments.get(name, []))
+    if not held:
+        raise ValueError(f"{name} has no held-out episodes in the holdout file; freeze them before training")
+    return sorted(set(dataset.segment_ids()) - held)
+
+
+def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device) -> EchoStream:
+    """One endless Rerun-dataloader producer per dataset into an ``EchoStream`` with step-budget epochs."""
+    from serde.json import from_json
+
+    holdout: DetectorHoldout = from_json(DetectorHoldout, rerun.holdout.read_text())
+    producers: list[Producer] = []
+    for index, (name, workers) in enumerate(zip(rerun.datasets, rerun.workers, strict=True)):
+        segments: list[str] = training_segments(name, holdout, rerun.catalog_url)
+        if rerun.decode == "nvdec":
+            producers.append(nvdec_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, device=device, endless=True))
+            continue
+        digest: str = hashlib.sha256("\n".join(segments).encode()).hexdigest()[:10]
+        manifest: Path = build_manifest(source_spec(name, index), segments, rerun.catalog_url, rerun.manifest_dir / f"{name}-train-{digest}-w{workers}.parquet", workers)
+        producers.append(rerun_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, manifest_path=manifest, workers=workers,
+                                        device=device, endless=True))
+    return EchoStream(producers, batch_size=settings.detnet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
+                      device=device, seed=settings.seed, finish=training_finish(settings.detnet_augment), epoch_steps=rerun.epoch_steps,
+                      min_echo=rerun.min_echo, prefetch=rerun.prefetch)
 
 
 GPU_OVERHEAD_GB: float = 0.75
@@ -167,6 +265,8 @@ def cap_gpu_memory(gigabytes: float, device: str) -> None:
 def main(config: Config) -> None:
     """Build exactly one training and one validation source, then train."""
     torch.manual_seed(config.stream.seed)
+    if config.stream.rerun is not None:
+        sys.setswitchinterval(config.stream.rerun.switch_interval_s)
     torch.backends.cudnn.benchmark = config.device.startswith("cuda")
     cap_gpu_memory(config.stream.gpu_memory_gb, config.device)
     trainer: Trainer = Trainer(config.nets, config.detnet, config.keynet, config.loop, config.run_dir, config.device,
