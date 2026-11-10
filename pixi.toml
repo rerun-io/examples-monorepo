@@ -56,14 +56,10 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 # The PyPI `catalog` extra, spelled out (rerun-sdk[catalog] == datafusion + pandas);
 # datafusion stays on PyPI (below).
 pandas = ">=2"
-
-# The workspace's one Pillow cap. gradio (PyPI) <= 6.31.0 requires pillow<13: Pillow 13 broke gradio's
-# 32-bit integer PNG output. Fixed on gradio main (gradio-app/gradio#14034, 2026-11-02, pillow<14) but
-# unreleased as of 2026-11-06. Remove this cap and bump gradio with the next 6.x release; Pillow 13 also
-# carries the fix for CVE-2026-112403 (gradio-app/gradio#13999). Gradio lives only in `common`, so the
-# cap does too; a constraint adds no package.
-[feature.common.constraints]
-pillow = "<13"
+# gradio from conda-forge (its 6.31.0 build installs complete; it also caps pillow <13 itself: Pillow 13 broke
+# gradio's 32-bit integer PNG output, fixed on gradio main by gradio-app/gradio#14034 but unreleased). Exact, so
+# each bump is a deliberate change: re-check that a gradio-rerun app still renders.
+gradio = "==6.31.0"                                        # pin-bump: hold
 
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
@@ -77,12 +73,9 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# pin-bump: hold — gradio-rerun pins rerun-sdk exactly (0.42.0 needs rerun-sdk==0.42.0 and gradio>=6),
-# so it moves only together with the rerun-sdk pins; the conda rerun-sdk in
-# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping. gradio is exact so
-# that each bump is a deliberate change: re-check that a gradio-rerun app still renders. Every gradio
-# release so far caps pillow<13, see [feature.common.constraints].
-gradio = "==6.31.0"                                        # pin-bump: hold
+# pin-bump: hold — gradio-rerun pins rerun-sdk exactly (0.42.0 needs rerun-sdk==0.42.0 and gradio>=6), so it moves
+# only together with the rerun-sdk pins; the conda rerun-sdk and gradio in [feature.common.dependencies] satisfy it
+# through pixi's conda->PyPI mapping.
 # gradio-rerun 0.42.0 plus one frontend fix (streamed segments load one at a time, in order; without it a slow
 # link delivers a big first segment, the blueprint and a video, after later small ones), from the ai-demos release.
 # TODO: back to `gradio-rerun = "==<version>"` from PyPI once a release loads streamed segments in order.
