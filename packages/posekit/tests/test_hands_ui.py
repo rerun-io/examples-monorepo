@@ -47,9 +47,20 @@ def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 
-def test_the_upload_takes_an_iphone_mov_and_other_containers() -> None:
-    from gradio_client.utils import is_valid_file
 
-    suffixes = list(hands_ui.VIDEO_SUFFIXES)
-    assert all(is_valid_file(name, suffixes) for name in ("IMG_6261.MOV", "clip.mp4", "clip.mkv", "clip.webm"))
-    assert not is_valid_file("notes.txt", suffixes)
+def test_picking_an_example_picks_its_stack_and_an_upload_keeps_the_chosen_one() -> None:
+    assert hands_ui.example_stack(str(EXAMPLES / "hands_video.mp4"), "egohand-fast") == "wilor"
+    assert hands_ui.example_stack("/tmp/gradio/abc/IMG_6261.MOV", "egohand") == "egohand"
+    assert hands_ui.example_stack(None, "egohand") == "egohand"
+
+
+def test_the_layout_takes_the_upload_as_is_and_stop_cancels_run() -> None:
+    import gradio as gr
+
+    from posekit.hands_app_ui.layout import build
+
+    demo = build()
+    video = next(block for block in demo.blocks.values() if block.elem_id == "source-video")
+    assert isinstance(video, gr.Video)
+    assert video.format is None and video.include_audio  # Gradio converts nothing on upload
+    assert any(dependency.get("cancels") for dependency in demo.config["dependencies"])
