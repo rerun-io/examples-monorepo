@@ -71,7 +71,7 @@ def fill_intrinsics(video: str | None) -> tuple[float | None, float | None, floa
 
 def settings_from_inputs(
     video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
-    mesh_detail: MeshDetail = "full",
+    mesh_detail: MeshDetail = "xlo",
 ) -> VideoHandsSettings:
     """The widget values as the CLI's settings; the stack name selects the same detector and pose configs as the CLI subcommand."""
     return VideoHandsSettings(
@@ -115,7 +115,7 @@ def warm_up() -> None:
 @rr.thread_local_stream("posekit_hands_ui")
 def stream_hands(
     video: str | None, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
-    mesh_detail: MeshDetail = "full",
+    mesh_detail: MeshDetail = "xlo",
 ) -> Iterator[tuple[bytes | None, str]]:
     """Run the shared video hands core and stream the recording to the viewer after every chunk."""
     stream: rr.BinaryStream = rr.binary_stream()

@@ -28,7 +28,7 @@ def build() -> gr.Blocks:
                     stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
                     max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
                     mesh_detail = gr.Radio(
-                        label="Mesh detail", choices=["full", "low", "xlo"], value="full",
+                        label="Mesh detail", choices=["full", "low", "xlo"], value="xlo",
                         info="EgoHand's SOMA levels of detail per hand: full = 2,859 vertices, low = 718 (4x fewer bytes to the viewer), "
                         "xlo = 134 (21x fewer). The joints do not change.",
                     )

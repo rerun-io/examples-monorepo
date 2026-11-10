@@ -89,7 +89,7 @@ class VideoHandsSettings:
     """Frames decoded and processed per step."""
     max_frames: int | None = None
     """Maximum number of frames to process; ``None`` runs the full video."""
-    mesh_detail: MeshDetail = "full"
+    mesh_detail: MeshDetail = "xlo"
     """Hand mesh sent to the viewer: the model's own, or (EgoHand) SOMA's ``low`` or ``xlo`` level of detail, 4x or 21x fewer bytes."""
 
 
