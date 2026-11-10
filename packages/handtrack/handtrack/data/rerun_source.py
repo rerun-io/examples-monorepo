@@ -11,7 +11,7 @@ import dataclasses
 import itertools
 import os
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing import resource_tracker
 from pathlib import Path
 from typing import Literal
@@ -27,7 +27,17 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from handtrack.data.augment import DetNetAugment, augment_detnet
 from handtrack.data.batches import DetNetBatch
 from handtrack.data.cache import CENTRE_MARGIN, MAX_CIRCLE_RADIUS
-from handtrack.data.catalog import UPRIGHT_TURNS, layout_for, list_segments, read_hand_timeline, read_rig, read_statics
+from handtrack.data.catalog import (
+    UPRIGHT_TURNS,
+    CatalogDataError,
+    layout_for,
+    list_segments,
+    read_hand_timeline,
+    read_rig,
+    read_statics,
+    stored_upright_turns,
+    turns_after_conversion,
+)
 from handtrack.data.echo import Producer
 from handtrack.data.luma import grey_from_luma, grey_from_rgb
 from handtrack.data.segment_labels import segment_labels
@@ -83,6 +93,21 @@ def source_spec(dataset: str, dataset_index: int, upright: bool = False) -> Sour
     """``upright``: turn every camera upright (``UPRIGHT_TURNS``), frames and labels alike."""
     cameras, codec, labels, camera_offset, min_score = DATASET_SPECS[dataset]
     return SourceSpec(dataset, dataset_index, cameras, codec, labels, camera_offset, min_score, UPRIGHT_TURNS[dataset] if upright else None)
+
+
+def resolve_upright(spec: SourceSpec, segments: Sequence[str], catalog_url: str) -> SourceSpec:
+    """The spec with each camera's turns less those the conversion already applied (``catalog.stored_upright_turns``), read once
+    from the segments' static rows. The legacy input (no turns) needs the cameras as recorded, so it refuses a converted-upright set."""
+    import rerun as rr
+
+    dataset = rr.catalog.CatalogClient(catalog_url).get_dataset(spec.dataset)
+    statics: pa.Table = dataset.filter_segments(list(segments)).filter_contents([f"{c}/pinhole" for c in spec.cameras]).reader(index=None).to_arrow_table()
+    stored: tuple[int, ...] = stored_upright_turns(statics, spec.cameras)
+    if spec.quarter_turns is None:
+        if any(stored):
+            raise CatalogDataError(f"{spec.dataset}: the cameras were converted upright {stored}; the legacy input needs them as recorded")
+        return spec
+    return replace(spec, quarter_turns=turns_after_conversion(spec.quarter_turns, stored))
 
 
 def camera_letterbox(spec: SourceSpec, camera: int, width: int, height: int) -> Letterbox:
@@ -301,6 +326,7 @@ def rerun_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: st
                    endless: bool = False) -> Producer:
     """A ``Producer`` for ``EchoStream``: spawn workers stream ready samples (decoded, labelled, letterboxed, pooled).
     ``endless``: after one pass over the manifest start the next (a new shuffle), for ``EchoStream(epoch_steps=...)``."""
+    spec = resolve_upright(spec, segments, catalog_url)
 
     def produce(epoch: int) -> Iterator[DetNetSamples]:
         for seed in itertools.count(epoch * PASS_STRIDE) if endless else (epoch,):
@@ -329,6 +355,8 @@ def nvdec_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: st
     letterboxed on the device, so no CPU decode workers and no inter-process copies remain.
     """
     from simplecv.rerun_dataloader import KeyedFrame, KeyedNvdecDecoder
+
+    spec = resolve_upright(spec, segments, catalog_url)
 
     def to_net(camera: int):
         def transform(frames: UInt8[Tensor, "n 3 h w"]) -> UInt8[Tensor, "n 480 640"]:

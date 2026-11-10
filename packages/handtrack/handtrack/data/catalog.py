@@ -122,7 +122,28 @@ Measured 2026-11-08 from calibration alone (world up from the dataset's ViewCoor
 rig frame; up_cam = R_cam_rig R_rig_world up, over 4 segments; /tmp/hand-detector-scratch/orientation_table.py). UmeTrack ships
 raw sensor orientation; its release's source_camera_angle_deg (0, 90, 90, 180) agrees (cameras 0 and 3 sit ~40 degrees off any
 quarter turn). SHOW3D and HOT3D are stored upright portrait (the legacy letterbox turned them sideways). GSI's cameras 2-3 look
-down and are stored upside down; 4-5 lean about 33 degrees. Gen-HumanEgo is upright."""
+down and are stored upside down; 4-5 lean about 33 degrees. Gen-HumanEgo is upright. These count from the image as recorded: a
+conversion that already turned a camera says so in ``<camera>/pinhole:upright_quarter_turns_cw`` (dataforge's UmeTrack since #558),
+and ``turns_after_conversion`` subtracts it."""
+
+
+def stored_upright_turns(statics: pa.Table, cameras: Sequence[str]) -> tuple[int, ...]:
+    """Clockwise quarter turns the conversion already applied to each camera, from every segment's static row (0 when a segment has no
+    ``upright_quarter_turns_cw``). A dataset whose segments disagree (a re-convert that has not reached every segment) is refused."""
+    stored: list[int] = []
+    for camera in cameras:
+        column: str = f"{camera}/pinhole:upright_quarter_turns_cw"
+        cells: list[list[int] | None] = statics[column].to_pylist() if column in statics.column_names else [None]
+        turns: set[int] = {int(cell[0]) % 4 if cell else 0 for cell in cells}
+        if len(turns) != 1:
+            raise CatalogDataError(f"{camera}: segments were converted with different upright turns {sorted(turns)}; re-convert all of them")
+        stored.append(turns.pop())
+    return tuple(stored)
+
+
+def turns_after_conversion(upright: tuple[int, ...], stored: tuple[int, ...]) -> tuple[int, ...]:
+    """The turns still needed to stand each camera upright when the conversion already applied ``stored``."""
+    return tuple((want - done) % 4 for want, done in zip(upright, stored, strict=True))
 
 
 def is_show3d(dataset: str) -> bool:
