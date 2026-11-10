@@ -223,7 +223,9 @@ def send_blueprint() -> None:
                     origin="world",
                     name="3D hands",
                     contents=["+ world/**", f"- {PINHOLE_PATH}/boxes/**"],
-                    eye_controls=follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15),
+                    eye_controls=follow_eye_controls(
+                        (0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15, spin_speed=0.1
+                    ),
                 ),
             ),
             rrb.TimePanel(timeline="video_time", play_state="playing"),
