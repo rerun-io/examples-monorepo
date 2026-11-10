@@ -260,6 +260,7 @@
       <div class="field"><div class="name">SLAM rate</div><div class="seg" data-name="slam_hz"><button data-v="15">15 Hz</button><button data-v="30">30 Hz</button></div></div>
       <div class="field"><div class="name">SLAM lane</div><div class="seg" data-name="slam_lane"><button data-v="gpu">Mali GPU</button><button data-v="cpu">CPU</button></div></div>
       <div class="field"><div class="name" title="One-frame frontend lag: auto = on for GPU, off for CPU">Frame lag</div><div class="seg" data-name="slam_lag"><button data-v="auto">Auto</button><button data-v="on">On</button><button data-v="off">Off</button></div></div>
+      <div class="field"><div class="name" title="Which DetNet-F finds the hands: mix-1 (cams 2-3 turned upright first) or the old 0929 model">DetNet</div><div class="seg" data-name="detnet_version"><button data-v="mix1-upright">mix-1</button><button data-v="0929">0929</button></div></div>
       <div class="field"><div class="name" title="fit: the fitted hand in every camera and DetNet's box; debug: also every KeyNet view and DetNet answer; verbose: also relative depths and the predicted pose. Each level uses more Wi-Fi.">Hand overlays</div><div class="seg" data-name="hand_overlays"><button data-v="fit">Fit</button><button data-v="debug">Debug</button><button data-v="verbose">Verbose</button></div></div>
     </div>
     <div class="field">
@@ -470,7 +471,7 @@ function loadForm(s) {
   const saved = JSON.parse(localStorage.getItem("robocap-request") || "null"), r = saved ?? s.run.request ?? {};
   $("viewer").value = saved?.viewer ?? "";  // what this browser typed, never the address a name resolved to
   camButtons.forEach(b => setPressed(b, (r.video_cameras ?? [0, 1]).map(String).includes(b.dataset.v)));
-  for (const [name, fallback] of [["slam_hz", 15], ["slam_lane", "gpu"], ["slam_lag", "auto"], ["hand_overlays", "fit"]]) setSeg(seg(name), r[name] ?? fallback);
+  for (const [name, fallback] of [["slam_hz", 15], ["slam_lane", "gpu"], ["slam_lag", "auto"], ["hand_overlays", "fit"], ["detnet_version", "mix1-upright"]]) setSeg(seg(name), r[name] ?? fallback);
   // Form 2 made "no time limit" the default: a request this browser saved before it starts unlimited too.
   $("minutes").value = saved && saved.form !== 2 ? 0 : Math.round((r.duration_s ?? 0) / 60);
   setSeg($("dur-presets"), $("minutes").value);
@@ -482,11 +483,11 @@ function loadForm(s) {
 
 // The request the form holds (the /api/start fields), and a request in one line ("2 cameras · SLAM 15 Hz GPU · hands fit").
 const formRequest = () => ({ viewer: $("viewer").value.trim(), video_cameras: camButtons.filter(pressed).map(b => Number(b.dataset.v)),
-  slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"),
+  slam_hz: Number(segValue("slam_hz")), slam_lane: segValue("slam_lane"), slam_lag: segValue("slam_lag"), hand_overlays: segValue("hand_overlays"), detnet_version: segValue("detnet_version"),
   duration_s: Math.round($("minutes").value * 60), hands: pressed($("hands")), frame_csv: pressed($("frame_csv")), uclamp: pressed($("uclamp")) });
 function describe(r) {
   const cams = r.video_cameras.length;
-  return `${cams ? `${cams} camera${cams > 1 ? "s" : ""}` : "no video"} · SLAM ${r.slam_hz} Hz ${r.slam_lane.toUpperCase()} · hands ${r.hands ? r.hand_overlays : "off"}`;
+  return `${cams ? `${cams} camera${cams > 1 ? "s" : ""}` : "no video"} · SLAM ${r.slam_hz} Hz ${r.slam_lane.toUpperCase()} · hands ${r.hands ? `${r.hand_overlays} · DetNet ${r.detnet_version === "0929" ? "0929" : "mix-1"}` : "off"}`;
 }
 // The folded settings line; a phone (the layout with the Start/Stop bar) starts with the settings folded.
 function summarize() {
