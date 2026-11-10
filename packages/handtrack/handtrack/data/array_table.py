@@ -16,8 +16,8 @@ SHAPE_KEY: bytes = b"array_shape"
 DTYPE_KEY: bytes = b"array_dtype"
 
 
-def write_arrays(path: Path, arrays: dict[str, ndarray]) -> None:
-    """One column per array; every array's first axis is the row axis."""
+def write_arrays(path: Path, arrays: dict[str, ndarray], table_metadata: dict[bytes, bytes] | None = None) -> None:
+    """One column per array; every array's first axis is the row axis. ``table_metadata`` goes to the schema (``pq.read_schema``)."""
     rows: set[int] = {len(value) for value in arrays.values()}
     if len(rows) != 1:
         raise ValueError(f"arrays must share their rows, got {sorted(rows)}")
@@ -30,7 +30,7 @@ def write_arrays(path: Path, arrays: dict[str, ndarray]) -> None:
         columns.append(column)
         metadata: dict[bytes, bytes] = {SHAPE_KEY: json.dumps(list(value.shape[1:])).encode(), DTYPE_KEY: str(value.dtype).encode()}
         fields.append(pa.field(name, column.type, metadata=metadata))
-    pq.write_table(pa.Table.from_arrays(columns, schema=pa.schema(fields)), path)
+    pq.write_table(pa.Table.from_arrays(columns, schema=pa.schema(fields, metadata=table_metadata)), path)
 
 
 def read_arrays(path: Path) -> dict[str, ndarray]:

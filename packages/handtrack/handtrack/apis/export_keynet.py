@@ -22,7 +22,7 @@ from torch import Tensor
 from handtrack.apis.export_nets_onnx import GraphRecord, KeyNetGraph, check_graph, export_graph, read_checked_state, torch_keynet
 from handtrack.data.array_table import write_arrays
 from handtrack.data.batches import CropKind
-from handtrack.data.keynet_holdout import KeyNetHoldout, read_holdout
+from handtrack.data.keynet_holdout import DATASETS_KEY, KeyNetHoldout, read_holdout
 from handtrack.data.stream import KeyNetSamples, select_samples
 from handtrack.models.keynet import KeyNetF, keynet_from_state
 
@@ -143,8 +143,7 @@ def main(config: Config) -> KeyNetExportReport:
         **{name: reference[name] for name in OUTPUTS}, "decoded_points_crop": reference["points_crop"], "peak": reference["peak"], "d_rel_mm": reference["d_rel_mm"],
     }
     config.out_dir.mkdir(parents=True, exist_ok=True)
-    write_arrays(config.out_dir / "keynet_heldout.parquet", arrays)
-    (config.out_dir / "keynet_heldout.datasets.txt").write_text("\n".join(holdout.dataset_names) + "\n")
+    write_arrays(config.out_dir / "keynet_heldout.parquet", arrays, {DATASETS_KEY: "\n".join(holdout.dataset_names).encode()})
 
     crop_feed: Float32[ndarray, "n 1 96 96"] = (crops.astype(np.float32) / 255.0)[:, None]
     targets: list[ndarray] = [reference["heatmaps"], reference["distance"], reference["presence_logit"][:, None], reference["pinch_logit"][:, None]]

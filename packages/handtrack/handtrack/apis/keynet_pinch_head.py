@@ -94,13 +94,12 @@ def labelled_crops(segments: dict[str, list[str]], count: int, augment: KeyNetAu
 
 
 def features(model: KeyNetF, crops: Tensor, inputs: Tensor, device: torch.device, batch: int = 256) -> Float32[Tensor, "n 160"]:
-    """The pooled fused features every head reads (``KeyNetF.forward`` up to the heads)."""
+    """The pooled ``KeyNetF.trunk`` features the pinch head reads."""
     out: list[Tensor] = []
     with torch.inference_mode():
         for start in range(0, crops.shape[0], batch):
-            image: Tensor = model.image((crops[start : start + batch].to(device).float() / 255.0)[:, None])
-            keys: Tensor = model.keypoints(inputs[start : start + batch].to(device)).reshape(-1, 32, 12, 12)
-            out.append(model.fused(torch.cat((image, keys), dim=1)).mean(dim=(2, 3)).float())
+            crop: Tensor = (crops[start : start + batch].to(device).float() / 255.0)[:, None]
+            out.append(model.trunk(crop, inputs[start : start + batch].to(device)).mean(dim=(2, 3)))
     return torch.cat(out)
 
 

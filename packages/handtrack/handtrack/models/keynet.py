@@ -114,6 +114,12 @@ class KeyNetF(nn.Module):
         if bn_eps != DEFAULT_BN_EPS:  # BatchNorm's eps is not part of a state_dict: keep a non-default one with the weights
             self.register_buffer("bn_eps", torch.tensor(bn_eps, dtype=torch.float64))
 
+    def trunk(self, crop: Float32[Tensor, "b 1 96 96"], keypoints: Float32[Tensor, "b 63"]) -> Float32[Tensor, "b 160 6 6"]:
+        """The fused image + prior features every head reads (the presence, visibility and pinch heads their spatial mean)."""
+        image_features: Float32[Tensor, "b 64 12 12"] = self.image(crop)
+        keypoint_features: Float32[Tensor, "b 32 12 12"] = rearrange(self.keypoints(keypoints), "b (c h w) -> b c h w", c=32, h=12, w=12)
+        return self.fused(torch.cat((image_features, keypoint_features), dim=1))
+
     def forward(self, crop: Float32[Tensor, "b 1 96 96"], keypoints: Float32[Tensor, "b 63"]) -> KeyNetOutput:
         """Predict heatmaps and presence from a crop and prior keypoints.
 
@@ -126,9 +132,7 @@ class KeyNetF(nn.Module):
         Returns:
             Table 5 heatmaps and an unbounded crop-presence logit.
         """
-        image_features: Float32[Tensor, "b 64 12 12"] = self.image(crop)
-        keypoint_features: Float32[Tensor, "b 32 12 12"] = rearrange(self.keypoints(keypoints), "b (c h w) -> b c h w", c=32, h=12, w=12)
-        fused: Float32[Tensor, "b 160 6 6"] = self.fused(torch.cat((image_features, keypoint_features), dim=1))
+        fused: Float32[Tensor, "b 160 6 6"] = self.trunk(crop, keypoints)
         pooled: Float32[Tensor, "b 160"] = fused.mean(dim=(2, 3))
         return KeyNetOutput(
             heatmaps=self.heatmap_head(fused),

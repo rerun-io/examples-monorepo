@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pyarrow.parquet as pq
 import torch
 from jaxtyping import Int64
 from numpy import ndarray
@@ -27,6 +28,8 @@ from handtrack.train.source import KeyNetValidation
 
 HOLDOUT_DATASETS: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d", "dataforge-hot3d-quest3", "gsi-six-view", "dataforge-gen-humanego-subset")
 VARIANTS: tuple[str, ...] = ("deployed", "rotated")
+DATASETS_KEY: bytes = b"keynet_datasets"
+"""Schema metadata of a holdout (and of ``export_keynet``'s table): the dataset names ``dataset`` indexes, one per line."""
 
 
 def eval_segments(name: str, held_out: dict[str, list[str]], catalog_url: str) -> list[str]:
@@ -85,17 +88,16 @@ def write_holdout(path: Path, holdout: KeyNetHoldout) -> None:
     arrays["variant"] = holdout.variant.numpy()
     path.parent.mkdir(parents=True, exist_ok=True)
     partial: Path = path.with_suffix(".partial.parquet")
-    write_arrays(partial, arrays)
+    write_arrays(partial, arrays, {DATASETS_KEY: "\n".join(holdout.dataset_names).encode()})
     partial.replace(path)
-    path.with_suffix(".datasets.txt").write_text("\n".join(holdout.dataset_names) + "\n")
 
 
 def read_holdout(path: Path) -> KeyNetHoldout:
     arrays: dict[str, ndarray] = read_arrays(path)
-    names: tuple[str, ...] = tuple(path.with_suffix(".datasets.txt").read_text().split())
+    names: tuple[str, ...] = tuple((pq.read_schema(path).metadata or {}).get(DATASETS_KEY, b"").decode().split())
     unknown: list[str] = [name for name in names if name not in DATASET_SPECS]
-    if unknown:
-        raise ValueError(f"{path}: unknown datasets {unknown}")
+    if unknown or not names:
+        raise ValueError(f"{path}: datasets {names} in its {DATASETS_KEY.decode()} schema metadata ({unknown} unknown)")
     fields: list[str] = [f.name for f in dataclasses.fields(KeyNetSamples)]
     samples: KeyNetSamples = KeyNetSamples(**{name: torch.from_numpy(np.ascontiguousarray(arrays[name])) for name in fields})
     return KeyNetHoldout(samples, names, torch.from_numpy(arrays["camera"]), torch.from_numpy(arrays["variant"]))

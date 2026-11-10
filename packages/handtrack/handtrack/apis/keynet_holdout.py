@@ -14,7 +14,7 @@ from handtrack.data.keynet_holdout import HOLDOUT_DATASETS, build_holdout, write
 @dataclass(frozen=True, slots=True)
 class Config:
     out: Path
-    """The Parquet table to write (a ``.datasets.txt`` beside it names the datasets)."""
+    """The Parquet table to write (its schema metadata names the datasets)."""
     datasets: tuple[str, ...] = HOLDOUT_DATASETS
     crops_per_dataset: int = 2048
     """Crops per dataset in the deployed variant (the rotated variant has as many)."""

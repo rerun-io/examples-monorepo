@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import numpy as np
+import pyarrow.parquet as pq
 import pytest
 import torch
 from jaxtyping import Float32, Int64
@@ -12,7 +13,7 @@ pytest.importorskip("onnxruntime", reason="needs onnxruntime")
 
 from handtrack.apis.export_keynet import OUTPUTS, Config, main, sample_rows  # noqa: E402
 from handtrack.data.array_table import read_arrays  # noqa: E402
-from handtrack.data.keynet_holdout import KeyNetHoldout, write_holdout  # noqa: E402
+from handtrack.data.keynet_holdout import DATASETS_KEY, KeyNetHoldout, write_holdout  # noqa: E402
 from handtrack.data.stream import KeyNetSamples, empty_keynet_samples  # noqa: E402
 from handtrack.models.keynet import KeyNetF  # noqa: E402
 from handtrack.train.checkpoint import export_weights  # noqa: E402
@@ -68,7 +69,7 @@ def test_three_graphs_match_pytorch_on_a_balanced_parquet_draw(tmp_path: Path) -
     }
     assert {name: value.shape for name, value in references.items()} == shapes
     assert references["crops_u8"].dtype == np.uint8 and references["keypoints"].dtype == np.float32
-    assert (out_dir / "keynet_heldout.datasets.txt").read_text().split() == list(DATASETS)
+    assert pq.read_schema(out_dir / "keynet_heldout.parquet").metadata[DATASETS_KEY].decode().split() == list(DATASETS)
 
     # Every row is a deployed-variant crop with its own labels; half of each dataset's rows get a zero prior, the rest the stored one.
     deployed: ndarray = np.flatnonzero(holdout.variant.numpy() == 0)
