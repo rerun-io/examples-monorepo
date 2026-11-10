@@ -339,7 +339,8 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
 
     if pipeline is None:
         pipeline = build_pipeline(settings)
-    decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
+    device: torch.device = torch.device("cuda", torch.cuda.current_device())
+    decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device=device)
     num_frames_raw = decoder.metadata.num_frames
     fps_raw = decoder.metadata.average_fps
     if num_frames_raw is None or fps_raw is None or float(fps_raw) <= 0.0:
@@ -369,6 +370,10 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
     meshed_slots: set[str] = set()
     for start in tqdm(range(0, num_frames, settings.frame_batch_size), desc="posekit video hands"):
         stop: int = min(start + settings.frame_batch_size, num_frames)
+        # A streaming app resumes this generator on any worker thread. torchcodec's NVDEC decoder needs the CUDA
+        # context current on the calling thread; without it the decode fails (error 201) and the cached decoder
+        # for that frame size stays broken, so make the device current before every chunk.
+        torch.cuda.set_device(device)
         frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
