@@ -58,7 +58,8 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 pandas = ">=2"
 # gradio from conda-forge (its 6.31.0 build installs complete; it also caps pillow <13 itself: Pillow 13 broke
 # gradio's 32-bit integer PNG output, fixed on gradio main by gradio-app/gradio#14034 but unreleased). Exact, so
-# each bump is a deliberate change: re-check that a gradio-rerun app still renders.
+# each bump is a deliberate change: re-check that a gradio-rerun app still renders, and that the hands app's tab strip
+# and example tiles still line up (posekit/hands_app_ui/theme.py styles Gradio's own classes).
 gradio = "==6.31.0"                                        # pin-bump: hold
 
 [feature.common.target.linux-aarch64.dependencies]

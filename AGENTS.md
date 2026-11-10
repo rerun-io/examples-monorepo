@@ -374,7 +374,7 @@ release ships.
 
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
-- **gradio from conda-forge** — pinned exactly in `[feature.common.dependencies]`; it caps `pillow <13` itself. `gradio-rerun` stays a PyPI pin (see **Testing Rerun builds**), and pixi's conda-to-PyPI mapping lets the conda `gradio` satisfy its `gradio>=6`.
+- **gradio from conda-forge** — pinned exactly in `[feature.common.dependencies]`; it caps `pillow <13` itself. `gradio-rerun`: see **Testing Rerun builds**.
 - **No dependency may need a build step during resolution** — `pixi lock` must never need package Python. Vendor the inference subset (as `monopriors/third_party/` does, with the upstream rev and patch list in the package `__init__` docstring), ship a prebuilt wheel, or give the package static metadata and build any CUDA extension through an explicit task.
 - **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. A shared-feature change re-solves the whole workspace; that works from any Linux host, while macOS is limited to `pixi lock --check` (see **Platforms & lockfile**).
 - **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:
