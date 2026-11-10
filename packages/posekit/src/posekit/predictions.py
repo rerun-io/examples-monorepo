@@ -18,8 +18,9 @@ from posekit.skeletons import HAND_21, SOMA_HAND, KeypointSkeleton
 
 HandSide: TypeAlias = Literal["left", "right"]
 """Anatomical handedness of a hand instance."""
-MeshDetail: TypeAlias = Literal["full", "low"]
-"""Hand mesh resolution sent to a viewer: the model's own, or a coarser one with 4x fewer vertices where the model has one (SOMA)."""
+MeshDetail: TypeAlias = Literal["full", "low", "xlo"]
+"""Hand mesh resolution sent to a viewer: the model's own (``full``), or, where the model has them (SOMA), its coarser
+levels of detail ``low`` (4x fewer vertices) and ``xlo`` (21x fewer)."""
 SOMA_HAND21: tuple[int, ...] = (0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24)
 """SOMA-25 rows of HAND_21 (wrist, then thumb/index/middle/ring/little): omits the non-thumb metacarpals."""
 
@@ -301,7 +302,7 @@ class HandPoses3d:
 
     def at_mesh_detail(self, detail: MeshDetail) -> "HandPoses3d":
         """These hands with their mesh at ``detail``. A model with one mesh resolution returns its hands as they are;
-        EgoHand overrides this to send SOMA's low level of detail."""
+        EgoHand overrides this to send one of SOMA's coarser levels of detail."""
         return self
 
     def as_hand21(self) -> "HandPoses3d":

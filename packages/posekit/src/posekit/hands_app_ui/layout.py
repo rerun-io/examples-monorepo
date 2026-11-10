@@ -28,8 +28,9 @@ def build() -> gr.Blocks:
                     stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
                     max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
                     mesh_detail = gr.Radio(
-                        label="Mesh detail", choices=["full", "low"], value="full",
-                        info="EgoHand: full = 2,859 vertices per hand, low = SOMA's 718 (4x fewer bytes to the viewer). The joints do not change.",
+                        label="Mesh detail", choices=["full", "low", "xlo"], value="full",
+                        info="EgoHand's SOMA levels of detail per hand: full = 2,859 vertices, low = 718 (4x fewer bytes to the viewer), "
+                        "xlo = 134 (21x fewer). The joints do not change.",
                     )
                     gr.Markdown(
                         f"Pinhole intrinsics in pixels, filled from a {VideoHandsSettings().hfov_deg:g}° horizontal FOV "

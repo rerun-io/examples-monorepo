@@ -90,7 +90,7 @@ class VideoHandsSettings:
     max_frames: int | None = None
     """Maximum number of frames to process; ``None`` runs the full video."""
     mesh_detail: MeshDetail = "full"
-    """Hand mesh sent to the viewer: the model's own, or ``low`` (EgoHand: SOMA's low level of detail, 4x fewer bytes)."""
+    """Hand mesh sent to the viewer: the model's own, or (EgoHand) SOMA's ``low`` or ``xlo`` level of detail, 4x or 21x fewer bytes."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

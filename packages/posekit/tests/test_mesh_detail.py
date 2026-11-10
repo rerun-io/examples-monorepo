@@ -6,12 +6,14 @@ import torch
 pytest.importorskip("warp", reason="EgoHand needs the posekit-hands Pixi environment (posekit-egohand feature)")
 pytest.importorskip("soma", reason="EgoHand needs the SOMA model package in the posekit-hands Pixi environment")
 
-from posekit.models.egohand import SOMA_REVISION, EgoHandReconstruction, SomaLowMesh, soma_assets_path, soma_low_mesh
+from pathlib import Path
+
+from posekit.models.egohand import SOMA_REVISION, EgoHandReconstruction, SomaMeshLod, SomaMeshLods, soma_assets_path
 from posekit.predictions import Keypoints3d
 from posekit.skeletons import SOMA_HAND
 
 
-def _hands(low_mesh: dict | None) -> EgoHandReconstruction:
+def _hands(mesh_lods: SomaMeshLods | None) -> EgoHandReconstruction:
     """A left and a right hand with 6-vertex meshes whose vertex v sits at x = v (+100 on the right hand)."""
     n, k = 2, SOMA_HAND.num_keypoints
     vertices = torch.zeros((n, 6, 3))
@@ -22,32 +24,43 @@ def _hands(low_mesh: dict | None) -> EgoHandReconstruction:
         vertices=vertices,
         faces={"left": torch.tensor([[0, 1, 2], [3, 4, 5]]), "right": torch.tensor([[0, 2, 1], [3, 5, 4]])},
         rotations=torch.zeros((n, k, 3, 3)), identity=torch.zeros((n, 5)), scale=torch.ones(n), translation=torch.zeros((n, 3)),
-        scale_parameters=None, low_mesh=low_mesh,
+        scale_parameters=None, mesh_lods=mesh_lods,
     )
 
 
-def test_low_detail_keeps_the_low_vertices_of_each_side_and_its_triangles() -> None:
-    low = {
-        "left": SomaLowMesh(vertex_ids=torch.tensor([0, 1, 2]), faces=torch.tensor([[0, 1, 2]])),
-        "right": SomaLowMesh(vertex_ids=torch.tensor([3, 4, 5]), faces=torch.tensor([[0, 2, 1]])),
-    }
-    hands = _hands(low)
-    coarse = hands.at_mesh_detail("low")
-    assert coarse.vertices is not None and coarse.faces is not None
-    assert coarse.vertices[:, :, 0].tolist() == [[0.0, 1.0, 2.0], [103.0, 104.0, 105.0]]
-    assert coarse.faces["right"].tolist() == [[0, 2, 1]]
-    assert coarse.keypoints is hands.keypoints  # the joints are untouched
+def test_a_coarser_level_maps_each_side_with_its_own_rule_and_takes_its_triangles() -> None:
+    mean_of_pairs = torch.nn.Module()
+    mean_of_pairs.forward = lambda mid: (mid[:, 0::2] + mid[:, 1::2]) / 2  # an xlo-like interpolation: 3 vertices from 6
+    lods = SomaMeshLods(Path("/unused"), levels={
+        "low": {
+            "left": SomaMeshLod(torch.tensor([[0, 1, 2]]), vertex_ids=torch.tensor([0, 1, 2])),
+            "right": SomaMeshLod(torch.tensor([[0, 2, 1]]), vertex_ids=torch.tensor([3, 4, 5])),
+        },
+        "xlo": {side: SomaMeshLod(torch.tensor([[0, 1, 2]]), interpolator=mean_of_pairs) for side in ("left", "right")},
+    })
+    hands = _hands(lods)
+    low = hands.at_mesh_detail("low")
+    assert low.vertices is not None and low.faces is not None
+    assert low.vertices[:, :, 0].tolist() == [[0.0, 1.0, 2.0], [103.0, 104.0, 105.0]]
+    assert low.faces["right"].tolist() == [[0, 2, 1]]
+    assert low.keypoints is hands.keypoints  # the joints are untouched
+    xlo = hands.at_mesh_detail("xlo")
+    assert xlo.vertices is not None and xlo.vertices[:, :, 0].tolist() == [[0.5, 2.5, 4.5], [100.5, 102.5, 104.5]]
     assert hands.at_mesh_detail("full") is hands
-    unchanged = _hands(None).at_mesh_detail("low")  # no low mesh: the model's own
+    unchanged = _hands(None).at_mesh_detail("low")  # no levels of detail: the model's own mesh
     assert unchanged.vertices is not None and unchanged.vertices.shape == (2, 6, 3)
 
 
 @pytest.mark.integration
-def test_soma_low_mesh_is_the_first_718_vertices_with_1422_triangles_per_side() -> None:
+@pytest.mark.parametrize(("detail", "vertices", "triangles"), [("low", 718, 1422), ("xlo", 134, 258)])
+def test_soma_levels_of_detail_have_their_vertex_and_triangle_counts(detail: str, vertices: int, triangles: int) -> None:
     try:
         soma = soma_assets_path(None, "nvidia/SOMA-X", SOMA_REVISION)
     except OSError as error:
         pytest.skip(f"SOMA hand assets (nvidia/SOMA-X) not available: {error}")
-    for side, mesh in soma_low_mesh(soma).items():
-        assert mesh.vertex_ids.tolist() == list(range(718)), side
-        assert tuple(mesh.faces.shape) == (1422, 3) and int(mesh.faces.max()) == 717, side
+    if not torch.cuda.is_available():
+        pytest.skip("SOMA levels of detail are kept on CUDA")
+    mid = torch.rand((2, 2859, 3), device="cuda")
+    for side, mesh in SomaMeshLods(soma).level(detail).items():  # type: ignore[arg-type]
+        assert tuple(mesh.vertices(mid).shape) == (2, vertices, 3), side
+        assert tuple(mesh.faces.shape) == (triangles, 3) and int(mesh.faces.max()) == vertices - 1, side
