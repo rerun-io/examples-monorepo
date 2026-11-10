@@ -41,7 +41,7 @@ from tqdm.auto import tqdm
 
 from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
-from posekit.predictions import HandDetections, HandPoses3d, HandSide
+from posekit.predictions import HandDetections, HandPoses3d, HandSide, MeshDetail
 from posekit.skeletons import KeypointSkeleton
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
@@ -89,6 +89,8 @@ class VideoHandsSettings:
     """Frames decoded and processed per step."""
     max_frames: int | None = None
     """Maximum number of frames to process; ``None`` runs the full video."""
+    mesh_detail: MeshDetail = "full"
+    """Hand mesh sent to the viewer: the model's own, or ``low`` (EgoHand: SOMA's low level of detail, 4x fewer bytes)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -344,7 +346,7 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
-            hands = hands.in_pinhole(camera.intrinsics)
+            hands = hands.in_pinhole(camera.intrinsics).at_mesh_detail(settings.mesh_detail)
         total_hands += hands.num_hands
         chunk: Int64[ndarray, "chunk"] = np.arange(start, stop, dtype=np.int64)
         timestamps: Int64[ndarray, "chunk"] = (

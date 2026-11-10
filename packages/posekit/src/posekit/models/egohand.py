@@ -33,7 +33,7 @@ from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.ops.pil_resize import resize_bilinear_uint8
-from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb
+from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, MeshDetail, validate_frames_rgb
 from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
 
@@ -256,6 +256,16 @@ class _UpstreamHand:
     """Wrist-relative mesh in source camera axes, metres."""
 
 
+@dataclass(frozen=True, slots=True)
+class SomaLowMesh:
+    """SOMA's low level of detail of one side's hand: which of the model's (mid) vertices it keeps, and its triangles."""
+
+    vertex_ids: Int64[Tensor, "v"]
+    """Mid-mesh vertex of each low-mesh vertex (SOMA orders the mid mesh so these are its first 718)."""
+    faces: Int64[Tensor, "f 3"]
+    """Low-mesh triangles, indexing ``vertex_ids``."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EgoHandReconstruction(HandPoses3d):
     """Metric SOMA hands: camera-space joints and meshes plus the SOMA parameters behind them."""
@@ -270,9 +280,28 @@ class EgoHandReconstruction(HandPoses3d):
     """Camera-space wrist translation in metres."""
     scale_parameters: Float32[Tensor, "n s"] | None
     """Per-finger MHR scales; None for checkpoints without this head."""
+    low_mesh: dict[HandSide, SomaLowMesh] | None = None
+    """SOMA's low level of detail per side, for ``at_mesh_detail("low")``."""
+
+    def at_mesh_detail(self, detail: MeshDetail) -> HandPoses3d:
+        """At ``"low"``, each mesh as SOMA's low level of detail: 718 of the 2,859 vertices and their 1,422 triangles.
+
+        The model still runs on the full mesh, so the joints and the hand pose are unchanged; only the mesh sent
+        to a viewer is coarser (4x fewer bytes per hand and frame). The low vertices sit within 0.4 mm of SOMA's
+        own low-detail skinning.
+        """
+        if detail == "full" or self.low_mesh is None or self.vertices is None or not self.sides:
+            return self
+        low_mesh: dict[HandSide, SomaLowMesh] = self.low_mesh
+        ids: Int64[Tensor, "n v"] = torch.stack([low_mesh[side].vertex_ids for side in self.sides])
+        return HandPoses3d(
+            keypoints=self.keypoints, sides=self.sides,
+            vertices=torch.gather(self.vertices, 1, ids[..., None].expand(-1, -1, 3)),
+            faces={side: mesh.faces for side, mesh in low_mesh.items()},
+        )
 
     @classmethod
-    def empty(cls, device: torch.device, faces: dict[HandSide, Tensor]) -> "EgoHandReconstruction":
+    def empty(cls, device: torch.device, faces: dict[HandSide, Tensor], low_mesh: dict[HandSide, SomaLowMesh] | None = None) -> "EgoHandReconstruction":
         """No hands: zero-row outputs on ``device``."""
         joints: int = SOMA_HAND.num_keypoints
         return cls(
@@ -285,6 +314,7 @@ class EgoHandReconstruction(HandPoses3d):
             scale=torch.empty((0,), device=device),
             translation=torch.empty((0, 3), device=device),
             scale_parameters=None,
+            low_mesh=low_mesh,
         )
 
 
@@ -365,6 +395,21 @@ def export_backbone_once(weights: Path, soma: Path, onnx: Path, *, batch_size: i
     build_once(onnx, export)
 
 
+def soma_low_mesh(soma: Path) -> dict[HandSide, SomaLowMesh]:
+    """SOMA's low level of detail of each side's hand, on CUDA, from the SOMA directory (built on the CPU, ~0.5 s per side)."""
+    from soma.hand import SOMAHandLayer
+
+    meshes: dict[HandSide, SomaLowMesh] = {}
+    for side in ("left", "right"):
+        layer = SOMAHandLayer(
+            data_root=str(soma), hand_type=side, device="cpu", identity_model_type="soma", mode="torch", lod="low", load_correctives_model=False
+        )
+        ids: Tensor | None = layer.identity_lod_mid_ids  # set for the low level of detail, a subset of the mid vertices
+        assert ids is not None
+        meshes[side] = SomaLowMesh(vertex_ids=ids.cuda(), faces=layer.faces.to(torch.int64).cuda())
+    return meshes
+
+
 def soma_faces(model: EgoHand) -> dict[HandSide, Int64[Tensor, "f 3"]]:
     """Each side's SOMA hand triangles on CUDA, from a released EgoHand model."""
     return {side: torch.from_numpy(np.asarray(model.soma_hand.faces(side), dtype=np.int64)).cuda() for side in ("left", "right")}
@@ -430,6 +475,7 @@ class EgoHandPredictor(TopDownHandPose3d):
             model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True, perf_reporter=self
         )
         self.faces: dict[HandSide, Tensor] = soma_faces(model)
+        self.low_mesh: dict[HandSide, SomaLowMesh] = soma_low_mesh(soma)
         self.module_timers: dict[EgoHandStage, _ModuleTimer] = {"backbone": _ModuleTimer(model.backbone), "head": _ModuleTimer(model.hand_head)}
 
     def record_latency(self, stage: PerfStage, latency_ms: float) -> None:
@@ -497,7 +543,7 @@ class EgoHandPredictor(TopDownHandPose3d):
                 confidence.append(float(detections.boxes.scores[row]))
         device: torch.device = frames_rgb.device
         if not rows:
-            return EgoHandReconstruction.empty(device, self.faces)
+            return EgoHandReconstruction.empty(device, self.faces, self.low_mesh)
         xyz: Float32[ndarray, "n 25 3"] = np.stack([row.pred_keypoints_3d + row.transl for row in rows]).astype(np.float32)
         xy: Float32[ndarray, "n 25 2"] = np.stack([project(camera, points.astype(np.float64)) for points in xyz]).astype(np.float32)
         xyz_tensor: Float32[Tensor, "n 25 3"] = torch.from_numpy(xyz).to(device)
@@ -514,6 +560,7 @@ class EgoHandPredictor(TopDownHandPose3d):
             sides=tuple(sides),
             vertices=torch.from_numpy(np.stack([row.pred_vertices + row.transl for row in rows]).astype(np.float32)).to(device),
             faces=self.faces,
+            low_mesh=self.low_mesh,
             rotations=torch.from_numpy(np.stack([row.poses for row in rows])).to(device),
             identity=torch.from_numpy(np.stack([row.identity_coeffs for row in rows])).to(device),
             scale=torch.tensor([row.global_scale for row in rows], dtype=torch.float32, device=device),

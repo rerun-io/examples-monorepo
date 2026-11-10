@@ -24,6 +24,7 @@ from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, assumed_pinho
 from posekit.cameras import CalibratedCamera
 from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
 from posekit.models.egohand_fast import supported_backbone_precision
+from posekit.predictions import MeshDetail
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
@@ -69,12 +70,13 @@ def fill_intrinsics(video: str | None) -> tuple[float | None, float | None, floa
 
 
 def settings_from_inputs(
-    video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None
+    video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
+    mesh_detail: MeshDetail = "full",
 ) -> VideoHandsSettings:
     """The widget values as the CLI's settings; the stack name selects the same detector and pose configs as the CLI subcommand."""
     return VideoHandsSettings(
         video_path=Path(video), fx=fx, fy=fy, cx=cx, cy=cy, detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack],
-        max_frames=max_frames if max_frames > 0 else None,
+        max_frames=max_frames if max_frames > 0 else None, mesh_detail=mesh_detail,
     )
 
 
@@ -112,14 +114,15 @@ def warm_up() -> None:
 
 @rr.thread_local_stream("posekit_hands_ui")
 def stream_hands(
-    video: str | None, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None
+    video: str | None, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
+    mesh_detail: MeshDetail = "full",
 ) -> Iterator[tuple[bytes | None, str]]:
     """Run the shared video hands core and stream the recording to the viewer after every chunk."""
     stream: rr.BinaryStream = rr.binary_stream()
     if video is None:
         yield stream.read(), "Choose a video first."
         return
-    settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy)
+    settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy, mesh_detail)
     if stack not in _PIPELINES:
         yield stream.read(), f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
     pipeline: HandPose3dPipeline = pipeline_for(stack)

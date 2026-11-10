@@ -29,6 +29,7 @@ from posekit.models.egohand import (
     EgoHandDetectorConfig,
     EgoHandReconstruction,
     EgoHandStage,
+    SomaLowMesh,
     TensorRtBackbone,
     asset_paths,
     egohand_weights_path,
@@ -36,6 +37,7 @@ from posekit.models.egohand import (
     require_camera,
     soma_assets_path,
     soma_faces,
+    soma_low_mesh,
 )
 from posekit.models.egohand_head import EgoHandHead
 from posekit.models.egohand_onnx import quantize_backbone
@@ -162,6 +164,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         loaded, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
         model: EgoHand = loaded.eval().to("cuda")
         self.faces: dict[HandSide, Tensor] = soma_faces(model)
+        self.low_mesh: dict[HandSide, SomaLowMesh] = soma_low_mesh(soma)
         _export_head_once(model, config.head_onnx, config.backbone_backend.max_batch_size)
         # The BF16 heads have no Q/DQ attention inputs; FP8 fusion applies only to DINO.
         self.executor: EgoHandTensorExecutor = EgoHandTensorExecutor(
@@ -188,7 +191,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         camera = require_camera(camera)
         validate_frames_rgb(frames_rgb)
         if not detections.num_detections:
-            return EgoHandReconstruction.empty(frames_rgb.device, self.faces)
+            return EgoHandReconstruction.empty(frames_rgb.device, self.faces, self.low_mesh)
         key: tuple[CameraKey, str] = (camera_key(camera), str(frames_rgb.device))
         if key not in self.croppers:
             self.croppers[key] = CudaHandCropper(camera, frames_rgb.device)
@@ -233,6 +236,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
             sides=detections.sides,
             vertices=output.vertices,
             faces=self.faces,
+            low_mesh=self.low_mesh,
             rotations=output.rotations,
             identity=output.identity,
             scale=output.scale,

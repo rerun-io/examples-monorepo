@@ -27,6 +27,10 @@ def build() -> gr.Blocks:
                 with gr.Accordion("Advanced settings", open=False):
                     stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
                     max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
+                    mesh_detail = gr.Radio(
+                        label="Mesh detail", choices=["full", "low"], value="full",
+                        info="EgoHand: full = 2,859 vertices per hand, low = SOMA's 718 (4x fewer bytes to the viewer). The joints do not change.",
+                    )
                     gr.Markdown(
                         f"Pinhole intrinsics in pixels, filled from a {VideoHandsSettings().hfov_deg:g}° horizontal FOV "
                         "with the principal point at the image centre."
@@ -51,7 +55,7 @@ def build() -> gr.Blocks:
                 )
         video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])
         video.change(example_stack, inputs=[video, stack], outputs=[stack])
-        run_event = run.click(stream_hands, inputs=[video, stack, max_frames, fx, fy, cx, cy], outputs=[viewer, status])
+        run_event = run.click(stream_hands, inputs=[video, stack, max_frames, fx, fy, cx, cy, mesh_detail], outputs=[viewer, status])
         stop.click(lambda: "Stopped.", outputs=[status], cancels=[run_event], queue=False)
     return demo
 
