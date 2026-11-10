@@ -97,6 +97,9 @@ class LoopSettings:
     """Multiplier for the pinch-relation loss (``models.keynet.pinch_loss``), scaled with the heatmap ramp."""
     keynet_bn_eps: float = 1e-5
     """KeyNet-F BatchNorm epsilon (1e-3 bounds the eval-mode amplification of near-dead channels)."""
+    lr_warmup_steps: int = 0
+    """With a step budget: grow every learning rate linearly from ~0 over this many first steps (large batches with frozen BatchNorm
+    diverged at the full rate from step 0 on 2026-11-09). 0: none."""
     keynet_freeze_bn_after_step: int = 0
     """From this global step on, KeyNet's BatchNorm layers keep their running statistics (eval mode) while every weight still trains,
     so training and evaluation compute the same function (the deployed net's frozen-BN continuation: its running statistics alone
@@ -471,9 +474,10 @@ class Trainer:
         if not self.cadence.max_steps:
             return
         progress: float = min(self.state.step, self.cadence.max_steps) / self.cadence.max_steps
+        warmup: float = min(1.0, (self.state.step + 1) / self.cadence.lr_warmup_steps) if self.cadence.lr_warmup_steps else 1.0
         for name, optimiser in self.optimisers.items():
             settings: OptimiserSettings = self.settings[name]
-            factor: float = (1 + math.cos(math.pi * progress)) / 2 if settings.schedule == 'cosine' else 1.0
+            factor: float = warmup * ((1 + math.cos(math.pi * progress)) / 2 if settings.schedule == 'cosine' else 1.0)
             for group in optimiser.param_groups:
                 group['lr'] = settings.lr * factor
 
