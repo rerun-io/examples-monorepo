@@ -41,11 +41,13 @@ The NPU pair is **FP16 DetNet + INT8 KeyNet**:
 
 ## Files
 
-mix-1's DetNet files come from `pixi run -e handtrack python packages/handtrack/tools/export_detnet.py --weights <pt> --heldout <parquet>
---out-dir <dir>` and `rknn_convert.py --builds detnet_b1_fp16`. The KeyNet `*.onnx` (and the 0929 DetNet's) come from `pixi run -e handtrack python packages/handtrack/tools/export_nets_onnx.py --detnet-weights <pt> --keynet-weights <pt>
---work-dir <dir> --detnet-cache <dir> --keynet-cache <dir>` (opset 17, TorchScript exporter).
+mix-1's DetNet files come from `pixi run -e handtrack python packages/handtrack/tools/export_detnet.py --weights <pt> --out-dir <dir>`
+(held-out frames decoded from the catalog) and `rknn_convert.py --builds detnet_b1_fp16`. The KeyNet `*.onnx` come from `pixi run -e handtrack
+python packages/handtrack/tools/export_keynet.py --weights <pt> --out-dir <dir>` (the frozen KeyNet holdout, cut from the catalog; opset 17,
+TorchScript exporter; the 0929 DetNet's files came from the retired combined exporter, the same graphs). `--golden-version <name>` /
+`--golden-dir <dir>` add a net's PyTorch outputs to the Rust crate's golden data (`tests/data/nets`, fixed inputs).
 `*.rknn` come from `pixi run --manifest-path <rknn-toolkit2 project>/pixi.toml python packages/robocap-live/tools/rknn_convert.py
---work-dir <dir> --keynet-cache <dir> --calibration-dir <dir>` (rknn-toolkit2 2.3.2, target rk3588; that env is its own pixi
+--work-dir <dir> --calibration-dir <dir>` (rknn-toolkit2 2.3.2, target rk3588; that env is its own pixi
 project, not an env of the root pixi.toml: the tool's docstring lists what it holds). The runtime on both caps is librknnrt 2.3.2 (429f97ae6b) with RKNPU driver 0.9.8.
 
 | File | sha256 | Bytes | What |
@@ -240,4 +242,4 @@ KeyNet INT8-mmse is inside those margins: 0.437 net px and a GT cost of +0.032 p
     nets_bench ort <models dir> --device cuda
   ```
   `<checkout>` is a monorepo checkout with the `handtrack` env installed. `--device cpu` works without a GPU.
-- **Scoring device outputs.** `rknn_convert.py --work-dir <dir> --keynet-cache <dir> --calibration-dir <dir> --score-device <out dir> --device-set heldout|s66 --device-label <label>`.
+- **Scoring device outputs.** `rknn_convert.py --work-dir <dir> --calibration-dir <dir> --score-device <out dir> --device-set heldout|s66 --device-label <label>`.

@@ -1,4 +1,4 @@
-"""Differentiable lens models for a camera rig: unclipped Fisheye62 (UmeTrack) and plain pinhole (SHOW3D).
+"""Differentiable lens models for a camera rig: unclipped Fisheye62 (UmeTrack), double sphere (Gen-HumanEgo) and plain pinhole (SHOW3D, GSI).
 
 Points are in metres. Projection never clips at the field of view or the image edge: labels need the
 position of keypoints outside the image, and the pose fit needs a smooth residual. Use ``in_front``
@@ -20,7 +20,8 @@ _R2_MAX: float = torch.pi**2
 class CameraRig:
     """The calibrated cameras of one rig, stacked on a leading camera axis ``c``.
 
-    ``fisheye62`` holds ``[k1..k6, p1, p2]`` per camera in simplecv's order; ``None`` means every camera is a pinhole.
+    ``fisheye62`` holds ``[k1..k6, p1, p2]`` per camera in simplecv's order; ``double_sphere`` holds ``[xi, alpha]`` per camera
+    (Usenko et al. 2018; focal and principal point as for a pinhole). Both ``None`` means every camera is a pinhole.
     """
 
     names: tuple[str, ...]
@@ -31,12 +32,21 @@ class CameraRig:
     focal: Float32[Tensor, "c 2"]
     principal: Float32[Tensor, "c 2"]
     fisheye62: Float32[Tensor, "c 8"] | None
+    double_sphere: Float32[Tensor, "c 2"] | None = None
 
     def __post_init__(self) -> None:
         n: int = len(self.names)
         shapes: list[tuple[int, ...]] = [tuple(self.image_size.shape), tuple(self.cam_from_rig.shape), tuple(self.focal.shape), tuple(self.principal.shape)]
-        if shapes != [(n, 2), (n, 4, 4), (n, 2), (n, 2)] or (self.fisheye62 is not None and tuple(self.fisheye62.shape) != (n, 8)):
+        if (shapes != [(n, 2), (n, 4, 4), (n, 2), (n, 2)] or (self.fisheye62 is not None and tuple(self.fisheye62.shape) != (n, 8))
+                or (self.double_sphere is not None and tuple(self.double_sphere.shape) != (n, 2))):
             raise ValueError(f"CameraRig tensors do not match {n} cameras: {shapes}")
+        if self.fisheye62 is not None and self.double_sphere is not None:
+            raise ValueError("a rig has one lens model: Fisheye62 or double sphere, not both")
+
+    @property
+    def pinhole(self) -> bool:
+        """Every camera is a plain pinhole (no lens distortion)."""
+        return self.fisheye62 is None and self.double_sphere is None
 
     def to(self, device: torch.device | str) -> "CameraRig":
         return CameraRig(
@@ -46,13 +56,14 @@ class CameraRig:
             focal=self.focal.to(device),
             principal=self.principal.to(device),
             fisheye62=None if self.fisheye62 is None else self.fisheye62.to(device),
+            double_sphere=None if self.double_sphere is None else self.double_sphere.to(device),
         )
 
     @staticmethod
     def cat(rigs: Sequence["CameraRig"]) -> "CameraRig":
-        """The cameras of ``rigs``, in order, as one rig; all pinhole or all Fisheye62."""
-        if len({rig.fisheye62 is None for rig in rigs}) != 1:
-            raise ValueError("one rig cannot mix pinhole and Fisheye62 cameras")
+        """The cameras of ``rigs``, in order, as one rig; all of one lens model."""
+        if len({(rig.fisheye62 is None, rig.double_sphere is None) for rig in rigs}) != 1:
+            raise ValueError("one rig cannot mix lens models")
         return CameraRig(
             names=tuple(name for rig in rigs for name in rig.names),
             image_size=torch.cat([rig.image_size for rig in rigs]),
@@ -60,6 +71,7 @@ class CameraRig:
             focal=torch.cat([rig.focal for rig in rigs]),
             principal=torch.cat([rig.principal for rig in rigs]),
             fisheye62=None if rigs[0].fisheye62 is None else torch.cat([rig.fisheye62 for rig in rigs if rig.fisheye62 is not None]),
+            double_sphere=None if rigs[0].double_sphere is None else torch.cat([rig.double_sphere for rig in rigs if rig.double_sphere is not None]),
         )
 
     def select(self, index: Sequence[int]) -> "CameraRig":
@@ -72,6 +84,7 @@ class CameraRig:
             focal=self.focal[rows],
             principal=self.principal[rows],
             fisheye62=None if self.fisheye62 is None else self.fisheye62[rows],
+            double_sphere=None if self.double_sphere is None else self.double_sphere[rows],
         )
 
 
@@ -92,10 +105,19 @@ def project(rig: CameraRig, points_cam: Float32[Tensor, "*batch c n 3"]) -> Floa
     x: Float32[Tensor, "*batch c n"] = points_cam[..., 0]
     y: Float32[Tensor, "*batch c n"] = points_cam[..., 1]
     z: Float32[Tensor, "*batch c n"] = points_cam[..., 2]
-    if rig.fisheye62 is None:
+    if rig.double_sphere is not None:
+        # Usenko et al. 2018 eq. 40-45, unclipped: the model's valid-region test is left to the callers (in_front, the image bounds).
+        xi, alpha = rig.double_sphere[:, None, :].unbind(dim=-1)  # each (c, 1), broadcasting over n
+        d1: Float32[Tensor, "*batch c n"] = torch.sqrt(x * x + y * y + z * z + 1e-12)
+        shifted: Float32[Tensor, "*batch c n"] = xi * d1 + z
+        d2: Float32[Tensor, "*batch c n"] = torch.sqrt(x * x + y * y + shifted * shifted + 1e-12)
+        denominator: Float32[Tensor, "*batch c n"] = alpha * d2 + (1 - alpha) * shifted
+        safe: Float32[Tensor, "*batch c n"] = torch.where(denominator.abs() < 1e-9, torch.full_like(denominator, 1e-9), denominator)
+        normalized: Float32[Tensor, "*batch c n 2"] = torch.stack([x / safe, y / safe], dim=-1)
+    elif rig.fisheye62 is None:
         # A point at z = 0 has no pinhole image; clamp so it stays finite (in_front rejects it).
         z_safe: Float32[Tensor, "*batch c n"] = torch.where(z.abs() < 1e-9, torch.full_like(z, 1e-9), z)
-        normalized: Float32[Tensor, "*batch c n 2"] = torch.stack([x / z_safe, y / z_safe], dim=-1)
+        normalized = torch.stack([x / z_safe, y / z_safe], dim=-1)
     else:
         # The epsilon keeps atan2(r, z) / r and its gradient finite on the optical axis (r = 0).
         radius: Float32[Tensor, "*batch c n"] = torch.sqrt(x * x + y * y + 1e-12)

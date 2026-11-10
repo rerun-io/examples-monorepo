@@ -14,8 +14,7 @@ import torch
 from torch import Tensor
 
 from handtrack.apis.export_detnet import ExportDetNetConfig
-from handtrack.apis.export_detnet import main as export_detnet
-from handtrack.data.array_table import write_arrays
+from handtrack.apis.export_detnet import export as export_detnet
 from handtrack.models.detnet import DetNetF, DetNetOutput
 from handtrack.train.checkpoint import TrainingState, load_checkpoint
 from handtrack.train.safetensors_checkpoint import ModelCard, file_sha256, load_model, load_training_state
@@ -85,8 +84,7 @@ def test_onnx_exported_from_the_safetensors_matches_the_bundles_onnx(version: st
     released: Path = RELEASE / version
     need(released / "model.safetensors", released / "detnet_full.onnx", released / "detnet_pooled_b1.onnx")
     frames: np.ndarray = (pooled(2).numpy()[:, 0] * 255).astype(np.uint8)
-    write_arrays(tmp_path / "heldout.parquet", {"pooled_u8": frames, "dataset": np.zeros(len(frames), dtype=np.int64)})
-    export_detnet(ExportDetNetConfig(weights=released / "model.safetensors", heldout=tmp_path / "heldout.parquet", out_dir=tmp_path / "onnx", threads=4))
+    export_detnet(ExportDetNetConfig(weights=released / "model.safetensors", out_dir=tmp_path / "onnx", threads=4), frames, np.zeros(len(frames), dtype=np.int64))
     feed: np.ndarray = (frames.astype(np.float32) / 255.0)[:, None]
     feeds: dict[str, np.ndarray] = {"detnet_pooled_b1.onnx": feed[:1], "detnet_full.onnx": np.repeat(np.repeat(feed, 4, axis=2), 4, axis=3)}
     for name, image in feeds.items():

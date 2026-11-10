@@ -7,15 +7,17 @@ from typing import Literal, get_args
 
 import torch
 from serde import serde
-from serde.json import to_json
+from serde.json import from_json, to_json
 
 from handtrack.data.augment import DetNetAugment
 from handtrack.data.batches import BatchSource
 from handtrack.data.cache import DetNetCache, KeyNetCache
 from handtrack.data.catalog import CATALOG_URL, DatasetName, SplitName, list_segments, select_split
-from handtrack.data.echo import EchoStream, Producer
+from handtrack.data.echo import EchoStream, KeyNetProducer, Producer
+from handtrack.data.keynet_holdout import HoldoutSource, load_holdout
+from handtrack.data.keynet_rerun import CutStream, DrawAugment, keynet_finish, stream_cuts
 from handtrack.data.rerun_source import DATASET_SPECS, build_manifest, nvdec_producer, rerun_producer, source_spec, training_finish
-from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig
+from handtrack.data.stream import CatalogStream, KeyNetAugment, StreamConfig, sample_count
 from handtrack.train.loop import LoopSettings, Nets, OptimiserSettings, Trainer
 
 
@@ -54,6 +56,12 @@ class RerunStreamSettings:
     left the GPU idle (2026-11-08: 0.5 ms took a 3-minute run from ~7.3k to ~8.2k images/s, GPU 55-60 % to 73 %)."""
     epoch_steps: int = 20_000
     """Batches per trainer epoch (checkpoint cadence); producers keep running across epochs."""
+    keynet_cuts: int = 2
+    """KeyNet: independently jittered crops cut from each decoded chunk (a cut is a grid sample; a decode is not)."""
+    keynet_full_rotation: float = 0.25
+    """KeyNet: share of crops rolled by a uniform angle on the whole circle instead of +-30 degrees (RoboCap cuts without a roll)."""
+    keynet_draw: DrawAugment = field(default_factory=DrawAugment)
+    """KeyNet: augmentation drawn anew every time a stored crop is drawn."""
     holdout: Path = Path("configs/detector_holdout.json")
     """Held-out episodes of the 2D-keypoint datasets (relative to the package directory)."""
     manifest_dir: Path = Path("/mnt/nas/ssd-8tb/scratch/hand-detector/manifests")
@@ -148,6 +156,8 @@ class Config:
     """Torch device, e.g. cpu or cuda:0; CPU is safe for local fake-data tests."""
     stream: StreamSettings = field(default_factory=StreamSettings)
     """Shared stream factory settings."""
+    keynet_init: Path | None = None
+    """Start KeyNet from these weights (a ``*.weights.pt`` with its ``.sha256`` sidecar) instead of from scratch."""
 
 
 SPLITS: dict[str, SplitName] = {"training": "train", "train": "train", "validation": "val", "val": "val", "testing": "test", "test": "test"}
@@ -170,9 +180,16 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
     ours: SplitName = SPLITS[split]
     evaluation: bool = ours != "train"
     if settings.rerun is not None and not evaluation:
-        if nets != "detnet":
-            raise ValueError("stream.rerun feeds DetNet only; train with nets=detnet")
-        return rerun_source(settings, settings.rerun, torch.device(device))
+        if nets == "both":
+            raise ValueError("stream.rerun feeds one net at a time; train with nets=detnet or nets=keynet")
+        return rerun_source(settings, settings.rerun, torch.device(device), nets)
+    if settings.rerun is not None and nets == "keynet":  # validation scores the frozen holdout (``data.keynet_holdout_cuts``), cut anew
+        holdout_source: HoldoutSource = HoldoutSource(load_holdout(settings.rerun.catalog_url, torch.device(device)), settings.keynet_batch, device)
+        rows: int = sample_count(holdout_source.samples)
+        if rows > settings.max_val_batches * settings.keynet_batch:
+            raise ValueError(f"the KeyNet holdout has {rows} rows but validation reads at most {settings.max_val_batches} x {settings.keynet_batch}; "
+                             "raise stream.max_val_batches so every model is scored on the whole holdout")
+        return holdout_source
     if settings.detnet_cache is not None and not evaluation:
         if nets != "detnet":
             raise ValueError("stream.detnet_cache holds DetNet samples only; train with nets=detnet")
@@ -230,11 +247,19 @@ def training_segments(name: str, holdout: DetectorHoldout, catalog_url: str) -> 
     return sorted(set(dataset.segment_ids()) - held)
 
 
-def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device) -> EchoStream:
-    """One endless Rerun-dataloader producer per dataset into an ``EchoStream`` with step-budget epochs."""
-    from serde.json import from_json
-
+def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device, nets: Nets = "detnet") -> EchoStream:
+    """One endless Rerun-dataloader producer per dataset into an ``EchoStream`` with step-budget epochs: DetNet frames, or KeyNet
+    crops (``data.keynet_rerun``; their priors are zeroed at draw time by ``DrawAugment``, so every stored crop keeps its prior)."""
     holdout: DetectorHoldout = from_json(DetectorHoldout, rerun.holdout.read_text())
+    if nets == "keynet":
+        augment: KeyNetAugment = KeyNetAugment(negative_margin=settings.keynet_negative_margin, full_rotation_probability=rerun.keynet_full_rotation,
+                                               zero_input_probability=0.0)
+        cuts: list[CutStream] = [stream_cuts(name, index, training_segments(name, holdout, rerun.catalog_url), catalog_url=rerun.catalog_url, device=device,
+                                             augments=[augment] * rerun.keynet_cuts, seed=settings.seed + index, endless=True) for index, name in enumerate(rerun.datasets)]
+        crops: list[KeyNetProducer] = [lambda epoch, cut=cut: (samples for samples, _, _ in cut(epoch)) for cut in cuts]
+        return EchoStream(crops, batch_size=settings.keynet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
+                          device=device, seed=settings.seed, finish=keynet_finish(rerun.keynet_draw), epoch_steps=rerun.epoch_steps, min_echo=rerun.min_echo,
+                          prefetch=rerun.prefetch, keynet=True)
     producers: list[Producer] = []
     for index, (name, workers) in enumerate(zip(rerun.datasets, rerun.workers, strict=True)):
         segments: list[str] = training_segments(name, holdout, rerun.catalog_url)
@@ -270,7 +295,8 @@ def main(config: Config) -> None:
     torch.backends.cudnn.benchmark = config.device.startswith("cuda")
     cap_gpu_memory(config.stream.gpu_memory_gb, config.device)
     trainer: Trainer = Trainer(config.nets, config.detnet, config.keynet, config.loop, config.run_dir, config.device,
-                               resume=config.resume, max_val_batches=config.stream.max_val_batches, config_json=to_json(config))
+                               resume=config.resume, max_val_batches=config.stream.max_val_batches, config_json=to_json(config),
+                               keynet_init=config.keynet_init)
     source: BatchSource = build_source(config.stream, config.stream.train_split, config.nets, device=config.device)
     try:
         validation: BatchSource = build_source(config.stream, config.stream.val_split, config.nets, device=config.device)

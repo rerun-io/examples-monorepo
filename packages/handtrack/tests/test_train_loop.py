@@ -354,3 +354,11 @@ def test_a_nonfinite_loss_stops_training_by_the_next_log(tmp_path: Path) -> None
     with pytest.raises(ValueError, match='Nonfinite detnet training loss'):
         trainer.run(source, FakeSource(1, 1))
     assert trainer.state.step == 2
+
+
+def test_the_warm_up_grows_the_learning_rate_linearly_before_the_cosine(tmp_path: Path) -> None:
+    constant = OptimiserSettings(0.001)
+    trainer = Trainer('detnet', constant, KEYNET_SGD, LoopSettings(epochs=1, max_steps=100, validate_every=0, lr_warmup_steps=10), tmp_path, 'cpu', max_val_batches=1)
+    trainer.run(FakeSource(4, 0), FakeSource(1, 1))
+    assert trainer.state.step == 4
+    assert trainer.optimisers['detnet'].param_groups[0]['lr'] == pytest.approx(0.001 * 5 / 10)

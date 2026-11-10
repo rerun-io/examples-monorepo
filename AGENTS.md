@@ -210,10 +210,12 @@ are checked on the way in; the rest of the code holds typed objects, never dicts
 - **Records yes, streams no.** A record you read whole goes through pyserde, arrays
   included: calibrations, hand models, keypoint rows, reports, whole-sequence pose
   tables. A stream you iterate does not: video frames, depth maps, masks, point clouds,
-  trajectories and per-frame model outputs live in Rerun (an `.rrd`, registered as a
-  catalog layer when the segment is on the catalog), tables in Parquet/Arrow, and
-  pyserde carries only the metadata that names them. The test is the role of the data,
-  not its size.
+  trajectories, per-frame model outputs and sample tables live in Rerun (an `.rrd`,
+  registered as a catalog layer when the segment is on the catalog), and pyserde carries
+  only the metadata that names them. The test is the role of the data, not its size.
+- **Data artifacts are Rerun recordings** (`.rrd` / catalog); no Parquet, npz or JSON data files. One named exception: the RKNN
+  conversion hand-off (`handtrack/data/array_table.py` -> `robocap-live/tools/rknn_convert.py`) stays Parquet because rknn-toolkit2
+  pins numpy <=1.26.4 and rerun-sdk needs numpy >=2; revisit when Rockchip supports numpy 2.
 - Data that belongs to a recording or a model (camera calibration, quantization ranges, goldens, eval outputs) lives inside a .rrd (static entities + recording properties), not in JSON sidecars.
 - **No npz/npy.** Never write them: not for outputs, caches, intermediates, test
   fixtures or frozen references. A frozen reference that a golden test needs is an
