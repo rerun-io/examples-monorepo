@@ -22,7 +22,7 @@ use ::ort::session::builder::GraphOptimizationLevel;
 use ::ort::value::TensorRef;
 
 use super::{
-    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, HandNets, KEYNET_CROP, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
+    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, DetNetVersion, HEATMAP_LEN, HandNets, KEYNET_CROP, KeyNetRaw, NUM_LANDMARKS, NetFrame, NetsError,
 };
 
 /// DetNet graph inside a models directory.
@@ -88,11 +88,14 @@ fn session(path: &Path, providers: &[ExecutionProviderDispatch], threads: usize)
 }
 
 impl OrtNets {
-    /// Loads ONNX Runtime and the two graphs ([`DETNET_ONNX`], [`KEYNET_ONNX`]) from `models_dir`.
+    /// Loads ONNX Runtime and the two graphs: [`DETNET_ONNX`] of `detnet` ([`DetNetVersion::dir`]) and [`KEYNET_ONNX`] from
+    /// `models_dir`.
     ///
     /// # Arguments
     ///
-    /// * `models_dir` - the directory holding the `.onnx` files.
+    /// * `models_dir` - the directory holding `keynet.onnx` and the DetNet versions (`detnet/<version>/detnet_full.onnx`, or a
+    ///   flat `detnet_full.onnx`).
+    /// * `version` - the DetNet version to load.
     /// * `options` - device, library path and threads.
     ///
     /// # Returns
@@ -103,7 +106,7 @@ impl OrtNets {
     ///
     /// [`NetsError::Load`] when no library path is given or it cannot be loaded, when a graph cannot be read, or when
     /// [`OrtDevice::Cuda`] was asked for and the CUDA execution provider does not register.
-    pub fn new(models_dir: impl AsRef<Path>, options: &OrtConfig) -> Result<Self, NetsError> {
+    pub fn new(models_dir: impl AsRef<Path>, version: DetNetVersion, options: &OrtConfig) -> Result<Self, NetsError> {
         let dylib: PathBuf = match &options.dylib {
             Some(path) => path.clone(),
             None => std::env::var_os("ORT_DYLIB_PATH")
@@ -116,7 +119,7 @@ impl OrtNets {
         let dir: &Path = models_dir.as_ref();
         let cuda = |device: i32| CUDA::default().with_device_id(device).with_tf32(false).build().error_on_failure();
         let pair = |providers: &[ExecutionProviderDispatch]| -> Result<(Session, Session), NetsError> {
-            Ok((session(&dir.join(DETNET_ONNX), providers, options.intra_threads)?, session(&dir.join(KEYNET_ONNX), providers, options.intra_threads)?))
+            Ok((session(&version.dir(dir).join(DETNET_ONNX), providers, options.intra_threads)?, session(&dir.join(KEYNET_ONNX), providers, options.intra_threads)?))
         };
         let cpu = || [CPU::default().build()];
         let ((detnet, keynet), device): ((Session, Session), String) = match options.device {
@@ -127,7 +130,7 @@ impl OrtNets {
                 Err(error) => (pair(&cpu())?, format!("cpu (cuda unavailable: {error})")),
             },
         };
-        let description: String = format!("ort {device} fp32 ({DETNET_ONNX}, {KEYNET_ONNX}; {})", dylib.display());
+        let description: String = format!("ort {device} fp32 ({DETNET_ONNX} {}, {KEYNET_ONNX}; {})", version.name(), dylib.display());
         Ok(Self { detnet, keynet, description, frames: Vec::new() })
     }
 }

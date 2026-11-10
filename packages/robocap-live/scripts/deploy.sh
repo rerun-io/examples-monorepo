@@ -9,6 +9,7 @@
 #        deploy.sh --cap a|b --panel-only [--root /root/robocap-live] [--binary <path>] [--dry-run]
 #   --panel-only  robocap-panel alone (panel.sh deploy uses it); no models, display asset, rig or Vulkan loader
 #   --models   required: *.rknn and MODELS.md from here (no *.rknn there is an error; models/MODELS.md says how they are made)
+#              plus detnet/<version>/*.rknn (each DetNet-F version --detnet-version can pick) when the dir has them
 #   --display  required: the display asset (made by: packages/handtrack/tools/robocap_live_display.py --output <it> --root <RoboCap dataset root>)
 #   --rig      the cap's calibration for the live source, to <root>/rig.json; a given rig must name the cap's device (for Cap A,
 #              e.g. the s66 dump's rig.json: Cap A's factory calibration from the catalog). Without it the cap keeps the rig.json
@@ -71,6 +72,11 @@ if [[ $panel_only == 0 ]]; then
     bash "$here/stage-vulkan.sh" "$stage/lib"
     compgen -G "$models/*.rknn" >/dev/null || { log "no *.rknn in $models: pass --models <dir with the RKNN models> (models/MODELS.md says how they are made)"; exit 1; }
     cp "$models"/*.rknn "$stage/models/"
+    # DetNet versions side by side (--detnet-version picks one): models/detnet/<version>/*.rknn, beside the flat files.
+    for dir in "$models"/detnet/*/; do
+        compgen -G "$dir*.rknn" >/dev/null || continue
+        mkdir -p "$stage/models/detnet/$(basename "$dir")" && cp "$dir"*.rknn "$stage/models/detnet/$(basename "$dir")/"
+    done
     [[ -f $models/MODELS.md ]] && cp "$models/MODELS.md" "$stage/models/"
     if [[ -f $display ]]; then cp "$display" "$stage/assets/robocap-live-display.rrd"; else log "warning: no display asset at $display"; fi
     # Without --rig the cap keeps the rig.json it has; a real deploy checks that it has one.

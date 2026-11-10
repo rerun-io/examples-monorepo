@@ -3760,10 +3760,13 @@ cwd = "packages/robocap-live"
 depends-on = ["robocap-live-build"]
 description = "Track the hands of one robocap catalog segment and register (or replace) its `hands` layer"
 
+# The bundle at one revision: KeyNet in models/, each DetNet version in models/detnet/<version>/ (models/MODELS.md). The nets
+# are fetched again when a version's model.safetensors is missing, so a checkout from before that layout updates itself.
 [feature.robocap-live.tasks.robocap-live-download-sample]
-cmd = "test -e data/robocap-live-sample/capb-s14-445 || (hf download pablovela5620/robocap-live-sample --repo-type dataset --local-dir data/robocap-live-sample && rm -rf data/robocap-live-sample/.unzip && python -m zipfile -e data/robocap-live-sample/robocap-live-clip.zip data/robocap-live-sample/.unzip && mv data/robocap-live-sample/.unzip/capb-s14-445 data/robocap-live-sample/ && rm -rf data/robocap-live-sample/.unzip data/robocap-live-sample/robocap-live-clip.zip)"
+cmd = "((test -e data/robocap-live-sample/models/detnet/mix1-upright/model.safetensors && test -e data/robocap-live-sample/models/detnet/0929/model.safetensors) || hf download pablovela5620/robocap-live-sample --repo-type dataset --revision $ROBOCAP_LIVE_SAMPLE_REVISION --local-dir data/robocap-live-sample --exclude robocap-live-clip.zip) && (test -e data/robocap-live-sample/capb-s14-445 || (hf download pablovela5620/robocap-live-sample robocap-live-clip.zip --repo-type dataset --revision $ROBOCAP_LIVE_SAMPLE_REVISION --local-dir data/robocap-live-sample && rm -rf data/robocap-live-sample/.unzip && python -m zipfile -e data/robocap-live-sample/robocap-live-clip.zip data/robocap-live-sample/.unzip && mv data/robocap-live-sample/.unzip/capb-s14-445 data/robocap-live-sample/ && rm -rf data/robocap-live-sample/.unzip data/robocap-live-sample/robocap-live-clip.zip))"
 cwd = "packages/robocap-live"
-description = "Download the 5 s replay clip, the ONNX hand nets and the display asset from Hugging Face"
+env = { ROBOCAP_LIVE_SAMPLE_REVISION = "09824d17b75d1e0b851dc59bcdfeaa187c442b77" }
+description = "Download the 5 s replay clip, the hand nets (KeyNet; both DetNet versions as ONNX, RKNN and safetensors) and the display asset from Hugging Face"
 
 [feature.robocap-live.tasks.robocap-live-build-host]
 cmd = "cargo build --release -p robocap-live --features ort --bin robocap-live"

@@ -134,6 +134,7 @@ fn golden_check(nets: &mut dyn HandNets, dir: &Path) -> BenchResult<()> {
         .map(|frame| NetFrame {
             pixels: frame,
             top: 0,
+            half_turn: false,
         })
         .collect();
     let detnet = nets.detnet(&frame_refs)?;
@@ -161,6 +162,7 @@ fn latency(nets: &mut dyn HandNets, iters: usize, golden_dir: &Path) -> BenchRes
         nets.detnet(&[NetFrame {
             pixels: &frames[0],
             top: 0,
+            half_turn: false,
         }])
         .map(|_| ())
     })?;
@@ -172,6 +174,7 @@ fn latency(nets: &mut dyn HandNets, iters: usize, golden_dir: &Path) -> BenchRes
         .map(|i| NetFrame {
             pixels: &frames[i % frames.len()],
             top: 0,
+            half_turn: false,
         })
         .collect();
     let mut detnet6 = time_calls(iters / 2, || nets.detnet(&frame_refs).map(|_| ()))?;
@@ -318,6 +321,7 @@ fn heldout(nets: &mut dyn HandNets, dir: &Path, out: &Path) -> BenchResult<()> {
         let raw = nets.detnet(&[NetFrame {
             pixels: frame,
             top: 0,
+            half_turn: false,
         }])?;
         detnet_us.push(started.elapsed().as_secs_f64() * 1e6);
         for raw in &raw {
@@ -498,7 +502,7 @@ fn ort_backend(args: &Args) -> BenchResult<Box<dyn HandNets>> {
         dylib: args.get("dylib").map(PathBuf::from),
         intra_threads: 0,
     };
-    let ort: OrtNets = OrtNets::new(&args.models, &options)?;
+    let ort: OrtNets = OrtNets::new(&args.models, robocap_live::nets::DetNetVersion::default(), &options)?;
     println!("backend: {}", ort.describe());
     Ok(Box::new(ort))
 }

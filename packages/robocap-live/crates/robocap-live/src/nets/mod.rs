@@ -4,6 +4,8 @@
 //! checked against the same PyTorch reference.
 #![deny(missing_docs)]
 
+use std::path::{Path, PathBuf};
+
 /// DetNet's input frame (BarLetterbox of the 640x360 small image), width x height.
 pub const DETNET_WIDTH: usize = 640;
 /// DetNet's input frame height.
@@ -76,6 +78,46 @@ pub struct KeyNetRaw {
     pub pinch_logit: Option<f32>,
 }
 
+/// A DetNet's weights version: where its files live (`<models>/detnet/<name>/`) and which input convention it was trained on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DetNetVersion {
+    /// The 2026-11 DetNet-F mix-1 (UmeTrack + SHOW3D + GSI + Gen-HumanEgo), trained on upright cameras.
+    #[default]
+    Mix1Upright,
+    /// The 2026-09-29 DetNet-F (`detnet-demo-0929`), trained on every camera as calibrated.
+    V0929,
+}
+
+impl DetNetVersion {
+    /// Every version, the default first.
+    pub const ALL: [DetNetVersion; 2] = [DetNetVersion::Mix1Upright, DetNetVersion::V0929];
+
+    /// The version's directory name under `<models>/detnet/` (and its CLI name).
+    pub fn name(self) -> &'static str {
+        match self {
+            DetNetVersion::Mix1Upright => "mix1-upright",
+            DetNetVersion::V0929 => "0929",
+        }
+    }
+
+    /// The version called `name`, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|version| version.name() == name)
+    }
+
+    /// Whether the weights were trained on upright cameras (RoboCap's cameras 2 and 3 turned 180 degrees first).
+    pub fn upright(self) -> bool {
+        self == DetNetVersion::Mix1Upright
+    }
+
+    /// The directory holding this version's DetNet files: `<models>/detnet/<name>/` when it exists, else `models` itself (a flat
+    /// directory of one version, as the 2026-10 layout was).
+    pub fn dir(self, models: &Path) -> PathBuf {
+        let versioned: PathBuf = models.join("detnet").join(self.name());
+        if versioned.is_dir() { versioned } else { models.to_path_buf() }
+    }
+}
+
 /// One DetNet input frame without its padding: 640-wide u8 rows (row-major) at net rows `top..top + rows`, black (0) above and
 /// below in the 640x480 frame. A full 640x480 frame has `top` 0; a RoboCap 640x360 small image has `top` 60 (the BarLetterbox
 /// bars). Backends write their input straight from these rows, so nobody builds the padded frame.
@@ -85,9 +127,17 @@ pub struct NetFrame<'a> {
     pub pixels: &'a [u8],
     /// The net row of the first pixel row.
     pub top: usize,
+    /// The net sees these rows turned 180 degrees (the pixels in reverse order) at the same rows: an upright model's input for a
+    /// camera mounted upside down. Needs equal bars above and below (`top` = 480 - `top` - rows), as the RoboCap letterbox has.
+    pub half_turn: bool,
 }
 
-impl NetFrame<'_> {
+impl<'a> NetFrame<'a> {
+    /// This frame, turned 180 degrees for the net when `half_turn` is true.
+    pub fn with_half_turn(self, half_turn: bool) -> NetFrame<'a> {
+        NetFrame { half_turn, ..self }
+    }
+
     /// The number of pixel rows.
     ///
     /// # Errors
@@ -97,6 +147,10 @@ impl NetFrame<'_> {
         let rows: usize = self.pixels.len() / DETNET_WIDTH;
         if !self.pixels.len().is_multiple_of(DETNET_WIDTH) || self.top + rows > DETNET_HEIGHT {
             let message: String = format!("{} bytes at row {} do not fit the 640x480 frame", self.pixels.len(), self.top);
+            return Err(NetsError::Input { net: "detnet", message });
+        }
+        if self.half_turn && 2 * self.top + rows != DETNET_HEIGHT {
+            let message: String = format!("a half turn needs equal bars: rows {}..{} of 480", self.top, self.top + rows);
             return Err(NetsError::Input { net: "detnet", message });
         }
         Ok(rows)
@@ -119,8 +173,11 @@ impl NetFrame<'_> {
         let (above, rest) = dst.split_at_mut(self.top * DETNET_WIDTH);
         let (image, below) = rest.split_at_mut(rows * DETNET_WIDTH);
         above.fill(0.0);
-        for (out, &value) in image.iter_mut().zip(self.pixels) {
-            *out = f32::from(value) / 255.0;
+        let unit = |(out, &value): (&mut f32, &u8)| *out = f32::from(value) / 255.0;
+        if self.half_turn {
+            image.iter_mut().zip(self.pixels.iter().rev()).for_each(unit);
+        } else {
+            image.iter_mut().zip(self.pixels).for_each(unit);
         }
         below.fill(0.0);
         Ok(())

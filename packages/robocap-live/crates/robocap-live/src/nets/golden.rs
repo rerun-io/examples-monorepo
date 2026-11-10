@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::rknn::POOLED_LEN;
 use super::{
-    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, HEATMAP_LEN, KeyNetRaw,
+    CROP_LEN, DETNET_HEIGHT, DETNET_WIDTH, DISTANCE_LEN, DetNetRaw, DetNetVersion, HEATMAP_LEN, KeyNetRaw,
     NUM_LANDMARKS, NetsError,
 };
 use crate::hands::detect::sigmoid;
@@ -142,9 +142,25 @@ impl Golden {
     ///
     /// [`NetsError::Load`] when a file is missing or its size does not fit the others.
     pub fn load(dir: impl AsRef<Path>) -> Result<Self, NetsError> {
+        Self::load_version(dir, DetNetVersion::default())
+    }
+
+    /// As [`Golden::load`], with the DetNet outputs of `version` (`detnet/<version>/detnet_out_f32.bin`, the same frames for every
+    /// version), else the directory's own `detnet_out_f32.bin`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Golden::load`].
+    pub fn load_version(dir: impl AsRef<Path>, version: DetNetVersion) -> Result<Self, NetsError> {
         let dir: &Path = dir.as_ref();
+        let versioned: PathBuf = dir.join("detnet").join(version.name()).join("detnet_out_f32.bin");
+        let detnet_out: PathBuf = if versioned.exists() { versioned } else { dir.join("detnet_out_f32.bin") };
+        Self::load_files(dir, &detnet_out)
+    }
+
+    fn load_files(dir: &Path, detnet_out: &Path) -> Result<Self, NetsError> {
         let pooled: Vec<u8> = read(&dir.join("detnet_pooled_u8.bin"))?;
-        let detnet_out: Vec<f32> = floats(&dir.join("detnet_out_f32.bin"))?;
+        let detnet_out: Vec<f32> = floats(detnet_out)?;
         let crops: Vec<u8> = read(&dir.join("keynet_crops_u8.bin"))?;
         let priors: Vec<f32> = floats(&dir.join("keynet_keypoints_f32.bin"))?;
         let keynet_out: Vec<f32> = floats(&dir.join("keynet_out_f32.bin"))?;
@@ -364,7 +380,7 @@ mod tests {
 
     #[test]
     fn comparison_rejects_malformed_outputs_and_references() {
-        let golden = Golden::load(default_dir()).expect("golden fixtures");
+        let golden = Golden::load_version(default_dir(), DetNetVersion::default()).expect("golden fixtures");
         for change in 0..8 {
             let mut keynet = golden.keynet_out.clone();
             match change {
@@ -418,8 +434,12 @@ mod tests {
         std::fs::create_dir_all(&dir)?;
         for entry in std::fs::read_dir(default_dir())? {
             let entry = entry?;
-            std::fs::copy(entry.path(), dir.join(entry.file_name()))?;
+            if entry.file_type()?.is_file() {
+                std::fs::copy(entry.path(), dir.join(entry.file_name()))?;
+            }
         }
+        let version: PathBuf = default_dir().join("detnet").join(DetNetVersion::default().name());
+        std::fs::copy(version.join("detnet_out_f32.bin"), dir.join("detnet_out_f32.bin"))?;
         assert!(Golden::load(&dir).is_ok());
         for name in [
             "detnet_out_f32.bin",
@@ -446,7 +466,7 @@ mod tests {
 
     #[test]
     fn golden_files_load_and_decode_like_handtrack() {
-        let golden: Result<Golden, NetsError> = Golden::load(default_dir());
+        let golden: Result<Golden, NetsError> = Golden::load_version(default_dir(), DetNetVersion::default());
         assert!(golden.is_ok(), "{:?}", golden.err());
         let Ok(golden) = golden else { return };
         assert_eq!(golden.detnet_pooled.len(), golden.detnet_out.len());

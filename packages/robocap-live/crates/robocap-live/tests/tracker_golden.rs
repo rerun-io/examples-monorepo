@@ -17,7 +17,7 @@ use robocap_live::frame::NUM_CAMERAS;
 use robocap_live::hands::model::GenericHandModel;
 use robocap_live::hands::scale::{CalibrationConfig, calibrate_scale};
 use robocap_live::hands::tracker::{Tracker, TrackerConfig};
-use robocap_live::hands::{HandFrameResult, HandInputs, HandsConfig, ScaleMode};
+use robocap_live::hands::{DetNetInput, HandFrameResult, HandInputs, HandsConfig, ScaleMode};
 
 #[path = "common/tracker_fixtures.rs"]
 mod fixtures;
@@ -52,6 +52,8 @@ fn run_with(
         log: log.clone(),
     });
     let hands = HandsConfig {
+        // Python's run fed recorded detections; the convention never reaches a net here.
+        detnet_input: DetNetInput::Legacy,
         scale,
         cameras: (0..NUM_CAMERAS).collect(),
         max_views: 2,

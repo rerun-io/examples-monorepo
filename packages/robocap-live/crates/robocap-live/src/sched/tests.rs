@@ -518,6 +518,7 @@ impl HandTracking for DetNetTracker {
             nets.detnet(&[NetFrame {
                 pixels: &frame,
                 top: 0,
+                half_turn: false,
             }])?;
         }
         Ok(HandFrameResult {
