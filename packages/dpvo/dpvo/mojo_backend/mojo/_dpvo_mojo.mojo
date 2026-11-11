@@ -152,6 +152,9 @@ def _numel(s: PythonObject) raises -> Int:
 def _corr_gpu[dtype: DType](mut rt: GPURuntime, stream: Int, radius: Int, t: PythonObject) raises:
     var out = out6[dtype](t[5])
     var total = _numel(t[5])
+    var threads = total
+    comptime if dtype == DType.float16:
+        threads //= 2  # CUDA half2 handles two neighboring search columns per thread.
     var func = rt.ctx.compile_function[corr_kernel[dtype]]()
     rt.torch_stream(stream).enqueue_function(
         func,
@@ -163,7 +166,7 @@ def _corr_gpu[dtype: DType](mut rt: GPURuntime, stream: Int, radius: Int, t: Pyt
         in1[DType.int64](t[3]),
         in1[DType.int64](t[4]),
         out,
-        grid_dim=ceildiv(total, NUM_THREADS),
+        grid_dim=ceildiv(threads, NUM_THREADS),
         block_dim=NUM_THREADS,
     )
 
