@@ -19,7 +19,6 @@ from jaxtyping import Float32, Float64, Int
 from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray, RecordBatch
 
-from simplecv import video_io
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.rerun_custom_types import (
     PinholeWithDistortion,
@@ -347,23 +346,16 @@ def log_video(
 
         target_recording.send_chunks(_chunks_recording_times())
 
-    # A source Rerun must re-encode (B-frames, a codec override) goes to NVENC. When that fails before any sample was
-    # sent, libx264 encodes this video instead, with a warning. Only a host without the NVENC library is remembered
-    # (``video_io.HARDWARE_VIDEO_FAILED``): any other failure belongs to this video, and the next one gets NVENC again.
+    # A source Rerun must re-encode (B-frames, a codec override) goes to NVENC; when that fails before any sample was
+    # sent (no libnvidia-encode, as on ZeroGPU), libx264 encodes it instead.
     try:
-        if "encode" in video_io.HARDWARE_VIDEO_FAILED:
+        try:
+            send(try_gpu=True)
+        except RuntimeError as gpu_error:
+            if times:
+                raise
+            logger.warning("NVENC cannot encode %s, the CPU encodes it (slower): %s", video_source, gpu_error)
             send(try_gpu=False)
-        else:
-            try:
-                send(try_gpu=True)
-            except RuntimeError as gpu_error:
-                if times:
-                    raise
-                send(try_gpu=False)  # raises for a source that no encoder can take: then NVENC was not the cause
-                if "libnvidia-encode" in str(gpu_error):
-                    video_io.hardware_video_unavailable("encode", str(gpu_error))
-                else:
-                    logger.warning("NVENC cannot encode %s, the CPU encodes this video (slower): %s", video_source, gpu_error)
     except RuntimeError as exc:
         raise RuntimeError(f"Mp4Reader failed for {video_source}: {exc}") from exc
 
