@@ -9,15 +9,18 @@ import gradio as gr
 from gradio_rerun import Rerun
 
 from posekit.apis.video_hands import EXAMPLES, VideoHandsProgress, VideoHandsSettings
-from posekit.hands_app_ui.theme import APP_CSS, VIEWER_HEIGHT
+from posekit.hands_app_ui.theme import APP_CSS, RERUN_LOGOS, VIEWER_HEIGHT
 from posekit.hands_ui import PIPELINES, STACKS, default_stack, example_rows, fill_intrinsics, settings_from_inputs, stream_hands
 from posekit.predictions import MeshDetail
 from posekit.track_ui_theme import FORCE_DARK_HEAD
 
 DESCRIPTION: str = (
-    "# EgoHand × [Rerun](https://rerun.io)\n"
-    "A video of hands becomes 3D hands. A hand detector finds every hand, a 3D hand model reconstructs its joints and mesh "
-    "in the camera, and each chunk streams into the Rerun viewer as it happens. Same code as `posekit-video-hands`."
+    f'<h1 id="app-title"><a href="https://rerun.io" target="_blank" rel="noopener" title="rerun.io">'
+    f'<img class="logo-light" src="{RERUN_LOGOS["light"]}" alt="Rerun"><img class="logo-dark" src="{RERUN_LOGOS["dark"]}" alt="Rerun">'
+    f'</a> <span class="title-x">×</span> EgoHand</h1>\n\n'
+    "3D hands from a head-mounted video with NVIDIA's [EgoHand](https://github.com/NVIDIA/IsaacCapture/tree/main/src/python/isaaccapture_egopost), on a TensorRT fast stack "
+    "(~7 ms per frame on an RTX 5090). **Pick an example or upload a clip, then press Run:** the hands stream into the viewer as they "
+    f"are computed. The camera is assumed to be a {VideoHandsSettings().hfov_deg:g}° pinhole; set intrinsics under *Advanced settings*."
 )
 READY: str = "Upload a clip, or pick an example, then press Run."
 
@@ -33,12 +36,12 @@ class Config:
 
 
 def summary(progress: VideoHandsProgress, elapsed_s: float, stack: str, mesh_detail: MeshDetail) -> str:
-    """The Outputs tab's table: how far the run is, how fast, and with what."""
+    """The Outputs tab's table: how far the run is, how fast, and with what (the status box below names the camera)."""
     fps: str = f"{progress.frames_done / elapsed_s:.0f} fps" if progress.frames_done and elapsed_s > 0 else "-"
     return (
         "| Run | |\n|---|---|\n"
         f"| Frames | {progress.frames_done} / {progress.num_frames} |\n| Hands | {progress.hands} |\n"
-        f"| Elapsed | {elapsed_s:.1f} s ({fps}) |\n| Stack | `{stack}`, mesh `{mesh_detail}` |\n| Camera | {progress.camera_note} |"
+        f"| Elapsed | {elapsed_s:.1f} s ({fps}) |\n| Stack | `{stack}`, mesh `{mesh_detail}` |"
     )
 
 
@@ -55,18 +58,18 @@ def run_hands(
     if stack not in PIPELINES:
         setup: str = f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
         log.append(f"{0.0:5.1f} s  {setup}")
-        yield gr.update(), setup, gr.update(), "", "\n".join(log)
+        yield gr.update(), setup, gr.update(), "", "\n".join(reversed(log))
     settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy, mesh_detail)
     for recording, progress in stream_hands(settings, stack):
         elapsed_s: float = time.perf_counter() - start
         log.append(f"{elapsed_s:5.1f} s  {progress.step}")
         bar = gr.update(value=progress.frames_done, maximum=max(progress.num_frames, 1))
-        yield recording, str(progress), bar, summary(progress, elapsed_s, stack, mesh_detail), "\n".join(log)
+        yield recording, str(progress), bar, summary(progress, elapsed_s, stack, mesh_detail), "\n".join(reversed(log))
 
 
 def build() -> gr.Blocks:
     """Input and Outputs tabs, Run, Stop and the status on the left; the streaming Rerun viewer on the right."""
-    with gr.Blocks(title="EgoHand × Rerun") as demo:
+    with gr.Blocks(title="Rerun × EgoHand") as demo:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
         with gr.Row(elem_id="main-row", equal_height=False):
             with gr.Column(scale=1, min_width=360, elem_id="left-column"):
@@ -100,7 +103,7 @@ def build() -> gr.Blocks:
                     with gr.Tab("Outputs", id="outputs"):
                         progress_bar = gr.Slider(label="Frames processed", minimum=0, maximum=1, value=0, step=1, interactive=False)
                         run_summary = gr.Markdown("No run yet.", elem_id="run-summary")
-                        run_log = gr.Textbox(label="Run log", lines=6, max_lines=6, autoscroll=True, interactive=False, elem_id="run-log")
+                        run_log = gr.Textbox(label="Run log (newest first)", lines=6, max_lines=6, autoscroll=False, interactive=False, elem_id="run-log")
                 with gr.Row(elem_id="run-row"):
                     run = gr.Button("Run", variant="primary")
                     stop = gr.Button("Stop", variant="stop")
