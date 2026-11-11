@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
 import sys
@@ -26,6 +27,24 @@ from simplecv.rerun_custom_types import (
     confidence_scores_to_rgb as confidence_scores_to_rgb,
 )
 from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value, unwrap_singleton_lists
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+HARDWARE_VIDEO: dict[str, str | None] = {}
+"""What this process learned about its hardware video paths, by name (``"encode"``: NVENC, ``"decode"``: NVDEC): None once
+the path worked, else why it failed. A path is tried until it has an entry; after a failure the CPU does that work."""
+
+
+def hardware_video_fallback(path: str, cause: BaseException) -> None:
+    """Remember that hardware video ``path`` failed with ``cause`` (the CPU then did the work) and warn about it, once."""
+    HARDWARE_VIDEO[path] = str(cause)
+    logger.warning("Hardware video %s FAILED, using the CPU for the rest of this process (slower): %s", path, cause)
+
+
+def hardware_video_warning() -> str:
+    """One line naming every hardware video path that failed in this process and runs on the CPU; empty when none did."""
+    failed: list[str] = [f"{path} ({cause.splitlines()[0][:200]})" for path, cause in HARDWARE_VIDEO.items() if cause]
+    return f"WARNING: hardware video failed, the CPU does this work (slower): {'; '.join(failed)}" if failed else ""
 
 
 def compute_vertex_normals(
@@ -324,13 +343,14 @@ def log_video(
     # The VideoStream chunks carry the sample times on ``timeline``; they are the frame
     # timestamps, so no separate AssetVideo probe (which rejects QuickTime-brand .MOV files).
     times: list[Int[ndarray, "rows"]] = []
-    try:
+
+    def send(try_gpu: bool) -> None:
         reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
             video_source,
             mode="stream",
             entity_path=str(video_log_path),
             timeline_name=timeline,
-            transcode=rr.experimental.Mp4TranscodeOptions(output_codec=output_codec, try_gpu=True),
+            transcode=rr.experimental.Mp4TranscodeOptions(output_codec=output_codec, try_gpu=try_gpu),
         )
 
         def _chunks_recording_times() -> Iterator[rrc.Chunk]:
@@ -342,6 +362,20 @@ def log_video(
                 yield chunk
 
         target_recording.send_chunks(_chunks_recording_times())
+
+    # A source Rerun must re-encode (B-frames, a codec override) goes to NVENC. When that fails before any sample was
+    # sent, libx264 encodes instead, with a warning; the failure is remembered, so NVENC is tried once per process.
+    try:
+        if HARDWARE_VIDEO.get("encode"):
+            send(try_gpu=False)
+        else:
+            try:
+                send(try_gpu=True)
+            except RuntimeError as gpu_error:
+                if times:
+                    raise
+                send(try_gpu=False)  # raises for a source that no encoder can take: then NVENC was not the cause
+                hardware_video_fallback("encode", gpu_error)
     except RuntimeError as exc:
         raise RuntimeError(f"Mp4Reader failed for {video_source}: {exc}") from exc
 

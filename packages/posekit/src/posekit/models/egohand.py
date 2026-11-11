@@ -270,28 +270,38 @@ class SomaMeshLod:
 
 
 @functools.cache
-def soma_mesh_lod(soma: Path, detail: MeshDetail) -> dict[HandSide, SomaMeshLod]:
-    """Both sides at SOMA level of detail ``detail`` (``low`` or ``xlo``), on CUDA, built from the SOMA directory on first use (~1-2 s).
+def soma_lod_tables(soma: Path, detail: MeshDetail) -> dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | None, torch.nn.Module | None]]:
+    """Per side, SOMA level of detail ``detail`` on the CPU: its triangles, and its vertices of the mid mesh as a subset or as SOMA's transfer.
 
-    Raises:
-        ValueError: If SOMA has no transfer from the mid mesh to ``detail``.
+    Built from the SOMA directory on first use (~1-2 s for both sides) and kept, so a process that forks GPU workers builds it once for all of them.
     """
     from soma.hand import SOMAHandLayer
 
-    meshes: dict[HandSide, SomaMeshLod] = {}
+    tables: dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | None, torch.nn.Module | None]] = {}
     for side in ("left", "right"):
         layer = SOMAHandLayer(
             data_root=str(soma), hand_type=side, device="cpu", identity_model_type="soma", mode="torch", lod=detail, load_correctives_model=False
         )
-        ids: Int64[Tensor, "v"] | None = layer.identity_lod_mid_ids
-        transfer: torch.nn.Module | None = layer.identity_lod_transfer
+        tables[side] = (layer.faces.to(torch.int64), layer.identity_lod_mid_ids, layer.identity_lod_transfer)
+    return tables
+
+
+@functools.cache
+def soma_mesh_lod(soma: Path, detail: MeshDetail) -> dict[HandSide, SomaMeshLod]:
+    """Both sides at SOMA level of detail ``detail`` (``low`` or ``xlo``), on CUDA, moved there from ``soma_lod_tables`` on first use.
+
+    Raises:
+        ValueError: If SOMA has no transfer from the mid mesh to ``detail``.
+    """
+    meshes: dict[HandSide, SomaMeshLod] = {}
+    for side, (faces, ids, transfer) in soma_lod_tables(soma, detail).items():
         if ids is not None:
             from_mid: Callable[[Float32[Tensor, "n 2859 3"]], Float32[Tensor, "n v 3"]] = functools.partial(torch.index_select, dim=1, index=ids.cuda())
         elif transfer is not None:
             from_mid = transfer.cuda()
         else:
             raise ValueError(f"SOMA has no transfer from the mid hand mesh to level of detail {detail!r}.")
-        meshes[side] = SomaMeshLod(faces=layer.faces.to(torch.int64).cuda(), from_mid=from_mid)
+        meshes[side] = SomaMeshLod(faces=faces.cuda(), from_mid=from_mid)
     return meshes
 
 

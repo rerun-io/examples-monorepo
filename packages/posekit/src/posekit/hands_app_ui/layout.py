@@ -1,7 +1,7 @@
 """The hands app's widgets, how a Run streams into them, and the server; the pipelines live in :mod:`posekit.hands_ui`."""
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, get_args
 
@@ -9,10 +9,19 @@ import gradio as gr
 from gradio_rerun import Rerun
 
 from posekit.apis.video_hands import EXAMPLES, VideoHandsProgress, VideoHandsSettings
-from posekit.hands_app_ui.theme import APP_CSS, RERUN_LOGOS, VIEWER_HEIGHT
-from posekit.hands_ui import PIPELINES, STACKS, default_stack, example_rows, fill_intrinsics, settings_from_inputs, stream_hands
+from posekit.hands_app_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS, VIEWER_HEIGHT
+from posekit.hands_ui import (
+    PIPELINES,
+    SETUP_NOTES,
+    STACKS,
+    default_stack,
+    example_rows,
+    fill_intrinsics,
+    pipeline_for,
+    settings_from_inputs,
+    stream_hands,
+)
 from posekit.predictions import MeshDetail
-from posekit.track_ui_theme import FORCE_DARK_HEAD
 
 DESCRIPTION: str = (
     f'<h1 id="app-title"><a href="https://rerun.io" target="_blank" rel="noopener" title="rerun.io">'
@@ -56,21 +65,36 @@ def run_hands(
     start: float = time.perf_counter()
     log: list[str] = []
     if stack not in PIPELINES:
-        setup: str = f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
+        setup: str = f"Setting up {stack}: loading its TensorRT engines, or building them when this machine has none (minutes)..."
         log.append(f"{0.0:5.1f} s  {setup}")
         yield gr.update(), setup, gr.update(), "", "\n".join(reversed(log))
+        pipeline_for(stack)
+        log.append(f"{time.perf_counter() - start:5.1f} s  {SETUP_NOTES[stack]}")
     settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy, mesh_detail)
     for recording, progress in stream_hands(settings, stack):
         elapsed_s: float = time.perf_counter() - start
+        if progress.stage == "video" and progress.warning:
+            log.append(f"{elapsed_s:5.1f} s  {progress.warning}")
         log.append(f"{elapsed_s:5.1f} s  {progress.step}")
         bar = gr.update(value=progress.frames_done, maximum=max(progress.num_frames, 1))
         yield recording, str(progress), bar, summary(progress, elapsed_s, stack, mesh_detail), "\n".join(reversed(log))
 
 
-def build() -> gr.Blocks:
-    """Input and Outputs tabs, Run, Stop and the status on the left; the streaming Rerun viewer on the right."""
+def build(
+    stacks: Sequence[str] = STACKS, examples: list[list[str]] | None = None, stack_default: str | None = None,
+    description: str = DESCRIPTION, run: Callable[..., Iterator[tuple[Any, str, Any, str, str]]] = run_hands,
+) -> gr.Blocks:
+    """Input and Outputs tabs, Run, Stop and the status on the left; the streaming Rerun viewer on the right.
+
+    Args:
+        stacks: Hand stacks the dropdown offers.
+        examples: ``[video, stack]`` per example; None shows ``example_rows()``.
+        stack_default: Stack selected at start; None selects ``default_stack()``.
+        description: Markdown above the app.
+        run: What the Run button calls, with ``run_hands``'s inputs and outputs (a host wraps ``run_hands`` to run it elsewhere).
+    """
     with gr.Blocks(title="Rerun × EgoHand") as demo:
-        gr.Markdown(DESCRIPTION, elem_id="app-description")
+        gr.Markdown(description, elem_id="app-description")
         with gr.Row(elem_id="main-row", equal_height=False):
             with gr.Column(scale=1, min_width=360, elem_id="left-column"):
                 with gr.Tabs(selected="input") as tabs:
@@ -78,7 +102,7 @@ def build() -> gr.Blocks:
                         # format=None with audio kept: Gradio hands the upload over as it is (no transcode).
                         video = gr.Video(label="Source clip", sources=["upload"], format=None, include_audio=True, elem_id="source-video")
                         with gr.Accordion("Advanced settings", open=False):
-                            stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
+                            stack = gr.Dropdown(label="Hand stack", choices=list(stacks), value=stack_default or default_stack())
                             max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
                             mesh_detail = gr.Radio(
                                 label="Mesh detail", choices=list(get_args(MeshDetail)), value=VideoHandsSettings().mesh_detail,
@@ -97,7 +121,7 @@ def build() -> gr.Blocks:
                                 cy = gr.Number(label="cy")
                         # Picking an example also picks its stack; only the video column shows, as thumbnails.
                         gr.Examples(
-                            examples=example_rows(), inputs=[video, stack], visible_columns=[0], examples_per_page=4,
+                            examples=example_rows() if examples is None else examples, inputs=[video, stack], visible_columns=[0], examples_per_page=4,
                             cache_examples=False, elem_id="examples",
                         )
                     with gr.Tab("Outputs", id="outputs"):
@@ -105,7 +129,7 @@ def build() -> gr.Blocks:
                         run_summary = gr.Markdown("No run yet.", elem_id="run-summary")
                         run_log = gr.Textbox(label="Run log (newest first)", lines=6, max_lines=6, autoscroll=False, interactive=False, elem_id="run-log")
                 with gr.Row(elem_id="run-row"):
-                    run = gr.Button("Run", variant="primary")
+                    run_button = gr.Button("Run", variant="primary")
                     stop = gr.Button("Stop", variant="stop")
                 status = gr.Markdown(READY, elem_id="run-status")
             with gr.Column(scale=3):
@@ -113,8 +137,8 @@ def build() -> gr.Blocks:
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=VIEWER_HEIGHT
                 )
         video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])
-        run_event = run.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(
-            run_hands, inputs=[video, stack, max_frames, fx, fy, cx, cy, mesh_detail], outputs=[viewer, status, progress_bar, run_summary, run_log]
+        run_event = run_button.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(
+            run, inputs=[video, stack, max_frames, fx, fy, cx, cy, mesh_detail], outputs=[viewer, status, progress_bar, run_summary, run_log]
         )
         stop.click(lambda: "Stopped.", outputs=[status], cancels=[run_event], queue=False)
     return demo
@@ -125,5 +149,5 @@ def launch(demo: gr.Blocks, config: Config) -> None:
     demo.queue(max_size=1, default_concurrency_limit=1)
     demo.launch(
         server_name=config.server_name, server_port=config.server_port, ssr_mode=False, allowed_paths=[str(EXAMPLES)],
-        css=APP_CSS, head=FORCE_DARK_HEAD, show_error=True,
+        css=APP_CSS, head=DARK_HEAD, show_error=True,
     )

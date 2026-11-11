@@ -6,6 +6,8 @@ This exposes those operations to Torch compilation without the TorchScript body
 model's general rotation and pose-corrective work.
 """
 
+from collections.abc import Callable
+
 import torch
 from jaxtyping import Float32, Float64, Int64
 from soma.geometry.transforms import quaternion_multiply_xyzw, quaternion_normalize_xyzw, quaternion_xyzw_to_matrix
@@ -62,6 +64,16 @@ class MhrHandRestSkinning(nn.Module):
         self.skin_vertices: Int64[Tensor, "s"] = torch.searchsorted(source_vertices, skinning.vert_indices_flattened[selected])
         self.skin_joints: Int64[Tensor, "s"] = skinning.skin_indices_flattened[selected].long()
         self.skin_weights: Float32[Tensor, "s"] = skinning.skin_weights_flattened[selected]
+
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> "MhrHandRestSkinning":
+        """Move the tables with the module (``.to``); they are plain attributes, as the released character holds them."""
+        super()._apply(fn, recurse)
+        for name, value in vars(self).items():
+            if isinstance(value, Tensor):
+                setattr(self, name, fn(value))
+            elif name in ("prefix_indices", "prefix_rotations"):
+                setattr(self, name, [fn(table) for table in value])
+        return self
 
     def forward(self, identity: Float32[Tensor, "b 5"], scales: Float32[Tensor, "b 26"]) -> Float32[Tensor, "b m 3"]:
         """Compute each frame's shaped, scaled source vertices; no learned value is cached."""

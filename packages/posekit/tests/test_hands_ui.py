@@ -1,6 +1,8 @@
 """The hands app runs the CLI's settings: a stack name selects the same configs as the CLI subcommand, the camera the CLI's pinhole."""
 
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import tyro
@@ -74,3 +76,68 @@ def test_the_outputs_tab_summarises_a_run_and_a_run_without_a_video_asks_for_one
     assert "| Frames | 64 / 180 |" in table and "| Hands | 128 |" in table and "32 fps" in table and "mesh `xlo`" in table
     updates = list(run_hands(None, "egohand-fast", 0, None, None, None, None, "xlo"))
     assert len(updates) == 1 and updates[0][1] == "Choose a video first."
+
+
+def test_the_layout_shows_the_stacks_examples_default_and_run_it_is_given() -> None:
+    import gradio as gr
+
+    from posekit.hands_app_ui.layout import build
+
+    def run(*inputs: object) -> Iterator[tuple[Any, str, Any, str, str]]:
+        yield None, "", None, "", ""
+
+    rows = [row for row in hands_ui.example_rows(Path("/space/examples")) if row[1] != "wilor"]
+    assert rows[0][0] == "/space/examples/gsi_sewing_left_front.mp4" and len(rows) == 4
+    demo = build(stacks=["egohand-fast"], examples=rows[:1], stack_default="egohand-fast", description="On this host", run=run)
+    stack = next(block for block in demo.blocks.values() if isinstance(block, gr.Dropdown))
+    assert [choice[1] for choice in stack.choices] == ["egohand-fast"] and stack.value == "egohand-fast"
+    examples = next(block for block in demo.blocks.values() if isinstance(block, gr.Dataset))
+    assert len(examples.samples) == 1
+    assert any(isinstance(block, gr.Markdown) and block.value == "On this host" for block in demo.blocks.values())
+    assert any(function.fn is run for function in demo.fns.values())
+
+
+def test_a_first_run_reports_what_setup_did(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Engines already in the cache: setup loads. An engine file that appears during setup: setup built it.
+    monkeypatch.setattr(hands_ui, "PIPELINES", {})
+    monkeypatch.setattr(hands_ui, "SETUP_NOTES", {})
+    monkeypatch.setattr(hands_ui, "DEFAULT_TRT_CACHE_DIR", tmp_path)
+    (tmp_path / "detector.engine").touch()
+    monkeypatch.setattr(hands_ui, "build_pipeline", lambda settings: HandPose3dPipeline.__new__(HandPose3dPipeline))
+    hands_ui.pipeline_for("egohand-fast")
+    assert hands_ui.SETUP_NOTES["egohand-fast"] == "Loaded egohand-fast (0 s)"
+    monkeypatch.setattr(
+        hands_ui, "build_pipeline", lambda settings: (tmp_path / "pose.engine").touch() or HandPose3dPipeline.__new__(HandPose3dPipeline)
+    )
+    hands_ui.pipeline_for("wilor")
+    assert hands_ui.SETUP_NOTES["wilor"] == "Built 1 TensorRT engine for wilor (0 s)"
+
+
+def test_nvdec_is_tried_once_then_the_cpu_decodes_with_a_warning(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    import torchcodec.decoders
+    from simplecv import rerun_log_utils
+
+    from posekit.apis.video_hands import VideoHandsProgress, open_decoder
+
+    opened: list[str] = []
+
+    class Decoder:
+        def __init__(self, video: Path, device: str = "cpu", **options: str) -> None:
+            opened.append(device)
+            if device != "cpu":
+                raise RuntimeError("Unsupported device: cuda (no NVDEC in this container)")
+
+        def get_frames_in_range(self, start: int, stop: int) -> None:
+            return None
+
+    monkeypatch.setattr(torchcodec.decoders, "VideoDecoder", Decoder)
+    monkeypatch.setattr(rerun_log_utils, "HARDWARE_VIDEO", {})
+    monkeypatch.setattr("posekit.apis.video_hands.HARDWARE_VIDEO", rerun_log_utils.HARDWARE_VIDEO)
+    with caplog.at_level("WARNING"):
+        open_decoder(Path("clip.mp4"), "cuda")
+        open_decoder(Path("clip.mp4"), "cuda")
+    assert opened == ["cuda", "cpu", "cpu"]  # NVDEC once, then the CPU
+    assert [record.levelname for record in caplog.records] == ["WARNING"] and "no NVDEC in this container" in caplog.text
+    warning = rerun_log_utils.hardware_video_warning()
+    assert warning.startswith("WARNING: hardware video failed") and "decode (Unsupported device: cuda" in warning
+    assert warning in str(VideoHandsProgress("video", 0, 8, 0, "assumed pinhole", warning))  # the app's status shows it

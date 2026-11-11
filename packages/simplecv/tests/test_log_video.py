@@ -365,3 +365,37 @@ def test_log_video_stream_roundtrip_pixels_match_source(
     assert len(stream_frames) == _FRAME_COUNT
     for i in (0, _FRAME_COUNT // 2, _FRAME_COUNT - 1):
         np.testing.assert_array_equal(src_frames[i], stream_frames[i])
+
+
+@pytest.mark.parametrize("nvenc_works", [True, False])
+def test_log_video_tries_nvenc_once_then_encodes_on_the_cpu_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, nvenc_works: bool
+) -> None:
+    """A failed NVENC transcode is retried on the CPU, warned about once, and remembered for the process."""
+    from simplecv import rerun_log_utils
+
+    attempts: list[bool] = []
+
+    class Reader:
+        def __init__(self, source: Path, *, transcode: bool, **options: object) -> None:
+            self.try_gpu: bool = transcode
+
+        def stream(self) -> Iterator[rrc.Chunk]:
+            attempts.append(self.try_gpu)
+            if self.try_gpu and not nvenc_works:
+                raise RuntimeError("ffmpeg: Cannot load libnvidia-encode.so.1")
+            return iter(())
+
+    monkeypatch.setattr(rrx, "Mp4Reader", Reader)
+    monkeypatch.setattr(rrx, "Mp4TranscodeOptions", lambda output_codec, try_gpu: try_gpu)
+    monkeypatch.setattr(rerun_log_utils, "HARDWARE_VIDEO", {})
+    recording: rr.RecordingStream = rr.RecordingStream("test_log_video_fallback")
+    with caplog.at_level("WARNING"):
+        log_video(Path("clip.mp4"), Path("/video"), recording=recording)
+        log_video(Path("clip.mp4"), Path("/video"), recording=recording)
+    if nvenc_works:
+        assert attempts == [True, True] and not caplog.records and rerun_log_utils.hardware_video_warning() == ""
+    else:
+        assert attempts == [True, False, False]  # NVENC once; afterwards the CPU without another try
+        assert [record.levelname for record in caplog.records] == ["WARNING"] and "libnvidia-encode" in caplog.text
+        assert "encode (ffmpeg: Cannot load libnvidia-encode.so.1)" in rerun_log_utils.hardware_video_warning()

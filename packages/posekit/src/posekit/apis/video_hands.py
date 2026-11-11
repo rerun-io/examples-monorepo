@@ -26,7 +26,7 @@ import tempfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import rerun as rr
@@ -36,7 +36,7 @@ from jaxtyping import Float32, Int64, UInt8, UInt16
 from numpy import ndarray
 from simplecv.rerun_custom_types import Points3DWithConfidence
 from simplecv.rerun_eye_controls import follow_eye_controls
-from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.rerun_log_utils import HARDWARE_VIDEO, RerunTyroConfig, hardware_video_fallback, hardware_video_warning, log_video
 from simplecv.video_io import bind_cuda_device
 from torch import Tensor
 from tqdm.auto import tqdm
@@ -45,6 +45,12 @@ from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.predictions import HandDetections, HandPoses3d, HandSide, MeshDetail
 from posekit.skeletons import KeypointSkeleton
+
+# torchcodec loads its FFmpeg libraries at import; the functions that decode import it, annotations only name the class.
+if TYPE_CHECKING:
+    from torchcodec.decoders import VideoDecoder
+else:
+    VideoDecoder = object
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
 CAMERA_PATH: str = "world/camera"
@@ -307,6 +313,8 @@ class VideoHandsProgress:
     """Hands found so far."""
     camera_note: str
     """The camera used (``describe_camera``)."""
+    warning: str = ""
+    """Hardware video paths that failed, so the CPU decodes or encodes (``hardware_video_warning``); empty when none did."""
 
     @property
     def step(self) -> str:
@@ -318,7 +326,31 @@ class VideoHandsProgress:
         return f"processed {self.num_frames} frames, {self.hands} hands"
 
     def __str__(self) -> str:
-        return f"{self.step}; {self.camera_note}"
+        return f"{self.step}; {self.camera_note}" + (f"\n\n**{self.warning}**" if self.warning else "")
+
+
+def open_decoder(video: Path, device: torch.device | str) -> VideoDecoder:
+    """A decoder of ``video``'s frames as ``NHWC``: NVDEC on ``device``, or the CPU once NVDEC has failed in this process.
+
+    The first call decodes one frame on the GPU to learn whether NVDEC works here. When it does not and the CPU can
+    read the same video, the failure is remembered with a warning and every later decoder is a CPU one; the caller
+    moves its frames to the GPU either way.
+    """
+    from torchcodec.decoders import VideoDecoder
+
+    if HARDWARE_VIDEO.get("decode") is None:
+        try:
+            decoder = VideoDecoder(video, dimension_order="NHWC", device=device)
+            if "decode" not in HARDWARE_VIDEO:
+                decoder.get_frames_in_range(0, 1)
+                HARDWARE_VIDEO["decode"] = None
+            return decoder
+        except RuntimeError as gpu_error:
+            decoder = VideoDecoder(video, dimension_order="NHWC")
+            decoder.get_frames_in_range(0, 1)  # raises for a video nothing can read: then NVDEC was not the cause
+            hardware_video_fallback("decode", gpu_error)
+            return decoder
+    return VideoDecoder(video, dimension_order="NHWC")
 
 
 def build_pipeline(settings: VideoHandsSettings) -> HandPose3dPipeline:
@@ -343,12 +375,10 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
     Raises:
         ValueError: If the video metadata cannot be read.
     """
-    from torchcodec.decoders import VideoDecoder
-
     if pipeline is None:
         pipeline = build_pipeline(settings)
     device: torch.device = torch.device("cuda", torch.cuda.current_device())
-    decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device=device)
+    decoder = open_decoder(settings.video_path, device)
     num_frames_raw = decoder.metadata.num_frames
     fps_raw = decoder.metadata.average_fps
     if num_frames_raw is None or fps_raw is None or float(fps_raw) <= 0.0:
@@ -372,14 +402,15 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         )
     send_blueprint()  # after the video: "playing" starts the cursor at the start of the logged video
     log_hand_annotation_context(pipeline.pose.skeleton)
-    yield VideoHandsProgress("video", 0, num_frames, 0, camera_note)  # the app streams the video out before the first chunk runs
+    warning: str = hardware_video_warning()
+    yield VideoHandsProgress("video", 0, num_frames, 0, camera_note, warning)  # the app streams the video out before the first chunk runs
     total_hands: int = 0
     live_slots: set[str] = set()
     meshed_slots: set[str] = set()
     for start in tqdm(range(0, num_frames, settings.frame_batch_size), desc="posekit video hands"):
         stop: int = min(start + settings.frame_batch_size, num_frames)
         bind_cuda_device(str(device))  # a streaming app resumes this generator on any worker thread
-        frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
+        frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous().to(device)
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
             hands = hands.in_pinhole(camera.intrinsics).at_mesh_detail(settings.mesh_detail)
@@ -392,9 +423,9 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
             frame_indices=chunk.tolist(), timestamps_ns=timestamps.tolist(), detections=detections, hands=hands,
             live_slots=live_slots, meshed_slots=meshed_slots,
         )
-        yield VideoHandsProgress("hands", stop, num_frames, total_hands, camera_note)
+        yield VideoHandsProgress("hands", stop, num_frames, total_hands, camera_note, warning)
     torch.cuda.synchronize()
-    yield VideoHandsProgress("done", num_frames, num_frames, total_hands, camera_note)
+    yield VideoHandsProgress("done", num_frames, num_frames, total_hands, camera_note, warning)
 
 
 def main(config: VideoHandsConfig) -> None:

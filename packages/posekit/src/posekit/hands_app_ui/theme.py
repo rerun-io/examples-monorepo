@@ -13,6 +13,18 @@ RERUN_LOGOS: dict[str, str] = {
 """Rerun's animated wordmark from the media kit (https://rerun.io/media) on a transparent ground, plays once: black letters for
 light mode, white for dark mode (the liquid keeps its colours). Inlined so the header needs no file route."""
 
+DARK_HEAD: str = """<script>
+(() => {
+    const url = new URL(window.location);
+    url.searchParams.set("__theme", "dark");
+    history.replaceState(null, "", url);
+    document.body.classList.add("dark");
+})();
+</script>"""
+"""Forces Gradio's dark theme without a reload (``track_ui_theme.FORCE_DARK_HEAD`` navigates, so the page loads twice).
+Gradio 6 inserts ``head`` after it has read its ``__theme`` URL switch, so the script also sets what that switch sets, the
+``dark`` class on the body; the URL keeps the switch for what reads it later (the Settings panel)."""
+
 APP_CSS: str = '@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");\n' + f"#main-row {{ height: {VIEWER_HEIGHT}; min-height: 0; overflow: hidden; }}\n" + """
 /* Rerun's brand base colours (https://rerun.io/media): #171616 ground, #F1EFEB type, #186ADD accent, #D72F21 red;
    the panels and borders use the viewer's own greys so the left column matches the embedded viewer. */
