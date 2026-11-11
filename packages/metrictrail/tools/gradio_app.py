@@ -1,4 +1,4 @@
-from metrictrail.gradio_ui.metrictrail_ui import build_app
+from metrictrail.gradio_ui.metrictrail_ui import build_app, launch
 
 if __name__ == "__main__":
-    build_app().queue(max_size=2).launch(ssr_mode=False)
+    launch(build_app())

@@ -12,7 +12,8 @@ import gradio as gr
 from gradio_rerun import Rerun
 
 from metrictrail.blueprint import SceneView, calibration_blueprint, run_blueprint
-from metrictrail.gradio_ui.metrictrail_ui import app_overrides, build_app, example_videos, metrictrail_streaming_fn
+from metrictrail.gradio_ui.metrictrail_ui import RunLog, RunYield, app_overrides, build_app, example_videos, metrictrail_streaming_fn, summary_table
+from metrictrail.outputs import RunMetrics
 
 
 def test_example_videos_list_the_iphone_clips_first(tmp_path: Path) -> None:
@@ -40,20 +41,34 @@ def test_app_overrides_keep_upstream_values_out_of_the_command() -> None:
         app_overrides(1, 1500, "all")  # a protocol mode, not a pipeline budget
 
 
-def test_build_app_wires_a_streaming_viewer_and_the_examples(tmp_path: Path) -> None:
+def test_build_app_has_the_egohand_layout_a_video_input_with_thumbnail_examples_and_a_streaming_viewer(tmp_path: Path) -> None:
     (tmp_path / "iphone").mkdir()
     (tmp_path / "iphone" / "pool.mp4").touch()
     demo: gr.Blocks = build_app(tmp_path)
     components: list[object] = list(demo.blocks.values())
     viewers: list[Rerun] = [block for block in components if isinstance(block, Rerun)]
     assert len(viewers) == 1 and viewers[0].streaming
-    assert any(isinstance(block, gr.File) for block in components)
-    assert any(isinstance(block, gr.Dataset) and len(block.samples) == 1 for block in components)
-    assert any(viewers[0]._id in dependency["outputs"] for dependency in demo.config["dependencies"])
+    videos: list[gr.Video] = [block for block in components if isinstance(block, gr.Video)]
+    assert len(videos) == 1  # the examples render as video tiles of this input
+    assert any(isinstance(block, gr.Dataset) and len(block.samples) == 1 and block.elem_id == "examples" for block in components)
+    assert [str(block.label) for block in components if isinstance(block, gr.Tab)] == ["Input", "Outputs"]
+    run = next(dependency for dependency in demo.config["dependencies"] if viewers[0]._id in dependency["outputs"])
+    assert len(run["outputs"]) == 4  # viewer, status, summary, run log
 
 
 def test_streaming_fn_without_a_video_yields_an_empty_chunk() -> None:
-    assert list(metrictrail_streaming_fn(None, 1, 1500, "fast64")) == [(b"", "Upload a video or pick an example first.")]
+    assert list(metrictrail_streaming_fn(None, 1, 1500, "fast64")) == [(b"", "Choose a video first.", gr.skip(), gr.skip())]
+
+
+def test_the_run_log_notes_each_status_once_newest_first_and_the_summary_is_a_table() -> None:
+    log = RunLog(started=10.0)
+    assert log.note("SharedK calibration", 10.5) == "   0.5 s  SharedK calibration"
+    assert log.note("SharedK calibration", 11.0) == gr.skip()  # unchanged: the textbox is not resent
+    assert log.note("DPVO tracking", 25.0) == "  15.0 s  DPVO tracking\n   0.5 s  SharedK calibration"
+    metrics = RunMetrics(num_tracked=1293, num_finite=1290, num_gt_pairs=None, ate_sim3_m=None, sim3_scale=None, ate_se3_m=None, cloud_points=None, mesh_triangles=3066509)
+    table: str = summary_table(metrics, 57.04, "fast64")
+    assert "| Frames tracked | 1,293 (1,290 finite poses) |" in table and "| TSDF mesh | 3,066,509 triangles |" in table
+    assert "| Fused cloud | - |" in table and "| Elapsed | 57.0 s |" in table
 
 
 def test_app_layouts_build_for_calibration_tracking_and_the_final_run() -> None:
@@ -92,8 +107,8 @@ def test_a_host_passes_its_run_examples_and_frame_cap_to_build_app(tmp_path: Pat
     clip: Path = tmp_path / "clip.mp4"
     clip.touch()
 
-    def hosted_run(video_path: str | None, tracking_stride: int | float, max_frames: int | float, budget: str) -> Iterator[tuple[bytes, str]]:
-        yield b"", "hosted"
+    def hosted_run(video_path: str | None, tracking_stride: int | float, max_frames: int | float, budget: str) -> Iterator[RunYield]:
+        yield b"", "hosted", gr.skip(), gr.skip()
 
     demo: gr.Blocks = build_app(run=hosted_run, examples=[clip], max_frames=300)
     components: list[object] = list(demo.blocks.values())

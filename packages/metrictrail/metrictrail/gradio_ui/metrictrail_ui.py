@@ -5,7 +5,7 @@ MetricTrail calibrates the camera itself (SharedK), so there is no intrinsics in
 (TensorRT ``moge-2-vitl-normal``, torch FP16 when TensorRT does not import).
 
 Streaming: ``@rr.thread_local_stream`` gives each call its own recording, ``rr.binary_stream()`` collects its bytes and
-the generator yields ``(stream.read(), status)``. The pipeline runs in a worker thread and logs into that recording
+the generator yields ``(stream.read(), status, summary, run log)`` (:data:`RunYield`). The pipeline runs in a worker thread and logs into that recording
 explicitly; the capture hooks (:mod:`metrictrail.capture`, ``live`` mode) log every tracked frame as DPVO tracks it, and
 the generator yields what has accumulated twice a second. The whole input video is logged first, from its own samples
 (``rr.VideoStream``). While SharedK calibrates, the viewer shows the calibration layout
@@ -14,16 +14,21 @@ frame the sweep reads (``gradio_rerun.commands.set_time``); once DPVO tracks, it
 the video at real time behind the tracked frames (:class:`Playback`), so DPVO's patches, depth, normals and DINOv3 PCA
 play smoothly over it. The trajectory and the final mesh come
 at the end, from the artifacts, and the clip plays on from where it is, in a loop.
+
+The page has the EgoHand app's look (:mod:`metrictrail.gradio_ui.theme`): Input and Outputs tabs, Run and the status on
+the left, the viewer filling the rest of the window.
 """
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Generator, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TypeAlias
 
 import gradio as gr
 import numpy as np
@@ -41,14 +46,25 @@ from metrictrail.apis.run import RunResult, RunSettings, run_and_log
 from metrictrail.benchmarks import UPSTREAM_MAX_FRAMES
 from metrictrail.blueprint import calibration_blueprint, run_blueprint
 from metrictrail.calibration_live import RunPhase
+from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS, VIEWER_HEIGHT
 from metrictrail.outputs import RunMetrics
 
 APPLICATION_ID: str = "metrictrail"
 """Application id of every streamed recording."""
 DATA_DIR: Path = Path(__file__).resolve().parents[2] / "data"
 """``packages/metrictrail/data``: the example clips (``metrictrail-app`` downloads them)."""
-VIDEO_TYPES: list[str] = [".mp4", ".mov", ".MOV", ".webm"]
-"""Upload types the file picker accepts."""
+RUN_LOG_LINES: int = 100
+"""Lines the run log keeps (the textbox is sent whole when it changes)."""
+READY: str = "Upload a clip, or pick an example, then press Run."
+DESCRIPTION: str = (
+    f'<h1 id="app-title"><a href="https://rerun.io" target="_blank" rel="noopener" title="rerun.io">'
+    f'<img class="logo-light" src="{RERUN_LOGOS["light"]}" alt="Rerun"><img class="logo-dark" src="{RERUN_LOGOS["dark"]}" alt="Rerun">'
+    f'</a> <span class="title-x">×</span> MetricTrail</h1>\n\n'
+    "Metric camera trajectory and surface from one phone video: ViPE's `pipeline=metrictrail`, DPVO with MoGe-2 metric depth "
+    "and DINOv3 features. **Pick an example or upload a clip, then press Run:** the camera's focal is calibrated from the video "
+    "first (SharedK, 15-30 s), then the tracking, MoGe-2's depth and normals and a TSDF mesh stream in as the video plays."
+)
+"""Markdown above the app: Rerun's wordmark, then two short lines."""
 POLL_S: float = 0.5
 """How often the generator yields the bytes logged so far and moves the cursor to the newest tracked frame."""
 
@@ -194,6 +210,38 @@ def summary(metrics: RunMetrics, wall_s: float) -> str:
     return f"done in {wall_s:.0f} s: {metrics.num_tracked} frames tracked ({metrics.num_finite} finite poses){mesh}{cloud}"
 
 
+def summary_table(metrics: RunMetrics, wall_s: float, budget: str) -> str:
+    """The Outputs tab's table of a finished run."""
+    rows: list[tuple[str, str]] = [
+        ("Frames tracked", f"{metrics.num_tracked:,} ({metrics.num_finite:,} finite poses)"),
+        ("TSDF mesh", f"{metrics.mesh_triangles:,} triangles" if metrics.mesh_triangles is not None else "-"),
+        ("Fused cloud", f"{metrics.cloud_points:,} points" if metrics.cloud_points is not None else "-"),
+        ("Elapsed", f"{wall_s:.1f} s"),
+        ("Calibration budget", f"`{budget}`"),
+    ]
+    return "| Run | |\n|---|---|\n" + "".join(f"| {name} | {value} |\n" for name, value in rows)
+
+
+@dataclass(slots=True)
+class RunLog:
+    """The Outputs tab's run log: each new status once, with the seconds since Run, newest first."""
+
+    started: float
+    """``time.perf_counter()`` at Run."""
+    lines: deque[str] = field(default_factory=lambda: deque(maxlen=RUN_LOG_LINES))
+    """The recent lines, newest first."""
+    last: str | None = None
+    """The newest status logged."""
+
+    def note(self, text: str, now: float) -> str | dict[str, object]:
+        """The textbox value after ``text`` (a new line), or ``gr.skip()`` when ``text`` is the newest already."""
+        if text == self.last:
+            return gr.skip()
+        self.last = text
+        self.lines.appendleft(f"{now - self.started:6.1f} s  {text}")
+        return "\n".join(self.lines)
+
+
 def run_locked(settings: RunSettings, rec: rr.RecordingStream, status: RunStatus) -> RunResult:
     """:func:`run_and_log` in live mode; releases :data:`RUN_LOCK` (taken by the caller) when it returns."""
     try:
@@ -202,10 +250,16 @@ def run_locked(settings: RunSettings, rec: rr.RecordingStream, status: RunStatus
         RUN_LOCK.release()
 
 
+Update: TypeAlias = str | dict[str, object]
+"""A Markdown or Textbox value, or ``gr.skip()`` (no change)."""
+RunYield: TypeAlias = tuple[bytes | dict[str, object], Update, Update, Update]
+"""One step of a run: Rerun bytes (or a viewer command), the status box, the Outputs summary and the run log."""
+
+
 @rr.thread_local_stream(APPLICATION_ID)
 def metrictrail_streaming_fn(
     video_path: str | None, tracking_stride: int | float, max_frames: int | float, budget: str = APP_BUDGET
-) -> Generator[tuple[bytes | dict[str, object], str], None, None]:
+) -> Generator[RunYield, None, None]:
     """Run MetricTrail on ``video_path`` and stream the recording to the viewer.
 
     Args:
@@ -215,14 +269,16 @@ def metrictrail_streaming_fn(
         budget: SharedK calibration's keyframe budget (``pipeline.init.calibration.budget``, :data:`PIPELINE_BUDGETS`).
 
     Yields:
-        The Rerun bytes logged since the last yield (or a cursor command for the viewer), and a status line.
+        The Rerun bytes logged since the last yield (or a cursor command for the viewer), the status line, the Outputs
+        tab's summary and its run log (:data:`RunYield`).
     """
+    skip: dict[str, object] = gr.skip()
     if video_path is None:
-        yield b"", "Upload a video or pick an example first."
+        yield b"", "Choose a video first.", skip, skip
         return
     overrides: list[str] = app_overrides(int(tracking_stride), int(max_frames), budget)
     if not RUN_LOCK.acquire(blocking=False):
-        yield b"", "The previous run is still finishing; try again in a moment."
+        yield b"", "The previous run is still finishing; try again in a moment.", skip, skip
         return
     stream: rr.BinaryStream = rr.binary_stream()
     rec: rr.RecordingStream | None = rr.get_thread_local_data_recording()
@@ -233,6 +289,8 @@ def metrictrail_streaming_fn(
     tracking_layout: bool = False
     status: RunStatus = RunStatus()
     started: float = time.perf_counter()
+    log: RunLog = RunLog(started)
+    yield b"", "Starting…", "Running…", log.note("starting", started)
     with TemporaryDirectory(prefix="metrictrail-app-") as run_dir, ThreadPoolExecutor(max_workers=1, thread_name_prefix="metrictrail") as pool:
         settings: RunSettings = RunSettings(input=Path(video_path), output=Path(run_dir), benchmark="video", extra_overrides=overrides)
         try:
@@ -246,22 +304,23 @@ def metrictrail_streaming_fn(
                     result: RunResult = future.result(timeout=POLL_S)
                     break
                 except FutureTimeoutError:
-                    line: str = f"{status.text} ({time.perf_counter() - started:.0f} s)"
-                    yield stream.read() or b"", line
+                    now: float = time.perf_counter()
+                    line: str = f"{status.text} ({now - started:.0f} s)"
+                    yield stream.read() or b"", line, skip, log.note(status.text, now)
                     if status.cursor is not None and status.cursor[1] == "tracking" and not tracking_layout:
                         rec.send_blueprint(run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True), make_active=True)
                         tracking_layout = True
                         # The layout (its time panel waits paused) must reach the viewer, and be ingested, before any play
                         # command: a play applied first is paused again by the layout. Commands wait for the next poll.
-                        yield stream.read() or b"", line
+                        yield stream.read() or b"", skip, skip, skip
                         continue
                     command: dict[str, object] | None = status.cursor_command(time.perf_counter())
                     if command is not None:
-                        yield command, line
+                        yield command, skip, skip, skip
         except BeartypeException:
             raise
         except RunCancelled:
-            yield stream.read() or b"", "Stopped."
+            yield stream.read() or b"", "Stopped.", "Stopped.", log.note("stopped", time.perf_counter())
             return
         except Exception as error:
             raise gr.Error(f"MetricTrail failed: {error}") from error
@@ -283,20 +342,22 @@ def metrictrail_streaming_fn(
         ),
         make_active=True,
     )
-    done: str = summary(result.logged.metrics, time.perf_counter() - started)
-    yield stream.read() or b"", done
-    yield status.playback.finish(time.perf_counter()), done
+    wall_s: float = time.perf_counter() - started
+    done: str = summary(result.logged.metrics, wall_s)
+    yield stream.read() or b"", done, summary_table(result.logged.metrics, wall_s, budget), log.note(done, time.perf_counter())
+    yield status.playback.finish(time.perf_counter()), skip, skip, skip
 
 
-RunFn = Callable[[str | None, int | float, int | float, str], Iterator[tuple[bytes | dict[str, object], str]]]
-"""``(video_path, tracking_stride, max_frames, budget) -> (Rerun bytes, status)`` per yield: :func:`metrictrail_streaming_fn`
-or a host's wrapper of it (a ZeroGPU Space runs it in a ``@spaces.GPU`` worker)."""
+RunFn = Callable[[str | None, int | float, int | float, str], Iterator[RunYield]]
+"""``(video_path, tracking_stride, max_frames, budget) -> RunYield`` per yield: :func:`metrictrail_streaming_fn` or a
+host's wrapper of it (a ZeroGPU Space runs it in a ``@spaces.GPU`` worker)."""
 
 
 def build_app(
     data_dir: Path = DATA_DIR, *, run: RunFn = metrictrail_streaming_fn, examples: list[Path] | None = None, max_frames: int = UPSTREAM_MAX_FRAMES
 ) -> gr.Blocks:
-    """The MetricTrail app: video upload, knobs, examples and status on the left; the streaming viewer on the right.
+    """Input and Outputs tabs, Run, Stop and the status on the left; the streaming Rerun viewer on the right (the EgoHand
+    app's layout). Serve it with :func:`launch` (its look comes with the launch).
 
     Args:
         data_dir: Where :func:`example_videos` finds the example clips (when ``examples`` is None).
@@ -305,42 +366,51 @@ def build_app(
         max_frames: Default of the max-frames field (a host caps the work a click reserves).
     """
     clips: list[Path] = examples if examples is not None else example_videos(data_dir)
-    viewer: Rerun = Rerun(
-        streaming=True,
-        panel_states={"time": "collapsed", "blueprint": "collapsed", "selection": "collapsed"},
-        height=800,
-    )
-    with gr.Blocks(title="MetricTrail") as demo:
-        gr.Markdown(
-            "# MetricTrail\nMonocular metric SLAM (ViPE `pipeline=metrictrail`): DPVO with MoGe-2 metric depth and DINOv3 "
-            "features. Your video plays at once; the camera's focal is first calibrated from it (SharedK, 15-30 s; see the "
-            "calibration budget in Settings), then tracking streams in over the video from the start, with a TSDF mesh "
-            "growing from each keyframe; the trajectory and the final mesh arrive at the end."
+    with gr.Blocks(title="Rerun × MetricTrail") as demo:
+        gr.Markdown(DESCRIPTION, elem_id="app-description")
+        with gr.Row(elem_id="main-row", equal_height=False):
+            with gr.Column(scale=1, min_width=360, elem_id="left-column"):
+                with gr.Tabs(selected="input") as tabs:
+                    with gr.Tab("Input", id="input"):
+                        # format=None: Gradio hands the upload over as it is (a .MOV stays a .MOV; prepare_input links it).
+                        video_input: gr.Video = gr.Video(label="Source clip", sources=["upload"], format=None, elem_id="source-video")
+                        with gr.Accordion("Advanced settings", open=False):
+                            stride_slider: gr.Slider = gr.Slider(
+                                label="Tracking stride (DPVO tracks every k-th frame)", minimum=1, maximum=5, step=1, value=1
+                            )
+                            max_frames_number: gr.Number = gr.Number(
+                                label="Max frames (a longer video is strided down to this many)", value=max_frames, precision=0, minimum=2
+                            )
+                            budget_dropdown: gr.Dropdown = gr.Dropdown(
+                                label="Calibration budget (keyframes SharedK keeps before it fixes the focal)",
+                                choices=[(BUDGET_LABELS[budget], budget) for budget in PIPELINE_BUDGETS],
+                                value=APP_BUDGET,
+                            )
+                        gr.Examples(
+                            examples=[[str(path)] for path in clips], inputs=[video_input], examples_per_page=4, cache_examples=False, elem_id="examples"
+                        )
+                    with gr.Tab("Outputs", id="outputs"):
+                        run_summary: gr.Markdown = gr.Markdown("No run yet.", elem_id="run-summary")
+                        run_log: gr.Textbox = gr.Textbox(
+                            label="Run log (newest first)", lines=8, max_lines=8, autoscroll=False, interactive=False, elem_id="run-log"
+                        )
+                with gr.Row(elem_id="run-row"):
+                    run_button: gr.Button = gr.Button("Run", variant="primary")
+                    stop_button: gr.Button = gr.Button("Stop", variant="stop")
+                status_text: gr.Markdown = gr.Markdown(READY, elem_id="run-status")
+            with gr.Column(scale=3):
+                viewer: Rerun = Rerun(
+                    streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=VIEWER_HEIGHT
+                )
+        run_event = run_button.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(
+            fn=run, inputs=[video_input, stride_slider, max_frames_number, budget_dropdown], outputs=[viewer, status_text, run_summary, run_log]
         )
-        with gr.Row():
-            with gr.Column(scale=1):
-                video_input: gr.File = gr.File(file_count="single", file_types=VIDEO_TYPES, label="Input video")
-                with gr.Row():
-                    run_button: gr.Button = gr.Button("Run MetricTrail", variant="primary")
-                    stop_button: gr.Button = gr.Button("Stop")
-                status_text: gr.Textbox = gr.Textbox(label="Status", value="Upload a video to begin.", interactive=False)
-                with gr.Accordion("Settings", open=False):
-                    stride_slider: gr.Slider = gr.Slider(
-                        label="Tracking stride (DPVO tracks every k-th frame)", minimum=1, maximum=5, step=1, value=1
-                    )
-                    max_frames_number: gr.Number = gr.Number(
-                        label="Max frames (a longer video is strided down to this many)", value=max_frames, precision=0, minimum=2
-                    )
-                    budget_dropdown: gr.Dropdown = gr.Dropdown(
-                        label="Calibration budget (keyframes SharedK keeps before it fixes the focal; ViPE's default is robust128)",
-                        choices=[(BUDGET_LABELS[budget], budget) for budget in PIPELINE_BUDGETS],
-                        value=APP_BUDGET,
-                    )
-                gr.Examples(examples=[[str(path)] for path in clips], inputs=[video_input], cache_examples=False)
-            with gr.Column(scale=5):
-                viewer.render()
-        run_event = run_button.click(
-            fn=run, inputs=[video_input, stride_slider, max_frames_number, budget_dropdown], outputs=[viewer, status_text]
-        )
-        stop_button.click(fn=None, inputs=None, outputs=None, cancels=[run_event])
+        stop_button.click(lambda: "Stopped.", outputs=[status_text], cancels=[run_event], queue=False)
     return demo
+
+
+def launch(demo: gr.Blocks) -> None:
+    """Serve ``demo`` with the app's look (forced dark, like the EgoHand app); one run at a time, as the pipeline holds the
+    GPU. Gradio's environment (``GRADIO_SERVER_NAME``, ``GRADIO_SERVER_PORT``) picks where."""
+    demo.queue(max_size=2, default_concurrency_limit=1)
+    demo.launch(ssr_mode=False, css=APP_CSS, head=DARK_HEAD, show_error=True)

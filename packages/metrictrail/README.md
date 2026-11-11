@@ -83,7 +83,9 @@ pixi run -e metrictrail metrictrail-app
 ```
 
 A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.py`): upload a video or pick an example
-(the task downloads dpvo's example clips into `data/`), and the run streams into an embedded Rerun viewer. It runs
+(the task downloads dpvo's example clips into `data/`; they show as video tiles), and the run streams into an embedded
+Rerun viewer that fills the window. The page has the EgoHand app's look (`gradio_ui/theme.py`: Rerun's colours and wordmark,
+Input and Outputs tabs; Outputs holds the run summary and a log of each stage). It runs
 `metrictrail.apis.run.run_and_log` with the `video` preset and the default MoGe-2 provider, so it calibrates the camera
 itself; there is no intrinsics input. Settings: the tracking stride, `max_frames` (upstream's Hydra keys) and the SharedK
 calibration budget (`fast64` by default, half the time of ViPE's `robust128`). The input video is logged first and plays at
