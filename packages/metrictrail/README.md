@@ -33,6 +33,11 @@ on TUM fr1_desk, seed 1234, level 0 gave 2.290 cm Sim(3) ATE and scale 1.05702 a
 1.05873. Both tracked all 613 frames with finite poses. The wider paper evaluation below used level 9 and has
 not been repeated at level 0. The smaller depth workload also leaves room for reducing feature-extractor dispatch.
 
+The `ours` path replays DINO and both DPVO convolutional encoders with CUDA graphs during inference. Graphs are scoped
+to one run and separated by model, raster and precision; FP32 recovery uses its own graph. Returned features own their
+storage, and logging stays outside capture. On the RTX 5090, the 642-frame IMG_0493 clip measured a median 48.67 tracking
+FPS without capture and 35.93 with capture (three runs each), versus 40.02 / 30.58 before graph replay.
+
 ## Run
 
 lietorch comes from `packages/lietorch-mojo`: both envs compose the `lietorch-mojo` feature, and `metrictrail-run`
