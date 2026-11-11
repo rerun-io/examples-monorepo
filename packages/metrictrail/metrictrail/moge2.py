@@ -177,6 +177,9 @@ def image_key(rgb_u8_hw3: UInt8[Tensor, "h w 3"]) -> ImageKey:
     return height, width, hashlib.blake2b(data.tobytes(), digest_size=16).digest()
 
 
+FREE_FOV_OBSERVERS: list[Callable[[Float64[ndarray, "4"]], None]] = []
+"""Called with every K :meth:`MoGe2NormalProvider.estimate_free_fov_k4` returns (SharedK's head focals; the live
+calibration view, :func:`metrictrail.calibration_live.calibration_live_view`, adds one for a run)."""
 _ENGINES: WeakSet["MoGe2Engine"] = WeakSet()
 """Every live engine, so :func:`clear_forward_caches` can reach the ones a long-lived ``ModelCache`` holds."""
 
@@ -374,7 +377,10 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
             raise ValueError(f"expected a (1,3,H,W) image, got {tuple(rgb_bchw.shape)}")
         intrinsics: Float[Tensor, "3 3"] = self.engine.predict(rgb_u8_bhw3(rgb_bchw)[0], fov_x=None).intrinsics
         image_hw: tuple[int, int] = (int(rgb_bchw.shape[-2]), int(rgb_bchw.shape[-1]))
-        return np.asarray(normalized_to_pixel_k4(intrinsics.detach().float().cpu().numpy(), image_hw), dtype=np.float64)
+        k4: Float64[ndarray, "4"] = np.asarray(normalized_to_pixel_k4(intrinsics.detach().float().cpu().numpy(), image_hw), dtype=np.float64)
+        for observer in FREE_FOV_OBSERVERS:
+            observer(k4)
+        return k4
 
     def describe(self) -> dict[str, Any]:
         """The depth-provider block of the run record."""

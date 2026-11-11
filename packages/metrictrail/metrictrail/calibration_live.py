@@ -6,8 +6,9 @@ the clip from its first frame until it keeps its keyframe budget (128 by default
 with throwaway keyframe poses and disparities, pulled towards MoGe-2 metric depth at the current focal. DPVO then
 tracks the clip from the start with that K.
 
-:func:`calibration_live_view` wraps the calibration engine ``ViPESharedFocalEngine`` and its MoGe-2 wrapper
-``AuditedDepthModel`` (ViPE stays unedited); :class:`CalibrationLive` logs what they produce on
+:func:`calibration_live_view` gives ViPE's calibration a subclass of its engine ``ViPESharedFocalEngine`` for one run
+(``vipe.metrictrail.calibration.processor.ENGINE_FACTORY``, recipe patch 0008) and observes MoGe-2's head focals on our
+own provider (:data:`metrictrail.moge2.FREE_FOV_OBSERVERS`); :class:`CalibrationLive` logs what they produce on
 :data:`entities.CALIBRATION_TIMELINE` (the index of the frame the sweep read) and on ``video_time`` / ``source_frame``:
 
 * MoGe-2's focal on each head frame, the focal after each backend solve, the keyframes kept per frame read (scalars);
@@ -308,62 +309,56 @@ def read_map(engine: Any) -> MapSnapshot:
 
 @contextmanager
 def calibration_live_view(live: CalibrationLive | None) -> Iterator[None]:
-    """Wrap ``AuditedDepthModel.estimate_free_fov_k4`` and ``ViPESharedFocalEngine.candidate`` / ``run_frontend`` /
-    ``run_backend`` / ``end_benchmark`` to report to ``live`` while the context is open; None: nothing to wrap."""
+    """Report the calibration to ``live`` while the context is open: ViPE builds its sweep engine from a subclass that
+    reports each frame read, frontend step, backend solve and the end of the sweep, and MoGe-2's head focals reach
+    ``live`` through our provider. None: nothing to report."""
     if live is None:
         yield
         return
-    view: CalibrationLive = live  # the hooks below close over it (a closure loses the narrowing)
-    from vipe.metrictrail.calibration.engine import AuditedDepthModel, ViPESharedFocalEngine
+    from vipe.metrictrail.calibration import processor
+    from vipe.metrictrail.calibration.engine import ViPESharedFocalEngine
 
-    head_orig = AuditedDepthModel.estimate_free_fov_k4
-    candidate_orig = ViPESharedFocalEngine.candidate
-    frontend_orig = ViPESharedFocalEngine.run_frontend
-    backend_orig = ViPESharedFocalEngine.run_backend
-    end_orig = ViPESharedFocalEngine.end_benchmark
+    from metrictrail.moge2 import FREE_FOV_OBSERVERS
+
+    view: CalibrationLive = live  # the methods below close over it (a closure loses the narrowing)
 
     def log_map(engine: Any) -> None:
         if int(engine.system.buffer.n_frames) > 0:
             view.map(read_map(engine), engine.recovered_k().astype(np.float64))
 
-    def estimate_free_fov_k4(self: Any, rgb_bchw: Any) -> Any:
-        k4: Any = head_orig(self, rgb_bchw)
-        guarded(lambda: view.head_focal(np.asarray(k4, dtype=np.float64)))
-        return k4
+    class LiveEngine(ViPESharedFocalEngine):
+        """ViPE's calibration engine, reporting to the live view; the view's failures fail the run (:func:`guarded`)."""
 
-    def candidate(self: Any, frame_index: int, frame: Any) -> bool:
-        guarded(lambda: view.read(int(frame_index), int(frame.raw_frame_idx)))  # a Stop passes through: not an Exception
-        return candidate_orig(self, frame_index, frame)
+        def candidate(self, frame_index: int, frame: Any) -> bool:
+            guarded(lambda: view.read(int(frame_index), int(frame.raw_frame_idx)))  # a Stop passes through: not an Exception
+            return super().candidate(frame_index, frame)
 
-    def run_frontend(self: Any) -> None:
-        frontend_orig(self)
+        def run_frontend(self) -> None:
+            super().run_frontend()
 
-        def report() -> None:
-            if view.frontend(int(self.system.buffer.n_frames)):
-                log_map(self)
+            def report() -> None:
+                if view.frontend(int(self.system.buffer.n_frames)):
+                    log_map(self)
 
-        guarded(report)
+            guarded(report)
 
-    def run_backend(self: Any, steps: int, *, update_depth: bool) -> None:
-        backend_orig(self, steps, update_depth=update_depth)
-        guarded(lambda: view.focal(self.recovered_k().astype(np.float64)))
+        def run_backend(self, steps: int, *, update_depth: bool) -> None:
+            super().run_backend(steps, update_depth=update_depth)
+            guarded(lambda: view.focal(self.recovered_k().astype(np.float64)))
 
-    def end_benchmark(self: Any) -> dict[str, float]:
-        timings: dict[str, float] = end_orig(self)
-        guarded(lambda: log_map(self))  # after the benchmark interval, so the calibration's own timing leaves this read out
-        return timings
+        def end_benchmark(self) -> dict[str, float]:
+            timings: dict[str, float] = super().end_benchmark()
+            guarded(lambda: log_map(self))  # after the benchmark interval, so the calibration's own timing leaves this read out
+            return timings
 
-    patches: list[tuple[type, str, Callable[..., Any], Callable[..., Any]]] = [
-        (AuditedDepthModel, "estimate_free_fov_k4", head_orig, estimate_free_fov_k4),
-        (ViPESharedFocalEngine, "candidate", candidate_orig, candidate),
-        (ViPESharedFocalEngine, "run_frontend", frontend_orig, run_frontend),
-        (ViPESharedFocalEngine, "run_backend", backend_orig, run_backend),
-        (ViPESharedFocalEngine, "end_benchmark", end_orig, end_benchmark),
-    ]
-    for owner, name, _, wrapper in patches:
-        setattr(owner, name, wrapper)
+    def head_focal(k4: Float64[ndarray, "4"]) -> None:
+        guarded(lambda: view.head_focal(k4))
+
+    previous = processor.ENGINE_FACTORY
+    processor.ENGINE_FACTORY = LiveEngine
+    FREE_FOV_OBSERVERS.append(head_focal)
     try:
         yield
     finally:
-        for owner, name, original, _ in patches:
-            setattr(owner, name, original)
+        FREE_FOV_OBSERVERS.remove(head_focal)
+        processor.ENGINE_FACTORY = previous

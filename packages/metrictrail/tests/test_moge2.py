@@ -196,3 +196,15 @@ def test_a_finished_run_releases_the_cached_forwards_but_keeps_the_network() -> 
     provider.predict_metric(frame(0), focal_px=40.0)
     assert engine.forward_count == 2  # a second forward: the first one's output was released
     assert len(built) == 1  # the same network (predictor) served both
+
+
+def test_free_fov_observers_see_every_head_focal() -> None:
+    engine, _ = make_engine()
+    provider = depth.MoGe2NormalProvider("l", engine=engine)
+    seen: list[float] = []
+    depth.FREE_FOV_OBSERVERS.append(lambda k4: seen.append(float(k4[0])))
+    try:
+        k4 = provider.estimate_free_fov_k4(frame(0))
+    finally:
+        depth.FREE_FOV_OBSERVERS.clear()
+    assert seen == [float(k4[0])]

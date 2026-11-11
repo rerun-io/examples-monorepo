@@ -168,3 +168,26 @@ def test_a_live_view_failure_fails_the_run_instead_of_reaching_vipes_focal_fallb
     with pytest.raises(CalibrationLiveError) as raised:
         guarded(broken)
     assert isinstance(raised.value.__cause__, NotImplementedError)
+
+
+def test_the_live_view_plugs_in_through_vipes_engine_factory_and_patches_no_vipe_class() -> None:
+    """The view subclasses ViPE's engine for one run (processor.ENGINE_FACTORY, recipe patch 0008) and observes MoGe-2's
+    head focals on our own provider; it leaves every ViPE method as it was."""
+    pytest.importorskip("vipe")
+    from vipe.metrictrail.calibration import processor
+    from vipe.metrictrail.calibration.engine import AuditedDepthModel, ViPESharedFocalEngine
+
+    from metrictrail import moge2
+    from metrictrail.calibration_live import calibration_live_view
+
+    methods = {name: getattr(ViPESharedFocalEngine, name) for name in ("candidate", "run_frontend", "run_backend", "end_benchmark")}
+    head = AuditedDepthModel.estimate_free_fov_k4
+    live = CalibrationLive(rec=rr.RecordingStream("metrictrail-test"), video_time_ns=None, target_keyframes=64, head_frames=32, on_stage=None, on_cursor=None)
+    with calibration_live_view(live):
+        factory = processor.ENGINE_FACTORY
+        assert isinstance(factory, type) and issubclass(factory, ViPESharedFocalEngine)
+        assert len(moge2.FREE_FOV_OBSERVERS) == 1
+        moge2.FREE_FOV_OBSERVERS[0](np.array([450.0, 450.0, 252.0, 140.0]))
+        assert live.head_focals_px == [450.0]
+    assert processor.ENGINE_FACTORY is None and moge2.FREE_FOV_OBSERVERS == []
+    assert {name: getattr(ViPESharedFocalEngine, name) for name in methods} == methods and AuditedDepthModel.estimate_free_fov_k4 is head
