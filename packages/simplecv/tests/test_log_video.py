@@ -367,20 +367,7 @@ def test_log_video_stream_roundtrip_pixels_match_source(
         np.testing.assert_array_equal(src_frames[i], stream_frames[i])
 
 
-@pytest.mark.parametrize(
-    ("nvenc_error", "attempts", "remembered"),
-    [
-        (None, [True, True], False),
-        ("ffmpeg: Cannot load libnvidia-encode.so.1", [True, False, False], True),  # a host fault: NVENC once, then the CPU
-        ("ffmpeg: nvenc: unsupported pixel format", [True, False, True, False], False),  # this video: NVENC again next time
-    ],
-)
-def test_log_video_encodes_on_the_cpu_when_nvenc_fails_and_remembers_only_a_missing_library(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, nvenc_error: str | None, attempts: list[bool], remembered: bool
-) -> None:
-    """A failed NVENC transcode is retried on the CPU with a warning; only a host without the NVENC library stops later tries."""
-    from simplecv import video_io
-
+def test_log_video_encodes_on_the_cpu_with_a_warning_when_nvenc_fails(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     tried: list[bool] = []
 
     class Reader:
@@ -389,21 +376,15 @@ def test_log_video_encodes_on_the_cpu_when_nvenc_fails_and_remembers_only_a_miss
 
         def stream(self) -> Iterator[rrc.Chunk]:
             tried.append(self.try_gpu)
-            if self.try_gpu and nvenc_error is not None:
-                raise RuntimeError(nvenc_error)
+            if self.try_gpu:
+                raise RuntimeError("ffmpeg: Cannot load libnvidia-encode.so.1")
             return iter(())
 
     monkeypatch.setattr(rrx, "Mp4Reader", Reader)
     monkeypatch.setattr(rrx, "Mp4TranscodeOptions", lambda output_codec, try_gpu: try_gpu)
-    monkeypatch.setattr(video_io, "HARDWARE_VIDEO_FAILED", {})
     recording: rr.RecordingStream = rr.RecordingStream("test_log_video_fallback")
     with caplog.at_level("WARNING"):
         log_video(Path("clip.mp4"), Path("/video"), recording=recording)
         log_video(Path("clip.mp4"), Path("/video"), recording=recording)
-    assert tried == attempts
-    if nvenc_error is None:
-        assert not caplog.records
-    else:
-        assert all(record.levelname == "WARNING" and nvenc_error in record.getMessage() for record in caplog.records)
-        assert len(caplog.records) == (1 if remembered else 2)
-    assert video_io.hardware_video_warning() == (f"WARNING: hardware video failed, the CPU does this work (slower): encode ({nvenc_error})" if remembered else "")
+    assert tried == [True, False, True, False]  # nothing is remembered: every video tries NVENC first
+    assert [record.levelname for record in caplog.records] == ["WARNING", "WARNING"] and "libnvidia-encode" in caplog.text
