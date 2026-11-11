@@ -105,27 +105,45 @@ def test_a_host_passes_its_run_examples_and_frame_cap_to_build_app(tmp_path: Pat
     assert any(dependency.fn is hosted_run for dependency in demo.fns.values())
 
 
-def test_the_cursor_follows_the_newest_frame_read_or_tracked_once_per_change() -> None:
+def test_the_cursor_follows_the_calibration_then_the_video_plays_smoothly_behind_tracking() -> None:
+    from metrictrail.gradio_ui.metrictrail_ui import RunStatus
+
+    def payload(command: dict[str, object] | None) -> dict[str, object]:
+        assert command is not None
+        inner = command["_command"]
+        assert isinstance(inner, dict)
+        return inner
+
+    status = RunStatus()
+    assert status.cursor_command(0.0) is None and status.cursor is None  # nothing read yet
+    status.at(42, "calibration")
+    calibration = payload(status.cursor_command(0.0))
+    assert calibration["timeline"] == "calibration_step" and calibration["time"] == "42" and not calibration["play"]
+    assert status.cursor_command(0.1) is None  # sent once per change
+    second: int = 1_000_000_000
+    status.at(second, "tracking")
+    assert status.cursor_command(1.0) is None  # less than the resume buffer tracked: wait
+    status.at(3 * second, "tracking")
+    start = payload(status.cursor_command(2.0))  # enough tracked: play from the start at real time
+    assert start["timeline"] == "video_time" and start["time"] == "0" and start["play"]
+    status.at(20 * second, "tracking")  # tracking runs ahead of the playhead: no jumps
+    assert status.cursor_command(5.0) is None and status.cursor_command(9.0) is None
+    status.at(21 * second, "tracking")
+    pause = payload(status.cursor_command(22.5))  # the playhead (20.5 s) is within a second of the tracked frames: wait
+    assert not pause["play"] and int(str(pause["time"])) <= 21 * second
+    status.at(24 * second, "tracking")
+    resume = payload(status.cursor_command(23.0))
+    assert resume["play"] and resume["time"] == pause["time"]
+
+
+def test_the_final_layout_keeps_playing_from_where_the_video_is() -> None:
     from metrictrail.gradio_ui.metrictrail_ui import RunStatus
 
     status = RunStatus()
-    assert status.cursor_command() is None and status.cursor is None  # nothing read yet
-    status.at(42, "calibration")
-    command = status.cursor_command()
-    assert command is not None
-    payload = command["_command"]
-    assert isinstance(payload, dict)
-    assert payload["timeline"] == "calibration_step" and payload["kind"] == "sequence" and payload["time"] == "42" and not payload["play"]
-    status.at(1_500_000_000, "tracking")
-    assert status.cursor is not None and status.cursor[1] == "tracking"
-    command = status.cursor_command()
-    assert command is not None
-    payload = command["_command"]
-    assert isinstance(payload, dict)
-    assert payload["timeline"] == "video_time" and payload["kind"] == "duration" and payload["time"] == "1500000000" and not payload["play"]
-    assert status.cursor_command() is None  # sent once per new frame
-    status.at(1_533_333_333, "tracking")
-    assert status.cursor_command() is not None
+    status.at(10 * 1_000_000_000, "tracking")
+    status.cursor_command(0.0)  # plays from 0
+    final = status.playback.finish(4.0)["_command"]
+    assert isinstance(final, dict) and final["play"] and int(str(final["time"])) == 4 * 1_000_000_000
 
 
 def test_the_budget_dropdown_offers_exactly_vipes_budgets() -> None:

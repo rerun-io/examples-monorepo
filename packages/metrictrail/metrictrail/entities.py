@@ -20,7 +20,7 @@ From the finished artifacts (:mod:`metrictrail.outputs`):
 
 * ``cam``, ``cam/rgb``, ``cam/depth`` when there was no live capture (frames read from the input, depth from
   ``depth/<name>.zip``);
-* ``world/<label>/trajectory`` (static), ``world/<label>/cam`` (pose over ``frame`` + pinhole), ``world/cloud`` (fused
+* ``world/<label>/trajectory`` (a segment per tracked frame), ``world/<label>/cam`` (pose over ``frame`` + pinhole), ``world/cloud`` (fused
   metric cloud), ``world/cloud_normals`` (the same points coloured by their fused MoGe-2 normal in that frame,
   RGB = (n + 1) / 2; Points3D carries no normal component; only after a live capture, which holds the normals);
   in the GT frame after the paper's Sim(3) alignment when GT exists, else in ViPE's world frame;
@@ -132,7 +132,8 @@ METRICS_PROPERTY: str = "metrics"
 
 
 def world_trajectory(label: RunLabel) -> str:
-    """``world/<label>/trajectory``: the run's whole camera path (static)."""
+    """``world/<label>/trajectory``: the run's camera path, one segment per tracked frame at that frame's time (the views
+    draw it up to the cursor)."""
     return f"world/{label}/trajectory"
 
 

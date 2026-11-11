@@ -218,7 +218,13 @@ def log_run_outputs(
     sim3: Float64[ndarray, "4 4"] = aligned.sim3.gt_T_est if aligned is not None else np.eye(4)
     positions: Float64[ndarray, "k 3"] = apply_alignment(sim3, world_T_cam[finite_rows, :3, 3])
     rotations: Float64[ndarray, "k 3 3"] = np.einsum("ij,njk->nik", rotation_of(sim3), world_T_cam[finite_rows, :3, :3])
-    rec.log(entities.world_trajectory(options.label), rr.LineStrips3D([positions], colors=[color], radii=rr.Radius.ui_points(2.0)), static=True)
+    # One segment per tracked frame at that frame's time: the views draw the path up to the cursor (blueprint.TRAIL).
+    segments: Float64[ndarray, "s 2 3"] = np.stack([positions[:-1], positions[1:]], axis=1)
+    rec.send_columns(
+        entities.world_trajectory(options.label),
+        indexes=time_columns(finite_rows[1:], trajectory.source_frame_ids, video_time_ns),
+        columns=rr.LineStrips3D.columns(strips=list(segments), colors=[color] * len(segments), radii=np.full(len(segments), -2.0, dtype=np.float32)),  # negative radii = UI points
+    )
     intrinsics0: Float64[ndarray, "4"] = outputs.intrinsics[finite_rows[0]] if finite_rows.size else np.full(4, np.nan)
     raster_hw: tuple[int, int] | None = None
     if outputs.record is not None and outputs.record.input_raster.prepared_hw is not None:

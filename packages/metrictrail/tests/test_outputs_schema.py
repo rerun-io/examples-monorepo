@@ -107,17 +107,50 @@ def test_the_app_and_the_cli_share_one_layout_with_tabs_in_run_order() -> None:
     background = rr.blueprint.Background(color=(0, 0, 0))
     # The app's run and a CLI capture run of a video: no GT.
     names: list[str] = [str(tab.name) for tab in run_tabs("ours", has_capture=True, has_gt=False, has_calibration=True, background=background)]
-    assert names == ["1 · SharedK calibration", "2 · DPVO tracking", "3 · trajectory + metric surface", "4 · surface coloured by normals", "5 · summary"]
+    assert names == ["1 · SharedK calibration", "2 · DPVO tracking", "3 · trajectory + metric surface", "4 · summary"]
     # A benchmark with GT adds the metric-scale tab; a run without SharedK (known K) has no calibration tab.
     names = [str(tab.name) for tab in run_tabs("ours", has_capture=True, has_gt=True, has_calibration=False, background=background)]
     assert names == [
         "1 · DPVO tracking",
         "2 · trajectory vs GT, Sim(3) aligned + metric surface",
-        "3 · surface coloured by normals",
-        "4 · metric scale vs GT",
-        "5 · summary",
+        "3 · metric scale vs GT",
+        "4 · summary",
     ]
 
+
+
+def test_the_world_trajectory_grows_with_the_cursor(tmp_path: Path, tum_like_context: tuple[GtContext, Float64[ndarray, "n 4 4"]]) -> None:
+    """One segment per tracked frame, at that frame's time: a view that shows everything up to the cursor draws the path
+    as far as the camera has come."""
+    context, world_T_cam = tum_like_context
+    write_recording(tmp_path / "run.rrd", synthetic_outputs(world_T_cam), context, None)
+    frames: list[int] = []
+    for chunk in RrdReader(tmp_path / "run.rrd").stream():
+        if str(chunk.entity_path) == "/" + entities.world_trajectory("ours"):
+            batch = chunk.to_record_batch()
+            assert entities.FRAME_TIMELINE in batch.schema.names, "the path is temporal, not static"
+            frames += batch.column(entities.FRAME_TIMELINE).to_pylist()
+    assert frames == list(range(1, world_T_cam.shape[0]))  # the segment that ends at each frame after the first
+
+
+def test_the_trajectory_tab_shows_the_overview_a_follow_camera_and_the_normals_side_by_side() -> None:
+    from metrictrail.blueprint import run_tabs
+
+    background = rr.blueprint.Background(color=(0, 0, 0))
+    tabs = run_tabs("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, background=background)
+    assert [str(tab.name) for tab in tabs] == ["1 · SharedK calibration", "2 · DPVO tracking", "3 · trajectory + metric surface", "4 · summary"]
+    views = [view for view in walk(tabs[2]) if isinstance(view, rr.blueprint.Spatial3DView)]
+    assert [str(view.name) for view in views] == ["overview: trajectory + metric surface", "follow (the camera)", "surface coloured by normals"]
+    assert str(views[1].origin) == entities.DPVO_CURRENT  # the camera the video plays in, riding the final trajectory
+    for view in views:
+        assert "/" + entities.world_trajectory("ours") in view.visualizer_overrides  # drawn up to the cursor
+
+
+def walk(node: object) -> list[object]:
+    """The views under a blueprint container, depth first (a view is its own leaf)."""
+    if isinstance(node, rr.blueprint.Container):
+        return [leaf for child in node.contents for leaf in walk(child)]
+    return [node]
 
 
 def test_every_video_run_without_gt_shows_its_input_camera_in_the_world_views() -> None:
@@ -130,8 +163,9 @@ def test_every_video_run_without_gt_shows_its_input_camera_in_the_world_views() 
     assert not shares_input_camera(has_capture=False, has_video=False, has_gt=False)  # no camera entity at all
     background = rr.blueprint.Background(color=(0, 0, 0))
     tabs = run_tabs("ours", has_capture=False, has_gt=False, has_video=True, has_calibration=False, background=background)
-    world = tabs[1]
-    assert isinstance(world, rr.blueprint.Spatial3DView) and str(world.name) == "2 · trajectory + metric surface"
+    assert str(tabs[1].name) == "2 · trajectory + metric surface"
+    world = walk(tabs[1])[0]
+    assert isinstance(world, rr.blueprint.Spatial3DView)
     contents: list[str] = list(cast(list[str], world.contents))
     assert f"/{entities.DPVO_CURRENT}/**" in contents and f"- /{entities.world_cam('ours')}/**" in contents
 

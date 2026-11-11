@@ -10,10 +10,10 @@ explicitly; the capture hooks (:mod:`metrictrail.capture`, ``live`` mode) log ev
 the generator yields what has accumulated twice a second. The whole input video is logged first, from its own samples
 (``rr.VideoStream``). While SharedK calibrates, the viewer shows the calibration layout
 (:func:`metrictrail.blueprint.calibration_blueprint`) and the generator moves its cursor along ``calibration_step`` to each
-frame the sweep reads (``gradio_rerun.commands.set_time``); once DPVO tracks, it switches to the run layout and moves the
-cursor along ``video_time`` to each newly tracked frame, so DPVO's patches, depth, normals and DINOv3 PCA show as
-MetricTrail computes them. The trajectory and the final mesh come
-at the end, from the artifacts, and the clip then plays from the start in a loop.
+frame the sweep reads (``gradio_rerun.commands.set_time``); once DPVO tracks, it switches to the run layout and plays
+the video at real time behind the tracked frames (:class:`Playback`), so DPVO's patches, depth, normals and DINOv3 PCA
+play smoothly over it. The trajectory and the final mesh come
+at the end, from the artifacts, and the clip plays on from where it is, in a loop.
 """
 
 import threading
@@ -28,6 +28,7 @@ from tempfile import TemporaryDirectory
 import gradio as gr
 import numpy as np
 import rerun as rr
+import torch
 from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from gradio_rerun.commands import set_time
@@ -76,6 +77,51 @@ class RunCancelled(BaseException):
 
 
 @dataclass(slots=True)
+class Playback:
+    """The input video plays at real time while DPVO tracks ahead of it, instead of the cursor jumping to each newly
+    tracked frame (tracking runs several times faster than real time on a desktop GPU, so the jumps flew by). It starts
+    once :attr:`resume_s` of video is tracked, waits where it is when it comes within :attr:`lead_s` of the tracked
+    frames (a slower GPU), and goes on once :attr:`resume_s` more is tracked. The viewer keeps its own clock: this only
+    estimates where the playhead is, to know when to pause."""
+
+    speed: float = 1.0
+    """Playback speed (the viewer's, 1 = real time)."""
+    lead_s: float = 1.0
+    """Pause when the playhead comes this close to the newest tracked frame, seconds."""
+    resume_s: float = 2.0
+    """Play (again) once this much video past the playhead is tracked, seconds."""
+    origin_ns: int = 0
+    """``video_time`` where the viewer last started playing."""
+    origin_wall: float | None = None
+    """``time.perf_counter()`` when it did; None while paused (or not started)."""
+    paused_ns: int = 0
+    """Where it waits while paused."""
+
+    def position_ns(self, now: float) -> int:
+        """Where the viewer's playhead is now (estimated)."""
+        if self.origin_wall is None:
+            return self.paused_ns
+        return self.origin_ns + int((now - self.origin_wall) * self.speed * 1e9)
+
+    def update(self, frontier_ns: int, now: float) -> dict[str, object] | None:
+        """The viewer command for a poll that found ``frontier_ns`` (the newest tracked frame's ``video_time``), or None."""
+        if self.origin_wall is None:
+            if frontier_ns - self.paused_ns < self.resume_s * 1e9:
+                return None
+            self.origin_ns, self.origin_wall = self.paused_ns, now
+            return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(self.origin_ns, "ns"), play=True))
+        position: int = self.position_ns(now)
+        if position <= frontier_ns - self.lead_s * 1e9:
+            return None
+        self.paused_ns, self.origin_wall = min(position, frontier_ns), None
+        return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(self.paused_ns, "ns"), play=False))
+
+    def finish(self, now: float) -> dict[str, object]:
+        """Every frame is in: play on from where the playhead is (the final layout would otherwise restart the clip)."""
+        return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(self.position_ns(now), "ns"), play=True))
+
+
+@dataclass(slots=True)
 class RunStatus:
     """What the worker reports to the generator."""
 
@@ -87,7 +133,9 @@ class RunStatus:
     """Where the newest frame is and which stage moved the cursor there: the calibration's ``calibration_step``, or
     DPVO's ``video_time`` in ns; None before the first."""
     sent: tuple[int, RunPhase] | None = None
-    """The cursor the viewer was last moved to."""
+    """The calibration cursor the viewer was last moved to."""
+    playback: Playback = field(default_factory=Playback)
+    """How the video plays while DPVO tracks."""
 
     def update(self, text: str) -> None:
         """The ``on_stage`` callback of :func:`run_and_log`."""
@@ -99,16 +147,18 @@ class RunStatus:
         """The ``on_cursor`` callback of :func:`run_and_log`."""
         self.cursor = (value, phase)
 
-    def cursor_command(self) -> dict[str, object] | None:
-        """A viewer update that moves the cursor to the newest frame (paused) on its phase's timeline, or None when it
-        has not moved."""
-        if self.cursor is None or self.cursor == self.sent:
+    def cursor_command(self, now: float) -> dict[str, object] | None:
+        """The viewer update for this poll, or None: during calibration the cursor moves (paused) to the newest frame
+        the sweep read; while DPVO tracks, :attr:`playback` plays the video behind the tracked frames."""
+        if self.cursor is None:
+            return None
+        value, phase = self.cursor
+        if phase == "tracking":
+            return self.playback.update(value, now)
+        if self.cursor == self.sent:
             return None
         self.sent = self.cursor
-        value, phase = self.cursor
-        if phase == "calibration":
-            return dict(set_time(entities.CALIBRATION_TIMELINE, sequence=value, play=False))
-        return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(value, "ns"), play=False))
+        return dict(set_time(entities.CALIBRATION_TIMELINE, sequence=value, play=False))
 
 
 def example_videos(data_dir: Path) -> list[Path]:
@@ -201,7 +251,7 @@ def metrictrail_streaming_fn(
                     if status.cursor is not None and status.cursor[1] == "tracking" and not tracking_layout:
                         rec.send_blueprint(run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True), make_active=True)
                         tracking_layout = True
-                    command: dict[str, object] | None = status.cursor_command()
+                    command: dict[str, object] | None = status.cursor_command(time.perf_counter())
                     if command is not None:
                         yield command, line
         except BeartypeException:
@@ -214,6 +264,9 @@ def metrictrail_streaming_fn(
         finally:
             # Stop button or closed tab: the worker stops at its next stage or tracked frame; the pool waits for it.
             status.cancel.set()
+    # The run's tensors are gone (the models stay in MODELS); give the allocator's cached blocks back to the GPU, which
+    # the app shares with other jobs between clicks.
+    torch.cuda.empty_cache()
     rec.send_blueprint(
         run_blueprint(
             "ours",
@@ -228,7 +281,7 @@ def metrictrail_streaming_fn(
     )
     done: str = summary(result.logged.metrics, time.perf_counter() - started)
     yield stream.read() or b"", done
-    yield dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(0, "ns"), play=True)), done
+    yield status.playback.finish(time.perf_counter()), done
 
 
 RunFn = Callable[[str | None, int | float, int | float, str], Iterator[tuple[bytes | dict[str, object], str]]]
