@@ -35,8 +35,9 @@ VIEWER_CODECS: tuple[str, ...] = ("h264", "av1")
 Chromium has no HEVC)."""
 HARDWARE_ENCODER: str = "h264_nvenc"
 """The encoder :class:`FrameVideo` expects; anything else is the CPU fallback and is warned about once."""
-CAMERA_PLANE_M: float = 0.5
-"""Image-plane distance of the moving camera's frustum, metres: large enough to see the video playing inside it."""
+CAMERA_PLANE_M: float = 1.0
+"""Image-plane distance of the moving camera's frustum, metres: large enough to see the video playing inside it from the
+whole-trajectory views."""
 _warned_cpu_encoder: list[bool] = [False]
 """Whether the CPU-encoder warning was given in this process."""
 

@@ -178,16 +178,19 @@ def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
     Left: the input video with DPVO's patches, MoGe-2 metric depth and normals of the keyframes, the DINOv3 feature PCA.
     Right, in tabs, in the order the run makes them: SharedK calibration's map and plots (to look back at), DPVO's
     keyframe path and BA window as it tracks, then the finished trajectory with the fused metric cloud, and the same
-    cloud coloured by its MoGe-2 normals. While tracking (``final_eye`` None) the DPVO tab is active; the final layout
-    opens the trajectory tab with ``final_eye`` framing it.
+    cloud coloured by its MoGe-2 normals; the world views show the one camera the video plays in. While tracking
+    (``final_eye`` None) the DPVO tab is active; the final layout opens the trajectory tab with ``final_eye`` framing it.
     """
     background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
     calibration_view: rrb.Vertical = rrb.Vertical(*calibration_views(background), row_shares=[3, 1], name="1 · SharedK calibration")
     tracking_view: rrb.Vertical = rrb.Vertical(*tracking_views(background), name="2 · DPVO tracking")
+    # One camera in every view: the live DPVO camera with the input video in its pinhole, which rides the final
+    # trajectory once the run ends (metrictrail.outputs.ride_final_trajectory), instead of the world's own frustum.
+    shared_camera: list[str] = ["/world/**", f"- /{entities.world_cam('ours')}/**", f"/{entities.DPVO_CURRENT}/**", f"- /{entities.INPUT_PATCHES}"]
     world_view: rrb.Spatial3DView = rrb.Spatial3DView(
         name="3 · trajectory + metric surface",
         origin=entities.WORLD_ROOT,
-        contents=["/world/**", f"- /{entities.WORLD_CLOUD_NORMALS}", f"- /{entities.WORLD_MESH_NORMALS}"],
+        contents=[*shared_camera, f"- /{entities.WORLD_CLOUD_NORMALS}", f"- /{entities.WORLD_MESH_NORMALS}"],
         background=background,
         line_grid=rrb.LineGrid3D(visible=False),
         eye_controls=final_eye.controls() if final_eye is not None else None,
@@ -195,7 +198,7 @@ def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
     world_normals_view: rrb.Spatial3DView = rrb.Spatial3DView(
         name="4 · surface coloured by normals",
         origin=entities.WORLD_ROOT,
-        contents=["/world/**", f"- /{entities.WORLD_CLOUD}", f"- /{entities.WORLD_MESH}"],
+        contents=[*shared_camera, f"- /{entities.WORLD_CLOUD}", f"- /{entities.WORLD_MESH}"],
         background=background,
         line_grid=rrb.LineGrid3D(visible=False),
         eye_controls=final_eye.controls() if final_eye is not None else None,
