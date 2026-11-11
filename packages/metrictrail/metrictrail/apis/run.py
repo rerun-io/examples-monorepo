@@ -37,6 +37,7 @@ from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
+from metrictrail.calibration_graphs import calibration_cuda_graphs
 from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.feature_graphs import feature_cuda_graphs
@@ -90,6 +91,8 @@ class RunSettings:
     """Patch budget for ``ours``: 64 uses less tracking work; 96 restores the original preset count."""
     depth_resolution_level: int = 0
     """MoGe-2 detail level, 0..9: 0 uses 1200 tokens; 9 restores the original 3600-token prior."""
+    calibration_graphs: bool = False
+    """Use prepared DROID topology and capture complete calibration updates on CUDA."""
     fuse_mesh: bool = True
     """Fuse a colour TSDF mesh from every tracked frame (:mod:`metrictrail.surface`, tsdf-rs): the default surface."""
     tsdf_voxel_m: float = DEFAULT_TSDF.voxel_size_m
@@ -338,6 +341,7 @@ def run_and_log(
             gpu_video_input(gpu),
             feature_cuda_graphs() if config.label == "ours" else nullcontext(),
             update_cuda_graphs() if config.label == "ours" else nullcontext(),
+            calibration_cuda_graphs(config.calibration_graphs) if config.label == "ours" else nullcontext(),
         ):
             pipeline = make_pipeline(typed.pipeline)
             if models is not None:

@@ -257,3 +257,10 @@ cache (a cold download was not measured):
   Pass your VSLAM-LAB checkout.
 - **Catalog.** The shipped path (`metrictrail`) is on the 9 TUM segments only; 7-Scenes, KITTI and LaMAria carry the
   torch reproduction (`metrictrail_paper`) and, except LaMAria, upstream ViPE.
+
+SharedK can use `--calibration-graphs` for prepared DROID graph metadata and a CUDA graph containing
+one complete projection/correlation/recurrent-update/BA step. Each topology warms on its first real
+update, captures on its second, then replays; no additional solver iterations are applied. Float64
+LLT stays on the GPU for frontend steps; the large backend systems retain the CPU solver. Live
+calibration hooks still see the same buffer and edge tensors. Proximity/keyframe decisions and
+CUDA's exact age-tie ordering remain outside capture. This option is off until the accuracy guards pass.
