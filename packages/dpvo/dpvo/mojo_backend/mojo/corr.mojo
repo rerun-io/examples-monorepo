@@ -93,8 +93,22 @@ def _mad[dtype: DType](s: Scalar[dtype], a: Scalar[dtype], b: Scalar[dtype]) -> 
 
 
 @always_inline
+def _mad_pair(s: UInt32, a: Float16, b0: Float16, b1: Float16) -> UInt32:
+    """Two independent NVIDIA half accumulators sharing one patch feature."""
+    var a_bits = UInt32(bitcast[DType.uint16](a))
+    var a_pair = a_bits | (a_bits << 16)
+    var b_pair = UInt32(bitcast[DType.uint16](b0)) | (UInt32(bitcast[DType.uint16](b1)) << 16)
+    return inlined_assembly[
+        "{ .reg .b32 product; mul.rn.f16x2 product, $2, $3; add.rn.f16x2 $0, $1, product; }",
+        UInt32,
+        constraints="=r,r,r,r",
+        has_side_effect=False,
+    ](s, a_pair, b_pair)
+
+
+@always_inline
 def corr_element[
-    dtype: DType
+    dtype: DType, paired: Bool = False
 ](
     n_in: Int,
     radius: Int,
@@ -105,9 +119,10 @@ def corr_element[
     vs: ImmTileTensor[DType.int64, L1, _],
     corr: MutTileTensor[dtype, L6, _],
 ):
-    """Correlation at one (batch, edge, patch row, patch col, search row, search col): `corr_forward_kernel`'s body."""
+    """Correlation at one search column, or two adjacent columns with paired half arithmetic."""
     comptime assert fmap1.flat_rank == 5 and fmap2.flat_rank == 5 and coords.flat_rank == 5
     comptime assert us.flat_rank == 1 and vs.flat_rank == 1 and corr.flat_rank == 6
+    comptime assert not paired or dtype == DType.float16
     var d = 2 * radius + 2
     var num_edges = Int(coords.dim[1]())
     var grid_h = Int(coords.dim[3]())
@@ -135,11 +150,26 @@ def corr_element[
     var i1 = Int(floor(y)) + (ii - radius)
     var j1 = Int(floor(x)) + (jj - radius)
 
-    var s: Scalar[dtype] = 0
-    if _within_bounds(i1, j1, h2, w2):
-        for c in range(channels):
-            s = _mad(s, fmap1[n, ix, c, i0, j0][0], fmap2[n, jx, c, i1, j1][0])
-    corr[n, m, ii, jj, i0, j0] = s
+    comptime if paired:
+        # D is even, so adjacent search columns always share the same patch pixel.
+        # Preserve each dot product's channel order; only independent outputs pair up.
+        var valid0 = _within_bounds(i1, j1, h2, w2)
+        var valid1 = _within_bounds(i1, j1 + 1, h2, w2)
+        var sums: UInt32 = 0
+        if valid0 or valid1:
+            for c in range(channels):
+                var a = fmap1[n, ix, c, i0, j0][0].cast[DType.float16]()
+                var b0 = fmap2[n, jx, c, i1, j1][0].cast[DType.float16]() if valid0 else Float16(0.0)
+                var b1 = fmap2[n, jx, c, i1, j1 + 1][0].cast[DType.float16]() if valid1 else Float16(0.0)
+                sums = _mad_pair(sums, a, b0, b1)
+        corr[n, m, ii, jj, i0, j0] = bitcast[DType.float16](sums.cast[DType.uint16]()).cast[dtype]() if valid0 else Scalar[dtype](0.0)
+        corr[n, m, ii, jj + 1, i0, j0] = bitcast[DType.float16]((sums >> 16).cast[DType.uint16]()).cast[dtype]() if valid1 else Scalar[dtype](0.0)
+    else:
+        var s: Scalar[dtype] = 0
+        if _within_bounds(i1, j1, h2, w2):
+            for c in range(channels):
+                s = _mad(s, fmap1[n, ix, c, i0, j0][0], fmap2[n, jx, c, i1, j1][0])
+        corr[n, m, ii, jj, i0, j0] = s
 
 
 @always_inline
@@ -190,9 +220,14 @@ def corr_kernel[
     vs: ImmTileTensor[DType.int64, L1, ImmUntrackedOrigin],
     corr: MutTileTensor[dtype, L6, MutUntrackedOrigin],
 ):
-    var n = global_idx.x
-    if n < Int(total):
-        corr_element(n, Int(radius), fmap1, fmap2, coords, us, vs, corr)
+    comptime if dtype == DType.float16 and is_nvidia_gpu():
+        var n = global_idx.x * 2
+        if n < Int(total):
+            corr_element[dtype, True](n, Int(radius), fmap1, fmap2, coords, us, vs, corr)
+    else:
+        var n = global_idx.x
+        if n < Int(total):
+            corr_element(n, Int(radius), fmap1, fmap2, coords, us, vs, corr)
 
 
 @__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
