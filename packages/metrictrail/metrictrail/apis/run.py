@@ -93,9 +93,9 @@ class RunSettings:
     """Patch budget for ``ours``: 64 uses less tracking work; 96 restores the original preset count."""
     depth_resolution_level: int = 0
     """MoGe-2 detail level, 0..9: 0 uses 1200 tokens; 9 restores the original 3600-token prior."""
-    calibration_graphs: bool = False
+    calibration_graphs: bool = True
     """Use prepared DROID topology and capture complete calibration updates on CUDA."""
-    calibration_gru_backend: GruBackend = "torch"
+    calibration_gru_backend: GruBackend = "tensorrt"
     """DROID ConvGRU backend. TensorRT caches model engines, with an eager fallback outside its FP16 profile."""
     fuse_mesh: bool = True
     """Fuse a colour TSDF mesh from every tracked frame (:mod:`metrictrail.surface`, tsdf-rs): the default surface."""

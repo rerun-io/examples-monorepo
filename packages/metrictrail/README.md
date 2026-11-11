@@ -264,7 +264,8 @@ update, captures on its second, then replays; no additional solver iterations ar
 bound retained memory. Connectivity, correlation volumes, state and all solve tables are copied on reuse.
 Float64 LLT stays on the GPU for frontend and backend steps. Live
 calibration hooks still see the same buffer and edge tensors. Proximity/keyframe decisions and
-CUDA's exact age-tie ordering remain outside capture. This option is off until the accuracy guards pass.
+CUDA's exact age-tie ordering remain outside capture. This option is enabled by default after the pool/movie focal and TUM accuracy guards passed for both budgets.
+Use `--no-calibration-graphs` to select the original graph implementation.
 
 `--calibration-gru-backend tensorrt` selects the frozen DROID ConvGRU TensorRT backend.
 `METRICTRAIL_TRT_CACHE` (default `~/.cache/metrictrail/droid-gru`) holds ONNX files and engines;
@@ -273,4 +274,4 @@ The dynamic profile is 1/48/128 edges (min/opt/max). CPU, training, gradients, F
 that profile retain PyTorch. Outputs own their storage. App `ModelCache` reuse retains model runtimes,
 while each calibration starts with fresh hidden state. The run prints export/build/load time separately;
 these costs remain included in total wall time. A Space must ship matching ONNX and engine artifacts in
-this directory to avoid building them on its first calibration. This backend is opt-in until guards pass.
+this directory to avoid building them on its first calibration. This backend is enabled by default after those same guards passed; `--calibration-gru-backend torch` selects PyTorch.
