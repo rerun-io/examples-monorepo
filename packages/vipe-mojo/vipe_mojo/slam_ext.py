@@ -4,8 +4,8 @@
 kernel, the per-frame sums (`accum_kernel`), the Schur products (`EEt6x6`, `Ev6x1`, `EvT6x1`) and the pose
 retraction are Mojo kernels with CUDA's summation order (no float atomics: the result does not depend
 on scheduling). As in the extension, the reduced sums go to the CPU once per iteration, where the pose
-system is assembled and solved in float64 (Eigen's `SimplicialLLT` there, a dense PyTorch Cholesky
-here; the scatter indices are built once per call); a factorisation failure gives a zero step. The
+system is assembled and solved in float64 (Eigen's `SimplicialLLT` there, a single-threaded Mojo profile Cholesky
+here; integer scatter tables are reused for identical edge topologies); a factorisation failure gives a zero step. The
 remaining tensor algebra is PyTorch on the input device, with the extension's expressions.
 
 Every other slam_ext function raises NotImplementedError when called.
@@ -76,7 +76,7 @@ def _valid(pose: Tensor, num_poses: int) -> Tensor:
 
 
 class _PoseSystem:
-    """The pose step of one BA iteration: scatter tables from the reduced sums into (A - S, b - s), built once per call,
+    """The pose step of one BA iteration: immutable scatter tables from the reduced sums into (A - S, b - s),
     and the float64 solve on the CPU on one thread (`pose_solve`, mojo/slam.mojo), as the extension's Eigen step.
 
     Per iteration the GPU sums arrive in one float32 buffer: the BA kernel's per-edge sums (num, BA_SUMS); unless
