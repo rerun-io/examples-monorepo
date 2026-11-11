@@ -22,10 +22,17 @@ Templates: [references/app.py](references/app.py) (bootstrap, copy unchanged),
 
 - ZeroGPU works only with the **Gradio SDK**, not Docker. The main process never has a GPU; every
   `@spaces.GPU` call runs in a forked worker. Nothing may initialise CUDA in the main process.
-- The GPU is an **RTX PRO 6000 Blackwell MIG slice** (default size: half the card, 48 GB, 94 SMs),
-  compute capability 12.0. NVFP4/FP8 TensorRT work. TensorRT, NVDEC (torchcodec CUDA) and CUDA graphs
-  work in the worker. **NVENC does not** (`libnvidia-encode` is not mounted; pixi cannot supply a
-  driver library), so any video encode must fall back to CPU.
+- The GPU is an **RTX PRO 6000 Blackwell MIG slice** (default size: half the card, 48 GB, 94 SMs,
+  2 NVENC + 2 NVDEC engines), compute capability 12.0. NVFP4/FP8 TensorRT and CUDA graphs work in the worker.
+- The container mounts only the compute driver libraries: **no `libnvcuvid` (NVDEC) and no
+  `libnvidia-encode` (NVENC)**. Pixi cannot supply them (they must match the host driver). Without
+  them torchcodec's CUDA decoder **falls back to CPU silently** (check `decoder.cpu_fallback`) and
+  Rerun's NVENC transcode raises. Fix in `app.py` before exec'ing pixi: read the driver version from
+  `/proc/driver/nvidia/version`, download NVIDIA's installer for exactly that version, extract it
+  without running it (`sh <installer>.run -x`), keep only `libnvidia-encode.so.<ver>` and
+  `libnvcuvid.so.<ver>` (as `.so.1`), cache them by version and prepend their directory to
+  `LD_LIBRARY_PATH` (about 16 s of boot). Never host the NVIDIA files in a repo. Keep a CPU fallback
+  that warns loudly, for when the version changes or the download fails.
 - ZeroGPU **drops an idle worker after a short time**. The next click forks a fresh worker from the
   main process and pays its setup again. A startup warm-up only helps clicks soon after boot.
 - A worker forked from the main process **inherits its imports and RAM**: import heavy modules
@@ -47,7 +54,7 @@ Templates: [references/app.py](references/app.py) (bootstrap, copy unchanged),
    ZeroGPU slots (`HfApi().list_spaces(author=..., expand=["runtime"])`).
 2. **Probe Space first.** A throwaway Space whose one `@spaces.GPU` generator exercises *every* GPU
    feature the real app uses: TensorRT build + run, NVDEC decode, NVENC encode, CUDA graph replay,
-   torch.compile, Triton, warp kernels, plus `torch.cuda.get_device_capability()` in the main process
+   torch.compile, Triton, warp kernels (and check `decoder.cpu_fallback`: a silent fallback looks like success), plus `torch.cuda.get_device_capability()` in the main process
    and the worker pid on two quick calls (reuse). Add one long `@spaces.GPU` call at import time
    (startup) that writes a file a later worker reads. Twenty minutes here replaces guesses with facts.
 3. **Manifest.** Copy [references/pixi.toml](references/pixi.toml). Take the dependency list from the
