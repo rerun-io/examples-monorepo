@@ -1,5 +1,6 @@
 """Per-frame hand logging of the posekit-video-hands app (no models, rr.log captured)."""
 
+import threading
 from typing import Any
 
 import numpy as np
@@ -8,16 +9,20 @@ import rerun as rr
 import torch
 
 from posekit.apis.video_hands import (
+    EXAMPLES,
     JOINT_CLASS,
     LINK_COLOR,
+    VideoHandsProgress,
     VideoHandsSettings,
     assumed_pinhole,
     describe_camera,
     log_chunk_hands,
     log_hand_annotation_context,
     pinhole_camera,
+    run_video_hands,
     send_blueprint,
 )
+from posekit.models import HandPose3dPipeline
 from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, Keypoints3d
 from posekit.skeletons import HAND_21
 
@@ -43,7 +48,7 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
     detections, hands = _chunk()
     live: set[str] = set()
-    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=live)
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=live, meshed_slots=set())
 
     paths = [path for path, _ in logged]
     # Joints and meshes are logged once in 3D; the video view projects them, so no 2D keypoints.
@@ -61,6 +66,21 @@ def test_hands_go_to_side_slots_and_an_emptied_slot_is_cleared(monkeypatch: pyte
     meshes = [archetype for path, archetype in logged if path == "world/camera/hands/right_0/mesh"]
     faces = meshes[0].triangle_indices.as_arrow_array().to_pylist()
     assert faces == [[0, 1, 2]]
+
+
+def test_mesh_faces_are_logged_once_per_slot_and_frames_carry_only_vertices(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[tuple[str, Any, bool]] = []
+    monkeypatch.setattr(rr, "log", lambda path, archetype, static=False, **_: logged.append((path, archetype, static)))
+    monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
+    detections, hands = _chunk()
+    meshed: set[str] = set()
+    for _ in range(2):  # two chunks
+        log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set(), meshed_slots=meshed)
+    left = [(archetype, static) for path, archetype, static in logged if path == "world/camera/hands/left_0/mesh"]
+    assert [static for _, static in left] == [True, False, False, False, False]
+    assert left[0][0].triangle_indices is not None and left[0][0].vertex_positions is None
+    assert all(archetype.triangle_indices is None and archetype.vertex_positions is not None for archetype, _ in left[1:])
+    assert meshed == {"left_0", "right_0"}
 
 
 def test_unset_intrinsics_come_from_the_assumed_field_of_view() -> None:
@@ -84,7 +104,7 @@ def test_joints_carry_full_confidence_and_show_green(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(rr, "log", lambda path, archetype, **_: logged.append((path, archetype)))
     monkeypatch.setattr(rr, "set_time", lambda *_, **__: None)
     detections, hands = _chunk()
-    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set())
+    log_chunk_hands(frame_indices=[10, 11], timestamps_ns=[0, 1], detections=detections, hands=hands, live_slots=set(), meshed_slots=set())
 
     joints = next(archetype for path, archetype in logged if path == "world/camera/hands/left_0/joints")
     batches = {batch.component_descriptor().component: batch.as_arrow_array().to_pylist() for batch in joints.as_component_batches()}
@@ -113,9 +133,69 @@ def test_the_viewer_plays_the_video_from_the_start(monkeypatch: pytest.MonkeyPat
     time_panel = sent[0].time_panel
     assert (time_panel.timeline, time_panel.play_state) == ("video_time", "playing")
     assert time_panel.state is None  # the app's panel_states keeps deciding whether the time panel shows
+    view_3d = sent[0].root_container.contents[1]
+    assert view_3d.properties["EyeControls3D"].spin_speed.as_arrow_array().to_pylist() == [0.1]  # a slow orbit around the hands
 
 
 def test_hands_from_a_model_that_uses_the_given_camera_stay_as_they_are() -> None:
     # The video core puts every stack's hands in the run's pinhole; only WiLoR (own virtual camera) overrides in_pinhole.
     _, hands = _chunk()
     assert hands.in_pinhole(np.eye(3)) is hands
+
+
+def test_progress_reads_as_the_status_line() -> None:
+    note = "assumed pinhole, f = 1256 px (65° horizontal FOV)"
+    assert str(VideoHandsProgress("video", 0, 180, 0, note)) == f"Video loaded, finding hands; {note}"
+    assert str(VideoHandsProgress("hands", 16, 180, 32, note)) == f"Frames 16/180, 32 hands; {note}"
+    assert str(VideoHandsProgress("done", 180, 180, 360, note)) == f"processed 180 frames, 360 hands; {note}"
+    warning: str = "WARNING: hardware video failed, the CPU does this work (slower): decode (NVcuvid unavailable)"
+    assert warning in str(VideoHandsProgress("video", 0, 8, 0, note, warning))  # the app's status shows a hardware video fallback
+
+
+class _NoHands(HandPose3dPipeline):
+    """A hand pipeline that finds nothing, so a run exercises only the video decode and the logging."""
+
+    def __init__(self) -> None:
+        self.pose = type("Pose", (), {"skeleton": HAND_21})()
+
+    def __call__(self, frames_rgb: torch.Tensor, camera: object = None) -> tuple[HandDetections, HandPoses3d]:
+        return HandDetections.empty(frames_rgb.device), HandPoses3d(
+            keypoints=Keypoints3d.empty(HAND_21, frames_rgb.device, root_indices=(0,), with_xyz_camera=True), sides=()
+        )
+
+
+@pytest.mark.integration
+def test_a_run_resumed_on_new_threads_still_decodes_on_the_gpu(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    # Gradio resumes a streaming generator on any worker thread; NVDEC needs the CUDA context current there.
+    pytest.importorskip("torchcodec", reason="the GPU video decoder comes with the hands env")
+    if not torch.cuda.is_available():
+        pytest.skip("NVDEC decoding needs a CUDA GPU")
+    video = EXAMPLES / "gsi_sewing_left_front.mp4"
+    if not video.exists():
+        pytest.skip(f"example clip {video.name} missing")
+    from simplecv import video_io
+
+    monkeypatch.setattr(video_io, "HARDWARE_VIDEO_FAILED", {})  # an earlier test's fallback must not send this run to the CPU
+    rr.init("thread-hop-test")
+    rr.memory_recording()  # the global recording, visible from every thread; nothing leaves the process
+    run = run_video_hands(VideoHandsSettings(video_path=video, max_frames=64), _NoHands())
+    steps: list[VideoHandsProgress] = []
+    errors: list[BaseException] = []
+
+    def step() -> None:
+        try:
+            steps.append(next(run))
+        except StopIteration:
+            pass
+        except BaseException as error:  # reported by the assert below
+            errors.append(error)
+
+    with caplog.at_level("WARNING", logger="simplecv.video_io"):
+        while not errors and not (steps and steps[-1].stage == "done"):
+            thread = threading.Thread(target=step)
+            thread.start()
+            thread.join()
+    assert not errors, errors[0]
+    assert steps[-1].frames_done == 64
+    # open_decoder warns whenever the CPU decodes, and remembers a host without NVDEC: neither happened, so NVDEC decoded.
+    assert not caplog.records and video_io.HARDWARE_VIDEO_FAILED == {} and not steps[-1].warning

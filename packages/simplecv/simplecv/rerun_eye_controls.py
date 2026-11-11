@@ -23,6 +23,8 @@ def eye_controls_from_pose(
     position: tuple[float, float, float],
     look_target: tuple[float, float, float],
     eye_up: tuple[float, float, float],
+    *,
+    spin_speed: float = 0.0,
 ) -> rrb.EyeControls3D:
     """An orbital eye placed by hand, in the coordinates of the view's origin.
 
@@ -35,9 +37,10 @@ def eye_controls_from_pose(
         position: Where the eye sits.
         look_target: What it aims at and orbits around.
         eye_up: Which way is up for the eye; it fixes the horizon's roll.
+        spin_speed: How fast the eye orbits ``look_target`` by itself; 0 keeps it still.
 
     Returns:
-        An orbital eye with spin off.
+        An orbital eye, still unless ``spin_speed`` is set.
     """
     # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
     return rrb.EyeControls3D(
@@ -45,7 +48,7 @@ def eye_controls_from_pose(
         position=position,
         look_target=look_target,
         eye_up=eye_up,
-        spin_speed=0.0,
+        spin_speed=spin_speed,
     )
 
 
@@ -58,6 +61,7 @@ def follow_eye_controls(
     ahead_m: float = FOLLOW_AHEAD_M,
     aim_down_m: float = 0.0,
     side_m: float = 0.0,
+    spin_speed: float = 0.0,
 ) -> rrb.EyeControls3D:
     """A chase camera derived from the device's own forward and up.
 
@@ -75,6 +79,7 @@ def follow_eye_controls(
         ahead_m: Distance in front of it that the eye aims at.
         aim_down_m: How far below the device the aim point sits (hands, for a headset).
         side_m: Offset to the device's right, for a three-quarter view.
+        spin_speed: How fast the eye orbits its aim point by itself; 0 keeps it still.
 
     Returns:
         An orbital eye in the device's frame, for a view whose origin is the device.
@@ -94,4 +99,4 @@ def follow_eye_controls(
         ahead_m * forward[1] - aim_down_m * up[1],
         ahead_m * forward[2] - aim_down_m * up[2],
     )
-    return eye_controls_from_pose(position, look_target, up)
+    return eye_controls_from_pose(position, look_target, up, spin_speed=spin_speed)
