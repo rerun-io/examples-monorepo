@@ -53,7 +53,7 @@ from torch import Tensor
 from metrictrail import entities
 from metrictrail.live_surface import LiveSurface
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
-from metrictrail.rerun_log import CAMERA_PLANE_M, FrameVideo, SourceRaster, log_depth, log_pinholes, set_frame_time
+from metrictrail.rerun_log import FrameVideo, SourceRaster, log_depth, log_pinholes, moving_camera, set_frame_time
 
 
 def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"]:
@@ -78,6 +78,11 @@ def dpvo_orient(world_T_cam: Float32[ndarray, "n 4 4"]) -> tuple[Float32[ndarray
     the dpvo and MASt3R-SLAM apps orient their live scenes."""
     orient: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(world_T_cam @ RDF_TO_RUB, method="up", center_method="poses").transform
     return orient[:, :3].astype(np.float32), orient[:, 3].astype(np.float32)
+
+
+def host_rgb(image: UInt8[Tensor, "3 h w"]) -> UInt8[ndarray, "h w 3"]:
+    """A tracked frame (DPVO's BGR, channels first, on its device) as host RGB."""
+    return image.flip(0).permute(1, 2, 0).contiguous().cpu().numpy()
 
 
 def normals_rgb(normals: Float32[Tensor, "h w 3"]) -> UInt8[Tensor, "h w 3"]:
@@ -179,8 +184,9 @@ class CaptureSession:
     logged. None or a None result: ``cam/rgb`` is the tracked frames as a video."""
     fps: float = 30.0
     """Frame rate the derived videos are encoded at (the rate does not set their times; the timelines do)."""
-    on_frame: Callable[[int, int, int], None] | None = None
-    """Called after each tracked frame with (frame index, frames of the pass, keyframes in the graph); may raise to stop."""
+    on_frame: Callable[[int, int | None, int, int], None] | None = None
+    """Called after each tracked frame with (frame index, its source frame or None, frames of the pass, keyframes in the
+    graph); may raise to stop."""
     live_surface: LiveSurface | None = None
     """TSDF mesh grown while tracking from each frame on which DPVO's keyframe graph grew, reset per pass (logging into
     :attr:`live`); None: none."""
@@ -361,13 +367,12 @@ class CaptureSession:
         """Log one tracked frame of a DPVO instance (see the module docstring); returns the patches entity when it
         logged patches."""
         set_frame_time(rec, frame, self.source_frames.get(frame), self.video_time_ns)
-        rgb: UInt8[ndarray, "h w 3"] = image.flip(0).permute(1, 2, 0).contiguous().cpu().numpy()
-        height, width = rgb.shape[:2]
+        height, width = int(image.shape[-2]), int(image.shape[-1])
         intrinsics_px: Float32[ndarray, "4"] = intrinsics.detach().float().cpu().numpy().reshape(4)
         raster: SourceRaster | None = self.source_raster() if self.source_raster is not None else None
         log_pinholes(rec, intrinsics_px.astype(np.float64), (height, width), raster)
         if raster is None:
-            self.video(rec, entities.CAM_RGB).log(rgb)
+            self.video(rec, entities.CAM_RGB).log(host_rgb(image))
         depth_m: Float32[ndarray, "h w"] | None = None
         if metric_depth is not None:
             valid: Tensor = torch.isfinite(metric_depth) if metric_mask is None else metric_mask.bool()
@@ -424,24 +429,14 @@ class CaptureSession:
         )
         newest_world_T_cam: Float32[ndarray, "4 4"] = world_T_cam[num_keyframes - 1]
         if self.live_surface is not None and depth_m is not None:
-            self.live_surface.integrate(depth_m, rgb, intrinsics_px, newest_world_T_cam, frame)
+            self.live_surface.integrate(depth_m, host_rgb(image), intrinsics_px, newest_world_T_cam, frame)
         if num_keyframes >= 3 and (self.oriented_at == 0 or num_keyframes - self.oriented_at >= ORIENT_EVERY_KEYFRAMES):
             orient_rotation, orient_translation = dpvo_orient(world_T_cam)
             rec.log(entities.DPVO_ROOT, rr.Transform3D(mat3x3=orient_rotation, translation=orient_translation))
             self.oriented_at = num_keyframes
         rec.log(entities.DPVO_CURRENT, rr.Transform3D(translation=newest_world_T_cam[:3, 3], mat3x3=newest_world_T_cam[:3, :3]))
         if raster is None:  # a video input's frustum is the source camera, logged with the frame (log_pinholes)
-            rec.log(
-                entities.DPVO_CURRENT_PINHOLE,
-                rr.Pinhole(
-                    focal_length=full_px[:2],
-                    principal_point=full_px[2:],
-                    resolution=[width, height],
-                    image_plane_distance=CAMERA_PLANE_M,
-                    color=BA_WINDOW_RGB,
-                    line_width=-2.5,  # negative = UI points (rr.Radius.ui_points); a positive value is metres
-                ),
-            )
+            rec.log(entities.DPVO_CURRENT_PINHOLE, moving_camera(full_px.astype(np.float64), (height, width)))
         num_patches: int = int(dpvo.m)
         patch_frame: Int64[ndarray, "m"] = dpvo.ix[:num_patches].cpu().numpy().astype(np.int64)
         keep: Bool[ndarray, "m"] = patch_frame >= window_start
@@ -492,7 +487,7 @@ class CaptureObserver(DPVOObserver):
                 session.clear_after(rec, frame, patches_entity)
         session.last_dino_rgb = None
         if session.on_frame is not None:
-            session.on_frame(frame, session.pass_frames, dpvo.n)
+            session.on_frame(frame, session.source_frames.get(frame), session.pass_frames, dpvo.n)
 
     def on_global_ba(self, dpvo: DPVO) -> None:
         """Count the global bundle adjustment that is about to run."""

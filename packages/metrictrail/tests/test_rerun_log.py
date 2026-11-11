@@ -8,12 +8,12 @@ import av
 import numpy as np
 import pytest
 import rerun as rr
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
 
 from metrictrail.eval.vipe_output import InputRasterRecord
-from metrictrail.rerun_log import FrameVideo, SourceRaster, video_times, viewer_mp4
+from metrictrail.rerun_log import FrameVideo, SourceRaster, viewer_mp4
 
 FFMPEG: str | None = shutil.which("ffmpeg")
 
@@ -37,13 +37,6 @@ def test_source_raster_comes_from_the_run_records_raster_block() -> None:
     record = InputRasterRecord(policy="cover_crop", prepared_hw=[280, 504], source_hw=[1080, 1920], resized_hw=[284, 504], crop_left_top=[0, 2])
     assert SourceRaster.from_record(record) == SourceRaster(source_hw=(1080, 1920), resized_hw=(284, 504), crop_left_top=(0, 2))
     assert SourceRaster.from_record(InputRasterRecord(policy="unchanged")) is None
-
-
-def test_video_times_follow_the_source_frame_of_each_tracked_row() -> None:
-    pts_ns: Int64[ndarray, "n"] = np.arange(10, dtype=np.int64) * 33_333_333
-    np.testing.assert_array_equal(video_times(np.array([0, 3, 9], dtype=np.int64), pts_ns), pts_ns[[0, 3, 9]])
-    with pytest.raises(IndexError):
-        video_times(np.array([10], dtype=np.int64), pts_ns)
 
 
 def test_frame_video_logs_one_decodable_h264_sample_per_frame(tmp_path: Path) -> None:

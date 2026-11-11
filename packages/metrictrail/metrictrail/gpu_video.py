@@ -151,10 +151,6 @@ class GpuVideoSession:
     """How the latest input raster (either path) put a source frame on the tracking raster; None before one is ready or
     without a resize plan."""
 
-    def source_raster(self) -> SourceRaster | None:
-        """:attr:`raster` (the capture's :attr:`~metrictrail.capture.CaptureSession.source_raster` callback)."""
-        return self.raster
-
     def rgb_source(self, source_frame_ids: ndarray) -> Callable[[int], UInt8[ndarray, "h w 3"]] | None:
         """Artifact frame ``i`` -> its prepared 8-bit RGB (tracking's own bytes), copied to the host once."""
         if self.prepared is None:

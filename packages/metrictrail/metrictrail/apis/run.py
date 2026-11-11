@@ -244,9 +244,8 @@ def run_and_log(
         if on_stage is not None:
             on_stage(text)
 
-    def tracked(frame: int, num_frames: int, keyframes: int) -> None:
+    def tracked(frame: int, source: int | None, num_frames: int, keyframes: int) -> None:
         stage(f"tracking: frame {frame + 1} / {num_frames}, {keyframes} keyframes in the graph")
-        source: int | None = session.source_frames.get(frame) if session is not None else None
         if on_cursor is not None and source is not None and video_time_ns is not None and source < video_time_ns.shape[0]:
             on_cursor(int(video_time_ns[source]))
 
@@ -284,7 +283,7 @@ def run_and_log(
             live=rec if live else None,
             every_frame_depth=not live,
             video_time_ns=video_time_ns,
-            source_raster=gpu.source_raster if has_video else None,
+            source_raster=(lambda: gpu.raster) if has_video else None,
             on_frame=tracked if on_stage is not None or on_cursor is not None else None,
             live_surface=live_surface,
         )

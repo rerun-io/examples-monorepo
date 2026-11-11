@@ -253,7 +253,7 @@ def test_installed_session_observes_every_new_dpvo_and_logs_its_frames(tmp_path:
         application_id="metrictrail-test",
         recording_id="observer",
         depth_range_m=(0.3, 3.0),
-        on_frame=lambda frame, frames, keyframes: status.append((frame, frames, keyframes)),
+        on_frame=lambda frame, source, frames, keyframes: status.append((frame, frames, keyframes)),
     )
     session.install()
     assert _SlamSystem.run is not session.restore[0][2]  # the ViPE-level wraps are in place

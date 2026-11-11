@@ -81,17 +81,6 @@ class SourceRaster:
         return np.array([k4_raster[0] * scale_x, k4_raster[1] * scale_y, (k4_raster[2] + left) * scale_x, (k4_raster[3] + top) * scale_y])
 
 
-def video_times(source_frames: Int64[ndarray, "k"], pts_ns: Int64[ndarray, "n"]) -> Int64[ndarray, "k"]:
-    """``video_time`` of source frames: the PTS of each (``pts_ns`` in presentation order, one per source frame).
-
-    Raises:
-        IndexError: If a source frame is past the video's last sample.
-    """
-    if source_frames.size and int(source_frames.max()) >= pts_ns.shape[0]:
-        raise IndexError(f"source frame {int(source_frames.max())} is past the video's {pts_ns.shape[0]} samples")
-    return pts_ns[source_frames]
-
-
 def set_frame_time(rec: rr.RecordingStream, row: int, source_frame: int | None, video_time_ns: Int64[ndarray, "n"] | None) -> None:
     """Every timeline of tracked row ``row``: ``frame``, and when known ``source_frame`` and ``video_time``
     (``video_time_ns`` indexed by source frame: the input video's PTS or the benchmark's stamps)."""
@@ -103,24 +92,25 @@ def set_frame_time(rec: rr.RecordingStream, row: int, source_frame: int | None, 
         rec.set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(int(video_time_ns[source_frame]), "ns"))
 
 
+def moving_camera(k4: Float64[ndarray, "4"], hw: tuple[int, int]) -> rr.Pinhole:
+    """The moving camera's frustum in the 3D views (the input video's camera, or the tracked raster's without one)."""
+    return rr.Pinhole(
+        focal_length=k4[:2],
+        principal_point=k4[2:],
+        resolution=[hw[1], hw[0]],
+        image_plane_distance=CAMERA_PLANE_M,
+        color=BA_WINDOW_RGB,
+        line_width=-2.5,  # negative = UI points (rr.Radius.ui_points); a positive value is metres
+    )
+
+
 def log_pinholes(rec: rr.RecordingStream, k4_raster: Float64[ndarray, "4"], raster_hw: tuple[int, int], raster: SourceRaster | None) -> None:
     """``cam``: the tracking raster's pinhole; with ``raster``, also :data:`entities.INPUT`: the source camera the input
     video plays in, the moving camera's frustum in the 3D views."""
     height, width = raster_hw
     rec.log(entities.CAM, rr.Pinhole(focal_length=k4_raster[:2], principal_point=k4_raster[2:], resolution=[width, height]))
     if raster is not None:
-        k4_source: Float64[ndarray, "4"] = raster.source_intrinsics(k4_raster)
-        rec.log(
-            entities.INPUT,
-            rr.Pinhole(
-                focal_length=k4_source[:2],
-                principal_point=k4_source[2:],
-                resolution=[raster.source_hw[1], raster.source_hw[0]],
-                image_plane_distance=CAMERA_PLANE_M,
-                color=BA_WINDOW_RGB,
-                line_width=-2.5,  # negative = UI points
-            ),
-        )
+        rec.log(entities.INPUT, moving_camera(raster.source_intrinsics(k4_raster), raster.source_hw))
 
 
 def log_depth(rec: rr.RecordingStream, depth_m: Float32[ndarray, "h w"], depth_range_m: tuple[float, float]) -> None:
