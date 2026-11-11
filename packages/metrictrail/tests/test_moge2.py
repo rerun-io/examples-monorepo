@@ -100,6 +100,24 @@ def test_network_size_is_the_inputs_own_token_grid_not_a_bucket() -> None:
     assert kitti_hw[0] % 14 == 0 and kitti_hw[1] % 14 == 0
 
 
+def test_resolution_level_selects_the_grid_and_separates_cached_models() -> None:
+    assert depth.MoGe2Engine.network_hw((280, 504), resolution_level=3) == (462, 840)
+    cache = ModelCache()
+    coarse = depth.make_provider("l", resolution_level=3, model_cache=cache)
+    repeated = depth.make_provider("l", resolution_level=3, model_cache=cache)
+    original = depth.make_provider("l", resolution_level=9, model_cache=cache)
+    assert coarse.engine is repeated.engine
+    assert coarse.engine is not original.engine
+    assert coarse.describe()["resolution_level"] == 3
+    assert original.describe()["resolution_level"] == 9
+
+
+@pytest.mark.parametrize("level", [-1, 10])
+def test_resolution_level_rejects_out_of_range_values(level: int) -> None:
+    with pytest.raises(ValueError, match="resolution_level"):
+        depth.MoGe2Engine("tensorrt", resolution_level=level)
+
+
 def test_a_focal_change_reuses_the_forward_and_matches_an_uncached_run() -> None:
     cached, built = make_engine()
     provider = depth.MoGe2NormalProvider("l", engine=cached)

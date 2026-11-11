@@ -70,6 +70,8 @@ class RunSettings:
     """Which tree runs: ``ours`` (``recipes/vipe-src`` + lietorch-mojo) or ``upstream`` (an unmodified ViPE on ``sys.path``)."""
     capture: bool = True
     """Log the live intermediates (frames, depth, DINOv3 PCA, DPVO patches, BA window); adds host syncs."""
+    depth_resolution_level: int = 3
+    """MoGe-2 detail level, 0..9: 3 uses 2000 tokens; 9 restores the original 3600-token prior."""
     fuse_mesh: bool = True
     """Fuse a colour TSDF mesh from every tracked frame (:mod:`metrictrail.surface`, tsdf-rs): the default surface."""
     tsdf_voxel_m: float = DEFAULT_TSDF.voxel_size_m
@@ -252,7 +254,7 @@ def run_and_log(
     if config.label == "ours":
         from metrictrail.moge2 import register_providers
 
-        register_providers()
+        register_providers(resolution_level=config.depth_resolution_level)
     config.output.mkdir(parents=True, exist_ok=True)
     vipe_out: Path = (config.output / "vipe_out").resolve()
     prepared: PreparedInput = prepare_input(config)
