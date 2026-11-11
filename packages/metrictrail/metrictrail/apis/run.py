@@ -44,6 +44,7 @@ from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, l
 from metrictrail.palette import RunLabel
 from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
+from metrictrail.update_graphs import update_cuda_graphs
 
 
 @dataclass
@@ -295,7 +296,11 @@ def run_and_log(
     started: float = time.perf_counter()
     stage("loading the models, then SharedK calibration (MoGe-2 + DINOv3 on the whole clip)")
     try:
-        with gpu_video_input(gpu), feature_cuda_graphs() if config.label == "ours" else nullcontext():
+        with (
+            gpu_video_input(gpu),
+            feature_cuda_graphs() if config.label == "ours" else nullcontext(),
+            update_cuda_graphs() if config.label == "ours" else nullcontext(),
+        ):
             pipeline = make_pipeline(typed.pipeline)
             streams = make_stream_list(typed.streams)
             for index in range(len(streams)):
