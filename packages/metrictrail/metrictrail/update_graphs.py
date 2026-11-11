@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from typing import TypeAlias
+from weakref import WeakKeyDictionary
 
 import torch
 from dpvo.net import Update, UpdateTopology
@@ -21,10 +22,7 @@ MIN_REPLAY_CALLS: int = 3
 
 @dataclass(frozen=True, slots=True)
 class UpdateGraphKey:
-    """Model, tensor shapes, group sizes, and precision fixed by a captured update."""
-
-    model: Update
-    """Model that owns the captured weights."""
+    """Tensor shapes, group sizes, and precision fixed by one model's captured update."""
     shapes: tuple[torch.Size, torch.Size, torch.Size]
     """Hidden-state, context, and correlation dimensions."""
     dtypes: tuple[torch.dtype, torch.dtype, torch.dtype]
@@ -73,10 +71,11 @@ def update_cuda_graphs() -> Iterator[None]:
 
     Group discovery stays outside capture. Every topology tensor is copied before replay, so equal
     edge counts with different graph connectivity cannot reuse stale neighbors or group membership.
+    Weak model keys let recovery release the old network and its graph pools before loading another.
     """
     original = Update.forward
-    cache: dict[UpdateGraphKey, UpdateGraph] = {}
-    seen: dict[UpdateGraphKey, int] = {}
+    cache: WeakKeyDictionary[Update, dict[UpdateGraphKey, UpdateGraph]] = WeakKeyDictionary()
+    seen: WeakKeyDictionary[Update, dict[UpdateGraphKey, int]] = WeakKeyDictionary()
 
     @wraps(original)
     def forward(
@@ -96,15 +95,17 @@ def update_cuda_graphs() -> Iterator[None]:
         if topology is None:
             topology = UpdateTopology.from_edges(ii, jj, kk)
         key: UpdateGraphKey = UpdateGraphKey(
-            self, (net.shape, inp.shape, corr.shape), (net.dtype, inp.dtype, corr.dtype), net.device,
+            (net.shape, inp.shape, corr.shape), (net.dtype, inp.dtype, corr.dtype), net.device,
             (topology.patch_groups[1], topology.frame_groups[1]),
             torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"),
             bool(torch.backends.cuda.matmul.allow_tf32), bool(torch.backends.cudnn.allow_tf32),
         )
-        saved: UpdateGraph | None = cache.get(key)
+        model_cache: dict[UpdateGraphKey, UpdateGraph] = cache.setdefault(self, {})
+        saved: UpdateGraph | None = model_cache.get(key)
         if saved is None:
-            seen[key] = seen.get(key, 0) + 1
-            if seen[key] < MIN_REPLAY_CALLS or len(cache) >= MAX_UPDATE_GRAPHS:
+            model_seen: dict[UpdateGraphKey, int] = seen.setdefault(self, {})
+            model_seen[key] = model_seen.get(key, 0) + 1
+            if model_seen[key] < MIN_REPLAY_CALLS or sum(len(graphs) for graphs in cache.values()) >= MAX_UPDATE_GRAPHS:
                 return original(self, net, inp, corr, flow, ii, jj, kk, topology=topology)
             hidden: Float[Tensor, "1 edges dim"] = net.clone()
             context: Float[Tensor, "1 edges dim"] = inp.clone()
@@ -129,7 +130,7 @@ def update_cuda_graphs() -> Iterator[None]:
                 with torch.cuda.graph(graph, capture_error_mode="thread_local"):
                     outputs: UpdateOutput = original(self, hidden, context, correlations, None, source, target, patch, topology=static_topology)
             saved = UpdateGraph(hidden, context, correlations, source, target, patch, static_topology, outputs, graph)
-            cache[key] = saved
+            model_cache[key] = saved
         saved.hidden.copy_(net)
         saved.context.copy_(inp)
         saved.correlations.copy_(corr)
