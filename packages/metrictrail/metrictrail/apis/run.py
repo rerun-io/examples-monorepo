@@ -346,7 +346,7 @@ def run_and_log(
             feature_cuda_graphs() if config.label == "ours" else nullcontext(),
             update_cuda_graphs() if config.label == "ours" else nullcontext(),
             calibration_cuda_graphs(config.calibration_graphs) if config.label == "ours" else nullcontext(),
-            calibration_gru(config.calibration_gru_backend if config.label == "ours" else "torch", model_cache=models) as gru_stats,
+            calibration_gru(config.calibration_gru_backend if config.label == "ours" else "torch") as gru_stats,
         ):
             pipeline = make_pipeline(typed.pipeline)
             if models is not None:

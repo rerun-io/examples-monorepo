@@ -268,10 +268,10 @@ CUDA's exact age-tie ordering remain outside capture. This option is enabled by 
 Use `--no-calibration-graphs` to select the original graph implementation.
 
 `--calibration-gru-backend tensorrt` selects the frozen DROID ConvGRU TensorRT backend.
-`METRICTRAIL_TRT_CACHE` (default `~/.cache/metrictrail/droid-gru`) holds ONNX files and engines;
+trtkit's engine cache (`TRTKIT_TRT_CACHE`, default `~/.cache/trtkit/trt`) holds its ONNX files and engines under `droid-gru/`;
 identity includes actual weights, raster, FP16 precision, edge-count profile, TensorRT version and GPU.
 The dynamic profile is 1/48/128 edges (min/opt/max). CPU, training, gradients, FP32 and counts outside
-that profile retain PyTorch. Outputs own their storage. App `ModelCache` reuse retains model runtimes,
+that profile retain PyTorch. Outputs own their storage. A runtime lives as long as its model, so the app (which keeps its models) reuses it,
 while each calibration starts with fresh hidden state. The run prints export/build/load time separately;
 these costs remain included in total wall time. A Space must ship matching ONNX and engine artifacts in
 this directory to avoid building them on its first calibration. This backend is enabled by default after those same guards passed; `--calibration-gru-backend torch` selects PyTorch.
