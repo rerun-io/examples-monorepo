@@ -73,6 +73,8 @@ class RunSettings:
     """Which tree runs: ``ours`` (``recipes/vipe-src`` + lietorch-mojo) or ``upstream`` (an unmodified ViPE on ``sys.path``)."""
     capture: bool = True
     """Log the live intermediates (frames, depth, DINOv3 PCA, DPVO patches, BA window); adds host syncs."""
+    patches_per_frame: int = 64
+    """Patch budget for ``ours``: 64 uses less tracking work; 96 restores the original preset count."""
     depth_resolution_level: int = 0
     """MoGe-2 detail level, 0..9: 0 uses 1200 tokens; 9 restores the original 3600-token prior."""
     fuse_mesh: bool = True
@@ -153,16 +155,15 @@ def prepare_input(config: RunSettings) -> PreparedInput:
 
 
 def hydra_overrides(config: RunSettings, prepared: PreparedInput, vipe_out: Path) -> list[str]:
-    """Upstream's command for the preset, our MoGe-2 provider (``ours`` only), the raw-frame raster, then the user's
-    overrides (later wins in Hydra)."""
+    """Preset, our provider and patch budget, raw-frame raster, then extra overrides (later wins in Hydra)."""
     preset: BenchmarkPreset = BENCHMARKS[config.benchmark]
     overrides: list[str] = preset.run_overrides(prepared.stream_path, vipe_out, config.intrinsics, config.seed, config.seed_name)
-    provider: list[str] = []
+    implementation_overrides: list[str] = []
     if config.label == "ours":
         from metrictrail.moge2 import PROVIDER_OVERRIDES
 
-        provider = list(PROVIDER_OVERRIDES)
-    return overrides + provider + prepared.raster_overrides + list(config.extra_overrides)
+        implementation_overrides = [*PROVIDER_OVERRIDES, f"pipeline.slam.dpvo.PATCHES_PER_FRAME={config.patches_per_frame}"]
+    return overrides + implementation_overrides + prepared.raster_overrides + list(config.extra_overrides)
 
 
 def frame_rgb_source(artifacts: Any, prepared: PreparedInput, gpu: GpuVideoSession | None) -> Callable[[int], UInt8[ndarray, "h w 3"]]:
