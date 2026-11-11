@@ -304,7 +304,7 @@ def run_blueprint(
     )
     left: list[rrb.View] = [
         frame_view(has_video=has_video, has_capture=has_capture, background=background),
-        rrb.Spatial2DView(name="MoGe-2 metric depth (turbo: near blue, far red)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
+        rrb.Spatial2DView(name="MoGe-2 metric depth (m)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
         rrb.Spatial2DView(name="MoGe-2 normals", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background)
         if has_capture
         else waiting("MoGe-2 normals", "normals"),

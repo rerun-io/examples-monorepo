@@ -90,7 +90,8 @@ calibration budget (`fast64` by default, half the time of ViPE's `robust128`). T
 once. While SharedK calibrates, the viewer shows its own layout on the `calibration_step` timeline: the DROID keyframe map,
 the focal and the keyframes kept, and the newest keyframe's MoGe-2 prior against its bundle-adjusted depth. The capture
 then runs in live mode: DPVO's patches (on the video), BA window and
-the DINOv3 PCA, MoGe-2's depth (turbo) and its normals stream in as videos, one frame per tracked frame. The trajectory and the
+the DINOv3 PCA and MoGe-2's normals stream in as videos and its metric depth as millimetre PNGs (MoGe-2 at most every
+third source frame). The trajectory and the
 surface arrive at the end; the TSDF mesh grows in the DPVO tracking view from each new keyframe (at DPVO's current pose) and the final mesh (final poses) replaces it. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
 viewer stays empty.
 

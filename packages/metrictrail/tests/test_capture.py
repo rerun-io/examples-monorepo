@@ -368,14 +368,14 @@ def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
 
 
 @pytest.mark.usefixtures("stand_in_vipe")
-def test_the_app_streams_moge2_depth_and_normals_as_video_at_a_third_of_the_input_rate(tmp_path: Path) -> None:
-    """Like the DINOv3 PCA, also on frames where DPVO's graph did not grow; at most every third source frame (the
-    tracking thread pays a copy and an encode per video frame)."""
+def test_the_app_streams_moge2_normals_as_video_and_depth_pngs_at_a_third_of_the_input_rate(tmp_path: Path) -> None:
+    """Normals as a video like the DINOv3 PCA, depth as metric PNGs, also on frames where DPVO's graph did not grow; at
+    most every third source frame (the tracking thread pays a copy and an encode per logged frame)."""
     from rerun.chunk import RrdReader
 
     from metrictrail import entities
 
-    session = CaptureSession(out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0), depth_as_video=True)
+    session = CaptureSession(out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0), thin_depth=True)
     session.install()
     session.pass_frames = 5
     tracker: DPVO = cpu_dpvo()
@@ -394,22 +394,11 @@ def test_the_app_streams_moge2_depth_and_normals_as_video_at_a_third_of_the_inpu
         )
         tracker.observers[-1].on_frame(tracker, event)
     session.uninstall()
-    samples: dict[str, list[int]] = {}
+    logged: dict[str, list[int]] = {}
     for chunk in RrdReader(tmp_path / "pass_0.rrd").store().stream():
         batch = chunk.to_record_batch()
-        if "VideoStream:sample" in batch.schema.names and entities.FRAME_TIMELINE in batch.schema.names:
-            samples.setdefault(str(chunk.entity_path), []).extend(batch.column(entities.FRAME_TIMELINE).to_pylist())
-    assert samples["/" + entities.CAM_DEPTH] == [0, 2]  # source frames 0 and 4
-    assert samples["/" + entities.CAM_NORMALS] == [0, 2]
-
-
-def test_turbo_rgb_colours_depth_on_its_device_and_blacks_out_invalid_pixels() -> None:
-    from metrictrail.capture import turbo_rgb
-    from metrictrail.palette import TURBO_LUT
-
-    depth = torch.tensor([[0.3, 3.0], [9.0, 0.0]])
-    rgb = turbo_rgb(depth, depth > 0, (0.3, 3.0))
-    assert rgb.dtype == torch.uint8 and rgb.shape == (2, 2, 3)
-    np.testing.assert_array_equal(rgb[0].numpy(), TURBO_LUT[[0, 255]])
-    np.testing.assert_array_equal(rgb[1, 0].numpy(), TURBO_LUT[255])  # past the range: clamped to far
-    assert int(rgb[1, 1].sum()) == 0  # no depth: black
+        for column in ("VideoStream:sample", "EncodedDepthImage:blob"):
+            if column in batch.schema.names and entities.FRAME_TIMELINE in batch.schema.names:
+                logged.setdefault(f"{chunk.entity_path} {column}", []).extend(batch.column(entities.FRAME_TIMELINE).to_pylist())
+    assert logged[f"/{entities.CAM_DEPTH} EncodedDepthImage:blob"] == [0, 2]  # source frames 0 and 4, in millimetres
+    assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 2]

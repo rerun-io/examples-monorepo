@@ -42,6 +42,3 @@ def depth_colors(depth_m: Float32[ndarray, "n"], depth_range_m: tuple[float, flo
     unit: Float32[ndarray, "n"] = np.clip((depth_m - low) / (high - low), 0.0, 1.0).astype(np.float32)
     return (colormaps["turbo"](unit)[:, :3] * 255.0).round().astype(np.uint8)
 
-
-TURBO_LUT: UInt8[ndarray, "256 3"] = (colormaps["turbo"](np.linspace(0.0, 1.0, 256))[:, :3] * 255.0).round().astype(np.uint8)
-""":func:`depth_colors`'s turbo map in 256 steps, for colouring whole depth maps on the GPU (``capture.turbo_rgb``)."""
