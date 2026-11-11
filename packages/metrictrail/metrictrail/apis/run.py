@@ -28,6 +28,7 @@ import torch
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
+from serde.json import to_json
 from simplecv.rerun_log_utils import RerunTyroConfig
 from vipe.metrictrail.calibration.policy import MODES
 from vipe.metrictrail.config import MetricTrailInitConfig
@@ -38,6 +39,7 @@ from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
 from metrictrail.calibration_graphs import calibration_cuda_graphs
+from metrictrail.calibration_gru import GruBackend, calibration_gru
 from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.feature_graphs import feature_cuda_graphs
@@ -93,6 +95,8 @@ class RunSettings:
     """MoGe-2 detail level, 0..9: 0 uses 1200 tokens; 9 restores the original 3600-token prior."""
     calibration_graphs: bool = False
     """Use prepared DROID topology and capture complete calibration updates on CUDA."""
+    calibration_gru_backend: GruBackend = "torch"
+    """DROID ConvGRU backend. TensorRT caches model engines, with an eager fallback outside its FP16 profile."""
     fuse_mesh: bool = True
     """Fuse a colour TSDF mesh from every tracked frame (:mod:`metrictrail.surface`, tsdf-rs): the default surface."""
     tsdf_voxel_m: float = DEFAULT_TSDF.voxel_size_m
@@ -342,6 +346,7 @@ def run_and_log(
             feature_cuda_graphs() if config.label == "ours" else nullcontext(),
             update_cuda_graphs() if config.label == "ours" else nullcontext(),
             calibration_cuda_graphs(config.calibration_graphs) if config.label == "ours" else nullcontext(),
+            calibration_gru(config.calibration_gru_backend if config.label == "ours" else "torch", model_cache=models) as gru_stats,
         ):
             pipeline = make_pipeline(typed.pipeline)
             if models is not None:
@@ -353,6 +358,8 @@ def run_and_log(
         if session is not None:
             session.uninstall()
     wall_s: float = time.perf_counter() - started
+    if gru_stats.backend == "tensorrt":
+        print(f"[metrictrail] calibration GRU: {to_json(gru_stats)}")
 
     kept: CapturedPass | None = session.kept_pass() if session is not None else None
     if kept is not None and kept.path is not None:

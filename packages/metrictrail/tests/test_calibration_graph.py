@@ -1,5 +1,8 @@
 """CUDA capture must include BA, preserve state, and avoid CPU tensor reads."""
 
+from pathlib import Path
+from typing import Literal
+
 import pytest
 import torch
 
@@ -40,7 +43,8 @@ def test_device_pose_solve_capture() -> None:
 
 
 @pytest.mark.integration
-def test_whole_step_matches_eager_and_updates_inputs() -> None:
+@pytest.mark.parametrize("backend", ["torch", "tensorrt"])
+def test_whole_step_matches_eager_and_updates_inputs(backend: Literal["torch", "tensorrt"], tmp_path: Path) -> None:
     """Capture/replay must consume changed sensor depths and preserve every state tensor."""
     import copy
     from types import SimpleNamespace
@@ -54,6 +58,7 @@ def test_whole_step_matches_eager_and_updates_inputs() -> None:
     from vipe.utils.cameras import CameraType
 
     from metrictrail.calibration_graphs import CalibrationGraph, calibration_cuda_graphs
+    from metrictrail.calibration_gru import calibration_gru
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required")
@@ -70,7 +75,7 @@ def test_whole_step_matches_eager_and_updates_inputs() -> None:
     buffer.inps.normal_(0.0, 0.1)
     net = SimpleNamespace(update=UpdateModule().cuda().eval())
     reference_buffer = copy.deepcopy(buffer)
-    with torch.no_grad():
+    with torch.no_grad(), calibration_gru(backend, cache_dir=tmp_path):
         reference = FactorGraph(cast(DroidNet, net), reference_buffer, device, 48, True, False)
         accelerated = CalibrationGraph(net, buffer, device, 48, True, False)
         reference.add_neighborhood_factors(0, 4, r=2)
@@ -88,6 +93,19 @@ def test_whole_step_matches_eager_and_updates_inputs() -> None:
                 torch.testing.assert_close(getattr(accelerated, name), getattr(reference, name), rtol=3e-3, atol=3e-4)
         assert accelerated.capture_count == 1
         assert accelerated.replay_count == 3
+        # Equal shapes with reordered edges must reuse a bucket, while replacing all connectivity.
+        sources, targets = reference.ii.flip(0), reference.jj.flip(0)
+        reference.rm_factors(torch.ones_like(reference.ii, dtype=torch.bool))
+        accelerated.rm_factors(torch.ones_like(accelerated.sources, dtype=torch.bool))
+        reference.add_factors(sources, targets)
+        with calibration_cuda_graphs():
+            accelerated.add_factors(sources.cpu(), targets.cpu())
+        reference.update(t0=1, t1=4)
+        with calibration_cuda_graphs():
+            accelerated.update(t0=1, t1=4)
+        assert accelerated.capture_count == 1
+        assert accelerated.bucket_reuses == 1
+        torch.testing.assert_close(buffer.poses, reference_buffer.poses, rtol=3e-4, atol=3e-5)
         reference.rm_factors(reference.ii == 0, store=True)
         accelerated.rm_factors(accelerated.sources == 0, store=True)
         for name in ("ii", "jj", "ii_inac", "jj_inac"):
@@ -96,3 +114,8 @@ def test_whole_step_matches_eager_and_updates_inputs() -> None:
         with calibration_cuda_graphs():
             accelerated.update(t0=1, t1=4, use_inactive=True)
         torch.testing.assert_close(buffer.poses, reference_buffer.poses, rtol=3e-4, atol=3e-5)
+        reference.update_batch(itrs=2, steps=2, optimize_intrinsics=True, optimize_rig_rotation=False)
+        with calibration_cuda_graphs():
+            accelerated.update_batch(itrs=2, steps=2, optimize_intrinsics=True, optimize_rig_rotation=False)
+        for name in ("intrinsics", "poses", "disps"):
+            torch.testing.assert_close(getattr(buffer, name), getattr(reference_buffer, name), rtol=5e-4, atol=5e-5)

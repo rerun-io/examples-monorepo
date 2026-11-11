@@ -117,16 +117,26 @@ def test_frame_distance_matches_cuda(device: str) -> None:
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("entity", entities("/ba_extended"))
 @pytest.mark.parametrize("_repeat", range(2))
-def test_ba_extended_matches_cuda(entity: str, device: str, _repeat: int) -> None:
+@pytest.mark.parametrize("device_solve", [False, True])
+def test_ba_extended_matches_cuda(entity: str, device: str, _repeat: int, device_solve: bool) -> None:
     """Repeated solves with fresh inputs must match the CUDA reference, including reused edge topology."""
     rec: Record = load()[entity]
+    if device_solve and device != "cuda":
+        pytest.skip("the device solver requires CUDA")
     poses, disps, intrinsics, disps_sens, targets, weights, eta, ii, jj, depth_active = _on(
         rec, device, "poses", "disps", "intrinsics", "disps_sens", "targets", "weights", "eta", "ii", "jj", "depth_active"
     )
     s: list[float] = rec.tensor("scalars").tolist()
+    topology = slam_ext._prepare_topology(
+        tuple(rec.tensor("ii").tolist()), tuple(rec.tensor("jj").tolist()), int(s[0]), int(s[1]),
+        bool(s[7]), bool(s[5]), poses.device,
+    )
+    if device_solve:
+        topology.pose_system.prepare_device(poses.device)
     _, _, energy = slam_ext.ba_extended(
         poses, disps, intrinsics, disps_sens, targets, weights, eta, ii, jj, depth_active,
         int(s[0]), int(s[1]), int(s[2]), s[3], s[4], bool(s[5]), s[6], bool(s[7]), s[8], s[9], s[10], bool(s[11]), s[12],
+        topology=topology, device_solve=device_solve,
     )  # fmt: skip
     for name, ours in (("poses", poses), ("disps", disps), ("intrinsics", intrinsics)):
         floor: float = rec.tensor(f"{name}_ulp_spread").item()

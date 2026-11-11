@@ -10,11 +10,13 @@ requires-python = ">=3.12"
 # whose catalog-blueprint hook metrictrail.catalog.blueprint overrides) and dpvo (MetricTrail's DPVO, dpvo.metric, behind
 # vipe-src's vipe.metrictrail.dpvo shims; metrictrail.capture observes it through dpvo.hooks) are workspace packages,
 # pinned below.
-dependencies = ["dataforge", "dpvo"]
+dependencies = ["dataforge", "dpvo", "trtkit", "vipe-mojo"]
 
 [tool.uv.sources]
 dataforge = { path = "../dataforge", editable = true }
 dpvo = { path = "../dpvo", editable = true }
+trtkit = { path = "../trtkit", editable = true }
+vipe-mojo = { path = "../vipe-mojo", editable = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -45,4 +47,4 @@ paths = ["metrictrail", "tools", "tests"]
 exclude = ["*/.pixi/*", "*/__pycache__/*"]
 min_confidence = 80
 # Framework-used names: pytest's module marker.
-ignore_names = ["pytestmark"]
+ignore_names = ["pytestmark", "solver_verbose"]

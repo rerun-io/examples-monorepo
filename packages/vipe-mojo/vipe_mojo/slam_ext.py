@@ -5,7 +5,9 @@ kernel, the per-frame sums (`accum_kernel`), the Schur products (`EEt6x6`, `Ev6x
 retraction are Mojo kernels with CUDA's summation order (no float atomics: the result does not depend
 on scheduling). As in the extension, the reduced sums go to the CPU once per iteration, where the pose
 system is assembled and solved in float64 (Eigen's `SimplicialLLT` there, a single-threaded Mojo profile Cholesky
-here; integer scatter tables are reused for identical edge topologies); a factorisation failure gives a zero step. The
+here; integer scatter tables are reused for identical edge topologies). Prepared calibration callers can instead
+assemble and solve the same float64 system on the GPU with cuSOLVER LLT, allowing whole-step CUDA capture.
+A factorisation failure gives a zero step on both paths. The
 remaining tensor algebra is PyTorch on the input device, with the extension's expressions.
 
 Every other slam_ext function raises NotImplementedError when called.

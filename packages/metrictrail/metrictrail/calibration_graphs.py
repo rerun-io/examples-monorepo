@@ -4,6 +4,8 @@ The edge policy is ViPE's DROID policy (Apache-2.0 / MIT), unchanged. Host mirro
 integer graph metadata; poses, disparities, neural state and calibration results are never cached.
 """
 
+import copy
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -25,6 +27,21 @@ from vipe.utils.cameras import CameraType
 from vipe_mojo.slam_ext import _BaTopology, _prepare_topology, ba_extended
 
 
+@dataclass(frozen=True)
+class StepState:
+    """Tensor addresses retained by a shape bucket; connectivity and values are copied on reuse."""
+
+    sources: Tensor
+    targets: Tensor
+    hidden: Tensor
+    context: Tensor
+    target: Tensor
+    weight: Tensor
+    inactive_target: Tensor
+    inactive_weight: Tensor
+    correlations: CorrBlock
+
+
 @dataclass
 class PreparedUpdate:
     """Fixed edge groups and solve tables for the current frontend topology."""
@@ -35,6 +52,7 @@ class PreparedUpdate:
     sources: Int64[Tensor, "all_edges"]
     targets: Int64[Tensor, "all_edges"]
     topology: _BaTopology
+    state: StepState
     t0: int
     t1: int
     iterations: int
@@ -43,6 +61,26 @@ class PreparedUpdate:
     use_inactive: bool
     graph: torch.cuda.CUDAGraph | None = None
     warmed: bool = False
+
+    def tensors(self) -> tuple[Tensor, ...]:
+        """All captured inputs, including every topology-dependent BA assembly table."""
+        topology, state = self.topology, self.state
+        assert topology.pose_system.device_tables is not None
+        return (
+            self.groups, self.inverse, self.sources, self.targets,
+            topology.kx, topology.kk_exp, topology.ii_exp, topology.pair_idx, topology.rhs_rows, topology.target_rows,
+            *(value for accum in (topology.accum_ii_kx, topology.accum_ii_ts, topology.accum_exp_kx)
+              for value in (accum.order, accum.starts, accum.ends)),
+            *topology.pose_system.device_tables,
+            state.sources, state.targets, state.hidden, state.context, state.target, state.weight,
+            state.inactive_target, state.inactive_weight, *state.correlations.corr_pyramid,
+        )
+
+    def key(self) -> tuple[object, ...]:
+        """Shapes, pose bounds, iteration count and precision determine the captured launch parameters."""
+        return (self.t0, self.t1, self.iterations, self.motion_only, self.limited_disp,
+                tuple((tuple(value.shape), value.dtype, value.device) for value in self.tensors()),
+                torch.get_autocast_dtype("cuda"), bool(torch.backends.cuda.matmul.allow_tf32), bool(torch.backends.cudnn.allow_tf32))
 
 
 def grouped_aggregate(self: GraphAgg, net: Tensor, ix: Tensor) -> tuple[Tensor, Tensor]:
@@ -73,6 +111,8 @@ class CalibrationGraph(FactorGraph):
         # Ages are bookkeeping: all decisions about them happen on the host.
         self.age = torch.empty(0, dtype=torch.int64)
         self.prepared: PreparedUpdate | None = None
+        self.buckets: OrderedDict[tuple[object, ...], PreparedUpdate] = OrderedDict()
+        self.bucket_reuses = 0
         self.capture_count = 0
         self.replay_count = 0
         if self.buffer.n_views != 1 or self.buffer.camera_type != CameraType.PINHOLE:
@@ -210,27 +250,50 @@ class CalibrationGraph(FactorGraph):
         topology.pose_system.prepare_device(self.device)
         inverse = inverse.to(self.device)
         inverse._metrictrail_groups = len(groups)
-        return PreparedUpdate(groups.to(self.device), inverse, inactive.to(self.device), sources.to(self.device), targets.to(self.device),
-                              topology, t0, t1, itrs, motion_only, limited_disp, use_inactive)
+        assert self.corr is not None and self.f_net is not None and self.inp is not None
+        correlations = copy.copy(self.corr)
+        # CorrBlock.cat / __getitem__ replace list entries in place. Keep this bucket's input addresses alive.
+        correlations.corr_pyramid = list(self.corr.corr_pyramid)
+        inactive = inactive.to(self.device)
+        state = StepState(self.ii, self.jj, self.f_net, self.inp, self.target, self.weight,
+                          self.target_inac[:, inactive], self.weight_inac[:, inactive], correlations)
+        plan = PreparedUpdate(groups.to(self.device), inverse, inactive, sources.to(self.device), targets.to(self.device),
+                              topology, state, t0, t1, itrs, motion_only, limited_disp, use_inactive)
+        key = plan.key()
+        saved = self.buckets.get(key)
+        if saved is not None:
+            for destination, source in zip(saved.tensors(), plan.tensors(), strict=True):
+                destination.copy_(source)
+            saved.use_inactive = use_inactive
+            self.buckets.move_to_end(key)
+            self.bucket_reuses += 1
+            return saved
+        # The global topology cache is immutable: a shape bucket needs its own writable index tables.
+        plan.topology = copy.deepcopy(topology)
+        self.buckets[key] = plan
+        while len(self.buckets) > 2:
+            self.buckets.popitem(last=False)
+        return plan
 
     @torch.amp.autocast("cuda", enabled=True)
     def _step(self, plan: PreparedUpdate) -> None:
         """All floating work of one update: projection, correlation, GRU, and every BA iteration."""
         assert self.corr is not None and self.f_net is not None and self.inp is not None
+        state = plan.state
         with torch.autocast("cuda", enabled=False):
-            coords = self._project()
+            coords = self._project(state.sources, state.targets)
             coords = coords[None]
-            motion = torch.cat([coords - self.coords0, self.target - coords], -1).permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
-        corr = self.corr(coords)
-        net, delta, weight, damping, _ = self.net.update(self.f_net, self.inp, corr, motion, ix=plan.inverse)
-        weight = weight.masked_fill(self.buffer.masks[self.ii, 0][None, ..., None], 0.0)
+            motion = torch.cat([coords - self.coords0, state.target - coords], -1).permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
+        corr = state.correlations(coords)
+        net, delta, weight, damping, _ = self.net.update(state.hidden, state.context, corr, motion, ix=plan.inverse)
+        weight = weight.masked_fill(self.buffer.masks[state.sources, 0][None, ..., None], 0.0)
         with torch.autocast("cuda", enabled=False):
-            self.f_net.copy_(net)
-            self.target.copy_(coords + delta.float())
-            self.weight.copy_(weight.float())
+            state.hidden.copy_(net)
+            state.target.copy_(coords + delta.float())
+            state.weight.copy_(weight.float())
             self.damping[plan.groups] = damping
-            target = torch.cat([self.target_inac[:, plan.inactive], self.target], 1)
-            weight = torch.cat([self.weight_inac[:, plan.inactive], self.weight], 1)
+            target = torch.cat([state.inactive_target, state.target], 1)
+            weight = torch.cat([state.inactive_weight, state.weight], 1)
             self._ba(target, weight, plan.sources, plan.targets, plan.topology, plan.t0, plan.t1, plan.iterations,
                      1e-3, 0.1, False, plan.motion_only, plan.limited_disp, device_solve=True)
 
@@ -275,22 +338,23 @@ class CalibrationGraph(FactorGraph):
                 self.capture_count += 1
             plan.graph.replay()
             self.replay_count += 1
+        self.f_net, self.target, self.weight = plan.state.hidden, plan.state.target, plan.state.weight
         self.age += 1
 
-    def _project(self) -> Tensor:
+    def _project(self, sources: Tensor, targets: Tensor) -> Tensor:
         """Use the existing geometry with a device grid prepared before capture."""
         buffer = self.buffer
-        zero = torch.zeros_like(self.ii)
+        zero = torch.zeros_like(sources)
         coords, _, _, _, _ = geom.iproj_i_proj_j_disp(
-            SE3(buffer.poses), buffer.flattened_disps[self.ii], self.coords0[None],
+            SE3(buffer.poses), buffer.flattened_disps[sources], self.coords0[None],
             buffer.camera_type.build_camera_model(buffer.intrinsics).scaled(1 / 8.0).intrinsics,
-            buffer.camera_type, SE3(buffer.rig), self.ii, self.jj, zero, zero, None, False, False, False,
+            buffer.camera_type, SE3(buffer.rig), sources, targets, zero, zero, None, False, False, False,
         )
         return coords
 
     @torch.amp.autocast("cuda", enabled=False)
     def update_batch(self, itrs: int, steps: int, optimize_intrinsics: bool, optimize_rig_rotation: bool, solver_verbose: bool = False) -> None:
-        """Backend with the same batches, order and CPU LLT, but no repeated topology readbacks."""
+        """Backend with the same batches and iterations, with topology and float64 LLT on the device."""
         if optimize_rig_rotation:
             raise ValueError("SharedK calibration has a fixed identity rig")
         assert self.f_net is not None
@@ -304,6 +368,7 @@ class CalibrationGraph(FactorGraph):
             batches.append((select.to(self.device), self.sources[select].to(self.device), self.targets[select].to(self.device), groups.to(self.device), inverse))
         topology = _prepare_topology(tuple(self.sources.tolist()), tuple(self.targets.tolist()), 1, self.buffer.n_frames,
                                      optimize_intrinsics, False, self.device)
+        topology.pose_system.prepare_device(self.device)
         for _ in range(steps):
             coords, _ = self.buffer.reproject_dense_disp(self.ii, self.jj)
             coords = coords[None]
@@ -318,7 +383,7 @@ class CalibrationGraph(FactorGraph):
                 self.weight[:, select] = weight.float()
                 self.damping[groups] = damping
             self._ba(self.target, self.weight, self.ii, self.jj, topology, 1, self.buffer.n_frames, itrs,
-                     1e-5, 1e-2, optimize_intrinsics)
+                     1e-5, 1e-2, optimize_intrinsics, device_solve=True)
 
 
 @contextmanager
