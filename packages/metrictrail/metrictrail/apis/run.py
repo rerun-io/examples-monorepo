@@ -44,7 +44,16 @@ from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
 from metrictrail.live_surface import LiveSurface
-from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, log_run_outputs, make_provenance, read_run_outputs
+from metrictrail.outputs import (
+    LoggedRun,
+    LogOptions,
+    RunMetrics,
+    RunOutputs,
+    log_run_outputs,
+    make_provenance,
+    read_run_outputs,
+    ride_final_trajectory,
+)
 from metrictrail.palette import RunLabel
 from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
@@ -375,6 +384,8 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh, video_time_ns=video_time_ns
     )
+    if kept is not None and context is None:
+        ride_final_trajectory(rec, outputs.trajectory, video_time_ns)
     return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None, has_video=has_video)
 
 

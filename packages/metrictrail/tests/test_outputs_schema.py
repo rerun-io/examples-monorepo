@@ -112,3 +112,35 @@ def test_a_video_run_frames_the_input_video_and_plays_video_time() -> None:
     # A live run logs the whole video first; the app moves the cursor to each tracked frame, so the panel waits paused.
     live = time_panel(has_video=True, live=True)
     assert str(live.timeline) == entities.VIDEO_TIMELINE and str(live.play_state) == "paused"
+
+
+def test_without_gt_the_world_hangs_in_dpvos_frame_and_the_live_camera_rides_the_final_trajectory(tmp_path: Path) -> None:
+    import pyarrow as pa
+
+    from metrictrail.outputs import ride_final_trajectory
+
+    world_T_cam: Float64[ndarray, "n 4 4"] = np.tile(np.eye(4), (6, 1, 1))
+    world_T_cam[:, 2, 3] = np.arange(6, dtype=np.float64)  # walking along +z
+    world_T_cam[3] = np.nan  # a non-finite pose is left out
+    outputs: RunOutputs = synthetic_outputs(world_T_cam)
+    rec = rr.RecordingStream("metrictrail-test", recording_id="ride", send_properties=False)
+    rec.save(tmp_path / "ride.rrd")
+    ride_final_trajectory(rec, outputs.trajectory, video_time_ns=np.arange(6, dtype=np.int64) * 40_000_000)
+    rec.flush()
+    rec.disconnect()
+    world_parent: list[object] = []
+    frames: list[int] = []
+    video: list[int] = []
+    translations: list[list[list[float]]] = []
+    for chunk in RrdReader(tmp_path / "ride.rrd").stream():
+        batch = chunk.to_record_batch()
+        if str(chunk.entity_path) == "/" + entities.WORLD_ROOT and "Transform3D:parent_frame" in batch.schema.names:
+            world_parent += batch.column("Transform3D:parent_frame").to_pylist()
+        if str(chunk.entity_path) == "/" + entities.DPVO_CURRENT:
+            frames += batch.column(entities.FRAME_TIMELINE).to_pylist()
+            video += batch.column(entities.VIDEO_TIMELINE).cast(pa.int64()).to_pylist()
+            translations += batch.column("Transform3D:translation").to_pylist()
+    assert world_parent == [["tf#/dpvo"]]  # ViPE's world without GT is DPVO's: the first camera's RDF frame
+    assert frames == [0, 1, 2, 4, 5]  # every finite tracked frame, at its own times
+    assert video == [0, 40_000_000, 80_000_000, 160_000_000, 200_000_000]
+    assert [row[0][2] for row in translations] == [0.0, 1.0, 2.0, 4.0, 5.0]
