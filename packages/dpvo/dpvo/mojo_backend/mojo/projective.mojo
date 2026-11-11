@@ -28,6 +28,55 @@ def _project(point: Vec4, calibration: Vec4) -> Tuple[Float32, Float32]:
 
 
 @always_inline
+def project_points_element(
+    n: Int,
+    poses: ImmTileTensor[DType.float32, L2, _],
+    patches: ImmTileTensor[DType.float32, L4, _],
+    intrinsics: ImmTileTensor[DType.float32, L2, _],
+    source: ImmTileTensor[DType.int64, L1, _],
+    target: ImmTileTensor[DType.int64, L1, _],
+    patch: ImmTileTensor[DType.int64, L1, _],
+    coordinates: MutTileTensor[DType.float32, L4, _],
+):
+    """Project all pixels of one patch using the edge's normalized relative pose."""
+    var i = Int(source[n][0])
+    var j = Int(target[n][0])
+    var k = Int(patch[n][0])
+    var ki = Vec4(intrinsics[i, 0][0], intrinsics[i, 1][0], intrinsics[i, 2][0], intrinsics[i, 3][0])
+    var kj = Vec4(intrinsics[j, 0][0], intrinsics[j, 1][0], intrinsics[j, 2][0], intrinsics[j, 3][0])
+    var ti, qi = _pose(poses, i)
+    var tj, qj = _pose(poses, j)
+    var tij, qij = rel_se3(ti, _normalize_quaternion(qi), tj, _normalize_quaternion(qj))
+    qij = _normalize_quaternion(qij)
+    for row in range(Int(patches.dim[2]())):
+        for col in range(Int(patches.dim[3]())):
+            var point = Vec4(
+                (patches[k, 0, row, col][0] - ki[2]) / ki[0],
+                (patches[k, 1, row, col][0] - ki[3]) / ki[1],
+                1.0,
+                patches[k, 2, row, col][0],
+            )
+            var x, y = _project(act_se3(tij, qij, point), kj)
+            coordinates[n, row, col, 0] = x
+            coordinates[n, row, col, 1] = y
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](NUM_THREADS))
+def project_points_kernel(
+    poses: ImmTileTensor[DType.float32, L2, ImmUntrackedOrigin],
+    patches: ImmTileTensor[DType.float32, L4, ImmUntrackedOrigin],
+    intrinsics: ImmTileTensor[DType.float32, L2, ImmUntrackedOrigin],
+    source: ImmTileTensor[DType.int64, L1, ImmUntrackedOrigin],
+    target: ImmTileTensor[DType.int64, L1, ImmUntrackedOrigin],
+    patch: ImmTileTensor[DType.int64, L1, ImmUntrackedOrigin],
+    coordinates: MutTileTensor[DType.float32, L4, MutUntrackedOrigin],
+):
+    var n = global_idx.x
+    if n < Int(source.dim[0]()):
+        project_points_element(n, poses, patches, intrinsics, source, target, patch, coordinates)
+
+
+@always_inline
 def flow_magnitude_element(
     n: Int,
     beta: Float32,

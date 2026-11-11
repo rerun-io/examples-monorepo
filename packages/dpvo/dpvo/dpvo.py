@@ -319,9 +319,13 @@ class DPVO:
         jj: Int[Tensor, "n_edges"]
         kk: Int[Tensor, "n_edges"]
         (ii, jj, kk) = indicies if indicies is not None else (self.pg.ii, self.pg.jj, self.pg.kk)
-        coords: Float[Tensor, "1 n_edges P P 2"] = pops.transform(
-            SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk
-        )
+        coords: Float32[Tensor, "1 n_edges P P 2"]
+        if self.device.type in ("cpu", "cuda") and not torch.is_grad_enabled():
+            from .mojo_backend.projective import project_points
+
+            coords = project_points(self.poses, self.patches, self.intrinsics, ii, jj, kk)
+        else:
+            coords = pops.transform(SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk)
         return rearrange(coords, "b e p1 p2 c -> b e c p1 p2")
 
     def append_factors(self, ii: Int[Tensor, "n_new"], jj: Int[Tensor, "n_new"]) -> None:
