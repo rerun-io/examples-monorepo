@@ -24,7 +24,7 @@ from typing import Any
 import cv2
 import rerun as rr
 import torch
-from jaxtyping import UInt8
+from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -40,6 +40,7 @@ from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
 from metrictrail.live_surface import LiveSurface
 from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, log_run_outputs, make_provenance, read_run_outputs
 from metrictrail.palette import RunLabel
+from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
 
 
@@ -99,6 +100,8 @@ class RunResult:
     """Whether a live capture was logged (frames, patches, normals)."""
     has_gt: bool
     """Whether GT was logged."""
+    has_video: bool
+    """Whether the input video was logged (``input/video``, a video input)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +230,7 @@ def run_and_log(
         config: What to run.
         rec: Target recording.
         live: The capture logs every DPVO pass straight into ``rec`` while it tracks, depth only on frames that grew
-            DPVO's keyframe graph and no DINOv3 PCA (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
+            DPVO's keyframe graph (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
         on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
             it may raise to stop the run.
     """
@@ -254,6 +257,17 @@ def run_and_log(
     typed = parse_typed_config("default", hydra_args=overrides, config_dir=config_dir)
     depth_range_m: tuple[float, float] = DEPTH_RANGES_M.get(config.benchmark, DEFAULT_DEPTH_RANGE_M)
     tsdf: TsdfSettings = TsdfSettings(voxel_size_m=config.tsdf_voxel_m, max_depth_m=config.tsdf_max_depth_m)
+    frames: FrameSource = open_frames(prepared.stream_path)
+    context: GtContext | None = None
+    if prepared.gt_sequence is not None:
+        context = load_gt_context(prepared.gt_sequence, protocol_for(config.benchmark), frames.names)
+    # The input video first, from its own samples: a streamed viewer plays it while the models load and calibrate.
+    video_time_ns: Int64[ndarray, "s"] | None = context.frames.timestamps_ns if context is not None else None
+    has_video: bool = frames.kind == "video"
+    if has_video:
+        stage("logging the input video")
+        video_time_ns = log_input_video(rec, config.input, config.output / "viewer")
+    gpu: GpuVideoSession = GpuVideoSession()
     session: CaptureSession | None = None
     live_surface: LiveSurface | None = LiveSurface(rec, tsdf) if config.capture and live and config.fuse_mesh else None
     if config.capture:
@@ -263,7 +277,9 @@ def run_and_log(
             recording_id=str(rec.get_recording_id()),
             depth_range_m=depth_range_m,
             live=rec if live else None,
-            every_frame_images=not live,
+            every_frame_depth=not live,
+            video_time_ns=video_time_ns,
+            source_raster=gpu.source_raster if has_video else None,
             on_frame=tracked if on_stage is not None else None,
             live_surface=live_surface,
         )
@@ -274,9 +290,8 @@ def run_and_log(
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
     stage("loading the models, then SharedK calibration (MoGe-2 + DINOv3 on the whole clip)")
-    gpu: GpuVideoSession
     try:
-        with gpu_video_input() as gpu:
+        with gpu_video_input(gpu):
             pipeline = make_pipeline(typed.pipeline)
             streams = make_stream_list(typed.streams)
             for index in range(len(streams)):
@@ -290,10 +305,6 @@ def run_and_log(
     if kept is not None and kept.path is not None:
         rec.send_chunks(RrdReader(kept.path).stream())
     outputs: RunOutputs = read_run_outputs(vipe_out, prepared.name)
-    frames: FrameSource = open_frames(prepared.stream_path)
-    context: GtContext | None = None
-    if prepared.gt_sequence is not None:
-        context = load_gt_context(prepared.gt_sequence, protocol_for(config.benchmark), frames.names)
     mesh: ColoredMesh | None = None
     if config.fuse_mesh:
         stage("fusing the TSDF mesh")
@@ -321,9 +332,9 @@ def run_and_log(
         max_cloud_points=config.max_cloud_points,
     )
     logged: LoggedRun = log_run_outputs(
-        rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh
+        rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh, video_time_ns=video_time_ns
     )
-    return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None)
+    return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None, has_video=has_video)
 
 
 def main(config: Config) -> RunMetrics:
@@ -332,7 +343,12 @@ def main(config: Config) -> RunMetrics:
     result: RunResult = run_and_log(config, rec)
     log_waiting_notes(rec, has_capture=result.has_capture, has_gt=result.has_gt)
     blueprint = run_blueprint(
-        config.label, has_capture=result.has_capture, has_gt=result.has_gt, world_eye=result.logged.world_eye, metric_eye=result.logged.metric_eye
+        config.label,
+        has_capture=result.has_capture,
+        has_gt=result.has_gt,
+        has_video=result.has_video,
+        world_eye=result.logged.world_eye,
+        metric_eye=result.logged.metric_eye,
     )
     rec.send_blueprint(blueprint, make_active=True, make_default=True)
     rec.flush()

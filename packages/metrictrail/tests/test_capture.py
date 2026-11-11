@@ -291,3 +291,69 @@ def test_installed_session_observes_every_new_dpvo_and_logs_its_frames(tmp_path:
     ]
     assert len(depth_blobs) == 1
     np.testing.assert_array_equal(depth_png.decode(depth_blobs[0]), np.full((32, 32), 2000, dtype=np.uint16))  # 2.0 m, in millimetres
+
+
+@pytest.mark.usefixtures("stand_in_vipe")
+def test_a_video_input_puts_the_patches_on_the_source_video_at_its_pts(tmp_path: Path) -> None:
+    from rerun.chunk import RrdReader
+
+    from metrictrail import entities
+    from metrictrail.rerun_log import SourceRaster
+
+    raster = SourceRaster(source_hw=(64, 128), resized_hw=(32, 64), crop_left_top=(16, 0))  # 2x down, then a 32x32 centre crop
+    session = CaptureSession(
+        out_dir=tmp_path,
+        application_id="metrictrail-test",
+        recording_id="video",
+        depth_range_m=(0.3, 3.0),
+        video_time_ns=np.arange(10, dtype=np.int64) * 100_000_000,
+        source_raster=lambda: raster,
+    )
+    session.install()
+    session.pass_frames = 5
+    session.source_frames[0] = 7  # as ViPE's _prepare reports it (a strided clip)
+    tracker: DPVO = cpu_dpvo()
+    tracker.n = 1
+    event = FrameEvent(
+        tstamp=0,
+        frame_index=0,
+        keyframes_before=0,
+        keyframe_added=True,
+        image=torch.full((3, 32, 32), 100, dtype=torch.uint8),
+        intrinsics=torch.tensor([30.0, 30.0, 16.0, 16.0]),
+        depth=FrameDepth(depth=torch.full((32, 32), 2.0), mask=None),
+    )
+    tracker.observers[-1].on_frame(tracker, event)
+    session.uninstall()
+    store = RrdReader(tmp_path / "pass_0.rrd").store()
+    cleared: bool = False
+    paths: set[str] = {str(path) for path in store.schema().entity_paths()}
+    assert {"/" + entities.INPUT, "/" + entities.INPUT_PATCHES, "/" + entities.CAM_DEPTH} <= paths
+    assert "/" + entities.CAM_RGB not in paths and "/" + entities.CAM_PATCHES not in paths
+    for chunk in store.stream():
+        batch = chunk.to_record_batch()
+        if chunk.entity_path == "/" + entities.INPUT:
+            assert batch.column("Pinhole:resolution").to_pylist() == [[[128.0, 64.0]]]
+        if chunk.entity_path == "/" + entities.INPUT_PATCHES and "Points2D:positions" in batch.schema.names:
+            assert batch.column("video_time").to_numpy().astype("int64").tolist() == [700_000_000]
+            positions: Float32[ndarray, "m 2"] = np.array(batch.column("Points2D:positions").to_pylist()[0], dtype=np.float32)
+            assert positions[:, 0].min() >= 32.0 and positions[:, 0].max() <= 96.0  # inside the crop, in source pixels
+        if chunk.entity_path == "/" + entities.INPUT_PATCHES and "Clear:is_recursive" in batch.schema.names:
+            # Cleared at the next source frame: playback past the tracked progress shows no stale patches.
+            assert batch.column("video_time").to_numpy().astype("int64").tolist() == [800_000_000]
+            cleared = True
+    assert cleared
+
+
+def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
+    from metrictrail.capture import dpvo_orient
+
+    # DPVO's world is the first camera's RDF frame: y points down. Cameras walk along x, looking along +z, level.
+    world_T_cam: Float32[ndarray, "n 4 4"] = np.tile(np.eye(4, dtype=np.float32), (6, 1, 1))
+    world_T_cam[:, 0, 3] = np.linspace(0.0, 2.0, 6)
+    rotation, translation = dpvo_orient(world_T_cam)
+    up_in_world: Float32[ndarray, "3"] = np.array([0.0, -1.0, 0.0], dtype=np.float32)  # camera up = -y (RDF)
+    np.testing.assert_allclose(rotation @ up_in_world, [0.0, 0.0, 1.0], atol=1e-5)  # becomes the viewer's +z
+    forward: Float32[ndarray, "3"] = rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    assert abs(float(forward[2])) < 1e-5  # looking level, not into the ground
+    np.testing.assert_allclose(rotation @ world_T_cam[:, :3, 3].mean(axis=0) + translation, 0.0, atol=1e-5)  # centred

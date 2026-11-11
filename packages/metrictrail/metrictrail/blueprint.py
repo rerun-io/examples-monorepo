@@ -1,10 +1,12 @@
 """Default blueprint of a MetricTrail run recording (entity layout in :mod:`metrictrail.entities`).
 
-Left: the frame DPVO tracks with its patches, the MoGe-2 metric depth and normals, the DINOv3 feature PCA. Middle: the
+Left: the input video with DPVO's patches (a frame-directory input: the frames DPVO tracks), the MoGe-2 metric depth and
+normals, the DINOv3 feature PCA. Middle: the
 trajectory against GT after the paper's Sim(3) alignment with the fused metric cloud (a second tab colours the cloud by
 its fused MoGe-2 normals), and DPVO's local BA window. Right: the
 per-frame error and running ATE, the SE(3)-only (scale 1) view on a 1 m grid, and the summary card. A view whose
-data the recording does not hold (no live capture, no GT) is a text tile that says what it is waiting for.
+data the recording does not hold (no live capture, no GT) is a text tile that says what it is waiting for. With a video
+the time panel plays ``video_time`` from the start, as the EgoHand app does.
 """
 
 from dataclasses import dataclass
@@ -14,9 +16,13 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float64
 from numpy import ndarray
+from simplecv.rerun_eye_controls import follow_eye_controls
 
 from metrictrail import entities
 from metrictrail.palette import BACKGROUND_RGB, RunLabel
+
+FOLLOW_EYE: rrb.EyeControls3D = follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=1.5, up_m=0.6, ahead_m=1.5)
+"""Chase eye of the Follow view, in the camera's RDF frame (metres: MetricTrail is metric), as MASt3R-SLAM's."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,18 +84,57 @@ def log_waiting_notes(rec: rr.RecordingStream, has_capture: bool, has_gt: bool) 
         rec.log(f"notes/waiting/{key}", rr.TextDocument(text, media_type=rr.MediaType.MARKDOWN), static=True)
 
 
+def frame_view(*, has_video: bool, has_capture: bool, background: rrb.Background) -> rrb.Spatial2DView:
+    """The input video with DPVO's patches over it (``input``), or for a frame-directory input the frames DPVO tracks."""
+    if has_video:
+        return rrb.Spatial2DView(
+            name="input video + DPVO patches", origin=entities.INPUT, contents=[entities.INPUT_VIDEO, entities.INPUT_PATCHES], background=background
+        )
+    return rrb.Spatial2DView(
+        name="frame + DPVO patches" if has_capture else "input frame",
+        origin=entities.CAM,
+        contents=[entities.CAM_RGB, entities.CAM_PATCHES],
+        background=background,
+    )
+
+
+def tracking_views(background: rrb.Background) -> tuple[rrb.Spatial3DView, rrb.Spatial3DView]:
+    """DPVO's live scene twice, as the dpvo and MASt3R-SLAM apps show theirs: an overview rooted at ``/``, so the
+    gravity alignment on ``dpvo`` applies (rerun#9244: a view's own origin transform is invisible), and a Follow view
+    rooted at the newest keyframe, whose chase eye rides the camera."""
+    overview: rrb.Spatial3DView = rrb.Spatial3DView(
+        name="DPVO overview (keyframes + BA window)", origin="/", contents=["/dpvo/**"], background=background
+    )
+    follow: rrb.Spatial3DView = rrb.Spatial3DView(
+        name="DPVO follow (newest keyframe)",
+        origin=entities.DPVO_CURRENT,
+        contents=["/dpvo/**"],
+        background=background,
+        line_grid=rrb.LineGrid3D(visible=False),
+        eye_controls=FOLLOW_EYE,
+    )
+    return overview, follow
+
+
+def time_panel(*, has_video: bool) -> rrb.TimePanel:
+    """Collapsed; with a video on ``video_time``, playing in a loop (a streamed viewer would otherwise sit at the newest
+    data; playback outruns tracking, so each loop shows more of the run), else on ``frame``."""
+    if has_video:
+        return rrb.TimePanel(state="collapsed", timeline=entities.VIDEO_TIMELINE, play_state="playing", loop_mode="all")
+    return rrb.TimePanel(state="collapsed", timeline=entities.FRAME_TIMELINE)
+
+
 def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
     """The Gradio app's layout of one live run of ``ours`` (a user video has no GT).
 
-    Left: the tracked frame with DPVO's patches, MoGe-2 metric depth and normals of the keyframes. Right, in tabs: DPVO's
+    Left: the input video with DPVO's patches, MoGe-2 metric depth and normals of the keyframes, the DINOv3 feature PCA.
+    Right, in tabs: DPVO's
     keyframe path and BA window as it tracks, then the finished trajectory with the fused metric cloud, and the same
     cloud coloured by its MoGe-2 normals. While tracking (``final_eye`` None) the DPVO tab is active; the final layout
     opens the trajectory tab with ``final_eye`` framing it.
     """
     background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
-    tracking_view: rrb.Spatial3DView = rrb.Spatial3DView(
-        name="DPVO tracking (keyframes + BA window)", origin=entities.DPVO_ROOT, contents=["/dpvo/**"], background=background
-    )
+    tracking_view: rrb.Vertical = rrb.Vertical(*tracking_views(background), name="DPVO tracking")
     world_view: rrb.Spatial3DView = rrb.Spatial3DView(
         name="trajectory + metric surface",
         origin=entities.WORLD_ROOT,
@@ -109,34 +154,33 @@ def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Vertical(
-                rrb.Spatial2DView(
-                    name="frame + DPVO patches", origin=entities.CAM, contents=[entities.CAM_RGB, entities.CAM_PATCHES], background=background
-                ),
+                frame_view(has_video=True, has_capture=True, background=background),
                 rrb.Spatial2DView(name="MoGe-2 metric depth (keyframes)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
                 rrb.Spatial2DView(name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background),
+                rrb.Spatial2DView(name="DINOv3 feature PCA", origin=entities.CAM, contents=[entities.CAM_DINO_PCA], background=background),
             ),
             rrb.Tabs(tracking_view, world_view, world_normals_view, active_tab=0 if final_eye is None else 1),
             column_shares=[1, 3],
         ),
         rrb.BlueprintPanel(state="collapsed"),
         rrb.SelectionPanel(state="collapsed"),
-        rrb.TimePanel(state="collapsed", timeline=entities.FRAME_TIMELINE),
+        time_panel(has_video=True),
         auto_views=False,
         auto_layout=False,
     )
 
 
 def run_blueprint(
-    label: RunLabel, *, has_capture: bool, has_gt: bool, world_eye: SceneView | None = None, metric_eye: SceneView | None = None
+    label: RunLabel,
+    *,
+    has_capture: bool,
+    has_gt: bool,
+    has_video: bool = False,
+    world_eye: SceneView | None = None,
+    metric_eye: SceneView | None = None,
 ) -> rrb.Blueprint:
     """The default layout of one run recording; the eyes frame the trajectory (the viewer's default can sit inside it)."""
     background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
-    frame_view: rrb.Spatial2DView = rrb.Spatial2DView(
-        name="frame + DPVO patches" if has_capture else "input frame",
-        origin=entities.CAM,
-        contents=[entities.CAM_RGB, entities.CAM_PATCHES],
-        background=background,
-    )
     depth_view: rrb.Spatial2DView = rrb.Spatial2DView(
         name="MoGe-2 metric depth (m)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background
     )
@@ -171,11 +215,7 @@ def run_blueprint(
         if has_capture
         else waiting("surface coloured by normals", "normals")
     )
-    window_view: rrb.View = (
-        rrb.Spatial3DView(name="DPVO local BA window", origin=entities.DPVO_ROOT, contents=["/dpvo/**"], background=background)
-        if has_capture
-        else waiting("DPVO local BA window", "window")
-    )
+    window_view: rrb.Container | rrb.View = rrb.Horizontal(*tracking_views(background)) if has_capture else waiting("DPVO local BA window", "window")
     if has_gt:
         error_view: rrb.View = rrb.TimeSeriesView(name="ATE per frame, Sim(3) (m)", origin="metrics/ate_sim3")
         metric_view: rrb.View = rrb.Spatial3DView(
@@ -191,14 +231,14 @@ def run_blueprint(
         metric_view = waiting("metric scale vs GT", "gt")
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Vertical(frame_view, depth_view, normals_view, dino_view),
+            rrb.Vertical(frame_view(has_video=has_video, has_capture=has_capture, background=background), depth_view, normals_view, dino_view),
             rrb.Vertical(rrb.Tabs(world_view, world_normals_view, active_tab=0), window_view, row_shares=[3, 2]),
             rrb.Vertical(error_view, metric_view, rrb.TextDocumentView(name="summary", origin=entities.SUMMARY), row_shares=[2, 3, 2]),
             column_shares=[2, 4, 3],
         ),
         rrb.BlueprintPanel(state="collapsed"),
         rrb.SelectionPanel(state="collapsed"),
-        rrb.TimePanel(state="collapsed", timeline=entities.FRAME_TIMELINE),
+        time_panel(has_video=has_video),
         auto_views=False,
         auto_layout=False,
     )

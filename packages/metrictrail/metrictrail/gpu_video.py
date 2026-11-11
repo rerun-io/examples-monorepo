@@ -24,10 +24,14 @@ from typing import Any
 import torch
 from jaxtyping import UInt8
 from numpy import ndarray
+from serde import from_dict
 from simplecv.video_io import TorchCodecVideoReader
 from torch import Tensor
 from vipe.metrictrail.raster import PreparedRasterStream
 from vipe.streams.base import ProcessedVideoStream, StreamList, VideoFrame, VideoStream
+
+from metrictrail.eval.vipe_output import InputRasterRecord
+from metrictrail.rerun_log import SourceRaster
 
 
 def _rotate_display(frame_3hw: UInt8[Tensor, "3 h w"], rotation_deg: int) -> UInt8[Tensor, "3 h w"]:
@@ -143,6 +147,13 @@ class GpuVideoSession:
     """The prepared clip on the GPU, or None when the run's input took upstream's path."""
     rasters: int = 0
     """Input rasters prepared on the GPU (one per pipeline run)."""
+    raster: SourceRaster | None = None
+    """How the latest input raster (either path) put a source frame on the tracking raster; None before one is ready or
+    without a resize plan."""
+
+    def source_raster(self) -> SourceRaster | None:
+        """:attr:`raster` (the capture's :attr:`~metrictrail.capture.CaptureSession.source_raster` callback)."""
+        return self.raster
 
     def rgb_source(self, source_frame_ids: ndarray) -> Callable[[int], UInt8[ndarray, "h w 3"]] | None:
         """Artifact frame ``i`` -> its prepared 8-bit RGB (tracking's own bytes), copied to the host once."""
@@ -217,20 +228,24 @@ def gpu_prepare_input_raster(
 
 
 @contextmanager
-def gpu_video_input() -> Iterator[GpuVideoSession]:
-    """Route ViPE's input raster through :func:`gpu_prepare_input_raster` for NVDEC streams during the block."""
+def gpu_video_input(session: GpuVideoSession) -> Iterator[GpuVideoSession]:
+    """Route ViPE's input raster through :func:`gpu_prepare_input_raster` for NVDEC streams during the block, and note
+    every prepared raster's plan in ``session``."""
     import vipe.metrictrail.pipeline as vipe_pipeline
 
-    session: GpuVideoSession = GpuVideoSession()
     upstream: Callable[..., Any] = vipe_pipeline.prepare_input_raster
 
     def prepare_input_raster(stream: VideoStream, config: Any, *, device: torch.device | None = None) -> tuple[VideoStream, dict[str, Any]]:
         base: VideoStream = stream
         while isinstance(base, ProcessedVideoStream):  # ViPE's ExactLengthStream around a short stream
             base = base.stream
+        prepared: tuple[VideoStream, dict[str, Any]]
         if isinstance(base, NvdecVideoStream) and str(config.policy) in ("cover_crop", "resize"):
-            return gpu_prepare_input_raster(base, config, session, frame_count=len(stream))
-        return upstream(stream, config, device=device)
+            prepared = gpu_prepare_input_raster(base, config, session, frame_count=len(stream))
+        else:
+            prepared = upstream(stream, config, device=device)
+        session.raster = SourceRaster.from_record(from_dict(InputRasterRecord, prepared[1]))
+        return prepared
 
     vipe_pipeline.prepare_input_raster = prepare_input_raster
     try:

@@ -7,8 +7,10 @@ MetricTrail calibrates the camera itself (SharedK), so there is no intrinsics in
 Streaming: ``@rr.thread_local_stream`` gives each call its own recording, ``rr.binary_stream()`` collects its bytes and
 the generator yields ``(stream.read(), status)``. The pipeline runs in a worker thread and logs into that recording
 explicitly; the capture hooks (:mod:`metrictrail.capture`, ``live`` mode) log every tracked frame as DPVO tracks it, and
-the generator yields what has accumulated about once a second. Calibration has no hook, so the viewer stays empty for
-those ~40 s and the status line says what runs. The trajectory and the final mesh come at the end, from the artifacts.
+the generator yields what has accumulated about once a second. The input video is logged first, from its own samples
+(``rr.VideoStream``), so the viewer plays it during the ~40 s of calibration (which has no hook; the status line says
+what runs); DPVO's patches, depth, normals and the DINOv3 PCA video follow on the video's ``video_time``. The trajectory
+and the final mesh come at the end, from the artifacts.
 """
 
 import threading
@@ -163,8 +165,8 @@ def build_app(data_dir: Path = DATA_DIR) -> gr.Blocks:
     with gr.Blocks(title="MetricTrail") as demo:
         gr.Markdown(
             "# MetricTrail\nMonocular metric SLAM (ViPE `pipeline=metrictrail`): DPVO with MoGe-2 metric depth and DINOv3 "
-            "features. The camera is calibrated from the video itself (about 40 s), then tracking streams in, with a TSDF "
-            "mesh growing from each keyframe; the trajectory and the final mesh arrive at the end."
+            "features. Your video plays at once; the camera is calibrated from it (about 40 s), then tracking streams in over "
+            "the video, with a TSDF mesh growing from each keyframe; the trajectory and the final mesh arrive at the end."
         )
         with gr.Row():
             with gr.Column(scale=1):
