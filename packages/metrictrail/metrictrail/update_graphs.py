@@ -12,6 +12,8 @@ from dpvo.net import Update, UpdateTopology
 from jaxtyping import Float, Int
 from torch import Tensor
 
+from metrictrail.feature_graphs import PrecisionKey, capture
+
 UpdateOutput: TypeAlias = tuple[Float[Tensor, "1 edges dim"], tuple[Float[Tensor, "1 edges 2"], Float[Tensor, "1 edges 2"], None]]
 """Updated hidden state, displacement, confidence, and the unused flow output."""
 MAX_UPDATE_GRAPHS: int = 8
@@ -31,38 +33,28 @@ class UpdateGraphKey:
     """Device that owns inputs and buffers."""
     groups: tuple[int, int]
     """Patch and frame-pair group counts."""
-    autocast: bool
-    """Whether CUDA autocast is enabled."""
-    autocast_dtype: torch.dtype
-    """Autocast target dtype."""
-    matmul_tf32: bool
-    """Matrix multiplication precision."""
-    cudnn_tf32: bool
-    """Convolution precision policy, kept separate during recovery."""
+    precision: PrecisionKey
+    """Precision policy captured by the graph."""
 
 
 @dataclass(frozen=True, slots=True)
 class UpdateGraph:
     """Persistent input buffers, prepared topology, and captured outputs."""
 
-    hidden: Float[Tensor, "1 edges dim"]
-    """Hidden state copied before replay."""
-    context: Float[Tensor, "1 edges dim"]
-    """Context features copied before replay."""
-    correlations: Float[Tensor, "1 edges corr_dim"]
-    """Correlation features copied before replay."""
-    source: Int[Tensor, "edges"]
-    """Source frame indices."""
-    target: Int[Tensor, "edges"]
-    """Target frame indices."""
-    patch: Int[Tensor, "edges"]
-    """Patch indices."""
-    topology: UpdateTopology
-    """Persistent neighbor and aggregation index buffers."""
+    inputs: tuple[Tensor, ...]
+    """Every input copied before replay, in :func:`update_inputs` order: the floating inputs, the edge indices and the
+    topology's neighbor and aggregation index buffers."""
     outputs: UpdateOutput
     """Outputs overwritten by each replay; callers receive copies."""
     graph: torch.cuda.CUDAGraph
     """Captured neural update kernels."""
+
+
+def update_inputs(
+    net: Tensor, inp: Tensor, corr: Tensor, ii: Tensor, jj: Tensor, kk: Tensor, topology: UpdateTopology
+) -> tuple[Tensor, ...]:
+    """The tensors a captured update reads (:attr:`UpdateGraph.inputs` order)."""
+    return (net, inp, corr, ii, jj, kk, topology.previous, topology.following, topology.patch_groups[0], topology.frame_groups[0])
 
 
 @contextmanager
@@ -96,10 +88,9 @@ def update_cuda_graphs() -> Iterator[None]:
             topology = UpdateTopology.from_edges(ii, jj, kk)
         key: UpdateGraphKey = UpdateGraphKey(
             (net.shape, inp.shape, corr.shape), (net.dtype, inp.dtype, corr.dtype), net.device,
-            (topology.patch_groups[1], topology.frame_groups[1]),
-            torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"),
-            bool(torch.backends.cuda.matmul.allow_tf32), bool(torch.backends.cudnn.allow_tf32),
+            (topology.patch_groups[1], topology.frame_groups[1]), PrecisionKey.current(),
         )
+        live: tuple[Tensor, ...] = update_inputs(net, inp, corr, ii, jj, kk, topology)
         model_cache: dict[UpdateGraphKey, UpdateGraph] = cache.setdefault(self, {})
         saved: UpdateGraph | None = model_cache.get(key)
         if saved is None:
@@ -107,40 +98,19 @@ def update_cuda_graphs() -> Iterator[None]:
             model_seen[key] = model_seen.get(key, 0) + 1
             if model_seen[key] < MIN_REPLAY_CALLS or sum(len(graphs) for graphs in cache.values()) >= MAX_UPDATE_GRAPHS:
                 return original(self, net, inp, corr, flow, ii, jj, kk, topology=topology)
-            hidden: Float[Tensor, "1 edges dim"] = net.clone()
-            context: Float[Tensor, "1 edges dim"] = inp.clone()
-            correlations: Float[Tensor, "1 edges corr_dim"] = corr.clone()
-            source: Int[Tensor, "edges"] = ii.clone()
-            target: Int[Tensor, "edges"] = jj.clone()
-            patch: Int[Tensor, "edges"] = kk.clone()
+            static: tuple[Tensor, ...] = tuple(value.clone() for value in live)
+            hidden, context, correlations, source, target, patch, previous, following, patch_index, frame_index = static
             static_topology: UpdateTopology = UpdateTopology(
-                topology.previous.clone(), topology.following.clone(),
-                (topology.patch_groups[0].clone(), topology.patch_groups[1]),
-                (topology.frame_groups[0].clone(), topology.frame_groups[1]),
+                previous, following, (patch_index, topology.patch_groups[1]), (frame_index, topology.frame_groups[1])
             )
-            current: torch.cuda.Stream = torch.cuda.current_stream(net.device)
-            warmup: torch.cuda.Stream = torch.cuda.Stream(device=net.device)
-            warmup.wait_stream(current)
-            with torch.autocast("cuda", enabled=key.autocast, dtype=key.autocast_dtype, cache_enabled=False):
-                with torch.cuda.stream(warmup):
-                    for _ in range(3):
-                        original(self, hidden, context, correlations, None, source, target, patch, topology=static_topology)
-                current.wait_stream(warmup)
-                graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, capture_error_mode="thread_local"):
-                    outputs: UpdateOutput = original(self, hidden, context, correlations, None, source, target, patch, topology=static_topology)
-            saved = UpdateGraph(hidden, context, correlations, source, target, patch, static_topology, outputs, graph)
+            graph, outputs = capture(
+                lambda: original(self, hidden, context, correlations, None, source, target, patch, topology=static_topology),
+                net.device, key.precision,
+            )
+            saved = UpdateGraph(static, outputs, graph)
             model_cache[key] = saved
-        saved.hidden.copy_(net)
-        saved.context.copy_(inp)
-        saved.correlations.copy_(corr)
-        saved.source.copy_(ii)
-        saved.target.copy_(jj)
-        saved.patch.copy_(kk)
-        saved.topology.previous.copy_(topology.previous)
-        saved.topology.following.copy_(topology.following)
-        saved.topology.patch_groups[0].copy_(topology.patch_groups[0])
-        saved.topology.frame_groups[0].copy_(topology.frame_groups[0])
+        for buffer, value in zip(saved.inputs, live, strict=True):
+            buffer.copy_(value)
         saved.graph.replay()
         hidden_out, (delta, weight, _) = saved.outputs
         return hidden_out.clone(), (delta.clone(), weight.clone(), None)

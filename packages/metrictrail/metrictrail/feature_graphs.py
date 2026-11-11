@@ -22,6 +22,47 @@ FeatureModel = TypeVar("FeatureModel", bound=nn.Module)
 
 
 @dataclass(frozen=True, slots=True)
+class PrecisionKey:
+    """The precision policy a captured graph bakes in; a change (the FP32 recovery path) needs another graph."""
+
+    autocast: bool
+    """Whether CUDA autocast is active."""
+    autocast_dtype: torch.dtype
+    """Autocast target dtype."""
+    matmul_tf32: bool
+    """Matrix multiplication precision."""
+    cudnn_tf32: bool
+    """Convolution precision."""
+
+    @staticmethod
+    def current() -> "PrecisionKey":
+        """The policy in force now."""
+        return PrecisionKey(
+            torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"),
+            bool(torch.backends.cuda.matmul.allow_tf32), bool(torch.backends.cudnn.allow_tf32),
+        )
+
+
+def capture[Captured](run: Callable[[], Captured], device: torch.device, precision: PrecisionKey) -> tuple[torch.cuda.CUDAGraph, Captured]:
+    """Warm ``run`` up three times on a side stream, then capture it; returns the graph and the outputs each replay
+    overwrites. ``run`` must read and write only persistent buffers."""
+    current: torch.cuda.Stream = torch.cuda.current_stream(device)
+    warmup: torch.cuda.Stream = torch.cuda.Stream(device=device)
+    warmup.wait_stream(current)
+    # Autocast's temporary weight cache must not outlive allocations made outside the graph.
+    with torch.autocast("cuda", enabled=precision.autocast, dtype=precision.autocast_dtype, cache_enabled=False):
+        with torch.cuda.stream(warmup):
+            for _ in range(3):
+                run()
+        current.wait_stream(warmup)
+        graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
+        # The independent depth producer submits work from another thread during capture.
+        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+            outputs: Captured = run()
+    return graph, outputs
+
+
+@dataclass(frozen=True, slots=True)
 class FeatureGraphKey:
     """Input and precision state fixed by one model's feature graph."""
     shape: torch.Size
@@ -30,14 +71,8 @@ class FeatureGraphKey:
     """Input storage dtype."""
     device: torch.device
     """Device that owns the input and graph buffers."""
-    autocast: bool
-    """Whether CUDA autocast is active."""
-    autocast_dtype: torch.dtype
-    """Autocast target, separate for the FP32 recovery path."""
-    matmul_tf32: bool
-    """Matrix multiplication precision captured by the graph."""
-    cudnn_tf32: bool
-    """Convolution precision captured by the graph."""
+    precision: PrecisionKey
+    """Precision policy captured by the graph."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,28 +100,12 @@ def feature_cuda_graphs() -> Iterator[None]:
     def replay(model: FeatureModel, images: Float[Tensor, "..."], original: Callable[[FeatureModel, Tensor], Tensor]) -> Float[Tensor, "..."]:
         if not images.is_cuda or model.training or torch.is_grad_enabled():
             return original(model, images)
-        key: FeatureGraphKey = FeatureGraphKey(
-            images.shape, images.dtype, images.device,
-            torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"),
-            bool(torch.backends.cuda.matmul.allow_tf32), bool(torch.backends.cudnn.allow_tf32),
-        )
+        key: FeatureGraphKey = FeatureGraphKey(images.shape, images.dtype, images.device, PrecisionKey.current())
         model_cache: dict[FeatureGraphKey, FeatureGraph] = cache.setdefault(model, {})
         saved: FeatureGraph | None = model_cache.get(key)
         if saved is None:
             static: Float[Tensor, "..."] = images.clone()
-            current: torch.cuda.Stream = torch.cuda.current_stream(images.device)
-            warmup: torch.cuda.Stream = torch.cuda.Stream(device=images.device)
-            warmup.wait_stream(current)
-            # Autocast's temporary weight cache must not outlive allocations made outside the graph.
-            with torch.autocast("cuda", enabled=key.autocast, dtype=key.autocast_dtype, cache_enabled=False):
-                with torch.cuda.stream(warmup):
-                    for _ in range(3):
-                        original(model, static)
-                current.wait_stream(warmup)
-                graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
-                # The independent depth producer submits work from another thread during capture.
-                with torch.cuda.graph(graph, capture_error_mode="thread_local"):
-                    features: Float[Tensor, "..."] = original(model, static)
+            graph, features = capture(lambda: original(model, static), images.device, key.precision)
             saved = FeatureGraph(static, features, graph)
             model_cache[key] = saved
         saved.image.copy_(images)
