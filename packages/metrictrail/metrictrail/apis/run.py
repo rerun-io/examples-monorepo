@@ -37,7 +37,7 @@ from vipe.utils.model_cache import ModelCache
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
-from metrictrail.blueprint import log_waiting_notes, run_blueprint
+from metrictrail.blueprint import log_waiting_notes, run_blueprint, shares_input_camera
 from metrictrail.calibration_graphs import calibration_cuda_graphs
 from metrictrail.calibration_gru import GruBackend, calibration_gru
 from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
@@ -398,7 +398,7 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh, video_time_ns=video_time_ns
     )
-    if kept is not None and context is None:
+    if shares_input_camera(has_capture=kept is not None, has_video=has_video, has_gt=context is not None):
         ride_final_trajectory(rec, outputs.trajectory, video_time_ns)
     return RunResult(
         logged=logged,

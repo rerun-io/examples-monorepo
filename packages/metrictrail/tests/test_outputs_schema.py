@@ -1,6 +1,7 @@
 """The run recording's layout: entity paths, components and properties (synthetic inputs, written to a temp .rrd)."""
 
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -117,6 +118,22 @@ def test_the_app_and_the_cli_share_one_layout_with_tabs_in_run_order() -> None:
         "5 · summary",
     ]
 
+
+
+def test_every_video_run_without_gt_shows_its_input_camera_in_the_world_views() -> None:
+    """A live capture or a log of finished artifacts (log_run): the camera the video plays in rides the final trajectory."""
+    from metrictrail.blueprint import run_tabs, shares_input_camera
+
+    assert shares_input_camera(has_capture=False, has_video=True, has_gt=False)
+    assert shares_input_camera(has_capture=True, has_video=False, has_gt=False)
+    assert not shares_input_camera(has_capture=True, has_video=True, has_gt=True)  # the world is aligned to GT
+    assert not shares_input_camera(has_capture=False, has_video=False, has_gt=False)  # no camera entity at all
+    background = rr.blueprint.Background(color=(0, 0, 0))
+    tabs = run_tabs("ours", has_capture=False, has_gt=False, has_video=True, has_calibration=False, background=background)
+    world = tabs[1]
+    assert isinstance(world, rr.blueprint.Spatial3DView) and str(world.name) == "2 · trajectory + metric surface"
+    contents: list[str] = list(cast(list[str], world.contents))
+    assert f"/{entities.DPVO_CURRENT}/**" in contents and f"- /{entities.world_cam('ours')}/**" in contents
 
 
 def test_a_video_run_frames_the_input_video_and_plays_video_time() -> None:

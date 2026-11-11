@@ -169,6 +169,15 @@ def calibration_blueprint() -> rrb.Blueprint:
     )
 
 
+def shares_input_camera(*, has_capture: bool, has_video: bool, has_gt: bool) -> bool:
+    """Whether the world views show the input camera (``dpvo/current``, its pinhole holding the input video) instead of
+    the world's own frustum: without GT, ViPE's world is DPVO's frame, so that camera can ride the final trajectory
+    (:func:`metrictrail.outputs.ride_final_trajectory`); a live capture made the camera, a video input has its pinhole
+    even when logged from finished artifacts. With GT the world is Sim(3)-aligned to the GT and keeps its own camera.
+    """
+    return (has_capture or has_video) and not has_gt
+
+
 def run_tabs(
     label: RunLabel,
     *,
@@ -176,6 +185,7 @@ def run_tabs(
     has_gt: bool,
     has_calibration: bool,
     background: rrb.Background,
+    has_video: bool = False,
     world_eye: SceneView | None = None,
     metric_eye: SceneView | None = None,
 ) -> list[rrb.Container | rrb.View]:
@@ -183,13 +193,10 @@ def run_tabs(
     the run calibrated with the live view), DPVO tracking, the trajectory with the metric surface, the same surface
     coloured by its normals, metric scale vs GT (with GT), the summary.
 
-    Without GT, ViPE's world is DPVO's frame and the world views show the one camera the input video plays in
-    (``dpvo/current``, which rides the final trajectory: :func:`metrictrail.outputs.ride_final_trajectory`) instead of
-    the world's own frustum. With GT the world is Sim(3)-aligned to the GT, so it keeps its own camera.
+    The world views show the input camera instead of the world's own frustum when :func:`shares_input_camera`.
     """
-    shared_camera: bool = has_capture and not has_gt
     world_contents: list[str] = ["/world/**"]
-    if shared_camera:
+    if shares_input_camera(has_capture=has_capture, has_video=has_video, has_gt=has_gt):
         world_contents += [f"- /{entities.world_cam(label)}/**", f"/{entities.DPVO_CURRENT}/**", f"- /{entities.INPUT_PATCHES}"]
     world_eye_controls = world_eye.controls() if world_eye is not None else None
     tabs: list[rrb.Container | rrb.View] = []
@@ -254,7 +261,14 @@ def run_blueprint(
     """
     background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
     tabs: list[rrb.Container | rrb.View] = run_tabs(
-        label, has_capture=has_capture, has_gt=has_gt, has_calibration=has_calibration, background=background, world_eye=world_eye, metric_eye=metric_eye
+        label,
+        has_capture=has_capture,
+        has_gt=has_gt,
+        has_calibration=has_calibration,
+        background=background,
+        has_video=has_video,
+        world_eye=world_eye,
+        metric_eye=metric_eye,
     )
     left: list[rrb.View] = [
         frame_view(has_video=has_video, has_capture=has_capture, background=background),
