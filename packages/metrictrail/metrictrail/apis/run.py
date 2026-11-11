@@ -29,6 +29,7 @@ from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
+from vipe.utils.model_cache import ModelCache
 
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
@@ -230,6 +231,7 @@ def run_and_log(
     live: bool = False,
     on_stage: Callable[[str], None] | None = None,
     on_cursor: Callable[[int], None] | None = None,
+    models: ModelCache | None = None,
 ) -> RunResult:
     """Run the pipeline on ``config.input``, then log the capture and the outputs into ``rec`` (no blueprint).
 
@@ -241,6 +243,8 @@ def run_and_log(
         on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
             it may raise to stop the run.
         on_cursor: Called after each tracked frame with its ``video_time``, ns (the app moves the viewer's cursor there).
+        models: The networks (MoGe-2, DROID, DINO-DPVO) built by an earlier run, reused by this one; the run adds what it
+            builds. None: a cache of this run's own (the pipeline's default). The app keeps one for its whole life.
     """
     from vipe._paths import get_config_path
     from vipe.config.parse import parse_typed_config
@@ -299,7 +303,7 @@ def run_and_log(
     # dl-server (15.7 vs 18.2 fps on TUM fr1_desk). Upstream's run.py imports torch first and never sees this.
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
-    stage("loading the models, then SharedK calibration (MoGe-2 + DINOv3 on the whole clip)")
+    stage("SharedK calibration: the MoGe-2 focal, then DROID keyframes and the focal fit (the first run also loads the models)")
     try:
         with (
             gpu_video_input(gpu),
@@ -307,6 +311,8 @@ def run_and_log(
             update_cuda_graphs() if config.label == "ours" else nullcontext(),
         ):
             pipeline = make_pipeline(typed.pipeline)
+            if models is not None:
+                pipeline.model_cache = models
             streams = make_stream_list(typed.streams)
             for index in range(len(streams)):
                 pipeline.run(streams[index])
