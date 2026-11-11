@@ -6,7 +6,7 @@ DPVO's frame counter); ``source_frame`` (sequence) is the input frame it came fr
 
 Live capture (only while the pipeline runs; :mod:`metrictrail.capture`):
 
-* ``input`` Pinhole of the source camera with ``input/video`` (the input video's own samples) and ``input/patches``;
+* ``dpvo/current/pinhole/video`` (the input video's own samples) and ``.../patches``, in the source camera's pinhole;
 * ``cam`` Pinhole of the tracking raster; ``cam/rgb`` the frame DPVO tracks (frame directories; an H.264 video); ``cam/depth`` the MoGe-2 metric depth DPVO
   is given; ``cam/normals`` MoGe-2's camera-space surface normals of each new keyframe, from the same forward as the
   depth (RGB = (n + 1) / 2 of x right, y down, z forward); ``cam/dino_pca`` DINOv3 patch features on a fixed
@@ -43,14 +43,6 @@ SOURCE_FRAME_TIMELINE: str = "source_frame"
 VIDEO_TIMELINE: str = "video_time"
 """VSLAM-LAB timestamp (duration timeline, the benchmark's own nanoseconds, as dataforge logs it)."""
 
-INPUT: str = "input"
-"""Pinhole of the source camera the input video was shot with (the tracking raster's K mapped back through ViPE's
-resize and crop, :class:`metrictrail.rerun_log.SourceRaster`)."""
-INPUT_VIDEO: str = "input/video"
-"""The input video's own samples (``rr.VideoStream``) on ``video_time``."""
-INPUT_PATCHES: str = "input/patches"
-"""DPVO's newest-keyframe patches in source pixels, over the input video."""
-
 CAM: str = "cam"
 CAM_RGB: str = "cam/rgb"
 CAM_DEPTH: str = "cam/depth"
@@ -65,7 +57,15 @@ DPVO_WINDOW: str = "dpvo/window"
 DPVO_CURRENT: str = "dpvo/current"
 """Newest keyframe's pose; the Follow view rides it."""
 DPVO_CURRENT_PINHOLE: str = "dpvo/current/pinhole"
-"""Its frustum, a child, so a 3D view rooted at the camera stays 3D."""
+"""Its frustum, a child, so a 3D view rooted at the camera stays 3D. For a video input it is the source camera (the
+tracking raster's K mapped back through ViPE's resize and crop, :class:`metrictrail.rerun_log.SourceRaster`), and the
+input video plays inside it."""
+INPUT: str = DPVO_CURRENT_PINHOLE
+"""The pinhole the input video sits in: the moving camera's frustum, so the video shows in the 3D views too."""
+INPUT_VIDEO: str = f"{DPVO_CURRENT_PINHOLE}/video"
+"""The input video's own samples (``rr.VideoStream``) on ``video_time``."""
+INPUT_PATCHES: str = f"{DPVO_CURRENT_PINHOLE}/patches"
+"""DPVO's newest-keyframe patches in source pixels, over the input video."""
 DPVO_WINDOW_POINTS: str = "dpvo/window_points"
 DPVO_MESH: str = "dpvo/mesh"
 """Live TSDF mesh of the app, one subtree per DPVO pass (``pass_<n>``, earlier passes cleared statically): changed

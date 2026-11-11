@@ -15,7 +15,7 @@ and the final mesh come at the end, from the artifacts.
 
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
@@ -155,8 +155,23 @@ def metrictrail_streaming_fn(
     yield stream.read() or b"", summary(result.logged.metrics, time.perf_counter() - started)
 
 
-def build_app(data_dir: Path = DATA_DIR) -> gr.Blocks:
-    """The MetricTrail app: video upload, knobs, examples and status on the left; the streaming viewer on the right."""
+RunFn = Callable[[str | None, int | float, int | float], Iterator[tuple[bytes, str]]]
+"""``(video_path, tracking_stride, max_frames) -> (Rerun bytes, status)`` per yield: :func:`metrictrail_streaming_fn`
+or a host's wrapper of it (a ZeroGPU Space runs it in a ``@spaces.GPU`` worker)."""
+
+
+def build_app(
+    data_dir: Path = DATA_DIR, *, run: RunFn = metrictrail_streaming_fn, examples: list[Path] | None = None, max_frames: int = UPSTREAM_MAX_FRAMES
+) -> gr.Blocks:
+    """The MetricTrail app: video upload, knobs, examples and status on the left; the streaming viewer on the right.
+
+    Args:
+        data_dir: Where :func:`example_videos` finds the example clips (when ``examples`` is None).
+        run: What the Run button calls; a host wraps :func:`metrictrail_streaming_fn` (a GPU reservation) and patches nothing.
+        examples: The example clips; None: :func:`example_videos` of ``data_dir``.
+        max_frames: Default of the max-frames field (a host caps the work a click reserves).
+    """
+    clips: list[Path] = examples if examples is not None else example_videos(data_dir)
     viewer: Rerun = Rerun(
         streaming=True,
         panel_states={"time": "collapsed", "blueprint": "collapsed", "selection": "collapsed"},
@@ -180,13 +195,13 @@ def build_app(data_dir: Path = DATA_DIR) -> gr.Blocks:
                         label="Tracking stride (DPVO tracks every k-th frame)", minimum=1, maximum=5, step=1, value=1
                     )
                     max_frames_number: gr.Number = gr.Number(
-                        label="Max frames (a longer video is strided down to this many)", value=UPSTREAM_MAX_FRAMES, precision=0, minimum=2
+                        label="Max frames (a longer video is strided down to this many)", value=max_frames, precision=0, minimum=2
                     )
-                gr.Examples(examples=[[str(path)] for path in example_videos(data_dir)], inputs=[video_input], cache_examples=False)
+                gr.Examples(examples=[[str(path)] for path in clips], inputs=[video_input], cache_examples=False)
             with gr.Column(scale=5):
                 viewer.render()
         run_event = run_button.click(
-            fn=metrictrail_streaming_fn, inputs=[video_input, stride_slider, max_frames_number], outputs=[viewer, status_text]
+            fn=run, inputs=[video_input, stride_slider, max_frames_number], outputs=[viewer, status_text]
         )
         stop_button.click(fn=None, inputs=None, outputs=None, cancels=[run_event])
     return demo

@@ -1,5 +1,6 @@
 """The Gradio app's builder and helpers, on the CPU (no pipeline runs)."""
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -68,3 +69,17 @@ def test_a_mov_upload_reaches_vipe_under_an_mp4_name(tmp_path: Path) -> None:
     mp4: Path = tmp_path / "clip.mp4"
     mp4.touch()
     assert prepare_input(RunSettings(input=mp4, output=tmp_path / "run2")).stream_path == mp4
+
+
+def test_a_host_passes_its_run_examples_and_frame_cap_to_build_app(tmp_path: Path) -> None:
+    clip: Path = tmp_path / "clip.mp4"
+    clip.touch()
+
+    def hosted_run(video_path: str | None, tracking_stride: int | float, max_frames: int | float) -> Iterator[tuple[bytes, str]]:
+        yield b"", "hosted"
+
+    demo: gr.Blocks = build_app(run=hosted_run, examples=[clip], max_frames=300)
+    components: list[object] = list(demo.blocks.values())
+    assert any(isinstance(block, gr.Dataset) and len(block.samples) == 1 for block in components)
+    assert any(isinstance(block, gr.Number) and block.value == 300 for block in components)
+    assert any(dependency.fn is hosted_run for dependency in demo.fns.values())

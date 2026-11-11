@@ -53,7 +53,7 @@ from torch import Tensor
 from metrictrail import entities
 from metrictrail.live_surface import LiveSurface
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
-from metrictrail.rerun_log import FrameVideo, SourceRaster, log_depth, log_pinholes, set_frame_time
+from metrictrail.rerun_log import CAMERA_PLANE_M, FrameVideo, SourceRaster, log_depth, log_pinholes, set_frame_time
 
 
 def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"]:
@@ -430,17 +430,18 @@ class CaptureSession:
             rec.log(entities.DPVO_ROOT, rr.Transform3D(mat3x3=orient_rotation, translation=orient_translation))
             self.oriented_at = num_keyframes
         rec.log(entities.DPVO_CURRENT, rr.Transform3D(translation=newest_world_T_cam[:3, 3], mat3x3=newest_world_T_cam[:3, :3]))
-        rec.log(
-            entities.DPVO_CURRENT_PINHOLE,
-            rr.Pinhole(
-                focal_length=full_px[:2],
-                principal_point=full_px[2:],
-                resolution=[width, height],
-                image_plane_distance=self.frustum_depth_m,
-                color=BA_WINDOW_RGB,
-                line_width=-2.5,  # negative = UI points (rr.Radius.ui_points); a positive value is metres
-            ),
-        )
+        if raster is None:  # a video input's frustum is the source camera, logged with the frame (log_pinholes)
+            rec.log(
+                entities.DPVO_CURRENT_PINHOLE,
+                rr.Pinhole(
+                    focal_length=full_px[:2],
+                    principal_point=full_px[2:],
+                    resolution=[width, height],
+                    image_plane_distance=CAMERA_PLANE_M,
+                    color=BA_WINDOW_RGB,
+                    line_width=-2.5,  # negative = UI points (rr.Radius.ui_points); a positive value is metres
+                ),
+            )
         num_patches: int = int(dpvo.m)
         patch_frame: Int64[ndarray, "m"] = dpvo.ix[:num_patches].cpu().numpy().astype(np.int64)
         keep: Bool[ndarray, "m"] = patch_frame >= window_start

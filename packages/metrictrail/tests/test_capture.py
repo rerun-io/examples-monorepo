@@ -298,7 +298,7 @@ def test_a_video_input_puts_the_patches_on_the_source_video_at_its_pts(tmp_path:
     from rerun.chunk import RrdReader
 
     from metrictrail import entities
-    from metrictrail.rerun_log import SourceRaster
+    from metrictrail.rerun_log import CAMERA_PLANE_M, SourceRaster
 
     raster = SourceRaster(source_hw=(64, 128), resized_hw=(32, 64), crop_left_top=(16, 0))  # 2x down, then a 32x32 centre crop
     session = CaptureSession(
@@ -332,8 +332,11 @@ def test_a_video_input_puts_the_patches_on_the_source_video_at_its_pts(tmp_path:
     assert "/" + entities.CAM_RGB not in paths and "/" + entities.CAM_PATCHES not in paths
     for chunk in store.stream():
         batch = chunk.to_record_batch()
-        if chunk.entity_path == "/" + entities.INPUT:
+        if chunk.entity_path == "/" + entities.INPUT and "Pinhole:resolution" in batch.schema.names:
+            # The source camera is the moving frustum: the input video plays inside it in the 3D views.
+            assert entities.INPUT == entities.DPVO_CURRENT_PINHOLE
             assert batch.column("Pinhole:resolution").to_pylist() == [[[128.0, 64.0]]]
+            assert batch.column("Pinhole:image_plane_distance").to_pylist()[0][0] == pytest.approx(CAMERA_PLANE_M)
         if chunk.entity_path == "/" + entities.INPUT_PATCHES and "Points2D:positions" in batch.schema.names:
             assert batch.column("video_time").to_numpy().astype("int64").tolist() == [700_000_000]
             positions: Float32[ndarray, "m 2"] = np.array(batch.column("Points2D:positions").to_pylist()[0], dtype=np.float32)

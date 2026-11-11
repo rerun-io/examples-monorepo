@@ -21,8 +21,9 @@ from simplecv.rerun_eye_controls import follow_eye_controls
 from metrictrail import entities
 from metrictrail.palette import BACKGROUND_RGB, RunLabel
 
-FOLLOW_EYE: rrb.EyeControls3D = follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=1.5, up_m=0.6, ahead_m=1.5)
-"""Chase eye of the Follow view, in the camera's RDF frame (metres: MetricTrail is metric), as MASt3R-SLAM's."""
+FOLLOW_EYE: rrb.EyeControls3D = follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.9, up_m=0.35, ahead_m=1.0)
+"""Chase eye of the Follow view, in the camera's RDF frame (metres: MetricTrail is metric): close enough that the frustum
+and the video in it fill the view (MASt3R-SLAM sits 1.5 m back)."""
 
 
 @dataclass(frozen=True, slots=True)

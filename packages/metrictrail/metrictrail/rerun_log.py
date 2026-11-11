@@ -27,6 +27,7 @@ from simplecv.video_encoder import VideoCodecChoice, VideoEncoder
 
 from metrictrail import entities
 from metrictrail.eval.vipe_output import InputRasterRecord
+from metrictrail.palette import BA_WINDOW_RGB
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 VIEWER_CODECS: tuple[str, ...] = ("h264", "av1")
@@ -34,6 +35,8 @@ VIEWER_CODECS: tuple[str, ...] = ("h264", "av1")
 Chromium has no HEVC)."""
 HARDWARE_ENCODER: str = "h264_nvenc"
 """The encoder :class:`FrameVideo` expects; anything else is the CPU fallback and is warned about once."""
+CAMERA_PLANE_M: float = 0.5
+"""Image-plane distance of the moving camera's frustum, metres: large enough to see the video playing inside it."""
 _warned_cpu_encoder: list[bool] = [False]
 """Whether the CPU-encoder warning was given in this process."""
 
@@ -101,14 +104,22 @@ def set_frame_time(rec: rr.RecordingStream, row: int, source_frame: int | None, 
 
 
 def log_pinholes(rec: rr.RecordingStream, k4_raster: Float64[ndarray, "4"], raster_hw: tuple[int, int], raster: SourceRaster | None) -> None:
-    """``cam``: the tracking raster's pinhole; with ``raster``, also ``input``: the source camera the input video sits in."""
+    """``cam``: the tracking raster's pinhole; with ``raster``, also :data:`entities.INPUT`: the source camera the input
+    video plays in, the moving camera's frustum in the 3D views."""
     height, width = raster_hw
     rec.log(entities.CAM, rr.Pinhole(focal_length=k4_raster[:2], principal_point=k4_raster[2:], resolution=[width, height]))
     if raster is not None:
         k4_source: Float64[ndarray, "4"] = raster.source_intrinsics(k4_raster)
         rec.log(
             entities.INPUT,
-            rr.Pinhole(focal_length=k4_source[:2], principal_point=k4_source[2:], resolution=[raster.source_hw[1], raster.source_hw[0]]),
+            rr.Pinhole(
+                focal_length=k4_source[:2],
+                principal_point=k4_source[2:],
+                resolution=[raster.source_hw[1], raster.source_hw[0]],
+                image_plane_distance=CAMERA_PLANE_M,
+                color=BA_WINDOW_RGB,
+                line_width=-2.5,  # negative = UI points
+            ),
         )
 
 
