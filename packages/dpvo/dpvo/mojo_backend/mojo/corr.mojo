@@ -15,6 +15,8 @@ Shapes (C = channels, D = 2R + 2, P x P = patch grid):
 from max.gpu import MAX_THREADS_PER_BLOCK_METADATA, global_idx
 from std.math import floor
 from std.memory import bitcast
+from std.sys._assembly import inlined_assembly
+from std.sys.info import is_nvidia_gpu
 from std.utils.static_tuple import StaticTuple
 
 from layout import ImmTileTensor, MutTileTensor, row_major
@@ -73,8 +75,19 @@ def _mad[dtype: DType](s: Scalar[dtype], a: Scalar[dtype], b: Scalar[dtype]) -> 
     """`s + a * b` as c10::Half computes it for half (product and sum each rounded to half), plain for float32."""
     comptime match dtype:
         case .float16:
-            var product = _round_to_half(a.cast[.float32]() * b.cast[.float32]())
-            return (s.cast[.float32]() + product).cast[dtype]()
+            comptime if is_nvidia_gpu():
+                # Explicit round-to-nearest instructions cannot contract to an FMA.
+                # No .ftz: half subnormals follow the same rounding as c10::Half.
+                var bits = inlined_assembly[
+                    "{ .reg .b16 product; mul.rn.f16 product, $2, $3; add.rn.f16 $0, $1, product; }",
+                    UInt16,
+                    constraints="=h,h,h,h",
+                    has_side_effect=False,
+                ](bitcast[DType.uint16](s), bitcast[DType.uint16](a), bitcast[DType.uint16](b))
+                return bitcast[DType.float16](bits).cast[dtype]()
+            else:
+                var product = _round_to_half(a.cast[.float32]() * b.cast[.float32]())
+                return (s.cast[.float32]() + product).cast[dtype]()
         case _:
             return s + a * b
 
