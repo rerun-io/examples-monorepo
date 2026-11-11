@@ -67,15 +67,14 @@ def waiting(name: str, what: str) -> rrb.TextDocumentView:
 
 
 def waiting_notes(has_capture: bool, has_gt: bool) -> dict[str, str]:
-    """``notes/waiting/<key>`` texts for the tiles the blueprint shows instead of missing data."""
+    """``notes/waiting/<key>`` texts for the tiles the blueprint shows instead of missing data (a run without GT has no
+    GT tab, so nothing waits for GT; ``has_gt`` stays for the callers)."""
     notes: dict[str, str] = {}
     if not has_capture:
         text: str = (
             "waiting for a live capture: `metrictrail run` logs this while the pipeline runs; this recording was logged from finished artifacts"
         )
         notes |= {"dino": text, "patches": text, "window": text, "normals": text}
-    if not has_gt:
-        notes |= {"gt": "waiting for ground truth: pass a VSLAM-LAB sequence (`--gt-sequence`)"}
     return notes
 
 
@@ -171,55 +170,74 @@ def calibration_blueprint() -> rrb.Blueprint:
     )
 
 
-def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
-    """The Gradio app's layout once DPVO tracks (after :func:`calibration_blueprint`) and of the finished run (``ours``;
-    a user video has no GT), on ``video_time``.
+def run_tabs(
+    label: RunLabel,
+    *,
+    has_capture: bool,
+    has_gt: bool,
+    has_calibration: bool,
+    background: rrb.Background,
+    world_eye: SceneView | None = None,
+    metric_eye: SceneView | None = None,
+) -> list[rrb.Container | rrb.View]:
+    """The right-hand tabs of :func:`run_blueprint`, numbered in the order the run makes them: SharedK calibration (when
+    the run calibrated with the live view), DPVO tracking, the trajectory with the metric surface, the same surface
+    coloured by its normals, metric scale vs GT (with GT), the summary.
 
-    Left: the input video with DPVO's patches, MoGe-2 metric depth and normals of the keyframes, the DINOv3 feature PCA.
-    Right, in tabs, in the order the run makes them: SharedK calibration's map and plots (to look back at), DPVO's
-    keyframe path and BA window as it tracks, then the finished trajectory with the fused metric cloud, and the same
-    cloud coloured by its MoGe-2 normals; the world views show the one camera the video plays in. While tracking
-    (``final_eye`` None) the DPVO tab is active; the final layout opens the trajectory tab with ``final_eye`` framing it.
+    Without GT, ViPE's world is DPVO's frame and the world views show the one camera the input video plays in
+    (``dpvo/current``, which rides the final trajectory: :func:`metrictrail.outputs.ride_final_trajectory`) instead of
+    the world's own frustum. With GT the world is Sim(3)-aligned to the GT, so it keeps its own camera.
     """
-    background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
-    calibration_view: rrb.Vertical = rrb.Vertical(*calibration_views(background), row_shares=[3, 1], name="1 · SharedK calibration")
-    tracking_view: rrb.Vertical = rrb.Vertical(*tracking_views(background), name="2 · DPVO tracking")
-    # One camera in every view: the live DPVO camera with the input video in its pinhole, which rides the final
-    # trajectory once the run ends (metrictrail.outputs.ride_final_trajectory), instead of the world's own frustum.
-    shared_camera: list[str] = ["/world/**", f"- /{entities.world_cam('ours')}/**", f"/{entities.DPVO_CURRENT}/**", f"- /{entities.INPUT_PATCHES}"]
-    world_view: rrb.Spatial3DView = rrb.Spatial3DView(
-        name="3 · trajectory + metric surface",
-        origin=entities.WORLD_ROOT,
-        contents=[*shared_camera, f"- /{entities.WORLD_CLOUD_NORMALS}", f"- /{entities.WORLD_MESH_NORMALS}"],
-        background=background,
-        line_grid=rrb.LineGrid3D(visible=False),
-        eye_controls=final_eye.controls() if final_eye is not None else None,
+    shared_camera: bool = has_capture and not has_gt
+    world_contents: list[str] = ["/world/**"]
+    if shared_camera:
+        world_contents += [f"- /{entities.world_cam(label)}/**", f"/{entities.DPVO_CURRENT}/**", f"- /{entities.INPUT_PATCHES}"]
+    world_eye_controls = world_eye.controls() if world_eye is not None else None
+    tabs: list[rrb.Container | rrb.View] = []
+
+    def numbered(name: str) -> str:
+        return f"{len(tabs) + 1} · {name}"
+
+    if has_calibration:
+        tabs.append(rrb.Vertical(*calibration_views(background), row_shares=[3, 1], name=numbered("SharedK calibration")))
+    tabs.append(
+        rrb.Vertical(*tracking_views(background), name=numbered("DPVO tracking")) if has_capture else waiting(numbered("DPVO tracking"), "window")
     )
-    world_normals_view: rrb.Spatial3DView = rrb.Spatial3DView(
-        name="4 · surface coloured by normals",
-        origin=entities.WORLD_ROOT,
-        contents=[*shared_camera, f"- /{entities.WORLD_CLOUD}", f"- /{entities.WORLD_MESH}"],
-        background=background,
-        line_grid=rrb.LineGrid3D(visible=False),
-        eye_controls=final_eye.controls() if final_eye is not None else None,
+    tabs.append(
+        rrb.Spatial3DView(
+            name=numbered("trajectory vs GT, Sim(3) aligned + metric surface" if has_gt else "trajectory + metric surface"),
+            origin=entities.WORLD_ROOT,
+            contents=[*world_contents, f"- /{entities.WORLD_CLOUD_NORMALS}", f"- /{entities.WORLD_MESH_NORMALS}"],
+            background=background,
+            line_grid=rrb.LineGrid3D(visible=False),
+            eye_controls=world_eye_controls,
+        )
     )
-    return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Vertical(
-                frame_view(has_video=True, has_capture=True, background=background),
-                rrb.Spatial2DView(name="MoGe-2 metric depth (keyframes)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
-                rrb.Spatial2DView(name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background),
-                rrb.Spatial2DView(name="DINOv3 feature PCA", origin=entities.CAM, contents=[entities.CAM_DINO_PCA], background=background),
-            ),
-            rrb.Tabs(calibration_view, tracking_view, world_view, world_normals_view, active_tab=1 if final_eye is None else 2),
-            column_shares=[1, 3],
-        ),
-        rrb.BlueprintPanel(state="collapsed"),
-        rrb.SelectionPanel(state="collapsed"),
-        time_panel(has_video=True, live=final_eye is None),
-        auto_views=False,
-        auto_layout=False,
+    tabs.append(
+        rrb.Spatial3DView(
+            name=numbered("surface coloured by normals"),
+            origin=entities.WORLD_ROOT,
+            contents=[*world_contents, f"- /{entities.WORLD_CLOUD}", f"- /{entities.WORLD_MESH}"],
+            background=background,
+            line_grid=rrb.LineGrid3D(visible=False),
+            eye_controls=world_eye_controls,
+        )
+        if has_capture
+        else waiting(numbered("surface coloured by normals"), "normals")
     )
+    if has_gt:
+        metric_view: rrb.Spatial3DView = rrb.Spatial3DView(
+            name="SE(3) only, scale 1: metric scale vs GT (1 m grid)",
+            origin=entities.METRIC_ROOT,
+            contents=["/metric/**", f"- /{entities.METRIC_CLOUD_NORMALS}", f"- /{entities.METRIC_MESH_NORMALS}"],
+            background=background,
+            line_grid=rrb.LineGrid3D(visible=True, spacing=1.0),
+            eye_controls=metric_eye.controls() if metric_eye is not None else None,
+        )
+        error_view: rrb.TimeSeriesView = rrb.TimeSeriesView(name="ATE per frame, Sim(3) (m)", origin="metrics/ate_sim3")
+        tabs.append(rrb.Vertical(metric_view, error_view, row_shares=[3, 1], name=numbered("metric scale vs GT")))
+    tabs.append(rrb.TextDocumentView(name=numbered("summary"), origin=entities.SUMMARY))
+    return tabs
 
 
 def run_blueprint(
@@ -228,69 +246,38 @@ def run_blueprint(
     has_capture: bool,
     has_gt: bool,
     has_video: bool = False,
+    has_calibration: bool = False,
     world_eye: SceneView | None = None,
     metric_eye: SceneView | None = None,
+    tracking: bool = False,
 ) -> rrb.Blueprint:
-    """The default layout of one run recording; the eyes frame the trajectory (the viewer's default can sit inside it)."""
+    """The one layout of a run recording, for the CLI (``metrictrail.apis.run``, ``log_run``) and the app alike.
+
+    Left: the input (video with DPVO's patches, or the tracked frames), MoGe-2 metric depth, MoGe-2 normals and the
+    DINOv3 feature PCA of the keyframes; right: :func:`run_tabs`. ``tracking`` (the app, while DPVO tracks) opens the
+    DPVO tab with the time panel paused for the app's cursor; otherwise the trajectory tab opens, framed by ``world_eye``.
+    The app shows :func:`calibration_blueprint` before tracking starts.
+    """
     background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
-    depth_view: rrb.Spatial2DView = rrb.Spatial2DView(
-        name="MoGe-2 metric depth (m)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background
+    tabs: list[rrb.Container | rrb.View] = run_tabs(
+        label, has_capture=has_capture, has_gt=has_gt, has_calibration=has_calibration, background=background, world_eye=world_eye, metric_eye=metric_eye
     )
-    normals_view: rrb.View = (
+    left: list[rrb.View] = [
+        frame_view(has_video=has_video, has_capture=has_capture, background=background),
+        rrb.Spatial2DView(name="MoGe-2 metric depth (m)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
         rrb.Spatial2DView(name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background)
         if has_capture
-        else waiting("MoGe-2 normals", "normals")
-    )
-    dino_view: rrb.View = (
+        else waiting("MoGe-2 normals", "normals"),
         rrb.Spatial2DView(name="DINOv3 feature PCA", origin=entities.CAM, contents=[entities.CAM_DINO_PCA], background=background)
         if has_capture
-        else waiting("DINOv3 feature PCA", "dino")
-    )
-    world_name: str = "trajectory vs GT, Sim(3) aligned + metric surface" if has_gt else "trajectory + metric surface (ViPE world)"
-    world_view: rrb.Spatial3DView = rrb.Spatial3DView(
-        name=world_name,
-        origin=entities.WORLD_ROOT,
-        contents=["/world/**", f"- /{entities.WORLD_CLOUD_NORMALS}", f"- /{entities.WORLD_MESH_NORMALS}"],
-        background=background,
-        line_grid=rrb.LineGrid3D(visible=False),
-        eye_controls=world_eye.controls() if world_eye is not None else None,
-    )
-    world_normals_view: rrb.View = (
-        rrb.Spatial3DView(
-            name="surface coloured by normals",
-            origin=entities.WORLD_ROOT,
-            contents=["/world/**", f"- /{entities.WORLD_CLOUD}", f"- /{entities.WORLD_MESH}"],
-            background=background,
-            line_grid=rrb.LineGrid3D(visible=False),
-            eye_controls=world_eye.controls() if world_eye is not None else None,
-        )
-        if has_capture
-        else waiting("surface coloured by normals", "normals")
-    )
-    window_view: rrb.Container | rrb.View = rrb.Horizontal(*tracking_views(background)) if has_capture else waiting("DPVO local BA window", "window")
-    if has_gt:
-        error_view: rrb.View = rrb.TimeSeriesView(name="ATE per frame, Sim(3) (m)", origin="metrics/ate_sim3")
-        metric_view: rrb.View = rrb.Spatial3DView(
-            name="SE(3) only, scale 1: metric scale vs GT (1 m grid)",
-            origin=entities.METRIC_ROOT,
-            contents=["/metric/**", f"- /{entities.METRIC_CLOUD_NORMALS}", f"- /{entities.METRIC_MESH_NORMALS}"],
-            background=background,
-            line_grid=rrb.LineGrid3D(visible=True, spacing=1.0),
-            eye_controls=metric_eye.controls() if metric_eye is not None else None,
-        )
-    else:
-        error_view = waiting("ATE per frame", "gt")
-        metric_view = waiting("metric scale vs GT", "gt")
+        else waiting("DINOv3 feature PCA", "dino"),
+    ]
+    tracking_tab: int = 1 if has_calibration else 0
     return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Vertical(frame_view(has_video=has_video, has_capture=has_capture, background=background), depth_view, normals_view, dino_view),
-            rrb.Vertical(rrb.Tabs(world_view, world_normals_view, active_tab=0), window_view, row_shares=[3, 2]),
-            rrb.Vertical(error_view, metric_view, rrb.TextDocumentView(name="summary", origin=entities.SUMMARY), row_shares=[2, 3, 2]),
-            column_shares=[2, 4, 3],
-        ),
+        rrb.Horizontal(rrb.Vertical(*left), rrb.Tabs(*tabs, active_tab=tracking_tab if tracking else tracking_tab + 1), column_shares=[1, 3]),
         rrb.BlueprintPanel(state="collapsed"),
         rrb.SelectionPanel(state="collapsed"),
-        time_panel(has_video=has_video),
+        time_panel(has_video=has_video, live=tracking),
         auto_views=False,
         auto_layout=False,
     )

@@ -122,6 +122,8 @@ class RunResult:
     """Whether GT was logged."""
     has_video: bool
     """Whether the input video was logged (``input/video``, a video input)."""
+    has_calibration: bool
+    """Whether SharedK calibration ran and was logged (:mod:`metrictrail.calibration_live`; not with a known K)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,8 +253,8 @@ def run_and_log(
         config: What to run.
         rec: Target recording.
         live: The capture logs every DPVO pass straight into ``rec`` while it tracks, depth only on frames that grew
-            DPVO's keyframe graph (a recording streamed to a viewer as it grows), and SharedK calibration's sweep before
-            it (:mod:`metrictrail.calibration_live`); False: one file per pass, merged afterwards.
+            DPVO's keyframe graph (a recording streamed to a viewer as it grows); False: one file per pass, merged
+            afterwards. Either way a capture run of ``ours`` logs SharedK calibration's sweep (:mod:`metrictrail.calibration_live`).
         on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
             it may raise to stop the run.
         on_cursor: Called with the ``calibration_step`` of each frame the calibration reads, then the ``video_time``
@@ -314,8 +316,9 @@ def run_and_log(
         )
         session.install()
     restore_calibration: Callable[[], None] | None = None
+    calibration: CalibrationLive | None = None
     init = typed.pipeline.init
-    if config.capture and live and isinstance(init, MetricTrailInitConfig):
+    if config.capture and config.label == "ours" and isinstance(init, MetricTrailInitConfig):
         target: int | None = MODES[init.calibration.budget].target_accepted_keyframes
         calibration = CalibrationLive(
             rec=rec,
@@ -386,7 +389,13 @@ def run_and_log(
     )
     if kept is not None and context is None:
         ride_final_trajectory(rec, outputs.trajectory, video_time_ns)
-    return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None, has_video=has_video)
+    return RunResult(
+        logged=logged,
+        has_capture=kept is not None,
+        has_gt=context is not None,
+        has_video=has_video,
+        has_calibration=calibration is not None and calibration.step >= 0,
+    )
 
 
 def main(config: Config) -> RunMetrics:
@@ -399,6 +408,7 @@ def main(config: Config) -> RunMetrics:
         has_capture=result.has_capture,
         has_gt=result.has_gt,
         has_video=result.has_video,
+        has_calibration=result.has_calibration,
         world_eye=result.logged.world_eye,
         metric_eye=result.logged.metric_eye,
     )
