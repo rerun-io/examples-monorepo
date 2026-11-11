@@ -8,20 +8,44 @@ per-frame metric depth and, from the same MoGe-2 forward, surface normals.
 This package holds our code around upstream: benchmark presets, a run CLI with a Rerun logger, the VSLAM-LAB / paper
 evaluation and the catalog layer. ViPE itself comes from `recipes/vipe-src`.
 
+## Quick start
+
+On Linux with an NVIDIA GPU, from the repository root:
+
+```bash
+pixi run -e metrictrail --frozen metrictrail-example
+```
+
+This runs the 86 s iPhone clip `data/iphone/pool.mp4` with the `video` preset and opens the Rerun viewer. Without a
+display, add `--rr-config.save /abs/path/pool.rrd`. Outputs go to `packages/metrictrail/data/example/pool`. The first
+run builds the Mojo kernels, downloads the weights and the clip, and builds TensorRT engines; later runs reuse them:
+
+| What | Cached in |
+| --- | --- |
+| DINO-DPVO (`nvidia/MetricTrail`), DINOv3 ViT-S/16 (`xysun917/dinov3-vits16`, a mirror of Meta's file) | `packages/metrictrail/data/weights/` |
+| The example clip (`pablovela5620/dpvo-example-data`) | `packages/metrictrail/data/iphone/` |
+| MoGe-2 `Ruicheng/moge-2-vitl-normal` | the Hugging Face cache (`HF_HOME`) |
+| DROID `droid.pth` (SharedK calibration) | the torch hub (`TORCH_HOME`, default `~/.cache/torch`) |
+| ONNX files and TensorRT engines | `~/.cache/monoprior` (`MONOPRIOR_TRT_CACHE`), `~/.cache/trtkit/trt` (`TRTKIT_TRT_CACHE`) |
+
+To use weight files kept elsewhere, export `VIPE_METRICTRAIL_DPVO_CHECKPOINT` and `VIPE_DINOV3_VITS16_CHECKPOINT`
+before `pixi run`: a value set in the shell wins over the feature's defaults.
+
 ## Packaging
 
 | Part | Where it comes from | Why |
 | --- | --- | --- |
 | ViPE + MetricTrail | `recipes/vipe-src`: the GitHub archive of ViPE `ead2e00`, sha256-pinned | `ead2e00` is the first commit with `vipe/metrictrail`; no release has it (v1.2.0 predates it). |
-| Kernels | Mojo, one source for CPU and CUDA, compiled for the local GPU. ViPE's CUDA extension `vipe_ext` is not built: patch 0007 makes `vipe.ext` import `packages/vipe-mojo`'s `vipe_mojo` (the ops MetricTrail calls; the others raise `NotImplementedError` naming the op). DPVO's kernels are `packages/dpvo`'s `dpvo.mojo_backend`. Built by the `vipe-mojo-build` and `dpvo-mojo-build` tasks (a `depends-on` of `metrictrail-run`, `metrictrail-app` and `tests-integration`) | no nvcc build at `pixi install`; one kernel source per op for every device. |
+| Kernels | Mojo, one source for CPU and CUDA, compiled for the local GPU. ViPE's CUDA extension `vipe_ext` is not built: patch 0007 makes `vipe.ext` import `packages/vipe-mojo`'s `vipe_mojo` (the ops MetricTrail calls; the others raise `NotImplementedError` naming the op). DPVO's kernels are `packages/dpvo`'s `dpvo.mojo_backend`. Built by the `vipe-mojo-build` and `dpvo-mojo-build` tasks (a `depends-on` of `metrictrail-run`, `metrictrail-example`, `metrictrail-app` and `tests-integration`) | no nvcc build at `pixi install`; one kernel source per op for every device. |
 | lietorch | patch 0001: ViPE's vendored lietorch (`vipe/ext/lietorch`) imports `lietorch_mojo` and `build.sh` deletes the vendored code; the DPVO shim's `lietorch` re-exports it too (the DPVO copies go with ViPE's DPVO) | one lietorch for the workspace (lietorch-mojo). ViPE's copies are code-identical to upstream lietorch. |
 | DINOv3 | patch 0002: `recipes/dinov3-src` (a run dependency) | the same ViT-S/16; patch tokens are bit-identical. |
 | MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds only that registry and the `fuse_point_cloud` hook `metrictrail.fusion` uses for the normals) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid (1,200 tokens by default); torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
 | DPVO | `packages/dpvo`'s `dpvo.metric.MetricDPVO` (an editable path dependency of the `metrictrail` feature). The recipe deletes ViPE's vendored DPVO, its kernels and the stereo runner, and installs re-export shims at `vipe.metrictrail.dpvo` (`recipes/vipe-src/dpvo_shim`), so ViPE's `slam.py` builds `MetricDPVO` from its yacs config unchanged; patch 0005 hands the DINO patchifier `packages/dpvo`'s patchify keywords | one DPVO for the workspace. ViPE's fork (metric-depth local BA, the metric global-BA backend, the `cuda_ba` prior kernel) is ported onto the typed core's hooks; the three presets run ViPE's operations in ViPE's order (lockstep against ViPE's copy on TUM, 7-Scenes and KITTI). MetricTrail does not use DBoW loop closure, so `packages/dpretrieval` is not used. `metrictrail.capture` observes DPVO through `dpvo.hooks.add_global_observer`. |
 
-Weights are on the NAS (`/mnt/nas/ssd-8tb/metrictrail/weights`, `MANIFEST.md` beside them). The `metrictrail` feature
-sets ViPE's checkpoint variables to these files. MoGe-2's `moge-2-vitl-normal` is the exception: monoprior loads it from
-the Hugging Face cache (pinned revision) when it exports the ONNX for a new token grid or when the torch fallback runs.
+The hidden task `_download-metrictrail-weights` (a `depends-on` of `metrictrail-run`, `metrictrail-app`,
+`metrictrail-example` and `tests-integration`) fetches DINO-DPVO and DINOv3 at pinned revisions into `data/weights/`;
+the `metrictrail` feature points ViPE's checkpoint variables at these files. MoGe-2's `moge-2-vitl-normal` comes from
+the Hugging Face cache (pinned revision) when monoprior exports the ONNX for a new token grid or when the torch fallback runs.
 ONNX files and TensorRT engines are cached under `~/.cache/monoprior` (`MONOPRIOR_TRT_CACHE`); the first run on a new
 raster aspect builds its engines (about 40 s each on the RTX 5090); tracking and SharedK calibration can need
 separate grids.
