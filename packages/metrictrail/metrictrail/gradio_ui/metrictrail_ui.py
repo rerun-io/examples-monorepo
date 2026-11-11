@@ -251,6 +251,10 @@ def metrictrail_streaming_fn(
                     if status.cursor is not None and status.cursor[1] == "tracking" and not tracking_layout:
                         rec.send_blueprint(run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True), make_active=True)
                         tracking_layout = True
+                        # The layout (its time panel waits paused) must reach the viewer, and be ingested, before any play
+                        # command: a play applied first is paused again by the layout. Commands wait for the next poll.
+                        yield stream.read() or b"", line
+                        continue
                     command: dict[str, object] | None = status.cursor_command(time.perf_counter())
                     if command is not None:
                         yield command, line
