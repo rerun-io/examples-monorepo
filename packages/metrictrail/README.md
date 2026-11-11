@@ -26,12 +26,12 @@ ONNX files and TensorRT engines are cached under `~/.cache/monoprior` (`MONOPRIO
 raster aspect builds its engines (about 40 s each on the RTX 5090; TUM needs two, 728x966 for tracking and 714x980 for
 the SharedK calibration raster).
 
-The CLI and app use MoGe-2 detail level 3 (2,000 tokens) for calibration and tracking. Set
+The CLI and app use MoGe-2 detail level 0 (1,200 tokens) for calibration and tracking. Set
 `--depth-resolution-level 9` to reproduce the original 3,600-token prior described above. Each detail level has its
 own engines and forward cache; the run record stores the selected level. This is an accuracy/speed trade:
-on TUM fr1_desk, seed 1234, level 3 gave 2.297 cm Sim(3) ATE and scale 1.05744 against level 9's 2.186 cm and
+on TUM fr1_desk, seed 1234, level 0 gave 2.290 cm Sim(3) ATE and scale 1.05702 against level 9's 2.186 cm and
 1.05873. Both tracked all 613 frames with finite poses. The wider paper evaluation below used level 9 and has
-not been repeated at level 3.
+not been repeated at level 0. The smaller depth workload also leaves room for reducing feature-extractor dispatch.
 
 ## Run
 
