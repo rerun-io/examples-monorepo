@@ -58,7 +58,8 @@ CALIBRATION: str = "calibration"
 optimises with the focal and then throws away; tracking starts again in ``dpvo``."""
 CALIBRATION_KEYFRAMES: str = "calibration/keyframes"
 """One child per kept keyframe, ``f<sweep frame>``: its pose, ``camera`` (its frustum) and ``points``
-(the bundle-adjusted disparities, in the keyframe's camera, after ViPE's multi-view depth filter)."""
+(the bundle-adjusted disparities, in the keyframe's camera, filtered by ViPE's single-view rule:
+:func:`metrictrail.calibration_live.keyframe_points`)."""
 CALIBRATION_PATH: str = "calibration/keyframe_path"
 CALIBRATION_EDGES: str = "calibration/factor_graph"
 """The frontend's factor-graph edges between keyframe centres."""

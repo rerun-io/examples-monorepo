@@ -11,18 +11,9 @@ from numpy import ndarray
 from rerun.chunk import RrdReader
 
 from metrictrail import entities
-from metrictrail.calibration_live import CalibrationLive, KeyframeCloud, MapSnapshot, RunPhase, camera_centres
+from metrictrail.calibration_live import CalibrationLive, KeyframeCloud, MapSnapshot, RunPhase
 
 K_EIGHTH: Float64[ndarray, "3 3"] = np.array([[55.0, 0.0, 32.0], [0.0, 55.0, 18.0], [0.0, 0.0, 1.0]])
-
-
-def test_camera_centres_invert_droids_world_to_camera_poses() -> None:
-    # A camera at (1, 2, 3) turned 90 degrees about z: world -> camera is R^T (x - c), stored as (t, q) = (-R^T c, q(R^T)).
-    centre: Float64[ndarray, "3"] = np.array([1.0, 2.0, 3.0])
-    rot: Float64[ndarray, "3 3"] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-    q_world_to_cam: Float64[ndarray, "4"] = np.array([0.0, 0.0, -np.sin(np.pi / 4), np.cos(np.pi / 4)])  # xyzw of R^T
-    poses: Float32[ndarray, "2 7"] = np.array([[*(-rot.T @ centre), *q_world_to_cam], [0, 0, 0, 0, 0, 0, 1]], dtype=np.float32)
-    np.testing.assert_allclose(camera_centres(poses), np.stack([centre, np.zeros(3)]), atol=1e-5)
 
 
 def snapshot(frames: list[int], changed: list[int]) -> MapSnapshot:
@@ -160,7 +151,7 @@ def test_keyframe_points_back_project_droids_disparities_with_the_eighth_resolut
     masks[0, 3, 5] = True  # masked out
     images = torch.rand((2, 3, 32, 48))
     k4 = torch.tensor([80.0, 80.0, 24.0, 16.0])  # internal raster; /8: fx 10, cx 3, cy 2
-    points, valid, colors = keyframe_points(disps, masks, images, k4)
+    points, valid, colors = keyframe_points(disps, masks, images[:, :, 3::8, 3::8], k4)
     assert points.shape == (2, 4, 6, 3) and valid.shape == (2, 4, 6) and colors.shape == (2, 4, 6, 3)
     np.testing.assert_allclose(points[0, 2, 5].numpy(), [(5 - 3) / 10 * 2.0, (2 - 2) / 10 * 2.0, 2.0], atol=1e-6)
     assert not bool(valid[0, 3, 5]) and not bool(valid[1, 0, 0]) and int(valid.sum()) == 2 * 24 - 2

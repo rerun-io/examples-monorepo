@@ -89,7 +89,7 @@ def main(config: Config) -> RunMetrics:
     if has_video:
         with TemporaryDirectory(prefix="metrictrail-viewer-") as scratch:
             video_time_ns = log_input_video(rec, config.input, Path(scratch))
-    log_waiting_notes(rec, has_capture=False, has_gt=has_gt)
+    log_waiting_notes(rec, has_capture=False)
     options = LogOptions(
         label=config.label,
         log_frames=True,

@@ -6,7 +6,7 @@ the clip from its first frame until it keeps its keyframe budget (128 by default
 with throwaway keyframe poses and disparities, pulled towards MoGe-2 metric depth at the current focal. DPVO then
 tracks the clip from the start with that K.
 
-:func:`install_calibration_live` wraps the calibration engine ``ViPESharedFocalEngine`` and its MoGe-2 wrapper
+:func:`calibration_live_view` wraps the calibration engine ``ViPESharedFocalEngine`` and its MoGe-2 wrapper
 ``AuditedDepthModel`` (ViPE stays unedited); :class:`CalibrationLive` logs what they produce on
 :data:`entities.CALIBRATION_TIMELINE` (the index of the frame the sweep read) and on ``video_time`` / ``source_frame``:
 
@@ -26,7 +26,8 @@ with :class:`CalibrationLiveError` instead.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -36,7 +37,9 @@ from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 
 from metrictrail import entities
+from metrictrail.capture import dpvo_world_T_cam
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB
+from metrictrail.rerun_log import set_source_time
 
 RunPhase = Literal["calibration", "tracking"]
 """Which stage moved the cursor: SharedK's sweep (a ``calibration_step``) or DPVO (a ``video_time``, ns)."""
@@ -60,19 +63,20 @@ def guarded(action: Callable[[], None]) -> None:
         raise CalibrationLiveError(f"the live SharedK view failed: {error!r}") from error
 
 
-def keyframe_points(disps: Any, masks: Any, images: Any, k4_internal: Any) -> tuple[Any, Any, Any]:
+def keyframe_points(disps: Any, masks: Any, samples: Any, k4_internal: Any) -> tuple[Any, Any, Any]:
     """DROID keyframes as camera-space points, as ViPE's ``extract_slam_map(is_local=True)`` back-projects them.
 
     Args:
         disps: ``(d, h/8, w/8)`` bundle-adjusted inverse depth (torch).
         masks: ``(d, h/8, w/8)`` bool, True = invalid.
-        images: ``(d, 3, h, w)`` RGB in [0, 1].
+        samples: ``(d, 3, h/8, w/8)`` RGB in [0, 1]: the keyframe images at ``[..., 3::8, 3::8]``, one pixel per
+            disparity, as ViPE's visualiser samples them (the caller slices before gathering the keyframes).
         k4_internal: ``fx fy cx cy`` at DROID's internal raster; divided by 8 like ``GraphBuffer.K_dense_disp``.
 
     Returns:
         Points ``(d, h/8, w/8, 3)`` float32, validity ``(d, h/8, w/8)`` (ViPE's single-view rule: disparity above half
         its keyframe's mean and not masked; vipe_mojo has no port of the multi-view ``depth_filter``) and colours
-        ``(d, h/8, w/8, 3)`` uint8 (the pixel at ``3::8``, as ViPE's visualiser samples it).
+        ``(d, h/8, w/8, 3)`` uint8.
     """
     import torch
 
@@ -82,7 +86,7 @@ def keyframe_points(disps: Any, masks: Any, images: Any, k4_internal: Any) -> tu
     depth = 1.0 / disps.float().clamp_min(1e-6)
     points = torch.stack([(u - cx) / fx * depth, (v - cy) / fy * depth, depth], dim=-1).float()
     valid = (disps > 0.5 * disps.mean(dim=(1, 2), keepdim=True)) & ~masks
-    colors = (images[:, :, 3::8, 3::8].float().clamp(0, 1) * 255).byte().moveaxis(1, -1)
+    colors = (samples.float().clamp(0, 1) * 255).byte().moveaxis(1, -1)
     return points, valid, colors
 
 
@@ -94,15 +98,6 @@ def depth_range_m(prior_m: Float32[ndarray, "h w"]) -> tuple[float, float]:
         return 0.0, 1.0
     lo, hi = np.percentile(valid, [2.0, 98.0])
     return float(lo), float(max(hi, lo + 1e-3))
-
-
-def camera_centres(world_to_cam: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 3"]:
-    """Camera centres of lietorch SE3 world-to-camera poses ``(tx ty tz qx qy qz qw)``: ``-R^T t``."""
-    t: Float32[ndarray, "n 3"] = world_to_cam[:, :3]
-    u: Float32[ndarray, "n 3"] = -world_to_cam[:, 3:6]  # the conjugate quaternion rotates by R^T
-    w: Float32[ndarray, "n 1"] = world_to_cam[:, 6:7]
-    uxt: Float32[ndarray, "n 3"] = np.cross(u, t)
-    return (-(t + 2.0 * w * uxt + 2.0 * np.cross(u, uxt))).astype(np.float32)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,8 +163,6 @@ class CalibrationLive:
     """``time.perf_counter()`` of the last map read."""
     logged: set[int] = field(default_factory=set)
     """Source frames of the keyframes in the viewer."""
-    initial_focal_px: float | None = None
-    """The sweep's starting focal: the median of MoGe-2's head focals."""
     focal_px: float | None = None
     """The newest focal."""
 
@@ -186,26 +179,25 @@ class CalibrationLive:
         if self.step < 0:
             return f"SharedK calibration: MoGe-2 focal on frame {len(self.head_focals_px)} / {self.head_frames}"
         text: str = f"SharedK calibration: {self.step + 1} frames read, {self.kept} / {self.target_keyframes} keyframes"
-        if self.focal_px is not None and self.initial_focal_px is not None:
-            text += f", focal {self.focal_px:.1f} px (MoGe-2: {self.initial_focal_px:.1f} px)"
+        if self.focal_px is not None and self.head_focals_px:  # the sweep starts from the median of the head focals
+            text += f", focal {self.focal_px:.1f} px (MoGe-2: {float(np.median(self.head_focals_px)):.1f} px)"
         return text
 
-    def set_time(self, step: int, source_frame: int | None) -> None:
-        """Every timeline of ``step``."""
+    @contextmanager
+    def at(self, step: int, source_frame: int | None) -> Iterator[None]:
+        """Log on every timeline of ``step`` (``calibration_step``, and its source frame's), then reset the time."""
         self.rec.set_time(entities.CALIBRATION_TIMELINE, sequence=step)
-        if source_frame is None:
-            return
-        self.rec.set_time(entities.SOURCE_FRAME_TIMELINE, sequence=source_frame)
-        if self.video_time_ns is not None and source_frame < self.video_time_ns.shape[0]:
-            self.rec.set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(int(self.video_time_ns[source_frame]), "ns"))
+        set_source_time(self.rec, source_frame, self.video_time_ns)
+        try:
+            yield
+        finally:
+            self.rec.reset_time()
 
     def head_focal(self, k4: Float64[ndarray, "4"]) -> None:
         """MoGe-2's focal on the next head frame (the head is the clip's first frames, so its index is the step)."""
-        self.set_time(len(self.head_focals_px), len(self.head_focals_px))
-        self.rec.log(entities.CALIBRATION_HEAD_FOCAL, rr.Scalars(float(k4[0])))
-        self.rec.reset_time()
+        with self.at(len(self.head_focals_px), len(self.head_focals_px)):
+            self.rec.log(entities.CALIBRATION_HEAD_FOCAL, rr.Scalars(float(k4[0])))
         self.head_focals_px.append(float(k4[0]))
-        self.initial_focal_px = float(np.median(self.head_focals_px))
         if self.on_stage is not None:
             self.on_stage(self.status())
 
@@ -222,17 +214,15 @@ class CalibrationLive:
     def frontend(self, keyframes: int) -> bool:
         """The frontend ran on the newest frame and keeps ``keyframes``; returns whether to read the map now."""
         self.kept = keyframes
-        self.set_time(self.step, self.source_frame)
-        self.rec.log(entities.CALIBRATION_KEPT, rr.Scalars(float(keyframes)))
-        self.rec.reset_time()
+        with self.at(self.step, self.source_frame):
+            self.rec.log(entities.CALIBRATION_KEPT, rr.Scalars(float(keyframes)))
         return time.perf_counter() - self.read_at >= self.min_interval_s
 
     def focal(self, k4: Float64[ndarray, "4"]) -> None:
         """The focal (raster px) after a backend solve."""
         self.focal_px = float(k4[0])
-        self.set_time(max(self.step, 0), self.source_frame)
-        self.rec.log(entities.CALIBRATION_FOCAL, rr.Scalars(self.focal_px))
-        self.rec.reset_time()
+        with self.at(max(self.step, 0), self.source_frame):
+            self.rec.log(entities.CALIBRATION_FOCAL, rr.Scalars(self.focal_px))
 
     def map(self, snapshot: MapSnapshot, k4_raster: Float64[ndarray, "4"]) -> None:
         """Log a map read: the changed keyframes' poses, frustums and points, the path, the
@@ -240,32 +230,31 @@ class CalibrationLive:
         self.read_at = time.perf_counter()
         self.kept = int(snapshot.steps.shape[0])
         self.focal_px = float(k4_raster[0])
-        self.set_time(max(self.step, 0), self.source_frame)
-        frames: list[int] = [int(frame) for frame in snapshot.steps]
-        for dropped in sorted(self.logged - set(frames)):
-            self.rec.log(entities.calibration_keyframe(dropped), rr.Clear(recursive=True))
-        self.logged = set(frames)
-        if frames:
-            centres: Float32[ndarray, "n 3"] = camera_centres(snapshot.world_to_cam)
-            height8, width8 = snapshot.newest_prior_m.shape
-            index_of: dict[int, int] = {frame: index for index, frame in enumerate(frames)}
-            for cloud in snapshot.changed:  # ViPE's dirty keyframes: the ones whose pose, disparities or focal moved
-                index: int = index_of[cloud.step]
-                pose: Float32[ndarray, "7"] = snapshot.world_to_cam[index]
-                entity: str = entities.calibration_keyframe(cloud.step)
-                self.rec.log(entity, rr.Transform3D(translation=centres[index], quaternion=rr.Quaternion(xyzw=[-pose[3], -pose[4], -pose[5], pose[6]])))
-                self.rec.log(
-                    f"{entity}/camera",
-                    rr.Pinhole(image_from_camera=snapshot.k_eighth, resolution=[width8, height8], image_plane_distance=KEYFRAME_PLANE_M, color=KEYFRAME_RGB),
-                )
-                self.rec.log(f"{entity}/points", rr.Points3D(cloud.points_cam, colors=cloud.colors, radii=-2.0))
-            self.rec.log(entities.CALIBRATION_PATH, rr.LineStrips3D([centres], colors=BA_WINDOW_RGB, radii=-1.5))
-            self.rec.log(entities.CALIBRATION_EDGES, rr.LineStrips3D(centres[snapshot.edges], colors=EDGE_RGB, radii=-0.5))
-            lo, hi = depth_range_m(snapshot.newest_prior_m)
-            self.rec.log(entities.CALIBRATION_NEWEST_RGB, rr.Image(snapshot.newest_rgb).compress(jpeg_quality=85))
-            self.rec.log(entities.CALIBRATION_NEWEST_PRIOR, rr.DepthImage(snapshot.newest_prior_m, meter=1.0, colormap="turbo", depth_range=[lo, hi]))
-            self.rec.log(entities.CALIBRATION_NEWEST_DEPTH, rr.DepthImage(snapshot.newest_depth_m, meter=1.0, colormap="turbo", depth_range=[lo, hi]))
-        self.rec.reset_time()
+        with self.at(max(self.step, 0), self.source_frame):
+            frames: list[int] = [int(frame) for frame in snapshot.steps]
+            for dropped in sorted(self.logged - set(frames)):
+                self.rec.log(entities.calibration_keyframe(dropped), rr.Clear(recursive=True))
+            self.logged = set(frames)
+            if frames:
+                world_T_cam: Float32[ndarray, "n 4 4"] = dpvo_world_T_cam(snapshot.world_to_cam)
+                centres: Float32[ndarray, "n 3"] = world_T_cam[:, :3, 3]
+                height8, width8 = snapshot.newest_prior_m.shape
+                index_of: dict[int, int] = {frame: index for index, frame in enumerate(frames)}
+                for cloud in snapshot.changed:  # ViPE's dirty keyframes: the ones whose pose, disparities or focal moved
+                    index: int = index_of[cloud.step]
+                    entity: str = entities.calibration_keyframe(cloud.step)
+                    self.rec.log(entity, rr.Transform3D(translation=centres[index], mat3x3=world_T_cam[index, :3, :3]))
+                    self.rec.log(
+                        f"{entity}/camera",
+                        rr.Pinhole(image_from_camera=snapshot.k_eighth, resolution=[width8, height8], image_plane_distance=KEYFRAME_PLANE_M, color=KEYFRAME_RGB),
+                    )
+                    self.rec.log(f"{entity}/points", rr.Points3D(cloud.points_cam, colors=cloud.colors, radii=-2.0))
+                self.rec.log(entities.CALIBRATION_PATH, rr.LineStrips3D([centres], colors=BA_WINDOW_RGB, radii=-1.5))
+                self.rec.log(entities.CALIBRATION_EDGES, rr.LineStrips3D(centres[snapshot.edges], colors=EDGE_RGB, radii=-0.5))
+                lo, hi = depth_range_m(snapshot.newest_prior_m)
+                self.rec.log(entities.CALIBRATION_NEWEST_RGB, rr.Image(snapshot.newest_rgb).compress(jpeg_quality=85))
+                self.rec.log(entities.CALIBRATION_NEWEST_PRIOR, rr.DepthImage(snapshot.newest_prior_m, meter=1.0, colormap="turbo", depth_range=[lo, hi]))
+                self.rec.log(entities.CALIBRATION_NEWEST_DEPTH, rr.DepthImage(snapshot.newest_depth_m, meter=1.0, colormap="turbo", depth_range=[lo, hi]))
 
 
 def read_map(engine: Any) -> MapSnapshot:
@@ -285,7 +274,8 @@ def read_map(engine: Any) -> MapSnapshot:
         edges = edges[(edges < count).all(axis=1) & (edges[:, 0] < edges[:, 1])]
         changed: list[KeyframeCloud] = []
         if dirty.numel():
-            points, valid, colors = keyframe_points(buffer.disps[dirty, 0], buffer.masks[dirty, 0], buffer.images[dirty, 0], buffer.intrinsics[0])
+            samples: Any = buffer.images[:count, 0, :, 3::8, 3::8][dirty]  # gather the sampled pixels, not every full raster
+            points, valid, colors = keyframe_points(buffer.disps[dirty, 0], buffer.masks[dirty, 0], samples, buffer.intrinsics[0])
             # Every second row and column: a quarter of the points, still a dense map, a quarter of the bytes per read.
             points_host: Float32[ndarray, "d h16 w16 3"] = points[:, ::2, ::2].cpu().numpy()
             valid_host = valid[:, ::2, ::2].cpu().numpy()
@@ -293,13 +283,14 @@ def read_map(engine: Any) -> MapSnapshot:
             for index, slot in enumerate(dirty.tolist()):
                 keep = valid_host[index]
                 changed.append(KeyframeCloud(int(steps[slot]), points_host[index][keep], colors_host[index][keep]))
-        fx, fy, cx, cy = (buffer.intrinsics[0].double() / 8.0).tolist()  # as GraphBuffer.K_dense_disp
-        k_eighth: Float64[ndarray, "3 3"] = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        k_eighth: Float64[ndarray, "3 3"] = np.asarray(buffer.K_dense_disp[0], dtype=np.float64)
         # The newest keyframe that has its MoGe-2 prior: depth is attached once the frontend keeps a keyframe, so the
         # newest one usually has none yet.
         with_prior = torch.nonzero(buffer.disps_sens[:count, 0].amax(dim=(1, 2)) > 0).flatten()
         shown: int = int(with_prior[-1]) if with_prior.numel() else count - 1
-        _, shown_valid, _ = keyframe_points(buffer.disps[shown : shown + 1, 0], buffer.masks[shown : shown + 1, 0], buffer.images[shown : shown + 1, 0], buffer.intrinsics[0])
+        _, shown_valid, _ = keyframe_points(
+            buffer.disps[shown : shown + 1, 0], buffer.masks[shown : shown + 1, 0], buffer.images[shown : shown + 1, 0, :, 3::8, 3::8], buffer.intrinsics[0]
+        )
         rgb_full: UInt8[ndarray, "h w 3"] = (buffer.images[shown, 0].float().clamp(0, 1) * 255).byte().moveaxis(0, -1).cpu().numpy()
         prior: Float32[ndarray, "h8 w8"] = torch.where(buffer.disps_sens[shown, 0] > 0, 1.0 / buffer.disps_sens[shown, 0], 0.0).float().cpu().numpy()
         depth: Float32[ndarray, "h8 w8"] = torch.where(shown_valid[0], 1.0 / buffer.disps[shown, 0].clamp_min(1e-6), 0.0).float().cpu().numpy()
@@ -315,59 +306,64 @@ def read_map(engine: Any) -> MapSnapshot:
     )
 
 
-def install_calibration_live(live: CalibrationLive) -> Callable[[], None]:
+@contextmanager
+def calibration_live_view(live: CalibrationLive | None) -> Iterator[None]:
     """Wrap ``AuditedDepthModel.estimate_free_fov_k4`` and ``ViPESharedFocalEngine.candidate`` / ``run_frontend`` /
-    ``run_backend`` / ``end_benchmark`` to report to ``live``; returns the function that restores them."""
+    ``run_backend`` / ``end_benchmark`` to report to ``live`` while the context is open; None: nothing to wrap."""
+    if live is None:
+        yield
+        return
+    view: CalibrationLive = live  # the hooks below close over it (a closure loses the narrowing)
     from vipe.metrictrail.calibration.engine import AuditedDepthModel, ViPESharedFocalEngine
 
-    originals: list[tuple[type, str, Callable[..., Any]]] = [
-        (AuditedDepthModel, "estimate_free_fov_k4", AuditedDepthModel.estimate_free_fov_k4),
-        (ViPESharedFocalEngine, "candidate", ViPESharedFocalEngine.candidate),
-        (ViPESharedFocalEngine, "run_frontend", ViPESharedFocalEngine.run_frontend),
-        (ViPESharedFocalEngine, "run_backend", ViPESharedFocalEngine.run_backend),
-        (ViPESharedFocalEngine, "end_benchmark", ViPESharedFocalEngine.end_benchmark),
-    ]
-    head_orig, candidate_orig, frontend_orig, backend_orig, end_orig = (original for _, _, original in originals)
+    head_orig = AuditedDepthModel.estimate_free_fov_k4
+    candidate_orig = ViPESharedFocalEngine.candidate
+    frontend_orig = ViPESharedFocalEngine.run_frontend
+    backend_orig = ViPESharedFocalEngine.run_backend
+    end_orig = ViPESharedFocalEngine.end_benchmark
 
     def log_map(engine: Any) -> None:
         if int(engine.system.buffer.n_frames) > 0:
-            live.map(read_map(engine), engine.recovered_k().astype(np.float64))
+            view.map(read_map(engine), engine.recovered_k().astype(np.float64))
 
     def estimate_free_fov_k4(self: Any, rgb_bchw: Any) -> Any:
         k4: Any = head_orig(self, rgb_bchw)
-        guarded(lambda: live.head_focal(np.asarray(k4, dtype=np.float64)))
+        guarded(lambda: view.head_focal(np.asarray(k4, dtype=np.float64)))
         return k4
 
     def candidate(self: Any, frame_index: int, frame: Any) -> bool:
-        guarded(lambda: live.read(int(frame_index), int(frame.raw_frame_idx)))  # a Stop passes through: not an Exception
+        guarded(lambda: view.read(int(frame_index), int(frame.raw_frame_idx)))  # a Stop passes through: not an Exception
         return candidate_orig(self, frame_index, frame)
 
     def run_frontend(self: Any) -> None:
         frontend_orig(self)
 
         def report() -> None:
-            if live.frontend(int(self.system.buffer.n_frames)):
+            if view.frontend(int(self.system.buffer.n_frames)):
                 log_map(self)
 
         guarded(report)
 
     def run_backend(self: Any, steps: int, *, update_depth: bool) -> None:
         backend_orig(self, steps, update_depth=update_depth)
-        guarded(lambda: live.focal(self.recovered_k().astype(np.float64)))
+        guarded(lambda: view.focal(self.recovered_k().astype(np.float64)))
 
     def end_benchmark(self: Any) -> dict[str, float]:
         timings: dict[str, float] = end_orig(self)
         guarded(lambda: log_map(self))  # after the benchmark interval, so the calibration's own timing leaves this read out
         return timings
 
-    AuditedDepthModel.estimate_free_fov_k4 = estimate_free_fov_k4
-    ViPESharedFocalEngine.candidate = candidate
-    ViPESharedFocalEngine.run_frontend = run_frontend
-    ViPESharedFocalEngine.run_backend = run_backend
-    ViPESharedFocalEngine.end_benchmark = end_benchmark
-
-    def restore() -> None:
-        for owner, name, original in originals:
+    patches: list[tuple[type, str, Callable[..., Any], Callable[..., Any]]] = [
+        (AuditedDepthModel, "estimate_free_fov_k4", head_orig, estimate_free_fov_k4),
+        (ViPESharedFocalEngine, "candidate", candidate_orig, candidate),
+        (ViPESharedFocalEngine, "run_frontend", frontend_orig, run_frontend),
+        (ViPESharedFocalEngine, "run_backend", backend_orig, run_backend),
+        (ViPESharedFocalEngine, "end_benchmark", end_orig, end_benchmark),
+    ]
+    for owner, name, _, wrapper in patches:
+        setattr(owner, name, wrapper)
+    try:
+        yield
+    finally:
+        for owner, name, original, _ in patches:
             setattr(owner, name, original)
-
-    return restore

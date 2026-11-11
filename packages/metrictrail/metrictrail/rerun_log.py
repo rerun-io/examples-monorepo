@@ -86,6 +86,11 @@ def set_frame_time(rec: rr.RecordingStream, row: int, source_frame: int | None, 
     """Every timeline of tracked row ``row``: ``frame``, and when known ``source_frame`` and ``video_time``
     (``video_time_ns`` indexed by source frame: the input video's PTS or the benchmark's stamps)."""
     rec.set_time(entities.FRAME_TIMELINE, sequence=row)
+    set_source_time(rec, source_frame, video_time_ns)
+
+
+def set_source_time(rec: rr.RecordingStream, source_frame: int | None, video_time_ns: Int64[ndarray, "n"] | None) -> None:
+    """``source_frame`` and ``video_time`` of a source frame, when known (``video_time_ns`` as :func:`set_frame_time`)."""
     if source_frame is None:
         return
     rec.set_time(entities.SOURCE_FRAME_TIMELINE, sequence=source_frame)

@@ -37,7 +37,7 @@ from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
-from metrictrail.calibration_live import CalibrationLive, RunPhase, install_calibration_live
+from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.feature_graphs import feature_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
@@ -314,7 +314,6 @@ def run_and_log(
             live_surface=live_surface,
         )
         session.install()
-    restore_calibration: Callable[[], None] | None = None
     calibration: CalibrationLive | None = None
     init = typed.pipeline.init
     if config.capture and config.label == "ours" and isinstance(init, MetricTrailInitConfig):
@@ -327,7 +326,6 @@ def run_and_log(
             on_stage=on_stage,
             on_cursor=on_cursor,
         )
-        restore_calibration = install_calibration_live(calibration)
     # This module imports cv2 (metrictrail.frames) before torch, so OpenMP sizes cv2's thread team to every logical
     # CPU while torch keeps one thread per physical core; both teams spinning cost ~13 % tracking fps on the 32-thread
     # dl-server (15.7 vs 18.2 fps on TUM fr1_desk). Upstream's run.py imports torch first and never sees this.
@@ -336,6 +334,7 @@ def run_and_log(
     try:
         stage("SharedK calibration: MoGe-2's focal on the first 32 frames (the first run also loads the models)")
         with (
+            calibration_live_view(calibration),
             gpu_video_input(gpu),
             feature_cuda_graphs() if config.label == "ours" else nullcontext(),
             update_cuda_graphs() if config.label == "ours" else nullcontext(),
@@ -347,8 +346,6 @@ def run_and_log(
             for index in range(len(streams)):
                 pipeline.run(streams[index])
     finally:
-        if restore_calibration is not None:
-            restore_calibration()
         if session is not None:
             session.uninstall()
     wall_s: float = time.perf_counter() - started
@@ -401,7 +398,7 @@ def main(config: Config) -> RunMetrics:
     """Run the pipeline on ``config.input``, then log the capture, the outputs and the default blueprint."""
     rec: rr.RecordingStream = config.rr_config.rec_stream
     result: RunResult = run_and_log(config, rec)
-    log_waiting_notes(rec, has_capture=result.has_capture, has_gt=result.has_gt)
+    log_waiting_notes(rec, has_capture=result.has_capture)
     blueprint = run_blueprint(
         config.label,
         has_capture=result.has_capture,

@@ -8,9 +8,11 @@ Streaming: ``@rr.thread_local_stream`` gives each call its own recording, ``rr.b
 the generator yields ``(stream.read(), status)``. The pipeline runs in a worker thread and logs into that recording
 explicitly; the capture hooks (:mod:`metrictrail.capture`, ``live`` mode) log every tracked frame as DPVO tracks it, and
 the generator yields what has accumulated twice a second. The whole input video is logged first, from its own samples
-(``rr.VideoStream``); the viewer waits paused on it during calibration (which has no hook; the status line says what
-runs), then the generator moves the viewer's cursor to each newly tracked frame (``gradio_rerun.commands.set_time``), so
-DPVO's patches, depth, normals and DINOv3 PCA show as MetricTrail computes them. The trajectory and the final mesh come
+(``rr.VideoStream``). While SharedK calibrates, the viewer shows the calibration layout
+(:func:`metrictrail.blueprint.calibration_blueprint`) and the generator moves its cursor along ``calibration_step`` to each
+frame the sweep reads (``gradio_rerun.commands.set_time``); once DPVO tracks, it switches to the run layout and moves the
+cursor along ``video_time`` to each newly tracked frame, so DPVO's patches, depth, normals and DINOv3 PCA show as
+MetricTrail computes them. The trajectory and the final mesh come
 at the end, from the artifacts, and the clip then plays from the start in a loop.
 """
 
@@ -29,6 +31,8 @@ import rerun as rr
 from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from gradio_rerun.commands import set_time
+from vipe.metrictrail.calibration.config import SharedKCalibrationConfig
+from vipe.metrictrail.calibration.policy import PIPELINE_BUDGETS
 from vipe.utils.model_cache import ModelCache
 
 from metrictrail import entities
@@ -47,9 +51,7 @@ VIDEO_TYPES: list[str] = [".mp4", ".mov", ".MOV", ".webm"]
 POLL_S: float = 0.5
 """How often the generator yields the bytes logged so far and moves the cursor to the newest tracked frame."""
 
-CALIBRATION_BUDGETS: tuple[str, ...] = ("fast64", "robust128", "robust256")
-"""The SharedK budgets a MetricTrail pipeline may select (``vipe.metrictrail.calibration.policy.PIPELINE_BUDGETS``)."""
-UPSTREAM_BUDGET: str = "robust128"
+UPSTREAM_BUDGET: str = SharedKCalibrationConfig.model_fields["budget"].default
 """ViPE's in-the-wild default."""
 APP_BUDGET: str = "fast64"
 """The app's default: on pool.mp4 it reads 413 frames for 64 keyframes, 15 s instead of 29 s for robust128's 840 / 128,
@@ -81,11 +83,9 @@ class RunStatus:
     """Latest status line."""
     cancel: threading.Event = field(default_factory=threading.Event)
     """Set when the generator stops; the next stage or tracked frame raises :class:`RunCancelled`."""
-    cursor: int | None = None
-    """Where the newest frame is: the calibration's ``calibration_step``, or DPVO's ``video_time`` in ns; None before
-    the first."""
-    phase: RunPhase | None = None
-    """Which of the two moved the cursor last (and so which timeline :attr:`cursor` is on)."""
+    cursor: tuple[int, RunPhase] | None = None
+    """Where the newest frame is and which stage moved the cursor there: the calibration's ``calibration_step``, or
+    DPVO's ``video_time`` in ns; None before the first."""
     sent: tuple[int, RunPhase] | None = None
     """The cursor the viewer was last moved to."""
 
@@ -97,18 +97,18 @@ class RunStatus:
 
     def at(self, value: int, phase: RunPhase) -> None:
         """The ``on_cursor`` callback of :func:`run_and_log`."""
-        self.cursor = value
-        self.phase = phase
+        self.cursor = (value, phase)
 
     def cursor_command(self) -> dict[str, object] | None:
         """A viewer update that moves the cursor to the newest frame (paused) on its phase's timeline, or None when it
         has not moved."""
-        if self.cursor is None or self.phase is None or (self.cursor, self.phase) == self.sent:
+        if self.cursor is None or self.cursor == self.sent:
             return None
-        self.sent = (self.cursor, self.phase)
-        if self.phase == "calibration":
-            return dict(set_time(entities.CALIBRATION_TIMELINE, sequence=self.cursor, play=False))
-        return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(self.cursor, "ns"), play=False))
+        self.sent = self.cursor
+        value, phase = self.cursor
+        if phase == "calibration":
+            return dict(set_time(entities.CALIBRATION_TIMELINE, sequence=value, play=False))
+        return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(value, "ns"), play=False))
 
 
 def example_videos(data_dir: Path) -> list[Path]:
@@ -125,8 +125,8 @@ def app_overrides(tracking_stride: int, max_frames: int, budget: str) -> list[st
     """
     if tracking_stride < 1 or max_frames < 2:
         raise ValueError(f"tracking stride must be >= 1 and max frames >= 2, got {tracking_stride} and {max_frames}")
-    if budget not in CALIBRATION_BUDGETS:
-        raise ValueError(f"calibration budget must be one of {CALIBRATION_BUDGETS}, got {budget!r}")
+    if budget not in PIPELINE_BUDGETS:
+        raise ValueError(f"calibration budget must be one of {PIPELINE_BUDGETS}, got {budget!r}")
     overrides: list[str] = []
     if tracking_stride != 1:
         overrides.append(f"pipeline.init.tracking_stride={tracking_stride}")
@@ -162,7 +162,7 @@ def metrictrail_streaming_fn(
         video_path: The uploaded video (a local path); None before an upload.
         tracking_stride: DPVO tracks every k-th prepared frame (``pipeline.init.tracking_stride``).
         max_frames: Longer videos are strided down to at most this many frames (``pipeline.init.input_raster.max_frames``).
-        budget: SharedK calibration's keyframe budget (``pipeline.init.calibration.budget``, :data:`CALIBRATION_BUDGETS`).
+        budget: SharedK calibration's keyframe budget (``pipeline.init.calibration.budget``, :data:`PIPELINE_BUDGETS`).
 
     Yields:
         The Rerun bytes logged since the last yield (or a cursor command for the viewer), and a status line.
@@ -198,7 +198,7 @@ def metrictrail_streaming_fn(
                 except FutureTimeoutError:
                     line: str = f"{status.text} ({time.perf_counter() - started:.0f} s)"
                     yield stream.read() or b"", line
-                    if status.phase == "tracking" and not tracking_layout:
+                    if status.cursor is not None and status.cursor[1] == "tracking" and not tracking_layout:
                         rec.send_blueprint(run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True), make_active=True)
                         tracking_layout = True
                     command: dict[str, object] | None = status.cursor_command()
@@ -276,7 +276,7 @@ def build_app(
                     )
                     budget_dropdown: gr.Dropdown = gr.Dropdown(
                         label="Calibration budget (keyframes SharedK keeps before it fixes the focal; ViPE's default is robust128)",
-                        choices=[(BUDGET_LABELS[budget], budget) for budget in CALIBRATION_BUDGETS],
+                        choices=[(BUDGET_LABELS[budget], budget) for budget in PIPELINE_BUDGETS],
                         value=APP_BUDGET,
                     )
                 gr.Examples(examples=[[str(path)] for path in clips], inputs=[video_input], cache_examples=False)

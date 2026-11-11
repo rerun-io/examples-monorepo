@@ -109,7 +109,7 @@ def test_the_cursor_follows_the_newest_frame_read_or_tracked_once_per_change() -
     from metrictrail.gradio_ui.metrictrail_ui import RunStatus
 
     status = RunStatus()
-    assert status.cursor_command() is None and status.phase is None  # nothing read yet
+    assert status.cursor_command() is None and status.cursor is None  # nothing read yet
     status.at(42, "calibration")
     command = status.cursor_command()
     assert command is not None
@@ -117,7 +117,7 @@ def test_the_cursor_follows_the_newest_frame_read_or_tracked_once_per_change() -
     assert isinstance(payload, dict)
     assert payload["timeline"] == "calibration_step" and payload["kind"] == "sequence" and payload["time"] == "42" and not payload["play"]
     status.at(1_500_000_000, "tracking")
-    assert status.phase == "tracking"
+    assert status.cursor is not None and status.cursor[1] == "tracking"
     command = status.cursor_command()
     assert command is not None
     payload = command["_command"]
@@ -126,3 +126,9 @@ def test_the_cursor_follows_the_newest_frame_read_or_tracked_once_per_change() -
     assert status.cursor_command() is None  # sent once per new frame
     status.at(1_533_333_333, "tracking")
     assert status.cursor_command() is not None
+
+
+def test_the_budget_dropdown_offers_exactly_vipes_budgets() -> None:
+    from metrictrail.gradio_ui.metrictrail_ui import APP_BUDGET, BUDGET_LABELS, PIPELINE_BUDGETS, UPSTREAM_BUDGET
+
+    assert tuple(BUDGET_LABELS) == PIPELINE_BUDGETS and {APP_BUDGET, UPSTREAM_BUDGET} <= set(PIPELINE_BUDGETS)

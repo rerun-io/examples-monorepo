@@ -33,7 +33,7 @@ def synthetic_outputs(world_T_cam: Float64[ndarray, "n 4 4"]) -> RunOutputs:
 def write_recording(path: Path, outputs: RunOutputs, context: GtContext | None, cloud: ColoredCloud | None) -> RunMetrics:
     rec = rr.RecordingStream("metrictrail-test", recording_id="test", send_properties=False)
     rec.save(path)
-    log_waiting_notes(rec, has_capture=False, has_gt=context is not None)
+    log_waiting_notes(rec, has_capture=False)
     provenance = Provenance("seq", "frames", "/run", "unit test (synthetic)", "env", "2026-11-06T00:00:00Z")
     options = LogOptions(label="ours", log_frames=False, raster_policy="unchanged", depth_range_m=(0.3, 3.0))
     logged: LoggedRun = log_run_outputs(rec, outputs, options, frames=None, context=context, cloud_world=cloud, provenance=provenance)
@@ -95,7 +95,7 @@ def test_run_recording_without_gt_has_no_gt_entities(tmp_path: Path, tum_like_co
 def test_blueprint_builds_and_waiting_tiles_match_the_notes(has_capture: bool, has_gt: bool) -> None:
     blueprint = run_blueprint("upstream", has_capture=has_capture, has_gt=has_gt)
     assert isinstance(blueprint, rr.blueprint.Blueprint)
-    notes: dict[str, str] = waiting_notes(has_capture, has_gt)
+    notes: dict[str, str] = waiting_notes(has_capture)
     assert ("dino" in notes) == (not has_capture) and "gt" not in notes
     assert all(text.startswith("waiting for") for text in notes.values())
 

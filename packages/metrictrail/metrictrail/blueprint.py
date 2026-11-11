@@ -66,9 +66,9 @@ def waiting(name: str, what: str) -> rrb.TextDocumentView:
     return rrb.TextDocumentView(name=name, origin=f"notes/waiting/{what}")
 
 
-def waiting_notes(has_capture: bool, has_gt: bool) -> dict[str, str]:
+def waiting_notes(has_capture: bool) -> dict[str, str]:
     """``notes/waiting/<key>`` texts for the tiles the blueprint shows instead of missing data (a run without GT has no
-    GT tab, so nothing waits for GT; ``has_gt`` stays for the callers)."""
+    GT tab, so nothing waits for GT)."""
     notes: dict[str, str] = {}
     if not has_capture:
         text: str = (
@@ -78,9 +78,9 @@ def waiting_notes(has_capture: bool, has_gt: bool) -> dict[str, str]:
     return notes
 
 
-def log_waiting_notes(rec: rr.RecordingStream, has_capture: bool, has_gt: bool) -> None:
+def log_waiting_notes(rec: rr.RecordingStream, has_capture: bool) -> None:
     """Log the texts of :func:`waiting_notes` as static ``TextDocument`` entities."""
-    for key, text in waiting_notes(has_capture, has_gt).items():
+    for key, text in waiting_notes(has_capture).items():
         rec.log(f"notes/waiting/{key}", rr.TextDocument(text, media_type=rr.MediaType.MARKDOWN), static=True)
 
 
@@ -127,9 +127,9 @@ def time_panel(*, has_video: bool, live: bool = False) -> rrb.TimePanel:
     return rrb.TimePanel(state="collapsed", timeline=entities.FRAME_TIMELINE)
 
 
-def calibration_views(background: rrb.Background) -> tuple[rrb.Spatial3DView, rrb.Horizontal]:
-    """SharedK calibration's DROID map in 3D (keyframe frustums with thumbnails, bundle-adjusted points, path, factor
-    graph), and its two plots: the focal (MoGe-2 per head frame, then after each solve) and the keyframes kept."""
+def calibration_views(background: rrb.Background, name: str | None = None) -> rrb.Vertical:
+    """SharedK calibration's DROID map in 3D (keyframe frustums, bundle-adjusted points, path, factor graph) over its two
+    plots: the focal (MoGe-2 per head frame, then after each solve) and the keyframes kept."""
     map_view: rrb.Spatial3DView = rrb.Spatial3DView(
         name="SharedK calibration: DROID keyframe map (thrown away after the focal fit)",
         origin=entities.CALIBRATION,
@@ -140,7 +140,7 @@ def calibration_views(background: rrb.Background) -> tuple[rrb.Spatial3DView, rr
         rrb.TimeSeriesView(name="focal fx (tracking-raster px)", contents=[f"/{entities.CALIBRATION_HEAD_FOCAL}", f"/{entities.CALIBRATION_FOCAL}"]),
         rrb.TimeSeriesView(name="keyframes kept", contents=[f"/{entities.CALIBRATION_KEPT}"]),
     )
-    return map_view, plots
+    return rrb.Vertical(map_view, plots, row_shares=[3, 1], name=name)
 
 
 def calibration_blueprint() -> rrb.Blueprint:
@@ -148,7 +148,6 @@ def calibration_blueprint() -> rrb.Blueprint:
     read; the app moves the cursor there). Left: the newest keyframe, its MoGe-2 depth prior at the current focal and
     its bundle-adjusted depth (the two the focal fit pulls together); right: the DROID map and the two plots."""
     background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
-    map_view, plots = calibration_views(background)
     newest = entities.CALIBRATION_NEWEST
     return rrb.Blueprint(
         rrb.Horizontal(
@@ -159,7 +158,7 @@ def calibration_blueprint() -> rrb.Blueprint:
                 ),
                 rrb.Spatial2DView(name="DROID depth after bundle adjustment", origin=newest, contents=[entities.CALIBRATION_NEWEST_DEPTH], background=background),
             ),
-            rrb.Vertical(map_view, plots, row_shares=[3, 1]),
+            calibration_views(background),
             column_shares=[1, 3],
         ),
         rrb.BlueprintPanel(state="collapsed"),
@@ -199,29 +198,24 @@ def run_tabs(
         return f"{len(tabs) + 1} · {name}"
 
     if has_calibration:
-        tabs.append(rrb.Vertical(*calibration_views(background), row_shares=[3, 1], name=numbered("SharedK calibration")))
+        tabs.append(calibration_views(background, numbered("SharedK calibration")))
     tabs.append(
         rrb.Vertical(*tracking_views(background), name=numbered("DPVO tracking")) if has_capture else waiting(numbered("DPVO tracking"), "window")
     )
-    tabs.append(
-        rrb.Spatial3DView(
-            name=numbered("trajectory vs GT, Sim(3) aligned + metric surface" if has_gt else "trajectory + metric surface"),
+    def world_view(name: str, hidden: tuple[str, str]) -> rrb.Spatial3DView:
+        return rrb.Spatial3DView(
+            name=numbered(name),
             origin=entities.WORLD_ROOT,
-            contents=[*world_contents, f"- /{entities.WORLD_CLOUD_NORMALS}", f"- /{entities.WORLD_MESH_NORMALS}"],
+            contents=[*world_contents, *(f"- /{entity}" for entity in hidden)],
             background=background,
             line_grid=rrb.LineGrid3D(visible=False),
             eye_controls=world_eye_controls,
         )
-    )
+
+    surface: str = "trajectory vs GT, Sim(3) aligned + metric surface" if has_gt else "trajectory + metric surface"
+    tabs.append(world_view(surface, (entities.WORLD_CLOUD_NORMALS, entities.WORLD_MESH_NORMALS)))
     tabs.append(
-        rrb.Spatial3DView(
-            name=numbered("surface coloured by normals"),
-            origin=entities.WORLD_ROOT,
-            contents=[*world_contents, f"- /{entities.WORLD_CLOUD}", f"- /{entities.WORLD_MESH}"],
-            background=background,
-            line_grid=rrb.LineGrid3D(visible=False),
-            eye_controls=world_eye_controls,
-        )
+        world_view("surface coloured by normals", (entities.WORLD_CLOUD, entities.WORLD_MESH))
         if has_capture
         else waiting(numbered("surface coloured by normals"), "normals")
     )
