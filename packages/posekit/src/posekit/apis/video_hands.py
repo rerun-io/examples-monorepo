@@ -20,6 +20,7 @@ needs MP4, so ``as_mp4`` remuxes other containers without re-encoding. Both read
 rotation (an iPhone portrait .MOV), so the frames, their size, the pinhole and the hands are all upright.
 """
 
+import logging
 import math
 import subprocess
 import tempfile
@@ -45,6 +46,8 @@ from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
 from posekit.predictions import HandDetections, HandPoses3d, HandSide, MeshDetail
 from posekit.skeletons import KeypointSkeleton
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 # torchcodec loads its FFmpeg libraries at import; the functions that decode import it, annotations only name the class.
 if TYPE_CHECKING:
@@ -332,24 +335,31 @@ class VideoHandsProgress:
 def open_decoder(video: Path, device: torch.device | str) -> VideoDecoder:
     """A decoder of ``video``'s frames as ``NHWC``: NVDEC on ``device``, or the CPU once NVDEC has failed in this process.
 
-    The first call decodes one frame on the GPU to learn whether NVDEC works here. When it does not and the CPU can
-    read the same video, the failure is remembered with a warning and every later decoder is a CPU one; the caller
-    moves its frames to the GPU either way.
+    NVDEC fails in two ways: torchcodec raises, or it decodes on the CPU without a word (a host without ``libnvcuvid``;
+    ``decoder.cpu_fallback`` says so). The first call also decodes one frame to see the first way. Either way, when the
+    CPU can read the same video the failure is remembered with a warning and every later decoder is a CPU one; the
+    caller moves its frames to the GPU. A single video that NVDEC cannot take is warned about and not remembered.
     """
     from torchcodec.decoders import VideoDecoder
 
-    if HARDWARE_VIDEO.get("decode") is None:
+    if not HARDWARE_VIDEO.get("decode"):
         try:
             decoder = VideoDecoder(video, dimension_order="NHWC", device=device)
             if "decode" not in HARDWARE_VIDEO:
                 decoder.get_frames_in_range(0, 1)
+            if not decoder.cpu_fallback:
                 HARDWARE_VIDEO["decode"] = None
-            return decoder
-        except RuntimeError as gpu_error:
-            decoder = VideoDecoder(video, dimension_order="NHWC")
-            decoder.get_frames_in_range(0, 1)  # raises for a video nothing can read: then NVDEC was not the cause
-            hardware_video_fallback("decode", gpu_error)
-            return decoder
+                return decoder
+            if "NVcuvid unavailable" not in str(decoder.cpu_fallback):
+                logger.warning("NVDEC cannot decode %s, the CPU decodes this video (slower): %s", video, decoder.cpu_fallback)
+                return decoder
+            gpu_error: RuntimeError = RuntimeError(str(decoder.cpu_fallback))
+        except RuntimeError as error:
+            gpu_error = error
+        decoder = VideoDecoder(video, dimension_order="NHWC")
+        decoder.get_frames_in_range(0, 1)  # raises for a video nothing can read: then NVDEC was not the cause
+        hardware_video_fallback("decode", gpu_error)
+        return decoder
     return VideoDecoder(video, dimension_order="NHWC")
 
 

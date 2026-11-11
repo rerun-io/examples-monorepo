@@ -113,19 +113,25 @@ def test_a_first_run_reports_what_setup_did(monkeypatch: pytest.MonkeyPatch, tmp
     assert hands_ui.SETUP_NOTES["wilor"] == "Built 1 TensorRT engine for wilor (0 s)"
 
 
-def test_nvdec_is_tried_once_then_the_cpu_decodes_with_a_warning(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+@pytest.mark.parametrize("failure", ["raises", "silent"])
+def test_nvdec_is_tried_once_then_the_cpu_decodes_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: str
+) -> None:
+    # NVDEC fails loudly (torchcodec raises) or silently (no libnvcuvid: torchcodec decodes on the CPU and says so in cpu_fallback).
     import torchcodec.decoders
     from simplecv import rerun_log_utils
 
     from posekit.apis.video_hands import VideoHandsProgress, open_decoder
 
     opened: list[str] = []
+    cause: str = "[CUDA] Fallback status: Falling back due to: NVcuvid unavailable"
 
     class Decoder:
-        def __init__(self, video: Path, device: str = "cpu", **options: str) -> None:
+        def __init__(self, video: Path, device: str = "cpu", **_: str) -> None:
             opened.append(device)
-            if device != "cpu":
-                raise RuntimeError("Unsupported device: cuda (no NVDEC in this container)")
+            if device != "cpu" and failure == "raises":
+                raise RuntimeError(cause)
+            self.cpu_fallback: str = cause if device != "cpu" else ""
 
         def get_frames_in_range(self, start: int, stop: int) -> None:
             return None
@@ -137,7 +143,30 @@ def test_nvdec_is_tried_once_then_the_cpu_decodes_with_a_warning(monkeypatch: py
         open_decoder(Path("clip.mp4"), "cuda")
         open_decoder(Path("clip.mp4"), "cuda")
     assert opened == ["cuda", "cpu", "cpu"]  # NVDEC once, then the CPU
-    assert [record.levelname for record in caplog.records] == ["WARNING"] and "no NVDEC in this container" in caplog.text
+    assert [record.levelname for record in caplog.records] == ["WARNING"] and "NVcuvid unavailable" in caplog.text
     warning = rerun_log_utils.hardware_video_warning()
-    assert warning.startswith("WARNING: hardware video failed") and "decode (Unsupported device: cuda" in warning
+    assert warning.startswith("WARNING: hardware video failed") and "decode ([CUDA] Fallback status" in warning
     assert warning in str(VideoHandsProgress("video", 0, 8, 0, "assumed pinhole", warning))  # the app's status shows it
+
+
+def test_nvdec_that_works_stays_and_one_unsupported_video_is_not_remembered(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    import torchcodec.decoders
+    from simplecv import rerun_log_utils
+
+    from posekit.apis.video_hands import open_decoder
+
+    class Decoder:
+        def __init__(self, video: Path, device: str = "cpu", **_: str) -> None:
+            self.device: str = device
+            self.cpu_fallback: str = "[CUDA] Fallback status: Falling back due to: Video not supported" if video.name == "odd.mp4" else ""
+
+        def get_frames_in_range(self, start: int, stop: int) -> None:
+            return None
+
+    monkeypatch.setattr(torchcodec.decoders, "VideoDecoder", Decoder)
+    monkeypatch.setattr(rerun_log_utils, "HARDWARE_VIDEO", {})
+    monkeypatch.setattr("posekit.apis.video_hands.HARDWARE_VIDEO", rerun_log_utils.HARDWARE_VIDEO)
+    with caplog.at_level("WARNING"):
+        devices = [open_decoder(Path(name), "cuda").device for name in ("clip.mp4", "odd.mp4", "clip.mp4")]
+    assert devices == ["cuda", "cuda", "cuda"] and rerun_log_utils.hardware_video_warning() == ""
+    assert len(caplog.records) == 1 and "odd.mp4" in caplog.text
