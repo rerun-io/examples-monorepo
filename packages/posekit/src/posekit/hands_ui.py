@@ -30,7 +30,7 @@ from posekit.apis.video_hands import (
     video_size,
 )
 from posekit.cameras import CalibratedCamera
-from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
+from posekit.models import HAND_DETECTORS, HAND_POSES, EgoHandDetectorConfig, EgoHandFastConfig, HandPose3dPipeline
 from posekit.models.egohand_fast import supported_backbone_precision
 from posekit.predictions import MeshDetail
 
@@ -81,6 +81,19 @@ def settings_from_inputs(
         video_path=Path(video), fx=fx, fy=fy, cx=cx, cy=cy, detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack],
         max_frames=max_frames if max_frames > 0 else None, mesh_detail=mesh_detail,
     )
+
+
+def prepare(stack: str) -> None:
+    """The part of ``stack``'s setup that needs no GPU: its downloads, and what its configs can build on the CPU.
+
+    An app whose GPU workers are forks of its main process (a ZeroGPU Space) calls this once before it serves: each
+    worker inherits the result, and ``pipeline_for`` then only does the GPU part. Any other host may skip it.
+    """
+    detector, pose = HAND_DETECTORS[stack], HAND_POSES[stack]
+    if isinstance(detector, EgoHandDetectorConfig):
+        detector.weights_path()
+    if isinstance(pose, EgoHandFastConfig):
+        pose.prepare()
 
 
 def pipeline_for(stack: str) -> HandPose3dPipeline:
