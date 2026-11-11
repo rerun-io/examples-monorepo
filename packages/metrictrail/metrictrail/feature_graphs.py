@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from typing import TypeVar
+from weakref import WeakKeyDictionary
 
 import torch
 from dpvo.extractor import BasicEncoder4
@@ -22,10 +23,7 @@ FeatureModel = TypeVar("FeatureModel", bound=nn.Module)
 
 @dataclass(frozen=True, slots=True)
 class FeatureGraphKey:
-    """Input and precision state fixed by a feature graph; the model keeps its weights alive."""
-
-    model: nn.Module
-    """The inference model; retaining it also retains the captured weights."""
+    """Input and precision state fixed by one model's feature graph."""
     shape: torch.Size
     """Input tensor dimensions, including batch and raster."""
     dtype: torch.dtype
@@ -60,18 +58,20 @@ def feature_cuda_graphs() -> Iterator[None]:
 
     Each returned tensor owns its storage. A later replay cannot overwrite a feature map retained by
     DPVO. Raster and autocast changes (including FP32 recovery) select separate captured graphs.
+    Weak model keys release graph pools when recovery discards the old network.
     """
-    cache: dict[FeatureGraphKey, FeatureGraph] = {}
+    cache: WeakKeyDictionary[nn.Module, dict[FeatureGraphKey, FeatureGraph]] = WeakKeyDictionary()
 
     def replay(model: FeatureModel, images: Float[Tensor, "..."], original: Callable[[FeatureModel, Tensor], Tensor]) -> Float[Tensor, "..."]:
         if not images.is_cuda or model.training or torch.is_grad_enabled():
             return original(model, images)
         key: FeatureGraphKey = FeatureGraphKey(
-            model, images.shape, images.dtype, images.device,
+            images.shape, images.dtype, images.device,
             torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"),
             bool(torch.backends.cuda.matmul.allow_tf32), bool(torch.backends.cudnn.allow_tf32),
         )
-        saved: FeatureGraph | None = cache.get(key)
+        model_cache: dict[FeatureGraphKey, FeatureGraph] = cache.setdefault(model, {})
+        saved: FeatureGraph | None = model_cache.get(key)
         if saved is None:
             static: Float[Tensor, "..."] = images.clone()
             current: torch.cuda.Stream = torch.cuda.current_stream(images.device)
@@ -88,7 +88,7 @@ def feature_cuda_graphs() -> Iterator[None]:
                 with torch.cuda.graph(graph, capture_error_mode="thread_local"):
                     features: Float[Tensor, "..."] = original(model, static)
             saved = FeatureGraph(static, features, graph)
-            cache[key] = saved
+            model_cache[key] = saved
         saved.image.copy_(images)
         saved.graph.replay()
         return saved.features.clone()

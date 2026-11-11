@@ -1,5 +1,7 @@
 """Feature graphs preserve changing images, retained outputs, rasters, and recovery precision."""
 
+import gc
+import weakref
 from pathlib import Path
 
 import pytest
@@ -66,3 +68,17 @@ def test_encoder_replay_preserves_features_across_precision_changes(norm: str) -
                 torch.testing.assert_close(actual_second, expected_second, rtol=0.0, atol=0.0)
             torch.testing.assert_close(model(second), expected_fp32, rtol=0.0, atol=0.0)
         torch.testing.assert_close(model(second), expected_fp32, rtol=0.0, atol=0.0)
+
+
+def test_feature_graphs_release_a_model_before_recovery_loads_its_replacement() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    with torch.inference_mode(), feature_cuda_graphs():
+        model: BasicEncoder4 = BasicEncoder4(output_dim=128, norm_fn="none").cuda().eval()
+        owner: weakref.ReferenceType[BasicEncoder4] = weakref.ref(model)
+        image: Float32[Tensor, "1 1 3 32 48"] = torch.rand(1, 1, 3, 32, 48, device="cuda")
+        features: Float32[Tensor, "1 1 128 8 12"] = model(image)
+        del model
+        gc.collect()
+        assert owner() is None, "the graph cache must not retain the released model"
+        assert bool(torch.isfinite(features).all()), "returned features keep their own storage"
