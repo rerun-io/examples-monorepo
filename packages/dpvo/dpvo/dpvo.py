@@ -448,7 +448,12 @@ class DPVO:
         jj: Int[Tensor, "n_matched"] = self.pg.jj[k]
         kk: Int[Tensor, "n_matched"] = self.pg.kk[k]
 
-        flow, _ = pops.flow_mag(SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5)
+        if self.device.type in ("cpu", "cuda"):
+            from .mojo_backend.projective import flow_magnitude
+
+            flow = flow_magnitude(self.poses, self.patches, self.intrinsics, ii, jj, kk, beta=0.5)
+        else:
+            flow, _ = pops.flow_mag(SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5)
         return flow.mean().item()
 
     def keyframe(self) -> None:
