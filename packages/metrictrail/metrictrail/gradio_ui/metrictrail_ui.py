@@ -29,6 +29,7 @@ import rerun as rr
 from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from gradio_rerun.commands import set_time
+from vipe.utils.model_cache import ModelCache
 
 from metrictrail import entities
 from metrictrail.apis.run import RunResult, RunSettings, run_and_log
@@ -46,6 +47,8 @@ POLL_S: float = 0.5
 """How often the generator yields the bytes logged so far and moves the cursor to the newest tracked frame."""
 
 RUN_LOCK: threading.Lock = threading.Lock()
+MODELS: ModelCache = ModelCache()
+"""The app's networks (MoGe-2 engines, DROID, DINO-DPVO): the first run builds them, every later run reuses them."""
 """Held while a pipeline runs: the capture hooks patch ViPE's classes, so two runs must never overlap (a cancelled
 run's worker can still be finishing when the next click arrives)."""
 
@@ -112,7 +115,7 @@ def summary(metrics: RunMetrics, wall_s: float) -> str:
 def run_locked(settings: RunSettings, rec: rr.RecordingStream, status: RunStatus) -> RunResult:
     """:func:`run_and_log` in live mode; releases :data:`RUN_LOCK` (taken by the caller) when it returns."""
     try:
-        return run_and_log(settings, rec, live=True, on_stage=status.update, on_cursor=status.tracked_at)
+        return run_and_log(settings, rec, live=True, on_stage=status.update, on_cursor=status.tracked_at, models=MODELS)
     finally:
         RUN_LOCK.release()
 
