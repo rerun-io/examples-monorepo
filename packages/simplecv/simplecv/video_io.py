@@ -1,11 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import logging
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import cv2
 import numpy as np
@@ -24,6 +25,15 @@ from jaxtyping import UInt8
 from simplecv.image_types import BGRList, ImageBGR
 
 T = TypeVar("T")
+
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+# torchcodec loads its FFmpeg libraries at import; the functions that decode import it, annotations only name the class.
+if TYPE_CHECKING:
+    from torchcodec.decoders import VideoDecoder
+else:
+    VideoDecoder = object
 
 
 def validate_video_file_path(video_path: Path) -> Path:
@@ -64,6 +74,56 @@ def bind_cuda_device(device: str) -> None:
     parsed: torch.device = torch.device(device)
     if parsed.type == "cuda":
         torch.cuda.set_device(parsed.index if parsed.index is not None else 0)
+
+
+HARDWARE_VIDEO_FAILED: dict[str, str] = {}
+"""Hardware video paths this host does not have, by name (``"decode"``: NVDEC, ``"encode"``: NVENC), with the cause. A path
+with an entry is not tried again in this process; the CPU does that work. A failure of one video is never an entry."""
+
+
+def hardware_video_unavailable(path: str, cause: str) -> None:
+    """Remember that this host has no hardware video ``path`` (``cause`` says why) and warn about it, once."""
+    HARDWARE_VIDEO_FAILED[path] = cause
+    logger.warning("Hardware video %s FAILED, using the CPU for the rest of this process (slower): %s", path, cause)
+
+
+def hardware_video_warning() -> str:
+    """One line naming every hardware video path this host does not have, so the CPU does that work; empty when it has all."""
+    failed: list[str] = [f"{path} ({cause.splitlines()[0][:200]})" for path, cause in HARDWARE_VIDEO_FAILED.items()]
+    return f"WARNING: hardware video failed, the CPU does this work (slower): {'; '.join(failed)}" if failed else ""
+
+
+def open_decoder(video: Path, device: torch.device | str) -> VideoDecoder:
+    """A decoder of ``video``'s frames as ``NHWC``: NVDEC on ``device``, or the CPU when NVDEC cannot decode it.
+
+    NVDEC fails in two ways: torchcodec raises (at construction or on a frame), or it decodes on the CPU without a
+    word (``decoder.cpu_fallback`` says so). Every new GPU decoder decodes one frame, so both show here; the CPU then
+    decodes this video, with a warning, and the caller moves its frames to the GPU. Only a host without the NVDEC
+    library (``libnvcuvid``) is remembered: later videos go to the CPU at once. Any other failure belongs to this video.
+
+    Raises:
+        RuntimeError: If the CPU cannot decode ``video`` either.
+    """
+    from torchcodec.decoders import VideoDecoder
+
+    if "decode" in HARDWARE_VIDEO_FAILED:
+        return VideoDecoder(video, dimension_order="NHWC")
+    bind_cuda_device(str(device))  # NVDEC needs the CUDA context current on the calling thread, also to build the decoder
+    try:
+        decoder = VideoDecoder(video, dimension_order="NHWC", device=device)
+        decoder.get_frames_in_range(0, 1)
+        if not decoder.cpu_fallback:
+            return decoder
+        cause: str = str(decoder.cpu_fallback)
+    except RuntimeError as error:
+        cause = str(error)
+    decoder = VideoDecoder(video, dimension_order="NHWC")
+    decoder.get_frames_in_range(0, 1)  # raises for a video nothing can read: then NVDEC was not the cause
+    if "NVcuvid unavailable" in cause or "libnvcuvid" in cause:
+        hardware_video_unavailable("decode", cause)
+    else:
+        logger.warning("NVDEC cannot decode %s, the CPU decodes this video (slower): %s", video, cause)
+    return decoder
 
 
 def rgb_chw_tensor_to_bgr_hwc(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> ImageBGR:
