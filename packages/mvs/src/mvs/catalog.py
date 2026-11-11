@@ -6,10 +6,12 @@ the raw AV1 samples the NVDEC decoder already fetched, never re-encoded per fram
 
 from dataclasses import dataclass
 
+import depth_png
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 from einops import rearrange
-from jaxtyping import Float32, Int64
+from jaxtyping import Float32, Int64, UInt16
 from numpy import ndarray
 from simplecv.rerun_dataloader import SegmentNvdecDecoder, relay_video_packets
 
@@ -60,6 +62,35 @@ def log_source_video(video_decoder: SegmentNvdecDecoder) -> None:
     times_ns: Int64[ndarray, " n"] = video_decoder.times.astype("timedelta64[ns]").astype(np.int64)
     relay_video_packets(
         VIDEO_WIDE, TIMELINE, video_decoder.times, video_decoder.samples, video_decoder.keyframes, rr.VideoCodec.AV1, int(times_ns[0]), int(times_ns[-1])
+    )
+
+
+def log_depth(depth_hw: Float32[ndarray, "h=192 w=256"], K_depth_33: Float32[ndarray, "3 3"]) -> None:
+    """The predicted metric depth as a millimetre PNG under its own 256x192 Pinhole, at the current time point."""
+    # The viewer back-projects the depth with its parent's intrinsics: the 256x192 raster's own Pinhole.
+    rr.log(
+        PINHOLE_LOWRES_PATH,
+        rr.Pinhole(image_from_camera=K_depth_33, width=DEPTH_HW[1], height=DEPTH_HW[0], camera_xyz=rr.ViewCoordinates.RDF),
+    )
+    depth_mm_hw: UInt16[ndarray, "h=192 w=256"] = np.rint(depth_hw * 1000.0).astype(np.uint16)
+    rr.log(
+        f"{PINHOLE_LOWRES_PATH}/depth",
+        rr.EncodedDepthImage(blob=depth_png.encode(depth_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0),
+    )
+
+
+def blueprint() -> rrb.Blueprint:
+    """One screen: the 3D scene (camera frustum, and the mesh when one is logged) beside the video above the predicted depth."""
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(origin="world", name="Scene"),
+            rrb.Vertical(
+                rrb.Spatial2DView(origin=PINHOLE_PATH, name="Video"),
+                rrb.Spatial2DView(origin=PINHOLE_LOWRES_PATH, name="Predicted depth"),
+            ),
+            column_shares=[2, 1],
+        ),
+        collapse_panels=True,
     )
 
 

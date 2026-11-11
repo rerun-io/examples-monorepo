@@ -4,10 +4,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import depth_png
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, UInt16
+from jaxtyping import Float32
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -16,7 +15,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 
-from mvs.catalog import DEPTH_HW, FRAME_TIMELINE, PINHOLE_LOWRES_PATH, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_source_video
+from mvs.catalog import FRAME_TIMELINE, TIMELINE, CatalogDataConfig, blueprint, depth_at_lowres, log_camera, log_depth, log_source_video
 from mvs.depth_engine import DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
 
@@ -48,6 +47,7 @@ def main(config: Config) -> None:
     segment_ids: list[str] = list(config.data.segments) or dataset.segment_ids()
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
 
+    rr.send_blueprint(blueprint())
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     device: torch_device = torch_device("cuda")
     total_frames: int = 0
@@ -84,16 +84,7 @@ def main(config: Config) -> None:
                 depth_hw: Float32[ndarray, "h=192 w=256"]
                 K_depth_33: Float32[ndarray, "3 3"]
                 depth_hw, K_depth_33 = depth_at_lowres(depth_outputs, K_native_33, native_wh)
-                # The viewer back-projects the depth with its parent's intrinsics: the 256x192 raster's own Pinhole.
-                rr.log(
-                    PINHOLE_LOWRES_PATH,
-                    rr.Pinhole(image_from_camera=K_depth_33, width=DEPTH_HW[1], height=DEPTH_HW[0], camera_xyz=rr.ViewCoordinates.RDF),
-                )
-                depth_mm_hw: UInt16[ndarray, "h=192 w=256"] = np.rint(depth_hw * 1000.0).astype(np.uint16)
-                rr.log(
-                    f"{PINHOLE_LOWRES_PATH}/depth",
-                    rr.EncodedDepthImage(blob=depth_png.encode(depth_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0),
-                )
+                log_depth(depth_hw, K_depth_33)
                 segment_depth_frames += 1
                 total_depth_frames += 1
 

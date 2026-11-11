@@ -3,7 +3,9 @@
 Frames come through the Rerun dataloader, decoded on the GPU (:func:`mvs.depth_stream.depth_dataset`); each depth
 frame is fused into a sparse colour TSDF (``packages/tsdf-rs``) at the catalog pose. The surface is logged with
 :class:`simplecv.rerun_live_mesh.LiveMeshLog`: the changed super-blocks on the timeline while the segment plays, one
-mesh from its last depth frame. The source video is relayed once as a VideoStream, never re-encoded per frame.
+mesh from its last depth frame. Every depth frame is logged as mvs-catalog-depth logs it, and the recording carries a
+default layout (:func:`mvs.catalog.blueprint`). The source video is relayed once as a VideoStream, never re-encoded per
+frame.
 
 One run meshes one segment (:func:`single_segment`): every segment restarts its frame index at 0, so a second segment
 in the same recording would mix its mesh history with the first one's.
@@ -29,7 +31,7 @@ from tqdm import tqdm
 from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 from tsdf_rs import TsdfVolume
 
-from mvs.catalog import FRAME_TIMELINE, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_source_video
+from mvs.catalog import FRAME_TIMELINE, TIMELINE, CatalogDataConfig, blueprint, depth_at_lowres, log_camera, log_depth, log_source_video
 from mvs.depth_engine import IMAGENET_MEAN, IMAGENET_STD, DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
 
@@ -95,6 +97,7 @@ def main(config: Config) -> None:
     segment_id: str = single_segment(list(config.data.segments) or dataset.segment_ids())
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
     fusion: FusionConfig = config.fusion
+    rr.send_blueprint(blueprint())
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     device: torch.device = torch.device("cuda")
 
@@ -125,6 +128,7 @@ def main(config: Config) -> None:
         depth_hw: Float32[ndarray, "h=192 w=256"]
         K_depth_33: Float32[ndarray, "3 3"]
         depth_hw, K_depth_33 = depth_at_lowres(depth_outputs, K_native_33, sample.resolution_wh)
+        log_depth(depth_hw, K_depth_33)
         volume.integrate(
             depth_hw,
             K_depth_33,

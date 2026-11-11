@@ -21,8 +21,11 @@ pixi run -e mvs --frozen mvs-live-mesh       # depth fused into a TSDF mesh, log
 The live mesh fuses each depth frame into a sparse colour TSDF (`packages/tsdf-rs`) at the catalog pose and logs
 it with `simplecv.rerun_live_mesh.LiveMeshLog`: the changed blocks on the timeline while the segment plays (scrub
 back to watch it grow), one mesh from the segment's last depth frame. The source video is relayed once as the
-catalog's own AV1 VideoStream. A run meshes exactly one segment (`--data.segments <id>`): segments restart
-their frame index at 0, so two in one recording would mix their mesh histories.
+catalog's own AV1 VideoStream. Every depth frame is also logged as `mvs-catalog-depth` logs it: a 256×192
+`pinhole_lowres` Pinhole and its depth as a millimetre PNG. Both tools send one default layout
+(`mvs.catalog.blueprint`): the 3D scene with the moving camera beside the video and the predicted depth. A run
+meshes exactly one segment (`--data.segments <id>`): segments restart their frame index at 0, so two in one
+recording would mix their mesh histories.
 
 The model artifact lives in the public HF repo `pablovela5620/mvs-depth`;
 `mvs-download-depth-model` fetches it with `hf download` (no login needed).
