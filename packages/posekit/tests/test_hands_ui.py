@@ -155,9 +155,11 @@ def test_nvdec_that_works_stays_and_one_unsupported_video_is_not_remembered(monk
 
     from posekit.apis.video_hands import open_decoder
 
+    opened: list[str] = []
+
     class Decoder:
         def __init__(self, video: Path, device: str = "cpu", **_: str) -> None:
-            self.device: str = device
+            opened.append(device)
             self.cpu_fallback: str = "[CUDA] Fallback status: Falling back due to: Video not supported" if video.name == "odd.mp4" else ""
 
         def get_frames_in_range(self, start: int, stop: int) -> None:
@@ -167,6 +169,7 @@ def test_nvdec_that_works_stays_and_one_unsupported_video_is_not_remembered(monk
     monkeypatch.setattr(rerun_log_utils, "HARDWARE_VIDEO", {})
     monkeypatch.setattr("posekit.apis.video_hands.HARDWARE_VIDEO", rerun_log_utils.HARDWARE_VIDEO)
     with caplog.at_level("WARNING"):
-        devices = [open_decoder(Path(name), "cuda").device for name in ("clip.mp4", "odd.mp4", "clip.mp4")]
-    assert devices == ["cuda", "cuda", "cuda"] and rerun_log_utils.hardware_video_warning() == ""
+        for name in ("clip.mp4", "odd.mp4", "clip.mp4"):
+            open_decoder(Path(name), "cuda")
+    assert opened == ["cuda", "cuda", "cuda"] and rerun_log_utils.hardware_video_warning() == ""
     assert len(caplog.records) == 1 and "odd.mp4" in caplog.text
