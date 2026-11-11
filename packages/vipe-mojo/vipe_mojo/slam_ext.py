@@ -11,6 +11,9 @@ remaining tensor algebra is PyTorch on the input device, with the extension's ex
 Every other slam_ext function raises NotImplementedError when called.
 """
 
+from dataclasses import dataclass
+from functools import lru_cache
+
 import torch
 from jaxtyping import Float32, Int64
 from torch import Tensor
@@ -54,12 +57,9 @@ class _Accum:
     is in increasing edge order.
     """
 
-    def __init__(self, ix: Tensor, jx: Tensor) -> None:
-        ix_cpu: Tensor = ix.cpu()
+    def __init__(self, ix_cpu: Tensor, jx_cpu: Tensor, device: torch.device) -> None:
         order: Tensor = torch.argsort(ix_cpu, stable=True)
         ordered: Tensor = ix_cpu[order]
-        jx_cpu: Tensor = jx.cpu()
-        device: torch.device = ix.device
         self.order: Tensor = order.to(device)
         self.starts: Tensor = torch.searchsorted(ordered, jx_cpu, right=False).to(device)
         self.ends: Tensor = torch.searchsorted(ordered, jx_cpu, right=True).to(device)
@@ -148,19 +148,20 @@ class _PoseSystem:
 
         self.a_table: tuple[Tensor, Tensor, Tensor] = table(a_parts)
         self.b_table: tuple[Tensor, Tensor, Tensor] = table(b_parts)
-        self.a: Tensor = torch.empty(dim * dim, dtype=torch.float64)
-        self.x: Tensor = torch.empty(dim, dtype=torch.float64)
 
     def solve(self, host: Tensor, lm: float, ep: float, scalar_lm: float, scalar_ep: float) -> tuple[Tensor, float]:
         """(dx (P, 6) float32, df) on the CPU; zeros when the Cholesky factorisation fails (Eigen's LLT)."""
         assert host.shape[0] == self.host_size, (host.shape, self.host_size)
+        # Cached tables are immutable; each solve owns its scratch, including concurrent callers.
+        a: Tensor = torch.empty(self.dim * self.dim, dtype=torch.float64)
+        x: Tensor = torch.empty(self.dim, dtype=torch.float64)
         ok = launch(
-            "pose_solve", (self.p, float(lm), float(ep), float(scalar_lm), float(scalar_ep)), (host, *self.a_table, *self.b_table, self.a, self.x)
+            "pose_solve", (self.p, float(lm), float(ep), float(scalar_lm), float(scalar_ep)), (host, *self.a_table, *self.b_table, a, x)
         )
         if not ok:
             return torch.zeros(self.p, 6, dtype=torch.float32), 0.0
-        df: float = float(self.x[6 * self.p]) if self.dim > 6 * self.p else 0.0
-        return self.x[: 6 * self.p].view(self.p, 6).float(), df
+        df: float = float(x[6 * self.p]) if self.dim > 6 * self.p else 0.0
+        return x[: 6 * self.p].view(self.p, 6).float(), df
 
 
 def _schur_pairs(jj_exp: Tensor, kk_exp: Tensor, t0: int, t1: int) -> tuple[Tensor, Tensor, Tensor]:
@@ -173,6 +174,66 @@ def _schur_pairs(jj_exp: Tensor, kk_exp: Tensor, t0: int, t1: int) -> tuple[Tens
     r1, r2 = torch.nonzero(depth.view(-1, 1) == depth.view(1, -1), as_tuple=True)
     idx: Tensor = torch.stack([rows[r1], rows[r2], depth[r1]], dim=1).contiguous()
     return idx, jj_exp[rows[r1]] - t0, jj_exp[rows[r2]] - t0
+
+
+@dataclass(frozen=True, slots=True)
+class _BaTopology:
+    """Index-only preparation shared by solves with identical ordered edges and pose ranges."""
+
+    kx: Int64[Tensor, "k"]
+    """Sorted source frames (including the optimized pose range)."""
+    kk_exp: Int64[Tensor, "expanded"]
+    """Expanded edge to source-group index."""
+    ii_exp: Int64[Tensor, "expanded"]
+    """Optimized frame range followed by edge sources."""
+    accum_ii_kx: _Accum
+    """Edge-to-source accumulation, in original edge order."""
+    accum_ii_ts: _Accum
+    """Edge-to-optimized-pose accumulation."""
+    accum_exp_kx: _Accum
+    """Expanded-edge-to-source accumulation."""
+    pair_idx: Int64[Tensor, "pairs 3"]
+    """Schur row pairs and their source group."""
+    rhs_rows: Int64[Tensor, "expanded"]
+    """Expanded target indices relative to the first optimized pose."""
+    target_rows: Int64[Tensor, "targets"]
+    """Expanded rows whose target pose is optimized."""
+    pose_system: _PoseSystem
+    """Immutable CPU assembly tables; each solve allocates its own scratch."""
+
+
+@lru_cache(maxsize=8)
+def _prepare_topology(
+    sources: tuple[int, ...],
+    targets: tuple[int, ...],
+    t0: int,
+    t1: int,
+    optimize_intrinsics: bool,
+    motion_only: bool,
+    device: torch.device,
+) -> _BaTopology:
+    """Build integer metadata on the CPU once, then transfer only the kernel index tables.
+
+    Eight entries bound retained device memory. Values, order, pose bounds, solver mode and
+    device all participate in the key. No poses, depths, focal estimates or residuals are cached.
+    """
+    ii: Int64[Tensor, "e"] = torch.tensor(sources, dtype=torch.int64)
+    jj: Int64[Tensor, "e"] = torch.tensor(targets, dtype=torch.int64)
+    ts: Int64[Tensor, "poses"] = torch.arange(t0, t1)
+    ii_exp: Int64[Tensor, "expanded"] = torch.cat((ts, ii))
+    jj_exp: Int64[Tensor, "expanded"] = torch.cat((ts, jj))
+    kx, kk_exp = torch.unique(ii_exp, sorted=True, return_inverse=True)
+    pair_idx, pair_i, pair_j = _schur_pairs(jj_exp, kk_exp, t0, t1)
+    target_rows: Int64[Tensor, "targets"] = torch.nonzero((jj_exp >= t0) & (jj_exp < t1)).view(-1)
+    pose_system: _PoseSystem = _PoseSystem(
+        t1 - t0, optimize_intrinsics, ii, jj, t0,
+        None if motion_only else (pair_i + t0, pair_j + t0, jj_exp, jj_exp[target_rows]),
+    )
+    return _BaTopology(
+        kx.to(device), kk_exp.to(device), ii_exp.to(device),
+        _Accum(ii, kx, device), _Accum(ii, ts, device), _Accum(ii_exp, kx, device),
+        pair_idx.to(device), (jj_exp - t0).contiguous().to(device), target_rows.to(device), pose_system,
+    )
 
 
 def ba_extended(
@@ -219,24 +280,15 @@ def ba_extended(
     ii = ii.contiguous()
     jj = jj.contiguous()
 
-    ts: Tensor = torch.arange(t0, t1, device=device)
-    ii_exp: Tensor = torch.cat([ts, ii])
-    jj_exp: Tensor = torch.cat([ts, jj])
-    kx, kk_exp = torch.unique(ii_exp, sorted=True, return_inverse=True)
-    accum_ii_kx = _Accum(ii, kx)
-    accum_ii_ts = _Accum(ii, ts)
-    accum_exp_kx = _Accum(ii_exp, kx)
-    ii_cpu, jj_cpu, jj_exp_cpu = ii.cpu(), jj.cpu(), jj_exp.cpu()
-    pair_idx, pair_i, pair_j = _schur_pairs(jj_exp_cpu, kk_exp.cpu(), t0, t1)
+    # One readback of the edge values identifies the exact topology. Tensor identity is not
+    # sufficient: upstream reuses tensors and also constructs fresh tensors for unchanged edges.
+    edges: list[list[int]] = torch.stack((ii, jj)).cpu().tolist()
+    topology: _BaTopology = _prepare_topology(tuple(edges[0]), tuple(edges[1]), t0, t1, optimize_intrinsics, motion_only, device)
+    kx, kk_exp, ii_exp = topology.kx, topology.kk_exp, topology.ii_exp
+    accum_ii_kx, accum_ii_ts, accum_exp_kx = topology.accum_ii_kx, topology.accum_ii_ts, topology.accum_exp_kx
+    pair_idx, rhs_rows, target_rows = topology.pair_idx, topology.rhs_rows, topology.target_rows
     num_pairs: int = pair_idx.shape[0]
-    pair_idx = pair_idx.to(device)
-    rhs_rows: Tensor = (jj_exp - t0).contiguous()
-    target_rows: Tensor = torch.nonzero((jj_exp >= t0) & (jj_exp < t1)).view(-1)
-    # The pose system's scatter tables, built once: they only depend on the edges.
-    pose_system = _PoseSystem(
-        p, optimize_intrinsics, ii_cpu, jj_cpu, t0,
-        None if motion_only else (pair_i + t0, pair_j + t0, jj_exp_cpu, jj_exp_cpu[target_rows.cpu()]),
-    )  # fmt: skip
+    pose_system: _PoseSystem = topology.pose_system
     # Constant over the iterations.
     active: Tensor = torch.empty(0, **f32)
     mask: Tensor = torch.empty(0, **f32)

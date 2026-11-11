@@ -116,8 +116,9 @@ def test_frame_distance_matches_cuda(device: str) -> None:
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("entity", entities("/ba_extended"))
-def test_ba_extended_matches_cuda(entity: str, device: str) -> None:
-    """One late BA call per option combination MetricTrail used, cut to fewer edges and a pixel window."""
+@pytest.mark.parametrize("repeat", range(2))
+def test_ba_extended_matches_cuda(entity: str, device: str, repeat: int) -> None:
+    """Repeated solves with fresh inputs must match the CUDA reference, including reused edge topology."""
     rec: Record = load()[entity]
     poses, disps, intrinsics, disps_sens, targets, weights, eta, ii, jj, depth_active = _on(
         rec, device, "poses", "disps", "intrinsics", "disps_sens", "targets", "weights", "eta", "ii", "jj", "depth_active"
