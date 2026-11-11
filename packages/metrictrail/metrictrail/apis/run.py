@@ -25,6 +25,7 @@ from typing import Any
 import cv2
 import rerun as rr
 import torch
+from dpvo.graph_replay import graph_replay
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
@@ -42,7 +43,7 @@ from metrictrail.calibration_graphs import calibration_cuda_graphs
 from metrictrail.calibration_gru import GruBackend, calibration_gru
 from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
-from metrictrail.feature_graphs import feature_cuda_graphs
+from metrictrail.feature_graphs import dino_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
@@ -60,7 +61,6 @@ from metrictrail.outputs import (
 from metrictrail.palette import RunLabel
 from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
-from metrictrail.update_graphs import update_cuda_graphs
 
 
 @dataclass
@@ -343,8 +343,8 @@ def run_and_log(
         with (
             calibration_live_view(calibration),
             gpu_video_input(gpu),
-            feature_cuda_graphs() if config.label == "ours" else nullcontext(),
-            update_cuda_graphs() if config.label == "ours" else nullcontext(),
+            graph_replay() if config.label == "ours" else nullcontext(),
+            dino_cuda_graphs() if config.label == "ours" else nullcontext(),
             calibration_cuda_graphs(config.calibration_graphs) if config.label == "ours" else nullcontext(),
             calibration_gru(config.calibration_gru_backend if config.label == "ours" else "torch") as gru_stats,
         ):
