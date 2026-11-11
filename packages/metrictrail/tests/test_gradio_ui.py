@@ -28,10 +28,16 @@ def test_example_videos_list_the_iphone_clips_first(tmp_path: Path) -> None:
 
 
 def test_app_overrides_keep_upstream_values_out_of_the_command() -> None:
-    assert app_overrides(1, 1500) == []
-    assert app_overrides(2, 600) == ["pipeline.init.tracking_stride=2", "pipeline.init.input_raster.max_frames=600"]
+    assert app_overrides(1, 1500, "robust128") == []
+    assert app_overrides(2, 600, "fast64") == [
+        "pipeline.init.tracking_stride=2",
+        "pipeline.init.input_raster.max_frames=600",
+        "pipeline.init.calibration.budget=fast64",
+    ]
     with pytest.raises(ValueError, match="tracking stride"):
-        app_overrides(0, 1500)
+        app_overrides(0, 1500, "robust128")
+    with pytest.raises(ValueError):
+        app_overrides(1, 1500, "all")  # a protocol mode, not a pipeline budget
 
 
 def test_build_app_wires_a_streaming_viewer_and_the_examples(tmp_path: Path) -> None:
@@ -47,7 +53,7 @@ def test_build_app_wires_a_streaming_viewer_and_the_examples(tmp_path: Path) -> 
 
 
 def test_streaming_fn_without_a_video_yields_an_empty_chunk() -> None:
-    assert list(metrictrail_streaming_fn(None, 1, 1500)) == [(b"", "Upload a video or pick an example first.")]
+    assert list(metrictrail_streaming_fn(None, 1, 1500, "fast64")) == [(b"", "Upload a video or pick an example first.")]
 
 
 def test_app_blueprint_builds_for_calibration_tracking_and_the_final_layout() -> None:
@@ -86,13 +92,16 @@ def test_a_host_passes_its_run_examples_and_frame_cap_to_build_app(tmp_path: Pat
     clip: Path = tmp_path / "clip.mp4"
     clip.touch()
 
-    def hosted_run(video_path: str | None, tracking_stride: int | float, max_frames: int | float) -> Iterator[tuple[bytes, str]]:
+    def hosted_run(video_path: str | None, tracking_stride: int | float, max_frames: int | float, budget: str) -> Iterator[tuple[bytes, str]]:
         yield b"", "hosted"
 
     demo: gr.Blocks = build_app(run=hosted_run, examples=[clip], max_frames=300)
     components: list[object] = list(demo.blocks.values())
     assert any(isinstance(block, gr.Dataset) and len(block.samples) == 1 for block in components)
     assert any(isinstance(block, gr.Number) and block.value == 300 for block in components)
+    budgets = [block for block in components if isinstance(block, gr.Dropdown)]
+    assert len(budgets) == 1 and budgets[0].value == "fast64"  # half of ViPE's default robust128 sweep
+    assert [choice[1] for choice in budgets[0].choices] == ["fast64", "robust128", "robust256"]
     assert any(dependency.fn is hosted_run for dependency in demo.fns.values())
 
 

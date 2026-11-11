@@ -47,6 +47,20 @@ VIDEO_TYPES: list[str] = [".mp4", ".mov", ".MOV", ".webm"]
 POLL_S: float = 0.5
 """How often the generator yields the bytes logged so far and moves the cursor to the newest tracked frame."""
 
+CALIBRATION_BUDGETS: tuple[str, ...] = ("fast64", "robust128", "robust256")
+"""The SharedK budgets a MetricTrail pipeline may select (``vipe.metrictrail.calibration.policy.PIPELINE_BUDGETS``)."""
+UPSTREAM_BUDGET: str = "robust128"
+"""ViPE's in-the-wild default."""
+APP_BUDGET: str = "fast64"
+"""The app's default: on pool.mp4 it reads 413 frames for 64 keyframes, 15 s instead of 29 s for robust128's 840 / 128,
+with a focal 0.5 % from robust128's (both converged). A clip too short for 128 keyframes gains little (IMG_0493: 16 s,
+focal within 0.1 %)."""
+BUDGET_LABELS: dict[str, str] = {
+    "fast64": "fast64: 64 keyframes (about half the time)",
+    "robust128": "robust128: 128 keyframes (ViPE's default)",
+    "robust256": "robust256: up to 256 keyframes (stops at 128 if converged)",
+}
+"""What the dropdown shows for each budget."""
 RUN_LOCK: threading.Lock = threading.Lock()
 """Held while a pipeline runs: the capture hooks patch ViPE's classes, so two runs must never overlap (a cancelled
 run's worker can still be finishing when the next click arrives)."""
@@ -102,15 +116,24 @@ def example_videos(data_dir: Path) -> list[Path]:
     return sorted((data_dir / "iphone").glob("*.mp4")) + sorted((data_dir / "movies").glob("*.mp4"))
 
 
-def app_overrides(tracking_stride: int, max_frames: int) -> list[str]:
-    """Hydra overrides of the two knobs; none at upstream's values (stride 1, :data:`UPSTREAM_MAX_FRAMES`)."""
+def app_overrides(tracking_stride: int, max_frames: int, budget: str) -> list[str]:
+    """Hydra overrides of the three knobs; none at upstream's values (stride 1, :data:`UPSTREAM_MAX_FRAMES`,
+    :data:`UPSTREAM_BUDGET`).
+
+    Raises:
+        ValueError: For a stride below 1, fewer than 2 frames, or a budget a MetricTrail pipeline cannot select.
+    """
     if tracking_stride < 1 or max_frames < 2:
         raise ValueError(f"tracking stride must be >= 1 and max frames >= 2, got {tracking_stride} and {max_frames}")
+    if budget not in CALIBRATION_BUDGETS:
+        raise ValueError(f"calibration budget must be one of {CALIBRATION_BUDGETS}, got {budget!r}")
     overrides: list[str] = []
     if tracking_stride != 1:
         overrides.append(f"pipeline.init.tracking_stride={tracking_stride}")
     if max_frames != UPSTREAM_MAX_FRAMES:
         overrides.append(f"pipeline.init.input_raster.max_frames={max_frames}")
+    if budget != UPSTREAM_BUDGET:
+        overrides.append(f"pipeline.init.calibration.budget={budget}")
     return overrides
 
 
@@ -131,7 +154,7 @@ def run_locked(settings: RunSettings, rec: rr.RecordingStream, status: RunStatus
 
 @rr.thread_local_stream(APPLICATION_ID)
 def metrictrail_streaming_fn(
-    video_path: str | None, tracking_stride: int | float, max_frames: int | float
+    video_path: str | None, tracking_stride: int | float, max_frames: int | float, budget: str = APP_BUDGET
 ) -> Generator[tuple[bytes | dict[str, object], str], None, None]:
     """Run MetricTrail on ``video_path`` and stream the recording to the viewer.
 
@@ -139,6 +162,7 @@ def metrictrail_streaming_fn(
         video_path: The uploaded video (a local path); None before an upload.
         tracking_stride: DPVO tracks every k-th prepared frame (``pipeline.init.tracking_stride``).
         max_frames: Longer videos are strided down to at most this many frames (``pipeline.init.input_raster.max_frames``).
+        budget: SharedK calibration's keyframe budget (``pipeline.init.calibration.budget``, :data:`CALIBRATION_BUDGETS`).
 
     Yields:
         The Rerun bytes logged since the last yield (or a cursor command for the viewer), and a status line.
@@ -146,7 +170,7 @@ def metrictrail_streaming_fn(
     if video_path is None:
         yield b"", "Upload a video or pick an example first."
         return
-    overrides: list[str] = app_overrides(int(tracking_stride), int(max_frames))
+    overrides: list[str] = app_overrides(int(tracking_stride), int(max_frames), budget)
     if not RUN_LOCK.acquire(blocking=False):
         yield b"", "The previous run is still finishing; try again in a moment."
         return
@@ -196,8 +220,8 @@ def metrictrail_streaming_fn(
     yield dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(0, "ns"), play=True)), done
 
 
-RunFn = Callable[[str | None, int | float, int | float], Iterator[tuple[bytes | dict[str, object], str]]]
-"""``(video_path, tracking_stride, max_frames) -> (Rerun bytes, status)`` per yield: :func:`metrictrail_streaming_fn`
+RunFn = Callable[[str | None, int | float, int | float, str], Iterator[tuple[bytes | dict[str, object], str]]]
+"""``(video_path, tracking_stride, max_frames, budget) -> (Rerun bytes, status)`` per yield: :func:`metrictrail_streaming_fn`
 or a host's wrapper of it (a ZeroGPU Space runs it in a ``@spaces.GPU`` worker)."""
 
 
@@ -221,8 +245,9 @@ def build_app(
     with gr.Blocks(title="MetricTrail") as demo:
         gr.Markdown(
             "# MetricTrail\nMonocular metric SLAM (ViPE `pipeline=metrictrail`): DPVO with MoGe-2 metric depth and DINOv3 "
-            "features. Your video plays at once; the camera is calibrated from it (about 40 s), then tracking streams in over "
-            "the video, with a TSDF mesh growing from each keyframe; the trajectory and the final mesh arrive at the end."
+            "features. Your video plays at once; the camera's focal is first calibrated from it (SharedK, 15-30 s; see the "
+            "calibration budget in Settings), then tracking streams in over the video from the start, with a TSDF mesh "
+            "growing from each keyframe; the trajectory and the final mesh arrive at the end."
         )
         with gr.Row():
             with gr.Column(scale=1):
@@ -238,11 +263,16 @@ def build_app(
                     max_frames_number: gr.Number = gr.Number(
                         label="Max frames (a longer video is strided down to this many)", value=max_frames, precision=0, minimum=2
                     )
+                    budget_dropdown: gr.Dropdown = gr.Dropdown(
+                        label="Calibration budget (keyframes SharedK keeps before it fixes the focal; ViPE's default is robust128)",
+                        choices=[(BUDGET_LABELS[budget], budget) for budget in CALIBRATION_BUDGETS],
+                        value=APP_BUDGET,
+                    )
                 gr.Examples(examples=[[str(path)] for path in clips], inputs=[video_input], cache_examples=False)
             with gr.Column(scale=5):
                 viewer.render()
         run_event = run_button.click(
-            fn=run, inputs=[video_input, stride_slider, max_frames_number], outputs=[viewer, status_text]
+            fn=run, inputs=[video_input, stride_slider, max_frames_number, budget_dropdown], outputs=[viewer, status_text]
         )
         stop_button.click(fn=None, inputs=None, outputs=None, cancels=[run_event])
     return demo
