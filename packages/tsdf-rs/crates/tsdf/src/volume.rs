@@ -163,6 +163,9 @@ pub struct TsdfVolume {
     blocks: FxHashMap<BlockKey, VoxelBlock>,
     changes: ChangeTracker,
     ray_cache: Option<RayCache>,
+    max_blocks: Option<usize>,
+    budget_reached: bool,
+    min_weight: f32,
 }
 
 impl TsdfVolume {
@@ -186,7 +189,79 @@ impl TsdfVolume {
             blocks: FxHashMap::default(),
             changes: ChangeTracker::default(),
             ray_cache: None,
+            max_blocks: None,
+            budget_reached: false,
+            min_weight: 0.0,
         })
+    }
+
+    /// Cap the number of allocated blocks (`None`, the default: unbounded).
+    ///
+    /// Once the cap is reached, existing blocks keep fusing and new blocks
+    /// are skipped (in sorted key order) until [`TsdfVolume::evict_farthest`]
+    /// frees room. A memory bound for long sessions on small devices.
+    pub fn set_max_blocks(&mut self, max_blocks: Option<usize>) {
+        self.max_blocks = max_blocks;
+    }
+
+    /// Whether an integration skipped a new block because of the cap set
+    /// with [`TsdfVolume::set_max_blocks`], since the last eviction.
+    pub fn budget_reached(&self) -> bool {
+        self.budget_reached
+    }
+
+    /// Number of allocated blocks.
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Free the blocks farthest from `center` (world units, block centers)
+    /// until at most `keep` remain, and clear [`TsdfVolume::budget_reached`].
+    ///
+    /// An evicted block is forgotten: it is not reported by
+    /// [`TsdfVolume::dirty_block_meshes`] (consumers keep or clear its last
+    /// mesh themselves), and a later frame that reaches it starts it afresh.
+    /// Returns the evicted keys, farthest first.
+    pub fn evict_farthest(&mut self, center: [f32; 3], keep: usize) -> Vec<BlockKey> {
+        if self.blocks.len() <= keep {
+            return Vec::new();
+        }
+        let block_length = self.voxel_size * BLOCK_RESOLUTION as f32;
+        let mut by_distance: Vec<(f32, BlockKey)> = self
+            .blocks
+            .keys()
+            .map(|key| {
+                let distance = (0..3)
+                    .map(|axis| ((key[axis] as f32 + 0.5) * block_length - center[axis]).powi(2))
+                    .sum();
+                (distance, *key)
+            })
+            .collect();
+        // Farthest first; ties by key, so the result is deterministic.
+        by_distance.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let evicted: Vec<BlockKey> = by_distance
+            .into_iter()
+            .take(self.blocks.len() - keep)
+            .map(|(_, key)| key)
+            .collect();
+        for key in &evicted {
+            self.blocks.remove(key);
+            self.changes.forget(key);
+        }
+        self.budget_reached = false;
+        evicted
+    }
+
+    /// Skip mesh cells with a corner voxel fused fewer than `min_weight`
+    /// times in [`TsdfVolume::dirty_block_meshes`] (0, the default: any
+    /// observed voxel), so live meshes hide single-view slivers.
+    /// [`TsdfVolume::extract_mesh`] is not affected.
+    pub fn set_min_weight(&mut self, min_weight: f32) {
+        self.min_weight = if min_weight.is_finite() {
+            min_weight.max(0.0)
+        } else {
+            0.0
+        };
     }
 
     /// Fuse one projective depth frame into the volume.
@@ -225,7 +300,10 @@ impl TsdfVolume {
             voxel_size: self.voxel_size,
             sdf_trunc: self.sdf_trunc,
         };
-        let touched = discover_touched_blocks(&context);
+        let mut touched = discover_touched_blocks(&context);
+        if let Some(limit) = self.max_blocks {
+            self.budget_reached |= drop_new_blocks_over(limit, &mut touched, &self.blocks);
+        }
         self.changes.mark_touched(&touched);
 
         let mut active: Vec<(BlockKey, VoxelBlock)> = touched
@@ -280,6 +358,7 @@ impl TsdfVolume {
             &self.changes.surfaced,
             self.voxel_size,
             self.fuse_color,
+            self.min_weight,
         );
         self.changes.pending(meshes)
     }
@@ -370,6 +449,29 @@ fn discover_touched_blocks(context: &FrameContext<'_>) -> FxHashSet<BlockKey> {
             left.extend(right);
             left
         })
+}
+
+/// Remove from `touched` the new blocks beyond `limit` allocated blocks,
+/// keeping the first in sorted key order; whether any was removed.
+fn drop_new_blocks_over(
+    limit: usize,
+    touched: &mut FxHashSet<BlockKey>,
+    blocks: &FxHashMap<BlockKey, VoxelBlock>,
+) -> bool {
+    let room = limit.saturating_sub(blocks.len());
+    let mut new: Vec<BlockKey> = touched
+        .iter()
+        .filter(|key| !blocks.contains_key(*key))
+        .copied()
+        .collect();
+    if new.len() <= room {
+        return false;
+    }
+    new.sort_unstable();
+    for key in &new[room..] {
+        touched.remove(key);
+    }
+    true
 }
 
 fn block_bounds(
