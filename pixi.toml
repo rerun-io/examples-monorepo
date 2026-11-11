@@ -83,7 +83,11 @@ torchvision = "*"
 # that each bump is a deliberate change: re-check that a gradio-rerun app still renders. Every gradio
 # release so far caps pillow<13, see [feature.common.constraints].
 gradio = "==6.31.0"                                        # pin-bump: hold
-gradio-rerun = "==0.42.0"                                  # pin-bump: hold
+# 0.42.0.post2 (pablovela5620/ai-demos release) = gradio-rerun-viewer main @ c456457: 0.42.0 plus the time cursor
+# command `gradio_rerun.commands.set_time` (rerun-io/gradio-rerun-viewer#66, merged after 0.42.0) and post1's ordered
+# loads of streamed segments. The MetricTrail app moves the cursor to each tracked frame with it. TODO: back to PyPI
+# once a gradio-rerun release has both.
+gradio-rerun = { url = "https://github.com/pablovela5620/ai-demos/releases/download/gradio-rerun-0.42.0.post2/gradio_rerun-0.42.0.post2-py3-none-any.whl" }  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
 

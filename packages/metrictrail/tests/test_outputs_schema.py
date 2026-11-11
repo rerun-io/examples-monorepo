@@ -109,3 +109,6 @@ def test_a_video_run_frames_the_input_video_and_plays_video_time() -> None:
     playing = time_panel(has_video=True)
     assert str(playing.timeline) == entities.VIDEO_TIMELINE and str(playing.play_state) == "playing" and str(playing.loop_mode) == "all"
     assert str(time_panel(has_video=False).timeline) == entities.FRAME_TIMELINE
+    # A live run logs the whole video first; the app moves the cursor to each tracked frame, so the panel waits paused.
+    live = time_panel(has_video=True, live=True)
+    assert str(live.timeline) == entities.VIDEO_TIMELINE and str(live.play_state) == "paused"

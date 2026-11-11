@@ -117,9 +117,12 @@ def tracking_views(background: rrb.Background) -> tuple[rrb.Spatial3DView, rrb.S
     return overview, follow
 
 
-def time_panel(*, has_video: bool) -> rrb.TimePanel:
-    """Collapsed; with a video on ``video_time``, playing in a loop (a streamed viewer would otherwise sit at the newest
-    data; playback outruns tracking, so each loop shows more of the run), else on ``frame``."""
+def time_panel(*, has_video: bool, live: bool = False) -> rrb.TimePanel:
+    """Collapsed; with a video on ``video_time``: paused while a live run tracks (the app moves the cursor to each newly
+    tracked frame, :meth:`metrictrail.gradio_ui.metrictrail_ui.RunStatus.cursor_command`), else playing in a loop (a
+    streamed viewer would otherwise sit at the newest data); without a video on ``frame``."""
+    if has_video and live:
+        return rrb.TimePanel(state="collapsed", timeline=entities.VIDEO_TIMELINE, play_state="paused")
     if has_video:
         return rrb.TimePanel(state="collapsed", timeline=entities.VIDEO_TIMELINE, play_state="playing", loop_mode="all")
     return rrb.TimePanel(state="collapsed", timeline=entities.FRAME_TIMELINE)
@@ -165,7 +168,7 @@ def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
         ),
         rrb.BlueprintPanel(state="collapsed"),
         rrb.SelectionPanel(state="collapsed"),
-        time_panel(has_video=True),
+        time_panel(has_video=True, live=final_eye is None),
         auto_views=False,
         auto_layout=False,
     )
