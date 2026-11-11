@@ -1,0 +1,33 @@
+# <App> on ZeroGPU: the subset of the monorepo env the app imports, our packages and the upstream
+# recipes pinned to one pushed monorepo commit. Lock on linux-64 with CONDA_OVERRIDE_CUDA=13.0.
+[workspace]
+name = "<space-name>"
+channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
+# Only if the app uses TensorRT: maps conda libnvinfer to PyPI tensorrt-cu13-libs (no 4.4 GB wheel).
+conda-pypi-map = { "https://prefix.dev/ai-demos/" = "conda-pypi-map-ai-demos.json" }
+# ZeroGPU is linux-64; the virtual packages let the CUDA 13 and manylinux_2_35 wheels resolve.
+platforms = [{ platform = "linux-64", cuda = "13.0", glibc = "2.35" }]
+requires-pixi = ">=0.83"
+preview = ["pixi-build"]
+
+[dependencies]
+python = "3.12.*"  # ZeroGPU supports 3.10 and 3.12
+cuda-version = "13.0.*"
+pytorch-gpu = "==2.12.1"  # ZeroGPU supports torch 2.8 to 2.13
+# ... the app env's features, the whole `cuda` feature included (Triton needs cuda.h and libcuda) ...
+gradio = "==6.31.0"
+rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" }
+# Upstream recipes as pixi-build source deps at the pinned commit:
+# <name>-src = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "<sha>", subdirectory = "recipes/<name>-src" }
+
+[pypi-dependencies]
+spaces = "*"  # PyPI only; pin the version you tested
+# Our packages at the same commit:
+# <package> = { git = "https://github.com/rerun-io/examples-monorepo.git", rev = "<sha>", subdirectory = "packages/<package>" }
+
+[activation.env]
+# conda's CUDA libraries first: TensorRT bindings and onnxruntime find them there.
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+[tasks]
+app = "python space_app.py"
