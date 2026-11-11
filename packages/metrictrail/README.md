@@ -36,9 +36,10 @@ not been repeated at level 0. The smaller depth workload also leaves room for re
 The `ours` path replays DINO and both DPVO convolutional encoders with CUDA graphs during inference. Graphs are scoped
 to one run and separated by model, raster and precision; FP32 recovery uses its own graph. Returned features own their
 storage, and logging stays outside capture. The recurrent update prepares its neighbor/group indices before replay;
-its cache holds at most eight recurring shapes, with uncommon shapes evaluated normally. On the RTX 5090, the
-642-frame IMG_0493 clip measured a median 50.17 tracking FPS without capture and 38.60 with capture (three runs each),
-versus 26.83 / 24.29 for the original 3,600-token path. The final TUM check gave 2.297 cm Sim(3) ATE and scale 1.05716.
+its cache holds at most eight recurring shapes, with uncommon shapes evaluated normally.
+Factor pruning and motion checks reuse compacted edge indices across their tensors. On the RTX 5090, the
+642-frame IMG_0493 clip measured a median 52.27 tracking FPS without capture and 37.25 with capture (three runs each),
+versus 26.83 / 24.29 for the original 3,600-token path. The final TUM check gave 2.288 cm Sim(3) ATE and scale 1.05686.
 
 ## Run
 
