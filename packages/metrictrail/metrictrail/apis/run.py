@@ -17,6 +17,7 @@ case name, and its ``groundtruth.csv`` is the GT).
 import sys
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
+from metrictrail.feature_graphs import feature_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
@@ -297,7 +299,7 @@ def run_and_log(
     started: float = time.perf_counter()
     stage("loading the models, then SharedK calibration (MoGe-2 + DINOv3 on the whole clip)")
     try:
-        with gpu_video_input(gpu):
+        with gpu_video_input(gpu), feature_cuda_graphs() if config.label == "ours" else nullcontext():
             pipeline = make_pipeline(typed.pipeline)
             streams = make_stream_list(typed.streams)
             for index in range(len(streams)):
