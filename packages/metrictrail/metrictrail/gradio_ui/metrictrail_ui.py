@@ -34,7 +34,8 @@ from vipe.utils.model_cache import ModelCache
 from metrictrail import entities
 from metrictrail.apis.run import RunResult, RunSettings, run_and_log
 from metrictrail.benchmarks import UPSTREAM_MAX_FRAMES
-from metrictrail.blueprint import app_blueprint
+from metrictrail.blueprint import app_blueprint, calibration_blueprint
+from metrictrail.calibration_live import RunPhase
 from metrictrail.outputs import RunMetrics
 
 APPLICATION_ID: str = "metrictrail"
@@ -47,14 +48,15 @@ POLL_S: float = 0.5
 """How often the generator yields the bytes logged so far and moves the cursor to the newest tracked frame."""
 
 RUN_LOCK: threading.Lock = threading.Lock()
-MODELS: ModelCache = ModelCache()
-"""The app's networks (MoGe-2 engines, DROID, DINO-DPVO): the first run builds them, every later run reuses them."""
 """Held while a pipeline runs: the capture hooks patch ViPE's classes, so two runs must never overlap (a cancelled
 run's worker can still be finishing when the next click arrives)."""
+MODELS: ModelCache = ModelCache()
+"""The app's networks (MoGe-2 engines, DROID, DINO-DPVO): the first run builds them, every later run reuses them."""
 
 
-class RunCancelled(RuntimeError):
-    """Raised from the capture hook when the user stops the run."""
+class RunCancelled(BaseException):
+    """Raised from the run's hooks when the user stops the run. Not an ``Exception``: ViPE's calibration turns every
+    ``Exception`` into its MoGe-2 focal fallback and goes on to track."""
 
 
 @dataclass(slots=True)
@@ -65,9 +67,12 @@ class RunStatus:
     """Latest status line."""
     cancel: threading.Event = field(default_factory=threading.Event)
     """Set when the generator stops; the next stage or tracked frame raises :class:`RunCancelled`."""
-    cursor_ns: int | None = None
-    """``video_time`` of the newest tracked frame, ns; None before tracking starts."""
-    sent_cursor_ns: int | None = None
+    cursor: int | None = None
+    """Where the newest frame is: the calibration's ``calibration_step``, or DPVO's ``video_time`` in ns; None before
+    the first."""
+    phase: RunPhase | None = None
+    """Which of the two moved the cursor last (and so which timeline :attr:`cursor` is on)."""
+    sent: tuple[int, RunPhase] | None = None
     """The cursor the viewer was last moved to."""
 
     def update(self, text: str) -> None:
@@ -76,16 +81,20 @@ class RunStatus:
             raise RunCancelled("stopped from the app")
         self.text = text
 
-    def tracked_at(self, video_time_ns: int) -> None:
+    def at(self, value: int, phase: RunPhase) -> None:
         """The ``on_cursor`` callback of :func:`run_and_log`."""
-        self.cursor_ns = video_time_ns
+        self.cursor = value
+        self.phase = phase
 
     def cursor_command(self) -> dict[str, object] | None:
-        """A viewer update that moves the cursor to the newest tracked frame (paused), or None when it has not moved."""
-        if self.cursor_ns is None or self.cursor_ns == self.sent_cursor_ns:
+        """A viewer update that moves the cursor to the newest frame (paused) on its phase's timeline, or None when it
+        has not moved."""
+        if self.cursor is None or self.phase is None or (self.cursor, self.phase) == self.sent:
             return None
-        self.sent_cursor_ns = self.cursor_ns
-        return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(self.cursor_ns, "ns"), play=False))
+        self.sent = (self.cursor, self.phase)
+        if self.phase == "calibration":
+            return dict(set_time(entities.CALIBRATION_TIMELINE, sequence=self.cursor, play=False))
+        return dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(self.cursor, "ns"), play=False))
 
 
 def example_videos(data_dir: Path) -> list[Path]:
@@ -115,7 +124,7 @@ def summary(metrics: RunMetrics, wall_s: float) -> str:
 def run_locked(settings: RunSettings, rec: rr.RecordingStream, status: RunStatus) -> RunResult:
     """:func:`run_and_log` in live mode; releases :data:`RUN_LOCK` (taken by the caller) when it returns."""
     try:
-        return run_and_log(settings, rec, live=True, on_stage=status.update, on_cursor=status.tracked_at, models=MODELS)
+        return run_and_log(settings, rec, live=True, on_stage=status.update, on_cursor=status.at, models=MODELS)
     finally:
         RUN_LOCK.release()
 
@@ -146,7 +155,8 @@ def metrictrail_streaming_fn(
     if rec is None:
         RUN_LOCK.release()
         raise RuntimeError("rr.thread_local_stream set no recording")
-    rec.send_blueprint(app_blueprint(None), make_active=True)
+    rec.send_blueprint(calibration_blueprint(), make_active=True)
+    tracking_layout: bool = False
     status: RunStatus = RunStatus()
     started: float = time.perf_counter()
     with TemporaryDirectory(prefix="metrictrail-app-") as run_dir, ThreadPoolExecutor(max_workers=1, thread_name_prefix="metrictrail") as pool:
@@ -164,6 +174,9 @@ def metrictrail_streaming_fn(
                 except FutureTimeoutError:
                     line: str = f"{status.text} ({time.perf_counter() - started:.0f} s)"
                     yield stream.read() or b"", line
+                    if status.phase == "tracking" and not tracking_layout:
+                        rec.send_blueprint(app_blueprint(None), make_active=True)
+                        tracking_layout = True
                     command: dict[str, object] | None = status.cursor_command()
                     if command is not None:
                         yield command, line
