@@ -369,8 +369,8 @@ class CaptureSession:
         added: bool,
     ) -> str | None:
         """Log one tracked frame of a DPVO instance (see the module docstring); returns the patches entity when it
-        logged patches. ``depth``: MoGe-2's metric depth (0 = none) on its device, for the live surface (logged by
-        :attr:`priors`)."""
+        logged patches. ``depth``: MoGe-2's metric depth (0 = none) on its device, for the live surface, on frames the
+        keyframe graph grew on; None otherwise (:attr:`priors` logs every frame's)."""
         set_frame_time(rec, frame, self.source_frames.get(frame), self.video_time_ns)
         height, width = int(image.shape[-2]), int(image.shape[-1])
         intrinsics_px: Float32[ndarray, "4"] = intrinsics.detach().float().cpu().numpy().reshape(4)
@@ -490,7 +490,10 @@ class CaptureObserver(DPVOObserver):
                 metric: Tensor = event.depth.depth.float()
                 valid: Tensor = torch.isfinite(metric) if event.depth.mask is None else event.depth.mask.bool()
                 depth = torch.where(valid, metric, torch.zeros_like(metric))
-            patches_entity: str | None = session.log_frame(rec, dpvo, frame, event.image, event.intrinsics, depth, added)
+            # The live surface integrates only frames the graph grew on (a TSDF integration and a device-to-host copy
+            # per frame slowed tracking by a fifth); the priors below log every frame.
+            surface_depth: Tensor | None = depth if graph_grew else None
+            patches_entity: str | None = session.log_frame(rec, dpvo, frame, event.image, event.intrinsics, surface_depth, added)
             if session.priors is not None:  # every frame: MoGe-2 ran on it for DPVO anyway
                 session.priors.submit(rec, frame, session.source_frames.get(frame), depth, normals)
             if patches_entity is not None:

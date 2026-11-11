@@ -370,16 +370,22 @@ def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
 @pytest.mark.usefixtures("stand_in_vipe")
 def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_tracking_thread(tmp_path: Path) -> None:
     """Normals as a video like the DINOv3 PCA, depth as metric millimetre PNGs, on every frame (also where DPVO's graph
-    did not grow), each at its own frame's time."""
+    did not grow), each at its own frame's time. The live surface still integrates only the frames the graph grew on."""
+    import rerun as rr
     from rerun.chunk import RrdReader
 
     from metrictrail import entities
+    from metrictrail.live_surface import LiveSurface
 
-    session = CaptureSession(out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0))
+    surface = LiveSurface(rr.RecordingStream("metrictrail-test", recording_id="surface"), log_every=100)
+    session = CaptureSession(
+        out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0), live_surface=surface
+    )
     session.install()
     session.pass_frames = 5
     tracker: DPVO = cpu_dpvo()
     tracker.n = 1
+    tracker.is_initialized = True  # every frame is "added" (logged), but the graph grows on frame 0 only
     for frame in range(4):  # a stride-2 clip: source frames 0, 2, 4, 6; no keyframe after the first
         session.source_frames[frame] = 2 * frame
         session.pending_normals[frame] = torch.full((32, 32, 3), 90 + frame, dtype=torch.uint8)
@@ -402,3 +408,4 @@ def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_track
                 logged.setdefault(f"{chunk.entity_path} {column}", []).extend(batch.column(entities.FRAME_TIMELINE).to_pylist())
     assert logged[f"/{entities.CAM_DEPTH} EncodedDepthImage:blob"] == [0, 1, 2, 3]
     assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 1, 2, 3]
+    assert surface.integrated == 1, "frame 0 only: a TSDF integration (and its device-to-host copy) per frame would slow tracking"
