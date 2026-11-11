@@ -128,19 +128,64 @@ def time_panel(*, has_video: bool, live: bool = False) -> rrb.TimePanel:
     return rrb.TimePanel(state="collapsed", timeline=entities.FRAME_TIMELINE)
 
 
+def calibration_views(background: rrb.Background) -> tuple[rrb.Spatial3DView, rrb.Horizontal]:
+    """SharedK calibration's DROID map in 3D (keyframe frustums with thumbnails, bundle-adjusted points, path, factor
+    graph), and its two plots: the focal (MoGe-2 per head frame, then after each solve) and the keyframes kept."""
+    map_view: rrb.Spatial3DView = rrb.Spatial3DView(
+        name="SharedK calibration: DROID keyframe map (thrown away after the focal fit)",
+        origin=entities.CALIBRATION,
+        contents=[f"/{entities.CALIBRATION}/**", f"- /{entities.CALIBRATION_NEWEST}/**"],
+        background=background,
+    )
+    plots: rrb.Horizontal = rrb.Horizontal(
+        rrb.TimeSeriesView(name="focal fx (tracking-raster px)", contents=[f"/{entities.CALIBRATION_HEAD_FOCAL}", f"/{entities.CALIBRATION_FOCAL}"]),
+        rrb.TimeSeriesView(name="keyframes kept", contents=[f"/{entities.CALIBRATION_KEPT}"]),
+    )
+    return map_view, plots
+
+
+def calibration_blueprint() -> rrb.Blueprint:
+    """The Gradio app's layout while SharedK calibrates, on its own timeline (``calibration_step``, the frame the sweep
+    read; the app moves the cursor there). Left: the newest keyframe, its MoGe-2 depth prior at the current focal and
+    its bundle-adjusted depth (the two the focal fit pulls together); right: the DROID map and the two plots."""
+    background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
+    map_view, plots = calibration_views(background)
+    newest = entities.CALIBRATION_NEWEST
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Vertical(
+                rrb.Spatial2DView(name="newest keyframe with a MoGe-2 prior (calibration raster)", origin=newest, contents=[entities.CALIBRATION_NEWEST_RGB], background=background),
+                rrb.Spatial2DView(
+                    name="MoGe-2 metric depth at the current focal (the prior)", origin=newest, contents=[entities.CALIBRATION_NEWEST_PRIOR], background=background
+                ),
+                rrb.Spatial2DView(name="DROID depth after bundle adjustment", origin=newest, contents=[entities.CALIBRATION_NEWEST_DEPTH], background=background),
+            ),
+            rrb.Vertical(map_view, plots, row_shares=[3, 1]),
+            column_shares=[1, 3],
+        ),
+        rrb.BlueprintPanel(state="collapsed"),
+        rrb.SelectionPanel(state="collapsed"),
+        rrb.TimePanel(state="collapsed", timeline=entities.CALIBRATION_TIMELINE, play_state="paused"),
+        auto_views=False,
+        auto_layout=False,
+    )
+
+
 def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
-    """The Gradio app's layout of one live run of ``ours`` (a user video has no GT).
+    """The Gradio app's layout once DPVO tracks (after :func:`calibration_blueprint`) and of the finished run (``ours``;
+    a user video has no GT), on ``video_time``.
 
     Left: the input video with DPVO's patches, MoGe-2 metric depth and normals of the keyframes, the DINOv3 feature PCA.
-    Right, in tabs: DPVO's
+    Right, in tabs, in the order the run makes them: SharedK calibration's map and plots (to look back at), DPVO's
     keyframe path and BA window as it tracks, then the finished trajectory with the fused metric cloud, and the same
     cloud coloured by its MoGe-2 normals. While tracking (``final_eye`` None) the DPVO tab is active; the final layout
     opens the trajectory tab with ``final_eye`` framing it.
     """
     background: rrb.Background = rrb.Background(color=BACKGROUND_RGB)
-    tracking_view: rrb.Vertical = rrb.Vertical(*tracking_views(background), name="DPVO tracking")
+    calibration_view: rrb.Vertical = rrb.Vertical(*calibration_views(background), row_shares=[3, 1], name="1 · SharedK calibration")
+    tracking_view: rrb.Vertical = rrb.Vertical(*tracking_views(background), name="2 · DPVO tracking")
     world_view: rrb.Spatial3DView = rrb.Spatial3DView(
-        name="trajectory + metric surface",
+        name="3 · trajectory + metric surface",
         origin=entities.WORLD_ROOT,
         contents=["/world/**", f"- /{entities.WORLD_CLOUD_NORMALS}", f"- /{entities.WORLD_MESH_NORMALS}"],
         background=background,
@@ -148,7 +193,7 @@ def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
         eye_controls=final_eye.controls() if final_eye is not None else None,
     )
     world_normals_view: rrb.Spatial3DView = rrb.Spatial3DView(
-        name="surface coloured by normals",
+        name="4 · surface coloured by normals",
         origin=entities.WORLD_ROOT,
         contents=["/world/**", f"- /{entities.WORLD_CLOUD}", f"- /{entities.WORLD_MESH}"],
         background=background,
@@ -163,7 +208,7 @@ def app_blueprint(final_eye: SceneView | None) -> rrb.Blueprint:
                 rrb.Spatial2DView(name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background),
                 rrb.Spatial2DView(name="DINOv3 feature PCA", origin=entities.CAM, contents=[entities.CAM_DINO_PCA], background=background),
             ),
-            rrb.Tabs(tracking_view, world_view, world_normals_view, active_tab=0 if final_eye is None else 1),
+            rrb.Tabs(calibration_view, tracking_view, world_view, world_normals_view, active_tab=1 if final_eye is None else 2),
             column_shares=[1, 3],
         ),
         rrb.BlueprintPanel(state="collapsed"),

@@ -1,5 +1,6 @@
 """Integration: our logging on a REAL finished upstream run (NAS assets), and the full pipeline run (needs lietorch_mojo + GPU)."""
 
+import json
 import os
 from pathlib import Path
 
@@ -140,3 +141,11 @@ def test_a_second_run_reuses_the_models_of_the_first(tmp_path: Path) -> None:
     second = run_and_log(settings[1], rec, live=True, models=models)
     assert models.built == built_first  # nothing built anew
     assert second.logged.metrics.num_tracked == first.logged.metrics.num_tracked == 100
+    for run in settings:
+        # The live calibration view ran inside SharedK's sweep; ViPE turns any exception there into its MoGe-2 focal.
+        record: dict[str, object] = json.loads(next((run.output / "vipe_out" / "vipe").glob("*_metrictrail.json")).read_text())["calibration"]
+        fallback = record.get("calibration_fallback")
+        assert not (isinstance(fallback, dict) and fallback.get("reason") == "vipe_stage_raised"), fallback
+    rec.disconnect()  # finishes the .rrd (footer)
+    paths: set[str] = set(RrdReader(tmp_path / "second.rrd").store().schema().entity_paths())
+    assert {"/" + entities.CALIBRATION_PATH, "/" + entities.CALIBRATION_FOCAL, "/" + entities.CALIBRATION_NEWEST_DEPTH} <= paths

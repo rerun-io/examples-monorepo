@@ -11,7 +11,7 @@ pytest.importorskip("gradio_rerun", reason="the metrictrail envs carry gradio-re
 import gradio as gr
 from gradio_rerun import Rerun
 
-from metrictrail.blueprint import SceneView, app_blueprint
+from metrictrail.blueprint import SceneView, app_blueprint, calibration_blueprint
 from metrictrail.gradio_ui.metrictrail_ui import app_overrides, build_app, example_videos, metrictrail_streaming_fn
 
 
@@ -50,10 +50,21 @@ def test_streaming_fn_without_a_video_yields_an_empty_chunk() -> None:
     assert list(metrictrail_streaming_fn(None, 1, 1500)) == [(b"", "Upload a video or pick an example first.")]
 
 
-def test_app_blueprint_builds_for_the_live_and_the_final_layout() -> None:
+def test_app_blueprint_builds_for_calibration_tracking_and_the_final_layout() -> None:
     eye = SceneView(position=(1.0, 1.0, 1.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, -1.0, 0.0))
+    calibration_blueprint()
     for final_eye in (None, eye):
         app_blueprint(final_eye)
+
+
+def test_a_stop_is_not_an_exception_so_vipes_calibration_fallback_cannot_swallow_it() -> None:
+    from metrictrail.gradio_ui.metrictrail_ui import RunCancelled, RunStatus
+
+    assert not issubclass(RunCancelled, Exception)
+    status = RunStatus()
+    status.cancel.set()
+    with pytest.raises(RunCancelled):
+        status.update("SharedK calibration: 3 frames read")
 
 
 def test_a_mov_upload_reaches_vipe_under_an_mp4_name(tmp_path: Path) -> None:
@@ -85,17 +96,24 @@ def test_a_host_passes_its_run_examples_and_frame_cap_to_build_app(tmp_path: Pat
     assert any(dependency.fn is hosted_run for dependency in demo.fns.values())
 
 
-def test_the_cursor_follows_the_newest_tracked_frame_once_per_change() -> None:
+def test_the_cursor_follows_the_newest_frame_read_or_tracked_once_per_change() -> None:
     from metrictrail.gradio_ui.metrictrail_ui import RunStatus
 
     status = RunStatus()
-    assert status.cursor_command() is None  # calibrating: nothing tracked yet, the viewer stays paused
-    status.tracked_at(1_500_000_000)
+    assert status.cursor_command() is None and status.phase is None  # nothing read yet
+    status.at(42, "calibration")
+    command = status.cursor_command()
+    assert command is not None
+    payload = command["_command"]
+    assert isinstance(payload, dict)
+    assert payload["timeline"] == "calibration_step" and payload["kind"] == "sequence" and payload["time"] == "42" and not payload["play"]
+    status.at(1_500_000_000, "tracking")
+    assert status.phase == "tracking"
     command = status.cursor_command()
     assert command is not None
     payload = command["_command"]
     assert isinstance(payload, dict)
     assert payload["timeline"] == "video_time" and payload["kind"] == "duration" and payload["time"] == "1500000000" and not payload["play"]
     assert status.cursor_command() is None  # sent once per new frame
-    status.tracked_at(1_533_333_333)
+    status.at(1_533_333_333, "tracking")
     assert status.cursor_command() is not None

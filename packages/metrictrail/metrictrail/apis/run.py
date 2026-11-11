@@ -29,12 +29,15 @@ from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
+from vipe.metrictrail.calibration.policy import MODES
+from vipe.metrictrail.config import MetricTrailInitConfig
 from vipe.utils.model_cache import ModelCache
 
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
+from metrictrail.calibration_live import CalibrationLive, RunPhase, install_calibration_live
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.feature_graphs import feature_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
@@ -230,7 +233,7 @@ def run_and_log(
     *,
     live: bool = False,
     on_stage: Callable[[str], None] | None = None,
-    on_cursor: Callable[[int], None] | None = None,
+    on_cursor: Callable[[int, RunPhase], None] | None = None,
     models: ModelCache | None = None,
 ) -> RunResult:
     """Run the pipeline on ``config.input``, then log the capture and the outputs into ``rec`` (no blueprint).
@@ -239,10 +242,12 @@ def run_and_log(
         config: What to run.
         rec: Target recording.
         live: The capture logs every DPVO pass straight into ``rec`` while it tracks, depth only on frames that grew
-            DPVO's keyframe graph (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
+            DPVO's keyframe graph (a recording streamed to a viewer as it grows), and SharedK calibration's sweep before
+            it (:mod:`metrictrail.calibration_live`); False: one file per pass, merged afterwards.
         on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
             it may raise to stop the run.
-        on_cursor: Called after each tracked frame with its ``video_time``, ns (the app moves the viewer's cursor there).
+        on_cursor: Called with the ``calibration_step`` of each frame the calibration reads, then the ``video_time``
+            (ns) of each frame DPVO tracks, and which of the two it is (the app moves the viewer's cursor there).
         models: The networks (MoGe-2, DROID, DINO-DPVO) built by an earlier run, reused by this one; the run adds what it
             builds. None: a cache of this run's own (the pipeline's default). The app keeps one for its whole life.
     """
@@ -255,9 +260,9 @@ def run_and_log(
             on_stage(text)
 
     def tracked(frame: int, source: int | None, num_frames: int, keyframes: int) -> None:
-        stage(f"tracking: frame {frame + 1} / {num_frames}, {keyframes} keyframes in the graph")
+        stage(f"DPVO tracking from the start, with the calibrated K: frame {frame + 1} / {num_frames}, {keyframes} keyframes in the graph")
         if on_cursor is not None and source is not None and video_time_ns is not None and source < video_time_ns.shape[0]:
-            on_cursor(int(video_time_ns[source]))
+            on_cursor(int(video_time_ns[source]), "tracking")
 
     if config.label == "ours":
         from metrictrail.moge2 import register_providers
@@ -298,13 +303,26 @@ def run_and_log(
             live_surface=live_surface,
         )
         session.install()
+    restore_calibration: Callable[[], None] | None = None
+    init = typed.pipeline.init
+    if config.capture and live and isinstance(init, MetricTrailInitConfig):
+        target: int | None = MODES[init.calibration.budget].target_accepted_keyframes
+        calibration = CalibrationLive(
+            rec=rec,
+            video_time_ns=video_time_ns,
+            target_keyframes=target or 0,
+            head_frames=init.calibration.initializer_frames,
+            on_stage=on_stage,
+            on_cursor=on_cursor,
+        )
+        restore_calibration = install_calibration_live(calibration)
     # This module imports cv2 (metrictrail.frames) before torch, so OpenMP sizes cv2's thread team to every logical
     # CPU while torch keeps one thread per physical core; both teams spinning cost ~13 % tracking fps on the 32-thread
     # dl-server (15.7 vs 18.2 fps on TUM fr1_desk). Upstream's run.py imports torch first and never sees this.
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
-    stage("SharedK calibration: the MoGe-2 focal, then DROID keyframes and the focal fit (the first run also loads the models)")
     try:
+        stage("SharedK calibration: MoGe-2's focal on the first 32 frames (the first run also loads the models)")
         with (
             gpu_video_input(gpu),
             feature_cuda_graphs() if config.label == "ours" else nullcontext(),
@@ -317,6 +335,8 @@ def run_and_log(
             for index in range(len(streams)):
                 pipeline.run(streams[index])
     finally:
+        if restore_calibration is not None:
+            restore_calibration()
         if session is not None:
             session.uninstall()
     wall_s: float = time.perf_counter() - started

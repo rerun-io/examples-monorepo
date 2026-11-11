@@ -50,6 +50,38 @@ CAM_NORMALS: str = "cam/normals"
 CAM_DINO_PCA: str = "cam/dino_pca"
 CAM_PATCHES: str = "cam/patches"
 
+CALIBRATION_TIMELINE: str = "calibration_step"
+"""SharedK calibration's sweep: the index of the frame it read (sequence timeline); its data is also on ``video_time``
+and ``source_frame``."""
+CALIBRATION: str = "calibration"
+"""SharedK calibration's own DROID-style keyframe SLAM (camera axes RDF, the first keyframe at the origin): the map it
+optimises with the focal and then throws away; tracking starts again in ``dpvo``."""
+CALIBRATION_KEYFRAMES: str = "calibration/keyframes"
+"""One child per kept keyframe, ``f<sweep frame>``: its pose, ``camera`` (its frustum) and ``points``
+(the bundle-adjusted disparities, in the keyframe's camera, after ViPE's multi-view depth filter)."""
+CALIBRATION_PATH: str = "calibration/keyframe_path"
+CALIBRATION_EDGES: str = "calibration/factor_graph"
+"""The frontend's factor-graph edges between keyframe centres."""
+CALIBRATION_NEWEST: str = "calibration/newest"
+"""The newest keyframe in 2D, outside the 3D view."""
+CALIBRATION_NEWEST_RGB: str = "calibration/newest/rgb"
+CALIBRATION_NEWEST_PRIOR: str = "calibration/newest/moge2_depth"
+"""MoGe-2 metric depth at the current focal: the prior the bundle adjustment pulls the disparities towards."""
+CALIBRATION_NEWEST_DEPTH: str = "calibration/newest/droid_depth"
+"""Depth of the bundle-adjusted disparities."""
+CALIBRATION_FOCAL: str = "metrics/sharedk/focal_px"
+"""SharedK's focal (tracking-raster px) after each backend solve."""
+CALIBRATION_HEAD_FOCAL: str = "metrics/sharedk/moge2_focal_px"
+"""MoGe-2's own focal on each of the first 32 frames; their median starts the fit."""
+CALIBRATION_KEPT: str = "metrics/sharedk/keyframes"
+"""Keyframes the sweep keeps, per frame read."""
+
+
+def calibration_keyframe(step: int) -> str:
+    """The entity of the calibration keyframe made at sweep step ``step``."""
+    return f"{CALIBRATION_KEYFRAMES}/f{step:05d}"
+
+
 DPVO_ROOT: str = "dpvo"
 DPVO_KEYFRAMES: str = "dpvo/keyframes"
 DPVO_KEYFRAME_PATH: str = "dpvo/keyframe_path"
