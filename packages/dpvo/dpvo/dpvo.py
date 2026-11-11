@@ -341,19 +341,21 @@ class DPVO:
             store: If ``True``, save removed edges as inactive (for global BA).
         """
         assert self.pg.ii.numel() == self.pg.weight.shape[1]
+        kept: Int64[Tensor, "n_kept"] = (~m).nonzero().flatten()
         if store:
-            self.pg.ii_inac = torch.cat((self.pg.ii_inac, self.pg.ii[m]))
-            self.pg.jj_inac = torch.cat((self.pg.jj_inac, self.pg.jj[m]))
-            self.pg.kk_inac = torch.cat((self.pg.kk_inac, self.pg.kk[m]))
-            self.pg.weight_inac = torch.cat((self.pg.weight_inac, self.pg.weight[:, m]), dim=1)
-            self.pg.target_inac = torch.cat((self.pg.target_inac, self.pg.target[:, m]), dim=1)
-        self.pg.weight = self.pg.weight[:, ~m]
-        self.pg.target = self.pg.target[:, ~m]
+            removed: Int64[Tensor, "n_removed"] = m.nonzero().flatten()
+            self.pg.ii_inac = torch.cat((self.pg.ii_inac, self.pg.ii[removed]))
+            self.pg.jj_inac = torch.cat((self.pg.jj_inac, self.pg.jj[removed]))
+            self.pg.kk_inac = torch.cat((self.pg.kk_inac, self.pg.kk[removed]))
+            self.pg.weight_inac = torch.cat((self.pg.weight_inac, self.pg.weight[:, removed]), dim=1)
+            self.pg.target_inac = torch.cat((self.pg.target_inac, self.pg.target[:, removed]), dim=1)
+        self.pg.weight = self.pg.weight[:, kept]
+        self.pg.target = self.pg.target[:, kept]
 
-        self.pg.ii = self.pg.ii[~m]
-        self.pg.jj = self.pg.jj[~m]
-        self.pg.kk = self.pg.kk[~m]
-        self.pg.net = self.pg.net[:, ~m]
+        self.pg.ii = self.pg.ii[kept]
+        self.pg.jj = self.pg.jj[kept]
+        self.pg.kk = self.pg.kk[kept]
+        self.pg.net = self.pg.net[:, kept]
         assert self.pg.ii.numel() == self.pg.weight.shape[1]
 
     def _append_extra_loop_edges(self, lii: Int64[Tensor, "n_loop"], ljj: Int64[Tensor, "n_loop"]) -> None:
@@ -441,7 +443,7 @@ class DPVO:
 
     def motionmag(self, i: int, j: int) -> float:
         """Compute mean pixel flow magnitude for all edges from frame i to frame j."""
-        k: Bool[Tensor, "n_edges"] = (self.pg.ii == i) & (self.pg.jj == j)
+        k: Int64[Tensor, "n_matched"] = ((self.pg.ii == i) & (self.pg.jj == j)).nonzero().flatten()
         ii: Int[Tensor, "n_matched"] = self.pg.ii[k]
         jj: Int[Tensor, "n_matched"] = self.pg.jj[k]
         kk: Int[Tensor, "n_matched"] = self.pg.kk[k]
