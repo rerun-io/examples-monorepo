@@ -25,7 +25,7 @@ from rerun.experimental.dataloader import (
     NumericDecoder,
     RerunIterableDataset,
 )
-from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE, SegmentNvdecDecoder
+from simplecv.rerun_dataloader import SegmentNvdecDecoder
 from torch import Tensor
 
 from mvs.catalog import NATIVE_FPS, TIMELINE, VIDEO_WIDE
@@ -41,6 +41,10 @@ from mvs.pose_stream import (
     Keyframe,
     KeyframeBuffer,
 )
+
+FETCH_BLOCK_SIZE: int = 256
+"""Samples per dataloader fetch: one block decodes all its full-resolution frames on the GPU at once, and 1024 ran out
+of memory on a 32 GB card."""
 
 
 class DepthRow(TypedDict):
@@ -110,7 +114,7 @@ def depth_dataset(
         fields=fields,
         timeline_sampling=FixedRateSampling(rate_hz=NATIVE_FPS),
         shuffle_strategy=NoShuffle(),
-        fetch_block_size=RECOMMENDED_FETCH_BLOCK_SIZE,
+        fetch_block_size=FETCH_BLOCK_SIZE,
     )
     return samples, video_decoder
 

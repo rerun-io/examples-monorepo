@@ -4,8 +4,6 @@ pytest.importorskip("rerun.catalog", reason="live mesh configuration imports nee
 pytest.importorskip("rerun.experimental.dataloader", reason="live mesh configuration imports need the Rerun dataloader")
 pytest.importorskip("torchcodec", reason="live mesh configuration imports need TorchCodec")
 
-from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE  # noqa: E402
-
 from mvs.catalog import CLOUD_CATALOG_URL, CatalogDataConfig  # noqa: E402
 
 
@@ -17,7 +15,6 @@ def test_catalog_data_config_defaults() -> None:
     assert config.catalog_url == CLOUD_CATALOG_URL
     assert config.dataset_name == "arkitscenes"
     assert config.segments == ("42899799",)
-    assert RECOMMENDED_FETCH_BLOCK_SIZE == 1024
 
 
 def test_depth_raster_rgb_undoes_the_model_normalisation() -> None:
@@ -54,3 +51,36 @@ def test_fusion_config_rejects_a_log_cadence_below_one() -> None:
     assert FusionConfig(log_every=1).log_every == 1
     with pytest.raises(ValueError, match="log_every"):
         FusionConfig(log_every=0)
+
+
+def test_the_depth_stream_fetches_small_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One fetch block decodes all its full-resolution frames on the GPU at once, so the stream asks for small blocks."""
+    from unittest.mock import MagicMock
+
+    import torch
+    from rerun.catalog import DatasetEntry
+    from rerun.experimental.dataloader import RerunIterableDataset
+    from simplecv.rerun_dataloader import SegmentNvdecDecoder
+
+    import mvs.depth_stream
+    from mvs.depth_stream import FETCH_BLOCK_SIZE, depth_dataset
+
+    requested: dict[str, object] = {}
+
+    # Subclasses, not mocks: beartype checks depth_dataset's annotated locals against these module names.
+    class RecordingDataset(RerunIterableDataset):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args
+            requested.update(kwargs)
+
+    class IdleDecoder(SegmentNvdecDecoder):
+        def __init__(self, *args: object) -> None:
+            del args
+
+    monkeypatch.setattr(mvs.depth_stream, "RerunIterableDataset", RecordingDataset)
+    monkeypatch.setattr(mvs.depth_stream, "SegmentNvdecDecoder", IdleDecoder)
+    monkeypatch.setattr(mvs.depth_stream, "DataSource", lambda **kwargs: None)
+    depth_dataset(MagicMock(spec=DatasetEntry), "42899799", torch.device("cpu"))
+
+    assert FETCH_BLOCK_SIZE == 256
+    assert requested["fetch_block_size"] == FETCH_BLOCK_SIZE
