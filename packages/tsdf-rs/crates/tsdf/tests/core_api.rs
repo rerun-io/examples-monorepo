@@ -352,3 +352,74 @@ fn singular_intrinsics_are_refused() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+#[test]
+fn the_block_budget_skips_new_blocks_and_keeps_fusing_old_ones() -> Result<(), Box<dyn Error>> {
+    let (depth, camera) = wavy_frame(0);
+    let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
+    let mut free = TsdfVolume::new(0.04, 0.12, false)?;
+    free.integrate(&frame, &camera)?;
+    assert!(free.block_count() > 3 && !free.budget_reached());
+
+    let mut capped = TsdfVolume::new(0.04, 0.12, false)?;
+    capped.set_max_blocks(Some(3));
+    capped.integrate(&frame, &camera)?;
+    assert_eq!(capped.block_count(), 3);
+    assert!(capped.budget_reached());
+    let (depth, camera) = wavy_frame(1);
+    capped.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
+    assert_eq!(capped.block_count(), 3);
+    Ok(())
+}
+
+#[test]
+fn eviction_frees_the_farthest_blocks_and_forgets_them() -> Result<(), Box<dyn Error>> {
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    volume.set_max_blocks(Some(1_000));
+    for frame in 0..3 {
+        let (depth, camera) = wavy_frame(frame);
+        volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
+    }
+    let before = volume.block_count();
+    let center = [0.0, 0.0, 2.0];
+    let evicted = volume.evict_farthest(center, before / 2);
+    assert_eq!(volume.block_count(), before / 2);
+    assert_eq!(evicted.len(), before - before / 2);
+    assert!(!volume.budget_reached());
+    // Every kept block is at least as near as every evicted one.
+    let distance = |key: &[i64; 3]| -> f32 {
+        (0..3)
+            .map(|axis| ((key[axis] as f32 + 0.5) * 0.64 - center[axis]).powi(2))
+            .sum()
+    };
+    let nearest_evicted = evicted.iter().map(distance).fold(f32::INFINITY, f32::min);
+    let meshes = volume.extract_dirty_block_meshes();
+    assert!(meshes.iter().all(|(key, _)| !evicted.contains(key)));
+    assert!(meshes
+        .iter()
+        .all(|(key, _)| distance(key) <= nearest_evicted));
+    assert!(volume.evict_farthest(center, before).is_empty());
+    Ok(())
+}
+
+#[test]
+fn min_weight_hides_cells_seen_once_from_live_meshes_only() -> Result<(), Box<dyn Error>> {
+    let (depth, camera) = wavy_frame(0);
+    let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    volume.set_min_weight(2.0);
+    volume.integrate(&frame, &camera)?;
+    assert!(volume
+        .extract_dirty_block_meshes()
+        .iter()
+        .all(|(_, mesh)| mesh.triangles.is_empty()));
+    assert!(!volume.extract_mesh()?.triangles.is_empty());
+    volume.integrate(&frame, &camera)?;
+    let live: usize = volume
+        .extract_dirty_block_meshes()
+        .iter()
+        .map(|(_, mesh)| mesh.triangles.len())
+        .sum();
+    assert_eq!(live, volume.extract_mesh()?.triangles.len());
+    Ok(())
+}

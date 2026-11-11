@@ -54,6 +54,12 @@ impl ChangeTracker {
         keys
     }
 
+    /// Drop every record of `key`, a block the volume freed.
+    pub(crate) fn forget(&mut self, key: &BlockKey) {
+        self.dirty.remove(key);
+        self.surfaced.remove(key);
+    }
+
     /// Pair `meshes` with the [`Delivery`] that records them in this tracker.
     pub(crate) fn pending(&mut self, meshes: Vec<(BlockKey, Mesh)>) -> DirtyMeshes<'_> {
         let surfaced = meshes

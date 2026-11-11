@@ -56,7 +56,7 @@ pub(crate) fn full_mesh(
     keys.sort_unstable();
     let block_meshes: Vec<BlockMesh> = keys
         .par_iter()
-        .map(|&key| block_mesh(key, blocks))
+        .map(|&key| block_mesh(key, blocks, 0.0))
         .collect();
 
     let triangle_count = block_meshes.iter().map(|mesh| mesh.triangles.len()).sum();
@@ -109,10 +109,11 @@ pub(crate) fn block_meshes(
     surfaced: &FxHashSet<BlockKey>,
     voxel_size: f32,
     fuse_color: bool,
+    min_weight: f32,
 ) -> Vec<(BlockKey, Mesh)> {
     keys.par_iter()
         .filter_map(|&key| {
-            let block = block_mesh(key, blocks);
+            let block = block_mesh(key, blocks, min_weight);
             // Report empty meshes only on the surfaced -> empty transition, so
             // surface-less shell blocks are not re-announced every extraction.
             if block.triangles.is_empty() && !surfaced.contains(&key) {
@@ -168,8 +169,9 @@ fn attributed_mesh(
 }
 
 /// Triangles of the cells anchored in block `key`. A cell yields triangles
-/// only when all eight corners are observed (nonzero weight, finite value).
-fn block_mesh(key: BlockKey, blocks: &Blocks) -> BlockMesh {
+/// only when all eight corners are observed (nonzero weight, at least
+/// `min_weight`, finite value).
+fn block_mesh(key: BlockKey, blocks: &Blocks, min_weight: f32) -> BlockMesh {
     let neighbors = neighbor_blocks(key, blocks);
     if !has_possible_surface(&neighbors) {
         return BlockMesh::default();
@@ -185,7 +187,8 @@ fn block_mesh(key: BlockKey, blocks: &Blocks) -> BlockMesh {
     for z in 0..BLOCK_RESOLUTION {
         for y in 0..BLOCK_RESOLUTION {
             for x in 0..BLOCK_RESOLUTION {
-                let Some((cube_index, values)) = observed_cell(&neighbors, [x, y, z]) else {
+                let Some((cube_index, values)) = observed_cell(&neighbors, [x, y, z], min_weight)
+                else {
                     continue;
                 };
                 if cube_index == 0 || cube_index == u8::MAX {
@@ -223,8 +226,13 @@ fn block_mesh(key: BlockKey, blocks: &Blocks) -> BlockMesh {
 }
 
 /// Configuration and corner values of the cell anchored at block-local
-/// `anchor`; `None` if a corner is unobserved.
-fn observed_cell(neighbors: &[Option<&VoxelBlock>; 8], anchor: [i64; 3]) -> Option<(u8, [f32; 8])> {
+/// `anchor`; `None` if a corner is unobserved or fused fewer than
+/// `min_weight` times.
+fn observed_cell(
+    neighbors: &[Option<&VoxelBlock>; 8],
+    anchor: [i64; 3],
+    min_weight: f32,
+) -> Option<(u8, [f32; 8])> {
     let mut cube_index = 0_u8;
     let mut values = [0.0_f32; 8];
     for (corner, offset) in CORNERS.iter().enumerate() {
@@ -234,7 +242,7 @@ fn observed_cell(neighbors: &[Option<&VoxelBlock>; 8], anchor: [i64; 3]) -> Opti
             anchor[2] + offset[2],
         ];
         let (value, weight) = cached_voxel(neighbors, local)?;
-        if weight == 0.0 || !value.is_finite() {
+        if weight == 0.0 || weight < min_weight || !value.is_finite() {
             return None;
         }
         values[corner] = value;
