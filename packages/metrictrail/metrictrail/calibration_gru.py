@@ -25,7 +25,15 @@ from torch import Tensor
 from vipe.slam.networks.droid_net import ConvGRU
 from vipe.utils.model_cache import ModelCache
 
+from metrictrail.calibration_graphs import CalibrationAccelerationError
+
 GruBackend: TypeAlias = Literal["torch", "tensorrt"]
+HIDDEN_CHANNELS: int = 128
+"""Channels of the GRU's hidden state."""
+CONTEXT_CHANNELS: int = 320
+"""Channels of its concatenated inputs."""
+MIN_EDGES, OPT_EDGES, MAX_EDGES = 1, 48, 128
+"""The engine's dynamic edge-count profile; other counts run the PyTorch forward."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +43,9 @@ class GruEngineKey:
     weights: str
     height: int
     width: int
-    min_edges: int = 1
-    opt_edges: int = 48
-    max_edges: int = 128
+    min_edges: int = MIN_EDGES
+    opt_edges: int = OPT_EDGES
+    max_edges: int = MAX_EDGES
     precision: Literal["fp16"] = "fp16"
 
     @property
@@ -98,8 +106,8 @@ class GruRuntime:
             frozen.forward = _original_forward.__get__(frozen, ConvGRU)
             device = next(frozen.parameters()).device
             with torch.inference_mode(), torch.autocast("cuda", enabled=False), TemporaryDirectory(dir=root) as temporary:
-                hidden = torch.zeros(2, 128, key.height, key.width, device=device, dtype=torch.float16)
-                context = torch.zeros(2, 320, key.height, key.width, device=device, dtype=torch.float16)
+                hidden = torch.zeros(2, HIDDEN_CHANNELS, key.height, key.width, device=device, dtype=torch.float16)
+                context = torch.zeros(2, CONTEXT_CHANNELS, key.height, key.width, device=device, dtype=torch.float16)
                 staged = Path(temporary) / onnx.name
                 torch.onnx.export(frozen, (hidden, context), staged, input_names=["hidden", "context"], output_names=["updated"],
                                   dynamic_axes={"hidden": {0: "edges"}, "context": {0: "edges"}, "updated": {0: "edges"}},
@@ -119,7 +127,7 @@ class GruRuntime:
         self.runtime = TensorRtRuntime(self.path)
         stats.load_seconds += time.perf_counter() - started
 
-    def __call__(self, hidden: Float16[Tensor, "edges 128 h w"], context: Float16[Tensor, "edges 320 h w"]) -> Float16[Tensor, "edges 128 h w"]:
+    def __call__(self, hidden: Float16[Tensor, "edges hidden h w"], context: Float16[Tensor, "edges context h w"]) -> Float16[Tensor, "edges hidden h w"]:
         return self.runtime({"hidden": hidden, "context": context})["updated"].clone()
 
 
@@ -134,36 +142,38 @@ def calibration_gru(backend: GruBackend = "torch", *, model_cache: ModelCache | 
     if backend == "torch":
         yield stats
         return
-    if backend != "tensorrt":
-        raise ValueError(f"unknown calibration GRU backend: {backend}")
     root = (cache_dir or Path(os.environ.get("METRICTRAIL_TRT_CACHE", "~/.cache/metrictrail/droid-gru"))).expanduser().resolve()
     original = ConvGRU.forward
 
     @wraps(original)
     def forward(self: ConvGRU, net: Tensor, *inputs: Tensor) -> Tensor:
-        hidden = net
-        if (self.training or torch.is_grad_enabled() or not hidden.is_cuda or hidden.dtype != torch.float16
-                or not 1 <= hidden.shape[0] <= 128 or hidden.shape[1] != 128 or sum(value.shape[1] for value in inputs) != 320):
+        if (self.training or torch.is_grad_enabled() or not net.is_cuda or net.dtype != torch.float16
+                or not MIN_EDGES <= net.shape[0] <= MAX_EDGES or net.shape[1] != HIDDEN_CHANNELS
+                or sum(value.shape[1] for value in inputs) != CONTEXT_CHANNELS):
             stats.eager_calls += 1
-            return original(self, hidden, *inputs)
+            return original(self, net, *inputs)
         versions = tuple((parameter.data_ptr(), parameter._version) for parameter in self.parameters())
         saved = _models.get(self)
         if saved is None or saved.versions != versions:
             saved = ModelEngines(versions, weights_digest(self))
             _models[self] = saved
-        key = GruEngineKey(saved.digest, hidden.shape[-2], hidden.shape[-1])
+        key = GruEngineKey(saved.digest, net.shape[-2], net.shape[-1])
         slot = (key, str(root))
         runtime = saved.engines.get(slot)
         if runtime is None:
             def build() -> GruRuntime:
-                return GruRuntime(self, key, root, stats)
-            runtime = build() if model_cache is None else model_cache.get(f"metrictrail/gru/{key!r}/{root}/{hidden.device}", build)
+                try:
+                    return GruRuntime(self, key, root, stats)
+                except Exception as error:  # ViPE's sweep would turn it into the MoGe-2 focal fallback
+                    raise CalibrationAccelerationError(f"the TensorRT calibration GRU failed to build or load: {error!r}") from error
+
+            runtime = build() if model_cache is None else model_cache.get(f"metrictrail/gru/{key!r}/{root}/{net.device}", build)
             saved.engines[slot] = runtime
         path = str(runtime.path)
         if path not in stats.engine_files:
             stats.engine_files.append(path)
         stats.engine_calls += 1
-        return runtime(hidden, torch.cat(inputs, dim=1))
+        return runtime(net, torch.cat(inputs, dim=1))
 
     ConvGRU.forward = forward
     try:

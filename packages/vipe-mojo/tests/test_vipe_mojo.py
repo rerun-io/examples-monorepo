@@ -127,7 +127,7 @@ def test_ba_extended_matches_cuda(entity: str, device: str, _repeat: int, device
         rec, device, "poses", "disps", "intrinsics", "disps_sens", "targets", "weights", "eta", "ii", "jj", "depth_active"
     )
     s: list[float] = rec.tensor("scalars").tolist()
-    topology = slam_ext._prepare_topology(
+    topology = slam_ext.prepare_topology(
         tuple(rec.tensor("ii").tolist()), tuple(rec.tensor("jj").tolist()), int(s[0]), int(s[1]),
         bool(s[7]), bool(s[5]), poses.device,
     )

@@ -81,3 +81,25 @@ def test_gru_dynamic_profile_ownership_and_model_cache(raster: tuple[int, int]) 
         with calibration_gru("tensorrt", cache_dir=cache_dir) as fallback:
             torch.testing.assert_close(model(hidden, context), reference, rtol=0.0, atol=0.0)
         assert fallback.eager_calls == 1 and fallback.engine_calls == 0
+
+
+@pytest.mark.integration
+def test_a_gru_build_failure_fails_the_run_instead_of_reaching_vipes_focal_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ViPE's sweep turns any Exception into the MoGe-2 focal fallback: a TensorRT failure must not be one."""
+    from metrictrail import calibration_gru as module
+    from metrictrail.calibration_graphs import CalibrationAccelerationError
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+
+    def broken(*_: object) -> None:
+        raise RuntimeError("no TensorRT builder")
+
+    monkeypatch.setattr(module, "GruRuntime", broken)
+    model = ConvGRU(128, 320).cuda().half().eval()
+    hidden = torch.zeros(2, 128, 3, 4, device="cuda", dtype=torch.float16)
+    context = torch.zeros(2, 320, 3, 4, device="cuda", dtype=torch.float16)
+    assert not issubclass(CalibrationAccelerationError, Exception)
+    with torch.no_grad(), calibration_gru("tensorrt", cache_dir=tmp_path), pytest.raises(CalibrationAccelerationError) as raised:
+        model(hidden, context)
+    assert isinstance(raised.value.__cause__, RuntimeError)

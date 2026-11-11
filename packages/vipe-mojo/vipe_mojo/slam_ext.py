@@ -182,6 +182,15 @@ class _PoseSystem:
         df = x[-1] if self.dim > 6 * self.p else torch.zeros((), dtype=torch.float64, device=reduced.device)
         return x[:6 * self.p].view(self.p, 6).float(), df
 
+    def solve_on(
+        self, reduced: Tensor, lm: float, ep: float, scalar_lm: float, scalar_ep: float, *, device_solve: bool
+    ) -> tuple[Tensor, Tensor | float]:
+        """(dx on ``reduced``'s device, df): :meth:`solve_device`, or :meth:`solve` on the CPU and dx copied back."""
+        if device_solve:
+            return self.solve_device(reduced, lm, ep, scalar_lm, scalar_ep)
+        dx, df = self.solve(reduced.cpu(), lm, ep, scalar_lm, scalar_ep)
+        return dx.to(reduced.device), df
+
     def solve(self, host: Tensor, lm: float, ep: float, scalar_lm: float, scalar_ep: float) -> tuple[Tensor, float]:
         """(dx (P, 6) float32, df) on the CPU; zeros when the Cholesky factorisation fails (Eigen's LLT)."""
         assert host.shape[0] == self.host_size, (host.shape, self.host_size)
@@ -210,7 +219,7 @@ def _schur_pairs(jj_exp: Tensor, kk_exp: Tensor, t0: int, t1: int) -> tuple[Tens
 
 
 @dataclass(frozen=True, slots=True)
-class _BaTopology:
+class BaTopology:
     """Index-only preparation shared by solves with identical ordered edges and pose ranges."""
 
     kx: Int64[Tensor, "k"]
@@ -236,7 +245,7 @@ class _BaTopology:
 
 
 @lru_cache(maxsize=8)
-def _prepare_topology(
+def prepare_topology(
     sources: tuple[int, ...],
     targets: tuple[int, ...],
     t0: int,
@@ -244,7 +253,7 @@ def _prepare_topology(
     optimize_intrinsics: bool,
     motion_only: bool,
     device: torch.device,
-) -> _BaTopology:
+) -> BaTopology:
     """Build integer metadata on the CPU once, then transfer only the kernel index tables.
 
     Eight entries bound retained device memory. Values, order, pose bounds, solver mode and
@@ -262,7 +271,7 @@ def _prepare_topology(
         t1 - t0, optimize_intrinsics, ii, jj, t0,
         None if motion_only else (pair_i + t0, pair_j + t0, jj_exp, jj_exp[target_rows]),
     )
-    return _BaTopology(
+    return BaTopology(
         kx.to(device), kk_exp.to(device), ii_exp.to(device),
         _Accum(ii, kx, device), _Accum(ii, ts, device), _Accum(ii_exp, kx, device),
         pair_idx.to(device), (jj_exp - t0).contiguous().to(device), target_rows.to(device), pose_system,
@@ -294,7 +303,7 @@ def ba_extended(
     compute_energy: bool,
     flow_weight: float,
     *,
-    topology: _BaTopology | None = None,
+    topology: BaTopology | None = None,
     device_solve: bool = False,
 ) -> list[Tensor | None]:
     """`iterations` Gauss-Newton steps on poses [t0, t1), the disparities of the edges' source frames and optionally the focal.
@@ -320,7 +329,7 @@ def ba_extended(
     # sufficient: upstream reuses tensors and also constructs fresh tensors for unchanged edges.
     if topology is None:
         edges: list[list[int]] = torch.stack((ii, jj)).cpu().tolist()
-        topology = _prepare_topology(tuple(edges[0]), tuple(edges[1]), t0, t1, optimize_intrinsics, motion_only, device)
+        topology = prepare_topology(tuple(edges[0]), tuple(edges[1]), t0, t1, optimize_intrinsics, motion_only, device)
     kx, kk_exp, ii_exp = topology.kx, topology.kk_exp, topology.ii_exp
     accum_ii_kx, accum_ii_ts, accum_exp_kx = topology.accum_ii_kx, topology.accum_ii_ts, topology.accum_exp_kx
     pair_idx, rhs_rows, target_rows = topology.pair_idx, topology.rhs_rows, topology.target_rows
@@ -364,11 +373,7 @@ def ba_extended(
             energy[itr] = iter_energy
 
         if motion_only:
-            if device_solve:
-                dx, df = pose_system.solve_device(sums_gpu.view(-1), lm, ep, intrinsics_lm, intrinsics_ep)
-            else:
-                dx_cpu, df = pose_system.solve(sums_gpu.view(-1).cpu(), lm, ep, intrinsics_lm, intrinsics_ep)
-                dx = dx_cpu.to(device)
+            dx, df = pose_system.solve_on(sums_gpu.view(-1), lm, ep, intrinsics_lm, intrinsics_ep, device_solve=device_solve)
             launch("pose_retr", (t0,), (poses, dx))
             if optimize_intrinsics:
                 intrinsics[:2] += df * intrinsics_scale
@@ -393,11 +398,7 @@ def ba_extended(
             ef = accum_ii_kx(efi) * active
             spf: Tensor = (e[target_rows] * (q[kk_exp[target_rows]] * ef[kk_exp[target_rows]]).unsqueeze(1)).sum(2)
             parts += [spf.view(-1), (ef * q * ef).sum().view(1), (ef * q * w).sum().view(1)]
-        if device_solve:
-            dx, df = pose_system.solve_device(torch.cat(parts), lm, ep, intrinsics_lm, intrinsics_ep)
-        else:
-            dx_cpu, df = pose_system.solve(torch.cat(parts).cpu(), lm, ep, intrinsics_lm, intrinsics_ep)
-            dx = dx_cpu.to(device)
+        dx, df = pose_system.solve_on(torch.cat(parts), lm, ep, intrinsics_lm, intrinsics_ep, device_solve=device_solve)
         dw: Tensor = torch.zeros(e.shape[0], hw, **f32)
         launch("evt", (), (e, dx, rhs_rows, dw))
         dz = q * (w - accum_exp_kx(dw))

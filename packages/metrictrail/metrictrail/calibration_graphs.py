@@ -24,7 +24,26 @@ from vipe.slam.components.factor_graph import FactorGraph
 from vipe.slam.maths import geom
 from vipe.slam.networks.droid_net import AltCorrBlock, CorrBlock, GraphAgg
 from vipe.utils.cameras import CameraType
-from vipe_mojo.slam_ext import _BaTopology, _prepare_topology, ba_extended
+from vipe_mojo.slam_ext import BaTopology, ba_extended, prepare_topology
+
+MAX_CALIBRATION_BUCKETS: int = 2
+"""Captured shape buckets kept per graph (least recently used dropped first)."""
+GROUPS_ATTRIBUTE: str = "_metrictrail_groups"
+"""Attribute on a grouped index tensor that carries its group count to :func:`grouped_aggregate` (no host sync)."""
+
+
+class CalibrationAccelerationError(BaseException):
+    """The calibration's CUDA graphs or TensorRT GRU failed. Not an ``Exception``, so ViPE's calibration cannot turn it
+    into its MoGe-2 focal fallback: the run fails instead of tracking with a K the failure changed."""
+
+
+def grouped_inverse(sources: Tensor, device: torch.device) -> tuple[Tensor, Tensor]:
+    """The sorted source groups of ``sources`` (host) and each edge's group index on ``device``, tagged with the group
+    count for :func:`grouped_aggregate`."""
+    groups, inverse = torch.unique(sources, sorted=True, return_inverse=True)
+    inverse = inverse.to(device)
+    setattr(inverse, GROUPS_ATTRIBUTE, len(groups))
+    return groups, inverse
 
 
 @dataclass(frozen=True)
@@ -48,10 +67,9 @@ class PreparedUpdate:
 
     groups: Int64[Tensor, "groups"]
     inverse: Int64[Tensor, "edges"]
-    inactive: Int64[Tensor, "inactive"]
     sources: Int64[Tensor, "all_edges"]
     targets: Int64[Tensor, "all_edges"]
-    topology: _BaTopology
+    topology: BaTopology
     state: StepState
     t0: int
     t1: int
@@ -85,7 +103,7 @@ class PreparedUpdate:
 
 def grouped_aggregate(self: GraphAgg, net: Tensor, ix: Tensor) -> tuple[Tensor, Tensor]:
     """The original aggregation, with its output size supplied by the host topology."""
-    groups: int | None = getattr(ix, "_metrictrail_groups", None)
+    groups: int | None = getattr(ix, GROUPS_ATTRIBUTE, None)
     batch, count, channels, height, width = net.shape
     net = self.relu(self.conv1(net.view(batch * count, channels, height, width)))
     net = scatter_mean(net.view(batch, count, 128, height, width), ix, dim=1, dim_size=groups)
@@ -116,9 +134,9 @@ class CalibrationGraph(FactorGraph):
         self.capture_count = 0
         self.replay_count = 0
         if self.buffer.n_views != 1 or self.buffer.camera_type != CameraType.PINHOLE:
-            raise ValueError("calibration graphs require a single pinhole view")
+            raise CalibrationAccelerationError("calibration graphs require a single pinhole view")
         if not self.buffer.ba_config.fused or self.buffer.sparse_tracks.enabled:
-            raise ValueError("calibration graphs require fused dense BA")
+            raise CalibrationAccelerationError("calibration graphs require fused dense BA")
 
     @torch.amp.autocast("cuda", enabled=True)
     def add_factors(self, ii: Tensor | list[int], jj: Tensor | list[int], remove: bool = False) -> None:
@@ -242,14 +260,12 @@ class CalibrationGraph(FactorGraph):
             self.add_factors(sources, targets, remove)
 
     def _prepare(self, t0: int, t1: int, itrs: int, use_inactive: bool, motion_only: bool, limited_disp: bool) -> PreparedUpdate:
-        groups, inverse = torch.unique(self.sources, sorted=True, return_inverse=True)
+        groups, inverse = grouped_inverse(self.sources, self.device)
         inactive = torch.where((self.inactive_sources >= t0 - 3) & (self.inactive_targets >= t0 - 3))[0] if use_inactive else torch.empty(0, dtype=torch.int64)
         sources = torch.cat([self.inactive_sources[inactive], self.sources])
         targets = torch.cat([self.inactive_targets[inactive], self.targets])
-        topology = _prepare_topology(tuple(sources.tolist()), tuple(targets.tolist()), t0, t1, False, motion_only, self.device)
+        topology = prepare_topology(tuple(sources.tolist()), tuple(targets.tolist()), t0, t1, False, motion_only, self.device)
         topology.pose_system.prepare_device(self.device)
-        inverse = inverse.to(self.device)
-        inverse._metrictrail_groups = len(groups)
         assert self.corr is not None and self.f_net is not None and self.inp is not None
         correlations = copy.copy(self.corr)
         # CorrBlock.cat / __getitem__ replace list entries in place. Keep this bucket's input addresses alive.
@@ -257,7 +273,7 @@ class CalibrationGraph(FactorGraph):
         inactive = inactive.to(self.device)
         state = StepState(self.ii, self.jj, self.f_net, self.inp, self.target, self.weight,
                           self.target_inac[:, inactive], self.weight_inac[:, inactive], correlations)
-        plan = PreparedUpdate(groups.to(self.device), inverse, inactive, sources.to(self.device), targets.to(self.device),
+        plan = PreparedUpdate(groups.to(self.device), inverse, sources.to(self.device), targets.to(self.device),
                               topology, state, t0, t1, itrs, motion_only, limited_disp, use_inactive)
         key = plan.key()
         saved = self.buckets.get(key)
@@ -271,14 +287,13 @@ class CalibrationGraph(FactorGraph):
         # The global topology cache is immutable: a shape bucket needs its own writable index tables.
         plan.topology = copy.deepcopy(topology)
         self.buckets[key] = plan
-        while len(self.buckets) > 2:
+        while len(self.buckets) > MAX_CALIBRATION_BUCKETS:
             self.buckets.popitem(last=False)
         return plan
 
     @torch.amp.autocast("cuda", enabled=True)
     def _step(self, plan: PreparedUpdate) -> None:
         """All floating work of one update: projection, correlation, GRU, and every BA iteration."""
-        assert self.corr is not None and self.f_net is not None and self.inp is not None
         state = plan.state
         with torch.autocast("cuda", enabled=False):
             coords = self._project(state.sources, state.targets)
@@ -297,7 +312,7 @@ class CalibrationGraph(FactorGraph):
             self._ba(target, weight, plan.sources, plan.targets, plan.topology, plan.t0, plan.t1, plan.iterations,
                      1e-3, 0.1, False, plan.motion_only, plan.limited_disp, device_solve=True)
 
-    def _ba(self, target: Tensor, weight: Tensor, ii: Tensor, jj: Tensor, topology: _BaTopology,
+    def _ba(self, target: Tensor, weight: Tensor, ii: Tensor, jj: Tensor, topology: BaTopology,
             t0: int, t1: int, iterations: int, lm: float, ep: float, optimize_intrinsics: bool,
             motion_only: bool = False, limited_disp: bool = False, *, device_solve: bool = False) -> None:
         """The fused single-view BA contract, with topology validation done on the host."""
@@ -320,7 +335,7 @@ class CalibrationGraph(FactorGraph):
     def update(self, t0: int | None = None, t1: int | None = None, itrs: int = 3, use_inactive: bool = False,
                motion_only: bool = False, fixed_motion: bool = False, limited_disp: bool = False) -> None:
         if fixed_motion:
-            raise ValueError("SharedK calibration requires free camera poses")
+            raise CalibrationAccelerationError("SharedK calibration requires free camera poses")
         t0 = max(1, int(self.sources.min()) + 1) if t0 is None else t0
         t1 = max(int(self.sources.max()), int(self.targets.max())) + 1 if t1 is None else t1
         plan = self.prepared
@@ -356,17 +371,15 @@ class CalibrationGraph(FactorGraph):
     def update_batch(self, itrs: int, steps: int, optimize_intrinsics: bool, optimize_rig_rotation: bool, solver_verbose: bool = False) -> None:
         """Backend with the same batches and iterations, with topology and float64 LLT on the device."""
         if optimize_rig_rotation:
-            raise ValueError("SharedK calibration has a fixed identity rig")
+            raise CalibrationAccelerationError("SharedK calibration has a fixed identity rig")
         assert self.f_net is not None
         corr_op = AltCorrBlock(self.buffer.flattened_fmaps[None])
         batches: list[tuple[Tensor, Tensor, Tensor, Tensor, Tensor]] = []
         for start in range(0, int(self.targets.max()) + 1, 8):
             select = torch.where((self.sources >= start) & (self.sources < start + 8))[0]
-            groups, inverse = torch.unique(self.sources[select], sorted=True, return_inverse=True)
-            inverse = inverse.to(self.device)
-            inverse._metrictrail_groups = len(groups)
+            groups, inverse = grouped_inverse(self.sources[select], self.device)
             batches.append((select.to(self.device), self.sources[select].to(self.device), self.targets[select].to(self.device), groups.to(self.device), inverse))
-        topology = _prepare_topology(tuple(self.sources.tolist()), tuple(self.targets.tolist()), 1, self.buffer.n_frames,
+        topology = prepare_topology(tuple(self.sources.tolist()), tuple(self.targets.tolist()), 1, self.buffer.n_frames,
                                      optimize_intrinsics, False, self.device)
         topology.pose_system.prepare_device(self.device)
         for _ in range(steps):
@@ -411,3 +424,4 @@ def calibration_cuda_graphs(enabled: bool = True) -> Iterator[None]:
     finally:
         frontend.FactorGraph, backend.FactorGraph = old_frontend, old_backend
         GraphBuffer.expand_edge_multiview, GraphAgg.forward = old_expand, old_agg
+        prepare_topology.cache_clear()  # its device index tables would outlive the run in an app process
