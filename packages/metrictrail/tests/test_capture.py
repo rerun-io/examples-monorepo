@@ -368,14 +368,14 @@ def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
 
 
 @pytest.mark.usefixtures("stand_in_vipe")
-def test_the_app_streams_moge2_normals_as_video_and_depth_pngs_at_a_third_of_the_input_rate(tmp_path: Path) -> None:
-    """Normals as a video like the DINOv3 PCA, depth as metric PNGs, also on frames where DPVO's graph did not grow; at
-    most every third source frame (the tracking thread pays a copy and an encode per logged frame)."""
+def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_tracking_thread(tmp_path: Path) -> None:
+    """Normals as a video like the DINOv3 PCA, depth as metric millimetre PNGs, on every frame (also where DPVO's graph
+    did not grow), each at its own frame's time."""
     from rerun.chunk import RrdReader
 
     from metrictrail import entities
 
-    session = CaptureSession(out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0), thin_depth=True)
+    session = CaptureSession(out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0))
     session.install()
     session.pass_frames = 5
     tracker: DPVO = cpu_dpvo()
@@ -400,5 +400,5 @@ def test_the_app_streams_moge2_normals_as_video_and_depth_pngs_at_a_third_of_the
         for column in ("VideoStream:sample", "EncodedDepthImage:blob"):
             if column in batch.schema.names and entities.FRAME_TIMELINE in batch.schema.names:
                 logged.setdefault(f"{chunk.entity_path} {column}", []).extend(batch.column(entities.FRAME_TIMELINE).to_pylist())
-    assert logged[f"/{entities.CAM_DEPTH} EncodedDepthImage:blob"] == [0, 2]  # source frames 0 and 4, in millimetres
-    assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 2]
+    assert logged[f"/{entities.CAM_DEPTH} EncodedDepthImage:blob"] == [0, 1, 2, 3]
+    assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 1, 2, 3]
