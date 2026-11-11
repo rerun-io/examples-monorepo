@@ -303,7 +303,7 @@ def run_and_log(
     has_video: bool = frames.kind == "video"
     if has_video:
         stage("logging the input video")
-        video_time_ns = log_input_video(rec, config.input, config.output / "viewer")
+        video_time_ns = log_input_video(rec, config.input)
     gpu: GpuVideoSession = GpuVideoSession()
     session: CaptureSession | None = None
     live_surface: LiveSurface | None = LiveSurface(rec, tsdf) if config.capture and live and config.fuse_mesh else None

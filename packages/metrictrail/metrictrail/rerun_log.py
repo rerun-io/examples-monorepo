@@ -11,7 +11,9 @@ Video, as the EgoHand app logs it:
 * depth stays a millimetre PNG ``EncodedDepthImage`` per frame (:func:`log_depth`): Rerun has no depth video yet.
 """
 
+import hashlib
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,10 @@ from metrictrail.palette import BA_WINDOW_RGB
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 VIEWER_CODECS: tuple[str, ...] = ("h264", "av1")
+VIEWER_CACHE: Path = Path(os.environ.get("METRICTRAIL_VIEWER_CACHE", "~/.cache/metrictrail/viewer")).expanduser()
+"""Where :func:`viewer_mp4` keeps its H.264 copies, named by the source's content (``METRICTRAIL_VIEWER_CACHE``)."""
+VIEWER_ENCODE: list[str] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-bf", "0", "-pix_fmt", "yuv420p"]
+"""ffmpeg's output options for a viewer copy (part of the copy's name, so a change re-encodes)."""
 """Codecs (FFmpeg names) the input video keeps as they are: every browser's Rerun viewer decodes them (headless Linux
 Chromium has no HEVC)."""
 HARDWARE_ENCODER: str = "h264_nvenc"
@@ -156,10 +162,12 @@ class FrameVideo:
             self.rec.log(self.entity, rr.VideoStream.from_fields(sample=sample))
 
 
-def viewer_mp4(video: Path, out_dir: Path) -> Path:
+def viewer_mp4(video: Path, cache_dir: Path = VIEWER_CACHE) -> Path:
     """The video as an MP4 every Rerun viewer plays: an MP4/MOV of H.264 or AV1 without a display rotation comes back
-    as it is; anything else (HEVC, another container, a rotated phone clip) is re-encoded once into ``out_dir`` as H.264
-    without B-frames, with the rotation applied (``Mp4Reader`` ignores it; ViPE's decode applies it)."""
+    as it is; anything else (HEVC, another container, a rotated phone clip) is re-encoded into ``cache_dir`` as H.264
+    without B-frames, with the rotation applied (``Mp4Reader`` ignores it; ViPE's decode applies it). The copy is named
+    by the source's bytes and :data:`VIEWER_ENCODE`, so a clip is encoded once, whatever path it arrives under (the app
+    gets each upload at a new temporary path)."""
     from torchcodec.decoders import VideoDecoder
 
     with av.open(str(video)) as container:
@@ -168,18 +176,22 @@ def viewer_mp4(video: Path, out_dir: Path) -> Path:
     rotation: float = float(VideoDecoder(str(video), seek_mode="approximate").metadata.rotation or 0.0)
     if is_mp4 and codec in VIEWER_CODECS and round(rotation) % 360 == 0:
         return video
-    out_dir.mkdir(parents=True, exist_ok=True)
-    target: Path = out_dir / f"{video.stem}.mp4"
+    digest = hashlib.blake2b(" ".join(VIEWER_ENCODE).encode(), digest_size=16)
+    with video.open("rb") as source:
+        for block in iter(lambda: source.read(1 << 22), b""):
+            digest.update(block)
+    target: Path = cache_dir / f"{digest.hexdigest()}.mp4"
+    if target.is_file():
+        return target
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    staged: Path = cache_dir / f".{target.stem}.{os.getpid()}.mp4"  # renamed into place: a reader never sees half a file
     print(f"[metrictrail] re-encoding {video.name} ({codec}, rotation {rotation:g} deg) to H.264 for the viewer")
-    subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video), "-map", "0:v:0"]
-        + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-bf", "0", "-pix_fmt", "yuv420p", str(target)],
-        check=True,
-    )
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video), "-map", "0:v:0", *VIEWER_ENCODE, str(staged)], check=True)
+    staged.replace(target)
     return target
 
 
-def log_input_video(rec: rr.RecordingStream, video: Path, scratch: Path) -> Int64[ndarray, "n"]:
+def log_input_video(rec: rr.RecordingStream, video: Path) -> Int64[ndarray, "n"]:
     """``input/video``: the input video's samples (:func:`viewer_mp4`) on ``video_time``; returns their PTS, ns, one per
     source frame in presentation order."""
-    return log_video(viewer_mp4(video, scratch), Path(entities.INPUT_VIDEO), timeline=entities.VIDEO_TIMELINE, recording=rec)
+    return log_video(viewer_mp4(video), Path(entities.INPUT_VIDEO), timeline=entities.VIDEO_TIMELINE, recording=rec)

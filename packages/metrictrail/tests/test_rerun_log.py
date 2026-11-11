@@ -86,3 +86,20 @@ def test_viewer_mp4_keeps_an_h264_mp4_and_reencodes_hevc_and_other_containers(tm
         assert copy.suffix == ".mp4" and copy.parent == tmp_path / "out"
         with av.open(str(copy)) as container:
             assert container.streams.video[0].codec_context.name == "h264"
+
+
+@pytest.mark.skipif(FFMPEG is None, reason="ffmpeg comes from the metrictrail env")
+def test_viewer_mp4_reencodes_a_clip_once_whatever_path_it_arrives_under(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The app gets every upload (and every click on an example) at a new temporary path: the copy is keyed by content."""
+    first: Path = tmp_path / "upload-1" / "clip.mkv"
+    first.parent.mkdir()
+    source: list[str] = ["-f", "lavfi", "-i", "testsrc=size=128x96:rate=10:duration=1"]
+    subprocess.run([str(FFMPEG), "-v", "error", "-y", *source, "-c:v", "libx264", "-pix_fmt", "yuv420p", str(first)], check=True)
+    second: Path = tmp_path / "upload-2" / "renamed.mkv"
+    second.parent.mkdir()
+    second.write_bytes(first.read_bytes())
+    copy: Path = viewer_mp4(first, tmp_path / "cache")
+    encodes: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda args, **_: encodes.append(args))
+    assert viewer_mp4(second, tmp_path / "cache") == copy
+    assert encodes == []

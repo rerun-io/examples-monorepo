@@ -13,7 +13,6 @@ only while the pipeline runs (``metrictrail run``); their tiles say so.
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import rerun as rr
 from jaxtyping import Int64
@@ -87,8 +86,7 @@ def main(config: Config) -> RunMetrics:
     has_video: bool = frames.kind == "video"
     video_time_ns: Int64[ndarray, "s"] | None = None
     if has_video:
-        with TemporaryDirectory(prefix="metrictrail-viewer-") as scratch:
-            video_time_ns = log_input_video(rec, config.input, Path(scratch))
+        video_time_ns = log_input_video(rec, config.input)
     log_waiting_notes(rec, has_capture=False)
     options = LogOptions(
         label=config.label,
