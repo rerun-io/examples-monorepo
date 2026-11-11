@@ -83,3 +83,19 @@ def test_a_host_passes_its_run_examples_and_frame_cap_to_build_app(tmp_path: Pat
     assert any(isinstance(block, gr.Dataset) and len(block.samples) == 1 for block in components)
     assert any(isinstance(block, gr.Number) and block.value == 300 for block in components)
     assert any(dependency.fn is hosted_run for dependency in demo.fns.values())
+
+
+def test_the_cursor_follows_the_newest_tracked_frame_once_per_change() -> None:
+    from metrictrail.gradio_ui.metrictrail_ui import RunStatus
+
+    status = RunStatus()
+    assert status.cursor_command() is None  # calibrating: nothing tracked yet, the viewer stays paused
+    status.tracked_at(1_500_000_000)
+    command = status.cursor_command()
+    assert command is not None
+    payload = command["_command"]
+    assert isinstance(payload, dict)
+    assert payload["timeline"] == "video_time" and payload["kind"] == "duration" and payload["time"] == "1500000000" and not payload["play"]
+    assert status.cursor_command() is None  # sent once per new frame
+    status.tracked_at(1_533_333_333)
+    assert status.cursor_command() is not None

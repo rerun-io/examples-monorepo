@@ -229,6 +229,7 @@ def run_and_log(
     *,
     live: bool = False,
     on_stage: Callable[[str], None] | None = None,
+    on_cursor: Callable[[int], None] | None = None,
 ) -> RunResult:
     """Run the pipeline on ``config.input``, then log the capture and the outputs into ``rec`` (no blueprint).
 
@@ -239,6 +240,7 @@ def run_and_log(
             DPVO's keyframe graph (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
         on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
             it may raise to stop the run.
+        on_cursor: Called after each tracked frame with its ``video_time``, ns (the app moves the viewer's cursor there).
     """
     from vipe._paths import get_config_path
     from vipe.config.parse import parse_typed_config
@@ -250,6 +252,9 @@ def run_and_log(
 
     def tracked(frame: int, num_frames: int, keyframes: int) -> None:
         stage(f"tracking: frame {frame + 1} / {num_frames}, {keyframes} keyframes in the graph")
+        source: int | None = session.source_frames.get(frame) if session is not None else None
+        if on_cursor is not None and source is not None and video_time_ns is not None and source < video_time_ns.shape[0]:
+            on_cursor(int(video_time_ns[source]))
 
     if config.label == "ours":
         from metrictrail.moge2 import register_providers
@@ -286,7 +291,7 @@ def run_and_log(
             every_frame_depth=not live,
             video_time_ns=video_time_ns,
             source_raster=gpu.source_raster if has_video else None,
-            on_frame=tracked if on_stage is not None else None,
+            on_frame=tracked if on_stage is not None or on_cursor is not None else None,
             live_surface=live_surface,
         )
         session.install()
