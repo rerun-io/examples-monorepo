@@ -37,9 +37,11 @@ The `ours` path replays DINO and both DPVO convolutional encoders with CUDA grap
 to one run and separated by model, raster and precision; FP32 recovery uses its own graph. Returned features own their
 storage, and logging stays outside capture. The recurrent update prepares its neighbor/group indices before replay;
 its cache holds at most eight recurring shapes, with uncommon shapes evaluated normally.
-Factor pruning and motion checks reuse compacted edge indices across their tensors. On the RTX 5090, the
-642-frame IMG_0493 clip measured a median 52.27 tracking FPS without capture and 37.25 with capture (three runs each),
-versus 26.83 / 24.29 for the original 3,600-token path. The final TUM check gave 2.288 cm Sim(3) ATE and scale 1.05686.
+Factor pruning and motion checks reuse compacted edge indices across their tensors. Motion checks use a fused Mojo
+kernel that preserves per-camera intrinsics, quaternion normalization and near-plane clipping. On the shared RTX 5090,
+an alternating three-run test of the 642-frame IMG_0493 clip measured 41.01 FPS before motion fusion and 45.03 after;
+capture measured 33.07 FPS. Earlier, under lighter GPU load, the path before motion fusion measured 52.27 / 37.25 FPS.
+The original 3,600-token path measured 26.83 / 24.29. The final TUM check gave 2.292 cm Sim(3) ATE and scale 1.05714.
 
 ## Run
 
