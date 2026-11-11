@@ -377,7 +377,7 @@ def test_log_video_tries_nvenc_once_then_encodes_on_the_cpu_with_a_warning(
     attempts: list[bool] = []
 
     class Reader:
-        def __init__(self, source: Path, *, transcode: bool, **options: object) -> None:
+        def __init__(self, source: Path, *, transcode: bool, **_: object) -> None:
             self.try_gpu: bool = transcode
 
         def stream(self) -> Iterator[rrc.Chunk]:
