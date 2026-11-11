@@ -165,7 +165,7 @@ class _NoHands(HandPose3dPipeline):
 
 
 @pytest.mark.integration
-def test_a_run_resumed_on_new_threads_still_decodes_on_the_gpu(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_a_run_resumed_on_new_threads_still_decodes_on_the_gpu(caplog: pytest.LogCaptureFixture) -> None:
     # Gradio resumes a streaming generator on any worker thread; NVDEC needs the CUDA context current there.
     pytest.importorskip("torchcodec", reason="the GPU video decoder comes with the hands env")
     if not torch.cuda.is_available():
@@ -173,9 +173,6 @@ def test_a_run_resumed_on_new_threads_still_decodes_on_the_gpu(monkeypatch: pyte
     video = EXAMPLES / "gsi_sewing_left_front.mp4"
     if not video.exists():
         pytest.skip(f"example clip {video.name} missing")
-    from simplecv import video_io
-
-    monkeypatch.setattr(video_io, "HARDWARE_VIDEO_FAILED", {})  # an earlier test's fallback must not send this run to the CPU
     rr.init("thread-hop-test")
     rr.memory_recording()  # the global recording, visible from every thread; nothing leaves the process
     run = run_video_hands(VideoHandsSettings(video_path=video, max_frames=64), _NoHands())
@@ -197,5 +194,5 @@ def test_a_run_resumed_on_new_threads_still_decodes_on_the_gpu(monkeypatch: pyte
             thread.join()
     assert not errors, errors[0]
     assert steps[-1].frames_done == 64
-    # open_decoder warns whenever the CPU decodes, and remembers a host without NVDEC: neither happened, so NVDEC decoded.
-    assert not caplog.records and video_io.HARDWARE_VIDEO_FAILED == {} and not steps[-1].warning
+    # open_decoder warns whenever torchcodec decodes on the CPU: it did not, so NVDEC decoded.
+    assert not caplog.records and not steps[-1].warning

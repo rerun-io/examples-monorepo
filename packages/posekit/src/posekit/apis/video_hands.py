@@ -37,7 +37,7 @@ from numpy import ndarray
 from simplecv.rerun_custom_types import Points3DWithConfidence
 from simplecv.rerun_eye_controls import follow_eye_controls
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
-from simplecv.video_io import bind_cuda_device, hardware_video_warning, open_decoder
+from simplecv.video_io import bind_cuda_device, open_decoder
 from torch import Tensor
 from tqdm.auto import tqdm
 
@@ -308,7 +308,7 @@ class VideoHandsProgress:
     camera_note: str
     """The camera used (``describe_camera``)."""
     warning: str = ""
-    """Hardware video paths that failed, so the CPU decodes or encodes (``hardware_video_warning``); empty when none did."""
+    """Why the CPU decodes the video when NVDEC cannot (torchcodec's ``cpu_fallback``); empty when NVDEC decodes it."""
 
     @property
     def step(self) -> str:
@@ -372,7 +372,7 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         )
     send_blueprint()  # after the video: "playing" starts the cursor at the start of the logged video
     log_hand_annotation_context(pipeline.pose.skeleton)
-    warning: str = hardware_video_warning()
+    warning: str = f"WARNING: NVDEC cannot decode this video, the CPU decodes it (slower): {decoder.cpu_fallback}" if decoder.cpu_fallback else ""
     yield VideoHandsProgress("video", 0, num_frames, 0, camera_note, warning)  # the app streams the video out before the first chunk runs
     total_hands: int = 0
     live_slots: set[str] = set()
