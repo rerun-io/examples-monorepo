@@ -1,6 +1,14 @@
+import gradio as gr
 import tyro
 
-from posekit.hands_ui import Config, launch
+from posekit.hands_app_ui.layout import Config, build, launch
+from posekit.hands_ui import warm_up
+
+config = tyro.cli(Config)
+# `gradio` hot reload (posekit-hands-app-dev) re-runs this file on every edit: load the stacks once.
+if gr.NO_RELOAD:
+    warm_up()
+demo = build()
 
 if __name__ == "__main__":
-    launch(tyro.cli(Config))
+    launch(demo, config)
