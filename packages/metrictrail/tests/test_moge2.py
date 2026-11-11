@@ -185,3 +185,14 @@ def test_registered_name_builds_our_provider_with_one_engine_per_cache() -> None
     assert f"pipeline.slam.keyframe_depth={depth.DEFAULT_PROVIDER}" in depth.PROVIDER_OVERRIDES
     # The calibration config states the precision our provider runs (upstream's default is FP32 for ViPE's moge2-l).
     assert "pipeline.init.calibration.depth_use_fp16=true" in depth.PROVIDER_OVERRIDES
+
+
+def test_a_finished_run_releases_the_cached_forwards_but_keeps_the_network() -> None:
+    """The app keeps its engines for its whole life; their per-frame outputs (GPU tensors) must not outlive a run."""
+    engine, built = make_engine()
+    provider = depth.MoGe2NormalProvider("l", engine=engine)
+    provider.predict_metric(frame(0), focal_px=40.0)
+    depth.clear_forward_caches()
+    provider.predict_metric(frame(0), focal_px=40.0)
+    assert engine.forward_count == 2  # a second forward: the first one's output was released
+    assert len(built) == 1  # the same network (predictor) served both

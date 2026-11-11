@@ -357,6 +357,10 @@ def run_and_log(
     finally:
         if session is not None:
             session.uninstall()
+        if config.label == "ours":
+            from metrictrail.moge2 import clear_forward_caches
+
+            clear_forward_caches()  # the app keeps its engines (models) between runs, not their per-frame outputs
     wall_s: float = time.perf_counter() - started
     if gru_stats.backend == "tensorrt":
         print(f"[metrictrail] calibration GRU: {to_json(gru_stats)}")
