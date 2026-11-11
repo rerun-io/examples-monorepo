@@ -3,7 +3,7 @@
 from typing import Literal, TypeAlias
 
 import numpy as np
-from jaxtyping import Float32, UInt8
+from jaxtyping import Bool, Float32, UInt8
 from matplotlib import colormaps
 from numpy import ndarray
 
@@ -34,6 +34,14 @@ BACKGROUND_RGB: tuple[int, int, int] = (15, 15, 17)
 def run_rgb(label: RunLabel) -> tuple[int, int, int]:
     """Legend colour of a run label."""
     return OURS_RGB if label == "ours" else UPSTREAM_RGB
+
+
+def depth_image_rgb(depth_m: Float32[ndarray, "h w"], depth_range_m: tuple[float, float]) -> UInt8[ndarray, "h w 3"]:
+    """A metric depth map in :func:`depth_colors`'s turbo colours, black where there is no depth (0 or not finite): the
+    frames of a depth video (display only; the metres stay in the depth artifact)."""
+    valid: Bool[ndarray, "h w"] = np.isfinite(depth_m) & (depth_m > 0)
+    rgb: UInt8[ndarray, "n 3"] = depth_colors(np.where(valid, depth_m, 0.0).reshape(-1).astype(np.float32), depth_range_m)
+    return np.where(valid[..., None], rgb.reshape(*depth_m.shape, 3), 0).astype(np.uint8)
 
 
 def depth_colors(depth_m: Float32[ndarray, "n"], depth_range_m: tuple[float, float]) -> UInt8[ndarray, "n 3"]:

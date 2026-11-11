@@ -211,7 +211,6 @@ def run_tabs(
     world_contents: list[str] = ["/world/**"]
     if shares_input_camera(has_capture=has_capture, has_video=has_video, has_gt=has_gt):
         world_contents += [f"- /{entities.world_cam(label)}/**", f"/{entities.DPVO_CURRENT}/**", f"- /{entities.INPUT_PATCHES}"]
-    world_eye_controls = world_eye.controls() if world_eye is not None else None
     tabs: list[rrb.Container | rrb.View] = []
 
     def numbered(name: str) -> str:
@@ -247,10 +246,10 @@ def run_tabs(
         eye_controls=FOLLOW_EYE,
         overrides={path: TRAIL},
     )
+    overview_eye = world_eye.controls(spin_speed=OVERVIEW_SPIN) if world_eye is not None else rrb.EyeControls3D(spin_speed=OVERVIEW_SPIN)
     side: list[rrb.View] = [follow]
     if has_capture:
-        side.append(world_view("surface coloured by normals", (entities.WORLD_CLOUD, entities.WORLD_MESH), eye_controls=world_eye_controls))
-    overview_eye = world_eye.controls(spin_speed=OVERVIEW_SPIN) if world_eye is not None else rrb.EyeControls3D(spin_speed=OVERVIEW_SPIN)
+        side.append(world_view("surface coloured by normals", (entities.WORLD_CLOUD, entities.WORLD_MESH), eye_controls=overview_eye))
     tabs.append(
         rrb.Horizontal(
             world_view(f"overview: {surface}", colour, eye_controls=overview_eye),
@@ -266,7 +265,7 @@ def run_tabs(
             contents=["/metric/**", f"- /{entities.METRIC_CLOUD_NORMALS}", f"- /{entities.METRIC_MESH_NORMALS}"],
             background=background,
             line_grid=rrb.LineGrid3D(visible=True, spacing=1.0),
-            eye_controls=metric_eye.controls() if metric_eye is not None else None,
+            eye_controls=metric_eye.controls(spin_speed=OVERVIEW_SPIN) if metric_eye is not None else rrb.EyeControls3D(spin_speed=OVERVIEW_SPIN),
         )
         error_view: rrb.TimeSeriesView = rrb.TimeSeriesView(name="ATE per frame, Sim(3) (m)", origin="metrics/ate_sim3")
         tabs.append(rrb.Vertical(metric_view, error_view, row_shares=[3, 1], name=numbered("metric scale vs GT")))
@@ -305,8 +304,8 @@ def run_blueprint(
     )
     left: list[rrb.View] = [
         frame_view(has_video=has_video, has_capture=has_capture, background=background),
-        rrb.Spatial2DView(name="MoGe-2 metric depth (m)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
-        rrb.Spatial2DView(name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background)
+        rrb.Spatial2DView(name="MoGe-2 metric depth (turbo: near blue, far red)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
+        rrb.Spatial2DView(name="MoGe-2 normals", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background)
         if has_capture
         else waiting("MoGe-2 normals", "normals"),
         rrb.Spatial2DView(name="DINOv3 feature PCA", origin=entities.CAM, contents=[entities.CAM_DINO_PCA], background=background)

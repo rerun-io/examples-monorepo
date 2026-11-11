@@ -365,3 +365,37 @@ def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
     forward: Float32[ndarray, "3"] = rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
     assert abs(float(forward[2])) < 1e-5  # looking level, not into the ground
     np.testing.assert_allclose(rotation @ world_T_cam[:, :3, 3].mean(axis=0) + translation, 0.0, atol=1e-5)  # centred
+
+
+@pytest.mark.usefixtures("stand_in_vipe")
+def test_the_app_streams_moge2_depth_and_normals_of_every_frame_as_video(tmp_path: Path) -> None:
+    """Like the DINOv3 PCA: one H.264 sample per tracked frame, also on frames where DPVO's graph did not grow."""
+    from rerun.chunk import RrdReader
+
+    from metrictrail import entities
+
+    session = CaptureSession(out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0), depth_as_video=True)
+    session.install()
+    session.pass_frames = 5
+    tracker: DPVO = cpu_dpvo()
+    for frame, (keyframes_before, keyframes) in enumerate([(0, 1), (1, 1)]):  # the second frame adds no keyframe
+        tracker.n = keyframes
+        session.pending_normals[frame] = torch.full((32, 32, 3), 90 + frame, dtype=torch.uint8)
+        event = FrameEvent(
+            tstamp=frame,
+            frame_index=frame,
+            keyframes_before=keyframes_before,
+            keyframe_added=keyframes > keyframes_before,
+            image=torch.full((3, 32, 32), 100, dtype=torch.uint8),
+            intrinsics=torch.tensor([30.0, 30.0, 16.0, 16.0]),
+            depth=FrameDepth(depth=torch.full((32, 32), 2.0), mask=None),
+        )
+        tracker.observers[-1].on_frame(tracker, event)
+    session.uninstall()
+    samples: dict[str, list[int]] = {}
+    for chunk in RrdReader(tmp_path / "pass_0.rrd").store().stream():
+        batch = chunk.to_record_batch()
+        if "VideoStream:sample" in batch.schema.names and entities.FRAME_TIMELINE in batch.schema.names:
+            samples.setdefault(str(chunk.entity_path), []).extend(batch.column(entities.FRAME_TIMELINE).to_pylist())
+    assert samples["/" + entities.CAM_DEPTH] == [0, 1]
+    assert samples["/" + entities.CAM_NORMALS] == [0, 1]

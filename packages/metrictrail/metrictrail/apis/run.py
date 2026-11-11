@@ -314,7 +314,7 @@ def run_and_log(
             recording_id=str(rec.get_recording_id()),
             depth_range_m=depth_range_m,
             live=rec if live else None,
-            every_frame_depth=not live,
+            depth_as_video=live,
             video_time_ns=video_time_ns,
             source_raster=(lambda: gpu.raster) if has_video else None,
             on_frame=tracked if on_stage is not None or on_cursor is not None else None,

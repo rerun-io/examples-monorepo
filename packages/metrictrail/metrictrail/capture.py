@@ -52,7 +52,7 @@ from torch import Tensor
 
 from metrictrail import entities
 from metrictrail.live_surface import LiveSurface
-from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
+from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors, depth_image_rgb
 from metrictrail.rerun_log import FrameVideo, SourceRaster, log_depth, log_pinholes, moving_camera, set_frame_time
 
 
@@ -173,9 +173,9 @@ class CaptureSession:
     """Depth of the BA-window frustums, metres."""
     live: rr.RecordingStream | None = None
     """Recording every pass logs into instead of its own file (the app's streamed recording); None: one file per pass."""
-    every_frame_depth: bool = True
-    """Log the depth of every tracked frame; False: only of frames on which DPVO's keyframe graph grew (a PNG per frame
-    is too much to stream to a browser)."""
+    depth_as_video: bool = False
+    """Log each tracked frame's MoGe-2 depth as a frame of a turbo-coloured H.264 video, like the DINOv3 PCA (display
+    only: what a browser can take); False: a metric millimetre PNG per frame."""
     video_time_ns: Int64[ndarray, "n"] | None = None
     """``video_time`` of each source frame (the input video's PTS, or the benchmark's stamps); None: no ``video_time``."""
     source_raster: Callable[[], SourceRaster | None] | None = None
@@ -377,7 +377,10 @@ class CaptureSession:
         if metric_depth is not None:
             valid: Tensor = torch.isfinite(metric_depth) if metric_mask is None else metric_mask.bool()
             depth_m = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
-            log_depth(rec, depth_m, self.depth_range_m)
+            if self.depth_as_video:
+                self.video(rec, entities.CAM_DEPTH).log(depth_image_rgb(depth_m, self.depth_range_m))
+            else:
+                log_depth(rec, depth_m, self.depth_range_m)
         if self.last_dino_rgb is not None:
             upsampled: UInt8[ndarray, "H W 3"] = self.last_dino_rgb.repeat(self.dino_patch_px, 0).repeat(self.dino_patch_px, 1)[:height, :width]
             self.video(rec, entities.CAM_DINO_PCA).log(upsampled)
@@ -485,10 +488,10 @@ class CaptureObserver(DPVOObserver):
             # when culling kept them all. The frame itself is always the newest keyframe after the call.
             graph_grew: bool = dpvo.n > event.keyframes_before
             added: bool = dpvo.is_initialized or graph_grew
-            depth: Tensor | None = event.depth.depth if session.every_frame_depth or graph_grew else None
+            depth: Tensor | None = event.depth.depth
             patches_entity: str | None = session.log_frame(rec, dpvo, frame, event.image, event.intrinsics, depth, event.depth.mask, added)
-            if graph_grew and normals is not None:
-                rec.log(entities.CAM_NORMALS, rr.Image(normals.cpu().numpy(), color_model="RGB").compress(jpeg_quality=92))
+            if normals is not None:  # every frame, as a video (like the DINOv3 PCA)
+                session.video(rec, entities.CAM_NORMALS).log(normals.cpu().numpy())
             if patches_entity is not None:
                 session.clear_after(rec, frame, patches_entity)
         session.last_dino_rgb = None
