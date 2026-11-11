@@ -11,7 +11,7 @@ pytest.importorskip("gradio_rerun", reason="the metrictrail envs carry gradio-re
 import gradio as gr
 from gradio_rerun import Rerun
 
-from metrictrail.blueprint import SceneView, app_blueprint, calibration_blueprint
+from metrictrail.blueprint import SceneView, calibration_blueprint, run_blueprint
 from metrictrail.gradio_ui.metrictrail_ui import app_overrides, build_app, example_videos, metrictrail_streaming_fn
 
 
@@ -56,11 +56,11 @@ def test_streaming_fn_without_a_video_yields_an_empty_chunk() -> None:
     assert list(metrictrail_streaming_fn(None, 1, 1500, "fast64")) == [(b"", "Upload a video or pick an example first.")]
 
 
-def test_app_blueprint_builds_for_calibration_tracking_and_the_final_layout() -> None:
+def test_app_layouts_build_for_calibration_tracking_and_the_final_run() -> None:
     eye = SceneView(position=(1.0, 1.0, 1.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, -1.0, 0.0))
     calibration_blueprint()
-    for final_eye in (None, eye):
-        app_blueprint(final_eye)
+    run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True)
+    run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, world_eye=eye)  # the CLI's layout too
 
 
 def test_a_stop_is_not_an_exception_so_vipes_calibration_fallback_cannot_swallow_it() -> None:

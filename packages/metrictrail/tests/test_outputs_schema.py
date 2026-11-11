@@ -88,7 +88,7 @@ def test_run_recording_without_gt_has_no_gt_entities(tmp_path: Path, tum_like_co
     assert metrics.ate_sim3_m is None and metrics.cloud_points is None
     paths: set[str] = set(RrdReader(tmp_path / "run.rrd").store().schema().entity_paths())
     assert not any(path.startswith(("/world/gt", "/metric", "/metrics/ate")) for path in paths)
-    assert "/notes/waiting/gt" in paths
+    assert not any(path.startswith("/notes/waiting/gt") for path in paths)  # no GT tab without GT, so nothing to wait for
 
 
 @pytest.mark.parametrize(("has_capture", "has_gt"), [(True, True), (False, True), (True, False), (False, False)])
@@ -96,8 +96,26 @@ def test_blueprint_builds_and_waiting_tiles_match_the_notes(has_capture: bool, h
     blueprint = run_blueprint("upstream", has_capture=has_capture, has_gt=has_gt)
     assert isinstance(blueprint, rr.blueprint.Blueprint)
     notes: dict[str, str] = waiting_notes(has_capture, has_gt)
-    assert ("dino" in notes) == (not has_capture) and ("gt" in notes) == (not has_gt)
+    assert ("dino" in notes) == (not has_capture) and "gt" not in notes
     assert all(text.startswith("waiting for") for text in notes.values())
+
+
+def test_the_app_and_the_cli_share_one_layout_with_tabs_in_run_order() -> None:
+    from metrictrail.blueprint import run_tabs
+
+    background = rr.blueprint.Background(color=(0, 0, 0))
+    # The app's run and a CLI capture run of a video: no GT.
+    names: list[str] = [str(tab.name) for tab in run_tabs("ours", has_capture=True, has_gt=False, has_calibration=True, background=background)]
+    assert names == ["1 · SharedK calibration", "2 · DPVO tracking", "3 · trajectory + metric surface", "4 · surface coloured by normals", "5 · summary"]
+    # A benchmark with GT adds the metric-scale tab; a run without SharedK (known K) has no calibration tab.
+    names = [str(tab.name) for tab in run_tabs("ours", has_capture=True, has_gt=True, has_calibration=False, background=background)]
+    assert names == [
+        "1 · DPVO tracking",
+        "2 · trajectory vs GT, Sim(3) aligned + metric surface",
+        "3 · surface coloured by normals",
+        "4 · metric scale vs GT",
+        "5 · summary",
+    ]
 
 
 

@@ -34,7 +34,7 @@ from vipe.utils.model_cache import ModelCache
 from metrictrail import entities
 from metrictrail.apis.run import RunResult, RunSettings, run_and_log
 from metrictrail.benchmarks import UPSTREAM_MAX_FRAMES
-from metrictrail.blueprint import app_blueprint, calibration_blueprint
+from metrictrail.blueprint import calibration_blueprint, run_blueprint
 from metrictrail.calibration_live import RunPhase
 from metrictrail.outputs import RunMetrics
 
@@ -199,7 +199,7 @@ def metrictrail_streaming_fn(
                     line: str = f"{status.text} ({time.perf_counter() - started:.0f} s)"
                     yield stream.read() or b"", line
                     if status.phase == "tracking" and not tracking_layout:
-                        rec.send_blueprint(app_blueprint(None), make_active=True)
+                        rec.send_blueprint(run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True), make_active=True)
                         tracking_layout = True
                     command: dict[str, object] | None = status.cursor_command()
                     if command is not None:
@@ -214,7 +214,18 @@ def metrictrail_streaming_fn(
         finally:
             # Stop button or closed tab: the worker stops at its next stage or tracked frame; the pool waits for it.
             status.cancel.set()
-    rec.send_blueprint(app_blueprint(result.logged.world_eye), make_active=True)
+    rec.send_blueprint(
+        run_blueprint(
+            "ours",
+            has_capture=result.has_capture,
+            has_gt=result.has_gt,
+            has_video=result.has_video,
+            has_calibration=result.has_calibration,
+            world_eye=result.logged.world_eye,
+            metric_eye=result.logged.metric_eye,
+        ),
+        make_active=True,
+    )
     done: str = summary(result.logged.metrics, time.perf_counter() - started)
     yield stream.read() or b"", done
     yield dict(set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(0, "ns"), play=True)), done
