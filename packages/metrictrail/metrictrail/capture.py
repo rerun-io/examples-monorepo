@@ -52,7 +52,7 @@ from torch import Tensor
 
 from metrictrail import entities
 from metrictrail.live_surface import LiveSurface
-from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors, depth_image_rgb
+from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, TURBO_LUT, depth_colors
 from metrictrail.rerun_log import FrameVideo, SourceRaster, log_depth, log_pinholes, moving_camera, set_frame_time
 
 
@@ -78,6 +78,15 @@ def dpvo_orient(world_T_cam: Float32[ndarray, "n 4 4"]) -> tuple[Float32[ndarray
     the dpvo and MASt3R-SLAM apps orient their live scenes."""
     orient: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(world_T_cam @ RDF_TO_RUB, method="up", center_method="poses").transform
     return orient[:, :3].astype(np.float32), orient[:, 3].astype(np.float32)
+
+
+def turbo_rgb(depth_m: Float32[Tensor, "h w"], valid: Bool[Tensor, "h w"], depth_range_m: tuple[float, float]) -> UInt8[Tensor, "h w 3"]:
+    """A depth map in turbo colours (:data:`TURBO_LUT`, near = blue), black where not ``valid``, on its own device: only
+    the 8-bit frame crosses to the host."""
+    low, high = depth_range_m
+    lut: UInt8[Tensor, "256 3"] = torch.as_tensor(TURBO_LUT, device=depth_m.device)
+    index: Tensor = ((depth_m - low) / (high - low)).clamp(0.0, 1.0).mul(255.0).round().long()
+    return torch.where(valid[..., None], lut[index], torch.zeros((), dtype=torch.uint8, device=depth_m.device))
 
 
 def host_rgb(image: UInt8[Tensor, "3 h w"]) -> UInt8[ndarray, "h w 3"]:
@@ -174,8 +183,14 @@ class CaptureSession:
     live: rr.RecordingStream | None = None
     """Recording every pass logs into instead of its own file (the app's streamed recording); None: one file per pass."""
     depth_as_video: bool = False
-    """Log each tracked frame's MoGe-2 depth as a frame of a turbo-coloured H.264 video, like the DINOv3 PCA (display
-    only: what a browser can take); False: a metric millimetre PNG per frame."""
+    """Log MoGe-2's depth as frames of a turbo-coloured H.264 video, like the DINOv3 PCA (display only: what a browser
+    can take); False: a metric millimetre PNG per tracked frame."""
+    prior_video_step: int = 3
+    """The MoGe-2 videos (normals; depth with :attr:`depth_as_video`) get a frame at most every this many source frames,
+    a third of the input's frame rate: MoGe-2 runs on every tracked frame anyway, but each video frame costs the
+    tracking thread a device-to-host copy and an encode."""
+    prior_video_at: int | None = None
+    """Source frame of the latest MoGe-2 video frame."""
     video_time_ns: Int64[ndarray, "n"] | None = None
     """``video_time`` of each source frame (the input video's PTS, or the benchmark's stamps); None: no ``video_time``."""
     source_raster: Callable[[], SourceRaster | None] | None = None
@@ -363,9 +378,10 @@ class CaptureSession:
         metric_depth: Tensor | None,
         metric_mask: Tensor | None,
         added: bool,
+        priors_due: bool = True,
     ) -> str | None:
         """Log one tracked frame of a DPVO instance (see the module docstring); returns the patches entity when it
-        logged patches."""
+        logged patches. ``priors_due``: the depth video gets this frame (:meth:`prior_video_due`)."""
         set_frame_time(rec, frame, self.source_frames.get(frame), self.video_time_ns)
         height, width = int(image.shape[-2]), int(image.shape[-1])
         intrinsics_px: Float32[ndarray, "4"] = intrinsics.detach().float().cpu().numpy().reshape(4)
@@ -373,14 +389,16 @@ class CaptureSession:
         log_pinholes(rec, intrinsics_px.astype(np.float64), (height, width), raster)
         if raster is None:
             self.video(rec, entities.CAM_RGB).log(host_rgb(image))
+        depth: Tensor | None = None
         depth_m: Float32[ndarray, "h w"] | None = None
         if metric_depth is not None:
             valid: Tensor = torch.isfinite(metric_depth) if metric_mask is None else metric_mask.bool()
-            depth_m = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
-            if self.depth_as_video:
-                self.video(rec, entities.CAM_DEPTH).log(depth_image_rgb(depth_m, self.depth_range_m))
-            else:
+            depth = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float()))
+            if not self.depth_as_video:
+                depth_m = depth.cpu().numpy()
                 log_depth(rec, depth_m, self.depth_range_m)
+            elif priors_due:
+                self.video(rec, entities.CAM_DEPTH).log(turbo_rgb(depth, valid, self.depth_range_m).cpu().numpy())
         if self.last_dino_rgb is not None:
             upsampled: UInt8[ndarray, "H W 3"] = self.last_dino_rgb.repeat(self.dino_patch_px, 0).repeat(self.dino_patch_px, 1)[:height, :width]
             self.video(rec, entities.CAM_DINO_PCA).log(upsampled)
@@ -437,8 +455,9 @@ class CaptureSession:
             ),
         )
         newest_world_T_cam: Float32[ndarray, "4 4"] = world_T_cam[num_keyframes - 1]
-        if self.live_surface is not None and depth_m is not None:
-            self.live_surface.integrate(depth_m, host_rgb(image), intrinsics_px, newest_world_T_cam, frame)
+        if self.live_surface is not None and depth is not None:
+            depth_host: Float32[ndarray, "h w"] = depth_m if depth_m is not None else depth.cpu().numpy()
+            self.live_surface.integrate(depth_host, host_rgb(image), intrinsics_px, newest_world_T_cam, frame)
         if num_keyframes >= 3 and (self.oriented_at == 0 or num_keyframes - self.oriented_at >= ORIENT_EVERY_KEYFRAMES):
             orient_rotation, orient_translation = dpvo_orient(world_T_cam)
             rec.log(entities.DPVO_ROOT, rr.Transform3D(mat3x3=orient_rotation, translation=orient_translation))
@@ -455,6 +474,14 @@ class CaptureSession:
         rec.log(f"{entities.DPVO_METRICS}/keyframes_in_graph", rr.Scalars(float(num_keyframes)))
         rec.log(f"{entities.DPVO_METRICS}/global_ba_calls", rr.Scalars(float(self.global_ba_calls)))
         return patches_entity
+
+    def prior_video_due(self, frame: int) -> bool:
+        """Whether tracked frame ``frame`` gets a frame of the MoGe-2 videos (:attr:`prior_video_step`); records it."""
+        source: int = self.source_frames.get(frame, frame)
+        if self.prior_video_at is not None and 0 <= source - self.prior_video_at < self.prior_video_step:
+            return False
+        self.prior_video_at = source
+        return True
 
     def clear_after(self, rec: rr.RecordingStream, frame: int, entity: str) -> None:
         """Clear ``entity`` at the next tracked frame's time (its source frame when ViPE has prepared it, else the next
@@ -488,9 +515,11 @@ class CaptureObserver(DPVOObserver):
             # when culling kept them all. The frame itself is always the newest keyframe after the call.
             graph_grew: bool = dpvo.n > event.keyframes_before
             added: bool = dpvo.is_initialized or graph_grew
-            depth: Tensor | None = event.depth.depth
-            patches_entity: str | None = session.log_frame(rec, dpvo, frame, event.image, event.intrinsics, depth, event.depth.mask, added)
-            if normals is not None:  # every frame, as a video (like the DINOv3 PCA)
+            priors_due: bool = session.prior_video_due(frame)
+            patches_entity: str | None = session.log_frame(
+                rec, dpvo, frame, event.image, event.intrinsics, event.depth.depth, event.depth.mask, added, priors_due
+            )
+            if normals is not None and priors_due:  # a video, like the DINOv3 PCA
                 session.video(rec, entities.CAM_NORMALS).log(normals.cpu().numpy())
             if patches_entity is not None:
                 session.clear_after(rec, frame, patches_entity)

@@ -368,8 +368,9 @@ def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
 
 
 @pytest.mark.usefixtures("stand_in_vipe")
-def test_the_app_streams_moge2_depth_and_normals_of_every_frame_as_video(tmp_path: Path) -> None:
-    """Like the DINOv3 PCA: one H.264 sample per tracked frame, also on frames where DPVO's graph did not grow."""
+def test_the_app_streams_moge2_depth_and_normals_as_video_at_a_third_of_the_input_rate(tmp_path: Path) -> None:
+    """Like the DINOv3 PCA, also on frames where DPVO's graph did not grow; at most every third source frame (the
+    tracking thread pays a copy and an encode per video frame)."""
     from rerun.chunk import RrdReader
 
     from metrictrail import entities
@@ -378,14 +379,15 @@ def test_the_app_streams_moge2_depth_and_normals_of_every_frame_as_video(tmp_pat
     session.install()
     session.pass_frames = 5
     tracker: DPVO = cpu_dpvo()
-    for frame, (keyframes_before, keyframes) in enumerate([(0, 1), (1, 1)]):  # the second frame adds no keyframe
-        tracker.n = keyframes
+    tracker.n = 1
+    for frame in range(4):  # a stride-2 clip: source frames 0, 2, 4, 6; no keyframe after the first
+        session.source_frames[frame] = 2 * frame
         session.pending_normals[frame] = torch.full((32, 32, 3), 90 + frame, dtype=torch.uint8)
         event = FrameEvent(
             tstamp=frame,
             frame_index=frame,
-            keyframes_before=keyframes_before,
-            keyframe_added=keyframes > keyframes_before,
+            keyframes_before=0 if frame == 0 else 1,
+            keyframe_added=frame == 0,
             image=torch.full((3, 32, 32), 100, dtype=torch.uint8),
             intrinsics=torch.tensor([30.0, 30.0, 16.0, 16.0]),
             depth=FrameDepth(depth=torch.full((32, 32), 2.0), mask=None),
@@ -397,5 +399,17 @@ def test_the_app_streams_moge2_depth_and_normals_of_every_frame_as_video(tmp_pat
         batch = chunk.to_record_batch()
         if "VideoStream:sample" in batch.schema.names and entities.FRAME_TIMELINE in batch.schema.names:
             samples.setdefault(str(chunk.entity_path), []).extend(batch.column(entities.FRAME_TIMELINE).to_pylist())
-    assert samples["/" + entities.CAM_DEPTH] == [0, 1]
-    assert samples["/" + entities.CAM_NORMALS] == [0, 1]
+    assert samples["/" + entities.CAM_DEPTH] == [0, 2]  # source frames 0 and 4
+    assert samples["/" + entities.CAM_NORMALS] == [0, 2]
+
+
+def test_turbo_rgb_colours_depth_on_its_device_and_blacks_out_invalid_pixels() -> None:
+    from metrictrail.capture import turbo_rgb
+    from metrictrail.palette import TURBO_LUT
+
+    depth = torch.tensor([[0.3, 3.0], [9.0, 0.0]])
+    rgb = turbo_rgb(depth, depth > 0, (0.3, 3.0))
+    assert rgb.dtype == torch.uint8 and rgb.shape == (2, 2, 3)
+    np.testing.assert_array_equal(rgb[0].numpy(), TURBO_LUT[[0, 255]])
+    np.testing.assert_array_equal(rgb[1, 0].numpy(), TURBO_LUT[255])  # past the range: clamped to far
+    assert int(rgb[1, 1].sum()) == 0  # no depth: black
