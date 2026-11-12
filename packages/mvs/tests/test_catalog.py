@@ -64,5 +64,7 @@ def test_blueprint_shows_the_scene_the_video_and_the_depth() -> None:
     collect(layout.root_container)
     assert set(views) == {"Scene", "Video", "Predicted depth"}
     assert isinstance(views["Scene"], rrb.Spatial3DView) and views["Scene"].origin == "world"
+    # Without the exclusion the 3D view back-projects the low-resolution depth into a point patch beside the mesh.
+    assert views["Scene"].contents == ["$origin/**", f"- /{PINHOLE_LOWRES_PATH}/**"]
     assert isinstance(views["Video"], rrb.Spatial2DView) and views["Video"].origin == PINHOLE_PATH
     assert isinstance(views["Predicted depth"], rrb.Spatial2DView) and views["Predicted depth"].origin == PINHOLE_LOWRES_PATH

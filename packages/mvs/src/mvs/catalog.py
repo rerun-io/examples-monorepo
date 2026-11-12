@@ -80,10 +80,14 @@ def log_depth(depth_hw: Float32[ndarray, "h=192 w=256"], K_depth_33: Float32[nda
 
 
 def blueprint() -> rrb.Blueprint:
-    """One screen: the 3D scene (camera frustum, and the mesh when one is logged) beside the video above the predicted depth."""
+    """One screen: the 3D scene (camera frustum, and the mesh when one is logged) beside the video above the predicted depth.
+
+    The 3D view leaves out the low-resolution depth subtree: the viewer would back-project that depth into a point patch
+    beside the mesh. The depth shows only in its own 2D view.
+    """
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(origin="world", name="Scene"),
+            rrb.Spatial3DView(origin="world", name="Scene", contents=["$origin/**", f"- /{PINHOLE_LOWRES_PATH}/**"]),
             rrb.Vertical(
                 rrb.Spatial2DView(origin=PINHOLE_PATH, name="Video"),
                 rrb.Spatial2DView(origin=PINHOLE_LOWRES_PATH, name="Predicted depth"),
