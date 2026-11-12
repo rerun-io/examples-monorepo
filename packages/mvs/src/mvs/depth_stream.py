@@ -43,8 +43,8 @@ from mvs.pose_stream import (
 )
 
 FETCH_BLOCK_SIZE: int = 256
-"""Samples per dataloader fetch: one block decodes all its full-resolution frames on the GPU at once, and 1024 ran out
-of memory on a 32 GB card."""
+"""Samples per dataloader fetch: one block holds all its decoded full-resolution frames on the GPU at once, about 2 GB
+of 1920x1440 RGB at 256 and about 8 GB at 1024."""
 
 
 class DepthRow(TypedDict):

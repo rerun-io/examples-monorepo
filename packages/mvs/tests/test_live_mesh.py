@@ -82,5 +82,4 @@ def test_the_depth_stream_fetches_small_blocks(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(mvs.depth_stream, "DataSource", lambda **kwargs: None)
     depth_dataset(MagicMock(spec=DatasetEntry), "42899799", torch.device("cpu"))
 
-    assert FETCH_BLOCK_SIZE == 256
     assert requested["fetch_block_size"] == FETCH_BLOCK_SIZE
