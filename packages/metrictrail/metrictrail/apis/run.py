@@ -43,6 +43,7 @@ from metrictrail.calibration_graphs import calibration_cuda_graphs
 from metrictrail.calibration_gru import GruBackend, calibration_gru
 from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
+from metrictrail.examples import DEFAULT_INPUT
 from metrictrail.feature_graphs import dino_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
@@ -63,12 +64,13 @@ from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
 
 
-@dataclass
+@dataclass(kw_only=True)
 class RunSettings:
     """What to run and how; the Rerun target is separate (:class:`Config` for the CLI, the app's own stream)."""
 
-    input: Path
-    """A video, a frame directory (its name names the outputs and seeds DPVO) or a VSLAM-LAB sequence directory."""
+    input: Path = DEFAULT_INPUT
+    """A video, a frame directory (its name names the outputs and seeds DPVO) or a VSLAM-LAB sequence directory; by
+    default the shared demo clip (:data:`metrictrail.examples.DEFAULT_INPUT`, also the app's first example)."""
     output: Path
     """Run directory: ViPE's artifacts go to ``<output>/vipe_out``, live-capture passes to ``<output>/capture``."""
     benchmark: BenchmarkName = "video"

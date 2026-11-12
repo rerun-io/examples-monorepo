@@ -3982,9 +3982,9 @@ description = "Build and test vipe_mojo against the frozen vipe_ext references (
 
 [feature.metrictrail.tasks.metrictrail-run]
 cmd = "python tools/run.py"
-depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-data"]
 cwd = "packages/metrictrail"
-description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
+description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --output, and --input (default: the demo clip IMG_0497.mp4) --benchmark --rr-config.save"
 
 [feature.metrictrail.tasks.metrictrail-log-run]
 cmd = "python tools/log_run.py"
@@ -4005,8 +4005,8 @@ description = "Write (and with --catalog-url/--dataset register) the MetricTrail
 [feature.metrictrail.tasks._download-metrictrail-data]
 cmd = "hf download pablovela5620/dpvo-example-data --repo-type dataset --include 'movies/*.mp4' --local-dir data/"
 cwd = "packages/metrictrail"
-outputs = ["packages/metrictrail/data/movies/IMG_0493.mp4"]
-description = "Download the example video clips of the MetricTrail app"
+outputs = ["packages/metrictrail/data/movies/IMG_0493.mp4", "packages/metrictrail/data/movies/IMG_0497.mp4"]
+description = "Download the example video clips of the MetricTrail app and the run CLI's default input (IMG_0497.mp4)"
 
 [feature.metrictrail.tasks._download-metrictrail-iphone-data]
 cmd = "hf download pablovela5620/dpvo-example-data iphone/pool.mp4 --repo-type dataset --local-dir data/"

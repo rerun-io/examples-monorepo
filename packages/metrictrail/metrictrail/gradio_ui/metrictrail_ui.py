@@ -46,13 +46,12 @@ from metrictrail.apis.run import RunResult, RunSettings, run_and_log
 from metrictrail.benchmarks import UPSTREAM_MAX_FRAMES
 from metrictrail.blueprint import calibration_blueprint, run_blueprint
 from metrictrail.calibration_live import RunPhase
+from metrictrail.examples import DATA_DIR, example_videos
 from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS, VIEWER_HEIGHT
 from metrictrail.outputs import RunMetrics
 
 APPLICATION_ID: str = "metrictrail"
 """Application id of every streamed recording."""
-DATA_DIR: Path = Path(__file__).resolve().parents[2] / "data"
-"""``packages/metrictrail/data``: the example clips (``metrictrail-app`` downloads them)."""
 RUN_LOG_LINES: int = 100
 """Lines the run log keeps (the textbox is sent whole when it changes)."""
 READY: str = "Upload a clip, or pick an example, then press Run."
@@ -177,11 +176,6 @@ class RunStatus:
         return dict(set_time(entities.CALIBRATION_TIMELINE, sequence=value, play=False))
 
 
-def example_videos(data_dir: Path) -> list[Path]:
-    """The example clips under ``data_dir``: the iPhone ones (``iphone/``), then dpvo's ``movies/``."""
-    return sorted((data_dir / "iphone").glob("*.mp4")) + sorted((data_dir / "movies").glob("*.mp4"))
-
-
 def app_overrides(tracking_stride: int, max_frames: int, budget: str) -> list[str]:
     """Hydra overrides of the three knobs; none at upstream's values (stride 1, :data:`UPSTREAM_MAX_FRAMES`,
     :data:`UPSTREAM_BUDGET`).
@@ -224,20 +218,22 @@ def summary_table(metrics: RunMetrics, wall_s: float, budget: str) -> str:
 
 @dataclass(slots=True)
 class RunLog:
-    """The Outputs tab's run log: each new status once, with the seconds since Run, newest first."""
+    """The Outputs tab's run log: one line per stage (a status's text before its first colon), with the seconds since
+    Run, newest first. A stage's later statuses (its frame counts) show in the status box only."""
 
     started: float
     """``time.perf_counter()`` at Run."""
     lines: deque[str] = field(default_factory=lambda: deque(maxlen=RUN_LOG_LINES))
     """The recent lines, newest first."""
-    last: str | None = None
-    """The newest status logged."""
+    stage: str | None = None
+    """The stage of the newest line."""
 
     def note(self, text: str, now: float) -> str | dict[str, object]:
-        """The textbox value after ``text`` (a new line), or ``gr.skip()`` when ``text`` is the newest already."""
-        if text == self.last:
+        """The textbox value after ``text`` (a new line), or ``gr.skip()`` when ``text`` is of the newest line's stage."""
+        stage: str = text.split(":", 1)[0]
+        if stage == self.stage:
             return gr.skip()
-        self.last = text
+        self.stage = stage
         self.lines.appendleft(f"{now - self.started:6.1f} s  {text}")
         return "\n".join(self.lines)
 
@@ -366,14 +362,17 @@ def build_app(
         max_frames: Default of the max-frames field (a host caps the work a click reserves).
     """
     clips: list[Path] = examples if examples is not None else example_videos(data_dir)
-    with gr.Blocks(title="Rerun × MetricTrail") as demo:
+    # fill_width: Gradio caps the page at 1,536 px otherwise, and the viewer would not take the window's width.
+    with gr.Blocks(title="Rerun × MetricTrail", fill_width=True) as demo:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
         with gr.Row(elem_id="main-row", equal_height=False):
             with gr.Column(scale=1, min_width=360, elem_id="left-column"):
                 with gr.Tabs(selected="input") as tabs:
                     with gr.Tab("Input", id="input"):
                         # format=None: Gradio hands the upload over as it is (a .MOV stays a .MOV; prepare_input links it).
-                        video_input: gr.Video = gr.Video(label="Source clip", sources=["upload"], format=None, elem_id="source-video")
+                        video_input: gr.Video = gr.Video(
+                            value=str(clips[0]) if clips else None, label="Source clip", sources=["upload"], format=None, elem_id="source-video"
+                        )
                         with gr.Accordion("Advanced settings", open=False):
                             stride_slider: gr.Slider = gr.Slider(
                                 label="Tracking stride (DPVO tracks every k-th frame)", minimum=1, maximum=5, step=1, value=1

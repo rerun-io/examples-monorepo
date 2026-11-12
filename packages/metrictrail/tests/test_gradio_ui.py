@@ -12,15 +12,17 @@ import gradio as gr
 from gradio_rerun import Rerun
 
 from metrictrail.blueprint import SceneView, calibration_blueprint, run_blueprint
-from metrictrail.gradio_ui.metrictrail_ui import RunLog, RunYield, app_overrides, build_app, example_videos, metrictrail_streaming_fn, summary_table
+from metrictrail.examples import example_videos
+from metrictrail.gradio_ui.metrictrail_ui import RunLog, RunYield, app_overrides, build_app, metrictrail_streaming_fn, summary_table
 from metrictrail.outputs import RunMetrics
 
 
-def test_example_videos_list_the_iphone_clips_first(tmp_path: Path) -> None:
-    for relative in ("movies/IMG_0493.mp4", "movies/IMG_0482.mp4", "iphone/pool.mp4", "movies/IMG_0493.MOV", "movies/notes.txt"):
+def test_example_videos_list_the_default_clip_first_then_the_iphone_clips(tmp_path: Path) -> None:
+    for relative in ("movies/IMG_0493.mp4", "movies/IMG_0497.mp4", "movies/IMG_0482.mp4", "iphone/pool.mp4", "movies/IMG_0493.MOV", "movies/notes.txt"):
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).touch()
     assert [path.relative_to(tmp_path).as_posix() for path in example_videos(tmp_path)] == [
+        "movies/IMG_0497.mp4",  # DEFAULT_CLIP, the stone balustrade walk
         "iphone/pool.mp4",
         "movies/IMG_0482.mp4",
         "movies/IMG_0493.mp4",
@@ -52,6 +54,8 @@ def test_build_app_has_the_egohand_layout_a_video_input_with_thumbnail_examples_
     assert len(videos) == 1  # the examples render as video tiles of this input
     assert any(isinstance(block, gr.Dataset) and len(block.samples) == 1 and block.elem_id == "examples" for block in components)
     assert [str(block.label) for block in components if isinstance(block, gr.Tab)] == ["Input", "Outputs"]
+    assert videos[0].value is not None and videos[0].value["orig_name"] == "pool.mp4"  # the first example, preloaded
+    assert demo.fill_width  # no 1,536 px page cap: the viewer takes the window's width
     run = next(dependency for dependency in demo.config["dependencies"] if viewers[0]._id in dependency["outputs"])
     assert len(run["outputs"]) == 4  # viewer, status, summary, run log
 
@@ -62,9 +66,10 @@ def test_streaming_fn_without_a_video_yields_an_empty_chunk() -> None:
 
 def test_the_run_log_notes_each_status_once_newest_first_and_the_summary_is_a_table() -> None:
     log = RunLog(started=10.0)
-    assert log.note("SharedK calibration", 10.5) == "   0.5 s  SharedK calibration"
-    assert log.note("SharedK calibration", 11.0) == gr.skip()  # unchanged: the textbox is not resent
-    assert log.note("DPVO tracking", 25.0) == "  15.0 s  DPVO tracking\n   0.5 s  SharedK calibration"
+    assert log.note("SharedK calibration: 16 frames read", 10.5) == "   0.5 s  SharedK calibration: 16 frames read"
+    assert log.note("SharedK calibration: 71 frames read", 11.0) == gr.skip()  # the same stage: one line, not one per poll
+    assert log.note("DPVO tracking: frame 9 / 20", 25.0) == "  15.0 s  DPVO tracking: frame 9 / 20\n   0.5 s  SharedK calibration: 16 frames read"
+    assert str(log.note("fusing the TSDF mesh", 26.0)).startswith("  16.0 s  fusing the TSDF mesh\n")
     metrics = RunMetrics(num_tracked=1293, num_finite=1290, num_gt_pairs=None, ate_sim3_m=None, sim3_scale=None, ate_se3_m=None, cloud_points=None, mesh_triangles=3066509)
     table: str = summary_table(metrics, 57.04, "fast64")
     assert "| Frames tracked | 1,293 (1,290 finite poses) |" in table and "| TSDF mesh | 3,066,509 triangles |" in table

@@ -32,3 +32,13 @@ def test_upstream_label_keeps_its_own_patch_budget() -> None:
     settings: RunSettings = RunSettings(input=Path("clip.mp4"), output=Path("out"), label="upstream")
     prepared: PreparedInput = PreparedInput(stream_path=settings.input, name="clip", gt_sequence=None, raster_overrides=[])
     assert all("PATCHES_PER_FRAME" not in value for value in hydra_overrides(settings, prepared, settings.output))
+
+
+def test_the_cli_runs_the_shared_default_clip_without_an_input() -> None:
+    import tyro
+
+    from metrictrail.apis.run import Config
+    from metrictrail.examples import DEFAULT_CLIP, DEFAULT_INPUT
+
+    config: Config = tyro.cli(Config, args=["--output", "out", "--rr-config.headless"])
+    assert config.input == DEFAULT_INPUT and DEFAULT_INPUT.name == DEFAULT_CLIP == "IMG_0497.mp4"
