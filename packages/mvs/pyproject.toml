@@ -25,7 +25,7 @@ exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modu
 sort_by_size = true
 min_confidence = 60
 # video: DepthRow TypedDict field, read via subscript.
-ignore_names = ["rr_config", "video"]
+ignore_names = ["rr_config", "video", "exc"]
 
 [tool.pytest.ini_options]
 markers = [

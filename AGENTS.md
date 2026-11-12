@@ -173,6 +173,13 @@ Bringing an upstream research model in (fork + pixify, then a vendor → predict
 Rerun pixel evidence) follows the repo skill `add-model` (`.agents/skills/add-model/SKILL.md`, also visible to
 Claude Code through `.claude/skills`). Both Codex and Claude Code load it when asked to "add/port <model>".
 
+## Putting an app on a ZeroGPU Space
+
+A Gradio + Rerun app goes onto a Hugging Face ZeroGPU Space with pixi, our packages pinned by commit, following
+the repo skill `zerogpu-pixi-space` (`.agents/skills/zerogpu-pixi-space/SKILL.md`): probe Space first, prebuilt
+TensorRT engines, Dev Mode iteration, GPU seconds per click sized from measured fresh-worker clicks, and
+screenshots of the Space page as proof.
+
 ## Adding a new package
 
 1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `ci/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
@@ -328,12 +335,16 @@ simplecv hold `python-dateutil <3` beside the pin: the conda rerun-sdk (ipykerne
 jupyter_client) would pull 4.x, and PyPI `s3fs` → `aiobotocore` needs <3. `gradio-rerun`
 (PyPI) pins an exact `rerun-sdk`; prefix.dev's conda-to-PyPI hash mapping gives the conda
 package the `rerun-sdk` purl, so uv treats it as installed and adds no second copy (check a
-re-lock for zero PyPI `rerun-sdk` entries).
+re-lock for zero PyPI `rerun-sdk` entries). The same mapping covers its `gradio>=6` with the
+conda `gradio`. Until upstream loads streamed segments in order, `gradio-rerun` is the
+ai-demos `0.42.0.post1` wheel (the pin's comment says why; rebuild inputs in ai-demos
+`.github/gradio-rerun-source-build`).
 
 To bump, in one change:
 1. every conda `rerun-sdk` pin in `pixi.toml` (`grep -n 'rerun-sdk = ' pixi.toml`) and the
    `rerun-sdk` run dependency in `packages/slam-rs/recipe.yaml`;
-2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately;
+2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately
+   (while it is the ai-demos wheel, rebuild that with the fix for the new version, or return to PyPI if upstream has it);
 3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
    `packages/robocap-live`, `packages/slam-rs`, the gsplat custom viewer
    (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`) and the depth-video viewer
@@ -370,7 +381,7 @@ release ships.
 
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
-- **gradio from PyPI, not conda** — conda's gradio package has missing transitive deps
+- **gradio from conda-forge** — pinned exactly in `[feature.common.dependencies]`; it caps `pillow <13` itself. `gradio-rerun`: see **Testing Rerun builds**.
 - **No dependency may need a build step during resolution** — `pixi lock` must never need package Python. Vendor the inference subset (as `monopriors/third_party/` does, with the upstream rev and patch list in the package `__init__` docstring), ship a prebuilt wheel, or give the package static metadata and build any CUDA extension through an explicit task.
 - **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. A shared-feature change re-solves the whole workspace; that works from any Linux host, while macOS is limited to `pixi lock --check` (see **Platforms & lockfile**).
 - **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:

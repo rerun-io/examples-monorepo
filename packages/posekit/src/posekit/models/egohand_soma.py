@@ -5,10 +5,14 @@ The released MHR parameters remain dynamic: all five identity coefficients,
 each hand. Only the neutral pose corrective and topology tables are cached.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import torch
+from egohand.models.egohand import EgoHand
 from egohand.models.soma_hand_wrapper import SomaHandWrapper
 from jaxtyping import Float32, Int64
 from soma.geometry.batched_skinning import BatchedSkinning
@@ -49,6 +53,15 @@ class _CudaMHRHand(MHRHandIdentityModel):
         self.hand_faces: Int64[Tensor, "v 3"] = local_faces
         character = self._mhr_model.module.character_torch
         self.rest_model = compile_unless_dev(MhrHandRestSkinning(character, source_vertices, scale_indices, neutral_correctives))
+
+    def _apply(self, fn: Callable[[Tensor], Tensor], recurse: bool = True) -> "_CudaMHRHand":
+        """Move the prepared tables with the module (``.to``): a hand prepared on the CPU follows its model to CUDA."""
+        super()._apply(fn, recurse)
+        for name, value in vars(self).items():
+            if isinstance(value, Tensor):
+                setattr(self, name, fn(value))
+        self.device = self.hand_barycentric.device
+        return self
 
     def _get_shaped_verts(self, identity_coeffs: Float32[Tensor, "b 5"]) -> Float32[Tensor, "b v 3"]:
         """Evaluate the released shape, scale and FK for every required source vertex."""
@@ -96,12 +109,19 @@ class _CudaHandSkinning(BatchedSkinning):
         self.bind_shapes = bind_shapes
 
 
-def prepare_cuda_soma(model: SomaHandWrapper) -> None:
-    """Prepare inference backends without changing the role or its full-mesh contract."""
+def prepare_identity(model: SomaHandWrapper) -> None:
+    """Replace each hand's MHR identity model with its prepared form, on the device the model is on."""
     for hand in (model.left, model.right):
         if not isinstance(hand.identity_model, MHRHandIdentityModel):
             raise ValueError("EgoHand CUDA execution requires its released MHR identity model.")
-        hand.identity_model = _CudaMHRHand(hand.identity_model)
+        if not isinstance(hand.identity_model, _CudaMHRHand):
+            hand.identity_model = _CudaMHRHand(hand.identity_model)
+
+
+def prepare_cuda_soma(model: SomaHandWrapper) -> None:
+    """Prepare inference backends without changing the role or its full-mesh contract."""
+    prepare_identity(model)
+    for hand in (model.left, model.right):
         hand.batched_skinning = _CudaHandSkinning(hand.batched_skinning)
         # RBF interpolation is linear in vertex positions. The library precomputes
         # the same weights as a sparse matrix; its default loops over joint masks.
@@ -109,3 +129,46 @@ def prepare_cuda_soma(model: SomaHandWrapper) -> None:
         hand.skeleton_transfer._precompute_regressors()
         # Kabsch avoids the auto method's host-side validity check/fallback.
         hand.skeleton_transfer.rotation_method = "kabsch"
+
+
+@contextmanager
+def _replaced(module: ModuleType, name: str, value: Any) -> Iterator[None]:
+    """``module.name`` is ``value`` inside the block."""
+    original: Any = getattr(module, name)
+    setattr(module, name, value)
+    try:
+        yield
+    finally:
+        setattr(module, name, original)
+
+
+@contextmanager
+def warp_init_deferred() -> Iterator[None]:
+    """SOMA layers built inside the block do not initialise Warp; Warp then starts at its first kernel launch.
+
+    SOMA initialises Warp when it constructs a layer, so that forked CPU data-loader workers inherit it. A process
+    that forks GPU workers must not: a worker would inherit Warp's device list of a process without a GPU, and SOMA's
+    fork hook turns Warp's CUDA context handling off in the child.
+    """
+    import soma.hand.soma
+
+    with _replaced(soma.hand.soma, "ensure_warp_initialized", lambda: None):
+        yield
+
+
+def load_model_on_cpu(weights: Path, soma: Path) -> EgoHand:
+    """The released model without a backbone, its SOMA hands built and prepared on the CPU; nothing here starts CUDA or Warp.
+
+    A process may therefore build it and then fork GPU workers, each of which only moves it to CUDA. Upstream builds
+    the SOMA hands on ``"cuda"`` with no option, so its ``SomaHandWrapper`` gets ``device="cpu"`` for this one call.
+    """
+    import egohand.models.egohand as upstream
+    from egohand_inference.pipeline.predictor import load_egohand_model
+
+    def cpu_soma_hand(**arguments: Any) -> SomaHandWrapper:
+        return SomaHandWrapper(**{**arguments, "device": "cpu"})
+
+    with warp_init_deferred(), _replaced(upstream, "SomaHandWrapper", cpu_soma_hand):
+        model, _ = load_egohand_model(weights, soma, backbone=torch.nn.Identity())
+    prepare_identity(model.soma_hand)
+    return model.eval()
