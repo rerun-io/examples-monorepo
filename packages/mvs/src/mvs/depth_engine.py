@@ -46,7 +46,7 @@ class DepthOutputs(NamedTuple):
     depth_b1hw: Float[Tensor, "b c=1 h=192 w=256"]
     """Metric depth."""
     lowest_cost_bhw: Float[Tensor, "b h=96 w=128"]
-    """Lowest plane-sweep matching cost (confidence proxy)."""
+    """Depth, in metres, of the cost volume's best plane per pixel at the matching size (not a cost value)."""
 
 
 class DepthEngine:
