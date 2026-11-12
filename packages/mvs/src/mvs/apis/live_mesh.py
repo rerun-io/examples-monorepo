@@ -30,12 +30,11 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 from tsdf_rs import TsdfVolume
 
 from mvs.blueprint import SOURCE_CAMS, create_blueprint
 from mvs.catalog import FRAME_TIMELINE, PATHS, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_depth, log_source_video
-from mvs.depth_engine import DepthEngine, DepthInputs, DepthOutputs
+from mvs.depth_engine import SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthInputs, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
 from mvs.frame_views import LogConfig, log_current_cam_style, log_lowest_cost, log_normals, log_sources, rgb_at_depth_raster
 from mvs.log_worker import LogWorker
@@ -69,8 +68,8 @@ class Config:
     """Where the catalog segments come from."""
     model_path: Path = Path("data/models/depth_model_dot.onnx")
     """Portable ONNX depth model artifact."""
-    backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
-    """CUDA ONNX Runtime or cached TensorRT execution backend."""
+    backend: DepthBackendConfig = SMALL_TRT_BACKEND
+    """TensorRT with the batch-1 profile (SMALL_TRT_BACKEND) by default; ``onnx`` is the ONNX Runtime CUDA fallback."""
     fusion: FusionConfig = field(default_factory=FusionConfig)
     """TSDF fusion and mesh logging."""
     log: LogConfig = field(default_factory=LogConfig)
