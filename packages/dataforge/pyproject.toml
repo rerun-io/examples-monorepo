@@ -49,6 +49,7 @@ ignore_names = [
     "dim", "n_control", "include_polynomial", "kernel_name", "kernel_params", "_rbf_func", "_lu", "A", "bind_local_transforms",
     "_warp_stage1_skinned_orig_centered", "_warp_stage2_n1_children_orig_centered", "_warp_stage2_n2_children_orig_centered",
     "installed",  # pytest fixture taken by name.
+    "calibrate_offsets",  # soma_x_landmarks: calibrates a new landmark source's offsets (run once per source, offline).
     # MammaSyn: a cached shard index compares stamps whole; a context manager's __exit__ takes the exception triple.
     "mtime_ns",
     "exc",

@@ -23,22 +23,33 @@ import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
 import torch
-from dataforge import schema, soma_x
-from dataforge.datasets.epfl_source import BODY_L2_THRESHOLD, HAND_L2_THRESHOLD
-from dataforge.soma_x_fit import BODY_MAX_MEDIAN_ERROR_MM, HAND_MAX_MEDIAN_ERROR_MM, BodyFitter, HandFitter, ModelFit, Side, mano_model
-from dataforge.writing import atomic_recording
 from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.ops.mano.mano_np import MANOLayerNP
 from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 
+from dataforge import schema, soma_x
+from dataforge.datasets.epfl_source import BODY_L2_THRESHOLD, HAND_L2_THRESHOLD
+from dataforge.soma_x_fit import BODY_MAX_MEDIAN_ERROR_MM, HAND_MAX_MEDIAN_ERROR_MM, BodyFitter, HandFitter, ModelFit, Side, mano_model
+from dataforge.soma_x_landmarks import (
+    UMETRACK_LANDMARK_OFFSETS_M,
+    HandLandmarks,
+    LandmarkFit,
+    LandmarkHandModel,
+    fit_hand,
+    read_hand_landmarks,
+)
+from dataforge.writing import atomic_recording
+
 SOMA_X_LAYER: str = "soma_x"
 """Layer name of every dataset's SOMA-X fit (decision 14)."""
 SIDES: tuple[Side, ...] = ("left", "right")
 WINDOW_ROWS: int = 2048
 """Segment rows per window: bounds the source vertices in memory (2048 SMPL rows = 170 MB)."""
-Dataset = Literal["hocap", "epfl", "harmony4d", "egoexo4d", "gsi-six-view", "genrobot", "gen-humanego", "hot3d-aria", "hot3d-quest3"]
+Dataset = Literal[
+    "hocap", "epfl", "harmony4d", "egoexo4d", "gsi-six-view", "genrobot", "gen-humanego", "hot3d-aria", "hot3d-quest3", "umetrack", "show3d"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +114,8 @@ class Stream:
     """Mesh colour."""
     windows: Callable[[], Iterator[SourceWindow]]
     """The windows, produced lazily."""
+    fitted: Callable[[], Iterator[soma_x.SomaXFit]] | None = None
+    """Ready fits window by window, for a source that is not a posed mesh (landmarks); ``windows`` is then unused."""
 
 
 def fixed_rows(table: pa.Table, column: str, width: int) -> Float32[ndarray, "t c"]:
@@ -195,9 +208,12 @@ def write_stream(recording: rr.RecordingStream, stream: Stream) -> Float32[ndarr
         recording, stream.root, topology=stream.fitter.topology, model=stream.fitter.model(), source=stream.source, albedo=stream.albedo
     )
     errors: list[Float32[ndarray, "k"]] = []
-    for window in stream.windows():
-        fit: soma_x.SomaXFit = fit_window(stream.fitter, window)
-        temporal: dict[str, Float32[ndarray, "w c"]] = window.temporal
+    fits: Iterator[tuple[soma_x.SomaXFit, dict[str, Float32[ndarray, "w c"]]]] = (
+        ((fit, {}) for fit in stream.fitted())
+        if stream.fitted is not None
+        else ((fit_window(stream.fitter, window), window.temporal) for window in stream.windows())
+    )
+    for fit, temporal in fits:
         soma_x.log_soma_x_rows(
             recording, stream.root, fit=fit, topology=stream.fitter.topology, source_temporal=temporal, mesh_rows=soma_x.MESH_ROWS[stream.fitter.kind]
         )
@@ -429,6 +445,7 @@ def harmony4d_streams(config: Config, segment: str, fitters: "Fitters") -> Itera
 def egoexo4d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[Stream]:
     """Ego-Exo4D-HM: SLAHMR's SMPL-H male fits, 16 betas, 45 PCA components per hand (``egoexo4d_body``)."""
     import torch
+
     from dataforge.datasets.egoexo4d_body import HAND_PCA_COMPONENTS, SMPLH_FILE, SmplhModel
 
     model_root: Path = config.body_model_root
@@ -595,6 +612,7 @@ def hot3d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[
     (Quest3 P0002: median surface distance 3.8 mm left, 4.0 mm right; the other conventions were 15-90 mm off).
     """
     import smplx
+
     from dataforge.soma_x_fit import mano_model
 
     # Only the MANO entities: the hands subtree also holds pose tracks pyarrow cannot sort.
@@ -663,6 +681,69 @@ def hot3d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[
         )
 
 
+# ── UmeTrack / SHOW3D: SOMA-X hands fitted to the 21 UmeTrack landmarks (decision 9) ──────────────────────────────
+
+
+def landmark_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[Stream]:
+    """UmeTrack and SHOW3D carry UmeTrack hands (their own mesh topology, no MANO): each hand's SOMA-X identity and poses are
+    fitted to the 21 landmarks of ``/world/gt/coco133_xyz`` (``soma_x_landmarks``). ``fit_error_mm`` of these rows is the
+    frame's mean landmark distance (MPJPE, UmeTrack landmark offsets applied), and the trust bar applies to it."""
+    _, table = read_rows(config.tree / "hand_pose" / f"{segment}.rrd", schema.coco133_xyz_path(), config.max_seconds)
+    for side in SIDES:
+        hand: HandLandmarks = read_hand_landmarks(table, side)
+        present: Bool[ndarray, "t"] = hand.present
+        if int(present.sum()) < 2:
+            continue
+
+        def fitted(side: Side = side, hand: HandLandmarks = hand, present: Bool[ndarray, "t"] = present) -> Iterator[soma_x.SomaXFit]:
+            fitter: HandFitter = fitters.hand(side)
+            offsets: Float32[ndarray, "21 3"] = np.asarray(UMETRACK_LANDMARK_OFFSETS_M[side], dtype=np.float32)
+            fit: LandmarkFit = fit_hand(fitters.landmark_model(side), hand.positions[present], hand.confidence[present], offsets)
+            count: int = len(hand.times_ns)
+            rows: Int64[ndarray, "k"] = np.flatnonzero(present)
+            rotations: Float32[ndarray, "t j 3"] = np.full((count, 25, 3), np.nan, dtype=np.float32)
+            translation: Float32[ndarray, "t 3"] = np.full((count, 3), np.nan, dtype=np.float32)
+            identity: Float32[ndarray, "t c"] = np.full((count, 10), np.nan, dtype=np.float32)
+            error_mm: Float32[ndarray, "t"] = np.full(count, np.nan, dtype=np.float32)
+            joints: Float32[ndarray, "t j 3"] = np.full((count, 25, 3), np.nan, dtype=np.float32)
+            rotations[rows], translation[rows], identity[rows], joints[rows] = fit.rotations, fit.root_translation, fit.betas, fit.joints
+            error_mm[rows] = fit.error_mm.mean(axis=1)
+            trusted: Bool[ndarray, "t"] = np.isfinite(error_mm) & (error_mm <= fitter.max_median_error_mm)
+            for start in range(0, count, WINDOW_ROWS):
+                part: slice = slice(start, start + WINDOW_ROWS)
+                keep: Bool[ndarray, "w"] = trusted[part]
+                vertices: Float32[ndarray, "k v 3"] = (
+                    fitter.pose(fit.betas[None], rotations[part][keep], translation[part][keep])
+                    if keep.any()
+                    else np.zeros((0, int(fitter.topology.faces.max()) + 1, 3), dtype=np.float32)
+                )
+                yield soma_x.SomaXFit(
+                    times_ns=hand.times_ns[part],
+                    frame_indices=hand.frame_indices[part],
+                    trusted=keep,
+                    vertices=vertices,
+                    joints=joints[part][keep],
+                    rotations=rotations[part],
+                    root_translation=translation[part],
+                    identity_coeffs=identity[part],
+                    fit_error_mm=error_mm[part],
+                )
+
+        yield Stream(
+            schema.hands_path(side),
+            fitters.hand(side),
+            soma_x.SourceParameters(
+                model="UmeTrack hand landmarks (no MANO): 21 points of /world/gt/coco133_xyz in the hand_pose layer",
+                encoding={"fit_error_mm": "mean distance of the 21 model landmarks (joints + UmeTrack landmark offsets) to the source landmarks"},
+                static={},
+                temporal={},
+            ),
+            soma_x.HAND_ALBEDO[side],
+            lambda: iter(()),
+            fitted,
+        )
+
+
 # ── driver ─────────────────────────────────────────────────────────────────
 
 
@@ -674,6 +755,7 @@ class Fitters:
         self.body_bar_mm: float = body_bar_mm
         self.hands: dict[tuple[Side, bool], HandFitter] = {}
         self.bodies: dict[tuple[str, Path], BodyFitter] = {}
+        self.landmark_models: dict[Side, LandmarkHandModel] = {}
 
     def hand(self, side: Side, *, fix_left_shapedirs: bool = False) -> HandFitter:
         key: tuple[Side, bool] = (side, fix_left_shapedirs)
@@ -682,6 +764,11 @@ class Fitters:
             self.hands[key] = HandFitter(side, fix_left_shapedirs=fix_left_shapedirs)
             self.hands[key].max_median_error_mm = self.hand_bar_mm
         return self.hands[key]
+
+    def landmark_model(self, side: Side) -> LandmarkHandModel:
+        if side not in self.landmark_models:
+            self.landmark_models[side] = LandmarkHandModel(side)
+        return self.landmark_models[side]
 
     def body(self, backend: Literal["smpl", "smplh", "smplx"], model_path: Path, *, gender: str = "neutral", num_betas: int = 10) -> BodyFitter:
         if (backend, model_path) not in self.bodies:
@@ -700,6 +787,8 @@ STREAMS: dict[Dataset, Callable[[Config, str, Fitters], Iterator[Stream]]] = {
     "gen-humanego": mesh_layer_streams,
     "hot3d-aria": hot3d_streams,
     "hot3d-quest3": hot3d_streams,
+    "umetrack": landmark_streams,
+    "show3d": landmark_streams,
 }
 POSE_LAYER: dict[Dataset, str] = {
     "hocap": "hand_pose",
@@ -711,6 +800,8 @@ POSE_LAYER: dict[Dataset, str] = {
     "gen-humanego": "pose",
     "hot3d-aria": "hand_pose",
     "hot3d-quest3": "hand_pose",
+    "umetrack": "hand_pose",
+    "show3d": "hand_pose",
 }
 """Layer whose segment files list the dataset's segments."""
 
