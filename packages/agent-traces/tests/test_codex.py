@@ -857,3 +857,48 @@ def test_native_execution_counts_as_turn_activity(rollout_builder: RolloutBuilde
                         item={"type": "CommandExecution", "id": "command", "aggregated_output": "done", "exit_code": 0})
     entities = read_entities(write_session_rrd(parse_rollout(rollout_builder.path), tmp_path / "native.rrd").path)
     assert entities["/turns"]["elapsed_ms"].to_pylist() == [[1000.0]]
+
+
+def compress(path: Path) -> Path:
+    """Replace a rollout by its zstd-compressed copy, as Codex does for older rollouts."""
+    zstandard = pytest.importorskip("zstandard")
+    target: Path = path.with_name(path.name + ".zst")
+    target.write_bytes(zstandard.ZstdCompressor().compress(path.read_bytes()))
+    path.unlink()
+    return target
+
+
+def test_compressed_rollouts_convert_with_their_children(rollout_builder: RolloutBuilder, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A compressed parent and child read like plain rollouts."""
+    home: Path = tmp_path / ".codex"
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    child: RolloutBuilder = RolloutBuilder(home / "archived_sessions/rollout-child.jsonl")
+    child.meta("child", parent_thread_id="thread", source={"subagent": {}})
+    child.item("Reasoning")
+    compress(rollout_builder.path)
+    compress(child.path)
+    convert_all_main(ConvertAllConfig(home=home, out=tmp_path / "out"))
+    assert "converted=1 skipped=1 failed=0" in capsys.readouterr().out
+    assert set(load_manifest(tmp_path / "out/codex/manifest.json").sessions) == {"thread"}
+
+
+def test_one_thread_in_several_files_converts_the_longest_copy(rollout_builder: RolloutBuilder, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Copies of one thread (moved to the archive, or compressed later) give one recording from the longest copy."""
+    home: Path = tmp_path / ".codex"
+    rollout_builder.meta()
+    rollout_builder.item("Reasoning")
+    archived: Path = home / "archived_sessions/rollout-thread.jsonl"
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(rollout_builder.path.read_bytes())
+    longer: RolloutBuilder = RolloutBuilder(home / "sessions/2026/09/19/rollout-thread.jsonl")
+    longer.path.parent.mkdir(parents=True)
+    longer.path.write_bytes(rollout_builder.path.read_bytes())
+    longer.index = rollout_builder.index
+    longer.item("Reasoning")
+    longest: Path = compress(longer.path)
+    convert_all_main(ConvertAllConfig(home=home, out=tmp_path / "out"))
+    output: str = capsys.readouterr().out
+    assert "converted=1 skipped=2 failed=0" in output
+    assert '"duplicate-thread":2' in output
+    assert load_manifest(tmp_path / "out/codex/manifest.json").sessions["thread"].source_path == str(longest.resolve())
