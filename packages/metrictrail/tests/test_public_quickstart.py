@@ -44,7 +44,9 @@ def test_the_run_tasks_fetch_the_weights_first(task: str) -> None:
     assert WEIGHTS_TASK in FEATURE["tasks"][task]["depends-on"]
 
 
-def test_the_example_runs_the_iphone_clip_with_the_video_preset() -> None:
+def test_the_example_runs_the_default_clip_with_the_video_preset() -> None:
+    """The stone balustrade walk (movies/IMG_0497.mp4), the app's and the CLI's default clip; its download task lists it."""
     task: dict = FEATURE["tasks"]["metrictrail-example"]
-    assert {"lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-iphone-data"} <= set(task["depends-on"])
-    assert "--input data/iphone/pool.mp4 --benchmark video --output data/" in task["cmd"]
+    assert {"lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-data"} <= set(task["depends-on"])
+    assert "--input data/movies/IMG_0497.mp4 --benchmark video --output data/" in task["cmd"]
+    assert "packages/metrictrail/data/movies/IMG_0497.mp4" in FEATURE["tasks"]["_download-metrictrail-data"]["outputs"]

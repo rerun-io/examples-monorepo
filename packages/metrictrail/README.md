@@ -16,14 +16,15 @@ On Linux with an NVIDIA GPU, from the repository root:
 pixi run -e metrictrail --frozen metrictrail-example
 ```
 
-This runs the 86 s iPhone clip `data/iphone/pool.mp4` with the `video` preset and opens the Rerun viewer. Without a
-display, add `--rr-config.save /abs/path/pool.rrd`. Outputs go to `packages/metrictrail/data/example/pool`. The first
-run builds the Mojo kernels, downloads the weights and the clip, and builds TensorRT engines; later runs reuse them:
+This runs the 1:58 clip `data/movies/IMG_0497.mp4`, a walk along a stone balustrade (the app's first example), with the
+`video` preset and opens the Rerun viewer. Without a display, add `--rr-config.save /abs/path/balustrade.rrd`. Outputs go
+to `packages/metrictrail/data/example/balustrade`. The first run builds the Mojo kernels, downloads the weights and the
+example clips (about 430 MB), and builds TensorRT engines; later runs reuse them:
 
 | What | Cached in |
 | --- | --- |
 | DINO-DPVO (`nvidia/MetricTrail`), DINOv3 ViT-S/16 (`xysun917/dinov3-vits16`, a mirror of Meta's file) | `packages/metrictrail/data/weights/` |
-| The example clip (`pablovela5620/dpvo-example-data`) | `packages/metrictrail/data/iphone/` |
+| The example clips (`pablovela5620/dpvo-example-data`) | `packages/metrictrail/data/movies/` |
 | MoGe-2 `Ruicheng/moge-2-vitl-normal` | the Hugging Face cache (`HF_HOME`) |
 | DROID `droid.pth` (SharedK calibration) | the torch hub (`TORCH_HOME`, default `~/.cache/torch`) |
 | ONNX files and TensorRT engines | `~/.cache/monoprior` (`MONOPRIOR_TRT_CACHE`), `~/.cache/trtkit/trt` (`TRTKIT_TRT_CACHE`) |

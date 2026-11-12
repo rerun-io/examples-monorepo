@@ -3985,12 +3985,13 @@ depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_dow
 cwd = "packages/metrictrail"
 description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
 
-# The quick start: the iPhone example clip with the video preset; extra arguments pass through (e.g. --rr-config.save).
+# The quick start: the default clip (a walk along a stone balustrade, the app's first example) with the video preset;
+# extra arguments pass through (e.g. --rr-config.save).
 [feature.metrictrail.tasks.metrictrail-example]
-cmd = "python tools/run.py --input data/iphone/pool.mp4 --benchmark video --output data/example/pool"
-depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights", "_download-metrictrail-iphone-data"]
+cmd = "python tools/run.py --input data/movies/IMG_0497.mp4 --benchmark video --output data/example/balustrade"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights", "_download-metrictrail-data"]
 cwd = "packages/metrictrail"
-description = "Run MetricTrail on the iPhone example clip (downloads the weights and the clip on first use) and show it in Rerun (needs the GPU)"
+description = "Run MetricTrail on the default example clip (downloads the weights and the clips on first use) and show it in Rerun (needs the GPU)"
 
 [feature.metrictrail.tasks.metrictrail-log-run]
 cmd = "python tools/log_run.py"
@@ -4011,8 +4012,8 @@ description = "Write (and with --catalog-url/--dataset register) the MetricTrail
 [feature.metrictrail.tasks._download-metrictrail-data]
 cmd = "hf download pablovela5620/dpvo-example-data --repo-type dataset --include 'movies/*.mp4' --local-dir data/"
 cwd = "packages/metrictrail"
-outputs = ["packages/metrictrail/data/movies/IMG_0493.mp4"]
-description = "Download the example video clips of the MetricTrail app"
+outputs = ["packages/metrictrail/data/movies/IMG_0493.mp4", "packages/metrictrail/data/movies/IMG_0497.mp4"]
+description = "Download the example video clips of the MetricTrail app and the run CLI's default input (IMG_0497.mp4)"
 
 [feature.metrictrail.tasks._download-metrictrail-iphone-data]
 cmd = "hf download pablovela5620/dpvo-example-data iphone/pool.mp4 --repo-type dataset --local-dir data/"
