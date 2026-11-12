@@ -82,10 +82,10 @@ def test_the_run_log_notes_each_status_once_newest_first_and_the_summary_is_a_ta
     assert log.note("SharedK calibration: 71 frames read", 11.0) == gr.skip()  # the same stage: one line, not one per poll
     assert log.note("DPVO tracking: frame 9 / 20", 25.0) == "  15.0 s  DPVO tracking: frame 9 / 20\n   0.5 s  SharedK calibration: 16 frames read"
     assert str(log.note("fusing the TSDF mesh", 26.0)).startswith("  16.0 s  fusing the TSDF mesh\n")
-    metrics = RunMetrics(num_tracked=1293, num_finite=1290, num_gt_pairs=None, ate_sim3_m=None, sim3_scale=None, ate_se3_m=None, cloud_points=None, mesh_triangles=3066509)
+    metrics = RunMetrics(num_tracked=1293, num_finite=1290, num_gt_pairs=None, ate_sim3_m=None, sim3_scale=None, ate_se3_m=None, mesh_triangles=3066509)
     table: str = summary_table(metrics, 57.04, "fast64")
     assert "| Frames tracked | 1,293 (1,290 finite poses) |" in table and "| TSDF mesh | 3,066,509 triangles |" in table
-    assert "| Fused cloud | - |" in table and "| Elapsed | 57.0 s |" in table
+    assert "| Elapsed | 57.0 s |" in table and "cloud" not in table
 
 
 def test_app_layouts_build_for_calibration_tracking_and_the_final_run() -> None:

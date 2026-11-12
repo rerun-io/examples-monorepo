@@ -11,7 +11,7 @@ from numpy import ndarray
 from serde import serde
 
 from metrictrail import entities
-from metrictrail.artifacts import ColoredCloud, iter_depth_zip, read_intrinsics, subsample_cloud
+from metrictrail.artifacts import iter_depth_zip, read_intrinsics
 from metrictrail.blueprint import SceneView, scene_view
 from metrictrail.eval.protocols import VslamlabDataset
 from metrictrail.eval.trajectory import apply_alignment, running_rmse
@@ -126,8 +126,6 @@ class RunMetrics:
     """Scale of that alignment (1.0 = exact metric scale)."""
     ate_se3_m: float | None
     """ATE RMSE after SE(3) alignment with scale 1 (metric-scale diagnostic), metres."""
-    cloud_points: int | None
-    """Points of the fused cloud before display subsampling."""
     mesh_triangles: int | None = None
     """Triangles of the TSDF mesh (:mod:`metrictrail.surface`)."""
 
@@ -147,8 +145,6 @@ class LogOptions:
     """Turbo range of depth images, metres."""
     depth_every: int = 1
     """Log every k-th tracked frame's depth image and RGB frame."""
-    max_cloud_points: int = 400_000
-    """Display subsample of the fused cloud."""
     image_plane_distance_m: float = 0.08
     """Frustum size of the trajectory camera in the 3D views, metres."""
 
@@ -183,12 +179,11 @@ def log_run_outputs(
     *,
     frames: FrameSource | None,
     context: GtContext | None,
-    cloud_world: ColoredCloud | None,
     provenance: Provenance,
     mesh_world: ColoredMesh | None = None,
     video_time_ns: Int64[ndarray, "s"] | None = None,
 ) -> LoggedRun:
-    """Log trajectory, GT, cloud, errors, frames and depth of a finished run, and its properties.
+    """Log trajectory, GT, the mesh, errors, frames and depth of a finished run, and its properties.
 
     Args:
         rec: Target recording.
@@ -196,7 +191,6 @@ def log_run_outputs(
         options: What to log and how.
         frames: The input the run read (``cam/rgb`` when ``options.log_frames``); None skips the frames.
         context: GT of the sequence; None logs the trajectory in ViPE's world frame with no errors.
-        cloud_world: The fused metric cloud in ViPE's world frame (the frame of ``pose/<name>.npz``); None skips it.
         provenance: The ``provenance`` property.
         mesh_world: The TSDF mesh in ViPE's world frame; None skips it.
         video_time_ns: ``video_time`` of each source frame (the input video's PTS); None: the GT stamps with GT, else no
@@ -265,28 +259,6 @@ def log_run_outputs(
             rec.log(path, rr.SeriesLines(colors=[line_color], names=[name], widths=[width]), static=True)
             rec.send_columns(path, indexes=gt_indexes, columns=rr.Scalars.columns(scalars=values))
 
-    cloud_points: int | None = None
-    if cloud_world is not None:
-        cloud_points = int(cloud_world.points_xyz.shape[0])
-        shown: ColoredCloud = subsample_cloud(cloud_world, options.max_cloud_points)
-        world_xyz: Float32[ndarray, "c 3"] = apply_alignment(sim3, shown.points_xyz.astype(np.float64)).astype(np.float32)
-        rec.log(entities.WORLD_CLOUD, rr.Points3D(world_xyz, colors=shown.colors_rgb, radii=rr.Radius.ui_points(1.5)), static=True)
-        if shown.normals_xyz is not None:
-            rec.log(
-                entities.WORLD_CLOUD_NORMALS,
-                rr.Points3D(world_xyz, colors=normal_colors(shown.normals_xyz, sim3), radii=rr.Radius.ui_points(1.5)),
-                static=True,
-            )
-        if aligned is not None:
-            metric_cloud: Float32[ndarray, "c 3"] = apply_alignment(aligned.se3.gt_T_est, shown.points_xyz.astype(np.float64)).astype(np.float32)
-            rec.log(entities.METRIC_CLOUD, rr.Points3D(metric_cloud, colors=shown.colors_rgb, radii=rr.Radius.ui_points(1.5)), static=True)
-            if shown.normals_xyz is not None:
-                rec.log(
-                    entities.METRIC_CLOUD_NORMALS,
-                    rr.Points3D(metric_cloud, colors=normal_colors(shown.normals_xyz, aligned.se3.gt_T_est), radii=rr.Radius.ui_points(1.5)),
-                    static=True,
-                )
-
     if mesh_world is not None:
         log_mesh(rec, mesh_world, sim3, entities.WORLD_MESH, entities.WORLD_MESH_NORMALS)
         if aligned is not None:
@@ -302,7 +274,6 @@ def log_run_outputs(
         ate_sim3_m=aligned.sim3.rmse_m if aligned is not None else None,
         sim3_scale=aligned.sim3.scale if aligned is not None else None,
         ate_se3_m=aligned.se3.rmse_m if aligned is not None else None,
-        cloud_points=cloud_points,
         mesh_triangles=int(mesh_world.triangles.shape[0]) if mesh_world is not None else None,
     )
     rec.log(entities.SUMMARY, rr.TextDocument(summary_markdown(outputs, options.label, metrics), media_type=rr.MediaType.MARKDOWN), static=True)
@@ -416,8 +387,6 @@ def summary_markdown(outputs: RunOutputs, label: RunLabel, metrics: RunMetrics) 
     lines: list[str] = [f"### MetricTrail, {who}: `{outputs.name}`", "", f"- tracked frames: **{metrics.num_tracked}** ({metrics.num_finite} finite)"]
     if metrics.mesh_triangles is not None:
         lines.append(f"- TSDF mesh: **{metrics.mesh_triangles:,}** triangles")
-    if metrics.cloud_points is not None:
-        lines.append(f"- fused metric cloud: **{metrics.cloud_points:,}** points")
     if metrics.ate_sim3_m is not None and metrics.sim3_scale is not None and metrics.ate_se3_m is not None:
         lines += [
             f"- ATE RMSE, Sim(3) (the paper's metric): **{100.0 * metrics.ate_sim3_m:.2f} cm** over {metrics.num_gt_pairs} frames",

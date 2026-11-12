@@ -6,17 +6,17 @@ not wrapped: :meth:`CaptureSession.install` registers :meth:`CaptureSession.obse
 :func:`dpvo.hooks.add_global_observer`, so every DPVO built while the session is installed
 
 * opens one recording file per DPVO instance (pass);
-* after each tracked frame (:meth:`CaptureObserver.on_frame`), logs the frame DPVO saw, the MoGe-2 metric depth it was
-  given, the frame's MoGe-2 normals when DPVO's keyframe graph grew on it, the newest keyframe's patches (boxes of
-  their P x P footprint on the shown image), the local bundle-adjustment window and its patch points;
+* after each tracked frame (:meth:`CaptureObserver.on_frame`), logs the frame DPVO saw, the MoGe-2 metric depth and
+  normals it was given (every frame, off the tracking thread: :attr:`CaptureSession.priors`), the newest keyframe's
+  patches (boxes of their P x P footprint on the shown image), the local bundle-adjustment window and its patch points;
 * counts global bundle adjustments (:meth:`CaptureObserver.on_global_ba`).
 
 Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSession.uninstall` restores them):
 
 * ``vipe.metrictrail.slam.DPVOSLAMSystem.run``: notes the frame count of the tracking pass that starts;
 * :meth:`metrictrail.moge2.MoGe2NormalProvider.predict_metric` and ``DPVOSLAMSystem._prepare``: keep the camera-space
-  normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so a
-  keyframe's normals are logged and the fused cloud gets per-point normals (:meth:`CaptureSession.kept_normals`);
+  normals of the forward that gave each tracked frame its depth (keyed by the tracked-frame index, as 8-bit RGB), so
+  that frame's normals are logged with it;
 * with :attr:`CaptureSession.live_surface` (the app), whenever DPVO's keyframe graph grows on a frame (DPVO adds
   every frame as a keyframe; the graph grows when keyframe culling keeps it), that frame's depth is integrated at
   DPVO's current estimate of its pose into the :class:`~metrictrail.live_surface.LiveSurface`, so the surface grows
@@ -90,13 +90,6 @@ def host_rgb(image: UInt8[Tensor, "3 h w"]) -> UInt8[ndarray, "h w 3"]:
 def normals_rgb(normals: Float32[Tensor, "h w 3"]) -> UInt8[Tensor, "h w 3"]:
     """Unit normals as 8-bit RGB, ``(n + 1) / 2`` per axis (monoprior's normals colouring)."""
     return ((normals.float() + 1.0) * 127.5).round().clamp(0.0, 255.0).to(torch.uint8)
-
-
-def rgb_normals(rgb: UInt8[ndarray, "*batch 3"]) -> Float32[ndarray, "*batch 3"]:
-    """Unit normals back from :func:`normals_rgb` (renormalised; 8-bit steps of about 0.008)."""
-    normals: Float32[ndarray, "*batch 3"] = rgb.astype(np.float32) / 127.5 - 1.0
-    length: Float32[ndarray, "*batch 1"] = np.linalg.norm(normals, axis=-1, keepdims=True)
-    return (normals / np.maximum(length, 1e-6)).astype(np.float32)
 
 
 def frustum_strips(
@@ -215,13 +208,6 @@ class CaptureSession:
     """Unregisters :meth:`observe` from :mod:`dpvo.hooks`; None while not installed."""
     pending_normals: dict[int, UInt8[Tensor, "h w 3"]] = field(default_factory=dict)
     """Normals (8-bit RGB, on the GPU) of frames the depth producer prepared and DPVO has not tracked yet, by index."""
-    pass_normals: list[dict[int, UInt8[Tensor, "h w 3"]]] = field(default_factory=list)
-    """Per pass (same order as :attr:`passes`), the normals of every tracked frame in page-locked host memory (copied
-    without a synchronisation) when :attr:`retain_normals`; superseded passes are emptied."""
-    retain_normals: bool = True
-    """Keep every tracked frame's normals for the fused cloud's colours (:meth:`kept_normals`); False when no cloud is
-    fused (the default run), which spares a page-locked copy of every frame (about 0.4 MB each). :attr:`priors` logs
-    them either way."""
     producer_local: threading.local = field(default_factory=threading.local)
     """The normals of the latest MoGe-2 prediction of the calling thread (the depth producer runs in its own)."""
 
@@ -331,14 +317,9 @@ class CaptureSession:
             rec.save(path)
         self.streams[instance_id] = rec
         rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)  # the overview's up; dpvo_orient makes it the scene's
-        # A pass at least as long supersedes the earlier ones (kept_pass), so their normals can go.
-        for earlier, captured in zip(self.pass_normals, self.passes, strict=True):
-            if captured.num_frames <= self.pass_frames:
-                earlier.clear()
         self.passes.append(CapturedPass(path=path, num_frames=self.pass_frames))
         if self.live_surface is not None:
             self.live_surface.open_pass()
-        self.pass_normals.append({})
         self.pending_normals.clear()
 
     def close_videos(self) -> None:
@@ -359,17 +340,6 @@ class CaptureSession:
             return None
         longest: int = max(captured.num_frames for captured in self.passes)
         return [captured for captured in self.passes if captured.num_frames == longest][-1]
-
-    def kept_normals(self) -> dict[int, UInt8[ndarray, "h w 3"]]:
-        """The kept pass's normals (8-bit RGB) by tracked-frame index; empty without a pass or without normals."""
-        kept: CapturedPass | None = self.kept_pass()
-        if kept is None:
-            return {}
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()  # the asynchronous copies into the pinned buffers are complete
-        # By identity: passes are values (live ones all have path None), and an equal earlier pass was emptied.
-        index: int = next(index for index, captured in enumerate(self.passes) if captured is kept)
-        return {frame: normals.numpy() for frame, normals in self.pass_normals[index].items()}
 
     def log_frame(
         self,
@@ -488,14 +458,6 @@ class CaptureObserver(DPVOObserver):
         frame: int = event.frame_index
         rec: rr.RecordingStream | None = session.streams.get(id(dpvo))
         normals: Tensor | None = session.pending_normals.pop(frame, None)
-        if normals is not None and session.retain_normals and session.pass_normals:
-            # A CUDA frame: an asynchronous copy into page-locked memory, the tracking loop never waits for it; fusion
-            # reads it after the run, long after the copy finished. A CPU frame (no GPU): a plain copy.
-            if normals.is_cuda:
-                pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
-                session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
-            else:
-                session.pass_normals[-1][frame] = normals.clone()
         if rec is not None:
             # DPVO appends every frame to its keyframe graph, then may cull an older keyframe: the graph grew
             # when culling kept them all. The frame itself is always the newest keyframe after the call.

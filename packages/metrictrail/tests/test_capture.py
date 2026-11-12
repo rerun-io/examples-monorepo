@@ -28,7 +28,6 @@ from metrictrail.capture import (  # noqa: E402
     dpvo_world_T_cam,
     frustum_strips,
     normals_rgb,
-    rgb_normals,
 )
 
 
@@ -77,43 +76,9 @@ def test_kept_pass_is_the_last_of_the_longest(tmp_path: Path) -> None:
     assert kept is not None and kept.path is not None and kept.path.name == "pass_2.rrd"
 
 
-def test_normals_survive_the_8bit_rgb_round_trip() -> None:
-    generator = torch.Generator().manual_seed(0)
-    normals = torch.nn.functional.normalize(torch.randn(6, 5, 3, generator=generator), dim=-1)
-    rgb = normals_rgb(normals)
-    assert rgb.dtype == torch.uint8
-    back: Float32[ndarray, "6 5 3"] = rgb_normals(rgb.numpy())
-    np.testing.assert_allclose(np.linalg.norm(back, axis=-1), 1.0, atol=1e-5)
-    np.testing.assert_allclose(back, normals.numpy(), atol=0.01)
-
-
-def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp_path: Path) -> None:
-    session = CaptureSession(out_dir=tmp_path, application_id="a", recording_id="r", depth_range_m=(0.3, 3.0))
-    assert session.kept_normals() == {}
-    image: np.ndarray = np.zeros((2, 2, 3), dtype=np.uint8)
-    for marker, frames in enumerate((32, 596, 596)):
-        session.pass_frames = frames
-        session.open_pass(len(session.passes))
-        session.pass_normals[-1][0] = torch.from_numpy(image + marker)
-    session.uninstall()
-    assert [len(normals) for normals in session.pass_normals] == [0, 0, 1]
-    assert session.kept_normals()[0][0, 0, 0] == 2
-
-
-def test_kept_normals_of_equal_live_passes_are_the_later_pass_s(tmp_path: Path) -> None:
-    """Live passes have no file (path None): two of equal length compare equal, and the kept one is the later."""
-    import rerun as rr
-
-    session = CaptureSession(
-        out_dir=tmp_path, application_id="a", recording_id="r", depth_range_m=(0.3, 3.0), live=rr.RecordingStream("a", recording_id="live")
-    )
-    image: np.ndarray = np.zeros((2, 2, 3), dtype=np.uint8)
-    for marker in (1, 2):
-        session.pass_frames = 596
-        session.open_pass(len(session.passes))
-        session.pass_normals[-1][0] = torch.from_numpy(image + marker)
-    assert session.passes[0] == session.passes[1]
-    assert session.kept_normals()[0][0, 0, 0] == 2
+def test_normals_are_coloured_as_8bit_rgb() -> None:
+    normals = torch.tensor([[[-1.0, 0.0, 1.0]]])
+    assert normals_rgb(normals).tolist() == [[[0, 128, 255]]]  # (n + 1) / 2 per axis
 
 
 def test_live_surface_grows_temporal_blocks_then_ends_as_one_mesh(tmp_path: Path) -> None:
@@ -400,7 +365,6 @@ def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_track
         recording_id="video-priors",
         depth_range_m=(0.3, 3.0),
         live_surface=surface,
-        retain_normals=False,  # the default run fuses no cloud: nothing keeps every frame's normals
     )
     session.install()
     session.pass_frames = 5
@@ -430,7 +394,6 @@ def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_track
     assert logged[f"/{entities.CAM_DEPTH} EncodedDepthImage:blob"] == [0, 1, 2, 3]
     assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 1, 2, 3]
     assert surface.integrated == 1, "frame 0 only: a TSDF integration (and its device-to-host copy) per frame would slow tracking"
-    assert session.pass_normals and not any(session.pass_normals), "logged above, but not kept for a cloud nobody fuses"
 
 
 def test_uninstall_closes_the_prior_logger_even_when_the_surface_fails_to_finish(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

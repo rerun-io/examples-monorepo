@@ -200,8 +200,7 @@ def app_overrides(tracking_stride: int, max_frames: int, budget: str) -> list[st
 def summary(metrics: RunMetrics, wall_s: float) -> str:
     """The final status line."""
     mesh: str = f", TSDF mesh of {metrics.mesh_triangles:,} triangles" if metrics.mesh_triangles is not None else ""
-    cloud: str = f", {metrics.cloud_points:,} cloud points" if metrics.cloud_points is not None else ""
-    return f"done in {wall_s:.0f} s: {metrics.num_tracked} frames tracked ({metrics.num_finite} finite poses){mesh}{cloud}"
+    return f"done in {wall_s:.0f} s: {metrics.num_tracked} frames tracked ({metrics.num_finite} finite poses){mesh}"
 
 
 def summary_table(metrics: RunMetrics, wall_s: float, budget: str) -> str:
@@ -209,7 +208,6 @@ def summary_table(metrics: RunMetrics, wall_s: float, budget: str) -> str:
     rows: list[tuple[str, str]] = [
         ("Frames tracked", f"{metrics.num_tracked:,} ({metrics.num_finite:,} finite poses)"),
         ("TSDF mesh", f"{metrics.mesh_triangles:,} triangles" if metrics.mesh_triangles is not None else "-"),
-        ("Fused cloud", f"{metrics.cloud_points:,} points" if metrics.cloud_points is not None else "-"),
         ("Elapsed", f"{wall_s:.1f} s"),
         ("Calibration budget", f"`{budget}`"),
     ]

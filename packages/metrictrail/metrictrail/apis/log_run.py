@@ -19,7 +19,6 @@ from jaxtyping import Int64
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from metrictrail.artifacts import ColoredCloud, read_binary_ply
 from metrictrail.benchmarks import BENCHMARKS, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint, shares_input_camera
 from metrictrail.frames import FrameSource, open_frames
@@ -67,13 +66,8 @@ class Config:
     """Which tree produced the run: ``ours`` (magenta) or ``upstream`` (amber)."""
     producer: str = "metrictrail log-run"
     """Free text naming the tree and commit that produced the run (the ``provenance.producer`` property)."""
-    cloud_ply: Path | None = None
-    """Fused cloud in ViPE's world frame (``python -m vipe.metrictrail.pointcloud <run_dir> --name <name> --world-frame``);
-    None: no cloud (fusing in-process needs the ViPE env with a lietorch provider: ``metrictrail run`` does it)."""
     depth_every: int = 1
     """Log every k-th frame's depth (and a frame directory's frames); a video input is logged whole."""
-    max_cloud_points: int = 400_000
-    """Display subsample of the cloud."""
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer / save / connect flags."""
 
@@ -89,7 +83,6 @@ def main(config: Config) -> RunMetrics:
         if frames.kind != "frame_dir":
             raise ValueError("GT needs the frame directory the run read (frame names carry the VSLAM-LAB timestamps)")
         context = load_gt_context(config.gt_sequence, protocol_for(config.benchmark), frames.names)
-    cloud: ColoredCloud | None = read_binary_ply(config.cloud_ply) if config.cloud_ply is not None else None
     rec: rr.RecordingStream = config.rr_config.rec_stream
     has_gt: bool = context is not None
     rec.send_recording_name(f"MetricTrail {config.label}: {name}")
@@ -104,7 +97,6 @@ def main(config: Config) -> RunMetrics:
         raster_policy=preset.raster_policy,
         depth_range_m=DEPTH_RANGES_M.get(config.benchmark, DEFAULT_DEPTH_RANGE_M),
         depth_every=config.depth_every,
-        max_cloud_points=config.max_cloud_points,
     )
     provenance = make_provenance(
         dataset_path=config.gt_sequence if config.gt_sequence is not None else config.input,
@@ -114,7 +106,7 @@ def main(config: Config) -> RunMetrics:
         env=Path(sys.prefix),
     )
     logged: LoggedRun = log_run_outputs(
-        rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, video_time_ns=video_time_ns
+        rec, outputs, options, frames=frames, context=context, provenance=provenance, video_time_ns=video_time_ns
     )
     if shares_input_camera(has_capture=False, has_video=has_video, has_gt=has_gt):
         ride_final_trajectory(rec, outputs.trajectory, video_time_ns)

@@ -223,7 +223,7 @@ def run_tabs(
     )
     path: str = f"/{entities.world_trajectory(label)}"
 
-    def world_view(name: str, hidden: tuple[str, str], **eye: Any) -> rrb.Spatial3DView:
+    def world_view(name: str, hidden: tuple[str, ...], **eye: Any) -> rrb.Spatial3DView:
         return rrb.Spatial3DView(
             name=name,
             origin=entities.WORLD_ROOT,
@@ -234,7 +234,7 @@ def run_tabs(
             **eye,
         )
 
-    colour: tuple[str, str] = (entities.WORLD_CLOUD_NORMALS, entities.WORLD_MESH_NORMALS)
+    colour: tuple[str, ...] = (entities.WORLD_MESH_NORMALS,)
     surface: str = "trajectory vs GT, Sim(3) aligned + metric surface" if has_gt else "trajectory + metric surface"
     camera: str = entities.DPVO_CURRENT if shares_input_camera(has_capture=has_capture, has_video=has_video, has_gt=has_gt) else entities.world_cam(label)
     follow: rrb.Spatial3DView = rrb.Spatial3DView(
@@ -249,7 +249,7 @@ def run_tabs(
     overview_eye = world_eye.controls(spin_speed=OVERVIEW_SPIN) if world_eye is not None else rrb.EyeControls3D(spin_speed=OVERVIEW_SPIN)
     side: list[rrb.View] = [follow]
     if has_capture:
-        side.append(world_view("surface coloured by normals", (entities.WORLD_CLOUD, entities.WORLD_MESH), eye_controls=overview_eye))
+        side.append(world_view("surface coloured by normals", (entities.WORLD_MESH,), eye_controls=overview_eye))
     tabs.append(
         rrb.Horizontal(
             world_view(f"overview: {surface}", colour, eye_controls=overview_eye),
@@ -262,7 +262,7 @@ def run_tabs(
         metric_view: rrb.Spatial3DView = rrb.Spatial3DView(
             name="SE(3) only, scale 1: metric scale vs GT (1 m grid)",
             origin=entities.METRIC_ROOT,
-            contents=["/metric/**", f"- /{entities.METRIC_CLOUD_NORMALS}", f"- /{entities.METRIC_MESH_NORMALS}"],
+            contents=["/metric/**", f"- /{entities.METRIC_MESH_NORMALS}"],
             background=background,
             line_grid=rrb.LineGrid3D(visible=True, spacing=1.0),
             eye_controls=metric_eye.controls(spin_speed=OVERVIEW_SPIN) if metric_eye is not None else rrb.EyeControls3D(spin_speed=OVERVIEW_SPIN),

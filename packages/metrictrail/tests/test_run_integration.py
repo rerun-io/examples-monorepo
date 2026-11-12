@@ -103,7 +103,7 @@ def test_full_run_on_a_short_real_sequence(tmp_path: Path) -> None:
         "/" + entities.METRIC_MESH,
     } <= paths
     assert metrics.mesh_triangles is not None and metrics.mesh_triangles > 0
-    assert "/" + entities.WORLD_CLOUD not in paths  # upstream's cloud is opt-in (--fuse-cloud)
+    assert not any("/cloud" in path for path in paths)  # the TSDF mesh is the one surface
 
 
 def test_a_second_run_reuses_the_models_of_the_first(tmp_path: Path) -> None:

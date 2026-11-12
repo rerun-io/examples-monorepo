@@ -3945,8 +3945,6 @@ trtkit = { path = "packages/trtkit", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 # vipe.utils.geometry / visualization import pycg (Isometry, Quaternion, image); not on conda-forge.
 python-pycg = "==1.0.3"
-# metrictrail.catalog.blueprint publishes MetricTrail's layouts through dataforge's VslamLabDataset catalog-blueprint hook.
-dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.metrictrail.activation.env]
 PACKAGE_DIR = "packages/metrictrail"
@@ -3995,11 +3993,6 @@ description = "Log a finished MetricTrail output directory (ours or upstream's) 
 cmd = "python tools/vslamlab_eval.py"
 cwd = "packages/metrictrail"
 description = "Score MetricTrail runs (one dir per seed) under the paper protocol and VSLAM-LAB's own evaluation (subprocess, private evo HOME)"
-
-[feature.metrictrail.tasks.metrictrail-catalog-layer]
-cmd = "python tools/catalog_layer.py"
-cwd = "packages/metrictrail"
-description = "Write (and with --catalog-url/--dataset register) the MetricTrail catalog layer of one run on a VSLAM-LAB segment; never overwrites a layer file"
 
 # The Gradio app's example clips: dpvo-app's H.264 MP4s without B-frames (NVDEC decodes them).
 [feature.metrictrail.tasks._download-metrictrail-data]
