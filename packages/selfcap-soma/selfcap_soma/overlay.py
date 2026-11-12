@@ -8,7 +8,7 @@ import pyarrow as pa
 import rerun as rr
 from dataforge.oak_mount import StaticCamera, read_static_cameras
 from dataforge.schema import cam_path, pinhole_path
-from dataforge.selfcap_schema import SOMA_EARS, SOMA_JOINTS, SOMA_MESH
+from dataforge.selfcap_schema import SOMA_EARS, SOMA_JOINTS, SOMA_MESH, SOMA_PARAMS
 from dataforge.triangulation import EgoCamera, project, project_ego
 from dataforge.writing import atomic_recording
 from jaxtyping import Bool, Float32, Float64, Int32, Int64
@@ -17,6 +17,7 @@ from rerun.catalog import CatalogClient, DatasetSelection
 from rerun.chunk import RrdReader
 from scipy.sparse import csr_matrix
 
+from selfcap_soma.assets import SOMA_X_REPO_ID, SOMA_X_REVISION
 from selfcap_soma.catalog import ExoSource, Observations, SegmentCatalog, open_segment
 from selfcap_soma.evaluation_io import nearest_indices, read_egohand_rgb, read_views
 from selfcap_soma.fitting import FitResult
@@ -67,6 +68,18 @@ class LayerFit:
     """Rest-pose vertex selection for the upper-body surface."""
     visible_joints: Int64[ndarray, "k"]
     """Joint indices shown in upper-body displays."""
+    poses: Float32[ndarray, "n 77 3"]
+    """The fit's joint rotations (SOMA ``pose`` input), one row per fitted frame."""
+    translations: Float32[ndarray, "n 3"]
+    """The fit's world root translations in metres."""
+    identity: Float32[ndarray, "1 128"]
+    """The fit's native SOMA identity coefficients."""
+    scale: float
+    """The fit's global scale."""
+    bone_scales: Float32[ndarray, "1 60"]
+    """The fit's local bone-length ratios."""
+    display_twists: bool
+    """Whether the surface used procedural twist distribution."""
 
 
 def layer_fit(data: Observations, result: FitResult) -> LayerFit:
@@ -87,6 +100,12 @@ def layer_fit(data: Observations, result: FitResult) -> LayerFit:
         result.faces,
         result.upper_body_vertices,
         result.visible_joints,
+        result.poses,
+        result.translations,
+        result.identity,
+        result.scale,
+        result.bone_scales,
+        result.display_twists,
     )
 
 
@@ -202,6 +221,43 @@ def log_mesh(recording: rr.RecordingStream, fit: LayerFit, upper_body_only: bool
         )
 
 
+POSE_ENCODING: str = "axis-angle, SOMA pose input with absolute_pose=False (relative to the rest joint orient), 77 joints, one row per joint"
+
+
+def log_params(recording: rr.RecordingStream, fit: LayerFit) -> None:
+    """Log the fit's parameters (decision 12: every new fit): identity, scales and settings once, rotations and translation
+    per fitted frame. ``SOMALayer(identity_model_type="soma", lod="low", enable_procedural_transforms=display_twists)``,
+    ``prepare_identity(identity, scale_params=bone_scales, global_scale=global_scale)`` and ``pose(rotations,
+    transl=root_translation, apply_correctives=False)`` give the posed SOMA surface; the logged mesh adds only the
+    waist-rim display offsets of ``fitting.mesh_selection`` (upper-body crop)."""
+    recording.log(
+        SOMA_PARAMS,
+        rr.AnyValues(
+            identity_model_type="soma",
+            lod="low",
+            assets_repo=SOMA_X_REPO_ID,
+            assets_revision=SOMA_X_REVISION,
+            rotation_encoding=POSE_ENCODING,
+            joint_names=pa.array(fit.names),
+            identity_coeffs=pa.FixedSizeListArray.from_arrays(pa.array(fit.identity.reshape(-1), type=pa.float32()), fit.identity.shape[1]),
+            bone_scales=pa.FixedSizeListArray.from_arrays(pa.array(fit.bone_scales.reshape(-1), type=pa.float32()), fit.bone_scales.shape[1]),
+            global_scale=fit.scale,
+            apply_correctives=False,
+            display_twists=fit.display_twists,
+        ),
+        static=True,
+    )
+    rotations: Float32[ndarray, "n c"] = fit.poses.reshape(len(fit.poses), -1)
+    recording.send_columns(
+        SOMA_PARAMS,
+        indexes=[video_time_column(fit.times)],
+        columns=rr.AnyValues.columns(
+            rotations=pa.FixedSizeListArray.from_arrays(pa.array(rotations.reshape(-1), type=pa.float32()), rotations.shape[1]),
+            root_translation=pa.FixedSizeListArray.from_arrays(pa.array(fit.translations.reshape(-1), type=pa.float32()), 3),
+        ),
+    )
+
+
 def oak_stereo_cameras(view: DatasetSelection, segment: str, rgb: EgoCamera) -> list[EgoCamera]:
     """The OAK's left and right cameras beside its rgb one; a camera with incomplete calibration is reported and skipped."""
     paths: list[str] = [cam_path(rgb.rig, cam) for cam in (1, 2)]
@@ -249,6 +305,7 @@ def write_layer(segment: str, dataset: str, catalog_url: str, exo_source: ExoSou
             columns=rr.Points3D.columns(positions=world_joints.reshape(-1, 3)).partition([world_joints.shape[1]] * len(times)),
         )
         log_mesh(recording, fit, True)
+        log_params(recording, fit)
         recording.log(SOMA_EARS, rr.Points3D.from_fields(colors=[0, 255, 255], radii=0.008), static=True)
         recording.send_columns(
             SOMA_EARS, indexes=[video_time_column(times)], columns=rr.Points3D.columns(positions=fit.ears.reshape(-1, 3)).partition([2] * len(times))

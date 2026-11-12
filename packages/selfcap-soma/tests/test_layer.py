@@ -84,6 +84,29 @@ def test_layer_from_memory_holds_the_crop_hidden_and_needs_no_fit_recording(tmp_
     assert [stamp for stamp, _ in found[(overlay.SOMA_MESH, "Mesh3D:vertex_normals")]] == [0, 40_000_000]
 
 
+def test_layer_logs_the_fit_parameters_that_regenerate_it(tmp_path: Path, no_catalog: None) -> None:
+    data, result = moving_fit()
+    rng = np.random.default_rng(0)
+    result = replace(
+        result,
+        poses=rng.normal(size=result.poses.shape).astype(np.float32),
+        translations=rng.normal(size=result.translations.shape).astype(np.float32),
+        identity=rng.normal(size=result.identity.shape).astype(np.float32),
+        scale=1.07,
+    )
+    layer = tmp_path / "layer.rrd"
+    write_layer("segment", "test", "test", "rtmw", layer, layer_fit(data, result))
+    found = contents(layer)
+    rotations = found[(overlay.SOMA_PARAMS, "rotations")]
+    assert [stamp for stamp, _ in rotations] == np.rint(data.times * 1e9).astype(np.int64).tolist()
+    np.testing.assert_allclose([eval(value)[0] for _, value in rotations], result.poses.reshape(len(result.poses), -1), rtol=1e-6)
+    np.testing.assert_allclose([eval(value)[0] for _, value in found[(overlay.SOMA_PARAMS, "root_translation")]], result.translations, rtol=1e-6)
+    static = {name: eval(rows[0][1]) for (entity, name), rows in found.items() if entity == overlay.SOMA_PARAMS and rows[0][0] == -1}
+    np.testing.assert_allclose(static["identity_coeffs"], result.identity, rtol=1e-6)
+    assert static["global_scale"] == [pytest.approx(1.07)]
+    assert static["identity_model_type"] == ["soma"]
+
+
 def test_report_alone_writes_no_recording(tmp_path: Path) -> None:
     data, result = moving_fit()
     write_report(tmp_path, data, result, 0.0, upper_body_only=True)
