@@ -64,6 +64,18 @@ def test_streaming_fn_without_a_video_yields_an_empty_chunk() -> None:
     assert list(metrictrail_streaming_fn(None, 1, 1500, "fast64")) == [(b"", "Choose a video first.", gr.skip(), gr.skip())]
 
 
+def test_a_stop_at_the_first_yield_leaves_the_run_lock_free(tmp_path: Path) -> None:
+    """Stop (or a closed tab) right after Run closes the generator at its first yield, before any worker exists; the next
+    click must not find the lock held ("the previous run is still finishing" until a restart)."""
+    from metrictrail.gradio_ui.metrictrail_ui import RUN_LOCK
+
+    run = metrictrail_streaming_fn(str(tmp_path / "clip.mp4"), 1, 1500, "fast64")
+    assert next(run)[1] == "Starting…"
+    run.close()
+    assert RUN_LOCK.acquire(blocking=False), "the run lock leaked"
+    RUN_LOCK.release()
+
+
 def test_the_run_log_notes_each_status_once_newest_first_and_the_summary_is_a_table() -> None:
     log = RunLog(started=10.0)
     assert log.note("SharedK calibration: 16 frames read", 10.5) == "   0.5 s  SharedK calibration: 16 frames read"

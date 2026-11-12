@@ -273,20 +273,24 @@ def metrictrail_streaming_fn(
         yield b"", "Choose a video first.", skip, skip
         return
     overrides: list[str] = app_overrides(int(tracking_stride), int(max_frames), budget)
-    if not RUN_LOCK.acquire(blocking=False):
-        yield b"", "The previous run is still finishing; try again in a moment.", skip, skip
-        return
-    stream: rr.BinaryStream = rr.binary_stream()
-    rec: rr.RecordingStream | None = rr.get_thread_local_data_recording()
-    if rec is None:
-        RUN_LOCK.release()
-        raise RuntimeError("rr.thread_local_stream set no recording")
-    rec.send_blueprint(calibration_blueprint(), make_active=True)
-    tracking_layout: bool = False
     status: RunStatus = RunStatus()
     started: float = time.perf_counter()
     log: RunLog = RunLog(started)
+    # Before the lock: a stop at this yield closes the generator here, and nothing is held yet.
     yield b"", "Starting…", "Running…", log.note("starting", started)
+    if not RUN_LOCK.acquire(blocking=False):
+        yield b"", "The previous run is still finishing; try again in a moment.", skip, skip
+        return
+    try:  # until the worker owns the lock (run_locked releases it), a failure here must release it
+        stream: rr.BinaryStream = rr.binary_stream()
+        rec: rr.RecordingStream | None = rr.get_thread_local_data_recording()
+        if rec is None:
+            raise RuntimeError("rr.thread_local_stream set no recording")
+        rec.send_blueprint(calibration_blueprint(), make_active=True)
+    except BaseException:
+        RUN_LOCK.release()
+        raise
+    tracking_layout: bool = False
     with TemporaryDirectory(prefix="metrictrail-app-") as run_dir, ThreadPoolExecutor(max_workers=1, thread_name_prefix="metrictrail") as pool:
         settings: RunSettings = RunSettings(input=Path(video_path), output=Path(run_dir), benchmark="video", extra_overrides=overrides)
         try:
