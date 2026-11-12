@@ -119,6 +119,8 @@ video). The app's egocentric examples run on the EgoHand stack: GSI head-camera 
 (`assets/examples/hands_video.mp4`, a person on stage with a microphone) on WiLoR; choosing an
 example also selects its stack. A phone video works as it is: an iPhone `.MOV` (HEVC, portrait by its
 rotation flag) comes out upright, and `.mkv`/`.webm` are remuxed to MP4 for the viewer without re-encoding.
+EgoHand's meshes go to the viewer at SOMA's `xlo` level of detail by default (134 vertices per hand instead of
+2,859, 21x fewer bytes; the joints are unchanged); `--mesh-detail full|low|xlo` (Advanced settings in the app) picks another.
 
 | Model | Detector | 3D hands | Skeleton | Camera | Backends |
 |---|---|---|---|---|---|
@@ -141,8 +143,9 @@ pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr
 # The same code as a Gradio app with an embedded Rerun viewer: one video in, stack and intrinsics under Advanced
 pixi run -e posekit-hands --frozen posekit-hands-app            # http://127.0.0.1:7872
 
-# Ground-truth eval on fixed frames of five dataforge catalog datasets
-pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://pablo-dl-server:51235 --output-dir /tmp/hands-eval
+# Ground-truth eval on fixed frames of five dataforge catalog datasets (a local catalog on :51235 by default;
+# pass --catalog-url rerun+http://<host>:51235 for one on another machine)
+pixi run -e posekit-hands --frozen posekit-hands-eval --output-dir /tmp/hands-eval
 
 # Per-frame speed, decoded GPU frame to joints + full mesh, per stage
 pixi run -e posekit-hands --frozen posekit-hands-bench
@@ -156,7 +159,7 @@ pixi run -e posekit-hands --frozen posekit-video-hands --rr-config.headless --rr
     egohand-fast tensorrt egohand-fast
 pixi run -e posekit-hands --frozen posekit-hands-bench --models egohand egohand-fast
 pixi run -e posekit-hands --frozen posekit-hands-eval --models egohand egohand-fast \
-    --catalog-url rerun+http://pablo-dl-server:51235 --output-dir /tmp/egohand-eval
+    --output-dir /tmp/egohand-eval
 ```
 
 `fast_egohand_configs()` pairs a batch-one TensorRT detector (PIL-exact GPU resize, its three
@@ -193,9 +196,9 @@ accuracy stay ≥ 0.95×; 2D median/p95 pixel error and absolute and wrist-relat
 otherwise idle GPU) adds the timing:
 
 ```bash
-pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://pablo-dl-server:51235 \
+pixi run -e posekit-hands --frozen posekit-hands-eval \
     --models egohand egohand-fast --protocols end-to-end --no-log-rrd --output-dir /tmp/egohand-bands
-pixi run -e posekit-hands --frozen posekit-hands-eval --catalog-url rerun+http://pablo-dl-server:51235 \
+pixi run -e posekit-hands --frozen posekit-hands-eval \
     --models egohand-fast --protocols end-to-end --no-log-rrd --output-dir /tmp/egohand-speed \
     --timing --baseline /tmp/egohand-bands/results.json   # egohand-fast-bf16 below Blackwell
 ```
