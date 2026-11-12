@@ -60,6 +60,8 @@ def test_native_layout_matches_the_original_demo() -> None:
     assert isinstance(camera, rrb.Vertical) and camera.row_shares == [4.0, 1.0]
     assert blueprint.collapse_panels
     assert blueprint.time_panel is not None and blueprint.time_panel.state == "collapsed"
+    # The relayed catalog video lives on video_time only.
+    assert blueprint.time_panel.timeline == "video_time"
 
     views: dict[str, rrb.View] = {str(view.name): view for view in _views(root)}
     world: rrb.View = views["Reconstruction"]
@@ -103,3 +105,4 @@ def test_phone_layouts_show_only_the_3d_view_the_camera_and_the_depth(variant: V
     # Portrait: Reconstruction above Current view | Depth. Landscape: Reconstruction left of Current view above Depth.
     assert (isinstance(root, rrb.Horizontal), isinstance(rest, rrb.Vertical)) == (landscape, landscape)
     assert blueprint.time_panel is not None and blueprint.time_panel.state == "hidden"
+    assert blueprint.time_panel.timeline == "video_time"

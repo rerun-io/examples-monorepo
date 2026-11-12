@@ -5,7 +5,8 @@ Ported from the original SimpleRecon live-meshing demo by Pablo Vela (repo pablo
 and frustum style are the original's. Differences: the camera, its pinholes and its video keep the ARKitScenes
 catalog's paths (``world/rig_00/cam_00/...``), because mvs output sits beside the catalog's layers; the mesh is
 :class:`simplecv.rerun_live_mesh.LiveMeshLog`'s tree under ``world/mesh``; the web page's ``tablet`` layout
-(IMU plots, tracked features, landmarks, trajectory, follow eye) is left out, because mvs has no data for it.
+(IMU plots, tracked features, landmarks, trajectory, follow eye) is left out, because mvs has no data for it; the time
+panel opens on :data:`TIMELINE`, where the relayed video lives.
 """
 
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from typing import Literal
 import rerun as rr
 import rerun.blueprint as rrb
 
+TIMELINE: str = "video_time"
+"""Timeline the time panel opens on: the catalog's video is relayed on it only, so on ``frame`` the Current view is empty."""
 SOURCE_CAMS: int = 7
 """Source views per depth run: the model's tuple size minus the current view (``pose_stream.NUM_SOURCE_VIEWS``)."""
 CURRENT_CAM_COLOR: tuple[int, int, int, int] = (40, 200, 80, 255)
@@ -151,11 +154,11 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
     )
     if variant == "phone":
         return rrb.Blueprint(
-            rrb.Vertical(world, rrb.Horizontal(current, depth), row_shares=[5.0, 3.0]), rrb.TimePanel(state="hidden"), collapse_panels=True
+            rrb.Vertical(world, rrb.Horizontal(current, depth), row_shares=[5.0, 3.0]), rrb.TimePanel(state="hidden", timeline=TIMELINE), collapse_panels=True
         )
     if variant == "phone-landscape":
         return rrb.Blueprint(
-            rrb.Horizontal(world, rrb.Vertical(current, depth), column_shares=[3.0, 2.0]), rrb.TimePanel(state="hidden"), collapse_panels=True
+            rrb.Horizontal(world, rrb.Vertical(current, depth), column_shares=[3.0, 2.0]), rrb.TimePanel(state="hidden", timeline=TIMELINE), collapse_panels=True
         )
     sources: rrb.Horizontal = rrb.Horizontal(
         *[
@@ -174,4 +177,4 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
         rrb.Vertical(camera, rrb.Horizontal(depth, *panels), timings, row_shares=[4.0, 2.0, 1.8]),
         column_shares=[3.0, 2.0],
     )
-    return rrb.Blueprint(layout, rrb.TimePanel(state="collapsed"), collapse_panels=True)
+    return rrb.Blueprint(layout, rrb.TimePanel(state="collapsed", timeline=TIMELINE), collapse_panels=True)

@@ -14,11 +14,10 @@ from jaxtyping import Float32, Int64, UInt16
 from numpy import ndarray
 from simplecv.rerun_dataloader import SegmentNvdecDecoder, relay_video_packets
 
-from mvs.blueprint import EntityPaths
+from mvs.blueprint import TIMELINE, EntityPaths
 from mvs.depth_engine import DepthOutputs
 
 CLOUD_CATALOG_URL: str = "rerun://api.latest.cloud.rerun.io:443"
-TIMELINE: str = "video_time"
 FRAME_TIMELINE: str = "frame"
 """The segment's frame index, beside :data:`TIMELINE`."""
 NATIVE_FPS: float = 60.0
