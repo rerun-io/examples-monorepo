@@ -238,14 +238,6 @@ class RunLog:
         return "\n".join(self.lines)
 
 
-def run_locked(settings: RunSettings, rec: rr.RecordingStream, status: RunStatus) -> RunResult:
-    """:func:`run_and_log` in live mode; releases :data:`RUN_LOCK` (taken by the caller) when it returns."""
-    try:
-        return run_and_log(settings, rec, live=True, on_stage=status.update, on_cursor=status.at, models=MODELS)
-    finally:
-        RUN_LOCK.release()
-
-
 Update: TypeAlias = str | dict[str, object]
 """A Markdown or Textbox value, or ``gr.skip()`` (no change)."""
 RunYield: TypeAlias = tuple[bytes | dict[str, object], Update, Update, Update]
@@ -281,52 +273,51 @@ def metrictrail_streaming_fn(
     if not RUN_LOCK.acquire(blocking=False):
         yield b"", "The previous run is still finishing; try again in a moment.", skip, skip
         return
-    try:  # until the worker owns the lock (run_locked releases it), a failure here must release it
+    # The generator owns the lock from here on: the pool's exit waits for the worker (a stop sets the cancel event
+    # first), so the lock is released only when nothing runs, whatever fails or stops in between.
+    try:
         stream: rr.BinaryStream = rr.binary_stream()
         rec: rr.RecordingStream | None = rr.get_thread_local_data_recording()
         if rec is None:
             raise RuntimeError("rr.thread_local_stream set no recording")
         rec.send_blueprint(calibration_blueprint(), make_active=True)
-    except BaseException:
+        tracking_layout: bool = False
+        with TemporaryDirectory(prefix="metrictrail-app-") as run_dir, ThreadPoolExecutor(max_workers=1, thread_name_prefix="metrictrail") as pool:
+            settings: RunSettings = RunSettings(input=Path(video_path), output=Path(run_dir), benchmark="video", extra_overrides=overrides)
+            future: Future[RunResult] = pool.submit(
+                run_and_log, settings, rec, live=True, on_stage=status.update, on_cursor=status.at, models=MODELS
+            )
+            try:
+                while True:
+                    try:
+                        result: RunResult = future.result(timeout=POLL_S)
+                        break
+                    except FutureTimeoutError:
+                        now: float = time.perf_counter()
+                        line: str = f"{status.text} ({now - started:.0f} s)"
+                        yield stream.read() or b"", line, skip, log.note(status.text, now)
+                        if status.cursor is not None and status.cursor[1] == "tracking" and not tracking_layout:
+                            rec.send_blueprint(run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True), make_active=True)
+                            tracking_layout = True
+                            # The layout (its time panel waits paused) must reach the viewer, and be ingested, before any play
+                            # command: a play applied first is paused again by the layout. Commands wait for the next poll.
+                            yield stream.read() or b"", skip, skip, skip
+                            continue
+                        command: dict[str, object] | None = status.cursor_command(time.perf_counter())
+                        if command is not None:
+                            yield command, skip, skip, skip
+            except BeartypeException:
+                raise
+            except RunCancelled:
+                yield stream.read() or b"", "Stopped.", "Stopped.", log.note("stopped", time.perf_counter())
+                return
+            except Exception as error:
+                raise gr.Error(f"MetricTrail failed: {error}") from error
+            finally:
+                # Stop button or closed tab: the worker stops at its next stage or tracked frame; the pool waits for it.
+                status.cancel.set()
+    finally:
         RUN_LOCK.release()
-        raise
-    tracking_layout: bool = False
-    with TemporaryDirectory(prefix="metrictrail-app-") as run_dir, ThreadPoolExecutor(max_workers=1, thread_name_prefix="metrictrail") as pool:
-        settings: RunSettings = RunSettings(input=Path(video_path), output=Path(run_dir), benchmark="video", extra_overrides=overrides)
-        try:
-            future: Future[RunResult] = pool.submit(run_locked, settings, rec, status)
-        except BaseException:
-            RUN_LOCK.release()
-            raise
-        try:
-            while True:
-                try:
-                    result: RunResult = future.result(timeout=POLL_S)
-                    break
-                except FutureTimeoutError:
-                    now: float = time.perf_counter()
-                    line: str = f"{status.text} ({now - started:.0f} s)"
-                    yield stream.read() or b"", line, skip, log.note(status.text, now)
-                    if status.cursor is not None and status.cursor[1] == "tracking" and not tracking_layout:
-                        rec.send_blueprint(run_blueprint("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, tracking=True), make_active=True)
-                        tracking_layout = True
-                        # The layout (its time panel waits paused) must reach the viewer, and be ingested, before any play
-                        # command: a play applied first is paused again by the layout. Commands wait for the next poll.
-                        yield stream.read() or b"", skip, skip, skip
-                        continue
-                    command: dict[str, object] | None = status.cursor_command(time.perf_counter())
-                    if command is not None:
-                        yield command, skip, skip, skip
-        except BeartypeException:
-            raise
-        except RunCancelled:
-            yield stream.read() or b"", "Stopped.", "Stopped.", log.note("stopped", time.perf_counter())
-            return
-        except Exception as error:
-            raise gr.Error(f"MetricTrail failed: {error}") from error
-        finally:
-            # Stop button or closed tab: the worker stops at its next stage or tracked frame; the pool waits for it.
-            status.cancel.set()
     # The run's tensors are gone (the models stay in MODELS); give the allocator's cached blocks back to the GPU, which
     # the app shares with other jobs between clicks.
     torch.cuda.empty_cache()

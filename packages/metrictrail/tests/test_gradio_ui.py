@@ -196,3 +196,19 @@ def test_launch_serves_with_the_app_look_and_a_host_s_interface_and_files(monkey
     assert demo._queue.max_size is None  # a public host lets any number of clicks wait
     assert calls["css"] == APP_CSS and calls["head"] == DARK_HEAD and calls["ssr_mode"] is False
     assert calls["server_name"] == "0.0.0.0" and calls["allowed_paths"] == [str(tmp_path)]
+
+
+def test_a_setup_failure_after_the_lock_releases_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Between taking the lock and the worker starting, any failure (here: no run directory) must release the lock."""
+    import metrictrail.gradio_ui.metrictrail_ui as ui
+
+    def no_run_dir(*args: object, **kwargs: object) -> object:
+        raise OSError("no space left for the run directory")
+
+    monkeypatch.setattr(ui, "TemporaryDirectory", no_run_dir)
+    run = ui.metrictrail_streaming_fn(str(tmp_path / "clip.mp4"), 1, 1500, "fast64")
+    next(run)
+    with pytest.raises(OSError, match="run directory"):
+        next(run)
+    assert ui.RUN_LOCK.acquire(blocking=False), "the run lock leaked"
+    ui.RUN_LOCK.release()
