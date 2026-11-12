@@ -10,18 +10,22 @@ import torch
 from mvs.blueprint import CURRENT_CAM_COLOR, CURRENT_CAM_PLANE_M, SOURCE_CAM_PLANE_M, EntityPaths
 from mvs.depth_engine import IMAGENET_MEAN, IMAGENET_STD, DepthInputs
 from mvs.frame_views import (
+    NORMALS_JPEG_QUALITY,
     LogConfig,
     depth_normals,
     log_current_cam_style,
     log_lowest_cost,
+    log_normals,
     log_sources,
     normals_rgb,
     rgb_at_depth_raster,
     source_cameras,
+    video_offsets_ns,
 )
 
 PATHS: EntityPaths = EntityPaths()
 K_S1_33: torch.Tensor = torch.tensor([[100.0, 0.0, 64.0], [0.0, 100.0, 48.0], [0.0, 0.0, 1.0]])
+VIDEO_WH: tuple[int, int] = (1920, 1440)
 
 
 def _inputs() -> DepthInputs:
@@ -48,15 +52,11 @@ def _columns(target: Path) -> dict[str, dict[str, list]]:
     return columns
 
 
-def test_log_config_defaults_log_the_full_layout_and_check_the_jpeg_quality() -> None:
+def test_log_config_defaults_log_the_full_layout_and_no_raw_pixels() -> None:
     config = LogConfig()
     assert config.camera and config.source_cams and config.normals and config.lowest_cost and config.timings
-    assert config.jpeg_quality == 75
-    assert LogConfig(jpeg_quality=None).jpeg_quality is None
-    assert LogConfig(jpeg_quality=85).jpeg_quality == 85
-    for quality in (0, 101):
-        with pytest.raises(ValueError, match="jpeg_quality"):
-            LogConfig(jpeg_quality=quality)
+    assert not hasattr(config, "jpeg_quality")
+    assert NORMALS_JPEG_QUALITY == 75
 
 
 def test_rgb_at_depth_raster_undoes_the_model_normalisation() -> None:
@@ -72,11 +72,21 @@ def test_rgb_at_depth_raster_undoes_the_model_normalisation() -> None:
     assert rgb_nhw3[1, 0, 255].tolist() == [255, 0, 128]
 
 
-def test_source_cameras_are_world_from_camera_at_the_depth_raster() -> None:
-    world_T_cam_m44, K_m33 = source_cameras(_inputs())
+def test_source_cameras_are_world_from_camera_at_the_video_size() -> None:
+    """s1 intrinsics are the native ones scaled to 128x96, so a 1920x1440 video gets them times 15."""
+    world_T_cam_m44, K_m33 = source_cameras(_inputs(), VIDEO_WH)
     assert world_T_cam_m44.shape == (7, 4, 4) and K_m33.shape == (7, 3, 3)
     assert np.allclose(world_T_cam_m44[:, 0, 3], np.arange(7))
-    assert np.allclose(K_m33[3], [[200.0, 0.0, 128.0], [0.0, 200.0, 96.0], [0.0, 0.0, 1.0]])
+    assert np.allclose(K_m33[3], [[1500.0, 0.0, 960.0], [0.0, 1500.0, 720.0], [0.0, 0.0, 1.0]])
+
+
+def test_video_offsets_name_the_decoded_sample_relative_to_the_first() -> None:
+    """A grid time maps to the latest video sample at or before it (what the decoder showed the model), as an
+    offset from the stream's first sample (what a VideoFrameReference into a VideoStream counts from)."""
+    video_times_ns = np.array([1_000, 17_000, 34_000, 50_000], dtype=np.int64)
+    assert video_offsets_ns(np.array([1_000, 17_500, 33_999, 60_000], dtype=np.int64), video_times_ns).tolist() == [0, 16_000, 16_000, 49_000]
+    with pytest.raises(ValueError, match="before the first video sample"):
+        video_offsets_ns(np.array([999], dtype=np.int64), video_times_ns)
 
 
 def test_depth_normals_of_a_wall_face_the_camera_axis() -> None:
@@ -87,14 +97,15 @@ def test_depth_normals_of_a_wall_face_the_camera_axis() -> None:
     assert normals_rgb(interior)[0, 0].tolist() == [127, 127, 255]
 
 
-def test_log_sources_writes_seven_small_frusta_and_their_images(tmp_path: Path) -> None:
+def test_log_sources_writes_seven_small_frusta_and_their_video_frames(tmp_path: Path) -> None:
     target: Path = tmp_path / "views.rrd"
     recording = rr.RecordingStream("mvs-test")
     recording.save(target)
     with recording:
         log_current_cam_style(PATHS)
         rr.set_time("frame", sequence=3)
-        log_sources(PATHS, _inputs(), jpeg_quality=None)
+        log_sources(PATHS, _inputs(), VIDEO_WH, np.arange(7, dtype=np.int64) * 1_000_000)
+        log_normals(PATHS, torch.full((1, 1, 192, 256), 2.0), np.array([[200.0, 0.0, 128.0], [0.0, 200.0, 96.0], [0.0, 0.0, 1.0]], dtype=np.float32))
         log_lowest_cost(PATHS, torch.full((1, 96, 128), 0.25))
     recording.flush()
     recording.disconnect()
@@ -105,9 +116,14 @@ def test_log_sources_writes_seven_small_frusta_and_their_images(tmp_path: Path) 
     assert current["Pinhole:image_plane_distance"] == [[pytest.approx(CURRENT_CAM_PLANE_M)]]
     for index in range(7):
         pinhole = columns[f"/{PATHS.source_pinhole(index)}"]
-        assert pinhole["Pinhole:resolution"] == [[[256.0, 192.0]]]
+        assert pinhole["Pinhole:resolution"] == [[[1920.0, 1440.0]]]
         assert pinhole["Pinhole:image_plane_distance"] == [[pytest.approx(SOURCE_CAM_PLANE_M)]]
-        assert f"/{PATHS.source_rgb(index)}" in columns
+        frame = columns[f"/{PATHS.source_rgb(index)}"]
+        assert frame["VideoFrameReference:timestamp"] == [[index * 1_000_000]]
+        assert frame["VideoFrameReference:video_reference"] == [[f"/{PATHS.video}"]]
+        assert not any(name.startswith(("Image:", "EncodedImage:")) for name in frame)
+    normal = columns[f"/{PATHS.normal}"]
+    assert normal["EncodedImage:media_type"] == [["image/jpeg"]]
     assert columns[f"/{PATHS.source_cam(6)}"]["Transform3D:translation"] == [[[6.0, 0.0, 0.0]]]
     lowest_cost = columns[f"/{PATHS.lowest_cost}"]
     assert lowest_cost["EncodedDepthImage:meter"] == [[1000.0]]

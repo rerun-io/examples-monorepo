@@ -5,9 +5,10 @@ frame is fused into a sparse colour TSDF (``packages/tsdf-rs``) at the catalog p
 :class:`simplecv.rerun_live_mesh.LiveMeshLog`: the changed super-blocks on the timeline while the segment plays, one
 mesh from its last depth frame. The recording carries the original SimpleRecon live-meshing layout
 (:func:`mvs.blueprint.create_blueprint`, ``native``) and logs what its views show (:mod:`mvs.frame_views`): the green
-current frustum, the seven source frusta and images of each depth query, the depth, its normals, the depth of the cost
-volume's best plane, and the per-stage timings in ms. The views are logged on one worker thread (:mod:`mvs.log_worker`).
-The source video is relayed once as a VideoStream, never re-encoded per frame.
+current frustum, the seven source frusta of each depth query with their frames, the depth, its normals, the depth of the
+cost volume's best plane, and the per-stage timings in ms. The views are logged on one worker thread
+(:mod:`mvs.log_worker`). The source video is relayed once as a VideoStream, never re-encoded per frame; the Current view
+shows it and each source view is a ``VideoFrameReference`` into it, so no frame's pixels are logged twice.
 
 One run meshes one segment (:func:`single_segment`): every segment restarts its frame index at 0, so a second segment
 in the same recording would mix its mesh history with the first one's.
@@ -22,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import torch
-from jaxtyping import Float, Float32
+from jaxtyping import Float, Float32, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.rerun_live_mesh import BlockKey, LiveMeshLog, MeshArrays
@@ -36,7 +37,7 @@ from mvs.blueprint import SOURCE_CAMS, create_blueprint
 from mvs.catalog import FRAME_TIMELINE, PATHS, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_depth, log_source_video
 from mvs.depth_engine import SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthInputs, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
-from mvs.frame_views import LogConfig, log_current_cam_style, log_lowest_cost, log_normals, log_sources, rgb_at_depth_raster
+from mvs.frame_views import LogConfig, log_current_cam_style, log_lowest_cost, log_normals, log_sources, rgb_at_depth_raster, video_offsets_ns
 from mvs.log_worker import LogWorker
 
 
@@ -103,17 +104,20 @@ def log_depth_frame(
     depth_hw: Float32[ndarray, "h=192 w=256"],
     K_depth_33: Float32[ndarray, "3 3"],
     inputs: DepthInputs,
+    video_wh: tuple[int, int],
+    source_offsets_ns: Int64[ndarray, " m"] | None,
     depth_b1hw: Float[Tensor, "1 1 h=192 w=256"],
     lowest_cost_bhw: Float[Tensor, "1 h=96 w=128"],
     changed_blocks: list[tuple[BlockKey, MeshArrays]] | None,
 ) -> None:
     """One depth frame's views, logged on the log worker at the frame's time point: the depth, the source frusta and
-    images, the normals, the lowest-cost depth and, when extracted, the changed mesh blocks."""
+    their video frames (``source_offsets_ns`` from the stream's first sample; None leaves them out), the normals, the
+    lowest-cost depth and, when extracted, the changed mesh blocks."""
     log_depth(depth_hw, K_depth_33)
-    if log.source_cams:
-        log_sources(PATHS, inputs, log.jpeg_quality)
+    if source_offsets_ns is not None:
+        log_sources(PATHS, inputs, video_wh, source_offsets_ns)
     if log.normals:
-        log_normals(PATHS, depth_b1hw, K_depth_33, log.jpeg_quality)
+        log_normals(PATHS, depth_b1hw, K_depth_33)
     if log.lowest_cost:
         log_lowest_cost(PATHS, lowest_cost_bhw)
     if changed_blocks is not None:
@@ -143,6 +147,9 @@ def main(config: Config) -> None:
     depth_frames: int = 0
     last_depth_time: tuple[int, int] | None = None
     times_ms: dict[str, float] = {}
+    # The source views reference frames of the relayed video, so they need it relayed.
+    relay_video: bool = log.camera or log.source_cams
+    video_times_ns: Int64[ndarray, " n"] = np.empty(0, dtype=np.int64)
     waited_from: float = time.perf_counter()
     sample: DepthSample | None
     # The log worker encodes and logs each depth frame's views off the main loop; leaving the block, on an exception
@@ -162,8 +169,10 @@ def main(config: Config) -> None:
             K_native_33: Float32[ndarray, "3 3"] = sample.K_native_33.numpy()
             world_T_cam_44: Float32[ndarray, "4 4"] = sample.world_T_cam_44.numpy()
             log_camera(world_T_cam_44, K_native_33, sample.resolution_wh)
-            if frames == 1 and log.camera:
-                log_source_video(video_decoder)
+            if frames == 1:
+                video_times_ns = video_decoder.times.astype("timedelta64[ns]").astype(np.int64)
+                if relay_video:
+                    log_source_video(video_decoder)
             if sample.inputs is None:
                 waited_from = time.perf_counter()
                 continue
@@ -200,6 +209,8 @@ def main(config: Config) -> None:
                     depth_hw,
                     K_depth_33,
                     sample.inputs,
+                    sample.resolution_wh,
+                    video_offsets_ns(np.asarray(sample.source_times_ns, dtype=np.int64), video_times_ns) if log.source_cams else None,
                     depth_outputs.depth_b1hw.clone(),
                     depth_outputs.lowest_cost_bhw.clone(),
                     changed_blocks,

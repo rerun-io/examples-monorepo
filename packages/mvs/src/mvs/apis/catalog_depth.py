@@ -88,7 +88,7 @@ def main(config: Config) -> None:
                 K_depth_33: Float32[ndarray, "3 3"]
                 depth_hw, K_depth_33 = depth_at_lowres(depth_outputs, K_native_33, native_wh)
                 log_depth(depth_hw, K_depth_33)
-                log_normals(PATHS, depth_outputs.depth_b1hw, K_depth_33, jpeg_quality=None)
+                log_normals(PATHS, depth_outputs.depth_b1hw, K_depth_33)
                 log_lowest_cost(PATHS, depth_outputs.lowest_cost_bhw)
                 segment_depth_frames += 1
                 total_depth_frames += 1

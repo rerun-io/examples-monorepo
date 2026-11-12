@@ -75,6 +75,8 @@ class DepthSample:
     """Native image resolution."""
     inputs: DepthInputs | None
     """Complete device-resident depth query, or None while the keyframe buffer warms up."""
+    source_times_ns: tuple[int, ...]
+    """Sampling-grid timestamps of the query's source views, in ``inputs`` order; empty when ``inputs`` is None."""
 
 
 def _se3(quat_xyzw_4: Float[Tensor, "4"], translation_3: Float[Tensor, "3"]) -> Se3:
@@ -182,7 +184,9 @@ class DepthCollate:
         image_3hw: Float[Tensor, "c=3 h=384 w=512"] = preprocess_image(frame_chw)
         source_keyframes: list[Keyframe] = self._keyframes.select_sources(world_T_cam_44)
         inputs: DepthInputs | None = None
+        source_times_ns: tuple[int, ...] = ()
         if len(source_keyframes) == NUM_SOURCE_VIEWS:
+            source_times_ns = tuple(self._grid_time_ns(keyframe.frame_index) for keyframe in source_keyframes)
             inputs = DepthInputs(
                 cur_image_b3hw=rearrange(image_3hw, "c h w -> 1 c h w"),
                 src_image_bm3hw=rearrange(
@@ -198,9 +202,14 @@ class DepthCollate:
         self._keyframes.add(Keyframe(self._grid_index, world_T_cam_44, cam_T_world_44, K_s1_144[0], image_3hw))
         return DepthSample(
             frame_index=self._grid_index,
-            timestamp_ns=self._index_start_ns + self._grid_index * self._ns_per_sample,
+            timestamp_ns=self._grid_time_ns(self._grid_index),
             world_T_cam_44=world_T_cam_44,
             K_native_33=K_native_33,
             resolution_wh=resolution_wh,
             inputs=inputs,
+            source_times_ns=source_times_ns,
         )
+
+    def _grid_time_ns(self, grid_index: int) -> int:
+        """Sampling-grid timestamp of a grid slot, ns."""
+        return self._index_start_ns + grid_index * self._ns_per_sample
