@@ -130,6 +130,7 @@ def test_the_run_log_keeps_only_recent_lines_newest_first(monkeypatch: pytest.Mo
 def test_the_viewer_takes_the_height_the_header_leaves() -> None:
     # A fixed calc(100vh - ...) overflowed whenever the header wrapped taller, and inside the Space's iframe the footer's
     # height that Gradio posts to the parent grew the iframe past the window: the viewer must fill the row, the footer stay hidden.
+    import gradio as gr
     from gradio_rerun import Rerun
 
     from posekit.hands_app_ui.layout import build
@@ -137,6 +138,6 @@ def test_the_viewer_takes_the_height_the_header_leaves() -> None:
 
     demo = build()
     viewer = next(block for block in demo.blocks.values() if isinstance(block, Rerun))
-    main_row = next(block for block in demo.blocks.values() if block.elem_id == "main-row")
+    main_row = next(block for block in demo.blocks.values() if isinstance(block, gr.Row) and block.elem_id == "main-row")
     assert demo.fill_height and main_row.scale == 1 and viewer.height == "100%" and viewer.elem_id == "viewer"
     assert "100vh" not in APP_CSS and "footer { display: none !important; }" in APP_CSS
