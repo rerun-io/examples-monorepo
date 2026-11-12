@@ -257,3 +257,21 @@ cache (a cold download was not measured):
   Pass your VSLAM-LAB checkout.
 - **Catalog.** The shipped path (`metrictrail`) is on the 9 TUM segments only; 7-Scenes, KITTI and LaMAria carry the
   torch reproduction (`metrictrail_paper`) and, except LaMAria, upstream ViPE.
+
+SharedK can use `--calibration-graphs` for prepared DROID graph metadata and a CUDA graph containing
+one complete projection/correlation/recurrent-update/BA step. Each shape bucket warms on its first real
+update, captures on its second, then replays; no additional solver iterations are applied. Two buckets
+bound retained memory. Connectivity, correlation volumes, state and all solve tables are copied on reuse.
+Float64 LLT stays on the GPU for frontend and backend steps. Live
+calibration hooks still see the same buffer and edge tensors. Proximity/keyframe decisions and
+CUDA's exact age-tie ordering remain outside capture. This option is enabled by default after the pool/movie focal and TUM accuracy guards passed for both budgets.
+Use `--no-calibration-graphs` to select the original graph implementation.
+
+`--calibration-gru-backend tensorrt` selects the frozen DROID ConvGRU TensorRT backend.
+`METRICTRAIL_TRT_CACHE` (default `~/.cache/metrictrail/droid-gru`) holds ONNX files and engines;
+identity includes actual weights, raster, FP16 precision, edge-count profile, TensorRT version and GPU.
+The dynamic profile is 1/48/128 edges (min/opt/max). CPU, training, gradients, FP32 and counts outside
+that profile retain PyTorch. Outputs own their storage. App `ModelCache` reuse retains model runtimes,
+while each calibration starts with fresh hidden state. The run prints export/build/load time separately;
+these costs remain included in total wall time. A Space must ship matching ONNX and engine artifacts in
+this directory to avoid building them on its first calibration. This backend is enabled by default after those same guards passed; `--calibration-gru-backend torch` selects PyTorch.
