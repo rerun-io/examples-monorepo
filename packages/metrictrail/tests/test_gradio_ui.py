@@ -14,6 +14,7 @@ from gradio_rerun import Rerun
 from metrictrail.blueprint import SceneView, calibration_blueprint, run_blueprint
 from metrictrail.examples import example_videos
 from metrictrail.gradio_ui.metrictrail_ui import RunLog, RunYield, app_overrides, build_app, metrictrail_streaming_fn, summary_table
+from metrictrail.gradio_ui.theme import APP_CSS
 from metrictrail.outputs import RunMetrics
 
 
@@ -212,3 +213,13 @@ def test_a_setup_failure_after_the_lock_releases_it(monkeypatch: pytest.MonkeyPa
         next(run)
     assert ui.RUN_LOCK.acquire(blocking=False), "the run lock leaked"
     ui.RUN_LOCK.release()
+
+
+def test_the_viewer_takes_the_height_the_header_leaves() -> None:
+    """A fixed calc(100vh - ...) overflowed when the header wrapped taller, and in the Space's iframe the footer height
+    Gradio posts to the parent grew the iframe past the window: the viewer fills the row and the footer stays hidden."""
+    demo = build_app(examples=[])
+    viewer = next(block for block in demo.blocks.values() if isinstance(block, Rerun))
+    main_row = next(block for block in demo.blocks.values() if isinstance(block, gr.Row) and block.elem_id == "main-row")
+    assert demo.fill_height and main_row.scale == 1 and viewer.height == "100%" and viewer.elem_id == "viewer"
+    assert "100vh" not in APP_CSS and "footer { display: none !important; }" in APP_CSS

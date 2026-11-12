@@ -47,7 +47,7 @@ from metrictrail.benchmarks import UPSTREAM_MAX_FRAMES
 from metrictrail.blueprint import calibration_blueprint, run_blueprint
 from metrictrail.calibration_live import RunPhase
 from metrictrail.examples import DATA_DIR, example_videos
-from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS, VIEWER_HEIGHT
+from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS
 from metrictrail.outputs import RunMetrics
 
 APPLICATION_ID: str = "metrictrail"
@@ -355,10 +355,11 @@ def build_app(
         max_frames: Default of the max-frames field (a host caps the work a click reserves).
     """
     clips: list[Path] = examples if examples is not None else example_videos(data_dir)
-    # fill_width: Gradio caps the page at 1,536 px otherwise, and the viewer would not take the window's width.
-    with gr.Blocks(title="Rerun × MetricTrail", fill_width=True) as demo:
+    # fill_width: Gradio caps the page at 1,536 px otherwise, and the viewer would not take the window's width. fill_height
+    # with the main row's scale=1: the row takes the height the header leaves (theme.APP_CSS), so the page fits the window.
+    with gr.Blocks(title="Rerun × MetricTrail", fill_width=True, fill_height=True) as demo:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
-        with gr.Row(elem_id="main-row", equal_height=False):
+        with gr.Row(elem_id="main-row", equal_height=False, scale=1):
             with gr.Column(scale=1, min_width=360, elem_id="left-column"):
                 with gr.Tabs(selected="input") as tabs:
                     with gr.Tab("Input", id="input"):
@@ -392,7 +393,9 @@ def build_app(
                 status_text: gr.Markdown = gr.Markdown(READY, elem_id="run-status")
             with gr.Column(scale=3):
                 viewer: Rerun = Rerun(
-                    streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=VIEWER_HEIGHT
+                    streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"},
+                    height="100%",
+                    elem_id="viewer",
                 )
         run_event = run_button.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(
             fn=run, inputs=[video_input, stride_slider, max_frames_number, budget_dropdown], outputs=[viewer, status_text, run_summary, run_log]
