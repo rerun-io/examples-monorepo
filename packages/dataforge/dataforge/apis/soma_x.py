@@ -12,6 +12,7 @@ holds more than one window of source vertices.
 """
 
 import fcntl
+import time
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
@@ -36,6 +37,8 @@ from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 SOMA_X_LAYER: str = "soma_x"
 """Layer name of every dataset's SOMA-X fit (decision 14)."""
 SIDES: tuple[Side, ...] = ("left", "right")
+LOCK_GAP_S: float = 2.0
+"""Seconds between releasing the GPU lock after a segment and asking for it again, so a waiting job gets it first."""
 WINDOW_ROWS: int = 2048
 """Segment rows per window: bounds the source vertices in memory (2048 SMPL rows = 170 MB)."""
 Dataset = Literal["hocap", "epfl", "harmony4d", "egoexo4d", "gsi-six-view", "genrobot", "gen-humanego", "hot3d-aria", "hot3d-quest3"]
@@ -797,6 +800,8 @@ def main(config: Config) -> None:
         with gpu_lock(config.gpu_lock):
             errors: dict[str, Float32[ndarray, "n"]] = write_segment(config, fitters, segment)
             torch.cuda.empty_cache()  # hand the cached blocks back to the GPU's other users between segments
+        if config.gpu_lock is not None:
+            time.sleep(LOCK_GAP_S)  # flock is not fair: without a gap this process re-takes the lock before a waiting job
         summary: str = "; ".join(
             f"{root}: {len(values)} rows, median {np.median(values):.2f} mm, p95 {np.percentile(values, 95):.2f}, max {values.max():.2f}"
             for root, values in errors.items()
