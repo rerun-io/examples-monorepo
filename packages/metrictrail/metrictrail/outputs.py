@@ -15,6 +15,7 @@ from metrictrail.artifacts import ColoredCloud, iter_depth_zip, read_intrinsics,
 from metrictrail.blueprint import SceneView, scene_view
 from metrictrail.eval.protocols import VslamlabDataset
 from metrictrail.eval.trajectory import apply_alignment, running_rmse
+from metrictrail.eval.trajectory import finite_rows as finite_pose_rows
 from metrictrail.eval.vipe_output import MetricTrailTrajectory, RunRecord, read_run_record, read_trajectory
 from metrictrail.frames import DisplayRaster, FrameReader, FrameSource, fit_for_display
 from metrictrail.ground_truth import AlignedRun, GtContext, align_to_gt
@@ -207,7 +208,7 @@ def log_run_outputs(
     trajectory: MetricTrailTrajectory = outputs.trajectory
     world_T_cam: Float64[ndarray, "n 4 4"] = trajectory.world_T_cam
     num_tracked: int = world_T_cam.shape[0]
-    finite_rows: Int64[ndarray, "k"] = np.flatnonzero(np.isfinite(world_T_cam.reshape(num_tracked, 16)).all(axis=1)).astype(np.int64)
+    finite_rows: Int64[ndarray, "k"] = np.flatnonzero(finite_pose_rows(world_T_cam)).astype(np.int64)
     color: tuple[int, int, int] = run_rgb(options.label)
     tracked: Int64[ndarray, "n"] = np.arange(num_tracked, dtype=np.int64)
     if video_time_ns is None and context is not None:
@@ -325,8 +326,7 @@ def ride_final_trajectory(rec: rr.RecordingStream, trajectory: MetricTrailTrajec
     trajectory: every finite tracked frame's pose at its own times, which replaces the live newest-keyframe pose there.
     """
     rec.log(entities.WORLD_ROOT, rr.Transform3D(parent_frame=f"tf#/{entities.DPVO_ROOT}"), static=True)
-    count: int = trajectory.world_T_cam.shape[0]
-    rows: Int64[ndarray, "k"] = np.flatnonzero(np.isfinite(trajectory.world_T_cam.reshape(count, 16)).all(axis=1)).astype(np.int64)
+    rows: Int64[ndarray, "k"] = np.flatnonzero(finite_pose_rows(trajectory.world_T_cam)).astype(np.int64)
     if rows.size == 0:
         return
     poses: Float64[ndarray, "k 4 4"] = trajectory.world_T_cam[rows]
