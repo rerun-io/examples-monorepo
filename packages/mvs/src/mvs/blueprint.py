@@ -72,12 +72,12 @@ class EntityPaths:
 
     @property
     def normal(self) -> str:
-        """Image of the depth normals."""
+        """JPEG of the depth normals."""
         return f"{self.depth_pinhole}/normal"
 
     @property
     def lowest_cost(self) -> str:
-        """DepthImage of the cost volume's lowest cost, at the matching size."""
+        """EncodedDepthImage (millimetre PNG) of the depth of the cost volume's best plane, at the matching size."""
         return f"{self.depth_pinhole}/lowest_cost"
 
     @property
@@ -104,7 +104,7 @@ class EntityPaths:
         return f"{self.source_cam(index)}/pinhole"
 
     def source_rgb(self, index: int) -> str:
-        """Image of source view ``index``."""
+        """VideoFrameReference of source view ``index`` into :attr:`video`."""
         return f"{self.source_pinhole(index)}/rgb"
 
     def timing(self, stage: str) -> str:
@@ -176,12 +176,10 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
         rrb.Spatial2DView(origin=paths.lowest_cost, name="Lowest cost"),
     ]
     camera: rrb.Vertical | rrb.Spatial2DView = rrb.Vertical(current, sources, row_shares=[4.0, 1.0]) if source_cams else current
-    right: rrb.Vertical = (
-        rrb.Vertical(
-            camera, rrb.Horizontal(depth, *panels), rrb.TimeSeriesView(origin=paths.timings, name="Stage timings (ms)"), row_shares=[4.0, 2.0, 1.8]
-        )
-        if timings
-        else rrb.Vertical(camera, rrb.Horizontal(depth, *panels), row_shares=[4.0, 2.0])
-    )
-    layout: rrb.Container = rrb.Horizontal(world, right, column_shares=[3.0, 2.0])
+    rows: list[rrb.Container | rrb.View] = [camera, rrb.Horizontal(depth, *panels)]
+    shares: list[float] = [4.0, 2.0]
+    if timings:
+        rows.append(rrb.TimeSeriesView(origin=paths.timings, name="Stage timings (ms)"))
+        shares.append(1.8)
+    layout: rrb.Container = rrb.Horizontal(world, rrb.Vertical(*rows, row_shares=shares), column_shares=[3.0, 2.0])
     return rrb.Blueprint(layout, rrb.TimePanel(state="collapsed", timeline=TIMELINE), collapse_panels=True)

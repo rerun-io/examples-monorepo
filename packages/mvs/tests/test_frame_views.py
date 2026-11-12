@@ -8,17 +8,14 @@ import rerun.chunk as rrc
 import torch
 
 from mvs.blueprint import CURRENT_CAM_COLOR, CURRENT_CAM_PLANE_M, SOURCE_CAM_PLANE_M, EntityPaths
-from mvs.depth_engine import IMAGENET_MEAN, IMAGENET_STD, DepthInputs
+from mvs.depth_engine import DepthInputs
 from mvs.frame_views import (
-    NORMALS_JPEG_QUALITY,
-    LogConfig,
     depth_normals,
     log_current_cam_style,
     log_lowest_cost,
     log_normals,
     log_sources,
     normals_rgb,
-    rgb_at_depth_raster,
     source_cameras,
     video_offsets_ns,
 )
@@ -52,26 +49,6 @@ def _columns(target: Path) -> dict[str, dict[str, list]]:
     return columns
 
 
-def test_log_config_defaults_log_the_full_layout_and_no_raw_pixels() -> None:
-    config = LogConfig()
-    assert config.camera and config.source_cams and config.normals and config.lowest_cost and config.timings
-    assert not hasattr(config, "jpeg_quality")
-    assert NORMALS_JPEG_QUALITY == 75
-
-
-def test_rgb_at_depth_raster_undoes_the_model_normalisation() -> None:
-    """The fused colour and the source images are the model's input images, un-normalised and averaged 2x2."""
-    rgb_3hw = torch.zeros(3, 384, 512)
-    rgb_3hw[0] = 1.0  # red
-    rgb_3hw[2, :, 256:] = 0.5  # blue on the right half
-    mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
-    std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
-    rgb_nhw3 = rgb_at_depth_raster(((rgb_3hw - mean) / std).repeat(2, 1, 1, 1))
-    assert rgb_nhw3.shape == (2, 192, 256, 3) and rgb_nhw3.dtype.name == "uint8"
-    assert rgb_nhw3[1, 0, 0].tolist() == [255, 0, 0]
-    assert rgb_nhw3[1, 0, 255].tolist() == [255, 0, 128]
-
-
 def test_source_cameras_are_world_from_camera_at_the_video_size() -> None:
     """s1 intrinsics are the native ones scaled to 128x96, so a 1920x1440 video gets them times 15."""
     world_T_cam_m44, K_m33 = source_cameras(_inputs(), VIDEO_WH)
@@ -80,13 +57,16 @@ def test_source_cameras_are_world_from_camera_at_the_video_size() -> None:
     assert np.allclose(K_m33[3], [[1500.0, 0.0, 960.0], [0.0, 1500.0, 720.0], [0.0, 0.0, 1.0]])
 
 
-def test_video_offsets_name_the_decoded_sample_relative_to_the_first() -> None:
+def test_video_offsets_name_the_decoded_sample_relative_to_the_stream_start() -> None:
     """A grid time maps to the latest video sample at or before it (what the decoder showed the model), as an
-    offset from the stream's first sample (what a VideoFrameReference into a VideoStream counts from)."""
+    offset from the relayed stream's first sample (what a VideoFrameReference into a VideoStream counts from)."""
     video_times_ns = np.array([1_000, 17_000, 34_000, 50_000], dtype=np.int64)
-    assert video_offsets_ns(np.array([1_000, 17_500, 33_999, 60_000], dtype=np.int64), video_times_ns).tolist() == [0, 16_000, 16_000, 49_000]
-    with pytest.raises(ValueError, match="before the first video sample"):
-        video_offsets_ns(np.array([999], dtype=np.int64), video_times_ns)
+    grid_ns = np.array([17_500, 33_999, 60_000], dtype=np.int64)
+    assert video_offsets_ns(grid_ns, video_times_ns, 1_000).tolist() == [16_000, 16_000, 49_000]
+    # The relay may open after sample 0 (at its first keyframe): offsets count from there.
+    assert video_offsets_ns(grid_ns, video_times_ns, 17_000).tolist() == [0, 0, 33_000]
+    with pytest.raises(ValueError, match="before the relayed stream"):
+        video_offsets_ns(np.array([1_500], dtype=np.int64), video_times_ns, 17_000)
 
 
 def test_depth_normals_of_a_wall_face_the_camera_axis() -> None:

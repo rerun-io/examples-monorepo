@@ -1,10 +1,11 @@
 """What each view of the live-meshing layout (:mod:`mvs.blueprint`) shows for one depth frame.
 
 Ported from the original SimpleRecon live-meshing demo by Pablo Vela (repo pablovela5620/simplerecon-inference,
-``live_meshing.py``, ``config.LogConfig`` and ``utils/geometry_utils.NormalGenerator`` at d5bc1a0): the green current
+``live_meshing.py`` and ``utils/geometry_utils.NormalGenerator`` at d5bc1a0): the green current
 frustum, the source frusta and their pictures, the depth normals and the depth of the cost volume's best plane
 (``lowest_cost``). Unlike the original, which logs each source image's pixels, a source view is a
-``VideoFrameReference`` into the segment's relayed VideoStream: the recording holds every video frame once.
+``VideoFrameReference`` into the segment's relayed VideoStream: the recording holds every video frame once. The
+references resolve on the video's timeline (``video_time``), where the blueprint opens; on ``frame`` they show no frame.
 """
 
 from dataclasses import dataclass
@@ -15,13 +16,13 @@ import numpy as np
 import rerun as rr
 import torch
 import torch.nn.functional as functional
-from einops import rearrange, reduce
-from jaxtyping import Float32, Int64, UInt8, UInt16
+from einops import rearrange
+from jaxtyping import Bool, Float32, Int64, UInt8, UInt16
 from numpy import ndarray
 from torch import Tensor
 
 from mvs.blueprint import CURRENT_CAM_COLOR, CURRENT_CAM_PLANE_M, SOURCE_CAM_PLANE_M, EntityPaths
-from mvs.depth_engine import IMAGENET_MEAN, IMAGENET_STD, DepthInputs
+from mvs.depth_engine import DepthInputs
 
 S1_WH: tuple[int, int] = (128, 96)
 """The model's s1 matching raster, where the source intrinsics come in (``depth_engine.s1_intrinsics``)."""
@@ -31,33 +32,15 @@ NORMALS_JPEG_QUALITY: int = 75
 
 @dataclass(frozen=True)
 class LogConfig:
-    """Which groups of the layout are logged (the original's ``LogConfig``)."""
+    """What the layout logs beyond its fixed views (the original ``config.LogConfig``'s ``source_cams``)."""
 
-    camera: bool = True
-    """Relay the segment's video under the current pinhole (Current view, the image in the green frustum, and the
-    frames the source views reference)."""
     source_cams: bool = True
     """Log each source camera's frustum and its frame of the relayed video (the filmstrip)."""
-    normals: bool = True
-    """Log the normals of the predicted depth."""
-    lowest_cost: bool = True
-    """Log the depth of the cost volume's best plane per pixel (the original's lowest cost)."""
-    timings: bool = True
-    """Log the per-stage timings, ms."""
 
 
 def log_current_cam_style(paths: EntityPaths) -> None:
     """Tint the current camera's frustum green; a static partial update composes with the per-frame pinhole."""
     rr.log(paths.current_pinhole, rr.Pinhole.from_fields(image_plane_distance=CURRENT_CAM_PLANE_M, color=CURRENT_CAM_COLOR), static=True)
-
-
-def rgb_at_depth_raster(images_n3hw: Float32[Tensor, "n 3 h=384 w=512"]) -> UInt8[ndarray, "n h=192 w=256 3"]:
-    """Model input images, un-normalised and averaged 2x2 down to the depth raster, as 8-bit RGB (the fused colour)."""
-    mean_311: Float32[Tensor, "3 1 1"] = rearrange(images_n3hw.new_tensor(IMAGENET_MEAN), "c -> c 1 1")
-    std_311: Float32[Tensor, "3 1 1"] = rearrange(images_n3hw.new_tensor(IMAGENET_STD), "c -> c 1 1")
-    rgb_n3hw: Float32[Tensor, "n 3 h w"] = images_n3hw * std_311 + mean_311
-    rgb_nhw3: Float32[Tensor, "n h2 w2 3"] = reduce(rgb_n3hw, "n c (h 2) (w 2) -> n h w c", "mean")
-    return (rgb_nhw3.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
 
 
 def source_cameras(inputs: DepthInputs, video_wh: tuple[int, int]) -> tuple[Float32[ndarray, "m 4 4"], Float32[ndarray, "m 3 3"]]:
@@ -68,15 +51,17 @@ def source_cameras(inputs: DepthInputs, video_wh: tuple[int, int]) -> tuple[Floa
     return world_T_cam_m44.cpu().numpy(), K_video_m33.cpu().numpy()
 
 
-def video_offsets_ns(grid_times_ns: Int64[ndarray, " m"], video_times_ns: Int64[ndarray, " n"]) -> Int64[ndarray, " m"]:
+def video_offsets_ns(grid_times_ns: Int64[ndarray, " m"], video_times_ns: Int64[ndarray, " n"], stream_start_ns: int) -> Int64[ndarray, " m"]:
     """The video sample each grid time decoded to (the latest at or before it, as ``SegmentNvdecDecoder.decode_at``
-    picks it), as nanoseconds from the stream's first sample: a ``VideoFrameReference`` into a VideoStream counts its
-    timestamp from the stream's first sample on the active timeline (re_view_spatial 0.42
+    picks it), as nanoseconds from ``stream_start_ns``, the relayed stream's first sample: a ``VideoFrameReference``
+    into a VideoStream counts its timestamp from the stream's first sample on the active timeline (re_view_spatial 0.42
     ``visualizers/video/video_frame_reference.rs``, ``first_stream_timestamp.decode_timestamp() + timestamp``)."""
     sample_m: Int64[ndarray, " m"] = np.searchsorted(video_times_ns, grid_times_ns, side="right") - 1
-    if (sample_m < 0).any():
-        raise ValueError(f"grid times {grid_times_ns[sample_m < 0].tolist()} lie before the first video sample {int(video_times_ns[0])}")
-    return video_times_ns[sample_m] - video_times_ns[0]
+    sample_times_m_ns: Int64[ndarray, " m"] = video_times_ns[np.maximum(sample_m, 0)]
+    early_m: Bool[ndarray, " m"] = (sample_m < 0) | (sample_times_m_ns < stream_start_ns)
+    if early_m.any():
+        raise ValueError(f"grid times {grid_times_ns[early_m].tolist()} decode to samples before the relayed stream's start {stream_start_ns}")
+    return sample_times_m_ns - stream_start_ns
 
 
 def log_sources(paths: EntityPaths, inputs: DepthInputs, video_wh: tuple[int, int], video_offsets_m_ns: Int64[ndarray, " m"]) -> None:
@@ -131,6 +116,6 @@ def log_normals(paths: EntityPaths, depth_b1hw: Float32[Tensor, "1 1 h w"], K_de
 def log_lowest_cost(paths: EntityPaths, lowest_cost_bhw: Float32[Tensor, "1 h w"]) -> None:
     """Log the depth of the cost volume's best plane at its matching size, as a millimetre 16-bit PNG like the depth."""
     lowest_cost_mm_hw: UInt16[ndarray, "h w"] = (
-        (lowest_cost_bhw[0].float() * 1000.0).round().clamp(0.0, 65535.0).to(torch.int32).cpu().numpy().astype(np.uint16)
+        (lowest_cost_bhw[0] * 1000.0).round().clamp(0.0, 65535.0).to(torch.int32).cpu().numpy().astype(np.uint16)
     )
     rr.log(paths.lowest_cost, rr.EncodedDepthImage(blob=depth_png.encode(lowest_cost_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0))

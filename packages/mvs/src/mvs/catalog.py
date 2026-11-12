@@ -57,13 +57,17 @@ def log_camera(world_T_cam_44: Float32[ndarray, "4 4"], K_native_33: Float32[nda
     )
 
 
-def log_source_video(video_decoder: SegmentNvdecDecoder) -> None:
-    """Relay the segment's raw AV1 samples once, whole, as a VideoStream (the source catalog's own schema)."""
+def log_source_video(video_decoder: SegmentNvdecDecoder) -> int:
+    """Relay the segment's raw AV1 samples once, whole, as a VideoStream (the source catalog's own schema), and return
+    the time of its first relayed sample, ns: the relay opens at the first keyframe, which a ``VideoFrameReference``
+    into the stream counts from."""
     assert video_decoder.samples is not None and video_decoder.keyframes is not None
     times_ns: Int64[ndarray, " n"] = video_decoder.times.astype("timedelta64[ns]").astype(np.int64)
     relay_video_packets(
         VIDEO_WIDE, TIMELINE, video_decoder.times, video_decoder.samples, video_decoder.keyframes, rr.VideoCodec.AV1, int(times_ns[0]), int(times_ns[-1])
     )
+    # relay_video_packets opens at the last keyframe at or before the window start; the window starts at sample 0.
+    return int(times_ns[int(np.flatnonzero(np.asarray(video_decoder.keyframes, dtype=bool))[0])])
 
 
 def log_depth(depth_hw: Float32[ndarray, "h=192 w=256"], K_depth_33: Float32[ndarray, "3 3"]) -> None:

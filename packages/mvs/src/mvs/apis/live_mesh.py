@@ -23,7 +23,8 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import torch
-from jaxtyping import Float, Float32, Int64
+from einops import rearrange, reduce
+from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.rerun_live_mesh import BlockKey, LiveMeshLog, MeshArrays
@@ -35,9 +36,9 @@ from tsdf_rs import TsdfVolume
 
 from mvs.blueprint import SOURCE_CAMS, create_blueprint
 from mvs.catalog import FRAME_TIMELINE, PATHS, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_depth, log_source_video
-from mvs.depth_engine import SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthInputs, DepthOutputs
+from mvs.depth_engine import IMAGENET_MEAN, IMAGENET_STD, SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthInputs, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
-from mvs.frame_views import LogConfig, log_current_cam_style, log_lowest_cost, log_normals, log_sources, rgb_at_depth_raster, video_offsets_ns
+from mvs.frame_views import LogConfig, log_current_cam_style, log_lowest_cost, log_normals, log_sources, video_offsets_ns
 from mvs.log_worker import LogWorker
 
 
@@ -74,7 +75,7 @@ class Config:
     fusion: FusionConfig = field(default_factory=FusionConfig)
     """TSDF fusion and mesh logging."""
     log: LogConfig = field(default_factory=LogConfig)
-    """Which groups of the layout are logged; the defaults fill every view."""
+    """Whether the filmstrip of source views is logged; the default fills every view."""
 
 
 @contextmanager
@@ -98,16 +99,23 @@ def single_segment(segment_ids: Sequence[str]) -> str:
     return segment_ids[0]
 
 
+def depth_raster_rgb(image_b3hw: Float32[Tensor, "1 3 h=384 w=512"]) -> UInt8[ndarray, "h=192 w=256 3"]:
+    """The model input image, un-normalised and averaged 2x2 down to the depth raster, as 8-bit RGB (the fused colour)."""
+    mean_311: Float32[Tensor, "3 1 1"] = rearrange(image_b3hw.new_tensor(IMAGENET_MEAN), "c -> c 1 1")
+    std_311: Float32[Tensor, "3 1 1"] = rearrange(image_b3hw.new_tensor(IMAGENET_STD), "c -> c 1 1")
+    rgb_hw3: Float32[Tensor, "h2 w2 3"] = reduce(image_b3hw[0] * std_311 + mean_311, "c (h 2) (w 2) -> h w c", "mean")
+    return (rgb_hw3.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
+
+
 def log_depth_frame(
-    log: LogConfig,
     mesh_log: LiveMeshLog,
     depth_hw: Float32[ndarray, "h=192 w=256"],
     K_depth_33: Float32[ndarray, "3 3"],
     inputs: DepthInputs,
     video_wh: tuple[int, int],
     source_offsets_ns: Int64[ndarray, " m"] | None,
-    depth_b1hw: Float[Tensor, "1 1 h=192 w=256"],
-    lowest_cost_bhw: Float[Tensor, "1 h=96 w=128"],
+    depth_b1hw: Float32[Tensor, "1 1 h=192 w=256"],
+    lowest_cost_bhw: Float32[Tensor, "1 h=96 w=128"],
     changed_blocks: list[tuple[BlockKey, MeshArrays]] | None,
 ) -> None:
     """One depth frame's views, logged on the log worker at the frame's time point: the depth, the source frusta and
@@ -116,10 +124,8 @@ def log_depth_frame(
     log_depth(depth_hw, K_depth_33)
     if source_offsets_ns is not None:
         log_sources(PATHS, inputs, video_wh, source_offsets_ns)
-    if log.normals:
-        log_normals(PATHS, depth_b1hw, K_depth_33)
-    if log.lowest_cost:
-        log_lowest_cost(PATHS, lowest_cost_bhw)
+    log_normals(PATHS, depth_b1hw, K_depth_33)
+    log_lowest_cost(PATHS, lowest_cost_bhw)
     if changed_blocks is not None:
         mesh_log.log_changed(changed_blocks)
 
@@ -147,9 +153,8 @@ def main(config: Config) -> None:
     depth_frames: int = 0
     last_depth_time: tuple[int, int] | None = None
     times_ms: dict[str, float] = {}
-    # The source views reference frames of the relayed video, so they need it relayed.
-    relay_video: bool = log.camera or log.source_cams
     video_times_ns: Int64[ndarray, " n"] = np.empty(0, dtype=np.int64)
+    stream_start_ns: int = 0
     waited_from: float = time.perf_counter()
     sample: DepthSample | None
     # The log worker encodes and logs each depth frame's views off the main loop; leaving the block, on an exception
@@ -171,8 +176,7 @@ def main(config: Config) -> None:
             log_camera(world_T_cam_44, K_native_33, sample.resolution_wh)
             if frames == 1:
                 video_times_ns = video_decoder.times.astype("timedelta64[ns]").astype(np.int64)
-                if relay_video:
-                    log_source_video(video_decoder)
+                stream_start_ns = log_source_video(video_decoder)
             if sample.inputs is None:
                 waited_from = time.perf_counter()
                 continue
@@ -187,7 +191,7 @@ def main(config: Config) -> None:
                     depth_hw,
                     K_depth_33,
                     np.linalg.inv(world_T_cam_44.astype(np.float64)).astype(np.float32),
-                    rgb_at_depth_raster(sample.inputs.cur_image_b3hw)[0],
+                    depth_raster_rgb(sample.inputs.cur_image_b3hw),
                     max_depth=fusion.max_depth_m,
                 )
             depth_frames += 1
@@ -197,30 +201,33 @@ def main(config: Config) -> None:
             if extract_mesh:
                 with timed(times_ms, "mesh_extract"):
                     changed_blocks = volume.extract_dirty_block_meshes()
+            source_offsets_ns: Int64[ndarray, " m"] | None = (
+                video_offsets_ns(np.asarray(sample.source_times_ns, dtype=np.int64), video_times_ns, stream_start_ns) if log.source_cams else None
+            )
+            # The engine may reuse its output buffers, so the worker gets its own copies.
+            depth_b1hw: Float32[Tensor, "1 1 h=192 w=256"] = depth_outputs.depth_b1hw.clone()
+            lowest_cost_bhw: Float32[Tensor, "1 h=96 w=128"] = depth_outputs.lowest_cost_bhw.clone()
             # rerun_log measures only the back-pressure wait for the worker, as in the original.
             with timed(times_ms, "rerun_log"):
-                # The engine may reuse its output buffers, so the worker gets its own copies.
                 log_worker.submit(
                     sample.timestamp_ns,
                     sample.frame_index,
                     log_depth_frame,
-                    log,
                     mesh_log,
                     depth_hw,
                     K_depth_33,
                     sample.inputs,
                     sample.resolution_wh,
-                    video_offsets_ns(np.asarray(sample.source_times_ns, dtype=np.int64), video_times_ns) if log.source_cams else None,
-                    depth_outputs.depth_b1hw.clone(),
-                    depth_outputs.lowest_cost_bhw.clone(),
+                    source_offsets_ns,
+                    depth_b1hw,
+                    lowest_cost_bhw,
                     changed_blocks,
                 )
-            if log.timings:
-                stage: str
-                for stage in ("data_wait", "model_forward", "tsdf_fuse", "mesh_extract", "rerun_log"):
-                    if stage == "mesh_extract" and not extract_mesh:
-                        continue
-                    rr.log(PATHS.timing(stage), rr.Scalars(times_ms[stage]))
+            stage: str
+            for stage in ("data_wait", "model_forward", "tsdf_fuse", "mesh_extract", "rerun_log"):
+                if stage == "mesh_extract" and not extract_mesh:
+                    continue
+                rr.log(PATHS.timing(stage), rr.Scalars(times_ms[stage]))
             waited_from = time.perf_counter()
 
         if last_depth_time is not None:

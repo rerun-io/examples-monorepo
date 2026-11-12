@@ -112,3 +112,4 @@ def test_phone_layouts_show_only_the_3d_view_the_camera_and_the_depth(variant: V
     assert (isinstance(root, rrb.Horizontal), isinstance(rest, rrb.Vertical)) == (landscape, landscape)
     assert blueprint.time_panel is not None and blueprint.time_panel.state == "hidden"
     assert blueprint.time_panel.timeline == "video_time"
+

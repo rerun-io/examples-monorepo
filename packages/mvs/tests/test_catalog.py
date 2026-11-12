@@ -10,8 +10,9 @@ import depth_png  # noqa: E402
 import numpy as np  # noqa: E402
 import rerun as rr  # noqa: E402
 import rerun.chunk as rrc  # noqa: E402
+from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
 
-from mvs.catalog import FRAME_TIMELINE, PINHOLE_LOWRES_PATH, TIMELINE, log_depth  # noqa: E402
+from mvs.catalog import FRAME_TIMELINE, PINHOLE_LOWRES_PATH, TIMELINE, log_depth, log_source_video  # noqa: E402
 
 
 def test_log_depth_writes_the_lowres_pinhole_and_a_millimetre_png(tmp_path: Path) -> None:
@@ -45,3 +46,21 @@ def test_log_depth_writes_the_lowres_pinhole_and_a_millimetre_png(tmp_path: Path
     decoded = depth_png.decode(bytes(depth["EncodedDepthImage:blob"][0][0]))
     assert decoded.dtype == np.uint16
     assert decoded[0, 0] == 750 and decoded[-1, -1] == 2500
+
+
+def test_log_source_video_returns_the_time_of_the_first_relayed_sample(tmp_path: Path) -> None:
+    """The relay opens at a keyframe, so when sample 0 is not one the stream starts later; a VideoFrameReference
+    counts from the stream's first sample, so the offsets need that time, not sample 0's."""
+
+    class StoredDecoder(SegmentNvdecDecoder):
+        def __init__(self) -> None:
+            self.times = np.array([0, 10, 20, 30], dtype="timedelta64[ns]")
+            self.samples = [b"a", b"b", b"c", b"d"]
+            self.keyframes = [False, True, False, True]
+
+    recording = rr.RecordingStream("mvs-test")
+    recording.save(tmp_path / "video.rrd")
+    with recording:
+        assert log_source_video(StoredDecoder()) == 10
+    recording.disconnect()
+
