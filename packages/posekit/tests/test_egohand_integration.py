@@ -323,6 +323,45 @@ def test_cuda_soma_preserves_changing_shapes_and_full_meshes() -> None:
                 torch.testing.assert_close(result[field], expected[side][field], atol=0.001, rtol=0.001)
 
 
+def test_a_model_prepared_on_the_cpu_matches_one_built_on_cuda_and_starts_neither_cuda_nor_warp() -> None:
+    """``EgoHandFastConfig.prepare`` is safe before a fork of GPU workers, and its model gives the same hands once on CUDA."""
+    import subprocess
+    import sys
+
+    from egohand_inference.pipeline.predictor import load_egohand_model
+
+    from posekit.models import HAND_POSES
+    from posekit.models.egohand_fast import CPU_MODELS
+    from posekit.models.egohand_soma import prepare_cuda_soma
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA GPU")
+    check: str = (
+        "import torch, warp._src.context as context; from posekit.models import HAND_POSES; from posekit.models.egohand_fast import CPU_MODELS;"
+        "HAND_POSES['egohand-fast'].prepare(); assert len(CPU_MODELS) == 1 and context.runtime is None and not torch.cuda.is_initialized()"
+    )
+    subprocess.run([sys.executable, "-c", check], check=True)
+    config = HAND_POSES["egohand-fast"]
+    assert isinstance(config, EgoHandFastConfig)
+    config.prepare()
+    (weights, soma), prepared = CPU_MODELS.popitem()
+    reference, _ = load_egohand_model(weights, soma, backbone=torch.nn.Identity())
+    generator = torch.Generator(device="cuda").manual_seed(72)
+    poses = torch.randn((2, 25, 3), device="cuda", generator=generator) * 0.2
+    identity = torch.randn((2, 5), device="cuda", generator=generator) * 0.7
+    scales = torch.randn((2, 26), device="cuda", generator=generator) * 0.05
+    size = torch.tensor([0.9, 1.1], device="cuda")
+    with torch.inference_mode():
+        outputs = []
+        for model in (reference, prepared):
+            hands = model.to("cuda").soma_hand
+            prepare_cuda_soma(hands)
+            outputs.append({side: hands(poses, identity, side, global_scale=size, scale_params=scales) for side in ("left", "right")})
+    for side in ("left", "right"):
+        for field in ("joints", "vertices"):
+            torch.testing.assert_close(outputs[1][side][field], outputs[0][side][field], atol=1e-5, rtol=1e-5)
+
+
 def test_exportable_hand_head_preserves_virtual_camera_conditioning() -> None:
     """The exported head includes the same camera rays and both learned heads."""
     from egohand.utils.ray_pe import compute_crop_ray_angles, fourier_encode_angles

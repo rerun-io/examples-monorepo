@@ -4,21 +4,31 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import depth_png
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, UInt16
+from jaxtyping import Float32
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import device as torch_device
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 
-from mvs.catalog import DEPTH_HW, FRAME_TIMELINE, PINHOLE_LOWRES_PATH, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_source_video
-from mvs.depth_engine import DepthEngine, DepthOutputs
+from mvs.blueprint import create_blueprint
+from mvs.catalog import (
+    FRAME_TIMELINE,
+    PATHS,
+    TIMELINE,
+    CatalogDataConfig,
+    depth_at_lowres,
+    log_camera,
+    log_depth,
+    log_source_video,
+    log_video_then_blueprint,
+)
+from mvs.depth_engine import SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
+from mvs.frame_views import log_current_cam_style, log_lowest_cost, log_normals
 
 
 @dataclass
@@ -31,8 +41,8 @@ class Config:
     """Catalog server, dataset, and segment selection."""
     model_path: Path = Path("data/models/depth_model_dot.onnx")
     """Portable ONNX depth model artifact."""
-    backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
-    """CUDA ONNX Runtime or cached TensorRT execution backend."""
+    backend: DepthBackendConfig = SMALL_TRT_BACKEND
+    """TensorRT with the batch-1 profile (SMALL_TRT_BACKEND) by default; ``onnx`` is the ONNX Runtime CUDA fallback."""
 
 
 def main(config: Config) -> None:
@@ -48,7 +58,8 @@ def main(config: Config) -> None:
     segment_ids: list[str] = list(config.data.segments) or dataset.segment_ids()
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
 
-    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    rr.log(PATHS.world, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    log_current_cam_style(PATHS)
     device: torch_device = torch_device("cuda")
     total_frames: int = 0
     total_depth_frames: int = 0
@@ -76,7 +87,11 @@ def main(config: Config) -> None:
             # numpy appears only at the rr.log boundary, as zero-copy views of CPU tensors.
             K_native_33: Float32[ndarray, "3 3"] = sample.K_native_33.numpy()
             log_camera(sample.world_T_cam_44.numpy(), K_native_33, native_wh)
-            if segment_frames == 1:
+            if total_frames == 1:
+                # The live-meshing layout without its filmstrip and stage timings: this demo logs no source views,
+                # mesh or timings. It follows the first segment's whole video, so the viewer plays from 0.
+                log_video_then_blueprint(video_decoder, create_blueprint(PATHS, variant="native", source_cams=0, timings=False))
+            elif segment_frames == 1:
                 log_source_video(video_decoder)
 
             if sample.inputs is not None:
@@ -84,16 +99,9 @@ def main(config: Config) -> None:
                 depth_hw: Float32[ndarray, "h=192 w=256"]
                 K_depth_33: Float32[ndarray, "3 3"]
                 depth_hw, K_depth_33 = depth_at_lowres(depth_outputs, K_native_33, native_wh)
-                # The viewer back-projects the depth with its parent's intrinsics: the 256x192 raster's own Pinhole.
-                rr.log(
-                    PINHOLE_LOWRES_PATH,
-                    rr.Pinhole(image_from_camera=K_depth_33, width=DEPTH_HW[1], height=DEPTH_HW[0], camera_xyz=rr.ViewCoordinates.RDF),
-                )
-                depth_mm_hw: UInt16[ndarray, "h=192 w=256"] = np.rint(depth_hw * 1000.0).astype(np.uint16)
-                rr.log(
-                    f"{PINHOLE_LOWRES_PATH}/depth",
-                    rr.EncodedDepthImage(blob=depth_png.encode(depth_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0),
-                )
+                log_depth(depth_hw, K_depth_33)
+                log_normals(PATHS, depth_outputs.depth_b1hw, K_depth_33)
+                log_lowest_cost(PATHS, depth_outputs.lowest_cost_bhw)
                 segment_depth_frames += 1
                 total_depth_frames += 1
 

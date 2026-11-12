@@ -1,5 +1,7 @@
 """Seeded visibility sampling and independent-frame EgoHand inference."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -50,7 +52,8 @@ def test_inference_detects_each_frame_independently_and_preserves_box_score():
         points = Keypoints3d(xy, torch.zeros((n, 25)), detections.boxes.scores[:, None].repeat(1, 25), detections.boxes.frame_indices,
                             SOMA_HAND, (0,), torch.zeros((n, 25, 3)))
         return EgoHandReconstruction(keypoints=points, sides=detections.sides, vertices=torch.zeros((n, 1, 3)), rotations=torch.zeros((n, 25, 3, 3)),
-                                     identity=torch.zeros((n, 1)), scale=torch.ones(n), translation=torch.zeros((n, 3)), scale_parameters=None)
+                                     identity=torch.zeros((n, 1)), scale=torch.ones(n), translation=torch.zeros((n, 3)), scale_parameters=None,
+                                     soma=Path("/unused"))
 
     camera = CalibratedCamera(np.eye(3), np.zeros(14), 30, 20)
     result = infer_egohand_frames(torch.zeros((6, 20, 30, 3), dtype=torch.uint8), np.arange(6, dtype=np.float64),
