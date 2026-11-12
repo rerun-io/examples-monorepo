@@ -84,3 +84,9 @@ def test_the_depth_stream_fetches_small_blocks(monkeypatch: pytest.MonkeyPatch) 
 
     assert requested["fetch_block_size"] == FETCH_BLOCK_SIZE
 
+
+def test_fusion_stops_at_three_metres_as_the_original_does() -> None:
+    """The original demo fuses depth to 3 m; past it the model's far predictions build sheets outside the room."""
+    from mvs.apis.live_mesh import FusionConfig
+
+    assert FusionConfig().max_depth_m == 3.0

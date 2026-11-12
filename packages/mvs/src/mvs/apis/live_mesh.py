@@ -50,8 +50,9 @@ class FusionConfig:
     """Voxel edge."""
     truncation_voxels: float = 3.0
     """Signed-distance truncation in voxels (Open3D's ``3 * voxel`` convention)."""
-    max_depth_m: float = 5.0
-    """Farthest depth fused; the model's far predictions are the least reliable."""
+    max_depth_m: float = 3.0
+    """Farthest depth fused, as in the original demo; the model's far predictions are the least reliable, and fused
+    past 3 m they build sheets outside the room."""
     log_every: int = 10
     """Depth frames between two logs of the changed blocks; at least 1."""
 
