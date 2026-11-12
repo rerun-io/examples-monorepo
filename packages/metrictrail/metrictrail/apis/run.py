@@ -29,18 +29,31 @@ from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
 from simplecv.rerun_log_utils import RerunTyroConfig
+from vipe.metrictrail.calibration.policy import MODES
+from vipe.metrictrail.config import MetricTrailInitConfig
+from vipe.utils.model_cache import ModelCache
 
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint
+from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
 from metrictrail.feature_graphs import feature_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
 from metrictrail.live_surface import LiveSurface
-from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, log_run_outputs, make_provenance, read_run_outputs
+from metrictrail.outputs import (
+    LoggedRun,
+    LogOptions,
+    RunMetrics,
+    RunOutputs,
+    log_run_outputs,
+    make_provenance,
+    read_run_outputs,
+    ride_final_trajectory,
+)
 from metrictrail.palette import RunLabel
 from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
@@ -109,6 +122,8 @@ class RunResult:
     """Whether GT was logged."""
     has_video: bool
     """Whether the input video was logged (``input/video``, a video input)."""
+    has_calibration: bool
+    """Whether SharedK calibration ran and was logged (:mod:`metrictrail.calibration_live`; not with a known K)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +244,8 @@ def run_and_log(
     *,
     live: bool = False,
     on_stage: Callable[[str], None] | None = None,
-    on_cursor: Callable[[int], None] | None = None,
+    on_cursor: Callable[[int, RunPhase], None] | None = None,
+    models: ModelCache | None = None,
 ) -> RunResult:
     """Run the pipeline on ``config.input``, then log the capture and the outputs into ``rec`` (no blueprint).
 
@@ -237,10 +253,14 @@ def run_and_log(
         config: What to run.
         rec: Target recording.
         live: The capture logs every DPVO pass straight into ``rec`` while it tracks, depth only on frames that grew
-            DPVO's keyframe graph (a recording streamed to a viewer as it grows); False: one file per pass, merged afterwards.
+            DPVO's keyframe graph (a recording streamed to a viewer as it grows); False: one file per pass, merged
+            afterwards. Either way a capture run of ``ours`` logs SharedK calibration's sweep (:mod:`metrictrail.calibration_live`).
         on_stage: Called with a short status line at each stage and after each tracked frame (the capture's hook);
             it may raise to stop the run.
-        on_cursor: Called after each tracked frame with its ``video_time``, ns (the app moves the viewer's cursor there).
+        on_cursor: Called with the ``calibration_step`` of each frame the calibration reads, then the ``video_time``
+            (ns) of each frame DPVO tracks, and which of the two it is (the app moves the viewer's cursor there).
+        models: The networks (MoGe-2, DROID, DINO-DPVO) built by an earlier run, reused by this one; the run adds what it
+            builds. None: a cache of this run's own (the pipeline's default). The app keeps one for its whole life.
     """
     from vipe._paths import get_config_path
     from vipe.config.parse import parse_typed_config
@@ -251,9 +271,9 @@ def run_and_log(
             on_stage(text)
 
     def tracked(frame: int, source: int | None, num_frames: int, keyframes: int) -> None:
-        stage(f"tracking: frame {frame + 1} / {num_frames}, {keyframes} keyframes in the graph")
+        stage(f"DPVO tracking from the start, with the calibrated K: frame {frame + 1} / {num_frames}, {keyframes} keyframes in the graph")
         if on_cursor is not None and source is not None and video_time_ns is not None and source < video_time_ns.shape[0]:
-            on_cursor(int(video_time_ns[source]))
+            on_cursor(int(video_time_ns[source]), "tracking")
 
     if config.label == "ours":
         from metrictrail.moge2 import register_providers
@@ -294,19 +314,34 @@ def run_and_log(
             live_surface=live_surface,
         )
         session.install()
+    calibration: CalibrationLive | None = None
+    init = typed.pipeline.init
+    if config.capture and config.label == "ours" and isinstance(init, MetricTrailInitConfig):
+        target: int | None = MODES[init.calibration.budget].target_accepted_keyframes
+        calibration = CalibrationLive(
+            rec=rec,
+            video_time_ns=video_time_ns,
+            target_keyframes=target or 0,
+            head_frames=init.calibration.initializer_frames,
+            on_stage=on_stage,
+            on_cursor=on_cursor,
+        )
     # This module imports cv2 (metrictrail.frames) before torch, so OpenMP sizes cv2's thread team to every logical
     # CPU while torch keeps one thread per physical core; both teams spinning cost ~13 % tracking fps on the 32-thread
     # dl-server (15.7 vs 18.2 fps on TUM fr1_desk). Upstream's run.py imports torch first and never sees this.
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
-    stage("loading the models, then SharedK calibration (MoGe-2 + DINOv3 on the whole clip)")
     try:
+        stage("SharedK calibration: MoGe-2's focal on the first 32 frames (the first run also loads the models)")
         with (
+            calibration_live_view(calibration),
             gpu_video_input(gpu),
             feature_cuda_graphs() if config.label == "ours" else nullcontext(),
             update_cuda_graphs() if config.label == "ours" else nullcontext(),
         ):
             pipeline = make_pipeline(typed.pipeline)
+            if models is not None:
+                pipeline.model_cache = models
             streams = make_stream_list(typed.streams)
             for index in range(len(streams)):
                 pipeline.run(streams[index])
@@ -348,19 +383,28 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh, video_time_ns=video_time_ns
     )
-    return RunResult(logged=logged, has_capture=kept is not None, has_gt=context is not None, has_video=has_video)
+    if kept is not None and context is None:
+        ride_final_trajectory(rec, outputs.trajectory, video_time_ns)
+    return RunResult(
+        logged=logged,
+        has_capture=kept is not None,
+        has_gt=context is not None,
+        has_video=has_video,
+        has_calibration=calibration is not None and calibration.step >= 0,
+    )
 
 
 def main(config: Config) -> RunMetrics:
     """Run the pipeline on ``config.input``, then log the capture, the outputs and the default blueprint."""
     rec: rr.RecordingStream = config.rr_config.rec_stream
     result: RunResult = run_and_log(config, rec)
-    log_waiting_notes(rec, has_capture=result.has_capture, has_gt=result.has_gt)
+    log_waiting_notes(rec, has_capture=result.has_capture)
     blueprint = run_blueprint(
         config.label,
         has_capture=result.has_capture,
         has_gt=result.has_gt,
         has_video=result.has_video,
+        has_calibration=result.has_calibration,
         world_eye=result.logged.world_eye,
         metric_eye=result.logged.metric_eye,
     )

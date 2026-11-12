@@ -35,8 +35,9 @@ VIEWER_CODECS: tuple[str, ...] = ("h264", "av1")
 Chromium has no HEVC)."""
 HARDWARE_ENCODER: str = "h264_nvenc"
 """The encoder :class:`FrameVideo` expects; anything else is the CPU fallback and is warned about once."""
-CAMERA_PLANE_M: float = 0.5
-"""Image-plane distance of the moving camera's frustum, metres: large enough to see the video playing inside it."""
+CAMERA_PLANE_M: float = 1.0
+"""Image-plane distance of the moving camera's frustum, metres: large enough to see the video playing inside it from the
+whole-trajectory views."""
 _warned_cpu_encoder: list[bool] = [False]
 """Whether the CPU-encoder warning was given in this process."""
 
@@ -85,6 +86,11 @@ def set_frame_time(rec: rr.RecordingStream, row: int, source_frame: int | None, 
     """Every timeline of tracked row ``row``: ``frame``, and when known ``source_frame`` and ``video_time``
     (``video_time_ns`` indexed by source frame: the input video's PTS or the benchmark's stamps)."""
     rec.set_time(entities.FRAME_TIMELINE, sequence=row)
+    set_source_time(rec, source_frame, video_time_ns)
+
+
+def set_source_time(rec: rr.RecordingStream, source_frame: int | None, video_time_ns: Int64[ndarray, "n"] | None) -> None:
+    """``source_frame`` and ``video_time`` of a source frame, when known (``video_time_ns`` as :func:`set_frame_time`)."""
     if source_frame is None:
         return
     rec.set_time(entities.SOURCE_FRAME_TIMELINE, sequence=source_frame)

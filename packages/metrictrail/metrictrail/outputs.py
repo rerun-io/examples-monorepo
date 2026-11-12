@@ -309,6 +309,28 @@ def log_run_outputs(
     return LoggedRun(metrics=metrics, world_eye=world_eye, metric_eye=metric_eye)
 
 
+def ride_final_trajectory(rec: rr.RecordingStream, trajectory: MetricTrailTrajectory, video_time_ns: Int64[ndarray, "s"] | None) -> None:
+    """One camera for every view of a live run without GT (the EgoExo layout: one camera entity, its pose over time, its
+    pinhole and the video in it).
+
+    ViPE's world without GT is DPVO's own frame (the first camera's RDF frame, identity at frame 0), so ``world`` hangs in
+    DPVO's frame (an identity ``Transform3D`` to ``tf#/dpvo``) and the world views can show the live camera
+    (:data:`entities.DPVO_CURRENT`, whose pinhole holds the input video). That camera then moves along the final
+    trajectory: every finite tracked frame's pose at its own times, which replaces the live newest-keyframe pose there.
+    """
+    rec.log(entities.WORLD_ROOT, rr.Transform3D(parent_frame=f"tf#/{entities.DPVO_ROOT}"), static=True)
+    count: int = trajectory.world_T_cam.shape[0]
+    rows: Int64[ndarray, "k"] = np.flatnonzero(np.isfinite(trajectory.world_T_cam.reshape(count, 16)).all(axis=1)).astype(np.int64)
+    if rows.size == 0:
+        return
+    poses: Float64[ndarray, "k 4 4"] = trajectory.world_T_cam[rows]
+    rec.send_columns(
+        entities.DPVO_CURRENT,
+        indexes=time_columns(rows, trajectory.source_frame_ids, video_time_ns),
+        columns=rr.Transform3D.columns(translation=poses[:, :3, 3], mat3x3=poses[:, :3, :3]),
+    )
+
+
 def time_columns(rows: Int64[ndarray, "k"], source_frame_ids: Int64[ndarray, "n"], video_time_ns: Int64[ndarray, "s"] | None) -> list[rr.TimeColumn]:
     """``frame``, ``source_frame`` and, when known, ``video_time`` index columns of the tracked rows ``rows``
     (``video_time_ns`` indexed by source frame)."""

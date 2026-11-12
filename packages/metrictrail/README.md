@@ -85,8 +85,11 @@ pixi run -e metrictrail metrictrail-app
 A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.py`): upload a video or pick an example
 (the task downloads dpvo's example clips into `data/`), and the run streams into an embedded Rerun viewer. It runs
 `metrictrail.apis.run.run_and_log` with the `video` preset and the default MoGe-2 provider, so it calibrates the camera
-itself; there is no intrinsics input. Settings: the tracking stride and `max_frames` (upstream's Hydra keys). The capture
-runs in live mode: the input video is logged first and plays at once, then DPVO's patches (on the video), BA window and
+itself; there is no intrinsics input. Settings: the tracking stride, `max_frames` (upstream's Hydra keys) and the SharedK
+calibration budget (`fast64` by default, half the time of ViPE's `robust128`). The input video is logged first and plays at
+once. While SharedK calibrates, the viewer shows its own layout on the `calibration_step` timeline: the DROID keyframe map,
+the focal and the keyframes kept, and the newest keyframe's MoGe-2 prior against its bundle-adjusted depth. The capture
+then runs in live mode: DPVO's patches (on the video), BA window and
 the DINOv3 PCA video stream in as it tracks, with depth and normals of new keyframes only. The trajectory and the
 surface arrive at the end; the TSDF mesh grows in the DPVO tracking view from each new keyframe (at DPVO's current pose) and the final mesh (final poses) replaces it. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
 viewer stays empty.
