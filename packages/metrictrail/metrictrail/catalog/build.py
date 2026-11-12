@@ -7,9 +7,12 @@ not from a second computation here (SPEC section 4); the layer's own Sim(3) fit 
 
 import socket
 import time
+from collections.abc import Set
 from dataclasses import dataclass
 from pathlib import Path
 
+import av
+import cv2
 import numpy as np
 from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
@@ -43,9 +46,10 @@ ATE_TOLERANCE_M: float = 1e-9
 CLOUD_TOLERANCE_M: float = 1e-4
 """Largest allowed distance between the capture's SE(3)- and Sim(3)-aligned fused clouds mapped back to the estimate."""
 NORMALS_SOURCE: str = (
-    "live capture <case>.rrd: cam/normals (MoGe-2 normals, JPEG RGB (n+1)/2, logged on the tracked row where DPVO's keyframe "
-    "count grew) at that row's video_time; metric/cloud_normals (upstream fused cloud, normals in GT axes by the SE(3) "
-    "rotation) mapped back to the estimate world"
+    "live capture <case>.rrd: cam/normals (MoGe-2 normals, RGB (n+1)/2; an H.264 video of every tracked row, decoded and kept at "
+    "the run's keyframe rows as JPEG; an older capture's JPEGs, logged where DPVO's keyframe count grew, as they are) at that "
+    "row's video_time; metric/cloud_normals (upstream fused cloud, normals in GT axes by the SE(3) rotation) mapped back to the "
+    "estimate world"
 )
 """What a layer's normals entities hold (``normals_source``)."""
 
@@ -104,8 +108,32 @@ class CaptureNormals:
     """The fused cloud in the estimate's world, coloured by its normals in GT axes."""
 
 
-def read_capture_normals(rrd: Path, gt_T_est_se3: Float64[ndarray, "4 4"], gt_T_est_sim3: Float64[ndarray, "4 4"]) -> CaptureNormals:
+def decode_normals_video(samples: dict[int, bytes], keep: Set[int]) -> dict[int, bytes]:
+    """JPEGs (quality 92, as the captures logged them before) of the ``keep`` rows of an H.264 normals video, from its
+    samples by tracked row. The video has no B-frames, so the decoded frames come in row order."""
+    rows: list[int] = sorted(samples)
+    decoder: av.video.codeccontext.VideoCodecContext = av.CodecContext.create("h264", "r")
+    frames: list[av.VideoFrame] = [frame for row in rows for frame in decoder.decode(av.Packet(samples[row]))]
+    frames += decoder.decode(None)
+    if len(frames) != len(rows):
+        raise ValueError(f"the normals video decoded to {len(frames)} frames for {len(rows)} samples")
+    images: dict[int, bytes] = {}
+    for row, frame in zip(rows, frames, strict=True):
+        if row in keep:
+            ok, jpeg = cv2.imencode(".jpg", frame.to_ndarray(format="bgr24"), [cv2.IMWRITE_JPEG_QUALITY, 92])
+            if not ok:
+                raise ValueError(f"JPEG encoding of the normals of row {row} failed")
+            images[row] = jpeg.tobytes()
+    return images
+
+
+def read_capture_normals(
+    rrd: Path, gt_T_est_se3: Float64[ndarray, "4 4"], gt_T_est_sim3: Float64[ndarray, "4 4"], video_rows: Set[int]
+) -> CaptureNormals:
     """``cam/normals`` (on the ``frame`` timeline, = tracked row) and ``metric/cloud_normals`` of a live capture.
+
+    A current capture holds the normals as an H.264 video of every tracked row: the ``video_rows`` (the run's keyframes)
+    are decoded into JPEGs. An older capture holds JPEGs of the rows where DPVO's keyframe count grew: all are kept.
 
     The cloud is logged SE(3)-aligned to GT; it is mapped back to the estimate's world here, and must agree with the
     capture's Sim(3)-aligned ``world/cloud_normals`` mapped back the same way (so the capture is of this run).
@@ -114,20 +142,28 @@ def read_capture_normals(rrd: Path, gt_T_est_se3: Float64[ndarray, "4 4"], gt_T_
         ValueError: If an entity is missing or the two clouds disagree by more than :data:`CLOUD_TOLERANCE_M`.
     """
     images: dict[int, bytes] = {}
+    video_samples: dict[int, bytes] = {}
     clouds: dict[str, Float32[ndarray, "c 3"]] = {}
     colors: UInt8[ndarray, "c 3"] | None = None
     for chunk in RrdReader(rrd).store().stream():
         path: str = chunk.entity_path.lstrip("/")
         if path == entities.CAM_NORMALS:
             batch = chunk.to_record_batch()
-            for frame, blob in zip(batch.column(entities.FRAME_TIMELINE).to_pylist(), batch.column("EncodedImage:blob").to_pylist(), strict=True):
-                images[int(frame)] = bytes(blob[0])
+            names: list[str] = batch.schema.names
+            if "EncodedImage:blob" in names:
+                for frame, blob in zip(batch.column(entities.FRAME_TIMELINE).to_pylist(), batch.column("EncodedImage:blob").to_pylist(), strict=True):
+                    images[int(frame)] = bytes(blob[0])
+            elif "VideoStream:sample" in names and entities.FRAME_TIMELINE in names:  # the static codec chunk has neither
+                for frame, sample in zip(batch.column(entities.FRAME_TIMELINE).to_pylist(), batch.column("VideoStream:sample").to_pylist(), strict=True):
+                    video_samples[int(frame)] = bytes(sample[0])
         elif path in (entities.METRIC_CLOUD_NORMALS, entities.WORLD_CLOUD_NORMALS):
             batch = chunk.to_record_batch()
             clouds[path] = np.asarray(batch.column("Points3D:positions").to_pylist()[-1], dtype=np.float32)
             if path == entities.METRIC_CLOUD_NORMALS:
                 packed: Int64[ndarray, "c"] = np.asarray(batch.column("Points3D:colors").to_pylist()[-1], dtype=np.int64)
                 colors = np.stack([(packed >> 24) & 255, (packed >> 16) & 255, (packed >> 8) & 255], axis=1).astype(np.uint8)
+    if video_samples:
+        images.update(decode_normals_video(video_samples, video_rows))
     if not images or colors is None or len(clouds) != 2:
         raise ValueError(f"{rrd}: needs cam/normals, metric/cloud_normals and world/cloud_normals; found {len(images)} images, {sorted(clouds)}")
     from_se3: Float64[ndarray, "c 3"] = (clouds[entities.METRIC_CLOUD_NORMALS].astype(np.float64) - gt_T_est_se3[:3, 3]) @ gt_T_est_se3[:3, :3]
@@ -204,7 +240,7 @@ def build_layer(
     )
     se3: Float64[ndarray, "4 4"] = aligned.se3.gt_T_est
     sim3: Float64[ndarray, "4 4"] = aligned.sim3.gt_T_est
-    normals: CaptureNormals | None = read_capture_normals(capture_rrd, se3, sim3) if capture_rrd is not None else None
+    normals: CaptureNormals | None = read_capture_normals(capture_rrd, se3, sim3, set(kept)) if capture_rrd is not None else None
     per_seed: list[float] | None = seed_scores.paper_ate_m if seed_scores is not None else None
     gt_rule: str = (
         f"nearest GT within {context.protocol.max_dt_ns / 1e6:g} ms" if context.protocol.gt_match == "nearest_time" else "frame index"

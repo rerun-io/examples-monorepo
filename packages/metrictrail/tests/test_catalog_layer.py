@@ -218,12 +218,40 @@ def test_read_capture_normals_maps_the_cloud_back_to_the_estimate_and_keys_image
     sim3[:3, :3] *= 0.5
     est_xyz: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, 1.0], [1.0, 0.5, 2.0], [-1.0, 0.0, 0.5]])
     write_capture(tmp_path / "capture.rrd", se3, sim3, est_xyz)
-    normals = read_capture_normals(tmp_path / "capture.rrd", se3, sim3)
-    assert normals.images_jpeg == {2: JPEG}
+    normals = read_capture_normals(tmp_path / "capture.rrd", se3, sim3, video_rows={0, 1})
+    assert normals.images_jpeg == {2: JPEG}  # an older capture's JPEGs: every one is kept, video_rows does not apply
     np.testing.assert_allclose(normals.cloud.points_xyz, est_xyz, atol=1e-6)
     assert normals.cloud.colors_rgb.tolist() == [[10, 20, 30]] * 3
     with pytest.raises(ValueError, match="not of this alignment"):
-        read_capture_normals(tmp_path / "capture.rrd", se3, se3)
+        read_capture_normals(tmp_path / "capture.rrd", se3, se3, video_rows=set())
+
+
+def test_read_capture_normals_decodes_the_normals_video_of_a_current_capture_at_the_keyframe_rows(tmp_path: Path) -> None:
+    """The app and CLI log cam/normals as an H.264 video of every tracked row (metrictrail.prior_log); the layer keeps
+    JPEGs of the run's keyframe rows, as it did when the capture logged JPEGs only there."""
+    import cv2
+
+    from metrictrail.rerun_log import FrameVideo
+
+    se3: Float64[ndarray, "4 4"] = np.eye(4)
+    est_xyz: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, 1.0], [1.0, 0.5, 2.0], [-1.0, 0.0, 0.5]])
+    rec = rr.RecordingStream("run", recording_id="capture-video")
+    rec.save(tmp_path / "capture.rrd")
+    video = FrameVideo(rec, "cam/normals", 30.0)
+    shades: list[int] = [40, 90, 140, 200]
+    for row, shade in enumerate(shades):
+        rec.set_time("frame", sequence=row)
+        video.log(np.full((64, 96, 3), shade, dtype=np.uint8))
+    video.close()
+    for entity in ("metric/cloud_normals", "world/cloud_normals"):
+        rec.log(entity, rr.Points3D(est_xyz.astype(np.float32), colors=[[10, 20, 30]] * 3), static=True)
+    rec.flush()
+    rec.disconnect()
+    normals = read_capture_normals(tmp_path / "capture.rrd", se3, se3, video_rows={1, 3})
+    assert sorted(normals.images_jpeg) == [1, 3]
+    for row in (1, 3):
+        decoded: ndarray | None = cv2.imdecode(np.frombuffer(normals.images_jpeg[row], dtype=np.uint8), cv2.IMREAD_COLOR)
+        assert decoded is not None and decoded.shape == (64, 96, 3) and abs(float(decoded.mean()) - shades[row]) < 6.0, "the row's own frame"
 
 
 def port_config(runs_root: Path, *, repo_commit: str | None = None, producer: str = "examples-monorepo metrictrail @ {commit} (port)") -> Config:
