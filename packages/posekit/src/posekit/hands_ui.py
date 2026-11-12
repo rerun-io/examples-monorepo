@@ -1,4 +1,7 @@
-"""Gradio app: 3D hands in a video (WiLoR or an EgoHand stack), streamed into an embedded Rerun viewer.
+"""The hands app's pipelines and runs: 3D hands in a video (WiLoR or an EgoHand stack), streamed to a Rerun viewer.
+
+No Gradio here: the widgets, their wiring and the server live in :mod:`posekit.hands_app_ui`, the only code
+``posekit-hands-app-dev`` hot reloads; this module holds the loaded pipelines, so they stay loaded while the layout reloads.
 
 One input, a video. The app runs the CLI's code path: each Run builds the same
 :class:`~posekit.apis.video_hands.VideoHandsSettings` the CLI parses from the widgets and drains
@@ -8,19 +11,17 @@ is chosen; edit them if you know the camera.
 """
 
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-import gradio as gr
 import rerun as rr
 import torch
-from gradio_rerun import Rerun
 from jaxtyping import UInt8
 from torch import Tensor
 
 from posekit.apis.video_hands import (
     EXAMPLES,
+    VideoHandsProgress,
     VideoHandsSettings,
     assumed_pinhole,
     build_pipeline,
@@ -36,9 +37,7 @@ from posekit.predictions import MeshDetail
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
-VIDEO_SUFFIXES: Final[tuple[str, ...]] = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
-"""Uploads the app takes (Gradio matches them case-insensitively, so an iPhone's .MOV too); ``as_mp4`` remuxes the non-MP4 ones."""
-_PIPELINES: dict[str, HandPose3dPipeline] = {}
+PIPELINES: dict[str, HandPose3dPipeline] = {}
 """Set-up pipelines by stack name: engines stay loaded for the app's lifetime, so switching stacks costs nothing."""
 
 
@@ -47,19 +46,19 @@ def default_stack() -> str:
     return "egohand-fast" if supported_backbone_precision() == "nvfp4" else "egohand-fast-bf16"
 
 
-def example_rows() -> list[list[str]]:
-    """``[video, stack]`` per example: egocentric clips on the accepted EgoHand stack, and WiLoR's original
-    demo clip (a person on stage with a microphone, exocentric) on WiLoR (EgoHand is egocentric).
+def example_rows(examples: Path = EXAMPLES) -> list[list[str]]:
+    """``[video, stack]`` per example in directory ``examples``: egocentric clips on the accepted EgoHand stack, and
+    WiLoR's original demo clip (a person on stage with a microphone, exocentric) on WiLoR (EgoHand is egocentric).
 
     The GSI clips are head-camera pinholes (1920x1080); the Gen-HumanEgo clips (1600x1300) were remapped from
     the double-sphere head camera into a 65° pinhole, so the app's assumed camera is their true one.
     """
     return [
-        [str(EXAMPLES / "gsi_sewing_left_front.mp4"), default_stack()],
-        [str(EXAMPLES / "genhumanego_kettle.mp4"), default_stack()],
-        [str(EXAMPLES / "genhumanego_garlic.mp4"), default_stack()],
-        [str(EXAMPLES / "gsi_workbench_left_front.mp4"), default_stack()],
-        [str(EXAMPLES / "hands_video.mp4"), "wilor"],
+        [str(examples / "gsi_sewing_left_front.mp4"), default_stack()],
+        [str(examples / "genhumanego_kettle.mp4"), default_stack()],
+        [str(examples / "genhumanego_garlic.mp4"), default_stack()],
+        [str(examples / "gsi_workbench_left_front.mp4"), default_stack()],
+        [str(examples / "hands_video.mp4"), "wilor"],
     ]
 
 
@@ -97,21 +96,21 @@ def prepare(stack: str) -> None:
 
 
 def pipeline_for(stack: str) -> HandPose3dPipeline:
-    """The pipeline of ``stack``, set up (TensorRT engines built or loaded) on first use and kept."""
-    if stack not in _PIPELINES:
-        _PIPELINES[stack] = build_pipeline(VideoHandsSettings(detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack]))
-    return _PIPELINES[stack]
+    """The pipeline of ``stack``, set up on first use (models loaded, TensorRT engines built or loaded) and kept."""
+    if stack not in PIPELINES:
+        PIPELINES[stack] = build_pipeline(VideoHandsSettings(detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack]))
+    return PIPELINES[stack]
 
 
-def warm_up() -> None:
-    """Set up every example's stack and run it once on the example's first chunk.
+def warm_up(examples: list[list[str]] | None = None) -> None:
+    """Set up the stack of every ``[video, stack]`` example (None: ``example_rows()``) and run it once on the example's first chunk.
 
     Setup builds or loads the TensorRT engines; the first call compiles and captures CUDA graphs
     for that frame size (~4 s for ``egohand-fast``). Done at start, the examples run at full speed
     from the first click; an upload of a new frame size pays well under a second once.
     """
     warmed: set[tuple[str, int, int]] = set()
-    for video, stack in example_rows():
+    for video, stack in example_rows() if examples is None else examples:
         settings = VideoHandsSettings(video_path=Path(video), detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack])
         decoder = open_decoder(settings.video_path, "cuda")
         assert decoder.metadata.width is not None and decoder.metadata.height is not None
@@ -127,76 +126,13 @@ def warm_up() -> None:
 
 
 @rr.thread_local_stream("posekit_hands_ui")
-def stream_hands(
-    video: str | None, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None
-) -> Iterator[tuple[bytes | None, str]]:
-    """Run the shared video hands core and stream the recording to the viewer after every chunk."""
+def stream_hands(settings: VideoHandsSettings, stack: str) -> Iterator[tuple[bytes | None, VideoHandsProgress]]:
+    """Run the shared video hands core on ``stack``'s pipeline and stream the recording to the viewer after every step.
+
+    Yields:
+        The new recording bytes and the run's progress.
+    """
     stream: rr.BinaryStream = rr.binary_stream()
-    if video is None:
-        yield stream.read(), "Choose a video first."
-        return
-    settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy, VideoHandsSettings().mesh_detail)
-    if stack not in _PIPELINES:
-        yield stream.read(), f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
     pipeline: HandPose3dPipeline = pipeline_for(stack)
     for progress in run_video_hands(settings, pipeline):
-        yield stream.read(), str(progress)  # the app's status box takes the line; the hands app PR reads the fields
-
-
-def build() -> gr.Blocks:
-    """A video input with an Advanced accordion beside a streaming Rerun viewer."""
-    viewer = Rerun(streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=800)
-    with gr.Blocks() as demo:
-        gr.Markdown(
-            "# 3D hands with Rerun\n"
-            "posekit's hand stacks on a video: boxes and the projected 3D hands on the video, the camera and the 3D hands beside it. "
-            "The camera is an assumed pinhole unless you edit it under Advanced. Same code as `posekit-video-hands`."
-        )
-        with gr.Row():
-            with gr.Column(scale=1):
-                tabs = gr.Tabs(selected="inputs")
-                with tabs:
-                    with gr.TabItem("Inputs", id="inputs"):
-                        video = gr.File(label="Video", file_types=list(VIDEO_SUFFIXES), type="filepath")
-                        run = gr.Button("Run", variant="primary")
-                        with gr.Accordion("Advanced", open=False):
-                            stack = gr.Dropdown(label="Hand stack", choices=STACKS, value=default_stack())
-                            max_frames = gr.Number(label="Max frames (0 = all)", value=0, precision=0)
-                            gr.Markdown(
-                                f"Pinhole intrinsics in pixels, filled from a {VideoHandsSettings().hfov_deg:g}° horizontal FOV "
-                                "with the principal point at the image centre."
-                            )
-                            with gr.Row():
-                                fx = gr.Number(label="fx")
-                                fy = gr.Number(label="fy")
-                            with gr.Row():
-                                cx = gr.Number(label="cx")
-                                cy = gr.Number(label="cy")
-                    with gr.TabItem("Outputs", id="outputs"):
-                        status = gr.Text("Upload a video to begin.", label="Status")
-                gr.Examples(examples=example_rows(), inputs=[video, stack])
-            with gr.Column(scale=5):
-                viewer.render()
-        video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])
-        run.click(fn=lambda: gr.update(selected="outputs"), inputs=None, outputs=[tabs]).then(
-            stream_hands, inputs=[video, stack, max_frames, fx, fy, cx, cy], outputs=[viewer, status]
-        )
-    return demo
-
-
-@dataclass(frozen=True, slots=True)
-class Config:
-    """Serve the hands app."""
-
-    server_name: str = "127.0.0.1"
-    """Interface on which Gradio listens."""
-    server_port: int = 7872
-    """Gradio HTTP port."""
-
-
-def launch(config: Config) -> None:
-    """Warm up the examples' stacks, then serve the app; one request at a time shares the GPU pipelines."""
-    warm_up()
-    demo = build()
-    demo.queue(max_size=1, default_concurrency_limit=1)
-    demo.launch(server_name=config.server_name, server_port=config.server_port, ssr_mode=False, allowed_paths=[str(EXAMPLES)])
+        yield stream.read(), progress

@@ -1285,6 +1285,13 @@ cmd = "python tools/apps/hands_app.py"
 cwd = "packages/posekit"
 description = "Launch the 3D hands Gradio app (posekit-video-hands' code: WiLoR or an EgoHand stack) with an embedded Rerun viewer (http://127.0.0.1:7872)"
 
+# Hot reload: run from tools/apps so Gradio watches only the launcher and the layout package; the pipelines
+# (posekit.hands_ui, the models) are not watched and stay loaded. Watch dirs must be absolute.
+[feature.posekit-hands.tasks.posekit-hands-app-dev]
+cmd = "gradio hands_app.py --watch-dirs $PIXI_PROJECT_ROOT/packages/posekit/src/posekit/hands_app_ui"
+cwd = "packages/posekit/tools/apps"
+description = "The 3D hands app with Gradio hot reload: edits under posekit/hands_app_ui show in the open tab within a second, the models stay loaded (args after --)"
+
 [feature.posekit-hands.tasks.posekit-hands-eval]
 cmd = "python tools/apps/hands_eval.py"
 cwd = "packages/posekit"
