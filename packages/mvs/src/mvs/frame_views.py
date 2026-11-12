@@ -2,18 +2,19 @@
 
 Ported from the original SimpleRecon live-meshing demo by Pablo Vela (repo pablovela5620/simplerecon-inference,
 ``live_meshing.py``, ``config.LogConfig`` and ``utils/geometry_utils.NormalGenerator`` at d5bc1a0): the green current
-frustum, the source frusta and their images, the depth normals and the lowest matching cost.
+frustum, the source frusta and their images, the depth normals and the depth of the cost volume's best plane (``lowest_cost``).
 """
 
 from dataclasses import dataclass
 
+import depth_png
 import kornia
 import numpy as np
 import rerun as rr
 import torch
 import torch.nn.functional as functional
 from einops import rearrange, reduce
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
 from torch import Tensor
 
@@ -35,11 +36,12 @@ class LogConfig:
     normals: bool = True
     """Log the normals of the predicted depth."""
     lowest_cost: bool = True
-    """Log the cost volume's lowest matching cost."""
+    """Log the depth of the cost volume's best plane per pixel (the original's lowest cost)."""
     timings: bool = True
     """Log the per-stage timings, ms."""
-    jpeg_quality: int | None = None
-    """JPEG-compress the source and normal images at this quality; None logs raw uint8."""
+    jpeg_quality: int | None = 75
+    """JPEG-compress the source and normal images at this quality; ``--log.jpeg-quality None`` logs raw uint8 (the
+    original's default), about 7x the recording size."""
 
     def __post_init__(self) -> None:
         if self.jpeg_quality is not None and not 1 <= self.jpeg_quality <= 100:
@@ -101,9 +103,7 @@ def depth_normals(
     height: int = depth_b1hw.shape[-2]
     width: int = depth_b1hw.shape[-1]
     smooth_b1hw: Float32[Tensor, "b 1 h w"] = kornia.filters.gaussian_blur2d(depth_b1hw, (kernel_size, kernel_size), (std, std))
-    xx_hw, yy_hw = torch.meshgrid(
-        torch.arange(width, device=depth_b1hw.device), torch.arange(height, device=depth_b1hw.device), indexing="xy"
-    )
+    xx_hw, yy_hw = torch.meshgrid(torch.arange(width, device=depth_b1hw.device), torch.arange(height, device=depth_b1hw.device), indexing="xy")
     pix_3n: Float32[Tensor, "3 n"] = torch.stack((xx_hw + 0.5, yy_hw + 0.5, torch.ones_like(xx_hw, dtype=torch.float32))).flatten(1).float()
     rays_b3n: Float32[Tensor, "b 3 n"] = torch.matmul(invK_b33, pix_3n)
     points_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(smooth_b1hw.flatten(start_dim=2) * rays_b3n, "b i (h w) -> b i h w", h=height, w=width)
@@ -118,15 +118,15 @@ def normals_rgb(normals_3hw: Float32[Tensor, "3 h w"]) -> UInt8[ndarray, "h w 3"
     return np.asarray(np.clip(rgb_hw3, 0.0, 1.0) * 255.0, dtype=np.uint8)
 
 
-def log_normals(
-    paths: EntityPaths, depth_b1hw: Float32[Tensor, "1 1 h w"], K_depth_33: Float32[ndarray, "3 3"], jpeg_quality: int | None
-) -> None:
+def log_normals(paths: EntityPaths, depth_b1hw: Float32[Tensor, "1 1 h w"], K_depth_33: Float32[ndarray, "3 3"], jpeg_quality: int | None) -> None:
     """Log the normals of the predicted depth under the depth pinhole."""
     invK_133: Float32[Tensor, "1 3 3"] = torch.linalg.inv(torch.from_numpy(K_depth_33).to(depth_b1hw.device))[None]
     log_image(paths.normal, normals_rgb(depth_normals(depth_b1hw, invK_133)[0]), jpeg_quality)
 
 
 def log_lowest_cost(paths: EntityPaths, lowest_cost_bhw: Float32[Tensor, "1 h w"]) -> None:
-    """Log the lowest matching cost as a float DepthImage at its matching size (the original's float32 default)."""
-    lowest_cost_hw: Float32[ndarray, "h w"] = lowest_cost_bhw[0].float().cpu().numpy()
-    rr.log(paths.lowest_cost, rr.DepthImage(lowest_cost_hw, meter=1.0))
+    """Log the depth of the cost volume's best plane at its matching size, as a millimetre 16-bit PNG like the depth."""
+    lowest_cost_mm_hw: UInt16[ndarray, "h w"] = (
+        (lowest_cost_bhw[0].float() * 1000.0).round().clamp(0.0, 65535.0).to(torch.int32).cpu().numpy().astype(np.uint16)
+    )
+    rr.log(paths.lowest_cost, rr.EncodedDepthImage(blob=depth_png.encode(lowest_cost_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0))

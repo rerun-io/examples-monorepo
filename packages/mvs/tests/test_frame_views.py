@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import depth_png
 import numpy as np
 import pytest
 import rerun as rr
@@ -50,7 +51,8 @@ def _columns(target: Path) -> dict[str, dict[str, list]]:
 def test_log_config_defaults_log_the_full_layout_and_check_the_jpeg_quality() -> None:
     config = LogConfig()
     assert config.camera and config.source_cams and config.normals and config.lowest_cost and config.timings
-    assert config.jpeg_quality is None
+    assert config.jpeg_quality == 75
+    assert LogConfig(jpeg_quality=None).jpeg_quality is None
     assert LogConfig(jpeg_quality=85).jpeg_quality == 85
     for quality in (0, 101):
         with pytest.raises(ValueError, match="jpeg_quality"):
@@ -107,4 +109,8 @@ def test_log_sources_writes_seven_small_frusta_and_their_images(tmp_path: Path) 
         assert pinhole["Pinhole:image_plane_distance"] == [[pytest.approx(SOURCE_CAM_PLANE_M)]]
         assert f"/{PATHS.source_rgb(index)}" in columns
     assert columns[f"/{PATHS.source_cam(6)}"]["Transform3D:translation"] == [[[6.0, 0.0, 0.0]]]
-    assert columns[f"/{PATHS.lowest_cost}"]["DepthImage:meter"] == [[1.0]]
+    lowest_cost = columns[f"/{PATHS.lowest_cost}"]
+    assert lowest_cost["EncodedDepthImage:meter"] == [[1000.0]]
+    decoded = depth_png.decode(bytes(lowest_cost["EncodedDepthImage:blob"][0][0]))
+    assert decoded.dtype == np.uint16 and decoded.shape == (96, 128)
+    assert (decoded == 250).all()

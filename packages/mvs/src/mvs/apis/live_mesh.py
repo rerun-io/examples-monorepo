@@ -5,8 +5,9 @@ frame is fused into a sparse colour TSDF (``packages/tsdf-rs``) at the catalog p
 :class:`simplecv.rerun_live_mesh.LiveMeshLog`: the changed super-blocks on the timeline while the segment plays, one
 mesh from its last depth frame. The recording carries the original SimpleRecon live-meshing layout
 (:func:`mvs.blueprint.create_blueprint`, ``native``) and logs what its views show (:mod:`mvs.frame_views`): the green
-current frustum, the seven source frusta and images of each depth query, the depth, its normals, the lowest matching
-cost, and the per-stage timings in ms. The source video is relayed once as a VideoStream, never re-encoded per frame.
+current frustum, the seven source frusta and images of each depth query, the depth, its normals, the depth of the cost
+volume's best plane, and the per-stage timings in ms. The views are logged on one worker thread (:mod:`mvs.log_worker`).
+The source video is relayed once as a VideoStream, never re-encoded per frame.
 
 One run meshes one segment (:func:`single_segment`): every segment restarts its frame index at 0, so a second segment
 in the same recording would mix its mesh history with the first one's.
