@@ -16,15 +16,40 @@ evaluation and the catalog layer. ViPE itself comes from `recipes/vipe-src`.
 | Kernels | Mojo, one source for CPU and CUDA, compiled for the local GPU. ViPE's CUDA extension `vipe_ext` is not built: patch 0007 makes `vipe.ext` import `packages/vipe-mojo`'s `vipe_mojo` (the ops MetricTrail calls; the others raise `NotImplementedError` naming the op). DPVO's kernels are `packages/dpvo`'s `dpvo.mojo_backend`. Built by the `vipe-mojo-build` and `dpvo-mojo-build` tasks (a `depends-on` of `metrictrail-run`, `metrictrail-app` and `tests-integration`) | no nvcc build at `pixi install`; one kernel source per op for every device. |
 | lietorch | patch 0001: ViPE's vendored lietorch (`vipe/ext/lietorch`) imports `lietorch_mojo` and `build.sh` deletes the vendored code; the DPVO shim's `lietorch` re-exports it too (the DPVO copies go with ViPE's DPVO) | one lietorch for the workspace (lietorch-mojo). ViPE's copies are code-identical to upstream lietorch. |
 | DINOv3 | patch 0002: `recipes/dinov3-src` (a run dependency) | the same ViT-S/16; patch tokens are bit-identical. |
-| MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds only that registry and the `fuse_point_cloud` hook `metrictrail.fusion` uses for the normals) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid at 3600 tokens; torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
+| MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds only that registry and the `fuse_point_cloud` hook `metrictrail.fusion` uses for the normals) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid (1,200 tokens by default); torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
 | DPVO | `packages/dpvo`'s `dpvo.metric.MetricDPVO` (an editable path dependency of the `metrictrail` feature). The recipe deletes ViPE's vendored DPVO, its kernels and the stereo runner, and installs re-export shims at `vipe.metrictrail.dpvo` (`recipes/vipe-src/dpvo_shim`), so ViPE's `slam.py` builds `MetricDPVO` from its yacs config unchanged; patch 0005 hands the DINO patchifier `packages/dpvo`'s patchify keywords | one DPVO for the workspace. ViPE's fork (metric-depth local BA, the metric global-BA backend, the `cuda_ba` prior kernel) is ported onto the typed core's hooks; the three presets run ViPE's operations in ViPE's order (lockstep against ViPE's copy on TUM, 7-Scenes and KITTI). MetricTrail does not use DBoW loop closure, so `packages/dpretrieval` is not used. `metrictrail.capture` observes DPVO through `dpvo.hooks.add_global_observer`. |
 
 Weights are on the NAS (`/mnt/nas/ssd-8tb/metrictrail/weights`, `MANIFEST.md` beside them). The `metrictrail` feature
 sets ViPE's checkpoint variables to these files. MoGe-2's `moge-2-vitl-normal` is the exception: monoprior loads it from
 the Hugging Face cache (pinned revision) when it exports the ONNX for a new token grid or when the torch fallback runs.
 ONNX files and TensorRT engines are cached under `~/.cache/monoprior` (`MONOPRIOR_TRT_CACHE`); the first run on a new
-raster aspect builds its engines (about 40 s each on the RTX 5090; TUM needs two, 728x966 for tracking and 714x980 for
-the SharedK calibration raster).
+raster aspect builds its engines (about 40 s each on the RTX 5090); tracking and SharedK calibration can need
+separate grids.
+
+The CLI and app use MoGe-2 detail level 0 (1,200 tokens) for calibration and tracking, and 64 patches per frame.
+These are deliberate accuracy/speed trades. Set `--depth-resolution-level 9 --patches-per-frame 96` to restore the
+original depth grid and patch count. Each detail level has its own engines and forward cache; the run record stores
+the selected level and resolved tracker configuration. The wider paper evaluation below used level 9 and 96 patches
+and has not been repeated with these defaults.
+
+The `ours` path replays DINO and both DPVO convolutional encoders with CUDA graphs during inference. Graphs are scoped
+to one run and separated by model, raster and precision; FP32 recovery uses its own graph. Returned features own their
+storage, and logging stays outside capture. The recurrent update prepares its neighbor/group indices before replay;
+its cache holds at most eight recurring shapes, with uncommon shapes evaluated normally.
+Factor pruning and motion checks reuse compacted edge indices across their tensors. Motion checks and inference
+projection use fused Mojo kernels that preserve per-camera intrinsics, quaternion normalization and near-plane
+clipping. Projection keeps its original autograd path when gradients are enabled. CUDA correlation pairs neighboring
+half-precision outputs with native half arithmetic, keeping the channel order and separate product/sum rounding.
+
+On the shared RTX 5090, the 642-frame `IMG_0493.mp4` clip measured **68.27 tracking FPS** without capture and
+**46.25 FPS** with capture (median of three full runs each, prod environment, no mesh). Process wall medians were
+34.96 / 38.52 s, including SharedK calibration at 16.36 / 17.52 s. The original 3,600-token, 96-patch path measured
+26.83 / 24.29 tracking FPS. GPU contention matters: final no-capture samples were 69.28, 68.27 and 56.73 FPS.
+These are tracking rates; model loading, calibration and final logging add to the process wall time.
+
+The final TUM fr1_desk check (seed 1234) gave **2.307 cm Sim(3) ATE**, scale **1.06327**, and 5.684 cm SE(3) ATE.
+The original settings gave 2.186 cm, 1.05873 and 5.313 cm. The new defaults pass the fixed guard of at most 10% more
+Sim(3) ATE and a scale change within 0.02. All 613 TUM poses and all 642 poses in each video run were finite.
 
 ## Run
 

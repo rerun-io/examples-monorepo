@@ -18,6 +18,7 @@ architecture description (Sec. 3).
 """
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -105,6 +106,32 @@ def sample_valid_centroids(
         xs.append(torch.cat(kept_x)[:count])
         ys.append(torch.cat(kept_y)[:count])
     return torch.stack(xs), torch.stack(ys)
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateTopology:
+    """Neighbor and aggregation indices prepared before neural inference.
+
+    Dynamic group discovery can synchronize CUDA. Keeping it outside the
+    neural forward lets that fixed-shape work run in a CUDA graph.
+    """
+
+    previous: Int64[Tensor, "edges"]
+    """Previous edge of each patch, or -1 when there is none."""
+    following: Int64[Tensor, "edges"]
+    """Next edge of each patch, or -1 when there is none."""
+    patch_groups: tuple[Int64[Tensor, "edges"], int]
+    """Contiguous patch-group index of each edge and the group count."""
+    frame_groups: tuple[Int64[Tensor, "edges"], int]
+    """Contiguous source/target frame-pair index of each edge and the group count."""
+
+    @classmethod
+    def from_edges(cls, ii: Int[Tensor, "edges"], jj: Int[Tensor, "edges"], kk: Int[Tensor, "edges"]) -> "UpdateTopology":
+        """Prepare the same stable neighbors and sorted groups used by an ordinary update."""
+        previous, following = fastba.neighbors(kk, jj)
+        patches, patch_inverse = torch.unique(kk, return_inverse=True)
+        pairs, pair_inverse = torch.unique(ii * 12345 + jj, return_inverse=True)
+        return cls(previous, following, (patch_inverse, patches.numel()), (pair_inverse, pairs.numel()))
 
 
 class Update(nn.Module):
@@ -206,6 +233,8 @@ class Update(nn.Module):
         ii: Int[Tensor, "n_edges"],
         jj: Int[Tensor, "n_edges"],
         kk: Int[Tensor, "n_edges"],
+        *,
+        topology: UpdateTopology | None = None,
     ) -> tuple[Float[Tensor, "1 n_edges dim"], tuple[Float[Tensor, "1 n_edges 2"], Float[Tensor, "1 n_edges 2"], None]]:
         """Run one iteration of the recurrent update operator.
 
@@ -220,6 +249,8 @@ class Update(nn.Module):
             ii: Source frame index per edge.
             jj: Target frame index per edge.
             kk: Patch index per edge.
+            topology: Precomputed neighbors and groups for these edges; useful
+                when replaying the neural work in a CUDA graph.
 
         Returns:
             A 2-tuple of:
@@ -228,6 +259,9 @@ class Update(nn.Module):
               predicted pixel displacement ``(1, n_edges, 2)`` and ``weight``
               is the sigmoid confidence ``(1, n_edges, 2)``.
         """
+        if topology is None:
+            topology = UpdateTopology.from_edges(ii, jj, kk)
+
         # Step 1: Inject correlation and context into hidden state
         net: Float[Tensor, "1 n_edges dim"] = net + inp + self.corr(corr)
         net = self.norm(net)
@@ -236,7 +270,7 @@ class Update(nn.Module):
         # ix, jx are indices of the "other" edge sharing the same (kk, jj)
         ix: Int[Tensor, "n_edges"]
         jx: Int[Tensor, "n_edges"]
-        ix, jx = fastba.neighbors(kk, jj)
+        ix, jx = topology.previous, topology.following
         # Mask out invalid neighbours (index -1 means no neighbour found)
         mask_ix: Float[Tensor, "1 n_edges 1"] = (ix >= 0).float().reshape(1, -1, 1)
         mask_jx: Float[Tensor, "1 n_edges 1"] = (jx >= 0).float().reshape(1, -1, 1)
@@ -248,10 +282,10 @@ class Update(nn.Module):
 
         # Step 2b: Attention-weighted scatter aggregation
         # Spatial: pool across all edges sharing the same patch index kk
-        net = net + self.agg_kk(net, kk)
+        net = net + self.agg_kk(net, kk, grouping=topology.patch_groups)
         # Temporal: pool across edges connecting the same frame pair (ii, jj)
         # The hash ii*12345+jj maps each (ii,jj) pair to a unique group ID
-        net = net + self.agg_ij(net, ii*12345 + jj)
+        net = net + self.agg_ij(net, ii*12345 + jj, grouping=topology.frame_groups)
 
         # Step 3: Gated residual GRU update
         net = self.gru(net)

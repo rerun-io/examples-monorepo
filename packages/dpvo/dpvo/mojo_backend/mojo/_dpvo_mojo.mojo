@@ -53,6 +53,7 @@ from pgo import (
     pgo_chain_solve,
     pgo_chain_solve_kernel,
 )
+from projective import flow_magnitude_element, flow_magnitude_kernel, project_points_element, project_points_kernel
 
 # ── tensor views from (address, *shape) tuples ──────────────────────────────
 
@@ -151,6 +152,9 @@ def _numel(s: PythonObject) raises -> Int:
 def _corr_gpu[dtype: DType](mut rt: GPURuntime, stream: Int, radius: Int, t: PythonObject) raises:
     var out = out6[dtype](t[5])
     var total = _numel(t[5])
+    var threads = total
+    comptime if dtype == DType.float16:
+        threads //= 2  # CUDA half2 handles two neighboring search columns per thread.
     var func = rt.ctx.compile_function[corr_kernel[dtype]]()
     rt.torch_stream(stream).enqueue_function(
         func,
@@ -162,7 +166,7 @@ def _corr_gpu[dtype: DType](mut rt: GPURuntime, stream: Int, radius: Int, t: Pyt
         in1[DType.int64](t[3]),
         in1[DType.int64](t[4]),
         out,
-        grid_dim=ceildiv(total, NUM_THREADS),
+        grid_dim=ceildiv(threads, NUM_THREADS),
         block_dim=NUM_THREADS,
     )
 
@@ -248,6 +252,82 @@ def patchify_cpu_py(runtime: PythonObject, scalars: PythonObject, tensors: Pytho
 
 
 # ── bundle adjustment ────────────────────────────────────────────────────────
+
+
+def project_points_gpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    """Scalars = (stream,); tensors = (poses, patches, intrinsics, source, target, patch, coordinates)."""
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var n = _dim(t[3], 0)
+    var func = rt[].ctx.compile_function[project_points_kernel]()
+    rt[].torch_stream(Int(py=scalars[0])).enqueue_function(
+        func,
+        in2[DType.float32](t[0]),
+        in4[DType.float32](t[1]),
+        in2[DType.float32](t[2]),
+        in1[DType.int64](t[3]),
+        in1[DType.int64](t[4]),
+        in1[DType.int64](t[5]),
+        out4[DType.float32](t[6]),
+        grid_dim=ceildiv(n, NUM_THREADS),
+        block_dim=NUM_THREADS,
+    )
+    return Python.none()
+
+
+def project_points_cpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    var rt = runtime.downcast_value_ptr[CPURuntime]()
+    var poses = in2[DType.float32](t[0])
+    var patches = in4[DType.float32](t[1])
+    var intrinsics = in2[DType.float32](t[2])
+    var source = in1[DType.int64](t[3])
+    var target = in1[DType.int64](t[4])
+    var patch = in1[DType.int64](t[5])
+    var coordinates = out4[DType.float32](t[6])
+
+    def element(n: Int) {imm}:
+        project_points_element(n, poses, patches, intrinsics, source, target, patch, coordinates)
+
+    rt[].for_each_row(element, _dim(t[3], 0))
+    return Python.none()
+
+
+def flow_magnitude_gpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    """Scalars = (stream, beta); tensors = (poses, patches, intrinsics, source, target, patch, flow)."""
+    var rt = runtime.downcast_value_ptr[GPURuntime]()
+    var n = _dim(t[3], 0)
+    var func = rt[].ctx.compile_function[flow_magnitude_kernel]()
+    rt[].torch_stream(Int(py=scalars[0])).enqueue_function(
+        func,
+        Float32(Float64(py=scalars[1])),
+        in2[DType.float32](t[0]),
+        in4[DType.float32](t[1]),
+        in2[DType.float32](t[2]),
+        in1[DType.int64](t[3]),
+        in1[DType.int64](t[4]),
+        in1[DType.int64](t[5]),
+        out3[DType.float32](t[6]),
+        grid_dim=ceildiv(n, NUM_THREADS),
+        block_dim=NUM_THREADS,
+    )
+    return Python.none()
+
+
+def flow_magnitude_cpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
+    var rt = runtime.downcast_value_ptr[CPURuntime]()
+    var beta = Float32(Float64(py=scalars[1]))
+    var poses = in2[DType.float32](t[0])
+    var patches = in4[DType.float32](t[1])
+    var intrinsics = in2[DType.float32](t[2])
+    var source = in1[DType.int64](t[3])
+    var target = in1[DType.int64](t[4])
+    var patch = in1[DType.int64](t[5])
+    var flow = out3[DType.float32](t[6])
+
+    def element(n: Int) {imm}:
+        flow_magnitude_element(n, beta, poses, patches, intrinsics, source, target, patch, flow)
+
+    rt[].for_each_row(element, _dim(t[3], 0))
+    return Python.none()
 
 
 def reproject_gpu_py(runtime: PythonObject, scalars: PythonObject, t: PythonObject) raises -> PythonObject:
@@ -624,6 +704,10 @@ def PyInit__dpvo_mojo() abi("C") -> PythonObject:
         m.def_function[patchify_cpu_py]("patchify_cpu")
         m.def_function[reproject_gpu_py]("reproject_gpu")
         m.def_function[reproject_cpu_py]("reproject_cpu")
+        m.def_function[project_points_gpu_py]("project_points_gpu")
+        m.def_function[project_points_cpu_py]("project_points_cpu")
+        m.def_function[flow_magnitude_gpu_py]("flow_magnitude_gpu")
+        m.def_function[flow_magnitude_cpu_py]("flow_magnitude_cpu")
         m.def_function[hessian_gpu_py]("hessian_gpu")
         m.def_function[hessian_cpu_py]("hessian_cpu")
         m.def_function[depth_prior_gpu_py]("depth_prior_gpu")
