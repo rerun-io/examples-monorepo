@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
 import sys
@@ -27,6 +28,7 @@ from simplecv.rerun_custom_types import (
 )
 from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value, unwrap_singleton_lists
 
+logger: logging.Logger = logging.getLogger(__name__)
 
 def compute_vertex_normals(
     verts: Float32[ndarray, "n_verts 3"],
@@ -324,13 +326,14 @@ def log_video(
     # The VideoStream chunks carry the sample times on ``timeline``; they are the frame
     # timestamps, so no separate AssetVideo probe (which rejects QuickTime-brand .MOV files).
     times: list[Int[ndarray, "rows"]] = []
-    try:
+
+    def send(try_gpu: bool) -> None:
         reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
             video_source,
             mode="stream",
             entity_path=str(video_log_path),
             timeline_name=timeline,
-            transcode=rr.experimental.Mp4TranscodeOptions(output_codec=output_codec, try_gpu=True),
+            transcode=rr.experimental.Mp4TranscodeOptions(output_codec=output_codec, try_gpu=try_gpu),
         )
 
         def _chunks_recording_times() -> Iterator[rrc.Chunk]:
@@ -342,6 +345,17 @@ def log_video(
                 yield chunk
 
         target_recording.send_chunks(_chunks_recording_times())
+
+    # A source Rerun must re-encode (B-frames, a codec override) goes to NVENC; when that fails before any sample was
+    # sent (no libnvidia-encode, as on ZeroGPU), libx264 encodes it instead.
+    try:
+        try:
+            send(try_gpu=True)
+        except RuntimeError as gpu_error:
+            if times:
+                raise
+            logger.warning("NVENC cannot encode %s, the CPU encodes it (slower): %s", video_source, gpu_error)
+            send(try_gpu=False)
     except RuntimeError as exc:
         raise RuntimeError(f"Mp4Reader failed for {video_source}: {exc}") from exc
 

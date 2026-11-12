@@ -10,7 +10,9 @@ The GPU-resident fast role, ``FastEgoHandPredictor``, shares the weights,
 detector and backbone export helpers below (see ``posekit.models.egohand_fast``).
 """
 
+import functools
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +35,7 @@ from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
 from posekit.cameras import CalibratedCamera
 from posekit.models.base import HandDetector, TopDownHandPose3d
 from posekit.ops.pil_resize import resize_bilinear_uint8
-from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, validate_frames_rgb
+from posekit.predictions import BoxDetections, HandDetections, HandPoses3d, HandSide, Keypoints3d, MeshDetail, validate_frames_rgb
 from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx, run_chunked
 from posekit.skeletons import SOMA_HAND, KeypointSkeleton
 
@@ -256,6 +258,49 @@ class _UpstreamHand:
     """Wrist-relative mesh in source camera axes, metres."""
 
 
+@dataclass(frozen=True, slots=True)
+class SomaMeshLod:
+    """One of SOMA's coarser levels of detail of one side's hand: its vertices from the model's (mid) mesh, and its triangles."""
+
+    faces: Int64[Tensor, "f 3"]
+    """Triangles of this level of detail."""
+    from_mid: Callable[[Float32[Tensor, "n 2859 3"]], Float32[Tensor, "n v 3"]]
+    """This level's vertices of posed mid meshes: ``low`` keeps a subset (SOMA orders the
+    mid mesh so it is the first 718), ``xlo`` applies SOMA's barycentric transfer (within 1.6 mm of SOMA's own xlo skinning)."""
+
+
+@functools.cache
+def soma_lod_tables(soma: Path, detail: MeshDetail) -> dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | torch.nn.Module]]:
+    """Per side, SOMA level of detail ``detail`` on the CPU: its triangles, and its vertices of the mid mesh as a subset
+    (``low``: vertex indices) or as SOMA's transfer (``xlo``: a module); SOMA gives each level exactly one of the two.
+
+    Built from the SOMA directory on first use (~1-2 s for both sides) and kept, so a process that forks GPU workers builds it once for all of them.
+    """
+    from soma.hand import SOMAHandLayer
+
+    tables: dict[HandSide, tuple[Int64[Tensor, "f 3"], Int64[Tensor, "v"] | torch.nn.Module]] = {}
+    for side in ("left", "right"):
+        layer = SOMAHandLayer(
+            data_root=str(soma), hand_type=side, device="cpu", identity_model_type="soma", mode="torch", lod=detail, load_correctives_model=False
+        )
+        mid_to_lod = layer.identity_lod_mid_ids if layer.identity_lod_transfer is None else layer.identity_lod_transfer
+        assert mid_to_lod is not None  # SOMA sets one of the two for every level below mid
+        tables[side] = (layer.faces.to(torch.int64), mid_to_lod)
+    return tables
+
+
+@functools.cache
+def soma_mesh_lod(soma: Path, detail: MeshDetail) -> dict[HandSide, SomaMeshLod]:
+    """Both sides at SOMA level of detail ``detail`` (``low`` or ``xlo``), on CUDA, moved there from ``soma_lod_tables`` on first use."""
+    meshes: dict[HandSide, SomaMeshLod] = {}
+    for side, (faces, mid_to_lod) in soma_lod_tables(soma, detail).items():
+        from_mid: Callable[[Float32[Tensor, "n 2859 3"]], Float32[Tensor, "n v 3"]] = (
+            functools.partial(torch.index_select, dim=1, index=mid_to_lod.cuda()) if isinstance(mid_to_lod, Tensor) else mid_to_lod.cuda()
+        )
+        meshes[side] = SomaMeshLod(faces=faces.cuda(), from_mid=from_mid)
+    return meshes
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EgoHandReconstruction(HandPoses3d):
     """Metric SOMA hands: camera-space joints and meshes plus the SOMA parameters behind them."""
@@ -270,9 +315,25 @@ class EgoHandReconstruction(HandPoses3d):
     """Camera-space wrist translation in metres."""
     scale_parameters: Float32[Tensor, "n s"] | None
     """Per-finger MHR scales; None for checkpoints without this head."""
+    soma: Path
+    """SOMA directory whose levels of detail ``at_mesh_detail`` sends."""
+
+    def at_mesh_detail(self, detail: MeshDetail) -> HandPoses3d:
+        """Each mesh at one of SOMA's levels of detail: ``low`` keeps 718 of the 2,859 vertices (1,422 triangles),
+        ``xlo`` interpolates 134 (258 triangles).
+
+        The model still runs on the full mesh, so the joints and the hand pose are unchanged; only the mesh sent
+        to a viewer is coarser.
+        """
+        if detail == "full" or self.vertices is None:
+            return self
+        level: dict[HandSide, SomaMeshLod] = soma_mesh_lod(self.soma, detail)
+        left: Bool[Tensor, "n 1 1"] = torch.tensor([side == "left" for side in self.sides], dtype=torch.bool, device=self.vertices.device)[:, None, None]
+        vertices: Tensor = torch.where(left, level["left"].from_mid(self.vertices), level["right"].from_mid(self.vertices))
+        return HandPoses3d(keypoints=self.keypoints, sides=self.sides, vertices=vertices, faces={side: mesh.faces for side, mesh in level.items()})
 
     @classmethod
-    def empty(cls, device: torch.device, faces: dict[HandSide, Tensor]) -> "EgoHandReconstruction":
+    def empty(cls, device: torch.device, faces: dict[HandSide, Tensor], soma: Path) -> "EgoHandReconstruction":
         """No hands: zero-row outputs on ``device``."""
         joints: int = SOMA_HAND.num_keypoints
         return cls(
@@ -285,6 +346,7 @@ class EgoHandReconstruction(HandPoses3d):
             scale=torch.empty((0,), device=device),
             translation=torch.empty((0, 3), device=device),
             scale_parameters=None,
+            soma=soma,
         )
 
 
@@ -430,6 +492,7 @@ class EgoHandPredictor(TopDownHandPose3d):
             model, config.batch_size, device="cuda", dtype=torch.bfloat16, use_perspective_cropping=True, perf_reporter=self
         )
         self.faces: dict[HandSide, Tensor] = soma_faces(model)
+        self.soma: Path = soma
         self.module_timers: dict[EgoHandStage, _ModuleTimer] = {"backbone": _ModuleTimer(model.backbone), "head": _ModuleTimer(model.hand_head)}
 
     def record_latency(self, stage: PerfStage, latency_ms: float) -> None:
@@ -497,7 +560,7 @@ class EgoHandPredictor(TopDownHandPose3d):
                 confidence.append(float(detections.boxes.scores[row]))
         device: torch.device = frames_rgb.device
         if not rows:
-            return EgoHandReconstruction.empty(device, self.faces)
+            return EgoHandReconstruction.empty(device, self.faces, self.soma)
         xyz: Float32[ndarray, "n 25 3"] = np.stack([row.pred_keypoints_3d + row.transl for row in rows]).astype(np.float32)
         xy: Float32[ndarray, "n 25 2"] = np.stack([project(camera, points.astype(np.float64)) for points in xyz]).astype(np.float32)
         xyz_tensor: Float32[Tensor, "n 25 3"] = torch.from_numpy(xyz).to(device)
@@ -514,6 +577,7 @@ class EgoHandPredictor(TopDownHandPose3d):
             sides=tuple(sides),
             vertices=torch.from_numpy(np.stack([row.pred_vertices + row.transl for row in rows]).astype(np.float32)).to(device),
             faces=self.faces,
+            soma=self.soma,
             rotations=torch.from_numpy(np.stack([row.poses for row in rows])).to(device),
             identity=torch.from_numpy(np.stack([row.identity_coeffs for row in rows])).to(device),
             scale=torch.tensor([row.global_scale for row in rows], dtype=torch.float32, device=device),
