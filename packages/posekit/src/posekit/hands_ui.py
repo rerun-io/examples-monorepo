@@ -19,10 +19,20 @@ from gradio_rerun import Rerun
 from jaxtyping import UInt8
 from torch import Tensor
 
-from posekit.apis.video_hands import EXAMPLES, VideoHandsSettings, assumed_pinhole, build_pipeline, pinhole_camera, run_video_hands, video_size
+from posekit.apis.video_hands import (
+    EXAMPLES,
+    VideoHandsSettings,
+    assumed_pinhole,
+    build_pipeline,
+    open_decoder,
+    pinhole_camera,
+    run_video_hands,
+    video_size,
+)
 from posekit.cameras import CalibratedCamera
 from posekit.models import HAND_DETECTORS, HAND_POSES, HandPose3dPipeline
 from posekit.models.egohand_fast import supported_backbone_precision
+from posekit.predictions import MeshDetail
 
 STACKS: Final[list[str]] = list(HAND_DETECTORS)
 """Every named hand stack, as on the CLI."""
@@ -63,12 +73,13 @@ def fill_intrinsics(video: str | None) -> tuple[float | None, float | None, floa
 
 
 def settings_from_inputs(
-    video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None
+    video: str, stack: str, max_frames: int, fx: float | None, fy: float | None, cx: float | None, cy: float | None,
+    mesh_detail: MeshDetail,
 ) -> VideoHandsSettings:
     """The widget values as the CLI's settings; the stack name selects the same detector and pose configs as the CLI subcommand."""
     return VideoHandsSettings(
         video_path=Path(video), fx=fx, fy=fy, cx=cx, cy=cy, detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack],
-        max_frames=max_frames if max_frames > 0 else None,
+        max_frames=max_frames if max_frames > 0 else None, mesh_detail=mesh_detail,
     )
 
 
@@ -86,22 +97,20 @@ def warm_up() -> None:
     for that frame size (~4 s for ``egohand-fast``). Done at start, the examples run at full speed
     from the first click; an upload of a new frame size pays well under a second once.
     """
-    from torchcodec.decoders import VideoDecoder
-
     warmed: set[tuple[str, int, int]] = set()
     for video, stack in example_rows():
-        settings: VideoHandsSettings = settings_from_inputs(video, stack, 0, None, None, None, None)
-        decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
+        settings = VideoHandsSettings(video_path=Path(video), detector=HAND_DETECTORS[stack], pose=HAND_POSES[stack])
+        decoder = open_decoder(settings.video_path, "cuda")
         assert decoder.metadata.width is not None and decoder.metadata.height is not None
         width, height = int(decoder.metadata.width), int(decoder.metadata.height)
         if (stack, width, height) in warmed:  # same graphs as an example already run
             continue
         warmed.add((stack, width, height))
-        frames: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(0, settings.frame_batch_size).data.contiguous()
+        frames: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(0, settings.frame_batch_size).data.contiguous().cuda()
         camera: CalibratedCamera = pinhole_camera(settings, width, height)
         print(f"[posekit] warming up {stack} on {settings.video_path.name}", flush=True)
         with torch.inference_mode():
-            pipeline_for(stack)(frames, camera)[1].in_pinhole(camera.intrinsics)
+            pipeline_for(stack)(frames, camera)[1].in_pinhole(camera.intrinsics).at_mesh_detail(settings.mesh_detail)
 
 
 @rr.thread_local_stream("posekit_hands_ui")
@@ -113,12 +122,12 @@ def stream_hands(
     if video is None:
         yield stream.read(), "Choose a video first."
         return
-    settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy)
+    settings: VideoHandsSettings = settings_from_inputs(video, stack, max_frames, fx, fy, cx, cy, VideoHandsSettings().mesh_detail)
     if stack not in _PIPELINES:
         yield stream.read(), f"Setting up {stack} (its first use builds or loads its TensorRT engines)..."
     pipeline: HandPose3dPipeline = pipeline_for(stack)
-    for status in run_video_hands(settings, pipeline):
-        yield stream.read(), status
+    for progress in run_video_hands(settings, pipeline):
+        yield stream.read(), str(progress)  # the app's status box takes the line; the hands app PR reads the fields
 
 
 def build() -> gr.Blocks:

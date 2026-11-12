@@ -14,11 +14,13 @@ from posekit.models import HandDetectorConfig, HandPose3dConfig, HandPose3dPipel
 
 @pytest.mark.parametrize("stack", ["wilor", "egohand-fast", "egohand-fast-bf16"])
 def test_inputs_become_the_cli_settings(stack: str) -> None:
-    settings = hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 32, 1000.0, None, 960.0, None)
+    settings = hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 32, 1000.0, None, 960.0, None, "low")
     assert settings.detector == tyro.cli(HandDetectorConfig, args=[stack])
     assert settings.pose == tyro.cli(HandPose3dConfig, args=[stack])
-    assert (settings.video_path, settings.max_frames, settings.fx, settings.fy, settings.cx, settings.cy) == (Path("/tmp/clip.mp4"), 32, 1000.0, None, 960.0, None)
-    assert hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 0, None, None, None, None).max_frames is None
+    assert (settings.video_path, settings.max_frames, settings.fx, settings.fy, settings.cx, settings.cy, settings.mesh_detail) == (
+        Path("/tmp/clip.mp4"), 32, 1000.0, None, 960.0, None, "low"
+    )
+    assert hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 0, None, None, None, None, "xlo").max_frames is None
 
 
 def test_choosing_a_video_fills_the_assumed_pinhole() -> None:

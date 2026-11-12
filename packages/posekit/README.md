@@ -119,6 +119,8 @@ video). The app's egocentric examples run on the EgoHand stack: GSI head-camera 
 (`assets/examples/hands_video.mp4`, a person on stage with a microphone) on WiLoR; choosing an
 example also selects its stack. A phone video works as it is: an iPhone `.MOV` (HEVC, portrait by its
 rotation flag) comes out upright, and `.mkv`/`.webm` are remuxed to MP4 for the viewer without re-encoding.
+EgoHand's meshes go to the viewer at SOMA's `xlo` level of detail by default (134 vertices per hand instead of
+2,859, 21x fewer bytes; the joints are unchanged); `--mesh-detail full|low|xlo` (Advanced settings in the app) picks another.
 
 | Model | Detector | 3D hands | Skeleton | Camera | Backends |
 |---|---|---|---|---|---|
