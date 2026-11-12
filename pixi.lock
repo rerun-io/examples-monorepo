@@ -96565,8 +96565,6 @@ packages:
   - cudnn >=9.23.2.1,<10.0a0
   - libcurand >=10.4.0.35,<11.0a0
   license: Apache-2.0
-  purls:
-  - pkg:pypi/gsplat?source=project-defined-mapping
   run_exports: {}
   size: 11935688
   timestamp: 1784685832280
@@ -96597,8 +96595,6 @@ packages:
   - cuda-nvrtc >=13.0.88,<14.0a0
   - python_abi 3.12.* *_cp312
   license: Apache-2.0
-  purls:
-  - pkg:pypi/gsplat?source=project-defined-mapping
   run_exports: {}
   size: 189364491
   timestamp: 1789722344041
@@ -96810,8 +96806,6 @@ packages:
   - cudnn >=9.26.0.51,<10.0a0
   - cuda-nvtx >=13.0.85,<14.0a0
   license: Apache-2.0
-  purls:
-  - pkg:pypi/gsplat?source=project-defined-mapping
   run_exports: {}
   size: 139640803
   timestamp: 1789722350597
