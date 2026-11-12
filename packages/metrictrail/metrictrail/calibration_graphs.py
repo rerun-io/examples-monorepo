@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from dpvo.graph_replay import PrecisionKey
 from jaxtyping import Int64
 from torch import Tensor
 from vipe.ext.lietorch import SE3
@@ -98,7 +99,7 @@ class PreparedUpdate:
         """Shapes, pose bounds, iteration count and precision determine the captured launch parameters."""
         return (self.t0, self.t1, self.iterations, self.motion_only, self.limited_disp,
                 tuple((tuple(value.shape), value.dtype, value.device) for value in self.tensors()),
-                torch.get_autocast_dtype("cuda"), bool(torch.backends.cuda.matmul.allow_tf32), bool(torch.backends.cudnn.allow_tf32))
+                PrecisionKey.current())
 
 
 def grouped_aggregate(self: GraphAgg, net: Tensor, ix: Tensor) -> tuple[Tensor, Tensor]:

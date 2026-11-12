@@ -534,3 +534,27 @@ def test_a_broken_hash_record_means_hashing_again(tmp_path: Path) -> None:
     blocked = tmp_path / "file-not-dir"
     blocked.write_text("")
     assert trt_builder.onnx_content_hash(model, cache_dir=blocked) == first
+
+
+def test_the_torchscript_exporter_marks_the_batch_of_every_input_and_output_dynamic(tmp_path: Path) -> None:
+    """Graphs the dynamo exporter cannot take (a recurrent cell exported with dynamic_axes) keep trtkit's atomic publish."""
+    captured: dict[str, object] = {}
+
+    def fake_export_fn(model: object, inputs: object, path: str, **kwargs: object) -> None:
+        captured.update(kwargs)
+        Path(path).write_bytes(b"protobuf")
+
+    export_onnx(
+        torch.nn.Identity(),
+        (torch.zeros(2, 4), torch.zeros(2, 5)),
+        tmp_path / "gru.onnx",
+        input_names=["hidden", "context"],
+        output_names=["updated"],
+        dynamic_batch_max=128,
+        exporter="torchscript",
+        export_fn=fake_export_fn,
+    )
+    assert captured["dynamo"] is False and captured["opset_version"] == 17 and captured["external_data"] is False
+    assert captured["dynamic_axes"] == {"hidden": {0: "batch"}, "context": {0: "batch"}, "updated": {0: "batch"}}
+    assert "dynamic_shapes" not in captured
+    assert (tmp_path / "gru.onnx").read_bytes() == b"protobuf" and [path.name for path in tmp_path.iterdir()] == ["gru.onnx"]

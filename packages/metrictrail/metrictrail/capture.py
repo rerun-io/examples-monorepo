@@ -7,8 +7,8 @@ not wrapped: :meth:`CaptureSession.install` registers :meth:`CaptureSession.obse
 
 * opens one recording file per DPVO instance (pass);
 * after each tracked frame (:meth:`CaptureObserver.on_frame`), logs the frame DPVO saw, the MoGe-2 metric depth it was
-  given, the frame's MoGe-2 normals when DPVO's keyframe graph grew on it, the newest keyframe's patches, the local
-  bundle-adjustment window and its patch points;
+  given, the frame's MoGe-2 normals when DPVO's keyframe graph grew on it, the newest keyframe's patches (boxes of
+  their P x P footprint on the shown image), the local bundle-adjustment window and its patch points;
 * counts global bundle adjustments (:meth:`CaptureObserver.on_global_ba`).
 
 Wrapped (class attributes of whichever ``vipe`` is imported; :meth:`CaptureSession.uninstall` restores them):
@@ -393,12 +393,18 @@ class CaptureSession:
         inverse_depth: Float32[ndarray, "m"] = newest[:, 2]
         patch_depth_m: Float32[ndarray, "m"] = np.where(inverse_depth > 1e-6, 1.0 / np.maximum(inverse_depth, 1e-6), 0.0).astype(np.float32)
         patches_px: Float32[ndarray, "m 2"] = newest[:, :2] * resolution
+        # A patch is P x P feature cells at DPVO's stride, centred on its coordinate: a box, not a point.
+        half_sizes: Float32[ndarray, "m 2"] = np.full_like(patches_px, int(dpvo.P) * resolution / 2.0)
+        if raster is not None:
+            patches_px = raster.source_px(patches_px)
+            half_sizes = (half_sizes * np.array(raster.scale_xy(), dtype=np.float32)).astype(np.float32)
         patches_entity: str = entities.CAM_PATCHES if raster is None else entities.INPUT_PATCHES
         rec.log(
             patches_entity,
-            rr.Points2D(
-                patches_px if raster is None else raster.source_px(patches_px),
-                radii=rr.Radius.ui_points(4.0),
+            rr.Boxes2D(
+                centers=patches_px,
+                half_sizes=half_sizes,
+                radii=rr.Radius.ui_points(1.5),
                 colors=depth_colors(patch_depth_m, self.depth_range_m),
             ),
         )

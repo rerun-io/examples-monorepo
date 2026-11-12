@@ -10,12 +10,26 @@ from ba import L2, _pose
 from corr import L1, L3, L4, NUM_THREADS
 from lie_math import sqrt_
 from se3 import Vec4, act_se3, rel_se3
+from so3 import SO3
 
 
 @always_inline
 def _normalize_quaternion(q: Vec4) -> Vec4:
-    var squared_norm = q[3].fma(q[3], q[2].fma(q[2], q[1].fma(q[1], q[0] * q[0])))
-    return q / sqrt_(squared_norm) if squared_norm > 0.0 else q
+    """lietorch-mojo's normalising SO3 constructor (Eigen's pinned FMA order), as an xyzw vector."""
+    var unit = SO3[DType.float32](q[0], q[1], q[2], q[3])
+    return Vec4(unit.x, unit.y, unit.z, unit.w)
+
+
+@always_inline
+def _intrinsics(intrinsics: ImmTileTensor[DType.float32, L2, _], frame: Int) -> Vec4:
+    """``fx fy cx cy`` of one frame."""
+    return Vec4(intrinsics[frame, 0][0], intrinsics[frame, 1][0], intrinsics[frame, 2][0], intrinsics[frame, 3][0])
+
+
+@always_inline
+def _patch_point(patches: ImmTileTensor[DType.float32, L4, _], k: Int, row: Int, col: Int, ki: Vec4) -> Vec4:
+    """One pixel of patch ``k`` back-projected in its source camera: normalised ``x y 1`` and inverse depth."""
+    return Vec4((patches[k, 0, row, col][0] - ki[2]) / ki[0], (patches[k, 1, row, col][0] - ki[3]) / ki[1], 1.0, patches[k, 2, row, col][0])
 
 
 @always_inline
@@ -39,23 +53,20 @@ def project_points_element(
     coordinates: MutTileTensor[DType.float32, L4, _],
 ):
     """Project all pixels of one patch using the edge's normalized relative pose."""
+    comptime assert poses.flat_rank == 2 and patches.flat_rank == 4 and intrinsics.flat_rank == 2
+    comptime assert source.flat_rank == 1 and target.flat_rank == 1 and patch.flat_rank == 1 and coordinates.flat_rank == 4
     var i = Int(source[n][0])
     var j = Int(target[n][0])
     var k = Int(patch[n][0])
-    var ki = Vec4(intrinsics[i, 0][0], intrinsics[i, 1][0], intrinsics[i, 2][0], intrinsics[i, 3][0])
-    var kj = Vec4(intrinsics[j, 0][0], intrinsics[j, 1][0], intrinsics[j, 2][0], intrinsics[j, 3][0])
+    var ki = _intrinsics(intrinsics, i)
+    var kj = _intrinsics(intrinsics, j)
     var ti, qi = _pose(poses, i)
     var tj, qj = _pose(poses, j)
     var tij, qij = rel_se3(ti, _normalize_quaternion(qi), tj, _normalize_quaternion(qj))
     qij = _normalize_quaternion(qij)
     for row in range(Int(patches.dim[2]())):
         for col in range(Int(patches.dim[3]())):
-            var point = Vec4(
-                (patches[k, 0, row, col][0] - ki[2]) / ki[0],
-                (patches[k, 1, row, col][0] - ki[3]) / ki[1],
-                1.0,
-                patches[k, 2, row, col][0],
-            )
+            var point = _patch_point(patches, k, row, col, ki)
             var x, y = _project(act_se3(tij, qij, point), kj)
             coordinates[n, row, col, 0] = x
             coordinates[n, row, col, 1] = y
@@ -94,8 +105,8 @@ def flow_magnitude_element(
     var i = Int(source[n][0])
     var j = Int(target[n][0])
     var k = Int(patch[n][0])
-    var ki = Vec4(intrinsics[i, 0][0], intrinsics[i, 1][0], intrinsics[i, 2][0], intrinsics[i, 3][0])
-    var kj = Vec4(intrinsics[j, 0][0], intrinsics[j, 1][0], intrinsics[j, 2][0], intrinsics[j, 3][0])
+    var ki = _intrinsics(intrinsics, i)
+    var kj = _intrinsics(intrinsics, j)
     var ti, qi = _pose(poses, i)
     var tj, qj = _pose(poses, j)
     qi = _normalize_quaternion(qi)
@@ -106,12 +117,7 @@ def flow_magnitude_element(
     qii = _normalize_quaternion(qii)
     for row in range(Int(patches.dim[2]())):
         for col in range(Int(patches.dim[3]())):
-            var point = Vec4(
-                (patches[k, 0, row, col][0] - ki[2]) / ki[0],
-                (patches[k, 1, row, col][0] - ki[3]) / ki[1],
-                1.0,
-                patches[k, 2, row, col][0],
-            )
+            var point = _patch_point(patches, k, row, col, ki)
             var x0, y0 = _project(act_se3(tii, qii, point), ki)
             var x1, y1 = _project(act_se3(tij, qij, point), kj)
             var x2, y2 = _project(act_se3(tij, Vec4(0.0, 0.0, 0.0, 1.0), point), kj)

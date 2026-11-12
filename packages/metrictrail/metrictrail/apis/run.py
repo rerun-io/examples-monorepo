@@ -25,6 +25,7 @@ from typing import Any
 import cv2
 import rerun as rr
 import torch
+from dpvo.graph_replay import graph_replay
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
@@ -37,12 +38,12 @@ from vipe.utils.model_cache import ModelCache
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
 from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
-from metrictrail.blueprint import log_waiting_notes, run_blueprint
+from metrictrail.blueprint import log_waiting_notes, run_blueprint, shares_input_camera
 from metrictrail.calibration_graphs import calibration_cuda_graphs
 from metrictrail.calibration_gru import GruBackend, calibration_gru
 from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
 from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
-from metrictrail.feature_graphs import feature_cuda_graphs
+from metrictrail.feature_graphs import dino_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
@@ -60,7 +61,6 @@ from metrictrail.outputs import (
 from metrictrail.palette import RunLabel
 from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
-from metrictrail.update_graphs import update_cuda_graphs
 
 
 @dataclass
@@ -303,7 +303,7 @@ def run_and_log(
     has_video: bool = frames.kind == "video"
     if has_video:
         stage("logging the input video")
-        video_time_ns = log_input_video(rec, config.input, config.output / "viewer")
+        video_time_ns = log_input_video(rec, config.input)
     gpu: GpuVideoSession = GpuVideoSession()
     session: CaptureSession | None = None
     live_surface: LiveSurface | None = LiveSurface(rec, tsdf) if config.capture and live and config.fuse_mesh else None
@@ -343,10 +343,10 @@ def run_and_log(
         with (
             calibration_live_view(calibration),
             gpu_video_input(gpu),
-            feature_cuda_graphs() if config.label == "ours" else nullcontext(),
-            update_cuda_graphs() if config.label == "ours" else nullcontext(),
+            graph_replay() if config.label == "ours" else nullcontext(),
+            dino_cuda_graphs() if config.label == "ours" else nullcontext(),
             calibration_cuda_graphs(config.calibration_graphs) if config.label == "ours" else nullcontext(),
-            calibration_gru(config.calibration_gru_backend if config.label == "ours" else "torch", model_cache=models) as gru_stats,
+            calibration_gru(config.calibration_gru_backend if config.label == "ours" else "torch") as gru_stats,
         ):
             pipeline = make_pipeline(typed.pipeline)
             if models is not None:
@@ -357,6 +357,10 @@ def run_and_log(
     finally:
         if session is not None:
             session.uninstall()
+        if config.label == "ours":
+            from metrictrail.moge2 import clear_forward_caches
+
+            clear_forward_caches()  # the app keeps its engines (models) between runs, not their per-frame outputs
     wall_s: float = time.perf_counter() - started
     if gru_stats.backend == "tensorrt":
         print(f"[metrictrail] calibration GRU: {to_json(gru_stats)}")
@@ -394,7 +398,7 @@ def run_and_log(
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh, video_time_ns=video_time_ns
     )
-    if kept is not None and context is None:
+    if shares_input_camera(has_capture=kept is not None, has_video=has_video, has_gt=context is not None):
         ride_final_trajectory(rec, outputs.trajectory, video_time_ns)
     return RunResult(
         logged=logged,

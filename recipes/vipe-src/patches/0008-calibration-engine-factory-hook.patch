@@ -1,0 +1,23 @@
+diff --git a/vipe/metrictrail/calibration/processor.py b/vipe/metrictrail/calibration/processor.py
+--- a/vipe/metrictrail/calibration/processor.py
++++ b/vipe/metrictrail/calibration/processor.py
+@@ -293,6 +293,10 @@
+ 
+ EngineFactory = Callable[..., SharedFocalEngine]
+ 
++#: Engine factory used when the caller passes no ``engine_factory`` (a package that observes the sweep, such as a live
++#: view, sets it for one run); None: :class:`ViPESharedFocalEngine`.
++ENGINE_FACTORY: EngineFactory | None = None
++
+ 
+ def calibrate_shared_k(
+     stream: VideoStream,
+@@ -353,7 +357,7 @@
+     calibrated: dict[str, Any] | None = None
+     fallback_reason: str | None = None
+     fallback_detail: dict[str, Any] = {}
+-    factory: EngineFactory = engine_factory or ViPESharedFocalEngine
++    factory: EngineFactory = engine_factory or ENGINE_FACTORY or ViPESharedFocalEngine
+     engine: SharedFocalEngine | None = None
+     try:
+         engine = factory(

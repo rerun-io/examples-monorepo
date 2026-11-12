@@ -18,7 +18,6 @@ architecture description (Sec. 3).
 """
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -28,11 +27,12 @@ from jaxtyping import Bool, Float, Float32, Int, Int64
 from lietorch_mojo import SE3
 from torch import Tensor
 
-from . import altcorr, fastba
+from . import altcorr, graph_replay
 from . import projective_ops as pops
 from .ba import BA
 from .blocks import GatedResidual, GradientClip, SoftAgg
 from .extractor import BasicEncoder4
+from .graph_replay import UpdateTopology
 from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 
 DIM: int = 384
@@ -106,32 +106,6 @@ def sample_valid_centroids(
         xs.append(torch.cat(kept_x)[:count])
         ys.append(torch.cat(kept_y)[:count])
     return torch.stack(xs), torch.stack(ys)
-
-
-@dataclass(frozen=True, slots=True)
-class UpdateTopology:
-    """Neighbor and aggregation indices prepared before neural inference.
-
-    Dynamic group discovery can synchronize CUDA. Keeping it outside the
-    neural forward lets that fixed-shape work run in a CUDA graph.
-    """
-
-    previous: Int64[Tensor, "edges"]
-    """Previous edge of each patch, or -1 when there is none."""
-    following: Int64[Tensor, "edges"]
-    """Next edge of each patch, or -1 when there is none."""
-    patch_groups: tuple[Int64[Tensor, "edges"], int]
-    """Contiguous patch-group index of each edge and the group count."""
-    frame_groups: tuple[Int64[Tensor, "edges"], int]
-    """Contiguous source/target frame-pair index of each edge and the group count."""
-
-    @classmethod
-    def from_edges(cls, ii: Int[Tensor, "edges"], jj: Int[Tensor, "edges"], kk: Int[Tensor, "edges"]) -> "UpdateTopology":
-        """Prepare the same stable neighbors and sorted groups used by an ordinary update."""
-        previous, following = fastba.neighbors(kk, jj)
-        patches, patch_inverse = torch.unique(kk, return_inverse=True)
-        pairs, pair_inverse = torch.unique(ii * 12345 + jj, return_inverse=True)
-        return cls(previous, following, (patch_inverse, patches.numel()), (pair_inverse, pairs.numel()))
 
 
 class Update(nn.Module):
@@ -258,10 +232,26 @@ class Update(nn.Module):
             - A 3-tuple ``(delta, weight, None)`` where ``delta`` is the
               predicted pixel displacement ``(1, n_edges, 2)`` and ``weight``
               is the sigmoid confidence ``(1, n_edges, 2)``.
+
+        Inside :func:`dpvo.graph_replay.graph_replay`, CUDA inference replays a
+        captured graph of :meth:`forward_eager` once a shape recurs.
         """
         if topology is None:
             topology = UpdateTopology.from_edges(ii, jj, kk)
+        replayed = graph_replay.replay_update(self, net, inp, corr, ii, jj, kk, topology, Update.forward_eager)
+        return replayed if replayed is not None else self.forward_eager(net, inp, corr, ii, jj, kk, topology)
 
+    def forward_eager(
+        self,
+        net: Float[Tensor, "1 n_edges dim"],
+        inp: Float[Tensor, "1 n_edges dim"],
+        corr: Float[Tensor, "1 n_edges corr_feat"],
+        ii: Int[Tensor, "n_edges"],
+        jj: Int[Tensor, "n_edges"],
+        kk: Int[Tensor, "n_edges"],
+        topology: UpdateTopology,
+    ) -> tuple[Float[Tensor, "1 n_edges dim"], tuple[Float[Tensor, "1 n_edges 2"], Float[Tensor, "1 n_edges 2"], None]]:
+        """:meth:`forward` with its topology prepared, always run kernel by kernel."""
         # Step 1: Inject correlation and context into hidden state
         net: Float[Tensor, "1 n_edges dim"] = net + inp + self.corr(corr)
         net = self.norm(net)

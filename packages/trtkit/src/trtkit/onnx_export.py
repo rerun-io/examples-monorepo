@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 import torch
 from torch.nn.modules.conv import _ConvTransposeNd
@@ -197,6 +197,7 @@ def export_onnx(
     dynamic_batch_max: int | None = None,
     dynamic_dims: DynamicDims | None = None,
     export_fn: ExportFn = torch.onnx.export,
+    exporter: Literal["dynamo", "torchscript"] = "dynamo",
 ) -> None:
     """Export a model to ONNX with the strongly-typed-TRT recipe.
 
@@ -221,15 +222,22 @@ def export_onnx(
             symbols, derived multiples); the complete spec, so it excludes
             ``dynamic_batch_max``. Inputs without an entry stay static.
         export_fn: ``torch.onnx.export``-compatible hook for tests.
+        exporter: ``"dynamo"`` (``torch.export``, opset 18/23); ``"torchscript"``
+            is the legacy tracer at opset 17, for graphs the dynamo exporter
+            does not take, with ``dynamic_batch_max`` as ``dynamic_axes`` on
+            every input and output and the weights inside the protobuf.
 
     Raises:
-        ValueError: If ``compute_dtype`` is not fp16/bf16/None, or both
-            ``dynamic_batch_max`` and ``dynamic_dims`` are given.
+        ValueError: If ``compute_dtype`` is not fp16/bf16/None, both
+            ``dynamic_batch_max`` and ``dynamic_dims`` are given, or
+            ``dynamic_dims`` is given to the torchscript exporter.
     """
     if compute_dtype not in (None, torch.float16, torch.bfloat16):
         raise ValueError(f"compute_dtype must be float16, bfloat16, or None, got {compute_dtype}.")
     if dynamic_batch_max is not None and dynamic_dims is not None:
         raise ValueError("dynamic_dims is the complete shape spec; declare the batch dim inside it instead of dynamic_batch_max.")
+    if exporter == "torchscript" and dynamic_dims is not None:
+        raise ValueError("dynamic_dims needs the dynamo exporter (torch.export Dims); the torchscript exporter takes dynamic_batch_max only.")
     # bf16 Conv/ConvTranspose only exist in ONNX from opset 22; below that,
     # TRT parsers accept the invalid graph and silently miscompile it. 18 is
     # the dynamo baseline for everything else; TRT 11 parses up to 24.
@@ -240,7 +248,12 @@ def export_onnx(
     export_model: torch.nn.Module = _AutocastWrapper(inner, compute_dtype).eval() if compute_dtype is not None else model
 
     kwargs: dict[str, object] = {}
-    if dynamic_batch_max is not None:
+    if exporter == "torchscript":
+        opset_version = 17
+        kwargs["external_data"] = False
+        if dynamic_batch_max is not None:
+            kwargs["dynamic_axes"] = {name: {0: "batch"} for name in (*input_names, *output_names)}
+    elif dynamic_batch_max is not None:
         batch_dim = torch.export.Dim("batch", min=1, max=dynamic_batch_max)
         # Positional form: keys by arg name break on adapters with different
         # parameter names, and dynamic_axes with dynamo=True is a lossy path.
@@ -271,7 +284,7 @@ def export_onnx(
                 input_names=input_names,
                 output_names=output_names,
                 opset_version=opset_version,
-                dynamo=True,
+                dynamo=exporter == "dynamo",
                 **kwargs,
             )
         # Sidecar first: the protobuf must never be visible while the data it

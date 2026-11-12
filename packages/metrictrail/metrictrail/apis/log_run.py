@@ -13,7 +13,6 @@ only while the pipeline runs (``metrictrail run``); their tiles say so.
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import rerun as rr
 from jaxtyping import Int64
@@ -22,10 +21,20 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from metrictrail.artifacts import ColoredCloud, read_binary_ply
 from metrictrail.benchmarks import BENCHMARKS, BenchmarkName, BenchmarkPreset
-from metrictrail.blueprint import log_waiting_notes, run_blueprint
+from metrictrail.blueprint import log_waiting_notes, run_blueprint, shares_input_camera
 from metrictrail.frames import FrameSource, open_frames
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
-from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, artifact_name, log_run_outputs, make_provenance, read_run_outputs
+from metrictrail.outputs import (
+    LoggedRun,
+    LogOptions,
+    RunMetrics,
+    RunOutputs,
+    artifact_name,
+    log_run_outputs,
+    make_provenance,
+    read_run_outputs,
+    ride_final_trajectory,
+)
 from metrictrail.palette import RunLabel
 from metrictrail.rerun_log import log_input_video
 
@@ -87,8 +96,7 @@ def main(config: Config) -> RunMetrics:
     has_video: bool = frames.kind == "video"
     video_time_ns: Int64[ndarray, "s"] | None = None
     if has_video:
-        with TemporaryDirectory(prefix="metrictrail-viewer-") as scratch:
-            video_time_ns = log_input_video(rec, config.input, Path(scratch))
+        video_time_ns = log_input_video(rec, config.input)
     log_waiting_notes(rec, has_capture=False)
     options = LogOptions(
         label=config.label,
@@ -108,6 +116,8 @@ def main(config: Config) -> RunMetrics:
     logged: LoggedRun = log_run_outputs(
         rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, video_time_ns=video_time_ns
     )
+    if shares_input_camera(has_capture=False, has_video=has_video, has_gt=has_gt):
+        ride_final_trajectory(rec, outputs.trajectory, video_time_ns)
     blueprint = run_blueprint(
         config.label, has_capture=False, has_gt=has_gt, has_video=has_video, world_eye=logged.world_eye, metric_eye=logged.metric_eye
     )

@@ -2,19 +2,18 @@
 
 Only network compilation artifacts and runtimes are cached. Every call consumes the current
 hidden state, and returns independent output storage. Training, CPU, FP32 and edge counts outside
-1..128 use the original PyTorch forward. Set METRICTRAIL_TRT_CACHE to ship prebuilt artifacts.
+1..128 use the original PyTorch forward. The ONNX files and engines live in trtkit's cache
+(``TRTKIT_TRT_CACHE``, default ``~/.cache/trtkit/trt``) under ``droid-gru/``; a Space ships them prebuilt.
 """
 
 import copy
 import hashlib
-import os
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Literal, TypeAlias
 from weakref import WeakKeyDictionary
 
@@ -23,7 +22,6 @@ from jaxtyping import Float16
 from serde import serde
 from torch import Tensor
 from vipe.slam.networks.droid_net import ConvGRU
-from vipe.utils.model_cache import ModelCache
 
 from metrictrail.calibration_graphs import CalibrationAccelerationError
 
@@ -51,7 +49,7 @@ class GruEngineKey:
     @property
     def stem(self) -> str:
         """Portable ONNX name; trtkit adds the profile, ONNX hash, TRT version and GPU to engine names."""
-        return f"droid-gru-v1-{self.weights[:16]}-{self.height}x{self.width}-{self.precision}"
+        return f"droid-gru-v2-{self.weights[:16]}-{self.height}x{self.width}-{self.precision}"
 
 
 @serde(deny_unknown_fields=True)
@@ -94,7 +92,7 @@ class GruRuntime:
     """One trtkit runtime and its shipping artifact, retaining no source model."""
 
     def __init__(self, model: ConvGRU, key: GruEngineKey, root: Path, stats: GruStats) -> None:
-        from trtkit import TensorRtRuntime, TrtBuildConfig, cached_engine_path, ensure_engine
+        from trtkit import TensorRtRuntime, TrtBuildConfig, cached_engine_path, ensure_engine, export_onnx
         from trtkit.artifacts import build_once
 
         root.mkdir(parents=True, exist_ok=True)
@@ -105,14 +103,11 @@ class GruRuntime:
             frozen = copy.deepcopy(model).half().eval()
             frozen.forward = _original_forward.__get__(frozen, ConvGRU)
             device = next(frozen.parameters()).device
-            with torch.inference_mode(), torch.autocast("cuda", enabled=False), TemporaryDirectory(dir=root) as temporary:
-                hidden = torch.zeros(2, HIDDEN_CHANNELS, key.height, key.width, device=device, dtype=torch.float16)
-                context = torch.zeros(2, CONTEXT_CHANNELS, key.height, key.width, device=device, dtype=torch.float16)
-                staged = Path(temporary) / onnx.name
-                torch.onnx.export(frozen, (hidden, context), staged, input_names=["hidden", "context"], output_names=["updated"],
-                                  dynamic_axes={"hidden": {0: "edges"}, "context": {0: "edges"}, "updated": {0: "edges"}},
-                                  opset_version=17, dynamo=False, external_data=False)
-                staged.replace(onnx)
+            hidden = torch.zeros(2, HIDDEN_CHANNELS, key.height, key.width, device=device, dtype=torch.float16)
+            context = torch.zeros(2, CONTEXT_CHANNELS, key.height, key.width, device=device, dtype=torch.float16)
+            with torch.autocast("cuda", enabled=False):
+                export_onnx(frozen, (hidden, context), onnx, input_names=["hidden", "context"], output_names=["updated"],
+                            dynamic_batch_max=key.max_edges, exporter="torchscript")
             stats.export_seconds += time.perf_counter() - started
 
         build_once(onnx, export)
@@ -132,8 +127,9 @@ class GruRuntime:
 
 
 @contextmanager
-def calibration_gru(backend: GruBackend = "torch", *, model_cache: ModelCache | None = None, cache_dir: Path | None = None) -> Iterator[GruStats]:
-    """Select the backend for a run, reusing runtimes with app-owned models across runs.
+def calibration_gru(backend: GruBackend = "torch", *, cache_dir: Path | None = None) -> Iterator[GruStats]:
+    """Select the backend for a run. A runtime lives as long as its model (weak key): an app that keeps its models
+    (``ModelCache``) reuses them across runs, and a run that builds a new model builds or loads its runtime again.
 
     A model's parameter storage/version changes invalidate its digest and runtimes. Engines are keyed
     by actual weights and raster, never by camera calibration. A runtime's output is cloned before return.
@@ -142,7 +138,9 @@ def calibration_gru(backend: GruBackend = "torch", *, model_cache: ModelCache | 
     if backend == "torch":
         yield stats
         return
-    root = (cache_dir or Path(os.environ.get("METRICTRAIL_TRT_CACHE", "~/.cache/metrictrail/droid-gru"))).expanduser().resolve()
+    from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
+
+    root = (cache_dir or DEFAULT_TRT_CACHE_DIR / "droid-gru").expanduser().resolve()
     original = ConvGRU.forward
 
     @wraps(original)
@@ -161,13 +159,10 @@ def calibration_gru(backend: GruBackend = "torch", *, model_cache: ModelCache | 
         slot = (key, str(root))
         runtime = saved.engines.get(slot)
         if runtime is None:
-            def build() -> GruRuntime:
-                try:
-                    return GruRuntime(self, key, root, stats)
-                except Exception as error:  # ViPE's sweep would turn it into the MoGe-2 focal fallback
-                    raise CalibrationAccelerationError(f"the TensorRT calibration GRU failed to build or load: {error!r}") from error
-
-            runtime = build() if model_cache is None else model_cache.get(f"metrictrail/gru/{key!r}/{root}/{net.device}", build)
+            try:
+                runtime = GruRuntime(self, key, root, stats)
+            except Exception as error:  # ViPE's sweep would turn it into the MoGe-2 focal fallback
+                raise CalibrationAccelerationError(f"the TensorRT calibration GRU failed to build or load: {error!r}") from error
             saved.engines[slot] = runtime
         path = str(runtime.path)
         if path not in stats.engine_files:

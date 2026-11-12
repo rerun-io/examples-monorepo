@@ -43,7 +43,6 @@ def test_gru_context_restores_forward_and_cpu_uses_eager(tmp_path: Path) -> None
 @pytest.mark.parametrize("raster", [(41, 74), (47, 64)])
 def test_gru_dynamic_profile_ownership_and_model_cache(raster: tuple[int, int]) -> None:
     """The production checkpoint, dynamic batches, independent outputs, and two app contexts."""
-    import os
 
     from vipe.slam.networks.droid_net import DroidNet
     from vipe.utils.model_cache import ModelCache
@@ -54,7 +53,9 @@ def test_gru_dynamic_profile_ownership_and_model_cache(raster: tuple[int, int]) 
     weights = Path(torch.hub.get_dir()) / "droid_slam/droid.pth"
     if not weights.is_file():
         pytest.skip(f"missing DROID checkpoint: {weights}")
-    cache_dir = Path(os.environ.get("METRICTRAIL_TRT_CACHE", "~/.cache/metrictrail/droid-gru")).expanduser()
+    from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR
+
+    cache_dir = DEFAULT_TRT_CACHE_DIR / "droid-gru"
     models = ModelCache()
     model = models.get("test/gru", lambda: DroidNet().cuda().eval().update.gru)
     height, width = raster
@@ -63,14 +64,14 @@ def test_gru_dynamic_profile_ownership_and_model_cache(raster: tuple[int, int]) 
             hidden = torch.randn(count, 128, height, width, device="cuda", dtype=torch.float16) * 0.2
             context = torch.randn(count, 320, height, width, device="cuda", dtype=torch.float16) * 0.2
             reference = model(hidden, context)
-            with calibration_gru("tensorrt", model_cache=models, cache_dir=cache_dir) as first:
+            with calibration_gru("tensorrt", cache_dir=cache_dir) as first:
                 result = model(hidden, context)
                 saved = result.clone()
                 model(hidden * 0.5, context * 0.5)
                 torch.testing.assert_close(result, saved, rtol=0.0, atol=0.0)
             assert (result - reference).abs().max().item() < 0.02
             assert (result - reference).abs().float().mean().item() < 0.001
-            with calibration_gru("tensorrt", model_cache=models, cache_dir=cache_dir) as second:
+            with calibration_gru("tensorrt", cache_dir=cache_dir) as second:
                 torch.testing.assert_close(model(hidden, context), result, rtol=0.0, atol=0.0)
             assert second.export_seconds == second.build_seconds == second.load_seconds == 0.0
             assert first.engine_files == second.engine_files
