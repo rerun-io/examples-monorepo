@@ -538,6 +538,12 @@ def egoexo4d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterat
 
 # ── MANO hands from the logged hand_mesh layer (GSI, DAS-Ego) ──────────────
 
+IDENTITY_PER_SEGMENT: frozenset[str] = frozenset({"gsi-six-view"})
+"""Families whose betas change on every frame (GSI: per-frame shape estimates, up to ~0.5 apart): one SOMA-X identity per hand
+and segment, the median of its rows' betas, instead of one identity preparation per frame. The fit still targets each
+frame's own source mesh. Measured on a 1,291-frame GSI segment: fit error 1.85 / 1.50 mm median (left / right) per-frame vs
+1.86 / 1.52 median, worst frame 2.77 / 2.08 vs 2.81 / 2.23 mm, and 15 → 5,400 fps. The per-frame betas stay in ``source``."""
+
 MESH_SOURCES: dict[str, tuple[str, dict[str, tuple[str, str]]]] = {
     "gsi-six-view": (
         "MANO (vertices skinned by GSI; params in GSI's rig frame)",
@@ -595,12 +601,16 @@ def mesh_layer_streams(config: Config, segment: str, fitters: "Fitters") -> Iter
         same: Bool[ndarray, "t"] = (mesh_times[at] == times_ns) if len(mesh_times) else np.zeros(len(times_ns), dtype=bool)
         has_mesh: Bool[ndarray, "t"] = same & np.array([bool(cells[i]) and len(cells[i]) == 778 for i in at], dtype=bool)
         present: Bool[ndarray, "t"] = has_mesh & np.isfinite(temporal["betas"]).all(axis=1)
+        identity: Float32[ndarray, "t c"] = temporal["betas"]
+        if family in IDENTITY_PER_SEGMENT and present.any():
+            identity = np.broadcast_to(np.median(temporal["betas"][present], axis=0), temporal["betas"].shape).astype(np.float32)
 
         def windows(
             present: Bool[ndarray, "t"] = present,
             at: Int64[ndarray, "t"] = at,
             cells: list[list[list[float]] | None] = cells,
             temporal: dict[str, Float32[ndarray, "t c"]] = temporal,
+            identity: Float32[ndarray, "t c"] = identity,
         ) -> Iterator[SourceWindow]:
             for start in range(0, len(times_ns), WINDOW_ROWS):
                 rows: slice = slice(start, start + WINDOW_ROWS)
@@ -612,7 +622,7 @@ def mesh_layer_streams(config: Config, segment: str, fitters: "Fitters") -> Iter
                     keep,
                     vertices,
                     vertices.mean(axis=1),
-                    temporal["betas"][rows][keep],
+                    identity[rows][keep],
                     {name: values[rows] for name, values in temporal.items()},
                 )
 
