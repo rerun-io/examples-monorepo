@@ -155,12 +155,14 @@ class PriorLog:
         self.raise_error()
 
     def close(self) -> None:
-        """:meth:`drain`, then stop the logger thread."""
-        self.drain()
-        if self.thread is not None:
-            self.pending.put(None)
-            self.thread.join()
-            self.thread = None
+        """:meth:`drain`, then stop the logger thread; it is stopped and joined even when draining raises."""
+        try:
+            self.drain()
+        finally:
+            if self.thread is not None:
+                self.pending.put(None)
+                self.thread.join()
+                self.thread = None
 
     def raise_error(self) -> None:
         """Raise the logger thread's failure, if any (once)."""

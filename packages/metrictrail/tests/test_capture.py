@@ -431,3 +431,24 @@ def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_track
     assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 1, 2, 3]
     assert surface.integrated == 1, "frame 0 only: a TSDF integration (and its device-to-host copy) per frame would slow tracking"
     assert session.pass_normals and not any(session.pass_normals), "logged above, but not kept for a cloud nobody fuses"
+
+
+def test_uninstall_closes_the_prior_logger_even_when_the_surface_fails_to_finish(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every release step runs; the first failure propagates."""
+    import rerun as rr
+
+    from metrictrail.live_surface import LiveSurface
+
+    def failing_finish(self: LiveSurface) -> None:
+        raise RuntimeError("surface finish failed")
+
+    surface = LiveSurface(rr.RecordingStream("a", recording_id="surface"), log_every=100)
+    session = CaptureSession(out_dir=tmp_path, application_id="a", recording_id="r", depth_range_m=(0.3, 3.0), live_surface=surface)
+    session.install()
+    assert session.priors is not None
+    session.priors.submit(rr.RecordingStream("a", recording_id="priors"), 0, None, torch.full((4, 4), 2.0), None)
+    thread = session.priors.thread
+    monkeypatch.setattr(LiveSurface, "finish", failing_finish)
+    with pytest.raises(RuntimeError, match="surface finish failed"):
+        session.uninstall()
+    assert thread is not None and not thread.is_alive(), "the prior logger was left running"

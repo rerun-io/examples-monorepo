@@ -35,6 +35,7 @@ not captured.
 
 import threading
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -290,18 +291,24 @@ class CaptureSession:
         return CaptureObserver(self)
 
     def uninstall(self) -> None:
-        """Stop observing new DPVO instances, restore the wrapped methods and close every pass recording."""
+        """Stop observing new DPVO instances, restore the wrapped methods and close every pass recording. Every release
+        step runs even when an earlier one raises (the first failure propagates, later ones chained to it)."""
         if self.remove_observer is not None:
             self.remove_observer()
             self.remove_observer = None
         for owner, name, original in self.restore:
             setattr(owner, name, original)
         self.restore = []
-        if self.live_surface is not None:
-            self.live_surface.finish()  # the whole surface as one mesh at the pass's last integrated frame
-        if self.priors is not None:
-            self.priors.close()
-        self.close_videos()
+        with ExitStack() as release:  # runs its callbacks last-registered first: the surface, priors, videos, recordings
+            release.callback(self.close_recordings)
+            release.callback(self.close_videos)
+            if self.priors is not None:
+                release.callback(self.priors.close)
+            if self.live_surface is not None:
+                release.callback(self.live_surface.finish)  # the whole surface as one mesh at the pass's last integrated frame
+
+    def close_recordings(self) -> None:
+        """Flush every pass recording and close the ones this session opened (not the caller's live stream)."""
         for rec in self.streams.values():
             rec.flush()
             if rec is not self.live:

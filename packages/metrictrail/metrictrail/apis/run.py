@@ -322,7 +322,6 @@ def run_and_log(
             live_surface=live_surface,
             retain_normals=config.fuse_cloud,  # only the fused cloud reads every frame's normals (kept_normals)
         )
-        session.install()
     calibration: CalibrationLive | None = None
     init = typed.pipeline.init
     if config.capture and config.label == "ours" and isinstance(init, MetricTrailInitConfig):
@@ -341,6 +340,8 @@ def run_and_log(
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
     try:
+        if session is not None:
+            session.install()  # inside the try: whatever fails from here on, the finally below restores ViPE's classes
         stage("SharedK calibration: MoGe-2's focal on the first 32 frames (the first run also loads the models)")
         with (
             calibration_live_view(calibration),
@@ -357,12 +358,14 @@ def run_and_log(
             for index in range(len(streams)):
                 pipeline.run(streams[index])
     finally:
-        if session is not None:
-            session.uninstall()
-        if config.label == "ours":
-            from metrictrail.moge2 import clear_forward_caches
+        try:
+            if session is not None:
+                session.uninstall()
+        finally:
+            if config.label == "ours":
+                from metrictrail.moge2 import clear_forward_caches
 
-            clear_forward_caches()  # the app keeps its engines (models) between runs, not their per-frame outputs
+                clear_forward_caches()  # the app keeps its engines (models) between runs, not their per-frame outputs
     wall_s: float = time.perf_counter() - started
     if gru_stats.backend == "tensorrt":
         print(f"[metrictrail] calibration GRU: {to_json(gru_stats)}")
