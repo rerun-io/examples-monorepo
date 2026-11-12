@@ -327,6 +327,7 @@ def test_a_video_input_puts_the_patches_on_the_source_video_at_its_pts(tmp_path:
     session.uninstall()
     store = RrdReader(tmp_path / "pass_0.rrd").store()
     cleared: bool = False
+    patches_logged: bool = False
     paths: set[str] = {str(path) for path in store.schema().entity_paths()}
     assert {"/" + entities.INPUT, "/" + entities.INPUT_PATCHES, "/" + entities.CAM_DEPTH} <= paths
     assert "/" + entities.CAM_RGB not in paths and "/" + entities.CAM_PATCHES not in paths
@@ -337,15 +338,19 @@ def test_a_video_input_puts_the_patches_on_the_source_video_at_its_pts(tmp_path:
             assert entities.INPUT == entities.DPVO_CURRENT_PINHOLE
             assert batch.column("Pinhole:resolution").to_pylist() == [[[128.0, 64.0]]]
             assert batch.column("Pinhole:image_plane_distance").to_pylist()[0][0] == pytest.approx(CAMERA_PLANE_M)
-        if chunk.entity_path == "/" + entities.INPUT_PATCHES and "Points2D:positions" in batch.schema.names:
+        if chunk.entity_path == "/" + entities.INPUT_PATCHES and "Boxes2D:centers" in batch.schema.names:
             assert batch.column("video_time").to_numpy().astype("int64").tolist() == [700_000_000]
-            positions: Float32[ndarray, "m 2"] = np.array(batch.column("Points2D:positions").to_pylist()[0], dtype=np.float32)
-            assert positions[:, 0].min() >= 32.0 and positions[:, 0].max() <= 96.0  # inside the crop, in source pixels
+            centers: Float32[ndarray, "m 2"] = np.array(batch.column("Boxes2D:centers").to_pylist()[0], dtype=np.float32)
+            assert centers[:, 0].min() >= 32.0 and centers[:, 0].max() <= 96.0  # inside the crop, in source pixels
+            # A patch is P x P feature cells at DPVO's stride: 3 x 4 = 12 raster pixels, 24 source pixels at this 2x raster.
+            half_sizes: Float32[ndarray, "m 2"] = np.array(batch.column("Boxes2D:half_sizes").to_pylist()[0], dtype=np.float32)
+            assert len(half_sizes) == len(centers) and np.all(half_sizes == [12.0, 12.0])
+            patches_logged = True
         if chunk.entity_path == "/" + entities.INPUT_PATCHES and "Clear:is_recursive" in batch.schema.names:
             # Cleared at the next source frame: playback past the tracked progress shows no stale patches.
             assert batch.column("video_time").to_numpy().astype("int64").tolist() == [800_000_000]
             cleared = True
-    assert cleared
+    assert cleared and patches_logged
 
 
 def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
