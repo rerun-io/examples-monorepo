@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-import depth_png
 import numpy as np
 import rerun as rr
 from jaxtyping import Float32, Float64, Int64, UInt8
@@ -21,6 +20,7 @@ from metrictrail.frames import DisplayRaster, FrameReader, FrameSource, fit_for_
 from metrictrail.ground_truth import AlignedRun, GtContext, align_to_gt
 from metrictrail.palette import GT_RGB, RUNNING_RMSE_RGB, RunLabel, run_rgb
 from metrictrail.properties import PropertyValue, any_values
+from metrictrail.rerun_log import FrameVideo, SourceRaster, log_depth, log_pinholes, set_frame_time
 from metrictrail.surface import ColoredMesh
 
 GT_VIEW: dict[VslamlabDataset, rr.components.ViewCoordinates] = {
@@ -138,7 +138,8 @@ class LogOptions:
     label: RunLabel
     """Which tree produced the run (entity names and colour)."""
     log_frames: bool
-    """Log ``cam``/``cam/rgb``/``cam/depth`` from the input and the depth artifact (a run without live capture)."""
+    """Log ``cam``/``cam/depth`` from the depth artifact and, for a frame-directory input, ``cam/rgb`` (a run without
+    live capture; a video input is the caller's ``input/video``, :func:`metrictrail.rerun_log.log_input_video`)."""
     raster_policy: DisplayRaster
     """How the input frames reached the tracking raster (display fit of ``cam/rgb``)."""
     depth_range_m: tuple[float, float]
@@ -184,6 +185,7 @@ def log_run_outputs(
     cloud_world: ColoredCloud | None,
     provenance: Provenance,
     mesh_world: ColoredMesh | None = None,
+    video_time_ns: Int64[ndarray, "s"] | None = None,
 ) -> LoggedRun:
     """Log trajectory, GT, cloud, errors, frames and depth of a finished run, and its properties.
 
@@ -196,6 +198,8 @@ def log_run_outputs(
         cloud_world: The fused metric cloud in ViPE's world frame (the frame of ``pose/<name>.npz``); None skips it.
         provenance: The ``provenance`` property.
         mesh_world: The TSDF mesh in ViPE's world frame; None skips it.
+        video_time_ns: ``video_time`` of each source frame (the input video's PTS); None: the GT stamps with GT, else no
+            ``video_time``.
 
     Returns:
         The numbers also sent as the ``metrics`` property, and eyes that frame the trajectory.
@@ -206,8 +210,9 @@ def log_run_outputs(
     finite_rows: Int64[ndarray, "k"] = np.flatnonzero(np.isfinite(world_T_cam.reshape(num_tracked, 16)).all(axis=1)).astype(np.int64)
     color: tuple[int, int, int] = run_rgb(options.label)
     tracked: Int64[ndarray, "n"] = np.arange(num_tracked, dtype=np.int64)
+    if video_time_ns is None and context is not None:
+        video_time_ns = context.frames.timestamps_ns
     rec.log(entities.WORLD_ROOT, GT_VIEW[context.protocol.dataset] if context is not None else rr.ViewCoordinates.RDF, static=True)
-    rec.log(entities.DPVO_ROOT, rr.ViewCoordinates.RDF, static=True)
 
     aligned: AlignedRun | None = align_to_gt(world_T_cam, trajectory.source_frame_ids, context) if context is not None else None
     sim3: Float64[ndarray, "4 4"] = aligned.sim3.gt_T_est if aligned is not None else np.eye(4)
@@ -232,7 +237,7 @@ def log_run_outputs(
         ),
         static=True,
     )
-    indexes: list[rr.TimeColumn] = time_columns(finite_rows, trajectory.source_frame_ids, context)
+    indexes: list[rr.TimeColumn] = time_columns(finite_rows, trajectory.source_frame_ids, video_time_ns)
     rec.send_columns(entities.world_cam(options.label), indexes=indexes, columns=rr.Transform3D.columns(translation=positions, mat3x3=rotations))
 
     if aligned is not None:
@@ -240,7 +245,7 @@ def log_run_outputs(
         rec.log(entities.WORLD_GT_TRAJECTORY, rr.LineStrips3D([aligned.gt_xyz], colors=[GT_RGB], radii=rr.Radius.ui_points(2.0)), static=True)
         rec.log(entities.METRIC_GT_TRAJECTORY, rr.LineStrips3D([aligned.gt_xyz], colors=[GT_RGB], radii=rr.Radius.ui_points(2.0)), static=True)
         rec.log(entities.WORLD_GT_POSITION, rr.Points3D.from_fields(colors=[GT_RGB], radii=rr.Radius.ui_points(6.0)), static=True)
-        gt_indexes: list[rr.TimeColumn] = time_columns(gt_rows, trajectory.source_frame_ids, context)
+        gt_indexes: list[rr.TimeColumn] = time_columns(gt_rows, trajectory.source_frame_ids, video_time_ns)
         rec.send_columns(entities.WORLD_GT_POSITION, indexes=gt_indexes, columns=rr.Points3D.columns(positions=aligned.gt_xyz))
         metric_xyz: Float64[ndarray, "m 3"] = apply_alignment(aligned.se3.gt_T_est, world_T_cam[gt_rows, :3, 3])
         rec.log(entities.metric_trajectory(options.label), rr.LineStrips3D([metric_xyz], colors=[color], radii=rr.Radius.ui_points(2.0)), static=True)
@@ -281,7 +286,7 @@ def log_run_outputs(
             log_mesh(rec, mesh_world, aligned.se3.gt_T_est, entities.METRIC_MESH, entities.METRIC_MESH_NORMALS)
 
     if options.log_frames:
-        log_frames_and_depth(rec, outputs, options, frames, tracked, raster_hw, context)
+        log_frames_and_depth(rec, outputs, options, frames, tracked, raster_hw, video_time_ns)
 
     metrics = RunMetrics(
         num_tracked=num_tracked,
@@ -304,25 +309,17 @@ def log_run_outputs(
     return LoggedRun(metrics=metrics, world_eye=world_eye, metric_eye=metric_eye)
 
 
-def time_columns(rows: Int64[ndarray, "k"], source_frame_ids: Int64[ndarray, "n"], context: GtContext | None) -> list[rr.TimeColumn]:
-    """``frame``, ``source_frame`` and, with GT, ``video_time`` index columns of the tracked rows ``rows``."""
+def time_columns(rows: Int64[ndarray, "k"], source_frame_ids: Int64[ndarray, "n"], video_time_ns: Int64[ndarray, "s"] | None) -> list[rr.TimeColumn]:
+    """``frame``, ``source_frame`` and, when known, ``video_time`` index columns of the tracked rows ``rows``
+    (``video_time_ns`` indexed by source frame)."""
     sources: Int64[ndarray, "k"] = source_frame_ids[rows]
     indexes: list[rr.TimeColumn] = [
         rr.TimeColumn(entities.FRAME_TIMELINE, sequence=rows),
         rr.TimeColumn(entities.SOURCE_FRAME_TIMELINE, sequence=sources),
     ]
-    if context is not None:
-        indexes.append(rr.TimeColumn(entities.VIDEO_TIMELINE, duration=context.frames.timestamps_ns[sources].astype("timedelta64[ns]")))
+    if video_time_ns is not None:
+        indexes.append(rr.TimeColumn(entities.VIDEO_TIMELINE, duration=video_time_ns[sources].astype("timedelta64[ns]")))
     return indexes
-
-
-def set_frame_time(rec: rr.RecordingStream, row: int, source_frame_ids: Int64[ndarray, "n"], context: GtContext | None) -> None:
-    """Set every timeline of tracked row ``row`` on ``rec``."""
-    source: int = int(source_frame_ids[row])
-    rec.set_time(entities.FRAME_TIMELINE, sequence=row)
-    rec.set_time(entities.SOURCE_FRAME_TIMELINE, sequence=source)
-    if context is not None:
-        rec.set_time(entities.VIDEO_TIMELINE, duration=np.timedelta64(int(context.frames.timestamps_ns[source]), "ns"))
 
 
 def log_frames_and_depth(
@@ -332,26 +329,28 @@ def log_frames_and_depth(
     frames: FrameSource | None,
     tracked: Int64[ndarray, "n"],
     raster_hw: tuple[int, int],
-    context: GtContext | None,
+    video_time_ns: Int64[ndarray, "s"] | None,
 ) -> None:
-    """``cam`` pinhole, ``cam/rgb`` (input frame on the raster) and ``cam/depth`` (depth artifact) of every k-th frame."""
+    """``cam`` pinhole (and ``input`` for a video input), ``cam/rgb`` (a frame directory's frames on the raster, as a
+    video) and ``cam/depth`` (depth artifact) of every k-th frame."""
     chosen: list[int] = [int(row) for row in tracked[:: options.depth_every]]
     source_frame_ids: Int64[ndarray, "n"] = outputs.trajectory.source_frame_ids
-    read: FrameReader | None = frames.reader() if frames is not None else None
+    raster: SourceRaster | None = None
+    if frames is not None and frames.kind == "video" and outputs.record is not None:
+        raster = SourceRaster.from_record(outputs.record.input_raster)
+    read: FrameReader | None = frames.reader() if frames is not None and frames.kind == "frame_dir" else None
+    rgb_video: FrameVideo | None = FrameVideo(rec, entities.CAM_RGB, fps=30.0) if read is not None else None
     depth_path: Path = outputs.run_dir / "depth" / f"{outputs.name}.zip"
     depth_by_row: dict[int, Float32[ndarray, "h w"]] = {}
     depth_iter = iter_depth_zip(depth_path, chosen) if depth_path.is_file() else iter(())
-    low_mm, high_mm = (value * 1000.0 for value in options.depth_range_m)
     for row in chosen:
-        set_frame_time(rec, row, source_frame_ids, context)
+        source: int = int(source_frame_ids[row])
+        set_frame_time(rec, row, source, video_time_ns)
         intrinsics_px: Float64[ndarray, "4"] = outputs.intrinsics[row]
         if np.isfinite(intrinsics_px).all():
-            rec.log(
-                entities.CAM, rr.Pinhole(focal_length=intrinsics_px[:2], principal_point=intrinsics_px[2:], resolution=[raster_hw[1], raster_hw[0]])
-            )
-        if read is not None:
-            rgb: UInt8[ndarray, "h w 3"] = fit_for_display(read(int(source_frame_ids[row])), raster_hw, options.raster_policy)
-            rec.log(entities.CAM_RGB, rr.Image(rgb, color_model="RGB").compress(jpeg_quality=90))
+            log_pinholes(rec, intrinsics_px, raster_hw, raster)
+        if rgb_video is not None and read is not None:
+            rgb_video.log(fit_for_display(read(source), raster_hw, options.raster_policy))
         while row not in depth_by_row:
             nxt: tuple[int, Float32[ndarray, "h w"]] | None = next(depth_iter, None)
             if nxt is None:
@@ -359,13 +358,9 @@ def log_frames_and_depth(
             depth_by_row[nxt[0]] = nxt[1]
         depth_m: Float32[ndarray, "h w"] | None = depth_by_row.pop(row, None)
         if depth_m is not None:
-            depth_mm: ndarray = np.clip(np.round(np.nan_to_num(depth_m, nan=0.0) * 1000.0), 0, 65535).astype(np.uint16)
-            rec.log(
-                entities.CAM_DEPTH,
-                rr.EncodedDepthImage(
-                    blob=depth_png.encode(depth_mm), media_type="image/png", meter=1000.0, colormap="turbo", depth_range=[low_mm, high_mm]
-                ),
-            )
+            log_depth(rec, depth_m, options.depth_range_m)
+    if rgb_video is not None:
+        rgb_video.close()
 
 
 def run_property(record: RunRecord) -> dict[str, PropertyValue | None]:

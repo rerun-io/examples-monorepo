@@ -39,20 +39,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import depth_png
 import numpy as np
 import rerun as rr
 import torch
 from dpvo.dpvo import DPVO
 from dpvo.hooks import DPVOObserver, FrameEvent, add_global_observer
-from jaxtyping import Bool, Float32, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from torch import Tensor
 
 from metrictrail import entities
 from metrictrail.live_surface import LiveSurface
 from metrictrail.palette import BA_WINDOW_RGB, KEYFRAME_RGB, depth_colors
+from metrictrail.rerun_log import FrameVideo, SourceRaster, log_depth, log_pinholes, moving_camera, set_frame_time
 
 
 def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"]:
@@ -63,6 +64,25 @@ def dpvo_world_T_cam(poses: Float32[ndarray, "n 7"]) -> Float32[ndarray, "n 4 4"
     world_T_cam[:, :3, :3] = world_R_cam
     world_T_cam[:, :3, 3] = -np.einsum("nij,nj->ni", world_R_cam, poses[:, :3])
     return world_T_cam
+
+
+RDF_TO_RUB: Float32[ndarray, "4 4"] = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
+"""Right-multiplied onto an OpenCV (RDF) camera pose, gives the OpenGL (RUB) pose ``auto_orient_and_center_poses`` takes."""
+ORIENT_EVERY_KEYFRAMES: int = 10
+"""Recompute the gravity alignment of the live DPVO scene every this many keyframes (as dpvo's app does)."""
+
+
+def dpvo_orient(world_T_cam: Float32[ndarray, "n 4 4"]) -> tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]]:
+    """The transform that turns DPVO's world (the first camera's RDF frame, y down) upright for a z-up viewer and centres
+    it on the cameras: the cameras' mean up becomes +z (simplecv ``auto_orient_and_center_poses``, method ``up``), as
+    the dpvo and MASt3R-SLAM apps orient their live scenes."""
+    orient: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(world_T_cam @ RDF_TO_RUB, method="up", center_method="poses").transform
+    return orient[:, :3].astype(np.float32), orient[:, 3].astype(np.float32)
+
+
+def host_rgb(image: UInt8[Tensor, "3 h w"]) -> UInt8[ndarray, "h w 3"]:
+    """A tracked frame (DPVO's BGR, channels first, on its device) as host RGB."""
+    return image.flip(0).permute(1, 2, 0).contiguous().cpu().numpy()
 
 
 def normals_rgb(normals: Float32[Tensor, "h w 3"]) -> UInt8[Tensor, "h w 3"]:
@@ -153,11 +173,20 @@ class CaptureSession:
     """Depth of the BA-window frustums, metres."""
     live: rr.RecordingStream | None = None
     """Recording every pass logs into instead of its own file (the app's streamed recording); None: one file per pass."""
-    every_frame_images: bool = True
-    """Log the depth and the DINOv3 PCA of every tracked frame; False: depth only of frames on which DPVO's keyframe
-    graph grew, no PCA (an uncompressed image per frame is too much to stream to a browser)."""
-    on_frame: Callable[[int, int, int], None] | None = None
-    """Called after each tracked frame with (frame index, frames of the pass, keyframes in the graph); may raise to stop."""
+    every_frame_depth: bool = True
+    """Log the depth of every tracked frame; False: only of frames on which DPVO's keyframe graph grew (a PNG per frame
+    is too much to stream to a browser)."""
+    video_time_ns: Int64[ndarray, "n"] | None = None
+    """``video_time`` of each source frame (the input video's PTS, or the benchmark's stamps); None: no ``video_time``."""
+    source_raster: Callable[[], SourceRaster | None] | None = None
+    """How the input reached the tracking raster, once ViPE prepared it (:class:`metrictrail.gpu_video.GpuVideoSession`);
+    a known raster means the input video is logged (``input/video``): the patches go onto it and ``cam/rgb`` is not
+    logged. None or a None result: ``cam/rgb`` is the tracked frames as a video."""
+    fps: float = 30.0
+    """Frame rate the derived videos are encoded at (the rate does not set their times; the timelines do)."""
+    on_frame: Callable[[int, int | None, int, int], None] | None = None
+    """Called after each tracked frame with (frame index, its source frame or None, frames of the pass, keyframes in the
+    graph); may raise to stop."""
     live_surface: LiveSurface | None = None
     """TSDF mesh grown while tracking from each frame on which DPVO's keyframe graph grew, reset per pass (logging into
     :attr:`live`); None: none."""
@@ -167,10 +196,16 @@ class CaptureSession:
     """Frame count of the tracking pass that is running."""
     global_ba_calls: int = 0
     """Global bundle adjustments of the current DPVO instance."""
+    oriented_at: int = 0
+    """Keyframe count of the pass when the live scene was last oriented (0: not yet)."""
     pca: DinoPca | None = None
     """DINOv3 PCA basis, fit on the first frame DINOv3 sees."""
     last_dino_rgb: UInt8[ndarray, "h w 3"] | None = None
     """PCA image of the latest DINOv3 call (the frame DPVO is patchifying)."""
+    source_frames: dict[int, int] = field(default_factory=dict)
+    """Source frame of each tracked-frame index (ViPE's ``PreparedFrame.source_frame_id``); the same for every pass."""
+    videos: dict[str, FrameVideo] = field(default_factory=dict)
+    """The derived videos of the current pass, by entity."""
     streams: dict[int, rr.RecordingStream] = field(default_factory=dict)
     """Open recording per DPVO instance, keyed by ``id(instance)``."""
     restore: list[tuple[type, str, Callable[..., Any]]] = field(default_factory=list)
@@ -213,6 +248,9 @@ class CaptureSession:
         def prepare(self: Any, index: int, *args: Any, **kwargs: Any) -> Any:
             session.producer_local.normals = None
             item: Any = prepare_orig(self, index, *args, **kwargs)
+            source_frame: Any = getattr(item, "source_frame_id", None)
+            if source_frame is not None:
+                session.source_frames[int(index)] = int(source_frame)
             normals: Tensor | None = getattr(session.producer_local, "normals", None)
             if normals is not None:
                 session.pending_normals[int(index)] = normals
@@ -221,7 +259,7 @@ class CaptureSession:
 
         def forward(self: Any, dpvo_images: Tensor) -> Tensor:
             features: Tensor = forward_orig(self, dpvo_images)
-            if session.every_frame_images and features.shape[0] * features.shape[1] == 1:
+            if features.shape[0] * features.shape[1] == 1:
                 with torch.no_grad(), torch.autocast(device_type="cuda", enabled=False):
                     single: Float32[Tensor, "c h w"] = features[0, 0].float()
                     if session.pca is None:
@@ -256,6 +294,7 @@ class CaptureSession:
         self.restore = []
         if self.live_surface is not None:
             self.live_surface.finish()  # the whole surface as one mesh at the pass's last integrated frame
+        self.close_videos()
         for rec in self.streams.values():
             rec.flush()
             if rec is not self.live:
@@ -265,6 +304,8 @@ class CaptureSession:
     def open_pass(self, instance_id: int) -> None:
         """Start the recording file of a new DPVO instance."""
         self.global_ba_calls = 0
+        self.oriented_at = 0
+        self.close_videos()
         path: Path | None = None
         if self.live is not None:
             rec: rr.RecordingStream = self.live
@@ -273,6 +314,7 @@ class CaptureSession:
             rec = rr.RecordingStream(self.application_id, recording_id=self.recording_id, send_properties=False)
             rec.save(path)
         self.streams[instance_id] = rec
+        rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)  # the overview's up; dpvo_orient makes it the scene's
         # A pass at least as long supersedes the earlier ones (kept_pass), so their normals can go.
         for earlier, captured in zip(self.pass_normals, self.passes, strict=True):
             if captured.num_frames <= self.pass_frames:
@@ -282,6 +324,18 @@ class CaptureSession:
             self.live_surface.open_pass()
         self.pass_normals.append({})
         self.pending_normals.clear()
+
+    def close_videos(self) -> None:
+        """Flush the derived videos of the pass that ends."""
+        for video in self.videos.values():
+            video.close()
+        self.videos = {}
+
+    def video(self, rec: rr.RecordingStream, entity: str) -> FrameVideo:
+        """The pass's derived video at ``entity``, started on first use."""
+        if entity not in self.videos:
+            self.videos[entity] = FrameVideo(rec, entity, self.fps)
+        return self.videos[entity]
 
     def kept_pass(self) -> CapturedPass | None:
         """The last of the longest passes (the tracking pass whose poses ViPE writes), or None if nothing ran."""
@@ -309,34 +363,26 @@ class CaptureSession:
         metric_depth: Tensor | None,
         metric_mask: Tensor | None,
         added: bool,
-    ) -> None:
-        """Log one tracked frame of a DPVO instance (see the module docstring)."""
-        rec.set_time(entities.FRAME_TIMELINE, sequence=frame)
-        rgb: UInt8[ndarray, "h w 3"] = image.flip(0).permute(1, 2, 0).contiguous().cpu().numpy()
-        height, width = rgb.shape[:2]
+    ) -> str | None:
+        """Log one tracked frame of a DPVO instance (see the module docstring); returns the patches entity when it
+        logged patches."""
+        set_frame_time(rec, frame, self.source_frames.get(frame), self.video_time_ns)
+        height, width = int(image.shape[-2]), int(image.shape[-1])
         intrinsics_px: Float32[ndarray, "4"] = intrinsics.detach().float().cpu().numpy().reshape(4)
-        rec.log(entities.CAM, rr.Pinhole(focal_length=intrinsics_px[:2], principal_point=intrinsics_px[2:], resolution=[width, height]))
-        rec.log(entities.CAM_RGB, rr.Image(rgb, color_model="RGB").compress(jpeg_quality=92))
+        raster: SourceRaster | None = self.source_raster() if self.source_raster is not None else None
+        log_pinholes(rec, intrinsics_px.astype(np.float64), (height, width), raster)
+        if raster is None:
+            self.video(rec, entities.CAM_RGB).log(host_rgb(image))
         depth_m: Float32[ndarray, "h w"] | None = None
         if metric_depth is not None:
             valid: Tensor = torch.isfinite(metric_depth) if metric_mask is None else metric_mask.bool()
             depth_m = torch.where(valid, metric_depth.float(), torch.zeros_like(metric_depth.float())).cpu().numpy()
-            depth_mm: ndarray = np.clip(np.round(depth_m * 1000.0), 0, 65535).astype(np.uint16)
-            rec.log(
-                entities.CAM_DEPTH,
-                rr.EncodedDepthImage(
-                    blob=depth_png.encode(depth_mm),
-                    media_type="image/png",
-                    meter=1000.0,
-                    colormap="turbo",
-                    depth_range=[r * 1000.0 for r in self.depth_range_m],
-                ),
-            )
+            log_depth(rec, depth_m, self.depth_range_m)
         if self.last_dino_rgb is not None:
             upsampled: UInt8[ndarray, "H W 3"] = self.last_dino_rgb.repeat(self.dino_patch_px, 0).repeat(self.dino_patch_px, 1)[:height, :width]
-            rec.log(entities.CAM_DINO_PCA, rr.Image(np.ascontiguousarray(upsampled), color_model="RGB"))
+            self.video(rec, entities.CAM_DINO_PCA).log(upsampled)
         if not added:
-            return
+            return None
         num_keyframes: int = int(dpvo.n)
         patches_per_frame: int = int(dpvo.M)
         resolution: int = int(dpvo.RES)
@@ -346,13 +392,19 @@ class CaptureSession:
         )
         inverse_depth: Float32[ndarray, "m"] = newest[:, 2]
         patch_depth_m: Float32[ndarray, "m"] = np.where(inverse_depth > 1e-6, 1.0 / np.maximum(inverse_depth, 1e-6), 0.0).astype(np.float32)
+        patches_px: Float32[ndarray, "m 2"] = newest[:, :2] * resolution
+        patches_entity: str = entities.CAM_PATCHES if raster is None else entities.INPUT_PATCHES
         rec.log(
-            entities.CAM_PATCHES,
-            rr.Points2D(newest[:, :2] * resolution, radii=rr.Radius.ui_points(4.0), colors=depth_colors(patch_depth_m, self.depth_range_m)),
+            patches_entity,
+            rr.Points2D(
+                patches_px if raster is None else raster.source_px(patches_px),
+                radii=rr.Radius.ui_points(4.0),
+                colors=depth_colors(patch_depth_m, self.depth_range_m),
+            ),
         )
         rec.log(f"{entities.DPVO_METRICS}/patch_depth_median_m", rr.Scalars(float(np.median(patch_depth_m))))
         if not dpvo.is_initialized:
-            return
+            return patches_entity
         window_start: int = max(num_keyframes - dpvo.cfg.optimization_window, 1)
         world_T_cam: Float32[ndarray, "n 4 4"] = dpvo_world_T_cam(dpvo.poses[0, :num_keyframes].float().cpu().numpy())
         centres: Float32[ndarray, "n 3"] = world_T_cam[:, :3, 3]
@@ -377,19 +429,14 @@ class CaptureSession:
         )
         newest_world_T_cam: Float32[ndarray, "4 4"] = world_T_cam[num_keyframes - 1]
         if self.live_surface is not None and depth_m is not None:
-            self.live_surface.integrate(depth_m, rgb, intrinsics_px, newest_world_T_cam, frame)
+            self.live_surface.integrate(depth_m, host_rgb(image), intrinsics_px, newest_world_T_cam, frame)
+        if num_keyframes >= 3 and (self.oriented_at == 0 or num_keyframes - self.oriented_at >= ORIENT_EVERY_KEYFRAMES):
+            orient_rotation, orient_translation = dpvo_orient(world_T_cam)
+            rec.log(entities.DPVO_ROOT, rr.Transform3D(mat3x3=orient_rotation, translation=orient_translation))
+            self.oriented_at = num_keyframes
         rec.log(entities.DPVO_CURRENT, rr.Transform3D(translation=newest_world_T_cam[:3, 3], mat3x3=newest_world_T_cam[:3, :3]))
-        rec.log(
-            entities.DPVO_CURRENT,
-            rr.Pinhole(
-                focal_length=full_px[:2],
-                principal_point=full_px[2:],
-                resolution=[width, height],
-                image_plane_distance=self.frustum_depth_m,
-                color=BA_WINDOW_RGB,
-                line_width=-2.5,  # negative = UI points (rr.Radius.ui_points); a positive value is metres
-            ),
-        )
+        if raster is None:  # a video input's frustum is the source camera, logged with the frame (log_pinholes)
+            rec.log(entities.DPVO_CURRENT_PINHOLE, moving_camera(full_px.astype(np.float64), (height, width)))
         num_patches: int = int(dpvo.m)
         patch_frame: Int64[ndarray, "m"] = dpvo.ix[:num_patches].cpu().numpy().astype(np.int64)
         keep: Bool[ndarray, "m"] = patch_frame >= window_start
@@ -398,6 +445,16 @@ class CaptureSession:
         rec.log(entities.DPVO_WINDOW_POINTS, rr.Points3D(points_world, colors=np.ascontiguousarray(colors_rgb), radii=rr.Radius.ui_points(3.0)))
         rec.log(f"{entities.DPVO_METRICS}/keyframes_in_graph", rr.Scalars(float(num_keyframes)))
         rec.log(f"{entities.DPVO_METRICS}/global_ba_calls", rr.Scalars(float(self.global_ba_calls)))
+        return patches_entity
+
+    def clear_after(self, rec: rr.RecordingStream, frame: int, entity: str) -> None:
+        """Clear ``entity`` at the next tracked frame's time (its source frame when ViPE has prepared it, else the next
+        source frame), so a viewer playing past the tracked progress shows the video without stale patches; the next
+        frame's own log at that time wins (logged later)."""
+        source: int | None = self.source_frames.get(frame)
+        next_source: int | None = self.source_frames.get(frame + 1, source + 1 if source is not None else None)
+        set_frame_time(rec, frame + 1, next_source, self.video_time_ns)
+        rec.log(entity, rr.Clear(recursive=False))
 
 
 class CaptureObserver(DPVOObserver):
@@ -422,13 +479,15 @@ class CaptureObserver(DPVOObserver):
             # when culling kept them all. The frame itself is always the newest keyframe after the call.
             graph_grew: bool = dpvo.n > event.keyframes_before
             added: bool = dpvo.is_initialized or graph_grew
-            depth: Tensor | None = event.depth.depth if session.every_frame_images or graph_grew else None
-            session.log_frame(rec, dpvo, frame, event.image, event.intrinsics, depth, event.depth.mask, added)
+            depth: Tensor | None = event.depth.depth if session.every_frame_depth or graph_grew else None
+            patches_entity: str | None = session.log_frame(rec, dpvo, frame, event.image, event.intrinsics, depth, event.depth.mask, added)
             if graph_grew and normals is not None:
                 rec.log(entities.CAM_NORMALS, rr.Image(normals.cpu().numpy(), color_model="RGB").compress(jpeg_quality=92))
+            if patches_entity is not None:
+                session.clear_after(rec, frame, patches_entity)
         session.last_dino_rgb = None
         if session.on_frame is not None:
-            session.on_frame(frame, session.pass_frames, dpvo.n)
+            session.on_frame(frame, session.source_frames.get(frame), session.pass_frames, dpvo.n)
 
     def on_global_ba(self, dpvo: DPVO) -> None:
         """Count the global bundle adjustment that is about to run."""

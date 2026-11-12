@@ -44,7 +44,7 @@ def test_time_columns_map_rows_to_source_frames_and_vslamlab_stamps(tum_like_con
     context, _ = tum_like_context
     source_frame_ids: Int64[ndarray, "n"] = np.arange(0, 60, 5, dtype=np.int64)  # a stride-5 run (7-Scenes style)
     rows: Int64[ndarray, "k"] = np.array([0, 2, 11], dtype=np.int64)
-    columns = time_columns(rows, source_frame_ids, context)
+    columns = time_columns(rows, source_frame_ids, context.frames.timestamps_ns)
     assert [column.timeline_name() for column in columns] == ["frame", "source_frame", "video_time"]
     arrays = [column.as_arrow_array().to_numpy() for column in columns]
     assert arrays[0].tolist() == [0, 2, 11]

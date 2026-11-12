@@ -11,7 +11,7 @@ from rerun.chunk import RrdReader
 
 from metrictrail import entities
 from metrictrail.artifacts import ColoredCloud
-from metrictrail.blueprint import log_waiting_notes, run_blueprint, waiting_notes
+from metrictrail.blueprint import frame_view, log_waiting_notes, run_blueprint, time_panel, waiting_notes
 from metrictrail.eval.vipe_output import MetricTrailTrajectory
 from metrictrail.ground_truth import GtContext
 from metrictrail.outputs import LoggedRun, LogOptions, Provenance, RunMetrics, RunOutputs, log_run_outputs
@@ -55,7 +55,6 @@ def test_run_recording_with_gt_has_every_entity_and_property(tmp_path: Path, tum
     paths: set[str] = set(schema.entity_paths())
     expected: set[str] = {
         "/world",
-        "/dpvo",
         "/" + entities.world_trajectory("ours"),
         "/" + entities.world_cam("ours"),
         "/" + entities.WORLD_GT_TRAJECTORY,
@@ -99,3 +98,17 @@ def test_blueprint_builds_and_waiting_tiles_match_the_notes(has_capture: bool, h
     notes: dict[str, str] = waiting_notes(has_capture, has_gt)
     assert ("dino" in notes) == (not has_capture) and ("gt" in notes) == (not has_gt)
     assert all(text.startswith("waiting for") for text in notes.values())
+
+
+
+def test_a_video_run_frames_the_input_video_and_plays_video_time() -> None:
+    with_video = frame_view(has_video=True, has_capture=True, background=rr.blueprint.Background(color=(0, 0, 0)))
+    assert str(with_video.origin) == entities.INPUT and with_video.contents == [entities.INPUT_VIDEO, entities.INPUT_PATCHES]
+    frame_dir = frame_view(has_video=False, has_capture=True, background=rr.blueprint.Background(color=(0, 0, 0)))
+    assert str(frame_dir.origin) == entities.CAM and frame_dir.contents == [entities.CAM_RGB, entities.CAM_PATCHES]
+    playing = time_panel(has_video=True)
+    assert str(playing.timeline) == entities.VIDEO_TIMELINE and str(playing.play_state) == "playing" and str(playing.loop_mode) == "all"
+    assert str(time_panel(has_video=False).timeline) == entities.FRAME_TIMELINE
+    # A live run logs the whole video first; the app moves the cursor to each tracked frame, so the panel waits paused.
+    live = time_panel(has_video=True, live=True)
+    assert str(live.timeline) == entities.VIDEO_TIMELINE and str(live.play_state) == "paused"

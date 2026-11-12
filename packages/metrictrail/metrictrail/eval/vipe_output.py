@@ -51,6 +51,12 @@ class InputRasterRecord:
     """Tracking raster ``[height, width]``."""
     frames: int | None = None
     """Frames the pipeline read."""
+    source_hw: list[int] | None = None
+    """Decoded source frame ``[height, width]`` (``resize`` and ``cover_crop`` plans)."""
+    resized_hw: list[int] | None = None
+    """``[height, width]`` the source was resized to before the crop."""
+    crop_left_top: list[int] | None = None
+    """``[left, top]`` of the crop in the resized frame."""
 
 
 @serde

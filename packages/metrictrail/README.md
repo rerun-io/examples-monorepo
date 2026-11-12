@@ -61,10 +61,18 @@ A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.
 (the task downloads dpvo's example clips into `data/`), and the run streams into an embedded Rerun viewer. It runs
 `metrictrail.apis.run.run_and_log` with the `video` preset and the default MoGe-2 provider, so it calibrates the camera
 itself; there is no intrinsics input. Settings: the tracking stride and `max_frames` (upstream's Hydra keys). The capture
-runs in live mode: DPVO's frames, patches and BA window stream in as it tracks, with depth and normals of new keyframes
-only and no DINOv3 PCA. Calibration has no hook, so the viewer stays empty for those seconds. The trajectory and the
+runs in live mode: the input video is logged first and plays at once, then DPVO's patches (on the video), BA window and
+the DINOv3 PCA video stream in as it tracks, with depth and normals of new keyframes only. The trajectory and the
 surface arrive at the end; the TSDF mesh grows in the DPVO tracking view from each new keyframe (at DPVO's current pose) and the final mesh (final poses) replaces it. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
 viewer stays empty.
+
+**Video, not images, in the recording** (`metrictrail.rerun_log`, the EgoHand pattern): the input video is logged once as
+`rr.VideoStream` from its own samples (`input/video`, no re-encode for an H.264/AV1 MP4; HEVC, other containers and
+rotated clips get one H.264 viewer copy) on `video_time` = its PTS, under an `input` pinhole of the source camera (the
+tracking raster's K mapped back through ViPE's resize and crop), and every per-frame entity carries that `video_time`.
+The DINOv3 PCA (and, for a frame directory, the tracked frames as `cam/rgb`) is encoded per frame to an H.264
+`VideoStream` (NVENC; libx264 with a warning without it). Depth stays a millimetre PNG per frame (Rerun has no depth
+video); keyframe normals stay JPEG (sparse).
 
 **Video input stays on the GPU** (`metrictrail.gpu_video`): a video decodes on NVDEC (simplecv `TorchCodecVideoReader`,
 display rotation applied as OpenCV does), ViPE's input raster (`raster_frame`) resizes and crops on the GPU, and the
