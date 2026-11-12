@@ -1,4 +1,3 @@
 {
-  "gsplat": "gsplat",
   "libnvinfer": "tensorrt-cu13-libs"
 }
