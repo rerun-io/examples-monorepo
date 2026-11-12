@@ -21,10 +21,31 @@ def _normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _override_stubs() -> set[Path]:
+    """Package directories pixi.toml installs only as a ``dependency-overrides`` path: they stand in for a third-party
+    distribution of the same name in some environments (packages/cholespy-stub), so other environments may resolve
+    that name from an index."""
+    stubs: set[Path] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "dependency-overrides" and isinstance(value, dict):
+                    stubs.update((REPO_ROOT / spec["path"]).resolve() for spec in value.values() if isinstance(spec, dict) and "path" in spec)
+                else:
+                    walk(value)
+
+    walk(tomllib.loads((REPO_ROOT / "pixi.toml").read_text()))
+    return stubs
+
+
 def _workspace_packages() -> dict[str, Path]:
-    """Normalized distribution name -> package directory, for every packages/*/pyproject.toml."""
+    """Normalized distribution name -> package directory, for every packages/*/pyproject.toml except override stubs."""
     packages: dict[str, Path] = {}
+    stubs: set[Path] = _override_stubs()
     for pyproject in PACKAGES_DIR.glob("*/pyproject.toml"):
+        if pyproject.parent.resolve() in stubs:
+            continue
         name: str | None = tomllib.loads(pyproject.read_text()).get("project", {}).get("name")
         if name:
             packages[_normalize(name)] = pyproject.parent

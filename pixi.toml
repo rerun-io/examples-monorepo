@@ -1605,6 +1605,38 @@ env = { OMP_NUM_THREADS = "2", MKL_NUM_THREADS = "2", PYTHONDONTWRITEBYTECODE = 
 cmd = "python tools/xlo.py"
 cwd = "packages/selfcap-soma"
 
+[feature.dataforge-soma-x]
+# The SOMA-X step of dataforge (decision: a separate GPU step; dataforge itself stays CPU-only).
+# It reads a segment's pose layer from its .rrd and writes the segment's soma_x layer.
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
+
+[feature.dataforge-soma-x.dependencies]
+python = "3.12.*"
+pytorch-gpu = ">=2.12,<2.13"
+cuda-version = "13.0.*"
+# The rest mirrors [feature.dataforge] without its pytorch-cpu, so the whole package
+# (and its tests' conftest) imports here as it does in the dataforge environments.
+depth-png = { path = "packages/depth-png" }
+tyro = ">=0.9.1,<0.10"
+requests = "*"
+7zip = ">=24.09"
+ffmpeg = ">=9.0.1"
+libjpeg-turbo = ">=3.0.0,<4"
+
+[feature.dataforge-soma-x.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+PyTurboJPEG = ">=2.0.0,<3"
+# SMPL-family source rigs (Ego-Exo4D's SMPL-H, EPFL's SMPL), as in [feature.dataforge].
+smplx = ">=0.1.28"
+
+[feature.dataforge-soma-x.pypi-options.dependency-overrides]
+# py-soma-x lists cholespy but never imports it; cholespy has no linux-aarch64 wheel (packages/cholespy-stub).
+cholespy = { path = "packages/cholespy-stub" }
+
+[feature.dataforge-soma-x.activation.env]
+PACKAGE_DIR = "packages/dataforge"
+PYREFLY_EXTRA_ARGS = "--search-path tests"
+
 [feature.selfcap-curate]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -4083,6 +4115,8 @@ simplecv-catalog-dev = { features = [
 ], solve-group = "simplecv-catalog", no-default-feature = true }
 selfcap-soma = { features = ["soma-runtime", "selfcap-soma"], solve-group = "selfcap-soma", no-default-feature = true }
 selfcap-soma-dev = { features = ["soma-runtime", "selfcap-soma", "dev"], solve-group = "selfcap-soma", no-default-feature = true }
+dataforge-soma-x = { features = ["common", "soma-runtime", "dataforge-soma-x"], solve-group = "dataforge-soma-x", no-default-feature = true }
+dataforge-soma-x-dev = { features = ["common", "soma-runtime", "dataforge-soma-x", "dev"], solve-group = "dataforge-soma-x", no-default-feature = true }
 selfcap-curate = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "soma-runtime", "posekit-egohand"], solve-group = "selfcap-curate", no-default-feature = true }
 selfcap-curate-dev = { features = ["catalog-common", "rerun-prerelease", "cuda", "selfcap-curate", "soma-runtime", "posekit-egohand", "dev"], solve-group = "selfcap-curate", no-default-feature = true }
 exo-calib = { features = [
