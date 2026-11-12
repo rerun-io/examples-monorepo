@@ -189,6 +189,26 @@ def fit_window(fitter: HandFitter | BodyFitter, window: SourceWindow) -> soma_x.
     )
 
 
+def empty_window(
+    times_ns: Int64[ndarray, "w"],
+    frame_indices: Int64[ndarray, "w"],
+    present: Bool[ndarray, "w"],
+    vertex_count: int,
+    temporal: dict[str, Float32[ndarray, "t c"]],
+    rows: slice,
+) -> SourceWindow:
+    """A window whose rows all lack a source fit: no mesh to pose, every row written untrusted."""
+    return SourceWindow(
+        times_ns,
+        frame_indices,
+        present,
+        np.zeros((0, vertex_count, 3), dtype=np.float32),
+        np.zeros((0, 3), dtype=np.float32),
+        temporal["betas"][rows][present],
+        {name: values[rows] for name, values in temporal.items()},
+    )
+
+
 def write_stream(recording: rr.RecordingStream, stream: Stream) -> Float32[ndarray, "n"]:
     """Fit and write one body or hand, window by window; return the fit errors of its fitted rows."""
     soma_x.log_soma_x_static(
@@ -451,6 +471,9 @@ def egoexo4d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterat
         for start in range(0, len(times_ns), WINDOW_ROWS):
             rows: slice = slice(start, start + WINDOW_ROWS)
             keep: Bool[ndarray, "w"] = present[rows]
+            if not keep.any():  # smplx cannot pose an empty batch
+                yield empty_window(times_ns[rows], frames[rows], keep, int(cast(torch.Tensor, model.layer.v_template).shape[0]), temporal, rows)
+                continue
             inputs: dict[str, torch.Tensor] = {
                 name: torch.from_numpy(np.ascontiguousarray(values[rows][keep])).cuda() for name, values in temporal.items()
             }
@@ -621,6 +644,9 @@ def hot3d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[
             for start in range(0, len(times_ns), WINDOW_ROWS):
                 rows: slice = slice(start, start + WINDOW_ROWS)
                 keep: Bool[ndarray, "w"] = present[rows]
+                if not keep.any():  # smplx cannot pose an empty batch
+                    yield empty_window(times_ns[rows], frames[rows], keep, int(cast(torch.Tensor, layer.v_template).shape[0]), temporal, rows)
+                    continue
                 quaternions: Float32[ndarray, "k 4"] = temporal["global_orient"][rows][keep]
                 orient: Float32[ndarray, "k 3"] = Rotation.from_quat(quaternions[:, [1, 2, 3, 0]].astype(np.float64)).as_rotvec().astype(np.float32)
 
@@ -766,4 +792,4 @@ def main(config: Config) -> None:
             for root, values in errors.items()
             if len(values)
         )
-        print(f"[{number}/{len(segments)}] {segment}: {summary}", flush=True)
+        print(f"[{number}/{len(segments)}] {segment}: {summary or 'no source rows to fit (layer written, every row untrusted)'}", flush=True)
