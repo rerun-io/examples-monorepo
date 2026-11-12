@@ -82,6 +82,12 @@ def test_no_source_cams_leaves_the_filmstrip_out() -> None:
     assert "Current view" in names
 
 
+def test_no_timings_leaves_the_stage_timings_view_out() -> None:
+    names: list[str] = _names(create_blueprint(EntityPaths(), variant="native", timings=False).root_container)
+    assert "Stage timings (ms)" not in names
+    assert {"Depth", "Normals", "Lowest cost"} <= set(names)
+
+
 def test_source_cams_is_the_model_tuple_minus_the_current_view() -> None:
     assert SOURCE_CAMS == NUM_SOURCE_VIEWS
 

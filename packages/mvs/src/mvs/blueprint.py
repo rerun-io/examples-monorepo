@@ -116,7 +116,7 @@ Variant = Literal["native", "phone", "phone-landscape"]
 """Layout of :func:`create_blueprint`: the desktop layout, or one of the two phone screens."""
 
 
-def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int = SOURCE_CAMS) -> rrb.Blueprint:
+def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int = SOURCE_CAMS, timings: bool = True) -> rrb.Blueprint:
     """Create the live-meshing layout.
 
     ``native``: left, the 3D reconstruction (fused mesh + camera frusta); right, the current view with a filmstrip of
@@ -134,6 +134,7 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
         paths: Entity paths of the segment.
         variant: Layout to build.
         source_cams: Number of source views in the filmstrip; 0 leaves the filmstrip out. Phone layouts ignore it.
+        timings: Show the stage timings view; False leaves it out (a tool that logs no timings).
 
     Returns:
         Blueprint ready for ``rr.send_blueprint`` or ``Blueprint.save``.
@@ -154,11 +155,15 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
     )
     if variant == "phone":
         return rrb.Blueprint(
-            rrb.Vertical(world, rrb.Horizontal(current, depth), row_shares=[5.0, 3.0]), rrb.TimePanel(state="hidden", timeline=TIMELINE), collapse_panels=True
+            rrb.Vertical(world, rrb.Horizontal(current, depth), row_shares=[5.0, 3.0]),
+            rrb.TimePanel(state="hidden", timeline=TIMELINE),
+            collapse_panels=True,
         )
     if variant == "phone-landscape":
         return rrb.Blueprint(
-            rrb.Horizontal(world, rrb.Vertical(current, depth), column_shares=[3.0, 2.0]), rrb.TimePanel(state="hidden", timeline=TIMELINE), collapse_panels=True
+            rrb.Horizontal(world, rrb.Vertical(current, depth), column_shares=[3.0, 2.0]),
+            rrb.TimePanel(state="hidden", timeline=TIMELINE),
+            collapse_panels=True,
         )
     sources: rrb.Horizontal = rrb.Horizontal(
         *[
@@ -166,15 +171,17 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
             for index in range(source_cams)
         ]
     )
-    timings: rrb.TimeSeriesView = rrb.TimeSeriesView(origin=paths.timings, name="Stage timings (ms)")
     panels: list[rrb.View] = [
         rrb.Spatial2DView(origin=paths.depth_pinhole, contents=paths.normal, name="Normals"),
         rrb.Spatial2DView(origin=paths.lowest_cost, name="Lowest cost"),
     ]
     camera: rrb.Vertical | rrb.Spatial2DView = rrb.Vertical(current, sources, row_shares=[4.0, 1.0]) if source_cams else current
-    layout: rrb.Container = rrb.Horizontal(
-        world,
-        rrb.Vertical(camera, rrb.Horizontal(depth, *panels), timings, row_shares=[4.0, 2.0, 1.8]),
-        column_shares=[3.0, 2.0],
+    right: rrb.Vertical = (
+        rrb.Vertical(
+            camera, rrb.Horizontal(depth, *panels), rrb.TimeSeriesView(origin=paths.timings, name="Stage timings (ms)"), row_shares=[4.0, 2.0, 1.8]
+        )
+        if timings
+        else rrb.Vertical(camera, rrb.Horizontal(depth, *panels), row_shares=[4.0, 2.0])
     )
+    layout: rrb.Container = rrb.Horizontal(world, right, column_shares=[3.0, 2.0])
     return rrb.Blueprint(layout, rrb.TimePanel(state="collapsed", timeline=TIMELINE), collapse_panels=True)

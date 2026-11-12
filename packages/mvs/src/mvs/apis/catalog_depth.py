@@ -49,8 +49,8 @@ def main(config: Config) -> None:
     segment_ids: list[str] = list(config.data.segments) or dataset.segment_ids()
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
 
-    # The live-meshing layout without its filmstrip: this demo logs no source views, mesh or timings.
-    rr.send_blueprint(create_blueprint(PATHS, variant="native", source_cams=0))
+    # The live-meshing layout without its filmstrip and stage timings: this demo logs no source views, mesh or timings.
+    rr.send_blueprint(create_blueprint(PATHS, variant="native", source_cams=0, timings=False))
     rr.log(PATHS.world, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     log_current_cam_style(PATHS)
     device: torch_device = torch_device("cuda")
