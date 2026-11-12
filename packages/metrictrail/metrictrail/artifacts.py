@@ -112,8 +112,8 @@ def read_binary_ply(path: Path) -> ColoredCloud:
         raise ValueError(f"{path}: expected a binary little-endian PLY with x y z red green blue, got {header}")
     count: int = next(int(line.split()[-1]) for line in header if line.startswith("element vertex"))
     vertices: ndarray = np.frombuffer(raw, dtype=PLY_VERTEX_DTYPE, count=count, offset=end + len(marker))
-    points_xyz: Float32[ndarray, "n 3"] = np.column_stack([vertices["x"], vertices["y"], vertices["z"]]).astype(np.float32)
-    colors_rgb: UInt8[ndarray, "n 3"] = np.column_stack([vertices["red"], vertices["green"], vertices["blue"]]).astype(np.uint8)
+    points_xyz: Float32[ndarray, "n 3"] = np.column_stack([vertices["x"], vertices["y"], vertices["z"]])
+    colors_rgb: UInt8[ndarray, "n 3"] = np.column_stack([vertices["red"], vertices["green"], vertices["blue"]])
     return ColoredCloud(points_xyz=points_xyz, colors_rgb=colors_rgb)
 
 
