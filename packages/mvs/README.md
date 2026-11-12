@@ -35,24 +35,24 @@ The model artifact lives in the public HF repo `pablovela5620/mvs-depth`;
 Both tools run the model as a TensorRT engine by default. The first run builds the engine and caches it per machine
 (`~/.cache/trtkit/trt`, or the folder in `TRTKIT_TRT_CACHE`); later runs load it. On an RTX 5090 the first run of
 `mvs-live-mesh` spends 112 s building the engine and takes 142 s in all; a later run of the same 30 s capture
-(42897542, 1,766 depth frames) takes 27 s and peaks at 5.6 GiB of GPU memory.
+(42897542, 1,766 depth frames) takes 27 s and peaks at about 5.4 GiB (5,578 MiB) of GPU memory.
 
 The default engine has a batch-1 profile (`mvs.depth_engine.SMALL_TRT_BACKEND`): both tools feed the model one
 frame at a time, and an engine keeps its buffers at its largest batch. trtkit's own default profile (max batch 32)
-holds about 11 GiB. For a larger profile, name the `tensorrt` subcommand and set the batch; each profile builds its
-own cached engine once:
+holds about 11 GiB. For a larger profile, name the `tensorrt` subcommand and set both batch flags; each profile builds
+its own cached engine once:
 
 ```bash
-pixi run -e mvs --frozen mvs-catalog-depth --data.segments 42899799 --rr-config.headless \
+pixi run -e mvs --frozen mvs-catalog-depth --data.segments 42897542 --rr-config.headless \
   tensorrt --backend.max-batch-size 8 --backend.opt-batch-size 8
 ```
 
 `onnx` runs the model on ONNX Runtime CUDA. It needs no build, but it is about 12x slower on this model: ONNX
-Runtime has no CUDA kernel for its 114 BatchNormalization nodes, so they run on the CPU. On the same RTX 5090 and
+Runtime has no CUDA kernel for its 114 BatchNormalization nodes, so they and the casts around them run on the CPU. On the same RTX 5090 and
 capture the live mesh takes 333 s instead of 27 s:
 
 ```bash
-pixi run -e mvs --frozen mvs-live-mesh --data.segments 42899799 --rr-config.headless onnx
+pixi run -e mvs --frozen mvs-live-mesh --data.segments 42897542 --rr-config.headless onnx
 ```
 
 Tyro applies flags to the preceding subcommand, so parent flags
