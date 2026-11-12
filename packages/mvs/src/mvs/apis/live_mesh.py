@@ -66,8 +66,7 @@ class Config:
     model_path: Path = Path("data/models/depth_model_dot.onnx")
     """Portable ONNX depth model artifact."""
     backend: DepthBackendConfig = SMALL_TRT_BACKEND
-    """Cached TensorRT engine by default (batch-1 profile, built once on first use; ``tensorrt --backend.max-batch-size N``
-    for a larger profile). ``onnx`` is the ONNX Runtime CUDA fallback: no build, much slower."""
+    """TensorRT with the batch-1 profile (SMALL_TRT_BACKEND) by default; ``onnx`` is the ONNX Runtime CUDA fallback."""
     fusion: FusionConfig = field(default_factory=FusionConfig)
     """TSDF fusion and mesh logging."""
 
