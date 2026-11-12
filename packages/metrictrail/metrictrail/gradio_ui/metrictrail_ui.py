@@ -412,8 +412,10 @@ def build_app(
     return demo
 
 
-def launch(demo: gr.Blocks) -> None:
+def launch(demo: gr.Blocks, *, server_name: str | None = None, allowed_paths: list[str] | None = None, max_queue: int | None = 2) -> None:
     """Serve ``demo`` with the app's look (forced dark, like the EgoHand app); one run at a time, as the pipeline holds the
-    GPU. Gradio's environment (``GRADIO_SERVER_NAME``, ``GRADIO_SERVER_PORT``) picks where."""
-    demo.queue(max_size=2, default_concurrency_limit=1)
-    demo.launch(ssr_mode=False, css=APP_CSS, head=DARK_HEAD, show_error=True)
+    GPU. ``server_name`` (None: ``GRADIO_SERVER_NAME``, else 127.0.0.1) and ``GRADIO_SERVER_PORT`` pick where; a host whose
+    examples live outside the working directory names them in ``allowed_paths``. ``max_queue`` clicks may wait (None: any
+    number, the public ZeroGPU Space, where each click reserves its own GPU)."""
+    demo.queue(max_size=max_queue, default_concurrency_limit=1)
+    demo.launch(server_name=server_name, allowed_paths=allowed_paths, ssr_mode=False, css=APP_CSS, head=DARK_HEAD, show_error=True)

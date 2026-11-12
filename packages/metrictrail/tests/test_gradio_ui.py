@@ -182,3 +182,17 @@ def test_the_budget_dropdown_offers_exactly_vipes_budgets() -> None:
     from metrictrail.gradio_ui.metrictrail_ui import APP_BUDGET, BUDGET_LABELS, PIPELINE_BUDGETS, UPSTREAM_BUDGET
 
     assert tuple(BUDGET_LABELS) == PIPELINE_BUDGETS and {APP_BUDGET, UPSTREAM_BUDGET} <= set(PIPELINE_BUDGETS)
+
+
+def test_launch_serves_with_the_app_look_and_a_host_s_interface_and_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A host (the ZeroGPU Space) launches through launch(), so it gets the theme without copying the launch settings."""
+    from metrictrail.gradio_ui.metrictrail_ui import launch
+    from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD
+
+    calls: dict[str, object] = {}
+    demo: gr.Blocks = build_app(tmp_path)
+    monkeypatch.setattr(demo, "launch", lambda **options: calls.update(options))
+    launch(demo, server_name="0.0.0.0", allowed_paths=[str(tmp_path)], max_queue=None)
+    assert demo._queue.max_size is None  # a public host lets any number of clicks wait
+    assert calls["css"] == APP_CSS and calls["head"] == DARK_HEAD and calls["ssr_mode"] is False
+    assert calls["server_name"] == "0.0.0.0" and calls["allowed_paths"] == [str(tmp_path)]
