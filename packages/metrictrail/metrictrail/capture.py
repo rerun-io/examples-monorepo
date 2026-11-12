@@ -476,10 +476,13 @@ class CaptureObserver(DPVOObserver):
         rec: rr.RecordingStream | None = session.streams.get(id(dpvo))
         normals: Tensor | None = session.pending_normals.pop(frame, None)
         if normals is not None and session.pass_normals:
-            # Asynchronous copy into page-locked memory: the tracking loop never waits for it; fusion reads it
-            # after the run, long after the copy finished.
-            pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
-            session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
+            # A CUDA frame: an asynchronous copy into page-locked memory, the tracking loop never waits for it; fusion
+            # reads it after the run, long after the copy finished. A CPU frame (no GPU): a plain copy.
+            if normals.is_cuda:
+                pinned: UInt8[Tensor, "h w 3"] = torch.empty(normals.shape, dtype=normals.dtype, pin_memory=True)
+                session.pass_normals[-1][frame] = pinned.copy_(normals, non_blocking=True)
+            else:
+                session.pass_normals[-1][frame] = normals.clone()
         if rec is not None:
             # DPVO appends every frame to its keyframe graph, then may cull an older keyframe: the graph grew
             # when culling kept them all. The frame itself is always the newest keyframe after the call.
