@@ -26,6 +26,7 @@ import tempfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -36,12 +37,13 @@ from numpy import ndarray
 from simplecv.rerun_custom_types import Points3DWithConfidence
 from simplecv.rerun_eye_controls import follow_eye_controls
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.video_io import bind_cuda_device, open_decoder
 from torch import Tensor
 from tqdm.auto import tqdm
 
 from posekit.cameras import CalibratedCamera
 from posekit.models import AnnotatedHandDetectorConfig, AnnotatedHandPose3dConfig, HandPose3dPipeline, WilorHandDetectorConfig, WilorHandPoseConfig
-from posekit.predictions import HandDetections, HandPoses3d, HandSide
+from posekit.predictions import HandDetections, HandPoses3d, HandSide, MeshDetail
 from posekit.skeletons import KeypointSkeleton
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
@@ -89,6 +91,8 @@ class VideoHandsSettings:
     """Frames decoded and processed per step."""
     max_frames: int | None = None
     """Maximum number of frames to process; ``None`` runs the full video."""
+    mesh_detail: MeshDetail = "xlo"
+    """Hand mesh sent to the viewer: the model's own, or (EgoHand) SOMA's ``low`` or ``xlo`` level of detail, 4x or 21x fewer bytes."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -134,6 +138,7 @@ def log_chunk_hands(
     detections: HandDetections,
     hands: HandPoses3d,
     live_slots: set[str],
+    meshed_slots: set[str],
 ) -> None:
     """Log one processed chunk onto the ``frame`` and ``video_time`` timelines.
 
@@ -149,13 +154,14 @@ def log_chunk_hands(
         hands: Reconstructed hands of the chunk (batch-relative frame indices).
         live_slots: Slots currently holding data, updated in place; a slot is
             cleared only on its populated -> empty transition.
+        meshed_slots: Slots whose static mesh faces and colour are already logged, updated in place;
+            each frame then logs only the vertex positions.
     """
     box_frames: Int64[ndarray, "n"] = detections.boxes.frame_indices.cpu().numpy()
     boxes: Float32[ndarray, "n 4"] = detections.boxes.xyxy_numpy()
     hand_frames: Int64[ndarray, "m"] = hands.keypoints.frame_indices.cpu().numpy()
     xyz: Float32[ndarray, "m k 3"] | None = None if hands.keypoints.xyz_camera is None else hands.keypoints.xyz_camera.cpu().numpy()
     vertices: Float32[ndarray, "m v 3"] | None = None if hands.vertices is None else hands.vertices.cpu().numpy()
-    faces: dict[HandSide, ndarray] = {} if hands.faces is None else {side: value.cpu().numpy() for side, value in hands.faces.items()}
     keypoint_ids: UInt16[ndarray, "k"] = np.arange(hands.keypoints.skeleton.num_keypoints, dtype=np.uint16)
     # The hand models give no per-joint confidence (WiLoR's score is its box's), so every joint is logged at 1.0: green.
     full_confidence: Float32[ndarray, "k"] = np.ones(len(keypoint_ids), dtype=np.float32)
@@ -180,11 +186,15 @@ def log_chunk_hands(
                     f"{CAMERA_PATH}/hands/{slot}/joints",
                     Points3DWithConfidence(xyz[row], full_confidence, class_ids=JOINT_CLASS, keypoint_ids=keypoint_ids, radii=0.004),
                 )
-            if vertices is not None and side in faces:
-                rr.log(
-                    f"{CAMERA_PATH}/hands/{slot}/mesh",
-                    rr.Mesh3D(vertex_positions=vertices[row], triangle_indices=faces[side], albedo_factor=(*SIDE_COLOR[side], MESH_ALPHA)),
-                )
+            if vertices is not None and hands.faces is not None and side in hands.faces:
+                mesh_path: str = f"{CAMERA_PATH}/hands/{slot}/mesh"
+                # The faces never change: sent once, not with every frame (they were 80 % of the bytes). Static works for a
+                # stream the viewer reads in order; catalog layers keep them per chunk instead (dataforge/meshes.py says why).
+                if slot not in meshed_slots:
+                    faces: ndarray = hands.faces[side].cpu().numpy()
+                    rr.log(mesh_path, rr.Mesh3D.from_fields(triangle_indices=faces, albedo_factor=(*SIDE_COLOR[side], MESH_ALPHA)), static=True)
+                    meshed_slots.add(slot)
+                rr.log(mesh_path, rr.Mesh3D.from_fields(vertex_positions=vertices[row]))
         for slot in sorted(live_slots - present):
             for path in (f"{PINHOLE_PATH}/boxes/{slot}", f"{CAMERA_PATH}/hands/{slot}/joints", f"{CAMERA_PATH}/hands/{slot}/mesh"):
                 rr.log(path, rr.Clear(recursive=False))
@@ -213,7 +223,9 @@ def send_blueprint() -> None:
                     origin="world",
                     name="3D hands",
                     contents=["+ world/**", f"- {PINHOLE_PATH}/boxes/**"],
-                    eye_controls=follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15),
+                    eye_controls=follow_eye_controls(
+                        (0.0, 0.0, 1.0), (0.0, -1.0, 0.0), back_m=0.4, up_m=0.45, ahead_m=0.5, aim_down_m=0.4, side_m=0.15, spin_speed=0.1
+                    ),
                 ),
             ),
             rrb.TimePanel(timeline="video_time", play_state="playing"),
@@ -281,12 +293,42 @@ def describe_camera(settings: VideoHandsSettings, camera: CalibratedCamera) -> s
     return f"pinhole fx = {fx:.0f}, fy = {fy:.0f}, cx = {cx:.0f}, cy = {cy:.0f} px"
 
 
+@dataclass(frozen=True, slots=True)
+class VideoHandsProgress:
+    """Where a run is: the video is logged (``video``), a chunk of frames is done (``hands``), or the run ended (``done``)."""
+
+    stage: Literal["video", "hands", "done"]
+    """What just finished."""
+    frames_done: int
+    """Frames processed so far."""
+    num_frames: int
+    """Frames the run processes."""
+    hands: int
+    """Hands found so far."""
+    camera_note: str
+    """The camera used (``describe_camera``)."""
+    warning: str = ""
+    """Why the CPU decodes the video when NVDEC cannot (torchcodec's ``cpu_fallback``); empty when NVDEC decodes it."""
+
+    @property
+    def step(self) -> str:
+        """What just finished, in a few words (the app's run log)."""
+        if self.stage == "video":
+            return "Video loaded, finding hands"
+        if self.stage == "hands":
+            return f"Frames {self.frames_done}/{self.num_frames}, {self.hands} hands"
+        return f"processed {self.num_frames} frames, {self.hands} hands"
+
+    def __str__(self) -> str:
+        return f"{self.step}; {self.camera_note}" + (f"\n\n**{self.warning}**" if self.warning else "")
+
+
 def build_pipeline(settings: VideoHandsSettings) -> HandPose3dPipeline:
     """Set up the detector and the 3D hand model the settings name (exports and engine builds happen here)."""
     return HandPose3dPipeline(settings.detector.setup(), settings.pose.setup())
 
 
-def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline | None = None) -> Iterator[str]:
+def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline | None = None) -> Iterator[VideoHandsProgress]:
     """Decode the video on the GPU, run the hand stack chunk by chunk and log everything to the active recording.
 
     The CLI drains this generator into its global recording; the app streams a thread-local
@@ -297,16 +339,16 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         pipeline: A pipeline already set up for ``settings``; None builds one.
 
     Yields:
-        A progress line after every chunk, then the summary; both name the camera used.
+        Progress once the video and the layout are logged (before any chunk runs, so a streaming viewer gets them
+        first), after every chunk, and at the end; ``str()`` of each is the status line, naming the camera used.
 
     Raises:
         ValueError: If the video metadata cannot be read.
     """
-    from torchcodec.decoders import VideoDecoder
-
     if pipeline is None:
         pipeline = build_pipeline(settings)
-    decoder = VideoDecoder(settings.video_path, dimension_order="NHWC", device="cuda")
+    device: torch.device = torch.device("cuda", torch.cuda.current_device())
+    decoder = open_decoder(settings.video_path, device)
     num_frames_raw = decoder.metadata.num_frames
     fps_raw = decoder.metadata.average_fps
     if num_frames_raw is None or fps_raw is None or float(fps_raw) <= 0.0:
@@ -328,16 +370,20 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         video_timestamps_ns: Int64[ndarray, "frames"] = log_video(
             as_mp4(settings.video_path, Path(scratch)), Path(VIDEO_PATH), timeline="video_time"
         )
-    send_blueprint()
+    send_blueprint()  # after the video: "playing" starts the cursor at the start of the logged video
     log_hand_annotation_context(pipeline.pose.skeleton)
+    warning: str = f"WARNING: NVDEC cannot decode this video, the CPU decodes it (slower): {decoder.cpu_fallback}" if decoder.cpu_fallback else ""
+    yield VideoHandsProgress("video", 0, num_frames, 0, camera_note, warning)  # the app streams the video out before the first chunk runs
     total_hands: int = 0
     live_slots: set[str] = set()
+    meshed_slots: set[str] = set()
     for start in tqdm(range(0, num_frames, settings.frame_batch_size), desc="posekit video hands"):
         stop: int = min(start + settings.frame_batch_size, num_frames)
-        frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous()
+        bind_cuda_device(str(device))  # a streaming app resumes this generator on any worker thread
+        frames_rgb: UInt8[Tensor, "chunk h w 3"] = decoder.get_frames_in_range(start, stop).data.contiguous().to(device)
         with torch.inference_mode():
             detections, hands = pipeline(frames_rgb, camera)
-            hands = hands.in_pinhole(camera.intrinsics)
+            hands = hands.in_pinhole(camera.intrinsics).at_mesh_detail(settings.mesh_detail)
         total_hands += hands.num_hands
         chunk: Int64[ndarray, "chunk"] = np.arange(start, stop, dtype=np.int64)
         timestamps: Int64[ndarray, "chunk"] = (
@@ -345,11 +391,11 @@ def run_video_hands(settings: VideoHandsSettings, pipeline: HandPose3dPipeline |
         )
         log_chunk_hands(
             frame_indices=chunk.tolist(), timestamps_ns=timestamps.tolist(), detections=detections, hands=hands,
-            live_slots=live_slots,
+            live_slots=live_slots, meshed_slots=meshed_slots,
         )
-        yield f"Frames {stop}/{num_frames}, {total_hands} hands; {camera_note}"
+        yield VideoHandsProgress("hands", stop, num_frames, total_hands, camera_note, warning)
     torch.cuda.synchronize()
-    yield f"processed {num_frames} frames, {total_hands} hands; {camera_note}"
+    yield VideoHandsProgress("done", num_frames, num_frames, total_hands, camera_note, warning)
 
 
 def main(config: VideoHandsConfig) -> None:
@@ -358,5 +404,5 @@ def main(config: VideoHandsConfig) -> None:
     Args:
         config: Demo configuration.
     """
-    statuses: list[str] = list(run_video_hands(config))
-    print(f"[posekit] {statuses[-1]}")
+    progress: list[VideoHandsProgress] = list(run_video_hands(config))
+    print(f"[posekit] {progress[-1]}")
