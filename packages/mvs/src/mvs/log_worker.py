@@ -9,7 +9,6 @@ entity's rows, in submission order. Rerun timelines are per thread, so each job 
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from types import TracebackType
 from typing import Self
 
 import numpy as np
@@ -37,7 +36,7 @@ class LogWorker:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> None:
+    def __exit__(self, *exc: object) -> None:
         try:
             while self._pending:
                 self._pending.popleft().result()
