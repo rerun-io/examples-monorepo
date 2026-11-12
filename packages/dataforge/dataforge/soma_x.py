@@ -207,7 +207,7 @@ def log_soma_x_static(
     recording: rr.RecordingStream, root: str, *, topology: SomaXTopology, model: SomaXModel, source: SourceParameters, albedo: Rgba
 ) -> None:
     """Everything of one body's or hand's ``soma_x`` subtree that never changes: once per segment, before ``log_soma_x_rows``."""
-    meshes.log_mesh_static(recording, mesh_path(root), albedo_factor=albedo)
+    meshes.log_mesh_topology(recording, mesh_path(root), topology=topology.faces, albedo_factor=albedo)
     rr.log(
         soma_x_path(root),
         rr.AnnotationContext(
@@ -271,19 +271,18 @@ def log_soma_x_rows(
     source_temporal: dict[str, Float32[ndarray, "t c"]],
     mesh_rows: int,
 ) -> None:
-    """One window of rows: mesh chunks of ``mesh_rows`` rows (triangles on each chunk's first trusted row), joints, parameters."""
+    """One window of rows: mesh chunks of ``mesh_rows`` rows (vertices, or a Clear on an untrusted row), joints, parameters."""
     trusted: list[bool] = fit.trusted.tolist()
     before: int = 0
     for start in range(0, len(trusted), mesh_rows):
         rows: list[bool] = trusted[start : start + mesh_rows]
-        meshes.log_mesh_batch(
+        meshes.log_mesh_frames(
             recording,
             mesh_path(root),
             times_ns=fit.times_ns[start : start + mesh_rows],
             frame_indices=fit.frame_indices[start : start + mesh_rows],
             vertices=fit.vertices[before : before + sum(rows)],
             trusted=rows,
-            topology=topology.faces,
         )
         before += sum(rows)
     _send(

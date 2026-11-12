@@ -113,6 +113,38 @@ def test_mesh_topology_resolves_on_every_trusted_row_across_batches(tmp_path: Pa
     assert table.column(column).to_pylist() == [[[0, 1, 2]]] * 6
 
 
+def test_static_topology_mesh_logs_triangles_once_and_clears_untrusted_rows(tmp_path: Path) -> None:
+    target = tmp_path / "mesh.rrd"
+    triangles = np.array([[0, 1, 2]], dtype=np.uint32)
+    with writing.atomic_recording(target, recording_id="test", send_properties=False) as recording:
+        meshes.log_mesh_topology(recording, "/mesh", topology=triangles, albedo_factor=[255, 255, 255, 128])
+        for start, trusted in ((0, [True, False, True]), (3, [False, True, True])):
+            meshes.log_mesh_frames(
+                recording, "/mesh", times_ns=np.arange(start, start + 3, dtype=np.int64), frame_indices=np.arange(start, start + 3, dtype=np.int64),
+                vertices=np.full((sum(trusted), 3, 3), start, dtype=np.float32), trusted=trusted,
+            )
+    chunks = read_chunks(target)
+    static = [c.to_record_batch() for c in chunks if c.is_static]
+    assert len(static) == 1
+    assert static[0].column("Mesh3D:triangle_indices").to_pylist() == [[[0, 1, 2]]]
+    assert "Mesh3D:albedo_factor" in static[0].schema.names
+    temporal = [c.to_record_batch() for c in chunks if not c.is_static]
+    assert len(temporal) == 2
+    assert not any("triangle_indices" in name for batch in temporal for name in batch.schema.names)
+    vertices = [row for batch in temporal for row in batch.column("Mesh3D:vertex_positions").to_pylist()]
+    clears = [row for batch in temporal for row in batch.column("Clear:is_recursive").to_pylist()]
+    assert [None if row is None else len(row) for row in vertices] == [3, None, 3, None, 3, 3]
+    assert clears == [None, [False], None, [False], None, None]
+
+
+def test_static_topology_mesh_frames_refuse_a_vertex_count_off_the_trusted_rows(tmp_path: Path) -> None:
+    with writing.atomic_recording(tmp_path / "mesh.rrd", recording_id="test", send_properties=False) as recording, pytest.raises(ValueError, match="trusted"):
+        meshes.log_mesh_frames(
+            recording, "/mesh", times_ns=np.arange(2, dtype=np.int64), frame_indices=np.arange(2, dtype=np.int64),
+            vertices=np.ones((2, 3, 3), dtype=np.float32), trusted=[True, False],
+        )
+
+
 def test_sparse_column_refuses_repartitioning() -> None:
     triangles = rr.ComponentColumn(rr.Mesh3D.descriptor_triangle_indices(), rr.components.TriangleIndicesBatch(np.array([[0, 1, 2]], dtype=np.uint32)))
     column = meshes.SparseComponentColumn(triangles, row=1, num_rows=3)

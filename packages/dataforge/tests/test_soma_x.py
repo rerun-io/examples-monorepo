@@ -62,15 +62,33 @@ def write(tmp_path: Path, trusted: Bool[ndarray, "t"]) -> rrc.ChunkStore:
     return read_back(target)
 
 
-def test_mesh_rows_are_xlo_vertices_with_triangles_on_the_first_trusted_row(tmp_path: Path) -> None:
+def temporal_mesh_columns(store: rrc.ChunkStore) -> set[str]:
+    """Component columns of the mesh's temporal chunks."""
+    return {name for chunk in store.stream().filter(content=soma_x.mesh_path(ROOT), is_static=False).to_chunks() for name in chunk.to_record_batch().schema.names}
+
+
+def clear_times(store: rrc.ChunkStore) -> list[int]:
+    """Times of the mesh's Clear rows, read from the chunks (the dataframe reader applies a Clear and hides its column)."""
+    times: list[int] = []
+    for chunk in store.stream().filter(content=soma_x.mesh_path(ROOT), is_static=False).to_chunks():
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        if "Clear:is_recursive" in batch.schema.names:
+            stamps: list[int] = batch.column(schema.TIMELINE).cast("int64").to_pylist()
+            times += [stamp for stamp, row in zip(stamps, batch.column("Clear:is_recursive").to_pylist(), strict=True) if row is not None]
+    return sorted(times)
+
+
+def test_mesh_rows_are_xlo_vertices_on_trusted_rows_with_static_triangles_and_a_clear_elsewhere(tmp_path: Path) -> None:
     store: rrc.ChunkStore = write(tmp_path, np.array([True, False, True, True]))
     mesh: str = soma_x.mesh_path(ROOT)
     positions: pa.Table = column_rows(store, f"{mesh}:Mesh3D:vertex_positions")
-    lengths: list[int] = [len(row) for row in positions.column(1).to_pylist()]
-    assert lengths == [VERTICES, 0, VERTICES, VERTICES]
-    triangles: pa.Table = column_rows(store, f"{mesh}:Mesh3D:triangle_indices")
-    assert triangles.num_rows == 1
-    assert static_values(store, mesh)["albedo_factor"] == soma_x.rgba_u32(soma_x.HAND_ALBEDO["left"])
+    # The file holds a null at the untrusted row; the reader applies its Clear and returns an empty list there.
+    assert [len(row) for row in positions.column(1).to_pylist()] == [VERTICES, 0, VERTICES, VERTICES]
+    assert clear_times(store) == [33_000_000]
+    statics: dict[str, object] = static_values(store, mesh)
+    assert store.reader(index=None, contents=mesh).to_arrow_table().column(f"{mesh}:Mesh3D:triangle_indices").to_pylist() == [topology().faces.tolist()]
+    assert statics["albedo_factor"] == soma_x.rgba_u32(soma_x.HAND_ALBEDO["left"])
+    assert "Mesh3D:triangle_indices" not in temporal_mesh_columns(store)
 
 
 def test_joints_are_green_and_their_context_links_each_joint_to_its_parent_in_white(tmp_path: Path) -> None:
@@ -113,11 +131,11 @@ def test_mismatched_trusted_rows_are_refused(tmp_path: Path) -> None:
     raise AssertionError("a fit whose vertex rows disagree with its trusted mask must be refused")
 
 
-def test_untrusted_rows_carry_no_vertices_but_keep_their_error(tmp_path: Path) -> None:
+def test_untrusted_rows_carry_a_clear_but_keep_their_error(tmp_path: Path) -> None:
     trusted: Bool[ndarray, "t"] = np.array([False, False, False, False])
     store: rrc.ChunkStore = write(tmp_path, trusted)
-    columns: list[str] = store.reader(index=schema.TIMELINE).to_arrow_table().schema.names
-    assert f"{soma_x.mesh_path(ROOT)}:Mesh3D:triangle_indices" not in columns
+    assert f"{soma_x.mesh_path(ROOT)}:Mesh3D:vertex_positions" not in store.reader(index=schema.TIMELINE).to_arrow_table().schema.names
+    assert len(clear_times(store)) == FRAMES
     errors: Float32[ndarray, "t"] = np.array(
         [row[0] if row[0] is not None else np.nan for row in column_rows(store, f"{soma_x.params_path(ROOT)}:fit_error_mm").column(1).to_pylist()],
         dtype=np.float32,
@@ -137,7 +155,8 @@ def test_rows_written_in_windows_and_small_mesh_chunks_read_back_whole(tmp_path:
     store: rrc.ChunkStore = read_back(target)
     lengths: list[int] = [len(row) for row in column_rows(store, f"{soma_x.mesh_path(ROOT)}:Mesh3D:vertex_positions").column(1).to_pylist()]
     assert lengths == [VERTICES, 0, VERTICES, VERTICES]
-    assert column_rows(store, f"{soma_x.mesh_path(ROOT)}:Mesh3D:triangle_indices").num_rows == 3
+    assert clear_times(store) == [33_000_000]
+    assert "Mesh3D:triangle_indices" not in temporal_mesh_columns(store)
 
 
 def test_selfcap_params_path_is_the_shared_params_path() -> None:
