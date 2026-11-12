@@ -173,6 +173,13 @@ Bringing an upstream research model in (fork + pixify, then a vendor → predict
 Rerun pixel evidence) follows the repo skill `add-model` (`.agents/skills/add-model/SKILL.md`, also visible to
 Claude Code through `.claude/skills`). Both Codex and Claude Code load it when asked to "add/port <model>".
 
+## Putting an app on a ZeroGPU Space
+
+A Gradio + Rerun app goes onto a Hugging Face ZeroGPU Space with pixi, our packages pinned by commit, following
+the repo skill `zerogpu-pixi-space` (`.agents/skills/zerogpu-pixi-space/SKILL.md`): probe Space first, prebuilt
+TensorRT engines, Dev Mode iteration, GPU seconds per click sized from measured fresh-worker clicks, and
+screenshots of the Space page as proof.
+
 ## Adding a new package
 
 1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `ci/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
