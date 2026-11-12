@@ -9,10 +9,9 @@ pytest.importorskip("torchcodec", reason="mvs catalog imports need TorchCodec")
 import depth_png  # noqa: E402
 import numpy as np  # noqa: E402
 import rerun as rr  # noqa: E402
-import rerun.blueprint as rrb  # noqa: E402
 import rerun.chunk as rrc  # noqa: E402
 
-from mvs.catalog import FRAME_TIMELINE, PINHOLE_LOWRES_PATH, PINHOLE_PATH, TIMELINE, blueprint, log_depth  # noqa: E402
+from mvs.catalog import FRAME_TIMELINE, PINHOLE_LOWRES_PATH, TIMELINE, log_depth  # noqa: E402
 
 
 def test_log_depth_writes_the_lowres_pinhole_and_a_millimetre_png(tmp_path: Path) -> None:
@@ -46,25 +45,3 @@ def test_log_depth_writes_the_lowres_pinhole_and_a_millimetre_png(tmp_path: Path
     decoded = depth_png.decode(bytes(depth["EncodedDepthImage:blob"][0][0]))
     assert decoded.dtype == np.uint16
     assert decoded[0, 0] == 750 and decoded[-1, -1] == 2500
-
-
-def test_blueprint_shows_the_scene_the_video_and_the_depth() -> None:
-    """One screen: the 3D scene (mesh + camera) beside the camera video above the predicted depth."""
-    views: dict[str, rrb.View] = {}
-
-    def collect(container: rrb.Container | rrb.View) -> None:
-        if isinstance(container, rrb.View):
-            views[str(container.name)] = container
-        else:
-            for child in container.contents:
-                collect(child)
-
-    layout = blueprint()
-    assert layout.collapse_panels
-    collect(layout.root_container)
-    assert set(views) == {"Scene", "Video", "Predicted depth"}
-    assert isinstance(views["Scene"], rrb.Spatial3DView) and views["Scene"].origin == "world"
-    # Without the exclusion the 3D view back-projects the low-resolution depth into a point patch beside the mesh.
-    assert views["Scene"].contents == ["$origin/**", f"- /{PINHOLE_LOWRES_PATH}/**"]
-    assert isinstance(views["Video"], rrb.Spatial2DView) and views["Video"].origin == PINHOLE_PATH
-    assert isinstance(views["Predicted depth"], rrb.Spatial2DView) and views["Predicted depth"].origin == PINHOLE_LOWRES_PATH

@@ -15,9 +15,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 
-from mvs.catalog import FRAME_TIMELINE, TIMELINE, CatalogDataConfig, blueprint, depth_at_lowres, log_camera, log_depth, log_source_video
+from mvs.blueprint import create_blueprint
+from mvs.catalog import FRAME_TIMELINE, PATHS, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_depth, log_source_video
 from mvs.depth_engine import DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
+from mvs.frame_views import log_current_cam_style, log_lowest_cost, log_normals
 
 
 @dataclass
@@ -47,8 +49,10 @@ def main(config: Config) -> None:
     segment_ids: list[str] = list(config.data.segments) or dataset.segment_ids()
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
 
-    rr.send_blueprint(blueprint())
-    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    # The live-meshing layout without its filmstrip: this demo logs no source views, mesh or timings.
+    rr.send_blueprint(create_blueprint(PATHS, variant="native", source_cams=0))
+    rr.log(PATHS.world, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    log_current_cam_style(PATHS)
     device: torch_device = torch_device("cuda")
     total_frames: int = 0
     total_depth_frames: int = 0
@@ -85,6 +89,8 @@ def main(config: Config) -> None:
                 K_depth_33: Float32[ndarray, "3 3"]
                 depth_hw, K_depth_33 = depth_at_lowres(depth_outputs, K_native_33, native_wh)
                 log_depth(depth_hw, K_depth_33)
+                log_normals(PATHS, depth_outputs.depth_b1hw, K_depth_33, jpeg_quality=None)
+                log_lowest_cost(PATHS, depth_outputs.lowest_cost_bhw)
                 segment_depth_frames += 1
                 total_depth_frames += 1
 

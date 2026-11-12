@@ -9,12 +9,12 @@ from dataclasses import dataclass
 import depth_png
 import numpy as np
 import rerun as rr
-import rerun.blueprint as rrb
 from einops import rearrange
 from jaxtyping import Float32, Int64, UInt16
 from numpy import ndarray
 from simplecv.rerun_dataloader import SegmentNvdecDecoder, relay_video_packets
 
+from mvs.blueprint import EntityPaths
 from mvs.depth_engine import DepthOutputs
 
 CLOUD_CATALOG_URL: str = "rerun://api.latest.cloud.rerun.io:443"
@@ -24,11 +24,13 @@ FRAME_TIMELINE: str = "frame"
 NATIVE_FPS: float = 60.0
 """Catalog segments store the wide camera as 60 fps AV1."""
 
-CAMERA_PATH: str = "world/rig_00/cam_00"
-PINHOLE_PATH: str = f"{CAMERA_PATH}/pinhole"
-VIDEO_WIDE: str = f"{PINHOLE_PATH}/video"
+PATHS: EntityPaths = EntityPaths()
+"""Entity paths the apps log to (the original live-meshing demo's, with the catalog's camera)."""
+CAMERA_PATH: str = PATHS.current_cam
+PINHOLE_PATH: str = PATHS.current_pinhole
+VIDEO_WIDE: str = PATHS.video
 """The wide camera's AV1 VideoStream in the catalog segments; the apps relay it at the same path."""
-PINHOLE_LOWRES_PATH: str = f"{CAMERA_PATH}/pinhole_lowres"
+PINHOLE_LOWRES_PATH: str = PATHS.depth_pinhole
 """The viewer back-projects a DepthImage with its parent pinhole's intrinsics, so the 256x192 depth needs its own
 depth-resolution pinhole beside the native one."""
 DEPTH_HW: tuple[int, int] = (192, 256)
@@ -74,27 +76,8 @@ def log_depth(depth_hw: Float32[ndarray, "h=192 w=256"], K_depth_33: Float32[nda
     )
     depth_mm_hw: UInt16[ndarray, "h=192 w=256"] = np.rint(depth_hw * 1000.0).astype(np.uint16)
     rr.log(
-        f"{PINHOLE_LOWRES_PATH}/depth",
+        PATHS.depth,
         rr.EncodedDepthImage(blob=depth_png.encode(depth_mm_hw), media_type=rr.components.MediaType.PNG, meter=1000.0),
-    )
-
-
-def blueprint() -> rrb.Blueprint:
-    """One screen: the 3D scene (camera frustum, and the mesh when one is logged) beside the video above the predicted depth.
-
-    The 3D view leaves out the low-resolution depth subtree: the viewer would back-project that depth into a point patch
-    beside the mesh. The depth shows only in its own 2D view.
-    """
-    return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(origin="world", name="Scene", contents=["$origin/**", f"- /{PINHOLE_LOWRES_PATH}/**"]),
-            rrb.Vertical(
-                rrb.Spatial2DView(origin=PINHOLE_PATH, name="Video"),
-                rrb.Spatial2DView(origin=PINHOLE_LOWRES_PATH, name="Predicted depth"),
-            ),
-            column_shares=[2, 1],
-        ),
-        collapse_panels=True,
     )
 
 
