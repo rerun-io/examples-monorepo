@@ -179,6 +179,7 @@ If one session appears on two computers, the copy registered first is kept and t
 ## Limits
 
 - Codex rollouts from CLI versions older than 0.150 are skipped. `convert-all` prints the count per version. Pre-envelope files are skipped as `property:skipped:legacy_rollout`. Children without native completion items retain their message records. Unknown records and response subtypes are counted by full tag.
+- Codex rollouts are read as `.jsonl` or as Codex's compressed `.jsonl.zst`. When one thread is in several files (moved to `archived_sessions/`, or compressed beside an older plain copy), the copy with the most decompressed bytes is converted, ties going to the newest file; the others count as `duplicate-thread`.
 - Codex rollouts do not record how long each command ran, so Codex tool rows have no elapsed time.
 - Codex subagent rollouts go into their parent's recording. When the parent is skipped or fails, its subagents are skipped too, and the summary says why.
 - Leading NUL bytes are removed and counted as `property:skipped:nul_padded_line`. A truncated prefix followed by a complete record is recovered only if the trailing JSON object passes the provider schema; this counts as `property:skipped:merged_line` and also `property:skipped:damaged_line` for the lost prefix. Other damaged lines, including truncated tails, are skipped with a file-and-line warning. Valid JSON with an invalid required shape still fails the session.
