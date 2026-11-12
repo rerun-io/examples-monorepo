@@ -24,19 +24,21 @@ import rerun as rr
 import rerun.chunk as rrc
 import torch
 from dataforge import schema, soma_x
+from dataforge.datasets.epfl_source import BODY_L2_THRESHOLD, HAND_L2_THRESHOLD
 from dataforge.soma_x_fit import BODY_MAX_MEDIAN_ERROR_MM, HAND_MAX_MEDIAN_ERROR_MM, BodyFitter, HandFitter, ModelFit, Side, mano_model
 from dataforge.writing import atomic_recording
 from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.ops.mano.mano_np import MANOLayerNP
+from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 
 SOMA_X_LAYER: str = "soma_x"
 """Layer name of every dataset's SOMA-X fit (decision 14)."""
 SIDES: tuple[Side, ...] = ("left", "right")
 WINDOW_ROWS: int = 2048
 """Segment rows per window: bounds the source vertices in memory (2048 SMPL rows = 170 MB)."""
-Dataset = Literal["hocap", "gsi-six-view", "genrobot", "gen-humanego", "hot3d-aria", "hot3d-quest3"]
+Dataset = Literal["hocap", "epfl", "harmony4d", "egoexo4d", "gsi-six-view", "genrobot", "gen-humanego", "hot3d-aria", "hot3d-quest3"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +53,8 @@ class Config:
     """Segment ids; empty means every segment of the tree's pose layer."""
     max_seconds: float | None = None
     """Keep only the first seconds of each segment (smoke tests); None keeps everything."""
+    body_model_root: Path = Path.home() / "exoego-data/harmony4d/body_models"
+    """Root holding ``smpl/SMPL_NEUTRAL.pkl`` (and the other body models), as the converters' ``--smpl-model-root``."""
     skip_existing: bool = True
     """Leave segments whose layer already exists (a resumable run); False refits them."""
     hand_bar_mm: float = HAND_MAX_MEDIAN_ERROR_MM
@@ -131,6 +135,12 @@ def index_rows(table: pa.Table) -> tuple[Int64[ndarray, "t"], Int64[ndarray, "t"
     times_ns: Int64[ndarray, "t"] = table.column(schema.TIMELINE).cast(pa.int64()).to_numpy()
     frames: Int64[ndarray, "t"] = table.column(schema.FRAME_INDEX).to_numpy(zero_copy_only=False).astype(np.int64)
     return times_ns, frames
+
+
+def pivot_translation(rh: Float32[ndarray, "k 3"], th: Float32[ndarray, "k 3"], root: Float32[ndarray, "3"]) -> Float32[ndarray, "k 3"]:
+    """EasyMocap origin-pivot ``Th`` as the root-joint-pivot translation simplecv's layers take (``epfl_mesh.corrected_translation``)."""
+    rotation: Float32[ndarray, "k 3 3"] = Rotation.from_rotvec(rh.astype(np.float64)).as_matrix().astype(np.float32)
+    return (th + np.einsum("bij,j->bi", rotation - np.eye(3, dtype=np.float32), root)).astype(np.float32)
 
 
 def fit_window(fitter: HandFitter | BodyFitter, window: SourceWindow) -> soma_x.SomaXFit:
@@ -252,6 +262,238 @@ def hocap_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[
             soma_x.HAND_ALBEDO[side],
             windows,
         )
+
+
+# ── SMPL and full-pose MANO from per-row parameters ────────────────────────
+
+
+def model_windows(
+    *,
+    side: Side | None,
+    model_root: Path,
+    pose: Float32[ndarray, "t p"],
+    translation: Callable[[Int64[ndarray, "r"], SmplxLayerTorch | MANOLayerNP], Float32[ndarray, "r 3"]],
+    betas: Float32[ndarray, "t c"],
+    present: Bool[ndarray, "t"],
+    times_ns: Int64[ndarray, "t"],
+    frames: Int64[ndarray, "t"],
+    temporal: dict[str, Float32[ndarray, "t c"]],
+) -> Iterator[SourceWindow]:
+    """Pose neutral SMPL (``side`` None) or full-pose MANO per row, one model per distinct shape, window by window.
+
+    ``translation`` gives the model's own translation of segment rows (it gets their indices and the posing model).
+    """
+    models: dict[bytes, SmplxLayerTorch | MANOLayerNP] = {}
+    for start in range(0, len(times_ns), WINDOW_ROWS):
+        rows: slice = slice(start, start + WINDOW_ROWS)
+        keep: Bool[ndarray, "w"] = present[rows]
+        window_pose: Float32[ndarray, "k p"] = pose[rows][keep]
+        window_betas: Float32[ndarray, "k c"] = betas[rows][keep]
+        indices: Int64[ndarray, "k"] = np.flatnonzero(keep) + start
+        vertices: Float32[ndarray, "k v 3"] = np.zeros((len(window_pose), 6890 if side is None else 778, 3), dtype=np.float32)
+        centres: Float32[ndarray, "k 3"] = np.zeros((len(window_pose), 3), dtype=np.float32)
+        for key in dict.fromkeys(row.tobytes() for row in window_betas):
+            run: Bool[ndarray, "k"] = np.array([row.tobytes() == key for row in window_betas])
+            if key not in models:
+                shape: Float32[ndarray, "c"] = np.frombuffer(key, dtype=np.float32).copy()
+                models[key] = (
+                    SmplxLayerTorch(betas=shape, model_type="smpl", gender="neutral", model_root_dir=model_root).to("cuda")
+                    if side is None
+                    else MANOLayerNP(side=side, betas=shape, use_pca=False)
+                )
+            model: SmplxLayerTorch | MANOLayerNP = models[key]
+            if isinstance(model, SmplxLayerTorch):
+                vertices[run] = model.forward_batched(window_pose[run], translation(indices[run], model)).vertices
+            else:
+                posed: tuple[Float32[ndarray, "r 778 3"], Float32[ndarray, "r 21 3"]] = model(window_pose[run], translation(indices[run], model))
+                vertices[run] = posed[0]
+                centres[run] = posed[1][:, 0]
+        yield SourceWindow(
+            times_ns[rows], frames[rows], keep, vertices, centres, window_betas, {name: values[rows] for name, values in temporal.items()}
+        )
+
+
+# ── EPFL Smart Kitchen ─────────────────────────────────────────────────────
+
+
+def epfl_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[Stream]:
+    """EPFL: EasyMocap SMPL (neutral, assumed) and MANO full pose, ``Rh`` replacing the root, ``Th`` an origin pivot (``epfl_mesh``)."""
+    smpl_root: Path = config.body_model_root
+    specs: list[tuple[str, str, str, float, int]] = [
+        ("body_pose", schema.body_path("smpl"), "/world/gt/body", BODY_L2_THRESHOLD, 72),
+        *(("hand_pose", schema.hand_mano_path(hand), schema.hands_path(hand), HAND_L2_THRESHOLD, 48) for hand in SIDES),
+    ]
+    for layer, path, root, threshold, width in specs:
+        _, table = read_rows(config.tree / layer / f"{segment}.rrd", f"{path}/**", config.max_seconds)
+        times_ns, frames = index_rows(table)
+        poses: Float32[ndarray, "t p"] = fixed_rows(table, f"{path}:poses", width)
+        rh: Float32[ndarray, "t 3"] = fixed_rows(table, f"{path}:Rh", 3)
+        th: Float32[ndarray, "t 3"] = fixed_rows(table, f"{path}:Th", 3)
+        shapes: Float32[ndarray, "t 10"] = fixed_rows(table, f"{path}:shapes", 10)
+        l2: Float32[ndarray, "t"] = scalar_rows(table, f"{path}/l2_dist:Scalars:scalars")
+        accepted: Bool[ndarray, "t"] = np.isfinite(l2) & (l2 < threshold) & np.isfinite(np.concatenate([poses, rh, th, shapes], axis=1)).all(axis=1)
+        side: Side | None = None if layer == "body_pose" else ("left" if "/left/" in path else "right")
+        pose: Float32[ndarray, "t p"] = poses.copy()
+        pose[:, :3] = rh
+        articulation: str = "body_pose" if side is None else "hand_pose"
+
+        def pivot(
+            rows: Int64[ndarray, "r"], model: SmplxLayerTorch | MANOLayerNP, rh: Float32[ndarray, "t 3"] = rh, th: Float32[ndarray, "t 3"] = th
+        ) -> Float32[ndarray, "r 3"]:
+            root: Float32[ndarray, "3"] = model.rest_root_joint() if isinstance(model, SmplxLayerTorch) else model.root_trans.reshape(3)
+            return pivot_translation(rh[rows], th[rows], root)
+
+        temporal: dict[str, Float32[ndarray, "t c"]] = {"betas": shapes, "global_orient": rh, articulation: poses[:, 3:], "transl": th}
+        yield Stream(
+            root,
+            fitters.body("smpl", smpl_root / "smpl/SMPL_NEUTRAL.pkl") if side is None else fitters.hand(side),
+            soma_x.SourceParameters(
+                model="SMPL neutral (assumed)" if side is None else "MANO",
+                encoding={
+                    "betas": "10 shape coefficients, per row as shipped",
+                    "global_orient": "axis-angle Rh, replaces the pose's root",
+                    articulation: "axis-angle, the shipped poses without their root placeholder"
+                    + ("" if side is None else "; no PCA, so no hands_mean"),
+                    "transl": "metres, EasyMocap origin pivot Th (x = R @ lbs + Th)",
+                },
+                static={},
+                temporal={},
+            ),
+            soma_x.BODY_ALBEDO if side is None else soma_x.HAND_ALBEDO[side],
+            lambda side=side, pose=pose, pivot=pivot, shapes=shapes, accepted=accepted, times_ns=times_ns, frames=frames, temporal=temporal: (
+                model_windows(
+                    side=cast(Side | None, side),
+                    model_root=smpl_root,
+                    pose=pose,
+                    translation=pivot,
+                    betas=shapes,
+                    present=accepted,
+                    times_ns=times_ns,
+                    frames=frames,
+                    temporal=temporal,
+                )
+            ),
+        )
+
+
+# ── Harmony4D ──────────────────────────────────────────────────────────────
+
+
+def harmony4d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[Stream]:
+    """Harmony4D: release SMPL fits (neutral, 10 betas), several people; smplx-convention ``transl`` (re-posing matches the shipped vertices)."""
+    _, table = read_rows(config.tree / "body_pose" / f"{segment}.rrd", "/world/gt/people/**", config.max_seconds)
+    times_ns, frames = index_rows(table)
+    people: list[str] = sorted({column.split("/")[4] for column in table.schema.names if column.endswith("/body/smpl:global_orient")})
+    smpl_root: Path = config.body_model_root
+    for person in people:
+        path: str = f"/world/gt/people/{person}/body/smpl"
+        global_orient: Float32[ndarray, "t 3"] = fixed_rows(table, f"{path}:global_orient", 3)
+        body_pose: Float32[ndarray, "t 69"] = fixed_rows(table, f"{path}:body_pose", 69)
+        betas: Float32[ndarray, "t 10"] = fixed_rows(table, f"{path}:betas", 10)
+        transl: Float32[ndarray, "t 3"] = fixed_rows(table, f"{path}:transl", 3)
+        present: Bool[ndarray, "t"] = np.isfinite(np.concatenate([global_orient, body_pose, betas, transl], axis=1)).all(axis=1)
+        temporal: dict[str, Float32[ndarray, "t c"]] = {"betas": betas, "global_orient": global_orient, "body_pose": body_pose, "transl": transl}
+        pose: Float32[ndarray, "t 72"] = np.concatenate([global_orient, body_pose], axis=1)
+        yield Stream(
+            f"/world/gt/people/{person}/body",
+            fitters.body("smpl", smpl_root / "smpl/SMPL_NEUTRAL.pkl"),
+            soma_x.SourceParameters(
+                model="SMPL neutral",
+                encoding={
+                    "betas": "10 shape coefficients, per row as shipped",
+                    "global_orient": "axis-angle",
+                    "body_pose": "23 x axis-angle",
+                    "transl": "metres, smplx convention (root-joint pivot)",
+                },
+                static={},
+                temporal={},
+            ),
+            soma_x.BODY_ALBEDO,
+            lambda pose=pose, betas=betas, present=present, temporal=temporal, transl=transl: model_windows(
+                side=None,
+                model_root=smpl_root,
+                pose=pose,
+                translation=lambda rows, model: transl[rows],
+                betas=betas,
+                present=present,
+                times_ns=times_ns,
+                frames=frames,
+                temporal=temporal,
+            ),
+        )
+
+
+# ── Ego-Exo4D-HM ───────────────────────────────────────────────────────────
+
+
+def egoexo4d_streams(config: Config, segment: str, fitters: "Fitters") -> Iterator[Stream]:
+    """Ego-Exo4D-HM: SLAHMR's SMPL-H male fits, 16 betas, 45 PCA components per hand (``egoexo4d_body``)."""
+    import torch
+    from dataforge.datasets.egoexo4d_body import HAND_PCA_COMPONENTS, SMPLH_FILE, SmplhModel
+
+    model_root: Path = config.body_model_root
+    path: str = schema.body_path("smplh")
+    _, table = read_rows(config.tree / "body_pose" / f"{segment}.rrd", f"{path}/**", config.max_seconds)
+    times_ns, frames = index_rows(table)
+    temporal: dict[str, Float32[ndarray, "t c"]] = {
+        "betas": fixed_rows(table, f"{path}:betas", 16),
+        "global_orient": fixed_rows(table, f"{path}:root_orient", 3),
+        "body_pose": fixed_rows(table, f"{path}:pose_body", 63),
+        "hand_pose": fixed_rows(table, f"{path}:hand_pose", 2 * HAND_PCA_COMPONENTS),
+        "transl": fixed_rows(table, f"{path}:trans", 3),
+    }
+    valid: Float32[ndarray, "t"] = scalar_rows(table, f"{path}/valid:Scalars:scalars")
+    present: Bool[ndarray, "t"] = (valid > 0.5) & np.isfinite(np.concatenate(list(temporal.values()), axis=1)).all(axis=1)
+
+    def windows() -> Iterator[SourceWindow]:
+        model: SmplhModel = SmplhModel(model_root)
+        model.layer = model.layer.to("cuda")  # posing ~3,000 SMPL-H frames costs ~1 s on the CPU, a few ms on the GPU
+        for start in range(0, len(times_ns), WINDOW_ROWS):
+            rows: slice = slice(start, start + WINDOW_ROWS)
+            keep: Bool[ndarray, "w"] = present[rows]
+            inputs: dict[str, torch.Tensor] = {
+                name: torch.from_numpy(np.ascontiguousarray(values[rows][keep])).cuda() for name, values in temporal.items()
+            }
+            with torch.no_grad():
+                output = model.layer(
+                    betas=inputs["betas"],
+                    global_orient=inputs["global_orient"],
+                    body_pose=inputs["body_pose"],
+                    left_hand_pose=inputs["hand_pose"][:, :HAND_PCA_COMPONENTS],
+                    right_hand_pose=inputs["hand_pose"][:, HAND_PCA_COMPONENTS:],
+                    transl=inputs["transl"],
+                )
+            vertices: Float32[ndarray, "k v 3"] = output.vertices.float().cpu().numpy()
+            yield SourceWindow(
+                times_ns[rows],
+                frames[rows],
+                keep,
+                vertices,
+                np.zeros((len(vertices), 3), dtype=np.float32),
+                temporal["betas"][rows][keep],
+                {name: values[rows] for name, values in temporal.items()},
+            )
+
+    yield Stream(
+        "/world/gt/body",
+        fitters.body(
+            "smpl", model_root / SMPLH_FILE, gender="male", num_betas=16
+        ),  # SOMA-X ships no SMPLH wrap; SMPL-H shares SMPL's 6,890-vertex body
+        soma_x.SourceParameters(
+            model="SMPL-H male, 16 betas",
+            encoding={
+                "betas": "16 shape coefficients, per row as shipped (betas_per_frame)",
+                "global_orient": "axis-angle (root_orient)",
+                "body_pose": "21 x axis-angle (pose_body)",
+                "hand_pose": f"{HAND_PCA_COMPONENTS} PCA coefficients per hand (left, right), SMPL-X MANO basis, mean hand added",
+                "transl": "metres, smplx convention (root-joint pivot)",
+            },
+            static={},
+            temporal={},
+        ),
+        soma_x.BODY_ALBEDO,
+        windows,
+    )
 
 
 # ── MANO hands from the logged hand_mesh layer (GSI, DAS-Ego) ──────────────
@@ -450,6 +692,9 @@ class Fitters:
 
 STREAMS: dict[Dataset, Callable[[Config, str, Fitters], Iterator[Stream]]] = {
     "hocap": hocap_streams,
+    "epfl": epfl_streams,
+    "harmony4d": harmony4d_streams,
+    "egoexo4d": egoexo4d_streams,
     "gsi-six-view": mesh_layer_streams,
     "genrobot": mesh_layer_streams,
     "gen-humanego": mesh_layer_streams,
@@ -458,6 +703,9 @@ STREAMS: dict[Dataset, Callable[[Config, str, Fitters], Iterator[Stream]]] = {
 }
 POSE_LAYER: dict[Dataset, str] = {
     "hocap": "hand_pose",
+    "epfl": "body_pose",
+    "harmony4d": "body_pose",
+    "egoexo4d": "body_pose",
     "gsi-six-view": "pose",
     "genrobot": "pose",
     "gen-humanego": "pose",
