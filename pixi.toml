@@ -56,14 +56,11 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 # The PyPI `catalog` extra, spelled out (rerun-sdk[catalog] == datafusion + pandas);
 # datafusion stays on PyPI (below).
 pandas = ">=2"
-
-# The workspace's one Pillow cap. gradio (PyPI) <= 6.31.0 requires pillow<13: Pillow 13 broke gradio's
-# 32-bit integer PNG output. Fixed on gradio main (gradio-app/gradio#14034, 2026-11-02, pillow<14) but
-# unreleased as of 2026-11-06. Remove this cap and bump gradio with the next 6.x release; Pillow 13 also
-# carries the fix for CVE-2026-112403 (gradio-app/gradio#13999). Gradio lives only in `common`, so the
-# cap does too; a constraint adds no package.
-[feature.common.constraints]
-pillow = "<13"
+# gradio from conda-forge (its 6.31.0 build installs complete; it also caps pillow <13 itself: Pillow 13 broke
+# gradio's 32-bit integer PNG output, fixed on gradio main by gradio-app/gradio#14034 but unreleased). Exact, so
+# each bump is a deliberate change: re-check that a gradio-rerun app still renders, and that the hands app's tab strip
+# and example tiles still line up (posekit/hands_app_ui/theme.py styles Gradio's own classes).
+gradio = "==6.31.0"                                        # pin-bump: hold
 
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
@@ -77,16 +74,13 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# pin-bump: hold — gradio-rerun pins rerun-sdk exactly (0.42.0 needs rerun-sdk==0.42.0 and gradio>=6),
-# so it moves only together with the rerun-sdk pins; the conda rerun-sdk in
-# [feature.common.dependencies] satisfies it through pixi's conda->PyPI mapping. gradio is exact so
-# that each bump is a deliberate change: re-check that a gradio-rerun app still renders. Every gradio
-# release so far caps pillow<13, see [feature.common.constraints].
-gradio = "==6.31.0"                                        # pin-bump: hold
-# 0.42.0.post2 (pablovela5620/ai-demos release) = gradio-rerun-viewer main @ c456457: 0.42.0 plus the time cursor
-# command `gradio_rerun.commands.set_time` (rerun-io/gradio-rerun-viewer#66, merged after 0.42.0) and post1's ordered
-# loads of streamed segments. The MetricTrail app moves the cursor to each tracked frame with it. TODO: back to PyPI
-# once a gradio-rerun release has both.
+# pin-bump: hold — gradio-rerun pins rerun-sdk exactly (0.42.0 needs rerun-sdk==0.42.0 and gradio>=6), so it moves
+# only together with the rerun-sdk pins; the conda rerun-sdk and gradio in [feature.common.dependencies] satisfy it
+# through pixi's conda->PyPI mapping.
+# 0.42.0.post2 (pablovela5620/ai-demos release) = gradio-rerun-viewer main @ c456457: 0.42.0 plus post1's frontend fix
+# (streamed segments load one at a time, in order) and the time cursor command `gradio_rerun.commands.set_time`
+# (rerun-io/gradio-rerun-viewer#66, merged after 0.42.0); the MetricTrail app moves the cursor to each tracked frame
+# with it. TODO: back to `gradio-rerun = "==<version>"` from PyPI once a release has both.
 gradio-rerun = { url = "https://github.com/pablovela5620/ai-demos/releases/download/gradio-rerun-0.42.0.post2/gradio_rerun-0.42.0.post2-py3-none-any.whl" }  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
@@ -1291,6 +1285,13 @@ description = "Run the GPU video 3D hands demo (hand detector + top-down 3D hand
 cmd = "python tools/apps/hands_app.py"
 cwd = "packages/posekit"
 description = "Launch the 3D hands Gradio app (posekit-video-hands' code: WiLoR or an EgoHand stack) with an embedded Rerun viewer (http://127.0.0.1:7872)"
+
+# Hot reload: run from tools/apps so Gradio watches only the launcher and the layout package; the pipelines
+# (posekit.hands_ui, the models) are not watched and stay loaded. Watch dirs must be absolute.
+[feature.posekit-hands.tasks.posekit-hands-app-dev]
+cmd = "gradio hands_app.py --watch-dirs $PIXI_PROJECT_ROOT/packages/posekit/src/posekit/hands_app_ui"
+cwd = "packages/posekit/tools/apps"
+description = "The 3D hands app with Gradio hot reload: edits under posekit/hands_app_ui show in the open tab within a second, the models stay loaded (args after --)"
 
 [feature.posekit-hands.tasks.posekit-hands-eval]
 cmd = "python tools/apps/hands_eval.py"

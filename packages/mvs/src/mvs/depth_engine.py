@@ -2,14 +2,15 @@
 
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 import torch.nn.functional as functional
+import tyro
 from einops import rearrange
 from jaxtyping import Float, UInt8
 from torch import Tensor
-from trtkit import OnnxOrTrtBackendConfig, TensorRtBackendConfig, TensorRuntime, create_runtime_from_onnx
+from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRtBackendConfig, TensorRuntime, create_runtime_from_onnx
 
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
@@ -17,6 +18,20 @@ TRT_EXTRA_OUTPUT_PATTERNS: tuple[str, ...] = ("cost_volume/GridSample",)
 """TensorRT miscompiles the plane-sweep GridSamples when fused with their consumers
 (~0.3 m mean depth error vs ONNX Runtime); materializing them as engine outputs
 restores parity."""
+SMALL_TRT_BACKEND: TensorRtBackendConfig = TensorRtBackendConfig(max_batch_size=1, opt_batch_size=1)
+"""The tools' default backend: TensorRT with a batch-1 profile. Both tools feed the model one frame at a time, and the
+runtime keeps its buffers at the profile's largest batch: trtkit's default profile (max batch 32) holds about 11 GiB of
+GPU memory. This profile has its own cached engine, built once on first use."""
+
+if TYPE_CHECKING:
+    DepthBackendConfig = OnnxBackendConfig | TensorRtBackendConfig
+else:
+    DepthBackendConfig = tyro.extras.subcommand_type_from_defaults(
+        {"onnx": OnnxBackendConfig(), "tensorrt": SMALL_TRT_BACKEND}, prefix_names=False
+    )
+"""The tools' ``onnx | tensorrt`` backend subcommands. trtkit's own union bakes its batch-32 profile into
+``tensorrt``; this one starts ``tensorrt`` from :data:`SMALL_TRT_BACKEND`, so ``tensorrt --backend.max-batch-size 4``
+changes only the max."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +61,7 @@ class DepthOutputs(NamedTuple):
     depth_b1hw: Float[Tensor, "b c=1 h=192 w=256"]
     """Metric depth."""
     lowest_cost_bhw: Float[Tensor, "b h=96 w=128"]
-    """Lowest plane-sweep matching cost (confidence proxy)."""
+    """Depth, in metres, of the cost volume's best plane per pixel at the matching size (not a cost value)."""
 
 
 class DepthEngine:

@@ -365,3 +365,26 @@ def test_log_video_stream_roundtrip_pixels_match_source(
     assert len(stream_frames) == _FRAME_COUNT
     for i in (0, _FRAME_COUNT // 2, _FRAME_COUNT - 1):
         np.testing.assert_array_equal(src_frames[i], stream_frames[i])
+
+
+def test_log_video_encodes_on_the_cpu_with_a_warning_when_nvenc_fails(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    tried: list[bool] = []
+
+    class Reader:
+        def __init__(self, source: Path, *, transcode: bool, **_: object) -> None:
+            self.try_gpu: bool = transcode
+
+        def stream(self) -> Iterator[rrc.Chunk]:
+            tried.append(self.try_gpu)
+            if self.try_gpu:
+                raise RuntimeError("ffmpeg: Cannot load libnvidia-encode.so.1")
+            return iter(())
+
+    monkeypatch.setattr(rrx, "Mp4Reader", Reader)
+    monkeypatch.setattr(rrx, "Mp4TranscodeOptions", lambda output_codec, try_gpu: try_gpu)
+    recording: rr.RecordingStream = rr.RecordingStream("test_log_video_fallback")
+    with caplog.at_level("WARNING"):
+        log_video(Path("clip.mp4"), Path("/video"), recording=recording)
+        log_video(Path("clip.mp4"), Path("/video"), recording=recording)
+    assert tried == [True, False, True, False]  # nothing is remembered: every video tries NVENC first
+    assert [record.levelname for record in caplog.records] == ["WARNING", "WARNING"] and "libnvidia-encode" in caplog.text
