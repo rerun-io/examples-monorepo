@@ -1,6 +1,8 @@
 """The hands app runs the CLI's settings: a stack name selects the same configs as the CLI subcommand, the camera the CLI's pinhole."""
 
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import tyro
@@ -14,11 +16,13 @@ from posekit.models import HandDetectorConfig, HandPose3dConfig, HandPose3dPipel
 
 @pytest.mark.parametrize("stack", ["wilor", "egohand-fast", "egohand-fast-bf16"])
 def test_inputs_become_the_cli_settings(stack: str) -> None:
-    settings = hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 32, 1000.0, None, 960.0, None)
+    settings = hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 32, 1000.0, None, 960.0, None, "low")
     assert settings.detector == tyro.cli(HandDetectorConfig, args=[stack])
     assert settings.pose == tyro.cli(HandPose3dConfig, args=[stack])
-    assert (settings.video_path, settings.max_frames, settings.fx, settings.fy, settings.cx, settings.cy) == (Path("/tmp/clip.mp4"), 32, 1000.0, None, 960.0, None)
-    assert hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 0, None, None, None, None).max_frames is None
+    assert (settings.video_path, settings.max_frames, settings.fx, settings.fy, settings.cx, settings.cy, settings.mesh_detail) == (
+        Path("/tmp/clip.mp4"), 32, 1000.0, None, 960.0, None, "low"
+    )
+    assert hands_ui.settings_from_inputs("/tmp/clip.mp4", stack, 0, None, None, None, None, "xlo").max_frames is None
 
 
 def test_choosing_a_video_fills_the_assumed_pinhole() -> None:
@@ -36,7 +40,7 @@ def test_examples_name_a_clip_and_a_stack_and_the_exocentric_clip_runs_wilor() -
 def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     # Switching between an EgoHand example and the WiLoR example must not set either stack up again.
     built: list[str] = []
-    monkeypatch.setattr(hands_ui, "_PIPELINES", {})
+    monkeypatch.setattr(hands_ui, "PIPELINES", {})
     monkeypatch.setattr(
         hands_ui, "build_pipeline", lambda settings: built.append(type(settings.pose).__name__) or HandPose3dPipeline.__new__(HandPose3dPipeline)
     )
@@ -46,10 +50,78 @@ def test_each_stack_is_set_up_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(built) == 2
 
 
+def test_the_layout_takes_the_upload_as_is_picks_an_examples_stack_and_stop_cancels_run() -> None:
+    import gradio as gr
 
-def test_the_upload_takes_an_iphone_mov_and_other_containers() -> None:
-    from gradio_client.utils import is_valid_file
+    from posekit.hands_app_ui.layout import build
 
-    suffixes = list(hands_ui.VIDEO_SUFFIXES)
-    assert all(is_valid_file(name, suffixes) for name in ("IMG_6261.MOV", "clip.mp4", "clip.mkv", "clip.webm"))
-    assert not is_valid_file("notes.txt", suffixes)
+    demo = build()
+    video = next(block for block in demo.blocks.values() if block.elem_id == "source-video")
+    assert isinstance(video, gr.Video)
+    assert video.format is None and video.include_audio  # Gradio converts nothing on upload
+    stack = next(block for block in demo.blocks.values() if isinstance(block, gr.Dropdown) and block.label == "Hand stack")
+    examples = next(block for block in demo.blocks.values() if isinstance(block, gr.Dataset))
+    # the examples show only the video (thumbnails), and a click on one sets the video and its stack
+    assert [type(component) for component in examples._components] == [gr.Video]
+    clicks = [dependency for dependency in demo.config["dependencies"] if (examples._id, "click") in dependency["targets"]]
+    assert [dependency["outputs"] for dependency in clicks] == [[video._id, stack._id]]
+    assert any(dependency.get("cancels") for dependency in demo.config["dependencies"])
+
+
+def test_the_outputs_tab_summarises_a_run_and_a_run_without_a_video_asks_for_one() -> None:
+    from posekit.apis.video_hands import VideoHandsProgress
+    from posekit.hands_app_ui.layout import run_hands, summary
+
+    table = summary(VideoHandsProgress("hands", 64, 180, 128, "assumed pinhole"), 2.0, "egohand-fast", "xlo")
+    assert "| Frames | 64 / 180 |" in table and "| Hands | 128 |" in table and "32 fps" in table and "mesh `xlo`" in table
+    updates = list(run_hands(None, "egohand-fast", 0, None, None, None, None, "xlo"))
+    assert len(updates) == 1 and updates[0][1] == "Choose a video first."
+
+
+def test_the_layout_shows_the_stacks_examples_default_and_run_it_is_given() -> None:
+    import gradio as gr
+
+    from posekit.hands_app_ui.layout import build
+
+    def run(*inputs: object) -> Iterator[tuple[Any, str, Any, str, str]]:
+        yield None, "", None, "", ""
+
+    rows = [row for row in hands_ui.example_rows(Path("/space/examples")) if row[1] != "wilor"]
+    assert rows[0][0] == "/space/examples/gsi_sewing_left_front.mp4" and len(rows) == 4
+    demo = build(stacks=["egohand-fast"], examples=rows[:1], stack_default="egohand-fast", description="On this host", run=run)
+    stack = next(block for block in demo.blocks.values() if isinstance(block, gr.Dropdown))
+    assert [choice[1] for choice in stack.choices] == ["egohand-fast"] and stack.value == "egohand-fast"
+    examples = next(block for block in demo.blocks.values() if isinstance(block, gr.Dataset))
+    assert len(examples.samples) == 1
+    assert any(isinstance(block, gr.Markdown) and block.value == "On this host" for block in demo.blocks.values())
+    assert any(function.fn is run for function in demo.fns.values())
+
+
+def test_a_first_run_says_it_prepares_the_stack_then_how_long_that_took(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The setup lines name the stack and no backend: WiLoR runs on torch, the EgoHand stacks on TensorRT.
+    from posekit.apis.video_hands import VideoHandsProgress
+    from posekit.hands_app_ui import layout
+
+    monkeypatch.setattr(layout, "PIPELINES", {})
+    monkeypatch.setattr(layout, "pipeline_for", lambda stack: None)
+    monkeypatch.setattr(layout, "stream_hands", lambda settings, stack: iter([(None, VideoHandsProgress("done", 8, 8, 4, "assumed pinhole"))]))
+    updates = list(layout.run_hands("/tmp/clip.mp4", "wilor", 0, None, None, None, None, "xlo"))
+    assert updates[0][1] == "Preparing wilor (the first run may take several minutes)…"
+    assert "TensorRT" not in updates[0][1] + updates[-1][4]
+    newest, ready, preparing = updates[-1][4].splitlines()
+    assert newest.endswith("processed 8 frames, 4 hands") and ready.endswith("wilor ready (0 s)") and preparing.endswith(updates[0][1])
+
+
+def test_the_run_log_keeps_only_recent_lines_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    from posekit.apis.video_hands import VideoHandsProgress
+    from posekit.hands_app_ui import layout
+
+    chunks: int = layout.RUN_LOG_LINES + 40
+    monkeypatch.setattr(layout, "PIPELINES", {"wilor": None})
+    monkeypatch.setattr(
+        layout, "stream_hands",
+        lambda settings, stack: ((None, VideoHandsProgress("hands", done, chunks, done, "assumed pinhole")) for done in range(1, chunks + 1)),
+    )
+    logs = [update[4].splitlines() for update in layout.run_hands("/tmp/clip.mp4", "wilor", 0, None, None, None, None, "xlo")]
+    assert max(len(log) for log in logs) == layout.RUN_LOG_LINES
+    assert logs[-1][0].endswith(f"Frames {chunks}/{chunks}, {chunks} hands") and logs[-1][-1].endswith(f"Frames 41/{chunks}, 41 hands")
