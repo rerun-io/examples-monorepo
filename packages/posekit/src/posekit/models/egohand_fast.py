@@ -59,6 +59,8 @@ DETECTOR_CALIBRATION: Path = Path(__file__).resolve().parents[1] / "assets" / "e
 """Activation ranges of the detector's three FP8 encoder input projections."""
 CACHED_HEAD_ONNX: Path = DEFAULT_TRT_CACHE_DIR / f"egohand-head-bf16-{EGOHAND_REVISION[:8]}-v1.onnx"
 """Both learned heads with their virtual-camera conditioning, exported in BF16."""
+CPU_MODELS: dict[tuple[Path, Path], EgoHand] = {}
+"""Models that ``EgoHandFastConfig.prepare`` built on the CPU, by weights and SOMA path; a predictor takes its model from here."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +95,23 @@ class EgoHandFastConfig:
     """Hugging Face repo holding the SOMA hand model."""
     hf_soma_revision: str = SOMA_REVISION
     """Pinned commit of that repo."""
+
+    def prepare(self) -> None:
+        """The part of ``setup`` that needs no GPU: download the weights and SOMA files, build the model and SOMA's coarser meshes on the CPU.
+
+        For a process that forks its GPU workers (a ZeroGPU Space): call it once before the fork, and ``setup`` in each
+        worker only moves the model to CUDA and loads the TensorRT engines. It starts neither CUDA nor Warp.
+        """
+        from posekit.models.egohand import soma_lod_tables
+        from posekit.models.egohand_soma import load_model_on_cpu, warp_init_deferred
+
+        weights: Path = egohand_weights_path(self.weights, self.hf_egohand_repo_id, self.hf_egohand_revision)
+        soma: Path = soma_assets_path(self.soma_assets, self.hf_soma_repo_id, self.hf_soma_revision)
+        if (weights, soma) not in CPU_MODELS:
+            CPU_MODELS[weights, soma] = load_model_on_cpu(weights, soma)
+        with warp_init_deferred():
+            soma_lod_tables(soma, "low")
+            soma_lod_tables(soma, "xlo")
 
     def setup(self) -> "FastEgoHandPredictor":
         """Export or reuse the calibrated artifacts and construct the CUDA predictor."""
@@ -159,9 +178,16 @@ class FastEgoHandPredictor(TopDownHandPose3d):
             backbone_onnx: Path = config.backbone_source_onnx
         else:
             backbone_onnx = export_quantized_backbone_once(config, weights, soma, load_calibration(config.calibration))
-        loaded, _ = load_egohand_model(weights, soma, backbone=TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend)))
+        backbone: TensorRtBackbone = TensorRtBackbone(create_runtime_from_onnx(backbone_onnx, config.backbone_backend))
+        prepared: EgoHand | None = CPU_MODELS.pop((weights, soma), None)
+        if prepared is None:
+            loaded, _ = load_egohand_model(weights, soma, backbone=backbone)
+        else:
+            loaded = prepared
+            loaded.backbone = backbone
         model: EgoHand = loaded.eval().to("cuda")
         self.faces: dict[HandSide, Tensor] = soma_faces(model)
+        self.soma: Path = soma
         _export_head_once(model, config.head_onnx, config.backbone_backend.max_batch_size)
         # The BF16 heads have no Q/DQ attention inputs; FP8 fusion applies only to DINO.
         self.executor: EgoHandTensorExecutor = EgoHandTensorExecutor(
@@ -188,7 +214,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
         camera = require_camera(camera)
         validate_frames_rgb(frames_rgb)
         if not detections.num_detections:
-            return EgoHandReconstruction.empty(frames_rgb.device, self.faces)
+            return EgoHandReconstruction.empty(frames_rgb.device, self.faces, self.soma)
         key: tuple[CameraKey, str] = (camera_key(camera), str(frames_rgb.device))
         if key not in self.croppers:
             self.croppers[key] = CudaHandCropper(camera, frames_rgb.device)
@@ -233,6 +259,7 @@ class FastEgoHandPredictor(TopDownHandPose3d):
             sides=detections.sides,
             vertices=output.vertices,
             faces=self.faces,
+            soma=self.soma,
             rotations=output.rotations,
             identity=output.identity,
             scale=output.scale,
