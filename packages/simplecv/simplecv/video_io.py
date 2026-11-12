@@ -1,11 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import logging
 import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import cv2
 import numpy as np
@@ -24,6 +25,15 @@ from jaxtyping import UInt8
 from simplecv.image_types import BGRList, ImageBGR
 
 T = TypeVar("T")
+
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+# torchcodec loads its FFmpeg libraries at import; the functions that decode import it, annotations only name the class.
+if TYPE_CHECKING:
+    from torchcodec.decoders import VideoDecoder
+else:
+    VideoDecoder = object
 
 
 def validate_video_file_path(video_path: Path) -> Path:
@@ -64,6 +74,22 @@ def bind_cuda_device(device: str) -> None:
     parsed: torch.device = torch.device(device)
     if parsed.type == "cuda":
         torch.cuda.set_device(parsed.index if parsed.index is not None else 0)
+
+
+def open_decoder(video: Path, device: torch.device | str) -> VideoDecoder:
+    """A decoder of ``video``'s frames as ``NHWC`` on ``device`` (NVDEC), with a warning when it decodes on the CPU.
+
+    torchcodec falls back to the CPU by itself when NVDEC cannot decode (no ``libnvcuvid``, an unsupported video) and
+    says so in ``decoder.cpu_fallback`` once a frame is decoded; the caller moves the frames to the GPU either way.
+    """
+    from torchcodec.decoders import VideoDecoder
+
+    bind_cuda_device(str(device))  # NVDEC needs the CUDA context current on the calling thread, also to build the decoder
+    decoder = VideoDecoder(video, dimension_order="NHWC", device=device)
+    decoder.get_frame_at(0)  # the fallback status is known after a frame
+    if decoder.cpu_fallback:
+        logger.warning("NVDEC cannot decode %s, the CPU decodes it (slower): %s", video, decoder.cpu_fallback)
+    return decoder
 
 
 def rgb_chw_tensor_to_bgr_hwc(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> ImageBGR:
