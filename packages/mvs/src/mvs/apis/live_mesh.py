@@ -35,7 +35,7 @@ from tqdm import tqdm
 from tsdf_rs import TsdfVolume
 
 from mvs.blueprint import SOURCE_CAMS, create_blueprint
-from mvs.catalog import FRAME_TIMELINE, PATHS, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_depth, log_source_video
+from mvs.catalog import FRAME_TIMELINE, PATHS, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_depth, log_video_then_blueprint
 from mvs.depth_engine import IMAGENET_MEAN, IMAGENET_STD, SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthInputs, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
 from mvs.frame_views import LogConfig, log_current_cam_style, log_lowest_cost, log_normals, log_sources, video_offsets_ns
@@ -139,7 +139,6 @@ def main(config: Config) -> None:
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
     fusion: FusionConfig = config.fusion
     log: LogConfig = config.log
-    rr.send_blueprint(create_blueprint(PATHS, variant="native", source_cams=SOURCE_CAMS if log.source_cams else 0))
     rr.log(PATHS.world, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     log_current_cam_style(PATHS)
     device: torch.device = torch.device("cuda")
@@ -173,10 +172,13 @@ def main(config: Config) -> None:
             rr.set_time(FRAME_TIMELINE, sequence=sample.frame_index)
             K_native_33: Float32[ndarray, "3 3"] = sample.K_native_33.numpy()
             world_T_cam_44: Float32[ndarray, "4 4"] = sample.world_T_cam_44.numpy()
-            log_camera(world_T_cam_44, K_native_33, sample.resolution_wh)
             if frames == 1:
+                # The whole video, then the blueprint that plays it from 0, before the first depth frame.
                 video_times_ns = video_decoder.times.astype("timedelta64[ns]").astype(np.int64)
-                stream_start_ns = log_source_video(video_decoder)
+                stream_start_ns = log_video_then_blueprint(
+                    video_decoder, create_blueprint(PATHS, variant="native", source_cams=SOURCE_CAMS if log.source_cams else 0)
+                )
+            log_camera(world_T_cam_44, K_native_33, sample.resolution_wh)
             if sample.inputs is None:
                 waited_from = time.perf_counter()
                 continue

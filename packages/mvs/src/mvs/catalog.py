@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import depth_png
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 from einops import rearrange
 from jaxtyping import Float32, Int64, UInt16
 from numpy import ndarray
@@ -68,6 +69,14 @@ def log_source_video(video_decoder: SegmentNvdecDecoder) -> int:
     )
     # relay_video_packets opens at the last keyframe at or before the window start; the window starts at sample 0.
     return int(times_ns[int(np.flatnonzero(np.asarray(video_decoder.keyframes, dtype=bool))[0])])
+
+
+def log_video_then_blueprint(video_decoder: SegmentNvdecDecoder, blueprint: rrb.Blueprint) -> int:
+    """Relay the whole video, then send the blueprint, whose time panel plays ``video_time`` from 0 (a blueprint cannot
+    seek, so it must come after the video and before the first depth frame); returns the stream's first sample time."""
+    stream_start_ns: int = log_source_video(video_decoder)
+    rr.send_blueprint(blueprint)
+    return stream_start_ns
 
 
 def log_depth(depth_hw: Float32[ndarray, "h=192 w=256"], K_depth_33: Float32[ndarray, "3 3"]) -> None:

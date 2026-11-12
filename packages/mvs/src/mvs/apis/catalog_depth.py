@@ -15,7 +15,17 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from mvs.blueprint import create_blueprint
-from mvs.catalog import FRAME_TIMELINE, PATHS, TIMELINE, CatalogDataConfig, depth_at_lowres, log_camera, log_depth, log_source_video
+from mvs.catalog import (
+    FRAME_TIMELINE,
+    PATHS,
+    TIMELINE,
+    CatalogDataConfig,
+    depth_at_lowres,
+    log_camera,
+    log_depth,
+    log_source_video,
+    log_video_then_blueprint,
+)
 from mvs.depth_engine import SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
 from mvs.frame_views import log_current_cam_style, log_lowest_cost, log_normals
@@ -48,8 +58,6 @@ def main(config: Config) -> None:
     segment_ids: list[str] = list(config.data.segments) or dataset.segment_ids()
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
 
-    # The live-meshing layout without its filmstrip and stage timings: this demo logs no source views, mesh or timings.
-    rr.send_blueprint(create_blueprint(PATHS, variant="native", source_cams=0, timings=False))
     rr.log(PATHS.world, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     log_current_cam_style(PATHS)
     device: torch_device = torch_device("cuda")
@@ -79,7 +87,11 @@ def main(config: Config) -> None:
             # numpy appears only at the rr.log boundary, as zero-copy views of CPU tensors.
             K_native_33: Float32[ndarray, "3 3"] = sample.K_native_33.numpy()
             log_camera(sample.world_T_cam_44.numpy(), K_native_33, native_wh)
-            if segment_frames == 1:
+            if total_frames == 1:
+                # The live-meshing layout without its filmstrip and stage timings: this demo logs no source views,
+                # mesh or timings. It follows the first segment's whole video, so the viewer plays from 0.
+                log_video_then_blueprint(video_decoder, create_blueprint(PATHS, variant="native", source_cams=0, timings=False))
+            elif segment_frames == 1:
                 log_source_video(video_decoder)
 
             if sample.inputs is not None:

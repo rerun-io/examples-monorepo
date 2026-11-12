@@ -126,6 +126,10 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
     Current view | Depth; ``phone-landscape`` puts Reconstruction left and Current view above Depth right. Phone
     layouts hide the time panel.
 
+    Every variant's time panel plays the video timeline: a streamed viewer would otherwise follow the newest data and
+    sit at the end. Send the blueprint after the whole video is logged, so playback starts at 0 (a blueprint cannot
+    seek).
+
     The depth pinhole is excluded from the 3D view: Rerun back-projects a depth image under a pinhole into world
     points, which hide the fused mesh. The lowest-cost view is rooted at its own entity because the cost volume is
     logged at matching resolution and would otherwise letterbox inside the depth pinhole bounds.
@@ -156,13 +160,13 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
     if variant == "phone":
         return rrb.Blueprint(
             rrb.Vertical(world, rrb.Horizontal(current, depth), row_shares=[5.0, 3.0]),
-            rrb.TimePanel(state="hidden", timeline=TIMELINE),
+            rrb.TimePanel(state="hidden", timeline=TIMELINE, play_state="playing"),
             collapse_panels=True,
         )
     if variant == "phone-landscape":
         return rrb.Blueprint(
             rrb.Horizontal(world, rrb.Vertical(current, depth), column_shares=[3.0, 2.0]),
-            rrb.TimePanel(state="hidden", timeline=TIMELINE),
+            rrb.TimePanel(state="hidden", timeline=TIMELINE, play_state="playing"),
             collapse_panels=True,
         )
     sources: rrb.Horizontal = rrb.Horizontal(
@@ -182,4 +186,4 @@ def create_blueprint(paths: EntityPaths, *, variant: Variant, source_cams: int =
         rows.append(rrb.TimeSeriesView(origin=paths.timings, name="Stage timings (ms)"))
         shares.append(1.8)
     layout: rrb.Container = rrb.Horizontal(world, rrb.Vertical(*rows, row_shares=shares), column_shares=[3.0, 2.0])
-    return rrb.Blueprint(layout, rrb.TimePanel(state="collapsed", timeline=TIMELINE), collapse_panels=True)
+    return rrb.Blueprint(layout, rrb.TimePanel(state="collapsed", timeline=TIMELINE, play_state="playing"), collapse_panels=True)

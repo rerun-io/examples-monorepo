@@ -113,3 +113,10 @@ def test_phone_layouts_show_only_the_3d_view_the_camera_and_the_depth(variant: V
     assert blueprint.time_panel is not None and blueprint.time_panel.state == "hidden"
     assert blueprint.time_panel.timeline == "video_time"
 
+
+@pytest.mark.parametrize("variant", get_args(Variant))
+def test_the_time_panel_plays_the_video_timeline(variant: Variant) -> None:
+    """A streamed viewer would follow the newest data and sit at the end: the blueprint plays video_time from 0."""
+    time_panel = create_blueprint(EntityPaths(), variant=variant).time_panel
+    assert time_panel is not None
+    assert time_panel.play_state == "playing" and time_panel.timeline == "video_time"

@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -64,3 +65,16 @@ def test_log_source_video_returns_the_time_of_the_first_relayed_sample(tmp_path:
         assert log_source_video(StoredDecoder()) == 10
     recording.disconnect()
 
+
+def test_the_blueprint_follows_the_whole_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blueprint cannot seek: the viewer plays from 0 only when the whole video is logged before its playing time
+    panel arrives (posekit's hands app does the same)."""
+    import rerun.blueprint as rrb
+
+    import mvs.catalog as catalog
+
+    calls: list[str] = []
+    monkeypatch.setattr(catalog, "log_source_video", lambda _decoder: calls.append("video") or 7)
+    monkeypatch.setattr(catalog.rr, "send_blueprint", lambda blueprint: calls.append("blueprint"))
+    assert catalog.log_video_then_blueprint(MagicMock(spec=SegmentNvdecDecoder), rrb.Blueprint()) == 7
+    assert calls == ["video", "blueprint"]
