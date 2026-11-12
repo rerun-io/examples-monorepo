@@ -320,6 +320,7 @@ def run_and_log(
             source_raster=(lambda: gpu.raster) if has_video else None,
             on_frame=tracked if on_stage is not None or on_cursor is not None else None,
             live_surface=live_surface,
+            retain_normals=config.fuse_cloud,  # only the fused cloud reads every frame's normals (kept_normals)
         )
         session.install()
     calibration: CalibrationLive | None = None

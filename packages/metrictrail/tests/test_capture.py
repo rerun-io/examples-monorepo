@@ -100,6 +100,22 @@ def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp
     assert session.kept_normals()[0][0, 0, 0] == 2
 
 
+def test_kept_normals_of_equal_live_passes_are_the_later_pass_s(tmp_path: Path) -> None:
+    """Live passes have no file (path None): two of equal length compare equal, and the kept one is the later."""
+    import rerun as rr
+
+    session = CaptureSession(
+        out_dir=tmp_path, application_id="a", recording_id="r", depth_range_m=(0.3, 3.0), live=rr.RecordingStream("a", recording_id="live")
+    )
+    image: np.ndarray = np.zeros((2, 2, 3), dtype=np.uint8)
+    for marker in (1, 2):
+        session.pass_frames = 596
+        session.open_pass(len(session.passes))
+        session.pass_normals[-1][0] = torch.from_numpy(image + marker)
+    assert session.passes[0] == session.passes[1]
+    assert session.kept_normals()[0][0, 0, 0] == 2
+
+
 def test_live_surface_grows_temporal_blocks_then_ends_as_one_mesh(tmp_path: Path) -> None:
     import rerun as rr
     from rerun.chunk import RrdReader
@@ -379,7 +395,12 @@ def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_track
 
     surface = LiveSurface(rr.RecordingStream("metrictrail-test", recording_id="surface"), log_every=100)
     session = CaptureSession(
-        out_dir=tmp_path, application_id="metrictrail-test", recording_id="video-priors", depth_range_m=(0.3, 3.0), live_surface=surface
+        out_dir=tmp_path,
+        application_id="metrictrail-test",
+        recording_id="video-priors",
+        depth_range_m=(0.3, 3.0),
+        live_surface=surface,
+        retain_normals=False,  # the default run fuses no cloud: nothing keeps every frame's normals
     )
     session.install()
     session.pass_frames = 5
@@ -409,3 +430,4 @@ def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_track
     assert logged[f"/{entities.CAM_DEPTH} EncodedDepthImage:blob"] == [0, 1, 2, 3]
     assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 1, 2, 3]
     assert surface.integrated == 1, "frame 0 only: a TSDF integration (and its device-to-host copy) per frame would slow tracking"
+    assert session.pass_normals and not any(session.pass_normals), "logged above, but not kept for a cloud nobody fuses"

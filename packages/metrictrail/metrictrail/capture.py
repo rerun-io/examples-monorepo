@@ -216,7 +216,11 @@ class CaptureSession:
     """Normals (8-bit RGB, on the GPU) of frames the depth producer prepared and DPVO has not tracked yet, by index."""
     pass_normals: list[dict[int, UInt8[Tensor, "h w 3"]]] = field(default_factory=list)
     """Per pass (same order as :attr:`passes`), the normals of every tracked frame in page-locked host memory (copied
-    without a synchronisation); superseded passes are emptied."""
+    without a synchronisation) when :attr:`retain_normals`; superseded passes are emptied."""
+    retain_normals: bool = True
+    """Keep every tracked frame's normals for the fused cloud's colours (:meth:`kept_normals`); False when no cloud is
+    fused (the default run), which spares a page-locked copy of every frame (about 0.4 MB each). :attr:`priors` logs
+    them either way."""
     producer_local: threading.local = field(default_factory=threading.local)
     """The normals of the latest MoGe-2 prediction of the calling thread (the depth producer runs in its own)."""
 
@@ -356,7 +360,9 @@ class CaptureSession:
             return {}
         if torch.cuda.is_available():
             torch.cuda.synchronize()  # the asynchronous copies into the pinned buffers are complete
-        return {frame: normals.numpy() for frame, normals in self.pass_normals[self.passes.index(kept)].items()}
+        # By identity: passes are values (live ones all have path None), and an equal earlier pass was emptied.
+        index: int = next(index for index, captured in enumerate(self.passes) if captured is kept)
+        return {frame: normals.numpy() for frame, normals in self.pass_normals[index].items()}
 
     def log_frame(
         self,
@@ -475,7 +481,7 @@ class CaptureObserver(DPVOObserver):
         frame: int = event.frame_index
         rec: rr.RecordingStream | None = session.streams.get(id(dpvo))
         normals: Tensor | None = session.pending_normals.pop(frame, None)
-        if normals is not None and session.pass_normals:
+        if normals is not None and session.retain_normals and session.pass_normals:
             # A CUDA frame: an asynchronous copy into page-locked memory, the tracking loop never waits for it; fusion
             # reads it after the run, long after the copy finished. A CPU frame (no GPU): a plain copy.
             if normals.is_cuda:
