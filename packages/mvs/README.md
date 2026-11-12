@@ -18,14 +18,29 @@ pixi run -e mvs --frozen mvs-catalog-depth   # depth demo (first use downloads t
 pixi run -e mvs --frozen mvs-live-mesh       # depth fused into a TSDF mesh, logged as it grows
 ```
 
-The live mesh fuses each depth frame into a sparse colour TSDF (`packages/tsdf-rs`) at the catalog pose and logs
-it with `simplecv.rerun_live_mesh.LiveMeshLog`: the changed blocks on the timeline while the segment plays (scrub
-back to watch it grow), one mesh from the segment's last depth frame. The source video is relayed once as the
-catalog's own AV1 VideoStream. Every depth frame is also logged as `mvs-catalog-depth` logs it: a 256×192
-`pinhole_lowres` Pinhole and its depth as a millimetre PNG. Both tools send one default layout
-(`mvs.catalog.blueprint`): the 3D scene with the moving camera beside the video and the predicted depth. A run
-meshes exactly one segment (`--data.segments <id>`): segments restart their frame index at 0, so two in one
+The live mesh fuses each depth frame into a sparse colour TSDF (`packages/tsdf-rs`) at the catalog pose, out to
+3 m as the original demo does, and logs it with `simplecv.rerun_live_mesh.LiveMeshLog`: the changed blocks every
+`--fusion.log-every` depth frames (default 10) while the segment plays, one mesh from the segment's last depth frame.
+A run meshes exactly one segment (`--data.segments <id>`): segments restart their frame index at 0, so two in one
 recording would mix their mesh histories.
+
+### Layout
+
+The recording carries the layout of the original SimpleRecon live-meshing demo by Pablo Vela
+(pablovela5620/simplerecon-inference, `blueprint.py` and `live_meshing.py`), ported in `mvs.blueprint` and
+`mvs.frame_views`; a worker thread logs each frame's views, as there:
+
+- **Reconstruction** (left): the growing mesh, the current camera as a green frustum, its 7 source cameras as grey ones.
+- **Current view**: the catalog's own AV1 VideoStream, relayed once, never re-encoded.
+- **src 0 … src 6**: the frames the depth model matched against. Each is a `VideoFrameReference` into that same
+  stream, at the time of the frame the decoder gave the model: no pixels are copied.
+- **Depth** (16-bit millimetre PNG), **Normals** (JPEG 75, display only) and **Lowest cost**: the depth of the cost
+  volume's best plane at 128×96, a millimetre PNG as well, because it takes only 64 values and stays exact.
+- **Stage timings (ms)**: data wait, model forward, TSDF fuse, mesh extract and the log hand-off.
+
+Both tools log the whole video first and then send the blueprint, whose time panel plays `video_time` from 0 at 1×.
+The source views resolve on `video_time`, not on `frame`. `--log.no-source-cams` leaves out the filmstrip and the
+source frusta. `mvs-catalog-depth` logs the same layout without the filmstrip, mesh and timings.
 
 The model artifact lives in the public HF repo `pablovela5620/mvs-depth`;
 `mvs-download-depth-model` fetches it with `hf download` (no login needed).
@@ -81,7 +96,7 @@ names, so the feed dict cannot drift from the graph.
 | Name | Shape | What it is |
 |---|---|---|
 | `depth_pred_s0_b1hw` | b×1×192×256 | Metric depth (meters) |
-| `lowest_cost_bhw` | b×96×128 | Lowest plane-sweep matching cost (confidence proxy) |
+| `lowest_cost_bhw` | b×96×128 | Depth (meters) of the cost volume's best plane, at the matching size |
 
 s1 intrinsics: rescale native K to the depth resolution (`K[0]·256/W`,
 `K[1]·192/H`), then halve once. TensorRT engines are built per machine and
