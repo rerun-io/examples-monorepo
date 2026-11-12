@@ -13,10 +13,9 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import device as torch_device
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from trtkit import OnnxBackendConfig, OnnxOrTrtBackendConfig
 
 from mvs.catalog import FRAME_TIMELINE, TIMELINE, CatalogDataConfig, blueprint, depth_at_lowres, log_camera, log_depth, log_source_video
-from mvs.depth_engine import DepthEngine, DepthOutputs
+from mvs.depth_engine import SMALL_TRT_BACKEND, DepthBackendConfig, DepthEngine, DepthOutputs
 from mvs.depth_stream import DepthCollate, DepthSample, depth_dataset
 
 
@@ -30,8 +29,9 @@ class Config:
     """Catalog server, dataset, and segment selection."""
     model_path: Path = Path("data/models/depth_model_dot.onnx")
     """Portable ONNX depth model artifact."""
-    backend: OnnxOrTrtBackendConfig = field(default_factory=OnnxBackendConfig)
-    """CUDA ONNX Runtime or cached TensorRT execution backend."""
+    backend: DepthBackendConfig = SMALL_TRT_BACKEND
+    """Cached TensorRT engine by default (batch-1 profile, built once on first use; ``tensorrt --backend.max-batch-size N``
+    for a larger profile). ``onnx`` is the ONNX Runtime CUDA fallback: no build, much slower."""
 
 
 def main(config: Config) -> None:
