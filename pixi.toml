@@ -3550,6 +3550,7 @@ tyro = ">=0.9.1,<0.10"
 # pin-bump: hold — this torch-free lane restates `common`'s exact pin; see AGENTS.md.
 rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" } # pin-bump: hold
 pandas = ">=2"
+zstandard = "*"
 
 [feature.agent-traces.pypi-dependencies]
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; PyPI, see [feature.common.pypi-dependencies]
