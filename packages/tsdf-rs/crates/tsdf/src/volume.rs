@@ -443,7 +443,7 @@ struct FrameContext<'a> {
 
 /// Blocks within `sdf_trunc` of a back-projected valid depth sample.
 fn discover_touched_blocks(context: &FrameContext<'_>) -> FxHashSet<BlockKey> {
-    let block_length = f64::from(context.voxel_size) * BLOCK_RESOLUTION as f64;
+    let blocks_per_unit = 1.0 / (f64::from(context.voxel_size) * BLOCK_RESOLUTION as f64);
     let sdf_trunc = f64::from(context.sdf_trunc);
     context
         .depth
@@ -465,7 +465,7 @@ fn discover_touched_blocks(context: &FrameContext<'_>) -> FxHashSet<BlockKey> {
                 if !world_point.iter().all(|coordinate| coordinate.is_finite()) {
                     continue;
                 }
-                let Some(bounds) = block_bounds(world_point, sdf_trunc, block_length) else {
+                let Some(bounds) = block_bounds(world_point, sdf_trunc, blocks_per_unit) else {
                     continue;
                 };
                 // Neighboring pixels nearly always cover the same blocks.
@@ -568,12 +568,12 @@ fn drop_new_blocks_over(room: usize, active: &mut [ActiveBlock]) -> bool {
 fn block_bounds(
     world_point: [f32; 3],
     sdf_trunc: f64,
-    block_length: f64,
+    blocks_per_unit: f64,
 ) -> Option<(BlockKey, BlockKey)> {
     let block_index = |offset: f64| -> Option<BlockKey> {
         let mut key = [0; 3];
         for (index, &coordinate) in key.iter_mut().zip(&world_point) {
-            *index = checked_floor_i64((f64::from(coordinate) + offset) / block_length)
+            *index = checked_floor_i64((f64::from(coordinate) + offset) * blocks_per_unit)
                 .filter(|index| (MIN_BLOCK_INDEX..=MAX_BLOCK_INDEX).contains(index))?;
         }
         Some(key)
