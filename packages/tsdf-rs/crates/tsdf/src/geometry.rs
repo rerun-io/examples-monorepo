@@ -2,42 +2,47 @@
 
 use crate::error::TsdfError;
 
+/// `a[0] * b[0] + a[1] * b[1] + a[2] * b[2]`, summed in that order: callers'
+/// bytes (mesh normals and their hashes) depend on it.
+pub(crate) fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Euclidean length, as `dot(vector, vector).sqrt()`.
+pub(crate) fn length(vector: [f32; 3]) -> f32 {
+    dot(vector, vector).sqrt()
+}
+
+/// Rotation row `row` of a row-major 4-by-4 rigid transform.
+fn rotation_row(matrix: [f32; 16], row: usize) -> [f32; 3] {
+    [matrix[4 * row], matrix[4 * row + 1], matrix[4 * row + 2]]
+}
+
+/// Rotation column `column` of a row-major 4-by-4 rigid transform: the
+/// image of unit axis `column`.
+pub(crate) fn rotation_column(matrix: [f32; 16], column: usize) -> [f32; 3] {
+    [matrix[column], matrix[4 + column], matrix[8 + column]]
+}
+
 /// Apply the rigid row-major 4-by-4 `matrix` to `point`.
 pub(crate) fn transform_point(matrix: [f32; 16], point: [f32; 3]) -> [f32; 3] {
-    [
-        matrix[0] * point[0] + matrix[1] * point[1] + matrix[2] * point[2] + matrix[3],
-        matrix[4] * point[0] + matrix[5] * point[1] + matrix[6] * point[2] + matrix[7],
-        matrix[8] * point[0] + matrix[9] * point[1] + matrix[10] * point[2] + matrix[11],
-    ]
+    std::array::from_fn(|row| dot(rotation_row(matrix, row), point) + matrix[4 * row + 3])
 }
 
 /// Map a camera-frame `point` to the world with the transpose of the rigid
 /// `camera_from_world`'s rotation.
 pub(crate) fn camera_to_world(camera_from_world: [f32; 16], point: [f32; 3]) -> [f32; 3] {
-    let shifted = [
-        point[0] - camera_from_world[3],
-        point[1] - camera_from_world[7],
-        point[2] - camera_from_world[11],
-    ];
-    [
-        camera_from_world[0] * shifted[0]
-            + camera_from_world[4] * shifted[1]
-            + camera_from_world[8] * shifted[2],
-        camera_from_world[1] * shifted[0]
-            + camera_from_world[5] * shifted[1]
-            + camera_from_world[9] * shifted[2],
-        camera_from_world[2] * shifted[0]
-            + camera_from_world[6] * shifted[1]
-            + camera_from_world[10] * shifted[2],
-    ]
+    let shifted = std::array::from_fn(|row| point[row] - camera_from_world[4 * row + 3]);
+    std::array::from_fn(|column| dot(rotation_column(camera_from_world, column), shifted))
 }
 
 pub(crate) fn multiply_3x3(matrix: [f32; 9], vector: [f32; 3]) -> [f32; 3] {
-    [
-        matrix[0] * vector[0] + matrix[1] * vector[1] + matrix[2] * vector[2],
-        matrix[3] * vector[0] + matrix[4] * vector[1] + matrix[5] * vector[2],
-        matrix[6] * vector[0] + matrix[7] * vector[1] + matrix[8] * vector[2],
-    ]
+    std::array::from_fn(|row| {
+        dot(
+            [matrix[3 * row], matrix[3 * row + 1], matrix[3 * row + 2]],
+            vector,
+        )
+    })
 }
 
 /// Inverse of a row-major 3-by-3 matrix; `None` when singular or non-finite.
@@ -62,7 +67,7 @@ pub(crate) fn invert_3x3(matrix: [f32; 9]) -> Option<[f32; 9]> {
     ])
 }
 
-pub(crate) fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+pub(crate) fn add<T: Copy + std::ops::Add<Output = T>>(left: [T; 3], right: [T; 3]) -> [T; 3] {
     [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
 }
 

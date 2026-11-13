@@ -7,13 +7,14 @@ use rustc_hash::FxHashMap;
 
 use crate::changes::{ChangeTracker, Pending, NEIGHBORHOOD};
 use crate::error::TsdfError;
+use crate::geometry::{add, length};
 use crate::mesh::{interpolation_amount, Mesh};
 use crate::tables::{for_each_triangle, CORNERS, EDGES};
 #[cfg(test)]
 use crate::volume::MIN_BLOCK_INDEX;
 use crate::volume::{
-    checked_block_origin, local_index, BlockKey, VoxelBlock, BLOCK_RESOLUTION,
-    BLOCK_RESOLUTION_USIZE,
+    checked_block_origin, checked_offset, local_index, voxel_center, voxel_index, BlockKey,
+    VoxelBlock, BLOCK_RESOLUTION, BLOCK_RESOLUTION_USIZE,
 };
 
 type Blocks = FxHashMap<BlockKey, VoxelBlock>;
@@ -201,10 +202,7 @@ fn block_attributes(
 /// World position of a vertex: the voxel center of its edge's base, moved
 /// `amount` voxels along the edge.
 fn vertex_position(vertex: &EdgeVertex, voxel_size: f32) -> [f32; 3] {
-    let mut position = vertex
-        .edge
-        .base
-        .map(|coordinate| (coordinate as f32 + 0.5) * voxel_size);
+    let mut position = voxel_center(vertex.edge.base, voxel_size);
     position[usize::from(vertex.edge.axis)] += vertex.amount * voxel_size;
     position
 }
@@ -310,22 +308,14 @@ fn block_mesh(
                 if cube_index == 0 || cube_index == u8::MAX {
                     continue;
                 }
-                let anchor = [
-                    origin[0] + i64::from(x),
-                    origin[1] + i64::from(y),
-                    origin[2] + i64::from(z),
-                ];
+                let anchor = add(origin, [x, y, z].map(i64::from));
                 for_each_triangle(cube_index, |edges| {
                     let triangle = edges.map(|edge_index| {
                         let slot = cell * 3 + EDGE_SLOT_OFFSETS[edge_index];
                         if vertex_slots[slot] == NO_VERTEX {
                             let edge = &EDGES[edge_index];
                             let key = EdgeKey {
-                                base: [
-                                    anchor[0] + edge.offset[0],
-                                    anchor[1] + edge.offset[1],
-                                    anchor[2] + edge.offset[2],
-                                ],
+                                base: add(anchor, edge.offset),
                                 axis: edge.axis,
                             };
                             let [start, end] = edge.corners;
@@ -369,9 +359,7 @@ fn gather_corners(neighbors: &[Option<&VoxelBlock>; 8], min_weight: f32, corners
             for x in 0..SPAN {
                 let (block_x, local_x) = split(x);
                 let value = neighbors[block_x | block_y << 1 | block_z << 2].and_then(|block| {
-                    let index = (local_z * BLOCK_RESOLUTION_USIZE + local_y)
-                        * BLOCK_RESOLUTION_USIZE
-                        + local_x;
+                    let index = voxel_index([local_x, local_y, local_z]);
                     let (value, weight) = (block.tsdf[index], block.weights[index]);
                     (weight != 0.0 && weight >= min_weight && value.is_finite()).then_some(value)
                 });
@@ -394,12 +382,8 @@ fn on_block_seam(edge: EdgeKey, origin: [i64; 3]) -> bool {
 /// The 2x2x2 blocks a block's cells read: `key + (i & 1, i >> 1 & 1, i >> 2 & 1)`.
 fn neighbor_blocks(key: BlockKey, blocks: &Blocks) -> [Option<&VoxelBlock>; 8] {
     std::array::from_fn(|index| {
-        let neighbor_key = [
-            key[0].checked_add((index & 1) as i64)?,
-            key[1].checked_add(((index >> 1) & 1) as i64)?,
-            key[2].checked_add(((index >> 2) & 1) as i64)?,
-        ];
-        blocks.get(&neighbor_key)
+        let offset = [index & 1, (index >> 1) & 1, (index >> 2) & 1].map(|bit| bit as i64);
+        blocks.get(&checked_offset(key, offset)?)
     })
 }
 
@@ -450,20 +434,9 @@ struct Neighborhood<'a> {
 impl<'a> Neighborhood<'a> {
     fn new(key: BlockKey, all: &'a Blocks) -> Option<Self> {
         let origin = checked_block_origin(key)?;
-        let first = [
-            origin[0].checked_sub(BLOCK_RESOLUTION)?,
-            origin[1].checked_sub(BLOCK_RESOLUTION)?,
-            origin[2].checked_sub(BLOCK_RESOLUTION)?,
-        ];
-        let blocks = std::array::from_fn(|index| {
-            let offset = NEIGHBORHOOD[index];
-            let neighbor = [
-                key[0].checked_add(offset[0])?,
-                key[1].checked_add(offset[1])?,
-                key[2].checked_add(offset[2])?,
-            ];
-            all.get(&neighbor)
-        });
+        let first = checked_offset(origin, [-BLOCK_RESOLUTION; 3])?;
+        let blocks =
+            std::array::from_fn(|index| all.get(&checked_offset(key, NEIGHBORHOOD[index])?));
         Some(Self { first, blocks, all })
     }
 }
@@ -510,9 +483,9 @@ fn vertex_normal(vertex: &EdgeVertex, voxels: &impl Voxels) -> [f32; 3] {
         1.0 => end,
         t => std::array::from_fn(|axis| start[axis] + (end[axis] - start[axis]) * t),
     };
-    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-    if length > 0.0 && length.is_finite() {
-        return normal.map(|component| component / length);
+    let magnitude = length(normal);
+    if magnitude > 0.0 && magnitude.is_finite() {
+        return normal.map(|component| component / magnitude);
     }
     // Degenerate gradient: fall back to the edge direction. The edge crosses
     // zero, so its endpoints differ and give the outward sign.

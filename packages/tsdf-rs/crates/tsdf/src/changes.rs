@@ -3,7 +3,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::mesh::Mesh;
-use crate::volume::{BlockKey, LocalBox, BLOCK_RESOLUTION_USIZE};
+use crate::volume::{checked_offset, BlockKey, LocalBox, BLOCK_RESOLUTION_USIZE};
 
 /// Offsets of a block and its 26 neighbors, x fastest.
 pub(crate) const NEIGHBORHOOD: [[i64; 3]; 27] = {
@@ -47,13 +47,8 @@ impl ChangeTracker {
     pub(crate) fn mark_touched<'a>(&mut self, touched: impl IntoIterator<Item = &'a BlockKey>) {
         for key in touched {
             for offset in NEIGHBORHOOD {
-                let neighbor = [
-                    key[0].checked_add(offset[0]),
-                    key[1].checked_add(offset[1]),
-                    key[2].checked_add(offset[2]),
-                ];
-                if let [Some(x), Some(y), Some(z)] = neighbor {
-                    self.dirty.insert([x, y, z]);
+                if let Some(neighbor) = checked_offset(*key, offset) {
+                    self.dirty.insert(neighbor);
                 }
             }
         }
@@ -75,13 +70,8 @@ impl ChangeTracker {
                 1 => changed.max[axis] >= last,
                 _ => true,
             });
-            let neighbor = [
-                key[0].checked_add(offset[0]),
-                key[1].checked_add(offset[1]),
-                key[2].checked_add(offset[2]),
-            ];
-            if let (true, [Some(x), Some(y), Some(z)]) = (reaches, neighbor) {
-                self.dirty.insert([x, y, z]);
+            if let Some(neighbor) = checked_offset(key, offset).filter(|_| reaches) {
+                self.dirty.insert(neighbor);
             }
         }
     }

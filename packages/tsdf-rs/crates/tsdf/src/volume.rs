@@ -6,8 +6,8 @@ use crate::error::TsdfError;
 use crate::extract;
 use crate::frame::{Camera, DepthFrame, DepthRange};
 use crate::geometry::{
-    add, add_scaled, camera_to_world, checked_floor_i64, invert_3x3, multiply_3x3, transform_point,
-    validate_length, validate_non_negative, validate_positive,
+    add, add_scaled, camera_to_world, checked_floor_i64, invert_3x3, length, multiply_3x3,
+    rotation_column, transform_point, validate_length, validate_non_negative, validate_positive,
 };
 use crate::mesh::Mesh;
 
@@ -59,9 +59,7 @@ impl RayCache {
                 PixelRay {
                     x_over_z: ray[0] / ray[2],
                     y_over_z: ray[1] / ray[2],
-                    distance_multiplier: (ray[0] * ray[0] + ray[1] * ray[1] + ray[2] * ray[2])
-                        .sqrt()
-                        / ray[2].abs(),
+                    distance_multiplier: length(ray) / ray[2].abs(),
                 }
             })
             .collect();
@@ -118,10 +116,24 @@ impl VoxelBlock {
     }
 }
 
-/// Index of block-local voxel `local` (each coordinate in `0..16`).
-pub(crate) fn local_index(local: [i64; 3]) -> usize {
-    let [x, y, z] = local.map(|coordinate| coordinate as usize);
+/// Index of block-local voxel `[x, y, z]` (each in `0..16`) in a block's
+/// arrays: x fastest. The one definition of the voxel layout.
+pub(crate) fn voxel_index([x, y, z]: [usize; 3]) -> usize {
     (z * BLOCK_RESOLUTION_USIZE + y) * BLOCK_RESOLUTION_USIZE + x
+}
+
+/// [`voxel_index`] of a block-local coordinate held as `i64` (each in `0..16`).
+pub(crate) fn local_index(local: [i64; 3]) -> usize {
+    voxel_index(local.map(|coordinate| coordinate as usize))
+}
+
+/// `key + offset`, when no coordinate overflows.
+pub(crate) fn checked_offset(key: [i64; 3], offset: [i64; 3]) -> Option<[i64; 3]> {
+    Some([
+        key[0].checked_add(offset[0])?,
+        key[1].checked_add(offset[1])?,
+        key[2].checked_add(offset[2])?,
+    ])
 }
 
 /// Global voxel coordinate of the first voxel of block `key`, when every
@@ -132,10 +144,19 @@ pub(crate) fn checked_block_origin(key: BlockKey) -> Option<[i64; 3]> {
         key[1].checked_mul(BLOCK_RESOLUTION)?,
         key[2].checked_mul(BLOCK_RESOLUTION)?,
     ];
-    origin[0].checked_add(BLOCK_RESOLUTION)?;
-    origin[1].checked_add(BLOCK_RESOLUTION)?;
-    origin[2].checked_add(BLOCK_RESOLUTION)?;
+    checked_offset(origin, [BLOCK_RESOLUTION; 3])?;
     Some(origin)
+}
+
+/// World position of the center of global voxel `coordinate`.
+pub(crate) fn voxel_center(coordinate: [i64; 3], voxel_size: f32) -> [f32; 3] {
+    coordinate.map(|value| (value as f32 + 0.5) * voxel_size)
+}
+
+/// The running mean of `weight` observations with `mean`, after one more:
+/// `observation`.
+fn running_mean(mean: f32, weight: f32, observation: f32) -> f32 {
+    (mean * weight + observation) / (weight + 1.0)
 }
 
 /// Sparse, unbounded truncated signed-distance volume.
@@ -593,30 +614,17 @@ fn integrate_block(
     };
     let voxel_size = context.voxel_size;
     let transform = context.camera_from_world;
-    let first_world = block_origin.map(|coordinate| (coordinate as f32 + 0.5) * voxel_size);
-    let first_camera = transform_point(transform, first_world);
-    let step_x = [
-        transform[0] * voxel_size,
-        transform[4] * voxel_size,
-        transform[8] * voxel_size,
-    ];
-    let step_y = [
-        transform[1] * voxel_size,
-        transform[5] * voxel_size,
-        transform[9] * voxel_size,
-    ];
-    let step_z = [
-        transform[2] * voxel_size,
-        transform[6] * voxel_size,
-        transform[10] * voxel_size,
-    ];
+    let first_camera = transform_point(transform, voxel_center(block_origin, voxel_size));
+    // One voxel along each world axis, in camera coordinates.
+    let [step_x, step_y, step_z] =
+        [0, 1, 2].map(|axis| rotation_column(transform, axis).map(|value| value * voxel_size));
 
     for z in 0..BLOCK_RESOLUTION_USIZE {
         let camera_at_z = add_scaled(first_camera, step_z, z as f32);
         for y in 0..BLOCK_RESOLUTION_USIZE {
             let mut camera = add_scaled(camera_at_z, step_y, y as f32);
             for x in 0..BLOCK_RESOLUTION_USIZE {
-                let index = (z * BLOCK_RESOLUTION_USIZE + y) * BLOCK_RESOLUTION_USIZE + x;
+                let index = voxel_index([x, y, z]);
                 match integrate_voxel(index, camera, block, context) {
                     VoxelUpdate::Skipped => {}
                     VoxelUpdate::Fused => update.fused = true,
@@ -673,27 +681,23 @@ fn integrate_voxel(
 
     let observation = (signed_distance / context.sdf_trunc).min(1.0);
     let old_weight = block.weights[index];
-    let denominator = old_weight + 1.0;
-    let updated_tsdf = (block.tsdf[index] * old_weight + observation) / denominator;
+    let updated_tsdf = running_mean(block.tsdf[index], old_weight, observation);
     let mut changed = updated_tsdf.to_bits() != block.tsdf[index].to_bits()
         || old_weight == 0.0
         || old_weight < context.min_weight;
     block.tsdf[index] = updated_tsdf;
-    block.weights[index] = denominator;
+    block.weights[index] = old_weight + 1.0;
     block.observed_min = block.observed_min.min(updated_tsdf);
     block.observed_max = block.observed_max.max(updated_tsdf);
 
     if let (Some(image), Some(color)) = (context.color, block.color.as_mut()) {
         let old_weight = color.weight[index];
-        let denominator = old_weight + 1.0;
-        let image_offset = pixel_index * 3;
         let old_rgb = color.rgb[index];
-        for channel in 0..3 {
-            color.rgb[index][channel] = (color.rgb[index][channel] * old_weight
-                + f32::from(image[image_offset + channel]))
-                / denominator;
-        }
-        color.weight[index] = denominator;
+        let pixel = &image[pixel_index * 3..pixel_index * 3 + 3];
+        color.rgb[index] = std::array::from_fn(|channel| {
+            running_mean(old_rgb[channel], old_weight, f32::from(pixel[channel]))
+        });
+        color.weight[index] = old_weight + 1.0;
         changed |= color.rgb[index].map(f32::to_bits) != old_rgb.map(f32::to_bits);
     }
     if changed {
