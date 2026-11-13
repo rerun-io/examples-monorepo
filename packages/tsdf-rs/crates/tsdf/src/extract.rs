@@ -10,7 +10,10 @@ use crate::mesh::{interpolation_amount, Mesh};
 use crate::tables::{for_each_triangle, CORNERS, EDGES};
 #[cfg(test)]
 use crate::volume::MIN_BLOCK_INDEX;
-use crate::volume::{checked_block_origin, local_index, BlockKey, VoxelBlock, BLOCK_RESOLUTION};
+use crate::volume::{
+    checked_block_origin, local_index, BlockKey, VoxelBlock, BLOCK_RESOLUTION,
+    BLOCK_RESOLUTION_USIZE,
+};
 
 type Blocks = FxHashMap<BlockKey, VoxelBlock>;
 
@@ -59,7 +62,9 @@ pub(crate) fn full_mesh(
     keys.sort_unstable();
     let block_meshes: Vec<BlockMesh> = keys
         .par_iter()
-        .map(|&key| block_mesh(key, blocks, min_weight))
+        .map_init(MeshScratch::new, |scratch, &key| {
+            block_mesh(key, blocks, min_weight, scratch)
+        })
         .collect();
 
     let triangle_count = block_meshes.iter().map(|mesh| mesh.triangles.len()).sum();
@@ -117,8 +122,8 @@ pub(crate) fn block_meshes(
     min_weight: f32,
 ) -> Vec<(BlockKey, Mesh, u64)> {
     keys.par_iter()
-        .filter_map(|&key| {
-            let block = block_mesh(key, blocks, min_weight);
+        .map_init(MeshScratch::new, |scratch, &key| {
+            let block = block_mesh(key, blocks, min_weight, scratch);
             let last = delivered.get(&key);
             // Report empty meshes only on the surfaced -> empty transition, so
             // surface-less shell blocks are not re-announced every extraction.
@@ -137,6 +142,7 @@ pub(crate) fn block_meshes(
             let hash = mesh.content_hash();
             (last != Some(&hash)).then_some((key, mesh, hash))
         })
+        .flatten()
         .collect()
 }
 
@@ -177,10 +183,49 @@ fn attributed_mesh(
     }
 }
 
+/// [`BLOCK_RESOLUTION`] as a loop counter that converts losslessly to `usize` and `i64`.
+const BLOCK_RESOLUTION_U16: u16 = BLOCK_RESOLUTION_USIZE as u16;
+
+/// Voxels per axis that a block's cells read: its own and the first of the next block.
+const SPAN: usize = BLOCK_RESOLUTION_USIZE + 1;
+
+/// Offsets of the cell corners, in [`CORNERS`] order, in a [`SPAN`]-cubed
+/// array laid out x fastest.
+const CORNER_OFFSETS: [usize; 8] = {
+    let mut offsets = [0; 8];
+    let mut corner = 0;
+    while corner < 8 {
+        let [x, y, z] = CORNERS[corner];
+        offsets[corner] = (z as usize * SPAN + y as usize) * SPAN + x as usize;
+        corner += 1;
+    }
+    offsets
+};
+
+/// Buffers one worker reuses from block to block.
+pub(crate) struct MeshScratch {
+    /// The corner values a block's cells read, [`SPAN`]-cubed, x fastest;
+    /// NaN where a cell may not use the voxel.
+    corners: Vec<f32>,
+}
+
+impl MeshScratch {
+    fn new() -> Self {
+        Self {
+            corners: vec![f32::NAN; SPAN * SPAN * SPAN],
+        }
+    }
+}
+
 /// Triangles of the cells anchored in block `key`. A cell yields triangles
 /// only when all eight corners are observed (nonzero weight, at least
 /// `min_weight`, finite value).
-fn block_mesh(key: BlockKey, blocks: &Blocks, min_weight: f32) -> BlockMesh {
+fn block_mesh(
+    key: BlockKey,
+    blocks: &Blocks,
+    min_weight: f32,
+    scratch: &mut MeshScratch,
+) -> BlockMesh {
     let neighbors = neighbor_blocks(key, blocks);
     if !has_possible_surface(&neighbors) {
         return BlockMesh::default();
@@ -188,22 +233,35 @@ fn block_mesh(key: BlockKey, blocks: &Blocks, min_weight: f32) -> BlockMesh {
     let Some(origin) = checked_block_origin(key) else {
         return BlockMesh::default();
     };
+    gather_corners(&neighbors, min_weight, &mut scratch.corners);
+    let corners = &scratch.corners;
     let mut mesh = BlockMesh {
         vertices: Vec::with_capacity(256),
         triangles: Vec::with_capacity(512),
     };
     let mut local_vertices = FxHashMap::<EdgeKey, u32>::default();
-    for z in 0..BLOCK_RESOLUTION {
-        for y in 0..BLOCK_RESOLUTION {
-            for x in 0..BLOCK_RESOLUTION {
-                let Some((cube_index, values)) = observed_cell(&neighbors, [x, y, z], min_weight)
-                else {
+    for z in 0..BLOCK_RESOLUTION_U16 {
+        for y in 0..BLOCK_RESOLUTION_U16 {
+            for x in 0..BLOCK_RESOLUTION_U16 {
+                let cell = (usize::from(z) * SPAN + usize::from(y)) * SPAN + usize::from(x);
+                let values = CORNER_OFFSETS.map(|offset| corners[cell + offset]);
+                if values.iter().any(|value| value.is_nan()) {
                     continue;
-                };
+                }
+                let cube_index = values
+                    .iter()
+                    .enumerate()
+                    .fold(0_u8, |index, (corner, value)| {
+                        index | (u8::from(*value < 0.0) << corner)
+                    });
                 if cube_index == 0 || cube_index == u8::MAX {
                     continue;
                 }
-                let anchor = [origin[0] + x, origin[1] + y, origin[2] + z];
+                let anchor = [
+                    origin[0] + i64::from(x),
+                    origin[1] + i64::from(y),
+                    origin[2] + i64::from(z),
+                ];
                 for_each_triangle(cube_index, |edges| {
                     let triangle = edges.map(|edge_index| {
                         let edge = &EDGES[edge_index];
@@ -234,32 +292,34 @@ fn block_mesh(key: BlockKey, blocks: &Blocks, min_weight: f32) -> BlockMesh {
     mesh
 }
 
-/// Configuration and corner values of the cell anchored at block-local
-/// `anchor`; `None` if a corner is unobserved or fused fewer than
-/// `min_weight` times.
-fn observed_cell(
-    neighbors: &[Option<&VoxelBlock>; 8],
-    anchor: [i64; 3],
-    min_weight: f32,
-) -> Option<(u8, [f32; 8])> {
-    let mut cube_index = 0_u8;
-    let mut values = [0.0_f32; 8];
-    for (corner, offset) in CORNERS.iter().enumerate() {
-        let local = [
-            anchor[0] + offset[0],
-            anchor[1] + offset[1],
-            anchor[2] + offset[2],
-        ];
-        let (value, weight) = cached_voxel(neighbors, local)?;
-        if weight == 0.0 || weight < min_weight || !value.is_finite() {
-            return None;
-        }
-        values[corner] = value;
-        if value < 0.0 {
-            cube_index |= 1 << corner;
+/// Fill `corners` ([`SPAN`]-cubed, x fastest) with the TSDF of each voxel
+/// the block's cells read, NaN where it is unobserved, fused fewer than
+/// `min_weight` times, or not finite.
+fn gather_corners(neighbors: &[Option<&VoxelBlock>; 8], min_weight: f32, corners: &mut [f32]) {
+    let split = |coordinate: usize| {
+        (
+            coordinate / BLOCK_RESOLUTION_USIZE,
+            coordinate % BLOCK_RESOLUTION_USIZE,
+        )
+    };
+    for z in 0..SPAN {
+        let (block_z, local_z) = split(z);
+        for y in 0..SPAN {
+            let (block_y, local_y) = split(y);
+            let row = (z * SPAN + y) * SPAN;
+            for x in 0..SPAN {
+                let (block_x, local_x) = split(x);
+                let value = neighbors[block_x | block_y << 1 | block_z << 2].and_then(|block| {
+                    let index = (local_z * BLOCK_RESOLUTION_USIZE + local_y)
+                        * BLOCK_RESOLUTION_USIZE
+                        + local_x;
+                    let (value, weight) = (block.tsdf[index], block.weights[index]);
+                    (weight != 0.0 && weight >= min_weight && value.is_finite()).then_some(value)
+                });
+                corners[row + x] = value.unwrap_or(f32::NAN);
+            }
         }
     }
-    Some((cube_index, values))
 }
 
 /// Whether cells outside the block at `origin` also contain `edge`: cells
@@ -295,16 +355,6 @@ fn has_possible_surface(neighbors: &[Option<&VoxelBlock>; 8]) -> bool {
         },
     );
     minimum < 0.0 && maximum >= 0.0
-}
-
-/// `(tsdf, weight)` of block-local voxel `local` (each coordinate in `0..32`).
-fn cached_voxel(neighbors: &[Option<&VoxelBlock>; 8], local: [i64; 3]) -> Option<(f32, f32)> {
-    let neighbor_index = (local[0] / BLOCK_RESOLUTION)
-        | ((local[1] / BLOCK_RESOLUTION) << 1)
-        | ((local[2] / BLOCK_RESOLUTION) << 2);
-    let block = neighbors[neighbor_index as usize]?;
-    let index = local_index(local.map(|coordinate| coordinate % BLOCK_RESOLUTION));
-    Some((block.tsdf[index], block.weights[index]))
 }
 
 /// The block holding global voxel `coordinate` and the voxel's index in it.

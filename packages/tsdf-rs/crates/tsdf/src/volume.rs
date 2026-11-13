@@ -12,7 +12,7 @@ use crate::geometry::{
 use crate::mesh::Mesh;
 
 pub(crate) const BLOCK_RESOLUTION: i64 = 16;
-const BLOCK_RESOLUTION_USIZE: usize = BLOCK_RESOLUTION as usize;
+pub(crate) const BLOCK_RESOLUTION_USIZE: usize = BLOCK_RESOLUTION as usize;
 const BLOCK_VOXEL_COUNT: usize =
     BLOCK_RESOLUTION_USIZE * BLOCK_RESOLUTION_USIZE * BLOCK_RESOLUTION_USIZE;
 const DISCOVERY_CHUNK_PIXELS: usize = 2_048;
