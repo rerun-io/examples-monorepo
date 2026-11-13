@@ -343,7 +343,8 @@ host's wrapper of it (a ZeroGPU Space runs it in a ``@spaces.GPU`` worker)."""
 
 
 def build_app(
-    data_dir: Path = DATA_DIR, *, run: RunFn = metrictrail_streaming_fn, examples: list[Path] | None = None, max_frames: int = UPSTREAM_MAX_FRAMES
+    data_dir: Path = DATA_DIR, *, run: RunFn = metrictrail_streaming_fn, examples: list[Path] | None = None, max_frames: int = UPSTREAM_MAX_FRAMES,
+    example_url: str | None = None,
 ) -> gr.Blocks:
     """Input and Outputs tabs, Run, Stop and the status on the left; the streaming Rerun viewer on the right (the EgoHand
     app's layout). Serve it with :func:`launch` (its look comes with the launch).
@@ -353,12 +354,15 @@ def build_app(
         run: What the Run button calls; a host wraps :func:`metrictrail_streaming_fn` (a GPU reservation) and patches nothing.
         examples: The example clips; None: :func:`example_videos` of ``data_dir``.
         max_frames: Default of the max-frames field (a host caps the work a click reserves).
+        example_url: The example's page on rerun.io (full walkthrough), linked at the header's right; None links nothing.
     """
     clips: list[Path] = examples if examples is not None else example_videos(data_dir)
     # fill_width: Gradio caps the page at 1,536 px otherwise, and the viewer would not take the window's width. fill_height
     # with the main row's scale=1: the row takes the height the header leaves (theme.APP_CSS), so the page fits the window.
     with gr.Blocks(title="Rerun × MetricTrail", fill_width=True, fill_height=True) as demo:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
+        if example_url is not None:
+            gr.HTML(f'<a href="{example_url}" target="_blank" rel="noopener">Full example and walkthrough on rerun.io →</a>', elem_id="example-link")
         with gr.Row(elem_id="main-row", equal_height=False, scale=1):
             with gr.Column(scale=1, min_width=360, elem_id="left-column"):
                 with gr.Tabs(selected="input") as tabs:

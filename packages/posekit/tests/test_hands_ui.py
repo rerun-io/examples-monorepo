@@ -141,3 +141,15 @@ def test_the_viewer_takes_the_height_the_header_leaves() -> None:
     main_row = next(block for block in demo.blocks.values() if isinstance(block, gr.Row) and block.elem_id == "main-row")
     assert demo.fill_height and main_row.scale == 1 and viewer.height == "100%" and viewer.elem_id == "viewer"
     assert "100vh" not in APP_CSS and "footer { display: none !important; }" in APP_CSS
+
+
+def test_a_host_links_the_rerun_io_example_page_from_the_header() -> None:
+    """A Space links its rerun.io example page (the full walkthrough); the local app has no page to link."""
+    import gradio as gr
+
+    from posekit.hands_app_ui.layout import build
+
+    url = "https://rerun.io/examples/spatial-computing/egohand"
+    links = [b for b in build(example_url=url).blocks.values() if isinstance(b, gr.HTML) and b.elem_id == "example-link"]
+    assert len(links) == 1 and f'href="{url}"' in links[0].value and "rerun.io" in links[0].value
+    assert not [b for b in build().blocks.values() if getattr(b, "elem_id", None) == "example-link"]
