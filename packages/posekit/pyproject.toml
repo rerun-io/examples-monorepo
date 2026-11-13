@@ -45,4 +45,5 @@ sort_by_size = true
 min_confidence = 80
 # Context-manager/Torch dispatch arguments and compatibility arguments retained
 # from the released MHR head (the upstream implementation also ignores them).
-ignore_names = ["exc", "types", "do_pcblend", "vertex_offsets", "slim_keypoints"]
+# signum: the signal-handler signature of the labeler server's SIGTERM handler.
+ignore_names = ["exc", "types", "do_pcblend", "vertex_offsets", "slim_keypoints", "signum"]
