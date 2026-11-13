@@ -432,24 +432,51 @@ fn eviction_clears_the_budget_flag_even_when_nothing_is_evicted() -> Result<(), 
 }
 
 #[test]
-fn min_weight_hides_cells_seen_once_from_live_meshes_only() -> Result<(), Box<dyn Error>> {
+fn min_weight_hides_cells_seen_too_few_times_from_every_mesh() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
     let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
-    volume.set_min_weight(2.0);
+    let mut held: HashMap<[i64; 3], Mesh> = HashMap::new();
+    volume.set_min_weight(2.0)?;
     volume.integrate(&frame, &camera)?;
-    assert!(volume
-        .extract_dirty_block_meshes()
-        .iter()
-        .all(|(_, mesh)| mesh.triangles.is_empty()));
-    assert!(!volume.extract_mesh()?.triangles.is_empty());
+    held.extend(volume.extract_dirty_block_meshes());
+    assert!(held.values().all(|mesh| mesh.triangles.is_empty()));
+    assert!(volume.extract_mesh()?.triangles.is_empty());
+
+    // Lowering the threshold re-meshes every block without a new frame.
+    volume.set_min_weight(0.0)?;
+    held.extend(volume.extract_dirty_block_meshes());
+    let full = triangle_multiset(&volume.extract_mesh()?);
+    assert!(!full.is_empty());
+    assert!(
+        union_multiset(&held) == full,
+        "union differs at min_weight 0"
+    );
+
+    volume.set_min_weight(2.0)?;
     volume.integrate(&frame, &camera)?;
-    let live: usize = volume
-        .extract_dirty_block_meshes()
-        .iter()
-        .map(|(_, mesh)| mesh.triangles.len())
-        .sum();
-    assert_eq!(live, volume.extract_mesh()?.triangles.len());
+    held.extend(volume.extract_dirty_block_meshes());
+    let full = triangle_multiset(&volume.extract_mesh()?);
+    assert!(!full.is_empty());
+    assert!(
+        union_multiset(&held) == full,
+        "union differs at min_weight 2"
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_min_weights_are_refused() -> Result<(), Box<dyn Error>> {
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    for value in [f32::NAN, -1.0, f32::INFINITY] {
+        assert!(matches!(
+            volume.set_min_weight(value),
+            Err(TsdfError::InvalidParameter {
+                name: "min_weight",
+                ..
+            })
+        ));
+    }
     Ok(())
 }
 
@@ -497,8 +524,7 @@ fn a_vanished_surface_is_delivered_empty_once() -> Result<(), Box<dyn Error>> {
     assert!(!surfaced.is_empty());
 
     // No voxel reaches this weight, so every live mesh empties.
-    volume.set_min_weight(10.0);
-    volume.integrate(&frame, &camera)?;
+    volume.set_min_weight(10.0)?;
     let emptied = volume.extract_dirty_block_meshes();
     assert_eq!(
         emptied.iter().map(|(key, _)| *key).collect::<Vec<_>>(),

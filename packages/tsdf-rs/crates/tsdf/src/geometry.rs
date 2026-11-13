@@ -104,6 +104,18 @@ pub(crate) fn validate_positive(name: &'static str, value: f32) -> Result<(), Ts
     }
 }
 
+pub(crate) fn validate_non_negative(name: &'static str, value: f32) -> Result<(), TsdfError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(TsdfError::InvalidParameter {
+            name,
+            reason: "must be finite and non-negative",
+            value,
+        })
+    }
+}
+
 /// Check that a slice of `got` values covers `dimensions` exactly.
 pub(crate) fn validate_length(
     name: &'static str,

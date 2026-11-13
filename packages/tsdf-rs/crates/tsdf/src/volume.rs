@@ -7,7 +7,7 @@ use crate::extract;
 use crate::frame::{Camera, DepthFrame, DepthRange};
 use crate::geometry::{
     add, add_scaled, camera_to_world, checked_floor_i64, invert_3x3, multiply_3x3, transform_point,
-    validate_length, validate_positive,
+    validate_length, validate_non_negative, validate_positive,
 };
 use crate::mesh::Mesh;
 
@@ -259,15 +259,22 @@ impl TsdfVolume {
     }
 
     /// Skip mesh cells with a corner voxel fused fewer than `min_weight`
-    /// times in [`TsdfVolume::dirty_block_meshes`] (0, the default: any
-    /// observed voxel), so live meshes hide single-view slivers.
-    /// [`TsdfVolume::extract_mesh`] is not affected.
-    pub fn set_min_weight(&mut self, min_weight: f32) {
-        self.min_weight = if min_weight.is_finite() {
-            min_weight.max(0.0)
-        } else {
-            0.0
-        };
+    /// times (0, the default: any observed voxel), so meshes hide
+    /// single-view slivers. Applies to [`TsdfVolume::extract_mesh`] and
+    /// [`TsdfVolume::dirty_block_meshes`] alike; a new value stales every
+    /// block's mesh.
+    ///
+    /// # Errors
+    ///
+    /// [`TsdfError::InvalidParameter`] if `min_weight` is not finite and
+    /// non-negative.
+    pub fn set_min_weight(&mut self, min_weight: f32) -> Result<(), TsdfError> {
+        validate_non_negative("min_weight", min_weight)?;
+        if min_weight != self.min_weight {
+            self.min_weight = min_weight;
+            self.changes.mark_all(self.blocks.keys());
+        }
+        Ok(())
     }
 
     /// Fuse one projective depth frame into the volume.
@@ -331,7 +338,8 @@ impl TsdfVolume {
 
     /// Extract the mesh of every observed zero crossing.
     ///
-    /// Vertices lie on cell edges whose eight-corner cell is fully observed;
+    /// Vertices lie on cell edges whose eight-corner cell is fully observed
+    /// (see [`TsdfVolume::set_min_weight`]);
     /// each carries the color of its nearest voxel and the unit TSDF gradient
     /// as normal. Blocks are processed in sorted order and merged
     /// sequentially, so the bytes do not depend on the Rayon thread count.
@@ -340,7 +348,12 @@ impl TsdfVolume {
     ///
     /// [`TsdfError::VertexIndexOverflow`] if the mesh exceeds 32-bit indices.
     pub fn extract_mesh(&self) -> Result<Mesh, TsdfError> {
-        extract::full_mesh(&self.blocks, self.voxel_size, self.fuse_color)
+        extract::full_mesh(
+            &self.blocks,
+            self.voxel_size,
+            self.fuse_color,
+            self.min_weight,
+        )
     }
 
     /// Per-block meshes of the blocks whose surface changed since the last

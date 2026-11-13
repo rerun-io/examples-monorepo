@@ -48,6 +48,12 @@ impl ChangeTracker {
         }
     }
 
+    /// Mark the meshes of `keys` themselves, as after a change that affects
+    /// every block alike.
+    pub(crate) fn mark_all<'a>(&mut self, keys: impl IntoIterator<Item = &'a BlockKey>) {
+        self.dirty.extend(keys);
+    }
+
     /// The dirty blocks that `exists`, sorted.
     pub(crate) fn dirty_keys(&self, exists: impl Fn(&BlockKey) -> bool) -> Vec<BlockKey> {
         let mut keys: Vec<BlockKey> = self.dirty.iter().copied().filter(exists).collect();

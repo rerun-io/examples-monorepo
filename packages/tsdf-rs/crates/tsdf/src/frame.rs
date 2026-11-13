@@ -1,4 +1,5 @@
 use crate::error::TsdfError;
+use crate::geometry::validate_non_negative;
 
 /// A pinhole camera at one pose.
 ///
@@ -66,13 +67,7 @@ impl Default for DepthRange {
 
 impl DepthRange {
     pub(crate) fn validate(&self) -> Result<(), TsdfError> {
-        if !self.min.is_finite() || self.min < 0.0 {
-            return Err(TsdfError::InvalidParameter {
-                name: "min_depth",
-                reason: "must be finite and non-negative",
-                value: self.min,
-            });
-        }
+        validate_non_negative("min_depth", self.min)?;
         if self.max.is_nan() || self.max < self.min {
             return Err(TsdfError::InvalidParameter {
                 name: "max_depth",

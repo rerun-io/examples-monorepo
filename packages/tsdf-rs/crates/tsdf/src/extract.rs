@@ -51,12 +51,13 @@ pub(crate) fn full_mesh(
     blocks: &Blocks,
     voxel_size: f32,
     fuse_color: bool,
+    min_weight: f32,
 ) -> Result<Mesh, TsdfError> {
     let mut keys: Vec<BlockKey> = blocks.keys().copied().collect();
     keys.sort_unstable();
     let block_meshes: Vec<BlockMesh> = keys
         .par_iter()
-        .map(|&key| block_mesh(key, blocks, 0.0))
+        .map(|&key| block_mesh(key, blocks, min_weight))
         .collect();
 
     let triangle_count = block_meshes.iter().map(|mesh| mesh.triangles.len()).sum();
@@ -410,7 +411,7 @@ mod tests {
         let mut blocks = Blocks::default();
         blocks.insert([0, 0, 0], block);
 
-        let mesh = full_mesh(&blocks, 0.04, false).expect("small mesh");
+        let mesh = full_mesh(&blocks, 0.04, false, 0.0).expect("small mesh");
 
         assert!(mesh.vertices.is_empty());
         assert!(mesh.triangles.is_empty());
