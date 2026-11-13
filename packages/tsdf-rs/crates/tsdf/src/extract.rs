@@ -202,17 +202,41 @@ const CORNER_OFFSETS: [usize; 8] = {
     offsets
 };
 
+/// Offsets of the twelve cell edges, in [`EDGES`] order, among the vertex
+/// slots of a block: three per voxel of a [`SPAN`]-cubed array (one per axis).
+const EDGE_SLOT_OFFSETS: [usize; 12] = {
+    let mut offsets = [0; 12];
+    let mut edge = 0;
+    while edge < 12 {
+        let [x, y, z] = EDGES[edge].offset;
+        let voxel = (z as usize * SPAN + y as usize) * SPAN + x as usize;
+        offsets[edge] = voxel * 3 + EDGES[edge].axis as usize;
+        edge += 1;
+    }
+    offsets
+};
+
+/// Marks a vertex slot whose edge has no vertex yet.
+const NO_VERTEX: u32 = u32::MAX;
+
 /// Buffers one worker reuses from block to block.
 pub(crate) struct MeshScratch {
     /// The corner values a block's cells read, [`SPAN`]-cubed, x fastest;
     /// NaN where a cell may not use the voxel.
     corners: Vec<f32>,
+    /// Block-local index of the vertex on each edge, [`NO_VERTEX`] if none;
+    /// see [`EDGE_SLOT_OFFSETS`].
+    vertex_slots: Vec<u32>,
+    /// The slots set by the current block, reset after it.
+    used_slots: Vec<usize>,
 }
 
 impl MeshScratch {
     fn new() -> Self {
         Self {
             corners: vec![f32::NAN; SPAN * SPAN * SPAN],
+            vertex_slots: vec![NO_VERTEX; SPAN * SPAN * SPAN * 3],
+            used_slots: Vec::with_capacity(512),
         }
     }
 }
@@ -234,12 +258,15 @@ fn block_mesh(
         return BlockMesh::default();
     };
     gather_corners(&neighbors, min_weight, &mut scratch.corners);
-    let corners = &scratch.corners;
+    let MeshScratch {
+        corners,
+        vertex_slots,
+        used_slots,
+    } = scratch;
     let mut mesh = BlockMesh {
         vertices: Vec::with_capacity(256),
         triangles: Vec::with_capacity(512),
     };
-    let mut local_vertices = FxHashMap::<EdgeKey, u32>::default();
     for z in 0..BLOCK_RESOLUTION_U16 {
         for y in 0..BLOCK_RESOLUTION_U16 {
             for x in 0..BLOCK_RESOLUTION_U16 {
@@ -264,30 +291,36 @@ fn block_mesh(
                 ];
                 for_each_triangle(cube_index, |edges| {
                     let triangle = edges.map(|edge_index| {
-                        let edge = &EDGES[edge_index];
-                        let key = EdgeKey {
-                            base: [
-                                anchor[0] + edge.offset[0],
-                                anchor[1] + edge.offset[1],
-                                anchor[2] + edge.offset[2],
-                            ],
-                            axis: edge.axis,
-                        };
-                        *local_vertices.entry(key).or_insert_with(|| {
+                        let slot = cell * 3 + EDGE_SLOT_OFFSETS[edge_index];
+                        if vertex_slots[slot] == NO_VERTEX {
+                            let edge = &EDGES[edge_index];
+                            let key = EdgeKey {
+                                base: [
+                                    anchor[0] + edge.offset[0],
+                                    anchor[1] + edge.offset[1],
+                                    anchor[2] + edge.offset[2],
+                                ],
+                                axis: edge.axis,
+                            };
                             let [start, end] = edge.corners;
+                            // A block has fewer than 3 * 17^3 edges.
+                            vertex_slots[slot] = mesh.vertices.len() as u32;
+                            used_slots.push(slot);
                             mesh.vertices.push(EdgeVertex {
                                 edge: key,
                                 amount: interpolation_amount(values[start], values[end]),
                                 on_seam: on_block_seam(key, origin),
                             });
-                            // A block has fewer than 3 * 17^3 edges.
-                            (mesh.vertices.len() - 1) as u32
-                        })
+                        }
+                        vertex_slots[slot]
                     });
                     mesh.triangles.push(triangle);
                 });
             }
         }
+    }
+    for slot in used_slots.drain(..) {
+        vertex_slots[slot] = NO_VERTEX;
     }
     mesh
 }
