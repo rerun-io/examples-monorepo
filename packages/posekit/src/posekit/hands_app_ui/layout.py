@@ -10,7 +10,7 @@ import gradio as gr
 from gradio_rerun import Rerun
 
 from posekit.apis.video_hands import EXAMPLES, VideoHandsProgress, VideoHandsSettings
-from posekit.hands_app_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS, VIEWER_HEIGHT
+from posekit.hands_app_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS
 from posekit.hands_ui import (
     PIPELINES,
     STACKS,
@@ -96,9 +96,9 @@ def build(
         description: Markdown above the app.
         run: What the Run button calls, with ``run_hands``'s inputs and outputs (a host wraps ``run_hands`` to run it elsewhere).
     """
-    with gr.Blocks(title="Rerun × EgoHand") as demo:
+    with gr.Blocks(title="Rerun × EgoHand", fill_height=True) as demo:
         gr.Markdown(description, elem_id="app-description")
-        with gr.Row(elem_id="main-row", equal_height=False):
+        with gr.Row(elem_id="main-row", equal_height=False, scale=1):
             with gr.Column(scale=1, min_width=360, elem_id="left-column"):
                 with gr.Tabs(selected="input") as tabs:
                     with gr.Tab("Input", id="input"):
@@ -137,7 +137,8 @@ def build(
                 status = gr.Markdown(READY, elem_id="run-status")
             with gr.Column(scale=3):
                 viewer = Rerun(
-                    streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height=VIEWER_HEIGHT
+                    streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%",
+                    elem_id="viewer",
                 )
         video.change(fill_intrinsics, inputs=[video], outputs=[fx, fy, cx, cy])
         run_event = run_button.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(

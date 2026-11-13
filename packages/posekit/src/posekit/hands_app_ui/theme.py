@@ -3,9 +3,6 @@
 import base64
 from pathlib import Path
 
-VIEWER_HEIGHT: str = "calc(100vh - 10.5rem)"
-"""Viewer frame height: the viewport minus the header band and the footer, the same as ``#main-row``."""
-
 RERUN_LOGOS: dict[str, str] = {
     mode: "data:image/webp;base64," + base64.b64encode((Path(__file__).parent / f"rerun_wordmark_animated_{mode}.webp").read_bytes()).decode()
     for mode in ("light", "dark")
@@ -25,7 +22,7 @@ DARK_HEAD: str = """<script>
 Gradio 6 inserts ``head`` after it has read its ``__theme`` URL switch, so the script also sets what that switch sets, the
 ``dark`` class on the body; the URL keeps the switch for what reads it later (the Settings panel)."""
 
-APP_CSS: str = '@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");\n' + f"#main-row {{ height: {VIEWER_HEIGHT}; min-height: 0; overflow: hidden; }}\n" + """
+APP_CSS: str = """@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
 /* Rerun's brand base colours (https://rerun.io/media): #171616 ground, #F1EFEB type, #186ADD accent, #D72F21 red;
    the panels and borders use the viewer's own greys so the left column matches the embedded viewer. */
 :root {
@@ -111,8 +108,15 @@ APP_CSS: str = '@import url("https://fonts.googleapis.com/css2?family=Inter:wght
 .gradio-container, .gradio-container button, .gradio-container input, .gradio-container textarea { font-family: "Inter", ui-sans-serif, system-ui, sans-serif !important; }
 #left-column .tab-container [role=tab][aria-selected=true], #left-column .tab-container .selected { color: var(--header-strong) !important; }
 #left-column .tab-container .selected::after { background: #186add !important; }
-/* The page never scrolls: the viewer fills the window and the run log scrolls inside itself. */
-html, body, gradio-app, .gradio-container { height: 100%; overflow: hidden; }
+/* The page fits the window: the header keeps its height and the main row (Blocks fill_height, Row scale=1) takes the rest,
+   so the viewer gets whatever height is left, however the header wraps. A window too short for a 30rem main row (a phone)
+   scrolls instead (Gradio's container clips by default). The footer stays hidden: Gradio adds its height to the size it posts to a parent iframe (the
+   Hugging Face Space page), and the Space page then grows the iframe past the window. */
+html, body, gradio-app, .gradio-container { height: 100%; }
+.gradio-container { overflow-y: auto !important; }
+footer { display: none !important; }
+#main-row { min-height: 30rem; }
+#viewer { flex: 1 1 0; min-height: 0; }
 /* The left column never scrolls. The tabs keep their natural height and only shrink when the window is too short, so Run
    sits right under them; inside Outputs the run log is what gives way, scrolling by itself. Only the Input tab, on a
    window too short for its clip, settings and examples, scrolls inside its own panel. */
