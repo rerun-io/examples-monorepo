@@ -17,17 +17,31 @@ pub(crate) const NEIGHBORHOOD: [[i64; 3]; 27] = {
     offsets
 };
 
-/// The volume's record of meshes not yet delivered.
+/// The blocks whose meshes may have changed since the last confirmed
+/// [`Delivery`], and what that delivery held.
 #[derive(Debug, Default)]
 pub(crate) struct ChangeTracker {
-    /// Blocks whose mesh may have changed since the last delivery.
+    /// Blocks whose mesh may have changed since the last confirmed delivery.
     dirty: FxHashSet<BlockKey>,
     /// Content hash ([`Mesh::content_hash`]) of each block's last delivered
     /// mesh, for the blocks whose last delivered mesh had triangles.
-    pub(crate) delivered: FxHashMap<BlockKey, u64>,
+    surface_hashes: FxHashMap<BlockKey, u64>,
+}
+
+/// A dirty block's new mesh, not yet confirmed as delivered.
+pub(crate) struct Pending {
+    pub(crate) key: BlockKey,
+    pub(crate) mesh: Mesh,
+    /// The mesh's content hash, `None` if it has no triangles.
+    pub(crate) surface_hash: Option<u64>,
 }
 
 impl ChangeTracker {
+    /// Content hash of the last delivered mesh of `key`, if it had triangles.
+    pub(crate) fn last_surface_hash(&self, key: &BlockKey) -> Option<u64> {
+        self.surface_hashes.get(key).copied()
+    }
+
     /// Mark the meshes that removing or replacing `touched` blocks can change:
     /// their own and all 26 neighbors' (see [`ChangeTracker::mark_changed`]).
     pub(crate) fn mark_touched<'a>(&mut self, touched: impl IntoIterator<Item = &'a BlockKey>) {
@@ -88,24 +102,26 @@ impl ChangeTracker {
     /// Drop every record of `key`, a block the volume freed.
     pub(crate) fn forget(&mut self, key: &BlockKey) {
         self.dirty.remove(key);
-        self.delivered.remove(key);
+        self.surface_hashes.remove(key);
     }
 
-    /// Pair `meshes`, each with its content hash, with the [`Delivery`] that
-    /// records them in this tracker.
-    pub(crate) fn pending(&mut self, meshes: Vec<(BlockKey, Mesh, u64)>) -> DirtyMeshes<'_> {
-        let (meshes, delivered) = meshes
+    /// The `pending` meshes with the [`Delivery`] that records them in this
+    /// tracker.
+    pub(crate) fn pending(&mut self, pending: Vec<Pending>) -> DirtyMeshes<'_> {
+        let (meshes, receipts) = pending
             .into_iter()
-            .map(|(key, mesh, hash)| {
-                let surface_hash = (!mesh.triangles.is_empty()).then_some(hash);
-                ((key, mesh), (key, surface_hash))
+            .map(|pending| {
+                (
+                    (pending.key, pending.mesh),
+                    (pending.key, pending.surface_hash),
+                )
             })
             .unzip();
         DirtyMeshes {
             meshes,
             delivery: Delivery {
                 tracker: self,
-                delivered,
+                receipts,
             },
         }
     }
@@ -123,25 +139,26 @@ pub struct DirtyMeshes<'a> {
 
 /// Records a [`DirtyMeshes`] extraction as delivered to its volume.
 ///
-/// It borrows the volume mutably, so no frame can be integrated and no other
-/// volume's meshes can be confirmed in between. Dropping it unconfirmed
-/// keeps the meshes pending for the next extraction.
+/// It borrows the volume mutably: until it is confirmed or dropped, this
+/// volume can neither integrate a frame nor extract again, so what it
+/// records matches the volume's state. Dropping it unconfirmed keeps the
+/// meshes pending for the next extraction.
 #[derive(Debug)]
 #[must_use = "unconfirmed meshes stay pending; call `confirm` once delivered"]
 pub struct Delivery<'a> {
     tracker: &'a mut ChangeTracker,
-    /// Each delivered block and its mesh's content hash, `None` if the mesh
+    /// Each extracted block and its mesh's content hash, `None` if the mesh
     /// has no triangles.
-    delivered: Vec<(BlockKey, Option<u64>)>,
+    receipts: Vec<(BlockKey, Option<u64>)>,
 }
 
 impl Delivery<'_> {
     /// Remember the delivered meshes and clear the dirty set.
     pub fn confirm(self) {
-        for (key, surface_hash) in self.delivered {
+        for (key, surface_hash) in self.receipts {
             match surface_hash {
-                Some(hash) => self.tracker.delivered.insert(key, hash),
-                None => self.tracker.delivered.remove(&key),
+                Some(hash) => self.tracker.surface_hashes.insert(key, hash),
+                None => self.tracker.surface_hashes.remove(&key),
             };
         }
         self.tracker.dirty.clear();

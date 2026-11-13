@@ -5,7 +5,7 @@ use std::collections::hash_map::Entry;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::changes::NEIGHBORHOOD;
+use crate::changes::{ChangeTracker, Pending, NEIGHBORHOOD};
 use crate::error::TsdfError;
 use crate::mesh::{interpolation_amount, Mesh};
 use crate::tables::{for_each_triangle, CORNERS, EDGES};
@@ -130,20 +130,19 @@ pub(crate) fn full_mesh(
 }
 
 /// Meshes of `keys` (sorted) that differ from the block's last delivered
-/// mesh, each with its content hash. `delivered` holds the hash of every
-/// block whose last delivered mesh had triangles; the others hold none.
+/// mesh in `changes`.
 pub(crate) fn block_meshes(
     keys: &[BlockKey],
     blocks: &Blocks,
-    delivered: &FxHashMap<BlockKey, u64>,
+    changes: &ChangeTracker,
     voxel_size: f32,
     fuse_color: bool,
     min_weight: f32,
-) -> Vec<(BlockKey, Mesh, u64)> {
+) -> Vec<Pending> {
     keys.par_iter()
         .map_init(MeshScratch::new, |scratch, &key| {
             let block = block_mesh(key, blocks, min_weight, scratch);
-            let last = delivered.get(&key);
+            let last = changes.last_surface_hash(&key);
             // Report empty meshes only on the surfaced -> empty transition, so
             // surface-less shell blocks are not re-announced every extraction.
             if block.triangles.is_empty() && last.is_none() {
@@ -157,8 +156,12 @@ pub(crate) fn block_meshes(
             };
             // A dirty block's mesh is often unchanged (its neighbor was
             // touched, not it): leave out what the consumer already holds.
-            let hash = mesh.content_hash();
-            (last != Some(&hash)).then_some((key, mesh, hash))
+            let surface_hash = (!mesh.triangles.is_empty()).then(|| mesh.content_hash());
+            (surface_hash != last).then_some(Pending {
+                key,
+                mesh,
+                surface_hash,
+            })
         })
         .flatten()
         .collect()

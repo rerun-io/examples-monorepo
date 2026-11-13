@@ -396,7 +396,7 @@ impl TsdfVolume {
         let meshes = extract::block_meshes(
             &keys,
             &self.blocks,
-            &self.changes.delivered,
+            &self.changes,
             self.voxel_size,
             self.fuse_color,
             self.min_weight,
