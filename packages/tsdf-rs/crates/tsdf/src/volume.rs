@@ -200,8 +200,10 @@ impl TsdfVolume {
     /// Cap the number of allocated blocks (`None`, the default: unbounded).
     ///
     /// Once the cap is reached, existing blocks keep fusing and new blocks
-    /// are skipped (in sorted key order) until [`TsdfVolume::evict_farthest`]
-    /// frees room. A memory bound for long sessions on small devices.
+    /// are dropped (in sorted key order) until [`TsdfVolume::evict_farthest`]
+    /// frees room. A memory bound for long sessions on small devices. Only
+    /// new blocks that a frame actually updates count: the cap applies after
+    /// integration, so a frame briefly holds its dropped blocks.
     pub fn set_max_blocks(&mut self, max_blocks: Option<usize>) {
         self.max_blocks = max_blocks;
     }
@@ -315,26 +317,37 @@ impl TsdfVolume {
             voxel_size: self.voxel_size,
             sdf_trunc: self.sdf_trunc,
         };
-        let mut touched = discover_touched_blocks(&context);
-        if let Some(limit) = self.max_blocks {
-            self.budget_reached |= drop_new_blocks_over(limit, &mut touched, &self.blocks);
-        }
-        self.changes.mark_touched(&touched);
-
-        let mut active: Vec<(BlockKey, VoxelBlock)> = touched
+        let allocated = self.blocks.len();
+        let mut active: Vec<ActiveBlock> = discover_touched_blocks(&context)
             .into_iter()
-            .map(|key| {
-                let block = self
-                    .blocks
-                    .remove(&key)
-                    .unwrap_or_else(|| VoxelBlock::new(self.fuse_color));
-                (key, block)
+            .map(|key| match self.blocks.remove(&key) {
+                Some(block) => ActiveBlock {
+                    key,
+                    block,
+                    is_new: false,
+                    updated: false,
+                },
+                None => ActiveBlock {
+                    key,
+                    block: VoxelBlock::new(self.fuse_color),
+                    is_new: true,
+                    updated: false,
+                },
             })
             .collect();
-        active
-            .par_iter_mut()
-            .for_each(|(key, block)| integrate_block(*key, block, &context));
-        self.blocks.extend(active);
+        active.par_iter_mut().for_each(|active| {
+            active.updated = integrate_block(active.key, &mut active.block, &context);
+        });
+        if let Some(limit) = self.max_blocks {
+            self.budget_reached |=
+                drop_new_blocks_over(limit.saturating_sub(allocated), &mut active);
+        }
+        // A new block that no voxel update reached holds nothing to keep.
+        active.retain(|active| active.updated || !active.is_new);
+        self.changes
+            .mark_touched(active.iter().map(|active| &active.key));
+        self.blocks
+            .extend(active.into_iter().map(|active| (active.key, active.block)));
         Ok(())
     }
 
@@ -475,25 +488,29 @@ fn discover_touched_blocks(context: &FrameContext<'_>) -> FxHashSet<BlockKey> {
         })
 }
 
-/// Remove from `touched` the new blocks beyond `limit` allocated blocks,
-/// keeping the first in sorted key order; whether any was removed.
-fn drop_new_blocks_over(
-    limit: usize,
-    touched: &mut FxHashSet<BlockKey>,
-    blocks: &FxHashMap<BlockKey, VoxelBlock>,
-) -> bool {
-    let room = limit.saturating_sub(blocks.len());
-    let mut new: Vec<BlockKey> = touched
-        .iter()
-        .filter(|key| !blocks.contains_key(*key))
-        .copied()
+/// A block one frame's integration reaches.
+struct ActiveBlock {
+    key: BlockKey,
+    block: VoxelBlock,
+    /// Allocated by this integration.
+    is_new: bool,
+    /// Whether the frame updated any of its voxels.
+    updated: bool,
+}
+
+/// Mark as not updated, so they are dropped, the updated new blocks beyond
+/// the first `room` in sorted key order; whether any was.
+fn drop_new_blocks_over(room: usize, active: &mut [ActiveBlock]) -> bool {
+    let mut new: Vec<&mut ActiveBlock> = active
+        .iter_mut()
+        .filter(|active| active.is_new && active.updated)
         .collect();
     if new.len() <= room {
         return false;
     }
-    new.sort_unstable();
-    for key in &new[room..] {
-        touched.remove(key);
+    new.sort_unstable_by_key(|active| active.key);
+    for active in &mut new[room..] {
+        active.updated = false;
     }
     true
 }
@@ -514,10 +531,12 @@ fn block_bounds(
     Some((block_index(-sdf_trunc)?, block_index(sdf_trunc)?))
 }
 
-fn integrate_block(key: BlockKey, block: &mut VoxelBlock, context: &FrameContext<'_>) {
+/// Fuse the frame into one block; whether any voxel was updated.
+fn integrate_block(key: BlockKey, block: &mut VoxelBlock, context: &FrameContext<'_>) -> bool {
     let Some(block_origin) = checked_block_origin(key) else {
-        return;
+        return false;
     };
+    let mut updated = false;
     let voxel_size = context.voxel_size;
     let transform = context.camera_from_world;
     let first_world = block_origin.map(|coordinate| (coordinate as f32 + 0.5) * voxel_size);
@@ -544,45 +563,48 @@ fn integrate_block(key: BlockKey, block: &mut VoxelBlock, context: &FrameContext
             let mut camera = add_scaled(camera_at_z, step_y, y as f32);
             for x in 0..BLOCK_RESOLUTION_USIZE {
                 let index = (z * BLOCK_RESOLUTION_USIZE + y) * BLOCK_RESOLUTION_USIZE + x;
-                integrate_voxel(index, camera, block, context);
+                updated |= integrate_voxel(index, camera, block, context);
                 camera = add(camera, step_x);
             }
         }
     }
+    updated
 }
 
+/// Fuse the frame into voxel `index` seen at camera point `camera`; whether
+/// the voxel was updated.
 fn integrate_voxel(
     index: usize,
     camera: [f32; 3],
     block: &mut VoxelBlock,
     context: &FrameContext<'_>,
-) {
+) -> bool {
     if camera[2] <= 0.0 || !camera[2].is_finite() {
-        return;
+        return false;
     }
     let pixel = multiply_3x3(context.intrinsics, camera);
     if pixel[2] == 0.0 || !pixel[2].is_finite() {
-        return;
+        return false;
     }
     let (Some(u), Some(v)) = (
         nearest_pixel(pixel[0] / pixel[2], context.width),
         nearest_pixel(pixel[1] / pixel[2], context.height),
     ) else {
-        return;
+        return false;
     };
 
     let pixel_index = v * context.width + u;
     let depth = context.depth[pixel_index];
     if !context.depth_range.contains(depth) {
-        return;
+        return false;
     }
     let distance_multiplier = context.rays[pixel_index].distance_multiplier;
     if !distance_multiplier.is_finite() {
-        return;
+        return false;
     }
     let signed_distance = (depth - camera[2]) * distance_multiplier;
     if signed_distance < -context.sdf_trunc {
-        return;
+        return false;
     }
 
     let observation = (signed_distance / context.sdf_trunc).min(1.0);
@@ -605,6 +627,7 @@ fn integrate_voxel(
         }
         color.weight[index] = denominator;
     }
+    true
 }
 
 /// The pixel `x.round()` (half away from zero) selects on an axis of `size`

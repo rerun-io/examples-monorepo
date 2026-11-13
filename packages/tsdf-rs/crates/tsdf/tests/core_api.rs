@@ -389,6 +389,35 @@ fn the_block_budget_skips_new_blocks_and_keeps_fusing_old_ones() -> Result<(), B
     Ok(())
 }
 
+/// One pixel seeing 1 m down the voxel-center column x = y = 0.02: its
+/// truncation band reaches four blocks, but only block (0, 0, 1) holds
+/// voxels that project into the narrow view.
+fn needle_frame() -> (Vec<f32>, Camera) {
+    let mut camera_from_world = Camera::IDENTITY;
+    camera_from_world[3] = -0.02;
+    camera_from_world[7] = -0.02;
+    let camera = Camera::pinhole([1_000.0, 1_000.0, 0.0, 0.0], camera_from_world);
+    (vec![1.0], camera)
+}
+
+#[test]
+fn blocks_a_frame_reaches_without_updating_a_voxel_are_not_kept() -> Result<(), Box<dyn Error>> {
+    let (depth, camera) = needle_frame();
+    let frame = DepthFrame::new(&depth, [1, 1]);
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    volume.integrate(&frame, &camera)?;
+    assert_eq!(volume.block_count(), 1);
+
+    // Under a cap of one block, blocks without an update neither count nor
+    // take the place of the updated one.
+    let mut capped = TsdfVolume::new(0.04, 0.12, false)?;
+    capped.set_max_blocks(Some(1));
+    capped.integrate(&frame, &camera)?;
+    assert_eq!(capped.block_count(), 1);
+    assert!(!capped.budget_reached());
+    Ok(())
+}
+
 #[test]
 fn eviction_frees_the_farthest_blocks_and_forgets_them() -> Result<(), Box<dyn Error>> {
     let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
