@@ -63,7 +63,7 @@ def _kinds(logged: list[tuple[str, object]]) -> list[tuple[str, str]]:
 
 
 def test_live_surface_logs_changed_blocks_then_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """New keyframes log only changed super-blocks; the re-fuse clears them and logs every block, front-faced."""
+    """New keyframes log only changed super-blocks (none for a repeat); the re-fuse clears them and logs every block."""
     logged: list[tuple[str, object]] = _live_logs(monkeypatch)
     live: LiveSurface = LiveSurface("world/mesh", None, ("frame", "video_time"), refuse_every=3, settings=SurfaceSettings(voxel_size=0.02))
     wall: KeyframeDepth = _plane_keyframe(1.0)
@@ -75,7 +75,8 @@ def test_live_surface_logs_changed_blocks_then_refuses(monkeypatch: pytest.Monke
 
     logged.clear()
     live.handle(SurfaceRequest(keyframes=[(0, wall, _sim3_data(1.0)), (1, wall, _sim3_data(1.0))], frame_idx=1, timestamp_ns=None))
-    assert logged and set(_kinds(logged)) <= set(first), "the same wall again only touches blocks it already had"
+    # tsdf-rs delivers only meshes that changed: the same wall again leaves every running mean bit for bit as it was.
+    assert not logged, "the same wall again changes no block, so nothing is logged"
 
     logged.clear()
     keyframes = [(0, wall, _sim3_data(1.0)), (1, wall, _sim3_data(1.0)), (2, far_wall, _sim3_data(1.0))]

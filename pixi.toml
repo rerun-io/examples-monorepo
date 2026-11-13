@@ -3826,6 +3826,30 @@ cwd = "packages/depth-png"
 description = "rustfmt, clippy and the core crate's tests for packages/depth-png"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# tsdf-rs (Rust core + PyO3 module; metrictrail, mast3r-slam and mvs take the conda build)
+# ═══════════════════════════════════════════════════════════════════════════
+# The Python module tsdf_rs is a pixi-build source package (packages/tsdf-rs/recipe.yaml), consumed as
+# `tsdf-rs = { path = "packages/tsdf-rs" }`; its Python tests live with its consumers (packages/metrictrail/tests,
+# packages/mast3r-slam/tests). This feature only checks the Rust workspace, with the pinned toolchain: the crate's
+# lints deny unknown lint names, so a newer or older clippy must not run them.
+[feature.tsdf-rs-rust]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.tsdf-rs-rust.dependencies]
+rust = "1.98.*"
+# pyo3's build script needs an interpreter to configure crates/tsdf-py.
+python = "3.12.*"
+
+[feature.tsdf-rs-rust.activation.env]
+PYO3_PYTHON = "$CONDA_PREFIX/bin/python"
+
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
+[feature.tsdf-rs-rust.tasks.tsdf-rs-rust-check]
+cmd = "cargo-fmt --all -- --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace && RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --workspace"
+cwd = "packages/tsdf-rs"
+description = "rustfmt, clippy with warnings denied, the tests and rustdoc for packages/tsdf-rs"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # kornia-staging
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.kornia-staging]
@@ -4055,6 +4079,7 @@ agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-tr
 kornia-staging = { features = ["kornia-staging"], solve-group = "kornia-staging", no-default-feature = true }
 kornia-staging-dev = { features = ["kornia-staging", "dev"], solve-group = "kornia-staging", no-default-feature = true }
 depth-png-rust = { features = ["depth-png-rust"], no-default-feature = true }
+tsdf-rs-rust = { features = ["tsdf-rs-rust"], no-default-feature = true }
 arkitscenes-download = { features = [
     "common",
     "arkitscenes-download",
