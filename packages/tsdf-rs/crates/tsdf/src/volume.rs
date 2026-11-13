@@ -316,6 +316,7 @@ impl TsdfVolume {
             camera_from_world: camera.camera_from_world,
             voxel_size: self.voxel_size,
             sdf_trunc: self.sdf_trunc,
+            min_weight: self.min_weight,
         };
         let allocated = self.blocks.len();
         let mut active: Vec<ActiveBlock> = discover_touched_blocks(&context)
@@ -325,27 +326,30 @@ impl TsdfVolume {
                     key,
                     block,
                     is_new: false,
-                    updated: false,
+                    update: BlockUpdate::default(),
                 },
                 None => ActiveBlock {
                     key,
                     block: VoxelBlock::new(self.fuse_color),
                     is_new: true,
-                    updated: false,
+                    update: BlockUpdate::default(),
                 },
             })
             .collect();
         active.par_iter_mut().for_each(|active| {
-            active.updated = integrate_block(active.key, &mut active.block, &context);
+            active.update = integrate_block(active.key, &mut active.block, &context);
         });
         if let Some(limit) = self.max_blocks {
             self.budget_reached |=
                 drop_new_blocks_over(limit.saturating_sub(allocated), &mut active);
         }
         // A new block that no voxel update reached holds nothing to keep.
-        active.retain(|active| active.updated || !active.is_new);
-        self.changes
-            .mark_touched(active.iter().map(|active| &active.key));
+        active.retain(|active| active.update.fused || !active.is_new);
+        for active in &active {
+            if let Some(changed) = &active.update.changed {
+                self.changes.mark_changed(active.key, changed);
+            }
+        }
         self.blocks
             .extend(active.into_iter().map(|active| (active.key, active.block)));
         Ok(())
@@ -434,6 +438,7 @@ struct FrameContext<'a> {
     camera_from_world: [f32; 16],
     voxel_size: f32,
     sdf_trunc: f32,
+    min_weight: f32,
 }
 
 /// Blocks within `sdf_trunc` of a back-projected valid depth sample.
@@ -494,23 +499,68 @@ struct ActiveBlock {
     block: VoxelBlock,
     /// Allocated by this integration.
     is_new: bool,
-    /// Whether the frame updated any of its voxels.
-    updated: bool,
+    update: BlockUpdate,
 }
 
-/// Mark as not updated, so they are dropped, the updated new blocks beyond
+/// What one frame's integration did to a block.
+#[derive(Default)]
+struct BlockUpdate {
+    /// Whether any voxel fused an observation.
+    fused: bool,
+    /// The voxels whose change can alter a mesh, if any.
+    changed: Option<LocalBox>,
+}
+
+/// Inclusive bounds of block-local voxel coordinates, per axis.
+pub(crate) struct LocalBox {
+    pub(crate) min: [usize; 3],
+    pub(crate) max: [usize; 3],
+}
+
+impl LocalBox {
+    fn include(changed: &mut Option<Self>, local: [usize; 3]) {
+        match changed {
+            Some(bounds) => {
+                for axis in 0..3 {
+                    bounds.min[axis] = bounds.min[axis].min(local[axis]);
+                    bounds.max[axis] = bounds.max[axis].max(local[axis]);
+                }
+            }
+            None => {
+                *changed = Some(Self {
+                    min: local,
+                    max: local,
+                });
+            }
+        }
+    }
+}
+
+/// What fusing one observation did to a voxel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoxelUpdate {
+    /// No observation: outside the image or the depth range, or behind the
+    /// truncation band.
+    Skipped,
+    /// Fused, leaving everything a mesh reads bit for bit as it was.
+    Fused,
+    /// Fused, and a mesh reading the voxel can change.
+    Changed,
+}
+
+/// Clear the update, so they are dropped, of the updated new blocks beyond
 /// the first `room` in sorted key order; whether any was.
 fn drop_new_blocks_over(room: usize, active: &mut [ActiveBlock]) -> bool {
     let mut new: Vec<&mut ActiveBlock> = active
         .iter_mut()
-        .filter(|active| active.is_new && active.updated)
+        .filter(|active| active.is_new && active.update.fused)
         .collect();
     if new.len() <= room {
         return false;
     }
     new.sort_unstable_by_key(|active| active.key);
     for active in &mut new[room..] {
-        active.updated = false;
+        active.update = BlockUpdate::default();
     }
     true
 }
@@ -531,12 +581,16 @@ fn block_bounds(
     Some((block_index(-sdf_trunc)?, block_index(sdf_trunc)?))
 }
 
-/// Fuse the frame into one block; whether any voxel was updated.
-fn integrate_block(key: BlockKey, block: &mut VoxelBlock, context: &FrameContext<'_>) -> bool {
+/// Fuse the frame into one block.
+fn integrate_block(
+    key: BlockKey,
+    block: &mut VoxelBlock,
+    context: &FrameContext<'_>,
+) -> BlockUpdate {
+    let mut update = BlockUpdate::default();
     let Some(block_origin) = checked_block_origin(key) else {
-        return false;
+        return update;
     };
-    let mut updated = false;
     let voxel_size = context.voxel_size;
     let transform = context.camera_from_world;
     let first_world = block_origin.map(|coordinate| (coordinate as f32 + 0.5) * voxel_size);
@@ -563,54 +617,67 @@ fn integrate_block(key: BlockKey, block: &mut VoxelBlock, context: &FrameContext
             let mut camera = add_scaled(camera_at_z, step_y, y as f32);
             for x in 0..BLOCK_RESOLUTION_USIZE {
                 let index = (z * BLOCK_RESOLUTION_USIZE + y) * BLOCK_RESOLUTION_USIZE + x;
-                updated |= integrate_voxel(index, camera, block, context);
+                match integrate_voxel(index, camera, block, context) {
+                    VoxelUpdate::Skipped => {}
+                    VoxelUpdate::Fused => update.fused = true,
+                    VoxelUpdate::Changed => {
+                        update.fused = true;
+                        LocalBox::include(&mut update.changed, [x, y, z]);
+                    }
+                }
                 camera = add(camera, step_x);
             }
         }
     }
-    updated
+    update
 }
 
-/// Fuse the frame into voxel `index` seen at camera point `camera`; whether
-/// the voxel was updated.
+/// Fuse the frame into voxel `index`, seen at camera point `camera`.
+///
+/// A mesh reads a voxel's TSDF value, whether its weight is zero or below
+/// `min_weight`, and its color: the update is [`VoxelUpdate::Changed`] when
+/// any of those can differ afterwards.
 fn integrate_voxel(
     index: usize,
     camera: [f32; 3],
     block: &mut VoxelBlock,
     context: &FrameContext<'_>,
-) -> bool {
+) -> VoxelUpdate {
     if camera[2] <= 0.0 || !camera[2].is_finite() {
-        return false;
+        return VoxelUpdate::Skipped;
     }
     let pixel = multiply_3x3(context.intrinsics, camera);
     if pixel[2] == 0.0 || !pixel[2].is_finite() {
-        return false;
+        return VoxelUpdate::Skipped;
     }
     let (Some(u), Some(v)) = (
         nearest_pixel(pixel[0] / pixel[2], context.width),
         nearest_pixel(pixel[1] / pixel[2], context.height),
     ) else {
-        return false;
+        return VoxelUpdate::Skipped;
     };
 
     let pixel_index = v * context.width + u;
     let depth = context.depth[pixel_index];
     if !context.depth_range.contains(depth) {
-        return false;
+        return VoxelUpdate::Skipped;
     }
     let distance_multiplier = context.rays[pixel_index].distance_multiplier;
     if !distance_multiplier.is_finite() {
-        return false;
+        return VoxelUpdate::Skipped;
     }
     let signed_distance = (depth - camera[2]) * distance_multiplier;
     if signed_distance < -context.sdf_trunc {
-        return false;
+        return VoxelUpdate::Skipped;
     }
 
     let observation = (signed_distance / context.sdf_trunc).min(1.0);
     let old_weight = block.weights[index];
     let denominator = old_weight + 1.0;
     let updated_tsdf = (block.tsdf[index] * old_weight + observation) / denominator;
+    let mut changed = updated_tsdf.to_bits() != block.tsdf[index].to_bits()
+        || old_weight == 0.0
+        || old_weight < context.min_weight;
     block.tsdf[index] = updated_tsdf;
     block.weights[index] = denominator;
     block.observed_min = block.observed_min.min(updated_tsdf);
@@ -620,14 +687,20 @@ fn integrate_voxel(
         let old_weight = color.weight[index];
         let denominator = old_weight + 1.0;
         let image_offset = pixel_index * 3;
+        let old_rgb = color.rgb[index];
         for channel in 0..3 {
             color.rgb[index][channel] = (color.rgb[index][channel] * old_weight
                 + f32::from(image[image_offset + channel]))
                 / denominator;
         }
         color.weight[index] = denominator;
+        changed |= color.rgb[index].map(f32::to_bits) != old_rgb.map(f32::to_bits);
     }
-    true
+    if changed {
+        VoxelUpdate::Changed
+    } else {
+        VoxelUpdate::Fused
+    }
 }
 
 /// The pixel `x.round()` (half away from zero) selects on an axis of `size`
@@ -647,7 +720,33 @@ fn nearest_pixel(x: f32, size: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::nearest_pixel;
+    use super::*;
+
+    #[test]
+    fn a_first_observation_changes_the_voxel_even_when_its_value_does_not() {
+        // A voxel 1 m in front of the surface observes the truncated value
+        // 1.0, the value a new block starts with: only its weight changes.
+        let intrinsics = Camera::pinhole([1_000.0, 1_000.0, 0.0, 0.0], Camera::IDENTITY).intrinsics;
+        let rays = RayCache::new([1, 1], intrinsics).expect("invertible intrinsics");
+        let context = FrameContext {
+            depth: &[2.0],
+            color: None,
+            depth_range: DepthRange::default(),
+            rays: &rays.rays,
+            width: 1,
+            height: 1,
+            intrinsics,
+            camera_from_world: Camera::IDENTITY,
+            voxel_size: 0.04,
+            sdf_trunc: 0.12,
+            min_weight: 0.0,
+        };
+        let mut block = VoxelBlock::new(false);
+        let fuse = |block: &mut VoxelBlock| integrate_voxel(0, [0.0, 0.0, 1.0], block, &context);
+        assert!(fuse(&mut block) == VoxelUpdate::Changed);
+        assert_eq!(block.tsdf[0].to_bits(), 1.0_f32.to_bits());
+        assert!(fuse(&mut block) == VoxelUpdate::Fused);
+    }
 
     /// The selection of the original `round()` rule.
     fn rounded(x: f32, size: usize) -> Option<usize> {

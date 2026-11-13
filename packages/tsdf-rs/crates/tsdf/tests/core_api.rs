@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 
 use tsdf::{Camera, DepthFrame, DepthRange, DirtyMeshes, Mesh, TsdfError, TsdfVolume};
@@ -215,10 +215,55 @@ fn repeated_observations_use_a_cumulative_average() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+/// Check the held per-block meshes against the full mesh: the same
+/// triangles, and every held vertex with the color and normal of a
+/// full-mesh vertex at its position.
+fn assert_union_matches_full(
+    held: &BTreeMap<[i64; 3], Mesh>,
+    full: &Mesh,
+    when: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut union: Vec<[[u32; 3]; 3]> = held.values().flat_map(triangle_multiset).collect();
+    union.sort_unstable();
+    let full_triangles = triangle_multiset(full);
+    assert!(
+        union == full_triangles,
+        "{when}: held union has {} triangles, extract_mesh {}",
+        union.len(),
+        full_triangles.len()
+    );
+
+    // Colors and normals are functions of the vertex's edge, so block
+    // meshes agree with the full mesh wherever positions coincide (seams
+    // included). Distinct edges can meet at one point; compare against
+    // every full-mesh vertex there.
+    let full_colors = full.colors.as_ref().ok_or("full mesh missing colors")?;
+    let mut full_attributes = AttributesByPosition::new();
+    for ((vertex, color), normal) in full.vertices.iter().zip(full_colors).zip(&full.normals) {
+        full_attributes
+            .entry(vertex.map(f32::to_bits))
+            .or_default()
+            .push((*color, normal.map(f32::to_bits)));
+    }
+    for mesh in held.values() {
+        let colors = mesh.colors.as_ref().ok_or("block mesh missing colors")?;
+        for ((vertex, color), normal) in mesh.vertices.iter().zip(colors).zip(&mesh.normals) {
+            let expected = full_attributes
+                .get(&vertex.map(f32::to_bits))
+                .ok_or("block vertex missing from the full mesh")?;
+            assert!(
+                expected.contains(&(*color, normal.map(f32::to_bits))),
+                "{when}: block vertex color or normal diverged from the full mesh"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn dirty_block_union_matches_full_extraction_after_every_frame() -> Result<(), Box<dyn Error>> {
     let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
-    let mut latest: HashMap<[i64; 3], Mesh> = HashMap::new();
+    let mut held = BTreeMap::new();
     let color: Vec<u8> = (0..HEIGHT * WIDTH * 3)
         .map(|index| (index % 251) as u8)
         .collect();
@@ -229,44 +274,118 @@ fn dirty_block_union_matches_full_extraction_after_every_frame() -> Result<(), B
             &DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_color(&color),
             &camera,
         )?;
-        for (key, mesh) in volume.extract_dirty_block_meshes() {
-            latest.insert(key, mesh);
-        }
+        held.extend(volume.extract_dirty_block_meshes());
+        assert_union_matches_full(&held, &volume.extract_mesh()?, &format!("frame {frame}"))?;
+    }
+    Ok(())
+}
 
-        let full = volume.extract_mesh()?;
-        let mut union_triangles: Vec<[[u32; 3]; 3]> =
-            latest.values().flat_map(triangle_multiset).collect();
-        union_triangles.sort_unstable();
-        assert_eq!(
-            union_triangles,
-            triangle_multiset(&full),
-            "per-block union diverged from full extraction at frame {frame}"
-        );
+/// Deterministic depth noise in `[-0.005, 0.005)` for pixel `index` of `frame`.
+fn depth_noise(index: usize, frame: usize) -> f32 {
+    let mut hash = (index as u64 ^ ((frame as u64 + 1) << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    hash ^= hash >> 29;
+    ((hash % 1_000) as f32 / 1_000.0 - 0.5) * 0.01
+}
 
-        // Colors and normals are functions of the vertex's edge, so block
-        // meshes agree with the full mesh wherever positions coincide (seams
-        // included). Distinct edges can meet at one point; compare against
-        // every full-mesh vertex there.
-        let full_colors = full.colors.as_ref().ok_or("full mesh missing colors")?;
-        let mut full_attributes = AttributesByPosition::new();
-        for ((vertex, color), normal) in full.vertices.iter().zip(full_colors).zip(&full.normals) {
-            full_attributes
-                .entry(vertex.map(f32::to_bits))
-                .or_default()
-                .push((*color, normal.map(f32::to_bits)));
-        }
-        for mesh in latest.values() {
-            let colors = mesh.colors.as_ref().ok_or("block mesh missing colors")?;
-            for ((vertex, color), normal) in mesh.vertices.iter().zip(colors).zip(&mesh.normals) {
-                let expected = full_attributes
-                    .get(&vertex.map(f32::to_bits))
-                    .ok_or("block vertex missing from the full mesh")?;
-                assert!(
-                    expected.contains(&(*color, normal.map(f32::to_bits))),
-                    "block vertex color or normal diverged from the full mesh at frame {frame}"
-                );
+#[test]
+fn held_meshes_follow_the_full_mesh_through_noise_eviction_and_min_weight(
+) -> Result<(), Box<dyn Error>> {
+    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let mut held = BTreeMap::new();
+    let color: Vec<u8> = (0..HEIGHT * WIDTH * 3)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    for frame in 0..40 {
+        // The camera turns away and back; noise on odd frames only, so even
+        // frames repeat earlier observations exactly.
+        let yaw = 0.06 * (frame % 20).min(20 - frame % 20) as f32;
+        let (mut depth, camera) = sphere_frame(yaw);
+        if frame % 2 == 1 {
+            for (index, value) in depth.iter_mut().enumerate() {
+                *value += depth_noise(index, frame);
             }
         }
+        volume.integrate(
+            &DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_color(&color),
+            &camera,
+        )?;
+        match frame {
+            13 | 27 => {
+                let keep = volume.block_count() * 2 / 3;
+                for key in volume.evict_farthest([0.0, 0.0, 1.7], keep) {
+                    held.remove(&key);
+                }
+            }
+            18 => volume.set_min_weight(3.0)?,
+            33 => volume.set_min_weight(1.0)?,
+            _ => {}
+        }
+        held.extend(volume.extract_dirty_block_meshes());
+        assert_union_matches_full(&held, &volume.extract_mesh()?, &format!("frame {frame}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn reaching_min_weight_delivers_the_mesh_although_no_value_changed() -> Result<(), Box<dyn Error>> {
+    let (depth, camera) = wavy_frame(0);
+    let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    volume.set_min_weight(2.0)?;
+    volume.integrate(&frame, &camera)?;
+    assert!(volume.extract_dirty_block_meshes().is_empty());
+    // The same observation again: every TSDF value stays bit for bit, but
+    // the weights reach 2.
+    volume.integrate(&frame, &camera)?;
+    let held: BTreeMap<_, _> = volume.extract_dirty_block_meshes().into_iter().collect();
+    let full = volume.extract_mesh()?;
+    assert!(!full.triangles.is_empty());
+    assert!(union_multiset(&held) == triangle_multiset(&full));
+    Ok(())
+}
+
+#[test]
+fn a_new_color_alone_delivers_recolored_meshes() -> Result<(), Box<dyn Error>> {
+    let (depth, camera) = wavy_frame(0);
+    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let mut held = BTreeMap::new();
+    for gray in [200, 40] {
+        let color = vec![gray; HEIGHT * WIDTH * 3];
+        let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_color(&color);
+        volume.integrate(&frame, &camera)?;
+        held.extend(volume.extract_dirty_block_meshes());
+        assert_union_matches_full(&held, &volume.extract_mesh()?, &format!("gray {gray}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_change_at_a_block_face_re_meshes_the_neighbor_across_it() -> Result<(), Box<dyn Error>> {
+    // A wall at depth 2 spans blocks -2..=1 on x. One pixel then sees the
+    // voxel column at local x = `local` of block 0 a little farther away:
+    // only that column changes, and the block across the nearer face reads
+    // it for its normals when `local` is 0, 1 or 15.
+    let wall_depth = vec![2.0_f32; HEIGHT * WIDTH];
+    let wall_camera = centered_camera(HEIGHT, WIDTH, Camera::IDENTITY);
+    let color = vec![128_u8; HEIGHT * WIDTH * 3];
+    for local in [0_u8, 1, 14, 15] {
+        let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+        volume.integrate(
+            &DepthFrame::new(&wall_depth, [HEIGHT, WIDTH]).with_color(&color),
+            &wall_camera,
+        )?;
+        let mut held: BTreeMap<_, _> = volume.extract_dirty_block_meshes().into_iter().collect();
+
+        let mut camera_from_world = Camera::IDENTITY;
+        camera_from_world[3] = -(f32::from(local) + 0.5) * 0.04;
+        camera_from_world[7] = -0.02;
+        let needle = Camera::pinhole([1_000.0, 1_000.0, 0.0, 0.0], camera_from_world);
+        volume.integrate(
+            &DepthFrame::new(&[2.05], [1, 1]).with_color(&[128; 3]),
+            &needle,
+        )?;
+        held.extend(volume.extract_dirty_block_meshes());
+        assert_union_matches_full(&held, &volume.extract_mesh()?, &format!("local x {local}"))?;
     }
     Ok(())
 }
@@ -465,7 +584,7 @@ fn min_weight_hides_cells_seen_too_few_times_from_every_mesh() -> Result<(), Box
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
     let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
-    let mut held: HashMap<[i64; 3], Mesh> = HashMap::new();
+    let mut held: BTreeMap<[i64; 3], Mesh> = BTreeMap::new();
     volume.set_min_weight(2.0)?;
     volume.integrate(&frame, &camera)?;
     held.extend(volume.extract_dirty_block_meshes());
@@ -515,7 +634,7 @@ fn no_delivery_repeats_the_mesh_the_consumer_already_holds() -> Result<(), Box<d
     let color: Vec<u8> = (0..HEIGHT * WIDTH * 3)
         .map(|index| (index % 251) as u8)
         .collect();
-    let mut held: HashMap<[i64; 3], Mesh> = HashMap::new();
+    let mut held: BTreeMap<[i64; 3], Mesh> = BTreeMap::new();
     let (mut delivered, mut repeated) = (0, 0);
     for frame in 0..8 {
         let (depth, camera) = wavy_frame(frame);
@@ -592,7 +711,7 @@ fn sphere_frame(yaw: f32) -> (Vec<f32>, Camera) {
 }
 
 /// The triangles of the latest mesh per block, as [`triangle_multiset`].
-fn union_multiset(latest: &HashMap<[i64; 3], Mesh>) -> Vec<[[u32; 3]; 3]> {
+fn union_multiset(latest: &BTreeMap<[i64; 3], Mesh>) -> Vec<[[u32; 3]; 3]> {
     let mut triangles: Vec<[[u32; 3]; 3]> = latest.values().flat_map(triangle_multiset).collect();
     triangles.sort_unstable();
     triangles
@@ -601,7 +720,7 @@ fn union_multiset(latest: &HashMap<[i64; 3], Mesh>) -> Vec<[[u32; 3]; 3]> {
 #[test]
 fn after_eviction_the_held_union_still_equals_the_full_mesh() -> Result<(), Box<dyn Error>> {
     let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
-    let mut held: HashMap<[i64; 3], Mesh> = HashMap::new();
+    let mut held: BTreeMap<[i64; 3], Mesh> = BTreeMap::new();
     for frame in 0..30 {
         let (depth, camera) = sphere_frame(frame as f32 * 0.03);
         volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;

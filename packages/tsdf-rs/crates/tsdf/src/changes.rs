@@ -3,7 +3,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::mesh::Mesh;
-use crate::volume::BlockKey;
+use crate::volume::{BlockKey, LocalBox, BLOCK_RESOLUTION_USIZE};
 
 /// Offsets of a block and its 26 neighbors, x fastest.
 pub(crate) const NEIGHBORHOOD: [[i64; 3]; 27] = {
@@ -28,11 +28,8 @@ pub(crate) struct ChangeTracker {
 }
 
 impl ChangeTracker {
-    /// Mark the meshes that updating `touched` blocks can change.
-    ///
-    /// A block's cells read its {0,1}^3 neighborhood and their normals one
-    /// voxel further on both sides, so updating a block stales the meshes of
-    /// itself and all 26 neighbors.
+    /// Mark the meshes that removing or replacing `touched` blocks can change:
+    /// their own and all 26 neighbors' (see [`ChangeTracker::mark_changed`]).
     pub(crate) fn mark_touched<'a>(&mut self, touched: impl IntoIterator<Item = &'a BlockKey>) {
         for key in touched {
             for offset in NEIGHBORHOOD {
@@ -44,6 +41,33 @@ impl ChangeTracker {
                 if let [Some(x), Some(y), Some(z)] = neighbor {
                     self.dirty.insert([x, y, z]);
                 }
+            }
+        }
+    }
+
+    /// Mark the meshes that a change to the `changed` voxels of block `key`
+    /// can alter.
+    ///
+    /// The mesh of block `k` reads global voxels `16 * k - 1` to
+    /// `16 * k + 17` on each axis (cell corners up to `16 * k + 16`, their
+    /// normals one voxel further), so a change at local coordinate `c` of
+    /// `key` reaches the previous block on that axis only if `c <= 1`, and
+    /// the next one only if `c >= 15`.
+    pub(crate) fn mark_changed(&mut self, key: BlockKey, changed: &LocalBox) {
+        let last = BLOCK_RESOLUTION_USIZE - 1;
+        for offset in NEIGHBORHOOD {
+            let reaches = (0..3).all(|axis| match offset[axis] {
+                -1 => changed.min[axis] <= 1,
+                1 => changed.max[axis] >= last,
+                _ => true,
+            });
+            let neighbor = [
+                key[0].checked_add(offset[0]),
+                key[1].checked_add(offset[1]),
+                key[2].checked_add(offset[2]),
+            ];
+            if let (true, [Some(x), Some(y), Some(z)]) = (reaches, neighbor) {
+                self.dirty.insert([x, y, z]);
             }
         }
     }
