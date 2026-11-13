@@ -220,7 +220,8 @@ impl TsdfVolume {
     ///
     /// An evicted block is forgotten: it is not reported by
     /// [`TsdfVolume::dirty_block_meshes`] (consumers keep or clear its last
-    /// mesh themselves), and a later frame that reaches it starts it afresh.
+    /// mesh themselves), and a later frame that reaches it starts it afresh
+    /// and delivers its mesh again.
     /// Returns the evicted keys, farthest first.
     pub fn evict_farthest(&mut self, center: [f32; 3], keep: usize) -> Vec<BlockKey> {
         if self.blocks.len() <= keep {
@@ -337,10 +338,13 @@ impl TsdfVolume {
         extract::full_mesh(&self.blocks, self.voxel_size, self.fuse_color)
     }
 
-    /// Per-block meshes of the blocks whose surface may have changed since
-    /// the last confirmed [`crate::Delivery`].
+    /// Per-block meshes of the blocks whose surface changed since the last
+    /// confirmed [`crate::Delivery`].
     ///
-    /// Each mesh holds the triangles of cells anchored in its block, with
+    /// Integration stales the meshes of the blocks it updates and of their
+    /// neighbors; a stale block whose new mesh is byte-identical to its last
+    /// confirmed one (by a 64-bit hash of positions, triangles, colors and
+    /// normals) is left out. Each mesh holds the triangles of cells anchored in its block, with
     /// vertices deduplicated within the block. The union of the latest mesh
     /// per key equals [`TsdfVolume::extract_mesh`] triangle for triangle, and
     /// a seam vertex has the same position, color and normal in every block
@@ -355,7 +359,7 @@ impl TsdfVolume {
         let meshes = extract::block_meshes(
             &keys,
             &self.blocks,
-            &self.changes.surfaced,
+            &self.changes.delivered,
             self.voxel_size,
             self.fuse_color,
             self.min_weight,

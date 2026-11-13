@@ -47,6 +47,8 @@ class TsdfVolume:
     def extract_dirty_block_meshes(self) -> list[tuple[tuple[int, int, int], _Mesh]]:
         """Per-block meshes of the blocks changed since the last call, by sorted block key.
 
+        A block whose mesh is byte-identical to the one this method last returned for it is left out.
+
         The union of the latest mesh per key equals :meth:`extract_mesh` triangle for triangle; a vertex on a block
         seam has the same position, colour and normal in every block. A block whose surface vanished comes once with
         an empty mesh; blocks that never had surface are omitted.

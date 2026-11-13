@@ -284,8 +284,25 @@ fn extract_dirty_block_meshes_drains_the_dirty_set() -> Result<(), Box<dyn Error
     assert!(first.iter().all(|(_, mesh)| !mesh.triangles.is_empty()));
     assert!(volume.extract_dirty_block_meshes().is_empty());
 
+    let (depth, camera) = wavy_frame(1);
+    volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
+    assert!(!volume.extract_dirty_block_meshes().is_empty());
+    Ok(())
+}
+
+#[test]
+fn re_integrating_an_identical_frame_delivers_nothing() -> Result<(), Box<dyn Error>> {
+    // A second identical observation leaves every running mean, and so every
+    // mesh, bit for bit as it was; only the weights grow.
+    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let (depth, camera) = wavy_frame(0);
+    let color = vec![200_u8; HEIGHT * WIDTH * 3];
+    let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_color(&color);
+
     volume.integrate(&frame, &camera)?;
     assert!(!volume.extract_dirty_block_meshes().is_empty());
+    volume.integrate(&frame, &camera)?;
+    assert_eq!(volume.extract_dirty_block_meshes(), Vec::new());
     Ok(())
 }
 
@@ -421,5 +438,80 @@ fn min_weight_hides_cells_seen_once_from_live_meshes_only() -> Result<(), Box<dy
         .map(|(_, mesh)| mesh.triangles.len())
         .sum();
     assert_eq!(live, volume.extract_mesh()?.triangles.len());
+    Ok(())
+}
+
+#[test]
+fn no_delivery_repeats_the_mesh_the_consumer_already_holds() -> Result<(), Box<dyn Error>> {
+    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let color: Vec<u8> = (0..HEIGHT * WIDTH * 3)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let mut held: HashMap<[i64; 3], Mesh> = HashMap::new();
+    let (mut delivered, mut repeated) = (0, 0);
+    for frame in 0..8 {
+        let (depth, camera) = wavy_frame(frame);
+        volume.integrate(
+            &DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_color(&color),
+            &camera,
+        )?;
+        for (key, mesh) in volume.extract_dirty_block_meshes() {
+            delivered += 1;
+            if held.get(&key) == Some(&mesh) {
+                repeated += 1;
+            }
+            held.insert(key, mesh);
+        }
+    }
+    eprintln!(
+        "wavy, 8 frames: {delivered} block meshes delivered, {repeated} identical to the held copy"
+    );
+    assert!(delivered > 0);
+    assert_eq!(repeated, 0);
+    Ok(())
+}
+
+#[test]
+fn a_vanished_surface_is_delivered_empty_once() -> Result<(), Box<dyn Error>> {
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let (depth, camera) = wavy_frame(0);
+    let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
+    volume.integrate(&frame, &camera)?;
+    let surfaced: Vec<[i64; 3]> = volume
+        .extract_dirty_block_meshes()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert!(!surfaced.is_empty());
+
+    // No voxel reaches this weight, so every live mesh empties.
+    volume.set_min_weight(10.0);
+    volume.integrate(&frame, &camera)?;
+    let emptied = volume.extract_dirty_block_meshes();
+    assert_eq!(
+        emptied.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+        surfaced
+    );
+    assert!(emptied.iter().all(|(_, mesh)| mesh.triangles.is_empty()));
+    volume.integrate(&frame, &camera)?;
+    assert_eq!(volume.extract_dirty_block_meshes(), Vec::new());
+    Ok(())
+}
+
+#[test]
+fn a_block_recreated_after_eviction_is_delivered_again() -> Result<(), Box<dyn Error>> {
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let (depth, camera) = wavy_frame(0);
+    let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
+    volume.integrate(&frame, &camera)?;
+    let first = volume.extract_dirty_block_meshes();
+    assert!(!first.is_empty());
+
+    volume.evict_farthest([0.0, 0.0, 2.0], 0);
+    assert_eq!(volume.block_count(), 0);
+    // The same frame rebuilds the same blocks with the same meshes; the
+    // consumer may have cleared them on eviction, so they come again.
+    volume.integrate(&frame, &camera)?;
+    assert_eq!(volume.extract_dirty_block_meshes(), first);
     Ok(())
 }

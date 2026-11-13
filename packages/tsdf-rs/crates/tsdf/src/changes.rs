@@ -1,6 +1,6 @@
 //! Which blocks' meshes changed since a consumer last took them.
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::mesh::Mesh;
 use crate::volume::BlockKey;
@@ -22,8 +22,9 @@ const NEIGHBORHOOD: [[i64; 3]; 27] = {
 pub(crate) struct ChangeTracker {
     /// Blocks whose mesh may have changed since the last delivery.
     dirty: FxHashSet<BlockKey>,
-    /// Blocks whose last delivered mesh had triangles.
-    pub(crate) surfaced: FxHashSet<BlockKey>,
+    /// Content hash ([`Mesh::content_hash`]) of each block's last delivered
+    /// mesh, for the blocks whose last delivered mesh had triangles.
+    pub(crate) delivered: FxHashMap<BlockKey, u64>,
 }
 
 impl ChangeTracker {
@@ -57,20 +58,24 @@ impl ChangeTracker {
     /// Drop every record of `key`, a block the volume freed.
     pub(crate) fn forget(&mut self, key: &BlockKey) {
         self.dirty.remove(key);
-        self.surfaced.remove(key);
+        self.delivered.remove(key);
     }
 
-    /// Pair `meshes` with the [`Delivery`] that records them in this tracker.
-    pub(crate) fn pending(&mut self, meshes: Vec<(BlockKey, Mesh)>) -> DirtyMeshes<'_> {
-        let surfaced = meshes
-            .iter()
-            .map(|(key, mesh)| (*key, !mesh.triangles.is_empty()))
-            .collect();
+    /// Pair `meshes`, each with its content hash, with the [`Delivery`] that
+    /// records them in this tracker.
+    pub(crate) fn pending(&mut self, meshes: Vec<(BlockKey, Mesh, u64)>) -> DirtyMeshes<'_> {
+        let (meshes, delivered) = meshes
+            .into_iter()
+            .map(|(key, mesh, hash)| {
+                let surface_hash = (!mesh.triangles.is_empty()).then_some(hash);
+                ((key, mesh), (key, surface_hash))
+            })
+            .unzip();
         DirtyMeshes {
             meshes,
             delivery: Delivery {
                 tracker: self,
-                surfaced,
+                delivered,
             },
         }
     }
@@ -95,19 +100,19 @@ pub struct DirtyMeshes<'a> {
 #[must_use = "unconfirmed meshes stay pending; call `confirm` once delivered"]
 pub struct Delivery<'a> {
     tracker: &'a mut ChangeTracker,
-    /// Each delivered block and whether its mesh has triangles.
-    surfaced: Vec<(BlockKey, bool)>,
+    /// Each delivered block and its mesh's content hash, `None` if the mesh
+    /// has no triangles.
+    delivered: Vec<(BlockKey, Option<u64>)>,
 }
 
 impl Delivery<'_> {
-    /// Remember which delivered blocks have surface and clear the dirty set.
+    /// Remember the delivered meshes and clear the dirty set.
     pub fn confirm(self) {
-        for (key, has_surface) in self.surfaced {
-            if has_surface {
-                self.tracker.surfaced.insert(key);
-            } else {
-                self.tracker.surfaced.remove(&key);
-            }
+        for (key, surface_hash) in self.delivered {
+            match surface_hash {
+                Some(hash) => self.tracker.delivered.insert(key, hash),
+                None => self.tracker.delivered.remove(&key),
+            };
         }
         self.tracker.dirty.clear();
     }

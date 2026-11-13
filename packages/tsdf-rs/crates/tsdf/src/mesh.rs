@@ -1,3 +1,7 @@
+use std::hash::Hasher;
+
+use rustc_hash::FxHasher;
+
 /// Triangle mesh of a TSDF zero level set.
 ///
 /// Positions use world units. Triangle rows hold zero-based indices into
@@ -26,6 +30,28 @@ pub struct Mesh {
     /// Per-vertex unit normals: the TSDF gradient, pointing out of the
     /// surface toward the observing cameras.
     pub normals: Vec<[f32; 3]>,
+}
+
+impl Mesh {
+    /// 64-bit FxHash of the vertex, triangle, color and normal bytes: equal
+    /// for byte-identical meshes, and different otherwise up to a hash
+    /// collision.
+    pub(crate) fn content_hash(&self) -> u64 {
+        let mut hasher = FxHasher::default();
+        hasher.write_usize(self.vertices.len());
+        hasher.write_usize(self.triangles.len());
+        let floats = self.vertices.iter().chain(&self.normals).flatten();
+        for value in floats {
+            hasher.write_u32(value.to_bits());
+        }
+        for &index in self.triangles.as_flattened() {
+            hasher.write_u32(index);
+        }
+        if let Some(colors) = &self.colors {
+            hasher.write(colors.as_flattened());
+        }
+        hasher.finish()
+    }
 }
 
 /// Fraction of the way from sample `a` to sample `b` where the linear
