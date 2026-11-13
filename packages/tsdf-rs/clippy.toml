@@ -1,0 +1,12 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+avoid-breaking-exported-api = false
+excessive-nesting-threshold = 8
+max-fn-params-bools = 1
+stack-size-threshold = 512000
+too-many-lines-threshold = 400
+disallowed-macros = ["std::dbg"]
+disallowed-methods = [
+  { path = "std::thread::spawn", reason = "Use rayon, or `std::thread::Builder` and name the thread" },
+]
+doc-valid-idents = ["..", "FxHash", "NumPy", "Open3D", "OpenCV"]

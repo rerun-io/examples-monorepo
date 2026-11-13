@@ -21,8 +21,94 @@ thiserror = "2"
 # Inherit only in member dev-dependencies.
 criterion = "0.8"
 
+# Lints adapted from rerun's reality workspace: clippy pedantic plus a curated restriction set. Run with the pinned
+# toolchain (pixi `tsdf-rs-rust-check`), so `unknown_lints = "deny"` cannot trip on a newer or older clippy.
 [workspace.lints.rust]
-unsafe_code = "warn"
+unknown_lints = "deny"
+unsafe_code = "deny"
+
+elided_lifetimes_in_paths = "warn"
+future_incompatible = { level = "warn", priority = -1 }
+missing_docs = "warn"
+nonstandard_style = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+semicolon_in_expressions_from_macros = "warn"
+trivial_numeric_casts = "warn"
+unexpected_cfgs = "deny"
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+
+trivial_casts = "allow"
+unused_qualifications = "allow"
+
+[workspace.lints.rustdoc]
+all = "warn"
+missing_crate_level_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+allow_attributes = "warn"
+branches_sharing_code = "warn"
+dbg_macro = "warn"
+debug_assert_with_mut_call = "warn"
+derive_partial_eq_without_eq = "warn"
+equatable_if_let = "warn"
+fallible_impl_from = "warn"
+float_cmp_const = "warn"
+get_unwrap = "warn"
+imprecise_flops = "warn"
+iter_on_empty_collections = "warn"
+iter_on_single_items = "warn"
+iter_over_hash_type = "warn"
+large_stack_frames = "warn"
+let_underscore_must_use = "warn"
+let_underscore_untyped = "warn"
+lossy_float_literal = "warn"
+map_err_ignore = "warn"
+missing_assert_message = "warn"
+needless_pass_by_ref_mut = "warn"
+needless_type_cast = "warn"
+nonstandard_macro_braces = "warn"
+or_fun_call = "warn"
+precedence_bits = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+return_and_then = "warn"
+set_contains_or_insert = "warn"
+single_option_map = "warn"
+str_to_string = "warn"
+suspicious_xor_used_as_pow = "warn"
+todo = "warn"
+too_long_first_doc_paragraph = "warn"
+trait_duplication_in_bounds = "warn"
+tuple_array_conversions = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unnecessary_self_imports = "warn"
+unnecessary_struct_initialization = "warn"
+unused_peekable = "warn"
+unused_rounding = "warn"
+unused_trait_names = "warn"
+unwrap_used = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+
+cast_precision_loss = "allow"
+float_cmp = "allow"
+inline_always = "allow"
+items_after_statements = "allow"
+many_single_char_names = "allow"
+map_unwrap_or = "allow"
+must_use_candidate = "allow"
+redundant_closure_for_method_calls = "allow"
+similar_names = "allow"
+too_many_arguments = "allow"
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"
 
 [profile.release]
 lto = "thin"

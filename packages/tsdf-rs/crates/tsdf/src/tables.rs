@@ -55,11 +55,12 @@ pub(crate) const EDGES: [CellEdge; 12] = [
 /// the classic table winds clockwise under this corner and sign convention,
 /// so each row is emitted as vertices 0, 2, 1.
 pub(crate) fn for_each_triangle(cube_index: u8, mut emit: impl FnMut([usize; 3])) {
-    for edges in TRI_TABLE[usize::from(cube_index)].chunks_exact(3) {
-        if edges[0] < 0 {
+    for edges in TRI_TABLE[usize::from(cube_index)].as_chunks::<3>().0 {
+        // -1 ends the row.
+        let [Ok(first), Ok(second), Ok(third)] = edges.map(usize::try_from) else {
             break;
-        }
-        emit([edges[0] as usize, edges[2] as usize, edges[1] as usize]);
+        };
+        emit([first, third, second]);
     }
 }
 
@@ -338,7 +339,7 @@ mod tests {
                 .iter()
                 .all(|&edge| edge == -1 || (0..12).contains(&edge)));
             // Triangles are whole: a row ends only at a triangle boundary.
-            for triangle in row.chunks_exact(3) {
+            for triangle in row.as_chunks::<3>().0 {
                 let terminated = triangle.iter().filter(|&&edge| edge < 0).count();
                 assert!(terminated == 0 || terminated == 3, "{row:?}");
             }
