@@ -88,18 +88,6 @@ impl WordHasher {
     }
 }
 
-/// Fraction of the way from sample `a` to sample `b` where the linear
-/// interpolant crosses zero.
-pub(crate) fn interpolation_amount(value_a: f32, value_b: f32) -> f32 {
-    if value_a == 0.0 {
-        0.0
-    } else if value_b == 0.0 {
-        1.0
-    } else {
-        value_a / (value_a - value_b)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

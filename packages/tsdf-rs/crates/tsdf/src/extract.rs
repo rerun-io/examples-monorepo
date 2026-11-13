@@ -8,16 +8,14 @@ use rustc_hash::FxHashMap;
 use crate::changes::{ChangeTracker, Pending, NEIGHBORHOOD};
 use crate::error::TsdfError;
 use crate::geometry::{add, length};
-use crate::mesh::{interpolation_amount, Mesh};
+use crate::mesh::Mesh;
 use crate::tables::{for_each_triangle, CORNERS, EDGES};
 #[cfg(test)]
 use crate::volume::MIN_BLOCK_INDEX;
 use crate::volume::{
-    checked_block_origin, checked_offset, local_index, voxel_center, voxel_index, BlockKey,
+    checked_block_origin, checked_offset, local_index, voxel_center, voxel_index, BlockKey, Blocks,
     VoxelBlock, BLOCK_RESOLUTION, BLOCK_RESOLUTION_USIZE,
 };
-
-type Blocks = FxHashMap<BlockKey, VoxelBlock>;
 
 /// A cell edge: its lower voxel and the axis to the other one.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -51,15 +49,26 @@ struct BlockMesh {
     triangles: Vec<[u32; 3]>,
 }
 
+/// What extraction reads of a volume.
+#[derive(Clone, Copy)]
+pub(crate) struct VolumeView<'a> {
+    pub(crate) blocks: &'a Blocks,
+    pub(crate) voxel_size: f32,
+    pub(crate) fuse_color: bool,
+    /// Cells with a corner fused fewer times are left out.
+    pub(crate) min_weight: f32,
+}
+
 /// Full extraction: blocks mesh in parallel, then a sequential merge in
 /// sorted block order joins vertices on block seams. The vertex order is the
 /// first-seen order of the whole sorted triangle stream.
-pub(crate) fn full_mesh(
-    blocks: &Blocks,
-    voxel_size: f32,
-    fuse_color: bool,
-    min_weight: f32,
-) -> Result<Mesh, TsdfError> {
+pub(crate) fn full_mesh(volume: &VolumeView<'_>) -> Result<Mesh, TsdfError> {
+    let VolumeView {
+        blocks,
+        voxel_size,
+        fuse_color,
+        min_weight,
+    } = *volume;
     let mut keys: Vec<BlockKey> = blocks.keys().copied().collect();
     keys.sort_unstable();
     let block_meshes: Vec<BlockMesh> = keys
@@ -133,16 +142,14 @@ pub(crate) fn full_mesh(
 /// Meshes of `keys` (sorted) that differ from the block's last delivered
 /// mesh in `changes`.
 pub(crate) fn block_meshes(
+    volume: &VolumeView<'_>,
     keys: &[BlockKey],
-    blocks: &Blocks,
     changes: &ChangeTracker,
-    voxel_size: f32,
-    fuse_color: bool,
-    min_weight: f32,
 ) -> Vec<Pending> {
+    let blocks = volume.blocks;
     keys.par_iter()
         .map_init(MeshScratch::new, |scratch, &key| {
-            let block = block_mesh(key, blocks, min_weight, scratch);
+            let block = block_mesh(key, blocks, volume.min_weight, scratch);
             let last = changes.last_surface_hash(&key);
             // Report empty meshes only on the surfaced -> empty transition, so
             // surface-less shell blocks are not re-announced every extraction.
@@ -152,8 +159,8 @@ pub(crate) fn block_meshes(
             // Block jobs already run in parallel: attributes sequentially,
             // through the block's neighborhood.
             let mesh = match Neighborhood::new(key, blocks) {
-                Some(voxels) => block_attributes(block, &voxels, voxel_size, fuse_color),
-                None => block_attributes(block, blocks, voxel_size, fuse_color),
+                Some(voxels) => block_attributes(block, &voxels, volume),
+                None => block_attributes(block, blocks, volume),
             };
             // A dirty block's mesh is often unchanged (its neighbor was
             // touched, not it): leave out what the consumer already holds.
@@ -169,12 +176,12 @@ pub(crate) fn block_meshes(
 }
 
 /// Positions, colors and normals of a block's vertices, computed in order.
-fn block_attributes(
-    block: BlockMesh,
-    voxels: &impl Voxels,
-    voxel_size: f32,
-    fuse_color: bool,
-) -> Mesh {
+fn block_attributes(block: BlockMesh, voxels: &impl Voxels, volume: &VolumeView<'_>) -> Mesh {
+    let VolumeView {
+        voxel_size,
+        fuse_color,
+        ..
+    } = *volume;
     let positions: Vec<[f32; 3]> = block
         .vertices
         .iter()
@@ -369,6 +376,18 @@ fn gather_corners(neighbors: &[Option<&VoxelBlock>; 8], min_weight: f32, corners
     }
 }
 
+/// Fraction of the way from sample `a` to sample `b` where the linear
+/// interpolant crosses zero.
+pub(crate) fn interpolation_amount(value_a: f32, value_b: f32) -> f32 {
+    if value_a == 0.0 {
+        0.0
+    } else if value_b == 0.0 {
+        1.0
+    } else {
+        value_a / (value_a - value_b)
+    }
+}
+
 /// Whether cells outside the block at `origin` also contain `edge`: cells
 /// anchored at `base - {0,1}` across the edge axis and at `base` along it.
 fn on_block_seam(edge: EdgeKey, origin: [i64; 3]) -> bool {
@@ -545,6 +564,15 @@ fn checked_coordinate(values: [f64; 3]) -> Option<[i64; 3]> {
 mod tests {
     use super::*;
 
+    fn view(blocks: &Blocks) -> VolumeView<'_> {
+        VolumeView {
+            blocks,
+            voxel_size: 0.04,
+            fuse_color: false,
+            min_weight: 0.0,
+        }
+    }
+
     #[test]
     fn a_cell_with_a_nan_corner_is_unobserved() {
         let mut block = VoxelBlock::new(false);
@@ -558,7 +586,7 @@ mod tests {
         let mut blocks = Blocks::default();
         blocks.insert([0, 0, 0], block);
 
-        let mesh = full_mesh(&blocks, 0.04, false, 0.0).expect("small mesh");
+        let mesh = full_mesh(&view(&blocks)).expect("small mesh");
 
         assert!(mesh.vertices.is_empty());
         assert!(mesh.triangles.is_empty());
@@ -575,7 +603,7 @@ mod tests {
         blocks.insert([MIN_BLOCK_INDEX; 3], block);
 
         // The normals read one voxel below the block's first voxel.
-        let mesh = full_mesh(&blocks, 0.04, false, 0.0).expect("small mesh");
+        let mesh = full_mesh(&view(&blocks)).expect("small mesh");
 
         assert_eq!(mesh.triangles.len(), 1);
     }

@@ -3,7 +3,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::changes::{ChangeTracker, DirtyMeshes};
 use crate::error::TsdfError;
-use crate::extract;
+use crate::extract::{self, VolumeView};
 use crate::frame::{Camera, DepthFrame, DepthRange};
 use crate::geometry::{
     add, add_scaled, camera_to_world, checked_floor_i64, invert_3x3, length, multiply_3x3,
@@ -24,6 +24,9 @@ const MAX_BLOCK_INDEX: i64 = (i64::MAX - BLOCK_RESOLUTION) / BLOCK_RESOLUTION;
 /// Integer index of a 16-by-16-by-16 voxel block: block `k` holds global voxel
 /// coordinates `16 * k` to `16 * k + 15` on each axis.
 pub type BlockKey = [i64; 3];
+
+/// The allocated blocks by key.
+pub(crate) type Blocks = FxHashMap<BlockKey, VoxelBlock>;
 
 #[derive(Clone, Copy)]
 struct PixelRay {
@@ -183,7 +186,7 @@ pub struct TsdfVolume {
     voxel_size: f32,
     sdf_trunc: f32,
     fuse_color: bool,
-    blocks: FxHashMap<BlockKey, VoxelBlock>,
+    blocks: Blocks,
     changes: ChangeTracker,
     ray_cache: Option<RayCache>,
     max_blocks: Option<usize>,
@@ -209,7 +212,7 @@ impl TsdfVolume {
             voxel_size,
             sdf_trunc,
             fuse_color,
-            blocks: FxHashMap::default(),
+            blocks: Blocks::default(),
             changes: ChangeTracker::default(),
             ray_cache: None,
             max_blocks: None,
@@ -388,19 +391,15 @@ impl TsdfVolume {
     ///
     /// [`TsdfError::VertexIndexOverflow`] if the mesh exceeds 32-bit indices.
     pub fn extract_mesh(&self) -> Result<Mesh, TsdfError> {
-        extract::full_mesh(
-            &self.blocks,
-            self.voxel_size,
-            self.fuse_color,
-            self.min_weight,
-        )
+        extract::full_mesh(&self.view())
     }
 
     /// Per-block meshes of the blocks whose surface changed since the last
     /// confirmed [`crate::Delivery`].
     ///
-    /// Integration stales the meshes of the blocks it updates and of their
-    /// neighbors; a stale block whose new mesh is byte-identical to its last
+    /// Integration stales the meshes that its voxel changes can alter (the
+    /// changed blocks' own, and their neighbors' across the faces the changes
+    /// reach); a stale block whose new mesh is byte-identical to its last
     /// confirmed one (by a 64-bit hash of positions, triangles, colors and
     /// normals) is left out. Each mesh holds the triangles of cells anchored in its block, with
     /// vertices deduplicated within the block. The union of the latest mesh
@@ -414,15 +413,17 @@ impl TsdfVolume {
     /// delivery instead to get them again from the next call.
     pub fn dirty_block_meshes(&mut self) -> DirtyMeshes<'_> {
         let keys = self.changes.dirty_keys(|key| self.blocks.contains_key(key));
-        let meshes = extract::block_meshes(
-            &keys,
-            &self.blocks,
-            &self.changes,
-            self.voxel_size,
-            self.fuse_color,
-            self.min_weight,
-        );
+        let meshes = extract::block_meshes(&self.view(), &keys, &self.changes);
         self.changes.pending(meshes)
+    }
+
+    fn view(&self) -> VolumeView<'_> {
+        VolumeView {
+            blocks: &self.blocks,
+            voxel_size: self.voxel_size,
+            fuse_color: self.fuse_color,
+            min_weight: self.min_weight,
+        }
     }
 
     /// [`TsdfVolume::dirty_block_meshes`], confirmed at once.
