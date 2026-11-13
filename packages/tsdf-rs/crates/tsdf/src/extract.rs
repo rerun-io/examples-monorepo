@@ -14,7 +14,7 @@ use crate::tables::{for_each_triangle, CORNERS, EDGES};
 use crate::volume::MIN_BLOCK_INDEX;
 use crate::volume::{
     checked_block_origin, checked_offset, local_index, voxel_center, voxel_index, BlockKey, Blocks,
-    VoxelBlock, BLOCK_RESOLUTION, BLOCK_RESOLUTION_USIZE,
+    VoxelBlock, BLOCK_RESOLUTION, BLOCK_RESOLUTION_U16, BLOCK_RESOLUTION_USIZE,
 };
 
 /// A cell edge: its lower voxel and the axis to the other one.
@@ -91,10 +91,11 @@ pub(crate) fn full_mesh(volume: &VolumeView<'_>) -> Result<Mesh, TsdfError> {
     for block in block_meshes {
         remap.clear();
         for vertex in block.vertices {
-            let next =
-                u32::try_from(vertices.len()).map_err(|_| TsdfError::VertexIndexOverflow {
+            let next = u32::try_from(vertices.len()).map_err(|_overflow| {
+                TsdfError::VertexIndexOverflow {
                     vertex_count: vertices.len(),
-                })?;
+                }
+            })?;
             let index = if vertex.on_seam {
                 match seams.entry(vertex.edge) {
                     Entry::Occupied(entry) => *entry.get(),
@@ -214,14 +215,16 @@ fn vertex_position(vertex: &EdgeVertex, voxel_size: f32) -> [f32; 3] {
     position
 }
 
-/// [`BLOCK_RESOLUTION`] as a loop counter that converts losslessly to `usize` and `i64`.
-const BLOCK_RESOLUTION_U16: u16 = BLOCK_RESOLUTION_USIZE as u16;
-
 /// Voxels per axis that a block's cells read: its own and the first of the next block.
 const SPAN: usize = BLOCK_RESOLUTION_USIZE + 1;
 
 /// Offsets of the cell corners, in [`CORNERS`] order, in a [`SPAN`]-cubed
 /// array laid out x fastest.
+#[expect(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "offsets are 0 or 1"
+)]
 const CORNER_OFFSETS: [usize; 8] = {
     let mut offsets = [0; 8];
     let mut corner = 0;
@@ -235,6 +238,11 @@ const CORNER_OFFSETS: [usize; 8] = {
 
 /// Offsets of the twelve cell edges, in [`EDGES`] order, among the vertex
 /// slots of a block: three per voxel of a [`SPAN`]-cubed array (one per axis).
+#[expect(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "offsets are 0 or 1"
+)]
 const EDGE_SLOT_OFFSETS: [usize; 12] = {
     let mut offsets = [0; 12];
     let mut edge = 0;
@@ -267,6 +275,7 @@ impl MeshScratch {
         Self {
             corners: vec![f32::NAN; SPAN * SPAN * SPAN],
             vertex_slots: vec![NO_VERTEX; SPAN * SPAN * SPAN * 3],
+            // About one block's vertices.
             used_slots: Vec::with_capacity(512),
         }
     }
@@ -294,6 +303,7 @@ fn block_mesh(
         vertex_slots,
         used_slots,
     } = scratch;
+    // A block crossed by one smooth surface holds a few hundred of each.
     let mut mesh = BlockMesh {
         vertices: Vec::with_capacity(256),
         triangles: Vec::with_capacity(512),
@@ -326,8 +336,12 @@ fn block_mesh(
                                 axis: edge.axis,
                             };
                             let [start, end] = edge.corners;
-                            // A block has fewer than 3 * 17^3 edges.
-                            vertex_slots[slot] = mesh.vertices.len() as u32;
+                            #[expect(
+                                clippy::cast_possible_truncation,
+                                reason = "a block has fewer than 3 * 17^3 edges"
+                            )]
+                            let index = mesh.vertices.len() as u32;
+                            vertex_slots[slot] = index;
                             used_slots.push(slot);
                             mesh.vertices.push(EdgeVertex {
                                 edge: key,
@@ -365,11 +379,13 @@ fn gather_corners(neighbors: &[Option<&VoxelBlock>; 8], min_weight: f32, corners
             let row = (z * SPAN + y) * SPAN;
             for x in 0..SPAN {
                 let (block_x, local_x) = split(x);
-                let value = neighbors[block_x | block_y << 1 | block_z << 2].and_then(|block| {
-                    let index = voxel_index([local_x, local_y, local_z]);
-                    let (value, weight) = (block.tsdf[index], block.weights[index]);
-                    (weight != 0.0 && weight >= min_weight && value.is_finite()).then_some(value)
-                });
+                let value =
+                    neighbors[block_x | (block_y << 1) | (block_z << 2)].and_then(|block| {
+                        let index = voxel_index([local_x, local_y, local_z]);
+                        let (value, weight) = (block.tsdf[index], block.weights[index]);
+                        (weight != 0.0 && weight >= min_weight && value.is_finite())
+                            .then_some(value)
+                    });
                 corners[row + x] = value.unwrap_or(f32::NAN);
             }
         }
@@ -393,7 +409,7 @@ pub(crate) fn interpolation_amount(value_a: f32, value_b: f32) -> f32 {
 fn on_block_seam(edge: EdgeKey, origin: [i64; 3]) -> bool {
     (0..3).any(|axis| {
         let local = edge.base[axis] - origin[axis];
-        let first = if axis == usize::from(edge.axis) { 0 } else { 1 };
+        let first = i64::from(axis != usize::from(edge.axis));
         !(first..BLOCK_RESOLUTION).contains(&local)
     })
 }
@@ -401,7 +417,7 @@ fn on_block_seam(edge: EdgeKey, origin: [i64; 3]) -> bool {
 /// The 2x2x2 blocks a block's cells read: `key + (i & 1, i >> 1 & 1, i >> 2 & 1)`.
 fn neighbor_blocks(key: BlockKey, blocks: &Blocks) -> [Option<&VoxelBlock>; 8] {
     std::array::from_fn(|index| {
-        let offset = [index & 1, (index >> 1) & 1, (index >> 2) & 1].map(|bit| bit as i64);
+        let offset: [i64; 3] = std::array::from_fn(|axis| i64::from((index >> axis) & 1 == 1));
         blocks.get(&checked_offset(key, offset)?)
     })
 }
@@ -472,6 +488,11 @@ impl Voxels for Neighborhood<'_> {
             return self.all.voxel(coordinate);
         }
         let [x, y, z] = relative.map(|value| value / BLOCK_RESOLUTION);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "each block offset is in 0..3"
+        )]
         let block = self.blocks[(x + 3 * y + 9 * z) as usize]?;
         Some((
             block,
@@ -548,6 +569,11 @@ fn nearest_color(position: [f32; 3], voxels: &impl Voxels, voxel_size: f32) -> [
         .voxel(coordinate)
         .and_then(|(block, index)| Some((block.color.as_ref()?, index)))
         .map_or([0; 3], |(color, index)| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "rounded and clamped to 0..=255"
+            )]
             color.rgb[index].map(|value| value.round().clamp(0.0, 255.0) as u8)
         })
 }

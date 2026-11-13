@@ -58,22 +58,22 @@ impl WordHasher {
 
     /// Two values per word.
     fn write_u32s(&mut self, values: &[u32]) {
-        let mut pairs = values.chunks_exact(2);
-        for pair in &mut pairs {
-            self.write_word(u64::from(pair[0]) | (u64::from(pair[1]) << 32));
+        let (pairs, rest) = values.as_chunks::<2>();
+        for [low, high] in pairs {
+            self.write_word(u64::from(*low) | (u64::from(*high) << 32));
         }
-        if let [last] = pairs.remainder() {
+        if let [last] = rest {
             self.write_word(u64::from(*last));
         }
     }
 
     /// The bit patterns of `values`, two per word.
     fn write_floats(&mut self, values: &[f32]) {
-        let mut pairs = values.chunks_exact(2);
-        for pair in &mut pairs {
-            self.write_word(u64::from(pair[0].to_bits()) | (u64::from(pair[1].to_bits()) << 32));
+        let (pairs, rest) = values.as_chunks::<2>();
+        for [low, high] in pairs {
+            self.write_word(u64::from(low.to_bits()) | (u64::from(high.to_bits()) << 32));
         }
-        if let [last] = pairs.remainder() {
+        if let [last] = rest {
             self.write_word(u64::from(last.to_bits()));
         }
     }

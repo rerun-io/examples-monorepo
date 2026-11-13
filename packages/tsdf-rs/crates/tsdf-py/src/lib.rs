@@ -7,8 +7,8 @@
 
 use numpy::ndarray::Dimension;
 use numpy::{
-    Element, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray, PyReadonlyArray2,
-    PyReadonlyArray3, PyUntypedArrayMethods,
+    Element, PyArray1, PyArray2, PyArrayMethods as _, PyReadonlyArray, PyReadonlyArray2,
+    PyReadonlyArray3, PyUntypedArrayMethods as _,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -34,11 +34,19 @@ impl PyTsdfVolume {
     #[new]
     #[pyo3(signature = (voxel_size, sdf_trunc, fuse_color))]
     fn new(voxel_size: f32, sdf_trunc: f32, fuse_color: bool) -> PyResult<Self> {
-        let inner = TsdfVolume::new(voxel_size, sdf_trunc, fuse_color).map_err(value_error)?;
+        let inner = TsdfVolume::new(voxel_size, sdf_trunc, fuse_color)
+            .map_err(|error| value_error(&error))?;
         Ok(Self { inner })
     }
 
-    #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[expect(
+        non_snake_case,
+        reason = "K_33 and cam_T_world_44 are the documented keyword names"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "PyO3 extracts arguments by value"
+    )]
     #[pyo3(signature = (
         depth_hw, K_33, cam_T_world_44, color_hw3=None, *, min_depth=0.0, max_depth=f32::INFINITY
     ))]
@@ -76,12 +84,14 @@ impl PyTsdfVolume {
         };
         let volume = &mut self.inner;
         py.detach(|| volume.integrate(&frame, &camera))
-            .map_err(value_error)
+            .map_err(|error| value_error(&error))
     }
 
     fn extract_mesh<'py>(&self, py: Python<'py>) -> PyResult<PyMesh<'py>> {
         let volume = &self.inner;
-        let mesh = py.detach(|| volume.extract_mesh()).map_err(value_error)?;
+        let mesh = py
+            .detach(|| volume.extract_mesh())
+            .map_err(|error| value_error(&error))?;
         mesh_to_numpy(py, mesh)
     }
 
@@ -92,7 +102,7 @@ impl PyTsdfVolume {
         // so the meshes stay pending and the call can be retried.
         let converted = meshes
             .into_iter()
-            .map(|([x, y, z], mesh)| Ok(((x, y, z), mesh_to_numpy(py, mesh)?)))
+            .map(|(key, mesh)| Ok((key.into(), mesh_to_numpy(py, mesh)?)))
             .collect::<PyResult<PyBlockMeshes<'py>>>()?;
         delivery.confirm();
         Ok(converted)
@@ -113,7 +123,7 @@ fn contiguous<'a, T: Element, D: Dimension>(
     if !array.is_c_contiguous() {
         return Err(refused());
     }
-    array.as_slice().map_err(|_| refused())
+    array.as_slice().map_err(|_not_contiguous| refused())
 }
 
 fn check_shape<T: Element, D: Dimension>(
@@ -139,7 +149,7 @@ fn matrix<const N: usize>(array: &PyReadonlyArray2<'_, f32>, name: &str) -> PyRe
     // The shape check fixed the length.
     values
         .try_into()
-        .map_err(|_| PyValueError::new_err(format!("{name} must hold {N} values")))
+        .map_err(|_wrong_length| PyValueError::new_err(format!("{name} must hold {N} values")))
 }
 
 fn rows<T: Element, const C: usize>(
@@ -159,7 +169,7 @@ fn mesh_to_numpy(py: Python<'_>, mesh: Mesh) -> PyResult<PyMesh<'_>> {
     ))
 }
 
-fn value_error(error: TsdfError) -> PyErr {
+fn value_error(error: &TsdfError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 

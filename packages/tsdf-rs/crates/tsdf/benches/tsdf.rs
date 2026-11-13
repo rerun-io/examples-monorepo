@@ -77,19 +77,19 @@ fn tsdf(c: &mut Criterion) {
 
     // 200 integrations into a fresh volume; divide by 200 for the per-frame cost.
     group.bench_function("integrate_all_frames", |b| {
-        b.iter(|| fused(black_box(&depth), black_box(&cameras)))
+        b.iter(|| fused(black_box(&depth), black_box(&cameras)));
     });
     // The live loop: integrate a frame, then take and confirm the meshes it
     // changed, for all 200 frames into a fresh volume.
     group.bench_function("live_integrate_and_extract_dirty_all_frames", |b| {
-        b.iter(|| live(black_box(&depth), black_box(&cameras)))
+        b.iter(|| live(black_box(&depth), black_box(&cameras)));
     });
     let mut volume = fused(&depth, &cameras);
     group.bench_function("extract_mesh", |b| {
-        b.iter(|| volume.extract_mesh().expect("mesh"))
+        b.iter(|| volume.extract_mesh().expect("mesh"));
     });
     group.bench_function("dirty_block_meshes_all_blocks", |b| {
-        b.iter(|| volume.dirty_block_meshes().meshes)
+        b.iter(|| volume.dirty_block_meshes().meshes);
     });
     group.finish();
 }

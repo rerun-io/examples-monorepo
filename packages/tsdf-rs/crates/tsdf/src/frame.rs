@@ -66,7 +66,7 @@ impl Default for DepthRange {
 }
 
 impl DepthRange {
-    pub(crate) fn validate(&self) -> Result<(), TsdfError> {
+    pub(crate) fn validate(self) -> Result<(), TsdfError> {
         validate_non_negative("min_depth", self.min)?;
         if self.max.is_nan() || self.max < self.min {
             return Err(TsdfError::InvalidParameter {
@@ -80,7 +80,7 @@ impl DepthRange {
 
     /// Whether `depth` is a valid sample inside the range.
     #[inline]
-    pub(crate) fn contains(&self, depth: f32) -> bool {
+    pub(crate) fn contains(self, depth: f32) -> bool {
         depth > 0.0 && depth.is_finite() && depth >= self.min && depth <= self.max
     }
 }
@@ -125,6 +125,7 @@ impl<'a> DepthFrame<'a> {
     }
 
     /// The same frame with RGB bytes per pixel.
+    #[must_use]
     pub fn with_color(self, color: &'a [u8]) -> Self {
         Self {
             color: Some(color),
@@ -133,6 +134,7 @@ impl<'a> DepthFrame<'a> {
     }
 
     /// The same frame integrating only depths inside `depth_range`.
+    #[must_use]
     pub fn with_depth_range(self, depth_range: DepthRange) -> Self {
         Self {
             depth_range,

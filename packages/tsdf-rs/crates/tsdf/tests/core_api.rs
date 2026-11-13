@@ -1,3 +1,6 @@
+//! The public API: integration, full and per-block extraction, delivery,
+//! the block budget, eviction and `min_weight`.
+
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 
@@ -21,9 +24,7 @@ fn new_volume(fuse_color: bool) -> Result<TsdfVolume, TsdfError> {
 
 /// RGB bytes for a `HEIGHT` x `WIDTH` frame that differ from pixel to pixel.
 fn ramp_color() -> Vec<u8> {
-    (0..HEIGHT * WIDTH * 3)
-        .map(|index| (index % 251) as u8)
-        .collect()
+    (0..=250).cycle().take(HEIGHT * WIDTH * 3).collect()
 }
 
 /// `run` on a Rayon pool of `threads` threads.
@@ -374,7 +375,10 @@ fn reaching_min_weight_delivers_the_mesh_although_no_value_changed() -> Result<(
     let held: BTreeMap<_, _> = volume.extract_dirty_block_meshes().into_iter().collect();
     let full = volume.extract_mesh()?;
     assert!(!full.triangles.is_empty());
-    assert!(union_multiset(&held) == triangle_multiset(&full));
+    assert!(
+        union_multiset(&held) == triangle_multiset(&full),
+        "held union differs from extract_mesh"
+    );
     Ok(())
 }
 

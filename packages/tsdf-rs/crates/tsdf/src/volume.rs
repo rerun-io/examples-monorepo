@@ -11,10 +11,14 @@ use crate::geometry::{
 };
 use crate::mesh::Mesh;
 
-pub(crate) const BLOCK_RESOLUTION: i64 = 16;
-pub(crate) const BLOCK_RESOLUTION_USIZE: usize = BLOCK_RESOLUTION as usize;
+/// Voxels per block edge, as a loop counter that converts losslessly to
+/// `usize` and `i64`.
+pub(crate) const BLOCK_RESOLUTION_U16: u16 = 16;
+pub(crate) const BLOCK_RESOLUTION: i64 = BLOCK_RESOLUTION_U16 as i64;
+pub(crate) const BLOCK_RESOLUTION_USIZE: usize = BLOCK_RESOLUTION_U16 as usize;
 const BLOCK_VOXEL_COUNT: usize =
     BLOCK_RESOLUTION_USIZE * BLOCK_RESOLUTION_USIZE * BLOCK_RESOLUTION_USIZE;
+/// Pixels per discovery task: enough to amortize a task's block set.
 const DISCOVERY_CHUNK_PIXELS: usize = 2_048;
 /// Lowest block index: one block above `i64::MIN / 16`, so the gradient one
 /// voxel below a block's first voxel stays inside `i64`.
@@ -126,6 +130,11 @@ pub(crate) fn voxel_index([x, y, z]: [usize; 3]) -> usize {
 }
 
 /// [`voxel_index`] of a block-local coordinate held as `i64` (each in `0..16`).
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "block-local coordinates are in 0..16"
+)]
 pub(crate) fn local_index(local: [i64; 3]) -> usize {
     voxel_index(local.map(|coordinate| coordinate as usize))
 }
@@ -160,6 +169,21 @@ pub(crate) fn voxel_center(coordinate: [i64; 3], voxel_size: f32) -> [f32; 3] {
 /// `observation`.
 fn running_mean(mean: f32, weight: f32, observation: f32) -> f32 {
     (mean * weight + observation) / (weight + 1.0)
+}
+
+impl std::fmt::Debug for TsdfVolume {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TsdfVolume")
+            .field("voxel_size", &self.voxel_size)
+            .field("sdf_trunc", &self.sdf_trunc)
+            .field("fuse_color", &self.fuse_color)
+            .field("block_count", &self.blocks.len())
+            .field("max_blocks", &self.max_blocks)
+            .field("budget_reached", &self.budget_reached)
+            .field("min_weight", &self.min_weight)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Sparse, unbounded truncated signed-distance volume.
@@ -473,6 +497,7 @@ fn discover_touched_blocks(context: &FrameContext<'_>) -> FxHashSet<BlockKey> {
         .zip(context.rays.par_chunks(DISCOVERY_CHUNK_PIXELS))
         .map(|(depth_chunk, ray_chunk)| {
             let mut local = FxHashSet::default();
+            // A chunk of neighboring pixels covers a few dozen blocks.
             local.reserve(32);
             let mut previous = None;
             for (&depth, ray) in depth_chunk.iter().zip(ray_chunk) {
@@ -543,10 +568,8 @@ impl LocalBox {
     fn include(changed: &mut Option<Self>, local: [usize; 3]) {
         match changed {
             Some(bounds) => {
-                for axis in 0..3 {
-                    bounds.min[axis] = bounds.min[axis].min(local[axis]);
-                    bounds.max[axis] = bounds.max[axis].max(local[axis]);
-                }
+                bounds.min = std::array::from_fn(|axis| bounds.min[axis].min(local[axis]));
+                bounds.max = std::array::from_fn(|axis| bounds.max[axis].max(local[axis]));
             }
             None => {
                 *changed = Some(Self {
@@ -712,6 +735,11 @@ fn integrate_voxel(
 /// pixels, if inside, without the libm `round` call: in `f64`, `x + 0.5`
 /// never rounds across an integer for an `f32` `x`, so truncating it rounds.
 #[inline]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "positive here; the cast saturates and the bound rejects what it clamps"
+)]
 fn nearest_pixel(x: f32, size: usize) -> Option<usize> {
     let shifted = f64::from(x) + 0.5;
     // round() sends x <= -0.5 below zero; the cast saturates infinity, which
@@ -754,6 +782,11 @@ mod tests {
     }
 
     /// The selection of the original `round()` rule.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a finite pixel inside 0..size"
+    )]
     fn rounded(x: f32, size: usize) -> Option<usize> {
         let r = x.round();
         (r.is_finite() && r >= 0.0 && r < size as f32).then_some(r as usize)

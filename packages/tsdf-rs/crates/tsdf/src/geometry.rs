@@ -80,6 +80,10 @@ pub(crate) fn add_scaled(base: [f32; 3], step: [f32; 3], amount: f32) -> [f32; 3
 }
 
 /// `value` truncated toward zero, when finite and inside the `i64` range.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the range is checked first"
+)]
 pub(crate) fn checked_trunc_i64(value: f64) -> Option<i64> {
     // -(i64::MIN as f64) is 2^63, the first value past i64::MAX.
     (value.is_finite() && value >= i64::MIN as f64 && value < -(i64::MIN as f64))
@@ -151,6 +155,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "values inside the i64 range"
+    )]
     fn checked_floor_matches_floor_inside_the_range() {
         for value in [
             -2.5, -2.0, -1e-9, -0.0, 0.0, 0.5, 3.0, 3.75, -9.2e18, 9.2e18,

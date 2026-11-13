@@ -8,11 +8,11 @@ use crate::volume::{checked_offset, BlockKey, LocalBox, BLOCK_RESOLUTION_USIZE};
 /// Offsets of a block and its 26 neighbors, x fastest.
 pub(crate) const NEIGHBORHOOD: [[i64; 3]; 27] = {
     let mut offsets = [[0; 3]; 27];
-    let mut index = 0;
+    let (mut index, mut i) = (0, 0_i64);
     while index < 27 {
-        let i = index as i64;
         offsets[index] = [i % 3 - 1, i / 3 % 3 - 1, i / 9 - 1];
         index += 1;
+        i += 1;
     }
     offsets
 };
