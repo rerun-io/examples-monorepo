@@ -219,9 +219,11 @@ impl TsdfVolume {
     /// until at most `keep` remain, and clear [`TsdfVolume::budget_reached`].
     ///
     /// An evicted block is forgotten: it is not reported by
-    /// [`TsdfVolume::dirty_block_meshes`] (consumers keep or clear its last
-    /// mesh themselves), and a later frame that reaches it starts it afresh
-    /// and delivers its mesh again.
+    /// [`TsdfVolume::dirty_block_meshes`] (consumers clear its last mesh
+    /// themselves), and a later frame that reaches it starts it afresh and
+    /// delivers its mesh again. Kept neighbors of an evicted block are
+    /// re-meshed: their cells and normals read its voxels, so their next
+    /// meshes leave those out.
     /// Returns the evicted keys, farthest first.
     pub fn evict_farthest(&mut self, center: [f32; 3], keep: usize) -> Vec<BlockKey> {
         if self.blocks.len() <= keep {
@@ -245,6 +247,8 @@ impl TsdfVolume {
             .take(self.blocks.len() - keep)
             .map(|(_, key)| key)
             .collect();
+        // Freed keys are dropped from the dirty set below; the kept neighbors stay dirty.
+        self.changes.mark_touched(&evicted);
         for key in &evicted {
             self.blocks.remove(key);
             self.changes.forget(key);

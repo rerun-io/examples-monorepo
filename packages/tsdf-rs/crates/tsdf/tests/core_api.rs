@@ -498,6 +498,70 @@ fn a_vanished_surface_is_delivered_empty_once() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// A sphere of radius 1.7 around the camera, which turns by `yaw` radians.
+fn sphere_frame(yaw: f32) -> (Vec<f32>, Camera) {
+    let camera = centered_camera(HEIGHT, WIDTH, Camera::IDENTITY);
+    let [focal, principal_x, principal_y] = [
+        camera.intrinsics[0],
+        camera.intrinsics[2],
+        camera.intrinsics[5],
+    ];
+    let depth = (0..HEIGHT * WIDTH)
+        .map(|index| {
+            let x = ((index % WIDTH) as f32 - principal_x) / focal;
+            let y = ((index / WIDTH) as f32 - principal_y) / focal;
+            1.7 / (x * x + y * y + 1.0).sqrt()
+        })
+        .collect();
+    let (sin, cos) = yaw.sin_cos();
+    #[rustfmt::skip]
+    let camera_from_world = [
+        cos, 0.0, -sin, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        sin, 0.0, cos, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    (depth, centered_camera(HEIGHT, WIDTH, camera_from_world))
+}
+
+/// The triangles of the latest mesh per block, as [`triangle_multiset`].
+fn union_multiset(latest: &HashMap<[i64; 3], Mesh>) -> Vec<[[u32; 3]; 3]> {
+    let mut triangles: Vec<[[u32; 3]; 3]> = latest.values().flat_map(triangle_multiset).collect();
+    triangles.sort_unstable();
+    triangles
+}
+
+#[test]
+fn after_eviction_the_held_union_still_equals_the_full_mesh() -> Result<(), Box<dyn Error>> {
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut held: HashMap<[i64; 3], Mesh> = HashMap::new();
+    for frame in 0..30 {
+        let (depth, camera) = sphere_frame(frame as f32 * 0.03);
+        volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
+        held.extend(volume.extract_dirty_block_meshes());
+    }
+    let count = volume.block_count();
+    let evicted = volume.evict_farthest([0.0, 0.0, 1.7], count * 2 / 3);
+    assert!(!evicted.is_empty());
+    // The consumer clears evicted blocks; the kept neighbors' meshes lose
+    // the cells that read the evicted voxels and come again.
+    for key in &evicted {
+        held.remove(key);
+    }
+    held.extend(volume.extract_dirty_block_meshes());
+    let (union, full) = (
+        union_multiset(&held),
+        triangle_multiset(&volume.extract_mesh()?),
+    );
+    assert!(
+        union == full,
+        "held union has {} triangles, extract_mesh {}",
+        union.len(),
+        full.len()
+    );
+    Ok(())
+}
+
 #[test]
 fn a_block_recreated_after_eviction_is_delivered_again() -> Result<(), Box<dyn Error>> {
     let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
