@@ -420,6 +420,18 @@ fn eviction_frees_the_farthest_blocks_and_forgets_them() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn eviction_clears_the_budget_flag_even_when_nothing_is_evicted() -> Result<(), Box<dyn Error>> {
+    let (depth, camera) = wavy_frame(0);
+    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    volume.set_max_blocks(Some(3));
+    volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
+    assert!(volume.budget_reached());
+    assert!(volume.evict_farthest([0.0, 0.0, 2.0], 3).is_empty());
+    assert!(!volume.budget_reached());
+    Ok(())
+}
+
+#[test]
 fn min_weight_hides_cells_seen_once_from_live_meshes_only() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);

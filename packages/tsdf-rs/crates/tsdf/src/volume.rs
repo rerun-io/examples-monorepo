@@ -227,6 +227,7 @@ impl TsdfVolume {
     /// Returns the evicted keys, farthest first.
     pub fn evict_farthest(&mut self, center: [f32; 3], keep: usize) -> Vec<BlockKey> {
         if self.blocks.len() <= keep {
+            self.budget_reached = false;
             return Vec::new();
         }
         let block_length = self.voxel_size * BLOCK_RESOLUTION as f32;
