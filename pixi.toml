@@ -3971,8 +3971,6 @@ trtkit = { path = "packages/trtkit", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 # vipe.utils.geometry / visualization import pycg (Isometry, Quaternion, image); not on conda-forge.
 python-pycg = "==1.0.3"
-# metrictrail.catalog.blueprint publishes MetricTrail's layouts through dataforge's VslamLabDataset catalog-blueprint hook.
-dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.metrictrail.activation.env]
 PACKAGE_DIR = "packages/metrictrail"
@@ -4007,9 +4005,9 @@ description = "Build and test vipe_mojo against the frozen vipe_ext references (
 
 [feature.metrictrail.tasks.metrictrail-run]
 cmd = "python tools/run.py"
-depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights", "_download-metrictrail-data"]
 cwd = "packages/metrictrail"
-description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
+description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --output, and --input (default: the demo clip IMG_0497.mp4) --benchmark --rr-config.save"
 
 # The quick start: the default clip (a walk along a stone balustrade, the app's first example) with the video preset;
 # extra arguments pass through (e.g. --rr-config.save).
@@ -4028,11 +4026,6 @@ description = "Log a finished MetricTrail output directory (ours or upstream's) 
 cmd = "python tools/vslamlab_eval.py"
 cwd = "packages/metrictrail"
 description = "Score MetricTrail runs (one dir per seed) under the paper protocol and VSLAM-LAB's own evaluation (subprocess, private evo HOME)"
-
-[feature.metrictrail.tasks.metrictrail-catalog-layer]
-cmd = "python tools/catalog_layer.py"
-cwd = "packages/metrictrail"
-description = "Write (and with --catalog-url/--dataset register) the MetricTrail catalog layer of one run on a VSLAM-LAB segment; never overwrites a layer file"
 
 # The Gradio app's example clips: dpvo-app's H.264 MP4s without B-frames (NVDEC decodes them).
 [feature.metrictrail.tasks._download-metrictrail-data]

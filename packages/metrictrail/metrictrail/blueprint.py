@@ -10,6 +10,7 @@ the time panel plays ``video_time`` from the start, as the EgoHand app does.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import rerun as rr
@@ -26,6 +27,18 @@ FOLLOW_EYE: rrb.EyeControls3D = follow_eye_controls((0.0, 0.0, 1.0), (0.0, -1.0,
 and the video in it fill the view (MASt3R-SLAM sits 1.5 m back)."""
 
 
+OVERVIEW_SPIN: float = 0.05
+"""Radians per second the trajectory overview orbits its scene (a turn in about two minutes): slow enough to read the
+surface, enough to show its depth."""
+TRAIL: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
+    [
+        rrb.VisibleTimeRange(timeline, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
+        for timeline in (entities.VIDEO_TIMELINE, entities.FRAME_TIMELINE)
+    ]
+)
+"""Everything up to the cursor: the world trajectory grows as the camera moves along it."""
+
+
 @dataclass(frozen=True, slots=True)
 class SceneView:
     """A fixed 3D eye: where it is, what it looks at, which way is up."""
@@ -37,9 +50,9 @@ class SceneView:
     eye_up: tuple[float, float, float]
     """The scene's up direction."""
 
-    def controls(self) -> rrb.EyeControls3D:
-        """As blueprint eye controls."""
-        return rrb.EyeControls3D(position=self.position, look_target=self.look_target, eye_up=self.eye_up)
+    def controls(self, spin_speed: float | None = None) -> rrb.EyeControls3D:
+        """As blueprint eye controls; ``spin_speed``: orbit the look target slowly (radians per second)."""
+        return rrb.EyeControls3D(position=self.position, look_target=self.look_target, eye_up=self.eye_up, spin_speed=spin_speed)
 
 
 def scene_view(points_xyz: Float64[ndarray, "n 3"], up: Float64[ndarray, "3"], back: Float64[ndarray, "3"]) -> SceneView:
@@ -117,8 +130,8 @@ def tracking_views(background: rrb.Background) -> tuple[rrb.Spatial3DView, rrb.S
 
 
 def time_panel(*, has_video: bool, live: bool = False) -> rrb.TimePanel:
-    """Collapsed; with a video on ``video_time``: paused while a live run tracks (the app moves the cursor to each newly
-    tracked frame, :meth:`metrictrail.gradio_ui.metrictrail_ui.RunStatus.cursor_command`), else playing in a loop (a
+    """Collapsed; with a video on ``video_time``: paused while a live run tracks (the app plays the video behind the
+    tracked frames, :class:`metrictrail.gradio_ui.metrictrail_ui.Playback`), else playing in a loop (a
     streamed viewer would otherwise sit at the newest data); without a video on ``frame``."""
     if has_video and live:
         return rrb.TimePanel(state="collapsed", timeline=entities.VIDEO_TIMELINE, play_state="paused")
@@ -198,7 +211,6 @@ def run_tabs(
     world_contents: list[str] = ["/world/**"]
     if shares_input_camera(has_capture=has_capture, has_video=has_video, has_gt=has_gt):
         world_contents += [f"- /{entities.world_cam(label)}/**", f"/{entities.DPVO_CURRENT}/**", f"- /{entities.INPUT_PATCHES}"]
-    world_eye_controls = world_eye.controls() if world_eye is not None else None
     tabs: list[rrb.Container | rrb.View] = []
 
     def numbered(name: str) -> str:
@@ -209,31 +221,51 @@ def run_tabs(
     tabs.append(
         rrb.Vertical(*tracking_views(background), name=numbered("DPVO tracking")) if has_capture else waiting(numbered("DPVO tracking"), "window")
     )
-    def world_view(name: str, hidden: tuple[str, str]) -> rrb.Spatial3DView:
+    path: str = f"/{entities.world_trajectory(label)}"
+
+    def world_view(name: str, hidden: tuple[str, ...], **eye: Any) -> rrb.Spatial3DView:
         return rrb.Spatial3DView(
-            name=numbered(name),
+            name=name,
             origin=entities.WORLD_ROOT,
             contents=[*world_contents, *(f"- /{entity}" for entity in hidden)],
             background=background,
             line_grid=rrb.LineGrid3D(visible=False),
-            eye_controls=world_eye_controls,
+            overrides={path: TRAIL},
+            **eye,
         )
 
+    colour: tuple[str, ...] = (entities.WORLD_MESH_NORMALS,)
     surface: str = "trajectory vs GT, Sim(3) aligned + metric surface" if has_gt else "trajectory + metric surface"
-    tabs.append(world_view(surface, (entities.WORLD_CLOUD_NORMALS, entities.WORLD_MESH_NORMALS)))
+    camera: str = entities.DPVO_CURRENT if shares_input_camera(has_capture=has_capture, has_video=has_video, has_gt=has_gt) else entities.world_cam(label)
+    follow: rrb.Spatial3DView = rrb.Spatial3DView(
+        name="follow (the camera)",
+        origin=camera,
+        contents=[*world_contents, *(f"- /{entity}" for entity in colour)],
+        background=background,
+        line_grid=rrb.LineGrid3D(visible=False),
+        eye_controls=FOLLOW_EYE,
+        overrides={path: TRAIL},
+    )
+    overview_eye = world_eye.controls(spin_speed=OVERVIEW_SPIN) if world_eye is not None else rrb.EyeControls3D(spin_speed=OVERVIEW_SPIN)
+    side: list[rrb.View] = [follow]
+    if has_capture:
+        side.append(world_view("surface coloured by normals", (entities.WORLD_MESH,), eye_controls=overview_eye))
     tabs.append(
-        world_view("surface coloured by normals", (entities.WORLD_CLOUD, entities.WORLD_MESH))
-        if has_capture
-        else waiting(numbered("surface coloured by normals"), "normals")
+        rrb.Horizontal(
+            world_view(f"overview: {surface}", colour, eye_controls=overview_eye),
+            rrb.Vertical(*side),
+            column_shares=[2, 1],
+            name=numbered(surface),
+        )
     )
     if has_gt:
         metric_view: rrb.Spatial3DView = rrb.Spatial3DView(
             name="SE(3) only, scale 1: metric scale vs GT (1 m grid)",
             origin=entities.METRIC_ROOT,
-            contents=["/metric/**", f"- /{entities.METRIC_CLOUD_NORMALS}", f"- /{entities.METRIC_MESH_NORMALS}"],
+            contents=["/metric/**", f"- /{entities.METRIC_MESH_NORMALS}"],
             background=background,
             line_grid=rrb.LineGrid3D(visible=True, spacing=1.0),
-            eye_controls=metric_eye.controls() if metric_eye is not None else None,
+            eye_controls=metric_eye.controls(spin_speed=OVERVIEW_SPIN) if metric_eye is not None else rrb.EyeControls3D(spin_speed=OVERVIEW_SPIN),
         )
         error_view: rrb.TimeSeriesView = rrb.TimeSeriesView(name="ATE per frame, Sim(3) (m)", origin="metrics/ate_sim3")
         tabs.append(rrb.Vertical(metric_view, error_view, row_shares=[3, 1], name=numbered("metric scale vs GT")))
@@ -273,7 +305,7 @@ def run_blueprint(
     left: list[rrb.View] = [
         frame_view(has_video=has_video, has_capture=has_capture, background=background),
         rrb.Spatial2DView(name="MoGe-2 metric depth (m)", origin=entities.CAM, contents=[entities.CAM_DEPTH], background=background),
-        rrb.Spatial2DView(name="MoGe-2 normals (keyframes)", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background)
+        rrb.Spatial2DView(name="MoGe-2 normals", origin=entities.CAM, contents=[entities.CAM_NORMALS], background=background)
         if has_capture
         else waiting("MoGe-2 normals", "normals"),
         rrb.Spatial2DView(name="DINOv3 feature PCA", origin=entities.CAM, contents=[entities.CAM_DINO_PCA], background=background)

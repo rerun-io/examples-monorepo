@@ -9,7 +9,7 @@ from numpy import ndarray
 
 from metrictrail.eval.protocols import BENCHMARK_DATASETS, PROTOCOLS, PaperProtocol
 from metrictrail.eval.score import FrameTimes, GtPairs, frame_times, paper_gt_pairs
-from metrictrail.eval.trajectory import AteResult, aligned_ate, pair_errors_m
+from metrictrail.eval.trajectory import AteResult, aligned_ate, finite_rows, pair_errors_m
 from metrictrail.eval.vslamlab_files import PoseTable, RgbCsv, read_pose_csv, read_rgb_csv
 
 
@@ -81,7 +81,7 @@ def align_to_gt(world_T_cam: Float64[ndarray, "n 4 4"], source_frame_ids: Int64[
         ValueError: If fewer than 3 finite tracked frames have GT.
     """
     pairs: GtPairs = paper_gt_pairs(source_frame_ids, context.frames, context.gt, context.protocol)
-    finite: ndarray = np.isfinite(world_T_cam[pairs.rows].reshape(-1, 16)).all(axis=1)
+    finite: Bool[ndarray, "m"] = finite_rows(world_T_cam[pairs.rows])
     rows: Int64[ndarray, "m"] = pairs.rows[finite]
     gt_xyz: Float64[ndarray, "m 3"] = pairs.gt_xyz[finite]
     if rows.shape[0] < 3:

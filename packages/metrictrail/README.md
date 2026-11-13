@@ -6,7 +6,7 @@ DINOv3 ViT-S/16 features improve the patch matching. The output is camera poses 
 per-frame metric depth and, from the same MoGe-2 forward, surface normals.
 
 This package holds our code around upstream: benchmark presets, a run CLI with a Rerun logger, the VSLAM-LAB / paper
-evaluation and the catalog layer. ViPE itself comes from `recipes/vipe-src`.
+evaluation. ViPE itself comes from `recipes/vipe-src`.
 
 ## Quick start
 
@@ -40,7 +40,7 @@ before `pixi run`: a value set in the shell wins over the feature's defaults.
 | Kernels | Mojo, one source for CPU and CUDA, compiled for the local GPU. ViPE's CUDA extension `vipe_ext` is not built: patch 0007 makes `vipe.ext` import `packages/vipe-mojo`'s `vipe_mojo` (the ops MetricTrail calls; the others raise `NotImplementedError` naming the op). DPVO's kernels are `packages/dpvo`'s `dpvo.mojo_backend`. Built by the `vipe-mojo-build` and `dpvo-mojo-build` tasks (a `depends-on` of `metrictrail-run`, `metrictrail-example`, `metrictrail-app` and `tests-integration`) | no nvcc build at `pixi install`; one kernel source per op for every device. |
 | lietorch | patch 0001: ViPE's vendored lietorch (`vipe/ext/lietorch`) imports `lietorch_mojo` and `build.sh` deletes the vendored code; the DPVO shim's `lietorch` re-exports it too (the DPVO copies go with ViPE's DPVO) | one lietorch for the workspace (lietorch-mojo). ViPE's copies are code-identical to upstream lietorch. |
 | DINOv3 | patch 0002: `recipes/dinov3-src` (a run dependency) | the same ViT-S/16; patch tokens are bit-identical. |
-| MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds only that registry and the `fuse_point_cloud` hook `metrictrail.fusion` uses for the normals) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid (1,200 tokens by default); torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
+| MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds that registry and a `fuse_point_cloud` hook this package no longer uses) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid (1,200 tokens by default); torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
 | DPVO | `packages/dpvo`'s `dpvo.metric.MetricDPVO` (an editable path dependency of the `metrictrail` feature). The recipe deletes ViPE's vendored DPVO, its kernels and the stereo runner, and installs re-export shims at `vipe.metrictrail.dpvo` (`recipes/vipe-src/dpvo_shim`), so ViPE's `slam.py` builds `MetricDPVO` from its yacs config unchanged; patch 0005 hands the DINO patchifier `packages/dpvo`'s patchify keywords | one DPVO for the workspace. ViPE's fork (metric-depth local BA, the metric global-BA backend, the `cuda_ba` prior kernel) is ported onto the typed core's hooks; the three presets run ViPE's operations in ViPE's order (lockstep against ViPE's copy on TUM, 7-Scenes and KITTI). MetricTrail does not use DBoW loop closure, so `packages/dpretrieval` is not used. `metrictrail.capture` observes DPVO through `dpvo.hooks.add_global_observer`. |
 
 The hidden task `_download-metrictrail-weights` (a `depends-on` of `metrictrail-run`, `metrictrail-app`,
@@ -99,7 +99,7 @@ quick start). `--no-capture` turns off the live intermediates (faster). Without 
 Other tasks:
 
 - `metrictrail-log-run --run-dir <vipe_out> ...`: log a finished output directory (ours or upstream's) without the GPU.
-  It has no normals: they exist only in a live capture (`cam/normals`, `world/cloud_normals` with `--fuse-cloud`).
+  It has no normals: they exist only in a live capture (`cam/normals`).
 
 ## App
 
@@ -108,14 +108,19 @@ pixi run -e metrictrail metrictrail-app
 ```
 
 A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.py`): upload a video or pick an example
-(the task downloads dpvo's example clips into `data/`), and the run streams into an embedded Rerun viewer. It runs
+(the task downloads dpvo's example clips into `data/`; they show as video tiles). The first tile, preloaded as the input, is
+the shared demo clip `movies/IMG_0497.mp4` (a walk along a stone balustrade; `metrictrail.examples.DEFAULT_CLIP`), which is
+also the run CLI's default `--input`. The run streams into an embedded
+Rerun viewer that fills the window. The page has the EgoHand app's look (`gradio_ui/theme.py`: Rerun's colours and wordmark,
+Input and Outputs tabs; Outputs holds the run summary and a log of each stage). It runs
 `metrictrail.apis.run.run_and_log` with the `video` preset and the default MoGe-2 provider, so it calibrates the camera
 itself; there is no intrinsics input. Settings: the tracking stride, `max_frames` (upstream's Hydra keys) and the SharedK
 calibration budget (`fast64` by default, half the time of ViPE's `robust128`). The input video is logged first and plays at
 once. While SharedK calibrates, the viewer shows its own layout on the `calibration_step` timeline: the DROID keyframe map,
 the focal and the keyframes kept, and the newest keyframe's MoGe-2 prior against its bundle-adjusted depth. The capture
 then runs in live mode: DPVO's patches (on the video), BA window and
-the DINOv3 PCA video stream in as it tracks, with depth and normals of new keyframes only. The trajectory and the
+the DINOv3 PCA and MoGe-2's normals stream in as videos and its metric depth as millimetre PNGs, for every tracked frame
+(MoGe-2 already runs on each one for DPVO; a logger thread of its own encodes them, off the tracking thread). The trajectory and the
 surface arrive at the end; the TSDF mesh grows in the DPVO tracking view from each new keyframe (at DPVO's current pose) and the final mesh (final poses) replaces it. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
 viewer stays empty.
 
@@ -134,15 +139,15 @@ OpenCV, rasters on the host and re-uploads the clip each pass. Frame directories
 
 **The surface is a TSDF mesh** (`metrictrail.surface`, `packages/tsdf-rs`: a sparse colour TSDF in Rust with marching
 cubes, from pablovela5620/simplerecon-inference): every tracked frame's metric depth at its final pose, 4 cm voxels to
-8 m (`--tsdf-voxel-m`, `--tsdf-max-depth-m`). `--fuse-cloud` adds upstream's fused point cloud
-(`fuse_point_cloud`: multi-view consistency filter, 2 cm voxel means, NumPy).
+8 m (`--tsdf-voxel-m`, `--tsdf-max-depth-m`). It replaced upstream's fused point cloud
+(`fuse_point_cloud`: multi-view consistency filter, 2 cm voxel means, NumPy), which the run no longer produces.
 
 pool (2,585 frames strided to 1,293; RTX 5090, CLI with capture, `metrictrail` env):
 
 | | wall | fusion | surface |
 |---|---|---|---|
-| upstream video path + fused cloud | 224 s | 94 s | 5.64 M points |
-| GPU video input + fused cloud | 188 s | 94 s | 5.64 M points |
+| upstream video path + fused cloud (removed) | 224 s | 94 s | 5.64 M points |
+| GPU video input + fused cloud (removed) | 188 s | 94 s | 5.64 M points |
 | GPU video input + TSDF mesh (default) | 97 s | 4 s | 2.94 M triangles |
 
 The rows above ran on the original iPhone `pool.MOV`. The app's examples are now dpvo's H.264 re-encodes
@@ -162,66 +167,6 @@ The task scores each output directory two ways and writes `report.json`:
   evo HOME).
 
 Datasets: `rgbdtum`, `7scenes`, `kitti`.
-
-## Catalog layers
-
-```bash
-pixi run -e metrictrail --frozen metrictrail-catalog-layer --runs-root <out seed1234> --report <report.json> \
-    --benchmark tum --source metrictrail --producer "examples-monorepo metrictrail @ <sha>" \
-    --catalog-url rerun+http://<host>:<port>
-```
-
-The task writes one layer `.rrd` per sequence to a new directory, `<results_root>/catalog/<source>/<run_tag>/`, and
-never overwrites a layer file. With `--catalog-url` it registers the layers on the `dataforge-vslam-lab-<dataset>`
-dataset: `ERROR` where the segment has no such layer yet, `REPLACE` where it has an older run. The run metrics are
-recording properties in the layer, not sidecar files. The layer name is the run source (`/world/runs/<source>`):
-
-| layer | run | colour |
-| --- | --- | --- |
-| `metrictrail` | ours, the shipped path: MoGe-2 `moge-2-vitl-normal` through TensorRT, with surface normals (`--capture-rrd`) | magenta `#E040FB` |
-| `metrictrail_paper` | our torch reproduction of the paper configuration (`moge-2-vitl`, FP32) | violet `#A78BFA` |
-| `metrictrail_upstream` | unmodified upstream ViPE @ ead2e00 on this machine | amber `#F5A623` |
-
-Ground truth is dataforge's `gt` layer (green `#3DDC97` in both layouts). On the shared Spark catalog
-(`rerun+http://dgx-spark:51235`):
-
-| dataset | segments | MetricTrail layers |
-| --- | --- | --- |
-| `dataforge-vslam-lab-rgbdtum` | 9 | `metrictrail`, `metrictrail_paper`, `metrictrail_upstream` |
-| `dataforge-vslam-lab-7scenes` | 18 | `metrictrail_paper`, `metrictrail_upstream` |
-| `dataforge-vslam-lab-kitti` | 11 | `metrictrail_paper`, `metrictrail_upstream` |
-| `dataforge-lamaria` | `lamaria__R_01_easy` only | `metrictrail_paper` |
-
-The shipped path has run on TUM only, so 7-Scenes, KITTI and LaMAria hold no `metrictrail` layer.
-
-### Layouts
-
-`metrictrail.catalog.blueprint` owns two layouts on dataforge's catalog-blueprint hook (`MetricTrailVslamLab`
-and `MetricTrailLamaria` override `catalog_blueprints`; dataforge's `republish_blueprints` publishes them):
-
-- `default`, the dataset default: ground truth and ours (`metrictrail`). Rig and Follow 3D views, rgb, the sensor
-  depth, our keyframe depth and, where the layer has them, our keyframe normals. The 3D views hide every other run.
-  Where the dataset has no `metrictrail` layer, its pane says "not run on this dataset" and the views show ground
-  truth only.
-- `comparison`, a development and validation view: ground truth, `metrictrail`, `metrictrail_paper` and
-  `metrictrail_upstream` in the colours above, with one keyframe-depth pane per run.
-
-Publish one with `--publish-blueprint default|comparison` together with `--catalog-url` (files go to
-`<blueprint_root>/blueprints/`). The flag is off by default. Do not run `dataforge-publish-blueprints` on the
-`dataforge-vslam-lab-*` datasets: it publishes dataforge's generic layout, which shows every run in its own palette.
-Take the Spark catalog snapshot after every publish.
-
-`dataforge-lamaria` is different: it is dataforge's own dataset (10 segments, MetricTrail's layer is on
-`lamaria__R_01_easy` only), so it keeps dataforge's default layout. `default` is refused there. dataforge's Rig and
-Follow views already show the `metrictrail_paper` path and points on R_01. For its keyframe-depth pane, use the
-`comparison` layout (`--publish-blueprint comparison`; the flag reaches VSLAM-LAB datasets only, so on LaMAria call
-`publish_layout(<catalog_url>, "dataforge-lamaria", "comparison", <blueprint_root>)` directly). It replaces dataforge's
-default while it is live, so restore dataforge's layout when you are done:
-
-```bash
-pixi run --frozen -e dataforge dataforge-publish-blueprints --catalog-url <catalog_url> \
-    --catalog-name dataforge-lamaria --output-root <dataforge output root> lamaria
-```
 
 ## Results against the paper
 
@@ -280,8 +225,6 @@ cache (a cold download was not measured):
   few of those packages.
 - **`metrictrail-eval`'s default `--vslamlab-dir`** is a scratch path (`/tmp/metrictrail-scratch/vslamlab/VSLAM-LAB`).
   Pass your VSLAM-LAB checkout.
-- **Catalog.** The shipped path (`metrictrail`) is on the 9 TUM segments only; 7-Scenes, KITTI and LaMAria carry the
-  torch reproduction (`metrictrail_paper`) and, except LaMAria, upstream ViPE.
 
 SharedK can use `--calibration-graphs` for prepared DROID graph metadata and a CUDA graph containing
 one complete projection/correlation/recurrent-update/BA step. Each shape bucket warms on its first real

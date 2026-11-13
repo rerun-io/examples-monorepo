@@ -28,7 +28,6 @@ from metrictrail.capture import (  # noqa: E402
     dpvo_world_T_cam,
     frustum_strips,
     normals_rgb,
-    rgb_normals,
 )
 
 
@@ -77,27 +76,9 @@ def test_kept_pass_is_the_last_of_the_longest(tmp_path: Path) -> None:
     assert kept is not None and kept.path is not None and kept.path.name == "pass_2.rrd"
 
 
-def test_normals_survive_the_8bit_rgb_round_trip() -> None:
-    generator = torch.Generator().manual_seed(0)
-    normals = torch.nn.functional.normalize(torch.randn(6, 5, 3, generator=generator), dim=-1)
-    rgb = normals_rgb(normals)
-    assert rgb.dtype == torch.uint8
-    back: Float32[ndarray, "6 5 3"] = rgb_normals(rgb.numpy())
-    np.testing.assert_allclose(np.linalg.norm(back, axis=-1), 1.0, atol=1e-5)
-    np.testing.assert_allclose(back, normals.numpy(), atol=0.01)
-
-
-def test_kept_normals_follow_the_kept_pass_and_superseded_passes_are_emptied(tmp_path: Path) -> None:
-    session = CaptureSession(out_dir=tmp_path, application_id="a", recording_id="r", depth_range_m=(0.3, 3.0))
-    assert session.kept_normals() == {}
-    image: np.ndarray = np.zeros((2, 2, 3), dtype=np.uint8)
-    for marker, frames in enumerate((32, 596, 596)):
-        session.pass_frames = frames
-        session.open_pass(len(session.passes))
-        session.pass_normals[-1][0] = torch.from_numpy(image + marker)
-    session.uninstall()
-    assert [len(normals) for normals in session.pass_normals] == [0, 0, 1]
-    assert session.kept_normals()[0][0, 0, 0] == 2
+def test_normals_are_coloured_as_8bit_rgb() -> None:
+    normals = torch.tensor([[[-1.0, 0.0, 1.0]]])
+    assert normals_rgb(normals).tolist() == [[[0, 128, 255]]]  # (n + 1) / 2 per axis
 
 
 def test_live_surface_grows_temporal_blocks_then_ends_as_one_mesh(tmp_path: Path) -> None:
@@ -365,3 +346,72 @@ def test_orient_turns_dpvo_world_upright_with_cameras_looking_level() -> None:
     forward: Float32[ndarray, "3"] = rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float32)
     assert abs(float(forward[2])) < 1e-5  # looking level, not into the ground
     np.testing.assert_allclose(rotation @ world_T_cam[:, :3, 3].mean(axis=0) + translation, 0.0, atol=1e-5)  # centred
+
+
+@pytest.mark.usefixtures("stand_in_vipe")
+def test_moge2_depth_and_normals_of_every_tracked_frame_are_logged_off_the_tracking_thread(tmp_path: Path) -> None:
+    """Normals as a video like the DINOv3 PCA, depth as metric millimetre PNGs, on every frame (also where DPVO's graph
+    did not grow), each at its own frame's time. The live surface still integrates only the frames the graph grew on."""
+    import rerun as rr
+    from rerun.chunk import RrdReader
+
+    from metrictrail import entities
+    from metrictrail.live_surface import LiveSurface
+
+    surface = LiveSurface(rr.RecordingStream("metrictrail-test", recording_id="surface"), log_every=100)
+    session = CaptureSession(
+        out_dir=tmp_path,
+        application_id="metrictrail-test",
+        recording_id="video-priors",
+        depth_range_m=(0.3, 3.0),
+        live_surface=surface,
+    )
+    session.install()
+    session.pass_frames = 5
+    tracker: DPVO = cpu_dpvo()
+    tracker.n = 1
+    tracker.is_initialized = True  # every frame is "added" (logged), but the graph grows on frame 0 only
+    for frame in range(4):  # a stride-2 clip: source frames 0, 2, 4, 6; no keyframe after the first
+        session.source_frames[frame] = 2 * frame
+        session.pending_normals[frame] = torch.full((32, 32, 3), 90 + frame, dtype=torch.uint8)
+        event = FrameEvent(
+            tstamp=frame,
+            frame_index=frame,
+            keyframes_before=0 if frame == 0 else 1,
+            keyframe_added=frame == 0,
+            image=torch.full((3, 32, 32), 100, dtype=torch.uint8),
+            intrinsics=torch.tensor([30.0, 30.0, 16.0, 16.0]),
+            depth=FrameDepth(depth=torch.full((32, 32), 2.0), mask=None),
+        )
+        tracker.observers[-1].on_frame(tracker, event)
+    session.uninstall()
+    logged: dict[str, list[int]] = {}
+    for chunk in RrdReader(tmp_path / "pass_0.rrd").store().stream():
+        batch = chunk.to_record_batch()
+        for column in ("VideoStream:sample", "EncodedDepthImage:blob"):
+            if column in batch.schema.names and entities.FRAME_TIMELINE in batch.schema.names:
+                logged.setdefault(f"{chunk.entity_path} {column}", []).extend(batch.column(entities.FRAME_TIMELINE).to_pylist())
+    assert logged[f"/{entities.CAM_DEPTH} EncodedDepthImage:blob"] == [0, 1, 2, 3]
+    assert logged[f"/{entities.CAM_NORMALS} VideoStream:sample"] == [0, 1, 2, 3]
+    assert surface.integrated == 1, "frame 0 only: a TSDF integration (and its device-to-host copy) per frame would slow tracking"
+
+
+def test_uninstall_closes_the_prior_logger_even_when_the_surface_fails_to_finish(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every release step runs; the first failure propagates."""
+    import rerun as rr
+
+    from metrictrail.live_surface import LiveSurface
+
+    def failing_finish(self: LiveSurface) -> None:
+        raise RuntimeError("surface finish failed")
+
+    surface = LiveSurface(rr.RecordingStream("a", recording_id="surface"), log_every=100)
+    session = CaptureSession(out_dir=tmp_path, application_id="a", recording_id="r", depth_range_m=(0.3, 3.0), live_surface=surface)
+    session.install()
+    assert session.priors is not None
+    session.priors.submit(rr.RecordingStream("a", recording_id="priors"), 0, None, torch.full((4, 4), 2.0), None)
+    thread = session.priors.thread
+    monkeypatch.setattr(LiveSurface, "finish", failing_finish)
+    with pytest.raises(RuntimeError, match="surface finish failed"):
+        session.uninstall()
+    assert thread is not None and not thread.is_alive(), "the prior logger was left running"

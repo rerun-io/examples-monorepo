@@ -20,12 +20,11 @@ From the finished artifacts (:mod:`metrictrail.outputs`):
 
 * ``cam``, ``cam/rgb``, ``cam/depth`` when there was no live capture (frames read from the input, depth from
   ``depth/<name>.zip``);
-* ``world/<label>/trajectory`` (static), ``world/<label>/cam`` (pose over ``frame`` + pinhole), ``world/cloud`` (fused
-  metric cloud), ``world/cloud_normals`` (the same points coloured by their fused MoGe-2 normal in that frame,
-  RGB = (n + 1) / 2; Points3D carries no normal component; only after a live capture, which holds the normals);
-  in the GT frame after the paper's Sim(3) alignment when GT exists, else in ViPE's world frame;
+* ``world/<label>/trajectory`` (a segment per tracked frame), ``world/<label>/cam`` (pose over ``frame`` + pinhole),
+  ``world/mesh`` and ``world/mesh_normals`` (the TSDF mesh, coloured by its colours and by its normals); in the GT frame
+  after the paper's Sim(3) alignment when GT exists, else in ViPE's world frame;
 * ``world/gt/trajectory`` (static) and ``world/gt/position`` (over ``frame``);
-* ``metric/<label>/trajectory``, ``metric/gt/trajectory``, ``metric/cloud``, ``metric/cloud_normals``: the same after
+* ``metric/<label>/trajectory``, ``metric/gt/trajectory``, ``metric/mesh``, ``metric/mesh_normals``: the same after
   an SE(3)-only alignment, scale fixed at 1, so metric scale shows against GT in metres;
 * ``metrics/ate_sim3/{err_m,running_rmse_m}`` and ``metrics/ate_se3/{err_m,running_rmse_m}`` over ``frame``;
 * ``summary`` (markdown) and ``notes/capture`` (what a recording without a live capture lacks).
@@ -109,14 +108,10 @@ DPVO_METRICS: str = "metrics/dpvo"
 WORLD_ROOT: str = "world"
 WORLD_GT_TRAJECTORY: str = "world/gt/trajectory"
 WORLD_GT_POSITION: str = "world/gt/position"
-WORLD_CLOUD: str = "world/cloud"
-WORLD_CLOUD_NORMALS: str = "world/cloud_normals"
 WORLD_MESH: str = "world/mesh"
 WORLD_MESH_NORMALS: str = "world/mesh_normals"
 METRIC_ROOT: str = "metric"
 METRIC_GT_TRAJECTORY: str = "metric/gt/trajectory"
-METRIC_CLOUD: str = "metric/cloud"
-METRIC_CLOUD_NORMALS: str = "metric/cloud_normals"
 METRIC_MESH: str = "metric/mesh"
 METRIC_MESH_NORMALS: str = "metric/mesh_normals"
 ATE_SIM3_ERR: str = "metrics/ate_sim3/err_m"
@@ -132,7 +127,8 @@ METRICS_PROPERTY: str = "metrics"
 
 
 def world_trajectory(label: RunLabel) -> str:
-    """``world/<label>/trajectory``: the run's whole camera path (static)."""
+    """``world/<label>/trajectory``: the run's camera path, one segment per tracked frame at that frame's time (the views
+    draw it up to the cursor)."""
     return f"world/{label}/trajectory"
 
 

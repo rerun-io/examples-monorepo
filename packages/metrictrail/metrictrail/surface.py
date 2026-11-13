@@ -1,9 +1,9 @@
 """MetricTrail's default surface: a colour TSDF mesh fused from every tracked frame (``packages/tsdf-rs``).
 
 Each tracked frame's metric depth (ViPE's depth artifact, MoGe-2 metric depth) is integrated into a sparse TSDF with
-the frame's final camera pose, and marching cubes extracts one coloured mesh. It replaces upstream's fused point cloud
-(``vipe.metrictrail.pointcloud.fuse_point_cloud``: a multi-view consistency filter and 2 cm voxel means in NumPy) as
-the default, at a fraction of its time; ``--fuse-cloud`` still produces that cloud for comparison.
+the frame's final camera pose, and marching cubes extracts one coloured mesh. It is the run's only surface: it
+replaced upstream's fused point cloud (``vipe.metrictrail.pointcloud.fuse_point_cloud``: a multi-view consistency filter
+and 2 cm voxel means in NumPy) at a fraction of its time.
 """
 
 from collections.abc import Callable

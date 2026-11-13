@@ -34877,8 +34877,7 @@ environments:
       - conda_source: depth-png[4edce233] @ packages/depth-png
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: tsdf-rs[e6484be8] @ packages/tsdf-rs
-      - conda_source: vipe-src[e2a41cc2] @ recipes/vipe-src
-      - pypi: ./packages/dataforge
+      - conda_source: vipe-src[ad50d8ac] @ recipes/vipe-src
       - pypi: ./packages/dpvo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/metrictrail
@@ -35584,8 +35583,7 @@ environments:
       - conda_source: depth-png[52021c6a] @ packages/depth-png
       - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
       - conda_source: tsdf-rs[72c9c15b] @ packages/tsdf-rs
-      - conda_source: vipe-src[25abea84] @ recipes/vipe-src
-      - pypi: ./packages/dataforge
+      - conda_source: vipe-src[1d62a1f6] @ recipes/vipe-src
       - pypi: ./packages/dpvo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/metrictrail
@@ -36306,8 +36304,7 @@ environments:
       - conda_source: depth-png[4edce233] @ packages/depth-png
       - conda_source: dinov3-src[1d180bc5] @ recipes/dinov3-src
       - conda_source: tsdf-rs[e6484be8] @ packages/tsdf-rs
-      - conda_source: vipe-src[e2a41cc2] @ recipes/vipe-src
-      - pypi: ./packages/dataforge
+      - conda_source: vipe-src[ad50d8ac] @ recipes/vipe-src
       - pypi: ./packages/dpvo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/metrictrail
@@ -37021,8 +37018,7 @@ environments:
       - conda_source: depth-png[52021c6a] @ packages/depth-png
       - conda_source: dinov3-src[11331a63] @ recipes/dinov3-src
       - conda_source: tsdf-rs[72c9c15b] @ packages/tsdf-rs
-      - conda_source: vipe-src[25abea84] @ recipes/vipe-src
-      - pypi: ./packages/dataforge
+      - conda_source: vipe-src[1d62a1f6] @ recipes/vipe-src
       - pypi: ./packages/dpvo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/metrictrail
@@ -174291,7 +174287,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/tomli-2.5.0-pyh5ded981_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
-- conda_source: vipe-src[25abea84] @ recipes/vipe-src
+- conda_source: vipe-src[1d62a1f6] @ recipes/vipe-src
   variants:
     target_platform: linux-aarch64
   depends:
@@ -174352,7 +174348,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/setuptools-84.2.1-pyhe730653_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
-- conda_source: vipe-src[e2a41cc2] @ recipes/vipe-src
+- conda_source: vipe-src[ad50d8ac] @ recipes/vipe-src
   variants:
     target_platform: linux-64
   depends:
@@ -174515,7 +174511,6 @@ packages:
 - pypi: ./packages/metrictrail
   name: metrictrail
   requires_dist:
-  - dataforge @ ./packages/dataforge
   - dpvo @ ./packages/dpvo
   - trtkit @ ./packages/trtkit
   - vipe-mojo @ ./packages/vipe-mojo

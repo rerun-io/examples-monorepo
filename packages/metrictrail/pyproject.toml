@@ -1,19 +1,17 @@
 [project]
 name = "metrictrail"
 version = "0.1.0"
-description = "NVIDIA MetricTrail (ViPE) in the monorepo: benchmark presets, kernel checks, VSLAM-LAB evaluation and Rerun catalog layers"
+description = "NVIDIA MetricTrail (ViPE) in the monorepo: benchmark presets, kernel checks, VSLAM-LAB evaluation and a Rerun app"
 authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
 # Static metadata only. ViPE + MetricTrail come from the `recipes/vipe-src` conda package (kernels: packages/vipe-mojo);
 # torch comes from the `cuda` feature; lietorch from the `lietorch-mojo` feature (pixi.toml [environments]); monopriors and
-# trtkit (metrictrail.moge2) from the `metrictrail` feature's editable path packages. dataforge (the VSLAM-LAB dataset
-# whose catalog-blueprint hook metrictrail.catalog.blueprint overrides) and dpvo (MetricTrail's DPVO, dpvo.metric, behind
-# vipe-src's vipe.metrictrail.dpvo shims; metrictrail.capture observes it through dpvo.hooks) are workspace packages,
-# pinned below.
-dependencies = ["dataforge", "dpvo", "trtkit", "vipe-mojo"]
+# trtkit (metrictrail.moge2) from the `metrictrail` feature's editable path packages. dpvo (MetricTrail's DPVO,
+# dpvo.metric, behind vipe-src's vipe.metrictrail.dpvo shims; metrictrail.capture observes it through dpvo.hooks) is a
+# workspace package, pinned below.
+dependencies = ["dpvo", "trtkit", "vipe-mojo"]
 
 [tool.uv.sources]
-dataforge = { path = "../dataforge", editable = true }
 dpvo = { path = "../dpvo", editable = true }
 trtkit = { path = "../trtkit", editable = true }
 vipe-mojo = { path = "../vipe-mojo", editable = true }

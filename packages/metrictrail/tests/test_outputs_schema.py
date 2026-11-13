@@ -11,7 +11,6 @@ from numpy import ndarray
 from rerun.chunk import RrdReader
 
 from metrictrail import entities
-from metrictrail.artifacts import ColoredCloud
 from metrictrail.blueprint import frame_view, log_waiting_notes, run_blueprint, time_panel, waiting_notes
 from metrictrail.eval.vipe_output import MetricTrailTrajectory
 from metrictrail.ground_truth import GtContext
@@ -31,13 +30,13 @@ def synthetic_outputs(world_T_cam: Float64[ndarray, "n 4 4"]) -> RunOutputs:
     return RunOutputs(run_dir=Path("/nonexistent"), name="synthetic", trajectory=trajectory, intrinsics=intrinsics, record=None)
 
 
-def write_recording(path: Path, outputs: RunOutputs, context: GtContext | None, cloud: ColoredCloud | None) -> RunMetrics:
+def write_recording(path: Path, outputs: RunOutputs, context: GtContext | None) -> RunMetrics:
     rec = rr.RecordingStream("metrictrail-test", recording_id="test", send_properties=False)
     rec.save(path)
     log_waiting_notes(rec, has_capture=False)
     provenance = Provenance("seq", "frames", "/run", "unit test (synthetic)", "env", "2026-11-06T00:00:00Z")
     options = LogOptions(label="ours", log_frames=False, raster_policy="unchanged", depth_range_m=(0.3, 3.0))
-    logged: LoggedRun = log_run_outputs(rec, outputs, options, frames=None, context=context, cloud_world=cloud, provenance=provenance)
+    logged: LoggedRun = log_run_outputs(rec, outputs, options, frames=None, context=context, provenance=provenance)
     rec.flush()
     rec.disconnect()
     assert logged.world_eye is not None and (logged.metric_eye is not None) == (context is not None)
@@ -46,12 +45,9 @@ def write_recording(path: Path, outputs: RunOutputs, context: GtContext | None, 
 
 def test_run_recording_with_gt_has_every_entity_and_property(tmp_path: Path, tum_like_context: tuple[GtContext, Float64[ndarray, "n 4 4"]]) -> None:
     context, world_T_cam = tum_like_context
-    cloud = ColoredCloud(
-        points_xyz=np.random.default_rng(0).normal(size=(50, 3)).astype(np.float32), colors_rgb=np.full((50, 3), 128, dtype=np.uint8)
-    )
-    metrics: RunMetrics = write_recording(tmp_path / "run.rrd", synthetic_outputs(world_T_cam), context, cloud)
+    metrics: RunMetrics = write_recording(tmp_path / "run.rrd", synthetic_outputs(world_T_cam), context)
     assert metrics.ate_sim3_m is not None and metrics.ate_sim3_m < 0.01
-    assert metrics.num_gt_pairs == 60 and metrics.cloud_points == 50
+    assert metrics.num_gt_pairs == 60
     schema = RrdReader(tmp_path / "run.rrd").store().schema()
     paths: set[str] = set(schema.entity_paths())
     expected: set[str] = {
@@ -60,10 +56,8 @@ def test_run_recording_with_gt_has_every_entity_and_property(tmp_path: Path, tum
         "/" + entities.world_cam("ours"),
         "/" + entities.WORLD_GT_TRAJECTORY,
         "/" + entities.WORLD_GT_POSITION,
-        "/" + entities.WORLD_CLOUD,
         "/" + entities.metric_trajectory("ours"),
         "/" + entities.METRIC_GT_TRAJECTORY,
-        "/" + entities.METRIC_CLOUD,
         "/" + entities.ATE_SIM3_ERR,
         "/" + entities.ATE_SIM3_RUNNING,
         "/" + entities.ATE_SE3_ERR,
@@ -72,6 +66,7 @@ def test_run_recording_with_gt_has_every_entity_and_property(tmp_path: Path, tum
         "/notes/waiting/dino",
     }
     assert expected <= paths
+    assert not any("/cloud" in path for path in paths)  # the TSDF mesh is the one surface
     columns: set[str] = set(schema.column_names())
     assert {
         "property:provenance:producer",
@@ -85,8 +80,8 @@ def test_run_recording_with_gt_has_every_entity_and_property(tmp_path: Path, tum
 
 def test_run_recording_without_gt_has_no_gt_entities(tmp_path: Path, tum_like_context: tuple[GtContext, Float64[ndarray, "n 4 4"]]) -> None:
     _, world_T_cam = tum_like_context
-    metrics: RunMetrics = write_recording(tmp_path / "run.rrd", synthetic_outputs(world_T_cam), None, None)
-    assert metrics.ate_sim3_m is None and metrics.cloud_points is None
+    metrics: RunMetrics = write_recording(tmp_path / "run.rrd", synthetic_outputs(world_T_cam), None)
+    assert metrics.ate_sim3_m is None
     paths: set[str] = set(RrdReader(tmp_path / "run.rrd").store().schema().entity_paths())
     assert not any(path.startswith(("/world/gt", "/metric", "/metrics/ate")) for path in paths)
     assert not any(path.startswith("/notes/waiting/gt") for path in paths)  # no GT tab without GT, so nothing to wait for
@@ -107,17 +102,50 @@ def test_the_app_and_the_cli_share_one_layout_with_tabs_in_run_order() -> None:
     background = rr.blueprint.Background(color=(0, 0, 0))
     # The app's run and a CLI capture run of a video: no GT.
     names: list[str] = [str(tab.name) for tab in run_tabs("ours", has_capture=True, has_gt=False, has_calibration=True, background=background)]
-    assert names == ["1 · SharedK calibration", "2 · DPVO tracking", "3 · trajectory + metric surface", "4 · surface coloured by normals", "5 · summary"]
+    assert names == ["1 · SharedK calibration", "2 · DPVO tracking", "3 · trajectory + metric surface", "4 · summary"]
     # A benchmark with GT adds the metric-scale tab; a run without SharedK (known K) has no calibration tab.
     names = [str(tab.name) for tab in run_tabs("ours", has_capture=True, has_gt=True, has_calibration=False, background=background)]
     assert names == [
         "1 · DPVO tracking",
         "2 · trajectory vs GT, Sim(3) aligned + metric surface",
-        "3 · surface coloured by normals",
-        "4 · metric scale vs GT",
-        "5 · summary",
+        "3 · metric scale vs GT",
+        "4 · summary",
     ]
 
+
+
+def test_the_world_trajectory_grows_with_the_cursor(tmp_path: Path, tum_like_context: tuple[GtContext, Float64[ndarray, "n 4 4"]]) -> None:
+    """One segment per tracked frame, at that frame's time: a view that shows everything up to the cursor draws the path
+    as far as the camera has come."""
+    context, world_T_cam = tum_like_context
+    write_recording(tmp_path / "run.rrd", synthetic_outputs(world_T_cam), context)
+    frames: list[int] = []
+    for chunk in RrdReader(tmp_path / "run.rrd").stream():
+        if str(chunk.entity_path) == "/" + entities.world_trajectory("ours"):
+            batch = chunk.to_record_batch()
+            assert entities.FRAME_TIMELINE in batch.schema.names, "the path is temporal, not static"
+            frames += batch.column(entities.FRAME_TIMELINE).to_pylist()
+    assert frames == list(range(1, world_T_cam.shape[0]))  # the segment that ends at each frame after the first
+
+
+def test_the_trajectory_tab_shows_the_overview_a_follow_camera_and_the_normals_side_by_side() -> None:
+    from metrictrail.blueprint import run_tabs
+
+    background = rr.blueprint.Background(color=(0, 0, 0))
+    tabs = run_tabs("ours", has_capture=True, has_gt=False, has_video=True, has_calibration=True, background=background)
+    assert [str(tab.name) for tab in tabs] == ["1 · SharedK calibration", "2 · DPVO tracking", "3 · trajectory + metric surface", "4 · summary"]
+    views = [view for view in walk(tabs[2]) if isinstance(view, rr.blueprint.Spatial3DView)]
+    assert [str(view.name) for view in views] == ["overview: trajectory + metric surface", "follow (the camera)", "surface coloured by normals"]
+    assert str(views[1].origin) == entities.DPVO_CURRENT  # the camera the video plays in, riding the final trajectory
+    for view in views:
+        assert "/" + entities.world_trajectory("ours") in view.visualizer_overrides  # drawn up to the cursor
+
+
+def walk(node: object) -> list[object]:
+    """The views under a blueprint container, depth first (a view is its own leaf)."""
+    if isinstance(node, rr.blueprint.Container):
+        return [leaf for child in node.contents for leaf in walk(child)]
+    return [node]
 
 
 def test_every_video_run_without_gt_shows_its_input_camera_in_the_world_views() -> None:
@@ -130,8 +158,9 @@ def test_every_video_run_without_gt_shows_its_input_camera_in_the_world_views() 
     assert not shares_input_camera(has_capture=False, has_video=False, has_gt=False)  # no camera entity at all
     background = rr.blueprint.Background(color=(0, 0, 0))
     tabs = run_tabs("ours", has_capture=False, has_gt=False, has_video=True, has_calibration=False, background=background)
-    world = tabs[1]
-    assert isinstance(world, rr.blueprint.Spatial3DView) and str(world.name) == "2 · trajectory + metric surface"
+    assert str(tabs[1].name) == "2 · trajectory + metric surface"
+    world = walk(tabs[1])[0]
+    assert isinstance(world, rr.blueprint.Spatial3DView)
     contents: list[str] = list(cast(list[str], world.contents))
     assert f"/{entities.DPVO_CURRENT}/**" in contents and f"- /{entities.world_cam('ours')}/**" in contents
 

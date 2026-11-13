@@ -3,7 +3,7 @@
 The pipeline is built exactly as upstream's ``run.py`` builds it: Hydra composes ``configs/default.yaml`` with the
 benchmark preset's overrides (``configs/slam/README_metrictrail.md``), ViPE validates the typed config, and
 ``make_pipeline(...).run(stream)`` runs each stream. While it runs, :mod:`metrictrail.capture` logs the live
-intermediates; afterwards :mod:`metrictrail.outputs` logs the trajectory, GT, fused cloud, errors and properties.
+intermediates; afterwards :mod:`metrictrail.outputs` logs the trajectory, GT, the TSDF mesh, errors and properties.
 
 Inputs: a video (``--benchmark video``), a frame directory named after the sequence, or a VSLAM-LAB sequence directory
 (its ``rgb_0/`` frames are linked under ``<output>/frames/<case>`` so the outputs and DPVO's seed carry upstream's eval
@@ -36,13 +36,13 @@ from vipe.metrictrail.config import MetricTrailInitConfig
 from vipe.utils.model_cache import ModelCache
 
 from metrictrail.apis.log_run import DEFAULT_DEPTH_RANGE_M, DEPTH_RANGES_M
-from metrictrail.artifacts import ColoredCloud
 from metrictrail.benchmarks import BENCHMARKS, VSLAMLAB_RASTER_OVERRIDES, BenchmarkName, BenchmarkPreset
 from metrictrail.blueprint import log_waiting_notes, run_blueprint, shares_input_camera
 from metrictrail.calibration_graphs import calibration_cuda_graphs
 from metrictrail.calibration_gru import GruBackend, calibration_gru
 from metrictrail.calibration_live import CalibrationLive, RunPhase, calibration_live_view
-from metrictrail.capture import CapturedPass, CaptureSession, rgb_normals
+from metrictrail.capture import CapturedPass, CaptureSession
+from metrictrail.examples import DEFAULT_INPUT
 from metrictrail.feature_graphs import dino_cuda_graphs
 from metrictrail.frames import FrameSource, InputKind, input_kind, link_sequence_frames, open_frames
 from metrictrail.gpu_video import GpuVideoSession, gpu_video_input, make_stream_list
@@ -63,12 +63,13 @@ from metrictrail.rerun_log import log_input_video
 from metrictrail.surface import DEFAULT_TSDF, ColoredMesh, TsdfSettings, fuse_tsdf_mesh
 
 
-@dataclass
+@dataclass(kw_only=True)
 class RunSettings:
     """What to run and how; the Rerun target is separate (:class:`Config` for the CLI, the app's own stream)."""
 
-    input: Path
-    """A video, a frame directory (its name names the outputs and seeds DPVO) or a VSLAM-LAB sequence directory."""
+    input: Path = DEFAULT_INPUT
+    """A video, a frame directory (its name names the outputs and seeds DPVO) or a VSLAM-LAB sequence directory; by
+    default the shared demo clip (:data:`metrictrail.examples.DEFAULT_INPUT`, also the app's first example)."""
     output: Path
     """Run directory: ViPE's artifacts go to ``<output>/vipe_out``, live-capture passes to ``<output>/capture``."""
     benchmark: BenchmarkName = "video"
@@ -103,10 +104,6 @@ class RunSettings:
     """TSDF voxel edge, metres (finer for close-up indoor clips; the mesh grows ~4x per halving)."""
     tsdf_max_depth_m: float = DEFAULT_TSDF.max_depth_m
     """Farthest depth the TSDF integrates, metres."""
-    fuse_cloud: bool = False
-    """Also fuse upstream's metric cloud (``vipe.metrictrail.pointcloud.fuse_point_cloud``, default filter; slow)."""
-    max_cloud_points: int = 400_000
-    """Display subsample of the cloud."""
 
 
 @dataclass
@@ -218,33 +215,6 @@ def fuse_mesh(
     return fuse_tsdf_mesh(artifacts.depth, artifacts.intrinsics, artifacts.c2w, frame_rgb_source(artifacts, prepared, gpu), settings)
 
 
-def fuse_cloud(
-    outputs: RunOutputs, prepared: PreparedInput, normals: dict[int, UInt8[ndarray, "h w 3"]], gpu: GpuVideoSession | None = None
-) -> ColoredCloud:
-    """Upstream's fused metric cloud of the run in ViPE's world frame (needs the ViPE env with a lietorch provider).
-
-    ``normals`` (the live capture's MoGe-2 normals per tracked frame, 8-bit RGB) give every point the voxel mean of its
-    pixels' normals rotated into the world by the camera pose; a run without a normal for every frame gets none.
-    ``gpu``: see :func:`frame_rgb_source`.
-    """
-    from vipe.metrictrail.pointcloud import fusion_settings, load_vipe_artifacts
-
-    from metrictrail.fusion import fuse_world_cloud
-
-    artifacts = load_vipe_artifacts(outputs.run_dir, outputs.name)
-    complete: bool = all(index in normals for index in range(len(artifacts.depth)))
-    if normals and not complete:
-        print(f"[metrictrail] {len(normals)} of {len(artifacts.depth)} frames carry MoGe-2 normals; the fused cloud gets none")
-    return fuse_world_cloud(
-        artifacts.depth,
-        artifacts.intrinsics,
-        artifacts.c2w,
-        frame_rgb_source(artifacts, prepared, gpu),
-        fusion_settings("default"),
-        normals=(lambda index: rgb_normals(normals[index])) if normals and complete else None,
-    )
-
-
 def run_and_log(
     config: RunSettings,
     rec: rr.RecordingStream,
@@ -314,13 +284,11 @@ def run_and_log(
             recording_id=str(rec.get_recording_id()),
             depth_range_m=depth_range_m,
             live=rec if live else None,
-            every_frame_depth=not live,
             video_time_ns=video_time_ns,
             source_raster=(lambda: gpu.raster) if has_video else None,
             on_frame=tracked if on_stage is not None or on_cursor is not None else None,
             live_surface=live_surface,
         )
-        session.install()
     calibration: CalibrationLive | None = None
     init = typed.pipeline.init
     if config.capture and config.label == "ours" and isinstance(init, MetricTrailInitConfig):
@@ -339,6 +307,8 @@ def run_and_log(
     cv2.setNumThreads(torch.get_num_threads())
     started: float = time.perf_counter()
     try:
+        if session is not None:
+            session.install()  # inside the try: whatever fails from here on, the finally below restores ViPE's classes
         stage("SharedK calibration: MoGe-2's focal on the first 32 frames (the first run also loads the models)")
         with (
             calibration_live_view(calibration),
@@ -355,12 +325,14 @@ def run_and_log(
             for index in range(len(streams)):
                 pipeline.run(streams[index])
     finally:
-        if session is not None:
-            session.uninstall()
-        if config.label == "ours":
-            from metrictrail.moge2 import clear_forward_caches
+        try:
+            if session is not None:
+                session.uninstall()
+        finally:
+            if config.label == "ours":
+                from metrictrail.moge2 import clear_forward_caches
 
-            clear_forward_caches()  # the app keeps its engines (models) between runs, not their per-frame outputs
+                clear_forward_caches()  # the app keeps its engines (models) between runs, not their per-frame outputs
     wall_s: float = time.perf_counter() - started
     if gru_stats.backend == "tensorrt":
         print(f"[metrictrail] calibration GRU: {to_json(gru_stats)}")
@@ -373,10 +345,6 @@ def run_and_log(
     if config.fuse_mesh:
         stage("fusing the TSDF mesh")
         mesh = fuse_mesh(outputs, prepared, gpu, tsdf)
-    cloud: ColoredCloud | None = None
-    if config.fuse_cloud:
-        stage("fusing the metric point cloud")
-        cloud = fuse_cloud(outputs, prepared, session.kept_normals() if session is not None else {}, gpu)
     stage("logging the trajectory and the surface")
     rec.send_recording_name(f"MetricTrail {config.label}: {prepared.name}")
     import vipe
@@ -393,10 +361,9 @@ def run_and_log(
         log_frames=kept is None,
         raster_policy=BENCHMARKS[config.benchmark].raster_policy,
         depth_range_m=depth_range_m,
-        max_cloud_points=config.max_cloud_points,
     )
     logged: LoggedRun = log_run_outputs(
-        rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, mesh_world=mesh, video_time_ns=video_time_ns
+        rec, outputs, options, frames=frames, context=context, provenance=provenance, mesh_world=mesh, video_time_ns=video_time_ns
     )
     if shares_input_camera(has_capture=kept is not None, has_video=has_video, has_gt=context is not None):
         ride_final_trajectory(rec, outputs.trajectory, video_time_ns)

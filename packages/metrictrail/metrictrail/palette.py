@@ -15,10 +15,8 @@ PAPER_RGB: tuple[int, int, int] = (91, 155, 240)
 UPSTREAM_RGB: tuple[int, int, int] = (245, 166, 35)
 """Upstream ViPE (unmodified) run on this machine: amber #F5A623."""
 OURS_RGB: tuple[int, int, int] = (224, 64, 251)
-"""Ours: the shipped path (MoGe-2 ``moge-2-vitl-normal`` through TensorRT, with surface normals; catalog layer
-``metrictrail``): magenta #E040FB."""
-PAPER_PORT_RGB: tuple[int, int, int] = (167, 139, 250)
-"""Our torch reproduction of the paper configuration (catalog layer ``metrictrail_paper``): violet #A78BFA."""
+"""Ours: the shipped path (MoGe-2 ``moge-2-vitl-normal`` through TensorRT, with surface normals): magenta
+#E040FB."""
 GT_RGB: tuple[int, int, int] = (61, 220, 151)
 """Ground truth: green #3DDC97."""
 BA_WINDOW_RGB: tuple[int, int, int] = (255, 224, 102)
@@ -41,3 +39,4 @@ def depth_colors(depth_m: Float32[ndarray, "n"], depth_range_m: tuple[float, flo
     low, high = depth_range_m
     unit: Float32[ndarray, "n"] = np.clip((depth_m - low) / (high - low), 0.0, 1.0).astype(np.float32)
     return (colormaps["turbo"](unit)[:, :3] * 255.0).round().astype(np.uint8)
+
