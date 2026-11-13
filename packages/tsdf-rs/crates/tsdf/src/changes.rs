@@ -5,8 +5,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::mesh::Mesh;
 use crate::volume::BlockKey;
 
-/// Offsets of a block and its 26 neighbors.
-const NEIGHBORHOOD: [[i64; 3]; 27] = {
+/// Offsets of a block and its 26 neighbors, x fastest.
+pub(crate) const NEIGHBORHOOD: [[i64; 3]; 27] = {
     let mut offsets = [[0; 3]; 27];
     let mut index = 0;
     while index < 27 {

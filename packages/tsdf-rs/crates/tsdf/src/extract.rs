@@ -5,6 +5,7 @@ use std::collections::hash_map::Entry;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::changes::NEIGHBORHOOD;
 use crate::error::TsdfError;
 use crate::mesh::{interpolation_amount, Mesh};
 use crate::tables::{for_each_triangle, CORNERS, EDGES};
@@ -105,9 +106,27 @@ pub(crate) fn full_mesh(
                 .map(|triangle| triangle.map(|local| remap[local as usize])),
         );
     }
-    Ok(attributed_mesh(
-        &vertices, triangles, blocks, voxel_size, fuse_color,
-    ))
+    // Whole-volume vertex lists are large: attributes in parallel.
+    let positions: Vec<[f32; 3]> = vertices
+        .par_iter()
+        .map(|vertex| vertex_position(vertex, voxel_size))
+        .collect();
+    let colors = fuse_color.then(|| {
+        positions
+            .par_iter()
+            .map(|position| nearest_color(*position, blocks, voxel_size))
+            .collect()
+    });
+    let normals = vertices
+        .par_iter()
+        .map(|vertex| vertex_normal(vertex, blocks))
+        .collect();
+    Ok(Mesh {
+        vertices: positions,
+        triangles,
+        colors,
+        normals,
+    })
 }
 
 /// Meshes of `keys` (sorted) that differ from the block's last delivered
@@ -130,13 +149,12 @@ pub(crate) fn block_meshes(
             if block.triangles.is_empty() && last.is_none() {
                 return None;
             }
-            let mesh = attributed_mesh(
-                &block.vertices,
-                block.triangles,
-                blocks,
-                voxel_size,
-                fuse_color,
-            );
+            // Block jobs already run in parallel: attributes sequentially,
+            // through the block's neighborhood.
+            let mesh = match Neighborhood::new(key, blocks) {
+                Some(voxels) => block_attributes(block, &voxels, voxel_size, fuse_color),
+                None => block_attributes(block, blocks, voxel_size, fuse_color),
+            };
             // A dirty block's mesh is often unchanged (its neighbor was
             // touched, not it): leave out what the consumer already holds.
             let hash = mesh.content_hash();
@@ -146,41 +164,46 @@ pub(crate) fn block_meshes(
         .collect()
 }
 
-/// Positions, colors and normals of `vertices`, computed in parallel.
-fn attributed_mesh(
-    vertices: &[EdgeVertex],
-    triangles: Vec<[u32; 3]>,
-    blocks: &Blocks,
+/// Positions, colors and normals of a block's vertices, computed in order.
+fn block_attributes(
+    block: BlockMesh,
+    voxels: &impl Voxels,
     voxel_size: f32,
     fuse_color: bool,
 ) -> Mesh {
-    let positions: Vec<[f32; 3]> = vertices
-        .par_iter()
-        .map(|vertex| {
-            let mut position = vertex
-                .edge
-                .base
-                .map(|coordinate| (coordinate as f32 + 0.5) * voxel_size);
-            position[usize::from(vertex.edge.axis)] += vertex.amount * voxel_size;
-            position
-        })
+    let positions: Vec<[f32; 3]> = block
+        .vertices
+        .iter()
+        .map(|vertex| vertex_position(vertex, voxel_size))
         .collect();
     let colors = fuse_color.then(|| {
         positions
-            .par_iter()
-            .map(|position| nearest_color(*position, blocks, voxel_size))
+            .iter()
+            .map(|position| nearest_color(*position, voxels, voxel_size))
             .collect()
     });
-    let normals = vertices
-        .par_iter()
-        .map(|vertex| vertex_normal(vertex, blocks))
+    let normals = block
+        .vertices
+        .iter()
+        .map(|vertex| vertex_normal(vertex, voxels))
         .collect();
     Mesh {
         vertices: positions,
-        triangles,
+        triangles: block.triangles,
         colors,
         normals,
     }
+}
+
+/// World position of a vertex: the voxel center of its edge's base, moved
+/// `amount` voxels along the edge.
+fn vertex_position(vertex: &EdgeVertex, voxel_size: f32) -> [f32; 3] {
+    let mut position = vertex
+        .edge
+        .base
+        .map(|coordinate| (coordinate as f32 + 0.5) * voxel_size);
+    position[usize::from(vertex.edge.axis)] += vertex.amount * voxel_size;
+    position
 }
 
 /// [`BLOCK_RESOLUTION`] as a loop counter that converts losslessly to `usize` and `i64`.
@@ -397,10 +420,74 @@ fn voxel_location(coordinate: [i64; 3]) -> (BlockKey, usize) {
     (key, local_index(local))
 }
 
+/// Voxel lookup by global coordinate.
+trait Voxels {
+    /// The allocated block holding global voxel `coordinate`, and the
+    /// voxel's index in it.
+    fn voxel(&self, coordinate: [i64; 3]) -> Option<(&VoxelBlock, usize)>;
+}
+
+impl Voxels for Blocks {
+    fn voxel(&self, coordinate: [i64; 3]) -> Option<(&VoxelBlock, usize)> {
+        let (key, index) = voxel_location(coordinate);
+        self.get(&key).map(|block| (block, index))
+    }
+}
+
+/// A block and its 26 neighbors, looked up once: what its vertices' colors
+/// and normals read. Other coordinates fall back to the map.
+struct Neighborhood<'a> {
+    /// Global coordinate of the first voxel of the block at offset `(-1, -1, -1)`.
+    first: [i64; 3],
+    /// The blocks at `NEIGHBORHOOD` offsets, x fastest.
+    blocks: [Option<&'a VoxelBlock>; 27],
+    all: &'a Blocks,
+}
+
+impl<'a> Neighborhood<'a> {
+    fn new(key: BlockKey, all: &'a Blocks) -> Option<Self> {
+        let origin = checked_block_origin(key)?;
+        let first = [
+            origin[0].checked_sub(BLOCK_RESOLUTION)?,
+            origin[1].checked_sub(BLOCK_RESOLUTION)?,
+            origin[2].checked_sub(BLOCK_RESOLUTION)?,
+        ];
+        let blocks = std::array::from_fn(|index| {
+            let offset = NEIGHBORHOOD[index];
+            let neighbor = [
+                key[0].checked_add(offset[0])?,
+                key[1].checked_add(offset[1])?,
+                key[2].checked_add(offset[2])?,
+            ];
+            all.get(&neighbor)
+        });
+        Some(Self { first, blocks, all })
+    }
+}
+
+impl Voxels for Neighborhood<'_> {
+    fn voxel(&self, coordinate: [i64; 3]) -> Option<(&VoxelBlock, usize)> {
+        let span = 3 * BLOCK_RESOLUTION;
+        let relative = [
+            coordinate[0].wrapping_sub(self.first[0]),
+            coordinate[1].wrapping_sub(self.first[1]),
+            coordinate[2].wrapping_sub(self.first[2]),
+        ];
+        if !relative.iter().all(|value| (0..span).contains(value)) {
+            return self.all.voxel(coordinate);
+        }
+        let [x, y, z] = relative.map(|value| value / BLOCK_RESOLUTION);
+        let block = self.blocks[(x + 3 * y + 9 * z) as usize]?;
+        Some((
+            block,
+            local_index(relative.map(|value| value % BLOCK_RESOLUTION)),
+        ))
+    }
+}
+
 /// TSDF of global voxel `coordinate`, when observed (nonzero weight, finite).
-fn observed_tsdf(blocks: &Blocks, coordinate: [i64; 3]) -> Option<f32> {
-    let (key, index) = voxel_location(coordinate);
-    let block = blocks.get(&key)?;
+fn observed_tsdf(voxels: &impl Voxels, coordinate: [i64; 3]) -> Option<f32> {
+    let (block, index) = voxels.voxel(coordinate)?;
     let value = block.tsdf[index];
     (block.weights[index] != 0.0 && value.is_finite()).then_some(value)
 }
@@ -410,9 +497,9 @@ fn observed_tsdf(blocks: &Blocks, coordinate: [i64; 3]) -> Option<f32> {
 /// inside (negative) to outside, toward the cameras. Reading neighbors across
 /// block borders makes the normal a function of the edge alone, so per-block
 /// meshes agree with the full mesh at seams.
-fn vertex_normal(vertex: &EdgeVertex, blocks: &Blocks) -> [f32; 3] {
-    let start = gradient(blocks, vertex.edge.base);
-    let end = gradient(blocks, vertex.edge.end());
+fn vertex_normal(vertex: &EdgeVertex, voxels: &impl Voxels) -> [f32; 3] {
+    let start = gradient(voxels, vertex.edge.base);
+    let end = gradient(voxels, vertex.edge.end());
     // A vertex on a voxel (amount 0 or 1) takes that voxel's gradient
     // exactly, so the edges that meet there agree on its normal.
     let normal = match vertex.amount {
@@ -427,7 +514,7 @@ fn vertex_normal(vertex: &EdgeVertex, blocks: &Blocks) -> [f32; 3] {
     // Degenerate gradient: fall back to the edge direction. The edge crosses
     // zero, so its endpoints differ and give the outward sign.
     let mut fallback = [0.0; 3];
-    let rising = observed_tsdf(blocks, vertex.edge.end()) > observed_tsdf(blocks, vertex.edge.base);
+    let rising = observed_tsdf(voxels, vertex.edge.end()) > observed_tsdf(voxels, vertex.edge.base);
     fallback[usize::from(vertex.edge.axis)] = if rising { 1.0 } else { -1.0 };
     fallback
 }
@@ -435,16 +522,16 @@ fn vertex_normal(vertex: &EdgeVertex, blocks: &Blocks) -> [f32; 3] {
 /// Central-difference TSDF gradient at a voxel (half the difference of its
 /// two neighbors per axis), one-sided where a neighbor is unobserved, zero
 /// where both are.
-fn gradient(blocks: &Blocks, coordinate: [i64; 3]) -> [f32; 3] {
-    let center = observed_tsdf(blocks, coordinate);
+fn gradient(voxels: &impl Voxels, coordinate: [i64; 3]) -> [f32; 3] {
+    let center = observed_tsdf(voxels, coordinate);
     std::array::from_fn(|axis| {
         let mut plus = coordinate;
         plus[axis] += 1;
         let mut minus = coordinate;
         minus[axis] -= 1;
         match (
-            observed_tsdf(blocks, minus),
-            observed_tsdf(blocks, plus),
+            observed_tsdf(voxels, minus),
+            observed_tsdf(voxels, plus),
             center,
         ) {
             (Some(minus), Some(plus), _) => (plus - minus) * 0.5,
@@ -456,17 +543,16 @@ fn gradient(blocks: &Blocks, coordinate: [i64; 3]) -> [f32; 3] {
 }
 
 /// RGB of the voxel nearest `position`; black when that voxel is not allocated.
-fn nearest_color(position: [f32; 3], blocks: &Blocks, voxel_size: f32) -> [u8; 3] {
+fn nearest_color(position: [f32; 3], voxels: &impl Voxels, voxel_size: f32) -> [u8; 3] {
     let voxel_size = f64::from(voxel_size);
     let coordinate = position.map(|value| (f64::from(value) / voxel_size - 0.5).round());
     let Some(coordinate) = checked_coordinate(coordinate) else {
         return [0; 3];
     };
-    let (key, index) = voxel_location(coordinate);
-    blocks
-        .get(&key)
-        .and_then(|block| block.color.as_ref())
-        .map_or([0; 3], |color| {
+    voxels
+        .voxel(coordinate)
+        .and_then(|(block, index)| Some((block.color.as_ref()?, index)))
+        .map_or([0; 3], |(color, index)| {
             color.rgb[index].map(|value| value.round().clamp(0.0, 255.0) as u8)
         })
 }
