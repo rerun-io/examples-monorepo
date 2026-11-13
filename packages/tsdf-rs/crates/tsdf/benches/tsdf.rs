@@ -54,6 +54,21 @@ fn fused(depth: &[f32], cameras: &[Camera]) -> TsdfVolume {
     volume
 }
 
+/// Integrate every frame, extracting and confirming the dirty block meshes
+/// after each; the number of meshes delivered.
+fn live(depth: &[f32], cameras: &[Camera]) -> usize {
+    let mut volume = TsdfVolume::new(0.04, 0.12, false).expect("valid volume parameters");
+    cameras
+        .iter()
+        .map(|camera| {
+            volume
+                .integrate(&DepthFrame::new(depth, [HEIGHT, WIDTH]), camera)
+                .expect("valid frame");
+            volume.extract_dirty_block_meshes().len()
+        })
+        .sum()
+}
+
 fn tsdf(c: &mut Criterion) {
     let depth = spherical_depth();
     let cameras = cameras();
@@ -63,6 +78,11 @@ fn tsdf(c: &mut Criterion) {
     // 200 integrations into a fresh volume; divide by 200 for the per-frame cost.
     group.bench_function("integrate_all_frames", |b| {
         b.iter(|| fused(black_box(&depth), black_box(&cameras)))
+    });
+    // The live loop: integrate a frame, then take and confirm the meshes it
+    // changed, for all 200 frames into a fresh volume.
+    group.bench_function("live_integrate_and_extract_dirty_all_frames", |b| {
+        b.iter(|| live(black_box(&depth), black_box(&cameras)))
     });
     let mut volume = fused(&depth, &cameras);
     group.bench_function("extract_mesh", |b| {
