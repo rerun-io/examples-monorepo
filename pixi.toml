@@ -77,10 +77,11 @@ torchvision = "*"
 # pin-bump: hold — gradio-rerun pins rerun-sdk exactly (0.42.0 needs rerun-sdk==0.42.0 and gradio>=6), so it moves
 # only together with the rerun-sdk pins; the conda rerun-sdk and gradio in [feature.common.dependencies] satisfy it
 # through pixi's conda->PyPI mapping.
-# gradio-rerun 0.42.0 plus one frontend fix (streamed segments load one at a time, in order; without it a slow
-# link delivers a big first segment, the blueprint and a video, after later small ones), from the ai-demos release.
-# TODO: back to `gradio-rerun = "==<version>"` from PyPI once a release loads streamed segments in order.
-gradio-rerun = { url = "https://github.com/pablovela5620/ai-demos/releases/download/gradio-rerun-0.42.0.post1/gradio_rerun-0.42.0.post1-py3-none-any.whl" }  # pin-bump: hold
+# 0.42.0.post2 (pablovela5620/ai-demos release) = gradio-rerun-viewer main @ c456457: 0.42.0 plus post1's frontend fix
+# (streamed segments load one at a time, in order) and the time cursor command `gradio_rerun.commands.set_time`
+# (rerun-io/gradio-rerun-viewer#66, merged after 0.42.0); the MetricTrail app moves the cursor to each tracked frame
+# with it. TODO: back to `gradio-rerun = "==<version>"` from PyPI once a release has both.
+gradio-rerun = { url = "https://github.com/pablovela5620/ai-demos/releases/download/gradio-rerun-0.42.0.post2/gradio_rerun-0.42.0.post2-py3-none-any.whl" }  # pin-bump: hold
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; on PyPI, as its conda build pins libprotobuf against the opencv/ffmpeg stack
 simplecv = { path = "packages/simplecv", editable = true }
 
@@ -3549,6 +3550,7 @@ tyro = ">=0.9.1,<0.10"
 # pin-bump: hold — this torch-free lane restates `common`'s exact pin; see AGENTS.md.
 rerun-sdk = { version = "==0.42.0", channel = "https://prefix.dev/conda-forge" } # pin-bump: hold
 pandas = ">=2"
+zstandard = "*"
 
 [feature.agent-traces.pypi-dependencies]
 datafusion = "==54.0.0"  # rerun-sdk[catalog]; PyPI, see [feature.common.pypi-dependencies]
@@ -3824,6 +3826,30 @@ cwd = "packages/depth-png"
 description = "rustfmt, clippy and the core crate's tests for packages/depth-png"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# tsdf-rs (Rust core + PyO3 module; metrictrail, mast3r-slam and mvs take the conda build)
+# ═══════════════════════════════════════════════════════════════════════════
+# The Python module tsdf_rs is a pixi-build source package (packages/tsdf-rs/recipe.yaml), consumed as
+# `tsdf-rs = { path = "packages/tsdf-rs" }`; its Python tests live with its consumers (packages/metrictrail/tests,
+# packages/mast3r-slam/tests). This feature only checks the Rust workspace, with the pinned toolchain: the crate's
+# lints deny unknown lint names, so a newer or older clippy must not run them.
+[feature.tsdf-rs-rust]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.tsdf-rs-rust.dependencies]
+rust = "1.98.*"
+# pyo3's build script needs an interpreter to configure crates/tsdf-py.
+python = "3.12.*"
+
+[feature.tsdf-rs-rust.activation.env]
+PYO3_PYTHON = "$CONDA_PREFIX/bin/python"
+
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
+[feature.tsdf-rs-rust.tasks.tsdf-rs-rust-check]
+cmd = "cargo-fmt --all -- --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace && RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps --workspace"
+cwd = "packages/tsdf-rs"
+description = "rustfmt, clippy with warnings denied, the tests and rustdoc for packages/tsdf-rs"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # kornia-staging
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.kornia-staging]
@@ -3951,11 +3977,10 @@ dataforge = { path = "packages/dataforge", editable = true }
 [feature.metrictrail.activation.env]
 PACKAGE_DIR = "packages/metrictrail"
 PYREFLY_TARGET = "metrictrail tools tests"
-# Weights on the NAS SSD tier (MANIFEST.md beside them); ViPE's explicit-file overrides, so a run never downloads.
-VIPE_METRICTRAIL_DPVO_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/metrictrail/dino_dpvo.pth"
-VIPE_DINOV3_VITS16_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/dinov3/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
-VIPE_MOGE2_CHECKPOINT = "/mnt/nas/ssd-8tb/metrictrail/weights/moge2/moge-2-vitl/model.pt"
-TORCH_HOME = "/mnt/nas/ssd-8tb/metrictrail/weights/torch_home"
+# ViPE's explicit-file overrides, defaulting to the files `_download-metrictrail-weights` fetches; a value set in the
+# shell wins. ViPE downloads droid.pth (torch hub) and moge-2-vitl (Hugging Face cache) itself.
+VIPE_METRICTRAIL_DPVO_CHECKPOINT = "${VIPE_METRICTRAIL_DPVO_CHECKPOINT:-$PIXI_PROJECT_ROOT/packages/metrictrail/data/weights/metrictrail/dino_dpvo.pth}"
+VIPE_DINOV3_VITS16_CHECKPOINT = "${VIPE_DINOV3_VITS16_CHECKPOINT:-$PIXI_PROJECT_ROOT/packages/metrictrail/data/weights/dinov3/dinov3_vits16_pretrain_lvd1689m-08c60483.pth}"
 
 # dpvo.mojo_backend (packages/dpvo's kernels in Mojo), as [feature.dpvo.tasks.dpvo-mojo-build].
 [feature.metrictrail.tasks.dpvo-mojo-build]
@@ -3982,9 +4007,17 @@ description = "Build and test vipe_mojo against the frozen vipe_ext references (
 
 [feature.metrictrail.tasks.metrictrail-run]
 cmd = "python tools/run.py"
-depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights"]
 cwd = "packages/metrictrail"
 description = "Run MetricTrail (ViPE pipeline=metrictrail) on a video, frame directory or VSLAM-LAB sequence and log it to Rerun (needs the GPU); pass --input --benchmark --output --rr-config.save"
+
+# The quick start: the default clip (a walk along a stone balustrade, the app's first example) with the video preset;
+# extra arguments pass through (e.g. --rr-config.save).
+[feature.metrictrail.tasks.metrictrail-example]
+cmd = "python tools/run.py --input data/movies/IMG_0497.mp4 --benchmark video --output data/example/balustrade"
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights", "_download-metrictrail-data"]
+cwd = "packages/metrictrail"
+description = "Run MetricTrail on the default example clip (downloads the weights and the clips on first use) and show it in Rerun (needs the GPU)"
 
 [feature.metrictrail.tasks.metrictrail-log-run]
 cmd = "python tools/log_run.py"
@@ -4005,8 +4038,8 @@ description = "Write (and with --catalog-url/--dataset register) the MetricTrail
 [feature.metrictrail.tasks._download-metrictrail-data]
 cmd = "hf download pablovela5620/dpvo-example-data --repo-type dataset --include 'movies/*.mp4' --local-dir data/"
 cwd = "packages/metrictrail"
-outputs = ["packages/metrictrail/data/movies/IMG_0493.mp4"]
-description = "Download the example video clips of the MetricTrail app"
+outputs = ["packages/metrictrail/data/movies/IMG_0493.mp4", "packages/metrictrail/data/movies/IMG_0497.mp4"]
+description = "Download the example video clips of the MetricTrail app and the run CLI's default input (IMG_0497.mp4)"
 
 [feature.metrictrail.tasks._download-metrictrail-iphone-data]
 cmd = "hf download pablovela5620/dpvo-example-data iphone/pool.mp4 --repo-type dataset --local-dir data/"
@@ -4014,9 +4047,17 @@ cwd = "packages/metrictrail"
 outputs = ["packages/metrictrail/data/iphone/pool.mp4"]
 description = "Download the iPhone example video of the MetricTrail app"
 
+# The weights ViPE's checkpoint variables name by default (activation.env), at pinned revisions; ViPE checks their
+# sha256. DINOv3 ViT-S/16 as the .pth ViPE loads comes from a mirror: Meta's own channels are gated.
+[feature.metrictrail.tasks._download-metrictrail-weights]
+cmd = "hf download nvidia/MetricTrail dino_dpvo.pth --revision f5a3ce1cebd2a6a35c30ffb138caa07122731fff --local-dir data/weights/metrictrail && hf download xysun917/dinov3-vits16 dinov3_vits16_pretrain_lvd1689m-08c60483.pth --revision 4f097416bd15cb1ca527bac01b39e1e64ef31f8a --local-dir data/weights/dinov3"
+cwd = "packages/metrictrail"
+outputs = ["packages/metrictrail/data/weights/metrictrail/dino_dpvo.pth", "packages/metrictrail/data/weights/dinov3/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"]
+description = "Download the DINO-DPVO and DINOv3 ViT-S/16 weights of MetricTrail"
+
 [feature.metrictrail.tasks.metrictrail-app]
 cmd = "python tools/gradio_app.py"
-depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-data", "_download-metrictrail-iphone-data"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights", "_download-metrictrail-data", "_download-metrictrail-iphone-data"]
 cwd = "packages/metrictrail"
 description = "Launch the MetricTrail Gradio app: upload a video, watch the run stream into an embedded Rerun viewer (needs the GPU)"
 
@@ -4032,7 +4073,7 @@ description = "Build the lietorch-mojo extension, then run the package unit test
 # shadows the dev feature's task.
 [feature.metrictrail.tasks.tests-integration]
 cmd = "sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
-depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build"]
+depends-on = ["lietorch-mojo-build", "dpvo-mojo-build", "vipe-mojo-build", "_download-metrictrail-weights"]
 cwd = "packages/metrictrail"
 description = "Build the lietorch-mojo extension and the DPVO and ViPE kernels, then run the package integration tests"
 
@@ -4045,6 +4086,7 @@ agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-tr
 kornia-staging = { features = ["kornia-staging"], solve-group = "kornia-staging", no-default-feature = true }
 kornia-staging-dev = { features = ["kornia-staging", "dev"], solve-group = "kornia-staging", no-default-feature = true }
 depth-png-rust = { features = ["depth-png-rust"], no-default-feature = true }
+tsdf-rs-rust = { features = ["tsdf-rs-rust"], no-default-feature = true }
 arkitscenes-download = { features = [
     "common",
     "arkitscenes-download",

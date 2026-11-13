@@ -15,15 +15,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import rerun as rr
+from jaxtyping import Int64
+from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from metrictrail.artifacts import ColoredCloud, read_binary_ply
 from metrictrail.benchmarks import BENCHMARKS, BenchmarkName, BenchmarkPreset
-from metrictrail.blueprint import log_waiting_notes, run_blueprint
+from metrictrail.blueprint import log_waiting_notes, run_blueprint, shares_input_camera
 from metrictrail.frames import FrameSource, open_frames
 from metrictrail.ground_truth import GtContext, load_gt_context, protocol_for
-from metrictrail.outputs import LoggedRun, LogOptions, RunMetrics, RunOutputs, artifact_name, log_run_outputs, make_provenance, read_run_outputs
+from metrictrail.outputs import (
+    LoggedRun,
+    LogOptions,
+    RunMetrics,
+    RunOutputs,
+    artifact_name,
+    log_run_outputs,
+    make_provenance,
+    read_run_outputs,
+    ride_final_trajectory,
+)
 from metrictrail.palette import RunLabel
+from metrictrail.rerun_log import log_input_video
 
 DEPTH_RANGES_M: dict[BenchmarkName, tuple[float, float]] = {
     "tum": (0.3, 3.0),
@@ -58,7 +71,7 @@ class Config:
     """Fused cloud in ViPE's world frame (``python -m vipe.metrictrail.pointcloud <run_dir> --name <name> --world-frame``);
     None: no cloud (fusing in-process needs the ViPE env with a lietorch provider: ``metrictrail run`` does it)."""
     depth_every: int = 1
-    """Log every k-th frame's RGB and depth."""
+    """Log every k-th frame's depth (and a frame directory's frames); a video input is logged whole."""
     max_cloud_points: int = 400_000
     """Display subsample of the cloud."""
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
@@ -80,7 +93,11 @@ def main(config: Config) -> RunMetrics:
     rec: rr.RecordingStream = config.rr_config.rec_stream
     has_gt: bool = context is not None
     rec.send_recording_name(f"MetricTrail {config.label}: {name}")
-    log_waiting_notes(rec, has_capture=False, has_gt=has_gt)
+    has_video: bool = frames.kind == "video"
+    video_time_ns: Int64[ndarray, "s"] | None = None
+    if has_video:
+        video_time_ns = log_input_video(rec, config.input)
+    log_waiting_notes(rec, has_capture=False)
     options = LogOptions(
         label=config.label,
         log_frames=True,
@@ -96,8 +113,14 @@ def main(config: Config) -> RunMetrics:
         producer=f"{config.producer} | logged by metrictrail.apis.log_run (finished artifacts, no live capture)",
         env=Path(sys.prefix),
     )
-    logged: LoggedRun = log_run_outputs(rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance)
-    blueprint = run_blueprint(config.label, has_capture=False, has_gt=has_gt, world_eye=logged.world_eye, metric_eye=logged.metric_eye)
+    logged: LoggedRun = log_run_outputs(
+        rec, outputs, options, frames=frames, context=context, cloud_world=cloud, provenance=provenance, video_time_ns=video_time_ns
+    )
+    if shares_input_camera(has_capture=False, has_video=has_video, has_gt=has_gt):
+        ride_final_trajectory(rec, outputs.trajectory, video_time_ns)
+    blueprint = run_blueprint(
+        config.label, has_capture=False, has_gt=has_gt, has_video=has_video, world_eye=logged.world_eye, metric_eye=logged.metric_eye
+    )
     rec.send_blueprint(blueprint, make_active=True, make_default=True)
     rec.flush()
     print(logged.metrics)

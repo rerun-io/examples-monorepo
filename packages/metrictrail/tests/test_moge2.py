@@ -100,6 +100,24 @@ def test_network_size_is_the_inputs_own_token_grid_not_a_bucket() -> None:
     assert kitti_hw[0] % 14 == 0 and kitti_hw[1] % 14 == 0
 
 
+def test_resolution_level_selects_the_grid_and_separates_cached_models() -> None:
+    assert depth.MoGe2Engine.network_hw((280, 504), resolution_level=3) == (462, 840)
+    cache = ModelCache()
+    coarse = depth.make_provider("l", resolution_level=3, model_cache=cache)
+    repeated = depth.make_provider("l", resolution_level=3, model_cache=cache)
+    original = depth.make_provider("l", resolution_level=9, model_cache=cache)
+    assert coarse.engine is repeated.engine
+    assert coarse.engine is not original.engine
+    assert coarse.describe()["resolution_level"] == 3
+    assert original.describe()["resolution_level"] == 9
+
+
+@pytest.mark.parametrize("level", [-1, 10])
+def test_resolution_level_rejects_out_of_range_values(level: int) -> None:
+    with pytest.raises(ValueError, match="resolution_level"):
+        depth.MoGe2Engine("tensorrt", resolution_level=level)
+
+
 def test_a_focal_change_reuses_the_forward_and_matches_an_uncached_run() -> None:
     cached, built = make_engine()
     provider = depth.MoGe2NormalProvider("l", engine=cached)
@@ -167,3 +185,26 @@ def test_registered_name_builds_our_provider_with_one_engine_per_cache() -> None
     assert f"pipeline.slam.keyframe_depth={depth.DEFAULT_PROVIDER}" in depth.PROVIDER_OVERRIDES
     # The calibration config states the precision our provider runs (upstream's default is FP32 for ViPE's moge2-l).
     assert "pipeline.init.calibration.depth_use_fp16=true" in depth.PROVIDER_OVERRIDES
+
+
+def test_a_finished_run_releases_the_cached_forwards_but_keeps_the_network() -> None:
+    """The app keeps its engines for its whole life; their per-frame outputs (GPU tensors) must not outlive a run."""
+    engine, built = make_engine()
+    provider = depth.MoGe2NormalProvider("l", engine=engine)
+    provider.predict_metric(frame(0), focal_px=40.0)
+    depth.clear_forward_caches()
+    provider.predict_metric(frame(0), focal_px=40.0)
+    assert engine.forward_count == 2  # a second forward: the first one's output was released
+    assert len(built) == 1  # the same network (predictor) served both
+
+
+def test_free_fov_observers_see_every_head_focal() -> None:
+    engine, _ = make_engine()
+    provider = depth.MoGe2NormalProvider("l", engine=engine)
+    seen: list[float] = []
+    depth.FREE_FOV_OBSERVERS.append(lambda k4: seen.append(float(k4[0])))
+    try:
+        k4 = provider.estimate_free_fov_k4(frame(0))
+    finally:
+        depth.FREE_FOV_OBSERVERS.clear()
+    assert seen == [float(k4[0])]

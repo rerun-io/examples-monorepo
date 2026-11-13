@@ -19,7 +19,7 @@ from agent_traces import codex_records as cr
 from agent_traces import events as ev
 from agent_traces.codex_tools import execution, model_tool
 from agent_traces.errors import SkipSession
-from agent_traces.sources import MISSING_INPUT, PARENT_FAILED, PARENT_SKIPPED, Discovery, SessionSource, iter_jsonl
+from agent_traces.sources import MISSING_INPUT, PARENT_FAILED, PARENT_SKIPPED, Discovery, SessionSource, iter_jsonl, open_transcript, transcript_size
 from agent_traces.timestamps import parse_timestamp_ns
 
 
@@ -452,6 +452,10 @@ def usage_counters(usage: cr.TokenUsage) -> ev.Usage:
     )
 
 
+DUPLICATE_THREAD: str = "duplicate-thread"
+"""A shorter or older copy of a thread that another file in the home also holds."""
+
+
 def rollout_home(path: Path) -> Path:
     """Find the owning home from either active or archived layout."""
     return next((parent.parent for parent in path.parents if parent.name in {"sessions", "archived_sessions"}), path.parent)
@@ -459,7 +463,7 @@ def rollout_home(path: Path) -> Path:
 
 def rollout_header(path: Path) -> cr.SessionMeta:
     """Decode a header and identify legacy layouts without reading its body."""
-    with path.open("rb") as stream:
+    with open_transcript(path) as stream:
         line: bytes = stream.readline().lstrip(b"\0")
     try:
         raw: object = orjson.loads(line)
@@ -480,7 +484,7 @@ def discover_rollouts(home: Path, result: Discovery) -> dict[Path, cr.SessionMet
     """Index headers only, retaining excluded parents for child ownership."""
     index: dict[Path, cr.SessionMeta] = {}
     for directory in ("sessions", "archived_sessions"):
-        for candidate in sorted((home / directory).rglob("*.jsonl")):
+        for candidate in sorted([*(home / directory).rglob("*.jsonl"), *(home / directory).rglob("*.jsonl.zst")]):
             if candidate.name.startswith("._"):
                 continue
             path: Path = candidate.resolve()
@@ -491,6 +495,16 @@ def discover_rollouts(home: Path, result: Discovery) -> dict[Path, cr.SessionMet
                 result.skipped[path] = str(error)
             except (ValueError, SerdeError, OSError) as error:
                 result.failed[path] = str(error)
+    copies: dict[str, list[Path]] = {}
+    for path, meta in index.items():
+        copies.setdefault(meta.thread_id, []).append(path)
+    for paths in copies.values():
+        if len(paths) > 1:  # Moved to the archive, or compressed beside an older plain copy: keep the longest.
+            kept: Path = max(paths, key=lambda path: (transcript_size(path), path.stat().st_mtime, str(path)))
+            for path in paths:
+                if path != kept:
+                    del index[path]
+                    result.skipped[path] = DUPLICATE_THREAD
     return index
 
 

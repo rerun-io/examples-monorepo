@@ -56,11 +56,14 @@ source:
     # vipe.ext imports vipe_mojo (packages/vipe-mojo) instead of vipe_ext or its JIT build; setup.py builds no
     # extension (no torch import, no CUDAExtension). Removed lines only, plus the import.
     - patches/0007-kernels-from-vipe-mojo.patch
+    # Hook only: calibrate_shared_k takes processor.ENGINE_FACTORY when its caller passes no engine_factory, so
+    # packages/metrictrail's live calibration view subclasses the engine for one run instead of patching its methods.
+    - patches/0008-calibration-engine-factory-hook.patch
 
 build:
   # Bump with every patch or build.sh change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 7
+  number: 8
   script:
     file: build.sh
 

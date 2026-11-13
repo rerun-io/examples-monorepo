@@ -20,6 +20,8 @@ import torch.nn as nn
 from jaxtyping import Float
 from torch import Tensor
 
+from . import graph_replay
+
 
 class ResidualBlock(nn.Module):
     """Standard two-layer residual block with configurable normalization.
@@ -410,8 +412,15 @@ class BasicEncoder4(nn.Module):
             x: Input images, shape ``(b, n, 3, h, w)``.
 
         Returns:
-            Feature maps of shape ``(b, n, output_dim, h//4, w//4)``.
+            Feature maps of shape ``(b, n, output_dim, h//4, w//4)``. Inside
+            :func:`dpvo.graph_replay.graph_replay`, CUDA inference replays a
+            captured graph of :meth:`forward_eager` per input shape.
         """
+        replayed: Tensor | None = graph_replay.replay_features(self, x, BasicEncoder4.forward_eager)
+        return replayed if replayed is not None else self.forward_eager(x)
+
+    def forward_eager(self, x: Float[Tensor, "b n c1 h1 w1"]) -> Float[Tensor, "b n output_dim h2 w2"]:
+        """:meth:`forward`, always run kernel by kernel."""
         b: int
         n: int
         c1: int

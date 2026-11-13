@@ -8,23 +8,73 @@ per-frame metric depth and, from the same MoGe-2 forward, surface normals.
 This package holds our code around upstream: benchmark presets, a run CLI with a Rerun logger, the VSLAM-LAB / paper
 evaluation and the catalog layer. ViPE itself comes from `recipes/vipe-src`.
 
+## Quick start
+
+On Linux with an NVIDIA GPU, from the repository root:
+
+```bash
+pixi run -e metrictrail --frozen metrictrail-example
+```
+
+This runs the 1:58 clip `data/movies/IMG_0497.mp4`, a walk along a stone balustrade (the app's first example), with the
+`video` preset and opens the Rerun viewer. Without a display, add `--rr-config.save /abs/path/balustrade.rrd`. Outputs go
+to `packages/metrictrail/data/example/balustrade`. The first run builds the Mojo kernels, downloads the weights and the
+example clips (about 430 MB), and builds TensorRT engines; later runs reuse them:
+
+| What | Cached in |
+| --- | --- |
+| DINO-DPVO (`nvidia/MetricTrail`), DINOv3 ViT-S/16 (`xysun917/dinov3-vits16`, a mirror of Meta's file) | `packages/metrictrail/data/weights/` |
+| The example clips (`pablovela5620/dpvo-example-data`) | `packages/metrictrail/data/movies/` |
+| MoGe-2 `Ruicheng/moge-2-vitl-normal` | the Hugging Face cache (`HF_HOME`) |
+| DROID `droid.pth` (SharedK calibration) | the torch hub (`TORCH_HOME`, default `~/.cache/torch`) |
+| ONNX files and TensorRT engines | `~/.cache/monoprior` (`MONOPRIOR_TRT_CACHE`), `~/.cache/trtkit/trt` (`TRTKIT_TRT_CACHE`) |
+
+To use weight files kept elsewhere, export `VIPE_METRICTRAIL_DPVO_CHECKPOINT` and `VIPE_DINOV3_VITS16_CHECKPOINT`
+before `pixi run`: a value set in the shell wins over the feature's defaults.
+
 ## Packaging
 
 | Part | Where it comes from | Why |
 | --- | --- | --- |
 | ViPE + MetricTrail | `recipes/vipe-src`: the GitHub archive of ViPE `ead2e00`, sha256-pinned | `ead2e00` is the first commit with `vipe/metrictrail`; no release has it (v1.2.0 predates it). |
-| Kernels | Mojo, one source for CPU and CUDA, compiled for the local GPU. ViPE's CUDA extension `vipe_ext` is not built: patch 0007 makes `vipe.ext` import `packages/vipe-mojo`'s `vipe_mojo` (the ops MetricTrail calls; the others raise `NotImplementedError` naming the op). DPVO's kernels are `packages/dpvo`'s `dpvo.mojo_backend`. Built by the `vipe-mojo-build` and `dpvo-mojo-build` tasks (a `depends-on` of `metrictrail-run`, `metrictrail-app` and `tests-integration`) | no nvcc build at `pixi install`; one kernel source per op for every device. |
+| Kernels | Mojo, one source for CPU and CUDA, compiled for the local GPU. ViPE's CUDA extension `vipe_ext` is not built: patch 0007 makes `vipe.ext` import `packages/vipe-mojo`'s `vipe_mojo` (the ops MetricTrail calls; the others raise `NotImplementedError` naming the op). DPVO's kernels are `packages/dpvo`'s `dpvo.mojo_backend`. Built by the `vipe-mojo-build` and `dpvo-mojo-build` tasks (a `depends-on` of `metrictrail-run`, `metrictrail-example`, `metrictrail-app` and `tests-integration`) | no nvcc build at `pixi install`; one kernel source per op for every device. |
 | lietorch | patch 0001: ViPE's vendored lietorch (`vipe/ext/lietorch`) imports `lietorch_mojo` and `build.sh` deletes the vendored code; the DPVO shim's `lietorch` re-exports it too (the DPVO copies go with ViPE's DPVO) | one lietorch for the workspace (lietorch-mojo). ViPE's copies are code-identical to upstream lietorch. |
 | DINOv3 | patch 0002: `recipes/dinov3-src` (a run dependency) | the same ViT-S/16; patch tokens are bit-identical. |
-| MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds only that registry and the `fuse_point_cloud` hook `metrictrail.fusion` uses for the normals) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid at 3600 tokens; torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
+| MoGe-2 (`moge2-l-normal`) | patch 0003: `packages/monoprior`'s MoGe-2 code for ViPE's own `moge2-l` (`build.sh` deletes ViPE's copy). Our port's prior is this package's `metrictrail.moge2`, registered in ViPE's `DEPTH_PROVIDERS` (patch 0004 adds only that registry and the `fuse_point_cloud` hook `metrictrail.fusion` uses for the normals) and selected by the run CLI's overrides `pipeline.slam.keyframe_depth` and `pipeline.init.calibration.depth_model`: it runs monoprior's `MoGeV2TrtPredictor` (heads `geometry`, batch 1) on `Ruicheng/moge-2-vitl-normal` @ `b135031`, one TensorRT engine per input token grid (1,200 tokens by default); torch FP16 on the same checkpoint when TensorRT does not import (`VIPE_MOGE2_BACKEND=auto\|tensorrt\|torch`) | one forward gives depth and normals. ViPE's FoV-conditioned post-processing is kept on the raw outputs; the forward does not depend on the FoV, so it is cached per source frame and a new focal re-runs only the post-processing. Depth differs from ViPE's `moge-2-vitl` by 1.96 % AbsRel (median +1.3 %) on 64 TUM frames; accepted. |
 | DPVO | `packages/dpvo`'s `dpvo.metric.MetricDPVO` (an editable path dependency of the `metrictrail` feature). The recipe deletes ViPE's vendored DPVO, its kernels and the stereo runner, and installs re-export shims at `vipe.metrictrail.dpvo` (`recipes/vipe-src/dpvo_shim`), so ViPE's `slam.py` builds `MetricDPVO` from its yacs config unchanged; patch 0005 hands the DINO patchifier `packages/dpvo`'s patchify keywords | one DPVO for the workspace. ViPE's fork (metric-depth local BA, the metric global-BA backend, the `cuda_ba` prior kernel) is ported onto the typed core's hooks; the three presets run ViPE's operations in ViPE's order (lockstep against ViPE's copy on TUM, 7-Scenes and KITTI). MetricTrail does not use DBoW loop closure, so `packages/dpretrieval` is not used. `metrictrail.capture` observes DPVO through `dpvo.hooks.add_global_observer`. |
 
-Weights are on the NAS (`/mnt/nas/ssd-8tb/metrictrail/weights`, `MANIFEST.md` beside them). The `metrictrail` feature
-sets ViPE's checkpoint variables to these files. MoGe-2's `moge-2-vitl-normal` is the exception: monoprior loads it from
-the Hugging Face cache (pinned revision) when it exports the ONNX for a new token grid or when the torch fallback runs.
+The hidden task `_download-metrictrail-weights` (a `depends-on` of `metrictrail-run`, `metrictrail-app`,
+`metrictrail-example` and `tests-integration`) fetches DINO-DPVO and DINOv3 at pinned revisions into `data/weights/`;
+the `metrictrail` feature points ViPE's checkpoint variables at these files. MoGe-2's `moge-2-vitl-normal` comes from
+the Hugging Face cache (pinned revision) when monoprior exports the ONNX for a new token grid or when the torch fallback runs.
 ONNX files and TensorRT engines are cached under `~/.cache/monoprior` (`MONOPRIOR_TRT_CACHE`); the first run on a new
-raster aspect builds its engines (about 40 s each on the RTX 5090; TUM needs two, 728x966 for tracking and 714x980 for
-the SharedK calibration raster).
+raster aspect builds its engines (about 40 s each on the RTX 5090); tracking and SharedK calibration can need
+separate grids.
+
+The CLI and app use MoGe-2 detail level 0 (1,200 tokens) for calibration and tracking, and 64 patches per frame.
+These are deliberate accuracy/speed trades. Set `--depth-resolution-level 9 --patches-per-frame 96` to restore the
+original depth grid and patch count. Each detail level has its own engines and forward cache; the run record stores
+the selected level and resolved tracker configuration. The wider paper evaluation below used level 9 and 96 patches
+and has not been repeated with these defaults.
+
+The `ours` path replays DINO and both DPVO convolutional encoders with CUDA graphs during inference. Graphs are scoped
+to one run and separated by model, raster and precision; FP32 recovery uses its own graph. Returned features own their
+storage, and logging stays outside capture. The recurrent update prepares its neighbor/group indices before replay;
+its cache holds at most eight recurring shapes, with uncommon shapes evaluated normally.
+Factor pruning and motion checks reuse compacted edge indices across their tensors. Motion checks and inference
+projection use fused Mojo kernels that preserve per-camera intrinsics, quaternion normalization and near-plane
+clipping. Projection keeps its original autograd path when gradients are enabled. CUDA correlation pairs neighboring
+half-precision outputs with native half arithmetic, keeping the channel order and separate product/sum rounding.
+
+On the shared RTX 5090, the 642-frame `IMG_0493.mp4` clip measured **68.27 tracking FPS** without capture and
+**46.25 FPS** with capture (median of three full runs each, prod environment, no mesh). Process wall medians were
+34.96 / 38.52 s, including SharedK calibration at 16.36 / 17.52 s. The original 3,600-token, 96-patch path measured
+26.83 / 24.29 tracking FPS. GPU contention matters: final no-capture samples were 69.28, 68.27 and 56.73 FPS.
+These are tracking rates; model loading, calibration and final logging add to the process wall time.
+
+The final TUM fr1_desk check (seed 1234) gave **2.307 cm Sim(3) ATE**, scale **1.06327**, and 5.684 cm SE(3) ATE.
+The original settings gave 2.186 cm, 1.05873 and 5.313 cm. The new defaults pass the fixed guard of at most 10% more
+Sim(3) ATE and a scale change within 0.02. All 613 TUM poses and all 642 poses in each video run were finite.
 
 ## Run
 
@@ -60,11 +110,22 @@ pixi run -e metrictrail metrictrail-app
 A Gradio app (`metrictrail/gradio_ui/metrictrail_ui.py`, shim `tools/gradio_app.py`): upload a video or pick an example
 (the task downloads dpvo's example clips into `data/`), and the run streams into an embedded Rerun viewer. It runs
 `metrictrail.apis.run.run_and_log` with the `video` preset and the default MoGe-2 provider, so it calibrates the camera
-itself; there is no intrinsics input. Settings: the tracking stride and `max_frames` (upstream's Hydra keys). The capture
-runs in live mode: DPVO's frames, patches and BA window stream in as it tracks, with depth and normals of new keyframes
-only and no DINOv3 PCA. Calibration has no hook, so the viewer stays empty for those seconds. The trajectory and the
+itself; there is no intrinsics input. Settings: the tracking stride, `max_frames` (upstream's Hydra keys) and the SharedK
+calibration budget (`fast64` by default, half the time of ViPE's `robust128`). The input video is logged first and plays at
+once. While SharedK calibrates, the viewer shows its own layout on the `calibration_step` timeline: the DROID keyframe map,
+the focal and the keyframes kept, and the newest keyframe's MoGe-2 prior against its bundle-adjusted depth. The capture
+then runs in live mode: DPVO's patches (on the video), BA window and
+the DINOv3 PCA video stream in as it tracks, with depth and normals of new keyframes only. The trajectory and the
 surface arrive at the end; the TSDF mesh grows in the DPVO tracking view from each new keyframe (at DPVO's current pose) and the final mesh (final poses) replaces it. Gradio prints the local URL. Open it over HTTPS (`tailscale serve`): on plain HTTP the
 viewer stays empty.
+
+**Video, not images, in the recording** (`metrictrail.rerun_log`, the EgoHand pattern): the input video is logged once as
+`rr.VideoStream` from its own samples (`input/video`, no re-encode for an H.264/AV1 MP4; HEVC, other containers and
+rotated clips get one H.264 viewer copy) on `video_time` = its PTS, under an `input` pinhole of the source camera (the
+tracking raster's K mapped back through ViPE's resize and crop), and every per-frame entity carries that `video_time`.
+The DINOv3 PCA (and, for a frame directory, the tracked frames as `cam/rgb`) is encoded per frame to an H.264
+`VideoStream` (NVENC; libx264 with a warning without it). Depth stays a millimetre PNG per frame (Rerun has no depth
+video); keyframe normals stay JPEG (sparse).
 
 **Video input stays on the GPU** (`metrictrail.gpu_video`): a video decodes on NVDEC (simplecv `TorchCodecVideoReader`,
 display rotation applied as OpenCV does), ViPE's input raster (`raster_frame`) resizes and crops on the GPU, and the
@@ -221,3 +282,21 @@ cache (a cold download was not measured):
   Pass your VSLAM-LAB checkout.
 - **Catalog.** The shipped path (`metrictrail`) is on the 9 TUM segments only; 7-Scenes, KITTI and LaMAria carry the
   torch reproduction (`metrictrail_paper`) and, except LaMAria, upstream ViPE.
+
+SharedK can use `--calibration-graphs` for prepared DROID graph metadata and a CUDA graph containing
+one complete projection/correlation/recurrent-update/BA step. Each shape bucket warms on its first real
+update, captures on its second, then replays; no additional solver iterations are applied. Two buckets
+bound retained memory. Connectivity, correlation volumes, state and all solve tables are copied on reuse.
+Float64 LLT stays on the GPU for frontend and backend steps. Live
+calibration hooks still see the same buffer and edge tensors. Proximity/keyframe decisions and
+CUDA's exact age-tie ordering remain outside capture. This option is enabled by default after the pool/movie focal and TUM accuracy guards passed for both budgets.
+Use `--no-calibration-graphs` to select the original graph implementation.
+
+`--calibration-gru-backend tensorrt` selects the frozen DROID ConvGRU TensorRT backend.
+trtkit's engine cache (`TRTKIT_TRT_CACHE`, default `~/.cache/trtkit/trt`) holds its ONNX files and engines under `droid-gru/`;
+identity includes actual weights, raster, FP16 precision, edge-count profile, TensorRT version and GPU.
+The dynamic profile is 1/48/128 edges (min/opt/max). CPU, training, gradients, FP32 and counts outside
+that profile retain PyTorch. Outputs own their storage. A runtime lives as long as its model, so the app (which keeps its models) reuses it,
+while each calibration starts with fresh hidden state. The run prints export/build/load time separately;
+these costs remain included in total wall time. A Space must ship matching ONNX and engine artifacts in
+this directory to avoid building them on its first calibration. This backend is enabled by default after those same guards passed; `--calibration-gru-backend torch` selects PyTorch.

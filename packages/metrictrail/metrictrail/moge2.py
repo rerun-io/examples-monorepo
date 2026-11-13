@@ -9,8 +9,7 @@ MoGe-2 call:
   one forward pass), run as monoprior's TensorRT engine (``MoGeV2TrtPredictor``, heads ``geometry``) when TensorRT
   and trtkit import, else monoprior's torch predictor with FP16 autocast on the same checkpoint
   (:func:`select_moge2_backend`; ``VIPE_MOGE2_BACKEND`` forces one);
-- 3600 tokens (``resolution_level=9``) on the input's own token grid (``token_grid_hw(width / height, 3600)``, one
-  engine per grid), never an aspect bucket;
+- a selectable detail level on the input's own token grid (one engine per grid), never an aspect bucket;
 - ``fov_x`` computed from the bound focal in float64 Python arithmetic (ViPE's ``fov_x_degrees``);
 - MoGe-2's fov-conditioned post-processing on the raw graph outputs:
   ``recover_shift_and_intrinsics(points, mask > 0.5, fov_x, aspect_ratio)``, the shift added to z, times
@@ -30,6 +29,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
+from weakref import WeakSet
 
 import numpy as np
 import torch
@@ -57,7 +57,7 @@ ImageKey: TypeAlias = tuple[int, int, bytes]
 MOGE2_BACKEND_ENV: str = "VIPE_MOGE2_BACKEND"
 """Environment override of the backend choice (``auto`` when unset)."""
 MOGE2_RESOLUTION_LEVEL: int = 9
-"""MoGe-2 detail level of every MetricTrail call (3600 tokens)."""
+"""Original MoGe-2 detail level (3600 tokens); the run settings can select a smaller grid."""
 MOGE2_ENCODERS: dict[str, MoGe2Encoder] = {"l": "vitl", "b": "vitb", "s": "vits"}
 """Registry variant -> monoprior encoder of the pinned ``moge-2-vit*-normal`` checkpoint."""
 MOGE2_FORWARD_CACHE_FRAMES: int = 256
@@ -177,6 +177,21 @@ def image_key(rgb_u8_hw3: UInt8[Tensor, "h w 3"]) -> ImageKey:
     return height, width, hashlib.blake2b(data.tobytes(), digest_size=16).digest()
 
 
+FREE_FOV_OBSERVERS: list[Callable[[Float64[ndarray, "4"]], None]] = []
+"""Called with every K :meth:`MoGe2NormalProvider.estimate_free_fov_k4` returns (SharedK's head focals; the live
+calibration view, :func:`metrictrail.calibration_live.calibration_live_view`, adds one for a run)."""
+_ENGINES: WeakSet["MoGe2Engine"] = WeakSet()
+"""Every live engine, so :func:`clear_forward_caches` can reach the ones a long-lived ``ModelCache`` holds."""
+
+
+def clear_forward_caches() -> None:
+    """Release every engine's cached forwards (GPU tensors, up to :data:`MOGE2_FORWARD_CACHE_FRAMES` per engine) and
+    keep the networks: a run reuses its own frames' forwards, but an app that keeps its engines between runs must not
+    hold the last clip's outputs on the GPU until the next click."""
+    for engine in list(_ENGINES):
+        engine._cache.clear()
+
+
 class MoGe2Engine:
     """MoGe-2 (normal checkpoint) forwards with a per-source-frame cache of the raw outputs.
 
@@ -190,13 +205,17 @@ class MoGe2Engine:
         backend: MoGe2Backend,
         encoder: MoGe2Encoder = "vitl",
         *,
+        resolution_level: int = MOGE2_RESOLUTION_LEVEL,
         cache_frames: int = MOGE2_FORWARD_CACHE_FRAMES,
         predictor_factory: Callable[[tuple[int, int]], Any] | None = None,
     ) -> None:
+        if not 0 <= resolution_level <= 9:
+            raise ValueError(f"resolution_level must be within [0, 9], got {resolution_level}")
         if cache_frames < 0:
             raise ValueError(f"cache_frames must be >= 0, got {cache_frames}")
         self.backend: MoGe2Backend = backend
         self.encoder: MoGe2Encoder = encoder
+        self.resolution_level: int = resolution_level
         self.cache_frames: int = int(cache_frames)
         self._factory: Callable[[tuple[int, int]], Any] = predictor_factory if predictor_factory is not None else self._default_predictor
         self._predictors: dict[tuple[int, int], Any] = {}
@@ -204,13 +223,14 @@ class MoGe2Engine:
         self._cache: OrderedDict[ImageKey, MoGe2Forward] = OrderedDict()
         self.forward_count: int = 0
         self.postprocess_count: int = 0
+        _ENGINES.add(self)
 
     @staticmethod
-    def network_hw(image_hw: tuple[int, int]) -> tuple[int, int]:
-        """The input's own token grid at 3600 tokens (14-px aligned), not an aspect bucket."""
+    def network_hw(image_hw: tuple[int, int], *, resolution_level: int = MOGE2_RESOLUTION_LEVEL) -> tuple[int, int]:
+        """The input's own 14-pixel-aligned token grid at the selected detail level."""
         from monopriors.models.moge_v2 import resolve_num_tokens, token_grid_hw
 
-        return token_grid_hw(image_hw[1] / image_hw[0], resolve_num_tokens(MOGE2_RESOLUTION_LEVEL))
+        return token_grid_hw(image_hw[1] / image_hw[0], resolve_num_tokens(resolution_level))
 
     def _default_predictor(self, network_hw: tuple[int, int]) -> Any:
         from monopriors.models.moge_v2 import MoGeV2TorchPredictor, MoGeV2TrtPredictor
@@ -221,15 +241,15 @@ class MoGe2Engine:
             # The ONNX (cached per grid, batch-dynamic) is exported for batches up to 8 as monoprior's default
             # predictor does: a batch-1 export fails (torch.export rejects Dim(min=1, max=1)); the engine is batch 1.
             export_moge_v2_onnx(
-                heads="geometry", encoder=self.encoder, image_hw=network_hw, resolution_level=MOGE2_RESOLUTION_LEVEL, max_batch_size=8
+                heads="geometry", encoder=self.encoder, image_hw=network_hw, resolution_level=self.resolution_level, max_batch_size=8
             )
             return MoGeV2TrtPredictor(
-                encoder=self.encoder, heads="geometry", network_hw_options=(network_hw,), resolution_level=MOGE2_RESOLUTION_LEVEL, batch_size=1
+                encoder=self.encoder, heads="geometry", network_hw_options=(network_hw,), resolution_level=self.resolution_level, batch_size=1
             )
         if self._torch_predictor is None:
             # network_hw_options=None: the exact token grid of each input, like the engines.
             self._torch_predictor = MoGeV2TorchPredictor(
-                encoder=self.encoder, heads="geometry", network_hw_options=None, resolution_level=MOGE2_RESOLUTION_LEVEL
+                encoder=self.encoder, heads="geometry", network_hw_options=None, resolution_level=self.resolution_level
             )
         return self._torch_predictor
 
@@ -243,7 +263,7 @@ class MoGe2Engine:
             self._cache.move_to_end(key)
             return cached
         image_hw: tuple[int, int] = (int(rgb_u8_hw3.shape[0]), int(rgb_u8_hw3.shape[1]))
-        network_hw: tuple[int, int] = self.network_hw(image_hw)
+        network_hw: tuple[int, int] = self.network_hw(image_hw, resolution_level=self.resolution_level)
         predictor: Any = self._predictors.get(network_hw)
         if predictor is None:
             predictor = self._predictors[network_hw] = self._factory(network_hw)
@@ -312,6 +332,7 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
         use_fp16: bool = True,
         min_depth_m: float = METRIC_DEPTH_MIN_M,
         max_depth_m: float = METRIC_DEPTH_MAX_M,
+        resolution_level: int = MOGE2_RESOLUTION_LEVEL,
         engine: MoGe2Engine | None = None,
     ) -> None:
         DepthEstimationModel.__init__(self)
@@ -323,7 +344,7 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
             raise ValueError(f"invalid metric depth range: [{min_depth_m}, {max_depth_m}]")
         if engine is None:
             backend: MoGe2Backend = select_moge2_backend(os.environ.get(MOGE2_BACKEND_ENV, "auto"), tensorrt_available=tensorrt_importable())
-            engine = MoGe2Engine(backend, MOGE2_ENCODERS[variant])
+            engine = MoGe2Engine(backend, MOGE2_ENCODERS[variant], resolution_level=resolution_level)
         self.engine: MoGe2Engine = engine
         self.variant: str = variant
         self.min_depth_m: float = float(min_depth_m)
@@ -356,7 +377,10 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
             raise ValueError(f"expected a (1,3,H,W) image, got {tuple(rgb_bchw.shape)}")
         intrinsics: Float[Tensor, "3 3"] = self.engine.predict(rgb_u8_bhw3(rgb_bchw)[0], fov_x=None).intrinsics
         image_hw: tuple[int, int] = (int(rgb_bchw.shape[-2]), int(rgb_bchw.shape[-1]))
-        return np.asarray(normalized_to_pixel_k4(intrinsics.detach().float().cpu().numpy(), image_hw), dtype=np.float64)
+        k4: Float64[ndarray, "4"] = np.asarray(normalized_to_pixel_k4(intrinsics.detach().float().cpu().numpy(), image_hw), dtype=np.float64)
+        for observer in FREE_FOV_OBSERVERS:
+            observer(k4)
+        return k4
 
     def describe(self) -> dict[str, Any]:
         """The depth-provider block of the run record."""
@@ -369,7 +393,7 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
             "checkpoint": f"{repo}@{revision}",
             "precision": self.precision,
             "depth_type": self.depth_type.name,
-            "resolution_level": MOGE2_RESOLUTION_LEVEL,
+            "resolution_level": self.engine.resolution_level,
             "fov_x": "float64 math.atan of the bound focal",
             "post_processing": "recover_shift_and_intrinsics(points, mask > 0.5, fov_x) at network resolution; "
             "(z + shift) * metric_scale; depth bilinear, mask nearest to the input raster",
@@ -378,19 +402,22 @@ class MoGe2NormalProvider(MetricTrailMoGe2):
         }
 
 
-def make_provider(variant: str, *, use_fp16: bool = True, model_cache: ModelCache | None = None) -> MoGe2NormalProvider:
-    """ViPE's ``DEPTH_PROVIDERS`` factory: one engine (networks + forward cache) per variant, shared through ``model_cache``."""
+def make_provider(
+    variant: str, *, use_fp16: bool = True, resolution_level: int = MOGE2_RESOLUTION_LEVEL, model_cache: ModelCache | None = None
+) -> MoGe2NormalProvider:
+    """ViPE's depth factory: share an engine per variant and detail level through ``model_cache``."""
     if model_cache is None:
-        return MoGe2NormalProvider(variant, use_fp16=use_fp16)
+        return MoGe2NormalProvider(variant, use_fp16=use_fp16, resolution_level=resolution_level)
     engine: MoGe2Engine = model_cache.get(
-        f"metrictrail/depth/moge2-{variant}-normal/engine", lambda: MoGe2NormalProvider(variant, use_fp16=use_fp16).engine
+        f"metrictrail/depth/moge2-{variant}-normal/level-{resolution_level}/engine",
+        lambda: MoGe2NormalProvider(variant, use_fp16=use_fp16, resolution_level=resolution_level).engine,
     )
     return MoGe2NormalProvider(variant, use_fp16=use_fp16, engine=engine)
 
 
-def register_providers() -> None:
+def register_providers(*, resolution_level: int = MOGE2_RESOLUTION_LEVEL) -> None:
     """Register every :data:`PROVIDER_NAMES` entry in ViPE's depth-provider registry (idempotent)."""
     from vipe.metrictrail.depth import DEPTH_PROVIDERS
 
     for name, variant in PROVIDER_NAMES.items():
-        DEPTH_PROVIDERS[name] = functools.partial(make_provider, variant)
+        DEPTH_PROVIDERS[name] = functools.partial(make_provider, variant, resolution_level=resolution_level)

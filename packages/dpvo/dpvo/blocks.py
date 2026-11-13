@@ -20,7 +20,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Int64
 from torch import Tensor
 
 from .scatter_utils import scatter_softmax, scatter_sum
@@ -130,27 +130,38 @@ class SoftAgg(nn.Module):
         self.g: nn.Linear = nn.Linear(self.dim, self.dim)
         self.h: nn.Linear = nn.Linear(self.dim, self.dim)
 
-    def forward(self, x: Float[Tensor, "batch edges dim"], ix: Int[Tensor, "edges"]) -> Float[Tensor, "batch out_edges dim"]:
+    def forward(
+        self,
+        x: Float[Tensor, "batch edges dim"],
+        ix: Int[Tensor, "edges"],
+        *,
+        grouping: tuple[Int64[Tensor, "edges"], int] | None = None,
+    ) -> Float[Tensor, "batch out_edges dim"]:
         """Aggregate edge features by group index.
 
         Args:
             x: Per-edge features of shape ``(batch, n_edges, dim)``.
             ix: Group index for each edge (1-D, no batch dim).  Edges
                 sharing the same index are aggregated together.
+            grouping: Prepared contiguous group indices and group count for
+                ``ix``; skips dynamic group discovery during graph replay.
 
         Returns:
             If ``expand=True``: per-edge aggregated features of shape
             ``(batch, n_edges, dim)``.  Otherwise: per-group features
             of shape ``(batch, n_groups, dim)``.
         """
-        _: Tensor
-        jx: Tensor
-        # Map raw indices to contiguous 0..n_groups-1 for scatter ops
-        _, jx = torch.unique(ix, return_inverse=True)
+        jx: Int64[Tensor, "edges"]
+        num_groups: int
+        if grouping is None:
+            groups, jx = torch.unique(ix, return_inverse=True)
+            num_groups = groups.numel()
+        else:
+            jx, num_groups = grouping
         # Attention weights via group-wise softmax over key projections
-        w: Float[Tensor, "..."] = scatter_softmax(self.g(x), jx, dim=1)
+        w: Float[Tensor, "..."] = scatter_softmax(self.g(x), jx, dim=1, dim_size=num_groups)
         # Weighted aggregation of value projections
-        y: Float[Tensor, "..."] = scatter_sum(self.f(x) * w, jx, dim=1)
+        y: Float[Tensor, "..."] = scatter_sum(self.f(x) * w, jx, dim=1, dim_size=num_groups)
 
         if self.expand:
             # Scatter group features back to per-edge resolution

@@ -1,0 +1,80 @@
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+pytest.importorskip("rerun.catalog", reason="mvs catalog imports need the Rerun catalog dependencies")
+pytest.importorskip("rerun.experimental.dataloader", reason="mvs catalog imports need the Rerun dataloader")
+pytest.importorskip("torchcodec", reason="mvs catalog imports need TorchCodec")
+
+import depth_png  # noqa: E402
+import numpy as np  # noqa: E402
+import rerun as rr  # noqa: E402
+import rerun.chunk as rrc  # noqa: E402
+from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
+
+from mvs.catalog import FRAME_TIMELINE, PINHOLE_LOWRES_PATH, TIMELINE, log_depth, log_source_video  # noqa: E402
+
+
+def test_log_depth_writes_the_lowres_pinhole_and_a_millimetre_png(tmp_path: Path) -> None:
+    """The depth lands under its own 256x192 pinhole as a 16-bit millimetre PNG on both timelines."""
+    depth_hw = np.full((192, 256), 2.5, dtype=np.float32)
+    depth_hw[:96] = 0.75  # near top half, far bottom half
+    K_depth_33 = np.array([[200.0, 0.0, 128.0], [0.0, 200.0, 96.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    target: Path = tmp_path / "depth.rrd"
+    recording = rr.RecordingStream("mvs-test")
+    recording.save(target)
+    with recording:
+        rr.set_time(TIMELINE, duration=np.timedelta64(1_000_000_000, "ns"))
+        rr.set_time(FRAME_TIMELINE, sequence=60)
+        log_depth(depth_hw, K_depth_33)
+    recording.flush()
+    recording.disconnect()
+
+    chunks: list[rrc.Chunk] = list(rrc.RrdReader(target).stream())
+    columns: dict[str, dict[str, list]] = {}
+    for chunk in chunks:
+        batch = chunk.to_record_batch()
+        columns.setdefault(str(chunk.entity_path), {}).update({name: batch.column(name).to_pylist() for name in batch.schema.names})
+    pinhole = columns[f"/{PINHOLE_LOWRES_PATH}"]
+    depth = columns[f"/{PINHOLE_LOWRES_PATH}/depth"]
+    # One row per column, one instance per row.
+    assert pinhole["Pinhole:resolution"] == [[[256.0, 192.0]]]
+    assert np.allclose(np.array(pinhole["Pinhole:image_from_camera"][0][0]).reshape(3, 3).T, K_depth_33)
+    assert depth["EncodedDepthImage:meter"] == [[1000.0]]
+    assert depth[FRAME_TIMELINE] == [60]
+    assert TIMELINE in depth
+    decoded = depth_png.decode(bytes(depth["EncodedDepthImage:blob"][0][0]))
+    assert decoded.dtype == np.uint16
+    assert decoded[0, 0] == 750 and decoded[-1, -1] == 2500
+
+
+def test_log_source_video_returns_the_time_of_the_first_relayed_sample(tmp_path: Path) -> None:
+    """The relay opens at a keyframe, so when sample 0 is not one the stream starts later; a VideoFrameReference
+    counts from the stream's first sample, so the offsets need that time, not sample 0's."""
+
+    class StoredDecoder(SegmentNvdecDecoder):
+        def __init__(self) -> None:
+            self.times = np.array([0, 10, 20, 30], dtype="timedelta64[ns]")
+            self.samples = [b"a", b"b", b"c", b"d"]
+            self.keyframes = [False, True, False, True]
+
+    recording = rr.RecordingStream("mvs-test")
+    recording.save(tmp_path / "video.rrd")
+    with recording:
+        assert log_source_video(StoredDecoder()) == 10
+    recording.disconnect()
+
+
+def test_the_blueprint_follows_the_whole_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blueprint cannot seek: the viewer plays from 0 only when the whole video is logged before its playing time
+    panel arrives (posekit's hands app does the same)."""
+    import rerun.blueprint as rrb
+
+    import mvs.catalog as catalog
+
+    calls: list[str] = []
+    monkeypatch.setattr(catalog, "log_source_video", lambda _decoder: calls.append("video") or 7)
+    monkeypatch.setattr(catalog.rr, "send_blueprint", lambda blueprint: calls.append("blueprint"))
+    assert catalog.log_video_then_blueprint(MagicMock(spec=SegmentNvdecDecoder), rrb.Blueprint()) == 7
+    assert calls == ["video", "blueprint"]

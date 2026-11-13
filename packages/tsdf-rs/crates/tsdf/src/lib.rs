@@ -1,4 +1,3 @@
-#![deny(missing_docs)]
 //! Sparse colour TSDF fusion and marching-cubes mesh extraction.
 //!
 //! [`TsdfVolume`] fuses projective depth frames into 16-by-16-by-16 voxel

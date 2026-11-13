@@ -2,7 +2,9 @@
 
 Arrays are C-contiguous and row-major; a Fortran-ordered or strided array raises ValueError. World units are those of
 the voxel size (metres in MetricTrail). Depth is camera Z, not ray length. The GIL is released while the volume
-integrates or extracts.
+integrates or extracts, and the volume stays borrowed meanwhile: a call on the same volume from another Python thread
+raises RuntimeError unless both calls are extract_mesh (use one volume per thread, or a lock). Invalid inputs raise
+ValueError; sizes past the 32-bit vertex indices or the address space raise OverflowError.
 """
 
 from typing import TypeAlias
@@ -46,6 +48,8 @@ class TsdfVolume:
         ...
     def extract_dirty_block_meshes(self) -> list[tuple[tuple[int, int, int], _Mesh]]:
         """Per-block meshes of the blocks changed since the last call, by sorted block key.
+
+        A block whose mesh is byte-identical to the one this method last returned for it is left out.
 
         The union of the latest mesh per key equals :meth:`extract_mesh` triangle for triangle; a vertex on a block
         seam has the same position, colour and normal in every block. A block whose surface vanished comes once with

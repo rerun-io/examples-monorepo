@@ -27,11 +27,12 @@ from jaxtyping import Bool, Float, Float32, Int, Int64
 from lietorch_mojo import SE3
 from torch import Tensor
 
-from . import altcorr, fastba
+from . import altcorr, graph_replay
 from . import projective_ops as pops
 from .ba import BA
 from .blocks import GatedResidual, GradientClip, SoftAgg
 from .extractor import BasicEncoder4
+from .graph_replay import UpdateTopology
 from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 
 DIM: int = 384
@@ -206,6 +207,8 @@ class Update(nn.Module):
         ii: Int[Tensor, "n_edges"],
         jj: Int[Tensor, "n_edges"],
         kk: Int[Tensor, "n_edges"],
+        *,
+        topology: UpdateTopology | None = None,
     ) -> tuple[Float[Tensor, "1 n_edges dim"], tuple[Float[Tensor, "1 n_edges 2"], Float[Tensor, "1 n_edges 2"], None]]:
         """Run one iteration of the recurrent update operator.
 
@@ -220,6 +223,8 @@ class Update(nn.Module):
             ii: Source frame index per edge.
             jj: Target frame index per edge.
             kk: Patch index per edge.
+            topology: Precomputed neighbors and groups for these edges; useful
+                when replaying the neural work in a CUDA graph.
 
         Returns:
             A 2-tuple of:
@@ -227,7 +232,26 @@ class Update(nn.Module):
             - A 3-tuple ``(delta, weight, None)`` where ``delta`` is the
               predicted pixel displacement ``(1, n_edges, 2)`` and ``weight``
               is the sigmoid confidence ``(1, n_edges, 2)``.
+
+        Inside :func:`dpvo.graph_replay.graph_replay`, CUDA inference replays a
+        captured graph of :meth:`forward_eager` once a shape recurs.
         """
+        if topology is None:
+            topology = UpdateTopology.from_edges(ii, jj, kk)
+        replayed = graph_replay.replay_update(self, net, inp, corr, ii, jj, kk, topology, Update.forward_eager)
+        return replayed if replayed is not None else self.forward_eager(net, inp, corr, ii, jj, kk, topology)
+
+    def forward_eager(
+        self,
+        net: Float[Tensor, "1 n_edges dim"],
+        inp: Float[Tensor, "1 n_edges dim"],
+        corr: Float[Tensor, "1 n_edges corr_feat"],
+        ii: Int[Tensor, "n_edges"],
+        jj: Int[Tensor, "n_edges"],
+        kk: Int[Tensor, "n_edges"],
+        topology: UpdateTopology,
+    ) -> tuple[Float[Tensor, "1 n_edges dim"], tuple[Float[Tensor, "1 n_edges 2"], Float[Tensor, "1 n_edges 2"], None]]:
+        """:meth:`forward` with its topology prepared, always run kernel by kernel."""
         # Step 1: Inject correlation and context into hidden state
         net: Float[Tensor, "1 n_edges dim"] = net + inp + self.corr(corr)
         net = self.norm(net)
@@ -236,7 +260,7 @@ class Update(nn.Module):
         # ix, jx are indices of the "other" edge sharing the same (kk, jj)
         ix: Int[Tensor, "n_edges"]
         jx: Int[Tensor, "n_edges"]
-        ix, jx = fastba.neighbors(kk, jj)
+        ix, jx = topology.previous, topology.following
         # Mask out invalid neighbours (index -1 means no neighbour found)
         mask_ix: Float[Tensor, "1 n_edges 1"] = (ix >= 0).float().reshape(1, -1, 1)
         mask_jx: Float[Tensor, "1 n_edges 1"] = (jx >= 0).float().reshape(1, -1, 1)
@@ -248,10 +272,10 @@ class Update(nn.Module):
 
         # Step 2b: Attention-weighted scatter aggregation
         # Spatial: pool across all edges sharing the same patch index kk
-        net = net + self.agg_kk(net, kk)
+        net = net + self.agg_kk(net, kk, grouping=topology.patch_groups)
         # Temporal: pool across edges connecting the same frame pair (ii, jj)
         # The hash ii*12345+jj maps each (ii,jj) pair to a unique group ID
-        net = net + self.agg_ij(net, ii*12345 + jj)
+        net = net + self.agg_ij(net, ii*12345 + jj, grouping=topology.frame_groups)
 
         # Step 3: Gated residual GRU update
         net = self.gru(net)

@@ -1,6 +1,7 @@
 """Resolved recording inputs shared by discovery, hashing, and parsing."""
 
 import hashlib
+import io
 import os
 import warnings
 from collections import Counter
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import orjson
+import zstandard
 from serde import SerdeError
 
 from agent_traces.events import Session
@@ -19,6 +21,23 @@ MISSING_INPUT: str = "missing"
 
 
 DecodedRecord = TypeVar("DecodedRecord")
+
+
+def open_transcript(path: Path) -> io.BufferedReader:
+    """Open a transcript for line reads; Codex compresses older rollouts as `.jsonl.zst`."""
+    stream: io.BufferedReader = path.open("rb")
+    if path.suffix != ".zst":
+        return stream
+    return io.BufferedReader(zstandard.ZstdDecompressor().stream_reader(stream, read_across_frames=True))
+
+
+def transcript_size(path: Path) -> int:
+    """Decompressed byte count of a transcript, read in blocks."""
+    size: int = 0
+    with open_transcript(path) as stream:
+        while block := stream.read(1024 * 1024):
+            size += len(block)
+    return size
 
 
 def recover_suffix(line: bytes, index: int, decode: Callable[[dict[str, object], int], DecodedRecord], validate: Callable[[DecodedRecord], object] | None) -> DecodedRecord | None:  # noqa: UP047 - Runtime TypeVar annotations.
@@ -47,7 +66,7 @@ def iter_jsonl(path: Path, decode: Callable[[dict[str, object], int], DecodedRec
         skipped[reason] += 1
         warnings.warn(f"{path}:{index + 1}: {reason}", stacklevel=3)
 
-    with path.open("rb") as stream:
+    with open_transcript(path) as stream:
         for index, original in enumerate(stream):
             line: bytes = original.lstrip(b"\0")
             if line != original:

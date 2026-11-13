@@ -20,8 +20,13 @@ The four functions MetricTrail calls, with vipe_ext's signatures (calls in one p
 (`blockReduce`); the Mojo kernels fold the 256 running sums in the same tree (in shared memory for
 `frame_distance` and the scratch-row `block_reduce`), so the summation order is CUDA's and there are no
 float atomics. As in the extension, the reduced sums go to the CPU once per iteration and the pose system
-is assembled and solved there in float64 (Eigen's `SimplicialLLT` in the extension, a dense PyTorch
+is assembled and solved there in float64 (Eigen's `SimplicialLLT` in the extension, a single-threaded Mojo profile
 Cholesky here); a failed factorisation gives a zero step, as in the extension.
+
+Integer BA topology is prepared on the CPU after one edge readback and retained in an eight-entry
+LRU. Keys include ordered source/target values, pose bounds, solver modes and device. Only index
+and assembly tables are reused: every call recomputes residuals and every solve owns its scratch.
+No poses, depths, focal values or calibration results are cached.
 
 Every other function of the six namespaces raises `NotImplementedError` when called: the backward passes,
 `altcorr_forward`, `ba_extended_v2`, `utils_ext`, `scatter_ext`, `corr_ext`, `grounding_dino_ext`.

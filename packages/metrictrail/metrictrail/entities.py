@@ -6,12 +6,14 @@ DPVO's frame counter); ``source_frame`` (sequence) is the input frame it came fr
 
 Live capture (only while the pipeline runs; :mod:`metrictrail.capture`):
 
-* ``cam`` Pinhole of the tracking raster; ``cam/rgb`` the frame DPVO tracks; ``cam/depth`` the MoGe-2 metric depth DPVO
+* ``dpvo/current/pinhole/video`` (the input video's own samples) and ``.../patches``, in the source camera's pinhole;
+* ``cam`` Pinhole of the tracking raster; ``cam/rgb`` the frame DPVO tracks (frame directories; an H.264 video); ``cam/depth`` the MoGe-2 metric depth DPVO
   is given; ``cam/normals`` MoGe-2's camera-space surface normals of each new keyframe, from the same forward as the
   depth (RGB = (n + 1) / 2 of x right, y down, z forward); ``cam/dino_pca`` DINOv3 patch features on a fixed
   3-component PCA; ``cam/patches`` the newest keyframe's DPVO patches, coloured by their depth;
 * ``dpvo/keyframes``, ``dpvo/keyframe_path``, ``dpvo/window`` (BA-window frustums), ``dpvo/current`` (newest keyframe
-  pose + pinhole), ``dpvo/window_points`` (patch points of the window), in DPVO's world frame;
+  pose; ``dpvo/current/pinhole`` its frustum), ``dpvo/window_points`` (patch points of the window), in DPVO's world
+  frame; ``dpvo`` itself carries the gravity alignment (``Transform3D``, z up, re-fit every 10 keyframes);
 * ``metrics/dpvo/...`` scalars.
 
 From the finished artifacts (:mod:`metrictrail.outputs`):
@@ -48,11 +50,55 @@ CAM_NORMALS: str = "cam/normals"
 CAM_DINO_PCA: str = "cam/dino_pca"
 CAM_PATCHES: str = "cam/patches"
 
+CALIBRATION_TIMELINE: str = "calibration_step"
+"""SharedK calibration's sweep: the index of the frame it read (sequence timeline); its data is also on ``video_time``
+and ``source_frame``."""
+CALIBRATION: str = "calibration"
+"""SharedK calibration's own DROID-style keyframe SLAM (camera axes RDF, the first keyframe at the origin): the map it
+optimises with the focal and then throws away; tracking starts again in ``dpvo``."""
+CALIBRATION_KEYFRAMES: str = "calibration/keyframes"
+"""One child per kept keyframe, ``f<sweep frame>``: its pose, ``camera`` (its frustum) and ``points``
+(the bundle-adjusted disparities, in the keyframe's camera, filtered by ViPE's single-view rule:
+:func:`metrictrail.calibration_live.keyframe_points`)."""
+CALIBRATION_PATH: str = "calibration/keyframe_path"
+CALIBRATION_EDGES: str = "calibration/factor_graph"
+"""The frontend's factor-graph edges between keyframe centres."""
+CALIBRATION_NEWEST: str = "calibration/newest"
+"""The newest keyframe in 2D, outside the 3D view."""
+CALIBRATION_NEWEST_RGB: str = "calibration/newest/rgb"
+CALIBRATION_NEWEST_PRIOR: str = "calibration/newest/moge2_depth"
+"""MoGe-2 metric depth at the current focal: the prior the bundle adjustment pulls the disparities towards."""
+CALIBRATION_NEWEST_DEPTH: str = "calibration/newest/droid_depth"
+"""Depth of the bundle-adjusted disparities."""
+CALIBRATION_FOCAL: str = "metrics/sharedk/focal_px"
+"""SharedK's focal (tracking-raster px) after each backend solve."""
+CALIBRATION_HEAD_FOCAL: str = "metrics/sharedk/moge2_focal_px"
+"""MoGe-2's own focal on each of the first 32 frames; their median starts the fit."""
+CALIBRATION_KEPT: str = "metrics/sharedk/keyframes"
+"""Keyframes the sweep keeps, per frame read."""
+
+
+def calibration_keyframe(step: int) -> str:
+    """The entity of the calibration keyframe made at sweep step ``step``."""
+    return f"{CALIBRATION_KEYFRAMES}/f{step:05d}"
+
+
 DPVO_ROOT: str = "dpvo"
 DPVO_KEYFRAMES: str = "dpvo/keyframes"
 DPVO_KEYFRAME_PATH: str = "dpvo/keyframe_path"
 DPVO_WINDOW: str = "dpvo/window"
 DPVO_CURRENT: str = "dpvo/current"
+"""Newest keyframe's pose; the Follow view rides it."""
+DPVO_CURRENT_PINHOLE: str = "dpvo/current/pinhole"
+"""Its frustum, a child, so a 3D view rooted at the camera stays 3D. For a video input it is the source camera (the
+tracking raster's K mapped back through ViPE's resize and crop, :class:`metrictrail.rerun_log.SourceRaster`), and the
+input video plays inside it."""
+INPUT: str = DPVO_CURRENT_PINHOLE
+"""The pinhole the input video sits in: the moving camera's frustum, so the video shows in the 3D views too."""
+INPUT_VIDEO: str = f"{DPVO_CURRENT_PINHOLE}/video"
+"""The input video's own samples (``rr.VideoStream``) on ``video_time``."""
+INPUT_PATCHES: str = f"{DPVO_CURRENT_PINHOLE}/patches"
+"""DPVO's newest-keyframe patches in source pixels, over the input video."""
 DPVO_WINDOW_POINTS: str = "dpvo/window_points"
 DPVO_MESH: str = "dpvo/mesh"
 """Live TSDF mesh of the app, one subtree per DPVO pass (``pass_<n>``, earlier passes cleared statically): changed
