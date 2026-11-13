@@ -8,6 +8,34 @@ type AttributesByPosition = HashMap<[u32; 3], Vec<([u8; 3], [u32; 3])>>;
 
 const HEIGHT: usize = 96;
 const WIDTH: usize = 128;
+/// Voxel edge and truncation of the test volumes, in meters.
+const VOXEL: f32 = 0.04;
+const TRUNC: f32 = 0.12;
+/// Edge of a 16-voxel block.
+const BLOCK_LENGTH: f32 = 16.0 * VOXEL;
+
+/// An empty test volume.
+fn new_volume(fuse_color: bool) -> Result<TsdfVolume, TsdfError> {
+    TsdfVolume::new(VOXEL, TRUNC, fuse_color)
+}
+
+/// RGB bytes for a `HEIGHT` x `WIDTH` frame that differ from pixel to pixel.
+fn ramp_color() -> Vec<u8> {
+    (0..HEIGHT * WIDTH * 3)
+        .map(|index| (index % 251) as u8)
+        .collect()
+}
+
+/// `run` on a Rayon pool of `threads` threads.
+fn on_threads<T: Send>(
+    threads: usize,
+    run: impl FnOnce() -> Result<T, TsdfError> + Send,
+) -> Result<T, Box<dyn Error>> {
+    Ok(rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()?
+        .install(run)?)
+}
 
 fn centered_camera(height: usize, width: usize, camera_from_world: [f32; 16]) -> Camera {
     Camera::pinhole(
@@ -35,8 +63,24 @@ fn wavy_frame(frame: usize) -> (Vec<f32>, Camera) {
     (depth, centered_camera(HEIGHT, WIDTH, camera_from_world))
 }
 
+/// A volume that fused `wavy_frame(0..frames)`, with [`ramp_color`] when
+/// `fuse_color`.
+fn wavy_volume(frames: usize, fuse_color: bool) -> Result<TsdfVolume, TsdfError> {
+    let mut volume = new_volume(fuse_color)?;
+    let color = ramp_color();
+    for frame in 0..frames {
+        let (depth, camera) = wavy_frame(frame);
+        let mut depth_frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
+        if fuse_color {
+            depth_frame = depth_frame.with_color(&color);
+        }
+        volume.integrate(&depth_frame, &camera)?;
+    }
+    Ok(volume)
+}
+
 fn plane_mesh() -> Result<Mesh, TsdfError> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let depth = vec![2.0_f32; HEIGHT * WIDTH];
     let camera = centered_camera(HEIGHT, WIDTH, Camera::IDENTITY);
     volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
@@ -58,7 +102,7 @@ fn triangle_multiset(mesh: &Mesh) -> Vec<[[u32; 3]; 3]> {
 
 #[test]
 fn integration_reports_slice_lengths_against_the_image_size() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let camera = centered_camera(2, 2, Camera::IDENTITY);
 
     let short_depth = volume.integrate(&DepthFrame::new(&[1.0; 3], [2, 2]), &camera);
@@ -87,7 +131,7 @@ fn integration_reports_slice_lengths_against_the_image_size() -> Result<(), Box<
 
 #[test]
 fn invalid_depth_ranges_are_refused() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let camera = centered_camera(2, 2, Camera::IDENTITY);
     for (min, max, name) in [
         (-0.1, 1.0, "min_depth"),
@@ -117,12 +161,12 @@ fn depths_outside_the_range_are_not_integrated() -> Result<(), Box<dyn Error>> {
     let camera = centered_camera(HEIGHT, WIDTH, Camera::IDENTITY);
     let range = DepthRange { min: 0.2, max: 3.0 };
 
-    let mut ranged = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut ranged = new_volume(false)?;
     ranged.integrate(
         &DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_depth_range(range),
         &camera,
     )?;
-    let mut prefiltered = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut prefiltered = new_volume(false)?;
     prefiltered.integrate(&DepthFrame::new(&masked, [HEIGHT, WIDTH]), &camera)?;
 
     let mesh = ranged.extract_mesh()?;
@@ -134,14 +178,8 @@ fn depths_outside_the_range_are_not_integrated() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn mesh_bytes_are_invariant_to_rayon_thread_count() -> Result<(), Box<dyn Error>> {
-    let mesh_one = rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build()?
-        .install(plane_mesh)?;
-    let mesh_eight = rayon::ThreadPoolBuilder::new()
-        .num_threads(8)
-        .build()?
-        .install(plane_mesh)?;
+    let mesh_one = on_threads(1, plane_mesh)?;
+    let mesh_eight = on_threads(8, plane_mesh)?;
 
     assert_eq!(mesh_one, mesh_eight);
     assert!(!mesh_one.vertices.is_empty());
@@ -186,7 +224,7 @@ fn repeated_observations_use_a_cumulative_average() -> Result<(), Box<dyn Error>
 
     let height = 8;
     let width = 8;
-    let mut volume = TsdfVolume::new(0.01, 0.12, false)?;
+    let mut volume = TsdfVolume::new(0.01, TRUNC, false)?;
     let camera = centered_camera(height, width, Camera::IDENTITY);
     let initial_depth = vec![INITIAL_DEPTH; height * width];
     let shifted_depth = vec![SHIFTED_DEPTH; height * width];
@@ -262,11 +300,9 @@ fn assert_union_matches_full(
 
 #[test]
 fn dirty_block_union_matches_full_extraction_after_every_frame() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let mut volume = new_volume(true)?;
     let mut held = BTreeMap::new();
-    let color: Vec<u8> = (0..HEIGHT * WIDTH * 3)
-        .map(|index| (index % 251) as u8)
-        .collect();
+    let color = ramp_color();
 
     for frame in 0..3 {
         let (depth, camera) = wavy_frame(frame);
@@ -290,11 +326,9 @@ fn depth_noise(index: usize, frame: usize) -> f32 {
 #[test]
 fn held_meshes_follow_the_full_mesh_through_noise_eviction_and_min_weight(
 ) -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let mut volume = new_volume(true)?;
     let mut held = BTreeMap::new();
-    let color: Vec<u8> = (0..HEIGHT * WIDTH * 3)
-        .map(|index| (index % 251) as u8)
-        .collect();
+    let color = ramp_color();
     for frame in 0..40 {
         // The camera turns away and back; noise on odd frames only, so even
         // frames repeat earlier observations exactly.
@@ -330,7 +364,7 @@ fn held_meshes_follow_the_full_mesh_through_noise_eviction_and_min_weight(
 fn reaching_min_weight_delivers_the_mesh_although_no_value_changed() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     volume.set_min_weight(2.0)?;
     volume.integrate(&frame, &camera)?;
     assert!(volume.extract_dirty_block_meshes().is_empty());
@@ -347,7 +381,7 @@ fn reaching_min_weight_delivers_the_mesh_although_no_value_changed() -> Result<(
 #[test]
 fn a_new_color_alone_delivers_recolored_meshes() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = wavy_frame(0);
-    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let mut volume = new_volume(true)?;
     let mut held = BTreeMap::new();
     for gray in [200, 40] {
         let color = vec![gray; HEIGHT * WIDTH * 3];
@@ -369,7 +403,7 @@ fn a_change_at_a_block_face_re_meshes_the_neighbor_across_it() -> Result<(), Box
     let wall_camera = centered_camera(HEIGHT, WIDTH, Camera::IDENTITY);
     let color = vec![128_u8; HEIGHT * WIDTH * 3];
     for local in [0_u8, 1, 14, 15] {
-        let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+        let mut volume = new_volume(true)?;
         volume.integrate(
             &DepthFrame::new(&wall_depth, [HEIGHT, WIDTH]).with_color(&color),
             &wall_camera,
@@ -377,8 +411,8 @@ fn a_change_at_a_block_face_re_meshes_the_neighbor_across_it() -> Result<(), Box
         let mut held: BTreeMap<_, _> = volume.extract_dirty_block_meshes().into_iter().collect();
 
         let mut camera_from_world = Camera::IDENTITY;
-        camera_from_world[3] = -(f32::from(local) + 0.5) * 0.04;
-        camera_from_world[7] = -0.02;
+        camera_from_world[3] = -(f32::from(local) + 0.5) * VOXEL;
+        camera_from_world[7] = -0.5 * VOXEL;
         let needle = Camera::pinhole([1_000.0, 1_000.0, 0.0, 0.0], camera_from_world);
         volume.integrate(
             &DepthFrame::new(&[2.05], [1, 1]).with_color(&[128; 3]),
@@ -392,7 +426,7 @@ fn a_change_at_a_block_face_re_meshes_the_neighbor_across_it() -> Result<(), Box
 
 #[test]
 fn extract_dirty_block_meshes_drains_the_dirty_set() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
 
@@ -413,7 +447,7 @@ fn extract_dirty_block_meshes_drains_the_dirty_set() -> Result<(), Box<dyn Error
 fn re_integrating_an_identical_frame_delivers_nothing() -> Result<(), Box<dyn Error>> {
     // A second identical observation leaves every running mean, and so every
     // mesh, bit for bit as it was; only the weights grow.
-    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
+    let mut volume = new_volume(true)?;
     let (depth, camera) = wavy_frame(0);
     let color = vec![200_u8; HEIGHT * WIDTH * 3];
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]).with_color(&color);
@@ -427,7 +461,7 @@ fn re_integrating_an_identical_frame_delivers_nothing() -> Result<(), Box<dyn Er
 
 #[test]
 fn an_unconfirmed_delivery_keeps_the_meshes_pending() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let (depth, camera) = wavy_frame(0);
     volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
 
@@ -442,20 +476,9 @@ fn an_unconfirmed_delivery_keeps_the_meshes_pending() -> Result<(), Box<dyn Erro
 
 #[test]
 fn dirty_block_meshes_are_invariant_to_rayon_thread_count() -> Result<(), Box<dyn Error>> {
-    let run = || -> Result<Vec<([i64; 3], Mesh)>, TsdfError> {
-        let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
-        let (depth, camera) = wavy_frame(0);
-        volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
-        Ok(volume.extract_dirty_block_meshes())
-    };
-    let meshes_one = rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build()?
-        .install(run)?;
-    let meshes_eight = rayon::ThreadPoolBuilder::new()
-        .num_threads(8)
-        .build()?
-        .install(run)?;
+    let run = || Ok(wavy_volume(1, false)?.extract_dirty_block_meshes());
+    let meshes_one = on_threads(1, run)?;
+    let meshes_eight = on_threads(8, run)?;
 
     assert_eq!(meshes_one, meshes_eight);
     assert!(!meshes_one.is_empty());
@@ -465,7 +488,7 @@ fn dirty_block_meshes_are_invariant_to_rayon_thread_count() -> Result<(), Box<dy
 #[test]
 fn integration_skips_world_coordinates_outside_the_sparse_index_range() -> Result<(), Box<dyn Error>>
 {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let mut camera_from_world = Camera::IDENTITY;
     camera_from_world[3] = -1.0e20;
     let camera = Camera::pinhole([1.0, 1.0, 0.0, 0.0], camera_from_world);
@@ -480,7 +503,7 @@ fn integration_skips_world_coordinates_outside_the_sparse_index_range() -> Resul
 
 #[test]
 fn singular_intrinsics_are_refused() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let camera = Camera::pinhole([0.0, 100.0, 0.5, 0.5], Camera::IDENTITY);
     assert_eq!(
         volume.integrate(&DepthFrame::new(&[1.0; 4], [2, 2]), &camera),
@@ -493,18 +516,27 @@ fn singular_intrinsics_are_refused() -> Result<(), Box<dyn Error>> {
 fn the_block_budget_skips_new_blocks_and_keeps_fusing_old_ones() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
-    let mut free = TsdfVolume::new(0.04, 0.12, false)?;
-    free.integrate(&frame, &camera)?;
-    assert!(free.block_count() > 3 && !free.budget_reached());
+    let free = wavy_volume(1, false)?;
+    assert!(!free.budget_reached());
+    let cap = free.block_count() / 2;
 
-    let mut capped = TsdfVolume::new(0.04, 0.12, false)?;
-    capped.set_max_blocks(Some(3));
+    let mut capped = new_volume(false)?;
+    capped.set_max_blocks(Some(cap));
     capped.integrate(&frame, &camera)?;
-    assert_eq!(capped.block_count(), 3);
+    assert_eq!(capped.block_count(), cap);
     assert!(capped.budget_reached());
-    let (depth, camera) = wavy_frame(1);
-    capped.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
-    assert_eq!(capped.block_count(), 3);
+    let first: BTreeMap<_, _> = capped.extract_dirty_block_meshes().into_iter().collect();
+    assert!(!first.is_empty());
+
+    // The wall moves 2 cm back: the kept blocks fuse it, no block is added.
+    let farther: Vec<f32> = depth.iter().map(|value| value + 0.02).collect();
+    capped.integrate(&DepthFrame::new(&farther, [HEIGHT, WIDTH]), &camera)?;
+    assert_eq!(capped.block_count(), cap);
+    let second = capped.extract_dirty_block_meshes();
+    assert!(!second.is_empty());
+    assert!(second
+        .iter()
+        .all(|(key, mesh)| first.get(key).is_some_and(|old| old != mesh)));
     Ok(())
 }
 
@@ -513,8 +545,8 @@ fn the_block_budget_skips_new_blocks_and_keeps_fusing_old_ones() -> Result<(), B
 /// voxels that project into the narrow view.
 fn needle_frame() -> (Vec<f32>, Camera) {
     let mut camera_from_world = Camera::IDENTITY;
-    camera_from_world[3] = -0.02;
-    camera_from_world[7] = -0.02;
+    camera_from_world[3] = -0.5 * VOXEL;
+    camera_from_world[7] = -0.5 * VOXEL;
     let camera = Camera::pinhole([1_000.0, 1_000.0, 0.0, 0.0], camera_from_world);
     (vec![1.0], camera)
 }
@@ -523,13 +555,13 @@ fn needle_frame() -> (Vec<f32>, Camera) {
 fn blocks_a_frame_reaches_without_updating_a_voxel_are_not_kept() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = needle_frame();
     let frame = DepthFrame::new(&depth, [1, 1]);
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     volume.integrate(&frame, &camera)?;
     assert_eq!(volume.block_count(), 1);
 
     // Under a cap of one block, blocks without an update neither count nor
     // take the place of the updated one.
-    let mut capped = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut capped = new_volume(false)?;
     capped.set_max_blocks(Some(1));
     capped.integrate(&frame, &camera)?;
     assert_eq!(capped.block_count(), 1);
@@ -539,12 +571,7 @@ fn blocks_a_frame_reaches_without_updating_a_voxel_are_not_kept() -> Result<(), 
 
 #[test]
 fn eviction_frees_the_farthest_blocks_and_forgets_them() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
-    volume.set_max_blocks(Some(1_000));
-    for frame in 0..3 {
-        let (depth, camera) = wavy_frame(frame);
-        volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
-    }
+    let mut volume = wavy_volume(3, false)?;
     let before = volume.block_count();
     let center = [0.0, 0.0, 2.0];
     let evicted = volume.evict_farthest(center, before / 2);
@@ -554,7 +581,7 @@ fn eviction_frees_the_farthest_blocks_and_forgets_them() -> Result<(), Box<dyn E
     // Every kept block is at least as near as every evicted one.
     let distance = |key: &[i64; 3]| -> f32 {
         (0..3)
-            .map(|axis| ((key[axis] as f32 + 0.5) * 0.64 - center[axis]).powi(2))
+            .map(|axis| ((key[axis] as f32 + 0.5) * BLOCK_LENGTH - center[axis]).powi(2))
             .sum()
     };
     let nearest_evicted = evicted.iter().map(distance).fold(f32::INFINITY, f32::min);
@@ -570,7 +597,7 @@ fn eviction_frees_the_farthest_blocks_and_forgets_them() -> Result<(), Box<dyn E
 #[test]
 fn eviction_clears_the_budget_flag_even_when_nothing_is_evicted() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = wavy_frame(0);
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     volume.set_max_blocks(Some(3));
     volume.integrate(&DepthFrame::new(&depth, [HEIGHT, WIDTH]), &camera)?;
     assert!(volume.budget_reached());
@@ -583,7 +610,7 @@ fn eviction_clears_the_budget_flag_even_when_nothing_is_evicted() -> Result<(), 
 fn min_weight_hides_cells_seen_too_few_times_from_every_mesh() -> Result<(), Box<dyn Error>> {
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let mut held: BTreeMap<[i64; 3], Mesh> = BTreeMap::new();
     volume.set_min_weight(2.0)?;
     volume.integrate(&frame, &camera)?;
@@ -615,7 +642,7 @@ fn min_weight_hides_cells_seen_too_few_times_from_every_mesh() -> Result<(), Box
 
 #[test]
 fn invalid_min_weights_are_refused() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     for value in [f32::NAN, -1.0, f32::INFINITY] {
         assert!(matches!(
             volume.set_min_weight(value),
@@ -630,10 +657,8 @@ fn invalid_min_weights_are_refused() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn no_delivery_repeats_the_mesh_the_consumer_already_holds() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, true)?;
-    let color: Vec<u8> = (0..HEIGHT * WIDTH * 3)
-        .map(|index| (index % 251) as u8)
-        .collect();
+    let mut volume = new_volume(true)?;
+    let color = ramp_color();
     let mut held: BTreeMap<[i64; 3], Mesh> = BTreeMap::new();
     let (mut delivered, mut repeated) = (0, 0);
     for frame in 0..8 {
@@ -650,9 +675,6 @@ fn no_delivery_repeats_the_mesh_the_consumer_already_holds() -> Result<(), Box<d
             held.insert(key, mesh);
         }
     }
-    eprintln!(
-        "wavy, 8 frames: {delivered} block meshes delivered, {repeated} identical to the held copy"
-    );
     assert!(delivered > 0);
     assert_eq!(repeated, 0);
     Ok(())
@@ -660,7 +682,7 @@ fn no_delivery_repeats_the_mesh_the_consumer_already_holds() -> Result<(), Box<d
 
 #[test]
 fn a_vanished_surface_is_delivered_empty_once() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
     volume.integrate(&frame, &camera)?;
@@ -719,7 +741,7 @@ fn union_multiset(latest: &BTreeMap<[i64; 3], Mesh>) -> Vec<[[u32; 3]; 3]> {
 
 #[test]
 fn after_eviction_the_held_union_still_equals_the_full_mesh() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let mut held: BTreeMap<[i64; 3], Mesh> = BTreeMap::new();
     for frame in 0..30 {
         let (depth, camera) = sphere_frame(frame as f32 * 0.03);
@@ -750,7 +772,7 @@ fn after_eviction_the_held_union_still_equals_the_full_mesh() -> Result<(), Box<
 
 #[test]
 fn a_block_recreated_after_eviction_is_delivered_again() -> Result<(), Box<dyn Error>> {
-    let mut volume = TsdfVolume::new(0.04, 0.12, false)?;
+    let mut volume = new_volume(false)?;
     let (depth, camera) = wavy_frame(0);
     let frame = DepthFrame::new(&depth, [HEIGHT, WIDTH]);
     volume.integrate(&frame, &camera)?;
