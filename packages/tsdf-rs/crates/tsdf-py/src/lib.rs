@@ -10,7 +10,7 @@ use numpy::{
     Element, PyArray1, PyArray2, PyArrayMethods as _, PyReadonlyArray, PyReadonlyArray2,
     PyReadonlyArray3, PyUntypedArrayMethods as _,
 };
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyOverflowError, PyValueError};
 use pyo3::prelude::*;
 use tsdf::{Camera, DepthFrame, DepthRange, DirtyMeshes, Mesh, TsdfError, TsdfVolume};
 
@@ -31,14 +31,16 @@ struct PyTsdfVolume {
 
 #[pymethods]
 impl PyTsdfVolume {
+    /// An empty volume; `ValueError` unless both distances are finite and positive.
     #[new]
     #[pyo3(signature = (voxel_size, sdf_trunc, fuse_color))]
     fn new(voxel_size: f32, sdf_trunc: f32, fuse_color: bool) -> PyResult<Self> {
-        let inner = TsdfVolume::new(voxel_size, sdf_trunc, fuse_color)
-            .map_err(|error| value_error(&error))?;
+        let inner =
+            TsdfVolume::new(voxel_size, sdf_trunc, fuse_color).map_err(|error| py_error(&error))?;
         Ok(Self { inner })
     }
 
+    /// Fuse one depth frame (C-contiguous arrays; see `tsdf_rs.pyi`).
     #[expect(
         non_snake_case,
         reason = "K_33 and cam_T_world_44 are the documented keyword names"
@@ -84,17 +86,19 @@ impl PyTsdfVolume {
         };
         let volume = &mut self.inner;
         py.detach(|| volume.integrate(&frame, &camera))
-            .map_err(|error| value_error(&error))
+            .map_err(|error| py_error(&error))
     }
 
+    /// The mesh of every observed zero crossing.
     fn extract_mesh<'py>(&self, py: Python<'py>) -> PyResult<PyMesh<'py>> {
         let volume = &self.inner;
         let mesh = py
             .detach(|| volume.extract_mesh())
-            .map_err(|error| value_error(&error))?;
+            .map_err(|error| py_error(&error))?;
         mesh_to_numpy(py, mesh)
     }
 
+    /// Per-block meshes changed since the last call, confirmed once converted.
     fn extract_dirty_block_meshes<'py>(&mut self, py: Python<'py>) -> PyResult<PyBlockMeshes<'py>> {
         let volume = &mut self.inner;
         let DirtyMeshes { meshes, delivery } = py.detach(|| volume.dirty_block_meshes());
@@ -169,10 +173,17 @@ fn mesh_to_numpy(py: Python<'_>, mesh: Mesh) -> PyResult<PyMesh<'_>> {
     ))
 }
 
-fn value_error(error: &TsdfError) -> PyErr {
-    PyValueError::new_err(error.to_string())
+/// `OverflowError` for sizes past the index types, `ValueError` for the rest.
+fn py_error(error: &TsdfError) -> PyErr {
+    match error {
+        TsdfError::VertexIndexOverflow { .. } | TsdfError::DimensionOverflow { .. } => {
+            PyOverflowError::new_err(error.to_string())
+        }
+        _ => PyValueError::new_err(error.to_string()),
+    }
 }
 
+/// Sparse colour TSDF fusion and marching cubes (see `tsdf_rs.pyi`).
 #[pymodule]
 fn tsdf_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTsdfVolume>()
