@@ -8,6 +8,8 @@ use rustc_hash::FxHashMap;
 use crate::error::TsdfError;
 use crate::mesh::{interpolation_amount, Mesh};
 use crate::tables::{for_each_triangle, CORNERS, EDGES};
+#[cfg(test)]
+use crate::volume::MIN_BLOCK_INDEX;
 use crate::volume::{checked_block_origin, local_index, BlockKey, VoxelBlock, BLOCK_RESOLUTION};
 
 type Blocks = FxHashMap<BlockKey, VoxelBlock>;
@@ -415,6 +417,22 @@ mod tests {
 
         assert!(mesh.vertices.is_empty());
         assert!(mesh.triangles.is_empty());
+    }
+
+    #[test]
+    fn the_lowest_block_key_meshes_without_overflow() {
+        let mut block = VoxelBlock::new(false);
+        block.weights.fill(1.0);
+        block.tsdf[local_index([0, 0, 0])] = -1.0;
+        block.observed_min = -1.0;
+        block.observed_max = 1.0;
+        let mut blocks = Blocks::default();
+        blocks.insert([MIN_BLOCK_INDEX; 3], block);
+
+        // The normals read one voxel below the block's first voxel.
+        let mesh = full_mesh(&blocks, 0.04, false, 0.0).expect("small mesh");
+
+        assert_eq!(mesh.triangles.len(), 1);
     }
 
     #[test]

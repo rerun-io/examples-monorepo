@@ -16,7 +16,9 @@ const BLOCK_RESOLUTION_USIZE: usize = BLOCK_RESOLUTION as usize;
 const BLOCK_VOXEL_COUNT: usize =
     BLOCK_RESOLUTION_USIZE * BLOCK_RESOLUTION_USIZE * BLOCK_RESOLUTION_USIZE;
 const DISCOVERY_CHUNK_PIXELS: usize = 2_048;
-const MIN_BLOCK_INDEX: i64 = i64::MIN / BLOCK_RESOLUTION;
+/// Lowest block index: one block above `i64::MIN / 16`, so the gradient one
+/// voxel below a block's first voxel stays inside `i64`.
+pub(crate) const MIN_BLOCK_INDEX: i64 = i64::MIN / BLOCK_RESOLUTION + 1;
 const MAX_BLOCK_INDEX: i64 = (i64::MAX - BLOCK_RESOLUTION) / BLOCK_RESOLUTION;
 
 /// Integer index of a 16-by-16-by-16 voxel block: block `k` holds global voxel
