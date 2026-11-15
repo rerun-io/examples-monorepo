@@ -11,8 +11,10 @@ Videos are ``rr.VideoStream`` samples (simplecv ``log_video``).
 """
 
 import colorsys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +25,7 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import log_video
 
 from fdanyone_rerun.assets import gvhmr_root
-from fdanyone_rerun.outputs import CameraRecord, CameraRig, RunMetadata, read_camera_rig, read_run_metadata
+from fdanyone_rerun.outputs import CameraRecord, CameraRig, InputRecord, RunMetadata, read_camera_rig, read_run_metadata
 
 TIMELINE: str = "time"
 """Seconds since the first canonical frame; the videos' timeline."""
@@ -197,7 +199,7 @@ def _time_panel(timeline: str, *, playing: bool) -> rrb.TimePanel:
 
 
 def motion_blueprint() -> rrb.Blueprint:
-    """Phase 1 (motion recovery): the input clip beside the progress log."""
+    """Phase 1 (motion recovery): the canonical clip (once cut) beside the progress log."""
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial2DView(origin=SOURCE, contents=["$origin/**"], name="Source"),
@@ -254,10 +256,20 @@ def result_blueprint(num_views: int) -> rrb.Blueprint:
     )
 
 
-def log_source_video(video: Path, recording: rr.RecordingStream) -> None:
-    """The input clip in the source camera, on its own sample times (they match the canonical clip when the run starts
-    at 0 s at the input's frame rate)."""
-    log_video(video, Path(f"{SOURCE}/video"), timeline=TIMELINE, recording=recording)
+def log_canonical_clip(clip: Path, recording: rr.RecordingStream) -> None:
+    """The run's canonical clip in the source camera: upstream's 121 frames from ``start_time``, frame k at k / fps, the
+    clock of the body and the generated views. Upstream writes it RGB-lossless (4:4:4) for GVHMR; it is re-encoded
+    to H.264, which every Rerun viewer decodes."""
+    log_video(clip, Path(f"{SOURCE}/video"), timeline=TIMELINE, recording=recording, output_codec=rr.VideoCodec.H264)
+
+
+def log_input_clip(video: Path, clip: InputRecord, recording: rr.RecordingStream) -> None:
+    """Cut a finished run's canonical clip from its input video again (upstream's own sampling) and log it."""
+    from fdanyone.video import decode_canonical_clip, write_gvhmr_video
+
+    canonical = decode_canonical_clip(video, num_frames=clip.num_frames, start_time=clip.start_time_seconds, fps=Fraction(clip.fps))
+    with tempfile.TemporaryDirectory() as scratch:
+        log_canonical_clip(write_gvhmr_video(canonical, Path(scratch) / "canonical_clip.mp4"), recording)
 
 
 def log_cameras(rig: CameraRig, output_dir: Path, recording: rr.RecordingStream) -> None:
@@ -274,6 +286,6 @@ def log_run(output_dir: Path, video: Path | None, models: Path, recording: rr.Re
     recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
     log_body(load_body(output_dir, models), float(metadata.input.frame_rate), recording)
     if video is not None:
-        log_source_video(video, recording)
+        log_input_clip(video, metadata.input, recording)
     log_cameras(rig, output_dir, recording)
     return metadata

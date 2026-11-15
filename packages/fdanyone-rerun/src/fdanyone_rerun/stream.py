@@ -29,7 +29,7 @@ from fdanyone_rerun.rerun_log import (
     load_body,
     log_body,
     log_cameras,
-    log_source_video,
+    log_canonical_clip,
     motion_blueprint,
     preview_entity,
     result_blueprint,
@@ -70,11 +70,13 @@ class RunStreamer:
         self.recording.log(PROGRESS, rr.TextLog(text, level=rr.TextLogLevel.INFO))
         self.recording.reset_time()
 
-    def on_stage(self, label: str, fraction: float) -> None:
-        """Upstream's stage callback: switch the layout at the phase boundaries."""
+    def on_stage(self, label: str, fraction: float, canonical_clip: Path | None = None) -> None:
+        """Upstream's stage callback: log the canonical clip once it exists, and switch the layout at phase boundaries."""
         if self.stop.is_set():
             raise RunCancelled("stopped")
         self.message(f"{fraction:4.0%} {label}")
+        if canonical_clip is not None:
+            log_canonical_clip(canonical_clip, self.recording)
         if label == CONDITIONING_STAGE:
             fps: float = self._motion_fps()
             log_body(load_body(self.output_dir, model_dir()), fps, self.recording)
@@ -106,7 +108,6 @@ class RunStreamer:
         """Run the pipeline and stream all four phases; returns upstream's run summary."""
         self.recording.send_blueprint(motion_blueprint())
         self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
-        log_source_video(self.config.video.expanduser().resolve(), self.recording)
         metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step)
         log_cameras(read_camera_rig(self.output_dir), self.output_dir, self.recording)
         self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))

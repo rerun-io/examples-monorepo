@@ -283,7 +283,8 @@ def run_pipeline(
         working_video = write_gvhmr_video(clip, scratch / "canonical_clip.mp4")
 
         with output.stage() as work:
-            PROGRESS.info("Recovering human motion with GVHMR", extra={"fraction": 0.15})
+            # The canonical clip (frame k at k / fps from start_time) rides on the record: observers log it on the run clock.
+            PROGRESS.info("Recovering human motion with GVHMR", extra={"fraction": 0.15, "canonical_clip": str(working_video)})
             if output.motion_dir.exists():
                 LOGGER.info("Reusing GVHMR motion from %s", output.motion_dir)
                 motion = MotionResult.load(output.motion_dir)

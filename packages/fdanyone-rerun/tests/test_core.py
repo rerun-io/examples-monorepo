@@ -88,11 +88,11 @@ def test_step_hook_sees_the_clean_estimate_and_views() -> None:
 def test_observers_detach_after_an_error() -> None:
     from fdanyone.model.denoise import STEP_HOOKS
 
-    stages: list[tuple[str, float]] = []
+    stages: list[tuple[str, float, Path | None]] = []
     progress: logging.Logger = logging.getLogger("fdanyone.progress")
-    with pytest.raises(RuntimeError), observers(lambda label, fraction: stages.append((label, fraction)), lambda *_: None):
+    with pytest.raises(RuntimeError), observers(lambda label, fraction, clip: stages.append((label, fraction, clip)), lambda *_: None):
         progress.info("Recovering human motion with GVHMR", extra={"fraction": 0.15})
         raise RuntimeError("stop")
     progress.info("after", extra={"fraction": 1.0})
-    assert stages == [("Recovering human motion with GVHMR", 0.15)]
+    assert stages == [("Recovering human motion with GVHMR", 0.15, None)]
     assert STEP_HOOKS == []

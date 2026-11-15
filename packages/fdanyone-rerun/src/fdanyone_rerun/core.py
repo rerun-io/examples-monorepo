@@ -22,8 +22,9 @@ from fdanyone_rerun.assets import EXAMPLE_VIDEO, gvhmr_root, model_dir
 from fdanyone_rerun.outputs import RunMetadata, read_run_metadata
 
 AttentionChoice: TypeAlias = Literal["auto", "sageattention", "sdpa", "flash_attn_3"]
-StageCallback: TypeAlias = Callable[[str, float], None]
-"""``on_stage(label, fraction)``: an upstream stage starts; ``fraction`` is its 0-1 position in the run."""
+StageCallback: TypeAlias = Callable[[str, float, Path | None], None]
+"""``on_stage(label, fraction, canonical_clip)``: an upstream stage starts; ``fraction`` is its 0-1 position in the run;
+``canonical_clip`` is the run's 121-frame clip (an mp4, frame k at k / fps) on the stage that publishes it, else None."""
 StepCallback: TypeAlias = Callable[[int, tuple[int, ...] | None, torch.Tensor], None]
 """``on_step(step_index, view_indices, clean_estimate)``: one group finished a denoising step (STEP_HOOKS)."""
 
@@ -95,7 +96,8 @@ class _ProgressHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         fraction: float = float(getattr(record, "fraction", 0.0))
-        self.on_stage(record.getMessage(), fraction)
+        clip: str | None = getattr(record, "canonical_clip", None)
+        self.on_stage(record.getMessage(), fraction, None if clip is None else Path(clip))
 
 
 @contextmanager
