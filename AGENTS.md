@@ -275,6 +275,27 @@ expected across SimpleCV tools. For a realtime tool that needs the live viewer
 **and** a `.rrd` at once, set `rr_config.live` together with `--rr-config.save`:
 `RerunTyroConfig` then fans out to both via `set_sinks` (the `live`/`port` fields).
 
+### Rerun 0.42 names: old -> new
+
+Do not guess Rerun names from memory. Old spellings fail or emit a `DeprecationWarning`;
+treat that warning as a bug in new code.
+
+| Old (fails or warns in 0.42) | 0.42 form |
+|---|---|
+| `rr.Transform3D(..., from_parent=True)` | `rr.Transform3D(..., relation=rr.TransformRelation.ChildFromParent)` |
+| `rr.Transform3D(..., from_parent=False)` | omit it (default `ParentFromChild`) |
+| `rerun.experimental.RrdReader` (also `Chunk`, `LazyChunkStream`, `LazyStore`, lenses, `McapReader`) | `rerun.chunk.<Name>`; `ParquetReader`, `Mp4Reader`, `ViewerClient` stay in `rerun.experimental` |
+| `rerun.experimental.send_chunks` | `rr.send_chunks` |
+| `rerun.datatypes` | `rerun.encodings` |
+| `rerun.catalog.DatasetView` | `rerun.catalog.DatasetSelection` |
+| `rerun.catalog.RegistrationHandle` | `rerun.catalog.RegistrationOperation` |
+| `rr.recording.load_recording(path)` (removed) | `rerun.chunk.RrdReader(path).store()` (a `LazyStore`) or `.stream()` |
+| `rr.dataframe` (removed) | dataframe queries: `with rr.server.Server(datasets={"d": [path]}) as srv:` then `srv.client().get_dataset("d").reader(index=...)` |
+| `rr.flush()` (absent) | `rr.get_data_recording().flush()` or `rec.flush()` |
+
+Check `rerun --version` first. Each release lists its breaking changes in the changeset at
+<https://rerun.io/docs/changelog> (for example `changeset-0-42`).
+
 ### OSS catalog file-descriptor limits
 
 Rerun 0.34.1 keeps one descriptor open per registered `.rrd`. One ARKitScenes
