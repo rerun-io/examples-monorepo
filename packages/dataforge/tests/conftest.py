@@ -6,7 +6,10 @@ datafusion view over one index), so a test asserts what a consumer sees rather
 than what the writer intended; the frame builders only have to make consecutive
 frames differ, and the sizes stay with the modules, which each have their own
 reason for theirs; ``test_transports.py`` and ``test_lamaria.py`` fetch from the
-same loopback server; and three modules read the published LaMAria calibration.
+same loopback server. The published LaMAria calibration reader lives in ``aria_published.py``.
+
+Package imports stay inside the helpers and fixtures (types under ``TYPE_CHECKING``): pytest-beartype
+instruments dataforge only if this file has not imported it.
 """
 
 from __future__ import annotations
@@ -19,10 +22,10 @@ import subprocess
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 from zipfile import ZipFile
 
 import cv2
@@ -33,17 +36,15 @@ import rerun as rr
 import rerun.chunk as rrc
 from jaxtyping import UInt8
 from numpy import ndarray
-from serde import field, from_dict, serde
+from serde import from_dict
 
-from dataforge import schema
-from dataforge.datasets.lamaria_source import PublishedTransform
-from dataforge.datasets.show3d_hands import HandFrame, read_hand_frames
-from dataforge.datasets.show3d_layers import Scene, read_scene
-from dataforge.datasets.show3d_source import CAMERAS, FrameClock, IndexRow, hand_pose_file, hand_profile_file, read_frame_clock
-from dataforge.identity import SequenceIdentity
-from dataforge.umetrack_hands import HandProfileDoc, read_hand_profile
-from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
-from dataforge.vrs import ImuRecords, VrsFile
+if TYPE_CHECKING:
+    from dataforge.datasets.show3d_hands import HandFrame
+    from dataforge.datasets.show3d_layers import Scene
+    from dataforge.datasets.show3d_source import FrameClock, IndexRow
+    from dataforge.identity import SequenceIdentity
+    from dataforge.umetrack_hands import HandProfileDoc
+    from dataforge.vrs import ImuRecords, VrsFile
 
 NOISE_CEILING: int = 96
 """Upper bound of the per-pixel noise, low enough that gradient + noise cannot wrap."""
@@ -108,6 +109,8 @@ def nvenc_ffmpeg() -> Path:
     A listed encoder is not enough: one real frame is encoded, so a missing
     driver or AV1-capable device skips here instead of failing mid-test.
     """
+    from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
+
     try:
         ffmpeg: Path = resolve_ffmpeg()
         require_av1_nvenc(ffmpeg)
@@ -209,6 +212,7 @@ def assert_raw_root_guarded(command: str, source: object, tmp_path: Path, monkey
     the guard runs first, so the source only has to have that type.
     """
     from dataforge.datasets import dataset_defaults
+    from dataforge.identity import SequenceIdentity
 
     raw: Path = tmp_path / "raw"
     raw.mkdir(exist_ok=True)
@@ -281,6 +285,8 @@ def raw_asset(what: str, path: Path) -> Path:
 
 def column_rows(store: rrc.ChunkStore, column: str) -> pa.Table:
     """Non-null rows of one component column, index-sorted."""
+    from dataforge import schema
+
     table: pa.Table = store.reader(index=schema.TIMELINE).to_arrow_table().sort_by(schema.TIMELINE)
     return table.select([schema.TIMELINE, column]).drop_null()
 
@@ -394,56 +400,6 @@ def serve(
 # (``test_lamaria``). It therefore lives here rather than in the package.
 
 
-@serde
-@dataclass(frozen=True)
-class PublishedResolution:
-    """A published camera's image size."""
-
-    width: int
-    """Image width in pixels."""
-    height: int
-    """Image height in pixels."""
-
-
-@serde
-@dataclass(frozen=True)
-class PublishedCamera:
-    """One ``cam0``/``cam1`` entry of an ``aria_calibrations/<split>/<seq>.json``.
-
-    This is the *published* calibration, kept only to cross-check the one read
-    out of the VRS: it covers the two SLAM cameras and no RGB, and its 16-float
-    ``params`` repeat the single Aria focal length as ``fx, fy``.
-    """
-
-    model: str
-    """Always ``RAD_TAN_THIN_PRISM_FISHEYE``, Aria's FISHEYE624 under COLMAP's name."""
-    resolution: PublishedResolution
-    """The camera's image size."""
-    params: list[float]
-    """``[fx, fy, cx, cy, k0..k5, p0, p1, s0..s3]`` — 16 floats."""
-    rig_T_cam: PublishedTransform = field(rename="T_b_s")
-    """Published as ``T_b_s``; the body frame is imu-right, so this *is* ``rig_T_cam``."""
-
-
-def read_calibration_json(path: Path) -> dict[str, PublishedCamera]:
-    """Read an ``aria_calibrations/<split>/<seq>.json`` file's camera entries.
-
-    The file's third entry, ``imu0``, is skipped: it is the body frame itself, so
-    its transform is the identity by definition, and the rest of it is noise
-    densities rather than a calibration.
-
-    Args:
-        path: The published calibration JSON.
-
-    Returns:
-        The camera entries, keyed by their published names (``cam0``, ``cam1``).
-    """
-    if not path.is_file():
-        pytest.skip(f"published Aria calibration is absent: {path}")
-    document: dict = json.loads(path.read_text())
-    return {name: from_dict(PublishedCamera, entry) for name, entry in document.items() if name.startswith("cam")}
-
-
 SHOW3D_RAW: Path = Path(__file__).parents[1] / "data/raw/show3d"
 """Local full-length SHOW3D assets shared by annotation tests."""
 
@@ -455,6 +411,8 @@ def read_chunks(rrd: Path) -> list[rrc.Chunk]:
 
 def index_row(**overrides: str | int | bool) -> IndexRow:
     """Build a complete synthetic index row, overriding only the fields under test."""
+    from dataforge.datasets.show3d_source import CAMERAS, IndexRow
+
     fields: dict[str, str | int | bool] = dict(
         subject_id="S", scene_id="keyboard_pick_up_abcd", num_frames=4, split="train",
         has_object_pose=True, has_hand_pose=True, has_caption=True,
@@ -476,6 +434,12 @@ class Show3dSceneInputs(NamedTuple):
 @pytest.fixture(scope="module", params=["SPI102/keyboard_toss-away_83ef", "LYA722/birdhousetoy_shaking_8eca"])
 def show3d_scene_inputs(request: pytest.FixtureRequest) -> Show3dSceneInputs:
     """Skip absent local assets before reading the two reference scenes."""
+    from dataforge.datasets.show3d_hands import read_hand_frames
+    from dataforge.datasets.show3d_layers import read_scene
+    from dataforge.datasets.show3d_source import hand_pose_file, hand_profile_file, read_frame_clock
+    from dataforge.identity import SequenceIdentity
+    from dataforge.umetrack_hands import read_hand_profile
+
     key: str = request.param
     identity: SequenceIdentity = SequenceIdentity("show3d", tuple(key.split("/")))
     scene_dir: Path = SHOW3D_RAW / "scenes" / key

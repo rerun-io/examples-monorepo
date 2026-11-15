@@ -24,13 +24,12 @@ import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
 import serde.json
+from aria_published import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
 from conftest import (  # pyrefly: ignore[missing-import]
-    PublishedCamera,
     ServedRequest,
     column_rows,
     eye_vector,
     read_back,
-    read_calibration_json,
     recording_properties,
     serve,
 )

@@ -91,6 +91,76 @@ def test_packages_do_not_use_retired_pytest_markers() -> None:
     assert not problems, "Retired pytest markers (use integration or golden):\n" + "\n".join(problems)
 
 
+def test_package_code_never_imports_beartype() -> None:
+    """Beartype runs only under pytest (pytest-beartype): package code never imports it (AGENTS.md, Beartype)."""
+    top_level_import: re.Pattern[str] = re.compile(r"^(?:from|import) beartype\b", re.MULTILINE)
+    problems: list[str] = []
+    for package_dir in RUNNABLE_PYTHON_PACKAGES:
+        for path in sorted(package_dir.rglob("*.py")):
+            relative: Path = path.relative_to(package_dir)
+            if relative.parts[0] in {"tests", ".pixi"} or path.name == "conftest.py":
+                continue
+            if top_level_import.search(path.read_text(errors="replace")):
+                problems.append(str(path.relative_to(REPO_ROOT)))
+    assert not problems, "beartype imported outside tests (use the sys.modules lookup from AGENTS.md):\n" + "\n".join(problems)
+
+
+def test_beartype_packages_fail_when_uncheckable() -> None:
+    """Every pytest-beartype config turns the plugin's "uncheckable by beartype" warning into an error (AGENTS.md, Beartype)."""
+    entry: str = "error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"
+    problems: list[str] = []
+    for pyproject in sorted(REPO_ROOT.glob("packages/*/pyproject.toml")):
+        options: dict = tomllib.loads(pyproject.read_text()).get("tool", {}).get("pytest", {}).get("ini_options", {})
+        if "beartype_packages" in options and entry not in options.get("filterwarnings", []):
+            problems.append(str(pyproject.relative_to(REPO_ROOT)))
+    assert not problems, f"pytest configs without filterwarnings {entry!r}:\n" + "\n".join(problems)
+
+
+def _module_level_imports(path: Path) -> list[str]:
+    """Top-level names a module imports when it loads: outside functions, classes and ``if TYPE_CHECKING:``."""
+    import ast
+
+    names: list[str] = []
+    pending: list[ast.stmt] = list(ast.parse(path.read_text()).body)
+    while pending:
+        node: ast.stmt = pending.pop()
+        if isinstance(node, ast.Import):
+            names.extend(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
+            names.append(node.module.split(".")[0])
+        elif isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+            pending.extend(node.orelse)
+        elif isinstance(node, ast.If | ast.Try | ast.With):
+            pending.extend([*node.body, *getattr(node, "orelse", []), *getattr(node, "finalbody", []), *[s for h in getattr(node, "handlers", []) for s in h.body]])
+    return names
+
+
+def test_conftest_never_imports_a_workspace_package_at_module_level() -> None:
+    """pytest-beartype installs its import hook in ``pytest_configure``, after conftest.py loads: a package conftest
+    imported first stays unchecked (beartype's hooks "silently reduce to a noop"). Imports go inside fixtures or helpers."""
+    workspace_modules: set[str] = {
+        init.parent.name
+        for package_dir in RUNNABLE_PYTHON_PACKAGES
+        for init in [*package_dir.glob("*/__init__.py"), *package_dir.glob("src/*/__init__.py")]
+        if init.parent.name not in {"tests", "tools"}
+    }
+    problems: list[str] = []
+    for conftest in sorted(REPO_ROOT.glob("packages/*/tests/conftest.py")):
+        pending: list[Path] = [conftest]
+        seen: set[Path] = set()
+        while pending:
+            module: Path = pending.pop()
+            if module in seen:
+                continue
+            seen.add(module)
+            for name in _module_level_imports(module):
+                if name in workspace_modules:
+                    problems.append(f"{module.relative_to(REPO_ROOT)} imports {name} (via {conftest.relative_to(REPO_ROOT)})")
+                elif (conftest.parent / f"{name}.py").is_file():
+                    pending.append(conftest.parent / f"{name}.py")
+    assert not problems, "Module-level workspace imports in conftest.py (move them into the fixtures):\n" + "\n".join(problems)
+
+
 def _task_commands(table: dict, prefix: str = "") -> dict[str, str | list[str]]:
     """Find tasks at workspace, feature and target scope, including shorthand."""
     commands: dict[str, str | list[str]] = {}

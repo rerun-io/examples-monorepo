@@ -286,7 +286,7 @@ packages/slam-evals/
 │   ├── schema.md               # what lives at which entity path, layer model, transform notation
 │   └── architecture.md         # this file
 ├── slam_evals/
-│   ├── __init__.py             # PIXI_DEV_MODE beartype activation
+│   ├── __init__.py
 │   ├── data/
 │   │   ├── datasets.py         # DatasetSpec registry (one entry per on-disk dataset)
 │   │   ├── discovery.py        # walk + classify modality

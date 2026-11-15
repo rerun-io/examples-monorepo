@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import count
@@ -10,13 +11,15 @@ from typing import Protocol, runtime_checkable
 from warnings import warn
 
 import torch
-from beartype.roar import BeartypeException
 from jaxtyping import Num
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from zipdepth.catalog.stats import STAGE_FIELDS, CatalogDatasetStats
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 
 @runtime_checkable

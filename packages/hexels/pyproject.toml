@@ -19,6 +19,10 @@ build-backend = "hatchling.build"
 packages = ["hexels_bench"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks hexels_bench only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["hexels_bench"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 testpaths = ["tests"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e hexels-dev tests-integration)",

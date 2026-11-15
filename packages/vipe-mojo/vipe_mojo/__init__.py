@@ -11,15 +11,8 @@ Every other function of those namespaces, all of `grounding_dino_ext`, `utils_ex
 the op when called: MetricTrail never calls them.
 """
 
-import os
-
-if os.environ.get("PIXI_DEV_MODE") == "1":
-    from beartype.claw import beartype_this_package
-
-    beartype_this_package()
-
-from vipe_mojo import droid_net_ext, slam_ext  # noqa: E402
-from vipe_mojo._unported import module_getattr, unported_namespace  # noqa: E402
+from vipe_mojo import droid_net_ext, slam_ext
+from vipe_mojo._unported import module_getattr, unported_namespace
 
 grounding_dino_ext = unported_namespace("grounding_dino_ext")
 utils_ext = unported_namespace("utils_ext")

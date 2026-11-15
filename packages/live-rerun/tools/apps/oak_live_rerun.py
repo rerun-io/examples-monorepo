@@ -1,5 +1,4 @@
-"""CLI entrypoint shim. Logic lives in ``live_rerun.apis.oak_live_rerun`` so it is
-type-checked by ``beartype_this_package()`` when running under the dev environment."""
+"""CLI entrypoint shim. Logic lives in ``live_rerun.apis.oak_live_rerun`` so tests can import it."""
 
 import tyro
 

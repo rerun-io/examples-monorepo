@@ -28,18 +28,16 @@ import pytest
 from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 
-from colsfm import PACKAGE_DIR as _REPO_ROOT
-from colsfm import RESOURCES_DIR
-from colsfm.config import CusfmConfig, read_config_directory
-from colsfm.export import RuntimeRecord, append_runtime_record, write_colmap_model, write_optimised_frames_meta
-from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, KeyframeMeta, read_frames_meta
-from colsfm.geometry import relative_rotation_degrees
-
+# colsfm is imported inside the fixtures and helpers, never here: pytest-beartype installs its import hook after this
+# file loads, and a module imported first would stay unchecked (ci/tests/test_manifest.py enforces it).
 if TYPE_CHECKING:
     from mapping_helpers import SyntheticRig
 
-REPO_ROOT: Path = _REPO_ROOT
-"""Repo root, so data paths resolve regardless of the working directory."""
+    from colsfm.config import CusfmConfig
+    from colsfm.frames_meta import CameraParams, FramesMeta, KeyframeMeta
+
+REPO_ROOT: Path = Path(__file__).resolve().parents[1]
+"""`packages/colsfm` (colsfm's `PACKAGE_DIR`), so data paths resolve regardless of the working directory."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,12 +127,14 @@ def galileo_input_dir() -> Path:
 @pytest.fixture(scope="session")
 def galileo_input_meta(galileo_input_dir: Path) -> Path:
     """The 226-keyframe input metadata shipped with r2b_galileo."""
+    from colsfm.frames_meta import FRAMES_META_NAME
     return galileo_input_dir / FRAMES_META_NAME
 
 
 @pytest.fixture(scope="session")
 def galileo_input(galileo_input_meta: Path) -> FramesMeta:
     """The parsed 226-keyframe Galileo input collection."""
+    from colsfm.frames_meta import read_frames_meta
     return read_frames_meta(galileo_input_meta)
 
 
@@ -189,6 +189,8 @@ def isaac_config(repo_root: Path) -> CusfmConfig:
     Here rather than in one test module because all five mapping modules read it,
     and it is the profile the shipped cuSFM runs were produced with.
     """
+    from colsfm import RESOURCES_DIR
+    from colsfm.config import read_config_directory
     return read_config_directory(RESOURCES_DIR / "configs" / "isaac")
 
 
@@ -238,6 +240,7 @@ def pose_delta(actual: pycolmap.Rigid3d, expected: pycolmap.Rigid3d) -> tuple[fl
     Returns:
         Translation difference in metres and rotation difference in degrees.
     """
+    from colsfm.geometry import relative_rotation_degrees
     translation_m: float = float(np.linalg.norm(np.asarray(actual.translation) - np.asarray(expected.translation)))
     return translation_m, relative_rotation_degrees(actual, expected)
 
@@ -455,6 +458,7 @@ def write_synthetic_run(run_dir: Path, frames_meta: FramesMeta, *, error_px: flo
     Returns:
         `run_dir`, now holding `sparse/`, `kpmap/keyframes/frames_meta.json` and `runtime.csv`.
     """
+    from colsfm.export import RuntimeRecord, append_runtime_record, write_colmap_model, write_optimised_frames_meta
     write_colmap_model(run_dir, build_reconstruction(frames_meta, error_px))
     write_optimised_frames_meta(run_dir, frames_meta, {})
     for command, seconds in runtimes.items():

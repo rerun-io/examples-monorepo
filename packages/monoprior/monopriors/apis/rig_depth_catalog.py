@@ -23,7 +23,7 @@ import torch
 from einops import rearrange
 from jaxtyping import Float, Float32, Float64, Int64, UInt8, UInt16
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters, Intrinsics, PinholeParameters, rescale_intri
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
@@ -264,7 +264,7 @@ def main(config: RigDepthCatalogConfig) -> None:
         raise RuntimeError("rig-depth catalog inference requires CUDA for X-Lens and NVDEC")
     device = torch.device("cuda")
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
-    view: DatasetView = dataset.filter_segments(config.segment_id)
+    view: DatasetSelection = dataset.filter_segments(config.segment_id)
     source_cameras: dict[str, Fisheye62Parameters] = {cam: read_fisheye_camera(view, cam) for cam in config.cams}
     model_cameras: dict[str, Fisheye62Parameters] = {
         cam: rescaled_fisheye(camera, width=config.width, height=config.height) for cam, camera in source_cameras.items()

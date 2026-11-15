@@ -81,7 +81,7 @@ def log_relative_pred(
         rr.Transform3D(
             translation=cam_T_world_44[:3, 3],
             mat3x3=cam_T_world_44[:3, :3],
-            from_parent=True,
+            relation=rr.TransformRelation.ChildFromParent,
         ),
     )
     rr.log(
@@ -187,7 +187,7 @@ def log_metric_pred(
         rr.Transform3D(
             translation=cam_T_world_44[:3, 3],
             mat3x3=cam_T_world_44[:3, :3],
-            from_parent=True,
+            relation=rr.TransformRelation.ChildFromParent,
         ),
     )
     rr.log(

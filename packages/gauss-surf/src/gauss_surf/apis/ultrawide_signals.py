@@ -28,7 +28,7 @@ from einops import rearrange
 from jaxtyping import Float32, UInt8, UInt32
 from monopriors.models.moge_v2 import MoGeV2NormalOutput, MoGeV2TrtPredictor
 from numpy import ndarray
-from rerun.catalog import DatasetEntry, DatasetView
+from rerun.catalog import DatasetEntry, DatasetSelection
 from torch import Tensor
 
 from gauss_surf.catalog import (
@@ -167,7 +167,7 @@ def brown_conrady_coefficients(static_row: dict[str, Any], *, video_id: str) -> 
 
 def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
     """Read chosen times, calibration, causal poses, and the static PromptDA mesh."""
-    segment_view: DatasetView = reader.segment_view()
+    segment_view: DatasetSelection = reader.segment_view()
     available_columns: set[str] = set(segment_view.arrow_schema().names)
     missing_distortion_columns: list[str] = [
         name for name in (DISTORTION_MODEL_COLUMN, DISTORTION_COEFFICIENTS_COLUMN) if name not in available_columns

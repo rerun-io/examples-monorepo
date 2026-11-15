@@ -245,7 +245,7 @@ def log_trajectory(
     world_t_cam: Float64[ndarray, "3"] = world_T_cam[:3, 3]
     path_list.append(world_t_cam.tolist())
 
-    rr.log(cam_log_path, rr.Transform3D(translation=world_t_cam, mat3x3=world_T_cam[:3, :3], from_parent=False))
+    rr.log(cam_log_path, rr.Transform3D(translation=world_t_cam, mat3x3=world_T_cam[:3, :3]))
     rr.log(f"{parent_log_path}/path", rr.LineStrips3D(strips=[path_list], colors=[255, 0, 0]))
 
     if log_points:

@@ -186,7 +186,7 @@ def child_environment(parent: Mapping[str, str]) -> dict[str, str]:
     """The environment of a nested ``pixi run``, without the activation of the env that runs selfcap-run.
 
     pixi keeps what the new env does not set: selfcap-curate's LD_LIBRARY_PATH would load its libraries into selfcap-soma,
-    and a dev env's flag would turn beartype on in the production envs of the tasks.
+    and a test's PIXI_DEV_MODE flag would keep torch.compile off in the tasks.
     """
     prefix: str | None = parent.get("CONDA_PREFIX")
     child: dict[str, str] = {}

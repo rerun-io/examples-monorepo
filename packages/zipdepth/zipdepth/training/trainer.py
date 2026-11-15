@@ -98,7 +98,7 @@ class ZipDepthTrainer:
                 lane. Upstream ZipDepth's SSI lane uses 2.0; 0.5 leaves the term at ~9%
                 of the objective, which under-penalizes depth-discontinuity errors.
             pin_batchnorm_eval: Return BatchNorm modules to eval after entering train mode
-            compile_mode: torch.compile mode, or 'off'; dev-mode beartype disables it
+            compile_mode: torch.compile mode, or 'off'; off under pytest, where beartype runs
             channels_last: Move four-dimensional batches with channels-last strides
             range_margin_m: Prompted head output-range margin of the student, in metres,
                 recorded in every checkpoint so inference rebuilds the same head
@@ -153,7 +153,7 @@ class ZipDepthTrainer:
         )
 
         # Compile student for faster iteration (PyTorch >= 2.0)
-        # Under the beartype dev env, Dynamo tracing through beartype's jaxtyping wrapper
+        # Under pytest's beartype claw (PIXI_DEV_MODE=1), Dynamo tracing through beartype's jaxtyping wrapper
         # raises a desynchronization error; production environments still compile.
         if compile_mode != 'off' and os.environ.get("PIXI_DEV_MODE") != "1":
             self.student = torch.compile(self.student, mode=compile_mode)

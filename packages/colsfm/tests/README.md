@@ -34,42 +34,12 @@ has it, and the loud Ceres fallback with its reason in `MappingStats` where it d
 
 ## The type-checked run
 
-`colsfm/__init__.py` turns on beartype's claw only when `PIXI_DEV_MODE=1`:
-
-```python
-if os.environ.get("PIXI_DEV_MODE") == "1":
-    from beartype.claw import beartype_this_package
-
-    beartype_this_package()
-```
-
-`colsfm-test` does not set it, so **the default run checks no annotation at run time**.
-Every jaxtyping shape and dtype in the package goes unverified there, whatever the static
-checker made of it. To get the checked run:
-
-```shell
-PIXI_DEV_MODE=1 pixi run -e colsfm python -m pytest tests/colsfm -q
-```
-
-The claw wraps every call in the package, so the checked run is the slower one: 160 s
-here, against 95–126 s for the default run across three goes on the same machine. One
-test opts out on purpose:
-`test_a_thousand_node_graph_solves_within_one_second` carries a `skipif` on
-`PIXI_DEV_MODE`, because the claw sits in the Ceres inner loop and a deadline measured
-through it means nothing. Its numerical half,
-`test_a_thousand_node_graph_closes_its_loop`, does run type-checked.
-
-### What the checked run currently reports
-
-**533 passed, 14 skipped** (2026-09-06), the same as the default run and 156 s against its
-103 s. It was 5 failed / 522 passed until the two annotation defects it exists to find were
-fixed: `colsfm.colmap_text_model.parse_colmap_points_text` declared `Int[ndarray,
-"n_points 3"]` and returned `uint8` RGB, and a `publish_atomically` test expected a
-`TypeError` beartype pre-empts with `BeartypeCallHintParamViolation`.
-
-```shell
-pixi run colsfm-test-typed
-```
+Beartype runs only under pytest, through pytest-beartype: `[tool.pytest.ini_options] beartype_packages = ["colsfm"]`
+in `pyproject.toml` checks every annotation in the package, jaxtyping shapes and dtypes included, on every test run.
+Nothing outside pytest loads it, so timings, demos and long runs (prod env or not) run unchecked and at full speed.
+`tests/conftest.py` imports colsfm only inside its fixtures, because pytest-beartype installs its import hook after the
+conftest loads; a module-level import would leave colsfm unchecked (`ci/tests/test_manifest.py` enforces it, and the
+`PytestBeartypeOptionPackagesWarning` filter turns the case into an error).
 
 ## The performance tests
 

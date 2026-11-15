@@ -7,7 +7,6 @@ and the same API helpers as the CLI pipeline.
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-import beartype
 import gradio as gr
 import numpy as np
 import rerun as rr
@@ -77,11 +76,6 @@ def stream_polycam_da(
 
     try:
         parameters = InputValues(*input_params)
-    except beartype.roar.BeartypeCallHintParamViolation as e:
-        raise gr.Error(
-            "Did you make sure the zipfile finished uploading?. Try to hit run again.",
-            duration=20,
-        ) from e
     except Exception as e:
         raise gr.Error(
             f"Error: {e}\n Did you wait for zip file to upload?",

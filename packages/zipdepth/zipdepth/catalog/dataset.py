@@ -1,5 +1,6 @@
 """Stream chosen-frame PromptDA targets from a Rerun catalog."""
 
+import sys
 from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -24,7 +25,6 @@ from arkitscenes_download.ingest.paths import (
     VIDEO_WIDE,
 )
 from arkitscenes_download.ingest.timestamps import match_exact_timestamps, table_timestamps
-from beartype.roar import BeartypeException
 from datafusion import col
 from jaxtyping import Bool, Int64, Shaped, UInt8
 from numpy import ndarray
@@ -40,6 +40,9 @@ from zipdepth.catalog.segments import SegmentRow
 from zipdepth.catalog.stats import CatalogDatasetStats, total
 from zipdepth.catalog.threaded import iter_threaded
 from zipdepth.catalog.ultrawide import ULTRAWIDE_LAYER, CameraSelection, interleave, subsample_indices
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 PROMPTDA_BLOB_COLUMN: str = f"/{DEPTH_PROMPTDA}:EncodedDepthImage:blob"
 """Catalog column containing uint16 PromptDA PNG blobs."""

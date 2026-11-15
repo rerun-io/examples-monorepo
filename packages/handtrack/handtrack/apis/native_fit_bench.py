@@ -126,7 +126,7 @@ def two_view_check(call: RecordedCall) -> list[str]:
 
 def main(config: Config) -> None:
     if os.environ.get("PIXI_DEV_MODE") == "1":
-        raise RuntimeError("benchmark requires production activation (beartype off)")
+        raise RuntimeError("benchmark must run outside pytest (beartype off)")
     if config.repeats < 1:
         raise ValueError("repeats must be positive")
     torch.set_num_threads(1)

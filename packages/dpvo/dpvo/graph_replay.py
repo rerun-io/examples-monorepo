@@ -9,7 +9,7 @@ Every replayed output is a copy (a later replay cannot overwrite a tensor the tr
 model released by FP32 recovery takes its graph pools with it. One :class:`GraphCache` bounds every graph of a run.
 
 Only module-level functions cross these functions' ``Callable`` parameters, never per-call closures or bound methods:
-beartype (the dev environments) memoises every callable it checks against a ``Callable`` hint in a strong-keyed dict,
+beartype (under pytest) memoises every callable it checks against a ``Callable`` hint in a strong-keyed dict,
 which would pin a closure's model (and its graph pools) for the life of the process.
 """
 

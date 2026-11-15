@@ -15,13 +15,13 @@ The Run button passes the Config widgets to the streaming callback, which builds
 
 import dataclasses
 import shutil
+import sys
 import tempfile
 import threading
 from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import TypeAlias
 
-import beartype
 import gradio as gr
 import rerun as rr
 from gradio_rerun import Rerun
@@ -32,6 +32,9 @@ from mast3r_slam.async_logger import DEFAULT_CONF_THRESHOLD
 from mast3r_slam.config import SLAM_PRESETS, SlamConfig, SlamPresetName
 from mast3r_slam.mast3r_utils import prepare_trt_engines
 from mast3r_slam.rerun_log_utils import LOG_PATH
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 EXAMPLE_VIDEOS: list[str] = [
     "data/livingroom-tour.mp4",
@@ -72,7 +75,7 @@ def _prepare_example_engines(model: AsymmetricMASt3R) -> None:
             engine_status = f"Preparing TensorRT engines for {w}x{h} frames ({n}/{len(sizes)}); a first build on this machine takes a few minutes..."
             prepare_trt_engines(model, (h, w))
         engine_status = f"TensorRT engines ready for {', '.join(f'{w}x{h}' for h, w in sizes)} frames."
-    except beartype.roar.BeartypeException:
+    except BeartypeException:
         raise
     except Exception as exc:
         engine_status = f"Preparing TensorRT engines failed ({exc}); runs build them on first use."

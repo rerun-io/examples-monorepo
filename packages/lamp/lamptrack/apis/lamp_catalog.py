@@ -15,7 +15,7 @@ from numpy import ndarray
 from posekit.predictions import BoxDetections, Keypoints2d
 from posekit.rerun_logging import log_person_bbox, log_person_points2d, log_skeleton_annotation_context, person_color
 from posekit.skeletons import COCO_17
-from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation, Slerp
 from simplecv.camera_parameters import Fisheye62Parameters
 from simplecv.catalog_video_codec import video_codec
@@ -336,7 +336,7 @@ def _log_rays(
 def run(config: Config) -> RunMetrics:
     """Run the configured Robocap interval and return measured stage summaries."""
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
-    view: DatasetView = dataset.filter_segments(config.segment_id)
+    view: DatasetSelection = dataset.filter_segments(config.segment_id)
     camera_parameters: list[Fisheye62Parameters] = [read_fisheye_camera(view, cam) for cam in config.cams]
     cameras = [RigCamera(parameters) for parameters in camera_parameters]
     pose_times, world_T_rig_values = read_rig_poses(view)

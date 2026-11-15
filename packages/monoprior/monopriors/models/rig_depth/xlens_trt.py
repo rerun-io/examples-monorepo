@@ -603,7 +603,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         return self.cache_dir / "onnx" / f"xlens-vits-rig_{signature}_v{ONNX_EXPORT_VERSION}_{self.checkpoint_digest[:8]}.onnx"
 
     def _export(self, plan: ExportPlan, onnx_path: Path, rays: Float32[ndarray, "s h w 3"], cam_types: Int64[ndarray, "s"], cam_T_ref: Float64[ndarray, "s 4 4"] | None) -> None:
-        """Export in-process, or in a clean interpreter when beartype's dev claw is active.
+        """Export in-process, or in a clean interpreter when beartype's claw is active (pytest).
 
         Symbolic dims reach the fork as ``torch.SymInt`` values, which the dev-mode
         ``int`` checks reject (the same reason MoGe re-enters its export). The worker

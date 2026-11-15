@@ -1,10 +1,14 @@
-"""Small synthetic Claude session fixtures."""
+"""Small synthetic Claude session fixtures.
+
+Package imports stay inside the helpers: pytest-beartype instruments agent_traces only if this file has not imported it.
+"""
 
 import base64
 import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import orjson
 import pyarrow as pa
@@ -12,8 +16,8 @@ import pytest
 import rerun_cli
 from rerun.chunk import RrdReader
 
-from agent_traces import claude, codex
-from agent_traces.events import Session
+if TYPE_CHECKING:
+    from agent_traces.events import Session
 
 
 @dataclass(slots=True)
@@ -137,13 +141,17 @@ def read_entities(path: Path) -> dict[str, pa.Table]:
     }
 
 
-def parse_session(path: Path) -> Session:
+def parse_session(path: Path) -> "Session":
     """Parse the inventoried Claude source through the public provider boundary."""
+    from agent_traces import claude
+
     return claude.session_source(path).parse()
 
 
-def parse_rollout(path: Path) -> Session:
+def parse_rollout(path: Path) -> "Session":
     """Parse the inventoried Codex source through the public provider boundary."""
+    from agent_traces import codex
+
     return codex.session_source(path).parse()
 
 

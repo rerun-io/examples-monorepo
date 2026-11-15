@@ -24,7 +24,7 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Bool, Float32, Int64, UInt32
 from numpy import ndarray
-from rerun.datatypes import Rgba32Like
+from rerun.encodings import Rgba32Like
 
 from dataforge.logging_toolkit import frame_index_column, time_column
 

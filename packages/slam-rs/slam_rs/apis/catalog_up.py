@@ -4,13 +4,16 @@ import os
 import resource
 import signal
 import subprocess
+import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from beartype.roar import BeartypeException
 from rerun.catalog import CatalogClient
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 SERVER_COMMAND: tuple[str, ...] = ("rerun", "server")
 

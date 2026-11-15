@@ -17,26 +17,39 @@ Runtime settings and benchmark definitions are separate session-scoped fixtures.
 Tests request benchmark definitions only when they evaluate regression cases.
 """
 
+from __future__ import annotations
+
+import os
 import socket
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import numpy as np
 import pytest
 import rerun.chunk as rrc
-from fixture_types import FRAME, CameraFactory, FrontendFactory, PipelineFactory, RigFactory, Row, Rows, RowsReader, TextureFactory
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
-from slam_rs import _core
-from slam_rs.catalog_feed import TIMELINE, CameraCalib, ImuCalib
-from slam_rs.config import SlamConfig, load_slam_config
-from slam_rs.reference import Benchmarks, load_benchmarks
+# Package imports (fixture_types imports slam_rs) stay inside the fixtures: pytest-beartype instruments slam_rs only
+# if this file has not imported it.
+if TYPE_CHECKING:
+    from fixture_types import CameraFactory, FrontendFactory, PipelineFactory, RigFactory, Rows, RowsReader, TextureFactory
+
+    from slam_rs import _core
+    from slam_rs.catalog_feed import CameraCalib, ImuCalib
+    from slam_rs.config import SlamConfig
+    from slam_rs.reference import Benchmarks
+
+# beartype runs under pytest only; code that cannot run under it reads this (test_frameset_matching.py checks it).
+os.environ.setdefault("PIXI_DEV_MODE", "1")
 
 
 @pytest.fixture(scope="session")
 def settings() -> SlamConfig:
     """Runtime settings, parsed once for the whole session."""
+    from slam_rs.config import load_slam_config
+
     return load_slam_config()
 
 
@@ -57,12 +70,17 @@ def live_catalog(settings: SlamConfig) -> None:
 @pytest.fixture(scope="session")
 def benchmarks(settings: SlamConfig) -> Benchmarks:
     """Frozen regression cases, loaded only by evaluation tests."""
+    from slam_rs.reference import load_benchmarks
+
     return load_benchmarks(settings)
 
 
 @pytest.fixture(scope="session")
 def camera() -> CameraFactory:
     """A 200x200 pinhole-like camera: kb4 with every coefficient zero."""
+    from fixture_types import FRAME
+
+    from slam_rs.catalog_feed import CameraCalib
 
     def build(index: int, baseline_m: float) -> CameraCalib:
         imu_T_cam: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
@@ -87,6 +105,8 @@ def camera() -> CameraFactory:
 @pytest.fixture(scope="session")
 def imu() -> ImuCalib:
     """The Index device's frozen noise model, which no test here is sensitive to."""
+    from slam_rs.catalog_feed import ImuCalib
+
     return ImuCalib(
         frequency_hz=1000.0,
         gyro_noise_std=0.000282,
@@ -101,6 +121,7 @@ def imu() -> ImuCalib:
 @pytest.fixture(scope="session")
 def rig(camera: CameraFactory, imu: ImuCalib) -> RigFactory:
     """A calibration for ``camera_count`` identical cameras, 10 cm apart."""
+    from slam_rs import _core
 
     def build(camera_count: int) -> _core.Calibration:
         return _core.Calibration.from_catalog([camera(index, 0.1 * index) for index in range(camera_count)], imu)
@@ -111,6 +132,7 @@ def rig(camera: CameraFactory, imu: ImuCalib) -> RigFactory:
 @pytest.fixture(scope="session")
 def frontend(rig: RigFactory) -> FrontendFactory:
     """A frontend on a rig of ``camera_count`` identical cameras."""
+    from slam_rs import _core
 
     def build(camera_count: int) -> _core.OpticalFlow:
         return _core.OpticalFlow(rig(camera_count), _core.VioConfig())
@@ -126,6 +148,7 @@ def pipeline(rig: RigFactory) -> PipelineFactory:
     (``optical_flow.h:210``), so a one-camera rig is a refusal to assert on, not
     a fixture to build from.
     """
+    from slam_rs import _core
 
     def build(camera_count: int) -> _core.Vio:
         return _core.Vio(rig(camera_count), _core.VioConfig())
@@ -144,6 +167,9 @@ def read_rows() -> RowsReader:
         A function of an ``.rrd`` written by :func:`rerun.save`, giving each
         entity path's rows in ``video_time`` order.
     """
+    from fixture_types import Row
+
+    from slam_rs.catalog_feed import TIMELINE
 
     def read(path: Path) -> Rows:
         rows: Rows = {}
@@ -176,6 +202,7 @@ def texture() -> TextureFactory:
     same score, and the detector's suppression is strictly-greater-than, so a tie kills
     both sides and a perfectly regular scene detects almost nothing.
     """
+    from fixture_types import FRAME
 
     def build(shift_x: int, shift_y: int) -> UInt8[ndarray, "h w"]:
         blocks: UInt8[ndarray, "b b"] = np.random.default_rng(20250907).integers(0, 256, (FRAME // 2, FRAME // 2), dtype=np.uint8)
@@ -188,6 +215,8 @@ def texture() -> TextureFactory:
 @pytest.fixture(scope="session")
 def robocap_imu() -> ImuCalib:
     """Cap A's factory noise model, used only as a test expectation."""
+    from slam_rs.catalog_feed import ImuCalib
+
     return ImuCalib(frequency_hz=200.0, gyro_noise_std=0.0007300442812547, accel_noise_std=0.005955224218014,
                     gyro_bias_std=3.445397083168e-05, accel_bias_std=0.0001963150489218, cam_time_offset_ns=14_902_432,
                     imu_T_body=np.eye(4, dtype=np.float64))

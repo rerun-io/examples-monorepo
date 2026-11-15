@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
+from aria_published import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64
 from numpy import ndarray
 

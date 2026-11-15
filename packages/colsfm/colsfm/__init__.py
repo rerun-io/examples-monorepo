@@ -9,7 +9,6 @@ this code follows live in the source fork, pablovela5620/pyCuSFM (branch feat/py
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Final
 
@@ -21,8 +20,3 @@ RESOURCES_DIR: Final[Path] = Path(__file__).resolve().parent / "resources"
 
 DATA_DIR: Final[Path] = PACKAGE_DIR / "data"
 """Gitignored: exported ONNX graphs, downloaded datasets, run outputs."""
-
-if os.environ.get("PIXI_DEV_MODE") == "1":
-    from beartype.claw import beartype_this_package
-
-    beartype_this_package()

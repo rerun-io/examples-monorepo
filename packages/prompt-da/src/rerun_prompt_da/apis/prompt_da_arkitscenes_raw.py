@@ -39,7 +39,7 @@ from arkitscenes_download.ingest.rig import (
 )
 from jaxtyping import Float, Float32, Float64, UInt8, UInt16
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
+from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationOperation
 from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 from torch import Tensor
@@ -372,7 +372,7 @@ def process_segment_raw(
     register_s: float = 0.0
     if config.register:
         register_started: float = time.perf_counter()
-        registration_handle: RegistrationHandle = dataset_entry.register(
+        registration_handle: RegistrationOperation = dataset_entry.register(
             [rrd_path.resolve().as_uri()],
             layer_name=PROMPTDA_RAW_LAYER,
             on_duplicate=OnDuplicateSegmentLayer.REPLACE,

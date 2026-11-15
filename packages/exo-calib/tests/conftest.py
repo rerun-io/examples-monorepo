@@ -1,10 +1,20 @@
-"""Synthetic multi-view scenes shared by the geometry tests."""
+"""Synthetic multi-view scenes shared by the geometry tests.
+
+Package imports stay inside the helpers: pytest-beartype instruments exo_calib only if this file has not imported it.
+"""
+
+import os
+from typing import TYPE_CHECKING
 
 import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.correspondences import ObservationSet
+if TYPE_CHECKING:
+    from exo_calib.correspondences import ObservationSet
+
+# beartype runs under pytest only; code that cannot run under it (torch.compile, ONNX export) reads this and stays eager.
+os.environ.setdefault("PIXI_DEV_MODE", "1")
 
 
 def ring_rig(n_views: int, radius_m: float) -> Float64[ndarray, "v 4 4"]:
@@ -29,8 +39,10 @@ def ring_rig(n_views: int, radius_m: float) -> Float64[ndarray, "v 4 4"]:
 
 def observe_points(
     points_xyz: Float64[ndarray, "n 3"], intrinsics: Float64[ndarray, "v 3 3"], cam_T_world: Float64[ndarray, "v 4 4"]
-) -> ObservationSet:
+) -> "ObservationSet":
     """Project every point into every view with unit confidence, one point per frame and joint 0 (point-major, view-minor order)."""
+    from exo_calib.correspondences import ObservationSet
+
     n_views: int = cam_T_world.shape[0]
     n_points: int = points_xyz.shape[0]
     points_homo: Float64[ndarray, "n 4"] = np.column_stack((points_xyz, np.ones(n_points, dtype=np.float64)))

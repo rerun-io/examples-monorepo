@@ -1,12 +1,12 @@
 """Helpers shared by the catalog-dataloader and raw-disk ARKitScenes PromptDA tools."""
 
+import sys
 from collections.abc import Callable
 from typing import Any
 
 import cv2
 import numpy as np
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence
-from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Float, Float32, UInt8, UInt16
 from monopriors.models.depth_completion.base_completion_depth import upsample_depth_to_image
@@ -17,6 +17,9 @@ from simplecv.ops.depth import quantize_depth_m_to_mm
 from torch import Tensor
 
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, preprocess_batch
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 ARKITSCENES_DATASET = "arkitscenes"
 NATIVE_FPS = 60.0

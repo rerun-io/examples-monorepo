@@ -11,6 +11,7 @@ each mode against the eager fp32 frozen-geometry path.
 import gc
 import json
 import statistics
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,7 +22,6 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, get_args, runtime_ch
 import cv2
 import numpy as np
 import torch
-from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, Int64, Shaped, UInt8
 from numpy import ndarray
@@ -30,6 +30,9 @@ from torch import Tensor
 
 from monopriors.models.rig_depth import BaseRigDepthPredictor, RigDepthPrediction, XLensPredictor, XLensTrtPredictor, camera_type, unit_rays
 from monopriors.models.rig_depth.xlens_trt import XLENS_CACHE_DIR, EngineProfile
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 Mode: TypeAlias = Literal["eager-bf16", "eager-frozen-bf16", "trt-rig-static", "trt-rig", "trt-dynamic"]
 """``trt-rig-static``: one static engine per rig (batch 1); ``trt-rig``: per-rig engine with a dynamic frameset batch;
@@ -213,13 +216,13 @@ def fit_to_network(frame: UInt8[ndarray, "h0 w0 3"], camera: Fisheye62Parameters
 
 def catalog_frames(config: Config, cams: tuple[str, ...]) -> tuple[dict[str, UInt8[ndarray, "h0 w0 3"]], dict[str, Fisheye62Parameters]]:
     """Decode the first shared frameset of the segment for ``cams`` and read their cameras."""
-    from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+    from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
     from simplecv.rerun_dataloader import open_segment_decoder
 
     from monopriors.apis.stereo_catalog import read_fisheye_camera
 
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
-    view: DatasetView = dataset.filter_segments(config.segment_id)
+    view: DatasetSelection = dataset.filter_segments(config.segment_id)
     cameras: dict[str, Fisheye62Parameters] = {cam: read_fisheye_camera(view, cam) for cam in cams}
     device = torch.device("cuda")
     decoders: dict[str, DecoderBundle] = {

@@ -27,7 +27,8 @@ from unittest.mock import Mock
 import av
 import numpy as np
 import pytest
-from conftest import PublishedCamera, assert_readers_match_projectaria, raw_asset, read_calibration_json  # pyrefly: ignore[missing-import]
+from aria_published import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
+from conftest import assert_readers_match_projectaria, raw_asset  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
