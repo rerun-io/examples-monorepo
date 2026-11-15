@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
+from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationOperation
 
 from agent_traces.blueprint import catalog_blueprint
 from agent_traces.catalog_layout import save_table_blueprint
@@ -125,7 +125,7 @@ def main(config: Config) -> Summary:
         failed_uris: set[str] = set()
         policy: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.REPLACE if config.replace else OnDuplicateSegmentLayer.SKIP
         if sessions_by_uri:
-            handle: RegistrationHandle = entry.register(list(sessions_by_uri), layer_name="base", on_duplicate=policy)
+            handle: RegistrationOperation = entry.register(list(sessions_by_uri), layer_name="base", on_duplicate=policy)
             wait_error: ValueError | None = None
             try:
                 handle.wait()

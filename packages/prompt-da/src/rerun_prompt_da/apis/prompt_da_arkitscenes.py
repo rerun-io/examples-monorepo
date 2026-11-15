@@ -27,7 +27,7 @@ from arkitscenes_download.ingest.recording import atomic_recording
 from einops import rearrange
 from jaxtyping import Float, UInt8, UInt16
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
+from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationOperation
 from rerun.experimental.dataloader import RerunIterableDataset
 from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
@@ -371,7 +371,7 @@ def main(config: PDAArkitScenesConfig) -> None:
     portrait_by_id: dict[str, bool] = {str(row["rerun_segment_id"]): portrait_from_segment_row(row) for row in rows}
     quarter_turns_by_id: dict[str, int] = {str(row["rerun_segment_id"]): landscape_quarter_turns(row) for row in rows}
     results: list[SegmentResult] = []
-    registration_handles: list[RegistrationHandle] = []
+    registration_handles: list[RegistrationOperation] = []
     for segment_id in segment_ids:
         result: SegmentResult = process_segment(
             dataset_entry,

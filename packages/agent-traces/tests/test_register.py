@@ -135,7 +135,7 @@ def catalog(monkeypatch: pytest.MonkeyPatch) -> dict[str, FakeEntry]:
     monkeypatch.setattr(FakeClient, "entries", {})
     monkeypatch.setattr(register, "CatalogClient", FakeClient)
     monkeypatch.setattr(register, "DatasetEntry", FakeEntry)
-    monkeypatch.setattr(register, "RegistrationHandle", FakeRegistration)
+    monkeypatch.setattr(register, "RegistrationOperation", FakeRegistration)
     return FakeClient.entries
 
 

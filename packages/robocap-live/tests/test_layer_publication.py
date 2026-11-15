@@ -6,12 +6,12 @@ from typing import Literal
 from urllib.parse import unquote, urlparse
 
 import pytest
-from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle, RegistrationResult
+from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer, RegistrationOperation, RegistrationResult
 
 from robocap_live.apis.hands_layer import publish_layer
 
 
-class FakeRegistration(RegistrationHandle):
+class FakeRegistration(RegistrationOperation):
     def __init__(self, complete: Callable[[], None]) -> None:
         self.complete: Callable[[], None] = complete
 
@@ -29,7 +29,7 @@ class FakeDataset(DatasetEntry):
 
     def register(self, recording_uri: list[str], *, layer_name: str | Sequence[str] = "base",
                  on_duplicate: OnDuplicateSegmentLayer = OnDuplicateSegmentLayer.ERROR,
-                 object_store_config: str | None = None) -> RegistrationHandle:
+                 object_store_config: str | None = None) -> RegistrationOperation:
         assert layer_name == "hands" and on_duplicate == OnDuplicateSegmentLayer.REPLACE
         assert len(recording_uri) == 1
         candidate: Path = Path(unquote(urlparse(recording_uri[0]).path))

@@ -213,13 +213,13 @@ def fit_to_network(frame: UInt8[ndarray, "h0 w0 3"], camera: Fisheye62Parameters
 
 def catalog_frames(config: Config, cams: tuple[str, ...]) -> tuple[dict[str, UInt8[ndarray, "h0 w0 3"]], dict[str, Fisheye62Parameters]]:
     """Decode the first shared frameset of the segment for ``cams`` and read their cameras."""
-    from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+    from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
     from simplecv.rerun_dataloader import open_segment_decoder
 
     from monopriors.apis.stereo_catalog import read_fisheye_camera
 
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
-    view: DatasetView = dataset.filter_segments(config.segment_id)
+    view: DatasetSelection = dataset.filter_segments(config.segment_id)
     cameras: dict[str, Fisheye62Parameters] = {cam: read_fisheye_camera(view, cam) for cam in cams}
     device = torch.device("cuda")
     decoders: dict[str, DecoderBundle] = {

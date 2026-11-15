@@ -34,7 +34,7 @@ from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Float32, UInt8, UInt32
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
 from torch import Tensor
 
 from gauss_surf.catalog import (
@@ -157,7 +157,7 @@ def generate_ultrawide_depth(reader: SegmentReader, rrd_path: Path, *, batch_siz
     Returns:
         Frame count, resolution, mesh size, and valid-depth coverage.
     """
-    segment_view: DatasetView = reader.segment_view()
+    segment_view: DatasetSelection = reader.segment_view()
     chosen_table: pa.Table = reader.chosen_table(ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN, (UW_K_COLUMN, UW_RESOLUTION_COLUMN))
     timestamps_n: TimedeltaNs = table_timestamps(chosen_table)
     K_uw_33: Float32[ndarray, "3 3"] = _matrix_from_cell(chosen_table.column(UW_K_COLUMN).to_pylist()[0], UW_K_COLUMN)

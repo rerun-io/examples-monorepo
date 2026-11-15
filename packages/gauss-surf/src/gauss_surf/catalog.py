@@ -15,7 +15,7 @@ from beartype.roar import BeartypeException
 from datafusion import col
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, DatasetView, OnDuplicateSegmentLayer, RegistrationHandle
+from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection, OnDuplicateSegmentLayer, RegistrationOperation
 from simplecv.rerun_dataloader import SegmentNvdecDecoder
 from torch import Tensor
 
@@ -162,7 +162,7 @@ class SegmentReader:
                 f"segment {self.video_id} has {property_name}={quarter_turns}; {stage_context} supports only zero quarter-turns"
             )
 
-    def segment_view(self) -> DatasetView:
+    def segment_view(self) -> DatasetSelection:
         """Return the catalog query view filtered to this segment."""
         self.row()
         return self.dataset.filter_segments(self.video_id)
@@ -177,7 +177,7 @@ class SegmentReader:
         Returns:
             Non-empty Arrow table containing ``time`` and ``columns``.
         """
-        segment_view: DatasetView = self.segment_view()
+        segment_view: DatasetSelection = self.segment_view()
         available_columns: set[str] = set(segment_view.arrow_schema().names)
         missing_columns: list[str] = [name for name in (chosen_column, *columns) if name not in available_columns]
         if missing_columns:
@@ -203,7 +203,7 @@ class SegmentReader:
         Returns:
             Arrow table containing exact pose timestamps and both components.
         """
-        segment_view: DatasetView = self.segment_view()
+        segment_view: DatasetSelection = self.segment_view()
         available_columns: set[str] = set(segment_view.arrow_schema().names)
         missing_columns: list[str] = [name for name in (translation_column, quaternion_column) if name not in available_columns]
         if missing_columns:
@@ -262,7 +262,7 @@ def register_layer(dataset: DatasetEntry, rrd_path: Path, layer_name: str) -> No
     """
     if not rrd_path.is_file():
         raise FileNotFoundError(rrd_path)
-    registration: RegistrationHandle = dataset.register(
+    registration: RegistrationOperation = dataset.register(
         [rrd_path.resolve().as_uri()],
         layer_name=layer_name,
         on_duplicate=OnDuplicateSegmentLayer.REPLACE,

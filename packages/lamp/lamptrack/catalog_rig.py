@@ -8,7 +8,7 @@ catalog rig reader becomes public.
 import numpy as np
 import pyarrow as pa
 from jaxtyping import Float64
-from rerun.catalog import DatasetView
+from rerun.catalog import DatasetSelection
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 from simplecv.rrd_query_utils import first_valid_value
@@ -17,13 +17,13 @@ TIMELINE = "video_time"
 RIG = "world/rig_00"
 
 
-def _read_static(view: DatasetView, entity: str, component: str) -> object:
+def _read_static(view: DatasetSelection, entity: str, component: str) -> object:
     """Read the first value of one static component."""
     table: pa.Table = view.filter_contents(entity).reader(index=None).select(f"/{entity}:{component}").to_arrow_table()
     return first_valid_value(table.column(0), component_name=component)
 
 
-def read_fisheye_camera(view: DatasetView, cam: str) -> Fisheye62Parameters:
+def read_fisheye_camera(view: DatasetSelection, cam: str) -> Fisheye62Parameters:
     """Read one dataforge exoego:v2 camera whose extrinsics are ``cam_T_rig``."""
     pinhole = f"{RIG}/{cam}/pinhole"
     model = str(np.asarray(_read_static(view, pinhole, "simplecv.components.DistortionModel")).ravel()[0])
@@ -63,7 +63,7 @@ def read_fisheye_camera(view: DatasetView, cam: str) -> Fisheye62Parameters:
     )
 
 
-def read_rig_poses(view: DatasetView) -> tuple[np.ndarray, Float64[np.ndarray, "n 4 4"]]:
+def read_rig_poses(view: DatasetSelection) -> tuple[np.ndarray, Float64[np.ndarray, "n 4 4"]]:
     """Read temporal ``world_T_rig`` timestamps and poses from the SLAM layer."""
     table: pa.Table = (
         view.filter_contents(RIG)
