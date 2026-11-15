@@ -19,12 +19,14 @@ PREVIEW_CHECKPOINT: str = "taehv/taew2_2.pth"
 class Config:
     """Run 4DAnyone-Turbo on one video; the source, the body, the denoising previews and the views stream into Rerun."""
 
+    rr_config: RerunTyroConfig
+    """Viewer / save options; pass --rr-config.headless without a display. No default: building one calls rr.init and
+    spawns or connects a viewer, so tyro must build it once, from the flags."""
+
     run: RunConfig = field(default_factory=RunConfig)
     """What to generate."""
     previews: bool = True
     """Decode each denoising step's x_0 estimate with TAEW2.2 and log it (``previews/<NN>``)."""
-    rr_config: RerunTyroConfig = field(default_factory=lambda: RerunTyroConfig(application_id="fdanyone-rerun"))
-    """Viewer / save options; pass --rr-config.headless without a display."""
 
 
 def main(config: Config) -> RunMetadata:

@@ -1,6 +1,6 @@
 """``fdanyone-log-run``: log a finished 4DAnyone run directory to Rerun (no GPU)."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -14,12 +14,14 @@ from fdanyone_rerun.rerun_log import log_run
 class Config:
     """Log a run directory (ours or upstream's ``inference.py`` output) with the default layout."""
 
+    rr_config: RerunTyroConfig
+    """Viewer / save options; pass --rr-config.headless without a display. No default: building one calls rr.init and
+    spawns or connects a viewer, so tyro must build it once, from the flags."""
+
     output_dir: Path
     """The run directory (videos/, cameras.json, metadata.json, gvhmr/)."""
     video: Path | None = None
     """The input video, to show it in the source camera; it lines up when the run started at 0 s."""
-    rr_config: RerunTyroConfig = field(default_factory=lambda: RerunTyroConfig(application_id="fdanyone-rerun"))
-    """Viewer / save options; pass --rr-config.headless without a display."""
 
 
 def main(config: Config) -> RunMetadata:
