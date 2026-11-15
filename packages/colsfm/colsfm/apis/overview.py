@@ -2,7 +2,8 @@
 
 Inputs: the walkthrough recording of a catalog run (`tools/walkthrough.py` on a `colsfm.catalog` input directory) and
 its run directory. The overview is logged into a second file with the walkthrough's own application and recording id,
-with one blueprint (Overview first, then the stage tabs), and the two are merged with `rerun rrd merge`.
+with one blueprint (Overview first, then the stage tabs); the walkthrough's data, without its own blueprint, and that file
+are merged with `rerun rrd merge`, so the result carries exactly one blueprint.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from pathlib import Path
 import rerun as rr
 import rerun.blueprint as rrb
 from rerun.catalog import CatalogClient, DatasetEntry
-from rerun.experimental import RrdReader
+from rerun.chunk import RrdReader
 
 from colsfm.benchmark import read_run
 from colsfm.catalog import CatalogInputConfig, read_catalog_cameras, read_catalog_trajectory
@@ -103,9 +104,13 @@ def main(config: Config) -> OverviewNumbers:
         make_default=True,
     )
     recording.flush()
+    # The walkthrough's data without its own blueprint: with two blueprints in the merged file, which one the viewer
+    # activates depends on merge order (one page recording opened on stage 1 with no Overview tab).
+    walkthrough_data: Path = config.overlay.with_name(f"{config.overlay.stem}-walkthrough-data.rrd")
+    RrdReader(str(config.walkthrough_rrd)).store().stream().write_rrd(walkthrough_data, application_id=APPLICATION_ID, recording_id=config.recording_id)
     rerun_cli: str = shutil.which("rerun") or "rerun"
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([rerun_cli, "rrd", "merge", str(config.walkthrough_rrd), str(config.overlay), "-o", str(config.output)], check=True)
+    subprocess.run([rerun_cli, "rrd", "merge", str(walkthrough_data), str(config.overlay), "-o", str(config.output)], check=True)
     print(notes_markdown(config.source.segment, numbers))
     print(f"[colsfm] wrote {config.output} ({config.output.stat().st_size / 2**20:.1f} MiB)")
     return numbers
