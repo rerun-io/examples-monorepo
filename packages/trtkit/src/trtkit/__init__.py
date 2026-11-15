@@ -19,13 +19,6 @@ hardware. Model-specific concerns — export wrappers, checkpoint resolution,
 pre/postprocessing — stay in the model packages.
 """
 
-import os
-
-if os.environ.get("PIXI_DEV_MODE") == "1":
-    from beartype.claw import beartype_this_package
-
-    beartype_this_package()
-
 from trtkit.backends import (
     BackendConfig,
     OnnxBackendConfig,

@@ -9,10 +9,3 @@
 - `hexels_mojo.gaussians2d`: Image-GS's Gaussian projection and top-K rasterizer (`imagegs-2d` baseline).
 - `hexels_mojo.raster3d`: hexel-kernel's base 3D forward (patch 0006 overlays it on `gsplat.cuda_hexels3d._C`).
 """
-
-import os
-
-if os.environ.get("PIXI_DEV_MODE") == "1":
-    from beartype.claw import beartype_this_package
-
-    beartype_this_package()

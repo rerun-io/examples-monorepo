@@ -32,6 +32,10 @@ sort_by_size = true
 min_confidence = 80
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks gsplat_rust_renderer only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["gsplat_rust_renderer"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 testpaths = ["tests"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e gsplat-rust-renderer-dev tests-integration)",

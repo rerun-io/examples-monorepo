@@ -1,4 +1,7 @@
-"""Shared synthetic inputs."""
+"""Shared synthetic inputs.
+
+Package imports stay inside the helpers: pytest-beartype instruments hexels_bench only if this file has not imported it.
+"""
 
 import json
 from collections.abc import Callable
@@ -7,8 +10,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
-
-from hexels_bench.cameras import load_target, ordered_targets_sha256, target_sha256
 
 NAMES: list[str] = [f"{index:04d}" for index in range(10)]
 
@@ -45,6 +46,8 @@ def write_protocol_scene(
         "training": [camera(name, i) for i, name in enumerate(NAMES) if name not in test_names],
         "test": [camera(name, i) for i, name in enumerate(NAMES) if name in test_names],
     }
+
+    from hexels_bench.cameras import load_target, ordered_targets_sha256, target_sha256
 
     def digest(rows: list[dict]) -> str:
         targets: list[list[str]] = [

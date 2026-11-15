@@ -21,13 +21,15 @@ bug, this can shrink to a one-liner or be deleted.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
 import rerun as rr
 
-from slam_evals.data.synthetic import Fixture, build_fixture
-from slam_evals.data.types import Modality
+if TYPE_CHECKING:  # pytest-beartype instruments slam_evals only if this file has not imported it.
+    from slam_evals.data.synthetic import Fixture
+    from slam_evals.data.types import Modality
 
 # Property columns the test summary tries to surface. The select() filter in
 # the ``segment_summary`` closure drops any that aren't present in the segment_table
@@ -117,6 +119,8 @@ def segment_summary():
 @pytest.fixture
 def fixture_factory(tmp_path: Path):
     """Factory fixture: ``fixture_factory(modality, n_frames=5)`` → ``Fixture``."""
+
+    from slam_evals.data.synthetic import build_fixture
 
     def _make(modality: Modality, *, n_frames: int = 5) -> Fixture:
         return build_fixture(tmp_path / "bench", modality=modality, n_frames=n_frames)

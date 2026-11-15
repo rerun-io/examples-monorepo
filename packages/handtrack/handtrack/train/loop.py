@@ -138,7 +138,7 @@ class LoopSettings:
         if self.heatmap_ramp_steps and self.heatmap_reduction != 'pixel_sum':
             raise ValueError("heatmap_ramp_steps ramps up the pixel sum; it needs heatmap_reduction='pixel_sum'")
         if self.bf16 and os.environ.get('PIXI_DEV_MODE') == '1':
-            raise ValueError('bf16 needs the prod environment: existing model internals enforce Float32 in dev')
+            raise ValueError('bf16 cannot run under pytest: beartype enforces the Float32 annotations of existing model internals')
 
 
 @serde(deny_unknown_fields=True)

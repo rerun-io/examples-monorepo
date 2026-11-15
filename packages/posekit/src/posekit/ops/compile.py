@@ -1,4 +1,4 @@
-"""Eager execution in the development environment or on request, ``torch.compile`` everywhere else."""
+"""Eager execution under pytest (beartype on) or on request, ``torch.compile`` everywhere else."""
 
 import os
 from collections.abc import Callable
@@ -10,8 +10,8 @@ import torch
 def compile_unless_dev[CompiledCallable: Callable[..., Any]](function: CompiledCallable) -> CompiledCallable:
     """Compile ``function`` as one dynamic-shape graph, except under ``PIXI_DEV_MODE=1`` or ``POSEKIT_COMPILE=0``.
 
-    The development environment keeps the eager function so that beartype checks
-    every call and annotated local; production runs the same math fused.
+    Under pytest (``tests/conftest.py`` sets ``PIXI_DEV_MODE=1``) the eager function stays so that beartype
+    checks every call and annotated local; every other run, dev env included, runs the same math fused.
     ``POSEKIT_COMPILE=0`` keeps it eager in production too, for a host whose processes are short-lived:
     each new process traces for seconds on its first call (EgoHand fast: 6-13 s, for about 5 % more frames a second).
     """

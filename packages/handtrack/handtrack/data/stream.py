@@ -37,7 +37,6 @@ import pyarrow as pa
 import rerun as rr
 import torch
 import torch.nn.functional as F
-from beartype.roar import BeartypeException
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -97,6 +96,9 @@ from handtrack.labels.perspective import (
 )
 from handtrack.labels.validity import HandLabel, classify_visibility
 from handtrack.train.source import DetNetValidation, KeyNetValidation
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 NetChoice: TypeAlias = Literal["detnet", "keynet", "both"]
 DECODE_CHUNK_PIXELS: int = 10_000_000
@@ -892,7 +894,7 @@ def open_nvdec_decoder(video: CatalogVideo, fps: int, device: torch.device) -> F
 
 def is_fatal(error: BaseException) -> bool:
     """Failures of the stream machinery or of our own code (type violations, CUDA, memory): never retried or skipped."""
-    if isinstance(error, BeartypeException | torch.OutOfMemoryError | torch.AcceleratorError | MemoryError | _Stale):
+    if isinstance(error, (*BeartypeException, torch.OutOfMemoryError, torch.AcceleratorError, MemoryError, _Stale)):
         return True
     if isinstance(error, AssertionError | TypeError | IndexError | KeyError | AttributeError | NameError):
         return True

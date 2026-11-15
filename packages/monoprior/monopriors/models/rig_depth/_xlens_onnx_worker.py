@@ -1,7 +1,7 @@
 """Clean-interpreter ONNX export for the X-Lens TensorRT predictor.
 
 Dynamic export dims reach the owned fork as ``torch.SymInt`` values, which the
-dev-mode beartype ``int`` checks reject; ``XLensTrtPredictor`` re-enters the
+pytest-time beartype ``int`` checks reject; ``XLensTrtPredictor`` re-enters the
 identical export here with ``PIXI_DEV_MODE=0`` (the MoGe v2 pattern).
 """
 

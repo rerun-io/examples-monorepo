@@ -137,7 +137,7 @@ transformations so that a fused or unfused product gives the same result.
 
 ```
 lietorch_mojo/
-  __init__.py        beartype activation (PIXI_DEV_MODE) + exports
+  __init__.py        exports
   groups.py          port of lietorch groups.py (LieGroup, SO3, RxSO3, SE3, Sim3, LieGroupParameter, cat, stack)
   group_ops.py       port of lietorch group_ops.py (autograd Functions)
   broadcasting.py    port of lietorch broadcasting.py

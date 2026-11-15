@@ -9,17 +9,20 @@ from the private HF dataset ``pablovela5620/mamma-streaming-data`` — requires
 """
 
 import shutil
+import sys
 from pathlib import Path
 from typing import Literal, NamedTuple, cast
 
 import numpy as np
 import torch
-from beartype.roar import BeartypeException
 from huggingface_hub import hf_hub_download
 from jaxtyping import Float32, Int64
 from numpy import ndarray
 from torch import Tensor
 from torch.nn import Module
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 SMPLX_HF_REPO_ID: str = "pablovela5620/mamma-streaming-data"
 """Private HF dataset hosting ``body_models/smplx/SMPLX_NEUTRAL.npz`` (SMPL-X v1.1)."""

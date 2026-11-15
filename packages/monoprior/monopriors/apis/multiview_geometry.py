@@ -14,10 +14,9 @@ Also provides a CLI entry point (``main``) for standalone usage with tyro.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Final
 
 import numpy as np
-from beartype.vale import Is
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -31,7 +30,6 @@ from monopriors.models.multiview.multiview_predictor import (
     MultiviewPredictorConfig,
 )
 
-KeepTopPercent = Annotated[int | float, Is[lambda percent: 1 <= percent <= 100]]
 MAX_POINT_CLOUD_POINTS: Final[int] = 150_000
 
 
@@ -39,7 +37,7 @@ MAX_POINT_CLOUD_POINTS: Final[int] = 150_000
 class MultiviewGeometryConfig:
     """Configuration for multi-view geometry prediction."""
 
-    keep_top_percent: KeepTopPercent = 30.0
+    keep_top_percent: int | float = 30.0
     """Percentage of high-confidence pixels retained after filtering.
     Value in [1, 100]; e.g. 30 keeps the top 30% and uses up to 30% of the
     bounded point-cloud budget."""
@@ -49,6 +47,10 @@ class MultiviewGeometryConfig:
     """How to center canonicalized camera poses after backend inference."""
     verbose: bool = False
     """Emit per-camera detail logging when True."""
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.keep_top_percent <= 100:
+            raise ValueError(f"keep_top_percent must be in [1, 100], got {self.keep_top_percent}")
 
     @property
     def point_cloud_budget(self) -> int:

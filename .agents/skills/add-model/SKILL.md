@@ -43,7 +43,7 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
   `rr.Points3D(keypoint_ids=…, class_ids=0)` under an `rr.AnnotationContext` with the skeleton's connections (the viewer draws
   the edges), meshes as `rr.Mesh3D(vertex_normals=…, albedo_factor=(r, g, b, 0.5))`. (e) Sensors that are out of distribution
   for every model (robocap `cam_02/03` eye cameras look at the wearer) are excluded from all runs; name the rig's cameras.
-- **Python conventions**: beartype via `PIXI_DEV_MODE` claw (never `@beartype`), PEP 526 annotations
+- **Python conventions**: beartype via pytest-beartype (`beartype_packages` in pyproject), pytest only (never `@beartype`), PEP 526 annotations
   everywhere, jaxtyping dtype+shape on every array, `TypeAlias` not PEP 695, tyro CLIs, `0.0` for float
   defaults, `einops` over reshape/permute chains, dataclass field docstrings, thin `tools/` shims.
   (Claude: `python-conventions`, `karpathy-guidelines`, `tdd` skills; Codex has the same rules.)

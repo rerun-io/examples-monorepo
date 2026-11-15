@@ -45,6 +45,10 @@ ignore_names = [
 ]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks gauss_surf only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["gauss_surf"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e gauss-surf-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e gauss-surf-dev tests-golden)",

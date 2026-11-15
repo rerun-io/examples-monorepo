@@ -26,7 +26,7 @@ from arkitscenes_download.ingest.recording import atomic_recording
 from arkitscenes_download.schema import DEPTH_RANGE_MM
 from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
-from rerun.catalog import DatasetEntry, DatasetView
+from rerun.catalog import DatasetEntry, DatasetSelection
 
 from gauss_surf.catalog import SegmentReader, register_layer
 from gauss_surf.contracts import (
@@ -397,7 +397,7 @@ def publish_in_process(
             f"full-grid manifest needs both cameras, got {len(wide_cameras)} wide and {len(ultrawide_cameras)} ultrawide"
         )
     reader.require_layers((PROMPTDA_LAYER, ULTRAWIDE_DEPTH_LAYER, ULTRAWIDE_NORMALS_LAYER))
-    segment_view: DatasetView = reader.segment_view()
+    segment_view: DatasetSelection = reader.segment_view()
     wide_depth_references: dict[int, bytes] = reference_blobs_at_component_timestamps(
         segment_view,
         PROMPTDA_DEPTH_BLOB_COLUMN,

@@ -1,14 +1,11 @@
+import sys
+
 import lietorch_mojo as lietorch
 import rerun as rr
 import torch
 from jaxtyping import Bool, Float, Int
 from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
-
-try:
-    from beartype.roar import BeartypeException
-except ImportError:
-    BeartypeException = ()
 
 from mast3r_slam import mojo_backend
 from mast3r_slam.config import MatchingConfig, SlamConfig, TrackingConfig
@@ -23,6 +20,9 @@ from mast3r_slam.mast3r_utils import mast3r_match_asymmetric
 from mast3r_slam.mojo_backend.gn import RAYS_TRACKING_HUBER, RAYS_TRACKING_REL_ERROR
 from mast3r_slam.nonlinear_optimizer import check_convergence, huber
 from mast3r_slam.rerun_log_utils import LOG_PATH
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 
 def check_rays_tracking_settings(huber: float, rel_error: float) -> None:
