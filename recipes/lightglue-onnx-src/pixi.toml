@@ -1,0 +1,6 @@
+[package]
+name = "lightglue-onnx-src"
+version = "3.0.0.d12b4ba"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

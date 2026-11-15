@@ -1,0 +1,42 @@
+# fabio-sim/LightGlue-ONNX: the RaCo-ALIKED extractor and the LightGlue(+) matcher as Dynamo-exportable torch modules.
+# packages/colsfm exports its ONNX graphs from these (colsfm.apis.raco_export); nothing here runs at inference time.
+#
+# Installed as plain files, without upstream's dependency list: the pyproject pins numpy==2.5.1, opencv-python==5.0.0.93,
+# matplotlib and typer exactly (a uv application lock, not a library range), which would fight every conda solve here.
+# The export path imports only `lightglue_dynamo.config` and `lightglue_dynamo.models` (torch, numpy); the consuming
+# environment brings torch, onnx and onnxscript.
+context:
+  rev: d12b4ba1632f558234e3f084e1f3d8bdf9147890
+
+package:
+  name: lightglue-onnx-src
+  version: 3.0.0.d12b4ba
+
+source:
+  git: https://github.com/fabio-sim/LightGlue-ONNX.git
+  rev: ${{ rev }}
+
+build:
+  number: 0
+  noarch: python
+  script:
+    - rm -rf "$SP_DIR/lightglue_dynamo"
+    - cp -r lightglue_dynamo "$SP_DIR/lightglue_dynamo"
+
+requirements:
+  host:
+    - python 3.12.*
+  run:
+    - python >=3.12
+
+tests:
+  - python:
+      imports:
+        - lightglue_dynamo.config
+      pip_check: false
+
+about:
+  repository: https://github.com/fabio-sim/LightGlue-ONNX
+  license: Apache-2.0
+  license_file: LICENSE
+  summary: LightGlue-ONNX (fabio-sim) @ d12b4ba, the torch modules only, for ONNX export.

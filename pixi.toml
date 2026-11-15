@@ -4071,9 +4071,93 @@ cwd = "packages/metrictrail"
 description = "Build the lietorch-mojo extension and the DPVO and ViPE kernels, then run the package integration tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# colsfm — the open rebuild of NVIDIA cuSFM on pycolmap (packages/colsfm)
+# ═══════════════════════════════════════════════════════════════════════════
+# pycolmap is recipes/colmap-src: COLMAP 4.2.0 built with CASPAR (GPU bundle adjustment) and the OPENCV_FISHEYE
+# Caspar adapter, sm_120 on linux-64 (RTX 5090) and sm_121 on linux-aarch64 (DGX Spark). The conda-forge pycolmap
+# cannot run CASPAR, and pysfm's pycolmap 4.0 cpu build stays in its own solve group.
+[feature.colsfm]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.colsfm.dependencies]
+python = "3.12.*"
+colmap-src = { path = "recipes/colmap-src" }
+# The RaCo-ALIKED and LightGlue+ torch modules the ONNX export (colsfm-raco-export) reads.
+lightglue-onnx-src = { path = "recipes/lightglue-onnx-src" }
+# Pose-graph optimisation and the regularised extrinsic refinement: pycolmap ships cost functions but no PGO driver.
+pyceres = "2.6.*"
+# cuSFM's protobuf-text configs and the vendored descriptor set (colsfm.schema).
+protobuf = "*"
+pyarrow = "*"
+pillow = "*"
+einops = "*"
+tyro = ">=0.9.1,<0.10"
+rich = "*"
+# Scopes BLAS to one thread around the vocabulary tree's thousands of tiny k-means products: the cuda feature's MKL
+# otherwise spends the time synchronising threads (KITTI 06's loop stage 435 s; 21 s vs 105 s at 1 vs 8 threads).
+threadpoolctl = "*"
+
+[feature.colsfm.pypi-dependencies]
+colsfm = { path = "packages/colsfm", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+onnx = "*"
+
+[feature.colsfm.activation.env]
+PACKAGE_DIR = "packages/colsfm"
+# Baseline for untyped compiled/runtime dependencies: pycolmap from recipes/colmap-src (built without stubs), pyceres,
+# and cuSFM's protobuf messages, which colsfm.schema builds at runtime from the vendored descriptor set. Regenerate with
+#   pyrefly check -c ../../pyrefly.toml . --baseline pyrefly-baseline.json --update-baseline
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
+
+# ── colsfm tasks ─────────────────────────────────────────────────────────
+# The default run needs the RaCo-ALIKED / LightGlue+ ONNX graphs; they are exported, not shipped (weights from the RaCo
+# and ALIKED GitHub releases, via torch.hub), and the TensorRT engines are built from them on first use per machine.
+[feature.colsfm.tasks.colsfm-raco-export]
+cmd = "python tools/raco_export.py"
+cwd = "packages/colsfm"
+description = "Export the RaCo-ALIKED and LightGlue+ ONNX graphs into packages/colsfm/data/models (kept when present)"
+
+[feature.colsfm.tasks.colsfm-download-galileo]
+cmd = "python tools/download_galileo.py"
+cwd = "packages/colsfm"
+description = "Download the 226-frame r2b Galileo sample (8 pinhole cameras, ground truth) from upstream PyCuSFM at a pinned commit"
+
+[feature.colsfm.tasks.colsfm-galileo]
+cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo"
+depends-on = ["colsfm-download-galileo", "colsfm-raco-export"]
+cwd = "packages/colsfm"
+description = "The default pipeline (RaCo, LightGlue+, loop closure, CASPAR + Ceres polish, extrinsic refinement) on Galileo"
+
+[feature.colsfm.tasks.colsfm-galileo-ablation]
+cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo_ablation --features-backend pycolmap --matching-backend pycolmap --ba-backend ceres --no-optimize-extrinsics --no-loop-closure"
+depends-on = ["colsfm-download-galileo"]
+cwd = "packages/colsfm"
+description = "The no-engine ablation on Galileo (COLMAP's ALIKED + LightGlue, Ceres, no refinement, no loops): the 4.33 mm / 19.4 s comparison"
+
+[feature.colsfm.tasks.colsfm-robocap]
+cmd = "python tools/run.py catalog --source.dataset robocap --source.segment robocap__f408193e6447b3b0__s00000021 --source.cameras left_front right_front left right --source.stereo-pairs left_front right_front --source.frame-stride 4 --source.trim-start-seconds 2 --source.trim-end-seconds 2"
+depends-on = ["colsfm-raco-export"]
+cwd = "packages/colsfm"
+description = "The default pipeline on the RoboCap fisheye segment s00000021 from the Spark catalog, starting from its slam_rs trajectory"
+
+[feature.colsfm.tasks.colsfm-kitti06]
+cmd = "python tools/run.py catalog --source.dataset dataforge-vslam-lab-kitti --source.segment vslam-lab-kitti__06 --source.cameras rgb_0 rgb_1 --source.stereo-pairs rgb_0 rgb_1 --source.trajectory-entity /world/runs/cuvslam/rig --options.config-dir colsfm/resources/configs/kitti --options.min-inter-frame-distance 0.5"
+depends-on = ["colsfm-raco-export"]
+cwd = "packages/colsfm"
+description = "The default pipeline on KITTI 06 from the Spark catalog, starting from the cuvslam layer (the cuVSLAM SLAM trajectory)"
+
+[feature.colsfm.tasks.colsfm-walkthrough]
+cmd = "python tools/walkthrough.py --input-dir data/r2b_galileo"
+depends-on = ["colsfm-download-galileo"]
+cwd = "packages/colsfm"
+description = "Run Galileo stage by stage and write the Rerun walkthrough to packages/colsfm/data/rrd/galileo_walkthrough.rrd"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
+colsfm = { features = ["common", "cuda", "colsfm"], solve-group = "colsfm", no-default-feature = true }
+colsfm-dev = { features = ["common", "cuda", "colsfm", "dev"], solve-group = "colsfm", no-default-feature = true }
 agent-traces = { features = ["agent-traces"], solve-group = "agent-traces", no-default-feature = true }
 agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-traces", no-default-feature = true }
 kornia-staging = { features = ["kornia-staging"], solve-group = "kornia-staging", no-default-feature = true }
