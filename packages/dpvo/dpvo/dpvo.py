@@ -40,6 +40,7 @@ loop edges) and observers (per-frame, cull, global-BA and terminate
 callbacks). The defaults reproduce plain DPVO exactly.
 """
 
+import sys
 from collections import OrderedDict
 from collections.abc import Generator, Sequence
 
@@ -47,7 +48,6 @@ import lietorch_mojo as lietorch
 import numpy as np
 import torch
 import torch.nn.functional as F
-from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Float64, Int, Int64, UInt8
 from lietorch_mojo import SE3
@@ -61,6 +61,9 @@ from .hooks import DefaultGraphPolicy, DepthPrior, DPVOObserver, FrameDepth, Fra
 from .net import VONet
 from .patchgraph import PatchGraph
 from .utils import DEFAULT_DEVICE, Timer, flatmeshgrid
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 
 class DPVO:

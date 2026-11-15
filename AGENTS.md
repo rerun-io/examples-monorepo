@@ -10,7 +10,7 @@ A **Pixi workspace monorepo** of computer vision projects. Runnable Python proje
 
 Each root-managed runnable package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes `lint`, `typecheck`, `deadcode`, `tests`, `tests-integration`, `tests-golden`, and `gate` (e.g. `pixi run -e <name>-dev tests`). In package directories that contain a `.envrc`, direnv auto-activates the `*-dev` env when you enter the directory.
 
-The prod env is for long runs: corpus conversions, registrations, full-length captures and training. It never loads beartype, so it runs at full speed; the dev env checks every annotated local and may be slower.
+The prod env is for long runs: corpus conversions, registrations, full-length captures and training. Beartype runs only under pytest (see **Beartype**): outside pytest, the dev env and the prod env never import it and run code at full speed. Never time or benchmark under beartype.
 
 ## Commands
 
@@ -125,18 +125,27 @@ Two rules learned the hard way:
 
 ## Architecture
 
-**Beartype** is activated conditionally via `PIXI_DEV_MODE` in each runnable Python package's `__init__.py`:
+**Beartype** runs only while pytest runs. Each runnable package has a root `conftest.py` that installs the
+claw before any test module imports the package (pytest loads it before `tests/conftest.py`):
 ```python
 import os
-if os.environ.get("PIXI_DEV_MODE") == "1":
-    from beartype.claw import beartype_this_package
-    beartype_this_package()
-```
 
-**`tools/` scripts must be thin shims** — `beartype_this_package()` only instruments
-code **inside** the package, so the Tyro `Config` dataclass and `main()` belong in the
-package (e.g. `<module>/apis/<name>.py`), and the `tools/` script just wires them up.
-Logic placed directly in a `tools/` script is **not** beartype-checked under dev.
+from beartype.claw import beartype_package
+
+os.environ["PIXI_DEV_MODE"] = "1"  # read by code that cannot run under beartype (torch.compile, ONNX export)
+beartype_package("<module>")
+```
+Never import beartype in package code: no claw in `__init__.py`, no decorators. Apps, CLIs, demos and benchmarks
+run without it in every env. A broad `except Exception` that must let a test-time violation through uses the
+lookup below, which never imports beartype (an empty tuple unless beartype is loaded; pyserde loads it for its own checks):
+```python
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
+```
+`PIXI_DEV_MODE=1` now means "beartype is on in this process"; only the package `conftest.py` sets it.
+
+**`tools/` scripts must be thin shims** — the Tyro `Config` dataclass and `main()` belong in the
+package (e.g. `<module>/apis/<name>.py`) so tests can import them and the claw checks them; the
+`tools/` script just wires them up.
 ```python
 # tools/apps/<name>.py  — keep it to a few lines
 import tyro
@@ -151,11 +160,12 @@ if __name__ == "__main__":
 packages/<name>/
   pyproject.toml    # [project], [build-system], [tool.ruff]
   <module>/
-    __init__.py     # Beartype activation
-    apis/           # High-level interfaces + Tyro Config/main (beartype-instrumented)
+    __init__.py
+    apis/           # High-level interfaces + Tyro Config/main (beartype-checked under pytest)
     gradio_ui/      # Gradio components (if applicable)
   tools/            # THIN CLI shims over <module>/apis/ (demos/ and apps/ subdirs)
   tests/
+  conftest.py       # Beartype claw, pytest only
 ```
 
 ### kornia-staging
@@ -384,9 +394,8 @@ release ships.
 - **gradio from conda-forge** — pinned exactly in `[feature.common.dependencies]`; it caps `pillow <13` itself. `gradio-rerun`: see **Testing Rerun builds**.
 - **No dependency may need a build step during resolution** — `pixi lock` must never need package Python. Vendor the inference subset (as `monopriors/third_party/` does, with the upstream rev and patch list in the package `__init__` docstring), ship a prebuilt wheel, or give the package static metadata and build any CUDA extension through an explicit task.
 - **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. A shared-feature change re-solves the whole workspace; that works from any Linux host, while macOS is limited to `pixi lock --check` (see **Platforms & lockfile**).
-- **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:
+- **Never use bare `except Exception` with beartype** — under pytest it silently swallows type violations. Always re-raise `BeartypeException`, defined with the `sys.modules` lookup from **Beartype** (never `from beartype.roar import ...` in package code):
   ```python
-  from beartype.roar import BeartypeException
   try:
       result = some_typed_function()
   except BeartypeException:
@@ -401,5 +410,5 @@ release ships.
 - **Never `git gc` / `git repack` / `git maintenance` in this repository from an agent session.** One `.git` (the main checkout's) is shared by every paseo worktree, and other sessions pull and commit in it at the same time. On 2026-09-21 a repack that raced another writer rewrote the 410 MB pack while its index stayed stale: `git worktree add` failed with `packed object ... is corrupt`, `git fsck` was red. If `fsck` is ever red here, do NOT gc; test objects individually (`git cat-file --batch-check` only reads headers and lies) and follow the loose-object repair in the `git-pack-corruption-repair` memory. Backups from that repair: `~/0Dev/work/rerun-projects/.git-corrupt-backup-2026-09-21/`.
 - **Don't poll with `pgrep -f <pat>` when the polling command itself contains `<pat>`** — it matches its own shell and the `until ! pgrep ...` loop never exits (silently hangs forever). Prefer `run_in_background` on the real command (you're notified on its own exit), or wait on a file/sentinel.
 - **Always pass `--rr-config.headless` to Rerun CLIs in shells without `DISPLAY`** — the `RerunTyroConfig` default calls `rr.spawn()`; when the viewer fails to start (winit "neither WAYLAND_DISPLAY nor DISPLAY is set"), the recording stream's channel fills and every `rr.log()` blocks forever. The run wedges silently (zombie viewer child, zero CPU) instead of erroring out.
-- **beartype checks annotated locals in the dev env, and that costs time** — under `beartype_this_package()` each `x: Float64[ndarray, "n 3"] = ...` evaluates its hint again when the line runs; jaxtyping returns a new class each time and beartype compiles and caches a new checker for it, so a hot loop runs slower and its memory grows (exo-calib's Stage B ran 2× slower over a 4,000-frame capture). Keep the checks on: never pass `BeartypeConf(claw_is_pep526=False)`. Long jobs run in the prod env, which never loads beartype. If one hot local makes a dev gate measurably too slow, drop that local's annotation; do not add aliases for speed. beartype caches its transformed bytecode as `__pycache__/*.opt-beartype*.pyc` keyed by beartype version, not by conf, so after changing a `BeartypeConf` delete those files or the old checks stay in.
+- **beartype checks annotated locals under pytest, and that costs time** — under the claw each `x: Float64[ndarray, "n 3"] = ...` evaluates its hint again when the line runs; jaxtyping returns a new class each time and beartype compiles and caches a new checker for it, so a hot loop runs slower and its memory grows (exo-calib's Stage B ran 2× slower over a 4,000-frame capture). Keep the checks on: never pass `BeartypeConf(claw_is_pep526=False)`. Runs outside pytest never load beartype. If one hot local makes a test gate measurably too slow, drop that local's annotation; do not add aliases for speed. beartype caches its transformed bytecode as `__pycache__/*.opt-beartype*.pyc` keyed by beartype version, not by conf, so after changing a `BeartypeConf` delete those files or the old checks stay in.
 - **Browser checks of the web viewer (playwright-cli, the `rerun-rrd-publish` and `rerun-viewer-validation` skills) run headless chromium on SwiftShader with CPU AV1 decode on our Linux NVIDIA hosts**, so video frames take 20-40 s to appear; judge a frame blank only after that. Real GPU rendering needs no display: add `--enable-gpu --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist` to the launch args (playwright config `browser.launchOptions.args`). Hardware AV1 decode stays off: Chromium decodes on Linux only through VA-API, and the NVIDIA VA-API driver needs `nvidia-drm modeset=1`, while the Spark pins `modeset=0` in `/etc/modprobe.d/zz-nvidia-drm-override.conf`. TODO (2026-09-04): decide on `modeset=1` and reboot, package the driver as a rattler-build recipe in ai-demos, then set `LIBVA_DRIVER_NAME=nvidia`, `LIBVA_DRIVERS_PATH`, and `NVD_BACKEND=direct` in the check. The Mac mini (M4) has hardware AV1 decode in headless chromium out of the box.

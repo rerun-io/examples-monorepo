@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 import requests
 import tyro
-from conftest import zip_bytes
 from serde import from_dict
 
+from conftest import zip_bytes
 from dataforge import meta_cdn, transports
 from dataforge.apis import download as download_api
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import assert_raw_root_guarded
 
+from conftest import assert_raw_root_guarded
 from dataforge.datasets.aria_gen2_pilot_source import Trajectory
 
 
@@ -181,8 +181,8 @@ def test_motion_hides_at_first_imu_stamp_and_after_each_run(tmp_path: Path, monk
     from unittest.mock import Mock
 
     import pyarrow as pa
-    from conftest import read_chunks
 
+    from conftest import read_chunks
     from dataforge import aria, writing
     from dataforge.datasets.aria_gen2_pilot_layers import write_motion
     from dataforge.datasets.aria_gen2_pilot_source import Scene

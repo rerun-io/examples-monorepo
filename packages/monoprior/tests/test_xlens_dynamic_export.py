@@ -13,11 +13,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from conftest import build_random_xlens_model, random_rig
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from torch import Tensor
 
+from conftest import build_random_xlens_model, random_rig
 from monopriors.models.rig_depth.xlens import RigTensors, normalize_framesets, rig_tensors
 from monopriors.models.rig_depth.xlens_trt import ENGINE_OUTPUT_NAMES, EngineGeometry, engine_geometry
 from monopriors.third_party.xlens.models.dinov2.vision_transformer import FrozenRigGeometry

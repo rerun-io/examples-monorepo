@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import read_chunks, vrs_file
 
+from conftest import read_chunks, vrs_file
 from dataforge import aria, schema
 from dataforge.datasets.aria_gen2_pilot_layers import write_projections
 from dataforge.datasets.aria_gen2_pilot_source import Camera, HandSamples, Scene

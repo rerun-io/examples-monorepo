@@ -11,11 +11,11 @@ import numpy as np
 import pytest
 import rerun as rr
 import yaml
-from conftest import assert_raw_root_guarded, read_chunks
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from PIL import Image
 
+from conftest import assert_raw_root_guarded, read_chunks
 from dataforge import objects, writing
 from dataforge.clocks import frame_times
 from dataforge.datasets.hocap import HocapConfig, HocapDataset

@@ -5,9 +5,9 @@ from zipfile import ZipFile
 
 import pytest
 import requests
-from conftest import zip_bytes
 from hub_fake import HubStore
 
+from conftest import zip_bytes
 from dataforge import transports
 from dataforge.datasets import hocap
 from dataforge.datasets.base import RemoteSequence

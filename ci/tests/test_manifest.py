@@ -91,6 +91,20 @@ def test_packages_do_not_use_retired_pytest_markers() -> None:
     assert not problems, "Retired pytest markers (use integration or golden):\n" + "\n".join(problems)
 
 
+def test_package_code_never_imports_beartype() -> None:
+    """Beartype runs only under pytest: only tests and the package-root conftest.py import it (AGENTS.md, Beartype)."""
+    top_level_import: re.Pattern[str] = re.compile(r"^(?:from|import) beartype\b", re.MULTILINE)
+    problems: list[str] = []
+    for package_dir in RUNNABLE_PYTHON_PACKAGES:
+        for path in sorted(package_dir.rglob("*.py")):
+            relative: Path = path.relative_to(package_dir)
+            if relative.parts[0] in {"tests", ".pixi"} or path.name == "conftest.py":
+                continue
+            if top_level_import.search(path.read_text(errors="replace")):
+                problems.append(str(path.relative_to(REPO_ROOT)))
+    assert not problems, "beartype imported outside tests (use the sys.modules lookup from AGENTS.md):\n" + "\n".join(problems)
+
+
 def _task_commands(table: dict, prefix: str = "") -> dict[str, str | list[str]]:
     """Find tasks at workspace, feature and target scope, including shorthand."""
     commands: dict[str, str | list[str]] = {}

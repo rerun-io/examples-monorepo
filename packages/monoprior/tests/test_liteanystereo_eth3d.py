@@ -6,10 +6,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from conftest import requires_cuda
 from huggingface_hub import snapshot_download
 from jaxtyping import Float32, UInt8
 
+from conftest import requires_cuda
 from monopriors.apis.stereo_depth import ETH3D_MAX_DISP, read_middlebury_calib, read_pfm, read_rgb, stereo_metrics
 from monopriors.models.stereo_depth import LiteAnyStereoPredictor
 

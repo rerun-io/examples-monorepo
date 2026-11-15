@@ -4,9 +4,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import read_chunks
 from simplecv.rerun_custom_types import confidence_scores_to_rgb
 
+from conftest import read_chunks
 from dataforge import hands, schema, writing
 
 

@@ -12,12 +12,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import rerun.chunk as rrc
-from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, raw_asset, read_back, read_chunks, recording_properties
 from jaxtyping import Float32
 from numpy import ndarray
 from serde import from_dict
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, skin_landmarks, wrist_for_hand
 
+from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, raw_asset, read_back, read_chunks, recording_properties
 from dataforge import paths, schema, transports
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset
 from dataforge.datasets.show3d_calibration import HeadsetCalibration, HeadsetPose

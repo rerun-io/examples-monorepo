@@ -125,7 +125,7 @@ Camera parameters use `simplecv.camera_parameters.PinholeParameters` which bundl
 
 ```
 monopriors/
-  __init__.py                     # beartype_this_package() activation (dev only)
+  __init__.py
   depth_utils.py                  # depth<->disparity, depth->points, edge masks, intrinsics estimation
   scale_utils.py                  # scale-shift alignment (relative->metric)
   rr_logging_utils.py             # Rerun logging helpers for depth/normal predictions
@@ -260,4 +260,4 @@ Pose orientation/centering is provided by `simplecv.camera_orient_utils.auto_ori
 
 ## Runtime type checking
 
-`__init__.py` calls `beartype_this_package()` only when `PIXI_DEV_MODE == "1"` (the dev environment), enabling runtime shape/dtype enforcement on every jaxtyping-annotated function and dataclass in the package. Outside dev mode it is not activated, so there is zero overhead.
+The package-root `conftest.py` installs the beartype claw (`beartype_package("monopriors")`) while pytest runs, enabling runtime shape/dtype enforcement on every jaxtyping-annotated function and dataclass in the package. Outside pytest beartype is never imported, so there is zero overhead.

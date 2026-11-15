@@ -18,7 +18,6 @@ from typing import Any
 import cv2
 import numpy as np
 import pytest
-from conftest import calibration_fixture
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -29,6 +28,7 @@ from simplecv.camera_parameters import (
     PinholeParameters,
 )
 
+from conftest import calibration_fixture
 from dataforge.basalt import (
     BasaltPose,
     CalibratedCamera,

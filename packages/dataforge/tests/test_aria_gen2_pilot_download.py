@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import zip_bytes
 
+from conftest import zip_bytes
 from dataforge import transports
 from dataforge.datasets.aria_gen2_pilot import MANIFEST_FILE, AriaGen2PilotConfig
 

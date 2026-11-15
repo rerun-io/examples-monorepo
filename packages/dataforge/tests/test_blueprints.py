@@ -7,8 +7,8 @@ from typing import cast
 
 import pytest
 import rerun.blueprint as rrb
-from conftest import eye_vector
 
+from conftest import eye_vector
 from dataforge import blueprints, schema
 
 

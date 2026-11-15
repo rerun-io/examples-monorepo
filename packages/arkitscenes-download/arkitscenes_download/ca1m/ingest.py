@@ -1,6 +1,7 @@
 """Ingest Apple's CA-1M laser ground truth as stackable ARKitScenes layers."""
 
 import json
+import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -9,7 +10,6 @@ from typing import Any
 
 import numpy as np
 import rerun as rr
-from beartype.roar import BeartypeException
 from jaxtyping import Float64, Int64
 from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
@@ -21,6 +21,9 @@ from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM
 from arkitscenes_download.ingest.paths import CAM_WIDE, GT, GT_DEPTH, GT_PINHOLE_WIDE, GT_RIG, RIG, TIMELINE
 from arkitscenes_download.ingest.recording import atomic_recording
 from arkitscenes_download.schema import GT_DEPTH_LAYER, GT_POSES_LAYER
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 DEFAULT_DATASET_ROOT: Path = Path("/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22")
 DEFAULT_SCRATCH: Path = Path("/var/tmp/ca1m-scratch")

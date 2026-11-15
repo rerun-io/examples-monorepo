@@ -40,6 +40,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,7 +50,6 @@ import av
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from beartype.roar import BeartypeException
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from serde import SerdeError, serde
@@ -70,6 +70,9 @@ from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_imu, log_rig_node, log_video_stream
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 GYRO_SCALE: float = 0.000266316
 """Raw gyro LSB → rad/s; measured in the basalt fork (``dataset_io_robocap.cpp``)."""

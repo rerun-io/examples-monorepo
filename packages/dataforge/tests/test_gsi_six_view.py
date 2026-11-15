@@ -15,11 +15,11 @@ import requests
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from conftest import assert_raw_root_guarded, read_back, read_chunks, recording_properties, static_values
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
+from conftest import assert_raw_root_guarded, read_back, read_chunks, recording_properties, static_values
 from dataforge import blueprints, schema, transports, writing
 from dataforge.datasets.gsi_six_view import GsiSixViewConfig, GsiSixViewDataset
 from dataforge.datasets.gsi_six_view_remote import fetch_signed

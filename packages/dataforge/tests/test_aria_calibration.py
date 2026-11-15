@@ -12,10 +12,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import vrs_file
 from simplecv.camera_parameters import Fisheye624Parameters
 from simplecv.se3 import SE3
 
+from conftest import vrs_file
 from dataforge import aria, hands
 from dataforge.vrs import VrsFile
 

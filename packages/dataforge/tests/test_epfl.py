@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import assert_raw_root_guarded
 
+from conftest import assert_raw_root_guarded
 from dataforge.datasets.epfl_source import CAMERA_NAMES, read_timestamps
 
 
@@ -125,7 +125,6 @@ def test_full_rational_projection_and_visibility() -> None:
 
 def test_pose_rrd_preserves_residuals_and_layer_ownership(tmp_path: Path) -> None:
     from conftest import read_chunks
-
     from dataforge import writing
     from dataforge.datasets.epfl_layers import start_parameters, write_hand_pose, write_pose
     from dataforge.datasets.epfl_source import FITS, parse_pose_row
@@ -171,7 +170,6 @@ def test_blueprint_and_discovery_missing_assets(tmp_path: Path, capsys: pytest.C
 
 def test_rejected_meshes_actions_and_projection_rrds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from conftest import read_chunks
-
     from dataforge import writing
     from dataforge.actions import Segment
     from dataforge.datasets.epfl_layers import write_actions, write_projections

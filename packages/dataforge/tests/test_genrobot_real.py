@@ -15,10 +15,10 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.chunk as rrc
-from conftest import column_rows, raw_asset, read_back, recording_properties, static_values
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 
+from conftest import column_rows, raw_asset, read_back, recording_properties, static_values
 from dataforge import paths, schema, writing
 from dataforge.das_ego.layers import BaseCensus, shipped_counts, write_base_layer, write_sidecar
 from dataforge.das_ego.pose import (

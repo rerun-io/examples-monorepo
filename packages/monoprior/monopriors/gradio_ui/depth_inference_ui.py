@@ -1,5 +1,6 @@
 import gc
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Final
@@ -10,7 +11,6 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from jaxtyping import UInt8
 
@@ -22,6 +22,9 @@ from monopriors.models.relative_depth import (
     relative_predictor_defaults,
 )
 from monopriors.rr_logging_utils import log_relative_pred
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 try:
     import spaces  # type: ignore

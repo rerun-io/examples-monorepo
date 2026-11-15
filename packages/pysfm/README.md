@@ -64,7 +64,7 @@ pixi task list -e pysfm
 packages/pysfm/
 ├── pyproject.toml                          # Package metadata
 ├── pysfm/                                  # Main module (editable install)
-│   ├── __init__.py                         # Beartype activation (dev env only)
+│   ├── __init__.py
 │   ├── streamed_pipeline.py                # Per-image pipeline stage implementations
 │   ├── apis/
 │   │   ├── pycolmap_rig_recon.py           # Multi-camera rig reconstruction

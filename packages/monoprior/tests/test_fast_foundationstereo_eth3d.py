@@ -5,11 +5,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from conftest import integration, requires_cuda
 from huggingface_hub import snapshot_download
 from jaxtyping import Float32, UInt8
 from torch import nn
 
+from conftest import integration, requires_cuda
 from monopriors.apis.stereo_depth import ETH3D_MAX_DISP, MiddleburyCalibration, read_middlebury_calib, read_pfm, read_rgb, stereo_metrics
 from monopriors.models.stereo_depth import FastFoundationStereoPredictor, StereoDepthPrediction
 from monopriors.models.stereo_depth.fast_foundationstereo import download_fast_foundationstereo_checkpoint, load_fast_foundationstereo

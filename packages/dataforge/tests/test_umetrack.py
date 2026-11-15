@@ -9,12 +9,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from conftest import assert_raw_root_guarded, column_rows, raw_asset, read_back, recording_properties
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.umetrack_temp.generic_hand_model_numpy import SingleHandPose, landmarks_from_hand_pose, skin_landmarks, wrist_for_hand
 
+from conftest import assert_raw_root_guarded, column_rows, raw_asset, read_back, recording_properties
 from dataforge import paths, schema, writing
 from dataforge.apis.compare_layers import ColumnKey, component_rows
 from dataforge.datasets.umetrack import UmetrackConfig, pane_contents

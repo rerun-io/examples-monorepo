@@ -227,7 +227,6 @@ vulture = "*"
 types-tqdm = "*"
 
 [feature.dev.activation.env]
-PIXI_DEV_MODE = "1"
 PYREFLY_TARGET = "."
 PYREFLY_EXTRA_ARGS = ""
 

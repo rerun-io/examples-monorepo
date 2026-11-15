@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import assert_raw_root_guarded
 
+from conftest import assert_raw_root_guarded
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
 from dataforge.datasets.hot3d_source import Device, Hot3dSource, Metadata
 

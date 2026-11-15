@@ -13,10 +13,10 @@ import pytest
 import rerun.blueprint as rrb
 import smplx
 import torch
-from conftest import column_rows, raw_asset, read_back, read_chunks, recording_properties, static_values
 from PIL import Image
 from test_mamma_layout import scene
 
+from conftest import column_rows, raw_asset, read_back, read_chunks, recording_properties, static_values
 from dataforge import paths, schema
 from dataforge.clocks import frame_times
 from dataforge.datasets.mamma import MammaConfig

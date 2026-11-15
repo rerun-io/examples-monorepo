@@ -5,9 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import raw_asset
 from scipy.spatial import KDTree
 
+from conftest import raw_asset
 from dataforge import paths
 from dataforge.datasets.mamma_body import BODY_FILES, MODEL_FILES, PosedPerson, SmplxBody
 from dataforge.datasets.mamma_source import PersonFit, SequenceLabels, read_eval_labels

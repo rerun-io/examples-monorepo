@@ -15,19 +15,22 @@ finishes 109/109 without manual cleanup.
 
 from __future__ import annotations
 
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import tyro
-from beartype.roar import BeartypeException
 from tqdm import tqdm
 
 from slam_evals.data import discover_sequences
 from slam_evals.data.discovery import filter_sequences
 from slam_evals.data.types import Modality, Sequence
 from slam_evals.ingest import LayerName, applicable_layers, ingest_sequence
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 # Substring on the formatted exception that identifies a transient NVENC
 # session-contention failure. The raw error type is av.error.ExternalError

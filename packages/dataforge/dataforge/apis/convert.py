@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from socket import gethostname
 from threading import Lock, local
-
-from beartype.roar import BeartypeException
 
 from dataforge import paths
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
@@ -18,6 +17,9 @@ from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.timing import ConvertRecord, SequenceTimer, append_record
 from dataforge.writing import CONVERT_SCHEMA_VERSION
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 
 @dataclass

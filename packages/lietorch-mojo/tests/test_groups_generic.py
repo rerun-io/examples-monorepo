@@ -7,8 +7,9 @@ tolerances on composites whose inputs and outputs are Euclidean.
 
 import pytest
 import torch
-from conftest import DEVICES, require_mojo_extension
 from torch import Tensor
+
+from conftest import DEVICES, require_mojo_extension
 
 require_mojo_extension()
 

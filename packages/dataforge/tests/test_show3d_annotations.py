@@ -10,13 +10,13 @@ import pyarrow as pa
 import pytest
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, raw_asset, read_back, read_chunks, recording_properties
 from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 from serde import from_dict
 from simplecv.camera_parameters import PinholeParameters, perspective_projection
 from simplecv.umetrack_temp.generic_hand_model_numpy import NUM_JOINTS_PER_HAND, NUM_LANDMARKS_PER_HAND
 
+from conftest import SHOW3D_RAW, Show3dSceneInputs, index_row, raw_asset, read_back, read_chunks, recording_properties
 from dataforge import schema, transports
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, Show3dDataset, base_files

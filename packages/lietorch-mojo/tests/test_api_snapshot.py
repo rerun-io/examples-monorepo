@@ -12,6 +12,7 @@ import json
 
 import pytest
 from api_surface import FIXTURE, api_surface
+
 from conftest import require_mojo_extension
 
 require_mojo_extension()

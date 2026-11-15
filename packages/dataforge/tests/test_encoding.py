@@ -14,10 +14,10 @@ from pathlib import Path
 import av
 import numpy as np
 import pytest
-from conftest import gray_frame, png_frame
 from jaxtyping import UInt8
 from numpy import ndarray
 
+from conftest import gray_frame, png_frame
 from dataforge import writing
 from dataforge.logging_toolkit import log_video_stream
 from dataforge.video_encoding import (

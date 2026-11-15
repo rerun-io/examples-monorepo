@@ -1,16 +1,19 @@
 """``selfcap-preview``: write one preview layer file per segment; it neither ships nor registers them."""
 
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 
-from beartype.roar import BeartypeException
 from dataforge import paths, writing
 from rerun.catalog import CatalogClient, DatasetEntry
 
 from selfcap_curate.preview import PreviewOptions, PreviewResult, RigChoice, build_segment_preview
 from selfcap_curate.records import episode_keys
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 
 @dataclass

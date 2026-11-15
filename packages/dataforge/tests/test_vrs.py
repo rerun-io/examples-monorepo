@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import vrs_file, vrs_record
 
+from conftest import vrs_file, vrs_record
 from dataforge.vrs import CONFIGURATION_RECORD, VrsFile, VrsImageReader
 
 

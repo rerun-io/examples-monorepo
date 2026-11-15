@@ -37,7 +37,6 @@ import pyarrow as pa
 import rerun as rr
 import torch
 import torch.nn.functional as F
-from beartype.roar import BeartypeException
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -97,6 +96,9 @@ from handtrack.labels.perspective import (
 )
 from handtrack.labels.validity import HandLabel, classify_visibility
 from handtrack.train.source import DetNetValidation, KeyNetValidation
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 NetChoice: TypeAlias = Literal["detnet", "keynet", "both"]
 DECODE_CHUNK_PIXELS: int = 10_000_000

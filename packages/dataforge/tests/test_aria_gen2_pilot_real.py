@@ -9,9 +9,9 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
-from conftest import assert_readers_match_projectaria, raw_asset, read_chunks
 from simplecv.sensors.camera import fisheye624
 
+from conftest import assert_readers_match_projectaria, raw_asset, read_chunks
 from dataforge import schema
 from dataforge.aria import project_to_calibration
 from dataforge.clocks import nearest_framesets

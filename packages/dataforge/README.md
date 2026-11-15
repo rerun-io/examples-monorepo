@@ -637,7 +637,7 @@ headers; every other column is hidden by name (the viewer's Columns menu brings 
 back). `register` takes the column names after it registers the layers, so the run
 that adds a layer also hides that layer's columns.
 
-Conventions this package follows — beartype under `PIXI_DEV_MODE`, thin `tools/`
+Conventions this package follows — beartype under pytest only (root `conftest.py`), thin `tools/`
 shims, jaxtyping annotations, `pixi run -e dataforge-dev {lint,typecheck,deadcode,tests}` —
 are the monorepo ones in the root `AGENTS.md`. The logging schema is
 `packages/simplecv/docs/exoego_schema.md`.

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from conftest import CHECKPOINT_PATH, SMPL_MODEL_PATH, integration, requires_cuda
 
+from conftest import CHECKPOINT_PATH, SMPL_MODEL_PATH, integration, requires_cuda
 from lamptrack.third_party.lamp.models.model_loader import build_lampnet_from_checkpoint
 
 LAMP_CHECKPOINT_SHA256: str = "6b5b1430ed2bdad089e579dfe53d98aa397535ca7a869570eda2de1ed82973e5"

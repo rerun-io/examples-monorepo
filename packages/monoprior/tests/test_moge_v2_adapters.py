@@ -6,11 +6,11 @@ import cv2
 import numpy as np
 import pytest
 import torch
-from conftest import requires_cuda
 from einops import rearrange
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 
+from conftest import requires_cuda
 from monopriors.models.metric_depth import MetricDepthPrediction
 from monopriors.models.moge_v2 import MoGeV2GeometryOutput, MoGeV2NormalOutput
 from monopriors.models.moge_v2.adapters import geometry_to_metric_prediction, normal_to_surface_prediction

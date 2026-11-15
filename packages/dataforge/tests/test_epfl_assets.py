@@ -8,9 +8,9 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
-from conftest import raw_asset, read_chunks
 from jaxtyping import Bool, Float32, Int64
 
+from conftest import raw_asset, read_chunks
 from dataforge.datasets.epfl import EpflConfig
 from dataforge.datasets.epfl_source import FITS, PoseRow, array_cell, parse_pose_row, read_timestamps
 

@@ -6,6 +6,7 @@ this tool never touches the catalog's layer set.
 """
 
 import json
+import sys
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -30,7 +31,6 @@ from arkitscenes_download.ingest.paths import (
 )
 from arkitscenes_download.ingest.recording import atomic_recording
 from arkitscenes_download.schema import DEPTH_RANGE_MM
-from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Float32, UInt8, UInt32
 from numpy import ndarray
@@ -70,6 +70,9 @@ from gauss_surf.uw_geometry import (
     undistort_rgb,
     world_from_pose,
 )
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 UW_K_COLUMN: str = f"/{PINHOLE_ULTRAWIDE}:Pinhole:image_from_camera"
 UW_RESOLUTION_COLUMN: str = f"/{PINHOLE_ULTRAWIDE}:Pinhole:resolution"

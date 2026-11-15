@@ -19,6 +19,7 @@ The page has the EgoHand app's look (:mod:`metrictrail.gradio_ui.theme`): Input 
 the left, the viewer filling the rest of the window.
 """
 
+import sys
 import threading
 import time
 from collections import deque
@@ -34,7 +35,6 @@ import gradio as gr
 import numpy as np
 import rerun as rr
 import torch
-from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from gradio_rerun.commands import set_time
 from vipe.metrictrail.calibration.config import SharedKCalibrationConfig
@@ -49,6 +49,9 @@ from metrictrail.calibration_live import RunPhase
 from metrictrail.examples import DATA_DIR, example_videos
 from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS
 from metrictrail.outputs import RunMetrics
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 APPLICATION_ID: str = "metrictrail"
 """Application id of every streamed recording."""

@@ -7,10 +7,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import column_rows, raw_asset, read_back, read_chunks, recording_properties, static_values
 from harmony4d_synthetic import FRAMES, write_sequence
 from hub_fake import HubStore
 
+from conftest import column_rows, raw_asset, read_back, read_chunks, recording_properties, static_values
 from dataforge import paths, schema, transports
 from dataforge.datasets import harmony4d
 from dataforge.datasets.harmony4d import SOURCE_REPO, SOURCE_REVISION, Harmony4dConfig, Harmony4dDataset

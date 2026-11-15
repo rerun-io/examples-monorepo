@@ -11,6 +11,7 @@ each mode against the eager fp32 frozen-geometry path.
 import gc
 import json
 import statistics
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,7 +22,6 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, get_args, runtime_ch
 import cv2
 import numpy as np
 import torch
-from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, Int64, Shaped, UInt8
 from numpy import ndarray
@@ -30,6 +30,9 @@ from torch import Tensor
 
 from monopriors.models.rig_depth import BaseRigDepthPredictor, RigDepthPrediction, XLensPredictor, XLensTrtPredictor, camera_type, unit_rays
 from monopriors.models.rig_depth.xlens_trt import XLENS_CACHE_DIR, EngineProfile
+
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 Mode: TypeAlias = Literal["eager-bf16", "eager-frozen-bf16", "trt-rig-static", "trt-rig", "trt-dynamic"]
 """``trt-rig-static``: one static engine per rig (batch 1); ``trt-rig``: per-rig engine with a dynamic frameset batch;

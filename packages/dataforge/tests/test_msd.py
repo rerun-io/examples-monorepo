@@ -20,12 +20,12 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from conftest import calibration_fixture, column_rows, eye_vector, read_back, recording_properties
 from hub_fake import HubStore
 from jaxtyping import Float64
 from msd_hub import REVISION_SHA, SEQUENCE, FakeHub, build_hub
 from numpy import ndarray
 
+from conftest import calibration_fixture, column_rows, eye_vector, read_back, recording_properties
 from dataforge import blueprints, paths, schema, transports
 from dataforge.basalt import FollowFrame, follow_frame, load_calibration
 from dataforge.datasets import msd, msd_layers

@@ -45,7 +45,7 @@ All commands can be listed with `pixi task list -e robocap-slam`.
 robocap-slam/
 ├── pyproject.toml                          # Package metadata and tooling config
 ├── robocap_slam/                           # Main package (editable install)
-│   ├── __init__.py                         # beartype activation (dev env only)
+│   ├── __init__.py
 │   ├── apis/
 │   │   ├── track_odometry.py               # Odometry pipeline + tyro entrypoint
 │   │   └── track_slam.py                   # SLAM pipeline + tyro entrypoint

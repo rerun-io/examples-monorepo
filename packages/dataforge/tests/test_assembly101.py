@@ -9,10 +9,10 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from conftest import assert_raw_root_guarded, read_chunks
 from simplecv.camera_parameters import BrownConradyDistortion, Fisheye62Parameters, KannalaBrandtDistortion, PinholeParameters
 from simplecv.rerun_custom_types import PinholeWithDistortion
 
+from conftest import assert_raw_root_guarded, read_chunks
 from dataforge import schema
 from dataforge.actions import Segment, active_labels
 from dataforge.datasets import assembly101_source

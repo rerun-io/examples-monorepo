@@ -1,8 +1,8 @@
 import numpy as np
-from conftest import observe_points
 from jaxtyping import Float64
 from numpy import ndarray
 
+from conftest import observe_points
 from exo_calib.correspondences import ObservationSet
 from exo_calib.focal import FocalRefinementResult, refine_focals
 

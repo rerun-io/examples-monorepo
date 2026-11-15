@@ -20,6 +20,7 @@ Usage::
 
 import gc
 import multiprocessing
+import sys
 import time
 import traceback
 from multiprocessing.managers import SyncManager
@@ -42,10 +43,8 @@ from mast3r_slam.mast3r_utils import load_retriever, use_pair_decoder_engine
 from mast3r_slam.rerun_log_utils import LOG_PATH
 from mast3r_slam.retrieval_database import RetrievalDatabase
 
-try:
-    from beartype.roar import BeartypeException
-except ImportError:
-    BeartypeException = ()
+# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 class BackendError(RuntimeError):
     """Raised when the backend process dies with an exception."""

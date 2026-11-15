@@ -5,8 +5,8 @@ import struct
 from pathlib import Path
 
 import pytest
-from conftest import vrs_file, vrs_record
 
+from conftest import vrs_file, vrs_record
 from dataforge.video_encoding import FrameSource
 from dataforge.vrs import VrsFile
 from dataforge.vrs_hevc import VrsHevcReader

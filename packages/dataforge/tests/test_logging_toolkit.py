@@ -20,10 +20,10 @@ import pytest
 import rerun as rr
 import rerun.chunk as rrc
 from beartype.roar import BeartypeException
-from conftest import column_rows, read_back
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
+from conftest import column_rows, read_back
 from dataforge import schema
 from dataforge.logging_toolkit import (
     VIDEO_KEYFRAME_COMPONENT,

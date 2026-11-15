@@ -6,9 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import column_rows, raw_asset, read_back, recording_properties
 from PIL import Image
 
+from conftest import column_rows, raw_asset, read_back, recording_properties
 from dataforge import paths, schema
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.mamma_body import BODY_FILES, PosedPerson, SmplxBody

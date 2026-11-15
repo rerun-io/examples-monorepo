@@ -12,11 +12,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import rerun.chunk as rrc
-from conftest import SHOW3D_RAW, index_row, raw_asset, read_back, read_chunks, recording_properties
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from serde import SerdeError, from_dict
 
+from conftest import SHOW3D_RAW, index_row, raw_asset, read_back, read_chunks, recording_properties
 from dataforge import schema, video_encoding
 from dataforge.datasets.base import DataforgeDataset
 from dataforge.datasets.show3d import Show3dConfig, pane_contents, preview_world_contents, world_contents
