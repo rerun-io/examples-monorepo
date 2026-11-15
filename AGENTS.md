@@ -288,6 +288,7 @@ treat that warning as a bug in new code.
 | `rerun.experimental.send_chunks` | `rr.send_chunks` |
 | `rerun.datatypes` | `rerun.encodings` |
 | `rerun.catalog.DatasetView` | `rerun.catalog.DatasetSelection` |
+| `rerun.catalog.RegistrationHandle` | `rerun.catalog.RegistrationOperation` |
 | `rr.recording.load_recording(path)` (removed) | `rerun.chunk.RrdReader(path).store()` (a `LazyStore`) or `.stream()` |
 | `rr.dataframe` (removed) | dataframe queries: `with rr.server.Server(datasets={"d": [path]}) as srv:` then `srv.client().get_dataset("d").reader(index=...)` |
 | `rr.flush()` (absent) | `rr.get_data_recording().flush()` or `rec.flush()` |
