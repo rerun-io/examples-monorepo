@@ -15,6 +15,7 @@ of this package.
 
 ```bash
 pixi run -e colsfm colsfm-raco-export        # once: RaCo-ALIKED + LightGlue+ ONNX graphs -> packages/colsfm/data/models
+pixi run -e colsfm colsfm-download-flexglue  # once: FlexGlue's ONNX graphs (sha256-pinned) -> packages/colsfm/data/models/flexglue
 pixi run -e colsfm colsfm-galileo            # r2b Galileo sample (downloaded by colsfm-download-galileo), default pipeline
 pixi run -e colsfm colsfm-galileo-ablation   # COLMAP's own ALIKED + LightGlue, Ceres, no refinement, no loops
 pixi run -e colsfm colsfm-robocap            # RoboCap fisheye segment s00000021 from the Spark catalog (slam_rs start)
@@ -30,7 +31,7 @@ whose temporal `Transform3D` is the initial trajectory, stride, trim) and every 
 | Knob | Default | Ablation |
 |---|---|---|
 | `--features-backend` | `raco` (RaCo-ALIKED, TensorRT) | `pycolmap` (COLMAP's ALIKED through ONNX Runtime; no engine) |
-| `--matching-backend` | `raco` (LightGlue+, TensorRT, real SSC) | `pycolmap` (score-free grid stand-in for SSC) |
+| `--matching-backend` | `flexglue` (COLMAP's FlexGlue, ORT CUDA, covisibility gate) | `raco` (LightGlue+, TensorRT, real SSC); `pycolmap` (COLMAP's LightGlue) |
 | `--ba-backend` | `caspar` (COLMAP's GPU bundle adjuster) + one Ceres polish | `ceres` |
 | `--optimize-extrinsics` | on (regularised, cuSFM's priors) | `--no-optimize-extrinsics`, `--no-regularised-extrinsics` |
 | `--loop-closure` | on | `--no-loop-closure` |

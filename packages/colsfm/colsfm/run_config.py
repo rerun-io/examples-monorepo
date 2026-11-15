@@ -193,14 +193,14 @@ class PipelineOptions:
     is told to export them or to ask for `--features-backend pycolmap`
     (`colsfm.model_assets`), never quietly given another extractor.
     See `colsfm.features.FeatureBackend`."""
-    matching_backend: MatchingBackend = "raco"
-    """Which LightGlue runs: LightGlue+ (`colsfm.matching_raco`), COLMAP's own ONNX one, or
-    the blob's TensorRT engine (`colsfm.matching_trt`).
+    matching_backend: MatchingBackend = "flexglue"
+    """Which matcher runs: COLMAP's FlexGlue, LightGlue+ on TensorRT (`colsfm.matching_raco`), or COLMAP's own ONNX
+    LightGlue. See `colsfm.matching.MatchingBackend`.
 
-    `raco` by default, as the matcher fabio-sim trained against RaCo-ALIKED: pairing the
-    default extractor with COLMAP's own matcher would match descriptors it was not trained
-    on. Like the `tensorrt` path it sees the per-match score the blob's SSC spatial NMS
-    needs, which the `pycolmap` path cannot. See `colsfm.matching.MatchingBackend`."""
+    `flexglue` by default since 2026-11-15: on RaCo-ALIKED keypoints it beat LightGlue+ on both datasets measured
+    (MSD MGO07 SE(3) ATE 1.33 vs 2.08 cm with twice the points; Galileo 4.48 vs 5.17 mm, 226 vs 224 registered) at
+    about 1.4x LightGlue+'s per-pair time (20.9 vs 14.6 ms on the 5090). `raco` (LightGlue+) remains the matcher
+    trained on these descriptors and the one with per-match scores for SSC."""
 
     @property
     def selection(self) -> SelectionOptions:

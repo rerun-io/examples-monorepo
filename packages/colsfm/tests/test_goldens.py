@@ -32,7 +32,8 @@ from colsfm.benchmark import RunMetrics, compute_run_metrics, read_run, reconstr
 from colsfm.export import MERGED_POSE_FILE_NAME, OUTPUT_POSES_DIR_NAME
 from colsfm.frames_meta import FRAMES_META_NAME, read_frames_meta
 from colsfm.kitti_eval import Trajectory, TrajectoryReport, evaluate_trajectory, read_kitti_ground_truth
-from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_LIGHTGLUE_ONNX_PATH, RACO_ONNX_PATH
+from colsfm.matching import FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES
+from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
 from colsfm.pipeline import run_pipeline
 from colsfm.run_config import PipelineOptions
 
@@ -116,8 +117,8 @@ def test_galileo_ablation_beats_the_cusfm_binary(tmp_path: Path) -> None:
 
 
 def test_galileo_default_pipeline_stays_in_its_band(tmp_path: Path) -> None:
-    """RaCo + LightGlue+, loops, CASPAR + Ceres polish, regularised refinement: the fork's 5.08 mm, under cuSFM's time."""
-    _require(GALILEO_DIR / FRAMES_META_NAME, RACO_ONNX_PATH, RACO_LIGHTGLUE_ONNX_PATH)
+    """RaCo + FlexGlue, loops, CASPAR + Ceres polish, regularised refinement: within 10 % of the fork's 5.08 mm (4.48 measured), under cuSFM's time."""
+    _require(GALILEO_DIR / FRAMES_META_NAME, RACO_ONNX_PATH, *(FLEXGLUE_MODEL_DIR / name for name in FLEXGLUE_MODEL_FILES.values()))
     output_dir: Path = tmp_path / "galileo_default"
     started: float = time.perf_counter()
     run_pipeline(PipelineOptions(input_dir=GALILEO_DIR, output_dir=output_dir))
@@ -135,7 +136,7 @@ def test_galileo_default_pipeline_stays_in_its_band(tmp_path: Path) -> None:
 
 def test_kitti06_default_pipeline_reproduces_the_fork(tmp_path: Path) -> None:
     """KITTI 06 from the cuVSLAM start: Sim(3) ATE within 10 % of 0.928 m, far under cuSFM's 1596 s."""
-    _require(KITTI_INPUT_DIR / FRAMES_META_NAME, KITTI_SEQUENCE_DIR / "poses_gt_06.txt", RACO_ONNX_PATH, RACO_DYNAMIC_ONNX_PATH)
+    _require(KITTI_INPUT_DIR / FRAMES_META_NAME, KITTI_SEQUENCE_DIR / "poses_gt_06.txt", RACO_ONNX_PATH, RACO_DYNAMIC_ONNX_PATH, *(FLEXGLUE_MODEL_DIR / name for name in FLEXGLUE_MODEL_FILES.values()))
     output_dir: Path = tmp_path / "kitti06"
     started: float = time.perf_counter()
     run_pipeline(

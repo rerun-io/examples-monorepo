@@ -101,8 +101,11 @@ MINIMUM_BATCH_SIZE: Final[int] = 1
 DEFAULT_BATCH_SIZE: Final[int] = 8
 """Images per execution, and the profile's `opt`; `tools/raco_extract.py`'s own default."""
 
-MAXIMUM_BATCH_SIZE: Final[int] = 16
-"""The fixed-shape profile's `max`, and the ceiling the ONNX graph itself was exported with."""
+MAXIMUM_BATCH_SIZE: Final[int] = DEFAULT_BATCH_SIZE
+"""The fixed-shape profile's `max`: the batch runs use, not the graph's export ceiling of 16.
+
+TensorRT sizes an execution context for the profile maximum: batch 16 at 1200x1920 asked for 19.1 GB, and with a
+per-size dynamic context alive beside it Galileo ran the 5090 out of memory. Batch 8 halves that."""
 
 DYNAMIC_MAXIMUM_BATCH_SIZE: Final[int] = 8
 """The shape-dynamic profile's `max` batch.

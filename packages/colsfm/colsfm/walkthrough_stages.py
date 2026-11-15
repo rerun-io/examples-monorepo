@@ -174,12 +174,12 @@ STAGE_CARDS: Final[dict[StageName, StageCard]] = {
     "feature_extraction": StageCard(
         title="2 · Feature extraction",
         computes=(
-            "Creates the COLMAP database carrying cuSFM's own camera, rig, frame and image ids, then runs ALIKED over "
+            "Creates the COLMAP database carrying cuSFM's own camera, rig, frame and image ids, then runs RaCo-ALIKED (the default `--features-backend raco`; COLMAP's ALIKED on `pycolmap`) over "
             "every kept keyframe and stores keypoints and descriptors in it."
         ),
         replaces="`feature_extractor_main` (per-image half)",
         module="`colsfm.database`, `colsfm.cameras`, `colsfm.features`",
-        figure="Feature Extraction, second row (§3.1) — ALIKED, the paper's own default.",
+        figure="Feature Extraction, second row (§3.1) — ALIKED, the paper's own default; here RaCo-ALIKED.",
     ),
     "pair_selection": StageCard(
         title="3 · Pair selection",
@@ -195,12 +195,12 @@ STAGE_CARDS: Final[dict[StageName, StageCard]] = {
     "matching": StageCard(
         title="4 · Matching",
         computes=(
-            "Runs LightGlue over every selected pair, verifies each match set with COLMAP's two-view geometry "
+            "Runs the selected matcher (FlexGlue by default; LightGlue+ on `--matching-backend raco`) over every selected pair, verifies each match set with COLMAP's two-view geometry "
             "estimator, subsamples the inliers over an image-space grid, and writes both into the database."
         ),
         replaces="`feature_matcher_main`",
         module="`colsfm.matching`",
-        figure="Feature Matching, second row (§3.1) — LightGlue, the paper's own default.",
+        figure="Feature Matching, second row (§3.1) — LightGlue in the paper; FlexGlue here by default.",
     ),
     "loop_closure": StageCard(
         title="5 · Loop closure",
