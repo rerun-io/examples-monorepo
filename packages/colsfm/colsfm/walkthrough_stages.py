@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TypeAlias
 
+import rerun as rr
+
 from colsfm import DATA_DIR
 from colsfm.rerun_log import Rgb
 from colsfm.run_lifecycle import StageName, stage_names
@@ -267,6 +269,9 @@ class WalkthroughStage:
     """The `colsfm.pipeline` stage this shows."""
     card: StageCard
     """What the stage is, run-independently."""
+    also_at_zero: tuple[str, ...] = ()
+    """Duration timelines every panel of this stage is also stamped on, at 0 — so a recording that adds a
+    `video_time` overview shows the stage tabs on that timeline too, with no timeline switch."""
 
     @property
     def entity_root(self) -> str:
@@ -278,19 +283,29 @@ class WalkthroughStage:
         return f"/{WALKTHROUGH_PATH}/stage_{self.index:02d}"
 
 
-def walkthrough_stages(optimize_extrinsics: bool) -> tuple[WalkthroughStage, ...]:
+def walkthrough_stages(optimize_extrinsics: bool, also_at_zero: tuple[str, ...] = ()) -> tuple[WalkthroughStage, ...]:
     """The stages this walkthrough will record, numbered in order.
 
     Args:
         optimize_extrinsics: Whether the run makes the second mapping pass, which
             adds stage 7b and pushes export one index later.
+        also_at_zero: Duration timelines the panels are also stamped on at 0 (`WalkthroughStage.also_at_zero`).
 
     Returns:
         One stage per `colsfm.pipeline.stage_names` entry, 1-based.
     """
     return tuple(
-        WalkthroughStage(index=index, name=name, card=STAGE_CARDS[name])
+        WalkthroughStage(index=index, name=name, card=STAGE_CARDS[name], also_at_zero=also_at_zero)
         for index, name in enumerate(stage_names(optimize_extrinsics), start=1)
     )
 
 
+def stamp_stage(stage: WalkthroughStage) -> None:
+    """Set the time a stage's panels are logged at: its index on `stage`, and 0 on every `also_at_zero` timeline.
+
+    Args:
+        stage: The stage about to be logged.
+    """
+    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    for timeline in stage.also_at_zero:
+        rr.set_time(timeline, duration=0.0)

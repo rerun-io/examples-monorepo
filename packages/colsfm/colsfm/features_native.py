@@ -232,6 +232,8 @@ class ExtractionGroup:
     """Height every image is resized to; `None` takes the engine's declared input height."""
     network_width: int | None = None
     """Width every image is resized to; `None` takes the engine's declared input width."""
+    maximum_batch_size: int | None = None
+    """The group's engine's batch ceiling, when below the run's batch size (a large shape-dynamic group)."""
 
 
 def to_network_bchw(resized_bgr_hwc: ResizedImageBGR) -> NetworkImage:
@@ -533,6 +535,7 @@ def run_native_extraction(
                     TensorRTSession(group.engine_path, reuse_output_buffers=True)
                 )
             session: TensorRTSession = sessions[group.engine_path]
+            group_batch: int = min(batch_size, group.maximum_batch_size or batch_size)
             declared_shape: tuple[int, ...] = tuple(session.engine.get_tensor_shape(model.image_binding))
             network_height: int = group.network_height if group.network_height is not None else int(declared_shape[2])
             network_width: int = group.network_width if group.network_width is not None else int(declared_shape[3])
@@ -544,8 +547,8 @@ def run_native_extraction(
                         GpuPreprocessor(
                             height=network_height,
                             width=network_width,
-                            max_batch=batch_size,
-                            optimal_batch=batch_size,
+                            max_batch=group_batch,
+                            optimal_batch=group_batch,
                             stream=session.stream,
                         )
                     )
@@ -553,7 +556,7 @@ def run_native_extraction(
             prepared: Iterator[PreparedImage] = prepared_stream(
                 group.tasks, preprocessing_workers, network_height, network_width, not gpu_preprocessing
             )
-            for batch in batched_images(prepared, batch_size):
+            for batch in batched_images(prepared, group_batch):
                 network_input: NetworkBatch | NetworkImage | DeviceTensor
                 if preprocessor is None:
                     network_input = _host_batch(batch)

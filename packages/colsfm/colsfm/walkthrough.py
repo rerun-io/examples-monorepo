@@ -182,6 +182,9 @@ class WalkthroughConfig:
     """A run whose loop closure found revisits, drawn beside Galileo's empty stage 5."""
     dataset: str = "galileo"
     """Label for this dataset; it names the recording and the benchmark report, nothing else."""
+    also_at_zero: tuple[str, ...] = ()
+    """Duration timelines every panel is also stamped on at 0, e.g. `video_time` for a catalog run whose overview
+    lives on the segment's video timeline (`tools/overview.py`), so the stage tabs need no timeline switch."""
     features_backend: FeatureBackend = "pycolmap"
     """Which ALIKED the drawn run uses. `pycolmap` here, not the pipeline's `raco` default.
 
@@ -518,7 +521,7 @@ def run_walkthrough(config: WalkthroughConfig) -> WalkthroughResult:
     """
     options: PipelineOptions = config.pipeline_options()
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    stages: tuple[WalkthroughStage, ...] = walkthrough_stages(config.optimize_extrinsics)
+    stages: tuple[WalkthroughStage, ...] = walkthrough_stages(config.optimize_extrinsics, config.also_at_zero)
     observer: WalkthroughObserver = WalkthroughObserver(config=config, options=options, stages=stages)
     print(f"[walkthrough] input {config.input_dir} | workspace {options.output_dir} | recording {config.output}")
 

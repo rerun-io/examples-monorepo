@@ -79,11 +79,11 @@ from colsfm.walkthrough_stages import (
     SOLVED_COLOR,
     SOLVED_NODE_SHRINK,
     STACKED_MAX_WIDTH,
-    STAGE_TIMELINE,
     STEREO_COLOR,
     MarkdownRows,
     SamplePane,
     WalkthroughStage,
+    stamp_stage,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -118,7 +118,7 @@ def log_keyframe_selection(stage: WalkthroughStage, selection: KeyframeSelection
         selection: What `run_keyframe_selection_stage` returned.
         console: What it printed.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     all_keyframes: tuple[KeyframeMeta, ...] = selection.frames_meta.keyframes
     kept: tuple[KeyframeMeta, ...] = selection.selected.keyframes
     input_centres: Float64[ndarray, "n 3"] = camera_centres(all_keyframes)
@@ -224,7 +224,7 @@ def log_feature_extraction(
         One pane per keyframe that was drawn, so the blueprint can give each its
         own 2D view — stacked in one view, only the last image would be visible.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     panes: list[SamplePane] = []
     drawable: list[KeyframeMeta] = [
         keyframe for keyframe in sample_keyframes(selected, num_samples) if image_path_of(input_dir, keyframe).is_file()
@@ -284,7 +284,7 @@ def log_pair_selection(
         pairs: The pairs `run_pair_selection_stage` returned.
         console: What it printed.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     by_id: dict[int, KeyframeMeta] = selected.keyframe_by_id()
     declared_stereo: set[ImagePair] = set(stereo_pairs(selected))
     consecutive: list[ImagePair] = [pair for pair in pairs if pair not in declared_stereo]
@@ -358,7 +358,7 @@ def log_matching(
         input_dir: The dataset's raw image root.
         console: What the stage printed.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     stats: dict[ImagePair, PairMatchStats] = matching.pair_stats
     inliers: Int64[ndarray, "n"] = np.asarray([stats[pair].inlier_matches for pair in sorted(stats)], dtype=np.int64)
     rr.log(f"{stage.entity_root}/inliers_per_pair", rr.BarChart(inliers, color=SELECTED_COLOR))
@@ -504,7 +504,7 @@ def log_loop_closure(stage: WalkthroughStage, loops: LoopClosureStageResult, rob
         robocap_run: A RoboCap `.../cusfm` directory, or None to skip that half.
         console: What the stage printed — the funnel counters live here.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     rows: MarkdownRows = [
         ("loop edges kept on this dataset", str(len(loops.edges))),
         ("extra pairs this stage had to match", str(loops.num_pairs_matched)),
@@ -586,7 +586,7 @@ def log_pose_graph(stage: WalkthroughStage, pose_graph: PoseGraphStageResult, co
         pose_graph: What `run_pose_graph_stage` returned.
         console: What it printed — the Ceres termination and costs live here.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     nodes: list[RigNode] = pose_graph.nodes
     before_by_id: dict[int, Float64[ndarray, "3"]] = {
         node.rig_id: np.asarray(node.world_T_rig.translation, dtype=np.float64) for node in nodes
@@ -657,7 +657,7 @@ def log_reconstruction(stage: WalkthroughStage, mapping: MappingResult, console:
             extrinsic refinement may adjust the same reconstruction in place.
         console: What it printed — the per-pass triangulation counts live here.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     positions: Float64[ndarray, "n 3"] = np.asarray(
         [point.xyz for point in mapping.reconstruction.points3D.values()], dtype=np.float64
     ).reshape(-1, 3)
@@ -679,7 +679,7 @@ def log_reconstruction(stage: WalkthroughStage, mapping: MappingResult, console:
         rr.log(f"{stage.entity_root}/rounds/max_pixel_error", rr.Scalars(stats.max_pixel_error))
         rr.log(f"{stage.entity_root}/rounds/seconds", rr.Scalars(stats.seconds))
     rr.reset_time()
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
 
     table: list[str] = [
         "## Rounds",
@@ -735,7 +735,7 @@ def log_extrinsic_refinement(
         arrow_scale: Factor the drawn arrows are multiplied by.
         console: What the stage printed.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     rig_frames: tuple[RigFrame, ...] = pose_graph_meta.rig_frames()
     world_T_rig: pycolmap.Rigid3d = rig_frames[0].world_T_vehicle
     camera_ids: list[int] = sorted(pose_graph_meta.cameras)
@@ -818,7 +818,7 @@ def log_run_as_rig(stage: WalkthroughStage, frames_meta: FramesMeta, index: int,
     log_rig_pose_stream(rig, timestamps_ns=1000 * track.timestamps_microseconds, world_path=rigs_path, timeline=TIMELINE)
 
     rig_path: str = f"/{rigs_path}/{entity_id('rig', index)}"
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     rr.log(rig_path, rr.Transform3D(translation=track.world_t_rig[0], mat3x3=track.world_R_rig[0]))
     rr.log(rig_path, rr.AnyValues(source=label, num_rig_frames=len(track)), static=True)
     for sensor in rig.calibration.cameras:
@@ -860,7 +860,7 @@ def log_export(
         dataset: Dataset label for the benchmark report heading.
         console: What the stage printed.
     """
-    rr.set_time(STAGE_TIMELINE, sequence=stage.index)
+    stamp_stage(stage)
     positions: Float64[ndarray, "n 3"] = np.asarray(
         [point.xyz for point in mapping.reconstruction.points3D.values()], dtype=np.float64
     ).reshape(-1, 3)

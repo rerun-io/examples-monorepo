@@ -19,7 +19,7 @@ from rerun.experimental import RrdReader
 
 from colsfm.benchmark import read_run
 from colsfm.catalog import CatalogInputConfig, read_catalog_cameras, read_catalog_trajectory
-from colsfm.overview import OverviewNumbers, log_overview, notes_markdown, overview_tab
+from colsfm.overview import OverviewNumbers, log_overview, notes_markdown, overview_eye, overview_tab
 from colsfm.walkthrough import APPLICATION_ID
 from colsfm.walkthrough_blueprint import stage_tab
 from colsfm.walkthrough_stages import SamplePane, walkthrough_stages
@@ -94,7 +94,7 @@ def main(config: Config) -> OverviewNumbers:
     panes: list[SamplePane] = sample_panes(config.walkthrough_rrd)
     recording.send_blueprint(
         rrb.Blueprint(
-            rrb.Tabs(overview_tab([camera.name for camera in cameras]), *[stage_tab(stage, panes) for stage in stages], active_tab=0),
+            rrb.Tabs(overview_tab([camera.name for camera in cameras], overview_eye(ground_truth)), *[stage_tab(stage, panes) for stage in stages], active_tab=0),
             rrb.SelectionPanel(state="collapsed"),
             rrb.BlueprintPanel(state="collapsed"),
             rrb.TimePanel(state="expanded", timeline=config.source.timeline),

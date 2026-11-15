@@ -512,7 +512,11 @@ def run_pose_graph_stage(
 
 
 def run_reconstruction_stage(
-    options: PipelineOptions, pose_graph_meta: FramesMeta, config: CusfmConfig, mapping_options: MappingOptions
+    options: PipelineOptions,
+    pose_graph_meta: FramesMeta,
+    config: CusfmConfig,
+    mapping_options: MappingOptions,
+    database_path: Path | None = None,
 ) -> MappingResult:
     """Triangulate and bundle-adjust the pose-graph poses.
 
@@ -528,6 +532,7 @@ def run_reconstruction_stage(
         pose_graph_meta: The collection stage 6 re-posed.
         config: The config profile, for `vision_mapping_config`.
         mapping_options: Command-line style mapper knobs.
+        database_path: The database to map from; the run's own by default (a `colsfm.pinhole_twin` copy otherwise).
 
     Returns:
         The adjusted reconstruction, its rig reference and the per-round statistics.
@@ -540,7 +545,7 @@ def run_reconstruction_stage(
         gauge_camera_params_id(pose_graph_meta) if options.optimize_extrinsics else None
     )
     model: PosedModel = build_reconstruction(pose_graph_meta, reference_camera_params_id=reference_camera_params_id)
-    mapping: MappingResult = run_mapping(model, options.database_path, config.vision_mapping, mapping_options)
+    mapping: MappingResult = run_mapping(model, database_path or options.database_path, config.vision_mapping, mapping_options)
     _print_mapping(mapping)
     return mapping
 
@@ -565,6 +570,7 @@ def run_extrinsic_refinement_stage(
     config: CusfmConfig,
     mapping_options: MappingOptions,
     mapping: MappingResult,
+    database_path: Path | None = None,
 ) -> ExtrinsicRefinementStageResult:
     """Refine the rig extrinsics of the model stage 7 produced.
 
@@ -578,6 +584,7 @@ def run_extrinsic_refinement_stage(
         config: The config profile, for the sigmas and the solver settings.
         mapping_options: Command-line style mapper knobs, for the (B) half of the alternation.
         mapping: What stage 7 produced, on a camera-referenced rig.
+        database_path: The database stage 7 mapped from; the run's own by default.
 
     Returns:
         The refined mapping result, the re-calibrated collection and the movement.
@@ -588,7 +595,7 @@ def run_extrinsic_refinement_stage(
     """
     refinement: ExtrinsicRefinementResult = refine_extrinsics(
         mapping,
-        options.database_path,
+        database_path or options.database_path,
         config.vision_mapping,
         mapping_options,
         {camera_params_id: camera.vehicle_T_cam for camera_params_id, camera in pose_graph_meta.cameras.items()},

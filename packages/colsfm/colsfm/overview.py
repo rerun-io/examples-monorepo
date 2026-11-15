@@ -35,6 +35,9 @@ from colsfm.rigid_fit import RigidAlignment, align_rigid
 ROOT: Final[str] = "/overview"
 """Entity root of the overview, apart from the walkthrough's stage roots."""
 
+POINT_CROP_FACTOR: Final[float] = 3.0
+"""The overview keeps the points within this many path extents of the path's centre."""
+
 GT_RGB: Final[tuple[int, int, int]] = (60, 200, 90)
 INPUT_RGB: Final[tuple[int, int, int]] = (60, 140, 255)
 OUTPUT_RGB: Final[tuple[int, int, int]] = (255, 140, 0)
@@ -153,9 +156,16 @@ def log_overview(
         static=True,
         recording=recording,
     )
+    # Points farther from the path than POINT_CROP_FACTOR x its own extent are dropped from the overview (they are
+    # kept in the walkthrough's stage 7): a handful of far triangulations would otherwise set the 3D view's framing.
+    points_xyz: Float64[ndarray, "p 3"] = _aligned(output_fit, artifacts.points_xyz())
+    path_xyz: Float64[ndarray, "n 3"] = _aligned(output_fit, output_poses[:, :3, 3])
+    centre: Float64[ndarray, " 3"] = path_xyz.mean(axis=0)
+    extent: float = float(np.linalg.norm(path_xyz - centre, axis=1).max()) + 1.0
+    near: np.ndarray = np.linalg.norm(points_xyz - centre, axis=1) <= POINT_CROP_FACTOR * extent
     rr.log(
         f"{world}/colsfm/points",
-        rr.Points3D(_aligned(output_fit, artifacts.points_xyz()), colors=artifacts.points_rgb().astype(np.uint8), radii=rr.Radius.ui_points(1.5)),
+        rr.Points3D(points_xyz[near], colors=artifacts.points_rgb().astype(np.uint8)[near], radii=rr.Radius.ui_points(1.5)),
         static=True,
         recording=recording,
     )
@@ -209,6 +219,22 @@ def log_overview(
     return numbers
 
 
+def overview_eye(ground_truth: CatalogTrajectory) -> tuple[list[float], list[float]]:
+    """A 3D eye that looks at the ground-truth path from above and to the side, far enough to see all of it.
+
+    Args:
+        ground_truth: The ground-truth trajectory (the overview's frame).
+
+    Returns:
+        `(position, look_target)`.
+    """
+    xyz: Float64[ndarray, "n 3"] = ground_truth.translations
+    centre: Float64[ndarray, " 3"] = xyz.mean(axis=0)
+    radius: float = float(np.linalg.norm(xyz - centre, axis=1).max()) + 0.5
+    offset: Float64[ndarray, " 3"] = np.array([1.2, -1.2, 1.4]) * radius
+    return (centre + offset).tolist(), centre.tolist()
+
+
 def _video_codec(name: str) -> rr.VideoCodec:
     from simplecv.catalog_video_codec import video_codec
 
@@ -246,11 +272,12 @@ def notes_markdown(segment: str, numbers: OverviewNumbers) -> str:
     return "\n".join(rows)
 
 
-def overview_tab(camera_names: Sequence[str]) -> rrb.Container:
+def overview_tab(camera_names: Sequence[str], eye: tuple[Sequence[float], Sequence[float]] | None = None) -> rrb.Container:
     """The Overview tab: the 3D comparison, every camera's video, and the numbers.
 
     Args:
         camera_names: The cameras `log_overview` logged, in entity order.
+        eye: `(position, look_target)` of the 3D view, e.g. from `overview_eye`; the viewer frames everything without it.
 
     Returns:
         A blueprint container.
@@ -258,7 +285,11 @@ def overview_tab(camera_names: Sequence[str]) -> rrb.Container:
     rig: str = f"{ROOT}/world/colsfm/rig"
     return rrb.Horizontal(
         rrb.Vertical(
-            rrb.Spatial3DView(origin=f"{ROOT}/world", name="GT (green) · input (blue) · colsfm (orange)"),
+            rrb.Spatial3DView(
+                origin=f"{ROOT}/world",
+                name="GT (green) · input (blue) · colsfm (orange)",
+                eye_controls=None if eye is None else rrb.EyeControls3D(position=eye[0], look_target=eye[1]),
+            ),
             rrb.Grid(
                 *[rrb.Spatial2DView(origin=f"{rig}/{name}/pinhole", name=name, contents=["+ $origin/**"]) for name in camera_names],
                 grid_columns=max(1, len(camera_names)),

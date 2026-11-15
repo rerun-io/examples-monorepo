@@ -113,6 +113,13 @@ dynamic the builder has to size its tactic workspace for the *maximum* shape as
 well, which pushes the build itself over. 8 is `DEFAULT_BATCH_SIZE`, so nothing
 in the extraction path wants more."""
 
+DYNAMIC_BATCH_PIXEL_BUDGET: Final[int] = 2 * 1216 * 1920
+"""Pixels one shape-dynamic execution may hold at its profile maximum (batch x height x width).
+
+TensorRT sizes an execution context's activation memory for the profile maximum: batch 8 at 1216x1920 asked for
+11.3 GB on the RTX 5090 and 17.1 GB on the GB10. Two full frames' worth keeps a large-image group to a few GB and still
+lets 480x640 images run eight at a time."""
+
 INPUT_DIM_DIVISOR: Final[int] = 32
 """RaCo's four-level pyramid pools by 32, so both network sides must be multiples of it.
 
@@ -193,13 +200,15 @@ def raco_dynamic_profile(network_size: tuple[int, int] | None = None) -> dict[st
     if network_size is None:
         optimal: tuple[int, int] = (OPTIMAL_NETWORK_HEIGHT, OPTIMAL_NETWORK_WIDTH)
         maximum: tuple[int, int] = (MAXIMUM_NETWORK_HEIGHT, MAXIMUM_NETWORK_WIDTH)
+        ceiling: int = DYNAMIC_MAXIMUM_BATCH_SIZE
     else:
         optimal = maximum = network_size
+        ceiling = dynamic_batch_ceiling(network_size)
     return {
         ALIKED_IMAGE_BINDING: (
             (MINIMUM_BATCH_SIZE, 3, min(MINIMUM_NETWORK_SIDE, maximum[0]), min(MINIMUM_NETWORK_SIDE, maximum[1])),
-            (DEFAULT_BATCH_SIZE, 3, *optimal),
-            (DYNAMIC_MAXIMUM_BATCH_SIZE, 3, *maximum),
+            (min(DEFAULT_BATCH_SIZE, ceiling), 3, *optimal),
+            (ceiling, 3, *maximum),
         )
     }
 
@@ -296,8 +305,21 @@ def select_raco_engine(network_size: tuple[int, int], choice: RacoEngineChoice =
         onnx_path=RACO_DYNAMIC_ONNX_PATH,
         network_height=network_size[0],
         network_width=network_size[1],
-        maximum_batch_size=DYNAMIC_MAXIMUM_BATCH_SIZE,
+        maximum_batch_size=dynamic_batch_ceiling(network_size),
     )
+
+
+def dynamic_batch_ceiling(network_size: tuple[int, int]) -> int:
+    """The batch ceiling of a shape-dynamic engine for one size: as many images as `DYNAMIC_BATCH_PIXEL_BUDGET` holds.
+
+    Args:
+        network_size: `(network_height, network_width)`.
+
+    Returns:
+        Between `MINIMUM_BATCH_SIZE` and `DYNAMIC_MAXIMUM_BATCH_SIZE`.
+    """
+    fits: int = DYNAMIC_BATCH_PIXEL_BUDGET // max(1, network_size[0] * network_size[1])
+    return max(MINIMUM_BATCH_SIZE, min(DYNAMIC_MAXIMUM_BATCH_SIZE, fits))
 
 
 def engine_file(engine: RacoEngine) -> Path:
@@ -367,6 +389,7 @@ def extraction_groups(tasks: Sequence[ImageTask], *, native_resolution: bool, ch
                 tasks=group,
                 network_height=engine.network_height,
                 network_width=engine.network_width,
+                maximum_batch_size=engine.maximum_batch_size,
             )
         )
     return groups

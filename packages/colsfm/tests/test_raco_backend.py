@@ -233,7 +233,8 @@ def test_either_engine_can_be_forced_whatever_the_size() -> None:
     forced_dynamic: RacoEngine = select_raco_engine(network_size_for(1200, 1920), "dynamic")
     assert forced_dynamic.kind == "dynamic"
     assert (forced_dynamic.network_height, forced_dynamic.network_width) == (1216, 1920)
-    assert forced_dynamic.maximum_batch_size == 8
+    # Two full frames: the pixel budget (DYNAMIC_BATCH_PIXEL_BUDGET) caps a 1216x1920 dynamic engine at batch 2.
+    assert forced_dynamic.maximum_batch_size == 2
 
     forced_fixed: RacoEngine = select_raco_engine(network_size_for(370, 1226), "fixed")
     assert forced_fixed.kind == "fixed"
