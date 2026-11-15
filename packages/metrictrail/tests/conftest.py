@@ -1,4 +1,9 @@
-"""Synthetic sequences for unit tests only (never logged as a figure or a result)."""
+"""Synthetic sequences for unit tests only (never logged as a figure or a result).
+
+Package imports stay inside the fixtures: pytest-beartype instruments metrictrail only if this file has not imported it.
+"""
+
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -6,15 +11,18 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from metrictrail.eval.protocols import TUM
-from metrictrail.eval.score import FrameTimes
-from metrictrail.eval.vslamlab_files import PoseTable
-from metrictrail.ground_truth import GtContext
+if TYPE_CHECKING:
+    from metrictrail.ground_truth import GtContext
 
 
 @pytest.fixture
-def tum_like_context(tmp_path_factory: pytest.TempPathFactory) -> tuple[GtContext, Float64[ndarray, "n 4 4"]]:
+def tum_like_context(tmp_path_factory: pytest.TempPathFactory) -> tuple["GtContext", Float64[ndarray, "n 4 4"]]:
     """A 30 Hz sequence with 100 Hz GT on the same path, and its true camera-to-world poses per frame."""
+    from metrictrail.eval.protocols import TUM
+    from metrictrail.eval.score import FrameTimes
+    from metrictrail.eval.vslamlab_files import PoseTable
+    from metrictrail.ground_truth import GtContext
+
     rng: np.random.Generator = np.random.default_rng(0)
     frame_ns: Int64[ndarray, "f"] = (1_305_031_100_000_000_000 + np.arange(60) * 33_333_333).astype(np.int64)
     gt_ns: Int64[ndarray, "g"] = (1_305_031_100_000_000_000 + np.arange(0, 2_100_000_000, 10_000_000)).astype(np.int64)

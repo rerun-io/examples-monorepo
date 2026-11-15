@@ -1,9 +1,13 @@
 """Shared test markers for lamptrack."""
 
+import os
 from pathlib import Path
 
 import pytest
 import torch
+
+# beartype runs under pytest only; code that cannot run under it (torch.compile, ONNX export) reads this and stays eager.
+os.environ.setdefault("PIXI_DEV_MODE", "1")
 
 PACKAGE_DIR: Path = Path(__file__).parents[1]
 CHECKPOINT_PATH: Path = PACKAGE_DIR / "data" / "checkpoints" / "lamp_smpl_aria_gen2.pt"

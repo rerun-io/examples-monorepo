@@ -6,8 +6,7 @@ DISPLAY, pass ``--rr-config.headless`` so the viewer spawn doesn't wedge logging
 
     python tools/apps/oak_live_rerun.py --source.codec h265 --rr-config.save out.rrd
 
-Lives in the package (not the ``tools/`` shim) so ``beartype_this_package()``
-type-checks ``main`` and the config when running under the dev environment.
+Lives in the package (not the ``tools/`` shim) so tests import and type-check ``main`` and the config.
 """
 
 from __future__ import annotations

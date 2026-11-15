@@ -264,11 +264,11 @@ def export_moge_v2_onnx(
     if onnx_path.exists():
         return onnx_path
 
-    # Beartype's dev import hook checks annotated locals inside the vendored
+    # Beartype's import hook (pytest only, PIXI_DEV_MODE=1) checks annotated locals inside the vendored
     # forward. Dynamic ONNX export represents the batch as torch.SymInt, which
     # correctly violates those eager-only ``int`` checks. Re-enter this exact
-    # export in a clean interpreter without dev instrumentation; the parent
-    # process keeps beartype active for every predictor call and test.
+    # export in a clean interpreter without beartype; the parent test
+    # process keeps beartype active for every predictor call.
     if os.environ.get("PIXI_DEV_MODE") == "1" and os.environ.get(_EXPORT_WORKER_ENV) != "1":
         worker_env: dict[str, str] = dict(os.environ)
         worker_env["PIXI_DEV_MODE"] = "0"

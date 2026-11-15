@@ -16,11 +16,11 @@ and completion is verified per-segment layer count, never by segment count
 alone.
 """
 
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from beartype.roar import BeartypeException
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rich.console import Console, Group
 from rich.live import Live
@@ -28,6 +28,9 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn
 
 from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
 from arkitscenes_download.schema import ALL_LAYER_NAMES, OPTIONAL_LAYER_NAMES, REQUIRED_LAYER_NAMES
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
 """gRPC URL of a locally-running ``rerun server`` catalog."""

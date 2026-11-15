@@ -14,6 +14,7 @@ Rerun recording; each viewer event appends to that recording through
 
 from __future__ import annotations
 
+import sys
 import time
 import uuid
 from collections.abc import Iterator
@@ -25,7 +26,6 @@ import gradio as gr
 import numpy as np
 import rerun as rr
 import tyro
-from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from gradio_rerun.events import Pause, Play, SelectionChange, TimeUpdate
 from jaxtyping import UInt8
@@ -57,6 +57,9 @@ from posekit.track_recording import (
     _viewer_time_s,
 )
 from posekit.track_ui_theme import APP_CSS, DESCRIPTION, FORCE_DARK_HEAD, VIEWER_HEIGHT
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 Mode: TypeAlias = Literal["+ Include", "− Exclude", "✕ Remove"]
 MODES: list[Mode] = ["+ Include", "− Exclude", "✕ Remove"]

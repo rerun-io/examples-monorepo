@@ -1,11 +1,13 @@
 """Skip-if-exists batch execution for per-segment layer generators."""
 
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from beartype.roar import BeartypeException
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 
 def segment_ids_from_selection(video_id: str | None, video_ids_file: Path | None) -> list[str]:

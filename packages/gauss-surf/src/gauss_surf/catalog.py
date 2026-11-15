@@ -1,5 +1,6 @@
 """Shared Rerun catalog connection, segment reads, and layer registration."""
 
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,13 +12,15 @@ import torch
 from arkitscenes_download.ingest.cells import component_instance as _single_instance  # noqa: F401  # re-exported
 from arkitscenes_download.ingest.paths import TIMELINE
 from arkitscenes_download.ingest.timestamps import TimedeltaNs, match_exact_timestamps, table_timestamps  # noqa: F401  # re-exported
-from beartype.roar import BeartypeException
 from datafusion import col
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection, OnDuplicateSegmentLayer, RegistrationOperation
 from simplecv.rerun_dataloader import SegmentNvdecDecoder
 from torch import Tensor
+
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51236"
 """Development catalog server URL for gauss-surf."""

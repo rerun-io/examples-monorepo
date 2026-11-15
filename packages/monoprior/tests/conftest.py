@@ -1,5 +1,6 @@
 """Shared test helpers for monoprior."""
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,9 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from monopriors.third_party.xlens.models.net import XLensNet
+
+# beartype runs under pytest only; code that cannot run under it (torch.compile, ONNX export) reads this and stays eager.
+os.environ.setdefault("PIXI_DEV_MODE", "1")
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 """Skip without a GPU; use for tests that load a checkpoint or build an engine."""

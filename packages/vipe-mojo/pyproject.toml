@@ -17,6 +17,10 @@ packages = ["vipe_mojo"]
 artifacts = ["vipe_mojo/_vipe_mojo.so"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks vipe_mojo only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["vipe_mojo"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 testpaths = ["tests"]
 markers = [
     "integration: needs a CUDA GPU (run: pixi run -e metrictrail-dev vipe-mojo-tests)",
