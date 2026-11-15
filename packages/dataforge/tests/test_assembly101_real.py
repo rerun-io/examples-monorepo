@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pytest
+from conftest import raw_asset, read_chunks
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.sensors.camera.brown_conrady import project_brown_conrady_diagonal
 from simplecv.sensors.camera.fisheye62 import project_kannala_brandt_diagonal
 
-from conftest import raw_asset, read_chunks
 from dataforge import schema
 from dataforge.datasets.assembly101 import Assembly101Config
 from dataforge.datasets.assembly101_calibration import camera_parameters

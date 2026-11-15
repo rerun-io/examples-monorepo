@@ -18,7 +18,7 @@ from dataforge.identity import SequenceIdentity
 from dataforge.timing import ConvertRecord, SequenceTimer, append_record
 from dataforge.writing import CONVERT_SCHEMA_VERSION
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 

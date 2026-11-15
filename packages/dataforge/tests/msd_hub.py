@@ -16,12 +16,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import calibration_fixture, png_frame
 from hub_fake import HubStore
 from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from conftest import calibration_fixture, png_frame
 from dataforge import transports
 from dataforge.datasets import msd
 from dataforge.datasets.msd import MSD_DEVICES, REPO_ID, MsdConfig, MsdDevice, MsdDeviceChoice

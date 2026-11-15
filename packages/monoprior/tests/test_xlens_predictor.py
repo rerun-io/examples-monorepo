@@ -6,11 +6,10 @@ import numpy as np
 import pytest
 import torch
 import tyro
+from conftest import build_random_xlens_model, random_rig
 from jaxtyping import Float32, Int64
 from numpy import ndarray
 from torch import Tensor, nn
-
-from conftest import build_random_xlens_model, random_rig
 
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
 

@@ -19,11 +19,11 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
+from conftest import column_rows, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64, UInt8, UInt16
 from numpy import ndarray
 from test_vslam_lab_source import EUROC_CALIBRATION, TUM_CALIBRATION  # pyrefly: ignore[missing-import]
 
-from conftest import column_rows, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
 from dataforge import paths, schema, writing
 from dataforge.datasets import dataset_defaults
 from dataforge.datasets.vslam_lab import (

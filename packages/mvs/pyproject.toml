@@ -28,6 +28,8 @@ min_confidence = 60
 ignore_names = ["rr_config", "video", "exc"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks mvs only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["mvs"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e mvs-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e mvs-dev tests-golden)",

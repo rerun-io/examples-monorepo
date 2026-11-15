@@ -17,6 +17,7 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 import rerun.chunk as rrc
+from conftest import calibration_fixture, column_rows, read_back, recording_properties
 from jaxtyping import Float64, Int64
 from msd_hub import (
     FIXTURE_WORLD_R_RIG,
@@ -31,7 +32,6 @@ from msd_hub import (
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from conftest import calibration_fixture, column_rows, read_back, recording_properties
 from dataforge import paths, schema
 from dataforge.basalt import BasaltPose, CalibratedCamera, load_calibration, rotate_camera_cw, upright_quarter_turns
 from dataforge.datasets.msd import MSD_DEVICES, MsdDataset, MsdDeviceChoice

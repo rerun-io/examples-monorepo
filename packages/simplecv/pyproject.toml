@@ -42,6 +42,8 @@ simplecv-view-exoego = "simplecv.apis.view_exoego:entrypoint"
 include = ["simplecv*", "tools*", "tests*"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks simplecv only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["simplecv"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e simplecv-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e simplecv-dev tests-golden)",

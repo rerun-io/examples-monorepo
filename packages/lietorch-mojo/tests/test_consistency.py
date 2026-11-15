@@ -8,9 +8,8 @@ residuals in ~29% of rows (CPU) where lietorch's CPU build cancels exactly.
 
 import pytest
 import torch
-from torch import Tensor
-
 from conftest import DEVICES, DTYPES, require_mojo_extension
+from torch import Tensor
 
 require_mojo_extension()
 

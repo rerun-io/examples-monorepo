@@ -29,7 +29,7 @@ from slam_evals.data.discovery import filter_sequences
 from slam_evals.data.types import Modality, Sequence
 from slam_evals.ingest import LayerName, applicable_layers, ingest_sequence
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 # Substring on the formatted exception that identifies a transient NVENC

@@ -33,6 +33,8 @@ sort_by_size = true
 min_confidence = 80
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks depth_video_viewer only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["depth_video_viewer"]
 testpaths = ["tests"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e depth-video-viewer-dev tests-integration)",

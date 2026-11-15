@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rerun as rr
-
 from conftest import read_chunks
+
 from dataforge import hands, meshes, objects, schema, writing
 from dataforge.logging_toolkit import time_column
 

@@ -23,7 +23,7 @@ from monopriors.models.relative_depth import (
 )
 from monopriors.rr_logging_utils import log_relative_pred
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 try:

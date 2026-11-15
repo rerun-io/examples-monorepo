@@ -7,9 +7,9 @@ import av
 import numpy as np
 import pyarrow as pa
 import pytest
+from conftest import raw_asset, read_chunks
 from simplecv.ops.mano.mano_np import MANOLayerNP
 
-from conftest import raw_asset, read_chunks
 from dataforge import paths, schema
 from dataforge.datasets.hocap import HocapConfig
 from dataforge.datasets.hocap_source import EGO_RIG, EXO_RIGS, SequenceData, read_labels, read_sequence

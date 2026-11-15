@@ -17,7 +17,7 @@ from torch import Tensor
 
 from trtkit.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 _ORT_TO_TORCH_DTYPE: dict[str, torch.dtype] = {

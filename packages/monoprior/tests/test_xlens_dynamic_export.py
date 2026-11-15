@@ -13,11 +13,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from conftest import build_random_xlens_model, random_rig
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from conftest import build_random_xlens_model, random_rig
 from monopriors.models.rig_depth.xlens import RigTensors, normalize_framesets, rig_tensors
 from monopriors.models.rig_depth.xlens_trt import ENGINE_OUTPUT_NAMES, EngineGeometry, engine_geometry
 from monopriors.third_party.xlens.models.dinov2.vision_transformer import FrozenRigGeometry
@@ -66,7 +66,6 @@ def test_one_dynamic_graph_matches_eager_at_unseen_shapes(tmp_path: Path) -> Non
         [sys.executable, "-c", f"import test_xlens_dynamic_export as m; from pathlib import Path; m.export_random_dynamic(Path({str(onnx_path)!r}))"],
         check=True,
         env=env,
-        cwd=Path(__file__).parent,  # `-c` puts the cwd first on sys.path: `conftest` must be tests/conftest.py, not the package-root one
     )
     session = onnxruntime.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     input_dims: dict[str, list[object]] = {node.name: [dim if isinstance(dim, int) else str(dim) for dim in node.shape] for node in session.get_inputs()}

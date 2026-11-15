@@ -33,7 +33,7 @@ from mast3r_slam.config import SLAM_PRESETS, SlamConfig, SlamPresetName
 from mast3r_slam.mast3r_utils import prepare_trt_engines
 from mast3r_slam.rerun_log_utils import LOG_PATH
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 EXAMPLE_VIDEOS: list[str] = [

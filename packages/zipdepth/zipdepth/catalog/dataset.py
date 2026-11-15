@@ -41,7 +41,7 @@ from zipdepth.catalog.stats import CatalogDatasetStats, total
 from zipdepth.catalog.threaded import iter_threaded
 from zipdepth.catalog.ultrawide import ULTRAWIDE_LAYER, CameraSelection, interleave, subsample_indices
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 PROMPTDA_BLOB_COLUMN: str = f"/{DEPTH_PROMPTDA}:EncodedDepthImage:blob"

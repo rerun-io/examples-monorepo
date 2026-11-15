@@ -1,8 +1,8 @@
 import numpy as np
+from conftest import observe_points, ring_rig
 from jaxtyping import Float64
 from numpy import ndarray
 
-from conftest import observe_points, ring_rig
 from exo_calib.correspondences import ObservationSet
 from exo_calib.triangulation import RobustTriangulationResult, triangulate_points, triangulate_robust
 

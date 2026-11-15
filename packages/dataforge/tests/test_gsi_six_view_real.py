@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 import rerun.chunk as rrc
-
 from conftest import read_back, read_chunks, recording_properties
+
 from dataforge import schema
 from dataforge.datasets.gsi_six_view import GsiSixViewConfig
 

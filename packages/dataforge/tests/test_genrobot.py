@@ -8,10 +8,10 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import simplecv
+from conftest import raw_asset
 from jaxtyping import Bool, Float32, Float64, Int64
 from numpy import ndarray
 
-from conftest import raw_asset
 from dataforge.das_ego import pose as das_ego_pose
 from dataforge.das_ego.pose import (
     PoseTrack,

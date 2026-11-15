@@ -19,7 +19,7 @@ from rerun.catalog import CatalogClient, DatasetEntry, DatasetView, OnDuplicateS
 from simplecv.rerun_dataloader import SegmentNvdecDecoder
 from torch import Tensor
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51236"

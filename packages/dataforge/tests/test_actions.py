@@ -3,8 +3,8 @@
 from pathlib import Path
 
 import pytest
-
 from conftest import read_chunks
+
 from dataforge import schema, writing
 from dataforge.actions import Segment, active_labels, active_states, log_action_states, log_actions
 

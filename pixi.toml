@@ -217,8 +217,9 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.dev.dependencies]
 ruff = "*"
-pytest = ">=8.0.0,<9"
-beartype = ">=0.22.9"
+pytest = ">=9.1"
+beartype = ">=0.23"
+pytest-beartype = ">=0.3.0"
 pyrefly = ">=1.1.0"
 hypothesis = "*"
 vulture = "*"
@@ -270,7 +271,7 @@ platforms = ["linux-64"]
 [feature.ci.dependencies]
 python = "3.12.*"
 ruff = "*"
-pytest = ">=8.0.0,<9"
+pytest = ">=9.1"
 
 [feature.ci.tasks]
 ci-lint = { cmd = "ruff check .", cwd = "." }

@@ -71,7 +71,7 @@ from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_imu, log_rig_node, log_video_stream
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 GYRO_SCALE: float = 0.000266316

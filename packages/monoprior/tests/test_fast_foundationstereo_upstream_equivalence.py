@@ -10,11 +10,11 @@ from typing import Any, cast
 
 import pytest
 import torch
+from conftest import requires_cuda
 from jaxtyping import Float32
 from omegaconf import DictConfig, OmegaConf
 from torch import Tensor, nn
 
-from conftest import requires_cuda
 from monopriors.models.stereo_depth.fast_foundationstereo import download_fast_foundationstereo_checkpoint
 from monopriors.third_party.fast_foundationstereo import extractor as owned_extractor
 from monopriors.third_party.fast_foundationstereo import foundation_stereo as owned_foundation_stereo

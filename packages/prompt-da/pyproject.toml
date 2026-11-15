@@ -39,6 +39,8 @@ min_confidence = 60
 ignore_names = ["rr_config", "_engine", "_sample_index", "cameras_path", "forward", "video", "depth", "conf", "k", "pose_t", "pose_q", "run"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks rerun_prompt_da only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["rerun_prompt_da"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e prompt-da-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e prompt-da-dev tests-golden)",

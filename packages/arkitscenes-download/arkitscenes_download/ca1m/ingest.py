@@ -22,7 +22,7 @@ from arkitscenes_download.ingest.paths import CAM_WIDE, GT, GT_DEPTH, GT_PINHOLE
 from arkitscenes_download.ingest.recording import atomic_recording
 from arkitscenes_download.schema import GT_DEPTH_LAYER, GT_POSES_LAYER
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 DEFAULT_DATASET_ROOT: Path = Path("/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22")

@@ -97,7 +97,7 @@ from handtrack.labels.perspective import (
 from handtrack.labels.validity import HandLabel, classify_visibility
 from handtrack.train.source import DetNetValidation, KeyNetValidation
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 NetChoice: TypeAlias = Literal["detnet", "keynet", "both"]

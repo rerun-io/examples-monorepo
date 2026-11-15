@@ -14,10 +14,10 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
+from conftest import assert_readers_match_projectaria, raw_asset, read_chunks
 from scipy.spatial.transform import Rotation
 from simplecv.umetrack_temp.generic_hand_model_numpy import skin_mesh, wrist_for_hand
 
-from conftest import assert_readers_match_projectaria, raw_asset, read_chunks
 from dataforge import aria, paths, schema, writing
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
 from dataforge.datasets.hot3d_hands import evaluate_hands, millimetre_wrists

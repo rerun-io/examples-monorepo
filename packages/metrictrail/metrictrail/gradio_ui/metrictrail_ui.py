@@ -50,7 +50,7 @@ from metrictrail.examples import DATA_DIR, example_videos
 from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS
 from metrictrail.outputs import RunMetrics
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 APPLICATION_ID: str = "metrictrail"

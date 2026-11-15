@@ -8,9 +8,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import FIXTURES, raw_asset, read_chunks, vrs_file
 from test_egoexo4d_download import entry, release
 
-from conftest import FIXTURES, raw_asset, read_chunks, vrs_file
 from dataforge import aria, paths, schema
 from dataforge.datasets.egoexo4d import Egoexo4dConfig, Egoexo4dDataset
 from dataforge.datasets.egoexo4d_body import HM_FILE, SMPLH_FILE, SMPLX_FILE

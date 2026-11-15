@@ -16,10 +16,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import raw_asset
 from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
-from conftest import raw_asset
 from dataforge import paths
 from dataforge.datasets.harmony4d_layers import exo_camera, exo_scale
 from dataforge.datasets.harmony4d_source import ARIA_MODES, Sequence, ZipSequenceFiles, load_pickle, read_sequence, sequences_in

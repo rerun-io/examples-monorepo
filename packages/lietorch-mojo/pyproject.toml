@@ -19,6 +19,8 @@ namespaces = false
 lietorch_mojo = ["*.so", "mojo/*.mojo"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks lietorch_mojo only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["lietorch_mojo"]
 markers = [
     "integration: needs a GPU or the compiled upstream lietorch (parity reference)",
     "golden: reference comparison against stored ground truth",

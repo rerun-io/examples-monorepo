@@ -18,7 +18,7 @@ from torch import Tensor
 
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, preprocess_batch
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 ARKITSCENES_DATASET = "arkitscenes"

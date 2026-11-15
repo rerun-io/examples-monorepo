@@ -11,10 +11,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from aria_published import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64
 from numpy import ndarray
 
-from conftest import PublishedCamera, read_calibration_json  # pyrefly: ignore[missing-import]
 from dataforge.datasets import lamaria_source
 
 pytestmark = pytest.mark.golden

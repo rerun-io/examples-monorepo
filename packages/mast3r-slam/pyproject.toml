@@ -28,6 +28,8 @@ include = ["mast3r_slam", "mast3r_slam.*"]
 namespaces = false
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks mast3r_slam only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["mast3r_slam"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e mast3r-slam-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e mast3r-slam-dev tests-golden)",

@@ -9,9 +9,9 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from conftest import integration, requires_cuda
 from huggingface_hub import snapshot_download
 
-from conftest import integration, requires_cuda
 from monopriors.apis.rig_depth import ETH3DRigPair, eth3d_rig_metrics, load_eth3d_rig_pair
 from monopriors.models.rig_depth import RigDepthPrediction, XLensPredictor
 from monopriors.models.rig_depth.xlens import download_xlens_checkpoint

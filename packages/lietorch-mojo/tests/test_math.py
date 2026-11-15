@@ -18,9 +18,8 @@ from types import ModuleType
 
 import pytest
 import torch
-from torch import Tensor
-
 from conftest import DEVICES, DTYPES
+from torch import Tensor
 
 PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
 MOJO_DIR: Path = PACKAGE_DIR / "lietorch_mojo" / "mojo"

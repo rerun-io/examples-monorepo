@@ -31,7 +31,7 @@ from torch import Tensor
 from monopriors.models.rig_depth import BaseRigDepthPredictor, RigDepthPrediction, XLensPredictor, XLensTrtPredictor, camera_type, unit_rays
 from monopriors.models.rig_depth.xlens_trt import XLENS_CACHE_DIR, EngineProfile
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 Mode: TypeAlias = Literal["eager-bf16", "eager-frozen-bf16", "trt-rig-static", "trt-rig", "trt-dynamic"]

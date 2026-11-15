@@ -260,4 +260,4 @@ Pose orientation/centering is provided by `simplecv.camera_orient_utils.auto_ori
 
 ## Runtime type checking
 
-The package-root `conftest.py` installs the beartype claw (`beartype_package("monopriors")`) while pytest runs, enabling runtime shape/dtype enforcement on every jaxtyping-annotated function and dataclass in the package. Outside pytest beartype is never imported, so there is zero overhead.
+pytest-beartype (`beartype_packages = ["monopriors"]` in `pyproject.toml`) installs the beartype claw while pytest runs, enabling runtime shape/dtype enforcement on every jaxtyping-annotated function and dataclass in the package. Outside pytest beartype is never imported, so there is zero overhead.

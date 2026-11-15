@@ -12,7 +12,7 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from selfcap_curate.preview import PreviewOptions, PreviewResult, RigChoice, build_segment_preview
 from selfcap_curate.records import episode_keys
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 

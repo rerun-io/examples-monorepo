@@ -58,7 +58,7 @@ from posekit.track_recording import (
 )
 from posekit.track_ui_theme import APP_CSS, DESCRIPTION, FORCE_DARK_HEAD, VIEWER_HEIGHT
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 Mode: TypeAlias = Literal["+ Include", "− Exclude", "✕ Remove"]

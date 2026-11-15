@@ -69,6 +69,8 @@ ignore_names = [
 ]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks arkitscenes_download only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["arkitscenes_download"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e arkitscenes-download-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e arkitscenes-download-dev tests-golden)",

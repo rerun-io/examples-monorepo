@@ -62,7 +62,7 @@ from .net import VONet
 from .patchgraph import PatchGraph
 from .utils import DEFAULT_DEVICE, Timer, flatmeshgrid
 
-# Beartype runs only under pytest (the package conftest imports it); its violations must escape broad handlers then.
+# Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 

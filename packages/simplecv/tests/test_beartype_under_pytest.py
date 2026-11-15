@@ -1,4 +1,4 @@
-"""Beartype checks simplecv while pytest runs (the package conftest installs the claw)."""
+"""Beartype checks simplecv while pytest runs (pytest-beartype, `beartype_packages` in pyproject.toml)."""
 
 import numpy as np
 import pytest

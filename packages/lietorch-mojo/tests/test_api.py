@@ -5,9 +5,8 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 import torch
-from torch import Tensor
-
 from conftest import require_mojo_extension
+from torch import Tensor
 
 require_mojo_extension()
 

@@ -16,7 +16,7 @@ def _is_rgb_normalized(rgb: ndarray) -> bool:
 
 
 def _range_check() -> object:
-    """beartype's [0, 1] range validator under pytest (only the package conftest imports beartype), else a plain note."""
+    """beartype's [0, 1] range validator under pytest (only pytest-beartype imports beartype.claw), else a plain note."""
     if "beartype.claw" not in sys.modules:
         return "values in [0, 1]"
     from beartype.vale import Is

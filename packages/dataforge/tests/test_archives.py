@@ -14,8 +14,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
 from conftest import png_frame
+
 from dataforge.archives import group_archives, open_member_reader
 
 TOP: str = "capture-01"

@@ -8,7 +8,7 @@ A **Pixi workspace monorepo** of computer vision projects. Runnable Python proje
 
 ## Environments
 
-Each root-managed runnable package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes `lint`, `typecheck`, `deadcode`, `tests`, `tests-integration`, `tests-golden`, and `gate` (e.g. `pixi run -e <name>-dev tests`). In package directories that contain a `.envrc`, direnv auto-activates the `*-dev` env when you enter the directory.
+Each root-managed runnable package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype + pytest-beartype, pyrefly, hypothesis, vulture). The dev env exposes `lint`, `typecheck`, `deadcode`, `tests`, `tests-integration`, `tests-golden`, and `gate` (e.g. `pixi run -e <name>-dev tests`). In package directories that contain a `.envrc`, direnv auto-activates the `*-dev` env when you enter the directory.
 
 The prod env is for long runs: corpus conversions, registrations, full-length captures and training. Beartype runs only under pytest (see **Beartype**): outside pytest, the dev env and the prod env never import it and run code at full speed. Never time or benchmark under beartype.
 
@@ -125,26 +125,30 @@ Two rules learned the hard way:
 
 ## Architecture
 
-**Beartype** runs only while pytest runs. Each runnable package has a root `conftest.py` that installs the
-claw before any test module imports the package (pytest loads it before `tests/conftest.py`):
-```python
-import os
-
-from beartype.claw import beartype_package
-
-os.environ["PIXI_DEV_MODE"] = "1"  # read by code that cannot run under beartype (torch.compile, ONNX export)
-beartype_package("<module>")
+**Beartype** runs only while pytest runs, through the [pytest-beartype](https://github.com/beartype/pytest-beartype)
+plugin (the beartype FAQ's answer to "type-check only while running my test suite"). Each runnable package names its
+module in `pyproject.toml`:
+```toml
+[tool.pytest.ini_options]
+beartype_packages = ["<module>"]
 ```
+The plugin installs `beartype.claw` in `pytest_configure`, which runs *after* `tests/conftest.py` loads. A module a
+conftest has already imported stays unchecked (beartype's hooks "silently reduce to a noop"), so **`tests/conftest.py`
+never imports a workspace package at module level**: import inside the fixture or helper, types under
+`if TYPE_CHECKING:` (`ci/tests` checks this, following conftest's sibling helper modules).
+
 Never import beartype in package code: no claw in `__init__.py`, no decorators. Apps, CLIs, demos and benchmarks
 run without it in every env. A broad `except Exception` that must let a test-time violation through uses the
 lookup below, which never imports beartype (an empty tuple unless beartype is loaded; pyserde loads it for its own checks):
 ```python
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 ```
-`PIXI_DEV_MODE=1` now means "beartype is on in this process"; only the package `conftest.py` sets it.
+`PIXI_DEV_MODE=1` means "beartype is on in this process": code that cannot run under it (`torch.compile`, ONNX
+export) reads it and stays eager. Only the `tests/conftest.py` of packages that reach such code (monoprior, posekit,
+zipdepth, handtrack, slam-rs and their dependents) sets it, with `os.environ.setdefault`.
 
 **`tools/` scripts must be thin shims** — the Tyro `Config` dataclass and `main()` belong in the
-package (e.g. `<module>/apis/<name>.py`) so tests can import them and the claw checks them; the
+package (e.g. `<module>/apis/<name>.py`) so tests can import them and beartype checks them; the
 `tools/` script just wires them up.
 ```python
 # tools/apps/<name>.py  — keep it to a few lines
@@ -164,8 +168,7 @@ packages/<name>/
     apis/           # High-level interfaces + Tyro Config/main (beartype-checked under pytest)
     gradio_ui/      # Gradio components (if applicable)
   tools/            # THIN CLI shims over <module>/apis/ (demos/ and apps/ subdirs)
-  tests/
-  conftest.py       # Beartype claw, pytest only
+  tests/            # conftest.py: no module-level workspace imports
 ```
 
 ### kornia-staging

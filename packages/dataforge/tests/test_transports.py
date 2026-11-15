@@ -3,9 +3,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import serve, zip_bytes  # pyrefly: ignore[missing-import]
 from hub_fake import HubStore
 
-from conftest import serve, zip_bytes  # pyrefly: ignore[missing-import]
 from dataforge import transports
 from dataforge.transports import (
     FetchReport,

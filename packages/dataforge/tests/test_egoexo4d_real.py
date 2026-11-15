@@ -13,9 +13,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+from conftest import raw_asset, read_chunks
 from simplecv.sensors.camera.fisheye62 import project_fisheye62
 
-from conftest import raw_asset, read_chunks
 from dataforge import paths, schema
 from dataforge.datasets.egoexo4d_download import fit_path
 from dataforge.datasets.egoexo4d_layers import SIDECAR, read_sidecar

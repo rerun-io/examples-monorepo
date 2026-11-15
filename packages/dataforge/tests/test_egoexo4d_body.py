@@ -6,10 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import FIXTURES, column_rows, raw_asset, read_back, read_chunks
 from jaxtyping import Float32, Int64
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
 
-from conftest import FIXTURES, column_rows, raw_asset, read_back, read_chunks
 from dataforge import paths, schema, writing
 from dataforge.datasets.egoexo4d_body import (
     SMPLH_FILE,

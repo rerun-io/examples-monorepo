@@ -16,6 +16,8 @@ select = ["E", "F", "UP", "B", "SIM", "I"]
 ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks selfcap_soma only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["selfcap_soma"]
 markers = ["integration: requires model assets, CUDA or catalog", "golden: stored reference comparisons"]
 addopts = "-m 'not integration and not golden'"
 

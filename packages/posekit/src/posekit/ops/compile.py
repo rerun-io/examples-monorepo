@@ -10,7 +10,7 @@ import torch
 def compile_unless_dev[CompiledCallable: Callable[..., Any]](function: CompiledCallable) -> CompiledCallable:
     """Compile ``function`` as one dynamic-shape graph, except under ``PIXI_DEV_MODE=1`` or ``POSEKIT_COMPILE=0``.
 
-    Under pytest (the package conftest sets ``PIXI_DEV_MODE=1``) the eager function stays so that beartype
+    Under pytest (``tests/conftest.py`` sets ``PIXI_DEV_MODE=1``) the eager function stays so that beartype
     checks every call and annotated local; every other run, dev env included, runs the same math fused.
     ``POSEKIT_COMPILE=0`` keeps it eager in production too, for a host whose processes are short-lived:
     each new process traces for seconds on its first call (EgoHand fast: 6-13 s, for about 5 % more frames a second).

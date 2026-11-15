@@ -17,6 +17,8 @@ packages = ["hexels_mojo"]
 artifacts = ["hexels_mojo/_hexels_mojo.so"]
 
 [tool.pytest.ini_options]
+# pytest-beartype: beartype checks hexels_mojo only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["hexels_mojo"]
 testpaths = ["tests"]
 markers = [
     "integration: needs a CUDA GPU (run: pixi run -e hexels-dev hexels-mojo-tests)",

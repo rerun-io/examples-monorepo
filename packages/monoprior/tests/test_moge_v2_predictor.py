@@ -9,10 +9,10 @@ import cv2
 import numpy as np
 import pytest
 import torch
+from conftest import integration, requires_cuda, synthetic_rgb_batch
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 
-from conftest import integration, requires_cuda, synthetic_rgb_batch
 from monopriors.models.moge_v2 import Encoder, MoGeV2GeometryOutput
 
 
