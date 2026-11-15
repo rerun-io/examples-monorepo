@@ -185,6 +185,11 @@ class RigPoseConfig:
     ransac_min_trials: int = 100
     """Trials RANSAC runs before its confidence test may stop it; COLMAP's own
     `TwoViewGeometryOptions` value."""
+    ransac_random_seed: int = -1
+    """RANSAC seed for both generalized estimators; -1 (COLMAP's default) draws a fresh one per call.
+
+    Pinned only where two runs must agree exactly (tests): COLMAP main's generalized samplers (#4780, #4690) made unseeded
+    repeats of the same search differ by a few loop edges."""
     min_inliers: int = 30
     """Fewest correspondences a solved pose may rest on, and the loop stage's own
     acceptance floor.
@@ -302,6 +307,7 @@ def _ransac_options(config: RigPoseConfig) -> pycolmap.RANSACOptions:
     options.confidence = config.ransac_confidence
     options.min_num_trials = config.ransac_min_trials
     options.max_num_trials = config.ransac_max_trials
+    options.random_seed = config.ransac_random_seed
     return options
 
 

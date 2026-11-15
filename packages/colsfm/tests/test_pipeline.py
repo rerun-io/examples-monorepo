@@ -457,15 +457,15 @@ def test_a_stage_that_returns_records_its_timing_and_says_it_finished(tmp_path: 
 def test_the_default_run_is_the_fast_full_pipeline() -> None:
     """`python -m colsfm run` with no other flag asks for the configuration of record.
 
-    RaCo-ALIKED, LightGlue+, CASPAR with its Ceres polish, the regularised extrinsic
-    refinement and loop closure — NOTES.md decision 17, 2026-09-06. The defaults are
+    RaCo-ALIKED, FlexGlue (since 2026-11-15; LightGlue+ before), CASPAR with its Ceres polish,
+    the regularised extrinsic refinement and loop closure — NOTES.md decision 17, 2026-09-06. The defaults are
     pinned here because they are a *product* decision: a machine without the RaCo
     graphs or without a CASPAR build must be told so, not quietly given another
     pipeline, and this test is what a change of mind has to walk past.
     """
     default: PipelineOptions = PipelineOptions(input_dir=Path("in"), output_dir=Path("out"))
     assert default.features_backend == "raco"
-    assert default.matching_backend == "raco"
+    assert default.matching_backend == "flexglue"
     assert default.ba_backend == "caspar"
     assert default.caspar_ceres_polish is True
     assert default.optimize_extrinsics is True
@@ -535,11 +535,11 @@ def test_the_unregularised_refinement_is_the_one_that_takes_caspar_off_the_gpu(
 
 
 @pytest.mark.skipif(
-    any(not path.is_file() for path in required_raco_graphs("raco", "raco")),
-    reason="the RaCo ONNX graphs are missing; `pixi run -e colsfm colsfm-raco-export` builds them",
+    any(not path.is_file() for path in required_raco_graphs("raco", "flexglue")),
+    reason="the RaCo or FlexGlue graphs are missing; `colsfm-raco-export` and `colsfm-download-flexglue` provide them",
 )
-def test_the_default_resolves_to_the_raco_backends(galileo_input_dir: Path, tmp_path: Path) -> None:
-    """Both ONNX stages get RaCo when nothing on the command line says otherwise.
+def test_the_default_resolves_to_raco_features_and_flexglue_matching(galileo_input_dir: Path, tmp_path: Path) -> None:
+    """RaCo extraction and FlexGlue matching when nothing on the command line says otherwise.
 
     Separate from the plan assertion above, and skipped rather than failed where the
     graphs are absent, because `resolve_run` refuses a `raco` run it cannot perform —
@@ -548,7 +548,7 @@ def test_the_default_resolves_to_the_raco_backends(galileo_input_dir: Path, tmp_
     """
     resolved: ResolvedRun = resolve_run(PipelineOptions(input_dir=galileo_input_dir, output_dir=tmp_path / "cusfm"))
     assert resolved.features.backend == "raco"
-    assert resolved.matching_backend == "raco"
+    assert resolved.matching_backend == "flexglue"
 
 
 def test_the_raco_default_needs_two_graphs_and_the_ablation_needs_none() -> None:

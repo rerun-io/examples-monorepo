@@ -51,7 +51,7 @@ from colsfm.loop_closure import (
     session_duration_seconds,
     verify_loop_plan,
 )
-from colsfm.loop_pose import Keypoints, RigPoseConfig
+from colsfm.loop_pose import DEFAULT_RIG_POSE_CONFIG, Keypoints, RigPoseConfig
 from colsfm.matching import MatchingOptions
 from colsfm.pose_graph import PoseGraphEdge, RigNode, gate_loop_edges, sequential_edges, solve_pose_graph
 from colsfm.retrieval import (
@@ -369,6 +369,10 @@ def make_match_function(scene: SquareRigScene, outlier_ratio: float = 0.25, seed
     return matcher_from_point_indices(scene.point_index_by_keypoint, outlier_ratio, seed)
 
 
+SEEDED_SERIAL_CONFIG: LoopClosureConfig = LoopClosureConfig(num_threads=1, rig_pose=replace(DEFAULT_RIG_POSE_CONFIG, ransac_random_seed=0))
+"""One thread and a pinned RANSAC seed: two searches over the same input must return the same edges."""
+
+
 @pytest.fixture(scope="module")
 def scene(tmp_path_factory: pytest.TempPathFactory) -> SquareRigScene:
     """The synthetic square-walking rig, built once for the module."""
@@ -580,7 +584,7 @@ def clean_match_fn(scene: SquareRigScene) -> MatchFunction:
 @pytest.fixture(scope="module")
 def serial_result(scene: SquareRigScene, clean_match_fn: MatchFunction) -> LoopClosureResult:
     """The reference run: one worker thread, the outlier-free matcher."""
-    return find_loop_edges(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(num_threads=1), clean_match_fn)
+    return find_loop_edges(scene.frames_meta, scene.database_path, scene.index, SEEDED_SERIAL_CONFIG, clean_match_fn)
 
 
 def _poses_by_rig_pair(result: LoopClosureResult) -> dict[tuple[int, int], pycolmap.Rigid3d]:
@@ -604,15 +608,13 @@ def test_the_thread_count_does_not_reach_the_result(scene: SquareRigScene, clean
     checked here — the poses on every shared rig pair agree to a millimetre against edges a
     metre long, and both runs' candidates come back in `(source rig, rig pair)` order.
 
-    What is *not* checked is bit equality: both generalized estimators are RANSAC and
-    pycolmap's `set_random_seed` does not reach them, so two runs of identical code pick
-    slightly different support sets — measured on this scene, that moves a pose by about
-    0.1 mm and flips roughly one edge in ten across the inlier gate, whether the second run
-    is threaded or serial.
+    Both runs pin the RANSAC seed (`RigPoseConfig.ransac_random_seed`): unseeded, COLMAP main's
+    generalized samplers flip up to three of eight edges across the inlier gate between two runs
+    of identical code, threaded or serial, which would hide a threading bug in noise.
     """
     assert LoopClosureConfig().num_threads >= 1
     threaded: LoopClosureResult = find_loop_edges(
-        scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(num_threads=8), clean_match_fn
+        scene.frames_meta, scene.database_path, scene.index, replace(SEEDED_SERIAL_CONFIG, num_threads=8), clean_match_fn
     )
     assert threaded.diagnostics.counters.after_deduplication == serial_result.diagnostics.counters.after_deduplication
     for result in (serial_result, threaded):
@@ -649,7 +651,7 @@ def test_reading_the_keypoints_once_and_passing_them_in_replaces_the_database_re
     assert len(keypoints) == len(scene.index.image_ids)
     absent: Path = Path("no/such/database.db")
     reused: LoopClosureResult = find_loop_edges(
-        scene.frames_meta, absent, scene.index, LoopClosureConfig(num_threads=1), clean_match_fn, keypoints=keypoints
+        scene.frames_meta, absent, scene.index, SEEDED_SERIAL_CONFIG, clean_match_fn, keypoints=keypoints
     )
     assert reused.diagnostics.counters.after_deduplication == serial_result.diagnostics.counters.after_deduplication
     shared: set[tuple[int, int]] = set(_poses_by_rig_pair(reused)) & set(_poses_by_rig_pair(serial_result))
