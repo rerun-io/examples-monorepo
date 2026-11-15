@@ -1,4 +1,4 @@
-"""The run core: view layouts and the observers attached to upstream (patch 0002's step hook)."""
+"""The run core: view layouts and the observers attached to upstream (the STEP_HOOKS seam of recipes/4danyone-src)."""
 
 import logging
 from dataclasses import dataclass

@@ -1,6 +1,6 @@
 """Denoising previews: each step's x_0 estimate of every view, decoded cheaply by TAEW2.2.
 
-Upstream's step hook (recipes/4danyone-src patch 0002) hands over each group's clean-latent estimate; the full Wan 2.2
+The STEP_HOOKS seam of recipes/4danyone-src hands over each group's clean-latent estimate; the full Wan 2.2
 VAE would take seconds per view, the TAEW2.2 tiny decoder takes milliseconds for one latent frame.
 """
 

@@ -4087,6 +4087,8 @@ gvhmr-src = { path = "recipes/gvhmr-src" }
 sageattention-src = { path = "recipes/sageattention-src" }
 # TAEW2.2's decoder for the per-step denoising previews (the weights: _download-fdanyone-models).
 taehv-src = { path = "recipes/taehv-src" }
+# FP8 W8A8 of the DiT's interior projections (4danyone-src, INFERENCE.dit_fp8_w8a8); the 5090 port's pin.
+torchao = "0.17.*"
 tyro = ">=0.9.1,<0.10"
 # What upstream fdanyone and GVHMR's static-camera path import (upstream requirements.txt + GVHMR's hmr4d).
 colorlog = ">=6,<7"

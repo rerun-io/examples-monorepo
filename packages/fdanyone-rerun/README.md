@@ -5,7 +5,7 @@ of a person into synchronized videos of that person from many new cameras, for d
 recovers the SMPL-X motion; 4DAnyone-Turbo (Wan 2.2 5B with the Turbo-LoRA, four denoising steps) generates the views,
 six at a time. This package runs it and shows the run in Rerun.
 
-- Upstream source: `recipes/4danyone-src` (ant-research/4DAnyone `6dcf626`, import name `fdanyone`), with GVHMR from
+- Upstream source: `recipes/4danyone-src` (ant-research/4DAnyone `6dcf626` plus the speed levers on the 4DAnyone-5090 fork branch `upstream-fast`, import name `fdanyone`), with GVHMR from
   `recipes/gvhmr-src` and SageAttention's CUDA kernels from `recipes/sageattention-src`.
 - Our code: the run core with its observers (`fdanyone_rerun.core`), the typed run-directory readers (`outputs`), the
   Rerun recording and layout (`rerun_log`), the tyro CLIs (`apis/`) and the tasks in the root `pixi.toml`.

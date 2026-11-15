@@ -1,26 +1,30 @@
-# Ant Research 4DAnyone (ant-research/4DAnyone) inference source at main 6dcf626 (2026-10-14), installed under its
-# upstream import name `fdanyone` (with its vendored DiffSynth Wan 2.2 and pytorch3d_compat). Pure Python.
+# Ant Research 4DAnyone, built from the upstream-fast branch of pablovela5620/4DAnyone-5090: upstream main 6dcf626
+# (ant-research/4DAnyone, 2026-10-14) plus the speed levers of the 4DAnyone-5090 port and the canonical Space,
+# one commit each, and two seams. Installed under its upstream import name `fdanyone` (with its vendored DiffSynth
+# Wan 2.2 and pytorch3d_compat). Pure Python; no patches.
 #
-# packages/fdanyone-rerun owns everything we add: the tyro CLIs, the Rerun recording and layouts, the Gradio app,
-# the asset tasks. Upstream's GUI (`fdanyone/space`) and nerfstudio export ship unused.
+# On top of 6dcf626 (git log 6dcf626..19a43fd):
+#   seams: validate_gvhmr reads a packaged tree's REVISION; fdanyone.model.denoise.STEP_HOOKS (x_0 previews);
+#          FDANYONE_INLINE_WORKERS=1 runs the motion/skeleton workers in-process (ZeroGPU)
+#   levers: ultrafast lossless working clip + 2-frame spot-check verifies; skeleton/source crop + bicubic resize in
+#           GPU batches; veryfast x264 for the intermediate skeleton videos; publish overlaps x264 with the next GPU
+#           decode; TAEW2.2 target decode (INFERENCE.target_decoder, "wan" keeps the full VAE); FP8 W8A8 + regional
+#           compile available but off (INFERENCE.dit_fp8_w8a8 / dit_regional_compile: out of memory with six-view groups
+#           on 32 GB, ~690 s cold compile).
+# packages/fdanyone-rerun owns the CLIs, the Rerun recording and layouts and the Gradio app.
+#
+# The source repository is private: fetching it needs the personal GitHub key (the default SSH key on our hosts).
 package:
   name: 4danyone-src
-  version: "0.1.0.6dcf626"
+  version: "0.1.0.19a43fd"
 
 source:
-  url: https://github.com/ant-research/4DAnyone/archive/6dcf626d74bd95c42792f86b1d55e3841075c10c.tar.gz
-  sha256: 22fc1abc652e9c198a5a7e791e7b438602d996e8a81fddb422f138db788b8ca2
-  patches:
-    # Packaging fix: validate_gvhmr reads the commit from <root>/REVISION when the GVHMR tree is not a git checkout
-    # (recipes/gvhmr-src installs a tree, not a clone).
-    - patches/0001-gvhmr-revision-file.patch
-    # Hook only: denoise_group runs fdanyone.model.denoise.STEP_HOOKS with the step's x_0 estimate and the group's
-    # target view indices, which the single-GPU target loop now passes. packages/fdanyone-rerun decodes previews there.
-    - patches/0002-denoise-step-hook.patch
+  git: ssh://git@github.com/pablovela5620/4DAnyone-5090.git
+  rev: 19a43fdd44508ae54556ad772a4f453c3c4e10b5
 
 build:
-  # Bump with every patch or script change: the build string hash does not follow the recipe content.
-  number: 0
+  # Bump with every source or script change: the build string hash does not follow the recipe content.
+  number: 2
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target or cp nests a second copy.
@@ -28,14 +32,14 @@ build:
     - mkdir -p "$SP_DIR"
     - cp -r fdanyone "$SP_DIR/fdanyone"
     - find "$SP_DIR/fdanyone" -name __pycache__ -prune -exec rm -rf {} +
-    - test -f "$SP_DIR/fdanyone/model/denoise.py"
     - grep -q STEP_HOOKS "$SP_DIR/fdanyone/model/denoise.py"
+    - grep -q target_decoder "$SP_DIR/fdanyone/config.py"
 
 requirements:
   host:
     - python >=3.11
   # Run deps follow the mast3r/asmk convention: python only. Import-time needs (torch, torchvision, numpy, av,
-  # einops, safetensors, transformers, huggingface_hub, hydra, ...) come from the consuming feature
+  # einops, safetensors, transformers, huggingface_hub, hydra, taehv, torchao, ...) come from the consuming feature
   # ([feature.fdanyone-rerun]), with GVHMR from the sibling recipe gvhmr-src.
   run:
     - python >=3.11
@@ -44,4 +48,4 @@ about:
   homepage: https://github.com/ant-research/4DAnyone
   license: Apache-2.0
   license_file: LICENSE
-  summary: 4DAnyone inference source (6dcf626) as fdanyone
+  summary: 4DAnyone inference source (6dcf626 + upstream-fast levers, 19a43fd) as fdanyone

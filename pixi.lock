@@ -14877,6 +14877,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.1.0-haa8c3ee_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.23.3-py312h70625ff_2.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/torchao-0.17.0-cuda_130py312h0671f0b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.28.0-cuda130_py312_h2966ecb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.6.1-py312h1b36aeb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.7.1-cuda130py312hc6dca4b_1.conda
@@ -15534,6 +15535,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tbb-2023.1.0-hdaecc9b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tokenizers-0.23.3-py312h2411609_2.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/torchao-0.17.0-cuda_130py312hbbc71f4_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/torchvision-0.28.0-cuda130_py312_hed8ace6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tornado-6.6.1-py312h898233f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/triton-3.7.1-cuda130py312h06dc8f7_1.conda
@@ -16211,6 +16213,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.1.0-haa8c3ee_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.23.3-py312h70625ff_2.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/torchao-0.17.0-cuda_130py312h0671f0b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.28.0-cuda130_py312_h2966ecb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.6.1-py312h1b36aeb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.7.1-cuda130py312hc6dca4b_1.conda
@@ -16876,6 +16879,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tbb-2023.1.0-hdaecc9b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tokenizers-0.23.3-py312h2411609_2.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/torchao-0.17.0-cuda_130py312hbbc71f4_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/torchvision-0.28.0-cuda130_py312_hed8ace6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tornado-6.6.1-py312h898233f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/triton-3.7.1-cuda130py312h06dc8f7_1.conda
@@ -129184,6 +129188,28 @@ packages:
   run_exports: {}
   size: 2526380
   timestamp: 1792575567610
+- conda: https://prefix.dev/conda-forge/linux-64/torchao-0.17.0-cuda_130py312h0671f0b_3.conda
+  sha256: d3a2611ef93ebac8a0662f13c2821a590ddbd5026d44ae4ddfbe7324abaa24fa
+  md5: 6e5d1d14a89d8582ec3ab0a078da3be9
+  depends:
+  - python
+  - importlib-metadata
+  - pytorch * cuda*
+  - cuda-version >=13.0,<14
+  - libgcc >=14
+  - __glibc >=2.28,<3.0.a0
+  - libstdcxx >=14
+  - cuda-cudart >=13.0.96,<14.0a0
+  - python_abi 3.12.* *_cp312
+  - pytorch >=2.12.0,<2.13.0a0
+  - libtorch >=2.12.0,<2.13.0a0
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/torchao?source=hash-mapping
+  run_exports: {}
+  size: 2877734
+  timestamp: 1782918167472
 - conda: https://prefix.dev/conda-forge/linux-64/torchcodec-0.14.0-cuda130_py312_h0ea267f_0.conda
   sha256: 7aae9a8c02cd907a01c8756dd1294d2a1f83906b9adaef681628e652e7a73434
   md5: bf31433ab96b28ea25d3d45970014fa2
@@ -154629,6 +154655,29 @@ packages:
   run_exports: {}
   size: 2510802
   timestamp: 1792575564015
+- conda: https://prefix.dev/conda-forge/linux-aarch64/torchao-0.17.0-cuda_130py312hbbc71f4_3.conda
+  sha256: 16c8dc08d11f2099d7a67108bb930f1857a701372c2b23e78b71217080766e7f
+  md5: 8f379dd735f5e1a6ebb954e5b69eb05a
+  depends:
+  - python
+  - importlib-metadata
+  - pytorch * cuda*
+  - __glibc >=2.28,<3.0.a0
+  - cuda-version >=13.0,<14
+  - arm-variant * sbsa
+  - libstdcxx >=14
+  - libgcc >=14
+  - python_abi 3.12.* *_cp312
+  - pytorch >=2.12.0,<2.13.0a0
+  - libtorch >=2.12.0,<2.13.0a0
+  - cuda-cudart >=13.0.96,<14.0a0
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/torchao?source=hash-mapping
+  run_exports: {}
+  size: 2865323
+  timestamp: 1782918346808
 - conda: https://prefix.dev/conda-forge/linux-aarch64/torchcodec-0.14.0-cuda130_py312_h59f5513_0.conda
   sha256: e5acba7ce61bbf102edad2e633b163e1e043bc25a1761b5897452155388c95aa
   md5: 93c5c8dd8107314ec231f1b932e53a2c
