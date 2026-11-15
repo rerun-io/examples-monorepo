@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from threading import Event
 
 from fdanyone.assets import (
     CHECKPOINT,
@@ -26,7 +29,7 @@ from fdanyone.assets import (
 from fdanyone.config import BASE24, INFERENCE, RANK64_DELTA4
 from fdanyone.device import CUDA_ALLOCATOR_CONF, select_cuda_devices
 from fdanyone.download import ensure_example_video, ensure_models, ensure_smplx
-from fdanyone.errors import ConfigurationError
+from fdanyone.errors import ConfigurationError, RunCancelled
 from fdanyone.io import remove_tree, resolve_output_path, write_json
 from fdanyone.motion.gvhmr import validate_gvhmr
 from fdanyone.motion.result import MotionResult
@@ -106,11 +109,37 @@ def _inline_workers() -> bool:
     return os.environ.get("FDANYONE_INLINE_WORKERS") == "1"
 
 
-def _run_worker(module: str, request_path: Path, worker_python: str) -> None:
-    """Run one worker entry point, as a subprocess or (inline) in this process."""
+def _run_worker(module: str, request_path: Path, worker_python: str, cancel: Event | None = None) -> None:
+    """Run one worker entry point, as a subprocess or (inline) in this process.
+
+    The subprocess is this call's own: when ``cancel`` is set (or this thread raises), its process group gets SIGTERM,
+    then SIGKILL after 10 s, and it is reaped before the error propagates (RunCancelled on cancel). An inline worker
+    cannot be interrupted; it runs to its end.
+    """
 
     if not _inline_workers():
-        subprocess.run([worker_python, "-m", module, str(request_path)], check=True, env=_worker_environment())
+        command = [worker_python, "-m", module, str(request_path)]
+        child = subprocess.Popen(command, env=_worker_environment(), start_new_session=True)
+        try:
+            while True:
+                try:
+                    returncode = child.wait(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel is not None and cancel.is_set():
+                        raise RunCancelled(f"stopped during {module}") from None
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+            raise
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, command)
         return
     import gc
     import importlib
@@ -131,6 +160,7 @@ def _run_motion(
     device: str,
     worker_python: str,
     clip_metadata: Path,
+    cancel: Event | None = None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     request_path = output_dir / ".motion-worker-request.json"
@@ -147,7 +177,7 @@ def _run_motion(
         },
     )
     try:
-        _run_worker("fdanyone.motion.worker", request_path, worker_python)
+        _run_worker("fdanyone.motion.worker", request_path, worker_python, cancel)
     finally:
         request_path.unlink(missing_ok=True)
     return MotionResult.load(result_dir)
@@ -165,6 +195,7 @@ def _build_conditioning(
     gvhmr_root: Path,
     device: str,
     worker_python: str,
+    cancel: Event | None = None,
 ):
     from fdanyone.skeleton.pipeline import Conditioning
 
@@ -184,7 +215,7 @@ def _build_conditioning(
         },
     )
     try:
-        _run_worker("fdanyone.skeleton.worker", request_path, worker_python)
+        _run_worker("fdanyone.skeleton.worker", request_path, worker_python, cancel)
     finally:
         request_path.unlink(missing_ok=True)
     return Conditioning.load(output_dir)
@@ -210,10 +241,12 @@ def run_pipeline(
     enable_rcp: bool,
     enable_tcr: bool,
     enable_turbo: bool,
+    cancel: Event | None = None,
 ) -> dict:
-    """Execute inference for one clip, retaining reusable motion."""
+    """Execute inference for one clip, retaining reusable motion; setting ``cancel`` stops a running worker subprocess."""
 
     request_options = locals().copy()
+    request_options.pop("cancel")
     pipeline_started = time.monotonic()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     PROGRESS.info("Checking input and settings", extra={"fraction": 0.02})
@@ -297,6 +330,7 @@ def run_pipeline(
                     device=device,
                     worker_python=worker_python,
                     clip_metadata=clip_metadata,
+                    cancel=cancel,
                 )
             if motion.gvhmr_revision != gvhmr_revision:
                 raise ConfigurationError(
@@ -350,6 +384,7 @@ def run_pipeline(
                 gvhmr_root=gvhmr_root,
                 device=device,
                 worker_python=worker_python,
+                cancel=cancel,
             )
             if conditioning.num_frames != len(clip.frames) or (
                 conditioning.fps_num,

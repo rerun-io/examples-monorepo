@@ -14,6 +14,7 @@ import torch
 from taehv import TAEHV
 
 from fdanyone.assets import TAEW2_2
+from fdanyone.errors import RunCancelled
 from fdanyone.model.vae import load_tiny_decoder
 from fdanyone_rerun.assets import model_dir
 from fdanyone_rerun.core import RunConfig, run_views
@@ -41,10 +42,6 @@ GENERATION_STAGE: str = "Generating target-view videos"
 """Upstream's progress label when denoising starts."""
 
 
-class RunCancelled(RuntimeError):
-    """The user stopped the run; raised from the next stage or step callback."""
-
-
 class RunStreamer:
     """Logs one run into ``recording`` as it happens."""
 
@@ -54,7 +51,7 @@ class RunStreamer:
         self.previews: bool = previews
         """Decode each denoising step's x_0 estimate with TAEW2.2 and log it."""
         self.stop: threading.Event = threading.Event()
-        """Set from another thread to cancel at the next stage or step."""
+        """Set from another thread to cancel: a worker subprocess is stopped at once, the rest at the next stage or step."""
         self.output_dir: Path = config.output_dir.expanduser().resolve()
 
     def message(self, text: str, step: int = 0) -> None:
@@ -108,7 +105,7 @@ class RunStreamer:
         """Run the pipeline and stream all four phases; returns upstream's run summary."""
         self.recording.send_blueprint(motion_blueprint())
         self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
-        metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step)
+        metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step, cancel=self.stop)
         log_cameras(read_camera_rig(self.output_dir), self.output_dir, self.recording)
         self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
         generation = metadata.generation

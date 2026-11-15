@@ -7,7 +7,7 @@ adds the widgets, a worker thread and the byte pump into the viewer.
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,7 +70,21 @@ class Config:
     """Gradio HTTP port."""
 
 
-def run_app(video: str | None, views_per_layer: int | float, seed: int | float) -> Iterator[tuple[bytes | None, str]]:
+class _RunSlot:
+    """One run on the GPU at a time. The slot is taken before a run's worker starts and released by that worker only
+    when its run has returned: the worker subprocess reaped, the prefetch closed and the observers detached. A Stop
+    ends the request at once, so the slot, not Gradio's queue, keeps the next run out until then."""
+
+    def __init__(self) -> None:
+        self.lock: threading.Lock = threading.Lock()
+        self.worker: threading.Thread | None = None
+        """The worker of the latest run; Stop reports "Stopping…" while it is alive."""
+
+
+SLOT: _RunSlot = _RunSlot()
+
+
+def run_app(video: str | None, views_per_layer: int | float, seed: int | float) -> Generator[tuple[bytes | None, str], None, None]:
     """Run 4DAnyone on ``video`` in a worker thread and pump the recording into the viewer until it ends."""
     if video is None:
         yield None, "Choose a video first."
@@ -89,10 +103,19 @@ def run_app(video: str | None, views_per_layer: int | float, seed: int | float) 
             streamer.run()
         except BaseException as error:  # re-raised by the generator below, beartype violations included
             errors.append(error)
+        finally:
+            SLOT.lock.release()
 
+    while not SLOT.lock.acquire(timeout=PUMP_SECONDS):
+        yield b"", "Waiting for the previous run to stop…"
     worker: threading.Thread = threading.Thread(target=work, name=f"fdanyone-{run_id}", daemon=True)
     started: float = time.perf_counter()
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        SLOT.lock.release()
+        raise
+    SLOT.worker = worker
     try:
         while worker.is_alive():
             worker.join(PUMP_SECONDS)
@@ -102,8 +125,18 @@ def run_app(video: str | None, views_per_layer: int | float, seed: int | float) 
             raise errors[0]
         yield stream.read(), f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views in {config.output_dir}"
     finally:
-        # A Stop (or a closed page) ends this generator: the worker stops at its next stage or denoising step.
+        # A Stop (or a closed page) ends this generator: the worker stops its subprocess at once, the rest at the next
+        # stage or denoising step, and frees the slot when it has.
         streamer.stop.set()
+
+
+def stop_status() -> Iterator[str]:
+    """Stop's status line: "Stopping…" until the stopped run's worker has exited."""
+    worker: threading.Thread | None = SLOT.worker
+    while worker is not None and worker.is_alive():
+        yield "Stopping…"
+        worker.join(PUMP_SECONDS)
+    yield "Stopped."
 
 
 def build(examples: list[str] | None = None) -> gr.Blocks:
@@ -132,7 +165,7 @@ def build(examples: list[str] | None = None) -> gr.Blocks:
                 )
 
         run_event = run_button.click(run_app, inputs=[video, views, seed], outputs=[viewer, status])
-        stop.click(lambda: "Stopped.", outputs=[status], cancels=[run_event], queue=False)
+        stop.click(stop_status, outputs=[status], cancels=[run_event])
     return demo
 
 

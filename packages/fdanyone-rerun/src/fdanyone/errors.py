@@ -15,3 +15,7 @@ class AssetError(FourDAnyoneError):
 
 class VideoContractError(FourDAnyoneError):
     """Raised when an input cannot provide the canonical 121-frame clip."""
+
+
+class RunCancelled(FourDAnyoneError):
+    """The run's cancel event was set; raised where the run notices it (a worker subprocess is reaped first)."""

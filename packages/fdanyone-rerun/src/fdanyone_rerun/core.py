@@ -7,6 +7,7 @@ step callback for one run and always detaches them.
 
 import logging
 import shutil
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -124,7 +125,9 @@ def observers(on_stage: StageCallback | None, on_step: StepCallback | None) -> I
             STEP_HOOKS.remove(on_step)
 
 
-def run_views(config: RunConfig, *, on_stage: StageCallback | None = None, on_step: StepCallback | None = None) -> RunMetadata:
+def run_views(
+    config: RunConfig, *, on_stage: StageCallback | None = None, on_step: StepCallback | None = None, cancel: threading.Event | None = None
+) -> RunMetadata:
     """Run upstream 4DAnyone on ``config`` and return the run's metadata.
 
     The run writes upstream's output directory at ``config.output_dir``. GVHMR motion of an earlier run in the same
@@ -163,5 +166,6 @@ def run_views(config: RunConfig, *, on_stage: StageCallback | None = None, on_st
             enable_rcp=True,
             enable_tcr=True,
             enable_turbo=True,
+            cancel=cancel,
         )
     return read_run_metadata(output_dir)
