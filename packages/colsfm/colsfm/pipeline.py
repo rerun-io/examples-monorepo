@@ -105,7 +105,6 @@ from colsfm.matching import (
     MatchingOptions,
     MatchReport,
 )
-from colsfm.pinhole_twin import PinholeTwin, make_pinhole_twin, restore_original_cameras
 from colsfm.run_config import PipelineOptions, ResolvedRun, SelectionOptions, resolve_run
 from colsfm.run_lifecycle import (
     EXTRINSIC_REFINEMENT_STAGE,
@@ -387,18 +386,9 @@ def _run_stages(
     mapping_options: MappingOptions = resolved.mapping
 
     # ── 7. triangulation and bundle adjustment ───────────────────────────────────────
-    # A distorted-pinhole rig maps on its undistorted PINHOLE twin when CASPAR is asked for, so the GPU bundle
-    # adjuster runs; the original cameras go back into the model before export (`colsfm.pinhole_twin`).
-    twin: PinholeTwin | None = None
     with timed_stage(ledger, "reconstruction"), watcher.stage_scope("reconstruction"):
-        if options.ba_backend == "caspar" and options.caspar_pinhole_twin:
-            twin = make_pinhole_twin(pose_graph.frames_meta, staged.database_path, staged.output_dir / PINHOLE_TWIN_DATABASE_NAME)
         reconstruction: MappingResult = run_reconstruction_stage(
-            staged,
-            twin.frames_meta if twin is not None else pose_graph.frames_meta,
-            config,
-            mapping_options,
-            database_path=twin.database_path if twin is not None else None,
+            staged, pose_graph.frames_meta, config, mapping_options
         )
     # Before 7b: the refinement adjusts this very reconstruction in place.
     watcher.on_reconstruction(reconstruction)
@@ -411,25 +401,13 @@ def _run_stages(
     if options.optimize_extrinsics:
         with timed_stage(ledger, EXTRINSIC_REFINEMENT_STAGE), watcher.stage_scope(EXTRINSIC_REFINEMENT_STAGE):
             refinement: ExtrinsicRefinementStageResult = run_extrinsic_refinement_stage(
-                staged,
-                twin.frames_meta if twin is not None else pose_graph.frames_meta,
-                config,
-                mapping_options,
-                mapping,
-                database_path=twin.database_path if twin is not None else None,
+                staged, pose_graph.frames_meta, config, mapping_options, mapping
             )
         watcher.on_extrinsic_refinement(refinement)
         mapping = refinement.mapping
         mapped_meta = refinement.frames_meta
         changes = refinement.changes
         rounds_run = refinement.rounds_run
-
-    if twin is not None:
-        # The refined extrinsics on the original cameras, and the raw cameras and keypoints back in the model.
-        mapped_meta = pose_graph.frames_meta.with_extrinsics(
-            {camera_id: camera.vehicle_T_cam for camera_id, camera in mapped_meta.cameras.items()}
-        )
-        restore_original_cameras(mapping.reconstruction, pose_graph.frames_meta, staged.database_path, twin)
 
     # ── 8. export ────────────────────────────────────────────────────────────────────
     with timed_stage(ledger, "export"), watcher.stage_scope("export"):
@@ -461,10 +439,6 @@ def _run_stages(
         f"{matching.empty_pairs} empty pairs"
     )
     return summary
-
-
-PINHOLE_TWIN_DATABASE_NAME: str = "database.pinhole_twin.db"
-"""The undistorted copy of the database stages 7 and 7b map from, when a twin is made."""
 
 
 @dataclass(frozen=True, slots=True)

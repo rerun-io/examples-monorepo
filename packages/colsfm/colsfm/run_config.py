@@ -170,10 +170,6 @@ class PipelineOptions:
     the Ceres mapper's 0.895 m in 148.5 s (`docs/caspar-build.md` § Shipped: CASPAR +
     Ceres polish). `--no-caspar-ceres-polish` is the ablation. Inert on `ceres`,
     fallbacks included, which have already converged."""
-    caspar_pinhole_twin: bool = True
-    """With `--ba-backend caspar`, map a distorted-pinhole rig (FULL_OPENCV, which has no CASPAR adapter) on its
-    undistorted PINHOLE twin so CASPAR solves it; `--no-caspar-pinhole-twin` falls back to Ceres instead
-    (`colsfm.pinhole_twin`)."""
     caspar_option: tuple[str, ...] = ()
     """CASPAR solver overrides as `name=value`, e.g. `--caspar-option solver_iter_max=1000
     pcg_iter_max=80`. Read only when `--ba-backend caspar` actually runs; see

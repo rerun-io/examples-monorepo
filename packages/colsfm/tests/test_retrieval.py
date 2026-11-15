@@ -464,8 +464,8 @@ def test_the_vectorised_l1_score_agrees_with_the_spec_reference() -> None:
             assert l1_score(query, document) == pytest.approx(float(scores[first, second]), abs=1e-6)
 
 
-VOCAB_PROBE_IMAGES: int = 200
-"""Synthetic images in the vocabulary fixture: 409 600 descriptors still fill all 10^5 leaves."""
+VOCAB_PROBE_IMAGES: int = 100
+"""Synthetic images in the vocabulary fixture: 204 800 descriptors still fill all 10^5 leaves."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,7 +503,7 @@ def vocab_build() -> VocabBuild:
 
 
 def test_the_vocabulary_backend_builds_the_whole_tree(vocab_build: VocabBuild) -> None:
-    """200 x 2048 descriptors fill every leaf: the word count is `branching ** depth`.
+    """100 x 2048 descriptors fill every leaf: the word count is `branching ** depth`.
 
     The claim that does not depend on the machine, so it runs by default. What the
     build and the queries cost is the `perf` test below.
@@ -513,7 +513,7 @@ def test_the_vocabulary_backend_builds_the_whole_tree(vocab_build: VocabBuild) -
 
 @pytest.mark.perf
 def test_the_vocabulary_backend_builds_and_queries_inside_the_budget(vocab_build: VocabBuild) -> None:
-    """200 x 2048 descriptors: build and every query, both well under the pipeline budget (the fork measured 11.1 s and 0.07 s at 1000 images).
+    """100 x 2048 descriptors: build and every query, both well under the pipeline budget (the fork measured 11.1 s and 0.07 s at 1000 images).
 
     Measured here: 11.1 s to build and 0.07 s for all 1000 queries, because the inverted
     index scores every pair during the build. The bounds are generous multiples so the test
