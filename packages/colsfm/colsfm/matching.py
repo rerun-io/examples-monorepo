@@ -68,6 +68,12 @@ entirely. Everything above this paragraph describes the `pycolmap` path, the abl
 Both leave the same two database tables filled, so the choice is invisible to every later stage. (The fork's third
 backend, the cuSFM blob's own LightGlue engine, is not part of this package; `colsfm.matching_trt` keeps the engine
 matching loop LightGlue+ runs through.)
+
+**FlexGlue.** `MatchingOptions.backend = "flexglue"` runs COLMAP's FlexGlue (cvg/FlexGlue, COLMAP main #4908) through
+the same `match_image_pairs` call as the `pycolmap` path. It reads only keypoint *locations* (RaCo-ALIKED's work as well
+as any other extractor's), computes dense DINOv3-ConvNeXt features from the image pixels (so it needs `image_dir`), and
+predicts each pair's covisibility: a pair below `flexglue_min_covisibility` comes back empty, which is what rejects
+look-alike loop candidates. The ONNX graphs are local files from `colsfm-download-flexglue`, never fetched at run time.
 """
 
 from __future__ import annotations
@@ -86,6 +92,7 @@ import pycolmap
 from jaxtyping import Float32, Int64
 from numpy import ndarray
 
+from colsfm import DATA_DIR
 from colsfm.database import (
     ImagePair,
     Keypoints,
@@ -100,11 +107,23 @@ from colsfm.database import (
 from colsfm.features import DeviceChoice, ResolvedDevice, resolve_device
 from colsfm.pairs import write_pair_list
 
+FLEXGLUE_MODEL_DIR: Final[Path] = DATA_DIR / "models" / "flexglue"
+"""Where `colsfm-download-flexglue` puts FlexGlue's ONNX graphs (gitignored, like the RaCo exports)."""
+
+FLEXGLUE_MODEL_FILES: Final[dict[str, str]] = {
+    "descriptor_model_path": "flexglue_descriptor.onnx",
+    "matcher_model_path": "flexglue_matcher_early_stop.onnx",
+    "matcher_model_path_fp16": "flexglue_matcher_early_stop_fp16.onnx",
+}
+"""`pycolmap.FlexGlueMatchingOptions` field to the graph it loads (cvg/FlexGlue v0.1, as COLMAP pins them)."""
+
 MatcherVariant: TypeAlias = Literal["ALIKED_LIGHTGLUE", "ALIKED_BRUTEFORCE"]
 """The ALIKED matchers COLMAP 4.2 offers; the pipeline uses LightGlue."""
 
-MatchingBackend: TypeAlias = Literal["pycolmap", "raco"]
-"""Which LightGlue runs: COLMAP's own ONNX one, or LightGlue+ on a TensorRT engine.
+MatchingBackend: TypeAlias = Literal["pycolmap", "raco", "flexglue"]
+"""Which matcher runs: COLMAP's own ONNX LightGlue, LightGlue+ on a TensorRT engine, or COLMAP's FlexGlue.
+
+`flexglue` is COLMAP's FlexGlue (see the module docstring); it ignores the descriptors.
 
 `raco` is `colsfm.matching_raco`, the LightGlue+ that fabio-sim trained against RaCo-ALIKED. It has the per-match
 score COLMAP's bindings hide and therefore runs the blob's real SSC spatial NMS rather than
@@ -301,6 +320,12 @@ class MatchingOptions:
     `pycolmap` backend runs (see the module docstring's "score threshold" note)."""
     num_points_tolerance_fraction: float = BLOB_NUM_POINTS_TOLERANCE_FRACTION
     """SSC's acceptance band around the target, as a fraction of it; `raco` only."""
+    image_dir: Path | None = None
+    """Root the database's image names resolve against; required by `flexglue`, which reads the pixels."""
+    flexglue_model_dir: Path = FLEXGLUE_MODEL_DIR
+    """Where `colsfm-download-flexglue` put the three FlexGlue graphs; `flexglue` only."""
+    flexglue_min_covisibility: float = 0.5
+    """FlexGlue's pair rejection: a pair whose predicted covisibility is below this keeps no match (COLMAP's default)."""
 
 
 DEFAULT_MATCHING_OPTIONS: Final[MatchingOptions] = MatchingOptions()
@@ -401,7 +426,17 @@ def _matching_options(options: MatchingOptions, device: ResolvedDevice) -> pycol
         `FeatureMatchingOptions` with the ALIKED LightGlue sub-options filled in.
     """
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
-    matching_options.type = getattr(pycolmap.FeatureMatcherType, options.variant)
+    if options.backend == "flexglue":
+        if options.image_dir is None:
+            raise ValueError("the flexglue matcher reads image pixels: MatchingOptions.image_dir is required")
+        matching_options.type = pycolmap.FeatureMatcherType.FLEXGLUE
+        flexglue = matching_options.flexglue
+        flexglue.image_path = str(options.image_dir)
+        flexglue.min_covisibility = options.flexglue_min_covisibility
+        for field_name, file_name in FLEXGLUE_MODEL_FILES.items():
+            setattr(flexglue, field_name, str(options.flexglue_model_dir / file_name))
+    else:
+        matching_options.type = getattr(pycolmap.FeatureMatcherType, options.variant)
     matching_options.use_gpu = device == "cuda"
     matching_options.gpu_index = options.gpu_index
     matching_options.num_threads = options.num_threads

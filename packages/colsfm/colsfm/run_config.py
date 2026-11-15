@@ -304,6 +304,7 @@ class ResolvedRun:
             num_threads=self.num_threads,
             device=self.device,
             match_limit=self.match_limit,
+            image_dir=self.selection.input_dir,
         )
 
 

@@ -1,28 +1,26 @@
-# COLMAP 4.2.0 + pycolmap with CASPAR (COLMAP's GPU bundle adjuster) and two extra Caspar adapters: OPENCV_FISHEYE
-# (RoboCap's Kannala-Brandt rigs) and fixed-calibration FULL_OPENCV (8-coefficient OpenCV rigs such as MSD).
+# COLMAP main (4.3.0.dev0, pinned after FlexGlue #4908..#4969) + pycolmap with CASPAR (COLMAP's GPU bundle adjuster)
+# and two extra Caspar adapters: OPENCV_FISHEYE (RoboCap's Kannala-Brandt rigs) and fixed-calibration FULL_OPENCV
+# (8-coefficient OpenCV rigs such as MSD). FlexGlue (dense sparse-to-dense matcher, ONNX) is upstream code, unpatched.
 #
-# Why from source: every distributed COLMAP binary ships CASPAR_ENABLED=OFF. conda-forge's
-# `pycolmap 4.2.0 cuda_130*` binds `BundleAdjustmentBackend.CASPAR`, but a solve aborts with "COLMAP was built
-# without CASPAR_ENABLED". Upstream CASPAR handles PINHOLE and SIMPLE_RADIAL only (colmap main, 2026-11-15;
-# OPENCV is colmap#4611, THIN_PRISM_FISHEYE colmap#4657, both open), so RoboCap's fisheye rig and MSD's 8-coefficient rig each need an adapter.
+# Why from source: every distributed COLMAP binary ships CASPAR_ENABLED=OFF, and FlexGlue is not in a release yet.
+# Upstream CASPAR handles PINHOLE and SIMPLE_RADIAL only (colmap main, 2026-11-15; OPENCV is colmap#4611,
+# THIN_PRISM_FISHEYE colmap#4657, both open), so RoboCap's fisheye rig and MSD's 8-coefficient rig each need an adapter.
 #
 # The patches (patches/, applied in list order to the pinned upstream clone):
-#   add-opencv-fisheye-caspar-adapter.patch  hand-written, 4 files: `OpenCVFisheyeAdapter` in caspar_model_adapter.h,
-#       its dispatch in bundle_adjustment_caspar.cc, the opencv_fisheye residual and the SumStore padding-thread fix
-#       in Symforce-Caspar/caspar_generate.py, one FAQ line.
-#   add-opencv-fisheye-generated-f32.patch   Symforce 0.12.0 output: 224 new fp32 kernels plus the 4 regenerated
-#       aggregates (solver.{h,cc}, caspar_mappings.{h,cu}). Not hand-editable.
-#   add-full-opencv-caspar-adapter.patch     hand-written, 4 files: `FullOpenCVAdapter`, its dispatch, the full_opencv
-#       residuals in caspar_generate.py, one FAQ line. Fixed intrinsics and fixed sensor_from_rig only: twelve
-#       parameters do not fit a tunable calib in Caspar's shared memory, the pattern of upstream PR #4657.
-#   add-full-opencv-generated-f32.patch      Symforce 0.12.0 output: 42 new fp32 kernels plus the 4 aggregates again.
+#   add-caspar-adapters.patch                hand-written, 4 files: `OpenCVFisheyeAdapter` and `FullOpenCVAdapter` in
+#       caspar_model_adapter.h, their dispatch in bundle_adjustment_caspar.cc, their residuals and the SumStore
+#       padding-thread fix in Symforce-Caspar/caspar_generate.py, two FAQ lines. FULL_OPENCV: fixed intrinsics and
+#       fixed sensor_from_rig only (twelve parameters do not fit a tunable calib in Caspar's shared memory, the
+#       pattern of upstream PR #4657).
+#   add-caspar-adapters-generated-f32.patch  Symforce 0.12.0 output: 266 new fp32 kernels (224 fisheye, 42
+#       FULL_OPENCV) plus the 4 regenerated aggregates (solver.{h,cc}, caspar_mappings.{h,cu}). Not hand-editable.
 # How the patches were made, with the generator command and versions: patches/PROVENANCE.md.
 # This is the one recipe whose patch is larger than "a hook": the adapter is C++ inside COLMAP's Caspar backend,
 # so it cannot live in a Python package (recipes/README.md "Patch or package" names the exception). The generated
 # CUDA travels in the patch because conda-forge has no symforce. Source of both patches and of the regeneration
 # tool (tools/caspar_fisheye_patch.sh): pablovela5620/pyCuSFM, branch feat/pycolmap-open-pipeline,
-# packages/pycolmap-caspar-fisheye (FULL_OPENCV: a branch on top of it, see PROVENANCE.md). Drop each pair when upstream
-# CASPAR gains that model.
+# packages/pycolmap-caspar-fisheye (FULL_OPENCV: a branch on top of it, see PROVENANCE.md). Drop an adapter when upstream
+# CASPAR gains its model.
 #
 # Two-step build: pycolmap's pyproject builds only the bindings (`cmake.source-dir = "python/"`) and links a
 # separately installed libcolmap, and CASPAR_ENABLED lives in libcolmap. So libcolmap is built and installed first.
@@ -31,27 +29,25 @@
 # COLMAP refuses "native"/"all" while CASPAR is on (cmake/FindDependencies.cmake), and Caspar's generated
 # CMakeLists honours an explicit CMAKE_CUDA_ARCHITECTURES, so no patch is needed for it.
 context:
-  # tag 4.2.0. The patches apply to this revision only; SHA256SUMS proves it.
-  colmap_rev: be5e29168d4aff238409d60424812df66aac919f
+  # main 2026-11-15, after FlexGlue's #4969. The patches apply to this revision only; SHA256SUMS proves it.
+  colmap_rev: 137f21680c79d3f2fffbb1d11deb367162aa6f83
   cuda_arch: ${{ "121" if target_platform == "linux-aarch64" else "120" }}
 
 package:
   name: colmap-src
-  version: "4.2.0"
+  version: "4.3.0.dev0"
 
 source:
   git: https://github.com/colmap/colmap.git
   rev: ${{ colmap_rev }}
   patches:
-    - patches/add-opencv-fisheye-caspar-adapter.patch
-    - patches/add-opencv-fisheye-generated-f32.patch
-    - patches/add-full-opencv-caspar-adapter.patch
-    - patches/add-full-opencv-generated-f32.patch
+    - patches/add-caspar-adapters.patch
+    - patches/add-caspar-adapters-generated-f32.patch
 
 build:
   # Bump with every patch or build-script edit: the build string hash does not follow them (recipes/README.md).
-  number: 1
-  string: caspar_fisheye_fullopencv_cuda130_sm${{ cuda_arch }}_py312_${{ build_number }}
+  number: 0
+  string: main137f216_caspar_fisheye_fullopencv_cuda130_sm${{ cuda_arch }}_py312_${{ build_number }}
   script:
     # Step 0: prove the patches landed byte for byte before the long CUDA compile. A fuzzy applier can skip an
     # already-applied hunk with a warning and exit 0; a skipped hunk in solver.cc would compile and solve wrong.
@@ -77,17 +73,20 @@ build:
       -DFETCH_ONNX=OFF
       -DFETCH_FAISS=OFF
       -DFETCH_POSELIB=OFF
+      -DFETCH_BOOST=OFF
       -DCMAKE_CUDA_ARCHITECTURES=${{ cuda_arch }}
     - cmake --build build_colmap --parallel ${{ CPU_COUNT }}
     - cmake --install build_colmap
     # Step 2: the bindings against that libcolmap. scikit-build-core defaults to one job without this.
     - export CMAKE_PREFIX_PATH="$PREFIX:${CMAKE_PREFIX_PATH:-}"
     - export CMAKE_BUILD_PARALLEL_LEVEL=${{ CPU_COUNT }}
-    - export CMAKE_ARGS="-DCASPAR_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=${{ cuda_arch }} -DGENERATE_STUBS=OFF -DFETCH_ONNX=OFF -DFETCH_FAISS=OFF -DFETCH_POSELIB=OFF -DCMAKE_PREFIX_PATH=$PREFIX"
+    - export CMAKE_ARGS="-DCASPAR_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=${{ cuda_arch }} -DGENERATE_STUBS=OFF -DFETCH_ONNX=OFF -DFETCH_FAISS=OFF -DFETCH_POSELIB=OFF -DFETCH_BOOST=OFF -DCMAKE_PREFIX_PATH=$PREFIX"
     - python -m pip install . -vv --no-build-isolation --no-deps
     # Step 3: the adapter reached the extension module (0 hits in a stock build). pixi-build does not run `tests:`.
     - grep -aq OpenCVFisheyeAdapter "$PREFIX"/lib/python3.12/site-packages/pycolmap/_core*.so
     - grep -aq FullOpenCVAdapter "$PREFIX"/lib/python3.12/site-packages/pycolmap/_core*.so
+    # FlexGlue is compiled only with ONNX on (COLMAP_ONNX_ENABLED); its default model URI is the marker.
+    - grep -rlaq flexglue_descriptor.onnx "$PREFIX"/lib/libcolmap* "$PREFIX"/lib/python3.12/site-packages/pycolmap/
 
 requirements:
   build:
@@ -171,5 +170,5 @@ about:
   homepage: https://colmap.github.io/
   repository: https://github.com/colmap/colmap
   license: BSD-3-Clause
-  license_file: COPYING.txt
+  license_file: LICENSE
   summary: COLMAP + pycolmap 4.2.0 (be5e2916) with CASPAR GPU bundle adjustment and OPENCV_FISHEYE + fixed-calibration FULL_OPENCV Caspar adapters, CUDA 13.

@@ -1,32 +1,33 @@
-# Patch: OpenCVFisheyeAdapter for Caspar GPU BA (caspar_model_adapter.h, bundle_adjustment_caspar.cc), the opencv_fisheye residual and the SumStore padding-thread fix in caspar_generate.py, doc/faq.rst. Hand-written.
-# Problem: stock CASPAR 4.2.0 skips OPENCV_FISHEYE observations ("unsupported camera model").
-# Base:    colmap/colmap be5e29168d4aff238409d60424812df66aac919f (tag 4.2.0)
-# Fork:    /home/pablo/0Dev/forks/colmap-caspar-fisheye, branch caspar-opencv-fisheye @ c03b1f388e8872196e84ba08297a1c67b7d8b526
-# Commit:  Record the initial_score fix that regenerating solver.cc brings in | pablo vela <pablovela5620@gmail.com> | Sat Sep 5 23:13:37 2026 -0500
-# Applied: rattler-build source.patches in recipes/colmap-src/recipe.yaml (examples-monorepo).
+# Patch: OPENCV_FISHEYE and fixed-calibration FULL_OPENCV Caspar adapters (caspar_model_adapter.h), their dispatch (bundle_adjustment_caspar.cc), their residuals and the SumStore padding-thread fix in caspar_generate.py, doc/faq.rst. Hand-written.
+# Problem: upstream CASPAR (main 137f2168) projects only PINHOLE and SIMPLE_RADIAL and skips other observations ("unsupported camera model").
+# Base:    colmap/colmap 137f21680c79d3f2fffbb1d11deb367162aa6f83 (main, 2026-11-15; includes FlexGlue #4908..#4969)
+# Branch:  caspar-adapters-main @ 391f7467, a port of the 4.2.0 patches (pablovela5620/pyCuSFM packages/pycolmap-caspar-fisheye + branch caspar-full-opencv)
+# Pattern: FULL_OPENCV after upstream COLMAP PR #4657: fixed intrinsics and fixed sensor_from_rig only, calib as constant sequential data.
+# Applied: rattler-build source.patches in recipes/colmap-src/recipe.yaml (examples-monorepo), before the generated patch.
 # Checked: every patched file is hashed in patches/SHA256SUMS, verified by the build.
-# Regen:   tools/caspar_fisheye_patch.sh regen in pablovela5620/pyCuSFM (feat/pycolmap-open-pipeline)  -- do not hand-edit.
+# Provenance: patches/PROVENANCE.md (generator command, inputs, versions).
 
 diff --git a/doc/faq.rst b/doc/faq.rst
-index c29c4fda8bd53d66671abc7e5d2a946a0cb95539..ff7c0741108f6fc106a1b5012cbda73b760a1f91 100644
+index f65221be474a84598dc5291d448210aaf50ce264..150b3cc0477445b364cee371dd2076ce0408740d 100644
 --- a/doc/faq.rst
 +++ b/doc/faq.rst
-@@ -662,8 +662,8 @@ The following describes practical ways to reduce bundle adjustment runtime.
+@@ -672,8 +672,9 @@ The following describes practical ways to reduce bundle adjustment runtime.
    (default ``-1`` auto-selects the best CUDA device).
  
    .. Attention:: Caspar is experimental and currently supports only the
 -     ``SIMPLE_RADIAL`` and ``PINHOLE`` camera models; observations using other
 -     camera models are skipped. It does not support pose priors or refining
-+     ``SIMPLE_RADIAL``, ``PINHOLE`` and ``OPENCV_FISHEYE`` camera models;
++     ``SIMPLE_RADIAL``, ``PINHOLE`` and ``OPENCV_FISHEYE`` camera models, and
++     ``FULL_OPENCV`` with fixed intrinsics and fixed ``sensor_from_rig``;
 +     observations using other camera models are skipped. It does not support pose priors or refining
       ``sensor_from_rig`` for non-reference rig sensors, and requires
       ``refine_focal_length`` and ``refine_extra_params`` to be equal. The
       ``global_mapper`` does not expose a Caspar backend selector.
 diff --git a/src/colmap/estimators/bundle_adjustment_caspar.cc b/src/colmap/estimators/bundle_adjustment_caspar.cc
-index d140ecddde568c44cd9f17410c8af5227629783a..09ca8c738e5930fa7c95ea9a0941ce2f2e11de01 100644
+index 09c39ac03f64c6f6dd70035c321f0f51c47c39c2..731219002bfb5f41166f963257cf3cd4073b3640 100644
 --- a/src/colmap/estimators/bundle_adjustment_caspar.cc
 +++ b/src/colmap/estimators/bundle_adjustment_caspar.cc
-@@ -881,6 +881,10 @@ class CasparBundleAdjuster : public BundleAdjuster {
+@@ -882,6 +882,14 @@ class CasparBundleAdjuster : public BundleAdjuster {
          it != num_poses_per_model_.end()) {
        sz.num_pinhole_poses = it->second;
      }
@@ -34,10 +35,14 @@ index d140ecddde568c44cd9f17410c8af5227629783a..09ca8c738e5930fa7c95ea9a0941ce2f
 +        it != num_poses_per_model_.end()) {
 +      sz.num_opencv_fisheye_poses = it->second;
 +    }
++    if (auto it = num_poses_per_model_.find(CameraModelId::kFullOpenCV);
++        it != num_poses_per_model_.end()) {
++      sz.num_full_opencv_poses = it->second;
++    }
      auto get_md = [&](CameraModelId id) -> const ModelData* {
        auto it = model_data_per_model_.find(id);
        return it != model_data_per_model_.end() ? &it->second : nullptr;
-@@ -900,6 +904,11 @@ class CasparBundleAdjuster : public BundleAdjuster {
+@@ -901,6 +909,14 @@ class CasparBundleAdjuster : public BundleAdjuster {
        adapters_.at(CameraModelId::kPinhole)
            ->FillSizing(sz, *md, sz.num_pinhole_calibs);
      }
@@ -46,10 +51,13 @@ index d140ecddde568c44cd9f17410c8af5227629783a..09ca8c738e5930fa7c95ea9a0941ce2f
 +      adapters_.at(CameraModelId::kOpenCVFisheye)
 +          ->FillSizing(sz, *md, sz.num_opencv_fisheye_calibs);
 +    }
++    if (const ModelData* md = get_md(CameraModelId::kFullOpenCV)) {
++      adapters_.at(CameraModelId::kFullOpenCV)->FillSizing(sz, *md, 0);
++    }
      return sz;
    }
  
-@@ -1007,6 +1016,11 @@ CasparBundleAdjustmentSummary::Create(
+@@ -1008,6 +1024,11 @@ CasparBundleAdjustmentSummary::Create(
      const caspar::SolveResult& caspar_summary) {
    auto summary = std::make_shared<CasparBundleAdjustmentSummary>();
    summary->iteration_count = caspar_summary.iteration_count;
@@ -62,10 +70,18 @@ index d140ecddde568c44cd9f17410c8af5227629783a..09ca8c738e5930fa7c95ea9a0941ce2f
    summary->iterations = caspar_summary.iterations;
    switch (caspar_summary.exit_reason) {
 diff --git a/src/colmap/estimators/caspar/caspar_model_adapter.h b/src/colmap/estimators/caspar/caspar_model_adapter.h
-index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590fad00e4c 100644
+index cdf783910a920b721e6085b569e8a63ddccd37fa..010f654d68cbdd8b6a89aaae608657315f3ba362 100644
 --- a/src/colmap/estimators/caspar/caspar_model_adapter.h
 +++ b/src/colmap/estimators/caspar/caspar_model_adapter.h
-@@ -19,6 +19,7 @@ struct CasparSolverSizing {
+@@ -7,6 +7,7 @@
+ #include "colmap/estimators/bundle_adjustment_caspar.h"
+ #include "colmap/scene/camera.h"
+ #include "colmap/sensor/models.h"
++#include "colmap/util/logging.h"
+ 
+ #include <memory>
+ #include <vector>
+@@ -23,6 +24,7 @@ struct CasparSolverSizing {
    // Pose pools are per-model to prevent cross-model factor batching.
    size_t num_simple_radial_poses = 0;
    size_t num_pinhole_poses = 0;
@@ -73,7 +89,7 @@ index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590
    size_t num_points = 0;
  
    // SimpleRadial: num_calibs is shared by the merged Calib pool and the split
-@@ -66,6 +67,31 @@ struct CasparSolverSizing {
+@@ -70,6 +72,37 @@ struct CasparSolverSizing {
    size_t num_pinhole_split_fixed_pose_fixed_focal_fixed_point = 0;
    size_t num_pinhole_split_fixed_pose_fixed_principal_point_fixed_point = 0;
    size_t num_pinhole_split_fixed_focal_fixed_principal_point_fixed_point = 0;
@@ -102,10 +118,177 @@ index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590
 +  size_t
 +      num_opencv_fisheye_split_fixed_focal_and_extra_fixed_principal_point_fixed_point =
 +          0;
++
++  size_t num_full_opencv_poses = 0;
++  size_t num_full_opencv_split_fixed_focal_and_extra_fixed_principal_point = 0;
++  size_t
++      num_full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point =
++          0;
  };
  
  // One implementation per camera model.
-@@ -901,6 +927,407 @@ class PinholeAdapter : public ICasparModelAdapter {
+@@ -529,6 +562,160 @@ class SimpleRadialAdapter : public ICasparModelAdapter {
+   }
+ };
+ 
++// FullOpenCV implementation.
++//
++// FULL_OPENCV has twelve parameters, so (like THIN_PRISM_FISHEYE in upstream
++// PR #4657) only fixed-intrinsics, fixed-sensor rig factors are generated:
++// pose+point BA and points-only BA, with the calibration passed as constant
++// sequential data. Any other variant fails explicitly instead of silently
++// skipping observations.
++class FullOpenCVAdapter : public ICasparModelAdapter {
++ public:
++  CameraModelId ModelId() const override { return CameraModelId::kFullOpenCV; }
++
++  // COLMAP params: [fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6]
++  // CASPAR split constants:
++  //   focal_and_extra = [fx, fy, k1, k2, p1, p2, k3, k4, k5, k6]
++  //   principal_point = [cx, cy]
++  size_t FocalAndExtraSize() const override { return 10; }
++  size_t PrincipalPointSize() const override { return 2; }
++  size_t CalibSize() const override {
++    return FocalAndExtraSize() + PrincipalPointSize();
++  }
++
++  void FillSizing(CasparSolverSizing& sz,
++                  const ModelData& md,
++                  size_t) const override {
++    for (int v = 0; v < CASPAR_NUM_VARIANTS; ++v) {
++      const size_t n = md.variants[v].num_factors;
++      if (n == 0) {
++        continue;
++      }
++      switch (static_cast<FactorVariant>(v)) {
++        case FactorVariant::FIXED_FOCAL_AND_EXTRA_FIXED_PRINCIPAL_POINT:
++          sz.num_full_opencv_split_fixed_focal_and_extra_fixed_principal_point =
++              n;
++          break;
++        case FactorVariant::
++            FIXED_POSE_FIXED_FOCAL_AND_EXTRA_FIXED_PRINCIPAL_POINT:
++          sz.num_full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point =
++              n;
++          break;
++        default:
++          UnsupportedVariant();
++      }
++    }
++  }
++
++  void ExtractFocalAndExtra(const Camera& camera,
++                            std::vector<StorageType>& out) const override {
++    out.push_back(static_cast<StorageType>(camera.params[0]));   // fx
++    out.push_back(static_cast<StorageType>(camera.params[1]));   // fy
++    out.push_back(static_cast<StorageType>(camera.params[4]));   // k1
++    out.push_back(static_cast<StorageType>(camera.params[5]));   // k2
++    out.push_back(static_cast<StorageType>(camera.params[6]));   // p1
++    out.push_back(static_cast<StorageType>(camera.params[7]));   // p2
++    out.push_back(static_cast<StorageType>(camera.params[8]));   // k3
++    out.push_back(static_cast<StorageType>(camera.params[9]));   // k4
++    out.push_back(static_cast<StorageType>(camera.params[10]));  // k5
++    out.push_back(static_cast<StorageType>(camera.params[11]));  // k6
++  }
++
++  void ExtractPrincipalPoint(const Camera& camera,
++                             std::vector<StorageType>& out) const override {
++    out.push_back(static_cast<StorageType>(camera.params[2]));  // cx
++    out.push_back(static_cast<StorageType>(camera.params[3]));  // cy
++  }
++
++  void WriteFocalAndExtra(Camera&, const StorageType*, size_t) const override {
++    UnsupportedIntrinsicsWrite();
++  }
++
++  void WritePrincipalPoint(Camera&, const StorageType*, size_t) const override {
++    UnsupportedIntrinsicsWrite();
++  }
++
++  void SetPoseNodes(caspar::GraphSolver& s,
++                    StorageType* data,
++                    size_t n) const override {
++    s.SetFullOpenCVPoseNodesFromStackedHost(data, 0, n);
++  }
++  void GetPoseNodes(caspar::GraphSolver& s,
++                    StorageType* data,
++                    size_t n) const override {
++    s.GetFullOpenCVPoseNodesToStackedHost(data, 0, n);
++  }
++  void SetFocalAndExtraNodes(caspar::GraphSolver&,
++                             StorageType*,
++                             size_t) const override {}
++  void GetFocalAndExtraNodes(caspar::GraphSolver&,
++                             StorageType*,
++                             size_t) const override {}
++  void SetPrincipalPointNodes(caspar::GraphSolver&,
++                              StorageType*,
++                              size_t) const override {}
++  void GetPrincipalPointNodes(caspar::GraphSolver&,
++                              StorageType*,
++                              size_t) const override {}
++  void SetCalibNodes(caspar::GraphSolver&, StorageType*, size_t) const override {
++  }
++  void GetCalibNodes(caspar::GraphSolver&, StorageType*, size_t) const override {
++  }
++
++  void SetVariantFactors(caspar::GraphSolver& s,
++                         FactorVariant variant,
++                         const VariantData& d) const override {
++    const size_t n = d.num_factors;
++    switch (variant) {
++      case FactorVariant::FIXED_FOCAL_AND_EXTRA_FIXED_PRINCIPAL_POINT:
++        s.SetFullOpencvSplitFixedFocalAndExtraFixedPrincipalPointNum(n);
++        s.SetFullOpencvSplitFixedFocalAndExtraFixedPrincipalPointPoseIndicesFromHost(
++            d.pose_indices.data(), n);
++        s.SetFullOpencvSplitFixedFocalAndExtraFixedPrincipalPointPointIndicesFromHost(
++            d.point_indices.data(), n);
++        s.SetFullOpencvSplitFixedFocalAndExtraFixedPrincipalPointSensorFromRigDataFromStackedHost(
++            d.sensor_from_rig_data.data(), 0, n);
++        s.SetFullOpencvSplitFixedFocalAndExtraFixedPrincipalPointFocalAndExtraDataFromStackedHost(
++            d.const_focal_and_extra.data(), 0, n);
++        s.SetFullOpencvSplitFixedFocalAndExtraFixedPrincipalPointPrincipalPointDataFromStackedHost(
++            d.const_principal_point.data(), 0, n);
++        s.SetFullOpencvSplitFixedFocalAndExtraFixedPrincipalPointPixelDataFromStackedHost(
++            d.pixels.data(), 0, n);
++        break;
++      case FactorVariant::
++          FIXED_POSE_FIXED_FOCAL_AND_EXTRA_FIXED_PRINCIPAL_POINT:
++        s.SetFullOpencvSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointNum(n);
++        s.SetFullOpencvSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPointIndicesFromHost(
++            d.point_indices.data(), n);
++        s.SetFullOpencvSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointSensorFromRigDataFromStackedHost(
++            d.sensor_from_rig_data.data(), 0, n);
++        s.SetFullOpencvSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPoseDataFromStackedHost(
++            d.const_poses.data(), 0, n);
++        s.SetFullOpencvSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointFocalAndExtraDataFromStackedHost(
++            d.const_focal_and_extra.data(), 0, n);
++        s.SetFullOpencvSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPrincipalPointDataFromStackedHost(
++            d.const_principal_point.data(), 0, n);
++        s.SetFullOpencvSplitFixedPoseFixedFocalAndExtraFixedPrincipalPointPixelDataFromStackedHost(
++            d.pixels.data(), 0, n);
++        break;
++      default:
++        UnsupportedVariant();
++    }
++  }
++
++ private:
++  static void UnsupportedVariant() {
++    LOG(FATAL_THROW)
++        << "FULL_OPENCV is supported by CASPAR only for fixed intrinsics and "
++           "fixed sensor_from_rig, with variable points3D and fixed or "
++           "variable rig_from_world poses.";
++  }
++  static void UnsupportedIntrinsicsWrite() {
++    LOG(FATAL_THROW) << "Writing FULL_OPENCV intrinsics from CASPAR is "
++                        "unsupported; run with fixed intrinsics.";
++  }
++};
++
+ // Pinhole implementation
+ 
+ class PinholeAdapter : public ICasparModelAdapter {
+@@ -905,6 +1092,407 @@ class PinholeAdapter : public ICasparModelAdapter {
    }
  };
  
@@ -513,16 +696,18 @@ index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590
  inline std::unique_ptr<ICasparModelAdapter> CreateCasparAdapter(
      const CameraModelId model_id) {
    switch (model_id) {
-@@ -908,6 +1335,8 @@ inline std::unique_ptr<ICasparModelAdapter> CreateCasparAdapter(
+@@ -912,6 +1500,10 @@ inline std::unique_ptr<ICasparModelAdapter> CreateCasparAdapter(
        return std::make_unique<SimpleRadialAdapter>();
      case CameraModelId::kPinhole:
        return std::make_unique<PinholeAdapter>();
++    case CameraModelId::kFullOpenCV:
++      return std::make_unique<FullOpenCVAdapter>();
 +    case CameraModelId::kOpenCVFisheye:
 +      return std::make_unique<OpenCVFisheyeAdapter>();
      default:
        return nullptr;
    }
-@@ -917,8 +1346,13 @@ inline std::unique_ptr<ICasparModelAdapter> CreateCasparAdapter(
+@@ -921,8 +1513,13 @@ inline std::unique_ptr<ICasparModelAdapter> CreateCasparAdapter(
  // Caspar release. Order:
  //   1. Node type counts, alphabetical by type name
  //   2. Factor counts, in registration order from caspar_generate.py:
@@ -538,16 +723,18 @@ index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590
  inline caspar::GraphSolver CreateSolver(
      const caspar::SolverParams<StorageType>& params,
      const CasparSolverSizing& sz,
-@@ -926,10 +1360,18 @@ inline caspar::GraphSolver CreateSolver(
+@@ -930,10 +1527,20 @@ inline caspar::GraphSolver CreateSolver(
    return caspar::GraphSolver(
        params,
        // Node type counts (alphabetical):
++      //   FullOpenCVPose,
 +      //   OpenCVFisheyeCalib, OpenCVFisheyeFocalAndExtra,
 +      //   OpenCVFisheyePose, OpenCVFisheyePrincipalPoint,
        //   PinholeCalib, PinholeFocal, PinholePose,
        //   PinholePrincipalPoint, Point,
        //   SimpleRadialCalib, SimpleRadialFocalAndExtra,
        //   SimpleRadialPose, SimpleRadialPrincipalPoint
++      sz.num_full_opencv_poses,      // FullOpenCVPose
 +      sz.num_opencv_fisheye_calibs,  // OpenCVFisheyeCalib     (merged pool)
 +      sz.num_opencv_fisheye_calibs,  // OpenCVFisheyeFocalAndExtra
 +                                     // (split pool)
@@ -557,7 +744,7 @@ index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590
        sz.num_pinhole_calibs,        // PinholeCalib        (merged pool)
        sz.num_pinhole_calibs,        // PinholeFocal         (split pool)
        sz.num_pinhole_poses,         // PinholePose
-@@ -952,6 +1394,11 @@ inline caspar::GraphSolver CreateSolver(
+@@ -956,6 +1563,11 @@ inline caspar::GraphSolver CreateSolver(
        sz.num_pinhole_fixed_pose,              // {pose}
        sz.num_pinhole_fixed_point,             // {point}
        sz.num_pinhole_fixed_pose_fixed_point,  // {pose, point}
@@ -569,7 +756,7 @@ index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590
        // simple_radial_split factor counts (11 variants, must_fix_one_of):
        sz.num_simple_radial_split_fixed_focal_and_extra,             // r=1 {fae}
        sz.num_simple_radial_split_fixed_principal_point,             // r=1 {pp}
-@@ -980,6 +1427,20 @@ inline caspar::GraphSolver CreateSolver(
+@@ -984,6 +1596,23 @@ inline caspar::GraphSolver CreateSolver(
        sz.num_pinhole_split_fixed_pose_fixed_focal_fixed_point,            // r=3
        sz.num_pinhole_split_fixed_pose_fixed_principal_point_fixed_point,  // r=3
        sz.num_pinhole_split_fixed_focal_fixed_principal_point_fixed_point,  // r=3
@@ -587,14 +774,17 @@ index 9a326f0c877650fe95daaec568717c538f1b79f2..36a12d7e5da52943f503994f292e9590
 +      sz.num_opencv_fisheye_split_fixed_pose_fixed_focal_and_extra_fixed_point,  // r=3
 +      sz.num_opencv_fisheye_split_fixed_pose_fixed_principal_point_fixed_point,  // r=3
 +      sz.num_opencv_fisheye_split_fixed_focal_and_extra_fixed_principal_point_fixed_point,  // r=3
++      // full_opencv fixed-calibration factors (registered last):
++      sz.num_full_opencv_split_fixed_focal_and_extra_fixed_principal_point,
++      sz.num_full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point,
        device_id);
  }
  
 diff --git a/src/thirdparty/Symforce-Caspar/caspar_generate.py b/src/thirdparty/Symforce-Caspar/caspar_generate.py
-index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44003b2033 100644
+index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a5365c189ab 100644
 --- a/src/thirdparty/Symforce-Caspar/caspar_generate.py
 +++ b/src/thirdparty/Symforce-Caspar/caspar_generate.py
-@@ -22,6 +22,54 @@ import symforce.symbolic as sf  # noqa: E402
+@@ -23,6 +23,54 @@ import symforce.symbolic as sf  # noqa: E402
  from symforce import typing as T  # noqa: E402
  from symforce.caspar import CasparLibrary  # noqa: E402
  from symforce.caspar import memory as mem  # noqa: E402
@@ -649,7 +839,7 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
  
  
  # Point and ConstPoint are shared across camera models so that different
-@@ -120,6 +168,54 @@ class ConstPinholeFocal(sf.V2):
+@@ -121,6 +169,85 @@ class ConstPinholeFocal(sf.V2):
      pass
  
  
@@ -701,10 +891,41 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
 +    pass
 +
 +
++# FullOpenCV: camera.params = [fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6]
++# (COLMAP's FullOpenCVCameraModel, sensor/models.h).  Twelve parameters: like
++# THIN_PRISM_FISHEYE (upstream PR #4657), a merged or split *tunable* calib of
++# this size does not fit the 48 KB shared-memory budget, so only the
++# fixed-calibration factors are generated, with the calib passed as constant
++# sequential data:
++#   focal_and_extra = [fx, fy, k1, k2, p1, p2, k3, k4, k5, k6]
++#   principal_point = [cx, cy]
++# That is the calibrated-rig case (fixed intrinsics, fixed sensor_from_rig,
++# variable points, fixed or variable rig poses), which is what a rig with an
++# 8-coefficient OpenCV calibration runs.
++class FullOpenCVPose(sf.Pose3):
++    pass
++
++
++class ConstFullOpenCVPose(sf.Pose3):
++    pass
++
++
++class ConstFullOpenCVSensorFromRig(sf.Pose3):
++    pass
++
++
++class ConstFullOpenCVPrincipalPoint(sf.V2):
++    pass  # [cx, cy]
++
++
++class ConstFullOpenCVFocalAndExtra(sf.Matrix(10, 1).__class__):
++    pass  # [fx, fy, k1, k2, p1, p2, k3, k4, k5, k6]
++
++
  # Constant sensor-from-rig calibration, stored as ConstantSequential
  # (7 floats = 28 B f32 / 56 B f64 loaded from global memory per factor).
  # ConstantShared would deduplicate to one slot per unique sensor per block,
-@@ -137,6 +233,10 @@ class ConstPinholeSensorFromRig(sf.Pose3):
+@@ -138,6 +265,10 @@ class ConstPinholeSensorFromRig(sf.Pose3):
      pass
  
  
@@ -713,9 +934,9 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
 +
 +
  def _make_variant(
-     core_fn, name: str, base_params: list, hints: dict, fixed: dict
- ):
-@@ -262,6 +362,62 @@ def pinhole_core(
+     core_fn: Callable[..., Any],
+     name: str,
+@@ -267,6 +398,62 @@ def pinhole_core(
      return sf.V2([fx * p[0] + cx, fy * p[1] + cy]) - pixel
  
  
@@ -778,7 +999,7 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
  # Split cores delegate to merged cores to avoid duplicating projection math.
  
  
-@@ -311,6 +467,42 @@ def pinhole_split_core(
+@@ -318,6 +505,117 @@ def pinhole_split_core(
      return pinhole_core(pose, sensor_from_rig, calib, point, pixel)
  
  
@@ -818,10 +1039,85 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
 +    return opencv_fisheye_core(pose, sensor_from_rig, calib, point, pixel)
 +
 +
++def full_opencv_project(point_cam, focal_and_extra, principal_point) -> sf.V2:
++    """COLMAP FULL_OPENCV projection (FullOpenCVCameraModel, sensor/models.h).
++
++    With (u, v) = (X/Z, Y/Z) and r2 = u^2 + v^2:
++
++        radial = (1 + k1 r2 + k2 r2^2 + k3 r2^3) / (1 + k4 r2 + k5 r2^2 + k6 r2^3)
++        x = u * radial + 2 p1 u v + p2 (r2 + 2 u^2)
++        y = v * radial + 2 p2 u v + p1 (r2 + 2 v^2)
++        (X, Y) = (fx x + cx, fy y + cy)
++
++    i.e. COLMAP's Distortion() adds (du, dv) = (x - u, y - v) to (u, v).
++    Bundle adjustment needs only this forward map, so the regions where the
++    rational model does not invert play no part.
++    """
++    fx, fy, k1, k2, p1, p2, k3, k4, k5, k6 = focal_and_extra
++    cx, cy = principal_point
++    depth = point_cam[2]
++    p = sf.V2(point_cam[:2]) / (depth + sf.epsilon() * sf.sign_no_zero(depth))
++    u, v = p[0], p[1]
++    u2 = u * u
++    uv = u * v
++    v2 = v * v
++    r2 = u2 + v2
++    r4 = r2 * r2
++    r6 = r4 * r2
++    radial = (1 + k1 * r2 + k2 * r4 + k3 * r6) / (1 + k4 * r2 + k5 * r4 + k6 * r6)
++    x = u * radial + 2 * p1 * uv + p2 * (r2 + 2 * u2)
++    y = v * radial + 2 * p2 * uv + p1 * (r2 + 2 * v2)
++    return sf.V2([fx * x + cx, fy * y + cy])
++
++
++def full_opencv_split_fixed_focal_and_extra_fixed_principal_point(
++    pose: T.Annotated[FullOpenCVPose, mem.TunableShared],
++    sensor_from_rig: T.Annotated[
++        ConstFullOpenCVSensorFromRig, mem.ConstantSequential
++    ],
++    focal_and_extra: T.Annotated[
++        ConstFullOpenCVFocalAndExtra, mem.ConstantSequential
++    ],
++    principal_point: T.Annotated[
++        ConstFullOpenCVPrincipalPoint, mem.ConstantSequential
++    ],
++    point: T.Annotated[Point, mem.TunableShared],
++    pixel: T.Annotated[ConstPixel, mem.ConstantSequential],
++) -> sf.V2:
++    """FULL_OPENCV fixed-calib pose+point BA residual."""
++    cam_T_world = sensor_from_rig * pose
++    return (
++        full_opencv_project(cam_T_world * point, focal_and_extra, principal_point)
++        - pixel
++    )
++
++
++def full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point(
++    point: T.Annotated[Point, mem.TunableShared],
++    sensor_from_rig: T.Annotated[
++        ConstFullOpenCVSensorFromRig, mem.ConstantSequential
++    ],
++    pose: T.Annotated[ConstFullOpenCVPose, mem.ConstantSequential],
++    focal_and_extra: T.Annotated[
++        ConstFullOpenCVFocalAndExtra, mem.ConstantSequential
++    ],
++    principal_point: T.Annotated[
++        ConstFullOpenCVPrincipalPoint, mem.ConstantSequential
++    ],
++    pixel: T.Annotated[ConstPixel, mem.ConstantSequential],
++) -> sf.V2:
++    """FULL_OPENCV fixed-pose/fixed-calib point BA residual."""
++    cam_T_world = sensor_from_rig * pose
++    return (
++        full_opencv_project(cam_T_world * point, focal_and_extra, principal_point)
++        - pixel
++    )
++
++
  dtype = mem.DType.DOUBLE if precision == "f64" else mem.DType.FLOAT
  caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
  
-@@ -348,6 +540,11 @@ FIXABLE_PINHOLE = {
+@@ -355,6 +653,11 @@ FIXABLE_PINHOLE = {
      "point": ConstPoint,
  }
  
@@ -833,7 +1129,7 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
  FIXABLE_SIMPLE_RADIAL_SPLIT = {
      "pose": ConstSimpleRadialPose,
      "focal_and_extra": ConstSimpleRadialFocalAndExtra,
-@@ -362,6 +559,13 @@ FIXABLE_PINHOLE_SPLIT = {
+@@ -369,6 +672,13 @@ FIXABLE_PINHOLE_SPLIT = {
      "point": ConstPoint,
  }
  
@@ -847,7 +1143,7 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
  # Merged: BASE, FIXED_POSE, FIXED_POINT, FIXED_POSE_FIXED_POINT (4 variants).
  register_camera_model(
      caslib,
-@@ -373,6 +577,13 @@ register_camera_model(
+@@ -380,6 +690,13 @@ register_camera_model(
  register_camera_model(
      caslib, "pinhole", pinhole_core, FIXABLE_PINHOLE, include_all_fixed=True
  )
@@ -861,7 +1157,7 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
  
  # Split: all variants where at least one of
  # {focal_and_extra, principal_point} is fixed (11 variants per model).
-@@ -390,7 +601,30 @@ register_camera_model(
+@@ -397,6 +714,34 @@ register_camera_model(
      FIXABLE_PINHOLE_SPLIT,
      must_fix_one_of={"focal", "principal_point"},
  )
@@ -872,7 +1168,7 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
 +    FIXABLE_OPENCV_FISHEYE_SPLIT,
 +    must_fix_one_of={"focal_and_extra", "principal_point"},
 +)
- 
++
 +# ---------------------------------------------------------------------------
 +# Deliberate side effect of regenerating solver.{h,cc}: `initial_score`.
 +#
@@ -889,6 +1185,10 @@ index 7dbea6283630478b683c334529503f1724a9d6d6..06fb06f987482cc777273d076ff1ad44
 +# number is meaningless.  Everything else in the regenerated aggregates is the
 +# OPENCV_FISHEYE wiring added below.
 +# ---------------------------------------------------------------------------
++caslib.add_factor(full_opencv_split_fixed_focal_and_extra_fixed_principal_point)
++caslib.add_factor(
++    full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point
++)
+ 
  out_dir = Path(f"{sys.argv[1]}")
  print(f"Generating Caspar kernels with precision {precision}: {out_dir}")
- caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
