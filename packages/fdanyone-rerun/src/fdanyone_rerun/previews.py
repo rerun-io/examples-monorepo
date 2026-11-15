@@ -1,34 +1,14 @@
 """Denoising previews: each step's x_0 estimate of every view, decoded cheaply by TAEW2.2.
 
-The STEP_HOOKS seam of recipes/4danyone-src hands over each group's clean-latent estimate; the full Wan 2.2
+The STEP_HOOKS seam of fdanyone.model.denoise hands over each group's clean-latent estimate; the full Wan 2.2
 VAE would take seconds per view, the TAEW2.2 tiny decoder takes milliseconds for one latent frame.
 """
-
-from pathlib import Path
 
 import numpy as np
 import torch
 from jaxtyping import Float, UInt8
 from numpy import ndarray
 from taehv import TAEHV
-
-LATENT_CHANNELS: int = 48
-"""Wan 2.2 5B (TI2V) latent channels; TAEW2.2 decodes these (taew2_1 would not)."""
-
-
-def load_preview_decoder(checkpoint: Path, device: str) -> TAEHV:
-    """TAEW2.2 in fp16 on ``device``.
-
-    Raises:
-        FileNotFoundError: When the checkpoint is missing (``_download-fdanyone-models`` fetches it).
-        ValueError: When it is not a Wan 2.2 5B decoder (48 channels, patch size 2).
-    """
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f"TAEW2.2 checkpoint missing: {checkpoint} (pixi run -e fdanyone-rerun fdanyone-download)")
-    decoder: TAEHV = TAEHV(checkpoint_path=str(checkpoint))
-    if (decoder.latent_channels, decoder.patch_size) != (LATENT_CHANNELS, 2):
-        raise ValueError(f"{checkpoint} is not TAEW2.2 (latent_channels={decoder.latent_channels}, patch_size={decoder.patch_size})")
-    return decoder.to(device=device, dtype=torch.float16).eval().requires_grad_(False)
 
 
 def preview_latent_index(num_latent_frames: int) -> int:

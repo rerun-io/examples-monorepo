@@ -16,7 +16,7 @@ def _streamer(tmp_path: Path) -> tuple[RunStreamer, rr.MemoryRecording]:
     recording = rr.RecordingStream("fdanyone-rerun-test")
     memory: rr.MemoryRecording = recording.memory_recording()
     config = RunConfig(video=tmp_path / "clip.mp4", output_dir=tmp_path / "run", layout=ViewLayout(views_per_layer=12))
-    return RunStreamer(config, recording, preview_decoder=None), memory
+    return RunStreamer(config, recording, previews=False), memory
 
 
 @pytest.mark.parametrize("num_views", [6, 12, 24])
@@ -29,7 +29,7 @@ def test_generation_stage_switches_to_the_diffusion_layout(tmp_path: Path) -> No
     streamer, memory = _streamer(tmp_path)
     streamer.on_stage(GENERATION_STAGE, 0.45)
     streamer.on_step(0, None, torch.zeros(6, 48, 31, 2, 2))  # RCP proposals: nothing to preview
-    streamer.on_step(0, (0, 1), torch.zeros(2, 48, 31, 2, 2))  # no decoder: no previews
+    streamer.on_step(0, (0, 1), torch.zeros(2, 48, 31, 2, 2))  # previews off: nothing decoded
     streamer.recording.flush()
     assert len(memory.drain_as_bytes()) > 0
 

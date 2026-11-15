@@ -153,8 +153,6 @@ BASE24 = DenoisingProfile(
 def _turbo_kept_steps() -> tuple[int, ...] | None:
     """``FDANYONE_TURBO_KEPT_STEPS=0,2,3`` runs a subset of the four trained Turbo timesteps (fewer DiT passes)."""
 
-    import os
-
     value = os.environ.get("FDANYONE_TURBO_KEPT_STEPS", "").strip()
     return tuple(int(item) for item in value.split(",")) if value else None
 

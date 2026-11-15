@@ -14,7 +14,6 @@ from pathlib import Path
 import gradio as gr
 import rerun as rr
 from gradio_rerun import Rerun
-from taehv import TAEHV
 
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, PACKAGE_ROOT
 from fdanyone_rerun.core import RunConfig, ViewLayout
@@ -71,7 +70,7 @@ class Config:
     """Gradio HTTP port."""
 
 
-def run_app(video: str | None, views_per_layer: int | float, seed: int | float, decoder: TAEHV | None) -> Iterator[tuple[bytes | None, str]]:
+def run_app(video: str | None, views_per_layer: int | float, seed: int | float) -> Iterator[tuple[bytes | None, str]]:
     """Run 4DAnyone on ``video`` in a worker thread and pump the recording into the viewer until it ends."""
     if video is None:
         yield None, "Choose a video first."
@@ -82,7 +81,7 @@ def run_app(video: str | None, views_per_layer: int | float, seed: int | float, 
     )
     recording: rr.RecordingStream = rr.RecordingStream(APPLICATION_ID, recording_id=run_id)
     stream: rr.BinaryStream = recording.binary_stream()
-    streamer: RunStreamer = RunStreamer(config, recording, decoder)
+    streamer: RunStreamer = RunStreamer(config, recording, previews=True)
     errors: list[BaseException] = []
 
     def work() -> None:
@@ -107,7 +106,7 @@ def run_app(video: str | None, views_per_layer: int | float, seed: int | float, 
         streamer.stop.set()
 
 
-def build(decoder: TAEHV | None, examples: list[str] | None = None) -> gr.Blocks:
+def build(examples: list[str] | None = None) -> gr.Blocks:
     """The input, settings, Run and Stop on the left; the streaming Rerun viewer on the right."""
     with gr.Blocks(title="4DAnyone × Rerun", fill_height=True) as demo:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
@@ -132,10 +131,7 @@ def build(decoder: TAEHV | None, examples: list[str] | None = None) -> gr.Blocks
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%", elem_id="viewer"
                 )
 
-        def run(video_path: str | None, views_per_layer: int | float, seed_value: int | float) -> Iterator[tuple[bytes | None, str]]:
-            yield from run_app(video_path, views_per_layer, seed_value, decoder)
-
-        run_event = run_button.click(run, inputs=[video, views, seed], outputs=[viewer, status])
+        run_event = run_button.click(run_app, inputs=[video, views, seed], outputs=[viewer, status])
         stop.click(lambda: "Stopped.", outputs=[status], cancels=[run_event], queue=False)
     return demo
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import importlib
 import importlib.util
-import itertools
 import json
 import os
 import subprocess
@@ -22,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from fdanyone.errors import AssetError, VideoContractError
+from fdanyone.errors import AssetError
 from fdanyone.motion.result import SMPL_PARAMETER_NAMES, MotionResult
 from fdanyone.vendor.pytorch3d_compat import install_if_needed as install_pytorch3d_compat
 from fdanyone.video import CanonicalClip
@@ -61,7 +60,7 @@ def validate_gvhmr(root: str | Path) -> tuple[Path, str]:
                 stderr=subprocess.DEVNULL,
             ).strip()
         except (OSError, subprocess.CalledProcessError) as exc:
-            raise AssetError(f"GVHMR must be a git checkout: {path}") from exc
+            raise AssetError(f"GVHMR must be a git checkout or carry a REVISION file: {path}") from exc
     if len(revision) != 40:
         raise AssetError(f"Cannot identify the GVHMR revision at {path}.")
     return path, revision

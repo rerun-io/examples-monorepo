@@ -1,4 +1,4 @@
-"""The GVHMR run root of links to the installed tree."""
+"""The GVHMR run root: a copy of the installed tree beside the weights."""
 
 from pathlib import Path
 

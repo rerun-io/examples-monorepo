@@ -1,4 +1,4 @@
-"""The run core: view layouts and the observers attached to upstream (the STEP_HOOKS seam of recipes/4danyone-src)."""
+"""The run core: view layouts and the observers attached to upstream (the STEP_HOOKS seam of fdanyone.model.denoise)."""
 
 import logging
 from dataclasses import dataclass

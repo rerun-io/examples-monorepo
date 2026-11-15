@@ -1,6 +1,6 @@
 """The one run core the CLI and the app share: upstream 4DAnyone's pipeline with our observers attached.
 
-Upstream reports coarse progress on the ``fdanyone.progress`` logger and, with the STEP_HOOKS seam of recipes/4danyone-src, every
+Upstream reports coarse progress on the ``fdanyone.progress`` logger and, with the STEP_HOOKS seam in src/fdanyone, every
 denoising group step through ``fdanyone.model.denoise.STEP_HOOKS``. :func:`run_views` attaches a stage callback and a
 step callback for one run and always detaches them.
 """
@@ -15,6 +15,7 @@ from typing import Literal, TypeAlias
 
 import torch
 
+from fdanyone.views import VIEWS_PER_GROUP
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, gvhmr_root, model_dir
 from fdanyone_rerun.outputs import RunMetadata, read_run_metadata
 
@@ -23,10 +24,6 @@ StageCallback: TypeAlias = Callable[[str, float], None]
 """``on_stage(label, fraction)``: an upstream stage starts; ``fraction`` is its 0-1 position in the run."""
 StepCallback: TypeAlias = Callable[[int, tuple[int, ...] | None, torch.Tensor], None]
 """``on_step(step_index, view_indices, clean_estimate)``: one group finished a denoising step (STEP_HOOKS)."""
-
-VIEWS_PER_GROUP: int = 6
-"""Upstream denoises views in groups of six, so the total view count is a multiple of six."""
-
 
 @dataclass(frozen=True, slots=True)
 class ViewLayout:

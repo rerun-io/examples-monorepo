@@ -7,14 +7,14 @@ from dataclasses import dataclass
 
 import torch
 
-_FP8_WEIGHT_ONLY_PATTERN: re.Pattern[str] = re.compile(
+_DIT_PROJECTION_PATTERN: re.Pattern[str] = re.compile(
     r"blocks\.(?P<block>\d+)\."
     r"(?:(?:self_attn|self_attn_mvs|cross_attn)\.(?:q|k|v|o)|"
     r"ffn\.(?:0|2))"
 )
 
 QUANTIZED_BLOCK_RANGE: tuple[int, int] = (3, 26)
-"""Inclusive interior DiT block range the guide approves for FP8 projections."""
+"""Inclusive interior DiT block range quantized to FP8; the first and last blocks stay BF16."""
 
 FP8_DTYPE: torch.dtype = torch.float8_e4m3fn
 FP8_MAX: float = float(torch.finfo(torch.float8_e4m3fn).max)
@@ -28,13 +28,9 @@ _TINY_AMAX: float = 2.0**-100
 
 
 def is_quantizable_dit_projection(fqn: str) -> bool:
-    """Return whether an FQN is on the safe interior-projection allowlist.
+    """Return whether an FQN is an attention or FFN projection inside ``QUANTIZED_BLOCK_RANGE``."""
 
-    W8A8 uses the same boundary-protected projection set established by the
-    earlier weight-only experiment; the name describes the surviving policy.
-    """
-
-    match: re.Match[str] | None = _FP8_WEIGHT_ONLY_PATTERN.fullmatch(fqn)
+    match: re.Match[str] | None = _DIT_PROJECTION_PATTERN.fullmatch(fqn)
     if match is None:
         return False
     block_index: int = int(match.group("block"))
@@ -47,7 +43,7 @@ class FP8W8A8Report:
     """Summary of one W8A8 conversion."""
 
     module_count: int
-    """Number of guide-approved Linear modules replaced by FP8 linears."""
+    """Number of Linear modules replaced by FP8 linears."""
 
 
 class Fp8RowwiseLinear(torch.nn.Module):

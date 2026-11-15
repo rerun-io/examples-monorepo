@@ -13,9 +13,11 @@ import rerun as rr
 import torch
 from taehv import TAEHV
 
+from fdanyone.assets import TAEW2_2
+from fdanyone.model.vae import load_tiny_decoder
 from fdanyone_rerun.assets import model_dir
 from fdanyone_rerun.core import RunConfig, run_views
-from fdanyone_rerun.outputs import RunMetadata
+from fdanyone_rerun.outputs import RunMetadata, read_camera_rig
 from fdanyone_rerun.previews import decode_previews
 from fdanyone_rerun.rerun_log import (
     DIFFUSION_TIMELINE,
@@ -46,11 +48,11 @@ class RunCancelled(RuntimeError):
 class RunStreamer:
     """Logs one run into ``recording`` as it happens."""
 
-    def __init__(self, config: RunConfig, recording: rr.RecordingStream, preview_decoder: TAEHV | None) -> None:
+    def __init__(self, config: RunConfig, recording: rr.RecordingStream, previews: bool) -> None:
         self.config: RunConfig = config
         self.recording: rr.RecordingStream = recording
-        self.preview_decoder: TAEHV | None = preview_decoder
-        """TAEW2.2 (``previews.load_preview_decoder``); None logs no previews."""
+        self.previews: bool = previews
+        """Decode each denoising step's x_0 estimate with TAEW2.2 and log it."""
         self.stop: threading.Event = threading.Event()
         """Set from another thread to cancel at the next stage or step."""
         self.output_dir: Path = config.output_dir.expanduser().resolve()
@@ -84,11 +86,13 @@ class RunStreamer:
         """Upstream's step hook: decode and log each view's preview (the RCP proposals are not shown)."""
         if self.stop.is_set():
             raise RunCancelled("stopped")
-        if view_indices is None or self.preview_decoder is None:
+        if view_indices is None or not self.previews:
             return
+        # Upstream's cached TAEW2.2, shared with its target decode; loaded here, after run_views set the allocator policy.
+        decoder: TAEHV = load_tiny_decoder(model_dir() / TAEW2_2, str(clean_estimate.device))
         self.message(f"denoising step {step_index + 1}: views {', '.join(f'{view:02d}' for view in view_indices)}", step=step_index)
         self.recording.set_time(DIFFUSION_TIMELINE, sequence=step_index)
-        for view, image in zip(view_indices, decode_previews(self.preview_decoder, clean_estimate), strict=True):
+        for view, image in zip(view_indices, decode_previews(decoder, clean_estimate), strict=True):
             self.recording.log(preview_entity(view), rr.Image(image).compress(jpeg_quality=85))
         self.recording.reset_time()
 
@@ -104,7 +108,7 @@ class RunStreamer:
         self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
         log_source_video(self.config.video.expanduser().resolve(), self.recording)
         metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step)
-        log_cameras(self.output_dir, self.recording)
+        log_cameras(read_camera_rig(self.output_dir), self.output_dir, self.recording)
         self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
         generation = metadata.generation
         self.message(

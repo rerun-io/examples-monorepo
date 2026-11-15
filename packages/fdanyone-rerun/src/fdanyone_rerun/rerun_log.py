@@ -260,21 +260,20 @@ def log_source_video(video: Path, recording: rr.RecordingStream) -> None:
     log_video(video, Path(f"{SOURCE}/video"), timeline=TIMELINE, recording=recording)
 
 
-def log_cameras(output_dir: Path, recording: rr.RecordingStream) -> CameraRig:
+def log_cameras(rig: CameraRig, output_dir: Path, recording: rr.RecordingStream) -> None:
     """Every generated view's camera and video."""
-    rig: CameraRig = read_camera_rig(output_dir)
     for camera in rig.cameras:
         log_camera(camera, output_dir, recording)
-    return rig
 
 
 def log_run(output_dir: Path, video: Path | None, models: Path, recording: rr.RecordingStream) -> RunMetadata:
     """Log a finished run directory: body, source camera (+ the input clip when given) and every generated view."""
     metadata: RunMetadata = read_run_metadata(output_dir)
-    recording.send_blueprint(result_blueprint(len(read_camera_rig(output_dir).cameras)))
+    rig: CameraRig = read_camera_rig(output_dir)
+    recording.send_blueprint(result_blueprint(len(rig.cameras)))
     recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
     log_body(load_body(output_dir, models), float(metadata.input.frame_rate), recording)
     if video is not None:
         log_source_video(video, recording)
-    log_cameras(output_dir, recording)
+    log_cameras(rig, output_dir, recording)
     return metadata

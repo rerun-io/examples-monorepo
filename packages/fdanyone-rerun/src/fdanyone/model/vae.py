@@ -19,6 +19,7 @@ from fdanyone.errors import FourDAnyoneError
 from fdanyone.video import write_video
 
 if TYPE_CHECKING:
+    from taehv import TAEHV
     from torch import Tensor
 
     from fdanyone.vendor.diffsynth.models.wan_video_vae import WanVideoVAE38
@@ -43,10 +44,10 @@ def _rgb_frames(video: Tensor) -> tuple[np.ndarray, ...]:
     )
 
 
-_TINY_DECODERS: dict[tuple[str, str], object] = {}
+_TINY_DECODERS: dict[tuple[str, str], TAEHV] = {}
 
 
-def _load_tiny_decoder(path: Path, device: str):
+def load_tiny_decoder(path: Path, device: str) -> TAEHV:
     """TAEW2.2 (Wan 2.2 5B latents: 48 channels, patch 2) in fp16 on ``device``, loaded once per process."""
 
     import torch
@@ -260,7 +261,7 @@ class VaeExecutor:
                         slots.acquire()
                         try:
                             decoded = (
-                                _tiny_decode_view(_load_tiny_decoder(tiny_decoder, device), latents[index], device)
+                                _tiny_decode_view(load_tiny_decoder(tiny_decoder, device), latents[index], device)
                                 if tiny_decoder is not None
                                 else self._decode_view(model, latents[index], device)
                             )
