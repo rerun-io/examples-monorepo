@@ -894,7 +894,7 @@ def open_nvdec_decoder(video: CatalogVideo, fps: int, device: torch.device) -> F
 
 def is_fatal(error: BaseException) -> bool:
     """Failures of the stream machinery or of our own code (type violations, CUDA, memory): never retried or skipped."""
-    if isinstance(error, BeartypeException | torch.OutOfMemoryError | torch.AcceleratorError | MemoryError | _Stale):
+    if isinstance(error, (*BeartypeException, torch.OutOfMemoryError, torch.AcceleratorError, MemoryError, _Stale)):
         return True
     if isinstance(error, AssertionError | TypeError | IndexError | KeyError | AttributeError | NameError):
         return True
