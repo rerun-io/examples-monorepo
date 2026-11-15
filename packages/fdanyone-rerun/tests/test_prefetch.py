@@ -25,8 +25,8 @@ def loads(monkeypatch: pytest.MonkeyPatch) -> list[weakref.ref]:
         built.append(weakref.ref(model))
         return model
 
-    monkeypatch.setattr(loader, "_load_denoiser_now", load)
-    monkeypatch.setattr(loader, "_load_vae_now", load)
+    monkeypatch.setattr(loader, "load_denoiser", load)
+    monkeypatch.setattr(loader, "load_vae", load)
     return built
 
 
@@ -54,8 +54,8 @@ def test_close_waits_for_a_load_in_flight(monkeypatch: pytest.MonkeyPatch) -> No
         finished.set()
         return _Model()
 
-    monkeypatch.setattr(loader, "_load_denoiser_now", slow_load)
-    monkeypatch.setattr(loader, "_load_vae_now", lambda *_a, **_k: _Model())
+    monkeypatch.setattr(loader, "load_denoiser", slow_load)
+    monkeypatch.setattr(loader, "load_vae", lambda *_a, **_k: _Model())
     prefetch = _prefetch()
     assert started.wait(5)
     threading.Timer(0.2, release.set).start()
@@ -67,8 +67,8 @@ def test_a_failed_load_raises_where_it_is_taken(monkeypatch: pytest.MonkeyPatch)
     def broken(*_args: object, **_kwargs: object) -> _Model:
         raise OSError("checkpoint unreadable")
 
-    monkeypatch.setattr(loader, "_load_denoiser_now", broken)
-    monkeypatch.setattr(loader, "_load_vae_now", lambda *_a, **_k: _Model())
+    monkeypatch.setattr(loader, "load_denoiser", broken)
+    monkeypatch.setattr(loader, "load_vae", lambda *_a, **_k: _Model())
     prefetch = _prefetch()
     with pytest.raises(OSError, match="unreadable"):
         prefetch.take_denoiser()

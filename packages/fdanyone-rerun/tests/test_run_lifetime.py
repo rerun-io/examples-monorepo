@@ -37,10 +37,18 @@ def _gone(pid: int) -> bool:
     return False
 
 
+def _cancel_once_running(pid_file: Path, cancel: threading.Event) -> None:
+    """Set ``cancel`` once the worker has written its pid (it is blocked in its sleep by then)."""
+    deadline: float = time.monotonic() + 20.0
+    while not (pid_file.is_file() and pid_file.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    cancel.set()
+
+
 def test_cancel_stops_and_reaps_a_blocked_worker(worker_module: Path) -> None:
     pid_file: Path = worker_module / "pid"
     cancel = threading.Event()
-    threading.Thread(target=lambda: (pid_file_written(pid_file), cancel.set()), daemon=True).start()
+    threading.Thread(target=_cancel_once_running, args=(pid_file, cancel), daemon=True).start()
     started: float = time.perf_counter()
     with pytest.raises(RunCancelled):
         pipeline._run_worker("sleeper", pid_file, sys.executable, cancel)
@@ -48,52 +56,47 @@ def test_cancel_stops_and_reaps_a_blocked_worker(worker_module: Path) -> None:
     assert _gone(int(pid_file.read_text()))  # terminated and reaped: not even a zombie
 
 
-def pid_file_written(path: Path) -> None:
-    deadline: float = time.monotonic() + 20.0
-    while not (path.is_file() and path.read_text()) and time.monotonic() < deadline:
-        time.sleep(0.05)
-
-
 def test_a_failing_worker_still_raises(worker_module: Path) -> None:
     with pytest.raises(subprocess.CalledProcessError):
         pipeline._run_worker("failer", worker_module / "request.json", sys.executable, threading.Event())
 
 
-class _BlockingStreamer:
-    """A run that holds upstream's observers until it is stopped, then takes a while to clean up."""
+def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fdanyone_rerun.core import _ProgressHandler
 
     runs: list[tuple[float, float]] = []
 
-    def __init__(self, config: RunConfig, _recording: object, previews: bool) -> None:
-        self.stop: threading.Event = threading.Event()
+    class BlockingStreamer:
+        """A run that holds upstream's observers until it is stopped, then takes a while to clean up."""
 
-    def on_stage(self, *_args: object) -> None:
-        if self.stop.is_set():
-            raise RunCancelled("stopped")
+        def __init__(self, _config: RunConfig, _recording: object, previews: bool) -> None:
+            self.stop: threading.Event = threading.Event()
 
-    def run(self) -> None:
-        start: float = time.perf_counter()
-        if _BlockingStreamer.runs:  # a second run: the first run's observers must be gone by now
-            progress: logging.Logger = logging.getLogger("fdanyone.progress")
-            assert STEP_HOOKS == [] and not [h for h in progress.handlers if type(h).__name__ == "_ProgressHandler"]
-        else:
-            with observers(self.on_stage, lambda *_: None):
-                self.stop.wait(10)
-                time.sleep(1.5)  # cleanup after the stop (longer than one slot wait): the slot must stay taken
-        _BlockingStreamer.runs.append((start, time.perf_counter()))
+        def on_stage(self, *_args: object) -> None:
+            if self.stop.is_set():
+                raise RunCancelled("stopped")
 
+        def run(self) -> None:
+            start: float = time.perf_counter()
+            if runs:  # a second run: the first run's observers must be gone by now
+                progress: logging.Logger = logging.getLogger("fdanyone.progress")
+                assert STEP_HOOKS == [] and not any(isinstance(handler, _ProgressHandler) for handler in progress.handlers)
+            else:
+                with observers(self.on_stage, lambda *_: None):
+                    self.stop.wait(10)
+                    time.sleep(0.3)  # cleanup after the stop, longer than one slot wait: the slot must stay taken
+            runs.append((start, time.perf_counter()))
 
-def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app, "RunStreamer", _BlockingStreamer)
+    monkeypatch.setattr(app, "RunStreamer", BlockingStreamer)
     monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
-    _BlockingStreamer.runs = []
+    monkeypatch.setattr(app, "PUMP_SECONDS", 0.05)
     video: str = str(tmp_path / "clip.mp4")
     first = app.run_app(video, 6, 42)
     assert next(first)[1].startswith("Running")
-    first.close()  # Stop: Gradio closes the request's generator
+    first.close()  # Stop: the page cancels the request, which closes its generator
     statuses: list[str] = [status for _, status in app.run_app(video, 6, 42)]
     assert statuses[0] == "Waiting for the previous run to stop…"
     assert statuses[-1].startswith("Done")
-    (first_start, first_end), (second_start, _) = _BlockingStreamer.runs
+    (_, first_end), (second_start, _) = runs
     assert second_start >= first_end  # no overlap
     assert list(app.stop_status()) == ["Stopped."]

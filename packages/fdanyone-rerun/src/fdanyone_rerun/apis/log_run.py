@@ -21,7 +21,7 @@ class Config:
     output_dir: Path
     """The run directory (videos/, cameras.json, metadata.json, gvhmr/)."""
     video: Path | None = None
-    """The input video, to show it in the source camera; it lines up when the run started at 0 s."""
+    """The input video: the run's canonical clip is cut from it again (from the run's start time) for the source camera."""
 
 
 def main(config: Config) -> RunMetadata:

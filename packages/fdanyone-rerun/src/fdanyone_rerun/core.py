@@ -8,6 +8,7 @@ step callback for one run and always detaches them.
 import logging
 import shutil
 import threading
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -18,14 +19,15 @@ import torch
 
 from fdanyone.errors import ConfigurationError
 from fdanyone.video import validate_clip_options
-from fdanyone.views import ViewPlan, resolve_view_plan
+from fdanyone.views import resolve_view_plan
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, gvhmr_root, model_dir
 from fdanyone_rerun.outputs import RunMetadata, read_run_metadata
 
 AttentionChoice: TypeAlias = Literal["auto", "sageattention", "sdpa", "flash_attn_3"]
 StageCallback: TypeAlias = Callable[[str, float, Path | None], None]
 """``on_stage(label, fraction, canonical_clip)``: an upstream stage starts; ``fraction`` is its 0-1 position in the run;
-``canonical_clip`` is the run's 121-frame clip (an mp4, frame k at k / fps) on the stage that publishes it, else None."""
+``canonical_clip`` is the run's 121-frame clip (an mp4, frame k at k / fps) on the stage that publishes it, else None;
+it lives in upstream's scratch directory, so read it inside the callback (it is deleted when the run ends)."""
 StepCallback: TypeAlias = Callable[[int, tuple[int, ...] | None, torch.Tensor], None]
 """``on_step(step_index, view_indices, clean_estimate)``: one group finished a denoising step (STEP_HOOKS)."""
 
@@ -43,11 +45,8 @@ class ViewLayout:
     """Yaw range of each ring, degrees, 1..360 (the end is excluded)."""
 
     def __post_init__(self) -> None:
-        self.plan()  # upstream's checks, when the layout is made: before any output is deleted or work starts
-
-    def plan(self) -> ViewPlan:
-        """Upstream's validated, normalized view plan for this layout (RCP and TCR on, as every run uses them)."""
-        return resolve_view_plan(
+        # Upstream's checks, when the layout is made: before any output is deleted or work starts.
+        resolve_view_plan(
             views_per_layer=self.views_per_layer,
             layer_pitches=self.layer_pitches,
             start_yaw=self.start_yaw,
@@ -59,7 +58,7 @@ class ViewLayout:
     @property
     def num_views(self) -> int:
         """Total generated views."""
-        return self.plan().num_target_views
+        return self.views_per_layer * len(self.layer_pitches)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,29 +142,41 @@ def run_views(
     from fdanyone.pipeline import run_pipeline
 
     output_dir: Path = config.output_dir.expanduser().resolve()
+    # Overwrite moves the old run aside and deletes it only once this run has succeeded; a failed or stopped run puts
+    # it back (upstream publishes its output only on success, so nothing of the failed run is in the way).
+    previous: Path | None = None
     if config.overwrite and output_dir.exists():
-        shutil.rmtree(output_dir)
+        previous = output_dir.with_name(f".{output_dir.name}.previous-{uuid.uuid4().hex[:8]}")
+        output_dir.rename(previous)
     models: Path = model_dir()
-    with observers(on_stage, on_step):
-        run_pipeline(
-            video_path=str(config.video.expanduser().resolve()),
-            output_dir=str(output_dir),
-            model_dir=str(models),
-            checkpoint_path=None,
-            mhr70_regressor_path=None,
-            gvhmr_root=str(gvhmr_root(models)),
-            gpu_ids=None,
-            attention_backend=attention,
-            start_time=config.start_time,
-            target_fps="auto",
-            seed=config.seed,
-            views_per_layer=config.layout.views_per_layer,
-            layer_pitches=list(config.layout.layer_pitches),
-            start_yaw=config.layout.start_yaw,
-            yaw_span=config.layout.yaw_span,
-            enable_rcp=True,
-            enable_tcr=True,
-            enable_turbo=True,
-            cancel=cancel,
-        )
+    try:
+        with observers(on_stage, on_step):
+            run_pipeline(
+                video_path=str(config.video.expanduser().resolve()),
+                output_dir=str(output_dir),
+                model_dir=str(models),
+                checkpoint_path=None,
+                mhr70_regressor_path=None,
+                gvhmr_root=str(gvhmr_root(models)),
+                gpu_ids=None,
+                attention_backend=attention,
+                start_time=config.start_time,
+                target_fps="auto",
+                seed=config.seed,
+                views_per_layer=config.layout.views_per_layer,
+                layer_pitches=list(config.layout.layer_pitches),
+                start_yaw=config.layout.start_yaw,
+                yaw_span=config.layout.yaw_span,
+                enable_rcp=True,
+                enable_tcr=True,
+                enable_turbo=True,
+                cancel=cancel,
+            )
+    except BaseException:
+        if previous is not None:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            previous.rename(output_dir)
+        raise
+    if previous is not None:
+        shutil.rmtree(previous)
     return read_run_metadata(output_dir)

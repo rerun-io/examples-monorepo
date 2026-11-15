@@ -5,15 +5,13 @@ same-code repeat (README "Goldens"), never bit equality.
 """
 
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
 
 import av
 import numpy as np
 import pytest
-import rerun as rr
 import torch
-from av.video.codeccontext import VideoCodecContext
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 
@@ -37,24 +35,6 @@ def _frames_from_mp4(path: Path) -> list[UInt8[ndarray, "h w 3"]]:
         return [frame.to_ndarray(format="rgb24") for frame in container.decode(container.streams.video[0])]
 
 
-def _frames_from_rrd(entity: str) -> list[UInt8[ndarray, "h w 3"]]:
-    from simplecv.rerun_log_utils import read_video_stream_from_rrd
-
-    codec, _, samples = read_video_stream_from_rrd(str(GOLDEN_RRD), f"{entity}/video", "time")
-    names: dict[rr.VideoCodec, str] = {rr.VideoCodec.H264: "h264", rr.VideoCodec.H265: "hevc", rr.VideoCodec.AV1: "av1"}
-    decoder: VideoCodecContext = cast(VideoCodecContext, av.CodecContext.create(names[codec], "r"))
-    frames: list[UInt8[ndarray, "h w 3"]] = []
-    # One row per sample, each a list of blobs (one blob per VideoStream sample).
-    for row in samples.to_pylist():
-        for packet in decoder.parse(b"".join(bytes(blob) for blob in row)):
-            frames.extend(frame.to_ndarray(format="rgb24") for frame in decoder.decode(packet))
-    # Flush the parser (it holds the last access unit until it sees the next), then the decoder.
-    for packet in decoder.parse(None):
-        frames.extend(frame.to_ndarray(format="rgb24") for frame in decoder.decode(packet))
-    frames.extend(frame.to_ndarray(format="rgb24") for frame in decoder.decode(None))
-    return frames
-
-
 def _ssim(first: UInt8[ndarray, "h w 3"], second: UInt8[ndarray, "h w 3"]) -> float:
     from kornia.metrics import ssim
 
@@ -64,14 +44,14 @@ def _ssim(first: UInt8[ndarray, "h w 3"], second: UInt8[ndarray, "h w 3"]) -> fl
     return float(ssim(tensor(first), tensor(second), window_size=11).mean())
 
 
-def test_views_match_the_banked_reference(example_run: Path) -> None:
+def test_views_match_the_banked_reference(example_run: Path, rrd_video_frames: Callable[[Path, str, str], list[ndarray]]) -> None:
     if not GOLDEN_RRD.is_file():
         pytest.skip(f"needs the banked reference recording {GOLDEN_RRD} (README 'Goldens')")
     rig = read_camera_rig(example_run)
     scores: list[float] = []
     for camera in rig.cameras:
         ours: list[UInt8[ndarray, "h w 3"]] = _frames_from_mp4(example_run / camera.video)
-        reference: list[UInt8[ndarray, "h w 3"]] = _frames_from_rrd(camera_entity(camera.camera_id))
+        reference: list[UInt8[ndarray, "h w 3"]] = rrd_video_frames(GOLDEN_RRD, f"{camera_entity(camera.camera_id)}/video", "time")
         assert len(reference) == len(ours) == 121
         scores.append(float(np.mean([_ssim(ours[index], reference[index]) for index in SAMPLE_FRAMES])))
     print("per-view SSIM", [round(score, 4) for score in scores])

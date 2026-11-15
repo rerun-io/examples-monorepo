@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from taehv import TAEHV
     from torch import Tensor
 
-    from fdanyone.model.loader import GenerationPrefetch
     from fdanyone.vendor.diffsynth.models.wan_video_vae import WanVideoVAE38
 
 LOGGER = logging.getLogger("fdanyone")
@@ -93,10 +92,10 @@ class VaeExecutor:
         self.last_peak_vram_bytes: dict[str, dict[str, int]] = {}
 
     @classmethod
-    def load(cls, path: str | Path, devices: tuple[str, ...], prefetch: GenerationPrefetch | None = None) -> VaeExecutor:
+    def load(cls, path: str | Path, devices: tuple[str, ...]) -> VaeExecutor:
         from fdanyone.model.loader import load_vae
 
-        return cls(load_vae(path) if prefetch is None else prefetch.take_vae(), devices)
+        return cls(load_vae(path), devices)
 
     @property
     def latent_channels(self) -> int:

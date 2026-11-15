@@ -15,9 +15,10 @@ import gradio as gr
 import rerun as rr
 from gradio_rerun import Rerun
 
+from fdanyone.errors import RunCancelled
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, PACKAGE_ROOT
 from fdanyone_rerun.core import RunConfig, ViewLayout
-from fdanyone_rerun.stream import RunCancelled, RunStreamer
+from fdanyone_rerun.stream import RunStreamer
 
 APPLICATION_ID: str = "fdanyone-rerun"
 RUNS_DIR: Path = PACKAGE_ROOT / "data" / "app-runs"

@@ -4,7 +4,7 @@ Entity layout (one recording per run, timelines ``time`` (seconds) and ``frame``
 
 - ``world``: the canonical human world, Y up.
 - ``world/body/{mesh,keypoints,skeleton}``: the recovered SMPL-X body and its MHR70 conditioning keypoints.
-- ``world/source`` (+ ``/video``): the moving source camera, fitted to the body, and the input clip.
+- ``world/source`` (+ ``/video``): the moving source camera, fitted to the body, and the run's canonical clip.
 - ``world/cameras/<NN>`` (+ ``/video``): each generated view's camera and its video.
 
 Videos are ``rr.VideoStream`` samples (simplecv ``log_video``).
@@ -12,7 +12,7 @@ Videos are ``rr.VideoStream`` samples (simplecv ``log_video``).
 
 import colorsys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -22,6 +22,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, UInt32
 from numpy import ndarray
+from simplecv.ops.umeyama import umeyama_alignment
 from simplecv.rerun_log_utils import log_video
 
 from fdanyone_rerun.assets import gvhmr_root
@@ -69,28 +70,6 @@ class BodyTrack:
     """Source video size, pixels."""
 
 
-def source_transforms(
-    points_incam: Float32[ndarray, "frames points 3"], points_world: Float32[ndarray, "frames points 3"]
-) -> Float64[ndarray, "frames 4 4"]:
-    """The rigid source-camera pose per frame that maps the in-camera body onto the world body (Kabsch fit).
-
-    From upstream 4DAnyone's GUI (fdanyone/space/body.py, not copied).
-    """
-    source: Float64[ndarray, "frames points 3"] = np.asarray(points_incam, dtype=np.float64)
-    target: Float64[ndarray, "frames points 3"] = np.asarray(points_world, dtype=np.float64)
-    source_mean: Float64[ndarray, "frames 3"] = source.mean(axis=1)
-    target_mean: Float64[ndarray, "frames 3"] = target.mean(axis=1)
-    covariance: Float64[ndarray, "frames 3 3"] = np.swapaxes(source - source_mean[:, None], 1, 2) @ (target - target_mean[:, None])
-    left, _, right = np.linalg.svd(covariance)
-    correction: Float64[ndarray, "frames 3 3"] = np.broadcast_to(np.eye(3), covariance.shape).copy()
-    correction[:, 2, 2] = np.linalg.det(left @ right)
-    row_rotation: Float64[ndarray, "frames 3 3"] = left @ correction @ right
-    transforms: Float64[ndarray, "frames 4 4"] = np.broadcast_to(np.eye(4), (len(source), 4, 4)).copy()
-    transforms[:, :3, :3] = np.swapaxes(row_rotation, 1, 2)
-    transforms[:, :3, 3] = target_mean - np.einsum("fi,fij->fj", source_mean, row_rotation)
-    return transforms
-
-
 def load_body(output_dir: Path, models: Path) -> BodyTrack:
     """Rebuild the body track from the run's GVHMR motion (on the CPU) with upstream's own geometry code."""
     from fdanyone.assets import MHR70_REGRESSOR
@@ -100,7 +79,10 @@ def load_body(output_dir: Path, models: Path) -> BodyTrack:
     motion = MotionResult.load(output_dir / "gvhmr")
     geometry = _body_geometry(motion, models / MHR70_REGRESSOR, gvhmr_root(models), "cpu", include_mesh=True)
     assert geometry.mesh_world is not None and geometry.mesh_faces is not None
-    world_T_source: Float64[ndarray, "frames 4 4"] = source_transforms(geometry.keypoints_incam, geometry.keypoints_world)
+    # The source camera per frame: the rigid fit of the in-camera body onto the world body.
+    world_T_source: Float64[ndarray, "frames 4 4"] = np.stack(
+        [umeyama_alignment(incam, world).as_matrix() for incam, world in zip(geometry.keypoints_incam, geometry.keypoints_world, strict=True)]
+    )
     return BodyTrack(
         vertices=geometry.mesh_world,
         faces=geometry.mesh_faces,
@@ -256,20 +238,36 @@ def result_blueprint(num_views: int) -> rrb.Blueprint:
     )
 
 
-def log_canonical_clip(clip: Path, recording: rr.RecordingStream) -> None:
-    """The run's canonical clip in the source camera: upstream's 121 frames from ``start_time``, frame k at k / fps, the
-    clock of the body and the generated views. Upstream writes it RGB-lossless (4:4:4) for GVHMR; it is re-encoded
-    to H.264, which every Rerun viewer decodes."""
-    log_video(clip, Path(f"{SOURCE}/video"), timeline=TIMELINE, recording=recording, output_codec=rr.VideoCodec.H264)
+def _log_clip_frames(frames: Iterator[ndarray] | tuple[ndarray, ...], fps: Fraction, recording: rr.RecordingStream) -> None:
+    """The canonical clip in the source camera, frame k at k / fps: the clock of the body and the generated views.
 
+    Encoded once as 4:2:0 H.264 without B-frames, which every Rerun viewer decodes (the browser's too): upstream's own
+    clip is RGB-lossless High 4:4:4, which Rerun would pass through unchanged (~750 MB for a 4K clip).
+    """
+    from fdanyone.video import write_video
 
-def log_input_clip(video: Path, clip: InputRecord, recording: rr.RecordingStream) -> None:
-    """Cut a finished run's canonical clip from its input video again (upstream's own sampling) and log it."""
-    from fdanyone.video import decode_canonical_clip, write_gvhmr_video
-
-    canonical = decode_canonical_clip(video, num_frames=clip.num_frames, start_time=clip.start_time_seconds, fps=Fraction(clip.fps))
     with tempfile.TemporaryDirectory() as scratch:
-        log_canonical_clip(write_gvhmr_video(canonical, Path(scratch) / "canonical_clip.mp4"), recording)
+        clip: Path = write_video(frames, Path(scratch) / "source.mp4", fps, crf=18, preset="ultrafast")
+        log_video(clip, Path(f"{SOURCE}/video"), timeline=TIMELINE, recording=recording)
+
+
+def log_canonical_clip(clip: Path, recording: rr.RecordingStream) -> None:
+    """Log upstream's canonical clip mp4 (its 121 frames from ``start_time``, as the pipeline's stage record hands it over)."""
+    import av
+
+    from fdanyone.video import iter_rgb_video
+
+    with av.open(str(clip)) as container:
+        fps: Fraction = Fraction(str(container.streams.video[0].average_rate))
+    _log_clip_frames(iter_rgb_video(clip), fps, recording)
+
+
+def log_input_clip(video: Path, record: InputRecord, recording: rr.RecordingStream) -> None:
+    """Cut a finished run's canonical clip from its input video again (upstream's own sampling) and log it."""
+    from fdanyone.video import decode_canonical_clip
+
+    canonical = decode_canonical_clip(video, num_frames=record.num_frames, start_time=record.start_time_seconds, fps=record.frame_rate)
+    _log_clip_frames(canonical.rgb_frames, canonical.fps, recording)
 
 
 def log_cameras(rig: CameraRig, output_dir: Path, recording: rr.RecordingStream) -> None:

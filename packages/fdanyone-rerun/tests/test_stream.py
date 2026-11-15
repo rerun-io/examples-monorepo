@@ -27,7 +27,7 @@ def test_layouts_build_for_every_rig(num_views: int) -> None:
 
 def test_generation_stage_switches_to_the_diffusion_layout(tmp_path: Path) -> None:
     streamer, memory = _streamer(tmp_path)
-    streamer.on_stage(GENERATION_STAGE, 0.45)
+    streamer.on_stage(GENERATION_STAGE, 0.45, None)
     streamer.on_step(0, None, torch.zeros(6, 48, 31, 2, 2))  # RCP proposals: nothing to preview
     streamer.on_step(0, (0, 1), torch.zeros(2, 48, 31, 2, 2))  # previews off: nothing decoded
     streamer.recording.flush()
@@ -38,7 +38,7 @@ def test_stop_cancels_at_the_next_callback(tmp_path: Path) -> None:
     streamer, _ = _streamer(tmp_path)
     streamer.stop.set()
     with pytest.raises(RunCancelled):
-        streamer.on_stage("Generating target-view videos", 0.45)
+        streamer.on_stage("Generating target-view videos", 0.45, None)
     with pytest.raises(RunCancelled):
         streamer.on_step(1, (0,), torch.zeros(1, 48, 31, 2, 2))
 
@@ -46,19 +46,3 @@ def test_stop_cancels_at_the_next_callback(tmp_path: Path) -> None:
 def test_previews_show_the_middle_latent_frame() -> None:
     # 121 frames -> 31 latent frames; frame 15 decodes to pixel frame 60, the middle of the clip.
     assert preview_latent_index(31) == 15
-
-
-def test_source_transforms_recover_a_rigid_pose() -> None:
-    import numpy as np
-    from scipy.spatial.transform import Rotation
-
-    from fdanyone_rerun.rerun_log import source_transforms
-
-    rng = np.random.default_rng(0)
-    points_incam = rng.normal(size=(2, 70, 3)).astype(np.float32)
-    rotation = Rotation.from_euler("xyz", [10.0, -20.0, 35.0], degrees=True).as_matrix()
-    translation = np.array([0.5, -1.0, 2.0])
-    points_world = (points_incam.astype(np.float64) @ rotation.T + translation).astype(np.float32)
-    world_T_source = source_transforms(points_incam, points_world)
-    assert np.allclose(world_T_source[:, :3, :3], rotation, atol=1e-4)
-    assert np.allclose(world_T_source[:, :3, 3], translation, atol=1e-4)

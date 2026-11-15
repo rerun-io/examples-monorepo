@@ -96,3 +96,45 @@ def test_observers_detach_after_an_error() -> None:
     progress.info("after", extra={"fraction": 1.0})
     assert stages == [("Recovering human motion with GVHMR", 0.15, None)]
     assert STEP_HOOKS == []
+
+
+def test_overwrite_keeps_the_old_run_until_the_new_one_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fdanyone import device, pipeline
+    from fdanyone.errors import VideoContractError
+    from fdanyone_rerun import core
+
+    class Published(Exception):
+        """Raised by the patched metadata read: the run finished and published."""
+
+    output_dir: Path = tmp_path / "runs" / "example"
+    output_dir.mkdir(parents=True)
+    (output_dir / "metadata.json").write_text("old")
+    monkeypatch.setattr(core, "gvhmr_root", lambda models: tmp_path)
+    monkeypatch.setattr(device, "has_low_memory_gpu", lambda _devices: False)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "")
+
+    def fails(**_kwargs: object) -> dict:
+        Path(str(_kwargs["output_dir"])).mkdir()  # whatever a failed run leaves behind goes too
+        raise VideoContractError("the clip is shorter than 121 frames")
+
+    monkeypatch.setattr(pipeline, "run_pipeline", fails)
+    with pytest.raises(VideoContractError):
+        core.run_views(RunConfig(output_dir=output_dir, overwrite=True))
+    assert (output_dir / "metadata.json").read_text() == "old"
+    assert [path.name for path in output_dir.parent.iterdir()] == ["example"]
+
+    def publishes(**kwargs: object) -> dict:
+        new: Path = Path(str(kwargs["output_dir"]))
+        new.mkdir()
+        (new / "metadata.json").write_text("new")
+        return {}
+
+    def read(_output_dir: Path) -> core.RunMetadata:
+        raise Published
+
+    monkeypatch.setattr(pipeline, "run_pipeline", publishes)
+    monkeypatch.setattr(core, "read_run_metadata", read)
+    with pytest.raises(Published):
+        core.run_views(RunConfig(output_dir=output_dir, overwrite=True))
+    assert (output_dir / "metadata.json").read_text() == "new"
+    assert [path.name for path in output_dir.parent.iterdir()] == ["example"]

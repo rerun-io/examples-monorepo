@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -103,43 +101,41 @@ def _inline_workers() -> bool:
 
     For hosts where a grandchild process cannot use the GPU (a Hugging Face
     ZeroGPU worker). The subprocess default keeps each worker's CUDA flags and
-    frees its memory with the process.
+    frees its memory with the process. Inline, GVHMR's motion recovery changes
+    the process working directory (gvhmr_imports) while it runs, and Stop waits
+    for an inline worker to finish.
     """
 
     return os.environ.get("FDANYONE_INLINE_WORKERS") == "1"
 
 
-def _run_worker(module: str, request_path: Path, worker_python: str, cancel: Event | None = None) -> None:
+def _run_worker(module: str, request_path: Path, worker_python: str, cancel: Event | None) -> None:
     """Run one worker entry point, as a subprocess or (inline) in this process.
 
-    The subprocess is this call's own: when ``cancel`` is set (or this thread raises), its process group gets SIGTERM,
-    then SIGKILL after 10 s, and it is reaped before the error propagates (RunCancelled on cancel). An inline worker
+    The subprocess is this call's own: when ``cancel`` is set (or this thread raises), it gets SIGTERM, then SIGKILL
+    after 10 s, and it is reaped before the error propagates (RunCancelled on cancel). It stays in this process group,
+    so a Ctrl-C in the terminal reaches it too. An inline worker
     cannot be interrupted; it runs to its end.
     """
 
     if not _inline_workers():
         command = [worker_python, "-m", module, str(request_path)]
-        child = subprocess.Popen(command, env=_worker_environment(), start_new_session=True)
+        stop = Event() if cancel is None else cancel
+        child = subprocess.Popen(command, env=_worker_environment())
         try:
-            while True:
-                try:
-                    returncode = child.wait(timeout=0.25)
-                    break
-                except subprocess.TimeoutExpired:
-                    if cancel is not None and cancel.is_set():
-                        raise RunCancelled(f"stopped during {module}") from None
+            while child.poll() is None:
+                if stop.wait(0.25):
+                    raise RunCancelled(f"stopped during {module}")
         except BaseException:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(child.pid, signal.SIGTERM)
+            child.terminate()
             try:
                 child.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(child.pid, signal.SIGKILL)
+                child.kill()
                 child.wait()
             raise
-        if returncode:
-            raise subprocess.CalledProcessError(returncode, command)
+        if child.returncode:
+            raise subprocess.CalledProcessError(child.returncode, command)
         return
     import gc
     import importlib
@@ -160,7 +156,7 @@ def _run_motion(
     device: str,
     worker_python: str,
     clip_metadata: Path,
-    cancel: Event | None = None,
+    cancel: Event | None,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     request_path = output_dir / ".motion-worker-request.json"
@@ -195,7 +191,7 @@ def _build_conditioning(
     gvhmr_root: Path,
     device: str,
     worker_python: str,
-    cancel: Event | None = None,
+    cancel: Event | None,
 ):
     from fdanyone.skeleton.pipeline import Conditioning
 

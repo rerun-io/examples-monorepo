@@ -67,7 +67,7 @@ class RunStreamer:
         self.recording.log(PROGRESS, rr.TextLog(text, level=rr.TextLogLevel.INFO))
         self.recording.reset_time()
 
-    def on_stage(self, label: str, fraction: float, canonical_clip: Path | None = None) -> None:
+    def on_stage(self, label: str, fraction: float, canonical_clip: Path | None) -> None:
         """Upstream's stage callback: log the canonical clip once it exists, and switch the layout at phase boundaries."""
         if self.stop.is_set():
             raise RunCancelled("stopped")

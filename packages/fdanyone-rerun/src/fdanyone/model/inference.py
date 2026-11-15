@@ -390,18 +390,21 @@ def generate_views(
     vae = None
     try:
         with metrics.stage("model_load"):
-            if not plan.needs_primary_denoiser:
-                denoiser = None
-            elif prefetch is not None:
-                denoiser = prefetch.take_denoiser()
+            if prefetch is not None:
+                denoiser = prefetch.take_denoiser() if plan.needs_primary_denoiser else None
+                vae = VaeExecutor(prefetch.take_vae(), plan.candidate_devices)
             else:
-                denoiser = load_denoiser(
-                    checkpoint_path=checkpoint_path,
-                    turbo_lora_path=turbo_lora_path,
-                    profile=denoising_profile,
-                    attention_backend=attention_backend,
+                denoiser = (
+                    load_denoiser(
+                        checkpoint_path=checkpoint_path,
+                        turbo_lora_path=turbo_lora_path,
+                        profile=denoising_profile,
+                        attention_backend=attention_backend,
+                    )
+                    if plan.needs_primary_denoiser
+                    else None
                 )
-            vae = VaeExecutor.load(assets.vae, plan.candidate_devices, prefetch)
+                vae = VaeExecutor.load(assets.vae, plan.candidate_devices)
 
         with metrics.stage("source_encode"):
             source_video = _channels_last_source_layout(conditioning.load_source_tensor())

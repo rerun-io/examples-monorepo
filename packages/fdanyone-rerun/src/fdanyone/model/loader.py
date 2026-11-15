@@ -178,13 +178,13 @@ class GenerationPrefetch:
     ) -> None:
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="model-prefetch")
         self._denoiser: Future[Denoiser] | None = self._pool.submit(
-            _load_denoiser_now,
+            load_denoiser,
             checkpoint_path=checkpoint_path,
             turbo_lora_path=turbo_lora_path,
             profile=profile,
             attention_backend=attention_backend,
         )
-        self._vae: Future | None = self._pool.submit(_load_vae_now, vae_path)
+        self._vae: Future | None = self._pool.submit(load_vae, vae_path)
 
     def take_denoiser(self) -> Denoiser:
         future, self._denoiser = self._denoiser, None
@@ -209,10 +209,6 @@ class GenerationPrefetch:
 def load_vae(path: str | Path):
     """Load the frozen Wan VAE as an independent generation stage."""
 
-    return _load_vae_now(path)
-
-
-def _load_vae_now(path: str | Path):
     import torch
 
     return _load_vae(Path(path), torch.bfloat16)
@@ -226,22 +222,6 @@ def load_denoiser(
     attention_backend: str,
 ) -> Denoiser:
     """Load one DiT and configure its denoising trajectory."""
-
-    return _load_denoiser_now(
-        checkpoint_path=checkpoint_path,
-        turbo_lora_path=turbo_lora_path,
-        profile=profile,
-        attention_backend=attention_backend,
-    )
-
-
-def _load_denoiser_now(
-    *,
-    checkpoint_path: str | Path,
-    turbo_lora_path: str | Path | None,
-    profile: DenoisingProfile,
-    attention_backend: str,
-) -> Denoiser:
 
     import torch
 
