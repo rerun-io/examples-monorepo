@@ -2,23 +2,43 @@
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 import pytest
 import torch
 
-from fdanyone_rerun.core import ViewLayout, observers
+from fdanyone.errors import FourDAnyoneError
+from fdanyone_rerun.core import RunConfig, ViewLayout, observers
 
 
-def test_layout_counts_views_across_rings() -> None:
-    assert ViewLayout().num_views == 6
-    assert ViewLayout(views_per_layer=16, layer_pitches=(-10, 15, 35)).num_views == 48
+@pytest.mark.parametrize(
+    ("layout", "num_views"),
+    [(ViewLayout(), 6), (ViewLayout(views_per_layer=24), 24), (ViewLayout(views_per_layer=16, layer_pitches=(-10, 15, 35)), 48)],
+)
+def test_layout_counts_views_across_rings(layout: ViewLayout, num_views: int) -> None:
+    assert layout.num_views == num_views
 
 
-@pytest.mark.parametrize("views_per_layer", [1, 4, 16])
-def test_layout_rejects_counts_upstream_cannot_group(views_per_layer: int) -> None:
-    with pytest.raises(ValueError, match="multiple of 6"):
-        ViewLayout(views_per_layer=views_per_layer)
+@pytest.mark.parametrize(
+    ("layout", "run", "message"),
+    [
+        ({"views_per_layer": 16}, {}, "divisible by 6"),  # one 16-view ring: upstream groups views by six
+        ({"views_per_layer": 4}, {}, "divisible by 6"),
+        ({"layer_pitches": (99,)}, {}, "between -15 and 45"),
+        ({"layer_pitches": (15, 15)}, {}, "duplicates"),
+        ({"yaw_span": 0}, {}, "yaw_span"),
+        ({}, {"seed": -1}, "seed"),
+        ({}, {"start_time": -1.0}, "start_time"),
+    ],
+)
+def test_invalid_runs_are_rejected_before_overwrite_deletes_the_output(tmp_path: Path, layout: dict, run: dict, message: str) -> None:
+    output_dir: Path = tmp_path / "run"
+    output_dir.mkdir()
+    (output_dir / "metadata.json").write_text("{}")
+    with pytest.raises(FourDAnyoneError, match=message):
+        RunConfig(output_dir=output_dir, layout=ViewLayout(**layout), overwrite=True, **run)
+    assert (output_dir / "metadata.json").is_file()
 
 
 class _Scheduler:

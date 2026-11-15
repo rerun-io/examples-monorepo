@@ -15,7 +15,9 @@ from typing import Literal, TypeAlias
 
 import torch
 
-from fdanyone.views import VIEWS_PER_GROUP
+from fdanyone.errors import ConfigurationError
+from fdanyone.video import validate_clip_options
+from fdanyone.views import ViewPlan, resolve_view_plan
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, gvhmr_root, model_dir
 from fdanyone_rerun.outputs import RunMetadata, read_run_metadata
 
@@ -30,7 +32,7 @@ class ViewLayout:
     """Where the generated cameras sit around the person."""
 
     views_per_layer: int = 6
-    """Evenly spaced views on each pitch ring; the total must be a multiple of six."""
+    """Evenly spaced views on each pitch ring; the total must be divisible by six (upstream's group size)."""
     layer_pitches: tuple[int, ...] = (15,)
     """Ring pitch per layer, degrees, -15..45; positive is above the subject."""
     start_yaw: int = 0
@@ -39,14 +41,23 @@ class ViewLayout:
     """Yaw range of each ring, degrees, 1..360 (the end is excluded)."""
 
     def __post_init__(self) -> None:
-        total: int = self.views_per_layer * len(self.layer_pitches)
-        if total <= 0 or total % VIEWS_PER_GROUP:
-            raise ValueError(f"{total} views: the total view count must be a positive multiple of {VIEWS_PER_GROUP}")
+        self.plan()  # upstream's checks, when the layout is made: before any output is deleted or work starts
+
+    def plan(self) -> ViewPlan:
+        """Upstream's validated, normalized view plan for this layout (RCP and TCR on, as every run uses them)."""
+        return resolve_view_plan(
+            views_per_layer=self.views_per_layer,
+            layer_pitches=self.layer_pitches,
+            start_yaw=self.start_yaw,
+            yaw_span=self.yaw_span,
+            enable_rcp=True,
+            enable_tcr=True,
+        )
 
     @property
     def num_views(self) -> int:
         """Total generated views."""
-        return self.views_per_layer * len(self.layer_pitches)
+        return self.plan().num_target_views
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +78,12 @@ class RunConfig:
     """Attention backend; auto prefers FlashAttention-3, then SageAttention, then SDPA (SDPA on GPUs <= 24 GiB)."""
     overwrite: bool = False
     """Delete an existing run directory first (upstream refuses to write into one)."""
+
+    def __post_init__(self) -> None:
+        # Upstream's input checks, here so the CLI and the app reject a bad run before overwrite deletes anything.
+        if self.seed < 0:
+            raise ConfigurationError(f"seed must be non-negative, got {self.seed}.")
+        validate_clip_options(start_time=self.start_time, fps=None)
 
 
 class _ProgressHandler(logging.Handler):
