@@ -45,5 +45,6 @@ addopts = "-m 'not integration and not golden'"
 # Silence simplecv's `from_parent` DeprecationWarning (needs an upstream fix
 # in simplecv; until then we don't want it cluttering our test output).
 filterwarnings = [
+    "error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning",  # a package imported before the pytest-beartype hook would go unchecked
     "ignore:.*from_parent.*deprecated.*:DeprecationWarning",
 ]

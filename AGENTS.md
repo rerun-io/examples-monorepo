@@ -131,11 +131,14 @@ module in `pyproject.toml`:
 ```toml
 [tool.pytest.ini_options]
 beartype_packages = ["<module>"]
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 ```
 The plugin installs `beartype.claw` in `pytest_configure`, which runs *after* `tests/conftest.py` loads. A module a
 conftest has already imported stays unchecked (beartype's hooks "silently reduce to a noop"), so **`tests/conftest.py`
 never imports a workspace package at module level**: import inside the fixture or helper, types under
 `if TYPE_CHECKING:` (`ci/tests` checks this, following conftest's sibling helper modules).
+Each config also sets `filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]`, so a
+package imported before the hook fails the run ("uncheckable by beartype") instead of going unchecked.
 
 Never import beartype in package code: no claw in `__init__.py`, no decorators. Apps, CLIs, demos and benchmarks
 run without it in every env. A broad `except Exception` that must let a test-time violation through uses the

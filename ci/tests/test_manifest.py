@@ -105,6 +105,17 @@ def test_package_code_never_imports_beartype() -> None:
     assert not problems, "beartype imported outside tests (use the sys.modules lookup from AGENTS.md):\n" + "\n".join(problems)
 
 
+def test_beartype_packages_fail_when_uncheckable() -> None:
+    """Every pytest-beartype config turns the plugin's "uncheckable by beartype" warning into an error (AGENTS.md, Beartype)."""
+    entry: str = "error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"
+    problems: list[str] = []
+    for pyproject in sorted(REPO_ROOT.glob("packages/*/pyproject.toml")):
+        options: dict = tomllib.loads(pyproject.read_text()).get("tool", {}).get("pytest", {}).get("ini_options", {})
+        if "beartype_packages" in options and entry not in options.get("filterwarnings", []):
+            problems.append(str(pyproject.relative_to(REPO_ROOT)))
+    assert not problems, f"pytest configs without filterwarnings {entry!r}:\n" + "\n".join(problems)
+
+
 def _module_level_imports(path: Path) -> list[str]:
     """Top-level names a module imports when it loads: outside functions, classes and ``if TYPE_CHECKING:``."""
     import ast

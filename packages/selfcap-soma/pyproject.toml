@@ -18,6 +18,8 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.pytest.ini_options]
 # pytest-beartype: beartype checks selfcap_soma only while pytest runs (AGENTS.md, Beartype).
 beartype_packages = ["selfcap_soma"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 markers = ["integration: requires model assets, CUDA or catalog", "golden: stored reference comparisons"]
 addopts = "-m 'not integration and not golden'"
 

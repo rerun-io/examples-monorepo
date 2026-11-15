@@ -8,6 +8,8 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 [tool.pytest.ini_options]
 # pytest-beartype: beartype checks scripts only while pytest runs (AGENTS.md, Beartype).
 beartype_packages = ["scripts"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 pythonpath = ["."]
 addopts = "-m 'not integration and not golden'"
 markers = ["integration: requires cached Cargo archives or network", "golden: reference output comparisons"]

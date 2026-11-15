@@ -52,6 +52,8 @@ ignore = [
 [tool.pytest.ini_options]
 # pytest-beartype: beartype checks mamma only while pytest runs (AGENTS.md, Beartype).
 beartype_packages = ["mamma"]
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e mamma-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e mamma-dev tests-golden)",
