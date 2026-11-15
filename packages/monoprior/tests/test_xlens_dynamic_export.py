@@ -66,6 +66,7 @@ def test_one_dynamic_graph_matches_eager_at_unseen_shapes(tmp_path: Path) -> Non
         [sys.executable, "-c", f"import test_xlens_dynamic_export as m; from pathlib import Path; m.export_random_dynamic(Path({str(onnx_path)!r}))"],
         check=True,
         env=env,
+        cwd=Path(__file__).parent,  # `-c` puts the cwd first on sys.path: `conftest` must be tests/conftest.py, not the package-root one
     )
     session = onnxruntime.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     input_dims: dict[str, list[object]] = {node.name: [dim if isinstance(dim, int) else str(dim) for dim in node.shape] for node in session.get_inputs()}
