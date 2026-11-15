@@ -69,8 +69,9 @@ Both leave the same two database tables filled, so the choice is invisible to ev
 backend, the cuSFM blob's own LightGlue engine, is not part of this package; `colsfm.matching_trt` keeps the engine
 matching loop LightGlue+ runs through.)
 
-**FlexGlue.** `MatchingOptions.backend = "flexglue"` runs COLMAP's FlexGlue (cvg/FlexGlue, COLMAP main #4908) through
-the same `match_image_pairs` call as the `pycolmap` path. It reads only keypoint *locations* (RaCo-ALIKED's work as well
+**FlexGlue.** `MatchingOptions.backend = "flexglue"` runs FlexGlue's graphs (cvg/FlexGlue, COLMAP main #4908) as TensorRT
+engines from `colsfm.flexglue_trt`; `"flexglue_ort"` runs COLMAP's own ONNX Runtime FlexGlue through the same
+`match_image_pairs` call as the `pycolmap` path (the parity reference: 20 MGO07 pairs agree to within 2 matches). It reads only keypoint *locations* (RaCo-ALIKED's work as well
 as any other extractor's), computes dense DINOv3-ConvNeXt features from the image pixels (so it needs `image_dir`), and
 predicts each pair's covisibility: a pair below `flexglue_min_covisibility` comes back empty, which is what rejects
 look-alike loop candidates. The ONNX graphs are local files from `colsfm-download-flexglue`, never fetched at run time.
@@ -120,10 +121,11 @@ FLEXGLUE_MODEL_FILES: Final[dict[str, str]] = {
 MatcherVariant: TypeAlias = Literal["ALIKED_LIGHTGLUE", "ALIKED_BRUTEFORCE"]
 """The ALIKED matchers COLMAP 4.2 offers; the pipeline uses LightGlue."""
 
-MatchingBackend: TypeAlias = Literal["pycolmap", "raco", "flexglue"]
+MatchingBackend: TypeAlias = Literal["pycolmap", "raco", "flexglue", "flexglue_ort"]
 """Which matcher runs: COLMAP's own ONNX LightGlue, LightGlue+ on a TensorRT engine, or COLMAP's FlexGlue.
 
-`flexglue` is COLMAP's FlexGlue (see the module docstring); it ignores the descriptors.
+`flexglue` is COLMAP's FlexGlue graphs on TensorRT (`colsfm.flexglue_trt`); `flexglue_ort` is COLMAP's own ONNX Runtime
+FlexGlue, kept as its parity reference. Both ignore the descriptors.
 
 `raco` is `colsfm.matching_raco`, the LightGlue+ that fabio-sim trained against RaCo-ALIKED. It has the per-match
 score COLMAP's bindings hide and therefore runs the blob's real SSC spatial NMS rather than
@@ -426,7 +428,7 @@ def _matching_options(options: MatchingOptions, device: ResolvedDevice) -> pycol
         `FeatureMatchingOptions` with the ALIKED LightGlue sub-options filled in.
     """
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
-    if options.backend == "flexglue":
+    if options.backend == "flexglue_ort":
         if options.image_dir is None:
             raise ValueError("the flexglue matcher reads image pixels: MatchingOptions.image_dir is required")
         matching_options.type = pycolmap.FeatureMatcherType.FLEXGLUE
@@ -768,6 +770,11 @@ def match_pairs(
         from colsfm.matching_raco import match_pairs_raco
 
         return match_pairs_raco(database_path, list(pairs), options)
+    if options.backend == "flexglue":
+        # Imported here for the same reason: TensorRT, torch and cv2 are only needed by this branch.
+        from colsfm.flexglue_trt import match_pairs_flexglue
+
+        return match_pairs_flexglue(database_path, list(pairs), options)
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
     if not pairs:

@@ -1786,6 +1786,20 @@
       "severity": "error"
     },
     {
+      "column": 10,
+      "path": "colsfm/flexglue_trt.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Database` in module `pycolmap`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/flexglue_trt.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `verify_matches` in module `pycolmap`",
+      "severity": "error"
+    },
+    {
       "column": 18,
       "path": "colsfm/frames_meta.py",
       "name": "missing-attribute",
@@ -2815,6 +2829,13 @@
       "severity": "error"
     },
     {
+      "column": 26,
+      "path": "colsfm/mapping.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ObservationManager` in module `pycolmap`",
+      "severity": "error"
+    },
+    {
       "column": 21,
       "path": "colsfm/mapping.py",
       "name": "missing-attribute",
@@ -2899,7 +2920,14 @@
       "severity": "error"
     },
     {
-      "column": 37,
+      "column": 33,
+      "path": "colsfm/matching.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `FeatureMatcherType` in module `pycolmap`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
       "path": "colsfm/matching.py",
       "name": "missing-attribute",
       "concise_description": "No attribute `FeatureMatcherType` in module `pycolmap`",
@@ -9098,6 +9126,20 @@
       "path": "tests/test_matching.py",
       "name": "missing-attribute",
       "concise_description": "No attribute `TwoViewGeometryOptions` in module `pycolmap`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/test_matching_flexglue.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `FeatureMatchingOptions` in module `pycolmap`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "tests/test_matching_flexglue.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `FeatureMatcherType` in module `pycolmap`",
       "severity": "error"
     },
     {

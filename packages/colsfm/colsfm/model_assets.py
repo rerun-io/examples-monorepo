@@ -77,7 +77,7 @@ def required_raco_graphs(features_backend: FeatureBackend, matching_backend: Mat
         graphs.append(RACO_ONNX_PATH)
     if matching_backend == "raco":
         graphs.append(RACO_LIGHTGLUE_ONNX_PATH)
-    if matching_backend == "flexglue":
+    if matching_backend in ("flexglue", "flexglue_ort"):
         graphs.extend(FLEXGLUE_MODEL_DIR / name for name in FLEXGLUE_MODEL_FILES.values())
     return tuple(graphs)
 

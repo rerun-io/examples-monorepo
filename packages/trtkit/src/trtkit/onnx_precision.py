@@ -20,6 +20,18 @@ FP32_ONLY_INPUTS: dict[str, frozenset[int]] = {"Resize": frozenset({1, 2})}
 """Float inputs ONNX types independently of the data: Resize's roi and scales (scales is tensor(float))."""
 
 
+def _constant_tensor(node: onnx.NodeProto) -> TensorProto:
+    """A Constant node's value as a tensor, whichever attribute holds it (value, value_float(s), value_int(s)).
+
+    torch.onnx writes scalars as `value_float` / `value_ints`; reading only `value` raised StopIteration on those.
+    """
+    attribute: onnx.AttributeProto = node.attribute[0]
+    if attribute.name == "value":
+        return attribute.t
+    data = np.asarray(helper.get_attribute_value(attribute), dtype=np.float32 if attribute.name.startswith("value_float") else np.int64)
+    return numpy_helper.from_array(data, name=node.output[0])
+
+
 def fp16_conv_trunk(source: onnx.ModelProto) -> onnx.ModelProto:
     """Run the convolutional trunk in fp16 and keep the tail and the graph I/O in fp32.
 
@@ -42,7 +54,7 @@ def fp16_conv_trunk(source: onnx.ModelProto) -> onnx.ModelProto:
     graph = model.graph
     nodes: list[onnx.NodeProto] = list(graph.node)
     constants: dict[str, TensorProto] = {tensor.name: tensor for tensor in graph.initializer}
-    constants.update({node.output[0]: next(a.t for a in node.attribute if a.name == "value") for node in nodes if node.op_type == "Constant"})
+    constants.update({node.output[0]: _constant_tensor(node) for node in nodes if node.op_type == "Constant"})
     elem_type: dict[str, int] = {v.name: v.type.tensor_type.elem_type for v in [*graph.value_info, *graph.input, *graph.output]}
     elem_type.update({name: tensor.data_type for name, tensor in constants.items()})
 

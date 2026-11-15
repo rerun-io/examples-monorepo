@@ -52,3 +52,31 @@ def test_fp16_cache_separates_sources_with_the_same_name(tmp_path: Path) -> None
     assert paths[0] != paths[1]
     for index, path in enumerate(paths, 1):
         np.testing.assert_array_equal(numpy_helper.to_array(onnx.load(path).graph.initializer[0]), np.full((1, 1, 1, 1), index, np.float16))
+
+
+def test_fp16_trunk_reads_scalar_constant_attributes():
+    """A Constant written as value_float (as torch.onnx emits for scalars) joins the trunk in fp16, not a crash."""
+    from onnx import TensorProto
+
+    from trtkit.onnx_precision import fp16_conv_trunk
+
+    weight = numpy_helper.from_array(np.ones((1, 1, 1, 1), dtype=np.float32), name="w")
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Constant", [], ["half"], value_float=0.5),
+                helper.make_node("Mul", ["input", "half"], ["scaled"]),
+                helper.make_node("Conv", ["scaled", "w"], ["c"]),
+                helper.make_node("Sigmoid", ["c"], ["output"]),
+            ],
+            "scalar-constant-then-conv",
+            [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 1, 2, 2])],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1, 2, 2])],
+            [weight],
+        ),
+        opset_imports=[helper.make_opsetid("", 13)],
+    )
+    rewritten = fp16_conv_trunk(model)
+    mul = next(node for node in rewritten.graph.node if node.op_type == "Mul")
+    half_inputs = {tensor.name for tensor in rewritten.graph.initializer if tensor.data_type == TensorProto.FLOAT16}
+    assert mul.input[1] in half_inputs
