@@ -34,11 +34,30 @@ DESCRIPTION: str = (
 )
 # The page fits the window (posekit #594): Blocks(fill_height) + Row(scale=1) give the main row the height the header leaves,
 # the viewer takes its column's height, and the footer stays hidden (Gradio adds its height to the size it posts to an iframe).
+# Below 900 px (iPad portrait, ~744 px) the two columns stack: the controls shrink to their content above the viewer, which
+# takes the rest of the window. Windows under 800 px tall get a smaller clip preview. Below 600 px (a phone) the page may scroll, and the viewer keeps 70% of the window height.
+# Touch targets are at least 44 px.
 APP_CSS: str = """
 footer { display: none !important; }
 #main-row { min-height: 30rem; }
+#viewer-column { display: flex; flex-direction: column; min-height: 0; }
 #viewer { flex: 1 1 0; min-height: 0; }
 #left-column { height: 100%; max-height: 100%; overflow-y: auto; flex-wrap: nowrap; }
+#left-column button { min-height: 44px; min-width: 44px; }
+#left-column .gr-accordion { overflow-x: hidden !important; }
+#left-column .label-wrap { min-width: 0; box-sizing: border-box; }
+@media (max-width: 900px) {
+    #main-row { flex-direction: column; flex-wrap: nowrap; }
+    #left-column { height: auto; max-height: none; flex: 0 0 auto !important; overflow: visible; }
+    #source-video, #source-video video { max-height: 180px; }
+    #viewer-column { flex: 1 1 0; min-height: 0; }
+}
+@media (max-height: 800px) {
+    #source-video, #source-video video { max-height: 200px; }
+}
+@media (max-width: 600px) {
+    #viewer-column, #viewer { min-height: 70vh; }
+}
 """
 
 
@@ -108,7 +127,7 @@ def build(decoder: TAEHV | None, examples: list[str] | None = None) -> gr.Blocks
                     run_button = gr.Button("Run", variant="primary")
                     stop = gr.Button("Stop", variant="stop")
                 status = gr.Markdown(READY, elem_id="run-status")
-            with gr.Column(scale=3):
+            with gr.Column(scale=3, elem_id="viewer-column"):
                 viewer = Rerun(
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%", elem_id="viewer"
                 )
