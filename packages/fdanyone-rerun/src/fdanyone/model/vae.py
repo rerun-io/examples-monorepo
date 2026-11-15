@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import gc
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from copy import deepcopy
 from fractions import Fraction
 from pathlib import Path
@@ -122,26 +123,23 @@ class VaeExecutor:
         self,
         *,
         num_views: int,
-        operation: Callable[[WanVideoVAE38, str, tuple[int, ...], Event], None],
+        operation: Callable[[int, str, tuple[int, ...], Event], None],
         stopped: Event | None = None,
     ) -> None:
         import torch
 
         worker_count = self._worker_count(num_views, len(self.devices))
-        self._ensure_models(worker_count)
         stopped = Event() if stopped is None else stopped
         peaks: dict[str, dict[str, int]] = {}
 
         def run(worker_index: int) -> None:
             device = self.devices[worker_index]
             device_index = int(device.removeprefix("cuda:"))
-            model = self._models[worker_index]
             indices = self._worker_indices(num_views, worker_index, worker_count)
             torch.cuda.set_device(device_index)
             torch.cuda.reset_peak_memory_stats(device_index)
             try:
-                model.to(device)
-                operation(model, device, indices, stopped)
+                operation(worker_index, device, indices, stopped)
                 torch.cuda.synchronize(device_index)
                 peaks[device] = {
                     "allocated": int(torch.cuda.max_memory_allocated(device_index)),
@@ -150,8 +148,6 @@ class VaeExecutor:
             except BaseException:
                 stopped.set()
                 raise
-            finally:
-                model.to("cpu")
 
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="vae") as pool:
             futures = [pool.submit(run, worker_index) for worker_index in range(worker_count)]
@@ -170,6 +166,17 @@ class VaeExecutor:
             torch.cuda.set_device(int(self.devices[worker_index].removeprefix("cuda:")))
             torch.cuda.empty_cache()
         self.last_peak_vram_bytes = peaks
+
+    @contextmanager
+    def _wan_on(self, worker_index: int, device: str) -> Iterator[WanVideoVAE38]:
+        """Worker ``worker_index``'s Wan replica on ``device``, back on the CPU afterwards."""
+
+        model = self._models[worker_index]
+        model.to(device)
+        try:
+            yield model
+        finally:
+            model.to("cpu")
 
     @staticmethod
     def _encode_view(model: WanVideoVAE38, video: Tensor, device: str) -> Tensor:
@@ -207,8 +214,8 @@ class VaeExecutor:
             raise FourDAnyoneError(f"VAE input must be CPU [V,C,F,H,W], got {tuple(videos.shape)} on {videos.device}.")
         outputs: list[Tensor | None] = [None] * videos.shape[0]
 
-        def operation(model: WanVideoVAE38, device: str, indices: tuple[int, ...], stopped: Event) -> None:
-            with torch.inference_mode(), _bf16_autocast():
+        def operation(worker_index: int, device: str, indices: tuple[int, ...], stopped: Event) -> None:
+            with self._wan_on(worker_index, device) as model, torch.inference_mode(), _bf16_autocast():
                 for index in indices:
                     if stopped.is_set():
                         return
@@ -216,6 +223,7 @@ class VaeExecutor:
                     outputs[index] = encoded[0].detach().to(device="cpu").contiguous()
                     del encoded
 
+        self._ensure_models(self._worker_count(videos.shape[0], len(self.devices)))
         self._run_workers(num_views=videos.shape[0], operation=operation)
         if any(output is None for output in outputs):
             raise RuntimeError("VAE encode completed without every canonical view.")
@@ -241,6 +249,19 @@ class VaeExecutor:
         sink_futures: list[Future[Output] | None] = [None] * num_views
         stopped = Event()
 
+        # The decoder is chosen once: TAEW2.2 workers never touch the Wan VAE (it stays on the CPU for source encode).
+        @contextmanager
+        def decoder_on(worker_index: int, device: str) -> Iterator[Callable[[Tensor], Tensor]]:
+            if tiny_decoder is not None:
+                taehv = load_tiny_decoder(tiny_decoder, device)
+                yield lambda latent: _tiny_decode_view(taehv, latent, device)
+                return
+            with self._wan_on(worker_index, device) as model:
+                yield lambda latent: self._decode_view(model, latent, device)
+
+        if tiny_decoder is None:
+            self._ensure_models(worker_count)
+
         with ThreadPoolExecutor(max_workers=worker_count + 1, thread_name_prefix="video-codec") as codec_pool:
 
             def release_slot(future: Future[Output]) -> None:
@@ -249,22 +270,18 @@ class VaeExecutor:
                 slots.release()
 
             def operation(
-                model: WanVideoVAE38,
+                worker_index: int,
                 device: str,
                 indices: tuple[int, ...],
                 worker_stop: Event,
             ) -> None:
-                with torch.inference_mode(), _bf16_autocast():
+                with decoder_on(worker_index, device) as decode, torch.inference_mode(), _bf16_autocast():
                     for index in indices:
                         if worker_stop.is_set():
                             return
                         slots.acquire()
                         try:
-                            decoded = (
-                                _tiny_decode_view(load_tiny_decoder(tiny_decoder, device), latents[index], device)
-                                if tiny_decoder is not None
-                                else self._decode_view(model, latents[index], device)
-                            )
+                            decoded = decode(latents[index])
                             device_video = decoded[0].detach()
                             rgb_frames = _rgb_frames(device_video)
                             del decoded, device_video
