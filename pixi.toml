@@ -4096,6 +4096,9 @@ rich = "*"
 # Scopes BLAS to one thread around the vocabulary tree's thousands of tiny k-means products: the cuda feature's MKL
 # otherwise spends the time synchronising threads (KITTI 06's loop stage 435 s; 21 s vs 105 s at 1 vs 8 threads).
 threadpoolctl = "*"
+# NVDEC decode of catalog VideoStreams straight to GPU tensors (colsfm.frames via simplecv's open_segment_decoder):
+# the keyframes are never re-encoded as JPEG.
+torchcodec = "*"
 
 [feature.colsfm.pypi-dependencies]
 colsfm = { path = "packages/colsfm", editable = true }

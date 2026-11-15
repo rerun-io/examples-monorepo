@@ -51,8 +51,7 @@ from colsfm.walkthrough_draw import (
     arc_strip,
     camera_centres,
     camera_frusta,
-    image_path_of,
-    load_rgb,
+    keyframe_rgb,
     log_notes,
     polyline_segments,
     rerun_keypoints,
@@ -74,6 +73,7 @@ from colsfm.walkthrough_stages import (
     NODE_RADIUS_FRACTION,
     REFERENCE_COLOR,
     ROUND_TIMELINE,
+    SAMPLE_JPEG_QUALITY,
     SELECTED_COLOR,
     SELECTED_FRUSTUM_FRACTION,
     SOLVED_COLOR,
@@ -226,9 +226,7 @@ def log_feature_extraction(
     """
     stamp_stage(stage)
     panes: list[SamplePane] = []
-    drawable: list[KeyframeMeta] = [
-        keyframe for keyframe in sample_keyframes(selected, num_samples) if image_path_of(input_dir, keyframe).is_file()
-    ]
+    drawable: list[KeyframeMeta] = list(sample_keyframes(selected, num_samples))
     # One database handle for the panel, not one per sample: `read_keypoints` opens and
     # closes the file every call.
     keypoints_by_id: dict[int, Keypoints] = read_keypoints_batch(
@@ -237,9 +235,8 @@ def log_feature_extraction(
     for keyframe in drawable:
         sensor_name: str = selected.cameras[keyframe.camera_params_id].sensor_name
         sample_path: str = f"{stage.entity_root}/samples/{sensor_name}_{keyframe.keyframe_id}"
-        image_path: Path = image_path_of(input_dir, keyframe)
         keypoints_xy: Keypoints = keypoints_by_id[keyframe.keyframe_id]
-        rr.log(f"{sample_path}/image", rr.EncodedImage(path=image_path))
+        rr.log(f"{sample_path}/image", rr.Image(keyframe_rgb(input_dir, keyframe.image_name)[0]).compress(jpeg_quality=SAMPLE_JPEG_QUALITY))
         rr.log(
             f"{sample_path}/keypoints",
             rr.Points2D(rerun_keypoints(keypoints_xy), colors=SELECTED_COLOR, radii=KEYPOINT_RADIUS),
@@ -403,10 +400,6 @@ def _log_match_pair(
     by_id: dict[int, KeyframeMeta] = selected.keyframe_by_id()
     left: KeyframeMeta = by_id[pair[0]]
     right: KeyframeMeta = by_id[pair[1]]
-    left_path: Path = image_path_of(input_dir, left)
-    right_path: Path = image_path_of(input_dir, right)
-    if not left_path.is_file() or not right_path.is_file():
-        return [("sample pair", "imagery missing on disk")]
 
     geometry: pycolmap.TwoViewGeometry = read_two_view_geometry(database_path, pair[0], pair[1])
     matches: Int64[ndarray, "m 2"] = np.asarray(geometry.inlier_matches, dtype=np.int64).reshape(-1, 2)
@@ -417,14 +410,14 @@ def _log_match_pair(
     left_matched: Float64[ndarray, "m 2"] = rerun_keypoints(left_keypoints[matches[:, 0]]) if len(matches) else np.zeros((0, 2))
     right_matched: Float64[ndarray, "m 2"] = rerun_keypoints(right_keypoints[matches[:, 1]]) if len(matches) else np.zeros((0, 2))
 
-    for side, keyframe, path, matched in (("left", left, left_path, left_matched), ("right", right, right_path, right_matched)):
+    for side, keyframe, matched in (("left", left, left_matched), ("right", right, right_matched)):
         side_path: str = f"{stage.entity_root}/pair/{side}"
-        rr.log(f"{side_path}/image", rr.EncodedImage(path=path))
+        rr.log(f"{side_path}/image", rr.Image(keyframe_rgb(input_dir, keyframe.image_name)[0]).compress(jpeg_quality=SAMPLE_JPEG_QUALITY))
         rr.log(f"{side_path}/keypoints", rr.Points2D(matched, colors=SOLVED_COLOR, radii=KEYPOINT_RADIUS))
         rr.log(f"{side_path}/name", rr.TextDocument(f"{selected.cameras[keyframe.camera_params_id].sensor_name}\n{keyframe.image_name}"))
 
-    left_rgb, scale = load_rgb(left_path, STACKED_MAX_WIDTH // 2)
-    right_rgb, _ = load_rgb(right_path, STACKED_MAX_WIDTH // 2)
+    left_rgb, scale = keyframe_rgb(input_dir, left.image_name, STACKED_MAX_WIDTH // 2)
+    right_rgb, _ = keyframe_rgb(input_dir, right.image_name, STACKED_MAX_WIDTH // 2)
     height: int = min(left_rgb.shape[0], right_rgb.shape[0])
     stacked: UInt8[ndarray, "h w 3"] = np.hstack([left_rgb[:height], right_rgb[:height]])
     offset_x: float = float(left_rgb.shape[1])

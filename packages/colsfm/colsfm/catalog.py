@@ -4,9 +4,10 @@ cuSFM-style mapping starts from a trajectory: colsfm refines it, it does not fin
 `exoego:v2` layout carries everything the pipeline needs — the cameras (`/world/rig_NN/cam_MM`, static extrinsic,
 pinhole and distortion), their `VideoStream`s, and a temporal `Transform3D` that gives `world_T_rig` (the `slam_rs`
 layer on RoboCap, the `gt` layer on VSLAM-LAB, or a `/world/runs/<source>/rig` prediction layer such as the KITTI
-`cuvslam` one). `prepare_catalog_input` reads those through the catalog, decodes the keyframes it samples, and writes
-the cuSFM `frames_meta.json` the stages read (`colsfm.frames_meta`). The decoded frames are a working cache under
-`packages/colsfm/data/inputs/`; the segment stays the source of truth.
+`cuvslam` one). `prepare_catalog_input` reads those through the catalog and writes metadata only: the cuSFM
+`frames_meta.json` the stages read (`colsfm.frames_meta`) and a `frame_source.json` naming each keyframe's sample in its
+camera's `VideoStream`. No pixel is decoded or written here; the run decodes the keyframes once on NVDEC straight from the
+catalog (`colsfm.frames.VideoStreamFrames`), so the matcher sees the original video, not a re-encoded JPEG.
 
 Every camera pose handed to the pipeline is `world_T_rig(t) @ rig_T_cam` at the camera's own frame time, the rig pose
 interpolated (slerp + linear) from the trajectory stream; frames outside the trajectory's time span are dropped, not
@@ -15,7 +16,6 @@ extrapolated.
 
 from __future__ import annotations
 
-import io
 import json
 import time
 from collections.abc import Sequence
@@ -23,20 +23,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, TypeAlias
 
-import av
-import cv2
 import numpy as np
 import pyarrow as pa
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from scipy.spatial.transform import Rotation, Slerp
 from simplecv.catalog_rig_layout import CatalogCamera, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rrd_query_utils import first_valid_value
 
 from colsfm import DATA_DIR
+from colsfm.frames import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, write_manifest
 
 DEFAULT_CATALOG_URL: Final[str] = "rerun+http://dgx-spark:51235"
 """The shared catalog the dataforge corpora are registered on."""
@@ -49,9 +47,6 @@ FRAMES_META_FILE: Final[str] = "frames_meta.json"
 
 GROUND_TRUTH_FILE: Final[str] = "ground_truth.txt"
 """The file name the pipeline looks for in its input directory."""
-
-JPEG_QUALITY: Final[int] = 95
-"""Quality of the keyframe JPEG cache: the frames already went through one lossy video codec."""
 
 ProjectionModel: TypeAlias = Literal["PINHOLE", "DISTORTED_PINHOLE", "OPENCV_FISHEYE"]
 """The cuSFM camera projection models a catalog camera maps onto (COLMAP PINHOLE, FULL_OPENCV, OPENCV_FISHEYE)."""
@@ -105,7 +100,7 @@ class CatalogInputConfig:
     sync_tolerance_ns: int = 5_000_000
     """Largest |dt| between the reference frame and another camera's frame of the same rig frame."""
     output_root: Path = field(default_factory=lambda: DATA_DIR / "inputs")
-    """Where the decoded keyframes and `frames_meta.json` go, one directory per segment and sampling."""
+    """Where `frames_meta.json`, `frame_source.json` and the ground truth go, one directory per segment and sampling."""
 
     @property
     def input_dir(self) -> Path:
@@ -300,34 +295,19 @@ def read_catalog_trajectory(dataset: DatasetEntry, segment: str, entity: str, ti
     return CatalogTrajectory(t_ns=t_ns[keep], rotations=rotations[keep], translations=translations[keep])
 
 
-def decode_selected(video: CatalogVideo, wanted: Sequence[int]) -> dict[int, UInt8[ndarray, "h w 3"]]:
-    """Decode a camera's packets in order and keep the frames at the `wanted` packet indices.
+def keyframe_image_name(camera_name: str, t_ns: int) -> str:
+    """The name a catalog keyframe carries in `frames_meta.json`, the database and the frame-source manifest.
+
+    A key, not a file: the pixels come from the catalog's video stream (`colsfm.frames.VideoStreamFrames`).
 
     Args:
-        video: One camera's packets.
-        wanted: Packet indices to keep.
+        camera_name: The camera.
+        t_ns: The sample's index value (`CatalogVideo.t_ns`).
 
     Returns:
-        BGR frames by packet index.
-
-    Raises:
-        ValueError: When the stream decodes to fewer frames than it has packets up to the last wanted one.
+        `<camera>/<t_ns>`.
     """
-    wanted_set: set[int] = set(wanted)
-    last: int = max(wanted_set) if wanted_set else -1
-    mp4: bytes = wrap_mp4(video.samples, video.keyframes, 30, video.codec)
-    frames: dict[int, UInt8[ndarray, "h w 3"]] = {}
-    with av.open(io.BytesIO(mp4)) as container:
-        stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
-        for index, frame in enumerate(container.decode(stream)):
-            if index in wanted_set:
-                frames[index] = frame.to_ndarray(format="bgr24")
-            if index >= last:
-                break
-    if len(frames) != len(wanted_set):
-        raise ValueError(f"decoded {len(frames)} of the {len(wanted_set)} wanted frames")
-    return frames
+    return f"{camera_name}/{t_ns}"
 
 
 def _axis_angle(transform: Transform) -> dict[str, dict[str, float]]:
@@ -386,7 +366,7 @@ def frames_meta_document(
                     "id": str(len(keyframes)),
                     "camera_params_id": params_id[camera.name],
                     "timestamp_microseconds": str(int(t_ns) // 1000),
-                    "image_name": f"{camera.name}/{int(t_ns)}.jpeg",
+                    "image_name": keyframe_image_name(camera.name, int(t_ns)),
                     "camera_to_world": _axis_angle(world_T_cam),
                     "synced_sample_id": str(sample_index),
                 }
@@ -447,7 +427,7 @@ def write_ground_truth(
 
 
 def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
-    """Read the segment and write the pipeline's input directory (idempotent: existing frames are kept).
+    """Read the segment and write the pipeline's input directory: `frames_meta.json`, `frame_source.json`, ground truth.
 
     Args:
         config: Segment, cameras and sampling.
@@ -491,21 +471,29 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
         selection.append(chosen)
 
     input_dir: Path = config.input_dir
+    input_dir.mkdir(parents=True, exist_ok=True)
     rig_frames: list[dict[str, tuple[int, Transform]]] = [{} for _ in candidates]
+    streams: list[StreamKeyframes] = []
     written: int = 0
     for camera, video, chosen in zip(cameras, videos, selection, strict=True):
-        camera_dir: Path = input_dir / camera.name
-        camera_dir.mkdir(parents=True, exist_ok=True)
         frame_times: Int64[ndarray, " m"] = np.asarray([video.t_ns[index] for index in chosen.values()], dtype=np.int64)
         world_T_rig: Float64[ndarray, "m 4 4"] = trajectory.at(frame_times) if len(frame_times) else np.zeros((0, 4, 4))
-        missing: list[int] = [index for index in chosen.values() if not (camera_dir / f"{int(video.t_ns[index])}.jpeg").is_file()]
-        decoded: dict[int, UInt8[ndarray, "h w 3"]] = decode_selected(video, missing) if missing else {}
-        for packet_index, image in decoded.items():
-            cv2.imwrite(str(camera_dir / f"{int(video.t_ns[packet_index])}.jpeg"), image, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         for (sample, packet_index), pose in zip(chosen.items(), world_T_rig, strict=True):
             rig_frames[sample][camera.name] = (int(video.t_ns[packet_index]), pose @ camera.rig_T_cam)
             written += 1
-        print(f"[colsfm.catalog] {camera.name}: {len(chosen)} keyframes ({len(decoded)} decoded) -> {camera_dir}")
+        # No pixels here: the run decodes these samples straight from the catalog on NVDEC (`colsfm.frames`).
+        streams.append(
+            StreamKeyframes(
+                entity=f"{camera.entity.lstrip('/')}/pinhole/video",
+                names=[keyframe_image_name(camera.name, int(video.t_ns[index])) for index in chosen.values()],
+                t_ns=[int(video.t_ns[index]) for index in chosen.values()],
+            )
+        )
+        print(f"[colsfm.catalog] {camera.name}: {len(chosen)} keyframes")
+    write_manifest(
+        input_dir / FRAME_SOURCE_FILE,
+        FrameSourceManifest(catalog_url=config.catalog_url, dataset=config.dataset, segment=config.segment, timeline=config.timeline, streams=streams),
+    )
 
     if config.ground_truth_entity is not None:
         ground_truth: CatalogTrajectory = read_catalog_trajectory(dataset, config.segment, config.ground_truth_entity, config.timeline)

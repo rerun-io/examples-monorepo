@@ -55,10 +55,13 @@ from typing import Final, Literal, TypeAlias
 import cv2
 import numpy as np
 import pycolmap
+import torch
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
+from torch import Tensor
 
 from colsfm.database import Descriptors, KeypointsXY, database_transaction
+from colsfm.frames import FrameSource
 from colsfm.tensorrt_runtime import DeviceTensor, GpuPreprocessor, TensorRTSession
 
 NetworkBatch: TypeAlias = Float32[ndarray, "batch 3 network_height network_width"]
@@ -142,8 +145,10 @@ class ImageTask:
 
     image_id: int
     """The database `image_id`, owned by `colsfm.database.create_database`."""
+    name: str
+    """The image name, as the database and the frame source key it."""
     image_path: Path
-    """Absolute path to the image file."""
+    """Absolute path to the image file (unused when the pixels come from a `FrameSource`)."""
     image_width: int
     """Original width in pixels, from the image's camera."""
     image_height: int
@@ -444,13 +449,14 @@ def store_feature_batch(
             )
 
 
-def image_tasks(database_path: Path, image_root: Path, image_names: Sequence[str]) -> list[ImageTask]:
+def image_tasks(database_path: Path, image_root: Path, image_names: Sequence[str], *, check_files: bool = True) -> list[ImageTask]:
     """Pair each requested image name with its database row and its camera size.
 
     Args:
         database_path: An existing database holding the image and camera rows.
         image_root: Directory the names are relative to.
         image_names: Images to extract, as stored in the database.
+        check_files: Require each image file to exist; off when the pixels come from a `FrameSource`.
 
     Returns:
         One task per name, in the order given.
@@ -477,12 +483,13 @@ def image_tasks(database_path: Path, image_root: Path, image_names: Sequence[str
         tasks.append(
             ImageTask(
                 image_id=image_id,
+                name=name,
                 image_path=image_root / name,
                 image_width=int(camera.width),
                 image_height=int(camera.height),
             )
         )
-    missing: list[Path] = [task.image_path for task in tasks if not task.image_path.is_file()]
+    missing: list[Path] = [task.image_path for task in tasks if not task.image_path.is_file()] if check_files else []
     if missing:
         raise FileNotFoundError(f"{len(missing)} images are missing; the first is {missing[0]}")
     return tasks
@@ -498,6 +505,7 @@ def run_native_extraction(
     batch_size: int,
     preprocessing_workers: int = DEFAULT_PREPROCESSING_WORKERS,
     gpu_preprocessing: bool = DEFAULT_GPU_PREPROCESSING,
+    frames: FrameSource | None = None,
 ) -> None:
     """Execute every group and store what came back, reusing sessions and buffers.
 
@@ -519,6 +527,9 @@ def run_native_extraction(
         gpu_preprocessing: Stage the decoded uint8 frames in one page-locked
             batch buffer and let a TensorRT preprocessing engine transpose, widen
             and scale them. `False` does that arithmetic on the host instead.
+        frames: Where the pixels come from as GPU tensors (`colsfm.frames`); the
+            batch is then built on the device and bound in place, and the file,
+            preprocessing-worker and staging arguments are not used.
 
     Raises:
         RuntimeError: When an engine cannot be deserialised or fails to execute.
@@ -539,6 +550,27 @@ def run_native_extraction(
             declared_shape: tuple[int, ...] = tuple(session.engine.get_tensor_shape(model.image_binding))
             network_height: int = group.network_height if group.network_height is not None else int(declared_shape[2])
             network_width: int = group.network_width if group.network_width is not None else int(declared_shape[3])
+            if frames is not None:
+                for first in range(0, len(group.tasks), group_batch):
+                    tasks: list[ImageTask] = list(group.tasks[first : first + group_batch])
+                    network_tensor: Tensor = _device_batch(frames, tasks, session, network_height, network_width)
+                    device_input: DeviceTensor = DeviceTensor(
+                        pointer=int(network_tensor.data_ptr()),
+                        shape=tuple(int(dim) for dim in network_tensor.shape),
+                        dtype=np.dtype(np.float32),
+                        capacity_bytes=int(network_tensor.numel()) * 4,
+                        stream=int(session.stream),
+                    )
+                    device_outputs: dict[str, ndarray] = session.run({model.image_binding: device_input})
+                    store_feature_batch(
+                        database,
+                        [PreparedImage(task=task, resized_bgr_hwc=np.empty((0, 0, 3), dtype=np.uint8), network_bchw=None) for task in tasks],
+                        FeatureBatch.from_bindings(device_outputs, len(tasks)),
+                        min_score=min_score,
+                        max_num_features=max_num_features,
+                        descriptor_type=model.descriptor_type,
+                    )
+                continue
             preprocessor: GpuPreprocessor | None = None
             if gpu_preprocessing:
                 preprocessor_key: tuple[Path, int, int] = (group.engine_path, network_height, network_width)
@@ -573,6 +605,38 @@ def run_native_extraction(
                     max_num_features=max_num_features,
                     descriptor_type=model.descriptor_type,
                 )
+
+
+def _device_batch(frames: FrameSource, tasks: Sequence[ImageTask], session: TensorRTSession, network_height: int, network_width: int) -> Tensor:
+    """One engine input built on the GPU from frame-source pixels, on the session's own stream.
+
+    The device equivalent of `preprocess_image` + `to_network_bchw`: RGB, stretched to the network size with bilinear
+    interpolation only when the image is not already that size, scaled to [0, 1], float32 `[batch, 3, h, w]`.
+
+    Args:
+        frames: The run's frame source.
+        tasks: The batch's images.
+        session: The engine session; the tensor is produced on its stream so it can be bound with no copy.
+        network_height: The engine's input height.
+        network_width: The engine's input width.
+
+    Returns:
+        The batch, contiguous, on the session's stream.
+
+    Raises:
+        ValueError: When a frame's size disagrees with its database camera (which would misplace every keypoint).
+    """
+    stream: torch.cuda.ExternalStream = torch.cuda.ExternalStream(int(session.stream))
+    resized: list[Tensor] = []
+    with torch.cuda.stream(stream):
+        for task, (name, rgb) in zip(tasks, frames.frames([task.name for task in tasks]), strict=True):
+            if (int(rgb.shape[1]), int(rgb.shape[2])) != (task.image_height, task.image_width):
+                raise ValueError(f"The database camera says {task.image_width}x{task.image_height}, but frame {name} is {rgb.shape[2]}x{rgb.shape[1]}")
+            image: Tensor = rgb[None].float()
+            if (task.image_height, task.image_width) != (network_height, network_width):
+                image = torch.nn.functional.interpolate(image, size=(network_height, network_width), mode="bilinear", align_corners=False, antialias=False)
+            resized.append(image)
+        return (torch.cat(resized) / 255.0).contiguous()
 
 
 def _host_batch(batch: Sequence[PreparedImage]) -> NetworkBatch | NetworkImage:

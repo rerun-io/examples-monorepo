@@ -316,13 +316,6 @@
       "severity": "error"
     },
     {
-      "column": 39,
-      "path": "colsfm/catalog.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `OutputContainer` has no attribute `decode`",
-      "severity": "error"
-    },
-    {
       "column": 8,
       "path": "colsfm/ceres_pose.py",
       "name": "missing-import",
@@ -1338,13 +1331,6 @@
       "severity": "error"
     },
     {
-      "column": 47,
-      "path": "colsfm/export.py",
-      "name": "missing-attribute",
-      "concise_description": "No attribute `Reconstruction` in module `pycolmap`",
-      "severity": "error"
-    },
-    {
       "column": 58,
       "path": "colsfm/export.py",
       "name": "missing-attribute",
@@ -1797,6 +1783,13 @@
       "path": "colsfm/flexglue_trt.py",
       "name": "missing-attribute",
       "concise_description": "No attribute `verify_matches` in module `pycolmap`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/frames.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Reconstruction` in module `pycolmap`",
       "severity": "error"
     },
     {
@@ -4177,13 +4170,6 @@
       "path": "colsfm/walkthrough_draw.py",
       "name": "missing-attribute",
       "concise_description": "No attribute `Camera` in module `pycolmap`",
-      "severity": "error"
-    },
-    {
-      "column": 89,
-      "path": "colsfm/walkthrough_draw.py",
-      "name": "missing-attribute",
-      "concise_description": "No attribute `BILINEAR` in module `PIL.Image`",
       "severity": "error"
     },
     {

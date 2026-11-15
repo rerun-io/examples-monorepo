@@ -279,6 +279,7 @@ def extract_features(
         # Imported here, not at module scope: TensorRT and `cuda-python` are only needed by this branch, and a machine
         # without a usable engine must still be able to run the `pycolmap` backend.
         from colsfm.features_raco import extract_raco
+        from colsfm.frames import frame_source_for
 
         # The graph's `scores` output is a selection rank, not a detector response, so the blob's
         # `detector_threshold` is meaningless against it; `colsfm.features_raco` documents why the gate is dropped.
@@ -290,6 +291,7 @@ def extract_features(
             max_num_features=options.max_num_features,
             native_resolution=options.native_resolution,
             raco_engine=options.raco_engine,
+            frames=frame_source_for(image_root),
         )
         tensorrt_report: ExtractionReport = ExtractionReport(
             keypoint_counts=extracted[0], device="cuda", elapsed_seconds=extracted[1]
@@ -297,6 +299,12 @@ def extract_features(
         print(f"colsfm.features[{options.backend}]: {tensorrt_report.summary()}")
         return tensorrt_report
 
+    # A literal rather than `colsfm.frames.FRAME_SOURCE_FILE`: that module imports torch, which this path never needs.
+    if (image_root / "frame_source.json").is_file():
+        raise ValueError(
+            f"{image_root} is a catalog input (its keyframes live in the segment's video streams, not in files); COLMAP's "
+            "own extractor reads files, so use --features-backend raco"
+        )
     device: ResolvedDevice = resolve_device(options.device)
     extraction_options: pycolmap.FeatureExtractionOptions = _extraction_options(options, device)
     started: float = time.perf_counter()

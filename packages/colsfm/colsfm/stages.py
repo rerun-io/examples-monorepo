@@ -33,7 +33,6 @@ from colsfm.database import (
     read_keypoints_batch,
 )
 from colsfm.export import (
-    colour_points_from_images,
     write_colmap_model,
     write_optimised_frames_meta,
     write_pose_files,
@@ -41,6 +40,7 @@ from colsfm.export import (
 )
 from colsfm.extrinsic_refinement import ExtrinsicRefinementOptions, ExtrinsicRefinementResult, refine_extrinsics
 from colsfm.features import ExtractionReport, FeatureOptions, extract_features
+from colsfm.frames import colour_points, frame_source_for
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, RigFrame, read_frames_meta, write_frames_meta
 from colsfm.geometry import TumPose
 from colsfm.keyframe_selection import KeyframeSelection, apply_selection, select_keyframes
@@ -648,7 +648,7 @@ def run_export_stage(options: PipelineOptions, mapped_meta: FramesMeta, mapping:
     Raises:
         FileNotFoundError: When the image root is missing.
     """
-    num_coloured: int = colour_points_from_images(mapping.reconstruction, options.input_dir, options.num_threads)
+    num_coloured: int = colour_points(mapping.reconstruction, frame_source_for(options.input_dir))
     print(f"[colsfm] export: coloured {num_coloured}/{mapping.num_points3D} points from the source imagery")
     write_colmap_model(options.output_dir, mapping.reconstruction)
     # `camera_to_world` comes straight off the adjusted reconstruction, so it stays

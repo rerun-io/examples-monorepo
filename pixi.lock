@@ -2496,8 +2496,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libldl-3.3.2-hf02c80a_7100101.conda
       - conda: https://prefix.dev/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libmagma-2.10.0-hd93470c_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libmagma_sparse-2.10.0-hbc3fd83_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnghttp2-1.71.0-hc5e5977_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnl-3.11.0-hb03c661_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libnpp-13.0.1.2-h676940d_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnsl-2.0.1-hb9d3cd8_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libntlm-1.8-hb9d3cd8_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnvjitlink-13.5.37-h393e864_0.conda
@@ -2646,6 +2648,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.1.0-haa8c3ee_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.23.3-py312h70625ff_3.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/torchcodec-0.14.0-cuda130_py312_h0ea267f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.28.0-cuda130_py312_h2966ecb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.6.1-py312h1b36aeb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.7.1-cuda130py312hc6dca4b_1.conda
@@ -3160,8 +3163,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libldl-3.3.2-h6ed72c6_7100102.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/liblzma-5.8.3-he30d5cf_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libmagma-2.10.0-he3ecef4_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/libmagma_sparse-2.10.0-h57ea964_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnghttp2-1.71.0-h0d23a54_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnl-3.11.0-he30d5cf_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/libnpp-13.0.1.2-he38c790_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnsl-2.0.1-h86ecc28_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libntlm-1.4-hf897c2e_1002.tar.bz2
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnvjitlink-13.5.37-hc1d3098_0.conda
@@ -3304,6 +3309,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tbb-2023.1.0-hdaecc9b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tokenizers-0.23.3-py312h2411609_3.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/torchcodec-0.14.0-cuda130_py312_h59f5513_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/torchvision-0.28.0-cuda130_py312_hed8ace6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tornado-6.6.1-py312h898233f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/triton-3.7.1-cuda130py312h06dc8f7_1.conda
@@ -3831,8 +3837,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libldl-3.3.2-hf02c80a_7100101.conda
       - conda: https://prefix.dev/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libmagma-2.10.0-hd93470c_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libmagma_sparse-2.10.0-hbc3fd83_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnghttp2-1.71.0-hc5e5977_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnl-3.11.0-hb03c661_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libnpp-13.0.1.2-h676940d_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnsl-2.0.1-hb9d3cd8_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libntlm-1.8-hb9d3cd8_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnvjitlink-13.5.37-h393e864_0.conda
@@ -3982,6 +3990,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.1.0-haa8c3ee_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.23.3-py312h70625ff_3.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/torchcodec-0.14.0-cuda130_py312_h0ea267f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.28.0-cuda130_py312_h2966ecb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.6.1-py312h1b36aeb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.7.1-cuda130py312hc6dca4b_1.conda
@@ -4504,8 +4513,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libldl-3.3.2-h6ed72c6_7100102.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/liblzma-5.8.3-he30d5cf_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libmagma-2.10.0-he3ecef4_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/libmagma_sparse-2.10.0-h57ea964_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnghttp2-1.71.0-h0d23a54_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnl-3.11.0-he30d5cf_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/libnpp-13.0.1.2-he38c790_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnsl-2.0.1-h86ecc28_1.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libntlm-1.4-hf897c2e_1002.tar.bz2
       - conda: https://prefix.dev/conda-forge/linux-aarch64/libnvjitlink-13.5.37-hc1d3098_0.conda
@@ -4649,6 +4660,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tbb-2023.1.0-hdaecc9b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tokenizers-0.23.3-py312h2411609_3.conda
+      - conda: https://prefix.dev/conda-forge/linux-aarch64/torchcodec-0.14.0-cuda130_py312_h59f5513_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/torchvision-0.28.0-cuda130_py312_hed8ace6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tornado-6.6.1-py312h898233f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/triton-3.7.1-cuda130py312h06dc8f7_1.conda
@@ -129702,6 +129714,7 @@ packages:
   - libcufft >=12.0.0.61,<13.0a0
   - pytorch >=2.12.0,<2.13.0a0
   license: BSD-3-Clause
+  license_family: BSD
   purls:
   - pkg:pypi/torchcodec?source=hash-mapping
   run_exports: {}

@@ -13,14 +13,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pycolmap
 import rerun as rr
 from jaxtyping import Float, Float64, Int64, UInt8
 from numpy import ndarray
-from PIL import Image as PillowImage
 
 from colsfm.cameras import colmap_camera
+from colsfm.frames import frame_source_for
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.walkthrough_stages import (
     ARC_LIFT_FRACTION,
@@ -173,22 +174,26 @@ def arc_strip(start_xyz: Float64[ndarray, "3"], end_xyz: Float64[ndarray, "3"]) 
     return chord
 
 
-def load_rgb(path: Path, max_width: int) -> tuple[UInt8[ndarray, "h w 3"], float]:
-    """Read one JPEG as RGB, scaled down to fit a width budget.
+def keyframe_rgb(input_dir: Path, image_name: str, max_width: int | None = None) -> tuple[UInt8[ndarray, "h w 3"], float]:
+    """One keyframe's pixels from the run's frame source, on the host, optionally scaled down to a width budget.
+
+    The walkthrough draws a handful of frames; they come from the same `colsfm.frames` source the stages read (the
+    catalog video on NVDEC, or the image folder), so no image file has to exist.
 
     Args:
-        path: The image file.
-        max_width: Largest width to return, in pixels.
+        input_dir: The run's input directory.
+        image_name: The keyframe's name.
+        max_width: Largest width to return, in pixels; None keeps the full frame.
 
     Returns:
         The uint8 RGB image and the scale factor that was applied to it.
     """
-    with PillowImage.open(path) as opened:
-        image = opened.convert("RGB")
-        scale: float = min(1.0, max_width / float(image.width))
-        if scale < 1.0:
-            image = image.resize((int(image.width * scale), int(image.height * scale)), PillowImage.BILINEAR)
-        return np.asarray(image, dtype=np.uint8), scale
+    (_, rgb), = frame_source_for(input_dir).frames([image_name])
+    image: UInt8[ndarray, "h w 3"] = rgb.permute(1, 2, 0).contiguous().cpu().numpy()
+    scale: float = 1.0 if max_width is None else min(1.0, max_width / float(image.shape[1]))
+    if scale < 1.0:
+        image = cv2.resize(image, (int(image.shape[1] * scale), int(image.shape[0] * scale)), interpolation=cv2.INTER_LINEAR)
+    return image, scale
 
 
 def rerun_keypoints(keypoints_xy: Float[ndarray, "n 2"]) -> Float64[ndarray, "n 2"]:
@@ -205,19 +210,6 @@ def rerun_keypoints(keypoints_xy: Float[ndarray, "n 2"]) -> Float64[ndarray, "n 
         Float64 coordinates with shape `[n, 2]`, in Rerun's convention.
     """
     return np.asarray(keypoints_xy, dtype=np.float64).reshape(-1, 2) - 0.5
-
-
-def image_path_of(input_dir: Path, keyframe: KeyframeMeta) -> Path:
-    """Where one keyframe's JPEG lives.
-
-    Args:
-        input_dir: The dataset's raw image root.
-        keyframe: The keyframe naming it.
-
-    Returns:
-        `<input_dir>/<image_name>`.
-    """
-    return input_dir / keyframe.image_name
 
 
 def spread_indices(count: int, wanted: int) -> list[int]:

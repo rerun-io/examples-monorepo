@@ -89,6 +89,9 @@ MATCH_LINE_RADIUS: Final[float] = 0.6
 STACKED_MAX_WIDTH: Final[int] = 1920
 """Width the concatenated match image is scaled down to, in pixels."""
 
+SAMPLE_JPEG_QUALITY: Final[int] = 90
+"""JPEG quality of the sample frames logged into the recording (display only; the run reads the original pixels)."""
+
 MAX_MATCH_LINES: Final[int] = 200
 """Match lines drawn on the concatenated image; more is a solid block of colour."""
 

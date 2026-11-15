@@ -82,39 +82,6 @@ class RuntimeRecord:
     """Wall-clock seconds the stage took."""
 
 
-def colour_points_from_images(reconstruction: pycolmap.Reconstruction, image_root: Path, num_threads: int = -1) -> int:
-    """Give every 3D point the colour of the imagery that observes it.
-
-    cuSFM colours points in the **extractor**: `feature_extractor_main --output_rgb`
-    fills `KeypointVector.r/g/b` per keypoint and the mapper copies it through
-    (keypoints_mapper_main.md §5.7). COLMAP's ALIKED extractor stores no colour,
-    so the same information is recovered here instead, at export time, from the
-    same JPEGs — `Reconstruction.extract_colors_for_all_images` averages each
-    point's observations. Where the blob samples one pixel per keypoint, this
-    averages over the track, which is strictly the better estimate and costs
-    0.4 s over Galileo's 226 images.
-
-    Without it a `points3D.txt` carries `0 0 0` everywhere and every viewer falls
-    back to a flat colour.
-
-    Args:
-        reconstruction: The model to colour, edited in place.
-        image_root: Directory the images' `name` values are relative to.
-        num_threads: Decoding threads; -1 lets COLMAP use every core.
-
-    Returns:
-        Points that ended up with a non-black colour. Points whose every
-        observation falls outside its image keep `(0, 0, 0)`.
-
-    Raises:
-        FileNotFoundError: When `image_root` is not a directory.
-    """
-    if not image_root.is_dir():
-        raise FileNotFoundError(f"No image directory at {image_root}")
-    reconstruction.extract_colors_for_all_images(str(image_root), num_threads)
-    return sum(1 for point in reconstruction.points3D.values() if any(int(channel) for channel in point.color))
-
-
 def write_colmap_model(output_dir: Path, reconstruction: pycolmap.Reconstruction) -> Path:
     """Write a COLMAP text model into `<output_dir>/sparse/`.
 

@@ -431,6 +431,11 @@ def _matching_options(options: MatchingOptions, device: ResolvedDevice) -> pycol
     if options.backend == "flexglue_ort":
         if options.image_dir is None:
             raise ValueError("the flexglue matcher reads image pixels: MatchingOptions.image_dir is required")
+        if (options.image_dir / "frame_source.json").is_file():
+            raise ValueError(
+                f"{options.image_dir} is a catalog input with no image files; COLMAP's FlexGlue reads files, so use --matching-backend "
+                "flexglue (TensorRT, reads the run's frames)"
+            )
         matching_options.type = pycolmap.FeatureMatcherType.FLEXGLUE
         flexglue = matching_options.flexglue
         flexglue.image_path = str(options.image_dir)

@@ -86,6 +86,7 @@ from colsfm.features_native import (
     image_tasks,
     run_native_extraction,
 )
+from colsfm.frames import FrameSource
 from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
 
@@ -410,6 +411,7 @@ def extract_raco(
     gpu_preprocessing: bool = DEFAULT_GPU_PREPROCESSING,
     native_resolution: bool = True,
     raco_engine: RacoEngineChoice = "auto",
+    frames: FrameSource | None = None,
 ) -> TensorRTExtraction:
     """Run the batched RaCo-ALIKED engine over the named images and store the features.
 
@@ -438,6 +440,8 @@ def extract_raco(
         raco_engine: Which engine serves a size group; see `select_raco_engine`.
             Read only when `native_resolution` is on — the stretch is the fixed
             engine by definition.
+        frames: Where the pixels come from as GPU tensors (`colsfm.frames`); None reads
+            the files under `image_root`.
 
     Returns:
         Keypoints stored per `image_id`, and the wall time of the whole pass
@@ -458,7 +462,7 @@ def extract_raco(
         raise ValueError(f"batch_size must be in [{MINIMUM_BATCH_SIZE}, {maximum_batch_size}], got {batch_size}")
 
     started: float = time.perf_counter()
-    tasks: list[ImageTask] = image_tasks(database_path, image_root, image_names)
+    tasks: list[ImageTask] = image_tasks(database_path, image_root, image_names, check_files=frames is None)
     run_native_extraction(
         database_path,
         extraction_groups(tasks, native_resolution=native_resolution, choice=engine_choice),
@@ -468,6 +472,7 @@ def extract_raco(
         batch_size=batch_size,
         preprocessing_workers=preprocessing_workers,
         gpu_preprocessing=gpu_preprocessing,
+        frames=frames,
     )
     elapsed_seconds: float = time.perf_counter() - started
     return keypoint_counts(database_path, [task.image_id for task in tasks]), elapsed_seconds

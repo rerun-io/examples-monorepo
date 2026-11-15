@@ -26,12 +26,10 @@ import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-import cv2
 import numpy as np
 import onnx
 import onnxscript.optimizer
@@ -40,10 +38,10 @@ import torch
 from numpy import ndarray
 from onnx import TensorProto, helper, numpy_helper
 from torch import Tensor
-from torchvision.io import ImageReadMode, decode_jpeg
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 
 from colsfm.database import ImagePair, KeypointsXY, MatchIndices, delete_two_view_geometries, pair_inlier_counts, raw_match_counts
+from colsfm.frames import FrameSource, frame_source_for
 from colsfm.matching import FLEXGLUE_MODEL_FILES, MatchingOptions, MatchReport, PairMatchStats, cap_verified_matches, verification_options
 from colsfm.matching_trt import FeatureCache
 from colsfm.pairs import write_pair_list
@@ -60,12 +58,6 @@ MATCHER_MAX_KEYPOINTS: Final[int] = 4096
 
 FEATURE_CACHE_IMAGES: Final[int] = 512
 """Dense feature maps kept on the GPU (4 MB each, 2 GB): a few hundred rig frames of sequential pairs stay resident."""
-
-DECODE_WORKERS: Final[int] = 4
-"""Threads reading image files ahead of the pair loop (decoding itself runs on the GPU)."""
-
-DECODE_WINDOW: Final[int] = 32
-"""Images read ahead of the pair loop."""
 
 DESCRIPTOR_BATCH: Final[int] = 8
 """Images per descriptor call: the next uncached images in the order the pair loop needs them."""
@@ -329,33 +321,6 @@ def descriptor_profile(max_batch: int = DESCRIPTOR_BATCH) -> dict[str, ShapeProf
     return {"image": ((1, *image), (max_batch, *image), (max_batch, *image))}
 
 
-def _decode_on_gpu(payload: bytes, path: Path, device: torch.device) -> Tensor:
-    """Decode one image to a `[3, height, width]` uint8 RGB tensor on the GPU.
-
-    JPEGs go through nvjpeg (`torchvision.io.decode_jpeg` on the device); anything else is decoded by OpenCV and
-    uploaded once.
-
-    Args:
-        payload: The file's bytes (read by a prefetch thread).
-        path: The file, for the error message and the fallback.
-        device: The CUDA device.
-
-    Returns:
-        The RGB image on the device.
-
-    Raises:
-        FileNotFoundError: When the image cannot be decoded.
-    """
-    if payload[:2] == b"\xff\xd8":
-        decoded: Tensor | list[Tensor] = decode_jpeg(torch.frombuffer(bytearray(payload), dtype=torch.uint8), mode=ImageReadMode.RGB, device=device)
-        # One encoded tensor in, one image out; the list form is for batched input.
-        return decoded if isinstance(decoded, Tensor) else decoded[0]
-    bgr: ndarray | None = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise FileNotFoundError(f"FlexGlue reads image pixels and could not decode {path}")
-    return torch.from_numpy(np.ascontiguousarray(bgr[:, :, ::-1])).to(device).permute(2, 0, 1)
-
-
 @dataclass(frozen=True, slots=True)
 class DenseImage:
     """What the matcher needs of one image, resident on the GPU."""
@@ -371,9 +336,9 @@ class DenseImage:
 class FlexGlueTensorRT:
     """FlexGlue's engines with everything between them on the GPU.
 
-    * Images: bytes read ahead on a thread pool, JPEG-decoded by nvjpeg, resized on the GPU with torch's bilinear
-      interpolation (the reference COLMAP's CPU resize mirrors) and encoded `DESCRIPTOR_BATCH` at a time by the fp16
-      descriptor engine.
+    * Images: GPU frames from the run's `colsfm.frames.FrameSource` (NVDEC for a catalog input, nvJPEG for a folder),
+      resized on the GPU with torch's bilinear interpolation (the reference COLMAP's CPU resize mirrors) and encoded
+      `DESCRIPTOR_BATCH` at a time by the fp16 descriptor engine.
     * Features and scaled keypoints stay in a GPU LRU (`DenseImage`); one upload per image.
     * The matcher runs on two CUDA streams in turn (a pair's tail overlaps the next pair's head: 9.7 vs 11.3 ms per
       pair on the 5090) and its matches stay on the GPU until `flush` downloads a whole chunk at once.
@@ -527,7 +492,7 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
         models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt" / f"flexglue_matcher_fp16_{flexglue_options.tag()}.onnx", flexglue_options
     )
     matcher_engine: Path = resolve_engine(matcher_graph, matcher_profile(), precision="fp32")
-    image_root: Path = options.image_dir
+    frames: FrameSource = frame_source_for(options.image_dir)
     started: float = time.perf_counter()
     with pycolmap.Database.open(database_path) as database:
         names: dict[int, str] = {image.image_id: image.name for image in database.read_all_images()}
@@ -535,42 +500,26 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
         flexglue: FlexGlueTensorRT = FlexGlueTensorRT(descriptor_engine, matcher_engine)
         order: list[int] = first_use_order(pairs)
         position: dict[int, int] = {image_id: index for index, image_id in enumerate(order)}
-        with ThreadPoolExecutor(max_workers=DECODE_WORKERS) as pool:
-            reads: dict[int, Future[bytes]] = {}
 
-            def read(image_id: int) -> bytes:
-                future: Future[bytes] | None = reads.pop(image_id, None)
-                return future.result() if future is not None else (image_root / names[image_id]).read_bytes()
+        def ensure(image_id: int) -> None:
+            if image_id in flexglue.images:
+                return
+            start: int = position[image_id]
+            batch_ids: list[int] = [image_id] + [
+                candidate for candidate in order[start + 1 : start + 4 * DESCRIPTOR_BATCH] if candidate not in flexglue.images
+            ][: DESCRIPTOR_BATCH - 1]
+            decoded: list[tuple[str, Tensor]] = list(frames.frames([names[candidate] for candidate in batch_ids]))
+            flexglue.encode([(candidate, rgb, keypoints[candidate][0]) for candidate, (_, rgb) in zip(batch_ids, decoded, strict=True)])
 
-            def prefetch(start: int) -> None:
-                for image_id in order[start : start + DECODE_WINDOW]:
-                    if image_id not in reads and image_id not in flexglue.images:
-                        reads[image_id] = pool.submit((image_root / names[image_id]).read_bytes)
-
-            def ensure(image_id: int) -> None:
-                if image_id in flexglue.images:
-                    return
-                start: int = position[image_id]
-                batch_ids: list[int] = [image_id] + [
-                    candidate for candidate in order[start + 1 : start + 4 * DESCRIPTOR_BATCH] if candidate not in flexglue.images
-                ][: DESCRIPTOR_BATCH - 1]
-                prefetch(start + len(batch_ids))
-                flexglue.encode(
-                    [(candidate, _decode_on_gpu(read(candidate), image_root / names[candidate], flexglue.device), keypoints[candidate][0]) for candidate in batch_ids]
-                )
-
-            prefetch(0)
-            for index, (image_id1, image_id2) in enumerate(pairs):
-                ensure(image_id1)
-                ensure(image_id2)
-                flexglue.enqueue((image_id1, image_id2))
-                if (index + 1) % DOWNLOAD_CHUNK == 0:
-                    for (first, second), matches in flexglue.flush():
-                        database.write_matches(first, second, matches.astype(np.uint32))
-            for (first, second), matches in flexglue.flush():
-                database.write_matches(first, second, matches.astype(np.uint32))
-            for future in reads.values():
-                future.cancel()
+        for index, (image_id1, image_id2) in enumerate(pairs):
+            ensure(image_id1)
+            ensure(image_id2)
+            flexglue.enqueue((image_id1, image_id2))
+            if (index + 1) % DOWNLOAD_CHUNK == 0:
+                for (first, second), matches in flexglue.flush():
+                    database.write_matches(first, second, matches.astype(np.uint32))
+        for (first, second), matches in flexglue.flush():
+            database.write_matches(first, second, matches.astype(np.uint32))
     matching_seconds: float = time.perf_counter() - started
 
     raw: dict[ImagePair, int] = raw_match_counts(database_path, pairs)
