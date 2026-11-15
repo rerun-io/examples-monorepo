@@ -21,12 +21,18 @@ packages = ["src/fdanyone_rerun", "src/fdanyone"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest-beartype: beartype checks our package only while pytest runs; the copied upstream fdanyone stays unchecked.
+beartype_packages = ["fdanyone_rerun"]
 markers = [
     "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e fdanyone-rerun-dev tests-integration)",
     "golden: reference comparison against stored ground truth (run: pixi run -e fdanyone-rerun-dev tests-golden)",
 ]
 addopts = "-m 'not integration and not golden'"
-filterwarnings = ["ignore::beartype.roar.BeartypeDecorHintPep613DeprecationWarning"]
+filterwarnings = [
+    "ignore::beartype.roar.BeartypeDecorHintPep613DeprecationWarning",
+    # A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+    "error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning",
+]
 
 [tool.ruff]
 line-length = 150

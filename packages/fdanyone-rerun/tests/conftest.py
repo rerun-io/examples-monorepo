@@ -5,8 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from fdanyone_rerun.assets import EXAMPLE_VIDEO, model_dir
-
 
 @pytest.fixture(scope="session")
 def example_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
@@ -15,6 +13,9 @@ def example_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
     reuse: str | None = os.environ.get("FDANYONE_TEST_RUN")
     if reuse:
         return Path(reuse)
+    # Imported here, not at module level: pytest-beartype hooks imports after conftest.py loads (AGENTS.md, Beartype).
+    from fdanyone_rerun.assets import EXAMPLE_VIDEO, model_dir
+
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU")
