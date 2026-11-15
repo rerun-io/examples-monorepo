@@ -40,6 +40,8 @@ from fdanyone.views import ViewPlan
 if TYPE_CHECKING:
     from torch import Tensor
 
+    from fdanyone.model.loader import GenerationPrefetch
+
 LOGGER = logging.getLogger("fdanyone")
 
 
@@ -355,8 +357,9 @@ def generate_views(
     output_dir: str | Path,
     devices: tuple[str, ...],
     seed: int,
+    prefetch: GenerationPrefetch | None = None,
 ) -> GeneratedViews:
-    """Generate proposal and target views with the pipeline's resolved backend."""
+    """Generate proposal and target views with the pipeline's resolved backend (models from ``prefetch`` when given)."""
 
     import torch
 
@@ -387,17 +390,18 @@ def generate_views(
     vae = None
     try:
         with metrics.stage("model_load"):
-            denoiser = (
-                load_denoiser(
+            if not plan.needs_primary_denoiser:
+                denoiser = None
+            elif prefetch is not None:
+                denoiser = prefetch.take_denoiser()
+            else:
+                denoiser = load_denoiser(
                     checkpoint_path=checkpoint_path,
                     turbo_lora_path=turbo_lora_path,
                     profile=denoising_profile,
                     attention_backend=attention_backend,
                 )
-                if plan.needs_primary_denoiser
-                else None
-            )
-            vae = VaeExecutor.load(assets.vae, plan.candidate_devices)
+            vae = VaeExecutor.load(assets.vae, plan.candidate_devices, prefetch)
 
         with metrics.stage("source_encode"):
             source_video = _channels_last_source_layout(conditioning.load_source_tensor())

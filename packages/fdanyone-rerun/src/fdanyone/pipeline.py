@@ -276,6 +276,7 @@ def run_pipeline(
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=f".{clip_name}.scratch-", dir=destination.parent))
+    prefetch = None
     try:
         clip_metadata = scratch / "canonical_clip.json"
         clip.write_metadata(clip_metadata)
@@ -328,9 +329,9 @@ def run_pipeline(
             PROGRESS.info("Building foreground masks and skeletons", extra={"fraction": 0.30})
             if len(devices) == 1:
                 # Conditioning runs in a worker process; load the DiT and VAE here meanwhile.
-                from fdanyone.model.loader import prefetch_generation_models
+                from fdanyone.model.loader import GenerationPrefetch
 
-                prefetch_generation_models(
+                prefetch = GenerationPrefetch(
                     checkpoint_path=checkpoint,
                     turbo_lora_path=turbo_lora,
                     profile=denoising_profile,
@@ -374,6 +375,7 @@ def run_pipeline(
                 output_dir=scratch / "generation",
                 devices=devices,
                 seed=seed,
+                prefetch=prefetch,
             )
             PROGRESS.info("Saving and validating generated videos", extra={"fraction": 0.92})
             summary = write_output(
@@ -386,6 +388,8 @@ def run_pipeline(
                 pipeline_started=pipeline_started,
             )
     finally:
+        if prefetch is not None:
+            prefetch.close()
         _discard_scratch(scratch)
     summary["output_dir"] = str(destination)
     PROGRESS.info("Inference complete", extra={"fraction": 1.0})

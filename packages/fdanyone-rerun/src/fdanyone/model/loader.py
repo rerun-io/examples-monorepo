@@ -158,52 +158,58 @@ def _load_vae(path: Path, dtype):
     return vae.to(dtype=dtype).eval().requires_grad_(False)
 
 
-_PREFETCHED: dict[tuple, Future] = {}
-"""Model loads started early by ``prefetch_generation_models``, by loader arguments; each is taken once."""
+class GenerationPrefetch:
+    """The DiT and the Wan VAE loading on background threads (CPU and disk work) while conditioning runs.
 
-
-def _take_prefetched(key: tuple):
-    future = _PREFETCHED.pop(key, None)
-    return None if future is None else future.result()
-
-
-def prefetch_generation_models(
-    *,
-    checkpoint_path: str | Path,
-    turbo_lora_path: str | Path | None,
-    profile: DenoisingProfile,
-    attention_backend: str,
-    vae_path: str | Path,
-) -> None:
-    """Start loading the DiT and the VAE on background threads (CPU and disk work).
-
-    The pipeline calls this before skeleton conditioning, which runs in a worker
-    process and leaves this process and the GPU idle; ``load_denoiser`` and
-    ``load_vae`` then return the prefetched models for the same arguments.
+    One run owns it: the pipeline starts it before skeleton conditioning, which runs in a worker process and leaves
+    this process and the GPU idle; generation takes each model once; ``close`` (in the run's ``finally``) cancels a
+    load that has not started, waits for one in flight and drops whatever was not taken, so a failed or stopped run
+    keeps no model alive.
     """
 
-    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="model-prefetch")
-    denoiser_args = dict(
-        checkpoint_path=checkpoint_path,
-        turbo_lora_path=turbo_lora_path,
-        profile=profile,
-        attention_backend=attention_backend,
-    )
-    _PREFETCHED[_denoiser_key(**denoiser_args)] = pool.submit(_load_denoiser_now, **denoiser_args)
-    _PREFETCHED[("vae", str(Path(vae_path).expanduser().resolve()))] = pool.submit(_load_vae_now, vae_path)
-    pool.shutdown(wait=False)
+    def __init__(
+        self,
+        *,
+        checkpoint_path: str | Path,
+        turbo_lora_path: str | Path | None,
+        profile: DenoisingProfile,
+        attention_backend: str,
+        vae_path: str | Path,
+    ) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="model-prefetch")
+        self._denoiser: Future[Denoiser] | None = self._pool.submit(
+            _load_denoiser_now,
+            checkpoint_path=checkpoint_path,
+            turbo_lora_path=turbo_lora_path,
+            profile=profile,
+            attention_backend=attention_backend,
+        )
+        self._vae: Future | None = self._pool.submit(_load_vae_now, vae_path)
 
+    def take_denoiser(self) -> Denoiser:
+        future, self._denoiser = self._denoiser, None
+        if future is None:
+            raise RuntimeError("The prefetched denoiser was already taken.")
+        return future.result()
 
-def _denoiser_key(*, checkpoint_path, turbo_lora_path, profile, attention_backend) -> tuple:
-    turbo = None if turbo_lora_path is None else str(Path(turbo_lora_path).expanduser().resolve())
-    return ("denoiser", str(Path(checkpoint_path).expanduser().resolve()), turbo, profile, attention_backend)
+    def take_vae(self):
+        future, self._vae = self._vae, None
+        if future is None:
+            raise RuntimeError("The prefetched VAE was already taken.")
+        return future.result()
+
+    def close(self) -> None:
+        for future in (self._denoiser, self._vae):
+            if future is not None:
+                future.cancel()
+        self._denoiser = self._vae = None
+        self._pool.shutdown(wait=True)
 
 
 def load_vae(path: str | Path):
-    """Load the frozen Wan VAE as an independent generation stage (or take the prefetched one)."""
+    """Load the frozen Wan VAE as an independent generation stage."""
 
-    prefetched = _take_prefetched(("vae", str(Path(path).expanduser().resolve())))
-    return prefetched if prefetched is not None else _load_vae_now(path)
+    return _load_vae_now(path)
 
 
 def _load_vae_now(path: str | Path):
@@ -219,16 +225,14 @@ def load_denoiser(
     profile: DenoisingProfile,
     attention_backend: str,
 ) -> Denoiser:
-    """Load one DiT and configure its denoising trajectory (or take the prefetched one)."""
+    """Load one DiT and configure its denoising trajectory."""
 
-    args = dict(
+    return _load_denoiser_now(
         checkpoint_path=checkpoint_path,
         turbo_lora_path=turbo_lora_path,
         profile=profile,
         attention_backend=attention_backend,
     )
-    prefetched = _take_prefetched(_denoiser_key(**args))
-    return prefetched if prefetched is not None else _load_denoiser_now(**args)
 
 
 def _load_denoiser_now(
