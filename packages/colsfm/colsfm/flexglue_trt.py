@@ -44,7 +44,7 @@ from torchvision.io import ImageReadMode, decode_jpeg
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 
 from colsfm.database import ImagePair, KeypointsXY, MatchIndices, delete_two_view_geometries, pair_inlier_counts, raw_match_counts
-from colsfm.matching import FLEXGLUE_MODEL_FILES, MatchingOptions, MatchReport, PairMatchStats, verification_options
+from colsfm.matching import FLEXGLUE_MODEL_FILES, MatchingOptions, MatchReport, PairMatchStats, cap_verified_matches, verification_options
 from colsfm.matching_trt import FeatureCache
 from colsfm.pairs import write_pair_list
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
@@ -579,6 +579,9 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
         pair_list_path: Path = Path(scratch) / "pairs.txt"
         write_pair_list(pair_list_path, pairs, database_path)
         pycolmap.verify_matches(database_path, pair_list_path, verification_options(options))
+    # The same post-verification spatial cap as the COLMAP path (`flexglue_ort`, `pycolmap`), so the two FlexGlue
+    # backends hand the mapper the same observation budget.
+    dropped: int = cap_verified_matches(database_path, pairs, options)
     elapsed_seconds: float = time.perf_counter() - started
     inliers: dict[ImagePair, int] = pair_inlier_counts(database_path, pairs)
     report: MatchReport = MatchReport(
@@ -588,6 +591,6 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
     )
     print(
         f"colsfm.matching[flexglue-trt]: {report.summary()} | matching {matching_seconds:.1f} s for {len(pairs)} pairs, "
-        f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches"
+        f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches, spatial cap dropped {dropped} inlier matches"
     )
     return report
