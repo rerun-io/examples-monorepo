@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -27,7 +28,7 @@ from fdanyone.geometry.cameras import (
 from fdanyone.geometry.crop import Crop, center_crop, crop_from_bounds, mask_bounds, transform_intrinsics
 from fdanyone.geometry.framing import analyze_input_framing, solve_clip_framing
 from fdanyone.io import write_json
-from fdanyone.motion.gvhmr import gvhmr_imports, validate_gvhmr
+from fdanyone.motion.gvhmr import validate_gvhmr
 from fdanyone.motion.result import MotionResult
 from fdanyone.skeleton.keypoints import KEYPOINT_NAMES
 from fdanyone.skeleton.renderer import estimate_body_height, projected_body_scales, render_goliath40
@@ -220,8 +221,12 @@ def _load_regressor(path: Path, device):
 @contextmanager
 def _gvhmr_geometry_context(gvhmr_root: Path):
     install_pytorch3d_compat()
-    with gvhmr_imports(gvhmr_root):
-        yield
+    # Body geometry needs GVHMR's modules, not its working directory: make_smplx("supermotion") reads the body model
+    # from hmr4d.PROJ_ROOT. So no chdir, which would move the cwd of every thread (the app rebuilds bodies on a worker
+    # thread); the root joins sys.path once, as an installed package would.
+    if str(gvhmr_root) not in sys.path:
+        sys.path.append(str(gvhmr_root))
+    yield
 
 
 def _body_geometry(
