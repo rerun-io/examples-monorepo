@@ -9,7 +9,7 @@ Environments consume it as a source dependency: `<name> = { path = "recipes/<nam
 | --- | --- | --- | --- | --- |
 | `asmk-src` | [jenicek/asmk](https://github.com/jenicek/asmk) git `2a96d9c`; pure Python: the Cython `asmk.hamming` is `packages/asmk-rs`'s `asmk_rs` | not declared in the recipe | 2 (`pyproject.toml`; `asmk.hamming` → `asmk_rs`, no `setup.py`) | `mast3r-slam` (linux-64) |
 | `brush-src` | [ArthurBrussee/brush](https://github.com/ArthurBrussee/brush) git `1388f74` | not declared in the recipe | 1 | `gsplat-rust-renderer` |
-| `colmap-src` | [colmap/colmap](https://github.com/colmap/colmap) git `be5e291` (tag 4.2.0), libcolmap + pycolmap with `CASPAR_ENABLED=ON`, CUDA 13, sm_120 (linux-64) / sm_121 (linux-aarch64) | BSD-3-Clause (`COPYING.txt`) | 2 (an `OPENCV_FISHEYE` Caspar adapter, hand-written 44 KB, and its Symforce-generated fp32 kernels, 3.1 MB; every patched file is sha256-checked in `patches/SHA256SUMS` before the build; see "Patch or package") | `colsfm` |
+| `colmap-src` | [colmap/colmap](https://github.com/colmap/colmap) git `be5e291` (tag 4.2.0), libcolmap + pycolmap with `CASPAR_ENABLED=ON`, CUDA 13, sm_120 (linux-64) / sm_121 (linux-aarch64) | BSD-3-Clause (`COPYING.txt`) | 4 (two Caspar adapters, each a hand-written patch plus its Symforce-generated fp32 kernels: `OPENCV_FISHEYE` 44 KB + 3.1 MB, fixed-calibration `FULL_OPENCV` 19 KB + 380 KB; every patched file is sha256-checked in `patches/SHA256SUMS` before the build; see "Patch or package" and `patches/PROVENANCE.md`) | `colsfm` |
 | `dinov3-src` | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) archive `5aa7e93`, sha256 `194fc7a6…` | DINOv3 License (`LICENSE.md`) | 0 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate`, `posekit-sam3d-body`, `metrictrail` |
 | `egohand-src` | [NVIDIA/IsaacCapture](https://github.com/NVIDIA/IsaacCapture) archive `479063c` (`src/python/isaaccapture_egopost`), sha256 `49dd5594…`; installs `egohand` and `egohand_inference` | OpenMDW-1.1 (+ `THIRD_PARTY_LICENSES.md`) | 6 | `posekit`, `mv-api`, `mamma`, `exo-calib`, `selfcap-curate` |
 | `hexels-src` (+ `hexel-kernel`, `image-gs`) | [honeycomb-surfels/hexels](https://github.com/honeycomb-surfels/hexels) git `698d1af`, its submodules and baselines at the revisions upstream records; fused-ssim, simple-knn and the JIT prune scorer are not built: `packages/hexels-mojo`'s `hexels_mojo` replaces them | not declared in the recipe | 6 (Open3D pipelines in eval_tnt; `fused_ssim`, `simple_knn._C`, `load_prune_scores`, Image-GS's `project_gaussians_2d_scale_rot` / `rasterize_gaussians_sum` → `hexels_mojo`; `gsplat_hexels`'s 2D hexel kernels overlaid by `hexels_mojo.raster2d`; hexel-kernel's base 3D forward and cached backward overlaid by `hexels_mojo.raster3d`) (+ upstream's own 2DGS `adaptations.patch`, sha256-checked) | `hexels` |
@@ -44,10 +44,10 @@ evaluation, catalog) and any real logic, which there gets tests and typechecks.
 Two tests: "could this patch go upstream as is, or be dropped when upstream changes?" means a patch; "does it add
 logic?" means our package. A patch over about 100 lines is a sign that logic leaks into it.
 
-The one exception is `colmap-src`: its fisheye adapter is C++ inside COLMAP's Caspar bundle adjuster, which no Python
-package can hold, and the generated kernels must travel with it because conda-forge has no symforce. It passes the first
-test (the same adapter is the kind of change upstream PRs colmap#4611 / #4657 make for other camera models) and is
-dropped when upstream CASPAR handles `OPENCV_FISHEYE`. The source of both patches and their regeneration script is
+The one exception is `colmap-src`: its Caspar adapters (`OPENCV_FISHEYE`, fixed-calibration `FULL_OPENCV`) are C++ inside COLMAP's Caspar bundle adjuster, which no Python
+package can hold, and the generated kernels must travel with it because conda-forge has no symforce. They pass the first
+test (the same adapter is the kind of change upstream PRs colmap#4611 / #4657 make for other camera models) and each pair is
+dropped when upstream CASPAR handles its model. The source of both patches and their regeneration script is
 pablovela5620/pyCuSFM, branch `feat/pycolmap-open-pipeline`, `packages/pycolmap-caspar-fisheye/`.
 
 ## Rules and traps

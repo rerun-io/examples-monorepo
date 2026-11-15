@@ -67,7 +67,7 @@ CASPAR_STOCK_CAMERA_MODELS: Final[frozenset[str]] = frozenset({"PINHOLE", "SIMPL
 Observations of a model the build has no adapter for are dropped with a `LOG(WARNING)`
 and the solve still reports success, so the pre-flight is a check, not a guard. Which
 models a build actually carries is a property of that build — the `colsfm` environment (recipes/colmap-src)
-adds OPENCV_FISHEYE (`docs/caspar-fisheye-adapter.md`) — so this constant is the
+adds OPENCV_FISHEYE and fixed-calibration FULL_OPENCV (`recipes/colmap-src/patches/PROVENANCE.md`) — so this constant is the
 reference point, not the answer; `caspar_supported_camera_models` measures the answer."""
 
 CASPAR_PROBE_CAMERA_MODELS: Final[tuple[str, ...]] = (
@@ -79,8 +79,8 @@ CASPAR_PROBE_CAMERA_MODELS: Final[tuple[str, ...]] = (
 )
 """Camera models `caspar_supported_camera_models` asks the build about, in probe order.
 
-The two stock adapters, the fisheye one this repo added, and the two OPENCV models that
-are the obvious next ports — probing them costs a few milliseconds each and means a
+The two stock adapters, the OPENCV_FISHEYE and FULL_OPENCV ones this repo adds, and OPENCV,
+the obvious next port — probing them costs a few milliseconds each and means a
 future adapter is picked up without editing this module."""
 
 CASPAR_DISABLED_MARKER: Final[str] = "CASPAR_ENABLED"

@@ -36,15 +36,15 @@ whose temporal `Transform3D` is the initial trajectory, stride, trim) and every 
 | `--loop-closure` | on | `--no-loop-closure` |
 
 The RaCo graphs are exported, not shipped: a run that cannot find them **stops** and names `colsfm-raco-export` (a silent
-change of extractor would be a different experiment under the same name). TensorRT 11 builds strongly typed engines, so
-the extractor graph's convolutional trunk is rewritten to fp16 (`trtkit.onnx_precision.fp16_trunk`) and LightGlue+ runs in
-fp32/TF32; engines are cached per machine by trtkit.
+change of extractor would be a different experiment under the same name). TensorRT 11 builds strongly typed engines; both
+graphs run in fp32/TF32 (the `fp16-trunk` rewrite fails to parse on RaCo's mixed Float/Half Add, a follow-up). Engines are
+cached per machine by trtkit.
 
 ## What it is built on
 
 | Part | From |
 |---|---|
-| pycolmap with CASPAR + an `OPENCV_FISHEYE` Caspar adapter | `recipes/colmap-src` (COLMAP 4.2.0, CUDA 13, sm_120 / sm_121) |
+| pycolmap with CASPAR + `OPENCV_FISHEYE` and fixed-calibration `FULL_OPENCV` Caspar adapters | `recipes/colmap-src` (COLMAP 4.2.0, CUDA 13, sm_120 / sm_121) |
 | RaCo-ALIKED / LightGlue+ torch modules (export only) | `recipes/lightglue-onnx-src` (fabio-sim/LightGlue-ONNX @ d12b4ba) |
 | TensorRT engine builds | `packages/trtkit` |
 | Catalog rig, calibration and video readers, Umeyama | `packages/simplecv` |
