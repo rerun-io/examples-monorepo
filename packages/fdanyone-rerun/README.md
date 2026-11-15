@@ -61,13 +61,14 @@ The page fits the window. One run at a time.
 ## Speed
 
 The recipe builds upstream plus speed levers (fork branch `upstream-fast`, one commit each; see `recipes/README.md`).
-RTX 5090, six-view example, busy host (load ~10), whole CLI run including Rerun logging:
+RTX 5090, prod env (no beartype), busy host (load ~10 unless noted), whole CLI run including Rerun logging:
 
 | build | wall | own CPU | denoise | peak reserved |
 | --- | ---: | ---: | ---: | ---: |
 | default (FP8 W8A8 row-wise) | 199 s | 1,342 CPU-s | 86 s | 24.5 GB |
 | `FDANYONE_DIT_FP8=0` (BF16) | 230 s | 1,389 CPU-s | 112 s | 29.2 GB |
 | `FDANYONE_TURBO_KEPT_STEPS=0,2,3` (3 steps, BF16) | 184 s | 1,324 CPU-s | 72 s | 29.2 GB |
+| default, 24-view orbit (RCP + 4 TCR groups, 8-view groups), busy host (load 16-38) | 767 s | 4,444 CPU-s | 85 s RCP + 389 s | 25.8 GB |
 
 The 3-step Turbo schedule is opt-in: it is visibly softer (mean per-view SSIM 0.862 against the full-VAE reference,
 versus 0.897 for the default).
