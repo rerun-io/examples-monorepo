@@ -55,7 +55,7 @@ def log_mono_pred(
         rr.Transform3D(
             translation=pinhole_params.extrinsics.cam_t_world,
             mat3x3=pinhole_params.extrinsics.cam_R_world,
-            from_parent=True,
+            relation=rr.TransformRelation.ChildFromParent,
         ),
     )
     rr.log(

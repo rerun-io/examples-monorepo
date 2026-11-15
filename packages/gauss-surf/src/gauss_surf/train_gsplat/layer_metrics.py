@@ -14,7 +14,7 @@ from arkitscenes_download.ingest.paths import (
 from datafusion import col
 from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
-from rerun.catalog import DatasetView
+from rerun.catalog import DatasetSelection
 
 from gauss_surf.catalog import table_timestamps
 from gauss_surf.contracts import CameraTag
@@ -134,7 +134,7 @@ class SplatTriageWriteStats:
     """Ultrawide product and chosen-diagnostic statistics."""
 
 
-def reference_blobs_at_component_timestamps(segment_view: DatasetView, component_name: str) -> dict[int, bytes]:
+def reference_blobs_at_component_timestamps(segment_view: DatasetSelection, component_name: str) -> dict[int, bytes]:
     """Read encoded reference depth at every exact component timestamp."""
     available_columns: set[str] = set(segment_view.arrow_schema().names)
     if component_name not in available_columns:
@@ -268,7 +268,7 @@ def compute_triage_errors(
     )
 
 
-def load_reference_blobs(segment_view: DatasetView) -> list[TriageReferenceBlobs]:
+def load_reference_blobs(segment_view: DatasetSelection) -> list[TriageReferenceBlobs]:
     """Load stored source images at every chosen ultrawide timestamp."""
     required_columns: tuple[str, ...] = (RGB_REFERENCE_COLUMN, DEPTH_REFERENCE_COLUMN, NORMAL_REFERENCE_COLUMN)
     available_columns: set[str] = set(segment_view.arrow_schema().names)

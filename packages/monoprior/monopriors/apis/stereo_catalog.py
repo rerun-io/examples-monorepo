@@ -19,7 +19,7 @@ import rerun.blueprint as rrb
 import torch
 from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8, UInt16
-from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters, rescale_intri
 from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
@@ -99,13 +99,13 @@ class StereoCatalogConfig:
     """Where the network runs (decode is always NVDEC)."""
 
 
-def read_static(view: DatasetView, entity: str, component: str) -> object:
+def read_static(view: DatasetSelection, entity: str, component: str) -> object:
     """First value of a static component on one entity."""
     table: pa.Table = view.filter_contents(entity).reader(index=None).select(f"/{entity}:{component}").to_arrow_table()
     return first_valid_value(table.column(0), component_name=component)
 
 
-def read_fisheye_camera(view: DatasetView, cam: str) -> Fisheye62Parameters:
+def read_fisheye_camera(view: DatasetSelection, cam: str) -> Fisheye62Parameters:
     """One rig camera as written by dataforge (exoego:v2 + simplecv distortion components); extrinsics are ``cam_T_rig``."""
     pinhole: str = f"{RIG}/{cam}/pinhole"
     model: str = str(np.asarray(read_static(view, pinhole, "simplecv.components.DistortionModel")).ravel()[0])
@@ -125,7 +125,7 @@ def read_fisheye_camera(view: DatasetView, cam: str) -> Fisheye62Parameters:
     )
 
 
-def read_rig_poses(view: DatasetView) -> tuple[np.ndarray, Float64[np.ndarray, "n 4 4"]]:
+def read_rig_poses(view: DatasetSelection) -> tuple[np.ndarray, Float64[np.ndarray, "n 4 4"]]:
     """Temporal ``world_T_rig`` from the rig node (the slam layer): sample times (timedelta64[ns]) and 4x4 poses."""
     table: pa.Table = (
         view.filter_contents(RIG).reader(index=TIMELINE).select(TIMELINE, f"/{RIG}:Transform3D:translation", f"/{RIG}:Transform3D:quaternion").sort(TIMELINE).to_arrow_table()
@@ -174,7 +174,7 @@ def build_blueprint(left_cam: str, right_cam: str) -> rrb.Blueprint:
 
 def main(config: StereoCatalogConfig) -> None:
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
-    view: DatasetView = dataset.filter_segments(config.segment_id)
+    view: DatasetSelection = dataset.filter_segments(config.segment_id)
     left: Fisheye62Parameters = read_fisheye_camera(view, config.left_cam)
     right: Fisheye62Parameters = read_fisheye_camera(view, config.right_cam)
     rect: StereoRectification = fisheye_stereo_rectify(left, right, focal_scale=config.focal_scale)

@@ -14,7 +14,7 @@ pytest.importorskip("rerun.experimental.dataloader", reason="requires the rerun.
 pytest.importorskip("torchcodec", reason="requires the torchcodec dependency in this environment")
 pytest.importorskip("imagecodecs", reason="requires the imagecodecs dependency in this environment")
 
-from rerun.catalog import DatasetEntry, DatasetView
+from rerun.catalog import DatasetEntry, DatasetSelection
 
 from gauss_surf.catalog import SegmentReader
 from gauss_surf.render_io import RenderCamera
@@ -76,7 +76,7 @@ def test_publish_replaces_existing_canonical_rrds(tmp_path: Path, monkeypatch: A
     monkeypatch.setattr("gauss_surf.train_gsplat.publish._quantized_wide_render", fake_quantized_wide_render)
     monkeypatch.setattr("gauss_surf.train_gsplat.publish._quantized_ultrawide_render", fake_quantized_ultrawide_render)
     monkeypatch.setattr(SegmentReader, "require_layers", lambda _reader, _layers: None)
-    segment_view: DatasetView = object.__new__(DatasetView)
+    segment_view: DatasetSelection = object.__new__(DatasetSelection)
     monkeypatch.setattr(SegmentReader, "segment_view", lambda _reader: segment_view)
     monkeypatch.setattr(
         "gauss_surf.train_gsplat.publish.register_layer",

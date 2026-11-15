@@ -56,7 +56,6 @@ def main(
         #         rr.Transform3D(
         #             translation=world_T_cam_gl_44[:3, 3],
         #             mat3x3=world_T_cam_gl_44[:3, :3],
-        #             from_parent=False,
         #         ),
         #     )
         #     rr.log(
@@ -170,7 +169,6 @@ def main(
                 rr.Transform3D(
                     translation=world_T_cam_cv_44[:3, 3],
                     mat3x3=world_T_cam_cv_44[:3, :3],
-                    from_parent=False,
                 ),
             )
             rr.log(
